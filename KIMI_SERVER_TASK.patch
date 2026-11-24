@@ -1,0 +1,602 @@
+--- a/vllm_ascend/ascend_forward_context.py
++++ b/vllm_ascend/ascend_forward_context.py
+@@ -417,6 +417,12 @@
+             is_draft_model,
+             draft_moe_quant_type,
+         )
++    if (__import__("os").environ.get("KIMI_ALIGNMENT_ALLTOALL") == "1"
++            and moe_comm_type in (MoECommType.MC2, MoECommType.FUSED_MC2)
++            and vllm_config.parallel_config.enable_expert_parallel
++            and get_ep_group().world_size > 1):
++        logger.info_once("Kimi BF16 alignment switching %s to ALLTOALL", moe_comm_type)
++        moe_comm_type = MoECommType.ALLTOALL
+     logger.debug(
+         "MoE comm method selected: policy=%s, method=%s, num_tokens=%d, mc2_capacity=%s, "
+         "is_draft_model=%s, draft_moe_quant_type=%r",
+--- a/vllm_ascend/attention/sfa_v1.py
++++ b/vllm_ascend/attention/sfa_v1.py
+@@ -1264,6 +1264,9 @@
+         slots: torch.Tensor,
+         attn_metadata: M,
+     ):
++        if getattr(self, '_alignment_kimi_raw_channels', False):
++            from dsa_alignment import write_raw_nope_cache
++            return write_raw_nope_cache(self, kv_no_split, slots, kv_cache)
+         if self.qk_rope_head_dim == 0 and not self.enable_sparse_sfa_c8:
+             assert self.kv_a_layernorm is not None
+             values = self.kv_a_layernorm(kv_no_split.reshape(-1, self.kv_lora_rank))
+@@ -1977,6 +1980,8 @@
+         actual_seq_lengths_key = parallel_context.actual_seq_lengths_key
+ 
+         fused_type: PreprocessType = self.preprocess_type
++        if getattr(self, '_alignment_kimi_raw_channels', False):
++            assert fused_type == PreprocessType.NATIVE, 'Raw Kimi channels require verified native preprocessing'
+         # PROLOG_V3 serves every attention state (decode, spec decoding and
+         # prefill); only MLAPO carries a per-call token-count limit.
+         if self.preprocess_type == PreprocessType.MLAPO and num_input_tokens > MLAPO_MAX_SUPPORTED_TOKENS:
+@@ -2078,7 +2083,7 @@
+             )
+ 
+             ql_nope, q_pe = self._q_proj_and_k_up_proj(q_c)
+-            if self.qk_rope_head_dim:
++            if self.qk_rope_head_dim and not getattr(self, '_alignment_kimi_raw_channels', False):
+                 q_pe = self.rope_single(q_pe, cos, sin)
+             self._record_query_gather_context(
+                 ql_nope,
+@@ -2134,6 +2139,16 @@
+         else:
+             raise RuntimeError(f"skip_topk is False but indexer is None. layer_name={self.layer_name}.")
+ 
++        from dsa_trace import stage
++        stage('pre_attention', preprocess=str(fused_type), hidden=hidden_states,
++              query_latent=q_c, query_absorbed=ql_nope, query_rope=q_pe,
++              key_plain=locals().get('k_nope'), key_rope=locals().get('k_pe'),
++              indices=topk_indices, seq_query=actual_seq_lengths_query,
++              seq_key=actual_seq_lengths_key, slot_mapping=slot_mapping_sfa,
++              key_projection=self.W_UK_T, value_projection=self.W_UV,
++              scale=self.scale, q_norm_epsilon=self.q_a_layernorm.variance_epsilon,
++              kv_norm_epsilon=self.kv_a_layernorm.variance_epsilon,
++              qk_rope_head_dim=self.qk_rope_head_dim, cos=cos, sin=sin)
+         # Notify for every layer that wrote the cache, not just indexer layers:
+         # by this point all of the layer's KV (main + indexer) has been
+         # scattered - indexer layers persisted it inside indexer.forward
+@@ -2156,7 +2171,9 @@
+                 )
+ 
+         if has_local_query:
++            stage('attention_core', output=attn_output)
+             attn_output = self._v_up_proj(attn_output)
++            stage('value_projection', output=attn_output)
+         else:
+             # The O-proj below still joins its PCP/TP collectives.
+             attn_output = hidden_states.new_zeros((ql_nope.shape[0], self.local_num_heads * self.v_head_dim))
+--- a/vllm_ascend/models/kimi_k3/kimi_k3.py
++++ b/vllm_ascend/models/kimi_k3/kimi_k3.py
+@@ -94,6 +94,7 @@
+     AscendKimiK3DeltaAttention as AscendKimiK3DeltaAttentionBase,
+ )
+ from vllm_ascend.ops.linear_op import KimiOProjMMReduceScatterOp
++from residual_alignment import attn_res_forward as aligned_attn_res_fwd
+ from vllm_ascend.quantization.methods.base import PreparedLinearInput
+ from vllm_ascend.quantization.methods.w8a8.w8a8_mxfp8 import AscendW8A8MXFP8DynamicLinearMethod
+ from vllm_ascend.utils import get_rotation_path, is_950
+@@ -257,6 +258,21 @@
+             # All weight shards must operate on the same tokens. Reducing
+             # different sequence shards would mix live and padding rows.
+             x = sp_all_gather(x)
++        import os
++        if os.environ.get("KIMI_ALIGNMENT_DENSE_MLP") == "1":
++            assert self.use_sequence_parallel, "Aligned dense MLP requires its SP output contract"
++            from types import SimpleNamespace
++            from vllm.distributed.parallel_state import get_tp_group
++            from linear_alignment import full_k_sequence_projection
++            import cann_ops_nn.ops
++            gate_up, _ = self.gate_up_proj(x)
++            activated = torch.ops.cann_ops_nn.situ_glu(
++                gate_up, dim=-1, beta=self.act_fn.beta,
++                linear_beta=self.act_fn.linear_beta, activate_left=True)
++            group = get_tp_group()
++            op = SimpleNamespace(layer=self.down_proj, comm_group=group,
++                                 tp_rank=group.rank_in_group, tp_size=group.world_size)
++            return full_k_sequence_projection(op, activated)
+         x = super().forward(x)
+         if self.use_sequence_parallel:
+             x = sp_reduce_scatter(x)
+@@ -371,6 +387,9 @@
+             prefix=f"{prefix}.gate",
+         )
+         self.gate.e_score_correction_bias = nn.Parameter(torch.empty(num_experts, dtype=torch.float32))
++        import os
++        self._alignment_router_config = config
++        self.gate._alignment_kimi_training_gate = os.environ.get('KIMI_ALIGNMENT_MOE') == '1'
+ 
+         if self.num_shared_experts is not None:
+             self.shared_experts = KimiMLP(
+@@ -420,6 +439,7 @@
+ 
+         self.experts = FusedMoEFactory(
+             shared_experts=self.shared_experts,
++            custom_routing_function=(self._alignment_routing if self.gate._alignment_kimi_training_gate else None),
+             num_experts=num_experts,
+             top_k=num_experts_per_token,
+             hidden_size=self.moe_hidden_size,
+@@ -457,14 +477,24 @@
+         except Exception:
+             pass
+ 
++    def _alignment_routing(self, hidden_states, gating_output, topk, renormalize):
++        from moe_alignment import training_routing
++        c = self._alignment_router_config
++        return training_routing(gating_output, self.gate.e_score_correction_bias,
++            topk, renormalize, self.routed_scaling_factor,
++            scoring_func=c.moe_router_activation_func,
++            num_expert_group=c.num_expert_group, topk_group=c.topk_group)
++
+     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+         num_tokens, hidden_size = hidden_states.shape
+         hidden_states = hidden_states.view(-1, hidden_size)
+-        router_logits, _ = self.gate(hidden_states)
+-        final_hidden_states = self.experts(
+-            hidden_states=hidden_states,
+-            router_logits=router_logits,
+-        )
++        from moe_trace import capture_moe
++        with capture_moe(self, hidden_states):
++            router_logits, _ = self.gate(hidden_states)
++            final_hidden_states = self.experts(
++                hidden_states=hidden_states,
++                router_logits=router_logits,
++            )
+         return final_hidden_states.view(num_tokens, hidden_size)
+ 
+ 
+@@ -605,6 +635,19 @@
+             prefix=prefix,
+             topk_indices_buffer=topk_indices_buffer,
+         )
++        import os
++        if os.environ.get('KIMI_ALIGNMENT_DSA_NORM') == '1':
++            # DSA calls DeepseekV2MLAAttention directly, bypassing the MLA
++            # constructor. These are the norm objects used by SFA native/prolog.
++            self.impl.q_a_layernorm.variance_epsilon = 1e-6
++            self.impl.kv_a_layernorm.variance_epsilon = 1e-6
++            assert self.q_a_layernorm is self.impl.q_a_layernorm
++            print(f'[KimiDSANormAlignment] {prefix} q_eps={self.impl.q_a_layernorm.variance_epsilon} kv_eps={self.impl.kv_a_layernorm.variance_epsilon}', flush=True)
++        self.impl._alignment_kimi_raw_channels = os.environ.get('KIMI_ALIGNMENT_DSA_RAW_CHANNELS') == '1'
++        if self.impl._alignment_kimi_raw_channels:
++            assert config.mla_use_nope and config.qk_rope_head_dim == 64
++            assert not self.impl.enable_sparse_sfa_c8 and not self.impl.enable_sparse_sfa_turboquant
++            print(f'[KimiDSARawChannels] {prefix} enabled', flush=True)
+         if config.mla_use_output_gate:
+             self.g_proj = ColumnParallelLinear(
+                 config.hidden_size,
+@@ -614,6 +657,12 @@
+                 prefix=f"{prefix}.g_proj",
+             )
+             self.impl.g_proj = self.g_proj
++
++
++    def forward(self, positions, hidden_states):
++        from dsa_trace import capture_dsa
++        with capture_dsa(self, positions, hidden_states):
++            return super().forward(positions, hidden_states)
+ 
+ 
+ class AscendKimiDecoderLayer(UpstreamKimiDecoderLayer):
+@@ -799,7 +848,9 @@
+         # The previous MLP add is rounded to BF16 before it becomes either a
+         # DSpark raw prefix or an AttnRes input. A block boundary stores that
+         # same prefix, while the mixture reads only the older valid slots.
+-        return torch.ops._C_ascend.attn_res_fwd(
++        import os
++        split_first_norm = self.prev_valid_blocks == 0 and os.environ.get("KIMI_ALIGNMENT_SPLIT_INPUT_NORM") == "1"
++        result = aligned_attn_res_fwd(
+             prefix_sum,
+             addend,
+             block_residual,
+@@ -807,12 +858,20 @@
+             self.self_attention_res_norm.weight,
+             self.self_attention_res_norm.variance_epsilon,
+             self.prev_valid_blocks,
+-            self.input_layernorm.weight,
+-            self.input_layernorm.variance_epsilon,
++            None if split_first_norm else self.input_layernorm.weight,
++            0.0 if split_first_norm else self.input_layernorm.variance_epsilon,
+             self.block_write_idx if self.is_block_write_layer else -1,
+             return_materialized,
+             optimize_prefill=optimize_prefill,
+         )
++        if split_first_norm:
++            import torch_npu
++            normalized = torch_npu.npu_rms_norm(result[0], self.input_layernorm.weight,
++                epsilon=self.input_layernorm.variance_epsilon)[0]
++            result = (normalized, result[1], result[2])
++        from mm_trace import trace_input_norm
++        trace_input_norm(self, prefix_sum, block_residual, result, addend, optimize_prefill)
++        return result
+ 
+     def forward_attn_residual(
+         self,
+@@ -842,8 +901,10 @@
+         if self.use_sequence_parallel and not self.fuse_o_proj_mm_reduce_scatter:
+             hidden_states = sp_reduce_scatter(hidden_states)
+ 
++        from mm_trace import trace_post_attention
++        trace_post_attention(self, hidden_states, prefix_sum, block_residual)
+         mlp_valid_blocks = self.prev_valid_blocks + int(self.is_block_write_layer)
+-        op = torch.ops._C_ascend.attn_res_fwd
++        op = aligned_attn_res_fwd
+         hidden_states, prefix_sum, _ = op(
+             hidden_states if prefix_sum is None else prefix_sum,
+             None if prefix_sum is None else hidden_states,
+@@ -857,6 +918,11 @@
+             optimize_prefill=optimize_prefill,
+         )
+         mlp_output = self.mlp(hidden_states)
++        trace_post_attention(self, None, prefix_sum, block_residual,
++                             output=hidden_states, mlp_output=mlp_output)
++        import os
++        if os.environ.get('KIMI_ALIGNMENT_AUDIT_DIR') and self.layer_idx < 4:
++            self._alignment_layer_output_trace = (prefix_sum + mlp_output).detach().cpu().clone()
+         if defer_mlp_add:
+             # Only the enclosing model uses this contract. It materializes the
+             # prefix in the next fused residual point before any aux capture,
+@@ -1174,7 +1240,7 @@
+                 aux_hidden_states,
+             )
+ 
+-        hidden_states, final_prefix, _ = torch.ops._C_ascend.attn_res_fwd(
++        hidden_states, final_prefix, _ = aligned_attn_res_fwd(
+             hidden_states,
+             pending_mlp_output,
+             residual,
+@@ -1335,6 +1401,11 @@
+     dummy_inputs=KimiK3DummyInputsBuilder,
+ )
+ class AscendKimiK3ForConditionalGeneration(UpstreamKimiK3ForConditionalGeneration):
++    def _process_media_input(self, media_input):
++        from mm_trace import trace_media
++        with trace_media(self, media_input):
++            return super()._process_media_input(media_input)
++
+     """Upstream Kimi K3 multimodal wrapper with Ascend text/projector layers."""
+ 
+     def __init__(self, vllm_config: VllmConfig, prefix: str = "") -> None:
+--- a/vllm_ascend/ops/fused_moe/gate_linear.py
++++ b/vllm_ascend/ops/fused_moe/gate_linear.py
+@@ -84,6 +84,9 @@
+         self.out_dtype = out_dtype if out_dtype is not None else torch.float32
+ 
+     def forward(self, x: torch.Tensor):
++        if getattr(self, '_alignment_kimi_training_gate', False):
++            from moe_alignment import training_gate_logits
++            return training_gate_logits(x, self.weight), None
+         # Tier 4: bf16 x bf16 -> fp32 accumulation. Eligibility mirrors
+         # upstream: bf16 weight (i.e. no fp32 upcast requested), fp32
+         # out_dtype, no bias (torch.mm has no bias term).
+--- a/vllm_ascend/ops/fused_moe/moe_comm_method.py
++++ b/vllm_ascend/ops/fused_moe/moe_comm_method.py
+@@ -157,6 +157,9 @@
+             fused_experts_input=fused_experts_input,
+         )
+         token_dispatch_output = self.token_dispatcher.token_dispatch(token_dispatch_input=token_dispatch_input)
++        from moe_trace import stage
++        stage('dispatch', comm=type(self).__name__, input=token_dispatch_input,
++              metadata=token_dispatch_output.combine_metadata)
+ 
+         shared_activation_overlap_start_evt = None
+         if self.shared_activation_overlaps_routed_gmm1:
+@@ -183,6 +186,7 @@
+             combine_metadata=token_dispatch_output.combine_metadata,
+         )
+ 
++        stage('combined_routed', output=routed_out)
+         return FusedExpertsResult(
+             routed_out=routed_out,
+             before_dispatch_evt=before_dispatch_evt,
+--- a/vllm_ascend/ops/fused_moe/moe_mlp.py
++++ b/vllm_ascend/ops/fused_moe/moe_mlp.py
+@@ -45,15 +45,24 @@
+                 quant_method=quant_method,
+             )
+ 
++    from moe_trace import stage
++    stage('mlp_input', hidden=mlp_compute_input.hidden_states,
++          groups=mlp_compute_input.group_list, group_list_type=mlp_compute_input.group_list_type,
++          topk_ids=mlp_compute_input.topk_ids, beta=mlp_compute_input.activation_situ_beta,
++          linear_beta=mlp_compute_input.activation_situ_linear_beta,
++          weights=mlp_compute_input.weights, method=type(quant_method).__name__)
+     if quant_method.supports_fused_activation(mlp_compute_input.activation):
+         hidden_states, act_out_scale = quant_method.apply_gmm1_act_quant(mlp_compute_input)
+     else:
+         hidden_states = quant_method.apply_gmm1(mlp_compute_input)
++        stage('gmm1', output=hidden_states)
+         hidden_states = _unified_apply_activation(mlp_compute_input, hidden_states, quant_method)
++        stage('activation', output=hidden_states)
+         hidden_states, act_out_scale = quant_method.apply_act_quant(mlp_compute_input, hidden_states)
+ 
+     before_gmm2_evt = torch.npu.current_stream().record_event()
+     hidden_states = quant_method.apply_gmm2(mlp_compute_input, hidden_states, act_out_scale)
++    stage('gmm2', output=hidden_states)
+     return hidden_states, before_gmm2_evt
+ 
+ 
+@@ -104,6 +113,11 @@
+     linear_beta: float | None,
+ ) -> torch.Tensor:
+     """Match SituAndMul.forward_native without constructing a CustomOp in forward."""
++    import os
++    if os.environ.get('KIMI_ALIGNMENT_MOE') == '1':
++        assert hidden_states.dtype == torch.bfloat16
++        return torch.ops.cann_ops_nn.situ_glu(hidden_states, dim=-1,
++            beta=beta, linear_beta=linear_beta, activate_left=True)
+     gate, up = hidden_states.chunk(2, dim=-1)
+     gate = gate.float()
+     up = up.float()
+--- a/vllm_ascend/ops/fused_moe/shared_experts.py
++++ b/vllm_ascend/ops/fused_moe/shared_experts.py
+@@ -130,6 +130,16 @@
+         ascend_config = get_ascend_config()
+         self.multistream_overlap = ascend_config.multistream_overlap_shared_expert
+         self.weights_replicated = ascend_config.enable_shared_expert_dp
++        import os
++        self._alignment_kimi_full_k = (
++            os.environ.get('KIMI_ALIGNMENT_MOE') == '1'
++            and '.block_sparse_moe.shared_experts.' in getattr(layer.gate_up_proj, 'prefix', '')
++            and self.situ_activation is not None)
++        if self._alignment_kimi_full_k:
++            assert self.quant_type == QuantType.NONE
++            assert self.is_sequence_parallel and not self.weights_replicated
++            # Keep newly introduced TP gathers ordered with routed collectives.
++            self.multistream_overlap = False
+ 
+         if self.multistream_overlap:
+             # Wrap the quant_method's process_weights_after_loading to validate that
+@@ -199,6 +209,10 @@
+         return shared_gate_up
+ 
+     def apply_activation(self, shared_gate_up: torch.Tensor):
++        if self._alignment_kimi_full_k:
++            return torch.ops.cann_ops_nn.situ_glu(shared_gate_up, dim=-1,
++                beta=self.situ_activation.beta, linear_beta=self.situ_activation.linear_beta,
++                activate_left=True)
+         return self.layer.act_fn(shared_gate_up)  # type: ignore
+ 
+     def part2(
+@@ -206,6 +220,15 @@
+         hidden_states: torch.Tensor,
+         down_input: LinearInput,
+     ):
++        if self._alignment_kimi_full_k:
++            from types import SimpleNamespace
++            from vllm.distributed import get_tp_group
++            from linear_alignment import full_k_sequence_projection
++            group = get_tp_group()
++            op = SimpleNamespace(layer=self.layer.down_proj, comm_group=group,
++                tp_rank=group.rank_in_group, tp_size=group.world_size)
++            shared_out = full_k_sequence_projection(op, down_input)
++            return self._apply_output_gate(hidden_states, shared_out)
+         shared_out, _ = self.layer.down_proj(down_input)  # type: ignore
+         return self._apply_output_gate(hidden_states, shared_out)
+ 
+@@ -287,6 +310,9 @@
+         (down_proj is built with reduce_results=False), replacing the usual
+         TP all-reduce.
+         """
++        if self._alignment_kimi_full_k:
++            # full_k_sequence_projection already returned the padded SP shard.
++            return shared_out
+         tp_size = self.moe_config.tp_group.world_size
+         original_num_tokens = shared_out.shape[0]
+         pad_size = (tp_size - original_num_tokens % tp_size) % tp_size
+--- a/vllm_ascend/ops/kimi_kda.py
++++ b/vllm_ascend/ops/kimi_kda.py
+@@ -263,6 +263,7 @@
+         hidden_states: torch.Tensor,
+         positions: torch.Tensor,
+     ) -> torch.Tensor:
++        self._alignment_kda_trace = None
+         if self.uses_mixed_projection:
+             num_tokens = hidden_states.size(0)
+             mixed_qkv, beta, g1, g2 = self._run_overlapped_qkv_bfg(hidden_states)
+@@ -281,7 +282,10 @@
+             )
+             core_attn_out = rearrange(core_attn_out, "1 n h d -> n (h d)")
+             return self.o_proj(core_attn_out)[0]
+-        return super().forward(hidden_states, positions)
++        output = super().forward(hidden_states, positions)
++        from kda_trace import trace_output
++        trace_output(self, hidden_states, output)
++        return output
+ 
+     def _run_overlapped_qkv_bfg(
+         self,
+@@ -396,9 +400,12 @@
+         max_query_len: int = -1,
+         num_accepted_tokens: torch.Tensor | None = None,
+     ) -> torch.Tensor:
++        import os
++        split_silu = os.environ.get("KIMI_ALIGNMENT_CONV_SPLIT_SILU") == "1"
++        activation = None if split_silu else "silu"
+         cache_indices = _normalize_causal_cache_indices(cache_indices)
+         if run_mode == 0:
+-            return causal_conv1d_fn(
++            output = causal_conv1d_fn(
+                 mixed_qkv,
+                 conv_weights_t,
+                 None,
+@@ -406,20 +413,21 @@
+                 query_start_loc=query_start_loc,
+                 cache_indices=cache_indices,
+                 has_initial_state=initial_state_mode,
+-                activation="silu",
++                activation=activation,
+                 pad_slot_id=PAD_SLOT_ID,
+                 null_block_id=0,
+             )
++            return torch.nn.functional.silu(output) if split_silu else output
+         if run_mode != 1:
+             raise ValueError(f"Unsupported causal_conv1d run_mode: {run_mode}")
+ 
+         output = torch.empty_like(mixed_qkv)
+-        return causal_conv1d_update(
++        output = causal_conv1d_update(
+             mixed_qkv,
+             conv_state,
+             conv_weights_t,
+             bias=None,
+-            activation="silu",
++            activation=activation,
+             conv_state_indices=cache_indices,
+             num_accepted_tokens=num_accepted_tokens,
+             query_start_loc=query_start_loc,
+@@ -427,6 +435,7 @@
+             null_block_id=0,
+             out=output,
+         )
++        return torch.nn.functional.silu(output) if split_silu else output
+ 
+     @torch.no_grad()
+     def _pack_conv_weights(self) -> None:
+@@ -459,6 +468,14 @@
+         *,
+         num_accepted_tokens: torch.Tensor | None = None,
+     ) -> torch.Tensor:
++        from kda_alignment import enabled, serving_decode
++        if enabled():
++            return serving_decode(
++                q, k, v, raw_gate, beta, recurrent_state, cu_seqlens,
++                state_indices, self.A_log, self.dt_bias,
++                lower_bound=self.gate_lower_bound,
++                num_accepted_tokens=num_accepted_tokens,
++            )
+         return run_recurrent_kda(
+             q,
+             k,
+@@ -507,6 +524,17 @@
+             raise RuntimeError("KDA state copy requires worker cache initialization before prefill")
+         initial_state_vk = state_copy.gather(recurrent_state, state_indices, has_initial_state)
+ 
++        from kda_alignment import enabled, canonical_kda
++        if enabled():
++            output, final_state = canonical_kda(
++                q, k, v, raw_gate, beta, self.A_log, self.dt_bias,
++                cu_seqlens=cu_seqlens, initial_state=initial_state_vk,
++                lower_bound=self.gate_lower_bound,
++            )
++            from kda_trace import trace_prefill
++            trace_prefill(self, q, k, v, raw_gate, beta, output, cu_seqlens)
++            state_copy.scatter(recurrent_state, final_state, state_indices)
++            return output
+         output, final_state = run_chunk_kda(
+             q,
+             k,
+@@ -555,8 +583,12 @@
+ 
+         num_actual_tokens = attn_metadata.num_actual_tokens
+         mixed_qkv = mixed_qkv[:num_actual_tokens]
++        import os
++        if os.environ.get("KIMI_ALIGNMENT_AUDIT_DIR") and ".layers.0." in self.prefix:
++            self._alignment_raw_qkv = mixed_qkv.detach().clone()
+         g1 = g1[:, :num_actual_tokens]
+         g2 = g2[:num_actual_tokens]
++        self._alignment_raw_beta = beta.detach()
+         beta = _prepare_beta(
+             beta,
+             num_actual_tokens,
+@@ -740,6 +772,20 @@
+         # Keep the registered norm's parameters while writing into the
+         # caller-owned attention output directly.
+         norm_out = core_attn_out[:, :num_actual_tokens]
+-        self.o_norm.forward_oot(norm_out, g2, out=norm_out)
++        import os
++        if os.environ.get("KIMI_ALIGNMENT_SPLIT_GATED_NORM") == "1":
++            import torch_npu
++            if self.o_norm.activation != "sigmoid" or self.o_norm.bias is not None:
++                raise ValueError("Kimi alignment requires unbiased sigmoid gated RMSNorm")
++            # Match the existing training forward's BF16 rounding boundaries.
++            # Keep the serving module's loaded parameter and original output buffer.
++            normalized = torch_npu.npu_rms_norm(
++                norm_out, self.o_norm.weight, epsilon=self.o_norm.eps
++            )[0]
++            norm_out.copy_(normalized * torch.sigmoid(g2))
++        else:
++            self.o_norm.forward_oot(norm_out, g2, out=norm_out)
++        from kda_trace import trace_norm
++        trace_norm(self, g2, norm_out)
+         core_attn_out[:, num_actual_tokens:].zero_()
+         maybe_save_kv_layer_to_connector("", [])
+--- a/vllm_ascend/ops/linear_op.py
++++ b/vllm_ascend/ops/linear_op.py
+@@ -195,6 +195,10 @@
+         # sp_reduce_scatter owns token padding and returns the same token shard.
+         assert self.quant_method is not None
+         input_parallel = self.get_input_parallel(input_)
++        import os
++        if os.environ.get("KIMI_ALIGNMENT_FULL_O_PROJ") == "1":
++            from linear_alignment import full_k_sequence_projection
++            return full_k_sequence_projection(self, input_parallel), None
+         output = self.quant_method.apply(self.layer, input_parallel, None)
+         return sp_reduce_scatter(output), None
+ 
+@@ -202,6 +206,13 @@
+         """Write the ordinary decode projection directly into its TP shard."""
+         assert self.quant_method is not None
+         input_parallel = self.get_input_parallel(input_)
++        import os
++        if os.environ.get("KIMI_ALIGNMENT_FULL_O_PROJ") == "1":
++            from linear_alignment import full_k_sequence_projection
++            aligned = full_k_sequence_projection(self, input_parallel)
++            assert aligned.shape == output.shape, (aligned.shape, output.shape)
++            output.copy_(aligned)
++            return output
+         parallel_output = self.quant_method.apply(self.layer, input_parallel, None)
+         dist.reduce_scatter_tensor(output, parallel_output, group=self.comm_group.device_group)
+         return output
+--- a/vllm_ascend/ops/mm_encoder_attention.py
++++ b/vllm_ascend/ops/mm_encoder_attention.py
+@@ -164,6 +164,18 @@
+         softmax_lse: torch.Tensor | None = None,
+         workspace: torch.Tensor | None = None,
+     ) -> torch.Tensor:
++        import os
++        if os.environ.get("KIMI_ALIGNMENT_VISION_FA") == "1":
++            # Fixed-operand replay verified the training FA path on this BF16 ViT.
++            # This candidate is explicitly eager-only; graph semantics are untested.
++            assert out is None and workspace is None and softmax_lse is None
++            assert not self.enable_pad and self.num_heads == self.num_kv_heads
++            assert query.dtype == key.dtype == value.dtype == torch.bfloat16
++            return torch_npu.npu_fusion_attention(
++                query, key, value, head_num=query.shape[1], pse=None,
++                atten_mask=None, scale=self.scale, keep_prob=1., input_layout="TND",
++                actual_seq_qlen=actual_seq_lengths_q,
++                actual_seq_kvlen=actual_seq_lengths_kv)[0]
+         fia_kwargs = dict(
+             query=query,
+             key=key.contiguous(),
+--- a/vllm_ascend/worker/v2/model_runner.py
++++ b/vllm_ascend/worker/v2/model_runner.py
+@@ -1085,6 +1085,11 @@
+         logits = self.model.compute_logits(hidden_states[sample_indices])
+         logits = logits[:num_logits]
+ 
++        import os as alignment_os
++        if alignment_os.environ.get("KIMI_ALIGNMENT_AUDIT_DIR"):
++            from alignment_audit import capture_vllm_v2_step
++            capture_vllm_v2_step(self, logits, hidden_states[sample_indices][:num_logits], input_batch)
++
+         # Dispatch tail mirrors GPUModelRunner.sample; refresh it on main bumps.
+         if grammar_output is not None:
+             # Apply grammar bitmask to the logits in-place.
+--- a/vllm_ascend/worker/worker.py
++++ b/vllm_ascend/worker/worker.py
+@@ -491,6 +491,9 @@
+         self._init_worker_distributed_environment()
+         # Set random seed.
+         set_random_seed(self.model_config.seed)
++        if os.environ.get("KIMI_ALIGNMENT_DETERMINISTIC_LEVEL") == "3":
++            torch_npu.npu.set_deterministic_level(3)
++            print(f"KIMI_ALIGNMENT_DETERMINISTIC rank={self.rank} role=rollout level=3", flush=True)
+         # Initialize device properties used by triton kernels.
+         init_device_properties_triton()
+ 

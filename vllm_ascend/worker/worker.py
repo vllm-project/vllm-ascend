@@ -19,8 +19,8 @@
 
 import copy
 import gc
-import logging
 import os
+import logging
 from collections.abc import Iterator
 from contextlib import AbstractContextManager, contextmanager, nullcontext
 from fnmatch import filter as fnmatch_filter

@@ -1420,7 +1420,7 @@ class AscendSFAImpl(MLAAttentionImpl):
     ):
         """Process and write KV whose PCP exchange has already completed."""
         if getattr(self, "_alignment_kimi_raw_channels", False):
-            from vllm_ascend.ops.kimi_alignment.dsa_alignment import write_raw_nope_cache
+            from dsa_alignment import write_raw_nope_cache
 
             return write_raw_nope_cache(self, kv_no_split, slots, kv_cache)
         if self.qk_rope_head_dim == 0 and not self.enable_sparse_sfa_c8:
@@ -2289,7 +2289,7 @@ class AscendSFAImpl(MLAAttentionImpl):
         else:
             raise RuntimeError(f"skip_topk is False but indexer is None. layer_name={self.layer_name}.")
 
-        from vllm_ascend.ops.kimi_alignment.dsa_trace import stage
+        from dsa_trace import stage
 
         stage(
             "pre_attention",

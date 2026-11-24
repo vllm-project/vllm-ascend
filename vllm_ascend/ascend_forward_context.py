@@ -462,12 +462,10 @@ def select_moe_comm_method(
             is_draft_model,
             draft_moe_quant_type,
         )
-    if (
-        __import__("os").environ.get("KIMI_ALIGNMENT_ALLTOALL") == "1"
-        and moe_comm_type in (MoECommType.MC2, MoECommType.FUSED_MC2)
-        and vllm_config.parallel_config.enable_expert_parallel
-        and get_ep_group().world_size > 1
-    ):
+    if (__import__("os").environ.get("KIMI_ALIGNMENT_ALLTOALL") == "1"
+            and moe_comm_type in (MoECommType.MC2, MoECommType.FUSED_MC2)
+            and vllm_config.parallel_config.enable_expert_parallel
+            and get_ep_group().world_size > 1):
         logger.info_once("Kimi BF16 alignment switching %s to ALLTOALL", moe_comm_type)
         moe_comm_type = MoECommType.ALLTOALL
     logger.debug(

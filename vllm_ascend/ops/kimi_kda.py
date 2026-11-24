@@ -424,7 +424,7 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
             core_attn_out = rearrange(core_attn_out, "1 n h d -> n (h d)")
             return self.o_proj(core_attn_out)[0]
         output = super().forward(hidden_states, positions)
-        from vllm_ascend.ops.kimi_alignment.kda_trace import trace_output
+        from kda_trace import trace_output
 
         trace_output(self, hidden_states, output)
         return output
@@ -624,7 +624,7 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
         *,
         num_accepted_tokens: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        from vllm_ascend.ops.kimi_alignment.kda_alignment import enabled, serving_decode
+        from kda_alignment import enabled, serving_decode
 
         if enabled():
             return serving_decode(
@@ -689,7 +689,7 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
             raise RuntimeError("KDA state copy requires worker cache initialization before prefill")
         initial_state_vk = state_copy.gather(recurrent_state, state_indices, has_initial_state)
 
-        from vllm_ascend.ops.kimi_alignment.kda_alignment import canonical_kda, enabled
+        from kda_alignment import canonical_kda, enabled
 
         if enabled():
             output, final_state = canonical_kda(
@@ -704,7 +704,7 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
                 initial_state=initial_state_vk,
                 lower_bound=self.gate_lower_bound,
             )
-            from vllm_ascend.ops.kimi_alignment.kda_trace import trace_prefill
+            from kda_trace import trace_prefill
 
             trace_prefill(self, q, k, v, raw_gate, beta, output, cu_seqlens)
             state_copy.scatter(recurrent_state, final_state, state_indices)
@@ -996,4 +996,6 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
             core_attn_out[:, num_actual_tokens:].zero_()
         else:
             self.o_norm.forward_oot(norm_input, g2, out=core_attn_out)
+        from kda_trace import trace_norm
+        trace_norm(self, g2, core_attn_out[:, :num_actual_tokens])
         maybe_save_kv_layer_to_connector("", [])

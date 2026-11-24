@@ -152,14 +152,9 @@ class MoECommMethod(ABC):
             fused_experts_input=fused_experts_input,
         )
         token_dispatch_output = self.token_dispatcher.token_dispatch(token_dispatch_input=token_dispatch_input)
-        from vllm_ascend.ops.kimi_alignment.moe_trace import stage
-
-        stage(
-            "dispatch",
-            comm=type(self).__name__,
-            input=token_dispatch_input,
-            metadata=token_dispatch_output.combine_metadata,
-        )
+        from moe_trace import stage
+        stage('dispatch', comm=type(self).__name__, input=token_dispatch_input,
+              metadata=token_dispatch_output.combine_metadata)
 
         mlp_compute_input = build_mlp_compute_input(
             fused_experts_input=fused_experts_input,
@@ -179,7 +174,7 @@ class MoECommMethod(ABC):
             combine_metadata=token_dispatch_output.combine_metadata,
         )
 
-        stage("combined_routed", output=routed_out)
+        stage('combined_routed', output=routed_out)
         return FusedExpertsResult(
             routed_out=routed_out,
             before_dispatch_evt=before_dispatch_evt,
