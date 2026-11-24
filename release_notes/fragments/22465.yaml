@@ -1,0 +1,6 @@
+pr: 22465
+entries:
+  - category: bugfix
+    text: Fixed incorrect candidate filtering for DeepSeek V4.1 on A3 when reusing QLI candidates across layers. Requires the matching rebuilt QLI operator package.
+    model: deepseek-v4.1
+    hardware: [A3]
