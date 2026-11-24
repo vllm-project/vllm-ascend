@@ -41,20 +41,12 @@ class AscendGroupedTopKRouter310(AscendGroupedTopKRouter):
                 input_ids=input_ids,
             )
 
-        # Fallback gate paths may still produce FP32 logits.
-        # npu_moe_gating_top_k_softmax requires FP16 ND input. This adjusts
-        # dtype only; the default FP16 gate path needs no dtype conversion.
-        router_logits = router_logits.to(torch.float16)
-
-        if router_logits.shape[0] > self.MAX_TOKENS_PER_GATING_CALL:
-            topk_results = [
-                torch_npu.npu_moe_gating_top_k_softmax(router_logits_chunk, k=self.top_k)
-                for router_logits_chunk in router_logits.split(self.MAX_TOKENS_PER_GATING_CALL, dim=0)
-            ]
-            topk_weights = torch.cat([result[0] for result in topk_results], dim=0)
-            topk_ids = torch.cat([result[1] for result in topk_results], dim=0)
-        else:
-            topk_weights, topk_ids, _ = torch_npu.npu_moe_gating_top_k_softmax(router_logits, k=self.top_k)
+        # 310P: npu_moe_gating_top_k_softmax aicoreUB overflow when
+        # num_experts > 64 (MTE out-of-bounds). Use plain softmax+topk,
+        # which the 310P handles fine at any expert count.
+        probs = torch.softmax(router_logits.float(), dim=-1)
+        topk_weights, topk_ids = torch.topk(probs, self.top_k, dim=-1)
+        topk_weights = topk_weights.to(torch.float16)
 
         topk_weights = self._renormalize_topk_weights(topk_weights)
         topk_weights = topk_weights * self.routed_scaling_factor
