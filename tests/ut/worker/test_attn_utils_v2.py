@@ -107,6 +107,20 @@ def _spec_compress_ratio(spec) -> int:
     return spec.tokens_per_state
 
 
+@pytest.mark.parametrize(
+    ("hf_config", "expected"),
+    [
+        (SimpleNamespace(model_type="deepseek_v4"), True),
+        (SimpleNamespace(model_type="deepseek_v41"), True),
+        (SimpleNamespace(model_type="glm5_next_text"), False),
+        (SimpleNamespace(compress_ratios=[1]), False),
+    ],
+)
+def test_is_dsv4_model_uses_explicit_model_type(hf_config, expected):
+    vllm_config = SimpleNamespace(model_config=SimpleNamespace(hf_config=hf_config))
+    assert attn_utils._is_dsv4_model(vllm_config) is expected
+
+
 @pytest.fixture(autouse=True)
 def default_pa_disabled(monkeypatch):
     monkeypatch.setattr(attn_utils, "requires_contiguous_pa_kv_cache", lambda *_args, **_kwargs: False)
@@ -1029,7 +1043,7 @@ def test_main_dsv4_materializes_real_planner_geometry_once(monkeypatch):
         additional_config={},
         kv_transfer_config=None,
         model_config=SimpleNamespace(
-            hf_config=SimpleNamespace(compress_ratios=[1]),
+            hf_config=SimpleNamespace(model_type="deepseek_v4"),
         ),
     )
     monkeypatch.setattr(
