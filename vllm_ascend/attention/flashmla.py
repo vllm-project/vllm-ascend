@@ -192,7 +192,7 @@ def _check_attention_inputs(
     batch_size = _check_lengths(cache_seqlens, cu_seqlens_q, seqused_q)
     if q.ndim != 3 or q.shape[0] == 0 or q.shape[1:] != (config.num_heads, FLASHMLA_QK_DIM):
         raise ValueError(f"FlashMLA q must be nonempty TND with configured heads and head dimension {FLASHMLA_QK_DIM}")
-    cache_tail = (FLASHMLA_BLOCK_SIZE, FLASHMLA_NUM_KV_HEADS, FLASHMLA_QK_DIM)
+    cache_tail: tuple[int, ...] = (FLASHMLA_BLOCK_SIZE, FLASHMLA_NUM_KV_HEADS, FLASHMLA_QK_DIM)
     if isinstance(config, QuantFlashMLAConfig) and k_cache.ndim == 5:
         cache_tail = (FLASHMLA_NUM_KV_HEADS, FLASHMLA_QK_DIM // 32, FLASHMLA_BLOCK_SIZE, 32)
     if k_cache.ndim != len(cache_tail) + 1 or k_cache.shape[1:] != cache_tail or k_cache.shape[0] == 0:

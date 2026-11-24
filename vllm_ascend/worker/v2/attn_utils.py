@@ -1971,7 +1971,7 @@ def _reshape_kv_cache_v2(
 
                 attn_impl = vllm_config.compilation_config.static_forward_context[layer_name].impl
                 if attn_impl.use_flashmla:
-                    cache_shape = (*component_shape, fused_dim)
+                    cache_shape: tuple[int, ...] = (*component_shape, fused_dim)
                     if (
                         getattr(attn_impl, "use_quant_flashmla", False)
                         and attn_impl.num_heads == 96
