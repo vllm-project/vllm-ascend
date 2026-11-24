@@ -15,7 +15,7 @@ from vllm_ascend.distributed import parallel_state
 from vllm_ascend.ops import linear_op
 from vllm_ascend.ops.fused_moe import shared_experts as shared_module
 from vllm_ascend.ops.fused_moe.dataclass.shared_experts import PreparedSharedExpertInput, RoutedMoEMilestones
-from vllm_ascend.ops.fused_moe.fused_moe import _ascend_moe_forward_shared_sp_fake
+from vllm_ascend.ops.fused_moe.fused_moe import AscendMoERunner, _ascend_moe_forward_shared_sp_fake
 from vllm_ascend.ops.fused_moe.shared_experts import AscendSharedExperts, SharedExpertMLPPath
 from vllm_ascend.quantization.quant_type import QuantType
 
@@ -77,6 +77,45 @@ def test_shared_tp_rejects_unsafe_config(section, key, value, error):
 def test_shared_tp_rejects_negative_size():
     with pytest.raises(ValueError, match="shared_expert_tensor_parallel_size"):
         FinegrainedTPConfig(shared_expert_tensor_parallel_size=-1)
+
+
+@pytest.mark.parametrize("shared_size", [1, 2])
+def test_shared_tp_config_for_qwen3_moe_with_only_routed_experts(shared_size):
+    vc = valid_config()
+    vc.model_config.hf_text_config = SimpleNamespace(model_type="qwen3_moe", num_experts=128)
+    config = FinegrainedTPConfig(shared_expert_tensor_parallel_size=shared_size)
+    if shared_size > 1:
+        with pytest.raises(ValueError, match="requires a model with shared experts"):
+            config._validate_preconditions(vc)
+    else:
+        config._validate_preconditions(vc)
+        assert not config.requires_graph(vc)
+
+
+@pytest.mark.parametrize("has_shared_experts, tp_size", [(False, 1), (True, 1), (True, 2)])
+def test_worker_requires_shared_expert_tp_on_a_loaded_layer(monkeypatch, has_shared_experts, tp_size):
+    from vllm_ascend.worker import worker as worker_module
+
+    runner = AscendMoERunner.__new__(AscendMoERunner)
+    torch.nn.Module.__init__(runner)
+    runner.ascend_shared_experts = (
+        SimpleNamespace(finegrained_tp_group=object() if tp_size > 1 else None) if has_shared_experts else None
+    )
+    worker = worker_module.NPUWorker.__new__(worker_module.NPUWorker)
+    worker.vllm_config = SimpleNamespace(
+        model_config=SimpleNamespace(enable_sleep_mode=False), weight_transfer_config=None
+    )
+    worker.model_runner = MagicMock()
+    worker.model_runner.get_model.return_value = torch.nn.Sequential(runner)
+    monkeypatch.setattr(worker_module, "shared_expert_tp_enable", lambda: True)
+    monkeypatch.setattr(worker_module, "set_current_vllm_config", lambda _: nullcontext())
+
+    if tp_size > 1:
+        worker.load_model()
+    else:
+        with pytest.raises(ValueError, match="requires a layer using shared-expert TP"):
+            worker.load_model()
+    worker.model_runner.load_model.assert_called_once()
 
 
 @pytest.mark.parametrize("gather_output,input_is_parallel", [(False, True), (True, True), (False, False)])
@@ -223,11 +262,10 @@ def test_kimi_k31_qkv_tp_uses_the_outer_model_type():
         config._validate_preconditions(vc)
 
 
-@pytest.mark.parametrize("model_type", ["kimi_linear", "glm5_next", "other"])
-def test_gproj_uses_kimi_outer_config_for_text_backbones(model_type):
+def test_gproj_tp_accepts_kimi_k31_with_kimi_linear_text_config():
     vc = valid_config()
     vc.model_config.hf_config = SimpleNamespace(model_type="kimi_k31")
-    vc.model_config.hf_text_config = SimpleNamespace(model_type=model_type)
+    vc.model_config.hf_text_config = SimpleNamespace(model_type="kimi_linear")
     FinegrainedTPConfig(gproj_tensor_parallel_size=2)._validate_preconditions(vc)
 
 

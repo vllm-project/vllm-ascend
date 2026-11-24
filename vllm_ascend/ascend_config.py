@@ -1604,6 +1604,12 @@ class FinegrainedTPConfig:
             ):
                 raise ValueError("Projection/shared-expert fine-grained TP requires TP=PCP=DCP=PP=1.")
         if shared_tp:
+            text_config = getattr(vc.model_config, "hf_text_config", None)
+            if (
+                getattr(text_config, "model_type", None) == "qwen3_moe"
+                and getattr(text_config, "shared_expert_intermediate_size", 0) <= 0
+            ):
+                raise ValueError("shared_expert_tensor_parallel_size > 1 requires a model with shared experts.")
             if (vc.additional_config or {}).get("enable_shared_expert_dp", False):
                 raise ValueError(
                     "Shared-expert fine-grained TP cannot replicate shared weights with enable_shared_expert_dp."
