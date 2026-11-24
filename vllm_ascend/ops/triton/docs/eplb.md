@@ -11,7 +11,7 @@
     1. Each program maps one contiguous tile of flattened token and top-k assignments. For up to 2048 assignments the tile size is 64, for up to 8192 it is 128, and for larger inputs it is 1024.
     2. Each lane derives the routing row from its token index, masks invalid logical expert IDs, and writes one physical ID. The last tile masks assignments beyond the end of the input.
     3. Existing MoE dispatch and computation produce `expert_tokens`. Recording uses blocks of `B = min(256, next_power_of_2(C))` experts and `ceil(C / B)` programs. Each program reads the device-side flag, decodes counts and updates its disjoint load range. Type 0 reads the previous global element across block boundaries. This kernel uses no atomics.
-    4. Source-route recording gives each program 256 consecutive routes of the flattened `[T, K]` IDs. A program reads the device-side flag, its routes and the mask of their rows, then adds one to the load of each valid route with a global atomic add.
+    4. Source-route recording compares routes against experts on a two-dimensional grid. A program owns eight unrolled tiles of 16 consecutive routes of the flattened `[T, K]` IDs and one chunk of at most 512 experts. It reads the device-side flag, narrows each tile of IDs to int32 after a range check, counts the valid routes of eligible rows for every expert of its chunk, and adds the chunk's counts to the load with one atomic add per expert.
 - **Supported modes**: Eager execution and ACL graph capture/replay on Ascend NPU. The optimized kernels were validated on Atlas A3 and Ascend 950DT.
 
 ## Parameters
@@ -57,7 +57,7 @@ All public entry-point parameters below are required. `T` is the token count, `K
 - Mapping specializes `TOPK` and `BLOCK_SIZE` to simplify token indexing and set the vector width. `numel` is a runtime bound with value specialization disabled. Triton still distinguishes pointer dtype and alignment, integer types and the default scalar classes of `num_logical_experts` and `routing_table_rows`.
 - The MoE factory registers the map wrapper for EPLB-enabled V2 routers inside the model runner's JIT registry window. The worker compiles six keys per logical expert count and top-k, covering three tiles and int32/int64 IDs for the standard aligned, contiguous int32 routing table with 1024 rows. The same wrapper and launch specification serve runtime calls. Other pointer alignment classes or routing-table scalar classes can compile on first use.
 - `kernel_config.enable_jit_warmup` controls startup compilation and defaults to `True`. See [Triton JIT warmup on Ascend](../../../../docs/source/developer_guide/Design_Documents/triton_jit_warmup.md) for registration and validation details. Recording uses lazy compilation with `group_list_type` and its block size as compile-time parameters.
-- Source-route recording also uses lazy compilation, with `BLOCK_SIZE` as its only compile-time parameter. The scalars `topk`, `num_experts` and `numel` have value specialization disabled, and the mask pointer ignores address alignment because comm-method masks are chunks of a shared buffer. One variant therefore serves every expert count, top-k and batch shape; variants remain for the ID pointer dtype. Programs that meet on one expert serialize on that address.
+- Source-route recording also uses lazy compilation. `ROUTES_PER_TILE`, `TILES_PER_PROGRAM` and `EXPERT_CHUNK` are compile-time parameters; the chunk is the smallest power of two that covers `P`, capped at 512. The scalars `topk`, `num_experts` and `numel` have value specialization disabled, and the mask pointer ignores address alignment because comm-method masks are chunks of a shared buffer. One variant therefore serves every top-k and batch shape of one expert-count bucket and ID pointer dtype. Only the per-program, per-expert atomic adds can serialize; an atomic add per route saturates at a few ten million updates per second.
 - Graph replay retains captured shapes, addresses, launch dimensions and host scalar arguments. Routing-table contents and the device-side record flag may change in the same buffers before replay; both are read on device without `.item()`.
 - Recording accumulates the counts supplied by EPLB; padding exclusion takes place before the operator receives those counts. Source-route recording excludes padding and ineligible rows through `source_mask`.
 
@@ -68,7 +68,7 @@ All public entry-point parameters below are required. `T` is the token count, `K
     - The flat map distributes contiguous assignments across programs and keeps the input ID width. Assignment counts of the same scalar type share a variant within a tile bucket when the other specialization inputs match.
     - Recording splits experts into blocks of at most 256, preserves the cumulative-count dependency across blocks, and avoids wider-than-needed arithmetic when the load dtype is narrower.
     - The public ABI, runtime table lookup, cumulative load updates, record-off behavior and post-MoE recording boundary are unchanged. No model-specific integration is added.
-    - Source-route recording is new: it counts routes after routing on the dispatching paths, where the executed counts mix the tokens of every DP rank.
+    - Source-route recording is new: it counts routes after routing on the dispatching paths, where the executed counts mix the tokens of every DP rank. Each program counts its routes by comparison and issues one vector atomic per expert chunk, because an atomic add per route saturates on Ascend.
 
 ## Test Cases
 
@@ -76,7 +76,7 @@ The nightly NPU suite checks exact integer equality (`rtol=0`, `atol=0`) against
 
 - Mapping covers Qwen3-30B-A3B decode and prefill, additional `(E, K) = (896, 16)` geometry, both ID dtypes, invalid IDs, table wrapping, and tile tails and transitions.
 - Recording covers `C = 64/255/256/257/896`, both group-list types, all int32/int64 count/load combinations, integer wraparound, nonzero initial loads and local starts, and record-off behavior.
-- Source-route recording covers decode and prefill shapes, `(P, K) = (128, 8)` and `(896, 16)`, both ID dtypes, negative and out-of-range IDs, masked rows, nonzero initial loads and record-off behavior.
+- Source-route recording covers decode and prefill shapes, `(P, K) = (8, 2)`, `(128, 8)`, `(384, 8)` and `(896, 16)`, both ID dtypes, negative, out-of-range and beyond-int32 IDs, masked rows, nonzero initial loads and record-off behavior.
 - Graph replay reads updated routing-table contents and the record flag from the same device buffers.
 - CPU warmup tests cover enabled-router registration, registry-window scope, deduplication, metadata-only compilation and runtime dispatch at the tile boundaries.
 - CPU unit tests cover the source-route custom operator contract and the layer-state mask selection: ineligible sources, padding rows, the comm-method mask, and the TP chunk of the derived mask.

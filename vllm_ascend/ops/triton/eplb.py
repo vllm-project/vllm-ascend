@@ -18,8 +18,13 @@ _SMALL_TILE = 64
 _MEDIUM_TILE = 128
 _LARGE_TILE = 1024
 _MAX_RECORD_BLOCK_SIZE = 256
-# Routes per program of the source histogram, capped like the recording block.
-_SOURCE_ROUTE_BLOCK_SIZE = 256
+# Source-route recording compares tiles of routes against chunks of experts.
+# Eight unrolled tiles per program amortize the launch, and one atomic per
+# expert per program keeps the number of atomic lanes low: an atomic per route
+# saturates at a few ten million updates per second.
+_SOURCE_ROUTE_TILE_SIZE = 16
+_SOURCE_ROUTE_TILES_PER_PROGRAM = 8
+_SOURCE_ROUTE_MAX_EXPERT_CHUNK = 512
 
 
 def _mapping_block_size(numel: int) -> int:
@@ -215,17 +220,28 @@ def _record_source_routes_kernel(
     topk,
     num_experts,
     numel,
-    BLOCK_SIZE: tl.constexpr,
+    ROUTES_PER_TILE: tl.constexpr,
+    TILES_PER_PROGRAM: tl.constexpr,
+    EXPERT_CHUNK: tl.constexpr,
 ):
-    offsets = tl.program_id(0) * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
     if tl.load(record_enabled_ptr) != 0:
-        mask = offsets < numel
-        expert_id = tl.load(topk_ids_ptr + offsets, mask=mask, other=-1)
-        source_valid = tl.load(source_mask_ptr + offsets // topk, mask=mask, other=0) != 0
-        valid = mask & source_valid & (expert_id >= 0) & (expert_id < num_experts)
-        # A masked lane still forms an address; keep it in range.
-        safe_expert_id = tl.where(valid, expert_id, 0)
-        tl.atomic_add(expert_load_ptr + safe_expert_id, 1, mask=valid)
+        experts = tl.program_id(1) * EXPERT_CHUNK + tl.arange(0, EXPERT_CHUNK)
+        counts = tl.zeros([EXPERT_CHUNK], dtype=tl.int32)
+        program_start = tl.program_id(0) * (ROUTES_PER_TILE * TILES_PER_PROGRAM)
+        for tile in tl.static_range(TILES_PER_PROGRAM):
+            offsets = program_start + tile * ROUTES_PER_TILE + tl.arange(0, ROUTES_PER_TILE)
+            route_valid = offsets < numel
+            expert_id = tl.load(topk_ids_ptr + offsets, mask=route_valid, other=-1)
+            # Only this tile-wide check runs in the ID dtype. The comparison
+            # against every expert of the chunk runs on 32-bit IDs.
+            in_range = (expert_id >= 0) & (expert_id < num_experts)
+            expert_id = tl.where(in_range, expert_id, -1).to(tl.int32)
+            source_valid = tl.load(source_mask_ptr + offsets // topk, mask=route_valid, other=0) != 0
+            valid = route_valid & source_valid & in_range
+            hit = (expert_id[:, None] == experts[None, :]) & valid[:, None]
+            counts += tl.sum(hit.to(tl.int32), axis=0)
+        # A lane past the last expert still forms an address; leave it out.
+        tl.atomic_add(expert_load_ptr + experts, counts, mask=experts < num_experts)
 
 
 def record_source_routes_triton(
@@ -238,13 +254,19 @@ def record_source_routes_triton(
     numel = topk_ids.numel()
     if numel == 0:
         return
-    _record_source_routes_kernel[(triton.cdiv(numel, _SOURCE_ROUTE_BLOCK_SIZE),)](
+    num_experts = expert_load_view.numel()
+    # Small expert counts compare against a chunk no wider than themselves.
+    expert_chunk = min(triton.next_power_of_2(num_experts), _SOURCE_ROUTE_MAX_EXPERT_CHUNK)
+    routes_per_program = _SOURCE_ROUTE_TILE_SIZE * _SOURCE_ROUTE_TILES_PER_PROGRAM
+    _record_source_routes_kernel[(triton.cdiv(numel, routes_per_program), triton.cdiv(num_experts, expert_chunk))](
         topk_ids,
         source_mask,
         record_enabled,
         expert_load_view,
         topk_ids.shape[1],
-        expert_load_view.numel(),
+        num_experts,
         numel,
-        BLOCK_SIZE=_SOURCE_ROUTE_BLOCK_SIZE,
+        ROUTES_PER_TILE=_SOURCE_ROUTE_TILE_SIZE,
+        TILES_PER_PROGRAM=_SOURCE_ROUTE_TILES_PER_PROGRAM,
+        EXPERT_CHUNK=expert_chunk,
     )

@@ -100,6 +100,8 @@ def test_record_expert_blocks(count, group_list_type, count_dtype, load_dtype):
     [
         (1, 128, 8, torch.int32),
         (33, 128, 8, torch.int64),
+        # Fewer experts than one comparison tile, and more than one expert chunk.
+        (257, 8, 2, torch.int32),
         (1025, 384, 8, torch.int32),
         (65536, 896, 16, torch.int64),
     ],
@@ -107,6 +109,7 @@ def test_record_expert_blocks(count, group_list_type, count_dtype, load_dtype):
 def test_record_source_routes(tokens, experts, topk, dtype):
     # The IDs span negative, valid and out-of-range values.
     ids = (torch.arange(tokens * topk).reshape(tokens, topk) * 7 % (experts + 8) - 4).to(dtype)
+    ids[-1, -1] = 2**32 if dtype == torch.int64 else experts
     mask = torch.arange(tokens) % 3 != 1
     initial = torch.arange(experts, dtype=torch.int32) * 3
     expected = initial.clone()
@@ -136,7 +139,9 @@ def test_record_source_routes_mutable_state_graph_replay():
         record_source_routes(ids, mask, load, enabled)
     load.copy_(initial)
     graph.replay()
+    # Rows 0 and 2 route to {1, 0} and {3, 1}; row 1 is masked out.
     expected = initial.clone()
+    expected[0] += 1
     expected[1] += 2
     expected[3] += 1
     torch.testing.assert_close(load.cpu(), expected, rtol=0, atol=0)
