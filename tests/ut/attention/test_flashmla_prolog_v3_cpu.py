@@ -15,6 +15,8 @@ MLA = "vllm_ascend/attention/mla_v1.py"
 
 
 def load(path, name, scope, owner=None):
+    if owner == "AscendMLAImpl" and name == "forward":
+        load("vllm_ascend/attention/flashmla.py", "split_flashmla_cache", scope)
     nodes = ast.parse((ROOT / path).read_text(encoding="utf-8")).body
     for node in nodes:
         if isinstance(node, ast.Assign):
@@ -427,11 +429,35 @@ def test_quant_flashmla_prolog_workspace_uses_bounded_bf16_staging(unsupported):
         impl._prepare_prolog_v3_weights.assert_called_once()
 
 
-@pytest.mark.parametrize("fallback", [None, "mixed", "over_capacity", "current_kv", "non_bf16", "dcp"])
-def test_quant_flashmla_decode_prolog_writes_c8_cache_and_passes_packed_q(fallback):
-    tokens, heads, prolog_heads = 3, 2, 4
+@pytest.mark.parametrize(
+    "fallback,nz",
+    [
+        (None, False),
+        (None, True),
+        ("mixed", False),
+        ("over_capacity", False),
+        ("current_kv", False),
+        ("non_bf16", False),
+        ("dcp", False),
+    ],
+)
+def test_quant_flashmla_decode_prolog_writes_c8_cache_and_passes_packed_q(fallback, nz, monkeypatch):
+    tokens = 3
+    heads, prolog_heads = (96, 128) if nz else (2, 4)
     bf16, fp8 = torch.bfloat16, torch.float8_e4m3fn
     history = torch.full((2, 128, 1, 576), -8.0).to(fp8)
+    if nz:
+        history = history.view(2, 1, 18, 128, 32)
+
+        def scatter_nz(k, r, kc, rc, slots):
+            assert kc.shape == (2, 1, 16, 128, 32) and rc.shape == (2, 1, 2, 128, 32)
+            assert slots is flash.slots
+            for row, slot in enumerate(slots.tolist()):
+                if slot >= 0:
+                    kc[slot // 128, 0, :, slot % 128].copy_(k[row].reshape(16, 32))
+                    rc[slot // 128, 0, :, slot % 128].copy_(r[row].reshape(2, 32))
+
+        monkeypatch.setattr(torch.ops._C_ascend, "quant_flash_mla_nz_write", scatter_nz, raising=False)
     flash = SimpleNamespace(
         slots=torch.tensor([1, 128, -1]),
         query=torch.zeros(tokens, heads, 576).to(fp8),
@@ -580,8 +606,11 @@ def test_quant_flashmla_decode_prolog_writes_c8_cache_and_passes_packed_q(fallba
     torch.testing.assert_close(passed_query.float()[..., 512:], torch.full((tokens, heads, 64), 4.0))
     torch.testing.assert_close(
         flash.adapter.attention.call_args.kwargs["q_descale"],
-        torch.arange(1, 7, dtype=torch.float32).view(tokens, heads),
+        torch.arange(1, 1 + tokens * heads, dtype=torch.float32).view(tokens, heads),
     )
+    if nz:
+        scope["DeviceOperator"].reshape_and_cache.assert_not_called()
+        history = history.transpose(2, 3).reshape(2, 128, 1, 576)
     torch.testing.assert_close(history[0, 1, 0].float(), torch.cat((torch.full((512,), 2.0), torch.full((64,), 4.0))))
     torch.testing.assert_close(history[1, 0, 0].float(), torch.cat((torch.full((512,), 4.0), torch.full((64,), 5.0))))
     torch.testing.assert_close(history[0, 0, 0].float(), torch.full((576,), -8.0))

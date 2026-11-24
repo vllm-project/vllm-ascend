@@ -6,3 +6,10 @@ entries:
       MegaRecurrentKda adapter with ReplaySSM and TP1, or the external
       TileLang MegaDSA package for eligible unsharded decode layers.
       Both paths are opt-in.
+  - category: performance
+    text: >-
+      Kimi DSpark C8 decode on Ascend 950 can write local FP8 KV pages in NZ
+      layout and reuse the packed query from PROLOG. This path supports 96
+      query heads and 128-token pages with DCP1 and KV transfer disabled.
+    model: kimi-dspark
+    hardware: [A5]

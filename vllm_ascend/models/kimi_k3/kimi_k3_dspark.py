@@ -40,6 +40,7 @@ from vllm.models.kimi_k3.nvidia.dspark_mla import (
     K3DSparkModel as UpstreamK3DSparkModel,
 )
 
+from vllm_ascend.attention.flashmla import split_flashmla_cache
 from vllm_ascend.models.kimi_k3.kimi_k3 import (
     AscendKimiMLAAttention,
 )
@@ -61,10 +62,7 @@ def _normalize_dspark_mla_cache(
 ) -> tuple[torch.Tensor, ...] | object:
     """Expose the NoPE/RoPE logical views consumed by MLA writers."""
     if isinstance(kv_cache, torch.Tensor):
-        return (
-            kv_cache[..., :kv_lora_rank],
-            kv_cache[..., kv_lora_rank:],
-        )
+        return split_flashmla_cache(kv_cache, kv_lora_rank)
     return kv_cache
 
 
