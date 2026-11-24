@@ -217,7 +217,10 @@ def run_upstream_state_batch(
         if (
             correction.shape[0] < batch
             or correction.shape[1:] != (heads, window, dim)
-            or any(record is None or record.shape != correction.shape or record.dtype != torch.float32 for record in records)
+            or any(
+                record is None or record.shape != correction.shape or record.dtype != torch.float32
+                for record in records
+            )
         ):
             raise ValueError("RecoverSSM needs FP32 request-indexed correction and normalized-key/decay storage")
 

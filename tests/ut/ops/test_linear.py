@@ -7,12 +7,12 @@ from unittest.mock import MagicMock, patch
 
 import torch
 from vllm.model_executor.model_loader.utils import process_weights_after_loading
+from vllm_ascend.ops.kda_parallel import KDAMergedColumnParallelLinear
 
 from tests.ut.base import TestBase
 from vllm_ascend import ascend_config
 from vllm_ascend.distributed import parallel_state
 from vllm_ascend.ops import linear
-from vllm_ascend.ops.kda_parallel import KDAMergedColumnParallelLinear
 from vllm_ascend.ops.linear import (
     AscendDCPGroupColumnParallelLinear,
     AscendMergedColumnParallelLinear,

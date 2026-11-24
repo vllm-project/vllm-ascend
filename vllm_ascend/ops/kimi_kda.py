@@ -32,8 +32,8 @@ from vllm.v1.attention.backend import AttentionBackend
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID
 
-from vllm_ascend.ascend_forward_context import get_mrv2_in_profile_run
 from vllm_ascend.ascend_config import get_ascend_config
+from vllm_ascend.ascend_forward_context import get_mrv2_in_profile_run
 from vllm_ascend.attention.gdn_attn_builder import (
     AscendGDNHostMetadataBackend,
     AscendGDNHostMetadataBuilder,
@@ -1099,7 +1099,18 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
             if native_prefill_metadata is None:
                 maybe_save_kv_layer_to_connector("", [])
 
-    def _forward_core(self, mixed_qkv, g1, beta, core_attn_out, *, beta_is_preprocessed=False, launch_gate=None, output_gate=None, native_prefill_metadata=None):
+    def _forward_core(
+        self,
+        mixed_qkv,
+        g1,
+        beta,
+        core_attn_out,
+        *,
+        beta_is_preprocessed=False,
+        launch_gate=None,
+        output_gate=None,
+        native_prefill_metadata=None,
+    ):
         """Original conv/spec/recurrent dispatch, with no dependency on output G."""
         attn_metadata = native_prefill_metadata
         if attn_metadata is None:

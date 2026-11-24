@@ -50,7 +50,7 @@ def _bool_env(name: str, default: bool) -> bool:
 
 env_variables: dict[str, Callable[[], Any]] = {
     # Opt in to the external TileLang A5 Kimi DSA package. 0 (default) or 1, non-sensitive.
-    "VLLM_ASCEND_ENABLE_MEGA_DSA": lambda: _strict_binary_env("VLLM_ASCEND_ENABLE_MEGA_DSA"),
+    "VLLM_ASCEND_ENABLE_MEGA_DSA": lambda: _bool_env("VLLM_ASCEND_ENABLE_MEGA_DSA", False),
     # max compile thread number for package building. Usually, it is set to
     # the number of CPU cores. If not set, the default value is None, which
     # means all number of CPU cores will be used.

@@ -7,6 +7,7 @@ from unittest.mock import MagicMock
 import pytest
 import torch
 from torch import nn
+
 from vllm_ascend.attention.gdn_attn_builder import GDNCausalConv1dMetadata, GDNPrefillMetadata
 from vllm_ascend.ops import kimi_kda
 from vllm_ascend.quantization.methods.w8a8 import w8a8_mxfp8

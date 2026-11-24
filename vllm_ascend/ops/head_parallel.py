@@ -32,7 +32,9 @@ def get_head_sharded_state_shape(vllm_config, upstream_get_shape):
 
 
 class HeadParallelColumnLinear(ColumnParallelLinear):
-    def __init__(self, input_size: int, output_size: int, *, tp_group: GroupCoordinator | None = None, **kwargs) -> None:
+    def __init__(
+        self, input_size: int, output_size: int, *, tp_group: GroupCoordinator | None = None, **kwargs
+    ) -> None:
         if tp_group is None:
             self.pcp_group = get_pcp_group()
             self.tp_group = get_tp_group()

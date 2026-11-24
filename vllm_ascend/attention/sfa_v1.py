@@ -2213,7 +2213,6 @@ class AscendSFAImpl(MLAAttentionImpl):
         mega_dsa = getattr(self, "_mega_dsa", None)
         if (
             mega_dsa is not None
-            and not input_is_sequence_parallel
             and attn_metadata.attn_state in (AscendAttentionState.DecodeOnly, AscendAttentionState.SpecDecoding)
             and mega_dsa.supports(hidden_states, output, kv_cache, attn_metadata, indexer_attn_metadata)
         ):
