@@ -564,6 +564,8 @@ def split_decodes_and_prefills(
     decode_threshold: int = 1,
     require_uniform: bool = False,
     treat_short_extends_as_decodes: bool = True,
+    *,
+    is_prefilling_override: torch.Tensor | None = None,
 ) -> tuple[int, int, int, int]:
     """
     Assuming a reordered batch, finds the boundary between prefill and decode
@@ -583,6 +585,8 @@ def split_decodes_and_prefills(
         treat_short_extends_as_decodes: If True (default), short extends
             (query_len <= threshold but still prefilling) are counted as
             decodes. If False, they are counted as prefills.
+        is_prefilling_override: Optional CPU prefill flags in local request order
+            for classifying short extends when they are counted as prefills.
 
     Returns:
         num_decodes: The number of decode requests.
@@ -622,8 +626,10 @@ def split_decodes_and_prefills(
         is_prefill = query_lens > decode_threshold
 
     if not treat_short_extends_as_decodes:
-        assert common_attn_metadata.is_prefilling is not None
-        raw_is_prefilling = common_attn_metadata.is_prefilling
+        raw_is_prefilling = is_prefilling_override
+        if raw_is_prefilling is None:
+            raw_is_prefilling = common_attn_metadata.is_prefilling
+        assert raw_is_prefilling is not None
         is_prefilling = raw_is_prefilling[: query_lens.shape[0]]
         if is_prefilling.shape[0] < query_lens.shape[0]:
             is_prefilling = F.pad(

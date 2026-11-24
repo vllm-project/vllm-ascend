@@ -45,7 +45,7 @@ from vllm_ascend.attention.context_parallel.sfa_dcp_utils import (
     get_sfa_dcp_local_block_table,
     get_sfa_dcp_max_local_block_table_cols,
     get_sfa_pcp_global_metadata,
-    get_sfa_pcp_prefill_metadata,
+    project_pcp_prefill_flags,
 )
 from vllm_ascend.attention.context_parallel.sharded_indexer import use_local_topk_output
 from vllm_ascend.attention.utils import (
@@ -1824,12 +1824,13 @@ class AscendSFAIndexerMetadataBuilder(AttentionMetadataBuilder[AscendSFAIndexerM
         if is_pcp_sharded or self.use_dcp:
             # PCP's gather and native DCP's fused store need the decode boundary.
             _, _, num_decode_tokens, _ = split_decodes_and_prefills(
-                get_sfa_pcp_prefill_metadata(common_attn_metadata, pcp_context),
+                common_attn_metadata,
                 decode_threshold=self.decode_threshold,
                 treat_short_extends_as_decodes=(
                     (self.use_dcp or self.use_sharded_dcp)
                     and is_pd_decode_recompute_scheduler_enabled(self.vllm_config)
                 ),
+                is_prefilling_override=project_pcp_prefill_flags(pcp_context),
             )
 
         metadata = AscendSFAIndexerMetadata(

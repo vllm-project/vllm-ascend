@@ -30,7 +30,7 @@ from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.context_parallel.common_cp import (
     get_pcp_num_replicated_tokens,
 )
-from vllm_ascend.attention.context_parallel.sfa_dcp_utils import get_sfa_pcp_prefill_metadata
+from vllm_ascend.attention.context_parallel.sfa_dcp_utils import project_pcp_prefill_flags
 from vllm_ascend.attention.dsa_attn_kv_plan import write_dsa_cache
 from vllm_ascend.attention.indexer import AscendSFAIndexerCache
 from vllm_ascend.attention.sparse_flash_mla import (
@@ -791,9 +791,10 @@ class AscendSFAMetadataBuilder(MLACommonMetadataBuilder[AscendSFAMetadata]):
             metadata.num_decode_tokens,
             _,
         ) = split_decodes_and_prefills(
-            get_sfa_pcp_prefill_metadata(common_attn_metadata, pcp_context),
+            common_attn_metadata,
             decode_threshold=self.decode_threshold,
             treat_short_extends_as_decodes=not self.use_pcp,
+            is_prefilling_override=project_pcp_prefill_flags(pcp_context),
         )
         if self.nope:
             self._prepare_nope_metadata(metadata, draft_index)
