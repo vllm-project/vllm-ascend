@@ -35,6 +35,7 @@ from vllm_ascend.quantization.quant_type import QuantType
 from vllm_ascend.quantization.utils import QUANT_DTYPES, get_dynamic_mx_quant_scale_alg
 
 if TYPE_CHECKING:
+    from vllm_ascend.attention.indexer import QLIMetadataConfig
     from vllm_ascend.models.deepseek_v41.mixed_quant_attention import MixedQuantPackedCacheOps
 
 ACL_HOST_REG_MAPPED = 0x2
@@ -52,6 +53,14 @@ else:
 
 class BaseDeviceAdaptor:
     native_dcp_indexer = False
+
+    @staticmethod
+    def get_indexer_metadata_config(cache_spec, hf_config) -> "QLIMetadataConfig | None":
+        return None
+
+    @staticmethod
+    def get_indexer_metadata_op():
+        raise NotImplementedError("This device does not use CANN V2 indexer metadata")
 
     @staticmethod
     def build_indexer_local_metadata(
@@ -575,6 +584,8 @@ class BaseDeviceAdaptor:
         enable_sparse_li_c8: bool,
         enable_sparse_li_c4: bool,
         use_torch_npu_lightning_indexer: bool,
+        *,
+        topk: int = 2048,
     ) -> torch.Tensor:
         indexer_cache_idx = indexer_k_cache_idx
         if enable_sparse_li_c4:
@@ -599,7 +610,7 @@ class BaseDeviceAdaptor:
                 key_quant_mode=0,
                 layout_query="TND",
                 layout_key="PA_BSND",
-                sparse_count=2048,
+                sparse_count=topk,
                 sparse_mode=3,
                 pre_tokens=INT64_MAX,
                 next_tokens=INT64_MAX,
@@ -614,7 +625,7 @@ class BaseDeviceAdaptor:
                 block_table=attn_metadata.block_table,
                 layout_query="TND",
                 layout_key="PA_BSND",
-                sparse_count=2048,
+                sparse_count=topk,
                 sparse_mode=3,
             )
         return topk_indices
@@ -1014,30 +1025,28 @@ class BaseDeviceAdaptor:
         fused_fwd,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Run the A2/A3 Phase6 FLA NPU GDN prefill kernel."""
-        # FLA's import-time capability queries can initialize an NPU context;
-        # defer them until execution on the selected worker device.
-        # TODO: Restore the top-level import once supported vLLM FLA or Triton
-        # Ascend versions make these queries safe before device selection.
-        from vllm.third_party.flash_linear_attention.ops.l2norm import l2norm_fwd
-
-        # Conv1d produces head-first storage exposed to attention as BSND views.
-        # Pack only views with gaps or a different storage order. L2Norm reduces D only.
-        q, k, v = (x.transpose(1, 2).contiguous() for x in (q, k, v))
-        q = l2norm_fwd(q)
-        k = l2norm_fwd(k)
-
+        # l2norm is done inside the kernel (use_qk_l2norm_in_kernel=True),
+        # so the external l2norm_fwd calls are removed.
+        head_first_qkv = tuple(x.transpose(1, 2) for x in (q, k, v))
+        if all(x.is_contiguous() for x in head_first_qkv):
+            q, k, v = head_first_qkv
+            layout = "BNSD"
+        else:
+            q, k, v = (x.contiguous() for x in (q, k, v))
+            layout = "BSND"
         g = g.to(torch.float32).contiguous()
+        # fused_gdn_gating already emits sigmoid(beta), so beta is forwarded
+        # as-is and the kernel must not apply the sigmoid a second time.
         beta = beta.to(v.dtype).contiguous()
         initial_state = initial_state.contiguous()
 
         cu_seqlens = prebuilt_meta.cu_seqlens_host
         chunk_indices = prebuilt_meta.chunk_indices_chunk64_host
         keep_meta = prebuilt_meta.keep_meta
-        # stateVFirst=false takes [N, Hv, K, V], i.e. the transpose of ssm_state.
-        initial_state_kern = initial_state.transpose(-1, -2).contiguous()
+        initial_state_kern = initial_state
         if keep_meta is not None:
             cu_seqlens = prebuilt_meta.cu_seqlens_kern
-            initial_state_kern = initial_state[keep_meta].transpose(-1, -2).contiguous()
+            initial_state_kern = initial_state[keep_meta]
 
         output, final_state, *_ = fused_fwd(
             q,
@@ -1051,20 +1060,19 @@ class BaseDeviceAdaptor:
             cu_seqlens=cu_seqlens,
             chunk_indices=chunk_indices,
             scale=scale,
-            layout="BNSD",
+            layout=layout,
             use_exp2=False,
-            use_qk_l2norm_in_kernel=False,
+            use_qk_l2norm_in_kernel=True,
+            use_beta_sigmoid_in_kernel=False,
             allow_neg_eigval=False,
-            disable_recompute=True,
-            state_v_first=False,
+            disable_recompute=False,
+            state_v_first=True,
         )
         if keep_meta is not None:
-            # Scatter in the kernel layout so empty segments keep their initial state,
-            # then flip back to the caller's [.., Dv, Dk].
-            full_final_state = initial_state.transpose(-1, -2).contiguous()
+            full_final_state = initial_state.clone()
             full_final_state[keep_meta] = final_state
             final_state = full_final_state
-        return output, final_state.transpose(-1, -2).contiguous()
+        return output, final_state
 
     @staticmethod
     def fused_gdn_gating(A_log: torch.Tensor, a: torch.Tensor, b: torch.Tensor, dt_bias: torch.Tensor):
@@ -1147,6 +1155,24 @@ class BaseDeviceAdaptor:
 
 class A5DeviceAdaptor(BaseDeviceAdaptor):
     native_dcp_indexer = True
+
+    @staticmethod
+    def get_indexer_metadata_config(cache_spec, hf_config) -> "QLIMetadataConfig | None":
+        # indexer imports DeviceOperator; defer the reverse import until runtime.
+        from vllm_ascend.attention.indexer import QLIMetadataConfig
+
+        if getattr(cache_spec, "cache_sparse_li_c4", False) or not getattr(cache_spec, "cache_sparse_li_c8", False):
+            return None
+        if cache_spec.dtype != torch.float8_e4m3fn:
+            return None
+        return QLIMetadataConfig(
+            hf_config.index_n_heads, hf_config.index_head_dim, 1, topk=getattr(hf_config, "index_topk", 2048)
+        )
+
+    @staticmethod
+    def get_indexer_metadata_op():
+        metadata_op, _ = A5DeviceAdaptor._load_cann_quant_lightning_indexer_ops()
+        return metadata_op
 
     @staticmethod
     def _scatter_cache(var, indices, updates) -> bool:
@@ -1857,6 +1883,8 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
         enable_sparse_li_c8: bool,
         enable_sparse_li_c4: bool,
         use_torch_npu_lightning_indexer: bool,
+        *,
+        topk: int = 2048,
     ) -> torch.Tensor:
         indexer_cache_idx = indexer_k_cache_idx
         indexer_scale_cache_idx = indexer_scale_cache_idx
@@ -1892,7 +1920,7 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
                 num_heads_q=num_heads_q,
                 num_heads_k=1,
                 head_dim=head_dim,
-                topk=2048,
+                topk=topk,
                 quant_mode=5,
                 cu_seqlens_q=cu_seqlens_q,
                 seqused_k=seqused_k,
@@ -1915,7 +1943,7 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
                 weights_c4,
                 q_li_scale,
                 key_dequant_scale,
-                topk=2048,
+                topk=topk,
                 quant_mode=5,
                 cu_seqlens_q=cu_seqlens_q,
                 seqused_k=seqused_k,
@@ -1935,25 +1963,37 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
 
             if q_li_scale is not None:
                 q_li_scale = q_li_scale.view(q_li_shape_ori[:-1])
-                key_dequant_scale = kv_cache[indexer_scale_cache_idx].squeeze(2)
+                key_dequant_scale = kv_cache[indexer_scale_cache_idx].squeeze(-1)
+                if q_li.dtype != torch.float8_e4m3fn or kv_cache[indexer_cache_idx].dtype != torch.float8_e4m3fn:
+                    raise ValueError("A5 C8 V2 indexer requires FP8 E4M3 query and key cache")
+                metadata_op, quant_li_op = A5DeviceAdaptor._load_cann_quant_lightning_indexer_ops()
+                from vllm_ascend.attention.indexer import QLIMetadataConfig, get_qli_metadata
 
-                topk_indices = torch_npu.npu_quant_lightning_indexer(
+                inputs = get_qli_metadata(
+                    getattr(attn_metadata, "qli_inputs", None),
+                    QLIMetadataConfig(q_li_shape_ori[1], q_li_shape_ori[-1], 1, topk=topk),
+                    actual_seq_lengths_query,
+                    actual_seq_lengths_key,
+                    metadata_op,
+                )
+                topk_indices, _ = quant_li_op(
                     query=q_li.view(q_li_shape_ori),
                     key=kv_cache[indexer_cache_idx],
-                    weights=weights,
+                    weights=weights.to(torch.float32),
                     query_dequant_scale=q_li_scale,
                     key_dequant_scale=key_dequant_scale,
-                    actual_seq_lengths_query=actual_seq_lengths_query,
-                    actual_seq_lengths_key=actual_seq_lengths_key,
+                    topk=inputs.config.topk,
+                    quant_mode=inputs.config.quant_mode,
+                    cu_seqlens_q=inputs.query_start_loc,
+                    seqused_k=inputs.seq_lens,
                     block_table=attn_metadata.block_table,
-                    query_quant_mode=0,
-                    key_quant_mode=0,
-                    layout_query="TND",
-                    layout_key="PA_BSND",
-                    sparse_count=2048,
-                    sparse_mode=3,
-                    pre_tokens=INT64_MAX,
-                    next_tokens=INT64_MAX,
+                    metadata=inputs.metadata,
+                    max_seqlen_q=-1,
+                    layout_q="TND",
+                    layout_k="PA_BBND",
+                    mask_mode=3,
+                    cmp_ratio=1,
+                    return_value=0,
                 )
             else:
                 topk_indices, _ = torch_npu.npu_lightning_indexer(
@@ -1965,7 +2005,7 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
                     block_table=attn_metadata.block_table,
                     layout_query="TND",
                     layout_key="PA_BSND",
-                    sparse_count=2048,
+                    sparse_count=topk,
                     sparse_mode=3,
                 )
         else:
@@ -1978,7 +2018,7 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
                 block_table=attn_metadata.block_table,
                 layout_query="TND",
                 layout_key="PA_BSND",
-                sparse_count=2048,
+                sparse_count=topk,
                 sparse_mode=3,
             )
         return topk_indices

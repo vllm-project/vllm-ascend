@@ -137,6 +137,8 @@ on:
         default: ''
         description: override CONFIG_BASE_PATH for bisect
     secrets:
+      PAT_TOKEN:
+        required: false
       HW_OBS_PROFILE_AK:
         required: false
       HW_OBS_PROFILE_SK:
@@ -409,6 +411,15 @@ jobs:
           set -o pipefail
           pytest -sv tests/e2e/common/single_node/test_single_node.py \
             2>&1 | tee /tmp/test-logs/yaml-test.log
+
+      - name: Dispatch Daily Issue update
+        id: daily-report
+        if: ${{ !cancelled() && startsWith(inputs.request_id, 'daily-') && (steps.pytest-driven.outcome == 'failure' || steps.yaml-test.outcome == 'failure') }}
+        uses: ./../../_temp/ci-workflow/.github/actions/dispatch-daily-issue
+        with:
+          github-token: ${{ secrets.PAT_TOKEN }}
+          request-id: ${{ inputs.request_id }}
+          case-name: ${{ inputs.name }}
 
       - name: Collect Ascend logs
         id: collect_ascend_logs

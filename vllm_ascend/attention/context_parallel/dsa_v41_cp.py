@@ -13,7 +13,6 @@ from vllm.forward_context import get_forward_context
 from vllm.v1.worker.gpu.pcp_manager import PCPManager
 
 from vllm_ascend.attention import dsa_v41 as v41
-from vllm_ascend.attention.context_parallel.common_cp import is_pcp_decode_sharding_enabled
 from vllm_ascend.attention.context_parallel.dsa_cp import (
     AscendDSAPCPMetadataBuilder,
 )
@@ -260,7 +259,7 @@ class AscendDSAV41PCPMetadataBuilder(_ReplicatedCacheMetadataBuilder):
         self._pcp_world_size = vllm_config.parallel_config.prefill_context_parallel_size
         self.use_pcp = self._pcp_world_size > 1
         self._pcp_rank = get_pcp_group().rank_in_group
-        self._is_decode_sharded = is_pcp_decode_sharding_enabled(vllm_config)
+        self._is_decode_sharded = vllm_config.parallel_config.pcp_shard_decode_requests
         self._max_tokens = vllm_config.scheduler_config.max_num_batched_tokens
         self._hidden_restore_idx_buffer = torch.empty(self._max_tokens, dtype=torch.int64, device=device)
 

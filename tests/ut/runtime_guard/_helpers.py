@@ -107,6 +107,7 @@ def attach_bus_worker(proc: Any, *, name: str = "ut-bus") -> Any:
     proc._pending_merged_bus_dump_jobs = []
     proc._pending_merged_bus_can_dump = False
     proc._pending_merged_bus_is_first = False
+    proc._pending_prev_needs_sample_hooks = None
     if not hasattr(proc, "_bus_wave_seq"):
         proc._bus_wave_seq = 0
     if not hasattr(proc, "_merged_bus_warn_ts"):

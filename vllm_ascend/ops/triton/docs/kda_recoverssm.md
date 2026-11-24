@@ -8,9 +8,10 @@
   compacts the convolution history prepared by the caller. This supports GLM
   speculative decoding without keeping a full recurrent checkpoint per draft.
   Kimi K3/K3.1 and GLM use request-indexed temporary records.
-- **Formula**: For one head, let `S` have shape `[V, K]`, and normalize nonzero
-  query/key vectors to unit L2 norm; zero vectors remain zero. Scale the normalized
-  query by `K**-0.5`. With `a = exp(A_log)` and `x = raw_g + dt_bias`:
+- **Formula**: For one head, let `S` have shape `[V, K]`. Normalize each query/key
+  vector `z` as `z / sqrt(sum(z * z))` over its `K` components. A zero vector stays
+  zero. Scale the normalized query by `K**-0.5`. With `a = exp(A_log)` and
+  `x = raw_g + dt_bias`:
 
   ```text
   g = lower_bound * sigmoid(a * x)       if lower_bound is not None
@@ -31,13 +32,16 @@
      register-held recurrence, writes outputs and compact records, and leaves the
      persistent checkpoint unchanged. Null-page rows produce zero output and do
      not write records.
-  2. `_prepare_commit_plan_kernel` maps speculative rows to sampler rows, clamps
-     accepted lengths to the query length and window capacity, and prepares final
-     and optional boundary destinations. Null pages and zero accepted lengths
-     become no-op plan entries.
-  3. `_compact_conv_state_kernel` copies the accepted convolution history to its
-     destination. For history length `W` and accepted length `c > 0`, the source
-     interval is `[c - 1, c - 1 + W)` and the destination interval is `[0, W)`.
+  2. The shared [`prepare_commit_plan()`](prepare_commit_plan.md) wrapper maps
+     speculative rows to sampler rows, clamps accepted lengths to the query
+     length and window capacity, and prepares final and optional boundary
+     destinations. Null pages and zero accepted lengths become no-op plan
+     entries.
+  3. The shared [`compact_conv_state()`](compact_conv_state.md) wrapper copies
+     the accepted convolution history to the final and optional boundary pages
+     selected by the plan. For history length `W` and accepted length `c > 0`,
+     the source interval is `[c - 1, c - 1 + W)` and the destination interval is
+     `[0, W)`.
   4. `_commit_kda_state_kernel` traverses the accepted records backwards,
      accumulates decay/products and correction outer products, and writes the
      reconstructed recurrent checkpoint. `_commit_kda_state_grouped_kernel`
@@ -204,8 +208,8 @@ for single-layer calls; it does not introduce a layer-count constexpr.
   in `vllm_ascend/ops/triton/kda/recoverssm.py`. It implements the paged verify and
   accepted-state commit contracts for Ascend GLM KDA.
 - **Differences**:
-    - Q/K normalization follows AscendC KDA: no squared-norm epsilon is added to
-    nonzero vectors, and zero vectors normalize to zero.
+    - Verify and both commit paths use guarded unit L2 normalization for Q/K.
+      The squared norm uses FP32 reduction.
     - FP32 recurrent arithmetic, explicit strided request records and batched
     multi-layer commit are used for Ascend. Persistent state is not advanced
     during verification.
@@ -220,8 +224,9 @@ for single-layer calls; it does not introduce a layer-count constexpr.
 
 The NPU test file uses an independent CPU FP64 forward recurrence for verify
 outputs, FP32 correction records and accepted states. Raw key/gate records and
-convolution compaction are compared exactly. AscendC is an additional reference
-for zero/small-norm inputs, rather than the only mathematical reference.
+convolution compaction are compared exactly. The same FP64 recurrence covers
+zero and small-norm inputs, including the state after each selected accepted
+prefix.
 
 Each arithmetic comparison uses the **actual output storage dtype**, computes
 errors on CPU in FP64, and enforces both criteria:
@@ -236,7 +241,7 @@ At least 99% of elements must satisfy
 `abs(actual - golden) <= atol + rtol * abs(golden)`, and **all** elements must have
 absolute error at most `max(fixed_limit, 32 * ULP_1.0(output_dtype))`. Non-finite
 results/references fail. Pure data movement and unchanged regions require exact
-agreement. The small-norm AscendC tests also retain their stronger regression
+agreement. The small-norm FP64 tests also retain their stronger regression
 tolerances. JUnit properties record each comparison's dtype, element counts,
 tolerances, pass ratio, maximum error and error limit; comparisons are not pooled
 to conceal a failed output.

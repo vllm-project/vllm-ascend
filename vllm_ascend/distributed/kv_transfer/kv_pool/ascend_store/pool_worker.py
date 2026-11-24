@@ -17,6 +17,7 @@ from vllm.distributed import (
     get_tensor_model_parallel_world_size,
 )
 from vllm.distributed.kv_events import BlockStored
+from vllm.distributed.utils import get_pp_indices
 from vllm.logger import logger
 from vllm.model_executor.model_loader.utils import get_model_cls
 from vllm.v1.core.kv_cache_utils import BlockHash, maybe_convert_block_hash
@@ -102,7 +103,7 @@ class BaseKVPoolWorker(ABC):
 
         self._init_parallelism_info(model_config, parallel_config)
         self._init_kv_transfer_config(vllm_config, extra_config, use_layerwise, kv_cache_config)
-        self._init_key_head_config(model_config, parallel_config)
+        self._init_key_head_config(model_config)
         self._init_metadata(model_config, vllm_config, extra_config)
         self._init_backend(parallel_config, extra_config)
         self._init_kv_events(vllm_config)
@@ -155,12 +156,19 @@ class BaseKVPoolWorker(ABC):
         self.dcp_rank = get_decode_context_model_parallel_rank() if self.dcp_size > 1 else 0
         self.model_name = model_config.model.split("/")[-1]
 
-        # Global layer addressing for layerwise keys under pipeline parallel:
-        # get_num_layers returns the per-stage layer count, so record the
-        # stage's global layer offset and the model-wide total layers used by
-        # the layerwise key space.
         self.pp_layer_offset = 0
         self.total_layers = None
+        if self.pp_size > 1 and self.pcp_size > 1:
+            # vLLM 0.33.0 derives the PP stage without the PCP rank dimension.
+            # Fixed upstream: https://github.com/vllm-project/vllm/pull/65539
+            # TODO: Remove once vLLM 0.33.0 support is dropped and PP/PCP
+            # layer-range regression tests pass with the v0.34.0 baseline.
+            self.total_layers = model_config.get_total_num_hidden_layers()
+            start, end = get_pp_indices(self.total_layers, self.pp_rank, self.pp_size)
+            self.pp_layer_offset = start
+            self.num_layers = end - start
+            return
+
         try:
             start, _ = model_config.get_layers_start_end_indices(parallel_config)
             self.pp_layer_offset = start
@@ -178,6 +186,7 @@ class BaseKVPoolWorker(ABC):
             )
             self.pp_layer_offset = 0
             self.total_layers = None
+        self.num_layers = model_config.get_num_layers(parallel_config)
 
     def _init_kv_transfer_config(self, vllm_config, extra_config, use_layerwise, kv_cache_config) -> None:
         self._extra_config = extra_config
@@ -190,9 +199,8 @@ class BaseKVPoolWorker(ABC):
         self._failed_requests: set[str] = set()
         self._invalid_block_ids_lock = threading.Lock()
         self._retired_store_req_ids: set[str] = set()
-        self.consumer_is_to_put = extra_config.get("consumer_is_to_put", False)
         self.save_decode_cache = extra_config.get("save_decode_cache", False)
-        self.can_put = self.kv_role in ("kv_producer", "kv_both") or self.consumer_is_to_put or self.save_decode_cache
+        self.can_put = self.kv_role in ("kv_producer", "kv_both") or self.save_decode_cache
         self.backend = extra_config.get("backend", "mooncake")
         self.backend_name = self.backend.lower()
         kv_cache_groups = kv_cache_config.kv_cache_groups if kv_cache_config is not None else None
@@ -238,9 +246,8 @@ class BaseKVPoolWorker(ABC):
     def _compute_use_hybrid(self, vllm_config, kv_cache_groups) -> bool:
         return uses_hybrid_kv_cache(vllm_config.scheduler_config, kv_cache_groups)
 
-    def _init_key_head_config(self, model_config, parallel_config) -> None:
+    def _init_key_head_config(self, model_config) -> None:
         self.current_layer = 0
-        self.num_layers = model_config.get_num_layers(parallel_config)
 
         if self.use_mla:
             self.num_kv_head = 1
@@ -363,9 +370,17 @@ class BaseKVPoolWorker(ABC):
         real_backend = getattr(backend_module, backend_name)
 
         backend_kwargs = {}
-        # lazy_init is requested only for compressed models. Each backend owns
-        # the hardware/protocol checks that decide whether it can honor it.
-        backend_kwargs["lazy_init"] = self.use_compress
+        # lazy_init is requested for compressed models and for sparse-indexer
+        # models that run the packed C8 cache path. The v0.26 trigger was
+        # fabric memory with c8_enable_reshape_optim; on main the packed path
+        # is the dtype-derived native default (sparse + fp8/int8), so the gate
+        # tracks that condition instead of the removed knob. Each backend owns
+        # the hardware/protocol checks that decide whether it can honor the
+        # request (Mooncake honors it under fabric memory, Memcache under
+        # device_sdma).
+        cache_dtype = self.vllm_config.cache_config.cache_dtype
+        packed_c8_path = self.use_sparse and cache_dtype in ("fp8", "int8")
+        backend_kwargs["lazy_init"] = self.use_compress or packed_c8_path
         # The connector's extra_config (with MultiConnector the child's own
         # config, not the top-level one) carries the QoS the backends inject.
         backend_kwargs["extra_config"] = extra_config
@@ -1031,6 +1046,29 @@ class BaseKVPoolWorker(ABC):
         if self.group_uses_align_state[kv_cache_group_id]:
             return self.tp_size
         return min(self.tp_size, self._get_group_num_kv_heads(kv_cache_group_id))
+
+    @property
+    def group_tp_replication_factors(self) -> tuple[int, ...]:
+        """Per-group count of aggregated workers that do not report one block.
+
+        The output aggregator counts every PP, TP and PCP worker. A logical
+        block is complete when ``reports * factor >= num_workers``. PP stages
+        store different layers of the same block, so they stay in the report
+        count. ``put_step`` replicas and PCP ranks own different blocks, so
+        they multiply the factor. DCP, align-state, KVPP and sharded Mamba
+        keep the TP ranks that must all finish on the same blocks.
+        """
+        num_groups = max(1, self.num_kv_cache_groups)
+        return tuple(self._group_tp_replication_factor(group_id) for group_id in range(num_groups))
+
+    def _group_tp_replication_factor(self, group_id: int) -> int:
+        pcp_size = max(1, self.pcp_size)
+        if self.use_kvpp or group_id in self.sharded_mamba_group_ids:
+            return 1
+        align_state = group_id < len(self.group_uses_align_state) and self.group_uses_align_state[group_id]
+        if self.dcp_size > 1 or align_state:
+            return pcp_size
+        return max(1, self.put_step) * pcp_size
 
     @staticmethod
     def _replace_key_field(key: str, field: str, value: int) -> str:
@@ -1779,11 +1817,6 @@ class KVPoolWorker(BaseKVPoolWorker):
                     )
                 )
             }
-            event_block_size = (
-                req_meta.original_block_size[0]
-                if isinstance(req_meta.original_block_size, list)
-                else req_meta.original_block_size
-            )
             stored_events: list[BlockStored] = []
             group_hashes = get_block_hashes(
                 req_meta.block_hashes,
@@ -1816,10 +1849,11 @@ class KVPoolWorker(BaseKVPoolWorker):
                         block_hashes=[block_hash],
                         parent_block_hash=parent_hash,
                         token_ids=token_ids,
-                        block_size=event_block_size,
+                        block_size=self.block_size,
                         lora_id=None,
                         medium="cpu",
                         lora_name=None,
+                        group_idx=0,
                     )
                 )
             if stored_events:

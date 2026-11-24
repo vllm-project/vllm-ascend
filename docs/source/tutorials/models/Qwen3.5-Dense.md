@@ -4,9 +4,9 @@
 
 Qwen3.5-2B, Qwen3.5-4B, and Qwen3.5-9B are dense hybrid Mamba-Transformer language models in the Qwen3.5 family. They share the same hybrid attention design (GDN + full attention) and are suitable for general-purpose text generation tasks such as dialogue, content creation, and code generation.
 
-This document describes deployment and verification of these models on **Atlas 300I DUO** and **Atlas 200I Pro**, including environment preparation, Docker installation, single-node online deployment, functional verification, and tuning notes.
+This document describes deployment and verification of these models on **Atlas 300I Duo** and **Atlas 200I Pro**, including environment preparation, Docker installation, single-node online deployment, functional verification, and tuning notes.
 
-It is **strongly recommended to use the latest release candidate (rc) version or the latest official version** of `vllm-ascend`. Support for Qwen3.5-2B/4B/9B on Atlas 300I DUO and Atlas 200I Pro starts from `vllm-ascend:v0.23.0rc1`.
+It is **strongly recommended to use the latest release candidate (rc) version or the latest official version** of `vllm-ascend`. Support for Qwen3.5-2B/4B/9B on Atlas 300I Duo and Atlas 200I Pro starts from `vllm-ascend:v0.23.0rc1`.
 
 ## 2 Supported Features
 
@@ -20,26 +20,26 @@ Please refer to the [Feature Guide](../../user_guide/feature_guide/index.md) for
 
 | Model | Version | Hardware Requirement | Download |
 |-------|---------|----------------------|----------|
-| Qwen3.5-2B | FP16 | Atlas 300I DUO or Atlas 200I Pro | [ModelScope](https://www.modelscope.cn/models/Qwen/Qwen3.5-2B) |
-| Qwen3.5-4B | FP16 | Atlas 300I DUO or Atlas 200I Pro | [ModelScope](https://www.modelscope.cn/models/Qwen/Qwen3.5-4B) |
-| Qwen3.5-9B | FP16 | Atlas 300I DUO or Atlas 200I Pro | [ModelScope](https://www.modelscope.cn/models/Qwen/Qwen3.5-9B) |
-| Qwen3.5-2B-W8A8-310P | INT8 | Atlas 300I DUO or Atlas 200I Pro | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/Qwen3.5-2B-W8A8-310P) |
-| Qwen3.5-4B-W8A8-310P | INT8 | Atlas 300I DUO or Atlas 200I Pro | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/Qwen3.5-4B-W8A8-310P) |
-| Qwen3.5-9B-W8A8-310P | INT8 | Atlas 300I DUO or Atlas 200I Pro | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/Qwen3.5-9B-W8A8-310P) |
+| Qwen3.5-2B | FP16 | Atlas 300I Duo or Atlas 200I Pro | [ModelScope](https://www.modelscope.cn/models/Qwen/Qwen3.5-2B) |
+| Qwen3.5-4B | FP16 | Atlas 300I Duo or Atlas 200I Pro | [ModelScope](https://www.modelscope.cn/models/Qwen/Qwen3.5-4B) |
+| Qwen3.5-9B | FP16 | Atlas 300I Duo or Atlas 200I Pro | [ModelScope](https://www.modelscope.cn/models/Qwen/Qwen3.5-9B) |
+| Qwen3.5-2B-W8A8-310P | INT8 | Atlas 300I Duo or Atlas 200I Pro | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/Qwen3.5-2B-W8A8-310P) |
+| Qwen3.5-4B-W8A8-310P | INT8 | Atlas 300I Duo or Atlas 200I Pro | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/Qwen3.5-4B-W8A8-310P) |
+| Qwen3.5-9B-W8A8-310P | INT8 | Atlas 300I Duo or Atlas 200I Pro | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/Qwen3.5-9B-W8A8-310P) |
 
 It is recommended to download the model weight to a local directory such as `/root/.cache/` or `/home/data/`.
 
->**Path description**: Download the model weights to a directory of your choice and record it. Ensure the model path in the subsequent deployment command matches this directory.
+> **Path description**: Download the model weights to a directory of your choice and record it. Ensure the model path in the subsequent deployment command matches this directory.
 
 ## 4 Installation
 
 ### 4.1 Docker Image Installation
 
-Select an image based on your machine type and start the docker image on your node, refer to [using docker](../../getting_started/installation.md#installation-prebuilt-image).
+Select an image based on your machine type and start the docker image on your node. Refer to [using docker](../../getting_started/installation.md#installation-prebuilt-image).
 
 It is **recommended to use the latest release candidate (rc) version or the latest official version** of the `vllm-ascend` image. As a minimum-version requirement, use `vllm-ascend:v0.23.0rc1-310p` (or a later `-310p`) image. For Atlas 200I Pro on openEuler, use the matching `-310p-openeuler` image.
 
-=== "Atlas 300I DUO"
+=== "Atlas 300I Duo"
 
     Start the docker image on each node.
 
@@ -154,7 +154,7 @@ If you don't want to use the docker image as above, you can also build all from 
 
     !!! note
 
-        On Atlas 300I DUO and Atlas 200I Pro, you may need to uninstall `triton-ascend` and `triton` to avoid dependency conflicts:
+        On Atlas 300I Duo and Atlas 200I Pro, you may need to uninstall `triton-ascend` and `triton` to avoid dependency conflicts:
 
         ```bash
         pip uninstall -y triton-ascend triton
@@ -172,7 +172,7 @@ Expected result: The version information of `vllm-ascend` is displayed, confirmi
 
 ### 5.1 Single-Node Online Deployment
 
-Single-node deployment completes both Prefill and Decode within the same node. `Qwen3.5-2B`, `Qwen3.5-4B`, and `Qwen3.5-9B` can be deployed on Atlas 300I DUO or Atlas 200I Pro.
+Single-node deployment completes both Prefill and Decode within the same node. `Qwen3.5-2B`, `Qwen3.5-4B`, and `Qwen3.5-9B` can be deployed on Atlas 300I Duo or Atlas 200I Pro.
 
 > **Parallelism note**: These platforms currently support the **TP** scenario. Choose **TP=1** or **TP=2** according to the available devices. On Atlas 200I Pro with a single visible NPU, use **TP=1**.
 
@@ -267,12 +267,12 @@ The following examples use FP16 weights from ModelScope. Replace `MODEL_PATH` wi
 
 Key Parameter Descriptions:
 
-- `--tensor-parallel-size` sets the tensor parallel size. Prefer **TP=1** on Atlas 200I Pro. On Atlas 300I DUO, **TP=1** and **TP=2** are both supported; choose according to the available devices.
-- `--max-model-len` represents the context length (input plus output for a single request). On Atlas 300I DUO and Atlas 200I Pro, configure this value according to the actual device memory; setting it too high may cause OOM.
-- `--max-num-seqs` indicates the maximum number of requests that can be processed concurrently. On Atlas 300I DUO and Atlas 200I Pro, configure this value according to the actual device memory; setting it too high may cause OOM.
-- `--gpu-memory-utilization` represents the proportion of HBM that vLLM will use for actual inference. On Atlas 300I DUO and Atlas 200I Pro, configure this value according to the actual device memory; setting it too high may cause OOM. The default value is `0.9`.
-- `--dtype float16` must be set on Atlas 300I DUO and Atlas 200I Pro. These devices only support the FP16 data type.
-- `--mamba-ssm-cache-dtype` sets the data type of the Mamba SSM cache. On Atlas 300I DUO and Atlas 200I Pro, only `float16` is supported.
+- `--tensor-parallel-size` sets the tensor parallel size. Prefer **TP=1** on Atlas 200I Pro. On Atlas 300I Duo, **TP=1** and **TP=2** are both supported; choose according to the available devices.
+- `--max-model-len` represents the context length (input plus output for a single request). On Atlas 300I Duo and Atlas 200I Pro, configure this value according to the actual device memory; setting it too high may cause OOM.
+- `--max-num-seqs` indicates the maximum number of requests that can be processed concurrently. On Atlas 300I Duo and Atlas 200I Pro, configure this value according to the actual device memory; setting it too high may cause OOM.
+- `--gpu-memory-utilization` represents the proportion of HBM that vLLM will use for actual inference. On Atlas 300I Duo and Atlas 200I Pro, configure this value according to the actual device memory; setting it too high may cause OOM. The default value is `0.9`.
+- `--dtype float16` must be set on Atlas 300I Duo and Atlas 200I Pro. These devices only support the FP16 data type.
+- `--mamba-ssm-cache-dtype` sets the data type of the Mamba SSM cache. On Atlas 300I Duo and Atlas 200I Pro, only `float16` is supported.
 - `--speculative-config` uses `qwen3_5_mtp` for Qwen3.5 Dense models that include an MTP head. It is recommended to set `num_speculative_tokens` to `1`.
 - `--compilation-config` contains configurations related to the aclgraph graph mode:
     - `"cudagraph_mode"`: `"FULL_DECODE_ONLY"` is recommended.
@@ -285,7 +285,7 @@ Service Verification:
 
 If the service starts successfully, the following startup log will be displayed:
 
-```text
+```output
 (APIServer pid=<pid>) INFO:     Started server process [<pid>]
 (APIServer pid=<pid>) INFO:     Waiting for application startup.
 (APIServer pid=<pid>) INFO:     Application startup complete.
@@ -332,11 +332,11 @@ Expected Result: The service returns HTTP 200 OK. The JSON response contains the
 
 1. Refer to [Using AISBench](../../developer_guide/evaluation/using_ais_bench.md) for details.
 
-2. After execution, you can get the result. Here are the accuracy results of `Qwen3.5-2B`, `Qwen3.5-4B`, and `Qwen3.5-9B` on Atlas 300I DUO for reference only.
+2. After execution, you can get the result. Here are the accuracy results of `Qwen3.5-2B`, `Qwen3.5-4B`, and `Qwen3.5-9B` on Atlas 300I Duo for reference only.
 
 **Accuracy Evaluation Config File:**
 
-```bash
+```python
 # Example configuration: benchmarks/ais_bench/benchmark/configs/models/vllm_api/vllm_api_general_chat.py
 from ais_bench.benchmark.models import VLLMCustomAPIChat
 from ais_bench.benchmark.utils.model_postprocessors import extract_non_reasoning_content
@@ -386,7 +386,7 @@ Refer to [Using AISBench for performance evaluation](../../developer_guide/evalu
 
 > **Note**: The following configurations are for reference only. The optimal configuration depends on model size, maximum input/output length, and actual device memory.
 >
-> **Atlas 300I DUO / Atlas 200I Pro**: Currently only the TP scenario is supported. Prefer **TP=1** on Atlas 200I Pro. On Atlas 300I DUO, **TP=1** and **TP=2** are both supported; choose according to the available devices. Configure `--max-model-len`, `--max-num-seqs`, and `--gpu-memory-utilization` based on the actual device memory; setting them too high may cause OOM.
+> **Atlas 300I Duo / Atlas 200I Pro**: Currently only the TP scenario is supported. Prefer **TP=1** on Atlas 200I Pro. On Atlas 300I Duo, **TP=1** and **TP=2** are both supported; choose according to the available devices. Configure `--max-model-len`, `--max-num-seqs`, and `--gpu-memory-utilization` based on the actual device memory; setting them too high may cause OOM.
 
 ### 9.2 Tuning Guidelines
 

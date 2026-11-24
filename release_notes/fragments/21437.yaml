@@ -1,0 +1,6 @@
+pr: 21437
+entries:
+  - category: bugfix
+    text: Fixed stale prefix-cache matches when Mooncake Hybrid shortens a prefill prompt on Ascend.
+  - category: performance
+    text: Mooncake V1 and V2 reuse hashes for the retained prompt prefix on vLLM versions earlier than 0.34, reducing CPU work for long prefill requests.

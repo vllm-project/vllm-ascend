@@ -44,6 +44,7 @@ from vllm_ascend.attention.dsa_v41 import (
     pad_sparse_indices,
     scatter_cache_sk,
 )
+from vllm_ascend.core import kv_cache_config_builder
 from vllm_ascend.core.kv_cache_interface import (
     AscendMLAAttentionSpec,
     AscendSlidingWindowMLASpec,
@@ -70,7 +71,7 @@ from vllm_ascend.worker.device_metadata import DeviceMetadataStage, DeviceMetada
 
 def _pool_bytes_per_block(runtime, groups):
     """vLLM #57169 added a leading ``vllm_config`` argument on main."""
-    return kv_cache_planning._pool_bytes_per_block(runtime, groups)
+    return kv_cache_config_builder.AscendKVCacheConfigBuilder()._get_pool_bytes_per_block(runtime, groups)
 
 
 def _max_memory_usage_bytes_from_groups(runtime, groups):
@@ -215,12 +216,12 @@ def test_swa_only_reduced_backbone_uses_independent_slots(config, runtime, packe
     groups = (
         make_cache_groups(group_cache_specs(specs))
         if packed_groups
-        else kv_cache_planning.get_kv_cache_groups(runtime, specs)
+        else kv_cache_config_builder.AscendKVCacheConfigBuilder().get_kv_cache_groups(runtime, specs)
     )
     assert is_deepseek_v41_cache(groups)
     page_bytes = sum(spec.page_size_bytes for spec in specs.values())
     assert _pool_bytes_per_block(runtime, groups) == page_bytes
-    cache_config = kv_cache_planning.get_kv_cache_config_from_groups(runtime, groups, 10 * page_bytes + 1)
+    cache_config = kv_cache_config_builder.get_ascend_kv_cache_config_from_groups(runtime, groups, 10 * page_bytes + 1)
     assert cache_config.num_blocks == 10
     assert len(cache_config.kv_cache_tensors) == 2
     assert {tuple(tensor.layers) for tensor in cache_config.kv_cache_tensors} == {(name,) for name in specs}
@@ -505,7 +506,7 @@ def test_upstream_entrypoint_and_admission_use_slot_reservation(runtime):
     runtime.max_in_flight_tokens = 128
     groups = make_cache_groups(group_cache_specs(collect_specs(runtime)))
     page = get_deepseek_v41_pool_bytes_per_block(groups)
-    config = kv_cache_planning.get_kv_cache_config_from_groups(runtime, groups, 100 * page)
+    config = kv_cache_config_builder.get_ascend_kv_cache_config_from_groups(runtime, groups, 100 * page)
     assert config.num_blocks == 100
     assert {t.size for t in config.kv_cache_tensors} == {100 * page}
     demand = _max_memory_usage_bytes_from_groups(runtime, groups) // page
@@ -1043,6 +1044,8 @@ def test_async_compressed_lengths_use_device_values_at_rejection_boundary(runtim
 @pytest.mark.parametrize("deferred", [False, True])
 @pytest.mark.parametrize("query_len", [1, 3])
 def test_batch_metadata_reuses_work_and_keeps_group_slots_separate(runtime, monkeypatch, deferred, query_len):
+    # This test mocks the CANN metadata ABI; packed A5 planning has separate coverage.
+    monkeypatch.setattr(dsa_v41.DeviceOperator, "get_dsv41_packed_cache_ops", lambda: None)
     groups = make_cache_config(17).kv_cache_groups
     builders = []
     for group in groups:
@@ -1751,7 +1754,7 @@ def test_c2_launch_bounds_do_not_change_graph_metadata(monkeypatch, rows):
     launch = Mock(side_effect=lambda *args, **kwargs: args[4])
     monkeypatch.setattr(compressor_triton, "compressor_from_projected", launch)
     compressor = SimpleNamespace(
-        state_cache=SimpleNamespace(kv_cache=[torch.empty(1, 32, 1, 16)]),
+        state_cache=SimpleNamespace(kv_cache=torch.empty(1, 32, 1, 16)),
         _ring_pooled=torch.empty(rows, 8, dtype=torch.bfloat16),
         _ring_num_cores=1,
         norm=lambda x: x,
@@ -1773,6 +1776,7 @@ def test_v41_adaptive_real_initialization_gate(num_drafts, method):
             method=method,
             enable_adaptive_verification=True,
             num_speculative_tokens=num_drafts,
+            max_num_new_slots_for_drafting=0,
             parallel_drafting=False,
         ),
         parallel_config=SimpleNamespace(prefill_context_parallel_size=1, decode_context_parallel_size=1),
@@ -1820,6 +1824,7 @@ def test_v41_query_bound_is_independent_of_adaptive_policy(method, enabled, num_
             method=method,
             enable_adaptive_verification=enabled,
             num_speculative_tokens=num_drafts,
+            max_num_new_slots_for_drafting=0,
             parallel_drafting=False,
         ),
         use_v2_model_runner=True,
