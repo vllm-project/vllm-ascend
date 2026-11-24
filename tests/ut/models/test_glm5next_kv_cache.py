@@ -223,12 +223,10 @@ def test_invalid_pool_geometry_is_rejected(ratio):
 
 
 @pytest.mark.parametrize("storage_block_size", [8, 24, 144, 1536, 2048])
-@pytest.mark.parametrize("split_kernel_pages", [False, True])
-def test_indexer_metadata_addresses_complete_storage_pages(storage_block_size, split_kernel_pages):
+def test_indexer_metadata_addresses_complete_storage_pages(storage_block_size):
     pool_size = 16
     logical_size = storage_block_size * pool_size
-    kernel_block_size = 128 if split_kernel_pages else logical_size
-    split = logical_size // kernel_block_size
+    split = logical_size // 128
     config = SimpleNamespace(
         cache_config=SimpleNamespace(block_size=logical_size),
         scheduler_config=SimpleNamespace(max_num_batched_tokens=4, max_num_seqs=1),
@@ -246,10 +244,8 @@ def test_indexer_metadata_addresses_complete_storage_pages(storage_block_size, s
         tokens_per_state=pool_size,
         model_version="glm5_next",
     )
-    # Match the copied spec supplied by AttentionGroup.create_metadata_builders().
-    kernel_spec = spec.copy_with_new_block_size(kernel_block_size)
     builders = [
-        AscendIndexerKPoolMetadataBuilder(kernel_spec, ["layer.indexer.k_cache"], config, torch.device("cpu"))
+        AscendIndexerKPoolMetadataBuilder(spec, ["layer.indexer.k_cache"], config, torch.device("cpu"))
         for _ in range(2)
     ]
     pages = torch.tensor([[7, 2, -1]], dtype=torch.int32)
@@ -271,8 +267,10 @@ def test_indexer_metadata_addresses_complete_storage_pages(storage_block_size, s
         block_table_tensor=expanded,
     )
     first, draft = [builder.build(0, common) for builder in builders]
-    # Metadata uses the selected kernel rows and preserves the mapped table.
-    assert first.block_size == kernel_block_size // pool_size
+    # Kernel-granularity blocks: the metadata reports the natural kernel rows
+    # (128 tokens / pool ratio) and passes the common expanded table through
+    # as a view, so both builders observe the same persistent buffer.
+    assert first.block_size == 128 // pool_size
     torch.testing.assert_close(first.block_table, expanded)
     assert first.slot_mapping.shape == (4,)
     assert first.seq_lens.shape == (1,)
