@@ -7,6 +7,13 @@ from __future__ import annotations
 import torch
 from vllm.triton_utils import HAS_TRITON, tl, triton
 
+_FUSED_INDEX_HEAD_DIM = 128
+_FUSED_ROPE_DIM = 64
+_FUSED_COMPRESS_RATIO = 4
+_COMPRESS_BLOCK_M_MEDIUM = 16
+_COMPRESS_BLOCK_M_LARGE = 32
+_FUSED_MROPE_SECTIONS = (11, 11, 10)
+
 
 @triton.jit
 def _pack_qsa_group_indices_kernel(
@@ -238,6 +245,237 @@ def _compress_qsa_groups_kernel(
     )
 
 
+@triton.jit
+def _compress_qsa_groups_norm_mrope_store_kernel(
+    raw_keys_ptr,
+    raw_positions_ptr,
+    compressor_state_cache_ptr,
+    rope_cache_ptr,
+    compressor_state_table_ptr,
+    token_to_req_ptr,
+    query_start_loc_ptr,
+    logical_positions_ptr,
+    compressed_slots_ptr,
+    stride_raw_row,
+    stride_raw_dim,
+    stride_raw_positions_row,
+    stride_raw_positions_dim,
+    stride_compressor_state_block,
+    stride_compressor_state_token,
+    stride_compressor_state_dim,
+    stride_rope_block,
+    stride_rope_token,
+    stride_rope_dim,
+    stride_compressor_state_table_req,
+    num_rows,
+    num_compressor_state_blocks,
+    num_requests,
+    COMPRESSOR_STATE_SIZE: tl.constexpr,
+    COMPRESS_RATIO: tl.constexpr,
+    HEAD_DIM: tl.constexpr,
+    BLOCK_M: tl.constexpr,
+    BLOCK_D: tl.constexpr,
+    LOAD_ROPE_POSITIONS: tl.constexpr,
+    norm_weight_ptr,
+    rotary_cache_ptr,
+    compressed_cache_ptr,
+    rotary_cache_rows: tl.constexpr,
+    rotary_cache_stride: tl.constexpr,
+    compressed_stride_block: tl.constexpr,
+    compressed_stride_token: tl.constexpr,
+    compressed_stride_dim: tl.constexpr,
+    compressed_page_size: tl.constexpr,
+    compressed_num_slots: tl.constexpr,
+    norm_eps: tl.constexpr,
+    rotary_dim: tl.constexpr,
+    mrope_section_h: tl.constexpr,
+    mrope_section_w: tl.constexpr,
+) -> None:
+    rows = tl.program_id(0) * BLOCK_M + tl.arange(0, BLOCK_M)
+    dims = tl.arange(0, BLOCK_D)
+    row_mask = rows < num_rows
+    request = tl.load(token_to_req_ptr + rows, mask=row_mask, other=-1)
+    end_position = tl.load(logical_positions_ptr + rows, mask=row_mask, other=-1)
+    compressed_slot = tl.load(compressed_slots_ptr + rows, mask=row_mask, other=-1)
+    valid_request = (request >= 0) & (request < num_requests)
+    safe_request = tl.minimum(tl.maximum(request, 0), num_requests - 1)
+    query_row_start = tl.load(
+        query_start_loc_ptr + safe_request,
+        mask=row_mask & valid_request,
+        other=0,
+    )
+    query_row_end = tl.load(
+        query_start_loc_ptr + safe_request + 1,
+        mask=row_mask & valid_request,
+        other=0,
+    )
+    chunk_start_position = end_position - (rows - query_row_start)
+    compressor_state_block = tl.load(
+        compressor_state_table_ptr + safe_request * stride_compressor_state_table_req,
+        mask=row_mask & valid_request,
+        other=-1,
+    )
+    valid_compressor_state_block = (compressor_state_block >= 0) & (
+        compressor_state_block < num_compressor_state_blocks
+    )
+    valid_row = (
+        row_mask
+        & valid_request
+        & (rows >= query_row_start)
+        & (rows < query_row_end)
+        & (end_position >= COMPRESS_RATIO - 1)
+        & (compressed_slot >= 0)
+    )
+    accumulator = tl.zeros((BLOCK_M, BLOCK_D), dtype=tl.float32)
+
+    for group_offset in tl.range(0, COMPRESS_RATIO):
+        position = end_position - (COMPRESS_RATIO - 1 - group_offset)
+        safe_position = tl.maximum(position, 0)
+        use_raw = position >= chunk_start_position
+        raw_row = query_row_start + position - chunk_start_position
+        raw_values = tl.load(
+            raw_keys_ptr + raw_row[:, None] * stride_raw_row + dims[None, :] * stride_raw_dim,
+            mask=(
+                valid_row & use_raw & (raw_row >= query_row_start) & (raw_row < query_row_end) & (raw_row < num_rows)
+            )[:, None]
+            & (dims < HEAD_DIM)[None, :],
+            other=0.0,
+        ).to(tl.float32)
+        compressor_state_values = tl.load(
+            compressor_state_cache_ptr
+            + tl.maximum(compressor_state_block, 0).to(tl.int64)[:, None] * stride_compressor_state_block
+            + (safe_position % COMPRESSOR_STATE_SIZE)[:, None] * stride_compressor_state_token
+            + dims[None, :] * stride_compressor_state_dim,
+            mask=(valid_row & ~use_raw & valid_compressor_state_block)[:, None] & (dims < HEAD_DIM)[None, :],
+            other=0.0,
+        ).to(tl.float32)
+        accumulator += tl.where(use_raw[:, None], raw_values, compressor_state_values)
+
+    first_position = end_position - COMPRESS_RATIO + 1
+    safe_first_position = tl.maximum(first_position, 0)
+    if LOAD_ROPE_POSITIONS:
+        first_from_raw = first_position >= chunk_start_position
+        raw_first_row = query_row_start + first_position - chunk_start_position
+
+    # Keep the original materialization boundaries: pooling, normalization,
+    # both rotary products and the final add/sub all round to BF16.
+    pooled = (accumulator / COMPRESS_RATIO).to(tl.bfloat16).to(tl.float32)
+    weight = (
+        tl.load(
+            norm_weight_ptr + dims,
+            mask=dims < HEAD_DIM,
+            other=0,
+        ).to(tl.float32)
+        + 1.0
+    )
+    variance = tl.sum(pooled * pooled, axis=1) / HEAD_DIM
+    normalized = (pooled * tl.rsqrt(variance[:, None] + norm_eps) * weight[None, :]).to(tl.bfloat16)
+    half_rope: tl.constexpr = rotary_dim // 2
+    offsets = dims % half_rope
+    axis = tl.where(
+        (offsets % 3 == 1) & (offsets < 3 * mrope_section_h),
+        1,
+        tl.where((offsets % 3 == 2) & (offsets < 3 * mrope_section_w), 2, 0),
+    )
+    if LOAD_ROPE_POSITIONS:
+        valid_raw_position = (
+            valid_row
+            & first_from_raw
+            & (raw_first_row >= query_row_start)
+            & (raw_first_row < query_row_end)
+            & (raw_first_row < num_rows)
+        )
+        raw_position_base = raw_positions_ptr + raw_first_row * stride_raw_positions_row
+        valid_state_position = valid_row & ~first_from_raw & valid_compressor_state_block
+        state_position_base = (
+            rope_cache_ptr
+            + tl.maximum(compressor_state_block, 0).to(tl.int64) * stride_rope_block
+            + (safe_first_position % COMPRESSOR_STATE_SIZE) * stride_rope_token
+        )
+        position_0 = tl.where(
+            first_from_raw,
+            tl.load(raw_position_base, mask=valid_raw_position, other=0),
+            tl.load(state_position_base, mask=valid_state_position, other=0),
+        )
+        position_1 = tl.where(
+            first_from_raw,
+            tl.load(
+                raw_position_base + stride_raw_positions_dim,
+                mask=valid_raw_position,
+                other=0,
+            ),
+            tl.load(
+                state_position_base + stride_rope_dim,
+                mask=valid_state_position,
+                other=0,
+            ),
+        )
+        position_2 = tl.where(
+            first_from_raw,
+            tl.load(
+                raw_position_base + 2 * stride_raw_positions_dim,
+                mask=valid_raw_position,
+                other=0,
+            ),
+            tl.load(
+                state_position_base + 2 * stride_rope_dim,
+                mask=valid_state_position,
+                other=0,
+            ),
+        )
+        rotary_position = tl.where(
+            axis[None, :] == 1,
+            position_1[:, None],
+            tl.where(axis[None, :] == 2, position_2[:, None], position_0[:, None]),
+        )
+    else:
+        rotary_position = tl.where(valid_row, first_position, 0)[:, None]
+    rotary_position = tl.minimum(tl.maximum(rotary_position, 0), rotary_cache_rows - 1)
+    cache_row = rotary_cache_ptr + rotary_position.to(tl.int64) * rotary_cache_stride
+    cos = tl.load(
+        cache_row + offsets[None, :],
+        mask=valid_row[:, None] & (dims < rotary_dim)[None, :],
+        other=1,
+    ).to(tl.float32)
+    sin = tl.load(
+        cache_row + offsets[None, :] + half_rope,
+        mask=valid_row[:, None] & (dims < rotary_dim)[None, :],
+        other=0,
+    ).to(tl.float32)
+    partner_dims = tl.where(
+        dims < half_rope,
+        dims + half_rope,
+        tl.where(dims < rotary_dim, dims - half_rope, dims),
+    )
+    partner_indices = partner_dims[None, :] + tl.zeros((BLOCK_M, 1), dtype=tl.int32)
+    partner = tl.gather(normalized, partner_indices, axis=1)
+    product_cos = (normalized * cos).to(tl.bfloat16)
+    product_sin = (partner * sin).to(tl.bfloat16)
+    rotated = (
+        product_cos
+        + tl.where(
+            (dims < half_rope)[None, :],
+            -product_sin,
+            product_sin,
+        )
+    ).to(tl.bfloat16)
+    values = tl.where((dims < rotary_dim)[None, :], rotated, normalized)
+    # Match the old store mask, including zero results for invalid owners.
+    valid_slot = (compressed_slot >= 0) & (compressed_slot < compressed_num_slots)
+    slot = tl.maximum(compressed_slot, 0).to(tl.int64)
+    destination = (
+        compressed_cache_ptr
+        + slot[:, None] // compressed_page_size * compressed_stride_block
+        + slot[:, None] % compressed_page_size * compressed_stride_token
+        + dims[None, :] * compressed_stride_dim
+    )
+    tl.store(
+        destination,
+        values,
+        mask=valid_slot[:, None] & (dims < HEAD_DIM)[None, :],
+    )
+
+
 def pack_qsa_group_indices_npu(
     block_indices: torch.Tensor,
     query_positions: torch.Tensor,
@@ -331,7 +569,7 @@ def qsa_store_cache_rows(
     )
 
 
-def qsa_compress_groups_with_ratio(
+def _validate_qsa_compression_inputs(
     raw_keys: torch.Tensor,
     raw_positions: torch.Tensor,
     compressor_state_cache: torch.Tensor,
@@ -341,9 +579,9 @@ def qsa_compress_groups_with_ratio(
     logical_positions: torch.Tensor,
     compressed_slots: torch.Tensor,
     compress_ratio: int,
-    rope_cache: torch.Tensor | None = None,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    """Pool completed groups from the state ring and current token rows."""
+    rope_cache: torch.Tensor | None,
+) -> tuple[int, int]:
+    """Validate the layout shared by legacy and fused compression."""
     if raw_keys.device.type != "npu" or not HAS_TRITON:
         raise RuntimeError("QSA NPU compression requires Triton")
     rows = token_to_req.numel()
@@ -379,11 +617,35 @@ def qsa_compress_groups_with_ratio(
         raise ValueError("QSA packed position view has an invalid shape or dtype")
     if rows and (not all(compressor_state_cache.shape) or not all(compressor_state_block_table.shape)):
         raise ValueError("QSA compressor-state cache and block table must be nonempty")
-    pooled = torch.empty(
-        (rows, 1, raw_keys.shape[2]),
-        dtype=raw_keys.dtype,
-        device=raw_keys.device,
+    return rows, num_requests
+
+
+def qsa_compress_groups_with_ratio(
+    raw_keys: torch.Tensor,
+    raw_positions: torch.Tensor,
+    compressor_state_cache: torch.Tensor,
+    compressor_state_block_table: torch.Tensor,
+    token_to_req: torch.Tensor,
+    query_start_loc: torch.Tensor,
+    logical_positions: torch.Tensor,
+    compressed_slots: torch.Tensor,
+    compress_ratio: int,
+    rope_cache: torch.Tensor | None = None,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Pool completed QSA groups and return their keys and first positions."""
+    rows, num_requests = _validate_qsa_compression_inputs(
+        raw_keys,
+        raw_positions,
+        compressor_state_cache,
+        compressor_state_block_table,
+        token_to_req,
+        query_start_loc,
+        logical_positions,
+        compressed_slots,
+        compress_ratio,
+        rope_cache,
     )
+    pooled = torch.empty((rows, 1, raw_keys.shape[2]), dtype=raw_keys.dtype, device=raw_keys.device)
     first_positions = torch.empty((rows, 3), dtype=torch.int64, device=raw_keys.device)
     if not rows:
         return pooled, first_positions
@@ -432,8 +694,131 @@ def qsa_compress_groups_with_ratio(
     return pooled, first_positions
 
 
+def qsa_compress_norm_mrope_store(
+    raw_keys: torch.Tensor,
+    raw_positions: torch.Tensor,
+    compressor_state_cache: torch.Tensor,
+    compressor_state_block_table: torch.Tensor,
+    token_to_req: torch.Tensor,
+    query_start_loc: torch.Tensor,
+    logical_positions: torch.Tensor,
+    compressed_slots: torch.Tensor,
+    compress_ratio: int,
+    rope_cache: torch.Tensor | None,
+    *,
+    norm_weight: torch.Tensor,
+    rotary_cache: torch.Tensor,
+    compressed_cache: torch.Tensor,
+    norm_eps: float = 1e-6,
+) -> None:
+    """Compress, normalize and rotate QSA keys directly into their cache.
+
+    This fixed Qwen3.8 Next ABI uses BF16, head_dim=128, ratio=4,
+    rotary_dim=64 and interleaved MRoPE sections [11, 11, 10]. Raw rings
+    remain read-only until the fused launch completes.
+    """
+    rows, num_requests = _validate_qsa_compression_inputs(
+        raw_keys,
+        raw_positions,
+        compressor_state_cache,
+        compressor_state_block_table,
+        token_to_req,
+        query_start_loc,
+        logical_positions,
+        compressed_slots,
+        compress_ratio,
+        rope_cache,
+    )
+    if (
+        raw_keys.dtype != torch.bfloat16
+        or raw_keys.shape[2] != _FUSED_INDEX_HEAD_DIM
+        or compress_ratio != _FUSED_COMPRESS_RATIO
+    ):
+        raise ValueError("QSA fused compression requires BF16 width 128 and ratio 4")
+    if norm_weight.shape != (_FUSED_INDEX_HEAD_DIM,) or not norm_weight.is_contiguous():
+        raise ValueError("QSA fused compression requires a contiguous 128-element norm weight")
+    if (
+        rotary_cache.ndim != 2
+        or rotary_cache.shape[0] == 0
+        or rotary_cache.shape[1] != _FUSED_ROPE_DIM
+        or rotary_cache.stride(1) != 1
+    ):
+        raise ValueError("QSA fused compression requires a rotary cache with width 64")
+    if (
+        compressed_cache.ndim != 4
+        or compressed_cache.shape[2:] != (1, _FUSED_INDEX_HEAD_DIM)
+        or not all(compressed_cache.shape)
+    ):
+        raise ValueError("QSA fused compression requires a nonempty compressed-key cache")
+    if any(
+        tensor.dtype != raw_keys.dtype or tensor.device != raw_keys.device
+        for tensor in (norm_weight, rotary_cache, compressed_cache)
+    ):
+        raise ValueError("QSA fused compression tensors must share BF16 dtype and device")
+    if not rows:
+        return
+    if rope_cache is None:
+        rope_cache = compressor_state_cache
+        load_rope_positions = False
+    else:
+        load_rope_positions = True
+    if rows < 1024:
+        block_m = 1
+    elif rows < 4096:
+        block_m = _COMPRESS_BLOCK_M_MEDIUM
+    else:
+        block_m = _COMPRESS_BLOCK_M_LARGE
+    _compress_qsa_groups_norm_mrope_store_kernel[(triton.cdiv(rows, block_m),)](
+        raw_keys,
+        raw_positions,
+        compressor_state_cache,
+        rope_cache,
+        compressor_state_block_table,
+        token_to_req,
+        query_start_loc,
+        logical_positions,
+        compressed_slots,
+        raw_keys.stride(0),
+        raw_keys.stride(2),
+        raw_positions.stride(0),
+        raw_positions.stride(2),
+        compressor_state_cache.stride(0),
+        compressor_state_cache.stride(1),
+        compressor_state_cache.stride(3),
+        rope_cache.stride(0),
+        rope_cache.stride(1),
+        rope_cache.stride(3),
+        compressor_state_block_table.stride(0),
+        rows,
+        compressor_state_cache.shape[0],
+        num_requests,
+        COMPRESSOR_STATE_SIZE=compressor_state_cache.shape[1],
+        COMPRESS_RATIO=compress_ratio,
+        HEAD_DIM=raw_keys.shape[2],
+        BLOCK_M=block_m,
+        LOAD_ROPE_POSITIONS=load_rope_positions,
+        BLOCK_D=triton.next_power_of_2(raw_keys.shape[2]),
+        norm_weight_ptr=norm_weight,
+        rotary_cache_ptr=rotary_cache,
+        compressed_cache_ptr=compressed_cache,
+        rotary_cache_rows=rotary_cache.shape[0],
+        rotary_cache_stride=rotary_cache.stride(0),
+        compressed_stride_block=compressed_cache.stride(0),
+        compressed_stride_token=compressed_cache.stride(1),
+        compressed_stride_dim=compressed_cache.stride(3),
+        compressed_page_size=compressed_cache.shape[1],
+        compressed_num_slots=compressed_cache.shape[0] * compressed_cache.shape[1],
+        norm_eps=norm_eps,
+        rotary_dim=_FUSED_ROPE_DIM,
+        mrope_section_h=_FUSED_MROPE_SECTIONS[1],
+        mrope_section_w=_FUSED_MROPE_SECTIONS[2],
+        num_warps=4,
+    )
+
+
 __all__ = [
     "pack_qsa_group_indices_npu",
     "qsa_compress_groups_with_ratio",
+    "qsa_compress_norm_mrope_store",
     "qsa_store_cache_rows",
 ]

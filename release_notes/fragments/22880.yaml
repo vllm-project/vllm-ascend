@@ -1,0 +1,5 @@
+pr: 22880
+entries:
+  - category: performance
+    text: Vectorized the fused Qwen3.8 Flash Next QSA group-compression, RMSNorm, MRoPE, and compressed-cache update path on Ascend A5.
+    model: qwen3.8-flash-next

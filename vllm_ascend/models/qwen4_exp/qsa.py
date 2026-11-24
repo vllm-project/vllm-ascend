@@ -44,9 +44,7 @@ from vllm_ascend.attention.utils import (
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence import attention_transfer_window
 from vllm_ascend.distributed.utils import all_gather_async
 from vllm_ascend.ops.triton.linearnorm import qsa_rmsnorm_mrope as _qsa_rmsnorm_mrope  # noqa: F401
-from vllm_ascend.ops.triton.qwen4_exp.qsa import (
-    qsa_compress_groups_with_ratio as qsa_compress_groups_with_ratio_fused,
-)
+from vllm_ascend.ops.triton.qwen4_exp.qsa import qsa_compress_norm_mrope_store
 from vllm_ascend.ops.triton.qwen4_exp.qsa import (
     qsa_store_cache_rows as qsa_store_cache_rows_fused,
 )
@@ -116,33 +114,6 @@ def _store_qsa_cache_rows(
         rows = rows.flatten(1)
     flat_slots = slot_mapping.reshape(-1)
     qsa_store_cache_rows_fused(cache, flat_slots, rows)
-
-
-def _compress_qsa_groups(
-    raw_keys: torch.Tensor,
-    raw_positions: torch.Tensor,
-    compressor_state_cache: torch.Tensor,
-    compressor_state_block_table: torch.Tensor,
-    token_to_req: torch.Tensor,
-    query_start_loc: torch.Tensor,
-    logical_positions: torch.Tensor,
-    compressed_slots: torch.Tensor,
-    compress_ratio: int,
-    rope_cache: torch.Tensor | None,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    """Pool completed groups with the fused QSA compression kernel."""
-    return qsa_compress_groups_with_ratio_fused(
-        raw_keys,
-        raw_positions,
-        compressor_state_cache,
-        compressor_state_block_table,
-        token_to_req,
-        query_start_loc,
-        logical_positions,
-        compressed_slots,
-        compress_ratio,
-        rope_cache,
-    )
 
 
 def _qsa_cache_is_bound(kv_cache: QSAKVCache) -> bool:
@@ -303,30 +274,6 @@ class AscendQSAIndexer(upstream_indexer.QSAIndexer):
             rope_dim=self.rotary_emb.rotary_dim,
         )
 
-    def normalize_compressed_keys(
-        self,
-        pooled: torch.Tensor,
-        first_positions: torch.Tensor,
-    ) -> torch.Tensor:
-        """Normalize and rotate compressed Indexer keys."""
-        original_pooled = pooled
-        original_positions = first_positions
-        if getattr(self.rotary_emb, "mrope_section", None):
-            first_positions = first_positions.transpose(0, 1)
-        else:
-            first_positions = first_positions[:, 0]
-        pooled = pooled.reshape(-1, 1, self.index_head_dim)
-        if not self._fused_norm_rope_eligible(pooled, first_positions):
-            return super().normalize_compressed_keys(
-                original_pooled,
-                original_positions,
-            )
-        return self._fused_norm_rope(
-            pooled,
-            self.k_layernorm,
-            first_positions,
-        )
-
     if vllm_version_is("0.33.0"):
 
         def forward(  # type: ignore[misc, override]
@@ -387,7 +334,7 @@ class AscendQSAIndexer(upstream_indexer.QSAIndexer):
             slot_mapping: torch.Tensor | None = None,
             gate_out: torch.Tensor | None = None,
         ) -> tuple[torch.Tensor, tuple[torch.Tensor, torch.Tensor] | None]:
-            """Run separate Ascend preparation with main's packed-input ABI."""
+            """Run the fused Ascend QSA path (main's fused-prepare signature)."""
             del attn, qkv, slot_mapping, gate_out
             metadata = self._metadata()
             if metadata is None:
@@ -474,7 +421,9 @@ class AscendQSAIndexer(upstream_indexer.QSAIndexer):
             position_rows = qsa_indexer.canonical_qsa_rope_positions(positions)[:num_tokens].to(
                 device=raw_key_cache.device
             )
-        pooled, first_positions = _compress_qsa_groups(
+        rotary_cache = self.rotary_emb._match_cos_sin_cache_dtype(token_k)  # noqa: SLF001
+        compressed_cache = self.compressed_key_cache.kv_cache
+        qsa_compress_norm_mrope_store(
             token_k[:num_tokens],
             position_rows,
             raw_key_cache,
@@ -485,13 +434,13 @@ class AscendQSAIndexer(upstream_indexer.QSAIndexer):
             compressed_metadata.slot_mapping,
             self.compress_ratio,
             rope_position_cache,
+            norm_weight=self.k_layernorm.weight,
+            rotary_cache=rotary_cache,
+            compressed_cache=compressed_cache,
+            norm_eps=self.k_layernorm.variance_epsilon,
         )
-        normalized = self.normalize_compressed_keys(pooled, first_positions)
-        _store_qsa_cache_rows(
-            self.compressed_key_cache.kv_cache,
-            compressed_metadata.slot_mapping,
-            normalized,
-        )
+        # Keep ring writes after compression: other rows can still read the
+        # previous ring contents while producing completed groups.
         _store_qsa_cache_rows(raw_key_cache, raw_metadata.slot_mapping, token_k[:num_tokens])
         if rope_position_cache is not None:
             _store_qsa_cache_rows(
@@ -956,9 +905,9 @@ class AscendQwen4ExpQSAAttention(upstream_qsa.Qwen4ExpQSAAttention):
 
         # Newer vLLM revisions call the owner with the packed projection when
         # ``use_fused_qsa_prepare`` is enabled. The upstream indexer consumes
-        # that projection itself; Ascend materializes Q/K/V and gate through
-        # the inherited projection before its separate indexer preparation
-        # and the existing cache/update transaction.
+        # that projection itself; Ascend keeps its independently fused main
+        # Q/K/V preparation and indexer paths, so materialize the same outputs
+        # here before entering the existing cache/update transaction.
         if qkv is not None:
             q, k, v, projected_gate = self._project_qkv_gate(qkv, positions)
             query = q.view(-1, self.num_heads, self.head_dim)
@@ -979,7 +928,7 @@ class AscendQwen4ExpQSAAttention(upstream_qsa.Qwen4ExpQSAAttention):
             )
         else:
             # Main's indexer returns (selection, prepared main outputs); Ascend
-            # prepares Q/K/V above, so the second element stays None.
+            # fuses its own Q/K/V preparation, so the second element stays None.
             selected = self.indexer(
                 hidden_states,
                 positions,
