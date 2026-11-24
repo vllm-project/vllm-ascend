@@ -1140,9 +1140,7 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
         if getattr(self, "block_key_hybrid", False) and request.can_save and request.save_end_token > 0:
             if self.cache_coordinator is None or request.save_end_token % self.cache_transfer_granularity:
                 raise ValueError("Block-key hybrid saves require a coordinator-aligned full-block boundary")
-            return self.token_database.store_mask(
-                request.save_end_token, request.num_prompt_tokens, request.target_token_len
-            )
+            return self.token_database.store_mask(request.save_end_token, request.num_prompt_tokens)
         masks = None
         if (
             self.cache_coordinator is not None
@@ -1150,9 +1148,7 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
             and request.save_end_token % self.cache_transfer_granularity == 0
         ):
             try:
-                masks = self.token_database.store_mask(
-                    request.save_end_token, request.num_prompt_tokens, request.target_token_len
-                )
+                masks = self.token_database.store_mask(request.save_end_token, request.num_prompt_tokens)
             except AssertionError:
                 masks = None
         align_groups = getattr(self, "group_uses_align_state", [])
