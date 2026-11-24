@@ -4,6 +4,8 @@
 from types import SimpleNamespace
 from unittest.mock import Mock
 
+import pytest
+
 import tests.ut.distributed.ascend_store._mock_deps  # noqa: F401
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.in_flight_save_blocks import (
     InFlightSaveBlockTracker,
@@ -41,20 +43,28 @@ def test_duplicate_boundary_sources_take_one_reference():
     assert not tracker.has_pending_work()
 
 
-def test_boundary_only_save_pins_exact_sources():
+@pytest.mark.parametrize(
+    "token_len_chunk, boundary_puts, expected_sources",
+    [
+        pytest.param(0, [BoundaryPut(0, 2, 16), BoundaryPut(1, 5, 16)], [2, 5], id="boundary-only"),
+        pytest.param(16, [BoundaryPut(1, 5, 16)], [5], id="full-page-with-mamba-checkpoint"),
+    ],
+)
+def test_save_pins_only_exact_boundary_sources(token_len_chunk, boundary_puts, expected_sources):
     tracker = InFlightSaveBlockTracker(1)
     pool = _pool()
     meta = ReqMeta(
         "r",
-        token_len_chunk=0,
+        token_len_chunk=token_len_chunk,
         can_save=True,
         block_ids_by_group=[[1, 2], [3, 4]],
-        boundary_puts=[BoundaryPut(0, 2, 16), BoundaryPut(1, 5, 16)],
+        boundary_puts=boundary_puts,
     )
     tracker.retain(meta, pool)
-    pool.touch.assert_called_once_with([2, 5])
+    pool.touch.assert_called_once_with(expected_sources)
     tracker.complete({meta.event_id: 1}, pool)
-    pool.free_blocks.assert_called_once_with([5, 2])
+    pool.free_blocks.assert_called_once_with(expected_sources[::-1])
+    assert not tracker.has_pending_work()
 
 
 def test_normal_save_without_boundary_puts_does_not_pin_ordinary_tables():
@@ -94,19 +104,3 @@ def test_aggregated_worker_counts_release_source():
     tracker.complete(completed.completed_events, pool)
     pool.free_blocks.assert_called_once_with([1])
     assert not tracker.has_pending_work()
-
-
-def test_full_page_save_pins_only_exact_mamba_checkpoint():
-    tracker = InFlightSaveBlockTracker(1)
-    pool = _pool()
-    meta = ReqMeta(
-        "r",
-        token_len_chunk=16,
-        block_ids_by_group=[[1, 2], [3, 4]],
-        can_save=True,
-        boundary_puts=[BoundaryPut(1, 5, 16)],
-    )
-    tracker.retain(meta, pool)
-    pool.touch.assert_called_once_with([5])
-    tracker.complete({meta.event_id: 1}, pool)
-    pool.free_blocks.assert_called_once_with([5])
