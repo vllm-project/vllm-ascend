@@ -37,6 +37,8 @@ It is recommended to download the model weight to the shared directory of multip
 
 ### 4.1 Docker Image Installation
 
+{% include "getting_started/installation/ascend_docker_runtime.inc.md" %}
+
 Select an image based on your machine type and start the docker image on your node, refer to [using docker](../../getting_started/installation.md#installation-prebuilt-image).
 
 === "950DT Products"
@@ -48,32 +50,17 @@ Select an image based on your machine type and start the docker image on your no
     export NAME=vllm-ascend
 
     docker run --rm \
+    -e ASCEND_VISIBLE_DEVICES=0-7 \
     --name $NAME \
     --net=host \
     --shm-size=1g \
     --privileged=true \
-    --device /dev/davinci0 \
-    --device /dev/davinci1 \
-    --device /dev/davinci2 \
-    --device /dev/davinci3 \
-    --device /dev/davinci4 \
-    --device /dev/davinci5 \
-    --device /dev/davinci6 \
-    --device /dev/davinci7 \
-    --device /dev/davinci_manager \
-    --device /dev/hisi_hdc \
-    --device /dev/ummu \
-    --device /dev/uburma \
     -v /usr/local/Ascend/driver:/usr/local/Ascend/driver \
-    -v /etc/ascend_install.info:/etc/ascend_install.info \
     -v /etc/hccl_rootinfo.json:/etc/hccl_rootinfo.json \
     -v /etc/hixlep/:/etc/hixlep/ \
     -v /root/.cache:/root/.cache \
     -v /usr/local/sbin:/usr/local/sbin \
-    -v /usr/local/dcmi:/usr/local/dcmi \
-    -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
     -v /usr/local/sbin/npu-smi:/usr/local/sbin/npu-smi \
-    -v /usr/bin/urma_admin:/usr/bin/urma_admin \
     -v /lib/route.conf:/lib/route.conf \
     -v /usr/lib64:/usr/lib64 \
     -itd $IMAGE bash
@@ -88,17 +75,9 @@ Select an image based on your machine type and start the docker image on your no
     export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}
 
     docker run --rm \
+    -e ASCEND_VISIBLE_DEVICES=0 \
     --name vllm-ascend \
     --shm-size=1g \
-    --device /dev/davinci0 \
-    --device /dev/davinci_manager \
-    --device /dev/devmm_svm \
-    --device /dev/hisi_hdc \
-    -v /usr/local/dcmi:/usr/local/dcmi \
-    -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
-    -v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
-    -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
-    -v /etc/ascend_install.info:/etc/ascend_install.info \
     -v /root/.cache:/root/.cache \
     -p 8000:8000 \
     -it $IMAGE bash
@@ -111,24 +90,9 @@ Select an image based on your machine type and start the docker image on your no
     export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}-310p
 
     docker run --rm \
+    -e ASCEND_VISIBLE_DEVICES=0-7 \
     --name vllm-ascend \
     --shm-size=10g \
-    --device /dev/davinci0 \
-    --device /dev/davinci1 \
-    --device /dev/davinci2 \
-    --device /dev/davinci3 \
-    --device /dev/davinci4 \
-    --device /dev/davinci5 \
-    --device /dev/davinci6 \
-    --device /dev/davinci7 \
-    --device /dev/davinci_manager \
-    --device /dev/devmm_svm \
-    --device /dev/hisi_hdc \
-    -v /usr/local/dcmi:/usr/local/dcmi \
-    -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
-    -v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
-    -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
-    -v /etc/ascend_install.info:/etc/ascend_install.info \
     -v /root/.cache:/root/.cache \
     -p 8000:8000 \
     -it $IMAGE bash
