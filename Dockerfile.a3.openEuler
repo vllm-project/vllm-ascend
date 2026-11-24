@@ -35,6 +35,7 @@
 #   --build-arg CANN_PKG_ARCH=aarch64|x86_64             缺省按构建架构自动选择
 #   --build-arg ETCD_VERSION=v3.5.21                     内置 etcd 版本
 #   --build-arg GCC_VERSION=12.3.0                       软件源无 C++20 工具链时源码编译的 GCC 版本
+#   --build-arg GCC_TARBALL_URL=<内网 gcc 源码 tar 地址>   可选，优先于公网地址
 #   --build-arg MAX_JOBS=32
 #
 # 本仓库源码必须是 releases/v0.23.0 分支（main 为 vLLM 0.33 世代，无法在此环境运行）。
@@ -90,6 +91,7 @@ RUN set -e; \
 #     麒麟自带 GCC 7.3 不支持。优先安装软件源里的新版工具链（gcc-toolset-*/gcc-NN），
 #     源里没有则源码编译 GCC 到 /usr/local。最终统一软链到 /usr/local/bin，供后续所有编译使用。
 ARG GCC_VERSION=12.3.0
+ARG GCC_TARBALL_URL=""
 RUN set -e; \
     PM="$(command -v dnf || command -v yum)"; \
     probe() { \
@@ -119,14 +121,31 @@ RUN set -e; \
     fi; \
     if [ -z "$CXX_BIN" ]; then \
         echo "INFO: 软件源无可用 C++20 编译器，源码编译 GCC ${GCC_VERSION}"; \
-        curl -fsSL "https://ftp.gnu.org/gnu/gcc/gcc-${GCC_VERSION}/gcc-${GCC_VERSION}.tar.gz" -o /tmp/gcc.tar.gz; \
-        mkdir -p /tmp/gccsrc && tar -xzf /tmp/gcc.tar.gz -C /tmp/gccsrc --strip-components=1; \
+        GCC_TAR=/tmp/gcc.tar; rm -f "$GCC_TAR"; \
+        URLS="https://ftp.gnu.org/gnu/gcc/gcc-${GCC_VERSION}/gcc-${GCC_VERSION}.tar.xz \
+https://mirrors.tuna.tsinghua.edu.cn/gnu/gcc/gcc-${GCC_VERSION}/gcc-${GCC_VERSION}.tar.xz \
+https://mirrors.aliyun.com/gnu/gcc/gcc-${GCC_VERSION}/gcc-${GCC_VERSION}.tar.xz \
+https://ftp.gnu.org/gnu/gcc/gcc-${GCC_VERSION}/gcc-${GCC_VERSION}.tar.gz"; \
+        if [ -n "${GCC_TARBALL_URL}" ]; then URLS="${GCC_TARBALL_URL} ${URLS}"; fi; \
+        for url in $URLS; do \
+            echo "INFO: 下载 GCC 源码 ${url}"; \
+            if curl -fL --retry 10 --retry-all-errors --retry-delay 5 --connect-timeout 30 \
+                    -C - -o "$GCC_TAR" "$url" && tar -tf "$GCC_TAR" >/dev/null 2>&1; then \
+                break; \
+            fi; \
+            rm -f "$GCC_TAR"; \
+        done; \
+        if ! tar -tf "$GCC_TAR" >/dev/null 2>&1; then \
+            echo "ERROR: GCC 源码下载失败（网络不稳可直接用 --build-arg GCC_TARBALL_URL 指内网地址）"; \
+            exit 1; \
+        fi; \
+        mkdir -p /tmp/gccsrc && tar -xf "$GCC_TAR" -C /tmp/gccsrc --strip-components=1; \
         cd /tmp/gccsrc && ./contrib/download_prerequisites; \
         mkdir -p /tmp/gccbuild && cd /tmp/gccbuild && \
         /tmp/gccsrc/configure --prefix=/usr/local --enable-languages=c,c++ \
             --disable-bootstrap --disable-multilib --with-system-zlib && \
         make -j"${MAX_JOBS:-$(nproc)}" && make install-strip; \
-        cd / && rm -rf /tmp/gccsrc /tmp/gccbuild /tmp/gcc.tar.gz; \
+        cd / && rm -rf /tmp/gccsrc /tmp/gccbuild "$GCC_TAR"; \
         CXX_BIN=/usr/local/bin/g++; \
     fi; \
     probe "$CXX_BIN" || { echo "ERROR: $CXX_BIN 仍不支持 C++20"; exit 1; }; \
