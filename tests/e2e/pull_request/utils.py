@@ -559,9 +559,13 @@ def run_pd_disaggregation(
             "--kv-transfer-config",
             json.dumps(
                 {
-                    "kv_connector": "MooncakeConnectorV2",
+                    "kv_connector": "MooncakeConnectorV1",
                     "kv_role": "kv_producer",
                     "kv_port": "30000",
+                    "kv_connector_extra_config": {
+                        "prefill": {"dp_size": 1, "tp_size": prefill_tp_size},
+                        "decode": {"dp_size": 1, "tp_size": decode_tp_size},
+                    },
                 }
             ),
             "--enforce-eager",
@@ -588,9 +592,13 @@ def run_pd_disaggregation(
             "--kv-transfer-config",
             json.dumps(
                 {
-                    "kv_connector": "MooncakeConnectorV2",
+                    "kv_connector": "MooncakeConnectorV1",
                     "kv_role": "kv_consumer",
                     "kv_port": "30200",
+                    "kv_connector_extra_config": {
+                        "prefill": {"dp_size": 1, "tp_size": prefill_tp_size},
+                        "decode": {"dp_size": 1, "tp_size": decode_tp_size},
+                    },
                 }
             ),
             "--compilation-config",
