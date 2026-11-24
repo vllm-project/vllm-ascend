@@ -150,13 +150,13 @@ class TestStandardConnectorHooks(unittest.TestCase):
         load(ATTENTION, "dsa_v41_forward", scope)
         hidden = torch.ones(1)
         scope["dsa_v41_write_kv"](hidden, hidden, "cut")
+        self.assertEqual(events, ["wait", "cache-only-write"])
         scope["dsa_v41_forward"](hidden, hidden, "cut")
         self.assertEqual(
             events,
             [
                 "wait",
                 "cache-only-write",
-                "gate",
                 "wait",
                 "final-write",
                 "gate",

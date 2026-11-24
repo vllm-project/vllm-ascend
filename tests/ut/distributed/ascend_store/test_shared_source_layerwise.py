@@ -401,13 +401,14 @@ class TestSharedSourceLayerwise(unittest.TestCase):
                 gate = get_attention_compute_start_gate()
                 self.assertFalse(gate.wait(timeout=0))
                 self.assertFalse(worker.layer_load_finished_events[8].is_set())
-                # Cache-only writes open the gate; the normal forward must reuse it.
-                record_attention_compute_start()
-                self.assertTrue(worker.layer_load_finished_events[8].wait(timeout=3))
+                # The normal forward reuses the still-closed cache-only gate.
                 conn.wait_for_layer_load(name)
                 self.assertIs(get_attention_compute_start_gate(), gate)
                 self.assertEqual(worker.current_layer, layer)
+                self.assertFalse(gate.wait(timeout=0))
             record_attention_compute_start()
+            if layer == 2:
+                self.assertTrue(worker.layer_load_finished_events[8].wait(timeout=3))
             conn.save_kv_layer(name, [], None)
 
     def test_failed_load_reports_request_and_disables_saves(self):

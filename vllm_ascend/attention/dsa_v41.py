@@ -106,8 +106,6 @@ def dsa_v41_write_kv(
     wait_for_kv_layer_from_connector(layer_name)
     hidden_states = hidden_states[: metadata.swa.num_actual_tokens]
     attn.v41_impl._update_caches(attn, hidden_states, metadata)
-    # Cache-only replay has no attention op to release prefetched loads.
-    record_attention_compute_start()
     # The following cut-layer forward writes retained rows again. Its normal
     # save hook records the final-write event without advancing twice here.
 
