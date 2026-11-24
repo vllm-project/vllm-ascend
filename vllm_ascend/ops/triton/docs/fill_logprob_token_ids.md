@@ -1,9 +1,9 @@
-# _fill_logprob_token_ids_kernel
+# fill_logprob_token_ids
 
 ## 功能说明
 
-- 算子功能：`_fill_logprob_token_ids_kernel` 用于在 GPU/NPU 上一次性构建
-  logprob token IDs 矩阵及其有效性掩码，供 `compute_topk_scores` 在
+- 算子功能：`fill_logprob_token_ids` 在 Ascend NPU 上构建
+  logprob token IDs 矩阵及其有效性掩码，供通用的 MRV2 `compute_topk_scores` 在
   “部分请求指定了自定义 `logprob_token_ids`”（即 `max_per_req_token_ids > 0`）
   的路径下使用。它与上游 vLLM 的同名 kernel 功能一致，但针对 Ascend NPU
   修复了一个动态地址指针相关的问题（详见下文“与上游实现的差异”）。
@@ -78,7 +78,9 @@
   逻辑结果与上游完全一致，仅实现方式不同（对应源码中的注释
   “fix dynamic addr ptr by placing load inside the if-else block”）。
 
-- 候选列采用分块循环限制 UB 使用，默认 `COL_BLOCK_SIZE = 4096`；上游对应填充内核仍一次处理全部候选列。
+- 候选列采用分块循环限制 UB 使用。A5 上的长候选测试中，8192 列分块仍会触发 UB 溢出，
+  4096 列通过了 A3 和 A5 的测试，因此默认 `COL_BLOCK_SIZE = 4096`。
+- Python 入口负责分配输出、计算 grid 和选择 `PADDED_COLS`。底层 kernel 保留上游 patch 所用的启动参数。
 
 ## 参数说明
 
@@ -101,6 +103,13 @@
 
 ## 约束说明
 
+- Python 入口接受非空 batch，且至少有一列自定义或默认候选容量。`topk_indices` 为 `None`
+  表示无默认 top-k 候选。
+  所有输入应位于同一 NPU，向量连续，矩阵列跨度为 1。
+- `max_per_req_token_ids` 由调用者提供，必须覆盖当前 batch 所引用请求的自定义候选数量，
+  各请求的数量不能超过 `per_req_token_ids` 的列数。所有有效 ID 都应落在词表内。
+- Python 入口分配并返回新的 INT64 IDs 和 BOOL mask，未填充位置分别为 0 和 `False`，输入不发生原地修改。
+  底层 kernel 仅写入调用者预先分配的输出缓冲区。
 - `out_token_ids` 必须为二维 INT64，第二维至少为 `1 + num_cols`；其 dtype 与
   `sampled_token_ids` 保持一致（上游通过 `sampled_token_ids.new_zeros` 分配，即
   INT64）。
@@ -122,15 +131,20 @@
 - 该 kernel 不处理 logits 数值，只做索引搬运与掩码写入，无浮点精度问题，对比应
   逐位相等（`torch.equal`）。
 
+## JIT 特化
+
+- `NUM_TOPK` 为编译期值，以便在无默认候选时消除对 `topk_indices` 的读取。
+  不同的 top-k 请求值会产生不同特化，即使它们落在相同的 `PADDED_COLS` 桶内。
+- `PADDED_COLS` 按 2 的幂分桶，决定遍历上界。`COL_BLOCK_SIZE` 在生产路径固定为 4096，
+  `min(PADDED_COLS, COL_BLOCK_SIZE)` 决定单次载入的向量宽度。
+- grid 随 batch 大小变化。实际张量类型、行跨度和对齐仍可能影响 Triton 特化。
+
 ## 调用示例
 
 ```python
 import torch
-import triton
 
-from vllm_ascend.ops.triton.sample.fill_logprob_token_idx import (
-    _fill_logprob_token_ids_kernel,
-)
+from vllm_ascend.ops.triton.sample.fill_logprob_token_idx import fill_logprob_token_ids
 
 device = "npu"
 batch_size = 4
@@ -138,9 +152,6 @@ num_reqs = 4
 max_per_req_token_ids = 3
 num_logprobs = 5
 MAX_LOGPROB_TOKEN_IDS = 128
-
-num_cols = max(num_logprobs, max_per_req_token_ids)
-PADDED_COLS = triton.next_power_of_2(num_cols)
 
 sampled_token_ids = torch.randint(0, 1000, (batch_size,), dtype=torch.int64, device=device)
 topk_indices = torch.randint(0, 1000, (batch_size, num_logprobs), dtype=torch.int32, device=device)
@@ -156,29 +167,24 @@ per_req_token_ids[0, 0] = 100
 per_req_token_ids[0, 1] = 200
 per_req_token_ids[0, 2] = 300
 
-out_token_ids = torch.zeros(batch_size, 1 + num_cols, dtype=torch.int64, device=device)
-out_valid_mask = torch.zeros(batch_size, 1 + num_cols, dtype=torch.bool, device=device)
-
-_fill_logprob_token_ids_kernel[(batch_size,)](
-    out_token_ids,
-    out_token_ids.stride(0),
-    out_valid_mask,
-    out_valid_mask.stride(0),
+out_token_ids, out_valid_mask = fill_logprob_token_ids(
     sampled_token_ids,
     topk_indices,
-    topk_indices.stride(0),
     expanded_idx_mapping,
     num_per_req_token_ids,
     per_req_token_ids,
-    per_req_token_ids.stride(0),
-    NUM_TOPK=num_logprobs,
-    PADDED_COLS=PADDED_COLS,
+    max_per_req_token_ids,
 )
 torch.npu.synchronize()
 ```
 
-## test ut
+## 测试用例
+
+PyTorch CPU 参考逐元素比较 token IDs 与有效性掩码。内核测试允许 A2、A3 和 A5，
+大候选生产路径验证覆盖 A3 和 A5。`test_compute_topk_scores.py` 通过 MRV2 入口覆盖自定义候选、
+默认与自定义请求混合、完整词表候选以及 logits 和 logprob 两种模式。
 
 ```bash
-pytest -sv tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_fill_logprob_token_ids_kernel.py #--noconftest
+pytest -sv tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_fill_logprob_token_ids_kernel.py \
+  tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_compute_topk_scores.py
 ```

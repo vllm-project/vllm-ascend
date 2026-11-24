@@ -129,8 +129,6 @@ from vllm_ascend.worker.v2.spec_decode.rejection_sampler_utils import (  # noqa:
 # triton ops that need to be filed in ops/triton
 penalties.apply_penalties = apply_penalties
 # These modules import compute_topk_scores before this patch runs.
-# Replace their local references as well as the defining module.
-logprob.compute_topk_scores = compute_topk_scores
 prompt_logprob.compute_topk_scores = compute_topk_scores
 sampler.compute_topk_scores = compute_topk_scores
 rejection_sampler.compute_topk_scores = compute_topk_scores

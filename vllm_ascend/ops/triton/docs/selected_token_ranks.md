@@ -19,7 +19,7 @@
   5. Reduce the counting vector to a scalar and store the rank as int64.
 - **Supported modes**: The operator is intended for Atlas A2, Atlas A3, and 950PR&950DT Products in the V2 score implementation. Single-operator tests run eagerly. End-to-end model ACL Graph and MTP coverage is not established by these tests.
 
-  On the paired vLLM `24420b7a` source, standard MRV2 callers invoke `compute_topk_scores`. The Ascend patch binds that entry in the defining module and its sampler, prompt-logprob and rejection-sampler callers to `compute_topk_scores`. The rank comparison was aligned separately in [#20109](https://github.com/vllm-project/vllm-ascend/pull/20109); this score-binding change reuses that implementation.
+  On the paired vLLM `24420b7a` source, the Ascend patch binds `compute_topk_scores` in the MRV2 sampler, prompt-logprob and rejection-sampler callers. The rank comparison was aligned separately in [#20109](https://github.com/vllm-project/vllm-ascend/pull/20109), and these callers reuse that implementation.
 
 ## Parameters
 
@@ -42,7 +42,7 @@ All eight kernel arguments are required. Grid size and `multibuffer` below are f
 
 - `logits` is a two-dimensional NPU tensor with `batch_size > 0`, `vocab_size > 0`, and `logits.stride(-1) == 1`. A larger row stride is supported, provided every row exposes all `vocab_size` elements.
 - `sampled_token_ids` and `selected_token_ranks` are contiguous one-dimensional NPU tensors of length `batch_size`, on the same device as `logits`. Every selected ID must satisfy `0 <= token_id < vocab_size`; the kernel does not mask the selected-token load.
-- The current wrapper requires a nonempty batch to compute its grid and row assignment. Empty-batch handling is not added by this rank-only PR.
+- The wrapper requires a nonempty batch to compute its grid and row assignment.
 - Counts accumulate in int32; the scanned padded width must fit its positive range. The result is stored as int64, but this does not remove the internal counting limit.
 - No vocabulary alignment is required. Partial tiles, multiple tiles, and an exactly aligned vocabulary all use the same formula. `BLOCK_SIZE` must remain a valid Triton tile width; the current launcher fixes it at 8192.
 - For finite selected logits, the rank is in `[1, vocab_size]`. Ties count all equal entries; there is no token-ID tie-break. Selected negative infinity can include out-of-range lanes, as described above. NaN probability distributions are not validated by the committed tests.
@@ -55,7 +55,7 @@ All eight kernel arguments are required. Grid size and `multibuffer` below are f
 - **Differences**:
     - NPU adaptation for performance: distribute rows over the available Vector Cores and loop over `rows_per_core`, rather than launch one program per row. Keep the 8192-lane counting vector and launch with `multibuffer=False`.
     - Align the former strict `>` comparison with upstream `>=`. Retain upstream behavior without an additional padding predicate or subtraction.
-    - The output shape and dtype are unchanged. The change does not modify token sampling, logprob normalization, or the existing service bindings.
+    - `compute_topk_scores` returns one int64 rank per input row. The MRV2 binding enables these rank results in the shared score path.
 
 ## Test Cases
 

@@ -1,3 +1,4 @@
+import torch
 from vllm.triton_utils import tl, triton
 
 
@@ -55,3 +56,40 @@ def _fill_logprob_token_ids_kernel(
 
         tl.store(tid_base + col, tokens, mask=valid)
         tl.store(mask_base + col, tl.full([block_size], 1, tl.int1), mask=valid)
+
+
+def fill_logprob_token_ids(
+    sampled_token_ids: torch.Tensor,
+    topk_indices: torch.Tensor | None,
+    expanded_idx_mapping: torch.Tensor,
+    num_per_req_token_ids: torch.Tensor,
+    per_req_token_ids: torch.Tensor,
+    max_per_req_token_ids: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Pack sampled and per-request candidate IDs into new ID and mask tensors."""
+    batch_size = sampled_token_ids.shape[0]
+    num_topk = 0 if topk_indices is None else topk_indices.shape[1]
+    num_cols = max(num_topk, max_per_req_token_ids)
+    out_token_ids = sampled_token_ids.new_zeros((batch_size, 1 + num_cols))
+    out_valid_mask = torch.zeros_like(out_token_ids, dtype=torch.bool)
+
+    if topk_indices is None:
+        # The kernel does not read this pointer when NUM_TOPK is zero.
+        topk_indices = per_req_token_ids
+
+    _fill_logprob_token_ids_kernel[(batch_size,)](
+        out_token_ids,
+        out_token_ids.stride(0),
+        out_valid_mask,
+        out_valid_mask.stride(0),
+        sampled_token_ids,
+        topk_indices,
+        topk_indices.stride(0),
+        expanded_idx_mapping,
+        num_per_req_token_ids,
+        per_req_token_ids,
+        per_req_token_ids.stride(0),
+        NUM_TOPK=num_topk,
+        PADDED_COLS=triton.next_power_of_2(num_cols),
+    )
+    return out_token_ids, out_valid_mask
