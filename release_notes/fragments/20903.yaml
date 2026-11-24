@@ -1,4 +1,0 @@
-pr: 20903
-entries:
-  - category: performance
-    text: Mooncake V2 supports per-request KV pull completion, an option to retain batch pulls, and configurable transfer concurrency for both Pull and Push workers.
