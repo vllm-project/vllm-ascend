@@ -180,7 +180,7 @@ class BalanceScheduler(_SchedulerCompatBase):
         dist.all_gather(self.balance_queue, running_tensor, group=self.dp_group)
 
     def schedule(self, throttle_prefills: bool = False) -> SchedulerOutput:
-        # Ascend delta B1: delegate to upstream when balance scheduling is disabled.
+        # Delegate directly to upstream when balance scheduling is disabled.
         if not self._balance_enabled:
             return super().schedule(throttle_prefills)
         self.current_step += 1
@@ -200,7 +200,7 @@ class BalanceScheduler(_SchedulerCompatBase):
         preempted_reqs: list[Request] = []
 
         iteration_details = None
-        # Ascend delta C1: IterationDetails does not exist in vLLM v0.33.0.
+        # vLLM v0.33.0 does not define IterationDetails.
         if not vllm_version_is("0.33.0") and (
             (self.log_stats and self.observability_config.enable_logging_iteration_details)
             or self.vllm_config.profiler_config.profiler is not None
@@ -520,7 +520,7 @@ class BalanceScheduler(_SchedulerCompatBase):
                     step_skipped_waiting.appendleft(request_to_skip)
 
             num_async_kv_loads = 0
-            # Ascend delta C4: vLLM v0.33.0 SchedulerConfig lacks max_async_kv_loads_per_step.
+            # Compatibility with vLLM v0.33.0, which lacks max_async_kv_loads_per_step.
             max_async_kv_loads = get_max_async_kv_loads_per_step(self.scheduler_config) or float("inf")
             # Cleared once self.async_kv_waiting's head can't start a load.
             take_async_kv = True
@@ -537,7 +537,7 @@ class BalanceScheduler(_SchedulerCompatBase):
                         request_queue = self._next_waiting_queue(take_async_kv)
                 elif (
                     take_async_kv
-                    # Ascend delta C5: vLLM v0.33.0 SchedulerConfig lacks max_num_inflight_kv_loads.
+                    # Compatibility with vLLM v0.33.0, which lacks max_num_inflight_kv_loads.
                     and get_max_num_inflight_kv_loads(self.scheduler_config)
                     and self._pause_state == PauseState.UNPAUSED
                 ):
@@ -548,7 +548,7 @@ class BalanceScheduler(_SchedulerCompatBase):
                     break
                 if not request_queue or (not loads_only and input_budget <= draft_slots):
                     break
-                # Ascend delta B2: freeze waiting admission when any DP rank is at running cap.
+                # Keep admission balanced across DP ranks: freeze waiting admission when any rank is at running cap.
                 if max(t.item() for t in self.balance_queue) == self.max_num_running_reqs:
                     break
 
@@ -615,7 +615,7 @@ class BalanceScheduler(_SchedulerCompatBase):
                         ext_tokens, load_kv_async = self.connector.get_num_new_matched_tokens(
                             request, block_aligned_local
                         )
-                        # Ascend delta C6: vLLM v0.33.0 uses skip_reading_prefix_cache.
+                        # Compatibility with vLLM v0.33.0, which uses skip_reading_prefix_cache.
                         if should_skip_external_kv(request):
                             ext_tokens, load_kv_async = 0, False
 
@@ -1068,7 +1068,7 @@ class BalanceScheduler(_SchedulerCompatBase):
             NewRequestData.from_request(
                 req,
                 req_to_new_blocks[req.request_id].get_block_ids(),
-                # Ascend delta C7: vLLM v0.33.0 Request uses _all_token_ids for V2.
+                # Compatibility with vLLM v0.33.0, where V2 prefill tokens come from _all_token_ids.
                 get_new_request_prefill_token_ids(req),
                 uses_mrope=self.model_uses_mrope,
             )
@@ -1076,7 +1076,7 @@ class BalanceScheduler(_SchedulerCompatBase):
         ]
 
         with record_function_or_nullcontext("schedule: make_cached_request_data"):
-            # Ascend delta C3: bridge _make_cached_request_data signature across main and v0.33.0.
+            # Bridge _make_cached_request_data signature differences across vLLM versions.
             cached_reqs_data = make_cached_request_data(
                 self,
                 scheduled_running_reqs,
@@ -1133,7 +1133,7 @@ class BalanceScheduler(_SchedulerCompatBase):
             total_num_scheduled_tokens=total_num_scheduled_tokens,
             scheduled_spec_decode_tokens=scheduled_spec_decode_tokens,
             scheduled_encoder_inputs=scheduled_encoder_inputs,
-            # Ascend delta C2+C8: pass iteration_details on main, encoder stats and ec_manager_metadata on v0.33.0.
+            # Pass iteration_details on vLLM main, or encoder stats and ec_manager_metadata on v0.33.0.
             **scheduler_output_version_kwargs(self, iteration_details, scheduled_encoder_inputs),
             preempted_req_ids=self.reset_preempted_req_ids,
             # finished_req_ids is an existing state in the scheduler,

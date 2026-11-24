@@ -595,7 +595,7 @@ def _normalized_schedule_diff(cls: type[Any]) -> list[str]:
 
 @pytest.mark.skipif(
     vllm_version_is("0.33.0"),
-    reason="upstream parity diff targets the vLLM main baseline (c410543d9)",
+    reason="upstream parity diff targets the pinned vLLM main commit",
 )
 @pytest.mark.parametrize(
     ("scheduler_cls", "expected_diff"),

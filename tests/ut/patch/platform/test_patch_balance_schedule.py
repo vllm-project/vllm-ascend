@@ -26,10 +26,10 @@ What is guarded here (everything reachable from CPU UT):
   still exist;
 * the Mamba-aligned waiting path can schedule a request through the real
   upstream helper without an argument mismatch;
-* the 2 balance deltas (B1 early return, B2 waiting-loop freeze gate) remain
-  present at the expected AST positions in ``schedule()`` (intent lock; full
-  line-by-line parity with upstream ``Scheduler.schedule()`` is enforced by
-  ``tests/ut/core/test_scheduler_upstream_parity.py``).
+* the 2 balance deltas (disabled-path early return and waiting-loop freeze
+  gate) remain present at the expected AST positions in ``schedule()``
+  (intent lock; full line-by-line parity with upstream ``Scheduler.schedule()``
+  is enforced by ``tests/ut/core/test_scheduler_upstream_parity.py``).
 
 What is NOT guarded here (structurally unreachable without a real engine):
 
@@ -353,7 +353,7 @@ def test_schedule_signature_matches_installed_vllm():
 
 
 def test_balance_deltas_present_in_schedule():
-    """Lock B1 (first statement) and B2 (immediately before peek_request())."""
+    """Lock the disabled early return (first statement) and freeze gate (before peek_request())."""
     tree = ast.parse(textwrap.dedent(inspect.getsource(BalanceScheduler.schedule)))
     func = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "schedule")
     stmts = func.body
@@ -365,7 +365,7 @@ def test_balance_deltas_present_in_schedule():
     ):
         stmts = stmts[1:]
 
-    # B1: disabled-path early return must be the very first statement of
+    # Disabled-path early return must be the very first statement of
     # schedule(), before self.current_step += 1.
     assert stmts
     first_stmt = stmts[0]
@@ -374,7 +374,7 @@ def test_balance_deltas_present_in_schedule():
     assert len(first_stmt.body) == 1
     assert ast.unparse(first_stmt.body[0]) == "return super().schedule(throttle_prefills)"
 
-    # B2: the balance freeze gate must sit immediately before
+    # The balance freeze gate must sit immediately before
     # ``request = request_queue.peek_request()`` inside the waiting while-loop.
     waiting_loops = [
         node

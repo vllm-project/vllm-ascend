@@ -209,7 +209,8 @@ class DyntraLBPolicyMixin(_SchedulerBase):
             # enforced in one place. Trade-off: WAITING requests in
             # async_kv_waiting still enter LB candidates and consume one
             # admission slot while starting their load with 0 forward tokens;
-            # excluding them would starve may_load_async false positives at L2b.
+            # excluding them would starve may_load_async false positives when
+            # they fall through to non-async admission.
             return set()
 
         kv_prefetch_limit = 2 * self.max_num_running_reqs - len(self.running)
@@ -518,13 +519,13 @@ class DyntraLBScheduler(DyntraLBPolicyMixin, _SchedulerCompatBase):
         preempted_reqs: list[Request] = []
 
         iteration_details = None
-        # Ascend delta C1: IterationDetails does not exist in vLLM v0.33.0.
+        # vLLM v0.33.0 does not define IterationDetails.
         if not vllm_version_is("0.33.0") and (
             (self.log_stats and self.observability_config.enable_logging_iteration_details)
             or self.vllm_config.profiler_config.profiler is not None
         ):
             iteration_details = IterationDetails()
-        # Ascend delta L1: apply cross-rank load-balancing plan before scheduling running requests.
+        # Apply cross-rank load-balancing decisions before scheduling running requests.
         self._apply_load_balance_modifications()
 
         req_to_new_blocks: dict[str, KVCacheBlocks] = {}
@@ -840,7 +841,7 @@ class DyntraLBScheduler(DyntraLBPolicyMixin, _SchedulerCompatBase):
                     step_skipped_waiting.appendleft(request_to_skip)
 
             num_async_kv_loads = 0
-            # Ascend delta C4: vLLM v0.33.0 SchedulerConfig lacks max_async_kv_loads_per_step.
+            # Compatibility with vLLM v0.33.0, which lacks max_async_kv_loads_per_step.
             max_async_kv_loads = get_max_async_kv_loads_per_step(self.scheduler_config) or float("inf")
             # Cleared once self.async_kv_waiting's head can't start a load.
             take_async_kv = True
@@ -857,7 +858,7 @@ class DyntraLBScheduler(DyntraLBPolicyMixin, _SchedulerCompatBase):
                         request_queue = self._next_waiting_queue(take_async_kv)
                 elif (
                     take_async_kv
-                    # Ascend delta C5: vLLM v0.33.0 SchedulerConfig lacks max_num_inflight_kv_loads.
+                    # Compatibility with vLLM v0.33.0, which lacks max_num_inflight_kv_loads.
                     and get_max_num_inflight_kv_loads(self.scheduler_config)
                     and self._pause_state == PauseState.UNPAUSED
                 ):
@@ -884,7 +885,7 @@ class DyntraLBScheduler(DyntraLBPolicyMixin, _SchedulerCompatBase):
                     skip_request(request_queue)
                     continue
 
-                # Ascend delta L2a: gate non-async-kv waiting queues by DyntraLB admission.
+                # Gate ordinary and KV-holding waiting queues by the DyntraLB admission plan.
                 if request_queue is not self.async_kv_waiting and not self._can_admit_waiting_request(request):
                     skip_request(request_queue)
                     continue
@@ -937,7 +938,7 @@ class DyntraLBScheduler(DyntraLBPolicyMixin, _SchedulerCompatBase):
                         ext_tokens, load_kv_async = self.connector.get_num_new_matched_tokens(
                             request, block_aligned_local
                         )
-                        # Ascend delta C6: vLLM v0.33.0 uses skip_reading_prefix_cache.
+                        # Compatibility with vLLM v0.33.0, which uses skip_reading_prefix_cache.
                         if should_skip_external_kv(request):
                             ext_tokens, load_kv_async = 0, False
 
@@ -1070,7 +1071,7 @@ class DyntraLBScheduler(DyntraLBPolicyMixin, _SchedulerCompatBase):
                     take_async_kv = False
                     continue
 
-                # Ascend delta L2b: require DyntraLB admission before forwarding non-async requests.
+                # Require DyntraLB admission before forwarding requests that do not start an async KV load.
                 if not load_kv_async and not self._can_admit_waiting_request(request):
                     skip_request(request_queue)
                     continue
@@ -1098,7 +1099,7 @@ class DyntraLBScheduler(DyntraLBPolicyMixin, _SchedulerCompatBase):
                     # Pad new decode requests to uniform spec decoding size to
                     # preserve full cudagraph for this step.
                     # Not for diffusion where draft tokens can't be padded.
-                    # Ascend delta L3: disaggregated D nodes never mix long prefills, so padding always pays off.
+                    # Disaggregated D nodes do not mix long prefills, so uniform spec-decode padding always pays off.
                     if (
                         (self.num_spec_tokens > 0 and self.dynamic_sd_lookup is None)
                         and self.num_sampled_tokens_per_step > 0
@@ -1395,7 +1396,7 @@ class DyntraLBScheduler(DyntraLBPolicyMixin, _SchedulerCompatBase):
             NewRequestData.from_request(
                 req,
                 req_to_new_blocks[req.request_id].get_block_ids(),
-                # Ascend delta C7: vLLM v0.33.0 Request uses _all_token_ids for V2.
+                # Compatibility with vLLM v0.33.0, where V2 prefill tokens come from _all_token_ids.
                 get_new_request_prefill_token_ids(req),
                 uses_mrope=self.model_uses_mrope,
             )
@@ -1403,7 +1404,7 @@ class DyntraLBScheduler(DyntraLBPolicyMixin, _SchedulerCompatBase):
         ]
 
         with record_function_or_nullcontext("schedule: make_cached_request_data"):
-            # Ascend delta C3: bridge _make_cached_request_data signature across main and v0.33.0.
+            # Bridge _make_cached_request_data signature differences across vLLM versions.
             cached_reqs_data = make_cached_request_data(
                 self,
                 scheduled_running_reqs,
@@ -1460,7 +1461,7 @@ class DyntraLBScheduler(DyntraLBPolicyMixin, _SchedulerCompatBase):
             total_num_scheduled_tokens=total_num_scheduled_tokens,
             scheduled_spec_decode_tokens=scheduled_spec_decode_tokens,
             scheduled_encoder_inputs=scheduled_encoder_inputs,
-            # Ascend delta C2+C8: pass iteration_details on main, encoder stats and ec_manager_metadata on v0.33.0.
+            # Pass iteration_details on vLLM main, or encoder stats and ec_manager_metadata on v0.33.0.
             **scheduler_output_version_kwargs(self, iteration_details, scheduled_encoder_inputs),
             preempted_req_ids=self.reset_preempted_req_ids,
             # finished_req_ids is an existing state in the scheduler,
@@ -1508,7 +1509,7 @@ class DyntraLBScheduler(DyntraLBPolicyMixin, _SchedulerCompatBase):
 
         with record_function_or_nullcontext("schedule: update_after_schedule"):
             self._update_after_schedule(scheduler_output)
-        # Ascend delta L4: emit optional DyntraLB scheduler diagnostics.
+        # Emit optional DyntraLB scheduler diagnostics.
         if self._enable_diagnostics:
             print_scheduler_summary(self, scheduler_output)
         return scheduler_output

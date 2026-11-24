@@ -229,15 +229,15 @@ class RecomputeScheduler(_SchedulerCompatBase):
         preempted_reqs: list[Request] = []
 
         iteration_details = None
-        # Ascend delta C1: IterationDetails does not exist in vLLM v0.33.0.
+        # vLLM v0.33.0 does not define IterationDetails.
         if not vllm_version_is("0.33.0") and (
             (self.log_stats and self.observability_config.enable_logging_iteration_details)
             or self.vllm_config.profiler_config.profiler is not None
         ):
             iteration_details = IterationDetails()
-        # Ascend delta R1: track requests returned to P for recomputation this step.
+        # Track requests returned to P for recomputation in this step.
         self._recomputed_reqs: list[RecomputeReqInfo] = []
-        # Ascend delta R2: apply cross-rank DyntraLB decisions when mixed in.
+        # Apply cross-rank DyntraLB decisions when mixed in.
         self._apply_load_balance_modifications()
 
         req_to_new_blocks: dict[str, KVCacheBlocks] = {}
@@ -460,7 +460,7 @@ class RecomputeScheduler(_SchedulerCompatBase):
                         self.current_step,
                     )
 
-                    # Ascend delta R3: offload KV or return to P before local preemption.
+                    # Offload KV or return the request to P for recomputation before local preemption.
                     locally_preempted = self._preempt_or_recompute(
                         preempted_req,
                         scheduled_timestamp,
@@ -536,7 +536,7 @@ class RecomputeScheduler(_SchedulerCompatBase):
             assert len(scheduled_loras) <= self.lora_config.max_loras
 
         # Next, schedule the WAITING requests.
-        # Ascend delta R4: skip waiting admission when requests were returned to P.
+        # Skip waiting admission when any running request was preempted or returned to P.
         if not preempted_reqs and not self._recomputed_reqs and self._pause_state != PauseState.PAUSED_ALL:
             if self.cache_aware_window and not defer_prefills:
                 self._reorder_waiting_by_cached_prefix()
@@ -561,7 +561,7 @@ class RecomputeScheduler(_SchedulerCompatBase):
                     step_skipped_waiting.appendleft(request_to_skip)
 
             num_async_kv_loads = 0
-            # Ascend delta C4: vLLM v0.33.0 SchedulerConfig lacks max_async_kv_loads_per_step.
+            # Compatibility with vLLM v0.33.0, which lacks max_async_kv_loads_per_step.
             max_async_kv_loads = get_max_async_kv_loads_per_step(self.scheduler_config) or float("inf")
             # Cleared once self.async_kv_waiting's head can't start a load.
             take_async_kv = True
@@ -578,7 +578,7 @@ class RecomputeScheduler(_SchedulerCompatBase):
                         request_queue = self._next_waiting_queue(take_async_kv)
                 elif (
                     take_async_kv
-                    # Ascend delta C5: vLLM v0.33.0 SchedulerConfig lacks max_num_inflight_kv_loads.
+                    # Compatibility with vLLM v0.33.0, which lacks max_num_inflight_kv_loads.
                     and get_max_num_inflight_kv_loads(self.scheduler_config)
                     and self._pause_state == PauseState.UNPAUSED
                 ):
@@ -605,7 +605,7 @@ class RecomputeScheduler(_SchedulerCompatBase):
                     skip_request(request_queue)
                     continue
 
-                # Ascend delta R5a: gate non-async-kv waiting queues by DyntraLB admission.
+                # Gate ordinary and KV-holding waiting queues by the DyntraLB admission plan.
                 if request_queue is not self.async_kv_waiting and not self._can_admit_waiting_request(request):
                     skip_request(request_queue)
                     continue
@@ -658,7 +658,7 @@ class RecomputeScheduler(_SchedulerCompatBase):
                         ext_tokens, load_kv_async = self.connector.get_num_new_matched_tokens(
                             request, block_aligned_local
                         )
-                        # Ascend delta C6: vLLM v0.33.0 uses skip_reading_prefix_cache.
+                        # Compatibility with vLLM v0.33.0, which uses skip_reading_prefix_cache.
                         if should_skip_external_kv(request):
                             ext_tokens, load_kv_async = 0, False
 
@@ -791,7 +791,7 @@ class RecomputeScheduler(_SchedulerCompatBase):
                     take_async_kv = False
                     continue
 
-                # Ascend delta R5b: require DyntraLB admission before forwarding non-async requests.
+                # Require DyntraLB admission before forwarding requests that do not start an async KV load.
                 if not load_kv_async and not self._can_admit_waiting_request(request):
                     skip_request(request_queue)
                     continue
@@ -819,7 +819,7 @@ class RecomputeScheduler(_SchedulerCompatBase):
                     # Pad new decode requests to uniform spec decoding size to
                     # preserve full cudagraph for this step.
                     # Not for diffusion where draft tokens can't be padded.
-                    # Ascend delta R6: disaggregated D nodes never mix long prefills, so padding always pays off.
+                    # Disaggregated D nodes do not mix long prefills, so uniform spec-decode padding always pays off.
                     if (
                         (self.num_spec_tokens > 0 and self.dynamic_sd_lookup is None)
                         and self.num_sampled_tokens_per_step > 0
@@ -1131,7 +1131,7 @@ class RecomputeScheduler(_SchedulerCompatBase):
             NewRequestData.from_request(
                 req,
                 req_to_new_blocks[req.request_id].get_block_ids(),
-                # Ascend delta C7: vLLM v0.33.0 Request uses _all_token_ids for V2.
+                # Compatibility with vLLM v0.33.0, where V2 prefill tokens come from _all_token_ids.
                 get_new_request_prefill_token_ids(req),
                 uses_mrope=self.model_uses_mrope,
             )
@@ -1139,7 +1139,7 @@ class RecomputeScheduler(_SchedulerCompatBase):
         ]
 
         with record_function_or_nullcontext("schedule: make_cached_request_data"):
-            # Ascend delta C3: bridge _make_cached_request_data signature across main and v0.33.0.
+            # Bridge _make_cached_request_data signature differences across vLLM versions.
             cached_reqs_data = make_cached_request_data(
                 self,
                 scheduled_running_reqs,
@@ -1189,7 +1189,7 @@ class RecomputeScheduler(_SchedulerCompatBase):
         if self.dynamic_sd_lookup is not None and len(num_scheduled_tokens) > 0:
             num_spec_tokens_to_schedule = self.dynamic_sd_lookup[len(num_scheduled_tokens)]
 
-        # Ascend delta R7: return RecomputeSchedulerOutput with recomputed_reqs metadata.
+        # Return RecomputeSchedulerOutput so workers receive recomputed_reqs metadata.
         scheduler_output = RecomputeSchedulerOutput(
             scheduled_new_reqs=new_reqs_data,
             scheduled_cached_reqs=cached_reqs_data,
@@ -1197,7 +1197,7 @@ class RecomputeScheduler(_SchedulerCompatBase):
             total_num_scheduled_tokens=total_num_scheduled_tokens,
             scheduled_spec_decode_tokens=scheduled_spec_decode_tokens,
             scheduled_encoder_inputs=scheduled_encoder_inputs,
-            # Ascend delta C2+C8: pass iteration_details on main, encoder stats and ec_manager_metadata on v0.33.0.
+            # Pass iteration_details on vLLM main, or encoder stats and ec_manager_metadata on v0.33.0.
             **scheduler_output_version_kwargs(self, iteration_details, scheduled_encoder_inputs),
             preempted_req_ids=self.reset_preempted_req_ids,
             # finished_req_ids is an existing state in the scheduler,
@@ -1246,7 +1246,7 @@ class RecomputeScheduler(_SchedulerCompatBase):
 
         with record_function_or_nullcontext("schedule: update_after_schedule"):
             self._update_after_schedule(scheduler_output)
-        # Ascend delta R8: emit optional DyntraLB diagnostics when combined.
+        # Emit optional DyntraLB scheduler diagnostics when combined.
         if getattr(self, "_enable_diagnostics", False):
             print_scheduler_summary(self, scheduler_output)
         return scheduler_output

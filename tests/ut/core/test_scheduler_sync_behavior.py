@@ -145,12 +145,12 @@ def _empty_runner_output(
 
 
 # ---------------------------------------------------------------------------
-# Item 3: BalanceScheduler delegation & rank-snapshot freeze/resume
+# BalanceScheduler delegation & rank-snapshot freeze/resume
 # ---------------------------------------------------------------------------
 
 
 def test_balance_disabled_delegates_to_upstream_and_increments_step_once(monkeypatch):
-    """When disabled, B1 delegates directly to upstream and increments current_step once."""
+    """When disabled, BalanceScheduler delegates directly to upstream and increments current_step once."""
     scheduler = _make_scheduler(BalanceScheduler, with_connector=False, balance_enabled=False)
     upstream_calls = 0
     orig_upstream = _UPSTREAM_SCHEDULER.schedule
@@ -230,7 +230,7 @@ def test_balance_rank_snapshot_freezes_waiting_and_async_loads_then_resumes():
 
 
 # ---------------------------------------------------------------------------
-# Item 4: v0.33.0 Score encoder cache metadata delivery
+# v0.33.0 Score encoder cache metadata delivery
 # ---------------------------------------------------------------------------
 
 
@@ -280,14 +280,14 @@ def test_v033_score_ec_manager_metadata_delivered_once_across_schedulers(schedul
 
 
 # ---------------------------------------------------------------------------
-# Item 5: DyntraLB KV entrypoints & admission behavior (Section 6 & 8.2.5)
+# DyntraLB KV entrypoints & admission behavior
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.skipif(vllm_version_is("0.33.0"), reason="async KV load caps require vLLM main")
 @pytest.mark.parametrize("scheduler_cls", [DyntraLBScheduler, DyntraLBRecomputeScheduler])
 def test_dyntra_lb_capped_async_kv_load_acceptance(monkeypatch, scheduler_cls):
-    """Section 6 acceptance scenario: per-step cap=1, inflight cap=2."""
+    """Verify DyntraLB async KV load throttling with per-step cap=1 and inflight cap=2."""
     block_size = 16
     scheduler = _make_scheduler(
         scheduler_cls,
@@ -695,7 +695,7 @@ def test_dyntra_lb_post_plan_arrival_is_not_admitted():
 
 
 # ---------------------------------------------------------------------------
-# Item 6: RecomputeScheduler end-to-end schedule() + update_from_output()
+# RecomputeScheduler end-to-end schedule() + update_from_output()
 # ---------------------------------------------------------------------------
 
 
@@ -765,7 +765,7 @@ def test_recompute_schedule_offload_failure_notifies_owning_client_once(monkeypa
     connector.request_finished.return_value = (False, None)
     scheduler.connector = connector
 
-    # Add a fresh waiting request to also verify R4 blocks waiting admission
+    # Add a fresh waiting request to also verify waiting admission is skipped
     # on a step that emitted recomputed_reqs.
     waiter = create_request(3, num_tokens=4, block_size=4)
     scheduler.add_request(waiter)
@@ -815,7 +815,7 @@ def test_recompute_schedule_finegrained_tp_aborts_without_recompute_signal(monke
 
 
 # ---------------------------------------------------------------------------
-# Item 7: BatchJobAware with platform config (Balance on & off)
+# BatchJobAware with platform config (Balance on & off)
 # ---------------------------------------------------------------------------
 
 
@@ -900,7 +900,7 @@ def test_batch_job_aware_blocks_unadmittable_batch_and_admits_interactive(balanc
 
 
 # ---------------------------------------------------------------------------
-# Item 8: ShortRequestFirst x Balance x cache_aware_admission_window (PR-B)
+# ShortRequestFirst x Balance x cache_aware_admission_window
 # ---------------------------------------------------------------------------
 
 
@@ -915,7 +915,7 @@ def test_batch_job_aware_blocks_unadmittable_batch_and_admits_interactive(balanc
             marks=pytest.mark.xfail(
                 strict=True,
                 reason=(
-                    "Blocked by PR-B: ShortRequestFirstRequestQueue.remove_requests() "
+                    "ShortRequestFirstRequestQueue.remove_requests() "
                     "drops _long_enqueue_at during cache-aware prefix reordering, "
                     "resetting aged long-request wait time."
                 ),
@@ -998,7 +998,7 @@ def test_short_request_first_aging_under_cache_aware_window(
 
 
 # ---------------------------------------------------------------------------
-# Item 9: Async KV full lifecycle across all schedulers & cap combinations
+# Async KV full lifecycle across all schedulers & cap combinations
 # ---------------------------------------------------------------------------
 
 
