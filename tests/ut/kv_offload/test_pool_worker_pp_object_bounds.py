@@ -68,28 +68,30 @@ def test_pp_physical_copies_fit_allocated_object(layer_entries, offset, block_id
     assert copied_bytes == sum(worker.group_block_len[0])
     assert worker.layerwise_key_layers == len(layer_entries)
     assert builder.page_size_bytes == allocated
-    # The byte origin is unchanged; only an insufficient object grows.
-    assert builder.layer_byte_offset == offset * (copied_bytes // len(layer_entries))
+    # Dense regions: each PP stage owns its @pp{rank} object and packs its
+    # local layers from offset 0, so the region is exactly the payload.
+    assert allocated == copied_bytes
+    assert builder.layer_byte_offset == 0
 
 
 @pytest.mark.parametrize("dcp_rank", range(4))
-def test_dcp_stride_covers_extended_stage_before_alignment(dcp_rank):
+def test_dcp_stride_keeps_hugepage_aligned_dense_shards(dcp_rank):
     mib = 1024 * 1024
     worker = _worker([[mib]] * 37, dcp_size=4, dcp_rank=dcp_rank)
     builder = worker._build_group_layer_builders()[0]
     allocated = worker._global_group_alloc_size(0)
-    # 78 MiB formerly aligned exactly; the physical stage needs 79 MiB.
-    assert allocated == 4 * 80 * mib
+    # 37 MiB of dense payload per shard, aligned up to the 2 MiB hugepage.
+    assert allocated == 4 * 38 * mib
     stride = allocated // 4
     base = 1_000_000_000
     for layer in range(37):
         _, sizes, gvas = builder._build_transfer_arrays(np.array([0]), np.array([base]), layer)
         assert np.all(gvas >= base + dcp_rank * stride)
         assert np.all(gvas + sizes <= base + (dcp_rank + 1) * stride)
-    assert builder.layer_byte_offset == dcp_rank * stride + 42 * mib
+    assert builder.layer_byte_offset == dcp_rank * stride
 
 
-def test_multigroup_layout_with_sufficient_capacity_is_unchanged():
+def test_multigroup_layout_uses_dense_per_group_regions():
     worker = _worker([[32]] * 16, offset=32, total_layers=61)
     worker.num_layers = 32
     worker.num_kv_cache_groups = 2
@@ -99,9 +101,11 @@ def test_multigroup_layout_with_sufficient_capacity_is_unchanged():
     worker.group_kv_caches_base_addr[1] = [30_000_000 + i * 1000 for i in range(16)]
     worker.group_layer_cache_entry_offsets[1] = list(range(17))
     builders = worker._build_group_layer_builders()
+    # Each group owns a dense region of exactly its own layer payload; the
+    # model's total layer count no longer inflates either region.
     for group, size in enumerate([32, 64]):
-        assert builders[group].page_size_bytes == 61 * size
-        assert builders[group].layer_byte_offset == 32 * size
+        assert builders[group].page_size_bytes == 16 * size
+        assert builders[group].layer_byte_offset == 0
     assert worker.layerwise_key_layers == 32
 
 
@@ -112,12 +116,38 @@ def test_block_key_layout_keeps_stage_local_object():
     assert builder.layer_byte_offset == 0
 
 
+def test_hybrid_multigroup_pp1_regions_match_group_payload():
+    # Qwen3.6-style hybrid: a 10-layer full-attention KV group and a 30-layer
+    # GDN state group out of 41 physical layers. The legacy
+    # per_layer x total_layers sizing over-allocated 4.1x / 1.37x the real
+    # payload; dense regions hold exactly each group's own bytes.
+    kib, mib = 1024, 1024 * 1024
+    worker = _worker([[128 * kib]] * 10, offset=0, total_layers=41)
+    worker.pp_size = 1
+    worker.num_layers = 41
+    worker.num_kv_cache_groups = 2
+    worker.group_num_layers = {0: 10, 1: 30}
+    worker.group_block_len[1] = [mib] * 30
+    worker.group_block_stride[1] = [2 * mib] * 30
+    worker.group_kv_caches_base_addr[1] = [50_000_000 + i * 10_000_000 for i in range(30)]
+    worker.group_layer_cache_entry_offsets[1] = list(range(31))
+    builders = worker._build_group_layer_builders()
+    assert worker._global_group_alloc_size(0) == 10 * 128 * kib
+    assert worker._global_group_alloc_size(1) == 30 * mib
+    assert builders[0].page_size_bytes == 10 * 128 * kib
+    assert builders[1].page_size_bytes == 30 * mib
+    assert builders[0].layer_byte_offset == 0
+    assert builders[1].layer_byte_offset == 0
+
+
 @pytest.mark.parametrize("total_layers", [None, 0])
 def test_missing_global_metadata_preserves_local_fallback(total_layers):
     worker = _worker([[13, 7], [29]], total_layers=total_layers)
     assert worker._global_group_alloc_size(0) == 49
 
 
-def test_existing_round_up_rule_is_preserved():
+def test_dense_region_uses_exact_payload_sum():
+    # Non-uniform per-layer bytes: the dense region is the exact byte sum,
+    # not the per-layer average rounded up to the layer count.
     worker = _worker([[2], [1]], offset=0, total_layers=2)
-    assert worker._global_group_alloc_size(0) == 4
+    assert worker._global_group_alloc_size(0) == 3
