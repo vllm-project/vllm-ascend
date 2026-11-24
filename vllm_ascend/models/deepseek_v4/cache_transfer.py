@@ -13,12 +13,12 @@ def transfer_cache_views(caches: dict[str, object]) -> dict[str, object]:
     """
     selected = {}
     for name, cache in caches.items():
-        if not isinstance(cache, (tuple, list)) or len(cache) != 3:
+        if not name.endswith(".indexer.k_cache") or not isinstance(cache, (tuple, list)) or len(cache) != 3:
             selected[name] = cache
             continue
         data, scale, full = cache
-        if not name.endswith(".indexer.k_cache") or not all(isinstance(t, torch.Tensor) for t in cache):
-            raise ValueError(f"Unrecognized three-component DeepSeek-V4 cache {name}.")
+        if not all(isinstance(t, torch.Tensor) for t in cache):
+            raise ValueError(f"Unrecognized three-component indexer cache {name}.")
         stride = data.stride(0) * data.element_size()
         data_bytes = data[0].numel() * data.element_size()
         scale_bytes = scale[0].numel() * scale.element_size()
@@ -32,6 +32,6 @@ def transfer_cache_views(caches: dict[str, object]) -> dict[str, object]:
             and full[0].numel() * full.element_size() == data_bytes + scale_bytes
             and data_bytes + scale_bytes <= stride
         ):
-            raise ValueError(f"DeepSeek-V4 indexer transfer views are not disjoint payload and scales: {name}")
+            raise ValueError(f"Indexer transfer views are not disjoint payload and scales: {name}")
         selected[name] = (data, scale)
     return selected

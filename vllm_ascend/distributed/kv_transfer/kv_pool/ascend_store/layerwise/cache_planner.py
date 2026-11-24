@@ -349,4 +349,18 @@ def plan_layerwise_cache_reuse(
         raise ValueError("Layerwise offload requires device-resident cache tensors.")
     if dsv4:
         layout = finalize_deepseek_v4_reuse_layout(vllm_config, kv_cache_config, layout)
+    if _is_mooncake(extra_config):
+        windows = {}
+        for group_id, group in enumerate(kv_cache_config.kv_cache_groups):
+            if layout.reused_cache_names.isdisjoint(group.layer_names):
+                continue
+            specs = [planner.spec_by_entry[name] for name in group.layer_names]
+            if specs and all(getattr(spec, "sliding_window", None) is not None for spec in specs):
+                windows[group_id] = max(
+                    spec.sliding_window + (getattr(spec, "extra_retained_tokens", 0) or 0) for spec in specs
+                )
+        kv_cache_config.block_key_prefill_windows = windows
+        kv_cache_config.block_key_continuation_windows = (
+            windows if vllm_config.speculative_config is None else {}
+        )
     return layout

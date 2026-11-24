@@ -234,6 +234,7 @@ class DSAAttention(nn.Module, AttentionLayerBase):
             head_size=cached_head_size,
             dtype=kv_cache_dtype,
             model_version="deepseek_v4",
+            transfer_separate_page_views=True,
             cache_dtype_str=vllm_config.cache_config.cache_dtype,
             **ratio_kwargs,
         )

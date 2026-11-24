@@ -63,19 +63,18 @@ def _load_entries(worker, request, group, hashes, mask):
         return [(expected, index)]
 
     config = getattr(worker, "kv_cache_config", None)
-    tracks_pages = running and group in getattr(config, "block_key_checkpoint_groups", ())
     live_window = running and group in getattr(config, "block_key_prefill_windows", {})
     first = _continuation_window_start(worker, group, tokens, size, request) if live_window else None
     checkpoint = getattr(worker, "_offload_active_pages", {}).get(
         (request.req_id, request.layerwise_request_id, group)
-    ) if tracks_pages else None
+    ) if live_window else None
     saved_pages = checkpoint[1] if checkpoint is not None else snapshots
     entries = []
     for index in range(first or 0, end):
-        if tracks_pages:
+        if live_window:
             if mask is not None and index < len(mask) and not mask[index] and index not in saved_pages:
                 continue
-        elif not live_window and not selected(mask, index):
+        elif index not in snapshots and not selected(mask, index):
             continue
         if ids[index] == 0:
             if live_window:
@@ -133,10 +132,9 @@ def _save_entries(worker, request, view, group, hashes, snapshots):
         raise ValueError("Mooncake offload save has no allocated checkpoint or block")
     mask = request.store_masks[group] if request.store_masks is not None else None
     snapshot_start = None
-    config = getattr(worker, "kv_cache_config", None)
-    if not recurrent and group in getattr(config, "block_key_checkpoint_groups", ()):
-        # The public prefix ends at a boundary common to all cache groups.
-        transfer_size = worker.cache_transfer_granularity
+    transfer_size = getattr(worker, "cache_transfer_granularity", size)
+    if not recurrent and size < transfer_size:
+        # A transfer unit can contain several complete pages of this group.
         public_tokens = min(tokens, len(hashes) * size) // transfer_size * transfer_size
         snapshot_start = public_tokens // size
     entries = []
@@ -205,7 +203,7 @@ def prepare_offload_sessions(worker: LayerwiseKVPoolWorker, requests: list[ReqMe
     put_slots: list[tuple[ReqMeta, str, int | None, int]] = []
     pending = {}
     config = getattr(worker, "kv_cache_config", None)
-    checkpoint_groups = getattr(config, "block_key_checkpoint_groups", ())
+    window_groups = getattr(config, "block_key_prefill_windows", {})
     next_snapshots: dict[str, dict[int, dict[int, str]]] = {}
     for request in requests:
         load_spec = request.load_spec
@@ -227,7 +225,7 @@ def prepare_offload_sessions(worker: LayerwiseKVPoolWorker, requests: list[ReqMe
             view.load_key_block_offset = 0
             hashes = get_block_hashes(request.block_hashes, worker.grouped_block_size[group], worker.hash_block_size)
             mask = masks[group] if masks is not None else None
-            if cached != aligned and running and group not in checkpoint_groups:
+            if cached != aligned and running and group not in window_groups:
                 mask = None
             entries = _load_entries(worker, request, group, hashes, mask)
             view.load_block_keys = [None] * (max((index for _, index in entries), default=-1) + 1)
@@ -237,7 +235,7 @@ def prepare_offload_sessions(worker: LayerwiseKVPoolWorker, requests: list[ReqMe
             group_snapshots = snapshots.setdefault(group, previous.get(group, {}).copy())
             saves = _save_entries(worker, request, view, group, hashes, group_snapshots)
             if (
-                group in checkpoint_groups
+                group in window_groups
                 and not worker.group_uses_align_state[group]
                 and request.can_save
                 and request.layerwise_request_id

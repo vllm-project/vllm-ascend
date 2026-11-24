@@ -148,6 +148,7 @@ class AscendDeepseekV4SWACache(VllmDeepseekV4SWACache):
             sliding_window=self.window_size,
             cache_dtype_str=self.cache_config.cache_dtype,
             model_version="deepseek_v4",
+            transfer_separate_page_views=True,
             alignment=None,
         )
 

@@ -42,6 +42,7 @@ class LayerwiseReuseLayout:
     num_prefetch_layers: int
     reused_cache_names: frozenset[str]
     draft_entry_names: frozenset[str]
+    separate_slot_backings: bool = False
 
     @property
     def has_layer_reuse(self) -> bool:

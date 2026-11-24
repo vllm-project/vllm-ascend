@@ -46,7 +46,10 @@ def component_layout_identity(groups) -> str:
             raise ValueError("DSV4 layout identity requires unprojected component specs")
         for name in sorted(group.layer_names):
             spec = group.kv_cache_spec.kv_cache_specs[name]
-            components.append((group_id, name, type(spec).__name__, asdict(spec), spec.page_size_bytes))
+            spec_fields = asdict(spec)
+            # The view-selection policy does not change existing object bytes.
+            spec_fields.pop("transfer_separate_page_views", None)
+            components.append((group_id, name, type(spec).__name__, spec_fields, spec.page_size_bytes))
     payload = json.dumps(("dsv4-components-v2", components), sort_keys=True, default=str)
     return hashlib.sha256(payload.encode()).hexdigest()
 
@@ -90,7 +93,6 @@ def prepare_deepseek_v4_reuse_config(config, cache_config):
 def finalize_deepseek_v4_reuse_layout(config, cache_config, layout):
     """Use one backing per slot and attach the window and transfer metadata."""
     groups = cache_config.kv_cache_groups
-    specs = {name: group.kv_cache_spec.kv_cache_specs[name] for group in groups for name in group.layer_names}
     num_blocks = cache_config.num_blocks
     if layout.has_layer_reuse:
         # The DSV4 allocator uses an independent, device-aligned backing per
@@ -105,21 +107,7 @@ def finalize_deepseek_v4_reuse_layout(config, cache_config, layout):
             )
             for slot in layout.kv_cache_tensors
         )
-        layout = replace(layout, kv_cache_tensors=tensors)
-    cache_config.dsv4_shared_cache_names = tuple(sorted(layout.reused_cache_names))
-    # Block-key checkpoints keep the exact keys used by each component group,
-    # including complete pages in an unpublished transfer unit.
-    cache_config.block_key_checkpoint_groups = frozenset(range(len(groups)))
-    cache_config.block_key_prefill_windows = {
-        group_id: max(
-            specs[name].sliding_window + (getattr(specs[name], "extra_retained_tokens", 0) or 0)
-            for name in group.layer_names
-        )
-        for group_id, group in enumerate(groups)
-        if all(getattr(specs[name], "sliding_window", None) is not None for name in group.layer_names)
-    }
-    if getattr(config, "speculative_config", None) is None:
-        cache_config.block_key_continuation_windows = cache_config.block_key_prefill_windows
+        layout = replace(layout, kv_cache_tensors=tensors, separate_slot_backings=True)
     cache_config.dsv4_component_identity = component_layout_identity(groups)
     cache_config.kv_cache_allocation_alignment = 2 * 1024 * 1024
     return layout

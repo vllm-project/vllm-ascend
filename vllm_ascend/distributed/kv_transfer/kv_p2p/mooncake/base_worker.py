@@ -559,7 +559,6 @@ class MooncakeBaseConnectorWorker(MooncakeTransferAddressMixin):
                 )
             ):
                 raise ValueError(f"KV sharing layer {layer_name!r} must bind to the same cache as {target_name!r}.")
-    _preserve_component_pages = False
 
     def register_kv_caches(
         self,
@@ -580,7 +579,6 @@ class MooncakeBaseConnectorWorker(MooncakeTransferAddressMixin):
         )
         kvpp_rank = self.pcp_rank * self.tp_size + self.tp_rank
         layer_names: list[str] = []
-        dsv4 = self._preserve_component_pages
         layer_block_sizes: list[int] = []
         group_indices: list[int] = []
         kv_caches_base_addr: list[list[int]] = []
@@ -620,7 +618,8 @@ class MooncakeBaseConnectorWorker(MooncakeTransferAddressMixin):
                 caches = as_kv_cache_tensors(cache_or_caches)
                 shared_page_metadata = (
                     self._get_shared_page_metadata(caches)
-                    if not dsv4 and isinstance(spec, (MLAAttentionSpec, SlidingWindowMLASpec))
+                    if isinstance(spec, (MLAAttentionSpec, SlidingWindowMLASpec))
+                    and not getattr(spec, "transfer_separate_page_views", False)
                     else None
                 )
                 if shared_page_metadata is not None and _is_component_major_mla_binding(spec, caches):
@@ -647,7 +646,7 @@ class MooncakeBaseConnectorWorker(MooncakeTransferAddressMixin):
                     for cache in caches:
                         tensor_num_blocks = cache.shape[0]
                         element_size = cache.element_size()
-                        block_shape = tuple(cache.shape[1:]) if dsv4 else self._get_transfer_block_shape(spec, cache)
+                        block_shape = self._get_transfer_block_shape(spec, cache)
                         base_addrs.append(cache.data_ptr())
                         block_strides.append(cache.stride(0) * element_size)
                         block_lens.append(math.prod(block_shape) * element_size)

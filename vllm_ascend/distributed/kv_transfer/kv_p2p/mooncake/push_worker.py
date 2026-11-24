@@ -207,7 +207,6 @@ class MooncakePushConnectorWorker(MooncakeBaseConnectorWorker):
     def __init__(self, vllm_config, engine_id, kv_cache_config) -> None:
         super().__init__(vllm_config, engine_id, kv_cache_config)
         self._is_dsv4 = is_deepseek_v4_cache(getattr(kv_cache_config, "kv_cache_groups", ()))
-        self._preserve_component_pages = self._is_dsv4
         if self._is_dsv4:
             parallel = vllm_config.parallel_config
             if (
@@ -244,8 +243,7 @@ class MooncakePushConnectorWorker(MooncakeBaseConnectorWorker):
         self._zmq_context: Context | None = None
 
     def register_kv_caches(self, kv_caches: dict[str, "torch.Tensor | list[torch.Tensor]"]) -> None:
-        if self._preserve_component_pages:
-            kv_caches = transfer_cache_views(kv_caches)
+        kv_caches = transfer_cache_views(kv_caches)
         super().register_kv_caches(kv_caches)
         if self.kv_transfer_config.is_kv_producer:
             self._device = torch.npu.current_device()
@@ -263,11 +261,11 @@ class MooncakePushConnectorWorker(MooncakeBaseConnectorWorker):
             for name, layer_index in self._layer_index_by_name.items():
                 self._layer_names_by_index.setdefault(layer_index, []).append(name)
             self._register_composite_layer_aliases()
-            if self._is_dsv4:
-                for name in self._layer_indices:
-                    if name.endswith(".self_attn.swa_cache"):
-                        hook = name.removesuffix(".swa_cache") + ".attn"
-                        self._layer_index_by_name.setdefault(hook, self._layer_index_by_name[name])
+            for name in self._layer_indices:
+                spec = self.kv_cache_specs[self.layer_name_to_spec_index[name]]
+                if isinstance(spec, SlidingWindowMLASpec) and name.endswith(".self_attn.swa_cache"):
+                    hook = name.removesuffix(".swa_cache") + ".attn"
+                    self._layer_index_by_name.setdefault(hook, self._layer_index_by_name[name])
             # Layer numbers do not establish execution order across models.
             # Multiple namespaces finalize at wait_for_save after draft execution.
             namespaces = {namespace for namespace, _ in self._layer_names_by_index}
@@ -512,8 +510,7 @@ class MooncakePushConnectorWorker(MooncakeBaseConnectorWorker):
             )
             return (0, 0, 1) if matched else None
         whole = (
-            self._is_dsv4
-            or isinstance(spec, (MLAAttentionSpec, SlidingWindowMLASpec))
+            isinstance(spec, (MLAAttentionSpec, SlidingWindowMLASpec))
             or is_circular_kv_cache_spec(spec)
         )
         if whole:
@@ -693,8 +690,7 @@ class MooncakePushConnectorWorker(MooncakeBaseConnectorWorker):
                 assert partition is not None
                 local_offset, remote_offset, heads = partition
                 whole = (
-                    self._is_dsv4
-                    or isinstance(spec, (MLAAttentionSpec, SlidingWindowMLASpec))
+                    isinstance(spec, (MLAAttentionSpec, SlidingWindowMLASpec))
                     or is_circular_kv_cache_spec(spec)
                 )
                 local = self.transfer_metadata
@@ -708,10 +704,12 @@ class MooncakePushConnectorWorker(MooncakeBaseConnectorWorker):
                         remote_len //= pp.block_shapes[remote_index][cache_index][0]
                     if local_len != remote_len:
                         raise ValueError("P/D cache slice lengths differ")
-                    if self._is_dsv4 and local_len > min(
-                        local.block_strides[local_index][cache_index], pp.block_strides[remote_index][cache_index]
-                    ):
-                        raise ValueError("DSV4 Push payload exceeds physical page stride")
+                    local_stride = local.block_strides[local_index][cache_index]
+                    remote_stride = pp.block_strides[remote_index][cache_index]
+                    if (local_offset + heads) * local_len > local_stride or (
+                        remote_offset + heads
+                    ) * remote_len > remote_stride:
+                        raise ValueError("Push payload exceeds physical page stride")
                     for req in batch.requests:
                         for local_block, remote_block in zip(req.local_block_ids, req.remote_block_ids, strict=True):
                             src_list.append(

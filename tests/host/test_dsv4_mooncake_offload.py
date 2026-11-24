@@ -209,14 +209,15 @@ def test_component_slots_and_physical_capacity(ns, buffers):
     layout = plan.layerwise_reuse_layout
     assert layout.independent_layers == [0, 1]
     assert layout.has_layer_reuse
+    assert plan.block_key_prefill_windows == {1: 128}
     assert any(len(sources) > 1 for sources in layout.prefetch_layer_map.values())
     for layer, sources in layout.prefetch_layer_map.items():
         assert all(source < layer for source in sources)
     owners = {name: index for index, tensor in enumerate(plan.kv_cache_tensors) for name in tensor.layers}
     assert len(owners) == sum(len(group.layer_names) for group in gs)
     for suffix in (".self_attn", ".swa_cache", ".indexer.k_cache", ".compressor.state_cache"):
-        assert any(name.endswith(suffix) for name in plan.dsv4_shared_cache_names)
-    assert all(layout.cache_layer_indices[name] >= 2 for name in plan.dsv4_shared_cache_names)
+        assert any(name.endswith(suffix) for name in plan.layerwise_reuse_layout.reused_cache_names)
+    assert all(layout.cache_layer_indices[name] >= 2 for name in plan.layerwise_reuse_layout.reused_cache_names)
     for group in gs:
         seen = set()
         for name in group.layer_names:
@@ -240,7 +241,7 @@ def test_dspark_draft_is_excluded_from_rotation(ns):
     cache_groups[0].kv_cache_spec.kv_cache_specs[draft] = Spec()
     plan = ns["make_plan"](config, cache_groups, 7)
     assert plan.layerwise_reuse_layout.draft_entry_names == frozenset({draft})
-    assert draft not in plan.dsv4_shared_cache_names
+    assert draft not in plan.layerwise_reuse_layout.reused_cache_names
     assert 43 not in plan.layerwise_reuse_layout.prefetch_layer_map
 
 
@@ -249,7 +250,6 @@ def test_all_resident_control(ns):
     config.kv_transfer_config.kv_connector_extra_config["layerwise_independent_layers"] = "all"
     plan = ns["make_plan"](config, groups(), 1)
     assert plan.layerwise_reuse_layout is None
-    assert not plan.dsv4_shared_cache_names
     assert all(len(t.layers) == 1 for t in plan.kv_cache_tensors)
 
 
@@ -321,7 +321,6 @@ def test_tail_snapshot_uses_raw_tokens_and_skips_resident_restore(ns):
         group_uses_align_state=[False],
         grouped_block_size=[128],
         use_eagle=False,
-        kv_cache_config=NS(dsv4_shared_cache_names=("main",)),
         _group_reuses_buffer=lambda group: True,
         _reused_layers_by_group={0: {0}},
         _snapshot_keys={},
@@ -376,6 +375,7 @@ def test_mrv2_allocates_the_exact_plan(ns):
         KVPPConfig=NS(from_vllm_config=lambda c: NS(size=1)),
         _is_dsv4_model=lambda c: True,
         _get_layer_kv_cache_specs=lambda c: specs,
+        get_layerwise_reuse_layout=lambda c: c.layerwise_reuse_layout,
         enable_sfa=lambda c: True,
         is_deepseek_v41_cache=lambda s: False,
         _allocate_int8_cache_tensor=allocate,
@@ -394,7 +394,6 @@ def test_missing_required_compressed_page_fails_closed(ns):
         group_uses_align_state=[False],
         grouped_block_size=[128],
         use_eagle=False,
-        kv_cache_config=NS(dsv4_shared_cache_names=("main",)),
         _group_reuses_buffer=lambda group: True,
         _reused_layers_by_group={0: {0}},
         _snapshot_keys={},
@@ -410,12 +409,38 @@ def test_missing_required_compressed_page_fails_closed(ns):
         ns["_load_entries"](worker, request, 0, [b"hash"], None)
 
 
+def test_align_state_uses_exact_snapshot_with_finer_pages(ns):
+    worker = NS(
+        grouped_block_size=[32],
+        group_uses_align_state=[True],
+        cache_transfer_granularity=128,
+        _reused_layers_by_group={0: {0}},
+        _is_layerwise_save_owner=lambda group: True,
+        _make_layerwise_full_key=lambda group, key: key,
+        vllm_config=NS(speculative_config=None),
+    )
+    request = NS(
+        req_id="request", layerwise_request_id="incarnation",
+        target_token_len=64, save_start_token=0, can_save=True,
+        block_ids_by_group=[[1, 2]], store_masks=None, load_spec=None,
+    )
+    snapshots = {}
+    hashes = [b"a", b"b"]
+    key = "offload_v1:incarnation:64:1"
+    assert ns["_save_entries"](worker, request, NS(), 0, hashes, snapshots) == [
+        ("61", 0), ("62", 1), (key, None),
+    ]
+    worker._snapshot_keys = {"request": {0: snapshots}}
+    request.load_spec = NS(can_load=True, layerwise_previous_step=True, kvpool_cached_tokens=64)
+    assert ns["_load_entries"](worker, request, 0, hashes, None) == [(key, 1)]
+
+
 def test_dsv4_window_continuation_restores_live_pages_only(ns):
     worker = NS(
         group_uses_align_state=[False],
         grouped_block_size=[128],
         use_eagle=False,
-        kv_cache_config=NS(block_key_checkpoint_groups={0}, block_key_prefill_windows={0: 256}),
+        kv_cache_config=NS(block_key_prefill_windows={0: 256}),
         _group_reuses_buffer=lambda group: True,
         _reused_layers_by_group={0: {0}},
         _snapshot_keys={},
@@ -475,7 +500,7 @@ def test_untrimmed_shared_window_skips_masked_public_page(ns):
         grouped_block_size=[128],
         group_uses_align_state=[False],
         cache_transfer_granularity=128,
-        kv_cache_config=NS(block_key_checkpoint_groups={0}, block_key_prefill_windows={0: 256}),
+        kv_cache_config=NS(block_key_prefill_windows={0: 256}),
         _group_reuses_buffer=lambda group: True,
         _reused_layers_by_group={0: {0}},
         _snapshot_keys={},
@@ -704,7 +729,6 @@ def test_dsv4_push_chunk_ranges_use_live_component_groups(ns, sliding_window, ca
         LayerTransferRequest=lambda *args: args,
     )
     worker = isolated_method(path, "MooncakePushConnectorWorker", "_build_layer_transfer_request", ns)()
-    worker._is_dsv4 = True
     worker._get_layer_dcp_sizes = lambda *args: (1, 1)
     worker._layer_indices = {"component": 0}
     worker.layer_name_to_spec_index = {"component": 0}
@@ -795,7 +819,6 @@ def test_transfer_suffix_snapshots_match_next_step_keys(ns, endpoint, size, hash
     worker = NS(
         grouped_block_size=[size], group_uses_align_state=[False],
         cache_transfer_granularity=transfer, use_eagle=False,
-        kv_cache_config=NS(block_key_checkpoint_groups={0}),
         _group_reuses_buffer=lambda group: True,
         _reused_layers_by_group={0: {0}},
         _snapshot_keys={},

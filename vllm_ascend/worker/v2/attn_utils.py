@@ -972,15 +972,13 @@ def _allocate_kv_cache(
     # prefill disaggregation need the addr of cache tensor be aligned with 2M
     alignment = KV_CACHE_BUFFER_ALIGNMENT
     layer_kv_cache_spec = _get_layer_kv_cache_specs(kv_cache_config)
-    if getattr(kv_cache_config, "dsv4_shared_cache_names", None):
-        # DSV4's model-owned plan separates resident regions from scratch.
-        # Keep this before the ordinary shared-tuple allocation below.
+    reuse_layout = get_layerwise_reuse_layout(kv_cache_config)
+    if reuse_layout is not None and reuse_layout.separate_slot_backings:
         for descriptor in kv_cache_config.kv_cache_tensors:
             backing = _allocate_int8_cache_tensor(descriptor.size, alignment, device)
             for name in get_kv_cache_tensor_layers(descriptor):
                 kv_cache_raw_tensors[name] = backing
         return kv_cache_raw_tensors
-    reuse_layout = get_layerwise_reuse_layout(kv_cache_config)
     if reuse_layout is not None:
         return allocate_cache_backing(
             kv_cache_config,

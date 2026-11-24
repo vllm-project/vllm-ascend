@@ -68,6 +68,7 @@ class AscendCompressorStateCache(CompressorStateCache):
             head_size=self.state_dim,
             dtype=self.dtype,
             sliding_window=self.sliding_window,
+            transfer_separate_page_views=True,
             alignment=None,
             page_size_padded=page_size_padded,
         )

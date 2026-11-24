@@ -420,7 +420,7 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
                     layer_byte_offset=layer_byte_offset,
                 )
             )
-        shared_entries = getattr(self, "dsv4_group_shared_entries", {})
+        shared_entries = getattr(self, "group_shared_cache_entries", {})
         for group_id, builder in enumerate(builders):
             builder.shared_cache_entries = shared_entries.get(group_id)
         return builders
@@ -564,8 +564,7 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
         self._transfer_threads_started = True
 
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]) -> None:
-        if getattr(self.kv_cache_config, "dsv4_component_identity", None) is not None:
-            kv_caches = transfer_cache_views(kv_caches)
+        kv_caches = transfer_cache_views(kv_caches)
         if self.use_recoverssm:
             kv_caches = self._recoverssm_store_caches(kv_caches)
         draft_names = set(getattr(self, "_dspark_draft_layer_names", ()))
