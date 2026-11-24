@@ -41,8 +41,8 @@ class AscendCircularBufferManager(CircularBufferManager):
         self._record_new_block_ids = needs_kv_cache_zeroing
 
 
-class AscendGDNPrefixOnlyManager(MambaManager):
-    """Keep the admitted local prefix and its private working state separate."""
+class AscendGDNLocalHitManager(MambaManager):
+    """Track local warm prefills through budgeted chunks and preemption."""
 
     def __init__(self, kv_cache_spec: MambaSpec, block_pool: BlockPool, **kwargs) -> None:
         super().__init__(kv_cache_spec, block_pool, **kwargs)
@@ -69,6 +69,14 @@ class AscendGDNPrefixOnlyManager(MambaManager):
         ):
             self._local_prefix_hits.add(request_id)
 
+    def pop_blocks_for_free(self, request_id: str) -> list[KVCacheBlock]:
+        self._local_prefix_hits.discard(request_id)
+        return super().pop_blocks_for_free(request_id)
+
+
+class AscendGDNPrefixOnlyManager(AscendGDNLocalHitManager):
+    """Keep the admitted local prefix without publishing the suffix."""
+
     def cache_blocks(
         self,
         request: Request,
@@ -84,6 +92,55 @@ class AscendGDNPrefixOnlyManager(MambaManager):
                 request, num_tokens, retention_interval=retention_interval, replay_boundaries=replay_boundaries
             )
 
+
+class AscendGDNCheckpointManager(AscendGDNLocalHitManager):
+    """Reserve warm checkpoints outside the positional state table."""
+
+    def __init__(self, kv_cache_spec: MambaSpec, block_pool: BlockPool, **kwargs) -> None:
+        super().__init__(kv_cache_spec, block_pool, **kwargs)
+        self.checkpoint_plans: dict[str, tuple[int, int]] = {}
+        self.checkpoint_pages: dict[str, tuple[int, KVCacheBlock]] = {}
+
+    def get_num_blocks_to_allocate(
+        self,
+        request_id: str,
+        num_tokens: int,
+        new_computed_blocks: Sequence[KVCacheBlock],
+        total_computed_tokens: int,
+        num_local_computed_tokens: int,
+        num_tokens_main_model: int,
+        apply_admission_cap: bool = False,
+        prefill_end: int = 0,
+    ) -> int:
+        blocks = super().get_num_blocks_to_allocate(
+            request_id,
+            num_tokens,
+            new_computed_blocks,
+            total_computed_tokens,
+            num_local_computed_tokens,
+            num_tokens_main_model,
+            apply_admission_cap=apply_admission_cap,
+            prefill_end=prefill_end,
+        )
+        plan = self.checkpoint_plans.get(request_id)
+        return blocks + int(plan is not None and plan[1] == num_tokens_main_model)
+
+    def allocate_new_blocks(self, request_id: str, num_tokens: int, num_tokens_main_model: int) -> list[KVCacheBlock]:
+        blocks = super().allocate_new_blocks(request_id, num_tokens, num_tokens_main_model)
+        plan = self.checkpoint_plans.pop(request_id, None)
+        if plan is not None and plan[1] == num_tokens_main_model:
+            # The exporter overwrites both states. The page never appears in a
+            # request row or in the CoW source/destination list.
+            checkpoint = self.block_pool.get_new_blocks(1)[0]
+            self.checkpoint_pages[request_id] = (plan[0], checkpoint)
+        return blocks
+
     def pop_blocks_for_free(self, request_id: str) -> list[KVCacheBlock]:
-        self._local_prefix_hits.discard(request_id)
-        return super().pop_blocks_for_free(request_id)
+        # A page that has already been handed to the worker stays pinned by
+        # its scheduler step until that step's feedback arrives.
+        self.checkpoint_plans.pop(request_id, None)
+        page = self.checkpoint_pages.pop(request_id, None)
+        blocks = super().pop_blocks_for_free(request_id)
+        if page is not None:
+            blocks.append(page[1])
+        return blocks

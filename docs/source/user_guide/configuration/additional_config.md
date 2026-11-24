@@ -413,13 +413,17 @@ KV transfer configurations and legacy EAGLE/MTP block dropping without
 lookahead hashes fall back to existing prefill scheduling: the scheduler and
 worker cannot safely assume the same internal checkpoint boundary in these modes.
 
-Checkpoint-bearing prefill uses the existing Triton recurrence instead of the
-AscendC FwdH implementation to export only selected FP32 chunk-start states.
+With FP32 recurrent caches on A5 and an available fused FLA NPU GDN operator,
+checkpoint-bearing prefill uses two packed fused prefill segments inside one
+model forward. Prefills without a new checkpoint use the ordinary fused path.
+Other supported devices use two batched AscendC recurrence segments, or the
+dense AscendC recurrence when no checkpoint is required. Both segmented paths
+retain the first segment's FP32 final state as the checkpoint and use it to
+initialize the second segment. Packing and state copies add memory traffic.
+Lower-precision recurrent caches continue to use the Triton checkpoint path.
 Convolution history and recurrent state are written through the shared upstream
-checkpoint exporter. Enabled layers use the same Triton recurrence for cold
-prefills and cache-hit tails, including tails without a new checkpoint. At an
-exported boundary, the cold FP32 accumulator is rounded to the configured SSM
-cache dtype before continuing, matching the state restored by a cache hit.
+checkpoint exporter. The Triton path rounds the FP32 accumulator to the
+configured SSM cache dtype at the exported boundary before continuing.
 Decode is unchanged. This backend change needs numerical
 and performance qualification; skipping a model forward does not guarantee a
 net speedup. A persistent FP32 scratch buffer is allocated during profiling, of size
@@ -427,6 +431,15 @@ net speedup. A persistent FP32 scratch buffer is allocated during profiling, of 
 with the same VllmConfig, device and state shape share it; ubatching is excluded.
 Checkpoint export retains a view of the pre-convolution input; the pinned FLA
 convolution allocates its output separately.
-Small prefix match units can increase checkpoint traffic.
+
+With Model Runner V2, the default scheduler, local KV, PP=PCP=DCP=1 and
+speculative decoding disabled, Ascend also exports warm checkpoints into
+dedicated pages. The cache must use a match unit smaller than the physical
+Mamba block. A final cache-hit prefill within one physical page can finish in
+one model forward and publish its tail checkpoint for full-prompt replay.
+Ascend registers the state manager and scheduler through the paired vLLM's
+existing extension points. Each export holds an extra page until worker
+feedback. A successful export becomes eligible for cache lookup and eviction
+at its exact token boundary.
 
 Validate correctness, quality and performance on the deployment hardware before deploying in production.

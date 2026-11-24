@@ -14,42 +14,57 @@ from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
 from vllm.v1.core.kv_cache_utils import get_request_block_hasher, init_none_hash
 from vllm.v1.core.single_type_kv_cache_manager import register_all_kvcache_specs
 from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheConfig, KVCacheGroupSpec, MambaSpec
-from vllm.v1.request import Request
+from vllm.v1.request import Request, RequestStatus
 from vllm.v1.structured_output import StructuredOutputManager
 
 from tests.ut.kv_offload.utils import create_model_runner_output, create_vllm_config
 from vllm_ascend.core.gdn_prefix_only_scheduler import (
+    AsyncGDNCheckpointScheduler,
     AsyncGDNPrefixOnlyScheduler,
+    GDNCheckpointScheduler,
     GDNPrefixOnlyScheduler,
+    configure_gdn_checkpoint_scheduler,
     configure_gdn_prefix_only_scheduler,
 )
-from vllm_ascend.core.kv_cache_interface import AscendGDNPrefixOnlySpec, register_ascend_kv_cache_specs
-from vllm_ascend.core.single_type_kv_cache_manager import AscendGDNPrefixOnlyManager
+from vllm_ascend.core.kv_cache_interface import (
+    AscendGDNCheckpointSpec,
+    AscendGDNPrefixOnlySpec,
+    register_ascend_kv_cache_specs,
+)
+from vllm_ascend.core.single_type_kv_cache_manager import AscendGDNCheckpointManager, AscendGDNPrefixOnlyManager
 
 PAGE_SIZE = 2048
 MATCH_UNIT = 128
 
 
-def _make_scheduler(async_scheduling: bool) -> GDNPrefixOnlyScheduler:
+def _make_scheduler(async_scheduling: bool, preserve_checkpoint: bool = False):
     def finalize_config(**kwargs):
         kwargs["kv_transfer_config"] = None
         kwargs["model_config"].max_model_len = 8192
         kwargs["cache_config"].mamba_cache_mode = "align"
+        kwargs["cache_config"].num_gpu_blocks = 64
         kwargs["scheduler_config"].async_scheduling = async_scheduling
         return VllmConfig(**kwargs)
 
     with patch("tests.ut.kv_offload.utils.VllmConfig", new=finalize_config):
         config = create_vllm_config(block_size=PAGE_SIZE, max_num_batched_tokens=4096)
+    config.scheduler_config.scheduler_cls = None
     register_all_kvcache_specs(config)
     register_ascend_kv_cache_specs()
     ascend_config = SimpleNamespace(
-        gdn_internal_prefill_checkpoints=False,
+        gdn_internal_prefill_checkpoints=preserve_checkpoint,
         scheduler_config=SimpleNamespace(enable_balance_scheduling=False),
     )
     with patch.object(VllmConfig, "use_v2_model_runner", True):
-        configure_gdn_prefix_only_scheduler(config, ascend_config)
+        if preserve_checkpoint:
+            configure_gdn_checkpoint_scheduler(config, ascend_config)
+        else:
+            configure_gdn_prefix_only_scheduler(config, ascend_config)
     scheduler_cls = config.scheduler_config.get_scheduler_cls()
-    assert scheduler_cls is (AsyncGDNPrefixOnlyScheduler if async_scheduling else GDNPrefixOnlyScheduler)
+    if preserve_checkpoint:
+        assert scheduler_cls is (AsyncGDNCheckpointScheduler if async_scheduling else GDNCheckpointScheduler)
+    else:
+        assert scheduler_cls is (AsyncGDNPrefixOnlyScheduler if async_scheduling else GDNPrefixOnlyScheduler)
 
     state = MambaSpec(
         block_size=PAGE_SIZE,
@@ -57,7 +72,10 @@ def _make_scheduler(async_scheduling: bool) -> GDNPrefixOnlyScheduler:
         dtypes=(torch.float32,),
         mamba_type=MambaAttentionBackendEnum.GDN_ATTN,
         mamba_cache_mode="align",
+        num_prefill_checkpoint_blocks=int(preserve_checkpoint),
+        prefill_checkpoint_alignment=64 if preserve_checkpoint else None,
     )
+    spec_cls = AscendGDNCheckpointSpec if preserve_checkpoint else AscendGDNPrefixOnlySpec
     cache = KVCacheConfig(
         num_blocks=64,
         kv_cache_tensors=[],
@@ -66,7 +84,7 @@ def _make_scheduler(async_scheduling: bool) -> GDNPrefixOnlyScheduler:
                 ["attention"],
                 FullAttentionSpec(block_size=PAGE_SIZE, num_kv_heads=1, head_size=1, dtype=torch.float32),
             ),
-            KVCacheGroupSpec(["gdn"], AscendGDNPrefixOnlySpec.from_mamba_spec(state)),
+            KVCacheGroupSpec(["gdn"], spec_cls.from_mamba_spec(state)),
         ],
     )
     init_none_hash(sha256)
@@ -83,7 +101,7 @@ def _request(name: str, prompt: list[int]) -> Request:
     )
 
 
-def _finish_cold_prefill(scheduler: GDNPrefixOnlyScheduler, request: Request) -> list[int]:
+def _finish_cold_prefill(scheduler, request: Request) -> list[int]:
     scheduler.add_request(request)
     stops = []
     while request.num_computed_tokens < request.num_prompt_tokens:
@@ -181,3 +199,54 @@ def test_gdn_prefix_only_reclassifies_request_after_preemption():
     output = scheduler.schedule()
     assert output.num_scheduled_tokens[request.request_id] == PAGE_SIZE
     assert not manager.has_local_prefix_hit(request.request_id)
+
+
+@pytest.mark.parametrize("async_scheduling", [False, True])
+@pytest.mark.parametrize(("prefix_len", "hit", "end", "tail"), [(2287, 2176, 3512, 3456), (1012, 896, 1211, 1152)])
+def test_warm_checkpoint_publishes_exact_replay_boundary_after_forward(async_scheduling, prefix_len, hit, end, tail):
+    scheduler = _make_scheduler(async_scheduling, preserve_checkpoint=True)
+    cache = scheduler.kv_cache_manager
+    manager = cache.coordinator.single_type_managers[1]
+    assert isinstance(manager, AscendGDNCheckpointManager)
+    prefix = [1] * prefix_len
+    _finish_cold_prefill(scheduler, _request("seed", prefix))
+    requests = [_request(f"warm-{token}", prefix + [token] * (end - prefix_len)) for token in (3, 5)]
+    for request in requests:
+        assert cache.get_computed_blocks(request)[1] == hit
+        scheduler.add_request(request)
+
+    step = scheduler.schedule()
+    assert step.num_scheduled_tokens == {request.request_id: end - hit for request in requests}
+    plans = step.mamba_prefill_checkpoints
+    assert len({entries[0][2] for entries in plans.values()}) == len(requests)
+    for index, request in enumerate(requests):
+        [(group, position, block_id)] = plans[request.request_id]
+        assert (group, position) == (1, tail)
+        assert block_id not in cache.get_block_ids(request.request_id)[group]
+        assert cache.get_computed_blocks(_request(f"probe-{index}", request.prompt_token_ids))[1] == hit
+
+    scheduler.update_from_output(step, create_model_runner_output(requests))
+    for index, request in enumerate(requests):
+        blocks, replay_hit, _ = cache.get_computed_blocks(_request(f"replay-{index}", request.prompt_token_ids))
+        assert replay_hit == tail
+        assert blocks.blocks[1][-1].block_id == plans[request.request_id][0][2]
+        assert blocks.blocks[1][-1].block_hash_num_tokens == tail
+    assert not scheduler._inflight_checkpoints
+
+
+def test_aborted_warm_checkpoint_remains_pinned_until_worker_feedback():
+    scheduler = _make_scheduler(True, preserve_checkpoint=True)
+    prefix = [1] * 1012
+    _finish_cold_prefill(scheduler, _request("seed", prefix))
+    request = _request("abort", prefix + [2] * 199)
+    scheduler.add_request(request)
+    step = scheduler.schedule()
+    _, manager, _, page = scheduler._inflight_checkpoints[id(step)][0]
+    scheduler.finish_requests(request.request_id, RequestStatus.FINISHED_ABORTED)
+    assert page.ref_cnt == 1
+    assert page.block_hash is None
+    scheduler.update_from_output(step, create_model_runner_output([request]))
+    assert page.ref_cnt == 0
+    assert page.block_hash is None
+    assert not scheduler._inflight_checkpoints
+    assert not manager.checkpoint_pages

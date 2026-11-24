@@ -424,6 +424,11 @@ class NPUModelRunner(GPUModelRunner):
             for name, spec in kv_cache_spec.items():
                 if isinstance(spec, MambaSpec) and spec.mamba_type == MambaAttentionBackendEnum.GDN_ATTN:
                     kv_cache_spec[name] = AscendGDNPrefixOnlySpec.from_mamba_spec(spec)
+        elif self.ascend_config.gdn_internal_prefill_checkpoints:
+            from vllm_ascend.ops.gdn_checkpoint import separate_gdn_checkpoint_spec
+
+            for name, spec in kv_cache_spec.items():
+                kv_cache_spec[name] = separate_gdn_checkpoint_spec(self.vllm_config, spec)
 
         return apply_dspark_resident_kv_specs(
             kv_cache_spec,
@@ -1151,6 +1156,7 @@ class NPUModelRunner(GPUModelRunner):
             prompt_lens = self.req_states.prompt_len.gpu[idx_mapping]
 
         input_batch = AscendInputBatch(
+            mamba_prefill_checkpoints=getattr(scheduler_output, "mamba_prefill_checkpoints", {}),
             req_ids=req_ids,
             num_reqs=num_reqs,
             num_reqs_after_padding=num_reqs_padded,

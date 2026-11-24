@@ -712,6 +712,10 @@ class NPUPlatform(Platform):
             from vllm_ascend.core.gdn_prefix_only_scheduler import configure_gdn_prefix_only_scheduler
 
             configure_gdn_prefix_only_scheduler(vllm_config, ascend_config)
+        elif ascend_config.gdn_internal_prefill_checkpoints:
+            from vllm_ascend.core.gdn_prefix_only_scheduler import configure_gdn_checkpoint_scheduler
+
+            configure_gdn_checkpoint_scheduler(vllm_config, ascend_config)
 
         # 9.Validate SFA / DCP / KV and SP consistency (vllm_config)
         _validate_sfa_dcp_kv_sp(vllm_config)

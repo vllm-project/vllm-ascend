@@ -945,21 +945,31 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
             use_checkpoint_prefill = (
                 getattr(self, "_ascend_internal_checkpoint_enabled", False) and self._exports_checkpoints
             )
-            supports_fused_prefill = (
-                query_non_spec.dtype == torch.bfloat16
-                and not use_checkpoint_prefill
-                and (head_sharded_pcp or get_pcp_group().world_size == 1)
+            supports_fused_prefill = query_non_spec.dtype == torch.bfloat16 and (
+                head_sharded_pcp or get_pcp_group().world_size == 1
             )
-            use_fla_gdn_prefill = supports_fused_prefill and get_current_hardware_profile().supports(
-                HardwareCapability.FLA_GDN_PREFILL
+            hardware = get_current_hardware_profile()
+            use_fla_gdn_prefill = (
+                supports_fused_prefill
+                and (not use_checkpoint_prefill or ssm_state.dtype == torch.float32)
+                and hardware.supports(HardwareCapability.FLA_GDN_PREFILL)
             )
             fla_gdn_prefill_op = _get_fla_gdn_prefill_op() if use_fla_gdn_prefill else None
+            beta_fla = beta_non_spec
+            if fla_gdn_prefill_op is not None and hardware.supports(HardwareCapability.FLA_GDN_PREFILL_CHUNK32):
+                # Chunk32 applies sigmoid itself. The other paths use processed beta.
+                beta_fla = b.unsqueeze(0)
+                if has_spec_decode:
+                    beta_fla = beta_fla.index_select(1, non_spec_token_indx)
+                if split_non_spec:
+                    beta_fla = beta_fla[:, num_decode_tokens:]
             # The built-in fused operator is NPU-only. Keep CPU/unit-test
             # dispatch on the Triton-compatible path even when its availability
             # probe was cached globally.
             use_fused_chunk = (
                 fla_gdn_prefill_op is None
                 and supports_fused_prefill
+                and not use_checkpoint_prefill
                 and query_non_spec.device.type != "cpu"
                 and AscendGatedDeltaNetAttention._probe_fused_chunk()
             )
@@ -975,8 +985,9 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
                     key_non_spec,
                     value_non_spec,
                     g_non_spec,
-                    beta_non_spec,
+                    beta_fla,
                     initial_state,
+                    fused_fwd=fla_gdn_prefill_op,
                 )
                 scatter_ssm_states_(ssm_state, prefill_state_indices, last_recurrent_state.to(ssm_state.dtype))
             elif fla_gdn_prefill_op is not None:
@@ -985,17 +996,6 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
                     prefill_state_indices,
                     prefill_has_initial_state,
                 )
-                # The A5 chunk32 kernel applies sigmoid internally: pass raw b,
-                # while decode and other prefill routes keep the processed beta.
-                # beta = sigmoid(b); dt_bias belongs only to the decay gate
-                # g = -exp(A_log) * softplus(a + dt_bias), computed above.
-                beta_fla = beta_non_spec
-                if get_current_hardware_profile().supports(HardwareCapability.FLA_GDN_PREFILL_CHUNK32):
-                    beta_fla = b.unsqueeze(0)
-                    if has_spec_decode:
-                        beta_fla = beta_fla.index_select(1, non_spec_token_indx)
-                    if split_non_spec:
-                        beta_fla = beta_fla[:, num_decode_tokens:]
                 (core_attn_out_non_spec, last_recurrent_state) = DeviceOperator.fla_gdn_prefill(
                     q=query_non_spec,
                     k=key_non_spec,

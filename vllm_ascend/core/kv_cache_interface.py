@@ -34,6 +34,11 @@ class AscendGDNPrefixOnlySpec(MambaSpec):
         return cls(**{field.name: getattr(spec, field.name) for field in fields(MambaSpec) if field.init})
 
 
+@dataclass(frozen=True)
+class AscendGDNCheckpointSpec(AscendGDNPrefixOnlySpec):
+    """Select the MRV2 manager that owns dedicated checkpoint pages."""
+
+
 def get_kv_cache_compression_ratio(kv_cache_spec: KVCacheSpec) -> int:
     """Return the MLA compression ratio across vLLM cache-spec APIs."""
     return kv_cache_spec.tokens_per_state
@@ -563,7 +568,11 @@ class AscendCircularBufferSpec(CircularBufferSpec):
 
 
 def register_ascend_kv_cache_specs() -> None:
-    from vllm_ascend.core.single_type_kv_cache_manager import AscendCircularBufferManager, AscendGDNPrefixOnlyManager
+    from vllm_ascend.core.single_type_kv_cache_manager import (
+        AscendCircularBufferManager,
+        AscendGDNCheckpointManager,
+        AscendGDNPrefixOnlyManager,
+    )
     from vllm_ascend.models.glm5next.kv_cache import KpoolTailManager
 
     KVCacheSpecRegistry.register(
@@ -596,5 +605,10 @@ def register_ascend_kv_cache_specs() -> None:
     KVCacheSpecRegistry.register(
         kvcache_spec_cls=AscendGDNPrefixOnlySpec,
         manager_class=AscendGDNPrefixOnlyManager,
+        uniform_type_base_spec=MambaSpec,
+    )
+    KVCacheSpecRegistry.register(
+        kvcache_spec_cls=AscendGDNCheckpointSpec,
+        manager_class=AscendGDNCheckpointManager,
         uniform_type_base_spec=MambaSpec,
     )

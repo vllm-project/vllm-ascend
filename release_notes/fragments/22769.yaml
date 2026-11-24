@@ -1,0 +1,8 @@
+pr: 22769
+entries:
+  - category: performance
+    text: >-
+      With `gdn_internal_prefill_checkpoints` enabled, Model Runner V2 on
+      Ascend can preserve warm GDN checkpoints in a single model forward
+      for eligible in-page prefills. The exported tail is reusable by later
+      requests with the same prompt prefix.

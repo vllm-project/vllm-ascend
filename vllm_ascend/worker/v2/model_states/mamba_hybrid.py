@@ -518,7 +518,10 @@ class AscendMambaHybridModelState(MambaHybridModelState, AscendModelState):
         max_query_len = getattr(input_batch, "max_query_len", None)
         if max_query_len is None:
             max_query_len = input_batch.num_scheduled_tokens.max().item()
+        checkpoints = getattr(input_batch, "mamba_prefill_checkpoints", None)
         return build_attn_metadata(
+            mamba_prefill_checkpoints=checkpoints,
+            req_ids=input_batch.req_ids if checkpoints else None,
             attn_groups=attn_groups,
             num_reqs=num_reqs,
             num_actual_reqs=input_batch.num_reqs,
