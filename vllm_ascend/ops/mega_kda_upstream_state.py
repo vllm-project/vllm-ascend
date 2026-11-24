@@ -7,6 +7,8 @@ from dataclasses import dataclass
 
 import torch
 
+from vllm_ascend.ops.triton.mamba.state_ops import gather_initial_states
+
 
 @dataclass
 class UpstreamStatePlan:
@@ -14,7 +16,6 @@ class UpstreamStatePlan:
 
     num_tokens: int
     window: int
-    recover: bool
     lengths: torch.Tensor
     active: torch.Tensor
     initial: torch.Tensor
@@ -41,7 +42,6 @@ def prepare_upstream_state_plan(
     max_query_len: int,
     num_state_slots: int,
     num_conv_slots: int,
-    recover: bool = False,
     build_metadata: Callable | None = None,
 ) -> UpstreamStatePlan:
     """Prepare one fixed-shape plan from replay-time device inputs.
@@ -59,7 +59,7 @@ def prepare_upstream_state_plan(
         prefix.ndim != 1
         or slots.ndim != 2
         or slots.shape[0] != batch
-        or slots.shape[1] < (1 if recover else window)
+        or slots.shape[1] < window
         or conv_slots.shape != (batch,)
         or accepted.shape != (batch,)
         or has_initial.shape != (batch,)
@@ -71,7 +71,7 @@ def prepare_upstream_state_plan(
     device = prefix.device
     scratch_slots = torch.arange(batch, device=device, dtype=torch.int32)
     accepted_offset = (accepted.to(torch.int64) - 1).clamp(0, window - 1)
-    source = slots[:, 0] if recover else slots.gather(1, accepted_offset.unsqueeze(1)).squeeze(1)
+    source = slots.gather(1, accepted_offset.unsqueeze(1)).squeeze(1)
     prefix = prefix.to(torch.int32)
     lengths = prefix[1:] - prefix[:-1]
     active = (
@@ -116,7 +116,6 @@ def prepare_upstream_state_plan(
     return UpstreamStatePlan(
         num_tokens,
         window,
-        recover,
         lengths,
         active,
         active & has_initial.bool(),
@@ -170,7 +169,6 @@ def run_upstream_state_batch(
     launch: Callable,
     *,
     max_query_len: int,
-    records=None,
     plan: UpstreamStatePlan | None = None,
     build_metadata: Callable | None = None,
 ) -> torch.Tensor:
@@ -178,7 +176,6 @@ def run_upstream_state_batch(
 
     The native checkpoint is read-only. Ordinary decode and multi-page verify
     reconstruct the appropriate pages from the returned u/k/decay factors.
-    Single-page RecoverSSM saves factors by request row for post-sampling commit.
     """
     tokens, hidden = hidden_states.shape
     if not tokens:
@@ -194,7 +191,6 @@ def run_upstream_state_batch(
             max_query_len=max_query_len,
             num_state_slots=state_cache.size(0),
             num_conv_slots=conv_cache.size(0),
-            recover=records is not None,
             build_metadata=build_metadata,
         )
     window = plan.window
@@ -202,7 +198,6 @@ def run_upstream_state_batch(
     if (
         tokens != plan.num_tokens
         or window != max_query_len
-        or plan.recover != (records is not None)
         or state_cache.ndim != 4
         or state_cache.size(2) != state_cache.size(3)
         or state_cache.dtype != torch.float32
@@ -212,22 +207,14 @@ def run_upstream_state_batch(
     ):
         raise ValueError("Incompatible MegaRecurrentKda state, convolution or metadata layout")
     heads, dim = state_cache.shape[1:3]
-    if records is not None:
-        correction, key_gate = records if isinstance(records, tuple) else (records.correction, records.key_gate)
-        if (
-            correction.shape[0] < batch
-            or correction.shape[1:] != (heads, window, dim)
-            or key_gate.shape != (*correction.shape[:-1], 2 * dim)
-            or correction.dtype != torch.float32
-            or key_gate.dtype != torch.float32
-        ):
-            raise ValueError("RecoverSSM needs FP32 request-indexed correction and normalized-key/decay storage")
-
-    state = state_cache.index_select(0, plan.source)
-    state = torch.where(plan.initial[:, None, None, None], state, 0)
+    # Physical cache pages have a padded row stride. Gather the selected
+    # pages directly instead of making the whole cache contiguous.
+    state = gather_initial_states(state_cache, plan.source, plan.initial)
+    cache_window = conv_cache[:, : window + 2]
+    old_conv = gather_initial_states(cache_window, plan.conv_slots, plan.active)
     capacity = window
     conv = conv_cache.new_zeros((batch, capacity + 2, conv_cache.size(2)))
-    history = conv_cache[plan.conv_slots[:, None], plan.history_indices]
+    history = old_conv.gather(1, plan.history_indices[:, :, None].expand(-1, -1, old_conv.size(2)))
     conv[:, :3].copy_(torch.where(plan.initial[:, None, None], history, 0))
     u = state.new_zeros((batch, heads, capacity, dim))
     k = torch.zeros_like(u, dtype=torch.float16)
@@ -244,29 +231,21 @@ def run_upstream_state_batch(
 
     steps = torch.arange(window, device=state.device)
     live = plan.active[:, None] & (steps[None, :] < plan.lengths[:, None])
-    if records is not None:
-        valid = live[:, None, :, None]
-        correction[:batch].copy_(torch.where(valid, u[:, :, :window], correction[:batch]))
-        kg = torch.cat((k[:, :, :window].float(), decay[:, :, :window]), dim=-1)
-        key_gate[:batch].copy_(torch.where(valid, kg, key_gate[:batch]))
-    else:
-        for step in range(window):
-            # Upstream stores normalized k in FP16. Reconstruct from the public
-            # replay values in FP32, using the checkpoint's [value,key] order.
-            state = state * decay[:, :, step].unsqueeze(-2) + (
-                u[:, :, step].unsqueeze(-1) * k[:, :, step].float().unsqueeze(-2)
-            )
-            destinations = plan.destinations[:, step]
-            valid = live[:, step] & (destinations > 0) & (destinations < state_cache.size(0))
-            _scatter_rows(state_cache, state, destinations, valid)
+    for step in range(window):
+        # Upstream stores normalized k in FP16. Reconstruct from the public
+        # replay values in FP32, using the checkpoint's [value,key] order.
+        state = state * decay[:, :, step].unsqueeze(-2) + (
+            u[:, :, step].unsqueeze(-1) * k[:, :, step].float().unsqueeze(-2)
+        )
+        destinations = plan.destinations[:, step]
+        valid = live[:, step] & (destinations > 0) & (destinations < state_cache.size(0))
+        _scatter_rows(state_cache, state, destinations, valid)
 
     # conv stores [h1,h2,q0,...]. Commit with c accepted tokens reads the
     # three entries starting at c-1. Retain the old suffix beyond each real
     # query to keep synthetic TH rows out of the scheduler's state pages.
-    cache_window = conv_cache[:, : window + 2]
-    old = cache_window.index_select(0, plan.conv_slots)
     rows = torch.arange(window + 2, device=state.device)
-    new_conv = torch.where(rows[None, :, None] < plan.lengths[:, None, None] + 2, conv[:, : window + 2], old)
+    new_conv = torch.where(rows[None, :, None] < plan.lengths[:, None, None] + 2, conv[:, : window + 2], old_conv)
     _scatter_rows(cache_window, new_conv, plan.conv_slots, plan.active)
     output = hidden_states.new_zeros((tokens, hidden))
     _scatter_rows(output, out.reshape(-1, hidden), plan.token_indices, plan.real_tokens)

@@ -415,15 +415,9 @@ Validate correctness, quality and performance on the deployment hardware before 
 Kimi K3.1 decode workers on Ascend 950 can select a KDA backend with
 `kda_backend_config`. Use Model Runner V2, prefill context parallel size 1,
 BF16 hidden states and the model's MXFP8 QKV weights. Set the option on the
-KV consumer. The default is `native`.
+KV consumer and leave `--use-replayssm` disabled. The default is `native`.
 
-| Backend | Operator and scope |
-| --- | --- |
-| `mega_recurrent_kda_mx` | The upstream `npu_mega_recurrent_kda` public API consumes BF16 hidden states and returns the local BF16 output projection. |
-| `mega_kda` | The separate `npu_mega_kda_projected` wheel accepts projected QKV and uses the model's external gated norm and output projection. This backend requires ReplaySSM to be disabled. |
-
-For the full operator, build an Ascend 950 wheel from
-[the upstream integration guide](https://github.com/chen-linxin/flash-linear-attention-npu/blob/0c59c1d363b5debe1b7f76ddc59e44d48351523d/fla/ops/ascendc/kda/mega_recurrent_kda/docs/model_integration.md).
+Build an Ascend 950 wheel using [the upstream integration guide](https://github.com/flashserve/flash-linear-attention-npu/blob/86248e13e6ea7c756d9932cbee4031973c542dbc/fla/ops/ascendc/kda/mega_recurrent_kda/docs/model_integration.md).
 Install the wheel and expose its OPP before starting workers:
 
 ```bash
@@ -444,19 +438,17 @@ their matching launcher from the configured directory in a separate namespace.
 }
 ```
 
-The full operator consumes the rank's E4M3FN QKV weights in FRACTAL_NZ
+The public `npu_mega_recurrent_kda` operator consumes the rank's E4M3FN QKV weights in FRACTAL_NZ
 layout, their E8M0 scales, and the original BF16 decay, beta and output gate
 weights. It computes the convolution, recurrence, gated RMSNorm and output
 projection inside the same invocation. vLLM applies the original TP collective.
 Ordinary decode uses BSH. Speculative decode uses TH with one device plan per
 metadata group per forward. Padding is isolated from live cache pages.
-The checkpoint is read-only during the call. vLLM commits the returned
-correction, normalized key and decay to the corresponding pages. With
-ReplaySSM enabled, speculative updates commit after sampling according to the
-accepted token count. In a mixed batch, requests classified as ordinary or
-speculative decode still use the full operator while multi-token prefill
-uses native KDA. With ReplaySSM disabled and draft requests present, the
-metadata builder places non-draft rows in a single prefill group. That group
-uses native KDA if any of its rows contains multiple tokens.
+The checkpoint is read-only during the call. The adapter reads only the
+request's checkpoint and convolution page using their physical stride. It
+reconstructs candidate pages from the returned correction, normalized key and
+decay, and the next forward selects the last accepted page. Requests classified
+as decode use the fused operator, including in mixed batches. Multi-token
+prefill groups use native KDA.
 Disable internal GDN prefill checkpoints and use `FULL_DECODE_ONLY` for decode
 graph replay.

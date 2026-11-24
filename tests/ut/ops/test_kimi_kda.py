@@ -617,7 +617,6 @@ def test_kda_forward_preserves_live_rows_with_nan_padding(mode, source_layout):
         head_dim=2,
         num_spec=3,
         use_recoverssm=False,
-        _mega_kda_op=None,
         kv_cache=(torch.zeros(1), state),
         get_parameter=lambda name: torch.empty(1),
         _run_causal_conv1d=lambda x, *args, **kwargs: x,
@@ -699,7 +698,6 @@ def test_recoverssm_dispatches_without_spec_mask_and_sigmoids_beta_once(mixed):
         head_dim=dim,
         num_spec=3,
         use_recoverssm=True,
-        _mega_kda_op=None,
         recoverssm_records=records,
         A_log=torch.zeros(1),
         dt_bias=torch.zeros(dim),
@@ -767,7 +765,6 @@ def test_kda_prefill_direct_norm_and_idle_output(mode, recover):
     attention = SimpleNamespace(
         prefix="kda",
         use_recoverssm=recover,
-        _mega_kda_op=None,
         head_dim=dim,
         kv_cache=(torch.empty(1), torch.empty(1)),
         get_parameter=lambda name: torch.empty(1),

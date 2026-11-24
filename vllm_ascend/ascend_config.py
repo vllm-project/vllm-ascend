@@ -350,7 +350,7 @@ class EplbConfig:
 class KDABackendConfig:
     """Select an optional kernel backend for KDA layers."""
 
-    backend: Literal["native", "mega_kda", "mega_recurrent_kda_mx"] = "native"
+    backend: Literal["native", "mega_recurrent_kda_mx"] = "native"
     operator_package_dir: str | None = None
 
     @model_validator(mode="after")
@@ -857,8 +857,8 @@ class AscendConfig:
                 raise ValueError("The MegaKDA backend requires a disaggregated decode worker")
             if self.gdn_internal_prefill_checkpoints:
                 raise ValueError("The MegaKDA backend requires internal GDN checkpoints to be disabled")
-            if self.kda_backend_config.backend == "mega_kda" and vc.cache_config.use_replayssm:
-                raise ValueError("The projected MegaKDA backend requires ReplaySSM to be disabled")
+            if vc.cache_config.use_replayssm:
+                raise ValueError("MegaRecurrentKda requires ReplaySSM to be disabled")
         if self.shared_engram is not None and self.shared_engram.backend in ("a2", "a5"):
             if getattr(vc, "shutdown_timeout", 0) <= 0:
                 raise ValueError("shared_engram requires --shutdown-timeout > 0 to retire reader leases")

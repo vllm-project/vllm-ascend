@@ -7,6 +7,7 @@ from unittest.mock import MagicMock
 import pytest
 import torch
 from torch import nn
+
 from vllm_ascend.attention.gdn_attn_builder import GDNCausalConv1dMetadata, GDNPrefillMetadata
 from vllm_ascend.ops import kimi_kda
 from vllm_ascend.quantization.methods.w8a8 import w8a8_mxfp8
@@ -81,7 +82,8 @@ def test_mega_kda_model_dispatch(monkeypatch, mode):
     monkeypatch.setattr(kimi_kda, "run_upstream_mega_kda", upstream)
     proj = MagicMock(side_effect=lambda hidden: (hidden, None, None, None))
 
-    def native(hidden, g1, g2, beta, out, *, native_prefill_metadata):
+    def native(hidden, g1, g2, beta, out, *, beta_is_preprocessed, native_prefill_metadata):
+        assert beta_is_preprocessed
         assert native_prefill_metadata.num_spec_decodes == 0
         assert native_prefill_metadata.num_actual_tokens == hidden.size(0)
         assert native_prefill_metadata.spec_sequence_masks is None
@@ -162,7 +164,7 @@ def test_mega_output_collective(monkeypatch, tp, reduce, rs, offset):
     monkeypatch.setattr(kimi_kda, "tensor_model_parallel_all_reduce", lambda x: x + 1)
     monkeypatch.setattr(kimi_kda, "sp_reduce_scatter", lambda x: x + 2)
     layer = SimpleNamespace(
-        _mega_kda_mix=True,
+        _mega_kda_op=object(),
         _forward_upstream_mega_kda=lambda x, out: out.copy_(x),
         o_proj=SimpleNamespace(
             custom_op=MagicMock(spec=kimi_kda.KimiOProjMMReduceScatterOp) if rs else None,
