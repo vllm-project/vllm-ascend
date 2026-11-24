@@ -158,6 +158,18 @@ class AscendDSparkSpeculator(LmheadTPDraftSamplingMixin, DSparkSpeculator):
         # It needs this speculator to update full-graph params, so set it here.
         self.query_cudagraph_manager.speculator = self
         self.query_cudagraph_manager.update_stream = self.update_stream
+        if not self.use_flashmla or cudagraph_mode == CUDAGraphMode.NONE:
+            return
+
+        # set_attn has created the builders, and the parent has selected the
+        # actual draft buckets. Register them before capture allocates buffers.
+        descriptors = self.query_cudagraph_manager._capture_descs.get(CUDAGraphMode.FULL, ())
+        if descriptors:
+            for groups in self.attn_groups:
+                for group in groups:
+                    state = getattr(group.get_metadata_builder(0), "flashmla_state", None)
+                    if state is not None and state.quant_max_query_len is not None:
+                        state.configure_graph_rows(descriptors)
 
     @torch.inference_mode()
     def get_draft_context_group_layout(self) -> tuple[tuple[int, ...], tuple[int, ...], dict[int, int]]:

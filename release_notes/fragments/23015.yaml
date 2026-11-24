@@ -1,5 +1,11 @@
 pr: 23015
 entries:
+  - category: bugfix
+    text: >-
+      Fixed a QuantFlashMLA graph replay failure on Ascend A5 when the number of active Kimi DSpark C8
+      requests drops during decode.
+    model: kimi-dspark
+    hardware: [A5]
   - category: performance
     text: >-
       Reduced decode preprocessing for native BF16 projection weights in Kimi DSpark C8 on Ascend A5,

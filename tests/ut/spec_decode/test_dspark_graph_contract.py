@@ -278,17 +278,26 @@ def test_dispatcher_pads_uniform_draft_descriptors(query_count):
 
 @pytest.mark.parametrize("module", [speculator_module, dflash_module], ids=["dspark", "dflash"])
 @pytest.mark.parametrize("enforce_eager", [False, True])
-def test_draft_graph_manager_binds_speculator_and_update_stream(monkeypatch, module, enforce_eager):
+@pytest.mark.parametrize("quantized", [False, True], ids=["floating", "quantized"])
+def test_draft_graph_manager_binds_speculator_and_update_stream(monkeypatch, module, enforce_eager, quantized):
     cls = module.AscendDSparkSpeculator if module is speculator_module else module.AscendDFlashSpeculator
     parent = DSparkSpeculator if module is speculator_module else dflash_module.DFlashSpeculator
     speculator = cls.__new__(cls)
     speculator.speculative_config = SimpleNamespace(enforce_eager=enforce_eager)
     speculator.update_stream = object()
+    speculator.use_flashmla = True
+    state = SimpleNamespace(quant_max_query_len=7 if quantized else None, configure_graph_rows=MagicMock())
+    builder = SimpleNamespace(flashmla_state=state)
+    group = SimpleNamespace(get_metadata_builder=MagicMock(return_value=builder))
+    speculator.attn_groups = [[group]]
+    descriptors = [
+        BatchExecutionDescriptor(cg_mode=CUDAGraphMode.FULL, num_tokens=28, num_reqs=4, uniform_token_count=7)
+    ]
     modes = []
 
     def init_manager(self, mode):
         modes.append(mode)
-        self.query_cudagraph_manager = SimpleNamespace()
+        self.query_cudagraph_manager = SimpleNamespace(_capture_descs={CUDAGraphMode.FULL: descriptors})
 
     monkeypatch.setattr(parent, "init_cudagraph_manager", init_manager)
     speculator.init_cudagraph_manager(CUDAGraphMode.FULL_DECODE_ONLY)
@@ -296,6 +305,12 @@ def test_draft_graph_manager_binds_speculator_and_update_stream(monkeypatch, mod
     assert modes == [CUDAGraphMode.NONE if enforce_eager else CUDAGraphMode.FULL_DECODE_ONLY]
     assert speculator.query_cudagraph_manager.speculator is speculator
     assert speculator.query_cudagraph_manager.update_stream is speculator.update_stream
+    if module is dflash_module or enforce_eager:
+        group.get_metadata_builder.assert_not_called()
+    if module is speculator_module and not enforce_eager and quantized:
+        state.configure_graph_rows.assert_called_once_with(descriptors)
+    else:
+        state.configure_graph_rows.assert_not_called()
 
 
 @pytest.mark.parametrize("needs_capture", [False, True])
