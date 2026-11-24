@@ -8,7 +8,7 @@ import textwrap
 import pytest
 import torch
 
-from vllm_ascend.ops.gdn_attn_builder import _stable_argsort_for_npu
+from vllm_ascend.attention.gdn_attn_builder import _stable_argsort_for_npu
 
 _AICPU_FALLBACK_WARNING = "running on AiCpu"
 
@@ -17,7 +17,7 @@ def _run_argsort_in_subprocess(expression: str) -> subprocess.CompletedProcess[s
     code = textwrap.dedent(
         f"""
         import torch
-        from vllm_ascend.ops.gdn_attn_builder import _stable_argsort_for_npu
+        from vllm_ascend.attention.gdn_attn_builder import _stable_argsort_for_npu
 
         mask = torch.tensor([True, False, True, False], device="npu")
         indices = {expression}

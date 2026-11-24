@@ -101,6 +101,9 @@ class MooncakePushConnectorScheduler(MooncakeBaseConnectorScheduler):
                     num_external_tokens,
                 )
             params["do_remote_prefill"] = False
+            if params.get("do_virtual", False):
+                # Health probes complete locally without dispatching P through the proxy.
+                return
             # The proxy matches external IDs; workers retain the full D ID.
             external_request_id = request.request_id[:-9]
             message = dict(
@@ -199,6 +202,10 @@ class MooncakePushConnectorScheduler(MooncakeBaseConnectorScheduler):
 
     def request_finished(self, request: "Request", block_ids: BlockIds) -> tuple[bool, dict[str, Any] | None]:
         if not self.kv_transfer_config.is_kv_producer:
+            params = request.kv_transfer_params
+            if params is not None and params.get("do_virtual", False):
+                self._reqs_pending_recv.pop(request.request_id, None)
+                params["do_remote_prefill"] = False
             # Core pins cancelled D receives until finished_recving.
             return False, None
         req_id = request.request_id

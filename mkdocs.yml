@@ -382,6 +382,7 @@ nav:
     - community/contributors.md
     - community/issue-workflow-guidelines.md
     - community/slash-commands.md
+    - community/ai-review.md
     - community/versioning_policy.md
     - User Stories:
         - community/user_stories/index.md

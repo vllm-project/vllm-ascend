@@ -52,12 +52,12 @@ def test_use_updatable_graph_does_not_require_current_vllm_config():
 
 @pytest.mark.parametrize("device_type", list(AscendDeviceType))
 def test_register_customop_selects_gdn_before_import(device_type):
-    from vllm_ascend._310p.ops.fla.gdn_310 import AscendGatedDeltaNetAttention310
+    from vllm_ascend._310p.attention.gdn_310 import AscendGatedDeltaNetAttention310
 
     if device_type == AscendDeviceType._310P:
         expected_gdn = AscendGatedDeltaNetAttention310
     else:
-        from vllm_ascend.ops.gdn import AscendGatedDeltaNetAttention
+        from vllm_ascend.attention.gdn import AscendGatedDeltaNetAttention
 
         expected_gdn = AscendGatedDeltaNetAttention
 
@@ -65,7 +65,7 @@ def test_register_customop_selects_gdn_before_import(device_type):
 
     def guarded_import(name, *args, **kwargs):
         if device_type == AscendDeviceType._310P and (
-            name == "vllm_ascend.ops.gdn" or name == "fla_npu" or name.startswith("fla_npu.")
+            name == "vllm_ascend.attention.gdn" or name == "fla_npu" or name.startswith("fla_npu.")
         ):
             raise ModuleNotFoundError(f"Unexpected 310P dependency: {name}", name=name)
         return original_import(name, *args, **kwargs)
