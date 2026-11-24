@@ -1,155 +1,43 @@
-#
-# Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
-# This file is a part of the vllm-ascend project.
-#
+name: karc hook cpFromPod probe
 
-# TEMPORARY (fork-only validation): run the full A3 PR E2E selection on the
-# karc-only scale sets linux-aarch64-a3-800i-karc-fed-{2,4}. The card count is
-# still decided by the repository routing tables (runner_mapping/partition in
-# .github/workflows/scripts/test_config.yaml); only the two A3 partition labels
-# are rebound to the karc aliases. The cloud A3 pools stay untouched.
-# Do not merge.
-name: E2E
+# TEMPORARY (fork-only experiment, do not merge): grow $RUNNER_TEMP
+# (= /__w/_temp inside the job pod) step by step. Every step boundary makes the
+# container hook copy the whole directory back to the runner (execCpFromPod), so
+# this measures at which size the tar stream gets cut:
+#   Error: Unexpected end of data  at Extract._final
 
 on:
   pull_request:
-    types: [opened, synchronize, reopened]
     branches: [main]
-
-defaults:
-  run:
-    shell: bash -el {0}
+  workflow_dispatch:
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: karc-hook-probe-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
-  # Lint, CPU UTs, precision recommendations, other NPU tests, and the label
-  # gate are intentionally omitted for this temporary runner validation.
-  select-tests:
-    runs-on: linux-amd64-cpu-8-hk
-    container:
-      image: quay.io/ascend-ci/vllm-ascend:lint
-    outputs:
-      main_commit: ${{ steps.vllm.outputs.main_commit }}
-      test_groups: ${{ steps.scope.outputs.test_groups }}
-      csrc_cache_target_ids: ${{ steps.scope.outputs.csrc_cache_target_ids }}
-      base_sha: ${{ steps.source-snapshot.outputs.base_sha }}
+  probe:
+    runs-on: [linux-aarch64-a3-800i-karc-fed-2]
+    timeout-minutes: 90
     steps:
-      - name: Checkout vllm-project/vllm-ascend repo
-        uses: actions/checkout@v7
-        with:
-          ref: ${{ github.event.pull_request.head.sha }}
-          fetch-depth: 0
-
-      - name: Resolve source snapshot
-        id: source-snapshot
-        env:
-          BASE_REF: ${{ github.base_ref }}
-          EVENT_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+      - name: show runner identity
         run: |
-          # Resolve the moving base branch once so test selection, cache
-          # production, and cache consumption all receive one immutable SHA.
-          git config --global --add safe.directory "$GITHUB_WORKSPACE"
-          cd "$GITHUB_WORKSPACE"
-          git config user.name "vllm-ascend-ci"
-          git config user.email "vllm-ascend-ci@users.noreply.github.com"
-          git fetch origin "$BASE_REF"
-          BASE_SHA=$(git rev-parse FETCH_HEAD)
+          hostname
+          whoami
+          echo "RUNNER_TEMP=$RUNNER_TEMP"
+          df -h "$RUNNER_TEMP"
 
-          # The workflow graph was loaded when the event was created. If its
-          # cache control files changed on the base branch since then, pairing
-          # the old graph with the new helpers could produce incompatible keys.
-          # A rerun reloads the workflow and helpers from a consistent revision.
-          if ! git diff --quiet "$EVENT_BASE_SHA" "$BASE_SHA" -- \
-            .github/workflows/_ensure_csrc_cache.yaml \
-            .github/workflows/_build_csrc_cache.yaml \
-            .github/workflows/scripts/csrc_cache_targets.json \
-            .github/workflows/scripts/resolve_csrc_cache_targets.py; then
-            echo "::error::CSRC build workflows changed on $BASE_REF, please rebase the code."
-            echo "::error::Trigger a new PR workflow run."
-            exit 1
-          fi
+      - name: grow temp to 64 MiB
+        run: dd if=/dev/urandom of="$RUNNER_TEMP/probe-64m.bin" bs=1M count=64 status=none && du -sh "$RUNNER_TEMP"
 
-          git rebase "$BASE_SHA"
-          echo "base_sha=$BASE_SHA" >> "$GITHUB_OUTPUT"
+      - name: grow temp to 1088 MiB
+        run: dd if=/dev/urandom of="$RUNNER_TEMP/probe-1g.bin" bs=1M count=1024 status=none && du -sh "$RUNNER_TEMP"
 
-      - name: Read verified vLLM main commit
-        id: vllm
-        run: |
-          main_commit="$(tr -d '[:space:]' < .github/vllm-main-verified.commit)"
-          [[ "${main_commit}" =~ ^[0-9a-f]{7,40}$ ]] || {
-            echo "::error::Invalid verified vLLM main commit: ${main_commit}"
-            exit 1
-          }
-          echo "main_commit=${main_commit}" >> "$GITHUB_OUTPUT"
+      - name: grow temp to 3136 MiB
+        run: dd if=/dev/urandom of="$RUNNER_TEMP/probe-2g.bin" bs=1M count=2048 status=none && du -sh "$RUNNER_TEMP"
 
-      - name: Select the full A3 test suite for the karc-only runners
-        id: scope
-        run: |
-          pip install regex pyyaml
-          GITHUB_OUTPUT="$RUNNER_TEMP/all-test-groups.txt" \
-            python3 .github/workflows/scripts/select_tests.py --all-tests --skip-cpu-ut --skip-a5
-          python3 - <<'PY'
-          import json
-          import os
-          from pathlib import Path
+      - name: grow temp to 6208 MiB
+        run: dd if=/dev/urandom of="$RUNNER_TEMP/probe-3g.bin" bs=1M count=3072 status=none && du -sh "$RUNNER_TEMP"
 
-          # TEMPORARY (fork-only validation, do not merge): keep every A3 group
-          # exactly as select_tests.py produced it. Card counts, partitions and
-          # per-partition sharding all come from the repository routing tables,
-          # so each case keeps the runner it was written for (2-card or 4-card).
-          outputs = dict(
-              line.split("=", 1)
-              for line in Path(os.environ["RUNNER_TEMP"], "all-test-groups.txt").read_text().splitlines()
-          )
-          all_groups = json.loads(outputs["test_groups"])
-          groups = [group for group in all_groups if group.get("npu_type") == "a3"]
-          if not groups:
-              raise SystemExit("No A3 test groups selected")
-
-          for group in groups:
-              files = str(group["tests"]).split()
-              print(
-                  f"{group['runner']} ({group.get('num_npus')} card)"
-                  f" [part {group.get('partition')}] {len(files)} files"
-              )
-
-          target_ids = sorted({group["csrc_cache_target"] for group in groups})
-          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
-              print("test_groups=" + json.dumps(groups, separators=(",", ":")), file=output)
-              print("csrc_cache_target_ids=" + json.dumps(target_ids), file=output)
-          PY
-
-  prepare-csrc-cache:
-    needs: select-tests
-    uses: ./.github/workflows/_ensure_csrc_cache.yaml
-    with:
-      target_ids: ${{ needs.select-tests.outputs.csrc_cache_target_ids }}
-      source_ref: ${{ github.event.pull_request.head.sha }}
-      base_ref: ${{ github.base_ref }}
-      base_sha: ${{ needs.select-tests.outputs.base_sha }}
-
-  run-selected-tests:
-    needs: [select-tests, prepare-csrc-cache]
-    # The reusable workflow runs every selected partition in parallel.
-    uses: ./.github/workflows/_selected_tests.yaml
-    with:
-      vllm: ${{ needs.select-tests.outputs.main_commit }}
-      ref: ${{ github.event.pull_request.head.sha }}
-      base_ref: ${{ github.base_ref }}
-      base_sha: ${{ needs.select-tests.outputs.base_sha }}
-      test_groups: ${{ needs.select-tests.outputs.test_groups }}
+      - name: final inventory
+        run: ls -lh "$RUNNER_TEMP" && du -sh "$RUNNER_TEMP"
