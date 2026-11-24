@@ -55,13 +55,17 @@ def _describe_layout(tensor: torch.Tensor) -> str:
     )
 
 
-def _make_int8_block_view(
+def _make_int8_block_views(
     tensor: torch.Tensor,
     num_blocks: int,
     physical_blocks_per_manager_block: int,
     bytes_per_physical_block: int,
-) -> torch.Tensor:
-    """Build a zero-copy ``[num_blocks, page_bytes]`` cache view."""
+) -> list[tuple[torch.Tensor, int]]:
+    """Build zero-copy ``[num_blocks, page_bytes]`` views over one cache part.
+
+    Returns ``(view, copy_size_bytes)`` pairs so a caller can describe a page
+    with more than one view.
+    """
     required_blocks = num_blocks * physical_blocks_per_manager_block
     if tensor.ndim < 1 or tensor.shape[0] < required_blocks:
         raise ValueError(
@@ -99,12 +103,17 @@ def _make_int8_block_view(
     manager_stride_bytes = physical_stride_bytes * physical_blocks_per_manager_block
     byte_offset = tensor.storage_offset() * element_size
     raw = torch.empty(0, dtype=torch.int8, device=tensor.device).set_(tensor.untyped_storage())
-    return torch.as_strided(
-        raw,
-        (num_blocks, page_size_bytes),
-        (manager_stride_bytes, 1),
-        byte_offset,
-    )
+    return [
+        (
+            torch.as_strided(
+                raw,
+                (num_blocks, page_size_bytes),
+                (manager_stride_bytes, 1),
+                byte_offset,
+            ),
+            page_size_bytes,
+        )
+    ]
 
 
 def _canonicalize_split_cache(
@@ -159,7 +168,7 @@ def _canonicalize_split_cache(
     views: list[tuple[torch.Tensor, int]] = []
     for part, part_bytes in selected:
         try:
-            view = _make_int8_block_view(part, num_blocks, factor, part_bytes)
+            views.extend(_make_int8_block_views(part, num_blocks, factor, part_bytes))
         except ValueError:
             # Layout probe: report the measured tensor geometry before the
             # layout is rejected, so the split-view adaptation can be designed
@@ -178,7 +187,7 @@ def _canonicalize_split_cache(
                 "; ".join(_describe_layout(part) for part in parts),
             )
             raise
-        views.append((view, part_bytes * factor))
+
     return tuple(views)
 
 
