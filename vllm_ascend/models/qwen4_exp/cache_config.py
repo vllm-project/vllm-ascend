@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import math
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Final
 
 import regex as re
@@ -19,6 +19,7 @@ try:
 except ImportError:
     from vllm.v1.core.kv_cache_planning import may_override_num_blocks
 from vllm.v1.kv_cache_interface import (
+    AttentionSpec,
     CircularBufferSpec,
     FullAttentionSpec,
     HiddenStateCacheSpec,
@@ -35,12 +36,14 @@ from vllm_ascend.core.kv_cache_interface import (
     get_kv_cache_compression_ratio,
 )
 
+QWEN4_EXP_MODEL_TYPES: Final = ("qwen4_exp", "qwen4_exp_text", "qwen4_exp_mtp")
 QSA_MAIN: Final = "qsa_main"
 QSA_RAW: Final = "qsa_raw"
 QSA_COMPRESSED: Final = "qsa_compressed"
 GDN: Final = "gdn"
 PLE: Final = "ple"
 HIDDEN: Final = "hidden"
+_CACHE_BANK_ALIGNMENT: Final = 16
 
 
 @dataclass(frozen=True)
@@ -108,6 +111,12 @@ def _group_member_specs(group: KVCacheGroupSpec) -> dict[str, KVCacheSpec]:
     if isinstance(group.kv_cache_spec, UniformTypeKVCacheSpecs):
         return group.kv_cache_spec.kv_cache_specs
     return {name: group.kv_cache_spec for name in group.layer_names}
+
+
+def is_qwen4_exp_model(vllm_config: VllmConfig) -> bool:
+    model_config = getattr(vllm_config, "model_config", None)
+    model_type = getattr(getattr(model_config, "hf_text_config", None), "model_type", None)
+    return model_type in QWEN4_EXP_MODEL_TYPES
 
 
 def _classify_spec(layer_name: str, spec: KVCacheSpec) -> str | None:
@@ -232,7 +241,7 @@ def build_qwen4_kv_cache_layout(
         for _, spec in role_members[role]
         for dtype in (spec.dtypes if isinstance(spec, MambaSpec) else (spec.dtype,))
     }
-    alignment = math.lcm(16, *dtype_sizes)
+    alignment = math.lcm(_CACHE_BANK_ALIGNMENT, *dtype_sizes)
     gdn_specs = [spec for _, spec in role_members[GDN] if isinstance(spec, MambaSpec)]
     max_ssm_bytes = max(_state_bytes(spec, 1) for spec in gdn_specs)
     conv_bytes = max(_state_bytes(spec, 0) for spec in gdn_specs)
@@ -598,8 +607,18 @@ def _private_page_bytes(owner: CacheOwner) -> int:
 
 def get_qwen4_exp_pool_bytes_per_block(
     kv_cache_groups: list[KVCacheGroupSpec],
+    *,
+    unified: bool = False,
 ) -> int | None:
-    """Charge shared slots once, plus one private bank per PLE/hidden owner."""
+    """Return the per-block cost of the selected QSA layout."""
+    if unified:
+        bytes_per_block = 0
+        for group in kv_cache_groups:
+            specs = _group_member_specs(group)
+            bytes_per_block += sum(
+                round_up(specs[name].page_size_bytes, _CACHE_BANK_ALIGNMENT) for name in group.layer_names
+            )
+        return bytes_per_block or None
     layout = build_qwen4_kv_cache_layout(kv_cache_groups, num_blocks=1)
     if layout is None:
         return None
@@ -616,6 +635,15 @@ def get_qwen4_exp_kv_cache_groups(
     owners = _prepare_qsa_composite_groups(kv_cache_spec)
     if owners is None:
         return None
+    if is_qwen4_exp_model(vllm_config):
+        # QSA no longer overlays GDN. Remove hybrid padding so the main and
+        # compressed kernel pages and the request-local rings stay compact.
+        kv_cache_spec = kv_cache_spec.copy()
+        for name in set.union(*owners):
+            spec = kv_cache_spec[name]
+            assert isinstance(spec, AttentionSpec)
+            if spec.page_size_padded is not None:
+                kv_cache_spec[name] = replace(spec, page_size_padded=None)
     groups = get_default_groups(vllm_config, kv_cache_spec)
     groups = _merge_qsa_composite_groups(groups, kv_cache_spec, *owners)
     groups = _merge_mamba_state_groups(groups, len(owners[0]))
@@ -632,16 +660,45 @@ def get_qwen4_exp_kv_cache_config(
     vllm_config: VllmConfig,
     kv_cache_groups: list[KVCacheGroupSpec],
     available_memory: int,
+    *,
+    unified: bool = False,
 ) -> KVCacheConfig | None:
-    """Plan state slabs and block-packed K/V-or-SSM pages per ordinal slot.
+    """Plan descriptor banks or the legacy QSA/GDN slab layout.
 
-    The main descriptor API cannot express that one logical QSA/GDN owner has
-    two disjoint physical regions.  Descriptors therefore publish the anchor
-    region and shared backing geometry; the Ascend runner reconstructs every
-    role from the same capability-derived layout.  Different cache groups
-    deliberately alias the same allocation because a physical block ID is
-    owned by only one group at a time.
+    Legacy descriptors publish the start and stride of the shared slots.
+    The runner reconstructs each owner's components from the slab geometry.
     """
+    if unified:
+        bytes_per_block = get_qwen4_exp_pool_bytes_per_block(kv_cache_groups, unified=True)
+        if bytes_per_block is None:
+            return None
+        num_blocks = may_override_num_blocks(vllm_config, available_memory // bytes_per_block)
+        backing_size = num_blocks * bytes_per_block
+        tensors: list[KVCacheTensor] = []
+        offset = 0
+        for group in kv_cache_groups:
+            specs = _group_member_specs(group)
+            for name in group.layer_names:
+                page_size = specs[name].page_size_bytes
+                # Unequal page strides can overlap even for different live
+                # block IDs. Reserve a separate bank for each owner.
+                tensors.append(
+                    KVCacheTensor(
+                        size=backing_size,
+                        layers=[name],
+                        offset=offset,
+                        layer_stride=num_blocks * page_size,
+                        block_stride=page_size,
+                    )
+                )
+                offset += num_blocks * round_up(page_size, _CACHE_BANK_ALIGNMENT)
+        return KVCacheConfig(
+            num_blocks=num_blocks,
+            kv_cache_tensors=tensors,
+            kv_cache_groups=kv_cache_groups,
+            prefix_cache_retention_interval=vllm_config.cache_config.prefix_cache_retention_interval,
+        )
+
     probe = build_qwen4_kv_cache_layout(
         kv_cache_groups,
         num_blocks=1,

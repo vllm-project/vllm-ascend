@@ -1586,7 +1586,15 @@ def allocate_kv_cache_main(
         raise NotImplementedError("Extensible KV cache allocation is not supported on Ascend.")
     vllm_config = get_current_vllm_config()
     model_type = getattr(getattr(vllm_config.model_config, "hf_text_config", None), "model_type", None)
-    if model_type in ("deepseek_v4", "deepseek_v41", "deepseek_v41_text", "kimi_linear"):
+    if model_type in (
+        "deepseek_v4",
+        "deepseek_v41",
+        "deepseek_v41_text",
+        "kimi_linear",
+        "qwen4_exp",
+        "qwen4_exp_text",
+        "qwen4_exp_mtp",
+    ):
         return unified_allocate_kv_cache(kv_cache_config, device, kernel_block_sizes)
     attn_layers = get_layers_from_vllm_config(vllm_config, AttentionLayerBase)
     shared_layers = {

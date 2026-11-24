@@ -68,6 +68,7 @@ from vllm_ascend.models.qwen4_exp.cache_config import (
     get_qwen4_exp_kv_cache_config,
     get_qwen4_exp_kv_cache_groups,
     get_qwen4_exp_pool_bytes_per_block,
+    is_qwen4_exp_model,
 )
 from vllm_ascend.models.step5.cache_config import (
     get_step5_kv_cache_config_from_groups,
@@ -173,6 +174,8 @@ class AscendKVCacheConfigBuilder(DefaultKVCacheConfigBuilder):
         """Return the pool cost used to build the native descriptors."""
         if vllm_config.model_config.hf_config.model_type == "kimi_k31":
             return paired_sfa_pool_bytes(kv_cache_groups)
+        if is_qwen4_exp_model(vllm_config):
+            return get_qwen4_exp_pool_bytes_per_block(kv_cache_groups, unified=True)
         pools = _get_replicated_draft_pools(kv_cache_groups)
         if pools is not None:
             return sum(_upstream_pool_bytes_per_block(vllm_config, pool) for pool in pools)
@@ -499,12 +502,13 @@ def get_ascend_kv_cache_config_from_groups(
     ``_attach_transfer_and_speculation_metadata`` before returning; see it for
     why the PD role must ride on the config object.
     """
+    qwen_unified = is_qwen4_exp_model(vllm_config)
     qwen_config = (
-        None
-        if vllm_version_is("0.28.0")
-        else get_qwen4_exp_kv_cache_config(vllm_config, kv_cache_groups, available_memory)
+        get_qwen4_exp_kv_cache_config(vllm_config, kv_cache_groups, available_memory, unified=qwen_unified)
+        if qwen_unified or not vllm_version_is("0.28.0")
+        else None
     )
-    pools = _get_replicated_draft_pools(kv_cache_groups)
+    pools = None if qwen_unified else _get_replicated_draft_pools(kv_cache_groups)
     if vllm_config.model_config.hf_config.model_type == "kimi_k31":
         kv_cache_config = paired_sfa_cache_config(vllm_config, kv_cache_groups, available_memory)
     elif is_step5_groups(kv_cache_groups):

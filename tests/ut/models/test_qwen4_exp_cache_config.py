@@ -527,7 +527,7 @@ def test_qsa_76_input_specs_restore_composite_block_table_lifetimes() -> None:
     assert raw[0].is_eagle_group
 
 
-def test_qwen4_cache_admission_matches_shared_planner_allocation() -> None:
+def test_qwen4_cache_admission_matches_unified_planner_allocation() -> None:
     specs = _ungrouped_qwen_specs()
     owners = _prepare_qsa_composite_groups(specs)
     assert owners is not None
@@ -537,7 +537,11 @@ def test_qwen4_cache_admission_matches_shared_planner_allocation() -> None:
         *owners,
     )
     vllm_config = SimpleNamespace(
-        model_config=SimpleNamespace(max_model_len=135168, hf_config=SimpleNamespace(model_type="qwen4_exp")),
+        model_config=SimpleNamespace(
+            max_model_len=135168,
+            hf_config=SimpleNamespace(model_type="qwen4_exp"),
+            hf_text_config=SimpleNamespace(model_type="qwen4_exp_text"),
+        ),
         parallel_config=SimpleNamespace(decode_context_parallel_size=1),
         cache_config=SimpleNamespace(
             mamba_cache_mode="align",
@@ -557,23 +561,9 @@ def test_qwen4_cache_admission_matches_shared_planner_allocation() -> None:
         // group.kv_cache_spec.page_size_bytes
         for group in groups
     )
-    planned = get_qwen4_exp_kv_cache_config(
-        vllm_config,
-        groups,
-        required_bytes,
-    )
-    assert planned is not None
+    planned = AscendKVCacheConfigBuilder().get_kv_cache_config_from_groups(vllm_config, groups, required_blocks)
     assert planned.num_blocks == required_blocks
-    layout = build_qwen4_kv_cache_layout(
-        groups,
-        num_blocks=required_blocks,
-    )
-    assert layout is not None
-    assert layout.slot_count == 13
-    assert (
-        layout.slot_count * layout.slot_backing_size
-        + sum(owner.spec.real_page_size_bytes * required_blocks for owner in layout.owners if owner.role == PLE)
-    ) == required_bytes
+    assert {tensor.size for tensor in planned.kv_cache_tensors} == {required_bytes}
 
 
 def test_mamba_state_groups_merge_shares_one_block_table(monkeypatch) -> None:
@@ -817,14 +807,159 @@ def test_platform_builder_uses_qwen_pool_accounting() -> None:
     from vllm_ascend.core.kv_cache_config_builder import AscendKVCacheConfigBuilder
 
     groups = _groups()
-    expected = get_qwen4_exp_pool_bytes_per_block(groups)
+    expected = get_qwen4_exp_pool_bytes_per_block(groups, unified=True)
     assert expected is not None
     assert (
         AscendKVCacheConfigBuilder()._get_pool_bytes_per_block(
-            SimpleNamespace(model_config=SimpleNamespace(hf_config=SimpleNamespace(model_type="qwen4_exp"))), groups
+            SimpleNamespace(
+                model_config=SimpleNamespace(
+                    hf_config=SimpleNamespace(model_type="qwen4_exp"),
+                    hf_text_config=SimpleNamespace(model_type="qwen4_exp_text"),
+                ),
+            ),
+            groups,
         )
         == expected
     )
+
+
+def test_qwen4_exp_worker_without_qsa_uses_unified_allocation(monkeypatch) -> None:
+    from vllm_ascend.attention.gdn_attn_builder import AscendGDNAttentionBackend
+
+    runtime = SimpleNamespace(
+        model_config=SimpleNamespace(
+            hf_config=SimpleNamespace(model_type="qwen4_exp"),
+            hf_text_config=SimpleNamespace(model_type="qwen4_exp_text"),
+        ),
+        cache_config=SimpleNamespace(num_gpu_blocks_override=None, prefix_cache_retention_interval=None),
+        kv_transfer_config=None,
+    )
+    groups = [
+        group
+        for group in _groups()
+        if isinstance(group.kv_cache_spec, MambaSpec) and not group.kv_cache_spec.tp_replicated
+    ]
+    config = AscendKVCacheConfigBuilder().get_kv_cache_config_from_groups(runtime, groups, num_blocks=3)
+    names = groups[0].layer_names
+    assert len(config.kv_cache_tensors) == len(names)
+    layers = {name: SimpleNamespace(get_attn_backend=lambda: AscendGDNAttentionBackend) for name in names}
+    monkeypatch.setattr(attn_utils_v2, "get_current_vllm_config", lambda: runtime)
+    monkeypatch.setattr(attn_utils_v2, "get_layers_from_vllm_config", lambda *_: layers)
+    monkeypatch.setattr(attn_utils_v2, "get_shared_kv_cache_layers", lambda _: {})
+
+    caches = attn_utils_v2.allocate_kv_cache_main(config, torch.device("cpu"), None, [128])
+
+    assert set(caches) == set(names)
+    first, second = (caches[name][0] for name in names)
+    assert first.shape == second.shape == (3, 64, 4)
+    assert first.untyped_storage().data_ptr() == second.untyped_storage().data_ptr()
+    assert first.data_ptr() != second.data_ptr()
+
+
+@pytest.mark.parametrize(
+    ("text_model_type", "outer_model_type", "manager_block_size", "indexer_dtype"),
+    [
+        ("qwen4_exp_text", "qwen4_exp", 384, torch.float8_e4m3fn),
+        ("qwen4_exp", "qwen4_exp", 128, torch.bfloat16),
+        ("qwen4_exp_mtp", "qwen4_exp", 256, torch.bfloat16),
+    ],
+)
+def test_qsa_unified_allocation_preserves_runtime_views(
+    monkeypatch, text_model_type, outer_model_type, manager_block_size, indexer_dtype
+) -> None:
+    from vllm.model_executor.models.extract_hidden_states import CacheOnlyAttentionBackend
+    from vllm.v1.attention.backends.short_conv_attn import PleShortConvAttentionBackend
+    from vllm.v1.kv_cache_layout import KVCacheLayout
+
+    from vllm_ascend.attention.gdn_attn_builder import AscendGDNAttentionBackend
+    from vllm_ascend.models.qwen4_exp.qsa import AscendQSABackend, AscendQSAIndexerBackend
+    from vllm_ascend.worker.utils import prepare_ascend_kernel_block_sizes
+
+    runtime = SimpleNamespace(
+        model_config=SimpleNamespace(
+            hf_config=SimpleNamespace(model_type=outer_model_type),
+            hf_text_config=SimpleNamespace(model_type=text_model_type),
+            supports_kv_cache_grouping=False,
+        ),
+        cache_config=SimpleNamespace(
+            num_gpu_blocks_override=None,
+            prefix_cache_retention_interval=None,
+            get_resolved_kv_cache_layout=lambda: KVCacheLayout.BLNHC,
+        ),
+        scheduler_config=SimpleNamespace(disable_hybrid_kv_cache_manager=False),
+        attention_config=SimpleNamespace(hisparse_config=None),
+        kv_transfer_config=None,
+    )
+    specs = {}
+    layers = {}
+    for group in _groups():
+        spec = group.kv_cache_spec
+        if isinstance(spec, HiddenStateCacheSpec):
+            backend = CacheOnlyAttentionBackend
+        elif isinstance(spec, MambaSpec):
+            backend = PleShortConvAttentionBackend if spec.tp_replicated else AscendGDNAttentionBackend
+            if spec.tp_replicated:
+                spec = replace(spec, shapes=((3, 5),))
+        elif isinstance(spec, CircularBufferSpec):
+            backend = AscendQSAIndexerBackend
+            spec = replace(spec, head_size=44, page_size_padded=1024)
+        elif isinstance(spec, MLAAttentionSpec):
+            backend = AscendQSAIndexerBackend
+            spec = replace(spec, block_size=manager_block_size, dtype=indexer_dtype, page_size_padded=16384)
+        else:
+            backend = AscendQSABackend
+            spec = AscendQSABackend.customize_spec(
+                replace(spec, block_size=manager_block_size, page_size_padded=100000)
+            )
+        for name in group.layer_names:
+            specs[name] = spec
+            layers[name] = SimpleNamespace(get_attn_backend=lambda backend=backend: backend)
+
+    builder = AscendKVCacheConfigBuilder()
+    groups = builder.get_kv_cache_groups(runtime, specs)
+    num_blocks = 3
+    config = builder.get_kv_cache_config_from_groups(runtime, groups, num_blocks)
+    cost = builder._get_pool_bytes_per_block(runtime, groups)
+    descriptors = config.kv_cache_tensors
+    assert len(descriptors) == len(specs)
+    assert {tensor.size for tensor in descriptors} == {num_blocks * cost}
+    for tensor, following in zip(descriptors, descriptors[1:]):
+        assert tensor.offset + num_blocks * tensor.block_stride <= following.offset
+        assert following.offset % 16 == 0
+
+    monkeypatch.setattr(attn_utils_v2, "get_current_vllm_config", lambda: runtime)
+    monkeypatch.setattr(attn_utils_v2, "get_layers_from_vllm_config", lambda *_: layers)
+    monkeypatch.setattr(attn_utils_v2, "get_shared_kv_cache_layers", lambda _: {})
+    attn_groups = [[] for _ in groups]
+    for group in attn_utils_v2._get_cache_attention_groups(config, layers, {}):
+        attn_groups[group.kv_cache_group_id].append(group)
+    kernel_sizes = prepare_ascend_kernel_block_sizes(config, attn_groups)
+    caches = attn_utils_v2.allocate_kv_cache_main(config, torch.device("cpu"), None, kernel_sizes)
+    source = "model.layers.11.self_attn"
+    keys, values = caches[f"{source}.attn"]
+    raw = caches[f"{source}.indexer.raw_key_cache"]
+    compressed = caches[f"{source}.indexer.compressed_key_cache"]
+    conv, ssm = caches["model.layers.0.linear_attn"]
+    (ple,) = caches["model.ple"]
+    hidden = caches["model.cache_only_layers.0"]
+    kernel_pages = num_blocks * (manager_block_size // 128)
+    assert keys.shape == values.shape == (kernel_pages, 128, 1, 64)
+    assert values.data_ptr() - keys.data_ptr() == keys[0].nbytes
+    assert keys.stride(0) * keys.element_size() == 2 * keys[0].nbytes
+    assert raw.shape == (num_blocks, 8, 1, 44) and raw.is_contiguous()
+    assert compressed.shape == (kernel_pages, 32, 1, 32) and compressed.is_contiguous()
+    assert compressed.dtype == indexer_dtype
+    assert conv.shape == (num_blocks, 64, 4) and ssm.shape == (num_blocks, 128, 128)
+    assert ple.shape == (num_blocks, 3, 5) and ple.is_contiguous()
+    assert hidden.shape == (num_blocks, 1, 128, 64)
+    components = (keys, values, raw, compressed, conv, ssm, ple, hidden)
+    assert len({component.untyped_storage().data_ptr() for component in components}) == 1
+
+    keys[0].fill_(7)
+    raw[1, ..., 32:].view(torch.int64).fill_(42)
+    assert torch.all(keys[0] == 7) and torch.count_nonzero(keys[1:]) == 0
+    for component in (values, compressed, conv, ssm, ple, hidden):
+        assert torch.count_nonzero(component.view(torch.int8)) == 0
 
 
 @pytest.mark.parametrize("manager_block_size", [256, 384, 768])
