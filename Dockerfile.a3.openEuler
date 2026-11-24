@@ -144,7 +144,44 @@ https://ftp.gnu.org/gnu/gcc/gcc-${GCC_VERSION}/gcc-${GCC_VERSION}.tar.xz"; \
             exit 1; \
         fi; \
         mkdir -p /tmp/gccsrc && tar -xf "$GCC_TAR" -C /tmp/gccsrc --strip-components=1; \
-        cd /tmp/gccsrc && ./contrib/download_prerequisites; \
+        dep_fetch() { \
+            local target="$1"; shift; \
+            for url in "$@"; do \
+                echo "INFO: 下载 GCC 依赖 ${url}"; \
+                if curl -fL --retry 3 --retry-delay 3 --connect-timeout 20 \
+                        --speed-limit 51200 --speed-time 30 --max-time 600 \
+                        -o /tmp/dep.tar "$url" && tar -tf /tmp/dep.tar >/dev/null 2>&1; then \
+                    mkdir -p "/tmp/gccsrc/${target}" && \
+                    tar -xf /tmp/dep.tar -C "/tmp/gccsrc/${target}" --strip-components=1 && \
+                    rm -f /tmp/dep.tar && return 0; \
+                fi; \
+                rm -f /tmp/dep.tar; \
+            done; \
+            return 1; \
+        }; \
+        dep_fetch gmp gmp-6.2.1 \
+            https://mirrors.huaweicloud.com/gnu/gmp/gmp-6.2.1.tar.xz \
+            https://mirrors.aliyun.com/gnu/gmp/gmp-6.2.1.tar.xz \
+            https://mirrors.tuna.tsinghua.edu.cn/gnu/gmp/gmp-6.2.1.tar.xz \
+            https://gcc.gnu.org/pub/gcc/infrastructure/gmp-6.2.1.tar.bz2 \
+            || { echo "ERROR: GMP 源码下载失败"; exit 1; }; \
+        dep_fetch mpfr mpfr-4.1.0 \
+            https://mirrors.huaweicloud.com/gnu/mpfr/mpfr-4.1.0.tar.xz \
+            https://mirrors.aliyun.com/gnu/mpfr/mpfr-4.1.0.tar.xz \
+            https://mirrors.tuna.tsinghua.edu.cn/gnu/mpfr/mpfr-4.1.0.tar.xz \
+            https://gcc.gnu.org/pub/gcc/infrastructure/mpfr-4.1.0.tar.bz2 \
+            || { echo "ERROR: MPFR 源码下载失败"; exit 1; }; \
+        dep_fetch mpc mpc-1.2.1 \
+            https://mirrors.huaweicloud.com/gnu/mpc/mpc-1.2.1.tar.gz \
+            https://mirrors.aliyun.com/gnu/mpc/mpc-1.2.1.tar.gz \
+            https://mirrors.tuna.tsinghua.edu.cn/gnu/mpc/mpc-1.2.1.tar.gz \
+            https://gcc.gnu.org/pub/gcc/infrastructure/mpc-1.2.1.tar.gz \
+            || { echo "ERROR: MPC 源码下载失败"; exit 1; }; \
+        if ! dep_fetch isl isl-0.24 \
+                https://gcc.gnu.org/pub/gcc/infrastructure/isl-0.24.tar.bz2 \
+                https://libisl.sourceforge.io/isl-0.24.tar.bz2; then \
+            echo "WARN: ISL 下载失败，构建时自动跳过 graphite（不影响 C/C++ 编译）"; \
+        fi; \
         mkdir -p /tmp/gccbuild && cd /tmp/gccbuild && \
         /tmp/gccsrc/configure --prefix=/usr/local --enable-languages=c,c++ \
             --disable-bootstrap --disable-multilib --with-system-zlib && \
