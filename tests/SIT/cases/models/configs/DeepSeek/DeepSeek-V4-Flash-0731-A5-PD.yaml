@@ -27,8 +27,9 @@ _envs: &envs
   PREFILL_PORT: "DEFAULT_PORT"
   DECODE_PORT: "DEFAULT_PORT"
   PROXY_PORT: "DEFAULT_PORT"
-  HCCL_RDMA_TIMEOUT: "30"        # 默认 20，调大到 30（指数项，30 → 约 60s）
-  HCCL_RDMA_RETRY_CNT: "15"
+  ASCEND_TRANSFER_TIMEOUT: "120000"
+#  HCCL_RDMA_TIMEOUT: "30"        # 默认 20，调大到 30（指数项，30 → 约 60s）
+#  HCCL_RDMA_RETRY_CNT: "15"
 
 test_cases:
   - name: "DeepSeek-V4-Flash-0731-A5-PD-single-node"
