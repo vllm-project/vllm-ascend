@@ -32,6 +32,7 @@ from vllm_ascend.ops.fused_moe.dataclass.fused_experts import MoEFusedExpertsInp
 from vllm_ascend.ops.fused_moe.dataclass.moe_mlp import MoEMlpComputeInput, build_mlp_compute_input
 from vllm_ascend.ops.fused_moe.dataclass.prepare_finalize import MoEPrepareOutput
 from vllm_ascend.ops.fused_moe.dataclass.token_dispatcher import build_token_dispatch_input
+from vllm_ascend.ops.fused_moe.mega_moe_context import ChannelWindow
 from vllm_ascend.ops.fused_moe.moe_mlp import apply_moe_mlp, maybe_record_event
 from vllm_ascend.ops.fused_moe.prepare_finalize import (
     PrepareAndFinalize,
@@ -63,6 +64,14 @@ def get_moe_comm_method(
     moe_config: FusedMoEConfig | None = None,
 ) -> MoECommMethod | None:
     return _MoECommMethods.get(_moe_config_key(moe_comm_type, moe_config))
+
+
+def retain_channel_methods(moe_config, shape: tuple[int, ...], methods):
+    # The sleep backend enumerates this registry to refresh dispatcher group
+    # names. Keep any model-specific instances displaced by the old short key.
+    for kind, method in methods.items():
+        if method is not None and get_moe_comm_method(kind, moe_config) is not method:
+            _MoECommMethods[kind, shape] = method
 
 
 def setup_moe_comm_method(moe_config):
@@ -350,6 +359,10 @@ class FusedMC2CommImpl(MoECommMethod):
 
     def refresh_hccl_runtime_state(self) -> bool:
         """Rebind a stale MegaMoe context to the restored MC2 communicator."""
+        window = getattr(self, "_channel_window", None)
+        if window is not None:
+            window.restore(get_mc2_group().device_group)
+            return True
         symm_buffer = getattr(self, "mega_moe_symm_buffer", None)
         if symm_buffer is None or not self._mega_moe_hccl_state_stale:
             return True
@@ -388,11 +401,23 @@ class FusedMC2CommImpl(MoECommMethod):
         *,
         is_decode_only_node: bool,
     ):
+        params = self.mega_moe_buffer_params(dispatch_quant_mode, dispatch_quant_out_dtype)
+        scope = get_mc2_group()
+        if isinstance(getattr(scope, "mega_moe_channel_window", None), ChannelWindow):
+            raise RuntimeError("Unbound MegaMoE layer requested a second context on the live MC2 group")
+        return self.get_symm_buffer_for_mega_moe(
+            scope.device_group,
+            params.pop("num_experts"),
+            params.pop("num_max_tokens_per_rank"),
+            params.pop("num_topk"),
+            **params,
+        )
+
+    def mega_moe_buffer_params(self, dispatch_quant_mode, dispatch_quant_out_dtype):
         # FusedMC2CommImpl always builds a TokenDispatcherWithMC2 (see
         # setup_moe_comm_method), which is where global_bs / ep_world_size live.
         # Assert it so mypy resolves those attributes off the base dispatcher.
         assert isinstance(self.token_dispatcher, TokenDispatcherWithMC2)
-        group = get_mc2_group().device_group
         # The sym buffer is allocated by get_symm_buffer_for_mega_moe, a
         # collective handshake over the EP (mc2) group. Its shape params —
         # especially num_max_tokens_per_rank — MUST be identical on every EP
@@ -462,11 +487,10 @@ class FusedMC2CommImpl(MoECommMethod):
             self.token_dispatcher.global_bs,
         )
 
-        return self.get_symm_buffer_for_mega_moe(
-            group,
-            num_experts,
-            num_max_tokens_per_rank,
-            num_topk,
+        return dict(
+            num_experts=num_experts,
+            num_max_tokens_per_rank=num_max_tokens_per_rank,
+            num_topk=num_topk,
             hidden=self.moe_config.hidden_dim,
             # Per the operator's contract, intermediate_hidden is the
             # post-activation width (half of the l1 output width). The
@@ -514,15 +538,17 @@ class FusedMC2CommImpl(MoECommMethod):
             fused_experts_input.quant.quant_type
         )
 
-        if self.mega_moe_symm_buffer is None:
-            self.mega_moe_symm_buffer = self._init_mega_moe_symm_buffer(
-                dispatch_quant_mode,
-                dispatch_quant_out_dtype,
-                is_decode_only_node=is_decode_only_node,
-            )
-        else:
-            self.mega_moe_symm_buffer.dispatch_quant_mode = dispatch_quant_mode
-            self.mega_moe_symm_buffer.dispatch_quant_out_dtype = dispatch_quant_out_dtype
+        layer = cast(torch.nn.Module, fused_experts_input.layer)
+        symm_buffer = getattr(layer, "channel_mega_moe_buffer", None)
+        if symm_buffer is None:
+            if self.mega_moe_symm_buffer is None:
+                self.mega_moe_symm_buffer = self._init_mega_moe_symm_buffer(
+                    dispatch_quant_mode, dispatch_quant_out_dtype, is_decode_only_node=is_decode_only_node
+                )
+            else:
+                self.mega_moe_symm_buffer.dispatch_quant_mode = dispatch_quant_mode
+                self.mega_moe_symm_buffer.dispatch_quant_out_dtype = dispatch_quant_out_dtype
+            symm_buffer = self.mega_moe_symm_buffer
 
         x_active_mask = None
         # Ascend 950 (A5) MegaMoe only support a null x_active_mask, and it
@@ -546,7 +572,6 @@ class FusedMC2CommImpl(MoECommMethod):
         l2_bias = weights.w2_scale_bias
         # Quant methods supply the routed layer, whose activation was bound at
         # initialization. The shared communicator may belong to a later layer.
-        layer = cast(torch.nn.Module, fused_experts_input.layer)
         activation_kwargs = getattr(layer, "mega_moe_activation_kwargs", None)
         if activation_kwargs is None:
             activation_kwargs = getattr(self, "mega_moe_activation_kwargs", {}) or {}
@@ -619,7 +644,7 @@ class FusedMC2CommImpl(MoECommMethod):
             topk_weights,
             weight1,
             weight2,
-            self.mega_moe_symm_buffer,
+            symm_buffer,
             l1_weights_sf=weight_scales1,
             l2_weights_sf=weight_scales2,
             l1_bias=l1_bias,

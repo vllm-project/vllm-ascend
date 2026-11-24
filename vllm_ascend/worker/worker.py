@@ -86,6 +86,7 @@ from vllm.v1.worker.workspace import init_workspace_manager
 import vllm_ascend.device_allocator.sleep_mode_backend  # noqa: F401  (registers camem)
 import vllm_ascend.envs as envs_ascend
 from vllm_ascend.ascend_config import KVPPConfig, get_ascend_config, init_ascend_config
+from vllm_ascend.ascend_forward_context import use_cann_megamoe
 from vllm_ascend.batch_invariant import init_batch_invariance
 from vllm_ascend.core import kv_cache_dtype_handlers  # noqa: F401
 from vllm_ascend.core.kv_cache_placement import (
@@ -110,8 +111,9 @@ from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_man
     plan_sparse_kv_offload_memory,
 )
 from vllm_ascend.distributed.kv_transfer.utils.mooncake_transfer_engine import global_te
-from vllm_ascend.distributed.parallel_state import init_ascend_model_parallel
+from vllm_ascend.distributed.parallel_state import get_mc2_group, init_ascend_model_parallel
 from vllm_ascend.observability.runtime_guard.hooks import runtime_guard_idle_step
+from vllm_ascend.ops.fused_moe.mega_moe_context import bind_channel_layers, collect_channel_layers
 from vllm_ascend.ops.triton.triton_utils import init_device_properties_triton
 from vllm_ascend.profiler.torch_npu_profiler import TorchNPUProfilerWrapper
 from vllm_ascend.utils import (
@@ -1102,8 +1104,21 @@ class NPUWorker(GPUWorker):
         else:
             empty_cache_context = nullcontext()
 
-        with context, empty_cache_context, set_current_vllm_config(self.vllm_config):
-            self.model_runner.load_model()
+        with set_current_vllm_config(self.vllm_config):
+            plan_channels = (
+                self.vllm_config.speculative_config is not None
+                and get_current_hardware_profile().supports(HardwareCapability.CANN_MEGAMOE_MXFP)
+                and use_cann_megamoe(self.vllm_config)
+            )
+            with context, empty_cache_context, collect_channel_layers() if plan_channels else nullcontext() as layers:
+                self.model_runner.load_model()
+            if layers is not None:
+                bind_channel_layers(
+                    layers,
+                    self.model_runner.get_model(),
+                    get_mc2_group(),
+                    allow_sharing=not self.vllm_config.parallel_config.use_ubatching,
+                )
 
         if getattr(self, "use_v2_model_runner", False) and has_ec_transfer():
             get_ec_transfer().start_worker_services()

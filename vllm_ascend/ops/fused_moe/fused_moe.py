@@ -16,6 +16,8 @@
 #
 from __future__ import annotations
 
+from contextlib import contextmanager, nullcontext
+
 import torch
 import torch.nn.functional as F
 from vllm.distributed import (
@@ -29,9 +31,10 @@ from vllm.model_executor.layers.fused_moe.layer import MoERunner
 from vllm.model_executor.layers.fused_moe.runner.moe_runner import _moe_forward_shared, _unpack
 from vllm.utils.torch_utils import direct_register_custom_op
 
-from vllm_ascend.ascend_forward_context import _EXTRA_CTX, MoECommType
+from vllm_ascend.ascend_forward_context import _EXTRA_CTX, MoECommType, get_unfused_mc2_capacity, select_unfused_a5_moe
 from vllm_ascend.distributed.parallel_state import get_mc2_group
 from vllm_ascend.ops.fused_moe.dataclass.shared_experts import PreparedSharedExpertInput, RoutedMoEMilestones
+from vllm_ascend.ops.fused_moe.mega_moe_context import register_channel_layer
 from vllm_ascend.ops.fused_moe.moe_comm_method import get_moe_comm_method, setup_moe_comm_method
 from vllm_ascend.ops.fused_moe.moe_mlp import maybe_record_event
 from vllm_ascend.ops.fused_moe.routed_experts import AscendRoutedExperts
@@ -154,6 +157,7 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
                 self._forward_entry = torch.ops.vllm.ascend_moe_forward_shared_sp
 
         setup_moe_comm_method(self.moe_config)
+        register_channel_layer(self, get_moe_comm_method)
         # Communication objects are shared across MoE layers. Keep the bound
         # activation with its owning layer when a later layer replaces them.
         self.routed_experts.mega_moe_activation_kwargs = getattr(
@@ -315,6 +319,31 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
             and shared_experts.parallel_mode() is SharedExpertParallelMode.SEQUENCE_PARALLEL_ONLY
         )
 
+    channel_mega_moe_fallback = False
+
+    def _layer_comm_type(self):
+        selected = _EXTRA_CTX.moe_comm_type
+        if self.channel_mega_moe_fallback and selected in (MoECommType.FUSED_MC2, MoECommType.MC2):
+            return select_unfused_a5_moe(
+                _EXTRA_CTX.max_tokens_across_dp,
+                get_unfused_mc2_capacity(self.moe_config.tp_size),
+                self.moe_config.ep_size,
+                self.moe_config.experts_per_token,
+            )
+        return selected
+
+    @contextmanager
+    def _unfused_channel_context(self):
+        # Router, shared-expert scheduling and quant methods must agree on
+        # the same transport for the entire layer, including dummy/capture.
+        previous = _EXTRA_CTX.moe_comm_type, _EXTRA_CTX.moe_comm_method, _EXTRA_CTX.use_mega_moe
+        _EXTRA_CTX.moe_comm_type = self._layer_comm_type()
+        _EXTRA_CTX.use_mega_moe = False
+        try:
+            yield
+        finally:
+            _EXTRA_CTX.moe_comm_type, _EXTRA_CTX.moe_comm_method, _EXTRA_CTX.use_mega_moe = previous
+
     @property
     def _fused_output_is_reduced(self) -> bool:
         # For MC2/ALLTOALL/FUSED_MC2 comm types, finalize() already includes
@@ -322,7 +351,7 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
         # handles it for the shared output. Signal this to the upstream
         # MoERunner.forward() so _maybe_reduce_final_output does not apply a
         # second TP all-reduce (which would double-count the contributions).
-        moe_comm_type = _EXTRA_CTX.moe_comm_type
+        moe_comm_type = self._layer_comm_type()
         return moe_comm_type in {
             MoECommType.ALLTOALL,
             MoECommType.MC2,
@@ -347,7 +376,7 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
             shared_experts is not None
             and getattr(shared_experts, "megamoe_shared_weights_ready", False)
             and not getattr(shared_experts, "_megamoe_shared_fusion_disabled", False)
-            and _EXTRA_CTX.moe_comm_type is MoECommType.FUSED_MC2
+            and self._layer_comm_type() is MoECommType.FUSED_MC2
         )
 
     @property
@@ -558,7 +587,8 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
         shared_experts_input: torch.Tensor | None,
         input_ids: torch.Tensor | None = None,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        with self._sequence_parallel_context():
+        channel_context = self._unfused_channel_context() if self.channel_mega_moe_fallback else nullcontext()
+        with channel_context, self._sequence_parallel_context():
             shared_hidden_states = shared_experts_input if shared_experts_input is not None else hidden_states
             if self.ascend_shared_experts is None:
                 if self.is_internal_router:

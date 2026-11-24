@@ -413,7 +413,24 @@ def _select_capacity_and_world_size_moe_comm_method(
     ep_world_size = (
         vllm_config.parallel_config.world_size_across_dp // vllm_config.parallel_config.pipeline_parallel_size
     )
-    if (num_tokens is None or num_tokens <= mc2_tokens_capacity) and ep_world_size > 1:
+    return select_unfused_a5_moe(num_tokens, mc2_tokens_capacity, ep_world_size, num_experts_per_tok)
+
+
+def get_unfused_mc2_capacity(tp_size: int) -> int | None:
+    # Plain MC2 can pass the entire reserved global_bs to HCCL, even for a
+    # small batch. A window sized for MegaMoE can exceed plain MC2's limit.
+    capacity = get_mc2_tokens_capacity()
+    if capacity is None or capacity > _MC2_TOKENS_PER_RANK_LIMIT * tp_size:
+        return None
+    return capacity
+
+
+def select_unfused_a5_moe(num_tokens, mc2_tokens_capacity, ep_world_size, num_experts_per_tok) -> MoECommType:
+    if (
+        mc2_tokens_capacity is not None
+        and (num_tokens is None or num_tokens <= mc2_tokens_capacity)
+        and ep_world_size > 1
+    ):
         return MoECommType.MC2
     if ep_world_size <= num_experts_per_tok:
         return MoECommType.ALLGATHER
