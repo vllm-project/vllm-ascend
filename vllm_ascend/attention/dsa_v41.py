@@ -8,6 +8,7 @@ before running the compressor, indexer and sparse-attention operators without
 moving cache or scheduler knowledge back into the model.
 """
 
+import time
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from typing import Any
@@ -29,7 +30,9 @@ from vllm.v1.attention.backend import (
 )
 from vllm.v1.kv_cache_interface import AttentionSpec, CircularBufferSpec
 
-from vllm_ascend.ascend_config import get_ascend_config
+from vllm_ascend.ascend_config import PcpConfig, get_ascend_config
+from vllm_ascend.attention.context_parallel.pcp_owner_timing import enter as _timing_enter
+from vllm_ascend.attention.context_parallel.pcp_owner_timing import exit as _timing_exit
 from vllm_ascend.attention.dsa_v1 import AscendDSABackend, build_dspark_swa_indices, dsv4_dsa_overlap_stream
 from vllm_ascend.attention.utils import (
     KVCacheRuntimeShapes,
@@ -240,6 +243,9 @@ class AscendDSAV41Metadata(AttentionMetadata):
     c2_source_cos: torch.Tensor | None = None
     c2_source_sin: torch.Tensor | None = None
     c2_metadata_group_id: int | None = None
+    # Per-forward staging cache, shared through the builder's batch dictionary
+    # so every cache group in the same forward resolves the same instance.
+    swa_stage_cache: Any = None
     global_metadata: "AscendDSAV41Metadata | None" = None
 
 
@@ -266,6 +272,10 @@ class DeepseekV41LayerMetadata:
     swa: AscendDSAV41Metadata
     compressor: DeepseekV41CompressorMetadata | None
     indexer: DeepseekV41IndexerMetadata | None
+    # Per-forward shared cache for the bounded SWA staging view. Every layer
+    # resolves it from the same attention-metadata mapping, so planning and
+    # operator metadata are shared across the cache group instead of per layer.
+    swa_stage_cache: "_SwaChunkStageCache | None" = None
 
     @property
     def positions(self) -> torch.Tensor:
@@ -348,6 +358,482 @@ def pad_sparse_indices(indices: torch.Tensor, topk: int) -> torch.Tensor:
     return indices.unsqueeze(1).contiguous().int()
 
 
+class _SwaChunkPlan:
+    """Immutable per-step view of one cache group's bounded SWA blocks.
+
+    ``window_block_table`` lists, per local chunk row, exactly the slab blocks
+    that the sliding window can reach. Staging turns them into a dense local
+    range; ``replay_seq_lens`` rebases the operator's causal coordinates onto
+    that range. ``segments`` is the shared, batch-level segment plan that both
+    the rebased table and the operator metadata signature derive from.
+    """
+
+    __slots__ = (
+        "window_block_table",
+        "counts",
+        "replay_seq_lens",
+        "total_blocks",
+        "max_replay_seq_len",
+        "prepared",
+        "segments",
+    )
+
+    def __init__(
+        self, window_block_table, counts, replay_seq_lens, total_blocks, max_replay_seq_len, prepared, segments
+    ):
+        self.window_block_table = window_block_table
+        self.counts = counts
+        self.replay_seq_lens = replay_seq_lens
+        self.total_blocks = total_blocks
+        self.max_replay_seq_len = max_replay_seq_len
+        # Dense stage table and flat source-block list, shared by every layer
+        # in this group; only the copied data differs per layer.
+        self.prepared = prepared
+        self.segments = segments
+
+
+class _SwaChunkStageCache:
+    """Per-forward staging caches shared by every layer of one batch.
+
+    ``segments`` depends only on the rank-local CPU sequence lengths, so the
+    segment plan is computed once per batch regardless of how many layers read
+    it. ``smla_cache`` is keyed by a value signature of the operator inputs:
+    layers with identical batch geometry share one ``npu_sparse_flash_mla_metadata``
+    call, while every differing geometry still pays its own call.
+    """
+
+    __slots__ = ("segments", "segments_key", "smla_cache", "plan_cache")
+
+    def __init__(self):
+        self.segments_key: tuple | None = None
+        self.segments: list | None = None
+        self.smla_cache: dict[tuple, torch.Tensor | bool] = {}
+        # One bounded plan (including its dense stage tables) per distinct
+        # block-table buffer and geometry within a step.  Layers that share a
+        # cache group reuse the gather/cat work instead of rebuilding it.
+        self.plan_cache: dict[tuple, _SwaChunkPlan | None] = {}
+
+
+_SWA_CHUNK_STAGE_CACHE_KEY = "_swa_chunk_stage_cache"
+
+
+def _cpu_prefix(value, size: int) -> tuple[int, ...] | None:
+    """Read a CPU-side length prefix without a device synchronization."""
+    if value is None:
+        return None
+    try:
+        values = value.tolist() if hasattr(value, "tolist") else value
+        return tuple(int(item) for item in list(values)[:size])
+    except (TypeError, ValueError):
+        return None
+
+
+def _swa_chunk_stage_cache(metadata) -> _SwaChunkStageCache:
+    """Return the batch-scoped staging cache attached to ``metadata``."""
+    cache = getattr(metadata, _SWA_CHUNK_STAGE_CACHE_KEY, None)
+    if not isinstance(cache, _SwaChunkStageCache):
+        cache = _SwaChunkStageCache()
+        try:
+            setattr(metadata, _SWA_CHUNK_STAGE_CACHE_KEY, cache)
+        except (AttributeError, TypeError):
+            # A slotted metadata object cannot carry the shared cache; this
+            # step then plans per call rather than failing.
+            return cache
+    return cache
+
+
+def _build_swa_chunk_plan(metadata, block_table, num_reqs, block_size, window, num_blocks, *, stage_cache=None):
+    """Build the bounded SWA view for one cache group.
+
+    The segment plan runs on the CPU-side sequence lengths only: no device
+    synchronization and no full-prefix gather. It is cached on the shared
+    per-forward ``stage_cache`` under its actual CPU inputs, so every layer
+    reuses one plan while each cache group still gathers its own block table.
+    Returns ``None`` for any batch the bounded view cannot represent exactly,
+    in which case the caller keeps the direct peer-read path.
+    """
+    from vllm_ascend.attention.context_parallel.pcp_owner_stage import (
+        build_stage_tables_fixed,
+        plan_swa_chunk_segments,
+    )
+
+    if stage_cache is None:
+        stage_cache = _swa_chunk_stage_cache(metadata)
+    starts = _cpu_prefix(getattr(metadata, "query_start_loc_cpu", None), num_reqs + 1)
+    seqs = _cpu_prefix(getattr(metadata, "seq_lens_cpu", None), num_reqs)
+    key = (starts, seqs, int(num_reqs), int(block_size), int(window))
+    if stage_cache.segments_key == key:
+        segments = stage_cache.segments
+    else:
+        segments = plan_swa_chunk_segments(starts, seqs, num_reqs, block_size, window)
+        stage_cache.segments_key = key
+        stage_cache.segments = segments
+    plan = None
+    if segments is not None and block_table.shape[1] > 0:
+        max_blocks = max((segment.num_blocks for segment in segments), default=0)
+        width = int(block_table.shape[1])
+        # The gather indexes the *absolute* block range, not just the longest
+        # row: a segment whose first_block + num_blocks exceeds the table width
+        # would read out of bounds even when every individual count fits.
+        in_bounds = all(segment.first_block + segment.num_blocks <= width for segment in segments)
+        if max_blocks > 0 and max_blocks <= width and in_bounds:
+            device = block_table.device
+            indices = torch.full((num_reqs, max_blocks), -1, dtype=torch.int64, device=device)
+            for row, segment in enumerate(segments):
+                indices[row, : segment.num_blocks] = torch.arange(
+                    segment.first_block,
+                    segment.first_block + segment.num_blocks,
+                    dtype=torch.int64,
+                    device=device,
+                )
+            valid = indices >= 0
+            gathered = block_table[:num_reqs].gather(1, indices.clamp_min(0))
+            window_block_table = torch.where(valid, gathered, torch.full_like(gathered, -1))
+            counts = [segment.num_blocks for segment in segments]
+            replay_seq_lens = torch.tensor(
+                [segment.replay_seq_len for segment in segments],
+                dtype=metadata.seq_lens.dtype,
+                device=metadata.seq_lens.device,
+            )
+            prepared = build_stage_tables_fixed(window_block_table, counts, num_blocks=num_blocks)
+            plan = _SwaChunkPlan(
+                window_block_table=window_block_table,
+                counts=counts,
+                replay_seq_lens=replay_seq_lens,
+                total_blocks=sum(counts),
+                max_replay_seq_len=max(segment.replay_seq_len for segment in segments),
+                prepared=prepared,
+                segments=segments,
+            )
+    return plan
+
+
+def _smla_signature_value(value):
+    """Normalize one operator input into a hashable signature component."""
+    if value is None or isinstance(value, (bool, int, float, str)):
+        return value
+    if isinstance(value, torch.Tensor):
+        # Length tensors affect the tiling, so they cannot be keyed by value
+        # without a device sync. The same tensor object across layers shares
+        # the identical contents; a different allocation rebuilds.
+        return ("tensor", int(value.data_ptr()), tuple(value.shape))
+    try:
+        hash(value)
+    except TypeError:
+        return repr(value)
+    return value
+
+
+def _swa_chunk_smla_signature(
+    attn, swa_metadata, operator_metadata, plan, *, has_compressed, ratio, cmp_topk, num_reqs
+) -> tuple:
+    """Value signature of every input that changes the operator tiling."""
+    cmp_mask_mode = 3 if has_compressed else 0
+    return (
+        int(attn.n_local_heads),
+        int(attn.head_dim),
+        int(num_reqs),
+        int(swa_metadata.max_query_len),
+        int(plan.max_replay_seq_len),
+        int(operator_metadata.max_cache_seq_len) if has_compressed else 0,
+        _smla_signature_value(swa_metadata.ori_topk_length),
+        int(cmp_topk) if has_compressed else 0,
+        int(ratio) if has_compressed else 0,
+        int(swa_metadata.ori_mask_mode),
+        cmp_mask_mode,
+        int(swa_metadata.ori_win_left),
+        int(swa_metadata.ori_win_right),
+        "TND",
+        "PA_BBND",
+        True,
+        bool(has_compressed),
+        tuple((int(segment.replay_start), int(segment.replay_seq_len)) for segment in plan.segments),
+    )
+
+
+def _build_swa_chunk_smla_metadata(
+    attn,
+    swa_metadata,
+    operator_metadata,
+    plan,
+    *,
+    stage_cache=None,
+    has_compressed,
+    ratio,
+    cmp_seq_lens,
+    cmp_residual,
+    cmp_topk,
+    num_reqs,
+):
+    """Rebuild the operator tiling metadata for the rebased bounded view.
+
+    The builder produced it from the unbounded sequence lengths; the kernel
+    must see the same batch with ``seqused_ori_kv`` shortened to each segment's
+    replay length. Memoized on the shared per-forward cache by a value
+    signature of the operator inputs, so identical batch geometry across layers
+    pays one metadata op per forward while differing geometry still rebuilds.
+    """
+    if stage_cache is None:
+        stage_cache = _swa_chunk_stage_cache(swa_metadata)
+    key = _swa_chunk_smla_signature(
+        attn,
+        swa_metadata,
+        operator_metadata,
+        plan,
+        has_compressed=has_compressed,
+        ratio=ratio,
+        cmp_topk=cmp_topk,
+        num_reqs=num_reqs,
+    )
+    if key in stage_cache.smla_cache:
+        cached = stage_cache.smla_cache[key]
+        if cached is False:
+            return None
+        # The operator allocates a fresh int32[1024] output per call
+        # (csrc/attention/sparse_flash_mla/sparse_flash_mla_torch_adpt.h),
+        # so the cached tensor is private and the kernel only reads it.
+        # Layers with identical geometry share it instead of paying a clone.
+        return cached
+    try:
+        value = torch.ops._C_ascend.npu_sparse_flash_mla_metadata(
+            attn.n_local_heads,
+            1,
+            attn.head_dim,
+            cu_seqlens_q=swa_metadata.query_start_loc[: num_reqs + 1].int(),
+            seqused_ori_kv=plan.replay_seq_lens,
+            seqused_cmp_kv=cmp_seq_lens if has_compressed else None,
+            cmp_residual_kv=cmp_residual if has_compressed else None,
+            batch_size=num_reqs,
+            max_seqlen_q=int(swa_metadata.max_query_len),
+            max_seqlen_ori_kv=int(plan.max_replay_seq_len),
+            max_seqlen_cmp_kv=(int(operator_metadata.max_cache_seq_len) if has_compressed else 0),
+            ori_topk=0,
+            ori_topk_length=swa_metadata.ori_topk_length,
+            cmp_topk=cmp_topk if has_compressed else 0,
+            cmp_ratio=ratio if has_compressed else 0,
+            ori_mask_mode=swa_metadata.ori_mask_mode,
+            cmp_mask_mode=3 if has_compressed else 0,
+            ori_win_left=swa_metadata.ori_win_left,
+            ori_win_right=swa_metadata.ori_win_right,
+            layout_q="TND",
+            layout_kv="PA_BBND",
+            has_ori_kv=True,
+            has_cmp_kv=has_compressed,
+        )
+    except Exception:  # noqa: BLE001 - fail open to the unbounded path
+        from vllm.logger import logger
+
+        # ``warning_once`` does not accept ``exc_info`` on every vLLM logger;
+        # a TypeError here would replace the fail-open path with a crash.
+        logger.warning(
+            "PCP SWA chunk staging: rebuilding sparse-MLA metadata failed; "
+            "keeping the direct peer-read path for this step.",
+            exc_info=True,
+        )
+        stage_cache.smla_cache[key] = False
+        return None
+    # The adapter returns a freshly allocated output tensor, so it can be
+    # cached and shared by every layer with this geometry.
+    stage_cache.smla_cache[key] = value
+    return value
+
+
+def _maybe_stage_owner_cmp_cache(
+    source_cache, block_table, metadata, num_reqs, pcp_config, seq_lens=None, block_size=None, counts=None
+):
+    """Copy a pure-prefill batch's long-KV blocks into local scratch.
+
+    Only applies to owner-sharded caches: every PCP rank writes one quarter of
+    the slab locally and maps the rest over peer memory, where one-byte-grain
+    reads run at a third of local bandwidth.  Copying the referenced blocks
+    once per layer turns that into a bulk gather and leaves the attention
+    kernel on local HBM.  Decode steps and non-prefill batches keep the
+    original table; overflow falls back to direct peer reads.
+    """
+    _pcp_stage_count("long_kv", "attempts")
+    if source_cache is None or block_table is None:
+        _pcp_stage_count("long_kv", "skipped_config")
+        return None
+    # Pure-prefill steps only.  Decode rows address the whole history, so a
+    # per-step bulk copy would cost more than the peer reads it replaces; a
+    # mixed step keeps direct peer reads for every row.
+    if getattr(metadata, "num_prefills", 0) <= 0:
+        _pcp_stage_count("long_kv", "skipped_nonprefill")
+        return None
+    if getattr(metadata, "num_decodes", 0) > 0:
+        _pcp_stage_count("long_kv", "skipped_mixed")
+        return None
+    from vllm_ascend.attention.context_parallel.pcp_owner_stage import get_stage_cache
+
+    if not pcp_config.owner_stage:
+        _pcp_stage_count("long_kv", "skipped_config")
+        return None
+    from vllm_ascend.attention.context_parallel.pcp_owner_vmm import owner_slab_for_tensor
+
+    if owner_slab_for_tensor(source_cache) is None:
+        _pcp_stage_count("long_kv", "skipped_nonowner")
+        return None
+    # Consumers of one long-KV source share the same cache and block table:
+    # the source layer owns both, and every later layer in the group reads
+    # them unchanged.  Memoizing on the (per-group, per-step) metadata object
+    # turns 38 copies per forward into 4 without any ordering hazard, because
+    # the source layer's own write happens before its first stage call.
+    memo = getattr(metadata, "_pcp_stage_memo", None)
+    if memo is not None and memo[0] == source_cache.data_ptr():
+        _pcp_stage_count("long_kv", "memo_hit")
+        return memo[1]
+    cache = get_stage_cache(source_cache.device, source_cache, budget_bytes=pcp_config.owner_stage_bytes)
+    result = cache.stage(
+        source_cache,
+        block_table,
+        seq_lens=seq_lens,
+        block_size=block_size,
+        counts=counts,
+        enable_timing=pcp_config.enable_timing,
+    )
+    if result is None:
+        _pcp_stage_count("long_kv", "skipped_overflow")
+        return None
+    metadata._pcp_stage_memo = (source_cache.data_ptr(), result)
+    _pcp_stage_count("long_kv", "ok")
+    _PCP_STAGE_STEP["long_kv_max_blocks"] = max(_PCP_STAGE_STEP["long_kv_max_blocks"], int(cache.last_total_blocks))
+    _PCP_STAGE_STEP["long_kv_capacity"] = int(cache.capacity_blocks)
+    return result
+
+
+# --- owner staging attribution -------------------------------------------
+# Gated fallbacks (mixed/decode batches, non-owner caches, plan or metadata
+# failures, overflow) silently keep direct peer reads.  Without counters a
+# high-TTFT step looks like a staging win, so count every decision and log one
+# summary per fixed number of forward steps.  The batch-scoped stage cache is
+# rebuilt per step, which gives the step boundary without threading a step id
+# through the layer forwards.
+_PCP_STAGE_STATS: dict[str, dict[str, int]] = {}
+_PCP_STAGE_STEP: dict[str, Any] = {
+    # Keyed on the step's attention-metadata mapping, not on the stage cache:
+    # the builder keeps one batch dictionary per worker, so the stage cache
+    # (and its signature caches) survives across steps by design.
+    "token": None,
+    "stage_cache": None,
+    # Step-scoped negative memo: the stages that can fail (bounded plan,
+    # metadata rebuild, overflow) depend on batch geometry only, so a failed
+    # step must not re-run their table/metadata work in every layer.
+    "negative": None,
+    "steps": 0,
+    "visits": 0,
+    "smla_ops": 0,
+    "step_smla_ops": 0,
+    "swa_max_blocks": 0,
+    "swa_capacity": 0,
+    "long_kv_max_blocks": 0,
+    "long_kv_capacity": 0,
+    # Real host time of the issue window (perf_counter, not device events).
+    "swa_host_s": 0.0,
+    "swa_host_calls": 0,
+    "long_kv_host_s": 0.0,
+    "long_kv_host_calls": 0,
+    "smla_host_s": 0.0,
+    "smla_host_calls": 0,
+    "swa_sync_host_s": 0.0,
+    "swa_sync_host_calls": 0,
+    "long_kv_sync_host_s": 0.0,
+    "long_kv_sync_host_calls": 0,
+}
+_PCP_STAGE_REPORT_EVERY = 128
+# Side-stream staging measured 7-8 ms (SWA) and 22-25 ms (long-KV) of host
+# stall per issue on A3: the table build's pageable H2D is issued after
+# ``wait_event(start)`` and therefore waits for the whole cache-write
+# dependency.  Keep the shared plan/metadata caches but stage synchronously
+# on the main stream, where the writes are already ordered ahead of us.
+_OWNER_STAGE_ASYNC = False
+
+
+def _pcp_stage_count(kind: str, name: str, amount: int = 1) -> None:
+    stats = _PCP_STAGE_STATS.setdefault(kind, {})
+    stats[name] = stats.get(name, 0) + amount
+
+
+def _pcp_stage_mark_negative(stage_cache, reason: str) -> None:
+    if stage_cache is not None:
+        _PCP_STAGE_STEP["negative"] = (stage_cache, reason)
+
+
+def _pcp_stage_negative(stage_cache) -> str | None:
+    negative = _PCP_STAGE_STEP["negative"]
+    if stage_cache is not None and negative is not None and negative[0] is stage_cache:
+        return negative[1]
+    return None
+
+
+def _pcp_stage_log() -> None:
+    state = _PCP_STAGE_STEP
+    from vllm.logger import logger
+
+    cache = state["stage_cache"]
+    entries = len(getattr(cache, "smla_cache", {}) or {})
+    logger.info(
+        "PCP stage counters: steps=%d visits=%d swa=%s long_kv=%s smla_ops=%d step_smla_ops=%d "
+        "step_smla_entries=%d swa_blocks=%d/%d long_kv_blocks=%d/%d "
+        "swa_host_us=%.1f long_kv_host_us=%.1f smla_host_us=%.1f "
+        "swa_sync_us=%.1f long_kv_sync_us=%.1f",
+        state["steps"],
+        state["visits"],
+        dict(sorted(_PCP_STAGE_STATS.get("swa", {}).items())),
+        dict(sorted(_PCP_STAGE_STATS.get("long_kv", {}).items())),
+        state["smla_ops"],
+        state["step_smla_ops"],
+        entries,
+        state["swa_max_blocks"],
+        state["swa_capacity"],
+        state["long_kv_max_blocks"],
+        state["long_kv_capacity"],
+        1e6 * state["swa_host_s"] / max(1, state["swa_host_calls"]),
+        1e6 * state["long_kv_host_s"] / max(1, state["long_kv_host_calls"]),
+        1e6 * state["smla_host_s"] / max(1, state["smla_host_calls"]),
+        1e6 * state["swa_sync_host_s"] / max(1, state["swa_sync_host_calls"]),
+        1e6 * state["long_kv_sync_host_s"] / max(1, state["long_kv_sync_host_calls"]),
+    )
+
+
+def _pcp_stage_touch(stage_cache) -> None:
+    """Tick a layer visit for the sync path (no step token available)."""
+    state = _PCP_STAGE_STEP
+    state["stage_cache"] = stage_cache
+    state["visits"] += 1
+    if state["visits"] in (512,) or state["visits"] % (32 * _PCP_STAGE_REPORT_EVERY) == 0:
+        _pcp_stage_log()
+
+
+def _pcp_stage_note_step(step_token, stage_cache) -> None:
+    """Report the previous forward step once the step metadata object changes."""
+    state = _PCP_STAGE_STEP
+    state["stage_cache"] = stage_cache
+    if step_token is None:
+        return
+    token = state["token"]
+    if token is step_token:
+        return
+    if token is not None:
+        cache = state["stage_cache"]
+        state["steps"] += 1
+        if state["steps"] % _PCP_STAGE_REPORT_EVERY == 0:
+            _pcp_stage_log()
+        # The operator tiling cache survives in the builder's batch dictionary
+        # across steps, while its signature cannot see the per-request
+        # compressed lengths (only max_cache_seq_len).  Drop it every step so
+        # a step with the same max but a different distribution cannot reuse
+        # stale metadata; the CPU-keyed segment plan is safe to keep.
+        smla_cache = getattr(cache, "smla_cache", None)
+        if isinstance(smla_cache, dict):
+            smla_cache.clear()
+        plan_cache = getattr(cache, "plan_cache", None)
+        if isinstance(plan_cache, dict):
+            plan_cache.clear()
+        state["step_smla_ops"] = 0
+        state["negative"] = None
+    state["token"] = step_token
+
+
 class AscendDSAV41Impl:
     """V4.1 execution boundary backed by fused Ascend operators.
 
@@ -357,8 +843,264 @@ class AscendDSAV41Impl:
     model construction is independent from cache-aware attention execution.
     """
 
+    def _start_owner_swa_stage_async(self, attn, metadata):
+        """Launch bounded SWA staging on a side stream right after the cache writes.
+
+        The table build, metadata rebuild and copy are all device work, so they
+        overlap ``_select_sparse_indices`` on the main stream.  The result is
+        stashed on this layer's SWA metadata and consumed by
+        ``_forward_attention``; any non-prefill batch, non-owner cache or
+        overflow keeps the synchronous path.
+        """
+        swa_metadata = metadata.swa
+        # Never let a stash from an earlier branch reach the kernel.
+        swa_metadata._pcp_swa_async = None
+        stage_cache = getattr(metadata, "swa_stage_cache", None)
+        _pcp_stage_note_step(get_forward_context().attn_metadata, stage_cache)
+        _pcp_stage_count("swa", "attempts")
+        config = self.pcp_config
+        if not config.owner_stage_swa_chunk:
+            _pcp_stage_count("swa", "skipped_config")
+            return
+        if swa_metadata.replay_block_table is not None:
+            _pcp_stage_count("swa", "skipped_replay")
+            return
+        if getattr(attn, "packed_cache_ops", None) is not None:
+            _pcp_stage_count("swa", "skipped_packed")
+            return
+        if swa_metadata.num_decodes > 0:
+            # Mixed rows are eligible for the bounded window too: a decode row
+            # has chunk_len == 1, so its replay range is the last window+1
+            # tokens.  The whole compressed history stays on the long-KV gate.
+            _pcp_stage_count("swa", "mixed_included")
+        if swa_metadata.num_prefills <= 0:
+            # Pure decode rows replay one window each (chunk_len == 1), so the
+            # same bounded plan applies; count them to measure the benefit.
+            _pcp_stage_count("swa", "decode_included")
+        if swa_metadata.ori_sparse_indices is not None:
+            _pcp_stage_count("swa", "skipped_sparse")
+            return
+        if swa_metadata.ori_topk_length is not None:
+            _pcp_stage_count("swa", "skipped_topk")
+            return
+        if not swa_metadata.storage_block_size or swa_metadata.ori_win_left < 0:
+            _pcp_stage_count("swa", "skipped_window")
+            return
+        negative = _pcp_stage_negative(stage_cache)
+        if negative is not None:
+            _pcp_stage_count("swa", f"skipped_{negative}")
+            return
+        from vllm_ascend.attention.context_parallel.pcp_owner_stage import (
+            get_swa_chunk_stage_cache,
+        )
+        from vllm_ascend.attention.context_parallel.pcp_owner_vmm import (
+            owner_slab_for_tensor,
+        )
+
+        swa_cache = attn.dsa_attn.swa_cache_layer.kv_cache
+        slab = owner_slab_for_tensor(swa_cache)
+        if slab is None or not slab.active:
+            _pcp_stage_count("swa", "skipped_nonowner")
+            return
+        has_compressed = self.role.compress_ratio in (1, 2)
+        num_reqs = swa_metadata.num_reqs
+        ori_block_table = swa_metadata.block_table[:num_reqs]
+        cache = get_swa_chunk_stage_cache(
+            swa_cache.device,
+            swa_cache,
+            budget_bytes=config.owner_stage_swa_chunk_bytes,
+        )
+        # Recorded after ``_preprocess`` issued the SWA/long-KV writes on the
+        # main stream (the multistream path joins its side stream before
+        # returning), so the copy can never read a half-written cache.
+        start, done_event = cache.next_events()
+        start.record()
+        host_started = time.perf_counter()
+        stream = cache.staging_stream()
+        issue = _timing_enter("stage_swa_chunk_issue", config.enable_timing)
+        staged = None
+        rebuilt = None
+        plan = None
+        with npu_stream_switch(stream, enabled=True):
+            stream.wait_event(start)
+            plan_token = _timing_enter("stage_swa_plan", config.enable_timing)
+            block_size = int(swa_metadata.storage_block_size)
+            window = int(swa_metadata.ori_win_left) + 1
+            num_blocks = int(swa_cache.shape[0])
+            plan_key = (int(ori_block_table.data_ptr()), int(num_reqs), num_blocks, block_size, window)
+            plan_cache = getattr(stage_cache, "plan_cache", None)
+            if isinstance(plan_cache, dict) and plan_key in plan_cache:
+                plan = plan_cache[plan_key]
+                _pcp_stage_count("swa", "plan_hit")
+            else:
+                plan = _build_swa_chunk_plan(
+                    swa_metadata,
+                    ori_block_table,
+                    num_reqs,
+                    block_size,
+                    window,
+                    num_blocks,
+                    stage_cache=stage_cache,
+                )
+                if isinstance(plan_cache, dict):
+                    plan_cache[plan_key] = plan
+                _pcp_stage_count("swa", "plan_miss")
+            _timing_exit(plan_token)
+            if plan is not None and plan.total_blocks > 0:
+                smla_token = _timing_enter("stage_swa_smla", config.enable_timing)
+                before_entries = len(stage_cache.smla_cache) if stage_cache is not None else 0
+                smla_started = time.perf_counter()
+                rebuilt = _build_swa_chunk_smla_metadata(
+                    attn,
+                    swa_metadata,
+                    metadata.attention if has_compressed else swa_metadata,
+                    plan,
+                    stage_cache=stage_cache,
+                    has_compressed=has_compressed,
+                    ratio=self.role.compress_ratio if has_compressed else 0,
+                    cmp_seq_lens=(metadata.attention.cache_seq_lens[:num_reqs] if has_compressed else None),
+                    cmp_residual=(metadata.attention.cmp_residual if has_compressed else None),
+                    cmp_topk=self.topology.index_topk if has_compressed else 0,
+                    num_reqs=num_reqs,
+                )
+                _timing_exit(smla_token)
+                _PCP_STAGE_STEP["smla_host_calls"] += 1
+                _PCP_STAGE_STEP["smla_host_s"] += time.perf_counter() - smla_started
+                if stage_cache is not None:
+                    missed = max(0, len(stage_cache.smla_cache) - before_entries)
+                    _PCP_STAGE_STEP["smla_ops"] += missed
+                    _PCP_STAGE_STEP["step_smla_ops"] += missed
+                if rebuilt is not None:
+                    staged = cache.stage_async(
+                        swa_cache,
+                        plan.window_block_table,
+                        counts=plan.counts,
+                        prepared=plan.prepared,
+                        enable_timing=config.enable_timing,
+                        start_event=start,
+                        done_event=done_event,
+                    )
+        _timing_exit(issue)
+        _PCP_STAGE_STEP["swa_host_calls"] += 1
+        _PCP_STAGE_STEP["swa_host_s"] += time.perf_counter() - host_started
+        if plan is None or plan.total_blocks <= 0:
+            _pcp_stage_count("swa", "skipped_plan")
+            _pcp_stage_mark_negative(stage_cache, "plan")
+            return
+        if rebuilt is None:
+            _pcp_stage_count("swa", "skipped_metadata")
+            _pcp_stage_mark_negative(stage_cache, "metadata")
+            return
+        if staged is None:
+            _pcp_stage_count("swa", "skipped_overflow")
+            _pcp_stage_mark_negative(stage_cache, "overflow")
+            return
+        _pcp_stage_count("swa", "ok")
+        _PCP_STAGE_STEP["swa_max_blocks"] = max(_PCP_STAGE_STEP["swa_max_blocks"], int(plan.total_blocks))
+        _PCP_STAGE_STEP["swa_capacity"] = int(cache.capacity_blocks)
+        swa_metadata._pcp_swa_async = (staged[2], (staged[0], staged[1]), plan, rebuilt, has_compressed)
+
+    def _cmp_stage_counts(self, cmp_metadata, num_reqs):
+        """Host-side live-block counts for the long-KV stage table.
+
+        The scheduler's CPU sequence lengths determine the compressed cache
+        length exactly (``seq_len // ratio``), so the fixed, sync-free table
+        builder can be used instead of device boolean indexing.  An
+        over-approximation is safe: the builder clamps and the kernel never
+        references padding rows.
+        """
+        cpu = getattr(cmp_metadata, "seq_lens_cpu", None)
+        block = int(getattr(cmp_metadata, "storage_block_size", 0) or 0)
+        if cpu is None or block <= 0:
+            return None
+        try:
+            seqs = cpu[:num_reqs].tolist()
+        except (TypeError, ValueError):  # fall back to the dynamic builder
+            return None
+        ratio = int(self.role.compress_ratio) if self.role.compress_ratio in (1, 2) else 1
+        counts = []
+        for seq in seqs:
+            cache_len = int(seq) // ratio if ratio > 1 else int(seq)
+            counts.append((cache_len + block - 1) // block)
+        return counts
+
+    def _start_owner_long_kv_stage_async(self, attn, metadata):
+        """Launch the long-KV source copy on a side stream after the writes.
+
+        Mirrors ``_maybe_stage_owner_cmp_cache`` but issues the copy early:
+        ``_forward_attention`` only joins the done event before the kernel, so
+        the copy overlaps the indexer selection.  One launch per source group
+        and step (the memo below), decode/mixed/non-owner/overflow keep the
+        synchronous path.
+        """
+        if not self.role.has_long_context:
+            return
+        cmp_metadata = metadata.attention
+        if cmp_metadata is None or getattr(attn, "packed_cache_ops", None) is not None:
+            return
+        _pcp_stage_count("long_kv", "async_attempts")
+        if getattr(cmp_metadata, "num_prefills", 0) <= 0:
+            _pcp_stage_count("long_kv", "async_skipped_nonprefill")
+            return
+        if getattr(cmp_metadata, "num_decodes", 0) > 0:
+            _pcp_stage_count("long_kv", "async_skipped_mixed")
+            return
+        config = self.pcp_config
+        if not config.owner_stage:
+            _pcp_stage_count("long_kv", "async_skipped_config")
+            return
+        from vllm_ascend.attention.context_parallel.pcp_owner_stage import get_stage_cache
+        from vllm_ascend.attention.context_parallel.pcp_owner_vmm import owner_slab_for_tensor
+
+        source_cache = get_forward_context().no_compile_layers[self.long_kv_source_prefix].kv_cache
+        if source_cache is None:
+            _pcp_stage_count("long_kv", "async_skipped_config")
+            return
+        pointer = int(source_cache.data_ptr())
+        memo = getattr(cmp_metadata, "_pcp_stage_memo", None)
+        if memo is not None and memo[0] == pointer:
+            _pcp_stage_count("long_kv", "async_memo_hit")
+            return
+        if getattr(cmp_metadata, "_pcp_stage_async", None) is not None:
+            _pcp_stage_count("long_kv", "async_pending")
+            return
+        if owner_slab_for_tensor(source_cache) is None:
+            _pcp_stage_count("long_kv", "async_skipped_nonowner")
+            return
+        num_reqs = metadata.swa.num_reqs
+        block_table = cmp_metadata.block_table[:num_reqs]
+        seq_lens = cmp_metadata.cache_seq_lens[:num_reqs]
+        counts = self._cmp_stage_counts(cmp_metadata, num_reqs)
+        cache = get_stage_cache(source_cache.device, source_cache, budget_bytes=config.owner_stage_bytes)
+        start, done_event = cache.next_events()
+        start.record()
+        host_started = time.perf_counter()
+        timing = _timing_enter("stage_long_kv_issue", config.enable_timing)
+        staged = cache.stage_async(
+            source_cache,
+            block_table,
+            seq_lens=seq_lens,
+            block_size=getattr(cmp_metadata, "storage_block_size", None),
+            counts=counts,
+            enable_timing=config.enable_timing,
+            start_event=start,
+            done_event=done_event,
+        )
+        _timing_exit(timing)
+        _PCP_STAGE_STEP["long_kv_host_calls"] += 1
+        _PCP_STAGE_STEP["long_kv_host_s"] += time.perf_counter() - host_started
+        if staged is None:
+            _pcp_stage_count("long_kv", "async_skipped_overflow")
+            return
+        cmp_metadata._pcp_stage_async = (pointer, (staged[0], staged[1]), staged[2])
+        _pcp_stage_count("long_kv", "async_ok")
+        _PCP_STAGE_STEP["long_kv_max_blocks"] = max(_PCP_STAGE_STEP["long_kv_max_blocks"], int(cache.last_total_blocks))
+        _PCP_STAGE_STEP["long_kv_capacity"] = int(cache.capacity_blocks)
+
     def __init__(self, prefix, role, topology, long_kv_source_prefix, index_k_source_prefix):
-        self.multistream_dsv4_dsa_overlap = get_ascend_config().multistream_dsv4_dsa_overlap
+        ascend_config = get_ascend_config()
+        self.multistream_dsv4_dsa_overlap = ascend_config.multistream_dsv4_dsa_overlap
+        self._pcp_config = getattr(ascend_config, "pcp_config", None) or PcpConfig()
         self.prefix = prefix
         self.layer_name = f"{prefix}.attn"
         self.role = role
@@ -370,11 +1112,26 @@ class AscendDSAV41Impl:
             f"{prefix}.compressor.state_cache" if role.is_kv_source and role.compress_ratio == 2 else None
         )
 
+    @property
+    def pcp_config(self) -> PcpConfig:
+        """Typed PCP settings; tests that bypass ``__init__`` get the defaults."""
+        config = getattr(self, "_pcp_config", None)
+        if config is None:
+            config = PcpConfig()
+            self._pcp_config = config
+        return config
+
     def _get_layer_metadata(self, metadata) -> DeepseekV41LayerMetadata:
         swa = metadata[self.swa_prefix]
         long_kv = metadata[self.long_kv_source_prefix] if self.long_kv_source_prefix is not None else None
         index_k = metadata[self.index_k_source_prefix] if self.index_k_source_prefix is not None else None
         compressor_state = metadata[self.compressor_state_prefix] if self.compressor_state_prefix is not None else None
+        # The builder publishes one staging cache per forward through the
+        # shared batch dictionary; every cache group receives the same
+        # instance, so planning and operator metadata are shared per batch.
+        stage_cache = getattr(swa, "swa_stage_cache", None)
+        if not isinstance(stage_cache, _SwaChunkStageCache):
+            stage_cache = _swa_chunk_stage_cache(swa)
         return DeepseekV41LayerMetadata(
             attention=long_kv,
             swa=swa,
@@ -384,6 +1141,7 @@ class AscendDSAV41Impl:
                 else None
             ),
             indexer=(DeepseekV41IndexerMetadata(index_k) if index_k is not None else None),
+            swa_stage_cache=stage_cache,
         )
 
     @staticmethod
@@ -393,7 +1151,7 @@ class AscendDSAV41Impl:
         )
 
     @staticmethod
-    def _write_swa_cache(attn, metadata, value):
+    def _write_swa_cache(attn, metadata, value, pcp_config: PcpConfig | None = None):
         if not value.shape[0]:
             return
         cache = attn.dsa_attn.swa_cache_layer.kv_cache
@@ -429,7 +1187,7 @@ class AscendDSAV41Impl:
             return
         cos, sin = metadata.rope(attn.rotary_emb.layername, hidden_states.shape[0])
         kv = self._project_kv(attn, hidden_states, cos, sin)
-        AscendDSAV41Impl._write_swa_cache(attn, metadata.swa, kv)
+        AscendDSAV41Impl._write_swa_cache(attn, metadata.swa, kv, self.pcp_config)
         if self.role.is_kv_source:
             self._compress_and_write_caches(attn, hidden_states, cos, sin, metadata, metadata)
 
@@ -459,7 +1217,7 @@ class AscendDSAV41Impl:
                 q = qr = None
                 kv = hidden_states.new_empty((0, attn.head_dim))
             # Empty PCP ranks still participate in the replicated-cache gather.
-            self._write_swa_cache(attn, local_metadata.swa, kv)
+            self._write_swa_cache(attn, local_metadata.swa, kv, self.pcp_config)
         prepared_indexer = None
         if q is not None:
             self._apply_rotary(attn, q, cos, sin)
@@ -574,6 +1332,10 @@ class AscendDSAV41Impl:
 
         # Part 3: Q_b matmul (Cube) overlaps KV norm and RoPE (Vector).
         # A5 prefill/mixed cache publication follows the stream join below.
+        # Forward the typed PCP config: every rank in a PCP group must make the
+        # same local-vs-gathered write decision. Omitting it here would force
+        # this rank to gather while an empty or non-multistream peer writes
+        # locally, leaving the cache collectives unmatched.
         write_cache_on_main = self._write_swa_cache_on_main_stream(attn, swa_metadata)
         part3_start = main_stream.record_event()
         main_stream.wait_event(kv_matmul_done)
@@ -582,11 +1344,11 @@ class AscendDSAV41Impl:
             kv = attn.kv_norm(kv).view(-1, 1, attn.head_dim)
             self._apply_rotary(attn, kv, cos, sin)
             if not write_cache_on_main:
-                self._write_swa_cache(attn, swa_metadata, kv.squeeze(1))
+                self._write_swa_cache(attn, swa_metadata, kv.squeeze(1), self.pcp_config)
         q = wq_b.matmul(q_b_quant, q_b_scale, bias=attn.wq_b.bias).unflatten(-1, (-1, attn.head_dim))
         main_stream.wait_stream(aux_stream)
         if write_cache_on_main:
-            self._write_swa_cache(attn, swa_metadata, kv.squeeze(1))
+            self._write_swa_cache(attn, swa_metadata, kv.squeeze(1), self.pcp_config)
         return q, qr
 
     def _compress_and_write_caches(
@@ -738,6 +1500,33 @@ class AscendDSAV41Impl:
             cmp_residual = metadata.attention.cmp_residual
             cmp_topk = self.topology.index_topk
             cmp_indices = pad_sparse_indices(compressed_indices, cmp_topk)
+            timing = _timing_enter("stage", self.pcp_config.enable_timing)
+            pending = getattr(metadata.attention, "_pcp_stage_async", None)
+            if pending is not None and source_cache is not None and pending[0] == int(source_cache.data_ptr()):
+                metadata.attention._pcp_stage_async = None
+                wait_timing = _timing_enter("stage_long_kv_wait", self.pcp_config.enable_timing)
+                torch.npu.current_stream().wait_event(pending[2])
+                _timing_exit(wait_timing)
+                staged = pending[1]
+                metadata.attention._pcp_stage_memo = (pending[0], staged)
+                _pcp_stage_count("long_kv", "async_consumed")
+            else:
+                long_kv_host_started = time.perf_counter()
+                staged = _maybe_stage_owner_cmp_cache(
+                    source_cache,
+                    cmp_block_table,
+                    metadata.attention,
+                    num_reqs,
+                    self.pcp_config,
+                    seq_lens=cmp_seq_lens,
+                    block_size=getattr(metadata.attention, "storage_block_size", None),
+                    counts=self._cmp_stage_counts(metadata.attention, num_reqs),
+                )
+                _PCP_STAGE_STEP["long_kv_sync_host_calls"] += 1
+                _PCP_STAGE_STEP["long_kv_sync_host_s"] += time.perf_counter() - long_kv_host_started
+            _timing_exit(timing)
+            if staged is not None:
+                source_cache, cmp_block_table = staged
 
         operator_metadata = metadata.attention if has_compressed else metadata.swa
         op_metadata = operator_metadata.smla_metadata
@@ -749,10 +1538,123 @@ class AscendDSAV41Impl:
         if metadata.swa.replay_block_table is not None:
             # Rebase only SWA: A3 CSA cannot mask its missing prefix with
             # sparse ori indices. Compressed KV retains its causal coordinates.
+            timing = _timing_enter("swa_gather", self.pcp_config.enable_timing)
             swa_cache = swa_cache[metadata.swa.replay_cache_blocks, metadata.swa.replay_cache_offsets]
+            _timing_exit(timing)
             swa_cache = swa_cache.reshape(-1, metadata.swa.storage_block_size, 1, swa_cache.shape[-1])
             ori_block_table = metadata.swa.replay_block_table
             seq_lens = metadata.swa.replay_seq_lens
+        elif self.pcp_config.owner_stage_swa_chunk:
+            # Each rank-local row is already one DualChunkSwap chunk, so the
+            # kernel only needs ``[chunk_start - window, chunk_end)`` of the
+            # owner slab. Stage that bounded range and rebase the operator
+            # coordinates onto it; the sliding-window mask is relative, so it
+            # is unchanged. Decodes, mixed batches, non-owner caches and sparse
+            # ori indices keep the direct peer-read path.
+            #
+            # ``_start_owner_swa_stage_async`` already built the tables and
+            # issued the copy on a side stream after the cache writes, so here
+            # we only join that event before the kernel.  A missing stash
+            # (decode/mixed, non-owner cache, overflow, packed-cache path) runs
+            # the synchronous staging below exactly as before.
+            async_stage = getattr(metadata.swa, "_pcp_swa_async", None)
+            metadata.swa._pcp_swa_async = None
+            staged = None
+            plan = None
+            rebuilt = None
+            if async_stage is not None:
+                done, staged_pair, async_plan, async_rebuilt, async_compressed = async_stage
+                # Always join the side-stream copy, even when the compressed
+                # geometry no longer matches: the fallback below copies into
+                # the same scratch, so it must wait for the async write.
+                timing = _timing_enter("stage_swa_chunk_wait", self.pcp_config.enable_timing)
+                torch.npu.current_stream().wait_event(done)
+                _timing_exit(timing)
+                if async_compressed == has_compressed:
+                    staged, plan, rebuilt = staged_pair, async_plan, async_rebuilt
+            if staged is None:
+                sync_host_started = time.perf_counter()
+                fallback_stage_cache = getattr(metadata, "swa_stage_cache", None)
+                _pcp_stage_touch(fallback_stage_cache)
+                eligible = (
+                    # A negative from the overlapped path means this step's
+                    # plan/metadata/overflow already failed; retrying the same
+                    # device work per layer would only add latency.
+                    _pcp_stage_negative(fallback_stage_cache) is None
+                    # Mixed and pure-decode rows replay one bounded window.
+                    and metadata.swa.ori_sparse_indices is None
+                    # A per-token visible-length floor (bounded replay) is tied
+                    # to the unbounded coordinate system; keep that path untouched.
+                    and metadata.swa.ori_topk_length is None
+                    and metadata.swa.storage_block_size
+                    and metadata.swa.ori_win_left >= 0
+                )
+                if eligible:
+                    from vllm_ascend.attention.context_parallel.pcp_owner_stage import (
+                        get_swa_chunk_stage_cache,
+                    )
+                    from vllm_ascend.attention.context_parallel.pcp_owner_vmm import (
+                        owner_slab_for_tensor,
+                    )
+
+                    if owner_slab_for_tensor(swa_cache) is not None:
+                        timing = _timing_enter("stage_swa_chunk", self.pcp_config.enable_timing)
+                        stage_cache = getattr(metadata, "swa_stage_cache", None)
+                        block_size = int(metadata.swa.storage_block_size)
+                        window = int(metadata.swa.ori_win_left) + 1
+                        num_blocks = int(swa_cache.shape[0])
+                        plan_key = (int(ori_block_table.data_ptr()), int(num_reqs), num_blocks, block_size, window)
+                        plan_cache = getattr(stage_cache, "plan_cache", None)
+                        if isinstance(plan_cache, dict) and plan_key in plan_cache:
+                            plan = plan_cache[plan_key]
+                            _pcp_stage_count("swa", "plan_hit")
+                        else:
+                            plan = _build_swa_chunk_plan(
+                                metadata.swa,
+                                ori_block_table,
+                                num_reqs,
+                                block_size,
+                                window,
+                                num_blocks,
+                                stage_cache=stage_cache,
+                            )
+                            if isinstance(plan_cache, dict):
+                                plan_cache[plan_key] = plan
+                            _pcp_stage_count("swa", "plan_miss")
+                        if plan is not None and plan.total_blocks > 0:
+                            rebuilt = _build_swa_chunk_smla_metadata(
+                                attn,
+                                metadata.swa,
+                                operator_metadata,
+                                plan,
+                                stage_cache=stage_cache,
+                                has_compressed=has_compressed,
+                                ratio=ratio,
+                                cmp_seq_lens=cmp_seq_lens,
+                                cmp_residual=cmp_residual,
+                                cmp_topk=cmp_topk,
+                                num_reqs=num_reqs,
+                            )
+                            if rebuilt is not None:
+                                staged = get_swa_chunk_stage_cache(
+                                    swa_cache.device,
+                                    swa_cache,
+                                    budget_bytes=self.pcp_config.owner_stage_swa_chunk_bytes,
+                                ).stage(
+                                    swa_cache,
+                                    plan.window_block_table,
+                                    counts=plan.counts,
+                                    prepared=plan.prepared,
+                                    enable_timing=self.pcp_config.enable_timing,
+                                )
+                        _timing_exit(timing)
+                _PCP_STAGE_STEP["swa_sync_host_calls"] += 1
+                _PCP_STAGE_STEP["swa_sync_host_s"] += time.perf_counter() - sync_host_started
+            if staged is not None:
+                swa_cache, ori_block_table = staged
+                seq_lens = plan.replay_seq_lens
+                op_metadata = rebuilt
+        timing = _timing_enter("kernel", self.pcp_config.enable_timing)
         output, _ = torch.ops._C_ascend.npu_sparse_flash_mla(
             q,
             ori_kv=swa_cache,
@@ -779,6 +1681,7 @@ class AscendDSAV41Impl:
             topk_value_mode=1,
             return_softmax_lse=False,
         )
+        _timing_exit(timing)
         return output
 
     @staticmethod
@@ -1071,6 +1974,10 @@ class AscendDSAV41MetadataBuilder(AttentionMetadataBuilder[AscendDSAV41Metadata]
         values = dict(self.common_v41_batch_metadata["batch"])
         values.update(self._request_counts_metadata)
         values["cache_seq_lens"] = values["seq_lens"]
+        stage_cache = self.common_v41_batch_metadata.get("swa_chunk_stage")
+        if not isinstance(stage_cache, _SwaChunkStageCache):
+            stage_cache = _SwaChunkStageCache()
+            self.common_v41_batch_metadata["swa_chunk_stage"] = stage_cache
 
         return AscendDSAV41Metadata(
             block_table=common.block_table_tensor[:num_reqs],
@@ -1090,6 +1997,7 @@ class AscendDSAV41MetadataBuilder(AttentionMetadataBuilder[AscendDSAV41Metadata]
             attn_state=getattr(common, "attn_state", None),
             is_prefilling=getattr(common, "is_prefilling", None),
             causal=getattr(common, "causal", True),
+            swa_stage_cache=stage_cache,
             **values,
         )
 

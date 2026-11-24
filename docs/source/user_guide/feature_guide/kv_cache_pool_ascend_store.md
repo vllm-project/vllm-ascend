@@ -82,6 +82,28 @@ pass `--prefix-cache-retention-interval None`; omitting the argument selects `0`
 To migrate an intended interval of `4096`, pass `--prefix-cache-retention-interval 4096`
 on the same instances that previously exported the environment variable.
 
+### PD Transfer Diagnostics
+
+Set `kv_connector_extra_config.enable_timing` to `true` (default `false`) on both the prefill and decode engines to emit one `[KVPD_TIMING]` JSON log line per request-boundary event. Prefill events include `p_save_enqueue`, `p_put_start`, `p_put_done`, and `p_prefill_done`; decode events include `d_lookup_skip`, `d_external_lookup`, `d_lookup_keys`, `d_lookup_path`, `d_load_enqueue`, `d_load_start`, `d_load_done`, `d_first_token`, and `dspark_accept`. Each record carries the request id, so prefill and decode logs can be aligned without changing the scheduler. Timing is disabled by default and does no work when it is off.
+
+The AscendStore connector always records load/save duration, key count, and byte metrics for Prometheus. With `enable_timing` enabled it also records the enqueue-to-get/put queue wait, logs the reduced statistics at info level as `[KVPD_STATS]`, and adds the queue-wait histograms:
+
+- `vllm:ascend_store_load_get_bytes_total`
+- `vllm:ascend_store_load_get_queue_wait_seconds`
+- `vllm:ascend_store_save_put_duration_seconds`
+- `vllm:ascend_store_save_put_keys_total`
+- `vllm:ascend_store_save_put_bytes_total`
+- `vllm:ascend_store_save_put_queue_wait_seconds`
+
+For example:
+
+```json
+"kv_transfer_config": {
+  "kv_connector": "AscendStoreConnector",
+  "kv_connector_extra_config": {"enable_timing": true}
+}
+```
+
 ## Scenario 1: Mooncake Backend
 
 ### Configuration Examples
