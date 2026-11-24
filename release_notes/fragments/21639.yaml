@@ -1,0 +1,4 @@
+pr: 21639
+entries:
+  - category: bugfix
+    text: Fixed cache helper imports for compatible vLLM source checkouts that retain the 0.32.0 version identifier.
