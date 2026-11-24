@@ -16,7 +16,6 @@ UNVERIFIED_GPU_WORKER_METHODS = (
     "checkpoint_prepare",
     "checkpoint_restore",
     "_scoped_allocator_max_split",
-    "handle_ft_command",
     "_compile_or_warm_up_model",
     "_maybe_activate_jit_monitor",
     "_get_cudagraph_capture_context",

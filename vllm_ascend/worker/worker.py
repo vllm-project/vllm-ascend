@@ -217,8 +217,10 @@ class NPUWorker(GPUWorker):
         configure_ascend_file_logging(ascend_config.ascend_log_path)
         check_ascend_device_type()
 
-        if getattr(vllm_config.parallel_config, "enable_fault_tolerance", False):
-            raise NotImplementedError("Ascend does not support the GPU fault-tolerance sentinel.")
+        # Keep FT off around super(): GPUWorker builds a GPU sentinel that rejects
+        # Ascend.
+        ft_enabled = vllm_config.parallel_config.enable_fault_tolerance
+        vllm_config.parallel_config.enable_fault_tolerance = False
 
         # 310P runs Model Runner V2 without Triton. Replace this context manager
         # with a _validate_triton() override once all supported vLLM versions
@@ -232,6 +234,7 @@ class NPUWorker(GPUWorker):
                 distributed_init_method=distributed_init_method,
                 is_driver_worker=is_driver_worker,
             )
+        vllm_config.parallel_config.enable_fault_tolerance = ft_enabled
 
         if self.cache_config.cache_dtype == "auto":
             self.cache_dtype = self.model_config.dtype
@@ -281,10 +284,6 @@ class NPUWorker(GPUWorker):
 
     def _scoped_allocator_max_split(self, max_split_size_mb: int):
         raise NotImplementedError("GPUWorker._scoped_allocator_max_split is not validated on Ascend.")
-
-    def handle_ft_command(self, ft_request):
-        assert self.worker_sentinel is not None
-        return self.worker_sentinel.handle_command(ft_request)
 
     def _compile_or_warm_up_model(self) -> CompilationTimes:
         raise NotImplementedError("GPUWorker._compile_or_warm_up_model is not validated on Ascend.")
