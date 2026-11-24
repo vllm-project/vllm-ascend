@@ -662,7 +662,7 @@ def test_recompute_detected_when_frame_split_across_chunks(proxy_server):
 
 
 @pytest.mark.parametrize("streaming", [False, True])
-def test_responses_review_fixes_over_http(proxy_server, streaming):
+def test_responses_validation_and_passthrough_over_http(proxy_server, streaming):
     """Rejected requests must not consume backend scripts; the next valid request does."""
     _set_script(
         MOCK_PREFILL_PORT,
@@ -709,7 +709,7 @@ def test_responses_review_fixes_over_http(proxy_server, streaming):
         actual = accepted.json()
     assert actual["id"] == "resp_http"
     assert actual["usage"]["input_tokens_details"] == {
-        "cached_tokens": 34,
-        "cached_tokens_per_turn": [20, 11, 3],
+        "cached_tokens": 114,
+        "cached_tokens_per_turn": [100, 11, 3],
     }
     assert actual["usage"]["total_tokens"] == 177

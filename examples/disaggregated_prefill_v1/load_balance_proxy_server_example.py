@@ -134,7 +134,7 @@ import tempfile
 import threading
 import time
 import uuid
-from contextlib import aclosing, asynccontextmanager
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from enum import Enum
 from multiprocessing.managers import BaseManager
@@ -867,7 +867,7 @@ def auth_headers(request_id: str) -> dict[str, str]:
     }
 
 
-def build_prefill_request(req_data: dict) -> dict:
+def build_prefill_request(req_data: dict, api: str = "/chat/completions") -> dict:
     payload = req_data.copy()
     payload["kv_transfer_params"] = {
         "do_remote_decode": True,
@@ -883,136 +883,49 @@ def build_prefill_request(req_data: dict) -> dict:
     if "max_completion_tokens" in payload:
         payload["max_completion_tokens"] = 1
     payload.pop("stream_options", None)
+    if api == "/responses":
+        payload["max_output_tokens"] = 1
+        for key in ("max_tokens", "min_tokens", "max_completion_tokens"):
+            payload.pop(key, None)
     return payload
 
 
-def _api_kind(api: str) -> str:
-    path = "/" + api.strip("/")
-    if path.endswith("/responses"):
-        return "responses"
-    if path.endswith("/messages"):
-        return "messages"
-    return "openai"
-
-
-def build_prefill_request_for_api(api: str, req_data: dict) -> dict:
-    if _api_kind(api) != "responses":
-        return build_prefill_request(req_data)
-    payload = req_data.copy()
-    payload["kv_transfer_params"] = {
-        "do_remote_decode": True,
-        "do_remote_prefill": False,
-        "remote_engine_id": None,
-        "remote_block_ids": None,
-        "remote_host": None,
-        "remote_port": None,
-    }
-    payload["stream"] = False
-    payload["max_output_tokens"] = 1
-    payload.pop("max_tokens", None)
-    payload.pop("min_tokens", None)
-    payload.pop("stream_options", None)
-    payload.pop("max_completion_tokens", None)
-    return payload
-
-
-def extract_cached_tokens_for_api(api: str, response_json: dict) -> int | None:
-    kind = _api_kind(api)
-    usage = response_json.get("usage") or {}
-    if kind == "messages":
-        cached = usage.get("cache_read_input_tokens")
-        return cached if isinstance(cached, int) else 0
-    if kind == "responses":
-        details = usage.get("input_tokens_details") or {}
-        cached = details.get("cached_tokens")
-        return cached if isinstance(cached, int) else 0
-    return extract_cached_tokens(response_json)
-
-
-def write_cached_tokens_for_api(api: str, chunk_json: dict, cached_tokens: int | None) -> bool:
-    kind = _api_kind(api)
-    if kind == "openai":
-        return update_cached_tokens_in_chunk(chunk_json, cached_tokens)
-    if cached_tokens is None:
-        return False
-    usage = chunk_json.get("usage")
-    if not isinstance(usage, dict):
-        response_obj = chunk_json.get("response" if kind == "responses" else "message")
-        usage = response_obj.get("usage") if isinstance(response_obj, dict) else None
-    if not isinstance(usage, dict):
-        return False
-    if kind == "messages":
-        input_tokens = usage.get("input_tokens")
-        previous_cached = usage.get("cache_read_input_tokens", 0)
-        if isinstance(input_tokens, int) and isinstance(previous_cached, int):
-            # Messages input_tokens excludes cache reads; preserve total input.
-            usage["input_tokens"] = input_tokens + previous_cached - cached_tokens
-        usage["cache_read_input_tokens"] = cached_tokens
-        return True
-    details = usage.get("input_tokens_details")
-    if not isinstance(details, dict):
-        details = {}
-    details["cached_tokens"] = cached_tokens
-    cached_per_turn = details.get("cached_tokens_per_turn")
-    # An empty list means per-turn accounting is unavailable; preserve it.
-    if isinstance(cached_per_turn, list) and cached_per_turn:
-        # Only the first turn is prefetched by P. Later tool turns run on D.
-        details["cached_tokens_per_turn"] = [cached_tokens, *cached_per_turn[1:]]
-        details["cached_tokens"] = sum(details["cached_tokens_per_turn"])
-    usage["input_tokens_details"] = details
-    return True
-
-
-def prepare_native_sse_frame(api: str, frame: bytes, cached_tokens: int | None, req_data: dict) -> tuple[bytes, bool]:
-    lines = frame.splitlines(keepends=True)
-    data_indices = [index for index, line in enumerate(lines) if line.startswith(b"data:")]
-    payload = b"\n".join(lines[index][5:].strip() for index in data_indices)
-    try:
-        obj = json.loads(payload)
-    except (json.JSONDecodeError, UnicodeDecodeError):
-        return frame, False
-    if not isinstance(obj, dict):
-        return frame, False
-    recomputed = native_request_recomputed(api, obj, req_data)
-    if not write_cached_tokens_for_api(api, obj, cached_tokens):
-        return frame, recomputed
-    first = data_indices[0]
-    ending = lines[first][len(lines[first].rstrip(b"\r\n")) :]
-    lines[first] = b"data: " + json.dumps(obj).encode("utf-8") + ending
-    return b"".join(line for index, line in enumerate(lines) if index == first or index not in data_indices), recomputed
-
-
-def split_native_sse_frames(body: bytes) -> list[bytes]:
-    frames = []
-    frame = bytearray()
-    for line in body.splitlines(keepends=True):
-        frame += line
-        if line in (b"\n", b"\r\n", b"\r"):
-            frames.append(bytes(frame))
-            frame.clear()
-    if frame:
-        frames.append(bytes(frame))
-    return frames
-
-
-def native_request_recomputed(api: str, obj: dict, req_data: dict) -> bool:
-    """Read the scheduler marker only from protocol stop fields."""
-    if _api_kind(api) == "messages":
-        result = obj.get("delta", obj) if obj.get("type") == "message_delta" else obj
+def native_request_recomputed(api: str, body: bytes, req_data: dict) -> bool:
+    """Inspect stop fields without rewriting the native response."""
+    streaming = req_data.get("stream", False)
+    payloads = [body]
+    if streaming:
+        frames = body.replace(b"\r\n", b"\n").replace(b"\r", b"\n").split(b"\n\n")
+        payloads = [
+            b"\n".join(line[5:].lstrip() for line in frame.splitlines() if line.startswith(b"data:"))
+            for frame in frames
+        ]
+    for payload in payloads:
+        try:
+            obj = json.loads(payload)
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            if not streaming:
+                raise
+            continue
+        if not isinstance(obj, dict):
+            continue
+        result = obj.get("response", obj) if api == "/responses" else obj
+        if api == "/messages" and obj.get("type") == "message_delta":
+            result = obj.get("delta")
         if not isinstance(result, dict):
-            return False
-        # vLLM's Messages serializer maps a string stop_reason to stop_sequence.
-        # A user-supplied stop sequence with the same spelling is ambiguous.
+            continue
+        if result.get("stop_reason") == "recomputed":
+            return True
+        # Messages maps the scheduler marker to a stop sequence. Do not mistake
+        # an explicitly requested stop string for scheduler preemption.
         if (
-            result.get("stop_reason") == "stop_sequence"
+            api == "/messages"
+            and result.get("stop_reason") == "stop_sequence"
             and result.get("stop_sequence") == "recomputed"
             and "recomputed" not in (req_data.get("stop_sequences") or [])
         ):
             return True
-    else:
-        # Responses can only retry when the backend exposes the marker.
-        result = obj.get("response", obj)
-    return isinstance(result, dict) and result.get("stop_reason") == "recomputed"
+    return False
 
 
 async def send_request_to_service(
@@ -1023,9 +936,9 @@ async def send_request_to_service(
     max_retries: int = 3,
     base_delay: float = 0.2,
 ):
-    req_data = build_prefill_request_for_api(endpoint, req_data)
+    req_data = build_prefill_request(req_data, endpoint)
     headers = auth_headers(request_id)
-    max_attempts = 1 if _api_kind(endpoint) != "openai" else max(1, max_retries)
+    max_attempts = 1 if endpoint in ("/messages", "/responses") else max(1, max_retries)
     for attempt in range(1, max_attempts + 1):
         try:
             response = await client.post(endpoint, json=req_data, headers=headers)
@@ -1051,7 +964,7 @@ async def stream_service_response(
     base_delay: float = 0.2,
 ):
     headers = auth_headers(request_id)
-    max_attempts = 1 if _api_kind(endpoint) != "openai" else max(1, max_retries)
+    max_attempts = max(1, max_retries)
     req_data = req_data.copy()
     if not req_data.get("stream", False):
         req_data.pop("stream_options", None)
@@ -1075,8 +988,6 @@ async def stream_service_response(
                 raise
             logger.warning("Attempt %s failed for streaming %s: %s", attempt, endpoint, exc)
         except httpx.RequestError as exc:
-            if _api_kind(endpoint) != "openai":
-                raise
             if first_chunk_sent:
                 logger.error("Streaming to client interrupted after response started: %s", exc)
                 return
@@ -1084,8 +995,6 @@ async def stream_service_response(
                 raise
             logger.warning("Attempt %s failed for streaming %s: %s", attempt, endpoint, exc)
         except Exception as exc:
-            if _api_kind(endpoint) != "openai":
-                raise
             if first_chunk_sent:
                 logger.error("Streaming to client interrupted after response started: %s", exc)
                 return
@@ -1163,7 +1072,7 @@ async def assign_instances(
     kv_transfer_params = response_json.get("kv_transfer_params", {})
     if kv_transfer_params:
         req_data["kv_transfer_params"] = kv_transfer_params
-    prefiller_cached_tokens = extract_cached_tokens_for_api(api, response_json)
+    prefiller_cached_tokens = extract_cached_tokens(response_json)
 
     decoder_key = None
     try:
@@ -1220,46 +1129,30 @@ async def _replay_first_chunk(first_chunk: bytes, gen: Any):
 
 
 async def _handle_native_decode(api: str, req_data: dict, info: InstanceInfo) -> Response:
-    """Retry whole native requests using the existing P/D reassignment path."""
+    """Buffer each native attempt, retry recompute, and forward only its final body."""
     runtime = get_runtime()
-    streaming = bool(req_data.get("stream", False))
-    cached_tokens = info.prefiller_cached_tokens
-    max_attempts = max(1, get_global_args().max_retries)
     released_kv = False
+    max_attempts = max(1, get_global_args().max_retries)
+    if not req_data.get("stream"):
+        req_data.pop("stream_options", None)
     try:
         for attempt in range(max_attempts):
             client = await runtime.get_client(ServerRole.DECODE, info.decoder_key)
             body = bytearray()
-            async with aclosing(
-                stream_service_response(client, api, req_data, info.request_id, max_retries=1)
-            ) as upstream:
-                async for chunk in upstream:
+            async with client.stream("POST", api, json=req_data, headers=auth_headers(info.request_id)) as response:
+                if response.status_code >= 400:
+                    await response.aread()
+                    response.raise_for_status()
+                async for chunk in response.aiter_bytes():
                     if chunk and not released_kv:
                         await runtime.schedule("release_prefill_kv", info.prefiller_key, info.prefiller_score)
                         released_kv = True
                     body += chunk
-            if streaming:
-                # Keep an attempt private until its stop reason is known, so a
-                # retry cannot emit duplicate native message/response events.
-                frames = [
-                    prepare_native_sse_frame(api, frame, cached_tokens, req_data)
-                    for frame in split_native_sse_frames(bytes(body))
-                ]
-                recomputed = any(retry for _, retry in frames)
-                output = b"".join(frame for frame, _ in frames)
-            else:
-                obj = json.loads(body)
-                recomputed = native_request_recomputed(api, obj, req_data)
-                output = (
-                    encode_response_chunk(obj, False)
-                    if write_cached_tokens_for_api(api, obj, cached_tokens)
-                    else bytes(body)
-                )
-            if not recomputed:
-                return Response(output, media_type="text/event-stream" if streaming else "application/json")
+            if not native_request_recomputed(api, bytes(body), req_data):
+                media_type = "text/event-stream" if req_data.get("stream") else "application/json"
+                return Response(bytes(body), media_type=media_type)
             if attempt + 1 >= max_attempts:
                 break
-            # Reuse Chat/Completions reassignment, keeping native inputs intact.
             req_data.pop("kv_transfer_params", None)
             info = await reassign_instances(
                 api,
@@ -1270,7 +1163,7 @@ async def _handle_native_decode(api: str, req_data: dict, info: InstanceInfo) ->
             )
             released_kv = False
         raise HTTPException(status_code=503, detail="Decode recompute retry limit reached.")
-    except (httpx.RequestError, json.JSONDecodeError) as exc:
+    except (httpx.RequestError, json.JSONDecodeError, UnicodeDecodeError) as exc:
         logger.warning("Native decode failed for %s: %s", info.request_id, exc)
         return JSONResponse({"error": {"message": "The decode backend did not complete the request."}}, status_code=502)
     finally:
@@ -1284,7 +1177,7 @@ async def handle_completions_impl(api: str, request: Request):
     request_released = False
     try:
         req_data = await request.json()
-        if _api_kind(api) == "responses":
+        if api == "/responses":
             # Reject before scheduling: P must finish before D starts, and
             # response history is local to each backend instance.
             unsupported = None
@@ -1314,7 +1207,7 @@ async def handle_completions_impl(api: str, request: Request):
         req_body = await request.body()
         request_length = len(req_body)
         instance_info = await assign_instances(api, req_data, request_length, is_initial_request=True)
-        if _api_kind(api) != "openai":
+        if api in ("/messages", "/responses"):
             request_released = True  # Native forwarding owns cleanup from this point.
             return await _handle_native_decode(api, req_data, instance_info)
         stream_flag = bool(req_data.get("stream", False))

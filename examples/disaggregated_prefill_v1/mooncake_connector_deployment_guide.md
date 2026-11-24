@@ -14,7 +14,7 @@ The vllm version must be the same as the main branch of vllm-ascend, for example
 must supply explicit input history; `background` and `previous_response_id` are
 unsupported.
 
-The proxy preserves native JSON/SSE fields and reports prefiller cache usage.
+The proxy forwards native response bytes, including the backend's original usage.
 When a native response exposes `stop_reason="recomputed"`, it uses the existing
 P/D reassignment path to retry the original request, including its full input
 and token limit. `--max-retries` limits the number of attempts; exhaustion returns

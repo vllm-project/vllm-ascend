@@ -1,494 +1,191 @@
-"""Regression tests for Messages/Responses forwarding."""
+"""Native proxy contracts, exercised through HTTP with mock P/D backends."""
 
 import argparse
 import asyncio
 import json
-from typing import Any
 
 import httpx
 import pytest
-from starlette.requests import Request
 
 from examples.disaggregated_prefill_v1 import load_balance_proxy_server_example as proxy
 
 
-@pytest.mark.parametrize("api", ["/messages", "/responses"])
-@pytest.mark.parametrize("streaming", [False, True])
-def test_native_backend_error_is_forwarded_once(installed_runtime, api, streaming):
-    scheduler, prefill, _ = installed_runtime
-    attempts = []
-    error = {"type": "error", "error": {"type": "api_error", "message": "backend failed"}}
-    if api == "/responses" and streaming:
-        error = {"type": "error", "code": "server_error", "message": "backend failed", "sequence_number": 2}
-    raw = json.dumps(error).encode()
-    if streaming:
-        raw = b"event: error\ndata: " + raw + b"\n\n"
+class Body(httpx.AsyncByteStream):
+    def __init__(self, data, error=None):
+        self.data, self.error, self.closed = data, error, False
 
-    async def backend(request):
-        attempts.append(json.loads(request.content))
-        return httpx.Response(200 if streaming else 500, content=raw)
-
-    async def exercise():
-        async with httpx.AsyncClient(base_url="http://decode/v1", transport=httpx.MockTransport(backend)) as decoder:
-            proxy.runtime._clients[proxy.ServerRole.DECODE][proxy.server_key("127.0.0.1", 8200)] = decoder
-            async with httpx.AsyncClient(
-                base_url="http://proxy", transport=httpx.ASGITransport(app=proxy.app)
-            ) as client:
-                return await client.post(
-                    "/v1" + api,
-                    json={
-                        "model": "m",
-                        "messages": [],
-                        "input": "hi",
-                        "stream": streaming,
-                        "vllm_xargs": {"existing_option": 1},
-                    },
-                )
-
-    result = asyncio.run(exercise())
-    assert result.status_code == (200 if streaming else 500)
-    if streaming:
-        assert result.content == raw
-    else:
-        assert result.json() == error
-    assert len(attempts) == len(prefill.posts) == 1
-    assert attempts[0]["vllm_xargs"] == {"existing_option": 1}
-    assert scheduler.request_num == 0
-    assert all(entry.active_kv_cache == 0 for entry in scheduler.prefillers.values())
-    assert all(entry.active_tokens == 0 for entry in scheduler.decoders.values())
-
-
-@pytest.mark.parametrize("after_output", [False, True])
-def test_native_disconnect_closes_backend_and_releases_load(installed_runtime, after_output):
-    scheduler, _, _ = installed_runtime
-    closed = []
-
-    class BackendStream(httpx.AsyncByteStream):
-        async def __aiter__(self):
-            yield b'event: content_block_delta\ndata: {"type":"content_block_delta"}\n\n'
-
-        async def aclose(self):
-            closed.append(True)
-
-    async def backend(request):
-        return httpx.Response(200, stream=BackendStream())
-
-    async def exercise():
-        async with httpx.AsyncClient(base_url="http://decode/v1", transport=httpx.MockTransport(backend)) as decoder:
-            proxy.runtime._clients[proxy.ServerRole.DECODE][proxy.server_key("127.0.0.1", 8200)] = decoder
-            request = _request({"model": "m", "stream": True})
-            response = await proxy.handle_completions_impl("/messages", request)
-
-            async def send(message):
-                if message["type"] == ("http.response.body" if after_output else "http.response.start"):
-                    raise asyncio.CancelledError
-
-            async def receive():
-                await asyncio.Event().wait()
-
-            with pytest.raises(asyncio.CancelledError):
-                await response({**request.scope, "asgi": {"spec_version": "2.4"}}, receive, send)
-
-    asyncio.run(exercise())
-    assert closed == [True]
-    assert scheduler.request_num == 0
-    assert all(entry.active_kv_cache == 0 for entry in scheduler.prefillers.values())
-    assert all(entry.active_tokens == 0 for entry in scheduler.decoders.values())
-
-
-@pytest.mark.parametrize("stage", ["decode", "retry_prefill"])
-def test_native_cancellation_during_recompute_releases_load(installed_runtime, monkeypatch, stage):
-    scheduler, prefill, _ = installed_runtime
-    proxy.global_args.max_retries = 2
-    closed = []
-    original_post = prefill.post
-
-    async def prefill_post(*args, **kwargs):
-        response = await original_post(*args, **kwargs)
-        if len(prefill.posts) == 2:
-            raise asyncio.CancelledError
-        return response
-
-    monkeypatch.setattr(prefill, "post", prefill_post)
-
-    class BackendStream(httpx.AsyncByteStream):
-        async def __aiter__(self):
-            yield b'data: {"type":"message_delta","delta":{"stop_reason":"recomputed"}}\n\n'
-            if stage == "decode":
-                raise asyncio.CancelledError
-
-        async def aclose(self):
-            closed.append(True)
-
-    async def backend(request):
-        return httpx.Response(200, stream=BackendStream())
-
-    async def exercise():
-        async with httpx.AsyncClient(base_url="http://decode/v1", transport=httpx.MockTransport(backend)) as decoder:
-            proxy.runtime._clients[proxy.ServerRole.DECODE][proxy.server_key("127.0.0.1", 8200)] = decoder
-            with pytest.raises(asyncio.CancelledError):
-                await proxy.handle_completions_impl("/messages", _request({"stream": True, "messages": []}))
-
-    asyncio.run(exercise())
-    assert closed == [True]
-    assert len(prefill.posts) == (1 if stage == "decode" else 2)
-    assert scheduler.request_num == 0
-    assert all(entry.active_kv_cache == 0 for entry in scheduler.prefillers.values())
-    assert all(entry.active_tokens == 0 for entry in scheduler.decoders.values())
-
-
-def _request(body: dict) -> Request:
-    raw = json.dumps(body).encode("utf-8")
-
-    async def receive():
-        return {"type": "http.request", "body": raw, "more_body": False}
-
-    return Request(
-        {
-            "type": "http",
-            "http_version": "1.1",
-            "method": "POST",
-            "scheme": "http",
-            "path": "/v1/messages",
-            "raw_path": b"/v1/messages",
-            "query_string": b"",
-            "headers": [(b"content-type", b"application/json")],
-            "client": ("127.0.0.1", 12345),
-            "server": ("127.0.0.1", 8000),
-        },
-        receive,
-    )
-
-
-class _Response:
-    def __init__(self, payload: dict, status: int = 200):
-        self.status_code = status
-        self._payload = payload
-
-    def json(self):
-        return self._payload
-
-    def raise_for_status(self):
-        if self.status_code >= 400:
-            raise AssertionError(f"unexpected prefill status {self.status_code}")
-
-
-class _Stream:
-    def __init__(self, chunks: list[bytes], status: int = 200):
-        self.status_code = status
-        self._chunks = list(chunks)
-
-    async def __aenter__(self):
-        return self
-
-    async def __aexit__(self, exc_type, exc, tb):
-        return False
-
-    def raise_for_status(self):
-        if self.status_code >= 400:
-            raise AssertionError(f"unexpected decode status {self.status_code}")
-
-    async def aread(self):
-        return b"".join(self._chunks)
-
-    async def aiter_bytes(self):
-        for chunk in self._chunks:
-            yield chunk
-
-
-class _Client:
-    def __init__(self, *, payload: dict | None = None, chunks: list[bytes] | None = None):
-        self.base_url = "http://127.0.0.1/v1"
-        self.posts: list[dict] = []
-        self.payload = payload or {}
-        self.chunks = chunks or []
-
-    async def post(self, endpoint, json=None, headers=None):
-        self.posts.append({"endpoint": endpoint, "json": json, "headers": headers})
-        return _Response(self.payload)
-
-    def stream(self, method, endpoint, json=None, headers=None):
-        self.posts.append({"endpoint": endpoint, "json": json, "headers": headers, "stream": True})
-        return _Stream(self.chunks)
+    async def __aiter__(self):
+        # Split every byte, including UTF-8 and SSE delimiters.
+        for byte in self.data:
+            yield bytes([byte])
+        if self.error:
+            raise self.error
 
     async def aclose(self):
-        return None
+        self.closed = True
 
 
-def _scheduler(prefill_ports=(8100, 8101), decode_ports=(8200, 8201)):
-    return proxy.SharedProxyScheduler(
-        [("127.0.0.1", port) for port in prefill_ports],
-        [("127.0.0.1", port) for port in decode_ports],
+def wire(api, obj, streaming):
+    if not streaming:
+        return json.dumps(obj, ensure_ascii=False, indent=2).encode()
+    event = (
+        {"type": "message_delta", "delta": obj}
+        if api == "/messages"
+        else {
+            "type": "response.completed",
+            "response": obj,
+        }
     )
+    # Preserve comments, IDs, event names, multiline data, and CRLF framing.
+    data = b"\r\n".join(
+        b"data: " + line for line in json.dumps(event, ensure_ascii=False, indent=2).encode().splitlines()
+    )
+    return b": keepalive\r\nid: event-1\r\nevent: " + event["type"].encode() + b"\r\n" + data + b"\r\n\r\n"
 
 
 @pytest.fixture
-def installed_runtime():
-    """One prefiller and one decoder, with fake HTTP clients already registered."""
-    prefill = _Client(
-        payload={
-            "kv_transfer_params": {"do_remote_decode": True, "remote_block_ids": [1]},
-            "usage": {
-                "cache_read_input_tokens": 32,
-                "input_tokens_details": {"cached_tokens": 7},
-                "prompt_tokens_details": {"cached_tokens": 4},
-            },
-        }
-    )
-    decode = _Client()
-    scheduler = _scheduler(prefill_ports=(8100,), decode_ports=(8200,))
-    runtime = proxy.WorkerRuntime(scheduler)
-    runtime._clients[proxy.ServerRole.PREFILL][proxy.server_key("127.0.0.1", 8100)] = prefill
-    runtime._clients[proxy.ServerRole.DECODE][proxy.server_key("127.0.0.1", 8200)] = decode
-    old_runtime, old_args = proxy.runtime, proxy.global_args
-    proxy.runtime = runtime
-    proxy.global_args = argparse.Namespace(
-        max_retries=1, retry_delay=0.0, workers=1, log_level="ERROR", enable_prefill_affinity=False
-    )
-    try:
-        yield scheduler, prefill, decode
-    finally:
-        proxy.runtime = old_runtime
-        proxy.global_args = old_args
+def exchange(monkeypatch):
+    """One real httpx client per backend, with load cleanup checked on every path."""
 
-
-async def _body(response) -> bytes:
-    if not hasattr(response, "body_iterator"):
-        return bytes(response.body)
-    chunks = []
-    async for chunk in response.body_iterator:
-        chunks.append(chunk if isinstance(chunk, bytes) else bytes(chunk))
-    return b"".join(chunks)
-
-
-def test_prefill_payload_depends_on_api():
-    original = {
-        "model": "m",
-        "input": "hello",
-        "max_output_tokens": 500,
-        "max_tokens": 80,
-        "min_tokens": 2,
-        "max_completion_tokens": 80,
-        "stream": True,
-        "stream_options": {"include_usage": True},
-    }
-
-    responses = proxy.build_prefill_request_for_api("/responses", original)
-    assert responses["max_output_tokens"] == 1
-    assert responses["stream"] is False
-    assert responses["kv_transfer_params"]["do_remote_decode"] is True
-    for key in ("max_tokens", "min_tokens", "max_completion_tokens", "stream_options"):
-        assert key not in responses
-    assert original["max_output_tokens"] == 500
-
-    messages = proxy.build_prefill_request_for_api("/messages", dict(original))
-    assert messages["max_tokens"] == 1
-    assert messages["min_tokens"] == 1
-    assert messages["max_completion_tokens"] == 1
-    assert "max_output_tokens" in messages
-
-    chat = proxy.build_prefill_request_for_api("/chat/completions", {"prompt": "hi", "max_tokens": 16})
-    assert chat["max_tokens"] == 1
-    assert chat["min_tokens"] == 1
-    assert "max_output_tokens" not in chat
-
-
-def test_cached_token_fields_follow_the_protocol():
-    messages = {"usage": {"cache_read_input_tokens": 11}}
-    responses = {"usage": {"input_tokens_details": {"cached_tokens": 22}}}
-    openai = {"usage": {"prompt_tokens_details": {"cached_tokens": 33}}}
-    assert proxy.extract_cached_tokens_for_api("/messages", messages) == 11
-    assert proxy.extract_cached_tokens_for_api("/responses", responses) == 22
-    assert proxy.extract_cached_tokens_for_api("/completions", openai) == 33
-    assert proxy.extract_cached_tokens_for_api("/messages", {"usage": {}}) == 0
-
-    message_out = {"usage": {"cache_read_input_tokens": 0}}
-    assert proxy.write_cached_tokens_for_api("/messages", message_out, 32) is True
-    assert message_out["usage"]["cache_read_input_tokens"] == 32
-    assert "input_tokens" not in message_out["usage"]
-
-    completed: dict[str, Any] = {"type": "response.completed", "response": {"usage": {"input_tokens": 10}}}
-    assert proxy.write_cached_tokens_for_api("/responses", completed, 7) is True
-    assert completed["response"]["usage"]["input_tokens_details"]["cached_tokens"] == 7
-
-    untouched = {"type": "message"}
-    assert proxy.write_cached_tokens_for_api("/messages", untouched, 1) is False
-    assert "usage" not in untouched
-    assert proxy.write_cached_tokens_for_api("/messages", {"usage": {}}, None) is False
-
-
-def test_messages_passthrough_rejoins_split_json_and_releases_load(installed_runtime):
-    scheduler, prefill, decode = installed_runtime
-    raw = json.dumps(
-        {
-            "type": "message",
-            "content": [{"type": "text", "text": "hello"}],
-            "usage": {"cache_read_input_tokens": 0},
-        }
-    ).encode("utf-8")
-    decode.chunks = [raw[:20], raw[20:]]
-
-    async def run():
-        response = await proxy.handle_completions_impl(
-            "/messages",
-            _request({"model": "m", "max_tokens": 80, "messages": [{"role": "user", "content": "hi"}]}),
+    async def run(api, payload, scripts, *, headers=None, prefill_error=None, affinity=False):
+        calls = {"prefill": [], "decode": []}
+        scheduler = proxy.SharedProxyScheduler([("127.0.0.1", 8100)], [("127.0.0.1", 8200)])
+        runtime = proxy.WorkerRuntime(scheduler)
+        monkeypatch.setattr(proxy, "runtime", runtime)
+        monkeypatch.setattr(
+            proxy,
+            "global_args",
+            argparse.Namespace(
+                max_retries=2,
+                retry_delay=0,
+                enable_prefill_affinity=affinity,
+            ),
         )
-        assert response.media_type == "application/json"
-        return json.loads(await _body(response))
 
-    body = asyncio.run(run())
+        async def backend(request):
+            role = request.url.host
+            calls[role].append(
+                {"body": json.loads(request.content), "headers": request.headers, "path": request.url.path}
+            )
+            if role == "prefill":
+                if prefill_error and len(calls[role]) == 2:
+                    raise prefill_error
+                return httpx.Response(
+                    200,
+                    json={
+                        "kv_transfer_params": {"remote_block_ids": [len(calls[role])]},
+                        "usage": {"cache_read_input_tokens": 32, "input_tokens_details": {"cached_tokens": 7}},
+                    },
+                )
+            script = scripts[len(calls[role]) - 1]
+            if isinstance(script, BaseException):
+                raise script
+            return script
 
-    assert body["content"][0]["text"] == "hello"
-    assert body["usage"]["cache_read_input_tokens"] == 32
-    assert "choices" not in body
-    posted = prefill.posts[0]["json"]
-    assert posted["max_tokens"] == 1
-    assert posted["min_tokens"] == 1
-    assert posted["kv_transfer_params"]["do_remote_decode"] is True
-    assert len(prefill.posts) == 1
-    assert scheduler.request_num == 0
-    assert all(entry.active_kv_cache == 0 for entry in scheduler.prefillers.values())
-    assert all(entry.active_tokens == 0 for entry in scheduler.decoders.values())
+        transport = httpx.MockTransport(backend)
+        async with (
+            httpx.AsyncClient(base_url="http://prefill/v1", transport=transport) as prefill,
+            httpx.AsyncClient(base_url="http://decode/v1", transport=transport) as decode,
+            httpx.AsyncClient(base_url="http://proxy", transport=httpx.ASGITransport(app=proxy.app)) as client,
+        ):
+            runtime._clients[proxy.ServerRole.PREFILL][proxy.server_key("127.0.0.1", 8100)] = prefill
+            runtime._clients[proxy.ServerRole.DECODE][proxy.server_key("127.0.0.1", 8200)] = decode
+            try:
+                response = await client.post("/v1" + api, json=payload, headers=headers)
+            finally:
+                assert scheduler.request_num == 0
+                assert all(entry.active_kv_cache == 0 for entry in scheduler.prefillers.values())
+                assert all(entry.active_tokens == 0 for entry in scheduler.decoders.values())
+        return response, calls
 
-
-@pytest.mark.parametrize("event_type", ["message", "message_start", "message_delta"])
-@pytest.mark.parametrize("old_cached, new_cached", [(100, 20), (100, 0), (0, 100), (None, 20)])
-def test_messages_cached_usage_preserves_total_input_tokens(installed_runtime, event_type, old_cached, new_cached):
-    scheduler, prefill, decode = installed_runtime
-    prefill.payload["usage"]["cache_read_input_tokens"] = new_cached
-    usage = {"input_tokens": 100 - (old_cached or 0), "cache_creation_input_tokens": 7, "output_tokens": 17}
-    if old_cached is not None:
-        usage["cache_read_input_tokens"] = old_cached
-    event: dict[str, Any] = {"type": event_type}
-    if event_type == "message_start":
-        event["message"] = {"usage": usage}
-    else:
-        event["usage"] = usage
-    streaming = event_type != "message"
-    payload = json.dumps(event).encode()
-    if streaming:
-        payload = b"event: " + event_type.encode() + b"\ndata: " + payload + b"\n\n"
-    decode.chunks = [payload[:20], payload[20:]]
-
-    async def run():
-        response = await proxy.handle_completions_impl("/messages", _request({"model": "m", "stream": streaming}))
-        return await _body(response)
-
-    body = asyncio.run(run())
-    if streaming:
-        assert body.startswith(b"event: " + event_type.encode() + b"\n")
-        body = body.split(b"data: ", 1)[1].strip()
-    patched = json.loads(body)
-    patched_usage = patched["message"]["usage"] if event_type == "message_start" else patched["usage"]
-    assert patched_usage["input_tokens"] == 100 - new_cached
-    assert patched_usage["cache_read_input_tokens"] == new_cached
-    assert patched_usage["cache_creation_input_tokens"] == 7
-    assert patched_usage["output_tokens"] == 17
-    assert (
-        sum(patched_usage[key] for key in ("input_tokens", "cache_read_input_tokens", "cache_creation_input_tokens"))
-        == 107
-    )
-    assert scheduler.request_num == 0
-
-
-def test_responses_prefill_is_one_token_and_streaming_usage_is_patched(installed_runtime):
-    scheduler, prefill, decode = installed_runtime
-    delta = b'data: {"type":"response.output_text.delta","delta":"hi"}\n\n'
-    completed = b'data: {"type":"response.completed","response":{"usage":{"input_tokens":10,"output_tokens":1}}}\n\n'
-    decode.chunks = [delta, completed]
-    request_body = {
-        "model": "m",
-        "input": "hello",
-        "stream": True,
-        "max_output_tokens": 500,
-        "max_tokens": 500,
-        "min_tokens": 2,
-        "max_completion_tokens": 500,
-        "stream_options": {"include_usage": True},
-    }
-
-    async def run():
-        response = await proxy.handle_completions_impl("/responses", _request(request_body))
-        assert response.headers["content-type"] == "text/event-stream; charset=utf-8"
-        return (await _body(response)).decode("utf-8")
-
-    text = asyncio.run(run())
-
-    posted = prefill.posts[0]["json"]
-    assert posted["max_output_tokens"] == 1
-    assert posted["stream"] is False
-    for key in ("max_tokens", "min_tokens", "max_completion_tokens", "stream_options"):
-        assert key not in posted
-    assert request_body["max_output_tokens"] == 500
-    assert '"delta": "hi"' in text or '"delta":"hi"' in text
-    usage_line = text.strip().split("\n\n")[1]
-    event = json.loads(usage_line.removeprefix("data: "))
-    assert event["response"]["usage"]["input_tokens_details"]["cached_tokens"] == 7
-    assert len(prefill.posts) == 1
-    assert scheduler.request_num == 0
+    return lambda *args, **kwargs: asyncio.run(run(*args, **kwargs))
 
 
 @pytest.mark.parametrize("api", ["/messages", "/responses"])
-@pytest.mark.parametrize("chunking", ["split-utf8", "coalesced"])
-def test_stream_usage_is_patched_across_http_chunk_boundaries(installed_runtime, api, chunking):
-    scheduler, _prefill, decode = installed_runtime
+@pytest.mark.parametrize("streaming", [False, True])
+def test_native_passthrough_and_prefill_payload(exchange, api, streaming):
+    result = {
+        "id": "native-id",
+        "stop_reason": "end_turn",
+        "text": "你好",
+        "content": [{"type": "thinking", "thinking": "reason"}, {"type": "tool_use", "id": "tool-1", "input": {}}],
+        "usage": {
+            "input_tokens": 10,
+            "cache_read_input_tokens": 99,
+            "input_tokens_details": {"cached_tokens": 114, "cached_tokens_per_turn": [100, 11, 3]},
+        },
+    }
+    raw = wire(api, result, streaming)
+    stream = Body(raw)
+    payload = {
+        "model": "m",
+        "messages": [{"role": "user", "content": "hi"}],
+        "input": "hi",
+        "stream": streaming,
+        "max_tokens": 80,
+        "max_completion_tokens": 80,
+        "max_output_tokens": 80,
+        "stream_options": {"include_usage": True},
+        "vllm_xargs": {"existing_option": 1},
+    }
+    response, calls = exchange(api, payload, [httpx.Response(200, stream=stream)])
+    assert response.status_code == 200
+    assert response.content == raw  # No usage, tool, reasoning, or event rewrites.
+    assert response.headers["content-type"].startswith("text/event-stream" if streaming else "application/json")
+    assert stream.closed
+    assert len(calls["prefill"]) == len(calls["decode"]) == 1
+    prefill, decode = calls["prefill"][0]["body"], calls["decode"][0]["body"]
+    assert prefill["stream"] is False
+    assert "stream_options" not in prefill
+    if api == "/responses":
+        assert prefill["max_output_tokens"] == 1
+        assert not {"max_tokens", "min_tokens", "max_completion_tokens"} & prefill.keys()
+    else:
+        assert prefill["max_tokens"] == prefill["min_tokens"] == prefill["max_completion_tokens"] == 1
+    expected = {**payload, "kv_transfer_params": {"remote_block_ids": [1]}}
+    if not streaming:
+        expected.pop("stream_options")
+    assert decode == expected
+    assert prefill["kv_transfer_params"]["do_remote_decode"] is True
+    assert calls["prefill"][0]["path"] == calls["decode"][0]["path"] == "/v1" + api
+
+
+@pytest.mark.parametrize("api", ["/messages", "/responses"])
+@pytest.mark.parametrize("streaming", [False, True])
+@pytest.mark.parametrize("exhausted", [False, True])
+def test_recompute_reuses_original_request_and_fresh_kv(exchange, api, streaming, exhausted):
+    # Responses needs a backend extension to expose this marker; upstream omits it.
+    stopped = {"stop_reason": "recomputed", "text": "discarded"}
     if api == "/messages":
-        event = {"type": "message_start", "message": {"usage": {"cache_read_input_tokens": 0}}}
-        expected_cached = 32
+        stopped.update(stop_reason="stop_sequence", stop_sequence="recomputed")
+    final = {"stop_reason": "end_turn", "text": "done"}
+    first = Body(wire(api, stopped, streaming))
+    last = Body(wire(api, stopped if exhausted else final, streaming))
+    payload = {
+        "model": "m",
+        "stream": streaming,
+        "input": "hi",
+        "messages": [{"role": "user", "content": "hi"}],
+        "max_tokens": 80,
+        "max_output_tokens": 80,
+    }
+    response, calls = exchange(api, payload, [httpx.Response(200, stream=first), httpx.Response(200, stream=last)])
+    assert response.status_code == (503 if exhausted else 200)
+    if exhausted:
+        assert "retry limit" in response.json()["detail"]
     else:
-        event = {"type": "response.completed", "response": {"usage": {"input_tokens_details": {"cached_tokens": 0}}}}
-        expected_cached = 7
-    event["text"] = "你好"
-    usage_frame = b"event: usage\r\ndata: " + json.dumps(event, ensure_ascii=False).encode() + b"\r\n\r\n"
-    tail = b"event: ping\r\ndata: [DONE]\r\n\r\n"
-    if chunking == "split-utf8":
-        split = usage_frame.index("你".encode()) + 1
-        decode.chunks = [usage_frame[:split], usage_frame[split:] + tail]
-    else:
-        decode.chunks = [usage_frame + tail]
-
-    async def run():
-        response = await proxy.handle_completions_impl(api, _request({"model": "m", "stream": True}))
-        return await _body(response)
-
-    body = asyncio.run(run())
-    frame, done, _ = body.split(b"\r\n\r\n")
-    assert frame.startswith(b"event: usage\r\n")
-    patched = json.loads(frame.split(b"data: ", 1)[1])
-    assert patched["text"] == "你好"
-    if api == "/messages":
-        assert patched["message"]["usage"]["cache_read_input_tokens"] == expected_cached
-    else:
-        assert patched["response"]["usage"]["input_tokens_details"]["cached_tokens"] == expected_cached
-    assert done + b"\r\n\r\n" == tail
-    assert scheduler.request_num == 0
-    assert all(entry.active_tokens == 0 for entry in scheduler.decoders.values())
+        assert response.content == wire(api, final, streaming)
+    assert first.closed and last.closed
+    assert len(calls["prefill"]) == len(calls["decode"]) == 2
+    for index, attempt in enumerate(calls["decode"], 1):
+        assert attempt["body"] == {**payload, "kv_transfer_params": {"remote_block_ids": [index]}}
 
 
-def test_messages_does_not_retry_on_normal_stop(installed_runtime):
-    scheduler, prefill, decode = installed_runtime
-    decode.chunks = [json.dumps({"type": "message", "stop_reason": "end_turn", "content": "done"}).encode()]
-
-    async def run():
-        response = await proxy.handle_completions_impl(
-            "/messages",
-            _request({"model": "m", "messages": [{"role": "user", "content": "hi"}]}),
-        )
-        return json.loads(await _body(response))
-
-    body = asyncio.run(run())
-
-    assert body["stop_reason"] == "end_turn"
-    assert body["content"] == "done"
-    assert len(prefill.posts) == 1
-    assert scheduler.request_num == 0
-
-
+@pytest.mark.parametrize("streaming", [False, True])
 @pytest.mark.parametrize(
-    "api, payload, req_data, expected",
+    "api, stopped, options, retry",
     [
         ("/messages", {"stop_reason": "recomputed"}, {}, True),
-        ("/messages", {"type": "message_delta", "delta": {"stop_reason": "recomputed"}}, {}, True),
         ("/messages", {"stop_reason": "stop_sequence", "stop_sequence": "recomputed"}, {}, True),
         (
             "/messages",
@@ -498,137 +195,69 @@ def test_messages_does_not_retry_on_normal_stop(installed_runtime):
         ),
         ("/messages", {"stop_reason": "end_turn", "content": [{"text": "recomputed"}]}, {}, False),
         ("/responses", {"stop_reason": "recomputed"}, {}, True),
-        ("/responses", {"type": "response.completed", "response": {"stop_reason": "recomputed"}}, {}, True),
         ("/responses", {"status": "completed", "output": [{"stop_reason": "recomputed"}]}, {}, False),
         ("/responses", {"status": "incomplete", "incomplete_details": {"reason": "max_output_tokens"}}, {}, False),
     ],
 )
-def test_native_recompute_detection_uses_stop_fields(api, payload, req_data, expected):
-    assert proxy.native_request_recomputed(api, payload, req_data) is expected
+def test_recompute_only_uses_protocol_stop_fields(exchange, api, stopped, options, retry, streaming):
+    original, final = wire(api, stopped, streaming), wire(api, {"text": "done"}, streaming)
+    response, calls = exchange(
+        api,
+        {"stream": streaming, **options},
+        [httpx.Response(200, content=original), httpx.Response(200, content=final)],
+    )
+    assert response.content == (final if retry else original)
+    assert len(calls["decode"]) == len(calls["prefill"]) == (2 if retry else 1)
 
 
-@pytest.mark.parametrize("streaming", [False, True])
 @pytest.mark.parametrize("api", ["/messages", "/responses"])
-@pytest.mark.parametrize("exhausted", [False, True])
-def test_native_recompute_reassigns_original_request(installed_runtime, api, exhausted, streaming):
-    scheduler, prefill, _ = installed_runtime
-    proxy.global_args.max_retries = 2
-    attempts = []
-    request_body = {
-        "model": "m",
-        "messages": [{"role": "user", "content": "hello"}],
-        "input": [{"role": "user", "content": "hello"}],
-        "max_tokens": 80,
-        "max_output_tokens": 80,
-        "stream": streaming,
-    }
-    if api == "/messages":
-        recomputed = {"type": "message", "stop_reason": "stop_sequence", "stop_sequence": "recomputed"}
-        completed = {"type": "message", "stop_reason": "end_turn", "content": [{"type": "text", "text": "done"}]}
+@pytest.mark.parametrize("streaming", [False, True])
+def test_backend_error_is_forwarded_without_retry(exchange, api, streaming):
+    raw = (
+        b'event: error\ndata: {"type":"error","message":"failed"}\n\n'
+        if streaming
+        else b'{"error":{"message":"failed"}}'
+    )
+    status = 200 if streaming else 500
+    response, calls = exchange(api, {"stream": streaming}, [httpx.Response(status, content=raw)])
+    assert response.status_code == status
+    if streaming:
+        assert response.content == raw
     else:
-        # Optional backend extension: upstream Responses currently omits this field.
-        recomputed = {"id": "resp_old", "stop_reason": "recomputed", "output": []}
-        completed = {"id": "resp_new", "status": "completed", "output": []}
+        assert response.json() == json.loads(raw)
+    assert len(calls["prefill"]) == len(calls["decode"]) == 1
 
-    async def backend(request):
-        attempts.append(json.loads(request.content))
-        # The next prefill must supply fresh transfer metadata.
-        prefill.payload["kv_transfer_params"] = {"remote_block_ids": [2]}
-        retry = exhausted or len(attempts) == 1
-        obj = recomputed if retry else completed
-        if not streaming:
-            return httpx.Response(200, json=obj)
-        if api == "/messages":
-            prefix = {
-                "type": "content_block_delta",
-                "delta": {"type": "text_delta", "text": "discard" if retry else "done"},
-            }
-            event = {"type": "message_delta", "delta": obj}
-        else:
-            prefix = {"type": "response.output_text.delta", "delta": "discard" if retry else "done"}
-            event = {"type": "response.completed", "response": obj}
-        raw = b"".join(
-            b"event: " + item["type"].encode() + b"\ndata: " + json.dumps(item).encode() + b"\n\n"
-            for item in (prefix, event)
-        )
-        return httpx.Response(200, content=raw)
 
-    async def exercise():
-        async with httpx.AsyncClient(base_url="http://decode/v1", transport=httpx.MockTransport(backend)) as decoder:
-            proxy.runtime._clients[proxy.ServerRole.DECODE][proxy.server_key("127.0.0.1", 8200)] = decoder
-            async with httpx.AsyncClient(
-                base_url="http://proxy", transport=httpx.ASGITransport(app=proxy.app)
-            ) as client:
-                return await client.post("/v1" + api, json=request_body)
+@pytest.mark.parametrize("api", ["/messages", "/responses"])
+@pytest.mark.parametrize("streaming", [False, True])
+def test_interrupted_decode_returns_502_and_closes_backend(exchange, api, streaming):
+    stream = Body(b'{"partial":', httpx.ReadError("connection lost"))
+    response, calls = exchange(api, {"stream": streaming}, [httpx.Response(200, stream=stream)])
+    assert response.status_code == 502
+    assert stream.closed
+    assert len(calls["decode"]) == 1
 
-    result = asyncio.run(exercise())
-    if exhausted:
-        assert result.status_code == 503
-        assert "retry limit" in result.json()["detail"]
+
+def test_incomplete_json_returns_502(exchange):
+    response, _ = exchange("/messages", {}, [httpx.Response(200, content=b'{"partial":')])
+    assert response.status_code == 502
+
+
+@pytest.mark.parametrize("stage", ["decode", "retry_prefill"])
+@pytest.mark.parametrize("error", [asyncio.CancelledError, httpx.ReadError])
+def test_recompute_failure_releases_load(exchange, stage, error):
+    stream = Body(
+        wire("/messages", {"stop_reason": "recomputed"}, True), error("interrupted") if stage == "decode" else None
+    )
+    kwargs = {"prefill_error": error("interrupted")} if stage == "retry_prefill" else {}
+    args = ("/messages", {"stream": True}, [httpx.Response(200, stream=stream)])
+    if error is asyncio.CancelledError:
+        with pytest.raises(asyncio.CancelledError):
+            exchange(*args, **kwargs)
     else:
-        assert result.status_code == 200
-        if streaming:
-            assert result.headers["content-type"] == "text/event-stream; charset=utf-8"
-            assert b"discard" not in result.content
-            assert b"recomputed" not in result.content
-            frames = result.content.strip().split(b"\n\n")
-            assert len(frames) == 2
-            last_event = json.loads(frames[-1].split(b"data: ", 1)[1])
-            assert last_event["delta" if api == "/messages" else "response"] == completed
-        else:
-            assert result.json() == completed
-    assert len(attempts) == len(prefill.posts) == 2
-    for attempt in attempts:
-        assert {key: attempt[key] for key in request_body} == request_body
-        assert "vllm_xargs" not in attempt
-    assert attempts[0]["kv_transfer_params"]["remote_block_ids"] == [1]
-    assert attempts[1]["kv_transfer_params"]["remote_block_ids"] == [2]
-    assert scheduler.request_num == 0
-    assert all(entry.active_kv_cache == 0 for entry in scheduler.prefillers.values())
-    assert all(entry.active_tokens == 0 for entry in scheduler.decoders.values())
-
-
-def test_incomplete_nonstream_response_fails_and_releases_load(installed_runtime):
-    scheduler, prefill, decode = installed_runtime
-    decode.chunks = [b'{"type":"message"', b', "cut":']
-
-    async def run():
-        response = await proxy.handle_completions_impl("/messages", _request({"model": "m"}))
+        response, _ = exchange(*args, **kwargs)
         assert response.status_code == 502
-        return json.loads(await _body(response))
-
-    assert "did not complete" in asyncio.run(run())["error"]["message"]
-    assert len(prefill.posts) == len(decode.posts) == 1
-    assert scheduler.request_num == 0
-
-
-def test_chat_completions_still_uses_choices_and_openai_cached_tokens(installed_runtime):
-    scheduler, prefill, decode = installed_runtime
-    decode.chunks = [
-        json.dumps(
-            {
-                "choices": [{"message": {"role": "assistant", "content": "hello"}, "stop_reason": "stop"}],
-                "usage": {"completion_tokens": 1, "prompt_tokens_details": {"cached_tokens": 99}},
-            }
-        ).encode()
-    ]
-
-    async def run():
-        response = await proxy.handle_completions_impl(
-            "/chat/completions",
-            _request({"model": "m", "messages": [{"role": "user", "content": [{"type": "text", "text": "hi"}]}]}),
-        )
-        return json.loads(await _body(response))
-
-    body = asyncio.run(run())
-
-    assert body["choices"][0]["message"]["content"] == "hello"
-    # Preserve main's existing non-streaming Chat behavior in this native-only change.
-    assert body["usage"]["prompt_tokens_details"]["cached_tokens"] == 99
-    posted = prefill.posts[0]["json"]
-    assert posted["max_tokens"] == 1
-    assert "max_output_tokens" not in posted
-    assert scheduler.request_num == 0
+    assert stream.closed
 
 
 @pytest.mark.parametrize("streaming", [False, True])
@@ -636,136 +265,44 @@ def test_chat_completions_still_uses_choices_and_openai_cached_tokens(installed_
     "options, parameter",
     [
         ({"background": True}, "background"),
-        ({"previous_response_id": "resp_from_decoder"}, "previous_response_id"),
+        ({"previous_response_id": "resp_other"}, "previous_response_id"),
         ({"previous_response_id": ""}, "previous_response_id"),
-        ({"background": True, "previous_response_id": "resp_1"}, "background"),
+        ({"background": True, "previous_response_id": "resp_other"}, "background"),
     ],
 )
-def test_responses_rejects_unsupported_state_before_scheduling(installed_runtime, streaming, options, parameter):
-    scheduler, prefill, decode = installed_runtime
-
-    async def run():
-        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=proxy.app), base_url="http://proxy") as client:
-            return await client.post(
-                "/v1/responses",
-                headers={"X-Request-Id": "rejected-request"},
-                json={"input": "hi", "stream": streaming, **options},
-            )
-
-    response = asyncio.run(run())
+def test_unsupported_response_state_never_reaches_backends(exchange, streaming, options, parameter):
+    response, calls = exchange("/responses", {"stream": streaming, **options}, [])
     assert response.status_code == 400
-    assert response.headers["content-type"] == "application/json"
-    error = response.json()["error"]
-    assert error["type"] == "invalid_request_error"
-    assert error["code"] == "unsupported_parameter"
-    assert error["param"] == parameter
-    assert parameter in error["message"]
-    assert prefill.posts == decode.posts == []
-    assert scheduler.request_num == 0
-    assert all(entry.active_kv_cache == 0 for entry in scheduler.prefillers.values())
-    assert all(entry.active_tokens == 0 for entry in scheduler.decoders.values())
+    assert response.json()["error"]["param"] == parameter
+    assert calls == {"prefill": [], "decode": []}
 
 
 @pytest.mark.parametrize("streaming", [False, True])
-@pytest.mark.parametrize("affinity_enabled", [False, True])
+@pytest.mark.parametrize("affinity", [False, True])
 @pytest.mark.parametrize(
-    "headers, body_id, expected_id",
-    [
-        ({"X-Request-Id": "header-id"}, None, "header-id"),
-        ({"X-Request-Id": "header-id"}, "body-id", "header-id"),
-        ({}, "body-id", "body-id"),
-    ],
+    "header_id, body_id, expected", [("header", None, "header"), ("header", "body", "header"), (None, "body", "body")]
 )
-def test_responses_preserves_request_id(installed_runtime, streaming, affinity_enabled, headers, body_id, expected_id):
-    scheduler, prefill, decode = installed_runtime
-    proxy.global_args.enable_prefill_affinity = affinity_enabled
-    result = {"id": "resp_id", "output": []}
-    payload = json.dumps({"type": "response.completed", "response": result} if streaming else result).encode()
-    decode.chunks = [b"event: response.completed\ndata: " + payload + b"\n\n" if streaming else payload]
-
-    async def run():
-        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=proxy.app), base_url="http://proxy") as client:
-            return await client.post(
-                "/v1/responses",
-                headers={**headers, "X-Session-Id": "header-session"},
-                json={"input": "hi", "stream": streaming, "request_id": body_id, "user": "body-session"},
-            )
-
-    response = asyncio.run(run())
-    assert response.status_code == 200
-    assert len(prefill.posts) == len(decode.posts) == 1
-    for posted in (prefill.posts[0], decode.posts[0]):
-        assert posted["json"]["request_id"] == expected_id
-        assert posted["headers"]["X-Request-Id"] == expected_id
-        assert posted["json"]["user"] == ("header-session" if affinity_enabled else "body-session")
-    assert scheduler.request_num == 0
-
-
-@pytest.mark.parametrize("streaming", [False, True])
-@pytest.mark.parametrize("options", [{}, {"background": False}, {"previous_response_id": None}])
-@pytest.mark.parametrize("old_per_turn", [None, [], [100], [100, 11, 3]])
-@pytest.mark.parametrize("prefill_cached", [0, 20])
-def test_responses_reconciles_per_turn_usage(installed_runtime, streaming, options, old_per_turn, prefill_cached):
-    scheduler, prefill, decode = installed_runtime
-    prefill.payload["usage"]["input_tokens_details"]["cached_tokens"] = prefill_cached
-    input_per_turn = ([160] if len(old_per_turn) == 1 else [120, 30, 10]) if old_per_turn else []
-    output_per_turn = ([17] if len(old_per_turn) == 1 else [10, 4, 3]) if old_per_turn else []
-    output_details = {"output_tokens_per_turn": output_per_turn}
-    details = {
-        "cached_tokens": sum(old_per_turn) if old_per_turn else 114,
-        "input_tokens_per_turn": input_per_turn,
-        "cache_write_tokens": 2,
+def test_response_request_identity_and_explicit_history(exchange, streaming, affinity, header_id, body_id, expected):
+    headers = {"X-Session-Id": "session"}
+    if header_id:
+        headers["X-Request-Id"] = header_id
+    payload = {
+        "input": [{"role": "user", "content": "hi"}],
+        "stream": streaming,
+        "request_id": body_id,
+        "user": "body-session",
+        "background": False,
+        "previous_response_id": None,
     }
-    if old_per_turn is not None:
-        details["cached_tokens_per_turn"] = old_per_turn
-    usage = {
-        "input_tokens": 160,
-        "output_tokens": 17,
-        "total_tokens": 177,
-        "input_tokens_details": details,
-        "output_tokens_details": output_details,
-    }
-    result = {"id": "resp_new", "usage": usage, "output": []}
-    payload = json.dumps({"type": "response.completed", "response": result} if streaming else result).encode()
-    if streaming:
-        payload = b"event: response.completed\ndata: " + payload + b"\n\n"
-    decode.chunks = [payload[:23], payload[23:]]
-
-    async def run():
-        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=proxy.app), base_url="http://proxy") as client:
-            return await client.post(
-                "/v1/responses",
-                json={"model": "m", "input": "hi", "stream": streaming, "max_output_tokens": 80, **options},
-            )
-
-    response = asyncio.run(run())
+    response, calls = exchange(
+        "/responses",
+        payload,
+        [httpx.Response(200, content=wire("/responses", {}, streaming))],
+        headers=headers,
+        affinity=affinity,
+    )
     assert response.status_code == 200
-    if streaming:
-        assert response.content.startswith(b"event: response.completed\n")
-        patched = json.loads(response.content.split(b"data: ", 1)[1])["response"]
-    else:
-        patched = response.json()
-    actual = patched["usage"]["input_tokens_details"]
-    if old_per_turn is None:
-        assert "cached_tokens_per_turn" not in actual
-        assert actual["cached_tokens"] == prefill_cached
-    elif not old_per_turn:
-        assert actual["cached_tokens_per_turn"] == []
-        assert actual["cached_tokens"] == prefill_cached
-    else:
-        expected = [prefill_cached, *old_per_turn[1:]]
-        assert actual["cached_tokens_per_turn"] == expected
-        assert actual["cached_tokens"] == sum(expected)
-    assert actual["input_tokens_per_turn"] == input_per_turn
-    assert patched["usage"]["output_tokens_details"] == output_details
-    assert actual["cache_write_tokens"] == 2
-    assert patched["usage"]["input_tokens"] == 160
-    assert patched["usage"]["output_tokens"] == 17
-    assert patched["usage"]["total_tokens"] == 177
-    assert prefill.posts[0]["json"]["max_output_tokens"] == 1
-    assert decode.posts[0]["json"]["max_output_tokens"] == 80
-    assert decode.posts[0]["json"]["kv_transfer_params"]["remote_block_ids"] == [1]
-    assert len(prefill.posts) == len(decode.posts) == 1
-    assert scheduler.request_num == 0
-    assert all(entry.active_kv_cache == 0 for entry in scheduler.prefillers.values())
-    assert all(entry.active_tokens == 0 for entry in scheduler.decoders.values())
+    for role in calls.values():
+        assert role[0]["body"]["request_id"] == role[0]["headers"]["X-Request-Id"] == expected
+        assert role[0]["body"]["user"] == ("session" if affinity else "body-session")
+        assert role[0]["body"]["input"] == payload["input"]
