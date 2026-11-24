@@ -827,12 +827,16 @@ def test_platform_builder_uses_qwen_pool_accounting() -> None:
     )
 
 
-@pytest.mark.parametrize("manager_block_size", [256, 384, 768])
-def test_compressed_qsa_builder_and_cache_use_matching_pages(monkeypatch, manager_block_size):
+@pytest.mark.parametrize(
+    ("manager_block_size", "kernel_block_size"),
+    [(256, 128), (384, 128), (768, 128), (512, 512), (1024, 512)],
+)
+def test_compressed_qsa_builder_and_cache_use_matching_pages(monkeypatch, manager_block_size, kernel_block_size):
     from vllm.v1.attention.backend import CommonAttentionMetadata
     from vllm.v1.worker.utils import AttentionGroup
 
     from vllm_ascend.models.qwen4_exp import qsa
+    from vllm_ascend.worker.utils import prepare_ascend_kernel_block_sizes
 
     if vllm_version_is("0.33.0"):
         import vllm.models.qwen4_exp.common.qsa_cache as qsa_module  # type: ignore[import-not-found]
@@ -878,18 +882,12 @@ def test_compressed_qsa_builder_and_cache_use_matching_pages(monkeypatch, manage
     )
     compressed_group = groups[2]
     spec = compressed_group.kv_cache_spec
-    backend = QSAIndexerBackend
     monkeypatch.setattr(attn_utils_v2, "get_current_vllm_config", lambda: runtime_config)
     monkeypatch.setattr(attn_utils_v2, "enable_sfa", lambda _: False)
     raw = attn_utils_v2._allocate_kv_cache(config, {}, torch.device("cpu"))
-    attn_groups = [AttentionGroup(backend, g.layer_names, g.kv_cache_spec, i) for i, g in enumerate(groups)]
-    caches = attn_utils_v2._reshape_kv_cache_v2(attn_groups, raw, "auto", [128] * len(groups), {}, config)
-    # Exercise the actual MRV2 factory, which rewrites the builder spec.
-    group = attn_groups[2]
-    group.create_metadata_builders(runtime_config, torch.device("cpu"), kernel_block_size=128)
-    builder = group.get_metadata_builder(0)
+    attn_groups = [AttentionGroup(QSAIndexerBackend, g.layer_names, g.kv_cache_spec, i) for i, g in enumerate(groups)]
     name = compressed_group.layer_names[0]
-    layer = qsa.qsa_indexer.QSACompressedKeyCache(
+    layer = qsa.AscendQSACompressedKeyCache(
         head_size=spec.head_size,
         dtype=spec.dtype,
         prefix=name,
@@ -897,6 +895,20 @@ def test_compressed_qsa_builder_and_cache_use_matching_pages(monkeypatch, manage
         compress_ratio=4,
         vllm_config=runtime_config,
     )
+    group = attn_groups[2]
+    group.backend = layer.get_attn_backend()
+    block_sizes = [128] * len(groups)
+    if kernel_block_size == 512:
+        assert group.backend is qsa.AscendQSACompressedKeyBackend
+        attn_groups[0].backend = qsa.AscendQSABackend
+        block_sizes = prepare_ascend_kernel_block_sizes(config, [[g] for g in attn_groups])
+        assert block_sizes[2] == manager_block_size
+    else:
+        assert group.backend is QSAIndexerBackend
+    # The MRV2 metadata factory refines the manager size using this backend.
+    group.create_metadata_builders(runtime_config, torch.device("cpu"), kernel_block_size=block_sizes[2])
+    builder = group.get_metadata_builder(0)
+    caches = attn_utils_v2._reshape_kv_cache_v2(attn_groups, raw, "auto", block_sizes, {}, config)
     from vllm_ascend.patch.worker.patch_bind_kv_cache import bind_kv_cache_to_layers
 
     bind_kv_cache_to_layers({name: caches[name]}, {name: layer})
@@ -918,13 +930,14 @@ def test_compressed_qsa_builder_and_cache_use_matching_pages(monkeypatch, manage
     positions = torch.tensor([2**40, 2**40 + 1, 2**40 + 2], dtype=torch.int64)
     raw_layer.rope_position_cache[2, 7, 0] = positions
     torch.testing.assert_close(raw_layer.rope_position_cache[2, 7, 0], positions)
-    keys_per_page = 128 // 4
-    factor = manager_block_size // 128
+    keys_per_page = kernel_block_size // 4
+    factor = manager_block_size // kernel_block_size
     assert layer.kv_cache.shape == (3 * factor, keys_per_page, 1, spec.head_size)
     assert builder.storage_block_size == keys_per_page
     assert layer.kv_cache.untyped_storage().data_ptr() == raw[name].untyped_storage().data_ptr()
     manager = torch.tensor([[2, 0]], dtype=torch.int32)
     virtual = (manager.unsqueeze(-1) * factor + torch.arange(factor)).flatten(1).to(torch.int32)
+    torch.testing.assert_close(group.map_to_kernel_block_table(manager), virtual)
     locs = torch.tensor([0, 8], dtype=torch.int32)
     common = CommonAttentionMetadata(
         query_start_loc=locs,
@@ -956,6 +969,35 @@ def test_compressed_qsa_builder_and_cache_use_matching_pages(monkeypatch, manage
         assert selected.data_ptr() == expected.data_ptr()
         selected.fill_(token_row + 1)
         torch.testing.assert_close(expected, torch.full_like(expected, token_row + 1))
+
+
+def test_qsa_composite_retains_manager_block_for_distinct_kernel_sizes():
+    from vllm.v1.kv_cache_interface import KVCacheConfig
+    from vllm.v1.worker.utils import AttentionGroup, select_common_block_size
+
+    from vllm_ascend.models.qwen4_exp.qsa import AscendQSABackend, AscendQSACompressedKeyBackend
+    from vllm_ascend.worker.utils import prepare_ascend_kernel_block_sizes
+
+    main, _, compressed, *_ = _groups()
+    manager_size = 1024
+    main_spec = replace(main.kv_cache_spec, block_size=manager_size)
+    compressed_spec = replace(compressed.kv_cache_spec, block_size=manager_size)
+    spec = UniformTypeKVCacheSpecs.from_specs(
+        {**dict.fromkeys(main.layer_names, main_spec), **dict.fromkeys(compressed.layer_names, compressed_spec)}
+    )
+    assert spec is not None
+    config = KVCacheConfig(
+        num_blocks=3,
+        kv_cache_tensors=[],
+        kv_cache_groups=[KVCacheGroupSpec(main.layer_names + compressed.layer_names, spec)],
+    )
+    groups = [
+        AttentionGroup(AscendQSABackend, main.layer_names, main_spec, 0),
+        AttentionGroup(AscendQSACompressedKeyBackend, compressed.layer_names, compressed_spec, 0),
+    ]
+    [size] = prepare_ascend_kernel_block_sizes(config, [groups])
+    assert size == manager_size
+    assert [select_common_block_size(size, [group.backend], [group.kv_cache_spec]) for group in groups] == [128, 512]
 
 
 def test_whole_page_sharing_uses_one_tp4_page_for_qsa_or_complete_gdn():

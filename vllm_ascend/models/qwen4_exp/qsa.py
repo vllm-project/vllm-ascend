@@ -32,7 +32,7 @@ from vllm.utils.torch_utils import (
     canonicalize_singleton_dim_strides,
     get_dtype_size,
 )
-from vllm.v1.attention.backend import AttentionCGSupport, AttentionImplBase, CommonAttentionMetadata
+from vllm.v1.attention.backend import AttentionBackend, AttentionCGSupport, AttentionImplBase, CommonAttentionMetadata
 from vllm.v1.kv_cache_interface import AttentionSpec
 from vllm.v1.kv_cache_layout import KVCacheLayout
 
@@ -92,6 +92,7 @@ if vllm_version_is("0.33.0"):
 else:
     UpstreamQSABackend = upstream_qsa.Qwen4ExpQSABackend  # type: ignore[attr-defined]
 
+QSA_INDEXER_KERNEL_BLOCK_SIZE = 512
 QSAKVCache: TypeAlias = tuple[torch.Tensor, torch.Tensor]
 
 
@@ -506,7 +507,10 @@ class AscendQSAIndexer(upstream_indexer.QSAIndexer):
         metadata: QSAIndexerMetadataProtocol,
         out: torch.Tensor | None,
     ) -> torch.Tensor:
-        logger.info_once("QSA is using native request-batched LightningIndexerV2 through the CANN Torch interface.")
+        logger.info_once(
+            "QSA is using native request-batched LightningIndexerV2 through the CANN Torch interface (page_size=%d).",
+            self.compressed_key_cache.kv_cache.shape[1],
+        )
         return qsa_select_paged_tokens_lightning_v2(
             query,
             self.compressed_key_cache.kv_cache,
@@ -813,10 +817,36 @@ class AscendQSABackend(UpstreamQSABackend):  # type: ignore[valid-type, misc]
         return (KVCacheLayout.BLNHC, KVCacheLayout.BLHNC)
 
 
+class AscendQSACompressedKeyBackend(QSAIndexerBackend):
+    selects_kernel_blocks_per_attention_group = True
+
+    @staticmethod
+    def get_name() -> str:
+        return "QWEN4_EXP_QSA_COMPRESSED_KEY_ASCEND"
+
+    @staticmethod
+    def get_supported_kernel_block_sizes(kv_cache_spec=None) -> list[int]:
+        # A 512-token kernel block contains 128 keys at 4:1 compression.
+        return [QSA_INDEXER_KERNEL_BLOCK_SIZE]
+
+
+class AscendQSACompressedKeyCache(qsa_indexer.QSACompressedKeyCache):
+    def __init__(self, *, vllm_config: VllmConfig, **kwargs) -> None:
+        super().__init__(vllm_config=vllm_config, **kwargs)
+        self.use_v2_model_runner = vllm_config.use_v2_model_runner
+
+    def get_attn_backend(self) -> type[AttentionBackend]:
+        block_size = self.cache_config.block_size
+        if self.use_v2_model_runner and block_size and block_size % QSA_INDEXER_KERNEL_BLOCK_SIZE == 0:
+            return AscendQSACompressedKeyBackend
+        return super().get_attn_backend()
+
+
 # The upstream owner resolves these names from its module globals during
 # construction. Replace only the platform-specific components, leaving model
 # structure, cache specifications and weight mapping in upstream vLLM.
 upstream_indexer.apply_qsa_rope = apply_qsa_rope
+upstream_indexer.QSACompressedKeyCache = AscendQSACompressedKeyCache
 upstream_qsa.QSAIndexer = AscendQSAIndexer
 if vllm_version_is("0.33.0"):
     upstream_qsa.Qwen4ExpQSAFlashAttentionImpl = AscendQSAImpl  # type: ignore[attr-defined]
