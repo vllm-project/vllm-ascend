@@ -753,15 +753,9 @@ class XliteWrapper:
         self.xlite_model = self.adapter_xlite_model.xlite_model  # xlite C++ model instance
         self.freq_cis = self.adapter_xlite_model.rope_cossin_cache
         xlite_config = self.adapter_xlite_model.xlite_config
-        self.xlite_rt = Runtime(
-            devid=device.index,
-            size=0,
-            rank=torch.distributed.get_rank(),
-            tp_size=xlite_config.def_tp_size,
-            dp_size=xlite_config.def_dp_size,
-            moe_tp_size=xlite_config.moe_tp_size,
-            moe_ep_size=xlite_config.moe_ep_size,
-        )
+        self.xlite_config = xlite_config
+        self.xlite_rt: Runtime | None = None
+        self._runtime_initialized: bool = False
         # The xlite token budget: batches with more tokens (max across DP ranks) are routed to the native runnable.
         self.max_tokens = xlite_config.max_m
         self.hidden_states = torch.empty(
@@ -770,11 +764,34 @@ class XliteWrapper:
         # Persistent one-token batch for DP dummy runs (`__call__`): constant, allocated once.
         self._dummy_attn_metadata = self._init_dummy_metadata(xlite_config)
 
+    def _ensure_runtime(self) -> None:
+        """Lazily create the xlite runtime and its tensor pool on first forward.
+
+        ``Runtime`` + ``init_tensor_pool`` allocate NPU streams (~103 MiB pool). Creating them at
+        ``load_model`` time placed them inside the ACL-graph capture window, where spec-decode configs
+        (which capture additional streams/graphs on the PIECEWISE path) can exhaust the device stream
+        budget — CANN EE1023 "Too many streams are created" at capture. The wrapper's ``__call__``
+        only runs for real steps (warmup/capture always route through ``_bypass_xlite_wrapper``), so
+        initializing here is provably after graph capture completes.
+        """
+        if self._runtime_initialized:
+            return
+        xlite_config = self.xlite_config
+        self.xlite_rt = Runtime(
+            devid=self.device.index,
+            size=0,
+            rank=torch.distributed.get_rank(),
+            tp_size=xlite_config.def_tp_size,
+            dp_size=xlite_config.def_dp_size,
+            moe_tp_size=xlite_config.moe_tp_size,
+            moe_ep_size=xlite_config.moe_ep_size,
+        )
         rt_pool_size = self.xlite_model.get_tensor_pool_size()
         if torch.distributed.get_rank() == 0:
             logger.info("xlite runtime pool size: %s MB", rt_pool_size)
         if self.xlite_rt.init_tensor_pool(rt_pool_size) != 0:
             raise ValueError(f"xlite wrapper init failed! runtime pool size: {rt_pool_size} MB")
+        self._runtime_initialized = True
 
     def __del__(self) -> None:
         self.npu_runner = None  # type: ignore[assignment]
@@ -906,6 +923,9 @@ class XliteWrapper:
         num_actual_tokens = common.num_actual_tokens
         # Rows handed to xlite: the true token count, or exactly one token for a DP dummy batch.
         num_forward_tokens = 1 if self._is_dummy_batch else num_actual_tokens
+
+        self._ensure_runtime()
+        assert self.xlite_rt is not None
 
         if self._is_dummy_batch:
             xlite_attn_metadata = self._dummy_attn_metadata

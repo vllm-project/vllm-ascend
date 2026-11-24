@@ -686,9 +686,9 @@ class NPUPlatform(Platform):
                 cache_config.mamba_block_size = cache_config.block_size
             else:
                 # mamba_block_size must be a multiple of block_size, so that it can hand the block hash
-                assert cache_config.mamba_block_size % cache_config.block_size == 0, (
-                    f"mamba_block_size must be a multiple of block_size: {cache_config.block_size}"
-                )
+                assert (
+                    cache_config.mamba_block_size % cache_config.block_size == 0
+                ), f"mamba_block_size must be a multiple of block_size: {cache_config.block_size}"
 
     @classmethod
     def _validate_indexer_pp_config(cls, vllm_config: VllmConfig) -> None:
@@ -1677,6 +1677,68 @@ def _setup_compile_backend(
         additional_config["ascend_compilation_config"]["enable_static_kernel"] = False
         additional_config["ascend_compilation_config"]["enable_super_kernel"] = False
     elif compilation_config.cudagraph_mode.requires_piecewise_compilation():
+        # PIECEWISE aclgraph capture allocates one dedicated NPU capture stream per
+        # captured graph (torch_npu NPUGraph.cpp). With the default size grid of
+        # ~90 entries that exceeds the CANN device stream pool (~52 streams on
+        # current 910-series stacks) and capture fails at the ~52nd graph with
+        # "EE1023 Too many streams are created" (error 207005). Until torch_npu
+        # releases or shares the capture stream at capture_end, keep the number of
+        # captured graphs under the budget by evenly sub-sampling the resolved grids
+        # while always preserving their min/max endpoints.
+        _MAX_PIECEWISE_CAPTURE_STREAMS = 48  # conservative: ~52 pool minus ambient streams
+        prefill_sizes = getattr(compilation_config, "prefill_cudagraph_capture_token_sizes", None)
+        decode_sizes = getattr(compilation_config, "decode_cudagraph_capture_request_sizes", None)
+        p_list = list(prefill_sizes or [])
+        d_list = list(decode_sizes or [])
+        total = len(p_list) + len(d_list)
+        if total > _MAX_PIECEWISE_CAPTURE_STREAMS:
+
+            def _subsample(sizes: list[int], n: int) -> list[int]:
+                if n <= 0 or not sizes:
+                    return []
+                if len(sizes) <= n:
+                    return list(sizes)
+                if n == 1:
+                    return [sizes[-1]]
+                idx = sorted({round(i * (len(sizes) - 1) / (n - 1)) for i in range(n)})
+                return [sizes[i] for i in idx]
+
+            if p_list and d_list:
+                budget_p = max(1, min(len(p_list), round(_MAX_PIECEWISE_CAPTURE_STREAMS * len(p_list) / total)))
+                budget_p = min(budget_p, _MAX_PIECEWISE_CAPTURE_STREAMS - 1)
+                budget_d = _MAX_PIECEWISE_CAPTURE_STREAMS - budget_p
+            elif p_list:
+                budget_p = _MAX_PIECEWISE_CAPTURE_STREAMS
+                budget_d = 0
+            else:
+                budget_p = 0
+                budget_d = _MAX_PIECEWISE_CAPTURE_STREAMS
+
+            new_prefill = _subsample(p_list, budget_p)
+            new_decode = _subsample(d_list, budget_d)
+            logger.warning(
+                "Resolved cudagraph capture grids exceed the piecewise stream budget "
+                "(%d prefill + %d decode > %d); evenly sub-sampling to %d+%d entries to avoid "
+                "'EE1023 Too many streams' at capture. Override with prefill_cudagraph_capture_token_sizes / "
+                "decode_cudagraph_capture_request_sizes in --compilation-config.",
+                len(p_list),
+                len(d_list),
+                _MAX_PIECEWISE_CAPTURE_STREAMS,
+                len(new_prefill),
+                len(new_decode),
+            )
+            if prefill_sizes is not None:
+                compilation_config.prefill_cudagraph_capture_token_sizes = new_prefill
+            if decode_sizes is not None:
+                compilation_config.decode_cudagraph_capture_request_sizes = new_decode
+            # Write the union back to the deprecated fields: the engine handshake
+            # re-runs _split_cudagraph_capture_sizes and asserts they equal the
+            # split-grid union (vllm/config/vllm.py), or it raises ValueError.
+            uq = vllm_config.uniform_decode_query_len
+            union = sorted(set(new_prefill) | {n * uq for n in new_decode})
+            compilation_config.cudagraph_capture_sizes = union
+            compilation_config.max_cudagraph_capture_size = union[-1] if union else 0
+
         # Our is_cuda_alike is False so we cannot reuse the assertion of upstream
         if compilation_config.mode != CompilationMode.VLLM_COMPILE and not envs_vllm.VLLM_USE_BREAKABLE_CUDAGRAPH:
             raise AssertionError(

@@ -61,6 +61,7 @@ def _is_old_hdk_capture_error(exc: RuntimeError) -> bool:
 class ACLGraphEntry:
     batch_descriptor: BatchDescriptor
     aclgraph: torch.npu.NPUGraph | None = None
+    capture_failed: bool = False
     output: Any | None = None
 
     # for aclgraph debugging, track the input addresses
@@ -186,6 +187,12 @@ class ACLGraphWrapper:
 
         entry = self.concrete_aclgraph_entries[batch_descriptor]
 
+        if entry.capture_failed:
+            # A previous capture for this batch descriptor exhausted the device
+            # stream pool (EE1023); replay can't work without a captured graph,
+            # so degrade to a plain eager forward for this descriptor.
+            return self.runnable(*args, **kwargs)
+
         if entry.aclgraph is None:
             if self.aclgraph_options.debug_log_enable:
                 # Since we capture aclgraph for many different shapes and
@@ -247,14 +254,26 @@ class ACLGraphWrapper:
                             f"Original error:\n{exc}"
                         ) from exc
                     elif _is_stream_resource_capture_error(exc):
-                        raise RuntimeError(
-                            "ACL graph capture failed with a known stream-resource exhaustion "
-                            "signature. Consider reducing cudagraph_capture_sizes, lowering "
-                            "max_cudagraph_capture_size, preferring FULL or FULL_DECODE_ONLY for "
-                            "mostly uniform decode workloads, or temporarily disabling graph mode "
-                            "to confirm the failure is capture-related.\n"
-                            f"Original error:\n{exc}"
-                        ) from exc
+                        # Stream-resource exhaustion (EE1023): each PIECEWISE
+                        # graph owns one capture stream, so >~52 captures on one
+                        # device exceeds the CANN stream pool. Rather than kill
+                        # startup, mark this batch descriptor as uncapturable and
+                        # degrade it to a plain eager forward; other sizes that
+                        # already captured keep replaying.
+                        logger.warning(
+                            "ACL graph capture for %s failed: device stream pool "
+                            "exhausted (EE1023, error 207005). Degrading this batch "
+                            "descriptor to eager forward; already-captured sizes "
+                            "are unaffected. To keep more sizes graphed, reduce "
+                            "cudagraph_capture_sizes or prefer FULL mode.",
+                            entry.batch_descriptor,
+                        )
+                        entry.capture_failed = True
+                        entry.aclgraph = None
+                        forward_context.capturing = False
+                        # Re-run the forward eagerly so this step still returns
+                        # valid output; the caller sees no failure.
+                        return self.runnable(*args, **kwargs)
                     raise
 
             if self.enable_super_kernel:
