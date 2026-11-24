@@ -104,6 +104,7 @@ def _pooled_blocked(
     CHUNK_ROWS: tl.constexpr,
     HAS_RES,
     HAS_PREV_ROWS: tl.constexpr,
+    CACHE_BLOCK_STRIDE: tl.constexpr = 0,
 ):
     """Pool a group in chunks using three passes: max, denominator and weighted sum.
 
@@ -116,7 +117,8 @@ def _pooled_blocked(
     # Keep masked history lanes inside the projection allocation. Ascend may
     # form a DMA address for a masked lane before applying the load mask.
     # The original masks and ring selection still supply all history values.
-    history_ptr = cache_ptr + cache_row * CACHE_SIZE * 2 * HEAD_DIM
+    cache_stride: tl.constexpr = CACHE_BLOCK_STRIDE if CACHE_BLOCK_STRIDE else CACHE_SIZE * 2 * HEAD_DIM
+    history_ptr = cache_ptr + cache_row * cache_stride
     history_slot_stride = 2 * HEAD_DIM
     if HAS_PREV_ROWS:
         if prev_row_idx >= 0:
@@ -239,6 +241,7 @@ def _pool_kernel(
     NO_PAD: tl.constexpr,
     HAS_PREV_ROWS: tl.constexpr,
     TOKEN_ALIGNED: tl.constexpr = False,
+    CACHE_BLOCK_STRIDE: tl.constexpr = 0,
 ):
     pid = tl.program_id(0)
     offs_h = tl.arange(0, HEAD_DIM)
@@ -287,6 +290,7 @@ def _pool_kernel(
                     CHUNK_ROWS,
                     True,
                     HAS_PREV_ROWS,
+                    CACHE_BLOCK_STRIDE=CACHE_BLOCK_STRIDE,
                 )
             else:
                 # Read groups without residuals directly if they fit in one block;
@@ -336,6 +340,7 @@ def _pool_kernel(
                         CHUNK_ROWS,
                         False,
                         False,
+                        CACHE_BLOCK_STRIDE=CACHE_BLOCK_STRIDE,
                     )
             if TOKEN_ALIGNED:
                 # Keep Aurora's existing RMSNorm outside this kernel. Place
@@ -369,7 +374,9 @@ def _cache_update_kernel(
     CACHE_SIZE: tl.constexpr,
     HEAD_DIM: tl.constexpr,
     PROTECT_NULL: tl.constexpr = False,
+    CACHE_BLOCK_STRIDE: tl.constexpr = 0,
 ):
+    cache_stride: tl.constexpr = CACHE_BLOCK_STRIDE if CACHE_BLOCK_STRIDE else CACHE_SIZE * 2 * HEAD_DIM
     pid = tl.program_id(0)
     offs_h = tl.arange(0, HEAD_DIM)
     for task_id in range(pid, total_write_slots, tl.num_programs(0)):
@@ -390,8 +397,8 @@ def _cache_update_kernel(
             cache_row = tl.load(block_table_ptr + batch).to(tl.int64)
             kv_vals = tl.load(kv_ptr + proj_row * HEAD_DIM + offs_h)
             score_vals = tl.load(score_ptr + proj_row * HEAD_DIM + offs_h)
-            tl.store(cache_ptr + (cache_row * CACHE_SIZE + slot) * 2 * HEAD_DIM + offs_h, kv_vals)
-            tl.store(cache_ptr + (cache_row * CACHE_SIZE + slot) * 2 * HEAD_DIM + HEAD_DIM + offs_h, score_vals)
+            tl.store(cache_ptr + cache_row * cache_stride + slot * 2 * HEAD_DIM + offs_h, kv_vals)
+            tl.store(cache_ptr + cache_row * cache_stride + slot * 2 * HEAD_DIM + HEAD_DIM + offs_h, score_vals)
 
 
 # ============================================================================
@@ -698,6 +705,7 @@ def _write_pcp_ring_rows_kernel(
     NUM_BLOCKS: tl.constexpr,
     ROW_WIDTH: tl.constexpr,
     RING_ROWS: tl.constexpr,
+    BLOCK_STRIDE: tl.constexpr,
 ):
     write_idx = tl.program_id(0)
     columns = tl.arange(0, ROW_WIDTH)
@@ -711,7 +719,7 @@ def _write_pcp_ring_rows_kernel(
             token_offset = tl.load(token_offsets_ptr + write_idx)
             ring_slot = (start_pos + token_offset) % RING_ROWS
             kv_score_row = tl.load(kv_score_rows_ptr + source_row_idx * ROW_WIDTH + columns)
-            tl.store(ring_state_ptr + (block_idx * RING_ROWS + ring_slot) * ROW_WIDTH + columns, kv_score_row)
+            tl.store(ring_state_ptr + block_idx * BLOCK_STRIDE + ring_slot * ROW_WIDTH + columns, kv_score_row)
 
 
 def write_pcp_ring_rows(
@@ -731,6 +739,7 @@ def write_pcp_ring_rows(
             NUM_BLOCKS=ring_state.shape[0],
             ROW_WIDTH=ring_state.shape[-1],
             RING_ROWS=STATE_RING_ROWS,
+            BLOCK_STRIDE=ring_state.stride(0),
         )
 
 
@@ -759,7 +768,9 @@ def compressor_from_projected(
         raise ValueError("Expected token-aligned BF16 pooled output")
     if metadata.dtype != torch.int32 or metadata.ndim != 2 or metadata.shape[0] != 5:
         raise ValueError("Expected INT32 [5, requests] device metadata")
-    tensors = [kv, scores, state_cache, metadata, out]
+    if state_cache.stride(2) != 1 or state_cache.stride(1) != 2 * width:
+        raise ValueError("Compressor ring rows must be contiguous within each page")
+    tensors = [kv, scores, metadata, out]
     if (prev_rows is None) != (prev_row_indices is None):
         raise ValueError("Expected both gathered rows and predecessor indices, or neither")
     if prev_rows is not None:
@@ -769,8 +780,8 @@ def compressor_from_projected(
             raise ValueError("Expected one INT64 predecessor index per local chunk")
         tensors.extend((prev_rows, prev_row_indices))
     if not all(t.is_contiguous() for t in tensors):
-        raise ValueError("Compressor requires contiguous projections, ring pages and controls")
-    if not all(t.device == kv.device for t in tensors):
+        raise ValueError("Compressor requires contiguous projections, output and controls")
+    if state_cache.device != kv.device or not all(t.device == kv.device for t in tensors):
         raise ValueError("Compressor tensors must share one device")
     if num_cores <= 0 or not 0 <= max_query_len <= tokens:
         raise ValueError("Invalid compressor launch bounds")
@@ -807,6 +818,7 @@ def compressor_from_projected(
         NO_PAD=True,
         HAS_PREV_ROWS=prev_rows is not None,
         TOKEN_ALIGNED=True,
+        CACHE_BLOCK_STRIDE=state_cache.stride(0),
     )
     if prev_rows is not None:
         return out
@@ -823,5 +835,6 @@ def compressor_from_projected(
         CACHE_SIZE=STATE_RING_ROWS,
         HEAD_DIM=width,
         PROTECT_NULL=True,
+        CACHE_BLOCK_STRIDE=state_cache.stride(0),
     )
     return out

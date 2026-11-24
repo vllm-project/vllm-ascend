@@ -674,6 +674,21 @@ class NPUPlatform(Platform):
 
         _validate_target_dcp_config(vllm_config)
         _validate_deepseek_v41_adaptive_config(vllm_config)
+        if _get_deepseek_v4_variant(vllm_config.model_config) == "V4.1" and vllm_config.cache_config.block_size == 512:
+            from vllm_ascend.models.deepseek_v41.cache_config import uses_a5_packed_cache
+
+            parallel = vllm_config.parallel_config
+            if (
+                vllm_version_is("0.33.0")
+                or not uses_a5_packed_cache()
+                or not vllm_config.use_v2_model_runner
+                or parallel.decode_context_parallel_size != 1
+                or parallel.prefill_context_parallel_size != 1
+                or parallel.pipeline_parallel_size != 1
+                or vllm_config.kv_transfer_config is not None
+                or vllm_config.attention_config.hisparse_config is not None
+            ):
+                raise ValueError("V4.1 packed 512/128 requires A5 MRV2 on vLLM main without PP, CP, or KV transfer.")
         _validate_draft_decode_context_parallel_config(vllm_config)
         _validate_parallel_config(vllm_config)
         _validate_engram_config(vllm_config)

@@ -167,7 +167,7 @@ def test_glm_next_layout_takes_precedence_over_ascend_grouping(monkeypatch):
     ascend_mock.assert_not_called()
 
 
-def test_ascend_layout_takes_precedence_over_kimi_dspark(monkeypatch):
+def test_v41_pipeline_layout_takes_precedence_over_kimi_dspark(monkeypatch):
     sentinel = [KVCacheGroupSpec(["tuple"], generic_specs()["layer.a"])]
     ascend_mock = Mock(return_value=sentinel)
     kimi_mock = Mock(return_value=None)
@@ -176,7 +176,9 @@ def test_ascend_layout_takes_precedence_over_kimi_dspark(monkeypatch):
     monkeypatch.setattr(builder_module, "group_cache_specs", Mock(return_value=[]))
     monkeypatch.setattr(builder_module, "make_cache_groups", ascend_mock)
     monkeypatch.setattr(builder_module, "_get_kimi_k3_dspark_mixed_kv_cache_groups", kimi_mock)
-    assert AscendKVCacheConfigBuilder().get_kv_cache_groups(make_runtime(), generic_specs()) is sentinel
+    runtime = make_runtime()
+    runtime.parallel_config = SimpleNamespace(pipeline_parallel_size=2)
+    assert AscendKVCacheConfigBuilder().get_kv_cache_groups(runtime, generic_specs()) is sentinel
     kimi_mock.assert_not_called()
 
 

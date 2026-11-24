@@ -49,6 +49,7 @@ from vllm_ascend.models.deepseek_v41.cache_config import (
     get_deepseek_v41_pool_bytes_per_block,
     group_cache_specs,
     is_deepseek_v41_cache,
+    is_split_main_spec,
     make_cache_groups,
 )
 from vllm_ascend.models.glm5next.cache_config import (
@@ -112,7 +113,18 @@ class AscendKVCacheConfigBuilder(DefaultKVCacheConfigBuilder):
             return qwen4_exp_groups
 
         if is_deepseek_v41_cache(kv_cache_spec):
-            return make_cache_groups(group_cache_specs(kv_cache_spec))
+            if vllm_config.parallel_config.pipeline_parallel_size > 1:
+                return make_cache_groups(group_cache_specs(kv_cache_spec))
+            if any(is_split_main_spec(spec) for spec in kv_cache_spec.values()):
+                draft = {name: spec for name, spec in kv_cache_spec.items() if spec.is_draft}
+                if draft:
+                    target = {name: spec for name, spec in kv_cache_spec.items() if not spec.is_draft}
+                    draft_spec = UniformTypeKVCacheSpecs.from_specs(draft)
+                    if draft_spec is None:
+                        raise ValueError("V4.1 packed DSpark pages must share one sliding-window specification.")
+                    groups = super().get_kv_cache_groups(vllm_config, target)
+                    return [*groups, KVCacheGroupSpec(list(draft), draft_spec)]
+            return super().get_kv_cache_groups(vllm_config, kv_cache_spec)
 
         grouped_specs = group_and_unify_kv_cache_specs(kv_cache_spec)
         if grouped_specs is not None and len(grouped_specs) >= 2:
@@ -178,7 +190,7 @@ class AscendKVCacheConfigBuilder(DefaultKVCacheConfigBuilder):
             return sum(_upstream_pool_bytes_per_block(vllm_config, pool) for pool in pools)
         if is_step5_groups(kv_cache_groups):
             return get_step5_pool_bytes_per_block(kv_cache_groups)
-        if is_deepseek_v41_cache(kv_cache_groups):
+        if _uses_v41_pipeline_layout(vllm_config, kv_cache_groups):
             return get_deepseek_v41_pool_bytes_per_block(kv_cache_groups)
         if _get_glm5_next_cache_layout(kv_cache_groups) is not None:
             return get_glm5_next_pool_bytes_per_block(kv_cache_groups)
@@ -488,6 +500,10 @@ def _get_kv_cache_config_deepseek_v4_main(
     return num_blocks, tensors
 
 
+def _uses_v41_pipeline_layout(vllm_config: VllmConfig, kv_cache_groups: list[KVCacheGroupSpec]) -> bool:
+    return is_deepseek_v41_cache(kv_cache_groups) and vllm_config.parallel_config.pipeline_parallel_size > 1
+
+
 def get_ascend_kv_cache_config_from_groups(
     vllm_config: VllmConfig,
     kv_cache_groups: list[KVCacheGroupSpec],
@@ -536,7 +552,7 @@ def get_ascend_kv_cache_config_from_groups(
         )
     elif qwen_config is not None:
         kv_cache_config = qwen_config
-    elif is_deepseek_v41_cache(kv_cache_groups):
+    elif _uses_v41_pipeline_layout(vllm_config, kv_cache_groups):
         kv_cache_config = get_deepseek_v41_kv_cache_config(vllm_config, kv_cache_groups, available_memory)
     elif _get_glm5_next_cache_layout(kv_cache_groups) is not None:
         kv_cache_config = get_glm5_next_kv_cache_config(vllm_config, kv_cache_groups, available_memory)

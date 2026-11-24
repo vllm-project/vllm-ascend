@@ -94,6 +94,7 @@ from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_man
     allocate_kv_cache_tensors_for_sparse_kv_offload,
     reshape_kv_cache_tensors_for_sparse_kv_offload,
 )
+from vllm_ascend.models.deepseek_v41.cache_config import is_split_main_spec
 from vllm_ascend.models.glm5next.cache_views import view_compressed_indexer_cache, view_kpool_tail_cache
 from vllm_ascend.models.qwen4_exp.cache_config import (
     GDN,
@@ -1492,14 +1493,28 @@ def create_kv_cache_runtime_views(
     for group in attn_groups:
         if group.kv_cache_group_id >= len(kernel_block_sizes):
             continue
-        spec = group.kv_cache_spec
         for name in group.layer_names:
+            spec = group.kv_cache_spec
             descriptor, layer_index = placements[name]
             num_blocks = kv_cache_config.num_blocks_of(descriptor)
             start = descriptor.offset + layer_index * descriptor.layer_stride
             span = (num_blocks - 1) * descriptor.block_stride + spec.page_size_bytes
             if start < 0 or descriptor.block_stride < spec.page_size_bytes or start + span > backing.nbytes:
                 raise ValueError(f"KV cache placement for {name} exceeds its backing allocation.")
+            page_stride = descriptor.block_stride
+            kernel_size = kernel_block_sizes[group.kv_cache_group_id]
+            if is_split_main_spec(spec):
+                # Divide the upstream manager tile into four identical stripes.
+                # Each stripe has one compact record per main resource. K and
+                # scales share the record stride and differ only in base offset.
+                stripes = spec.block_size // kernel_size
+                if not layout.is_block_outermost or start % stripes or page_stride % stripes:
+                    raise ValueError(f"Unaligned packed V4.1 cache placement for {name}.")
+                start //= stripes
+                page_stride //= stripes
+                num_blocks *= stripes
+                spec = spec.copy_with_new_block_size(kernel_size)
+                span = (num_blocks - 1) * page_stride + spec.page_size_bytes
             shapes = group.backend.get_runtime_shapes(
                 spec,
                 num_blocks,
@@ -1519,7 +1534,7 @@ def create_kv_cache_runtime_views(
                 backing[start : start + span],
                 cache_shapes,
                 dtypes,
-                descriptor.block_stride,
+                page_stride,
             )
             if issubclass(group.backend, DeepseekV41CacheBackend):
                 caches[name] = components[0] if len(components) == 1 else tuple(components)
