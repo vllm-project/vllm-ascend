@@ -149,7 +149,8 @@ def test_last_shared_hook_submits_writes_once():
     obj._last_layer_index = obj._layer_index_by_name[shared]
     target = (0, 0, 0)
     event = Mock()
-    resident_write, shared_write = Future(), Future()
+    resident_write: Future[str | None] = Future()
+    shared_write: Future[str | None] = Future()
     metadata_future = Mock()
     metadata_future.done.return_value = False
     destination = SimpleNamespace(
@@ -191,7 +192,7 @@ def test_last_shared_hook_submits_writes_once():
     }
     assert state.available_layers == {resident: (32, event)}
     obj._pending_sends.append((SimpleNamespace(layer_name=other_shared), Future()))
-    waited = []
+    waited: list[Future[str | None]] = []
     wait_futures = Mock(side_effect=waited.extend)
     wait = load(PUSH, "wait_for_layer_reuse", {"wait_futures": wait_futures}, OWNER)
     wait(obj, 0)
