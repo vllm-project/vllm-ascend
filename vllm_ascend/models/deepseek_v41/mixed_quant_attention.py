@@ -6,7 +6,6 @@ from __future__ import annotations
 
 import torch
 
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence import record_attention_compute_start
 from vllm_ascend.ops import packaged_attention as ops
 from vllm_ascend.ops.triton.build_window_indices import (
     build_window_indices_triton,
@@ -270,8 +269,6 @@ def qsmla(
         raise RuntimeError(f"A5 MLA plan c{ratio} was not prepared by the metadata builder")
     task_metadata = plans[ratio]
     wait_for_device_metadata(DeviceMetadataStage.ATTENTION, id(task_metadata))
-    sinks = sinks.detach().float().contiguous()
-    record_attention_compute_start()
     output, _ = ops.mixed_quant_sparse_flash_mla(
         q,
         ori_kv=ori_kv,
@@ -285,7 +282,7 @@ def qsmla(
         seqused_cmp_kv=metadata.attention.cache_seq_lens if has_cmp else None,
         ori_topk_length=ori_lengths,
         cmp_topk_length=cmp_lengths if has_cmp else None,
-        sinks=sinks,
+        sinks=sinks.detach().float().contiguous(),
         metadata=task_metadata,
         quant_mode=1,
         softmax_scale=softmax_scale,

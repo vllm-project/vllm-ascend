@@ -756,7 +756,6 @@ class AscendDSAV41Impl:
             swa_cache = swa_cache.reshape(-1, metadata.swa.storage_block_size, 1, swa_cache.shape[-1])
             ori_block_table = metadata.swa.replay_block_table
             seq_lens = metadata.swa.replay_seq_lens
-        record_attention_compute_start()
         output, _ = torch.ops._C_ascend.npu_sparse_flash_mla(
             q,
             ori_kv=swa_cache,
@@ -821,6 +820,7 @@ class AscendDSAV41Impl:
             attn, hidden_states, metadata, forward_context.attn_metadata
         )
         num_tokens = metadata.swa.num_actual_tokens
+        record_attention_compute_start()
         if num_tokens:
             positions = metadata.positions[:num_tokens]
             cos, sin = metadata.rope(attn.rotary_emb.layername, num_tokens)
@@ -830,8 +830,6 @@ class AscendDSAV41Impl:
             attention_output = self._forward_attention(attn, q, metadata, compressed_indices)
             AscendDSAV41Impl._apply_rotary(attn, attention_output, cos, sin, inverse=True)
         else:
-            # Empty PCP ranks must also release the next layer's loads.
-            record_attention_compute_start()
             heads = attn.n_local_heads
             attention_output = hidden_states.new_empty((0, heads, attn.head_dim))
         self._project_output(attn, attention_output, hidden_states, projected=output)

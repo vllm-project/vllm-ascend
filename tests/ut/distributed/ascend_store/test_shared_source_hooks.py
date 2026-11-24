@@ -5,7 +5,7 @@
 import unittest
 from types import MethodType, SimpleNamespace
 from typing import Any
-from unittest.mock import MagicMock, Mock
+from unittest.mock import Mock
 
 import torch
 
@@ -130,8 +130,8 @@ class TestStandardConnectorHooks(unittest.TestCase):
                 _get_layer_metadata=lambda _: layer_metadata,
                 _update_caches=lambda *args: events.append("cache-only-write"),
                 _prepare_inputs_and_caches=prepare_inputs_and_caches,
-                _select_sparse_indices=Mock(),
-                _forward_attention=Mock(),
+                _select_sparse_indices=lambda *args, **kwargs: events.append("indexer"),
+                _forward_attention=lambda *args: events.append("attention"),
                 _project_output=lambda *args, **kwargs: events.append("project"),
             ),
         )
@@ -151,7 +151,21 @@ class TestStandardConnectorHooks(unittest.TestCase):
         hidden = torch.ones(1)
         scope["dsa_v41_write_kv"](hidden, hidden, "cut")
         scope["dsa_v41_forward"](hidden, hidden, "cut")
-        self.assertEqual(events, ["wait", "cache-only-write", "gate", "wait", "final-write", "project", "save"])
+        self.assertEqual(
+            events,
+            [
+                "wait",
+                "cache-only-write",
+                "gate",
+                "wait",
+                "final-write",
+                "gate",
+                "indexer",
+                "attention",
+                "project",
+                "save",
+            ],
+        )
         scope["maybe_save_kv_layer_to_connector"].assert_called_once_with("cut", attn.dsa_attn.swa_cache_layer.kv_cache)
 
         for num_tokens in (1, 0):
@@ -159,7 +173,10 @@ class TestStandardConnectorHooks(unittest.TestCase):
                 events.clear()
                 layer_metadata.swa.num_actual_tokens = num_tokens
                 attn.v41_impl.forward(attn, None, hidden, hidden)
-                expected = ["wait", "final-write"] + (["gate"] if not num_tokens else []) + ["project", "save"]
+                expected = ["wait", "final-write", "gate"]
+                if num_tokens:
+                    expected += ["indexer", "attention"]
+                expected += ["project", "save"]
                 self.assertEqual(events, expected)
                 scope["wait_for_kv_layer_from_connector"].assert_called_with("cut")
 
@@ -167,33 +184,6 @@ class TestStandardConnectorHooks(unittest.TestCase):
         ctx.attn_metadata = None
         scope["dsa_v41_forward"](hidden, hidden, "cut")
         self.assertEqual(events, [])
-
-    def test_attention_op_opens_prefetch_gate_after_metadata(self):
-        for packed, replay in ((False, False), (False, True), (True, False)):
-            with self.subTest(packed=packed, replay=replay):
-                events = []
-                operator = Mock(
-                    side_effect=lambda *args, events=events, **kwargs: events.append("attention") or (None, None)
-                )
-                attn, metadata = MagicMock(), MagicMock()
-                metadata.swa.replay_block_table = object() if replay else None
-                metadata.swa.a5_smla_plans = {0: object()}
-                scope = dict(
-                    torch=SimpleNamespace(
-                        ops=SimpleNamespace(_C_ascend=SimpleNamespace(npu_sparse_flash_mla=operator))
-                    ),
-                    DeviceMetadataStage=SimpleNamespace(ATTENTION=object()),
-                    wait_for_device_metadata=lambda *args, events=events: events.append("metadata"),
-                    record_attention_compute_start=lambda events=events: events.append("gate"),
-                    ops=SimpleNamespace(mixed_quant_sparse_flash_mla=operator),
-                    _resolve_window_indices=lambda *args, events=events: events.append("indices") or (None, None),
-                )
-                packed_forward = load("vllm_ascend/models/deepseek_v41/mixed_quant_attention.py", "qsmla", scope)
-                attn.packed_cache_ops = SimpleNamespace(qsmla=packed_forward) if packed else None
-                forward = load(ATTENTION, "_forward_attention", scope, "AscendDSAV41Impl")
-                impl = SimpleNamespace(role=SimpleNamespace(has_long_context=False, compress_ratio=0))
-                forward(impl, attn, torch.ones(1), metadata, None)
-                self.assertEqual(events, (["indices"] if packed else []) + ["metadata", "gate", "attention"])
 
     def test_standard_connector_drives_full_sparse_sequence(self):
         worker, store, _ = make_shared_worker(self, bounded=True, draft=True)
