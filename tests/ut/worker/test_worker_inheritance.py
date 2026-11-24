@@ -240,7 +240,10 @@ def construct_worker(setup, worker_class=None, cache_dtype="auto"):
     config = SimpleNamespace(
         model_config=SimpleNamespace(dtype=torch.float16),
         cache_config=SimpleNamespace(cache_dtype=cache_dtype),
-        parallel_config=SimpleNamespace(enable_fault_tolerance=False),
+        parallel_config=SimpleNamespace(
+            enable_fault_tolerance=False, world_size=1, tensor_parallel_size=1, prefill_context_parallel_size=1
+        ),
+        gpu_iteration_timing=False,
         kernel_config=SimpleNamespace(ir_op_priority=SimpleNamespace(set_default=Mock())),
         compilation_config=SimpleNamespace(ir_enable_torch_wrap=False),
         profiler_config=SimpleNamespace(profiler="torch"),

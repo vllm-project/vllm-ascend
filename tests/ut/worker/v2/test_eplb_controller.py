@@ -11,6 +11,7 @@ from vllm.model_executor.models.interfaces import SupportsMultiModal
 
 from vllm_ascend.device.hardware import AscendDeviceType
 from vllm_ascend.device.hardware_profile import get_hardware_profile
+from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2.eplb import AscendEPLBController, _unwrap_moe
 
 
@@ -105,11 +106,14 @@ class TestAscendEPLBController(unittest.TestCase):
                     model=nn.Linear(2, 2),
                     set_eplb_state=MagicMock(),
                 )
-                draft_config = SimpleNamespace(model="draft")
+                draft_config = SimpleNamespace(model="draft", is_moe=True)
+                speculative_config = SimpleNamespace(draft_model_config=draft_config)
+                if not vllm_version_is("0.33.0"):
+                    from vllm.v1.worker.gpu.spec_decode.eagle.config import EagleSpeculatorConfig
+
+                    speculative_config.speculator_config = object.__new__(EagleSpeculatorConfig)
                 with patch("vllm.v1.worker.gpu.eplb_utils.get_mixture_of_experts_model", return_value=speculator.model):
-                    added = controller.maybe_register_speculator(
-                        speculator, SimpleNamespace(draft_model_config=draft_config), False
-                    )
+                    added = controller.maybe_register_speculator(speculator, speculative_config, False)
                 self.assertEqual(added, enabled)
                 self.assertEqual(controller._has_registered_models, enabled)
                 if enabled:

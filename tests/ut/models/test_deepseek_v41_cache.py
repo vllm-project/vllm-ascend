@@ -1778,6 +1778,7 @@ def test_v41_adaptive_real_initialization_gate(num_drafts, method):
     # All five role backends inherit the bounded graph capability. Exercise the real
     # upstream checks; only construction of device-side manager buffers is mocked.
     config = SimpleNamespace(
+        max_concurrent_batches=2,
         speculative_config=SimpleNamespace(
             method=method,
             enable_adaptive_verification=True,

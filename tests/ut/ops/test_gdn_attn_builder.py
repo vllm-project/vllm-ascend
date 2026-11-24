@@ -1659,6 +1659,7 @@ def test_adaptive_gdn_real_initialization_gate(monkeypatch, backend_cls, host_me
     monkeypatch.setattr(AscendGatedDeltaNetAttention, "_supports_host_metadata_prefill", lambda: host_metadata)
     builder_cls = backend_cls.get_builder_cls()
     config = _make_vllm_config(num_speculative_tokens=num_steps, enable_adaptive_verification=True)
+    config.max_concurrent_batches = 2
     group = AttentionGroup(
         backend=backend_cls,
         layer_names=["layer0"],

@@ -922,7 +922,11 @@ def test_load_model_original_profiler_counts_post_load_weights(monkeypatch, with
     runner.use_aux_hidden_state_outputs = False
     runner.encoder_cache = None
     runner.num_speculative_steps = int(with_draft)
-    runner.speculative_config = SimpleNamespace(prefill_context_kv_only=False) if with_draft else None
+    runner.speculative_config = (
+        SimpleNamespace(prefill_context_kv_only=False, draft_model_config=SimpleNamespace(model="draft"))
+        if with_draft
+        else None
+    )
     runner.is_first_pp_rank = True
     runner._draft_workspace_lane = object()
     model = SimpleNamespace()
@@ -984,7 +988,7 @@ def test_load_model_original_profiler_counts_post_load_weights(monkeypatch, with
     if runner.speculator:
         # vLLM main reads the draft-logits cache while loading the model.
         runner.speculator.draft_logits = None
-    if runner.speculator:
+        runner.speculator.model = torch.nn.Module()
         runner.speculator.load_model.side_effect = lambda _target: load_attention("draft.attn")
 
     @contextmanager

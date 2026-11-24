@@ -222,6 +222,7 @@ def _adaptive_manager_kwargs(groups, enabled=True, steps=3):
         prefill_len=SimpleNamespace(np=np.zeros(2, dtype=np.int32)),
     )
     config = SimpleNamespace(
+        max_concurrent_batches=2,
         speculative_config=SimpleNamespace(
             method="mtp", num_speculative_tokens=3, parallel_drafting=False, max_num_new_slots_for_drafting=0
         ),
