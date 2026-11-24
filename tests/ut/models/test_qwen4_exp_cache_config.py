@@ -987,6 +987,22 @@ def test_compressed_qsa_builder_and_cache_use_matching_pages(monkeypatch, manage
     _assert_qsa_compressed_page_boundary(layer.kv_cache, metadata, manager, manager_block_size)
 
 
+def test_qsa_compressed_cache_uses_default_backend_without_runner_flag():
+    from vllm_ascend.models.qwen4_exp import qsa
+
+    _, runtime_config = _qsa_page_test_config(512)
+    del runtime_config.use_v2_model_runner
+    layer = qsa.AscendQSACompressedKeyCache(
+        head_size=32,
+        dtype=torch.bfloat16,
+        prefix="indexer.compressed_key_cache",
+        cache_config=runtime_config.cache_config,
+        compress_ratio=4,
+        vllm_config=runtime_config,
+    )
+    assert layer.get_attn_backend() is qsa.QSAIndexerBackend
+
+
 def test_qsa_composite_retains_manager_block_for_distinct_kernel_sizes(monkeypatch):
     from vllm_ascend.models.qwen4_exp import qsa
     from vllm_ascend.worker.utils import prepare_ascend_kernel_block_sizes

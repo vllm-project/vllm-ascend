@@ -833,7 +833,7 @@ class AscendQSACompressedKeyBackend(QSAIndexerBackend):
 class AscendQSACompressedKeyCache(qsa_indexer.QSACompressedKeyCache):
     def __init__(self, *, vllm_config: VllmConfig, **kwargs) -> None:
         super().__init__(vllm_config=vllm_config, **kwargs)
-        self.use_v2_model_runner = vllm_config.use_v2_model_runner
+        self.use_v2_model_runner = getattr(vllm_config, "use_v2_model_runner", False)
 
     def get_attn_backend(self) -> type[AttentionBackend]:
         block_size = self.cache_config.block_size
