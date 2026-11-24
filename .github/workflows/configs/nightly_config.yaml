@@ -153,6 +153,17 @@ a3:
         config_file_path: GLM-5.1-W8A8C8-A3_128k_90_50.yaml
         config_base_path: tests/SIT/cases/models/configs/GLM
         size: 2
+  single_node:
+    test_config:
+      - name: dsv4-memcache-colocation-64k
+        os: linux-aarch64-a3-800i-16
+        tests: tests/SIT/cases/features/kv_pool/test_pool_nightly.py::test_dsv4_memcache_colocation_64k
+      - name: qwen38-memcache-mtp-align
+        os: linux-aarch64-a3-800i-4
+        tests: tests/SIT/cases/features/kv_pool/test_pool_nightly.py::test_qwen38_memcache_mtp_align
+      - name: dsv4-mooncake-dp4-colocation
+        os: linux-aarch64-a3-800i-16
+        tests: tests/SIT/cases/features/kv_pool/test_pool_nightly.py::test_dsv4_mooncake_dp4_colocation
 
 a3-560t:
   single_node:
