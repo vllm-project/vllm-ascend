@@ -35,7 +35,6 @@ All speculative decoding methods are configured through the `speculative_config`
     > 2. Other models: `num_speculative_tokens` on P nodes should be 1, and `num_speculative_tokens` on D nodes should be greater or equal to 1.
 - **`model`** (str, optional): Path or HF repo ID for the draft model. Required for `eagle`, `eagle3`, `dflash`, `medusa`, and `draft_model`. Automatically resolved for `mtp` (reuses target model), `ngram`, and `extract_hidden_states`.
 - **`draft_tensor_parallel_size`** (int, optional): Tensor parallelism size for the draft model. Can only be `1` or the same as the target model's tensor parallel size.
-- **`disable_padded_drafter_batch`** (bool, default: `False`): Disable input padding for speculative decoding. If set to `True`, speculative input batches can contain sequences of different lengths, which may only be supported by certain attention backends. **Note:** Only effective with `eagle`, `eagle3`, `mtp`, `dflash`, `draft_model`, and `extract_hidden_states` methods.
 
 **Offline inference** — pass `speculative_config` as a Python dict to `LLM()`:
 
@@ -183,7 +182,6 @@ MTP (Multi-Token Prediction) boosts inference performance by parallelizing the p
         speculative_config={
             "method": "mtp",
             "num_speculative_tokens": 2,
-            "disable_padded_drafter_batch": False,
         },
     )
     outputs = llm.generate(prompts, sampling_params)
@@ -211,7 +209,7 @@ MTP (Multi-Token Prediction) boosts inference performance by parallelizing the p
     --trust-remote-code \
     --gpu-memory-utilization 0.9 \
     --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
-    --speculative-config '{"num_speculative_tokens": 2, "method":"mtp", "disable_padded_drafter_batch": false}'
+    --speculative-config '{"num_speculative_tokens": 2, "method":"mtp"}'
     ```
 
 !!! note
