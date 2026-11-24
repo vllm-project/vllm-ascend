@@ -47,7 +47,7 @@ variants:
   ascend_w8a8:
     model_id: Eco-Tech/Qwen3.6-27B-w8a8
     precision: int8
-    label: W8A8 (Ascend A3)
+    label: W8A8 (Ascend A2/A3)
     vram_minimum_gb: 33
     supported_hardware:
       - ascend_910c
@@ -117,7 +117,7 @@ variants:
           VLLM_USE_MODELSCOPE: 'True'
           HCCL_BUFFSIZE: '1024'
           HCCL_OP_EXPANSION_MODE: AIV
-    description: ModelSlim INT8 W8A8 checkpoint for one Atlas 800 A3 node (16x Ascend 910C), using TP2+DP8. Requires --quantization ascend.
+    description: ModelSlim INT8 W8A8 checkpoint for one Atlas 800 A3 node (16x Ascend 910C) or one Atlas 800I A2 node (8x Ascend 910B). Requires --quantization ascend.
   default:
     hardware_overrides:
       ascend_910c:
