@@ -1,0 +1,6 @@
+pr: 22606
+entries:
+  - category: hardware
+    text: Added a DeepSeek-V4-Pro W4A8 MTP recipe variant for two-node DP2xTP16 deployment on Ascend 910C with Atlas 800 A3. The command builder does not emit the per-node data-parallel address, RPC port, or start-rank arguments; use the companion Ascend recipe's launcher for the verified two-node setup.
+    model: DeepSeek-V4-Pro
+    hardware: [A3]
