@@ -34,7 +34,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 import torch
-from vllm.distributed.weight_transfer.packed_tensor import PackedIpcChunk
+from vllm_ascend.distributed.weight_transfer.packed_tensor import NPUPackedIpcChunk
 
 from vllm_ascend.distributed.weight_transfer.packed_tensor import (
     DEFAULT_PACKED_BUFFER_SIZE_BYTES,
@@ -951,7 +951,7 @@ def _assert_packed_roundtrip(backend, tensors, buffer_size):
         assert len(chunks) == 1  # IPC callers here deliberately fit in one chunk.
         chunk_count = len(chunks)
         chunk = chunks[0]
-        assert isinstance(chunk, PackedIpcChunk)
+        assert isinstance(chunk, NPUPackedIpcChunk)
         with _install_fake_rebuild_npu_tensor(buffers[0]):
             received = packed_npu_ipc_consumer(
                 chunk.ipc_handle,
