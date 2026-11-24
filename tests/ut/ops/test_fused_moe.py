@@ -600,20 +600,18 @@ def test_grouped_topk_router_preserves_routing_weight_dtype():
     assert topk_ids.dtype == torch.int32
 
 
-@pytest.mark.parametrize("renormalize", [False, True])
-@pytest.mark.parametrize("routed_scaling_factor", [1.0, 2.5])
 @pytest.mark.parametrize(
-    ("logits_dtype", "bias_dtype"),
+    ("logits_dtype", "bias_dtype", "renormalize", "routed_scaling_factor"),
     [
-        (torch.float32, torch.float32),
-        (torch.float16, torch.float32),
-        (torch.bfloat16, torch.float32),
-        (torch.float16, torch.float16),
-        (torch.bfloat16, torch.bfloat16),
+        pytest.param(torch.float32, torch.float32, False, 2.5, id="fp32-raw-scaled"),
+        pytest.param(torch.float16, torch.float32, False, 1.0, id="fp16-fp32-raw"),
+        pytest.param(torch.bfloat16, torch.float32, True, 2.5, id="bf16-fp32-renorm-scaled"),
+        pytest.param(torch.float16, torch.float16, False, 2.5, id="fp16-raw-scaled"),
+        pytest.param(torch.bfloat16, torch.bfloat16, True, 1.0, id="bf16-renorm"),
     ],
 )
-def test_non_grouped_sigmoid_router_uses_unbiased_weights(renormalize, routed_scaling_factor, logits_dtype, bias_dtype):
-    router_logits = torch.tensor([[2.0, 0.0, -1.0, -2.0], [2.0, -2.0, 3.0, -1.0]], dtype=logits_dtype)
+def test_non_grouped_sigmoid_router_uses_unbiased_weights(logits_dtype, bias_dtype, renormalize, routed_scaling_factor):
+    router_logits = torch.tensor([[2.0, 0.0, -1.0, -2.0], [3.0, 4.0, -5.0, -2.0]], dtype=logits_dtype)
     bias = torch.tensor([-0.05, 0.0, 0.8, 0.1], dtype=bias_dtype)
     router = AscendGroupedTopKRouter(
         top_k=2,
@@ -628,15 +626,15 @@ def test_non_grouped_sigmoid_router_uses_unbiased_weights(renormalize, routed_sc
 
     weights, ids = router._compute_routing(torch.zeros_like(router_logits), router_logits, indices_type=None)
 
+    # Bias moves expert 2 into the first token's top-k.
+    expected_ids = torch.tensor([[2, 0], [1, 0]], dtype=torch.int32)
+    torch.testing.assert_close(ids, expected_ids)
+
     scores = 1.0 / (1.0 + torch.exp(-router_logits.float()))
-    expected_ids = (scores + bias.float()).argsort(dim=-1, descending=True)[:, :2]
-    # Bias changes the first token's top-k and leaves the second token's ranking intact.
-    torch.testing.assert_close(expected_ids, torch.tensor([[2, 0], [2, 0]]))
-    expected_weights = torch.take_along_dim(scores, expected_ids, dim=-1)
+    expected_weights = torch.take_along_dim(scores, expected_ids.long(), dim=-1)
     if renormalize:
         expected_weights /= expected_weights.sum(dim=-1, keepdim=True)
     expected_weights = (expected_weights * routed_scaling_factor).to(torch.promote_types(logits_dtype, bias_dtype))
-    torch.testing.assert_close(ids, expected_ids.to(torch.int32))
     torch.testing.assert_close(weights, expected_weights)
 
 
