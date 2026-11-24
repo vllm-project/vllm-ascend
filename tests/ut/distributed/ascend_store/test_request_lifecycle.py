@@ -29,6 +29,7 @@ from vllm.v1.outputs import DraftTokenIds, KVConnectorOutput
 from vllm.v1.request import Request, RequestStatus
 from vllm.v1.structured_output import StructuredOutputManager
 
+from tests.ut.distributed.ascend_store.cache_config_helpers import make_resolved_cache_config
 from tests.ut.kv_offload.utils import assert_scheduler_empty, create_model_runner_output, create_vllm_config
 from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec, AscendSlidingWindowMLASpec, is_prefix_cacheable
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store import pool_worker
@@ -245,6 +246,7 @@ def test_raw_sequence_lifecycle(
     # Match the planner's role annotation so kv_both keeps the EAGLE safety drop.
     plan.kv_transfer_config = config.kv_transfer_config
     block_size, hash_size = resolve_kv_cache_block_sizes(plan, config)
+    plan = make_resolved_cache_config(config, plan)
     worker = KVConnectorFactory.create_connector(config, KVConnectorRole.WORKER, plan)
     caches = allocate()
     worker.register_kv_caches(caches)
