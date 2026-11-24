@@ -493,11 +493,10 @@ aclnnStatus aclnnQuantLightningIndexerV2(
       <td>公式中的Indices输出对应的value值。</td>
       <td>
           <ul>
-                <li>returnValue为1时输出有效值，无效部分按输出 dtype 填负无穷；returnValue为0时输出shape为(0,)的空tensor。</li>
-                <li>910B/910_93（arch22）在 returnValue为1时直接输出 FP32（跨 rank 归并不掉精度）；950（arch35）为 BF16。</li>
+                <li>returnValue为1时输出有效值，无效部分填bf16负无穷；returnValue为0时输出shape为(0,)的空tensor。</li>
           </ul>
       </td>
-      <td>BFLOAT16（arch22 且 returnValue=1 时为 FLOAT32）</td>
+      <td>BFLOAT16</td>
       <td>ND</td>
       <td>returnValue为1时shape与sparseIndicesOut保持一致；returnValue为0时shape为(0,)。</td>
       <td>x</td>
