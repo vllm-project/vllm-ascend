@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import logging
 import sys
 from collections.abc import Mapping
 from copy import copy
@@ -23,6 +24,7 @@ from vllm.v1.core.kv_cache_utils import (
 )
 from vllm.v1.core.single_type_kv_cache_manager import (
     MambaManager,
+    SlidingWindowManager,
     get_manager_for_kv_cache_spec,
 )
 from vllm.v1.kv_cache_interface import (
@@ -35,6 +37,8 @@ from vllm.v1.kv_cache_interface import (
 )
 
 from vllm_ascend.core.kv_cache_interface import is_prefix_cacheable
+
+logger = logging.getLogger(__name__)
 
 _orig_get_kv_cache_coordinator = vllm.v1.core.kv_cache_coordinator.get_kv_cache_coordinator
 
@@ -91,6 +95,41 @@ def _manager_spec(spec: KVCacheSpec) -> KVCacheSpec:
     if isinstance(spec, UniformTypeKVCacheSpecs):
         return next(iter(spec.kv_cache_specs.values()))
     return spec
+
+
+def _iter_layer_specs(kv_cache_spec: KVCacheSpec):
+    if isinstance(kv_cache_spec, UniformTypeKVCacheSpecs):
+        yield from kv_cache_spec.kv_cache_specs.values()
+    else:
+        yield kv_cache_spec
+
+
+def _has_ds4_compress_mla_group(kv_cache_config: KVCacheConfig, hash_block_size: int) -> bool:
+    """Any DeepSeek-V4 (v4.0) compressed-MLA group whose logical block size
+    exceeds ``hash_block_size``. Such groups fold ``compress_ratio`` into the
+    spec ``block_size`` (e.g. 4096 raw tokens for the C128 main group), so
+    full-block prefix-cache hits are pinned to whole blocks and any shorter
+    shared prefix misses entirely."""
+    return any(
+        getattr(spec, "model_version", None) == "deepseek_v4" and spec.block_size > hash_block_size
+        for g in kv_cache_config.kv_cache_groups
+        for spec in _iter_layer_specs(_manager_spec(g.kv_cache_spec))
+    )
+
+
+def _ds4_tail_alignment_divides_hash(kv_cache_config: KVCacheConfig, hash_block_size: int) -> bool:
+    """The upstream fine-grained lookup indexes partial hits at
+    ``hash_block_size``, which is only correct while the hybrid
+    ``cache_hit_alignment_tokens`` stays equal to ``hash_block_size``. That
+    requires every non-cacheable tail pool's ``compress_ratio`` to divide
+    ``hash_block_size``; otherwise fall back to whole-block hits (correct,
+    just coarse) instead of probing on a misaligned index."""
+    tail_alignment = 1
+    for g in kv_cache_config.kv_cache_groups:
+        if not is_prefix_cacheable(g.kv_cache_spec):
+            for spec in _iter_layer_specs(g.kv_cache_spec):
+                tail_alignment = lcm(tail_alignment, getattr(spec, "compress_ratio", 1))
+    return tail_alignment % hash_block_size == 0
 
 
 class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
@@ -209,20 +248,41 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
                 for g in kv_cache_config.kv_cache_groups
                 if is_prefix_cacheable(g.kv_cache_spec)
             ), "block_size must be divisible by hash_block_size"
-        self.enable_partial_hash_hits = allow_partial_hash_hits and any(
-            isinstance(g.kv_cache_spec, MambaSpec)
-            and g.kv_cache_spec.mamba_cache_mode == "align"
-            and (
-                g.kv_cache_spec.block_size > hash_block_size
-                or (dcp_world_size > 1 and g.kv_cache_spec.block_size == hash_block_size)
+        self.enable_partial_hash_hits = allow_partial_hash_hits and (
+            any(
+                isinstance(g.kv_cache_spec, MambaSpec)
+                and g.kv_cache_spec.mamba_cache_mode == "align"
+                and (
+                    g.kv_cache_spec.block_size > hash_block_size
+                    or (dcp_world_size > 1 and g.kv_cache_spec.block_size == hash_block_size)
+                )
+                for g in kv_cache_config.kv_cache_groups
             )
-            for g in kv_cache_config.kv_cache_groups
+            # DeepSeek-V4 (v4.0) compressed-MLA groups: full-block hits are
+            # pinned to whole (huge) logical blocks, e.g. 4096 tokens for the
+            # C128 main group. FullAttentionManager already supports
+            # fine-grained hash lookup natively, so opening this gate unlocks
+            # hash_block_size-granular partial hits with no custom manager.
+            or (
+                dcp_world_size == 1
+                and _has_ds4_compress_mla_group(kv_cache_config, hash_block_size)
+                and _ds4_tail_alignment_divides_hash(kv_cache_config, hash_block_size)
+            )
         )
         if self.enable_partial_hash_hits:
             self.enable_partial_hash_hits = all(
                 not is_prefix_cacheable(g.kv_cache_spec)
                 or getattr(manager, "block_size", self._get_effective_block_size(g.kv_cache_spec)) == hash_block_size
                 or getattr(manager, "supports_fine_grained_hash_lookup", False)
+                # SlidingWindowManager.find_longest_cache_hit already degrades
+                # to alignment_tokens boundaries when the hybrid alignment is
+                # finer than its block size (it only reports hits whose
+                # boundary is a multiple of alignment_tokens), so it is safe
+                # in fine-grained mode even without the capability flag.
+                or (
+                    isinstance(manager, SlidingWindowManager)
+                    and getattr(manager, "block_size", 0) % hash_block_size == 0
+                )
                 for manager, g in zip(self.single_type_managers, kv_cache_config.kv_cache_groups)
             )
         self.verify_and_split_kv_cache_groups()
@@ -262,6 +322,14 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
             for group_id, manager in enumerate(self.single_type_managers):
                 if isinstance(manager, MambaManager) and group_id in self.eagle_group_ids:
                     manager.drop_eagle_checkpoint_block = True
+
+        if self.enable_partial_hash_hits:
+            logger.info_once(
+                "Ascend hybrid fine-grained prefix-cache hits enabled: "
+                "hash_block_size=%d, cache_hit_alignment_tokens=%d",
+                self.hash_block_size,
+                self._cache_hit_alignment_tokens,
+            )
 
     @property
     def _cache_hit_alignment_tokens(self) -> int:
