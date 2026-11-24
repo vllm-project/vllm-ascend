@@ -16,6 +16,11 @@ from vllm_ascend.attention.attention_c8_mxfp import AscendC8MXFPAttentionBackend
 from vllm_ascend.attention.attention_v1 import AscendAttentionBackend
 from vllm_ascend.attention.dsa_v1 import AscendDSABackend
 from vllm_ascend.attention.dsa_v41 import DeepseekV41CacheBackend
+from vllm_ascend.attention.gdn_attn_builder import (
+    AscendGDNAttentionBackend,
+    AscendGDNFusedAttentionBackend,
+    AscendGDNHostMetadataBackend,
+)
 from vllm_ascend.attention.indexer import AscendSFAIndexerBackend
 from vllm_ascend.attention.indexer_kpool import (
     AscendIndexerKPoolBackend,
@@ -26,11 +31,6 @@ from vllm_ascend.attention.sfa_v1 import AscendSFABackend
 from vllm_ascend.models.minimax_m3.msa_m3 import (
     AscendMiniMaxM3IndexerBackend,
     AscendMiniMaxM3SparseBackend,
-)
-from vllm_ascend.ops.gdn_attn_builder import (
-    AscendGDNAttentionBackend,
-    AscendGDNFusedAttentionBackend,
-    AscendGDNHostMetadataBackend,
 )
 
 _BACKENDS = [

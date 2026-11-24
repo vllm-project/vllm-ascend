@@ -257,6 +257,7 @@ class AscendMultiHeadLatentAttention(MultiHeadLatentAttentionWrapper):
             g_proj=mla_modules.g_proj,
             use_mla_rope=mla_modules.rotary_emb is not None,
             layer_name=f"{prefix}.attn",
+            layer_quant_config=quant_config,
         )
 
         # Fused preprocess (mlapo/prolog_v3) owns transpose+NZ for these

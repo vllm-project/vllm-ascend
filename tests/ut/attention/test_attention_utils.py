@@ -27,6 +27,7 @@ from vllm_ascend.attention.utils import (
     filter_chunked_req_indices,
     get_flashmla_ops,
     get_or_register_attention_buffer,
+    get_quant_flashmla_ops,
 )
 
 NUM_REQS = 2
@@ -89,6 +90,31 @@ def test_get_flashmla_ops_propagates_internal_import_failure(monkeypatch):
 
     with pytest.raises(ModuleNotFoundError, match="internal_dependency"):
         get_flashmla_ops()
+
+
+def test_get_quant_flashmla_ops_requires_both_callable_apis(monkeypatch):
+    attention_op = MagicMock()
+    metadata_op = MagicMock()
+    monkeypatch.setattr(attention_utils, "_has_flashmla_module", lambda: True)
+    monkeypatch.setattr(
+        attention_utils,
+        "import_module",
+        MagicMock(
+            return_value=SimpleNamespace(
+                quant_flash_mla=attention_op,
+                quant_flash_mla_metadata=metadata_op,
+            )
+        ),
+    )
+
+    assert get_quant_flashmla_ops() == (attention_op, metadata_op)
+
+    monkeypatch.setattr(
+        attention_utils,
+        "import_module",
+        MagicMock(return_value=SimpleNamespace(quant_flash_mla=attention_op)),
+    )
+    assert get_quant_flashmla_ops() is None
 
 
 def _common_attn_metadata() -> AscendCommonAttentionMetadata:
