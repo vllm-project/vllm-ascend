@@ -879,8 +879,10 @@ class NPUPlatform(Platform):
             _is_decode_only_node,
             get_mc2_mask,
             get_mrv2_in_profile_run,
+            is_draft_vllm_config,
+            resolve_draft_moe_quant_type,
+            resolve_use_mega_moe,
             select_moe_comm_method,
-            use_cann_megamoe,
         )
         from vllm_ascend.ops.fused_moe.moe_comm_method import get_moe_comm_method
         from vllm_ascend.quantization.utils import get_dynamic_mx_quant_scale_alg
@@ -898,8 +900,11 @@ class NPUPlatform(Platform):
         # prefetch flags, ...) consumed by the FIA/MoE graph paths.
         dynamic_mx_quant_scale_alg = get_dynamic_mx_quant_scale_alg(vllm_config)
 
-        # is_draft_model will be removed later, so we set it to False temporarily.
-        is_draft_model = False
+        is_draft_model = is_draft_vllm_config(vllm_config)
+        draft_moe_quant_type = resolve_draft_moe_quant_type(
+            vllm_config,
+            is_draft_model=is_draft_model,
+        )
         # v2 has 2 graphs in eager, one for prefill, the other for decodes, this flag is aimed to distinguish them.
         is_draft_model_prefill = False
         sinks = False
@@ -929,6 +934,9 @@ class NPUPlatform(Platform):
         if dp_world_size > 1 and dp_metadata is not None:
             max_tokens_across_dp = dp_metadata.num_tokens_across_dp_cpu.max().item()
             padded_length = (max_tokens_across_dp + tp_world_size - 1) // tp_world_size * tp_world_size
+        elif num_tokens_across_dp is not None:
+            max_tokens_across_dp = int(num_tokens_across_dp.max().item())
+            padded_length = (max_tokens_across_dp + tp_world_size - 1) // tp_world_size * tp_world_size
         else:
             max_tokens_across_dp = num_tokens
 
@@ -937,6 +945,8 @@ class NPUPlatform(Platform):
         moe_comm_type = select_moe_comm_method(
             max_tokens_across_dp,
             vllm_config,
+            is_draft_model=is_draft_model,
+            draft_moe_quant_type=draft_moe_quant_type,
         )
         moe_comm_method = get_moe_comm_method(moe_comm_type)
 
@@ -951,10 +961,11 @@ class NPUPlatform(Platform):
                 mc2_mask = reserved_mc2_mask[:padded_num_tokens]
                 mc2_mask[:num_actual_tokens] = True
                 mc2_mask[num_actual_tokens:] = False
+        use_mega_moe = resolve_use_mega_moe(vllm_config, moe_comm_type)
         return {
             "moe_comm_type": moe_comm_type,
             "moe_comm_method": moe_comm_method,
-            "use_mega_moe": use_cann_megamoe(vllm_config),
+            "use_mega_moe": use_mega_moe,
             "is_decode_only_node": _is_decode_only_node(vllm_config),
             "capturing": capturing,
             "mmrs_fusion": mmrs_fusion,
@@ -965,6 +976,7 @@ class NPUPlatform(Platform):
             "mc2_mask": mc2_mask,
             "is_draft_model": is_draft_model,
             "is_draft_model_prefill": is_draft_model_prefill,
+            "draft_moe_quant_type": draft_moe_quant_type,
             "in_profile_run": in_profile_run,
             "padded_num_tokens": padded_num_tokens,
             "sinks": sinks,

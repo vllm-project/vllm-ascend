@@ -54,8 +54,18 @@ def _moe_config_key(
     moe_comm_type: MoECommType | None, moe_config: FusedMoEConfig | None
 ) -> tuple[MoECommType | None, tuple[int, ...]]:
     """Return the execution shape that owns mutable MoE comm state."""
-    _CONFIG_KEY_FIELDS = ("num_experts", "num_local_experts")
-    return (moe_comm_type, tuple(int(getattr(moe_config, field, 0) or 0) for field in _CONFIG_KEY_FIELDS))
+    _CONFIG_KEY_FIELDS = (
+        "num_experts",
+        "num_local_experts",
+        "hidden_dim",
+        "intermediate_size_per_partition",
+        "experts_per_token",
+    )
+    key_values = []
+    for field in _CONFIG_KEY_FIELDS:
+        val = getattr(moe_config, field, 0)
+        key_values.append(int(val) if isinstance(val, int) else 0)
+    return (moe_comm_type, tuple(key_values))
 
 
 def get_moe_comm_method(
@@ -628,7 +638,7 @@ class FusedMC2CommImpl(MoECommMethod):
             # the runner keeps the real value, so the runner plumbs it down
             # as ``ascend_megamoe_fold_scale`` before dispatching.
             routed_scaling_factor = getattr(layer, "ascend_megamoe_fold_scale", None)
-            if routed_scaling_factor is None:
+            if routed_scaling_factor is None and getattr(layer, "apply_routed_scale_to_output", False):
                 routed_scaling_factor = getattr(layer, "routed_scaling_factor", None)
             if routed_scaling_factor is not None and routed_scaling_factor != 1.0:
                 topk_weights = topk_weights * routed_scaling_factor

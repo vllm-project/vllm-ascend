@@ -15,6 +15,7 @@
 # limitations under the License.
 #
 
+import weakref
 from typing import Any
 
 import numpy as np
@@ -28,7 +29,7 @@ from vllm_ascend.ascend_forward_context import _EXTRA_CTX, use_cann_megamoe
 from vllm_ascend.distributed.parallel_state import get_mc2_group
 from vllm_ascend.ops.fused_moe.dataclass.fused_experts import MoEWeights, build_fused_experts_input
 from vllm_ascend.ops.fused_moe.dataclass.moe_mlp import MoEMlpComputeInput
-from vllm_ascend.ops.fused_moe.routed_experts import AscendRoutedExperts  # noqa: F401
+from vllm_ascend.ops.fused_moe.routed_experts import AscendRoutedExperts, update_expert_tensor_list, use_layer_megamoe
 from vllm_ascend.utils import (
     ACL_FORMAT_FRACTAL_NZ,
     ASCEND_QUANTIZATION_METHOD,
@@ -319,34 +320,51 @@ class AscendW4A8DynamicFusedMoEMethod(AscendMoEScheme):
             "w13_scale_bias",
             "w2_scale_bias",
         )
-        use_mega_moe = use_cann_megamoe(get_current_vllm_config())
+        use_mega_moe = use_layer_megamoe(layer, use_cann_megamoe)
         if self.use_expert_weight_list:
             for tensor_name in tensor_names:
-                tensor = getattr(layer, tensor_name)
-                expert_list = [expert.clone() for expert in tensor.data.unbind(dim=0)]
+                tensor = getattr(layer, tensor_name).data
                 if tensor_name in ("w13_scale_bias", "w2_scale_bias") and use_mega_moe:
-                    expert_list = [expert.to(torch.float32) for expert in expert_list]
-                setattr(layer, f"{tensor_name}_list", expert_list)
-                delattr(layer, tensor_name)
-        elif use_mega_moe:
-            layer.cann_mega_moe_w13_weight_list = [weight.clone() for weight in layer.w13_weight.data.unbind(dim=0)]
-            layer.cann_mega_moe_w2_weight_list = [weight.clone() for weight in layer.w2_weight.data.unbind(dim=0)]
-
-            layer.cann_mega_moe_w13_weight_scale_list = [
-                t.reshape(-1) for t in layer.w13_weight_scale.data.unbind(dim=0)
-            ]
-            layer.cann_mega_moe_w2_weight_scale_list = [t.reshape(-1) for t in layer.w2_weight_scale.data.unbind(dim=0)]
-            layer.cann_mega_moe_w13_scale_bias_list = [
-                t.reshape(-1).to(torch.float32) for t in layer.w13_scale_bias.data.unbind(dim=0)
-            ]
-            layer.cann_mega_moe_w2_scale_bias_list = [
-                t.reshape(-1).to(torch.float32) for t in layer.w2_scale_bias.data.unbind(dim=0)
-            ]
-            for tensor_name in tensor_names:
+                    tensor = tensor.to(torch.float32)
+                update_expert_tensor_list(layer, f"{tensor_name}_list", tensor)
                 delattr(layer, tensor_name)
         else:
+            if use_mega_moe and not hasattr(layer, "cann_mega_moe_w13_weight_list"):
+                # Bind once on initial load. During layerwise reload the
+                # parameters here are temporary until vLLM copies them back.
+                for projection in ("w13", "w2"):
+                    weight = getattr(layer, f"{projection}_weight").data
+                    scale = getattr(layer, f"{projection}_weight_scale").data
+                    bias = getattr(layer, f"{projection}_scale_bias").data
+                    setattr(layer, f"cann_mega_moe_{projection}_weight_list", list(weight.unbind(dim=0)))
+                    setattr(
+                        layer,
+                        f"cann_mega_moe_{projection}_weight_scale_list",
+                        [t.view(-1) for t in scale.unbind(dim=0)],
+                    )
+                    setattr(
+                        layer,
+                        f"cann_mega_moe_{projection}_scale_bias_list",
+                        [t.to(torch.float32).view(-1) for t in bias.unbind(dim=0)],
+                    )
             layer.w13_weight.data = self._pack_to_int32(layer.w13_weight.data)
             layer.w2_weight.data = self._pack_to_int32(layer.w2_weight.data)
+
+    @torch.inference_mode()
+    def refresh_megamoe_weights(self, layer: torch.nn.Module) -> None:
+        if not hasattr(layer, "cann_mega_moe_w13_weight_list"):
+            return
+        for projection in ("w13", "w2"):
+            # Reinterpret the committed INT32 fallback buffer as per-expert
+            # INT8 weights. The packed scales and FP32 biases are already
+            # views of committed parameters.
+            weight = getattr(layer, f"{projection}_weight").data.view(torch.int8)
+            setattr(layer, f"cann_mega_moe_{projection}_weight_list", list(weight.unbind(dim=0)))
+            bias = getattr(layer, f"{projection}_scale_bias")
+            if bias.dtype != torch.float32:
+                bias_list = getattr(layer, f"cann_mega_moe_{projection}_scale_bias_list")
+                for cached_bias, current_bias in zip(bias_list, bias.unbind(dim=0), strict=True):
+                    cached_bias.copy_(current_bias.view(-1))
 
     def process_weights_after_loading_compressed_tensors(self, layer):
         layer.w13_weight.data = layer.w13_weight.data.transpose(1, 2).contiguous()
@@ -706,8 +724,15 @@ class AscendW4A8DynamicLinearMethod(AscendLinearScheme):
         ):
             packed_weight = maybe_trans_nz(packed_weight)
         layer.weight.data = packed_weight.view(torch.int32)
-        layer.weight_scale_fp32 = layer.weight_scale.data.flatten().to(torch.float32).contiguous()
+        scale = layer.weight_scale.data.flatten().to(torch.float32).contiguous()
         # CANN A8W4 consumes the FP32 scale bits in the low half of INT64.
-        layer.weight_scale.data = layer.weight_scale_fp32.view(torch.int32).to(torch.int64)
+        layer.weight_scale.data = scale.view(torch.int32).to(torch.int64)
+        scale_ref = getattr(layer, "_ascend_weight_scale_ref", None)
+        if scale_ref is None:
+            layer.weight_scale_fp32 = scale
+            layer._ascend_weight_scale_ref = weakref.ref(layer.weight_scale)
+        elif scale_ref() is layer.weight_scale:
+            with torch.inference_mode():
+                layer.weight_scale_fp32.copy_(scale)
         layer.weight_offset.data = layer.weight_offset.data.flatten()
         layer.scale_bias.data = layer.scale_bias.data.sum(dim=1).contiguous()
