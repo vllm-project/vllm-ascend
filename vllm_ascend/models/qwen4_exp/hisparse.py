@@ -4,6 +4,7 @@
 from dataclasses import dataclass, replace
 
 import torch
+from vllm.models.qwen4_exp.common import qsa_indexer
 from vllm.models.qwen4_exp.common.qsa import Qwen4ExpQSAMetadata, Qwen4ExpQSAMetadataBuilder
 from vllm.v1.attention.backend import AttentionCGSupport
 from vllm.v1.attention.backends.mla.index_group import SparseMLAIndexGroupBuilder, get_sparse_mla_index_group_max_rows
@@ -102,11 +103,27 @@ class AscendQSAHiSparseBackend(AscendQSABackend):
         return (KVCacheLayout.BLNHC,)
 
 
+def build_hisparse_indexer_metadata(common, *buffers, **kwargs):
+    if (
+        common.max_query_len == 1
+        and 0 < common.num_actual_tokens == common.num_reqs
+        and common.query_start_loc.device.type == "npu"
+        and getattr(common, "pcp_context", None) is None
+        and getattr(common, "graph_pad_size", -1) < 0
+    ):
+        # The upstream kernel disables CUDA PDL on Ascend. One launch produces
+        # the coordinates, slots, and compression work for the indexer group.
+        return qsa_indexer.build_qsa_metadata_triton(common, *buffers, **kwargs)
+    return qsa_indexer._build_qsa_metadata_torch(common, *buffers, **kwargs)
+
+
 def init_qsa_hisparse(layer, config):
     if config.speculative_config is not None or config.parallel_config.prefill_context_parallel_size != 1:
         raise NotImplementedError("QSA HiSparse requires PCP=1 and ordinary decoding")
     if layer.kv_cache_torch_dtype != torch.bfloat16:
         raise NotImplementedError("QSA HiSparse requires BF16 KV")
+    if config.model_config.enforce_eager and hasattr(qsa_indexer, "build_qsa_metadata_triton"):
+        qsa_indexer.build_qsa_metadata = build_hisparse_indexer_metadata
     rows = get_sparse_mla_index_group_max_rows(config)
     scratch = layer.topk_indices_buffer.new_empty((rows, layer.indexer.token_topk))
     group, _ = SparseMLAIndexGroupBuilder(scratch, rows).register_layer(
