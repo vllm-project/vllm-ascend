@@ -16,17 +16,6 @@ def _gbsa_metadata_op():
         return generic_block_sparse_attention_metadata
 
 
-def _gbsa_op():
-    try:
-        return torch.ops._C_ascend.npu_generic_block_sparse_attention
-    except AttributeError:
-        from cann_ops_transformer.ops.attention.generic_block_sparse_attention import (
-            generic_block_sparse_attention,
-        )
-
-        return generic_block_sparse_attention
-
-
 class GBSAMaskMode(IntEnum):
     NO_MASK = 0
     CAUSAL = 1
@@ -91,76 +80,6 @@ def generic_block_sparse_attention_metadata(
         win_right=win_right,
         residual_block_mode=residual_block_mode,
         is_consistent_topk=is_consistent_topk,
-    )
-
-
-def generic_block_sparse_attention(
-    q: torch.Tensor,
-    k: torch.Tensor,
-    v: torch.Tensor,
-    sparse_block_idx: torch.Tensor,
-    sparse_block_count: torch.Tensor,
-    block_shape: list[int],
-    *,
-    metadata: torch.Tensor,
-    attn_mask: torch.Tensor | None = None,
-    q_dequant_scale: torch.Tensor | None = None,
-    k_dequant_scale: torch.Tensor | None = None,
-    v_dequant_scale: torch.Tensor | None = None,
-    p_quant_scale: torch.Tensor | None = None,
-    cu_seqlens_q: torch.Tensor | None = None,
-    cu_seqlens_kv: torch.Tensor | None = None,
-    seqused_q: torch.Tensor | None = None,
-    seqused_kv: torch.Tensor | None = None,
-    block_table: torch.Tensor | None = None,
-    layout_q: str = "TND",
-    layout_kv: str = "PA_BBND",
-    layout_sparse_pattern: int = 4,
-    softmax_scale: float = 0.0,
-    mask_mode: int = GBSAMaskMode.CAUSAL,
-    quant_mode: int = GBSAQuantMode.NO_QUANT,
-    dst_type_max: float = 0.0,
-    softmax_precision: int = 1,
-    win_left: int = -1,
-    win_right: int = -1,
-    return_softmax_lse: bool = False,
-    residual_block_mode: int = 0,
-    is_consistent_topk: bool = False,
-    attention_out_dtype: torch.dtype | None = None,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    """Run GBSA using metadata generated for the same inputs and attributes."""
-    return _gbsa_op()(
-        q,
-        k,
-        v,
-        sparse_block_idx,
-        sparse_block_count,
-        block_shape,
-        metadata=metadata,
-        attn_mask=attn_mask,
-        q_dequant_scale=q_dequant_scale,
-        k_dequant_scale=k_dequant_scale,
-        v_dequant_scale=v_dequant_scale,
-        p_quant_scale=p_quant_scale,
-        cu_seqlens_q=cu_seqlens_q,
-        cu_seqlens_kv=cu_seqlens_kv,
-        seqused_q=seqused_q,
-        seqused_kv=seqused_kv,
-        block_table=block_table,
-        layout_q=layout_q,
-        layout_kv=layout_kv,
-        layout_sparse_pattern=layout_sparse_pattern,
-        softmax_scale=softmax_scale,
-        mask_mode=int(mask_mode),
-        quant_mode=int(quant_mode),
-        dst_type_max=dst_type_max,
-        softmax_precision=softmax_precision,
-        win_left=win_left,
-        win_right=win_right,
-        return_softmax_lse=return_softmax_lse,
-        residual_block_mode=residual_block_mode,
-        is_consistent_topk=is_consistent_topk,
-        attention_out_dtype=attention_out_dtype,
     )
 
 
@@ -240,7 +159,6 @@ def generic_block_sparse_attention_out(
 __all__ = [
     "GBSAMaskMode",
     "GBSAQuantMode",
-    "generic_block_sparse_attention",
     "generic_block_sparse_attention_out",
     "generic_block_sparse_attention_metadata",
 ]
