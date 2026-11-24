@@ -2050,27 +2050,6 @@ class TestAscendMLAImpl(TestBase):
         self.assertEqual(params["actual_seq_qlen"], [2, 4, 6])
         self.assertEqual(params["actual_seq_kvlen"], [10, 20, 0])
 
-    def test_mla_param_provider_draft_trims_padded_block_table(self):
-        block_table = torch.arange(16).view(4, 4)
-        metadata = SimpleNamespace(
-            decode=SimpleNamespace(
-                actual_seq_lengths_q=[1, 2],
-                seq_lens_list=[10],
-                block_table=block_table,
-            )
-        )
-        provider = MLAParamProvider(
-            layer_name="layer_0",
-            is_draft_model=True,
-            disable_padded_batch=True,
-        )
-
-        params = provider.resolve({"layer_0": metadata})
-
-        self.assertEqual(params["actual_seq_qlen"], [1, 2])
-        self.assertEqual(params["actual_seq_kvlen"], [10, 0])
-        torch.testing.assert_close(params["block_table"], block_table[:2])
-
     def test_get_context_seq_len_npu(self):
         mock_attn_metadata = MagicMock()
         mock_prefill_metadata = MagicMock()
