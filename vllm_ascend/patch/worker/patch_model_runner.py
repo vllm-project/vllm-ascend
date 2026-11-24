@@ -107,6 +107,10 @@ def initialize_kv_cache(
         # split whenever the adaptive budget binds.
         copy_admitted_drafts_to_host=self.batch_sharder is not None,
     )
+    # Suffix speculators expose seeded_requests to pin greedy requests whose
+    # sampling must not depend on batched drafts (same contract as upstream).
+    if self.adaptive_verification is not None:
+        self.adaptive_verification.pinned_requests = getattr(self.speculator, "seeded_requests", None)
 
     block_tables_kwargs = {}
     block_tables_kwargs["dcp_sharded"] = dcp_sharded

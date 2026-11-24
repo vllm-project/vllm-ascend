@@ -1,3 +1,4 @@
+import numpy as np
 import vllm.model_executor.layers.mamba.ops.causal_conv1d as _cc1d
 import vllm.third_party.flash_linear_attention.ops as fla_ops
 import vllm.third_party.flash_linear_attention.ops.layernorm_guard as fla_layernorm_guard
@@ -122,6 +123,7 @@ from vllm_ascend.worker.v2.sample.logprob import compute_token_logprobs, compute
 from vllm_ascend.worker.v2.sample.min_p import apply_min_p  # noqa: E402
 from vllm_ascend.worker.v2.sample.penalties import apply_penalties, bincount  # noqa: E402
 from vllm_ascend.worker.v2.sample.trace_replay import apply_trace_tokens  # noqa: E402
+from vllm_ascend.worker.v2.spec_decode import rejection_sampler_utils as npu_rejection_sampler_utils  # noqa: E402
 from vllm_ascend.worker.v2.spec_decode.rejection_sampler_utils import (  # noqa: E402
     rejection_sample as npu_rejection_sample,
 )
@@ -140,6 +142,177 @@ states.apply_temperature = apply_temperature
 logprob.compute_token_logprobs = compute_token_logprobs
 rejection_sampler_utils.rejection_sample = npu_rejection_sample
 rejection_sampler.rejection_sample = npu_rejection_sample
+
+_orig_rejection_verify = rejection_sampler.RejectionSampler._verify
+_orig_rejection_verify_in_chunks = rejection_sampler.RejectionSampler._verify_in_chunks
+_orig_rejection_call = rejection_sampler.RejectionSampler.__call__
+_orig_gather_draft_sampled = rejection_sampler.gather_draft_sampled
+_orig_get_num_sampled_and_rejected = rejection_sampler.get_num_sampled_and_rejected
+
+
+def _npu_gather_draft_sampled(input_ids, positions, *args, **kwargs):
+    n = getattr(npu_rejection_sampler_utils._GREEDY_LOCAL, "skip_gather_num_logits", None)
+    if n is not None:
+        return input_ids[:n], positions[:n]
+    return _orig_gather_draft_sampled(input_ids, positions, *args, **kwargs)
+
+
+def _npu_get_num_sampled_and_rejected(num_sampled, *args, **kwargs):
+    ctx = npu_rejection_sampler_utils._GREEDY_LOCAL
+    fused_nr = getattr(ctx, "last_num_rejected", None)
+    if fused_nr is not None:
+        ctx.last_num_rejected = None
+        return num_sampled, fused_nr
+    return _orig_get_num_sampled_and_rejected(num_sampled, *args, **kwargs)
+
+
+def _npu_rejection_verify(
+    self,
+    logits,
+    draft_logits,
+    draft_sampled,
+    pos,
+    cu_num_logits,
+    idx_mapping,
+    idx_mapping_np,
+    expanded_idx_mapping,
+    expanded_local_pos,
+    seq_lens_upper_bound_np,
+    *args,
+    **kwargs,
+):
+    ctx = npu_rejection_sampler_utils._GREEDY_LOCAL
+    all_greedy = (
+        draft_logits is None
+        and self.synthetic_conditional_rates is None
+        and not self.use_block_verification
+        and getattr(self, "watermark_key", None) is None
+        and getattr(self, "fly_window_size", 0) == 0
+        and not self.sampler.return_sampling_mask
+        and getattr(self.sampler, "trace_replay_state", None) is None
+        and bool(np.all(self.sampler.sampling_states.temperature.np[idx_mapping_np] == 0.0))
+    )
+    prev = getattr(ctx, "all_greedy", False)
+    ctx.all_greedy = all_greedy
+    try:
+        return _orig_rejection_verify(
+            self,
+            logits,
+            draft_logits,
+            draft_sampled,
+            pos,
+            cu_num_logits,
+            idx_mapping,
+            idx_mapping_np,
+            expanded_idx_mapping,
+            expanded_local_pos,
+            seq_lens_upper_bound_np,
+            *args,
+            **kwargs,
+        )
+    finally:
+        ctx.all_greedy = prev
+
+
+def _npu_rejection_verify_in_chunks(
+    self,
+    logits,
+    input_batch,
+    draft_logits,
+    draft_sampled,
+    pos,
+    max_chunk_logits,
+    *args,
+    **kwargs,
+):
+    ctx = npu_rejection_sampler_utils._GREEDY_LOCAL
+    cu_num_logits_np = input_batch.cu_num_logits_np
+    num_reqs = input_batch.num_reqs
+    has_logprobs = args[0] is not None if args else False
+    has_trace = getattr(self.sampler, "trace_replay_state", None) is not None
+    is_full_batch = (
+        logits.shape[0] <= max_chunk_logits
+        and num_reqs > 0
+        and cu_num_logits_np.size > num_reqs
+        and int(cu_num_logits_np[0]) == 0
+        and int(cu_num_logits_np[num_reqs]) == logits.shape[0]
+        and not has_trace
+    )
+    if is_full_batch:
+        has_prefill = bool(getattr(ctx, "has_prefill", True))
+        can_fuse_post = (
+            bool(getattr(ctx, "allow_post_update", False))
+            and not has_prefill
+            and bool(getattr(input_batch, "contiguous_logits_indices", False))
+            and getattr(input_batch, "pcp", None) is None
+            and not self.enable_adaptive_verification
+            and not self.sampler.return_sampling_mask
+            and not has_logprobs
+        )
+        ctx.seq_lens = input_batch.seq_lens[:num_reqs]
+        ctx.idx_mapping = input_batch.idx_mapping
+        ctx.prefill_len = self.sampler.req_states.prefill_len.gpu
+        ctx.last_num_rejected = None
+        ctx.can_fuse_post_update = can_fuse_post
+        if can_fuse_post:
+            ctx.req_states = self.sampler.req_states
+            penalties_state = self.sampler.penalties_state
+            has_penalties = bool(np.any(penalties_state.use_penalty[input_batch.idx_mapping_np]))
+            ctx.has_penalties = has_penalties
+            ctx.output_bin_counts = penalties_state.output_bin_counts if has_penalties else None
+    try:
+        return _orig_rejection_verify_in_chunks(
+            self,
+            logits,
+            input_batch,
+            draft_logits,
+            draft_sampled,
+            pos,
+            max_chunk_logits,
+            *args,
+            **kwargs,
+        )
+    finally:
+        if is_full_batch:
+            ctx.seq_lens = None
+            ctx.idx_mapping = None
+            ctx.prefill_len = None
+            ctx.can_fuse_post_update = False
+            ctx.req_states = None
+            ctx.output_bin_counts = None
+
+
+def _npu_rejection_call(self, logits, input_batch, *args, **kwargs):
+    ctx = npu_rejection_sampler_utils._GREEDY_LOCAL
+    has_prefill = getattr(input_batch, "has_prefill", None)
+    if has_prefill is None:
+        has_prefill = bool(
+            np.any(input_batch.seq_lens_np < self.sampler.req_states.prefill_len.np[input_batch.idx_mapping_np])
+        )
+    skip_gather = bool(
+        getattr(input_batch, "contiguous_logits_indices", False)
+        and not has_prefill
+        and getattr(input_batch, "pcp", None) is None
+        and not self.enable_adaptive_verification
+    )
+    prev_skip = getattr(ctx, "skip_gather_num_logits", None)
+    prev_has_prefill = getattr(ctx, "has_prefill", True)
+    ctx.skip_gather_num_logits = logits.shape[0] if skip_gather else None
+    ctx.has_prefill = bool(has_prefill)
+    ctx.last_num_rejected = None
+    try:
+        return _orig_rejection_call(self, logits, input_batch, *args, **kwargs)
+    finally:
+        ctx.skip_gather_num_logits = prev_skip
+        ctx.has_prefill = prev_has_prefill
+        ctx.last_num_rejected = None
+
+
+rejection_sampler.gather_draft_sampled = _npu_gather_draft_sampled
+rejection_sampler.get_num_sampled_and_rejected = _npu_get_num_sampled_and_rejected
+rejection_sampler.RejectionSampler._verify = _npu_rejection_verify
+rejection_sampler.RejectionSampler._verify_in_chunks = _npu_rejection_verify_in_chunks
+rejection_sampler.RejectionSampler.__call__ = _npu_rejection_call
 # triton ops that filed in ops/triton
 gumbel.gumbel_sample = categorical_sample
 speculator.gumbel_sample = categorical_sample
