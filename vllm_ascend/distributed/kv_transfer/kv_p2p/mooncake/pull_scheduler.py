@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM-Ascend project
 """Scheduler-side logic for Mooncake pull transfers."""
 
+import logging
 import queue
 import threading
 import time
@@ -54,6 +55,11 @@ ACK_MSG = b"ACK"
 PRODUCER_LEASE_CACHE_TTL_SECONDS = 600
 PRODUCER_LEASE_CACHE_MAX_SIZE = 1024
 
+# Cadence of the DEBUG-only "Mooncake delayed-free status" sample. 10s keeps
+# the diagnostic cheap while still showing a pending-release backlog on the
+# scale of a heartbeat interval (kv_lease_duration // 6 = 20s by default).
+DELAYED_FREE_STATUS_INTERVAL_SECONDS = 10.0
+
 
 class MooncakeSchedulerSendingThread(MooncakeMetadataThread):
     """Serve worker metadata and collect D-side completion messages."""
@@ -79,6 +85,10 @@ class MooncakeSchedulerSendingThread(MooncakeMetadataThread):
         self.lease_extension = kv_lease_duration * 2 // 3
         self.finished_requests: queue.SimpleQueue[str] = queue.SimpleQueue()
         self.state_lock = threading.Lock()
+        # Deadline of the next pending-release sample. 0.0 makes the first
+        # DEBUG evaluation report immediately; the reporter only reads this
+        # field from the sending thread, so it needs no lock.
+        self._next_status_report_at = 0.0
 
     def add_delayed_request(self, request_id: str) -> None:
         with self.state_lock:
@@ -157,6 +167,8 @@ class MooncakeSchedulerSendingThread(MooncakeMetadataThread):
     def _run_busy_loop(self, sock: Any) -> None:
         decoder = msgspec.msgpack.Decoder(type=tuple)
         while not self.stop_event.is_set():
+            if logger.isEnabledFor(logging.DEBUG):
+                self._report_delayed_free_status()
             try:
                 frames = sock.recv_multipart()
             except zmq.Again:  # type: ignore[attr-defined]
@@ -239,6 +251,37 @@ class MooncakeSchedulerSendingThread(MooncakeMetadataThread):
                 self._mark_finished_locked(request_id)
                 expired.append((request_id, now - expiry))
         return expired
+
+    def _report_delayed_free_status(self) -> None:
+        """Sample the pending-release queue; a depth alone does not prove a stall.
+
+        The producer control thread can receive a DONE and queue a request for
+        release while the scheduler drain path is idle (engine on 0-token
+        steps / the connector gate closed). This sample makes that pending
+        backlog visible in DEBUG logs at a bounded cadence.
+
+        Deliberately minimal: it does not take `state_lock`, does not track a
+        cross-thread drain flag, does not scan leases, does not consume the
+        queue and does not release blocks. A repeated count, or the same count
+        under ongoing traffic, is therefore not proof of a stalled drain,
+        and the absence of a line is not proof of health - it only means no
+        nonzero queue was sampled while logging was enabled.
+        """
+        try:
+            now = time.monotonic()
+            if now < self._next_status_report_at:
+                return
+            self._next_status_report_at = now + DELAYED_FREE_STATUS_INTERVAL_SECONDS
+            pending = self.finished_requests.qsize()
+            if pending:
+                logger.debug(
+                    "Mooncake delayed-free status: engine_id=%s pending_release=%d",
+                    self.engine_id,
+                    pending,
+                )
+        except Exception:
+            # Observation must not interrupt DONE or heartbeat handling.
+            logger.exception("Mooncake delayed-free status report failed")
 
 
 class MooncakeSchedulerRecvingThread(threading.Thread):
