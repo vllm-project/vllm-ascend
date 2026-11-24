@@ -125,9 +125,12 @@ def test_kda_output_norm_uses_checkpoint_epsilon():
             enable_prompt_embeds=False,
         )
     )
-    with patch(
-        "vllm_ascend.ops.kimi_kda.KimiK3DeltaAttention.__init__",
-        new=fake_upstream_init,
+    with (
+        patch("vllm_ascend.ops.kimi_kda.KimiK3DeltaAttention.__init__", new=fake_upstream_init),
+        patch(
+            "vllm_ascend.ops.kimi_kda.get_ascend_config",
+            return_value=SimpleNamespace(kda_backend_config=SimpleNamespace(backend="native")),
+        ),
     ):
         attention = AscendKimiK3DeltaAttention(config, vllm_config)
 

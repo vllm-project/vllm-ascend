@@ -71,6 +71,7 @@ The following table lists additional configuration options available in vLLM Asc
 | `enable_flashcomm1`                 | bool | `False` | Whether to enable SP MoE. See [Sequence Parallelism](../feature_guide/sequence_parallelism.md). |
 | `enable_pcp_o_proj_weight_sharding` | bool | `True` | Whether PCP shards O-projection weights across the PCP group. This option controls SFA-PCP `o_proj` and DSA-PCP two-stage O-projection (`wo_a`/`wo_b`). If the weight method or PCP partition does not support sharding, the option is disabled with a warning. Set it to `false` at server startup to disable sharding. Other attention backends do not use this option. |
 | `enable_pcp_embedding_lmhead_weight_sharding` | bool | `True` | Whether PCP shards embedding and LM Head weights across PCP ranks inside each TP shard. This option is enabled by default, takes effect when PCP size is greater than 1, and is incompatible with batch-sharded sampling (`enable_batch_sharded_sampling`) and fine-grained TP for these modules. |
+| `kda_backend_config`               | dict | `{}`    | Optional KDA backend selection. See [MegaKDA backend](#megakda-backend). |
 | `rejection_sampler_config`          | dict | `{}`    | Configuration options for rejection sampler (block verify and entropy verify). |
 | `multistream_dsv4_dsa_overlap`      | bool | `True`  | Whether to enable dsa multi-stream overlap for DeepSeek V4.  |
 | `rl_config`                        | dict | `{}`    | One-click RL mode configuration. See <a href="#rl_config">rl_config</a> for all fields, the two deployment modes, usage examples, and the migration guide. |
@@ -407,3 +408,47 @@ convolution allocates its output separately.
 Small prefix match units can increase checkpoint traffic.
 
 Validate correctness, quality and performance on the deployment hardware before deploying in production.
+
+
+### MegaKDA backend
+
+Kimi K3.1 decode workers on Ascend 950 can select a KDA backend with
+`kda_backend_config`. Use Model Runner V2, prefill context parallel size 1,
+BF16 hidden states and the model's MXFP8 QKV weights. Set the option on the
+KV consumer and leave `--use-replayssm` disabled. The default is `native`.
+
+Build an Ascend 950 wheel using [the upstream integration guide](https://github.com/flashserve/flash-linear-attention-npu/blob/e8646e1d347fef785b92a1bbc13e2764b7b85ae1/fla/ops/ascendc/kda/mega_recurrent_kda/docs/model_integration.md).
+Install the wheel and expose its OPP before starting workers:
+
+```bash
+python3 -m pip install --no-deps --target /opt/mega-kda-runtime /path/to/fla_npu.whl
+export ASCEND_CUSTOM_OPP_PATH="/opt/mega-kda-runtime/fla_npu/opp/vendors/fla_npu_transformer${ASCEND_CUSTOM_OPP_PATH:+:$ASCEND_CUSTOM_OPP_PATH}"
+```
+
+Use the actual wheel filename in the install command. Keep the image's base
+`fla_npu` on the Python path. The adapter loads the two public wrappers and
+their matching launcher from the configured directory in a separate namespace.
+
+```json
+{
+  "kda_backend_config": {
+    "backend": "mega_recurrent_kda_mx",
+    "operator_package_dir": "/opt/mega-kda-runtime"
+  }
+}
+```
+
+The public `npu_mega_recurrent_kda` operator consumes the rank's E4M3FN QKV weights in FRACTAL_NZ
+layout, their E8M0 scales, and the original BF16 decay, beta and output gate
+weights. It computes the convolution, recurrence, gated RMSNorm and output
+projection inside the same invocation. vLLM applies the original TP collective.
+Ordinary decode uses BSH. Speculative decode uses TH with one device plan per
+metadata group per forward. Padding is isolated from live cache pages.
+The checkpoint is read-only during the call. The adapter reads only the
+request's checkpoint and convolution page using their physical stride. It
+reconstructs candidate pages from the returned correction, normalized key and
+decay, and the next forward selects the last accepted page. Requests classified
+as decode use the fused operator, including in mixed batches. Multi-token
+prefill groups use native KDA.
+Disable internal GDN prefill checkpoints and use `FULL_DECODE_ONLY` for decode
+graph replay.
