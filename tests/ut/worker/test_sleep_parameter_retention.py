@@ -18,7 +18,10 @@ def worker(monkeypatch):
         sleep_mode_backend="camem",
     )
     worker.vllm_config = SimpleNamespace(model_config=worker.model_config)
-    worker.model_runner = SimpleNamespace(model=torch.nn.Linear(2, 2))
+    worker.model_runner = SimpleNamespace(
+        model=torch.nn.Linear(2, 2),
+        get_draft_model=lambda: None,
+    )
     from vllm_ascend.device_allocator.sleep_mode_backend import CaMemBackend
 
     worker._sleep_mode_backend = MagicMock(spec=CaMemBackend)
@@ -104,3 +107,52 @@ def test_get_sleep_parameters_returns_target_parameters(worker):
     parameters = worker._get_sleep_parameters(worker.model_runner.model)
 
     assert set(parameters) == {"weight", "bias"}
+
+
+def test_get_sleep_parameters_includes_draft_parameters(worker):
+    target = worker.model_runner.model
+    draft = torch.nn.Linear(2, 2)
+    worker.model_runner.get_draft_model = lambda: draft
+
+    parameters = worker._get_sleep_parameters(target)
+
+    assert "draft.weight" in parameters
+    assert "draft.bias" in parameters
+    assert parameters["draft.weight"] is draft.weight
+    assert parameters["draft.bias"] is draft.bias
+
+
+def test_get_sleep_parameters_skips_shared_draft_parameters(worker):
+    target = worker.model_runner.model
+    draft = torch.nn.Module()
+    draft.weight = target.weight
+    worker.model_runner.get_draft_model = lambda: draft
+
+    parameters = worker._get_sleep_parameters(target)
+
+    assert "draft.weight" not in parameters
+    assert parameters["weight"] is target.weight
+
+
+def test_discardable_parameters_include_draft_parameters(worker):
+    target = worker.model_runner.model
+    draft = torch.nn.Linear(2, 2)
+    worker.model_runner.get_draft_model = lambda: draft
+
+    discardable = worker._discardable_parameters(target)
+
+    assert draft.weight.untyped_storage().data_ptr() in discardable
+    assert draft.bias.untyped_storage().data_ptr() in discardable
+    assert target.weight.untyped_storage().data_ptr() not in discardable
+
+
+def test_preserved_draft_parameters_are_not_discardable(worker):
+    target = worker.model_runner.model
+    draft = torch.nn.Linear(2, 2)
+    worker.model_runner.get_draft_model = lambda: draft
+    worker.model_config.sleep_preserve_parameter_names = ["draft.*"]
+
+    discardable = worker._discardable_parameters(target)
+
+    assert draft.weight.untyped_storage().data_ptr() not in discardable
+    assert draft.bias.untyped_storage().data_ptr() not in discardable

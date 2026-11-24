@@ -77,7 +77,10 @@ def _make_sleep_worker(model: torch.nn.Module) -> NPUWorker:
     )
     from vllm_ascend.device_allocator.sleep_mode_backend import CaMemBackend
 
-    worker.model_runner = SimpleNamespace(model=model)
+    worker.model_runner = SimpleNamespace(
+        model=model,
+        get_draft_model=lambda: None,
+    )
     worker._sleep_mode_backend = MagicMock(spec=CaMemBackend)
     worker.sleep_wakeup_manager = MagicMock()
     return worker

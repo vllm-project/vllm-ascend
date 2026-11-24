@@ -271,12 +271,6 @@ class NPUWorker(GPUWorker):
             signal.signal(signal.SIGTERM, signal_handler)
             signal.signal(signal.SIGINT, signal_handler)
 
-    def _get_sleep_parameters(self, model: nn.Module) -> dict[str, nn.Parameter]:
-        # Draft weight updates are not validated on Ascend; leaving draft
-        # parameters out keeps their allocations out of the discardable set so
-        # the allocator backs them up instead of discarding them.
-        return dict(model.named_parameters())
-
     def _discardable_parameters(self, model: nn.Module) -> set[int]:
         """Storage of the parameters the weight update rewrites."""
         storage = {
@@ -323,6 +317,11 @@ class NPUWorker(GPUWorker):
 
     def _get_cudagraph_capture_context(self) -> AbstractContextManager[None]:
         raise NotImplementedError("GPUWorker._get_cudagraph_capture_context is not validated on Ascend.")
+
+    def reset_mm_cache(self) -> None:
+        reset_fn = getattr(self.model_runner, "reset_mm_cache", None)
+        if callable(reset_fn):
+            reset_fn()
 
     def supports_draft_weight_updates(self) -> bool:
         return False
