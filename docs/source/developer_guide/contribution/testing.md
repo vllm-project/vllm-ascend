@@ -33,7 +33,7 @@ The fastest way to set up a test environment is to use the main branch's contain
     pip config set global.index-url https://mirrors.huaweicloud.com/repository/pypi/simple/
 
     # For TorchNPU dev version or x86 machine
-    export PIP_EXTRA_INDEX_URL="https://download.pytorch.org/whl/cpu/ https://repo.huaweicloud.com/ascend/repos/pypi"
+    export PIP_EXTRA_INDEX_URL="https://download.pytorch.org/whl/cpu/ https://repo.huaweicloud.com/ascend/repos/pypi https://repo.huaweicloud.com/ascend/repos/pypi/nightly"
 
     # src path
     export SRC_WORKSPACE=/vllm-workspace
@@ -96,7 +96,9 @@ The fastest way to set up a test environment is to use the main branch's contain
     cd /vllm-workspace/vllm-ascend/
 
     # Install required packages
-    pip install -r requirements-dev.txt
+    pip install -r requirements-dev.txt \
+        --extra-index-url https://repo.huaweicloud.com/ascend/repos/pypi \
+        --extra-index-url https://repo.huaweicloud.com/ascend/repos/pypi/nightly
     ```
 
 === "Multi-cards"
@@ -133,7 +135,9 @@ The fastest way to set up a test environment is to use the main branch's contain
     pip config set global.index-url https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple
 
     # Install required packages
-    pip install -r requirements-dev.txt
+    pip install -r requirements-dev.txt \
+        --extra-index-url https://repo.huaweicloud.com/ascend/repos/pypi \
+        --extra-index-url https://repo.huaweicloud.com/ascend/repos/pypi/nightly
     ```
 
 ## Running tests

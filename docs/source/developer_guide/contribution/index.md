@@ -50,6 +50,7 @@ cd ..
 
 # Install requirements
 cd vllm-ascend
+export PIP_EXTRA_INDEX_URL="${PIP_EXTRA_INDEX_URL:+$PIP_EXTRA_INDEX_URL }https://repo.huaweicloud.com/ascend/repos/pypi https://repo.huaweicloud.com/ascend/repos/pypi/nightly"
 # For Linux:
 pip install -r requirements-dev.txt
 # For non-Linux:

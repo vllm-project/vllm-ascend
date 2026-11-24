@@ -216,7 +216,7 @@ check_and_config() {
     git config --global http.lowSpeedTime 30
     pip config set global.index-url https://mirrors.huaweicloud.com/repository/pypi/simple/
     pip config set global.trusted-host mirrors.huaweicloud.com
-    export PIP_EXTRA_INDEX_URL="https://repo.huaweicloud.com/ascend/repos/pypi"
+    export PIP_EXTRA_INDEX_URL="https://repo.huaweicloud.com/ascend/repos/pypi https://repo.huaweicloud.com/ascend/repos/pypi/nightly"
     pip config set global.timeout 120
 }
 
@@ -314,7 +314,7 @@ install_vllm_ascend() {
     # installing the other runtime dependencies declared by requirements.txt.
     # `|| true` matters: grep returns 1 when every line is filtered out while
     # this script runs with `set -euo pipefail`.
-    grep -vE '^(torch|torch-npu|torchvision|torchaudio|triton-ascend|memfabric_hybrid|memcache_hybrid)[=<>!]' \
+    grep -vE '^(torch|torch-npu|torchvision|torchaudio|triton-ascend|memfabric[-_]hybrid|memcache[-_]hybrid)[=<>!]' \
         "$WORKSPACE/vllm-ascend/requirements.txt" > /tmp/requirements-runtime.txt || true
     pip install -r /tmp/requirements-runtime.txt
     pip install -e "$WORKSPACE/vllm-ascend" --no-deps

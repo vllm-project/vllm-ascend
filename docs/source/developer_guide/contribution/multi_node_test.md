@@ -416,7 +416,9 @@ Install vllm-ascend development dependencies on every cluster host:
 
 ```bash
 cd /vllm-workspace/vllm-ascend
-python3 -m pip install -r requirements-dev.txt
+python3 -m pip install -r requirements-dev.txt \
+    --extra-index-url https://repo.huaweicloud.com/ascend/repos/pypi \
+    --extra-index-url https://repo.huaweicloud.com/ascend/repos/pypi/nightly
 ```
 
 Install AISBench on the first host, which is the node with
@@ -500,7 +502,9 @@ Install vllm-ascend development dependencies on every cluster host:
 
 ```bash
 cd /vllm-workspace/vllm-ascend
-python3 -m pip install -r requirements-dev.txt
+python3 -m pip install -r requirements-dev.txt \
+    --extra-index-url https://repo.huaweicloud.com/ascend/repos/pypi \
+    --extra-index-url https://repo.huaweicloud.com/ascend/repos/pypi/nightly
 ```
 
 Install AISBench on node 0:

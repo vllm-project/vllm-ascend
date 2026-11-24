@@ -175,7 +175,7 @@ jobs:
       HF_HUB_OFFLINE: 1
       TEST_FREQUENCY: ${{ inputs.test_frequency }}
       VLLM_USE_MODELSCOPE: True
-      UV_EXTRA_INDEX_URL: "https://repo.huaweicloud.com/ascend/repos/pypi"
+      UV_EXTRA_INDEX_URL: "https://repo.huaweicloud.com/ascend/repos/pypi https://repo.huaweicloud.com/ascend/repos/pypi/nightly"
       UV_INDEX_STRATEGY: unsafe-best-match
       UV_NO_CACHE: 1
       UV_SYSTEM_PYTHON: 1
@@ -282,7 +282,7 @@ jobs:
           # installing the other runtime dependencies declared by requirements.txt.
           # `|| true` matters: grep returns 1 when every line is filtered out while
           # GitHub's bash runs with `-e -o pipefail`.
-          grep -vE '^(torch|torch-npu|torchvision|torchaudio|triton-ascend|memfabric_hybrid|memcache_hybrid)[=<>!]' \
+          grep -vE '^(torch|torch-npu|torchvision|torchaudio|triton-ascend|memfabric[-_]hybrid|memcache[-_]hybrid)[=<>!]' \
             requirements.txt > /tmp/requirements-runtime.txt || true
           uv pip install -r /tmp/requirements-runtime.txt
           uv pip install -e . --no-deps
