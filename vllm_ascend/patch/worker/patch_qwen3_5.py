@@ -218,11 +218,14 @@ class AscendQwen3_5DecoderLayer(Qwen3_5DecoderLayer):
         use_sp = getattr(self, "use_attn_reduce_scatter_for_moe", False)
         full_num_tokens = positions.shape[-1]
 
+        is_gdn = self.layer_type == "linear_attention"
+        in_proj = self.linear_attn.in_proj_qkvz if is_gdn else self.self_attn.qkv_proj  
+
         if residual is None:
             residual = hidden_states
             hidden_states = self.input_layernorm(hidden_states)
         else:
-            hidden_states, residual = self.input_layernorm(hidden_states, residual)
+            hidden_states, residual = self.input_layernorm.forward_fused(hidden_states, residual, in_proj)
 
         if use_sp:
             # Attention (full and GDN) needs the full token sequence; the
