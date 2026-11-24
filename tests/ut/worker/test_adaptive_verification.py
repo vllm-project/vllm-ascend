@@ -26,6 +26,7 @@ from vllm_ascend.attention.sfa_v1 import AscendSFABackend, AscendSFAMetadataBuil
 from vllm_ascend.patch.worker import patch_model_runner
 from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2.model_runner import NPUModelRunner
+from vllm_ascend.worker.v2.spec_decode.dflash import speculator as dflash_module
 from vllm_ascend.worker.v2.spec_decode.dflash2.speculator import AscendDFlash2Speculator
 from vllm_ascend.worker.v2.spec_decode.dspark.speculator import AscendDSparkSpeculator
 from vllm_ascend.worker.v2.spec_decode.mtp.speculator import AscendMTPSpeculator
@@ -151,9 +152,14 @@ def test_adaptive_draft_uses_its_own_request_count(monkeypatch, local_reqs, dp_r
     monkeypatch.setattr(AscendDSparkSpeculator, "attn_vllm_config", property(lambda self: self.vllm_config))
     monkeypatch.setattr(dspark_module, "build_attn_metadata_wrapper", nullcontext)
     monkeypatch.setattr(dspark_module, "build_attn_metadata_factory", lambda *args, **kwargs: nullcontext())
-    prepare_inputs_signature = signature(upstream_dflash.prepare_dflash_inputs)
+    # Inspect final launcher arguments after the main-only block_stride adapter.
+    prepare_inputs_signature = signature(dflash_module.prepare_dflash_inputs_triton)
     prepare_inputs = Mock()
-    monkeypatch.setattr(upstream_dflash, "prepare_dflash_inputs", prepare_inputs)
+    monkeypatch.setattr(dflash_module, "prepare_dflash_inputs_triton", prepare_inputs)
+    prepare_entry = (
+        prepare_inputs if vllm_version_is("0.33.0") else dflash_module._prepare_dflash_inputs_with_block_stride
+    )
+    monkeypatch.setattr(upstream_dflash, "prepare_dflash_inputs", prepare_entry)
 
     class InputsPrepared(Exception):
         pass
