@@ -250,11 +250,19 @@ class MooncakePullConnector(MooncakeBaseConnector):
         super().__init__(vllm_config, role, kv_cache_config)
 
         if role == KVConnectorRole.SCHEDULER:
-            self.connector_scheduler = MooncakePullConnectorScheduler(vllm_config, str(self.engine_id), kv_cache_config)
+            self.connector_scheduler = self._create_scheduler(vllm_config, kv_cache_config)
         elif role == KVConnectorRole.WORKER:
-            self.connector_worker = MooncakePullConnectorWorker(vllm_config, str(self.engine_id), kv_cache_config)
+            self.connector_worker = self._create_worker(vllm_config, kv_cache_config)
         else:
             raise ValueError(f"Unsupported KVConnectorRole: {role}")
+
+    def _create_scheduler(
+        self, vllm_config: VllmConfig, kv_cache_config: "KVCacheConfig"
+    ) -> MooncakePullConnectorScheduler:
+        return MooncakePullConnectorScheduler(vllm_config, str(self.engine_id), kv_cache_config)
+
+    def _create_worker(self, vllm_config: VllmConfig, kv_cache_config: "KVCacheConfig") -> MooncakePullConnectorWorker:
+        return MooncakePullConnectorWorker(vllm_config, str(self.engine_id), kv_cache_config)
 
 
 class MooncakePushConnector(MooncakeBaseConnector):
@@ -320,6 +328,13 @@ class MooncakeConnectorV2(MooncakeBaseConnector):
     ) -> MooncakeBaseConnector:
         assert vllm_config.kv_transfer_config is not None
         extra_config = vllm_config.kv_transfer_config.kv_connector_extra_config
+        dsa_offload = extra_config.get("dsa_pd_offload", False)
+        if not isinstance(dsa_offload, bool):
+            raise ValueError("dsa_pd_offload must be bool")
+        if dsa_offload:
+            from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_dsa import MooncakeDsaConnector
+
+            return MooncakeDsaConnector(vllm_config, role, kv_cache_config)
         connector_cls = MooncakePushConnector if extra_config.get("use_layerwise", False) else MooncakePullConnector
         return connector_cls(vllm_config, role, kv_cache_config)
 

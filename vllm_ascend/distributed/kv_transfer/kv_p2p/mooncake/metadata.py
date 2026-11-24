@@ -3,7 +3,7 @@
 """Metadata types for Mooncake KV transfer connectors."""
 
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 from vllm.distributed.kv_transfer.kv_connector.utils import BlockIds
@@ -41,11 +41,22 @@ class MooncakeTransferMetadata(KVConnectorHandshakeMetadata):
     dcp_sharded: list[bool]
     local_ip: str = ""
     handshake_port: int = 0
+    # Optional physical registration and component validation for direct Host reads.
+    registered_regions: list[tuple[int, int]] = field(default_factory=list)
+    cache_dtypes: list[list[str]] = field(default_factory=list)
 
     def __post_init__(self) -> None:
         if self.cp_kv_cache_interleave_size <= 0:
             raise ValueError("Mooncake CP interleave size must be positive.")
         num_layers = len(self.layer_names)
+        if self.cache_dtypes:
+            if len(self.cache_dtypes) != num_layers or any(
+                len(dtypes) != len(addrs)
+                for dtypes, addrs in zip(self.cache_dtypes, self.kv_caches_base_addr, strict=True)
+            ):
+                raise ValueError("Invalid per-component cache dtypes")
+        if any(ptr < 0 or size <= 0 for ptr, size in self.registered_regions):
+            raise ValueError("Invalid physical registration range")
         if len(self.indexer_replication_sizes) != num_layers or any(
             size < 0 for size in self.indexer_replication_sizes
         ):
@@ -95,6 +106,7 @@ class MooncakeTPTransferMetadata:
     kv_caches_base_addr: list[list[int]]
     local_ip: str
     handshake_port: int
+    registered_regions: list[tuple[int, int]] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -122,6 +134,7 @@ class MooncakePPTransferMetadata:
     dcp_sharded: list[bool]
     metadata_by_pcp_rank: dict[int, MooncakePCPTransferMetadata]
     indexer_replication_sizes: list[int]
+    cache_dtypes: list[list[str]] = field(default_factory=list)
 
 
 @dataclass(frozen=True)

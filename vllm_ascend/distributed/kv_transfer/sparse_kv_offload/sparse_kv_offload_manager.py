@@ -810,6 +810,13 @@ class SparseKVOffloadManager:
             MooncakeHostPool,
         )
 
+    def get_mooncake_host_pool(self) -> MooncakeHostPool:
+        """Return the prepared Mooncake allocator used by Decode Main KV."""
+        allocator = self._host_kv_allocator
+        if not isinstance(allocator, MooncakeHostPool):
+            raise RuntimeError("Sparse KV offload is not using the Mooncake Host backend")
+        return allocator
+
     def _get_mooncake_writeback_view(
         self,
         logical_tensor: torch.Tensor,
@@ -1219,13 +1226,17 @@ class SparseKVOffloadManager:
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Return CPU full KV tensors used by fused_overlap decode.
 
-        On TP0 these are the owned CPU pools; on other ranks they are non-owning
-        GVA views restored after broadcast.
+        Mooncake preserves each rank's local mapping. MemFabric restores GVA
+        views after the existing owner pointer broadcast.
         """
         if not self.use_fused_overlap:
             raise RuntimeError(
                 "get_fused_overlap_cpu_kv_inputs requires kv_offload_decode_config.use_fused_overlap=true"
             )
+        return self.get_local_host_kv_views(layer_name)
+
+    def get_local_host_kv_views(self, layer_name: str) -> tuple[torch.Tensor, torch.Tensor]:
+        """Return this process's original Mooncake or restored MemFabric views."""
         layer_id = self._get_offload_layer_id(layer_name)
         if layer_id >= len(self.k_caches_cpu) or layer_id >= len(self.v_caches_cpu):
             raise RuntimeError(

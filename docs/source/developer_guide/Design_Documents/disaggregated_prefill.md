@@ -158,6 +158,85 @@ Cancellation/drain recovery for a permanently lost P is not yet
 implemented, so repeated failures can exhaust D's available KV blocks. A failure
 of the shared DONE listener remains fatal.
 
+#### Mooncake V2 sparse KV Host offload
+
+With the sparse KV offload Host and Decode support enabled, select
+`MooncakeConnectorV2` and set
+`kv_connector_extra_config.dsa_pd_offload=true` on both P and D. This is an
+opt-in Pull path; leave `use_layerwise` unset or false. Use Model Runner V2.
+
+Prefill uses ordinary device KV and leaves sparse KV offload disabled:
+
+```json
+{
+  "kv_connector": "MooncakeConnectorV2",
+  "kv_role": "kv_producer",
+  "kv_connector_extra_config": {"dsa_pd_offload": true}
+}
+```
+
+Decode uses:
+
+```json
+{
+  "kv_connector": "MooncakeConnectorV2",
+  "kv_role": "kv_consumer",
+  "kv_load_failure_policy": "fail",
+  "kv_connector_extra_config": {"dsa_pd_offload": true}
+}
+```
+
+On Decode, configure the existing typed additional config:
+
+```json
+{
+  "sparse_kv_offload_config": {
+    "enabled": true,
+    "host_backend": "mooncake",
+    "use_fused_overlap": true
+  }
+}
+```
+
+Keep the workload's other sparse-offload capacity and attention settings.
+Main KV uses the manager's BF16 K/V Host views. Indexer KV can use its supported
+device cache dtype; both endpoints must expose matching component dtypes and
+kernel block geometry.
+
+Within each Decode TP group, TP rank 0 receives Main KV directly into the
+manager-owned Mooncake VMM shared Host pool. Other TP ranks omit Main from
+their connector transfer views. Every rank receives its own Indexer and
+device-resident MTP draft KV. Each DP instance owns its pool and receives KV
+for the requests routed to it.
+
+Decode requires PCP=DCP=1. Prefill can use PP and valid PCP/DCP configurations:
+the ordinary V2 planner selects source workers and reconstructs their sequence
+shards into Decode blocks. P and D need compatible kernel blocks and CP
+interleave. TP sizes may differ in either direction when supported by the
+ordinary V2 cache layout validation. The DSA path adds no TP-size ordering
+restriction or opt-in switch.
+
+The physical Host allocation remains owned by the sparse offload manager.
+The connector checks shared offsets across TP ranks while retaining each
+process's local virtual address. It registers source HBM, Indexer and draft
+destinations, and keeps VMM Main outside ordinary HBM registration. READs are
+split at advertised physical registration boundaries.
+
+For example, P PCP=8/TP=1 and D TP=2 use the common V2 planner directly.
+TP0 receives shared Main and every D rank receives its own device caches.
+
+A request becomes ready only after all workers have completed their required
+READs, including TP0's Main receive. The V2 scheduler then acknowledges P.
+Failures use the request-level failure policy; Host-offloaded requests cannot
+fall back to recomputing a missing full Main device cache. Cancellation and
+worker shutdown follow the common V2 lifecycle.
+
+CPU tests cover actual byte reconstruction through the V2 planner, shared
+ownership, cached prefixes, registration boundaries and failure propagation.
+NPU transport, model accuracy and performance require hardware validation.
+TP0 concentrates Main receive traffic; distributed Main writers are not
+enabled by this path.
+
 #### Mooncake D2RH Connector
 
 D2RH (device-to-remote-host) splits KV cache transfer into two stages:
