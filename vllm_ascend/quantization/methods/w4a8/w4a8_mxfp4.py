@@ -502,10 +502,8 @@ class AscendW4A8MXFPDynamicFusedMoEMethod(AscendMoEScheme):
         if padding:
             # Pad the halves independently to preserve the gate/up pairing.
             gate, up = hidden_states.chunk(2, dim=-1)
-            hidden_states = torch.cat(
-                (torch.nn.functional.pad(gate, (0, padding)), torch.nn.functional.pad(up, (0, padding))),
-                dim=-1,
-            )
+            zeros = hidden_states.new_zeros((*hidden_states.shape[:-1], padding))
+            hidden_states = torch.cat((gate, zeros, up, zeros), dim=-1)
 
         # The `group_index` input for the `npu_swiglu_group_quant` operator
         # currently only supports the `count` type. In the current version, the
