@@ -416,10 +416,35 @@ def test_capacity_for_batch_keeps_default_and_expands_per_layer(rdma):
     assert rdma.capacity_for_batch(65536, 9000, [32, 32], 4) == 72000
     assert rdma.capacity_for_batch(100000, 8192, [32, 32], 4) == 100000
     assert rdma.capacity_for_batch(65536, 32768, [32], 4) == 262144
-    with pytest.raises(ValueError, match="262152.*262144"):
-        rdma.capacity_for_batch(65536, 32769, [32], 4)
+    # The old ad-hoc 262,144-row cap is gone; the byte budget decides.
+    assert rdma.capacity_for_batch(65536, 32769, [32], 4) == 262152
     with pytest.raises(ValueError, match="divisible"):
         rdma.capacity_for_batch(65536, 8192, [31], 4)
+
+
+@pytest.mark.parametrize(
+    ("max_tokens", "expected"),
+    [(8192, 196608), (12288, 294912), (16384, 393216), (24576, 589824)],
+)
+def test_capacity_for_batch_scales_to_larger_prefill(rdma, max_tokens, expected):
+    # 24 Engram heads on TP=1, the A2 DeepSeek-V4.1 layout.
+    assert rdma.capacity_for_batch(65536, max_tokens, [24], 1) == expected
+
+
+def test_capacity_for_batch_rejects_at_receive_budget_boundary(rdma):
+    limit = rdma.MAX_ROWS
+    max_ok = limit // 24
+    assert rdma.capacity_for_batch(65536, max_ok, [24], 1) == max_ok * 24
+    with pytest.raises(ValueError, match=f"{limit}-row receive budget"):
+        rdma.capacity_for_batch(65536, max_ok + 1, [24], 1)
+    with pytest.raises(ValueError, match="receive budget"):
+        rdma.capacity_for_batch(limit + 1, 1, [24], 1)
+
+
+def test_receive_budget_is_derived_from_hbm_and_widest_row(rdma):
+    assert rdma.receive_buffer_budget_bytes() == 1 << 30
+    assert rdma.MAX_ROWS == (1 << 30) // rdma.MAX_ROW_BYTES
+    assert rdma.MAX_ROWS >= 589824
 
 
 def test_lookup_plan_accepts_larger_capacity_and_rejects_overflow(rdma):

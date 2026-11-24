@@ -576,6 +576,17 @@ class QuantizedAllReduceConfig:
                 raise ValueError("MXFP8 AllToAll quantized all-reduce requires TP=2/4/8 (or TP=1 to bypass).")
 
 
+def _shared_engram_max_rows() -> int:
+    """One receive-buffer bound for config, readers, and the owner.
+
+    Imported lazily: ``ascend_config`` is loaded on CPU control paths and must
+    not pull the NPU model stack at import time.
+    """
+    from vllm_ascend.models.deepseek_v41.engram.shared_rdma import MAX_ROWS
+
+    return MAX_ROWS
+
+
 @config
 class SharedEngramConfig:
     """Shared Engram owner and per-rank receive capacity."""
@@ -604,8 +615,9 @@ class SharedEngramConfig:
         host, separator, port = self.endpoint.rpartition(":")
         if not separator or not host or not port.isdigit() or not 0 < int(port) < 65536:
             raise ValueError("shared Engram endpoint must be host:port")
-        if not 0 < self.capacity <= 262144:
-            raise ValueError("shared Engram capacity must be in [1, 262144]")
+        max_rows = _shared_engram_max_rows()
+        if not 0 < self.capacity <= max_rows:
+            raise ValueError(f"shared Engram capacity must be in [1, {max_rows}]")
         if self.listen_port is not None and not 0 < self.listen_port < 65536:
             raise ValueError("shared Engram listen_port must be in [1, 65535]")
         if self.listen_port is not None and self.local_comm_res:
