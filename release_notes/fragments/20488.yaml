@@ -1,0 +1,4 @@
+pr: 20488
+entries:
+  - category: bugfix
+    text: MooncakeHybridConnector now reports KV receive failures by request after local receive tasks finish, allowing the scheduler to apply the configured load-failure policy.
