@@ -224,6 +224,184 @@ def _verify_section(
     return t_stock, t_fused
 
 
+def _accuracy_check(
+    layers_count: int,
+    heads: int,
+    key_dim: int,
+    value_dim: int,
+    spec_q: int,
+    batch: int,
+    steps: int,
+    blocks: int,
+    accept_rate: float | None,
+    accept_len: int | None,
+    layer_groups: tuple[int, ...] | None,
+) -> None:
+    """标准流程（immediate）vs 延迟流程（deferred）的端到端数值对比.
+
+    模拟 ``steps`` 个 spec-decode 步，验证 deferred 优化（采样后 defer，下一步
+    flush 折叠）在数值上等价于 vllm 标准流程（每步采样后立即 commit）。
+
+    records 借 checkpoint 的 state-block 编号做 record slot（``records=None``），
+    使 immediate（按 state block 索引）与 deferred（按 record slot 索引，这里让
+    ``record_rows == state_indices``）读同一批 correction/kg。
+
+    随后用单步 align 场景（cache-block 分页 + 跨 block 边界的 crossing 请求）
+    对拍 boundary commit：immediate 全量 fold vs deferred 的 eager（crossing 立即
+    commit）+ flush（非 crossing 延迟折叠）。
+    """
+    group_sizes = layer_groups or (layers_count,)
+    # 固定 3 步对齐 test_deferred_vs_immediate_equivalence：多步累积足以暴露
+    # defer/flush 与 immediate 的折叠顺序差异，又不会让数值误差无关放大。
+    n_steps = min(steps, 3)
+    state_indices = torch.arange(1, batch + 1, dtype=torch.int32, device=DEVICE)
+    record_rows = state_indices.clone()
+    query_start_loc = torch.arange(
+        0, (batch + 1) * spec_q, spec_q, dtype=torch.int32, device=DEVICE
+    )
+    num_accepted = _accepted_lengths(batch, spec_q, accept_rate, accept_len)
+
+    def make_paths(seed: int):
+        contexts, layers = [], []
+        for gi, size in enumerate(group_sizes):
+            ctx, group_layers = _make_context(
+                num_layers=size, heads=heads, key_dim=key_dim,
+                value_dim=value_dim, spec_q=spec_q, blocks=blocks,
+                max_reqs=batch, records=None, seed=seed + gi,
+            )
+            contexts.append(ctx)
+            layers.extend(group_layers)
+        return contexts, layers
+
+    def report(name: str, layers_a, layers_b) -> bool:
+        worst_abs = 0.0
+        worst_rel = 0.0
+        finite = True
+        for la, lb in zip(layers_a, layers_b):
+            a = la.kv_cache[1].double()
+            b = lb.kv_cache[1].double()
+            diff = (a - b).abs()
+            worst_abs = max(worst_abs, diff.max().item())
+            worst_rel = max(worst_rel, (diff / (a.abs() + 1e-6)).max().item())
+            finite = finite and torch.isfinite(a).all().item()
+            finite = finite and torch.isfinite(b).all().item()
+        ok = finite and worst_abs < 1e-3 and worst_rel < 1e-3
+        print(f"  [{'PASS' if ok else 'FAIL'}] {name}: "
+              f"max abs diff {worst_abs:.3e}, max rel diff {worst_rel:.3e}")
+        return ok
+
+    # --- 非 align: 多步 defer+flush vs 立即 commit ---
+    ctxs_imm, layers_imm = make_paths(100)
+    for _ in range(n_steps):
+        for ctx in ctxs_imm:
+            ctx.commit(
+                num_accepted_tokens=num_accepted,
+                state_indices=state_indices,
+                query_start_loc=query_start_loc,
+            )
+
+    ctxs_def, layers_def = make_paths(100)
+    pending = torch.zeros(batch + 1, dtype=torch.int32, device=DEVICE)
+    for _ in range(n_steps):
+        for ctx in ctxs_def:
+            ctx.flush(state_indices, record_rows, pending)
+            ctx.commit(
+                num_accepted_tokens=num_accepted,
+                state_indices=state_indices,
+                query_start_loc=query_start_loc,
+                record_rows=record_rows,
+                pending=pending,
+                eager=None,
+            )
+    for ctx in ctxs_def:
+        ctx.flush(state_indices, record_rows, pending)
+
+    ok1 = report(
+        f"immediate vs deferred-flush ({n_steps} steps, non-align)",
+        layers_imm, layers_def,
+    )
+    del ctxs_imm, ctxs_def, layers_imm, layers_def
+    torch.npu.empty_cache()
+
+    # --- align: 单步 boundary（crossing 请求跨 cache-block 边界）---
+    mamba_block_size = 16
+    align_blocks = 2 * batch + 2
+    align_indices = torch.arange(1, batch + 1, dtype=torch.int32, device=DEVICE)
+    align_record_rows = align_indices.clone()
+    align_query_start_loc = torch.arange(
+        0, (batch + 1) * spec_q, spec_q, dtype=torch.int32, device=DEVICE
+    )
+    # block table: 每请求双列 [当前 block, crossing 目的地 block]。
+    dest = torch.arange(batch + 1, 2 * batch + 1, dtype=torch.int32, device=DEVICE)
+    block_table = torch.stack((align_indices, dest), dim=1)
+    # 前一半请求停在 block 末尾（commit 后跨边界 -> crossing/boundary），
+    # 后一半在 block 开头（不跨 -> 主 commit）。
+    half = batch // 2
+    num_computed = torch.where(
+        torch.arange(batch, device=DEVICE) < half,
+        torch.full((batch,), mamba_block_size - 1, dtype=torch.int32, device=DEVICE),
+        torch.zeros(batch, dtype=torch.int32, device=DEVICE),
+    )
+    align_num_accepted = torch.full(
+        (batch,), spec_q - 1, dtype=torch.int32, device=DEVICE
+    )
+    nc64 = num_computed.to(torch.int64)
+    fnc = nc64 + align_num_accepted.to(torch.int64)
+    next_boundary = (nc64 // mamba_block_size + 1) * mamba_block_size
+    crosses = fnc >= next_boundary
+    eager = crosses.to(torch.int32)
+
+    def make_align_paths(seed: int):
+        contexts, layers = [], []
+        for gi, size in enumerate(group_sizes):
+            ctx, group_layers = _make_context(
+                num_layers=size, heads=heads, key_dim=key_dim,
+                value_dim=value_dim, spec_q=spec_q, blocks=align_blocks,
+                max_reqs=batch, records=None, seed=seed + gi,
+            )
+            contexts.append(ctx)
+            layers.extend(group_layers)
+        return contexts, layers
+
+    a_imm, l_imm = make_align_paths(200)
+    for ctx in a_imm:
+        ctx.commit(
+            num_accepted_tokens=align_num_accepted,
+            state_indices=align_indices,
+            query_start_loc=align_query_start_loc,
+            block_table=block_table,
+            num_computed_tokens=num_computed,
+            mamba_block_size=mamba_block_size,
+        )
+
+    a_def, l_def = make_align_paths(200)
+    align_pending = torch.zeros(batch + 1, dtype=torch.int32, device=DEVICE)
+    for ctx in a_def:
+        ctx.flush(align_indices, align_record_rows, align_pending)
+        ctx.commit(
+            num_accepted_tokens=align_num_accepted,
+            state_indices=align_indices,
+            query_start_loc=align_query_start_loc,
+            block_table=block_table,
+            num_computed_tokens=num_computed,
+            mamba_block_size=mamba_block_size,
+            record_rows=align_record_rows,
+            pending=align_pending,
+            eager=eager,
+        )
+        ctx.flush(align_indices, align_record_rows, align_pending)
+
+    n_cross = int(crosses.sum().item())
+    ok2 = report(
+        f"immediate vs deferred-flush (align, {n_cross}/{batch} crossing)",
+        l_imm, l_def,
+    )
+    del a_imm, a_def, l_imm, l_def
+    torch.npu.empty_cache()
+
+    print(f"\naccuracy check overall: {'PASS' if (ok1 and ok2) else 'FAIL'}")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--preset", choices=sorted(PRESETS), default="small")
@@ -262,6 +440,11 @@ def main() -> None:
                              "matching the scheduler's mamba cache groups (GLM-5.3-Flash "
                              "serving: '12,11,11' for its 34 KDA layers); default: one "
                              "context over all layers")
+    parser.add_argument("--check", action="store_true",
+                        help="accuracy check: simulate the vllm standard flow "
+                             "(immediate commit per step) vs the deferred flow "
+                             "(defer + flush), comparing final checkpoints; "
+                             "includes an align-mode crossing/boundary case")
     args = parser.parse_args()
 
     cfg = dict(PRESETS[args.preset])
@@ -431,6 +614,12 @@ def main() -> None:
             layers, heads, key_dim, value_dim, spec_q, batch, steps, args.warmup,
             args.accept_rate, args.accept_len, args.blocks, records,
             args.pipeline_stages, layer_groups=group_sizes,
+        )
+
+    if args.check:
+        _accuracy_check(
+            layers, heads, key_dim, value_dim, spec_q, batch, steps, blocks,
+            args.accept_rate, args.accept_len, group_sizes,
         )
 
 
