@@ -116,6 +116,7 @@ _vllm_mock_modules = [
     "vllm.v1.core",
     "vllm.v1.core.block_pool",
     "vllm.v1.core.kv_cache_manager",
+    "vllm.v1.core.kv_cache_coordinator",
     "vllm.v1.core.kv_cache_planning",
     "vllm.v1.core.kv_cache_utils",
     "vllm.v1.core.sched",
@@ -325,6 +326,15 @@ class _FakeKVCacheConfig:
 
 _kv_cache_utils_mod.KVCacheBlock = _FakeKVCacheBlock  # type: ignore[attr-defined]
 _kv_cache_utils_mod.BlockHashList = list  # type: ignore[attr-defined]
+
+
+def _fake_replay_boundaries(num_prompt_tokens, scheduler_block_size, use_eagle):
+    """Import-only placeholder; replay boundary tests must use real vLLM."""
+    raise NotImplementedError("replay_boundaries requires real vLLM")
+
+
+if _MOCK_VLLM_DEPS:
+    sys.modules["vllm.v1.core.kv_cache_coordinator"].replay_boundaries = _fake_replay_boundaries
 
 
 class _FakeBlockPool:

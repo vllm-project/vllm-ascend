@@ -434,6 +434,7 @@ class BaseKVPoolWorker(ABC):
             group_cache_families=self.kv_cache_group_families,
             use_eagle=use_eagle,
             retention_interval=retention_interval,
+            num_hash_lookahead_tokens=vllm_config.num_hash_lookahead_tokens,
         )
 
     def _infer_group_uses_align_state(self) -> list[bool]:

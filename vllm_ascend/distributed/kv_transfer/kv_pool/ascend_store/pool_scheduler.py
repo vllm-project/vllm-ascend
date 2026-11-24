@@ -219,6 +219,7 @@ class BaseKVPoolScheduler(ABC):
             group_cache_families=self.kv_cache_group_families,
             use_eagle=self.use_eagle,
             retention_interval=self.retention_interval,
+            num_hash_lookahead_tokens=self.vllm_config.num_hash_lookahead_tokens,
         )
 
     def _floor_to_cache_transfer_granularity(self, token_len: int) -> int:

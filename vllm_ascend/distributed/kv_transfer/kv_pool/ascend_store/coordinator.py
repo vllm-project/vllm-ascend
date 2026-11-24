@@ -11,6 +11,7 @@ from weakref import proxy
 from vllm.logger import logger
 from vllm.utils.math_utils import cdiv
 from vllm.v1.core.block_pool import BlockPool
+from vllm.v1.core.kv_cache_coordinator import replay_boundaries
 from vllm.v1.core.kv_cache_utils import BlockHash, BlockHashList, KVCacheBlock
 from vllm.v1.core.single_type_kv_cache_manager import SingleTypeKVCacheManager
 from vllm.v1.kv_cache_interface import (
@@ -120,6 +121,7 @@ class AscendStoreCoordinator:
         group_cache_families: list[str],
         use_eagle: bool = False,
         retention_interval: int | None = None,
+        num_hash_lookahead_tokens: int = 0,
     ) -> None:
         assert len(kv_cache_groups) == len(group_block_sizes)
         assert len(kv_cache_groups) == len(group_cache_families)
@@ -132,6 +134,7 @@ class AscendStoreCoordinator:
         self.lcm_block_size = scheduler_block_size
         self.use_eagle = use_eagle
         self.retention_interval = retention_interval
+        self.num_hash_lookahead_tokens = num_hash_lookahead_tokens
         self.group_block_sizes = group_block_sizes
         self.group_cache_families = group_cache_families
         self.group_effective_block_sizes = list(group_block_sizes)
@@ -231,7 +234,12 @@ class AscendStoreCoordinator:
         # every possible checkpoint: a shorter request may have published a
         # boundary that is not the current request's replay/segment boundary.
         reachable_boundaries = (
-            (max(0, num_prompt_tokens - 1),)
+            _replay_boundaries(
+                num_prompt_tokens,
+                scheduler_block_size=self.lcm_block_size,
+                use_eagle=self.use_eagle,
+                num_hash_lookahead_tokens=self.num_hash_lookahead_tokens,
+            )
             if num_prompt_tokens is not None
             else range(self.lcm_block_size, aligned_token_len + 1, self.lcm_block_size)
         )
@@ -487,6 +495,25 @@ def _find_longest_cache_hit(
 ) -> tuple[tuple[list[KVCacheBlock], ...], int]:
     hit_result = manager_cls.find_longest_cache_hit(**kwargs)
     return cast(tuple[tuple[list[KVCacheBlock], ...], int], hit_result)
+
+
+def _replay_boundaries(
+    num_prompt_tokens: int,
+    *,
+    scheduler_block_size: int,
+    use_eagle: bool,
+    num_hash_lookahead_tokens: int,
+) -> Sequence[int]:
+    """Adapt upstream ``replay_boundaries`` arguments across vLLM versions."""
+    kwargs = dict(
+        num_prompt_tokens=num_prompt_tokens,
+        scheduler_block_size=scheduler_block_size,
+        use_eagle=use_eagle,
+        num_hash_lookahead_tokens=num_hash_lookahead_tokens,
+    )
+    parameters = inspect.signature(replay_boundaries).parameters
+    accepts_kwargs = any(parameter.kind is inspect.Parameter.VAR_KEYWORD for parameter in parameters.values())
+    return replay_boundaries(**{name: value for name, value in kwargs.items() if accepts_kwargs or name in parameters})
 
 
 def _reachable_mask_accepted_kwargs(
