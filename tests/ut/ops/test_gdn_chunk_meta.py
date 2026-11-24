@@ -154,7 +154,7 @@ def test_chunk_gated_delta_rule_fwd_threads_prebuilt_chunk_offsets(
     non_pcp_calls: list[tuple[str, object]] = []
     pcp_calls: list[tuple[str, object]] = []
 
-    def run_case(world_size: int, calls: list[tuple[str, object]]):
+    def run_case(world_size: int, calls: list[tuple[str, object]], *, head_sharded: bool = False):
         group = type(
             "Group",
             (),
@@ -165,7 +165,9 @@ def test_chunk_gated_delta_rule_fwd_threads_prebuilt_chunk_offsets(
             },
         )()
 
-        monkeypatch.setattr(chunk, "get_forward_context", lambda: type("Ctx", (), {"attn_metadata": None})())
+        metadata = {"qsa": object()} if head_sharded else None
+        prebuilt_meta.head_sharded_pcp = head_sharded
+        monkeypatch.setattr(chunk, "get_forward_context", lambda: type("Ctx", (), {"attn_metadata": metadata})())
         monkeypatch.setattr(chunk, "get_pcp_group", lambda: group)
         monkeypatch.setattr(chunk, "chunk_local_cumsum", lambda *args, **kwargs: _DummyTensor("g_cumsum"))
         monkeypatch.setattr(chunk, "chunk_scaled_dot_kkt_fwd", lambda *args, **kwargs: _DummyTensor("A"))
@@ -236,6 +238,10 @@ def test_chunk_gated_delta_rule_fwd_threads_prebuilt_chunk_offsets(
 
     run_case(2, pcp_calls)
     assert pcp_calls == [("o_update", chunk_offsets)]
+
+    head_sharded_calls: list[tuple[str, object]] = []
+    run_case(2, head_sharded_calls, head_sharded=True)
+    assert head_sharded_calls == []
 
 
 def test_chunk_gated_delta_rule_fwd_uses_prebuilt_metadata_without_runtime_tolist(

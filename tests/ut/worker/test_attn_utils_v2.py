@@ -16,6 +16,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
     KVCacheGroupSpec,
     KVCacheTensor,
+    KVQuantMode,
     MambaSpec,
     MLAAttentionSpec,
     SlidingWindowSpec,
@@ -23,6 +24,7 @@ from vllm.v1.kv_cache_interface import (
     compute_layer_kv_cache_shape_bytes,
 )
 from vllm.v1.worker.gpu import attn_utils as upstream_attn_utils
+from vllm.v1.worker.gpu import model_runner as upstream_model_runner
 from vllm.v1.worker.utils import AttentionGroup
 
 from vllm_ascend.attention import dsa_attn_kv_plan, dsa_v1
@@ -34,7 +36,6 @@ from vllm_ascend.attention.attention_v1 import (
     AscendAttentionState,
     AscendC8AttentionBackendImpl,
 )
-from vllm_ascend.attention.context_parallel.attention_cp import AscendAttentionDCPImpl
 from vllm_ascend.attention.dsa_v1 import (
     AscendDSAC4Backend,
     AscendDSAC4StateBackend,
@@ -46,6 +47,9 @@ from vllm_ascend.attention.dsa_v1 import (
 )
 from vllm_ascend.attention.mla_v1 import AscendMLAAttention, AscendMLABackend, AscendMLAImpl
 from vllm_ascend.attention.sfa_v1 import AscendSFABackend, AscendSFAMetadataBuilder
+from vllm_ascend.core.kv_cache_config_builder import (
+    _get_kv_cache_config_deepseek_v4_main,
+)
 from vllm_ascend.core.kv_cache_interface import (
     AscendMLAAttentionSpec,
     AscendSFAIndexerCacheSpec,
@@ -56,9 +60,6 @@ from vllm_ascend.device.hardware_profile import get_hardware_profile
 from vllm_ascend.models.deepseek_v4 import compressor as deepseek_v4_compressor
 from vllm_ascend.models.deepseek_v4 import indexer as deepseek_v4_indexer
 from vllm_ascend.models.deepseek_v4 import model as deepseek_v4_model
-from vllm_ascend.patch.platform.patch_kv_cache_utils import (
-    _get_kv_cache_config_deepseek_v4_main,
-)
 from vllm_ascend.worker.utils import prepare_ascend_kernel_block_sizes
 from vllm_ascend.worker.v2 import attn_utils
 from vllm_ascend.worker.v2 import model_runner as v2_model_runner
@@ -66,6 +67,7 @@ from vllm_ascend.worker.v2 import utils as v2_utils
 from vllm_ascend.worker.v2.model_runner import NPUModelRunner
 from vllm_ascend.worker.v2.model_states import default as model_state_module
 from vllm_ascend.worker.v2.model_states.default import AscendModelState
+from vllm_ascend.worker.v2.spec_decode.eagle.speculator import AscendEagleSpeculator
 from vllm_ascend.worker.v2.utils import AscendV2KVBlockZeroer
 
 
@@ -105,6 +107,20 @@ def _spec_compress_ratio(spec) -> int:
     return spec.tokens_per_state
 
 
+@pytest.mark.parametrize(
+    ("hf_config", "expected"),
+    [
+        (SimpleNamespace(model_type="deepseek_v4"), True),
+        (SimpleNamespace(model_type="deepseek_v41"), True),
+        (SimpleNamespace(model_type="glm5_next_text"), False),
+        (SimpleNamespace(compress_ratios=[1]), False),
+    ],
+)
+def test_is_dsv4_model_uses_explicit_model_type(hf_config, expected):
+    vllm_config = SimpleNamespace(model_config=SimpleNamespace(hf_config=hf_config))
+    assert attn_utils._is_dsv4_model(vllm_config) is expected
+
+
 @pytest.fixture(autouse=True)
 def default_pa_disabled(monkeypatch):
     monkeypatch.setattr(attn_utils, "requires_contiguous_pa_kv_cache", lambda *_args, **_kwargs: False)
@@ -132,7 +148,7 @@ def _configure_pa_allocation_check(monkeypatch, vllm_config, pa_enabled):
         for cache_kind in ("full", "sliding_window", "sparse", "full_sparse", "mixed")
         for pa_enabled in (False, True)
     ]
-    + [("c8", True), ("dcp", True)],
+    + [("c8", True)],
 )
 def test_main_allocator_attention_layout(
     monkeypatch, block_size, kernel_block_size, kv_transfer, cache_kind, pa_enabled
@@ -164,7 +180,6 @@ def test_main_allocator_attention_layout(
     )
     impl_cls = {
         "c8": AscendC8AttentionBackendImpl,
-        "dcp": AscendAttentionDCPImpl,
     }.get(cache_kind, AscendAttentionBackendImpl)
     impl = impl_cls.__new__(impl_cls)
     impl.sliding_window = extra_args.get("sliding_window")
@@ -185,7 +200,7 @@ def test_main_allocator_attention_layout(
         cache_config=SimpleNamespace(cache_dtype="auto"),
         kv_transfer_config=object() if kv_transfer else None,
         model_config=SimpleNamespace(hf_config=SimpleNamespace()),
-        parallel_config=SimpleNamespace(decode_context_parallel_size=2 if cache_kind == "dcp" else 1),
+        parallel_config=SimpleNamespace(decode_context_parallel_size=1),
         quant_config=None,
     )
     monkeypatch.setattr(attn_utils, "get_current_vllm_config", lambda: vllm_config)
@@ -678,6 +693,9 @@ def test_v2_single_raw_mla_path_excludes_unsupported_modes(monkeypatch):
 
     attn_module.impl.fa_quant_layer = True
     assert not attn_utils._uses_single_raw_mla_cache(vllm_config, layer_name, spec)
+    attn_module.impl.use_flashmla = True
+    assert attn_utils._uses_single_raw_mla_cache(vllm_config, layer_name, spec)
+    attn_module.impl.use_flashmla = False
     attn_module.impl.fa_quant_layer = False
 
     attn_module.impl.use_pcp = True
@@ -1007,7 +1025,7 @@ def test_main_dsv4_materializes_real_planner_geometry_once(monkeypatch):
     tuple_stride = (small_spec.page_size_bytes + large_spec.page_size_bytes) * num_blocks
     backing_size = tuple_stride * 2
     monkeypatch.setattr(
-        "vllm_ascend.patch.platform.patch_kv_cache_utils.may_override_num_blocks",
+        "vllm_ascend.core.kv_cache_config_builder.may_override_num_blocks",
         lambda _config, value: value,
     )
     planned_num_blocks, descriptors = _get_kv_cache_config_deepseek_v4_main(
@@ -1025,7 +1043,7 @@ def test_main_dsv4_materializes_real_planner_geometry_once(monkeypatch):
         additional_config={},
         kv_transfer_config=None,
         model_config=SimpleNamespace(
-            hf_config=SimpleNamespace(compress_ratios=[1]),
+            hf_config=SimpleNamespace(model_type="deepseek_v4"),
         ),
     )
     monkeypatch.setattr(
@@ -1106,8 +1124,7 @@ def test_build_attn_metadata_factory_applies_state(monkeypatch, state_kwargs, fa
     assert captured_kwargs["copy_sfa_draft_index"] == 2
 
 
-@pytest.mark.parametrize("dcp_size", [2])
-def test_gqa_pcp_dcp_cache_keeps_tp_local_kv_heads(monkeypatch, dcp_size):
+def test_gqa_pcp_cache_keeps_tp_local_kv_heads(monkeypatch):
     source_spec = FullAttentionSpec(
         block_size=128,
         num_kv_heads=1,
@@ -1131,7 +1148,7 @@ def test_gqa_pcp_dcp_cache_keeps_tp_local_kv_heads(monkeypatch, dcp_size):
         parallel_config=SimpleNamespace(
             tensor_parallel_size=8,
             prefill_context_parallel_size=2,
-            decode_context_parallel_size=dcp_size,
+            decode_context_parallel_size=1,
         ),
         attention_config=AttentionConfig(indexer_kv_dtype="auto"),
         cache_config=SimpleNamespace(cache_dtype="auto", block_size=128),
@@ -1148,7 +1165,7 @@ def test_gqa_pcp_dcp_cache_keeps_tp_local_kv_heads(monkeypatch, dcp_size):
 
 
 @pytest.mark.parametrize("is_draft_layer", [True, False])
-def test_draft_layer_specs_are_tagged_for_eagle_groups(monkeypatch, is_draft_layer):
+def test_draft_layer_specs_keep_ownership_and_sequence_capacity(monkeypatch, is_draft_layer):
     """Draft specs carry ``is_draft`` so EAGLE groups get flagged on main.
 
     vLLM #42309 annotates ``is_eagle_group`` from ``spec.is_draft``; without the
@@ -1170,14 +1187,15 @@ def test_draft_layer_specs_are_tagged_for_eagle_groups(monkeypatch, is_draft_lay
     )
     vllm_config = SimpleNamespace(
         model_config=SimpleNamespace(
-            use_mla=False,
+            use_mla=True,
+            max_model_len=1024,
             dtype=torch.bfloat16,
             get_total_num_kv_heads=lambda: 4,
         ),
         parallel_config=SimpleNamespace(
             tensor_parallel_size=1,
             prefill_context_parallel_size=1,
-            decode_context_parallel_size=1,
+            decode_context_parallel_size=2,
         ),
         attention_config=AttentionConfig(indexer_kv_dtype="auto"),
         cache_config=SimpleNamespace(cache_dtype="auto", block_size=128),
@@ -1188,9 +1206,19 @@ def test_draft_layer_specs_are_tagged_for_eagle_groups(monkeypatch, is_draft_lay
         lambda *_args, **_kwargs: {"model.layers.0.self_attn.attn": layer},
     )
 
-    spec = attn_utils.get_kv_cache_spec(vllm_config)["model.layers.0.self_attn.attn"]
+    # Ascend delegates to the upstream runner, which marks replicated draft
+    # groups using the speculator's effective DCP size before cache planning.
+    monkeypatch.setattr(upstream_model_runner, "get_kv_cache_spec", attn_utils.get_kv_cache_spec)
+    speculator = object.__new__(AscendEagleSpeculator)
+    speculator.dcp_size = 1
+    speculator.draft_attn_layer_names = {"model.layers.0.self_attn.attn"} if is_draft_layer else set()
+    runner = SimpleNamespace(vllm_config=vllm_config, speculator=speculator, dcp_size=2)
+    spec = upstream_model_runner.GPUModelRunner.get_kv_cache_spec(runner)["model.layers.0.self_attn.attn"]
 
     assert spec.is_draft is is_draft_layer
+    assert spec.dcp_sharded is (not is_draft_layer)
+    expected_blocks = 8 if is_draft_layer else 4
+    assert spec.max_num_blocks_per_req(vllm_config, 1024) == expected_blocks
 
 
 @pytest.mark.parametrize(
@@ -1200,8 +1228,9 @@ def test_draft_layer_specs_are_tagged_for_eagle_groups(monkeypatch, is_draft_lay
 @pytest.mark.parametrize("dcp_sharded", [False, True])
 @pytest.mark.parametrize(("source_is_draft", "is_draft_layer"), [(False, False), (False, True), (True, False)])
 @pytest.mark.parametrize("non_causal", [False, True])
+@pytest.mark.parametrize("dspark_active", [False, True])
 def test_mla_cache_spec_uses_physical_heads_for_kimi_k3(
-    monkeypatch, model_type, expected_num_heads, source_is_draft, is_draft_layer, non_causal, dcp_sharded
+    monkeypatch, model_type, expected_num_heads, source_is_draft, is_draft_layer, non_causal, dcp_sharded, dspark_active
 ):
     source_spec = MLAAttentionSpec(
         block_size=128,
@@ -1237,6 +1266,15 @@ def test_mla_cache_spec_uses_physical_heads_for_kimi_k3(
         attention_config=AttentionConfig(indexer_kv_dtype="auto"),
         cache_config=SimpleNamespace(block_size=128, cache_dtype="auto"),
     )
+    if dspark_active:
+        # Only a DSpark draft protocol owns device-resident draft layers.
+        vllm_config.speculative_config = SimpleNamespace(method="dspark")
+        vllm_config.kv_transfer_config = SimpleNamespace(
+            is_kv_producer=False,
+            is_kv_consumer=True,
+            kv_connector="SfaRemoteD2HConnector",
+            kv_connector_extra_config={},
+        )
     monkeypatch.setattr(
         attn_utils,
         "get_layers_from_vllm_config",
@@ -1251,8 +1289,105 @@ def test_mla_cache_spec_uses_physical_heads_for_kimi_k3(
     assert spec.dcp_sharded is dcp_sharded
     assert spec.page_size_bytes == source_spec.page_size_bytes
     assert spec.is_draft is (source_is_draft or is_draft_layer)
-    assert spec.store_on_host is not spec.is_draft
+    if spec.is_draft:
+        # Draft layers stay device-resident only under the DSpark protocol;
+        # any other draft method must ride the host pipeline (its only PD
+        # transfer path, broken by upstream #20878's blanket exclusion).
+        assert spec.store_on_host is not dspark_active
+    else:
+        assert spec.store_on_host is True
     assert spec.non_causal_multi_token_decode is non_causal
+
+
+@pytest.mark.parametrize(
+    "is_draft,method,model_type,quantized,expected_dtype",
+    [
+        (True, "dspark", "k3_dspark", False, torch.bfloat16),
+        (True, "dspark", "k3_dspark", True, torch.float8_e4m3fn),
+        (False, "dspark", "k3_dspark", False, torch.float8_e4m3fn),
+        (True, "eagle3", "k3_dspark", False, torch.float8_e4m3fn),
+        (True, "dspark", "other_draft", False, torch.float8_e4m3fn),
+    ],
+)
+def test_k31_dspark_mla_cache_spec_uses_layer_dtype(
+    monkeypatch, is_draft, method, model_type, quantized, expected_dtype
+):
+    source_spec = MLAAttentionSpec(
+        block_size=1536,
+        num_kv_heads=1,
+        head_size=576,
+        dtype=torch.bfloat16 if quantized else torch.float8_e4m3fn,
+        cache_dtype_str=None if quantized else "fp8",
+        kv_quant_mode=KVQuantMode.NONE if quantized else KVQuantMode.FP8_PER_TENSOR,
+        non_causal_multi_token_decode=True,
+    )
+    layer = AscendMLAAttention.__new__(AscendMLAAttention)
+    torch.nn.Module.__init__(layer)
+    layer.impl = SimpleNamespace(
+        fa_quant_layer=quantized,
+        enable_sparse_sfa_c8=False,
+        enable_sparse_sfa_turboquant=False,
+        dtype=torch.float8_e4m3fn if quantized else torch.bfloat16,
+        head_size=512,
+        store_kv_cache_on_host=False,
+    )
+    layer.num_heads = 96
+    layer.kv_lora_rank = 512
+    layer.attn_backend = AscendMLABackend
+    layer.qk_rope_head_dim = 64
+    layer.model_version = None
+    layer.indexes_kv_by_block_stride = False
+    layer.is_draft_layer = is_draft
+    layer.kv_sharing_target_layer_name = None
+    monkeypatch.setattr(MLAAttention, "get_kv_cache_spec", lambda *_: source_spec)
+    vllm_config = SimpleNamespace(
+        speculative_config=SimpleNamespace(
+            method=method,
+            draft_model_config=SimpleNamespace(hf_config=SimpleNamespace(model_type=model_type)),
+        ),
+        model_config=SimpleNamespace(
+            dtype=torch.bfloat16,
+            hf_text_config=SimpleNamespace(model_type="kimi_linear"),
+        ),
+        parallel_config=SimpleNamespace(
+            decode_context_parallel_size=1,
+            prefill_context_parallel_size=1,
+        ),
+        attention_config=SimpleNamespace(indexer_kv_dtype="auto", hisparse_config=None),
+        cache_config=SimpleNamespace(block_size=1536, cache_dtype="fp8"),
+    )
+    monkeypatch.setattr(
+        attn_utils,
+        "get_layers_from_vllm_config",
+        lambda *_args, **_kwargs: {"model.layers.93.self_attn.attn": layer},
+    )
+    # The surrounding VllmConfig still belongs to the K3.1 SFA target. The
+    # layer-local FA quant flag must take precedence for this DSpark draft.
+    monkeypatch.setattr(attn_utils, "enable_sfa", lambda _config: True)
+
+    monkeypatch.setattr(
+        attn_utils,
+        "get_ascend_config",
+        lambda: SimpleNamespace(sparse_kv_offload_config=SimpleNamespace(enabled=False)),
+    )
+
+    spec = attn_utils.get_kv_cache_spec(vllm_config)["model.layers.93.self_attn.attn"]
+
+    assert isinstance(spec, AscendMLAAttentionSpec)
+    assert spec.is_draft is is_draft
+    assert spec.num_heads == 1
+    assert spec.head_size == 576
+    assert spec.dtype == expected_dtype
+    if quantized or expected_dtype == torch.bfloat16:
+        assert spec.cache_dtype_str is None
+        assert spec.kv_quant_mode == KVQuantMode.NONE
+    else:
+        assert spec.cache_dtype_str == "fp8"
+        assert spec.kv_quant_mode == KVQuantMode.FP8_PER_TENSOR
+    assert not spec.cache_sparse_sfa_c8
+    assert not spec.store_on_host
+    assert spec.page_size_bytes == 1536 * 576 * torch.empty((), dtype=spec.dtype).element_size()
+    assert spec.non_causal_multi_token_decode
 
 
 @pytest.mark.parametrize(
@@ -2796,7 +2931,6 @@ def _run_get_kv_cache_spec(monkeypatch, vllm_config, spec) -> dict:
         get_attn_backend=lambda: AscendAttentionBackend,
     )
     monkeypatch.setattr(attn_utils, "get_layers_from_vllm_config", lambda _cfg, _type: {"attn": attn_module})
-    monkeypatch.setattr(attn_utils, "kv_cache_dtype_str_to_dtype", lambda _s, _m: torch.bfloat16)
     return attn_utils.get_kv_cache_spec(vllm_config)
 
 
@@ -3410,3 +3544,59 @@ def test_step5_reshape_rejects_non_tensor_step_aux_raw(monkeypatch) -> None:
 
     with pytest.raises(ValueError, match="must use one raw tensor"):
         _step5_reshape(config, raw, monkeypatch)
+
+
+@pytest.mark.parametrize(
+    "target_dtype,layer_dtype,packed",
+    [
+        ("int8", torch.bfloat16, False),
+        ("int8", torch.bfloat16, True),
+        ("int8", torch.int8, True),
+    ],
+)
+def test_sfa_reshape_uses_each_layer_storage_format(monkeypatch, target_dtype, layer_dtype, packed):
+    layer_name = "model.layers.78.self_attn.attn"
+    num_blocks, block_size = 2, 128
+    spec = AscendMLAAttentionSpec(
+        block_size=block_size,
+        num_kv_heads=1,
+        head_size=656 if packed else 576,
+        dtype=layer_dtype,
+        is_draft=True,
+        cache_sparse_sfa_c8=packed,
+    )
+    config = SimpleNamespace(
+        cache_config=SimpleNamespace(cache_dtype=target_dtype),
+        model_config=SimpleNamespace(dtype=torch.bfloat16),
+    )
+    monkeypatch.setattr(attn_utils, "get_current_vllm_config", lambda: config)
+    monkeypatch.setattr(attn_utils, "enable_sfa", lambda _: True)
+    monkeypatch.setattr(attn_utils, "_uses_single_raw_mla_cache", lambda *_: False)
+    monkeypatch.setattr(attn_utils, "_get_attention_kv_cache_dims", lambda *_: (512, 64))
+    raw = torch.zeros(num_blocks * spec.page_size_bytes, dtype=torch.int8)
+    cache_config = KVCacheConfig(
+        num_blocks=num_blocks,
+        kv_cache_tensors=[_make_kv_cache_tensor(raw.numel(), [layer_name], spec.page_size_bytes)],
+        kv_cache_groups=[KVCacheGroupSpec(layer_names=[layer_name], kv_cache_spec=spec)],
+    )
+    group = AttentionGroup(
+        backend=AscendSFABackend,
+        layer_names=[layer_name],
+        kv_cache_spec=spec,
+        kv_cache_group_id=0,
+    )
+    caches = attn_utils._reshape_kv_cache_v2(
+        attn_groups=[group],
+        kv_cache_raw_tensors={layer_name: raw},
+        cache_dtype=target_dtype,
+        kernel_block_sizes=[block_size],
+        shared_kv_cache_layers={},
+        kv_cache_config=cache_config,
+    )[layer_name]
+    assert len(caches) == (1 if packed else 2)
+    assert all(cache.dtype == layer_dtype for cache in caches)
+    assert all(cache.untyped_storage().data_ptr() == raw.untyped_storage().data_ptr() for cache in caches)
+    assert sum(cache.numel() * cache.element_size() for cache in caches) == raw.numel()
+    assert caches[0].shape == (num_blocks, block_size, 1, 656 if packed else 512)
+    if not packed:
+        assert caches[1].shape == (num_blocks, block_size, 1, 64)

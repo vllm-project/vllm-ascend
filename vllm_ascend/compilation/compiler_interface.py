@@ -162,7 +162,24 @@ def _configure_backend(
 
             options["static_kernel_compile"] = True
             # Set sym_range to limit static kernel compilation to specified batch sizes.
-            options["_vllm_aclnn_static_kernel_sym_range"] = _compute_decode_cudagraph_batch_sizes(vllm_config)
+            # PIECEWISE graphs capture and replay exactly at the cudagraph capture
+            # sizes, so compile those shapes; other routes use decode batch sizes.
+            compilation_config = vllm_config.compilation_config
+            if compilation_config.cudagraph_mode.requires_piecewise_compilation():
+                # Pieces are captured and replayed exactly at the cudagraph
+                # capture sizes. Newer vllm resolves the prefill token grid
+                # and the decode request grid separately, so prefer them and
+                # cover both; fall back to the legacy unified sizes.
+                prefill_sizes = getattr(compilation_config, "prefill_cudagraph_capture_token_sizes", None)
+                decode_sizes = getattr(compilation_config, "decode_cudagraph_capture_request_sizes", None)
+                if prefill_sizes is None and decode_sizes is None:
+                    sym_range = list(compilation_config.cudagraph_capture_sizes or [])
+                else:
+                    sym_range = list(prefill_sizes or [])
+                    sym_range.extend(size for size in decode_sizes or [] if size not in sym_range)
+                options["_vllm_aclnn_static_kernel_sym_range"] = sym_range
+            else:
+                options["_vllm_aclnn_static_kernel_sym_range"] = _compute_decode_cudagraph_batch_sizes(vllm_config)
             if ascend_compilation_config.enable_super_kernel:
                 options["super_kernel_optimize"] = True
                 options["super_kernel_optimize_options"] = {

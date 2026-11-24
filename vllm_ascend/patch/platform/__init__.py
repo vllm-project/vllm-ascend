@@ -19,7 +19,6 @@ import os
 import vllm_ascend.patch.platform.patch_distributed  # noqa
 import vllm_ascend.patch.platform.patch_kimi_k31_config  # noqa
 import vllm_ascend.patch.platform.patch_kv_cache_admission  # noqa
-import vllm_ascend.patch.platform.patch_kv_cache_utils  # noqa
 import vllm_ascend.patch.platform.patch_mamba_block_aligned_split  # noqa
 import vllm_ascend.patch.platform.patch_parallel_config  # noqa
 import vllm_ascend.patch.platform.patch_pp_mtp  # noqa
@@ -30,8 +29,6 @@ if get_current_hardware_profile().supports(HardwareCapability.STANDARD_MAMBA_PAT
     import vllm_ascend.patch.platform.patch_mamba_config  # noqa
 else:
     import vllm_ascend.patch.platform.patch_mamba_config_310  # noqa
-import vllm_ascend.patch.platform.patch_minimax_m2_config  # noqa
-
 import vllm_ascend.patch.platform.patch_structured_output  # noqa
 import vllm_ascend.patch.platform.patch_torch_accelerator  # noqa
 import vllm_ascend.patch.platform.patch_mamba_manager  # noqa
@@ -75,28 +72,6 @@ import vllm_ascend.patch.platform.patch_example_connector  # noqa
 #    Future Plan:
 #       Remove this patch when upstream's `is_cuda_alike()` covers Ascend NPU
 #       or when the device-index qualification is applied unconditionally.
-#
-# ** File: platform/patch_kv_cache_utils.py **
-# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-#   1. `vllm.v1.core.kv_cache_planning` (both supported versions, vLLM #61183)
-#    Why:
-#       vLLM's generic KV-cache planner cannot represent GLM-Next's cache
-#       topology, where MLA and compressed indexer caches share block IDs while
-#       indexer-state and Mamba caches use independent groups.
-#    How:
-#       Use GLM-Next-specific grouping, tensor layout, and memory accounting.
-#       Other models continue to use the original vLLM implementation.
-#    Related PR (if no, explain why):
-#       https://github.com/vllm-project/vllm/pull/53906
-#       https://github.com/vllm-project/vllm/pull/55219
-#    Future Plan:
-#       Remove this patch when upstream's generic KV-cache layout supports the
-#       Ascend GLM-Next cache topology.
-#
-#       On both supported versions, Ascend grouping and pool accounting live
-#       in AscendKVCacheConfigBuilder, which the platform selects through
-#       NPUPlatform.get_kv_cache_config_builder_cls. Its default materialization
-#       delegates to the patched planning functions in this file.
 #
 # ** File: platform/patch_mamba_config.py **
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~

@@ -16,7 +16,7 @@ from vllm_ascend.utils import get_pcp_profile_num_tokens
 from vllm_ascend.worker.v2.model_runner import NPUModelRunner
 
 
-def make_runner(tokens=16384, pcp=16, requests=64, query=4, replicated=False, dcp=1):
+def make_runner(tokens=16384, pcp=16, requests=64, query=4, method="mtp", dcp=1):
     runner = NPUModelRunner.__new__(NPUModelRunner)
     runner.max_num_tokens = tokens
     runner.max_num_reqs = requests
@@ -26,7 +26,7 @@ def make_runner(tokens=16384, pcp=16, requests=64, query=4, replicated=False, dc
         compilation_config=SimpleNamespace(cudagraph_mode=CUDAGraphMode.NONE, cudagraph_capture_sizes=[]),
     )
     runner.speculative_config = SimpleNamespace(
-        method="dspark" if replicated else "mtp",
+        method=method,
         num_speculative_tokens=query - 1,
         max_num_new_slots_for_drafting=0,
     )
@@ -36,18 +36,19 @@ def make_runner(tokens=16384, pcp=16, requests=64, query=4, replicated=False, dc
 
 
 @pytest.mark.parametrize(
-    "tokens,pcp,requests,query,replicated,expected",
+    "tokens,pcp,requests,query,method,expected",
     [
-        (16384, 1, 64, 4, False, 16384),
-        (16384, 16, 64, 4, False, 1392),
-        (16384, 16, 512, 4, False, 3968),
-        (17, 4, 2, 1, False, 10),
-        (17, 16, 64, 4, False, 17),
-        (16384, 16, 64, 9, True, 16384),
+        (16384, 1, 64, 4, "mtp", 16384),
+        (16384, 16, 64, 4, "mtp", 1392),
+        (16384, 16, 512, 4, "mtp", 3968),
+        (17, 4, 2, 1, "mtp", 10),
+        (17, 16, 64, 4, "mtp", 17),
+        (16384, 8, 64, 4, "dspark", 2400),
+        (16384, 8, 64, 4, "dflash", 2400),
     ],
 )
-def test_local_prefill_preserves_draft_requests(tokens, pcp, requests, query, replicated, expected):
-    runner = make_runner(tokens, pcp, requests, query, replicated)
+def test_local_prefill_preserves_draft_requests(tokens, pcp, requests, query, method, expected):
+    runner = make_runner(tokens, pcp, requests, query, method)
     assert get_pcp_profile_num_tokens(runner.vllm_config, runner.max_num_tokens, runner.max_num_reqs) == expected
     assert runner.max_num_tokens == tokens
     assert runner.max_num_reqs == requests
@@ -58,22 +59,6 @@ def test_no_draft_preserves_target_decode_requests():
     runner.speculative_config = None
     runner.vllm_config.speculative_config = None
     assert get_pcp_profile_num_tokens(runner.vllm_config, runner.max_num_tokens, runner.max_num_reqs) == 7040
-
-
-def test_non_model_draft_keeps_global_budget():
-    runner = make_runner()
-    runner.speculative_config.method = "ngram"
-    assert get_pcp_profile_num_tokens(runner.vllm_config, runner.max_num_tokens, runner.max_num_reqs) == 16384
-
-
-@pytest.mark.parametrize("method", ["dflash", "dspark", "draft_model"])
-def test_replicated_draft_context_is_not_reduced(method):
-    runner = make_runner()
-    runner.speculative_config.method = method
-    assert (
-        get_pcp_profile_num_tokens(runner.vllm_config, runner.max_num_tokens, runner.max_num_reqs)
-        == runner.max_num_tokens
-    )
 
 
 @pytest.mark.parametrize("tokens,requests", [(16384, 64), (16384, 512), (17, 64)])
@@ -102,15 +87,15 @@ def test_local_dummy_preserves_actual_upstream_request_count(tokens, requests):
 
 
 @pytest.mark.parametrize("fail", [False, True])
-@pytest.mark.parametrize("replicated,expected", [(False, 3968), (True, 16384)])
-def test_profile_temporarily_sets_budget_and_restores_on_failure(fail, replicated, expected):
-    runner = make_runner(requests=512, replicated=replicated)
+@pytest.mark.parametrize("method", ["mtp", "dspark", "dflash"])
+def test_profile_temporarily_sets_budget_and_restores_on_failure(fail, method):
+    runner = make_runner(requests=512, method=method)
     runner.ascend_config = SimpleNamespace(sparse_kv_offload_config=SimpleNamespace(enabled=False))
     runner._dummy_run = Mock()
 
     def profile(self, **kwargs):
         assert kwargs == {"randomize_inputs": True}
-        assert self.max_num_tokens == expected
+        assert self.max_num_tokens == 3968
         assert self.max_num_reqs == 512
         if fail:
             raise RuntimeError("profile failed")

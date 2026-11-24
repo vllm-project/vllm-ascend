@@ -1,0 +1,8 @@
+pr: 21831
+entries:
+  - category: feature
+    model: glm-5.3-flash
+    text: >-
+      GLM-5.3-Flash can now use DFlash2 speculative decoding in Model Runner V2
+      with --pipeline-parallel-size greater than 1. Combining pipeline
+      parallelism with sequence-parallel MoE remains unsupported.

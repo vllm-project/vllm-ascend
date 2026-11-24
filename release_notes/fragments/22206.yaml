@@ -1,0 +1,22 @@
+pr: 22206
+entries:
+  - category: bugfix
+    text: >-
+      Fixed multimodal requests crashing the engine with "too many values to
+      unpack (expected 4)" when `enable_balance_scheduling` or DyntraLB is
+      enabled on vLLM 0.32 or later.
+  - category: bugfix
+    text: >-
+      With Model Runner V2, the Balance, DyntraLB and recompute schedulers now
+      release a multimodal request's CPU image data once its prefill has used
+      it, instead of keeping it until the request finishes.
+  - category: bugfix
+    text: >-
+      Fixed `enable_balance_scheduling` with `ECMooncakeConnector` crashing the
+      engine with "Encoder cache miss" when an image's encoder output was
+      evicted from the local cache between prefill chunks of the same request.
+  - category: bugfix
+    text: >-
+      `ECMemcacheConnector` no longer queries memcache on every decode step for
+      images a request has already used, so its reported hit rate is no longer
+      inflated by those repeated lookups.

@@ -1,7 +1,7 @@
 from vllm.model_executor.layers.mamba.gdn.qwen_gdn_linear_attn import QwenGatedDeltaNetAttention
 from vllm.third_party.flash_linear_attention.ops import index as fla_index
 
-from vllm_ascend._310p.ops.fla.gdn_310 import AscendGatedDeltaNetAttention310
+from vllm_ascend._310p.attention.gdn_310 import AscendGatedDeltaNetAttention310
 from vllm_ascend._310p.ops.fla.idex import (
     prepare_chunk_indices_310,
     prepare_chunk_offsets_310,
@@ -30,7 +30,7 @@ if is_rc_device():
     from vllm.model_executor.models.qwen3_vl import Qwen3_VisionTransformer
     from vllm.v1.attention.backends.gdn_attn import GDNAttentionBackend
 
-    from vllm_ascend._310p.ops.gdn_attn_builder_310 import GDNAttentionMetadataBuilder310
+    from vllm_ascend._310p.attention.gdn_attn_builder_310 import GDNAttentionMetadataBuilder310
     from vllm_ascend._310p.ops.qwen3vl_310 import rot_pos_emb_310
 
     # 310P RC: use blocking H2D in rot_pos_emb to avoid race with subsequent indexing.

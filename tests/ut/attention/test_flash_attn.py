@@ -160,6 +160,11 @@ def test_flash_attn_preserves_m3_fp8_target_kernel_pages(monkeypatch):
 @pytest.fixture
 def dflash2_config():
     return SimpleNamespace(
+        cache_config=SimpleNamespace(cache_dtype="auto"),
+        quant_config=None,
+        parallel_config=SimpleNamespace(
+            pipeline_parallel_size=1, prefill_context_parallel_size=1, decode_context_parallel_size=1
+        ),
         model_config=SimpleNamespace(runner_type="generate", hf_config=SimpleNamespace(architectures=["DFlash2Model"])),
         speculative_config=SimpleNamespace(
             method="dflash",
@@ -185,7 +190,11 @@ def select_flash_attn(monkeypatch):
     from vllm_ascend import platform
     from vllm_ascend.device.hardware_profile import AttentionBackendFamily
 
-    profile = SimpleNamespace(supports=lambda _: True, attention_backend_family=AttentionBackendFamily.STANDARD)
+    profile = SimpleNamespace(
+        supports=lambda _: True,
+        attention_backend_family=AttentionBackendFamily.STANDARD,
+        flash_attn_npu_3_models=frozenset(),
+    )
     monkeypatch.setattr(platform, "get_current_hardware_profile", lambda: profile)
     monkeypatch.setattr(platform, "_validate_fa3_backend", lambda *_: False)
 
@@ -253,6 +262,14 @@ def test_flash_attn_requires_live_dflash_loader_tag(monkeypatch, select_flash_at
     assert not platform._validate_flash_attn_backend((False, False, False), selector)
 
 
+@pytest.mark.parametrize("enforce_eager", [False, True, None])
+def test_dflash_selection_requires_eager_draft(select_flash_attn, dflash2_config, enforce_eager):
+    select, _ = select_flash_attn
+    dflash2_config.speculative_config.enforce_eager = enforce_eager
+    selector = AttentionSelectorConfig(head_size=128, block_size=128, dtype=torch.bfloat16, kv_cache_dtype="auto")
+    assert select(dflash2_config, selector) == bool(enforce_eager)
+
+
 @pytest.mark.parametrize("sampling", ["greedy", "probabilistic"])
 def test_flash_attn_selection_is_independent_of_draft_sampling(select_flash_attn, dflash2_config, sampling):
     select, _ = select_flash_attn
@@ -266,13 +283,11 @@ def test_flash_attn_selection_is_independent_of_draft_sampling(select_flash_attn
     [
         ("method", "eagle3"),
         ("method", "mtp"),
-        ("enforce_eager", False),
-        ("enforce_eager", None),
         ("architectures", ["DFlashDraftModel"]),
         ("architectures", None),
     ],
 )
-def test_other_drafts_and_graph_mode_retain_legacy_backend(select_flash_attn, dflash2_config, field, value):
+def test_other_drafts_retain_legacy_backend(select_flash_attn, dflash2_config, field, value):
     select, _ = select_flash_attn
     spec = dflash2_config.speculative_config
     setattr(spec.draft_model_config if field == "architectures" else spec, field, value)
