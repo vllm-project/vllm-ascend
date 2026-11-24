@@ -31,6 +31,7 @@ from vllm_ascend.attention.context_parallel.common_cp import (
     get_pcp_num_replicated_tokens,
 )
 from vllm_ascend.attention.indexer import AscendSFAIndexerCache
+from vllm_ascend.attention.mega_dsa import prepare_mega_dsa
 from vllm_ascend.attention.sparse_flash_mla import sparse_flash_mla, sparse_flash_mla_metadata
 from vllm_ascend.attention.utils import (
     MLAPO_MAX_SUPPORTED_TOKENS,
@@ -1059,6 +1060,7 @@ class AscendSFAImpl(MLAAttentionImpl):
 
         if self.has_indexer:
             self.indexer.process_weights_after_loading()
+        self._mega_dsa = prepare_mega_dsa(self) if type(self) is AscendSFAImpl else None
 
         if self._parallel_o_proj is not None:
             self._parallel_o_proj.enable()
@@ -2208,6 +2210,21 @@ class AscendSFAImpl(MLAAttentionImpl):
         sin = attn_metadata.sin
         slot_mapping_sfa = self._get_sfa_kv_slot_mapping(attn_metadata)
         indexer_attn_metadata = self._get_indexer_attn_metadata()
+        mega_dsa = getattr(self, "_mega_dsa", None)
+        if (
+            mega_dsa is not None
+            and not input_is_sequence_parallel
+            and attn_metadata.attn_state in (AscendAttentionState.DecodeOnly, AscendAttentionState.SpecDecoding)
+            and mega_dsa.supports(hidden_states, output, kv_cache, attn_metadata, indexer_attn_metadata)
+        ):
+            wait_for_kv_layer_from_connector(layer_name)
+            if self.layerwise_kv_cache_hook is not None:
+                self.layerwise_kv_cache_hook.wait_for_layer(layer_name)
+            with attention_transfer_window():
+                mega_dsa(hidden_states, output, kv_cache, attn_metadata, indexer_attn_metadata)
+            notify_kv_cache_written(self.layer_name or "")
+            maybe_save_kv_layer_to_connector(layer_name, list(kv_cache))
+            return output
 
         # Inputs and outputs may be padded for CUDA graphs
         num_input_tokens = hidden_states.shape[0] if self.qk_rope_head_dim == 0 else attn_metadata.num_input_tokens
