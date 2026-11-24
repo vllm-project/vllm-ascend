@@ -105,6 +105,7 @@ for i in $(seq 0 15); do
 done
 
 docker run -itd \
+    --net=host \
     --name ${CONTAINER_NAME} \
     --shm-size=1000g \
     ${DEVICES} \
@@ -160,13 +161,13 @@ vllm serve /path/to/Hy4-preview-w8a8 \
   --gpu-memory-utilization 0.92 \
   --seed 1024 \
   --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
-  --speculative-config '{"method": "mtp","num_speculative_tokens": 3}' \
+  --speculative-config '{"method": "mtp", "num_speculative_tokens": 3}' \
   --additional-config '{"enable_mlapo": true, "enable_fused_mc2": 1, "ascend_compilation_config": {"enable_npugraph_ex": true}}'
 ```
 
 ### 5.2 Multi-Node Co-Located Deployment
 
-DP=2 cross-machine deployment with TP=16 per node extends the context to 96k. Node 1 (Node1, demo IP `192.168.1.1`) hosts DP rank 0 and the API, and Node 2 (Node2, demo IP `192.168.1.2`) is a headless worker. Both nodes share the host network via `--net=host`. Use the same command as the A3 single-node deployment, executed inside the container.
+DP=2 cross-machine deployment with TP=16 per node extends the context to 96k. Node 1 (Node1, demo IP `192.168.1.1`) hosts DP rank 0 and the API, and Node 2 (Node2, demo IP `192.168.1.2`) is a headless worker. Both nodes must be started with `--net=host` (add this flag to the `docker run` command in Section 4.1); otherwise they do not share the host network and multi-node DP/HCCL communication will fail. Use the same command as the A3 single-node deployment, executed inside the container.
 
 Startup order:
 
@@ -218,7 +219,7 @@ vllm serve ${MODEL} \
   --enable-prefix-caching \
   --seed 1024 \
   --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
-  --speculative-config '{"method": "mtp","num_speculative_tokens": 3}' \
+  --speculative-config '{"method": "mtp", "num_speculative_tokens": 3}' \
   --additional-config '{"enable_mlapo": true, "enable_fused_mc2": 1, "ascend_compilation_config": {"enable_npugraph_ex": true}}'
 ```
 
@@ -264,7 +265,7 @@ vllm serve ${MODEL} \
   --enable-prefix-caching \
   --seed 1024 \
   --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
-  --speculative-config '{"method": "mtp","num_speculative_tokens": 3}' \
+  --speculative-config '{"method": "mtp", "num_speculative_tokens": 3}' \
   --additional-config '{"enable_mlapo": true, "enable_fused_mc2": 1, "ascend_compilation_config": {"enable_npugraph_ex": true}}'
 ```
 
