@@ -3646,5 +3646,56 @@ class TestKVPoolWorkerResetStore(unittest.TestCase):
         worker.m_store.remove_all.assert_called_once_with()
 
 
+class TestLazyInitGate(unittest.TestCase):
+    PW = "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker"
+
+    def _run_init_backend(self, use_compress=False, architectures=None):
+        from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker import KVPoolWorker
+
+        worker = KVPoolWorker.__new__(KVPoolWorker)
+        worker.backend = "mooncake"
+        worker.use_compress = use_compress
+        worker.vllm_config = SimpleNamespace(
+            model_config=SimpleNamespace(hf_config=SimpleNamespace(architectures=architectures))
+        )
+        backend_cls = MagicMock()
+        fake_module = SimpleNamespace(Backend=backend_cls)
+        parallel_config = object()
+        extra_config = {"backend": "mooncake"}
+        with (
+            patch(self.PW + ".backend_map", {"mooncake": {"path": "fake_backend", "name": "Backend"}}),
+            patch(self.PW + ".importlib", SimpleNamespace(import_module=lambda _path: fake_module)),
+        ):
+            worker._init_backend(parallel_config, extra_config)
+        self.assertIs(worker.m_store, backend_cls.return_value)
+        self.assertEqual(backend_cls.call_args.args, (parallel_config,))
+        self.assertEqual(backend_cls.call_args.kwargs["extra_config"], extra_config)
+        return backend_cls
+
+    def test_qwen_flash_next_requests_lazy_init_without_compression(self):
+        backend_cls = self._run_init_backend(architectures=["Qwen4ExpForConditionalGeneration"])
+        self.assertTrue(backend_cls.call_args.kwargs["lazy_init"])
+
+    def test_compressed_model_keeps_lazy_init(self):
+        backend_cls = self._run_init_backend(use_compress=True)
+        self.assertTrue(backend_cls.call_args.kwargs["lazy_init"])
+
+    def test_architecture_match_is_exact(self):
+        for architectures in (
+            None,
+            [],
+            ["Qwen4ExpForCausalLM"],
+            ["Qwen4ExpForConditionalGenerationExtra"],
+            ["LlamaForCausalLM"],
+        ):
+            with self.subTest(architectures=architectures):
+                backend_cls = self._run_init_backend(architectures=architectures)
+                self.assertFalse(backend_cls.call_args.kwargs["lazy_init"])
+
+    def test_matching_architecture_in_list_requests_lazy_init(self):
+        backend_cls = self._run_init_backend(architectures=["OtherArchitecture", "Qwen4ExpForConditionalGeneration"])
+        self.assertTrue(backend_cls.call_args.kwargs["lazy_init"])
+
+
 if __name__ == "__main__":
     unittest.main()
