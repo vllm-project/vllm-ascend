@@ -116,25 +116,28 @@ class SlidingWindowAdapter:
             device=device,
         )
 
+    def token_crop(self, seq_lens: torch.Tensor) -> torch.Tensor:
+        """Token offset shared by every KV group. ``seq_lens`` shape is unchanged."""
+        raw = (seq_lens + self._future_offset - self.window_size).clamp(min=0)
+        return (raw // self._align) * self._align
+
     def compute_sliding_window_block_table(
         self,
         common_attn_metadata,
         out: torch.Tensor,
+        start_tokens: torch.Tensor | None = None,
     ) -> None:
-        k_future = self._future_offset
-        w = self.window_size
         b = self.block_size
-        align = self._align
         num_reqs = common_attn_metadata.seq_lens.shape[0]
         full_cols = self.full_block_table.shape[1]
 
-        # Window math on the (NPU) seq_lens. Pure arithmetic -> stays on NPU.
-        # ``align`` chooses the token boundary; ``b`` converts that offset into this
-        # table's columns. They are equal unless several kernel block sizes share a crop.
-        raw = (common_attn_metadata.seq_lens + k_future - w).clamp(min=0)
-        self.start_tokens_in_window_rounding = (raw // align) * align
-        self._windowed_seq_lens = common_attn_metadata.seq_lens - self.start_tokens_in_window_rounding
-        start_block_indices = self.start_tokens_in_window_rounding // b
+        # Window math stays on the seq_lens device. ``start_tokens`` is that crop;
+        # MRV2 computes it once and each group divides by its own block size.
+        if start_tokens is None:
+            start_tokens = self.token_crop(common_attn_metadata.seq_lens)
+        self.start_tokens_in_window_rounding = start_tokens
+        self._windowed_seq_lens = common_attn_metadata.seq_lens - start_tokens
+        start_block_indices = start_tokens // b
 
         # column offset grid [1, max_window_blocks]
         cols = torch.arange(self.max_window_blocks, device=self.full_block_table.device).unsqueeze(0)
@@ -155,9 +158,6 @@ class SlidingWindowAdapter:
     ) -> None:
         self.full_block_table = common_attn_metadata.block_table_tensor
         num_reqs = common_attn_metadata.seq_lens.shape[0]
-        k_future = self._future_offset
-        w = self.window_size
-        align = self._align
 
         self.compute_sliding_window_block_table(common_attn_metadata, self._block_table_clone)
         common_attn_metadata.block_table_tensor = self._block_table_clone[:num_reqs]
@@ -168,8 +168,7 @@ class SlidingWindowAdapter:
         for name in ("seq_lens_cpu", "_seq_lens_cpu", "seq_lens_cpu_upper_bound"):
             src = getattr(common_attn_metadata, name, None)
             if src is not None:
-                _windowed = src - ((src + k_future - w).clamp(min=0) // align) * align
-                setattr(common_attn_metadata, name, _windowed)
+                setattr(common_attn_metadata, name, src - self.token_crop(src))
 
 
 @contextmanager

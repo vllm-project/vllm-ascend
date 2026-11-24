@@ -183,28 +183,16 @@ class MRV2DraftSlidingWindow:
 
         extras = [extra for extra in extra_seq_lens if extra is not None]
 
-        # Crop into private clones first. Live tables stay intact until every group
-        # agrees on the same token offset.
+        # One token crop for every group. Each table divides it by its own block size.
+        # Private clones are filled before any live table is replaced.
         seq_lens = original_seq_lens[:num_reqs]
-        windowed_seq_lens: torch.Tensor | None = None
-        crops: list[torch.Tensor] = []
+        crop = self.adapters[0].token_crop(seq_lens)
+        windowed_seq_lens = seq_lens - crop
         for i, full_table in enumerate(original_tables):
             meta = SimpleNamespace(seq_lens=seq_lens, block_table_tensor=full_table)
             adapter = self.adapters[i]
             adapter.full_block_table = full_table
-            adapter.compute_sliding_window_block_table(meta, self._clones[i])
-            crops.append(adapter.start_tokens_in_window_rounding)
-            if windowed_seq_lens is None:
-                windowed_seq_lens = adapter._windowed_seq_lens
-
-        assert windowed_seq_lens is not None
-        crop = crops[0]
-        for other in crops[1:]:
-            if not torch.equal(crop, other):
-                raise RuntimeError(
-                    "draft sliding window token crops differ across KV groups "
-                    f"(kernel block sizes {list(self.block_sizes)}); block tables were left unchanged"
-                )
+            adapter.compute_sliding_window_block_table(meta, self._clones[i], start_tokens=crop)
         for i in range(len(original_tables)):
             block_tables.input_block_tables[i] = self._clones[i][:num_reqs]
         self._last_windowed_seq_lens = windowed_seq_lens

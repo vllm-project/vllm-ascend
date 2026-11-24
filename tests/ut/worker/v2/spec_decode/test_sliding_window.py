@@ -151,6 +151,8 @@ def test_mixed_kernel_block_sizes_crop_each_group():
         assert windowed_ub[0].item() == 192  # 320 - 128
         assert block_tables.input_block_tables[0][0, 0].item() == 2  # 128 / 64
         assert block_tables.input_block_tables[1][0, 0].item() == 101  # 128 / 128
+        shared_crop = helper.adapters[0].start_tokens_in_window_rounding
+        assert helper.adapters[1].start_tokens_in_window_rounding is shared_crop
         assert block_tables.input_block_tables[0].shape[1] == helper.adapters[0].max_window_blocks
         assert block_tables.input_block_tables[1].shape[1] == helper.adapters[1].max_window_blocks
         torch.testing.assert_close(block_tables.slot_mappings, saved_slots)
@@ -175,6 +177,8 @@ def test_mixed_kernel_block_sizes_crop_each_group():
         assert windowed_ub[0].item() == 192
         assert block_tables.input_block_tables[0][0, 0].item() == 2
         assert block_tables.input_block_tables[1][0, 0].item() == 101
+        shared_crop = helper_coarse.adapters[0].start_tokens_in_window_rounding
+        assert helper_coarse.adapters[1].start_tokens_in_window_rounding is shared_crop
 
     torch.testing.assert_close(block_tables.input_block_tables[0], original_a)
     torch.testing.assert_close(block_tables.input_block_tables[1], original_b)
@@ -325,40 +329,6 @@ def test_apply_builder_inputs_rejects_a_changed_group_count():
             pass
 
     torch.testing.assert_close(block_tables.input_block_tables[0], original)
-    assert input_buffers.seq_lens[0].item() == 300
-
-
-def test_divergent_token_crops_leave_live_tables_unchanged():
-    helper = MRV2DraftSlidingWindow(
-        window_size=128,
-        block_sizes=(64, 128),
-        max_num_reqs=1,
-        future_offset=0,
-        device=torch.device("cpu"),
-    )
-    real_compute = helper.adapters[1].compute_sliding_window_block_table
-
-    def _shift_second_crop(metadata, out):
-        real_compute(metadata, out)
-        helper.adapters[1].start_tokens_in_window_rounding = (
-            helper.adapters[1].start_tokens_in_window_rounding + helper.adapters[1].block_size
-        )
-
-    helper.adapters[1].compute_sliding_window_block_table = _shift_second_crop
-    table_a = torch.arange(8, dtype=torch.int32).view(1, 8)
-    table_b = table_a + 100
-    original_a = table_a.clone()
-    original_b = table_b.clone()
-    block_tables = SimpleNamespace(input_block_tables=[table_a, table_b])
-    input_buffers = SimpleNamespace(seq_lens=torch.tensor([300], dtype=torch.int32))
-    upper_bound = torch.tensor([320], dtype=torch.int32)
-
-    with pytest.raises(RuntimeError, match="token crops differ"):
-        with helper.apply_builder_inputs(input_buffers, block_tables, upper_bound, 1):
-            pass
-
-    torch.testing.assert_close(block_tables.input_block_tables[0], original_a)
-    torch.testing.assert_close(block_tables.input_block_tables[1], original_b)
     assert input_buffers.seq_lens[0].item() == 300
 
 
