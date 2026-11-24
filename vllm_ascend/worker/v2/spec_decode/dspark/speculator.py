@@ -61,6 +61,8 @@ from vllm_ascend.worker.v2.spec_decode.pcp_utils import (
 class AscendDSparkSpeculator(LmheadTPDraftSamplingMixin, DSparkSpeculator):
     _speculator_name = "DSpark"
     _proposal_host_lengths: dict[tuple[int, int], torch.Tensor] | None = None
+    _reuse_full_replay_metadata: bool = False
+    _full_replay_metadata_cache: tuple[tuple[Any, ...], dict[str, Any]] | None = None
     # DSpark samples via compute_draft_logits and never calls sample_draft, so
     # the mixin's speculator-level logits hook is not used; load_draft_model
     # wraps the draft model's compute_draft_logits to pad the LM-head input to
@@ -301,6 +303,37 @@ class AscendDSparkSpeculator(LmheadTPDraftSamplingMixin, DSparkSpeculator):
             cache[shape] = seq_lens_cpu
         return seq_lens_cpu, is_prefilling
 
+    @contextmanager
+    def _full_replay_metadata_scope(self, enabled: bool) -> Iterator[None]:
+        """Share a uniform metadata build only with this proposal's replay.
+
+        A later proposal can have different rejection counts and KV lengths,
+        even with the same requests. Never retain metadata across proposals.
+        """
+        self._reuse_full_replay_metadata = enabled
+        self._full_replay_metadata_cache = None
+        try:
+            yield
+        finally:
+            self._reuse_full_replay_metadata = False
+            self._full_replay_metadata_cache = None
+
+    def _full_replay_metadata_key(
+        self, num_reqs: int, num_reqs_padded: int, seq_lens_cpu_upper_bound: torch.Tensor
+    ) -> tuple[Any, ...]:
+        causal = self._group_causal
+        causal_key = causal if isinstance(causal, bool) else tuple(sorted(causal.items()))
+        return (
+            id(self.input_batch),
+            num_reqs,
+            num_reqs_padded,
+            self.num_query_per_req,
+            id(seq_lens_cpu_upper_bound),
+            id(self.input_buffers.seq_lens),
+            id(self.input_buffers.positions),
+            causal_key,
+        )
+
     # Graph capture builds metadata from the padded request shape.
     def build_draft_attn_metadatas(self, num_reqs_padded, seq_lens_cpu_upper_bound):
         assert self.input_batch is not None
@@ -308,6 +341,12 @@ class AscendDSparkSpeculator(LmheadTPDraftSamplingMixin, DSparkSpeculator):
         if num_reqs is None:
             num_reqs = self.input_batch.num_reqs
         assert 0 <= num_reqs <= num_reqs_padded, "draft requests exceed graph capacity"
+        cached = self._full_replay_metadata_cache
+        self._full_replay_metadata_cache = None
+        if cached is not None and self._reuse_full_replay_metadata:
+            key = self._full_replay_metadata_key(num_reqs, num_reqs_padded, seq_lens_cpu_upper_bound)
+            if cached[0] == key:
+                return [cached[1]]
         num_tokens_padded = num_reqs_padded * self.num_query_per_req
         # GQA and MLA supply both values inside _build_attn_metadata.
         seq_lens_cpu, is_prefilling = None, None
@@ -342,6 +381,9 @@ class AscendDSparkSpeculator(LmheadTPDraftSamplingMixin, DSparkSpeculator):
                 causal=self._group_causal,
             )
 
+        # A fallback build also dispatches through _build_attn_metadata; it
+        # must not leave a second candidate for another replay to consume.
+        self._full_replay_metadata_cache = None
         return [attn_metadata]
 
     def _build_attn_metadata(
@@ -397,6 +439,17 @@ class AscendDSparkSpeculator(LmheadTPDraftSamplingMixin, DSparkSpeculator):
             # FULL replay uses the captured padded Q, so FIA needs cumulative
             # query lengths through every padded request slot.
             self._update_draft_attn_metadata(attn_metadata, num_reqs_padded)
+            if (
+                self._reuse_full_replay_metadata
+                and num_reqs == self._draft_metadata_num_reqs
+                and batch_desc.num_tokens == num_reqs_padded * self.num_query_per_req
+                and step == self.num_query_per_req
+                and causal == self._group_causal
+                and dcp_local_seq_lens is None
+                and np.array_equal(query_start_loc_np, self.arange_np[: num_reqs + 1] * step)
+            ):
+                key = self._full_replay_metadata_key(num_reqs, num_reqs_padded, seq_lens_cpu_upper_bound)
+                self._full_replay_metadata_cache = (key, attn_metadata)
         return attn_metadata
 
     def _update_draft_attn_metadata(self, attn_metadata, num_reqs_padded):
@@ -465,6 +518,13 @@ class AscendDSparkSpeculator(LmheadTPDraftSamplingMixin, DSparkSpeculator):
         is_prefilling = torch.from_numpy(self.input_batch.is_prefilling_np)
         with (
             self._proposal_metadata(num_draft_reqs),
+            self._full_replay_metadata_scope(
+                getattr(self, "attn_architecture", None) == "GQA"
+                and not self.use_dcp
+                and self.pcp_manager is None
+                and not dummy_run
+                and not is_profile
+            ),
             build_attn_metadata_wrapper(),
             build_attn_metadata_factory(
                 self.input_buffers.positions,

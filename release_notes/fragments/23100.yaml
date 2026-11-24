@@ -7,3 +7,9 @@ entries:
       PP/PCP/DCP equal to one, and adaptive verification disabled.
       No new configuration is required.
     model: minimax-m3
+  - category: performance
+    text: >-
+      Reduced repeated CPU preparation before GQA DSpark FULL graph replay
+      without context parallelism by sharing already prepared attention
+      metadata within the same proposal. No new configuration is required.
+    model: minimax-m3
