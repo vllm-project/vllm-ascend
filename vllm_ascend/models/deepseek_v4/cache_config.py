@@ -46,10 +46,7 @@ def component_layout_identity(groups) -> str:
             raise ValueError("DSV4 layout identity requires unprojected component specs")
         for name in sorted(group.layer_names):
             spec = group.kv_cache_spec.kv_cache_specs[name]
-            spec_fields = asdict(spec)
-            # The view-selection policy does not change existing object bytes.
-            spec_fields.pop("transfer_separate_page_views", None)
-            components.append((group_id, name, type(spec).__name__, spec_fields, spec.page_size_bytes))
+            components.append((group_id, name, type(spec).__name__, asdict(spec), spec.page_size_bytes))
     payload = json.dumps(("dsv4-components-v2", components), sort_keys=True, default=str)
     return hashlib.sha256(payload.encode()).hexdigest()
 

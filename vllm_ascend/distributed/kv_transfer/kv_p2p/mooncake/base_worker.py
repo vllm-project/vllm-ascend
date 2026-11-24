@@ -619,7 +619,6 @@ class MooncakeBaseConnectorWorker(MooncakeTransferAddressMixin):
                 shared_page_metadata = (
                     self._get_shared_page_metadata(caches)
                     if isinstance(spec, (MLAAttentionSpec, SlidingWindowMLASpec))
-                    and not getattr(spec, "transfer_separate_page_views", False)
                     else None
                 )
                 if shared_page_metadata is not None and _is_component_major_mla_binding(spec, caches):

@@ -527,6 +527,25 @@ def test_untrimmed_shared_window_skips_masked_public_page(ns):
     assert ns["_load_entries"](worker, request, 0, hashes, request.store_masks[0]) == saved
 
 
+@pytest.mark.parametrize("shared", [False, True])
+def test_push_registers_declared_swa_owner(ns, shared):
+    path = "vllm_ascend/distributed/kv_transfer/kv_p2p/mooncake/push_worker.py"
+    owner = "model.layers.0.self_attn.swa_cache"
+    hook = "model.layers.0.self_attn.attn"
+    layer = ("model.layers", 0)
+    worker = NS(
+        _layer_index_by_name={owner: layer},
+        _shared_layer_indices={owner: 0} if shared else {},
+        vllm_config=NS(compilation_config=NS(static_forward_context={
+            hook: NS(layerwise_push_cache_name=owner),
+            "unregistered": NS(layerwise_push_cache_name="not_on_this_rank"),
+        })),
+    )
+    register = isolated_method(path, "MooncakePushConnectorWorker", "_register_composite_layer_aliases", ns)
+    register._register_composite_layer_aliases(worker)
+    assert worker._layer_index_by_name == {owner: layer, hook: layer}
+
+
 def test_indexer_transport_drops_only_overlapping_view(ns):
     torch = pytest.importorskip("torch")
     ns["torch"] = torch

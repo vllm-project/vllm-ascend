@@ -151,7 +151,6 @@ class AscendDeepseekV4IndexerCache(DeepseekV4IndexerCache):
             head_size=self.head_dim,
             dtype=self.dtype,
             model_version="deepseek_v4",
-            transfer_separate_page_views=True,
             cache_dtype_str=self.cache_config.cache_dtype,
             scale_dim=1 if self.head_dim == 128 else 0,
             scale_dtype=torch.float

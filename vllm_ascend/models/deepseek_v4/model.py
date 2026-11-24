@@ -148,7 +148,6 @@ class AscendDeepseekV4SWACache(VllmDeepseekV4SWACache):
             sliding_window=self.window_size,
             cache_dtype_str=self.cache_config.cache_dtype,
             model_version="deepseek_v4",
-            transfer_separate_page_views=True,
             alignment=None,
         )
 
@@ -676,6 +675,8 @@ class DeepseekV4Attention(nn.Module):
             # prefix=f'{prefix}.attn',
             prefix=f"{prefix}",
         )
+        if self.compress_ratio <= 1:
+            self.dsa_attn.dsa_attn.layerwise_push_cache_name = swa_cache_layer.prefix
 
     def forward(
         self,

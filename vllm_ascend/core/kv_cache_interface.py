@@ -226,8 +226,6 @@ class AscendMLAAttentionSpec(MLAAttentionSpec):
             block_table_block_size=self.block_table_block_size or self.block_size,
         )
 
-    transfer_separate_page_views: bool = False
-
     @property
     def uses_packed_sfa_main_cache(self) -> bool:
         """Whether the SFA main cache is stored in one packed tensor."""
@@ -273,7 +271,6 @@ class AscendMLAAttentionSpec(MLAAttentionSpec):
                 spec.alignment,
                 get_kv_cache_compression_ratio(spec),
                 spec.indexes_kv_by_block_stride,
-                spec.transfer_separate_page_views,
                 spec.dcp_sharded,
             )
             for spec in specs
@@ -297,7 +294,6 @@ class AscendMLAAttentionSpec(MLAAttentionSpec):
             cache_sparse_sfa_turboquant=first_spec.cache_sparse_sfa_turboquant,
             store_on_host=first_spec.store_on_host,
             indexes_kv_by_block_stride=first_spec.indexes_kv_by_block_stride,
-            transfer_separate_page_views=first_spec.transfer_separate_page_views,
             # A merged mixed group must remain in the target lookup. Per-layer
             # draft ownership is retained by UniformTypeKVCacheSpecs where
             # target and draft have distinct physical layouts.
@@ -404,8 +400,6 @@ class AscendSlidingWindowMLASpec(SlidingWindowMLASpec):
     indexes_kv_by_block_stride: bool = False
     bounded_replay: bool = False
 
-    transfer_separate_page_views: bool = False
-
     @property
     def prefix_cacheable(self) -> bool:
         return not self.bounded_replay
@@ -435,7 +429,6 @@ class AscendSlidingWindowMLASpec(SlidingWindowMLASpec):
         model_version_set = set(spec.model_version for spec in specs)
         sliding_window_set = set(spec.sliding_window for spec in specs)
         assert len({spec.dcp_sharded for spec in specs}) == 1
-        assert len({spec.transfer_separate_page_views for spec in specs}) == 1
         # ``extra_retained_tokens`` belongs to ``SlidingWindowSpec`` and
         # ``bounded_replay`` arrives with vLLM #56227. This override builds the
         # merged spec from scratch rather than through the parent's ``merge``,
@@ -473,7 +466,6 @@ class AscendSlidingWindowMLASpec(SlidingWindowMLASpec):
             cache_dtype_str=cache_dtype_str_set.pop(),
             compress_ratio=compress_ratio_set.pop(),
             model_version=model_version_set.pop(),
-            transfer_separate_page_views=specs[0].transfer_separate_page_views,
             **carried_kwargs,
         )
 

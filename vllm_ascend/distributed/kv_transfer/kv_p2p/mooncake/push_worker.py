@@ -45,7 +45,6 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.layerwis
     get_layerwise_reuse_layout,
 )
 from vllm_ascend.models.deepseek_v4.cache_config import is_deepseek_v4_cache, validate_dsv4_transfer_speculation
-from vllm_ascend.models.deepseek_v4.cache_transfer import transfer_cache_views
 
 # Rank tuples are (PP, PCP, TP), matching scheduler handshake keys.
 WorkerRank = tuple[int, int, int]
@@ -243,7 +242,6 @@ class MooncakePushConnectorWorker(MooncakeBaseConnectorWorker):
         self._zmq_context: Context | None = None
 
     def register_kv_caches(self, kv_caches: dict[str, "torch.Tensor | list[torch.Tensor]"]) -> None:
-        kv_caches = transfer_cache_views(kv_caches)
         super().register_kv_caches(kv_caches)
         if self.kv_transfer_config.is_kv_producer:
             self._device = torch.npu.current_device()
@@ -261,11 +259,6 @@ class MooncakePushConnectorWorker(MooncakeBaseConnectorWorker):
             for name, layer_index in self._layer_index_by_name.items():
                 self._layer_names_by_index.setdefault(layer_index, []).append(name)
             self._register_composite_layer_aliases()
-            for name in self._layer_indices:
-                spec = self.kv_cache_specs[self.layer_name_to_spec_index[name]]
-                if isinstance(spec, SlidingWindowMLASpec) and name.endswith(".self_attn.swa_cache"):
-                    hook = name.removesuffix(".swa_cache") + ".attn"
-                    self._layer_index_by_name.setdefault(hook, self._layer_index_by_name[name])
             # Layer numbers do not establish execution order across models.
             # Multiple namespaces finalize at wait_for_save after draft execution.
             namespaces = {namespace for namespace, _ in self._layer_names_by_index}
@@ -295,6 +288,10 @@ class MooncakePushConnectorWorker(MooncakeBaseConnectorWorker):
             cache_names = getattr(layer, "kv_transfer_cache_names", None)
             if cache_names is not None:
                 self._layer_index_by_name[alias] = self._layer_index_by_name[cache_names[0]]
+            elif alias not in self._layer_index_by_name:
+                owner = getattr(layer, "layerwise_push_cache_name", None)
+                if owner in self._layer_index_by_name:
+                    self._layer_index_by_name[alias] = self._layer_index_by_name[owner]
 
     def start_load_kv(self, metadata: MooncakeConnectorMetadata) -> None:
         if self.kv_transfer_config.is_kv_producer:
