@@ -41,7 +41,7 @@ from vllm_ascend.attention.flashmla import (
     FLASHMLA_V_DIM,
     FlashMLADecode,
     FlashMLAMetadataBuilder,
-    flashmla_query_heads,
+    flashmla_query_head_counts,
     get_flashmla_ops,
     split_flashmla_requests,
 )
@@ -1140,20 +1140,16 @@ class AscendMLAImpl(MLAAttentionImpl):
             return False
         if not get_current_hardware_profile().supports(HardwareCapability.MLA_FLASH):
             return False
-        query_heads = flashmla_query_heads(self)
-        if query_heads not in MLA_FLASH_SUPPORTED_Q_HEADS or self.num_kv_heads != 1:
+        if self.num_kv_heads != 1 or self.use_pcp:
             return False
         if self.kv_lora_rank != FLASHMLA_V_DIM or self.qk_rope_head_dim != FLASHMLA_QK_DIM - FLASHMLA_V_DIM:
             return False
         if self.fa_quant_layer or self.dtype not in (torch.bfloat16, torch.float16) or self.enable_kv_nz:
             return False
         dcp_size = config.parallel_config.decode_context_parallel_size
-        # Replicated DSpark queries keep PCP=1 in their config, but reuse the
-        # physical PCP group. Its ranks carry the same Q heads, so history
-        # gathers only distinct TP heads, as _dcp_all_gather_fragments does.
         pcp_size = get_pcp_group().world_size if dcp_size > 1 else 1
-        query_gather_size = max(1, dcp_size // pcp_size)
-        if self.use_pcp or query_heads * query_gather_size not in MLA_FLASH_SUPPORTED_Q_HEADS:
+        local_heads, history_heads = flashmla_query_head_counts(self, dcp_size, pcp_size)
+        if local_heads not in MLA_FLASH_SUPPORTED_Q_HEADS or history_heads not in MLA_FLASH_SUPPORTED_Q_HEADS:
             return False
         if not supports_component_major_mla_pd(config):
             return False

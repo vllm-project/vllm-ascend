@@ -249,13 +249,19 @@ def runtime(monkeypatch):
             "_prepare_dcp_flashmla_current",
             "_run_dcp_flashmla_attention",
             "_forward_decode_split_attention",
+            "reorg_decode_q",
         )
     }
 
     methods.update(
         {
             name: load_method("vllm_ascend/attention/context_parallel/common_cp.py", "DCPImplMixin", name, scope)
-            for name in ("_local_decode_query", "_merge_dcp_attention_output")
+            for name in (
+                "_dcp_all_gather",
+                "_dcp_all_gather_fragments",
+                "_local_decode_query",
+                "_merge_dcp_attention_output",
+            )
         }
     )
 
@@ -471,18 +477,20 @@ def test_noncausal_draft_metadata_ignores_rejected_cpu_upper_bound(runtime):
 
 
 @pytest.mark.parametrize(
-    "target_arch, draft_arch, dcp_size, use_pcp, fa_quant_layer, expected",
+    "target_arch, draft_arch, dcp_size, pcp_size, use_pcp, fa_quant_layer, expected",
     [
-        ("KimiK31ForConditionalGeneration", "K3DSparkModel", 1, False, False, True),
-        ("KimiK31ForConditionalGeneration", "K3DSparkModel", 2, False, False, False),
-        ("KimiK31ForConditionalGeneration", "K3DSparkModel", 1, True, False, False),
-        ("KimiK31ForConditionalGeneration", "K3DSparkModel", 1, False, True, False),
-        ("KimiK31ForConditionalGeneration", "Glm5DSparkForCausalLM", 1, False, False, False),
-        ("KimiK3ForConditionalGeneration", "K3DSparkModel", 1, False, False, False),
+        ("KimiK31ForConditionalGeneration", "K3DSparkModel", 1, 1, False, False, True),
+        ("KimiK31ForConditionalGeneration", "K3DSparkModel", 16, 1, False, False, True),
+        ("KimiK31ForConditionalGeneration", "K3DSparkModel", 8, 1, False, False, False),
+        ("KimiK31ForConditionalGeneration", "K3DSparkModel", 16, 2, False, False, False),
+        ("KimiK31ForConditionalGeneration", "K3DSparkModel", 1, 1, True, False, False),
+        ("KimiK31ForConditionalGeneration", "K3DSparkModel", 16, 1, False, True, False),
+        ("KimiK31ForConditionalGeneration", "Glm5DSparkForCausalLM", 16, 1, False, False, False),
+        ("KimiK3ForConditionalGeneration", "K3DSparkModel", 16, 1, False, False, False),
     ],
 )
-def test_six_flashmla_heads_are_only_padded_for_local_kimi_k31_draft(
-    runtime, target_arch, draft_arch, dcp_size, use_pcp, fa_quant_layer, expected
+def test_six_flashmla_heads_use_supported_kimi_k31_draft_geometry(
+    runtime, target_arch, draft_arch, dcp_size, pcp_size, use_pcp, fa_quant_layer, expected
 ):
     config = SimpleNamespace(
         use_v2_model_runner=True,
@@ -508,9 +516,10 @@ def test_six_flashmla_heads_are_only_padded_for_local_kimi_k31_draft(
         "FLASHMLA_QK_DIM": runtime.api.FLASHMLA_QK_DIM,
         "FLASHMLA_V_DIM": runtime.api.FLASHMLA_V_DIM,
         "MLA_FLASH_SUPPORTED_Q_HEADS": runtime.api.MLA_FLASH_SUPPORTED_Q_HEADS,
-        "flashmla_query_heads": runtime.api.flashmla_query_heads,
+        "flashmla_query_head_counts": runtime.api.flashmla_query_head_counts,
         "HardwareCapability": SimpleNamespace(MLA_FLASH=object()),
         "get_current_hardware_profile": lambda: SimpleNamespace(supports=lambda _: True),
+        "get_pcp_group": lambda: SimpleNamespace(world_size=pcp_size),
         "supports_component_major_mla_pd": lambda _: True,
         "get_flashmla_ops": lambda: (object(), object()),
     }
@@ -555,28 +564,31 @@ def test_kimi_dspark_padded_heads_match_dense_attention_after_graph_buffer_refre
 
 
 @pytest.mark.parametrize(
-    "causal,speculative,interleave,dtype,capturing",
+    "causal,speculative,interleave,dtype,capturing,size,local_heads",
     [
-        (True, False, 1, torch.float16, False),
-        (True, False, 128, torch.bfloat16, True),
-        (True, True, 4, torch.float16, False),
-        (True, True, 128, torch.bfloat16, True),
-        (False, True, 1, torch.bfloat16, False),
-        (False, True, 4, torch.float16, True),
+        (True, False, 1, torch.float16, False, 8, 8),
+        (True, False, 128, torch.bfloat16, True, 8, 8),
+        (True, True, 4, torch.float16, False, 8, 8),
+        (True, True, 128, torch.bfloat16, True, 8, 8),
+        (False, True, 1, torch.bfloat16, False, 8, 8),
+        (False, True, 4, torch.float16, True, 8, 8),
+        (True, True, 384, torch.bfloat16, True, 16, 6),
+        (False, True, 128, torch.bfloat16, True, 16, 6),
     ],
 )
 def test_forward_matches_dense_with_strided_history_and_empty_ranks(
-    runtime, monkeypatch, causal, speculative, interleave, dtype, capturing
+    runtime, monkeypatch, causal, speculative, interleave, dtype, capturing, size, local_heads
 ):
     runtime.context.capturing = capturing
     torch.manual_seed(41)
-    size, local_heads, tokens = 8, 8, 5
+    tokens = 5
+    history_heads = size * local_heads
     split = causal and speculative
     queries = [3, 1] if speculative else [1, 1]
-    histories = [257, 0]
+    histories = [max(257, 2 * interleave + 1), 0]
     lengths = [history + query for history, query in zip(histories, queries)]
     keys = [torch.randn(length, 576, dtype=dtype) * 0.2 for length in lengths]
-    query = torch.randn(tokens, size * local_heads, 576, dtype=dtype) * 0.2
+    query = torch.randn(tokens, history_heads, 576, dtype=dtype) * 0.2
     current_kv = torch.zeros(tokens, 1, 576, dtype=dtype)
     start = 0
     for sequence, qlen in zip(keys, queries):
@@ -584,10 +596,21 @@ def test_forward_matches_dense_with_strided_history_and_empty_ranks(
         start += qlen
     flashes, caches, partials = [], [], []
     for rank in range(size):
-        builder = runtime.builder(rank=rank, interleave=interleave, dtype=dtype, speculative=speculative)
+        builder = runtime.builder(
+            size=size,
+            rank=rank,
+            heads=local_heads,
+            interleave=interleave,
+            dtype=dtype,
+            speculative=speculative,
+            kimi_draft=local_heads == 6,
+        )
         inputs = common(lengths, queries, tokens=tokens, causal=causal)
         inputs.block_table_tensor.copy_(torch.tensor([[1, 3, 5], [2, 4, 6]]))
-        flash = builder.build(inputs, 2, sum(queries), False)
+        flash = builder.build(inputs, 2, sum(queries), False, retain_for_graph=capturing)
+        if capturing:
+            assert builder.build(inputs, 2, sum(queries), False, retain_for_graph=True) is flash
+        assert flash.adapter.config.num_heads == history_heads
         # Nonzero storage offset and padding between physical pages.
         stride = 128 * 576 + 32
         backing = torch.full((8 * stride + 64,), 17.0, dtype=dtype)
@@ -614,7 +637,7 @@ def test_forward_matches_dense_with_strided_history_and_empty_ranks(
         flashes.append(flash)
         caches.append((cache, backing, backing.clone()))
 
-    expected = torch.zeros(tokens, size * local_heads, 512, dtype=torch.float64)
+    expected = torch.zeros(tokens, history_heads, 512, dtype=torch.float64)
     start = 0
     for sequence, history, qlen in zip(keys, histories, queries):
         for offset in range(qlen):
@@ -630,7 +653,7 @@ def test_forward_matches_dense_with_strided_history_and_empty_ranks(
         ):
             assert (world_size, scatter_dim, group, defer_combine) == (size, 1, "cpu-dcp", True)
             runtime.events.append(("exchange", runtime.active_stream[0]))
-            assert output.shape == (tokens, 64, 512) and lse.shape == (tokens, 64, 1)
+            assert output.shape == (tokens, history_heads, 512) and lse.shape == (tokens, history_heads, 1)
             expected_output, expected_lse = partials[rank]
             torch.testing.assert_close(output, expected_output.transpose(0, 1))
             torch.testing.assert_close(lse, expected_lse.transpose(0, 1).unsqueeze(-1))
@@ -657,6 +680,11 @@ def test_forward_matches_dense_with_strided_history_and_empty_ranks(
             runtime.events.append(("project", runtime.active_stream[0]))
             return latent
 
+        def gather(local_query, dim, owned=owned):
+            assert dim == 1 and local_query.shape == (tokens, local_heads, 576)
+            torch.testing.assert_close(local_query, query[:, owned])
+            return query
+
         impl = runtime.bind(
             SimpleNamespace(
                 kv_lora_rank=512,
@@ -665,13 +693,14 @@ def test_forward_matches_dense_with_strided_history_and_empty_ranks(
                 num_heads=local_heads,
                 dcp_size=size,
                 dcp_rank=rank,
-                dcp_group=SimpleNamespace(unique_name="cpu-dcp"),
+                dcp_group=SimpleNamespace(unique_name="cpu-dcp", all_gather=gather),
                 _v_up_proj_batch_major=Mock(side_effect=project),
             )
         )
+        ql_nope, q_pe = impl.reorg_decode_q(query[:, owned, :512], query[:, owned, 512:])
         preprocessed = SimpleNamespace(
-            ql_nope=query[..., :512],
-            q_pe=query[..., 512:],
+            ql_nope=ql_nope,
+            q_pe=q_pe,
             current_k_nope=current_kv[..., :512] if split else None,
             current_k_pe=current_kv[..., 512:] if split else None,
         )
@@ -691,6 +720,9 @@ def test_forward_matches_dense_with_strided_history_and_empty_ranks(
         impl._v_up_proj_batch_major.assert_called_once()
         assert runtime.attention_op.call_count == (2 if split else 1)
         if split:
+            assert flash.current.query.shape == (tokens, 8, 576)
+            torch.testing.assert_close(flash.current.query[:, :local_heads], query[:, owned])
+            assert torch.count_nonzero(flash.current.query[:, local_heads:]) == 0
             assert runtime.events == [
                 ("history", "main"),
                 ("scatter", "main"),

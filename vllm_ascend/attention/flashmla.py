@@ -30,24 +30,26 @@ FLASHMLA_MASK_SIZE = 2048
 FLASHMLA_MAX_BATCH_SIZE = 65535
 
 
-def flashmla_query_heads(impl) -> int:
-    """Return the physical Q head count for local FlashMLA attention."""
-    if impl.num_heads != 6 or impl.use_pcp:
-        return impl.num_heads
+def flashmla_query_head_counts(impl, dcp_size: int, pcp_size: int) -> tuple[int, int]:
+    """Return the physical Q head counts for local and history attention."""
+    local_heads = impl.num_heads
+    # PCP ranks replicate Q heads, including for a DSpark batch that exposes PCP1.
+    history_heads = local_heads * max(1, dcp_size // pcp_size)
+    if local_heads != 6 or impl.use_pcp or pcp_size != 1 or dcp_size not in (1, 16):
+        return local_heads, history_heads
     config = impl.vllm_config
     spec = config.speculative_config
     if (
-        config.parallel_config.decode_context_parallel_size == 1
-        and config.model_config.architecture == "KimiK31ForConditionalGeneration"
+        config.model_config.architecture == "KimiK31ForConditionalGeneration"
         and spec is not None
         and spec.method == "dspark"
         and spec.draft_model_config is not None
         and "K3DSparkModel" in (spec.draft_model_config.architectures or ())
     ):
-        # K3.1 DSpark has 96 Q heads. At TP16, pad six local heads to an
-        # operator-supported eight without changing the KV or V projection.
-        return 8
-    return impl.num_heads
+        # Pad only local attention. DCP16 gathers the original six heads per
+        # rank, and history attention and its exchange keep all 96 real heads.
+        return 8, 8 if dcp_size == 1 else history_heads
+    return local_heads, history_heads
 
 
 def prepare_flashmla_batch_req_state(
@@ -339,16 +341,13 @@ class FlashMLAMetadataBuilder:
         self.use_spec_decode = impl.vllm_config.speculative_config is not None
         self.cp_interleave = impl.vllm_config.parallel_config.cp_kv_cache_interleave_size if self.dcp_size > 1 else 1
         self.logical_heads = impl.num_heads
-        query_heads = flashmla_query_heads(impl)
-        adapter = FlashMLAImpl.load(FlashMLAConfig(query_heads, impl.scale, return_softmax_lse=self.dcp_size > 1))
-        self.current_adapter = adapter
-        # Match DCPImplMixin's query gather. PCP ranks replicate Q heads even
-        # when DSpark exposes a PCP=1 config for its global query batch.
         pcp_size = impl.pcp_group.world_size if self.dcp_size > 1 else 1
-        query_gather_size = max(1, self.dcp_size // pcp_size)
+        local_heads, history_heads = flashmla_query_head_counts(impl, self.dcp_size, pcp_size)
+        adapter = FlashMLAImpl.load(FlashMLAConfig(local_heads, impl.scale, return_softmax_lse=self.dcp_size > 1))
+        self.current_adapter = adapter
         history_adapter = replace(
             adapter,
-            config=replace(adapter.config, num_heads=query_heads * query_gather_size, mask_mode=0),
+            config=replace(adapter.config, num_heads=history_heads, mask_mode=0),
         )
         self.adapters = {True: history_adapter if self.dcp_size > 1 else adapter, False: history_adapter}
         self.device = device
@@ -400,13 +399,14 @@ class FlashMLAMetadataBuilder:
                 torch.empty_like(cu, device="meta"),
                 torch.empty_like(used, device="meta"),
             )
+            current_heads = self.current_adapter.config.num_heads
+            current_query = torch.empty((tokens, current_heads, FLASHMLA_QK_DIM), dtype=self.dtype, device=self.device)
+            if current_heads != self.logical_heads:
+                # Current attention writes only the real heads on every replay.
+                current_query[:, self.logical_heads :].zero_()
             flash.current = FlashMLACurrent(
                 adapter=self.current_adapter,
-                query=torch.empty(
-                    (tokens, self.current_adapter.config.num_heads, FLASHMLA_QK_DIM),
-                    dtype=self.dtype,
-                    device=self.device,
-                ),
+                query=current_query,
                 schedule=torch.empty_like(current_schedule, device=self.device),
                 cache=torch.empty(
                     (block_columns + rows, FLASHMLA_BLOCK_SIZE, 1, FLASHMLA_QK_DIM),

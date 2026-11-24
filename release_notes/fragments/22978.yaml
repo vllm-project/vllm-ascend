@@ -1,4 +1,4 @@
 pr: 22978
 entries:
   - category: performance
-    text: Kimi K3.1 DSpark draft decode can use FlashMLA at TP16 without context parallelism, avoiding a blocking sequence-length readback on supported Ascend configurations.
+    text: Kimi K3.1 DSpark draft decode can use FlashMLA at TP16 with DCP1 or DCP16 when PCP is disabled, avoiding a blocking sequence-length readback on supported Ascend configurations.

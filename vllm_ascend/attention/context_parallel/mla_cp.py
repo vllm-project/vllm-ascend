@@ -602,8 +602,11 @@ class AscendMlaDCPImpl(DCPImplMixin, AscendMLAImpl):
             slot_mapping=current.slots,
             cache_mode="Norm",
         )
-        current.query[..., : self.kv_lora_rank].copy_(q_nope)
-        current.query[..., self.kv_lora_rank :].copy_(q_pe)
+        query = current.query
+        if query.shape[1] != self.num_heads:
+            query = query[:, : self.num_heads]
+        query[..., : self.kv_lora_rank].copy_(q_nope)
+        query[..., self.kv_lora_rank :].copy_(q_pe)
 
     def _run_dcp_flashmla_attention(self, flash, q_nope, q_pe, k_nope, k_pe, *, attention_kind):
         """Adapt FlashMLA to TND/TN1; current KV/Q must already be staged."""
@@ -629,6 +632,10 @@ class AscendMlaDCPImpl(DCPImplMixin, AscendMLAImpl):
             metadata=schedule,
             attn_mask=attn_mask,
         )
+        if attention_kind is CPKVScope.CURRENT and output.shape[0] != self.num_heads:
+            # The DCP exchange and LSE merge use six real heads per rank.
+            output = output[: self.num_heads]
+            lse = lse[: self.num_heads]
         return output.transpose(0, 1), lse.transpose(0, 1).unsqueeze(-1)
 
     def _run_dcp_mtp_split_attention_op(
