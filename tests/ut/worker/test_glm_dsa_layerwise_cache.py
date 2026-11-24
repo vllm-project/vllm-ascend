@@ -9,9 +9,9 @@ import torch
 from vllm.config import KVTransferConfig
 from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
 from vllm.v1.core.single_type_kv_cache_manager import register_all_kvcache_specs
-from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheGroupSpec
 from vllm.v1.kv_cache_layout import KVCacheLayout
 
+from vllm_ascend.attention.indexer import AscendSFAIndexerBackend
 from vllm_ascend.core.kv_cache_config_builder import AscendKVCacheConfigBuilder
 from vllm_ascend.core.kv_cache_interface import (
     AscendMLAAttentionSpec,
@@ -33,7 +33,7 @@ def test_glm_dsa_reuses_mla_and_indexer_and_preserves_views(monkeypatch, dtype):
     packed = dtype == torch.float8_e4m3fn
     cache_dtype = "fp8" if packed else "bfloat16"
     monkeypatch.setitem(STR_DTYPE_TO_TORCH_DTYPE, "fp8", torch.float8_e4m3fn)
-    text_config = SimpleNamespace(model_type="glm_moe_dsa", num_hidden_layers=78)
+    text_config = SimpleNamespace(model_type="glm_moe_dsa", num_hidden_layers=78, index_topk=2048)
     transfer_config = KVTransferConfig(
         kv_connector="AscendStoreConnector",
         kv_role="kv_producer",
@@ -114,8 +114,8 @@ def test_glm_dsa_reuses_mla_and_indexer_and_preserves_views(monkeypatch, dtype):
     monkeypatch.setattr(attn_utils, "_allocate_int8_cache_tensor", allocate)
     raw = attn_utils._allocate_kv_cache(worker_config, shared_layers={}, device=torch.device("cpu"))
     assert allocations == [expected_bytes]
-    assert raw[main_entries[10]] is raw[main_entries[6]]
-    assert raw[indexer_entries[10]] is raw[indexer_entries[0]]
+    assert isinstance(raw[main_entries[10]], tuple) == (not packed)
+    assert isinstance(raw[indexer_entries[10]], tuple) == packed
     for name in draft_entries:
         assert all(name not in tensor.layers or tensor.layers == [name] for tensor in layout.kv_cache_tensors)
 
@@ -128,19 +128,25 @@ def test_glm_dsa_reuses_mla_and_indexer_and_preserves_views(monkeypatch, dtype):
         for name in specs
     ]
     caches = attn_utils._reshape_kv_cache_v2(attn_groups, raw, cache_dtype, [128], {}, worker_config)
+    for entries, source_layer in ((main_entries, 6), (indexer_entries, 0)):
+        assert [part.data_ptr() for part in caches[entries[10]]] == [
+            part.data_ptr() for part in caches[entries[source_layer]]
+        ]
     for name in main_entries.values():
         components = caches[name]
         expected_widths = (656,) if packed else (512, 64)
         assert tuple(component.shape[-1] for component in components) == expected_widths
         assert all(component.is_contiguous() and component.dtype == dtype for component in components)
-        assert components[0].data_ptr() == raw[name].data_ptr()
+        raw_nope = raw[name] if packed else raw[name][0]
+        assert components[0].data_ptr() == raw_nope.data_ptr()
         if not packed:
             nope, rope = components
             assert rope.data_ptr() == nope.data_ptr() + nope.numel() * nope.element_size()
     for name in indexer_entries.values():
         key, *scales = caches[name]
         assert key.is_contiguous() and key.dtype == dtype
-        assert key.data_ptr() == raw[name].data_ptr()
+        raw_key = raw[name][0] if packed else raw[name]
+        assert key.data_ptr() == raw_key.data_ptr()
         if packed:
             (scale,) = scales
             assert scale.is_contiguous()
@@ -149,7 +155,7 @@ def test_glm_dsa_reuses_mla_and_indexer_and_preserves_views(monkeypatch, dtype):
             assert not scales
 
 
-def test_indexer_reshape_checks_capacity_after_scale_alignment(monkeypatch):
+def test_indexer_slot_checks_capacity_after_scale_alignment():
     layer_name = "model.layers.0.self_attn.indexer.k_cache"
     spec = AscendSFAIndexerCacheSpec(
         block_size=1,
@@ -160,16 +166,7 @@ def test_indexer_reshape_checks_capacity_after_scale_alignment(monkeypatch):
         scale_dtype=torch.float32,
         cache_sparse_li_c8=True,
     )
-    config = KVCacheConfig(num_blocks=1, kv_cache_tensors=[], kv_cache_groups=[KVCacheGroupSpec([layer_name], spec)])
-    group = SimpleNamespace(
-        kv_cache_group_id=0,
-        kv_cache_spec=spec,
-        layer_names=[layer_name],
-        backend=SimpleNamespace(get_kv_cache_shape=lambda *shape: shape),
-    )
-    monkeypatch.setattr(attn_utils, "get_layerwise_reuse_layout", lambda _: object())
-    monkeypatch.setattr(attn_utils, "get_current_vllm_config", lambda: SimpleNamespace())
     # One K byte and four scale bytes fit tightly, but FP32 alignment moves the scale to offset four.
-    raw = {layer_name: torch.empty(spec.page_size_bytes, dtype=torch.int8)}
+    raw_cache = torch.empty(spec.page_size_bytes, dtype=torch.int8)
     with pytest.raises(ValueError, match=r"requires 8 bytes for aligned K/scale views, got 5 bytes"):
-        attn_utils._reshape_kv_cache_v2([group], raw, "fp8", [1], {}, config)
+        AscendSFAIndexerBackend.split_contiguous_kv_cache(raw_cache, spec, layer_name)

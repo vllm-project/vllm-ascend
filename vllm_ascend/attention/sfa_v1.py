@@ -1,4 +1,3 @@
-import math
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any, ClassVar, TypeVar
@@ -22,7 +21,7 @@ from vllm.v1.attention.backend import (
     MLAAttentionImpl,
     max_decode_query_len,
 )
-from vllm.v1.kv_cache_interface import AttentionSpec
+from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheSpec
 from vllm.v1.worker.utils import select_common_block_size
 
 from vllm_ascend.ascend_config import get_ascend_config
@@ -31,7 +30,7 @@ from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.context_parallel.common_cp import (
     get_pcp_num_replicated_tokens,
 )
-from vllm_ascend.attention.indexer import AscendSFAIndexerCache
+from vllm_ascend.attention.indexer import AscendSFAIndexerBackend, AscendSFAIndexerCache
 from vllm_ascend.attention.sparse_flash_mla import sparse_flash_mla, sparse_flash_mla_metadata
 from vllm_ascend.attention.utils import (
     MLAPO_MAX_SUPPORTED_TOKENS,
@@ -50,6 +49,7 @@ from vllm_ascend.attention.utils import (
     uses_pcp_sharded_layout,
     wait_for_kv_layer_from_connector,
 )
+from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec, AscendSFAIndexerCacheSpec
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.device.hardware_profile import DeviceAdaptorFamily, HardwareCapability, get_current_hardware_profile
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence import (
@@ -76,6 +76,7 @@ from vllm_ascend.utils import (
     ACL_FORMAT_FRACTAL_NZ,
     dispose_layer,
     enable_pcp_o_proj_weight_sharding,
+    enable_sfa,
     enable_sfa_dcp_replicated_indexer,
     enable_sp,
     is_mtp_layer,
@@ -97,6 +98,31 @@ SMLA_DEFAULT_SINK_VALUE = 1.0
 TQ_QUANT_MODE = 3
 TQ_TILE_SIZE = 128
 SFA_NOPE_PROLOG_SUPPORTED_DIMS = ((256, 512, 1536), (256, 512, 2048))
+
+
+def prepare_sfa_cache_slot_views(
+    raw_caches: dict[str, torch.Tensor],
+    specs: dict[str, KVCacheSpec],
+    vllm_config: VllmConfig,
+    get_mla_dims: Callable[[str, AttentionSpec], tuple[int, int]],
+) -> dict[str, torch.Tensor | tuple[torch.Tensor, ...]]:
+    """Expose the native SFA component layout in a single-group offload backing."""
+    views: dict[str, torch.Tensor | tuple[torch.Tensor, ...]] = dict(raw_caches)
+    uses_sfa = enable_sfa(vllm_config)
+    for layer_name, raw_cache in raw_caches.items():
+        spec = specs[layer_name]
+        if isinstance(spec, AscendSFAIndexerCacheSpec) and spec.scale_dim:
+            views[layer_name] = AscendSFAIndexerBackend.split_contiguous_kv_cache(raw_cache, spec, layer_name)
+        elif (
+            uses_sfa
+            and isinstance(spec, AscendMLAAttentionSpec)
+            and not spec.uses_packed_sfa_main_cache
+            and spec.tokens_per_state == 1
+        ):
+            views[layer_name] = AscendSFABackend.split_contiguous_kv_cache(
+                raw_cache, spec, *get_mla_dims(layer_name, spec)
+            )
+    return views
 
 
 def generate_smla_plan(metadata, num_heads, head_dim, topk, cu_seqlens_q, topk_length):
@@ -409,14 +435,16 @@ class AscendSFABackend(AttentionBackend):
     @staticmethod
     def split_contiguous_kv_cache(
         raw_cache: torch.Tensor,
-        nope_shape: tuple[int, ...],
-        rope_shape: tuple[int, ...],
-        dtype: torch.dtype,
+        spec: AscendMLAAttentionSpec,
+        nope_dim: int,
+        rope_dim: int,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Expose all NoPE blocks followed by all RoPE blocks as two byte views."""
-        elem_size = get_dtype_size(dtype)
-        nope_bytes = math.prod(nope_shape) * elem_size
-        rope_bytes = math.prod(rope_shape) * elem_size
+        num_blocks = raw_cache.numel() // spec.page_size_bytes
+        num_rows = num_blocks * spec.block_size * spec.num_kv_heads
+        elem_size = get_dtype_size(spec.dtype)
+        nope_bytes = num_rows * nope_dim * elem_size
+        rope_bytes = num_rows * rope_dim * elem_size
         # Both parts use the same dtype, so RoPE starts at an aligned offset.
         nope, rope = raw_cache.split((nope_bytes, rope_bytes))
         return nope, rope

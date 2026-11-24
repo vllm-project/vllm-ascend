@@ -41,7 +41,6 @@ from vllm.logger import logger
 from vllm.model_executor.layers.attention.attention import Attention
 from vllm.model_executor.layers.attention.mla_attention import MLAAttention
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
-from vllm.utils.math_utils import round_up as _align_up
 from vllm.utils.torch_utils import get_dtype_size
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadataBuilder
 from vllm.v1.attention.backends.utils import get_dcp_local_seq_lens
@@ -70,8 +69,7 @@ from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.dsa_attn_kv_plan import get_dsa_attn_kv_plan
 from vllm_ascend.attention.dsa_v1 import AscendDSAMetadataBuilder
 from vllm_ascend.attention.dsa_v41 import AscendDSAV41MetadataBuilder, DeepseekV41CacheBackend
-from vllm_ascend.attention.indexer import AscendSFAIndexerBackend
-from vllm_ascend.attention.sfa_v1 import AscendSFABackend, AscendSFAMetadataBuilder
+from vllm_ascend.attention.sfa_v1 import AscendSFAMetadataBuilder, prepare_sfa_cache_slot_views
 from vllm_ascend.attention.utils import (
     AscendCommonAttentionMetadata,
     requires_contiguous_pa_kv_cache,
@@ -745,6 +743,10 @@ def _align_memory(tensor: torch.Tensor, alignment: int) -> torch.Tensor:
     return tensor[int(offset) :]
 
 
+def _align_up(value: int, alignment: int) -> int:
+    return (value + alignment - 1) // alignment * alignment
+
+
 def _allocate_int8_cache_tensor(
     numel: int,
     alignment: int,
@@ -978,12 +980,18 @@ def _allocate_kv_cache(
     layer_kv_cache_spec = _get_layer_kv_cache_specs(kv_cache_config)
     reuse_layout = get_layerwise_reuse_layout(kv_cache_config)
     if reuse_layout is not None:
-        return allocate_cache_backing(
+        raw_caches = allocate_cache_backing(
             kv_cache_config,
             layer_kv_cache_spec,
             lambda size: _allocate_int8_cache_tensor(size, alignment, device),
             reuse_layout.cache_view_sizes,
         )
+        # Component-major views require slots that no other KV group overlays.
+        if len(kv_cache_config.kv_cache_groups) == 1:
+            return prepare_sfa_cache_slot_views(
+                raw_caches, layer_kv_cache_spec, vllm_config, _get_attention_kv_cache_dims
+            )
+        return raw_caches
 
     attn_layers: dict[str, AttentionLayerBase] | None = None
     # Gemma 4 full/sliding groups share one pool while retaining contiguous
@@ -1609,10 +1617,6 @@ def _reshape_kv_cache_v2(
 
     vllm_config = get_current_vllm_config()
     layer_kv_cache_spec = _get_layer_kv_cache_specs(kv_cache_config)
-    # Reshape the whole slot by component only when no other group can use its pages.
-    use_contiguous_components = (
-        len(kv_cache_config.kv_cache_groups) == 1 and get_layerwise_reuse_layout(kv_cache_config) is not None
-    )
     kv_caches: dict[str, Any] = {}
     # Qwen4 QSA hybrids (Qwen3.8 Flash Next) reconstruct every owner's
     # view from the same deterministic layout that _allocate_kv_cache used:
@@ -1793,15 +1797,6 @@ def _reshape_kv_cache_v2(
                     )
                     if group_spec.cache_sparse_li_c4:
                         indexer_scale_cache_shape = (*indexer_scale_cache_shape[:-1], group_spec.scale_dim // 2, 2)
-
-                    # Without offload, the Indexer allocator already returns (K, scale).
-                    # Offload provides one byte tensor. Both shapes are known here,
-                    # so the backend can split it into the same component views.
-                    if use_contiguous_components and isinstance(raw_cache, torch.Tensor):
-                        raw_cache = AscendSFAIndexerBackend.split_contiguous_kv_cache(
-                            raw_cache, kv_cache_shape, indexer_scale_cache_shape, group_spec, layer_name
-                        )
-                        raw_k_tensor, raw_scale_tensor = raw_cache
 
                 if isinstance(raw_cache, torch.Tensor):
                     if group_spec.scale_dim:
@@ -2061,17 +2056,6 @@ def _reshape_kv_cache_v2(
                     kv_cache_spec.dtype,
                     vllm_config.model_config,
                 )
-
-            if (
-                use_contiguous_components
-                and isinstance(kv_cache_spec, AscendMLAAttentionSpec)
-                and isinstance(raw_cache, torch.Tensor)
-                and enable_sfa(vllm_config)
-                and not packed_sfa_main_cache
-            ):
-                # Without offload, each layer gets separate NoPE and RoPE tensors.
-                # Split the shared slot so both paths use the same (NoPE, RoPE) layout.
-                raw_cache = AscendSFABackend.split_contiguous_kv_cache(raw_cache, k_shape, v_shape, k_dtype)
 
             if packed_sfa_main_cache:
                 raw_k_tensor = raw_cache

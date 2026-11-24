@@ -1,4 +1,3 @@
-import math
 from collections.abc import Callable, Hashable
 from contextlib import contextmanager
 from dataclasses import dataclass, fields, replace
@@ -336,16 +335,17 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
     @staticmethod
     def split_contiguous_kv_cache(
         raw_cache: torch.Tensor,
-        key_shape: tuple[int, ...],
-        scale_shape: tuple[int, ...],
         spec: AscendSFAIndexerCacheSpec,
         layer_name: str,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Expose all K blocks and all scale blocks as two byte views."""
-        k_bytes = math.prod(key_shape) * get_dtype_size(spec.dtype)
+        num_blocks, remainder = divmod(raw_cache.numel(), spec.page_size_bytes)
+        assert remainder == 0
+        num_rows = num_blocks * spec.block_size * spec.num_kv_heads * spec.sfa_dcp_replicated_indexer_size
+        k_bytes = num_rows * spec.head_size * get_dtype_size(spec.dtype)
         scale_elem_size = get_dtype_size(spec.scale_dtype)
         scale_offset = round_up(k_bytes, scale_elem_size)
-        required_bytes = scale_offset + math.prod(scale_shape) * scale_elem_size
+        required_bytes = scale_offset + num_rows * spec.scale_dim * scale_elem_size
         if required_bytes > raw_cache.numel():
             raise ValueError(
                 f"Indexer KV cache for {layer_name} requires {required_bytes} bytes "
