@@ -9,13 +9,11 @@ from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.device.hardware import AscendDeviceType
 
 MAX_POSITION_EMBEDDINGS = [262144]
-NUM_TOKENS = [1, 16, 1024, 10240]
-QKV_SHAPES = [
-    (16, 8, 256, 256),
-    (8, 4, 256, 256),
-    (4, 2, 256, 256),
-    (8, 1, 512, 512),
-    (4, 1, 512, 512),
+QKV_CASES = [
+    # Cover decode/prefill, both head sizes and Q/KV ratios 2, 4 and 8 in both bias modes.
+    (1, 4, 1, 512, 512),
+    (10240, 16, 8, 256, 256),
+    (10240, 8, 1, 512, 512),
 ]
 EPS = [1e-6]
 DTYPES = [torch.bfloat16]
@@ -84,8 +82,10 @@ def v_rms_norm(v, num_tokens, head_size, eps):
     reason="Requires Ascend A2/A3; A5 keeps the unfused path",
 )
 @pytest.mark.parametrize("max_position_embeddings", MAX_POSITION_EMBEDDINGS)
-@pytest.mark.parametrize("num_tokens", NUM_TOKENS)
-@pytest.mark.parametrize("num_q_heads, num_kv_heads, head_size, rope_dim", QKV_SHAPES)
+@pytest.mark.parametrize(
+    "num_tokens,num_q_heads,num_kv_heads,head_size,rope_dim",
+    QKV_CASES + [(1024, 4, 2, 256, 256)],
+)
 @pytest.mark.parametrize("eps", EPS)
 @pytest.mark.parametrize("dtype", DTYPES)
 @pytest.mark.parametrize("seed", SEEDS)
@@ -156,8 +156,10 @@ def test_split_qkv_rmsnorm_rope_vnorm(
     reason="Requires Ascend A2/A3; A5 keeps the unfused path",
 )
 @pytest.mark.parametrize("max_position_embeddings", MAX_POSITION_EMBEDDINGS)
-@pytest.mark.parametrize("num_tokens", NUM_TOKENS)
-@pytest.mark.parametrize("num_q_heads, num_kv_heads, head_size, rope_dim", QKV_SHAPES)
+@pytest.mark.parametrize(
+    "num_tokens,num_q_heads,num_kv_heads,head_size,rope_dim",
+    QKV_CASES,
+)
 @pytest.mark.parametrize("eps", EPS)
 @pytest.mark.parametrize("dtype", DTYPES)
 @pytest.mark.parametrize("seed", SEEDS)

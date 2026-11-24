@@ -2,7 +2,7 @@
 
 ## 1 Introduction
 
-The Qwen-VL(Vision-Language)series from Alibaba Cloud comprises a family of powerful Large Vision-Language Models (LVLMs) designed for comprehensive multimodal understanding. They accept images, text, and bounding boxes as input, and output text and detection boxes, enabling advanced functions like image detection, multi-modal dialogue, and multi-image reasoning.
+The Qwen-VL (Vision-Language) series from Alibaba Cloud comprises a family of powerful Large Vision-Language Models (LVLMs) designed for comprehensive multimodal understanding. They accept images, text, and bounding boxes as input, and output text and detection boxes, enabling advanced functions like image detection, multi-modal dialogue, and multi-image reasoning.
 
 This document will show the main verification steps of the model, including supported features, feature configuration, environment preparation, NPU deployment, accuracy and performance evaluation.
 
@@ -10,7 +10,7 @@ This tutorial uses the vLLM-Ascend `v0.11.0rc3-a3` version for demonstration, sh
 
 !!! note
 
-    For **Atlas inference products**, Qwen3-VL Dense requires vLLM-Ascend `v0.18.0` or later(for 950DT Products, the model is supported from `vllm-ascend:v0.23.0rc1`). Do not use the demonstration version above on this hardware.
+    For **Atlas inference products**, Qwen3-VL Dense requires vLLM-Ascend `v0.18.0` or later (for 950DT Products, the model is supported from `vllm-ascend:v0.23.0rc1`). Do not use the demonstration version above on this hardware.
 
 ## 2 Supported Features
 
@@ -24,14 +24,14 @@ Refer to [Feature Guide](../../user_guide/feature_guide/index.md) to get the fea
 
 |  Weight Version                                 | Hardware Requirements                                                                     | Download Links |
 |-------------------------------------------------|-------------------------------------------------------------------------------------------|----------------|
-| `Qwen3-VL-8B-Instruct`                          | 1 card on Atlas 800I A2 (64GB × 8), Atlas 800 A3 (64GB × 16), or Atlas 300I DUO           | [ModelScope](https://modelscope.cn/models/Qwen/Qwen3-VL-8B-Instruct) |
-| `Qwen3-VL-8B-Instruct-w8a8`(Quantized version)  | 1 card on 950DT Products (96GB × 8) node                                              | [ModelScope](https://modelscope.cn/models/Eco-Tech/Qwen3-VL-8B-Instruct-w8a8-mxfp8) |
+| `Qwen3-VL-8B-Instruct`                          | 1 card on Atlas 800I A2 (64GB × 8), Atlas 800 A3 (64GB × 16), or Atlas 300I Duo           | [ModelScope](https://modelscope.cn/models/Qwen/Qwen3-VL-8B-Instruct) |
+| `Qwen3-VL-8B-Instruct-w8a8` (Quantized version)  | 1 card on 950DT Products (96GB × 8) node                                              | [ModelScope](https://modelscope.cn/models/Eco-Tech/Qwen3-VL-8B-Instruct-w8a8-mxfp8) |
 | `Qwen3-VL-32B-Instruct`                         | 2 cards on Atlas 800I A2 (64GB × 8), Atlas 800 A3 (64GB × 16), or Atlas inference products| [ModelScope](https://www.modelscope.cn/models/Qwen/Qwen3-VL-32B-Instruct) |
-| `Qwen3-VL-32B-Instruct-w8a8`(Quantized version) | 1 card on 950DT Products (96GB × 8) node                                              | [ModelScope](https://modelscope.cn/models/Eco-Tech/Qwen3-VL-32B-Instruct-w8a8-mxfp8) |
+| `Qwen3-VL-32B-Instruct-w8a8` (Quantized version) | 1 card on 950DT Products (96GB × 8) node                                              | [ModelScope](https://modelscope.cn/models/Eco-Tech/Qwen3-VL-32B-Instruct-w8a8-mxfp8) |
 
 It is recommended to download the model weight to the shared directory of multiple nodes, such as `/root/.cache/`.
 
->**Path description**: Download the model weights to a directory of your choice and record it. Ensure the model path in the subsequent deployment command matches this directory.
+> **Path description**: Download the model weights to a directory of your choice and record it. Ensure the model path in the subsequent deployment command matches this directory.
 
 ## 4 Installation
 
@@ -104,7 +104,7 @@ Select an image based on your machine type and start the docker image on your no
     -it $IMAGE bash
     ```
 
-=== "Atlas 300I DUO"
+=== "Atlas 300I Duo"
 
     ```bash
     # Use the vllm-ascend image
@@ -172,7 +172,7 @@ If you prefer not to use the Docker image, you can build from source. Install vL
 
 !!! note
 
-    Atlas 300I DUO does not support `triton` or `triton-ascend`. Source installation may pull them in automatically; uninstall them manually before running:
+    Atlas 300I Duo does not support `triton` or `triton-ascend`. Source installation may pull them in automatically; uninstall them manually before running:
 
     ```bash
     pip uninstall -y triton-ascend triton
@@ -251,7 +251,7 @@ Run docker container to start the vLLM server on single-NPU:
 
     ```
 
-=== "Atlas 300I DUO"
+=== "Atlas 300I Duo"
 
     ```bash
     export HCCL_OP_EXPANSION_MODE="AIV"
@@ -283,19 +283,19 @@ Run docker container to start the vLLM server on single-NPU:
 
     !!! note
 
-        On Atlas 300I DUO:
+        On Atlas 300I Duo:
 
         - Only `float16` dtype is supported.
         - Graph compilation (`--compilation-config`) requires **CANN version >= 9.0.0**. If your CANN version is lower, replace `--compilation-config` with `--enforce-eager`.
-        - `--additional-config` with `"ascend_compilation_config": {"enable_npugraph_ex": false}` is required because `enable_npugraph_ex` is not supported on Atlas 300I DUO.
+        - `--additional-config` with `"ascend_compilation_config": {"enable_npugraph_ex": false}` is required because `enable_npugraph_ex` is not supported on Atlas 300I Duo.
 
 Key Parameter Descriptions:
 
-- Add the `--max-model-len` option to avoid the ValueError that occurs when the Qwen3-VL-8B-Instruct model's max-seq-len (256000) exceeds the maximum number of tokens that can be stored in KV cache. This will differ with different NPU series based on the on-chip memory size. Please modify the value according to a suitable value for your NPU series.
+- Add the `--max-model-len` option to avoid the ValueError that occurs when the Qwen3-VL-8B-Instruct model's max-seq-len (256k) exceeds the maximum number of tokens that can be stored in KV cache. This will differ with different NPU series based on the on-chip memory size. Please modify the value according to a suitable value for your NPU series.
 
 If your service starts successfully, you can see the info shown below:
 
-```bash
+```output
 INFO:     Started server process [2736]
 INFO:     Waiting for application startup.
 INFO:     Application startup complete.
@@ -324,7 +324,7 @@ Expected Result:
 
 The service returns HTTP 200 OK.
 
-```bash
+```output
 {"id":"chatcmpl-d3270d4a16cb4b98936f71ee3016451f","object":"chat.completion","created":1764924127,"model":"Qwen/Qwen3-VL-8B-Instruct","choices":[{"index":0,"message":{"role":"assistant","content":"The text in the illustration is: **TONGYI Qwen**","refusal":null,"annotations":null,"audio":null,"function_call":null,"tool_calls":[],"reasoning_content":null},"logprobs":null,"finish_reason":"stop","stop_reason":null,"token_ids":null}],"service_tier":null,"system_fingerprint":null,"usage":{"prompt_tokens":107,"total_tokens":123,"completion_tokens":16,"prompt_tokens_details":null},"prompt_logprobs":null,"prompt_token_ids":null,"kv_transfer_params":null}
 ```
 
@@ -365,7 +365,7 @@ The accuracy of some models is already within our CI monitoring scope, including
     | -------- | ------ | ------ |
     | mmmu_val | 0.5389 | 0.0159 |
 
-=== "Atlas 300I DUO"
+=== "Atlas 300I Duo"
 
     **Using AISBench**
 
@@ -424,7 +424,7 @@ After several minutes, you can get the performance evaluation result.
 
 #### Table 2: Detailed Node Configuration
 
-|Scenario|Configuration|NPUs|TP|DP|Max Model Len|MTP Speculation Num|Weight Version|
+|Scenario|Configuration|NPUs|TP|DP|Max Model Len|MTP (Multi-Token Prediction) Speculation Num|Weight Version|
 |--------|-------------|-----|--|--|-------------------|--------------------|---|
 |High Throughput / Low Latency (16k)|Server / Single Machine|1|1|1|~16k|3|Qwen3-VL-8B-Instruct|
 |Long Context (128k, no cache)|Server / Single Machine|1|1|1|128k|3|Qwen3-VL-8B-Instruct|
@@ -434,7 +434,7 @@ After several minutes, you can get the performance evaluation result.
 > For complete startup commands and parameter descriptions, please refer to the deployment examples in [Chapter 5](#5-online-service-deployment).
 
 **Notice:**
-`max-model-len` and `max-num-seqs` need to be set according to the actual usage scenario. For other settings, please refer to the **[Deployment](#5-online-service-deployment)** chapter.
+`max-model-len` and `max-num-seqs` need to be set according to the actual usage scenario. For other settings, please refer to the **[Chapter 5](#5-online-service-deployment)** chapter.
 
 ### 9.2 Tuning Guidelines
 

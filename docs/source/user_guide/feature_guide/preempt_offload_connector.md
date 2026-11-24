@@ -19,7 +19,7 @@ In a typical Decode deployment, `max_num_batched_tokens` is often sized around
 `max_num_seqs * (1 + num_spec_tokens)` so that the Decode node mainly schedules
 one new token, plus speculative tokens if MTP is enabled, per request. This is
 efficient for decode but too small for recomputing long prompts after
-preemption. Recompute CPU offload avoids sending such requests back through the
+preemption. Preempt offload avoids sending such requests back through the
 full prompt recompute path when their KV state can be preserved locally.
 
 ## Key Concepts
