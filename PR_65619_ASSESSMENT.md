@@ -12,6 +12,7 @@
 - MTP 独立构造，不进入 target 的共享作用域。AMD MTP 存在 `set_skip_topk` 跨步索引复用和逐层 `compact_topk_indices`，不能直接照搬 NVIDIA target/draft 共享策略。
 - 保留上游非持久 buffer 注册以及 main 的 LightningIndexerV2 路径；不改变选择算法、有效 token 范围及 attention 数学计算。
 - ContextVar 只在构造时使用，存储池在退出作用域时释放引用；层继续持有共享 tensor。推理热路径不查询共享池，不增加设备同步、复制或计算。
+- 指定 vLLM 的默认 loader 直接在目标设备构造模型。如果随后用 `.to()` 或 `.to_empty()` 转换整个模型，target backbone 的 `_apply` 会在本次转换内按原 tensor 身份复用 Top-K 转换结果，避免各层重新独立分配。转换结束后释放临时映射，KV cache 绑定不参与共享。
 - 上游构造函数仍短暂分配当前层 buffer，再立即重绑。本实现降低常驻内存，但不声称完全消除临时分配。为避免全局拦截 tensor 分配或 buffer 注册，暂不扩大适配范围。上游 AMD 提供共享 buffer 参数后，应迁移至显式参数并移除此 helper。
 
 ## 本地验证
@@ -19,7 +20,7 @@
 环境：Python 3.12、CPU PyTorch 2.2.2。本机缺少完整 vLLM/NPU 运行依赖。
 
 - helper 与 LightningIndexerV2 CPU 测试：20 项通过。覆盖共享与隔离、异常和嵌套作用域、shape/stride/dtype/device、非持久 buffer，以及 0/1/3/8 个有效 token 的顺序消费结果与独立 buffer 逐位一致。
-- 构造路径回归测试：7 项通过。覆盖 DBO 开关、ubatch_size 0/1/2/4、PCP 的私有存储和缓存配置、多个 target 模型隔离和独立 draft attention。测试 mock 上游构造开销，执行 Ascend target/QSA 构造函数。
+- 构造路径回归测试：7 项通过。覆盖 DBO 开关、ubatch_size 0/1/2/4、PCP 的私有存储和缓存配置、多个 target 模型隔离和独立 draft attention。覆盖父模块 `.to(meta)` 再 `.to_empty(cpu)` 后的别名和隔离关系。测试 mock 上游构造开销，执行 Ascend target/QSA 构造函数。
 - 本地隔离 runner 从真实源码提取上述构造函数和指定 vLLM 的 `use_ubatching` property，在 CPU 基类上执行同一回归测试；这不等同于完整模块导入或完整模型构造。恢复旧 guard 的对照实验恰好在 DBO 关闭且 ubatch_size 为 2/4 时失败（2 failed、4 passed），截至首次修复，新 guard 为 6 passed；本次新增 PCP 验证。
 - Ruff lint、格式检查及 `git diff --check` 通过。`bash format.sh ci` 因缺少 pre-commit 未能执行。
 

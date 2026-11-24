@@ -639,3 +639,18 @@ def test_target_topk_sharing_respects_all_microbatch_modes(monkeypatch, enable_d
     draft = [qsa.AscendQwen4ExpQSAAttention(vllm_config=config) for _ in range(2)]
     assert draft[0].topk_indices_buffer is not draft[1].topk_indices_buffer
     assert all(attention.topk_indices_buffer is not buffers[0] for attention in draft)
+
+    # Exercise whole-model conversions that normally recreate each layer buffer.
+    # Moving an outer module also reaches the target's _apply override.
+    parent = torch.nn.ModuleList([first, second, *draft])
+    parent.to(device="meta")
+    parent.to_empty(device="cpu")
+    moved = [attention.topk_indices_buffer for attention in first.layers]
+    assert all(buffer.device.type == "cpu" for buffer in moved)
+    assert len({buffer.data_ptr() for buffer in moved}) == (1 if should_share else len(moved))
+    assert moved[0] is not buffers[0]
+    assert {buffer.data_ptr() for buffer in moved}.isdisjoint(
+        attention.topk_indices_buffer.data_ptr() for attention in [*second.layers, *draft]
+    )
+    assert draft[0].topk_indices_buffer is not draft[1].topk_indices_buffer
+    assert not parent.state_dict()
