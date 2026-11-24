@@ -1,0 +1,16 @@
+pr: 23057
+entries:
+  - category: feature
+    text: >-
+      Added support for `--max-num-inflight-kv-loads` and
+      `--max-async-kv-loads-per-step` when `enable_balance_scheduling`,
+      `dyntra_lb_config`, or `recompute_scheduler_enable` is enabled. Both
+      limits are unset by default; when configured, requests waiting on
+      asynchronous KV cache loads are throttled and scheduled to completion
+      instead of stalling in the waiting queue.
+  - category: bugfix
+    text: >-
+      Fixed prompts being unexpectedly split by `--long-prefill-token-threshold`
+      or encoder cache pressure when chunked prefill is disabled
+      (`enable_chunked_prefill=False`) with `enable_balance_scheduling`,
+      `dyntra_lb_config`, or `recompute_scheduler_enable` enabled.
