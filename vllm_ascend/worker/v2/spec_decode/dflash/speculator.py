@@ -2,8 +2,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from collections.abc import Mapping
-from contextlib import nullcontext
+from collections.abc import Iterator, Mapping
+from contextlib import contextmanager, nullcontext
 from dataclasses import replace
 from typing import Any, cast
 
@@ -21,20 +21,70 @@ from vllm.v1.worker.gpu.spec_decode.dflash.speculator import DFlashSpeculator
 from vllm_ascend.ascend_config import draft_config_context
 from vllm_ascend.attention.attention_v1 import AscendAttentionBackend, AscendAttentionState
 from vllm_ascend.attention.context_parallel.mla_cp import AscendMlaDCPImpl
-from vllm_ascend.attention.mla_v1 import AscendMLAImpl
+from vllm_ascend.attention.mla_v1 import AscendMLABackend, AscendMLAImpl
 from vllm_ascend.ops.triton.spec_decode.prepare_dflash_inputs import prepare_dflash_inputs_triton
 from vllm_ascend.utils import vllm_version_is
+from vllm_ascend.worker.v2.aclgraph_utils import _get_graph_update_backend
 from vllm_ascend.worker.v2.attn_utils import build_attn_metadata_factory, build_attn_metadata_wrapper
-from vllm_ascend.worker.v2.spec_decode.host_lengths import (
-    detect_draft_attn_architecture,
-    prepare_draft_host_lengths,
-    proposal_host_lengths,
-)
-from vllm_ascend.worker.v2.spec_decode.host_lengths import (
-    draft_metadata_request_count as draft_metadata_request_count,
-)
+from vllm_ascend.worker.v2.pcp_manager import AscendPCPManager
 from vllm_ascend.worker.v2.spec_decode.lmhead_tp_utils import LmheadTPDraftSamplingMixin
 from vllm_ascend.worker.v2.spec_decode.pcp_utils import prepare_replicated_draft_profile_inputs
+
+
+@contextmanager
+def draft_metadata_request_count(speculator: Any, num_reqs: int) -> Iterator[None]:
+    """Share the live request count and FIA lengths across builds within one proposal."""
+    previous_count = getattr(speculator, "_draft_metadata_num_reqs", None)
+    previous_lengths = getattr(speculator, "_proposal_host_lengths", None)
+    speculator._draft_metadata_num_reqs = num_reqs
+    speculator._proposal_host_lengths = {}
+    try:
+        yield
+    finally:
+        speculator._draft_metadata_num_reqs = previous_count
+        speculator._proposal_host_lengths = previous_lengths
+
+
+def prepare_draft_fia_lengths(
+    speculator: Any, num_reqs: int, num_reqs_padded: int, *, window_step: int | None = None
+) -> tuple[torch.Tensor, list[int] | None]:
+    """Prepare rejection-adjusted KV lengths and, for a capped window, the valid Q prefix."""
+    cache = getattr(speculator, "_proposal_host_lengths", None)
+    key = (num_reqs, num_reqs_padded, window_step)
+    if cache is not None and key in cache:
+        return cache[key]
+
+    kv_lens = torch.zeros(num_reqs_padded, dtype=torch.int32, device="cpu")
+    live = kv_lens[:num_reqs]
+    valid_queries = None
+    if window_step is None:
+        live.copy_(speculator.input_buffers.seq_lens[:num_reqs])
+    else:
+        # The clipped KV length alone cannot distinguish live query rows from padding.
+        stride = speculator.num_speculative_steps
+        live.copy_(speculator.sample_pos[: num_reqs * stride : stride])
+        live.add_(window_step - 1)
+        valid_queries = [max(0, window_step - max(0, end - speculator.max_model_len)) for end in live.tolist()]
+        live.clamp_(max=speculator.max_model_len)
+
+    result = kv_lens, valid_queries
+    if cache is not None:
+        cache[key] = result
+    return result
+
+
+def detect_draft_attn_architecture(attn_groups: Any) -> tuple[str | None, bool]:
+    backend = _get_graph_update_backend(attn_groups)
+    if issubclass(backend, AscendMLABackend):
+        mla_groups = [
+            group for groups in attn_groups for group in groups if issubclass(group.backend, AscendMLABackend)
+        ]
+        return "MLA", bool(mla_groups) and all(
+            getattr(group.get_metadata_builder(0), "flashmla_state", None) is not None for group in mla_groups
+        )
+    if issubclass(backend, AscendAttentionBackend):
+        return "GQA", False
+    return None, False
 
 
 def install_ascend_dflash_input_preparation() -> None:
@@ -224,18 +274,10 @@ class AscendDFlashSpeculator(LmheadTPDraftSamplingMixin, DFlashSpeculator):
         metadata_context = nullcontext()
         valid_queries = None
         if self.attn_architecture == "MLA" and not self.use_flashmla:
-            if self._windowed_mla_layers and self.draft_max_seq_len == self.max_model_len:
-                # The first predicted position is anchor + 1 in both sampling modes.
-                # Mirror it instead of the clipped device length so the same host copy
-                # gives FIA both the accepted KV length and the number of valid queries.
-                seq_lens_cpu = torch.zeros(num_reqs_padded, dtype=torch.int32, device="cpu")
-                live = seq_lens_cpu[:num_reqs]
-                live.copy_(self.sample_pos[: num_reqs * self.num_speculative_steps : self.num_speculative_steps])
-                live.add_(step - 1)
-                valid_queries = [max(0, step - max(0, end - self.max_model_len)) for end in live.tolist()]
-                live.clamp_(max=self.max_model_len)
-            else:
-                seq_lens_cpu = prepare_draft_host_lengths(self, num_reqs, num_reqs_padded, step)
+            capped_window = self._windowed_mla_layers and self.draft_max_seq_len == self.max_model_len
+            seq_lens_cpu, valid_queries = prepare_draft_fia_lengths(
+                self, num_reqs, num_reqs_padded, window_step=step if capped_window else None
+            )
             metadata_context = build_attn_metadata_factory(
                 self.input_buffers.positions,
                 num_tokens,
@@ -422,7 +464,7 @@ class AscendDFlashSpeculator(LmheadTPDraftSamplingMixin, DFlashSpeculator):
         num_draft_reqs = input_batch.num_reqs
         if dummy_run and sync_state is not None:
             num_draft_reqs = min(num_draft_reqs, sync_state.num_reqs)
-        with proposal_host_lengths(self, num_draft_reqs), build_attn_metadata_wrapper():
+        with draft_metadata_request_count(self, num_draft_reqs), build_attn_metadata_wrapper():
             draft_tokens = super().propose(
                 input_batch,
                 attn_metadata,

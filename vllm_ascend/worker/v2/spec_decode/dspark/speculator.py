@@ -15,8 +15,7 @@
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 #
-from collections.abc import Iterator, Mapping, Sequence
-from contextlib import contextmanager
+from collections.abc import Mapping, Sequence
 from typing import Any, cast
 
 import numpy as np
@@ -49,9 +48,7 @@ from vllm_ascend.worker.v2.attn_utils import (
 from vllm_ascend.worker.v2.spec_decode.dflash.speculator import (
     draft_metadata_request_count,
     install_ascend_dflash_input_preparation,
-)
-from vllm_ascend.worker.v2.spec_decode.host_lengths import (
-    prepare_draft_host_lengths,
+    prepare_draft_fia_lengths,
 )
 from vllm_ascend.worker.v2.spec_decode.lmhead_tp_utils import LmheadTPDraftSamplingMixin
 from vllm_ascend.worker.v2.spec_decode.pcp_utils import (
@@ -62,7 +59,6 @@ from vllm_ascend.worker.v2.spec_decode.pcp_utils import (
 
 class AscendDSparkSpeculator(LmheadTPDraftSamplingMixin, DSparkSpeculator):
     _speculator_name = "DSpark"
-    _proposal_host_lengths: dict[tuple[int, int], torch.Tensor] | None = None
     # DSpark samples via compute_draft_logits and never calls sample_draft, so
     # the mixin's speculator-level logits hook is not used; load_draft_model
     # wraps the draft model's compute_draft_logits to pad the LM-head input to
@@ -287,16 +283,6 @@ class AscendDSparkSpeculator(LmheadTPDraftSamplingMixin, DSparkSpeculator):
                 self.attn_architecture = None
             install_ascend_dflash_input_preparation()
 
-    @contextmanager
-    def _proposal_metadata(self, num_reqs: int) -> Iterator[None]:
-        with draft_metadata_request_count(self, num_reqs):
-            previous = self._proposal_host_lengths
-            self._proposal_host_lengths = {}
-            try:
-                yield
-            finally:
-                self._proposal_host_lengths = previous
-
     def _prepare_draft_dcp_metadata_inputs(
         self, num_reqs: int, num_reqs_padded: int, step: int
     ) -> tuple[torch.Tensor | None, torch.Tensor]:
@@ -305,9 +291,8 @@ class AscendDSparkSpeculator(LmheadTPDraftSamplingMixin, DSparkSpeculator):
         if getattr(self, "use_a3_mla_sink", False) or not needs_host_lengths:
             return None, is_prefilling
 
-        # FULL replay rebuilds metadata for the same prepared draft batch; the
-        # proposal-scoped cache in prepare_draft_host_lengths deduplicates it.
-        return prepare_draft_host_lengths(self, num_reqs, num_reqs_padded, step), is_prefilling
+        seq_lens_cpu, _ = prepare_draft_fia_lengths(self, num_reqs, num_reqs_padded)
+        return seq_lens_cpu, is_prefilling
 
     # Graph capture builds metadata from the padded request shape.
     def build_draft_attn_metadatas(self, num_reqs_padded, seq_lens_cpu_upper_bound):
@@ -486,7 +471,7 @@ class AscendDSparkSpeculator(LmheadTPDraftSamplingMixin, DSparkSpeculator):
             num_draft_reqs = min(num_draft_reqs, sync_state.num_reqs)
         is_prefilling = torch.from_numpy(self.input_batch.is_prefilling_np)
         with (
-            self._proposal_metadata(num_draft_reqs),
+            draft_metadata_request_count(self, num_draft_reqs),
             build_attn_metadata_wrapper(),
             build_attn_metadata_factory(
                 self.input_buffers.positions,

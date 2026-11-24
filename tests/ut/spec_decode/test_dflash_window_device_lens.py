@@ -26,8 +26,7 @@ from vllm.v1.worker.gpu.spec_decode.dflash.speculator import DFlashSpeculator
 import vllm_ascend.worker.v2.spec_decode.dflash.speculator as dflash_speculator_module
 from vllm_ascend.attention.attention_v1 import AscendAttentionBackend, AscendAttentionState
 from vllm_ascend.attention.mla_v1 import AscendMLABackend, AscendMLADecodeMetadata, AscendMLAMetadata
-from vllm_ascend.worker.v2.spec_decode.dflash.speculator import AscendDFlashSpeculator
-from vllm_ascend.worker.v2.spec_decode.host_lengths import prepare_draft_host_lengths, proposal_host_lengths
+from vllm_ascend.worker.v2.spec_decode.dflash.speculator import AscendDFlashSpeculator, draft_metadata_request_count
 
 
 def _spec(lengths, *, mla_draft=True):
@@ -55,32 +54,6 @@ def _capture_factory(monkeypatch, supplied):
 
     monkeypatch.setattr(dflash_speculator_module, "build_attn_metadata_factory", factory)
     monkeypatch.setattr(dflash_speculator_module, "build_attn_metadata_wrapper", nullcontext)
-
-
-class TestRejectionAdjustedHostLengths:
-    def test_zero_padded_host_copy(self):
-        spec = _spec([1034, 1040, 7, 9])
-        host = prepare_draft_host_lengths(spec, 2, 4, 8)
-        assert host.dtype == torch.int32
-        assert host.device.type == "cpu"
-        assert host.tolist() == [1034, 1040, 0, 0]
-
-    def test_host_lengths_refresh_after_rejection(self):
-        spec = _spec([1034, 1040, 7, 9])
-        first = prepare_draft_host_lengths(spec, 2, 4, 8)
-        spec.input_buffers.seq_lens[:2].copy_(torch.tensor([1035, 1047], dtype=torch.int32))
-        second = prepare_draft_host_lengths(spec, 2, 4, 8)
-        assert first.tolist() == [1034, 1040, 0, 0]
-        assert second.tolist() == [1035, 1047, 0, 0]
-
-    def test_proposal_scope_caches_same_shape(self):
-        spec = _spec([1034, 1040, 7, 9])
-        with proposal_host_lengths(spec, 2):
-            first = prepare_draft_host_lengths(spec, 2, 4, 8)
-            second = prepare_draft_host_lengths(spec, 2, 4, 8)
-            assert first is second
-        third = prepare_draft_host_lengths(spec, 2, 4, 8)
-        assert third is not first
 
 
 class TestBuildDraftAttnMetadatasFactory:
@@ -114,23 +87,22 @@ class TestBuildDraftAttnMetadatasFactory:
 
     def test_mla_draft_eager_and_acl_get_exact_lengths(self, monkeypatch):
         monkeypatch.setattr(AscendDFlashSpeculator, "attn_vllm_config", property(lambda self: self.vllm_config))
-        for entrypoint in ("eager", "ACL_update"):
-            spec = _spec([1034, 1040, 7, 9])
-            result, metadata, supplied, decode = self._run_entrypoint(monkeypatch, spec, entrypoint)
-            assert result is metadata
-            assert len(supplied) == 1
-            kwargs = supplied[0]
-            assert kwargs["attn_state"] == AscendAttentionState.ChunkedPrefill
-            assert kwargs["is_prefilling"].dtype == torch.bool
-            assert kwargs["is_prefilling"].tolist() == [False] * 4
-            assert kwargs["seq_lens_cpu"].tolist() == [1034, 1040, 0, 0]
-
-    def test_full_graph_update_pads_query_lengths(self, monkeypatch):
-        monkeypatch.setattr(AscendDFlashSpeculator, "attn_vllm_config", property(lambda self: self.vllm_config))
         spec = _spec([1034, 1040, 7, 9])
-        _, _, _, decode = self._run_entrypoint(monkeypatch, spec, "eager")
-        assert decode.actual_seq_lengths_q == [8, 16, 24, 32]
-        assert decode.seq_lens_list == [1034, 1040, 0, 0]
+        for expected in ([1034, 1040], [1035, 1047]):
+            spec.input_buffers.seq_lens[:2] = torch.tensor(expected)
+            with draft_metadata_request_count(spec, 2):
+                lengths = []
+                for entrypoint in ("eager", "ACL_update"):
+                    result, metadata, supplied, decode = self._run_entrypoint(monkeypatch, spec, entrypoint)
+                    assert result is metadata
+                    assert decode.actual_seq_lengths_q == [8, 16, 24, 32]
+                    kwargs = supplied[0]
+                    assert kwargs["attn_state"] == AscendAttentionState.ChunkedPrefill
+                    assert kwargs["is_prefilling"].tolist() == [False] * 4
+                    lengths.append(kwargs["seq_lens_cpu"])
+                assert lengths[0] is lengths[1]
+                assert lengths[0].dtype == torch.int32 and lengths[0].device.type == "cpu"
+                assert lengths[0].tolist() == [*expected, 0, 0]
 
     def test_non_mla_draft_keeps_upstream_path(self, monkeypatch):
         def forbidden_factory(*args, **kwargs):
@@ -193,14 +165,30 @@ def test_window_at_model_limit_preserves_valid_draft_rows(monkeypatch, mode):
     monkeypatch.setattr(
         DFlashSpeculator, "_build_attn_metadata", lambda *args, **kwargs: dict.fromkeys(spec.attn_backends, metadata)
     )
-    built = spec._build_uniform_attn_metadata(
-        num_reqs=2,
-        batch_desc=BatchExecutionDescriptor(cg_mode=mode, num_tokens=8 * num_rows, num_reqs=num_rows),
-        num_query_per_req=8,
-        seq_lens_cpu_upper_bound=lengths,
-        step=8,
-        causal=True,
-    )
+    sample_pos_copies = 0
+    copy_tensor = torch.Tensor.copy_
+
+    def count_copy(dst, src, *args, **kwargs):
+        nonlocal sample_pos_copies
+        if dst.device.type == "cpu" and src.data_ptr() == spec.sample_pos.data_ptr():
+            sample_pos_copies += 1
+        return copy_tensor(dst, src, *args, **kwargs)
+
+    monkeypatch.setattr(torch.Tensor, "copy_", count_copy)
+    with draft_metadata_request_count(spec, 2):
+        built = spec._build_uniform_attn_metadata(
+            num_reqs=2,
+            batch_desc=BatchExecutionDescriptor(cg_mode=mode, num_tokens=8 * num_rows, num_reqs=num_rows),
+            num_query_per_req=8,
+            seq_lens_cpu_upper_bound=lengths,
+            step=8,
+            causal=True,
+        )
+        if mode == CUDAGraphMode.FULL:
+            replay = spec.build_draft_attn_metadatas(num_rows, lengths)[0]["window"].decode
+            assert replay.actual_seq_lengths_q == built["window"].decode.actual_seq_lengths_q
+            assert replay.seq_lens_list == built["window"].decode.seq_lens_list
+        assert sample_pos_copies == 1
 
     # Reconstruct the newest visible key for each physical query as FIA does.
     # The first sampled row must see key 4093 (window [3070, 4093]).
@@ -219,3 +207,11 @@ def test_window_at_model_limit_preserves_valid_draft_rows(monkeypatch, mode):
     assert built["full"].decode is decode
     assert decode.actual_seq_lengths_q == list(range(8, 8 * num_rows + 1, 8))
     assert decode.block_table is tables
+
+    if mode == CUDAGraphMode.FULL:
+        # A fresh proposal in the same graph bucket now has six valid queries.
+        spec.sample_pos[:7].sub_(2)
+        with draft_metadata_request_count(spec, 2):
+            fresh = spec.build_draft_attn_metadatas(num_rows, lengths)[0]["window"].decode
+        assert fresh.actual_seq_lengths_q[:2] == [6, 8]
+        assert sample_pos_copies == 2
