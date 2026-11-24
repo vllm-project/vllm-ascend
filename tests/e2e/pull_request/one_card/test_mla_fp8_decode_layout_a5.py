@@ -78,6 +78,7 @@ def _case(monkeypatch, num_tokens, speculative, fp8):
     impl.v_head_dim = VALUE_DIM
     impl.scale = (LATENT_DIM + ROPE_DIM) ** -0.5
     impl.enable_kv_nz = False
+    impl.sliding_window = None
     impl.support_fp8_attention = True
     impl.fa_quant_layer = fp8
     impl.fak_descale_float = torch.ones(1, device="npu")
@@ -195,6 +196,29 @@ def test_mla_decode_output_to_v_projection_a5(monkeypatch, num_tokens, speculati
     _assert_output(actual, expected)
     _assert_output(explicit_copy, expected)
     _assert_output(actual, explicit_copy.cpu())
+
+
+@pytest.mark.e2e_coverage(
+    arch="", feature="fia_comparison", parallel="", deploy="", hardware="A5", quantization="", graph_mode="eager"
+)
+@torch.inference_mode()
+def test_mla_swa_left_boundary(monkeypatch):
+    window = 32
+    impl, metadata, _ = _case(monkeypatch, num_tokens=2, speculative=True, fp8=False)
+    impl.sliding_window = window
+    metadata.decode.seq_lens_list = [window + 1]
+    inputs = _inputs(2, fp8=False, seed=41)
+    # With zero queries, the marker at KV position 0 contributes 1 at
+    # query position window - 1 and falls outside the next query's window.
+    inputs.ql_nope.zero_()
+    inputs.q_pe.zero_()
+    inputs.k_nope.zero_()
+    inputs.k_nope[0, 0, 0, 0] = window
+    impl.W_UV.zero_()
+    impl.W_UV[:, 0, 0] = 1
+
+    output = impl._forward_decode(inputs, BLOCK_SIZE, metadata)
+    torch.testing.assert_close(output[:, 0].float().cpu(), torch.tensor([1.0, 0.0]))
 
 
 @pytest.mark.e2e_coverage(

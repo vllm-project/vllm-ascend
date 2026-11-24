@@ -3164,7 +3164,8 @@ class AscendMLAImpl(MLAAttentionImpl):
             "actual_seq_kvlen": decode_meta.seq_lens_list,
         }
         if sparse_mode == 4 and self.sliding_window is not None:
-            common_kwargs["pre_tokens"] = self.sliding_window
+            # The window includes the current token. FIA counts only preceding tokens here.
+            common_kwargs["pre_tokens"] = self.sliding_window - 1
             common_kwargs["next_tokens"] = 0
         common_kwargs["query_rope"] = q_pe
         common_kwargs["key_rope"] = k_pe
