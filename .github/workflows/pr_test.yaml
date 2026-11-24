@@ -147,17 +147,18 @@ jobs:
                   ".github/workflows/scripts/test_config.yaml", encoding="utf-8"
               ) as config:
                   skip = set(yaml.safe_load(config)["skip_tests"])
-              tests = group["tests"]
-              if not isinstance(tests, list):
-                  tests = str(tests).split()
+              # select_tests.py emits "tests" as a space-joined string and
+              # _selected_tests.yaml interpolates it directly into the shell
+              # command; a JSON list would render as the literal "Array".
               tests = [
                   test
-                  for test in tests
-                  if str(test).replace("\\", "/") not in skip
+                  for test in str(group["tests"]).split()
+                  if test.replace("\\", "/") not in skip
               ]
-              group["tests"] = tests[:KEEP_TESTS]
-              if not group["tests"]:
+              tests = tests[:KEEP_TESTS]
+              if not tests:
                   raise SystemExit(f"Empty test selection for {group['num_npus']} cards")
+              group["tests"] = " ".join(tests)
               return group
 
           prefix = "linux-aarch64-a3-800i-karc-fed-"
