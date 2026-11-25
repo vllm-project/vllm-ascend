@@ -77,13 +77,13 @@ For multi-node deployment, verify the communication environment by following [Ve
 
 {% include "getting_started/installation/ascend_docker_runtime.inc.md" %}
 
-#### Download Docker Image
+#### Download Docker Image {: #download-docker-image }
 
 ```bash
-docker pull quay.io/ascend/vllm-ascend:step5-a5-openeuler
+docker pull quay.io/ascend/vllm-ascend:nightly-releases-v0.34.0rc1-a5
 ```
 
-#### Create Docker Container
+#### Create Docker Container {: #create-docker-container }
 
 Use the following command to create the container.
 
@@ -114,11 +114,35 @@ docker run --rm \
 ```
 Inside the container, run `npu-smi info` and confirm that all eight NPUs are visible. Run `vllm --version` to check the installed vLLM version.
 
-The container runs with `--privileged=true`, so the URMA device nodes (`/dev/urma*`) and the Davinci devices are visible without enumerating each one with `--device`. The reference containers also bind the host `urma_admin` binary into the container; add `--device /dev/urmaN` only if you drop `--privileged`.
+The container runs without `--privileged`: Ascend Docker Runtime injects the eight Davinci devices selected by `-e ASCEND_VISIBLE_DEVICES=0-7`, so no `--device` entry is needed for them. Add `--device` only if you start the container without that runtime.
+
+The `-v` option maps directories. **You should map the weight directory into the container** so that the weights can be accessed inside the container. The local weight path is `/mnt/weight`; modify it according to the actual situation.
+
+The `docker run` command above opens an interactive container shell. Use that shell for the following steps. To open an additional shell, run this command from another terminal on the host:
+
+```bash
+docker exec -it ${CONTAINER_NAME} bash
+```
+
+**Installation Verification:**
+
+In another terminal on the same host, check the container status (replace `step5` if you changed `CONTAINER_NAME`):
+
+```bash
+docker ps --filter name=step5
+```
+
+Expected result: the container is listed with status `Up`. In the container terminal, verify the installed package versions:
+
+```bash
+pip show vllm vllm-ascend
+```
+
+Expected result: the version information for both packages is displayed; `vllm-ascend` is the preview build shipped in this image.
 
 Use the same image and absolute checkpoint path on every participating node. Reserve enough host memory and shared memory for Engram CPU offload and local DP sharing.
 
-The KV cache pool in [Section 5.3](#53-pd-separation-with-kv-cache-pool) uses the MemCache backend over the `device_urma` transport on 950DT products. The pool reads its configuration files from `MEMCACHE_CONFIG_DIR`, which the container mounts at the same path, so create that directory on every node before starting Docker. Remove the mount if you do not use the KV cache pool.
+The KV cache pool in [Section 5.3](#53-pd-separation-with-kv-cache-pool) uses the MemCache backend over the `device_urma` transport on 950DT products. That transport needs the `/dev/uburma` node inside the container; check it with `ls /dev | grep uburma` after the container starts. The pool reads its configuration files from `MEMCACHE_CONFIG_DIR`, which the container mounts at the same path, so create that directory on every node before starting Docker. Remove the mount if you do not use the KV cache pool.
 
 ### 4.2 Source Code Installation {: #42-source-code-installation }
 
