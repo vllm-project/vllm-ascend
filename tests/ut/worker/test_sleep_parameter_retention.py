@@ -13,6 +13,7 @@ def worker(monkeypatch):
     from vllm_ascend.worker import worker as worker_module
 
     worker = worker_module.NPUWorker.__new__(worker_module.NPUWorker)
+    worker.load_config = SimpleNamespace(load_format="auto", model_loader_extra_config={})
     worker.model_config = SimpleNamespace(
         sleep_preserve_parameter_names=["weight"],
         sleep_mode_backend="camem",

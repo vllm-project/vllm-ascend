@@ -1,0 +1,188 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026 Huawei Technologies Co., Ltd. All Rights Reserved.
+
+import gc
+import itertools
+import socket
+import struct
+import sys
+from contextlib import contextmanager
+
+import psutil
+import torch
+from torch.utils.hooks import RemovableHandle
+from vllm.config import ModelConfig, VllmConfig
+from vllm.model_executor.model_loader.weight_cache import utils as weight_cache_utils
+from vllm.model_executor.model_loader.weight_cache.ipc_loader import IpcModelLoader
+from vllm.model_executor.model_loader.weight_cache.protocol import WeightCacheState
+
+from .config import validate_preload_config
+
+
+@contextmanager
+def _model_construction_state(vllm_config: VllmConfig):
+    """Roll back constructor registries when upstream falls back to disk."""
+    from vllm_ascend.ops.rotary_embedding import rope_cache_construction
+
+    context = vllm_config.compilation_config.static_forward_context
+    previous_context = dict(context)
+    dynamo = sys.modules.get("torch._dynamo.convert_frame")
+    previous_hooks = frozenset(getattr(dynamo, "_bytecode_hooks", {}))
+    with rope_cache_construction():
+        try:
+            yield
+        except BaseException:
+            # A compiled model can register a bound callback during construction.
+            # Detach only callbacks created by this failed attempt, otherwise the
+            # discarded meta model stays alive across the normal disk fallback.
+            dynamo = sys.modules.get("torch._dynamo.convert_frame")
+            hooks = getattr(dynamo, "_bytecode_hooks", {})
+            for hook_id, callback in list(hooks.items()):
+                if hook_id in previous_hooks:
+                    continue
+                owner = getattr(callback, "__self__", None)
+                handle = getattr(owner, "_bytecode_hook_handle", None)
+                if (
+                    isinstance(owner, torch.nn.Module)
+                    and isinstance(handle, RemovableHandle)
+                    and handle.id == hook_id
+                    and handle.hooks_dict_ref() is hooks
+                ):
+                    handle.remove()
+            context.clear()
+            context.update(previous_context)
+            raise
+
+
+class AscendIpcModelLoader(IpcModelLoader):
+    """Keep upstream transport/lifecycle and specialize NPU model binding.
+
+    Zero-copy daemon loss follows upstream's warn-and-continue policy; it does
+    not trigger a runtime disk fallback. With expandable_segments=True, the
+    engine retains imported physical-memory handles after the daemon exits.
+    CANN releases shared physical memory only after all handle owners release
+    it. A replacement daemon may allocate a second copy of the cached weights.
+    """
+
+    preload_daemon_process: psutil.Process | None = None
+    _capture_daemon_process = False
+    _defer_copy_release = False
+
+    def _connect(self, timeout: float) -> socket.socket:
+        conn = super()._connect(timeout)
+        if self._capture_daemon_process and hasattr(socket, "SO_PEERCRED"):
+            # Identify the process on the same connection that supplies the
+            # startup charge. A later connection can reach a replacement.
+            try:
+                credentials = struct.Struct("3i")
+                pid, _, _ = credentials.unpack(conn.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, credentials.size))
+                self.preload_daemon_process = psutil.Process(pid) if pid > 0 else None
+            except (OSError, psutil.Error):
+                self.preload_daemon_process = None
+        return conn
+
+    def get_external_weight_memory(self, vllm_config: VllmConfig) -> int:
+        validate_preload_config(vllm_config, mode=self.mode)
+        if self.mode == "copy":
+            # Wait before the worker snapshot, but do not subtract these
+            # weights from its independent budget. The worker must later
+            # remove a confirmed producer release from the profiling delta.
+            self.resident_cache_memory = self._daemon_memory()
+            return 0
+        self.preload_daemon_process = None
+        self._capture_daemon_process = self.fallback
+        try:
+            return super().get_external_weight_memory(vllm_config)
+        finally:
+            self._capture_daemon_process = False
+
+    def load_model(self, vllm_config: VllmConfig, model_config: ModelConfig, prefix: str = "") -> torch.nn.Module:
+        validate_preload_config(vllm_config, mode=self.mode)
+        self._released_cache_memory = 0
+        model = super().load_model(vllm_config, model_config, prefix)
+        if self._released_cache_memory:
+            model._ascend_preload_released_cache_bytes = self._released_cache_memory
+        return model
+
+    def load_weights(self, model: torch.nn.Module, model_config: ModelConfig) -> None:
+        if self.mode == "zero_copy":
+            raise ValueError("In-place reload would mutate daemon-owned zero_copy weights")
+        super().load_weights(model, model_config)
+
+    def _fallback_load(self, vllm_config: VllmConfig, model_config: ModelConfig, prefix: str) -> torch.nn.Module:
+        # The upstream exception handler has exited, so failed constructor
+        # tracebacks and model cycles can be reclaimed before disk allocation.
+        gc.collect()
+        torch.accelerator.empty_cache()
+        model = super()._fallback_load(vllm_config, model_config, prefix)
+        # TODO: Remove this marker once the minimum supported vLLM release
+        # includes vllm-project/vllm#63488, which records the fallback upstream.
+        if self.mode == "zero_copy" and not hasattr(weight_cache_utils, "ExternalWeightCharges"):
+            model._ascend_preload_disk_fallback = True
+        return model
+
+    def _send_release(self) -> None:
+        if self._defer_copy_release:
+            return
+        if self.mode == "copy":
+            # Finish asynchronous reads from imported NPU allocations before
+            # asking their owner to release them. This runs once at startup.
+            torch.npu.synchronize()
+            free_before = torch.npu.mem_get_info()[0]
+        super()._send_release()
+        if self.mode == "copy":
+            self._released_cache_memory = max(0, torch.npu.mem_get_info()[0] - free_before)
+
+    def _build_model(
+        self, vllm_config: VllmConfig, model_config: ModelConfig, prefix: str, state: WeightCacheState
+    ) -> torch.nn.Module:
+        from vllm_ascend.ops.rotary_embedding import rebind_rope_caches
+
+        with _model_construction_state(vllm_config):
+            # Core releases copy-mode weights inside _build_model. Platform
+            # rebinding can still allocate and fail, so commit the handoff only
+            # after it succeeds. Clear the deferral before Core handles failure
+            # so its disk-fallback cleanup can still release the daemon.
+            # TODO: Remove this release deferral along with copy-mode support
+            # once the baseline includes vllm-project/vllm#68388.
+            self._defer_copy_release = self.mode == "copy"
+            try:
+                model = super()._build_model(vllm_config, model_config, prefix, state)
+                rebind_rope_caches(model)
+            finally:
+                self._defer_copy_release = False
+            if self.mode == "copy":
+                self._send_release()
+            return model
+
+    def _apply_entries(self, model: torch.nn.Module, state: WeightCacheState, device_index: int) -> None:
+        # Methods validate these parameters during post-processing, before upstream
+        # materializes any remaining meta tensors.
+        method_validated = {
+            f"{path}.{leaf}" if path else leaf
+            for path, module in model.named_modules(remove_duplicate=False)
+            for leaf in getattr(getattr(module, "quant_method", None), "pre_processed_weight_names", ())
+        }
+        expected = {
+            name: (tensor.shape, tensor.dtype)
+            for name, tensor in itertools.chain(
+                model.named_parameters(remove_duplicate=False), model.named_buffers(remove_duplicate=False)
+            )
+            if name not in method_validated
+        }
+        provided = set(state.entries) | set(state.aliases)
+        missing = set(expected) - provided
+        if missing:
+            raise ValueError(f"Incomplete Ascend weight cache: missing {sorted(missing)}")
+        for alias, canonical in state.aliases.items():
+            if canonical not in state.entries:
+                raise ValueError(f"Invalid cached alias {alias}: missing {canonical}")
+        super()._apply_entries(model, state, device_index)
+        actual = dict(model.named_parameters(remove_duplicate=False))
+        actual.update(dict(model.named_buffers(remove_duplicate=False)))
+        for name, (shape, dtype) in expected.items():
+            if actual[name].shape != shape or actual[name].dtype != dtype:
+                raise ValueError(f"Cached tensor {name} has an incompatible shape or dtype")
+        remaining = [name for name, tensor in actual.items() if tensor.is_meta and name not in method_validated]
+        if remaining:
+            raise ValueError(f"Unresolved meta tensors in Ascend weight cache: {remaining}")

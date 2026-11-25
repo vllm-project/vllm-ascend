@@ -98,10 +98,12 @@ def register_model_loader():
 
     from .model_loader.bigtensorloader import register_bigtensor_loader
     from .model_loader.netloader import register_netloader
+    from .model_loader.preload import register_preload_loader
     from .model_loader.rfork import register_rforkloader
 
     register_bigtensor_loader()
     register_netloader()
+    register_preload_loader()
     register_rforkloader()
 
 

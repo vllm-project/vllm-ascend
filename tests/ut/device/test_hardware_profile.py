@@ -44,6 +44,7 @@ _STANDARD_CAPABILITIES = frozenset(
         HardwareCapability.MOE_GATING_TOP_K_HASH_VISION,
         HardwareCapability.NPUGRAPH_EX,
         HardwareCapability.PAGED_ATTENTION,
+        HardwareCapability.PRELOAD_WEIGHT_CACHE,
         HardwareCapability.RUNTIME_CUSTOM_OPS,
         HardwareCapability.SFA_NOPE_PROLOG_V3,
         HardwareCapability.SCATTER_ND_CACHE_STORE,

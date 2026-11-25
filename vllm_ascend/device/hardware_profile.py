@@ -183,6 +183,9 @@ class HardwareCapability(Enum):
     NPU_TOP_K_TOP_P = auto()
     # Allow shared paged-attention decode when graph mode, shape, and model checks pass.
     PAGED_ATTENTION = auto()
+    # Enable the preload weight-cache Tensor IPC path on supported A2/A3 stacks.
+    # This is the preload support scope, not a general hardware IPC capability.
+    PRELOAD_WEIGHT_CACHE = auto()
     # Use eight-row Qwen4Exp HC gate-mix tiles for large prefill batches.
     # A2, A3, and A5 validated parity and a performance benefit at the
     # family-specific dispatch threshold; other profiles retain one-row dispatch.
@@ -392,6 +395,7 @@ _STANDARD_CAPABILITIES = frozenset(
         HardwareCapability.MOE_GATING_TOP_K_HASH_VISION,
         HardwareCapability.NPUGRAPH_EX,
         HardwareCapability.PAGED_ATTENTION,
+        HardwareCapability.PRELOAD_WEIGHT_CACHE,
         HardwareCapability.RUNTIME_CUSTOM_OPS,
         HardwareCapability.SFA_NOPE_PROLOG_V3,
         HardwareCapability.SCATTER_ND_CACHE_STORE,

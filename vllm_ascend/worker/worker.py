@@ -28,6 +28,7 @@ from types import NoneType
 from typing import TYPE_CHECKING, Any
 from unittest.mock import patch
 
+import psutil
 import torch
 import torch.nn as nn
 import torch_npu
@@ -51,6 +52,7 @@ from vllm.distributed.kv_transfer import (
 from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorHandshakeMetadata
 from vllm.distributed.parallel_state import get_pp_group, get_tp_group
 from vllm.logger import logger
+from vllm.model_executor.model_loader import get_model_loader
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.utils.mem_constants import GiB_bytes
@@ -77,8 +79,16 @@ from vllm.v1.worker.startup_plan import (
     maybe_apply_startup_plan,
     maybe_save_startup_plan,
 )
+from vllm.v1.worker.utils import request_memory
 from vllm.v1.worker.worker_base import CompilationTimes
 from vllm.v1.worker.workspace import init_workspace_manager
+
+# TODO: Import ExternalWeightCharges directly and remove its None checks once
+# the minimum supported vLLM release includes vllm-project/vllm#63488.
+try:
+    from vllm.model_executor.model_loader.weight_cache.utils import ExternalWeightCharges
+except ImportError:
+    ExternalWeightCharges = None
 
 import vllm_ascend.device_allocator.sleep_mode_backend  # noqa: F401  (registers camem)
 import vllm_ascend.envs as envs_ascend
@@ -108,6 +118,7 @@ from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_man
 )
 from vllm_ascend.distributed.kv_transfer.utils.mooncake_transfer_engine import global_te
 from vllm_ascend.distributed.parallel_state import init_ascend_model_parallel
+from vllm_ascend.model_loader.preload.config import require_private_weights
 from vllm_ascend.observability.runtime_guard.hooks import runtime_guard_idle_step
 from vllm_ascend.ops.triton.triton_utils import init_device_properties_triton
 from vllm_ascend.profiler.torch_npu_profiler import TorchNPUProfilerWrapper
@@ -396,6 +407,7 @@ class NPUWorker(GPUWorker):
         return apply_process_metrics_level(level)
 
     def sleep(self, level: int = 1) -> None:
+        require_private_weights(self.load_config, "sleep")
         # Resolve the backend before cleanup or KV unregistration so a bad
         # backend configuration leaves the worker state intact.
         backend = self.sleep_mode_backend
@@ -474,6 +486,7 @@ class NPUWorker(GPUWorker):
             )
 
     def _start_weight_update(self, is_draft: bool = False) -> None:
+        require_private_weights(self.load_config, "start_weight_update")
         if is_draft:
             raise NotImplementedError("Draft weight updates are not supported on Ascend.")
         # Report a missing engine before checking the Ascend layout.
@@ -482,6 +495,10 @@ class NPUWorker(GPUWorker):
         # The inherited lifecycle tracks session state, dispatches rank payloads
         # and refreshes the model runner once the target weights are in place.
         super()._start_weight_update()
+
+    def update_weights(self, update_info: dict | list[dict]) -> None:
+        require_private_weights(self.load_config, "update_weights")
+        super().update_weights(update_info)
 
     def shutdown(self) -> None:
         model = getattr(getattr(self, "model_runner", None), "model", None)
@@ -593,20 +610,23 @@ class NPUWorker(GPUWorker):
         if get_current_hardware_profile().supports(HardwareCapability.LOCAL_KV_COMM_RESOURCE):
             setup_ascend_local_comm_res(visible_device_index, self.vllm_config.kv_transfer_config)
 
-        # take current memory snapshot
+        # Wait for externally held weights before taking the snapshot, like
+        # upstream GPUWorker. Shared weights consume the utilization budget,
+        # but must not be allocated or charged again by this worker.
+        loader = get_model_loader(self.load_config)
+        query_external_memory = getattr(loader, "get_external_weight_memory", None)
+        charges = ExternalWeightCharges() if ExternalWeightCharges is not None else None
+        with charges.track() if charges is not None else nullcontext():
+            external_weight_memory = query_external_memory(self.vllm_config) if query_external_memory is not None else 0
+        self._external_weight_charges = charges
+        self._preload_external_weight_memory = external_weight_memory
+        self._preload_daemon_process = getattr(loader, "preload_daemon_process", None)
+        self._preload_copy_cache_memory = getattr(loader, "resident_cache_memory", 0)
         self.init_snapshot = MemorySnapshot(device=device)
-        self.requested_memory = self.init_snapshot.total_memory * self._get_gpu_memory_utilization()
-        if self.init_snapshot.free_memory < self.requested_memory:
-            GiB = lambda b: round(b / GiB_bytes, 2)
-            raise ValueError(
-                f"Free memory on device "
-                f"({GiB(self.init_snapshot.free_memory)}/"
-                f"{GiB(self.init_snapshot.total_memory)} GiB) on startup "
-                f"is less than desired GPU memory utilization "
-                f"({self._get_gpu_memory_utilization()}, "
-                f"{GiB(self.requested_memory)} GiB). Decrease GPU memory "
-                f"utilization or reduce GPU memory used by other processes."
-            )
+        if external_weight_memory:
+            self.requested_memory = request_memory(self.init_snapshot, self.cache_config, external_weight_memory)
+        else:
+            self.requested_memory = request_memory(self.init_snapshot, self.cache_config)
 
         if (
             self.parallel_config.data_parallel_size > 1
@@ -775,6 +795,11 @@ class NPUWorker(GPUWorker):
         # Override torch_peak_increase with the pre-graph-capture value to
         # avoid double-counting graph pool memory as activation memory.
         profile_result.torch_peak_increase = profile_torch_peak - profile_result.before_profile.torch_peak
+        preload_disk_fallback = getattr(self, "_preload_disk_fallback", False)
+        if preload_disk_fallback:
+            # A device-wide drop can include releases that the worker cannot
+            # attribute. Never let a negative overhead increase the KV budget.
+            profile_result.non_torch_increase = max(0, profile_result.non_torch_increase)
         if self.vllm_config.attention_config.hisparse_config is None:
             profile_result.non_kv_cache_memory = (
                 profile_result.non_torch_increase + profile_result.torch_peak_increase + profile_result.weights_memory
@@ -799,6 +824,8 @@ class NPUWorker(GPUWorker):
             "isolate vLLM in its own container."
         )
         self.available_kv_cache_memory_bytes = self.requested_memory - profile_result.non_kv_cache_memory
+        if preload_disk_fallback:
+            self.available_kv_cache_memory_bytes = min(self.available_kv_cache_memory_bytes, free_gpu_memory)
         self.available_kv_cache_memory_bytes = self._scale_kv_cache_memory_for_multi_group(
             self.available_kv_cache_memory_bytes,
         )
@@ -1005,8 +1032,37 @@ class NPUWorker(GPUWorker):
         else:
             empty_cache_context = nullcontext()
 
-        with context, empty_cache_context, set_current_vllm_config(self.vllm_config):
+        charges = getattr(self, "_external_weight_charges", None)
+        with (
+            context,
+            empty_cache_context,
+            set_current_vllm_config(self.vllm_config),
+            charges.track() if charges is not None else nullcontext(),
+        ):
             self.model_runner.load_model()
+
+        if external_weight_memory := getattr(self, "_preload_external_weight_memory", 0):
+            if charges is not None:
+                fallback_bytes = charges.fallback_bytes
+            else:
+                # TODO: Remove this branch and the loader's fallback marker once
+                # the minimum supported vLLM release includes vllm-project/vllm#63488.
+                disk_fallback = self.get_model().__dict__.pop("_ascend_preload_disk_fallback", False)
+                fallback_bytes = external_weight_memory if disk_fallback else 0
+            if fallback_bytes:
+                self._preload_disk_fallback = True
+                self._reconcile_preload_fallback(min(fallback_bytes, external_weight_memory), external_weight_memory)
+
+        if copy_cache_memory := getattr(self, "_preload_copy_cache_memory", 0):
+            model = self.model_runner.get_model()
+            released = model.__dict__.pop("_ascend_preload_released_cache_bytes", 0)
+            # A producer release is not negative engine overhead. Rebase
+            # only the cache known to exist at startup and actually freed;
+            # a failed release or disk fallback must not receive this credit.
+            correction = min(copy_cache_memory, released)
+            self.init_snapshot.free_memory += correction
+            self.init_snapshot.cuda_memory -= correction
+            self.init_snapshot.non_torch_memory -= correction
 
         if has_ec_transfer():
             get_ec_transfer().start_worker_services()
@@ -1022,6 +1078,34 @@ class NPUWorker(GPUWorker):
                 self.device,
                 self.model_runner.get_model(),
             )
+
+    def _reconcile_preload_fallback(self, fallback_bytes: int, external_weight_memory: int) -> None:
+        producer = self._preload_daemon_process
+        if producer is None:
+            return
+        try:
+            if producer.is_running() and producer.status() != psutil.STATUS_ZOMBIE:
+                return
+        except psutil.NoSuchProcess:
+            pass
+        except psutil.AccessDenied:
+            return
+
+        # Rebase from the observed device drop, excluding the worker's own
+        # allocator reservations. This can include producer runtime memory
+        # beyond its weight charge, or less if other IPC imports keep it alive.
+        after_disk_load = MemorySnapshot(device=self.device)
+        correction = self.init_snapshot.non_torch_memory - after_disk_load.non_torch_memory
+        if correction <= 0:
+            return
+
+        snapshot = copy.copy(self.init_snapshot)
+        snapshot.free_memory += correction
+        snapshot.cuda_memory -= correction
+        snapshot.non_torch_memory -= correction
+        remaining_charge = external_weight_memory - min(fallback_bytes, correction)
+        self.requested_memory = request_memory(snapshot, self.cache_config, remaining_charge)
+        self.init_snapshot = snapshot
 
     def compile_or_warm_up_model(self) -> CompilationTimes:
         # Note: need to adapt for graph mode.
@@ -1138,6 +1222,10 @@ class NPUWorker(GPUWorker):
         weight = torch.rand((2, 4), dtype=torch.float16).npu()
         c = torch.rand((4, 4), dtype=torch.float32).npu()
         torch_npu._npu_matmul_add_fp32(x, weight, c)
+
+    def reset_weights(self) -> None:
+        require_private_weights(self.load_config, "reset_weights")
+        super().reset_weights()
 
     def get_kv_connector_handshake_metadata(
         self,
@@ -1370,6 +1458,7 @@ class NPUWorker(GPUWorker):
         self.model_runner.update_config(overrides)
 
     def reload_weights(self, *args, **kwargs) -> None:
+        require_private_weights(self.load_config, "reload_weights")
         self.model_runner.reload_weights(*args, **kwargs)
 
     def check_health(self) -> None:

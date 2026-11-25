@@ -95,6 +95,11 @@ _LONG_PROMPTS = [os.path.join(_TEST_DIR, "prompts", "long_prompt.txt")]
 
 def pytest_addoption(parser: pytest.Parser) -> None:
     parser.addoption(
+        "--preload-model",
+        default="Qwen/Qwen3-0.6B",
+        help="Dense model ID or local checkpoint path for preload E2E tests.",
+    )
+    parser.addoption(
         "--msa-m3-sparse-backend",
         action="store",
         default=os.environ.get("MINIMAX_M3_SPARSE_BACKEND", "all"),
