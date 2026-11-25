@@ -158,6 +158,52 @@ def test_local_compressor_boundaries_preserve_request_tails_and_predecessors(wor
                 assert predecessor == -1
 
 
+@pytest.mark.parametrize("world", [2, 4, 8])
+@pytest.mark.parametrize("query_len", [1, 4])
+def test_c2_metadata_uses_cached_short_prefill_decode_ownership(world, query_len):
+    """Gather cached prompt tails from their decode owner, including draft tokens."""
+    batch = SimpleNamespace(
+        num_reqs=2,
+        num_tokens=1 + query_len,
+        num_scheduled_tokens=np.array([1, query_len], dtype=np.int32),
+        query_start_loc_np=np.array([0, 1, 1 + query_len], dtype=np.int32),
+        is_prefilling_np=np.array([False, True]),
+        prefill_runs_as_decode_np=np.array([False, True]),
+    )
+    # Decode requests are owned round-robin. Each rank's local rows start at zero.
+    rank_rows = [[0], list(range(1, batch.num_tokens))] + [[] for _ in range(world - 2)]
+    rank_metadata, gathered_rows = [], []
+    for rank, rows in enumerate(rank_rows):
+        metadata = dsa_v41_cp.build_v41_pcp_c2_metadata(
+            batch,
+            world,
+            rank,
+            torch.device("cpu"),
+            decode_sharded=True,
+            min_send_rows=0,
+            num_local_reqs=int(bool(rows)),
+            num_ring_rows=0,
+            buffers=None,
+            buffer_capacity=0,
+        )
+        assert int(metadata.send_valid_mask.sum()) == len(rows)
+        assert metadata.prev_token_row_indices.tolist() == ([-1] if rows else [])
+        sent_rows = torch.full_like(metadata.send_token_indices, -1)
+        if rows:
+            sent_rows[metadata.send_valid_mask] = torch.tensor(rows)[
+                metadata.send_token_indices[metadata.send_valid_mask]
+            ]
+        rank_metadata.append(metadata)
+        gathered_rows.append(sent_rows)
+
+    gathered = torch.cat(gathered_rows)
+    for metadata in rank_metadata:
+        assert gathered[metadata.ring_source_row_indices].tolist() == list(range(batch.num_tokens))
+        assert metadata.ring_request_indices.tolist() == [0] + [1] * query_len
+        assert metadata.ring_token_offsets.tolist() == [0] + list(range(query_len))
+    np.testing.assert_array_equal(batch.is_prefilling_np, [False, True])
+
+
 # Scheduler token IDs owned by each rank, in DualChunkSwap order. Repeated
 # decode rows are added separately; the oracle does not call PCP helpers.
 PREFILL_ROWS = {
@@ -316,12 +362,12 @@ def builders(monkeypatch):
         monkeypatch.setattr(module, "get_full_cos_and_sin_dsa_for_layer", lambda name: (full_cos, full_sin))
 
     def make(world=2, rank=0, *, max_seqs=2, graph_sizes=(12, 24), dcp=1, decode_sharded=False):
-        monkeypatch.setattr(dsa_v41_cp, "is_pcp_decode_sharding_enabled", lambda config: decode_sharded)
         config = SimpleNamespace(
             parallel_config=SimpleNamespace(
                 tensor_parallel_size=1,
                 prefill_context_parallel_size=world,
                 decode_context_parallel_size=dcp,
+                pcp_shard_decode_requests=decode_sharded,
             ),
             scheduler_config=SimpleNamespace(max_num_seqs=max_seqs, max_num_batched_tokens=64),
             speculative_config=None if decode_sharded else SimpleNamespace(num_speculative_tokens=5),

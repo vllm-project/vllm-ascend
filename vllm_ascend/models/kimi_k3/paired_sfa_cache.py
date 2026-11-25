@@ -13,6 +13,7 @@ from dataclasses import replace
 
 from vllm.config import VllmConfig
 from vllm.model_executor.models.utils import extract_layer_index
+from vllm.v1.core.kv_cache_planning import may_override_num_blocks
 from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
     KVCacheGroupSpec,
@@ -23,13 +24,6 @@ from vllm.v1.kv_cache_interface import (
 
 from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec, AscendSFAIndexerCacheSpec
 from vllm_ascend.models.kimi_k3.cache_config import make_kimi_cache_groups
-from vllm_ascend.utils import vllm_version_is
-
-# vLLM main moved this helper to kv_cache_planning after v0.32.0.
-if vllm_version_is("0.32.0"):
-    from vllm.v1.core.kv_cache_utils import may_override_num_blocks
-else:
-    from vllm.v1.core.kv_cache_planning import may_override_num_blocks
 
 
 def _draft_layer_specs(groups):
@@ -236,12 +230,3 @@ def paired_sfa_cache_config(
         kv_cache_groups=kv_cache_groups,
         prefix_cache_retention_interval=vllm_config.cache_config.prefix_cache_retention_interval,
     )
-
-
-def paired_sfa_max_memory(config, groups):
-    blocks = sum(
-        (g.kv_cache_spec.max_memory_usage_bytes(config) + g.kv_cache_spec.page_size_bytes - 1)
-        // g.kv_cache_spec.page_size_bytes
-        for g in groups
-    )
-    return blocks * paired_sfa_pool_bytes(groups)

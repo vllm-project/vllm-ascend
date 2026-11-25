@@ -32,7 +32,7 @@ The official model is available on [Hugging Face](https://huggingface.co/stepfun
 | --- | --- |
 | Step-5-Preview-w8a8-mxfp8 | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/Step-5-Preview-w8a8-mxfp8) |
 
->**Path description**: Download the model weights to a directory of your choice and record it. Ensure the model path in the subsequent deployment command matches this directory.
+> **Path description**: Download the model weights to a directory of your choice and record it. Ensure the model path in the subsequent deployment command matches this directory.
 
 ### 3.2 Hardware and Software Preparation
 
@@ -56,6 +56,8 @@ This experimental deployment example targets 950DT products only.
 
 ### 4.1 Docker Image Installation
 
+{% include "getting_started/installation/ascend_docker_runtime.inc.md" %}
+
 #### Download Docker Image
 
 ```bash
@@ -73,27 +75,12 @@ export CONTAINER_NAME=step5
 
 # 950DT products have 8 NPUs and use Device UB.
 docker run --rm \
+-e ASCEND_VISIBLE_DEVICES=0-7 \
 --name $CONTAINER_NAME \
 --net=host \
---privileged=true \
 --shm-size=60g \
---device /dev/davinci_manager \
---device /dev/hisi_hdc \
---device /dev/ummu \
---device /dev/uburma \
---device /dev/davinci0 \
---device /dev/davinci1 \
---device /dev/davinci2 \
---device /dev/davinci3 \
---device /dev/davinci4 \
---device /dev/davinci5 \
---device /dev/davinci6 \
---device /dev/davinci7 \
 -v /usr/local/Ascend/driver:/usr/local/Ascend/driver \
 -v /usr/local/Ascend/firmware:/usr/local/Ascend/firmware \
--v /usr/local/dcmi:/usr/local/dcmi \
--v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
--v /etc/ascend_install.info:/etc/ascend_install.info \
 -v /etc/hixlep:/etc/hixlep \
 -v /etc/hccn.conf:/etc/hccn.conf \
 -v /var/log/npu/:/usr/slog \

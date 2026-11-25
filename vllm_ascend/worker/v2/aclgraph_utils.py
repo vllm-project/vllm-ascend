@@ -47,7 +47,7 @@ from vllm_ascend.compilation.updatable_graph import (
     UpdatableGraph,
 )
 from vllm_ascend.distributed.expert_transfer import expert_offload_utils as expert_offload
-from vllm_ascend.utils import use_updatable_graph, vllm_version_is
+from vllm_ascend.utils import use_updatable_graph
 from vllm_ascend.worker.metadata_async import finish_metadata
 from vllm_ascend.worker.v2.utils import communicator_switch
 
@@ -90,7 +90,7 @@ class ModelAclGraphManager(ModelCudaGraphManager):
         vllm_config: VllmConfig,
         device: torch.device,
         cudagraph_mode: CUDAGraphMode,
-        decode_query_len: int | Mapping[int, int],
+        decode_query_lens: Mapping[int, int],
         model_runner: Any,
         lora_capture_cases: list[int] | None = None,
         varlen_decode: bool = False,
@@ -102,7 +102,7 @@ class ModelAclGraphManager(ModelCudaGraphManager):
             vllm_config,
             device,
             cudagraph_mode,
-            decode_query_len,
+            decode_query_lens,
             lora_capture_cases=lora_capture_cases,
             varlen_decode=varlen_decode,
             ubatch_runner=ubatch_runner,
@@ -212,7 +212,6 @@ class ModelAclGraphManager(ModelCudaGraphManager):
         block_tables: BlockTables,
         attn_groups: list[list[AttentionGroup]],
         kv_cache_config: KVCacheConfig,
-        has_lora: bool = False,
         use_aux_hidden_state_outputs: bool = False,
         lora_capture_hook: Callable[[int, int, int], None] | None = None,
         progress_bar_desc: str = "Capturing CUDA graphs",
@@ -222,11 +221,8 @@ class ModelAclGraphManager(ModelCudaGraphManager):
         """Capture CUDA graphs for model forward pass."""
         metadata = getattr(model_state, "device_metadata", None)
         if hasattr(metadata, "configure_capture_sizes"):
-            if has_lora:
-                raise ValueError("A3 asynchronous metadata does not support LoRA graph capture")
             metadata.configure_capture_sizes(self.capture_sizes)
         model = ModelWithContext(model, device_metadata=metadata)
-        legacy_kwargs = {"has_lora": has_lora} if vllm_version_is("0.33.0") else {}
         succeeded = False
         try:
             with communicator_switch():
@@ -239,7 +235,6 @@ class ModelAclGraphManager(ModelCudaGraphManager):
                     attn_groups,
                     kv_cache_config,
                     pcp_manager=pcp_manager,
-                    **legacy_kwargs,
                     use_aux_hidden_state_outputs=use_aux_hidden_state_outputs,
                     lora_capture_hook=lora_capture_hook,
                     progress_bar_desc=progress_bar_desc,

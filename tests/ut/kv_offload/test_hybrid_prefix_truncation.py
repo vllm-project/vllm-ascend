@@ -56,6 +56,7 @@ def test_prefill_truncation_precedes_local_prefix_lookup(speculative_method, mon
     register_all_kvcache_specs(None)
     init_none_hash(sha256)
     block_size, hash_size = resolve_kv_cache_block_sizes(plan, config)
+    plan.hash_block_size = hash_size
     scheduler = Scheduler(
         config, plan, StructuredOutputManager(config), block_size=block_size, hash_block_size=hash_size
     )
@@ -66,9 +67,11 @@ def test_prefill_truncation_precedes_local_prefix_lookup(speculative_method, mon
             prompt_token_ids=list(range(length)),
             pooling_params=None,
             sampling_params=SamplingParams(max_tokens=1, extra_args={"kv_transfer_params": {"do_remote_decode": True}}),
-            block_hasher=get_request_block_hasher(hash_size, sha256),
+            block_hasher=get_request_block_hasher(hash_size, sha256, config.num_hash_lookahead_tokens),
         )
+        expected_hashes = request.block_hashes[: max(0, length - 1 - config.num_hash_lookahead_tokens) // hash_size]
         scheduler.add_request(request)
+        assert request.block_hashes == expected_hashes
         starts = []
         for _ in range(12):
             output = scheduler.schedule()

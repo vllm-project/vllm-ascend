@@ -72,3 +72,16 @@ class Mxfp8AscendHandler:
 
     def quant_mode(self):
         return KVQuantMode.CUSTOM
+
+
+@register_kv_cache_dtype("hif8")
+class Hif8AscendHandler:
+    """HIF8 latent payload stored as raw uint8 bytes in the MLA page layout."""
+
+    name = "hif8"
+
+    def torch_dtype(self) -> torch.dtype:
+        return torch.uint8
+
+    def quant_mode(self):
+        return KVQuantMode.CUSTOM

@@ -478,8 +478,7 @@ def test_actual_replay_wrapper_orders_validation_and_release(env, monkeypatch, f
     assert [call for call in env.calls if call[1] == "reset"] == resets
 
 
-@pytest.mark.parametrize("legacy_lora_argument", [False, True])
-def test_actual_capture_failure_invalidates_a3_only(env, monkeypatch, legacy_lora_argument):
+def test_actual_capture_failure_invalidates_a3_only(env, monkeypatch):
     from vllm_ascend.worker.v2 import aclgraph_utils as graph
 
     metadata = module.AsyncTargetDeviceMetadata()
@@ -489,15 +488,12 @@ def test_actual_capture_failure_invalidates_a3_only(env, monkeypatch, legacy_lor
     manager = graph.ModelAclGraphManager.__new__(graph.ModelAclGraphManager)
     manager.capture_sizes = [6]
     monkeypatch.setattr(graph, "communicator_switch", nullcontext)
-    monkeypatch.setattr(graph, "vllm_version_is", lambda version: legacy_lora_argument)
     original = ValueError("input preparation failed")
     pcp_manager = object()
 
     def fail(*args, **kwargs):
         assert kwargs["pcp_manager"] is pcp_manager
-        assert ("has_lora" in kwargs) == legacy_lora_argument
-        if legacy_lora_argument:
-            assert kwargs["has_lora"] is False
+        assert "has_lora" not in kwargs
         raise original
 
     monkeypatch.setattr(graph.ModelCudaGraphManager, "capture", fail)

@@ -19,8 +19,7 @@ import zmq
 from vllm.config import KVTransferConfig
 from vllm.utils.network_utils import make_zmq_path
 
-# vLLM #61183 moved these KV-cache planning helpers to `kv_cache_planning` on
-# main; the v0.33.0 lane still ships them in `kv_cache_utils`.
+# vLLM #61183 moved these KV-cache planning helpers to `kv_cache_planning` on main.
 from vllm.v1.core.kv_cache_planning import (
     get_kv_cache_config_from_groups,
     is_kv_cache_spec_uniform,
@@ -1800,6 +1799,8 @@ class TestMainThreadLoop(unittest.TestCase):
 
 
 class MockVllmConfig:
+    num_hash_lookahead_tokens = 0
+
     def __init__(self):
         self.model_config = MagicMock()
         # vLLM main reads attention_config.hisparse_config in the KV cache
@@ -1856,8 +1857,7 @@ class MockRequest:
         self.prompt_embeds: torch.Tensor | None = None
         self.block_hashes: list = []
 
-    def update_block_hashes(self) -> None:
-        self.block_hashes.append(tuple(self._all_token_ids))
+        self.truncate_block_hashes = MagicMock()
 
 
 class MockKVCacheGroup:
@@ -1867,6 +1867,8 @@ class MockKVCacheGroup:
 
 
 class MockKVCacheConfig:
+    hash_block_size = 16
+
     def __init__(self, kv_cache_groups=None, num_blocks=10):
         self.kv_cache_groups = kv_cache_groups or [MockKVCacheGroup()]
         self.num_blocks = num_blocks
@@ -5326,6 +5328,8 @@ class TestMooncakeConnectorWorker(unittest.TestCase):
 @pytest.mark.parametrize("guard", ["normal", "already-truncated", "single-token", "no-params"])
 def test_prefill_truncation_preserves_payload_and_is_idempotent(payload, guard):
     scheduler = MooncakeConnectorScheduler.__new__(MooncakeConnectorScheduler)
+    scheduler.kv_cache_config = types.SimpleNamespace(hash_block_size=2)
+    scheduler.vllm_config = types.SimpleNamespace(num_hash_lookahead_tokens=1)
     count = 1 if guard == "single-token" else 3
     tokens = list(range(count))
     embeds = torch.arange(count * 2).reshape(count, 2)
@@ -5337,13 +5341,9 @@ def test_prefill_truncation_preserves_payload_and_is_idempotent(payload, guard):
         _all_token_ids=tokens.copy(),
         num_prompt_tokens=count,
         max_tokens=16,
-        block_hashes=["old-prompt-hash"],
+        truncate_block_hashes=MagicMock(),
     )
 
-    def update_block_hashes():
-        request.block_hashes.append("short-prompt-hash")
-
-    request.update_block_hashes = update_block_hashes
     should_truncate = guard == "normal" and payload != "missing"
     for _ in range(2):  # Preemption/reschedule must not drop a second token.
         scheduler._truncate_request_for_prefill(request)
@@ -5351,7 +5351,10 @@ def test_prefill_truncation_preserves_payload_and_is_idempotent(payload, guard):
         assert request._all_token_ids == expected
         assert request.num_prompt_tokens == len(expected)
         assert request.max_tokens == (1 if should_truncate else 16)
-        assert request.block_hashes == (["short-prompt-hash"] if should_truncate else ["old-prompt-hash"])
+        if should_truncate:
+            request.truncate_block_hashes.assert_called_once_with(2, 1)
+        else:
+            request.truncate_block_hashes.assert_not_called()
         if payload == "tokens":
             assert request.prompt_token_ids == expected
         if payload == "embeds":

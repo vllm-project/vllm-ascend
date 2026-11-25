@@ -19,6 +19,11 @@ name: Selected Tests
 on:
   workflow_call:
     inputs:
+      request_id:
+        type: string
+        required: false
+        default: ''
+        description: 'Daily round identity; empty for non-Daily callers.'
       vllm:
         type: string
         required: true
@@ -68,6 +73,8 @@ on:
         default: 120
         description: 'Selected tests job timeout in minutes.'
     secrets:
+      PAT_TOKEN:
+        required: false
       OBS_ACCESS_KEY_PRECISION:
         required: false
       OBS_SECRET_ACCESS_KEY_PRECISION:
@@ -108,7 +115,7 @@ jobs:
         VLLM_USE_MODELSCOPE: True
         HF_HUB_OFFLINE: 1
         MAX_JOBS: 4
-        UV_EXTRA_INDEX_URL: "https://mirrors.huaweicloud.com/ascend/repos/pypi https://mirrors.huaweicloud.com/ascend/repos/pypi/nightly https://download.pytorch.org/whl/cpu/"
+        UV_EXTRA_INDEX_URL: "https://repo.huaweicloud.com/ascend/repos/pypi https://repo.huaweicloud.com/ascend/repos/pypi/nightly https://download.pytorch.org/whl/cpu/"
         UV_INDEX_STRATEGY: unsafe-best-match
         UV_HTTP_TIMEOUT: 120
         UV_NO_CACHE: 1
@@ -165,6 +172,32 @@ jobs:
           git submodule sync --recursive
           git submodule update --init --recursive
 
+      - uses: dorny/paths-filter@v4
+        id: filter
+        # Runs before the test steps on purpose: the coverage steps below
+        # read steps.filter.outputs.src, and a skipped step yields empty
+        # outputs. This step must therefore never be skipped by a failing
+        # test step, so it sits here, right after the checkout.
+        with:
+          base: ${{ inputs.base_ref }}
+          predicate-quantifier: some-with-excludes
+          filters: |
+            # Source paths that require precision/full test execution.
+            # Mirrors the src category in pr_test.yaml's paths-filter step.
+            src:
+              - 'vllm_ascend/**'
+              - 'setup.py'
+              - 'csrc/**'
+              - 'packages.txt'
+              - 'requirements.txt'
+              - 'requirements-dev.txt'
+              - 'pyproject.toml'
+              - 'cmake/**'
+              - 'tests/ut/**'
+              - 'tools/**'
+              - 'CMakeLists.txt'
+              - '!**/*.md'
+
       - name: Get csrc hash
         id: get_csrc_hash
         if: ${{ matrix.group.npu_type != 'cpu' }}
@@ -214,7 +247,7 @@ jobs:
 
       # Stage manifests where both the job container and runner can read them.
       - name: Check layout and stage actions
-        if: ${{ matrix.group.npu_type != 'cpu' && steps.cache-csrc.outputs.cache-hit != 'true' }}
+        if: ${{ startsWith(inputs.request_id, 'daily-') || (matrix.group.npu_type != 'cpu' && steps.cache-csrc.outputs.cache-hit != 'true') }}
         shell: bash
         run: bash .github/workflows/scripts/stage_ci_actions.sh
 
@@ -334,6 +367,7 @@ jobs:
           pip uninstall -y triton-ascend triton
 
       - name: Run selected tests with device
+        id: tests-with-device
         if: ${{ matrix.group.npu_type != 'cpu' }}
         continue-on-error: ${{ inputs.continue_on_error }}
         env:
@@ -356,6 +390,7 @@ jobs:
             ${{ matrix.group.tests }}
 
       - name: Run selected tests without device
+        id: tests-without-device
         if: ${{ matrix.group.npu_type == 'cpu' }}
         continue-on-error: ${{ inputs.continue_on_error }}
         env:
@@ -372,6 +407,15 @@ jobs:
             "without-device" \
             ${{ matrix.group.tests }}
 
+      - name: Dispatch Daily Issue update
+        id: daily-report
+        if: ${{ !cancelled() && startsWith(inputs.request_id, 'daily-') && (steps.tests-with-device.outcome == 'failure' || steps.tests-without-device.outcome == 'failure') }}
+        uses: ./../../_temp/ci-workflow/.github/actions/dispatch-daily-issue
+        with:
+          github-token: ${{ secrets.PAT_TOKEN }}
+          request-id: ${{ inputs.request_id }}
+          case-name: run-all-tests (${{ inputs.vllm }}) / ${{ matrix.group.partition_name }} card-${{ matrix.group.partition && format('(part {0})', matrix.group.partition) || '' }}
+
       - name: Upload timing data
         if: ${{ inputs.upload_timing && matrix.group.npu_type != 'cpu' }}
         continue-on-error: true
@@ -382,44 +426,51 @@ jobs:
           if-no-files-found: ignore
           retention-days: 7
 
-      - name: Generate Cobertura XML from coverage data
+      - name: Generate coverage XML
         # tests/coverage.json is only produced by the slipcover pytest runs,
         # which run on cpu only (NPU targets run plain pytest, see
         # run_selected_tests.sh); without the guard this step fails on every
         # NPU job. enable-coverage=true routes to the legacy coverage.py + OBS
         # path, so the diff-cover trio is skipped in that case.
-        if: ${{ matrix.group.npu_type == 'cpu' && inputs.enable-coverage != true }}
+        # !cancelled(): run even when the tests failed, so the coverage
+        # comment still describes a red run.
+        if: ${{ !cancelled() && matrix.group.npu_type == 'cpu' && inputs.enable-coverage != true && steps.filter.outputs.src == 'true' && github.base_ref != '' }}
         run: |
           python -m slipcover --merge ./tests/coverage.json \
             --xml --out ./tests/coverage.xml
 
-      - name: Generate coverage comment on summary
-        # Depends on coverage.xml generated by the step above (cpu only, and
-        # only when enable-coverage != true, which keeps the diff-cover trio
-        # out of the legacy coverage.py + OBS path).
-        if: ${{ matrix.group.npu_type == 'cpu' && inputs.enable-coverage != true }}
+      - name: Generate diff coverage
+        if: ${{ !cancelled() && matrix.group.npu_type == 'cpu' && inputs.enable-coverage != true && steps.filter.outputs.src == 'true' && github.base_ref != '' }}
         run: |
           diff-cover ./tests/coverage.xml --compare-branch=origin/${{ github.base_ref }} \
             --markdown-report ./tests/diff_coverage.md
-          cat ./tests/diff_coverage.md >> "${GITHUB_STEP_SUMMARY}"
 
       - name: Generate PR coverage comment
-        if: ${{ matrix.group.npu_type == 'cpu' && inputs.enable-coverage != true }}
+        if: ${{ !cancelled() && matrix.group.npu_type == 'cpu' && inputs.enable-coverage != true && steps.filter.outputs.src == 'true' && github.base_ref != '' }}
         run: |
            python3 .github/workflows/scripts/coverage_comment.py \
-            --input ./tests/diff_coverage.md \
+            --input-json ./tests/coverage.json \
+            --input-diff ./tests/diff_coverage.md \
             --output ./tests/coverage_comment.md \
             --summary-url "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
 
       - name: Upload diff coverage report
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && matrix.group.npu_type == 'cpu' && inputs.enable-coverage != true && steps.filter.outputs.src == 'true' && github.base_ref != '' }}
         uses: actions/upload-artifact@v4
         with:
           name: coverage-report
           path: |
             ./tests/diff_coverage.md
             ./tests/coverage_comment.md
+            ./tests/coverage.json
+            ./tests/coverage.xml
           if-no-files-found: ignore
+
+      - name: Generate coverage comment on summary
+        if: ${{ !cancelled() && matrix.group.npu_type == 'cpu' && inputs.enable-coverage != true && steps.filter.outputs.src == 'true' && github.base_ref != '' }}
+        run: |
+          cat ./tests/coverage_comment.md >> "${GITHUB_STEP_SUMMARY}"
+          cat ./tests/diff_coverage.md >> "${GITHUB_STEP_SUMMARY}"
 
       - name: Upload coverage data
         if: ${{ !cancelled() && inputs.enable-coverage }}
@@ -448,7 +499,12 @@ jobs:
   upload-coverage-to-obs:
       if: ${{ !cancelled() && inputs.enable-coverage }}
       needs: selected-tests
-      runs-on: ubuntu-latest
+      runs-on: linux-amd64-cpu-2-hk
+      # Host python on linux-amd64-cpu-2-hk has no pip. Use the repo-built
+      # lint image (Dockerfile.lint) instead of get-pip.py on the shared
+      # runner (L2-ci#container-contract).
+      container:
+        image: quay.io/ascend-ci/vllm-ascend:lint
       continue-on-error: true
       env:
         OBS_ACCESS_KEY: ${{ secrets.OBS_ACCESS_KEY_PRECISION }}
@@ -586,7 +642,9 @@ jobs:
             find "${TASK_DIR}" -type f | wc -l
 
             echo "=== building test_case_map.json ==="
-            pip install regex
+            if ! python3 -c "import regex" >/dev/null 2>&1; then
+              python3 -m pip install regex
+            fi
             python3 .github/workflows/scripts/test_selector.py \
               --build-map \
               --coverage-dir "${TASK_DIR}" \
@@ -635,7 +693,10 @@ jobs:
 
         - name: Upload coverage to OBS
           run: |
-            pip install esdk-obs-python --quiet
+            set -euo pipefail
+            if ! python3 -c "from obs import ObsClient" >/dev/null 2>&1; then
+              python3 -m pip install esdk-obs-python --quiet
+            fi
             python3 - <<'EOF'
             import os
             from obs import ObsClient
@@ -672,9 +733,11 @@ jobs:
             set +e
             echo "pruned=false" >> "$GITHUB_OUTPUT"
             OBS_URL="https://vllm-ascend.obs.cn-north-4.myhuaweicloud.com/${COVERAGE_OBJECT_EXTRA}"
-            if ! pip install pyyaml --quiet; then
-              echo "::warning::Failed to install pyyaml; skip prune"
-              exit 0
+            if ! python3 -c "import yaml" >/dev/null 2>&1; then
+              if ! python3 -m pip install pyyaml --quiet; then
+                echo "::warning::Failed to install pyyaml; skip prune"
+                exit 0
+              fi
             fi
             http_code=$(curl -sSL --retry 3 -o extra_recommended_tests.yaml -w "%{http_code}" "${OBS_URL}" || echo "000")
             if [ "${http_code}" != "200" ] || [ ! -s extra_recommended_tests.yaml ]; then
@@ -713,7 +776,9 @@ jobs:
               echo "No pruned extra_recommended_tests.yaml to upload"
               exit 0
             fi
-            pip install esdk-obs-python --quiet
+            if ! python3 -c "from obs import ObsClient" >/dev/null 2>&1; then
+              python3 -m pip install esdk-obs-python --quiet
+            fi
             python3 - <<'EOF'
             import os
             from obs import ObsClient
