@@ -106,6 +106,12 @@ def apply_grammar_bitmask_npu(
     init_device_properties_triton()
     num_programs = min(get_vectorcore_num(), total_tasks)
 
+    # An empty bitmask would launch a coreDim=0 grid, which NPU rejects.
+    # The upstream caller returns before any launch when there are no
+    # grammar requests, so this guard is defensive only.
+    if num_masks == 0:
+        return None
+
     # Disable MULTIBUFFER to better utilize the UB buffer, which gives
     # a significant performance improvement on A2/A3. It can be enabled
     # again on A5.
