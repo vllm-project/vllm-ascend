@@ -9,8 +9,9 @@ from typing import TYPE_CHECKING, Any, cast
 import numpy as np
 import torch
 import torch.distributed as dist
+from vllm import envs
 from vllm.config import CUDAGraphMode, VllmConfig, set_current_vllm_config
-from vllm.distributed import get_dp_group, get_pcp_group, get_tp_group, tensor_model_parallel_all_gather
+from vllm.distributed import get_dp_group, get_pcp_group, get_tp_group
 from vllm.forward_context import get_forward_context, set_forward_context
 from vllm.utils.math_utils import round_up
 from vllm.v1.utils import CpuGpuBuffer
@@ -29,6 +30,7 @@ from vllm_ascend.worker.device_metadata import DeviceMetadataTask
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch
 
 from .decoder_replay_layers import AscendDecoderReplayLayers
+from .decoder_replay_sp import SPReplayPlan
 
 if TYPE_CHECKING:
     from vllm_ascend.worker.v2.pcp_manager import AscendPCPAttentionContext
@@ -83,6 +85,7 @@ class DecoderReplayState:
         self.num_actual_tokens = 0
         self.dp_tokens: torch.Tensor | None = None
         self.replay_pcp_context: AscendPCPAttentionContext | None = None
+        self.original_padding: torch.Tensor | None = None
 
     def _pcp_kept_lengths(self, inputs: DecoderReplayInputs) -> tuple[np.ndarray, int, torch.Tensor] | None:
         context = inputs.pcp_context
@@ -100,6 +103,9 @@ class DecoderReplayState:
         if not (global_kept < global_lens).any():
             return None
         num_padded = int(global_kept.sum())
+        if self.layers.sequence_parallel:
+            # Every PCP rank uses the same collective width, including empty tail owners.
+            num_padded = round_up(num_padded, self.config.parallel_config.tensor_parallel_size)
         if num_padded >= batch.num_tokens_after_padding:
             return None
 
@@ -230,6 +236,10 @@ class DecoderReplayState:
         self.layers.rows = None
         self.layers.context_factory = None
         self.layers.num_padded_rows = None
+        self.layers.sp_plan = None
+        self.layers.sp_replay_positions = None
+        self.layers.sp_replay_input_ids = None
+        self.original_padding = None
         self.replay_pcp_context = None
         self.dp_tokens = None
         self.metadata = {}
@@ -259,6 +269,12 @@ class DecoderReplayState:
         any_replica_compacts = self._coordinate_replay_across_dp(plan)
         if not any_replica_compacts:
             return
+
+        if self.layers.sequence_parallel:
+            # The runner's full mask remains valid when the backbone replaces
+            # ForwardContext.is_padding with an SP-local tensor. Keep it for
+            # both compact replicas and untrimmed DP peers; no gather is needed.
+            self.original_padding = inputs.batch.is_padding
 
         # A peer compacted its batch; only update the cross-DP token counts locally.
         # Keep rows unset to reuse attention metadata, including dummy PCP contexts
@@ -297,11 +313,17 @@ class DecoderReplayState:
         kept_lens = np.where(trim_requests, np.minimum(query_lens, self.layers.window), query_lens)
         requires_compaction = bool((kept_lens < query_lens).any())
 
-        if not requires_compaction:
-            # Preserve collective width, including padding on empty PCP ranks and idle DP replicas.
-            num_tokens = batch.num_tokens_after_padding
-        else:
-            num_tokens = int(kept_lens.sum())
+        num_tokens = batch.num_tokens_after_padding
+        if requires_compaction:
+            replay_tokens = int(kept_lens.sum())
+            if self.layers.sequence_parallel:
+                replay_tokens = round_up(replay_tokens, self.config.parallel_config.tensor_parallel_size)
+            if replay_tokens < num_tokens:
+                num_tokens = replay_tokens
+            else:
+                # No TP shard shrinks. A compact DP peer still needs our full valid count.
+                kept_lens = query_lens
+                requires_compaction = False
 
         return _DecoderReplayPlan(
             kept_lens=kept_lens,
@@ -341,6 +363,33 @@ class DecoderReplayState:
         # Prepare row indices, positions, slot mappings, and replay starts.
         # The layer adapter gathers hidden states and executes the decoder later.
         self._gather(plan.replay_inputs)
+        if self.layers.sequence_parallel:
+            tp = get_tp_group()
+            sp_plan = SPReplayPlan.build(
+                batch.query_start_loc_np[: num_reqs + 1],
+                plan.kept_lens,
+                batch.num_tokens_after_padding,
+                plan.num_tokens,
+                tp.world_size,
+                tp.rank_in_group,
+                self.rows,
+            )
+            self.layers.sp_plan = sp_plan
+            # PCP rows contain only valid local indices. The layer takes the padded
+            # positions produced by the gather kernel even when this PCP owns no tail.
+            self.layers.sp_replay_positions = self.positions[: plan.num_tokens]
+            # Every TP rank already owns the full IDs. Select this decoder
+            # shard directly, including for hash/vision routing, instead of
+            # exchanging IDs from their encoder SP owners.
+            start = tp.rank_in_group * sp_plan.replay_local_tokens
+            replay_ids = batch.input_ids.new_zeros(sp_plan.replay_local_tokens)
+            torch.index_select(
+                batch.input_ids,
+                0,
+                self.rows[start : start + sp_plan.received_tokens],
+                out=replay_ids[: sp_plan.received_tokens],
+            )
+            self.layers.sp_replay_input_ids = replay_ids
         if plan.uses_pcp_replay:
             assert inputs.pcp_context is not None
             global_batch = inputs.pcp_context.global_batch
@@ -486,11 +535,11 @@ class DecoderReplayState:
         self.wait_for_metadata()
         outer = get_forward_context()
         compact = self.layers.rows is not None
-        padding = outer.is_padding
-        full_padding = padding
+        padding = self.original_padding if self.layers.sequence_parallel else outer.is_padding
+        # The model shards this mask only when MoE consumes it. With padding
+        # skipping disabled, the outer mask still has the original full layout.
+        sharded_padding = self.layers.sequence_parallel and envs.VLLM_MOE_SKIP_PADDING
         if compact or padding is None:
-            if padding is not None and self.layers.sequence_parallel:
-                padding = tensor_model_parallel_all_gather(padding, dim=0)
             replay_padding = self.padding[: self.num_tokens]
             replay_padding.fill_(True)
             if padding is None:
@@ -500,10 +549,13 @@ class DecoderReplayState:
                     padding.index_select(0, self.rows[: self.num_actual_tokens])
                 )
             padding = replay_padding
-            full_padding = replay_padding
-            if self.layers.sequence_parallel:
+        full_padding = padding
+        if sharded_padding:
+            if compact:
                 tp = get_tp_group()
                 padding = padding.chunk(tp.world_size)[tp.rank_in_group]
+            else:
+                padding = outer.is_padding
         mask = get_mc2_mask()
         saved_mask = mask.clone() if mask is not None else None
         try:
@@ -527,8 +579,6 @@ class DecoderReplayState:
                     replay_mask[self.num_actual_tokens :].fill_(False)
                     # Preserve masked rows in untrimmed batches as well as the
                     # new suffix padding. MC2 masks use the pre-SP layout.
-                    if self.layers.sequence_parallel and not compact and outer.is_padding is not None:
-                        full_padding = tensor_model_parallel_all_gather(padding, dim=0)
                     assert full_padding is not None
                     replay_mask[: self.num_tokens].logical_and_(~full_padding)
                 yield

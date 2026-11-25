@@ -66,10 +66,11 @@ def test_decoder_replay_custom_op_checks_auxiliary_output_count(monkeypatch):
 
 
 @pytest.mark.parametrize("num_late_aux", [0, 2])
-def test_decoder_replay_fake_outputs_have_expected_shapes(num_late_aux):
+@pytest.mark.parametrize("num_positions", [4, 7], ids=["non_sp", "sp_padded"])
+def test_decoder_replay_fake_outputs_have_expected_shapes(num_late_aux, num_positions):
     hidden_states = torch.randn(4, 2, 8)
     pre_mix = torch.randn(4, 2)
-    positions = torch.arange(4)
+    positions = torch.arange(num_positions)
 
     outputs = decoder_replay_layers.dsv41_decoder_replay_forward_fake(
         hidden_states,
@@ -87,11 +88,12 @@ def test_decoder_replay_fake_outputs_have_expected_shapes(num_late_aux):
     ]
 
 
-def test_registered_decoder_replay_op_supports_fake_tensor_outputs():
+@pytest.mark.parametrize("num_positions", [4, 7], ids=["non_sp", "sp_padded"])
+def test_registered_decoder_replay_op_supports_fake_tensor_outputs(num_positions):
     with FakeTensorMode() as fake_mode:
         hidden_states = fake_mode.from_tensor(torch.randn(4, 2, 8))
         pre_mix = fake_mode.from_tensor(torch.randn(4, 2))
-        positions = fake_mode.from_tensor(torch.arange(4))
+        positions = fake_mode.from_tensor(torch.arange(num_positions))
         input_ids = fake_mode.from_tensor(torch.arange(4))
 
         outputs = torch.ops.vllm.dsv41_decoder_replay_forward(
@@ -103,4 +105,5 @@ def test_registered_decoder_replay_op_supports_fake_tensor_outputs():
             "decoder_replay",
         )
 
-    assert [output.shape for output in outputs] == [(4, 2, 8), (4, 2), (4, 8), (4, 8)]
+    # Hidden/mix remain SP-local; auxiliary outputs use the full token layout.
+    assert [output.shape for output in outputs] == [(4, 2, 8), (4, 2), (num_positions, 8), (num_positions, 8)]

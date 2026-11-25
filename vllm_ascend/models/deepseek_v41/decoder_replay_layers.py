@@ -3,14 +3,16 @@
 
 from collections.abc import Callable
 from contextlib import AbstractContextManager
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 import torch
 from vllm.config import CUDAGraphMode, VllmConfig
-from vllm.distributed import get_tp_group, tensor_model_parallel_all_gather
+from vllm.distributed import get_tp_group
 from vllm.forward_context import get_forward_context
 from vllm.logger import logger
 from vllm.utils.torch_utils import direct_register_custom_op
+
+from .decoder_replay_sp import SPReplayPlan
 
 if TYPE_CHECKING:
     from .model import DeepseekV41Model
@@ -39,6 +41,9 @@ class AscendDecoderReplayLayers:
         self.num_actual_rows = 0
         self.num_padded_rows: int | None = None
         self.sequence_parallel = False
+        self.sp_plan: SPReplayPlan | None = None
+        self.sp_replay_positions: torch.Tensor | None = None
+        self.sp_replay_input_ids: torch.Tensor | None = None
         self.smla_plan_ratios: tuple[int, ...] | None = None
         self.first_swa_plan_ratios: tuple[int, ...] | None = None
 
@@ -63,39 +68,41 @@ class AscendDecoderReplayLayers:
                 buffer[: rows.numel()].copy_(buffer.index_select(0, rows))
                 if self.num_padded_rows is not None:
                     buffer[rows.numel() : self.num_padded_rows].zero_()
-            replay_states: list[torch.Tensor | None] = []
-            for index, state in enumerate(states):
-                if state is None:
-                    replay_states.append(None)
-                    continue
-                sharded = self.sequence_parallel and index != 2
-                if sharded:
-                    state = tensor_model_parallel_all_gather(state, dim=0)
-                state = state.index_select(0, rows)
-                if sharded:
-                    state = state.chunk(get_tp_group().world_size)[get_tp_group().rank_in_group]
-                if self.num_padded_rows is not None:
-                    padding = self.num_padded_rows - state.shape[0]
-                    state = torch.cat((state, state.new_zeros((padding, *state.shape[1:]))))
-                replay_states.append(state)
+            replay_states: list[torch.Tensor | None]
+            if self.sequence_parallel:
+                hidden, mix = cast(SPReplayPlan, self.sp_plan).compact(
+                    cast(torch.Tensor, states[0]), cast(torch.Tensor, states[1]), get_tp_group().device_group
+                )
+                replay_states = [hidden, mix, self.sp_replay_positions, self.sp_replay_input_ids]
+            else:
+                replay_states = []
+                for state in states:
+                    if state is None:
+                        replay_states.append(None)
+                        continue
+                    state = state.index_select(0, rows)
+                    if self.num_padded_rows is not None:
+                        padding = self.num_padded_rows - state.shape[0]
+                        state = torch.cat((state, state.new_zeros((padding, *state.shape[1:]))))
+                    replay_states.append(state)
             row_outputs = self.run_layers(*replay_states)
             for buffer in self.output_row_buffers:
                 # Clone before clearing: packed values may overlap their final rows.
                 values = buffer[: self.num_actual_rows].clone()
                 buffer[: positions.shape[0]].zero_()
                 buffer.index_copy_(0, rows[: self.num_actual_rows], values)
-            outputs = []
-            for index, row_output in enumerate(row_outputs):
-                # Hidden states and pre-mix are SP-local; auxiliary states
-                # have already been gathered by the model's layer loop.
-                sharded = self.sequence_parallel and index < 2
-                if sharded:
-                    row_output = tensor_model_parallel_all_gather(row_output, dim=0)
+            outputs: list[torch.Tensor] = []
+            if self.sequence_parallel:
+                outputs.extend(
+                    cast(SPReplayPlan, self.sp_plan).restore(
+                        row_outputs[0], row_outputs[1], get_tp_group().device_group
+                    )
+                )
+                # Auxiliary states already use the full token layout.
+                row_outputs = row_outputs[2:]
+            for row_output in row_outputs:
                 output = row_output.new_zeros((positions.shape[0], *row_output.shape[1:]))
                 output.index_copy_(0, rows[: self.num_actual_rows], row_output[: self.num_actual_rows])
-                if sharded:
-                    tp = get_tp_group()
-                    output = output.chunk(tp.world_size)[tp.rank_in_group]
                 outputs.append(output)
             return tuple(outputs)
 
@@ -172,8 +179,14 @@ def make_decoder_replay(model: "DeepseekV41Model", config: VllmConfig) -> Ascend
     replay_start = max(start, cut if trim_cut_layer else cut + 1)
     if replay_start >= model.end_layer:
         return None
-    if model.use_sequence_parallel or parallel.decode_context_parallel_size > 1 or parallel.use_ubatching:
-        reason = "SP, DCP and microbatching need a separate replay layout"
+    if parallel.decode_context_parallel_size > 1 or parallel.use_ubatching:
+        reason = "DCP and microbatching need a separate replay layout"
+    elif model.use_sequence_parallel and parallel.pipeline_parallel_size > 1:
+        reason = "SP replay requires a single pipeline stage"
+    elif model.use_sequence_parallel and speculative is not None and speculative.enable_adaptive_verification:
+        # Adaptive verification can change device query boundaries without
+        # updating the CPU counts used to plan the SP all-to-all.
+        reason = "SP replay requires CPU-known query boundaries; adaptive verification is unsupported"
     elif config.compilation_config.cudagraph_mode not in (CUDAGraphMode.NONE, CUDAGraphMode.FULL_DECODE_ONLY):
         reason = "replay prefill requires eager execution; use NONE or FULL_DECODE_ONLY"
     elif any(layer > cut for layer in model.config.engram_layer_ids):
