@@ -464,6 +464,43 @@ def test_platform_startup_log_directory(tmp_path, monkeypatch, use_custom_path):
             ascend_logger._file_handler.close()
 
 
+@pytest.mark.parametrize(
+    ("child_role", "expect_error"),
+    [
+        ("kv_producer", False),
+        ("kv_consumer", False),
+        ("kv_both", True),
+    ],
+)
+def test_validate_mooncake_connector_v1_role_multi_connector_child(child_role, expect_error):
+    """MultiConnector keeps the outer kv_role='kv_both'; the child role decides.
+
+    A MooncakeConnectorV1 child passes validation with kv_producer /
+    kv_consumer and fails with kv_both. Exercises the validator directly with
+    a real KVTransferConfig so the platform startup mocks are not repeated.
+    """
+    from vllm.config import KVTransferConfig
+
+    from vllm_ascend.platform import _validate_mooncake_connector_v1_role
+
+    kv_transfer_config = KVTransferConfig(
+        kv_connector="MultiConnector",
+        kv_role="kv_both",
+        kv_connector_extra_config={
+            "connectors": [
+                {"kv_connector": "MooncakeConnectorV1", "kv_role": child_role},
+            ],
+        },
+    )
+    vllm_config = SimpleNamespace(kv_transfer_config=kv_transfer_config)
+
+    if expect_error:
+        with pytest.raises(ValueError, match="MooncakeConnectorV1 does not support kv_role='kv_both'"):
+            _validate_mooncake_connector_v1_role(vllm_config)
+    else:
+        _validate_mooncake_connector_v1_role(vllm_config)
+
+
 class TestNPUPlatform(TestBase):
     @staticmethod
     def mock_vllm_config():
