@@ -7,8 +7,9 @@ meta:
     # 200, and both a single request and 8 concurrent requests returned 200.
     ascend_910b: verified
     # 910C: performance first-party verified 2026-10-28 (2-node DP2/TP16 + MTP,
-    # 390 tok/s, TPOT 90.5 ms); accuracy run planned for December
-    # (companion Ascend recipe vllm-ascend/vllm-ascend-recipes#130).
+    # 390 tok/s, TPOT 90.5 ms) on the v0.23.0rc1 pre-release from the same
+    # v0.23.0 line the stable tag below pins; accuracy run planned for
+    # December (companion Ascend recipe vllm-ascend/vllm-ascend-recipes#130).
     ascend_910c: supported
 
 hardware_notes:
@@ -46,7 +47,18 @@ hardware_notes:
 
   ascend_910c:
     title: "Verified topology is 2-node DP2×TP16"
-    body: "Verified on hardware 2026-10-28 on 2× Atlas 800 A3 with the v0.23.0rc1-a3 image: DP2×TP16 + MTP with a FULL_DECODE_ONLY compilation config (390 tok/s). The single-node TEP/TP renderings, the strategy-emitted FULL_AND_PIECEWISE compilation config, and the multi-node TEP/DEP renderings are builder defaults not yet run on NPU — treat them as untested here; the verified topology is orchestrated with per-node args (see the companion Ascend recipe) rather than a builder strategy output."
+    body: |
+      First-party verified 2026-10-28 on 2x Atlas 800 A3 with the v0.23.0rc1
+      pre-release image: DP2xTP16 + MTP with a FULL_DECODE_ONLY compilation
+      config (390 tok/s). On ascend_910c the builder offers the W4A8-MTP
+      variant through `multi_node_tp_dp` (two 16-NPU nodes, per
+      `strategy_min_gpus`); the verified deployment additionally passed
+      per-node orchestration args (`--data-parallel-address` /
+      `--data-parallel-rpc-port` / `--data-parallel-start-rank`) that the
+      builder does not emit — see the companion Ascend recipe for the
+      launcher. The pinned v0.23.0.post1 stable tag has not been re-run yet;
+      single-node and multi-node TEP/DEP renderings remain builder defaults
+      not run on NPU.
 
 strategy_hardware:
   single_node_tp:
@@ -61,6 +73,9 @@ strategy_hardware:
     npu: unsupported
   multi_node_tp_dp:
     npu: unsupported
+    # 910C: the verified topology — two 16-NPU Atlas 800 A3 nodes forming
+    # DP2 x TP16; strategy_min_gpus below sets the two-node floor.
+    ascend_910c: supported
   multi_node_tp_pp:
     npu: unsupported
   multi_node_tep:
@@ -74,16 +89,27 @@ strategy_hardware:
     npu: unsupported
     ascend_910b: supported
 
+strategy_min_gpus:
+  # On ascend_910c the verified deployment needs two 16-NPU nodes; single-node
+  # strategies cannot clear this floor and drop out on that hardware.
+  ascend_910c: 32
+
 variants:
   # Variants inherited from the base recipe (default / fp8 / dspark) are also
-  # visible on Ascend and must pin an Ascend installation explicitly. Adding
-  # only ascend_w4a8 leaves them inheriting model.docker_image and the generic
-  # pip default, which the Ascend configuration check reports as ASC001
-  # (NVIDIA image) and ASC002 (generic pip fallback).
+  # visible on Ascend and must pin an Ascend installation explicitly on both
+  # A2 (910B) and A3 (910C); leaving any Ascend hardware unpinned makes the
+  # renderer fall back to model.docker_image and the generic pip default,
+  # which the Ascend configuration check reports as ASC001 (NVIDIA image)
+  # and ASC002 (generic pip fallback).
   default:
     hardware_overrides:
       ascend_910b:
         docker_image: quay.io/ascend/vllm-ascend:v0.32.0rc1
+        install:
+          pip: false
+      ascend_910c:
+        docker_image: quay.io/ascend/vllm-ascend:v0.23.0.post1-a3
+        docker_serve_command: "vllm serve"
         install:
           pip: false
   fp8:
@@ -92,10 +118,20 @@ variants:
         docker_image: quay.io/ascend/vllm-ascend:v0.32.0rc1
         install:
           pip: false
+      ascend_910c:
+        docker_image: quay.io/ascend/vllm-ascend:v0.23.0.post1-a3
+        docker_serve_command: "vllm serve"
+        install:
+          pip: false
   dspark:
     hardware_overrides:
       ascend_910b:
         docker_image: quay.io/ascend/vllm-ascend:v0.32.0rc1
+        install:
+          pip: false
+      ascend_910c:
+        docker_image: quay.io/ascend/vllm-ascend:v0.23.0.post1-a3
+        docker_serve_command: "vllm serve"
         install:
           pip: false
   ascend_w4a8:
@@ -205,6 +241,9 @@ variants:
       - tool_calling
       - reasoning
     tp: 16
+    min_vllm_version: 0.23.0
+    supported_frontends:
+      - python
     extra_args:
       - '--quantization'
       - ascend
@@ -213,8 +252,6 @@ variants:
       - '--kv-cache-dtype'
       - auto
       - '--enable-expert-parallel'
-      - '--served-model-name'
-      - dsv4
       - '--max-model-len'
       - '135000'
       - '--max-num-batched-tokens'
@@ -239,18 +276,22 @@ variants:
       - '--additional-config'
       - '{"ascend_compilation_config":{"enable_npugraph_ex":true,"enable_static_kernel":false},"enable_cpu_binding": true,"enable_flashcomm1": true,"multistream_overlap_shared_expert":true}'
     extra_env:
+      VLLM_USE_MODELSCOPE: 'True'
       HCCL_OP_EXPANSION_MODE: AIV
       HCCL_BUFFSIZE: '2048'
       PYTORCH_NPU_ALLOC_CONF: expandable_segments:True
       VLLM_ENGINE_READY_TIMEOUT_S: '7200'
+    install:
+      pip: false
+      docker:
+        command: docker pull quay.io/ascend/vllm-ascend:v0.23.0.post1-a3
     hardware_overrides:
       ascend_910c:
-        docker_image: quay.io/ascend/vllm-ascend:v0.23.0rc1-a3
+        docker_image: quay.io/ascend/vllm-ascend:v0.23.0.post1-a3
         docker_serve_command: "vllm serve"
         install:
           pip: false
-          docker: true
-    description: "ModelSlim W4A8+MTP (weights on ModelScope: Eco-Tech/DeepSeek-V4-Pro-w4a8-mtp) — 2x Atlas 800 A3 multi-node DP2xTP16 + MTP (first-party verified 2026-10-28, 390 tok/s; also fits 2x A3 128G / 4x A2 per the upstream tutorial). Node orchestration args (--data-parallel-address / --data-parallel-rpc-port / --data-parallel-start-rank) are per-node; see the companion Ascend recipe."
+    description: "ModelSlim W4A8+MTP (weights on ModelScope: Eco-Tech/DeepSeek-V4-Pro-w4a8-mtp) — 2x Atlas 800 A3 multi-node DP2xTP16 + MTP (first-party verified 2026-10-28 on the v0.23.0rc1 pre-release from this line, 390 tok/s; pinned to the v0.23.0.post1 stable tag; also fits 2x A3 128G / 4x A2 per the upstream tutorial). Node orchestration args (--data-parallel-address / --data-parallel-rpc-port / --data-parallel-start-rank) are per-node; see the companion Ascend recipe."
 
 presets:
   ascend_a2_w4a8_multinode_dep:
@@ -348,3 +389,12 @@ presets:
       HCCL_SOCKET_IFNAME: $IFACE_NAME
       GLOO_SOCKET_IFNAME: $IFACE_NAME
       TP_SOCKET_IFNAME: $IFACE_NAME
+
+notes:
+  - title: "Ascend 910C: use the W4A8-MTP (Ascend) variant"
+    when: { hardware: [ascend_910c] }
+    body: |
+      The `default` / `fp8` / `dspark` checkpoints are NVIDIA FP8/FP4 builds
+      that are not validated on Ascend 910C; the Ascend image and pip pins
+      only make the commands runnable. The first-party verified deployment on
+      2x Atlas 800 A3 is the **W4A8-MTP (Ascend)** variant (DP2xTP16 + MTP).
