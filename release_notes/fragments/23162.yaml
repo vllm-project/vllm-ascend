@@ -1,0 +1,9 @@
+pr: 23162
+entries:
+  - category: performance
+    text: >-
+      DeepSeek V4.1 pure prefill skips a per-layer SWA KV reordering copy on
+      Ascend A2 and A3 when prefill context parallelism and `--swa-bounded-replay`
+      are enabled with eager execution or `FULL_DECODE_ONLY` graphs.
+    model: deepseek-v4.1
+    hardware: [A2, A3]

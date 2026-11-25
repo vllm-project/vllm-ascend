@@ -549,17 +549,22 @@ class TestPCPMetadata:
         "scenario,mode,full_graph_mode,bounded_replay",
         [
             ("mixed", CUDAGraphMode.FULL_DECODE_ONLY, False, True),
+            ("short-prefill-as-decode", CUDAGraphMode.FULL_DECODE_ONLY, False, True),
             ("decode", CUDAGraphMode.FULL_DECODE_ONLY, False, True),
             ("prefill", CUDAGraphMode.FULL_DECODE_ONLY, True, True),
             ("prefill", CUDAGraphMode.PIECEWISE, False, True),
             ("prefill", CUDAGraphMode.FULL_DECODE_ONLY, False, False),
         ],
-        ids=["mixed", "decode", "full-graph", "piecewise", "prefix-cacheable"],
+        ids=["mixed", "short-prefill-as-decode", "decode", "full-graph", "piecewise", "prefix-cacheable"],
     )
     def test_swa_direct_write_uses_baseline_for_other_batches(
         self, builders, scenario, mode, full_graph_mode, bounded_replay
     ):
-        batch = _batch(2, 0, scenario, decode_sharded=True)
+        batch = _batch(2, 0, "mixed" if scenario == "short-prefill-as-decode" else scenario, decode_sharded=True)
+        if scenario == "short-prefill-as-decode":
+            # The cached prompt tail uses decode ownership while still in the prefill lifecycle.
+            batch.context.global_batch.is_prefilling_np = np.array([True, True])
+            batch.context.global_batch.prefill_runs_as_decode_np = np.array([False, True])
         builder = builders(specialized=True, decode_sharded=True, bounded_replay=bounded_replay)["swa"]
         builder.vllm_config.compilation_config.cudagraph_mode = mode
 
@@ -931,6 +936,42 @@ def runtime(builders, monkeypatch):
 
 
 class TestPCPBatchLifecycle:
+    @pytest.mark.parametrize(
+        "num_rows, column_stride, restore_order, reuse_input",
+        [
+            (4, 1, False, True),
+            (4, 2, False, False),
+            (2, 1, False, False),
+            (0, 1, False, False),
+            (4, 1, True, False),
+        ],
+        ids=["direct", "strided", "padded", "empty-rank", "restore-order"],
+    )
+    def test_cache_gather_reuses_unpadded_swa_rows(
+        self, monkeypatch, num_rows, column_stride, restore_order, reuse_input
+    ):
+        padded_width = 4
+        rows = torch.arange(num_rows * 2 * column_stride, dtype=torch.bfloat16)
+        rows = rows.reshape(num_rows, 2 * column_stride)[:, ::column_stride]
+        gathered = torch.arange(16, dtype=rows.dtype).view(8, 2)
+        restore_idx = torch.tensor([3, 0, 7, 5])
+        metadata = SimpleNamespace(local_num_tokens_after_padding=padded_width, hidden_restore_idx=restore_idx)
+        all_gather = Mock(return_value=gathered)
+        monkeypatch.setattr(dsa_v41_cp, "get_pcp_group", lambda: SimpleNamespace(all_gather=all_gather))
+
+        result = dsa_v41_cp.AscendDSAV41PCPImpl._gather_cache_rows(rows, metadata, restore_order=restore_order)
+
+        all_gather.assert_called_once()
+        assert all_gather.call_args.kwargs == {"dim": 0}
+        sent = all_gather.call_args.args[0]
+        assert sent.is_contiguous()
+        assert (sent is rows) == reuse_input
+        torch.testing.assert_close(sent, torch.cat((rows, rows.new_zeros((padded_width - num_rows, 2)))))
+        if restore_order:
+            torch.testing.assert_close(result, gathered[restore_idx])
+        else:
+            assert result is gathered
+
     @pytest.mark.parametrize("scenario", ["prefill", "empty"])
     def test_swa_scatter_writes_all_gather_rows_without_restoring_order(self, builders, monkeypatch, scenario):
         world, rank = 4, 3
