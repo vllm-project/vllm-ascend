@@ -198,6 +198,9 @@ Before starting the service:
         --mm-encoder-tp-mode data \
         --mm-processor-cache-type shm \
         --enable-prefix-caching \
+        --enable-auto-tool-choice \
+        --tool-call-parser qwen3_coder \
+        --reasoning-parser qwen3 \
         --gpu-memory-utilization 0.85 \
         --speculative-config '{"method": "qwen3_5_mtp", "num_speculative_tokens": 3}' \
         --compilation-config '{"cudagraph_capture_sizes": [1,4,8,12,16,20,24,28,32,36,40,44,48,52,56,60,64,68,72,76,80,84,88,92,96,100,104,108,112,116,120,124,128],"cudagraph_mode": "FULL_DECODE_ONLY"}' \
@@ -218,6 +221,7 @@ Before starting the service:
     - `--kv-cache-dtype mxfp8` enables the C8 (MXFP8 KV cache) and is required by the `Qwen3.8-27B-w8a8c8-mxfp8` weights. It stores the KV cache of the full-attention layers as FP8 (E4M3) with E8M0 scales, and runs the full-attention layers on the dedicated QFA (quant flash attention) kernel. The W8A8C8 weights bring performance gains in long-sequence scenarios. With this option, `--block-size` must be a multiple of `512` (it defaults to `512` if unset).
     - For short-sequence scenarios (e.g., 16k input length), the W8A8 weights (e.g., `Qwen3.8-27B-w8a8-mxfp8`) are recommended instead. When serving a W8A8 weight, remove `--kv-cache-dtype mxfp8` from the startup command. Note that C8 quantization is only supported on 950PR&950DT Products.
     - `--enable-prefix-caching` enables prefix caching, which is the default behavior. To disable it, use `--no-enable-prefix-caching`. For workloads with long shared prefixes, finer-grained hybrid prefix matching can be enabled with `--enable-prefix-caching --prefix-match-unit 16`. The match unit must divide every KV cache group's block size. A smaller unit can reuse more of a partial physical page, at the cost of additional hash metadata, copy-on-write operations, and an extra prefill split at the final matching boundary.
+    - `--enable-auto-tool-choice` allows the model to select a tool, `--tool-call-parser qwen3_coder` parses tool calls, and `--reasoning-parser qwen3` separates reasoning from the final answer.
     - `--speculative-config` uses `qwen3_5_mtp` for `Qwen3.8-27B` because it shares the same MTP head design as `Qwen3.5-27B`.
     - `--compilation-config` contains configurations related to the aclgraph graph mode. The most significant configurations are `"cudagraph_mode"` and `"cudagraph_capture_sizes"`, which have the following meanings:
         - `"cudagraph_mode"`: represents the specific graph mode. Currently, `"PIECEWISE"` and `"FULL_DECODE_ONLY"` are supported. The graph mode is mainly used to reduce the cost of operator dispatch. Currently, `"FULL_DECODE_ONLY"` is recommended.
