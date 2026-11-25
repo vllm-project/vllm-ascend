@@ -20,6 +20,7 @@ import torch
 import torch_npu
 from vllm.distributed.eplb.eplb_state import EplbLayerState
 from vllm.model_executor.models.utils import sequence_parallel_chunk
+from vllm.utils.math_utils import round_up
 
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX, MoECommType
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
@@ -28,6 +29,8 @@ from vllm_ascend.ops.fused_moe.router.grouped_topk_router import AscendGroupedTo
 
 DEEPSEEK_V4_IMAGE_SENTINEL_BASE_ID = 129257
 DEEPSEEK_V4_IMAGE_SENTINEL_COUNT = 5
+MOE_GATING_EXPERT_GROUP_ALIGNMENT = 32
+MOE_GATING_MAX_ALIGNED_EXPERTS = 2048
 
 
 def select_deepseek_v4_vision_experts(
@@ -150,23 +153,22 @@ class AscendFusedTopKRouter(AscendGroupedTopKRouter):
 
     def is_fused_supported(
         self,
-        hidden_states: torch.Tensor,
+        router_logits: torch.Tensor,
     ) -> bool:
         topk_group = self.topk_group if self.topk_group is not None else 1
         num_expert_group = self.num_expert_group if self.num_expert_group is not None else 1
-        if not (
-            num_expert_group > 0
-            and hidden_states.shape[-1] % num_expert_group == 0
-            and hidden_states.shape[-1] // num_expert_group > 2
-        ):
+        if not 1 <= topk_group <= num_expert_group:
             return False
-        if self.top_k > (hidden_states.shape[-1] / (num_expert_group * topk_group)):
-            return False
-        if topk_group * hidden_states.shape[-1] / num_expert_group < self.top_k:  # noqa: SIM103
-            return False
-        return True
+        experts_per_group, remainder = divmod(router_logits.shape[-1], num_expert_group)
+        return (
+            remainder == 0
+            and experts_per_group > 2
+            and 1 <= self.top_k <= experts_per_group * topk_group
+            and round_up(experts_per_group, MOE_GATING_EXPERT_GROUP_ALIGNMENT) * num_expert_group
+            <= MOE_GATING_MAX_ALIGNED_EXPERTS
+        )
 
-    def _can_fuse_gating_map(self, hidden_states: torch.Tensor) -> bool:
+    def _can_fuse_gating_map(self, router_logits: torch.Tensor) -> bool:
         profile = get_current_hardware_profile()
         return (
             self.eplb_state is not None
@@ -175,7 +177,7 @@ class AscendFusedTopKRouter(AscendGroupedTopKRouter):
             and self.num_expert_group in (None, 1)
             and self.topk_group in (None, 1)
             and (self.bias_vl is None or profile.supports(HardwareCapability.MOE_GATING_TOP_K_HASH_VISION))
-            and self.is_fused_supported(hidden_states)
+            and self.is_fused_supported(router_logits)
         )
 
     def _get_gating_map_table(self) -> torch.Tensor | None:
@@ -199,8 +201,8 @@ class AscendFusedTopKRouter(AscendGroupedTopKRouter):
         input_ids: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         if self._use_gating_top_k_with_map is None:
-            self._use_gating_top_k_with_map = self._can_fuse_gating_map(hidden_states)
-        if self.bias_vl is None and not self.is_fused_supported(hidden_states):
+            self._use_gating_top_k_with_map = self._can_fuse_gating_map(router_logits)
+        if self.bias_vl is None and not self.is_fused_supported(router_logits):
             return super()._compute_routing(
                 hidden_states=hidden_states,
                 router_logits=router_logits,
