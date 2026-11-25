@@ -29,9 +29,14 @@ class TestSharedMXFPActivation(unittest.TestCase):
         names = {
             "_apply_output_gate",
             "_can_fuse_w8a8_mxfp_activation",
+            "_compute_stream_context",
+            "_prepare_execution_input",
             "_prepare_w8a8_mxfp_down_input",
             "_prepare_gate_up_input",
+            "_wait_for_milestone",
+            "prepare_for_router_overlap",
             "enqueue_gate_up_after_router",
+            "forward",
             "_finish_linear_wrapped_mlp",
             "_finish_shared_mlp",
             "_select_mlp_path",
@@ -66,6 +71,11 @@ class TestSharedMXFPActivation(unittest.TestCase):
             "QuantType": self.quant,
             "Enum": Enum,
             "auto": auto,
+            "PreparedSharedExpertExecution": SimpleNamespace,
+            "RoutedMoEMilestones": SimpleNamespace,
+            "SharedExpertParallelMode": Enum(
+                "SharedExpertParallelMode", "TENSOR_PARALLEL SHARED_EXPERT_DATA_PARALLEL_ONLY SEQUENCE_PARALLEL_ONLY"
+            ),
             "SubmittedSharedExpertGateUp": SimpleNamespace,
             "npu_stream_switch": lambda *args, **kwargs: nullcontext(),
             "shared_experts_calculation_stream": lambda: None,
@@ -127,13 +137,45 @@ class TestSharedMXFPActivation(unittest.TestCase):
         self.executor._prepare_linear_input_for_overlap.assert_called_once_with(
             self.executor.layer.gate_up_proj, "input"
         )
-        prepared_execution = SimpleNamespace(hidden_states="input", gate_up_input=result, local_dp_metadata=None)
+        prepared_execution = SimpleNamespace(
+            hidden_states="input", gate_up_input=result, local_dp_metadata=None, input_ready_event=None
+        )
         submitted = self.executor.enqueue_gate_up_after_router(prepared_execution, "router")
         self.executor._wait_for_milestone.assert_called_once_with("router", "router_output_ready")
         self.executor.part1.assert_called_once_with(prepared_input)
         self.assertIs(submitted.path, self.paths.W8A8_MXFP_LINEAR)
         self.assertIs(submitted.gate_up, self.gate_up)
         self.fused.assert_not_called()
+
+    def test_gate_up_waits_once_for_each_distinct_milestone(self):
+        stream = Mock()
+        self.torch.npu = SimpleNamespace(current_stream=lambda: stream)
+        del self.executor._wait_for_milestone  # Exercise the production wait, including missing-event validation.
+        self.executor.parallel_mode = lambda: self.namespace["SharedExpertParallelMode"].TENSOR_PARALLEL
+        self.executor._finish_shared_mlp = Mock()
+        self.executor.wait_for_output = Mock()
+        inputs = SimpleNamespace(hidden_states="input", ready_event=None)
+        input_ready, router_ready = object(), object()
+
+        for early_submission in (True, False):
+            for output_ready in (input_ready, router_ready, None):
+                with self.subTest(early_submission=early_submission, output_ready=output_ready):
+                    stream.reset_mock()
+                    milestones = SimpleNamespace(shared_input_ready=input_ready, router_output_ready=output_ready)
+                    with (
+                        self.assertRaisesRegex(RuntimeError, "router_output_ready")
+                        if output_ready is None
+                        else nullcontext()
+                    ):
+                        if early_submission:
+                            prepared = self.executor.prepare_for_router_overlap(inputs, input_ready)
+                            self.executor.enqueue_gate_up_after_router(prepared, output_ready)
+                        else:
+                            self.executor.forward(inputs, milestones)
+                    expected = [call(input_ready)]
+                    if output_ready is router_ready:
+                        expected.append(call(router_ready))
+                    self.assertEqual(stream.wait_event.call_args_list, expected)
 
     def test_fused_input_reaches_down_and_preserves_expert_gate(self):
         self.executor.layer.expert_gate = Mock(return_value=(2, None))

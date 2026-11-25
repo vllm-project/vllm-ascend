@@ -356,6 +356,8 @@ def _get_config_bool(configs: tuple[Any, ...], attr: str) -> bool:
 
 class AscendSFABackend(AttentionBackend):
     accept_output_buffer: bool = True
+    # SFA reads its runtime metadata from buffers bound during capture.
+    requires_graph_param_update = False
 
     @staticmethod
     def get_name() -> str:

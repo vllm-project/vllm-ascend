@@ -20,11 +20,11 @@ class KimiDecodeSchedule:
     routed activation/quantization/GMM2. Other paths keep the 0.30 schedule.
     """
 
-    def __init__(self, shared, prepared_input, router_ready, *, enable_superkernel=False, comm_stream=None):
+    def __init__(self, shared, prepared_input, shared_input_ready, *, enable_superkernel=False, comm_stream=None):
         self.shared = shared
         self.enable_superkernel = enable_superkernel
         self.comm_stream = comm_stream if comm_stream is not None else shared_experts_calculation_stream()
-        self.prepared = shared.prepare_for_router_overlap(prepared_input, router_ready)
+        self.prepared = shared.prepare_for_router_overlap(prepared_input, shared_input_ready)
         assert self.prepared is not None
         self.submitted = None
         self.down_input = None

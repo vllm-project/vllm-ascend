@@ -84,6 +84,7 @@ class PreparedSharedExpertExecution:
     hidden_states: torch.Tensor
     gate_up_input: LinearInput
     local_dp_metadata: tuple[int, int] | None
+    input_ready_event: torch.npu.Event | None = None
 
 
 @dataclass(frozen=True)
@@ -424,8 +425,7 @@ class AscendSharedExperts:
             milestones.shared_input_ready,
             "shared_input_ready",
         )
-        # Kimi Decode hands the AG event directly to this consumer stream.
-        # Wait before any activation preparation, including quantization.
+        # A caller may also supply a tensor with a separate producer event.
         if prepared_input.ready_event is not None:
             torch.npu.current_stream().wait_event(prepared_input.ready_event)
         hidden_states = prepared_input.hidden_states
@@ -478,6 +478,7 @@ class AscendSharedExperts:
             hidden_states=hidden_states,
             gate_up_input=gate_up_input,
             local_dp_metadata=local_dp_metadata,
+            input_ready_event=shared_input_ready,
         )
 
     def _prepare_gate_up_input(self, hidden_states: torch.Tensor) -> LinearInput:
@@ -533,7 +534,10 @@ class AscendSharedExperts:
         path = self._select_mlp_path()
         gate_up_input_scale = None
         with self._compute_stream_context():
-            self._wait_for_milestone(router_output_ready, "router_output_ready")
+            # An external router can publish one event for both milestones.
+            # Input preparation already waited for it on this same stream.
+            if router_output_ready is None or router_output_ready is not prepared_execution.input_ready_event:
+                self._wait_for_milestone(router_output_ready, "router_output_ready")
             if path is SharedExpertMLPPath.A8_INT_FUSED:
                 # W8A8/W4A8: INT8 activations with INT8 or INT4 weights.
                 assert isinstance(prepared_execution.gate_up_input, tuple)
@@ -810,6 +814,7 @@ class AscendSharedExperts:
                 hidden_states=hidden_states,
                 gate_up_input=gate_up_input,
                 local_dp_metadata=local_dp_metadata,
+                input_ready_event=milestones.shared_input_ready if self.multistream_overlap else None,
             )
             submitted_gate_up = self.enqueue_gate_up_after_router(
                 prepared_execution,

@@ -267,7 +267,16 @@ class TestKimiFrontOverlap(unittest.TestCase):
         runner.routed_experts.forward_impl = routed_forward
         with patch.object(torch.Tensor, "record_stream", lambda *args: None):
             runner._forward_impl(projected, logits, shared_input)
+        gate = graph.index("router_gemm")
+        router_joins = [deps[-1] for stream, label, deps in graph.nodes if stream == "main" and label == "wait"]
+        self.assertEqual(router_joins.count(gate), 1)
+        self.assertIn(gate, graph.ancestors(graph.index("dispatch")))
         ag = graph.index("all_gather")
+        shared_quant = graph.index("shared_quant")
+        input_waits = [
+            deps[-1] for stream, op, deps in graph.nodes[:shared_quant] if stream == "shared" and op == "wait"
+        ]
+        self.assertEqual(input_waits, [ag])
         self.assertNotIn(ag, graph.ancestors(graph.index("dispatch")))
         for name in ("shared_quant", "shared_gate_up"):
             self.assertEqual(graph.nodes[graph.index(name)][0], "shared")

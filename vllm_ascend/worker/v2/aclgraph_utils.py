@@ -199,9 +199,13 @@ class ModelAclGraphManager(ModelCudaGraphManager):
                     prepare_engram()
             if use_updatable_graph(attn_backend):
                 return self._updatable_graph_replay(desc, attn_metadata)
-            else:
+            if getattr(attn_backend, "requires_graph_param_update", True):
                 # This will be removed once the refactoring is fully complete.
-                return self._graph_relay(attn_backend, desc, num_tokens, attn_metadata)
+                ret = self._graph_relay(attn_backend, desc, num_tokens, attn_metadata)
+            else:
+                ret = super().run_fullgraph(desc)
+            logger.info_once("ACL graph replay is active for the V2 target model (logged once).")
+            return ret
         finally:
             if metadata is not None:
                 metadata.finish_replay()
@@ -241,7 +245,6 @@ class ModelAclGraphManager(ModelCudaGraphManager):
                 self.vllm_config,
                 self.model_runner.speculative_config,
             )
-        logger.info_once("ACL graph replay is active for the V2 target model (logged once).")
         return ret
 
     def _updatable_graph_replay(self, desc, attn_metadata):

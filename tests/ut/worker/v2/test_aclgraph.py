@@ -10,9 +10,32 @@ import torch
 from vllm.config.compilation import CUDAGraphMode
 from vllm.v1.worker.gpu.spec_decode.autoregressive.cudagraph_utils import SpeculatorCudaGraphManager
 
+from vllm_ascend.attention.sfa_v1 import AscendSFABackend
+from vllm_ascend.worker.v2 import aclgraph_utils
 from vllm_ascend.worker.v2.spec_decode.autoregressive.aclgraph import (
     AutoRegressiveAclGraphManager,
 )
+
+
+def test_target_sfa_replay_skips_update_stream(monkeypatch):
+    manager = aclgraph_utils.ModelAclGraphManager.__new__(aclgraph_utils.ModelAclGraphManager)
+    manager.vllm_config = object()
+    manager.update_stream = MagicMock()
+    metadata = MagicMock()
+    manager.model_runner = SimpleNamespace(
+        attn_groups=[[SimpleNamespace(backend=AscendSFABackend)]],
+        model_state=SimpleNamespace(attn_metadata={}, device_metadata=metadata),
+    )
+    monkeypatch.setattr(aclgraph_utils, "set_current_vllm_config", lambda _: nullcontext())
+    monkeypatch.setattr(AscendSFABackend, "get_impl_cls", lambda: object)
+    replay = MagicMock(return_value=object())
+    monkeypatch.setattr(aclgraph_utils.ModelCudaGraphManager, "run_fullgraph", replay)
+
+    desc = SimpleNamespace(num_tokens=32)
+    assert manager.run_fullgraph(desc) is replay.return_value
+    replay.assert_called_once_with(desc)
+    manager.update_stream.wait_stream.assert_not_called()
+    metadata.finish_replay.assert_called_once_with()
 
 
 def _parent_init(

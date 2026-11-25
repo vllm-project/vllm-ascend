@@ -100,7 +100,6 @@ def _ascend_kimi_moe(
     finally:
         # Do not retain a prefill-sized FP32 router tensor on every layer.
         runner._kimi_router_logits = None
-        runner._kimi_router_done = None
         runner._kimi_superkernel_active = False
         runner._kimi_topk = None
         runner._kimi_shared_output_done = None
@@ -486,7 +485,6 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
         if kimi_gate is not None and router_logits is not None:
             self._kimi_decode_active = self._can_run_kimi_decode(hidden_states)
             self._kimi_router_logits = router_logits
-            self._kimi_router_done = None
         elif kimi_gate is not None:
             self._kimi_decode_active = self._can_run_kimi_decode(hidden_states)
             stream = getattr(self, "_kimi_router_stream", None)
@@ -503,7 +501,7 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
                 )
                 with scope:
                     self._kimi_router_logits = self._compute_router_logits(hidden_states, hidden_states)
-                self._kimi_router_done = torch.npu.current_stream().record_event() if stream is not None else None
+                router_done = torch.npu.current_stream().record_event() if stream is not None else None
                 if self._kimi_decode_active:
                     self._kimi_topk = self._prepare_kimi_decode_topk(hidden_states, self._kimi_router_logits)
             # Quantization overlaps Router GEMM; the projection waits only for
@@ -511,11 +509,11 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
             if self._kimi_decode_active and routed_input is None:
                 scheme = self.routed_input_transform.quant_method.quant_method
                 prepared = scheme.prepare_input_for_overlap(self.routed_input_transform, hidden_states)
-                if self._kimi_router_done is not None:
-                    torch.npu.current_stream().wait_event(self._kimi_router_done)
+                if router_done is not None:
+                    torch.npu.current_stream().wait_event(router_done)
                 routed_input = self.routed_input_transform(prepared if prepared is not None else hidden_states)[0]
-            elif self._kimi_router_done is not None:
-                torch.npu.current_stream().wait_event(self._kimi_router_done)
+            elif router_done is not None:
+                torch.npu.current_stream().wait_event(router_done)
         if routed_input is None:
             routed_input, shared_input = super().apply_routed_input_transform(hidden_states)
         else:
@@ -737,8 +735,6 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         kimi_gate = getattr(self, "_kimi_gate", None)
         if kimi_gate is not None:
-            if self._kimi_router_done is not None:
-                torch.npu.current_stream().wait_event(self._kimi_router_done)
             router_logits = self._kimi_router_logits
             if getattr(self, "_kimi_router_stream", None) is not None:
                 router_logits.record_stream(torch.npu.current_stream())
@@ -756,20 +752,17 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
             shared_input_is_gathered = self._can_overlap_sp_shared_with(self.routed_input_transform)
             defer_shared_output_wait = self._can_overlap_sp_shared_with(self.routed_output_transform)
             prepared_shared_input = (
-                PreparedSharedExpertInput(
-                    shared_hidden_states,
-                    is_gathered=True,
-                    ready_event=getattr(self, "_kimi_shared_input_ready", None),
-                )
+                PreparedSharedExpertInput(shared_hidden_states, is_gathered=True)
                 if shared_input_is_gathered
                 else self.ascend_shared_experts.prepare_input_before_routed(shared_hidden_states)
             )
             if kimi_gate is not None:
-                ready = (
-                    torch.npu.current_stream().record_event()
-                    if self.ascend_shared_experts.multistream_overlap
-                    else None
-                )
+                # The gathered input's producer is the comm stream. Its event
+                # alone releases shared input preparation; Gate-Up still waits
+                # at the routed Dispatch boundary in the decode schedule.
+                ready = self._kimi_shared_input_ready
+                if ready is None and self.ascend_shared_experts.multistream_overlap:
+                    ready = torch.npu.current_stream().record_event()
                 if self._kimi_decode_active:
                     schedule = KimiDecodeSchedule(
                         self.ascend_shared_experts,
