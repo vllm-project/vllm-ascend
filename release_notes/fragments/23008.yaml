@@ -1,4 +1,0 @@
-pr: 23008
-entries:
-  - category: bugfix
-    text: Gemma-4 models (including the Gemma-4 MTP drafter) no longer crash during prefill on Ascend NPU when an attention layer reads the KV cache written by another layer.
