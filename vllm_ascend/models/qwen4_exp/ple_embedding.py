@@ -367,12 +367,6 @@ class AscendPLEHostEmbedding(Qwen4ExpPLEPinnedHostEmbedding):
             client.close()
             self._shared_client = None
             self._shared_ptrs = None
-        if self._host_scale is not None:
-            # Drop aliases before closing shared storage, retaining failed owners.
-            if hasattr(self, "_parameters"):
-                self.register_parameter("weight_scale", None)
-            self._host_scale.close()
-            self._host_scale = None
         if self._quantized and hasattr(self, "weight_scale"):
             self.register_parameter("weight_scale", None)
         table = self._host_table
@@ -472,7 +466,6 @@ class AscendPLEHostEmbedding(Qwen4ExpPLEPinnedHostEmbedding):
         ):
             raise ValueError("PLE prefetch output must match the input shape, lookup dtype, and input device")
         if self._quantized:
-            assert self._host_table is not None and self._host_scale is not None
             ple_lookup_quantized.lookup_quantized(
                 self._host_table.ptrs,
                 self.weight_scale,
