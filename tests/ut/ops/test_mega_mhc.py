@@ -5,7 +5,9 @@ from __future__ import annotations
 
 import math
 import weakref
+from contextlib import contextmanager
 from dataclasses import replace
+from types import SimpleNamespace
 
 import pytest
 import torch
@@ -148,6 +150,60 @@ def test_stable_sigmoid_boundary():
             replace(A3, soc_name="Ascend910_9372", aic_count=20),
             A3MegaMhcBackend,
             id="a3-20aic-9372-qualified",
+        ),
+        pytest.param(
+            BF16_SEAM,
+            replace(A3, soc_name="ascend910_9382"),
+            A3MegaMhcBackend,
+            id="a3-lowercase-9382-soc",
+        ),
+        pytest.param(
+            BF16_SEAM,
+            replace(A3, soc_name="ascend910_9372", aic_count=20),
+            A3MegaMhcBackend,
+            id="a3-lowercase-9372-soc",
+        ),
+        pytest.param(
+            BF16_SEAM,
+            replace(A3, soc_name="ascend910c"),
+            A3MegaMhcBackend,
+            id="a3-lowercase-910c-soc",
+        ),
+        pytest.param(
+            BF16_SEAM,
+            replace(A3, graph_mode="full"),
+            A3MegaMhcBackend,
+            id="a3-fused-full-graph-mode",
+        ),
+        pytest.param(
+            BF16_SEAM,
+            replace(A3, graph_mode="piecewise"),
+            A3MegaMhcBackend,
+            id="a3-fused-piecewise-graph-mode",
+        ),
+        pytest.param(
+            BF16_SEAM,
+            replace(A3, graph_mode="full_and_piecewise"),
+            A3MegaMhcBackend,
+            id="a3-fused-full-and-piecewise-graph-mode",
+        ),
+        pytest.param(
+            replace(BF16_SEAM, T=6, prefer_side_stream=True),
+            replace(A3, has_a3_decoupled_op=True, graph_mode="full"),
+            A3DecoupledMhcBackend,
+            id="a3-decoupled-full-graph-mode",
+        ),
+        pytest.param(
+            replace(BF16_SEAM, T=6, prefer_side_stream=True),
+            replace(A3, has_a3_decoupled_op=True, graph_mode="piecewise"),
+            A3MegaMhcBackend,
+            id="a3-decoupled-rejects-piecewise-falls-back-to-fused",
+        ),
+        pytest.param(
+            replace(BF16_SEAM, T=6, prefer_side_stream=True),
+            replace(A3, has_a3_decoupled_op=True, graph_mode="full_and_piecewise"),
+            A3MegaMhcBackend,
+            id="a3-decoupled-rejects-full-and-piecewise-falls-back-to-fused",
         ),
         pytest.param(
             BF16_SEAM,
@@ -459,3 +515,312 @@ def test_is_mega_mhc_supported_tracks_custom_op_registration(monkeypatch):
     assert is_mega_mhc_supported() is False
     monkeypatch.setattr(torch.ops, "_C_ascend", _OpsWith(), raising=False)
     assert is_mega_mhc_supported() is True
+
+
+@pytest.mark.parametrize(
+    ("override", "message"),
+    [
+        ({"residual": torch.empty(6, 4, 64, dtype=torch.float32)}, "residual must be bfloat16 or float16"),
+        ({"residual": torch.empty(6, 3, 64, dtype=torch.bfloat16)}, "C=4"),
+        (
+            {"residual": torch.empty(6, 64, 4, dtype=torch.bfloat16).transpose(1, 2)},
+            "residual must be contiguous",
+        ),
+        ({"hc_scale": torch.empty(4, dtype=torch.float32)}, "hc_scale must have shape"),
+        ({"hc_base": torch.empty(24, dtype=torch.bfloat16)}, "hc_base must have dtype"),
+        ({"r_sq": torch.empty(5, dtype=torch.float32)}, "r_sq must have shape"),
+        ({"r_sq": torch.empty(6, dtype=torch.bfloat16)}, "r_sq must have dtype"),
+        ({"r_sq": torch.empty(6, dtype=torch.float32, device="meta")}, "r_sq must be on"),
+        ({"prepared_tensor": torch.empty(1, 48, 16, dtype=torch.bfloat16)}, "prepared hc_fn must have shape"),
+    ],
+)
+def test_decoupled_run_coefficients_rejects_invalid_inputs(override, message):
+    inputs, hc_fn = _seam_case(T=6, D=64)
+    cap = replace(A3, has_a3_decoupled_op=True)
+    backend = A3DecoupledMhcBackend()
+    prepared = replace(backend.prepare({"hc_fn": hc_fn, "version_tag": "v1"}, "cpu", cap), index_map_ready=True)
+    if "prepared_tensor" in override:
+        prepared = replace(prepared, tensor=override["prepared_tensor"])
+    kwargs = {
+        "residual": inputs.residual,
+        "hc_scale": inputs.hc_scale,
+        "hc_base": inputs.hc_base,
+        "r_sq": None,
+    }
+    kwargs.update({k: v for k, v in override.items() if k != "prepared_tensor"})
+    with pytest.raises(ValueError, match=message):
+        backend.run_coefficients(
+            kwargs["residual"],
+            prepared,
+            kwargs["hc_scale"],
+            kwargs["hc_base"],
+            {},
+            r_sq=kwargs["r_sq"],
+        )
+
+
+def test_decoupled_launch_coefficients_async_records_streams_and_handles_capture_and_errors(monkeypatch):
+    inputs, hc_fn = _seam_case(T=6, D=64)
+    cap = replace(A3, has_a3_decoupled_op=True)
+    backend = A3DecoupledMhcBackend()
+    prepared = replace(backend.prepare({"hc_fn": hc_fn, "version_tag": "v1"}, "cpu", cap), index_map_ready=True)
+    r_sq = torch.ones(6, dtype=torch.float32)
+
+    stream_events: list[tuple[str, object]] = []
+    recorded_streams: list[tuple[int, object]] = []
+    capturing_state = {"value": False}
+
+    class _FakeStream:
+        def __init__(self, name: str) -> None:
+            self.name = name
+
+        def wait_event(self, event) -> None:
+            stream_events.append(("wait_event", (self.name, event.name)))
+
+    class _FakeEvent:
+        def __init__(self, name: str) -> None:
+            self.name = name
+
+        def record(self, stream=None) -> None:
+            stream_events.append(("record", (self.name, None if stream is None else stream.name)))
+
+    main_stream = _FakeStream("main")
+    side_stream = _FakeStream("side")
+    ready_event = _FakeEvent("ready")
+    done_event = _FakeEvent("done")
+
+    @contextmanager
+    def fake_stream_ctx(stream):
+        stream_events.append(("enter_stream", stream.name))
+        try:
+            yield
+        finally:
+            stream_events.append(("exit_stream", stream.name))
+
+    fake_npu = SimpleNamespace(
+        stream=fake_stream_ctx,
+        current_stream=lambda: main_stream,
+        is_current_stream_capturing=lambda: capturing_state["value"],
+    )
+    monkeypatch.setattr(torch, "npu", fake_npu, raising=False)
+    monkeypatch.setattr(
+        torch.Tensor,
+        "record_stream",
+        lambda self, stream: recorded_streams.append((id(self), stream.name)),
+    )
+
+    out_post = torch.ones(6, 4, dtype=torch.float32)
+    out_comb = torch.ones(6, 4, 4, dtype=torch.float32)
+    out_pre = torch.ones(6, 4, dtype=torch.float32)
+
+    def fake_coeff(res, pw, hs, hb, *, r_sq, weight_format, numerics_profile, norm_eps, hc_eps, iterations, post_mult):
+        return out_post, out_comb, out_pre
+
+    monkeypatch.setattr(torch.ops._C_ascend, "npu_mhc_coefficients_ozaki", fake_coeff, raising=False)
+
+    outputs = backend.launch_coefficients_async(
+        inputs.residual,
+        prepared,
+        inputs.hc_scale,
+        inputs.hc_base,
+        {},
+        side_stream=side_stream,
+        ready_event=ready_event,
+        done_event=done_event,
+        r_sq=r_sq,
+    )
+    assert outputs == (out_post, out_comb, out_pre)
+    assert recorded_streams == [
+        (id(inputs.residual), "side"),
+        (id(inputs.hc_scale), "side"),
+        (id(inputs.hc_base), "side"),
+        (id(r_sq), "side"),
+        (id(out_post), "main"),
+        (id(out_comb), "main"),
+        (id(out_pre), "main"),
+    ]
+    assert stream_events == [
+        ("record", ("ready", None)),
+        ("enter_stream", "side"),
+        ("wait_event", ("side", "ready")),
+        ("record", ("done", "side")),
+        ("exit_stream", "side"),
+    ]
+
+    # When graph capture is active, record_stream is skipped.
+    recorded_streams.clear()
+    stream_events.clear()
+    capturing_state["value"] = True
+    backend.launch_coefficients_async(
+        inputs.residual,
+        prepared,
+        inputs.hc_scale,
+        inputs.hc_base,
+        {},
+        side_stream=side_stream,
+        ready_event=ready_event,
+        done_event=done_event,
+        main_stream=main_stream,
+        r_sq=r_sq,
+    )
+    assert recorded_streams == []
+    assert stream_events[0] == ("record", ("ready", "main"))
+
+    # On failure inside run_coefficients, done_event is still recorded before re-raising.
+    stream_events.clear()
+    capturing_state["value"] = False
+    with pytest.raises(ValueError, match="hc_scale must have shape"):
+        backend.launch_coefficients_async(
+            inputs.residual,
+            prepared,
+            torch.empty(2, dtype=torch.float32),
+            inputs.hc_base,
+            {},
+            side_stream=side_stream,
+            ready_event=ready_event,
+            done_event=done_event,
+            main_stream=main_stream,
+        )
+    assert ("record", ("done", "side")) in stream_events
+    assert stream_events[-1] == ("exit_stream", "side")
+
+
+def test_native_fallback_npu_without_rms_norm_cast_falls_back_to_npu_rms_norm(monkeypatch):
+    inputs, hc_fn = _seam_case(T=4, C=4, D=64, dtype=torch.bfloat16)
+    backend = NativeFallbackMhcBackend()
+    prepared = backend.prepare({"hc_fn": hc_fn, "version_tag": "v1"}, "cpu", A5)
+    calls: list[str] = []
+
+    class _AscendOpsNoCast:
+        @staticmethod
+        def npu_hc_post(y, residual, post, comb):
+            calls.append("npu_hc_post")
+            return residual
+
+        @staticmethod
+        def npu_hc_pre_v3(updated, weight, hc_scale, hc_base, pre_mix, **kwargs):
+            calls.append("npu_hc_pre_v3")
+            return updated[:, 0, :], inputs.post, inputs.comb, inputs.pre_mix
+
+    class _NpuOps:
+        @staticmethod
+        def npu_rms_norm(collapsed, gamma, norm_eps):
+            calls.append("npu_rms_norm")
+            return collapsed.to(torch.bfloat16), None
+
+    monkeypatch.setattr(MhcSeamInputs, "device", property(lambda self: SimpleNamespace(type="npu")))
+    monkeypatch.setattr(torch.ops, "_C_ascend", _AscendOpsNoCast(), raising=False)
+    monkeypatch.setattr(torch.ops, "npu", _NpuOps(), raising=False)
+
+    out = backend.run(inputs, prepared, {"return_v_fp32": True})
+    assert calls == ["npu_hc_post", "npu_hc_pre_v3", "npu_rms_norm"]
+    assert out.v_fp32 is not None
+    assert torch.equal(out.v_fp32, out.v.bfloat16().float())
+
+
+def test_lifecycle_backend_switch_between_a3_fused_and_decoupled_reuses_weights_without_retiring():
+    events: list[str] = []
+    loads = {"count": 0}
+
+    def load():
+        loads["count"] += 1
+        return torch.ones(24, 256, dtype=torch.float32)
+
+    cap = replace(A3, has_a3_decoupled_op=True)
+    manager = MhcWeightLifecycleManager("cpu", cap, retire_graphs=lambda: events.append("retire"))
+    manager.register_layer("l0", ("seam_l0",), version_tag="v1", load_canonical=load)
+    manager.mark_consumer_migrated("l0", "seam_l0")
+
+    fused_spec = replace(BF16_SEAM, D=64, prefer_side_stream=False)
+    decoupled_spec = replace(BF16_SEAM, D=64, prefer_side_stream=True)
+
+    b1, p1 = manager.prepare_layer("l0", fused_spec)
+    assert isinstance(b1, A3MegaMhcBackend) and not isinstance(b1, A3DecoupledMhcBackend)
+    gen0 = manager.generation
+    assert loads["count"] == 1 and events == []
+
+    # Switching from fused to decoupled reuses packed Ozaki weights without retiring graphs or repacking.
+    b2, p2 = manager.prepare_layer("l0", decoupled_spec)
+    assert isinstance(b2, A3DecoupledMhcBackend)
+    assert p2 is p1
+    assert manager.generation == gen0
+    assert loads["count"] == 1 and events == []
+
+    # Switching back from decoupled to fused also reuses packed weights without retiring graphs.
+    b3, p3 = manager.prepare_layer("l0", fused_spec)
+    assert isinstance(b3, A3MegaMhcBackend) and not isinstance(b3, A3DecoupledMhcBackend)
+    assert p3 is p1
+    assert manager.generation == gen0
+    assert loads["count"] == 1 and events == []
+
+    # Changing weight_format (NZ -> ND) must still retire graphs and repack.
+    nd_spec = replace(fused_spec, weight_format=WeightFormat.OZAKI_BF16_ND_V1)
+    _, p4 = manager.prepare_layer("l0", nd_spec)
+    assert p4 is not p1
+    assert p4.weight_format == WeightFormat.OZAKI_BF16_ND_V1
+    assert manager.generation == gen0 + 1
+    assert events == ["retire"] and loads["count"] == 2
+
+
+def test_resolve_mhc_device_handles_unspecified_npu_index(monkeypatch):
+    from vllm_ascend.ops.mhc import registry as mhc_registry
+
+    real_torch_device = torch.device
+
+    class _FakeNpuDevice:
+        def __init__(self, dev_type: str, index: int | None = None) -> None:
+            self.type = dev_type
+            self.index = index
+
+        def __eq__(self, other: object) -> bool:
+            return isinstance(other, _FakeNpuDevice) and (self.type, self.index) == (other.type, other.index)
+
+    def fake_device(dev, index=None):
+        if isinstance(dev, _FakeNpuDevice):
+            return dev
+        if isinstance(dev, str) and dev.startswith("npu"):
+            if index is not None:
+                return _FakeNpuDevice("npu", int(index))
+            parts = dev.split(":", 1)
+            return _FakeNpuDevice("npu", int(parts[1]) if len(parts) == 2 else None)
+        return real_torch_device(dev) if index is None else real_torch_device(dev, index)
+
+    monkeypatch.setattr(torch, "device", fake_device)
+    monkeypatch.setattr(torch, "npu", SimpleNamespace(current_device=lambda: 3), raising=False)
+    assert mhc_registry.resolve_mhc_device("npu") == _FakeNpuDevice("npu", 3)
+    assert mhc_registry.resolve_mhc_device("npu:1") == _FakeNpuDevice("npu", 1)
+
+    manager = MhcWeightLifecycleManager("npu", A3)
+    assert manager._device == _FakeNpuDevice("npu", 3)
+    monkeypatch.setattr(torch, "npu", SimpleNamespace(current_device=lambda: 5), raising=False)
+    manager.on_device_move("npu", A3)
+    assert manager._device == _FakeNpuDevice("npu", 5)
+
+    monkeypatch.delattr(torch, "npu", raising=False)
+    with pytest.raises(ValueError, match="explicit NPU device index"):
+        mhc_registry.resolve_mhc_device("npu")
+
+
+def test_torch_split_seam_vectorized_matches_loop_reference():
+    inputs, hc_fn = _seam_case(T=5, C=4, D=64, dtype=torch.bfloat16)
+    backend = NativeFallbackMhcBackend()
+    prepared = backend.prepare({"hc_fn": hc_fn, "version_tag": "v1"}, "cpu", A3)
+    out = backend.run(inputs, prepared, {"return_v_fp32": True})
+
+    # Reference explicit loop calculation for HcPost and collapse.
+    ref_updated = inputs.y.float().unsqueeze(1) * inputs.post.unsqueeze(-1)
+    for lane, comb_col in zip(inputs.residual.float().unbind(1), inputs.comb.unbind(1)):
+        ref_updated = ref_updated + lane.unsqueeze(1) * comb_col.unsqueeze(-1)
+    ref_updated = ref_updated.to(inputs.y.dtype)
+
+    ref_pieces = (ref_updated.float() * inputs.pre_mix.unsqueeze(-1)).unbind(1)
+    ref_collapsed = ref_pieces[0]
+    for piece in ref_pieces[1:]:
+        ref_collapsed = ref_collapsed + piece
+    ref_collapsed = ref_collapsed.to(inputs.y.dtype).float()
+    ref_denom = (ref_collapsed.square().mean(-1, keepdim=True) + 1e-6).sqrt()
+    ref_v = ((ref_collapsed * ref_denom.reciprocal()) * inputs.gamma.float()).to(inputs.y.dtype)
+
+    torch.testing.assert_close(out.residual, ref_updated, atol=1e-2, rtol=1e-2)
+    torch.testing.assert_close(out.v, ref_v, atol=1e-2, rtol=1e-2)
+    assert out.v_fp32 is not None and out.v_fp32.dtype == torch.float32

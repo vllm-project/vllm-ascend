@@ -11,7 +11,7 @@ from dataclasses import dataclass, replace
 import torch
 
 from .contracts import MhcHardwareCapability, MhcSeamSpec, PreparedMhcWeights, WeightFormat
-from .registry import A3MegaMhcBackend, MhcBackend, select_backend
+from .registry import A3MegaMhcBackend, MhcBackend, resolve_mhc_device, select_backend
 
 
 @dataclass(slots=True)
@@ -48,7 +48,7 @@ class MhcWeightLifecycleManager:
         invalidate_device_constants: Callable[[torch.device], None] | None = None,
         native_adapter: Callable | None = None,
     ) -> None:
-        self._device = torch.device(device)
+        self._device = resolve_mhc_device(device)
         self._cap = cap
         self._layers: dict[str, _LayerWeights] = {}
         self._retire_graphs = retire_graphs
@@ -114,6 +114,15 @@ class MhcWeightLifecycleManager:
             previous_backend, previous = layer.binding
             if previous_backend is backend and previous.weight_format == layout:
                 return layer.binding
+            if (
+                packed
+                and isinstance(previous_backend, A3MegaMhcBackend)
+                and previous.weight_format == layout
+                and previous.device == self._device
+                and previous.version_tag == layer.version_tag
+            ):
+                layer.binding = (backend, previous)
+                return layer.binding
             self._retire_generation()
             layer.binding = None
             del previous
@@ -160,7 +169,7 @@ class MhcWeightLifecycleManager:
 
     def on_device_move(self, device: str, cap: MhcHardwareCapability) -> None:
         """Retire device bindings and stage weights on the new device on demand."""
-        target = torch.device(device)
+        target = resolve_mhc_device(device)
         if (target, cap) != (self._device, self._cap):
             self._invalidate_device()
             self._device, self._cap = target, cap

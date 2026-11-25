@@ -29,7 +29,11 @@ ACTIVATION_DTYPES = (torch.bfloat16, torch.float16)
 A2_HIDDEN_SIZE = 5120
 A2_MAX_ROWS = 72
 A3_MAX_HIDDEN_SIZE = 16320
-A3_GRAPH_MODES = frozenset(("none", "eager", "aclgraph", "full_decode_only"))
+A3_FUSED_GRAPH_MODES = frozenset(
+    ("none", "eager", "aclgraph", "full", "full_decode_only", "piecewise", "full_and_piecewise")
+)
+A3_GRAPH_MODES = A3_FUSED_GRAPH_MODES
+A3_DECOUPLED_GRAPH_MODES = frozenset(("none", "eager", "aclgraph", "full", "full_decode_only"))
 
 
 class MhcBackend(Protocol):
@@ -115,13 +119,22 @@ def _validate_inputs(inputs: MhcSeamInputs, prepared: PreparedMhcWeights) -> tup
     return tokens, lanes, width
 
 
-def _canonical_source(weights: dict, device: str) -> tuple[torch.Tensor, torch.device, str]:
+def resolve_mhc_device(device: str | torch.device) -> torch.device:
     try:
         target = torch.device(device)
     except (RuntimeError, TypeError) as exc:
         raise ValueError(f"Invalid mHC preparation device: {device}") from exc
     if target.type == "npu" and target.index is None:
+        npu_mod = getattr(torch, "npu", None)
+        current_device = getattr(npu_mod, "current_device", None)
+        if callable(current_device):
+            return torch.device("npu", int(current_device()))
         raise ValueError("mHC preparation requires an explicit NPU device index")
+    return target
+
+
+def _canonical_source(weights: dict, device: str) -> tuple[torch.Tensor, torch.device, str]:
+    target = resolve_mhc_device(device)
     source = weights.get("hc_fn")
     if not isinstance(source, torch.Tensor) or source.ndim != 2 or min(source.shape) <= 0:
         raise ValueError("hc_fn must be a nonempty 2D tensor")
@@ -165,13 +178,46 @@ class A5NativeMhcBackend:
         return prepared.native_adapter(inputs, prepared.tensor, attrs)
 
 
+def _is_a3_soc(soc_name: str) -> bool:
+    soc = soc_name.lower()
+    return soc == "ascend910c" or soc.startswith("ascend910_93")
+
+
 def _a3_capable(cap: MhcHardwareCapability) -> bool:
-    is_a3_soc = cap.soc_name == "Ascend910C" or cap.soc_name.startswith("Ascend910_93")
-    return is_a3_soc and cap.arch_gen == "arch22" and 8 <= cap.aic_count <= 24 and cap.has_a3_fused_op
+    return _is_a3_soc(cap.soc_name) and cap.arch_gen == "arch22" and 8 <= cap.aic_count <= 24 and cap.has_a3_fused_op
 
 
 def _a3_seam_supported(lanes: int, width: int, dtype: torch.dtype) -> bool:
     return dtype == torch.bfloat16 and lanes == 4 and 0 < width <= A3_MAX_HIDDEN_SIZE and width % 64 == 0
+
+
+def _validate_coefficient_inputs(
+    residual: torch.Tensor,
+    prepared: PreparedMhcWeights,
+    hc_scale: torch.Tensor,
+    hc_base: torch.Tensor,
+    r_sq: torch.Tensor | None,
+) -> tuple[int, int, int]:
+    if not isinstance(residual, torch.Tensor) or residual.ndim != 3:
+        raise ValueError("residual must have shape [T, C, D]")
+    tokens, lanes, width = residual.shape
+    dtype = residual.dtype
+    if min(tokens, lanes, width) <= 0:
+        raise ValueError("T, C and D must be positive")
+    if dtype not in ACTIVATION_DTYPES:
+        raise ValueError(f"residual must be bfloat16 or float16, got {dtype}")
+    device = prepared.device
+    _check_tensor("residual", residual, (tokens, lanes, width), dtype, device)
+    if not _a3_seam_supported(lanes, width, dtype) or prepared.weight_format not in OZAKI_FORMATS:
+        raise ValueError("A3 decoupled run_coefficients requires BF16, C=4, qualified D, and prepared Ozaki weights")
+    mixes = lanes * (lanes + 2)
+    _check_tensor("hc_scale", hc_scale, (3,), torch.float32, device)
+    _check_tensor("hc_base", hc_base, (mixes,), torch.float32, device)
+    if r_sq is not None:
+        _check_tensor("r_sq", r_sq, (tokens,), torch.float32, device)
+    weight_shape = ozaki_shape(lanes * width, prepared.weight_format)
+    _check_tensor("prepared hc_fn", prepared.tensor, weight_shape, torch.bfloat16, device)
+    return tokens, lanes, width
 
 
 class A3MegaMhcBackend:
@@ -190,7 +236,7 @@ class A3MegaMhcBackend:
             return False, "requires a versioned Ozaki NZ or ND layout"
         if cap.superkernel_enabled:
             return False, "SuperKernel capture/replay for MegaMHC requires separate qualification"
-        if cap.graph_mode.lower() not in A3_GRAPH_MODES:
+        if cap.graph_mode.lower() not in A3_FUSED_GRAPH_MODES:
             return False, "requires an eager or ACLGraph seam"
         return True, "qualified Atlas A3 fused single-kernel seam (eager or ACLGraph)"
 
@@ -252,6 +298,8 @@ class A3DecoupledMhcBackend(A3MegaMhcBackend):
             return False, "requires npu_mega_mhc_main and npu_mhc_coefficients_ozaki"
         if cap.superkernel_enabled:
             return False, "dual-stream decoupled MegaMHC is not yet qualified under SuperKernel"
+        if cap.graph_mode.lower() not in A3_DECOUPLED_GRAPH_MODES:
+            return False, "dual-stream decoupled MegaMHC requires eager or full ACLGraph capture"
         ok, reason = super().supports(spec, cap)
         if not ok:
             return False, reason
@@ -295,6 +343,7 @@ class A3DecoupledMhcBackend(A3MegaMhcBackend):
         r_sq: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Stage 2 (or standalone entry) Ozaki dual-BF16 coefficient kernel."""
+        _validate_coefficient_inputs(residual, prepared, hc_scale, hc_base, r_sq)
         if not prepared.index_map_ready:
             raise ValueError("A3 device constants must be prepared before capture and run")
         args = _parse_attrs(attrs)
@@ -327,13 +376,33 @@ class A3DecoupledMhcBackend(A3MegaMhcBackend):
         r_sq: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Fork Ozaki coefficients onto side_stream after ready_event; caller joins done_event."""
+        npu_mod = getattr(torch, "npu", None)
+        is_capturing = getattr(npu_mod, "is_current_stream_capturing", None)
+        capturing = bool(is_capturing()) if callable(is_capturing) else False
+        resolved_main_stream = main_stream
+        if resolved_main_stream is None and npu_mod is not None:
+            current_stream = getattr(npu_mod, "current_stream", None)
+            if callable(current_stream):
+                resolved_main_stream = current_stream()
+
         if main_stream is None:
             ready_event.record()
         else:
             ready_event.record(main_stream)
         with torch.npu.stream(side_stream):
             side_stream.wait_event(ready_event)
-            outputs = self.run_coefficients(residual, prepared, hc_scale, hc_base, attrs, r_sq=r_sq)
+            if not capturing:
+                for tensor in (residual, hc_scale, hc_base, r_sq):
+                    if tensor is not None:
+                        tensor.record_stream(side_stream)
+            try:
+                outputs = self.run_coefficients(residual, prepared, hc_scale, hc_base, attrs, r_sq=r_sq)
+            except Exception:
+                done_event.record(side_stream)
+                raise
+            if not capturing and resolved_main_stream is not None:
+                for tensor in outputs:
+                    tensor.record_stream(resolved_main_stream)
             done_event.record(side_stream)
         return outputs
 
@@ -448,7 +517,11 @@ class NativeFallbackMhcBackend:
             if args.post_mult != 2.0:
                 post = post * (args.post_mult / 2.0)
             if args.return_v_fp32:
-                v, v_fp32 = ops.npu_rms_norm_cast(collapsed, inputs.gamma, args.norm_eps)
+                if hasattr(ops, "npu_rms_norm_cast"):
+                    v, v_fp32 = ops.npu_rms_norm_cast(collapsed, inputs.gamma, args.norm_eps)
+                else:
+                    v, _ = torch.ops.npu.npu_rms_norm(collapsed, inputs.gamma, args.norm_eps)
+                    v_fp32 = v.bfloat16().float()
             else:
                 v, _ = torch.ops.npu.npu_rms_norm(collapsed, inputs.gamma, args.norm_eps)
                 v_fp32 = None
@@ -458,16 +531,10 @@ class NativeFallbackMhcBackend:
 
 def _torch_split_seam(inputs: MhcSeamInputs, hc_fn: torch.Tensor, args: _SeamAttrs) -> MhcSeamOutputs:
     updated = inputs.y.float().unsqueeze(1) * inputs.post.unsqueeze(-1)
-    residual_lanes = inputs.residual.float().unbind(1)
-    for lane, comb_column in zip(residual_lanes, inputs.comb.unbind(1)):
-        updated = updated + lane.unsqueeze(1) * comb_column.unsqueeze(-1)
+    updated = updated + torch.bmm(inputs.comb.transpose(1, 2).float(), inputs.residual.float())
     updated = updated.to(inputs.y.dtype)
 
-    collapse_pieces = (updated.float() * inputs.pre_mix.unsqueeze(-1)).unbind(1)
-    collapsed = collapse_pieces[0]
-    for piece in collapse_pieces[1:]:
-        collapsed = collapsed + piece
-    collapsed = collapsed.to(inputs.y.dtype).float()
+    collapsed = (updated.float() * inputs.pre_mix.unsqueeze(-1)).sum(dim=1).to(inputs.y.dtype).float()
     denom = (collapsed.square().mean(-1, keepdim=True) + args.norm_eps).sqrt()
     v = ((collapsed * denom.reciprocal()) * inputs.gamma.float()).to(inputs.y.dtype)
     v_fp32 = v.bfloat16().float() if args.return_v_fp32 else None
