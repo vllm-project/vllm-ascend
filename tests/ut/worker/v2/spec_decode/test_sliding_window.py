@@ -238,6 +238,66 @@ def test_mixed_kernel_block_sizes_crop_each_group():
     torch.testing.assert_close(block_tables.input_block_tables[1], original_b)
 
 
+def test_sharded_crop_rounds_down_to_a_local_column():
+    """DCP2 must not crop to global token 64, which is local token 32.
+
+    That position is inside column 0. Dropping 64 tokens while keeping the
+    column would attend to tokens from the start of the column. The crop
+    rounds down to the column stride, 128.
+    """
+    helper = MRV2DraftSlidingWindow(
+        window_size=128,
+        block_sizes=(64,),
+        max_num_reqs=2,
+        future_offset=0,
+        device=torch.device("cpu"),
+        cp_size=2,
+        dcp_sharded=(True,),
+    )
+    assert helper.align == 128
+    table = torch.arange(8, dtype=torch.int32).view(1, 8).expand(2, 8).contiguous()
+    original = table.clone()
+    block_tables = SimpleNamespace(input_block_tables=[table])
+    input_buffers = SimpleNamespace(seq_lens=torch.tensor([192, 0], dtype=torch.int32))
+    upper_bound = torch.tensor([192, 0], dtype=torch.int32)
+
+    with helper.apply_builder_inputs(input_buffers, block_tables, upper_bound, num_reqs=1) as windowed_ub:
+        # raw start 64 rounds down to 0, so the length and column 0 agree.
+        assert input_buffers.seq_lens[0].item() == 192
+        assert windowed_ub[0].item() == 192
+        assert helper.adapters[0].start_tokens_in_window_rounding[0].item() == 0
+        assert block_tables.input_block_tables[0][0, 0].item() == 0
+
+    torch.testing.assert_close(block_tables.input_block_tables[0], original)
+
+    # raw start 192 rounds down to 128, which is local column 1.
+    input_buffers.seq_lens = torch.tensor([320, 0], dtype=torch.int32)
+    upper_bound = torch.tensor([320, 0], dtype=torch.int32)
+    with helper.apply_builder_inputs(input_buffers, block_tables, upper_bound, num_reqs=1) as windowed_ub:
+        assert input_buffers.seq_lens[0].item() == 192
+        assert windowed_ub[0].item() == 192
+        assert helper.adapters[0].start_tokens_in_window_rounding[0].item() == 128
+        assert block_tables.input_block_tables[0][0, 0].item() == 1
+
+    torch.testing.assert_close(block_tables.input_block_tables[0], original)
+
+
+def test_sharded_align_uses_the_virtual_block_when_interleave_is_coarser():
+    helper = MRV2DraftSlidingWindow(
+        window_size=128,
+        block_sizes=(64,),
+        max_num_reqs=1,
+        future_offset=0,
+        device=torch.device("cpu"),
+        kv_block_sizes=(128,),
+        cp_size=2,
+        cp_interleave=3,
+        dcp_sharded=(True,),
+    )
+    # 3 does not divide 64, so the stride is the virtual block 128 * 2.
+    assert helper.align == 256
+
+
 def test_maybe_create_reads_physical_dcp_layout():
     block_tables = SimpleNamespace(
         input_block_tables=[

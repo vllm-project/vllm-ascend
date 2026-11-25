@@ -75,9 +75,9 @@ class SlidingWindowAdapter:
         query stretch (bonus + mask) into ``seq_lens``, so ``final = seq_lens``.
 
     ``align`` is the token multiple the window start rounds down to. It defaults
-    to ``block_size``. MRV2 sets it to the LCM of the KV groups' kernel block
-    sizes so every group shares one token crop while each table is indexed in
-    its own block size.
+    to ``block_size``. MRV2 sets it to the LCM of the groups' column strides:
+    the kernel block size, or the rank-local column stride when the group is
+    DCP-sharded. Every group then shares one token crop.
     """
 
     def __init__(

@@ -119,6 +119,27 @@ def _cp_layout(block_tables: Any, num_groups: int) -> tuple[int, int, tuple[bool
     return cp_size, cp_interleave, _bool_flags(sharded, num_groups, "dcp_sharded")
 
 
+def _column_stride(
+    kernel_block_size: int,
+    kv_block_size: int,
+    sharded: bool,
+    cp_size: int,
+    cp_interleave: int,
+) -> int:
+    """Token multiple of one rank-local block-table column.
+
+    A replicated group strides by its kernel block. A sharded group strides by
+    ``kernel_block_size * cp_size`` when the interleave divides that block, and
+    by the virtual block ``kv_block_size * cp_size`` otherwise. A crop inside a
+    local column would keep the column that starts before the window.
+    """
+    if not sharded or cp_size <= 1:
+        return kernel_block_size
+    if kernel_block_size % cp_interleave == 0:
+        return kernel_block_size * cp_size
+    return kv_block_size * cp_size
+
+
 def _kv_block_sizes(block_tables: Any, kernel_block_sizes: Sequence[int]) -> tuple[int, ...]:
     """Physical block size used to split a DCP position. Falls back to the kernel size."""
     physical = getattr(block_tables, "block_sizes", None)
@@ -182,11 +203,18 @@ class MRV2DraftSlidingWindow:
                     "draft sliding window sharded block size must be a multiple of the kernel block size, "
                     f"got {kv_block_size} and {kernel_block_size}"
                 )
-        # One seq_lens tensor is shared by every group, so the token crop has to be a
-        # multiple of every kernel block size. A replicated table drops
-        # start_tokens / block_size columns. A sharded DCP table drops the
-        # rank-local column of that same token.
-        self.align = math.lcm(*self.block_sizes)
+        # One seq_lens tensor is shared, so the crop is a multiple of every group's
+        # column stride. Replicated groups stride by the kernel block. Sharded
+        # groups stride by a whole rank-local column, which is wider than the
+        # kernel block once cp_size > 1.
+        self.align = math.lcm(
+            *(
+                _column_stride(kernel_block_size, kv_block_size, sharded, self.cp_size, self.cp_interleave)
+                for kernel_block_size, kv_block_size, sharded in zip(
+                    self.block_sizes, self.kv_block_sizes, self.dcp_sharded
+                )
+            )
+        )
         self.adapters = [
             SlidingWindowAdapter(
                 window_size,
