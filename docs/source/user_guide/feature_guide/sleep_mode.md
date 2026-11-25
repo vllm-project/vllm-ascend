@@ -62,10 +62,7 @@ During `wake_up()`, vLLM Ascend restores the HCCL process groups, refreshes MoE 
 
     Extra cleanup trades lower sleep-time NPU memory usage for longer wakeup latency. In particular, if ACL graph is enabled, `wake_up()` must call `capture_model()` again after the model state has been restored. Keep `rl_config.sleep_mode_extra_cleanup` disabled when lower wakeup latency is more important than releasing HCCL and ACL graph workspace memory. The former top-level `enable_sleep_mode_extra_cleanup` option has been removed.
 
-For level 2 sleep, only weights allocations that contain exclusively parameters
-rewritten by the following weight update are discarded. Non-parameter and mixed
-weights-pool allocations are backed up and restored. Wakeup can be split into
-two phases:
+For level 2 sleep, wakeup can be split into two phases:
 
 ```python
 llm.wake_up(tags=["weights"])
