@@ -507,6 +507,44 @@ def test_untrimmed_shared_window_skips_masked_public_page(ns):
     assert ns["_load_entries"](worker, request, 0, hashes, request.store_masks[0]) == saved
 
 
+def test_aligned_prefill_saves_live_window_outside_public_store_mask(ns):
+    worker = NS(
+        grouped_block_size=[32],
+        group_uses_align_state=[False],
+        cache_transfer_granularity=4096,
+        kv_cache_config=NS(block_key_prefill_windows={0: 128}),
+        _reused_layers_by_group={0: {0}},
+        _snapshot_keys={},
+        _is_layerwise_save_owner=lambda group: True,
+        _make_layerwise_full_key=lambda group, key: key,
+    )
+    request = NS(
+        req_id="request",
+        layerwise_request_id="incarnation",
+        target_token_len=8192,
+        num_prompt_tokens=17192,
+        save_start_token=0,
+        can_save=True,
+        block_ids_by_group=[[0] * 251 + [320, 321, 322, 323, 324]],
+        store_masks=[[False] * 255 + [True]],
+        load_spec=None,
+    )
+    hashes = [index.to_bytes(2, "big") for index in range(256)]
+    snapshots = {}
+    view = NS()
+    saved = ns["_save_entries"](worker, request, view, 0, hashes, snapshots)
+    assert view.partial_block_index is None
+    assert set(snapshots) == {252, 253, 254}
+    assert saved == [*((snapshots[index], index) for index in range(252, 255)), (hashes[255].hex(), 255)]
+
+    worker._offload_active_pages = {
+        ("request", "incarnation", 0): (8192, {index: key for key, index in saved})
+    }
+    request.target_token_len = 16384
+    request.load_spec = NS(can_load=True, layerwise_previous_step=True, kvpool_cached_tokens=8192)
+    assert ns["_load_entries"](worker, request, 0, hashes, [False] * 252 + [True] * 4) == saved
+
+
 @pytest.mark.parametrize("shared", [False, True])
 def test_push_registers_declared_swa_owner(ns, shared):
     path = "vllm_ascend/distributed/kv_transfer/kv_p2p/mooncake/push_worker.py"

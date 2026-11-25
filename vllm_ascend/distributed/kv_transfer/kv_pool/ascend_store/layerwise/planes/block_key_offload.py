@@ -137,14 +137,22 @@ def _save_entries(worker, request, view, group, hashes, snapshots):
         # A transfer unit can contain several complete pages of this group.
         public_tokens = min(tokens, len(hashes) * size) // transfer_size * transfer_size
         snapshot_start = public_tokens // size
+    continuation_start = None
+    prompt_end = getattr(request, "num_prompt_tokens", None)
+    if reuses_buffer and not recurrent and prompt_end is not None and tokens < prompt_end:
+        continuation_start = _continuation_window_start(worker, group, tokens, size, request)
+
     entries = []
     for index in range(start, end):
         if ids[index] == 0:
             continue
         private = index >= len(hashes) or (snapshot_start is not None and index >= snapshot_start)
-        if not private:
-            if mask is not None and index < len(mask) and not mask[index]:
+        if not private and mask is not None and index < len(mask) and not mask[index]:
+            # Public prefix retention can omit pages needed by the next chunk.
+            if continuation_start is None or index < continuation_start:
                 continue
+            private = True
+        if not private:
             key = worker._make_layerwise_full_key(group, block_hash_to_str(hashes[index]))
             snapshots.pop(index, None)
         else:
