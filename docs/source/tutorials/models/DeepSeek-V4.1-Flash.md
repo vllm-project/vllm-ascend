@@ -1193,11 +1193,26 @@ vLLM Ascend revision.
     - `VLLM_USE_V2_MODEL_RUNNER=1` selects model runner V2 on both roles.
     - `VLLM_USE_FASTOKENS=1` enables the fastokens tokenizer backend. Both
       containers must include `fastokens>=0.3.5`.
-    - `--enable-eplb` enables expert parallel load balancing on Prefill. The
-      `stair` policy uses a 64-step load window and a 128-step rearrangement
-      interval, with 16 redundant experts across the EP group. Redundant
-      experts consume additional device memory; tune these values for the
-      workload. See [Expert Parallel Load Balancing](../../user_guide/feature_guide/expert_parallelism_load_balancer.md).
+    - `--enable-eplb` enables expert parallel load balancing on Prefill.
+      `--eplb-config` configures the following parameters:
+
+        - `window_size: 64`: Number of recent steps used to record expert load.
+        - `step_interval: 128`: Number of steps between expert rearrangement
+          attempts. When this exceeds `window_size`, only metrics from the last
+          `window_size` steps are used.
+        - `policy: "stair"`: Selects Ascend's STAIR expert load-balancing policy.
+          Use `"default"` for comparison with the upstream policy.
+        - `num_redundant_experts: 16`: Total number of redundant physical experts
+          across the EP group, not per rank. Redundant experts consume additional
+          device memory, and `(num_experts + num_redundant_experts)` must be
+          divisible by the expert-parallel size.
+
+        As in Section 5.2.1.2, `window_size: 64` and `step_interval: 128` are
+        intended for short benchmark runs, providing faster load feedback and
+        more opportunities for expert rearrangement. For production deployments,
+        use `window_size: 1000` and `step_interval: 3000` for more stable behavior.
+        See [Expert Parallel Load Balancing](../../user_guide/feature_guide/expert_parallelism_load_balancer.md).
+
     - `--data-parallel-size`, `--prefill-context-parallel-size`, and
       `--tensor-parallel-size` define DP4/PCP4/TP1 on Prefill and DP16/PCP1/TP1
       on Decode. Their product is 16 on each node. The launcher assigns four
@@ -1242,8 +1257,6 @@ vLLM Ascend revision.
         - `multistream_overlap_shared_expert: false` disables shared-expert
         multistream overlap on Prefill, where MegaMoE is enabled.
         - `enable_shared_expert_dp: true` requests shared-expert data parallelism.
-        This option requires expert parallelism and TP greater than 1; it is
-        inactive in this TP1 example.
 
     - Decode uses the following `--additional-config` options:
 
@@ -1257,10 +1270,6 @@ vLLM Ascend revision.
         - `recompute_scheduler_enable: true` enables the PD Decode recomputation
         scheduler. When the Decode-side KV cache is unavailable, the request can be
         sent back to Prefill to recompute it. Enable this option only on Decode.
-
-      Both roles request `enable_fused_mc2: 3`. The current upstream implementation
-      restricts this mode to A5; these settings require an A3 software build that
-      supports MegaMoE shared-expert fusion.
 
       The Prefill and Decode configurations are role-specific. Validate the
       topology and performance before changing the Prefill PCP settings or the
