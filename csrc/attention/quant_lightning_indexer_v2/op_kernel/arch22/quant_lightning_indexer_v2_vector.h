@@ -167,7 +167,6 @@ __aicore__ inline void SortAll(LocalTensor<float> &src, LocalTensor<float> &tmp,
             srcList.src3 = tmp[2048];
             srcList.src4 = tmp[3072];
             AscendC::MrgSort<float>(src, srcList, params);
-            AscendC::PipeBarrier<PIPE_V>();
         }
         return;
     }
