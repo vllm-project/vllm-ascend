@@ -2,18 +2,12 @@ pr: 21924
 entries:
   - category: feature
     text: >-
-      Added experimental bulk AscendStore prefix reuse with colocated HiSparse
-      on A5 using MemCache host_tcp. The feature requires asynchronous request
-      loading (load_async=true), discard_partial_chunks=true and
-      eager_host_mirror=true, including for Prefill-only saves.
-      Use a vLLM Core build with Ascend HiSparse backend support.
-      The combination supports single-node colocated Prefill and Decode with
-      kv_role=kv_both on MultiConnector and its children. Startup rejects PD
-      disaggregation, multi-node deployments, prefill context parallelism, duplicate or additional connectors,
-      layerwise transfers, other Store backends and other MemCache protocols.
-      Mooncake is disabled for this combination due to a PUT timeout data consistency
-      issue. The hisparse-ascendstore-v1
-      key namespace separates entries by target and draft checkpoints, resolved revisions,
-      dummy-weight mode, sharded-state filename patterns, effective model
-      configurations and page layout.
+      Added experimental, opt-in AscendStore prefix reuse for HiSparse on A5
+      with Prefill and Decode colocated on a single node.
+      Enabling it requires a vLLM build with Ascend HiSparse support,
+      `MultiConnector` with `kv_role=kv_both` on the parent and both children,
+      MemCache `host_tcp`, and `load_async=true`, `discard_partial_chunks=true`,
+      and `eager_host_mirror=true`.
+      PD disaggregation, prefill context parallelism, layerwise transfers,
+      and Mooncake are unsupported in this combination.
     hardware: [A5]
