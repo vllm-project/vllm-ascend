@@ -60,6 +60,7 @@ _EXPECTED_CAPABILITIES = {
     | {
         HardwareCapability.MM_REDUCE_SCATTER_BF16,
         HardwareCapability.QWEN4EXP_HC_GATE_MIX_ROW_BLOCK,
+        HardwareCapability.MM_REDUCE_SCATTER_INT8,
         HardwareCapability.RMS_NORM_CAST,
         HardwareCapability.NPU_TOP_K_TOP_P,
         HardwareCapability.FLASH_ATTN_NPU_3,
@@ -76,6 +77,7 @@ _EXPECTED_CAPABILITIES = {
         HardwareCapability.CANN_MEGAMOE_SHARED_EXPERT_FUSION,
         HardwareCapability.MC2_FULLMESH_V2_COMM,
         HardwareCapability.MM_REDUCE_SCATTER_BF16,
+        HardwareCapability.MM_REDUCE_SCATTER_INT8,
         HardwareCapability.RMS_NORM_CAST,
         HardwareCapability.FLASH_ATTN_NPU_3,
         HardwareCapability.MOE_DISPATCH_EXTRA_ARGS,
@@ -128,6 +130,7 @@ _EXPECTED_CAPABILITIES = {
             HardwareCapability.MINIMAX_M3_INDEX_SCORE_TOPK_FUSION,
             HardwareCapability.MM_REDUCE_SCATTER_AI_CPU_INFERENCE,
             HardwareCapability.MM_REDUCE_SCATTER_BF16,
+            HardwareCapability.MM_REDUCE_SCATTER_INT8,
             HardwareCapability.MOE_DISPATCH_EXTRA_ARGS,
             HardwareCapability.MOE_DISPATCH_SHARED_EXPERT_ARGS,
             HardwareCapability.MOE_GATING_TOP_K_HASH_VISION,
