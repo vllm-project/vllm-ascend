@@ -88,18 +88,10 @@ from vllm_ascend.utils import (
     enable_sfa,
     is_pd_decode_recompute_scheduler_enabled,
     maybe_trans_nz,
-    vllm_version_is,
 )
 
 BUILD_METADATA_STEP_PREFILL = 0
 BUILD_METADATA_STEP_DECODE = 1
-
-
-def _uses_unpadded_drafter_batch(speculative_config) -> bool:
-    if vllm_version_is("0.33.0"):
-        return speculative_config.disable_padded_drafter_batch
-    # MRv1's optional unpadded drafter was removed in native #63373.
-    return False
 
 
 # Exclusive batch * K limit of the fused op with perm_x1=(1, 0, 2).
@@ -816,10 +808,6 @@ class AscendMLAMetadataBuilder(MLACommonMetadataBuilder[AscendMLAMetadata]):
         if build_metadata_step == BUILD_METADATA_STEP_PREFILL:
             # If graph_pad_size > -1, mean is running in fullgraph mode.
             # NOTE: Maybe this block_table change can be removed when graph_pad_size > 1.
-            if self.graph_pad_size > common_attn_metadata.num_reqs and _uses_unpadded_drafter_batch(
-                self.speculative_config
-            ):
-                return self.graph_pad_size
             return common_attn_metadata.num_reqs
         return self.num_decodes
 
@@ -886,49 +874,32 @@ class AscendMLAMetadataBuilder(MLACommonMetadataBuilder[AscendMLAMetadata]):
 
         # NOTE: MTP full graph is incompatible with context parallelism.
         # NOTE: Maybe this block_table change can be removed when graph_pad_size > 1.
-        if self.graph_pad_size > self.num_decodes and _uses_unpadded_drafter_batch(self.speculative_config):
-            self.block_table = self.block_table[: self.graph_pad_size, ...]
         seq_lens_list = self.seq_lens.tolist()
 
         if self.graph_pad_size > num_reqs:
-            if _uses_unpadded_drafter_batch(self.speculative_config):
-                num_reqs_pad_size = self.graph_pad_size - num_reqs
-                actual_seq_lengths_q = self.pad_actual_seq_len_q_mtp_disable_pad(
-                    num_reqs_pad_size, num_reqs, actual_seq_lengths_q
-                )
-                seq_lens_list = seq_lens_list + [0] * (self.graph_pad_size - self.num_decodes)
-                num_block_pad_size = self.graph_pad_size - self.block_table.shape[0]
-                if num_block_pad_size > 0:
-                    block_table_padding = torch.zeros(
-                        (num_block_pad_size,) + self.block_table.shape[1:],
-                        dtype=self.block_table.dtype,
-                        device=self.block_table.device,
-                    )
-                    self.block_table = torch.cat([self.block_table, block_table_padding], dim=0)
-            else:
-                num_token_pad_size = self.graph_pad_size - self.num_decode_tokens
-                num_reqs_pad_size = self.graph_pad_size // common_attn_metadata.decode_token_per_req - num_reqs
-                num_block_table_pad_size = (
-                    self.graph_pad_size // common_attn_metadata.decode_token_per_req - self.num_decodes
-                )
-                seq_lens_list = self.seq_lens.tolist() + [0] * num_reqs_pad_size
-                slot_padding = torch.full(
-                    (num_token_pad_size,), PAD_SLOT_ID, dtype=self.slot_mapping.dtype, device=self.slot_mapping.device
-                )
-                self.slot_mapping = torch.cat([self.slot_mapping, slot_padding])
-                block_table_padding = torch.zeros(
-                    (num_block_table_pad_size,) + self.block_table.shape[1:],
-                    dtype=self.block_table.dtype,
-                    device=self.block_table.device,
-                )
-                self.block_table = torch.cat([self.block_table, block_table_padding], dim=0)
-                position_padding = torch.zeros(
-                    num_token_pad_size, dtype=input_positions.dtype, device=input_positions.device
-                )
-                input_positions = torch.cat([input_positions, position_padding])
-                actual_seq_lengths_q = self.pad_actual_seq_len_q_mtp_enable_pad(
-                    num_reqs_pad_size, num_reqs, actual_seq_lengths_q, common_attn_metadata
-                )
+            num_token_pad_size = self.graph_pad_size - self.num_decode_tokens
+            num_reqs_pad_size = self.graph_pad_size // common_attn_metadata.decode_token_per_req - num_reqs
+            num_block_table_pad_size = (
+                self.graph_pad_size // common_attn_metadata.decode_token_per_req - self.num_decodes
+            )
+            seq_lens_list = self.seq_lens.tolist() + [0] * num_reqs_pad_size
+            slot_padding = torch.full(
+                (num_token_pad_size,), PAD_SLOT_ID, dtype=self.slot_mapping.dtype, device=self.slot_mapping.device
+            )
+            self.slot_mapping = torch.cat([self.slot_mapping, slot_padding])
+            block_table_padding = torch.zeros(
+                (num_block_table_pad_size,) + self.block_table.shape[1:],
+                dtype=self.block_table.dtype,
+                device=self.block_table.device,
+            )
+            self.block_table = torch.cat([self.block_table, block_table_padding], dim=0)
+            position_padding = torch.zeros(
+                num_token_pad_size, dtype=input_positions.dtype, device=input_positions.device
+            )
+            input_positions = torch.cat([input_positions, position_padding])
+            actual_seq_lengths_q = self.pad_actual_seq_len_q_mtp_enable_pad(
+                num_reqs_pad_size, num_reqs, actual_seq_lengths_q, common_attn_metadata
+            )
 
         if self.use_mla_rope:
             cos, sin = get_cos_and_sin_mla(input_positions, use_cache=True)
@@ -1017,7 +988,6 @@ class MLAParamProvider:
     is_draft_model: bool = False
     num_tokens: int | None = None
     eagle_spec_multiple: int | None = None
-    disable_padded_batch: bool = False
 
     def resolve(self, attn_metadata) -> dict[str, Any]:
         decode = attn_metadata[self.layer_name].decode
@@ -1025,8 +995,6 @@ class MLAParamProvider:
         if self.is_draft_model:
             actual_seq_qlen = decode.actual_seq_lengths_q
             block_table = decode.block_table
-            if self.disable_padded_batch:
-                block_table = block_table[: len(actual_seq_qlen)]
             return {
                 "actual_seq_qlen": actual_seq_qlen,
                 "actual_seq_kvlen": decode.seq_lens_list + [0] * (len(actual_seq_qlen) - len(decode.seq_lens_list)),
@@ -1180,8 +1148,7 @@ class AscendMLAImpl(MLAAttentionImpl):
 
     def _supports_flashmla(self, supported_q_heads: frozenset[int]) -> bool:
         return (
-            bool(getattr(self.vllm_config, "use_v2_model_runner", False))
-            and get_current_hardware_profile().supports(HardwareCapability.MLA_FLASH)
+            get_current_hardware_profile().supports(HardwareCapability.MLA_FLASH)
             and self.num_heads in supported_q_heads
             and self.num_kv_heads == FLASHMLA_NUM_KV_HEADS
             and self.kv_lora_rank == FLASHMLA_V_DIM
@@ -1416,13 +1383,6 @@ class AscendMLAImpl(MLAAttentionImpl):
         config = self.vllm_config
         # Avoid preparing unused PROLOG weights for FIA drafts under SFA targets.
         if enable_sfa(config) and not self.use_flashmla:
-            return
-        if not config.use_v2_model_runner and (
-            hasattr(config.model_config.hf_config, "compress_ratios")
-            or get_ascend_config().sparse_kv_offload_config.enabled
-        ):
-            # V1 keeps these global cache modes on their legacy writer layout,
-            # including draft layers constructed from the target model config.
             return
         attn_module = config.compilation_config.static_forward_context.get(self.layer_name)
         if not isinstance(attn_module, MLAAttention):
@@ -3075,7 +3035,6 @@ class AscendMLAImpl(MLAAttentionImpl):
                 num_tokens=num_tokens,
                 is_draft_model=is_draft_model,
                 eagle_spec_multiple=eagle_spec_multiple,
-                disable_padded_batch=(is_draft_model and _uses_unpadded_drafter_batch(self.speculative_config)),
             )
             register_task(torch_npu.npu_fused_infer_attention_score_v2.out, operation_kwargs, provider)
         else:

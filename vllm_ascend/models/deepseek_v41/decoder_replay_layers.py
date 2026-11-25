@@ -42,6 +42,7 @@ class AscendDecoderReplayLayers:
         self.num_padded_rows: int | None = None
         self.sequence_parallel = False
         self.sp_plan: SPReplayPlan | None = None
+        self.sp_replay_positions: torch.Tensor | None = None
         self.sp_replay_input_ids: torch.Tensor | None = None
         self.smla_plan_ratios: tuple[int, ...] | None = None
         self.first_swa_plan_ratios: tuple[int, ...] | None = None
@@ -72,7 +73,7 @@ class AscendDecoderReplayLayers:
                 hidden, mix = cast(SPReplayPlan, self.sp_plan).compact(
                     cast(torch.Tensor, states[0]), cast(torch.Tensor, states[1]), get_tp_group().device_group
                 )
-                replay_states = [hidden, mix, positions.index_select(0, rows), self.sp_replay_input_ids]
+                replay_states = [hidden, mix, self.sp_replay_positions, self.sp_replay_input_ids]
             else:
                 replay_states = []
                 for state in states:
@@ -182,8 +183,6 @@ def make_decoder_replay(model: "DeepseekV41Model", config: VllmConfig) -> Ascend
         reason = "DCP and microbatching need a separate replay layout"
     elif model.use_sequence_parallel and parallel.pipeline_parallel_size > 1:
         reason = "SP replay requires a single pipeline stage"
-    elif model.use_sequence_parallel and (not config.use_v2_model_runner or parallel.prefill_context_parallel_size > 1):
-        reason = "SP replay requires MRV2 without PCP"
     elif model.use_sequence_parallel and speculative is not None and speculative.enable_adaptive_verification:
         # Adaptive verification can change device query boundaries without
         # updating the CPU counts used to plan the SP all-to-all.

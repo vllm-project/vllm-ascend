@@ -38,7 +38,6 @@ def test_kvpp_pipeline_parallel():
             args,
             server_port=port,
             auto_port=False,
-            env_dict={"VLLM_USE_V2_MODEL_RUNNER": "1"},
         ) as server:
             results.append(
                 [

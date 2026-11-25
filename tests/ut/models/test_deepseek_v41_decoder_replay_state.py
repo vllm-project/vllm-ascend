@@ -81,6 +81,21 @@ def test_prefill_trims_but_decode_and_prompt_logprobs_keep_rows(state):
     assert state._build_metadata.call_args.args[1].tolist() == [0, 1, 7, 9]
 
 
+@pytest.mark.parametrize("original_width", [13, 16])
+def test_sp_keeps_all_valid_tokens_when_tp_rounding_erases_savings(state, original_width):
+    state.layers.sequence_parallel = True
+    state.config.parallel_config.tensor_parallel_size = 8
+    state.layers.window = 5
+    source = inputs()
+    source.batch.num_tokens_after_padding = original_width
+    # [1, 6, 6] would keep eleven rows, which needs sixteen execution rows at TP8.
+    state.prepare(source, CUDAGraphMode.NONE)
+    assert state.num_tokens == original_width
+    assert state.num_actual_tokens == 13
+    assert state.layers.rows is None
+    state._gather.assert_not_called()
+
+
 @pytest.mark.parametrize("rank", [0, 1])
 @pytest.mark.parametrize("ids_dtype", [torch.int32, torch.int64])
 def test_sp_replay_plan_aligns_execution_and_preserves_row_ownership(state, monkeypatch, rank, ids_dtype):

@@ -19,11 +19,18 @@ def _hccl_replay_worker(rank, init_method):
     device = torch.device(f"npu:{rank}")
     dist.init_process_group("hccl", init_method=init_method, rank=rank, world_size=2, timeout=timedelta(seconds=60))
     try:
-        for lengths, kept in (([4096], [128]), ([4096, 1], [128, 1]), ([33, 35, 2], [30, 2, 2]), ([16], [1])):
+        for lengths, kept, compact_width in (
+            ([4096], [128], 64),
+            ([4096, 1], [128, 1], 65),
+            ([33, 35, 2], [30, 2, 2], 17),
+            ([16], [1], 1),
+            ([4, 4], [0, 0], 2),  # PCP peer owns all three retained rows; both use TP2 width two.
+        ):
             offsets = np.insert(np.cumsum(lengths), 0, 0)
             original_width = (sum(lengths) + 1) // 2
-            compact_width = (sum(kept) + 1) // 2
-            rows = torch.tensor([row for end, count in zip(offsets[1:], kept) for row in range(end - count, end)])
+            rows = torch.tensor(
+                [row for end, count in zip(offsets[1:], kept) for row in range(end - count, end)], dtype=torch.long
+            )
             device_rows = torch.nn.functional.pad(rows, (0, compact_width * 2 - len(rows))).to(device)
             plan = SPReplayPlan.build(offsets, np.array(kept), sum(lengths), compact_width * 2, 2, rank, device_rows)
             compact_rows = rows[rank * compact_width : (rank + 1) * compact_width]

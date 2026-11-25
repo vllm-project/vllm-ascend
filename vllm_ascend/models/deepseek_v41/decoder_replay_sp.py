@@ -48,6 +48,7 @@ class SPReplayPlan:
     original_local_tokens: int
     replay_local_tokens: int
     received_tokens: int
+    has_kept_rows: bool
 
     @classmethod
     def build(
@@ -99,12 +100,20 @@ class SPReplayPlan:
             original_width,
             replay_width,
             sum(recv_counts),
+            owner_offsets[-1] > 0,
         )
 
     def compact(
         self, hidden_states: torch.Tensor, pre_mix: torch.Tensor, group: dist.ProcessGroup
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Select locally and exchange both states in one byte-packed collective."""
+        # All TP ranks in this PCP share the kept lengths. When their PCP owns
+        # no tail rows, the decoder still runs at the common padded width.
+        if not self.has_kept_rows:
+            return (
+                hidden_states.new_zeros((self.replay_local_tokens, *hidden_states.shape[1:])),
+                pre_mix.new_zeros((self.replay_local_tokens, *pre_mix.shape[1:])),
+            )
         selected = _pack_states(
             hidden_states.index_select(0, self.local_rows), pre_mix.index_select(0, self.local_rows)
         )
@@ -122,6 +131,11 @@ class SPReplayPlan:
         self, hidden_states: torch.Tensor, pre_mix: torch.Tensor, group: dist.ProcessGroup
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Return only valid decoder rows to their original SP owners."""
+        if not self.has_kept_rows:
+            return (
+                hidden_states.new_zeros((self.original_local_tokens, *hidden_states.shape[1:])),
+                pre_mix.new_zeros((self.original_local_tokens, *pre_mix.shape[1:])),
+            )
         packed = _pack_states(hidden_states[: self.received_tokens], pre_mix[: self.received_tokens])
         selected = packed.new_empty((self.local_rows.numel(), packed.shape[1]))
         dist.all_to_all_single(

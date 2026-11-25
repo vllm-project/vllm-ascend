@@ -10,7 +10,6 @@ npu_per_node: 16
 dp_load_balancing: internal
 
 env_common: &env_common
-  VLLM_USE_V2_MODEL_RUNNER: "1"
   VLLM_USE_MODELSCOPE: true
   HCCL_BUFFSIZE: 800
   PYTORCH_NPU_ALLOC_CONF: expandable_segments:True

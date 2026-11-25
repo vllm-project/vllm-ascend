@@ -46,7 +46,7 @@ def test_decoder_replay_with_parallel_layouts(pcp_size, prefix_caching, dp_size,
         lora_config=None,
     )
     replay = replay_mod.make_decoder_replay(model, config)
-    if sequence_parallel and (pp_size > 1 or pcp_size > 1):
+    if sequence_parallel and pp_size > 1:
         assert replay is None
         assert model.decoder_replay_start == model.end_layer
         return
@@ -55,10 +55,10 @@ def test_decoder_replay_with_parallel_layouts(pcp_size, prefix_caching, dp_size,
 
 
 @pytest.mark.parametrize(
-    ("runner_v2", "pcp_size", "adaptive", "enabled"),
-    [(True, 1, False, True), (False, 1, False, False), (True, 2, False, False), (True, 1, True, False)],
+    ("pcp_size", "adaptive", "enabled"),
+    [(1, False, True), (2, False, True), (1, True, False), (2, True, False)],
 )
-def test_sp_decoder_replay_requires_host_known_mrv2_layout(runner_v2, pcp_size, adaptive, enabled):
+def test_sp_decoder_replay_requires_host_known_layout(pcp_size, adaptive, enabled):
     model = SimpleNamespace(
         config=SimpleNamespace(kv_source_layer_ids=[0], sliding_window=128, engram_layer_ids=[]),
         end_layer=3,
@@ -70,7 +70,6 @@ def test_sp_decoder_replay_requires_host_known_mrv2_layout(runner_v2, pcp_size, 
         topk_lengths_buffer=torch.empty(8),
     )
     config = SimpleNamespace(
-        use_v2_model_runner=runner_v2,
         cache_config=SimpleNamespace(swa_bounded_replay=True),
         parallel_config=SimpleNamespace(
             pipeline_parallel_size=1,
@@ -435,6 +434,7 @@ def test_compiled_entry_reads_each_replay_plan_and_peer_context(compiled_replay_
             case.replay.sp_plan = SPReplayPlan.build(
                 np.array(offsets), np.array(kept), 6, len(rows), 1, 0, case.replay.rows
             )
+            case.replay.sp_replay_positions = torch.tensor(rows)
             case.replay.sp_replay_input_ids = torch.tensor(rows)
         output, aux = case.forward()
         expected = torch.zeros_like(case.embeddings)

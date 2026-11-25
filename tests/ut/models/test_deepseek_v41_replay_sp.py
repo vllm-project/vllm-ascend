@@ -211,6 +211,7 @@ def _sp_replay_worker(rank, world_size, hidden_dtype, init_method):
                 replay = layers_mod.AscendDecoderReplayLayers(128, run_layers, [])
                 replay.sequence_parallel = True
                 replay.sp_plan = plan
+                replay.sp_replay_positions = full_positions[padded_rows]
                 replay.sp_replay_input_ids = torch.zeros(replay_width, dtype=full_ids.dtype)
                 replay.sp_replay_input_ids[: plan.received_tokens] = full_ids[
                     rows[rank * replay_width : (rank + 1) * replay_width]

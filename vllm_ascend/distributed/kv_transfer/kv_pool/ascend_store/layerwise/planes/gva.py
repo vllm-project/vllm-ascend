@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 from vllm.logger import logger
+from vllm.v1.core.kv_cache_utils import BlockHash
 
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.metadata import (
     get_partial_block_index,
@@ -78,6 +79,7 @@ class GvaDataPlane(LayerwiseDataPlane):
             return
         if worker.kv_role == "kv_consumer" and not worker.save_decode_cache:
             return
+        hash_strings: dict[BlockHash | str, str] = {}
         for request in requests:
             if worker._save_disabled.is_set():
                 break
@@ -87,7 +89,7 @@ class GvaDataPlane(LayerwiseDataPlane):
                 request.load_spec is None or not request.load_spec.layerwise_previous_step
             ):
                 worker._snapshot_keys.pop(request.req_id, None)
-            if self._alloc_gvas_for_save_for_request([request]) is False:
+            if self._alloc_gvas_for_save_for_request([request], hash_strings) is False:
                 logger.error("Memcache save preparation failed for %s", request.req_id)
                 worker._save_disabled.set()
         if worker._save_disabled.is_set():
@@ -100,7 +102,9 @@ class GvaDataPlane(LayerwiseDataPlane):
                 request.can_save = False
                 request.save_keys = []
 
-    def _alloc_gvas_for_save_for_request(self, requests: list[ReqMeta]) -> bool | None:
+    def _alloc_gvas_for_save_for_request(
+        self, requests: list[ReqMeta], hash_strings: dict[BlockHash | str, str]
+    ) -> bool | None:
         """Allocate per-group GVA on the worker side right before batch_copy.
 
         For multi-group models, iterates all KV cache groups and allocates
@@ -173,15 +177,22 @@ class GvaDataPlane(LayerwiseDataPlane):
                     for block_idx in range(save_start_block, end_limit)
                     if group_store_mask is None or block_idx >= len(group_store_mask) or group_store_mask[block_idx]
                 ]
-                candidate_keys = [
-                    worker._make_layerwise_full_key(
-                        group_id,
-                        block_hash_to_str(group_block_hashes[block_idx]),
-                    )
-                    if block_idx < len(group_block_hashes)
-                    else worker._make_layerwise_partial_key(request, group_id, block_idx, request.target_token_len)
-                    for block_idx in candidate_blocks
-                ]
+                assert worker.layerwise_keys is not None
+                make_full_key = worker.layerwise_keys.make_full_key
+                rank = worker.metadata[group_id].head_or_tp_rank
+                num_hashes = len(group_block_hashes)
+                candidate_keys = []
+                for block_idx in candidate_blocks:
+                    if block_idx >= num_hashes:
+                        key = worker._make_layerwise_partial_key(request, group_id, block_idx, request.target_token_len)
+                    else:
+                        block_hash = group_block_hashes[block_idx]
+                        hash_str = hash_strings.get(block_hash)
+                        if hash_str is None:
+                            hash_str = block_hash_to_str(block_hash)
+                            hash_strings[block_hash] = hash_str
+                        key = make_full_key(group_id, hash_str, rank, worker.pp_rank, worker.pcp_rank, worker.dcp_rank)
+                    candidate_keys.append(key)
                 partial_key = None
                 if (
                     worker.layerwise_offload

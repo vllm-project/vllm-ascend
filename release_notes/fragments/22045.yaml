@@ -8,3 +8,4 @@ entries:
       devices other than 310P, with BF16 activations and PP, PCP, and DCP set to 1.
       Prefix caching uses Mamba cache mode `align`, including on both peers
       in Mooncake prefill/decode deployments.
+    hardware: [A3, A5]

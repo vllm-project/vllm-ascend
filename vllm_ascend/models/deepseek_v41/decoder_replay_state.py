@@ -103,6 +103,9 @@ class DecoderReplayState:
         if not (global_kept < global_lens).any():
             return None
         num_padded = int(global_kept.sum())
+        if self.layers.sequence_parallel:
+            # Every PCP rank uses the same collective width, including empty tail owners.
+            num_padded = round_up(num_padded, self.config.parallel_config.tensor_parallel_size)
         if num_padded >= batch.num_tokens_after_padding:
             return None
 
@@ -234,6 +237,7 @@ class DecoderReplayState:
         self.layers.context_factory = None
         self.layers.num_padded_rows = None
         self.layers.sp_plan = None
+        self.layers.sp_replay_positions = None
         self.layers.sp_replay_input_ids = None
         self.original_padding = None
         self.replay_pcp_context = None
@@ -309,13 +313,17 @@ class DecoderReplayState:
         kept_lens = np.where(trim_requests, np.minimum(query_lens, self.layers.window), query_lens)
         requires_compaction = bool((kept_lens < query_lens).any())
 
-        if not requires_compaction:
-            # Preserve collective width, including padding on empty PCP ranks and idle DP replicas.
-            num_tokens = batch.num_tokens_after_padding
-        else:
-            num_tokens = int(kept_lens.sum())
+        num_tokens = batch.num_tokens_after_padding
+        if requires_compaction:
+            replay_tokens = int(kept_lens.sum())
             if self.layers.sequence_parallel:
-                num_tokens = round_up(num_tokens, self.config.parallel_config.tensor_parallel_size)
+                replay_tokens = round_up(replay_tokens, self.config.parallel_config.tensor_parallel_size)
+            if replay_tokens < num_tokens:
+                num_tokens = replay_tokens
+            else:
+                # No TP shard shrinks. A compact DP peer still needs our full valid count.
+                kept_lens = query_lens
+                requires_compaction = False
 
         return _DecoderReplayPlan(
             kept_lens=kept_lens,
@@ -367,6 +375,9 @@ class DecoderReplayState:
                 self.rows,
             )
             self.layers.sp_plan = sp_plan
+            # PCP rows contain only valid local indices. The layer takes the padded
+            # positions produced by the gather kernel even when this PCP owns no tail.
+            self.layers.sp_replay_positions = self.positions[: plan.num_tokens]
             # Every TP rank already owns the full IDs. Select this decoder
             # shard directly, including for hash/vision routing, instead of
             # exchanging IDs from their encoder SP owners.
