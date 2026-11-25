@@ -9,7 +9,7 @@ checkpoint and how to convert them into the same form the normal load path's
 
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import NamedTuple
+from typing import Any, NamedTuple
 
 import torch
 import torch_npu
@@ -132,7 +132,7 @@ class _QuantReloadDefinition:
     builder that rebuilds it.
     """
 
-    quant_method: type
+    quant_method: type[Any]
     pipelines: dict[str, _WeightBuilder]
 
     def matches(self, method) -> bool:
