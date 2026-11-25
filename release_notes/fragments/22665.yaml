@@ -1,4 +1,4 @@
 pr: 22665
 entries:
   - category: feature
-    text: Added DiffusionGemma text and image generation and structured decision serving on Ascend 950DT.
+    text: Added DiffusionGemma text generation from text or image inputs and structured decision serving on Ascend 950DT.

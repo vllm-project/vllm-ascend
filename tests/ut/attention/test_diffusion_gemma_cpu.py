@@ -14,13 +14,16 @@ import torch
 SOURCE = Path(__file__).resolve().parents[3] / "vllm_ascend"
 
 
-def _load_class(path, name, **scope):
+def _load_class(path, name, method=None, **scope):
     """Exercise metadata logic without importing NPU kernels."""
     node = next(
         node
         for node in ast.parse((SOURCE / path).read_text()).body
         if isinstance(node, ast.ClassDef) and node.name == name
     )
+    if method is not None:
+        node = next(item for item in node.body if isinstance(item, ast.FunctionDef) and item.name == method)
+        name = method
     module = ast.fix_missing_locations(ast.Module(body=[node], type_ignores=[]))
     exec(compile(module, str(SOURCE / path), "exec"), scope)
     return scope[name]
@@ -78,3 +81,73 @@ def test_diffusion_fia_tasks_have_distinct_replay_providers():
 
     context = {"layer": SimpleNamespace(actual_seq_lengths_q=[2, 5], seq_lens_list=[12, 23], block_tables=None)}
     assert causal.resolve(context) == bidirectional.resolve(context)
+
+
+def test_diffusion_full_replay_pads_fia_without_changing_upstream_offsets():
+    class GraphMode(Enum):
+        FULL = "FULL"
+
+    def build_attn_metadata(**kwargs):
+        return {
+            "layer": SimpleNamespace(
+                actual_seq_lengths_q=kwargs["query_start_loc_cpu"][1:].tolist(),
+                seq_lens_list=kwargs["seq_lens_np"].tolist(),
+                block_tables=kwargs["block_tables"][0],
+                num_actual_tokens=kwargs["num_actual_tokens"],
+            )
+        }
+
+    state_cls = _load_class(
+        "worker/v2/model_states/diffusion_gemma.py",
+        "AscendDiffusionGemmaModelState",
+        DiffusionGemmaModelState=object,
+        CUDAGraphMode=GraphMode,
+        AscendAttentionState=SimpleNamespace(ChunkedPrefill=0),
+        build_attn_metadata=build_attn_metadata,
+        torch=torch,
+    )
+    state = state_cls.__new__(state_cls)
+    state._token_positions = torch.arange(256, dtype=torch.int32)
+    state._token_causal = torch.empty(256, dtype=torch.bool)
+    state.max_model_len = 1024
+    state.diffusion_states = SimpleNamespace(is_encoder_phase=torch.tensor([False, True, False]))
+    offsets = [0, 64, 128, 192, 192]
+    batch = SimpleNamespace(
+        num_reqs=3,
+        num_reqs_after_padding=4,
+        num_tokens=192,
+        num_tokens_after_padding=256,
+        query_start_loc=torch.tensor(offsets, dtype=torch.int32),
+        query_start_loc_np=np.array(offsets, dtype=np.int32),
+        idx_mapping=torch.tensor([1, 2, 0]),
+        seq_lens=torch.tensor([80, 96, 112, 0], dtype=torch.int32),
+        num_scheduled_tokens=np.array([64, 64, 64]),
+    )
+    table = torch.arange(4, dtype=torch.int32).view(4, 1)
+    metadata = state.prepare_attn(batch, GraphMode.FULL, [table], None, [], None)
+    provider = _load_class("attention/attention_v1.py", "FIAParamProvider", dataclass=dataclass, Any=Any)
+    for causal in (True, False):
+        params = provider("layer", None, diffusion_causal=causal).resolve(metadata)
+        assert params["actual_seq_lengths"] == [64, 128, 192, 256]
+        assert params["actual_seq_lengths_kv"] == [80, 96, 112, 0]
+        assert params["block_table"] is table
+    assert metadata["layer"].num_actual_tokens == 192
+    assert batch.query_start_loc.tolist() == batch.query_start_loc_np.tolist() == offsets
+
+
+def test_diffusion_causal_fia_window_matches_upstream_boundary():
+    mask_params = _load_class(
+        "attention/attention_v1.py",
+        "AscendAttentionBackendImpl",
+        method="_get_fia_mask_params",
+        AscendMetadata=object,
+        SWA_INT_MAX=2147483647,
+        torch=torch,
+    )
+    impl = SimpleNamespace(sliding_window=1024)
+    metadata = SimpleNamespace(causal=True, attn_mask=None, diffusion_causal=torch.tensor([True]))
+    _, sparse_mode, left, right = mask_params(impl, metadata, torch.device("cpu"))
+    assert (sparse_mode, left, right) == (4, 1023, 0)
+    assert 1024 - left == 1
+    metadata.diffusion_causal = None
+    assert mask_params(impl, metadata, torch.device("cpu"))[2] == 1024

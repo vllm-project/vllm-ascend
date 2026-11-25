@@ -50,13 +50,14 @@ class AscendDiffusionGemmaModelState(DiffusionGemmaModelState):
 
         # FIA requires exact host-visible lengths, including after a rewind.
         seq_lens = input_batch.seq_lens[:num_reqs]
+        query_start_loc_cpu = torch.from_numpy(input_batch.query_start_loc_np)
         metadata = build_attn_metadata(
             attn_groups=attn_groups,
             num_reqs=num_reqs,
             num_actual_reqs=actual_reqs,
             num_tokens=num_tokens,
             query_start_loc_gpu=starts,
-            query_start_loc_cpu=torch.from_numpy(input_batch.query_start_loc_np),
+            query_start_loc_cpu=query_start_loc_cpu,
             max_query_len=int(input_batch.num_scheduled_tokens.max(initial=0)),
             seq_lens=seq_lens,
             seq_lens_np=seq_lens.cpu().numpy(),
@@ -65,10 +66,27 @@ class AscendDiffusionGemmaModelState(DiffusionGemmaModelState):
             slot_mappings=slot_mappings,
             kv_cache_config=kv_cache_config,
             attn_state=AscendAttentionState.ChunkedPrefill,
+            num_actual_tokens=input_batch.num_tokens,
             for_cudagraph_capture=for_capture,
             full_graph_mode=cudagraph_mode == CUDAGraphMode.FULL,
         )
+        padded_query_lengths = None
+        if num_tokens > input_batch.num_tokens:
+            # Upstream leaves padded query offsets at the last real token.
+            # Describe the padding to FIA without modifying canvas or logit inputs.
+            padded_query_lengths = query_start_loc_cpu[1 : num_reqs + 1].tolist()
+            if num_reqs > actual_reqs:
+                padded_query_lengths[-1] = num_tokens
+            else:
+                padded_query_lengths.append(num_tokens)
         for layer_metadata in metadata.values():
             layer_metadata.diffusion_causal = mask
+            if padded_query_lengths is not None:
+                layer_metadata.actual_seq_lengths_q = padded_query_lengths
+                if len(layer_metadata.seq_lens_list) < len(padded_query_lengths):
+                    layer_metadata.seq_lens_list = [*layer_metadata.seq_lens_list, 1]
+                    table = layer_metadata.block_tables
+                    if table is not None:
+                        layer_metadata.block_tables = torch.cat((table, table.new_zeros((1, table.shape[1]))))
         self.attn_metadata = metadata
         return metadata

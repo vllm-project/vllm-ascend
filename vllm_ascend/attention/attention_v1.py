@@ -657,10 +657,13 @@ class AscendAttentionBackendImpl(AttentionImpl):
         # updates lengths/block tables), so capture-time parameters must stay
         # valid for every replay shape. The mask is only skipped on the eager
         # path, where the metadata describes the real batch.
+        pre_tokens = self.sliding_window or SWA_INT_MAX
+        if self.sliding_window is not None and isinstance(getattr(attn_metadata, "diffusion_causal", None), torch.Tensor):
+            pre_tokens = self.sliding_window - 1
         return (
             attn_metadata.attn_mask,
             4 if self.sliding_window else 3,
-            self.sliding_window or SWA_INT_MAX,
+            pre_tokens,
             0 if self.sliding_window else SWA_INT_MAX,
         )
 
@@ -1033,11 +1036,12 @@ class AscendAttentionBackendImpl(AttentionImpl):
                     sparse_mode=0,
                 )
             elif self.sliding_window is not None:
+                attn_mask, sparse_mode, pre_tokens, next_tokens = self._get_fia_mask_params(attn_metadata, query.device)
                 attn_output, _ = torch_npu.npu_fused_infer_attention_score(
                     query=query,
                     key=key,
                     value=value,
-                    atten_mask=attn_metadata.attn_mask,
+                    atten_mask=attn_mask,
                     block_table=block_table,
                     input_layout="TND",
                     block_size=block_size,
@@ -1046,9 +1050,9 @@ class AscendAttentionBackendImpl(AttentionImpl):
                     num_key_value_heads=self.num_kv_heads,
                     num_heads=self.num_heads,
                     scale=self.scale,
-                    pre_tokens=self.sliding_window,
-                    next_tokens=0,
-                    sparse_mode=4,
+                    pre_tokens=pre_tokens,
+                    next_tokens=next_tokens,
+                    sparse_mode=sparse_mode,
                 )
             else:
                 # ChunkedPrefill mixing prefill+decode: split into a per-phase
