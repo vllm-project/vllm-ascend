@@ -8,10 +8,10 @@ from unittest.mock import Mock
 import pytest
 import torch
 from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheGroupSpec, MambaSpec
-from vllm_ascend.ops.kda_pcp import KimiKDAHostMetadataBackend
 
 from vllm_ascend.attention import attention_v1
 from vllm_ascend.attention.indexer import AscendSFAIndexerBackend
+from vllm_ascend.attention.mla_v1 import AscendMLAAttention
 from vllm_ascend.attention.sfa_v1 import AscendSFABackend
 from vllm_ascend.core import kv_cache_config_builder
 from vllm_ascend.core.kv_cache_config_builder import AscendKVCacheConfigBuilder
@@ -21,6 +21,7 @@ from vllm_ascend.models.kimi_k3.paired_sfa_cache import (
     paired_sfa_cache_groups,
     paired_sfa_pool_bytes,
 )
+from vllm_ascend.ops.kimi_kda import KimiKDAHostMetadataBackend
 from vllm_ascend.worker.v2 import attn_utils
 
 
@@ -94,8 +95,6 @@ def test_paired_sfa_runtime_views(monkeypatch, main_format, indexer_format, repl
         num_kv_heads=1,
         head_size=sum(main_widths),
         dtype=main_dtype,
-        kv_lora_rank=512,
-        qk_rope_head_dim=64,
         cache_sparse_sfa_c8=main_format == "c8",
         cache_sparse_sfa_turboquant=main_format == "turboquant",
     )
@@ -149,6 +148,12 @@ def test_paired_sfa_runtime_views(monkeypatch, main_format, indexer_format, repl
     layers = {
         name: SimpleNamespace(get_attn_backend=lambda backend=backend: backend) for name, backend in backends.items()
     }
+    main_layer = AscendMLAAttention.__new__(AscendMLAAttention)
+    torch.nn.Module.__init__(main_layer)
+    main_layer.attn_backend = AscendSFABackend
+    main_layer.kv_lora_rank = 512
+    main_layer.qk_rope_head_dim = 64
+    layers[main_name] = main_layer
     monkeypatch.setattr(attn_utils, "get_current_vllm_config", lambda: vllm_config)
     monkeypatch.setattr(attn_utils, "get_layers_from_vllm_config", lambda *_: layers)
     monkeypatch.setattr(attn_utils, "get_shared_kv_cache_layers", lambda _: {})
