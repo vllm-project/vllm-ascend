@@ -46,7 +46,9 @@ class TestEnvVariables(TestBase):
                     self.assertEqual(getattr(envs_ascend, var_name), var_handler())
 
                     handler_source = inspect.getsource(var_handler)
-                    if var_name in self.boolean_vars:
+                    if var_name == "VLLM_ASCEND_SPLIT_QKV_RMSNORM_MROPE_BLOCK_M":
+                        test_vals = ["1", "2"]
+                    elif var_name in self.boolean_vars:
                         test_vals = ["1", "0"]
                     elif "int(" in handler_source:
                         test_vals = ["123", "456"]
@@ -110,3 +112,38 @@ class TestEnvVariables(TestBase):
                         os.environ.pop(var_name, None)
                     else:
                         os.environ[var_name] = original_val
+
+    def test_split_qkv_rmsnorm_mrope_block_m_is_strict_and_defaults_to_two(self):
+        name = "VLLM_ASCEND_SPLIT_QKV_RMSNORM_MROPE_BLOCK_M"
+        original_val = os.environ.pop(name, None)
+        try:
+            self.assertEqual(getattr(envs_ascend, name), 2)
+            for value in ("1", "2"):
+                with self.subTest(value=value):
+                    os.environ[name] = value
+                    self.assertEqual(getattr(envs_ascend, name), int(value))
+            for value in ("", "0", "3", "4", "-1", "123", "456", "not-an-integer"):
+                with self.subTest(invalid=value):
+                    os.environ[name] = value
+                    with self.assertRaises(ValueError):
+                        getattr(envs_ascend, name)
+        finally:
+            if original_val is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = original_val
+
+    def test_retired_ub_and_kvpool_overrides_are_not_registered(self):
+        for name in ("VLLM_ASCEND_ROPE_UB_SIZE_KB", "VLLM_ASCEND_KVPOOL_RANGE_DEBUG"):
+            with self.subTest(name=name):
+                original_val = os.environ.get(name)
+                try:
+                    os.environ[name] = "invalid"
+                    self.assertNotIn(name, envs_ascend.env_variables)
+                    with self.assertRaises(AttributeError):
+                        getattr(envs_ascend, name)
+                finally:
+                    if original_val is None:
+                        os.environ.pop(name, None)
+                    else:
+                        os.environ[name] = original_val

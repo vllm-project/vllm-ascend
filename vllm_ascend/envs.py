@@ -48,6 +48,18 @@ def _bool_env(name: str, default: bool) -> bool:
 # begin-env-vars-definition
 
 
+def _split_qkv_rmsnorm_mrope_block_m() -> int:
+    name = "VLLM_ASCEND_SPLIT_QKV_RMSNORM_MROPE_BLOCK_M"
+    raw = os.getenv(name, "2")
+    try:
+        value = int(raw)
+    except ValueError as exc:
+        raise ValueError(f"{name} must be an integer, got {raw!r}") from exc
+    if value not in (1, 2):
+        raise ValueError(f"{name} must be one of 1, 2, got {value}")
+    return value
+
+
 env_variables: dict[str, Callable[[], Any]] = {
     # max compile thread number for package building. Usually, it is set to
     # the number of CPU cores. If not set, the default value is None, which
@@ -92,6 +104,10 @@ env_variables: dict[str, Callable[[], Any]] = {
     # Control the aclrtMemcpyBatchAsync compile path for KV cache offloading.
     # "1": force enable, "0": force disable, None: auto-detect from CANN headers.
     "VLLM_ASCEND_ENABLE_BATCH_MEMCPY": lambda: os.getenv("VLLM_ASCEND_ENABLE_BATCH_MEMCPY", None),
+    # Split-QKV RMSNorm MRoPE row grouping. Default: 2 (adaptive M1/M2/M4
+    # selection); valid values: 1 or 2. Not sensitive. Read per call so
+    # an explicit diagnostic override does not require a process restart.
+    "VLLM_ASCEND_SPLIT_QKV_RMSNORM_MROPE_BLOCK_M": _split_qkv_rmsnorm_mrope_block_m,
 }
 
 # end-env-vars-definition

@@ -1,0 +1,4 @@
+pr: 18064
+entries:
+  - category: performance
+    text: Improved fused Split-QKV RMSNorm MRoPE operator performance on Ascend910B3 for eligible single-token and long-token workloads. Automatic tiling preserves the public interface and avoids UB-overflow compilation failures for several valid wide-head inputs.
