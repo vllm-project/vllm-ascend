@@ -1240,7 +1240,17 @@ async def handle_completions_impl(api: str, request: Request):
                             obj = json.loads(chunk)
                             frames = [SSEFrame(obj, False)] if isinstance(obj, dict) else []
                         else:
-                            frames = frame_parser.feed(chunk)
+                            data = chunk
+                            if native_api:
+                                # Adapt native event framing for the existing parser; forward the original bytes.
+                                data = b"\n\n".join(
+                                    b"data: "
+                                    + b"\n".join(
+                                        line[5:].lstrip() for line in frame.splitlines() if line.startswith(b"data:")
+                                    )
+                                    for frame in chunk.replace(b"\r\n", b"\n").replace(b"\r", b"\n").split(b"\n\n")
+                                )
+                            frames = frame_parser.feed(data)
                             # Native attempts are fully buffered; include an unterminated final frame.
                             if native_api and (tail := frame_parser.flush()) is not None:
                                 frames.append(tail)
