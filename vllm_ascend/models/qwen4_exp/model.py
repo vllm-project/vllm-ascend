@@ -15,8 +15,9 @@
 """Ascend wrappers for the upstream Qwen4Exp model implementation."""
 
 from collections.abc import Callable
-from typing import TYPE_CHECKING, Self
+from typing import TYPE_CHECKING
 
+from typing_extensions import Self
 from vllm.config import VllmConfig
 from vllm.model_executor.models.qwen3_vl import Qwen3VLDummyInputsBuilder
 from vllm.models.qwen4_exp.amd import (
