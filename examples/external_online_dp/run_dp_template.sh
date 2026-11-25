@@ -14,9 +14,16 @@ export HCCL_DETERMINISTIC=True
 export HCCL_BUFFSIZE=1024
 export TASK_QUEUE_ENABLE=1
 
-export ASCEND_RT_VISIBLE_DEVICES=$1
+device_args=()
+if [[ "${USE_DEVICE_IDS:-0}" == "1" ]]; then
+    # Keep the inherited visibility. The slice contains indices into that list.
+    device_args=(--device-ids "$1")
+else
+    export ASCEND_RT_VISIBLE_DEVICES="$1"
+fi
 
 vllm serve model_path \
+    "${device_args[@]}" \
     --host 0.0.0.0 \
     --port $2 \
     --data-parallel-size $3 \

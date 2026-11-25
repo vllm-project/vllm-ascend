@@ -496,7 +496,7 @@ Use `launch_online_dp.py` to launch external dp vLLM servers.
 Modify `run_dp_template.sh` on each node.
 [run_dp_template.sh](https://github.com/vllm-project/vllm-ascend/blob/main/examples/external_online_dp/run_dp_template.sh)
 
-`launch_online_dp.py` starts `dp-size-local` vLLM instances and passes seven positional arguments to `run_dp_template.sh`. The examples below correspond to [Start the service](#start-the-service).
+`launch_online_dp.py` starts one vLLM instance per local DP rank. It passes the device slice as `$1`, the global DP rank as `$4`, and TP, PCP, and PP as `$7`, `$8`, and `$9`. The examples below correspond to [Start the service](#start-the-service).
 
 | Launcher option | Template value | Meaning | Example value | Constraints |
 | --- | --- | --- | --- | --- |
@@ -507,11 +507,28 @@ Modify `run_dp_template.sh` on each node.
 | `--dp-address` | `$5` / `--data-parallel-address` | DP master address. | P: `192.0.0.1` or `192.0.0.2`; D: `192.0.0.3` | The IP address must be reachable and identical within the same DP group. |
 | `--dp-rpc-port` | `$6` / `--data-parallel-rpc-port` | DP master RPC port. | `12321` | Free, reachable port; identical within a DP group. |
 | `--vllm-start-port` | `$2` / `--port` = `vllm-start-port + i` | First local API port. | `7100`, then `7101`, ... | Consecutive free ports; must match the proxy configuration. |
-| Computed by the launcher | `$1` / `ASCEND_RT_VISIBLE_DEVICES` | NPU IDs assigned to each instance. | P: `0,...,7`, `8,...,15`; D: `0` through `15` | IDs must exist and not overlap; non-contiguous IDs require adapting the launcher. |
+| `--device-list` (optional) | `$1` | Ordered device list sliced by local DP rank. Defaults to consecutive IDs starting at zero. | `8,9,0,1` | Provide `dp-size-local × tp-size × pcp-size × pp-size` distinct IDs. |
+
+#### Select devices for each DP rank
+
+The [example template](https://github.com/vllm-project/vllm-ascend/blob/main/examples/external_online_dp/run_dp_template.sh) defaults to setting `ASCEND_RT_VISIBLE_DEVICES="$1"` for each rank. To use `--device-ids`, set `USE_DEVICE_IDS=1` with that template. The template then keeps the inherited visibility and passes the rank's slice as `--device-ids "$1"`. If the inherited variable is set, supply zero-based indices into that list.
+
+For example, after configuring the template for your model and node, start two TP2 ranks with the following device order:
+
+```bash
+ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15 \
+  USE_DEVICE_IDS=1 python launch_online_dp.py \
+  --dp-size 2 --dp-size-local 2 --tp-size 2 \
+  --device-list 8,9,0,1 --dp-address 192.0.0.1
+```
+
+Rank 0 receives `--device-ids 8,9` and rank 1 receives `--device-ids 0,1`. Each independently launched rank on the same node needs a disjoint slice. For a custom template, keep the inherited visibility when passing `$1` to `--device-ids`. If the template sets `ASCEND_RT_VISIBLE_DEVICES="$1"` instead, omit `--device-ids` or use indices into that reduced list.
+
+See [NPU Device Selection](../../user_guide/configuration/device_selection.md) for the mapping rules.
 
 !!! note
 
-    - The launcher validates only argument types and required options. Check the remaining constraints before deployment.
+    - Check that the assigned devices exist and are available before deployment.
     - If speculative decoding is enabled, `num_speculative_tokens` should be subject to one of the following conditions:
         1. Hybrid Mamba models (e.g., Qwen-Next and Qwen3.5 series): `num_speculative_tokens` should be equal on P nodes and D nodes.
         2. Other models: `num_speculative_tokens` on P nodes should be 1, and `num_speculative_tokens` on D nodes should be greater or equal to 1.

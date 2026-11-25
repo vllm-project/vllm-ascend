@@ -23,6 +23,7 @@ def parse_args():
     parser.add_argument("--dp-rpc-port", type=int, default=12345, help="DP RPC port.")
     parser.add_argument("--vllm-start-port", type=int, default=9000, help="First API port on this node.")
     parser.add_argument("--template", "--script", default="./run_dp_template.sh", help="Shell template path.")
+    parser.add_argument("--device-list", help="Ordered, comma-separated device IDs for local ranks.")
     args = parser.parse_args()
 
     if args.dp_size_local == -1:
@@ -33,6 +34,17 @@ def parse_args():
         parser.error("Local DP ranks exceed the global DP range.")
     if not os.path.isfile(args.template):
         parser.error(f"Template does not exist: {args.template}")
+    num_devices = args.dp_size_local * args.tp_size * args.pcp_size * args.pp_size
+    if args.device_list is None:
+        args.device_list = list(map(str, range(num_devices)))
+    else:
+        try:
+            ids = [int(value) for value in args.device_list.split(",")]
+        except ValueError:
+            parser.error("--device-list must contain comma-separated integers.")
+        if len(ids) != num_devices or len(set(ids)) != num_devices or min(ids) < 0:
+            parser.error(f"--device-list must contain {num_devices} distinct non-negative IDs.")
+        args.device_list = list(map(str, ids))
     return args
 
 
@@ -49,13 +61,14 @@ def main():
         for i in range(args.dp_size_local):
             dp_rank = args.dp_rank_start + i
             port = args.vllm_start_port + i
-            devices = ",".join(str(x) for x in range(i * devices_per_rank, (i + 1) * devices_per_rank))
+            start = i * devices_per_rank
+            devices = ",".join(args.device_list[start : start + devices_per_rank])
             command = [
                 "bash",
                 "-o",
                 "pipefail",
                 args.template,
-                devices,  # $1: visible devices
+                devices,  # $1: this rank's device slice
                 str(port),  # $2: API port
                 str(args.dp_size),  # $3: global DP size
                 str(dp_rank),  # $4: global DP rank
