@@ -145,8 +145,6 @@ jobs:
 
     - name: Get csrc hash
       id: get_csrc_hash
-      env:
-        BASE_IMAGE_TAG: ${{ steps.get_base_image_tag.outputs.BASE_IMAGE_TAG }}
       run: |
         # Fail closed so a git error cannot silently produce sha256(empty).
         set -euo pipefail
@@ -154,11 +152,7 @@ jobs:
         cd "$GITHUB_WORKSPACE"
 
         # Match the standalone cache producer's tracked csrc build inputs.
-        CSRC_INPUTS=(csrc setup.py CMakeLists.txt cmake)
-        if [[ "$BASE_IMAGE_TAG" == *-950-* ]]; then
-          CSRC_INPUTS+=(pyproject.toml tools/deepgemm/build.py tools/deepgemm/install_build_deps.sh)
-        fi
-        CSRC_MANIFEST=$(git ls-files -s -- "${CSRC_INPUTS[@]}")
+        CSRC_MANIFEST=$(git ls-files -s -- csrc setup.py CMakeLists.txt cmake pyproject.toml tools/deepgemm/build.py tools/deepgemm/install_build_deps.sh)
         if [ -z "$CSRC_MANIFEST" ]; then
           echo "::error::No tracked csrc inputs found."
           exit 1

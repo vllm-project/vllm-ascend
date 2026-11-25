@@ -201,8 +201,6 @@ jobs:
       - name: Get csrc hash
         id: get_csrc_hash
         if: ${{ matrix.group.npu_type != 'cpu' }}
-        env:
-          NPU_TYPE: ${{ matrix.group.npu_type }}
         run: |
           # Fail closed so a git error cannot be converted into sha256(empty)
           # and then appear to be a legitimate cache miss.
@@ -211,11 +209,7 @@ jobs:
           cd "$GITHUB_WORKSPACE"
 
           # Match the cache producer's tracked csrc build inputs exactly.
-          CSRC_INPUTS=(csrc setup.py CMakeLists.txt cmake)
-          if [ "$NPU_TYPE" = a5 ]; then
-            CSRC_INPUTS+=(pyproject.toml tools/deepgemm/build.py tools/deepgemm/install_build_deps.sh)
-          fi
-          CSRC_MANIFEST=$(git ls-files -s -- "${CSRC_INPUTS[@]}")
+          CSRC_MANIFEST=$(git ls-files -s -- csrc setup.py CMakeLists.txt cmake pyproject.toml tools/deepgemm/build.py tools/deepgemm/install_build_deps.sh)
           if [ -z "$CSRC_MANIFEST" ]; then
             echo "::error::No tracked csrc inputs found."
             exit 1

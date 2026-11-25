@@ -49,7 +49,6 @@ jobs:
     outputs:
       targets: ${{ steps.targets.outputs.targets }}
       csrc_hash: ${{ steps.hash.outputs.csrc_hash }}
-      a5_csrc_hash: ${{ steps.hash.outputs.a5_csrc_hash }}
     steps:
       - name: Checkout source
         uses: actions/checkout@v7
@@ -71,7 +70,7 @@ jobs:
           cd "$GITHUB_WORKSPACE"
 
           # Limit invalidation to tracked inputs that can change csrc artifacts.
-          CSRC_MANIFEST=$(git ls-files -s -- csrc setup.py CMakeLists.txt cmake)
+          CSRC_MANIFEST=$(git ls-files -s -- csrc setup.py CMakeLists.txt cmake pyproject.toml tools/deepgemm/build.py tools/deepgemm/install_build_deps.sh)
           if [ -z "$CSRC_MANIFEST" ]; then
             echo "::error::No tracked csrc inputs found."
             exit 1
@@ -79,11 +78,6 @@ jobs:
 
           CSRC_HASH=$(printf '%s\n' "$CSRC_MANIFEST" | sha256sum | awk '{print $1}')
           echo "csrc_hash=$CSRC_HASH" >> "$GITHUB_OUTPUT"
-          # A5 also packages the pinned DeepGEMM wheel with the csrc artifacts.
-          A5_CSRC_MANIFEST=$(git ls-files -s -- csrc setup.py CMakeLists.txt cmake \
-            pyproject.toml tools/deepgemm/build.py tools/deepgemm/install_build_deps.sh)
-          A5_CSRC_HASH=$(printf '%s\n' "$A5_CSRC_MANIFEST" | sha256sum | awk '{print $1}')
-          echo "a5_csrc_hash=$A5_CSRC_HASH" >> "$GITHUB_OUTPUT"
 
   build-cache:
     needs: prepare-targets
@@ -97,7 +91,5 @@ jobs:
       HW_OBS_SK: ${{ secrets.HW_OBS_SK }}
     with:
       target: ${{ toJSON(matrix.target) }}
-      csrc_hash: >-
-        ${{ startsWith(matrix.target.soc_version, 'ascend950') &&
-          needs.prepare-targets.outputs.a5_csrc_hash || needs.prepare-targets.outputs.csrc_hash }}
+      csrc_hash: ${{ needs.prepare-targets.outputs.csrc_hash }}
       source_ref: ${{ github.sha }}
