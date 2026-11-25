@@ -167,6 +167,22 @@ def test_resolve_num_nodes_fails_when_multi_node_yaml_has_no_node_count(tmp_path
         _resolve_num_nodes(args, tmp_path)
 
 
+def test_resolve_num_nodes_rejects_non_mapping_yaml(tmp_path: Path):
+    """A list/scalar YAML would make ``data.get`` raise AttributeError instead of a clear error."""
+    config = tmp_path / "configs" / "case.yaml"
+    config.parent.mkdir()
+    config.write_text("- num_nodes: 2\n", encoding="utf-8")
+    args = argparse.Namespace(
+        num_nodes=None,
+        scene=SCENE_MULTI,
+        config_base_path="configs",
+        config_yaml="case.yaml",
+    )
+
+    with pytest.raises(SystemExit, match="must contain a mapping"):
+        _resolve_num_nodes(args, tmp_path)
+
+
 @pytest.mark.parametrize("value", [0, -1, -2])
 def test_resolve_num_nodes_rejects_non_positive_explicit_value(tmp_path: Path, value: int):
     """The ready barrier is ``len(readies) >= num_nodes``: at zero or below it passes

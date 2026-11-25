@@ -440,6 +440,10 @@ def _resolve_num_nodes(args: argparse.Namespace, repo_dir: Path) -> int:
         path = repo_dir / base / args.config_yaml
         if path.exists():
             data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+            if not isinstance(data, dict):
+                raise SystemExit(
+                    f"config yaml {path} must contain a mapping with a 'num_nodes' field, got {type(data).__name__}"
+                )
             try:
                 n = int(data.get("num_nodes", 0))
             except (TypeError, ValueError):
