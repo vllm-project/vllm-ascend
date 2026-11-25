@@ -3,7 +3,7 @@
 # Copyright (c) 2026 Huawei Technologies Co., Ltd. All Rights Reserved.
 """Deterministic checkpoint payloads for weight-transfer tests.
 
-Two sources share this module, the seeding scheme and the tensor sampler:
+Sources share this module, the seeding scheme and the tensor sampler:
 
 ``FixedRandomWeightSource``
     Enumerates a Transformers meta model.  That works for every architecture
@@ -274,6 +274,123 @@ class FixedRandomWeightSource(WeightSource):
         save_file(state, str(target / "model.safetensors"), metadata={"format": "pt"})
 
 
+MXFP8_GROUP_SIZE = 32
+QUANT_DESCRIPTION_FILENAME = "quant_model_description.json"
+
+
+def write_msmodelslim_quant_config(
+    case: WeightUpdateModelCase,
+    directory: str | Path,
+    *,
+    source: FixedRandomWeightSource | None = None,
+) -> Path:
+    """Write a synthetic MXFP8 recipe beside a temporary random checkpoint.
+
+    The source applies hf_overrides before constructing a meta model and
+    expanding experts. Reading metadata never materializes random weights.
+    This is a test recipe, not a calibrated ModelSlim export.
+    """
+    if source is None:
+        source = FixedRandomWeightSource(case, torch.device("cpu"))
+    description = {
+        "quant_method": "ascend",
+        "model_quant_type": "W8A8_MXFP8",
+        "group_size": MXFP8_GROUP_SIZE,
+    }
+    float_modules = {
+        "embed_tokens",
+        "embedding",
+        "lm_head",
+        "gate",
+        "router",
+        "shared_expert_gate",
+    }
+    for param in source.metadata:
+        if not param.name.endswith(".weight"):
+            continue
+        module = param.name.removesuffix(".weight").rsplit(".", 1)[-1]
+        quantized = len(param.shape) == 2 and module not in float_modules and "norm" not in module
+        description[param.name] = "W8A8_MXFP8" if quantized else "FLOAT"
+    if not any(name.endswith(".weight") and value == "W8A8_MXFP8" for name, value in description.items()):
+        raise ValueError(f"{case.id}: no projection weights selected for MXFP8")
+    path = Path(directory) / QUANT_DESCRIPTION_FILENAME
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(description, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    return path
+
+
+class MXFP8WeightSource(WeightSource):
+    """Simulate a trainer exporting BF16 master weights as FP8 weights/scales.
+
+    Metadata describes the wire representation. The exact same iterator writes
+    the fresh-load checkpoint and supplies HCCL. No rollout quantizer is used.
+    """
+
+    def __init__(self, case: WeightUpdateModelCase, device: torch.device) -> None:
+        self._source = FixedRandomWeightSource(case, device)
+        self._case = case
+        self._device = device
+        self.revision = 0
+        with tempfile.TemporaryDirectory(prefix="mxfp8-recipe-") as directory:
+            path = write_msmodelslim_quant_config(case, directory, source=self._source)
+            self.quant_description = json.loads(path.read_text())
+
+    @property
+    def case_id(self) -> str:
+        return self._case.id
+
+    def set_update_round(self, update_round: int) -> None:
+        self.revision = update_round % 2
+
+    @cached_property
+    def metadata(self) -> list[ParamMeta]:
+        result = []
+        for param in self._source.metadata:
+            if self.quant_description.get(param.name) == "W8A8_MXFP8":
+                groups = math.ceil(param.shape[-1] / MXFP8_GROUP_SIZE)
+                result.append(ParamMeta(param.name, torch.float8_e4m3fn, param.shape))
+                result.append(ParamMeta(param.name + "_scale", torch.uint8, (*param.shape[:-1], groups)))
+            else:
+                result.append(param)
+        return result
+
+    def __iter__(self) -> Iterator[tuple[str, torch.Tensor]]:
+        import torch_npu
+
+        with torch.no_grad():
+            for name, tensor in self._source:
+                if self.quant_description.get(name) != "W8A8_MXFP8":
+                    yield name, tensor
+                    continue
+                # A -> B changes both FP8 bytes (sign) and MX exponents (8x).
+                if self.revision:
+                    tensor = tensor * -8
+                weight, scale = torch_npu.npu_dynamic_mx_quant(
+                    tensor.to(torch.bfloat16).contiguous(),
+                    axis=-1,
+                    dst_type=torch.float8_e4m3fn,
+                )
+                groups = math.ceil(tensor.shape[-1] / MXFP8_GROUP_SIZE)
+                yield name, weight
+                yield name + "_scale", scale.flatten(-2, -1)[..., :groups].contiguous()
+
+    def iter_full(self) -> Iterator[tuple[str, torch.Tensor]]:
+        yield from self
+
+    def write_checkpoint(self, directory: str | Path) -> None:
+        from huggingface_hub import hf_hub_download
+        from safetensors.torch import save_file
+
+        target = Path(directory)
+        target.mkdir(parents=True, exist_ok=True)
+        local_config = Path(self._case.model) / "config.json"
+        config = local_config if local_config.is_file() else hf_hub_download(self._case.model, "config.json")
+        shutil.copyfile(config, target / "config.json")
+        (target / QUANT_DESCRIPTION_FILENAME).write_text(json.dumps(self.quant_description), encoding="utf-8")
+        state = {name: tensor.detach().cpu().contiguous() for name, tensor in self}
+        save_file(state, str(target / "model.safetensors"), metadata={"format": "pt"})
+
+
 # ---------------------------------------------------------------------------
 # DeepSeek-V4.1: geometry from the published checkpoint's safetensors headers
 # ---------------------------------------------------------------------------
@@ -333,7 +450,9 @@ def _dsv41_text_config(case: Any) -> dict[str, Any]:
     return config.get("text_config", config)
 
 
-def _dsv41_engram_table_shapes(text_config: dict[str, Any]) -> dict[str, tuple[int, int]]:
+def _dsv41_engram_table_shapes(
+    text_config: dict[str, Any],
+) -> dict[str, tuple[int, int]]:
     """Exact engram table shapes for the reduced config.
 
     ``EngramLayout`` draws one prime near ``engram_vocab_size`` per (n-gram size,
@@ -611,7 +730,12 @@ class DeepseekV41WeightSource(WeightSource):
 
         target = Path(directory)
         target.mkdir(parents=True, exist_ok=True)
-        for name in ("config.json", "tokenizer.json", "tokenizer_config.json", "generation_config.json"):
+        for name in (
+            "config.json",
+            "tokenizer.json",
+            "tokenizer_config.json",
+            "generation_config.json",
+        ):
             source = self._model_dir / name
             if source.exists():
                 shutil.copyfile(source, target / name)
@@ -688,6 +812,10 @@ def make_weight_source(case: WeightUpdateModelCase, device: torch.device) -> Wei
     lives in this module too. ``packed_buffer_size_for`` works on either, because
     both answer ``metadata()`` with the same ``ParamMeta``.
     """
+    if case.weight_quantization == "mxfp8":
+        return MXFP8WeightSource(case, device)
+    if case.weight_quantization is not None:
+        raise ValueError(f"Unsupported sender quantization: {case.weight_quantization}")
     if case.weight_source_factory is not None:
         return case.weight_source_factory(case, device)
     return FixedRandomWeightSource(case, device)

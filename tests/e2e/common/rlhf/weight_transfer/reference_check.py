@@ -1,11 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 # Copyright (c) 2026 Huawei Technologies Co., Ltd. All Rights Reserved.
-"""Startup-load reference and two-update equivalence checks."""
+"""Startup-load reference and live-update equivalence checks."""
 
 import base64
 import json
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from io import BytesIO
 
 from PIL import Image
@@ -19,6 +19,25 @@ from tests.e2e.common.rlhf.weight_transfer.weight_source import (
 )
 
 UPDATE_ROUNDS = 2
+
+
+def update_rounds(case: WeightUpdateModelCase) -> int:
+    return 3 if case.weight_quantization else UPDATE_ROUNDS
+
+
+def capture_update_result(server, case):
+    if case.weight_quantization:
+        from tests.e2e.common.rlhf.weight_transfer.quantized_weight_checks import (
+            capture_quantized_result,
+        )
+
+        return capture_quantized_result(server, case)
+    return generation_signature(
+        server.get_client(),
+        case.model,
+        prompts=case.prompts,
+        image_prompt=case.image_prompt,
+    )
 
 
 FULL_DECODE_ONLY_CONFIG = '{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [1]}'
@@ -119,7 +138,8 @@ def reference_serve_args(
 # Reuse a startup reference only for the same model, memory, TP, logical device
 # and effective child-server environment. Transport and packing do not affect it.
 _REFERENCE_SIGNATURES: dict[
-    tuple[str, float, int, int, tuple[tuple[str, str], ...]], list[tuple[str, tuple[float, ...]]]
+    tuple[str, float, int, int, tuple[tuple[str, str], ...]],
+    list[tuple[str, tuple[float, ...]]],
 ] = {}
 
 
@@ -171,7 +191,10 @@ def reference_signature(
         ) as server,
     ):
         signature = generation_signature(
-            server.get_client(), case.model, prompts=case.prompts, image_prompt=case.image_prompt
+            server.get_client(),
+            case.model,
+            prompts=case.prompts,
+            image_prompt=case.image_prompt,
         )
 
     _REFERENCE_SIGNATURES[cache_key] = signature
@@ -201,7 +224,11 @@ IMAGE_DATA_URL = _quadrant_png_data_url()
 
 
 def generation_signature(
-    client, model: str, *, prompts: tuple[str | tuple[int, ...], ...], image_prompt: bool = False
+    client,
+    model: str,
+    *,
+    prompts: tuple[str | tuple[int, ...], ...],
+    image_prompt: bool = False,
 ) -> list[tuple[str, tuple[float, ...]]]:
     """Capture deterministic text and logprobs for exact reload comparison.
 
@@ -264,6 +291,18 @@ def weight_transfer_servers(
     The reference server must release every TP device before the live-update
     server starts. Both use the case's environment and the same generated W.
     """
+    if case.weight_quantization:
+        with quantized_weight_transfer_servers(
+            source,
+            case,
+            backend=backend,
+            tensor_parallel_size=tensor_parallel_size,
+            device_index=device_index,
+            gpu_memory_utilization=gpu_memory_utilization,
+            env_dict=env_dict,
+        ) as servers:
+            yield servers
+        return
     reference = reference_signature(
         source,
         case,
@@ -290,13 +329,86 @@ def weight_transfer_servers(
         env_dict=env_dict,
     ) as server:
         dummy_signature = generation_signature(
-            server.get_client(), case.model, prompts=case.prompts, image_prompt=case.image_prompt
+            server.get_client(),
+            case.model,
+            prompts=case.prompts,
+            image_prompt=case.image_prompt,
         )
         yield server, reference, dummy_signature
 
 
+@contextmanager
+def quantized_weight_transfer_servers(
+    source,
+    case,
+    *,
+    backend,
+    tensor_parallel_size,
+    device_index,
+    gpu_memory_utilization,
+    env_dict,
+):
+    """Compare live refits with independent normal loads of the same FP8 payload.
+
+    Keep A's temporary directory alive for the live server's config/recipe.
+    Both references finish before the live server starts, sharing one NPU.
+    No reference cache is used: A and B have different weights and scales.
+    """
+    references = []
+    with ExitStack() as stack:
+        model_directory = None
+        for revision in (0, 1):
+            source.set_update_round(revision)
+            directory = stack.enter_context(fixed_startup_checkpoint(source))
+            if revision == 0:
+                model_directory = directory
+            for rank in range(tensor_parallel_size):
+                wait_for_free_device_memory(device_index + rank, gpu_memory_utilization)
+            port = get_open_port()
+            with rlhf_server(
+                directory,
+                vllm_serve_args=reference_serve_args(
+                    case,
+                    port=port,
+                    gpu_memory_utilization=gpu_memory_utilization,
+                    tensor_parallel_size=tensor_parallel_size,
+                ),
+                server_host="127.0.0.1",
+                server_port=port,
+                env_dict=env_dict,
+            ) as server:
+                references.append(capture_update_result(server, case))
+        source.set_update_round(0)
+        for rank in range(tensor_parallel_size):
+            wait_for_free_device_memory(device_index + rank, gpu_memory_utilization)
+        port = get_open_port()
+        with rlhf_server(
+            model_directory,
+            vllm_serve_args=[
+                "--tokenizer",
+                case.model,
+                "--served-model-name",
+                case.model,
+                *live_update_serve_args(
+                    case,
+                    backend=backend,
+                    port=port,
+                    gpu_memory_utilization=gpu_memory_utilization,
+                    tensor_parallel_size=tensor_parallel_size,
+                ),
+            ],
+            server_host="127.0.0.1",
+            server_port=port,
+            env_dict=env_dict,
+        ) as server:
+            yield server, references, None
+
+
 def assert_weight_update_matches_reference(
-    dummy_signature, reference_signature, updated_signatures, case: WeightUpdateModelCase
+    dummy_signature,
+    reference_signature,
+    updated_signatures,
+    case: WeightUpdateModelCase,
 ) -> None:
     """Compare every live update against independent startup loading.
 
@@ -305,6 +417,13 @@ def assert_weight_update_matches_reference(
     layerwise reload and graph-captured storage preserve the same behavior.
     Comparing updates only to each other could hide consistently wrong loads.
     """
+    if case.weight_quantization:
+        from tests.e2e.common.rlhf.weight_transfer.quantized_weight_checks import (
+            assert_quantized_updates,
+        )
+
+        assert_quantized_updates(reference_signature, updated_signatures, case)
+        return
     assert dummy_signature != reference_signature, (
         f"{case.id}: a dummy-loaded model already matches a normally loaded one; "
         "the reference cannot observe the payload"

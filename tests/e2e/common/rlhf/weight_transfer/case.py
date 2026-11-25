@@ -55,6 +55,7 @@ class WeightUpdateModelCase:
     image_prompt: bool = False
     # One representative model covers both backends and packing modes.
     full_transfer_matrix: bool = False
+    weight_quantization: str | None = None
     skip_reason: str | None = None
     """Why neither lane can carry this case yet.
 
@@ -106,6 +107,34 @@ QWEN35_CASE = WeightUpdateModelCase(
 
 
 QWEN_CASES = (QWEN35_CASE,)
+
+
+QWEN35_W8A8_MXFP_CASE = WeightUpdateModelCase(
+    id="qwen35-quant-mxfp8",
+    model="Qwen/Qwen3.5-35B-A3B",
+    full_transfer_matrix=True,
+    weight_quantization="mxfp8",
+    hf_overrides={
+        "architectures": ["Qwen3_5MoeForCausalLM"],
+        "text_config": {
+            "num_hidden_layers": 4,
+            "layer_types": [
+                "linear_attention",
+                "linear_attention",
+                "linear_attention",
+                "full_attention",
+            ],
+        },
+    },
+    meta_config_attribute="text_config",
+    checkpoint_model_prefix="model.language_model.",
+    extra_server_args=(
+        "--quantization",
+        "ascend",
+        "--worker-extension-cls",
+        "tests.e2e.common.rlhf.weight_transfer.quantized_weight_checks.MXFP8AuditWorker",
+    ),
+)
 
 
 DEEPSEEK_V4_CASE = WeightUpdateModelCase(
