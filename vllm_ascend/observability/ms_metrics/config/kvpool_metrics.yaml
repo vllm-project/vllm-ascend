@@ -18,4 +18,4 @@
   handler: vllm_ascend.observability.ms_metrics.handlers:kv_pool_layerwise_gva_load_handler
 
 - symbol: vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.kv_transfer:KVCacheStoreLayerRecvingThread._handle_range_layer_task
-  handler: vllm_ascend.observability.ms_metrics.handlers:kv_pool_layerwise_range_load_handler
+  handler: vllm_ascend.observability.ms_metrics.handlers:kv_pool_layerwise_key_load_handler

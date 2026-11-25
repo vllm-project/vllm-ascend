@@ -427,7 +427,7 @@ def test_kv_pool_layerwise_handlers_record_one_sample_per_load_path(monkeypatch)
         return obj, args, kwargs
 
     assert handlers.kv_pool_layerwise_gva_load_handler(original, thread, "layer") == (thread, ("layer",), {})
-    assert handlers.kv_pool_layerwise_range_load_handler(original, thread) == (thread, (), {})
+    assert handlers.kv_pool_layerwise_key_load_handler(original, thread) == (thread, (), {})
 
     metrics.get_or_create_metric.assert_any_call(
         metric_name="kvpool:layerwise_load_get_duration_ms",
@@ -435,7 +435,7 @@ def test_kv_pool_layerwise_handlers_record_one_sample_per_load_path(monkeypatch)
         label_names=["mode"],
     )
     recorded = [call.kwargs["labels"] for call in metrics.record_metric.call_args_list]
-    assert recorded == [{"mode": "gva"}, {"mode": "range"}]
+    assert recorded == [{"mode": "gva"}, {"mode": "key"}]
     assert all(call.args[0] == "kvpool:layerwise_load_get_duration_ms" for call in metrics.record_metric.call_args_list)
     assert all(call.kwargs["value"] >= 0.0 for call in metrics.record_metric.call_args_list)
 
@@ -452,7 +452,7 @@ def test_kv_pool_layerwise_handlers_stay_dark_at_basic_level(monkeypatch):
     sys.modules[_COMMON_MODULE].set_metric_level("basic")
 
     assert handlers.kv_pool_layerwise_gva_load_handler(lambda thread: "loaded", object()) == "loaded"
-    assert handlers.kv_pool_layerwise_range_load_handler(lambda thread: "loaded", object()) == "loaded"
+    assert handlers.kv_pool_layerwise_key_load_handler(lambda thread: "loaded", object()) == "loaded"
 
     metrics.get_or_create_metric.assert_not_called()
     metrics.record_metric.assert_not_called()

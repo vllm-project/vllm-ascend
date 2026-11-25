@@ -12,6 +12,6 @@ entries:
   - category: feature
     text: >
       Add the layerwise KV pool load histogram kvpool:layerwise_load_get_duration_ms,
-      labeled by transfer mode (gva/range) and recorded at the detail metric
+      labeled by transfer mode (gva/key) and recorded at the detail metric
       level, so layerwise AscendStore loads that bypass the connector metric are
       visible per layer.

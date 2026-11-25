@@ -132,6 +132,6 @@ def kv_pool_layerwise_gva_load_handler(original_func, thread, *args, **kwargs):
     return _timed_layerwise_load(original_func, thread, "gva", args, kwargs)
 
 
-def kv_pool_layerwise_range_load_handler(original_func, thread, *args, **kwargs):
-    """Time one key-major range layer load on the layerwise receive thread."""
-    return _timed_layerwise_load(original_func, thread, "range", args, kwargs)
+def kv_pool_layerwise_key_load_handler(original_func, thread, *args, **kwargs):
+    """Time one block-key (key-major) layer load on the layerwise receive thread."""
+    return _timed_layerwise_load(original_func, thread, "key", args, kwargs)
