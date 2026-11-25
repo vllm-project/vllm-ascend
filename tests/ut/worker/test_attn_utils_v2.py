@@ -2303,7 +2303,7 @@ def test_dsa_builder_receives_full_graph_mode(capture, full_graph):
 
 @pytest.mark.parametrize("pcp", [False, True])
 def test_glm_flash_q6_uses_grouped_gdn_only_without_pcp(monkeypatch, pcp):
-    monkeypatch.setattr(sfa_hisparse, "supports_flash_resident_decode_graph", lambda _: True)
+    monkeypatch.setattr(sfa_hisparse, "supports_hisparse_resident_decode_graph", lambda _: True)
     builder = Glm5NextGDNHostMetadataBuilder.__new__(Glm5NextGDNHostMetadataBuilder)
     builder.vllm_config = SimpleNamespace()
     builder.speculative_config = None

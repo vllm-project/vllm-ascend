@@ -7,21 +7,24 @@ from dataclasses import replace
 from typing import Any
 
 import torch
+from vllm.utils.torch_utils import get_dtype_size
 from vllm.v1.kv_cache_interface import (
     HiSparseHotSpec,
     HiSparseResidentSpec,
     KVCacheConfig,
     KVCacheSpec,
-    SparseCacheRole,
     UniformTypeKVCacheSpecs,
 )
 
+from vllm_ascend.attention.utils import SFA_QSFA_TILE_SIZE
 from vllm_ascend.core.kv_cache_interface import (
     AscendIndexerKPoolTailSpec,
     AscendMLAAttentionSpec,
     AscendSFAIndexerCacheSpec,
+    get_kv_cache_compression_ratio,
+    get_storage_block_size,
+    is_pooled_hisparse_indexer,
 )
-from vllm_ascend.models.glm5next.cache_views import view_hisparse_kpool_cache
 
 
 def align_hisparse_indexer_specs(
@@ -191,8 +194,56 @@ def _bind_indexer_views(
         kv_caches[name] = (indexer_cache,)
 
 
-def _bind_glm5_next_indexer_views(kv_cache_config: KVCacheConfig, kv_caches: dict[str, Any]) -> None:
-    """Bind Flash's device-only compressed keys and request-private tail."""
+def view_hisparse_kpool_cache(cache: torch.Tensor, spec: AscendMLAAttentionSpec) -> tuple[torch.Tensor, ...]:
+    """Expose HiSparse pooled keys and scales in PA_BBND layout."""
+    width = spec.head_size
+    rows = get_storage_block_size(spec)
+    row_elements = spec.state_content_size_bytes // cache.element_size()
+    if (
+        cache.ndim != 4
+        or cache.shape[1:] != (1, rows, row_elements)
+        or cache.stride()[2:] != (row_elements, 1)
+        or cache.dtype != spec.dtype
+        or cache.stride(0) < rows * row_elements
+    ):
+        raise ValueError("Invalid HiSparse KPool cache geometry.")
+    if not spec.scale_dim:
+        return (cache.transpose(1, 2),)
+
+    # Compact FP8 layers have no gap between manager blocks. Store each
+    # kernel page as its contiguous keys followed by its contiguous scales,
+    # with the same 128-token page geometry as ordinary KPool.
+    pages = cache.shape[0]
+    stride = cache.stride(0)
+    if spec.dtype == torch.float8_e4m3fn and stride == rows * row_elements:
+        compression_ratio = get_kv_cache_compression_ratio(spec)
+        kernel_rows = SFA_QSFA_TILE_SIZE // compression_ratio
+        if kernel_rows < rows and kernel_rows > 0 and rows % kernel_rows == 0:
+            subpages = rows // kernel_rows
+            pages *= subpages
+            stride //= subpages
+            rows = kernel_rows
+    key_bytes = rows * width
+    scale_size = get_dtype_size(spec.scale_dtype)
+    scale_offset = cache.storage_offset() + key_bytes
+    if (
+        cache.element_size() != 1
+        or spec.scale_dim != 1
+        or row_elements != width + scale_size
+        or stride % scale_size
+        or scale_offset % scale_size
+    ):
+        raise ValueError("Invalid HiSparse KPool scale alignment.")
+    keys = cache.as_strided((pages, rows, 1, width), (stride, width, width, 1))
+    scale_base = cache.as_strided((0,), (1,), storage_offset=0).view(spec.scale_dtype)
+    scales = scale_base.as_strided(
+        (pages, rows, 1, 1), (stride // scale_size, 1, 1, 1), storage_offset=scale_offset // scale_size
+    )
+    return keys, scales
+
+
+def _bind_pooled_indexer_views(kv_cache_config: KVCacheConfig, kv_caches: dict[str, Any]) -> None:
+    """Bind device-only pooled keys and request-private tails by cache spec."""
     for group in kv_cache_config.kv_cache_groups:
         for name in group.layer_names:
             spec = group.kv_cache_spec
@@ -201,9 +252,5 @@ def _bind_glm5_next_indexer_views(kv_cache_config: KVCacheConfig, kv_caches: dic
             if isinstance(spec, AscendIndexerKPoolTailSpec):
                 # Core's shape is [blocks, 1, ring_capacity, 2 * head_dim].
                 kv_caches[name] = (kv_caches[name].squeeze(1),)
-            elif (
-                isinstance(spec, AscendMLAAttentionSpec)
-                and spec.model_version == "glm5_next"
-                and spec.cache_role is SparseCacheRole.INDEXER
-            ):
+            elif is_pooled_hisparse_indexer(spec):
                 kv_caches[name] = view_hisparse_kpool_cache(kv_caches[name], spec)

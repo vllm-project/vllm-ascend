@@ -785,9 +785,9 @@ class NPUModelRunner(GPUModelRunner):
         ):
             from vllm.distributed.kv_transfer.kv_connector.v1.hisparse.connector import HiSparseConnectorMetadata
 
-            from vllm_ascend.attention.sfa_hisparse import supports_flash_resident_decode_graph
+            from vllm_ascend.attention.sfa_hisparse import supports_hisparse_resident_decode_graph
 
-            if supports_flash_resident_decode_graph(self.vllm_config):
+            if supports_hisparse_resident_decode_graph(self.vllm_config):
                 metadata = scheduler_output.kv_connector_metadata
                 graph_manager.force_eager_target = not (
                     isinstance(metadata, HiSparseConnectorMetadata) and metadata.all_context_pages_resident

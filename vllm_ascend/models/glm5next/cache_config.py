@@ -12,7 +12,6 @@ from dataclasses import dataclass
 from math import lcm
 
 from vllm.config import VllmConfig
-from vllm.logger import logger
 from vllm.model_executor.models.utils import extract_layer_index
 from vllm.utils.torch_utils import get_dtype_size
 
@@ -37,6 +36,7 @@ from vllm_ascend.core.kv_cache_interface import (
     get_kv_cache_compression_ratio,
     get_storage_block_size,
 )
+from vllm_ascend.hisparse.layout import group_interleaved_mamba_layers
 
 
 @dataclass(frozen=True)
@@ -313,89 +313,12 @@ def _get_glm5_next_cache_layout(
     )
 
 
-def _group_glm5_next_mamba_layer_names(
-    kv_cache_spec: dict[str, KVCacheSpec],
-    mamba_specs: dict[str, MambaSpec],
-) -> list[list[str]]:
-    """Recover recurrent runs without depending on spec insertion order."""
-
-    layer_is_mamba: dict[int, bool] = {}
-    mamba_name_by_index: dict[int, str] = {}
-    for name in kv_cache_spec:
-        try:
-            layer_idx = extract_layer_index(name)
-        except ValueError as exc:
-            raise ValueError(
-                f"GLM-Next Mamba grouping requires layer names with numeric indices, got {name!r}."
-            ) from exc
-
-        is_mamba = name in mamba_specs
-        previous_kind = layer_is_mamba.setdefault(layer_idx, is_mamba)
-        if previous_kind != is_mamba:
-            raise ValueError(
-                f"A GLM-Next model layer cannot contain both Mamba and MLA cache specs: layer index {layer_idx}."
-            )
-        if is_mamba:
-            if layer_idx in mamba_name_by_index:
-                raise ValueError(
-                    f"A GLM-Next model layer must own exactly one Mamba cache spec: layer index {layer_idx}."
-                )
-            mamba_name_by_index[layer_idx] = name
-
-    max_run_length = 0
-    run_length = 0
-    previous_layer_idx: int | None = None
-    for layer_idx in sorted(layer_is_mamba):
-        is_consecutive = previous_layer_idx is not None and layer_idx == previous_layer_idx + 1
-        if layer_is_mamba[layer_idx]:
-            run_length = run_length + 1 if is_consecutive else 1
-            max_run_length = max(max_run_length, run_length)
-        else:
-            run_length = 0
-        previous_layer_idx = layer_idx
-
-    if max_run_length == 0:
-        raise ValueError("GLM-Next Mamba specs were provided but no Mamba layers were found.")
-
-    sorted_mamba_names = [mamba_name_by_index[index] for index in sorted(mamba_name_by_index)]
-    return [sorted_mamba_names[offset::max_run_length] for offset in range(max_run_length)]
-
-
 def _create_mamba_groups(
     mamba_specs: dict[str, MambaSpec],
     grouped_layer_names: list[list[str]],
 ) -> list[KVCacheGroupSpec]:
     sorted_groups = [list(_sorted_layer_names(layer_names)) for layer_names in grouped_layer_names]
     return create_kv_cache_group_specs(mamba_specs, sorted_groups)
-
-
-def regroup_glm5_next_hisparse_kda(
-    kv_cache_spec: dict[str, KVCacheSpec], groups: list[KVCacheGroupSpec]
-) -> list[KVCacheGroupSpec]:
-    """Split native Flash KDA groups to bound the physical cache pitch."""
-    mamba_specs = {name: spec for name, spec in kv_cache_spec.items() if isinstance(spec, MambaSpec)}
-    if not mamba_specs:
-        return groups
-    # Cap state layers per physical block so C8 retains enough global IDs
-    # after charging for both the device slab and the compact KPool region.
-    max_layers_per_group = 6
-    native_groups = _group_glm5_next_mamba_layer_names(kv_cache_spec, mamba_specs)
-    split_groups = [
-        names[start : start + max_layers_per_group]
-        for names in native_groups
-        for start in range(0, len(names), max_layers_per_group)
-    ]
-    kda_groups = _create_mamba_groups(mamba_specs, split_groups)
-    # Other groups retain their block tables and logical page sizes. Core
-    # materializes the finished group list with the new aligned slab stride.
-    other_groups = [group for group in groups if all(name not in mamba_specs for name in group.layer_names)]
-    logger.info_once(
-        "GLM-Next HiSparse KDA groups: %d -> %d, layers per group: %s",
-        len(groups) - len(other_groups),
-        len(kda_groups),
-        tuple(len(group.layer_names) for group in kda_groups),
-    )
-    return [*other_groups, *kda_groups]
 
 
 def get_glm5_next_kv_cache_groups(
@@ -420,7 +343,7 @@ def get_glm5_next_kv_cache_groups(
         # no recurrent groups.
         return groups
 
-    grouped_names = _group_glm5_next_mamba_layer_names(kv_cache_spec, mamba_specs)
+    grouped_names = group_interleaved_mamba_layers(kv_cache_spec, mamba_specs)
     groups.extend(_create_mamba_groups(mamba_specs, grouped_names))
     return groups
 

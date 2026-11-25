@@ -9,7 +9,7 @@ from functools import wraps
 
 import torch
 
-from vllm_ascend.hisparse import FLASH_MTP_QUERY_LEN
+from vllm_ascend.hisparse import HISPARSE_GROUPED_QUERY_LEN
 
 
 def _host_disjoint(caches, draft_layers):
@@ -230,7 +230,7 @@ class HostMirrorConnector:
             and self._defer_resident_decode_row_mirror
             and input_batch is not None
             and attn_metadata is not None
-            and bool((input_batch.num_scheduled_tokens == FLASH_MTP_QUERY_LEN).all())
+            and bool((input_batch.num_scheduled_tokens == HISPARSE_GROUPED_QUERY_LEN).all())
             and getattr(scheduler_output.kv_connector_metadata, "all_context_pages_resident", False)
         ):
             target_metadata = [
@@ -339,7 +339,7 @@ def overlap_target_host_mirror(runner):
     from vllm.logger import logger
     from vllm.v1.worker.gpu.kv_connector import ActiveKVConnector
 
-    from vllm_ascend.attention.sfa_hisparse import supports_flash_resident_decode_graph
+    from vllm_ascend.attention.sfa_hisparse import supports_hisparse_resident_decode_graph
     from vllm_ascend.hisparse.backend import AscendHiSparseBackend
     from vllm_ascend.hisparse.pcp import PCPHiSparseConnector
 
@@ -378,8 +378,8 @@ def overlap_target_host_mirror(runner):
     defer_decode_row_mirror = (
         type(connector) is ActiveKVConnector
         and not worker.cache_handles[0].runtime.eager_host_mirror
-        and supports_flash_resident_decode_graph(runner.vllm_config)
-        and runner.vllm_config.num_speculative_tokens + 1 == FLASH_MTP_QUERY_LEN
+        and supports_hisparse_resident_decode_graph(runner.vllm_config)
+        and runner.vllm_config.num_speculative_tokens + 1 == HISPARSE_GROUPED_QUERY_LEN
     )
     legacy = None
     if defer_decode_row_mirror and "defer_decode_row_mirror" not in inspect.signature(connector.pre_forward).parameters:

@@ -15,7 +15,7 @@ from vllm.v1.kv_cache_interface import SparseCacheRole
 from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec
 from vllm_ascend.device.device_config import get_ascend_device_type
 from vllm_ascend.device.hardware import AscendDeviceType
-from vllm_ascend.models.glm5next.cache_views import view_hisparse_kpool_cache
+from vllm_ascend.hisparse.binding import view_hisparse_kpool_cache
 from vllm_ascend.ops.cann_keypool import pool_key_indexer_nonempty
 from vllm_ascend.ops.triton.glm5_next_cann_keypool import pack_keypool_indices
 from vllm_ascend.ops.triton.prepare_nonempty_keypool_inputs import prepare_nonempty_keypool_inputs

@@ -20,6 +20,7 @@ from vllm.v1.kv_cache_interface import (
     MLAAttentionSpec,
     SlidingWindowMLASpec,
     SlidingWindowSpec,
+    SparseCacheRole,
     UniformTypeKVCacheSpecs,
 )
 from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry
@@ -28,6 +29,15 @@ from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry
 def get_kv_cache_compression_ratio(kv_cache_spec: KVCacheSpec) -> int:
     """Return the MLA compression ratio across vLLM cache-spec APIs."""
     return kv_cache_spec.tokens_per_state
+
+
+def is_pooled_hisparse_indexer(spec: KVCacheSpec) -> bool:
+    """Identify the device-only compressed key cache by its declared geometry."""
+    return (
+        isinstance(spec, AscendMLAAttentionSpec)
+        and spec.cache_role is SparseCacheRole.INDEXER
+        and get_kv_cache_compression_ratio(spec) > 1
+    )
 
 
 def get_storage_block_size(kv_cache_spec: KVCacheSpec) -> int:

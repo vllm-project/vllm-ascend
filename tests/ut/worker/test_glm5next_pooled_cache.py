@@ -11,6 +11,7 @@ from vllm.v1.core.single_type_kv_cache_manager import (
     register_all_kvcache_specs,
 )
 from vllm.v1.kv_cache_interface import (
+    KVCacheGroupRole,
     KVCacheGroupSpec,
     MambaSpec,
     SparseCacheRole,
@@ -22,12 +23,13 @@ from vllm_ascend.core.kv_cache_interface import (
     AscendMLAAttentionSpec,
     requires_padded_page_layout,
 )
+from vllm_ascend.hisparse.binding import _bind_pooled_indexer_views
 from vllm_ascend.models.glm5next.cache_config import (
     get_glm5_next_kv_cache_config,
     get_glm5_next_kv_cache_groups,
     get_glm5_next_pool_bytes_per_block,
 )
-from vllm_ascend.models.glm5next.cache_views import view_hisparse_kpool_cache, view_kpool_tail_cache
+from vllm_ascend.models.glm5next.cache_views import view_kpool_tail_cache
 from vllm_ascend.utils import get_kv_cache_tensor_layers
 from vllm_ascend.worker.v2 import attn_utils
 
@@ -271,9 +273,11 @@ def test_glm_fp8_indexer_keys_and_scales_share_padded_pages_without_overlapping(
     assert torch.all(key[1].view(torch.uint8) == 23)
 
 
-def test_hisparse_fp8_indexer_views_preserve_slab_offset_and_gap():
+@pytest.mark.parametrize("model_version", ["glm5_next", None])
+def test_hisparse_fp8_indexer_views_preserve_slab_offset_and_gap(model_version):
     spec = replace(
         _make_specs()[INDEXER],
+        model_version=model_version,
         cache_role=SparseCacheRole.INDEXER,
         block_size=128,
         tokens_per_state=4,
@@ -287,7 +291,10 @@ def test_hisparse_fp8_indexer_views_preserve_slab_offset_and_gap():
     # offset, and a larger group determines the shared 8192-byte block stride.
     raw = torch.zeros(2 * 8192, dtype=torch.int8)
     core_view = raw.as_strided((2, 1, 32, 132), (8192, 4224, 132, 1), storage_offset=64)
-    keys, scales = view_hisparse_kpool_cache(core_view.view(torch.float8_e4m3fn), spec)
+    caches = {INDEXER: core_view.view(torch.float8_e4m3fn)}
+    group = KVCacheGroupSpec(layer_names=[INDEXER], kv_cache_spec=spec, role=KVCacheGroupRole.HISPARSE_INDEXER)
+    _bind_pooled_indexer_views(SimpleNamespace(kv_cache_groups=[group]), caches)
+    keys, scales = caches[INDEXER]
     assert keys.shape == (2, 32, 1, 128)
     assert scales.shape == (2, 32, 1, 1)
     assert keys.data_ptr() == raw.data_ptr() + 64

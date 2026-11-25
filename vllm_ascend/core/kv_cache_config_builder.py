@@ -39,7 +39,7 @@ from vllm.v1.kv_cache_interface import (
     get_kv_cache_spec_kind,
 )
 
-from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec
+from vllm_ascend.core.kv_cache_interface import is_pooled_hisparse_indexer
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.cache_planner import (
     get_layerwise_offload_config,
     get_spec_reuse_rules,
@@ -49,7 +49,12 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.layerwis
     LAYERWISE_REUSE_BACKING_BYTES,
     get_layerwise_reuse_backing_bytes,
 )
-from vllm_ascend.hisparse import supports_glm5_next_hisparse
+from vllm_ascend.hisparse import supports_pooled_hisparse, uses_pooled_hisparse
+from vllm_ascend.hisparse.layout import (
+    get_hybrid_sfa_hisparse_groups,
+    has_hybrid_sfa_hisparse_groups,
+    regroup_pooled_hisparse_kda,
+)
 from vllm_ascend.models.deepseek_v41.cache_config import (
     get_deepseek_v41_kv_cache_config,
     get_deepseek_v41_pool_bytes_per_block,
@@ -62,7 +67,6 @@ from vllm_ascend.models.glm5next.cache_config import (
     get_glm5_next_kv_cache_config,
     get_glm5_next_kv_cache_groups,
     get_glm5_next_pool_bytes_per_block,
-    regroup_glm5_next_hisparse_kda,
 )
 from vllm_ascend.models.glm5next.kv_cache import is_glm5_next_cache_spec
 from vllm_ascend.models.kimi_k3.cache_config import _get_kimi_k3_dspark_mixed_kv_cache_groups
@@ -70,6 +74,7 @@ from vllm_ascend.models.kimi_k3.paired_sfa_cache import (
     paired_sfa_cache_config,
     paired_sfa_cache_groups,
     paired_sfa_pool_bytes,
+    uses_paired_sfa_cache,
 )
 from vllm_ascend.models.qwen4_exp.cache_config import (
     get_qwen4_exp_kv_cache_config,
@@ -94,8 +99,7 @@ def _compact_hisparse_kpool_pages(groups: list[KVCacheGroupSpec]) -> dict[str, i
         for group in groups
         if group.role == KVCacheGroupRole.HISPARSE_INDEXER and isinstance(group.kv_cache_spec, UniformTypeKVCacheSpecs)
         for name, spec in group.kv_cache_spec.kv_cache_specs.items()
-        if isinstance(spec, AscendMLAAttentionSpec)
-        and spec.model_version == "glm5_next"
+        if is_pooled_hisparse_indexer(spec)
         and spec.dtype == torch.float8_e4m3fn
         and spec.scale_dim == 1
         and spec.scale_dtype == torch.float32
@@ -157,23 +161,28 @@ class AscendKVCacheConfigBuilder(DefaultKVCacheConfigBuilder):
         mixed-page-size shared slots, then the Kimi-K3 DSpark mixed grouping,
         then vLLM's generic grouping.
         """
-        if vllm_config.model_config.hf_config.model_type == "kimi_k31":
-            return paired_sfa_cache_groups(vllm_config, kv_cache_spec)
-        step5_groups = get_step5_kv_cache_groups(vllm_config, kv_cache_spec, super().get_kv_cache_groups)
-        if step5_groups is not None:
-            return step5_groups
-        is_glm5_next = any(is_glm5_next_cache_spec(spec) for spec in kv_cache_spec.values())
-        if is_glm5_next and vllm_config.attention_config.hisparse_config is not None:
-            if not supports_glm5_next_hisparse(vllm_config):
+        if uses_pooled_hisparse(vllm_config):
+            if not supports_pooled_hisparse(vllm_config):
                 raise ValueError(
-                    "GLM-5.3-Flash HiSparse requires A5 FP8 main and indexer KV with DP, PP, PCP and DCP set to 1."
+                    "Pooled HiSparse requires A5 FP8 NoPE main KV, FP8 indexer KV, "
+                    "pool size 4 and DP, PP, PCP and DCP set to 1."
                 )
+            if not any(is_pooled_hisparse_indexer(spec) for spec in kv_cache_spec.values()):
+                raise ValueError("Pooled HiSparse requires a declared pooled indexer cache spec.")
             if vllm_config.scheduler_config.disable_hybrid_kv_cache_manager:
-                raise ValueError("GLM-Next HiSparse requires the hybrid KV cache manager.")
+                raise ValueError("Pooled HiSparse requires the hybrid KV cache manager.")
             # Core separates the host-backed MLA sources from the device-only
             # pooled keys, tail rings and KDA state groups.
             groups = _upstream_get_kv_cache_groups(vllm_config, kv_cache_spec)
-            if _compact_hisparse_kpool_pages(groups):
+            if compact_pages := _compact_hisparse_kpool_pages(groups):
+                indexer_layers = {
+                    name
+                    for group in groups
+                    if group.role == KVCacheGroupRole.HISPARSE_INDEXER
+                    for name in group.layer_names
+                }
+                if indexer_layers != compact_pages.keys():
+                    raise ValueError("Compact KPool HiSparse requires the same packed indexer format in all layers.")
                 # The compact KPool no longer needs to fill the shared slab
                 # page. Recover native alignment from the verified Mamba page:
                 # resolving HiSparse specs has already reduced block_size.
@@ -181,8 +190,10 @@ class AscendKVCacheConfigBuilder(DefaultKVCacheConfigBuilder):
 
                 config = vllm_config.model_config.hf_text_config
                 row_bytes = get_sfa_qsfa_packed_head_dim(config.kv_lora_rank, config.qk_rope_head_dim)
-                native_size, remainder = divmod(vllm_config.cache_config.mamba_page_size_padded, row_bytes)
-                assert native_size > 0 and remainder == 0
+                padded_page_bytes = vllm_config.cache_config.mamba_page_size_padded
+                if padded_page_bytes is None or padded_page_bytes < row_bytes or padded_page_bytes % row_bytes:
+                    raise ValueError("Compact KPool HiSparse requires a recurrent page of whole packed KV rows.")
+                native_size = padded_page_bytes // row_bytes
                 for group in groups:
                     if group.role == KVCacheGroupRole.HISPARSE_INDEXER:
                         native = UniformTypeKVCacheSpecs.from_specs(
@@ -193,8 +204,17 @@ class AscendKVCacheConfigBuilder(DefaultKVCacheConfigBuilder):
                         )
                         assert native is not None
                         group.kv_cache_spec = native
-                return regroup_glm5_next_hisparse_kda(kv_cache_spec, groups)
+                return regroup_pooled_hisparse_kda(kv_cache_spec, groups)
             return groups
+        native_hisparse_groups = get_hybrid_sfa_hisparse_groups(vllm_config, kv_cache_spec)
+        if native_hisparse_groups is not None:
+            return native_hisparse_groups
+        if uses_paired_sfa_cache(vllm_config):
+            return paired_sfa_cache_groups(vllm_config, kv_cache_spec)
+        step5_groups = get_step5_kv_cache_groups(vllm_config, kv_cache_spec, super().get_kv_cache_groups)
+        if step5_groups is not None:
+            return step5_groups
+        is_glm5_next = any(is_glm5_next_cache_spec(spec) for spec in kv_cache_spec.values())
         if vllm_config.scheduler_config.disable_hybrid_kv_cache_manager:
             # vLLM's generic grouping promotes local-attention specs before it
             # groups, so the Ascend layouts must see the same promoted specs.
@@ -245,6 +265,11 @@ class AscendKVCacheConfigBuilder(DefaultKVCacheConfigBuilder):
             config = super().get_kv_cache_config_from_groups(vllm_config, kv_cache_groups, num_blocks)
             _place_compact_hisparse_kpool(config, pages)
             return _attach_transfer_and_speculation_metadata(vllm_config, config)
+        if has_hybrid_sfa_hisparse_groups(kv_cache_groups):
+            return _attach_transfer_and_speculation_metadata(
+                vllm_config,
+                super().get_kv_cache_config_from_groups(vllm_config, kv_cache_groups, num_blocks),
+            )
         bytes_per_block = self._get_native_pool_bytes_per_block(vllm_config, kv_cache_groups)
         if bytes_per_block is None:
             return _attach_transfer_and_speculation_metadata(
@@ -282,7 +307,7 @@ class AscendKVCacheConfigBuilder(DefaultKVCacheConfigBuilder):
         kv_cache_groups: list[KVCacheGroupSpec],
     ) -> int | None:
         """Return the pool cost used to build the native descriptors."""
-        if vllm_config.model_config.hf_config.model_type == "kimi_k31":
+        if uses_paired_sfa_cache(vllm_config):
             return paired_sfa_pool_bytes(kv_cache_groups)
         pools = _get_replicated_draft_pools(kv_cache_groups)
         if pools is not None:
@@ -616,7 +641,9 @@ def get_ascend_kv_cache_config_from_groups(
         else get_qwen4_exp_kv_cache_config(vllm_config, kv_cache_groups, available_memory)
     )
     pools = _get_replicated_draft_pools(kv_cache_groups)
-    if vllm_config.model_config.hf_config.model_type == "kimi_k31":
+    if has_hybrid_sfa_hisparse_groups(kv_cache_groups):
+        kv_cache_config = _upstream_get_kv_cache_config_from_groups(vllm_config, kv_cache_groups, available_memory)
+    elif uses_paired_sfa_cache(vllm_config):
         kv_cache_config = paired_sfa_cache_config(vllm_config, kv_cache_groups, available_memory)
     elif is_step5_groups(kv_cache_groups):
         kv_cache_config = get_step5_kv_cache_config_from_groups(vllm_config, kv_cache_groups, available_memory)

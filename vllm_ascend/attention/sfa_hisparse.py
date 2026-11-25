@@ -27,7 +27,7 @@ from vllm_ascend.attention.sfa_v1 import (
     needs_pcp_kv_gather,
 )
 from vllm_ascend.distributed.utils import all_gather_async
-from vllm_ascend.hisparse import cache_ops, supports_glm5_next_hisparse
+from vllm_ascend.hisparse import cache_ops, supports_pooled_hisparse
 from vllm_ascend.hisparse.flash_compat import install_flash_layer_view_bounds
 from vllm_ascend.hisparse.pcp import hisparse_write_target, prepare_pcp_query_metadata, prepare_pcp_query_states
 from vllm_ascend.ops.triton.hisparse import _TRITON_SCATTER_MIN_REPRESENTATIVES, scatter_min_representatives
@@ -36,9 +36,9 @@ from vllm_ascend.ops.triton.hisparse import _TRITON_SCATTER_MIN_REPRESENTATIVES,
 _ATTENTION_CHUNK_ROWS = 32
 
 
-def supports_flash_resident_decode_graph(vllm_config: VllmConfig) -> bool:
+def supports_hisparse_resident_decode_graph(vllm_config: VllmConfig) -> bool:
     return (
-        supports_glm5_next_hisparse(vllm_config)
+        supports_pooled_hisparse(vllm_config)
         and vllm_config.compilation_config.cudagraph_mode == CUDAGraphMode.FULL_DECODE_ONLY
     )
 
@@ -263,7 +263,7 @@ class AscendHiSparseImpl(AscendSFAImpl):
         if not isinstance(self.index_group, HiSparseMLAIndexGroup):
             raise RuntimeError("Ascend HiSparse was initialized without a HiSparse index group")
         self.hisparse_cache = self.index_group.cache(self.index_group_index)
-        if supports_glm5_next_hisparse(self.vllm_config):
+        if supports_pooled_hisparse(self.vllm_config):
             install_flash_layer_view_bounds(self.hisparse_cache)
         self.topk = self.index_group.logical_topk_indices.shape[-1]
         if self.topk % 128:
@@ -707,7 +707,7 @@ class AscendHiSparseImpl(AscendSFAImpl):
             or cache.block_table is None
             or query_ends.shape != (metadata.num_reqs,)
             or key_lengths.shape != (metadata.num_reqs,)
-            or not supports_flash_resident_decode_graph(self.vllm_config)
+            or not supports_hisparse_resident_decode_graph(self.vllm_config)
         ):
             return None
         config = self.vllm_config.model_config.hf_text_config
@@ -745,7 +745,7 @@ class AscendHiSparseImpl(AscendSFAImpl):
             or not (metadata.num_actual_tokens == metadata.num_input_tokens == query.shape[0] == logical_topk.shape[0])
             or query_ends.shape != (metadata.num_reqs,)
             or key_lengths.shape != (metadata.num_reqs,)
-            or not supports_flash_resident_decode_graph(self.vllm_config)
+            or not supports_hisparse_resident_decode_graph(self.vllm_config)
             or get_forward_context().cudagraph_runtime_mode != CUDAGraphMode.NONE
             or torch.npu.is_current_stream_capturing()
         ):
@@ -912,6 +912,10 @@ class AscendHiSparseImpl(AscendSFAImpl):
                 selected = logical[num_decode:]
                 nonnegative = selected.clamp_min(0)
                 block_ids = nonnegative.to(torch.int64) // metadata.block_size
+                if metadata.num_actual_tokens < logical.shape[0]:
+                    # Padded rows have had their logical TopK masked. Use a valid
+                    # row even when rebasing request IDs made the padding negative.
+                    req_ids = req_ids.clamp_min(0)
                 request_tables = staged_table[req_ids.to(torch.int64)]
                 physical = torch.gather(request_tables, 1, block_ids) * metadata.block_size
                 physical = physical + nonnegative % metadata.block_size

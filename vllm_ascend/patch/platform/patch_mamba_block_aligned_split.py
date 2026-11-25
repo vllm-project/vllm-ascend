@@ -39,7 +39,7 @@ import inspect
 from vllm.v1.core.sched.scheduler import Scheduler
 from vllm.v1.request import Request
 
-from vllm_ascend.hisparse import is_glm5_next_hisparse
+from vllm_ascend.hisparse import uses_pooled_hisparse
 from vllm_ascend.patch.platform.patch_kv_cache_coordinator import (
     _skips_eagle_block_drop,
 )
@@ -103,7 +103,7 @@ def _mamba_block_aligned_split(
     kv_transfer_config = self.vllm_config.kv_transfer_config
     local_flash_hisparse = getattr(
         kv_transfer_config, "kv_connector", None
-    ) == "HiSparseConnector" and is_glm5_next_hisparse(self.vllm_config)
+    ) == "HiSparseConnector" and uses_pooled_hisparse(self.vllm_config)
     # Extra verifier or asynchronous output rows need an unsplit window.
     # Ordinary prefills must still stop at reusable checkpoints.
     num_computed_tokens = request.num_computed_tokens + num_new_local_computed_tokens + num_external_computed_tokens

@@ -20,12 +20,12 @@ from vllm.v1.kv_cache_interface import (
 )
 
 from vllm_ascend.core.kv_cache_interface import AscendIndexerKPoolTailSpec, AscendMLAAttentionSpec
+from vllm_ascend.hisparse.layout import regroup_pooled_hisparse_kda
 from vllm_ascend.models.glm5next.cache_config import (
     _get_glm5_next_cache_layout,
     get_glm5_next_kv_cache_config,
     get_glm5_next_kv_cache_groups,
     get_glm5_next_pool_bytes_per_block,
-    regroup_glm5_next_hisparse_kda,
 )
 from vllm_ascend.models.glm5next.cache_views import view_compressed_indexer_cache, view_kpool_tail_cache
 from vllm_ascend.utils import get_kv_cache_tensor_layers
@@ -148,7 +148,7 @@ def test_hisparse_caps_kda_layers_per_physical_group_at_six():
     other = [KVCacheGroupSpec([name], spec) for name, spec in regular.items()]
     original_kda = [KVCacheGroupSpec([name], state) for name in kda_names]
 
-    groups = regroup_glm5_next_hisparse_kda(specs, [*other, *original_kda])
+    groups = regroup_pooled_hisparse_kda(specs, [*other, *original_kda])
 
     assert all(after is before for after, before in zip(groups, other))
     recurrent = groups[len(other) :]
@@ -157,8 +157,19 @@ def test_hisparse_caps_kda_layers_per_physical_group_at_six():
     assert all(group.kv_cache_spec == state for group in recurrent)
 
 
-def test_fp8_hisparse_kpool_preserves_native_manager_page(monkeypatch):
-    from vllm.v1.kv_cache_interface import KVCacheGroupRole, UniformTypeKVCacheSpecs
+@pytest.mark.parametrize(
+    ("padded_page_bytes", "mixed_indexers", "expected_error"),
+    [
+        (608256, False, None),
+        (None, False, "requires a recurrent page of whole packed KV rows"),
+        (608257, False, "requires a recurrent page of whole packed KV rows"),
+        (608256, True, "requires the same packed indexer format in all layers"),
+    ],
+)
+def test_fp8_hisparse_kpool_validates_native_manager_page(
+    monkeypatch, padded_page_bytes, mixed_indexers, expected_error
+):
+    from vllm.v1.kv_cache_interface import KVCacheGroupRole, SparseCacheRole, UniformTypeKVCacheSpecs
 
     from vllm_ascend import hisparse
     from vllm_ascend.core import kv_cache_config_builder as builder
@@ -172,20 +183,26 @@ def test_fp8_hisparse_kpool_preserves_native_manager_page(monkeypatch):
         dtype=torch.float8_e4m3fn,
         model_version="glm5_next",
         tokens_per_state=4,
+        cache_role=SparseCacheRole.INDEXER,
         scale_dim=1,
         scale_dtype=torch.float32,
     )
     specs = {name: kpool}
     expanded = UniformTypeKVCacheSpecs.from_specs({name: replace(kpool, block_size=1536)})
-    group = KVCacheGroupSpec([name], expanded, role=KVCacheGroupRole.HISPARSE_INDEXER)
-    monkeypatch.setattr(builder, "_upstream_get_kv_cache_groups", lambda *_: [group])
+    groups = [KVCacheGroupSpec([name], expanded, role=KVCacheGroupRole.HISPARSE_INDEXER)]
+    if mixed_indexers:
+        native_name = "model.layers.7.indexer.k_cache"
+        specs[native_name] = replace(kpool, tokens_per_state=1)
+        native = UniformTypeKVCacheSpecs.from_specs({native_name: specs[native_name]})
+        groups.append(KVCacheGroupSpec([native_name], native, role=KVCacheGroupRole.HISPARSE_INDEXER))
+    monkeypatch.setattr(builder, "_upstream_get_kv_cache_groups", lambda *_: groups)
     config = make_config()
     config.attention_config = SimpleNamespace(hisparse_config=object(), indexer_kv_dtype="fp8")
     config.parallel_config.data_parallel_size = 1
     config.parallel_config.pipeline_parallel_size = 1
     config.cache_config.block_size = 128
     config.cache_config.cache_dtype = "fp8"
-    config.cache_config.mamba_page_size_padded = 608256
+    config.cache_config.mamba_page_size_padded = padded_page_bytes
     config.model_config.hf_text_config = SimpleNamespace(
         model_type="glm5_next_text", index_kpool=4, kv_lora_rank=512, qk_rope_head_dim=0
     )
@@ -194,6 +211,11 @@ def test_fp8_hisparse_kpool_preserves_native_manager_page(monkeypatch):
         "get_current_hardware_profile",
         lambda: SimpleNamespace(device_adaptor_family=DeviceAdaptorFamily.FP8_OPTIMIZED),
     )
+
+    if expected_error is not None:
+        with pytest.raises(ValueError, match=expected_error):
+            builder.AscendKVCacheConfigBuilder().get_kv_cache_groups(config, specs)
+        return
 
     [planned] = builder.AscendKVCacheConfigBuilder().get_kv_cache_groups(config, specs)
 

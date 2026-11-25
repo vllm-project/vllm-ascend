@@ -6,19 +6,21 @@ from vllm.config import VllmConfig
 
 from vllm_ascend.device.hardware_profile import DeviceAdaptorFamily, get_current_hardware_profile
 
-FLASH_MTP_QUERY_LEN = 6
+HISPARSE_GROUPED_QUERY_LEN = 6
 
 
-def is_glm5_next_hisparse(vllm_config: VllmConfig) -> bool:
-    text_config = getattr(vllm_config.model_config, "hf_text_config", None)
-    return (
-        vllm_config.attention_config.hisparse_config is not None
-        and getattr(text_config, "model_type", None) == "glm5_next_text"
-    )
+def uses_pooled_hisparse(vllm_config: VllmConfig) -> bool:
+    """Detect the pooled indexer configuration before worker cache specs exist."""
+    if getattr(getattr(vllm_config, "attention_config", None), "hisparse_config", None) is None:
+        return False
+    text_config = getattr(getattr(vllm_config, "model_config", None), "hf_text_config", None)
+    pool_size = getattr(text_config, "index_kpool", None)
+    return isinstance(pool_size, int) and pool_size > 1
 
 
-def supports_glm5_next_hisparse(vllm_config: VllmConfig) -> bool:
-    if not is_glm5_next_hisparse(vllm_config):
+def supports_pooled_hisparse(vllm_config: VllmConfig) -> bool:
+    """Gate the qualified A5 packed NoPE and FP8 pooled-indexer geometry."""
+    if not uses_pooled_hisparse(vllm_config):
         return False
     parallel = vllm_config.parallel_config
     text_config = vllm_config.model_config.hf_text_config
