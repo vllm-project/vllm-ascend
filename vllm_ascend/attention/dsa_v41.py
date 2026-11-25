@@ -102,9 +102,16 @@ def dsa_v41_write_kv(
     forward_context = get_forward_context()
     attn = forward_context.no_compile_layers[layer_name]
     metadata = attn.v41_impl._get_layer_metadata(forward_context.attn_metadata)
+    handle = getattr(attn.long_kv_cache, "hisparse_cache", None) if attn.v41_impl.role.is_kv_source else None
+    if handle is not None:
+        from vllm_ascend.models.deepseek_v41.hisparse import prepare_source_write_kv
+
+        prepare_source_write_kv(handle, metadata.attention)
     wait_for_kv_layer_from_connector(layer_name)
     hidden_states = hidden_states[: metadata.swa.num_actual_tokens]
     attn.v41_impl._update_caches(attn, hidden_states, metadata)
+    if handle is not None:
+        handle._v41_replay_kv_written = True
     # The following cut-layer forward writes retained rows again. Its normal
     # save hook records the final-write event without advancing twice here.
 
@@ -647,15 +654,16 @@ class AscendDSAV41Impl:
         backend = getattr(attn, "packed_cache_ops", None)
         handle = getattr(attn.long_kv_cache, "hisparse_cache", None)
         if handle is not None:
-            from vllm_ascend.models.deepseek_v41.hisparse import finish_source_write, resident_write_slots
+            if not getattr(handle, "_v41_skip_source_write", False):
+                from vllm_ascend.models.deepseek_v41.hisparse import finish_source_write, resident_write_slots
 
-            backend.write_attention_cache(
-                handle.view.cache.unsqueeze(2),
-                resident_write_slots(handle.slot_mapping, compressor_metadata.cache)[:num_tokens],
-                latent.squeeze(1),
-                kind="cmp",
-            )
-            finish_source_write(handle, compressor_metadata.cache)
+                backend.write_attention_cache(
+                    handle.view.cache.unsqueeze(2),
+                    resident_write_slots(handle.slot_mapping, compressor_metadata.cache)[:num_tokens],
+                    latent.squeeze(1),
+                    kind="cmp",
+                )
+                finish_source_write(handle, compressor_metadata.cache)
         elif backend is not None:
             backend.write_attention_cache(
                 attn.long_kv_cache.kv_cache,

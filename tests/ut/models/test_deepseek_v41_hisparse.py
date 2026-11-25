@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM Ascend project
 
+from dataclasses import dataclass
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -13,7 +14,10 @@ from vllm_ascend.models.deepseek_v41.hisparse import (
     finish_source_write,
     offloaded_sources,
     prepare_cache_views,
+    prepare_source_batch,
+    prepare_source_write_kv,
     resident_write_slots,
+    resolve_attention,
 )
 
 
@@ -142,3 +146,78 @@ def test_prepare_cache_views_pa_bbnd_and_mxfp4():
     key, scale = kv_caches[idx_name]
     assert key.shape == (4, 128, 1, 128)
     assert scale.shape == (4, 128, 1, 4)
+
+
+def test_resolve_attention_masks_trailing_decode_indices_and_reuses_group():
+    @dataclass
+    class _DummyMeta:
+        num_decode_tokens: int
+        num_actual_tokens: int
+        num_reqs: int
+        storage_block_size: int
+        req_id_per_token: torch.Tensor
+        query_start_loc: torch.Tensor
+        block_table: torch.Tensor | None
+        cache_seq_lens: torch.Tensor | None
+        cmp_residual: torch.Tensor | None
+
+    hot_cache = torch.zeros((2, 64, 320), dtype=torch.uint8)
+    handle = SimpleNamespace(
+        runtime=SimpleNamespace(hot=SimpleNamespace(attention_cache=hot_cache)),
+        source_block_table=torch.zeros((2, 4), dtype=torch.int32),
+        _v41_physical_table=torch.arange(2, dtype=torch.int32).expand(2, -1).contiguous(),
+        _v41_physical_lengths=torch.full((2,), 128, dtype=torch.int32),
+        _v41_topk_cols=torch.arange(6, dtype=torch.int32),
+        swap_in=MagicMock(
+            return_value=(torch.full((2, 6), 7, dtype=torch.int32), torch.tensor([3, 1], dtype=torch.int32))
+        ),
+    )
+    meta = _DummyMeta(
+        num_decode_tokens=2,
+        num_actual_tokens=2,
+        num_reqs=2,
+        storage_block_size=64,
+        req_id_per_token=torch.tensor([0, 1], dtype=torch.int32),
+        query_start_loc=torch.tensor([0, 1, 2], dtype=torch.int32),
+        block_table=None,
+        cache_seq_lens=None,
+        cmp_residual=torch.tensor([1], dtype=torch.int32),
+    )
+    logical_indices = torch.tensor([[10, 11, 12, 0, 99, 0], [20, 0, 0, 5, 0, 0]], dtype=torch.int32)
+    logical_lengths = torch.tensor([[3], [1]], dtype=torch.int32)
+
+    cache, attn_meta, indices, lengths = resolve_attention(
+        handle, meta, logical_indices, new_index_group=True, logical_lengths=logical_lengths
+    )
+    passed_indices = handle.swap_in.call_args.args[2]
+    assert passed_indices.tolist() == [[10, 11, 12, -1, -1, -1], [20, -1, -1, -1, -1, -1]]
+    assert cache.shape == (2, 64, 1, 320)
+    assert attn_meta.cmp_residual is None
+    assert lengths.shape == (2, 1)
+    assert resolve_attention(handle, meta, logical_indices, new_index_group=False) == (
+        cache,
+        attn_meta,
+        indices,
+        lengths,
+    )
+    handle.swap_in.assert_called_once()
+
+
+def test_prepare_source_write_kv_and_batch_replay_skip():
+    handle = MagicMock()
+    meta = SimpleNamespace()
+    prepare_source_write_kv(handle, meta)
+    assert handle._v41_replay_kv_written is False
+    assert handle._v41_skip_source_write is False
+    handle.prepare_group_for_batch.assert_called_once_with(meta)
+
+    handle._v41_replay_kv_written = True
+    prepare_source_batch(handle, meta)
+    assert handle._v41_replay_kv_written is False
+    assert handle._v41_skip_source_write is True
+    handle.runtime.begin_forward.assert_called_once()
+    assert handle.prepare_group_for_batch.call_count == 1
+
+    prepare_source_batch(handle, meta)
+    assert handle._v41_skip_source_write is False
+    assert handle.prepare_group_for_batch.call_count == 2

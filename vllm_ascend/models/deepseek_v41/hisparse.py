@@ -220,6 +220,9 @@ def resolve_attention(handle, metadata, logical_indices, *, new_index_group, log
         cache, attention_metadata = prefill_binding
         indices, lengths = logical_indices, logical_lengths
     elif metadata.num_decode_tokens == metadata.num_actual_tokens:
+        if logical_lengths is not None:
+            cols = handle._v41_topk_cols[: logical_indices.shape[1]]
+            logical_indices = torch.where(cols < logical_lengths, logical_indices, -1)
         indices, lengths = handle.swap_in(
             metadata.req_id_per_token,
             handle.source_block_table,
@@ -297,12 +300,32 @@ def prepare_source_attention(handle):
         dtype=torch.int32,
         device=cache.device,
     )
+    handle._v41_topk_cols = torch.arange(
+        runtime.index_group.shared_topk.device_topk_rows.shape[1],
+        dtype=torch.int32,
+        device=cache.device,
+    )
+
+
+def prepare_source_write_kv(handle, metadata):
+    """Prepare full-batch source state before decoder-replay KV pre-write."""
+    handle._v41_prefill_binding = None
+    handle._v41_attention_binding = None
+    handle._v41_replay_kv_written = False
+    handle._v41_skip_source_write = False
+    handle.prepare_group_for_batch(metadata)
 
 
 def prepare_source_batch(handle, metadata):
     """A shared source is written once and staged at most once per forward."""
     handle._v41_prefill_binding = None
     handle._v41_attention_binding = None
+    if getattr(handle, "_v41_replay_kv_written", False):
+        handle._v41_replay_kv_written = False
+        handle._v41_skip_source_write = True
+        handle.runtime.begin_forward()
+        return
+    handle._v41_skip_source_write = False
     handle.prepare_group_for_batch(metadata)
 
 
