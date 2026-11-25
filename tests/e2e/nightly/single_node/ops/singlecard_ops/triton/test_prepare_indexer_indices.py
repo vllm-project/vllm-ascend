@@ -1,11 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import multiprocessing
+from concurrent.futures import ProcessPoolExecutor
+
 import pytest
 import torch
 import torch_npu  # noqa: F401
 
+from vllm_ascend.batch_invariant import enable_batch_invariant_mode
 from vllm_ascend.ops.triton.prepare_indexer_indices import prepare_indexer_indices
+from vllm_ascend.ops.triton.triton_utils import init_device_properties_triton
 
 
 def reference(selected, positions, compress_ratio):
@@ -84,24 +89,48 @@ def test_prepare_indexer_indices_uses_supplied_output():
     torch.testing.assert_close(actual.cpu(), reference(selected.cpu(), positions.cpu(), 2), rtol=0, atol=0)
 
 
-@pytest.mark.parametrize("compress_ratio", [1, 2])
-@pytest.mark.parametrize("tokens", [41, 129])
+@pytest.mark.parametrize(
+    "tokens,compress_ratio,batch_invariant",
+    [pytest.param(tokens, ratio, False, id=f"{tokens}-{ratio}") for tokens in (41, 129) for ratio in (1, 2)]
+    + [pytest.param(257, 2, True, id="batch-invariant-separate-lengths")],
+)
+def test_prepare_indexer_indices_graph_replay(tokens, compress_ratio, batch_invariant):
+    if batch_invariant:
+        pytest.importorskip("batch_invariant_ops")
+        # Batch invariance installs process-wide PyTorch operators.
+        with ProcessPoolExecutor(max_workers=1, mp_context=multiprocessing.get_context("spawn")) as worker:
+            worker.submit(_check_indexer_graph_replay, tokens, compress_ratio, torch.npu.current_device()).result()
+    else:
+        _check_indexer_graph_replay(tokens, compress_ratio)
+
+
 @torch.inference_mode()
-def test_prepare_indexer_indices_graph_replay(compress_ratio, tokens):
+def _check_indexer_graph_replay(tokens, compress_ratio, batch_invariant_device=None):
+    if batch_invariant_device is not None:
+        torch.npu.set_device(batch_invariant_device)
+        init_device_properties_triton()
+        enable_batch_invariant_mode()
     selected = torch.randint(-1, 4096, (tokens, 2048), dtype=torch.int32, device="npu")
     positions = torch.full((tokens,), 4095, dtype=torch.int64, device="npu")
-    prepare_indexer_indices(selected, positions, compress_ratio)
+    indices = torch.empty_like(selected)
+    lengths = torch.empty((tokens, 1), dtype=torch.int32, device=selected.device)
+    prepare_indexer_indices(selected, positions, compress_ratio, indices_output=indices, lengths_output=lengths)
     torch.npu.synchronize()
     graph = torch.npu.NPUGraph()
     with torch.npu.graph(graph, capture_error_mode="thread_local", auto_dispatch_capture=True):
-        actual = prepare_indexer_indices(selected, positions, compress_ratio)
-    pointer = actual.data_ptr()
+        actual = prepare_indexer_indices(
+            selected, positions, compress_ratio, indices_output=indices, lengths_output=lengths
+        )
+    assert actual is indices
     for last_position in (0, 127, 8191):
         selected.copy_(torch.randint_like(selected, -1, 4096))
         positions.fill_(last_position)
+        indices.fill_(-2)
+        lengths.fill_(-1)
         graph.replay()
         torch.npu.synchronize()
-        assert actual.data_ptr() == pointer
+        expected = reference(selected.cpu(), positions.cpu(), compress_ratio)
+        torch.testing.assert_close(indices.cpu(), expected, rtol=0, atol=0)
         torch.testing.assert_close(
-            actual.cpu(), reference(selected.cpu(), positions.cpu(), compress_ratio), rtol=0, atol=0
+            lengths.cpu(), (expected >= 0).count_nonzero(dim=-1).int().unsqueeze(-1), rtol=0, atol=0
         )
