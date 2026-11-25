@@ -46,6 +46,14 @@ class TestAscendAttentionBackend310(TestBase):
         result = AscendAttentionBackend310.get_kv_cache_shape(10, 20, 30, 40)
         self.assertEqual(result, (2, 10, 75, 20, 16))
 
+    def test_get_preferred_block_size(self):
+        self.assertEqual(AscendAttentionBackend310.get_supported_kernel_block_sizes(), [128, 64])
+        self.assertTrue(AscendAttentionBackend310.supports_block_size(64))
+        self.assertTrue(AscendAttentionBackend310.supports_block_size(128))
+        self.assertEqual(AscendAttentionBackend310.get_preferred_block_size(16), 128)
+        self.assertEqual(AscendAttentionBackend310.get_preferred_block_size(64), 128)
+        self.assertEqual(AscendAttentionBackend310.get_preferred_block_size(128), 128)
+
 
 class TestAscendAttentionBackendImpl310(TestBase):
     def setUp(self):
