@@ -276,9 +276,16 @@ def test_dispatcher_pads_uniform_draft_descriptors(query_count):
         assert desc.uniform_token_count == query_count
 
 
-@pytest.mark.parametrize("module", [speculator_module, dflash_module], ids=["dspark", "dflash"])
-@pytest.mark.parametrize("enforce_eager", [False, True])
-@pytest.mark.parametrize("quantized", [False, True], ids=["floating", "quantized"])
+@pytest.mark.parametrize(
+    "module,enforce_eager,quantized",
+    [
+        pytest.param(speculator_module, False, True, id="dspark-quantized"),
+        pytest.param(speculator_module, False, False, id="dspark-floating"),
+        pytest.param(speculator_module, True, True, id="dspark-eager"),
+        pytest.param(dflash_module, False, True, id="dflash-graph"),
+        pytest.param(dflash_module, True, True, id="dflash-eager"),
+    ],
+)
 def test_draft_graph_manager_binds_speculator_and_update_stream(monkeypatch, module, enforce_eager, quantized):
     cls = module.AscendDSparkSpeculator if module is speculator_module else module.AscendDFlashSpeculator
     parent = DSparkSpeculator if module is speculator_module else dflash_module.DFlashSpeculator

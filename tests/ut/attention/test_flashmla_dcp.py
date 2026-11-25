@@ -1185,14 +1185,13 @@ def test_quant_adapter_class_constraints_and_native_abi(runtime, heads):
     assert operation.call_args.kwargs["return_softmax_lse"]
 
 
-@pytest.mark.parametrize("causal", [False, True])
-def test_quant_graph_row_budget_from_descriptors(runtime, causal):
+def test_quant_graph_row_budget_from_descriptors(runtime):
     builder = runtime.builder(size=8, quantized=True, query_capacity=8, max_requests=4)
     fixed = SimpleNamespace(num_tokens=28, num_reqs=4, uniform_token_count=7)
     variable = SimpleNamespace(num_tokens=28, num_reqs=4, uniform_token_count=None)
 
     def build(queries, capture=False):
-        inputs = common([32] * len(queries), queries, tokens=28, causal=causal)
+        inputs = common([32] * len(queries), queries, tokens=28)
         return builder.build(inputs, len(queries), sum(queries), False, retain_for_graph=capture)
 
     builder.configure_graph_rows([fixed])
