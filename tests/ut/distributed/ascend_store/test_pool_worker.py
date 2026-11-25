@@ -489,7 +489,7 @@ class TestPCPPoolWorker(unittest.TestCase):
             for names, spec in ((draft_names, draft), (target_names, target))
             for name in names
         }
-        cases = [
+        cases: list[tuple[bool, dict[str, object], bool]] = [
             (True, {"backend": "memcache", "layerwise_num_shared_buffers": 1}, True),
             (True, {"backend": "memcache"}, False),
             (True, {"backend": "memcache", "layerwise_num_shared_buffers": 6}, False),
@@ -522,6 +522,9 @@ class TestPCPPoolWorker(unittest.TestCase):
                 self.assertEqual(worker.cacheable_group_ids, [0])
                 self.assertEqual(getattr(worker, "layerwise_offload", False), reuse)
                 self.assertEqual(getattr(worker, "prefetch_layer_map", {}), {2: (1,), 3: (2,)} if reuse else {})
+                if use_layerwise:
+                    expected_draft_start = 4 if not reuse else None
+                    self.assertEqual(worker._dflash_draft_start_layer, expected_draft_start)
                 if reuse:
                     self.assertEqual(worker._reused_layers_by_group, {0: {1, 2, 3}})
                 worker._transfer_threads_started = True
@@ -578,15 +581,22 @@ class TestPCPPoolWorker(unittest.TestCase):
 
 
 class TestDFlashLayerwiseKV(unittest.TestCase):
-    def make_worker(self, kv_role="kv_both", reuse=False):
+    def make_worker(
+        self, kv_role="kv_both", reuse=False, dspark=False, separate_groups=False, backend="memcache", draft_names=None
+    ):
         target_names = [f"model.layers.{layer}.attn" for layer in range(4)]
-        draft_names = [f"draft.layers.{layer}.attn" for layer in range(4, 6)]
+        if draft_names is None:
+            draft_names = [f"draft.layers.{layer}.attn" for layer in range(4, 6)]
         spec = FullAttentionSpec(block_size=16, num_kv_heads=1, head_size=8, dtype=torch.float32)
         plan = SimpleNamespace(
-            kv_cache_groups=[KVCacheGroupSpec(target_names + draft_names, spec)],
+            kv_cache_groups=(
+                [KVCacheGroupSpec(target_names, spec), KVCacheGroupSpec(draft_names, spec)]
+                if separate_groups
+                else [KVCacheGroupSpec(target_names + draft_names, spec)]
+            ),
             prefix_cache_retention_interval=None,
-            dflash_draft_layer_names=tuple(draft_names),
         )
+        setattr(plan, "dspark_draft_layer_names" if dspark else "dflash_draft_layer_names", tuple(draft_names))
         if reuse:
             layout = SimpleNamespace(
                 prefetch_layer_map={2: (1,), 3: (2,)},
@@ -602,7 +612,11 @@ class TestDFlashLayerwiseKV(unittest.TestCase):
             num_hidden_layers=4,
             use_layerwise=True,
             kv_role=kv_role,
-            extra_config={"backend": "memcache", "layerwise_num_shared_buffers": 1},
+            extra_config=(
+                {"backend": "mooncake"}
+                if backend == "mooncake"
+                else {"backend": "memcache", "layerwise_num_shared_buffers": 6 if dspark else 1}
+            ),
             kv_cache_config=plan,
         )
         worker.kv_recv_thread = MagicMock()
@@ -659,6 +673,98 @@ class TestDFlashLayerwiseKV(unittest.TestCase):
         self.assertEqual(worker.current_layer, 6)
         connector.wait_for_save()
         self.assertEqual(order.count(("drain", None)), 1)
+
+    def test_dspark_draft_save_follows_speculator(self):
+        for backend in ("memcache", "mooncake"):
+            with self.subTest(backend=backend):
+                worker = self.make_worker(dspark=True, backend=backend)
+                self.assertEqual(
+                    worker.dflash_draft_layer_names, frozenset({"draft.layers.4.attn", "draft.layers.5.attn"})
+                )
+                self.assertEqual(worker._dspark_draft_layer_names, set())
+                self.assertEqual(worker._dflash_draft_start_layer, 4)
+                self.assertEqual(worker.num_layers, 6)
+                metadata = AscendConnectorMetadata(set())
+                connector = AscendStoreConnector.__new__(AscendStoreConnector)
+                connector.use_layerwise = connector.can_put = True
+                connector.connector_worker = worker
+                connector.has_connector_metadata = lambda: True
+                connector._get_connector_metadata = lambda metadata=metadata: metadata
+                for layer in range(4):
+                    connector.save_kv_layer(f"model.layers.{layer}.attn", None, None)
+                self.assertEqual(worker.current_layer, 4)
+                connector.finish_forward()
+                self.assertEqual(worker.current_layer, 4)
+                for name in worker.dflash_draft_layer_names:
+                    connector.wait_for_layer_load(name)
+                    connector.save_kv_layer(name, None, None)
+                self.assertEqual(worker.current_layer, 4)
+                if backend == "memcache":
+                    self.assertEqual([event.record.call_count for event in worker.sync_save_events], [1, 1, 1, 1, 0, 0])
+                with patch.object(worker, "_wait_for_final_layer_save") as drain:
+                    connector.wait_for_save()  # Called after speculator.propose writes draft KV.
+                    connector.wait_for_save()
+                self.assertEqual(worker.current_layer, 6)
+                if backend == "memcache":
+                    self.assertEqual([event.record.call_count for event in worker.sync_save_events], [1] * 6)
+                drain.assert_called_once()
+
+    def test_dspark_draft_in_separate_group_saves_after_speculator(self):
+        for backend in ("memcache", "mooncake"):
+            with self.subTest(backend=backend):
+                worker = self.make_worker(dspark=True, separate_groups=True, backend=backend)
+                self.assertEqual(worker._groups_for_layerwise_transfer(3), [(0, 3)])
+                self.assertEqual(worker._groups_for_layerwise_transfer(4), [(1, 0)])
+                self.assertEqual(worker._groups_for_layerwise_transfer(5), [(1, 1)])
+                worker.layer_save_tasks[4] = [LayerTransferTask(layer_id=4, block_ranges=[], group_id=1)]
+                worker.layer_save_tasks[5] = [LayerTransferTask(layer_id=5, block_ranges=[], group_id=1)]
+                metadata = AscendConnectorMetadata(set())
+                for _ in range(4):
+                    worker.save_kv_layer(metadata)
+                self.assertEqual(worker.current_layer, 4)
+                worker.load_dflash_draft_kv()
+                if backend == "memcache":
+                    self.assertEqual([event.record.call_count for event in worker.sync_save_events], [1, 1, 1, 1, 0, 0])
+                worker.kv_send_thread.add_request.assert_not_called()
+                with patch.object(worker, "_wait_for_final_layer_save") as drain:
+                    worker.save_dflash_draft_kv(metadata)
+                calls = worker.kv_send_thread.add_request.call_args_list
+                self.assertEqual(
+                    [(call.args[0][0].group_id, call.args[0][0].layer_id) for call in calls], [(1, 4), (1, 5)]
+                )
+                if backend == "memcache":
+                    self.assertEqual([event.record.call_count for event in worker.sync_save_events], [1] * 6)
+                self.assertEqual(worker.current_layer, 6)
+                drain.assert_called_once()
+
+    def test_dspark_swa_cache_defers_attention_callbacks(self):
+        draft_names = [f"draft.layers.{layer}.self_attn.swa_cache" for layer in range(4, 6)]
+        worker = self.make_worker(dspark=True, draft_names=draft_names)
+        metadata = AscendConnectorMetadata(set())
+        connector = AscendStoreConnector.__new__(AscendStoreConnector)
+        connector.use_layerwise = connector.can_put = True
+        connector.connector_worker = worker
+        connector.has_connector_metadata = lambda: True
+        connector._get_connector_metadata = lambda: metadata
+        connector._loaded_layer = None
+        connector._mamba_state = None
+        for layer in range(4):
+            connector.save_kv_layer(f"model.layers.{layer}.self_attn.attn", None, None)
+        connector.finish_forward()
+        with patch.object(worker, "wait_for_layer_load") as load:
+            for name in draft_names:
+                callback_name = name.removesuffix(".swa_cache") + ".attn"
+                connector.wait_for_layer_load(callback_name)
+                connector.save_kv_layer(callback_name, None, None)
+            load.assert_not_called()
+        self.assertEqual(worker.current_layer, 4)
+        self.assertEqual([event.record.call_count for event in worker.sync_save_events], [1, 1, 1, 1, 0, 0])
+        with patch.object(worker, "_wait_for_final_layer_save") as drain:
+            connector.wait_for_save()
+            connector.wait_for_save()
+        self.assertEqual(worker.current_layer, 6)
+        self.assertEqual([event.record.call_count for event in worker.sync_save_events], [1] * 6)
+        drain.assert_called_once()
 
     def test_load_only_restores_draft_without_saving(self):
         worker = self.make_worker(kv_role="kv_consumer")

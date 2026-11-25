@@ -1,0 +1,4 @@
+pr: 22855
+entries:
+  - category: bugfix
+    text: Fixed external prefix-cache misses for Kimi K3.1 with DSpark and layerwise AscendStore pooling backed by Memcache or Mooncake.

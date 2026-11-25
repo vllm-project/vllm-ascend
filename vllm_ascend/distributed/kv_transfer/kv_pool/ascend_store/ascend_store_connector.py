@@ -458,12 +458,21 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
             assert self.connector_worker is not None
             cast(LayerwiseKVPoolWorker, self.connector_worker).load_dflash_draft_kv()
 
+    @staticmethod
+    def _is_deferred_draft_layer(worker: LayerwiseKVPoolWorker, layer_name: str) -> bool:
+        draft_names = getattr(worker, "dflash_draft_layer_names", ())
+        if layer_name in draft_names:
+            return True
+        # DeepSeek V4 hooks can use the attention name for a registered SWA cache.
+        return layer_name.endswith(".self_attn.attn") and layer_name.removesuffix(".attn") + ".swa_cache" in draft_names
+
     def wait_for_layer_load(self, layer_name: str) -> None:
         if not self.use_layerwise:
             return
         assert self.connector_worker is not None
         worker = cast(LayerwiseKVPoolWorker, self.connector_worker)
-        if layer_name in getattr(worker, "dflash_draft_layer_names", ()):
+        # Draft loads run in finish_forward(), after target forward.
+        if self._is_deferred_draft_layer(worker, layer_name):
             return
         # PLE and attention can share one physical layer. Load its groups once,
         # then let each cache owner copy its own recurrent state before use.
@@ -508,7 +517,8 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
             return
         assert self.connector_worker is not None
         worker = cast(LayerwiseKVPoolWorker, self.connector_worker)
-        if layer_name not in getattr(worker, "dflash_draft_layer_names", ()):
+        # Draft saves run in wait_for_save(), after the speculator writes KV.
+        if not self._is_deferred_draft_layer(worker, layer_name):
             worker.save_kv_layer(self._get_connector_metadata())
 
     def has_pending_bulk_save(self) -> bool:
