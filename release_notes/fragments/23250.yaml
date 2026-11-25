@@ -1,0 +1,7 @@
+pr: 23250
+entries:
+  - category: performance
+    text: >-
+      Supported packed GDN projections combine data copies and output
+      initialization into one device launch, including small decode batches.
+      No configuration changes are required.
