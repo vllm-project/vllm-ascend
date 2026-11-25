@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+# mypy: disable-error-code="valid-type"
 
-import tilelang.ascend.language as T
+import tilelang.ascend.language as T  # type: ignore[import-not-found]
 
 from ..shared.carrier import keep_parameters, mixed_signature
 from . import INDEX_HEAD_PANEL_SHAPE, mtp_projection_rows

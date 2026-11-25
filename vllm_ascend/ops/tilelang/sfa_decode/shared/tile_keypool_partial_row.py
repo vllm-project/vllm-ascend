@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+# mypy: disable-error-code="valid-type"
 
-import tilelang.ascend.language as T
+import tilelang.ascend.language as T  # type: ignore[import-not-found]
 
 
 def partial_projection(batch, parts, bm, bn, *, rollback=False):

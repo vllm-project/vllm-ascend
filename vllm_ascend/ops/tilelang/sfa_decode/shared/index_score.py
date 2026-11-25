@@ -1,8 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+# mypy: disable-error-code="valid-type"
 
-import tilelang.ascend.language as T
-from tilelang.ascend.language import simd as S
+import tilelang.ascend.language as T  # type: ignore[import-not-found]
+from tilelang.ascend.language import simd as S  # type: ignore[import-not-found]
 
 
 def score_program(
@@ -112,11 +113,11 @@ def score_program(
                         for span_i in T.serial(T.ceildiv(active_splits - first, shards)):
                             start = (first + span_i * shards) * group
                             if (start + group) * tile <= valid:
-                                for subtile in T.Pipelined(group, num_stages=stages):
-                                    score_tile(start + subtile, False, inputs)
+                                for tile_offset in T.Pipelined(group, num_stages=stages):
+                                    score_tile(start + tile_offset, False, inputs)
                             else:
-                                for subtile in T.serial(valid // tile - start):
-                                    score_tile(start + subtile, False, inputs)
+                                for tile_offset in T.serial(valid // tile - start):
+                                    score_tile(start + tile_offset, False, inputs)
                                 if valid % tile != 0:
                                     score_tile(valid // tile, True, inputs)
 

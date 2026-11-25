@@ -1,9 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+# mypy: disable-error-code="valid-type"
 
-import tilelang.ascend.language as T
-from tilelang.ascend.language import simd as S
-from tilelang.layout import make_ascend_compact_nz_layout
+import tilelang.ascend.language as T  # type: ignore[import-not-found]
+from tilelang.ascend.language import simd as S  # type: ignore[import-not-found]
+from tilelang.layout import make_ascend_compact_nz_layout  # type: ignore[import-not-found]
 
 from ..mtp import DENSE_PREFIX_TOKENS
 from .attention_mma import attention_mma
@@ -25,7 +26,7 @@ def dequantize_group(scales, codes, row, channel, full, byte_mask, bf_mask):
     odd = S.vmul(S.vcvt(data, "float32", byte_mask, part=2), gain, full)
     lo = T.reinterpret(S.vcvt(even, "bfloat16", full, part=0), "uint16x128")
     hi = T.reinterpret(S.vcvt(odd, "bfloat16", full, part=1), "uint16x128")
-    return T.reinterpret(S.vor(lo, hi, bf_mask), "bfloat16x128")
+    return T.reinterpret(S.vor(lo, hi, bf_mask), "bfloat16x128")  # codespell:ignore vor
 
 
 def paged_attention(

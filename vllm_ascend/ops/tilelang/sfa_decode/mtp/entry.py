@@ -4,7 +4,7 @@
 
 from functools import lru_cache
 
-from tvm import tirx
+from tvm import tirx  # type: ignore[import-not-found]
 
 from ..shared.compiler import compile_fused, cube, mixed, phase, vector
 from ..shared.index_query_quant_exact_div import program as quant_program

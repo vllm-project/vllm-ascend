@@ -1,9 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import tilelang.ascend.language as T
-from tilelang import tvm
-from tilelang.ascend.language import simd as S
+import tilelang.ascend.language as T  # type: ignore[import-not-found]
+from tilelang import tvm  # type: ignore[import-not-found]
+from tilelang.ascend.language import simd as S  # type: ignore[import-not-found]
 
 
 def attention_mma(half_rows):

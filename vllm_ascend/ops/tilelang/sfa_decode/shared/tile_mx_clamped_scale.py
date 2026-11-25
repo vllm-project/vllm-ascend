@@ -1,8 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+# mypy: disable-error-code="valid-type"
 
-import tilelang.ascend.language as T
-from tilelang.ascend.language import simd as S
+import tilelang.ascend.language as T  # type: ignore[import-not-found]
+from tilelang.ascend.language import simd as S  # type: ignore[import-not-found]
 
 
 @T.macro
@@ -28,7 +29,7 @@ def encode_block(inp, codes, scales, rows, columns, fp32_input=False):
                 m1 = S.vdupv(S.vcmax(ax, hi), mask)
                 e0 = S.vmax(S.vsub(S.vshrs(T.reinterpret(m0, "int32x64"), 23, mask), bias, mask), zero, mask)
                 e1 = S.vmax(S.vsub(S.vshrs(T.reinterpret(m1, "int32x64"), 23, mask), bias, mask), zero, mask)
-                scale = S.vor(e0, S.vshls(e1, 8, mask), mask)
+                scale = S.vor(e0, S.vshls(e1, 8, mask), mask)  # codespell:ignore vor
                 S.vsts(scales[g, r], T.reinterpret(scale, "int16x128"), scalar, "ONEPT_B16", extent=1)
                 exp = S.vsel(e0, e1, half)
                 mul = T.reinterpret(S.vshls(S.vsub(peak_exp, exp, mask), 23, mask), "float32x64")

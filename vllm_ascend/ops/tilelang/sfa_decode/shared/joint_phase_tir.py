@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from tilelang import tvm
-from tvm import tirx
+from tilelang import tvm  # type: ignore[import-not-found]
+from tvm import tirx  # type: ignore[import-not-found]
 
 
 def instruction(op, *args):

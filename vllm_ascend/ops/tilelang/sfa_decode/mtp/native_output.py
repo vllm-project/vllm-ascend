@@ -1,9 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import tilelang.ascend.language as T
-from tilelang import tvm
-from tvm import tirx
+import tilelang.ascend.language as T  # type: ignore[import-not-found]
+from tilelang import tvm  # type: ignore[import-not-found]
+from tvm import tirx  # type: ignore[import-not-found]
 
 MXFP8_NZ_C0 = 32
 

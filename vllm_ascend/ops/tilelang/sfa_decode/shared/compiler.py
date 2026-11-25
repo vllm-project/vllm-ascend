@@ -3,17 +3,16 @@
 
 from dataclasses import dataclass, field
 
-from tilelang import tvm
-from tilelang.engine.lower import (
+from tilelang import tvm  # type: ignore[import-not-found]
+from tilelang.engine.lower import (  # type: ignore[import-not-found]
     device_codegen,
     device_codegen_without_compile,
-    extrac_params,
     host_codegen,
     lower_to_host_device_ir,
 )
-from tilelang.engine.param import CompiledArtifact
-from tilelang.jit.kernel import JITKernel
-from tvm import tirx
+from tilelang.engine.param import CompiledArtifact  # type: ignore[import-not-found]
+from tilelang.jit.kernel import JITKernel  # type: ignore[import-not-found]
+from tvm import tirx  # type: ignore[import-not-found]
 
 from ..mtp.native_output import lower_native_weight_copy
 from .joint_phase_tir import emit_stage, grid_barrier, rewrite_host
@@ -53,7 +52,7 @@ def compile_fused(abi, phases, *, name="main_kernel", views=(), controls=None):
         def _compile_artifact(self, func, pass_configs, compile_metadata):
             ctx = self.backend_context
             with self.target, tvm.transform.PassContext(opt_level=3, config=pass_configs):
-                host, device, *_ = lower_to_host_device_ir(func, ctx)
+                host, device, params, *_ = lower_to_host_device_ir(func, ctx)
                 carrier = next(iter(device.functions.values()))
                 pointers = {var.name: var for var in carrier.params}
                 for base, view in views:
@@ -100,7 +99,7 @@ def compile_fused(abi, phases, *, name="main_kernel", views=(), controls=None):
                 return CompiledArtifact(
                     ready,
                     dev,
-                    extrac_params(func),
+                    params,
                     code,
                     rt_mod=ready,
                     target=self.target,
