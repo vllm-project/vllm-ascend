@@ -10,6 +10,7 @@ from unittest.mock import Mock
 import pytest
 
 from tests.ut.kv_offload.mooncake_v2 import test_push_sending
+from tests.ut.kv_offload.mooncake_v2.test_push_sending import wait_for_completions
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake import base_worker, push_worker
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.metadata import MooncakeConnectorMetadata
 
@@ -176,7 +177,6 @@ def test_bilateral_chunks_copy_each_token_once(
             sender.start_load_kv(meta)
             sender.save_kv_layer("model.layers.0.attn")
             sender.wait_for_save()
-            assert all(call.args[1] is None for call in sender._send_done.call_args_list)
             if end < 29:
                 for destination in sender._reqs_send_state["d-request"].destinations.values():
                     if destination.required_layers:
@@ -199,9 +199,11 @@ def test_bilateral_chunks_copy_each_token_once(
     # Concurrent Mock calls can lose call_count increments; inspect the recorded
     # destinations instead, checking that every D rank is notified exactly once.
     for sender in senders:
+        wait_for_completions(sender)
         assert sorted(call.args[0]["consumer_rank"] for call in sender._send_done.call_args_list) == [
             [0, pcp, tp] for pcp in range(d_pcp) for tp in range(d_tp)
         ]
+        assert all(call.args[1] is None for call in sender._send_done.call_args_list)
 
 
 @pytest.mark.parametrize(
@@ -329,6 +331,7 @@ def test_mamba_dcp_preserves_tp_state_bytes(
             assert buf.raw == expected
     assert len(writes) == len(set(writes)), "Each destination state byte must have exactly one TP owner"
     for sender in senders:
+        wait_for_completions(sender)
         assert sorted(call.args[0]["consumer_rank"] for call in sender._send_done.call_args_list) == [
             [0, pcp, tp] for pcp in range(d_pcp) for tp in range(d_tp)
         ]
@@ -343,6 +346,7 @@ def test_invalid_producer_interleave_is_rejected(worker, monkeypatch, p_dcp, d_d
     worker.start_load_kv(metadata(0, 8, prompt=8, tp=d_dcp))
     worker.wait_for_save()
     worker.engine.batch_transfer_sync_write.assert_not_called()
+    wait_for_completions(worker)
     assert len(worker._send_done.call_args_list) == d_dcp
     assert all("P page size" in call.args[1] for call in worker._send_done.call_args_list)
 
@@ -381,6 +385,7 @@ def test_receiver_waits_for_last_source_shard(worker, monkeypatch, producers, wr
         for rank, sender in enumerate(senders):
             if rank != delayed_rank:
                 sender.wait_for_save()
+                wait_for_completions(sender)
         # Non-owner replicas send DONE too, but cannot substitute for shard 1.
         senders[delayed_rank]._send_done.assert_not_called()
         assert not worker.get_transfer_results().finished_recving
@@ -390,6 +395,7 @@ def test_receiver_waits_for_last_source_shard(worker, monkeypatch, producers, wr
     finally:
         release.set()
     senders[delayed_rank].wait_for_save()
+    wait_for_completions(senders[delayed_rank])
     result = worker.get_transfer_results()
     assert result.finished_recving == {"d-request"}
     assert result.failed_recving == ({"d-request"} if write_fails else set())
