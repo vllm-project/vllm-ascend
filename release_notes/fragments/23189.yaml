@@ -1,0 +1,7 @@
+pr: 23189
+entries:
+  - category: feature
+    text: >-
+      Added opt-in container snapshot restoration for Model Runner V2 through
+      the companion vLLM --snapshot-config interface. An external container
+      snapshot system and compatible Ascend runtime are required.
