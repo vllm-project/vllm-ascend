@@ -125,6 +125,60 @@ def test_initialize_hisparse_slab_padding_survives_both_runner_copies():
     assert context["indexer"].hisparse_block_stride == 3
 
 
+@pytest.mark.parametrize(
+    ("mode", "pcp_size", "expected_num_tokens"),
+    [
+        (CUDAGraphMode.NONE, 1, 8),
+        (CUDAGraphMode.PIECEWISE, 1, 5),
+        (CUDAGraphMode.NONE, 2, 5),
+    ],
+)
+def test_dispatch_pads_only_non_pcp_eager(mode, pcp_size, expected_num_tokens):
+    config = SimpleNamespace(
+        compilation_config=SimpleNamespace(cudagraph_mode=mode),
+        parallel_config=SimpleNamespace(
+            pcp_shard_decode_requests=False,
+            prefill_context_parallel_size=pcp_size,
+        ),
+    )
+    manager = SimpleNamespace(vllm_config=config)
+    with (
+        patch.object(patch_model_runner, "pad_num_tokens", return_value=8) as pad,
+        patch.object(
+            patch_model_runner,
+            "get_ascend_config",
+            return_value=SimpleNamespace(enable_shared_expert_dp=True),
+        ),
+        patch.object(patch_model_runner, "_dispatch_cg_and_sync_dp", return_value=("desc", None)) as parent,
+    ):
+        assert patch_model_runner.dispatch_cg_and_sync_dp(manager, 2, 5, None, 1, 0) == ("desc", None)
+
+    assert parent.call_args.args[:4] == (manager, 2, expected_num_tokens, None)
+    if mode == CUDAGraphMode.NONE and pcp_size == 1:
+        pad.assert_called_once_with(5, config, True)
+    else:
+        pad.assert_not_called()
+
+
+def test_dispatch_preserves_sharded_pcp_request_count():
+    config = SimpleNamespace(
+        compilation_config=SimpleNamespace(cudagraph_mode=CUDAGraphMode.NONE),
+        parallel_config=SimpleNamespace(
+            pcp_shard_decode_requests=True,
+            prefill_context_parallel_size=2,
+        ),
+    )
+    manager = SimpleNamespace(vllm_config=config)
+    with (
+        patch.object(patch_model_runner, "pad_num_tokens") as pad,
+        patch.object(patch_model_runner, "_dispatch_cg_and_sync_dp", return_value=("desc", None)) as parent,
+    ):
+        patch_model_runner.dispatch_cg_and_sync_dp(manager, 16, 6, 2, 1, 0)
+
+    assert parent.call_args.args[:4] == (manager, 3, 6, 2)
+    pad.assert_not_called()
+
+
 @pytest.mark.parametrize("is_profiling", [False, True])
 @pytest.mark.parametrize("has_trackers", [False, True])
 def test_initialize_preserves_connector_containers_and_flattens_runner_cache(is_profiling, has_trackers):

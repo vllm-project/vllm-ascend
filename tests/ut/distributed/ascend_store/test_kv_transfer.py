@@ -623,6 +623,21 @@ class TestKVCacheStoreSendingThread(unittest.TestCase):
         self.assertEqual(len(keys), 1)
         self.assertEqual(sizes, [[16384, 512]])
 
+    def test_put_uses_only_locally_projected_groups(self):
+        thread, store = self._make_thread([0])
+        thread.token_database = make_projected_database()
+        thread.block_size = [16, 16]
+        store.exists = MagicMock(return_value=[0])
+        request = make_projected_request(1)
+        thread.add_stored_request(request)
+        thread.request_queue.put(request)
+
+        thread._handle_request(request)
+
+        store.exists.assert_called_once()
+        keys, addrs, sizes = store.put_calls[0]
+        self.assertEqual((len(keys), addrs, sizes), (1, [[1016]], [[16]]))
+
     def test_save_keeps_checks_for_align_state_slots(self):
         thread, store = self._make_thread()
         thread.group_uses_align_state = [True]

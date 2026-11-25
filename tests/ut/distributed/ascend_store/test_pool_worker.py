@@ -142,7 +142,8 @@ def make_worker(
     module = "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker"
     start_patch(test, f"{module}.get_tensor_model_parallel_rank", return_value=tp_rank)
     start_patch(test, f"{module}.get_tensor_model_parallel_world_size", return_value=tp_size)
-    start_patch(test, f"{module}.get_pp_group", return_value=SimpleNamespace(rank_in_group=pp_rank))
+    pp_group = SimpleNamespace(rank_in_group=pp_rank, cpu_group=object())
+    start_patch(test, f"{module}.get_pp_group", return_value=pp_group)
     pcp_group = start_patch(test, f"{module}.get_pcp_group")
     pcp_group.return_value.world_size = pcp_size
     pcp_group.return_value.rank_in_group = pcp_rank
@@ -210,6 +211,14 @@ def make_worker(
         config.kv_events_config = MagicMock(enable_kv_cache_events=True)
 
     kv_cache_config = make_resolved_cache_config(config, kv_cache_config)
+    if config.parallel_config.pipeline_parallel_size > 1 and not use_layerwise:
+        # The default fixture gives every PP rank the same groups.
+        def gather_groups(gathered, local_groups, *, group):
+            assert group is pp_group.cpu_group
+            gathered[:] = [local_groups] * len(gathered)
+
+        with patch.object(torch.distributed, "all_gather_object", side_effect=gather_groups):
+            return create_kv_pool_worker(config, use_layerwise=use_layerwise, kv_cache_config=kv_cache_config)
     return create_kv_pool_worker(config, use_layerwise=use_layerwise, kv_cache_config=kv_cache_config)
 
 

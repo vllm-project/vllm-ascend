@@ -1276,7 +1276,7 @@ class KVCacheStoreRecvingThread(_WholeBlockKVTransferThread):
             key_list = []
             block_id_list: list[int] = []
             memory_locations: list[MemoryLocation] | None = [] if self.host_memory_group_ids else None
-            group_ids = req_meta.kv_cache_group_ids or [0]
+            group_ids = self.token_database.project_group_ids(req_meta.kv_cache_group_ids or [0])
             load_masks = self.token_database.load_mask(req_meta.block_hashes, token_len)
             tail_boundaries = {boundary.group_id: boundary.num_tokens for boundary in load_spec.tail_key_boundaries}
             for group_id in group_ids:
