@@ -4,6 +4,7 @@ import random
 import sys
 import types
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -54,14 +55,14 @@ def test_client_cache_salts_and_no_retries(tmp_path, monkeypatch):
         async def get_request_body(self, *args, **kwargs):
             return {"messages": ["unchanged"], "max_tokens": 1024}
 
-    module.API = API
+    module.__dict__["API"] = API
     monkeypatch.setitem(sys.modules, module.__name__, module)
     (tmp_path / "vllm_api_stream_chat.py").write_text(
         "from rp3_test_api import API as VLLMCustomAPIChat\n"
         "models = [dict(type=VLLMCustomAPIChat, retry=2, generation_kwargs=dict(ignore_eos=True))]\n"
     )
     rp3.prepare_request_configs(tmp_path)
-    namespace = {}
+    namespace: dict[str, Any] = {}
     exec((tmp_path / "vllm_api_stream_chat_rp3_cold.py").read_text(), namespace)
     cold = namespace["models"][0]
     assert cold["retry"] == 0
