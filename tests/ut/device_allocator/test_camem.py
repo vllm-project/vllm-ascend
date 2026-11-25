@@ -325,7 +325,7 @@ class TestCaMem(PytestBase):
 
     @patch("vllm_ascend.device_allocator.camem.create_and_map")
     @patch("vllm_ascend.device_allocator.camem.memcpy")
-    def test_wake_up_loads_and_clears_cpu_backup(self, mock_memcpy, mock_create_and_map):
+    def test_wake_up_loads_cpu_backup(self, mock_memcpy, mock_create_and_map):
         allocator = CaMemAllocator.get_instance()
 
         handle = (1, 10, 1000, 0)
@@ -336,7 +336,7 @@ class TestCaMem(PytestBase):
         allocator.wake_up(tags=["tag1"])
 
         mock_create_and_map.assert_called_once_with(handle)
-        assert data.cpu_backup_tensor is None
+        assert data.cpu_backup_tensor is tensor
         assert mock_memcpy.called
 
     def test_use_memory_pool_context_manager(self):

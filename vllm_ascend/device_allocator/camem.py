@@ -282,7 +282,6 @@ class CaMemAllocator(CuMemAllocator):
                     ACL_MEMCPY_HOST_TO_DEVICE = 1
                     dest_max = ptr + size_in_bytes * 2
                     memcpy(ptr, dest_max, cpu_ptr, size_in_bytes, ACL_MEMCPY_HOST_TO_DEVICE)
-                    data.cpu_backup_tensor = None
 
     @contextmanager
     def use_memory_pool(self, tag: str | None = None):
