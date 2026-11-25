@@ -17,7 +17,7 @@ import numpy as np
 import torch
 from torch.distributed import all_reduce
 from vllm.config.utils import hash_config_cached
-from vllm.distributed import get_dp_group, get_ep_group, get_eplb_group
+from vllm.distributed import get_ep_group, get_eplb_group
 from vllm.distributed.eplb import eplb_state as _eplb_state
 from vllm.distributed.eplb.policy import AbstractEplbPolicy
 from vllm.distributed.parallel_state import (
@@ -46,15 +46,6 @@ EXPERT_MAPPING_EP_SIZE: ContextVar[int] = ContextVar("vllm_ascend_expert_mapping
 # mask per micro-batch. Read directly rather than through _EXTRA_CTX: the
 # proxy cannot create the list atomically, which DBO needs.
 _ALLGATHER_SOURCE_MASK_SLOTS = "eplb_allgather_source_mask_slots"
-
-
-def _needs_group_load_decision() -> bool:
-    """Return whether idle and active ranks can share one EP-group step.
-
-    The ranks of a data-parallel replica schedule together, so only an EP
-    group spanning several replicas mixes them.
-    """
-    return get_ep_group().world_size > 1 and get_dp_group().world_size > 1
 
 
 @contextmanager
@@ -290,10 +281,10 @@ class AscendEplbState(_eplb_state.EplbState):
         self._configured_policy = policy
         if policy is not None:
             self.policy = policy
-        self._has_fresh_recorded_load = False
         self._is_load_sampling_step = False
         self.allgather_record_tensor: torch.Tensor | None = None
         self.allgather_source_record_tensor: torch.Tensor | None = None
+        self._slot_gathered: torch.Tensor | None = None
         self._load_collection_phase_matched = True
         self._stop_async = threading.Event()
         self._suspended = False
@@ -332,8 +323,7 @@ class AscendEplbState(_eplb_state.EplbState):
         key = hash_config_cached(model_config)
         model_state = self.model_states[key]
         model_state._allgather_physical_map = model_state.physical_to_logical_map.clone()
-        if self.uses_custom_load_stats:
-            self._initialize_load_stats_state(model_state)
+        self._initialize_load_stats_state(model_state)
 
     def _propagate_shared_tensors(self, model, num_unpadded_tokens_tensors) -> None:
         super()._propagate_shared_tensors(model, num_unpadded_tokens_tensors)
@@ -343,6 +333,12 @@ class AscendEplbState(_eplb_state.EplbState):
             return
         if self.allgather_record_tensor is None:
             self.allgather_record_tensor = torch.full((), -1, dtype=torch.int32, device=self.device)
+            self._slot_gathered = torch.full(
+                (self.expert_load_window_size,),
+                -1,
+                dtype=torch.int32,
+                device=self.device,
+            )
         if self.allgather_source_record_tensor is None:
             self.allgather_source_record_tensor = torch.ones((), dtype=torch.bool, device=self.device)
         for layer in model.moe_layers:
@@ -406,15 +402,21 @@ class AscendEplbState(_eplb_state.EplbState):
             super().start_async_loop(*args, **kwargs)
 
     def _initialize_load_stats_state(self, model_state: Any) -> None:
-        model_state._last_committed_mean_ratios = np.full(
-            model_state.model.num_moe_layers,
-            np.nan,
-        )
+        if self.uses_custom_load_stats:
+            model_state._last_committed_mean_ratios = np.full(
+                model_state.model.num_moe_layers,
+                np.nan,
+            )
         model_state._load_mapping_generation = 0
         model_state._observed_load_mapping_generation = 0
-        if hasattr(self, "_local_load_collection_mask"):
+        if hasattr(self, "_slot_active"):
             return
-        self._local_load_collection_mask = torch.zeros(
+        self._slot_active = torch.zeros(
+            self.expert_load_window_size,
+            dtype=torch.int32,
+            device="cpu",
+        )
+        self._slot_out_of_phase = torch.zeros(
             self.expert_load_window_size,
             dtype=torch.int32,
             device="cpu",
@@ -460,8 +462,11 @@ class AscendEplbState(_eplb_state.EplbState):
         )
         if not mapping_changed:
             return
-        self._local_load_collection_mask.zero_()
+        self._slot_active.zero_()
+        self._slot_out_of_phase.zero_()
         self._physical_load_sample_slots.fill_(-1)
+        if getattr(self, "_slot_gathered", None) is not None:
+            self._slot_gathered.fill_(-1)
         self._num_recorded_load_steps = 0
         self._load_stats_window_start_index = 0
         self._load_stats_window_write_index = 0
@@ -495,33 +500,24 @@ class AscendEplbState(_eplb_state.EplbState):
         )
         return PreparedLoadStats(logical_values[..., :-1], physical_stats.sample_counts)
 
-    def _group_collected_step(self, is_dummy: bool) -> bool:
-        """Return whether every EP rank commits this step's load.
-
-        Expert counts come from the rank that executes the tokens, so the load
-        of a step is complete only if all EP ranks commit it or none does.
-        """
+    def _record_load_slot(self, is_dummy: bool) -> None:
+        """Book the window slot that the upstream step writes next."""
+        self._discard_samples_from_old_mapping()
+        index = self._load_stats_window_write_index
         active = not is_dummy
-        # [active ranks, active ranks outside the collection phase]
-        flags = torch.tensor(
-            (int(active), int(active and not self._load_collection_phase_matched)),
-            dtype=torch.int32,
-        )
-        if _needs_group_load_decision():
-            # Every rank calls this on the same steps: sampling depends on the
-            # rearrangement counter, which upstream keeps equal across ranks.
-            all_reduce(flags, group=get_ep_group().cpu_group)
-        if 0 < int(flags[1]) < int(flags[0]):
-            logger.debug("EPLB skips a step that mixes prefill and decode across DP ranks")
-        collected = int(flags[0]) > 0 and int(flags[1]) == 0
-        allgather_record = self.allgather_record_tensor
-        if allgather_record is not None:
-            gathered = int(allgather_record.item())
-            if gathered >= 0:
-                # An AllGather layer decided for the whole forward from the
-                # gathered source eligibility, which already filters by phase.
-                return gathered != 0
-        return collected
+        self._slot_active[index] = int(active)
+        self._slot_out_of_phase[index] = int(active and not self._load_collection_phase_matched)
+        self._physical_load_sample_slots[index] = self.expert_load_window_step
+        if getattr(self, "_slot_gathered", None) is not None:
+            # Device to device only: the value is read once per rearrangement.
+            self._slot_gathered[index].copy_(self.allgather_record_tensor)
+        if self._num_recorded_load_steps < self.expert_load_window_size:
+            self._num_recorded_load_steps += 1
+        else:
+            self._load_stats_window_start_index = (
+                self._load_stats_window_start_index + 1
+            ) % self.expert_load_window_size
+        self._load_stats_window_write_index = (index + 1) % self.expert_load_window_size
 
     def step(
         self,
@@ -533,31 +529,16 @@ class AscendEplbState(_eplb_state.EplbState):
         self.raise_if_close_failed()
         if self._hixl_session is not None:
             _raise_if_async_worker_stopped(self)
-        is_sampling = getattr(self, "_is_load_sampling_step", False) and not is_profile
-        if is_sampling:
-            # An idle DP rank still executes remote tokens, so whether its load
-            # counts is decided by the EP group rather than by this rank.
-            is_dummy = not self._group_collected_step(is_dummy)
-        if is_sampling and not is_dummy:
-            self._has_fresh_recorded_load = True
-        is_sampling = is_sampling and not is_dummy
+        is_sampling = self._is_load_sampling_step and not is_profile
         self._is_load_sampling_step = False
-        if self.uses_custom_load_stats:
-            self._discard_samples_from_old_mapping()
-            if not is_profile:
-                index = self._load_stats_window_write_index
-                has_sample = is_sampling
-                self._local_load_collection_mask[index] = has_sample
-                self._physical_load_sample_slots[index] = self.expert_load_window_step if has_sample else -1
-                if self._num_recorded_load_steps < self.expert_load_window_size:
-                    self._num_recorded_load_steps += 1
-                else:
-                    self._load_stats_window_start_index = (
-                        self._load_stats_window_start_index + 1
-                    ) % self.expert_load_window_size
-                self._load_stats_window_write_index = (index + 1) % self.expert_load_window_size
+        if is_sampling:
+            # Expert counts come from the rank that executes the tokens, so an
+            # idle DP rank holds load sent by the other ranks. Every rank writes
+            # its window slot, which keeps the window position equal across
+            # ranks. Which slots hold complete load is decided when rearranging.
+            self._record_load_slot(is_dummy)
         super().step(
-            is_dummy=is_dummy,
+            is_dummy=False if is_sampling else is_dummy,
             is_profile=is_profile,
             log_stats=log_stats,
         )
@@ -572,8 +553,97 @@ class AscendEplbState(_eplb_state.EplbState):
         """
         return super()._sync_load_pass(*args, **kwargs)
 
+    def _local_load_per_slot(self) -> torch.Tensor:
+        """Sum the load recorded behind each window slot, oldest first."""
+        physical_slots = self._physical_load_sample_slots[self._ordered_load_step_indices()]
+        local_load = torch.zeros(self.expert_load_window_size, dtype=torch.int64)
+        written = physical_slots >= 0
+        if written.any():
+            device_slots = physical_slots[written].to(self.device)
+            for model_state in self.model_states.values():
+                window = model_state.expert_load_window
+                local_load[written] += (
+                    window.index_select(0, device_slots).reshape(device_slots.numel(), -1).sum(dim=1).cpu()
+                )
+        return local_load
+
+    def _all_reduce_sum(self, value: torch.Tensor) -> None:
+        """Sum ``value`` over the EP group in place."""
+        ep_group = get_ep_group()
+        cpu_group = getattr(ep_group, "cpu_group", None)
+        if cpu_group is not None:
+            if cpu_group.size() > 1:
+                all_reduce(value, group=cpu_group)
+            return
+        device_group = ep_group.device_group
+        if device_group.size() <= 1:
+            return
+        reduced = value.to(self.device)
+        all_reduce(reduced, group=device_group)
+        value.copy_(reduced.cpu())
+
+    def _reduce_load_slots(self) -> torch.Tensor:
+        """Return per-slot ``[active ranks, active ranks outside the phase, load]``.
+
+        Every rank calls this at the same rearrangement, so all of them read the
+        same reduced flags and take the same branch.
+        """
+        step_indices = self._ordered_load_step_indices()
+        flags = torch.stack(
+            (
+                self._slot_active[step_indices].to(torch.int64),
+                self._slot_out_of_phase[step_indices].to(torch.int64),
+                self._local_load_per_slot(),
+            )
+        )
+        self._all_reduce_sum(flags)
+        return flags
+
+    def _included_load_slots(self, flags: torch.Tensor) -> torch.Tensor:
+        """Return the slots whose load is complete.
+
+        A slot is complete when some rank scheduled tokens on it, no active rank
+        was outside the collection phase and some rank recorded load. Owner
+        counts cannot tell which DP rank sent a token, so a slot that mixes
+        phases across ranks is dropped. On the AllGather path the gathered
+        source eligibility of the slot decides instead: it is equal on every
+        rank and filters by the phase of each source.
+        """
+        active, out_of_phase, load = flags
+        included = (active > 0) & (out_of_phase == 0)
+        if getattr(self, "_slot_gathered", None) is not None:
+            gathered = self._slot_gathered[self._ordered_load_step_indices()].cpu()
+            included = torch.where(gathered >= 0, gathered > 0, included)
+        return included & (load > 0)
+
+    def _log_window_selection(self, flags: torch.Tensor, included: torch.Tensor) -> None:
+        active = flags[0] > 0
+        if get_ep_group().device_group.rank() != 0:
+            return
+        if included.any():
+            logger.info(
+                "EPLB load window: %d slots collected, %d slots with active ranks dropped",
+                int(included.sum()),
+                int((active & ~included).sum()),
+            )
+        else:
+            logger.info(
+                "EPLB skips rearrangement: the load window holds no complete sample (%d slots dropped)",
+                int(active.sum()),
+            )
+
+    def _zero_excluded_slots(self, included: torch.Tensor) -> None:
+        excluded = self._physical_load_sample_slots[self._ordered_load_step_indices()][~included]
+        excluded = excluded[excluded >= 0]
+        if excluded.numel() == 0:
+            return
+        device_rows = excluded.to(self.device)
+        for model_state in self.model_states.values():
+            model_state.expert_load_window.index_fill_(0, device_rows, 0)
+
     def collect_global_load_stats(
         self,
+        included_slots: torch.Tensor | None = None,
     ) -> dict[str, PreparedLoadStats] | None:
         """Prepare and reduce policy statistics on a shared time axis."""
         prepare_load_stats = getattr(self.policy, "prepare_local_load_stats", None)
@@ -582,14 +652,14 @@ class AscendEplbState(_eplb_state.EplbState):
         self._discard_samples_from_old_mapping()
         if self._num_recorded_load_steps == 0:
             return None
-
-        group = get_eplb_group()
-        step_indices = self._ordered_load_step_indices()
-        rank_counts = self._local_load_collection_mask[step_indices].clone()
-        all_reduce(rank_counts, group=group.cpu_group)
-        included_steps = step_indices[rank_counts > 0]
-        if included_steps.numel() == 0:
+        if included_slots is None:
+            included_slots = self._included_load_slots(self._reduce_load_slots())
+        if not included_slots.any():
             return None
+
+        step_indices = self._ordered_load_step_indices()
+        included_steps = step_indices[included_slots]
+        group = get_eplb_group()
 
         local_stats: dict[str, PreparedLoadStats] = {}
         for model_key, model_state in self.model_states.items():
@@ -642,32 +712,6 @@ class AscendEplbState(_eplb_state.EplbState):
             model_state.rebalanced = True
         self.rearrange_event.record()
 
-    def _has_global_fresh_recorded_load(self) -> bool:
-        """Synchronize whether any EP rank recorded load since rearranging."""
-        ep_group = get_ep_group()
-        cpu_group = getattr(ep_group, "cpu_group", None)
-        if cpu_group is not None:
-            if cpu_group.size() <= 1:
-                return self._has_fresh_recorded_load
-            flag = torch.tensor(
-                (self._has_fresh_recorded_load,),
-                dtype=torch.int32,
-                device="cpu",
-            )
-            all_reduce(flag, group=cpu_group)
-            return bool(flag.item())
-
-        device_group = ep_group.device_group
-        if device_group.size() <= 1:
-            return self._has_fresh_recorded_load
-        flag = torch.tensor(
-            (self._has_fresh_recorded_load,),
-            dtype=torch.int32,
-            device=self.device,
-        )
-        all_reduce(flag, group=device_group)
-        return bool(flag.item())
-
     def rearrange(
         self,
         is_profile: bool = False,
@@ -675,24 +719,29 @@ class AscendEplbState(_eplb_state.EplbState):
     ) -> torch.Tensor | None:
         if self._suspended:
             return None
+        included = None
+        if not is_profile and rank_mapping is None and not self.parallel_config.enable_elastic_ep:
+            # Load recorded under a placement that has since been committed says
+            # nothing about the current one.
+            self._discard_samples_from_old_mapping()
+            # One reduction per rearrangement decides the window on every rank
+            # alike, so an all-zero or mixed-phase window never reaches a policy.
+            flags = self._reduce_load_slots()
+            included = self._included_load_slots(flags)
+            self._log_window_selection(flags, included)
+            if not included.any():
+                return None
         use_custom_async_stats = (
             self.is_async and not is_profile and rank_mapping is None and self.uses_custom_load_stats
         )
-        should_gate = (
-            hasattr(self, "_has_fresh_recorded_load")
-            and not is_profile
-            and rank_mapping is None
-            and not self.parallel_config.enable_elastic_ep
-        )
-        if should_gate and not self._has_global_fresh_recorded_load():
-            return None
-
         if use_custom_async_stats:
-            global_load_stats = self.collect_global_load_stats()
+            global_load_stats = self.collect_global_load_stats(included)
             if global_load_stats is not None:
                 self.publish_async_load_stats(global_load_stats)
             result = None
         else:
+            if included is not None:
+                self._zero_excluded_slots(included)
             result = super().rearrange(
                 is_profile=is_profile,
                 rank_mapping=rank_mapping,
@@ -700,8 +749,6 @@ class AscendEplbState(_eplb_state.EplbState):
         if not is_profile and not self.is_async:
             for model_state in self.model_states.values():
                 refresh_model_routing_tables(model_state)
-        if not is_profile:
-            self._has_fresh_recorded_load = False
         return result
 
     def drain_async(self) -> None:
@@ -805,9 +852,8 @@ class AscendEplbState(_eplb_state.EplbState):
         state._configured_policy = policy
         if policy is not None:
             state.policy = policy
-        if state.uses_custom_load_stats:
-            for model_state in state.model_states.values():
-                state._initialize_load_stats_state(model_state)
+        for model_state in state.model_states.values():
+            state._initialize_load_stats_state(model_state)
         for model_state in state.model_states.values():
             refresh_model_routing_tables(model_state)
             # Elastic EP builds the state here instead of through add_model, so

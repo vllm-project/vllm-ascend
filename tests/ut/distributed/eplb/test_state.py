@@ -227,6 +227,7 @@ def test_add_model_snapshots_the_placement_on_every_profile(monkeypatch, device)
     state._hixl_session = None
     state._configured_policy = None
     state.parallel_config = SimpleNamespace(eplb_config=SimpleNamespace(policy="default"))
+    state.expert_load_window_size = 2
     state.model_states = {"target": SimpleNamespace(physical_to_logical_map=physical)}
     key = hash_config_cached(model_config)
     state.model_states[key] = state.model_states["target"]
@@ -369,6 +370,8 @@ def test_from_mapping_refreshes_final_mapping(monkeypatch):
 
     def upstream_from_mapping(cls, **kwargs):
         state = cls.__new__(cls)
+        # The upstream add_model sets it before the model state is extended.
+        state.expert_load_window_size = 1
         state.model_states = {"model": model_state}
         return state
 

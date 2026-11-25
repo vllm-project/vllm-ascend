@@ -67,7 +67,10 @@ class AscendEPLBController(EPLBController):
             self.state = AscendEplbState(self.parallel_config, self.device, self.eplb_policy)
 
     def set_batch_phase(self, batch_has_prefill: bool) -> None:
-        self._load_collection_phase_matched = is_eplb_load_collection_phase_matched(
+        # The collection phase filters load only for a policy that consumes the
+        # Ascend load statistics. `default` treats it as `all`.
+        filters_phase = self.state is not None and self.state.uses_custom_load_stats
+        self._load_collection_phase_matched = not filters_phase or is_eplb_load_collection_phase_matched(
             self.load_collection_phase,
             batch_has_prefill,
         )
@@ -96,16 +99,14 @@ class AscendEPLBController(EPLBController):
         supports_allgather = get_current_hardware_profile().moe_comm_policy is MoECommPolicy.CAPACITY_AND_WORLD_SIZE
         if not state.uses_custom_load_stats or supports_allgather:
             state.prepare_forward(model_config, num_unpadded_tokens, ubatch_slices)
-            if not supports_allgather:
-                return
-        if supports_allgather:
-            if state.allgather_record_tensor is not None:
-                state.allgather_record_tensor.fill_(-1)
+        if supports_allgather and state.allgather_record_tensor is not None:
+            state.allgather_record_tensor.fill_(-1)
         if state.should_record_tensor is not None:
             is_sampling = state._should_record_current_step(log_stats=self.parallel_config.eplb_config.log_balancedness)
             # Expert counts come from the rank that executes the tokens, so idle
-            # DP ranks and batches outside the collection phase record too. The
-            # step decides group-wide whether the recorded load is committed.
+            # DP ranks and batches outside the collection phase record too. A
+            # window slot is kept or dropped when rearranging, on every rank
+            # from the same reduced flags.
             state.should_record_tensor.fill_(is_sampling)
             state._is_load_sampling_step = is_sampling
             state._load_collection_phase_matched = self._load_collection_phase_matched

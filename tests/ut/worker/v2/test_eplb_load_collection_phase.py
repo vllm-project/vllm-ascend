@@ -119,7 +119,6 @@ class TestEplbLoadCollectionPhase(unittest.TestCase):
                 controller = self._make_controller(load_collection_phase="prefill")
                 state = MagicMock()
                 state.should_record_tensor = torch.tensor(False)
-                state._has_fresh_recorded_load = False
                 state._should_record_current_step.return_value = True
                 controller.state = state
                 controller.set_batch_phase(batch_has_prefill=batch_has_prefill)
@@ -128,278 +127,335 @@ class TestEplbLoadCollectionPhase(unittest.TestCase):
 
                 state.prepare_forward.assert_not_called()
                 state._should_record_current_step.assert_called_once_with(log_stats=False)
-                # The executing rank's counts are recorded; the step decides group-wide.
+                # The executing rank's counts are recorded; a slot is kept or
+                # dropped when rearranging.
                 self.assertTrue(state.should_record_tensor.item())
                 self.assertTrue(state._is_load_sampling_step)
                 self.assertIs(state._load_collection_phase_matched, batch_has_prefill)
-                self.assertFalse(state._has_fresh_recorded_load)
+
+    def test_default_policy_treats_the_phase_as_all(self):
+        controller = self._make_controller(load_collection_phase="prefill", policy="default")
+        state = MagicMock()
+        state.uses_custom_load_stats = False
+        state.should_record_tensor = torch.tensor(False)
+        state._should_record_current_step.return_value = True
+        controller.state = state
+        controller.set_batch_phase(batch_has_prefill=False)
+
+        controller.prepare_forward(object(), 7)
+
+        self.assertTrue(state._load_collection_phase_matched)
+        self.assertTrue(state.should_record_tensor.item())
+        self.assertTrue(state._is_load_sampling_step)
+        state.prepare_forward.assert_called_once()
 
 
-def _reduced_by(rank_flags, sent):
-    """Return an all_reduce that records the input and sums ``rank_flags`` into it."""
-
-    def all_reduce(flags, **_kwargs):
-        sent.append(flags.tolist())
-        flags.copy_(torch.tensor(rank_flags, dtype=torch.int32).sum(dim=0))
-
-    return all_reduce
+_WINDOW_SIZE = 2
 
 
-def _decision_state(monkeypatch, *, phase_matched=True, gathered=None, shared_ep_group=True):
-    monkeypatch.setattr(state_module, "_needs_group_load_decision", lambda: shared_ep_group)
+def _stair_policy():
+    return SimpleNamespace(prepare_local_load_stats=lambda samples: PreparedLoadStats(samples))
+
+
+_BOTH_POLICIES = pytest.mark.parametrize("policy_factory", [_stair_policy, DefaultEplbPolicy], ids=["stair", "default"])
+
+
+def _model_state(window):
+    return SimpleNamespace(
+        model=SimpleNamespace(num_logical_experts=window.shape[-1]),
+        physical_to_logical_map=torch.arange(window.shape[-1]).unsqueeze(0),
+        _load_mapping_generation=0,
+        _observed_load_mapping_generation=0,
+        expert_load_window=window,
+        expert_load_pass=torch.zeros_like(window[0]),
+        rebalanced=False,
+    )
+
+
+def _install_groups(monkeypatch, remote=()):
+    """Give the EP group CPU and device subgroups and mock the reduction.
+
+    ``remote`` holds the per-slot ``[active, out_of_phase, load]`` that other
+    ranks contribute to the window flags; other tensors are left as they are.
+    """
     cpu_group = MagicMock()
     cpu_group.size.return_value = 4
-    monkeypatch.setattr(state_module, "get_ep_group", lambda: SimpleNamespace(cpu_group=cpu_group))
-    upstream_step = MagicMock()
-    monkeypatch.setattr(upstream_eplb_state.EplbState, "step", upstream_step)
+    device_group = MagicMock()
+    device_group.rank.return_value = 0
+    reduced = []
+
+    def all_reduce(value, **kwargs):
+        reduced.append(kwargs["group"])
+        if value.shape == (3, _WINDOW_SIZE):
+            for flags in remote:
+                value.add_(torch.tensor(flags, dtype=value.dtype))
+
+    ep_group = SimpleNamespace(cpu_group=cpu_group, device_group=device_group)
+    monkeypatch.setattr(state_module, "all_reduce", all_reduce)
+    monkeypatch.setattr(state_module, "get_ep_group", lambda: ep_group)
+    monkeypatch.setattr(state_module, "get_eplb_group", lambda: SimpleNamespace(device_group=device_group))
+    return ep_group, reduced
+
+
+def _booked_state(policy, *, active, out_of_phase, rows=None, gathered=None):
+    """A state at rearrangement time; its window has one row per booked slot."""
+    window = torch.zeros((_WINDOW_SIZE, 1, 2), dtype=torch.int32)
+    if rows is not None:
+        window.copy_(torch.tensor(rows, dtype=torch.int32))
+    state = AscendEplbState.__new__(AscendEplbState)
+    state._suspended = False
+    state.parallel_config = SimpleNamespace(enable_elastic_ep=False)
+    state.device = torch.device("cpu")
+    state.policy = policy
+    state.model_states = {"model": _model_state(window)}
+    state.is_async = True
+    state.expert_load_window_size = _WINDOW_SIZE
+    state._slot_active = torch.tensor(active, dtype=torch.int32)
+    state._slot_out_of_phase = torch.tensor(out_of_phase, dtype=torch.int32)
+    state._physical_load_sample_slots = torch.arange(_WINDOW_SIZE)
+    state._slot_gathered = None if gathered is None else torch.tensor(gathered, dtype=torch.int32)
+    state._num_recorded_load_steps = _WINDOW_SIZE
+    state._load_stats_window_start_index = 0
+    state._load_stats_window_write_index = 0
+    return state
+
+
+def _rearranged(policy, state, upstream_rearrange, publish):
+    """Return the slot rows the policy was offered, or None when it was not."""
+    if isinstance(policy, DefaultEplbPolicy):
+        if not upstream_rearrange.called:
+            return None
+        window = state.model_states["model"].expert_load_window
+        return window[window.abs().sum(dim=(1, 2)) > 0].tolist()
+    if not publish.called:
+        return None
+    return publish.call_args.args[0]["model"].values.tolist()
+
+
+@_BOTH_POLICIES
+def test_slot_holding_load_of_an_idle_rank_is_rearranged(monkeypatch, policy_factory):
+    # The three idle DP replicas of a group execute most of the tokens, so a
+    # slot of a rank that scheduled nothing still holds load.
+    ep_group, reduced = _install_groups(monkeypatch, remote=[([1, 1], [0, 0], [0, 0])])
+    state = _booked_state(policy_factory(), active=[0, 0], out_of_phase=[0, 0], rows=[[[5, 7]], [[9, 11]]])
+    upstream_rearrange = MagicMock(return_value=None)
+    publish = MagicMock()
+    monkeypatch.setattr(upstream_eplb_state.EplbState, "rearrange", upstream_rearrange)
+    monkeypatch.setattr(AscendEplbState, "publish_async_load_stats", publish)
+
+    state.rearrange()
+
+    assert _rearranged(state.policy, state, upstream_rearrange, publish) == [[[5, 7]], [[9, 11]]]
+    # The window is reduced once per rearrangement on the EP CPU group. STAIR
+    # then sums the selected samples on the EPLB device group, as it did before.
+    later = [] if isinstance(state.policy, DefaultEplbPolicy) else [ep_group.device_group]
+    assert reduced == [ep_group.cpu_group] + later
+
+
+@_BOTH_POLICIES
+def test_slot_mixing_phases_across_ranks_is_dropped(monkeypatch, policy_factory):
+    # Owner counts cannot tell which DP rank sent a token, so a slot in which
+    # another rank prefills is not a decode sample.
+    _install_groups(monkeypatch, remote=[([1, 0], [0, 0], [0, 0]), ([0, 1], [0, 1], [0, 0])])
+    state = _booked_state(policy_factory(), active=[1, 1], out_of_phase=[0, 0], rows=[[[5, 7]], [[9, 11]]])
+    upstream_rearrange = MagicMock(return_value=None)
+    publish = MagicMock()
+    monkeypatch.setattr(upstream_eplb_state.EplbState, "rearrange", upstream_rearrange)
+    monkeypatch.setattr(AscendEplbState, "publish_async_load_stats", publish)
+
+    state.rearrange()
+
+    assert _rearranged(state.policy, state, upstream_rearrange, publish) == [[[5, 7]]]
+
+
+@_BOTH_POLICIES
+def test_window_without_a_complete_slot_does_not_rearrange(monkeypatch, policy_factory):
+    _install_groups(monkeypatch, remote=[([1, 0], [1, 1], [0, 0])])
+    state = _booked_state(policy_factory(), active=[1, 1], out_of_phase=[1, 1], rows=[[[5, 7]], [[9, 11]]])
+    upstream_rearrange = MagicMock(return_value=None)
+    publish = MagicMock()
+    monkeypatch.setattr(upstream_eplb_state.EplbState, "rearrange", upstream_rearrange)
+    monkeypatch.setattr(AscendEplbState, "publish_async_load_stats", publish)
+
+    state.rearrange()
+
+    assert _rearranged(state.policy, state, upstream_rearrange, publish) is None
+
+
+def test_all_zero_window_does_not_reach_the_default_policy(monkeypatch):
+    # On an all-zero window DefaultEplbPolicy piles every replica on one expert.
+    _install_groups(monkeypatch)
+    state = _booked_state(DefaultEplbPolicy(), active=[1, 1], out_of_phase=[0, 0])
+    upstream_rearrange = MagicMock(return_value=None)
+    publish = MagicMock()
+    monkeypatch.setattr(upstream_eplb_state.EplbState, "rearrange", upstream_rearrange)
+
+    state.rearrange()
+
+    assert _rearranged(state.policy, state, upstream_rearrange, publish) is None
+
+
+def test_slot_without_an_active_rank_is_dropped_with_its_stale_load(monkeypatch):
+    _install_groups(monkeypatch)
+    state = _booked_state(DefaultEplbPolicy(), active=[0, 0], out_of_phase=[0, 0], rows=[[[5, 7]], [[9, 11]]])
+    upstream_rearrange = MagicMock(return_value=None)
+    publish = MagicMock()
+    monkeypatch.setattr(upstream_eplb_state.EplbState, "rearrange", upstream_rearrange)
+
+    state.rearrange()
+
+    assert _rearranged(state.policy, state, upstream_rearrange, publish) is None
+
+
+@pytest.mark.parametrize(
+    "gathered,expected_rows",
+    [
+        # This rank scheduled nothing, but a source rank was inside the phase.
+        ([1, -1], [[[5, 7]]]),
+        # The sources filter by their own phase, which is finer than the slot flags.
+        ([-1, 1], [[[9, 11]]]),
+        ([-1, -1], None),
+    ],
+)
+def test_allgather_slots_follow_the_gathered_sources(monkeypatch, gathered, expected_rows):
+    _install_groups(monkeypatch)
+    # Slot 0 has no active rank, slot 1 mixes phases: the flags would drop both.
+    state = _booked_state(
+        _stair_policy(),
+        active=[0, 1],
+        out_of_phase=[0, 1],
+        rows=[[[5, 7]], [[9, 11]]],
+        gathered=gathered,
+    )
+    upstream_rearrange = MagicMock(return_value=None)
+    publish = MagicMock()
+    monkeypatch.setattr(upstream_eplb_state.EplbState, "rearrange", upstream_rearrange)
+    monkeypatch.setattr(AscendEplbState, "publish_async_load_stats", publish)
+
+    state.rearrange()
+
+    assert _rearranged(state.policy, state, upstream_rearrange, publish) == expected_rows
+
+
+@pytest.mark.parametrize("is_profile,enable_elastic_ep", [(True, False), (False, True)])
+def test_profile_and_elastic_rearranges_bypass_the_gate(monkeypatch, is_profile, enable_elastic_ep):
+    ep_group, reduced = _install_groups(monkeypatch)
+    state = _booked_state(DefaultEplbPolicy(), active=[0, 0], out_of_phase=[0, 0])
+    state.parallel_config.enable_elastic_ep = enable_elastic_ep
+    upstream_rearrange = MagicMock(return_value=None)
+    monkeypatch.setattr(upstream_eplb_state.EplbState, "rearrange", upstream_rearrange)
+
+    state.rearrange(is_profile=is_profile)
+
+    upstream_rearrange.assert_called_once_with(is_profile=is_profile, rank_mapping=None)
+    assert reduced == []
+
+
+@pytest.mark.parametrize("mixed,summary", [(False, "2 slots collected, 0 slots"), (True, "1 slots collected, 1 slots")])
+def test_window_selection_is_logged_once_per_rearrangement(monkeypatch, mixed, summary):
+    _install_groups(monkeypatch)
+    state = _booked_state(DefaultEplbPolicy(), active=[1, 1], out_of_phase=[0, int(mixed)], rows=[[[5, 7]], [[9, 11]]])
+    monkeypatch.setattr(upstream_eplb_state.EplbState, "rearrange", MagicMock(return_value=None))
+    logger = MagicMock()
+    monkeypatch.setattr(state_module, "logger", logger)
+
+    state.rearrange()
+
+    assert logger.info.call_count == 1
+    message, *counts = logger.info.call_args.args
+    assert summary in message % tuple(counts)
+
+
+def test_window_flags_fall_back_to_the_device_group(monkeypatch):
+    # A group without a CPU subgroup reduces on the device one instead.
+    device_group = MagicMock()
+    device_group.size.return_value = 4
+    monkeypatch.setattr(state_module, "get_ep_group", lambda: SimpleNamespace(device_group=device_group))
+    all_reduce = MagicMock(side_effect=lambda value, **_kwargs: value.add_(3))
+    monkeypatch.setattr(state_module, "all_reduce", all_reduce)
+    state = AscendEplbState.__new__(AscendEplbState)
+    state.device = torch.device("cpu")
+    flags = torch.tensor([1, 0, 5])
+
+    state._all_reduce_sum(flags)
+
+    assert flags.tolist() == [4, 3, 8]
+    assert all_reduce.call_args.kwargs["group"] is device_group
+
+
+def _live_state(monkeypatch, policy):
+    """A state whose upstream step runs and rearranges every second step."""
+    _install_groups(monkeypatch)
+    monkeypatch.setattr(
+        "vllm.distributed.eplb.eplb_state.get_ep_group",
+        lambda: SimpleNamespace(device_group=MagicMock()),
+    )
+    upstream_rearrange = MagicMock(return_value=None)
+    publish = MagicMock()
+    monkeypatch.setattr(upstream_eplb_state.EplbState, "rearrange", upstream_rearrange)
+    monkeypatch.setattr(AscendEplbState, "publish_async_load_stats", publish)
     state = AscendEplbState.__new__(AscendEplbState)
     state._hixl_session = None
     state._close_error = None
-    state._has_fresh_recorded_load = False
-    state._is_load_sampling_step = True
-    state._load_collection_phase_matched = phase_matched
-    state.allgather_record_tensor = None if gathered is None else torch.tensor(gathered)
-    state.policy = SimpleNamespace(prepare_local_load_stats=lambda samples: PreparedLoadStats(samples))
-    state.model_states = {}
-    state.expert_load_window_size = 2
-    state.expert_load_window_step = 3
-    state._local_load_collection_mask = torch.zeros(2, dtype=torch.int32)
-    state._physical_load_sample_slots = torch.full((2,), -1)
+    state._suspended = False
+    state.parallel_config = SimpleNamespace(enable_elastic_ep=False)
+    state.device = torch.device("cpu")
+    state.policy = policy
+    state.model_states = {"model": _model_state(torch.zeros((_WINDOW_SIZE, 1, 2), dtype=torch.int32))}
+    state.is_async = True
+    state.expert_load_window_size = _WINDOW_SIZE
+    state.expert_load_window_step = 0
+    state.expert_rearrangement_step = 0
+    state.expert_rearrangement_step_interval = _WINDOW_SIZE
+    state.should_record_tensor = None
+    state._slot_active = torch.zeros(_WINDOW_SIZE, dtype=torch.int32)
+    state._slot_out_of_phase = torch.zeros(_WINDOW_SIZE, dtype=torch.int32)
+    state._physical_load_sample_slots = torch.full((_WINDOW_SIZE,), -1)
+    state._slot_gathered = None
     state._num_recorded_load_steps = 0
     state._load_stats_window_start_index = 0
     state._load_stats_window_write_index = 0
-    return state, upstream_step, cpu_group
-
-
-def _assert_committed(state, upstream_step, committed):
-    # Committing passes ``is_dummy=False`` upstream so every rank keeps its window slot.
-    assert upstream_step.call_args.kwargs["is_dummy"] == (not committed)
-    assert int(state._local_load_collection_mask[0]) == int(committed)
-    assert int(state._physical_load_sample_slots[0]) == (3 if committed else -1)
-    assert state._has_fresh_recorded_load == committed
-
-
-@pytest.mark.parametrize(
-    "rank_flags,expected",
-    [
-        # An idle rank executes tokens sent by the active rank.
-        ([(0, 0), (1, 0)], True),
-        # Nobody schedules tokens.
-        ([(0, 0), (0, 0)], False),
-        # Every active rank is outside the collection phase.
-        ([(0, 0), (1, 1)], False),
-    ],
-)
-def test_idle_rank_follows_the_group(monkeypatch, rank_flags, expected):
-    state, upstream_step, cpu_group = _decision_state(monkeypatch)
-    sent = []
-    all_reduce = MagicMock(side_effect=_reduced_by(rank_flags, sent))
-    monkeypatch.setattr(state_module, "all_reduce", all_reduce)
-
-    state.step(is_dummy=True)
-
-    # An idle rank never asks for the step by itself.
-    assert sent == [[0, 0]]
-    assert all_reduce.call_args.kwargs["group"] is cpu_group
-    _assert_committed(state, upstream_step, expected)
-
-
-@pytest.mark.parametrize(
-    "phase_matched,rank_flags,expected",
-    [
-        # Every active rank is inside the collection phase.
-        (True, [(1, 0), (1, 0), (0, 0)], True),
-        # Another DP rank prefills while this one decodes: owner counts cannot split them.
-        (True, [(1, 0), (1, 1), (0, 0)], False),
-        (False, [(1, 1), (1, 0), (0, 0)], False),
-        # This rank is the only active one and is outside the phase.
-        (False, [(1, 1), (0, 0)], False),
-    ],
-)
-def test_mixed_phase_steps_are_skipped(monkeypatch, phase_matched, rank_flags, expected):
-    state, upstream_step, _ = _decision_state(monkeypatch, phase_matched=phase_matched)
-    sent = []
-    monkeypatch.setattr(state_module, "all_reduce", MagicMock(side_effect=_reduced_by(rank_flags, sent)))
-
-    state.step()
-
-    # The rank reports whether it is active and whether its batch matches the phase.
-    assert sent == [[1, int(not phase_matched)]]
-    _assert_committed(state, upstream_step, expected)
-
-
-def test_single_replica_ep_group_decides_locally(monkeypatch):
-    state, upstream_step, _ = _decision_state(monkeypatch, shared_ep_group=False)
-    all_reduce = MagicMock()
-    monkeypatch.setattr(state_module, "all_reduce", all_reduce)
-
-    state.step(is_dummy=True)
-
-    all_reduce.assert_not_called()
-    _assert_committed(state, upstream_step, False)
-
-
-@pytest.mark.parametrize("gathered,expected", ((1, True), (0, False)))
-def test_allgather_decision_wins_but_the_group_still_meets(monkeypatch, gathered, expected):
-    # Participation must not depend on which layers ran on a rank, or the
-    # collective would hang. An AllGather layer's gathered source eligibility
-    # is more precise than the per-rank phase, so it decides the step.
-    state, upstream_step, cpu_group = _decision_state(monkeypatch, gathered=gathered)
-    all_reduce = MagicMock(side_effect=_reduced_by([(0, 0), (1, 1)], []))
-    monkeypatch.setattr(state_module, "all_reduce", all_reduce)
-
-    state.step(is_dummy=True)
-
-    all_reduce.assert_called_once()
-    assert all_reduce.call_args.kwargs["group"] is cpu_group
-    _assert_committed(state, upstream_step, expected)
-
-
-def test_non_sampling_steps_do_not_meet(monkeypatch):
-    state, upstream_step, _ = _decision_state(monkeypatch)
-    all_reduce = MagicMock()
-    monkeypatch.setattr(state_module, "all_reduce", all_reduce)
     state._is_load_sampling_step = False
-
-    state.step(is_dummy=True)
-
-    all_reduce.assert_not_called()
-    assert int(state._local_load_collection_mask[0]) == 0
-    assert upstream_step.call_args.kwargs["is_dummy"] is True
+    state._load_collection_phase_matched = True
+    return state, upstream_rearrange, publish
 
 
-class TestAscendEplbFreshLoadGate(unittest.TestCase):
-    def setUp(self):
-        patcher = patch(
-            "vllm_ascend.distributed.eplb.eplb_state._needs_group_load_decision",
-            return_value=False,
-        )
-        patcher.start()
-        self.addCleanup(patcher.stop)
+def _record(state, load, *, is_dummy=False, phase_matched=True):
+    """Run one sampling step as if the forward had recorded ``load``."""
+    model_state = state.model_states["model"]
+    model_state.expert_load_pass.fill_(0)
+    model_state.expert_load_pass[0] = torch.tensor(load)
+    state._is_load_sampling_step = True
+    state._load_collection_phase_matched = phase_matched
+    state.step(is_dummy=is_dummy)
 
-    @staticmethod
-    def _make_state(*, rearrangement_step=1):
-        state = object.__new__(AscendEplbState)
-        state._hixl_session = None
-        state._close_error = None
-        state._suspended = False
-        state.parallel_config = SimpleNamespace(
-            enable_elastic_ep=False,
-            eplb_config=SimpleNamespace(log_balancedness_interval=1),
-        )
-        state.device = torch.device("cpu")
-        state.model_states = {}
-        state.is_async = False
-        state.expert_rearrangement_step = rearrangement_step
-        state.expert_rearrangement_step_interval = 2
-        state.expert_load_window_step = 0
-        state.expert_load_window_size = 2
-        state.should_record_tensor = None
-        state._has_fresh_recorded_load = False
-        return state
 
-    @staticmethod
-    def _ep_group():
-        return SimpleNamespace(device_group=MagicMock())
+@_BOTH_POLICIES
+def test_interval_of_skipped_slots_restarts_the_clock_without_rearranging(monkeypatch, policy_factory):
+    state, upstream_rearrange, publish = _live_state(monkeypatch, policy_factory())
+    # Under a large DP another rank is likely inside the phase. That does not
+    # make this rank's out-of-phase slots complete.
+    _install_groups(monkeypatch, remote=[([1, 0], [0, 0], [0, 0])])
 
-    def test_dummy_period_skips_rearrange_but_resets_clock(self):
-        state = self._make_state()
+    for _ in range(4):
+        _record(state, [5, 7], phase_matched=False)
 
-        with (
-            patch(
-                "vllm.distributed.eplb.eplb_state.get_ep_group",
-                return_value=self._ep_group(),
-            ),
-            patch.object(
-                state,
-                "_has_global_fresh_recorded_load",
-                return_value=False,
-            ) as sync_fresh_load,
-            patch("vllm.distributed.eplb.eplb_state.EplbState.rearrange") as upstream_rearrange,
-        ):
-            state.step(is_dummy=True)
+    assert _rearranged(state.policy, state, upstream_rearrange, publish) is None
+    # Upstream restarts its rearrangement clock whether or not a rearrangement ran.
+    assert state.expert_rearrangement_step == 0
 
-        self.assertEqual(state.expert_rearrangement_step, 0)
-        sync_fresh_load.assert_called_once_with()
-        upstream_rearrange.assert_not_called()
 
-    def test_fresh_recorded_load_runs_rearrange_and_is_consumed(self):
-        for is_async in (False, True):
-            with self.subTest(is_async=is_async):
-                state = self._make_state()
-                state.is_async = is_async
+@_BOTH_POLICIES
+@pytest.mark.parametrize("committed", [False, True], ids=["same_placement", "after_commit"])
+def test_window_written_before_a_commit_does_not_rearrange(monkeypatch, policy_factory, committed):
+    state, upstream_rearrange, publish = _live_state(monkeypatch, policy_factory())
+    _record(state, [5, 7])
+    if committed:
+        # The commit of the last changed layer in refresh_model_routing_tables.
+        state.model_states["model"].expert_load_window.zero_()
+        state.model_states["model"]._load_mapping_generation += 1
+    # An interval in which no rank schedules tokens.
+    _record(state, [0, 0], is_dummy=True)
 
-                with (
-                    patch(
-                        "vllm.distributed.eplb.eplb_state.get_ep_group",
-                        return_value=self._ep_group(),
-                    ),
-                    patch.object(
-                        state,
-                        "_has_global_fresh_recorded_load",
-                        return_value=True,
-                    ) as sync_fresh_load,
-                    patch("vllm.distributed.eplb.eplb_state.EplbState.rearrange") as upstream_rearrange,
-                ):
-                    state.step()
-
-                self.assertEqual(state.expert_rearrangement_step, 0)
-                self.assertFalse(state._has_fresh_recorded_load)
-                sync_fresh_load.assert_called_once_with()
-                upstream_rearrange.assert_called_once_with(
-                    is_profile=False,
-                    rank_mapping=None,
-                )
-
-    def test_remote_fresh_load_enables_all_ranks(self):
-        state = self._make_state()
-        cpu_group = MagicMock()
-        cpu_group.size.return_value = 2
-        ep_group = SimpleNamespace(cpu_group=cpu_group)
-
-        def set_remote_fresh_load(flag, **_kwargs):
-            flag.fill_(1)
-
-        with (
-            patch(
-                "vllm_ascend.distributed.eplb.eplb_state.get_ep_group",
-                return_value=ep_group,
-            ),
-            patch(
-                "vllm_ascend.distributed.eplb.eplb_state.all_reduce",
-                side_effect=set_remote_fresh_load,
-            ) as sync_fresh_load,
-        ):
-            self.assertTrue(state._has_global_fresh_recorded_load())
-
-        sync_fresh_load.assert_called_once()
-        self.assertIs(sync_fresh_load.call_args.kwargs["group"], cpu_group)
-
-    def test_profile_and_elastic_rearranges_bypass_gate(self):
-        for is_profile, enable_elastic_ep in ((True, False), (False, True)):
-            with self.subTest(
-                is_profile=is_profile,
-                enable_elastic_ep=enable_elastic_ep,
-            ):
-                state = self._make_state()
-                state.parallel_config.enable_elastic_ep = enable_elastic_ep
-                state._has_fresh_recorded_load = True
-
-                with (
-                    patch.object(
-                        state,
-                        "_has_global_fresh_recorded_load",
-                    ) as sync_fresh_load,
-                    patch("vllm.distributed.eplb.eplb_state.EplbState.rearrange") as upstream_rearrange,
-                ):
-                    state.rearrange(is_profile=is_profile)
-
-                sync_fresh_load.assert_not_called()
-                upstream_rearrange.assert_called_once_with(
-                    is_profile=is_profile,
-                    rank_mapping=None,
-                )
-                self.assertIs(
-                    state._has_fresh_recorded_load,
-                    is_profile,
-                )
+    offered = _rearranged(state.policy, state, upstream_rearrange, publish)
+    assert offered == (None if committed else [[[5, 7]]])

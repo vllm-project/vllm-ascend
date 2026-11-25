@@ -33,7 +33,7 @@ class TestAscendEPLBController(unittest.TestCase):
         state.prepare_forward.assert_called_once_with(config, 3, None)
         assert state.should_record_tensor.item()
         assert state.allgather_record_tensor.item() == -1
-        assert not state._has_fresh_recorded_load
+        assert state._is_load_sampling_step
 
     @staticmethod
     def _make_controller(*, enable_eplb=True, log_balancedness=False, policy="stair"):
@@ -85,6 +85,7 @@ class TestAscendEPLBController(unittest.TestCase):
 
     def test_set_batch_phase_updates_match(self):
         controller = self._make_controller()
+        controller.state = MagicMock()
         controller.load_collection_phase = "prefill"
 
         controller.set_batch_phase(batch_has_prefill=True)
@@ -173,15 +174,18 @@ class TestAscendEPLBController(unittest.TestCase):
                     log_stats=True,
                 )
 
-    def test_prepare_forward_records_matching_phase(self):
-        controller = self._make_controller(log_balancedness=True)
-        controller.load_collection_phase = "prefill"
-        controller.set_batch_phase(batch_has_prefill=True)
+    @staticmethod
+    def _sampling_state():
         state = MagicMock()
         state.should_record_tensor = torch.zeros((), dtype=torch.bool)
         state._should_record_current_step.return_value = True
-        state._has_fresh_recorded_load = False
-        controller.state = state
+        return state
+
+    def test_prepare_forward_records_matching_phase(self):
+        controller = self._make_controller(log_balancedness=True)
+        controller.load_collection_phase = "prefill"
+        controller.state = state = self._sampling_state()
+        controller.set_batch_phase(batch_has_prefill=True)
         model_config = SimpleNamespace()
         ubatch_slices = [slice(0, 4)]
 
@@ -192,39 +196,51 @@ class TestAscendEPLBController(unittest.TestCase):
             log_stats=True,
         )
         self.assertTrue(state.should_record_tensor.item())
+        self.assertTrue(state._is_load_sampling_step)
         self.assertTrue(state._load_collection_phase_matched)
-        # Load is marked fresh when the step commits it, not when it is recorded.
-        self.assertFalse(state._has_fresh_recorded_load)
 
-    def test_prepare_forward_records_nonmatching_phase_for_group_decision(self):
+    def test_prepare_forward_records_nonmatching_phase_for_the_slot_flags(self):
         controller = self._make_controller(log_balancedness=True)
         controller.load_collection_phase = "prefill"
+        controller.state = state = self._sampling_state()
         controller.set_batch_phase(batch_has_prefill=False)
-        state = MagicMock()
-        state.should_record_tensor = torch.zeros((), dtype=torch.bool)
-        state._should_record_current_step.return_value = True
-        state._has_fresh_recorded_load = False
-        controller.state = state
 
         controller.prepare_forward(SimpleNamespace(), 4)
 
         state._should_record_current_step.assert_called_once_with(
             log_stats=True,
         )
+        # This rank's experts may execute tokens of a rank inside the phase.
         self.assertTrue(state.should_record_tensor.item())
         self.assertFalse(state._load_collection_phase_matched)
-        self.assertFalse(state._has_fresh_recorded_load)
+
+    def test_non_allgather_default_policy_publishes_sampling(self):
+        # `default` on A2/A3 never reached the sampling bookkeeping and so never
+        # rearranged; it must share it with the other policies.
+        controller = self._make_controller(policy="default")
+        controller.load_collection_phase = "decode"
+        controller.state = state = self._sampling_state()
+        state.uses_custom_load_stats = False
+        controller.set_batch_phase(batch_has_prefill=True)
+
+        with patch(
+            "vllm_ascend.worker.v2.eplb.get_current_hardware_profile",
+            return_value=get_hardware_profile(AscendDeviceType.A3),
+        ):
+            controller.prepare_forward(SimpleNamespace(), 4)
+
+        self.assertTrue(state.should_record_tensor.item())
+        self.assertTrue(state._is_load_sampling_step)
+        # The collection phase has no effect on `default`.
+        self.assertTrue(state._load_collection_phase_matched)
 
     def test_allgather_sources_keep_their_own_phase_filter(self):
         controller = self._make_controller()
         controller.load_collection_phase = "decode"
-        controller.set_batch_phase(batch_has_prefill=True)
-        state = MagicMock()
-        state.should_record_tensor = torch.zeros((), dtype=torch.bool)
+        controller.state = state = self._sampling_state()
         state.allgather_source_record_tensor = torch.ones((), dtype=torch.bool)
         state.allgather_record_tensor = torch.ones((), dtype=torch.int32)
-        state._should_record_current_step.return_value = True
-        controller.state = state
+        controller.set_batch_phase(batch_has_prefill=True)
 
         with patch(
             "vllm_ascend.worker.v2.eplb.get_current_hardware_profile",
@@ -237,12 +253,11 @@ class TestAscendEPLBController(unittest.TestCase):
         self.assertFalse(state.allgather_source_record_tensor.item())
         self.assertEqual(state.allgather_record_tensor.item(), -1)
 
-    def test_prepare_forward_disables_closed_window(self):
+    def test_prepare_forward_closes_recording_outside_the_sampling_window(self):
         controller = self._make_controller()
-        state = MagicMock()
+        state = self._sampling_state()
         state.should_record_tensor = torch.ones((), dtype=torch.bool)
         state._should_record_current_step.return_value = False
-        state._has_fresh_recorded_load = False
         controller.state = state
 
         controller.prepare_forward(SimpleNamespace(), 4)
@@ -251,7 +266,7 @@ class TestAscendEPLBController(unittest.TestCase):
             log_stats=False,
         )
         self.assertFalse(state.should_record_tensor.item())
-        self.assertFalse(state._has_fresh_recorded_load)
+        self.assertFalse(state._is_load_sampling_step)
 
     def test_setup_from_mapping_updates_registered_state(self):
         controller = self._make_controller()
