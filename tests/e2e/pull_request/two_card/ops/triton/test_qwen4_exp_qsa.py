@@ -1,12 +1,12 @@
 import pytest
 import torch
 from vllm.triton_utils import HAS_TRITON
-from vllm_ascend.models.qwen4_exp.ops.fia import QSAFIAMaskWorkspace, build_qsa_fia_mask
-from vllm_ascend.models.qwen4_exp.ops.qsa import pack_qsa_group_indices_npu
-from vllm_ascend.models.qwen4_exp.qsa_prepare import prepare_qsa_gbsa_inputs
 
 from vllm_ascend.device.device_config import get_ascend_device_type
 from vllm_ascend.device.hardware import AscendDeviceType
+from vllm_ascend.models.qwen4_exp.ops.fia import QSAFIAMaskWorkspace, build_qsa_fia_mask
+from vllm_ascend.models.qwen4_exp.ops.qsa import pack_qsa_group_indices_npu
+from vllm_ascend.models.qwen4_exp.qsa_prepare import prepare_qsa_gbsa_inputs
 
 pytestmark = [
     pytest.mark.skipif(get_ascend_device_type() != AscendDeviceType.A3, reason="Requires Ascend A3"),
