@@ -1,5 +1,7 @@
 import threading
 
+_WILDCARD_LOCATION = "*"
+
 
 class GlobalTE:
     def __init__(self):
@@ -7,6 +9,7 @@ class GlobalTE:
         self.is_register_buffer: bool = False
         self.transfer_engine_lock = threading.Lock()
         self.register_buffer_lock = threading.Lock()
+        self._registered_regions: list[tuple[int, int, str]] = []
 
     def get_transfer_engine(self, hostname: str, device_name: str | None):
         if self.transfer_engine is None:
@@ -28,16 +31,76 @@ class GlobalTE:
                         raise RuntimeError(f"TransferEngine initialization failed with ret_value: {ret_value}")
         return self.transfer_engine
 
-    def register_buffer(self, ptrs: list[int], sizes: list[int]):
+    def _unregister_regions(
+        self,
+        regions: list[tuple[int, int, str]],
+    ) -> tuple[list[tuple[int, int, str]], list[str]]:
+        """Unregister regions in reverse order and return any failures."""
+        assert self.transfer_engine is not None
+        failed_regions: list[tuple[int, int, str]] = []
+        failure_messages: list[str] = []
+        for region in reversed(regions):
+            ptr, _, _ = region
+            try:
+                ret_value = self.transfer_engine.unregister_memory(ptr)
+            except Exception as exc:  # noqa: BLE001
+                failed_regions.append(region)
+                failure_messages.append(f"ptr={ptr}: {exc}")
+                continue
+            if ret_value != 0:
+                failed_regions.append(region)
+                failure_messages.append(f"ptr={ptr}: ret_value={ret_value}")
+
+        failed_regions.reverse()
+        return failed_regions, failure_messages
+
+    def register_buffer(
+        self,
+        ptrs: list[int],
+        sizes: list[int],
+        locations: list[str] | None = None,
+    ) -> None:
+        normalized_locations = locations if locations is not None else [_WILDCARD_LOCATION] * len(ptrs)
+        regions = list(zip(ptrs, sizes, normalized_locations))
+
         with self.register_buffer_lock:
             assert self.transfer_engine is not None, "Transfer engine must be initialized"
             if self.is_register_buffer:
                 return
-            for ptr, size in zip(ptrs, sizes):
-                ret_value = self.transfer_engine.register_memory(ptr, size)
-                if ret_value != 0:
-                    raise RuntimeError("Mooncake memory registration failed.")
+
+            registered_regions: list[tuple[int, int, str]] = []
+            try:
+                for ptr, size, location in regions:
+                    ret_value = self.transfer_engine.register_memory(ptr, size, location)
+                    if ret_value != 0:
+                        raise RuntimeError("Mooncake memory registration failed.")
+                    registered_regions.append((ptr, size, location))
+            except Exception as exc:
+                failed_regions, failure_messages = self._unregister_regions(registered_regions)
+                self._registered_regions = failed_regions
+                self.is_register_buffer = bool(failed_regions)
+                if failure_messages:
+                    raise RuntimeError(
+                        "Mooncake memory registration failed and rollback failed "
+                        "for regions: " + "; ".join(failure_messages)
+                    ) from exc
+                raise
+            self._registered_regions = regions
             self.is_register_buffer = True
+
+    def unregister_buffer(self) -> None:
+        """Unregister all buffers owned by this wrapper, if any."""
+        with self.register_buffer_lock:
+            if not self._registered_regions:
+                self.is_register_buffer = False
+                return
+            assert self.transfer_engine is not None, "Transfer engine must be initialized"
+
+            failed_regions, failure_messages = self._unregister_regions(self._registered_regions)
+            self._registered_regions = failed_regions
+            self.is_register_buffer = bool(failed_regions)
+            if failure_messages:
+                raise RuntimeError("Mooncake memory unregistration failed for regions: " + "; ".join(failure_messages))
 
 
 global_te = GlobalTE()

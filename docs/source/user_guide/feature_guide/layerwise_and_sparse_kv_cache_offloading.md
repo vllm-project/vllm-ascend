@@ -6,10 +6,10 @@ KV cache is a major NPU memory cost in long-sequence inference. Prefill and
 Decode have different performance characteristics, so they use different
 offloading strategies:
 
-| Stage | Feature | What remains on the NPU |
-| :--- | :--- | :--- |
-| Prefill | Layerwise KV Cache Offload | A few reusable full-layer KV buffers |
-| Decode | Sparse KV Cache Offload | Indexer cache and a hot top-k KV buffer |
+| Stage   | Feature                    | What remains on the NPU                 |
+| ------- | -------------------------- | --------------------------------------- |
+| Prefill | Layerwise KV Cache Offload | A few reusable full-layer KV buffers    |
+| Decode  | Sparse KV Cache Offload    | Indexer cache and a hot top-k KV buffer |
 
 Prefill has enough computation to overlap full-layer transfers. Decode does
 not, so it keeps the full KV cache in host memory and loads only the top-k
@@ -41,9 +41,9 @@ implementation uses `AscendStoreConnector` with the Memcache backend.
 - Use `backend: "memcache"` and `use_layerwise: true`.
 - Use an MLA, SFA, or DSA attention backend with eager execution.
 - Install MemFabric Hybrid first, then Memcache Hybrid on the Prefill node.
-  Memcache is the host KV Pool backend; MemFabric is its dependency.
+Memcache is the host KV Pool backend; MemFabric is its dependency.
 - Configure `mmc-meta.conf` and `mmc-local.conf`, and start MetaService before
-  starting Prefill.
+starting Prefill.
 
 Install the dependencies in order:
 
@@ -79,10 +79,10 @@ reusable buffers:
 }
 ```
 
-| Parameter | Description |
-| :--- | :--- |
+| Parameter                      | Description                                                                                                                    |
+| ------------------------------ | ------------------------------------------------------------------------------------------------------------------------------ |
 | `layerwise_num_shared_buffers` | Number of reusable NPU buffers. More buffers use more memory but provide more opportunity to overlap transfer and computation. |
-| `layerwise_independent_layers` | Layers that keep dedicated buffers. The default is `[0]`; `"all"` disables cross-layer reuse. |
+| `layerwise_independent_layers` | Layers that keep dedicated buffers. The default is `[0]`; `"all"` disables cross-layer reuse.                                  |
 
 The buffer count is workload-dependent. Start with two to four buffers and tune
 it according to NPU memory and transfer bandwidth.
@@ -98,9 +98,9 @@ Layerwise KV cache reuse merged ... descriptors into ... descriptors using ... b
 - Shared-buffer offload currently requires Memcache and eager execution.
 - Context parallelism has not been validated.
 - AscendStore's own layerwise P/D transfer does not support TP mismatch. This
-  limitation does not apply when `SfaRemoteD2HConnector` performs P/D transfer.
+limitation does not apply when `SfaRemoteD2HConnector` performs P/D transfer.
 - MTP layers and optional SFA indexer caches participate in buffer reuse and
-  memory accounting automatically.
+memory accounting automatically.
 
 ## 3. Sparse KV Cache Offload for Decode
 
@@ -112,20 +112,32 @@ Sparse KV Cache Offload stores the full KV cache in host memory. The NPU keeps:
 - a hot buffer containing recently used top-k KV entries.
 
 On each Decode step, entries already in the hot buffer are reused and only
-cache misses are loaded from host memory. `SfaRemoteD2HConnector` transfers the
-Prefill KV cache directly into the Decode-side storage.
+cache misses are loaded from host memory. Prefill KV is transferred into
+Decode-side storage through `SfaRemoteD2HConnector` for the MemFabric backend
+or `MooncakeConnectorV1` for the Mooncake backend.
 
 ### Requirements
 
 - Use a sparse-attention model such as
-  [GLM-5.2](https://huggingface.co/zai-org/GLM-5.2) or
-  [DeepSeek-V3.2](https://huggingface.co/deepseek-ai/DeepSeek-V3.2).
+[GLM-5.2](https://huggingface.co/zai-org/GLM-5.2) or
+[DeepSeek-V3.2](https://huggingface.co/deepseek-ai/DeepSeek-V3.2).
 - Use disaggregated P/D deployment and enable the feature only on Decode.
 - Tensor parallelism is supported; context and pipeline parallelism are not.
 - Model Runner V1 is required.
-- Install MemFabric Hybrid release 1.2. The current version requires NPU driver
-  `25.5.1` or later.
-- Install Clang and OpenMP if they are not already available in the image.
+- Install the compiler and OpenMP runtime required by the native LRU planner.
+
+### Preparation
+
+Install the dependencies for the selected Decode host backend. Dependencies
+for Mooncake P/D transfer apply to both Prefill and Decode nodes.
+
+Both backends require Ascend HDK `25.5.1` with matching firmware.
+See the [official driver and firmware downloads](https://www.hiascend.com/hardware/firmware-drivers).
+
+#### MemFabric dependencies
+
+Install MemFabric Hybrid release 1.2. Install Clang and OpenMP if they are not
+already available in the image.
 
 If MemFabric Hybrid 1.2 is not already installed in the image:
 
@@ -138,16 +150,58 @@ bash output/memfabric_hybrid-1.2.0_linux_aarch64.run
 export MEMFABRIC_HYBRID_EXTEND_LIB_PATH=/usr/local/memfabric_hybrid/1.2.0/aarch64-linux/lib64
 ```
 
+#### Mooncake dependencies
+
+The Mooncake backend requires:
+
+- A qualified Mooncake Transfer Engine NPU `0.3.13` build providing Ascend
+VMM shared segments and the Ascend RD2H functionality required by
+`MooncakeConnectorV1`.
+- CANN `9.2.0` Toolkit and the matching A3 ops package on both P/D nodes,
+including the HIXL runtime used for remote Host-memory transfer. Ensure that
+the serving processes load these libraries rather than an older HIXL runtime.
+
+Run the CANN upgrade commands on both P/D nodes from the directory containing
+the downloaded AArch64 installers:
+
+```bash
+bash ./Ascend-cann-toolkit_9.2.0_linux-aarch64.run --quiet --upgrade
+bash ./Ascend-cann-A3-ops_9.2.0_linux-aarch64.run --quiet --upgrade
+```
+
+The validated Mooncake source checkout is branch `pr3952` at revision
+`4d48de32786899c2232531c9b761609607340ca8`. It includes
+[PR #3952](https://github.com/kvcache-ai/Mooncake/pull/3952) and the shared-segment
+device-ID handling fix for CANN `9.2.0`. The validated NPU wheel build is
+`dist-npu-dist-pr3952-1020`, with package version `0.3.13`.
+
+Use this build, or a build containing the same interfaces and fixes. The
+package version `0.3.13` or PR #3952 alone does not identify the complete
+qualified dependency.
+
+The Mooncake sparse-offload path does not currently support Prefill layerwise
+KV cache offload. The Memcache services described for Prefill layerwise
+offload are therefore not required to enable the Mooncake Decode backend.
+
 ### Configuration
 
-Add the following options to the Decode launch command:
+The current decode offload use a different host pool compared to prefill. So
+the configuration on decode node is slightly different. Select one of the
+following backends.
+
+#### MemFabric backend
+
+MemFabric is the default host backend. Add the following options to the Decode
+launch command:
 
 ```bash
 --additional-config '{
     "sparse_kv_offload_config": {
         "enabled": true,
+        "host_backend": "memfabric",
         "topk_buffer_size": 4096,
-        "dram_size_per_dp_GB": 128
+        "dram_size_per_dp_GB": 128,
+        "lru_max_threads": 16
     }
 }' \
 --kv-transfer-config '{
@@ -161,13 +215,69 @@ Add the following options to the Decode launch command:
 }'
 ```
 
-| Parameter | Description |
-| :--- | :--- |
-| `topk_buffer_size` | Device hot-buffer size. It must be at least `index_topk` and divisible by `block_size`. Twice `index_topk` is a practical starting point. |
-| `dram_size_per_dp_GB` | Host memory reserved per DP rank. It must hold the full KV cache. TP ranks share this pool. |
-| `keep_device_kv_cache` | Debug-only option that retains the full device KV cache. Keep it `false` in production. |
+Note that users might encounter an error like
+"Sparse KV offload offload.initialize failed.". This is mainly because the
+contiguous host memory required by MemFabric is not enough to allocate. Please
+refer to
+[memfabric-prerequisite-checks](https://docs.vllm.ai/projects/ascend/en/latest/user_guide/feature_guide/kv_cache_pool_ascend_store.html#step-1-prerequisite-checks)
+for preparing the host memory. You can also reduce the Decode DP size to
+reduce the required host memory.
+
+#### Mooncake backend
+
+Add the following options to the Decode launch command:
+
+```bash
+--additional-config '{
+    "sparse_kv_offload_config": {
+        "enabled": true,
+        "host_backend": "mooncake",
+        "use_fused_overlap": true,
+        "keep_device_kv_cache": false,
+        "topk_buffer_size": 4096,
+        "dram_size_per_dp_GB": 128,
+        "lru_max_threads": 16
+    }
+}' \
+--kv-transfer-config '{
+    "kv_connector": "MooncakeConnectorV1",
+    "kv_buffer_device": "npu",
+    "kv_role": "kv_consumer",
+    "kv_port": 57000,
+    "kv_load_failure_policy": "fail",
+    "kv_connector_extra_config": {
+        "use_ascend_direct": true,
+        "dsa_pd_offload": true
+    }
+}'
+```
+
+Mooncake requires `use_fused_overlap=true` and
+`keep_device_kv_cache=false`.
+
+Enable `dsa_pd_offload=true` on Prefill as well; see
+[Using MooncakeConnectorV1 with Decode sparse offload](../../tutorials/features/pd_disaggregation_mooncake_multi_node.md#using-mooncakeconnectorv1-with-decode-sparse-offload) for the corresponding Prefill connector configuration.
+
+#### Parameters
+
+| Parameter              | Description                                                                                                                               |
+| ---------------------- | ----------------------------------------------------------------------------------------------------------------------------------------- |
+| `host_backend`         | Host KV allocation backend. Options: `memfabric` (default) and `mooncake`.                                                                |
+| `topk_buffer_size`     | Device hot-buffer size. It must be at least `index_topk` and divisible by `block_size`. Twice `index_topk` is a practical starting point. |
+| `dram_size_per_dp_GB`  | Host memory reserved per DP rank. It must hold the full KV cache. TP ranks share this pool.                                               |
+| `keep_device_kv_cache` | Debug-only option that retains the full device KV cache. Keep it `false` in production.                                                   |
+| `lru_max_threads`      | Per-Decode-Worker CPU LRU planner thread budget. Positive integer; default `8`.                                                           |
+
+`lru_max_threads` caps the CPU LRU planner per Decode Worker. The effective
+team is also limited by the current work rows and the process CPU affinity.
+A larger value allocates more per-thread CPU workspaces; give the Worker an
+adequate NUMA-local CPU affinity range before increasing it.
 
 ## 4. Use Them Together
+
+This section describes combining Prefill layerwise offload with Decode sparse
+offload through MemFabric. The Mooncake Decode backend does not currently
+support this Prefill layerwise combination.
 
 The combined data flow is:
 
@@ -227,9 +337,26 @@ Use the Sparse KV Cache Offload configuration from chapter 3. Decode owns the
 destination and pulls main KV directly into its host pool; indexer KV remains
 in rank-local NPU memory.
 
-### Proxy
+### Deployment checklist
 
-Start the layerwise proxy after Prefill and Decode are ready:
+- Set `transfer_backend` to `memfabric` on both Prefill and Decode.
+- Prefill TP must be greater than or equal to Decode TP and divisible by it.
+- `kv_port` is the Decode control-port base. Reserve
+`decode_data_parallel_size * decode_tensor_parallel_size` consecutive ports.
+Prefill does not bind these ports; Decode supplies the target through request
+metadata.
+
+For implementation details, see
+[SFA Remote D2H Connector Design](../../developer_guide/Design_Documents/sfa_remote_d2h_connector.md).
+
+## 5. Start the P/D Proxy
+
+Start the proxy after the Prefill and Decode services are ready. Select the
+proxy for the Connector and offload combination.
+
+### MemFabric layerwise-of fload proxy
+
+For the combined deployment in chapter 4, use the layerwise proxy:
 
 ```bash
 python examples/disaggregated_prefill_v1/load_balance_proxy_layerwise_server_example.py \
@@ -242,17 +369,22 @@ python examples/disaggregated_prefill_v1/load_balance_proxy_layerwise_server_exa
 ```
 
 Use reachable addresses for multi-node deployment. Do not advertise
-`0.0.0.0`, because Decode calls the proxy's `/v1/metaserver` endpoint. Send
-inference requests to the proxy port (`9000` in this example).
+`0.0.0.0`, because Decode calls the proxy's `/v1/metaserver` endpoint.
 
-### Deployment checklist
+### Mooncake sparse-offload proxy
 
-- Set `transfer_backend` to `memfabric` on both Prefill and Decode.
-- Prefill TP must be greater than or equal to Decode TP and divisible by it.
-- `kv_port` is the Decode control-port base. Reserve
-  `decode_data_parallel_size * decode_tensor_parallel_size` consecutive ports.
-  Prefill does not bind these ports; Decode supplies the target through request
-  metadata.
+For `MooncakeConnectorV1` with Decode sparse offload, use the ordinary proxy:
 
-For implementation details, see
-[SFA Remote D2H Connector Design](../../developer_guide/Design_Documents/sfa_remote_d2h_connector.md).
+```bash
+python examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py \
+    --host 127.0.0.1 \
+    --port 9000 \
+    --prefiller-hosts 127.0.0.1 \
+    --prefiller-ports 8100 \
+    --decoder-hosts 127.0.0.1 \
+    --decoder-ports 8200
+```
+
+This path does not support Prefill layerwise offload and must not use the
+layerwise proxy. The proxy's routing address and every advertised worker
+address must be reachable by the participating nodes.

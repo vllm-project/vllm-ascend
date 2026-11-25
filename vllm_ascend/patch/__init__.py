@@ -1535,3 +1535,21 @@
 #       operator in the supported release, so the plain add already lowers to
 #       the fused kernel and the foreach form is no longer needed.
 #
+# ** 36. File: platform/patch_pd_xfer_terminal.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.v1.core.sched.scheduler.Scheduler._update_from_kv_xfer_finished`
+#      `vllm.v1.core.sched.scheduler.Scheduler.update_from_output`
+#    Why:
+#       A PD-disaggregated decode engine can receive a finished_recving
+#       terminal for a request that already left WAITING_FOR_REMOTE_KVS
+#       (duplicate transfer round, or a failure terminal racing a request
+#       that already started decoding). The pinned vLLM core asserts on
+#       this state-machine violation, killing the whole engine group.
+#    How:
+#       Replace _update_from_kv_xfer_finished so the affected request is
+#       failed via finish_requests (controlled FINISHED_ERROR, blocks
+#       released) and the failure is stashed; wrap update_from_output to
+#       emit exactly one client-facing error output for the failed request.
+#    Future Plan:
+#       Remove this patch when upstream vLLM handles out-of-order/duplicate
+#       KV-transfer terminals without asserting.

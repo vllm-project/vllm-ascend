@@ -2,6 +2,7 @@
 
 import asyncio
 import threading
+import time
 from concurrent.futures import Future
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -41,6 +42,7 @@ from vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.read_thread import (
 from vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.scheduler import (  # noqa: E402
     SFAPDRD2HProducerScheduler,
     SFAPDRD2HScheduler,
+    _MetaserverDispatchError,
 )
 from vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.send_thread import (  # noqa: E402
     MembPullSendingThread,
@@ -517,6 +519,9 @@ def _make_consumer_worker_for_completion_test():
     worker._invalid_block_ids = set()
     worker._pending_done = set()
     worker._terminal_ext_ids = set()
+    worker._rendezvous_failed_ext_ids = set()
+    worker._reported_terminal_ext_ids = set()
+    worker._deferred_cleanup_ids = set()
     worker._mf_read_thread = MagicMock()
     worker._mf_read_thread.get_and_clear_failed.return_value = set()
     return worker
@@ -596,6 +601,34 @@ def test_read_descriptor_rejects_missing_destination_blocks():
             p_indexer_block_ids=[],
             want_info=False,
         )
+
+
+def test_read_descriptor_waits_for_late_destination_blocks():
+    thread = _make_read_thread()
+    thread._state.dest_blocks_by_req.clear()
+    thread._stop_event = threading.Event()
+
+    def register_late_dest_blocks():
+        time.sleep(0.02)
+        thread._state.dest_blocks_by_req["req-0"] = ([3, 4], [])
+
+    register_thread = threading.Thread(target=register_late_dest_blocks)
+    register_thread.start()
+    try:
+        local, peer, lengths, info = thread._build_req_descriptors(
+            _make_layer(k_cpu_ptr=3000, v_cpu_ptr=4000, has_indexer=False),
+            "req-0",
+            p_main_block_ids=[1, 2],
+            p_indexer_block_ids=[],
+            want_info=True,
+        )
+    finally:
+        register_thread.join(timeout=1)
+
+    assert local == [3030, 4060]
+    assert peer == [1010, 2020]
+    assert lengths == [20, 40]
+    assert info is not None
 
 
 def test_read_descriptor_rejects_incomplete_indexer_transfer():
@@ -987,7 +1020,7 @@ def test_consumer_scheduler_closes_remote_prefill_before_rendezvous():
     scheduler._request_trackers = {}
     scheduler._reqs_need_recv = set()
     scheduler._metaserver_lock = threading.Lock()
-    scheduler._cancelled_metaserver_requests = set()
+    scheduler._cancelled_metaserver_requests = {}
     scheduler._submit_metaserver_request = MagicMock()  # type: ignore[method-assign]
     params = {
         "do_remote_prefill": True,
@@ -1007,7 +1040,7 @@ def test_consumer_scheduler_closes_remote_prefill_before_rendezvous():
     scheduler._submit_metaserver_request.assert_called_once()
 
 
-def test_metaserver_treats_legacy_http_error_as_delivered():
+def test_metaserver_fails_http_error_without_retry():
     scheduler = SFAPDRD2HScheduler.__new__(SFAPDRD2HScheduler)
     response = MagicMock()
     response.is_error = True
@@ -1017,13 +1050,16 @@ def test_metaserver_treats_legacy_http_error_as_delivered():
 
     with patch("vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.scheduler.httpx.Client") as client_cls:
         client_cls.return_value.__enter__.return_value = client
-        scheduler._access_metaserver("http://metaserver", {"request_id": "req-0"})
+        with pytest.raises(_MetaserverDispatchError, match="HTTP 500"):
+            scheduler._access_metaserver("http://metaserver", {"request_id": "req-0"})
 
     client.post.assert_called_once_with(
         "http://metaserver",
         json={"request_id": "req-0"},
     )
-    assert client_cls.call_args.kwargs["timeout"] is None
+    timeout = client_cls.call_args.kwargs["timeout"]
+    assert isinstance(timeout, httpx.Timeout)
+    assert all(value is not None and value > 0 for value in timeout.as_dict().values())
 
 
 def test_metaserver_retries_transport_errors():
@@ -1047,7 +1083,8 @@ def test_metaserver_callback_retries_without_changing_request_state():
     scheduler._metaserver_lock = threading.Lock()
     scheduler._shutdown_event = threading.Event()
     scheduler._metaserver_retry_timers = {}
-    scheduler._cancelled_metaserver_requests = set()
+    scheduler._metaserver_retry_counts = {}
+    scheduler._cancelled_metaserver_requests = {}
     failed_future: Future[None] = Future()
     scheduler._metaserver_futures = {"req-0": failed_future}
     failed_future.set_exception(RuntimeError("metaserver unavailable"))
@@ -1067,6 +1104,7 @@ def test_metaserver_callback_retries_without_changing_request_state():
     assert "req-0" not in scheduler._metaserver_futures
     assert scheduler._metaserver_retry_timers["req-0"] is retry_timer
     retry_timer.start.assert_called_once_with()
+    assert scheduler._metaserver_retry_counts == {"req-0": 1}
 
 
 def test_metaserver_callback_clears_completed_future():
@@ -1074,7 +1112,7 @@ def test_metaserver_callback_clears_completed_future():
     scheduler._metaserver_lock = threading.Lock()
     scheduler._shutdown_event = threading.Event()
     scheduler._metaserver_retry_timers = {}
-    scheduler._cancelled_metaserver_requests = set()
+    scheduler._cancelled_metaserver_requests = {}
     succeeded_future: Future[None] = Future()
     scheduler._metaserver_futures = {"req-0": succeeded_future}
     succeeded_future.set_result(None)
@@ -1216,7 +1254,7 @@ def test_scheduler_shutdown_cancels_rendezvous_and_executor():
     scheduler._metaserver_lock = threading.Lock()
     scheduler._shutdown_event = threading.Event()
     scheduler._metaserver_retry_timers = {}
-    scheduler._cancelled_metaserver_requests = set()
+    scheduler._cancelled_metaserver_requests = {}
     pending_future: Future[None] = Future()
     scheduler._metaserver_futures = {"req-0": pending_future}
     scheduler.executor = MagicMock()
@@ -1369,7 +1407,10 @@ def test_ratio_one_degenerates_to_full_pull():
 def _make_completion_thread() -> MembPullReadThread:
     thread = MembPullReadThread.__new__(MembPullReadThread)
     thread._done_requests = set()
+    thread._completed_ext_ids = set()
+    thread._discarded_ext_ids = {}
     thread._failed_requests = set()
+    thread._pending_failures = set()
     thread._done_contributors = {}
     thread._expected_ratio = {}
     thread._lock = threading.Lock()
@@ -1410,3 +1451,4 @@ def test_discard_requests_clears_partial_contributor_state():
     thread.discard_requests({"req-0"})
     assert "req-0" not in thread._done_contributors
     assert "req-0" not in thread._expected_ratio
+    assert "req-0" in thread._discarded_ext_ids
