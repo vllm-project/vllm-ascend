@@ -542,6 +542,16 @@ def build_attn_metadata(
                 backend = getattr(attn_group, "backend", None)
                 if is_qsa_indexer or getattr(backend, "uses_qsa_page_major_kv_view", False):
                     layer_common = layer_common.replace(graph_pad_size=num_input_tokens)
+            if (
+                full_graph_mode
+                and pcp_context is None
+                and num_input_tokens > num_actual_tokens
+                and (is_qsa_indexer or getattr(attn_group.backend, "uses_qsa_page_major_kv_view", False))
+            ):
+                # LI and GBSA replay the tiling buffers bound at capture. Build
+                # the same physical row geometry, keeping the CPU boundary
+                # above at the live token count to mask the unmapped tail.
+                layer_common = layer_common.replace(num_actual_tokens=num_input_tokens)
             metadata_variants = [(attn_group.layer_names, layer_common)]
             if is_sfa_builder and draft_layer_names:
                 target_names = [name for name in attn_group.layer_names if name not in draft_layer_names]
