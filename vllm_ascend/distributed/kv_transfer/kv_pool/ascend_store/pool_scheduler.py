@@ -733,7 +733,11 @@ class BaseKVPoolScheduler(ABC):
                     if req_meta is not None:
                         meta.add_request(req_meta)
 
-        # TODO: Adapt layerwise saves to consume Core's boundary-state handoff.
+        # Layerwise transfer uses the request tracker's block tables. Only
+        # bulk transfer can consume and pin Core's standalone checkpoints.
+        if self.use_layerwise:
+            return meta
+
         state = getattr(scheduler_output, "kv_connector_block_state", None)
         if state is not None and state.boundary_state_offloads and self.can_put:
             self._handle_boundary_state_offloads(state.boundary_state_offloads, meta)

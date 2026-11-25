@@ -80,6 +80,37 @@ def _mock_scheduler_clients():
         yield
 
 
+def test_layerwise_metadata_preserves_request_tables_and_skips_bulk_checkpoints():
+    scheduler = LayerwiseKVPoolScheduler.__new__(LayerwiseKVPoolScheduler)
+    scheduler.use_layerwise = True
+    scheduler.kv_role = "kv_both"
+    scheduler.can_put = True
+    scheduler._async_loading_req_ids = set()
+    req = ReqMeta(req_id="r1", token_len_chunk=32, can_save=True, block_hashes=[b"h"], block_ids_by_group=[[4]])
+    scheduled = SimpleNamespace(req_id="r1", block_hashes=req.block_hashes)
+    scheduler._unfinished_requests = {"r1": (scheduled, [[4]])}
+    scheduler._request_trackers = {"r1": SimpleNamespace(prefill_end_tokens=32, num_prompt_tokens=32)}
+    scheduler._finished_partial_tail_metas = {}
+    scheduler.cache_coordinator = SimpleNamespace(mamba_group_ids={0})
+    scheduler._process_new_request = MagicMock(return_value=req)
+    state = KVConnectorBlockState(
+        req_ids={"r1"}, resolve_block_ids=lambda _: ([9],), boundary_state_offloads={"r1": [(0, 7, 16)]}
+    )
+    output = SimpleNamespace(
+        finished_req_ids=set(),
+        preempted_req_ids=set(),
+        scheduled_new_reqs=[scheduled],
+        scheduled_cached_reqs=SimpleNamespace(req_ids=[]),
+        kv_connector_block_state=state,
+    )
+
+    metadata = scheduler.build_connector_meta(output)
+
+    assert metadata.requests == [req]
+    assert req.block_ids_by_group == [[4]]
+    assert not req.boundary_puts
+
+
 @pytest.mark.parametrize("tp_size,pcp_size", [(1, 4), (2, 1)])
 def test_layerwise_state_lookup_keeps_tp_rank_separate_from_pcp_without_scratch_blocks(tp_size, pcp_size):
     scheduler = LayerwiseKVPoolScheduler.__new__(LayerwiseKVPoolScheduler)
