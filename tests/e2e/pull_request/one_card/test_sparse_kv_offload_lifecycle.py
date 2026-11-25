@@ -24,6 +24,7 @@ import torch_npu
 from vllm import SamplingParams, TokensPrompt
 
 from tests.e2e.conftest import VllmRunner
+from tests.e2e.pull_request.one_card.sparse_kv_lifecycle_diagnostics import run_with_cann_diagnostics
 from vllm_ascend.attention.sfa_kv_offload import AscendSFAKVOffloadImpl
 from vllm_ascend.device.device_config import get_ascend_device_type
 from vllm_ascend.device.hardware import AscendDeviceType
@@ -38,6 +39,7 @@ MAX_STEPS = 32
 LIVE_REQUEST_ID = "retained-live-control"
 POISON_VALUE = 8.0
 MODULE = "tests.e2e.pull_request.one_card.test_sparse_kv_offload_lifecycle"
+LIFECYCLE_TIMEOUT_SECONDS = 600
 RUN_WITH_TRACEBACKS = """
 import faulthandler
 import runpy
@@ -326,14 +328,13 @@ def test_sparse_kv_offload_runner_request_lifecycle(tmp_path):
         "VLLM_DISABLE_REQUEST_ID_RANDOMIZATION": "1",
         "OMP_NUM_THREADS": "8",
     }
-    # Start traceback reporting before importing Torch or initializing the NPU.
-    subprocess.run(
-        [sys.executable, "-u", "-c", RUN_WITH_TRACEBACKS, MODULE, str(model_path)],
-        cwd=Path(__file__).resolve().parents[4],
-        env=env,
-        timeout=600,
-        check=True,
-    )
+    # Start diagnostics in the actual lifecycle child before it imports Torch.
+    command = [sys.executable, "-u", "-c", RUN_WITH_TRACEBACKS, MODULE, str(model_path)]
+    repo_root = Path(__file__).resolve().parents[4]
+    if os.environ.get("GITHUB_ACTIONS") == "true":
+        run_with_cann_diagnostics(command, repo_root, env, tmp_path / "cann", LIFECYCLE_TIMEOUT_SECONDS)
+    else:
+        subprocess.run(command, cwd=repo_root, env=env, timeout=LIFECYCLE_TIMEOUT_SECONDS, check=True)
 
 
 if __name__ == "__main__":
