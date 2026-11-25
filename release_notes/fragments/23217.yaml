@@ -1,0 +1,4 @@
+pr: 23217
+entries:
+  - category: bugfix
+    text: Fixed stale FA3 scheduling metadata during `FULL_DECODE_ONLY` replay when speculative decoding rounds a configured graph capture size, so replay uses the current KV lengths.
