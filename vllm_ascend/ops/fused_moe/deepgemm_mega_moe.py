@@ -92,8 +92,6 @@ class DeepGemmExperts:
         if get_tensor_model_parallel_world_size() != 1:
             raise ValueError("DeepGEMM MegaMoE requires TP1")
         group = get_ep_group()
-        if layer.router is not None and layer.router.eplb_state is not None:
-            raise ValueError("The EPLB router requires per-forward expert counts from DeepGEMM")
         if getattr(config.parallel_config, "expert_placement_strategy", "linear") != "linear":
             raise ValueError("DeepGEMM requires linear expert placement")
         if config.parallel_config.use_ubatching:
@@ -105,6 +103,9 @@ class DeepGemmExperts:
         moe = layer.moe_config
         if getattr(moe.activation, "value", moe.activation) != "silu":
             raise ValueError("MegaMoE requires SwiGLU")
+        eplb_enabled = layer.router is not None and layer.router.eplb_state is not None
+        if moe.num_experts != moe.num_logical_experts and not eplb_enabled:
+            raise ValueError("MegaMoE expert replicas require an EPLB router")
 
         self.hidden = layer.w2_weight.shape[1]
         self.intermediate = layer.w13_weight.shape[1] // 2
@@ -112,6 +113,11 @@ class DeepGemmExperts:
         self.topk = moe.experts_per_token
         self.activation_clamp = moe.swiglu_limit
         self.max_tokens = config.scheduler_config.max_num_batched_tokens
+        self.expert_tokens = (
+            torch.empty(moe.num_local_experts, dtype=torch.int32, device=layer.w2_weight.device)
+            if eplb_enabled
+            else None
+        )
         deep_gemm = load_deepgemm()
         self.kernel = deep_gemm.fp8_fp4_mega_moe
         self.num_shared_experts = text.n_shared_experts or 0
@@ -248,6 +254,9 @@ class DeepGemmExperts:
         else:
             torch.mul(topk_weights, routed_scale, out=routed_weights)
         out = torch.empty((count, self.hidden), dtype=torch.bfloat16, device=x.device)
+        if self.expert_tokens is not None:
+            # The kernel accumulates counts. MRV2 records a single forward's load.
+            self.expert_tokens.zero_()
         self.kernel(
             out,
             (layer.w13_weight, layer.w13_weight_scale),
@@ -255,8 +264,9 @@ class DeepGemmExperts:
             self.buffer,
             shared_l1_weights=self.shared_l1_weights,
             shared_l2_weights=self.shared_l2_weights,
+            cumulative_local_expert_recv_stats=self.expert_tokens,
             activation_clamp=self.activation_clamp,
         )
         # Shared experts execute inside this kernel, so no side-stream
         # milestones are needed by the framework.
-        return FusedExpertsResult(routed_out=out)
+        return FusedExpertsResult(routed_out=out, expert_tokens=self.expert_tokens)

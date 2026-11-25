@@ -285,6 +285,9 @@ class AscendW4A8MXFPDynamicFusedMoEMethod(AscendMoEScheme):
 
     @classmethod
     def get_eplb_weight_views(cls, layer: torch.nn.Module) -> list:
+        if getattr(layer, "_deepgemm_mega_moe", None) is not None:
+            # DeepGEMM consumes the packed weights and scales in place.
+            return [layer.w13_weight, layer.w2_weight, layer.w13_weight_scale, layer.w2_weight_scale]
         if hasattr(layer, "w13_weight_list"):
             # The expert weights are cast with parameters, so EPLB cannot
             # rebuild them without the same cast. The scales stay ND.

@@ -50,7 +50,7 @@ def context():
             num_shared_experts=num_shared_experts,
             x=torch.empty((capacity, hidden), dtype=torch.float8_e4m3fn),
             x_sf=torch.empty((capacity, hidden // 64), dtype=torch.int16),
-            topk_idx=torch.empty((capacity, topk), dtype=torch.int32),
+            topk_idx=torch.empty((capacity, topk), dtype=torch.int64),
             topk_weights=torch.empty((capacity, topk), dtype=torch.float32),
         )
 
@@ -63,13 +63,13 @@ def context():
         yield backend, config, group, dependency
 
 
-def layer(experts=384, topk=6, ep_size=8):
+def layer(experts=384, topk=6, *, logical_experts=None, ep_size=8):
     local = experts // ep_size
     result = torch.nn.Module()
     result.moe_config = SimpleNamespace(
         activation="silu",
         num_experts=experts,
-        num_logical_experts=experts,
+        num_logical_experts=experts if logical_experts is None else logical_experts,
         num_local_experts=local,
         experts_per_token=topk,
         swiglu_limit=10.0,
@@ -162,7 +162,7 @@ def test_strided_checkpoint_weights_and_scales_pack_identically(context):
         torch.testing.assert_close(pair[1].view(torch.uint8), original[prefix + "_weight_scale"])
 
 
-@pytest.mark.parametrize("mode", ["model", "tp", "eplb", "input_weight", "activation", "lora"])
+@pytest.mark.parametrize("mode", ["model", "tp", "input_weight", "activation", "lora"])
 def test_unsupported_config_fails_before_weight_conversion(context, mode):
     backend, config, group, dependency = context
     item = layer()
@@ -170,8 +170,6 @@ def test_unsupported_config_fails_before_weight_conversion(context, mode):
         config.model_config.hf_text_config.model_type = "other"
     if mode == "tp":
         backend.get_tensor_model_parallel_world_size = lambda: 2
-    if mode == "eplb":
-        item.router = SimpleNamespace(eplb_state=object())
     if mode == "input_weight":
         item.apply_router_weight_on_input = True
     if mode == "activation":
@@ -225,6 +223,64 @@ def test_backend_uses_ep_group_size(context, ep_size):
     group.world_size = ep_size
     backend.DeepGemmExperts(layer(ep_size=ep_size))
     assert dependency.SymmBuffer.call_args.args[0] is group.device_group
+
+
+def test_eplb_replicas_require_layer_router_state(context):
+    backend, _, _, dependency = context
+    with pytest.raises(ValueError, match="require an EPLB router"):
+        backend.DeepGemmExperts(layer(400, logical_experts=384))
+    dependency.transform_weights_for_mega_moe.assert_not_called()
+
+
+def test_eplb_counts_physical_expert_slots_per_forward(context):
+    backend, _, _, dependency = context
+    target = layer(400, logical_experts=384)
+    target.router = SimpleNamespace(eplb_state=object())
+    adapter = backend.DeepGemmExperts(target)
+    assert dependency.SymmBuffer.call_args.args[1] == 400
+    draft = backend.DeepGemmExperts(layer(128, 3))
+    assert draft.buffer.base is adapter.buffer
+    assert draft.expert_tokens is None
+
+    x = torch.ones((2, 256), dtype=torch.bfloat16)
+    weights = torch.full((2, 6), 1 / 6)
+    indices = torch.tensor([[0, 49, 50, 100, 398, 399]] * 2, dtype=torch.int64)
+
+    def accumulate(out, *args, cumulative_local_expert_recv_stats, **kwargs):
+        counts = cumulative_local_expert_recv_stats
+        assert counts.shape == (50,) and counts.dtype == torch.int32
+        assert torch.equal(adapter.buffer.topk_idx[:2], indices)
+        counts[-1].add_(out.shape[0])
+
+    dependency.fp8_fp4_mega_moe.side_effect = accumulate
+    result_module = SimpleNamespace(FusedExpertsResult=lambda **kwargs: SimpleNamespace(**kwargs))
+    with (
+        patch.object(torch.ops._C_ascend, "dynamic_mx_quant_out", create=True),
+        patch.dict(sys.modules, {"vllm_ascend.ops.fused_moe.moe_comm_method": result_module}),
+    ):
+        for _ in range(2):
+            result = adapter.apply(target, x, weights, indices)
+            assert result.expert_tokens is adapter.expert_tokens
+            expected = torch.zeros(50, dtype=torch.int32)
+            expected[-1] = 2
+            torch.testing.assert_close(result.expert_tokens, expected)
+
+
+def test_eplb_moves_the_packed_storage_used_by_megamoe(context):
+    from vllm_ascend.quantization.methods.w4a8.w4a8_mxfp4 import AscendW4A8MXFPDynamicFusedMoEMethod
+
+    backend, _, _, _ = context
+    item = layer()
+    item._deepgemm_mega_moe = backend.DeepGemmExperts(item)
+    tensors = AscendW4A8MXFPDynamicFusedMoEMethod.get_eplb_weight_views(item)
+    for tensor, parameter in zip(
+        tensors, (item.w13_weight, item.w2_weight, item.w13_weight_scale, item.w2_weight_scale)
+    ):
+        assert tensor is parameter
+        slots = tensor.view(tensor.shape[0], -1)
+        slots[0].fill_(7)
+        assert torch.all(parameter[0] == 7)
+    assert [tensor.dtype for tensor in tensors] == [torch.int8, torch.int8, torch.int16, torch.int16]
 
 
 @pytest.mark.parametrize("block,fp32_scale", [(0, False), (32, False), (32, True), (128, True)])
