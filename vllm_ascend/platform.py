@@ -100,6 +100,15 @@ _MINIMAX_M3_ARCHITECTURES = frozenset(
         "MiniMaxM3SparseForConditionalGeneration",
     }
 )
+QWEN_FA3_TARGETS = frozenset(
+    {
+        "Qwen3NextForCausalLM",
+        "Qwen3_5ForCausalLM",
+        "Qwen3_5MoeForCausalLM",
+        "Qwen3_5ForConditionalGeneration",
+        "Qwen3_5MoeForConditionalGeneration",
+    }
+)
 _V2_EPLB_CONFIG_FIELDS = frozenset({"load_collection_phase", "stair_config"})
 _V2_STAIR_CONFIG_FIELDS = frozenset(StairConfig.__dataclass_fields__)
 
@@ -2031,7 +2040,7 @@ def _validate_fa3_global_constraints(config, *, allow_local_draft: bool) -> bool
 
 
 def _validate_flash_attn_npu_3(backend_key, selector) -> bool:
-    """Select optional FA3 for compatible MiniMax, Step5, or local GLM DFlash2 attention."""
+    """Select optional FA3 for compatible MiniMax, Step5, Qwen, or local GLM DFlash2 attention."""
     if backend_key != (False, False, False) or not get_current_hardware_profile().supports(
         HardwareCapability.FLASH_ATTN_NPU_3
     ):
@@ -2053,7 +2062,7 @@ def _validate_flash_attn_npu_3(backend_key, selector) -> bool:
     )
     if config is None or config.model_config is None:
         return False
-    if not (local_glm_dflash or _uses_minimax_fa3(config) or _uses_step5_fa3(config)):
+    if not (local_glm_dflash or _uses_minimax_fa3(config) or _uses_step5_fa3(config) or _uses_qwen_fa3(config)):
         return False
     return _validate_fa3_common_constraints(config, selector) and _validate_fa3_global_constraints(
         config,
@@ -2086,6 +2095,24 @@ def _uses_minimax_fa3(config) -> bool:
         and getattr(spec, "method", None) in ("dspark",)
         and bool(draft_architectures.intersection(architectures))
         and bool(_MINIMAX_M3_ARCHITECTURES.intersection(getattr(target_hf, "architectures", None) or ()))
+    )
+
+
+def _uses_qwen_fa3(config: VllmConfig) -> bool:
+    from vllm.compilation import backends
+
+    architectures = config.model_config.hf_config.architectures or ()
+    if (
+        FlashAttentionNpu3Model.QWEN not in get_current_hardware_profile().flash_attn_npu_3_models
+        or QWEN_FA3_TARGETS.isdisjoint(architectures)
+    ):
+        return False
+    # DFlash keeps the target model config while loading the draft.
+    spec = config.speculative_config
+    return (
+        backends.model_tag in ("backbone", "dflash_head")
+        and spec.method == "dflash"
+        and "DFlash2DraftModel" in (spec.draft_model_config.architectures or ())
     )
 
 

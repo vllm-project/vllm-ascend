@@ -2414,6 +2414,35 @@ def test_glm_dflash2_device_lengths_do_not_require_attention_groups(model_type):
 
 
 @pytest.mark.parametrize(
+    "target_arch,draft_arch,draft_uses_fa3,kv_transfer,expected",
+    [
+        ("Qwen3_5ForConditionalGeneration", "DFlash2DraftModel", True, None, True),
+        ("Qwen3_5ForConditionalGeneration", "DFlash2DraftModel", False, None, False),
+        ("Qwen3_5MoeForConditionalGeneration", "DFlash2DraftModel", True, None, False),
+        ("Qwen3_5ForConditionalGeneration", "Qwen3DFlashForCausalLM", True, None, False),
+        ("Qwen3_5ForConditionalGeneration", "DFlash2DraftModel", True, SimpleNamespace(), False),
+    ],
+)
+def test_qwen_dflash2_cpu_length_sync(target_arch, draft_arch, draft_uses_fa3, kv_transfer, expected):
+    from vllm_ascend.worker.v2.model_states.mamba_hybrid import AscendMambaHybridModelState
+
+    fa3 = SimpleNamespace(
+        full_cls_name=lambda: ("vllm_ascend.attention.flash_attention_v3", "AscendFlashAttentionBackend")
+    )
+    runner, _, _ = _device_length_runner("qwen3_5_text")
+    runner.model_config.architecture = target_arch
+    runner.model_state = AscendMambaHybridModelState.__new__(AscendMambaHybridModelState)
+    runner.speculative_config.draft_model_config.architectures = [draft_arch]
+    runner.vllm_config.kv_transfer_config = kv_transfer
+    draft_backend = fa3 if draft_uses_fa3 else AscendAttentionBackend
+    runner.speculator = SimpleNamespace(attn_groups=[[SimpleNamespace(backend=draft_backend)]])
+    runner.initialize_spec_cpu_length_sync()
+    for target_backend in (AscendAttentionBackend, fa3):
+        runner.attn_groups = [[SimpleNamespace(backend=target_backend)]]
+        assert runner._can_skip_spec_cpu_length_sync() is expected
+
+
+@pytest.mark.parametrize(
     "unsupported",
     ["no_spec_config", "no_speculator", "method", "no_draft_config", "draft_arch", "target_arch"],
 )
