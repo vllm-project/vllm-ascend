@@ -164,7 +164,15 @@ class YuanrongBackend(Backend):
             logger.debug("Failed to get key details. keys=%s", failed_keys_for_log)
             return None
 
-    def put(self, keys: list[str], addrs: list[list[int]], sizes: list[list[int]]) -> bool:
+    def put(
+        self,
+        keys: list[str],
+        addrs: list[list[int]],
+        sizes: list[list[int]],
+        session_ids: list[str] | None = None,
+    ) -> bool:
+        # session_ids (per-key request affinity) is a MemCache-only placement
+        # hint; yuanrong placement is not request-affine.
         assert self.store is not None
         failed_keys_for_log = keys
         try:
