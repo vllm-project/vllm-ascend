@@ -56,6 +56,7 @@ from vllm.v1.worker.gpu.model_runner import (
 )
 from vllm.v1.worker.gpu.model_states.mamba_hybrid import MambaHybridModelState
 from vllm.v1.worker.gpu.spec_decode.speculator import DraftModelSpeculator
+from vllm.v1.worker.utils import get_uniform_decode_token_count
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import (
@@ -152,6 +153,9 @@ from vllm_ascend.worker.v2.utils import (
 
 class NPUModelRunner(GPUModelRunner):
     """Model runner for Ascend NPUs."""
+
+    # The base runner initializes this using self.pcp_manager_cls.
+    pcp_manager: AscendPCPManager | None
 
     # vLLM #51718 overlays hybrid Attention/Mamba groups in one standardized
     # backing allocation. Ascend MRV2 preserves that allocation and exposes
@@ -889,9 +893,22 @@ class NPUModelRunner(GPUModelRunner):
 
     def gather_batch_req_state(self, scheduler_output: SchedulerOutput, dummy_run: bool):
         batch_state, uniform_token_count = super().gather_batch_req_state(scheduler_output, dummy_run)
+        if self.pcp_manager is not None:
+            batch_state = self.pcp_manager.prepare_pcp_batch_req_state(batch_state)
+
+            if batch_state is not None and batch_state.prefill_runs_as_decode_np is not None:
+                max_query_len = int(batch_state.num_scheduled_tokens.max())
+                uniform_token_count = get_uniform_decode_token_count(
+                    len(batch_state.req_ids),
+                    batch_state.num_tokens,
+                    max_query_len,
+                    batch_state.decode_graph_eligible,
+                )
         if self._target_uses_flashmla and batch_state is not None:
             # The backend order must precede derived inputs and graph dispatch.
             batch_state, uniform_token_count = prepare_flashmla_batch_req_state(batch_state, uniform_token_count)
+        if self.pcp_manager is not None:
+            self.pcp_manager.set_dispatch_batch_req_state(batch_state)
         expert_offload.prepare_batch(self, batch_state)
         return batch_state, uniform_token_count
 
