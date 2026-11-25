@@ -16,9 +16,8 @@
 # This file is a part of the vllm-ascend project.
 #
 
-import huggingface_hub
 import numpy as np
-from huggingface_hub import snapshot_download as hf_snapshot_download
+from modelscope import snapshot_download  # type: ignore[import-untyped]
 from vllm import SamplingParams
 
 from tests.e2e.conftest import VllmRunner, qwen_prompt, wait_until_npu_memory_free
@@ -56,10 +55,7 @@ def test_qwen35_evs_reduces_video_prompt_tokens():
         prompt.replace("<|image_pad|>", "<|video_pad|>")
         for prompt in qwen_prompt(["Describe the colors in this video. Answer briefly."])
     ]
-    model_path = hf_snapshot_download(
-        "Qwen/Qwen3.5-2B",
-        local_files_only=huggingface_hub.constants.HF_HUB_OFFLINE,
-    )
+    model_path = snapshot_download("Qwen/Qwen3.5-2B")
     visual_token_counts = []
     nonvisual_token_ids = []
     for pruning_rate in (0.0, 0.75):
