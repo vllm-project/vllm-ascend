@@ -22,12 +22,26 @@ import os
 from collections.abc import Callable
 from typing import Any
 
+
+def _get_bool_env(name: str, default: str) -> bool:
+    value = os.getenv(name, default)
+    if value not in ("0", "1"):
+        raise ValueError(f"{name} must be '0' or '1', got {value!r}")
+    return value == "1"
+
+
 # The begin-* and end* here are used by the documentation generator
 # to extract the used env vars.
 
 # begin-env-vars-definition
 
 env_variables: dict[str, Callable[[], Any]] = {
+    # Disable incremental block-table H2D commits for baseline comparisons.
+    # Valid values: 0 (default, dirty-range commits), 1 (original full copy).
+    # This variable does not contain sensitive information.
+    "VLLM_ASCEND_BLOCK_TABLE_NO_COMMIT_OPTIMIZE": lambda: _get_bool_env(
+        "VLLM_ASCEND_BLOCK_TABLE_NO_COMMIT_OPTIMIZE", "0"
+    ),
     # max compile thread number for package building. Usually, it is set to
     # the number of CPU cores. If not set, the default value is None, which
     # means all number of CPU cores will be used.
