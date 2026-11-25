@@ -32,7 +32,7 @@ def test_fused_decode_publishes_indices_and_preserves_connector_order(monkeypatc
     cache = (torch.zeros(1),)
     slots = torch.tensor([0, -1], dtype=torch.int32)
     metadata = SimpleNamespace(attn_state=AscendAttentionState.DecodeOnly, slot_mapping=slots, cos=None, sin=None)
-    calls = []
+    calls: list[str | tuple[str, str]] = []
     indices = torch.arange(2 * 2176, dtype=torch.int32).reshape(2, 2176)
     shared_indices = torch.full((3, 2051), -1, dtype=torch.int32)
 
