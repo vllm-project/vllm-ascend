@@ -24,6 +24,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
 )
 
 _TRANSFER_SHUTDOWN_POLL_S = 0.1
+_MEMCACHE_GET_DATA_FOR_LAYER_WISE = 1
 
 
 class KVTransferThread(threading.Thread):
@@ -195,6 +196,8 @@ class KVTransferThread(threading.Thread):
         direction: int,
         max_transfer_blocks: int,
         max_transfer_bytes: int,
+        *,
+        scheduler_gva_copy_deadline: float | None = None,
     ) -> int:
         if len(gvas) == 0:
             return 0
@@ -229,12 +232,14 @@ class KVTransferThread(threading.Thread):
                 split_gvas.tolist(),
                 split_sizes.tolist(),
             )
-            res = self.m_store.store.batch_copy(
-                split_gvas.tolist(),
-                split_addrs.tolist(),
-                split_sizes.tolist(),
-                direction,
-            )
+            copy_args = (split_gvas.tolist(), split_addrs.tolist(), split_sizes.tolist(), direction)
+            if scheduler_gva_copy_deadline is not None and direction == 1:
+                if time.monotonic() >= scheduler_gva_copy_deadline:
+                    logger.error("Scheduler GVA read lease is too close to expiry to submit a copy")
+                    return -1
+                res = self.m_store.store.batch_copy(*copy_args, _MEMCACHE_GET_DATA_FOR_LAYER_WISE)
+            else:
+                res = self.m_store.store.batch_copy(*copy_args)
             if res != 0:
                 logger.error("[KVPOOL] batch_copy %s FAILED res=%d", dir_name, res)
                 return res

@@ -1,10 +1,14 @@
+import time
 from collections.abc import Sequence
+from itertools import count
 from typing import Any
 
 from vllm.config import VllmConfig
 from vllm.logger import logger
 from vllm.v1.core.kv_cache_utils import BlockHash
+from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig
+from vllm.v1.outputs import KVConnectorOutput
 from vllm.v1.request import Request
 
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend import (
@@ -14,9 +18,15 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.dspark_prefix_cach
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.layerwise_cache_layout import (
     get_layerwise_reuse_backing_bytes,
 )
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.metadata import (
+    LAYERWISE_READ_LEASE_TTL_MS,
+)
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
+    AscendConnectorMetadata,
+    AscendStoreKVConnectorWorkerMetadata,
     LoadSpec,
     RequestTracker,
+    SchedulerGvaReadLease,
     block_hash_to_str,
     get_block_hashes,
     get_sharded_mamba_group_ids,
@@ -66,6 +76,25 @@ class LayerwiseKVPoolScheduler(BaseKVPoolScheduler):
         if self.use_block_key_layerwise and self.tp_mismatch:
             raise ValueError("Mooncake layerwise does not yet support prefill/decode TP mismatch")
         self.layerwise_max_transfer_blocks = int(extra_config.get("layerwise_max_transfer_blocks", 0))
+        parallel_config = vllm_config.parallel_config
+        self.use_scheduler_lookup = (
+            extra_config.get("use_scheduler_lookup") is True
+            and self.use_layerwise_transfer
+            and backend_name == "memcache"
+            # Only local ranks share the scheduler's monotonic clock.
+            and parallel_config.nnodes == 1
+            and parallel_config.distributed_executor_backend != "ray"
+            and parallel_config.data_parallel_backend != "ray"
+            and getattr(self.store_scheduler.store, "supports_scheduler_read_lease", False) is True
+        )
+        self._read_lease_ids = count()
+        self._read_lease_worker_count = parallel_config.world_size
+        self._scheduler_read_leases: dict[int, tuple[list[str], int, float]] = {}
+        if extra_config.get("use_scheduler_lookup") is True:
+            logger.info(
+                "AscendStore layerwise read leases are acquired by the %s.",
+                "scheduler when possible" if self.use_scheduler_lookup else "worker",
+            )
         cacheable_block_sizes = [self.original_block_size[i] for i in self.cacheable_group_ids]
         if (
             self.use_layerwise
@@ -74,6 +103,128 @@ class LayerwiseKVPoolScheduler(BaseKVPoolScheduler):
             and len(cacheable_block_sizes) != len(self.original_block_size)
         ):
             raise ValueError("AscendStore private KV state requires Mooncake block-key or non-layerwise transfer")
+
+    def build_connector_meta(self, scheduler_output: SchedulerOutput) -> AscendConnectorMetadata:
+        meta = super().build_connector_meta(scheduler_output)
+        assert isinstance(meta, AscendConnectorMetadata)
+        if self.use_scheduler_lookup:
+            meta.scheduler_gva_read_lease = self._prepare_scheduler_read_lease(meta)
+        return meta
+
+    def _scheduler_read_keys(self, meta: AscendConnectorMetadata) -> list[str]:
+        keys: dict[str, None] = {}
+        seen_hashes = {group_id: set() for group_id in self.cacheable_group_ids}
+        for request in meta.requests:
+            load = request.load_spec
+            if load is None or not load.can_load:
+                continue
+            cached_tokens = load.kvpool_cached_tokens if self.use_eagle else load.pool_hit_tokens
+            if cached_tokens <= 0:
+                continue
+            masks = (
+                self.cache_coordinator.load_mask(request.block_hashes, cached_tokens)
+                if self.cache_coordinator is not None
+                else None
+            )
+            for group_id in self.cacheable_group_ids:
+                block_size = self.grouped_block_size[group_id]
+                first = 0 if self.layerwise_offload else load.vllm_cached_tokens // block_size
+                hashes = get_block_hashes(request.block_hashes, block_size, self.hash_block_size)
+                end = min(cached_tokens // block_size, len(hashes))
+                mask = masks[group_id] if masks is not None else None
+                for index in range(first, end):
+                    if mask is not None and index < len(mask) and not mask[index]:
+                        continue
+                    block_hash = hashes[index]
+                    if block_hash in seen_hashes[group_id]:
+                        continue
+                    seen_hashes[group_id].add(block_hash)
+                    for key in self._make_layerwise_hit_check_keys(group_id, block_hash_to_str(block_hash)):
+                        keys[key] = None
+        return list(keys)
+
+    def _prepare_scheduler_read_lease(self, meta: AscendConnectorMetadata) -> SchedulerGvaReadLease | None:
+        if self.layerwise_offload and any(
+            (load := request.load_spec) is not None and load.can_load and load.layerwise_previous_step
+            for request in meta.requests
+        ):
+            # Only the worker can resolve private snapshots for resumed prefill.
+            return None
+
+        now = time.monotonic()
+        held_keys = set()
+        for event_id, (keys, _, expires_after) in list(self._scheduler_read_leases.items()):
+            if now >= expires_after:
+                # An undelivered completion cannot hold back later steps after the lease expires.
+                self._scheduler_read_leases.pop(event_id)
+            else:
+                held_keys.update(keys)
+
+        leased: list[str] = []
+        gvas: dict[str, int] = {}
+        try:
+            keys = self._scheduler_read_keys(meta)
+            # A partial plan would send workers back to local lookup.
+            if not keys or not held_keys.isdisjoint(keys):
+                return None
+            leased = keys
+            started = time.monotonic()
+            # MemCache only grants a lease on a readable GVA, so one query
+            # after acquisition is enough. SSD-only keys stay on the worker path.
+            statuses = self.store_scheduler.batch_add_lease(leased, LAYERWISE_READ_LEASE_TTL_MS)
+            # If the response is malformed, release every lease that this call could have acquired.
+            if statuses is None or len(statuses) != len(leased):
+                self._release_scheduler_read_keys(leased)
+                return None
+            leased = [key for key, result in zip(leased, statuses, strict=True) if result == 0]
+            if not leased:
+                return None
+            expires_after = time.monotonic() + LAYERWISE_READ_LEASE_TTL_MS / 1000
+            infos = self.store_scheduler.batch_get_key_info(leased)
+            if infos is not None and len(infos) == len(leased):
+                for key, info in zip(leased, infos, strict=True):
+                    if info is not None and info.size() > 0:
+                        address = next((int(gva) for gva in info.gva_list() if 0 < gva < 1 << 63), 0)
+                        if address:
+                            gvas[key] = address
+        except Exception:
+            logger.warning("Scheduler GVA read preparation failed; using worker lookup", exc_info=True)
+            self._release_scheduler_read_keys(leased)
+            return None
+        if not gvas:
+            self._release_scheduler_read_keys(leased)
+            return None
+
+        event_id = next(self._read_lease_ids)
+        self._scheduler_read_leases[event_id] = leased, self._read_lease_worker_count, expires_after
+        # Leave half the lease lifetime for copies already submitted by a worker.
+        return SchedulerGvaReadLease(event_id, gvas, started + LAYERWISE_READ_LEASE_TTL_MS / 2000)
+
+    def _release_scheduler_read_keys(self, keys: list[str]) -> None:
+        if not keys:
+            return
+        try:
+            result = self.store_scheduler.batch_remove_lease(keys)
+            if result != 0:
+                logger.warning("Scheduler GVA read lease cleanup returned %s", result)
+        except Exception:
+            logger.warning("Scheduler GVA read lease cleanup failed", exc_info=True)
+
+    def update_connector_output(self, connector_output: KVConnectorOutput) -> None:
+        super().update_connector_output(connector_output)
+        worker_meta = connector_output.kv_connector_worker_meta
+        if not self.use_scheduler_lookup or not isinstance(worker_meta, AscendStoreKVConnectorWorkerMetadata):
+            return
+        for event_id, completed in worker_meta.completed_events.items():
+            lease = self._scheduler_read_leases.get(event_id)
+            if lease is None:
+                continue
+            keys, remaining, expires_after = lease
+            if completed >= remaining:
+                self._scheduler_read_leases.pop(event_id)
+                self._release_scheduler_read_keys(keys)
+            else:
+                self._scheduler_read_leases[event_id] = keys, remaining - completed, expires_after
 
     def _process_hit_without_alloc(self, store_skip_tokens: int) -> bool:
         return store_skip_tokens > 0

@@ -1,0 +1,7 @@
+pr: 23060
+entries:
+  - category: performance
+    text: >-
+      Set `use_scheduler_lookup` in the AscendStoreConnector extra config to batch
+      public key lookups and read leases on the scheduler for MemCache layerwise loads.
+      This requires a compatible MemCache SDK and defaults to worker-side lookup.

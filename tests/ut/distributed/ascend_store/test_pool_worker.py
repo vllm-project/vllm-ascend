@@ -17,6 +17,7 @@
 
 import queue
 import threading
+import time
 import unittest
 from itertools import product
 from types import SimpleNamespace
@@ -53,6 +54,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     AscendConnectorMetadata,
     LoadSpec,
     ReqMeta,
+    SchedulerGvaReadLease,
 )
 
 
@@ -2706,6 +2708,42 @@ class TestKVPoolWorkerProcessLayerData(unittest.TestCase):
         self.assertIn(301, request.load_block_gvas_by_group_np[0])
         self.assertNotIn(201, request.load_block_gvas_by_group_np[0])
         self.assertEqual(worker.get_block_ids_with_load_errors(), set())
+
+    def test_scheduler_read_lease_uses_worker_fallback_if_any_keys_are_missing(self):
+        for missing_key in (False, True):
+            with self.subTest(missing_key=missing_key):
+                worker = self._make_gva_worker()
+                worker.m_store.store.supports_scheduler_read_lease = True
+                request = self._make_gva_request(load_spec=LoadSpec(0, 16, True))
+                key = worker._make_layerwise_full_key(0, "h0")
+                worker._scheduler_gva_read_lease = SchedulerGvaReadLease(
+                    0, {} if missing_key else {key: 401}, time.monotonic() + 30
+                )
+                resident = SimpleNamespace(size=lambda: 64, gva_list=lambda: [301])
+                worker.m_store.batch_get_key_info.return_value = [resident]
+                worker.m_store.batch_add_lease.return_value = [0]
+
+                worker._data_plane._prepare_load_gvas([request])
+
+                self.assertEqual(request.load_block_gvas_by_group_np[0].tolist(), [301 if missing_key else 401])
+                if missing_key:
+                    worker.m_store.batch_add_lease.assert_called_once()
+                    self.assertIsNone(worker._scheduler_gva_copy_deadline)
+                else:
+                    worker.m_store.batch_get_key_info.assert_not_called()
+                    worker.m_store.batch_add_lease.assert_not_called()
+                    self.assertEqual(
+                        worker._scheduler_gva_copy_deadline, worker._scheduler_gva_read_lease.copy_deadline
+                    )
+                    meta = AscendConnectorMetadata(set())
+                    meta.scheduler_gva_read_lease = worker._scheduler_gva_read_lease
+                    worker.kv_recv_thread = MagicMock()
+                    with patch.object(worker, "_drain_attention_transfers") as drain:
+                        worker.get_finished(set(), meta)
+                        drain.assert_called_once_with(full=True)
+                    self.assertEqual(worker.build_connector_worker_meta().completed_events, {0: 1})
+                    self.assertIsNone(worker.build_connector_worker_meta())
+                    worker.m_store.batch_remove_lease.assert_not_called()
 
     @staticmethod
     def _make_multi_block_gva_request(block_hashes):

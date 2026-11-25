@@ -1116,6 +1116,9 @@ class KVCacheStoreLayerRecvingThread(KVTransferThread):
         size_array = np.concatenate(all_sizes) if len(all_sizes) > 1 else all_sizes[0]
         if self.external_slot_release_waiter is not None:
             self.external_slot_release_waiter(layer_id)
+        copy_options = {}
+        if data.scheduler_gva_copy_deadline is not None:
+            copy_options["scheduler_gva_copy_deadline"] = data.scheduler_gva_copy_deadline
         res = self._batch_copy_with_limits(
             gvas_array,
             addr_array,
@@ -1123,6 +1126,7 @@ class KVCacheStoreLayerRecvingThread(KVTransferThread):
             1,
             self.max_transfer_blocks,
             self.max_transfer_bytes,
+            **copy_options,
         )
         if layer_id <= 2 or res != 0:
             logger.debug(
