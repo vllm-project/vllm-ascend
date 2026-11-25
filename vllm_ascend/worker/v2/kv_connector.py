@@ -10,8 +10,8 @@ from vllm.v1.worker.gpu.kv_connector import KVConnector
 from vllm_ascend.attention.attention_c8_mxfp import AscendC8MXFPAttentionBackendImpl
 
 if TYPE_CHECKING:
-    from vllm.v1.kv_cache_interface import KVCacheConfig
     from vllm.v1.core.sched.output import SchedulerOutput
+    from vllm.v1.kv_cache_interface import KVCacheConfig
     from vllm.v1.outputs import KVConnectorOutput, ModelRunnerOutput
 
 
