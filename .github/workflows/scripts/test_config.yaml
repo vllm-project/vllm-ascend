@@ -126,11 +126,13 @@ runner_mapping:
   # Sparse KV offload native ops require A3, even for the TP=1 runner test.
   tests/e2e/pull_request/one_card/test_sparse_kv_offload_lifecycle\.py$:
     default: a3-2
-  # A2 KV-pool protection cases: the scenarios are calibrated on A2/910B2
-  # (env, hugepages, per-tier perf gates) and run on a single card, so route to
-  # the A2 single-card pool instead of the one_card default (a3-2).
-  tests/e2e/pull_request/one_card/kv_pool/test_qwen38_kv_pool_ab_a2\.py$:
+  # A2 mooncake KV-pool cases run on the shared a2-1 pool (NUMA-cpuset bound).
+  tests/e2e/pull_request/one_card/kv_pool/test_qwen38_mooncake_pool_ab_a2\.py$:
     default: a2-1
+  # A2 memcache KV-pool cases need the loop-1 runner's raw UBS IO device and
+  # hugepages, so they run on the dedicated single-card host.
+  tests/e2e/pull_request/one_card/kv_pool/test_qwen38_memcache_pool_ab_a2\.py$:
+    default: a2-loop-1
   # Native padded-head Q_B packing regressed on A3; keep its numerical test there.
   tests/e2e/pull_request/one_card/test_mla_prolog_head_padding\.py$:
     default: a3-2
@@ -174,6 +176,11 @@ partition:
   a2-1:
     runner_label: linux-aarch64-a2b1b3-1-hk-001
     count: 7
+  # Dedicated single-card A2 host for the memcache KV-pool cases (raw UBS IO
+  # device + hugepages; the shared a2-1 pool has neither).
+  a2-loop-1:
+    runner_label: linux-aarch64-a2b3-loop-1
+    count: 1
   a3-2:
     runner_label: linux-aarch64-a3-800i-2
     count: 5

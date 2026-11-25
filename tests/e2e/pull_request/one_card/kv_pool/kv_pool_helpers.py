@@ -1,115 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM-Ascend project
-"""A2 KV-pool protection cases for the hybrid-GDN Qwen3.8-27B W8A8 model.
+"""Shared implementation for the A2 KV-pool A/B test files.
 
-Four single-node ``kv_both`` scenarios guard the pooling matrix on A2:
-
-======================  =========  =========  ===========
-scenario                backend    mode       tier
-======================  =========  =========  ===========
-mooncake_bulk_tier2     mooncake   bulk       DRAM
-mooncake_layerwise_tier3 mooncake  layerwise  DRAM + SSD
-memcache_bulk_tier2     memcache   bulk       DRAM
-memcache_layerwise_tier3 memcache layerwise  DRAM + SSD
-======================  =========  =========  ===========
-
-The scenarios run on a single A2 card (``TP_SIZE=1``, the default) because the
-pool moves KV between ranks and the A2 slices available to this file have no
-working cross-NPU channel: device RoCE endpoints are unavailable there and the
-platform HCCS path fails with rtsIpcMemImportByKey 107000 / DisableP2P 17, which
-made every two-card scenario read back 0 of its 16128 expected hit tokens. A
-single card needs no cross-rank transfer, and the whole matrix was verified
-passing on one A2 card with the platform default transport. Export
-``QWEN38_POOL_TP_SIZE=2`` on a slice whose NPUs can exchange KV to exercise the
-sharded path.
-
-Every scenario runs two control legs, each inside one engine instance:
-
-- Leg A: pool enabled (backend / transfer mode / storage tier per scenario),
-  local prefix cache disabled;
-- Leg B: pool disabled, local prefix cache enabled.
-
-Both legs run three phases inside the single service: accuracy (cold greedy
-output of a shared 16K natural-language prefix), pool hit (R2/R3 exact
-hit-token count, token identity against the cold output and an R4
-disjoint-prompt miss), and performance (TTFT-proxy sampling on the
-repeatedly-hit prefix). The A/B comparison asserts that the pooled leg
-reproduces the control leg's tokens exactly and stays within the per-tier
-performance gates calibrated on A2 (see ``TTFT_LIMITS`` /
-``THROUGHPUT_LIMITS``).
-
-The tier-3 scenarios arm the SSD storage tier but keep it eviction-free
-(deliberately, see the tier sizing comment below): the pool DRAM tier holds the
-whole working set so hits are served from DRAM, and the SSD tier is armed and
-receives the writes but its read-back path is not exercised. The memcache
-tier-3 legs use UBS IO storage (raw block device, rewarm readbacks from the
-UBS IO DRAM buffer) and the mooncake tier-3 leg arms SSD offload + the SSD ->
-DRAM prefetch per the official KV pool guide (activated only on mooncake
-builds exposing ``ExistOptions``; on older builds the DRAM-only tier runs and
-the SSD store stays armed-but-idle).
-
-``memcache_layerwise_tier3`` runs at TP=1 on hosts that pass it the raw UBS IO
-block device (the a2-loop-1 runner mounts its loop device at ``/mnt/boostio``):
-the tier-3 DRAM tier defaults to 8GB, which fits the layerwise save
-pre-allocation of a single 16128-token prefix (~4.5GB; the 4GB tier-2 default
-overflows it and the pool reports 0 of 16128 hits - verified on the 148 box,
-where 8GB and 16GB both pass with full hits). The TP<2 skip therefore fires
-only when the tier is explicitly reduced below 8GB; see the skip reason in the
-test body for the root cause and the configurations that were ruled out.
-
-Environment knobs:
-
-- ``QWEN38_POOL_MODEL``: model id or local checkpoint path (default
-  ``Eco-Tech/Qwen3.8-27B-w8a8``);
-- ``KV_POOL_AB_MODE``: ``gate`` (default, A/B comparison must pass) or
-  ``record`` (only log the verdict);
-- ``KV_POOL_MEMCACHE_UBSIO_DISK``: raw block device used for the memcache
-  tier-3 UBS IO storage. When unset the case probes the known provisioning
-  locations in order - ``/mnt/boostio`` (bind-mount convention) then any
-  device-plugin injected ``/dev/loop[0-7]`` node (lowest index first; the
-  node number the plugin publishes drifts between runs) - and falls back to
-  ``/dev/loop0`` so the skip reason names the expected path. The path must be
-  a *block device* - dedicated, unmounted, no filesystem signature, and not
-  the backing image file: the ubsio SDK rejects non-block paths late and
-  cryptically, so the test checks it up front;
-- ``KV_POOL_MEMCACHE_UBSIO_DEVICES``: UBS IO standalone device count (default
-  ``TP_SIZE``, one per DRAM-enabled local service);
-- ``KV_POOL_MEMCACHE_DRAM_TIER``: memcache pool DRAM tier size written to
-  ``ock.mmc.local_service.dram.size`` (default ``4GB``). The tier-3 legs are
-  eviction-free by design, so the tier must hold the whole working set: a TP=1
-  layerwise save pre-allocates ~4.5GB for one 16128-token prefix, so TP=1
-  needs at least 8GB (the TP=2 aggregate; 16GB leaves room for a second
-  disjoint prefix);
-- ``KV_POOL_MEMCACHE_TIER3_ALLOW_TP1``: ``1`` runs the memcache tier-3 leg on
-  TP=1 despite the skip above; pair it with a sized DRAM tier (8GB verified);
-- ``QWEN38_POOL_DEVICE_ROCE``: ``1`` pins the mooncake legs to the device RoCE
-  transport (``ASCEND_GLOBAL_RESOURCE_CONFIG`` with
-  ``protocol_desc=["roce:device"]``, ``HCCL_INTRA_PCIE_ENABLE=0``,
-  ``HCCL_INTRA_ROCE_ENABLE=1``); ``0`` (default) leaves HIXL on the platform
-  default. Set it on hosts whose default HCCS P2P channel cannot carry
-  cross-rank puts, i.e. the dev A2 boxes;
-- ``QWEN38_POOL_STALL_TIMEOUT_SECONDS``: no-progress ceiling for the watchdog
-  (default ``900``, ``0`` disables). A failed engine initialisation can leave the
-  pytest process alive after the failure, so the watchdog turns that into a fast
-  failure; it measures the time since the last phase reported progress, which
-  keeps it from killing a healthy run that re-measures a case. The legacy
-  ``QWEN38_POOL_CASE_TIMEOUT_SECONDS`` is honoured as an alias;
-- ``QWEN38_POOL_TOTAL_TIMEOUT_SECONDS``: whole-module ceiling (default ``5400``).
-
-Host / runner prerequisites (official KV pool guide): the mooncake legs talk to
-the pool over HIXL. The transport itself is host-specific, so the RoCE knobs are
-opt-in (``QWEN38_POOL_DEVICE_ROCE=1``) rather than unconditional; a slice whose
-NPUs have no configured device RoCE endpoint must keep the platform default,
-otherwise HIXL aborts with "Device roce endpoint is unavailable" and the store
-never initialises. ``ASCEND_ENABLE_USE_FABRIC_MEM`` stays unset either way
-(fabric mem is the documented A3-HCCS mode). Hosts that do pin RoCE need the
-devices to expose working endpoints (``/etc/hccn.conf`` visible in the
-container, per-NPU RoCE IP and link up).
-The official A2 environment also reserves 2MB
-hugepages, but no scenario consumes them (all four scenarios were verified
-passing with ``nr_hugepages=0`` on A2), so their absence only prints a note.
-The memcache tier-3 legs need the raw UBS IO block device above (the test
-skips with provisioning steps when it is missing).
+Constants, environment diagnostics, the stall watchdog, the leg context
+manager, the three measurement phases and the gated A/B runner live here.
+The test files (``test_qwen38_mooncake_pool_ab_a2.py`` and
+``test_qwen38_memcache_pool_ab_a2.py``) import :func:`run` and call it with
+their backend; only the backend-specific pool config builders stay in the
+per-backend modules.
 """
 
 import json
@@ -139,7 +37,7 @@ from tests.e2e.common.single_node.kv_pool_runtime import (
     SingleNodeMemcacheManager,
     SingleNodeMooncakeManager,
 )
-from tests.e2e.conftest import VllmRunner, wait_until_npu_memory_free
+from tests.e2e.conftest import VllmRunner
 from tests.e2e.pull_request.kv_pool_watch import (
     PREFIX_HITS_METRIC,
     assert_hit_tokens,
@@ -1282,29 +1180,9 @@ def _start_stall_watchdog() -> None:
     threading.Thread(name="kv-pool-watchdog", target=_watch, daemon=True).start()
 
 
-@pytest.mark.e2e_model(MODEL)
-@pytest.mark.e2e_coverage(
-    arch="dense",
-    feature="kvpp,chunked_prefill,prefix_caching",
-    parallel="TP",
-    deploy="pd_mix",
-    hardware="A2",
-    quantization="W8A8",
-    graph_mode="full_and_piecewise",
-)
-@pytest.mark.parametrize(
-    ("backend", "use_layerwise"),
-    [
-        ("mooncake", False),
-        ("mooncake", True),
-        ("memcache", False),
-        ("memcache", True),
-    ],
-    ids=["mooncake_bulk_tier2", "mooncake_layerwise_tier3", "memcache_bulk_tier2", "memcache_layerwise_tier3"],
-)
-@patch.dict(os.environ, {"VLLM_USE_V2_MODEL_RUNNER": "1", "VLLM_WORKER_MULTIPROC_METHOD": "spawn"})
-@wait_until_npu_memory_free()
-def test_qwen38_kv_pool_ab_a2(backend: str, use_layerwise: bool):
+def run(backend: str, use_layerwise: bool) -> None:
+    """Run one A/B scenario; see the per-backend test files for parametrize."""
+
     tier_ssd = use_layerwise
     mode = "layerwise" if use_layerwise else "bulk"
     tier = "tier3-ssd" if tier_ssd else "tier2-dram"
