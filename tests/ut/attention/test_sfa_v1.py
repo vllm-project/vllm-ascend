@@ -39,7 +39,6 @@ from vllm_ascend.quantization.methods import (
     AscendW8A8LinearMethod,
     AscendW8A8MXFP8DynamicLinearMethod,
 )
-from vllm_ascend.utils import vllm_version_is
 
 
 class TestAscendSFABackend(TestBase):
@@ -1327,8 +1326,8 @@ class TestAscendSFAImpl(TestBase):
     ):
         """An incompatible reload must rebind instead of raising from ``copy_``.
 
-        v0.33.0 rebinds an incompatible value; main can copy a smaller value
-        into the parameter's existing storage. Both must accept the new shape.
+        Main copies a smaller value into the parameter's existing storage, so
+        the new shape must be accepted.
         """
         layer = self._setup_kv_b_proj()
         mock_format_cast.return_value = layer.weight
@@ -1349,13 +1348,9 @@ class TestAscendSFAImpl(TestBase):
 
         self.impl.process_weights_after_loading(torch.bfloat16)
 
-        if vllm_version_is("0.33.0"):
-            # A re-derived value that no longer fits rebinds the parameter.
-            self.assertNotEqual(self.impl.W_UV.data_ptr(), w_uv_ptr)
-        else:
-            # Main copies a smaller value into the parameter's own storage, so
-            # the address captured by graphs is preserved.
-            self.assertEqual(self.impl.W_UV.data_ptr(), w_uv_ptr)
+        # Main copies a smaller value into the parameter's own storage, so
+        # the address captured by graphs is preserved.
+        self.assertEqual(self.impl.W_UV.data_ptr(), w_uv_ptr)
         self.assertEqual(
             self.impl.W_UV.shape,
             (self.impl.local_num_heads, self.impl.kv_lora_rank, self.impl.v_head_dim),
