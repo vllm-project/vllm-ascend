@@ -4,14 +4,10 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
-
 import torch
 from vllm.logger import logger
 from vllm.triton_utils import tl, triton
-
-if TYPE_CHECKING:
-    from vllm.v1.worker.gpu.sample.output import SamplingMaskTensors
+from vllm.v1.worker.gpu.sample.output import SamplingMaskTensors
 
 _BLOCK_SIZE = 4096
 _BITS_PER_BYTE = 8
@@ -81,10 +77,7 @@ def sampling_mask_from_logits_npu(
     """
     # Registered as a class-mount kernel override. KernelOverride is not a
     # descriptor, so unlike the retired classmethod() mount no implicit `cls`
-    # is passed at call time. Lazy import: the module is always loaded by
-    # the time this wrapper runs.
-    from vllm.v1.worker.gpu.sample.output import SamplingMaskTensors
-
+    # is passed at call time.
     num_reqs = num_sampled_tokens.shape[0]
     if logits.stride(1) != 1:
         logits = logits.contiguous()
