@@ -391,7 +391,10 @@ def expand_pa_per_token_rows(metadata) -> bool:
         return False
     counts = torch.tensor(query_lens, dtype=torch.long, device=block_tables.device)
     metadata.pa_block_tables = block_tables.repeat_interleave(counts, dim=0)
-    metadata.pa_seq_lens = torch.tensor(context_lens, dtype=torch.int32, device=block_tables.device)
+    # torch_npu paged attention derives the workspace size from context_lens on
+    # the host, so keep this a CPU tensor (matching the stock seq_lens that
+    # AscendAttentionBackendImpl.full_graph_pa passes).
+    metadata.pa_seq_lens = torch.tensor(context_lens, dtype=torch.int32)
     metadata.pa_rows_expanded = True
     return True
 
