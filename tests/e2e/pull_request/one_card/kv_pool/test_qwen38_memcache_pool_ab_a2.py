@@ -13,9 +13,19 @@ from unittest.mock import patch
 
 import pytest
 
-from tests.e2e.pull_request.one_card.kv_pool.kv_pool_helpers import run
+from tests.e2e.pull_request.one_card.kv_pool.kv_pool_helpers import MODEL, run
 
 
+@pytest.mark.e2e_model(MODEL)
+@pytest.mark.e2e_coverage(
+    arch="dense",
+    feature="kvpp,chunked_prefill,prefix_caching",
+    parallel="TP",
+    deploy="pd_mix",
+    hardware="A2",
+    quantization="W8A8",
+    graph_mode="full_and_piecewise",
+)
 @pytest.mark.parametrize(
     ("backend", "use_layerwise"),
     [
