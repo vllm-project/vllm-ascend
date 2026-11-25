@@ -537,19 +537,21 @@ def _streaming_completion(
     }
 
 
-def _spec_metrics(server: RemoteOpenAIServer) -> dict[str, float]:
+def _spec_metrics(server: RemoteOpenAIServer) -> dict[str, float] | None:
+    """Return the two spec-decode counters, or None when a scrape is unusable."""
     try:
-        text = requests.get(server.url_for("metrics"), timeout=(10, 120)).text
+        response = requests.get(server.url_for("metrics"), timeout=(10, 120))
+        response.raise_for_status()
     except requests.RequestException:
-        return {"num_drafts": 0.0, "num_accepted_tokens": 0.0}
-    totals = {"num_drafts": 0.0, "num_accepted_tokens": 0.0}
+        return None
+    totals: dict[str, float] = {}
     wanted = {
         "vllm:spec_decode_num_drafts": "num_drafts",
         "vllm:spec_decode_num_drafts_total": "num_drafts",
         "vllm:spec_decode_num_accepted_tokens": "num_accepted_tokens",
         "vllm:spec_decode_num_accepted_tokens_total": "num_accepted_tokens",
     }
-    for line in text.splitlines():
+    for line in response.text.splitlines():
         if not line or line.startswith("#"):
             continue
         match = _METRIC_LINE_RE.match(line.strip())
@@ -557,8 +559,40 @@ def _spec_metrics(server: RemoteOpenAIServer) -> dict[str, float]:
             continue
         key = wanted.get(match.group(1))
         if key:
-            totals[key] += float(match.group(2))
+            totals[key] = totals.get(key, 0.0) + float(match.group(2))
+    if set(totals) != {"num_drafts", "num_accepted_tokens"}:
+        return None
     return totals
+
+
+def _spec_delta(
+    before: dict[str, float] | None, after: dict[str, float] | None
+) -> dict[str, float | None] | None:
+    """Return the per-batch counter delta, or None when either snapshot is unusable."""
+    if before is None or after is None:
+        return None
+    drafts = after["num_drafts"] - before["num_drafts"]
+    accepted = after["num_accepted_tokens"] - before["num_accepted_tokens"]
+    if drafts < 0 or accepted < 0:
+        return None
+    return {
+        "num_drafts": drafts,
+        "num_accepted_tokens": accepted,
+        "accepted_per_draft": (accepted / drafts) if drafts else None,
+    }
+
+
+def test_spec_delta_requires_two_valid_snapshots():
+    before = {"num_drafts": 100.0, "num_accepted_tokens": 50.0}
+    assert _spec_delta(before, None) is None
+    assert _spec_delta(None, before) is None
+    # A failed post-batch scrape must not turn into a negative delta.
+    assert _spec_delta(before, {"num_drafts": 90.0, "num_accepted_tokens": 40.0}) is None
+    assert _spec_delta(before, {"num_drafts": 110.0, "num_accepted_tokens": 60.0}) == {
+        "num_drafts": 10.0,
+        "num_accepted_tokens": 10.0,
+        "accepted_per_draft": 1.0,
+    }
 
 
 def _performance_run(server: RemoteOpenAIServer) -> list[dict[str, Any]]:
@@ -587,13 +621,7 @@ def _performance_run(server: RemoteOpenAIServer) -> list[dict[str, Any]]:
                     item["batch_output_tokens_per_s"] = (
                         sum(other["completion_tokens"] for other in batch) / batch_elapsed
                     )
-                    drafts = after["num_drafts"] - before["num_drafts"]
-                    accepted = after["num_accepted_tokens"] - before["num_accepted_tokens"]
-                    item["spec_decode"] = {
-                        "num_drafts": drafts,
-                        "num_accepted_tokens": accepted,
-                        "accepted_per_draft": (accepted / drafts) if drafts else None,
-                    }
+                    item["spec_decode"] = _spec_delta(before, after)
                 measurements.extend(batch)
     return measurements
 
