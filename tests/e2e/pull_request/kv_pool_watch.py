@@ -25,12 +25,58 @@ QUERIES_METRIC = "vllm:external_prefix_cache_queries"
 LOAD_KEYS_METRIC = "vllm:ascend_store_load_get_keys"
 DELAYED_BLOCKS_METRIC = "vllm:ascend_store_delayed_release_blocks"
 MEMCACHE_TRANSFER_GATE_TIMEOUT_S = 120
+HIXL_TOPOLOGY_GATE_TIMEOUT_S = 30
+# What the installation guide reports when the UB stack cannot build the
+# fabric topology (/etc/hixlep + /lib/route.conf + /etc/hccl_rootinfo.json).
+URMA_TOPOLOGY_FAILURES = (
+    "Failed to recv netlink msg",
+    "Failed to get topo info",
+    "Failed to get ubagg topo",
+)
 
 
 def _skip_memcache_gate(reason: str) -> None:
     # pytest only prints skip reasons with -r, so leave the signature in the log too.
     print(f"[memcache_transfer_gate] {reason}", flush=True)
     pytest.skip(reason)
+
+
+def _skip_hixl_gate(reason: str) -> None:
+    print(f"[hixl_topology_gate] {reason}", flush=True)
+    pytest.skip(reason)
+
+
+def ensure_hixl_topology() -> None:
+    """Skip when the UB fabric topology HIXL needs for its peer plane is absent.
+
+    ``urma_admin show topo`` is the documented stack check: the topology is
+    built from ``/etc/hixlep``, ``/lib/route.conf`` and
+    ``/etc/hccl_rootinfo.json``, and a pod without them reports
+    ``Failed to recv netlink msg`` / ``Failed to get topo info``. HIXL needs
+    those CLOS links, so the mooncake pool dies in store init (``No CLOS edge``
+    or a SIGKILL) when the check fails. The endpoint list from
+    ``urma_admin show`` can be all ``ACTIVE`` in that state, so probe the
+    topology, not the links.
+    """
+    if shutil.which("urma_admin") is None:
+        _skip_hixl_gate("mooncake gate: urma_admin is not installed in the image")
+    try:
+        completed = subprocess.run(
+            ["urma_admin", "show", "topo"],
+            capture_output=True,
+            text=True,
+            timeout=HIXL_TOPOLOGY_GATE_TIMEOUT_S,
+        )
+    except subprocess.TimeoutExpired:
+        _skip_hixl_gate(
+            f"mooncake gate: urma_admin show topo did not finish in {HIXL_TOPOLOGY_GATE_TIMEOUT_S}s"
+        )
+    output = completed.stdout + completed.stderr
+    if completed.returncode != 0 or any(sig in output for sig in URMA_TOPOLOGY_FAILURES):
+        tail = output.strip().splitlines()[:4]
+        _skip_hixl_gate(
+            f"mooncake gate: UB topology is not ready (rc={completed.returncode}): " + " / ".join(tail)
+        )
 
 
 def ensure_memcache_transfer(protocol: str, local_rank_size: int) -> None:
