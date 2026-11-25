@@ -1338,10 +1338,13 @@ class AscendConnectorMetadata(KVConnectorMetadata):
         self,
         preempted_req_ids,
         loading_req_ids: set[str] | None = None,
+        *,
+        cancelled_load_req_ids: set[str] | None = None,
     ):
         self.requests: list[ReqMeta] = []
         self.preempted_req_ids = preempted_req_ids
         self.loading_req_ids = loading_req_ids or set()
+        self.cancelled_load_req_ids = cancelled_load_req_ids if cancelled_load_req_ids is not None else set()
 
     def add_request(self, req_meta: ReqMeta) -> None:
         """Add a request to the metadata."""
