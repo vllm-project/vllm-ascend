@@ -293,11 +293,6 @@ class NPUWorker(GPUWorker):
     def _get_cudagraph_capture_context(self) -> AbstractContextManager[None]:
         raise NotImplementedError("GPUWorker._get_cudagraph_capture_context is not validated on Ascend.")
 
-    def reset_mm_cache(self) -> None:
-        reset_fn = getattr(self.model_runner, "reset_mm_cache", None)
-        if callable(reset_fn):
-            reset_fn()
-
     def supports_draft_weight_updates(self) -> bool:
         return False
 
