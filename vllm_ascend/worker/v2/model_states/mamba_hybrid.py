@@ -243,6 +243,9 @@ class AscendMambaHybridModelState(MambaHybridModelState, AscendModelState):
             COPY_BLOCK_SIZE=_COPY_BLOCK_SIZE,
             CONV_STATE_DIM_FIRST=is_conv_state_dim_first(),
             HAS_IDX_MAPPING=True,
+            # Mirrors the upstream bulk call: ReplaySSM models zero the
+            # temporal token bias on copy, the layerwise path must agree.
+            ZERO_TEMPORAL_TOKEN_BIAS=ctx.replayssm is not None,
         )
         pending.pending_layers.discard(layer_name)
 
