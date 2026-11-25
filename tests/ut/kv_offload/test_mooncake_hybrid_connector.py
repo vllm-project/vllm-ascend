@@ -135,6 +135,50 @@ class TestHybridKVCacheRecvingThreadDispatch(unittest.TestCase):
                 self.assertFalse(thread.proc_not_transfer_request)
                 self.assertEqual(thread.request_queue.unfinished_tasks, 0)
 
+    def test_group_count_mismatch_transfers_only_shared_groups(self):
+        thread = self._make_thread()
+        self.addCleanup(thread.executor.shutdown, wait=True)
+        thread.hma_group_size = 3
+        # Decode side has an extra draft (speculative) KV cache group.
+        thread.kv_cache_specs = [MagicMock(), MagicMock(), MagicMock()]
+        thread._prefill_pp_size = 1
+        thread.local_engine_id = "decode"
+        thread.local_handshake_port = 32000
+        thread.remote_metadata_lock = threading.Lock()
+        thread.kv_caches_base_addr = {
+            "decode": {32000: [0x1000, 0x2000, 0x3000]},
+            "prefill": {31002: [0x4000, 0x5000, 0x6000]},
+        }
+        thread.remote_te_port = {"prefill": {31002: 7777}}
+        thread.addr_group_idx = [[0], [0], [1]]
+        thread.block_len_per_addr = [16, 8, 32]
+        thread.block_stride_per_addr = [32, 16, 64]
+        thread.engine = MagicMock()
+        thread.engine.batch_transfer_sync_read.return_value = 0
+
+        req_meta = {
+            "remote_request_id": "prefill-mismatch",
+            "remote_block_ids": ([1, 2], [3]),  # prefill: 2 groups
+            "local_block_ids": ([2, 3], [4], [5]),  # decode: 3 groups (extra draft group)
+            "remote_engine_id": "prefill",
+            "remote_host": "192.0.2.1",
+            "remote_handshake_port": 31002,
+        }
+
+        with patch(
+            "vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_hybrid_connector.logger.warning_once"
+        ) as log_warning:
+            thread._transfer_kv_cache_all_groups(req_meta)
+
+        log_warning.assert_called_once()
+        # Only the two shared groups are transferred; the decode-only draft group is skipped.
+        thread.engine.batch_transfer_sync_read.assert_called_once_with(
+            "192.0.2.1:7777",
+            [0x1040, 0x2020, 0x3100],
+            [0x4020, 0x5010, 0x60C0],
+            [32, 16, 32],
+        )
+
     def test_executor_workers_bind_kv_cache_device_before_handling_requests(self):
         expected_device_index = 5
         kv_cache = MagicMock(device=expected_device_index)
