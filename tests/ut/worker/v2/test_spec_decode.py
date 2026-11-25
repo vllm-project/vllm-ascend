@@ -126,7 +126,6 @@ def test_init_speculator_suffix_uses_current_request_state(monkeypatch, enforce_
     config.compilation_config = SimpleNamespace(mode=CompilationMode.VLLM_COMPILE)
     device = torch.device("cpu")
     req_states = object()
-    monkeypatch.setattr("vllm_ascend.worker.v2.spec_decode.vllm_version_is", lambda version: False)
     speculator_cls = _mock_speculator_module(
         monkeypatch,
         "vllm.v1.worker.gpu.spec_decode.suffix.speculator",
@@ -146,24 +145,6 @@ def test_init_speculator_suffix_uses_current_request_state(monkeypatch, enforce_
 def test_init_speculator_suffix_requires_request_state():
     with pytest.raises(ValueError, match="requires request states"):
         init_speculator(_make_config("suffix", "vllm.v1.worker.gpu.spec_decode.suffix.speculator.SuffixSpeculator"), torch.device("cpu"))
-
-
-def test_init_speculator_rejects_suffix_before_import_on_vllm_0330(monkeypatch):
-    import builtins
-
-    original_import = builtins.__import__
-    suffix_imports = []
-
-    def track_import(name, *args, **kwargs):
-        if name == "vllm.v1.worker.gpu.spec_decode.suffix.speculator":
-            suffix_imports.append(name)
-        return original_import(name, *args, **kwargs)
-
-    monkeypatch.setattr(builtins, "__import__", track_import)
-    monkeypatch.setattr("vllm_ascend.worker.v2.spec_decode.vllm_version_is", lambda version: version == "0.33.0")
-    with pytest.raises(ValueError, match="requires vLLM with PR #60339"):
-        init_speculator(_make_config("suffix", "vllm.v1.worker.gpu.spec_decode.suffix.speculator.SuffixSpeculator"), torch.device("cpu"), object())
-    assert suffix_imports == []
 
 
 
