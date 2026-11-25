@@ -8,7 +8,7 @@ import pytest
 import torch
 import vllm.lora.utils as lora_utils
 from torch import nn
-from vllm.lora.layers import ColumnParallelLinearWithLoRA
+from vllm.lora.layers import ColumnParallelLinearWithLoRA, DeepseekV4GroupedWoAWithLoRA
 
 from vllm_ascend.attention.dsa_v1 import AscendDSAImpl
 from vllm_ascend.lora.deepseek_v4 import AscendDeepseekV4GroupedWoAWithLoRA
@@ -75,8 +75,33 @@ def test_grouped_projection_selects_specialized_lora_wrapper(monkeypatch, fully_
     config = SimpleNamespace(max_lora_rank=2, max_loras=2, lora_dtype=torch.float32, fully_sharded_loras=fully_sharded)
     layer = lora_utils.from_layer(_make_grouped_projection(2, 1), config.max_loras, config, [])
     assert isinstance(layer, AscendDeepseekV4GroupedWoAWithLoRA)
+    assert isinstance(layer, DeepseekV4GroupedWoAWithLoRA)
     assert len(layer.lora_b_stacked) == 2
     assert layer.lora_a_stacked[0].shape[-2] == config.max_lora_rank
+
+
+@pytest.mark.parametrize("tp_size,tp_rank", [(1, 0), (2, 1), (4, 3)])
+@pytest.mark.parametrize("fully_sharded", [False, True])
+def test_grouped_adapter_reload_clears_unused_rank_without_changing_other_slots(tp_size, tp_rank, fully_sharded):
+    layer = AscendDeepseekV4GroupedWoAWithLoRA(_make_grouped_projection(tp_size, tp_rank))
+    config = SimpleNamespace(max_lora_rank=4, lora_dtype=torch.float32, fully_sharded_loras=fully_sharded)
+    layer.create_lora_weights(2, config)
+    for slot in range(2):
+        layer.set_lora(slot, torch.ones(4, 4), torch.ones(12, 4))
+
+    layer.set_lora(0, torch.full((1, 4), 2.0), torch.full((12, 1), 3.0))
+    expected_a = torch.zeros_like(layer.lora_a_stacked[0][0])
+    expected_a[:, 0] = 2
+    torch.testing.assert_close(layer.lora_a_stacked[0][0], expected_a)
+    for group_b in layer.lora_b_stacked:
+        expected_b = torch.zeros_like(group_b[0])
+        expected_b[..., 0] = 3
+        torch.testing.assert_close(group_b[0], expected_b)
+
+    layer.reset_lora(0)
+    for weights in (*layer.lora_a_stacked, *layer.lora_b_stacked):
+        torch.testing.assert_close(weights[0], torch.zeros_like(weights[0]))
+        torch.testing.assert_close(weights[1], torch.ones_like(weights[1]))
 
 
 def test_shared_dsa_generic_lora_wrapper_keeps_existing_bmm_path():

@@ -29,10 +29,10 @@ class PunicaWrapperNPU(PunicaWrapperBase):
         self._lora_triton_workspaces: dict[int, torch.Tensor] = {}
         self.lora_config = kwargs.get("lora_config")
         ascend_device_type = get_ascend_device_type()
-        self.ascend_device_type = ascend_device_type
-        if not get_current_hardware_profile().supports(HardwareCapability.LORA_CUSTOM_OPS) or (
+        self._use_torch_ops = not get_current_hardware_profile().supports(HardwareCapability.LORA_CUSTOM_OPS) or (
             self.lora_config is not None and self.lora_config.max_lora_rank >= 128
-        ):
+        )
+        if self._use_torch_ops:
             from vllm.lora.ops.torch_ops import (
                 bgmv_expand,
                 bgmv_expand_slice,
@@ -217,9 +217,10 @@ class PunicaWrapperNPU(PunicaWrapperBase):
     def _use_sgmv(self) -> bool:
         if not self.is_prefill:
             return False
-        # Torch SGMV expands per-request indices with repeat_interleave, which
-        # synchronizes during capture. BGMV can use the existing per-token indices.
-        return not (self.ascend_device_type in (AscendDeviceType._310P, AscendDeviceType.A5) and self._in_graph_mode())
+        # Torch SGMV uses repeat_interleave without output_size, which needs
+        # synchronization to determine the output shape. During capture, use
+        # Torch BGMV with the existing per-token indices. Eager still uses SGMV.
+        return not (self._use_torch_ops and self._in_graph_mode())
 
     def _apply_expand(
         self,

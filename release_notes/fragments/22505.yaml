@@ -12,6 +12,10 @@ entries:
       Fixed LoRA prefill and decode failing on Ascend 950 with missing sgmv_shrink
       or bgmv_shrink operators when --max-lora-rank is below 128, including the
       default of 16.
+  - category: bugfix
+    text: >-
+      Fixed LoRA prefill graph capture on Atlas A2 and A3 when --max-lora-rank
+      is 128 or higher.
   - category: breaking
     text: >-
       DeepSeek V4 with LoRA now fails at initialization for unsupported context-parallel

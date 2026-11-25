@@ -6,7 +6,7 @@
 from typing import TYPE_CHECKING, cast
 
 import torch
-from vllm.lora.layers import ColumnParallelLinearWithLoRA, ReplicatedLinearWithLoRA
+from vllm.lora.layers import DeepseekV4GroupedWoAWithLoRA, ReplicatedLinearWithLoRA
 
 if TYPE_CHECKING:
     from vllm_ascend.lora.punica_npu import PunicaWrapperNPU
@@ -30,57 +30,14 @@ class AscendCompressorLinearWithLoRA(ReplicatedLinearWithLoRA):
         return type(source_layer).__name__ == "AscendCompressorLinear"
 
 
-class AscendDeepseekV4GroupedWoAWithLoRA(ColumnParallelLinearWithLoRA):
-    """Grouped adapter loading with Ascend's already inverse-rotated input.
-
-    Weight packing follows vLLM PR #64880's DeepseekV4GroupedWoAWithLoRA.
-    Keep it here because the supported v0.33.0 lane lacks that CUDA wrapper.
-    """
+class AscendDeepseekV4GroupedWoAWithLoRA(DeepseekV4GroupedWoAWithLoRA):
+    """Reuse upstream adapter loading with Ascend's already inverse-rotated input."""
 
     lora_b_stacked: tuple[torch.Tensor, ...]
 
-    def create_lora_weights(self, max_loras, lora_config, model_config=None) -> None:
-        super().create_lora_weights(max_loras, lora_config, model_config)
-        if lora_config.fully_sharded_loras:
-            # Different TP ranks consume different head groups, so shrinking
-            # their inputs cannot be split across ranks. Each needs all of A.
-            self.lora_a_stacked = (
-                torch.zeros(
-                    max_loras,
-                    1,
-                    lora_config.max_lora_rank,
-                    self.input_size,
-                    dtype=lora_config.lora_dtype,
-                    device=self.device,
-                ),
-            )
-        groups = self.base_layer.n_local_groups
-        lora_b = self.lora_b_stacked[0]
-        self.lora_b_stacked = torch.zeros(
-            groups,
-            *lora_b.shape[:2],
-            lora_b.shape[2] // groups,
-            lora_b.shape[3],
-            dtype=lora_b.dtype,
-            device=lora_b.device,
-        ).unbind(0)
-
-    def reset_lora(self, index: int) -> None:
-        self.lora_a_stacked[0][index].zero_()
-        for lora_b in self.lora_b_stacked:
-            lora_b[index].zero_()
-
-    def set_lora(self, index: int, lora_a: torch.Tensor, lora_b: torch.Tensor) -> None:
-        self.reset_lora(index)
-        if self.tp_size > 1:
-            lora_a = self.slice_lora_a(lora_a)
-            lora_b = self.slice_lora_b(lora_b)
-        self.lora_a_stacked[0][index, 0, : lora_a.shape[0], : lora_a.shape[1]].copy_(lora_a, non_blocking=True)
-        group_size = self.lora_b_stacked[0].shape[2]
-        for group, rows in enumerate(lora_b.split(group_size)):
-            self.lora_b_stacked[group][index, 0, : rows.shape[0], : rows.shape[1]].copy_(rows, non_blocking=True)
-
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # The upstream grouped entry point also prepares the inverse RoPE.
+        # Ascend DSA has already done that before dispatching this forward.
         output = self.base_layer.grouped_forward(x)
         # Reuse one pair of contiguous group buffers. Packing all groups at
         # once makes the temporary memory scale with the number of groups.

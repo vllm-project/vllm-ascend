@@ -26,9 +26,10 @@ GROUP_INPUT_SIZE = 128
 GROUP_OUTPUT_SIZE = 64
 NUM_TOKENS = 16
 LORA_RANK = 8
+TORCH_BACKEND_MAX_LORA_RANK = 128
 
 
-def _make_case(tp_size, tp_rank, fully_sharded, num_tokens=NUM_TOKENS):
+def _make_case(tp_size, tp_rank, fully_sharded, num_tokens=NUM_TOKENS, max_lora_rank=LORA_RANK):
     torch.npu.set_device(0)
     enable_custom_op()
     generator = torch.Generator().manual_seed(64880)
@@ -46,7 +47,7 @@ def _make_case(tp_size, tp_rank, fully_sharded, num_tokens=NUM_TOKENS):
         full_weight[start : start + base.n_local_groups].to(device="npu", dtype=torch.bfloat16), requires_grad=False
     )
     config = LoRAConfig(
-        max_loras=2, max_lora_rank=LORA_RANK, lora_dtype=torch.bfloat16, fully_sharded_loras=fully_sharded
+        max_loras=2, max_lora_rank=max_lora_rank, lora_dtype=torch.bfloat16, fully_sharded_loras=fully_sharded
     )
     punica = PunicaWrapperNPU(num_tokens, num_tokens, "npu", lora_config=config)
     layer = from_layer(base, config.max_loras, config, [])
@@ -168,14 +169,25 @@ def test_grouped_lora_aclgraph_replays_changed_adapter_mapping(tp_size, tp_rank)
     _check_aclgraph_replay(tp_size, tp_rank, is_prefill=False)
 
 
-@pytest.mark.skipif(not is_950(), reason="Exercises the Ascend 950 prefill LoRA graph fallback")
-def test_grouped_lora_prefill_aclgraph_replays_changed_adapter_mapping():
-    _check_aclgraph_replay(1, 0, is_prefill=True)
+@pytest.mark.parametrize(
+    "max_lora_rank",
+    [
+        TORCH_BACKEND_MAX_LORA_RANK,
+        pytest.param(
+            LORA_RANK,
+            marks=pytest.mark.skipif(not is_950(), reason="Requires the Ascend 950 small-rank PyTorch backend"),
+        ),
+    ],
+)
+def test_grouped_lora_prefill_aclgraph_replays_changed_adapter_mapping(max_lora_rank):
+    _check_aclgraph_replay(1, 0, is_prefill=True, max_lora_rank=max_lora_rank)
 
 
 @torch.inference_mode()
-def _check_aclgraph_replay(tp_size, tp_rank, *, is_prefill):
-    impl, punica, x, adapter_a, adapter_b = _make_case(tp_size, tp_rank, fully_sharded=False)
+def _check_aclgraph_replay(tp_size, tp_rank, *, is_prefill, max_lora_rank=LORA_RANK):
+    impl, punica, x, adapter_a, adapter_b = _make_case(
+        tp_size, tp_rank, fully_sharded=False, max_lora_rank=max_lora_rank
+    )
     initial_ids = [1, 0, 2, 1] * (NUM_TOKENS // 4)
     _set_mapping(punica, initial_ids, is_prefill=is_prefill)
     for _ in range(3):
