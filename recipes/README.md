@@ -120,7 +120,10 @@ issue the model-specific proxy requests before backend verification. Record
 which hosts and containers run each step, the prerequisite step IDs and the
 observable result. New-pool steps can prepare files and start the control
 service. The reuse path reads approved files and checks the existing control
-endpoint. Place site inputs in typed fields and pass them as individual shell
+endpoint. For Memcache, each model container must pass a read-only check
+before either role starts. Each LocalService file used by Prefill or Decode
+must explicitly set `ubsio.standalone.force_new_disk = false` exactly once.
+Place site inputs in typed fields and pass them as individual shell
 words, argv values or serialized configuration values. Mount checkpoint
 directories read-only. Model weights may be on shared storage; configure the
 SSD tier separately on each host.
@@ -128,8 +131,9 @@ SSD tier separately on each host.
 The release tutorial baselines cover MiniMax-M3.1-Flash on A3 and 950DT
 (Mooncake) and Qwen3.8-Flash-Next on A2, A3 and 950DT (Memcache). The source
 tests render both modes, inspect all P/D processes and compare the proxy
-endpoints, visible devices and cache roles. Run these against a renderer
-with pool-profile support:
+endpoints, visible devices and cache roles. They also run the generated Memcache
+reuse check with Bash and Python 3 against temporary LocalService files.
+Run these against a renderer with pool-profile support:
 
 ```bash
 node recipes/tools/test-pool-profiles.mjs --renderer /path/to/recipes

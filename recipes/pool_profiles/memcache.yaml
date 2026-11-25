@@ -70,7 +70,7 @@ steps:
     target: hosts
     mode: reuse
     command: ls -l -- {{config_host_dir}}
-    check: Match each file, device and endpoint to the existing pool. Preserve its storage initialization policy.
+    check: Match each file, device and endpoint to the existing pool. Use approved LocalService configurations that preserve cached data on startup.
   - id: container
     depends_on: [hardware, host-storage, new-disk, reusable-files]
     title: Create the role container with its block device mappings
@@ -201,7 +201,29 @@ steps:
               if values.get(key) != value: raise SystemExit(f"{name}: check {key}")
           print(name, "force_new_disk =", values.get("ubsio.standalone.force_new_disk", "(package default)"))
       PY
-    check: Reuse the approved existing storage policy. If its reported initialization policy could erase retained data, resolve that with the pool owner before starting workers.
+    check: Compare the reported paths, endpoints and initialization policy with the intended deployment.
+  - id: reuse-disk-policy
+    depends_on: [validate-local]
+    title: Verify that starting LocalServices will preserve the existing SSD cache
+    stage: config
+    target: containers
+    mode: reuse
+    command: |
+      python3 - {{config_dir}} {{prefill_config}} {{decode_config}} <<'PY'
+      import re, sys
+      from pathlib import Path
+      root, *names = sys.argv[1:]
+      key = "ubsio.standalone.force_new_disk"
+      setting = re.compile(rf"\s*{re.escape(key)}(?=[\s:=]|$)", re.IGNORECASE)
+      safe = re.compile(rf"\s*{re.escape(key)}\s*=\s*false\s*")
+      for name in dict.fromkeys(names):
+          path = Path(root, name)
+          with path.open() as config:
+              entries = [line for line in config if setting.match(line)]
+          if len(entries) != 1 or not safe.fullmatch(entries[0]):
+              raise SystemExit(f"{path}: pool reuse requires exactly one explicit '{key} = false'.")
+      PY
+    check: Continue only after this read-only check succeeds in every model container. If it fails, obtain an approved LocalService file with a single explicit false setting before starting Prefill or Decode.
   - id: start-meta
     depends_on: [configure-meta, validate-local]
     title: Start one MetaService in a dedicated terminal
@@ -216,7 +238,7 @@ steps:
       python -c 'from memcache_hybrid import MetaService; MetaService.main()'
     check: Keep the service running. Check the configured control, ConfigStore and metrics listeners with ss -lntp.
   - id: endpoints
-    depends_on: [validate-local, start-meta]
+    depends_on: [validate-local, reuse-disk-policy, start-meta]
     title: Check the running control endpoints from each model container
     stage: control
     target: containers

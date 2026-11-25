@@ -1,0 +1,8 @@
+pr: 23161
+entries:
+  - category: documentation
+    text: >-
+      Recipes adds Ascend KV pool deployment guides for MiniMax-M3.1-Flash with Mooncake
+      and Qwen3.8-Flash-Next with Memcache. Before reusing a Memcache pool, run the
+      preflight in each model container. Every LocalService configuration used by Prefill
+      or Decode must explicitly set `ubsio.standalone.force_new_disk = false`.

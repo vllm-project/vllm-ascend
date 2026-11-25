@@ -1,7 +1,9 @@
-// Source-owned v0.32.0rc tutorial baselines; only render commands, never run them.
+// Source-owned v0.32.0rc tutorial baselines and read-only configuration checks.
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { execFileSync, spawnSync } from "node:child_process";
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
+import { tmpdir } from "node:os";
 import path from "node:path";
 import { test } from "node:test";
 import { pathToFileURL } from "node:url";
@@ -103,11 +105,22 @@ for (const [overlay, key, hostCount, deviceCount, pPort, dPorts, proxyPort] of c
           localFiles.map((file) => "/opt/recipe-pool/" + file));
         assert.ok(plan.inputs.every((field) => !/^(local_configs|prefill_config|decode_config)$/.test(field.key.split(".").at(-1))));
         if (mode === "reuse") assert.ok(!plan.inputs.some((field) => field.key.endsWith(".local_services")));
-        const steps = mode === "new" ? ["copy-templates/", "configure-storage/", "validate-local/"] : ["validate-local/"];
+        const steps = mode === "new" ? ["copy-templates/", "configure-storage/", "validate-local/"] :
+          ["validate-local/", "reuse-disk-policy/"];
+        const guards = plan.steps.filter((step) => step.id.startsWith("reuse-disk-policy/"));
+        assert.equal(guards.length, mode === "reuse" ? hostCount : 0);
+        function prerequisites(id) {
+          const direct = plan.steps[positions.get(id)].depends_on;
+          return new Set(direct.flatMap((dep) => [dep, ...prerequisites(dep)]));
+        }
+        for (const worker of [prefill, ...decode]) {
+          const beforeStart = prerequisites("start-" + worker.role + "/" + worker.id);
+          for (const guard of guards) assert.ok(beforeStart.has(guard.id), worker.id + " requires " + guard.id);
+        }
         for (const prefix of steps) {
           for (const host of plan.hosts) {
             const command = plan.steps.find((step) => step.id === prefix + host).command;
-            const argumentsLine = command.split("\n").find((line) => line.startsWith("python - "));
+            const argumentsLine = command.split("\n").find((line) => /^python3? - /.test(line));
             assert.ok(argumentsLine.includes(localFiles.join(" ")), argumentsLine);
             assert.ok(!argumentsLine.includes("other-local.conf"), argumentsLine);
           }
@@ -132,6 +145,65 @@ for (const [overlay, key, hostCount, deviceCount, pPort, dPorts, proxyPort] of c
   }
 }
 
+const diskPolicy = "ubsio.standalone.force_new_disk";
+const approved = "# " + diskPolicy + " = true\n; " + diskPolicy + " = true\n\t" + diskPolicy + " = false  \n";
+const unsafePolicies = [
+  null,                                  // The role configuration file is absent.
+  "# " + diskPolicy + " = false\n",      // Only a comment, so the package default applies.
+  ...["true", "", "auto", "0", "false # unverified"].map((value) => diskPolicy + " = " + value + "\n"),
+  diskPolicy + " = true\n" + approved,    // A dictionary parser would hide the unsafe first entry.
+  approved + diskPolicy + " = true\n",
+  approved + diskPolicy + " = false\n",
+  approved + diskPolicy + ": true\n",
+];
+
+for (const key of ["ascend_a2_memcache_pool", "ascend_a3_memcache_pool", "ascend_950dt_memcache_pool"]) {
+  test(key + " executes the read-only reuse guard on the files each worker opens", (t) => {
+    const root = mkdtempSync(path.join(tmpdir(), "memcache reuse "));
+    t.after(() => rmSync(root, { recursive: true, force: true }));
+    // Resolve the fixture's path in the Bash environment that runs the generated command.
+    const shellRoot = execFileSync("bash", ["-c", "pwd -P"], { cwd: root, encoding: "utf8" }).trim();
+    const inputs = {};
+    for (const host of qwen.presets[key].deployment.hosts) {
+      mkdirSync(path.join(root, host));
+      inputs["hosts." + host + ".config_dir"] = shellRoot + "/" + host;
+    }
+    const recipe = { ...qwen, _poolProfiles: { "vllm-ascend/memcache": read("../pool_profiles/memcache.yaml") } };
+    const plan = resolvePoolDeployment({ recipe, presetKey: key, mode: "reuse", inputs });
+    const guards = plan.steps.filter((step) => step.id.startsWith("reuse-disk-policy/"));
+    const containers = new Set(plan.launches.filter((w) => ["prefill", "decode"].includes(w.role)).map((w) => w.container));
+    assert.deepEqual(guards.map((step) => step.container).sort(), [...containers].sort());
+    for (const guard of guards) {
+      const dir = path.join(root, guard.host);
+      const workers = plan.launches.filter((w) => w.container === guard.container && ["prefill", "decode"].includes(w.role));
+      const files = [...new Set(workers.map((w) => path.posix.basename(w.env.MMC_LOCAL_CONFIG_PATH)))];
+      assert.ok(files.length > 0);
+      const snapshot = () => readdirSync(dir).sort().map((name) => {
+        const file = path.join(dir, name);
+        return [name, readFileSync(file), statSync(file).mtimeMs];
+      });
+      function check(status, file) {
+        const before = snapshot();
+        const run = spawnSync("bash", ["-c", guard.command], { encoding: "utf8" });
+        assert.ifError(run.error);
+        assert.equal(run.status, status, guard.id + ": " + run.stderr);
+        if (file) assert.ok(run.stderr.includes(file), run.stderr);
+        assert.deepEqual(snapshot(), before, "The guard changed the configuration on " + guard.host);
+      }
+      for (const name of files) writeFileSync(path.join(dir, name), approved);
+      check(0);
+      for (const name of files) {
+        const file = path.join(dir, name);
+        for (const policy of unsafePolicies) {
+          if (policy === null) rmSync(file);
+          else writeFileSync(file, policy);
+          check(1, name);
+        }
+        writeFileSync(file, approved);
+      }
+    }
+  });
+}
 
 if (values.report) {
   test("the assembled source report checked every published pool process", () => {
