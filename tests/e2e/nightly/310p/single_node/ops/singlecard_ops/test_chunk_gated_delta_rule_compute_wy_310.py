@@ -73,6 +73,16 @@ def _make_inputs(batch=1, tokens=128, q_heads=2, v_heads=4, k_dim=64, v_dim=64, 
     return q, k, v, g, beta
 
 
+def _torch_wy_reference_cpu(q, k, v, g, beta, chunk_size):
+    inputs_cpu = tuple(tensor.cpu() for tensor in (q, k, v, g, beta))
+    return chunk_mod._compute_kernel_inputs_from_torch_wy(*inputs_cpu, chunk_size)
+
+
+def _torch_wy_reference_for_npu_pipeline(q, k, v, g, beta, chunk_size):
+    reference = _torch_wy_reference_cpu(q, k, v, g, beta, chunk_size)
+    return tuple(tensor.to(q.device) for tensor in reference)
+
+
 def _assert_compute_wy_close(out, ref):
     torch.testing.assert_close(out[0].cpu(), ref[0].cpu(), rtol=0, atol=0)
     torch.testing.assert_close(out[1].cpu(), ref[1].cpu(), rtol=0, atol=0)
@@ -113,7 +123,7 @@ def test_compute_wy_matches_torch_reference_grouped_heads():
     q, k, v, g, beta = _make_inputs(q_heads=2, v_heads=4)
     assert chunk_mod._can_use_npu_compute_wy(q, k, v, g, beta, CHUNK_SIZE)
 
-    ref = chunk_mod._compute_kernel_inputs_from_torch_wy(q, k, v, g, beta, CHUNK_SIZE)
+    ref = _torch_wy_reference_cpu(q, k, v, g, beta, CHUNK_SIZE)
     out = torch.ops._C_ascend.chunk_gated_delta_rule_compute_wy(q, k, v, g, beta, CHUNK_SIZE)
     _assert_compute_wy_close(out, ref)
 
@@ -130,7 +140,7 @@ def test_compute_wy_matches_torch_reference_qwen35_heads():
     q, k, v, g, beta = _make_inputs(batch=1, tokens=64, q_heads=8, v_heads=16, k_dim=64, v_dim=64)
     assert chunk_mod._can_use_npu_compute_wy(q, k, v, g, beta, CHUNK_SIZE)
 
-    ref = chunk_mod._compute_kernel_inputs_from_torch_wy(q, k, v, g, beta, CHUNK_SIZE)
+    ref = _torch_wy_reference_cpu(q, k, v, g, beta, CHUNK_SIZE)
     out = torch.ops._C_ascend.chunk_gated_delta_rule_compute_wy(q, k, v, g, beta, CHUNK_SIZE)
     _assert_compute_wy_close(out, ref)
     expected = tuple(tensor.cpu() for tensor in out)
@@ -175,7 +185,7 @@ def test_cgdr_310_npu_wy_matches_torch_wy_e2e(monkeypatch, batch, tokens, q_head
 
     out_npu, state_npu = _run_cgdr_310(q, k, v, g, beta, initial_state)
 
-    monkeypatch.setattr(chunk_mod, "_can_use_npu_compute_wy", lambda *args, **kwargs: False)
+    monkeypatch.setattr(chunk_mod, "_compute_kernel_inputs_from_npu_wy", _torch_wy_reference_for_npu_pipeline)
     out_ref, state_ref = _run_cgdr_310(q, k, v, g, beta, initial_state)
 
     assert state_npu is not None and state_ref is not None
@@ -231,8 +241,9 @@ def test_compute_wy_qwen35_2b_l2norm_matches_torch():
     q_pad, k_pad, v_pad, g_pad, beta_pad, _, _ = chunk_mod._pad_bthd_to_chunk(q, k, v, g, beta, CHUNK_SIZE)
     assert chunk_mod._can_use_npu_compute_wy(q_pad, k_pad, v_pad, g_pad, beta_pad, CHUNK_SIZE)
 
-    ref = chunk_mod._compute_kernel_inputs_from_torch_wy(q_pad, k_pad, v_pad, g_pad, beta_pad, CHUNK_SIZE)
-    dbl = chunk_mod._compute_kernel_inputs_from_doubling_wy(q_pad, k_pad, v_pad, g_pad, beta_pad, CHUNK_SIZE)
+    inputs_cpu = tuple(tensor.cpu() for tensor in (q_pad, k_pad, v_pad, g_pad, beta_pad))
+    ref = chunk_mod._compute_kernel_inputs_from_torch_wy(*inputs_cpu, CHUNK_SIZE)
+    dbl = chunk_mod._compute_kernel_inputs_from_doubling_wy(*inputs_cpu, CHUNK_SIZE)
     out = torch.ops._C_ascend.chunk_gated_delta_rule_compute_wy(q_pad, k_pad, v_pad, g_pad, beta_pad, CHUNK_SIZE)
 
     # g cumsum must match exactly (fp32 path).
@@ -264,11 +275,12 @@ def test_compute_wy_correlated_qk_uses_stable_fp32_path():
     q = l2norm_310p(q)
     k = l2norm_310p(k)
     q, k, v, g, beta, _, _ = chunk_mod._pad_bthd_to_chunk(q, k, v, g, beta, CHUNK_SIZE)
-    a_mat, _, _, _ = chunk_mod._wy_build_A_and_R(k, v, g, beta, CHUNK_SIZE)
+    inputs_cpu = tuple(tensor.cpu() for tensor in (q, k, v, g, beta))
+    a_mat, _, _, _ = chunk_mod._wy_build_A_and_R(*inputs_cpu[1:], CHUNK_SIZE)
     max_row_sum = a_mat.abs().sum(dim=-1).amax().item()
     assert max_row_sum >= 0.75, f"test did not select stable path: ||A||_inf={max_row_sum}"
 
-    ref = chunk_mod._compute_kernel_inputs_from_torch_wy(q, k, v, g, beta, CHUNK_SIZE)
+    ref = chunk_mod._compute_kernel_inputs_from_torch_wy(*inputs_cpu, CHUNK_SIZE)
     out = torch.ops._C_ascend.chunk_gated_delta_rule_compute_wy(q, k, v, g, beta, CHUNK_SIZE)
 
     assert torch.isfinite(out[2]).all().item(), "w_kernel contains NaN/Inf"
@@ -349,7 +361,7 @@ def test_cgdr_310_colleague_shape_npu_wy_vs_torch_wy(monkeypatch):
     assert state_npu is None
     assert out_npu.shape == v.shape
 
-    monkeypatch.setattr(chunk_mod, "_can_use_npu_compute_wy", lambda *args, **kwargs: False)
+    monkeypatch.setattr(chunk_mod, "_compute_kernel_inputs_from_npu_wy", _torch_wy_reference_for_npu_pipeline)
     out_ref, state_ref = _run_cgdr_310(
         q,
         k,
@@ -375,6 +387,16 @@ def test_cgdr_310_colleague_shape_vs_pytorch_reference():
     q_pad, k_pad, v_pad, g_pad, beta_pad, _, _ = chunk_mod._pad_bthd_to_chunk(q, k, v, g, beta, CHUNK_SIZE)
     assert chunk_mod._can_use_npu_compute_wy(q_pad, k_pad, v_pad, g_pad, beta_pad, CHUNK_SIZE)
 
+    q_cpu, k_cpu, v_cpu, g_cpu, beta_cpu, initial_state_cpu = (
+        tensor.cpu() for tensor in (q, k, v, g, beta, initial_state)
+    )
+
+    def l2norm_cpu(x):
+        x_fp32 = x.float()
+        return (x_fp32 * torch.rsqrt(x_fp32.square().sum(dim=-1, keepdim=True) + 1e-6)).to(x.dtype)
+
+    q_cpu = l2norm_cpu(q_cpu)
+    k_cpu = l2norm_cpu(k_cpu)
     out_npu, _ = _run_cgdr_310(
         q,
         k,
@@ -386,17 +408,17 @@ def test_cgdr_310_colleague_shape_vs_pytorch_reference():
         use_qk_l2norm_in_kernel=True,
     )
     out_ref, _ = chunk_mod.chunk_gated_delta_rule_pytorch(
-        q=q,
-        k=k,
-        v=v,
-        g=g,
-        beta=beta,
+        q=q_cpu,
+        k=k_cpu,
+        v=v_cpu,
+        g=g_cpu,
+        beta=beta_cpu,
         scale=None,
-        initial_state=initial_state,
+        initial_state=initial_state_cpu,
         output_final_state=False,
         cu_seqlens=None,
         head_first=False,
-        use_qk_l2norm_in_kernel=True,
+        use_qk_l2norm_in_kernel=False,
     )
 
     assert out_npu.shape == out_ref.shape == v.shape
@@ -422,7 +444,7 @@ def test_cgdr_310_colleague_shape_with_cu_seqlens(monkeypatch):
         use_qk_l2norm_in_kernel=True,
     )
 
-    monkeypatch.setattr(chunk_mod, "_can_use_npu_compute_wy", lambda *args, **kwargs: False)
+    monkeypatch.setattr(chunk_mod, "_compute_kernel_inputs_from_npu_wy", _torch_wy_reference_for_npu_pipeline)
     out_ref, _ = _run_cgdr_310(
         q,
         k,
