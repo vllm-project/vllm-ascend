@@ -11,11 +11,13 @@ from vllm.model_executor.layers.attention.mla_attention import MLAAttention
 from vllm.v1.attention.backend import MultipleOf
 from vllm.v1.kv_cache_interface import KVQuantMode, MLAAttentionSpec, SparseCacheRole
 
+from vllm_ascend.attention import mla_v1
 from vllm_ascend.attention.fa_v1 import AscendFlashAttentionBackend
 from vllm_ascend.attention.indexer import AscendSFAIndexerBackend
 from vllm_ascend.attention.mla_v1 import AscendMLAAttention, AscendMLABackend, AscendMLAImpl
 from vllm_ascend.attention.sfa_v1 import AscendSFABackend, AscendSFAImpl
 from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec
+from vllm_ascend.worker.v2.attn_utils import create_cache_component_views
 
 
 @pytest.mark.parametrize(
@@ -105,7 +107,7 @@ def _get_owner_spec(monkeypatch, layer):
     )
     monkeypatch.setattr(MLAAttention, "get_kv_cache_spec", lambda *_: source)
     config = SimpleNamespace(
-        model_config=SimpleNamespace(hf_text_config=SimpleNamespace(model_type="glm_moe_dsa")),
+        model_config=SimpleNamespace(dtype=torch.bfloat16, hf_text_config=SimpleNamespace(model_type="glm_moe_dsa")),
     )
     return layer.get_kv_cache_spec(config)
 
@@ -145,6 +147,52 @@ def test_fa_quant_decision_stays_with_each_owner(monkeypatch, quantized):
     assert spec.page_size_bytes == 128 * (640 if quantized else 1152)
     if quantized:
         assert spec.cache_dtype_str is None
+    assert spec.fa_quant_layer is quantized
+
+
+@pytest.mark.parametrize("cache_dtype", [torch.int8, torch.float8_e4m3fn])
+@pytest.mark.parametrize("fused", [False, True])
+@pytest.mark.parametrize("kernel_blocks_per_manager", [1, 2])
+@pytest.mark.parametrize("is_draft", [False, True])
+def test_mla_runtime_uses_fa_quant_flag(monkeypatch, cache_dtype, fused, kernel_blocks_per_manager, is_draft):
+    config = SimpleNamespace(
+        model_config=SimpleNamespace(dtype=torch.bfloat16),
+        speculative_config=SimpleNamespace(draft_model_config=SimpleNamespace(dtype=torch.float16)),
+    )
+    monkeypatch.setattr(mla_v1, "get_current_vllm_config", lambda: config)
+    widths = (576,) if fused else (512, 64)
+    dtypes = (cache_dtype,) if fused else (cache_dtype, torch.float16 if is_draft else torch.bfloat16)
+    row_bytes = sum(width * dtype.itemsize for width, dtype in zip(widths, dtypes, strict=True))
+    spec = AscendMLAAttentionSpec(
+        block_size=128 * kernel_blocks_per_manager,
+        num_kv_heads=1,
+        head_size=row_bytes,
+        dtype=cache_dtype,
+        kv_lora_rank=512,
+        qk_rope_head_dim=64,
+        mla_cache_layout="token_interleaved" if fused else "component_major",
+        fa_quant_layer=True,
+        is_draft=is_draft,
+    )
+    merged = AscendMLAAttentionSpec.merge([spec, spec])
+    assert merged.fa_quant_layer is True
+    shapes, actual_dtypes = AscendMLABackend.get_runtime_shapes_and_dtypes(merged, 2, None, 128)
+    assert actual_dtypes == dtypes
+    assert shapes == tuple((2 * kernel_blocks_per_manager, 128, 1, width) for width in widths)
+    slot_bytes = spec.page_size_bytes // kernel_blocks_per_manager
+    raw = torch.zeros(2 * spec.page_size_bytes, dtype=torch.int8)
+    views = create_cache_component_views(raw, shapes, actual_dtypes, slot_bytes)
+    assert tuple(view.dtype for view in views) == dtypes
+    if not fused:
+        assert views[1].data_ptr() - views[0].data_ptr() == 128 * 512
+        with pytest.raises(ValueError, match="smaller than its cache components"):
+            AscendMLABackend.get_runtime_shapes_and_dtypes(replace(spec, head_size=576), 2, None, 128)
+    with pytest.raises(AssertionError, match="same Ascend KV cache layout"):
+        AscendMLAAttentionSpec.merge([spec, replace(spec, fa_quant_layer=False)])
+    if not fused:
+        floating_spec = replace(spec, dtype=torch.bfloat16, head_size=576, fa_quant_layer=False)
+        _, floating_dtypes = AscendMLABackend.get_runtime_shapes_and_dtypes(floating_spec, 2, None, 128)
+        assert floating_dtypes == (torch.bfloat16, torch.bfloat16)
 
 
 def test_sfa_owner_reuses_execution_width_without_customizing(monkeypatch):

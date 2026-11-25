@@ -26,7 +26,6 @@ from vllm.v1.kv_cache_interface import (
 from vllm.v1.worker.gpu import attn_utils as upstream_attn_utils
 from vllm.v1.worker.gpu import model_runner as upstream_model_runner
 from vllm.v1.worker.utils import AttentionGroup
-from vllm_ascend.ops.kda_pcp import KimiKDAHostMetadataBackend
 
 from vllm_ascend.attention import dsa_attn_kv_plan, dsa_v1
 from vllm_ascend.attention import utils as attention_utils
@@ -61,6 +60,7 @@ from vllm_ascend.device.hardware_profile import get_hardware_profile
 from vllm_ascend.models.deepseek_v4 import compressor as deepseek_v4_compressor
 from vllm_ascend.models.deepseek_v4 import indexer as deepseek_v4_indexer
 from vllm_ascend.models.deepseek_v4 import model as deepseek_v4_model
+from vllm_ascend.ops.kimi_kda import KimiKDAHostMetadataBackend
 from vllm_ascend.worker.utils import prepare_ascend_kernel_block_sizes
 from vllm_ascend.worker.v2 import attn_utils
 from vllm_ascend.worker.v2 import model_runner as v2_model_runner
@@ -1568,6 +1568,7 @@ def test_k31_dspark_mla_cache_spec_uses_layer_dtype(
     assert spec.num_heads == 1
     assert spec.head_size == 576
     assert spec.dtype == expected_dtype
+    assert spec.fa_quant_layer is quantized
     if quantized or expected_dtype == torch.bfloat16:
         assert spec.cache_dtype_str is None
         assert spec.kv_quant_mode == KVQuantMode.NONE
