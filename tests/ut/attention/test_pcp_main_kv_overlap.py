@@ -10,27 +10,30 @@ import torch
 from vllm.v1.attention.ops.pcp import _gather_prefill_cache_inputs
 
 import vllm_ascend.attention.context_parallel.sfa_cp as pcp_module
+import vllm_ascend.attention.sfa_hisparse as hisparse_sfa
 import vllm_ascend.attention.sfa_v1 as sparse_mla
+from vllm_ascend.attention.sfa_hisparse import AscendHiSparseImpl
 from vllm_ascend.attention.sfa_v1 import AscendSFAImpl
 
 
 @pytest.mark.parametrize(
-    "rope,rows,replicated,dcp,sharded_decode",
+    "rope,rows,replicated,impl_cls,sharded_decode",
     [
-        pytest.param(False, 0, 0, False, False, id="empty-rank"),
-        pytest.param(False, 2, 0, False, False, id="padded-nope"),
-        pytest.param(False, 4, 1, True, False, id="dcp-replicated-prefix"),
-        pytest.param(True, 4, 0, False, False, id="rope-prefill"),
-        pytest.param(True, 4, 1, True, False, id="dcp-rope-mixed"),
-        pytest.param(False, 2, 1, True, True, id="dcp-sharded-decode"),
+        pytest.param(False, 0, 0, AscendSFAImpl, False, id="empty-rank"),
+        pytest.param(False, 2, 0, AscendSFAImpl, False, id="padded-nope"),
+        pytest.param(False, 4, 1, pcp_module.AscendSFADCPImpl, False, id="dcp-replicated-prefix"),
+        pytest.param(True, 4, 0, AscendSFAImpl, False, id="rope-prefill"),
+        pytest.param(True, 4, 1, pcp_module.AscendSFADCPImpl, False, id="dcp-rope-mixed"),
+        pytest.param(False, 2, 1, pcp_module.AscendSFADCPImpl, True, id="dcp-sharded-decode"),
+        pytest.param(True, 4, 1, AscendHiSparseImpl, False, id="hisparse-rank-major"),
     ],
 )
 @pytest.mark.parametrize("defer_wait", [False, True])
 def test_main_kv_matches_synchronous_inputs_and_slots(
-    monkeypatch, rope, rows, replicated, dcp, sharded_decode, defer_wait
+    monkeypatch, rope, rows, replicated, impl_cls, sharded_decode, defer_wait
 ):
     pcp = 2
-    impl_cls = pcp_module.AscendSFADCPImpl if dcp else AscendSFAImpl
+    dcp = impl_cls is pcp_module.AscendSFADCPImpl
     impl = impl_cls.__new__(impl_cls)
     impl.pcp_enabled = True
     impl.qk_rope_head_dim = 2 if rope else 0
@@ -42,6 +45,8 @@ def test_main_kv_matches_synchronous_inputs_and_slots(
     metadata.pcp_has_global_prefill = not sharded_decode
     metadata.uses_pcp_sharded_layout = True
     slots = torch.arange(pcp * 4)
+    if impl_cls is AscendHiSparseImpl:
+        slots[4] = -1  # The duplicated decode row keeps its rank-major position.
     metadata.dcp_context = SimpleNamespace(slot_mapping=slots.flip(0))
     inputs = torch.arange(rows * 3, dtype=torch.float32).reshape(rows, 3)
     cos, sin = (torch.randn(rows, 2), torch.randn(rows, 2)) if rope else (None, None)
@@ -54,6 +59,7 @@ def test_main_kv_matches_synchronous_inputs_and_slots(
 
     group = SimpleNamespace(world_size=pcp, all_gather=gather)
     monkeypatch.setattr(sparse_mla, "get_pcp_group", lambda: group)
+    monkeypatch.setattr(hisparse_sfa, "get_pcp_group", lambda: group)
     monkeypatch.setattr("vllm.v1.attention.ops.pcp.get_pcp_group", lambda: group)
 
     def write(self, values, actual_cos, actual_sin, actual_cache, actual_slots, actual_metadata):
@@ -64,11 +70,12 @@ def test_main_kv_matches_synchronous_inputs_and_slots(
         writes.append((values.clone(), actual_cos, actual_sin, actual_slots.clone()))
         return None, None
 
-    monkeypatch.setattr(AscendSFAImpl, "_exec_kv_local", write)
+    monkeypatch.setattr(impl_cls, "_exec_kv_local", write)
     # Keep the unchanged upstream synchronous helper as an independent oracle.
     expected_slots = metadata.dcp_context.slot_mapping if dcp and not sharded_decode else slots
     values = (inputs, cos, sin) if rope else (torch.nn.functional.pad(inputs, (0, 0, 0, 4 - rows)),)
-    values, expected_slots = _gather_prefill_cache_inputs(values, expected_slots, 0 if sharded_decode else replicated)
+    deduplicated = 0 if sharded_decode or impl_cls is AscendHiSparseImpl else replicated
+    values, expected_slots = _gather_prefill_cache_inputs(values, expected_slots, deduplicated)
     expected_cos, expected_sin = values[1:] if rope else (None, None)
     expected_result = write(impl, values[0], expected_cos, expected_sin, cache, expected_slots, metadata)
 
@@ -84,6 +91,7 @@ def test_main_kv_matches_synchronous_inputs_and_slots(
         return output, SimpleNamespace(wait=wait)
 
     monkeypatch.setattr(sparse_mla, "all_gather_async", launch)
+    monkeypatch.setattr(hisparse_sfa, "all_gather_async", launch)
     result = impl.exec_kv(inputs, cos, sin, cache, slots, metadata, defer_wait=defer_wait)
     if defer_wait:
         assert callable(result) and len(writes) == 1
@@ -149,7 +157,7 @@ def test_main_kv_retains_contiguous_send_until_completion(monkeypatch):
     def launch(send, actual_group):
         assert actual_group is group and send.is_contiguous()
         send_ref = weakref.ref(send)
-        output = torch.empty(8, 3, dtype=send.dtype)
+        output = send.new_empty((2 * send.shape[0], *send.shape[1:]))
 
         def wait():
             retained_send = send_ref()

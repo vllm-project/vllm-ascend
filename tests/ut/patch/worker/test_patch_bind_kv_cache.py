@@ -1,5 +1,4 @@
 from typing import cast
-from unittest.mock import Mock
 
 import pytest
 import torch
@@ -75,40 +74,25 @@ def test_bind_kv_cache_accepts_materialized_mamba_states(
     assert layer.kv_cache[1].data_ptr() == temporal_state.data_ptr()
 
 
-@pytest.mark.parametrize("legacy_hook", [False, True])
 @pytest.mark.parametrize("runner_binding", [False, True])
-def test_binding_retains_tuple_layout_across_tracker_lifecycle(monkeypatch, legacy_hook, runner_binding):
+def test_binding_retains_tuple_layout(runner_binding):
     name = "model.layers.0.self_attn"
     layer = _TensorOnlyAttentionLayer()
     allocated = (torch.zeros(2, 16, 1, 8), torch.zeros(2, 16, 1, 8))
     context = {name: layer}
-    groups: list[object] = []
-    hook = Mock()
-    # Model the API version as well as its corresponding tracker hook.
-    monkeypatch.setattr(patch_bind_kv_cache, "vllm_version_is", lambda version: legacy_hook)
-    if legacy_hook:
-        monkeypatch.setattr(patch_bind_kv_cache.utils, "share_replayssm_ring_trackers", hook, raising=False)
-    else:
-        monkeypatch.delattr(patch_bind_kv_cache.utils, "share_replayssm_ring_trackers", raising=False)
 
     runner_caches: list[object] = []
     if runner_binding:
-        patch_bind_kv_cache.bind_kv_cache({name: allocated}, context, runner_caches, kv_cache_groups=groups)
+        patch_bind_kv_cache.bind_kv_cache({name: allocated}, context, runner_caches)
         assert runner_caches[0] is allocated
     else:
-        patch_bind_kv_cache.bind_kv_cache_to_layers({name: allocated}, context, kv_cache_groups=groups)
+        patch_bind_kv_cache.bind_kv_cache_to_layers({name: allocated}, context)
 
     assert layer.kv_cache is allocated
     assert not layer.bind_called
-    if legacy_hook:
-        hook.assert_called_once_with([name], context, groups)
-    else:
-        hook.assert_not_called()
 
 
-def test_binding_keeps_scheduler_storage_separate_from_kernel_view(monkeypatch):
-    monkeypatch.setattr(patch_bind_kv_cache, "vllm_version_is", lambda version: False)
-    monkeypatch.delattr(patch_bind_kv_cache.utils, "share_replayssm_ring_trackers", raising=False)
+def test_binding_keeps_scheduler_storage_separate_from_kernel_view():
     name = "model.layers.0.self_attn"
     storage = torch.arange(32).reshape(4, 8)
     kernel_view = storage.reshape(8, 4)

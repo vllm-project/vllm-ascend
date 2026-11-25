@@ -1,0 +1,4 @@
+pr: 22514
+entries:
+  - category: bugfix
+    text: Fixed missing AscendStore CPU KV events for blocks stored by individual workers. An event is published once every rank that writes that block has stored it, including when those stores finish on different steps, and fully stored blocks in a partially successful PUT are still reported.

@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
+import logging
 import threading
 import time
 from dataclasses import replace
@@ -12,6 +13,9 @@ import torch
 import zmq
 from cachetools import TTLCache
 from vllm.sampling_params import SamplingParams
+from vllm.utils.hashing import sha256
+from vllm.v1.core import kv_cache_utils
+from vllm.v1.core.kv_cache_utils import get_request_block_hasher
 from vllm.v1.request import Request, RequestStatus
 
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake import heartbeat as heartbeat_module
@@ -29,6 +33,7 @@ from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.metadata import (
 )
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.pull_scheduler import (
     ACK_MSG,
+    DELAYED_FREE_STATUS_INTERVAL_SECONDS,
     DONE_RECVING_MSG,
     MooncakePullConnectorScheduler,
     MooncakeSchedulerRecvingThread,
@@ -351,6 +356,134 @@ def test_sending_thread_force_frees_expired_request(monkeypatch: pytest.MonkeyPa
 
     thread._handle_finished_request("expired")
     assert thread.get_and_clear_finished_requests() == set()
+
+
+@pytest.fixture
+def status_logger(monkeypatch: pytest.MonkeyPatch) -> tuple[logging.Logger, list[logging.LogRecord]]:
+    """Return an isolated logger plus the records it emits.
+
+    A private Manager keeps the sample independent of a global
+    logging.disable() left behind by another test in the same process.
+    """
+    logger = logging.Logger("mooncake-status-test", logging.DEBUG)
+    logger.manager = logging.Manager(logging.RootLogger(logging.DEBUG))
+    records: list[logging.LogRecord] = []
+
+    class _Capture(logging.Handler):
+        def emit(self, record: logging.LogRecord) -> None:
+            records.append(record)
+
+    logger.addHandler(_Capture())
+    monkeypatch.setattr(pull_scheduler, "logger", logger)
+    return logger, records
+
+
+def _pending_lines(records: list[logging.LogRecord]) -> list[logging.LogRecord]:
+    return [r for r in records if "pending_release" in r.getMessage()]
+
+
+@pytest.mark.parametrize("debug_enabled", [False, True])
+def test_delayed_free_status_loop_observes_only_in_debug(
+    monkeypatch: pytest.MonkeyPatch,
+    status_logger: tuple[logging.Logger, list[logging.LogRecord]],
+    debug_enabled: bool,
+) -> None:
+    """DEBUG disabled skips the sample entirely; enabled samples once per window.
+
+    The control loop must not pay for the diagnostic when DEBUG is off: no
+    clock read and no queue sampling. When enabled, the first iteration
+    samples a nonzero pending release and logs it exactly once.
+    """
+    logger, records = status_logger
+    thread = make_sending_thread()
+    thread.finished_requests.put("done")
+    logger.setLevel(logging.DEBUG if debug_enabled else logging.INFO)
+    clock = MagicMock(return_value=1000.0)
+    monkeypatch.setattr(pull_scheduler, "time", SimpleNamespace(monotonic=clock))
+    state_lock_mock = MagicMock()
+    thread.state_lock = state_lock_mock  # type: ignore[assignment]
+    finished_mock = MagicMock(wraps=thread.finished_requests)
+    thread.finished_requests = finished_mock  # type: ignore[assignment]
+    thread.stop_event.is_set = MagicMock(side_effect=[False, True])  # type: ignore[method-assign]
+    sock = MagicMock()
+    sock.recv_multipart.side_effect = zmq.Again()  # type: ignore[attr-defined]
+
+    thread._run_busy_loop(sock)
+
+    assert clock.call_count == int(debug_enabled)
+    assert finished_mock.qsize.call_count == int(debug_enabled)
+    assert len(_pending_lines(records)) == int(debug_enabled)
+    state_lock_mock.__enter__.assert_not_called()
+    sock.recv_multipart.assert_called_once()
+    assert finished_mock.get_nowait() == "done"
+
+
+def test_delayed_free_status_cadence_and_read_only(
+    monkeypatch: pytest.MonkeyPatch, status_logger: tuple[logging.Logger, list[logging.LogRecord]]
+) -> None:
+    """The sample runs on its cadence and never reaps, locks or drains.
+
+    An expired lease must stay in the ledger for the normal drain path, the
+    bookkeeping snapshot must not move, and a drain by the hook must still
+    return every queued id.
+    """
+    _, records = status_logger
+    thread = make_sending_thread()
+    clock = MagicMock(return_value=1000.0)
+    monkeypatch.setattr(pull_scheduler, "time", SimpleNamespace(monotonic=clock))
+    thread.add_delayed_request("expired")
+    thread.add_delayed_request("done")
+    thread._handle_finished_request("done")
+    records.clear()  # the lease-finish debug line is not a status sample
+    before = (dict(thread.delayed_free_requests), dict(thread.renewed_requests), thread.finished_requests.qsize())
+    clock.return_value += 40  # The reporter must not reap the expired lease.
+
+    thread._report_delayed_free_status()
+    lines = _pending_lines(records)
+    assert len(lines) == 1
+    assert lines[0].getMessage() == "Mooncake delayed-free status: engine_id=engine-p pending_release=1"
+    clock.return_value += DELAYED_FREE_STATUS_INTERVAL_SECONDS / 2
+    thread._report_delayed_free_status()
+    assert len(_pending_lines(records)) == 1
+    clock.return_value += DELAYED_FREE_STATUS_INTERVAL_SECONDS / 2
+    thread._report_delayed_free_status()
+    assert len(_pending_lines(records)) == 2
+    assert before == (
+        dict(thread.delayed_free_requests),
+        dict(thread.renewed_requests),
+        thread.finished_requests.qsize(),
+    )
+
+    assert thread.get_and_clear_finished_requests() == {"done", "expired"}
+    records.clear()
+    clock.return_value += DELAYED_FREE_STATUS_INTERVAL_SECONDS
+    thread._report_delayed_free_status()
+    assert _pending_lines(records) == []  # Empty queues stay silent.
+
+
+def test_delayed_free_status_failure_keeps_control_loop_running(
+    monkeypatch: pytest.MonkeyPatch, status_logger: tuple[logging.Logger, list[logging.LogRecord]]
+) -> None:
+    """A failing sample is logged and the control loop keeps serving.
+
+    The reporter shares the sending thread with DONE and heartbeat handling,
+    so an observation error must be swallowed and the loop must still reach
+    the socket receive path.
+    """
+    _, records = status_logger
+    thread = make_sending_thread()
+    monkeypatch.setattr(pull_scheduler, "time", SimpleNamespace(monotonic=lambda: 1000.0))
+    finished_mock = MagicMock()
+    finished_mock.qsize.side_effect = RuntimeError("observation failed")
+    thread.finished_requests = finished_mock  # type: ignore[assignment]
+    thread.stop_event.is_set = MagicMock(side_effect=[False, True])  # type: ignore[method-assign]
+    sock = MagicMock()
+    sock.recv_multipart.side_effect = zmq.Again()  # type: ignore[attr-defined]
+
+    thread._run_busy_loop(sock)
+
+    assert [r.getMessage() for r in records] == ["Mooncake delayed-free status report failed"]
+    sock.recv_multipart.assert_called_once()
 
 
 def test_recving_thread_reuses_socket_after_ack_and_discards_it_on_error(
@@ -728,47 +861,6 @@ def test_base_scheduler_detects_state_and_compressed_prefill_truncation() -> Non
     assert scheduler._needs_prefill_token_truncation() is False
 
 
-def test_truncate_request_for_prefill_is_idempotent_for_token_ids() -> None:
-    scheduler = MooncakeBaseConnectorScheduler.__new__(MooncakeBaseConnectorScheduler)
-    scheduler.need_truncate = True
-    request = make_request(
-        prompt_token_ids=[1, 2, 3],
-        num_prompt_tokens=3,
-        _all_token_ids=[1, 2, 3],
-        kv_transfer_params={},
-        max_tokens=8,
-    )
-
-    request.block_hashes = ["full-prompt-hash"]
-    scheduler._truncate_request_for_prefill(request)
-    scheduler._truncate_request_for_prefill(request)
-
-    assert request.prompt_token_ids == [1, 2]
-    assert request._all_token_ids == [1, 2]
-    assert request.num_prompt_tokens == 2
-    assert request.max_tokens == 1
-    assert request.kv_transfer_params["_p_side_truncated"] is True
-    assert request.block_hashes == [(1, 2)]
-
-
-def test_truncate_request_for_prefill_supports_prompt_embeddings() -> None:
-    scheduler = MooncakeBaseConnectorScheduler.__new__(MooncakeBaseConnectorScheduler)
-    scheduler.need_truncate = True
-    prompt_embeds = torch.arange(12).reshape(3, 4)
-    request = make_request(
-        prompt_token_ids=None,
-        prompt_embeds=prompt_embeds,
-        num_prompt_tokens=3,
-        _all_token_ids=[1, 2, 3],
-        kv_transfer_params={},
-    )
-
-    scheduler._truncate_request_for_prefill(request)
-
-    assert torch.equal(request.prompt_embeds, prompt_embeds[:2])
-    assert request.num_prompt_tokens == 2
-
-
 def test_sending_busy_loop_serves_metadata_and_completion_ack() -> None:
     thread = make_sending_thread()
     thread._handle_finished_request = MagicMock()  # type: ignore[method-assign]
@@ -860,13 +952,16 @@ def prefix_connector():
     result = MooncakePullConnector.__new__(MooncakePullConnector)
     result.connector_scheduler = MooncakePullConnectorScheduler.__new__(MooncakePullConnectorScheduler)
     result.connector_scheduler.need_truncate = True
+    result.connector_scheduler.kv_cache_config = SimpleNamespace(hash_block_size=128)
+    result.connector_scheduler.vllm_config = SimpleNamespace(num_hash_lookahead_tokens=0)
     result.connector_scheduler._heartbeat_thread = None
     return result
 
 
-def make_prefix_request(num_tokens, params, use_embeds=False):
+def make_prefix_request(num_tokens, params, use_embeds=False, block_hasher=None):
     request = Request(
         request_id="prefill",
+        block_hasher=block_hasher,
         prompt_token_ids=None if use_embeds else list(range(num_tokens)),
         prompt_embeds=torch.zeros(num_tokens, 4) if use_embeds else None,
         sampling_params=SamplingParams(max_tokens=8),
@@ -903,6 +998,34 @@ def test_truncation_precedes_prefix_lookup(prefix_connector, num_tokens, use_emb
     prefix_connector.on_new_request(request)
     assert prefix_connector.get_num_new_matched_tokens(request, local_hit) == (0, False)
     assert request.num_prompt_tokens == num_tokens - 1
+
+
+@pytest.mark.parametrize(("lookahead", "tail", "use_embeds"), [(2, 0, True), (0, 1, False)])
+@pytest.mark.parametrize("disable_native_api", [False, True])
+def test_prefill_keeps_valid_prefix_hashes_without_rehashing(
+    prefix_connector, lookahead, tail, use_embeds, disable_native_api, monkeypatch
+):
+    scheduler = prefix_connector.connector_scheduler
+    scheduler.vllm_config.num_hash_lookahead_tokens = lookahead
+    hash_size = scheduler.kv_cache_config.hash_block_size
+    length = 2 * hash_size + lookahead + tail
+    monkeypatch.setattr(kv_cache_utils, "NONE_HASH", sha256("test-seed"), raising=False)
+    hash_prompt = get_request_block_hasher(hash_size, sha256, lookahead)
+    counted_hasher = MagicMock(wraps=hash_prompt)
+    request = make_prefix_request(length, {"do_remote_decode": True}, use_embeds, counted_hasher)
+    expected = make_prefix_request(length - 1, {}, use_embeds, hash_prompt)
+    assert len(request.block_hashes) == 2
+    if disable_native_api:
+        monkeypatch.setattr(request, "truncate_block_hashes", None, raising=False)
+    counted_hasher.reset_mock()
+
+    prefix_connector.on_new_request(request)
+    prefix_connector.on_new_request(request)
+
+    assert request.num_prompt_tokens == length - 1
+    assert request.block_hashes == expected.block_hashes
+    assert not request._prompt_embeds_per_block_hashes
+    counted_hasher.assert_not_called()
 
 
 @pytest.mark.parametrize("params", [None, {}, {"do_remote_prefill": True}, {"do_remote_decode": False}])
@@ -1834,12 +1957,18 @@ def test_producer_passes_lease_duration_to_control_thread(monkeypatch) -> None:
 @pytest.mark.parametrize("extra, duration, interval", [({}, 120, 20), ({"kv_lease_duration": 60}, 60, 10)])
 def test_consumer_always_starts_heartbeat_with_configured_interval(monkeypatch, extra, duration, interval) -> None:
     config = SimpleNamespace(
+        kv_role="kv_consumer",
         is_kv_consumer=True,
         get_from_extra_config=extra.get,
     )
-    monkeypatch.setattr(
-        MooncakeBaseConnectorScheduler, "__init__", lambda self, *args: setattr(self, "kv_transfer_config", config)
-    )
+
+    def init_base(self, vllm_config, engine_id, kv_cache_config):
+        self.kv_transfer_config = config
+        self.engine_id = engine_id
+
+    monkeypatch.setattr(MooncakeBaseConnectorScheduler, "__init__", init_base)
+    logger = MagicMock()
+    monkeypatch.setattr(pull_scheduler, "logger", logger)
     receiver = MagicMock()
 
     def create_receiver(ready):
@@ -1850,6 +1979,12 @@ def test_consumer_always_starts_heartbeat_with_configured_interval(monkeypatch, 
     heartbeat = MagicMock()
     monkeypatch.setattr(pull_scheduler, "MooncakeHeartbeatThread", heartbeat)
     scheduler = MooncakePullConnectorScheduler(MagicMock(), "engine", MagicMock())
+    logger.debug.assert_called_once()
+    message, *args = logger.debug.call_args.args
+    assert message % tuple(args) == (
+        "MooncakeHeartbeat event=config engine_id=engine kv_role=kv_consumer "
+        f"initial_lease_s={duration} renewal_window_s={duration * 2 // 3} heartbeat_interval_s={interval}"
+    )
     assert scheduler._kv_lease_duration == duration
     assert isinstance(scheduler._validated_producer_leases, TTLCache)
     assert scheduler._validated_producer_leases.ttl == 600

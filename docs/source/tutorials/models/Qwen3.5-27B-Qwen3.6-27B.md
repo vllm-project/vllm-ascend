@@ -12,7 +12,7 @@ Qwen3.5-27B and Qwen3.6-27B are dense hybrid Mamba-Transformer language models i
 
 This document will demonstrate the main validation steps for the models, including supported features, feature configuration, environment preparation, single-node and multi-node deployment, as well as accuracy and performance evaluation.
 
-It is **strongly recommended to use the latest release candidate (rc) version or the latest official version** of `vllm-ascend`. As a minimum-version requirement, `Qwen3.5-27B` is first supported in `vllm-ascend:v0.17.0rc1`, and `Qwen3.6-27B` is first supported in `vllm-ascend:v0.18.0rc1`. Support for Atlas 300I DUO and 950DT Products starts from `vllm-ascend:v0.23.0rc1`.
+It is **strongly recommended to use the latest release candidate (rc) version or the latest official version** of `vllm-ascend`. As a minimum-version requirement, `Qwen3.5-27B` is first supported in `vllm-ascend:v0.17.0rc1`, and `Qwen3.6-27B` is first supported in `vllm-ascend:v0.18.0rc1`. Support for Atlas 300I Duo and 950DT Products starts from `vllm-ascend:v0.23.0rc1`.
 
 ## 2 Supported Features
 
@@ -26,19 +26,19 @@ Please refer to the [Feature Guide](../../user_guide/feature_guide/index.md) for
 
 |  Weight Version | Hardware Requirements | Download Links |
 |-----------------|-----------------------|----------------|
-| `Qwen3.5-27B` (BF16 version) | 1 Atlas 800I A3 (64GB × 16) node or 1 Atlas 800I A2 (64GB × 8) node or Atlas 300I DUO | [ModelScope](https://www.modelscope.cn/models/Qwen/Qwen3.5-27B) \| [Hugging Face](https://huggingface.co/Qwen/Qwen3.5-27B) |
-| `Qwen3.5-27B-w8a8` (Quantized version) | 1 Atlas 800I A3 (64GB × 16) node or 1 Atlas 800I A2 (64GB × 8) node or Atlas 300I DUO | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/Qwen3.5-27B-w8a8-mtp) |
-| `Qwen3.6-27B` (BF16 version) | 1 950DT Products(96GB × 8) node or 1 Atlas 800I A3 (64GB × 16) node or 1 Atlas 800I A2 (64GB × 8) node or Atlas 300I DUO | [ModelScope](https://www.modelscope.cn/models/Qwen/Qwen3.6-27B) \| [Hugging Face](https://huggingface.co/Qwen/Qwen3.6-27B) |
+| `Qwen3.5-27B` (BF16 version) | 1 Atlas 800I A3 (64GB × 16) node or 1 Atlas 800I A2 (64GB × 8) node or Atlas 300I Duo | [ModelScope](https://www.modelscope.cn/models/Qwen/Qwen3.5-27B) \| [Hugging Face](https://huggingface.co/Qwen/Qwen3.5-27B) |
+| `Qwen3.5-27B-w8a8` (Quantized version) | 1 Atlas 800I A3 (64GB × 16) node or 1 Atlas 800I A2 (64GB × 8) node or Atlas 300I Duo | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/Qwen3.5-27B-w8a8-mtp) |
+| `Qwen3.6-27B` (BF16 version) | 1 950DT Products (96GB × 8) node or 1 Atlas 800I A3 (64GB × 16) node or 1 Atlas 800I A2 (64GB × 8) node or Atlas 300I Duo | [ModelScope](https://www.modelscope.cn/models/Qwen/Qwen3.6-27B) \| [Hugging Face](https://huggingface.co/Qwen/Qwen3.6-27B) |
 | `Qwen3.6-27B-w8a8` (Quantized version) | 1 Atlas 800I A3 (64GB × 16) node or 1 Atlas 800I A2 (64GB × 8) node | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/Qwen3.6-27B-w8a8) |
 | `Qwen3.6-27B-w8a8-mxfp8` (Quantized version) | 1 950DT Products (96GB × 8) node | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/Qwen3.6-27B-w8a8-mxfp8) |
 | `Qwen3.6-27B-w8a8c8-mxfp8` (Quantized version) | 1 950DT Products (96GB × 8) node | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/Qwen3.6-27B-w8a8c8-mxfp8) |
-| `Qwen3.6-27B-w8a8-310p`(Quantized version) | 1 Atlas 300I DUO | [ModelScope](https://modelscope.cn/models/Eco-Tech/Qwen3.6-27B-W8A8-310P) |
+| `Qwen3.6-27B-w8a8-310p` (Quantized version) | 1 Atlas 300I Duo | [ModelScope](https://modelscope.cn/models/Eco-Tech/Qwen3.6-27B-W8A8-310P) |
 
 - `Qwen3.6-27B-w8a8c8-mxfp8` (W8A8 MXFP8 quantization with C8 MXFP8 KV cache): serve it with `--kv-cache-dtype mxfp8`; recommended for long-sequence scenarios.
 
 It is recommended to download the model weight to the shared directory of multiple nodes, such as `/root/.cache/`.
 
->**Path description**: Download the model weights to a directory of your choice and record it. Ensure the model path in the subsequent deployment command matches this directory.
+> **Path description**: Download the model weights to a directory of your choice and record it. Ensure the model path in the subsequent deployment command matches this directory.
 
 ### 3.2 Verify Multi-node Communication
 
@@ -48,105 +48,54 @@ If you want to deploy multi-node environment, you need to verify multi-node comm
 
 ### 4.1 Docker Image Installation
 
-Select an image based on your machine type and start the docker image on your node, refer to [using docker](../../getting_started/installation.md#installation-prebuilt-image).
+{% include "getting_started/installation/ascend_docker_runtime.inc.md" %}
 
-It is **recommended to use the latest release candidate (rc) version or the latest official version** of the `vllm-ascend` image to ensure the best compatibility and access to the latest features. As a minimum-version requirement, use `vllm-ascend:v0.17.0rc1` (or a later version) for `Qwen3.5-27B`, and `vllm-ascend:v0.18.0rc1` (or a later version) for `Qwen3.6-27B`. For `Qwen3.6-27B` on Atlas 800I A3, please use the matching `v0.18.0rc1-a3` (or a later `-a3`) image. For Atlas 300I DUO, use `vllm-ascend:v0.23.0rc1-310p` (or a later `-310p`) image.
+Select an image based on your machine type and start the Docker image on your node, refer to [using Docker](../../getting_started/installation.md#installation-prebuilt-image).
+
+It is **recommended to use the latest release candidate (rc) version or the latest official version** of the `vllm-ascend` image to ensure the best compatibility and access to the latest features. As a minimum-version requirement, use `vllm-ascend:v0.17.0rc1` (or a later version) for `Qwen3.5-27B`, and `vllm-ascend:v0.18.0rc1` (or a later version) for `Qwen3.6-27B`. For `Qwen3.6-27B` on Atlas 800I A3, please use the matching `v0.18.0rc1-a3` (or a later `-a3`) image. For Atlas 300I Duo, use `vllm-ascend:v0.23.0rc1-310p` (or a later `-310p`) image.
 
 === "Atlas 800I A3"
 
-    Start the docker image on each node.
+    Start the Docker image on each node.
 
     ```bash
     export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}-a3
     docker run --rm \
+        -e ASCEND_VISIBLE_DEVICES=0-15 \
         --name vllm-ascend \
         --shm-size=1g \
         --net=host \
-        --device /dev/davinci0 \
-        --device /dev/davinci1 \
-        --device /dev/davinci2 \
-        --device /dev/davinci3 \
-        --device /dev/davinci4 \
-        --device /dev/davinci5 \
-        --device /dev/davinci6 \
-        --device /dev/davinci7 \
-        --device /dev/davinci8 \
-        --device /dev/davinci9 \
-        --device /dev/davinci10 \
-        --device /dev/davinci11 \
-        --device /dev/davinci12 \
-        --device /dev/davinci13 \
-        --device /dev/davinci14 \
-        --device /dev/davinci15 \
-        --device /dev/davinci_manager \
-        --device /dev/devmm_svm \
-        --device /dev/hisi_hdc \
-        -v /usr/local/dcmi:/usr/local/dcmi \
         -v /usr/local/Ascend/driver/tools/hccn_tool:/usr/local/Ascend/driver/tools/hccn_tool \
-        -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
-        -v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
-        -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
-        -v /etc/ascend_install.info:/etc/ascend_install.info \
         -v /root/.cache:/root/.cache \
         -it $IMAGE bash
     ```
 
 === "Atlas 800I A2"
 
-    Start the docker image on each node.
+    Start the Docker image on each node.
 
     ```bash
     export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}
     docker run --rm \
+        -e ASCEND_VISIBLE_DEVICES=0-7 \
         --name vllm-ascend \
         --shm-size=1g \
         --net=host \
-        --device /dev/davinci0 \
-        --device /dev/davinci1 \
-        --device /dev/davinci2 \
-        --device /dev/davinci3 \
-        --device /dev/davinci4 \
-        --device /dev/davinci5 \
-        --device /dev/davinci6 \
-        --device /dev/davinci7 \
-        --device /dev/davinci_manager \
-        --device /dev/devmm_svm \
-        --device /dev/hisi_hdc \
-        -v /usr/local/dcmi:/usr/local/dcmi \
         -v /usr/local/Ascend/driver/tools/hccn_tool:/usr/local/Ascend/driver/tools/hccn_tool \
-        -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
-        -v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
-        -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
-        -v /etc/ascend_install.info:/etc/ascend_install.info \
         -v /root/.cache:/root/.cache \
         -it $IMAGE bash
     ```
 
-=== "Atlas 300I DUO"
+=== "Atlas 300I Duo"
 
-    Start the docker image on each node.
+    Start the Docker image on each node.
 
     ```bash
     export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}-310p
     docker run --rm \
+        -e ASCEND_VISIBLE_DEVICES=0-7 \
         --name vllm-ascend \
         --shm-size=1g \
-        --device /dev/davinci0 \
-        --device /dev/davinci1 \
-        --device /dev/davinci2 \
-        --device /dev/davinci3 \
-        --device /dev/davinci4 \
-        --device /dev/davinci5 \
-        --device /dev/davinci6 \
-        --device /dev/davinci7 \
-        --device /dev/davinci_manager \
-        --device /dev/devmm_svm \
-        --device /dev/hisi_hdc \
-        -v /usr/local/dcmi:/usr/local/dcmi \
-        -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
-        -v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
-        -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
-        -v /etc/ascend_install.info:/etc/ascend_install.info \
         -v /root/.cache:/root/.cache \
         -p 8000:8000 \
         -it $IMAGE bash
@@ -154,46 +103,32 @@ It is **recommended to use the latest release candidate (rc) version or the late
 
 === "950DT Products"
 
-    Start the docker image on each node.
+    Start the Docker image on each node.
 
     ```shell
     export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}-a5
     export NAME=vllm-ascend
 
     docker run --rm \
+        -e ASCEND_VISIBLE_DEVICES=0-7 \
         --name $NAME \
         --net=host \
         --shm-size=1g \
-        --device /dev/davinci0 \
-        --device /dev/davinci1 \
-        --device /dev/davinci2 \
-        --device /dev/davinci3 \
-        --device /dev/davinci4 \
-        --device /dev/davinci5 \
-        --device /dev/davinci6 \
-        --device /dev/davinci7 \
-        --device /dev/davinci_manager \
-        --device /dev/hisi_hdc \
-        --device /dev/ummu \
-        --device /dev/uburma \
         -v /usr/local/Ascend/driver:/usr/local/Ascend/driver \
-        -v /etc/ascend_install.info:/etc/ascend_install.info \
         -v /etc/hccl_rootinfo.json:/etc/hccl_rootinfo.json \
         -v /etc/hixlep/:/etc/hixlep/ \
         -v /root/.cache:/root/.cache \
         -v /usr/local/sbin:/usr/local/sbin \
-        -v /usr/local/dcmi:/usr/local/dcmi \
-        -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
         -v /usr/local/sbin/npu-smi:/usr/local/sbin/npu-smi \
         -v /usr/lib64:/usr/lib64 \
         -it $IMAGE bash
     ```
 
-After a successful docker run, you can verify the running container service by executing the `docker ps` command. The expected result is that the container `vllm-ascend` is listed with status `Up`, confirming the docker installation is successful.
+After a successful Docker run, you can verify the running container service by executing the `docker ps` command. The expected result is that the container `vllm-ascend` is listed with status `Up`, confirming the Docker installation is successful.
 
 ### 4.2 Source Code Installation
 
-If you don't want to use the docker image as above, you can also build all from source:
+If you don't want to use the Docker image as above, you can also build all from source:
 
 1. Clone the repository and install `vllm-ascend` from source:
 
@@ -207,7 +142,7 @@ If you don't want to use the docker image as above, you can also build all from 
 
     !!! note
 
-        On Atlas 300I DUO, you may need to uninstall `triton-ascend` and `triton` to avoid dependency conflicts:
+        On Atlas 300I Duo, you may need to uninstall `triton-ascend` and `triton` to avoid dependency conflicts:
 
         ```bash
         pip uninstall -y triton-ascend triton
@@ -227,7 +162,7 @@ Expected result: The version information of `vllm-ascend` is displayed, confirmi
 
 ### 5.1 Single-Node Online Deployment
 
-Single-node deployment completes both Prefill and Decode within the same node, suitable for development, testing, and medium-scale inference scenarios. The `Qwen3.5-27B`, `Qwen3.5-27B-w8a8`, `Qwen3.6-27B`, and `Qwen3.6-27B-w8a8` models can all be deployed on 1 Atlas 800I A3 (64GB × 16), 1 Atlas 800I A2 (64GB × 8). On Atlas 300I DUO, at least 2 devices are required. The `Qwen3.6-27B`, `Qwen3.6-27B-w8a8-mxfp8` and `Qwen3.6-27B-w8a8c8-mxfp8` models can all be deployed on 1 950DT Products (96GB × 8). The quantized versions need to start with the `--quantization ascend` parameter.
+Single-node deployment completes both Prefill and Decode within the same node, suitable for development, testing, and medium-scale inference scenarios. The `Qwen3.5-27B`, `Qwen3.5-27B-w8a8`, `Qwen3.6-27B`, and `Qwen3.6-27B-w8a8` models can all be deployed on 1 Atlas 800I A3 (64GB × 16), 1 Atlas 800I A2 (64GB × 8). On Atlas 300I Duo, at least 2 devices are required. The `Qwen3.6-27B`, `Qwen3.6-27B-w8a8-mxfp8` and `Qwen3.6-27B-w8a8c8-mxfp8` models can all be deployed on 1 950DT Products (96GB × 8). The quantized versions need to start with the `--quantization ascend` parameter.
 
 Both `Qwen3.5-27B` and `Qwen3.6-27B` share the same MTP head design, so the `qwen3_5_mtp` speculative decoding method can be used for both.
 
@@ -336,9 +271,9 @@ Both `Qwen3.5-27B` and `Qwen3.6-27B` share the same MTP head design, so the `qwe
     - `--speculative-config` uses `qwen3_5_mtp` for both `Qwen3.5-27B` and `Qwen3.6-27B` because they share the same MTP head design.
     - `--compilation-config` contains configurations related to the aclgraph graph mode. The most significant configurations are `"cudagraph_mode"` and `"cudagraph_capture_sizes"`, which have the following meanings:
         - `"cudagraph_mode"`: represents the specific graph mode. Currently, `"PIECEWISE"` and `"FULL_DECODE_ONLY"` are supported. The graph mode is mainly used to reduce the cost of operator dispatch. Currently, `"FULL_DECODE_ONLY"` is recommended.
-        - `"cudagraph_capture_sizes"`: specifies the batch size tiers at which graphs are captured. The default value is `[1, 2, 4, 8, 16, 24, 32, 40,..., --max-num-seqs]`. In the graph mode, the batch size of each captured graph is fixed, and an actual batch size between two adjacent capture sizes is automatically padded up to the next capture size. Currently, the default setting is recommended. Only in some scenarios is it necessary to set this separately to achieve optimal performance.
+        - `"cudagraph_capture_sizes"`: specifies the batch size tiers at which graphs are captured. The default value is `[1, 2, 4, 8, 16, 24, 32, 40, ..., --max-num-seqs]`. In the graph mode, the batch size of each captured graph is fixed, and an actual batch size between two adjacent capture sizes is automatically padded up to the next capture size. Currently, the default setting is recommended. Only in some scenarios is it necessary to set this separately to achieve optimal performance.
     - `--allowed-local-media-path` allows the API server to read local images or videos from the specified directory when processing multimodal inputs. In this example, `/` whitelists the entire file system. This is security-sensitive and should only be enabled in trusted environments.
-    - `--dtype bfloat16` sets the data type for model weights and activations. `bfloat16` is used on Atlas 800I A3 / Atlas 800I A2; `float16` is required on Atlas 300I DUO instead.
+    - `--dtype bfloat16` sets the data type for model weights and activations. `bfloat16` is used on Atlas 800I A3 / Atlas 800I A2; `float16` is required on Atlas 300I Duo instead.
     - `--reasoning-parser qwen3` enables the reasoning output parser for the OpenAI-compatible API. It splits the model's thinking content from the final answer and returns it in the `reasoning_content` field of `chat.completions` responses.
     - `--mm-processor-cache-gb` sets the size (in GiB) of the multimodal processor cache, which is used to avoid re-processing past multimodal inputs. The cache is duplicated in each API server process and engine core process, so the total host memory usage is the cache size multiplied by the number of these processes. A value of `0` disables this cache completely.
     - `--mm-encoder-tp-mode` indicates how to optimize multimodal encoder inference using tensor parallelism (TP). `data` splits the batched encoder input data across TP ranks while each rank hosts the full encoder weights, and is recommended when multimodal inputs are used. The default mode `weights` splits the encoder weights across TP ranks instead.
@@ -346,9 +281,9 @@ Both `Qwen3.5-27B` and `Qwen3.6-27B` share the same MTP head design, so the `qwe
     - `--additional-config` contains Ascend-specific optimization options:
         - `"enable_cpu_binding": true` enables Ascend-native CPU binding, which pins the worker process, key runtime threads, memory pages, and NPU IRQs to CPU ranges close to the driven NPU, reducing cross-NUMA traffic and thread preemption and improving latency stability. It is enabled by default starting from vllm-ascend v0.18.0rc1.
 
-=== "Atlas 300I DUO"
+=== "Atlas 300I Duo"
 
-    Currently only the **TP** scenario is supported. Choose **TP=2** or **TP=4** according to the available devices. Replace `MODEL_PATH` with a ModelScope model id or a local directory path.The quantized versions need to start with the `--quantization ascend` parameter.
+    Currently only the **TP** scenario is supported. Choose **TP=2** or **TP=4** according to the available devices. Replace `MODEL_PATH` with a ModelScope model id or a local directory path. The quantized versions need to start with the `--quantization ascend` parameter.
 
     === "Qwen3.5-27B-w8a8"
 
@@ -389,7 +324,7 @@ Both `Qwen3.5-27B` and `Qwen3.6-27B` share the same MTP head design, so the `qwe
         export MODEL_PATH=Eco-Tech/Qwen3.6-27B-w8a8-310p
         export VLLM_USE_MODELSCOPE=True
 
-        # Model weight path; can be a ModelScope model id (e.g., Eco-Tech/Qwen3.6-27B-w8a8) or a local directory path
+        # Model weight path; can be a ModelScope model id (e.g., Eco-Tech/Qwen3.6-27B-w8a8-310p) or a local directory path
         # Ensure the model path matches the directory recorded during download
 
         vllm serve $MODEL_PATH \
@@ -411,16 +346,16 @@ Both `Qwen3.5-27B` and `Qwen3.6-27B` share the same MTP head design, so the `qwe
     Key Parameter Descriptions:
 
     - `--tensor-parallel-size` sets the tensor parallel size. Choose **TP=2** or **TP=4** according to the available devices.
-    - `--max-model-len` represents the context length, which is the maximum value of the input plus output for a single request. Configure it based on the actual workload and available memory; The Qwen3.6-27B model supports up to 262144.
+    - `--max-model-len` represents the context length, which is the maximum value of the input plus output for a single request. Configure it based on the actual workload and available memory. The Qwen3.6-27B model supports up to 262144.
     - `--max-num-seqs` indicates the maximum number of concurrent requests.
     - `--gpu-memory-utilization` represents the proportion of HBM that vLLM will use for actual inference. Configure this value according to the actual device memory; setting it too high may cause OOM. The default value is `0.9`.
-    - `--mamba-ssm-cache-dtype` sets the data type of the Mamba SSM cache. On Atlas 300I DUO, only `float16` is supported.
-    - `--dtype float16` must be set on Atlas 300I DUO. These devices only support the FP16 data type.
-    - `--speculative-config` uses `qwen3_5_mtp` for both `Qwen3.5-27B` and `Qwen3.6-27B` because they share the same MTP head design. On Atlas 300I DUO, it is recommended to set `num_speculative_tokens` to `1`.
+    - `--mamba-ssm-cache-dtype` sets the data type of the Mamba SSM cache. On Atlas 300I Duo, only `float16` is supported.
+    - `--dtype float16` must be set on Atlas 300I Duo. These devices only support the FP16 data type.
+    - `--speculative-config` uses `qwen3_5_mtp` for both `Qwen3.5-27B` and `Qwen3.6-27B` because they share the same MTP head design. On Atlas 300I Duo, it is recommended to set `num_speculative_tokens` to `1`.
     - `--compilation-config` contains configurations related to the aclgraph graph mode. The most significant configurations are `"cudagraph_mode"` and `"cudagraph_capture_sizes"`, which have the following meanings:
         - `"cudagraph_mode"`: represents the specific graph mode. Currently, `"PIECEWISE"` and `"FULL_DECODE_ONLY"` are supported. The graph mode is mainly used to reduce the cost of operator dispatch. Currently, `"FULL_DECODE_ONLY"` is recommended.
         - `"cudagraph_capture_sizes"`: specifies the batch size tiers at which graphs are captured. When tensor parallelism (TP) is enabled, hardware event-id constraints allow at most two capture sizes (for example, `[1, 8]`). With MTP enabled, calculate each capture size as `n * (num_speculative_tokens + 1)`, where `n` is a capture size for the deployment without MTP. For example, when `num_speculative_tokens` is `1`, the non-MTP sizes `[1,2,4,8]` become `[2,4,8,16]`.
-    - `--additional-config` with `"ascend_compilation_config": {"enable_npugraph_ex": false}` is required on Atlas 300I DUO because `enable_npugraph_ex` is not supported on this platform.
+    - `--additional-config` with `"ascend_compilation_config": {"enable_npugraph_ex": false}` is required on Atlas 300I Duo because `enable_npugraph_ex` is not supported on this platform.
 
 === "950DT Products"
 
@@ -481,11 +416,11 @@ Both `Qwen3.5-27B` and `Qwen3.6-27B` share the same MTP head design, so the `qwe
     - Prefix caching is enabled by default, and the example above uses the default. Add `--no-enable-prefix-caching` to disable it if needed. For workloads with long shared prefixes, finer-grained hybrid prefix matching can be enabled with `--enable-prefix-caching --prefix-match-unit 16`. The match unit must divide every KV cache group's block size. A smaller unit can reuse more of a partial physical page, at the cost of additional hash metadata, copy-on-write operations, and an extra prefill split at the final matching boundary.
     - `--quantization ascend` indicates that quantization is used. To disable quantization, remove this option.
     - `--kv-cache-dtype mxfp8` enables the C8 (MXFP8 KV cache) and is required by the `Qwen3.6-27B-w8a8c8-mxfp8` weights. It stores the KV cache of the full-attention layers as FP8 (E4M3) with E8M0 scales, and runs the full-attention layers on the dedicated QFA (quant flash attention) kernel. The W8A8C8 weights bring performance gains in long-sequence scenarios. With this option, `--block-size` must be a multiple of `512` (it defaults to `512` if unset).
-    - For short-sequence scenarios (e.g., 16K input length), the W8A8 weights (e.g., `Qwen3.6-27B-w8a8-mxfp8`) are recommended instead. When serving a W8A8 weight, remove `--kv-cache-dtype mxfp8` from the startup command. Note that C8 quantization is only supported on  950PR&950DT Products.
+    - For short-sequence scenarios (e.g., 16K input length), the W8A8 weights (e.g., `Qwen3.6-27B-w8a8-mxfp8`) are recommended instead. When serving a W8A8 weight, remove `--kv-cache-dtype mxfp8` from the startup command. Note that C8 quantization is only supported on 950PR&950DT Products.
     - `--speculative-config` uses `qwen3_5_mtp` for `Qwen3.6-27B` because it shares the same MTP head design as `Qwen3.5-27B`.
     - `--compilation-config` contains configurations related to the aclgraph graph mode. The most significant configurations are `"cudagraph_mode"` and `"cudagraph_capture_sizes"`, which have the following meanings:
         - `"cudagraph_mode"`: represents the specific graph mode. Currently, `"PIECEWISE"` and `"FULL_DECODE_ONLY"` are supported. The graph mode is mainly used to reduce the cost of operator dispatch. Currently, `"FULL_DECODE_ONLY"` is recommended.
-        - `"cudagraph_capture_sizes"`: specifies the batch size tiers at which graphs are captured. The default value is `[1, 2, 4, 8, 16, 24, 32, 40,..., --max-num-seqs]`. In the graph mode, the batch size of each captured graph is fixed, and an actual batch size between two adjacent capture sizes is automatically padded up to the next capture size. Currently, the default setting is recommended. Only in some scenarios is it necessary to set this separately to achieve optimal performance.
+        - `"cudagraph_capture_sizes"`: specifies the batch size tiers at which graphs are captured. The default value is `[1, 2, 4, 8, 16, 24, 32, 40, ..., --max-num-seqs]`. In the graph mode, the batch size of each captured graph is fixed, and an actual batch size between two adjacent capture sizes is automatically padded up to the next capture size. Currently, the default setting is recommended. Only in some scenarios is it necessary to set this separately to achieve optimal performance.
     - `--allowed-local-media-path` allows the API server to read local images or videos from the specified directory when processing multimodal inputs. In this example, `/` whitelists the entire file system. This is security-sensitive and should only be enabled in trusted environments.
     - `--mm-processor-cache-gb` sets the size (in GiB) of the multimodal processor cache, which is used to avoid re-processing past multimodal inputs. The cache is duplicated in each API server process and engine core process, so the total host memory usage is the cache size multiplied by the number of these processes. A value of `0` disables this cache completely.
     - `--mm-encoder-tp-mode` indicates how to optimize multimodal encoder inference using tensor parallelism (TP). `data` splits the batched encoder input data across TP ranks while each rank hosts the full encoder weights, and is recommended when multimodal inputs are used. The default mode `weights` splits the encoder weights across TP ranks instead.
@@ -500,7 +435,7 @@ Service Verification:
 
 If the service starts successfully, the following startup log will be displayed:
 
-```text
+```output
 (APIServer pid=<pid>) INFO:     Started server process [<pid>]
 (APIServer pid=<pid>) INFO:     Waiting for application startup.
 (APIServer pid=<pid>) INFO:     Application startup complete.
@@ -609,7 +544,7 @@ Refer to [Using AISBench for performance evaluation](../../developer_guide/evalu
 
 ### 8.2 Using vLLM Benchmark
 
-Refer to [vllm benchmark](https://docs.vllm.ai/en/latest/benchmarking/) for more details.
+Refer to [vLLM Benchmark](https://docs.vllm.ai/en/latest/benchmarking/) for more details.
 
 ## 9 Performance Tuning
 
@@ -619,7 +554,7 @@ Refer to [vllm benchmark](https://docs.vllm.ai/en/latest/benchmarking/) for more
 >
 > **Parallelism Strategy**: `Qwen3.5-27B-w8a8` and `Qwen3.6-27B-w8a8` are only ~30 GB and easily fit in a single NPU (64 GB HBM per NPU). Following the **DP-first** principle, **TP=2 is the recommended default** for most scenarios, and the remaining NPUs should be allocated to DP for parallel request batches. **TP=8 is only recommended for ultra-long context (256k+) scenarios**, where it shards the KV cache across 8 NPUs to maximize the available context window per rank. For `Qwen3.6-27B-w8a8`, you can also raise `--max-model-len` up to 262144 in the same TP/DP layout.
 >
-> **Atlas 300I DUO**: Currently only the TP scenario is supported. Choose **TP=2** or **TP=4** according to the available devices. With **TP=4**, `--max-model-len` can support **128k** and **256k** long-sequence scenarios.
+> **Atlas 300I Duo**: Currently only the TP scenario is supported. Choose **TP=2** or **TP=4** according to the available devices. With **TP=4**, `--max-model-len` can support **128k** and **256k** long-sequence scenarios.
 >
 > **950DT Products**: The `Qwen3.6-27B-w8a8c8-mxfp8` model weight easily fits in a single NPU (96 GB HBM per NPU). Following the **DP-first** principle, **TP=1 is the recommended default** for most scenarios, and the remaining NPUs should be allocated to DP for parallel request batches. The C8 weights are recommended for long-sequence scenarios and are served with `--kv-cache-dtype mxfp8`; for short-sequence scenarios (e.g., 16K input), use `Qwen3.6-27B-w8a8-mxfp8` without `--kv-cache-dtype mxfp8`. `--max-model-len` can support up to **262144** in the same TP=1 + DP=8 layout.
 

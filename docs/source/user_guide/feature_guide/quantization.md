@@ -2,7 +2,7 @@
 
 Model quantization is a technique that reduces model size and computational overhead by lowering the numerical precision of weights and activations, thereby saving memory and improving inference speed.
 
-`vLLM Ascend` supports multiple quantization methods. This guide provides instructions for using different quantization tools and running quantized models on vLLM Ascend.
+vLLM Ascend supports multiple quantization methods. This guide provides instructions for using different quantization tools and running quantized models on vLLM Ascend.
 
 > **Note**
 >
@@ -16,11 +16,11 @@ vLLM Ascend supports models quantized by two main tools: `ModelSlim` and `LLM-Co
 
 ### 1. ModelSlim (Recommended)
 
-[ModelSlim](https://gitcode.com/Ascend/msmodelslim/blob/master/README.md) is an Ascend-friendly compression tool focused on acceleration, using compression techniques, and built for Ascend hardware. It includes a series of inference optimization technologies such as quantization and compression, aiming to accelerate large language dense models, MoE models, multimodal understanding models, multimodal generation models, etc.
+[ModelSlim](https://gitcode.com/Ascend/msmodelslim) is an Ascend-friendly compression tool focused on acceleration, using compression techniques, and built for Ascend hardware. It includes a series of inference optimization technologies such as quantization and compression, aiming to accelerate large language dense models, MoE models, multimodal understanding models, multimodal generation models, etc.
 
 #### Installation
 
-To use ModelSlim for model quantization, install it from its [Git repository](https://gitcode.com/Ascend/msmodelslim):
+To use ModelSlim for model quantization, install it from its [official repository](https://gitcode.com/Ascend/msmodelslim):
 
 ```bash
 # Install 26.0.0 version, this is currently the latest stable branch
@@ -33,7 +33,7 @@ bash install.sh
 
 #### Model Quantization
 
-The following example shows how to generate W8A8 quantized weights for the [Qwen3-MoE model](https://gitcode.com/Ascend/msmodelslim/blob/master/example/Qwen3-MOE/README.md).
+The following example shows how to generate W8A8 quantized weights for the [Qwen3-MoE model](https://gitcode.com/Ascend/msmodelslim/blob/master/example/Qwen3-MOE/README.md):
 
 **Quantization Script:**
 
@@ -114,7 +114,7 @@ vllm serve /path/to/GLM-5.3-Flash --tensor-parallel-size 8 --trust-remote-code
 How the weights are executed depends on the hardware:
 
 - **950PR&950DT Products**: the block scales are re-grouped into MXFP8 at load time, so weights stay at one byte per element and the native FP8 matmul is used.
-- **Other Ascend generations**: A2/A3 and Atlas 300I DUO have no FP8 matmul, so such a checkpoint is rejected at startup. Dequantizing it into the model dtype instead would double the weight footprint to run an unquantized GEMM, which is not what the checkpoint promises. Serve the BF16 release of the model there, or re-quantize it with ModelSlim or LLM-Compressor.
+- **Other Ascend generations**: A2/A3 and Atlas 300I Duo have no FP8 matmul, so such a checkpoint is rejected at startup. Dequantizing it into the model dtype instead would double the weight footprint to run an unquantized GEMM, which is not what the checkpoint promises. Serve the BF16 release of the model there, or re-quantize it with ModelSlim or LLM-Compressor.
 
 Layers the checkpoint left unquantized, such as `visual.merger.*` on multimodal models, are listed in `ignored_layers` or `modules_to_not_convert` and are served unquantized.
 
@@ -169,7 +169,7 @@ python -m vllm.entrypoints.api_server \
     --tensor-parallel-size 2 \
     --data-parallel-size 1 \
     --served-model-name quantized_model \
-    --trust-remote-code 
+    --trust-remote-code
 ```
 
 ## References

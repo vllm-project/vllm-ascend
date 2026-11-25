@@ -28,7 +28,6 @@ def vision_wrapper():
     model = AscendDeepseekV4ForConditionalGeneration.__new__(AscendDeepseekV4ForConditionalGeneration)
     nn.Module.__init__(model)
     hidden = 8
-    model._sentinel_table = None
     for i, name in enumerate(("image_start", "image_pad", "image_newline", "image_end")):
         setattr(model, name, nn.Parameter(torch.full((hidden,), float(i + 1), dtype=torch.float32)))
 
@@ -39,7 +38,7 @@ def vision_wrapper():
     return model
 
 
-def test_embed_input_ids_replaces_sentinels_and_caches_table(vision_wrapper):
+def test_embed_input_ids_replaces_sentinels(vision_wrapper):
     ids = torch.tensor(
         [
             IMAGE_SENTINEL_BASE_ID + 0,  # start
@@ -50,47 +49,45 @@ def test_embed_input_ids_replaces_sentinels_and_caches_table(vision_wrapper):
             100,  # regular token
         ]
     )
+    base = vision_wrapper.language_model.embed_input_ids.return_value.clone()
     out = vision_wrapper.embed_input_ids(ids)
 
-    table = vision_wrapper._sentinel_table
-    assert table is not None
-    assert table.dtype == torch.bfloat16
-    assert table.shape == (5, 8)
-    # start / pad / newline / end rows come from the cached table
-    assert torch.equal(out[0], table[0])
-    assert torch.equal(out[1], table[1])
-    assert torch.equal(out[2], table[2])
-    assert torch.equal(out[3], table[3])
-    assert torch.equal(out[4], table[4])
-    # regular tokens pass through unchanged
-    base = vision_wrapper.language_model.embed_input_ids.return_value
+    for row, name in enumerate(("image_start", "image_pad", "image_pad", "image_newline", "image_end")):
+        assert torch.equal(out[row], getattr(vision_wrapper, name).to(out.dtype))
     assert torch.equal(out[5], base[5])
 
-    # Second call must reuse the cached table (no re-stacking).
-    table_before = vision_wrapper._sentinel_table
-    vision_wrapper.embed_input_ids(ids)
-    assert vision_wrapper._sentinel_table is table_before
+
+@pytest.mark.parametrize(
+    ("marker", "rows"),
+    [("image_start", [0]), ("image_pad", [1, 2]), ("image_newline", [3]), ("image_end", [4])],
+)
+def test_embed_input_ids_uses_updated_marker(vision_wrapper, marker, rows):
+    ids = torch.tensor([*(IMAGE_SENTINEL_BASE_ID + i for i in range(5)), 100])
+    before = vision_wrapper.embed_input_ids(ids).clone()
+    parameter = getattr(vision_wrapper, marker)
+    with torch.no_grad():
+        parameter.add_(10)
+
+    out = vision_wrapper.embed_input_ids(ids)
+    expected = before.clone()
+    expected[rows] = parameter.to(expected.dtype)
+
+    assert not torch.equal(out, before)
+    assert torch.equal(out, expected)
 
 
-def test_sentinel_table_rebuilt_on_device_change(vision_wrapper):
-    # The fixture mock returns a (6, 8) embedding; align it with the
-    # shorter ids used below so the in-place where can broadcast.
-    vision_wrapper.language_model.embed_input_ids.return_value = torch.randn(2, 8, dtype=torch.bfloat16)
-    ids = torch.tensor([IMAGE_SENTINEL_BASE_ID, 100])
-    vision_wrapper.embed_input_ids(ids)
-    assert vision_wrapper._sentinel_table.device.type == "cpu"
-
-    # The table is a plain attribute and does not follow nn.Module.to();
-    # a device move after the first forward must invalidate the cache.
+def test_sentinel_table_uses_requested_device_and_dtype(vision_wrapper):
     meta_table = vision_wrapper._get_sentinel_table(torch.bfloat16, torch.device("meta"))
     assert meta_table.device.type == "meta"
-    assert vision_wrapper._sentinel_table is meta_table
+    assert meta_table.dtype == torch.bfloat16
+    assert meta_table.shape == (5, 8)
 
-    # Moving back rebuilds again instead of returning the stale table.
-    rebuilt = vision_wrapper._get_sentinel_table(torch.bfloat16, torch.device("cpu"))
+    rebuilt = vision_wrapper._get_sentinel_table(torch.float32, torch.device("cpu"))
     assert rebuilt.device.type == "cpu"
-    assert rebuilt is not meta_table
-    assert vision_wrapper._sentinel_table is rebuilt
+    assert rebuilt.dtype == torch.float32
+    for row, name in enumerate(("image_start", "image_pad", "image_pad", "image_newline", "image_end")):
+        assert torch.equal(rebuilt[row], getattr(vision_wrapper, name))
+    assert not rebuilt.requires_grad
 
 
 def test_embed_input_ids_without_image_params_is_passthrough(vision_wrapper):
@@ -99,4 +96,3 @@ def test_embed_input_ids_without_image_params_is_passthrough(vision_wrapper):
     out = vision_wrapper.embed_input_ids(ids)
     base = vision_wrapper.language_model.embed_input_ids.return_value
     assert torch.equal(out, base)
-    assert vision_wrapper._sentinel_table is None
