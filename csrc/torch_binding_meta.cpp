@@ -1194,6 +1194,27 @@ at::Tensor npu_hc_pre_inv_rms_meta(const at::Tensor& x, double epsilon=1e-20)
     return yOut;
 }
 
+void npu_matmul_out_meta(
+    at::Tensor& out,
+    const at::Tensor& x1,
+    const at::Tensor& weight)
+{
+    TORCH_CHECK(
+        x1.dtype() == at::kBFloat16 && weight.dtype() == at::kBFloat16 &&
+            out.dtype() == at::kBFloat16,
+        "npu_matmul_out expects BF16 tensors.");
+    TORCH_CHECK(
+        out.dim() == 2 && x1.dim() == 2 && weight.dim() == 2,
+        "npu_matmul_out expects rank-2 tensors.");
+    TORCH_CHECK(
+        x1.sym_size(1) == weight.sym_size(1),
+        "npu_matmul_out expects matching reduction dimensions.");
+    TORCH_CHECK(
+        out.sym_size(0) == x1.sym_size(0) &&
+            out.sym_size(1) == weight.sym_size(0),
+        "npu_matmul_out output shape mismatch.");
+}
+
 std::tuple<at::Tensor, at::Tensor, at::Tensor> construct_hc_pre_sinkhorn_output_tensor(const at::Tensor& mixes, const at::Tensor& x, int64_t hc_mult)
 {
     auto xDims = x.dim();
@@ -2115,6 +2136,7 @@ TORCH_LIBRARY_IMPL_EXPAND(CONCAT(_C, _ascend), Meta, ops) {
     ops.impl("npu_hc_pre", &vllm_ascend::meta::npu_hc_pre_meta);
     ops.impl("npu_hc_pre_v2", &vllm_ascend::meta::npu_hc_pre_meta);
     ops.impl("npu_hc_pre_inv_rms", &vllm_ascend::meta::npu_hc_pre_inv_rms_meta);
+    ops.impl("npu_matmul_out", &vllm_ascend::meta::npu_matmul_out_meta);
     ops.impl("npu_hc_pre_sinkhorn", &vllm_ascend::meta::npu_hc_pre_sinkhorn_meta);
     ops.impl("inplace_partial_rotary_mul", &vllm_ascend::meta::inplace_partial_rotary_mul_meta);
     ops.impl("npu_rms_norm_dynamic_quant", &vllm_ascend::meta::npu_rms_norm_dynamic_quant_meta);
