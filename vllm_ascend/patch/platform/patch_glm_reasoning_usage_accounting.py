@@ -23,7 +23,7 @@ import json
 from collections.abc import AsyncIterator, Sequence
 from dataclasses import dataclass
 from types import MethodType
-from typing import Any
+from typing import Any, NoReturn
 
 from vllm.entrypoints.openai.chat_completion import protocol as chat_protocol
 from vllm.entrypoints.openai.chat_completion import serving as chat_serving
@@ -33,6 +33,7 @@ from vllm.parser.glm47_moe import THINK_END, THINK_START, Glm47MoeParser
 from vllm.reasoning.glm47_moe_reasoning_parser import (
     Glm47MoeParserReasoningAdapter,
 )
+from vllm.v1.engine.exceptions import EngineDeadError
 
 _ORIGINAL_COUNT_REASONING_TOKENS = Glm47MoeParser.count_reasoning_tokens
 
@@ -162,24 +163,43 @@ def _create_stream_usage_state(
     return _StreamUsageState(counters=counters)
 
 
+def _raise_fresh_engine_dead() -> NoReturn:
+    # When the engine dies, OutputProcessor.propagate_error() hands one shared
+    # EngineDeadError instance to every in-flight request, and each re-raise
+    # prepends that request's frames onto the shared __traceback__. Passing
+    # the same instance through this wrapper would make the per-request
+    # traceback logged by the serving layer grow by one round of frames per
+    # failed request (hundreds of duplicated stacks in the server log when
+    # many requests are in flight). Raise a fresh instance instead: each
+    # request logs only its own constant-size traceback, and the root cause is
+    # already logged once by AsyncLLM.output_handler.
+    raise EngineDeadError() from None
+
+
 async def _tracked_stream_results(
     result_generator: AsyncIterator,
     state: _StreamUsageState,
 ):
-    async for res in result_generator:
-        for output in res.outputs:
-            if 0 <= output.index < len(state.counters):
-                state.counters[output.index].update(chat_serving.as_list(output.token_ids))
-        yield res
+    try:
+        async for res in result_generator:
+            for output in res.outputs:
+                if 0 <= output.index < len(state.counters):
+                    state.counters[output.index].update(chat_serving.as_list(output.token_ids))
+            yield res
+    except EngineDeadError:
+        _raise_fresh_engine_dead()
 
 
 async def _tracked_full_results(
     result_generator: AsyncIterator,
     state: _FullUsageState,
 ):
-    async for res in result_generator:
-        state.final_res = res
-        yield res
+    try:
+        async for res in result_generator:
+            state.final_res = res
+            yield res
+    except EngineDeadError:
+        _raise_fresh_engine_dead()
 
 
 def _reasoning_tokens_for_stream_chunk(
