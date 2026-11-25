@@ -555,7 +555,6 @@ class NPUWorker(GPUWorker):
                 os.environ["HCCL_EXEC_TIMEOUT"],
                 abort_timeout,
             )
-        torch.npu.set_op_timeout_ms(abort_timeout * 1000)
 
     def _init_device(self):
         # vLLM v0.24.0 (PR #45026) removed automatic per-process device
@@ -609,6 +608,12 @@ class NPUWorker(GPUWorker):
         device = torch.device(f"{current_platform.device_type}:{visible_device_index}")
 
         torch.npu.set_device(device)
+
+        if self.parallel_config.enable_fault_tolerance:
+            abort_timeout = get_ascend_config().ft_communication_abort_timeout
+            if abort_timeout > 0:
+                torch.npu.current_stream()
+                torch.npu.set_op_timeout_ms(abort_timeout * 1000)
 
         if enable_custom_op():
             register_device_print()
