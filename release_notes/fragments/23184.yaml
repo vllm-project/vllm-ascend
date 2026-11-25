@@ -1,0 +1,7 @@
+pr: 23184
+entries:
+  - category: feature
+    text: >-
+      Atlas A3 Kimi decode workers can use the INT8 MegaKDA backend with
+      ReplaySSM for width-four speculative verification. This path requires
+      an FLA wheel providing the A3 verify operator.

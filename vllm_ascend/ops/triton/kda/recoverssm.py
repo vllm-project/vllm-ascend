@@ -337,6 +337,44 @@ def _kda_recoverssm_verify_kernel(
 
 
 @triton.jit
+def _native_key_decay(
+    kg_cache_ptr,
+    token_offset,
+    offs_k,
+    mask_k,
+    stride_kg_cache_pos,
+    stride_kg_cache_dim,
+    dt_bias,
+    A,
+    lower_bound,
+    K: tl.constexpr,
+    USE_LOWER_BOUND: tl.constexpr,
+):
+    kg_ptr = kg_cache_ptr + token_offset * stride_kg_cache_pos
+    k = tl.load(
+        kg_ptr + offs_k * stride_kg_cache_dim,
+        mask=mask_k,
+        other=0.0 if mask_k is not None else None,
+    ).to(tl.float32)
+    raw_g = tl.load(
+        kg_ptr + (K + offs_k) * stride_kg_cache_dim,
+        mask=mask_k,
+        other=0.0 if mask_k is not None else None,
+    ).to(tl.float32)
+    normalized_k = _kda_l2_normalize(k)
+    gate = _kda_gate(
+        raw_g,
+        dt_bias,
+        A,
+        lower_bound,
+        USE_LOWER_BOUND,
+    )
+    tl.static_assert(gate.dtype == tl.float32)
+    decay = tl.exp(gate)
+    return normalized_k, decay
+
+
+@triton.jit
 def _accumulate_kda_commit_step(
     correction_cache_ptr,
     kg_cache_ptr,
@@ -360,34 +398,52 @@ def _accumulate_kda_commit_step(
     K: tl.constexpr,
     USE_LOWER_BOUND: tl.constexpr,
     ALIGN_MODE: tl.constexpr,
+    canonical_k=None,
+    canonical_decay=None,
+    use_canonical=False,
+    HAS_MEGA: tl.constexpr = False,
 ):
     correction_ptr = correction_cache_ptr + token_offset * stride_correction_cache_pos
-    kg_ptr = kg_cache_ptr + token_offset * stride_kg_cache_pos
-    k = tl.load(
-        kg_ptr + offs_k * stride_kg_cache_dim,
-        mask=mask_k,
-        other=0.0 if mask_k is not None else None,
-    ).to(tl.float32)
     correction = tl.load(
         correction_ptr + offs_v * stride_correction_cache_dim,
         mask=mask_v,
         other=0.0 if mask_v is not None else None,
     ).to(tl.float32)
-    raw_g = tl.load(
-        kg_ptr + (K + offs_k) * stride_kg_cache_dim,
-        mask=mask_k,
-        other=0.0 if mask_k is not None else None,
-    ).to(tl.float32)
-    normalized_k = _kda_l2_normalize(k)
-    gate = _kda_gate(
-        raw_g,
-        dt_bias,
-        A,
-        lower_bound,
-        USE_LOWER_BOUND,
-    )
-    tl.static_assert(gate.dtype == tl.float32)
-    decay = tl.exp(gate)
+    if HAS_MEGA:
+        if use_canonical:
+            offset = token_offset * K + offs_k
+            normalized_k = tl.load(canonical_k + offset, mask=mask_k, other=0.0 if mask_k is not None else None).to(
+                tl.float32
+            )
+            decay = tl.load(canonical_decay + offset, mask=mask_k, other=0.0 if mask_k is not None else None)
+        else:
+            normalized_k, decay = _native_key_decay(
+                kg_cache_ptr,
+                token_offset,
+                offs_k,
+                mask_k,
+                stride_kg_cache_pos,
+                stride_kg_cache_dim,
+                dt_bias,
+                A,
+                lower_bound,
+                K,
+                USE_LOWER_BOUND,
+            )
+    else:
+        normalized_k, decay = _native_key_decay(
+            kg_cache_ptr,
+            token_offset,
+            offs_k,
+            mask_k,
+            stride_kg_cache_pos,
+            stride_kg_cache_dim,
+            dt_bias,
+            A,
+            lower_bound,
+            K,
+            USE_LOWER_BOUND,
+        )
     weighted_k = normalized_k * final_decay
     final_correction = tl.fma(correction[:, None], weighted_k[None, :], final_correction)
     final_decay *= decay
@@ -448,6 +504,8 @@ def _commit_kda_state_kernel(
     ALIGN_MODE: tl.constexpr,
     SPEC_QUERY_LEN: tl.constexpr,
     UNROLL_COMMIT: tl.constexpr,
+    MEGA_TABLE=None,
+    HAS_MEGA: tl.constexpr = False,
 ):
     # Explicit one-dimensional indexing gives the same request-major order
     # across Ascend Triton backends with different 3-D grid flattening orders.
@@ -490,6 +548,16 @@ def _commit_kda_state_kernel(
     kg_cache_ptr = kg_cache_base_addr.to(tl.pointer_type(kg_cache_ref_ptr.dtype.element_ty))
     kg_cache_ptr += pid_b * kg_cache_block_stride + pid_h * stride_kg_cache_head
 
+    if HAS_MEGA:
+        row_offset = (pid_b * NUM_HEADS + pid_h) * SPEC_QUERY_LEN * K
+        table = MEGA_TABLE + pid_l * 4
+        canonical_k = tl.load(table).to(tl.pointer_type(tl.float16)) + row_offset
+        canonical_decay = tl.load(table + 1).to(tl.pointer_type(tl.float32)) + row_offset
+        use_canonical = tl.load(tl.load(table + 2).to(tl.pointer_type(tl.int32))) != 0
+    else:
+        canonical_k = None
+        canonical_decay = None
+        use_canonical = False
     offs_k = tl.arange(0, BK)
     offs_v = pid_v * BV + tl.arange(0, BV)
     mask_k = None if K == BK else offs_k < K
@@ -544,6 +612,10 @@ def _commit_kda_state_kernel(
                     K,
                     USE_LOWER_BOUND,
                     ALIGN_MODE,
+                    canonical_k,
+                    canonical_decay,
+                    use_canonical,
+                    HAS_MEGA,
                 )
     else:
         for reverse_offset in range(tl.minimum(commit_len, SPEC_QUERY_LEN)):
@@ -571,6 +643,10 @@ def _commit_kda_state_kernel(
                     K,
                     USE_LOWER_BOUND,
                     ALIGN_MODE,
+                    canonical_k,
+                    canonical_decay,
+                    use_canonical,
+                    HAS_MEGA,
                 )
     initial_state = tl.load(state_ptrs, mask=mask_state, other=0.0 if mask_state is not None else None).to(tl.float32)
     state = initial_state * final_decay[None, :] + final_correction
@@ -948,6 +1024,8 @@ class KDARecoverSSMCommitContext:
     conv_state_dim_strides: torch.Tensor
     conv_state_token_strides: torch.Tensor
     conv_history_len: int
+    mega_table: torch.Tensor | None
+    mega_buffers: tuple
     checkpoints: tuple[torch.Tensor, ...]
     state_base_addrs: torch.Tensor
     state_block_strides: torch.Tensor
@@ -976,6 +1054,8 @@ class KDARecoverSSMCommitContext:
             return False
         for index, (layer, caches) in enumerate(zip(layers, self.cache_bindings)):
             if len(layer.kv_cache) != len(caches) or any(a is not b for a, b in zip(layer.kv_cache, caches)):
+                return False
+            if self.mega_buffers and self.mega_buffers[index] is not layer.mega_records:
                 return False
             records = getattr(layer, "recoverssm_records", None)
             if (
@@ -1100,7 +1180,20 @@ class KDARecoverSSMCommitContext:
                 device=device,
             )
 
+        mega_table = None
+        mega_buffers = ()
+        if all(getattr(layer, "enable_full_mega", False) for layer in layers) and state_ref.dtype == torch.float32:
+            from vllm_ascend.ops.megakda_full import bind, supports
+
+            if not all(supports(layer) for layer in layers):
+                raise ValueError(
+                    "A3 MegaKDA ReplaySSM requires compatible INT8 weights and request-indexed FP32 records"
+                )
+            mega_buffers = tuple(bind(layer) for layer in layers)
+            mega_table = _base_addrs([tensor for buffers in mega_buffers for tensor in buffers])
         return cls(
+            mega_table=mega_table,
+            mega_buffers=mega_buffers,
             conv_states=tuple(conv_states),
             conv_state_base_addrs=_base_addrs(conv_states),
             conv_state_block_strides=_block_strides(conv_states),
@@ -1215,6 +1308,8 @@ class KDARecoverSSMCommitContext:
             align_mode=block_table is not None,
             dim_stride=self.conv_dim_stride,
             null_block_id=NULL_BLOCK_ID,
+            mega_table=self.mega_table,
+            mega_rows=self.spec_query_len + 2,
         )
 
         num_layers = len(self.checkpoints)
@@ -1247,7 +1342,11 @@ class KDARecoverSSMCommitContext:
             value_tile = min(value_tile, 1 << (max_rows.bit_length() - 1))
             head_groups = num_heads
             commit_kernel = _commit_kda_state_kernel
-            commit_options = {"UNROLL_COMMIT": is_a5}
+            commit_options = {
+                "UNROLL_COMMIT": is_a5,
+                "MEGA_TABLE": self.mega_table,
+                "HAS_MEGA": self.mega_table is not None,
+            }
         block_v = min(triton.next_power_of_2(value_dim), value_tile)
         # Explicit flat indexing keeps request rows outermost on both 3.2/3.6
         # backends, balancing mixed boundary requests without a new static flag.

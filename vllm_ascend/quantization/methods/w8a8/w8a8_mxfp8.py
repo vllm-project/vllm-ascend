@@ -36,6 +36,7 @@ from vllm_ascend.ops.fused_moe.routed_experts import AscendRoutedExperts  # noqa
 from vllm_ascend.quantization.nz import mxfp8_nz
 from vllm_ascend.quantization.utils import DynamicMXQuantScaleAlg, get_dynamic_mx_quant_scale_alg
 from vllm_ascend.utils import (
+    ACL_FORMAT_FRACTAL_NZ,
     FP8_METHOD,
     _should_trans_nz,
     dispose_tensor,
@@ -276,7 +277,18 @@ class AscendW8A8MXFP8DynamicLinearMethod(AscendLinearScheme):
         target_scale = reshaped_scale.transpose(0, 1)
 
         transposed_weight = padded_weight.transpose(0, 1).contiguous()
-        layer._mxfp8_gmm_nz_layout = (
+        mega_qkv = getattr(layer, "_mega_kda_mx_qkv", False)
+        if mega_qkv and (
+            self.group_size != 32
+            or padded_weight.dtype != torch.float8_e4m3fn
+            or padded_weight.shape[1] != 7168
+            or padded_weight.shape[0] % 32
+            or k_dim != 7168 // 32
+            or n_dim != padded_weight.shape[0]
+            or layer.weight_scale.dtype != torch.uint8
+        ):
+            raise ValueError("MegaRecurrentKda requires E4M3FN QKV and E8M0 scales grouped by 32 along H=7168")
+        layer._mxfp8_gmm_nz_layout = mega_qkv or (
             getattr(layer, "_single_group_gmm_nz", False)
             and not getattr(layer, "_fused_preprocess_managed", False)
             and _should_trans_nz(transposed_weight)
@@ -287,15 +299,19 @@ class AscendW8A8MXFP8DynamicLinearMethod(AscendLinearScheme):
             transposed_weight = transposed_weight.unsqueeze(0)
             target_scale = target_scale.unsqueeze(0)
 
+        if mega_qkv:
+            # The public MegaRecurrentKda MX ABI uses rank-5 NZ storage on
+            # every A5 worker, independently of the generic matmul NZ policy.
+            transposed_weight = torch_npu.npu_format_cast(transposed_weight, ACL_FORMAT_FRACTAL_NZ)
         if not hasattr(layer, "_mxfp8_weight_buf"):
             # First call: allocate the persistent transformed buffers.
             layer._mxfp8_weight_buf = transposed_weight
-            if not getattr(layer, "_fused_preprocess_managed", False):
+            if not mega_qkv and not getattr(layer, "_fused_preprocess_managed", False):
                 layer._mxfp8_weight_buf = maybe_trans_nz(layer._mxfp8_weight_buf, **mxfp8_nz().cast_kwargs())
             layer._mxfp8_scale_buf = target_scale.contiguous()
         else:
             # Subsequent calls (RL reload path): copy in place to keep data_ptr stable.
-            if layer._mxfp8_gmm_nz_layout:
+            if layer._mxfp8_gmm_nz_layout and not mega_qkv:
                 # A5 only supports NZ-to-NZ copies into an internal-format buffer.
                 transposed_weight = maybe_trans_nz(transposed_weight, customize_dtype=torch.float8_e4m3fn)
             layer._mxfp8_weight_buf.copy_(transposed_weight)
@@ -339,7 +355,8 @@ class AscendW8A8MXFP8DynamicLinearMethod(AscendLinearScheme):
         orig_scale_shape = orig_shapes["weight_scale"]
 
         if getattr(layer, "_mxfp8_gmm_nz_layout", False):
-            restored_weight = torch_npu.npu_format_cast(layer.weight.data, 2, customize_dtype=torch.float8_e4m3fn)
+            cast_kwargs = {} if getattr(layer, "_mega_kda_mx_qkv", False) else mxfp8_nz().cast_kwargs()
+            restored_weight = torch_npu.npu_format_cast(layer.weight.data, 2, **cast_kwargs)
             target_weight = restored_weight.squeeze(0).transpose(0, 1).contiguous()
             layer.weight.data = target_weight
             target_scale = layer.weight_scale.data.squeeze(0).transpose(0, 1).reshape(orig_scale_shape).contiguous()

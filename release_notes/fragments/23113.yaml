@@ -1,0 +1,11 @@
+pr: 23113
+entries:
+  - category: bugfix
+    text: >-
+      Fixed the extra QKV dimension in native prefill for Kimi K3.1 workers using
+      the Ascend 950 MegaKDA backend. Decode layers in the same forward can reuse
+      matching token and page plans.
+  - category: feature
+    text: >-
+      Kimi K3.1 disaggregated decode workers on Atlas A2 and A3 can select
+      mega_recurrent_kda_int8 for dynamic W8A8 QKV checkpoints.

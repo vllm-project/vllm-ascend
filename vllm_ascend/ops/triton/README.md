@@ -111,6 +111,7 @@ configuration rather than the runner input or sampling interface.
 | [glm5_next_cann_keypool.py](glm5_next_cann_keypool.py) | Model/attention primitive or shared utility |
 | [glm5_next_kpool_tail_compress.py](glm5_next_kpool_tail_compress.py) | Model/attention primitive or shared utility |
 | [glm5_next_lightning_indexer.py](glm5_next_lightning_indexer.py) | Model/attention primitive or shared utility |
+| [kda/candidate_pages.py](kda/candidate_pages.py) | MegaRecurrentKda candidate checkpoint writes. [Operator documentation](docs/candidate_pages.md) |
 | [kda/chunk_delta_h.py](kda/chunk_delta_h.py) | KDA computation |
 | [kda/conv_state.py](kda/conv_state.py) | KDA computation |
 | [kda/cumsum.py](kda/cumsum.py) | KDA computation |
