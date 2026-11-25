@@ -22,7 +22,10 @@ Environment knobs:
   and an already-exported ``HCCL_IF_IP`` pair is honoured untouched. Without the
   binding HIXL auto-picks an interface and, on a Kubernetes job pod, picks the
   pod overlay, which cannot create its RoCE endpoint (E19999
-  HcommEndpointCreate);
+  HcommEndpointCreate). The probe binds only when it finds a business-plane
+  NIC (score >= ``QWEN38_POOL_HCCL_IF_MIN_SCORE``, default ``80``); a job pod
+  that exposes only its overlay logs the candidates and leaves the variables
+  unset, because such a pod needs host networking to reach that plane;
 - ``KV_POOL_MEMCACHE_UBSIO_DISK``: raw block device used for the memcache
   tier-3 UBS IO storage. When unset the case probes the known provisioning
   locations in order - ``/mnt/boostio`` (bind-mount convention) then any
@@ -210,6 +213,13 @@ DEVICE_ROCE = os.environ.get("QWEN38_POOL_DEVICE_ROCE", "0") == "1"
 # QWEN38_POOL_HCCL_IF=0 disables the steering; an explicit
 # QWEN38_POOL_HCCL_IF_IP / _IFNAME pair wins over the probe.
 HCCL_IF_AUTOSET = os.environ.get("QWEN38_POOL_HCCL_IF", "1") == "1"
+# Minimum interface score the probe must reach before it exports anything. The
+# pod overlay scores 20 and is deliberately below this bar: binding the engine
+# to the overlay it would have used anyway changes nothing, and a job pod with
+# host networking (or an injected RoCE NIC) is what actually exposes the
+# business plane to HIXL. Lower it with QWEN38_POOL_HCCL_IF_MIN_SCORE to force a
+# bind on overlay-only hosts.
+HCCL_IF_MIN_SCORE = int(os.environ.get("QWEN38_POOL_HCCL_IF_MIN_SCORE", "80"))
 # One module-level watchdog guards the whole module, and it is *progress aware*.
 # A fixed per-case timer cannot work here: a case may re-measure itself
 # (PERF_ATTEMPTS) and several cases run back to back, so run 44271971490 had the
@@ -1259,9 +1269,27 @@ def _apply_collective_if_env(case: str) -> None:
 
     candidates.sort(key=lambda item: (-item[0], item[1]))
     score, ifname, address = candidates[0]
+    seen = ", ".join(f"{n}={a}" for _, n, a in candidates)
+    if score < HCCL_IF_MIN_SCORE:
+        # Only the container overlay is visible, which means this job pod runs in
+        # its own network namespace: the host's business-plane NIC does not exist
+        # here. Binding HCCL_IF_IP to the overlay would reproduce exactly what
+        # HIXL autodetect already does, so leave the environment untouched and
+        # report what provisioning would have to change instead.
+        print(
+            f"[kv_pool_a2] {case}: no business-plane NIC in this container "
+            f"(best={ifname}={address} score={score} < {HCCL_IF_MIN_SCORE}); "
+            f"HCCL_IF_IP left unset. Candidates seen: {seen}. HIXL's AdxlEngine "
+            f"creates its RoCE endpoint on the NPU-side address, so a job pod in "
+            f"its own network namespace needs hostNetwork: true (or an injected "
+            f"RoCE/business-plane NIC) to expose the host network it uses; "
+            f"set QWEN38_POOL_HCCL_IF_MIN_SCORE below {HCCL_IF_MIN_SCORE} to bind "
+            f"the overlay anyway.",
+            flush=True,
+        )
+        return
     ip_ip = os.environ.get("QWEN38_POOL_HCCL_IF_IP") or address
     ip_if = os.environ.get("QWEN38_POOL_HCCL_IFNAME") or ifname
-    seen = ", ".join(f"{n}={a}" for _, n, a in candidates)
     print(
         f"[kv_pool_a2] {case}: collective NIC probe -> {ip_if} ({ip_ip}) score={score}; candidates: {seen}",
         flush=True,
