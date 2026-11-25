@@ -189,7 +189,7 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor, at::Tensor> QuantLightningIndexer
     c10::string_view layoutK, int64_t maskMode, int64_t cmpRatio, int64_t candidateMode,
     int64_t candidateTopkBlocks, int64_t candidateBlockSize, bool enableDcp, int64_t cpWorld, int64_t cpRank,
     int64_t cpKvCacheInterleaveSize, const c10::optional<at::Tensor> &causalSeqlensKvGlobal,
-    const c10::optional<at::Tensor> &candidateBlockLength, int64_t returnValue, bool initializeOutputs)
+    const c10::optional<at::Tensor> &candidateBlockLength, int64_t returnValue)
 {
     TORCH_CHECK(query.numel() > 0, "Tensor query is empty.")
     TORCH_CHECK(key.numel() > 0, "Tensor key is empty.")
@@ -201,14 +201,13 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor, at::Tensor> QuantLightningIndexer
         ConstructQuantLightningIndexerOutputTensor(query, key, topk, queryLayoutStr, keyLayoutStr, returnValue);
     at::Tensor sparseIndicesOut = std::get<0>(quantLightningIndexerOutput);
     at::Tensor sparseValuesOut = std::get<1>(quantLightningIndexerOutput);
-    if (enableDcp && initializeOutputs) {
+    if (enableDcp) {
         // The kernel visits only rows covered by cu_seqlens_q. Graph padding
         // must retain the local-candidate sentinel contract before exchange.
         sparseIndicesOut.fill_(-1);
         sparseValuesOut.fill_(-std::numeric_limits<float>::infinity());
     }
 
-    // Without initialization, the consumer must mask padding and rows with no local history.
     int64_t keyHeadNum = (keyLayoutStr == "TND") ? key.size(DIM_1) : key.size(DIM_2);
     at::Tensor candidateTopkIndexOut;
     at::Tensor candidateBlockLengthOut;

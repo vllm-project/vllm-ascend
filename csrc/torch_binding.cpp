@@ -1394,13 +1394,39 @@ std::tuple<at::Tensor, at::Tensor> npu_quant_lightning_indexer_v2_compat_npu(
     bool enable_dcp, int64_t cp_world, int64_t cp_rank, int64_t cp_interleave,
     const c10::optional<at::Tensor> &causal_seqlens_kv_global, bool initialize_outputs)
 {
-    auto outputs = qli_v2::QuantLightningIndexerCandidate(
-        query, key, weights, query_dequant_scale, key_dequant_scale, topk, quant_mode,
-        c10::nullopt, cu_seqlens_q, cu_seqlens_k, seqused_q, seqused_k, cmp_residual_k,
-        block_table, output_idx_offset, metadata, max_seqlen_q, layout_q, layout_k,
-        mask_mode, cmp_ratio, 3, 2048, 8, enable_dcp, cp_world, cp_rank, cp_interleave,
-        causal_seqlens_kv_global, c10::nullopt, return_value, initialize_outputs);
-    return {std::get<0>(outputs), std::get<1>(outputs)};
+    TORCH_CHECK(query.numel() > 0, "Tensor query is empty.");
+    TORCH_CHECK(key.numel() > 0, "Tensor key is empty.");
+
+    std::string query_layout_str(layout_q);
+    std::string key_layout_str(layout_k);
+    auto [sparse_indices_out, sparse_values_out] = qli_v2::ConstructQuantLightningIndexerOutputTensor(
+        query, key, topk, query_layout_str, key_layout_str, return_value);
+
+    // When initialization is skipped, the consumer masks padding and rows with no local history.
+    if (enable_dcp && initialize_outputs) {
+        sparse_indices_out.fill_(-1);
+        sparse_values_out.fill_(-std::numeric_limits<float>::infinity());
+    }
+
+    constexpr int64_t candidate_mode = 3;
+    constexpr int64_t candidate_topk_blocks = 2048;
+    constexpr int64_t candidate_block_size = 8;
+    const c10::optional<at::Tensor> no_candidate_input = c10::nullopt;
+    at::Tensor candidate_topk_index_out = at::empty({0}, query.options().dtype(at::kInt));
+    at::Tensor candidate_block_length_out = at::empty({0}, query.options().dtype(at::kInt));
+    char *query_layout_ptr = query_layout_str.data();
+    char *key_layout_ptr = key_layout_str.data();
+    int64_t key_stride0 = key.stride(0);
+    int64_t key_scale_stride0 = key_dequant_scale.stride(0);
+
+    EXEC_NPU_CMD(aclnnVllmAscendQuantLightningIndexerV2, query, key, weights, query_dequant_scale, key_dequant_scale,
+        cu_seqlens_q, cu_seqlens_k, seqused_q, seqused_k, cmp_residual_k, block_table, output_idx_offset,
+        metadata, no_candidate_input, no_candidate_input, causal_seqlens_kv_global, topk, quant_mode,
+        max_seqlen_q, query_layout_ptr, key_layout_ptr, mask_mode, cmp_ratio, return_value, candidate_mode,
+        candidate_topk_blocks, candidate_block_size, key_stride0, key_scale_stride0, enable_dcp, cp_world, cp_rank,
+        cp_interleave, sparse_indices_out, sparse_values_out, candidate_topk_index_out, candidate_block_length_out);
+
+    return {sparse_indices_out, sparse_values_out};
 }
 
 std::tuple<at::Tensor, at::Tensor> construct_output_tensor(const at::Tensor &q, std::string layout,
@@ -3268,7 +3294,7 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
         "int cmp_ratio=1, int candidate_mode=3, int candidate_topk_blocks=2048, "
         "int candidate_block_size=8, bool enable_dcp=False, int cp_world=1, int cp_rank=0, "
         "int cp_kv_cache_interleave_size=1, Tensor? causal_seqlens_kv_global=None, "
-        "Tensor? candidate_block_length=None, int return_value=0, bool initialize_outputs=True)"
+        "Tensor? candidate_block_length=None, int return_value=0)"
         " -> (Tensor, Tensor, Tensor, Tensor)"
     );
     ops.impl("npu_quant_lightning_indexer_v3", torch::kPrivateUse1,
