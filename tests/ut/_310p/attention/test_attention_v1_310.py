@@ -108,7 +108,7 @@ class TestAscendAttentionBackendImpl310(TestBase):
         metadata.slot_mapping = torch.zeros(10, dtype=torch.long)
 
         self.impl.support_compressed_mask = False
-        mock_get_forward_context.return_value = MagicMock(capturing=False)
+        mock_get_forward_context.return_value = MagicMock(capturing=False, additional_kwargs={"capturing": False})
         mock_npu_flash_attention.return_value = torch.ones(10, 8, 64)
         result = self.impl.forward_impl(query, key, value, None, metadata, output)
 
@@ -155,7 +155,7 @@ class TestAscendAttentionBackendImpl310(TestBase):
         metadata.slot_mapping = torch.zeros(10, dtype=torch.long)
 
         self.impl.support_compressed_mask = False
-        mock_get_forward_context.return_value = MagicMock(capturing=False)
+        mock_get_forward_context.return_value = MagicMock(capturing=False, additional_kwargs={"capturing": False})
         mock_npu_paged_attention_splitfuse.return_value = torch.ones(5, 8, 64)
         output = self.impl.forward_impl(query, key, value, None, metadata, output)
 
@@ -191,7 +191,7 @@ class TestAscendAttentionBackendImpl310(TestBase):
         metadata.slot_mapping = torch.zeros(10, dtype=torch.long)
 
         self.impl.support_compressed_mask = False
-        mock_get_forward_context.return_value = MagicMock(capturing=False)
+        mock_get_forward_context.return_value = MagicMock(capturing=False, additional_kwargs={"capturing": False})
         mock_npu_paged_attention_splitfuse.return_value = torch.ones(5, 8, 64)
         output = self.impl.forward_impl(query, key, value, None, metadata, output)
 
@@ -219,7 +219,7 @@ class TestAscendAttentionBackendImpl310(TestBase):
         metadata.num_prefills = 0
         mock_using_paged_attention.return_value = True
 
-        mock_get_forward_context.return_value = MagicMock(capturing=False)
+        mock_get_forward_context.return_value = MagicMock(capturing=False, additional_kwargs={"capturing": False})
 
         output = self.impl.forward_impl(query, key, value, None, metadata, output)
 
