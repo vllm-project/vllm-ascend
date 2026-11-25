@@ -1482,7 +1482,6 @@ def test_prepare_attn_zero_drafts_and_align_groups(monkeypatch, drafts, for_capt
     monkeypatch.setattr(mamba_hybrid_module, "build_attn_metadata", build)
     indices = torch.arange(24 * 6 * 4, dtype=torch.int32).view(24, 6, 4)
     gather = MagicMock(return_value=indices)
-    monkeypatch.setattr(mamba_hybrid_module, "_compute_aligned_state_indices", gather)
     builders = [SimpleNamespace(mamba_aligned_state_indices=None) for _ in range(24)]
     groups = [[SimpleNamespace(get_metadata_builder=lambda _, b=b: b)] for b in builders]
     state = SimpleNamespace(
@@ -1492,7 +1491,7 @@ def test_prepare_attn_zero_drafts_and_align_groups(monkeypatch, drafts, for_capt
         recoverssm=None,
         _align_mode=True,
         _get_mamba_group_info=MagicMock(return_value=(list(range(24)), None)),
-        _ensure_align_ctx=MagicMock(return_value=object()),
+        _ensure_align_ctx=MagicMock(return_value=SimpleNamespace(compute_aligned_state_indices=gather)),
     )
     state._get_aligned_state_index_views = lambda values: AscendMambaHybridModelState._get_aligned_state_index_views(
         state, values
@@ -1519,7 +1518,7 @@ def test_prepare_attn_zero_drafts_and_align_groups(monkeypatch, drafts, for_capt
     AscendMambaHybridModelState.prepare_attn(
         state, batch, CUDAGraphMode.FULL, tables, torch.empty(0), groups, MagicMock(), for_capture=for_capture
     )
-    gather.assert_called_once_with(state._ensure_align_ctx.return_value, batch.seq_lens, 6, 32)
+    gather.assert_called_once_with(batch.seq_lens, 6)
     for group_idx, builder in enumerate(builders):
         torch.testing.assert_close(builder.mamba_aligned_state_indices, indices[group_idx])
     model_metadata = build.call_args.kwargs["model_specific_attn_metadata"]
@@ -1530,30 +1529,3 @@ def test_prepare_attn_zero_drafts_and_align_groups(monkeypatch, drafts, for_capt
     else:
         assert model_metadata.num_decode_draft_tokens_cpu.tolist() == [-1, -1, -1, -1, -1, -1]
         assert model_metadata.num_accepted_tokens.tolist() == [3, 4, 2, 1, 1, 1]
-
-
-@pytest.mark.parametrize("num_reqs", [0, 1, 33])
-@pytest.mark.parametrize("separate_index_tables", [False, True])
-def test_aligned_state_indices_use_npu_gather(monkeypatch, num_reqs, separate_index_tables):
-    output = torch.empty(24, 64, 4, dtype=torch.int32)
-    gather = MagicMock(return_value=output[:, :num_reqs])
-    monkeypatch.setattr(mamba_hybrid_module, "compute_aligned_state_indices", gather)
-    ctx = SimpleNamespace(
-        is_initialized=True,
-        aligned_state_indices=output,
-        block_table_ptrs=object(),
-        block_table_stride_req=32,
-        block_size=16,
-        num_groups=24,
-    )
-    if separate_index_tables:
-        ctx.aligned_index_block_table_ptrs = object()
-    seq_lens = SimpleNamespace(device=SimpleNamespace(type="npu"), shape=(64,), stride=lambda _: 2)
-    actual = mamba_hybrid_module._compute_aligned_state_indices(ctx, seq_lens, num_reqs, 32)
-    assert actual.shape == (24, num_reqs, 4)
-    if not num_reqs:
-        gather.assert_not_called()
-        return
-    gather.assert_called_once_with(
-        getattr(ctx, "aligned_index_block_table_ptrs", ctx.block_table_ptrs), seq_lens, output, num_reqs, 32, 32, 16
-    )

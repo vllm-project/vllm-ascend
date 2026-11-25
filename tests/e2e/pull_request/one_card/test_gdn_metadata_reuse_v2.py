@@ -8,11 +8,12 @@ import torch
 import torch_npu  # noqa: F401
 from vllm.config.compilation import CUDAGraphMode
 from vllm.v1.kv_cache_interface import MambaSpec
+from vllm.v1.worker.mamba_utils import MambaSpecDecodeGPUContext
 
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
 from vllm_ascend.ops.gdn_attn_builder import AscendGDNAttentionMetadataBuilder
 from vllm_ascend.ops.triton.mamba.graph_state import GDNGraphStateUpdater
-from vllm_ascend.worker.v2.model_states.mamba_hybrid import _compute_aligned_state_indices
+from vllm_ascend.utils import adapt_patch
 
 
 @pytest.mark.parametrize("width", [1, 3, 8, 17])
@@ -66,9 +67,20 @@ def test_batched_graph_state_replay_reads_current_group_ids(width, reset_spec):
     assert [dst.data_ptr() for dst in outputs] == addresses
 
 
+def _gather_context(tables, output):
+    adapt_patch()
+    ctx = MambaSpecDecodeGPUContext.__new__(MambaSpecDecodeGPUContext)
+    ctx.is_initialized = True
+    ctx.block_table_ptrs = torch.tensor([table.data_ptr() for table in tables], dtype=torch.int64, device="npu")
+    ctx.aligned_index_block_table_ptrs = ctx.block_table_ptrs
+    ctx.block_table_stride_req = tables.stride(1)
+    ctx.block_size = 16
+    ctx.num_groups = tables.shape[0]
+    ctx.aligned_state_indices = output
+    return ctx
+
+
 # Representative matrix: (groups, requests, state slots, max requests).
-# Covers empty/single/tail/full batches, one vs many groups, the non-contiguous
-# row stride below, and both window (slots * max_reqs % 8 == 0) and flat dispatch.
 _ALIGNED_CASES = [
     (1, 0, 1, 33),
     (1, 1, 1, 33),
@@ -97,15 +109,8 @@ def test_aligned_state_indices_match_physical_tables(num_groups, num_reqs, num_s
     seq_lens = torch.zeros(max_reqs * 2, dtype=torch.int64, device="npu")
     seq_lens[::2].copy_(lengths_cpu)
     output = torch.full((num_groups, max_reqs, num_state_slots), -99, dtype=torch.int32, device="npu")
-    ctx = SimpleNamespace(
-        is_initialized=True,
-        block_table_ptrs=torch.tensor([table.data_ptr() for table in tables], dtype=torch.int64, device="npu"),
-        block_table_stride_req=tables.stride(1),
-        block_size=16,
-        num_groups=num_groups,
-        aligned_state_indices=output,
-    )
-    actual = _compute_aligned_state_indices(ctx, seq_lens[::2], num_reqs, columns)
+    ctx = _gather_context(tables, output)
+    actual = ctx.compute_aligned_state_indices(seq_lens[::2], num_reqs)
     slots = ((lengths_cpu[:num_reqs] - 1) // 16).clamp_min(0)[:, None] + torch.arange(num_state_slots)
     expected = torch.stack([table.cpu().gather(1, slots.long()) for table in tables])
     torch.testing.assert_close(actual.cpu(), expected, rtol=0, atol=0)
@@ -122,45 +127,13 @@ def test_aligned_state_indices_preserve_int32_bits(max_reqs, slots, seq_dtype):
     tables = values.repeat(num_groups * max_reqs * columns // values.numel()).view(num_groups, max_reqs, columns)
     tables = tables.to("npu")
     lengths = (torch.arange(max_reqs, dtype=seq_dtype) % (columns - slots + 1)) * 16 + 1
-    ctx = SimpleNamespace(
-        is_initialized=True,
-        block_table_ptrs=torch.tensor([table.data_ptr() for table in tables], dtype=torch.int64, device="npu"),
-        block_table_stride_req=columns,
-        block_size=16,
-        num_groups=num_groups,
-        aligned_state_indices=torch.full((num_groups, max_reqs, slots), -99, dtype=torch.int32, device="npu"),
-    )
-    actual = _compute_aligned_state_indices(ctx, lengths.to("npu"), num_reqs, columns)
+    output = torch.full((num_groups, max_reqs, slots), -99, dtype=torch.int32, device="npu")
+    ctx = _gather_context(tables, output)
+    actual = ctx.compute_aligned_state_indices(lengths.to("npu"), num_reqs)
     cols = (lengths[:num_reqs, None] - 1) // 16 + torch.arange(slots)
     expected = torch.stack([table.cpu().gather(1, cols.long()) for table in tables])
     torch.testing.assert_close(actual.cpu(), expected, rtol=0, atol=0)
     assert torch.all(ctx.aligned_state_indices[:, num_reqs:].cpu() == -99)
-
-
-@pytest.mark.parametrize("num_groups", [1, 24])
-@pytest.mark.parametrize("seq_dtype", [torch.int32, torch.int64])
-@pytest.mark.parametrize("seq_length", [0, 1, 113, 129])
-def test_aligned_state_indices_single_row_window(num_groups, seq_dtype, seq_length):
-    torch.npu.set_device(0)
-    max_reqs, columns, slots = 33, 32, 8
-    tables = torch.arange(num_groups * max_reqs * columns * 2, dtype=torch.int32, device="npu").view(
-        num_groups, max_reqs, columns * 2
-    )[:, :, :columns]
-    seq_lens = torch.full((max_reqs * 2,), seq_length, dtype=seq_dtype, device="npu")[::2]
-    output = torch.full((num_groups, max_reqs, slots), -99, dtype=torch.int32, device="npu")
-    ctx = SimpleNamespace(
-        is_initialized=True,
-        block_table_ptrs=torch.tensor([table.data_ptr() for table in tables], dtype=torch.int64, device="npu"),
-        block_table_stride_req=tables.stride(1),
-        block_size=16,
-        num_groups=num_groups,
-        aligned_state_indices=output,
-    )
-    actual = _compute_aligned_state_indices(ctx, seq_lens, 1, columns)
-    first_slot = max((seq_length - 1) // 16, 0)
-    expected = tables[:, :1, first_slot : first_slot + slots]
-    torch.testing.assert_close(actual.cpu(), expected.cpu(), rtol=0, atol=0)
-    assert torch.all(output[:, 1:].cpu() == -99)
 
 
 @pytest.mark.parametrize("num_reqs", [1, 17])
@@ -172,23 +145,17 @@ def test_aligned_state_indices_aclgraph_replay(max_reqs, slots, num_reqs):
         num_groups, max_reqs, columns
     )
     seq_lens = torch.ones(max_reqs, dtype=torch.int32, device="npu")
-    ctx = SimpleNamespace(
-        is_initialized=True,
-        block_table_ptrs=torch.tensor([table.data_ptr() for table in tables], dtype=torch.int64, device="npu"),
-        block_table_stride_req=columns,
-        block_size=16,
-        num_groups=num_groups,
-        aligned_state_indices=torch.full((num_groups, max_reqs, slots), -99, dtype=torch.int32, device="npu"),
-    )
+    output = torch.full((num_groups, max_reqs, slots), -99, dtype=torch.int32, device="npu")
+    ctx = _gather_context(tables, output)
     stream = torch.npu.Stream()
     graph = torch.npu.NPUGraph()
     snapshots = []
     with torch.npu.stream(stream):
         stream.wait_stream(torch.npu.default_stream())
-        _compute_aligned_state_indices(ctx, seq_lens, num_reqs, columns)
+        ctx.compute_aligned_state_indices(seq_lens, num_reqs)
         torch.npu.synchronize()
         with torch.npu.graph(graph, stream=stream):
-            _compute_aligned_state_indices(ctx, seq_lens, num_reqs, columns)
+            ctx.compute_aligned_state_indices(seq_lens, num_reqs)
         for step in range(1, 9):
             lengths = (torch.arange(max_reqs, dtype=torch.int32) * step % (columns - slots + 1)) * 16 + 1
             seq_lens.copy_(lengths)

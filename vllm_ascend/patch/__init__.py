@@ -759,6 +759,10 @@
 #    Future Plan:
 #       Remove this patch when the upstream kernel can run on Ascend hardware.
 #
+#   3. MambaSpecDecodeGPUContext.compute_aligned_state_indices
+#      Route NPU inputs to the Ascend gather using the context's table pointers
+#      and output. Remove when the upstream method and kernel support NPU.
+#
 # ** 10. File: worker/patch_minimax_m2.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.model_executor.models.minimax_m2.MiniMaxM2Attention.forward`

@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM Ascend project
 
+from types import SimpleNamespace
+
 import pytest
 import torch
 
@@ -13,8 +15,6 @@ pytestmark = pytest.mark.skipif(
     reason="Mamba aligned-index tests require an Ascend NPU",
 )
 
-# Real callers size the table from the aligned Mamba block table and the
-# per-request slot window; these cases cover the window and flat dispatches.
 _CASES = [
     dict(num_groups=1, max_reqs=1, num_reqs=1, state_slots=1, table_cols=16, cache_block_size=16, seq_lens=[1]),
     dict(num_groups=1, max_reqs=2, num_reqs=2, state_slots=4, table_cols=16, cache_block_size=16, seq_lens=[33, 63]),
@@ -58,8 +58,7 @@ def _golden(tables, seq_lens, num_reqs, state_slots, cache_block_size, shape):
         for row in range(num_reqs):
             first_slot = max((int(seq_lens[row]) - 1) // cache_block_size, 0)
             for slot in range(state_slots):
-                source_col = first_slot + min(slot, state_slots - 1)
-                expected[group, row, slot] = tables[group, row, source_col]
+                expected[group, row, slot] = tables[group, row, first_slot + slot]
     return expected
 
 
@@ -88,15 +87,14 @@ def test_aligned_state_indices_match_torch_gather(case):
     seq_lens = torch.tensor(case["seq_lens"], dtype=seq_dtype, device=device)
     output = torch.full((num_groups, max_reqs, state_slots), -99, dtype=torch.int32, device=device)
 
-    actual = compute_aligned_state_indices(
-        table_ptrs,
-        seq_lens,
-        output,
-        num_reqs,
-        storage.stride(1),
-        table_cols,
-        case["cache_block_size"],
+    ctx = SimpleNamespace(
+        is_initialized=True,
+        block_table_ptrs=table_ptrs,
+        block_table_stride_req=storage.stride(1),
+        block_size=case["cache_block_size"],
+        aligned_state_indices=output,
     )
+    actual = compute_aligned_state_indices(ctx, seq_lens, num_reqs)
     expected = _golden(tables, case["seq_lens"], num_reqs, state_slots, case["cache_block_size"], output.shape)
 
     assert torch.equal(actual, expected[:, :num_reqs])

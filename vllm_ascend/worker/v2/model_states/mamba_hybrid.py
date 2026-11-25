@@ -39,8 +39,7 @@ from vllm.v1.worker.mamba_utils import (
 )
 from vllm.v1.worker.utils import AttentionGroup
 
-from vllm_ascend.ops.triton.mamba.aligned_indices import compute_aligned_state_indices
-from vllm_ascend.utils import model_uses_kimi_kda, model_uses_kpool_indexer, vllm_version_is
+from vllm_ascend.utils import model_uses_kimi_kda, model_uses_kpool_indexer
 from vllm_ascend.worker.v2.attn_utils import build_attn_metadata
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch
 from vllm_ascend.worker.v2.model_states.default import AscendModelState
@@ -51,29 +50,6 @@ if TYPE_CHECKING:
 # Copy block size used by the upstream fused mamba kernels.
 _COPY_BLOCK_SIZE = 1024
 _PREPROCESS_BLOCK_SIZE = 256
-
-
-def _compute_aligned_state_indices(
-    ctx: MambaSpecDecodeGPUContext, seq_lens: torch.Tensor, num_reqs: int, table_cols: int
-) -> torch.Tensor:
-    """Reuse upstream's pointer table and output storage with an NPU gather."""
-    assert ctx.is_initialized and seq_lens.device.type == "npu"
-    assert ctx.aligned_state_indices is not None
-    assert 0 <= num_reqs <= min(seq_lens.shape[0], ctx.aligned_state_indices.shape[1])
-    if num_reqs == 0:
-        return ctx.aligned_state_indices[:, :0]
-    output = ctx.aligned_state_indices
-    # Newer upstream contexts separate batch-order index tables from copy tables.
-    pointers = getattr(ctx, "aligned_index_block_table_ptrs", ctx.block_table_ptrs)
-    return compute_aligned_state_indices(
-        pointers,
-        seq_lens,
-        output,
-        num_reqs,
-        ctx.block_table_stride_req,
-        table_cols,
-        ctx.block_size,
-    )
 
 
 @dataclass
@@ -546,8 +522,7 @@ class AscendMambaHybridModelState(MambaHybridModelState, AscendModelState):
             ]
             if aligned_builders:
                 ctx = self._ensure_align_ctx(kv_cache_config, mamba_group_ids, block_tables)
-                table_cols = block_tables[mamba_group_ids[0]].shape[1]
-                indices = _compute_aligned_state_indices(ctx, input_batch.seq_lens, num_reqs, table_cols)
+                indices = ctx.compute_aligned_state_indices(input_batch.seq_lens, num_reqs)
                 index_views = self._get_aligned_state_index_views(indices)
                 for group_idx, builder in aligned_builders:
                     builder.mamba_aligned_state_indices = index_views[group_idx]

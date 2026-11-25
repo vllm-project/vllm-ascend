@@ -1,95 +1,23 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM Ascend project
 
-"""NPU gather of graph-stable, per-group Mamba physical state indices.
+"""Gather each Mamba group's physical state indices into its persistent output."""
 
-Uses the contiguous GM load followed by UB gather from Triton-Ascend's
-``third_party/ascend/tutorials/10-gather-2d-simd.py``. Since state slots are
-consecutive, only a bounded column window is needed instead of the full table.
-"""
-
-import math
+from typing import TYPE_CHECKING
 
 import torch
 from vllm.triton_utils import tl, triton
-from vllm.utils.math_utils import next_power_of_2
 
-from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num, init_device_properties_triton
+if TYPE_CHECKING:
+    from vllm.v1.worker.mamba_utils import MambaSpecDecodeGPUContext
 
-_STATE_ALIGNMENT_BYTES = 32
-_INT32_BYTES = torch.int32.itemsize
-_ALIGN_ELEMENTS = _STATE_ALIGNMENT_BYTES // _INT32_BYTES
-_ALIGN_ELEMENTS_TL = tl.constexpr(_ALIGN_ELEMENTS)
-_FLAT_BLOCK = 256  # One flat program covers 256 output elements (1 KiB).
-_MAX_WINDOW_ELEMENTS = 4096  # Bounds one row tile so the gathered window fits UB.
+# A 128-byte tile keeps stores aligned and limits how many group pointers it visits.
+_TILE_SIZE = 32
+_MAX_PROGRAMS = 65535
 
 
 @triton.jit(do_not_specialize=["num_reqs"])
-def _aligned_indices_window_kernel(
-    table_ptrs,
-    seq_lens,
-    output,
-    table_stride: tl.int64,
-    seq_stride: tl.constexpr,
-    output_group_stride: tl.constexpr,
-    output_row_stride: tl.constexpr,
-    num_reqs,
-    TABLE_COLS: tl.constexpr,
-    CACHE_BLOCK_SIZE: tl.constexpr,
-    STATE_SLOTS: tl.constexpr,
-    BLOCK_SLOTS: tl.constexpr,
-    BLOCK_ROWS: tl.constexpr,
-    WINDOW: tl.constexpr,
-    TILES_PER_PROGRAM: tl.constexpr,
-):
-    group = tl.program_id(0)
-    # A scalar base per group, cast outside loops for Ascend AxisInfo analysis.
-    table_base = tl.load(table_ptrs + group).to(tl.pointer_type(tl.int32))
-    columns = tl.arange(0, WINDOW)
-    slots = tl.arange(0, BLOCK_SLOTS)
-    first_tile = tl.program_id(1) * TILES_PER_PROGRAM
-    last_tile = tl.minimum(first_tile + TILES_PER_PROGRAM, tl.cdiv(num_reqs, BLOCK_ROWS))
-    for tile in range(first_tile, last_tile):
-        rows = tile * BLOCK_ROWS + tl.arange(0, BLOCK_ROWS)
-        valid_rows = rows < num_reqs
-        # Masked tl.load/store lanes do not access GM; tail offsets stay unclamped.
-        if BLOCK_ROWS == 1:
-            # Compile specialization, not a performance dispatch: a true scalar
-            # keeps max/div out of Ascend's single-element tensor pointer
-            # analysis, which does not support tensor maxsi. other=1 makes
-            # inactive rows select window slot 0 without a read.
-            lengths = tl.load(seq_lens + tile * seq_stride, tile < num_reqs, other=1)
-        else:
-            lengths = tl.load(seq_lens + rows * seq_stride, valid_rows, other=1)
-        # Preserve the length dtype: Ascend BlockPtrAnalysis cannot parse an
-        # int64-to-int32 truncation in GM pointer offsets.
-        first_slot = tl.maximum((lengths - 1) // CACHE_BLOCK_SIZE, 0)
-        window_start = first_slot // _ALIGN_ELEMENTS_TL * _ALIGN_ELEMENTS_TL
-        if BLOCK_ROWS == 1:
-            source_columns = window_start + columns[None, :]
-            local_indices = first_slot - window_start + tl.minimum(slots[None, :], STATE_SLOTS - 1)
-        else:
-            source_columns = window_start[:, None] + columns[None, :]
-            local_indices = first_slot[:, None] - window_start[:, None] + tl.minimum(slots[None, :], STATE_SLOTS - 1)
-        # Only a small contiguous window enters UB, rather than the whole table.
-        source = tl.load(
-            table_base + rows[:, None].to(tl.int64) * table_stride + source_columns,
-            valid_rows[:, None] & (source_columns < TABLE_COLS),
-            other=0,
-        )
-        # Masked output lanes must also have valid UB gather indices.
-        local_indices = local_indices.to(tl.int32)
-        # Ascend gather supports fp32 but not int32; preserve physical ID bits.
-        values = tl.gather(source.to(tl.float32, bitcast=True), local_indices, axis=1).to(tl.int32, bitcast=True)
-        tl.store(
-            output + group * output_group_stride + rows[:, None] * output_row_stride + slots[None, :],
-            values,
-            valid_rows[:, None] & (slots[None, :] < STATE_SLOTS),
-        )
-
-
-@triton.jit(do_not_specialize=["num_reqs"])
-def _aligned_indices_flat_kernel(
+def _aligned_indices_kernel(
     table_ptrs,
     seq_lens,
     output,
@@ -101,68 +29,48 @@ def _aligned_indices_flat_kernel(
     STATE_SLOTS: tl.constexpr,
     CACHE_BLOCK_SIZE: tl.constexpr,
     BLOCK: tl.constexpr,
+    TILES_PER_PROGRAM: tl.constexpr,
 ):
-    # Whole 32-byte output spans avoid cross-core partial-write overlap when
-    # max_reqs * state_slots leaves adjacent group bases unaligned.
-    program_start = tl.program_id(0) * BLOCK
-    offsets = program_start + tl.arange(0, BLOCK)
-    groups = offsets // (MAX_REQS * STATE_SLOTS)
-    rows = offsets // STATE_SLOTS % MAX_REQS
-    slots = offsets % STATE_SLOTS
-    valid = (groups < NUM_GROUPS) & (rows < num_reqs)
-    # other=1 keeps inactive rows on window slot 0; the mask skips their read.
-    lengths = tl.load(seq_lens + rows * seq_stride, valid, other=1)
-    first_slot = tl.maximum((lengths - 1) // CACHE_BLOCK_SIZE, 0).to(tl.int32)
-    first_group = program_start // (MAX_REQS * STATE_SLOTS)
-    last_group = tl.minimum(tl.cdiv(program_start + BLOCK, MAX_REQS * STATE_SLOTS), NUM_GROUPS)
-    values = tl.full((BLOCK,), 0, tl.int32)
-    for group in range(first_group, last_group):
-        # A vector int-to-pointer base aborts Ascend OffsetAnalysis. Keep the
-        # base scalar and visit only groups intersecting this program's output.
-        table_base = tl.load(table_ptrs + group).to(tl.pointer_type(tl.int32))
-        group_mask = valid & (groups == group)
-        group_values = tl.load(table_base + rows.to(tl.int64) * table_stride + first_slot + slots, group_mask, other=0)
-        values = tl.where(group_mask, group_values, values)
-    # One store retains disjoint 32-byte ownership across group boundaries.
-    tl.store(output + offsets, values, valid)
-
-
-def _aligned_index_launch_config(num_groups, num_reqs, max_reqs, state_slots, num_cores):
-    """Select small UB tiles and disjoint 32-byte output regions on the CPU."""
-    window = next_power_of_2(state_slots + _ALIGN_ELEMENTS - 1)
-    aligned_rows = _ALIGN_ELEMENTS // math.gcd(state_slots, _ALIGN_ELEMENTS)
-    max_rows = min(32, _MAX_WINDOW_ELEMENTS // window)
-    if max_reqs * state_slots % _ALIGN_ELEMENTS or max_rows < aligned_rows:
-        return None
-    rows = next_power_of_2(triton.cdiv(num_reqs * num_groups, num_cores))
-    block_rows = max(aligned_rows, min(rows, max_rows))
-    num_tiles = triton.cdiv(num_reqs, block_rows)
-    row_programs = min(num_tiles, max(1, num_cores // num_groups))
-    tiles_per_program = triton.cdiv(num_tiles, row_programs)
-    return (num_groups, row_programs), block_rows, window, tiles_per_program
+    offset_dtype: tl.constexpr = tl.int64 if NUM_GROUPS * MAX_REQS * STATE_SLOTS > 2**31 - BLOCK else tl.int32
+    for tile in range(TILES_PER_PROGRAM):
+        program_start = (tl.program_id(0) + tile * tl.num_programs(0)).to(offset_dtype) * BLOCK
+        offsets = program_start + tl.arange(0, BLOCK)
+        groups = offsets // (MAX_REQS * STATE_SLOTS)
+        rows = offsets // STATE_SLOTS % MAX_REQS
+        slots = offsets % STATE_SLOTS
+        valid = (groups < NUM_GROUPS) & (rows < num_reqs)
+        lengths = tl.load(seq_lens + rows * seq_stride, valid, other=1)
+        first_slot = tl.maximum((lengths - 1) // CACHE_BLOCK_SIZE, 0).to(tl.int32)
+        first_group = program_start // (MAX_REQS * STATE_SLOTS)
+        last_group = tl.minimum(tl.cdiv(program_start + BLOCK, MAX_REQS * STATE_SLOTS), NUM_GROUPS)
+        values = tl.full((BLOCK,), 0, tl.int32)
+        for group in range(first_group, last_group):
+            # Triton-Ascend requires a scalar table base for each load.
+            table_base = tl.load(table_ptrs + group).to(tl.pointer_type(tl.int32))
+            group_mask = valid & (groups == group)
+            group_values = tl.load(
+                table_base + rows.to(tl.int64) * table_stride + first_slot + slots, group_mask, other=0
+            )
+            values = tl.where(group_mask, group_values, values)
+        tl.store(output + offsets, values, valid)
 
 
 def compute_aligned_state_indices(
-    table_ptrs: torch.Tensor,
-    seq_lens: torch.Tensor,
-    output: torch.Tensor,
-    num_reqs: int,
-    table_stride: int,
-    table_cols: int,
-    cache_block_size: int,
+    self: "MambaSpecDecodeGPUContext", seq_lens: torch.Tensor, num_reqs: int
 ) -> torch.Tensor:
-    """Gather each group's state slots in one launch, into existing storage.
-
-    Inputs and output must share a device. Table columns are contiguous; rows
-    may have physical padding. Callers guarantee that each real request's
-    selected state slots fit within table_cols. Inactive output rows stay intact.
-    """
+    """Gather the live rows of every group's state IDs into the context's output."""
+    assert self.is_initialized and self.aligned_state_indices is not None
+    output = self.aligned_state_indices
+    # Newer contexts keep batch-ordered gather pointers separate from state-copy pointers.
+    table_ptrs = getattr(self, "aligned_index_block_table_ptrs", self.block_table_ptrs)
+    table_stride = self.block_table_stride_req
+    cache_block_size = self.block_size
     assert output.ndim == 3 and output.dtype == torch.int32 and output.is_contiguous()
     assert output.data_ptr() % 32 == 0
     num_groups, max_reqs, state_slots = output.shape
     assert num_groups > 0 and state_slots > 0 and cache_block_size > 0
     assert 0 <= num_reqs <= min(max_reqs, seq_lens.shape[0])
-    assert state_slots <= table_cols <= table_stride
+    assert state_slots <= table_stride
     assert seq_lens.ndim == 1 and seq_lens.dtype in (torch.int32, torch.int64)
     assert (
         table_ptrs.ndim == 1
@@ -173,50 +81,22 @@ def compute_aligned_state_indices(
     assert table_ptrs.device == seq_lens.device == output.device
     if num_reqs == 0:
         return output[:, :0]
-    init_device_properties_triton()
-    config = _aligned_index_launch_config(num_groups, num_reqs, max_reqs, state_slots, get_vectorcore_num())
-    if config is None:
-        grid = (triton.cdiv(output.numel(), _FLAT_BLOCK),)
-        assert grid[0] <= 65535
-        _aligned_indices_flat_kernel[grid](
-            table_ptrs,
-            seq_lens,
-            output,
-            table_stride,
-            seq_lens.stride(0),
-            num_reqs,
-            MAX_REQS=max_reqs,
-            NUM_GROUPS=num_groups,
-            STATE_SLOTS=state_slots,
-            CACHE_BLOCK_SIZE=cache_block_size,
-            BLOCK=_FLAT_BLOCK,
-            # Single-buffered, no unit-flag scheduling: these short index
-            # kernels are launch-bound and do not benefit from either.
-            multibuffer=False,
-            unit_flag=False,
-        )
-    else:
-        grid, block_rows, window, tiles_per_program = config
-        assert math.prod(grid) <= 65535
-        _aligned_indices_window_kernel[grid](
-            table_ptrs,
-            seq_lens,
-            output,
-            table_stride,
-            seq_lens.stride(0),
-            output.stride(0),
-            output.stride(1),
-            num_reqs,
-            TABLE_COLS=table_cols,
-            CACHE_BLOCK_SIZE=cache_block_size,
-            STATE_SLOTS=state_slots,
-            BLOCK_SLOTS=next_power_of_2(state_slots),
-            BLOCK_ROWS=block_rows,
-            WINDOW=window,
-            TILES_PER_PROGRAM=tiles_per_program,
-            # Single-buffered, no unit-flag scheduling: these short index
-            # kernels are launch-bound and do not benefit from either.
-            multibuffer=False,
-            unit_flag=False,
-        )
+    num_tiles = triton.cdiv(output.numel(), _TILE_SIZE)
+    num_programs = min(num_tiles, _MAX_PROGRAMS)
+    _aligned_indices_kernel[(num_programs,)](
+        table_ptrs,
+        seq_lens,
+        output,
+        table_stride,
+        seq_lens.stride(0),
+        num_reqs,
+        MAX_REQS=max_reqs,
+        NUM_GROUPS=num_groups,
+        STATE_SLOTS=state_slots,
+        CACHE_BLOCK_SIZE=cache_block_size,
+        BLOCK=_TILE_SIZE,
+        TILES_PER_PROGRAM=triton.cdiv(num_tiles, num_programs),
+        multibuffer=False,
+        unit_flag=False,
+    )
     return output[:, :num_reqs]
