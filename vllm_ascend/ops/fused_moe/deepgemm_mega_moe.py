@@ -118,6 +118,7 @@ class DeepGemmExperts:
             if eplb_enabled
             else None
         )
+        self.zero_expert_tokens = torch.zeros_like(self.expert_tokens) if eplb_enabled else None
         deep_gemm = load_deepgemm()
         self.kernel = deep_gemm.fp8_fp4_mega_moe
         self.num_shared_experts = text.n_shared_experts or 0
@@ -255,8 +256,8 @@ class DeepGemmExperts:
             torch.mul(topk_weights, routed_scale, out=routed_weights)
         out = torch.empty((count, self.hidden), dtype=torch.bfloat16, device=x.device)
         if self.expert_tokens is not None:
-            # The kernel accumulates counts. MRV2 records a single forward's load.
-            self.expert_tokens.zero_()
+            # The native kernel accumulates. Reset each forward with a same-device DMA copy.
+            self.expert_tokens.copy_(self.zero_expert_tokens, non_blocking=True)
         self.kernel(
             out,
             (layer.w13_weight, layer.w13_weight_scale),
