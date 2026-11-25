@@ -19,7 +19,6 @@ important thing to keep in mind when reviewing a diff here.
 - `vllm_ascend/__init__.py` — plugin entry: register() returns NPUPlatform
 - `vllm_ascend/platform.py` — NPUPlatform: central platform abstraction (device 'npu', dispatch PrivateUse1)
 - `vllm_ascend/worker/` — NPUWorker(GPUWorker) in `worker.py`; the model runner is NPUModelRunner(GPUModelRunner) in `worker/v2/model_runner.py` (V2 only — the legacy V1 runner has been removed); `worker/v2/` also carries the sampling helpers (`v2/sample/`), speculative-decoding proposers (`v2/spec_decode/`: eagle, dflash, dflash2, dspark, ...) and ACL-graph utilities
-- `vllm_ascend/mrv2_utils.py` — shared helpers for the V2 runner
 - `vllm_ascend/_310p/` — self-contained 310P implementation: NPUWorker310(NPUWorker) in `worker_310p.py`, NPUModelRunner310V2(NPUModelRunner) in `worker/v2/`, plus its own attention, fused_moe, ops and quantization
 - `vllm_ascend/attention/` — Ascend attention backends and metadata builders: attention_v1 (GQA/FIA), mla_v1, sfa_v1 (+ sfa_hisparse, sfa_kv_offload), dsa_v1/dsa_v41, fa_v1, fa3_v1, flashmla, indexer/indexer_kpool, context_parallel
 - `vllm_ascend/compilation/` — ACL graph capture/replay (ACLGraphWrapper, API-compatible with CUDA graph) and the inductor compiler bridge (AscendCompiler, graph fusion passes)
