@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 from collections.abc import Callable
+from typing import Any
 
 import torch
 from vllm.lora.punica_wrapper.punica_base import PunicaWrapperBase
@@ -34,6 +35,12 @@ class PunicaWrapperNPU(PunicaWrapperBase):
         self._use_custom_lora_ops = get_current_hardware_profile().supports(HardwareCapability.LORA_CUSTOM_OPS) and (
             self.lora_config is None or self.lora_config.max_lora_rank < 128
         )
+        self.bgmv_expand: Callable[..., Any]
+        self.bgmv_expand_slice: Callable[..., Any]
+        self.bgmv_shrink: Callable[..., Any]
+        self.sgmv_expand: Callable[..., Any]
+        self.sgmv_expand_slice: Callable[..., Any]
+        self.sgmv_shrink: Callable[..., Any]
         if not self._use_custom_lora_ops:
             from vllm_ascend.lora.lora_ops import (
                 bgmv_expand_slice_torch,
