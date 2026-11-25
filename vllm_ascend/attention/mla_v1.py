@@ -1248,8 +1248,34 @@ class AscendMLAImpl(MLAAttentionImpl):
         return None
 
     def process_weights_after_loading(self, act_dtype: torch.dtype):
-        # NOTE: We currently do not support quant kv_b_proj.
-        assert isinstance(self.kv_b_proj.quant_method, UnquantizedLinearMethod)
+        # NOTE: We currently do not support quantized kv_b_proj compute, but
+        # compressed-tensors checkpoints (e.g. FP8-DYNAMIC Kimi-Linear)
+        # quantize it. Dequantize once here so the MLA path keeps running the
+        # unquantized BMM; weight_scale resolves the stored orientation.
+        if not isinstance(self.kv_b_proj.quant_method, UnquantizedLinearMethod):
+            kv_b_layer = self.kv_b_proj
+            weight = kv_b_layer.weight
+            scale = getattr(kv_b_layer, "weight_scale", None)
+            if scale is None:
+                raise AssertionError(
+                    "quantized kv_b_proj without weight_scale cannot be dequantized for the Ascend MLA path"
+                )
+            if weight.dim() != 2:
+                raise AssertionError(f"unexpected kv_b_proj weight rank {weight.dim()}")
+            if scale.dim() == 2 and scale.shape[-1] == 1:
+                scale = scale.squeeze(-1)
+            if scale.numel() == weight.shape[0]:
+                dequantized = weight.to(torch.float32) * scale.reshape(-1, 1).to(torch.float32)
+            elif scale.numel() == weight.shape[1]:
+                dequantized = (weight.to(torch.float32) * scale.reshape(1, -1).to(torch.float32)).t()
+            else:
+                raise AssertionError(
+                    f"kv_b_proj weight/scale mismatch: weight {tuple(weight.shape)}, scale {tuple(scale.shape)}"
+                )
+            if dequantized.dtype not in (torch.bfloat16, torch.float16):
+                dequantized = dequantized.to(torch.bfloat16)
+            kv_b_layer.weight = torch.nn.Parameter(dequantized.contiguous(), requires_grad=False)
+            kv_b_layer.quant_method = UnquantizedLinearMethod()
         # NOTE: Weight will be reshaped next, we need to revert and transpose it.
         kv_b_proj_weight = torch_npu.npu_format_cast(self.kv_b_proj.weight.data, ACL_FORMAT_FRACTAL_ND).T
         assert kv_b_proj_weight.shape == (
