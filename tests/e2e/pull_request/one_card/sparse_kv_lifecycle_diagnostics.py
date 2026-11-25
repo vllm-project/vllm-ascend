@@ -66,8 +66,8 @@ def show_native_logs(directory, pid):
     if not files:
         log(f"no CANN host or device log files for pid={pid}")
     for path in sorted(files):
-        matches = deque(maxlen=MAX_MATCHED_LOG_LINES)
-        tail = deque(maxlen=MAX_TAIL_LOG_LINES)
+        matches: deque[tuple[int, str]] = deque(maxlen=MAX_MATCHED_LOG_LINES)
+        tail: deque[tuple[int, str]] = deque(maxlen=MAX_TAIL_LOG_LINES)
         try:
             with path.open(encoding="utf-8", errors="replace") as stream:
                 for index, line in enumerate(stream):
