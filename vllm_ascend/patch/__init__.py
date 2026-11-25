@@ -690,6 +690,20 @@
 #
 # ** 2. File: worker/patch_deepseek_v2.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   `vllm.model_executor.models.deepseek_v2.DeepseekV2DecoderLayer.forward`
+#    Why:
+#       The dense GLM-5.2 MLP can consume the output of the Ascend fused
+#       residual-add, RMSNorm and dynamic-quant operation without a graph pass.
+#    How:
+#       Use the fused operation only when the complete MLP input layer advertises
+#       compatible dynamic INT8 input; keep the original forward for other cases.
+#    Related PR:
+#       https://github.com/vllm-project/vllm/pull/51415
+#       https://github.com/vllm-project/vllm/pull/53793
+#    Future Plan:
+#       Remove this forward override when upstream provides an equivalent
+#       producer/consumer extension point for this fused Ascend operation.
+#
 #   1. `vllm.model_executor.models.deepseek_v2.DeepseekV2MLAAttention.__init__`
 #    Why:
 #       GLM-5.2 checkpoints omit `Indexer` weights on shared-indexer layers,

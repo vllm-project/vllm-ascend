@@ -198,6 +198,23 @@ class AscendLinearMethod(LinearMethodBase):
         if hasattr(self.quant_method, "process_weights_after_loading"):
             self.quant_method.process_weights_after_loading(layer)
 
+        # Only advertise the contract for a complete column-parallel layer
+        # that forwards its input directly to this dynamic INT8 scheme.
+        from vllm.model_executor.layers.linear import ColumnParallelLinear
+        from .methods.w8a8.w8a8_dynamic import AscendW8A8DynamicLinearMethod
+
+        if (
+            isinstance(layer, ColumnParallelLinear)
+            and getattr(layer, "custom_op", None) is None
+            and type(self.quant_method) is AscendW8A8DynamicLinearMethod
+            and self.quant_method.act_quant_type == torch.int8
+        ):
+            try:
+                from vllm.model_executor.layers.quantization.utils.quant_utils import kInt8DynamicTokenSym
+            except ImportError:
+                return
+            layer._input_quant_key = kInt8DynamicTokenSym
+
     def get_computed_params(self) -> set[str]:
         """Return parameter name patterns that are computed, not loaded.
 
@@ -216,6 +233,15 @@ class AscendLinearMethod(LinearMethodBase):
         x: torch.Tensor | PreparedLinearInput | tuple[torch.Tensor, torch.Tensor],
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
+        if not isinstance(x, (torch.Tensor, PreparedLinearInput, tuple)):
+            from vllm.model_executor.layers.fusion.quant_activation import as_quantized_activation
+            from vllm.model_executor.layers.quantization.utils.quant_utils import kInt8DynamicTokenSym
+
+            quantized = as_quantized_activation(x, getattr(layer, "_input_quant_key", None))
+            if quantized is not None:
+                if layer._input_quant_key != kInt8DynamicTokenSym:
+                    raise ValueError("Unsupported pre-quantized input for Ascend linear")
+                x = PreparedLinearInput(quantized.data, quantized.scale, quantized.orig_dtype)
         if isinstance(layer, RowParallelLinear):
             if layer.prefix.find("o_proj") != -1 and oproj_tp_enable():
                 tp_rank = get_otp_group().rank_in_group

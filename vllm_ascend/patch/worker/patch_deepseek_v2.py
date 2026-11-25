@@ -25,6 +25,8 @@ from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmbedding
 from vllm.model_executor.models import deepseek_v2 as deepseek_v2_module
 from vllm.model_executor.models.deepseek_v2 import (
+    DeepseekV2DecoderLayer,
+    DeepseekV2MLP,
     DeepseekV2ForCausalLM,
     DeepSeekV2FusedQkvAProjLinear,
     DeepseekV2MLAAttention,
@@ -39,8 +41,10 @@ from vllm.sequence import IntermediateTensors
 from vllm.v1.attention.backends.mla.index_group import SparseMLAIndexGroupBuilder
 
 from vllm_ascend.attention.context_parallel.common_cp import use_dcp_q_replicate
+from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
+from vllm_ascend.ops.layernorm import AscendRMSNorm
 from vllm_ascend.ops.linear import AscendDCPGroupColumnParallelLinear
-from vllm_ascend.utils import is_mtp_layer, should_reuse_topk, vllm_version_is
+from vllm_ascend.utils import enable_custom_op, is_mtp_layer, should_reuse_topk, vllm_version_is
 from vllm_ascend.worker.v2 import pp_transport
 from vllm_ascend.worker.v2.pp_transport import (
     PPTransportDataType,
@@ -456,4 +460,71 @@ def _patched_forward(
     return hidden_states
 
 
+_ORIGINAL_DECODER_FORWARD = DeepseekV2DecoderLayer.forward
+
+
+def _decoder_forward_with_norm_quant(self, positions, hidden_states, residual, llama_4_scaling=None):
+    """Explicit dense-MLP norm/quant fusion; remove when upstream owns it."""
+    try:
+        from vllm.model_executor.layers.fusion.quant_activation import QuantizedActivation, get_input_quant_key
+        from vllm.model_executor.layers.quantization.utils.quant_utils import kInt8DynamicTokenSym
+    except ImportError:
+        return _ORIGINAL_DECODER_FORWARD(self, positions, hidden_states, residual, llama_4_scaling)
+
+    # Restrict the model-level override to the observed dense W8A8 path. Other
+    # layers, sequence-parallel boundaries and unsupported consumers retain
+    # upstream's complete forward, including its FP16 overflow handling.
+    if (
+        not isinstance(self.mlp, DeepseekV2MLP)
+        or self.use_sequence_parallel_moe
+        or hidden_states.dtype != torch.bfloat16
+        or not isinstance(self.post_attention_layernorm, AscendRMSNorm)
+        or get_input_quant_key(self.mlp.gate_up_proj) != kInt8DynamicTokenSym
+        or not enable_custom_op()
+        or not get_current_hardware_profile().supports(HardwareCapability.GRAPH_NORM_QUANT_FUSION)
+    ):
+        return _ORIGINAL_DECODER_FORWARD(self, positions, hidden_states, residual, llama_4_scaling)
+
+    if residual is None:
+        residual = hidden_states
+        hidden_states = self.input_layernorm(hidden_states)
+    else:
+        hidden_states, residual = self.input_layernorm(hidden_states, residual)
+
+    if self.use_mha:
+        hidden_states = self.self_attn(positions, hidden_states)
+    else:
+        hidden_states = self.self_attn(positions, hidden_states, llama_4_scaling)
+
+    norm = self.post_attention_layernorm
+    if (
+        hidden_states.ndim != 2
+        or hidden_states.dtype != torch.bfloat16
+        or residual.dtype != hidden_states.dtype
+        or hidden_states.shape != residual.shape
+        or not hidden_states.is_contiguous()
+        or not residual.is_contiguous()
+    ):
+        hidden_states, residual = norm(hidden_states, residual)
+        return self.mlp(hidden_states), residual
+
+    output = torch.ops.npu.npu_add_rms_norm_dynamic_quant(
+        hidden_states,
+        residual,
+        norm.weight,
+        beta=norm.bias,
+        epsilon=norm.variance_epsilon,
+        output_mask=[True, False],
+    )
+    prepared = QuantizedActivation(
+        data=output[0],
+        scale=output[3],
+        orig_dtype=hidden_states.dtype,
+        orig_shape=hidden_states.shape,
+        quant_key=kInt8DynamicTokenSym,
+    )
+    return self.mlp(prepared), output[2]
+
+
+DeepseekV2DecoderLayer.forward = _decoder_forward_with_norm_quant
 DeepseekV2Model.forward = _patched_forward
