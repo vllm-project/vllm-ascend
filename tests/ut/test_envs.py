@@ -75,7 +75,19 @@ class TestEnvVariables(TestBase):
         # The expected defaults are spelled out on purpose: deriving them from
         # the implementation would let a wrong default still pass the assertions
         # below.
-        expected_defaults = {"COMPILE_CUSTOM_KERNELS": True, "VERBOSE": False}
+        expected_defaults = {
+            "COMPILE_CUSTOM_KERNELS": True,
+            "VERBOSE": False,
+            "VLLM_ASCEND_HY4_ENGRAM_ROW_PREP": False,
+            "VLLM_ASCEND_HY4_ENGRAM_HASH_GRAPH": True,
+            "VLLM_ASCEND_HY4_DFLY_PAGEABLE_ENGRAM": False,
+            "VLLM_ASCEND_HY4_TARGET_PREP_EXTRA_FUSIONS": False,
+            "VLLM_ASCEND_HY4_TARGET_ROPE_HASH_FUSION": None,
+            "VLLM_ASCEND_HY4_ENGRAM_BATCH_HASH": True,
+            "VLLM_ASCEND_HY4_DRAFT_PREP_GRAPH": True,
+            "VLLM_ASCEND_HY4_ENGRAM_TRITON_HASH": True,
+            "VLLM_ASCEND_HY4_TARGET_EMBED_FUSION": None,
+        }
         # Fail loudly if a boolean variable is added without covering it here.
         self.assertEqual(set(expected_defaults), self.boolean_vars)
 
@@ -96,7 +108,9 @@ class TestEnvVariables(TestBase):
                     os.environ.pop(var_name, None)
                     self.assertIs(getattr(envs_ascend, var_name), expected_default)
                     os.environ[var_name] = ""
-                    self.assertIs(getattr(envs_ascend, var_name), expected_default)
+                    self.assertIs(
+                        getattr(envs_ascend, var_name), False if expected_default is None else expected_default
+                    )
 
                     # Everything else is rejected, and the error names the
                     # variable so users can locate the offending export.

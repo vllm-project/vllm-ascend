@@ -165,6 +165,86 @@ def read_c8_banded(cache, block_table, block_size, rows):
     return key, value
 
 
+@triton.jit(do_not_specialize=["count"])
+def _read_c8_fia_rows(
+    cache,
+    rope_cache,
+    scale_cache,
+    block_table,
+    positions,
+    latent_output,
+    rope_output,
+    mask_output,
+    count,
+    ROW_BYTES: tl.constexpr,
+    PAGE_SIZE: tl.constexpr,
+    LATENT: tl.constexpr,
+    ROPE: tl.constexpr,
+    SCALE_TILE: tl.constexpr,
+    ROWS: tl.constexpr,
+):
+    index = tl.program_id(0) * ROWS + tl.arange(0, ROWS)
+    in_bounds = index < count
+    position = tl.load(positions + index, in_bounds, -1)
+    live = in_bounds & (position >= 0)
+    page = tl.load(block_table + position // PAGE_SIZE, live, 0).to(tl.int64)
+    slot = page * PAGE_SIZE + position % PAGE_SIZE
+    lane = tl.arange(0, LATENT)
+    bits = tl.load(cache + slot[:, None] * ROW_BYTES + lane[None, :], live[:, None], 0)
+    group = tl.arange(0, LATENT // SCALE_TILE)
+    scales = tl.load(
+        scale_cache + slot[:, None] * (ROW_BYTES // 4) + (LATENT + 2 * ROPE) // 4 + group[None, :],
+        live[:, None],
+        0.0,
+    )
+    decoded = _decode_e4m3fn(bits).reshape((ROWS, LATENT // SCALE_TILE, SCALE_TILE))
+    latent = (decoded * scales[:, :, None]).reshape((ROWS, LATENT))
+    tl.store(latent_output + index[:, None] * LATENT + lane[None, :], latent, in_bounds[:, None])
+    rope_lane = tl.arange(0, ROPE)
+    rope = tl.load(
+        rope_cache + slot[:, None] * (ROW_BYTES // 2) + LATENT // 2 + rope_lane[None, :],
+        live[:, None],
+        0.0,
+    )
+    tl.store(rope_output + index[:, None] * ROPE + rope_lane[None, :], rope, in_bounds[:, None])
+    tl.store(mask_output + index, position < 0, in_bounds)
+
+
+def empty_c8_fia_rows(queries, candidates, device):
+    latent = torch.empty((queries, candidates, 1, _LATENT), dtype=torch.bfloat16, device=device)
+    rope = torch.empty((queries, candidates, 1, _ROPE), dtype=torch.bfloat16, device=device)
+    mask = torch.empty((queries, 1, 1, candidates), dtype=torch.bool, device=device)
+    return latent, rope, mask
+
+
+def gather_c8_fia_rows(cache, block_table, block_size, positions, *, output=None):
+    """Gather sparse rows directly into contiguous BF16 FIA K/rope and mask."""
+    queries, candidates = positions.shape
+    if output is None:
+        output = empty_c8_fia_rows(queries, candidates, cache.device)
+    count = positions.numel()
+    if count:
+        _read_c8_fia_rows[(triton.cdiv(count, _ROWS_PER_PROGRAM),)](
+            cache,
+            cache.view(torch.bfloat16),
+            cache.view(torch.float32),
+            block_table,
+            positions.contiguous(),
+            *output,
+            count,
+            cache.shape[-1],
+            block_size,
+            _LATENT,
+            _ROPE,
+            SFA_QSFA_TILE_SIZE,
+            _ROWS_PER_PROGRAM,
+            num_warps=1,
+            enable_fp_fusion=False,
+            enable_graph_optimize=False,
+        )
+    return output
+
+
 @triton.jit
 def _read_c8_qk(
     query,

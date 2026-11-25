@@ -265,6 +265,16 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
         # Apply output transform (e.g. latent -> full dim)
         fused_output = self.apply_routed_output_transform(fused_output)
 
+        pair_width = getattr(self, "hy4_decode_return_pair", 0)
+        if pair_width:
+            from vllm_ascend.models.hy_v4_flash.attention import get_flash_attention_metadata
+            from vllm_ascend.models.hy_v4_flash.decode_fusions import is_decode_batch
+
+            if is_decode_batch(get_flash_attention_metadata()):
+                # HY4 consumes this pair with native AddRmsNorm. All routed
+                # and shared reductions/transforms have already completed.
+                return shared_output, fused_output
+
         if shared_output is not None:
             result = torch._foreach_add([shared_output], [fused_output])[0]
         else:

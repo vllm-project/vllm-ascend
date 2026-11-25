@@ -42,6 +42,13 @@ def _bool_env(name: str, default: bool) -> bool:
     raise ValueError(f"Invalid value for environment variable {name}: {raw!r}. Expected '0' or '1'.")
 
 
+def _hy4_bool_env(name: str, legacy: str, default: bool) -> bool:
+    """Prefer the public control; retain the experiment's 1-only alias semantics."""
+    if name in os.environ:
+        return _bool_env(name, default)
+    return os.getenv(legacy, "1" if default else "0") == "1"
+
+
 # The begin-* and end* here are used by the documentation generator
 # to extract the used env vars.
 
@@ -49,6 +56,59 @@ def _bool_env(name: str, default: bool) -> bool:
 
 
 env_variables: dict[str, Callable[[], Any]] = {
+    # HY4 target prep extra fusions; default False.
+    # Values: 0/1. Not sensitive. Legacy alias: HY4_TARGET_PREP_EXTRA_FUSIONS.
+    "VLLM_ASCEND_HY4_TARGET_PREP_EXTRA_FUSIONS": lambda: _hy4_bool_env(
+        "VLLM_ASCEND_HY4_TARGET_PREP_EXTRA_FUSIONS", "HY4_TARGET_PREP_EXTRA_FUSIONS", False
+    ),
+    # HY4 engram triton hash; default True.
+    # Values: 0/1. Not sensitive. Legacy alias: HY4_ENGRAM_TRITON_HASH.
+    "VLLM_ASCEND_HY4_ENGRAM_TRITON_HASH": lambda: _hy4_bool_env(
+        "VLLM_ASCEND_HY4_ENGRAM_TRITON_HASH", "HY4_ENGRAM_TRITON_HASH", True
+    ),
+    # HY4 engram batch hash; default True.
+    # Values: 0/1. Not sensitive. Legacy alias: HY4_ENGRAM_BATCH_HASH.
+    "VLLM_ASCEND_HY4_ENGRAM_BATCH_HASH": lambda: _hy4_bool_env(
+        "VLLM_ASCEND_HY4_ENGRAM_BATCH_HASH", "HY4_ENGRAM_BATCH_HASH", True
+    ),
+    # HY4 engram hash graph; default True.
+    # Values: 0/1. Not sensitive. Legacy alias: HY4_ENGRAM_HASH_GRAPH.
+    "VLLM_ASCEND_HY4_ENGRAM_HASH_GRAPH": lambda: _hy4_bool_env(
+        "VLLM_ASCEND_HY4_ENGRAM_HASH_GRAPH", "HY4_ENGRAM_HASH_GRAPH", True
+    ),
+    # HY4 draft prep graph; default True.
+    # Values: 0/1. Not sensitive. Legacy alias: HY4_DRAFT_PREP_GRAPH.
+    "VLLM_ASCEND_HY4_DRAFT_PREP_GRAPH": lambda: _hy4_bool_env(
+        "VLLM_ASCEND_HY4_DRAFT_PREP_GRAPH", "HY4_DRAFT_PREP_GRAPH", True
+    ),
+    # HY4 dfly pageable engram; default False.
+    # Values: 0/1. Not sensitive. Legacy alias: HY4_DFLY_PAGEABLE_ENGRAM.
+    "VLLM_ASCEND_HY4_DFLY_PAGEABLE_ENGRAM": lambda: _hy4_bool_env(
+        "VLLM_ASCEND_HY4_DFLY_PAGEABLE_ENGRAM", "HY4_DFLY_PAGEABLE_ENGRAM", False
+    ),
+    # Optional directory of per-device Mooncake JSON descriptors; default unset.
+    # Not sensitive. The original HY4_MOONCAKE_LOCAL_COMM_RES_DIR remains an alias.
+    "VLLM_ASCEND_HY4_MOONCAKE_LOCAL_COMM_RES_DIR": lambda: os.getenv(
+        "VLLM_ASCEND_HY4_MOONCAKE_LOCAL_COMM_RES_DIR", os.getenv("HY4_MOONCAKE_LOCAL_COMM_RES_DIR")
+    ),
+    # Independent HY4 graph-external embedding/RoPE-hash preparation controls.
+    # Valid values: 0/1; empty is disabled. Unset returns None and retains the
+    # legacy HY4_TARGET_PREP_EXTRA_FUSIONS group switch (default disabled).
+    # Explicit 0 disables that path even when the legacy group is enabled.
+    # Not sensitive: no credentials or keys. D-only pure Decode guards apply.
+    "VLLM_ASCEND_HY4_TARGET_EMBED_FUSION": lambda: (
+        None
+        if os.getenv("VLLM_ASCEND_HY4_TARGET_EMBED_FUSION") is None
+        else _bool_env("VLLM_ASCEND_HY4_TARGET_EMBED_FUSION", False)
+    ),
+    "VLLM_ASCEND_HY4_TARGET_ROPE_HASH_FUSION": lambda: (
+        None
+        if os.getenv("VLLM_ASCEND_HY4_TARGET_ROPE_HASH_FUSION") is None
+        else _bool_env("VLLM_ASCEND_HY4_TARGET_ROPE_HASH_FUSION", False)
+    ),
+    # Enable HY4 CPU-offloaded BF16 Engram row staging and native batch lookup.
+    # Default: False. Valid values: 0/1. Not sensitive; no credentials or keys.
+    "VLLM_ASCEND_HY4_ENGRAM_ROW_PREP": lambda: _bool_env("VLLM_ASCEND_HY4_ENGRAM_ROW_PREP", False),
     # max compile thread number for package building. Usually, it is set to
     # the number of CPU cores. If not set, the default value is None, which
     # means all number of CPU cores will be used.
