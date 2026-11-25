@@ -49,11 +49,10 @@ class _NpuAll2AllManager:
         #  shared_expert_rank_num, num_physical_experts] + table1(orig->dense)
         #  + table2(dense->orig). num_physical_experts is derived from the
         #  dead set and num_local_experts on every rebuild.
-        size = 4 + 2 * ep_world_size
-        self._elastic_info_host = torch.zeros(size, dtype=torch.int32)
-        if device is None:
-            device = torch.device("npu", torch.npu.current_device())
-        self._elastic_info = torch.zeros(size, dtype=torch.int32, device=device)
+        if device is not None:
+            size = 4 + 2 * ep_world_size
+            self._elastic_info_host = torch.zeros(size, dtype=torch.int32)
+            self._elastic_info = torch.zeros(size, dtype=torch.int32, device=device)
 
     def update_mask(self, rank: int, masked: bool = True) -> None:
         """Mark an EP rank dead/alive and rebuild elastic_info in place."""
