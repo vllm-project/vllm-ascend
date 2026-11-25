@@ -658,7 +658,8 @@ class AscendAttentionBackendImpl(AttentionImpl):
         # valid for every replay shape. The mask is only skipped on the eager
         # path, where the metadata describes the real batch.
         pre_tokens = self.sliding_window or SWA_INT_MAX
-        if self.sliding_window is not None and isinstance(getattr(attn_metadata, "diffusion_causal", None), torch.Tensor):
+        is_diffusion = isinstance(getattr(attn_metadata, "diffusion_causal", None), torch.Tensor)
+        if self.sliding_window is not None and is_diffusion:
             pre_tokens = self.sliding_window - 1
         return (
             attn_metadata.attn_mask,
