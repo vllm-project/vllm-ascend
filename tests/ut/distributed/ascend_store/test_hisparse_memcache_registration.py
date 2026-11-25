@@ -450,6 +450,21 @@ def test_hisparse_rejects_incomplete_raw_view_with_larger_storage(raw_view):
     assert config.kv_cache_tensors[0].size == reserved_bytes
 
 
+@pytest.mark.parametrize(
+    "overrides, message",
+    [
+        ({"address": 0}, "address and size"),
+        ({"size_bytes": 0}, "address and size"),
+        ({"alignment_bytes": 0}, "power of two"),
+        ({"alignment_bytes": 3}, "power of two"),
+        ({"address": 129, "alignment_bytes": 128}, "aligned to 128"),
+    ],
+)
+def test_buffer_descriptor_rejects_invalid_geometry(overrides, message):
+    with pytest.raises(ValueError, match=message):
+        BufferDescriptor(**{"address": 128, "size_bytes": 32, **overrides})
+
+
 def test_register_hisparse_views_requires_sized_host_pool():
     spec = AscendMLAAttentionSpec(block_size=128, num_kv_heads=1, head_size=128, dtype=torch.bfloat16)
     source = KVCacheGroupSpec(["source"], spec, host_resident=True, role=KVCacheGroupRole.HISPARSE_SOURCE)
@@ -594,7 +609,6 @@ def test_memcache_hisparse_get_fails_when_sdk_result_count_differs(memcache_back
 @pytest.mark.parametrize(
     ("extra_config", "kv_role"),
     [
-        ({"backend": "mooncake", "use_layerwise": True}, "kv_both"),
         ({"backend": "memcache", "use_layerwise": True}, "kv_both"),
         ({"backend": "memcache"}, "kv_consumer"),
     ],
@@ -637,15 +651,21 @@ def test_hisparse_rejects_partial_chunk_saves():
 
 
 @pytest.mark.parametrize("role", [KVConnectorRole.SCHEDULER, KVConnectorRole.WORKER])
-@pytest.mark.parametrize("backend", [{}, {"backend": "mooncake"}], ids=["default", "explicit"])
-def test_hisparse_rejects_mooncake_before_creating_pool(role, backend):
+@pytest.mark.parametrize(
+    ("extra_config", "error"),
+    [
+        pytest.param({}, r"timed-out PUT.*backend=memcache.*host_tcp", id="default-mooncake"),
+        pytest.param({"backend": "yuanrong"}, "does not support mixed Host/Device bulk transfers", id="yuanrong"),
+    ],
+)
+def test_hisparse_rejects_incompatible_backend_before_creating_pool(role, extra_config, error):
     config = SimpleNamespace(
         parallel_config=SimpleNamespace(rank=1),
         attention_config=SimpleNamespace(hisparse_config=SimpleNamespace(eager_host_mirror=True)),
         kv_transfer_config=SimpleNamespace(
             kv_role="kv_both",
             kv_connector="AscendStoreConnector",
-            kv_connector_extra_config={"load_async": True, **backend},
+            kv_connector_extra_config={"load_async": True, **extra_config},
         ),
     )
     cache = SimpleNamespace(kv_cache_groups=[SimpleNamespace(role="hisparse_source", layer_names=[])])
@@ -653,7 +673,7 @@ def test_hisparse_rejects_mooncake_before_creating_pool(role, backend):
     with (
         patch(f"{module}.create_kv_pool_scheduler") as scheduler,
         patch(f"{module}.create_kv_pool_worker") as worker,
-        pytest.raises(ValueError, match=r"timed-out PUT.*backend=memcache.*host_tcp"),
+        pytest.raises(ValueError, match=error),
     ):
         AscendStoreConnector(config, role, cache)
     scheduler.assert_not_called()

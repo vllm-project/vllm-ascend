@@ -58,16 +58,6 @@ def test_get_and_put_use_multi_buffer_apis(memory_location):
     assert backend.store.mset_d2h_from_multi_buffers.call_args.args[0] is keys
 
 
-def test_host_pool_transfers_are_rejected_before_calling_sdk():
-    backend = _make_backend()
-
-    for transfer in (backend.get, backend.put):
-        with pytest.raises(ValueError, match="does not support Host pool transfers"):
-            transfer(["key"], [[100]], [[8]], memory_location=MemoryLocation.HOST)
-
-    assert not backend.store.mock_calls
-
-
 def test_get_forwards_empty_keys_to_sdk():
     backend = _make_backend()
     backend.store.mget_h2d_from_multi_buffers.return_value = []

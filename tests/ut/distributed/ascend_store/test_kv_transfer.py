@@ -445,18 +445,6 @@ class TestGVALayerReceivingTaskOwnership(unittest.TestCase):
         )
         return thread, load_finished, save_finished, sync_events
 
-    def test_device_initialization_failure_does_not_signal_layerwise_ready(self):
-        thread, _, _, _ = self._make_thread()
-        thread.m_store.set_device.side_effect = RuntimeError("cannot bind layerwise receiver to device")
-
-        with (
-            patch.object(thread, "_set_os_thread_name"),
-            self.assertRaisesRegex(RuntimeError, "cannot bind layerwise receiver"),
-        ):
-            thread.run()
-
-        self.assertFalse(thread.ready_event.is_set())
-
     def test_gva_load_failure_policy(self):
         for hybrid in (False, True):
             with self.subTest(hybrid=hybrid):

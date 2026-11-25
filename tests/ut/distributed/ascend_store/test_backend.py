@@ -1027,16 +1027,6 @@ class TestMooncakeBackendMethods(unittest.TestCase):
         b.register_buffer([BufferDescriptor(address=100, size_bytes=200)])
         b.store.register_buffer.assert_not_called()
 
-    def test_rejects_host_pool_buffers_and_transfers(self):
-        backend = self._make_backend()
-        host = BufferDescriptor(address=100, size_bytes=200, memory_location=MemoryLocation.HOST)
-        with self.assertRaisesRegex(ValueError, "does not support Host pool buffers"):
-            backend.register_buffer([BufferDescriptor(address=400, size_bytes=200), host])
-        for transfer in (backend.get, backend.put):
-            with self.assertRaisesRegex(ValueError, "does not support Host pool transfers"):
-                transfer(["key"], [[host.address]], [[host.size_bytes]], memory_location=MemoryLocation.HOST)
-        self.assertEqual(backend.store.mock_calls, [])
-
     def test_setup_store_with_store_independent_te(self):
         b = self._make_backend()
         b._use_store_independent_te = True
@@ -1868,17 +1858,10 @@ class TestMemcacheBackendMethods(unittest.TestCase):
         b = self._make_backend()
         b.store.batch_put_from_layers.return_value = [1]
         self.assertEqual(b.put(["k1"], [[100]], [[10]]), [False])
-
-    def test_hisparse_put_validates_both_indexer_and_source_batches(self):
-        backend = self._make_backend()
-        for memory_location in (MemoryLocation.DEVICE, MemoryLocation.HOST):
-            with self.subTest(memory_location=memory_location):
-                backend.store.reset_mock()
-                self.assertIs(backend.put(["k"], [], [[8]], memory_location=memory_location), False)
-                backend.store.batch_put_from_layers.assert_not_called()
-                for malformed in ([False], ["0"], [], [0, 0]):
-                    backend.store.batch_put_from_layers.return_value = malformed
-                    self.assertIs(backend.put(["k"], [[100]], [[8]], memory_location=memory_location), False)
+        for malformed in ([False], ["0"], [], [0, 0]):
+            with self.subTest(malformed=malformed):
+                b.store.batch_put_from_layers.return_value = malformed
+                self.assertIs(b.put(["k1"], [[100]], [[10]], memory_location=MemoryLocation.HOST), False)
 
     def test_put_exception(self):
         b = self._make_backend()

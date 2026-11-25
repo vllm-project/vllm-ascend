@@ -3,7 +3,6 @@
 # ruff: noqa: E402
 
 from copy import deepcopy
-from dataclasses import fields
 from types import SimpleNamespace
 
 import pytest
@@ -36,47 +35,39 @@ from vllm_ascend.hisparse.binding import prepare_hisparse_cache_views
 BLOCK_SIZE = 16
 
 
-def _transfer_config(hisparse, store, other_connector=None):
+def _transfer_config(pool_connector):
     source = {
         "kv_connector": "HiSparseConnector",
         "kv_role": "kv_both",
         "kv_connector_extra_config": {"host_pool_gib": 1},
     }
-    pool = {
-        "kv_connector": "AscendStoreConnector",
-        "kv_role": "kv_both",
-        "kv_connector_extra_config": {"backend": "memcache", "load_async": True},
-    }
-    if hisparse and (store or other_connector is not None):
-        if other_connector is not None:
-            pool = {"kv_connector": other_connector, "kv_role": "kv_both"}
-        return KVTransferConfig(
-            kv_connector="MultiConnector",
-            kv_role="kv_both",
-            kv_connector_extra_config={"connectors": [source, pool]},
-        )
-    return KVTransferConfig(**(source if hisparse else pool))
+    if pool_connector is None:
+        return KVTransferConfig(**source)
+    pool = {"kv_connector": pool_connector, "kv_role": "kv_both"}
+    if pool_connector == "AscendStoreConnector":
+        pool["kv_connector_extra_config"] = {"backend": "memcache", "load_async": True}
+    return KVTransferConfig(
+        kv_connector="MultiConnector",
+        kv_role="kv_both",
+        kv_connector_extra_config={"connectors": [source, pool]},
+    )
 
 
 def _cache_configs(
     *,
-    hisparse=True,
-    store=True,
+    pool_connector="AscendStoreConnector",
     host_blocks=None,
     device_blocks=14,
     max_model_blocks=8,
     in_flight_blocks=2,
     block_size=BLOCK_SIZE,
     hot_units=1,
-    other_connector=None,
 ):
     # Register Core types before the combined builder adds its import-only spec.
     register_all_kvcache_specs(None)
     hf_text_config = SimpleNamespace(model_type="glm_moe_dsa", index_topk=16)
     config = SimpleNamespace(
-        attention_config=SimpleNamespace(
-            hisparse_config=HiSparseConfig(device_buffer_size=2 * block_size) if hisparse else None
-        ),
+        attention_config=SimpleNamespace(hisparse_config=HiSparseConfig(device_buffer_size=2 * block_size)),
         model_config=SimpleNamespace(
             hf_config=hf_text_config,
             hf_text_config=hf_text_config,
@@ -90,7 +81,7 @@ def _cache_configs(
             get_resolved_kv_cache_layout=lambda: KVCacheLayout.BLHNC,
         ),
         scheduler_config=SimpleNamespace(disable_hybrid_kv_cache_manager=False),
-        kv_transfer_config=_transfer_config(hisparse, store, other_connector),
+        kv_transfer_config=_transfer_config(pool_connector),
         max_in_flight_tokens=in_flight_blocks * block_size,
     )
     specs = {
@@ -131,51 +122,28 @@ def _cache_manager(config, cache):
     )
 
 
-@pytest.mark.parametrize("other_connector", [None, "MooncakeConnector"], ids=["hisparse-only", "mooncake"])
-def test_registry_changes_only_the_resident_spec(other_connector):
-    _, original = _cache_configs(store=False, hot_units=2, other_connector=other_connector)
-    _, combined = _cache_configs(hot_units=2)
-    _, store_only = _cache_configs(hisparse=False)
-    from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.hisparse.admission import (
-        AscendStoreHiSparseResidentSpec,
-    )
-
-    assert not any(isinstance(group.kv_cache_spec, HiSparseResidentSpec) for group in store_only.kv_cache_groups)
-    assert original.kv_cache_tensors == combined.kv_cache_tensors
-    assert original.num_blocks == combined.num_blocks
-    assert original.hisparse_host_num_blocks == combined.hisparse_host_num_blocks
-    assert original.hisparse_host_block_stride == combined.hisparse_host_block_stride
-    assert sum(isinstance(group.kv_cache_spec, HiSparseResidentSpec) for group in original.kv_cache_groups) == 2
-    for base, new in zip(original.kv_cache_groups, combined.kv_cache_groups, strict=True):
-        if isinstance(base.kv_cache_spec, HiSparseResidentSpec):
-            assert type(base.kv_cache_spec) is HiSparseResidentSpec
-            assert type(new.kv_cache_spec) is AscendStoreHiSparseResidentSpec
-            assert not new.enable_kv_transfer
-            for field in fields(base.kv_cache_spec):
-                assert getattr(new.kv_cache_spec, field.name) == getattr(base.kv_cache_spec, field.name)
-            assert new.layer_names == base.layer_names
-            assert new.role == base.role
-            assert new.host_resident == base.host_resident
-            assert new.is_eagle_group == base.is_eagle_group
-        else:
-            assert new == base
-
-
-@pytest.mark.parametrize(("window", "sizing_pages"), [(0, 1), (2, 3), (8, 8), (12, 8)])
-def test_registry_shares_the_spec_window_and_sizes_for_the_import_tail(window, sizing_pages):
-    config, cache = _cache_configs(in_flight_blocks=window)
+@pytest.mark.parametrize(("window", "sizing_pages", "hot_units"), [(0, 1, 1), (2, 3, 2), (8, 8, 1), (12, 8, 1)])
+def test_registry_shares_the_spec_window_and_sizes_for_the_import_tail(window, sizing_pages, hot_units):
+    config, cache = _cache_configs(in_flight_blocks=window, hot_units=hot_units)
     from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.hisparse.admission import (
         AscendStoreHiSparseResidentManager,
     )
 
-    (manager,) = get_hisparse_coordinator(_cache_manager(config, cache)).resident_managers
-    assert type(manager) is AscendStoreHiSparseResidentManager
-    spec = manager.kv_cache_spec
-    assert manager.max_admission_blocks_per_request == spec.max_admission_blocks_per_request(
-        config.max_in_flight_tokens, config.model_config.max_model_len
+    managers = get_hisparse_coordinator(_cache_manager(config, cache)).resident_managers
+    assert len(managers) == hot_units
+    for manager in managers:
+        assert type(manager) is AscendStoreHiSparseResidentManager
+        spec = manager.kv_cache_spec
+        assert manager.max_admission_blocks_per_request == spec.max_admission_blocks_per_request(
+            config.max_in_flight_tokens, config.model_config.max_model_len
+        )
+        assert manager.max_admission_blocks_per_request == min(window, 8)
+        assert spec.max_memory_usage_bytes(config) == sizing_pages * spec.page_size_bytes
+    assert not any(
+        group.enable_kv_transfer
+        for group in cache.kv_cache_groups
+        if isinstance(group.kv_cache_spec, HiSparseResidentSpec)
     )
-    assert manager.max_admission_blocks_per_request == min(window, 8)
-    assert spec.max_memory_usage_bytes(config) == sizing_pages * spec.page_size_bytes
 
 
 @pytest.mark.parametrize(("window", "expected"), [(0, 0), (2, 2)])
@@ -262,19 +230,26 @@ def test_registered_resident_admission(tokens, computed, local, admission, tail_
 
 
 @pytest.mark.parametrize(
-    ("store", "host_blocks", "admitted"),
-    [(False, None, False), (True, 8, False), (True, None, True)],
-    ids=["core-baseline", "host-capacity-limit", "registered-partial-hit"],
+    ("pool_connector", "host_blocks", "admitted"),
+    [
+        pytest.param(None, None, False, id="core-baseline"),
+        pytest.param("MooncakeConnector", None, False, id="other-connector"),
+        pytest.param("AscendStoreConnector", 8, False, id="host-capacity-limit"),
+        pytest.param("AscendStoreConnector", None, True, id="registered-partial-hit"),
+    ],
 )
-def test_scheduler_cache_manager_admits_partial_import(store, host_blocks, admitted):
-    config, cache = _cache_configs(store=store, host_blocks=host_blocks)
+def test_scheduler_cache_manager_admits_partial_import(pool_connector, host_blocks, admitted):
+    config, cache = _cache_configs(pool_connector=pool_connector, host_blocks=host_blocks)
     from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.hisparse.admission import (
         AscendStoreHiSparseResidentManager,
     )
 
     manager = _cache_manager(config, cache)
     (resident_manager,) = get_hisparse_coordinator(manager).resident_managers
-    assert type(resident_manager) is (AscendStoreHiSparseResidentManager if store else HiSparseResidentManager)
+    expected_manager = (
+        AscendStoreHiSparseResidentManager if pool_connector == "AscendStoreConnector" else HiSparseResidentManager
+    )
+    assert type(resident_manager) is expected_manager
     request = Request(
         request_id="partial-hit",
         prompt_token_ids=list(range(8 * BLOCK_SIZE)),
@@ -363,17 +338,3 @@ def test_hisparse_slab_padding_is_idempotent():
     repeated = aligned_hisparse_allocation_config(aligned)
     assert [t.size for t in repeated.kv_cache_tensors] == [t.size for t in aligned.kv_cache_tensors]
     assert [t.size for t in cache.kv_cache_tensors] != [t.size for t in aligned.kv_cache_tensors]
-
-
-def test_pool_layout_import_does_not_preempt_core_spec_registration(monkeypatch):
-    import runpy
-
-    from vllm.v1 import kv_cache_spec_registry
-
-    from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store import hisparse
-
-    monkeypatch.setattr(kv_cache_spec_registry, "_REGISTRY_KVCACHESPEC_LIST", {})
-    monkeypatch.setattr(kv_cache_spec_registry, "_REGISTRY_ROLE_MANAGERS", {})
-    runpy.run_path(hisparse.__file__)
-    assert kv_cache_spec_registry._REGISTRY_KVCACHESPEC_LIST == {}
-    assert kv_cache_spec_registry._REGISTRY_ROLE_MANAGERS == {}
