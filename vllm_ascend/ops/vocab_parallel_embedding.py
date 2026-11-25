@@ -57,6 +57,9 @@ from vllm_ascend.utils import (
 )
 
 
+_LOGITS_ALL_TO_ALL_MIN_ROWS = 24
+
+
 class VocabParallelMode(Enum):
     """Vocabulary-weight layout and its corresponding execution strategy.
 
@@ -652,7 +655,20 @@ class AscendLogitsProcessor(LogitsProcessor):
         # each rank already holds the full vocab logits locally and no
         # all-gather is needed.
         if lm_head.tp_size > 1:
-            logits = self._gather_logits(logits)
+            group = get_tp_group()
+            if logits.shape[0] >= _LOGITS_ALL_TO_ALL_MIN_ROWS and group.world_size > 1:
+                # Avoid lazy AICPU AllGatherConcur channel creation during
+                # high-concurrency graph replay. Keep the cheaper AllGather
+                # for small batches.
+                rows, vocab_per_rank = logits.shape
+                repeated = logits.repeat(group.world_size, 1)
+                exchanged = torch.empty_like(repeated)
+                dist.all_to_all_single(exchanged, repeated, group=group.device_group)
+                logits = exchanged.view(group.world_size, rows, vocab_per_rank).permute(1, 0, 2).reshape(
+                    rows, group.world_size * vocab_per_rank
+                )
+            else:
+                logits = self._gather_logits(logits)
 
         # Remove paddings in vocab (if any)
         if logits is not None:
