@@ -172,7 +172,7 @@ def supports_component_major_mla_pd(vllm_config: VllmConfig) -> bool:
     metadata distinguishing component-major from token-fused FlashMLA pages.
     This helper identifies connector support, not cross-endpoint agreement.
     """
-    kv_transfer_config = vllm_config.kv_transfer_config
+    kv_transfer_config = getattr(vllm_config, "kv_transfer_config", None)
     if kv_transfer_config is None:
         return True
 
@@ -209,7 +209,7 @@ class AscendMLAAttentionSpec(MLAAttentionSpec):
     # that fixes runtime cache metadata ownership.
     kv_lora_rank: int | None = None
     qk_rope_head_dim: int | None = None
-    mla_cache_layout: Literal["component_major", "token_interleaved"] = "component_major"
+    mla_cache_layout: Literal["plane_major", "component_major", "token_interleaved"] = "component_major"
     # Split-cache RoPE storage dtype; None means spec.dtype. Fused caches use spec.dtype.
     rope_dtype: torch.dtype | None = None
     scale_dim: int = 0

@@ -1,5 +1,5 @@
 from copy import copy
-from dataclasses import dataclass, fields
+from dataclasses import dataclass, fields, replace
 from typing import Any, ClassVar, NamedTuple, TypeVar
 
 import numpy as np
@@ -271,7 +271,26 @@ class AscendMLAAttention(MLAAttention):
             dtype=dtype,
             cache_dtype_str=cache_dtype_str,
         )
-        return AscendMLAAttentionSpec(**values)
+        result = AscendMLAAttentionSpec(**values)
+        backend = self.get_attn_backend() if hasattr(self, "attn_backend") else None
+        if (
+            result.mla_cache_layout == "component_major"
+            and isinstance(backend, type)
+            and issubclass(backend, AscendMLABackend)
+            and getattr(self, "indexer", None) is None
+            and model_type != "kimi_linear"
+            and not (use_sfa_turboquant or use_sfa_c8 or use_sfa_hif8)
+            and not result.store_on_host
+            and result.supports_single_raw_backing
+            and result.page_size_bytes == result.real_page_size_bytes
+            and not enable_sfa(vllm_config)
+            and not supports_strided_mla_cache(vllm_config, self, result)
+        ):
+            # Operators with AutoContiguous cache bindings (PCP, FA quant, NZ,
+            # FP16) and connectors without component-major page transfer
+            # (e.g. MooncakeConnectorV1) require contiguous NoPE/RoPE planes.
+            result = replace(result, mla_cache_layout="plane_major")
+        return result
 
     def _get_kv_cache_format(self, spec: MLAAttentionSpec) -> tuple[int, torch.dtype, str | None, bool, bool, bool]:
         """Resolve cache dimensions, dtype and SFA flags from the execution format."""
