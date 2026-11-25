@@ -58,7 +58,16 @@ class TestAscendW8A8DynamicLinearMethod(TestBase):
         layer.weight.data = torch.randint(-128, 127, (128, 256), dtype=torch.int8)
         layer.weight_scale.data = torch.randn(256, 1, dtype=torch.bfloat16)
         layer.weight_offset.data = torch.randn(256, 1, dtype=torch.bfloat16)
-        with patch("vllm_ascend.quantization.methods.w8a8.w8a8_dynamic.maybe_trans_nz", side_effect=lambda x: x):
+        with (
+            patch(
+                "vllm_ascend.quantization.methods.w8a8.w8a8_dynamic.maybe_trans_nz",
+                side_effect=lambda x: x,
+            ),
+            patch(
+                "vllm_ascend.quantization.methods.w8a8.w8a8_dynamic.get_current_vllm_config",
+                return_value=SimpleNamespace(snapshot_config=None),
+            ),
+        ):
             self.method.process_weights_after_loading(layer)
         self.assertEqual(layer.weight_scale_fp32.dtype, torch.float32)
         self.assertEqual(layer.weight_scale.data.shape, (256,))
@@ -218,7 +227,9 @@ class TestAscendW8A8FusedMoEMethod(TestBase):
 
     @patch("torch_npu.npu_format_cast")
     @patch("vllm_ascend.quantization.methods.w8a8.w8a8_dynamic.get_ascend_config")
-    def test_process_weights_after_loading(self, mock_get_config, mock_format_cast):
+    @patch("vllm_ascend.quantization.methods.w8a8.w8a8_dynamic.get_current_vllm_config")
+    def test_process_weights_after_loading(self, mock_vllm_config, mock_get_config, mock_format_cast):
+        mock_vllm_config.return_value = SimpleNamespace(snapshot_config=None)
         mock_config = MagicMock()
         mock_config.enable_fused_mc2 = 1
         mock_get_config.return_value = mock_config

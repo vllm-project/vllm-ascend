@@ -930,6 +930,57 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         self.slot_mapping = torch.zeros(self.slot_mapping_shape, dtype=torch.int32, device=self.device)
         self.compressor_metadata_buffers: CompressorMetadataOutput | None = None
 
+    def reset_runtime_state_after_snapshot_restore(self) -> None:
+        """Clear DSA request metadata while preserving feature configuration."""
+        self.num_decodes = 0
+        self.num_prefills = 0
+        self.num_decode_tokens = 0
+        self.num_prefill_tokens = 0
+        self.num_actual_tokens = None
+        self.block_table = None
+        self.seq_lens = None
+        self._device_metadata_tasks = ()
+        # Recreated from host-side cache geometry before metadata consumption.
+        self.tq_group_block_sizes = None
+
+        if self.compressor_metadata_buffers is not None:
+            for tensor in self.compressor_metadata_buffers[:2]:
+                tensor.zero_()
+
+        if self.common_ratio_to_sas_metadata is not None:
+            self.common_ratio_to_sas_metadata.clear()
+
+        for tensor in (
+            self.start_pos_prefill,
+            self.sas_metadata_buffer,
+            self.qli_metadata_buffer,
+            self.qli_seqused_k,
+            self.qli_cmp_residual_k,
+            self.cu_seqlens_ori_kv,
+            self.cu_seqlens_cmp_kv,
+            self.seqused_q,
+            self._zero_i32,
+            self.slot_mapping,
+        ):
+            tensor.zero_()
+
+        for attr_name in ("spec_slot_mapping", "spec_sas_metadata"):
+            tensors = getattr(self, attr_name, None)
+            if tensors is not None:
+                for tensor in tensors:
+                    tensor.zero_()
+        if self.dspark_swa_indices_buffer is not None:
+            self.dspark_swa_indices_buffer.zero_()
+
+    def restore_constants_after_snapshot_restore(self) -> None:
+        """Restore builder-owned constants allocated after model inventory capture."""
+        if self.hadamard is not None:
+            from scipy.linalg import hadamard  # type: ignore[import-untyped]
+
+            dim = self.hadamard.shape[0]
+            restored = torch.tensor(hadamard(dim, dtype=float), dtype=torch.float, device=self.device)
+            self.hadamard.copy_(restored.to(torch.bfloat16))
+
     def _init_hadamard(self, layer_names: list[str]) -> None:
         hf_config = self.model_config.hf_config
         if hf_config.model_type != "deepseek_v4":
@@ -2188,6 +2239,10 @@ class AscendDSAImpl(AttentionImplBase[Any]):
 
         ascend_config = get_ascend_config()
         self.multistream_dsv4_dsa_overlap = ascend_config.multistream_dsv4_dsa_overlap
+
+    def restore_constants_after_snapshot_restore(self) -> None:
+        if self.turboquant is not None:
+            self.turboquant.restore_constants_after_snapshot_restore()
 
     def _write_kv_cache(self, cache, kv, slot_mapping, *, quantize: bool):
         if self.turboquant is not None:

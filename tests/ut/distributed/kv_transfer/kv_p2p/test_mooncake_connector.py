@@ -218,6 +218,41 @@ def test_sender_endpoint_includes_pipeline_and_prefill_context_ranks(pp_rank, pc
 
 
 class TestKVCacheSendingThread(unittest.TestCase):
+    def test_snapshot_gate_preserves_blocking_receive_when_disabled(self):
+        module = sys.modules[KVCacheSendingThread.__module__]
+        for enabled in (False, True):
+            with self.subTest(enabled=enabled):
+                config = MockVllmConfig()
+                config.snapshot_config = object() if enabled else None
+                sender = KVCacheSendingThread(
+                    vllm_config=config,
+                    tp_rank=0,
+                    prefill_tp_size=1,
+                    local_engine_id="prefill-engine",
+                    side_channel_host="127.0.0.1",
+                    side_channel_port=5555,
+                    metadata=make_agent_metadata(engine_id="prefill-engine"),
+                    ready_event=threading.Event(),
+                    kv_caches={},
+                    pcp_rank=0,
+                )
+                socket = MagicMock(spec=Socket)
+                socket.recv_multipart.side_effect = SystemExit
+                with patch.object(module.zmq, "Poller") as poller_cls:
+                    if enabled:
+                        poller_cls.return_value.poll.return_value = {socket: zmq.POLLIN}
+                    with self.assertRaises(SystemExit):
+                        sender.run_busy_loop(socket)
+                self.assertEqual(poller_cls.call_count, int(enabled))
+                socket.recv_multipart.assert_called_once_with()
+
+                if enabled:
+                    sender.stop()
+                    self.assertTrue(sender._stop_event.is_set())
+                else:
+                    with self.assertRaisesRegex(RuntimeError, "only available when snapshot is enabled"):
+                        sender.stop()
+
     def test_multiple_done_messages_complete_only_after_all_pulls(self):
         """UT-IT: real sender counter gates completion; peers may finish in either order.
 
@@ -1811,6 +1846,7 @@ class MockVllmConfig:
         self.kv_transfer_config = MagicMock()
         self.scheduler_config = MagicMock(disable_hybrid_kv_cache_manager=True)
         self.speculative_config = None
+        self.snapshot_config = None
         self.model_config.use_mla = False
         self.model_config.is_deepseek_mla = False
         self.model_config.hf_text_config = types.SimpleNamespace(
@@ -2818,6 +2854,19 @@ class TestMooncakeConnector(unittest.TestCase):
         self.assertIsNotNone(connector.connector_scheduler)
         self.assertIsNone(connector.connector_worker)
 
+    def test_rebuild_refreshes_scheduler_identity(self):
+        kv_config = MagicMock(engine_id="engine-old")
+        scheduler = MooncakeConnectorScheduler.__new__(MooncakeConnectorScheduler)
+        scheduler.engine_id = "engine-old"
+        scheduler.side_channel_host = "10.0.0.1"
+        scheduler.vllm_config = MagicMock(kv_transfer_config=kv_config)
+
+        scheduler.rebuild_kv_transfer_endpoint("10.0.0.2", "engine-new")
+
+        self.assertEqual(scheduler.engine_id, "engine-new")
+        self.assertEqual(scheduler.side_channel_host, "10.0.0.2")
+        self.assertEqual(kv_config.engine_id, "engine-new")
+
     @patch.object(MooncakeConnectorScheduler, "get_num_new_matched_tokens")
     def test_get_num_new_matched_tokens(self, mock_method):
         with (
@@ -3562,6 +3611,116 @@ class TestMooncakeConnectorWorker(unittest.TestCase):
         worker.register_kv_caches(self.kv_caches)
         self.assertIsNone(worker.kv_send_thread)
         self.assertIsNotNone(worker.kv_recv_thread)
+
+    def test_rebuild_stops_listener_and_destroys_old_engine_before_recreate(self):
+        events = []
+        old_engine = MagicMock()
+        old_engine.unregister_memory.side_effect = lambda _ptr: (events.append("unregister"), 0)[1]
+        old_send = MagicMock()
+        old_send.stop.side_effect = lambda: events.append("stop")
+        old_send.join.side_effect = lambda timeout: events.append(f"join:{timeout}")
+        old_send.is_alive.return_value = False
+        new_send = MagicMock()
+        new_send.start.side_effect = lambda: events.append("start")
+        new_engine = MagicMock()
+        new_engine.get_rpc_port.return_value = 9091
+
+        worker = object.__new__(MooncakeConnectorWorker)
+        worker.vllm_config = types.SimpleNamespace(
+            kv_transfer_config=types.SimpleNamespace(is_kv_producer=True, is_kv_consumer=False)
+        )
+        worker.engine = old_engine
+        worker.kv_send_thread = old_send
+        worker.kv_recv_thread = None
+        worker._registered_regions = types.SimpleNamespace(ptrs=[0x1000], lengths=[4096])
+        worker._engine_device_name = "npu"
+        worker.xfer_handshake_metadata = MagicMock()
+        worker.tp_rank = 0
+        worker._prefill_tp_size = 1
+        worker.engine_id = "engine"
+        worker.side_channel_port = 12345
+        worker.kv_caches = {}
+        worker.pcp_rank = 0
+
+        with (
+            patch(
+                "vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector.global_te.reset",
+                side_effect=lambda: events.append("reset"),
+            ),
+            patch(
+                "vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector.global_te.transfer_engine",
+                old_engine,
+            ),
+            patch(
+                "vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector.global_te.get_transfer_engine",
+                side_effect=lambda *_args, **_kwargs: (events.append("get_engine"), new_engine)[1],
+            ),
+            patch(
+                "vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector.global_te.register_buffer",
+                side_effect=lambda *_args: events.append("register"),
+            ),
+            patch(
+                "vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector.KVCacheSendingThread",
+                return_value=new_send,
+            ),
+            patch("gc.collect", side_effect=lambda: events.append("gc")),
+        ):
+            worker.rebuild_kv_transfer_endpoint("10.0.0.8", "engine-new")
+
+        self.assertEqual(
+            events,
+            ["stop", "join:10", "unregister", "reset", "gc", "get_engine", "register", "start"],
+        )
+        self.assertIs(worker.engine, new_engine)
+        self.assertIs(worker.kv_send_thread, new_send)
+        self.assertEqual(worker.engine_id, "engine-new")
+        self.assertEqual(worker.xfer_handshake_metadata.engine_id, "engine-new")
+
+    def test_sync_engine_id_migrates_consumer_local_metadata(self):
+        local_addrs = [[0x1000], [0x2000]]
+        thread = types.SimpleNamespace(
+            local_engine_id="engine-old",
+            local_handshake_port=12345,
+            remote_metadata_lock=threading.Lock(),
+            kv_caches_base_addr=defaultdict(
+                dict,
+                {
+                    "engine-old": {12345: local_addrs},
+                    "remote-old": {22345: [[0x3000]]},
+                },
+            ),
+            remote_te_port=defaultdict(dict, {"remote-old": {22345: 9090}}),
+            remote_block_size_scale=defaultdict(dict, {"remote-old": {22345: [[1]]}}),
+            remote_block_stride_per_addr=defaultdict(dict, {"remote-old": {22345: [[1024]]}}),
+            remote_kv_group2layeridx=defaultdict(dict, {"remote-old": {22345: {0: ({}, [0])}}}),
+        )
+        metadata = types.SimpleNamespace(engine_id="consumer-metadata")
+        kv_cfg = types.SimpleNamespace(
+            engine_id="engine-old",
+            is_kv_producer=False,
+            is_kv_consumer=True,
+        )
+        worker = object.__new__(MooncakeConnectorWorker)
+        worker.engine_id = "engine-old"
+        worker.vllm_config = types.SimpleNamespace(kv_transfer_config=kv_cfg)
+        worker.xfer_handshake_metadata = metadata
+        worker.kv_recv_thread = thread
+
+        worker._sync_engine_id_after_snapshot("engine-new")
+
+        self.assertEqual(worker.engine_id, "engine-new")
+        self.assertEqual(kv_cfg.engine_id, "engine-new")
+        self.assertEqual(thread.local_engine_id, "engine-new")
+        self.assertEqual(
+            thread.kv_caches_base_addr,
+            {"engine-new": {12345: local_addrs}},
+        )
+        self.assertEqual(thread.remote_te_port, {})
+        self.assertEqual(thread.remote_block_size_scale, {})
+        self.assertEqual(thread.remote_block_stride_per_addr, {})
+        self.assertEqual(thread.remote_kv_group2layeridx, {})
+        # Consumer metadata is not exposed by a send thread.
+        self.assertEqual(metadata.engine_id, "consumer-metadata")
 
     def test_register_kv_caches_mla_case(self):
         self.vllm_config.model_config.is_deepseek_mla = True

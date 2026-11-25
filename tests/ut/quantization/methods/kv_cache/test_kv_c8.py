@@ -351,6 +351,33 @@ class TestAscendFAQuantAttentionMethodProcessWeights(unittest.TestCase):
         self.assertEqual(layer.quant_kscale.shape, (1, 4))
         self.assertEqual(layer.quant_kscale.dtype, torch.float32)
 
+    def test_process_weights_restores_derived_scales(self):
+        self.layer.fa_k.scale = nn.Parameter(torch.tensor([[2.0]], dtype=torch.float16), requires_grad=False)
+        self.layer.fa_k.offset = nn.Parameter(torch.tensor([[1]], dtype=torch.int8), requires_grad=False)
+        self.method.kv_lora_rank = 4
+        self.method.process_weights_after_loading(self.layer)
+        self.assertNotIn("quant_kscale", self.layer.state_dict())
+        self.assertNotIn("fak_descale_reciprocal", self.layer.state_dict())
+        expected = self.layer.quant_kscale.clone()
+        self.layer.fak_descale_reciprocal.zero_()
+        self.layer.quant_kscale.zero_()
+
+        self.method.process_weights_after_loading(self.layer)
+
+        torch.testing.assert_close(self.layer.quant_kscale, expected)
+        torch.testing.assert_close(
+            self.layer.fak_descale_reciprocal,
+            1.0 / self.layer.fa_k.scale.squeeze().unsqueeze(0),
+        )
+
+    def test_snapshot_disabled_does_not_register_derived_scales(self):
+        self.mock_config.snapshot_config = None
+        self.layer.fa_k.scale = nn.Parameter(torch.tensor([[2.0]]), requires_grad=False)
+        self.layer.fa_k.offset = nn.Parameter(torch.tensor([[0]], dtype=torch.int8), requires_grad=False)
+        self.method.process_weights_after_loading(self.layer)
+        self.assertNotIn("quant_kscale", self.layer.state_dict())
+        self.assertNotIn("fak_descale_reciprocal", self.layer.state_dict())
+
 
 class TestIntegration(unittest.TestCase):
     """Integration tests for the complete kv_c8 functionality"""
@@ -610,6 +637,19 @@ class TestAscendC8AttentionBackendImplScales(TestBase):
         layer.k_cache_scale.data = torch.ones(32, dtype=self.original_dtype) * 99
         impl._prepare_c8_scales(layer, torch.device("cpu"))
         self.assertTrue(torch.allclose(layer._c8_k_scale, k_scale_after_first))
+
+    @patch("vllm_ascend.attention.attention_v1.get_tensor_model_parallel_rank", return_value=0)
+    @patch("vllm_ascend.attention.attention_v1.get_tensor_model_parallel_world_size", return_value=1)
+    def test_reset_c8_scale_state_rebuilds_from_parameters(self, mock_tp_size, mock_tp_rank):
+        impl = self._make_impl()
+        layer = self._make_layer()
+        impl._prepare_c8_scales(layer, torch.device("cpu"))
+        layer.k_cache_scale.data.fill_(2)
+
+        impl.reset_runtime_state_after_snapshot_restore()
+        impl._prepare_c8_scales(layer, torch.device("cpu"))
+
+        self.assertTrue(torch.all(layer._c8_k_scale == 2))
 
     @patch("vllm_ascend.attention.attention_v1.get_tensor_model_parallel_rank", return_value=0)
     @patch("vllm_ascend.attention.attention_v1.get_tensor_model_parallel_world_size", return_value=1)

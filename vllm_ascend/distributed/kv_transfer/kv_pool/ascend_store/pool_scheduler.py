@@ -191,6 +191,12 @@ class BaseKVPoolScheduler(ABC):
     def _use_hybrid(self, vllm_config: VllmConfig, kv_cache_groups: list[Any] | None) -> bool:
         return uses_hybrid_kv_cache(vllm_config.scheduler_config, kv_cache_groups)
 
+    def prepare_for_snapshot_restore(self) -> None:
+        self.store_scheduler.prepare_for_snapshot_restore()
+
+    def rebuild_kv_transfer_endpoint(self, local_ip: str, new_engine_id: str | None = None) -> None:
+        self.store_scheduler.reset_after_snapshot(local_ip)
+
     def _get_or_create_request_tracker(self, req_id: str) -> RequestTracker:
         tracker = self._request_trackers.get(req_id)
         if tracker is None:

@@ -141,10 +141,12 @@ class MooncakeSchedulerSendingThread(MooncakeMetadataThread):
             except queue.Empty:
                 return finished
 
-    def shutdown(self) -> None:
+    def shutdown(self, timeout: float | None = None) -> None:
         self.stop_event.set()
         if self.ident is not None:
-            self.join()
+            self.join(timeout=timeout)
+            if self.is_alive():
+                raise RuntimeError("Mooncake scheduler sending thread did not stop")
         with self.state_lock:
             self.delayed_free_requests.clear()
             self.renewed_requests.clear()
@@ -300,12 +302,14 @@ class MooncakeSchedulerRecvingThread(threading.Thread):
     def add_request(self, remote_host: str, remote_port: int, request_id: str) -> None:
         self.request_queue.put((remote_host, remote_port, request_id))
 
-    def shutdown(self) -> None:
+    def shutdown(self, timeout: float | None = None) -> None:
         if not self.stop_event.is_set():
             self.stop_event.set()
             self.request_queue.put(None)
         if self.ident is not None:
-            self.join()
+            self.join(timeout=timeout)
+            if self.is_alive():
+                raise RuntimeError("Mooncake scheduler receiving thread did not stop")
         # Also handle shutdown before start and a sentinel enqueued while the
         # thread was already completing its final cleanup.
         self._clear_pending_requests()
@@ -496,6 +500,34 @@ class MooncakePullConnectorScheduler(MooncakeBaseConnectorScheduler):
         self._reqs_in_batch.clear()
         self._reqs_recv_info.clear()
         self._validated_producer_leases.clear()
+
+    def prepare_for_snapshot_restore(self) -> None:
+        for name in ("_sending_thread", "_recving_thread"):
+            thread = getattr(self, name)
+            if thread is not None:
+                thread.shutdown(timeout=10)
+                setattr(self, name, None)
+        self._reqs_need_recv.clear()
+        self._reqs_need_send.clear()
+        self._reqs_in_batch.clear()
+        self._reqs_recv_info.clear()
+
+    def rebuild_kv_transfer_endpoint(self, local_ip: str, new_engine_id: str | None = None) -> None:
+        self.prepare_for_snapshot_restore()
+        if new_engine_id is not None:
+            self.engine_id = new_engine_id
+            self.kv_transfer_config.engine_id = new_engine_id
+        self.local_ip = self.side_channel_host = local_ip
+        self.side_channel_port = (
+            self.kv_transfer_config.kv_port + self.max_device_id + self.vllm_config.parallel_config.data_parallel_rank
+        )
+        # P starts its listener only after EngineCore gathers fresh worker metadata.
+        if self.kv_transfer_config.is_kv_consumer:
+            ready = threading.Event()
+            self._recving_thread = MooncakeSchedulerRecvingThread(ready)
+            self._recving_thread.start()
+            if not ready.wait(timeout=10) or not self._recving_thread.is_alive():
+                raise RuntimeError("[snapshot] Mooncake scheduler receiving thread failed to start")
 
     def set_xfer_handshake_metadata_from_workers(
         self,

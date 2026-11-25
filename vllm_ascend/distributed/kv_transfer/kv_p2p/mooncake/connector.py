@@ -87,6 +87,23 @@ class MooncakeBaseConnector(KVConnectorBase_V1, SupportsHMA):
         self.connector_scheduler: MooncakeBaseConnectorScheduler | None = None
         self.connector_worker: MooncakeBaseConnectorWorker | None = None
 
+    def prepare_for_snapshot_restore(self) -> None:
+        if self.connector_scheduler is not None:
+            self.connector_scheduler.prepare_for_snapshot_restore()
+        if self.connector_worker is not None:
+            self.connector_worker.prepare_for_snapshot_restore()
+        self.clear_connector_metadata()
+
+    def rebuild_kv_transfer_endpoint(self, local_ip: str, new_engine_id: str | None = None) -> None:
+        if new_engine_id is not None:
+            self.engine_id = new_engine_id
+            self.kv_transfer_config.engine_id = new_engine_id
+        if self.connector_scheduler is not None:
+            self.connector_scheduler.rebuild_kv_transfer_endpoint(local_ip, new_engine_id)
+        if self.connector_worker is not None:
+            self.connector_worker.rebuild_kv_transfer_endpoint(local_ip, new_engine_id)
+        self.clear_connector_metadata()
+
     def shutdown(self) -> None:
         if self.connector_scheduler is not None:
             self.connector_scheduler.shutdown()

@@ -10,12 +10,48 @@ from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm_ascend.ops.fused_moe.moe_utils import (
     _custom_gmm_swiglu_enabled,
     _get_cann_mega_moe_quant_settings,
+    _pad_tokens_with_cat,
     _prepare_dequant_swiglu_weight_scale,
     cumsum_group_list,
     load_cann_mega_moe_ops,
+    reset_moe_padding_cache_after_snapshot_restore,
     select_mega_moe_activation_kwargs,
 )
 from vllm_ascend.quantization.quant_type import QuantType
+
+
+class TestSnapshotPaddingCache(unittest.TestCase):
+    def test_restore_empty_cache(self):
+        with patch("vllm_ascend.ops.fused_moe.moe_utils._PAD_ZERO_BLOCKS", {}) as cache:
+            reset_moe_padding_cache_after_snapshot_restore()
+            self.assertEqual(cache, {})
+
+    def test_restore_preserves_storage_and_zero_padding(self):
+        config = SimpleNamespace(parallel_config=SimpleNamespace(tensor_parallel_size=16))
+        inputs = [torch.ones((3, 8)), torch.ones((3, 4), dtype=torch.bfloat16)]
+        with (
+            patch("vllm_ascend.ops.fused_moe.moe_utils._PAD_ZERO_BLOCKS", {}) as cache,
+            patch("vllm_ascend.ops.fused_moe.moe_utils.get_current_vllm_config_or_none", return_value=config),
+        ):
+            with torch.inference_mode():
+                for x in inputs:
+                    _pad_tokens_with_cat(x, 16)
+                blocks = dict(cache)
+                pointers = {key: block.data_ptr() for key, block in blocks.items()}
+                for block in blocks.values():
+                    block.fill_(7)
+
+            for _ in range(2):
+                reset_moe_padding_cache_after_snapshot_restore()
+                self.assertEqual(cache.keys(), blocks.keys())
+                for key, block in cache.items():
+                    self.assertIs(block, blocks[key])
+                    self.assertEqual(block.data_ptr(), pointers[key])
+                    self.assertTrue(torch.equal(block, torch.zeros_like(block)))
+                for x in inputs:
+                    padded = _pad_tokens_with_cat(x, 16)
+                    self.assertTrue(torch.equal(padded[:3], x))
+                    self.assertTrue(torch.equal(padded[3:], torch.zeros_like(padded[3:])))
 
 
 class TestCumsumGroupList(unittest.TestCase):

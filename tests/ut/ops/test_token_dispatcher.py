@@ -46,6 +46,23 @@ from vllm_ascend.quantization.quant_type import QuantType
 MXFP4_TEST_DTYPE = getattr(torch, "float4_e2m1fn_x2", torch.float16)
 
 
+def test_all2allv_snapshot_reset_preserves_expert_buffer_alias():
+    dispatcher = TokenDispatcherWithAll2AllV.__new__(TokenDispatcherWithAll2AllV)
+    dispatcher.num_local_experts = 2
+    expert_ids = torch.full((4,), -1, dtype=torch.int32)
+    dispatcher.expert_ids_per_ep_rank = expert_ids
+
+    with patch.object(
+        dispatcher,
+        "_build_expert_ids_per_ep_rank",
+        return_value=torch.arange(4, dtype=torch.int32),
+    ):
+        dispatcher.reset_runtime_state_after_snapshot_restore()
+
+    assert dispatcher.expert_ids_per_ep_rank is expert_ids
+    assert torch.equal(expert_ids, torch.arange(4, dtype=torch.int32))
+
+
 def build_token_dispatch_input_fixture(
     *,
     hidden_states: torch.Tensor,
@@ -970,6 +987,21 @@ class TestTokenDispatcherWithAllGather(TestBase):
         results = self.dispatcher.token_dispatch(token_dispatch_input=token_dispatch_input)
         self.assertEqual(results.hidden_states.shape, (6, 128))
         self.assertIsInstance(results.combine_metadata, MoEAllGatherCombineMetadata)
+
+
+def test_all2allv_reset_runtime_state_after_snapshot_restore_rebuilds_expert_ids():
+    dispatcher = object.__new__(TokenDispatcherWithAll2AllV)
+    dispatcher.num_experts = 4
+    dispatcher.num_local_experts = 2
+    dispatcher.expert_ids_per_ep_rank = torch.full((4,), -1, dtype=torch.int32)
+
+    with patch("torch.npu.current_device", return_value="cpu"):
+        dispatcher.reset_runtime_state_after_snapshot_restore()
+
+    torch.testing.assert_close(
+        dispatcher.expert_ids_per_ep_rank,
+        torch.tensor([0, 1, 0, 1], dtype=torch.int32),
+    )
 
 
 class TestTokenDispatcherWithAll2AllV(TestBase):

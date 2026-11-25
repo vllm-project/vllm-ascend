@@ -298,6 +298,16 @@ class AscendVocabParallelEmbedding(VocabParallelEmbedding):
 
         self.update_param_tp_status()
 
+    def reset_runtime_state_after_snapshot_restore(self) -> None:
+        """Reconnect vocabulary collectives to the rebuilt process groups."""
+        if self.parallel_mode == VocabParallelMode.PCP_X_TP and self.token_exchange_group is not None:
+            self.token_exchange_group = get_pcp_group()
+            self.output_reduce_group = get_tp_group()
+        elif self.parallel_mode == VocabParallelMode.FINE_GRAINED and self.token_exchange_group is not None:
+            self.token_exchange_group = get_embed_tp_group()
+        elif self.parallel_mode == VocabParallelMode.STANDARD:
+            self.output_reduce_group = get_tp_group()
+
     def set_embedding_num_tokens_padded(self, num_tokens_padded: int) -> None:
         """Publish the padded batch length for lookup outside model forward."""
         # Empty batches still use a nonzero collective size; output rows are
@@ -452,6 +462,8 @@ class AscendVocabParallelEmbedding(VocabParallelEmbedding):
 class AscendParallelLMHead(ParallelLMHead):
     """
     Register ParallelLMHead as a custom op for Ascend."""
+
+    reset_runtime_state_after_snapshot_restore = AscendVocabParallelEmbedding.reset_runtime_state_after_snapshot_restore
 
     def __init__(
         self,

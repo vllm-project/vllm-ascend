@@ -601,6 +601,14 @@ class AscendSFAMetadataBuilder(MLACommonMetadataBuilder[AscendSFAMetadata]):
         self.reorder_batch_threshold = self.decode_threshold
         self.attn_mask_builder = AttentionMaskBuilder(self.device)
 
+    def reset_runtime_state_after_snapshot_restore(self) -> None:
+        for state in self.nope_states.values():
+            state.block_table_buffer.zero_()
+            if state.use_smla:
+                state.metadata_buffer.zero_()
+                state.length_buffer.zero_()
+                state.sinks.fill_(SMLA_DEFAULT_SINK_VALUE)
+
     @staticmethod
     def determine_chunked_prefill_workspace_size(vllm_config: VllmConfig) -> int:
         return ascend_chunked_prefill_workspace_size(vllm_config)
@@ -1075,6 +1083,28 @@ class AscendSFAImpl(MLAAttentionImpl):
 
         if self._parallel_o_proj is not None:
             self._parallel_o_proj.enable()
+
+    def reset_runtime_state_after_snapshot_restore(self) -> None:
+        if self.topk_indices_buffer is not None:
+            self.topk_indices_buffer.fill_(-1)
+
+        if self._parallel_o_proj is not None:
+            self._parallel_o_proj.reset_runtime_state_after_snapshot_restore(
+                group=get_pcp_group(), tp_group=get_tp_group()
+            )
+
+        if self.preprocess_type is PreprocessType.PROLOG_V3 and self.enable_sparse_sfa_c8:
+            # clip_alpha is load-time state restored in place by the inventory.
+            # Empty cache placeholders are deliberately excluded from it.
+            self.sfa_qsfa_kr_cache_dummy = torch.empty(
+                0,
+                dtype=torch.bfloat16,
+                device=self.weight_dq.device,
+            )
+
+    def restore_constants_after_snapshot_restore(self) -> None:
+        if self.turboquant is not None:
+            self.turboquant.restore_constants_after_snapshot_restore()
 
     @staticmethod
     def _get_layer_quant_method(layer: torch.nn.Module | None):

@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM-Ascend project
 """Common worker-side logic for Mooncake KV transfer connectors."""
 
+import gc
 import math
 import os
 from typing import TYPE_CHECKING
@@ -379,12 +380,52 @@ class MooncakeBaseConnectorWorker(MooncakeTransferAddressMixin):
         self.te_rpc_port = self.engine.get_rpc_port()
         self.xfer_handshake_metadata: KVConnectorHandshakeMetadata | None = None
         self.xfer_stats = MooncakeKVConnectorStats()
+        self._registered_regions = None
 
         logger.info("Initializing Mooncake worker %s", engine_id)
 
     def get_handshake_metadata(self) -> KVConnectorHandshakeMetadata | None:
         """Return the registered cache descriptor for either transfer mode."""
         return self.xfer_handshake_metadata
+
+    def prepare_for_snapshot_restore(self) -> None:
+        """Release registrations and the engine after all transfer threads stop."""
+        if self.engine is None:
+            return
+        old_engine = self.engine
+        if global_te.transfer_engine is old_engine and self._registered_regions is not None:
+            for ptr in dict.fromkeys(self._registered_regions.ptrs):
+                result = old_engine.unregister_memory(ptr)
+                if result != 0:
+                    raise RuntimeError(f"[snapshot] unregister {ptr:#x} failed: {result}")
+        self.engine = None
+        self.xfer_handshake_metadata = None
+        global_te.reset()
+        del old_engine
+        gc.collect()
+
+    def rebuild_kv_transfer_endpoint(self, local_ip: str, new_engine_id: str | None = None) -> None:
+        if self._registered_regions is None:
+            raise RuntimeError("Mooncake snapshot restore requires registered KV caches")
+        self.prepare_for_snapshot_restore()
+        if new_engine_id is not None:
+            self.engine_id = new_engine_id
+            self.kv_transfer_config.engine_id = new_engine_id
+        self.tp_group = get_tp_group()
+        self.side_channel_host = local_ip
+        self.side_channel_port = (
+            self.kv_transfer_config.kv_port
+            + self.vllm_config.parallel_config.data_parallel_index * self.tp_size * self.pp_size * self.pcp_size
+        )
+        device_index = (self.pp_rank * self.pcp_size + self.pcp_rank) * self.tp_size + self.tp_rank
+        self.handshake_port = self.side_channel_port + device_index
+        device_name = str(torch.npu.current_device()) if self.pp_size > 1 else None
+        self.engine = global_te.get_transfer_engine(local_ip, device_name=device_name)
+        self.te_rpc_port = self.engine.get_rpc_port()
+        self.xfer_stats = MooncakeKVConnectorStats()
+        # Recompute metadata from the retained cache tensors, not stale addresses.
+        # The Pull override also starts a fresh consumer thread after registration.
+        self.register_kv_caches(self.kv_caches)
 
     def _build_kv_cache_spec_mappings(self) -> None:
         """Flatten group specs and map each layer to its group and spec.
@@ -682,6 +723,7 @@ class MooncakeBaseConnectorWorker(MooncakeTransferAddressMixin):
         register_regions = collect_configured_register_regions(self.kv_cache_config, kv_caches)
         validate_register_region_count(register_regions)
         global_te.register_buffer(register_regions.ptrs, register_regions.lengths)
+        self._registered_regions = register_regions
 
         transfer_metadata = MooncakeTransferMetadata(
             engine_id=self.engine_id,

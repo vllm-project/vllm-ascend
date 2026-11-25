@@ -2,7 +2,7 @@
 
 from types import SimpleNamespace
 from typing import Any
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, Mock, patch
 
 import pytest
 import torch
@@ -20,6 +20,86 @@ from vllm_ascend.weight_switch import (
 
 def _weight_switch_config() -> WeightSwitchConfig:
     return WeightSwitchConfig(group=object(), world_size=2, rank=0)
+
+
+def test_projection_snapshot_rebinds_groups_and_restores_copies():
+    class Method(WeightSwitchMixin):
+        supports_weight_switch = True
+        weight_switch_gather_specs = (WeightSwitchGatherSpec("weight", 1),)
+        weight_switch_repeat_specs = (WeightSwitchRepeatSpec("scale"),)
+
+    layer = torch.nn.Module()
+    layer.weight = torch.nn.Parameter(torch.arange(6.0).reshape(2, 3), requires_grad=False)
+    layer.scale = torch.nn.Parameter(torch.tensor([2.0, 3.0]), requires_grad=False)
+    layer.output_size_per_partition = 2
+    layer.quant_method = Method()
+    old_group = SimpleNamespace(world_size=2, rank_in_group=0)
+    projection = ParallelOProjection(
+        3,
+        layer,
+        config=WeightSwitchConfig.from_group(old_group, shard_axis="input"),
+        tp_group=old_group,
+        pool={},
+        pool_key="snapshot",
+        project_full=lambda x, out: out,
+        decode_sharded=False,
+    )
+    projection.enabled = True
+    projection.enable()
+    state = projection._weight_switch_states[0][2]
+    gather = state.gather_parts["weight"]
+    repeat = state.repeat_parts["scale"]
+    addresses = gather.gather_input.data_ptr(), repeat.full_tensor.data_ptr(), layer.weight.data_ptr()
+    group = SimpleNamespace(world_size=2, rank_in_group=0)
+    tp_group = object()
+    for _ in range(2):
+        gather.gather_input.zero_()
+        repeat.full_tensor.zero_()
+        stale_work = Mock()
+        state.handles.append(stale_work)
+        projection.mode = OProjectionMode.FULL_WEIGHT
+        projection.reset_runtime_state_after_snapshot_restore(group=group, tp_group=tp_group)
+        assert projection.config.group is group and projection.tp_group is tp_group
+        assert projection.config.shard_axis == "input"
+        assert projection.mode is OProjectionMode.LOCAL_WEIGHT
+        assert not state.handles
+        stale_work.wait.assert_not_called()
+        torch.testing.assert_close(gather.gather_input, layer.weight.T.contiguous())
+        torch.testing.assert_close(repeat.full_tensor, layer.scale.repeat(2))
+        assert addresses == (gather.gather_input.data_ptr(), repeat.full_tensor.data_ptr(), layer.weight.data_ptr())
+
+
+@pytest.mark.parametrize("gather_dim", [0, 1, -1])
+def test_snapshot_rebuilds_independent_copies_in_place(gather_dim):
+    class Method(WeightSwitchMixin):
+        supports_weight_switch = True
+        weight_switch_gather_specs = (WeightSwitchGatherSpec("weight", gather_dim),)
+        weight_switch_repeat_specs = (WeightSwitchRepeatSpec("scale"),)
+
+    layer = torch.nn.Module()
+    layer.weight = torch.nn.Parameter(torch.arange(6.0).reshape(2, 3), requires_grad=False)
+    layer.scale = torch.nn.Parameter(torch.tensor([2.0, 3.0]), requires_grad=False)
+    config = WeightSwitchConfig(object(), 2, 0, shard_axis="input")
+    method = Method()
+    state = method.enable_weight_switch(layer, config)
+    saved = {name: tensor.clone() for name, tensor in layer.state_dict().items()}
+    gather = state.gather_parts["weight"]
+    repeat = state.repeat_parts["scale"]
+    addresses = (gather.gather_input.data_ptr(), repeat.full_tensor.data_ptr())
+    for _ in range(2):
+        gather.gather_input.zero_()
+        repeat.full_tensor.zero_()
+        with torch.no_grad():
+            for name, tensor in saved.items():
+                getattr(layer, name).copy_(tensor)
+        state.rebuild_after_snapshot_restore(config)
+        torch.testing.assert_close(gather.gather_input, torch.movedim(saved["weight"], gather_dim, 0).contiguous())
+        torch.testing.assert_close(repeat.full_tensor, saved["scale"].repeat(2))
+        assert addresses == (gather.gather_input.data_ptr(), repeat.full_tensor.data_ptr())
+        method.switch_weight(layer, state, use_full_weight=True)
+        torch.testing.assert_close(layer.scale, saved["scale"].repeat(2))
+        method.switch_weight(layer, state, use_full_weight=False)
+        torch.testing.assert_close(layer.weight, saved["weight"])
 
 
 def test_weight_switch_config_uses_the_caller_selected_parallel_group() -> None:

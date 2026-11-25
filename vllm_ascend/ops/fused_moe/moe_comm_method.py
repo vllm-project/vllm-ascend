@@ -105,6 +105,13 @@ class MoECommMethod(ABC):
         self.prepare_finalize.set_lora_context(lora_context)
         self.token_dispatcher.set_lora_context(lora_context)
 
+    def reset_runtime_state_after_snapshot_restore(self) -> None:
+        # Force-EPLB tables are device tensors outside the model checkpoint.
+        # The original builder recreates them before capture or eager reuse.
+        cache = getattr(self, "_force_eplb_topk_cache", None)
+        if cache is not None:
+            cache.clear()
+
     def prepare(
         self,
         hidden_states: torch.Tensor,
@@ -380,6 +387,10 @@ class FusedMC2CommImpl(MoECommMethod):
             symm_buffer.ep_world_size,
         )
         return True
+
+    def reset_runtime_state_after_snapshot_restore(self) -> None:
+        super().reset_runtime_state_after_snapshot_restore()
+        self.mega_moe_symm_buffer = None
 
     def _init_mega_moe_symm_buffer(
         self,

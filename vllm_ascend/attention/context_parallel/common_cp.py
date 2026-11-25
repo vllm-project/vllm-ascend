@@ -117,12 +117,19 @@ class DCPImplMixin:
 
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
+        self._refresh_dcp_group()
+
+    def _refresh_dcp_group(self) -> None:
         self.dcp_group = get_dcp_group()
         self.pcp_group = get_pcp_group()
         self.tp_group = get_tp_group()
         self.dcp_size = self.dcp_group.world_size
         self.dcp_rank = self.dcp_group.rank_in_group
         self.dcp_device_group = self.dcp_group.device_group if self.dcp_size > 1 else None
+
+    def reset_runtime_state_after_snapshot_restore(self) -> None:
+        self._refresh_dcp_group()
+        super().reset_runtime_state_after_snapshot_restore()
 
     def _dcp_all_gather(
         self,

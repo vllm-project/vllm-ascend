@@ -534,6 +534,25 @@ class AscendMLAMetadataBuilder(MLACommonMetadataBuilder[AscendMLAMetadata]):
             external_flashmla=flash,
         )
 
+    def reset_runtime_state_after_snapshot_restore(self) -> None:
+        self.chunk_seq_lens = None
+        self.cu_seq_lens_cpu = None
+        self.num_chunks = None
+        self.max_context_chunk = 0
+        self.num_decodes = 0
+        self.num_prefills = 0
+        self.num_decode_tokens = 0
+        self.num_prefill_tokens = 0
+        self.context_lens_cpu = None
+        self.num_actual_tokens = None
+        self.block_table = None
+        self.slot_mapping = None
+        self.graph_pad_size = 0
+        self.query_lens = None
+        self.seq_lens = None
+        if self.nope_zero_rope_cache is not None:
+            self.nope_zero_rope_cache.clear()
+
     @staticmethod
     def determine_chunked_prefill_workspace_size(vllm_config: VllmConfig) -> int:
         return ascend_chunked_prefill_workspace_size(vllm_config)
@@ -1398,6 +1417,17 @@ class AscendMLAImpl(MLAAttentionImpl):
         cache_spec = attn_module.get_kv_cache_spec(config)
         if supports_strided_mla_cache(config, attn_module, cache_spec):
             self._prepare_prolog_v3_weights()
+
+    def restore_lazy_tensors_after_snapshot_restore(
+        self, act_dtype: torch.dtype, *, restored_tensor_ids: set[int] | frozenset[int] = frozenset()
+    ) -> None:
+        current = getattr(self, "_prolog_v3_weights", None)
+        if current is None:
+            return
+        if all(id(value) in restored_tensor_ids for value in current.values() if isinstance(value, torch.Tensor)):
+            return
+        # Retained source projections have been restored before this hook.
+        self._refresh_prolog_v3_weights()
 
     def _load_fa_quant_scales(self):
         layer = self.vllm_config.compilation_config.static_forward_context[self.layer_name]

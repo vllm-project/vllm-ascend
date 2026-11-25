@@ -94,6 +94,19 @@ class AscendMambaHybridModelState(MambaHybridModelState, AscendModelState):
         self._layer_state_ranges: dict[str, tuple[int, int]] | None = None
         self._pending_bulk_copy: tuple[MambaSpecDecodeGPUContext, int, torch.Tensor] | None = None
 
+    @torch.inference_mode()
+    def reset_runtime_state_after_snapshot_restore(self) -> None:
+        # Snapshot restore starts idle. Retain graph-visible buffers in place,
+        # but discard lazy address tables whose Python is_initialized survived.
+        self.num_accepted_tokens_gpu.fill_(1)
+        if self._align_mode:
+            self._mamba_state_idx_gpu.zero_()
+            self._mamba_src_col_gpu.fill_(-1)
+            self._mamba_src_off_gpu.zero_()
+            self._mamba_ctx = None
+        self._layerwise_mamba_copy = None
+        self._pending_bulk_copy = None
+
     def _get_layer_state_ranges(self, kv_cache_config: KVCacheConfig) -> dict[str, tuple[int, int]]:
         """Map every mamba layer name to its (start, end) range in the
         flattened (layer, state-type) metadata arrays of

@@ -164,6 +164,8 @@ class MemcacheBackend(Backend):
         self._store_initialized = False
         self._store_init_lock = threading.Lock()
         self._pending_buffers: tuple[list[int], list[int]] | None = None
+        self._registered_buffers: tuple[list[int], list[int]] | None = None
+        self._store_was_initialized: bool | None = None
 
         if not self._lazy_init:
             self.store = self._setup_store()
@@ -219,6 +221,11 @@ class MemcacheBackend(Backend):
 
     @classmethod
     def create_scheduler_client(cls, parallel_config: ParallelConfig):
+        # TODO: With DP=1 and no assigned_physical_gpu_ids, device resolution
+        # calls torch.npu.current_device(), initializing NPU state in EngineCore
+        # despite init_bm=False. EngineCore ACL snapshots currently cover only
+        # Mooncake pools. Startup device mapping is unchanged pending validation
+        # of the effect on worker device selection.
         return cls(
             parallel_config,
             device_id=get_scheduler_device_id(parallel_config),
@@ -237,7 +244,8 @@ class MemcacheBackend(Backend):
         torch.npu.set_device(self.device_id)
 
     def register_buffer(self, ptrs: list[int], sizes: list[int]):
-        self._pending_buffers = (list(ptrs), list(sizes))
+        self._registered_buffers = (list(ptrs), list(sizes))
+        self._pending_buffers = self._registered_buffers
         self._register_buffers_if_needed()
 
     def unregister_buffer(self, ptrs: list[int], sizes: list[int]):
@@ -257,6 +265,26 @@ class MemcacheBackend(Backend):
         for ptr, size in zip(ptrs, sizes):
             self.store.register_buffer(ptr, size)
         self._pending_buffers = None
+
+    def prepare_for_snapshot_restore(self) -> None:
+        if self._store_was_initialized is None:
+            self._store_was_initialized = self._store_initialized
+        # MMC initialization is process-wide; dropping the wrapper does not uninit it.
+        self.close()
+        self._pending_buffers = self._registered_buffers
+
+        import gc
+
+        gc.collect()
+
+    def reset_after_snapshot(self, _local_ip: str) -> None:
+        self.prepare_for_snapshot_restore()
+        restore_initialized_store = bool(self._store_was_initialized)
+        if restore_initialized_store or not self._lazy_init:
+            self.store = self._setup_store()
+            self._store_initialized = True
+            self._register_buffers_if_needed()
+        self._store_was_initialized = None
 
     def exists(self, keys: list[str]) -> list[int]:
         if self._lazy_init and not self._store_initialized:

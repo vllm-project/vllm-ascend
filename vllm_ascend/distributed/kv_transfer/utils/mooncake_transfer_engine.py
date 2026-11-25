@@ -1,3 +1,4 @@
+import gc
 import threading
 
 
@@ -5,6 +6,7 @@ class GlobalTE:
     def __init__(self):
         self.transfer_engine = None
         self._initialization_attempted = False
+        self.hostname: str | None = None
         self.is_register_buffer: bool = False
         self.registered_buffers: list[tuple[int, int]] = []
         self.transfer_engine_lock = threading.Lock()
@@ -43,6 +45,7 @@ class GlobalTE:
                             "Restart the process before retrying."
                         )
                     self.transfer_engine = engine
+                    self.hostname = hostname
         return self.transfer_engine
 
     def register_buffer(self, ptrs: list[int], sizes: list[int]):
@@ -85,6 +88,27 @@ class GlobalTE:
                     )
 
             self.is_register_buffer = True
+
+    def reset(self):
+        """Drop the cached transfer engine after its memory is unregistered."""
+        with self.transfer_engine_lock:
+            old_engine = self.transfer_engine
+            self.transfer_engine = None
+            self.hostname = None
+        with self.register_buffer_lock:
+            self.is_register_buffer = False
+
+        if old_engine is None:
+            return
+
+        # TransferEngine has no close/finalize API. Drop its last Python
+        # reference and trigger destruction before creating a replacement.
+        del old_engine
+        gc.collect()
+        # Only a successfully initialized engine can be retired and rebuilt.
+        # A failed native initialization still requires a process restart.
+        with self.transfer_engine_lock:
+            self._initialization_attempted = False
 
 
 global_te = GlobalTE()

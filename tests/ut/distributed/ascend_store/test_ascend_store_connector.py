@@ -294,6 +294,15 @@ class TestAscendStoreConnector(unittest.TestCase):
                     scheduler.assert_called_once_with(config, False, cache)
                     self.assertIs(connector.connector_scheduler, scheduler.return_value)
 
+    def test_rebuild_kv_transfer_endpoint_delegates_to_active_role(self):
+        connector = object.__new__(AscendStoreConnector)
+        connector.connector_scheduler = MagicMock()
+        connector.connector_worker = None
+
+        connector.rebuild_kv_transfer_endpoint("10.0.0.2", "engine-new")
+
+        connector.connector_scheduler.rebuild_kv_transfer_endpoint.assert_called_once_with("10.0.0.2", "engine-new")
+
     def test_pp_handshake_metadata_is_ignored(self):
         connector = AscendStoreConnector.__new__(AscendStoreConnector)
         metadata = {

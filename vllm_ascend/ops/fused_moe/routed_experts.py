@@ -29,6 +29,8 @@ from vllm.model_executor.layers.fused_moe.config import FusedMoEConfig
 from vllm.model_executor.layers.fused_moe.unquantized_fused_moe_method import UnquantizedFusedMoEMethod
 from vllm.model_executor.utils import replace_parameter
 
+# Keep the existing import grouping stable for FT patches.
+# isort: split
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX, use_cann_megamoe
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
@@ -582,7 +584,6 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
 
         # Level-2 sleep discards NPU tensors that are not parameters/buffers.
         # Register Ascend runtime EPLB NPU state as named buffers for wake restore.
-        # ascend_expert_map stays a plain CPU attribute and does not need promotion.
         self._promote_attr_to_buffer("log2phy")
         if self.dynamic_eplb:
             self._promote_attr_to_buffer("moe_load")
@@ -615,7 +616,7 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
 
     @ascend_expert_map.setter
     def ascend_expert_map(self, expert_map: torch.Tensor | None) -> None:
-        object.__setattr__(self, "_ascend_expert_map", expert_map)
+        self._ascend_expert_map = expert_map
 
     def update_expert_map(self, new_expert_map: torch.Tensor | None = None) -> None:
         """Update the upstream map or preserve the legacy Ascend update API."""

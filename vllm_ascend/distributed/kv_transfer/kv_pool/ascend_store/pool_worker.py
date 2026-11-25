@@ -395,6 +395,12 @@ class BaseKVPoolWorker(ABC):
         if kv_event_config and kv_event_config.enable_kv_cache_events:
             self.enable_kv_events = True
 
+    def prepare_for_snapshot_restore(self) -> None:
+        self.m_store.prepare_for_snapshot_restore()
+
+    def rebuild_kv_transfer_endpoint(self, local_ip: str, new_engine_id: str | None = None) -> None:
+        self.m_store.reset_after_snapshot(local_ip)
+
     def shutdown(self) -> None:
         if self._closed:
             return

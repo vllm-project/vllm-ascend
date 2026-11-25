@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import dataclasses
+import gc
 import weakref
 from collections.abc import Callable
 from contextlib import ExitStack
@@ -444,3 +445,39 @@ def update_draft_graph_prefill_params_workspaces(num_tokens: int, workspace: Any
 
 def get_draft_graph_prefill_params():
     return _draft_graph_prefill_params
+
+
+def _iter_graph_params():
+    for params in (_graph_params, _draft_graph_params, _draft_graph_prefill_params):
+        if params is not None:
+            yield params
+
+
+def clear_graph_params_for_recapture() -> None:
+    """Clear captured graph parameters while preserving configured sizes."""
+    for params in _iter_graph_params():
+        for size in params.events:
+            params.events[size] = []
+            params.workspaces[size] = None
+            params.handles[size] = []
+            params.attn_params[size] = []
+
+
+def clear_all_aclgraph_entries() -> None:
+    """Release process-local ACL Graph objects before graph recapture."""
+    torch.npu.synchronize()
+    for wrapper in list(_acl_graph_wrappers):
+        for entry in wrapper.concrete_aclgraph_entries.values():
+            if entry.aclgraph is not None:
+                entry.aclgraph.reset()
+        wrapper.concrete_aclgraph_entries.clear()
+
+    gc.collect()
+    torch.npu.empty_cache()
+    if hasattr(current_platform, "_global_graph_pool"):
+        current_platform._global_graph_pool = None
+    if hasattr(current_platform.__class__, "_global_graph_pool"):
+        current_platform.__class__._global_graph_pool = None
+    graph_pool = current_platform.get_global_graph_pool()
+    for wrapper in list(_acl_graph_wrappers):
+        wrapper.graph_pool = graph_pool

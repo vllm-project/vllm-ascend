@@ -348,6 +348,14 @@ class AscendIndexerKPoolMetadataBuilder(AttentionMetadataBuilder):
             and num_rows >= MIN_GLM53_INDEXER_TP_SHARD_ROWS_PER_RANK * self.tp_size
         )
 
+    def reset_runtime_state_after_snapshot_restore(self) -> None:
+        # Recapture rebuilds per-draft-step buffers using the restored slot mappings.
+        self._metadata_buffers.clear()
+        self._write_metadata_buffers.clear()
+        self._captured_state_tables.clear()
+        self._state_table_scratch.clear()
+        self._state_table_shapes.clear()
+
     def _build_indexer_row_shard(
         self, common_attn_metadata: CommonAttentionMetadata, graph_capture: bool
     ) -> AscendIndexerKPoolRowShard | None:
@@ -886,6 +894,10 @@ class Glm5NextKPoolIndexerBackend(nn.Module):
             self._head_weight_f32 = head_weight
         else:
             self._head_weight_f32.copy_(head_weight)
+
+    def reset_runtime_state_after_snapshot_restore(self) -> None:
+        if self.topk_indices_buffer is not None:
+            self.topk_indices_buffer.fill_(-1)
 
     @staticmethod
     def _bound_caches(layer: Any) -> tuple[torch.Tensor, ...]:

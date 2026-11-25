@@ -598,6 +598,42 @@ class TestKVCacheRecvingLayerThread(unittest.TestCase):
         )
         self.ready_event = threading.Event()
 
+    def test_snapshot_gate_preserves_blocking_receive_when_disabled(self):
+        module = sys.modules[KVCacheRecvingLayerThread.__module__]
+        for enabled in (False, True):
+            with self.subTest(enabled=enabled):
+                thread = KVCacheRecvingLayerThread(
+                    tp_rank=0,
+                    side_channel_port=5555,
+                    tp_size=2,
+                    pd_head_ratio=1,
+                    local_engine_id="engineA",
+                    metadata=self.meta,
+                    ready_event=threading.Event(),
+                    snapshot_enabled=enabled,
+                )
+                socket = MagicMock()
+                socket.recv_multipart.side_effect = SystemExit
+                context = MagicMock()
+                context.__enter__.return_value = socket
+                with (
+                    patch.object(module, "zmq_ctx", return_value=context),
+                    patch.object(module.zmq, "Poller") as poller_cls,
+                ):
+                    if enabled:
+                        poller_cls.return_value.poll.return_value = {socket: zmq.POLLIN}
+                    with self.assertRaises(SystemExit):
+                        thread.run()
+                self.assertEqual(poller_cls.call_count, int(enabled))
+                socket.recv_multipart.assert_called_once_with()
+
+                if enabled:
+                    thread.stop()
+                    self.assertTrue(thread._stop_event.is_set())
+                else:
+                    with self.assertRaisesRegex(RuntimeError, "only available when snapshot is enabled"):
+                        thread.stop()
+
     def test_get_and_clear_done_requests(self):
         th = KVCacheRecvingLayerThread(
             tp_rank=0,
@@ -804,6 +840,7 @@ class TestKVCacheRecvingLayerThread(unittest.TestCase):
 
 class MockVllmConfig:
     def __init__(self):
+        self.snapshot_config = None
         self.model_config = MagicMock()
         self.parallel_config = MagicMock()
         self.cache_config = MagicMock()
@@ -1255,6 +1292,19 @@ class TestMooncakeLayerwiseConnector(unittest.TestCase):
         connector = MooncakeLayerwiseConnector(self.config, KVConnectorRole.SCHEDULER, self.kv_cache_config)
         self.assertIsNotNone(connector.connector_scheduler)
         self.assertIsNone(connector.connector_worker)
+
+    def test_rebuild_refreshes_scheduler_identity(self):
+        kv_config = SimpleNamespace(engine_id="engine-old")
+        scheduler = MooncakeLayerwiseConnectorScheduler.__new__(MooncakeLayerwiseConnectorScheduler)
+        scheduler.engine_id = "engine-old"
+        scheduler.side_channel_host = "10.0.0.1"
+        scheduler.vllm_config = SimpleNamespace(kv_transfer_config=kv_config)
+
+        scheduler.rebuild_kv_transfer_endpoint("10.0.0.2", "engine-new")
+
+        self.assertEqual(scheduler.engine_id, "engine-new")
+        self.assertEqual(scheduler.side_channel_host, "10.0.0.2")
+        self.assertEqual(kv_config.engine_id, "engine-new")
 
     @patch.object(MooncakeLayerwiseConnectorScheduler, "get_num_new_matched_tokens")
     def test_get_num_new_matched_tokens(self, mock_method):
@@ -1905,3 +1955,65 @@ class TestMooncakeLayerwiseConnectorWorker(unittest.TestCase):
         worker.register_kv_caches(kv_caches)
 
         worker.create_kv_buffer.assert_called_once_with(main_cache)
+
+    def test_rebuild_kv_transfer_endpoint_producer_resets_and_reregisters(self):
+        self.vllm_config.kv_transfer_config.is_kv_producer = True
+        self.vllm_config.kv_transfer_config.is_kv_consumer = False
+        worker = MooncakeLayerwiseConnectorWorker(self.vllm_config, self.kv_cache_config, self.engine_id)
+        worker.side_channel_host = "127.0.0.1"
+        worker._registered_regions = SimpleNamespace(ptrs=[0x1000], lengths=[4096])
+
+        new_engine = MagicMock()
+        new_engine.get_rpc_port.return_value = 7777
+
+        with (
+            patch(
+                "vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_layerwise_connector.global_te.reset"
+            ) as mock_reset,
+            patch(
+                "vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_layerwise_connector.global_te.get_transfer_engine",
+                return_value=new_engine,
+            ) as mock_get_engine,
+            patch(
+                "vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_layerwise_connector.global_te.register_buffer"
+            ) as mock_register_buffer,
+        ):
+            worker.rebuild_kv_transfer_endpoint("10.0.0.8")
+
+        mock_reset.assert_called_once()
+        mock_get_engine.assert_called_once_with("10.0.0.8", device_name=None)
+        mock_register_buffer.assert_called_once_with([0x1000], [4096])
+        self.assertIs(worker.engine, new_engine)
+        self.assertEqual(worker.te_rpc_port, 7777)
+        self.assertEqual(worker.side_channel_host, "10.0.0.8")
+
+    def test_rebuild_kv_transfer_endpoint_consumer_resets_and_reregisters(self):
+        self.vllm_config.kv_transfer_config.is_kv_producer = False
+        self.vllm_config.kv_transfer_config.is_kv_consumer = True
+        worker = MooncakeLayerwiseConnectorWorker(self.vllm_config, self.kv_cache_config, self.engine_id)
+        worker._registered_regions = SimpleNamespace(ptrs=[0x1000], lengths=[4096])
+        worker.kv_recv_layer_thread = None
+
+        new_engine = MagicMock()
+        new_engine.get_rpc_port.return_value = 7777
+
+        with (
+            patch(
+                "vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_layerwise_connector.global_te.reset"
+            ) as mock_reset,
+            patch(
+                "vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_layerwise_connector.global_te.get_transfer_engine",
+                return_value=new_engine,
+            ) as mock_get_engine,
+            patch(
+                "vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_layerwise_connector.global_te.register_buffer"
+            ) as mock_register_buffer,
+        ):
+            worker.rebuild_kv_transfer_endpoint("10.0.0.8")
+
+        mock_reset.assert_called_once()
+        mock_get_engine.assert_called_once_with("10.0.0.8", device_name=None)
+        mock_register_buffer.assert_called_once_with([0x1000], [4096])
+        self.assertIs(worker.engine, new_engine)
+        self.assertEqual(worker.te_rpc_port, 7777)
+        self.assertEqual(worker.side_channel_host, "10.0.0.8")
