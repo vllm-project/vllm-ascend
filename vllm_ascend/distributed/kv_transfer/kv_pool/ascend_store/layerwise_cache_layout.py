@@ -321,22 +321,21 @@ def apply_layerwise_kv_cache_plan(
     tensors_by_name = {tensor.shared_by[0]: tensor for tensor in old_tensors}
 
     def _merge_specs(named_specs: list[NamedKVCacheSpec]) -> None:
-        shared_by = [named_spec.layer_name for named_spec in named_specs]
-        cache_tensors = [tensors_by_name[layer_name] for layer_name in shared_by]
-        tensor_sizes = {tensor.size for tensor in cache_tensors}
-        if len(tensor_sizes) != 1:
-            raise ValueError("Layers sharing layerwise KV buffers must have equal tensor sizes for every cache spec.")
-        reference_spec = layer_specs[shared_by[0]]
-        if any(layer_specs[layer_name] != reference_spec for layer_name in shared_by[1:]):
-            raise ValueError(
-                "Layers sharing layerwise KV buffers must have identical cache specs for every named cache spec."
+        # Bucket by (tensor size, cache spec repr) so layers with different
+        # sizes (e.g. GLM DSA indexer full/shared caches) still share buffers
+        # within each bucket instead of failing the whole plan.
+        buckets: dict[tuple[int, str], list[str]] = {}
+        for named_spec in named_specs:
+            tensor = tensors_by_name[named_spec.layer_name]
+            key = (tensor.size, repr(layer_specs[named_spec.layer_name]))
+            buckets.setdefault(key, []).append(named_spec.layer_name)
+        for (_size, _key), shared_by in buckets.items():
+            new_tensors.append(
+                KVCacheTensor(
+                    shared_by=shared_by,
+                    size=tensors_by_name[shared_by[0]].size,
+                )
             )
-        new_tensors.append(
-            KVCacheTensor(
-                shared_by=shared_by,
-                size=cache_tensors[0].size,
-            )
-        )
 
     new_tensors: list[KVCacheTensor] = []
     for slot in reuse_layout.buffer_slots:
