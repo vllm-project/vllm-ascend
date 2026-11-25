@@ -76,6 +76,41 @@ guide_sections:
     Eagle3 requires the separate
     [AngelSlim/Qwen3-a3B_eagle3 draft checkpoint](https://huggingface.co/AngelSlim/Qwen3-a3B_eagle3).
 
+    ### Prefill-decode disaggregation
+
+    For PD deployment, follow the
+    [Ascend Mooncake deployment guide](https://docs.vllm.ai/projects/ascend/en/latest/tutorials/features/pd_disaggregation_mooncake_multi_node.html)
+    and its communication checks. Prefill and Decode run as separate service
+    pools with KV transfer between them; adding DP replicas to the colocated
+    service does not create a PD deployment.
+
+    The recipes renderer supports `pd_cluster`, **Ascend Router**
+    (`pd_router: ascend`) and **Mooncake (Ascend)**
+    (`pd_connector: mooncake_ascend`). These choices require an active preset
+    matching the model variant and hardware, with both choices declared in
+    its `select` mapping. See the renderer's
+    [Ascend PD preset contract](https://github.com/vllm-project/recipes/blob/main/SCHEMA.md#ascend-pd-presets).
+    Renderer support alone does not qualify a Qwen3 topology: this recipe's
+    single-node TP4 variant has no qualified PD preset, so it does not enable
+    the PD selector or provide PD validation evidence.
+
+    For a model-specific PD configuration, reserve separate Prefill and Decode
+    devices, use the same hardware family and checkpoint on both roles, and
+    verify the network and Mooncake prerequisites on every host. Pin a runtime
+    that supports the selected connector and its matching Ascend proxy script;
+    the renderer's Mooncake catalog defaults to `MooncakeConnectorV2`, which
+    must not be assumed available in the historical image above. Set each
+    role's node count, TP/DP/PP topology, device allocation, IPs and ports
+    consistently with its KV-transfer metadata and the proxy endpoints.
+
+    Verify readiness on every worker, then send chat and streaming requests
+    through the proxy and check nonempty output and successful KV transfer in
+    both roles' logs. Run accuracy and performance evaluation against that
+    same proxy endpoint, recording the P:D topology and per-role settings.
+    The single-node results and historical badge do not validate PD accuracy,
+    performance, unequal TP, or PD combined with Eagle3; each combination
+    needs its own evidence before adding a selectable preset.
+
     ### Verify inference
 
     Check the health endpoint and model listing before issuing a request.

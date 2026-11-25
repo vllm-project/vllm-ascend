@@ -1,0 +1,8 @@
+pr: 22304
+entries:
+  - category: documentation
+    text: >-
+      Expanded Qwen3-30B-A3B Ascend guidance with checkpoint selection,
+      inference checks, evaluation procedures and prerequisites for
+      Prefill/Decode disaggregation. PD deployments require a matching
+      model-specific preset and separate validation of both service roles.
