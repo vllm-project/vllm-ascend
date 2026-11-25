@@ -2403,9 +2403,9 @@ class AscendSFAImpl(MLAAttentionImpl):
         # above - so the connector can dispatch the PD pull.
         notify_kv_cache_written(self.layer_name or "")
 
-        # Open the prefetch gate for every SFA layer. Some GLM-5.2 layers
-        # reuse cached top-k indices and have no indexer, so recording this
-        # inside the indexer's forward would leave their gate closed.
+        # Keep the attention boundary for every SFA layer. Some GLM-5.2 layers
+        # reuse cached top-k indices and have no indexer, so the indexer's
+        # forward cannot provide the save event or fallback load gate for them.
         with attention_transfer_window():
             if has_local_query:
                 attn_output = self._execute_sparse_flash_attention_process(

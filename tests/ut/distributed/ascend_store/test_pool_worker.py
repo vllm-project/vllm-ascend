@@ -589,15 +589,15 @@ class TestLayerwiseAttentionSave(unittest.TestCase):
         worker = make_worker(self, num_layers=1, use_layerwise=True, kv_cache_config=plan)
         worker.kv_recv_thread = MagicMock()
         worker.layer_load_finished_events = [threading.Event()]
-        gate = SimpleNamespace(on_start=None, on_finish=None)
+        save_gate = SimpleNamespace(event=None, on_start=None, on_finish=None, cancel=MagicMock())
         with patch(
-            "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.pool_worker.reset_attention_compute_start_gate",
-            return_value=gate,
+            "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.pool_worker.reset_attention_gates",
+            return_value=(MagicMock(), save_gate),
         ):
             worker.wait_for_layer_load()
         self.assertFalse(worker.use_hybrid)
         self.assertEqual(worker._recurrent_layers, {0})
-        self.assertIsNone(gate.on_start)
+        self.assertIsNone(save_gate.on_start)
 
     def test_pp_maps_global_mamba_layer_to_local_post_compute_save(self):
         from vllm.v1.kv_cache_interface import UniformTypeKVCacheSpecs
@@ -626,26 +626,27 @@ class TestLayerwiseAttentionSave(unittest.TestCase):
                 )
                 worker.kv_recv_thread = MagicMock()
                 worker.layer_load_finished_events = [threading.Event(), threading.Event()]
+                worker.sync_save_events = [MagicMock(), MagicMock()]
 
                 self.assertEqual(worker.pp_rank, 1)
                 self.assertEqual(worker._global_to_local_layer, {2: 0, 3: 1})
                 self.assertEqual(worker._recurrent_layers, {1})
 
-                full_attention_gate = SimpleNamespace(on_start=None, on_finish=None)
+                full_attention_gate = SimpleNamespace(event=None, on_start=None, on_finish=None, cancel=MagicMock())
                 with patch(
                     "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.pool_worker."
-                    "reset_attention_compute_start_gate",
-                    return_value=full_attention_gate,
+                    "reset_attention_gates",
+                    return_value=(MagicMock(), full_attention_gate),
                 ):
                     worker.wait_for_layer_load()
                 self.assertIsNotNone(full_attention_gate.on_start)
 
                 worker.current_layer = 1
-                mamba_gate = SimpleNamespace(on_start=None, on_finish=None)
+                mamba_gate = SimpleNamespace(event=None, on_start=None, on_finish=None, cancel=MagicMock())
                 with patch(
                     "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.pool_worker."
-                    "reset_attention_compute_start_gate",
-                    return_value=mamba_gate,
+                    "reset_attention_gates",
+                    return_value=(MagicMock(), mamba_gate),
                 ):
                     worker.wait_for_layer_load()
                 self.assertIsNone(mamba_gate.on_start)

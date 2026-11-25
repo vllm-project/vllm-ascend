@@ -26,7 +26,7 @@ from tests.ut.distributed.ascend_store.test_pool_worker import make_worker
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector import create_kv_pool_scheduler
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence import (
     attention_transfer_window,
-    reset_attention_compute_start_gate,
+    reset_attention_gates,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend import mooncake_backend, mooncake_layerwise
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.mooncake_layerwise import (
@@ -435,9 +435,10 @@ class TestMooncakeHybrid(unittest.TestCase):
     def test_attention_window_drains_before_communication_and_on_exception(self):
         for fail in (False, True):
             events: list[str] = []
-            gate = reset_attention_compute_start_gate()
-            gate.on_start = lambda events=events: events.append("put/get submit")
-            gate.on_finish = lambda events=events: events.append("put/get complete")
+            _, save_gate = reset_attention_gates()
+            save_gate.event = MagicMock()
+            save_gate.on_start = lambda events=events: events.append("put/get submit")
+            save_gate.on_finish = lambda events=events: events.append("put/get complete")
             try:
                 with attention_transfer_window():
                     events.append("attention submitted")
@@ -694,7 +695,7 @@ class TestMooncakeHybrid(unittest.TestCase):
                 raise TimeoutError("test device fence")
 
         device_event.synchronize.side_effect = synchronize
-        gate = reset_attention_compute_start_gate()
+        gate, _ = reset_attention_gates()
         job = threading.Thread(target=lambda: transfer_started.set() if gate.wait(timeout=2) else None, daemon=True)
         with patch(
             "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence.torch.npu.Event",
