@@ -2373,10 +2373,11 @@ guide_sections:
 
     #### Memcache three-tier pooling
 
-    Select the **Memcache three-tier PD** preset for [A2](?hardware=ascend_910b&variant=ascend_w4a8&strategy=pd_cluster&preset=ascend_a2_memcache_pool),
+    On [A2](?hardware=ascend_910b&variant=ascend_w4a8&strategy=pd_cluster&preset=ascend_a2_memcache_pool),
     [A3](?hardware=ascend_910c&variant=ascend_w4a8&strategy=pd_cluster&preset=ascend_a3_memcache_pool) or
-    [950DT](?hardware=ascend_950dt&variant=ascend_a5_w4a8_mxfp&strategy=pd_cluster&preset=ascend_950dt_memcache_pool).
-    Open **Deployment** and choose a new or existing pool. A2 uses two hosts,
+    [950DT](?hardware=ascend_950dt&variant=ascend_a5_w4a8_mxfp&strategy=pd_cluster&preset=ascend_950dt_memcache_pool)
+    select Memcache under **KV Offload**, then choose whether to create a pool or use an existing one.
+    Follow the steps in the command panel above to check the devices and start the services. A2 uses two hosts,
     each with a dedicated device. A3 uses two devices in one serving
     container, and 950DT uses one device with separate P/D local configurations.
     Follow the role layouts, endpoint checks and SSD restore procedure in the

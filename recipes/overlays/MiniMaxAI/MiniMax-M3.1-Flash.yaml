@@ -1730,9 +1730,11 @@ guide_sections:
     `--hf-overrides` with the sparse architecture its scripts use; the 950DT PD
     scripts do not pass it, so that preset does not either.
 
-    **Mooncake three-tier pooling.** Select the [A3](?hardware=ascend_910c&variant=ascend_w8a8&strategy=pd_cluster&preset=ascend_a3_mooncake_pool)
+    **Mooncake three-tier pooling.** On [A3](?hardware=ascend_910c&variant=ascend_w8a8&strategy=pd_cluster&preset=ascend_a3_mooncake_pool)
     or [950DT](?hardware=ascend_950dt_8x&variant=ascend_w8a8_mxfp8&strategy=pd_cluster&preset=ascend_950dt_mooncake_pool)
-    pool preset and open **Deployment**. These presets reproduce the versioned tutorial's
+    select Mooncake under **KV Offload**, then choose whether to create a pool or use an existing one.
+    Follow the steps in the command panel above to prepare storage and start the services.
+    These presets reproduce the versioned tutorial's
     MooncakeConnectorV1 P-to-D transport with an AscendStoreConnector on both roles.
     A3 has one independent Decode process per rank. The 950DT group has one
     process per Decode host. Each worker host provides writable local SSD storage.
