@@ -247,7 +247,6 @@ def run_draft_hccl_weight_transfer(tmp_path, monkeypatch, packed: bool, enforce_
 
     wait_for_free_device_memory(INFERENCE_DEVICE_INDEX, 0.2)
     port = get_open_port()
-    results = []
     with rlhf_server(
         str(initial_path),
         vllm_serve_args=draft_serve_args(initial_path, speculative_case, port, enforce_eager=enforce_eager, live=True),
@@ -316,20 +315,17 @@ def run_draft_hccl_weight_transfer(tmp_path, monkeypatch, packed: bool, enforce_
                 (tmp_path / f"update-{update_round}-{role}-draft-outputs.json").write_text(
                     json.dumps(observation["draft_outputs"], indent=2)
                 )
-                results.append((reference_name, observation, parameter_addresses(after)))
+                # Full parameter comparison also verifies update isolation:
+                # the cold reference retains the other model's expected weights.
+                assert observation == references[reference_name], (
+                    f"{speculative_case.id}: {role} update {update_round} differs from startup"
+                )
+                assert parameter_addresses(after) == original_addresses, (
+                    f"{speculative_case.id}: {role} update {update_round} changed parameter storage"
+                )
         finally:
             try:
                 if graph_capture_started:
                     post_control(server, "collective_rpc", json={"method": "finish_graph_execution_capture"})
             finally:
                 engine.shutdown()
-
-    # Full parameter comparison also checks that draft-only updates leave the
-    # target unchanged. Greedy generation alone cannot observe draft changes.
-    for update_round, (role, observation, addresses) in enumerate(results, start=1):
-        assert observation == references[role], (
-            f"{speculative_case.id}: {role} update {update_round} differs from startup"
-        )
-        assert addresses == original_addresses, (
-            f"{speculative_case.id}: update {update_round} changed parameter storage"
-        )

@@ -454,6 +454,26 @@ class WeightUpdateTestWorkerExtension:
                 assert "model.context_wkv_proj.weight" in result[name], (
                     "DSpark merged context WKV must be covered by the parameter snapshot"
                 )
+            if name == "draft":
+                # These BF16 cases omit draft embeddings/heads and share the
+                # target copies. Check the relationship on every snapshot;
+                # existing digest/address comparisons cover reload correctness.
+                target = self.get_model()
+                if hasattr(target, "get_language_model"):
+                    target = target.get_language_model()
+                shared_weights = [("embedding", model.model.embed_tokens.weight, target.model.embed_tokens.weight)]
+                if type(model).__name__.endswith("DeepSeekV4MTP"):
+                    # MTP computes logits through each layer's shared head.
+                    shared_weights.extend(
+                        (f"mtp.{layer_id}.lm_head", layer.shared_head.head.weight, target.lm_head.weight)
+                        for layer_id, layer in model.model.layers.items()
+                    )
+                else:
+                    shared_weights.append(("lm_head", model.lm_head.weight, target.lm_head.weight))
+                for label, draft_weight, target_weight in shared_weights:
+                    assert draft_weight.data_ptr() == target_weight.data_ptr(), (
+                        f"Draft {label} no longer shares storage with the target"
+                    )
         return result
 
 
