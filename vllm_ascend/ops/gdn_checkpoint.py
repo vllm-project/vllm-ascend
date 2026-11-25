@@ -118,6 +118,15 @@ def build_gdn_checkpoint_metadata(
     if host_blocks is not None:
         logger.info_once("Native GDN checkpoints use host block metadata")
     device = metadata.query_start_loc.device
+    if dedicated_writes and metadata.block_table_tensor.dtype == torch.int32 and not any(col >= 0 for col in columns):
+        # Dedicated pages already have absolute IDs. With no positional
+        # destinations in the batch, upload the two vectors together.
+        offsets_npu, indices = async_tensor_h2d([offsets, dedicated_blocks], dtype=torch.int32, device=device).unbind(0)
+        checkpoint = MambaPrefillCheckpointMetadata(
+            checkpoint_offsets=offsets_npu, state_indices=indices, offsets=offsets, query_lens=query_lens
+        )
+        checkpoint.dedicated_ack = GDNCheckpointAcknowledgement(dedicated_writes)
+        return checkpoint
     checkpoint = MambaPrefillCheckpointMetadata(
         checkpoint_offsets=async_tensor_h2d(offsets, dtype=torch.int32, device=device),
         state_indices=None,

@@ -7,7 +7,7 @@ import pytest
 import torch
 
 from vllm_ascend.core.gdn_checkpoint_policy import GDNCheckpointPolicy
-from vllm_ascend.ops import native_gdn_checkpoint
+from vllm_ascend.ops import gdn_checkpoint, native_gdn_checkpoint
 from vllm_ascend.ops.gdn_checkpoint import build_gdn_checkpoint_metadata
 from vllm_ascend.ops.native_gdn_checkpoint import plan_native_checkpoint
 
@@ -120,3 +120,27 @@ def test_dedicated_page_coexists_with_another_rows_positional_checkpoint():
     assert checkpoint.state_indices.tolist() == [77, 22]
     assert checkpoint.dedicated_ack.writes == {"req": ((1, 3456, 77),)}
     assert checkpoint.dedicated_ack.layers == set()
+
+
+def test_dedicated_only_batch_uses_one_host_transfer(monkeypatch):
+    cache = SimpleNamespace(hash_block_size=128, cache_hit_alignment_tokens=128)
+    config = SimpleNamespace(cache_config=cache, num_hash_lookahead_tokens=1)
+    spec = SimpleNamespace(block_size=2048, prefill_checkpoint_alignment=64)
+    builder = SimpleNamespace(vllm_config=config, kv_cache_spec=spec, drop_eagle_block=False)
+    starts = torch.tensor([0, 1452, 2308], dtype=torch.int32)
+    metadata = SimpleNamespace(
+        seq_lens_cpu_upper_bound=torch.tensor([3500, 7000], dtype=torch.int32),
+        query_start_loc_cpu=starts,
+        query_start_loc=starts,
+        # The dedicated-only planner needs the dtype but never indexes this table.
+        block_table_tensor=torch.empty((0, 0), dtype=torch.int32),
+        gdn_dedicated_checkpoint_rows={0: ("a", (1, 3456, 77)), 1: ("b", (1, 6912, 78))},
+    )
+    upload = Mock(side_effect=torch.tensor)
+    monkeypatch.setattr(gdn_checkpoint, "async_tensor_h2d", upload)
+    checkpoint = build_gdn_checkpoint_metadata(builder, metadata, [0, 1], GDNCheckpointPolicy(65536, True, False))
+    upload.assert_called_once()
+    assert checkpoint.offsets == checkpoint.checkpoint_offsets.tolist() == [1408, 768]
+    assert checkpoint.state_indices.tolist() == [77, 78]
+    assert checkpoint.request_rows is None and checkpoint.block_cols is None
+    assert checkpoint.dedicated_ack.writes == {"a": ((1, 3456, 77),), "b": ((1, 6912, 78),)}
