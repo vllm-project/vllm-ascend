@@ -99,6 +99,10 @@ def test_handshake_merge_preserves_layout_by_layer_and_rejects_rank_mismatch():
 
 @pytest.fixture
 def worker():
+    def single_pcp_dcp_rank(worker_rank, pcp_size, dcp_size):
+        assert pcp_size == 1
+        return worker_rank % dcp_size
+
     cls = load_class(
         "pull_worker.py",
         "MooncakePullRecvingThread",
@@ -112,6 +116,7 @@ def worker():
             "_expand_block_ids",
             "_select_remote_tp_rank",
         },
+        dependencies={"worker_rank_to_dcp_rank": single_pcp_dcp_rank},
     )
     worker = cls()
     worker.tp_size = 4

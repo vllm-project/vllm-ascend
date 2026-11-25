@@ -697,7 +697,8 @@ class CpuAlloc:
 
         if not os.access("/proc/irq", os.W_OK):
             logger.warning_once(
-                "/proc/irq is not writable. If running in Docker, start the container with '--privileged=true'."
+                "/proc/irq is not writable; IRQ binding is skipped. Configure host permissions for "
+                "/proc/irq/*/smp_affinity if IRQ binding is required."
             )
             return
 

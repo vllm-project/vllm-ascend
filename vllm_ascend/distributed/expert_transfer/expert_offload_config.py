@@ -29,8 +29,6 @@ def validate_expert_offload_config(
         return
     if get_current_hardware_profile().device_adaptor_family != DeviceAdaptorFamily.FP8_OPTIMIZED:
         raise ValueError("expert offload currently requires Ascend 950 (A5) hardware")
-    if not vllm_config.use_v2_model_runner:
-        raise ValueError("expert offload requires Model Runner V2")
     if not vllm_config.model_config.enforce_eager:
         from vllm.config.compilation import CompilationMode, CUDAGraphMode
 

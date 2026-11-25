@@ -147,7 +147,6 @@ public:
     ge::graphStatus CalcOpTiling();
     void CalcVectorCoreNum();
     ge::graphStatus CalcMKSplitCoreMembasePart2Tiling();
-    ge::graphStatus CalcPremixPart2Tiling();
     ge::graphStatus CalcSinkhornTiling();
 
 private:

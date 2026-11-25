@@ -16,6 +16,7 @@ from vllm.v1.kv_cache_interface import (
     CircularBufferSpec,
     FullAttentionSpec,
     KVCacheSpec,
+    KVCacheTensor,
     MambaSpec,
     MLAAttentionSpec,
     SlidingWindowMLASpec,
@@ -23,6 +24,14 @@ from vllm.v1.kv_cache_interface import (
     UniformTypeKVCacheSpecs,
 )
 from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry
+
+
+@dataclass(kw_only=True)
+class AlignedKVCacheTensor(KVCacheTensor):
+    """Allocator padding carried explicitly through copies of the base descriptor."""
+
+    logical_size: int
+    alignment: int
 
 
 def get_kv_cache_compression_ratio(kv_cache_spec: KVCacheSpec) -> int:
@@ -210,6 +219,13 @@ class AscendMLAAttentionSpec(MLAAttentionSpec):
     # indexer spec.
     cache_sparse_sfa_c8: bool = False
     cache_sparse_sfa_turboquant: bool = False
+    # HIF8 C8 (Ascend 950PR/950DT) marks layers whose latent KV cache is
+    # per-tensor-quantized to HIF8 with a static scale. Unlike C8/TQ above it
+    # does NOT repack the cache: the geometry stays the plain MLA latent
+    # layout (kv_lora_rank bytes per token, no embedded scale, empty RoPE
+    # view for NoPE models); only the payload dtype becomes uint8 HIF8
+    # bytes. The flag exists for group-merge uniformity checks.
+    cache_sparse_sfa_hif8: bool = False
     store_on_host: bool = False
     # Ascend kernels consume padded pages through an explicit physical block
     # stride. vLLM main removed this field from AttentionSpec, but it remains
@@ -239,6 +255,7 @@ class AscendMLAAttentionSpec(MLAAttentionSpec):
             and self.model_version is None
             and not self.indexes_kv_by_block_stride
             and not self.cache_sparse_sfa_c8
+            and not self.cache_sparse_sfa_hif8
         )
 
     @property
@@ -267,6 +284,7 @@ class AscendMLAAttentionSpec(MLAAttentionSpec):
                 spec.scale_dtype,
                 spec.cache_sparse_sfa_c8,
                 spec.cache_sparse_sfa_turboquant,
+                spec.cache_sparse_sfa_hif8,
                 spec.store_on_host,
                 spec.alignment,
                 get_kv_cache_compression_ratio(spec),
@@ -292,6 +310,7 @@ class AscendMLAAttentionSpec(MLAAttentionSpec):
             alignment=first_spec.alignment,
             cache_sparse_sfa_c8=first_spec.cache_sparse_sfa_c8,
             cache_sparse_sfa_turboquant=first_spec.cache_sparse_sfa_turboquant,
+            cache_sparse_sfa_hif8=first_spec.cache_sparse_sfa_hif8,
             store_on_host=first_spec.store_on_host,
             indexes_kv_by_block_stride=first_spec.indexes_kv_by_block_stride,
             # A merged mixed group must remain in the target lookup. Per-layer

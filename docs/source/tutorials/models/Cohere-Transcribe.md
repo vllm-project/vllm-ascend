@@ -31,7 +31,7 @@ Download the model weights from any of the following sources:
 
 |  Weight Version | Hardware Requirements  | Download Links |
 |-----------------|------------------------|----------------|
-| BF16            | one Atlas A2 64 GB NPU | [ModelScope](https://modelscope.cn/models/CohereLabs/cohere-transcribe-03-2026) \| [Hugging Face(03-2026)](https://huggingface.co/CohereLabs/cohere-transcribe-03-2026) \| [Hugging Face(07-2026)](https://huggingface.co/CohereLabs/cohere-transcribe-arabic-07-2026) \| [GitCode mirror (03-2026)](https://ai.gitcode.com/weixin_62994174/CohereLabs_cohere-transcribe-03-2026)|
+| BF16            | one Atlas A2 64 GB NPU | [ModelScope](https://modelscope.cn/models/CohereLabs/cohere-transcribe-03-2026) \| [Hugging Face (03-2026)](https://huggingface.co/CohereLabs/cohere-transcribe-03-2026) \| [Hugging Face (07-2026)](https://huggingface.co/CohereLabs/cohere-transcribe-arabic-07-2026) \| [GitCode mirror (03-2026)](https://ai.gitcode.com/weixin_62994174/CohereLabs_cohere-transcribe-03-2026)|
 
 Note that the model repository ships custom modeling code, so `--trust-remote-code` is required when serving.
 
@@ -41,6 +41,8 @@ Download the weights to a directory that is accessible from the deployment envir
 
 ### 4.1 Docker Image Installation
 
+{% include "getting_started/installation/ascend_docker_runtime.inc.md" %}
+
 Use the vLLM-Ascend Docker image that corresponds to your hardware. Replace the model-weight mount with the path used in your environment.
 
 === "Atlas A2 inference products"
@@ -49,18 +51,10 @@ Use the vLLM-Ascend Docker image that corresponds to your hardware. Replace the 
     export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}
 
     docker run --rm \
+        -e ASCEND_VISIBLE_DEVICES=0 \
         --name vllm-ascend \
         --shm-size=1g \
         --net host \
-        --device /dev/davinci0 \
-        --device /dev/davinci_manager \
-        --device /dev/devmm_svm \
-        --device /dev/hisi_hdc \
-        -v /usr/local/dcmi:/usr/local/dcmi \
-        -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
-        -v /usr/local/Ascend/driver/lib64:/usr/local/Ascend/driver/lib64 \
-        -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
-        -v /etc/ascend_install.info:/etc/ascend_install.info \
         -v /root/.cache:/root/.cache \
         -it -d $IMAGE bash
     ```
@@ -104,7 +98,7 @@ Single-node deployment runs both audio prefill and decoding on one NPU, making i
 
     === "cohere-transcribe-03-2026"
 
-        ```shell
+        ```bash
         export ASCEND_RT_VISIBLE_DEVICES=0
         export HF_HUB_OFFLINE=1
         export TRANSFORMERS_OFFLINE=1
@@ -122,7 +116,7 @@ Single-node deployment runs both audio prefill and decoding on one NPU, making i
 
     === "cohere-transcribe-arabic-07-2026"
 
-        ```shell
+        ```bash
         export ASCEND_RT_VISIBLE_DEVICES=0
         export HF_HUB_OFFLINE=1
         export TRANSFORMERS_OFFLINE=1
@@ -216,7 +210,7 @@ The 07-2026 Arabic fine-tuned model significantly outperforms the 03-2026 base m
 
 Measure ASR serving performance with audio samples that represent the production workload. Record at least the audio duration, request concurrency, end-to-end latency, real-time factor, and throughput. This ensures that audio preprocessing, request construction, API communication, inference, and response parsing are included in the result.
 
-Both models were evaluated on the same 100 Common Voice Arabic samples (440 seconds total audio) with the same inference stack (vLLM 0.23.0 + vllm-ascend). Results from the internal evaluation report:
+Both models were evaluated on the same 100 Common Voice Arabic samples (440 s total audio) with the same inference stack (vLLM 0.23.0 + vllm-ascend). Results from the internal evaluation report:
 
 | Metric | 07-2026 Arabic | 03-2026 (base) |
 | --- | --- | --- |

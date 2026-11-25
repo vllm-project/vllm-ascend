@@ -16,7 +16,7 @@
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 #
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Hashable, Mapping
 from contextlib import contextmanager
 from typing import Any
 
@@ -47,7 +47,7 @@ from vllm_ascend.compilation.updatable_graph import (
     UpdatableGraph,
 )
 from vllm_ascend.distributed.expert_transfer import expert_offload_utils as expert_offload
-from vllm_ascend.utils import use_updatable_graph, vllm_version_is
+from vllm_ascend.utils import use_updatable_graph
 from vllm_ascend.worker.v2.utils import communicator_switch
 
 
@@ -81,7 +81,16 @@ def _get_graph_update_backend(
     raise RuntimeError("No executable attention backend is available for full-graph parameter updates.")
 
 
-class ModelAclGraphManager(ModelCudaGraphManager):
+class AscendGraphManagerMixin:
+    vllm_config: VllmConfig
+    breakable_cg_runner: BreakableACLGraphWrapper | None
+
+    def init_breakable_cg_runner(self, model: nn.Module, key_fn: Callable[..., Hashable] | None = None) -> None:
+        if self.breakable_cg_runner is None:
+            self.breakable_cg_runner = BreakableACLGraphWrapper(model, self.vllm_config, key_fn=key_fn)
+
+
+class ModelAclGraphManager(AscendGraphManagerMixin, ModelCudaGraphManager):
     """ACL Model Cuda Graph Manager for Ascend NPUs."""
 
     def __init__(
@@ -89,7 +98,7 @@ class ModelAclGraphManager(ModelCudaGraphManager):
         vllm_config: VllmConfig,
         device: torch.device,
         cudagraph_mode: CUDAGraphMode,
-        decode_query_len: int | Mapping[int, int],
+        decode_query_lens: Mapping[int, int],
         model_runner: Any,
         lora_capture_cases: list[int] | None = None,
         varlen_decode: bool = False,
@@ -101,7 +110,7 @@ class ModelAclGraphManager(ModelCudaGraphManager):
             vllm_config,
             device,
             cudagraph_mode,
-            decode_query_len,
+            decode_query_lens,
             lora_capture_cases=lora_capture_cases,
             varlen_decode=varlen_decode,
             ubatch_runner=ubatch_runner,
@@ -113,10 +122,6 @@ class ModelAclGraphManager(ModelCudaGraphManager):
         self.capture_sizes = collect_sorted_captured_token_sizes(self._capture_descs)
         if super().needs_capture():
             set_graph_params(self.capture_sizes)
-
-    def init_breakable_cg_runner(self, model: nn.Module) -> None:
-        if self.breakable_cg_runner is None:
-            self.breakable_cg_runner = BreakableACLGraphWrapper(model, self.vllm_config)
 
     def run_fullgraph(self, desc: BatchExecutionDescriptor) -> torch.Tensor | tuple[torch.Tensor, list[torch.Tensor]]:
         """Override run_fullgraph to update full graph params in run_fullgraph."""
@@ -207,7 +212,6 @@ class ModelAclGraphManager(ModelCudaGraphManager):
         block_tables: BlockTables,
         attn_groups: list[list[AttentionGroup]],
         kv_cache_config: KVCacheConfig,
-        has_lora: bool = False,
         use_aux_hidden_state_outputs: bool = False,
         lora_capture_hook: Callable[[int, int, int], None] | None = None,
         progress_bar_desc: str = "Capturing CUDA graphs",
@@ -217,7 +221,6 @@ class ModelAclGraphManager(ModelCudaGraphManager):
         """Capture CUDA graphs for model forward pass."""
         metadata = getattr(model_state, "device_metadata", None)
         model = ModelWithContext(model, device_metadata=metadata)
-        legacy_kwargs = {"has_lora": has_lora} if vllm_version_is("0.33.0") else {}
         try:
             with communicator_switch():
                 return super().capture(
@@ -229,7 +232,6 @@ class ModelAclGraphManager(ModelCudaGraphManager):
                     attn_groups,
                     kv_cache_config,
                     pcp_manager=pcp_manager,
-                    **legacy_kwargs,
                     use_aux_hidden_state_outputs=use_aux_hidden_state_outputs,
                     lora_capture_hook=lora_capture_hook,
                     progress_bar_desc=progress_bar_desc,

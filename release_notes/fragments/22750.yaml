@@ -1,0 +1,25 @@
+pr: 22750
+entries:
+  - category: feature
+    text: >-
+      Added HIF8 C8 KV cache quantization for sparse-attention MLA models
+      (GLM-5.3-Flash) on Ascend 950PR/950DT, enabled with
+      `--kv-cache-dtype hif8` together with a ModelSlim
+      `QK_HIF8_PER_TENSOR` layer recipe. The latent KV cache and the absorbed
+      query are quantized to HIFLOAT8 with per-tensor scales loaded from the
+      checkpoint (fa_q/fa_k scale). The cache keeps the plain MLA latent page
+      layout as a uint8 payload (kv_lora_rank bytes per token, no repacking,
+      no embedded scales), so P2P KV transfer can treat HIF8 pages as opaque
+      buffers, and attention runs on the QuantSparseFlashMla operators from
+      the CANN toolkit. Works with tensor parallelism, prefix caching, MTP
+      speculative decoding, and FULL decode ACL graphs.
+    model: glm-5.3-flash
+    hardware: [A5]
+    highlight: true
+  - category: config
+    text: >-
+      `--kv-cache-dtype hif8` quantizes only the layers exported with the
+      ModelSlim `QK_HIF8_PER_TENSOR` recipe; other layers fall back to the
+      model dtype.
+    model: glm-5.3-flash
+    hardware: [A5]
