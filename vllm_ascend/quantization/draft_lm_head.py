@@ -12,9 +12,8 @@ quantized copy of a shared target LM head:
   (A5-class, FP8_OPTIMIZED device family).
 - ``int8``: per-channel INT8 weights on the W8A8 matmul (A2/A3-class,
   STANDARD device family).
-- ``fp8``/``nvfp4``: the core formats, which have no Ascend execution
-  path; shadowed with factories that raise a clear error instead of
-  failing inside a CUDA-kernel initialization.
+- ``fp8``/``nvfp4``: the core formats, claimed with ``None`` by the
+  platform hook: recognized names with no Ascend execution path.
 
 310P (COMPATIBILITY family) declares no Ascend format.
 """
@@ -32,21 +31,3 @@ def create_mxfp8_lm_head_method() -> AscendEmbeddingMethod:
 def create_int8_lm_head_method() -> AscendEmbeddingMethod:
     """Quantize the draft copy into per-channel INT8 (A2/A3-class devices)."""
     return AscendEmbeddingMethod(AscendW8A8DynamicLmHeadMethod())
-
-
-def _unsupported_format_error(format_name: str) -> ValueError:
-    return ValueError(
-        f'draft_lm_head_quantization="{format_name}" has no Ascend execution '
-        'path; use "mxfp8" on A5-class devices (FP8_OPTIMIZED family) or '
-        '"int8" on A2/A3-class devices (STANDARD family).'
-    )
-
-
-def create_unsupported_fp8_method() -> AscendEmbeddingMethod:
-    """Reject the core ``fp8`` format with a pointer to the Ascend formats."""
-    raise _unsupported_format_error("fp8")
-
-
-def create_unsupported_nvfp4_method() -> AscendEmbeddingMethod:
-    """Reject the core ``nvfp4`` format with a pointer to the Ascend formats."""
-    raise _unsupported_format_error("nvfp4")

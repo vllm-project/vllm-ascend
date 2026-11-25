@@ -50,12 +50,15 @@ def _resolve(qualname: str):
     ],
 )
 def test_platform_formats_follow_hardware_family(family, expected_formats):
-    """The hook declares the Ascend format of the device family, plus the
-    shadowed core formats; every qualifier resolves to a callable factory."""
+    """The hook declares the Ascend format of the device family and claims
+    the core formats with None; every non-None qualifier resolves to a
+    callable factory."""
     with patch("vllm_ascend.platform.get_current_hardware_profile", return_value=_profile(family)):
         methods = NPUPlatform.get_draft_lm_head_quantization_methods()
     assert set(methods) == expected_formats
     for format_name, qualname in methods.items():
+        if qualname is None:
+            continue
         factory = _resolve(qualname)
         assert callable(factory), format_name
 
@@ -89,14 +92,20 @@ def test_int8_factory_builds_lm_head_method():
 
 
 @pytest.mark.parametrize("format_name", ["fp8", "nvfp4"])
-def test_core_format_factories_raise_a_pointer(format_name):
-    """The shadowed core formats reject with the Ascend format of the device
-    family, not a kernel-level failure."""
-    from vllm_ascend.quantization import draft_lm_head
-
-    factory = getattr(draft_lm_head, f"create_unsupported_{format_name}_method")
-    with pytest.raises(ValueError, match="mxfp8.*int8"):
-        factory()
+def test_core_formats_are_claimed_with_none(format_name):
+    """The core formats are claimed with None in every family: recognized
+    names with no Ascend execution path, rejected by the core factory."""
+    for family in (
+        DeviceAdaptorFamily.FP8_OPTIMIZED,
+        DeviceAdaptorFamily.STANDARD,
+        DeviceAdaptorFamily.COMPATIBILITY,
+    ):
+        with patch(
+            "vllm_ascend.platform.get_current_hardware_profile",
+            return_value=_profile(family),
+        ):
+            methods = NPUPlatform.get_draft_lm_head_quantization_methods()
+        assert methods[format_name] is None
 
 
 @pytest.mark.parametrize(

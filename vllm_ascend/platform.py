@@ -362,20 +362,17 @@ class NPUPlatform(Platform):
         return "vllm_ascend.compilation.compiler_interface.AscendCompiler"
 
     @classmethod
-    def get_draft_lm_head_quantization_methods(cls) -> dict[str, str]:
+    def get_draft_lm_head_quantization_methods(cls) -> dict[str, str | None]:
         """Ascend formats for the drafter's quantized LM head copy.
 
         Maps each `draft_lm_head_quantization` format to the qualified name
-        of a zero-argument factory in vllm_ascend.quantization.draft_lm_head.
-        The core "fp8"/"nvfp4" formats have no Ascend execution path and are
-        shadowed with factories that raise a clear error. 310P (COMPATIBILITY
+        of a zero-argument factory in vllm_ascend.quantization.draft_lm_head,
+        or None for a recognized name with no Ascend execution path; the
+        core "fp8"/"nvfp4" formats are claimed with None. 310P (COMPATIBILITY
         family) has no online LM head quantization support yet.
         """
         family = get_current_hardware_profile().device_adaptor_family
-        methods = {
-            "fp8": "vllm_ascend.quantization.draft_lm_head.create_unsupported_fp8_method",
-            "nvfp4": "vllm_ascend.quantization.draft_lm_head.create_unsupported_nvfp4_method",
-        }
+        methods: dict[str, str | None] = {"fp8": None, "nvfp4": None}
         if family is DeviceAdaptorFamily.FP8_OPTIMIZED:
             methods["mxfp8"] = "vllm_ascend.quantization.draft_lm_head.create_mxfp8_lm_head_method"
         elif family is DeviceAdaptorFamily.STANDARD:
