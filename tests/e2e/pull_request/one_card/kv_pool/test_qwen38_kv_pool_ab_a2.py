@@ -141,8 +141,6 @@ from tests.e2e.common.single_node.kv_pool_runtime import (
 )
 from tests.e2e.conftest import VllmRunner, wait_until_npu_memory_free
 from tests.e2e.pull_request.kv_pool_watch import (
-    AB_SAMPLES,
-    AB_WARMUP,
     PREFIX_HITS_METRIC,
     assert_hit_tokens,
     assert_no_hit,
@@ -152,6 +150,15 @@ from tests.e2e.pull_request.kv_pool_watch import (
 )
 
 MODEL = os.environ.get("QWEN38_POOL_MODEL", "Eco-Tech/Qwen3.8-27B-w8a8")
+# Sampling shape for the A/B performance legs: 2 discarded warmup requests, then
+# 20 measured samples per leg. These stay local to this file on purpose: the
+# shared kv_pool_watch helper belongs to the A3 PR series (its API keeps
+# evolving upstream), and importing constants from it would break whenever the
+# upstream shifts them again (the watch on main currently has neither
+# AB_SAMPLES nor AB_WARMUP; it this test needs those constants, it pins them
+# locally instead of importing them).
+PERF_SAMPLES = 20
+PERF_WARMUP = 2
 # These cases run on a single A2 card by default. The pool moves KV between
 # ranks, and the two-card A2 slice this file used to be routed to has no working
 # cross-NPU channel: pinning device RoCE fails with "Device roce endpoint is
@@ -965,7 +972,7 @@ def _phase_control(runner: VllmRunner, state: dict[str, Any], tag: str) -> None:
 def _percentile(values: list[float], q: float) -> float:
     """Nearest-rank percentile for ``q`` in (0, 1].
 
-    With ``AB_SAMPLES = 20`` a ``q=0.95`` request now yields the 19th sample
+    With ``PERF_SAMPLES = 20`` a ``q=0.95`` request now yields the 19th sample
     instead of the maximum, so one slow request no longer defines the gate
     value. ``q=0.50`` still returns the median (middle sample for odd counts).
     """
@@ -987,7 +994,7 @@ def _phase_perf(
     pool leg), each request is followed by a metrics snapshot taken *outside* the
     timing window, one line is printed per round, and the aggregate is checked:
     because ``expected_hit_tokens`` is also the per-round maximum, a total equal
-    to ``AB_SAMPLES * expected_hit_tokens`` proves that no measured round
+    to ``PERF_SAMPLES * expected_hit_tokens`` proves that no measured round
     under-hit. ``expected_hit_tokens=None`` (control leg, no pool) skips all of
     this and only times the requests.
     """
@@ -999,7 +1006,7 @@ def _phase_perf(
     measured_queries = 0.0
     warmup_hits = 0.0
     previous = snapshot_metrics(runner) if expected_hit_tokens is not None else None
-    for index in range(AB_WARMUP + AB_SAMPLES):
+    for index in range(PERF_WARMUP + PERF_SAMPLES):
         began = time.perf_counter()
         _generate(runner, prompt_ids, 1)
         elapsed = time.perf_counter() - began
@@ -1009,7 +1016,7 @@ def _phase_perf(
             round_hits = current.hits - previous.hits
             round_queries = current.queries - previous.queries
             previous = current
-        if index < AB_WARMUP:
+        if index < PERF_WARMUP:
             # Warmup only. Keeping it out of every accumulator means the
             # reported throughput divides the measured tokens by the measured
             # time, so it is comparable across runs and unaffected by how many
@@ -1018,7 +1025,7 @@ def _phase_perf(
             if expected_hit_tokens is not None:
                 warmup_hits += round_hits
                 print(
-                    f"[kv_pool_a2] {tag} perf_warmup={index + 1}/{AB_WARMUP} "
+                    f"[kv_pool_a2] {tag} perf_warmup={index + 1}/{PERF_WARMUP} "
                     f"ttft={elapsed * 1000.0:.1f}ms hits_delta={round_hits:.0f} "
                     f"queries_delta={round_queries:.0f}",
                     flush=True,
@@ -1031,7 +1038,7 @@ def _phase_perf(
             measured_hits += round_hits
             measured_queries += round_queries
             print(
-                f"[kv_pool_a2] {tag} perf_round={index - AB_WARMUP + 1}/{AB_SAMPLES} "
+                f"[kv_pool_a2] {tag} perf_round={index - PERF_WARMUP + 1}/{PERF_SAMPLES} "
                 f"ttft={elapsed * 1000.0:.1f}ms tok_s={len(prompt_ids) / elapsed:.0f} "
                 f"hits_delta={round_hits:.0f} queries_delta={round_queries:.0f} "
                 f"query_hit_rate={(round_hits / round_queries if round_queries else 0.0):.2%} "
@@ -1048,7 +1055,7 @@ def _phase_perf(
     print(
         f"[kv_pool_a2] {tag} perf: ttft_p50={p50:.1f}ms ttft_p80={p80:.1f}ms "
         f"ttft_p95={p95:.1f}ms input_throughput={throughput:.0f}tok/s "
-        f"drift={tail / head if head else 1.0:.2f} samples={AB_SAMPLES} warmup={AB_WARMUP}",
+        f"drift={tail / head if head else 1.0:.2f} samples={PERF_SAMPLES} warmup={PERF_WARMUP}",
         flush=True,
     )
     # Every measured sample, so a reader can line each round up with its own TTFT
@@ -1062,10 +1069,10 @@ def _phase_perf(
         flush=True,
     )
     if expected_hit_tokens is not None:
-        hits_cap = AB_SAMPLES * expected_hit_tokens
-        queries_cap = AB_SAMPLES * len(prompt_ids)
+        hits_cap = PERF_SAMPLES * expected_hit_tokens
+        queries_cap = PERF_SAMPLES * len(prompt_ids)
         print(
-            f"[kv_pool_a2] {tag} perf_hits: measured_rounds={AB_SAMPLES} "
+            f"[kv_pool_a2] {tag} perf_hits: measured_rounds={PERF_SAMPLES} "
             f"hits_delta={measured_hits:.0f}/{hits_cap} "
             f"queries_delta={measured_queries:.0f}/{queries_cap} "
             f"query_hit_rate={(measured_hits / measured_queries if measured_queries else 0.0):.2%} "
@@ -1076,7 +1083,7 @@ def _phase_perf(
         )
         assert measured_hits >= hits_cap, (
             f"[{tag}] perf phase returned only {measured_hits:.0f} of {hits_cap} expected hit "
-            f"tokens over {AB_SAMPLES} rounds: the repeatedly measured prefix stopped hitting "
+            f"tokens over {PERF_SAMPLES} rounds: the repeatedly measured prefix stopped hitting "
             "at full block granularity even though the hit phase passed"
         )
     if PERF_SAMPLE_OUT is not None:

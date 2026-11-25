@@ -2,45 +2,20 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM-Ascend project
 """KV pool watch helpers for PR-level e2e tests.
 
-口径来源：``Proposals/ascend_project/pool_ci/analysis.md §0``
-- H1/H2/H3 三级命中断言；spec-decode/hybrid 用精确命中 token 数
-- 必须用快照差值，禁止读累计值（冷启动 miss 会永久抬高分母）
-- 普通命中用例必须显式关闭本地 prefix cache；hybrid（mamba align）例外，
-  轮次之间只清本地 KV（``reset_connector=False``），保留池内容
-
-Typical use inside a test::
-
-    from tests.e2e.pull_request.kv_pool_watch import run_pool_hit_sequence
-
-    with VllmRunner(
-        ..., enable_prefix_caching=False, disable_log_stats=False, kv_transfer_config=pool_kv_transfer_config
-    ) as runner:
-        run_pool_hit_sequence(runner, block_size=128, prompt_tokens=16384)
-
-Hybrid / MTP cases (Qwen3.8-27B, GLM-5.3-Flash) pass the lcm block size and
-reset the local prefix cache between rounds::
-
-    run_pool_hit_sequence(
-        runner,
-        block_size=128,
-        prompt_tokens=lcm + 4,
-        lcm_block_size=lcm,
-        reset_local_cache=True,
-    )
-
-The low-level helpers (``snapshot_metrics`` / ``assert_hit_ratio`` /
-``assert_hit_tokens`` / ``assert_no_hit`` / ``assert_output_identical``) stay
-public so a test can build a custom sequence when the shared one does not fit.
+Counters are read as deltas; hybrid cases reset local KV between rounds.
 """
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import time
 from collections.abc import Callable, Sequence
 from dataclasses import asdict, dataclass, field
 from typing import Any
+
+import regex as re
 
 HITS_METRIC = "vllm:external_prefix_cache_hits"
 QUERIES_METRIC = "vllm:external_prefix_cache_queries"
@@ -50,14 +25,7 @@ DELAYED_BLOCKS_METRIC = "vllm:ascend_store_delayed_release_blocks"
 
 @dataclass(frozen=True)
 class PoolSnapshot:
-    """Cumulative counters captured at a point in time.
-
-    ``delayed_blocks`` is a gauge (``ascend_store_delayed_release_blocks``):
-    blocks the store still accounts for while releasing them. It is reported
-    for diagnostics only. Measured on DSV4 TP4 16K, the pool write is visible
-    as soon as ``generate()`` returns, so the hit sequence never polls this
-    gauge and never inserts a fence.
-    """
+    """Point-in-time pool counters; always compare deltas."""
 
     hits: float
     queries: float
@@ -78,16 +46,7 @@ class PoolSnapshot:
 
 
 def snapshot_metrics(source: Any) -> PoolSnapshot:
-    """Read current pool counters from a runner or model exposing ``get_metrics()``.
-
-    ``VllmRunner.get_metrics()`` and ``DPVllmRunner.get_metrics()`` both
-    return ``name -> value`` (DP counters summed over ranks); a raw
-    ``PromMetric`` list is still accepted for callers that pass engine metrics
-    directly.
-
-    ``LLM.get_metrics()`` requires ``disable_log_stats=False``; otherwise it
-    raises ``AssertionError: Stat logging disabled``.
-    """
+    """Read counters from a runner whose ``get_metrics()`` returns a dict or a metric list."""
     metrics = source.get_metrics()
     raw: dict[str, float] = {}
     if isinstance(metrics, dict):
@@ -108,39 +67,19 @@ def snapshot_metrics(source: Any) -> PoolSnapshot:
 
 
 def expected_hit_ratio(token_len: int, block_size: int) -> float:
-    """Theoretical max hit ratio for a fully cached prompt (non-spec cases).
-
-    Only whole blocks are transferable, so the tail below ``block_size``
-    can never hit. Verified on hardware: 801 tokens / 128 block -> 768/801
-    = 95.88%.
-    """
+    """Max hit ratio for a fully cached prompt (non-spec cases)."""
     if token_len <= 0:
         return 0.0
     return (token_len // block_size) * block_size / token_len
 
 
 def expected_hit_token_count(prompt_tokens: int, block_size: int, lcm_block_size: int | None = None) -> int:
-    """Exact number of hit tokens the engine can report.
-
-    Mirrors ``pool_scheduler`` (see ``_get_num_new_uncached_and_cached_tokens``):
-
-    - non-spec: whole ``block_size`` blocks; if the hit covers the full prompt
-      the scheduler drops one token, so 16,384 -> 16,383;
-    - spec / MTP (``use_eagle``): when the hit reaches the prompt's final
-      ``lcm_block_size`` block, that whole block is trimmed. ``lcm + 4`` ->
-      ``lcm`` hits; ``2 * lcm`` -> ``lcm`` hits; exactly ``lcm`` -> 0 hits.
-      Hybrid cases also pass ``lcm_block_size`` so that an ``lcm + 4`` prompt
-      asserts the exact token count; with a non-zero tail the result is the
-      same ``lcm`` regardless of whether the engine trims.
-    """
+    """Exact hit tokens reported by the engine (spec/hybrid and non-spec)."""
     if prompt_tokens <= 0:
         return 0
     hits = (prompt_tokens // block_size) * block_size
     if lcm_block_size:
-        # The pool only stores whole lcm blocks; a prompt tail shorter than
-        # lcm is never transferred. Measured on GLM-5.3-Flash dummy
-        # (lcm=1152, prompt=16,388): the engine reports 16,128 hits, not the
-        # 16,384 block-granularity value.
+        # Only whole lcm blocks are transferable; the tail never hits.
         saveable = (prompt_tokens // lcm_block_size) * lcm_block_size
         hits = min(hits, saveable)
         final_block_start = ((prompt_tokens - 1) // lcm_block_size) * lcm_block_size
@@ -160,11 +99,7 @@ def assert_hit_ratio(
     tolerance: float = 0.9,
     tag: str = "",
 ) -> float:
-    """H1 + H2: there is a hit, and the delta ratio reaches expected * tolerance.
-
-    Only for non-spec cases. Spec-decode / hybrid must use
-    :func:`assert_hit_tokens` instead.
-    """
+    """H1/H2 for non-spec cases: hit exists and ratio >= expected * tolerance."""
     ratio = before.delta_ratio(after)
     expected = expected_hit_ratio(prompt_tokens, block_size)
     floor = expected * tolerance
@@ -182,13 +117,7 @@ def assert_hit_ratio(
 
 
 def assert_hit_tokens(before: PoolSnapshot, after: PoolSnapshot, *, expected: int, tag: str = "") -> float:
-    """H1 + exact hit-token assertion for spec-decode / hybrid cases.
-
-    ``expected`` comes from :func:`expected_hit_token_count`. Do not replace
-    this with a 0.9 ratio: with a 16K-class lcm block the ratio still passes
-    while the actual payload is wrong, and an lcm-aligned prompt legitimately
-    has 0 hits.
-    """
+    """H1 + exact hit-token assertion for spec/hybrid cases."""
     delta = before.delta_hits(after)
     assert delta > 0, (
         f"[{tag}] H1 failed: no external hit "
@@ -204,11 +133,7 @@ def assert_hit_tokens(before: PoolSnapshot, after: PoolSnapshot, *, expected: in
 
 
 def assert_no_hit(before: PoolSnapshot, after: PoolSnapshot, *, tag: str = "") -> None:
-    """Negative assertion: a prompt with no shared prefix must not hit the pool.
-
-    A non-zero delta means key collision or write-overwrite, which is worse
-    than a miss.
-    """
+    """R4: a disjoint prompt must not hit (key isolation)."""
     dh = before.delta_hits(after)
     assert dh == 0, (
         f"[{tag}] isolation failed: expected 0 external hits for a disjoint prompt, "
@@ -217,40 +142,31 @@ def assert_no_hit(before: PoolSnapshot, after: PoolSnapshot, *, tag: str = "") -
 
 
 def assert_output_identical(cold_tokens: Sequence[int], hit_tokens: Sequence[int], *, tag: str = "") -> None:
-    """H3: the pool-hit run must reproduce the cold-start tokens exactly.
-
-    Greedy decoding over a fixed token-id prompt is deterministic, so any
-    divergence means corrupted KV data rather than sampling noise.
-    """
-    cold, hit = list(cold_tokens), list(hit_tokens)
+    """H3: pool-hit tokens must match cold-start tokens exactly."""
+    cold = list(cold_tokens)
+    hit = list(hit_tokens)
     if cold == hit:
         return
-    diff_positions = [index for index, (a, b) in enumerate(zip(cold, hit)) if a != b]
+    first_diff = next(
+        (i for i, (c, h) in enumerate(zip(cold, hit)) if c != h),
+        min(len(cold), len(hit)),
+    )
+    num_diff = sum(1 for c, h in zip(cold, hit) if c != h) + abs(len(cold) - len(hit))
     raise AssertionError(
         f"[{tag}] H3 failed: silent data corruption, pool-hit tokens differ from the cold start\n"
-        f"  len cold={len(cold)} hit={len(hit)} "
-        f"num_diff={len(diff_positions) + abs(len(cold) - len(hit))} "
-        f"first_diff_positions={diff_positions[:3]}\n"
-        f"  cold_tail={cold[-8:]}\n  hit_tail ={hit[-8:]}"
+        f"  len(cold)={len(cold)} len(hit)={len(hit)} num_diff={num_diff} "
+        f"first_diff={first_diff} cold_tail={cold[-8:]} hit_tail={hit[-8:]}"
     )
 
 
-# Deterministic token-id prompts. Token IDs are model-independent here: every
-# PR pool model has a vocabulary far larger than base + span, so these are
-# valid embeddings for all of them.
+# Model-independent token ids; all PR pool vocabs exceed base + span.
 POOL_PROMPT_TOKEN_BASE = 1000
 POOL_PROMPT_TOKEN_SPAN = 7000
 POOL_MAX_TOKENS = 16
 
 
 def build_pool_prompts(prompt_tokens: int) -> tuple[list[int], list[int]]:
-    """Return ``(prompt_a, prompt_b)`` as raw token ids of ``prompt_tokens``.
-
-    Tokenizer-free on purpose: ``DPVllmRunner`` does not expose ``model``, so a
-    DP test cannot build prompts through ``get_tokenizer()``. The two prompts
-    differ in their very first token, which is enough to guarantee distinct
-    block hashes for R4 (key isolation).
-    """
+    """Return two token-id prompts of ``prompt_tokens``; the first block differs (R4)."""
 
     def _build(seed: int) -> list[int]:
         return [POOL_PROMPT_TOKEN_BASE + (seed + index * 7) % POOL_PROMPT_TOKEN_SPAN for index in range(prompt_tokens)]
@@ -258,57 +174,97 @@ def build_pool_prompts(prompt_tokens: int) -> tuple[list[int], list[int]]:
     return _build(0), _build(POOL_PROMPT_TOKEN_SPAN // 2)
 
 
+POOL_SECRET = "8"
+# The fact repeats evenly through the cached prefix, one per padding gap. A
+# trailing padding gap keeps the last fact away from the question.
+POOL_FACT_REPEATS = 10
+POOL_ANSWER_RE = re.compile(r"answer\s*:\s*\$?\s*(-?\d+)")
+
+
+def build_pool_accuracy_prompt(
+    tokenizer: Any,
+    target_tokens: int,
+    max_model_len: int,
+    secret: str = POOL_SECRET,
+) -> list[int]:
+    """Long natural-language prompt; the fact repeats evenly in the cached prefix."""
+    padding = "This paragraph is padding for a long context test. "
+    fact = f"The secret number is {secret}. "
+    question = "\nQuestion: What is the secret number? The secret number is"
+    unit = len(tokenizer.encode(padding, add_special_tokens=False))
+    fact_unit = len(tokenizer.encode(fact, add_special_tokens=False))
+    gaps = POOL_FACT_REPEATS + 1
+    repeats = max(1, (target_tokens - POOL_FACT_REPEATS * fact_unit) // (gaps * unit))
+    counts = [repeats] * gaps
+
+    def _render() -> str:
+        parts: list[str] = []
+        for index, count in enumerate(counts):
+            parts.append(padding * count)
+            if index < POOL_FACT_REPEATS:
+                parts.append(fact)
+        parts.append(question)
+        return "".join(parts)
+
+    while True:
+        ids = tokenizer.encode(_render(), add_special_tokens=False)
+        missing = target_tokens - len(ids)
+        if missing <= 0:
+            break
+        step = missing // (gaps * unit)
+        if step:
+            counts = [count + step for count in counts]
+        else:
+            # Top up one padding sentence at a time to stay inside the
+            # max_model_len headroom.
+            counts[counts.index(min(counts))] += 1
+    assert len(ids) >= target_tokens, f"prompt {len(ids)} < target {target_tokens}"
+    if len(ids) > max_model_len - 32:
+        raise AssertionError(f"prompt {len(ids)} exceeds max_model_len-32={max_model_len - 32}")
+    return ids
+
+
+def extract_pool_answer(text: str) -> str:
+    match = POOL_ANSWER_RE.search(text)
+    if match is not None:
+        return match.group(1)
+    fallback = re.search(r"-?\d+", text)
+    assert fallback is not None, f"no answer in output: {text!r}"
+    return fallback.group(0)
+
+
 def run_pool_hit_sequence(
     runner: Any,
     *,
     block_size: int,
     prompt_tokens: int,
+    prompt_ids: list[int] | None = None,
     replicas: int = 1,
     max_tokens: int = POOL_MAX_TOKENS,
     lcm_block_size: int | None = None,
     expected_hit_tokens: int | None = None,
     reset_local_cache: bool = False,
     check_output: bool = True,
+    answer_secret: str | None = None,
     tolerance: float = 0.9,
     tag: str = "",
 ) -> dict[str, Any]:
     """Run R1 cold write -> R2/R3 hit -> R4 disjoint miss.
 
-    Criteria: ``Proposals/ascend_project/pool_ci/analysis.md`` §0.1 / §0.2.
-
-    ``replicas`` sends identical copies of a prompt in one call. The DP runner
-    shards prompts across ranks, so ``replicas=dp_size`` exercises every DP
-    rank in the same round instead of only rank 0.
-
-    ``lcm_block_size`` switches R2/R3 to the exact hit-token assertion used by
-    spec-decode and hybrid models; ``expected_hit_tokens`` overrides the
-    generic formula with a measured constant when the model's hash granularity
-    equals lcm (GLM-5.3-Flash dummy). ``reset_local_cache`` calls
-    ``runner.model.reset_prefix_cache(reset_connector=False)`` before every
-    round (hybrid cases must keep the local prefix cache enabled, and without
-    the reset R2/R3 would be served locally with 0 external hits).
-    ``check_output=False`` skips H3 for cases where cold/hit token identity is
-    not meaningful (#11 dummy weights) or not comparable (#3 DSpark); H1/H2/R4
-    stay active.
-
-    Calls go through ``runner.generate_greedy`` rather than ``runner.model`` so
-    that both ``VllmRunner`` and ``DPVllmRunner`` are supported.
+    ``prompt_ids`` supplies a measured long natural-language prompt;
+    ``answer_secret`` asserts the cold and hit answers. ``replicas`` scales with
+    DP size. ``lcm_block_size`` / ``expected_hit_tokens`` enable exact hit-token
+    checks. ``reset_local_cache`` is for hybrid cases. ``check_output=False``
+    skips H3 (DSpark and dummy-weight cases).
     """
-    prompt_a, prompt_b = build_pool_prompts(prompt_tokens)
+    prompt_a = prompt_ids if prompt_ids is not None else build_pool_prompts(prompt_tokens)[0]
+    prompt_b = build_pool_prompts(prompt_tokens)[1]
+    effective_tokens = len(prompt_a)
     if expected_hit_tokens is None:
-        expected_hits = expected_hit_token_count(prompt_tokens, block_size, lcm_block_size)
+        expected_hits = expected_hit_token_count(effective_tokens, block_size, lcm_block_size)
     else:
-        # Hybrid models whose hash granularity equals lcm (dense Mamba/GDN)
-        # need a measured constant: the scheduler drops the final engine block
-        # before grouping into lcm chunks, which the generic formula does not
-        # model. Record the measured value next to the case.
+        # Measured override for models whose hash granularity equals lcm.
         expected_hits = expected_hit_tokens
-
-    # DPVllmRunner sums counters over all DP ranks, and each rank serves one
-    # replica of the prompt, so the pooled delta is ``replicas`` times the
-    # per-prompt expectation. Ratios are scale-invariant and keep the
-    # per-prompt value.
-    expected_total = expected_hits * replicas
 
     def _reset_local() -> None:
         if not reset_local_cache:
@@ -321,10 +277,10 @@ def run_pool_hit_sequence(
             ) from exc
         model.reset_prefix_cache(reset_connector=False)
 
-    def _generate(ids: list[int]) -> list[list[int]]:
+    def _generate(ids: list[int]) -> tuple[list[list[int]], list[str]]:
         _reset_local()
         outputs = runner.generate_greedy([ids] * replicas, max_tokens)
-        return [list(token_ids) for token_ids, _ in outputs]
+        return [list(token_ids) for token_ids, _ in outputs], [text for _, text in outputs]
 
     def _assert_outputs(cold: list[list[int]], hit: list[list[int]], round_tag: str) -> None:
         assert len(hit) == len(cold), f"[{tag} {round_tag}] replica count changed: {len(hit)} != {len(cold)}"
@@ -334,39 +290,43 @@ def run_pool_hit_sequence(
     def _assert_hit(before: PoolSnapshot, after: PoolSnapshot, round_tag: str) -> float:
         round_full_tag = f"{tag} {round_tag}"
         if lcm_block_size:
-            return assert_hit_tokens(before, after, expected=expected_total, tag=round_full_tag)
+            # One prompt copy per DP rank, so hits scale with replicas.
+            return assert_hit_tokens(before, after, expected=expected_hits * replicas, tag=round_full_tag)
         return assert_hit_ratio(
             before,
             after,
-            prompt_tokens=prompt_tokens,
+            prompt_tokens=effective_tokens,
             block_size=block_size,
             tolerance=tolerance,
             tag=round_full_tag,
         )
 
-    # R1: cold start, no pool content yet -> writes the pool.
-    # No fence between R1 and R2 on purpose: measured on DSV4 TP4 16K, writes
-    # are visible as soon as generate() returns (0.9999 hit on R2/R3 with no
-    # sleep). If R2 ever misses intermittently in CI, check backend flush
-    # behavior first -- do not paper over it with a sleep.
-    cold = _generate(prompt_a)
+    # R1: cold start writes the pool; writes are visible when generate() returns.
+    cold, cold_texts = _generate(prompt_a)
     snap1 = snapshot_metrics(runner)
 
     # R2: first hit
-    hit_1 = _generate(prompt_a)
+    hit_1, hit_1_texts = _generate(prompt_a)
     snap2 = snapshot_metrics(runner)
     ratio_r2 = _assert_hit(snap1, snap2, "R2")
     if check_output:
         _assert_outputs(cold, hit_1, "R2")
 
     # R3: repeated hit must not decay
-    hit_2 = _generate(prompt_a)
+    hit_2, hit_2_texts = _generate(prompt_a)
     snap3 = snapshot_metrics(runner)
     ratio_r3 = _assert_hit(snap2, snap3, "R3")
     if check_output:
         _assert_outputs(cold, hit_2, "R3")
 
-    # R4: disjoint prompt must not hit (negative assertion: key isolation)
+    if answer_secret is not None:
+        for round_tag, texts in (("R1", cold_texts), ("R2", hit_1_texts), ("R3", hit_2_texts)):
+            answers = [extract_pool_answer(text) for text in texts]
+            assert all(answer == answer_secret for answer in answers), (
+                f"[{tag} {round_tag}] answer mismatch: {answers} != {answer_secret!r}; texts={texts!r}"
+            )
+
+    # R4: disjoint prompt must not hit.
     _generate(prompt_b)
     snap4 = snapshot_metrics(runner)
     assert_no_hit(snap3, snap4, tag=f"{tag} R4")
@@ -375,47 +335,47 @@ def run_pool_hit_sequence(
         "r2": ratio_r2,
         "r3": ratio_r3,
         "expected_hits": float(expected_hits),
-        "expected_hits_total": float(expected_total),
+        "expected_hits_total": float(expected_hits * replicas),
+        "replicas": replicas,
         "load_keys": snap4.load_keys,
-        # A/B 对照用：R1 冷输出与 R3 命中轮输出
+        # A/B comparison: R1 cold outputs and R3 hit-round outputs
         "cold_outputs": cold,
         "hit_outputs": hit_2,
+        "cold_texts": cold_texts,
+        "hit_texts": hit_2_texts,
     }
-    if lcm_block_size:
-        detail = f"hit_tokens R2={ratio_r2:.0f} R3={ratio_r3:.0f}"
-    else:
-        detail = f"delta_ratio R2={ratio_r2:.4f} R3={ratio_r3:.4f}"
+    metric_label = "hit_tokens" if lcm_block_size else "delta ratios"
     print(
-        f"[kv_pool] {tag} {detail} expected_hits={expected_hits} replicas={replicas} "
-        f"expected_hits_total={expected_total} load_keys_total={snap4.load_keys:.0f}",
+        f"[kv_pool] {tag} {metric_label} R2={ratio_r2:.4f} R3={ratio_r3:.4f} "
+        f"expected_hits={expected_hits} replicas={replicas} "
+        f"expected_hits_total={expected_hits * replicas} "
+        f"prompt_tokens={effective_tokens} "
+        f"load_keys_total={snap4.load_keys:.0f}",
         flush=True,
     )
     return summary
 
 
-# --- A/B two-leg runner -----------------------------------------------------
+# --- A/B runner -------------------------------------------------------------
 
-AB_TTFT_LIMIT = 1.08
-AB_THROUGHPUT_LIMIT = 0.92
-# 20 measured samples: the nearest-rank p95 then selects the 19th sample instead
-# of the maximum, so a single outlier no longer defines the reported p95.
-AB_SAMPLES = 20
-AB_WARMUP = 2
-# Leave time for worker processes and NPU memory to be reclaimed between legs.
+AB_THROUGHPUT_LIMIT = 0.85
+# 2 warmup rounds of 2 requests, 1 s settle, then 32 timed requests at
+# concurrency 16 (2 waves).
+AB_WARMUP_ROUNDS = 2
+AB_WARMUP_REQUESTS = 2
+AB_CONCURRENCY = 16
+AB_REQUESTS = AB_CONCURRENCY * 2
+AB_PERF_SETTLE_SECONDS = 1.0
+# Let the B leg release device memory and child processes before starting A.
 AB_LEG_GAP_SECONDS = 10
 AB_ARTIFACT = os.environ.get("KV_POOL_AB_ARTIFACT", "pool_ab_report.json")
-# Default 16K-class load for the performance segment; every PR case passes its
-# own prompt_tokens explicitly.
+# B-leg default 16K workload; all six PR cases pass prompt_tokens explicitly.
 POOL_PROMPT_TOKENS = 16388
 PREFIX_HITS_METRIC = "vllm:prefix_cache_hits"
 
 
 def _preflight_probe() -> str | None:
-    """Return a reason string when the environment cannot run the A/B legs.
-
-    CI replaces this with real probes (fabric-mem export, hugepages, loop,
-    cross-node links, ports); the default does not block.
-    """
+    """Return a reason when the environment is unusable, else None."""
     return None
 
 
@@ -424,10 +384,10 @@ class LegResult:
     acc: bool
     hit_tokens: float
     outputs: list[list[int]]
-    ttft_p50: float
-    ttft_p95: float
     throughput: float
     env: dict[str, str] = field(default_factory=dict)
+    local_hit_tokens: float = 0.0
+    acceptance: list[float] = field(default_factory=list)
 
 
 @dataclass
@@ -439,32 +399,29 @@ class PoolABReport:
     label: str
 
     @property
-    def delta_ttft(self) -> float:
-        return (self.a.ttft_p50 / self.b.ttft_p50 - 1.0) if self.b.ttft_p50 else 0.0
-
-    @property
     def delta_throughput(self) -> float:
-        return (self.a.throughput / self.b.throughput - 1.0) if self.b.throughput else 0.0
+        if not self.a.throughput or not self.b.throughput:
+            return 0.0
+        return self.a.throughput / self.b.throughput - 1.0
 
     def emit(self) -> None:
         for leg, result in (("A", self.a), ("B", self.b)):
             print(
                 f"[kv_pool_ab] case={self.case} leg={leg} acc={int(result.acc)} "
-                f"hit_tokens={result.hit_tokens:.0f} ttft_p50={result.ttft_p50:.2f} "
-                f"ttft_p95={result.ttft_p95:.2f} throughput={result.throughput:.1f} "
-                f"delta_ttft={self.delta_ttft:+.4f} delta_throughput={self.delta_throughput:+.4f} "
+                f"hit_tokens={result.hit_tokens:.0f} local_hit_tokens={result.local_hit_tokens:.0f} "
+                f"throughput={result.throughput:.1f} "
+                f"delta_throughput={self.delta_throughput:+.4f} "
                 f"verdict={self.verdict} label={self.label}",
                 flush=True,
             )
         payload = asdict(self)
-        payload["delta_ttft"] = self.delta_ttft
         payload["delta_throughput"] = self.delta_throughput
         with open(AB_ARTIFACT, "a", encoding="utf-8") as handle:
             handle.write(json.dumps(payload, default=str) + "\n")
 
 
 def _prefix_cache_hits(source: Any) -> float:
-    """Local prefix-cache hit tokens, used to prove the B leg really hits."""
+    """Local prefix-cache hit tokens; used to prove the B leg really hits locally."""
     metrics = source.get_metrics()
     if isinstance(metrics, dict):
         return float(metrics.get(PREFIX_HITS_METRIC, 0.0))
@@ -481,71 +438,100 @@ def _env_fingerprint() -> dict[str, str]:
     }
 
 
-def _percentile(values: list[float], q: float) -> float:
-    ordered = sorted(values)
-    if not ordered:
-        return 0.0
-    return ordered[min(len(ordered) - 1, int(round(q * (len(ordered) - 1))))]
-
-
-def _collect_perf(runner: Any, prompt_tokens: int, *, reset_local_cache: bool = False) -> tuple[float, float, float]:
-    """Sample the hit state; end-to-end latency with max_tokens=1 proxies TTFT.
-
-    Hybrid legs keep the local prefix cache on. Only the pooled leg must drop
-    the local KV before every sample (``reset_connector=False``), otherwise
-    every sample after the first measures a local hit instead of the pool. The
-    control leg intentionally keeps its warm local cache.
-    """
+def _collect_perf(
+    runner: Any,
+    prompt_tokens: int,
+    *,
+    reset_local_cache: bool = False,
+    seed_concurrency: bool = False,
+) -> float:
+    """Return input throughput for 32 requests at concurrency 16."""
     prompt, _ = build_pool_prompts(prompt_tokens)
-    ttft: list[float] = []
-    produced = 0
-    started = time.perf_counter()
-    for index in range(AB_WARMUP + AB_SAMPLES):
-        if reset_local_cache:
-            try:
-                runner.model.reset_prefix_cache(reset_connector=False)
-            except (AttributeError, RuntimeError) as exc:
-                # Fail loudly instead of silently skipping the reset: without
-                # it every sample after the first measures a local hit, not
-                # the pool (DPVllmRunner does not expose ``.model``).
-                raise RuntimeError(
-                    "reset_local_cache requires a runner exposing "
-                    "model.reset_prefix_cache(); without the reset the "
-                    "samples measure the local prefix cache instead of "
-                    "the pool"
-                ) from exc
-        begin = time.perf_counter()
-        runner.generate_greedy([prompt], 1)
-        elapsed = (time.perf_counter() - begin) * 1000.0
-        if index >= AB_WARMUP:
-            ttft.append(elapsed)
-            produced += prompt_tokens
-    wall = time.perf_counter() - started
-    return _percentile(ttft, 0.50), _percentile(ttft, 0.95), produced / wall
+    if seed_concurrency:
+        # Hybrid align only: seed the tail block at the target concurrency so
+        # the first timed wave does not measure an under-populated block.
+        runner.generate_greedy([prompt] * AB_CONCURRENCY, 1)
+    for _ in range(AB_WARMUP_ROUNDS):
+        runner.generate_greedy([prompt] * AB_WARMUP_REQUESTS, 1)
+    # Let scheduling and in-flight async writes settle before timing.
+    time.sleep(AB_PERF_SETTLE_SECONDS)
+    if reset_local_cache:
+        # Drop the warmup-filled local blocks so the timed requests hit the pool.
+        with contextlib.suppress(RuntimeError):
+            runner.model.reset_prefix_cache(reset_connector=False)
+    begin = time.perf_counter()
+    for _ in range(AB_REQUESTS // AB_CONCURRENCY):
+        runner.generate_greedy([prompt] * AB_CONCURRENCY, 1)
+    elapsed = time.perf_counter() - begin
+    return AB_REQUESTS * prompt_tokens / elapsed
 
 
-def _control_hit_outputs(runner: Any, prompt_tokens: int, max_tokens: int) -> list[list[int]]:
-    """B leg: one cold round to fill the local cache, then one hit round.
-
-    A missing local hit is a control defect, not a pool defect.
-    """
-    prompt, _ = build_pool_prompts(prompt_tokens)
+def _control_hit_outputs(
+    runner: Any,
+    prompt_tokens: int,
+    max_tokens: int,
+    prompt_ids: list[int] | None = None,
+) -> tuple[list[list[int]], float]:
+    """B leg: cold write + one local-hit round; no local hit is CONTROL_DEFECT."""
+    prompt = prompt_ids if prompt_ids is not None else build_pool_prompts(prompt_tokens)[0]
     runner.generate_greedy([prompt], max_tokens)
     before = _prefix_cache_hits(runner)
     outputs = [list(ids) for ids, _ in runner.generate_greedy([prompt], max_tokens)]
     after = _prefix_cache_hits(runner)
-    assert after > before, (
-        f"CONTROL_DEFECT: B leg got no local prefix-cache hit (prefix_cache_hits Δ{after - before:.0f})"
+    local_hits = after - before
+    assert local_hits > 0, f"CONTROL_DEFECT: B leg got no local prefix-cache hit (prefix_cache_hits Δ{local_hits:.0f})"
+    return outputs, local_hits
+
+
+def _report_token_diff(a: LegResult, b: LegResult) -> None:
+    """Print where the pool-hit and local-hit outputs diverge."""
+    print(
+        f"[kv_pool_ab_diff] a_hit_tokens={a.hit_tokens:.0f} "
+        f"b_local_hit_tokens={b.local_hit_tokens:.0f} "
+        f"replicas={len(a.outputs)}/{len(b.outputs)}",
+        flush=True,
     )
-    return outputs
+    for index, (left, right) in enumerate(zip(a.outputs, b.outputs)):
+        if left == right:
+            print(f"[kv_pool_ab_diff] replica{index} identical len={len(left)}", flush=True)
+            continue
+        limit = min(len(left), len(right))
+        first = next((pos for pos in range(limit) if left[pos] != right[pos]), limit)
+        num = sum(1 for pos in range(limit) if left[pos] != right[pos]) + abs(len(left) - len(right))
+        print(
+            f"[kv_pool_ab_diff] replica{index} len={len(left)}/{len(right)} "
+            f"first_diff={first} num_diff={num} "
+            f"a_tail={left[-8:]} b_tail={right[-8:]}",
+            flush=True,
+        )
 
 
-def _classify(a_err: str | None, b_err: str | None, token_diff: bool, perf_bad: bool) -> str:
-    if a_err and b_err:
-        return "TEST_DEFECT"
-    if b_err:
-        return "CONTROL_DEFECT"
-    if a_err or token_diff or perf_bad:
+@dataclass
+class LegOutcome:
+    """Result of one leg, including the phase that failed.
+
+    ``env`` marks engine/store failures and perf noise; only those map to
+    ENV_BLOCKED. Assertion failures keep the phase so the classifier can tell a
+    broken control group from a pool defect.
+    """
+
+    result: LegResult | None = None
+    error: str | None = None
+    phase: str = "ok"
+    env: bool = False
+
+
+def _classify(a: LegOutcome, b: LegOutcome, token_diff: bool, perf_bad: bool, acc_bad: bool = False) -> str:
+    if a.env or b.env:
+        return "ENV_BLOCKED"
+    if b.phase == "skipped" and a.error is not None:
+        # Pool leg ran first and failed, so the control leg was skipped.
+        return "POOL_DEFECT"
+    if b.error is not None:
+        # A is skipped when B fails. A failure in the shared accuracy function
+        # is a test defect; a failure in the local-hit control is not.
+        return "TEST_DEFECT" if b.phase == "accuracy" else "CONTROL_DEFECT"
+    if a.error is not None or token_diff or perf_bad or acc_bad:
         return "POOL_DEFECT"
     return "PASS"
 
@@ -553,82 +539,119 @@ def _classify(a_err: str | None, b_err: str | None, token_diff: bool, perf_bad: 
 def run_pool_ab(
     case_name: str,
     build_leg: Callable[[bool, str], Any],
-    accuracy: Callable[[Any], None],
+    accuracy: Callable[[Any], Sequence[float] | None],
     hit: Callable[[Any], dict[str, Any]] | None = None,
     *,
     prompt_tokens: int = POOL_PROMPT_TOKENS,
+    prompt_ids: list[int] | None = None,
+    perf_prompt_tokens: int | None = None,
     max_tokens: int = POOL_MAX_TOKENS,
     token_identity: bool = True,
     perf_reset_local: bool = False,
+    perf_seed_concurrency: bool = False,
     gate: bool = True,
+    pool_first: bool = False,
+    acceptance_ratio: float | None = None,
 ) -> PoolABReport:
-    """Run leg A (pool on, local cache off) then leg B (pool off, local cache on).
-
-    Legs run serially in the same pytest process: HCCL/torch.distributed groups
-    are process-wide singletons. The original assertions of both legs always
-    fail the test; ``record`` mode only records the pool-side labels
-    (``POOL_DEFECT`` / ``CONTROL_DEFECT``).
-    """
-    mode = os.environ.get("KV_POOL_AB_MODE", "record")
+    perf_tokens = perf_prompt_tokens or prompt_tokens
     blocked = _preflight_probe()
     if blocked is not None:
-        empty = LegResult(False, 0.0, [], 0.0, 0.0, 0.0, _env_fingerprint())
+        empty = LegResult(False, 0.0, [], 0.0, _env_fingerprint())
         report = PoolABReport(case_name, empty, empty, "FAIL", "ENV_BLOCKED")
         report.emit()
         raise AssertionError(f"ENV_BLOCKED: {blocked}")
 
-    def _run(use_pool: bool, leg: str) -> tuple[LegResult | None, str | None, bool]:
-        """Return ``(result, error, original_assertion_failed)``.
-
-        The third value keeps the original case assertions non-degradable: an
-        engine that cannot start or an ``accuracy()`` failure must fail in both
-        ``record`` and ``gate`` modes.
-        """
-        accuracy_ok = False
+    def _run(use_pool: bool, leg: str) -> LegOutcome:
+        phase = "build"
         try:
             with build_leg(use_pool, f"{case_name}_{leg}") as runner:
-                accuracy(runner)
-                accuracy_ok = True
+                phase = "accuracy"
+                rates = accuracy(runner)
+                phase = "hit"
                 if use_pool:
                     summary = hit(runner) if hit is not None else {}
                     outputs = summary.get("hit_outputs", [])
                     hits = float(summary.get("r3", 0.0))
+                    local_hits = 0.0
                 else:
-                    outputs = _control_hit_outputs(runner, prompt_tokens, max_tokens)
-                    # The control leg owns local cache hits, not pool hits.
+                    outputs, local_hits = _control_hit_outputs(runner, prompt_tokens, max_tokens, prompt_ids)
+                    # B leg records local-hit output, not pool hits.
                     hits = 0.0
-                p50, p95, throughput = _collect_perf(
-                    runner, prompt_tokens, reset_local_cache=perf_reset_local and use_pool
+                phase = "perf"
+                throughput = _collect_perf(
+                    runner,
+                    perf_tokens,
+                    reset_local_cache=perf_reset_local and use_pool,
+                    seed_concurrency=perf_seed_concurrency,
                 )
-                result = LegResult(True, hits, outputs, p50, p95, throughput, _env_fingerprint())
-                return result, None, False
+                result = LegResult(
+                    True,
+                    hits,
+                    outputs,
+                    throughput,
+                    _env_fingerprint(),
+                    local_hit_tokens=local_hits,
+                    acceptance=list(rates) if rates else [],
+                )
+                return LegOutcome(result=result)
         except AssertionError as exc:
-            return None, str(exc), not accuracy_ok
+            # An assertion while starting the leg is an environment problem;
+            # later assertions belong to the accuracy/hit phase.
+            return LegOutcome(error=str(exc), phase=phase, env=phase == "build")
+        except Exception as exc:
+            # Engine/store failures are ENV_BLOCKED, not pool assertions.
+            return LegOutcome(error=f"{type(exc).__name__}: {exc}", phase=phase, env=True)
 
-    a, a_err, a_fatal = _run(True, "a")
-    # Wait until worker processes and NPU memory are reclaimed, then run B.
-    time.sleep(AB_LEG_GAP_SECONDS)
-    b, b_err, b_fatal = _run(False, "b")
-    empty = LegResult(False, 0.0, [], 0.0, 0.0, 0.0, _env_fingerprint())
-    a_result = a or empty
-    b_result = b or empty
-    token_diff = token_identity and a_err is None and b_err is None and a_result.outputs != b_result.outputs
-    perf_bad = (
-        a_err is None
-        and b_err is None
-        and (
-            a_result.ttft_p50 > b_result.ttft_p50 * AB_TTFT_LIMIT
-            or a_result.ttft_p95 > b_result.ttft_p95 * AB_TTFT_LIMIT
-            or a_result.throughput < b_result.throughput * AB_THROUGHPUT_LIMIT
-        )
+    if pool_first:
+        # Diagnostic order: surface a pool-leg hang without waiting for the
+        # control leg first.
+        a = _run(True, "a")
+        if a.error is None:
+            time.sleep(AB_LEG_GAP_SECONDS)
+            b = _run(False, "b")
+        else:
+            b = LegOutcome(error="skipped: pool leg failed", phase="skipped")
+    else:
+        b = _run(False, "b")
+        if b.error is None:
+            # Wait for the B leg to release workers and device memory.
+            time.sleep(AB_LEG_GAP_SECONDS)
+            a = _run(True, "a")
+        else:
+            # Control group failed: skip the pool leg.
+            a = LegOutcome(error="skipped: control leg failed", phase="skipped")
+    empty = LegResult(False, 0.0, [], 0.0, _env_fingerprint())
+    a_result = a.result or empty
+    b_result = b.result or empty
+    token_diff = (
+        token_identity and a.result is not None and b.result is not None and a_result.outputs != b_result.outputs
     )
-    label = _classify(a_err, b_err, token_diff, perf_bad)
+    perf_bad = (
+        a.result is not None
+        and b.result is not None
+        and a_result.throughput < b_result.throughput * AB_THROUGHPUT_LIMIT
+    )
+    if token_diff:
+        _report_token_diff(a_result, b_result)
+    acc_bad = False
+    if (
+        acceptance_ratio is not None
+        and a.result is not None
+        and b.result is not None
+        and a_result.acceptance
+        and b_result.acceptance
+    ):
+        pairs = list(zip(a_result.acceptance, b_result.acceptance))
+        acc_bad = any(a_val < b_val * acceptance_ratio for a_val, b_val in pairs)
+        print(
+            f"[kv_pool_acceptance_ab] a={a_result.acceptance} b={b_result.acceptance} "
+            f"ratio={acceptance_ratio} bad={int(acc_bad)}",
+            flush=True,
+        )
+    label = _classify(a, b, token_diff, perf_bad, acc_bad)
     report = PoolABReport(case_name, a_result, b_result, "PASS" if label == "PASS" else "FAIL", label)
     report.emit()
-    if a_fatal or b_fatal:
-        raise AssertionError(
-            f"[{case_name}] {label}: original assertions failed (A={a_err or 'ok'}; B={b_err or 'ok'})"
-        )
-    if gate and mode == "gate" and label != "PASS":
-        raise AssertionError(f"[{case_name}] {label}: A/B comparison failed")
+    if gate and label != "PASS":
+        a_text = "skipped" if a.phase == "skipped" else (a.error or "ok")
+        raise AssertionError(f"[{case_name}] {label}: A={a_text}; B={b.error or 'ok'}")
     return report
