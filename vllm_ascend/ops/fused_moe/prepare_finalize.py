@@ -530,7 +530,9 @@ class PrepareAndFinalizeWithAllGather(PrepareAndFinalize):
             pad_size = max_tokens_across_pcp - self.num_tokens_pcp
             if pad_size > 0:
                 hidden_states = nn.functional.pad(hidden_states, (0, 0, 0, pad_size))
-                router_logits = nn.functional.pad(router_logits, (0, 0, 0, pad_size))
+            router_pad = max_tokens_across_pcp - router_logits.shape[0]
+            if router_pad > 0:
+                router_logits = nn.functional.pad(router_logits, (0, 0, 0, router_pad))
 
             # Quantize each token on its owner before replicating it across
             # PCP. Dispatch reuses the INT8 per-token or MXFP8 block scales.
@@ -538,7 +540,7 @@ class PrepareAndFinalizeWithAllGather(PrepareAndFinalize):
             if self.lora_context is None and hidden_states.shape[0] > 0:
                 if quant_type == QuantType.W8A8:
                     hidden_states, pertoken_scale = torch_npu.npu_dynamic_quant(hidden_states)
-                elif quant_type == QuantType.W8A8MXFP:
+                elif quant_type in (QuantType.W8A8MXFP, QuantType.W4A8MXFP):
                     # Match both A5 dispatch paths: fused init_routing (quant_mode=3)
                     # and the explicit CEIL quantizer used for MiniMax.
                     hidden_states, pertoken_scale = torch_npu.npu_dynamic_mx_quant(

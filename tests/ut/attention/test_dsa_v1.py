@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import weakref
 from contextlib import ExitStack
 from types import SimpleNamespace
 from typing import Any, cast
@@ -2253,7 +2254,7 @@ def test_pcp_forward_updates_global_caches_before_local_attention(
             )
             assert events[0] == "hidden"
             if shard_o_proj and global_prefill:
-                assert events.index("cache") < events.index("weights")
+                assert events.index("hidden") < events.index("weights") < events.index("cache")
             if "projection" in events:
                 assert events.index("cache") < events.index("projection")
 
@@ -3063,3 +3064,51 @@ def test_adaptive_query_bound_reaches_metadata(adaptive, prefill_tokens, expecte
         )
     assert builder._build_sas_metadata.call_args.kwargs["max_seqlen_q"] == expected
     assert builder._build_qli_metadata.call_args.kwargs["max_seqlen_q"] == expected
+
+
+@pytest.mark.parametrize("actual_tokens", [4, 3], ids=["unpadded-zero-copy", "padded-releases-source"])
+def test_dsa_forward_o_proj_input_reuse_and_release(actual_tokens: int):
+    impl = _make_impl()
+    impl.num_heads, impl.head_dim, impl.nope_head_dim = 1, 2, 1
+    impl.enable_pcp_o_proj_weight_sharding = False
+    padded_tokens = 4
+    meta = AscendDSAMetadata(
+        num_actual_tokens=actual_tokens,
+        num_decodes=0,
+        num_decode_tokens=0,
+        num_prefills=1,
+        req_metadata=_make_req_metadata(),
+    )
+    attn_out_ref: weakref.ReferenceType[torch.Tensor] | None = None
+    o_proj_state: dict[str, bool] = {}
+
+    def fake_forward_attention(*_args: Any, **_kwargs: Any) -> torch.Tensor:
+        nonlocal attn_out_ref
+        out = torch.full((actual_tokens, 1, 2), 3.0)
+        attn_out_ref = weakref.ref(out)
+        return out
+
+    def fake_o_proj(x: torch.Tensor, out: torch.Tensor) -> torch.Tensor:
+        assert attn_out_ref is not None
+        o_proj_state["same_tensor"] = x is attn_out_ref()
+        o_proj_state["source_released"] = attn_out_ref() is None
+        o_proj_state["head_copied"] = bool(torch.equal(x[:actual_tokens], torch.full((actual_tokens, 1, 2), 3.0)))
+        o_proj_state["tail_zero"] = bool(torch.count_nonzero(x[actual_tokens:]) == 0)
+        return out
+
+    with (
+        patch.object(torch.ops._C_ascend, "inplace_partial_rotary_mul", create=True),
+        patch.object(impl, "_get_o_proj_input_shape", return_value=(padded_tokens, 1, 2)),
+        patch.object(impl, "_prepare_caches_and_query", return_value=(False, None)),
+        patch.object(impl, "_forward_attention", side_effect=fake_forward_attention),
+        patch.object(impl, "_forward_o_proj", side_effect=fake_o_proj),
+        patch("vllm_ascend.attention.dsa_v1.wait_for_kv_layer_from_connector"),
+        patch("vllm_ascend.attention.dsa_v1.maybe_save_kv_layer_to_connector"),
+    ):
+        impl.forward("layer", torch.randn(padded_tokens, 4), (), {"swa_cache": meta}, torch.empty(padded_tokens, 2))
+    assert o_proj_state == {
+        "same_tensor": actual_tokens == padded_tokens,
+        "source_released": actual_tokens < padded_tokens,
+        "head_copied": True,
+        "tail_zero": True,
+    }

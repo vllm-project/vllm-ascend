@@ -546,6 +546,33 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
 
         return topk_weights, topk_ids
 
+    def _can_pre_route_pcp(
+        self,
+        hidden_states: torch.Tensor,
+        prepare_quant_type: QuantType,
+        enable_force_load_balance: bool,
+    ) -> bool:
+        router = self.router
+        return (
+            prepare_quant_type == QuantType.W4A8MXFP
+            and self.moe_config.dp_size == 1
+            and self.moe_config.tp_size == 1
+            and self.moe_config.tp_group.world_size == 1
+            and _EXTRA_CTX.max_tokens_across_pcp > 0
+            and not _EXTRA_CTX.capturing
+            and not enable_force_load_balance
+            and not getattr(self, "mix_placement", False)
+            and not get_ascend_config().enable_force_eplb
+            and isinstance(router, AscendFusedTopKRouter)
+            and type(router) is AscendFusedTopKRouter
+            and router.scoring_func == "sqrtsoftplus"
+            and router.bias_vl is None
+            and router.eplb_state is None
+            and router.capture_fn is None
+            and not router.is_routing_input_ids_producer
+            and router.is_fused_supported(hidden_states)
+        )
+
     def forward_impl(
         self,
         *,
@@ -572,18 +599,37 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
 
         num_source_tokens = hidden_states.shape[0]
         prepare_quant_type = self.quant_type
-        if (
-            prepare_quant_type in (QuantType.W8A8, QuantType.W8A8MXFP)
-            and isinstance(moe_comm_method, AllGatherCommImpl)
+        is_pcp_allgather = (
+            isinstance(moe_comm_method, AllGatherCommImpl)
             and self.moe_config.pcp_size > 1
             and not self.moe_config.is_sequence_parallel
+        )
+        if (
+            is_pcp_allgather
+            and prepare_quant_type in (QuantType.W8A8, QuantType.W8A8MXFP, QuantType.W4A8MXFP)
             and (
                 self.apply_router_weight_on_input
+                or lora_context is not None
                 # Subclasses can override expert selection and read activation values.
                 or type(self.router) not in (AscendFusedTopKRouter, AscendGroupedTopKRouter)
             )
         ):
             prepare_quant_type = QuantType.NONE
+
+        local_routing = is_pcp_allgather and self._can_pre_route_pcp(
+            hidden_states, prepare_quant_type, enable_force_load_balance
+        )
+        if local_routing:
+            assert isinstance(self.router, AscendFusedTopKRouter)
+            local_logits, local_ids_in = router_logits, input_ids
+            if (pad := _EXTRA_CTX.max_tokens_across_pcp - num_source_tokens) > 0:
+                local_logits = torch.nn.functional.pad(local_logits, (0, 0, 0, pad))
+                if self.router.tid2eid is not None and local_ids_in is not None:
+                    local_ids_in = torch.nn.functional.pad(local_ids_in, (0, pad))
+            local_w, local_ids = self.router._compute_routing(
+                hidden_states, local_logits, None, input_ids=local_ids_in, local_input_ids=True
+            )
+            router_logits = torch.cat((local_w.contiguous().view(torch.int32), local_ids.to(torch.int32)), dim=1)
         prepare_output = moe_comm_method.prepare(
             hidden_states=hidden_states,
             router_logits=router_logits,
@@ -598,12 +644,16 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
         pertoken_scale = prepare_output.pertoken_scale
         if self.router is None:
             raise RuntimeError("AscendRoutedExperts requires a router for expert selection.")
-        topk_weights, topk_ids = self._select_experts(
-            hidden_states=hidden_states,
-            router_logits=router_logits,
-            enable_force_load_balance=enable_force_load_balance,
-            input_ids=input_ids,
-        )
+        if local_routing:
+            w_i32, topk_ids = router_logits.split(self.router.top_k, dim=1)
+            topk_weights, topk_ids = w_i32.contiguous().view(torch.float32), topk_ids.contiguous()
+        else:
+            topk_weights, topk_ids = self._select_experts(
+                hidden_states=hidden_states,
+                router_logits=router_logits,
+                enable_force_load_balance=enable_force_load_balance,
+                input_ids=input_ids,
+            )
         self.ascend_pertoken_scale = pertoken_scale
         self.ascend_mc2_mask = mc2_mask
         try:

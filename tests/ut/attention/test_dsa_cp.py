@@ -220,12 +220,11 @@ def test_cache_query_preparation_preserves_collectives(
     case.impl.compress_ratio = compress_ratio
     case.impl.pcp_q_projection_overlap = overlap_enabled
     overlap = overlap_enabled and global_prefill and local_tokens > 0
-    expected = ["gather", "swa"]
+    expected = ["gather", "weights", "swa"]
     if compress_ratio > 1:
         expected.append("compressor")
     if compress_ratio == 4:
         expected.append("indexer")
-    expected.append("weights")
     if overlap:
         expected = ["query_wait", "query"] + expected + ["current_wait"]
     for _ in range(2):

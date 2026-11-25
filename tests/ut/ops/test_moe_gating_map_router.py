@@ -163,3 +163,29 @@ def test_vision_branch_selects_mapping_once(hardware_profile, vision_supported):
         op.assert_not_called()
         map_op.assert_called_once_with(logical_ids, table)
     assert router._use_gating_top_k_with_map is vision_supported
+
+
+@pytest.mark.parametrize("local_input_ids", [False, True])
+def test_local_input_ids_controls_collective_preparation(local_input_ids):
+    router, _, _ = make_router(tid2eid=torch.arange(16, dtype=torch.int32).reshape(8, 2))
+    router.eplb_state = None
+    local_ids, gathered_ids = torch.tensor([3, 5], dtype=torch.int64), torch.tensor([3, 5, 1, 2], dtype=torch.int64)
+    all_gather_ids = Mock(return_value=gathered_ids)
+    context = SimpleNamespace(
+        moe_comm_type=module.MoECommType.ALLGATHER,
+        moe_comm_method=SimpleNamespace(prepare_finalize=SimpleNamespace(all_gather_input_ids=all_gather_ids)),
+    )
+    op = Mock(return_value=(torch.ones(2, 2), torch.ones(2, 2, dtype=torch.int32), None))
+    with (
+        patch.object(module, "_EXTRA_CTX", context),
+        patch.object(torch.ops._C_ascend, "moe_gating_top_k_hash", op, create=True),
+    ):
+        router._compute_routing(
+            torch.ones((2, 64), dtype=torch.bfloat16),
+            torch.ones((2, 8), dtype=torch.float32),
+            None,
+            input_ids=local_ids,
+            local_input_ids=local_input_ids,
+        )
+    assert op.call_args.kwargs["input_ids"] is (local_ids if local_input_ids else gathered_ids)
+    assert all_gather_ids.call_count == (0 if local_input_ids else 1)

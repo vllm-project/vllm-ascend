@@ -1,14 +1,24 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM Ascend project
 
+from contextlib import contextmanager
 from types import SimpleNamespace
+from typing import Any
+from unittest.mock import MagicMock, patch
 
 import pytest
 import torch
 
 import vllm_ascend.ops.fused_moe.routed_experts as routed_experts_module
+from vllm_ascend.ascend_forward_context import MoECommType
+from vllm_ascend.ops.fused_moe.dataclass.prepare_finalize import MoEPrepareOutput
+from vllm_ascend.ops.fused_moe.moe_comm_method import AllGatherCommImpl, FusedExpertsResult
+from vllm_ascend.ops.fused_moe.prepare_finalize import PrepareAndFinalizeWithAllGather
 from vllm_ascend.ops.fused_moe.routed_experts import AscendRoutedExperts, EplbExpertTensorList
+from vllm_ascend.ops.fused_moe.router import AscendFusedMoERouter
+from vllm_ascend.ops.fused_moe.router.grouped_topk_router import AscendGroupedTopKRouter
 from vllm_ascend.quantization.nz import NzCastSpec
+from vllm_ascend.quantization.quant_type import QuantType
 
 
 class _FakeNpuTensor:
@@ -297,3 +307,205 @@ def test_ascend_expert_map_uses_upstream_placement():
     object.__setattr__(routed_experts, "_expert_map", upstream_map)
 
     assert routed_experts.ascend_expert_map is upstream_map
+
+
+def _make_pcp_routed_experts_fixture(*, scoring_func="sqrtsoftplus", tid2eid=None, pcp_size=2):
+    moe_config = SimpleNamespace(
+        dp_size=1,
+        tp_size=1,
+        tp_group=SimpleNamespace(world_size=1),
+        pcp_size=pcp_size,
+        ep_size=pcp_size,
+        is_sequence_parallel=False,
+        num_experts=8,
+        original_num_experts=8,
+    )
+    captured: dict[str, Any] = {}
+
+    def apply_fn(*, layer, x, topk_weights, topk_ids, **_kwargs):
+        captured.update(x=x, scale=layer.ascend_pertoken_scale, topk_weights=topk_weights, topk_ids=topk_ids)
+        return FusedExpertsResult(routed_out=torch.zeros((x.shape[0], 64), dtype=torch.bfloat16))
+
+    experts = AscendRoutedExperts.__new__(AscendRoutedExperts)
+    for key, val in {
+        "moe_config": moe_config,
+        "router": AscendFusedMoERouter(top_k=2, global_num_experts=8, scoring_func=scoring_func, tid2eid=tid2eid),
+        "quant_method": SimpleNamespace(quant_method=SimpleNamespace(quant_type=QuantType.W4A8MXFP), apply=apply_fn),
+        "enable_npugraph_ex_static_kernel": False,
+        "apply_router_weight_on_input": False,
+        "n_shared_experts": 0,
+        "global_redundant_expert_num": 0,
+        "mix_placement": False,
+        "return_with_event": False,
+        "ascend_pertoken_scale": None,
+        "ascend_mc2_mask": None,
+    }.items():
+        object.__setattr__(experts, key, val)
+
+    comm = AllGatherCommImpl.__new__(AllGatherCommImpl)
+    comm.moe_config = moe_config
+    with patch("vllm_ascend.ops.fused_moe.prepare_finalize.get_dynamic_mx_quant_scale_alg", return_value=1):
+        comm.prepare_finalize = PrepareAndFinalizeWithAllGather(moe_config)
+    return experts, comm, captured
+
+
+@contextmanager
+def _pcp_forward_env(comm, *, capturing=False):
+    extra_ctx = SimpleNamespace(
+        in_profile_run=False,
+        moe_comm_type=MoECommType.ALLGATHER,
+        moe_comm_method=comm,
+        max_tokens_across_pcp=2,
+        capturing=capturing,
+    )
+    with (
+        patch.object(routed_experts_module, "get_forward_context", return_value=SimpleNamespace(all_moe_layers=[])),
+        patch.object(routed_experts_module, "get_moe_comm_method", return_value=comm),
+        patch.object(routed_experts_module, "get_ascend_config", return_value=SimpleNamespace(enable_force_eplb=False)),
+        patch.object(routed_experts_module, "sync_lora_context"),
+        patch.object(routed_experts_module, "_EXTRA_CTX", extra_ctx),
+    ):
+        yield extra_ctx
+
+
+def _run_two_rank_pcp_forward(experts, comm, *, capturing, rank0_rows=1):
+    tid2eid = experts.router.tid2eid
+    rank0_h = torch.full((rank0_rows, 64), 2.0, dtype=torch.bfloat16)
+    rank0_logits = torch.arange(rank0_rows * 8, dtype=torch.float32).reshape(rank0_rows, 8)
+    rank1_logits = torch.arange(100, 116, dtype=torch.float32).reshape(2, 8)
+    rank0_ids = torch.arange(1, 1 + rank0_rows, dtype=torch.int64)
+    rank1_ids = torch.tensor([3, 4], dtype=torch.int64)
+    r1_val = torch.arange(128, 256, dtype=torch.uint8).reshape(2, 64)
+    r1_scl = torch.tensor([[[122, 123]], [[124, 125]]], dtype=torch.uint8)
+
+    def fake_quant(x, **_kwargs):
+        return (
+            x.to(torch.int32).to(torch.uint8).view(torch.float8_e4m3fn),
+            torch.full((x.shape[0], 1, 2), 120, dtype=torch.uint8).view(torch.float8_e8m0fnu),
+        )
+
+    def fake_hash_topk(*, x, k, input_ids, tid2eid, **_kwargs):
+        scores = torch.nn.functional.softplus(x).sqrt()
+        ids = (
+            tid2eid[input_ids].to(torch.int32)
+            if tid2eid is not None
+            else torch.topk(scores, k=k, dim=-1).indices.to(torch.int32)
+        )
+        return scores.gather(1, ids.to(torch.int64)).to(torch.float32), ids, None
+
+    pcp_calls: list[torch.Tensor] = []
+
+    def fake_all_gather(tensor, dim=0):
+        pcp_calls.append(tensor)
+        if tensor.dtype == torch.float8_e4m3fn and tensor.shape == (2, 64):
+            return torch.cat((tensor.view(torch.uint8), r1_val), dim=dim).view(torch.float8_e4m3fn)
+        if tensor.dtype == torch.float8_e8m0fnu and tensor.shape == (2, 1, 2):
+            return torch.cat((tensor.view(torch.uint8), r1_scl), dim=dim).view(torch.float8_e8m0fnu)
+        if tensor.dtype == torch.int32 and tensor.shape == (2, 4):
+            r1_w, r1_i, _ = fake_hash_topk(x=rank1_logits, k=2, input_ids=rank1_ids, tid2eid=tid2eid)
+            remote = torch.cat((r1_w.view(torch.int32), r1_i), dim=1)
+        elif tensor.dtype == torch.float32 and tensor.shape == (2, 8):
+            remote = rank1_logits
+        elif tensor.ndim == 1 and tensor.shape == (2,):
+            remote = rank1_ids
+        else:
+            raise AssertionError(f"Unexpected PCP all_gather payload: shape={tensor.shape}, dtype={tensor.dtype}")
+        return torch.cat((tensor, remote), dim=dim)
+
+    pcp_group = MagicMock()
+    pcp_group.all_gather.side_effect = fake_all_gather
+    pcp_group.reduce_scatter.side_effect = lambda tensor, dim=0: tensor[:2]
+    with (
+        _pcp_forward_env(comm, capturing=capturing) as extra_ctx,
+        patch("vllm_ascend.ops.fused_moe.router.fused_topk_router._EXTRA_CTX", extra_ctx),
+        patch("vllm_ascend.ops.fused_moe.prepare_finalize._EXTRA_CTX", extra_ctx),
+        patch("vllm_ascend.ops.fused_moe.prepare_finalize.get_pcp_group", return_value=pcp_group),
+        patch("vllm_ascend.ops.fused_moe.prepare_finalize.torch_npu.npu_dynamic_mx_quant", side_effect=fake_quant),
+        patch.object(torch.ops._C_ascend, "moe_gating_top_k_hash", side_effect=fake_hash_topk, create=True) as topk_op,
+    ):
+        out = experts.forward_impl(
+            hidden_states=rank0_h, router_logits=rank0_logits, input_ids=rank0_ids if tid2eid is not None else None
+        )
+    assert out.shape == (rank0_rows, 64)
+    return pcp_calls, topk_op
+
+
+@pytest.mark.parametrize(
+    "rank0_rows",
+    [pytest.param(1, id="non-empty"), pytest.param(0, id="empty-local-shard")],
+)
+def test_pcp_mxfp8_local_topk_matches_global_routing(rank0_rows):
+    tid2eid = torch.tensor([[0, 1], [2, 3], [4, 5], [6, 7], [1, 6], [3, 5]], dtype=torch.int32)
+    fast_experts, fast_comm, fast_cap = _make_pcp_routed_experts_fixture(tid2eid=tid2eid)
+    fast_calls, fast_topk = _run_two_rank_pcp_forward(fast_experts, fast_comm, capturing=False, rank0_rows=rank0_rows)
+    ref_experts, ref_comm, ref_cap = _make_pcp_routed_experts_fixture(tid2eid=tid2eid)
+    ref_calls, ref_topk = _run_two_rank_pcp_forward(ref_experts, ref_comm, capturing=True, rank0_rows=rank0_rows)
+
+    assert [(t.shape, t.dtype) for t in fast_calls] == [
+        ((2, 64), torch.float8_e4m3fn),
+        ((2, 4), torch.int32),
+        ((2, 1, 2), torch.float8_e8m0fnu),
+    ]
+    assert fast_topk.call_args.kwargs["x"].shape == (2, 8)
+    assert len(ref_calls) == 4 and ref_topk.call_args.kwargs["x"].shape == (4, 8)
+    for key in ("x", "scale"):
+        torch.testing.assert_close(fast_cap[key].view(torch.uint8), ref_cap[key].view(torch.uint8))
+    for key in ("topk_weights", "topk_ids"):
+        torch.testing.assert_close(fast_cap[key], ref_cap[key])
+
+
+class _CustomTopKRouter(AscendFusedMoERouter):
+    pass
+
+
+@pytest.mark.parametrize(
+    "target,attr,value,expected_quant_type",
+    [
+        pytest.param("moe_config", "pcp_size", 1, QuantType.W4A8MXFP, id="pcp-1"),
+        pytest.param(
+            "moe_config",
+            "tp_group",
+            SimpleNamespace(world_size=2),
+            QuantType.W4A8MXFP,
+            id="physical-tp-gt-1",
+        ),
+        pytest.param("quant", "quant_type", QuantType.W8A8, QuantType.W8A8, id="non-w4a8mxfp"),
+        pytest.param("experts", "router", _CustomTopKRouter, QuantType.NONE, id="router-subclass"),
+        pytest.param("experts", "router", AscendGroupedTopKRouter, QuantType.W4A8MXFP, id="grouped-topk-router"),
+        pytest.param("experts", "apply_router_weight_on_input", True, QuantType.NONE, id="weight-on-input"),
+        pytest.param("experts", "_ascend_moe_lora_context", object(), QuantType.NONE, id="lora-active"),
+        pytest.param("router", "scoring_func", "sigmoid", QuantType.W4A8MXFP, id="non-sqrtsoftplus"),
+        pytest.param("router", "bias_vl", torch.ones(8), QuantType.W4A8MXFP, id="vision-router"),
+        pytest.param("router", "is_routing_input_ids_producer", True, QuantType.W4A8MXFP, id="ids-producer"),
+    ],
+)
+def test_pcp_mxfp8_and_local_routing_guards(target: str, attr: str, value: Any, expected_quant_type: QuantType):
+    experts, comm, _ = _make_pcp_routed_experts_fixture()
+    if value is _CustomTopKRouter:
+        value = _CustomTopKRouter(top_k=2, global_num_experts=8, scoring_func="sqrtsoftplus")
+    elif value is AscendGroupedTopKRouter:
+        value = AscendGroupedTopKRouter(top_k=2, global_num_experts=8, num_expert_group=None, topk_group=None)
+    targets = {
+        "experts": experts,
+        "router": experts.router,
+        "moe_config": experts.moe_config,
+        "quant": experts.quant_method.quant_method,
+    }
+    object.__setattr__(targets[target], attr, value)
+    hidden = torch.ones((2, 64), dtype=torch.bfloat16)
+    logits = torch.zeros((2, 8), dtype=torch.float32)
+    prepare_out = MoEPrepareOutput(hidden, logits, None, None, None)
+    with (
+        _pcp_forward_env(comm),
+        patch.object(comm, "prepare", return_value=prepare_out) as prepare_mock,
+        patch.object(comm, "finalize", side_effect=lambda hidden_states, **_kw: hidden_states),
+        patch.object(
+            AscendRoutedExperts,
+            "_select_experts",
+            return_value=(torch.ones((2, 2)), torch.zeros((2, 2), dtype=torch.int32)),
+        ) as select_experts,
+    ):
+        experts.forward_impl(hidden_states=hidden, router_logits=logits)
+    assert prepare_mock.call_args.kwargs["quant_type"] == expected_quant_type
+    assert prepare_mock.call_args.kwargs["router_logits"].dtype == torch.float32
+    select_experts.assert_called_once()
