@@ -14,7 +14,7 @@ from vllm_ascend.worker.v2.spec_decode import rejection_sampler_utils as utils
 def inputs():
     return dict(
         target_logits=torch.zeros(2, 3),
-        draft_logits=None,
+        draft_logits_cache=None,
         draft_sampled=torch.zeros(2, dtype=torch.int64),
         cu_num_logits=torch.tensor([0, 2], dtype=torch.int32),
         pos=torch.arange(2, dtype=torch.int32),

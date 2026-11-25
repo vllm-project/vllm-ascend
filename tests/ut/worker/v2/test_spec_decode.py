@@ -24,7 +24,7 @@ def test_rejection_sample_rejects_block_with_synthetic_rates():
     with pytest.raises(AssertionError, match="incompatible with synthetic"):
         rejection_sample(
             target_logits=torch.zeros(2, 1),
-            draft_logits=None,
+            draft_logits_cache=None,
             draft_sampled=torch.zeros(2, dtype=torch.int64),
             cu_num_logits=torch.tensor([0, 2], dtype=torch.int32),
             pos=torch.arange(2, dtype=torch.int32),
