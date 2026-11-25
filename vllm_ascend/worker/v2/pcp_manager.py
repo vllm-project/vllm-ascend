@@ -39,6 +39,7 @@ from vllm_ascend.attention.utils import apply_prefill_as_decode_mask, has_reques
 from vllm_ascend.ops.rotary_embedding import update_cos_sin
 from vllm_ascend.worker.v2.attn_utils import build_attn_state
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch, AscendInputBuffers
+from vllm_ascend.worker.v2.spec_decode.dspark.aux_states import ProjectedDraftAuxStates
 
 if TYPE_CHECKING:
     from vllm.v1.worker.gpu.spec_decode.speculator import DraftModelSpeculator
@@ -228,6 +229,27 @@ class AscendPCPManager(PCPManager):
         self._draft_layer_names = frozenset(speculator.draft_attn_layer_names)
         self._is_draft_prefill_sharded = speculator.vllm_config.parallel_config.prefill_context_parallel_size > 1
         self._dispatch_prefill_runs_as_decode_np = None
+
+        self._draft_aux_speculator = None
+        configure = getattr(speculator, "configure_pcp_aux_projection", None)
+        if (
+            self.pcp_world_size > 1
+            and self.is_last_pp_rank
+            and not self._is_draft_prefill_sharded
+            and configure is not None
+            and configure()
+        ):
+            self._draft_aux_speculator = speculator
+
+    def restore_draft_aux_states(self, aux_hidden_states: list[torch.Tensor]) -> torch.Tensor:
+        """Combine padded local rows, then reuse the canonical PCP restorer."""
+        speculator = self._draft_aux_speculator
+        assert speculator is not None
+        local_context_states = speculator.project_pcp_aux_states(aux_hidden_states)
+        # Includes HCCL-contiguous conversion, hidden_restore_idx, padding and
+        # compact-global-batch handling. Do not implement a second gather here.
+        return self.restore_hidden_states(local_context_states)
+
 
     def bind_config(self, vllm_config: VllmConfig) -> None:
         self.vllm_config = vllm_config
@@ -644,10 +666,22 @@ class AscendPCPManager(PCPManager):
         last hidden states; replicated drafts (DSpark) consume them globally.
         """
         assert self._global_batch is not None
+        projected_aux = False
         if self._is_draft_prefill_sharded:
             # Keep local aux states for the sharded draft; only sampling needs
             # the main hidden states restored to the global layout.
             hidden_states, _, global_batch = super().restore_for_sampling(hidden_states, None)
+        elif (
+            getattr(self, "_draft_aux_speculator", None) is not None
+            and self.is_last_pp_rank
+            and aux_hidden_states
+            and not self._global_batch.is_dummy
+        ):
+            # Keep sampling's main hidden states separate from draft context.
+            local_aux = aux_hidden_states
+            hidden_states, _, global_batch = super().restore_for_sampling(hidden_states, None)
+            aux_hidden_states = [self.restore_draft_aux_states(local_aux)]
+            projected_aux = True
         else:
             hidden_states, aux_hidden_states, global_batch = super().restore_for_sampling(
                 hidden_states, aux_hidden_states
@@ -658,6 +692,9 @@ class AscendPCPManager(PCPManager):
             hidden_states = hidden_states[:num_tokens]
             if not self._is_draft_prefill_sharded and aux_hidden_states is not None:
                 aux_hidden_states = [states[:num_tokens] for states in aux_hidden_states]
+        if projected_aux:
+            assert aux_hidden_states is not None
+            aux_hidden_states = ProjectedDraftAuxStates(aux_hidden_states[0])
         self._sampling_global_batch = global_batch
         return hidden_states, aux_hidden_states, global_batch
 
