@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Real A5 FIA output-to-V-projection regressions, without model weights.
+"""A5 MLA prefill and output-to-V-projection regressions without model weights.
 
 Run on Ascend 950 with the same torch_npu/CANN bundle as the serving test::
 
@@ -22,7 +22,7 @@ import torch_npu
 from vllm_ascend.attention import mla_v1
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.mla_v1 import AscendMLAImpl, DecodeMLAPreprocessResult
-from vllm_ascend.compilation import acl_graph
+from vllm_ascend.compilation.updatable_graph import ContextSource, UpdatableGraph
 from vllm_ascend.device.device_config import check_ascend_device_type, is_950
 
 NUM_HEADS = 16
@@ -81,6 +81,7 @@ def _case(monkeypatch, num_tokens, speculative, fp8):
     impl.support_fp8_attention = True
     impl.fa_quant_layer = fp8
     impl.fak_descale_float = torch.ones(1, device="npu")
+    impl.layer_name = "attn"
     query_tokens_per_seq = num_tokens if speculative else 1
     if speculative and fp8:
         # The tested CANN 9.2 FP8 path supports at most 16 queries per sequence.
@@ -108,15 +109,7 @@ def _case(monkeypatch, num_tokens, speculative, fp8):
     )
     extra_context = SimpleNamespace(capturing=False, is_draft_model=False, is_draft_model_prefill=False)
     monkeypatch.setattr(mla_v1, "_EXTRA_CTX", extra_context)
-    params = acl_graph.GraphParams(
-        events={num_tokens: []},
-        workspaces={num_tokens: None},
-        handles={num_tokens: []},
-        attn_params={num_tokens: []},
-    )
-    monkeypatch.setattr(acl_graph, "_graph_params", params)
-    assert mla_v1.get_graph_params() is params
-    return impl, metadata, extra_context, params
+    return impl, metadata, extra_context
 
 
 def _reference(impl, inputs, metadata, speculative):
@@ -195,7 +188,7 @@ def _assert_output(actual, expected):
 @pytest.mark.parametrize("fp8", [True, False], ids=["fp8", "bf16_control"])
 @torch.inference_mode()
 def test_mla_decode_output_to_v_projection_a5(monkeypatch, num_tokens, speculative, fp8):
-    impl, metadata, _, _ = _case(monkeypatch, num_tokens, speculative, fp8)
+    impl, metadata, _ = _case(monkeypatch, num_tokens, speculative, fp8)
     inputs = _inputs(num_tokens, fp8, seed=41)
     expected, explicit_copy = _reference(impl, inputs, metadata, speculative)
     actual = impl._forward_decode(inputs, BLOCK_SIZE, metadata)
@@ -212,22 +205,22 @@ def test_mla_decode_output_to_v_projection_a5(monkeypatch, num_tokens, speculati
 @pytest.mark.parametrize("fp8", [True, False], ids=["fp8", "bf16_control"])
 @torch.inference_mode()
 def test_mla_decode_graph_replay_changed_inputs_a5(monkeypatch, num_tokens, speculative, fp8):
-    impl, metadata, extra_context, params = _case(monkeypatch, num_tokens, speculative, fp8)
+    impl, metadata, extra_context = _case(monkeypatch, num_tokens, speculative, fp8)
     inputs = _inputs(num_tokens, fp8, seed=41)
     expected, explicit_copy = _reference(impl, inputs, metadata, speculative)
     for _ in range(2):
         impl._forward_decode(inputs, BLOCK_SIZE, metadata)
     torch.npu.synchronize()
 
-    graph = torch.npu.NPUGraph()
+    graph = UpdatableGraph()
     extra_context.capturing = True
     try:
         with torch.npu.graph(graph):
             actual = impl._forward_decode(inputs, BLOCK_SIZE, metadata)
     finally:
         extra_context.capturing = False
-    assert len(params.attn_params[num_tokens]) == 1
-    saved_layout = params.attn_params[num_tokens][0][6]
+    assert len(graph.tasks) == 1
+    saved_layout = graph.tasks[0].kwargs["input_layout"]
     if speculative:
         expected_layout = "TND" if fp8 else "TND_NTD"
     else:
@@ -235,12 +228,8 @@ def test_mla_decode_graph_replay_changed_inputs_a5(monkeypatch, num_tokens, spec
     assert saved_layout == expected_layout
     update_stream = torch.npu.Stream()
     # The captured FIA task waits for its ExternalEvent on the first replay too.
-    AscendMLAImpl.update_graph_params(
-        update_stream,
-        SimpleNamespace(attn_metadata={"attn": metadata}),
-        num_tokens,
-        speculative_config=impl.speculative_config,
-    )
+    resolved_tasks = graph.resolve_tasks(ContextSource({impl.layer_name: metadata}))
+    graph.update(update_stream, resolved_tasks)
     torch.npu.current_stream().wait_stream(update_stream)
     graph.replay()
     _assert_output(actual, expected)
@@ -260,12 +249,8 @@ def test_mla_decode_graph_replay_changed_inputs_a5(monkeypatch, num_tokens, spec
         changed_expected, changed_copy = _reference(impl, inputs, metadata, speculative)
         assert not torch.allclose(changed_expected.float(), expected.float(), rtol=1e-3, atol=1e-3)
         torch.npu.synchronize()
-        AscendMLAImpl.update_graph_params(
-            update_stream,
-            SimpleNamespace(attn_metadata={"attn": metadata}),
-            num_tokens,
-            speculative_config=impl.speculative_config,
-        )
+        resolved_tasks = graph.resolve_tasks(ContextSource({impl.layer_name: metadata}))
+        graph.update(update_stream, resolved_tasks)
         torch.npu.current_stream().wait_stream(update_stream)
         graph.replay()
         _assert_output(actual, changed_expected)
@@ -297,7 +282,7 @@ def _projection_time_us(project):
 @pytest.mark.parametrize("num_tokens", TOKEN_COUNTS[1:])
 @torch.inference_mode()
 def test_mla_fp8_v_projection_fusion_a5(monkeypatch, record_property, num_tokens):
-    impl, _, _, _ = _case(monkeypatch, num_tokens, speculative=False, fp8=True)
+    impl, _, _ = _case(monkeypatch, num_tokens, speculative=False, fp8=True)
     generator = torch.Generator(device="cpu").manual_seed(151)
     token_major = torch.randn(num_tokens, NUM_HEADS, LATENT_DIM, generator=generator).bfloat16().npu()
     expected = _cpu_projection_reference(impl, token_major)
@@ -321,3 +306,64 @@ def test_mla_fp8_v_projection_fusion_a5(monkeypatch, record_property, num_tokens
         f"tokens={num_tokens}: fused={fused_us:.2f} us, "
         f"explicit_copy={copy_us:.2f} us, speedup={copy_us / fused_us:.3f}"
     )
+
+
+@pytest.mark.e2e_coverage(
+    arch="", feature="chunked_prefill", parallel="", deploy="", hardware="A5", quantization="", graph_mode="eager"
+)
+@torch.inference_mode()
+def test_quant_flashmla_prefill_reads_fp8_history_across_pages(monkeypatch):
+    device = "npu:0"
+    heads, latent_dim, rope_dim, head_dim = 8, 512, 64, 128
+    width = latent_dim + rope_dim
+    block_size = 128
+    generator = torch.Generator().manual_seed(0)
+    fp8 = (torch.randn(3, block_size, 1, width, generator=generator) * 0.25).to(torch.float8_e4m3fn)
+    # Transfer the stored bytes to the device, including the token-fused strides.
+    fused = fp8.view(torch.int8).to(device).view(fp8.dtype)
+    cache = fused[..., :latent_dim], fused[..., latent_dim:]
+    table = torch.tensor([[2, 0]], device=device, dtype=torch.int32)
+    lengths = torch.tensor([4], device=device, dtype=torch.int32)
+    starts = torch.tensor([126], device=device, dtype=torch.int32)
+    metadata = SimpleNamespace(
+        prefill=SimpleNamespace(
+            chunked_context=SimpleNamespace(seq_tot=[4], starts=[starts], chunk_actual_seq_lengths_kv_list=[[4]]),
+            actual_seq_lengths_q=[2],
+        )
+    )
+
+    def project(latent):
+        return (latent[:, : 2 * head_dim].repeat(1, heads),)
+
+    impl = SimpleNamespace(
+        num_heads=heads,
+        head_padding=0,
+        qk_nope_head_dim=head_dim,
+        qk_rope_head_dim=rope_dim,
+        v_head_dim=head_dim,
+        scale=1.0 / (head_dim + rope_dim) ** 0.5,
+        use_quant_flashmla=True,
+        fa_quant_layer=True,
+        support_fp8_attention=True,
+        fak_descale_float=torch.tensor([0.5], device=device),
+        get_context_block_table=lambda _: table,
+        get_context_seq_len_npu=lambda *_: lengths,
+        _reorg_kvcache=lambda k, v, **_: (k, v),
+        kv_b_proj=project,
+    )
+    q_nope = torch.randn(2, heads, head_dim, generator=generator).bfloat16().to(device)
+    q_pe = torch.randn(2, heads, rope_dim, generator=generator).bfloat16().to(device)
+    prefix = torch.zeros_like(q_nope)
+    prefix_lse = torch.zeros(heads, 2, dtype=torch.float32, device=device)
+
+    def prefill():
+        output, _ = AscendMLAImpl._compute_prefill_context(
+            impl, q_nope, q_pe, cache, rope_dim, metadata, prefix, prefix_lse
+        )
+        return output.cpu()
+
+    actual = prefill()
+    raw = fp8.view(torch.int8)
+    expected_rows = torch.cat((raw[2, 126:, 0], raw[0, :2, 0])).to(device)
+    monkeypatch.setattr(mla_v1, "load_mla_cache_context_rows", lambda *_: expected_rows)
+    torch.testing.assert_close(actual, prefill(), rtol=0, atol=0)

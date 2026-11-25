@@ -35,7 +35,6 @@ All speculative decoding methods are configured through the `speculative_config`
     > 2. Other models: `num_speculative_tokens` on P nodes should be 1, and `num_speculative_tokens` on D nodes should be greater or equal to 1.
 - **`model`** (str, optional): Path or HF repo ID for the draft model. Required for `eagle`, `eagle3`, `dflash`, `medusa`, and `draft_model`. Automatically resolved for `mtp` (reuses target model), `ngram`, and `extract_hidden_states`.
 - **`draft_tensor_parallel_size`** (int, optional): Tensor parallelism size for the draft model. Can only be `1` or the same as the target model's tensor parallel size.
-- **`disable_padded_drafter_batch`** (bool, default: `False`): Disable input padding for speculative decoding. If set to `True`, speculative input batches can contain sequences of different lengths, which may only be supported by certain attention backends. **Note:** Only effective with `eagle`, `eagle3`, `mtp`, `dflash`, `draft_model`, and `extract_hidden_states` methods.
 
 **Offline inference** — pass `speculative_config` as a Python dict to `LLM()`:
 
@@ -183,7 +182,6 @@ MTP (Multi-Token Prediction) boosts inference performance by parallelizing the p
         speculative_config={
             "method": "mtp",
             "num_speculative_tokens": 2,
-            "disable_padded_drafter_batch": False,
         },
     )
     outputs = llm.generate(prompts, sampling_params)
@@ -211,7 +209,7 @@ MTP (Multi-Token Prediction) boosts inference performance by parallelizing the p
     --trust-remote-code \
     --gpu-memory-utilization 0.9 \
     --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
-    --speculative-config '{"num_speculative_tokens": 2, "method":"mtp", "disable_padded_drafter_batch": false}'
+    --speculative-config '{"num_speculative_tokens": 2, "method":"mtp"}'
     ```
 
 !!! note
@@ -490,7 +488,7 @@ for a BF16 draft.
 !!! warning
 
     When `enable_adaptive_verification` is enabled, vLLM Ascend does not support fully eager execution or pure `PIECEWISE` graph mode for the target model. The same restriction applies in vLLM.
-    In vLLM Ascend, adaptive verification cannot be combined with PP, PCP, DCP, LM head TP, or LoRA.
+    In vLLM Ascend, adaptive verification cannot be combined with PP, PCP, DCP, or LoRA.
     Commercial use is restricted.
 
 - Offline inference
@@ -769,8 +767,8 @@ To use Batch-size based Dynamic SD, add `num_speculative_tokens_per_batch_size` 
 
 implies that:
 
-- K=3 will be used when the concurrency is in range [1, 64]
-- K=1 will be used when the concurrency is in range [65, 128]
+- K=3 will be used when the concurrency is in range [1, 64].
+- K=1 will be used when the concurrency is in range [65, 128].
 - K=0 will be used when the concurrency is in range [129, 512], i.e., no draft tokens will be produced.
 
 #### Online examples
@@ -900,8 +898,9 @@ and devices:
 ```
 
 RecoverSSM requires speculative decoding, PP=1 and DCP=1. PCP is limited to
-Prefill producers with TP=1;
-PCP Decode consumers and colocated PCP execution are not supported.
+Prefill producers and supports joint TP × PCP head sharding. The KDA head count
+must be divisible by TP × PCP. PCP Decode consumers and colocated PCP execution
+are not supported.
 Stochastic rounding must be disabled.
 
 For direct prefill-to-decode transfer, use `MooncakeConnectorV2` or
@@ -948,6 +947,102 @@ layerwise hybrid pooling, the
     tokens; evaluate model accuracy and performance for your workload before use.
 
 Removing `--use-replayssm` selects the native KDA path.
+
+## Experimental Kimi K3 and K3.1 KDA RecoverSSM
+
+Kimi K3 and K3.1 can use the Ascend KDA RecoverSSM path with DSpark speculative
+decoding. It keeps one recurrent checkpoint per request and writes compact,
+request-indexed verification records, then reconstructs the accepted state
+after sampling. RecoverSSM is disabled by default.
+
+Add the following options to your existing Kimi serving command, replacing the
+path with a compatible DSpark draft model. Keep the parallelism, quantization,
+KV-cache dtype and memory settings appropriate for the model and devices:
+
+```shell
+--use-replayssm \
+--speculative-config '{"method": "dspark", "model": "/path/to/dspark", "num_speculative_tokens": 3}'
+```
+
+Requirements:
+
+- Adaptive verification and stochastic rounding are unsupported.
+
+For experimental prefill/decode separation, use `MooncakeConnectorV2` or
+`MooncakePullConnector` and enable `--use-replayssm` on both Prefill and Decode.
+Both sides must use the same integration version, model and weights,
+TP size, prefix-caching configuration, speculative method and window, and
+persistent state dtypes. Set `VLLM_SSM_CONV_STATE_LAYOUT=SD` on both sides;
+the connector does not validate the peer's convolution layout or all other peer
+settings.
+
+!!! warning
+
+    This feature is experimental. An A5 P/D functional test with PP4/TP8 on
+    Prefill and DP4/TP8/DCP8 on Decode passed with PCP=1, using an experimental
+    image with modified parallelism checks. This does not establish correctness
+    for the unmodified PR, PCP greater than 1, or other parallel configurations.
+    End-to-end P/D output equivalence remains unverified, including when prefix
+    caching is enabled.
+
+## Experimental Qwen GDN RecoverSSM
+
+Qwen GDN hybrid models like Qwen3.5/3.6 can use experimental RecoverSSM on
+Ascend A3 and A5. For Qwen3.8, use the Qwen3.5-compatible dense checkpoint
+`Qwen/Qwen3.8-27B`.
+
+Enable this path with `--use-replayssm`, which is off by default. Use Model
+Runner V2 with [MTP](#speculating-using-mtp), [DSpark](#speculating-using-dspark),
+or [DFlash](#speculating-using-dflash) and a speculative window appropriate for
+your checkpoint and draft model.
+
+For example, run Qwen3.6-35B-A3B with DFlash speculative config mode:
+
+```shell
+--use-replayssm \
+--speculative-config '{"method": "DFlash", "model": "/path/to/dflash", "num_speculative_tokens": 3}'
+```
+
+Use BF16 activations and convolution state, and BF16 or FP32 SSM checkpoints.
+Set PP, PCP, and DCP to 1. The TP size must divide both the key-head
+and value-head counts, and the value-head count must be a multiple of the
+key-head count. Disable stochastic rounding. Ascend 310P is unsupported.
+
+Use `--mamba-cache-mode none --no-enable-prefix-caching` with prefix caching
+disabled, or `--mamba-cache-mode align --enable-prefix-caching` to enable it.
+In `align` mode, the Mamba block size must cover at least
+`num_speculative_tokens + 1` tokens.
+
+For direct prefill-to-decode transfer, use `MooncakePullConnector` or
+`MooncakeConnectorV2` with its default pull mode (`use_layerwise=false`).
+Enable `--use-replayssm` on both roles and match the model weights, TP size,
+speculative method, draft checkpoint where applicable, speculative window,
+state dtypes, convolution layout, and prefix-caching configuration.
+
+For example, use these settings for a same-host TP4 + TP4 deployment with
+Qwen3.6-35B-A3B, MTP with four speculative tokens, and prefix caching:
+
+| Setting | Prefill | Decode |
+| --- | --- | --- |
+| Tensor parallel size | 4 | 4 |
+| KV role | `kv_producer` | `kv_consumer` |
+| SSM checkpoint dtype | `float32` | `float32` |
+| Mamba cache mode | `align` | `align` |
+| Prefix caching | Enabled | Enabled |
+
+For Mooncake transport setup and request routing, see
+[Prefill-Decode Disaggregation (DeepSeek)](../../tutorials/features/pd_disaggregation_mooncake_multi_node.md).
+
+The Qwen3.6-35B-A3B MTP generation test checks completion and token validity
+with RecoverSSM off and on in eager and graph-enabled configurations, including
+repeated requests in `none` and `align` modes. The Qwen3.8-27B operator cases
+check verification and state commit using synthetic tensors with the model's
+head geometry and a DFlash-sized window.
+
+!!! warning
+
+    RecoverSSM is experimental. Validate accuracy and performance on your
+    deployment stack, including the selected execution mode and P/D configuration.
 
 ## Synthetic Rejection Sampling
 

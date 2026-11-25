@@ -11,7 +11,6 @@ from transformers import Glm5NextTextConfig
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import ParallelConfig, VllmConfig
 from vllm.distributed import (
-    divide,
     get_ep_group,
     get_pp_group,
     get_tensor_model_parallel_rank,
@@ -71,6 +70,7 @@ from vllm.model_executor.models.utils import (
     make_layers,
     maybe_prefix,
     sequence_parallel_chunk,
+    spec_decode_needs_target_embed,
 )
 from vllm.models.common.ops.sequence_parallel import (
     sp_all_gather,
@@ -80,7 +80,6 @@ from vllm.models.common.ops.sequence_parallel import (
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
-from vllm.utils.torch_utils import get_kv_cache_torch_dtype
 
 from vllm_ascend.utils import pad_sequence_parallel_tokens
 
@@ -92,7 +91,6 @@ from .multimodal import (
     Glm5NextVisionTransformer,
 )
 from .ops.mhc_ops import hc_contract, hc_expand
-from .recoverssm_config import use_glm_recoverssm
 
 # Trained GLM-5.3-Flash values formerly supplied by vLLM's vendored config.
 _MHC_TAU = 0.05
@@ -598,6 +596,8 @@ class Glm5NextDecoderLayer(nn.Module):
 
 @support_torch_compile
 class Glm5NextModel(nn.Module, EagleModelMixin):
+    supports_aux_hidden_states_over_pp = True
+
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
 
@@ -629,7 +629,8 @@ class Glm5NextModel(nn.Module, EagleModelMixin):
             # Full-MLA config (no kpool sparse indexer): no topk buffer.
             topk_indices_buffer = None
 
-        if get_pp_group().is_first_rank:
+        # Load the target embedding on the last PP stage before draft sharing.
+        if get_pp_group().is_first_rank or spec_decode_needs_target_embed(vllm_config):
             self.embed_tokens = VocabParallelEmbedding(
                 config.vocab_size,
                 config.hidden_size,
@@ -742,8 +743,9 @@ class Glm5NextModel(nn.Module, EagleModelMixin):
         intermediate_tensors: IntermediateTensors | None,
         inputs_embeds: torch.Tensor | None = None,
         **kwargs,
-    ) -> torch.Tensor | tuple[torch.Tensor, list[torch.Tensor]]:
-        if get_pp_group().is_first_rank:
+    ) -> torch.Tensor | IntermediateTensors | tuple[torch.Tensor, list[torch.Tensor]]:
+        pp_group = get_pp_group()
+        if pp_group.is_first_rank:
             if inputs_embeds is not None:
                 hidden_states = inputs_embeds
             else:
@@ -765,38 +767,37 @@ class Glm5NextModel(nn.Module, EagleModelMixin):
             hidden_states = sp_shard(pad_sequence_parallel_tokens(hidden_states))
 
         aux_hidden_states: list[torch.Tensor] = []
-        # DFlash2 targets are validated as PP=1, so auxiliary layer IDs are
-        # local to this model instance and must not depend on a PP stage offset.
-        for layer_idx, layer in enumerate(self._active_layers):
-            if layer_idx in self.aux_hidden_state_layers:
+        if pp_group.is_first_rank and 0 in self.aux_hidden_state_layers:
+            aux_hidden_state = hidden_states
+            if self.is_sequence_parallel:
+                aux_hidden_state = sp_all_gather(aux_hidden_state)[:full_num_tokens]
+            aux_hidden_states.append(aux_hidden_state)
+
+        # EagleModelMixin assigns a boundary snapshot to the preceding stage.
+        # Complete the deferred mHC state before gathering token shards.
+        for layer_idx, layer in enumerate(self._active_layers, start=self.start_layer):
+            hidden_states, residual, post, comb = layer(positions, hidden_states, residual, post, comb)
+            if layer_idx + 1 in self.aux_hidden_state_layers:
                 aux_hidden_state = self._aux_hidden_state(hidden_states, residual, post, comb)
                 if self.is_sequence_parallel:
                     aux_hidden_state = sp_all_gather(aux_hidden_state)[:full_num_tokens]
                 aux_hidden_states.append(aux_hidden_state)
-            hidden_states, residual, post, comb = layer(positions, hidden_states, residual, post, comb)
 
-        if not get_pp_group().is_last_rank:
+        if not pp_group.is_last_rank:
             # Ship the deferred mHC state produced by this rank's last layer so
             # the next stage can continue exactly where this one stopped.
             tensors = {"hidden_states": hidden_states, "residual": residual}
             if self.config.mhc:
                 tensors["post"] = post
                 tensors["comb"] = comb
+            tensors.update(self.pack_local_aux_hidden_states(aux_hidden_states))
             return IntermediateTensors(tensors)
-
-        # The mHC inputs are still sequence-parallel shards here. Materialize
-        # the final aux state before gathering the model output so residual,
-        # post, and comb all keep the same rank-local token layout.
-        if self.end_layer in self.aux_hidden_state_layers:
-            final_aux = self._aux_hidden_state(hidden_states, residual, post, comb)
-            if self.is_sequence_parallel:
-                final_aux = sp_all_gather(final_aux)[:full_num_tokens]
-            aux_hidden_states.append(final_aux)
 
         if self.is_sequence_parallel:
             hidden_states = sp_all_gather(hidden_states)[:full_num_tokens]
 
         hidden_states = self.norm(hidden_states)
+        aux_hidden_states = self.collect_remote_aux_hidden_states(intermediate_tensors) + aux_hidden_states
         if aux_hidden_states:
             return hidden_states, aux_hidden_states
         return hidden_states
@@ -806,6 +807,9 @@ class Glm5NextModel(nn.Module, EagleModelMixin):
     def load_weights(self, weights: Iterable[tuple[Any, ...]]) -> set[str]:
         stacked_params_mapping = [
             # (param_name, shard_name, shard_id)
+            (".conv1d", ".q_conv1d", 0),
+            (".conv1d", ".k_conv1d", 1),
+            (".conv1d", ".v_conv1d", 2),
             (".gate_up_proj", ".gate_proj", 0),
             (".gate_up_proj", ".up_proj", 1),
             # MLA: fuse q_a_proj and kv_a_proj_with_mqa
@@ -975,6 +979,12 @@ class Glm5NextForCausalLM(nn.Module, HasInnerState, SupportsPP, DeepseekV2Mixtur
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.model.embed_input_ids(input_ids)
 
+    def set_embedding_num_tokens_padded(self, num_tokens_padded: int) -> None:
+        # MRV2 prepares embeddings before ForwardContext is available.
+        # Use the current PCP batch span instead of the static token capacity.
+        if not isinstance(self.model.embed_tokens, PPMissingLayer):
+            self.model.embed_tokens.set_embedding_num_tokens_padded(num_tokens_padded)
+
     def forward(
         self,
         input_ids: torch.Tensor | None,
@@ -991,16 +1001,11 @@ class Glm5NextForCausalLM(nn.Module, HasInnerState, SupportsPP, DeepseekV2Mixtur
         cls,
         vllm_config: "VllmConfig",
     ) -> tuple[torch.dtype, torch.dtype]:
-        dtypes = MambaStateDtypeCalculator.kda_state_dtype(
+        return MambaStateDtypeCalculator.kda_state_dtype(
             vllm_config.model_config.dtype,
             vllm_config.cache_config.mamba_cache_dtype,
             vllm_config.cache_config.mamba_ssm_cache_dtype,
         )
-        if use_glm_recoverssm(vllm_config):
-            # vLLM main moved KDA RecoverSSM records out of the KV cache and
-            # removed the calculator helper, but Ascend still packs them in.
-            return (*dtypes, torch.float32, get_kv_cache_torch_dtype("auto", vllm_config.model_config.dtype))
-        return dtypes
 
     @classmethod
     def get_mamba_state_shape_from_config(
@@ -1010,27 +1015,18 @@ class Glm5NextForCausalLM(nn.Module, HasInnerState, SupportsPP, DeepseekV2Mixtur
         hf_config = vllm_config.model_config.hf_text_config
         tp_size = get_kda_parallel_size(parallel_config)
         num_spec = vllm_config.speculative_config.num_speculative_tokens if vllm_config.speculative_config else 0
-        shapes = MambaStateShapeCalculator.kda_state_shape(
+        return MambaStateShapeCalculator.kda_state_shape(
             tp_size,
             hf_config.linear_num_heads,
             hf_config.linear_head_dim,
             conv_kernel_size=hf_config.linear_conv_kernel_dim,
             num_spec=num_spec,
         )
-        if use_glm_recoverssm(vllm_config):
-            local_num_heads = divide(hf_config.linear_num_heads, tp_size)
-            spec_query_len = num_spec + 1
-            return (
-                *shapes,
-                (local_num_heads, spec_query_len, hf_config.linear_head_dim),
-                (local_num_heads, spec_query_len, 2 * hf_config.linear_head_dim),
-            )
-        return shapes
 
     @classmethod
     def get_mamba_state_copy_func(
         cls,
-    ) -> tuple[MambaStateCopyFunc, MambaStateCopyFunc, MambaStateCopyFunc, MambaStateCopyFunc]:
+    ) -> tuple[MambaStateCopyFunc, MambaStateCopyFunc]:
         return MambaStateCopyFuncCalculator.kda_state_copy_func()
 
     def compute_logits(
@@ -1147,6 +1143,9 @@ class Glm5NextForConditionalGeneration(Glm4vForConditionalGeneration, HasInnerSt
         # wrapper so PP ranks > 0 can materialize placeholder intermediate
         # tensors (the vision tower only executes on the first rank).
         self.make_empty_intermediate_tensors = self.language_model.make_empty_intermediate_tensors
+
+    def set_embedding_num_tokens_padded(self, num_tokens_padded: int) -> None:
+        self.language_model.set_embedding_num_tokens_padded(num_tokens_padded)
 
     def load_weights(self, weights: Iterable[tuple[Any, ...]]) -> set[str]:
         # The visual merger's down_proj already contains the exported rotation.

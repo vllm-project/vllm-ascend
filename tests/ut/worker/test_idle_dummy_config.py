@@ -25,7 +25,7 @@ def test_idle_dummy_batch_scopes_and_restores_config(fails):
     worker = SimpleNamespace(
         vllm_config=config,
         log_memory_stats=Mock(),
-        model_runner=SimpleNamespace(uniform_decode_query_len=2, _dummy_run=dummy),
+        model_runner=SimpleNamespace(uniform_decode_query_len=2, decode_query_len=2, _dummy_run=dummy),
     )
     with set_current_vllm_config(outer_config):
         if fails:

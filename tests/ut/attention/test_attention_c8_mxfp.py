@@ -5,6 +5,67 @@ import torch
 
 from tests.ut.base import TestBase
 from vllm_ascend.attention.attention_c8_mxfp import AscendC8MXFPAttentionBackendImpl
+from vllm_ascend.utils import uses_ascend_store_memcache, uses_mooncake_connector
+
+
+class TestC8TransferConnector(TestBase):
+    def test_memcache_connector_is_separate_from_mooncake(self):
+        memcache = {
+            "kv_connector": "AscendStoreConnector",
+            "kv_connector_extra_config": {"backend": "memcache"},
+        }
+        multi = {
+            "kv_connector": "MultiConnector",
+            "kv_connector_extra_config": {"connectors": [memcache]},
+        }
+        object_config = SimpleNamespace(
+            kv_connector="AscendStoreConnector",
+            kv_connector_extra_config=SimpleNamespace(backend="MEMCACHE"),
+        )
+        object_multi = SimpleNamespace(
+            kv_connector="MultiConnector",
+            kv_connector_extra_config=SimpleNamespace(connectors=[object_config]),
+        )
+        for config in (memcache, multi, SimpleNamespace(**memcache), object_config, object_multi):
+            with self.subTest(config=config):
+                self.assertTrue(uses_ascend_store_memcache(config))
+                self.assertFalse(uses_mooncake_connector(config))
+
+        self.assertFalse(
+            uses_ascend_store_memcache(
+                {"kv_connector": "AscendStoreConnector", "kv_connector_extra_config": {"backend": "mooncake"}}
+            )
+        )
+
+    def test_memcache_passes_forward_connector_check(self):
+        impl = object.__new__(AscendC8MXFPAttentionBackendImpl)
+        output = torch.zeros(1)
+        for backend, expected_error in (
+            ("memcache", "requires a.*KV cache"),
+            ("mooncake", "requires MooncakeConnectorV1"),
+        ):
+            with self.subTest(backend=backend):
+                impl.vllm_config = SimpleNamespace(
+                    kv_transfer_config=SimpleNamespace(
+                        kv_connector="AscendStoreConnector",
+                        kv_connector_extra_config={"backend": backend},
+                    )
+                )
+                error_type = RuntimeError if backend == "memcache" else NotImplementedError
+                with self.assertRaisesRegex(error_type, expected_error):
+                    impl.forward(None, None, None, None, (), SimpleNamespace(), output=output)
+
+    def test_no_transfer_config_skips_connector_checks(self):
+        impl = object.__new__(AscendC8MXFPAttentionBackendImpl)
+        impl.vllm_config = SimpleNamespace(kv_transfer_config=None)
+        with (
+            patch("vllm_ascend.attention.attention_c8_mxfp.uses_mooncake_connector") as uses_mooncake,
+            patch("vllm_ascend.attention.attention_c8_mxfp.uses_ascend_store_memcache") as uses_memcache,
+            self.assertRaisesRegex(RuntimeError, "requires a.*KV cache"),
+        ):
+            impl.forward(None, None, None, None, (), SimpleNamespace(), output=torch.zeros(1))
+        uses_mooncake.assert_not_called()
+        uses_memcache.assert_not_called()
 
 
 class TestC8MXFPQfaQueryPlan(TestBase):

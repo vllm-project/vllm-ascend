@@ -211,7 +211,7 @@ asynchronous movement. It rejects:
 Validate the target model, topology, graph mode, and traffic independently
 before production use.
 
-## Performance Ceiling Analysis (`enable_force_eplb`)
+## Performance Ceiling Analysis (enable_force_eplb)
 
 `enable_force_eplb` is an analysis-only switch that forces a deterministic
 round-robin expert routing instead of the real MoE router output. It gives every
@@ -272,8 +272,8 @@ rebalances a layer only when the hysteresis gates above fire, so lowering
 
 2. Hardware Requirements:
     - Ensure that all NPUs have identical memory capacity and compute capabilities.
-    - Network bandwidth must support expert redistribution traffic (≥ 10 Gbps recommended).
-    - shm needs to be mounted for container
+    - Network bandwidth must support expert redistribution traffic (≥ 10 Gbit/s recommended).
+    - shm needs to be mounted for container.
 
 3. Monitoring & Validation:
     - Temporarily enable `--eplb-config.log_balancedness true` to log

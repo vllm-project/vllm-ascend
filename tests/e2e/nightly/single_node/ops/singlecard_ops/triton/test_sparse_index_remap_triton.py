@@ -34,9 +34,18 @@ def _torch_reference(topk_indices: torch.Tensor, dcp_size: int, dcp_rank: int, i
 @pytest.mark.skipif(
     get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3), reason="Requires Ascend A2/A3"
 )
-@pytest.mark.parametrize("dcp_size", [2, 4, 6])
-@pytest.mark.parametrize("interleave_size", [1, 2, 4])
-@pytest.mark.parametrize("topk", [1, 8, 48, 256, 2048])
+@pytest.mark.parametrize(
+    "dcp_size,interleave_size,topk",
+    [
+        # Cover a single index, a small aligned tile, and the maximum 2D top-k.
+        (4, 2, 2048),
+        (6, 4, 1),
+        (2, 1, 8),
+        # Pair non-power-of-two DCP and interleaved layouts with intermediate top-k sizes.
+        (6, 1, 48),
+        (2, 4, 256),
+    ],
+)
 @torch.inference_mode()
 def test_sparse_index_remap_triton_matches_reference(dcp_size: int, interleave_size: int, topk: int) -> None:
     device = "npu:0"

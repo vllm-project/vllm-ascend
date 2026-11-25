@@ -15,4 +15,7 @@ def mutable_weights_bypass_reason(vllm_config: Any, model_config: Any) -> str | 
         return "sleep mode"
     if getattr(vllm_config, "weight_transfer_config", None) is not None:
         return "online weight transfer (weight_transfer_config)"
+    parallel_config = getattr(vllm_config, "parallel_config", None)
+    if parallel_config is not None and getattr(parallel_config, "enable_eplb", False):
+        return "EPLB (enable_eplb)"
     return None

@@ -31,7 +31,7 @@ Test selection is driven by the coverage/AST based precision testing pipeline
 
 - ``--all-tests``: Full-suite mode. Scans ``tests/ut`` (routed to the CPU
   runner) and ``tests/e2e/pull_request`` (routed by directory convention).
-  Used for ready-all runs and scheduled full scans.
+  Used for full-suite runs and scheduled full scans.
 
 - ``--curated``: Curated-suite mode. Reads the named test list from
   ``curated_tests:`` in the routing config and routes each path.
@@ -865,7 +865,7 @@ def main():
     # even when the targets came from different selection modes.
     _dedup_groups(all_groups)
 
-    # Full-suite runs (ready-all) and any run that includes accuracy tests
+    # Full-suite runs and any run that includes accuracy tests
     # (files listed in accuracy_tests) are pinned to 560T machines: replace
     # the mixed-pool A3 labels before resolving partitions to runners.
     if args.all_tests or _has_accuracy_tests(all_groups, accuracy_tests):

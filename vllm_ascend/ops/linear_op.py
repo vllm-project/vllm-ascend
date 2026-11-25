@@ -52,11 +52,13 @@ from vllm.models.common.ops.sequence_parallel import sp_reduce_scatter
 from vllm_ascend.distributed.parallel_state import (
     get_mlp_tp_group,
     get_otp_group,
+    get_shared_expert_tp_group,
 )
 from vllm_ascend.utils import (
     mlp_tp_enable,
     oproj_tp_enable,
     shared_expert_dp_enabled,
+    shared_expert_tp_enable,
 )
 
 
@@ -276,6 +278,32 @@ class KimiOProjMMReduceScatterOp(CustomRowParallelOp):
         return padded_tokens * weight.shape[0] * weight.element_size() < self.MAX_COMM_BYTES
 
 
+class SharedExpertColumnParallelOp(CustomColumnParallelOp):
+    """Shard shared weights; the shared runner owns activation collectives."""
+
+    @property
+    def comm_group(self):
+        return get_shared_expert_tp_group()
+
+    def apply_impl(self, input_):
+        bias = None if self.skip_bias_add else self.layer.bias
+        assert self.quant_method is not None
+        output = self.quant_method.apply(self.layer, input_, bias)
+        return output, self.layer.bias if self.skip_bias_add else None
+
+
+class SharedExpertRowParallelOp(CustomRowParallelOp):
+    @property
+    def comm_group(self):
+        return get_shared_expert_tp_group()
+
+    def apply_impl(self, input_):
+        bias = None if self.tp_rank > 0 or self.skip_bias_add else self.layer.bias
+        assert self.quant_method is not None
+        output = self.quant_method.apply(self.layer, self.get_input_parallel(input_), bias)
+        return output, self.layer.bias if self.skip_bias_add else None
+
+
 class MLPColumnParallelOp(CustomColumnParallelOp):
     def __init__(self, layer):
         super().__init__(layer)
@@ -427,6 +455,10 @@ def get_parallel_op(disable_tp, prefix, layer, direct):
         dcp_group_op = DCPGroupColumnParallelOp(layer)
         return dcp_group_op, dcp_group_op.tp_rank, dcp_group_op.tp_size
     if _is_shared_expert_layer(prefix):
+        if shared_expert_tp_enable():
+            # Shared weights use their own size, outside dense-MLP selection.
+            op = SharedExpertColumnParallelOp(layer) if direct == "column" else SharedExpertRowParallelOp(layer)
+            return op, op.tp_rank, op.tp_size
         # Shared-expert weight layout is decoupled from sequence parallelism:
         # only the shared-expert DP switch replicates weights. Models still
         # pass disable_tp=is_sequence_parallel for shared experts, so SP alone

@@ -25,11 +25,11 @@ Two performance collection solutions are provided below: Ascend PyTorch Profiler
 
 ---
 
-## Ascend PyTorch Profiler  
+## Ascend PyTorch Profiler
 
 ### 0. Installation and Configuration
 
-No additional packages need to be installed; it can be enabled through command-line configuration. Currently, vLLM enables **python stack** by default, which can significantly inflate the collected performance data. If you do not wish to collect **python stack**, you can disable it using `torch_profiler_with_stack=false`.
+No additional packages need to be installed; it can be enabled through command-line configuration. Currently, vLLM enables **Python stack** by default, which can significantly inflate the collected performance data. If you do not wish to collect **python stack**, you can disable it using `torch_profiler_with_stack=false`.
 
 ### 1. Preparation for Collection
 
@@ -46,7 +46,7 @@ python3 -m vllm.entrypoints.openai.api_server \
 --max-model-len 256
 ```
 
-> Note: **January 19, 2026: The vLLM mainline has deprecated the VLLM_TORCH_PROFILER_DIR environment variable.** [Related PR](https://github.com/vllm-project/vllm-ascend/pull/5928)  When using the vLLM Ascend mainline code to collect profiler data, remember to use the `--profiler-config` (online) parameter or the `profiler_config` (offline) parameter.
+> Note: **January 19, 2026: The vLLM mainline has deprecated the VLLM_TORCH_PROFILER_DIR environment variable.** [Related PR](https://github.com/vllm-project/vllm-ascend/pull/5928) When using the vLLM-Ascend mainline code to collect profiler data, remember to use the `--profiler-config` (online) parameter or the `profiler_config` (offline) parameter.
 
 ### 2. Start Collection
 
@@ -140,7 +140,7 @@ curl -X POST http://<decoder_ip>:<decoder_port>/stop_profile
 
 ---
 
-## MS Service Profiler  
+## MS Service Profiler
 
 ### 0. Build from Source and Upgrade
 
@@ -230,11 +230,11 @@ The configuration is in JSON format. Main parameters:
 | enable | Switch for profiling: <br />0: disable<br />1: enable<br />Default: 0 | Yes |
 | prof_dir | Directory to store collected performance data. <br />Default: `${HOME}/.ms_server_profiler` | No |
 | profiler_level | Data collection level. Default is "INFO" (normal level). | No |
-| acl_task_time | Switch to collect operator dispatch latency and execution latency. Values: <br />0: off. Default; 0 or any invalid value means off.<br />1: on. When enabled, calls `aclprofCreateConfig` with `ACL_PROF_TASK_TIME_L0`.<br />2: on. MSPTI-based dump. When enabled, set before starting the service: `export LD_PRELOAD={INSTALL_DIR}/lib64/libmspti.so`, where `{INSTALL_DIR}` is the CANN installation root (e.g. `/usr/local/Ascend/cann` for a typical root install).<br />3: on. Torch Profiler–based dump. | No |
+| acl_task_time | Switch to collect operator dispatch latency and execution latency. Values: <br />0: off (default); 0 or any invalid value means off.<br />1: on. When enabled, calls `aclprofCreateConfig` with `ACL_PROF_TASK_TIME_L0`.<br />2: on. MSPTI-based dump. When enabled, set before starting the service: `export LD_PRELOAD={INSTALL_DIR}/lib64/libmspti.so`, where `{INSTALL_DIR}` is the CANN installation root (e.g., `/usr/local/Ascend/cann` for a typical root install).<br />3: on. Torch Profiler–based dump. | No |
 | acl_prof_task_time_level | Profiling level and duration. Values: <br />L0: collect operator dispatch and execution latency only; lower overhead (no operator basic info).<br />L1: collect AscendCL interface performance (host–device and inter-device sync/async memory copy latencies), plus operator dispatch, execution, and basic info for comprehensive analysis.<br />`{time}`: optional duration segment; integer 1–999, unit seconds.<br />If unset, defaults to L0 until program exit; invalid values fall back to defaults.<br />Level and duration can be combined, e.g., `"acl_prof_task_time_level": "L1;10"`.<br />**Note:** When Torch Profiler is used (`acl_task_time` set to `3`), `{time}` duration is not supported. | No |
 | timelimit | Profiling duration for the service. The process stops automatically after this time. Range: integer 0–7200, unit: seconds. Default 0 means unlimited. Recommend at least 120s; shorter runs may lack data for parsed outputs and trigger warnings. | No |
 | domain | Limit profiling to the specified domains to reduce data volume. String, separated by semicolons, case-sensitive, e.g., "Request; KVCache".<br />Empty means all available domains.<br />Available domains: Request, KVCache, ModelExecute, BatchSchedule, Communication.<br />Note: If the selected domains are incomplete, analysis output may show warnings due to missing data. See [Reference Table 1](https://www.hiascend.com/document/detail/zh/canncommercial/850/devaids/Profiling/mindieprofiling_0010.html). | No |
-| torch_prof_stack | Collect operator call stacks (framework and CPU operators). Values: `false` (default, off), `true` (on). Requires `acl_task_time` set to `3`. **Note:** Enabling this configuration introduces additional performance overhead. | No |
+| torch_prof_stack | Collect operator call stacks (framework and Core operators). Values: `false` (default, off), `true` (on). Requires `acl_task_time` set to `3`. **Note:** Enabling this configuration introduces additional performance overhead. | No |
 | torch_prof_step_num | Torch Profiler step limit. Integer ≥ 0. Default `0` means collect all steps.<br />Requires `acl_task_time` set to `3`. | No |
 | profiler_step_num | Step limit for operator and service framework profiling. Integer ≥ 0.<br />`0` or invalid values stop the entire service profiling process.<br />The number of steps actually recorded depends on `modelRunnerExec` events. | No |
 
@@ -261,7 +261,7 @@ The symbols configuration file defines which functions/methods to profile and su
 
 If you need to customize the profiling points, it is highly recommended to copy a symbol configuration file to your working directory and point to it with the `PROFILING_SYMBOLS_PATH` environment variable.
 
-##### Configuration file updates
+##### Configuration File Updates
 
 After you change profiling symbols, restart the vLLM service so the updated configuration file is loaded.
 

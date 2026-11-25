@@ -24,7 +24,7 @@ on:
 jobs:
   slashCommandDispatch:
     if: (github.event.issue.pull_request != null || startsWith(github.event.comment.body, '/wait-feedback')) && github.event.comment.user.type == 'User'
-    runs-on: linux-amd64-cpu-2-hk
+    runs-on: linux-amd64-cpu-1-hk
     steps:
       - name: Slash Command Dispatch
         uses: peter-evans/slash-command-dispatch@v5
@@ -34,8 +34,11 @@ jobs:
           commands: |
             e2e
             rerun
+            run
             cancel
             nightly
+            presmoke
+            download
             cherry-pick
             revert
             weekly
@@ -56,6 +59,11 @@ jobs:
                 "issue_type": "pull-request"
               },
               {
+                "command": "run",
+                "permission": "none",
+                "issue_type": "pull-request"
+              },
+              {
                 "command": "cancel",
                 "permission": "none",
                 "issue_type": "pull-request"
@@ -63,6 +71,16 @@ jobs:
               {
                 "command": "nightly",
                 "permission": "none",
+                "issue_type": "pull-request"
+              },
+              {
+                "command": "presmoke",
+                "permission": "none",
+                "issue_type": "pull-request"
+              },
+              {
+                "command": "download",
+                "permission": "triage",
                 "issue_type": "pull-request"
               },
               {

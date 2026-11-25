@@ -3,7 +3,7 @@
 """Ascend RecoverSSM verify and batched accepted-state recovery.
 
 Adapted from vLLM c4df37dfcc. Preserve its paged-cache strides and public
-verify/commit contracts. Q/K normalization follows the AscendC KDA kernel.
+verify/commit contracts. Nonzero Q/K vectors are normalized to unit L2 norm.
 """
 
 from collections.abc import Sequence
@@ -16,6 +16,8 @@ from vllm.triton_utils import tl, triton
 from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
 
 from vllm_ascend.device.device_config import is_950
+from vllm_ascend.ops.triton.mamba.compact_conv_state import compact_conv_state
+from vllm_ascend.ops.triton.mamba.prepare_commit_plan import prepare_commit_plan
 from vllm_ascend.ops.triton.triton_utils import get_ub_size_bytes, init_device_properties_triton
 
 RECOVERSSM_COMMIT_HEAD_TILE = 2
@@ -29,18 +31,18 @@ RECOVERSSM_COMMIT_UB_HEADROOM_ROWS = 2
 RECOVERSSM_VALUE_TILE = 64
 RECOVERSSM_VALUE_TILE_LARGE = 128
 RECOVERSSM_LARGE_TILE_MIN_PROGRAMS = 96
-RECOVERSSM_CONV_TILE = 4096
-RECOVERSSM_CONV_STRIDED_TILE = 256
+
+
+@triton.jit
+def _kda_inverse_norm(norm_square):
+    norm_square = tl.where(norm_square > 0.0, norm_square, 1.0)
+    tl.static_assert(norm_square.dtype == tl.float32)
+    return tl.rsqrt(norm_square)
 
 
 @triton.jit
 def _kda_l2_normalize(vector):
-    # AscendC normalizes nonzero vectors without CUDA's squared-norm bias.
-    norm_square = tl.sum(vector * vector)
-    norm_input = tl.where(norm_square > 0.0, norm_square, 1.0)
-    tl.static_assert(norm_input.dtype == tl.float32)
-    inverse = tl.rsqrt(norm_input)
-    return tl.where(norm_square > 0.0, vector * inverse, 0.0)
+    return vector * _kda_inverse_norm(tl.sum(vector * vector))
 
 
 @triton.jit
@@ -245,7 +247,7 @@ def _kda_recoverssm_verify_kernel(
 
         correction_ptr = (
             correction_cache_ptr
-            + state_idx * stride_correction_block
+            + pid_b * stride_correction_block
             + pid_h * stride_correction_head
             + token_offset * stride_correction_pos
         )
@@ -255,7 +257,7 @@ def _kda_recoverssm_verify_kernel(
             mask=mask_v,
         )
         if pid_v == 0:
-            kg_ptr = kg_cache_ptr + state_idx * stride_kg_block + pid_h * stride_kg_head + token_offset * stride_kg_pos
+            kg_ptr = kg_cache_ptr + pid_b * stride_kg_block + pid_h * stride_kg_head + token_offset * stride_kg_pos
             tl.store(
                 kg_ptr + offs_k * stride_kg_dim,
                 k,
@@ -311,7 +313,7 @@ def _kda_recoverssm_verify_kernel(
 
         correction_ptr = (
             correction_cache_ptr
-            + state_idx * stride_correction_block
+            + pid_b * stride_correction_block
             + pid_h * stride_correction_head
             + token_offset * stride_correction_pos
         )
@@ -321,7 +323,7 @@ def _kda_recoverssm_verify_kernel(
             mask=mask_v,
         )
         if pid_v == 0:
-            kg_ptr = kg_cache_ptr + state_idx * stride_kg_block + pid_h * stride_kg_head + token_offset * stride_kg_pos
+            kg_ptr = kg_cache_ptr + pid_b * stride_kg_block + pid_h * stride_kg_head + token_offset * stride_kg_pos
             tl.store(
                 kg_ptr + offs_k * stride_kg_dim,
                 k,
@@ -332,219 +334,6 @@ def _kda_recoverssm_verify_kernel(
                 raw_g,
                 mask=mask_k,
             )
-
-
-@triton.heuristics(
-    {
-        "HAS_REQUEST_INDICES": lambda args: args["request_indices_ptr"] is not None,
-        "ALIGN_MODE": lambda args: args["block_table_ptr"] is not None,
-    }
-)
-@triton.jit
-def _prepare_commit_plan_kernel(
-    num_accepted_ptr,
-    request_indices_ptr,
-    state_indices_ptr,
-    query_start_loc_ptr,
-    block_table_ptr,
-    num_computed_ptr,
-    commit_lens_ptr,
-    state_commit_lens_ptr,
-    boundary_commit_lens_ptr,
-    final_state_indices_ptr,
-    boundary_state_indices_ptr,
-    boundary_recovery_lens_ptr,
-    null_block_id,
-    mamba_block_size,
-    block_table_width,
-    stride_num_accepted,
-    stride_request_indices,
-    stride_state_indices,
-    stride_query_start_loc,
-    stride_block_table_row,
-    stride_block_table_col,
-    stride_num_computed,
-    SPEC_QUERY_LEN: tl.constexpr,
-    HAS_REQUEST_INDICES: tl.constexpr,
-    ALIGN_MODE: tl.constexpr,
-):
-    spec_idx = tl.program_id(0)
-    source_state_idx = tl.load(state_indices_ptr + spec_idx * stride_state_indices).to(tl.int64)
-    request_idx = spec_idx
-    if HAS_REQUEST_INDICES:
-        request_idx = tl.load(request_indices_ptr + spec_idx * stride_request_indices).to(tl.int64)
-    num_accepted = tl.load(num_accepted_ptr + request_idx * stride_num_accepted).to(tl.int32)
-    bos = tl.load(query_start_loc_ptr + spec_idx * stride_query_start_loc).to(tl.int64)
-    eos = tl.load(query_start_loc_ptr + (spec_idx + 1) * stride_query_start_loc).to(tl.int64)
-    query_len = (eos - bos).to(tl.int32)
-    commit_len = tl.minimum(tl.maximum(num_accepted, 0), query_len)
-    commit_len = tl.minimum(commit_len, SPEC_QUERY_LEN)
-
-    final_state_idx = source_state_idx
-    boundary_state_idx = null_block_id
-    boundary_recovery_len = 0
-    if ALIGN_MODE:
-        num_computed = tl.load(num_computed_ptr + request_idx * stride_num_computed).to(tl.int32)
-        final_num_computed = num_computed + commit_len
-        final_state_col = tl.minimum(final_num_computed // mamba_block_size, block_table_width - 1)
-        final_state_idx = tl.load(
-            block_table_ptr + request_idx * stride_block_table_row + final_state_col * stride_block_table_col
-        ).to(tl.int64)
-        next_boundary = (num_computed // mamba_block_size + 1) * mamba_block_size
-        crosses_boundary = final_num_computed >= next_boundary
-        boundary_recovery_len = next_boundary - num_computed
-        boundary_state_idx = tl.load(
-            block_table_ptr
-            + request_idx * stride_block_table_row
-            + (next_boundary // mamba_block_size - 1) * stride_block_table_col,
-            mask=crosses_boundary,
-            other=null_block_id,
-        ).to(tl.int64)
-    valid = (source_state_idx > null_block_id) & (commit_len > 0)
-    tl.store(commit_lens_ptr + spec_idx, tl.where(valid, commit_len, 0))
-    has_boundary = (boundary_state_idx > null_block_id) & (boundary_recovery_len > 0)
-    # Predicate once per request, rather than reading several metadata arrays in
-    # every head/value program merely to discover that it has no work.
-    tl.store(state_commit_lens_ptr + spec_idx, tl.where(valid & ~has_boundary, commit_len, 0))
-    tl.store(boundary_commit_lens_ptr + spec_idx, tl.where(valid & has_boundary, commit_len, 0))
-    tl.store(
-        final_state_indices_ptr + spec_idx,
-        tl.where(valid, final_state_idx, null_block_id),
-    )
-    tl.store(
-        boundary_state_indices_ptr + spec_idx,
-        tl.where(valid, boundary_state_idx, null_block_id),
-    )
-    tl.store(
-        boundary_recovery_lens_ptr + spec_idx,
-        tl.where(valid, boundary_recovery_len, 0),
-    )
-
-
-@triton.jit
-def _copy_conv_state_tile(
-    source_ptr,
-    final_ptr,
-    boundary_ptr,
-    channel_offsets,
-    history_offsets,
-    token_stride,
-    commit_len,
-    boundary_recovery_len,
-    mask,
-    boundary_valid,
-    ALIGN_MODE: tl.constexpr,
-):
-    final_values = tl.load(
-        source_ptr + channel_offsets + (commit_len - 1 + history_offsets) * token_stride,
-        mask=mask,
-    )
-    if ALIGN_MODE:
-        boundary_values = tl.load(
-            source_ptr + channel_offsets + (boundary_recovery_len - 1 + history_offsets) * token_stride,
-            mask=mask & boundary_valid,
-        )
-        tl.store(
-            boundary_ptr + channel_offsets + history_offsets * token_stride,
-            boundary_values,
-            mask=mask & boundary_valid,
-        )
-    tl.store(
-        final_ptr + channel_offsets + history_offsets * token_stride,
-        final_values,
-        mask=mask,
-    )
-
-
-@triton.jit
-def _compact_conv_state_kernel(
-    conv_state_ref_ptr,
-    conv_state_base_addrs_ptr,
-    conv_state_block_strides_ptr,
-    conv_state_dim_strides_ptr,
-    conv_state_token_strides_ptr,
-    state_indices_ptr,
-    commit_lens_ptr,
-    final_state_indices_ptr,
-    boundary_state_indices_ptr,
-    boundary_recovery_lens_ptr,
-    null_block_id,
-    conv_dim,
-    conv_history_len,
-    stride_state_indices,
-    BLOCK_D: tl.constexpr,
-    BLOCK_HISTORY: tl.constexpr,
-    ALIGN_MODE: tl.constexpr,
-    DIM_STRIDE: tl.constexpr = None,
-    USE_1D_CHANNEL_GATHER: tl.constexpr = False,
-):
-    pid_d = tl.program_id(0)
-    pid_b = tl.program_id(1)
-    pid_l = tl.program_id(2)
-    source_state_idx = tl.load(state_indices_ptr + pid_b * stride_state_indices).to(tl.int64)
-    if source_state_idx <= null_block_id:
-        return
-
-    commit_len = tl.load(commit_lens_ptr + pid_b)
-    if commit_len == 0:
-        return
-    final_state_idx = tl.load(final_state_indices_ptr + pid_b).to(tl.int64)
-    boundary_state_idx = tl.load(boundary_state_indices_ptr + pid_b).to(tl.int64)
-    boundary_recovery_len = tl.load(boundary_recovery_lens_ptr + pid_b)
-
-    if final_state_idx <= null_block_id:
-        return
-
-    base_addr = tl.load(conv_state_base_addrs_ptr + pid_l)
-    block_stride = tl.load(conv_state_block_strides_ptr + pid_l)
-    if DIM_STRIDE is None:
-        dim_stride = tl.load(conv_state_dim_strides_ptr + pid_l)
-    else:
-        dim_stride = DIM_STRIDE
-    token_stride = tl.load(conv_state_token_strides_ptr + pid_l)
-    conv_state_ptr = base_addr.to(tl.pointer_type(conv_state_ref_ptr.dtype.element_ty))
-    source_ptr = conv_state_ptr + source_state_idx * block_stride
-    final_ptr = conv_state_ptr + final_state_idx * block_stride
-
-    boundary_ptr = None
-    if ALIGN_MODE:
-        boundary_ptr = conv_state_ptr + boundary_state_idx * block_stride
-
-    if USE_1D_CHANNEL_GATHER and (DIM_STRIDE is not None and DIM_STRIDE != 1):
-        # A3 Triton 3.2 requires one-dimensional gathers for strided channels.
-        offs_d = pid_d * BLOCK_D + tl.arange(0, BLOCK_D)
-        for history in tl.static_range(BLOCK_HISTORY):
-            mask = (offs_d < conv_dim) & (history < conv_history_len)
-            _copy_conv_state_tile(
-                source_ptr,
-                final_ptr,
-                boundary_ptr,
-                offs_d * dim_stride,
-                history,
-                token_stride,
-                commit_len,
-                boundary_recovery_len,
-                mask,
-                boundary_state_idx > null_block_id,
-                ALIGN_MODE,
-            )
-        return
-    offs_d = (pid_d * BLOCK_D + tl.arange(0, BLOCK_D))[None, :]
-    offs_h = tl.arange(0, BLOCK_HISTORY)[:, None]
-    mask = (offs_d < conv_dim) & (offs_h < conv_history_len)
-    _copy_conv_state_tile(
-        source_ptr,
-        final_ptr,
-        boundary_ptr,
-        offs_d * dim_stride,
-        offs_h,
-        token_stride,
-        commit_len,
-        boundary_recovery_len,
-        mask,
-        boundary_state_idx > null_block_id,
-        ALIGN_MODE,
-    )
 
 
 @triton.jit
@@ -695,11 +484,11 @@ def _commit_kda_state_kernel(
     correction_cache_base_addr = tl.load(correction_cache_base_addrs_ptr + pid_l)
     correction_cache_block_stride = tl.load(correction_cache_block_strides_ptr + pid_l)
     correction_cache_ptr = correction_cache_base_addr.to(tl.pointer_type(correction_cache_ref_ptr.dtype.element_ty))
-    correction_cache_ptr += source_state_idx * correction_cache_block_stride + pid_h * stride_correction_cache_head
+    correction_cache_ptr += pid_b * correction_cache_block_stride + pid_h * stride_correction_cache_head
     kg_cache_base_addr = tl.load(kg_cache_base_addrs_ptr + pid_l)
     kg_cache_block_stride = tl.load(kg_cache_block_strides_ptr + pid_l)
     kg_cache_ptr = kg_cache_base_addr.to(tl.pointer_type(kg_cache_ref_ptr.dtype.element_ty))
-    kg_cache_ptr += source_state_idx * kg_cache_block_stride + pid_h * stride_kg_cache_head
+    kg_cache_ptr += pid_b * kg_cache_block_stride + pid_h * stride_kg_cache_head
 
     offs_k = tl.arange(0, BK)
     offs_v = pid_v * BV + tl.arange(0, BV)
@@ -815,10 +604,8 @@ def _commit_kda_state_kernel(
 @triton.jit
 def _kda_l2_normalize_heads(vector):
     norm_square = tl.sum(vector * vector, axis=1)
-    norm_input = tl.where(norm_square > 0.0, norm_square, 1.0)
-    tl.static_assert(norm_input.dtype == tl.float32)
-    inverse = tl.rsqrt(norm_input)
-    return tl.where(norm_square[:, None] > 0.0, vector * inverse[:, None], 0.0)
+    inverse = _kda_inverse_norm(norm_square)
+    return vector * inverse[:, None]
 
 
 @triton.jit(do_not_specialize=["num_layers"])
@@ -901,11 +688,11 @@ def _commit_kda_state_grouped_kernel(
     correction_cache_base_addr = tl.load(correction_cache_base_addrs_ptr + pid_l)
     correction_cache_block_stride = tl.load(correction_cache_block_strides_ptr + pid_l)
     correction_cache_ptr = correction_cache_base_addr.to(tl.pointer_type(correction_cache_ref_ptr.dtype.element_ty))
-    correction_cache_ptr += source_state_idx * correction_cache_block_stride + pid_h * stride_correction_cache_head
+    correction_cache_ptr += pid_b * correction_cache_block_stride + pid_h * stride_correction_cache_head
     kg_cache_base_addr = tl.load(kg_cache_base_addrs_ptr + pid_l)
     kg_cache_block_stride = tl.load(kg_cache_block_strides_ptr + pid_l)
     kg_cache_ptr = kg_cache_base_addr.to(tl.pointer_type(kg_cache_ref_ptr.dtype.element_ty))
-    kg_cache_ptr += source_state_idx * kg_cache_block_stride + pid_h * stride_kg_cache_head
+    kg_cache_ptr += pid_b * kg_cache_block_stride + pid_h * stride_kg_cache_head
     offs_k = tl.arange(0, BK)
     offs_v = pid_v * BV + tl.arange(0, BV)
     mask_k = None if K == BK else offs_k < K
@@ -1034,22 +821,25 @@ def kda_recoverssm_verify(
         raise ValueError("KDA RecoverSSM q, k, and gate heads must be contiguous")
     if v.stride()[2:] != (value_dim, 1) or raw_beta.stride(2) != 1:
         raise ValueError("KDA RecoverSSM v and beta heads must be contiguous")
-    num_blocks = checkpoint_state.shape[0]
     if checkpoint_state.shape[1:] != (
         num_heads,
         value_dim,
         key_dim,
     ):
         raise ValueError("KDA RecoverSSM checkpoint shape is incompatible")
+    batch = state_indices.shape[0]
+    if correction_cache.ndim != 4 or correction_cache.shape[0] < batch:
+        raise ValueError("KDA RecoverSSM records must cover every speculative request")
+    record_capacity = correction_cache.shape[0]
     expected_correction_shape = (
-        num_blocks,
+        record_capacity,
         num_heads,
         spec_query_len,
         value_dim,
     )
     if correction_cache.shape != expected_correction_shape:
         raise ValueError(f"KDA RecoverSSM correction buffer needs shape {expected_correction_shape}")
-    expected_kg_shape = (num_blocks, num_heads, spec_query_len, 2 * key_dim)
+    expected_kg_shape = (record_capacity, num_heads, spec_query_len, 2 * key_dim)
     if kg_cache.shape != expected_kg_shape:
         raise ValueError(f"KDA RecoverSSM key/gate buffer needs shape {expected_kg_shape}")
     if correction_cache.dtype != torch.float32:
@@ -1060,7 +850,6 @@ def kda_recoverssm_verify(
         raise ValueError("KDA RecoverSSM gate parameters are incompatible")
     if not A_log.is_contiguous() or not dt_bias.is_contiguous():
         raise ValueError("KDA RecoverSSM gate parameters must be contiguous")
-    batch = state_indices.shape[0]
     if query_start_loc.shape[0] != batch + 1:
         raise ValueError("KDA RecoverSSM query metadata is incompatible")
     if total_tokens > batch * spec_query_len:
@@ -1151,11 +940,6 @@ def kda_recoverssm_verify(
     return out
 
 
-def _conv_compaction_block_d(dim_stride):
-    # A3 strided gathers need smaller tiles to fit the 192 KiB UB.
-    return RECOVERSSM_CONV_TILE if is_950() or dim_stride == 1 else RECOVERSSM_CONV_STRIDED_TILE
-
-
 @dataclass
 class KDARecoverSSMCommitContext:
     conv_states: tuple[torch.Tensor, ...]
@@ -1184,6 +968,23 @@ class KDARecoverSSMCommitContext:
     lower_bound: float | None
     spec_query_len: int
     conv_dim_stride: int | None
+    cache_bindings: tuple[tuple[torch.Tensor, ...], ...]
+
+    def is_bound_to(self, layers: Sequence[Any]) -> bool:
+        """Detect cache or scratch-buffer replacement between worker bindings."""
+        if len(layers) != len(self.cache_bindings):
+            return False
+        for index, (layer, caches) in enumerate(zip(layers, self.cache_bindings)):
+            if len(layer.kv_cache) != len(caches) or any(a is not b for a, b in zip(layer.kv_cache, caches)):
+                return False
+            records = getattr(layer, "recoverssm_records", None)
+            if (
+                records is None
+                or records.correction is not self.correction_caches[index]
+                or records.key_gate is not self.kg_caches[index]
+            ):
+                return False
+        return True
 
     @classmethod
     def create(
@@ -1204,16 +1005,18 @@ class KDARecoverSSMCommitContext:
         del backend
         if not layers:
             raise ValueError("KDA RecoverSSM commit requires at least one layer")
-        if any(len(layer.kv_cache) != 4 for layer in layers):
-            raise ValueError("KDA RecoverSSM pages must contain conv, state, correction, and key/gate")
+        if any(len(layer.kv_cache) != 2 for layer in layers):
+            raise ValueError("KDA RecoverSSM requires convolution and checkpoint caches")
+        if any(getattr(layer, "recoverssm_records", None) is None for layer in layers):
+            raise ValueError("KDA RecoverSSM layers require request-indexed verify records")
         init_device_properties_triton()
 
         conv_states = [layer.kv_cache[0] for layer in layers]
         if not is_conv_state_dim_first():
             conv_states = [state.transpose(-1, -2) for state in conv_states]
         checkpoints = [layer.kv_cache[1] for layer in layers]
-        correction_caches = [layer.kv_cache[2] for layer in layers]
-        kg_caches = [layer.kv_cache[3] for layer in layers]
+        correction_caches = [layer.recoverssm_records.correction for layer in layers]
+        kg_caches = [layer.recoverssm_records.key_gate for layer in layers]
         A_log = [layer.A_log.reshape(-1) for layer in layers]
         dt_bias = [layer.dt_bias.view(layer.local_num_heads, layer.head_dim) for layer in layers]
         lower_bounds = {layer.gate_lower_bound for layer in layers}
@@ -1232,13 +1035,16 @@ class KDARecoverSSMCommitContext:
                 or state.stride()[1:] != state_ref.stride()[1:]
             ):
                 raise ValueError("KDA RecoverSSM layers need matching checkpoint layout")
+        correction_ref = correction_caches[0]
+        if correction_ref.ndim != 4 or correction_ref.shape[0] < max_num_reqs:
+            raise ValueError("KDA RecoverSSM record capacity is smaller than max_num_reqs")
+        record_capacity = correction_ref.shape[0]
         expected_correction_shape = (
-            num_blocks,
+            record_capacity,
             num_heads,
             spec_query_len,
             value_dim,
         )
-        correction_ref = correction_caches[0]
         for correction_cache in correction_caches:
             if (
                 correction_cache.shape != expected_correction_shape
@@ -1247,7 +1053,7 @@ class KDARecoverSSMCommitContext:
                 or correction_cache.stride()[1:] != correction_ref.stride()[1:]
             ):
                 raise ValueError(f"KDA RecoverSSM correction buffers need float32 shape {expected_correction_shape}")
-        expected_kg_shape = (num_blocks, num_heads, spec_query_len, 2 * key_dim)
+        expected_kg_shape = (record_capacity, num_heads, spec_query_len, 2 * key_dim)
         kg_ref = kg_caches[0]
         for kg_cache in kg_caches:
             if (
@@ -1331,6 +1137,7 @@ class KDARecoverSSMCommitContext:
             conv_dim_stride=(
                 conv_ref.stride(1) if all(state.stride(1) == conv_ref.stride(1) for state in conv_states) else None
             ),
+            cache_bindings=tuple(tuple(layer.kv_cache) for layer in layers),
         )
 
     def commit(
@@ -1376,42 +1183,25 @@ class KDARecoverSSMCommitContext:
         ):
             raise ValueError("KDA RecoverSSM commit inputs must be on the same device")
 
-        block_table_stride = (0, 0) if block_table is None else block_table.stride()
-        num_computed_stride = 0 if num_computed_tokens is None else num_computed_tokens.stride(0)
-
-        num_layers = len(self.checkpoints)
-        conv_ref = self.conv_states[0]
-        conv_dim = conv_ref.shape[1]
-        block_history = triton.next_power_of_2(self.conv_history_len)
-        _prepare_commit_plan_kernel[(batch,)](
+        prepare_commit_plan(
             num_accepted_tokens,
-            request_indices,
             state_indices,
             query_start_loc,
-            block_table,
-            num_computed_tokens,
             self.commit_lens,
             self.state_commit_lens,
             self.boundary_commit_lens,
             self.final_state_indices,
             self.boundary_state_indices,
             self.boundary_recovery_lens,
-            NULL_BLOCK_ID,
-            mamba_block_size or 1,
-            block_table.shape[1] if block_table is not None else 1,
-            num_accepted_tokens.stride(0),
-            request_indices.stride(0) if request_indices is not None else 0,
-            state_indices.stride(0),
-            query_start_loc.stride(0),
-            block_table_stride[0],
-            block_table_stride[1],
-            num_computed_stride,
-            SPEC_QUERY_LEN=self.spec_query_len,
-            num_warps=1,
+            spec_query_len=self.spec_query_len,
+            null_block_id=NULL_BLOCK_ID,
+            request_indices=request_indices,
+            block_table=block_table,
+            num_computed_tokens=num_computed_tokens,
+            mamba_block_size=mamba_block_size,
         )
-        conv_block_d = _conv_compaction_block_d(self.conv_dim_stride)
-        _compact_conv_state_kernel[(triton.cdiv(conv_dim, conv_block_d), batch, num_layers)](
-            conv_ref,
+        compact_conv_state(
+            self.conv_states[0],
             self.conv_state_base_addrs,
             self.conv_state_block_strides,
             self.conv_state_dim_strides,
@@ -1421,18 +1211,13 @@ class KDARecoverSSMCommitContext:
             self.final_state_indices,
             self.boundary_state_indices,
             self.boundary_recovery_lens,
-            NULL_BLOCK_ID,
-            conv_dim,
-            self.conv_history_len,
-            state_indices.stride(0),
-            BLOCK_D=conv_block_d,
-            BLOCK_HISTORY=block_history,
-            ALIGN_MODE=block_table is not None,
-            DIM_STRIDE=self.conv_dim_stride,
-            USE_1D_CHANNEL_GATHER=not is_950(),
-            num_warps=4,
+            conv_history_len=self.conv_history_len,
+            align_mode=block_table is not None,
+            dim_stride=self.conv_dim_stride,
+            null_block_id=NULL_BLOCK_ID,
         )
 
+        num_layers = len(self.checkpoints)
         state_ref = self.checkpoints[0]
         correction_ref = self.correction_caches[0]
         assert correction_ref.dtype == torch.float32

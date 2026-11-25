@@ -6,7 +6,6 @@ test_cases:
   - name: "Qwen3-30B-A3B-VWN-eagle3-PCP"
     model: "Qwen/Qwen3-30B-A3B"
     envs:
-      VLLM_USE_V2_MODEL_RUNNER: "1"
       VLLM_WORKER_MULTIPROC_METHOD: "spawn"
       HCCL_OP_EXPANSION_MODE: "AIV"
       HCCL_BUFFSIZE: "768"

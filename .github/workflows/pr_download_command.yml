@@ -1,0 +1,391 @@
+# Mirror the models and datasets a PR adds into the CI cluster caches.
+#
+# Triggers:
+#   - the `model-dataset-download` label on a PR (pull_request);
+#   - a maintainer commenting `/download` on a PR (repository_dispatch, gated by
+#     slash_command_dispatch at triage+);
+#   - a manual run with explicit items and cluster (workflow_dispatch).
+#
+# The first two download only what the PR adds to model_dataset_list.json, and
+# only for the clusters that actually receive something: a PR touching
+# `models.a2` produces one request, not four. `a3` and `a3-560t` are the two
+# disks of the a3 cluster and are requested separately; the 310p tests mount the
+# a3 volume, so models.310p travels with a3.
+#
+# The download is delegated to the ascend-gha-runners/sync-tools model-library
+# pipeline, which routes every request to the right cluster disks (idempotent,
+# serialized, xet-disabled, ledger-recorded). No Ascend runner is occupied and
+# no repository secret is needed on the PR branch, so the comment trigger also
+# works for PRs from forks.
+
+name: 'model downloader'
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/misc/model_dataset_list.json'
+      - '.github/workflows/pr_download_command.yml'
+    types: [labeled, synchronize]
+  repository_dispatch:
+    types: [download-command]
+  workflow_dispatch:
+    inputs:
+      models:
+        description: 'ModelScope model ids (org/name), comma or newline separated'
+        required: false
+        default: ''
+      datasets:
+        description: 'ModelScope dataset ids (org/name), comma or newline separated'
+        required: false
+        default: ''
+      cluster:
+        description: 'Cluster to populate (a3 also covers the 310p entries)'
+        type: choice
+        options: [all, a2, a3, a3-560t, a5]
+        default: all
+
+defaults:
+  run:
+    shell: bash -el {0}
+
+concurrency:
+  # One wait per PR: a newer /download supersedes the previous one. The request
+  # already handed to sync-tools keeps running; it is idempotent. A manual run
+  # gets its own group, so it never cancels another manual download.
+  group: ascend-${{ github.workflow_ref }}-${{ github.event.pull_request.number || github.event.client_payload.pull_request.number || github.run_id }}
+  cancel-in-progress: true
+
+jobs:
+  download:
+    name: Download models and datasets
+    # The label only gates pull_request events; a dispatch (comment or manual)
+    # is always allowed because a maintainer started it.
+    if: |
+      github.event_name != 'pull_request' ||
+      contains(github.event.pull_request.labels.*.name, 'model-dataset-download')
+    runs-on: linux-amd64-cpu-1-hk
+    container:
+      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend/act-environments-ubuntu:act-22.04
+    # The wait below is capped at 3h; this only protects against a stuck step.
+    timeout-minutes: 210
+    steps:
+      - name: Checkout PR head
+        if: github.event_name != 'workflow_dispatch'
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 1
+          # repository_dispatch checks out the default branch; point it at the
+          # PR head so the diff below sees the list this PR proposes.
+          ref: ${{ github.event_name == 'repository_dispatch' && format('refs/pull/{0}/head', github.event.client_payload.pull_request.number) || '' }}
+
+      - name: Plan clusters and items
+        id: plan
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          CLUSTER: ${{ inputs.cluster }}
+          IN_MODELS: ${{ inputs.models }}
+          IN_DATASETS: ${{ inputs.datasets }}
+        run: |
+          set -euo pipefail
+          export LC_ALL=C
+
+          JSON_PATH=".github/workflows/misc/model_dataset_list.json"
+          mkdir -p /tmp/plan
+          : > /tmp/plan/datasets
+          : > /tmp/plan/in.models
+
+          # cluster|runner|groups of model_dataset_list.json. `a3` and `a3-560t`
+          # are the two disks of the a3 cluster; the 310p tests mount the a3
+          # volume, so models.310p travels with a3.
+          CLUSTERS='a2|linux-aarch64-a2b3-0|a2
+          a3|linux-aarch64-a3-800t-0|a3,310p
+          a3-560t|linux-aarch64-a3-800i-2|a3,310p
+          a5|linux-aarch64-a5-0|a5'
+
+          split_ids() {
+            tr ',' '\n' | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' \
+              | grep -v '^$' | sort -u || true
+          }
+
+          if [ "${EVENT_NAME}" = "workflow_dispatch" ]; then
+            want="${CLUSTER:-all}"
+            case "$want" in
+              all|a2|a3|a3-560t|a5) ;;
+              *) echo "::error::unknown cluster '$want' (expected all, a2, a3, a3-560t or a5)"; exit 1 ;;
+            esac
+            printf '%s\n' "${IN_MODELS}"   | split_ids > /tmp/plan/in.models
+            printf '%s\n' "${IN_DATASETS}" | split_ids > /tmp/plan/datasets
+            ids=$(grep -h . /tmp/plan/in.models /tmp/plan/datasets || true)
+            if [ -z "${ids}" ]; then
+              echo "::error::give at least one model or dataset id (org/name)."
+              exit 1
+            fi
+            # The ids are forwarded into another repository's workflow, so only
+            # a conservative charset without '..' is accepted.
+            bad=$(printf '%s\n' "${ids}" \
+              | grep -Ev '^[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9][A-Za-z0-9._/-]*$' || true)
+            if [ -n "${bad}" ] || printf '%s\n' "${ids}" | grep -q '\.\.'; then
+              echo "::error::invalid id(s): expected ModelScope ids such as 'DeepSeek-ai/DeepSeek-OCR', got:"
+              printf '  %s\n' "${bad:-${ids}}"
+              # Hint when the value is a path instead of an id.
+              if printf '%s\n' "${ids}" | grep -qE '^(/|[A-Za-z]:)'; then
+                echo "::notice::'models' and 'datasets' take ModelScope ids, not a filesystem path: the job runs on a CI runner and cannot read a file from your machine. The JSON list is only read by the label and /download paths."
+              fi
+              exit 1
+            fi
+          else
+            git config --global --add safe.directory "$GITHUB_WORKSPACE"
+            git -C "$GITHUB_WORKSPACE" show "HEAD:${JSON_PATH}" > /tmp/head.json
+            git -C "$GITHUB_WORKSPACE" fetch -q --depth=1 origin +main:refs/remotes/origin/main
+            git -C "$GITHUB_WORKSPACE" show "origin/main:${JSON_PATH}" > /tmp/base.json
+            for f in /tmp/head.json /tmp/base.json; do
+              jq -e '((.models // {}) | type == "object") and ((.datasets // []) | type == "array")' \
+                "$f" > /dev/null \
+                || { echo "::error::unexpected schema in $f"; exit 1; }
+            done
+            jq -r '(.datasets // [])[]' /tmp/head.json | sort -u > /tmp/plan/d.head
+            jq -r '(.datasets // [])[]' /tmp/base.json | sort -u > /tmp/plan/d.base
+            comm -23 /tmp/plan/d.head /tmp/plan/d.base > /tmp/plan/datasets
+          fi
+
+          # Keep a cluster only when it receives at least one model or dataset.
+          plan='{}'
+          clusters=''
+          while IFS='|' read -r cluster runner groups; do
+            [ -n "$cluster" ] || continue
+            models="/tmp/plan/m.${cluster}"
+            datasets="/tmp/plan/d.${cluster}"
+            : > "$models"
+            : > "$datasets"
+            if [ "${EVENT_NAME}" = "workflow_dispatch" ]; then
+              if [ "$want" = "all" ] || [ "$want" = "$cluster" ]; then
+                cp /tmp/plan/in.models "$models"
+                cp /tmp/plan/datasets "$datasets"
+              fi
+            else
+              jq -r --argjson g "$(printf '%s' "$groups" | jq -R -c 'split(",")')" '
+                def flat($d): [ $g[] as $k | ($d.models[$k] // [])[] ] | unique;
+                flat(.) as $pr | input as $m | flat($m) as $main | ($pr - $main)[]
+              ' /tmp/head.json /tmp/base.json > "$models"
+              cp /tmp/plan/datasets "$datasets"
+            fi
+            [ -s "$models" ] || [ -s "$datasets" ] || continue
+            plan=$(printf '%s' "$plan" | jq -c \
+              --arg c "$cluster" --arg r "$runner" \
+              --argjson m "$(jq -R -s 'split("\n") | map(select(length > 0))' "$models")" \
+              --argjson d "$(jq -R -s 'split("\n") | map(select(length > 0))' "$datasets")" \
+              '. + {($c): {runner: $r, models: $m, datasets: $d}}')
+            clusters="${clusters:+${clusters},}${cluster}"
+          done <<< "$CLUSTERS"
+
+          printf '%s' "$plan" | jq -c . > /tmp/plan/plan.json
+          echo "clusters=${clusters}" >> "$GITHUB_OUTPUT"
+          echo "clusters: ${clusters:-none}"
+          jq -r 'to_entries[] | "\(.key) -> \(.value.runner): \(.value.models | length) models, \(.value.datasets | length) datasets"' \
+            /tmp/plan/plan.json
+
+      - name: Delegate to sync-tools
+        id: dispatch
+        env:
+          MODEL_SYNC_PAT: ${{ secrets.MODEL_SYNC_PAT }}
+        run: |
+          set -euo pipefail
+          if [ "$(jq 'length' /tmp/plan/plan.json)" -eq 0 ]; then
+            echo "no cluster needs a download; nothing to request"
+            echo "requested=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if [ -z "${MODEL_SYNC_PAT:-}" ]; then
+            echo "::error::MODEL_SYNC_PAT is empty: a label-triggered run from a fork cannot read the repository secrets. Use /download instead."
+            exit 1
+          fi
+
+          to_models() {
+            jq -c '[.[] | split("/") | {platform:"modelscope", organization:.[0], model_name:(.[1:] | join("/"))}]'
+          }
+          to_datasets() {
+            jq -c '[.[] | split("/") | {platform:"modelscope", organization:.[0], dataset_name:(.[1:] | join("/"))}]'
+          }
+
+          : > /tmp/rids.txt
+          for cluster in $(jq -r 'keys[]' /tmp/plan/plan.json); do
+            rid="${GITHUB_RUN_ID}-${cluster}"
+            runner=$(jq -r --arg c "$cluster" '.[$c].runner' /tmp/plan/plan.json)
+            m=$(jq -c --arg c "$cluster" '.[$c].models'   /tmp/plan/plan.json | to_models)
+            d=$(jq -c --arg c "$cluster" '.[$c].datasets' /tmp/plan/plan.json | to_datasets)
+            payload=$(jq -n --arg rid "$rid" --arg lbl "$runner" \
+              --argjson m "$m" --argjson d "$d" \
+              '{event_type:"model-download-request", client_payload:{
+                 repo:"vllm-project/vllm-ascend", runner_label:$lbl, request_id:$rid,
+                 models:$m, datasets:$d}}')
+            curl -sf -X POST -H "Authorization: Bearer ${MODEL_SYNC_PAT}" \
+              -H "Accept: application/vnd.github+json" \
+              https://api.github.com/repos/ascend-gha-runners/sync-tools/dispatches \
+              --data "$payload"
+            echo "${rid} ${runner}" >> /tmp/rids.txt
+            echo "requested ${cluster} on ${runner}: $(printf '%s' "$m" | jq length) models, $(printf '%s' "$d" | jq length) datasets"
+          done
+          echo "requested=true" >> "$GITHUB_OUTPUT"
+
+      - name: Acknowledge on the PR
+        if: github.event_name == 'repository_dispatch' && steps.dispatch.outputs.requested == 'true'
+        uses: peter-evans/create-or-update-comment@v5
+        with:
+          token: ${{ secrets.PAT_TOKEN }}
+          repository: ${{ github.event.client_payload.github.payload.repository.full_name }}
+          comment-id: ${{ github.event.client_payload.github.payload.comment.id }}
+          body: |
+            [Bot]: /download accepted, downloading for: `${{ steps.plan.outputs.clusters }}`. This comment is updated as each cluster finishes.
+          reactions: eyes
+
+      - name: Wait for the downloads to land
+        if: steps.dispatch.outputs.requested == 'true'
+        env:
+          MODEL_SYNC_PAT: ${{ secrets.MODEL_SYNC_PAT }}
+          PAT_TOKEN: ${{ secrets.PAT_TOKEN }}
+          REPO: ${{ github.event.client_payload.github.payload.repository.full_name }}
+          COMMENT_ID: ${{ github.event.client_payload.github.payload.comment.id }}
+        run: |
+          set -uo pipefail
+          api=https://api.github.com/repos/ascend-gha-runners/sync-tools
+          auth=(-H "Authorization: Bearer ${MODEL_SYNC_PAT}" -H "Accept: application/vnd.github+json")
+          deadline=$(( $(date +%s) + 10800 ))
+          declare -A run_of=() result=() url_of=()
+          : > /tmp/matches.txt
+
+          # Rewrite the triggering comment with the current per-cluster state, so
+          # a maintainer does not have to wait up to 3h for the final reply.
+          render() {
+            out=""
+            for k in "${!run_of[@]}"; do
+              case "${result[$k]}" in
+                ok) mark="✅" ;;
+                warn) mark="⚠️" ;;
+                failed) mark="❌" ;;
+                *) mark="⏳" ;;
+              esac
+              out="${out}- \`${k#*-}\` ${mark} ${url_of[$k]:-no sync-tools job yet}"$'\n'
+            done
+            printf '%s' "$out"
+          }
+          push_progress() {
+            [ -n "${COMMENT_ID:-}" ] || return 0
+            body=$(printf '[Bot]: /download %s\n\n%s\nRun: %s/%s/actions/runs/%s\n' \
+              "$1" "$(render)" "${GITHUB_SERVER_URL}" "${GITHUB_REPOSITORY}" "${GITHUB_RUN_ID}")
+            jq -n --arg b "$body" '{body: $b}' \
+              | curl -sf -X PATCH -H "Authorization: Bearer ${PAT_TOKEN}" \
+                  -H "Accept: application/vnd.github+json" \
+                  -H "Content-Type: application/json" \
+                  "https://api.github.com/repos/${REPO}/issues/comments/${COMMENT_ID}" \
+                  --data-binary @- > /dev/null \
+              || echo "::warning::could not update the PR comment"
+          }
+
+          while read -r rid _runner; do
+            run_of[$rid]=""
+            result[$rid]=""
+          done < /tmp/rids.txt
+          push_progress "running"
+
+          while :; do
+            pending=0
+            for rid in "${!run_of[@]}"; do
+              if [ -z "${result[$rid]}" ]; then
+                if [ -z "${run_of[$rid]}" ]; then
+                  for r in $(curl -s "${auth[@]}" "$api/actions/runs?event=repository_dispatch&per_page=15" \
+                               | jq -r '.workflow_runs[].id'); do
+                    # The job name carries the request id, and html_url is the
+                    # link a maintainer needs to read the download log.
+                    url=$(curl -s "${auth[@]}" "$api/actions/runs/$r/jobs" \
+                          | jq -r --arg rid "$rid" \
+                              '[.jobs[] | select(.name | test(" <- api#" + $rid + "$"))][0].html_url // empty')
+                    if [ -n "$url" ]; then
+                      run_of[$rid]=$r
+                      url_of[$rid]="$url"
+                      echo "matched ${rid} -> ${url}"
+                      echo "${rid} ${url}" >> /tmp/matches.txt
+                      echo "::notice title=${rid}::${url}"
+                      break
+                    fi
+                  done
+                fi
+                if [ -n "${run_of[$rid]}" ]; then
+                  st=$(curl -s "${auth[@]}" "$api/actions/runs/${run_of[$rid]}" \
+                       | jq -r '.status + ":" + (.conclusion // "")')
+                  case "$st" in
+                    completed:success)
+                      result[$rid]=ok
+                      echo "${rid}: landed on the cluster disks" ;;
+                    completed:cancelled|completed:skipped)
+                      result[$rid]=warn
+                      echo "::warning::${rid}: sync-tools run ${run_of[$rid]} ended ${st}" ;;
+                    completed:*)
+                      result[$rid]=failed
+                      echo "::error::${rid}: sync-tools run ${run_of[$rid]} ended ${st}" ;;
+                  esac
+                  [ -n "${result[$rid]}" ] && push_progress "in progress"
+                fi
+              fi
+              [ -z "${result[$rid]}" ] && pending=1
+            done
+            [ "$pending" -eq 0 ] && break
+            if [ "$(date +%s)" -ge "$deadline" ]; then
+              echo "::warning::timed out after 3h; some downloads are still running in sync-tools"
+              break
+            fi
+            sleep 60
+          done
+
+          failed=""
+          incomplete=""
+          for rid in "${!run_of[@]}"; do
+            case "${result[$rid]:-pending}" in
+              ok) ;;
+              failed) failed="${failed:+${failed} }${rid}" ;;
+              *) incomplete="${incomplete:+${incomplete} }${rid} (${result[$rid]:-pending})" ;;
+            esac
+          done
+          [ -z "$failed" ] || { echo "::error::failed: ${failed}"; exit 1; }
+          [ -z "$incomplete" ] || { echo "::error::incomplete (not landed): ${incomplete}"; exit 1; }
+
+      - name: Compose comment
+        id: comment
+        if: always() && github.event_name == 'repository_dispatch'
+        env:
+          STATUS: ${{ job.status }}
+          CLUSTERS: ${{ steps.plan.outputs.clusters }}
+        run: |
+          set -uo pipefail
+          case "${STATUS}" in
+            success)
+              if [ -z "${CLUSTERS}" ]; then
+                msg="found nothing new to download: model_dataset_list.json at the PR head adds no model or dataset."
+              else
+                msg="finished, downloaded for: \`${CLUSTERS}\`."
+              fi ;;
+            *)
+              msg="failed (${STATUS}), see the run log." ;;
+          esac
+          {
+            echo "[Bot]: /download ${msg}"
+            echo ""
+            if [ -s /tmp/matches.txt ]; then
+              echo "Downloads:"
+              while read -r rid url; do
+                echo "- \`${rid#*-}\`: ${url}"
+              done < /tmp/matches.txt
+              echo ""
+            fi
+            echo "Run: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+          } > /tmp/comment.md
+          cat /tmp/comment.md >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Comment result on PR
+        if: always() && github.event_name == 'repository_dispatch'
+        uses: peter-evans/create-or-update-comment@v5
+        with:
+          token: ${{ secrets.PAT_TOKEN }}
+          repository: ${{ github.event.client_payload.github.payload.repository.full_name }}
+          comment-id: ${{ github.event.client_payload.github.payload.comment.id }}
+          body-file: /tmp/comment.md
+          reactions: ${{ job.status == 'success' && 'hooray' || 'confused' }}

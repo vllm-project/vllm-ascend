@@ -448,7 +448,14 @@ class TestApplyMoeMlp(unittest.TestCase):
         mlp_compute_input = _mlp_compute_input()
         stream = MagicMock()
         stream.record_event.return_value = "evt"
-        with patch(f"{MOE_MLP}.torch.npu.current_stream", return_value=stream):
+        with (
+            # maybe_record_event() records unconditionally only when the
+            # AscendConfig is uninitialized; on xdist workers the global
+            # config state depends on which tests ran first, so pin the
+            # legacy fallback instead of relying on worker history.
+            patch(f"{MOE_MLP}.get_ascend_config", side_effect=RuntimeError("uninitialized config")),
+            patch(f"{MOE_MLP}.torch.npu.current_stream", return_value=stream),
+        ):
             out, evt = apply_moe_mlp(mlp_compute_input, quant_method)
 
         self.assertEqual((out, evt), ("final_out", "evt"))
@@ -494,6 +501,10 @@ class TestApplyMoeMlp(unittest.TestCase):
         stream = MagicMock()
         stream.record_event.side_effect = _record_event
         with (
+            # Same rationale as test_fused_path_skips_separate_activation:
+            # the event is recorded unconditionally only when the AscendConfig
+            # is uninitialized, so pin that state on fresh xdist workers.
+            patch(f"{MOE_MLP}.get_ascend_config", side_effect=RuntimeError("uninitialized config")),
             patch(f"{MOE_MLP}.torch.npu.current_stream", return_value=stream),
             patch(f"{MOE_MLP}.torch_npu.npu_swiglu", return_value="x", create=True),
         ):
@@ -592,15 +603,15 @@ class TestUnifiedApplyActivation(unittest.TestCase):
         up = linear_beta * torch.tanh(up / linear_beta)
         self.assertTrue(torch.allclose(out, gate * up))
 
-    def test_swiglustep_uses_hardcoded_limit(self):
-        with patch(f"{MOE_MLP}.AscendSwigluStepAndMul.swiglustep_forward", return_value="out") as mock_act:
+    def test_swiglustep_uses_its_own_limit(self):
+        with patch("vllm.triton_utils.HAS_TRITON", False):
             out = _unified_apply_activation(
-                _mlp_compute_input(activation=MoEActivation.SWIGLUSTEP, swiglu_limit=5.0),
-                "x",
+                _mlp_compute_input(activation=MoEActivation.SWIGLUSTEP, swiglu_limit=5.0, swiglustep_limit=4.0),
+                torch.tensor([[8.0, 6.0]]),
                 self._quant_method(),
             )
-        self.assertEqual(out, "out")
-        mock_act.assert_called_once_with("x", limit=7.0)
+        # min(SiLU(8), 4) * clamp(6, -4, 4)
+        torch.testing.assert_close(out, torch.tensor([[16.0]]))
 
     def test_swigluoai_uninterleave_uses_clipped_swiglu(self):
         with patch(f"{MOE_MLP}.DeviceOperator.clipped_swiglu", return_value="out") as mock_act:

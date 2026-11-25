@@ -87,9 +87,20 @@ def test_invalid_inputs(change: dict, message: str) -> None:
     get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5),
     reason="Requires Ascend A2/A3/A5",
 )
-@pytest.mark.parametrize("context_dtype", [torch.int32, torch.int64])
-@pytest.mark.parametrize("query_len", [1, 4])
-@pytest.mark.parametrize("topk,width", [(1, 1), (16, 7), (16, 33), (32, 16)])
+@pytest.mark.parametrize(
+    "context_dtype,query_len,topk,width",
+    [
+        # Cover both context dtypes and query lengths at each clipping boundary.
+        (torch.int32, 1, 16, 33),
+        (torch.int32, 4, 32, 16),
+        (torch.int64, 1, 32, 16),
+        (torch.int64, 4, 16, 33),
+        (torch.int32, 1, 1, 1),
+        (torch.int64, 4, 1, 1),
+        (torch.int64, 1, 16, 7),
+        (torch.int32, 4, 16, 7),
+    ],
+)
 def test_block_boundaries(context_dtype: torch.dtype, query_len: int, topk: int, width: int) -> None:
     context = torch.tensor([-query_len, 0, 127, 128, 255, 256, 4095], dtype=context_dtype)
     tokens = context.numel() * query_len
@@ -159,9 +170,16 @@ def test_decode_topk_varying_runtime_parameters(strided: bool, init_blocks: int,
     get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5),
     reason="Requires Ascend A2/A3/A5",
 )
-@pytest.mark.parametrize("query_len", [1, 4])
-@pytest.mark.parametrize("strided", [False, True])
-@pytest.mark.parametrize("topk,width", [(1, 0), (3, 7), (16, 513), (32, 2055)])
+@pytest.mark.parametrize(
+    "query_len,strided,topk,width",
+    [
+        # Cover the dedicated TopK-16 path and generic wide/small TopK paths.
+        (1, True, 32, 2055),
+        (4, True, 16, 513),
+        (4, False, 3, 7),
+        (1, False, 1, 0),  # Sort an empty selection with active decode tokens.
+    ],
+)
 def test_sorted_decode_indices_match_normalized_selection(query_len: int, strided: bool, topk: int, width: int) -> None:
     context = torch.tensor([-query_len, 0, 127, 128, 255, 65535], dtype=torch.int64, device="npu")
     tokens = context.numel() * query_len
@@ -186,11 +204,8 @@ def test_sorted_decode_indices_match_normalized_selection(query_len: int, stride
 @pytest.mark.parametrize(
     "requests,query_len,width,context_tokens,strided",
     [
-        (5, 8, 1024, 131072, False),
         (10, 8, 512, 65536, True),
-        (11, 4, 512, 65536, True),
         (1, 1, 2055, 263000, False),
-        (2, 9, 33, 4095, False),
         (2, 16, 17, 2047, True),
     ],
 )

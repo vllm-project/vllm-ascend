@@ -72,3 +72,42 @@ def test_bind_kv_cache_accepts_materialized_mamba_states(
     assert layer.kv_cache[1].is_contiguous()
     assert layer.kv_cache[0].data_ptr() == conv_state.data_ptr()
     assert layer.kv_cache[1].data_ptr() == temporal_state.data_ptr()
+
+
+@pytest.mark.parametrize("runner_binding", [False, True])
+def test_binding_retains_tuple_layout(runner_binding):
+    name = "model.layers.0.self_attn"
+    layer = _TensorOnlyAttentionLayer()
+    allocated = (torch.zeros(2, 16, 1, 8), torch.zeros(2, 16, 1, 8))
+    context = {name: layer}
+
+    runner_caches: list[object] = []
+    if runner_binding:
+        patch_bind_kv_cache.bind_kv_cache({name: allocated}, context, runner_caches)
+        assert runner_caches[0] is allocated
+    else:
+        patch_bind_kv_cache.bind_kv_cache_to_layers({name: allocated}, context)
+
+    assert layer.kv_cache is allocated
+    assert not layer.bind_called
+
+
+def test_binding_keeps_scheduler_storage_separate_from_kernel_view():
+    name = "model.layers.0.self_attn"
+    storage = torch.arange(32).reshape(4, 8)
+    kernel_view = storage.reshape(8, 4)
+    layer = _TensorOnlyAttentionLayer()
+    runner_caches: list[torch.Tensor] = []
+
+    patch_bind_kv_cache.bind_kv_cache(
+        {name: storage}, {name: layer}, runner_caches, layer_kv_caches={name: kernel_view}
+    )
+
+    assert runner_caches[0] is storage
+    assert layer.kv_cache is kernel_view
+    bound_cache = cast(torch.Tensor, layer.kv_cache)
+    assert runner_caches[0].shape == (4, 8)
+    assert bound_cache.shape == (8, 4)
+    assert bound_cache.data_ptr() == storage.data_ptr()
+    storage[0, 0] = 99
+    assert bound_cache[0, 0] == 99

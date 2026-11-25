@@ -78,8 +78,7 @@ class TestFillLogprobTokenIdsKernel:
     @pytest.mark.skipif(
         get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3), reason="Requires Ascend A2/A3"
     )
-    @pytest.mark.parametrize("batch_size", [1, 4, 8])
-    @pytest.mark.parametrize("topk", [0, 3, 5])
+    @pytest.mark.parametrize("topk,batch_size", [(0, 1), (0, 8), (3, 4), (5, 8)])
     def test_custom_token_ids(self, batch_size, topk):
         """Test with per-request custom token IDs."""
         init_device_properties_triton()

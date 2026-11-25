@@ -250,16 +250,12 @@ def test_qsa_gbsa_reserves_tail_within_512_entry_limit():
 def test_gbsa_uses_cann_transformer_op_api_without_bundled_sources():
     root = Path(__file__).resolve().parents[4]
     bundled_source = root / "csrc/attention/generic_block_sparse_attention"
-    adapter = (root / "csrc/aclnn_torch_adapter/gbsa_torch_adpt.h").read_text()
     binding = (root / "csrc/torch_binding.cpp").read_text()
     loader = (root / "csrc/aclnn_torch_adapter/op_api_common.h").read_text()
 
     assert not bundled_source.exists()
-    assert "EXEC_NPU_CMD(aclnnGenericBlockSparseAttentionMetadata" in adapter
-    assert "EXEC_NPU_CMD(aclnnGenericBlockSparseAttention" in adapter
-    assert '#include "aclnn_torch_adapter/gbsa_torch_adpt.h"' in binding
+    assert "EXEC_NPU_CMD(aclnnGenericBlockSparseAttentionMetadata," in binding
     assert '"npu_generic_block_sparse_attention_metadata(' in binding
-    assert '"npu_generic_block_sparse_attention(' in binding
     assert 'return "libopapi_transformer.so";' in loader
 
 

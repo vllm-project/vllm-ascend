@@ -7,6 +7,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 import torch
+from vllm.config.utils import hash_config_cached
 from vllm.distributed.eplb import eplb_state as upstream_eplb_state
 
 from vllm_ascend.ascend_config import StairConfig
@@ -28,8 +29,11 @@ def test_update_mapping_refreshes_ascend_routing_without_replacing_state():
     state._suspended = False
     model_config = MagicMock()
     model_config.compute_hash.return_value = "target"
+    model_config.compile_factors.return_value = {"identity": "target"}
     model_state = object()
     state.model_states = {"target": model_state}
+    key = hash_config_cached(model_config)
+    state.model_states[key] = model_state
     mapping = torch.tensor([[1, 0]], dtype=torch.int32)
     events = []
     with (
@@ -216,6 +220,7 @@ def test_add_model_snapshots_the_placement_on_every_profile(monkeypatch, device)
     monkeypatch.setattr(upstream_eplb_state.EplbState, "add_model", lambda *_, **__: None)
     model_config = MagicMock()
     model_config.compute_hash.return_value = "target"
+    model_config.compile_factors.return_value = {"identity": "target"}
     physical = torch.tensor([[0, 1, 0, 1]])
 
     state = AscendEplbState.__new__(AscendEplbState)
@@ -223,6 +228,8 @@ def test_add_model_snapshots_the_placement_on_every_profile(monkeypatch, device)
     state._configured_policy = None
     state.parallel_config = SimpleNamespace(eplb_config=SimpleNamespace(policy="default"))
     state.model_states = {"target": SimpleNamespace(physical_to_logical_map=physical)}
+    key = hash_config_cached(model_config)
+    state.model_states[key] = state.model_states["target"]
     monkeypatch.setattr(AscendEplbState, "uses_custom_load_stats", property(lambda _: False))
 
     state.add_model(object(), model_config)

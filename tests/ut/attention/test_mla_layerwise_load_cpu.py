@@ -50,7 +50,7 @@ def make_pool(has_load):
         kv_recv_thread=SimpleNamespace(raise_if_failed=Mock()),
         _submit_ready_layer_loads=Mock(),
     )
-    scope = {"reset_attention_compute_start_gate": Mock(), "logger": Mock()}
+    scope = {"reset_attention_gates": Mock(return_value=(Mock(), Mock())), "logger": Mock()}
     worker.wait_for_layer_load = MethodType(load(POOL, "wait_for_layer_load", scope, "LayerwiseKVPoolWorker"), worker)
     return worker, event, tracked_event
 
@@ -74,7 +74,6 @@ def make_forward(path, batch, wait):
         # A 3076-token prompt with 3072 cached tokens is still prefilling,
         # but its four scheduled rows use the decode path at spec=3.
         common = SimpleNamespace(
-            context_parallel_metadata=None,
             num_reqs=1,
             num_actual_tokens=4,
             max_query_len=4,

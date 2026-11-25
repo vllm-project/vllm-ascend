@@ -92,7 +92,7 @@ xxx 特性自 vLLM-Ascend x.x.x / MindIE x.x.x 起支持，通过 xxx 机制，�
 | 模型 | 已验证 Qwen3-8B、Qwen3-30B-A3B、DeepSeek-V3.1-W8A8 |
 | 特性互斥 | 不支持与 xx 特性同时使用 |
 | 软件依赖 | CANN >= 8.5.0、HDK >= 25.5、Mooncake >= 0.3.11.post1 |
-| 其他限制 | 需要特权容器、节点间网络需要 10Gbps+ |
+| 其他限制 | 需要显式映射设备、节点间网络需要 10Gbps+ |
 | 方案约束 | RFC-001：xxx 功能受限，需参考 `http://xxx/rfc/001` |
 
 ## 特性使用
