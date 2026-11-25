@@ -50,6 +50,7 @@ class TestQuantMoELoRAEmptyOverlap(unittest.TestCase):
                     "DeviceOperator": device_operator,
                     "MoECommType": MoECommType,
                     "_EXTRA_CTX": SimpleNamespace(moe_comm_type=comm_type),
+                    "get_current_vllm_config_or_none": lambda: None,
                 }
                 exec(compile(module, str(source), "exec"), namespace)
 

@@ -27,6 +27,7 @@ from typing import Any
 
 import torch
 import torch_npu
+from vllm.config import get_current_vllm_config_or_none
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX, MoECommType
@@ -162,8 +163,9 @@ def _apply_dynamic_int8_moe_lora(
             "MC2 and FusedMC2 are unsupported."
         )
     lora_context = mlp_compute_input.lora_context
-    if getattr(quant_method, "use_expert_weight_list", False) is True:
-        raise NotImplementedError("Ascend quantized MoE LoRA does not support per-expert weight lists.")
+    vllm_config = get_current_vllm_config_or_none()
+    if vllm_config is not None and vllm_config.parallel_config.enable_eplb:
+        raise NotImplementedError("Ascend quantized MoE LoRA does not support EPLB.")
 
     hidden_states = mlp_compute_input.hidden_states
     if mlp_compute_input.dynamic_scale is not None or hidden_states.dtype == torch.int8:

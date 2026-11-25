@@ -176,22 +176,21 @@ def test_dynamic_int8_lora_reads_weights_from_layer_via_quant_method() -> None:
 
 
 @pytest.mark.parametrize(
-    ("comm_type", "mlp_input", "quant_method", "message"),
+    ("comm_type", "enable_eplb", "message"),
     [
-        (MoECommType.FUSED_MC2, _make_input(), None, "AllGather TP"),
-        (
-            MoECommType.ALLGATHER,
-            _make_input(),
-            SimpleNamespace(use_expert_weight_list=True),
-            "per-expert weight lists",
-        ),
+        (MoECommType.FUSED_MC2, False, "AllGather TP"),
+        (MoECommType.ALLGATHER, True, "EPLB"),
     ],
 )
-def test_dynamic_int8_lora_rejects_unsupported_modes(comm_type, mlp_input, quant_method, message) -> None:
-    with patch(f"{QUANT_MOE}._EXTRA_CTX") as extra_ctx:
+def test_dynamic_int8_lora_rejects_unsupported_modes(comm_type, enable_eplb, message) -> None:
+    vllm_config = SimpleNamespace(parallel_config=SimpleNamespace(enable_eplb=enable_eplb))
+    with (
+        patch(f"{QUANT_MOE}._EXTRA_CTX") as extra_ctx,
+        patch(f"{QUANT_MOE}.get_current_vllm_config_or_none", return_value=vllm_config),
+    ):
         extra_ctx.moe_comm_type = comm_type
         with pytest.raises(NotImplementedError, match=message):
-            quant_apply_mlp_with_moe_lora(mlp_compute_input=mlp_input, quant_method=quant_method)
+            quant_apply_mlp_with_moe_lora(mlp_compute_input=_make_input())
 
 
 def test_dynamic_int8_all2all_lora_handles_empty_ep_rank() -> None:

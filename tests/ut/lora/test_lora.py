@@ -283,8 +283,17 @@ def test_sync_lora_context_updates_available_setters() -> None:
     quant.set_lora_context.assert_called_once_with("ctx")
 
 
-def test_assert_rejects_fused_mc2() -> None:
+def test_assert_rejects_eplb_and_fused_mc2() -> None:
     with (
+        patch(
+            "vllm_ascend.lora.fused_moe.get_current_vllm_config_or_none",
+            return_value=SimpleNamespace(parallel_config=SimpleNamespace(enable_eplb=True)),
+        ),
+        pytest.raises(AssertionError, match="incompatible with EPLB"),
+    ):
+        _assert_ascend_moe_lora_supported(SimpleNamespace(_shared_experts=None))
+    with (
+        patch("vllm_ascend.lora.fused_moe.get_current_vllm_config_or_none", return_value=None),
         patch(
             "vllm_ascend.lora.fused_moe.get_ascend_config",
             return_value=SimpleNamespace(enable_fused_mc2=1),
