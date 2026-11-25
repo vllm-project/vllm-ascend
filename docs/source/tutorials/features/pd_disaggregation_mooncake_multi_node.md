@@ -507,7 +507,7 @@ Modify `run_dp_template.sh` on each node.
 | `--dp-address` | `$5` / `--data-parallel-address` | DP master address. | P: `192.0.0.1` or `192.0.0.2`; D: `192.0.0.3` | The IP address must be reachable and identical within the same DP group. |
 | `--dp-rpc-port` | `$6` / `--data-parallel-rpc-port` | DP master RPC port. | `12321` | Free, reachable port; identical within a DP group. |
 | `--vllm-start-port` | `$2` / `--port` = `vllm-start-port + i` | First local API port. | `7100`, then `7101`, ... | Consecutive free ports; must match the proxy configuration. |
-| `--device-list` (optional) | `$1` | Ordered device list sliced by local DP rank. Defaults to consecutive IDs starting at zero. | `8,9,0,1` | Provide `dp-size-local × tp-size × pcp-size × pp-size` distinct IDs. |
+| `--device-list` (optional) | `$1` → `ASCEND_RT_VISIBLE_DEVICES` or `--device-ids` | Ordered device list sliced by local DP rank. Defaults to consecutive IDs starting at zero. | `8,9,0,1` | Provide `dp-size-local × tp-size × pcp-size × pp-size` distinct IDs. |
 
 #### Select devices for each DP rank
 
@@ -522,7 +522,23 @@ ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15 \
   --device-list 8,9,0,1 --dp-address 192.0.0.1
 ```
 
-Rank 0 receives `--device-ids 8,9` and rank 1 receives `--device-ids 0,1`. Each independently launched rank on the same node needs a disjoint slice. For a custom template, keep the inherited visibility when passing `$1` to `--device-ids`. If the template sets `ASCEND_RT_VISIBLE_DEVICES="$1"` instead, omit `--device-ids` or use indices into that reduced list.
+Rank 0 receives `--device-ids 8,9` and rank 1 receives `--device-ids 0,1`. Each independently launched rank on the same node needs a disjoint slice.
+
+The P/D templates below set visibility directly. To use explicit device IDs in
+those templates, set the node's visibility in the launcher environment, then
+apply this change to the role template:
+
+```diff
+-export ASCEND_RT_VISIBLE_DEVICES=$1
+ vllm serve /path_to_weight/DeepSeek-r1_w8a8_mtp \
++  --device-ids "$1" \
+   --host 0.0.0.0 \
+```
+
+`USE_DEVICE_IDS=1` is handled by the linked example template. With an inline
+template, the change above is what passes the slice to `--device-ids`. If you
+keep `ASCEND_RT_VISIBLE_DEVICES="$1"` in the role template, omit
+`--device-ids` or use indices into that reduced list.
 
 See [NPU Device Selection](../../user_guide/configuration/device_selection.md) for the mapping rules.
 
