@@ -1124,10 +1124,7 @@ def _allocate_kv_cache(
         if not shared_names:
             continue
 
-        if dsv4_backing is not None:
-            continue
-
-        if any(isinstance(layer_kv_cache_spec[name], AscendIndexerKPoolTailSpec) for name in shared_names):
+        if any(name.endswith(".indexer.tail_cache") for name in shared_names):
             # The compressed indexer and request-private tail share a physical
             # small-page slot. Both need the same single backing allocation.
             raw_tensor = _allocate_int8_cache_tensor(kv_cache_tensor.size, alignment, device)

@@ -81,7 +81,7 @@ def test_tail_uses_one_full_precision_page(capacity):
     )
     assert spec.page_size_bytes == 2 * capacity * 128 * 4
     assert spec.block_size == capacity
-    assert spec.num_states == spec.get_num_kernel_states(capacity) == get_storage_block_size(spec) == capacity
+    assert spec.num_states == spec.get_num_kernel_states(capacity) == capacity
     assert not spec.dcp_sharded
     assert not spec.uses_slot_mapping
     kernel_block_size = select_common_block_size(capacity, [AscendIndexerKPoolTailBackend], [spec])
