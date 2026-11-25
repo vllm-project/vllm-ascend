@@ -1,43 +1,30 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Compact request metadata at the NPU rejection-kernel boundary.
+"""Expose a request-sharded q cache without copying its vocabulary rows."""
 
-The existing NPU kernels share one index for cache, seed and temperature.
-Gather the local requests' q rows and seed/temperature once, then give those
-kernels compact request indices. External scheduler/request state is untouched.
-"""
+from types import SimpleNamespace
+from typing import Any
+
 import torch
 
 
-def compact_rejection_inputs(cache, draft_sampled, idx_mapping,
-                             expanded_idx_mapping, expanded_local_pos,
-                             temperature, seed):
-    slots = idx_mapping.to(torch.int64)
-    expanded_slots = expanded_idx_mapping.to(torch.int64)
-    mapped = cache.row_mapping.to(torch.int64)
-    owners = cache.inverse_row_mapping.to(torch.int64)
+def prepare_rejection_cache(
+    cache: Any,
+    draft_sampled: torch.Tensor,
+    expanded_idx_mapping: torch.Tensor,
+    expanded_local_pos: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor]:
+    """Keep cache storage and request-state indices in their original domains.
 
-    # Ownership changes when requests are skipped, reordered or slots reused.
-    # A cached row is usable only if its last writer is this request state.
-    rows = mapped.index_select(0, slots)
-    row_exists = rows >= 0
-    holders = owners.index_select(0, rows.clamp(min=0))
-    valid = row_exists & (holders == slots)
-
-    expanded_rows = mapped.index_select(0, expanded_slots)
-    expanded_holders = owners.index_select(0, expanded_rows.clamp(min=0))
-    stale = ((expanded_local_pos > 0)
-             & ((expanded_rows < 0) | (expanded_holders != expanded_slots)))
-    draft_sampled = draft_sampled.masked_fill(stale, -1)
-
-    # Shape is [num_local_requests, K, V], never [all_requests, K, V].
-    compact_q = cache.values.index_select(0, rows.clamp(min=0))
-    compact_q.masked_fill_(~valid[:, None, None], 0)
-    compact_temperature = temperature.index_select(0, slots)
-    compact_seed = seed.index_select(0, slots)
-
-    local_indices = torch.arange(slots.numel(), dtype=idx_mapping.dtype, device=slots.device)
-    state_to_local = torch.full_like(cache.row_mapping, -1)
-    state_to_local.scatter_(0, slots, local_indices.to(state_to_local.dtype))
-    compact_expanded = state_to_local.index_select(0, expanded_slots).to(expanded_idx_mapping.dtype)
-    return (compact_q, draft_sampled, local_indices, compact_expanded,
-            compact_temperature, compact_seed)
+    Core owns row assignment and detects rows overwritten by another request.
+    Only draft token ids are masked; bonus rows (local position zero) survive.
+    No q logits, temperature, seed, or request-index tensor is gathered here.
+    """
+    if cache.row_mapping is not None:
+        batch = SimpleNamespace(
+            expanded_idx_mapping=expanded_idx_mapping,
+            expanded_local_pos=expanded_local_pos,
+        )
+        stale = cache.stale_drafts(batch)
+        if stale is not None:
+            draft_sampled = draft_sampled.masked_fill(stale, -1)
+    return cache.values, cache.row_mapping, draft_sampled

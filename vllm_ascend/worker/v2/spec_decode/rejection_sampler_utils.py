@@ -41,7 +41,7 @@ from vllm_ascend.ops.triton.spec_decode.entropy_verify import (
 )
 from vllm_ascend.ops.triton.spec_decode.resample import resample
 from vllm_ascend.utils import vllm_version_is
-from vllm_ascend.worker.v2.spec_decode.dspark.cache_adapter import compact_rejection_inputs
+from vllm_ascend.worker.v2.spec_decode.dspark.cache_adapter import prepare_rejection_cache
 
 _ENTROPY_EPSILON = 1e-10
 
@@ -75,6 +75,8 @@ def _probabilistic_rejection_kernel(
     draft_logits_ptr,
     draft_logits_stride_0,
     draft_logits_stride_1,
+    # [max_num_reqs] Request state -> local cache row; None when replicated.
+    draft_logits_row_mapping_ptr,
     # [num_logits, num_blocks]
     draft_local_max_ptr,
     draft_local_max_stride,
@@ -114,6 +116,11 @@ def _probabilistic_rejection_kernel(
     # offsets in int32, which overflows when num_logits exceeds INT32_MAX
     # (upstream vllm #46560).
     req_state_idx = tl.load(idx_mapping_ptr + req_idx).to(tl.int64)
+    draft_row = req_state_idx
+    if HAS_DRAFT_LOGITS:
+        if draft_logits_row_mapping_ptr is not None:
+            draft_row = tl.load(draft_logits_row_mapping_ptr + req_state_idx).to(tl.int64)
+    safe_draft_row = tl.maximum(draft_row, 0)
     start_idx = tl.load(cu_num_logits_ptr + req_idx).to(tl.int64)
     end_idx = tl.load(cu_num_logits_ptr + req_idx + 1)
     num_tokens = end_idx - start_idx
@@ -232,9 +239,11 @@ def _probabilistic_rejection_kernel(
                 if HAS_DRAFT_LOGITS:
                     draft_logit = tl.load(
                         draft_logits_ptr
-                        + req_state_idx * draft_logits_stride_0
+                        + safe_draft_row * draft_logits_stride_0
                         + i * draft_logits_stride_1
-                        + draft_sampled
+                        + draft_sampled,
+                        mask=(draft_row >= 0) & is_valid_draft,
+                        other=float("-inf"),
                     ).to(tl.float32)
                     # Match the temperature-scaled block statistics.
                     draft_logit = draft_logit / temp
@@ -377,13 +386,9 @@ def rejection_sample(
             draft_logits = draft_logits_cache.values
             draft_logits_row_mapping = draft_logits_cache.row_mapping
         if draft_logits_row_mapping is not None:
-            (draft_logits, draft_sampled, idx_mapping, expanded_idx_mapping,
-             temperature, seed) = compact_rejection_inputs(
-                draft_logits_cache, draft_sampled, idx_mapping,
-                expanded_idx_mapping, expanded_local_pos, temperature, seed,
+            draft_logits, draft_logits_row_mapping, draft_sampled = prepare_rejection_cache(
+                draft_logits_cache, draft_sampled, expanded_idx_mapping, expanded_local_pos,
             )
-            # All subsequent NPU kernels see a compact, unsharded local cache.
-            draft_logits_row_mapping = None
     if fly_window_size > 0:
         raise NotImplementedError("FLy rejection sampling is not supported on NPU.")
     if (
@@ -660,6 +665,7 @@ def rejection_sample(
         draft_logits,
         draft_logits.stride(0),
         draft_logits.stride(1),
+        draft_logits_row_mapping,
         draft_local_max,
         draft_local_max.stride(0),
         draft_local_sumexp,
@@ -702,5 +708,6 @@ def rejection_sample(
         has_draft_logits=has_draft_logits,
         cumulative_log_p=cumulative_log_p,
         use_block_verification=use_block_verification,
+        draft_logits_row_mapping=draft_logits_row_mapping,
     )
     return sampled, num_sampled

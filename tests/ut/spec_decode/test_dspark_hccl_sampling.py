@@ -12,7 +12,7 @@ from pydantic import TypeAdapter
 
 from vllm_ascend.ascend_config import AscendConfig, DraftSamplingConfig, SparseKVOffloadConfig
 from vllm_ascend.worker.v2.spec_decode.dspark import hccl_sampling
-from vllm_ascend.worker.v2.spec_decode.dspark.cache_adapter import compact_rejection_inputs
+from vllm_ascend.worker.v2.spec_decode.dspark.cache_adapter import prepare_rejection_cache
 from vllm_ascend.worker.v2.spec_decode.dspark.hccl_sampling import DSparkHCCLSamplingMixin
 
 
@@ -118,28 +118,32 @@ def test_draft_sampling_threshold_rejects_excess_capacity():
         DraftSamplingConfig(shard_min_reqs=17).resolve_shard_min_reqs(8, 16)
 
 
-def test_compact_rejection_reorders_metadata_and_rejects_stale_ownership():
-    # Slot 5 maps to row 1, but row 1 now belongs to slot 7.
-    cache = SimpleNamespace(
-        values=torch.arange(12, dtype=torch.float32).view(2, 2, 3),
-        row_mapping=torch.tensor([-1, -1, 0, -1, -1, 1, -1, 1], dtype=torch.int32),
-        inverse_row_mapping=torch.tensor([2, 7], dtype=torch.int32),
+def test_rejection_cache_keeps_storage_and_original_request_state():
+    values = torch.arange(12, dtype=torch.float32).view(2, 2, 3)
+    rows = torch.tensor([-1, -1, 0, -1, -1, 1, -1, 1], dtype=torch.int32)
+    stale = torch.tensor([False, True, False, False])
+    cache = SimpleNamespace(values=values, row_mapping=rows, stale_drafts=MagicMock(return_value=stale))
+    sampled = torch.tensor([9, 10, 11, 12])
+    expanded = torch.tensor([5, 5, 2, 2], dtype=torch.int32)
+    local_pos = torch.tensor([0, 1, 0, 1], dtype=torch.int32)
+    q, mapping, masked = prepare_rejection_cache(cache, sampled, expanded, local_pos)
+    assert q is values
+    assert mapping is rows
+    assert masked.tolist() == [9, -1, 11, 12]
+    assert sampled.tolist() == [9, 10, 11, 12]
+    batch = cache.stale_drafts.call_args.args[0]
+    assert batch.expanded_idx_mapping is expanded
+    assert batch.expanded_local_pos is local_pos
+
+
+def test_replicated_rejection_cache_does_not_allocate_or_check_owners():
+    values = torch.zeros(2, 2, 3)
+    sampled = torch.tensor([9, 10])
+    cache = SimpleNamespace(values=values, row_mapping=None, stale_drafts=MagicMock())
+    q, mapping, masked = prepare_rejection_cache(
+        cache, sampled, torch.tensor([1, 1]), torch.tensor([0, 1]),
     )
-    temperature = torch.arange(8, dtype=torch.float32) + 0.5
-    seeds = torch.arange(8, dtype=torch.int64) * 104729 + 17
-    q, sampled, indices, expanded, local_temp, local_seeds = compact_rejection_inputs(
-        cache,
-        torch.tensor([9, 10, 11, 12]),
-        torch.tensor([5, 2], dtype=torch.int32),
-        torch.tensor([5, 5, 2, 2], dtype=torch.int32),
-        torch.tensor([0, 1, 0, 1], dtype=torch.int32),
-        temperature,
-        seeds,
-    )
-    torch.testing.assert_close(q[0], torch.zeros_like(q[0]))
-    torch.testing.assert_close(q[1], cache.values[0])
-    assert sampled.tolist() == [9, -1, 11, 12]
-    assert indices.tolist() == [0, 1]
-    assert expanded.tolist() == [0, 0, 1, 1]
-    torch.testing.assert_close(local_temp, temperature[[5, 2]])
-    torch.testing.assert_close(local_seeds, seeds[[5, 2]])
+    assert q is values
+    assert mapping is None
+    assert masked is sampled
+    cache.stale_drafts.assert_not_called()
