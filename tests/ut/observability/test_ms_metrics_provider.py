@@ -3,6 +3,7 @@
 
 import ast
 import importlib.util
+import logging
 import sys
 from dataclasses import dataclass
 from importlib.metadata import EntryPoint
@@ -141,7 +142,13 @@ def test_provider_entry_point_loads_without_metric_core(monkeypatch):
     assert callable(entry_point.load())
 
 
-def test_ascend_handler_module_loads_from_yaml_path(monkeypatch):
+def test_provider_yaml_custom_handlers_resolve(monkeypatch):
+    """Every configured custom handler resolves to a callable in the package.
+
+    Reads the packaged YAML instead of hardcoding names: dropping a transfer
+    entry or misspelling a handler name would silently remove the metrics,
+    and both must fail here.
+    """
     metric_type = type("MetricType", (), {"GAUGE": "gauge", "HISTOGRAM": "histogram", "COUNTER": "counter"})
     _install_provider_api(
         monkeypatch,
@@ -163,16 +170,16 @@ def test_ascend_handler_module_loads_from_yaml_path(monkeypatch):
     ):
         monkeypatch.delitem(sys.modules, module_name, raising=False)
 
-    handler_module = __import__(
-        _HANDLER_PACKAGE,
-        fromlist=[
-            "eplb_sync_load_handler",
-            "runtime_guard_handle_alert_handler",
-        ],
-    )
+    handler_module = __import__(_HANDLER_PACKAGE, fromlist=["__unused__"])
 
-    assert callable(handler_module.eplb_sync_load_handler)
-    assert callable(handler_module.runtime_guard_handle_alert_handler)
+    config = yaml.safe_load((_PACKAGE_ROOT / "config" / "eplb_metrics.yaml").read_text(encoding="utf-8"))
+    assert config
+    transfer = next(item for item in config if item["symbol"].endswith("AscendHixlEplbCommunicator.execute"))
+    assert transfer["handler"] == "vllm_ascend.observability.ms_metrics.handlers:eplb_transfer_execute_handler"
+    for item in config:
+        handler = item.get("handler", "")
+        if handler.startswith("vllm_ascend.observability.ms_metrics.handlers:"):
+            assert callable(getattr(handler_module, handler.split(":", 1)[1]))
 
 
 def test_provider_yaml_symbols_exist_in_current_vllm_ascend_source():
@@ -229,6 +236,36 @@ def test_record_metric_skips_specs_above_active_level_and_registers_on_raise(mon
     common.record_metric(metrics, low, 3.0, {})
     common.record_metric(None, low, 3.0, {})
     assert metrics.record_metric.call_count == 3
+
+
+def test_register_metrics_reregisters_on_recorder_swap(monkeypatch):
+    """The per-feature cache registers once per (recorder, level) pair.
+
+    This is the guarantee the EPLB handlers rely on across many hooked calls:
+    the same recorder never registers twice, while a replaced recorder
+    registers its own series exactly once.
+    """
+    metrics = Mock()
+    current = [metrics]
+    _install_provider_api(
+        monkeypatch,
+        MetricType=type("MetricType", (), {"GAUGE": "gauge", "HISTOGRAM": "histogram", "COUNTER": "counter"}),
+        get_metric_recorder=lambda: current[0],
+    )
+    common = _load_source("test_register_recorder_swap_common", "handlers/common.py")
+    common.set_metric_level("basic")
+    spec = common.MetricSpec("m", "gauge", ())
+    recorders: dict[str, object] = {}
+
+    assert common.register_metrics((spec,), recorders, "group") is metrics
+    assert common.register_metrics((spec,), recorders, "group") is metrics
+    assert metrics.get_or_create_metric.call_count == 1
+
+    replacement = Mock()
+    current[0] = replacement
+    assert common.register_metrics((spec,), recorders, "group") is replacement
+    assert replacement.get_or_create_metric.call_count == 1
+    assert metrics.get_or_create_metric.call_count == 1
 
 
 def test_set_metric_level_rejects_unknown_value(monkeypatch):
@@ -296,7 +333,7 @@ def test_custom_handlers_are_not_factory_created_from_yaml_metrics():
 
 
 # ---------------------------------------------------------------------------
-# EPLB V2 load balance (AscendEplbState.step)
+# EPLB V2 load balance (AscendEplbState._sync_load_pass)
 # ---------------------------------------------------------------------------
 
 
@@ -312,10 +349,15 @@ def _install_ep_group(monkeypatch, ep_group):
     monkeypatch.setitem(sys.modules, "vllm.distributed.parallel_state", parallel_state)
 
 
-def _load_balance_state(torch, *, load=None):
-    """State shaped like ``AscendEplbState`` for the sync-load hook."""
+def _expert_load_state(torch, *, load=None):
+    """State shaped like ``AscendEplbState`` for the sync-load hook.
+
+    The rank-local buffer defaults to zero while the stub ``_sync_load_pass``
+    returns a distinct reduced result, so a handler that reads the buffer
+    instead of the reduced tensors cannot pass.
+    """
     if load is None:
-        load = torch.tensor([[1.0, 3.0], [2.0, 2.0]])
+        load = torch.zeros(2, 2)
     return type(
         "State",
         (),
@@ -335,8 +377,15 @@ def _load_balance_state(torch, *, load=None):
 
 
 def _sync_load_pass(state, *args, **kwargs):
-    """Mirror upstream: return the globally reduced load pass."""
-    return [model_state.expert_load_pass.clone() for model_state in state.model_states.values()]
+    """Mirror upstream: return the globally reduced load pass.
+
+    The reduced tensors are distinct from the rank-local buffer. The busiest
+    rank switches between layers (3 on layer 0, 4 on layer 1), so a handler
+    that sums layers before taking the max also fails here.
+    """
+    import torch
+
+    return [torch.tensor([[1.0, 3.0], [4.0, 2.0]])]
 
 
 def test_eplb_sync_load_handler_records_reduced_load(monkeypatch):
@@ -347,48 +396,33 @@ def test_eplb_sync_load_handler_records_reduced_load(monkeypatch):
         MetricType=type("MetricType", (), {"GAUGE": "gauge", "HISTOGRAM": "histogram", "COUNTER": "counter"}),
         get_metric_recorder=lambda: metrics,
     )
-    handlers = _load_feature_handlers(monkeypatch, "test_eplb_load_balance", "eplb")
+    handlers = _load_feature_handlers(monkeypatch, "test_eplb_expert_load", "eplb")
     ep_group = Mock()
     ep_group.rank.return_value = 0
     ep_group.size.return_value = 2
     _install_ep_group(monkeypatch, ep_group)
 
-    result = handlers.eplb_sync_load_handler(_sync_load_pass, _load_balance_state(torch))
+    loads = [torch.tensor([[1.0, 3.0], [4.0, 2.0]])]
 
-    assert isinstance(result, list)
-    assert metrics.record_metric.call_count == 2
-    recorded = {call.args[0]: call.kwargs for call in metrics.record_metric.call_args_list}
-    # The load is already reduced upstream. With two EP ranks, [[1, 3], [2, 2]]
-    # gives rank means [2, 2] (avg 4) and rank maxima [3, 2] (max 5).
-    assert recorded["eplb:load_balance:avg_tokens"]["value"] == 4.0
-    assert recorded["eplb:load_balance:max_tokens"]["value"] == 5.0
-    assert recorded["eplb:load_balance:avg_tokens"]["labels"] == {"rank": "0", "model": "main"}
-
-
-def test_eplb_sync_load_handler_does_not_reduce_again(monkeypatch):
-    """The hook reuses upstream's reduction instead of repeating the collective."""
-    torch = pytest.importorskip("torch")
-    pytest.importorskip("torch.distributed")
-
-    metrics = Mock()
-    _install_provider_api(
-        monkeypatch,
-        MetricType=type("MetricType", (), {"GAUGE": "gauge", "HISTOGRAM": "histogram", "COUNTER": "counter"}),
-        get_metric_recorder=lambda: metrics,
-    )
-    handlers = _load_feature_handlers(monkeypatch, "test_eplb_lb_no_reduce", "eplb")
-    ep_group = Mock()
-    ep_group.rank.return_value = 0
-    ep_group.size.return_value = 2
-    _install_ep_group(monkeypatch, ep_group)
+    def stub(state, *args, **kwargs):
+        return loads
 
     calls = []
     monkeypatch.setattr("torch.distributed.all_reduce", lambda *args, **kwargs: calls.append(args))
 
-    handlers.eplb_sync_load_handler(_sync_load_pass, _load_balance_state(torch))
+    result = handlers.eplb_sync_load_handler(stub, _expert_load_state(torch))
 
+    # Core receives the reduced result untouched and no collective runs again.
+    assert result is loads
     assert calls == []
-    assert metrics.record_metric.call_count == 2
+    assert metrics.record_metric.call_count == 3
+    recorded = {call.args[0]: call.kwargs for call in metrics.record_metric.call_args_list}
+    # The reduced loads give per-layer rank means [2, 3] (avg 5) and per-layer
+    # rank maxima [3, 4] (max 7); the busiest rank switches between layers.
+    assert recorded["eplb:expert_load:avg_tokens"]["value"] == 5.0
+    assert recorded["eplb:expert_load:max_tokens"]["value"] == 7.0
+    assert recorded["eplb:expert_load:balancedness"]["value"] == pytest.approx(5.0 / 7.0)
+    assert recorded["eplb:expert_load:avg_tokens"]["labels"] == {"rank": "0", "model": "main"}
 
 
 def test_eplb_sync_load_handler_without_recorder_records_nothing(monkeypatch):
@@ -404,7 +438,18 @@ def test_eplb_sync_load_handler_without_recorder_records_nothing(monkeypatch):
     ep_group.size.return_value = 2
     _install_ep_group(monkeypatch, ep_group)
 
-    assert isinstance(handlers.eplb_sync_load_handler(_sync_load_pass, _load_balance_state(torch)), list)
+    def forbidden(*args, **kwargs):
+        raise AssertionError("per-rank statistics must not run without a recorder")
+
+    monkeypatch.setattr(handlers, "_per_rank_tokens", forbidden)
+    loads = [torch.tensor([[1.0, 3.0], [4.0, 2.0]])]
+
+    def stub(state, *args, **kwargs):
+        return loads
+
+    result = handlers.eplb_sync_load_handler(stub, _expert_load_state(torch))
+
+    assert result is loads
 
 
 def test_eplb_sync_load_handler_records_only_on_rank_zero(monkeypatch):
@@ -421,12 +466,17 @@ def test_eplb_sync_load_handler_records_only_on_rank_zero(monkeypatch):
     ep_group.size.return_value = 2
     _install_ep_group(monkeypatch, ep_group)
 
-    handlers.eplb_sync_load_handler(_sync_load_pass, _load_balance_state(torch))
+    handlers.eplb_sync_load_handler(_sync_load_pass, _expert_load_state(torch))
     metrics.record_metric.assert_not_called()
 
 
-def test_eplb_sync_load_handler_drops_zero_load_steps(monkeypatch):
-    """Idle or dummy logging steps still reach the hook but record nothing."""
+def test_eplb_sync_load_handler_drops_zero_load_steps(monkeypatch, caplog):
+    """Idle or dummy logging steps still reach the hook but record nothing.
+
+    A zero reduce must be dropped silently: if it fell through to recording,
+    the balancedness division would raise 0/0 and ``safe_recording`` would
+    log a warning on every idle logging step.
+    """
     torch = pytest.importorskip("torch")
     metrics = Mock()
     _install_provider_api(
@@ -440,28 +490,14 @@ def test_eplb_sync_load_handler_drops_zero_load_steps(monkeypatch):
     ep_group.size.return_value = 2
     _install_ep_group(monkeypatch, ep_group)
 
-    handlers.eplb_sync_load_handler(_sync_load_pass, _load_balance_state(torch, load=torch.zeros(2, 2)))
+    def stub(state, *args, **kwargs):
+        return [torch.zeros(2, 2)]
+
+    with caplog.at_level(logging.WARNING):
+        handlers.eplb_sync_load_handler(stub, _expert_load_state(torch))
+
     metrics.record_metric.assert_not_called()
-
-
-def test_eplb_sync_load_handler_passes_empty_result_through(monkeypatch):
-    """A state without models yields an empty list and records nothing."""
-    pytest.importorskip("torch")
-    metrics = Mock()
-    _install_provider_api(
-        monkeypatch,
-        MetricType=type("MetricType", (), {"GAUGE": "gauge", "HISTOGRAM": "histogram", "COUNTER": "counter"}),
-        get_metric_recorder=lambda: metrics,
-    )
-    handlers = _load_feature_handlers(monkeypatch, "test_eplb_lb_empty", "eplb")
-    ep_group = Mock()
-    ep_group.rank.return_value = 0
-    ep_group.size.return_value = 2
-    _install_ep_group(monkeypatch, ep_group)
-    empty = type("State", (), {"model_states": {}})()
-
-    assert handlers.eplb_sync_load_handler(_sync_load_pass, empty) == []
-    metrics.record_metric.assert_not_called()
+    assert caplog.records == []
 
 
 # ---------------------------------------------------------------------------
@@ -470,6 +506,14 @@ def test_eplb_sync_load_handler_passes_empty_result_through(monkeypatch):
 
 
 def test_eplb_transfer_handlers_record_per_layer_totals(monkeypatch):
+    """One layer of HIXL reads: three descriptors, one peer, one request.
+
+    Mirrors the receiver-initiated production path: the receiver stages reads
+    through ``add_recv`` and HIXL serves local copies without the send
+    handler. Expert 5 is read twice and still counts once, and all three
+    descriptors share source rank 1, so they batch into a single transfer
+    request while bytes accumulate per tensor (3 x 16).
+    """
     metrics = Mock()
     _install_provider_api(
         monkeypatch,
@@ -492,93 +536,28 @@ def test_eplb_transfer_handlers_record_per_layer_totals(monkeypatch):
         )
         == "context"
     )
-    send_tensors = [type("Tensor", (), {"nbytes": 8})(), type("Tensor", (), {"nbytes": 4})()]
-    recv_tensors = [type("Tensor", (), {"nbytes": 16})()]
+    tensors = [type("Tensor", (), {"nbytes": 16})()]
     for expert_id in (5, 6, 5):
         assert (
-            handlers.eplb_transfer_send_handler(
-                lambda *args, **kwargs: "sent",
+            handlers.eplb_transfer_recv_handler(
+                lambda *args, **kwargs: "received",
                 communicator,
-                send_tensors,
+                tensors,
                 1,
                 expert_id,
             )
-            == "sent"
+            == "received"
         )
-    assert (
-        handlers.eplb_transfer_recv_handler(
-            lambda *args, **kwargs: "received",
-            communicator,
-            recv_tensors,
-            0,
-            7,
-        )
-        == "received"
-    )
     assert handlers.eplb_transfer_execute_handler(lambda *args, **kwargs: "done", communicator) == "done"
 
     assert metrics.record_metric.call_count == 4
     recorded = {call.args[0]: call.kwargs for call in metrics.record_metric.call_args_list}
-    assert recorded["eplb:transfer:send_experts"]["value"] == 2
-    assert recorded["eplb:transfer:recv_experts"]["value"] == 1
-    # Requests are counted per peer rank, not per descriptor: the three
-    # sends target rank 1 and the receive reads from rank 0, so 2 requests.
-    # Bytes still accumulate per tensor: 3 x (8 + 4) + 16 = 52.
-    assert recorded["eplb:transfer:comm_requests"]["value"] == 2
-    assert recorded["eplb:transfer:est_bytes"]["value"] == 52
-    assert recorded["eplb:transfer:send_experts"]["labels"] == {"rank": "0", "phase": "all", "layer": "3"}
-
-
-def test_eplb_transfer_batches_descriptors_per_peer(monkeypatch):
-    """Two experts from one source rank still issue a single transfer request."""
-    metrics = Mock()
-    _install_provider_api(
-        monkeypatch,
-        MetricType=type("MetricType", (), {"GAUGE": "gauge", "HISTOGRAM": "histogram", "COUNTER": "counter"}),
-        get_metric_recorder=lambda: metrics,
-    )
-    handlers = _load_feature_handlers(monkeypatch, "test_eplb_transfer_batch", "eplb")
-    ep_group = Mock()
-    ep_group.rank.return_value = 0
-    ep_group.size.return_value = 2
-    _install_ep_group(monkeypatch, ep_group)
-    communicator = type("Communicator", (), {})()
-    tensors = [type("Tensor", (), {"nbytes": 16})()]
-
-    handlers.eplb_transfer_context_handler(lambda *args, **kwargs: "context", communicator, None, 5)
-    for expert_id in (0, 1):
-        handlers.eplb_transfer_recv_handler(
-            lambda *args, **kwargs: "received",
-            communicator,
-            tensors,
-            3,
-            expert_id,
-        )
-    handlers.eplb_transfer_execute_handler(lambda *args, **kwargs: "done", communicator)
-
-    recorded = {call.args[0]: call.kwargs for call in metrics.record_metric.call_args_list}
+    assert recorded["eplb:transfer:send_experts"]["value"] == 0
     assert recorded["eplb:transfer:recv_experts"]["value"] == 2
     assert recorded["eplb:transfer:comm_requests"]["value"] == 1
-    assert recorded["eplb:transfer:est_bytes"]["value"] == 32
-
-
-def test_eplb_transfer_execute_without_context_records_nothing(monkeypatch):
-    metrics = Mock()
-    _install_provider_api(
-        monkeypatch,
-        MetricType=type("MetricType", (), {"GAUGE": "gauge", "HISTOGRAM": "histogram", "COUNTER": "counter"}),
-        get_metric_recorder=lambda: metrics,
-    )
-    handlers = _load_feature_handlers(monkeypatch, "test_eplb_transfer_no_ctx", "eplb")
-    ep_group = Mock()
-    ep_group.rank.return_value = 0
-    ep_group.size.return_value = 2
-    _install_ep_group(monkeypatch, ep_group)
-    communicator = type("Communicator", (), {})()
-
-    assert handlers.eplb_transfer_execute_handler(lambda *args, **kwargs: "done", communicator) == "done"
-
-    metrics.record_metric.assert_not_called()
+    assert recorded["eplb:transfer:est_bytes"]["value"] == 48
+    assert recorded["eplb:transfer:send_experts"]["labels"] == {"rank": "0", "phase": "all", "layer": "3"}
+    assert recorded["eplb:transfer:recv_experts"]["labels"] == {"rank": "0", "phase": "all", "layer": "3"}
 
 
 def test_eplb_transfer_execute_failure_clears_pending_accumulator(monkeypatch):
@@ -612,67 +591,6 @@ def test_eplb_transfer_execute_failure_clears_pending_accumulator(monkeypatch):
     # on the same communicator starts from a clean state.
     metrics.record_metric.assert_not_called()
     assert communicator not in handlers._pending
-
-
-def test_eplb_transfer_handler_registers_metrics_once_per_recorder(monkeypatch):
-    """Metric registration is cached per recorder and follows a recorder swap.
-
-    ``register_metrics`` keeps one registration per (spec tuple, recorder)
-    pair: the same recorder never registers twice, while a new recorder
-    instance registers its own metrics and records exactly once.
-    """
-    metric_type = type("MetricType", (), {"GAUGE": "gauge", "HISTOGRAM": "histogram", "COUNTER": "counter"})
-    first_metrics = Mock()
-    current_metrics = [first_metrics]
-    _install_provider_api(
-        monkeypatch,
-        MetricType=metric_type,
-        get_metric_recorder=lambda: current_metrics[0],
-    )
-    handlers = _load_feature_handlers(monkeypatch, "test_eplb_transfer_recorder_cache", "eplb")
-    ep_group = Mock()
-    ep_group.rank.return_value = 0
-    ep_group.size.return_value = 2
-    _install_ep_group(monkeypatch, ep_group)
-    communicator = type("Communicator", (), {})()
-    tensors = [type("Tensor", (), {"nbytes": 8})()]
-
-    def run_transfer():
-        assert (
-            handlers.eplb_transfer_context_handler(
-                lambda *args, **kwargs: "context",
-                communicator,
-                None,
-                3,
-            )
-            == "context"
-        )
-        assert (
-            handlers.eplb_transfer_send_handler(
-                lambda *args, **kwargs: "sent",
-                communicator,
-                tensors,
-                1,
-                5,
-            )
-            == "sent"
-        )
-        assert handlers.eplb_transfer_execute_handler(lambda *args, **kwargs: "done", communicator) == "done"
-
-    run_transfer()
-    run_transfer()
-
-    # Both executes shared the first recorder's single registration.
-    assert first_metrics.get_or_create_metric.call_count == 4
-    assert first_metrics.record_metric.call_count == 8
-
-    second_metrics = Mock()
-    current_metrics[0] = second_metrics
-    run_transfer()
-
-    # A new recorder instance registers its own metrics and records once.
-    assert second_metrics.get_or_create_metric.call_count == 4
-    assert second_metrics.record_metric.call_count == 4
 
 
 def test_runtime_guard_handler_counts_alerts_by_incident_type(monkeypatch):
