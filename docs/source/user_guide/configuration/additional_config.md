@@ -76,6 +76,13 @@ The following table lists additional configuration options available in vLLM Asc
 | `rl_config`                        | dict | `{}`    | One-click RL mode configuration. See <a href="#rl_config">rl_config</a> for all fields, the two deployment modes, usage examples, and the migration guide. |
 | `combine_quant_mode`                | int  | `0`     | Controls communication quantization for the MC2 combine operation. The default (`0`) lets the runtime select the mode. Set `2`, `3`, or `4` to override the `comm_quant_mode` argument to `torch_npu.npu_moe_distribute_combine_v2`. |
 
+When MLAPO is selected, Q and KV RMSNorm use their respective layers'
+`variance_epsilon`, inherited from the model configuration. Direct
+`torch.ops._C_ascend.mla_preprocess` calls accept optional keyword-only
+`q_epsilon` and `kv_epsilon`, both defaulting to `1e-6`. Each value must be
+positive and finite when represented as float32. Rebuild the PyTorch extension
+and the custom operator package together when upgrading this interface.
+
 The details of each configuration option are as follows:
 
 <span id="runtime_guard"></span>**runtime_guard**

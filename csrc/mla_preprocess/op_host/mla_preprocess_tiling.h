@@ -137,6 +137,8 @@ struct OpParam {
     uint64_t kvCacheBlockSize{128};
     uint64_t kvCacheStride0{0};
     uint64_t kvCacheRopeStride0{0};
+    float qEpsilon{1e-6f};
+    float kvEpsilon{1e-6f};
 };
 
 class PpMatmulTilingApi
@@ -638,6 +640,8 @@ void MlaPreprocessTiling::Init()
     tilingData->kvCacheBlockSize = opParam.kvCacheBlockSize == 0 ? 128ULL : opParam.kvCacheBlockSize;
     tilingData->kvCacheStride0 = opParam.kvCacheStride0;
     tilingData->kvCacheRopeStride0 = opParam.kvCacheRopeStride0;
+    tilingData->qEpsilon = opParam.qEpsilon;
+    tilingData->kvEpsilon = opParam.kvEpsilon;
 
     return;
 }
