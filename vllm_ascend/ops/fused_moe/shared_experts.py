@@ -204,6 +204,15 @@ class AscendSharedExperts:
         """
         # MegaMoe's fused shared ABI does not own the DP-axis AG/RS.
         if getattr(self, "finegrained_tp_group", None) is not None:
+            if getattr(self.moe_config, "deepgemm_mega_moe", False) is True:
+                raise ValueError("DeepGEMM requires replicated shared weights for fused shared experts")
+            return
+        if getattr(self.moe_config, "deepgemm_mega_moe", False) is True:
+            # The routed layer's post-load hook packs both FP8 linears directly
+            # from their checkpoint tensors. Keep the normal mode-3 forward.
+            for linear in (self.layer.gate_up_proj, self.layer.down_proj):
+                linear._deepgemm_mega_moe_shared_linear = True
+            self.megamoe_shared_weights_ready = True
             return
         if not use_cann_megamoe(get_current_vllm_config()):
             return

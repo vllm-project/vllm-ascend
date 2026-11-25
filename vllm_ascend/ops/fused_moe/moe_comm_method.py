@@ -17,7 +17,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import Any, cast
+from typing import cast
 
 import torch
 from vllm.logger import logger
@@ -54,7 +54,7 @@ def _moe_config_key(
     moe_comm_type: MoECommType | None, moe_config: FusedMoEConfig | None
 ) -> tuple[MoECommType | None, tuple[int, ...]]:
     """Return the execution shape that owns mutable MoE comm state."""
-    _CONFIG_KEY_FIELDS = ("num_experts", "num_local_experts")
+    _CONFIG_KEY_FIELDS = ("num_experts", "num_local_experts", "deepgemm_mega_moe")
     return (moe_comm_type, tuple(int(getattr(moe_config, field, 0) or 0) for field in _CONFIG_KEY_FIELDS))
 
 
@@ -66,9 +66,7 @@ def get_moe_comm_method(
 
 
 def setup_moe_comm_method(moe_config):
-    if get_ascend_config().deepgemm_mega_moe:
-        _MoECommMethods[_moe_config_key(MoECommType.DEEPGEMM, moe_config)] = DeepGemmCommImpl(moe_config)
-    elif moe_config.ep_size > 1:
+    if moe_config.ep_size > 1:
         _MoECommMethods[_moe_config_key(MoECommType.ALLTOALL, moe_config)] = AlltoAllCommImpl(moe_config)
         _MoECommMethods[_moe_config_key(MoECommType.ALLGATHER, moe_config)] = AllGatherCommImpl(moe_config)
         _MoECommMethods[_moe_config_key(MoECommType.MC2, moe_config)] = MC2CommImpl(moe_config)
@@ -115,8 +113,7 @@ class MoECommMethod(ABC):
     def set_lora_context(self, lora_context) -> None:
         self.lora_context = lora_context
         self.prepare_finalize.set_lora_context(lora_context)
-        if self.token_dispatcher is not None:
-            self.token_dispatcher.set_lora_context(lora_context)
+        self.token_dispatcher.set_lora_context(lora_context)
 
     def prepare(
         self,
@@ -158,7 +155,6 @@ class MoECommMethod(ABC):
 
         moe_comm_method = _EXTRA_CTX.moe_comm_method
         assert moe_comm_method is not None, "Missing communication context"
-        assert self.token_dispatcher is not None, "Fused backends must implement fused_experts"
 
         before_dispatch_evt = maybe_record_event()
 
@@ -204,7 +200,7 @@ class MoECommMethod(ABC):
         )
 
     @abstractmethod
-    def _get_token_dispatcher(self) -> MoETokenDispatcher | None:
+    def _get_token_dispatcher(self) -> MoETokenDispatcher:
         raise NotImplementedError("_get_token_dispatcher function not implemented.")
 
     @abstractmethod
@@ -286,22 +282,6 @@ class AlltoAllCommImpl(MoECommMethod):
         return PrepareAndFinalizeWithAll2All(self.moe_config)
 
 
-class DeepGemmCommImpl(AlltoAllCommImpl):
-    """DeepGEMM consumes local tokens and performs its own dispatch and combine."""
-
-    def _get_token_dispatcher(self):
-        return None
-
-    def fused_experts(self, fused_experts_input: MoEFusedExpertsInput, quant_method=None):
-        layer: Any = fused_experts_input.layer
-        return layer._deepgemm_mega_moe.apply(
-            layer,
-            fused_experts_input.hidden_states,
-            fused_experts_input.topk_weights,
-            fused_experts_input.topk_ids,
-        )
-
-
 class FusedMC2CommImpl(MoECommMethod):
     """This implementation is for the scenarios listed below:
     1. `enable_expert_parallel=True`.
@@ -313,10 +293,11 @@ class FusedMC2CommImpl(MoECommMethod):
     """
 
     def __init__(self, moe_config):
+        self.uses_deepgemm = getattr(moe_config, "deepgemm_mega_moe", False) is True
         super().__init__(moe_config)
         self._mega_moe_hccl_state_stale = False
         self.enable_fused_mc2 = get_ascend_config().enable_fused_mc2
-        if self.enable_fused_mc2 == 1 and is_mega_moe_supported():
+        if self.enable_fused_mc2 == 1 and is_mega_moe_supported() and not self.uses_deepgemm:
             self.mega_moe_symm_buffer = None
             self.get_symm_buffer_for_mega_moe, self.mega_moe = moe_utils.load_cann_mega_moe_ops()
             # TODO(ZT-AIA): Different CANN versions accept a different set of
@@ -358,6 +339,9 @@ class FusedMC2CommImpl(MoECommMethod):
         return TokenDispatcherWithMC2()
 
     def _get_prepare_finalize(self):
+        if self.uses_deepgemm:
+            # The kernel consumes local rows; DP padding would count fake routes.
+            return PrepareAndFinalizeWithAll2All(self.moe_config)
         return PrepareAndFinalizeWithMC2(self.moe_config)
 
     def prepare_hccl_teardown(self) -> bool:
@@ -691,6 +675,12 @@ class FusedMC2CommImpl(MoECommMethod):
         fused_experts_input: MoEFusedExpertsInput,
         quant_method=None,
     ):
+        if self.uses_deepgemm:
+            layer = cast(torch.nn.Module, fused_experts_input.layer)
+            return layer._deepgemm_mega_moe.apply(
+                layer, fused_experts_input.hidden_states, fused_experts_input.topk_weights, fused_experts_input.topk_ids
+            )
+
         if quant_method is not None:
             weights = quant_method.get_fused_mc2_weights(fused_experts_input.layer)
         else:

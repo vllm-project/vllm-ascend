@@ -100,7 +100,9 @@ def _patch_select_moe_comm_method_deps(
     monkeypatch.setattr(afc, "is_moe_model", lambda _: is_moe)
     monkeypatch.setattr(afc, "get_mc2_tokens_capacity", lambda: capacity)
     monkeypatch.setattr(afc, "get_current_hardware_profile", lambda: get_hardware_profile(device_type))
-    monkeypatch.setattr(afc, "get_ep_group", lambda: SimpleNamespace(world_size=ep_world_size))
+    monkeypatch.setattr(
+        afc, "get_ep_group", lambda: SimpleNamespace(world_size=ep_world_size, _deepgemm_supported=deepgemm_mega_moe)
+    )
     monkeypatch.setattr(
         afc,
         "get_ascend_config",
@@ -332,7 +334,7 @@ def test_select_moe_comm_method_uses_deepgemm_across_mc2_threshold(monkeypatch, 
         device_type=AscendDeviceType.A5,
         deepgemm_mega_moe=True,
     )
-    assert afc.select_moe_comm_method(tokens, _make_vllm_config()) == MoECommType.DEEPGEMM
+    assert afc.select_moe_comm_method(tokens, _make_vllm_config()) == MoECommType.FUSED_MC2
 
 
 @pytest.mark.parametrize(

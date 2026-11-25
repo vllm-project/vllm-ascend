@@ -185,7 +185,6 @@ def test_v4_family_uses_same_kernel(context, model_type):
 )
 def test_device_support_is_resolved_for_the_ep_group(context, counts, fallback):
     backend, _, group, _ = context
-    config = SimpleNamespace(additional_config={"enable_fused_mc2": 3, "deepgemm_mega_moe": True})
     group.world_size = len(counts)
 
     def collect(peers, local, group):
@@ -196,13 +195,12 @@ def test_device_support_is_resolved_for_the_ep_group(context, counts, fallback):
         patch.object(
             torch.npu, "get_device_properties", return_value=SimpleNamespace(cube_core_num=counts[0]), create=True
         ),
-        patch.object(torch.distributed, "all_gather_object", side_effect=collect),
-        patch("vllm_ascend.ascend_config.clear_ascend_config"),
-        patch("vllm_ascend.ascend_config.init_ascend_config") as resolve,
+        patch.object(torch.npu, "current_device", return_value=0, create=True),
+        patch.object(torch.distributed, "all_gather_object", side_effect=collect) as gather,
     ):
-        backend.resolve_deepgemm_device_support(config, 0, group)
-    assert config.additional_config == {"enable_fused_mc2": 3, "deepgemm_mega_moe": not fallback}
-    assert resolve.called == fallback
+        assert backend.deepgemm_device_supported(group) is not fallback
+        assert backend.deepgemm_device_supported(group) is not fallback
+        gather.assert_called_once()
 
 
 @pytest.mark.parametrize("ep_size", [4, 16])

@@ -29,7 +29,6 @@ class MoECommType(Enum):
     MC2 = 1
     ALLTOALL = 2
     FUSED_MC2 = 3
-    DEEPGEMM = 4
 
 
 _MRV2_IN_PROFILE_RUN: ContextVar[bool] = ContextVar("_MRV2_IN_PROFILE_RUN", default=False)
@@ -376,6 +375,9 @@ def _select_capacity_and_world_size_moe_comm_method(
     is_draft_model: bool = False,
     draft_moe_quant_type: QuantType = QuantType.NONE,
 ) -> MoECommType:
+    if get_ascend_config().deepgemm_mega_moe and getattr(get_ep_group(), "_deepgemm_supported", False) is True:
+        if not is_draft_model or draft_moe_quant_type == QuantType.W4A8MXFP:
+            return MoECommType.FUSED_MC2
     if get_ascend_config().enable_fused_mc2 == 1:
         if is_mega_moe_supported():
             if is_draft_model and draft_moe_quant_type not in A5_SUPPORT_MEGA_MOE_QUANT_TYPES:
@@ -431,10 +433,6 @@ def select_moe_comm_method(
     """
     if not is_moe_model(vllm_config):
         return None
-
-    if get_ascend_config().deepgemm_mega_moe:
-        # The fused backend owns dispatch/combine and retains local tokens.
-        return MoECommType.DEEPGEMM
 
     mc2_tokens_capacity = get_mc2_tokens_capacity()
     moe_comm_policy = get_current_hardware_profile().moe_comm_policy

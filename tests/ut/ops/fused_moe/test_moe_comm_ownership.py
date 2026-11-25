@@ -14,21 +14,17 @@ from vllm_ascend.ops.fused_moe import moe_comm_method as comm
 def test_model_snapshots_and_layer_lookup_survive_draft_registration(monkeypatch, ep_size, deepgemm):
     monkeypatch.setattr(comm, "_MoECommMethods", {})
     monkeypatch.setattr(comm, "get_ascend_config", lambda: SimpleNamespace(deepgemm_mega_moe=deepgemm))
-    for name in ("AllGatherCommImpl", "AlltoAllCommImpl", "MC2CommImpl", "FusedMC2CommImpl", "DeepGemmCommImpl"):
+    for name in ("AllGatherCommImpl", "AlltoAllCommImpl", "MC2CommImpl", "FusedMC2CommImpl"):
         monkeypatch.setattr(comm, name, lambda config: SimpleNamespace(moe_config=config))
-    target = SimpleNamespace(ep_size=ep_size, num_experts=384, num_local_experts=384 // ep_size)
+    target = SimpleNamespace(
+        deepgemm_mega_moe=deepgemm, ep_size=ep_size, num_experts=384, num_local_experts=384 // ep_size
+    )
     draft = SimpleNamespace(ep_size=ep_size, num_experts=128, num_local_experts=128 // ep_size)
     comm.setup_moe_comm_method(target)
     target_snapshot = {kind: comm.get_moe_comm_method(kind) for kind in MoECommType}
     comm.setup_moe_comm_method(draft)
     draft_snapshot = {kind: comm.get_moe_comm_method(kind) for kind in MoECommType}
-    if deepgemm:
-        kinds = [MoECommType.DEEPGEMM]
-        assert target_snapshot[MoECommType.ALLTOALL] is None
-    else:
-        kinds = [kind for kind in MoECommType if kind != MoECommType.DEEPGEMM]
-        if ep_size == 1:
-            kinds = [MoECommType.ALLGATHER]
+    kinds = list(MoECommType) if ep_size > 1 else [MoECommType.ALLGATHER]
     for kind in kinds:
         assert target_snapshot[kind] is not None
         assert draft_snapshot[kind] is not None
@@ -40,8 +36,11 @@ def test_model_snapshots_and_layer_lookup_survive_draft_registration(monkeypatch
 def test_deepgemm_uses_common_prepare_execute_finalize_contract(monkeypatch):
     prepare_finalize = Mock()
     monkeypatch.setattr(comm, "PrepareAndFinalizeWithAll2All", lambda config: prepare_finalize)
-    backend = comm.DeepGemmCommImpl(SimpleNamespace())
-    assert backend.token_dispatcher is None
+    monkeypatch.setattr(comm, "TokenDispatcherWithMC2", Mock)
+    monkeypatch.setattr(comm, "get_ascend_config", lambda: SimpleNamespace(enable_fused_mc2=0))
+    backend = comm.FusedMC2CommImpl(
+        SimpleNamespace(deepgemm_mega_moe=True, swiglu_limit=None, swiglu_alpha=None, swiglu_beta=None)
+    )
     tokens, logits, weights, ids, result = (object() for _ in range(5))
     layer = SimpleNamespace(_deepgemm_mega_moe=SimpleNamespace(apply=Mock(return_value=result)))
     backend.prepare(tokens, logits)

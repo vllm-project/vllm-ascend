@@ -20,27 +20,30 @@ from vllm_ascend.utils import is_deepseek_v41
 _DEEPGEMM_CUBE_CORES = 32
 
 
-def resolve_deepgemm_device_support(config, device, group):
-    from vllm_ascend.ascend_config import clear_ascend_config, init_ascend_config
+def deepgemm_device_supported(group):
+    """Resolve the native collective once per EP group, before packing weights."""
+    supported = getattr(group, "_deepgemm_supported", None)
+    if supported is not None:
+        return supported
 
     try:
-        cores = getattr(torch.npu.get_device_properties(device), "cube_core_num", None)
+        cores = getattr(torch.npu.get_device_properties(torch.npu.current_device()), "cube_core_num", None)
     except (AttributeError, RuntimeError):
         cores = None
     # All peers must select the same collective, including peers whose driver
     # does not expose the Cube count. Query only the device bound to this worker.
     counts = [None] * group.world_size
     torch.distributed.all_gather_object(counts, cores, group=group.cpu_group)
-    if any(n and n > 0 and n != _DEEPGEMM_CUBE_CORES for n in counts):
+    supported = not any(n and n > 0 and n != _DEEPGEMM_CUBE_CORES for n in counts)
+    if not supported:
         logger.warning_once(
             "Disabling deepgemm_mega_moe: the kernel expects %d Cube cores, EP ranks report %s. "
             "Using the standard enable_fused_mc2=3 selection.",
             _DEEPGEMM_CUBE_CORES,
             tuple(counts),
         )
-        config.additional_config = {**config.additional_config, "deepgemm_mega_moe": False}
-        clear_ascend_config()
-        init_ascend_config(config)
+    group._deepgemm_supported = supported
+    return supported
 
 
 class DeepGemmExperts:
@@ -81,7 +84,6 @@ class DeepGemmExperts:
         self.topk = moe.experts_per_token
         self.activation_clamp = moe.swiglu_limit or 0.0
         self.max_tokens = config.scheduler_config.max_num_batched_tokens
-        self.routed_scaling_factor = float(getattr(layer, "ascend_megamoe_fold_scale", 1.0))
         deep_gemm = load_deepgemm()
         self.kernel = deep_gemm.fp8_fp4_mega_moe
         self._prepare_shared_weights(layer, text, deep_gemm.transform_weights_for_mega_moe)
@@ -246,10 +248,11 @@ class DeepGemmExperts:
         # DeepInfer scales routed weights before SwiGLU/requantization. Shared
         # experts have their own kernel path and must not receive this factor.
         routed_weights = self.buffer.topk_weights[:count]
-        if self.routed_scaling_factor == 1.0:
+        routed_scale = getattr(layer, "ascend_megamoe_fold_scale", 1.0)
+        if routed_scale == 1.0:
             routed_weights.copy_(topk_weights)
         else:
-            torch.mul(topk_weights, self.routed_scaling_factor, out=routed_weights)
+            torch.mul(topk_weights, routed_scale, out=routed_weights)
         out = torch.empty((count, self.hidden), dtype=torch.bfloat16, device=x.device)
         self.kernel(
             out,

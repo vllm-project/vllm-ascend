@@ -814,14 +814,8 @@ class AscendConfig:
         # TODO(zzzzwwjj): remove it after deprecating `enable_mc2_hierarchy_comm`.
         if self.enable_mc2_hierarchy_comm:
             self.mc2_comm_alg = "hierarchy"
-        if self.deepgemm_mega_moe:
-            if self.enable_fused_mc2 != 3:
-                raise ValueError("deepgemm_mega_moe requires enable_fused_mc2=3")
-            self.megamoe_shared_expert_fusion = True
-            # The resolved enable_fused_mc2 controls the CANN implementation.
-            self.enable_fused_mc2 = 0
-            return self
-
+        if self.deepgemm_mega_moe and self.enable_fused_mc2 != 3:
+            raise ValueError("deepgemm_mega_moe requires enable_fused_mc2=3")
         # TODO(zzzzwwjj): Currently, there are many problems with the megamoe op.
         # We will first roll back the megamoe internally and keep `enable_fused_mc2=2`
         # to enable the megamoe for testing capabilities.
@@ -834,7 +828,7 @@ class AscendConfig:
             # with the shared expert fused into the operator.
             self.megamoe_shared_expert_fusion = self.enable_fused_mc2 == 3
             self._megamoe_supported = importlib.util.find_spec("cann_ops_transformer") is not None
-            if self.enable_fused_mc2 == 3 and not self._megamoe_supported:
+            if self.enable_fused_mc2 == 3 and not self._megamoe_supported and not self.deepgemm_mega_moe:
                 logger.warning_once(
                     "enable_fused_mc2=3 requires the cann_ops_transformer package; "
                     "MegaMoe (and its shared-expert fusion) will be disabled."

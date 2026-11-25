@@ -231,6 +231,7 @@ def test_w4a8_shared_weights_reach_megamoe(monkeypatch, use_expert_weight_list, 
     # Execute the real communicator and W4A8 getter. Only the native kernel is
     # mocked, so a dropped payload cannot be hidden by a mocked getter.
     comm = FusedMC2CommImpl.__new__(FusedMC2CommImpl)
+    comm.uses_deepgemm = False
     comm.token_dispatcher = Mock(spec=TokenDispatcherWithMC2)
     comm.token_dispatcher.max_num_tokens_per_rank = 4
     comm.token_dispatcher.global_bs = 0

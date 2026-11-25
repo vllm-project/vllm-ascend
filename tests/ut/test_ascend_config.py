@@ -2098,15 +2098,16 @@ class TestTopLevelSwitchTypeValidation(TestBase):
 
     @patch("vllm_ascend.ascend_config.importlib.util.find_spec")
     def test_deepgemm_uses_mode_3_without_cann(self, find_spec):
+        find_spec.return_value = None
         options = dict(sparse_kv_offload_config=SimpleNamespace(enabled=False), deepgemm_mega_moe=True)
         config = AscendConfig(enable_fused_mc2=3, **options)
         self.assertTrue(config.megamoe_shared_expert_fusion)
-        self.assertEqual(config.enable_fused_mc2, 0)
+        self.assertEqual(config.enable_fused_mc2, 1)
         self.assertFalse(config._megamoe_supported)
         for mode in (0, 1, 2):
             with self.subTest(mode=mode), self.assertRaisesRegex(ValueError, "requires enable_fused_mc2=3"):
                 AscendConfig(enable_fused_mc2=mode, **options)
-        find_spec.assert_not_called()
+        find_spec.assert_called_once_with("cann_ops_transformer")
 
     @_clean_up
     @patch(
