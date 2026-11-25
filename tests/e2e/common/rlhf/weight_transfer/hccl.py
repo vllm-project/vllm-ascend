@@ -138,7 +138,17 @@ def create_hccl_trainer(client, source, packed: bool, buffer_source=None):
 
 def collect_draft_observation(server, case: WeightUpdateModelCase):
     """Measure startup and updated models after generation refreshes derived state."""
-    signature = generation_signature(server.get_client(), case.id, prompts=case.prompts)
+    signature, draft_outputs = [], []
+    for prompt in case.prompts:
+        post_control(server, "collective_rpc", json={"method": "start_draft_output_capture"})
+        try:
+            signature.extend(generation_signature(server.get_client(), case.id, prompts=(prompt,)))
+        finally:
+            outputs = post_control(server, "collective_rpc", json={"method": "finish_draft_output_capture"}).json()[
+                "results"
+            ]
+        assert len(outputs) == INFERENCE_WORLD_SIZE and all(outputs), "No draft proposal was captured"
+        draft_outputs.append(outputs)
     snapshot = snapshot_weight_update_models(server)
     projections = post_control(server, "collective_rpc", json={"method": "snapshot_draft_context_projections"}).json()[
         "results"
@@ -146,6 +156,7 @@ def collect_draft_observation(server, case: WeightUpdateModelCase):
     return snapshot, {
         "parameters": parameter_digests(snapshot),
         "generation": signature,
+        "draft_outputs": draft_outputs,
         "context_projections": projections,
     }
 
@@ -237,6 +248,9 @@ def run_draft_hccl_weight_transfer(tmp_path, monkeypatch, packed: bool, enforce_
                 (tmp_path / f"update-{update_round}-{role}-snapshot.json").write_text(json.dumps(after, indent=2))
                 (tmp_path / f"update-{update_round}-{role}-generation.json").write_text(
                     json.dumps(observation["generation"], indent=2)
+                )
+                (tmp_path / f"update-{update_round}-{role}-draft-outputs.json").write_text(
+                    json.dumps(observation["draft_outputs"], indent=2)
                 )
                 results.append((role, observation, parameter_addresses(after)))
         finally:

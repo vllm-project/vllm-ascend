@@ -10,7 +10,7 @@ from collections.abc import Callable
 from contextlib import contextmanager
 from io import BytesIO
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import torch
 from PIL import Image
@@ -337,9 +337,29 @@ class WeightUpdateTestWorkerExtension:
         # Supplied by the worker class when the extension is composed at runtime.
         get_model: Callable[[], torch.nn.Module]
         get_draft_model: Callable[[], torch.nn.Module | None]
+        model_runner: Any
 
     def draft_model_architecture(self):
         return type(self.get_draft_model()).__name__
+
+    def start_draft_output_capture(self):
+        speculator = self.model_runner.speculator
+        self._draft_propose = speculator.propose
+        self._draft_output: list[list[int]] | None = None
+
+        def capture(input_batch, *args, **kwargs):
+            tokens = self._draft_propose(input_batch, *args, **kwargs)
+            # Observe the first proposal for a fixed prompt before target
+            # verification. Copy it before the runner reuses its output buffer.
+            if self._draft_output is None and input_batch.num_reqs:
+                self._draft_output = tokens[: input_batch.num_reqs].detach().cpu().tolist()
+            return tokens
+
+        speculator.propose = capture
+
+    def finish_draft_output_capture(self):
+        self.model_runner.speculator.propose = self._draft_propose
+        return self._draft_output
 
     def snapshot_draft_context_projections(self):
         draft_model = self.get_draft_model()
