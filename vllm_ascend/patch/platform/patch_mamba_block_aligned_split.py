@@ -214,7 +214,8 @@ def _split_with_gdn_policy(
     )
     next_page_boundary = (start // block_size + 1) * block_size
     skip_tail = (
-        partial_cache_hit
+        policy.elide_singleton_warm_tail
+        and partial_cache_hit
         and getattr(request, "_ascend_first_observed_mamba_tail", False)
         and start > 0
         and (start == num_new_local_computed_tokens or (policy.max_tokens and prefill_end > policy.max_tokens))

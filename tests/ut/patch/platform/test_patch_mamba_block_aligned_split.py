@@ -388,6 +388,21 @@ def test_first_seen_partial_hit_can_finish_in_same_page(prompt, hit, first_seen,
     assert scheduler.mamba_has_prefill_checkpoint_blocks and scheduler.mamba_partial_cache_hit
 
 
+def test_first_warm_tail_keeps_publishable_checkpoint_with_mtp_lookahead():
+    scheduler = _scheduler(is_kv_consumer=None)
+    scheduler.cache_config.block_size = scheduler.block_size = 2048
+    scheduler.hash_block_size = 128
+    scheduler.num_hash_lookahead_tokens = 3
+    scheduler.mamba_partial_cache_hit = True
+    scheduler.mamba_has_prefill_checkpoint_blocks = True
+    scheduler.mamba_prefill_checkpoint_alignment = 64
+    scheduler._ascend_gdn_checkpoint_policy = GDNCheckpointPolicy(8192, True, False)
+    request = _request(num_computed_tokens=0, num_prompt_tokens=7000, num_tokens=7000)
+    request._ascend_first_observed_mamba_tail = True
+
+    assert _mamba_block_aligned_split(scheduler, request, 7000 - 6272, 6272) == 6912 - 6272
+
+
 def test_exact_first_page_prompt_retains_repeat_history(monkeypatch):
     from collections import OrderedDict
 
