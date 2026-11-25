@@ -9,6 +9,7 @@ from vllm.distributed import (
     get_pp_group,
     get_tensor_model_parallel_world_size,
     tensor_model_parallel_all_gather,
+    tensor_model_parallel_reduce_scatter,
 )
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
@@ -26,6 +27,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmb
 from vllm.model_executor.models import deepseek_v2 as deepseek_v2_module
 from vllm.model_executor.models.deepseek_v2 import (
     DeepseekV2DecoderLayer,
+    DeepseekAttention,
     DeepseekV2MLP,
     DeepseekV2ForCausalLM,
     DeepSeekV2FusedQkvAProjLinear,
@@ -36,7 +38,12 @@ from vllm.model_executor.models.deepseek_v2 import (
     yarn_get_mscale,
 )
 from vllm.model_executor.models.interfaces import EagleModelMixin
-from vllm.model_executor.models.utils import PPMissingLayer, extract_layer_index, spec_decode_needs_target_embed
+from vllm.model_executor.models.utils import (
+    PPMissingLayer,
+    extract_layer_index,
+    sequence_parallel_chunk,
+    spec_decode_needs_target_embed,
+)
 from vllm.sequence import IntermediateTensors
 from vllm.v1.attention.backends.mla.index_group import SparseMLAIndexGroupBuilder
 
@@ -520,17 +527,44 @@ def _decoder_forward_with_norm_quant(self, positions, hidden_states, residual, l
     if not _supports_dense_norm_quant(self, hidden_states, get_input_quant_key, kInt8DynamicTokenSym):
         return _ORIGINAL_DECODER_FORWARD(self, positions, hidden_states, residual, llama_4_scaling)
 
+    # Keep this forward aligned with DeepseekV2DecoderLayer.forward. Only the
+    # post-attention norm/quant call below intentionally changes its behavior.
+    full_num_tokens = positions.shape[0]
+    input_is_sequence_parallel = (
+        self.use_sequence_parallel_moe and residual is not None and hidden_states.shape[0] != full_num_tokens
+    )
+
+    # Self Attention
     if residual is None:
         residual = hidden_states
         hidden_states = self.input_layernorm(hidden_states)
     else:
         hidden_states, residual = self.input_layernorm(hidden_states, residual)
 
+    if input_is_sequence_parallel:
+        hidden_states = tensor_model_parallel_all_gather(hidden_states, 0)
+        hidden_states = hidden_states[:full_num_tokens]
+
     if self.use_mha:
         hidden_states = self.self_attn(positions, hidden_states)
     else:
         hidden_states = self.self_attn(positions, hidden_states, llama_4_scaling)
 
+    if not isinstance(self.self_attn, DeepseekAttention) and hidden_states.dtype == torch.float16:
+        # Match the upstream FP16 overflow handling after attention.
+        hidden_states *= 1.0 / self.routed_scaling_factor
+        if self.layer_idx == 0:
+            residual *= 1.0 / self.routed_scaling_factor
+
+    if self.use_sequence_parallel_moe:
+        tp_world_size = get_tensor_model_parallel_world_size()
+        sp_pad = (-hidden_states.shape[0]) % tp_world_size
+        hidden_states = torch.nn.functional.pad(hidden_states, (0, 0, 0, sp_pad))
+        hidden_states = tensor_model_parallel_reduce_scatter(hidden_states, 0)
+        if not input_is_sequence_parallel:
+            residual = sequence_parallel_chunk(residual)
+
+    # Fully Connected
     hidden_states, residual = _maybe_fused_add_rms_norm_quant(
         self.post_attention_layernorm,
         hidden_states,
@@ -538,7 +572,16 @@ def _decoder_forward_with_norm_quant(self, positions, hidden_states, residual, l
         QuantizedActivation,
         kInt8DynamicTokenSym,
     )
-    return self.mlp(hidden_states), residual
+    if self.use_sequence_parallel_moe:
+        hidden_states = self.mlp(hidden_states, already_sequence_parallel=True)
+    else:
+        hidden_states = self.mlp(hidden_states)
+
+    if isinstance(self.mlp, DeepseekV2MLP) and hidden_states.dtype == torch.float16:
+        # Match the upstream FP16 overflow handling after the dense MLP.
+        hidden_states *= 1.0 / self.routed_scaling_factor
+
+    return hidden_states, residual
 
 
 DeepseekV2DecoderLayer.forward = _decoder_forward_with_norm_quant
