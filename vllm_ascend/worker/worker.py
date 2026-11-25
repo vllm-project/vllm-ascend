@@ -1283,7 +1283,8 @@ class NPUWorker(GPUWorker):
             from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.connector import MooncakePullConnector
             from vllm_ascend.worker.v2.kv_connector import C8VScaleKVConnector, kv_connector_tree
 
-            if any(isinstance(connector, MooncakePullConnector) for connector in kv_connector_tree(get_kv_transfer_group())):
+            connectors = kv_connector_tree(get_kv_transfer_group())
+            if any(isinstance(connector, MooncakePullConnector) for connector in connectors):
                 self.model_runner.kv_connector = C8VScaleKVConnector(
                     self.model_runner.kv_connector,
                     kv_cache_config,

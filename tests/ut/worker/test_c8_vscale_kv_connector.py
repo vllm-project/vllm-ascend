@@ -199,5 +199,3 @@ def test_kv_connector_tree_includes_pool_and_mooncake_children():
 
     assert connectors == [root, nested, mooncake, pool]
     assert any(getattr(connector, "requires_mamba_state_copy_after_load", False) for connector in connectors)
-
-
