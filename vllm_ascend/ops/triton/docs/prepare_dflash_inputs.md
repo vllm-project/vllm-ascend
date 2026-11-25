@@ -10,7 +10,8 @@
       the 2-D Triton kernel and launcher `prepare_dflash_inputs_triton`.
     - The Ascend DFlash and DSpark workers bind the upstream entry point to
       the Ascend launcher. The adapter forwards the physical block stride
-      supplied by vLLM main.
+      supplied by vLLM main; vLLM 0.34.0 has no such argument and calls the
+      launcher directly.
 - **Formula**:
     - Request context range:
       `ctx_start = query_start_loc[req]`,
@@ -96,7 +97,7 @@
 ## Constraints
 
 - The operator is inference-only and requires Ascend NPU Triton execution.
-- The optimized kernel implements the vLLM 0.33.0 DFlash ABI and the same
+- The optimized kernel implements the vLLM 0.34.0 DFlash ABI and the same
   rank-local DCP slot mapping as main's scalar implementation.
 - Multimodal inputs (including M-RoPE positions) are not supported by this optimized path. It derives KV slots from scalar token positions; multimodal inputs require the target slot mapping and linear token indices (see [#9340](https://github.com/vllm-project/vllm-ascend/pull/9340)).
 - `input_batch.num_reqs > 0` and `input_batch.num_reqs <= max_num_reqs`.
@@ -117,7 +118,7 @@
 
 ## Upstream Compatibility
 
-The Ascend launcher accepts the vLLM 0.33.0 positional signature. The
+The Ascend launcher accepts the vLLM 0.34.0 positional signature. The
 worker adapter passes vLLM main's extra `block_stride` argument by keyword.
 Each draft group supplies a manager block table and its matching
 `block_size`.

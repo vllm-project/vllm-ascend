@@ -195,7 +195,7 @@ def test_embedding_tp_disabled_preserves_dummy_buffer(monkeypatch, supports_mm_i
     state.model.modules.assert_not_called()
 
 
-@pytest.mark.skipif(vllm_version_is("0.33.0"), reason="Profile input_ids are only passed by vLLM main")
+@pytest.mark.skipif(vllm_version_is("0.34.0"), reason="Profile input_ids are only passed by vLLM main")
 def test_dummy_embedding_uses_profile_input_ids(monkeypatch):
     monkeypatch.setattr(default, "embedding_tp_enable", lambda: True)
     embedding = torch.nn.Embedding(8, 4)
