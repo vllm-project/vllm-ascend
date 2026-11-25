@@ -87,7 +87,6 @@ def _make_config(
     uses_draft_model=False,
     speculator_class: Any = _UNSET,
     custom_method=None,
-    include_speculator_config=True,
 ):
     """Create a minimal speculative decoding config for init_speculator tests."""
     resolved_speculator_class = (
@@ -108,6 +107,7 @@ def _make_config(
         method=method,
         enforce_eager=None,
         custom_method=custom_method,
+        speculator_config=SimpleNamespace(speculator_class=resolved_speculator_class),
         use_dspark=MagicMock(return_value=use_dspark),
         use_dflash=MagicMock(return_value=use_dflash),
         use_eagle=MagicMock(return_value=use_eagle),
@@ -119,8 +119,6 @@ def _make_config(
             hf_config=SimpleNamespace(model_type=None),
         ),
     )
-    if include_speculator_config:
-        speculative_config.speculator_config = SimpleNamespace(speculator_class=resolved_speculator_class)
     return SimpleNamespace(speculative_config=speculative_config)
 
 
@@ -415,8 +413,7 @@ def test_mtp_routing_uses_actual_native_config(
     else:
         expected_upstream = "vllm.v1.worker.gpu.spec_decode.mtp.speculator.MTPSpeculator"
         module, name = "vllm_ascend.worker.v2.spec_decode.mtp.speculator", "AscendMTPSpeculator"
-    if not v2_spec_decode.vllm_version_is("0.33.0"):
-        assert speculative.speculator_config.speculator_class == expected_upstream
+    assert speculative.speculator_config.speculator_class == expected_upstream
     constructor = _mock_speculator_module(monkeypatch, module, name)
     device = torch.device("cpu")
     assert factory(config, device) is constructor.return_value
@@ -514,7 +511,6 @@ def test_init_speculator_main_dispatches_via_speculator_class(
     with_req_states,
 ):
     """Main path selects the Ascend/upstream speculator solely from speculator_class."""
-    monkeypatch.setattr(v2_spec_decode, "vllm_version_is", lambda _: False)
     config = _make_config(
         method,
         speculator_class=upstream_class,
@@ -544,9 +540,6 @@ def test_init_speculator_main_dispatches_via_speculator_class(
 @pytest.mark.parametrize("method", ["eagle", "eagle3"])
 def test_init_speculator_main_actual_native_config_eagle(monkeypatch, method):
     """Verify real upstream SpeculativeConfig.speculator_config resolves EAGLE."""
-    if v2_spec_decode.vllm_version_is("0.33.0"):
-        pytest.skip("SpeculativeConfig.speculator_config requires vLLM main")
-
     speculative = object.__new__(SpeculativeConfig)
     speculative.method = method
     speculative.custom_method = None
@@ -568,9 +561,8 @@ def test_init_speculator_main_actual_native_config_eagle(monkeypatch, method):
     constructor.assert_called_once_with(config, device)
 
 
-def test_init_speculator_main_rejects_unadapted_upstream_speculator(monkeypatch):
+def test_init_speculator_main_rejects_unadapted_upstream_speculator():
     """Unadapted concrete speculator classes fail with an explicit class-level NotImplementedError."""
-    monkeypatch.setattr(v2_spec_decode, "vllm_version_is", lambda _: False)
     speculator_class = "vllm.v1.worker.gpu.spec_decode.suffix.speculator.SuffixSpeculator"
     config = _make_config("suffix", speculator_class=speculator_class)
 
@@ -581,9 +573,8 @@ def test_init_speculator_main_rejects_unadapted_upstream_speculator(monkeypatch)
     assert "suffix is not supported yet" not in str(exc_info.value)
 
 
-def test_init_speculator_main_rejects_none_speculator_class(monkeypatch):
+def test_init_speculator_main_rejects_none_speculator_class():
     """Speculator configs with speculator_class=None keep the method-level NotImplementedError."""
-    monkeypatch.setattr(v2_spec_decode, "vllm_version_is", lambda _: False)
     config = _make_config("unsupported", speculator_class=None)
 
     with pytest.raises(NotImplementedError, match="unsupported is not supported yet"):
@@ -592,9 +583,6 @@ def test_init_speculator_main_rejects_none_speculator_class(monkeypatch):
 
 def test_init_speculator_main_actual_native_config_xpress_rejected_vs_dflash(monkeypatch):
     """Real XPressSpeculatorConfig (method='dflash') rejects XPress explicitly instead of generic DFlash."""
-    if v2_spec_decode.vllm_version_is("0.33.0"):
-        pytest.skip("SpeculativeConfig.speculator_config requires vLLM main")
-
     from vllm.v1.worker.gpu.spec_decode.dflash.config import DFlashSpeculatorConfig
     from vllm.v1.worker.gpu.spec_decode.xpress.config import XPressSpeculatorConfig
 
@@ -641,8 +629,6 @@ def test_init_speculator_main_actual_native_config_xpress_rejected_vs_dflash(mon
 
 def test_init_speculator_main_supports_custom_speculator(monkeypatch):
     """Main path supports registered custom speculators with or without req_states."""
-    monkeypatch.setattr(v2_spec_decode, "vllm_version_is", lambda _: False)
-
     base_mod: Any = ModuleType("vllm.v1.worker.gpu.spec_decode.speculator")
 
     class DummyBaseSpeculator:
@@ -699,112 +685,3 @@ def test_init_speculator_main_supports_custom_speculator(monkeypatch):
     )
     with pytest.raises(TypeError, match="must be a subclass of"):
         init_speculator(cfg_invalid, device)
-
-
-@pytest.mark.parametrize(
-    "kwargs,target_module,target_class,with_req_states",
-    [
-        (
-            {"method": "ngram"},
-            "vllm.v1.worker.gpu.spec_decode.ngram.speculator",
-            "NgramGPUSpeculator",
-            True,
-        ),
-        (
-            {"method": "ngram_gpu"},
-            "vllm.v1.worker.gpu.spec_decode.ngram.speculator",
-            "NgramGPUSpeculator",
-            True,
-        ),
-        (
-            {"method": "extract_hidden_states"},
-            "vllm.v1.worker.gpu.spec_decode.extract_hidden_states",
-            "ExtractHiddenStatesSpeculator",
-            False,
-        ),
-        (
-            {"method": "dspark", "use_dspark": True},
-            "vllm_ascend.worker.v2.spec_decode.dspark.speculator",
-            "AscendDSparkSpeculator",
-            False,
-        ),
-        (
-            {"method": "dflash", "use_dflash": True, "architectures": ["LiLiCorrDraftModel"]},
-            "vllm_ascend.worker.v2.spec_decode.lilicorr.speculator",
-            "AscendLiLiCorrSpeculator",
-            False,
-        ),
-        (
-            {"method": "dflash", "use_dflash": True, "architectures": ["DFlash2DraftModel"]},
-            "vllm_ascend.worker.v2.spec_decode.dflash2.speculator",
-            "AscendDFlash2Speculator",
-            False,
-        ),
-        (
-            {"method": "dflash", "use_dflash": True, "architectures": ["DFlashDraftModel"]},
-            "vllm_ascend.worker.v2.spec_decode.dflash.speculator",
-            "AscendDFlashSpeculator",
-            False,
-        ),
-        (
-            {"method": "mtp", "use_gemma4_mtp": True, "use_eagle": True},
-            "vllm_ascend.worker.v2.spec_decode.gemma4.speculator",
-            "AscendGemma4Speculator",
-            False,
-        ),
-        (
-            {"method": "mtp", "use_multi_module_mtp": True, "use_eagle": True},
-            "vllm_ascend.worker.v2.spec_decode.multi_module_mtp.speculator",
-            "AscendMultiModuleMTPSpeculator",
-            False,
-        ),
-        (
-            {"method": "mtp", "use_eagle": True},
-            "vllm_ascend.worker.v2.spec_decode.mtp.speculator",
-            "AscendMTPSpeculator",
-            False,
-        ),
-        (
-            {"method": "eagle", "use_eagle": True},
-            "vllm_ascend.worker.v2.spec_decode.eagle.speculator",
-            "AscendEagleSpeculator",
-            False,
-        ),
-        (
-            {"method": "draft_model", "uses_draft_model": True},
-            "vllm_ascend.worker.v2.spec_decode.standalone_ar.speculator",
-            "AscendStandaloneARSpeculator",
-            False,
-        ),
-    ],
-)
-def test_init_speculator_v033_legacy_dispatch(
-    monkeypatch,
-    kwargs,
-    target_module,
-    target_class,
-    with_req_states,
-):
-    """Legacy v0.33.0 compatibility path keeps predicate routing without speculator_config."""
-    monkeypatch.setattr(v2_spec_decode, "vllm_version_is", lambda ver: ver == "0.33.0")
-    config = _make_config(**kwargs, include_speculator_config=False)
-    constructor = _mock_speculator_module(monkeypatch, target_module, target_class)
-    device = torch.device("cpu")
-    req_states = object() if with_req_states else None
-
-    result = init_speculator(config, device, req_states)
-
-    assert result is constructor.return_value
-    if with_req_states:
-        constructor.assert_called_once_with(config, device, req_states)
-    else:
-        constructor.assert_called_once_with(config, device)
-
-
-def test_init_speculator_v033_unsupported_method(monkeypatch):
-    """Legacy v0.33.0 compatibility path rejects unsupported methods cleanly."""
-    monkeypatch.setattr(v2_spec_decode, "vllm_version_is", lambda ver: ver == "0.33.0")
-    config = _make_config("unsupported", include_speculator_config=False)
-
-    with pytest.raises(NotImplementedError, match="unsupported is not supported yet"):
-        init_speculator(config, torch.device("cpu"))

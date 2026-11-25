@@ -318,10 +318,10 @@ def test_registered_dflash2_model_resolves_dflash2_speculator_config_and_routes(
     from vllm import envs as vllm_envs
     from vllm.config import SpeculativeConfig
     from vllm.model_executor.models import registry as registry_mod
+    from vllm.v1.worker.gpu.spec_decode.dflash2.config import DFlash2SpeculatorConfig
 
     from vllm_ascend.models import register_model
     from vllm_ascend.models.qwen3_dflash2 import DFlash2Qwen3ForCausalLM
-    from vllm_ascend.utils import vllm_version_is
 
     monkeypatch.setattr(ModelRegistry, "models", ModelRegistry.models.copy())
     monkeypatch.setenv("VLLM_CACHE_ROOT", str(tmp_path))
@@ -346,11 +346,6 @@ def test_registered_dflash2_model_resolves_dflash2_speculator_config_and_routes(
 
     model_info, inspected_arch = ModelRegistry.inspect_model_cls(["DFlash2DraftModel"], model_config)
     assert inspected_arch == "DFlash2DraftModel"
-
-    if vllm_version_is("0.33.0"):
-        return
-
-    from vllm.v1.worker.gpu.spec_decode.dflash2.config import DFlash2SpeculatorConfig
 
     assert model_info.speculator_config_class == "vllm.v1.worker.gpu.spec_decode.dflash2.config.DFlash2SpeculatorConfig"
 

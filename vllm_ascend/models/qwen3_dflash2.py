@@ -16,6 +16,7 @@ from vllm.model_executor.models.qwen3_dflash import (
     DFlashQwen3Model,
 )
 from vllm.model_executor.models.utils import maybe_prefix
+from vllm.v1.worker.gpu.spec_decode.dflash2.config import DFlash2SpeculatorConfig
 
 from vllm_ascend.models.quarot_utils import align_draft_weights
 from vllm_ascend.ops.vocab_parallel_embedding import (
@@ -23,7 +24,7 @@ from vllm_ascend.ops.vocab_parallel_embedding import (
     gather_lm_head_hidden_states,
     gather_lm_head_outputs,
 )
-from vllm_ascend.utils import get_rotation_path, vllm_version_is
+from vllm_ascend.utils import get_rotation_path
 
 _MAX_EXACT_FP32_TOKEN_ID = 1 << 24
 
@@ -327,10 +328,7 @@ class DFlash2Qwen3ForCausalLM(DFlashQwen3ForCausalLM):
     # vLLM #52816 likewise routes the draft model through this class factory.
     model_cls = DFlash2Qwen3Model
 
-    if not vllm_version_is("0.33.0"):
-        from vllm.v1.worker.gpu.spec_decode.dflash2.config import DFlash2SpeculatorConfig
-
-        speculator_config_class = DFlash2SpeculatorConfig
+    speculator_config_class = DFlash2SpeculatorConfig
 
     # Share the target LM head so compute_candidates can top-k the full vocab.
     has_own_lm_head = False
