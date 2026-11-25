@@ -186,17 +186,17 @@ class TestAscendW4A8MXFP4MoEMethod(TestBase):
         scheme.process_weights_after_loading(layer)
         with patch("vllm_ascend.quantization.methods.w4a8.w4a8_mxfp4._EXTRA_CTX") as context:
             context.use_mega_moe = True
-            before = scheme.get_fused_mc2_weights(layer)
-            for group in (layer.w13_weight_list, layer.w13_weight_scale_list, layer.w2_weight_scale_list):
-                group[0] = group[0].clone()
-            after = scheme.get_fused_mc2_weights(layer)
-        for old, new, source in (
-            (before.w1, after.w1, layer.w13_weight_list),
-            (before.w1_scale, after.w1_scale, layer.w13_weight_scale_list),
-            (before.w2_scale, after.w2_scale, layer.w2_weight_scale_list),
-        ):
-            self.assertNotEqual(old[0].data_ptr(), new[0].data_ptr())
-            self.assertEqual(new[0].data_ptr(), source[0].data_ptr())
+            for field, experts in (
+                ("w1", layer.w13_weight_list),
+                ("w1_scale", layer.w13_weight_scale_list),
+                ("w2_scale", layer.w2_weight_scale_list),
+            ):
+                with self.subTest(field=field):
+                    old = getattr(scheme.get_fused_mc2_weights(layer), field)[0]
+                    experts[0] = experts[0].clone()
+                    new = getattr(scheme.get_fused_mc2_weights(layer), field)[0]
+                    self.assertNotEqual(old.data_ptr(), new.data_ptr())
+                    self.assertEqual(new.data_ptr(), experts[0].data_ptr())
 
     def test_get_weight_static_method(self):
         result = self.scheme.get_weight(self.num_experts, self.intermediate_size, self.hidden_size, torch.bfloat16)
