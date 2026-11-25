@@ -466,6 +466,7 @@ class AscendPLEHostEmbedding(Qwen4ExpPLEPinnedHostEmbedding):
         ):
             raise ValueError("PLE prefetch output must match the input shape, lookup dtype, and input device")
         if self._quantized:
+            assert self._host_table is not None
             ple_lookup_quantized.lookup_quantized(
                 self._host_table.ptrs,
                 self.weight_scale,
