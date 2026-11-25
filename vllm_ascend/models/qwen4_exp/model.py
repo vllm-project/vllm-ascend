@@ -14,7 +14,10 @@
 
 """Ascend wrappers for the upstream Qwen4Exp model implementation."""
 
+from typing import ClassVar
+
 from vllm.config import VllmConfig
+from vllm.model_executor.models.qwen3_5 import Qwen3_5ForCausalLMBase
 from vllm.model_executor.models.qwen3_vl import Qwen3VLDummyInputsBuilder
 from vllm.models.qwen4_exp.amd import (
     hyperconnection as upstream_hc,
@@ -120,6 +123,9 @@ upstream_model.Qwen4ExpModel = AscendQwen4ExpModel
 class AscendQwen4ExpForCausalLM(upstream_model.Qwen4ExpForCausalLM):
     """Qwen3.8-Flash-Next text model using Ascend platform operators."""
 
+    is_3d_moe_weight: ClassVar[bool] = True
+    embedding_modules = Qwen3_5ForCausalLMBase.embedding_modules
+
     def process_weights_after_loading(self) -> None:
         parent_hook = getattr(super(), "process_weights_after_loading", None)
         if parent_hook is not None:
@@ -161,6 +167,8 @@ class AscendQwen4ExpProcessingInfo(_AscendProcessorMixin, upstream_model.Qwen4Ex
 )
 class AscendQwen4ExpForConditionalGeneration(_AscendVLPreprocessMixin, upstream_model.Qwen4ExpForConditionalGeneration):
     """Qwen3.8-Flash-Next multimodal model using Ascend operators."""
+
+    is_3d_moe_weight: ClassVar[bool] = True
 
     def process_weights_after_loading(self) -> None:
         parent_hook = getattr(super(), "process_weights_after_loading", None)

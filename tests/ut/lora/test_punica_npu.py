@@ -13,6 +13,7 @@
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 
+import sys
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
@@ -60,6 +61,7 @@ def _make_wrapper(
     ("device_type", "max_lora_rank", "expect_torch_ops"),
     [
         (AscendDeviceType._310P, 8, True),
+        (AscendDeviceType.A5, 16, True),
         (AscendDeviceType.A2, 128, True),
         (AscendDeviceType.A2, 16, False),
     ],
@@ -88,11 +90,11 @@ def test_punica_init_selects_kernel_backend(device_type, max_lora_rank, expect_t
         )
     refresh.assert_called_once()
     if expect_torch_ops:
-        from vllm.lora.ops.torch_ops import bgmv_shrink
-
-        assert wrapper.bgmv_shrink is bgmv_shrink
+        assert wrapper.bgmv_shrink is lora_ops.bgmv_shrink_torch
+        assert wrapper._use_custom_lora_ops is False
     else:
         assert wrapper.bgmv_shrink is lora_ops.bgmv_shrink
+        assert wrapper._use_custom_lora_ops is True
 
 
 def test_prefill_calls_sgmv_when_lora_active() -> None:
@@ -332,6 +334,109 @@ def test_add_lora_logits_uses_sampler_indices() -> None:
     x = torch.ones(2, 4)
     a = torch.ones(3, 4, 4)
     b = torch.ones(3, 8, 4)
+    wrapper.add_lora_logits(y, x, a, b, 0.5)
+    assert torch.equal(wrapper.bgmv_shrink.call_args.args[3], torch.tensor([1, 0]))
+    wrapper.bgmv_expand.assert_called_once()
+
+
+def test_use_sgmv_returns_false_without_custom_lora_ops() -> None:
+    wrapper = _make_wrapper(is_prefill=True, device_type=AscendDeviceType.A5)
+    wrapper._use_custom_lora_ops = False
+    assert wrapper._use_sgmv() is False
+
+
+def test_add_lora_fused_moe_without_custom_ops_uses_gmm_and_ignores_local_no_lora() -> None:
+    wrapper = _make_wrapper(no_lora=True, device_type=AscendDeviceType.A5, capturing=False)
+    wrapper._use_custom_lora_ops = False
+    a = torch.ones(2, 2, 2, 4)
+    b = torch.full((2, 2, 4, 2), 2.0)
+    x = torch.ones(3, 4)
+    y = torch.ones(3, 4)
+    group_list = torch.tensor([1, 2])
+    gmm_calls: list[tuple[torch.Tensor, torch.Tensor, torch.Tensor, int]] = []
+
+    def _fake_gmm(*, x, weight, split_item, group_list_type, group_type, group_list):
+        del split_item, group_type
+        x_in = x[0]
+        w_in = weight[0]
+        gmm_calls.append((x_in.clone(), w_in.clone(), group_list.clone(), group_list_type))
+        counts = group_list.tolist()
+        outs = []
+        row = 0
+        for exp_idx, cnt in enumerate(counts):
+            if cnt > 0:
+                outs.append(x_in[row : row + cnt] @ w_in[exp_idx])
+                row += cnt
+        return [torch.cat(outs, dim=0) if outs else x_in.new_zeros((0, w_in.shape[-1]))]
+
+    fake_torch_npu = SimpleNamespace(npu_grouped_matmul=Mock(side_effect=_fake_gmm))
+    with patch.dict(sys.modules, {"torch_npu": fake_torch_npu}):
+        wrapper.add_lora_fused_moe(
+            y,
+            x,
+            (a,),
+            (b,),
+            expert_ids=torch.tensor([0, 1, 1]),
+            adapter_enabled=torch.tensor([1, 0]),
+            token_lora_mapping=torch.tensor([0, -1, 1]),
+            topk_weights=torch.tensor([0.5, 1.0, 2.0]),
+            mul_routed_weight=True,
+            group_list=group_list,
+            group_list_type=1,
+        )
+
+    assert len(gmm_calls) == 2
+    assert gmm_calls[0][3] == 1
+    # Row 0: x=[1,1,1,1], shrink=4*[1,1]=[4,4], *0.5=[2,2], expand=4*2=8 -> y=1+8=9.
+    torch.testing.assert_close(y[0], torch.full((4,), 9.0))
+    torch.testing.assert_close(y[1:], torch.ones(2, 4))
+
+
+def test_add_lora_fused_moe_without_custom_ops_falls_back_to_chunked() -> None:
+    wrapper = _make_wrapper(no_lora=True, device_type=AscendDeviceType.A5)
+    wrapper._use_custom_lora_ops = False
+    a = torch.tensor(
+        [
+            [[[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0]], [[0.0, 0.0, 1.0, 0.0], [0.0, 0.0, 0.0, 1.0]]],
+            [[[2.0, 0.0, 0.0, 0.0], [0.0, 2.0, 0.0, 0.0]], [[0.0, 0.0, 2.0, 0.0], [0.0, 0.0, 0.0, 2.0]]],
+        ]
+    )
+    b = torch.ones(2, 2, 4, 2)
+    x = torch.tensor([[1.0, 2.0, 3.0, 4.0], [5.0, 6.0, 7.0, 8.0], [1.0, 1.0, 1.0, 1.0]])
+    y = torch.zeros(3, 6)
+    wrapper.add_lora_fused_moe(
+        y,
+        x,
+        (a,),
+        (b,),
+        expert_ids=torch.tensor([0, 1, 1]),
+        adapter_enabled=torch.tensor([1, 1]),
+        token_lora_mapping=torch.tensor([0, -1, 1]),
+        topk_weights=torch.tensor([0.5, 1.0, 2.0]),
+        mul_routed_weight=True,
+        offset=2,
+        group_list=None,
+    )
+    # Row 0: slot 0, expert 0 -> [1, 2] * 0.5 = [0.5, 1.0], expand sum = 1.5 into y[:, 2:6].
+    # Row 1: masked (-1) -> all zeros.
+    # Row 2: slot 1, expert 1 -> [2, 2] * 2.0 = [4.0, 4.0], expand sum = 8.0 into y[:, 2:6].
+    expected = torch.tensor(
+        [
+            [0.0, 0.0, 1.5, 1.5, 1.5, 1.5],
+            [0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+            [0.0, 0.0, 8.0, 8.0, 8.0, 8.0],
+        ]
+    )
+    torch.testing.assert_close(y, expected)
+
+
+def test_add_lora_logits_without_custom_ops_uses_bgmv_when_out_smaller_than_rank() -> None:
+    wrapper = _make_wrapper()
+    wrapper._use_custom_lora_ops = False
+    y = torch.zeros(2, 2)
+    x = torch.ones(2, 4)
+    a = torch.ones(3, 4, 4)
+    b = torch.ones(3, 2, 4)
     wrapper.add_lora_logits(y, x, a, b, 0.5)
     assert torch.equal(wrapper.bgmv_shrink.call_args.args[3], torch.tensor([1, 0]))
     wrapper.bgmv_expand.assert_called_once()

@@ -284,6 +284,8 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
                 gate_up_out=gate_up_out,
                 hidden_states=hidden_states,
                 lora_routing=self._lora_routing,
+                group_list=mlp_compute_input.group_list,
+                group_list_type=mlp_compute_input.group_list_type,
             )
         return gate_up_out
 
@@ -321,6 +323,8 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
                 down_out=hidden_states,
                 silu_out=silu_out,
                 lora_routing=self._lora_routing,
+                group_list=mlp_compute_input.group_list,
+                group_list_type=mlp_compute_input.group_list_type,
             )
             self._lora_routing = None
         return hidden_states
