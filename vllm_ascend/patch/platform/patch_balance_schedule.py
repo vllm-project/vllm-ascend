@@ -82,7 +82,7 @@ from vllm_ascend.ascend_config import init_ascend_config
 from vllm_ascend.core.scheduler_output import make_cached_request_data
 from vllm_ascend.utils import vllm_version_is
 
-if not vllm_version_is("0.33.0"):
+if not vllm_version_is("0.34.0"):
     from vllm.v1.core.sched.output import IterationDetails
 
 
@@ -187,7 +187,7 @@ class BalanceScheduler(Scheduler):
         preempted_reqs: list[Request] = []
 
         iteration_details = None
-        if not vllm_version_is("0.33.0") and (
+        if not vllm_version_is("0.34.0") and (
             (self.log_stats and self.observability_config.enable_logging_iteration_details)
             or self.vllm_config.profiler_config.profiler is not None
         ):
@@ -799,33 +799,22 @@ class BalanceScheduler(Scheduler):
         assert len(scheduled_new_reqs) + len(scheduled_resumed_reqs) + len(scheduled_running_reqs) <= len(self.running)
 
         # Construct the scheduler output.
-        if not vllm_version_is("0.33.0") or self.use_v2_model_runner:
-            scheduled_new_reqs.extend(scheduled_resumed_reqs)
-            scheduled_resumed_reqs.clear()
-            new_reqs_data = [
-                NewRequestData.from_request(
-                    req,
-                    req_to_new_blocks[req.request_id].get_block_ids(),
-                    req._all_token_ids,
-                    uses_mrope=self.model_uses_mrope,
-                )
-                for req in scheduled_new_reqs
-            ]
-        else:
-            new_reqs_data = [
-                NewRequestData.from_request(
-                    req,
-                    req_to_new_blocks[req.request_id].get_block_ids(),
-                    uses_mrope=self.model_uses_mrope,
-                )
-                for req in scheduled_new_reqs
-            ]
+        scheduled_new_reqs.extend(scheduled_resumed_reqs)
+        scheduled_resumed_reqs.clear()
+        new_reqs_data = [
+            NewRequestData.from_request(
+                req,
+                req_to_new_blocks[req.request_id].get_block_ids(),
+                req._all_token_ids,
+                uses_mrope=self.model_uses_mrope,
+            )
+            for req in scheduled_new_reqs
+        ]
 
         with record_function_or_nullcontext("schedule: make_cached_request_data"):
             cached_reqs_data = make_cached_request_data(
                 self,
                 scheduled_running_reqs,
-                scheduled_resumed_reqs,
                 num_scheduled_tokens,
                 scheduled_spec_decode_tokens,
                 req_to_new_blocks,
@@ -833,7 +822,7 @@ class BalanceScheduler(Scheduler):
             )
 
         schedule_metadata: dict[str, Any] = {}
-        if not vllm_version_is("0.33.0"):
+        if not vllm_version_is("0.34.0"):
             if iteration_details is not None:
                 iteration_details.num_prefill_requests = (
                     len(num_scheduled_tokens) - iteration_details.num_decode_requests
@@ -841,12 +830,7 @@ class BalanceScheduler(Scheduler):
                 iteration_details.num_prefill_tokens = total_num_scheduled_tokens - iteration_details.num_decode_tokens
                 iteration_details.num_encoder_inputs = num_scheduled_encoder_inputs
                 iteration_details.num_encoder_output_tokens = self.max_num_encoder_input_tokens - encoder_compute_budget
-            schedule_metadata = {"iteration_details": iteration_details}
-
-        # Record the request ids that were scheduled in this step (MRV1-only).
-        if vllm_version_is("0.33.0") and not self.use_v2_model_runner:
-            self.prev_step_scheduled_req_ids.clear()
-            self.prev_step_scheduled_req_ids.update(num_scheduled_tokens.keys())
+            schedule_metadata["iteration_details"] = iteration_details
 
         # Drain every step, including without a connector, to avoid stale
         # Mamba boundary offers. Snapshot exact current block tables for the
@@ -873,7 +857,7 @@ class BalanceScheduler(Scheduler):
         if self.dynamic_sd_lookup is not None and len(num_scheduled_tokens) > 0:
             num_spec_tokens_to_schedule = self.dynamic_sd_lookup[len(num_scheduled_tokens)]
 
-        if vllm_version_is("0.33.0"):
+        if vllm_version_is("0.34.0"):
             scheduled_encoder_input_stats = None
             if self.log_stats and self.observability_config.enable_logging_iteration_details:
                 scheduled_encoder_input_stats = self._make_scheduled_encoder_input_stats(scheduled_encoder_inputs)

@@ -33,7 +33,6 @@ from vllm_ascend.models.qwen4_exp.cache_config import (
     make_slab_view,
 )
 from vllm_ascend.platform import NPUPlatform
-from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2 import attn_utils as attn_utils_v2
 
 
@@ -753,7 +752,7 @@ def test_qsa_block_alignment_reuses_vllm_for_whole_gdn_page(monkeypatch, cache_m
     )
     NPUPlatform._align_hybrid_block_size(config, AscendQSABackend)
     assert cache.block_size == 896
-    expected_mamba_block_size = 896 if cache_mode == "align" or vllm_version_is("0.31.0") else None
+    expected_mamba_block_size = 896 if cache_mode == "align" else None
     assert cache.mamba_block_size == expected_mamba_block_size
     assert cache.mamba_page_size_padded == 896 * 1024
 

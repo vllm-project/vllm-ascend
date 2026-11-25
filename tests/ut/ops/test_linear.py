@@ -274,8 +274,10 @@ class TestAscendMergedColumnParallelLinear(BaseLinearTest):
             kwargs: dict[str, Any] = dict(
                 input_size=8, output_sizes=[4, 6], bias=True, disable_tp=True, padding_size=padding_size
             )
-            if vllm_version_is("0.33.0") and padding_size:
-                with self.assertRaisesRegex(ValueError, "output padding requires"):
+            if vllm_version_is("0.34.0") and padding_size:
+                # v0.34.0 lacks the upstream pad-fill helpers, so the layer
+                # refuses padded allocations instead of mismatching weights.
+                with self.assertRaisesRegex(ValueError, "requires the verified"):
                     AscendMergedColumnParallelLinear(**kwargs)
                 continue
             layer = AscendMergedColumnParallelLinear(**kwargs)
@@ -298,7 +300,6 @@ class TestAscendMergedColumnParallelLinear(BaseLinearTest):
                     self.assertEqual(layer._checkpoint_output_sizes, [4, 6])
                     self.assertEqual(layer.shard_ids, (0, 1))
 
-    @unittest.skipIf(vllm_version_is("0.33.0"), "Stacked shard tracking was added after v0.33")
     def test_custom_allocations_preserve_missing_shard_validation(self):
         layers: tuple[Any, ...] = (
             AscendMergedColumnParallelLinear(input_size=8, output_sizes=[4, 4], bias=False, disable_tp=True),

@@ -6,7 +6,6 @@ from unittest.mock import Mock
 
 import pytest
 import torch
-from vllm.v1.attention.backend import AttentionType
 from vllm.v1.attention.ops import metadata as upstream_metadata_ops
 from vllm.v1.kv_cache_interface import MLAAttentionSpec
 from vllm.v1.worker import cp_utils
@@ -14,17 +13,13 @@ from vllm.v1.worker.utils import AttentionGroup
 
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
 from vllm_ascend.models.qwen4_exp import qsa
-from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2.attn_utils import build_attn_metadata
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch
 from vllm_ascend.worker.v2.pcp_manager import AscendPCPAttentionContext
 
 
 def test_replicated_qsa_draft_passes_pcp_compatibility(monkeypatch) -> None:
-    if vllm_version_is("0.33.0"):
-        impl = qsa.AscendQSAImpl(2, 256, 0.0625, 1, None, None, "auto", None, AttentionType.DECODER)
-    else:
-        impl = qsa.AscendQSAImpl(2, 256, 0.0625, 1, "auto")
+    impl = qsa.AscendQSAImpl(2, 256, 0.0625, 1, "auto")
     layers = {"mtp.layers.0.self_attn": SimpleNamespace(impl=impl)}
     monkeypatch.setattr(cp_utils, "get_layers_from_vllm_config", lambda *_: layers)
     config = SimpleNamespace(
@@ -42,7 +37,6 @@ def test_main_and_draft_qkv_projection_use_upstream_path() -> None:
     assert qsa.AscendQwen4ExpQSAAttention._project_qkv_gate is qsa.upstream_qsa.Qwen4ExpQSAAttention._project_qkv_gate
 
 
-@pytest.mark.skipif(vllm_version_is("0.33.0"), reason="Packed Indexer arguments are part of the main ABI")
 def test_indexer_accepts_main_packed_inputs_without_fused_preparation() -> None:
     layer = qsa.AscendQSAIndexer.__new__(qsa.AscendQSAIndexer)
     torch.nn.Module.__init__(layer)
@@ -55,6 +49,8 @@ def test_indexer_accepts_main_packed_inputs_without_fused_preparation() -> None:
     layer._update_and_compress = Mock()
     selected = torch.zeros((2, 3), dtype=torch.int32)
     layer._select = Mock(return_value=selected)
+    # Deterministic input: assert_close treats NaN as unequal to itself, so
+    # uninitialized memory would make the slice comparison below flaky.
     hidden_states = torch.arange(32, dtype=torch.float32).reshape(4, 8)
     positions = torch.arange(4)
     gate = torch.full((2, 2, 4), 7.0)
@@ -236,7 +232,7 @@ def test_fused_prepare_upstream_abi_materializes_qkv_and_gate(monkeypatch, pcp) 
 
     selected = torch.zeros((2, 3), dtype=torch.int32)
     # Main's indexer returns (selection, prepared main outputs).
-    indexer = Mock(return_value=selected if vllm_version_is("0.33.0") else (selected, None))
+    indexer = Mock(return_value=(selected, None))
     indexer.output_width = 3
     indexer.raw_key_cache = SimpleNamespace(prefix=side_prefix)
     layer.indexer = indexer
@@ -279,7 +275,7 @@ def test_fused_prepare_upstream_abi_materializes_qkv_and_gate(monkeypatch, pcp) 
     torch.testing.assert_close(update_args[2], expected_value)
     torch.testing.assert_close(update_args[4], main_metadata.slot_mapping)
     assert layer.impl.forward_qsa.call_count + layer.impl.forward.call_count == 1
-    forward_call = layer.impl.forward_qsa if vllm_version_is("0.33.0") else layer.impl.forward
+    forward_call = layer.impl.forward
     forward_args = forward_call.call_args.args
     torch.testing.assert_close(forward_args[1], projected_q.view(2, 2, 4))
 
@@ -565,10 +561,7 @@ def test_pcp_indexer_projects_padding_for_collective_but_selects_only_live_queri
     hidden = torch.arange(3).view(3, 1)
     positions = torch.arange(3)
 
-    if vllm_version_is("0.33.0"):
-        selected = indexer(hidden, positions)
-    else:
-        selected, _ = indexer(hidden, positions, attn=object())
+    selected, _ = indexer(hidden, positions, attn=object())
 
     key_rows, write_positions = indexer._update_and_compress.call_args.args[:2]
     torch.testing.assert_close(key_rows, hidden)

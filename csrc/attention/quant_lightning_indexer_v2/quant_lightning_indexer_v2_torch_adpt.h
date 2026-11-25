@@ -119,6 +119,7 @@ at::Tensor QuantLightningIndexerMetadata(int64_t numHeadsQ, int64_t numHeadsK, i
     auto sequsedQVal = valid_tensor(sequsedQ, outputDevice);
     auto sequsedKVal = valid_tensor(sequsedK, outputDevice);
     auto cmpResidualKVal = valid_tensor(cmpResidualK, outputDevice);
+    auto candidateBlockLengthVal = valid_tensor(c10::nullopt, outputDevice);
     auto causalSeqlensKvGlobalVal = valid_tensor(causalSeqlensKvGlobal, outputDevice);
 
     std::string layoutQStr = std::string(layoutQ);
@@ -128,7 +129,8 @@ at::Tensor QuantLightningIndexerMetadata(int64_t numHeadsQ, int64_t numHeadsK, i
 
     if (output.device().is_meta()) return output;
     EXEC_NPU_CMD(aclnnVllmAscendQuantLightningIndexerV2Metadata, cuSeqlensQVal, cuSeqlensKVal, sequsedQVal, sequsedKVal,
-              cmpResidualKVal, causalSeqlensKvGlobalVal, numHeadsQ, numHeadsK, headDim, topk, quantMode, batchSize,
+              cmpResidualKVal, candidateBlockLengthVal, causalSeqlensKvGlobalVal, numHeadsQ, numHeadsK, headDim, topk,
+              quantMode, batchSize,
               maxSeqlenQ, maxSeqlenK, layoutQPtr, layoutKPtr, maskMode, cmpRatio, enableDcp, cpWorld, cpRank,
               cpInterleaveSize, output);
     return output;
@@ -175,7 +177,7 @@ std::tuple<at::Tensor, at::Tensor> ConstructQuantLightningIndexerOutputTensor(
     return std::tuple<at::Tensor, at::Tensor>(sparseIndicesOut, sparseValuesOut);
 }
 
-std::tuple<at::Tensor, at::Tensor, at::Tensor> QuantLightningIndexerCandidate(
+std::tuple<at::Tensor, at::Tensor, at::Tensor, at::Tensor> QuantLightningIndexerCandidate(
     const at::Tensor &query, const at::Tensor &key, const at::Tensor &weights, const at::Tensor &queryDequantScale,
     const at::Tensor &keyDequantScale, int64_t topk, int64_t quantMode,
     const c10::optional<at::Tensor> &candidateTopkIndexIn, const c10::optional<at::Tensor> &cuSeqlensQ,
@@ -185,7 +187,8 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> QuantLightningIndexerCandidate(
     const c10::optional<at::Tensor> &metadata, int64_t maxSeqlenQ, c10::string_view layoutQ,
     c10::string_view layoutK, int64_t maskMode, int64_t cmpRatio, int64_t candidateMode,
     int64_t candidateTopkBlocks, int64_t candidateBlockSize, bool enableDcp, int64_t cpWorld, int64_t cpRank,
-    int64_t cpKvCacheInterleaveSize, const c10::optional<at::Tensor> &causalSeqlensKvGlobal, int64_t returnValue)
+    int64_t cpKvCacheInterleaveSize, const c10::optional<at::Tensor> &causalSeqlensKvGlobal,
+    const c10::optional<at::Tensor> &candidateBlockLength, int64_t returnValue)
 {
     TORCH_CHECK(query.numel() > 0, "Tensor query is empty.")
     TORCH_CHECK(key.numel() > 0, "Tensor key is empty.")
@@ -206,16 +209,24 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> QuantLightningIndexerCandidate(
 
     int64_t keyHeadNum = (keyLayoutStr == "TND") ? key.size(DIM_1) : key.size(DIM_2);
     at::Tensor candidateTopkIndexOut;
+    at::Tensor candidateBlockLengthOut;
     if (candidateMode == 1) {
         at::SmallVector<int64_t, SIZE> candSize;
+        at::SmallVector<int64_t, SIZE> candLenSize;
         if (queryLayoutStr == "BSND") {
             candSize = {query.size(DIM_0), query.size(DIM_1), keyHeadNum, candidateTopkBlocks};
+            candLenSize = {query.size(DIM_0) * query.size(DIM_1), keyHeadNum};
         } else {
             candSize = {query.size(DIM_0), keyHeadNum, candidateTopkBlocks};
+            candLenSize = {query.size(DIM_0), keyHeadNum};
         }
         candidateTopkIndexOut = at::empty(candSize, query.options().dtype(at::kInt));
+        // 每行有效候选块数（DSL candidate_length 语义）。用 zeros 保证 kernel 未覆盖的行（如
+        // coreZeroEnable==0 全空闲）为 0 而不是未初始化值；仅 source 模式分配，代价 ~T1*N2*4B 一次 memset。
+        candidateBlockLengthOut = at::zeros(candLenSize, query.options().dtype(at::kInt));
     } else {
         candidateTopkIndexOut = at::empty({0}, query.options().dtype(at::kInt));
+        candidateBlockLengthOut = at::empty({0}, query.options().dtype(at::kInt));
     }
 
     char *queryLayoutPtr = const_cast<char *>(queryLayoutStr.c_str());
@@ -223,7 +234,9 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> QuantLightningIndexerCandidate(
 
     TORCH_CHECK(candidateMode >= 1 && candidateMode <= 3, "Invalid candidate_mode");
     TORCH_CHECK(candidateMode != 2 || candidateTopkIndexIn.has_value(), "Consumer requires candidate blocks");
-    if (query.device().is_meta()) return {sparseIndicesOut, sparseValuesOut, candidateTopkIndexOut};
+    if (query.device().is_meta()) {
+        return {sparseIndicesOut, sparseValuesOut, candidateTopkIndexOut, candidateBlockLengthOut};
+    }
 
     // A11: key 0 轴非连续 — aclnn 动态调用下 tiling 拿不到 tensor stride (仅 TensorV2/图模式可见),
     // 从 key/k_scale 的 torch stride(0) 自动显式传入 (紧凑存储时等于紧凑值, 走 kernel 兜底语义)
@@ -232,12 +245,14 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> QuantLightningIndexerCandidate(
 
     EXEC_NPU_CMD(aclnnVllmAscendQuantLightningIndexerV2, query, key, weights, queryDequantScale, keyDequantScale,
               cuSeqlensQ, cuSeqlensK, sequsedQ, sequsedK, cmpResidualK, blockTable, outputIdxOffset,
-              metadata, candidateTopkIndexIn, causalSeqlensKvGlobal, topk, quantMode, maxSeqlenQ, queryLayoutPtr,
-              keyLayoutPtr, maskMode, cmpRatio, returnValue, candidateMode, candidateTopkBlocks, candidateBlockSize,
-              keyStride0, keyScaleStride0, enableDcp, cpWorld, cpRank, cpKvCacheInterleaveSize, sparseIndicesOut,
-              sparseValuesOut, candidateTopkIndexOut);
+              metadata, candidateTopkIndexIn, candidateBlockLength, causalSeqlensKvGlobal, topk, quantMode,
+              maxSeqlenQ, queryLayoutPtr, keyLayoutPtr, maskMode, cmpRatio, returnValue, candidateMode,
+              candidateTopkBlocks, candidateBlockSize, keyStride0, keyScaleStride0, enableDcp, cpWorld, cpRank,
+              cpKvCacheInterleaveSize, sparseIndicesOut, sparseValuesOut, candidateTopkIndexOut,
+              candidateBlockLengthOut);
 
-    return std::tuple<at::Tensor, at::Tensor, at::Tensor>(sparseIndicesOut, sparseValuesOut, candidateTopkIndexOut);
+    return std::tuple<at::Tensor, at::Tensor, at::Tensor, at::Tensor>(
+        sparseIndicesOut, sparseValuesOut, candidateTopkIndexOut, candidateBlockLengthOut);
 }
 
 }  // namespace vllm_ascend::qli_v2
