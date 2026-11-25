@@ -218,11 +218,10 @@ def test_two_update_rounds_reconstruct_latest_weight(monkeypatch):
     )
     monkeypatch.setattr(torch.accelerator, "synchronize", Mock())
     monkeypatch.setattr(hccl_m2n_engine, "_require_nd", Mock())
-    has_reload_lifecycle = hasattr(reload, "start_reload")
     start = Mock()
     finish = Mock()
-    monkeypatch.setattr(reload, "start_reload" if has_reload_lifecycle else "initialize_layerwise_reload", start)
-    monkeypatch.setattr(reload, "finish_reload" if has_reload_lifecycle else "finalize_layerwise_reload", finish)
+    monkeypatch.setattr(reload, "start_reload", start)
+    monkeypatch.setattr(reload, "finish_reload", finish)
     monkeypatch.setattr(hccl_m2n_engine, "HCCLLibrary", Mock())
 
     source_layout = M2NLayout(M2NMesh((2, 1), 0), (0, -1))
@@ -287,10 +286,7 @@ def test_two_update_rounds_reconstruct_latest_weight(monkeypatch):
             torch.testing.assert_close(loaded["weight"], tensor)
             tensor.add_(100)
     assert start.call_args_list == [call(worker.model)] * 2
-    finish_args = (worker.model, worker.model_config)
-    if has_reload_lifecycle:
-        finish_args += (worker.device,)
-    assert finish.call_args_list == [call(*finish_args)] * 2
+    assert finish.call_args_list == [call(worker.model, worker.model_config, worker.device)] * 2
 
 
 def test_failed_trainer_session_cannot_send_again():

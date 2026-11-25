@@ -553,8 +553,6 @@ class HCCLM2NWeightTransferEngine(M2NWeightTransferEngine):
                 )
             requested_indices.append(index)
 
-        from vllm.model_executor.model_loader.mtp_validation import disable_mtp_completeness_check
-
         is_full_order = requested_indices == list(range(len(self._metas)))
         stream = torch.npu.current_stream(self.device)
         transferred = 0
@@ -588,7 +586,7 @@ class HCCLM2NWeightTransferEngine(M2NWeightTransferEngine):
                     yield meta.name, buffer
 
         has_fallback = any(needs_host_sync)
-        with closing(received), disable_mtp_completeness_check():
+        with closing(received):
             if has_fallback:
                 self.model.load_weights(receive())
             else:
