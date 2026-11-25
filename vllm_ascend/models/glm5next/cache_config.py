@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from math import lcm
 
 from vllm.config import VllmConfig
+from vllm.logger import logger
 from vllm.model_executor.models.utils import extract_layer_index
 from vllm.utils.torch_utils import get_dtype_size
 
@@ -366,6 +367,35 @@ def _create_mamba_groups(
 ) -> list[KVCacheGroupSpec]:
     sorted_groups = [list(_sorted_layer_names(layer_names)) for layer_names in grouped_layer_names]
     return create_kv_cache_group_specs(mamba_specs, sorted_groups)
+
+
+def regroup_glm5_next_hisparse_kda(
+    kv_cache_spec: dict[str, KVCacheSpec], groups: list[KVCacheGroupSpec]
+) -> list[KVCacheGroupSpec]:
+    """Split native Flash KDA groups to bound the physical cache pitch."""
+    mamba_specs = {name: spec for name, spec in kv_cache_spec.items() if isinstance(spec, MambaSpec)}
+    if not mamba_specs:
+        return groups
+    # Cap state layers per physical block so C8 retains enough global IDs
+    # after charging for both the device slab and the compact KPool region.
+    max_layers_per_group = 6
+    native_groups = _group_glm5_next_mamba_layer_names(kv_cache_spec, mamba_specs)
+    split_groups = [
+        names[start : start + max_layers_per_group]
+        for names in native_groups
+        for start in range(0, len(names), max_layers_per_group)
+    ]
+    kda_groups = _create_mamba_groups(mamba_specs, split_groups)
+    # Other groups retain their block tables and logical page sizes. Core
+    # materializes the finished group list with the new aligned slab stride.
+    other_groups = [group for group in groups if all(name not in mamba_specs for name in group.layer_names)]
+    logger.info_once(
+        "GLM-Next HiSparse KDA groups: %d -> %d, layers per group: %s",
+        len(groups) - len(other_groups),
+        len(kda_groups),
+        tuple(len(group.layer_names) for group in kda_groups),
+    )
+    return [*other_groups, *kda_groups]
 
 
 def get_glm5_next_kv_cache_groups(

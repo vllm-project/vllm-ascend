@@ -1,0 +1,9 @@
+pr: 22806
+entries:
+  - category: feature
+    text: >-
+      Added opt-in HiSparse support for GLM-5.3-Flash on Ascend A3 with INT8 main KV and
+      BF16 KPool. Enable HiSparse and select MemFabric in HiSparseConnector to use the
+      validated Host offload path on HDK 25.5.1.
+    model: glm-5.3-flash
+    hardware: [A3]

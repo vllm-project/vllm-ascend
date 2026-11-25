@@ -84,6 +84,22 @@ For a `MultiConnector` configuration, put `transfer_backend` in the
 `HiSparseConnector` child's extra configuration. This setting selects
 the private Host allocator. Omitting it uses native ACL Host-memory registration.
 
+#### GLM-5.3-Flash on 950DT
+
+Start from the [950DT single-node deployment](../../tutorials/models/GLM5.3-Flash.md#glm53-flash-5-1-950dt).
+Keep Model Runner V2, FP8 main KV, the hybrid KV cache manager, and one rank
+for each of DP, PP, PCP and DCP. Replace the recipe's indexer attention
+option and add the local HiSparse connector:
+
+```bash
+--attention-config '{"indexer_kv_dtype":"fp8","hisparse_config":{"eager_host_mirror":false}}' \
+--kv-transfer-config '{"kv_connector":"HiSparseConnector","kv_role":"kv_both","kv_connector_extra_config":{"host_pool_gib":8}}'
+```
+
+The host pool stores target DSA pages. The KeyPool index and KDA state stay
+on device. With MTP5, the resident verifier can defer host copies while
+preserving the original copy path for batches that require cold rows.
+
 ### Verifying the Feature
 
 Send a request and check the server's metrics endpoint for the HiSparse miss

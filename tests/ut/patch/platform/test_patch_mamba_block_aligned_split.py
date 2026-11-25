@@ -133,6 +133,18 @@ def test_kv_both_cold_prefill_retains_mamba_boundary_split():
     assert result == 4224
 
 
+@pytest.mark.parametrize(("model_type", "expected_tokens"), [("glm5_next_text", 2304), ("other_model", 1152)])
+def test_local_hisparse_preserves_last_flash_kpool_checkpoint(model_type, expected_tokens):
+    scheduler = _scheduler(is_kv_consumer=True, is_kv_producer=True, uses_sparse_index_kpool=True)
+    scheduler.vllm_config.kv_transfer_config.kv_connector = "HiSparseConnector"
+    scheduler.vllm_config.attention_config = SimpleNamespace(hisparse_config=object())
+    scheduler.vllm_config.model_config.hf_text_config.model_type = model_type
+    scheduler.block_size = 1152
+    request = _request(num_computed_tokens=29952, num_prompt_tokens=32768, num_tokens=32768)
+
+    assert _mamba_block_aligned_split(scheduler, request, num_new_tokens=2816) == expected_tokens
+
+
 def test_producer_splits_window_after_external_cache_hit():
     result = _mamba_block_aligned_split(
         _scheduler(is_kv_consumer=False),
