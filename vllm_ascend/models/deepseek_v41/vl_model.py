@@ -8,7 +8,7 @@ import torch
 from torch import nn
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.interfaces import MultiModalEmbeddings, SupportsEagle3, SupportsMultiModal, SupportsPP
-from vllm.model_executor.models.utils import maybe_prefix
+from vllm.model_executor.models.utils import is_pp_missing_parameter, maybe_prefix
 
 # Upstream #56741 normalized the V4.1 model package name from deepseek_v4_1
 # to deepseek_v41.
@@ -330,11 +330,9 @@ class AscendDeepseekV41ForCausalLM(
                 if vision_name is None:
                     yield name, loaded_weight
                     continue
-                # Text-only serving intentionally leaves the vision tower
-                # unconstructed, although a multimodal checkpoint still
-                # contains its tensors. Keep loading strict when the tower is
-                # enabled, but do not make disabled modalities loadable state.
-                if vision_name not in params and self.vision is None:
+                # Skip disabled vision components and towers owned by another
+                # PP stage, but keep loading strict for local enabled modules.
+                if vision_name not in params and (self.vision is None or is_pp_missing_parameter(vision_name, self)):
                     continue
                 param = params[vision_name]
                 loader = getattr(param, "weight_loader", default_weight_loader)

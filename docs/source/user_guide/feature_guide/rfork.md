@@ -143,7 +143,7 @@ Both sources are supported configuration inputs. The environment route suits dep
 
 ## Example Commands & Placeholders
 
-> Replace parts in `<...>` before running.
+> Replace placeholders such as `<planner_port>` with your own values before running the commands.
 
 ### 1. Install YuanRong Datasystem
 

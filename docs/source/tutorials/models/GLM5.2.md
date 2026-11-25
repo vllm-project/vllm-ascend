@@ -358,7 +358,7 @@ If you want to deploy a multi-node environment, first verify the data-plane netw
 
     export VLLM_RPC_TIMEOUT=3600000
     export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=30000
-    export HCCL_EXEC_TIMEOUT=1800
+    export HCCL_EXEC_TIMEOUT=3600
     export HCCL_CONNECT_TIMEOUT=1800
     export HCCL_BUFFSIZE=1200
 
@@ -445,7 +445,7 @@ If you want to deploy a multi-node environment, first verify the data-plane netw
 
     export VLLM_RPC_TIMEOUT=3600000
     export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=30000
-    export HCCL_EXEC_TIMEOUT=1800
+    export HCCL_EXEC_TIMEOUT=3600
     export HCCL_CONNECT_TIMEOUT=1800
     export HCCL_BUFFSIZE=1200
 
@@ -683,7 +683,7 @@ If you want to deploy a multi-node environment, first verify the data-plane netw
     export HCCL_SOCKET_IFNAME=$nic_name
     export VLLM_RPC_TIMEOUT=360000
     export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=30000
-    export HCCL_EXEC_TIMEOUT=200
+    export HCCL_EXEC_TIMEOUT=3600
     export HCCL_CONNECT_TIMEOUT=120
     export OMP_PROC_BIND=false
     export OMP_NUM_THREADS=10
@@ -750,7 +750,7 @@ If you want to deploy a multi-node environment, first verify the data-plane netw
     export HCCL_SOCKET_IFNAME=$nic_name
     export VLLM_RPC_TIMEOUT=360000
     export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=30000
-    export HCCL_EXEC_TIMEOUT=200
+    export HCCL_EXEC_TIMEOUT=3600
     export HCCL_CONNECT_TIMEOUT=120
     export OMP_PROC_BIND=false
     export OMP_NUM_THREADS=10
@@ -975,7 +975,7 @@ layerwise setting and topology.
 
             export VLLM_RPC_TIMEOUT=3600000
             export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=30000
-            export HCCL_EXEC_TIMEOUT=1800
+            export HCCL_EXEC_TIMEOUT=3600
             export HCCL_CONNECT_TIMEOUT=1800
             export HCCL_BUFFSIZE=1200
 
@@ -1086,7 +1086,7 @@ layerwise setting and topology.
 
             export VLLM_RPC_TIMEOUT=3600000
             export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=30000
-            export HCCL_EXEC_TIMEOUT=1800
+            export HCCL_EXEC_TIMEOUT=3600
             export HCCL_CONNECT_TIMEOUT=1800
             export HCCL_BUFFSIZE=1200
 
@@ -1195,7 +1195,7 @@ layerwise setting and topology.
 
             export VLLM_RPC_TIMEOUT=3600000
             export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=30000
-            export HCCL_EXEC_TIMEOUT=1800
+            export HCCL_EXEC_TIMEOUT=3600
             export HCCL_CONNECT_TIMEOUT=1800
             export HCCL_BUFFSIZE=1800
 
@@ -1514,7 +1514,7 @@ layerwise setting and topology.
             export PYTHONPATH="/vllm-workspace/vllm:/vllm-workspace/vllm-ascend:${PYTHONPATH:-}"
 
             export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=30000
-            export HCCL_EXEC_TIMEOUT=1800
+            export HCCL_EXEC_TIMEOUT=3600
             export HCCL_CONNECT_TIMEOUT=1800
             export ASCEND_TRANSFER_TIMEOUT=10000
             export MC_TRANSFER_TIMEOUT=120
@@ -1615,7 +1615,7 @@ layerwise setting and topology.
             export PYTHONPATH="/vllm-workspace/vllm:/vllm-workspace/vllm-ascend:${PYTHONPATH:-}"
 
             export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=30000
-            export HCCL_EXEC_TIMEOUT=1800
+            export HCCL_EXEC_TIMEOUT=3600
             export HCCL_CONNECT_TIMEOUT=1800
             export ASCEND_TRANSFER_TIMEOUT=10000
             export MC_TRANSFER_TIMEOUT=120
@@ -1715,7 +1715,7 @@ layerwise setting and topology.
             export PYTHONPATH="/vllm-workspace/vllm:/vllm-workspace/vllm-ascend:${PYTHONPATH:-}"
 
             export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=30000
-            export HCCL_EXEC_TIMEOUT=1800
+            export HCCL_EXEC_TIMEOUT=3600
             export HCCL_CONNECT_TIMEOUT=1800
             export ASCEND_TRANSFER_TIMEOUT=10000
             export MC_TRANSFER_TIMEOUT=120
@@ -1803,7 +1803,7 @@ layerwise setting and topology.
             export PYTHONPATH="/vllm-workspace/vllm:/vllm-workspace/vllm-ascend:${PYTHONPATH:-}"
 
             export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=30000
-            export HCCL_EXEC_TIMEOUT=1800
+            export HCCL_EXEC_TIMEOUT=3600
             export HCCL_CONNECT_TIMEOUT=1800
             export ASCEND_TRANSFER_TIMEOUT=10000
             export MC_TRANSFER_TIMEOUT=120
@@ -2091,7 +2091,7 @@ layerwise setting and topology.
     export GLOO_SOCKET_IFNAME="$NIC_NAME"
     export TP_SOCKET_IFNAME="$NIC_NAME"
     export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=30000
-    export HCCL_EXEC_TIMEOUT=7200
+    export HCCL_EXEC_TIMEOUT=3600
     export HCCL_CONNECT_TIMEOUT=7200
     export VLLM_RPC_TIMEOUT=360000
     export VLLM_ENGINE_READY_TIMEOUT_S=1200
@@ -2186,7 +2186,7 @@ layerwise setting and topology.
     export TP_SOCKET_IFNAME="$NIC_NAME"
     export HCCL_SOCKET_IFNAME="$NIC_NAME"
     export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=30000
-    export HCCL_EXEC_TIMEOUT=7200
+    export HCCL_EXEC_TIMEOUT=3600
     export HCCL_CONNECT_TIMEOUT=7200
     export VLLM_RPC_TIMEOUT=360000
     export VLLM_ENGINE_READY_TIMEOUT_S=1200
@@ -2508,7 +2508,7 @@ Select the tab that matches the deployment hardware and its Prefill topology.
 
             export VLLM_RPC_TIMEOUT=3600000
             export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=30000
-            export HCCL_EXEC_TIMEOUT=1800
+            export HCCL_EXEC_TIMEOUT=3600
             export HCCL_CONNECT_TIMEOUT=1800
             export HCCL_BUFFSIZE=1200
 
@@ -2648,7 +2648,7 @@ Select the tab that matches the deployment hardware and its Prefill topology.
 
             export VLLM_RPC_TIMEOUT=3600000
             export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=30000
-            export HCCL_EXEC_TIMEOUT=1800
+            export HCCL_EXEC_TIMEOUT=3600
             export HCCL_CONNECT_TIMEOUT=1800
             export HCCL_BUFFSIZE=1200
 
@@ -2787,7 +2787,7 @@ Select the tab that matches the deployment hardware and its Prefill topology.
 
             export VLLM_RPC_TIMEOUT=3600000
             export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=30000
-            export HCCL_EXEC_TIMEOUT=1800
+            export HCCL_EXEC_TIMEOUT=3600
             export HCCL_CONNECT_TIMEOUT=1800
             export HCCL_BUFFSIZE=1800
 
@@ -3067,7 +3067,7 @@ Select the tab that matches the deployment hardware and its Prefill topology.
             export PYTHONPATH="/vllm-workspace/vllm:/vllm-workspace/vllm-ascend:${PYTHONPATH:-}"
 
             export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=30000
-            export HCCL_EXEC_TIMEOUT=1800
+            export HCCL_EXEC_TIMEOUT=3600
             export HCCL_CONNECT_TIMEOUT=1800
             export ASCEND_TRANSFER_TIMEOUT=10000
             export MC_TRANSFER_TIMEOUT=120
@@ -3189,7 +3189,7 @@ Select the tab that matches the deployment hardware and its Prefill topology.
             export PYTHONPATH="/vllm-workspace/vllm:/vllm-workspace/vllm-ascend:${PYTHONPATH:-}"
 
             export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=30000
-            export HCCL_EXEC_TIMEOUT=1800
+            export HCCL_EXEC_TIMEOUT=3600
             export HCCL_CONNECT_TIMEOUT=1800
             export ASCEND_TRANSFER_TIMEOUT=10000
             export MC_TRANSFER_TIMEOUT=120
@@ -3311,7 +3311,7 @@ Select the tab that matches the deployment hardware and its Prefill topology.
             export PYTHONPATH="/vllm-workspace/vllm:/vllm-workspace/vllm-ascend:${PYTHONPATH:-}"
 
             export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=30000
-            export HCCL_EXEC_TIMEOUT=1800
+            export HCCL_EXEC_TIMEOUT=3600
             export HCCL_CONNECT_TIMEOUT=1800
             export ASCEND_TRANSFER_TIMEOUT=10000
             export MC_TRANSFER_TIMEOUT=120
@@ -3422,7 +3422,7 @@ Select the tab that matches the deployment hardware and its Prefill topology.
             export PYTHONPATH="/vllm-workspace/vllm:/vllm-workspace/vllm-ascend:${PYTHONPATH:-}"
 
             export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=30000
-            export HCCL_EXEC_TIMEOUT=1800
+            export HCCL_EXEC_TIMEOUT=3600
             export HCCL_CONNECT_TIMEOUT=1800
             export ASCEND_TRANSFER_TIMEOUT=10000
             export MC_TRANSFER_TIMEOUT=120
@@ -3722,7 +3722,7 @@ Select the tab that matches the deployment hardware and its Prefill topology.
 
     export VLLM_SERVER_DEV_MODE=1
     export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=30000
-    export HCCL_EXEC_TIMEOUT=1800
+    export HCCL_EXEC_TIMEOUT=3600
     export HCCL_CONNECT_TIMEOUT=1800
     export VLLM_HOST_IP="$LOCAL_IP"
     export HCCL_IF_IP="$LOCAL_IP"
@@ -3846,7 +3846,7 @@ Select the tab that matches the deployment hardware and its Prefill topology.
 
     export VLLM_SERVER_DEV_MODE=1
     export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=30000
-    export HCCL_EXEC_TIMEOUT=1800
+    export HCCL_EXEC_TIMEOUT=3600
     export HCCL_CONNECT_TIMEOUT=1800
     export ASCEND_TRANSFER_TIMEOUT=10000
     export VLLM_HOST_IP="$LOCAL_IP"
@@ -4066,7 +4066,7 @@ Select the tab that matches your deployment hardware.
 
             export VLLM_RPC_TIMEOUT=3600000
             export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=30000
-            export HCCL_EXEC_TIMEOUT=1800
+            export HCCL_EXEC_TIMEOUT=3600
             export HCCL_CONNECT_TIMEOUT=1800
             export HCCL_BUFFSIZE=1200
 
@@ -4199,7 +4199,7 @@ Select the tab that matches your deployment hardware.
 
             export VLLM_RPC_TIMEOUT=3600000
             export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=30000
-            export HCCL_EXEC_TIMEOUT=1800
+            export HCCL_EXEC_TIMEOUT=3600
             export HCCL_CONNECT_TIMEOUT=1800
             export HCCL_BUFFSIZE=900
 
@@ -4420,7 +4420,7 @@ Select the tab that matches your deployment hardware.
             export PYTHONPATH="/vllm-workspace/vllm:/vllm-workspace/vllm-ascend:${PYTHONPATH:-}"
 
             export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=30000
-            export HCCL_EXEC_TIMEOUT=1800
+            export HCCL_EXEC_TIMEOUT=3600
             export HCCL_CONNECT_TIMEOUT=1800
             export ASCEND_TRANSFER_TIMEOUT=10000
             export MC_TRANSFER_TIMEOUT=120
@@ -4523,7 +4523,7 @@ Select the tab that matches your deployment hardware.
             export PYTHONPATH="/vllm-workspace/vllm:/vllm-workspace/vllm-ascend:${PYTHONPATH:-}"
 
             export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=30000
-            export HCCL_EXEC_TIMEOUT=1800
+            export HCCL_EXEC_TIMEOUT=3600
             export HCCL_CONNECT_TIMEOUT=1800
             export ASCEND_TRANSFER_TIMEOUT=10000
             export MC_TRANSFER_TIMEOUT=120
@@ -4625,7 +4625,7 @@ Select the tab that matches your deployment hardware.
             export PYTHONPATH="/vllm-workspace/vllm:/vllm-workspace/vllm-ascend:${PYTHONPATH:-}"
 
             export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=30000
-            export HCCL_EXEC_TIMEOUT=1800
+            export HCCL_EXEC_TIMEOUT=3600
             export HCCL_CONNECT_TIMEOUT=1800
             export ASCEND_TRANSFER_TIMEOUT=10000
             export MC_TRANSFER_TIMEOUT=120
@@ -4716,7 +4716,7 @@ Select the tab that matches your deployment hardware.
             export PYTHONPATH="/vllm-workspace/vllm:/vllm-workspace/vllm-ascend:${PYTHONPATH:-}"
 
             export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=30000
-            export HCCL_EXEC_TIMEOUT=1800
+            export HCCL_EXEC_TIMEOUT=3600
             export HCCL_CONNECT_TIMEOUT=1800
             export ASCEND_TRANSFER_TIMEOUT=10000
             export MC_TRANSFER_TIMEOUT=120
