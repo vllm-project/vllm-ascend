@@ -2150,8 +2150,9 @@ class _CaptureStateBuilder(_PrefillStateBuilder):
 
 @pytest.mark.parametrize("capture", [False, True])
 @pytest.mark.parametrize("full_graph", [False, True])
-def test_v41_capture_keeps_compressed_indexer_branches(monkeypatch, capture, full_graph):
-    monkeypatch.setattr(attn_utils, "AscendDSAV41MetadataBuilder", _CaptureStateBuilder)
+@pytest.mark.parametrize("builder_name", ["AscendDSAV41MetadataBuilder", "AscendSFAIndexerMetadataBuilder"])
+def test_indexer_builder_receives_full_graph_mode(monkeypatch, capture, full_graph, builder_name):
+    monkeypatch.setattr(attn_utils, builder_name, _CaptureStateBuilder)
     builder = _CaptureStateBuilder()
     group = SimpleNamespace(layer_names=["layer.0"], get_metadata_builder=lambda _: builder)
     attn_utils.build_attn_metadata(

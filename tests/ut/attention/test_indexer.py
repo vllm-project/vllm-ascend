@@ -8,6 +8,7 @@ from unittest.mock import MagicMock, Mock, patch
 import pytest
 import torch
 import torch_npu
+from vllm.config.compilation import CUDAGraphMode
 from vllm.v1.attention.backend import AttentionCGSupport
 from vllm.v1.kv_cache_interface import FullAttentionSpec
 
@@ -264,12 +265,16 @@ def test_kimi_k31_bf16_sharded_indexer_and_graph_policy(target, model_dtype, ind
     config = SimpleNamespace(
         model_config=SimpleNamespace(hf_config=SimpleNamespace(model_type=target), dtype=model_dtype),
         attention_config=SimpleNamespace(indexer_kv_dtype=indexer_dtype),
+        compilation_config=SimpleNamespace(cudagraph_mode=CUDAGraphMode.NONE),
         speculative_config=None,
     )
     assert _uses_kimi_k31_bf16_indexer(config) is enabled
     with patch("vllm_ascend.attention.indexer.enable_sfa_dcp_sharded_indexer", return_value=True):
         expected = AttentionCGSupport.NEVER if enabled else AttentionCGSupport.UNIFORM_BATCH
         assert AscendSFAIndexerMetadataBuilder.get_cudagraph_support(config, MagicMock()) is expected
+        config.compilation_config.cudagraph_mode = CUDAGraphMode.FULL_DECODE_ONLY
+        support = AscendSFAIndexerMetadataBuilder.get_cudagraph_support(config, MagicMock())
+        assert support is AttentionCGSupport.UNIFORM_BATCH
 
 
 @patch("vllm_ascend.attention.indexer.get_cos_and_sin_mla")
@@ -303,6 +308,20 @@ def test_bf16_sharded_builder_uses_causal_lengths_instead_of_native_qli(mock_cos
     assert builder.take_device_metadata_tasks() == ()
     assert metadata.first_valid_indexer_page == 6
     assert metadata.max_local_indexer_pages == 8
+
+    capture_end = common.max_seq_len
+    with (
+        patch.dict("sys.modules", {ops.__name__: ops}),
+        patch("vllm_ascend.attention.indexer.get_dcp_group", return_value=group),
+    ):
+        captured = builder.build_for_cudagraph_capture(common)
+        common.max_seq_len = 2 * capture_end
+        replay = builder.build(0, common, full_graph_mode=True)
+
+    assert captured.full_graph_mode and replay.full_graph_mode
+    assert captured.max_local_indexer_pages is replay.max_local_indexer_pages is None
+    assert captured.block_table.shape == replay.block_table.shape
+    assert captured.local_visible_lengths.data_ptr() == replay.local_visible_lengths.data_ptr()
 
 
 @patch("vllm_ascend.attention.indexer.get_ascend_config")

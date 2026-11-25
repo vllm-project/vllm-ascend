@@ -538,7 +538,7 @@ class NPUPlatform(Platform):
         # ascend_config is only used for verification, this object must NOT be modified here
         ascend_config = init_ascend_config(vllm_config)
         if _validate_kimi_k31_bf16_dcp(vllm_config):
-            _configure_kimi_k31_bf16_dcp_eager(vllm_config)
+            _configure_kimi_k31_bf16_dcp_graph(vllm_config)
         _validate_deepseek_v4_tp_config(vllm_config, ascend_config)
         _check_ascend_config(vllm_config, ascend_config)
 
@@ -1846,15 +1846,25 @@ def _validate_kimi_k31_bf16_dcp(vllm_config: VllmConfig) -> bool:
     return True
 
 
-def _configure_kimi_k31_bf16_dcp_eager(vllm_config: VllmConfig) -> None:
+def _configure_kimi_k31_bf16_dcp_graph(vllm_config: VllmConfig) -> None:
     from vllm.config.compilation import CUDAGraphMode
 
-    # The paged BF16 indexer uses an eager host bound for its compute tiles.
+    if vllm_config.speculative_config is not None:
+        vllm_config.speculative_config.enforce_eager = True
+
+    kv_transfer_config = vllm_config.kv_transfer_config
+    if (
+        not vllm_config.model_config.enforce_eager
+        and vllm_config.compilation_config.cudagraph_mode == CUDAGraphMode.FULL_DECODE_ONLY
+        and kv_transfer_config is not None
+        and kv_transfer_config.kv_role == "kv_consumer"
+    ):
+        logger.info_once("Kimi K3.1 sharded BF16 indexer enables FULL_DECODE_ONLY for the target on Decode.")
+        return
+
     logger.info_once("Kimi K3.1 sharded BF16 indexer uses eager execution for target and draft.")
     vllm_config.model_config.enforce_eager = True
     vllm_config.compilation_config.cudagraph_mode = CUDAGraphMode.NONE
-    if vllm_config.speculative_config is not None:
-        vllm_config.speculative_config.enforce_eager = True
 
 
 def _validate_draft_decode_context_parallel_config(vllm_config: VllmConfig) -> None:

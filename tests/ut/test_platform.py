@@ -16,7 +16,7 @@ from vllm_ascend.ascend_forward_context import MoECommType, override_mrv2_in_pro
 from vllm_ascend.device.hardware_profile import get_hardware_profile
 from vllm_ascend.platform import (
     NPUPlatform,
-    _configure_kimi_k31_bf16_dcp_eager,
+    _configure_kimi_k31_bf16_dcp_graph,
     _setup_compile_backend,
     _validate_deepseek_v4_tp_config,
     _validate_draft_decode_context_parallel_config,
@@ -320,13 +320,25 @@ def test_kimi_k31_bf16_dcp_accepts_gqa_draft_with_tp_heads():
     assert config.parallel_config.decode_context_parallel_size == 8
 
 
-def test_kimi_k31_bf16_dcp_disables_target_and_draft_graphs():
+@pytest.mark.parametrize(
+    ("role", "enforce_eager", "mode", "expected_mode"),
+    [
+        ("kv_consumer", False, CUDAGraphMode.FULL_DECODE_ONLY, CUDAGraphMode.FULL_DECODE_ONLY),
+        ("kv_consumer", True, CUDAGraphMode.FULL_DECODE_ONLY, CUDAGraphMode.NONE),
+        ("kv_producer", False, CUDAGraphMode.FULL_DECODE_ONLY, CUDAGraphMode.NONE),
+        (None, False, CUDAGraphMode.FULL_DECODE_ONLY, CUDAGraphMode.NONE),
+        ("kv_consumer", False, CUDAGraphMode.FULL_AND_PIECEWISE, CUDAGraphMode.NONE),
+    ],
+)
+def test_kimi_k31_bf16_dcp_graph_policy(role, enforce_eager, mode, expected_mode):
     config = _make_kimi_k31_bf16_dcp_config()
-    config.compilation_config = SimpleNamespace(cudagraph_mode=CUDAGraphMode.FULL_DECODE_ONLY)
-    _configure_kimi_k31_bf16_dcp_eager(config)
-    assert config.model_config.enforce_eager
+    config.model_config.enforce_eager = enforce_eager
+    config.kv_transfer_config = None if role is None else SimpleNamespace(kv_role=role)
+    config.compilation_config = SimpleNamespace(cudagraph_mode=mode)
+    _configure_kimi_k31_bf16_dcp_graph(config)
+    assert config.model_config.enforce_eager is (expected_mode == CUDAGraphMode.NONE)
     assert config.speculative_config.enforce_eager
-    assert config.compilation_config.cudagraph_mode == CUDAGraphMode.NONE
+    assert config.compilation_config.cudagraph_mode == expected_mode
 
 
 @pytest.mark.parametrize("cache_dtype", ["fp8", "int8"])

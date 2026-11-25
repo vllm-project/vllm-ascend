@@ -8,7 +8,8 @@ from vllm_ascend.ops import bf16_sharded_indexer
 
 
 @pytest.mark.parametrize("topk", [2, 20])
-def test_bf16_paged_candidates_match_independent_causal_reference(monkeypatch, topk):
+@pytest.mark.parametrize("full_graph", [False, True])
+def test_bf16_paged_candidates_match_independent_causal_reference(monkeypatch, topk, full_graph):
     monkeypatch.setattr(bf16_sharded_indexer, "_QUERY_ROWS_PER_TILE", 2)
     monkeypatch.setattr(bf16_sharded_indexer, "_KEY_TOKENS_PER_TILE", 4)
     generator = torch.Generator().manual_seed(23)
@@ -23,7 +24,7 @@ def test_bf16_paged_candidates_match_independent_causal_reference(monkeypatch, t
     visible = torch.tensor([[1], [7], [5], [6], [9], [0], [10], [12]], dtype=torch.int32)
     with torch.autocast(device_type="cpu", dtype=torch.bfloat16):
         actual_ids, actual_scores = bf16_sharded_indexer.bf16_paged_indexer_candidates(
-            query, weights, key, table, ends, visible, topk, first_valid_page=2
+            query, weights, key, table, ends, visible, topk, first_valid_page=2, full_graph=full_graph
         )
 
     expected_ids = torch.full_like(actual_ids, -1)

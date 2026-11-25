@@ -18,6 +18,7 @@ def bf16_paged_indexer_candidates(
     topk: int,
     *,
     first_valid_page: int = 1,
+    full_graph: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Select paged, rank-local Lightning Indexer candidates with FP32 scores.
 
@@ -64,6 +65,7 @@ def bf16_paged_indexer_candidates(
         requests = request_rows[row_slice]
         best_ids = indices[row_slice, 0]
         best_scores = scores[row_slice, 0]
+        score_tiles = []
 
         for page_start in range(0, block_table.shape[1], pages_per_tile):
             page_end = min(page_start + pages_per_tile, block_table.shape[1])
@@ -80,6 +82,11 @@ def bf16_paged_indexer_candidates(
                 tile_scores = torch.bmm(query_tile, keys.transpose(1, 2)).relu_()
             tile_scores.mul_(weights_tile)
             tile_scores = tile_scores.sum(dim=1).masked_fill_(~valid_tokens, -torch.inf)
+            if full_graph:
+                # Score tiles stay small, while a single stable sort over the
+                # static page extent avoids recording one sort per page tile.
+                score_tiles.append(tile_scores)
+                continue
             tile_ids = page_tokens.flatten().expand_as(tile_scores).masked_fill(~valid_tokens, -1)
 
             # All IDs in the old winners precede the new tile's IDs.
@@ -89,6 +96,16 @@ def bf16_paged_indexer_candidates(
             sorted_scores, order = torch.sort(merged_scores, dim=-1, descending=True, stable=True)
             best_scores = sorted_scores[:, :topk]
             best_ids = merged_ids.gather(-1, order[:, :topk])
+
+        if full_graph:
+            all_scores = torch.cat(score_tiles, dim=-1)
+            sorted_scores, order = torch.sort(all_scores, dim=-1, descending=True, stable=True)
+            width = min(topk, all_scores.shape[-1])
+            best_scores = sorted_scores[:, :width]
+            best_ids = order[:, :width].to(torch.int32).masked_fill(best_scores == -torch.inf, -1)
+            indices[row_slice, 0, :width].copy_(best_ids)
+            scores[row_slice, 0, :width].copy_(best_scores)
+            continue
 
         indices[row_slice, 0].copy_(best_ids)
         scores[row_slice, 0].copy_(best_scores)

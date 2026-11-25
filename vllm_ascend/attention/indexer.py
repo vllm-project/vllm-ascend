@@ -10,6 +10,7 @@ import torch
 import torch_npu
 from torch import nn
 from vllm.config import VllmConfig, get_current_vllm_config
+from vllm.config.compilation import CUDAGraphMode
 from vllm.distributed import get_dcp_group, get_pcp_group, get_tp_group
 from vllm.forward_context import get_forward_context
 from vllm.triton_utils import HAS_TRITON
@@ -134,9 +135,9 @@ class AscendSFAIndexerMetadata:
     topk_selector: Any | None = None
     local_visible_lengths: torch.Tensor | None = None
     first_valid_indexer_page: int = 1
-    # Host upper bound in local kernel pages. MRv2 graph capture supplies
-    # the model's maximum length so replay always covers the live context.
+    # Eager-only host bound. A full graph always uses the page table capacity.
     max_local_indexer_pages: int | None = None
+    full_graph_mode: bool = False
     # Shared verbatim by the A5 metadata producer and QLI consumer.
     qli_dcp_args: dict[str, Any] | None = None
     # Includes the leading zero; shared by every layer in this metadata group.
@@ -890,6 +891,7 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
                     indexer_metadata.local_visible_lengths,
                     self.topk_tokens,
                     first_valid_page=indexer_metadata.first_valid_indexer_page,
+                    full_graph=indexer_metadata.full_graph_mode,
                 )
                 return distributed_topk(
                     indices,
@@ -1093,9 +1095,8 @@ class AscendSFAIndexerMetadataBuilder(AttentionMetadataBuilder[AscendSFAIndexerM
         kv_cache_spec: AttentionSpec,
     ) -> AttentionCGSupport:
         if enable_sfa_dcp_sharded_indexer(vllm_config) and _uses_kimi_k31_bf16_indexer(vllm_config):
-            # The bounded PyTorch scorer loops over an eager host length
-            # bound. Capturing model-length tiles for every layer would turn
-            # long-context profiles into excessively large graphs.
+            if vllm_config.compilation_config.cudagraph_mode == CUDAGraphMode.FULL_DECODE_ONLY:
+                return AttentionCGSupport.UNIFORM_BATCH
             return AttentionCGSupport.NEVER
         speculative_config = vllm_config.speculative_config
         if (
@@ -1482,11 +1483,14 @@ class AscendSFAIndexerMetadataBuilder(AttentionMetadataBuilder[AscendSFAIndexerM
     def build_for_cudagraph_capture(
         self,
         common_attn_metadata: CommonAttentionMetadata,
+        *,
+        full_graph_mode: bool = True,
         **kwargs,
     ) -> AscendSFAIndexerMetadata:
         return self.build(
             common_prefix_len=0,
             common_attn_metadata=common_attn_metadata,
+            full_graph_mode=full_graph_mode,
             **kwargs,
         )
 
@@ -1598,6 +1602,7 @@ class AscendSFAIndexerMetadataBuilder(AttentionMetadataBuilder[AscendSFAIndexerM
         buffer_key: object,
         use_cached_rope: bool,
         copy_rope: bool,
+        full_graph_mode: bool = False,
         **kwargs,
     ) -> AscendSFAIndexerMetadata:
         num_reqs = common_attn_metadata.num_reqs
@@ -1644,7 +1649,7 @@ class AscendSFAIndexerMetadataBuilder(AttentionMetadataBuilder[AscendSFAIndexerM
 
             group = get_dcp_group()
             interleave = self.vllm_config.parallel_config.cp_kv_cache_interleave_size
-            if self.use_sharded_bf16:
+            if self.use_sharded_bf16 and not full_graph_mode:
                 upper_bound = common_attn_metadata.max_seq_len
                 complete_cycles, tail = divmod(upper_bound, group.world_size * interleave)
                 local_upper_bound = complete_cycles * interleave + min(
@@ -1705,7 +1710,7 @@ class AscendSFAIndexerMetadataBuilder(AttentionMetadataBuilder[AscendSFAIndexerM
                 sin,
                 buffer_key,
             )
-        elif copy_rope:
+        elif copy_rope or (self.use_sharded_bf16 and full_graph_mode):
             cos, sin = self._copy_rope_to_metadata_buffers(
                 cos,
                 sin,
@@ -1747,6 +1752,7 @@ class AscendSFAIndexerMetadataBuilder(AttentionMetadataBuilder[AscendSFAIndexerM
             local_visible_lengths=local_visible,
             first_valid_indexer_page=self.first_valid_indexer_page,
             max_local_indexer_pages=max_local_indexer_pages,
+            full_graph_mode=full_graph_mode,
             qli_dcp_args=qli_dcp_args,
             query_start_loc=query_start_loc,
         )

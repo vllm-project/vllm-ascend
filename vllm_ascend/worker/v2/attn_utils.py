@@ -67,6 +67,7 @@ from vllm_ascend.attention.context_parallel.dsa_cp import AscendDSACPMetadataBui
 from vllm_ascend.attention.dsa_attn_kv_plan import get_dsa_attn_kv_plan
 from vllm_ascend.attention.dsa_v1 import AscendDSAMetadataBuilder
 from vllm_ascend.attention.dsa_v41 import AscendDSAV41MetadataBuilder
+from vllm_ascend.attention.indexer import AscendSFAIndexerMetadataBuilder
 from vllm_ascend.attention.kimi_c8_static import pa_nz_cache_view, validate_pa_nz_page_stride
 from vllm_ascend.attention.sfa_v1 import AscendSFAMetadataBuilder
 from vllm_ascend.attention.utils import (
@@ -706,6 +707,8 @@ def build_attn_metadata(
                     # branches in the graph even for a short dummy sequence.
                     full_graph_mode=full_graph_mode or for_cudagraph_capture,
                 )
+            elif isinstance(attn_metadata_builder, AscendSFAIndexerMetadataBuilder):
+                attn_metadata_extra_kwargs["full_graph_mode"] = full_graph_mode or for_cudagraph_capture
             # Parallel attention and cache-only backends opt in to the PCP
             # context needed to construct their own metadata.
             if pcp_context is not None and (is_sfa_builder or is_dsa_builder or consumes_pcp_context):
