@@ -661,6 +661,8 @@ For MooncakeStore with `ASCEND_BUFFER_POOL` enabled, perform a warm-up phase bef
 
 ### Configuration Examples
 
+> **Before deployment:** Review the [Memcache software compatibility reference](#memcache-software-compatibility-reference) for Memcache-specific HDK, firmware, OS, and network requirements. If Memcache fails to start, KV pool creation fails, or KV transfer reports errors, see [Memcache Log Diagnosis](#memcache-log-diagnosis) for log signatures and actions.
+
 #### Environment Preparation
 
 1. Verify that `hccn.conf` exists in the environment. When using Docker, mount it into the container:
@@ -677,7 +679,7 @@ For MooncakeStore with `ASCEND_BUFFER_POOL` enabled, perform a warm-up phase bef
     export PYTHONHASHSEED=0
     ```
 
-#### Step 1: Prerequisite Checks
+#### Step 1: Prerequisite Checks {: #memcache-step-1-prerequisite-checks }
 
 1. **Check memory:**
 
@@ -705,19 +707,7 @@ For MooncakeStore with `ASCEND_BUFFER_POOL` enabled, perform a warm-up phase bef
 
 3. **Check software compatibility:**
 
-    Before deployment, compare the driver, firmware, OS, and network software against the [Memcache compatibility matrix](https://gitcode.com/Ascend/memcache/blob/master/docs/zh/compatibility.md). Key requirements and how to check them:
-
-    | Item | A2 (`device_rdma`) | A3 HCCS (`device_sdma`) | A3 NPU RDMA (`device_rdma`) | A5 (`device_urma`/`device_rdma`) | How to check |
-    | ---- | ------------------ | ----------------------- | ---------------------------- | -------------------------------- | ------------ |
-    | HDK | >= 25.5.1 | >= 25.5.1 | >= 25.5.1 | Per model type, see [MemFabric Hybrid hardware support](https://memfabric-hybrid.readthedocs.io/zh-cn/latest/wiki/user_guide/basic_configuration/hardware_support/) | `npu-smi info` |
-    | HDK firmware | N/A | >= 7.8.0.6.201 | N/A | N/A | `/usr/local/Ascend/driver/tools/upgrade-tool --device_index -1 --component -1 --version` |
-    | LingQu Computing Network L1 | Not required | >= 1.5.0 (1.5.1 recommended) | Not required | Not required | See the LingQu version query guide |
-    | Page size | 4K (64K supported since v1.3.1) | N/A | 4K (64K supported since v1.3.1) | 4K, 64K | `getconf PAGESIZE` |
-    | OS kernel | N/A | 5.10.0 <= kernel < 6.6.0-114.0.0 | N/A | N/A | `uname -a` |
-    | BIOS / A3 memory configuration | N/A | 1 TB (must upgrade), 1.5 TB / 2 TB (upgrade recommended to expand the pool), 3 TB (no upgrade needed) | N/A | N/A | `dmidecode -t bios`; see [expanding A3 available memory](https://gitcode.com/Ascend/memcache/wiki/MemCache%E6%89%A9%E5%A4%A7A3%E5%8F%AF%E7%94%A8%E5%86%85%E5%AD%98%E7%A9%BA%E9%97%B4.md) |
-    | Max cluster scale | 16 nodes | Within one super pod | 8 nodes | Per model type, see MemFabric Hybrid hardware support | - |
-
-    If the HDK and LingQu versions match the matrix but A3 `device_sdma` still reports `sdma move comperr`, verify the HDK firmware version.
+    Before deployment, review the [Memcache software compatibility reference](#memcache-software-compatibility-reference). It supplements the general [HDK and CANN Version Compatibility Reference](#hdk-and-cann-version-compatibility-reference) with Memcache-specific requirements, and should be used together with the [Memcache compatibility matrix](https://gitcode.com/Ascend/memcache/blob/master/docs/zh/compatibility.md).
 
 4. **Check super pod boundaries (A3 `device_sdma`):**
 
@@ -1188,24 +1178,6 @@ For disk config, eviction watermarks, and other UBS IO parameters, see the [DRAM
 
     Expected output: Returns a JSON response in OpenAI Completions API format.
 
-### Memcache Log Diagnosis
-
-Use the following log signatures to confirm that Memcache started successfully and to localize failures.
-
-Healthy startup means all of the following:
-
-- The MetaService ports from `mmc-meta.conf` (default `5000` and `6000`, metrics `18000`) are listening.
-- vLLM starts without `memcache_backend` errors, and no `smem_bm_init` failure is logged on any KV pool worker rank.
-
-Typical failure signatures and how to respond:
-
-| Log | Meaning | Action |
-| --- | ------- | ------ |
-| `read version is empty` / `does not support mf` (hybm) | The driver does not meet the MemFabric Hybrid requirement. | Compare the driver version against the compatibility matrix in Step 1. |
-| `smem_bm_init` returns non-zero (an `assert res == 0` failure in `memcache_backend.py`) | KV pool creation failed, typically a driver or HYBM initialization problem. | Check the driver version against the compatibility matrix and confirm `memcache-hybrid` / `memfabric-hybrid` versions. |
-| `Failed to get N keys out of N. error_codes=[...]` followed by `Failed to load blocks` | A Memcache KV get failed for the affected request. | With `kv_load_failure_policy=recompute` the request is rescheduled and recomputed. Check MetaService connectivity and pool health. |
-| `transfer page error` | KV data transfer failed across the HCCS domain. | Confirm all ranks are inside the same super pod (see Step 1). |
-
 ### Tuning
 
 #### Huge Page Cleanup and Setup
@@ -1675,6 +1647,40 @@ Refer to the verification operations in Steps 1–5 of Configuration Examples.
 | 800 I/T A3 | >= 26.0 or >= 25.5 (with Mooncake >= v0.3.11) | >= 9.1.0 | LingQu Computing Network >= 1.5 (required for both Mooncake FabricMem and Memcache `device_sdma`); recommended `ASCEND_ENABLE_USE_FABRIC_MEM=1` |
 | 800 I/T A2 | >= 25.5 recommended | >= 9.1.0 | `HCCL_INTRA_ROCE_ENABLE=1` direct transfer |
 
+### Memcache Software Compatibility Reference {: #memcache-software-compatibility-reference }
+
+The [HDK and CANN Version Compatibility Reference](#hdk-and-cann-version-compatibility-reference) gives the baseline HDK and CANN versions for all KV Cache Pool backends. The following table adds Memcache-specific requirements for firmware, OS kernel, LingQu, page size, and cluster scale. Use both references when preparing a Memcache deployment, and use the stricter requirement when both specify the same item. Also compare the environment against the [Memcache compatibility matrix](https://gitcode.com/Ascend/memcache/blob/master/docs/zh/compatibility.md).
+
+| Item | A2 (`device_rdma`) | A3 HCCS (`device_sdma`) | A3 NPU RDMA (`device_rdma`) | 950PR&950DT Products (`device_urma`/`device_rdma`) | How to check |
+| ---- | ------------------ | ----------------------- | ---------------------------- | -------------------------------- | ------------ |
+| HDK | >= 25.5.1 | >= 25.5.1 | >= 25.5.1 | Per model type, see [MemFabric Hybrid hardware support](https://memfabric-hybrid.readthedocs.io/zh-cn/latest/wiki/user_guide/basic_configuration/hardware_support/) | `npu-smi info` |
+| HDK firmware | N/A | >= 7.8.0.6.201 | N/A | N/A | `/usr/local/Ascend/driver/tools/upgrade-tool --device_index -1 --component -1 --version` |
+| LingQu Computing Network L1 | Not required | >= 1.5.0 (1.5.1 recommended) | Not required | Not required | See the LingQu version query guide |
+| Page size | 4K (64K supported since v1.3.1) | N/A | 4K (64K supported since v1.3.1) | 4K, 64K | `getconf PAGESIZE` |
+| OS kernel | N/A | 5.10.0 <= kernel < 6.6.0-114.0.0 | N/A | N/A | `uname -a` |
+| BIOS / A3 memory configuration | N/A | 1 TB (must upgrade), 1.5 TB / 2 TB (upgrade recommended to expand the pool), 3 TB (no upgrade needed) | N/A | N/A | `dmidecode -t bios`; see [expanding A3 available memory](https://gitcode.com/Ascend/memcache/wiki/MemCache%E6%89%A9%E5%A4%A7A3%E5%8F%AF%E7%94%A8%E5%86%85%E5%AD%98%E7%A9%BA%E9%97%B4.md) |
+| Max cluster scale | 16 nodes | Within one super pod | 8 nodes | Per model type, see MemFabric Hybrid hardware support | - |
+
+If the HDK and LingQu versions match the matrix but A3 `device_sdma` still reports `sdma move comperr`, verify the HDK firmware version.
+
+### Memcache Log Diagnosis {: #memcache-log-diagnosis }
+
+Use the following log signatures to confirm that Memcache started successfully and to localize failures.
+
+Healthy startup means all of the following:
+
+- The MetaService ports from `mmc-meta.conf` (default `5000` and `6000`, metrics `18000`) are listening.
+- vLLM starts without `memcache_backend` errors, and no `smem_bm_init` failure is logged on any KV pool worker rank.
+
+Typical failure signatures and how to respond:
+
+| Log | Meaning | Action |
+| --- | ------- | ------ |
+| `read version is empty` / `does not support mf` (hybm) | The driver does not meet the MemFabric Hybrid requirement. | Compare the driver version against the [Memcache software compatibility reference](#memcache-software-compatibility-reference). |
+| `smem_bm_init` returns non-zero (an `assert res == 0` failure in `memcache_backend.py`) | KV pool creation failed, typically a driver or HYBM initialization problem. | Check the driver version against the [Memcache software compatibility reference](#memcache-software-compatibility-reference) and confirm `memcache-hybrid` / `memfabric-hybrid` versions. |
+| `Failed to get N keys out of N. error_codes=[...]` followed by `Failed to load blocks` | A Memcache KV get failed for the affected request. | With `kv_load_failure_policy=recompute` the request is rescheduled and recomputed. Check MetaService connectivity and pool health. |
+| `transfer page error` | KV data transfer failed across the HCCS domain. | Confirm all ranks are inside the same super pod; see the super pod boundary check in [Step 1: Prerequisite Checks](#memcache-step-1-prerequisite-checks). |
+
 ### QoS Configuration
 
 Both the Mooncake and Memcache backends support configuring the transfer QoS. The valid range is **0-4 (integers only)**, and the default value is 0 when not configured. A larger value means a higher transfer priority. Invalid values (non-integer, out of range) cause startup to fail fast with a validation error.
@@ -1757,7 +1763,7 @@ Public FAQ references:
 
 ### Issue 5: Memcache Related Issues
 
-Pre-operation checks (software compatibility and super pod checks, memory inspection, A3 available memory scanning, 950PR&950DT Products signature verification disabling and container mounts, SSD disk status checks) are described in "Step 1: Prerequisite Checks" of [Scenario 2: Memcache Backend](#scenario-2-memcache-backend). For Memcache troubleshooting, refer to the [Memcache FAQ](https://gitcode.com/Ascend/memcache/wiki/FAQ.md), and see [Memcache Log Diagnosis](#memcache-log-diagnosis) for startup and runtime log signatures.
+Memcache software compatibility requirements are described in the [Memcache Software Compatibility Reference](#memcache-software-compatibility-reference). Other pre-operation checks (super pod boundaries, memory inspection, A3 available memory scanning, 950PR&950DT Products signature verification disabling and container mounts, SSD disk status checks) are described in "Step 1: Prerequisite Checks" of [Scenario 2: Memcache Backend](#scenario-2-memcache-backend). For Memcache troubleshooting, refer to the [Memcache FAQ](https://gitcode.com/Ascend/memcache/wiki/FAQ.md), and see [Memcache Log Diagnosis](#memcache-log-diagnosis) for startup and runtime log signatures.
 
 ### Issue 6: DSv4 Deployment Notes
 
