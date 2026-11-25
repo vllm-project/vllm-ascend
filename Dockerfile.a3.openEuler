@@ -86,7 +86,7 @@ RUN set -e; \
         yaml-cpp-devel gflags-devel boost-devel \
         zstd libzstd-devel \
         jemalloc clang && \
-    for p in libaio-devel libunwind-devel jsoncpp-devel liburing-devel; do \
+    for p in libaio-devel libunwind-devel jsoncpp-devel liburing-devel xxhash xxhash-devel; do \
         $PM install -y "$p" || echo "WARN: 可选依赖 $p 不可用，稍后由源码编译环节兜底"; \
     done; \
     rm -rf /var/cache/yum/* /var/cache/dnf/*
@@ -370,18 +370,31 @@ RUN export PIP_EXTRA_INDEX_URL="${ASCEND_INDEX_URL}" && \
 #    mooncake 的 cmake 通过 find_package(yalantinglibs) 找 coro_rpc 依赖，该库以子模块
 #    extern/yalantinglibs 形式提供，必须 --recurse-submodules 一起拉下来并先装好，
 #    否则 configure 直接报 "Could not find a package configuration file provided by yalantinglibs"。
-RUN for f in /usr/local/Ascend/cann/set_env.sh /usr/local/Ascend/ascend-toolkit/set_env.sh; do if [ -f "$f" ]; then . "$f"; fi; done && \
-    git clone -b ${MOONCAKE_TAG} --recurse-submodules ${MOONCAKE_REPO} /tmp/Mooncake && \
-    cmake -S /tmp/Mooncake/extern/yalantinglibs -B /tmp/ylt-build \
-        -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/usr/local \
-        -DBUILD_EXAMPLES=OFF -DBUILD_BENCHMARK=OFF -DBUILD_UNIT_TESTS=OFF && \
-    cmake --build /tmp/ylt-build -j"${MAX_JOBS:-$(nproc)}" && \
-    cmake --install /tmp/ylt-build && \
-    rm -rf /tmp/ylt-build && ldconfig && \
-    cd /tmp/Mooncake && mkdir -p build && cd build && \
-    cmake .. -DCMAKE_BUILD_TYPE=Release \
-        -DWITH_TE=ON -DUSE_CUDA=OFF -DUSE_ASCEND=ON && \
-    make -j"${MAX_JOBS:-$(nproc)}" && make install && ldconfig
+RUN for f in /usr/local/Ascend/cann/set_env.sh /usr/local/Ascend/ascend-toolkit/set_env.sh; do if [ -f "$f" ]; then . "$f"; fi; done; \
+    LOG=/tmp/mooncake_build.log; : > "$LOG"; \
+    set -o pipefail; \
+    trap 'rc=$?; if [ $rc -ne 0 ]; then echo "ERROR: mooncake 构建失败，日志尾部："; tail -n 40 "$LOG"; fi' EXIT; \
+    { git clone -b ${MOONCAKE_TAG} --recurse-submodules ${MOONCAKE_REPO} /tmp/Mooncake && \
+      cmake -S /tmp/Mooncake/extern/yalantinglibs -B /tmp/ylt-build \
+          -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/usr/local \
+          -DBUILD_EXAMPLES=OFF -DBUILD_BENCHMARK=OFF -DBUILD_UNIT_TESTS=OFF && \
+      cmake --build /tmp/ylt-build -j"${MAX_JOBS:-$(nproc)}" && \
+      cmake --install /tmp/ylt-build && \
+      rm -rf /tmp/ylt-build && ldconfig && \
+      if [ ! -e /usr/include/xxhash.h ] && [ ! -e /usr/local/include/xxhash.h ]; then \
+          echo "INFO: 系统无 xxhash 开发头文件，源码编译 xxHash v0.8.3"; \
+          git clone --depth 1 -b v0.8.3 https://github.com/Cyan4973/xxHash.git /tmp/xxHash && \
+          cmake -S /tmp/xxHash/cmake_unofficial -B /tmp/xxHash/build \
+              -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/usr/local \
+              -DXXHASH_BUILD_XXHSUM=OFF && \
+          cmake --build /tmp/xxHash/build -j"${MAX_JOBS:-$(nproc)}" && \
+          cmake --install /tmp/xxHash/build && \
+          rm -rf /tmp/xxHash && ldconfig; \
+      fi; \
+      cd /tmp/Mooncake && mkdir -p build && cd build && \
+      cmake .. -DCMAKE_BUILD_TYPE=Release \
+          -DWITH_TE=ON -DUSE_CUDA=OFF -DUSE_ASCEND=ON && \
+      make -j"${MAX_JOBS:-$(nproc)}" && make install && ldconfig; } 2>&1 | tee -a "$LOG"
 
 # 9) mooncake python 绑定
 RUN for f in /usr/local/Ascend/cann/set_env.sh /usr/local/Ascend/ascend-toolkit/set_env.sh; do if [ -f "$f" ]; then . "$f"; fi; done && \
