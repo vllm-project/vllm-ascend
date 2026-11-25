@@ -2202,16 +2202,22 @@ def test_pull_admission_restores_c8_v_scales_after_partial_page_copy(ratio):
     # A partial Pull transfer and Mamba copy can overwrite a newly assigned
     # physical page. Its V scales are static and must be repaired before forward.
     raw[128 + ratio * pitch : 128 + 2 * ratio * pitch].fill_(73)
+    poisoned = raw.clone()
     expected = raw.clone()
     expected_views = mxfp_paged_cache_views(expected[128:-128], 2 * ratio, 2, 64, 64, 512, page_stride_bytes=pitch)
     fill_mxfp_v_scale_cache(layer.v_cache_scale, expected_views[3][ratio : 2 * ratio])
     output = SimpleNamespace(
         has_sync_kv_loads=False,
-        scheduled_new_reqs=[SimpleNamespace(block_ids=([1],))],
+        scheduled_new_reqs=[SimpleNamespace(block_ids=([], [1]))],
         scheduled_cached_reqs=SimpleNamespace(req_ids=[], new_block_ids=[], resumed_req_ids=set()),
         new_block_ids_to_zero=[],
     )
 
+    # Page 1 belongs to group 1 here; the C8 cache belongs to group 0.
+    runner._restore_c8_mxfp_loaded_v_scales(output)
+    assert torch.equal(raw, poisoned)
+
+    output.scheduled_new_reqs[0].block_ids = ([1],)
     runner._restore_c8_mxfp_loaded_v_scales(output)
 
     assert torch.equal(raw, expected)
