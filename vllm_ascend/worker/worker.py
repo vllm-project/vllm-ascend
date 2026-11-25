@@ -20,7 +20,6 @@
 import copy
 import gc
 import logging
-import os
 from collections.abc import Iterator
 from contextlib import AbstractContextManager, contextmanager, nullcontext
 from datetime import timedelta
@@ -114,6 +113,7 @@ from vllm_ascend.distributed.parallel_state import init_ascend_model_parallel
 from vllm_ascend.observability.runtime_guard.hooks import runtime_guard_idle_step
 from vllm_ascend.ops.triton.triton_utils import init_device_properties_triton
 from vllm_ascend.patch.worker.patch_async_output import AscendAsyncOutput
+from vllm_ascend.platform import NPUPlatform
 from vllm_ascend.profiler.torch_npu_profiler import TorchNPUProfilerWrapper
 from vllm_ascend.utils import (
     check_ascend_device_type,
@@ -513,49 +513,6 @@ class NPUWorker(GPUWorker):
             return self.cache_config.resolved_gpu_memory_utilization
         return utilization
 
-    def _apply_ft_comm_settings(self, parallel_config) -> None:
-        """Apply the HCCL environment overrides fault tolerance requires."""
-        if self.use_v2_model_runner:
-            # Model Runner V2 hangs with the task queue under FT; force it off.
-            os.environ["TASK_QUEUE_ENABLE"] = "0"
-            logger.warning(
-                "Fault tolerance with Model Runner V2 does not support the "
-                "task queue (TASK_QUEUE_ENABLE); forcing TASK_QUEUE_ENABLE=0."
-            )
-
-        if parallel_config.tensor_parallel_size > 1:
-            # TP>1 uses collective HCCL; disable async error handling so HCCL
-            # cannot abort the process during fault-tolerance recovery.
-            os.environ["TORCH_HCCL_ASYNC_ERROR_HANDLING"] = "0"
-
-        abort_timeout = get_ascend_config().ft_communication_abort_timeout
-        if abort_timeout <= 0:
-            return
-        # User HCCL timeouts win; otherwise derive them from
-        # ft_communication_abort_timeout. HCCL requires EXEC < EVENT,
-        # so EXEC defaults to abort_timeout - 1.
-        os.environ.setdefault("HCCL_EVENT_TIMEOUT", str(abort_timeout))
-        os.environ.setdefault("HCCL_EXEC_TIMEOUT", str(abort_timeout - 1))
-        if int(os.environ["HCCL_EVENT_TIMEOUT"]) <= int(os.environ["HCCL_EXEC_TIMEOUT"]):
-            raise ValueError(
-                f"HCCL_EVENT_TIMEOUT ({os.environ['HCCL_EVENT_TIMEOUT']}) "
-                "must be greater than HCCL_EXEC_TIMEOUT "
-                f"({os.environ['HCCL_EXEC_TIMEOUT']})"
-            )
-        if (
-            int(os.environ["HCCL_EVENT_TIMEOUT"]) != abort_timeout
-            or int(os.environ["HCCL_EXEC_TIMEOUT"]) != abort_timeout - 1
-        ):
-            logger.warning(
-                "Fault tolerance: HCCL communication timeouts are taken from the "
-                "HCCL_EVENT_TIMEOUT (%s s) / HCCL_EXEC_TIMEOUT (%s s) environment "
-                "variables instead of the NPU operator timeout "
-                "(ft_communication_abort_timeout=%s s).",
-                os.environ["HCCL_EVENT_TIMEOUT"],
-                os.environ["HCCL_EXEC_TIMEOUT"],
-                abort_timeout,
-            )
-
     def _init_device(self):
         # vLLM v0.24.0 (PR #45026) removed automatic per-process device
         # isolation for DP workers. Mirror gpu_worker.py::init_device:
@@ -563,7 +520,9 @@ class NPUWorker(GPUWorker):
         # that each DP group binds to a distinct set of NPUs.
         parallel_config = self.parallel_config
         if self.parallel_config.enable_fault_tolerance:
-            self._apply_ft_comm_settings(parallel_config)
+            NPUPlatform.apply_fault_tolerance_comm_settings(
+                parallel_config, use_v2_model_runner=self.use_v2_model_runner
+            )
         if (
             parallel_config.distributed_executor_backend not in ("ray", "external_launcher")
             and parallel_config.data_parallel_backend != "ray"

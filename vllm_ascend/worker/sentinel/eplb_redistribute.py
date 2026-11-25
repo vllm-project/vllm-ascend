@@ -286,6 +286,7 @@ def _find_local_expert_slots(
 
 def reload_experts_from_disk(
     model: torch.nn.Module,
+    moe_layers: list,
     model_config: ModelConfig,
     load_config: LoadConfig,
     dead_rank_experts: set[tuple[int, int]],
@@ -294,14 +295,15 @@ def reload_experts_from_disk(
 
     The tensors must end up exactly as ``process_weights_after_loading`` leaves
     them (weights transposed and cast to NZ, quant scales converted, one tensor
-    per expert slot), which ``model.load_weights`` cannot produce. Each model is
-    read with its own checkpoint config and ``hf_to_vllm_mapper``; returns the
-    number of (layer, expert) pairs reloaded.
+    per expert slot), which ``model.load_weights`` cannot produce. ``moe_layers``
+    comes from the EPLB-registered model (the inner language model for
+    multimodal checkpoints), while ``model`` supplies the checkpoint config and
+    ``hf_to_vllm_mapper``. Returns the number of (layer, expert) pairs reloaded.
     """
     if not dead_rank_experts:
         return 0
 
-    moe_layers = list(model.moe_layers)
+    moe_layers = list(moe_layers)
     routed_layers = [getattr(layer, "routed_experts", layer) for layer in moe_layers]
     local_slots = _find_local_expert_slots(routed_layers, moe_layers, dead_rank_experts, get_ep_group().rank_in_group)
     if not local_slots:

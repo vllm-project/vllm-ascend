@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import threading
 from collections.abc import Callable
 from datetime import timedelta
 from typing import TYPE_CHECKING
@@ -73,8 +74,18 @@ def fault_barrier_wrapper(method: Callable):
         except Exception as exc:
             rank = getattr(self, "rank", None)
             rank_desc = f"rank {rank}" if isinstance(rank, int) else "worker"
-            sentinel.worker_faulted = True
-            sentinel.fault_info = f"{type(exc).__name__}: {exc}"
+            # Async scheduling runs execute_model and get_output on different
+            # threads; both can reach this handler for the same device fault.
+            # Only the first one quarantines the device, the other propagates.
+            with sentinel._fault_lock:
+                first_fault = not sentinel.worker_faulted
+                if first_fault:
+                    sentinel.worker_faulted = True
+                    sentinel.fault_info = f"{type(exc).__name__}: {exc}"
+            if not first_fault:
+                # Drop the frames that pin device tensors of the broken stream.
+                exc.__traceback__ = None
+                raise RuntimeError(f"[FT] worker faulted: {sentinel.fault_info}")
             logger.warning("[FT] Marking %s faulted after: %s", rank_desc, exc)
             try:
                 sentinel.reset_device()
@@ -109,6 +120,7 @@ class WorkerSentinel(GPUWorkerSentinel):
         # wrapped methods fail fast instead of using the device.
         self.worker_faulted = False
         self.fault_info: str | None = None
+        self._fault_lock = threading.Lock()
         _sentinel = self
 
     def query_mask(self, ft_request: FaultToleranceRequest) -> dict:
@@ -275,7 +287,7 @@ class WorkerSentinel(GPUWorkerSentinel):
         # The model's expert map is indexed by physical expert id and no id
         # changes here; the logical-id map must not overwrite it.
         if dead_rank_experts:
-            reload_experts_from_disk(model, model_config, load_config, dead_rank_experts)
+            reload_experts_from_disk(model, model_state.model.moe_layers, model_config, load_config, dead_rank_experts)
         refresh_model_routing_tables(model_state)
         densify_routing_tables(
             model_state.model.moe_layers,

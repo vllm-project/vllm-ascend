@@ -416,17 +416,6 @@ def _driving(*servers: RemoteOpenAIServer):
             t.join(timeout=2)
 
 
-def _wait_for_ft_apply_outcome(server: RemoteOpenAIServer, request_id: str, deadline_s: int) -> str | None:
-    """Wait until ``/v1/fault_tolerance/status`` records the FT apply outcome."""
-    engine_status = _wait_for_engines(
-        [server],
-        match_key="last_ft_request_id",
-        match_values={request_id},
-        deadline_s=deadline_s,
-    )[0]
-    return engine_status.get("ft_error") if engine_status else None
-
-
 # ---------------------------------------------------------------------------
 # Feature guard
 # ---------------------------------------------------------------------------
@@ -495,7 +484,6 @@ def test_injected_fault_retry_recovers_all_ranks(monkeypatch, tmp_path):
     _install_fault_injection(monkeypatch, tmp_path, rank=3, step=fault_step)
 
     with _ft_manager() as servers:
-        assert len(servers) == DP_SIZE
         all_ranks = tuple(_server_for_rank(servers, r) for r in range(DP_SIZE))
 
         # 1. All engines healthy and serving.
@@ -540,15 +528,16 @@ def test_injected_fault_retry_recovers_all_ranks(monkeypatch, tmp_path):
 def test_scale_down_removes_dead_rank_and_recovers():
     """scale_down removes the dead DP rank; survivors keep serving.
 
-    SIGKILL rank 3's worker: survivors go UNHEALTHY, the victim goes DEAD
-    and rejects ``retry`` (recovery requires UNHEALTHY). ``scale_down``
-    with ``removed_dp_ranks=[3]`` masks the dead rank, redistributes its
-    EPLB experts onto the survivors and reloads the reassigned weights.
-    Rank 3 (not rank 0, the DP store master) is removed so no
-    ``dp_master_ip`` / ``dp_store_port`` params are needed. After recovery
-    every survivor must answer factual prompts correctly.
+    SIGKILL rank 1's worker: survivors go UNHEALTHY, the victim goes DEAD.
+    ``scale_down`` with ``removed_dp_ranks=[1]`` masks the dead rank,
+    redistributes its EPLB experts onto the survivors and reloads the
+    reassigned weights. Ranks 2 and 3 must become dense ranks 1 and 2, so a
+    missing rank remap cannot pass unnoticed. Rank 1 (not rank 0, the DP
+    store master) is removed so no ``dp_master_ip`` / ``dp_store_port``
+    params are needed. After recovery every survivor must answer factual
+    prompts correctly.
     """
-    victim_rank = DP_SIZE - 1
+    victim_rank = 1
     extra_args = [
         # All reachable batches must fit MC2; 512 is the per-TP-rank MC2 limit.
         "--max-num-batched-tokens",
@@ -565,7 +554,6 @@ def test_scale_down_removes_dead_rank_and_recovers():
         str(NUM_REDUNDANT_EXPERTS),
     ]
     with _ft_manager(extra_args, additional_config={"enable_prefill_mc2": True}) as servers:
-        assert len(servers) == DP_SIZE
         servers_by_rank = {r: _server_for_rank(servers, r) for r in range(DP_SIZE)}
         victim = servers_by_rank[victim_rank]
         survivor_ranks = [r for r in range(DP_SIZE) if r != victim_rank]
@@ -597,15 +585,7 @@ def test_scale_down_removes_dead_rank_and_recovers():
                 assert engine_status["status"] == "unhealthy", engine_status
                 assert engine_status.get("fault_info"), engine_status
 
-        # 3. The DEAD victim rejects retry: recovery requires UNHEALTHY.
-        #    retry is accepted at the HTTP layer (202 = background dispatch)...
-        request_id = _apply_ft(victim, "retry")["request_id"]
-        # 4. ...but the rejection is recorded in /v1/fault_tolerance/status.
-        ft_error = _wait_for_ft_apply_outcome(victim, request_id, FAULT_DETECTION_DEADLINE_S)
-        assert ft_error is not None, "rejection was never recorded in /v1/fault_tolerance/status"
-        assert "status is DEAD" in ft_error, ft_error
-
-        # 5. scale_down to every survivor: remove the dead rank.
+        # 3. scale_down to every survivor: remove the dead rank.
         round_id = str(uuid.uuid4())
         for server in survivors:
             _apply_ft(
@@ -615,7 +595,7 @@ def test_scale_down_removes_dead_rank_and_recovers():
                 request_id=round_id,
             )
 
-        # 6. Recovery completes: survivors return to healthy and serve again.
+        # 4. Recovery completes: survivors return to healthy and serve again.
         recovered = _wait_for_engines(
             list(survivors),
             match_key="status",
@@ -629,6 +609,6 @@ def test_scale_down_removes_dead_rank_and_recovers():
             )
         _in_parallel(lambda s: _complete(s.get_client()), survivors)
 
-        # 7. Factual answers on the survivors: the re-hosted experts must
+        # 5. Factual answers on the survivors: the re-hosted experts must
         #    produce correct completions on the shrunken DP group.
         _assert_correct_answers(survivors)

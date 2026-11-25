@@ -581,6 +581,50 @@ class NPUPlatform(Platform):
             vllm_config.compilation_config.max_cudagraph_capture_size = reduced_cg_cap
             vllm_config.compilation_config.reduced_cg_cap = reduced_cg_cap
 
+    @classmethod
+    def apply_fault_tolerance_comm_settings(cls, parallel_config, *, use_v2_model_runner: bool) -> None:
+        """Apply the HCCL environment overrides fault tolerance requires."""
+        if use_v2_model_runner:
+            # Model Runner V2 hangs with the task queue under FT; force it off.
+            os.environ["TASK_QUEUE_ENABLE"] = "0"
+            logger.warning(
+                "Fault tolerance with Model Runner V2 does not support the "
+                "task queue (TASK_QUEUE_ENABLE); forcing TASK_QUEUE_ENABLE=0."
+            )
+
+        if parallel_config.tensor_parallel_size > 1:
+            # TP>1 uses collective HCCL; disable async error handling so HCCL
+            # cannot abort the process during fault-tolerance recovery.
+            os.environ["TORCH_HCCL_ASYNC_ERROR_HANDLING"] = "0"
+
+        abort_timeout = get_ascend_config().ft_communication_abort_timeout
+        if abort_timeout <= 0:
+            return
+        # User HCCL timeouts win; otherwise derive them from
+        # ft_communication_abort_timeout. HCCL requires EXEC < EVENT,
+        # so EXEC defaults to abort_timeout - 1.
+        os.environ.setdefault("HCCL_EVENT_TIMEOUT", str(abort_timeout))
+        os.environ.setdefault("HCCL_EXEC_TIMEOUT", str(abort_timeout - 1))
+        if int(os.environ["HCCL_EVENT_TIMEOUT"]) <= int(os.environ["HCCL_EXEC_TIMEOUT"]):
+            raise ValueError(
+                f"HCCL_EVENT_TIMEOUT ({os.environ['HCCL_EVENT_TIMEOUT']}) "
+                "must be greater than HCCL_EXEC_TIMEOUT "
+                f"({os.environ['HCCL_EXEC_TIMEOUT']})"
+            )
+        if (
+            int(os.environ["HCCL_EVENT_TIMEOUT"]) != abort_timeout
+            or int(os.environ["HCCL_EXEC_TIMEOUT"]) != abort_timeout - 1
+        ):
+            logger.warning(
+                "Fault tolerance: HCCL communication timeouts are taken from the "
+                "HCCL_EVENT_TIMEOUT (%s s) / HCCL_EXEC_TIMEOUT (%s s) environment "
+                "variables instead of the NPU operator timeout "
+                "(ft_communication_abort_timeout=%s s).",
+                os.environ["HCCL_EVENT_TIMEOUT"],
+                os.environ["HCCL_EXEC_TIMEOUT"],
+                abort_timeout,
+            )
+
     def num_compute_units(cls, device_id: int = 0) -> int:
         """Return the number of Cube Cores on the NPU device.
         This is the NPU equivalent of CUDA's ``multi_processor_count``
