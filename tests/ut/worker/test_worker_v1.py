@@ -2037,7 +2037,7 @@ class TestNPUWorker(TestBase):
         # Create worker mock
         with (
             patch.object(NPUWorker, "__init__", lambda x, **kwargs: None),
-            patch("vllm_ascend.worker.worker.ensure_kv_transfer_initialized"),
+            patch("vllm_ascend.worker.worker.ensure_kv_transfer_initialized") as mock_connector,
         ):
             worker = NPUWorker()
             worker.model_runner = MagicMock()
@@ -2046,14 +2046,34 @@ class TestNPUWorker(TestBase):
             worker.vllm_config.model_config = MagicMock()
             worker.vllm_config.model_config.enable_sleep_mode = False
             worker.vllm_config.kv_transfer_config = None
-            worker.cache_config = MagicMock()
+            # initialize_from_config publishes the post-profiling block count
+            # itself (core Worker contract); the stub starts without it.
+            worker.cache_config = SimpleNamespace(num_gpu_blocks=None)
 
             # Create mock kv_cache_config
             mock_kv_cache_config = MagicMock()
             mock_kv_cache_config.needs_kv_cache_zeroing = False
+            mock_kv_cache_config.num_blocks = 4242
+
+            # Both consumers of the block count record what they see when the
+            # real method calls them, and in which order.
+            observed = []
+            mock_connector.side_effect = lambda *_args: observed.append(
+                ("connector", worker.cache_config.num_gpu_blocks)
+            )
+            worker.model_runner.initialize_kv_cache.side_effect = lambda *_args, **_kwargs: observed.append(
+                ("registration", worker.cache_config.num_gpu_blocks)
+            )
 
             # Test initialize_from_config
             worker.initialize_from_config(mock_kv_cache_config)
+
+            # The connector is constructed before the runner registers the
+            # caches (register_kv_caches runs there), and both must already
+            # see the authoritative block count: a connector reading None
+            # crashes with AssertionError.
+            self.assertEqual(observed, [("connector", 4242), ("registration", 4242)])
+            self.assertEqual(worker.cache_config.num_gpu_blocks, 4242)
 
             # Verify calls
             worker.model_runner.initialize_kv_cache.assert_called_once_with(
