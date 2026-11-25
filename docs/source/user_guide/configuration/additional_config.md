@@ -74,6 +74,7 @@ The following table lists additional configuration options available in vLLM Asc
 | `rejection_sampler_config`          | dict | `{}`    | Configures entropy verification for speculative decoding. |
 | `multistream_dsv4_dsa_overlap`      | bool | `True`  | Whether to enable DSA multi-stream overlap for DeepSeek V4. For PCP batches with global prefill, this option controls overlap of local Q projection with global cache preparation on nonempty query shards. Set it to `false` to run these operations serially.  |
 | `rl_config`                        | dict | `{}`    | One-click RL mode configuration. See <a href="#rl_config">rl_config</a> for all fields, the two deployment modes, usage examples, and the migration guide. |
+| `selected_kv_config`               | float \| dict | `None` | Opt-in selected Main-KV prefill configuration for two-slot GVA layerwise `AscendStoreConnector` on Atlas A3. Pass a ratio in `[0, 1]` (for example `0.015`) or `{"max_query_ratio": 0.015, "min_history_tokens": 32768}` to enable; omit or set `None` to disable. See <a href="#selected_kv_config">selected_kv_config</a>. |
 | `combine_quant_mode`                | int  | `0`     | Controls communication quantization for the MC2 combine operation. The default (`0`) lets the runtime select the mode. Set `2`, `3`, or `4` to override the `comm_quant_mode` argument to `torch_npu.npu_moe_distribute_combine_v2`. |
 
 The details of each configuration option are as follows:
@@ -297,6 +298,33 @@ llm = LLM(
 | `--attention-backend FLASH_ATTN` for FA3 consistency mode | `"rl_config": {"enabled": true, "enable_training_consistency": true}` |
 | top-level `"weight_nz_mode": 0` for RL | `"rl_config": {"enabled": true}` |
 | top-level `"enable_sleep_mode_extra_cleanup": true` | `"rl_config": {"enabled": true, "sleep_mode_extra_cleanup": true}` |
+
+<span id="selected_kv_config"></span>**selected_kv_config**
+
+`selected_kv_config` enables on-demand historical Main-KV loading for long-context (`min_history_tokens < H <= 1,048,576`, default `min_history_tokens = 32,768`) DSA prefill requests hitting the DDR KV Pool on Atlas A3 without changing native HBM two-slot tensors or DDR object layouts. A bare number `r` in `[0, 1]` is shorthand for `{"enabled": true, "max_query_ratio": r, "min_history_tokens": 32768}`.
+
+| Name | Type | Default | Description |
+| ---- | ---- | ------- | ----------- |
+| `enabled` | bool | `False` | Master switch for selected Main-KV prefill. When `true` without explicit thresholds, `max_query_ratio` and `min_history_tokens` default to `0.015` and `32768`. Cannot be `false` when either threshold is set. |
+| `max_query_ratio` | float | `None` (`0.015` when enabled) | Upper bound in `[0, 1]` on `Q / (H + Q)` for selecting a cached prefill request (`Q / (H + Q) < max_query_ratio`). Setting a valid ratio implicitly sets `enabled=true`. |
+| `min_history_tokens` | int | `None` (`32768` when enabled) | Lower-bound threshold in `[0, 1048576]` on cached history tokens `H` for selecting a prefill request (`H > min_history_tokens`). Setting a valid threshold implicitly sets `enabled=true`. |
+
+**Prerequisites and workspace budget:**
+
+- Requires Atlas A3 (`ascend910_93*`), eager Model Runner V2 (`enforce_eager=True`, `PP=PCP=DCP=1`, no KVPP, HiSparse, `sparse_kv_offload_config`, `xlite_graph_config`, DBO, speculative decoding, or sleep mode), and `glm_moe_dsa` models with packed INT8 C8 Main-KV (`--kv-cache-dtype int8`, `656` B/row) and INT8 C8 Lightning Indexer (`--attention-config '{"indexer_kv_dtype": "int8"}'`, `block_size=128`, `TopK=2048`).
+- Requires synchronous `kv_producer` `AscendStoreConnector` (`backend="memcache"`, `use_layerwise=True`, `load_async=False`, `layerwise_num_shared_buffers=2`, `layerwise_prefetch_layers` in `{1, 2}`, `layerwise_independent_layers=[]`, `num_layers >= 3`), automatic KV cache budgeting (`kv_cache_memory_bytes=None`, `max_num_batched_tokens <= 8192`, `max_num_seqs <= 256`), and external watchdog or server-side lease TTL coverage for the `300s` MemCache read lease.
+- Reserves HBM workspace upfront before native KV block planning (`4 * max_requests * union_capacity` union IDs, `4.13 MiB` union bitmap scratch, `2 MiB` alignment margin, and `16` B/block across the two-slot object-base ring); shared prefix blocks, unaligned partial-history tail blocks, and unselected requests automatically retain native SDMA loads.
+
+**Example (online):**
+
+```bash
+vllm serve zai-org/GLM-5.1 \
+    --enforce-eager \
+    --kv-cache-dtype int8 \
+    --attention-config '{"indexer_kv_dtype": "int8"}' \
+    --kv-transfer-config '{"kv_connector": "AscendStoreConnector", "kv_role": "kv_producer", "kv_connector_extra_config": {"backend": "memcache", "use_layerwise": true, "load_async": false, "layerwise_num_shared_buffers": 2, "layerwise_independent_layers": []}}' \
+    --additional-config '{"selected_kv_config": {"max_query_ratio": 0.015, "min_history_tokens": 32768}}'
+```
 
 ### Example
 

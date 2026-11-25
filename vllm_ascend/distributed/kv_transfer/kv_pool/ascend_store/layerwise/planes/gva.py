@@ -324,6 +324,9 @@ class GvaDataPlane(LayerwiseDataPlane):
                 if request.load_spec is not None:
                     request.load_spec.can_load = False
 
+    def _get_leased_key_infos(self, leased_keys: list[str]):
+        return self._worker.m_store.batch_get_key_info(leased_keys)
+
     def _prepare_load_gvas_for_request(self, requests: list[ReqMeta]) -> bool | None:
         """Fetch per-rank GVA and acquire read lease for the load path.
 
@@ -561,7 +564,7 @@ class GvaDataPlane(LayerwiseDataPlane):
                 # descriptor first, and its GVA is zero. The lease pins the
                 # current DRAM allocation until all layer copies finish.
                 if leased_keys:
-                    leased_infos = worker.m_store.batch_get_key_info(leased_keys)
+                    leased_infos = self._get_leased_key_infos(leased_keys)
                     if leased_infos is None or len(leased_infos) != len(leased_keys):
                         return False
                     key_indices: dict[str, list[int]] = {}

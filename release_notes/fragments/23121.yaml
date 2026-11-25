@@ -1,0 +1,5 @@
+pr: 23121
+entries:
+  - category: feature
+    text: Added opt-in selected Main-KV prefill (`selected_kv_config`) with configurable `H > min_history_tokens` (default 32K, up to 1M history tokens) and `Q / (H + Q) < max_query_ratio` thresholds over two-slot GVA layerwise AscendStore on Atlas A3 without changing HBM or DDR cache layouts.
+    hardware: [A3]

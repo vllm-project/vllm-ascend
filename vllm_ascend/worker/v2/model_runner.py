@@ -59,7 +59,7 @@ from vllm.v1.worker.gpu.model_states.mamba_hybrid import MambaHybridModelState
 from vllm.v1.worker.gpu.spec_decode.speculator import DraftModelSpeculator
 from vllm.v1.worker.utils import get_uniform_decode_token_count
 
-from vllm_ascend.ascend_config import get_ascend_config
+from vllm_ascend.ascend_config import get_ascend_config, selected_kv_enabled
 from vllm_ascend.ascend_forward_context import (
     MoECommType,
     get_mc2_tokens_capacity,
@@ -599,6 +599,13 @@ class NPUModelRunner(GPUModelRunner):
         ):
             self.kv_connector = MambaCopyKVConnector(self.kv_connector, copy_mamba_state)
 
+        if selected_kv_enabled(getattr(self, "ascend_config", None)):
+            from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.selected_kv_runtime import (
+                start_selected_kv,
+            )
+
+            start_selected_kv(self, kv_cache_config)
+
         self.initialize_spec_cpu_length_sync()
 
         # Only target-model layers determine whether FIA is in use. This flag
@@ -641,6 +648,12 @@ class NPUModelRunner(GPUModelRunner):
                 fill_mxfp_v_scale_cache(layer.v_cache_scale, value_scale_cache)
 
     def shutdown(self) -> None:
+        if getattr(self, "_selected_kv_runtime", None) is not None:
+            from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.selected_kv_runtime import (
+                stop_selected_kv,
+            )
+
+            stop_selected_kv(self)
         from vllm_ascend.distributed.expert_transfer import expert_offload_utils as expert_offload
 
         expert_offload.shutdown(self)

@@ -32,6 +32,7 @@ from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.outputs import KVConnectorOutput
 from vllm.v1.request import Request
 
+from vllm_ascend.ascend_config import selected_kv_requested
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend import (
     get_backend_class,
 )
@@ -77,6 +78,10 @@ def create_kv_pool_worker(
     kv_cache_config: KVCacheConfig | None = None,
 ) -> BaseKVPoolWorker:
     worker_class = LayerwiseKVPoolWorker if use_layerwise else KVPoolWorker
+    if use_layerwise and selected_kv_requested(vllm_config):
+        from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise import selected_pool_worker as spw
+
+        worker_class = spw.SelectedKVPoolWorker
     return worker_class(
         vllm_config,
         use_layerwise,

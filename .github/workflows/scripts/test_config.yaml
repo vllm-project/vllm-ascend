@@ -126,6 +126,8 @@ runner_mapping:
   # Run the TP=1 KV pool test on the smallest available A3 runner.
   tests/e2e/pull_request/one_card/test_kv_pool_accuracy\.py$:
     default: a3-2
+  tests/e2e/pull_request/one_card/test_selected_kv_inplace\.py$:
+    default: a3-2
   tests/e2e/pull_request/one_card/test_flash_attn_precision\.py$:
     default: a5-4
   tests/e2e/pull_request/one_card/test_swiglu_mx_quant\.py$:
