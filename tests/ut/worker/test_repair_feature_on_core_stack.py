@@ -71,6 +71,32 @@ _WRITE_BLOCK = 2
 _REQUEST_ID = "req-a"
 
 
+@pytest.fixture
+def pin_kv_layout():
+    """Pin vllm.envs' VLLM_KV_CACHE_LAYOUT for the rest of the test (None: no layout).
+
+    vllm.envs serves the variable lazily through the module's __getattr__.
+    Another test of the full suite sets it with monkeypatch.setattr
+    (tests/ut/attention/test_minimax_fa3.py), which leaves it behind as a
+    plain module attribute; from then on the environment variable is never
+    read again. So the layout under test is pinned on the module itself and
+    taken away afterwards unless an earlier test had pinned it.
+    """
+    from vllm import envs as envs_vllm
+
+    pinned_before = "VLLM_KV_CACHE_LAYOUT" in vars(envs_vllm)
+    previous = vars(envs_vllm).get("VLLM_KV_CACHE_LAYOUT")
+
+    def pin(layout):
+        envs_vllm.VLLM_KV_CACHE_LAYOUT = layout
+
+    yield pin
+    if pinned_before:
+        envs_vllm.VLLM_KV_CACHE_LAYOUT = previous
+    else:
+        vars(envs_vllm).pop("VLLM_KV_CACHE_LAYOUT", None)
+
+
 def _adopt_kv_layout_like_engine_core(vllm_config):
     """The KV cache layout step the engine core runs before worker init:
     the worker reports the layouts its attention backends support, the
@@ -84,7 +110,7 @@ def _adopt_kv_layout_like_engine_core(vllm_config):
     assert vllm_config.cache_config.kv_cache_layout == layout.name
 
 
-def _parse_repair_config(monkeypatch, layout, additional_config=None):
+def _parse_repair_config(pin_kv_layout, layout, additional_config=None):
     """Real EngineArgs -> VllmConfig parsing of a repair configuration.
 
     With vllm_ascend installed, create_engine_config() resolves the NPU
@@ -92,13 +118,7 @@ def _parse_repair_config(monkeypatch, layout, additional_config=None):
     Ascend validation of the policy is the production path. The KV cache
     layout is then adopted the way the engine core adopts it.
     """
-    from vllm.envs import disable_envs_cache
-
-    disable_envs_cache()
-    if layout is None:
-        monkeypatch.delenv("VLLM_KV_CACHE_LAYOUT", raising=False)
-    else:
-        monkeypatch.setenv("VLLM_KV_CACHE_LAYOUT", layout)
+    pin_kv_layout(layout)
     engine_args = EngineArgs(
         model=_MODEL,
         block_size=_BLOCK_SIZE,
@@ -154,10 +174,29 @@ def _model_for(vllm_config, block_size=None):
 
 def _runner(vllm_config, model):
     """The runner state the gate and the binding read at the end of
-    initialize_kv_cache; the methods under test are the real ones."""
+    initialize_kv_cache; the methods under test are the real ones. The
+    KV cache configuration is a real one: a KVCacheGroupSpec of the
+    pinned vLLM carries no block_size of its own, only its KV spec does."""
+    from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheConfig, KVCacheGroupSpec
+
     runner = NPUModelRunner.__new__(NPUModelRunner)
     runner.vllm_config = vllm_config
-    runner.kv_cache_config = None
+    spec = FullAttentionSpec(
+        block_size=vllm_config.cache_config.block_size,
+        num_kv_heads=vllm_config.model_config.get_num_kv_heads(vllm_config.parallel_config),
+        head_size=vllm_config.model_config.get_head_size(),
+        dtype=vllm_config.model_config.dtype,
+    )
+    runner.kv_cache_config = KVCacheConfig(
+        num_blocks=_NUM_BLOCKS,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec(
+                layer_names=[layer.self_attn.attn.layer_name for layer in model.model.layers],
+                kv_cache_spec=spec,
+            )
+        ],
+    )
     runner.model = model
     return runner
 
@@ -242,8 +281,8 @@ def _span_written(model):
 # ---------------------------------------------------------------------------
 
 
-def test_supported_repair_config_passes_real_config_parsing(monkeypatch):
-    vllm_config = _parse_repair_config(monkeypatch, _LAYOUT_ENV)
+def test_supported_repair_config_passes_real_config_parsing(monkeypatch, pin_kv_layout):
+    vllm_config = _parse_repair_config(pin_kv_layout, _LAYOUT_ENV)
 
     # Real parsing: the Core policy literal accepts 'repair' and resolves
     # the HND alias to its canonical layout name; the Ascend platform
@@ -253,14 +292,14 @@ def test_supported_repair_config_passes_real_config_parsing(monkeypatch):
     assert vllm_config.cache_config.block_size == _BLOCK_SIZE
 
 
-def test_repair_config_is_refused_for_a_forking_scheduler_mode(monkeypatch):
+def test_repair_config_is_refused_for_a_forking_scheduler_mode(monkeypatch, pin_kv_layout):
     # A real additional_config: the recompute scheduler replaces
     # Scheduler.schedule() with a fork that never admits repair-only steps.
     with pytest.raises(
         ValueError, match="kv_load_failure_policy='repair' is not supported with recompute_scheduler_enable"
     ):
         _parse_repair_config(
-            monkeypatch,
+            pin_kv_layout,
             _LAYOUT_ENV,
             additional_config={"scheduler_config": {"recompute_scheduler_enable": True}},
         )
@@ -271,8 +310,8 @@ def test_repair_config_is_refused_for_a_forking_scheduler_mode(monkeypatch):
 # ---------------------------------------------------------------------------
 
 
-def test_init_gate_admits_supported_configuration_with_real_stack(monkeypatch):
-    vllm_config = _parse_repair_config(monkeypatch, _LAYOUT_ENV)
+def test_init_gate_admits_supported_configuration_with_real_stack(monkeypatch, pin_kv_layout):
+    vllm_config = _parse_repair_config(pin_kv_layout, _LAYOUT_ENV)
     runner = _runner(vllm_config, _model_for(vllm_config))
 
     NPUModelRunner._check_repair_kv_layout_capability(runner)
@@ -287,8 +326,8 @@ def test_init_gate_admits_supported_configuration_with_real_stack(monkeypatch):
     )
 
 
-def test_init_gate_refuses_default_layout_with_real_stack(monkeypatch):
-    vllm_config = _parse_repair_config(monkeypatch, None)
+def test_init_gate_refuses_default_layout_with_real_stack(monkeypatch, pin_kv_layout):
+    vllm_config = _parse_repair_config(pin_kv_layout, None)
     # Without an explicit choice the engine resolves the token-major layout.
     assert vllm_config.cache_config.kv_cache_layout == "LBNHC"
     runner = _runner(vllm_config, _model_for(vllm_config))
@@ -297,8 +336,8 @@ def test_init_gate_refuses_default_layout_with_real_stack(monkeypatch):
         NPUModelRunner._check_repair_kv_layout_capability(runner)
 
 
-def test_init_gate_refuses_contradicting_layer_geometry_with_real_stack(monkeypatch):
-    vllm_config = _parse_repair_config(monkeypatch, _LAYOUT_ENV)
+def test_init_gate_refuses_contradicting_layer_geometry_with_real_stack(monkeypatch, pin_kv_layout):
+    vllm_config = _parse_repair_config(pin_kv_layout, _LAYOUT_ENV)
     # The layer bound 64-token blocks while the parsed configuration says 128.
     runner = _runner(vllm_config, _model_for(vllm_config, block_size=64))
 
@@ -328,8 +367,8 @@ def test_repair_steps_reach_the_inherited_dispatch():
     assert "_repair_view_binding" in GPUModelRunner.__dict__
 
 
-def test_repair_step_commits_with_the_runner_binding(monkeypatch):
-    vllm_config = _parse_repair_config(monkeypatch, _LAYOUT_ENV)
+def test_repair_step_commits_with_the_runner_binding(monkeypatch, pin_kv_layout):
+    vllm_config = _parse_repair_config(pin_kv_layout, _LAYOUT_ENV)
     runner = _runner(vllm_config, _model_for(vllm_config))
 
     (report,) = _dispatch_repair_step(runner, NPUModelRunner._repair_view_binding(runner))
@@ -351,11 +390,11 @@ def test_repair_step_commits_with_the_runner_binding(monkeypatch):
             assert total == [0.0, 0.0]
 
 
-def test_repair_step_is_refused_with_a_core_binding_on_per_kv_views(monkeypatch):
+def test_repair_step_is_refused_with_a_core_binding_on_per_kv_views(monkeypatch, pin_kv_layout):
     """The base runner's core-logical binding contradicts the per-K/V
     views this runner binds: the real executor refuses before any layer
     runs, and both buffers stay intact."""
-    vllm_config = _parse_repair_config(monkeypatch, _LAYOUT_ENV)
+    vllm_config = _parse_repair_config(pin_kv_layout, _LAYOUT_ENV)
     runner = _runner(vllm_config, _model_for(vllm_config))
 
     (report,) = _dispatch_repair_step(runner, _REPAIR_EXECUTOR.core_logical_repair_binding(_BLOCK_SIZE, "LBHNC"))

@@ -627,11 +627,16 @@ class NPUModelRunner(GPUModelRunner):
             per_kv_repair_binding,
         )
 
-        spec_block_size = (
-            self.kv_cache_config.kv_cache_groups[0].block_size
+        group = (
+            self.kv_cache_config.kv_cache_groups[0]
             if self.kv_cache_config is not None and self.kv_cache_config.kv_cache_groups
             else None
         )
+        # An older vLLM keeps the block size on the group itself; the verified
+        # pin keeps it in the group's KV cache spec.
+        spec_block_size = getattr(group, "block_size", None)
+        if spec_block_size is None and group is not None:
+            spec_block_size = getattr(group.kv_cache_spec, "block_size", None)
         if spec_block_size is None:
             spec_block_size = self.vllm_config.cache_config.block_size
         resolved_layout = self.vllm_config.cache_config.kv_cache_layout
