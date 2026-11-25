@@ -323,6 +323,27 @@ class TestCaMem(PytestBase):
         # The fixture wakes asleep allocations; these handles are fake.
         allocator.pointer_to_data.clear()
 
+    def test_level2_parameter_only_skips_backup_and_preserves_non_parameter(self, _npu_camem_allocator):
+        allocator = _npu_camem_allocator
+        with allocator.use_memory_pool("weights"):
+            parameter = torch.ones(1024, device="npu")
+        with allocator.use_memory_pool("weights"):
+            non_parameter = torch.arange(1024, device="npu")
+
+        parameter_ptr = parameter.data_ptr()
+        non_parameter_data = non_parameter.detach().clone()
+        allocator.sleep(offload_tags=("weights",), discardable={parameter_ptr})
+
+        assert allocator.pointer_to_data[parameter_ptr].cpu_backup_tensor is None
+        assert any(
+            data.cpu_backup_tensor is not None
+            for ptr, data in allocator.pointer_to_data.items()
+            if ptr != parameter_ptr
+        )
+
+        allocator.wake_up(tags=["weights"])
+        assert torch.equal(non_parameter, non_parameter_data)
+
     @patch("vllm_ascend.device_allocator.camem.create_and_map")
     @patch("vllm_ascend.device_allocator.camem.memcpy")
     def test_wake_up_loads_cpu_backup(self, mock_memcpy, mock_create_and_map):

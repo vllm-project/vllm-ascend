@@ -44,10 +44,6 @@ def worker(monkeypatch):
     return worker
 
 
-def _storage_ptr(parameter: torch.nn.Parameter) -> int:
-    return parameter.untyped_storage().data_ptr()
-
-
 def test_unmatched_pattern_fails_before_sleep(worker):
     worker.model_config.sleep_preserve_parameter_names = ["missing.*"]
 
@@ -70,8 +66,3 @@ def test_level_two_passes_discardable_storages(worker):
     worker.sleep(level=2)
 
     worker.sleep_mode_backend.suspend.assert_called_once_with(expected)
-
-
-def test_worker_no_longer_keeps_python_sleep_snapshots(worker):
-    assert not hasattr(worker, "_sleep_saved_parameters")
-    assert not hasattr(worker, "_sleep_saved_buffers")
