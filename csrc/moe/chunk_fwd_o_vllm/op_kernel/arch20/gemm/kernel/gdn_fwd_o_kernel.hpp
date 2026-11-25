@@ -225,7 +225,8 @@ public:
     // Vec1/Vec2 scratch is dead at the beginning of a body; the fences below
     // release it before the subsequent vector work.
     __aicore__ inline void PrefetchTileNZ(
-        AscendC::GlobalTensor<half> src, uint32_t rows, uint32_t cols, uint32_t l1Offset) {
+        AscendC::GlobalTensor<half> src, uint32_t rows, uint32_t cols,
+        uint32_t srcRowStride, uint32_t l1Offset) {
         // cols is a head dim: always a multiple of the 16-element C0 here, so
         // cols*2B is a multiple of 32 and no DataCopy truncation can occur.
         const uint32_t mAl = M200Gemm::HmRoundUp16(rows);
@@ -234,8 +235,17 @@ public:
         auto dst = resource.l1Buf.template GetBufferByByte<half>(l1Offset);
         AscendC::SetFlag<AscendC::HardEvent::V_MTE2>(EVENT_ID6);
         AscendC::WaitFlag<AscendC::HardEvent::V_MTE2>(EVENT_ID6);
-        // GM rows are contiguous (ld == cols), so the valid part is one burst.
-        AscendC::DataCopy(scratch, src, rows * cols);
+        if (srcRowStride == cols) {
+            AscendC::DataCopy(scratch, src, rows * cols);
+        } else {
+            // V is a column slice of an ND [tokens, full V] matrix.
+            AscendC::DataCopyParams rowCopy;
+            rowCopy.blockCount = static_cast<uint16_t>(rows);
+            rowCopy.blockLen = static_cast<uint16_t>(cols / 16);
+            rowCopy.srcStride = static_cast<uint16_t>((srcRowStride - cols) / 16);
+            rowCopy.dstStride = 0;
+            AscendC::DataCopy(scratch, src, rowCopy);
+        }
         // The burst writes rows [0,rows) and the zero-fill rows [rows,mAl):
         // DISJOINT, so V needs no order against MTE2. MTE3 reads the whole
         // span, so it takes one pair per producer. Both pairs are self-paired,
@@ -440,21 +450,24 @@ public:
                 GDNFwdOOffsets& cube1Offsets = cubeBlockScheduler.GetCube1Offsets();
                 const uint32_t pbt = cube1Offsets.blockTokens;
                 PrefetchTileNZ(gmQ[cube1Offsets.qkOffset],
-                    pbt, kHeadDim, Q_L1_OFFSET + maskedParity * Q_L1_SLOT);
+                    pbt, kHeadDim, kHeadDim, Q_L1_OFFSET + maskedParity * Q_L1_SLOT);
                 PrefetchTileNZ(gmK[cube1Offsets.qkOffset],
-                    pbt, kHeadDim, K_L1_OFFSET + maskedParity * K_L1_SLOT);
+                    pbt, kHeadDim, kHeadDim, K_L1_OFFSET + maskedParity * K_L1_SLOT);
                 // C1's gate: only Q and K. h/v below carry their own flag, so
                 // C1 does not stall on the 64 KB it never reads.
                 AscendC::SetFlag<AscendC::HardEvent::MTE2_MTE1>(EVENT_ID6);
                 {   // h is already a zN image: one flat burst.
                     auto l1H = resource.l1Buf.template GetBufferByByte<half>(
                         H_L1_OFFSET + maskedParity * H_L1_SLOT);
-                    AscendC::DataCopy(l1H, gmH[cube1Offsets.hOffset],
+                    // zN stores each 16-column V panel contiguously across K.
+                    const uint32_t hTileOffset = cube1Offsets.vTileStart * M200Gemm::HmRoundUp16(kHeadDim);
+                    AscendC::DataCopy(l1H, gmH[cube1Offsets.hOffset + hTileOffset],
                                       M200Gemm::HmRoundUp16(kHeadDim) *
-                                      M200Gemm::HmRoundUp16(vHeadDim));
+                                      M200Gemm::HmRoundUp16(cube1Offsets.vTileDim));
                 }
-                PrefetchTileNZ(gmV[cube1Offsets.ovOffset],
-                    pbt, vHeadDim, V_L1_OFFSET + maskedParity * V_L1_SLOT);
+                PrefetchTileNZ(gmV[cube1Offsets.ovOffset + cube1Offsets.vTileStart],
+                    pbt, cube1Offsets.vTileDim, vHeadDim,
+                    V_L1_OFFSET + maskedParity * V_L1_SLOT);
                 AscendC::SetFlag<AscendC::HardEvent::MTE2_MTE1>(EVENT_ID5);  // h/v -> next body's C2/C3
             }
 
@@ -472,6 +485,7 @@ public:
                 //   - extra k terms (Cube3) hit masked[r][c], c>r -> 0 by the causal mask
                 // so the rounded mmad is numerically identical for every blockTokens.
                 const uint32_t pAl = M200Gemm::HmRoundUp16(prevOffsets.blockTokens);
+                const uint32_t tileV = prevOffsets.vTileDim;
 
                 // h/v banks for this task were prefetched at the previous body's
                 // top; consume their flag here.
@@ -489,8 +503,8 @@ public:
                                    /*LEAN_TAIL=*/true, /*NO_MTE1_MTE2=*/true>(
                     resource,
                     gmQ[prevOffsets.qkOffset], kHeadDim,
-                    gmH[prevOffsets.hOffset], vHeadDim,
-                    pAl, vHeadDim, kHeadDim,
+                     gmH[prevOffsets.hOffset], tileV,
+                     pAl, tileV, kHeadDim,
                     Q_L1_OFFSET + (maskedParity ^ 1u) * Q_L1_SLOT,
                     H_L1_OFFSET + (maskedParity ^ 1u) * H_L1_SLOT,
                     UB_HW_OFFSET, L0C_C2_OFFSET);
@@ -510,8 +524,8 @@ public:
                                    /*LEAN_TAIL=*/true, /*NO_MTE1_MTE2=*/true>(
                     resource,
                     gmV[prevOffsets.ovOffset], 0,
-                    gmV[prevOffsets.ovOffset], vHeadDim,
-                    pAl, vHeadDim, pAl,
+                     gmV[prevOffsets.ovOffset + prevOffsets.vTileStart], vHeadDim,
+                     pAl, tileV, pAl,
                     MASKED_L1_OFFSET + (maskedParity ^ 1u) * MASKED_L1_SLOT,
                     V_L1_OFFSET + (maskedParity ^ 1u) * V_L1_SLOT,
                     UB_STAGE_OFFSET, L0C_C3_OFFSET);
@@ -526,7 +540,7 @@ public:
                 {
                     uint32_t bt = prevOffsets.blockTokens;
                     uint32_t mAl = (bt + 15) / 16 * 16;
-                    uint32_t nFr = (vHeadDim + 15) / 16;
+                    uint32_t nFr = (tileV + 15) / 16;
                     uint32_t FRUN = mAl * 16;
                     uint32_t N = nFr * FRUN;
                     AscendC::LocalTensor<float> gUb =
@@ -585,7 +599,8 @@ public:
                     op.srcStride = 0;
                     op.dstStride = static_cast<uint16_t>((vHeadDim - 16) * sizeof(ElementVNEW) / 32);
                     for (uint32_t nf = 0; nf < nFr; ++nf) {
-                        AscendC::DataCopy(gmO[prevOffsets.ovOffset + nf * 16], outUb[nf * FRUN], op);
+                        AscendC::DataCopy(gmO[prevOffsets.ovOffset + prevOffsets.vTileStart + nf * 16],
+                                          outUb[nf * FRUN], op);
                     }
                     // No MTE3_V drain after the store: v2out sits in its own
                     // window now and its only later writer is the next body's

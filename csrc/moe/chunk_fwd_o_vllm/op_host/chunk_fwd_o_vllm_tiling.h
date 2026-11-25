@@ -38,6 +38,7 @@ TILING_DATA_FIELD_DEF(int64_t, attnWorkspaceOffset);
 TILING_DATA_FIELD_DEF(int64_t, aftermaskWorkspaceOffset);
 TILING_DATA_FIELD_DEF(int64_t, maskWorkspaceOffset);
 TILING_DATA_FIELD_DEF(float, scale);
+TILING_DATA_FIELD_DEF(int64_t, vTileDim);
 END_TILING_DATA_DEF;
 
 REGISTER_TILING_DATA_CLASS(ChunkFwdOVllm, ChunkFwdOVllmTilingData)

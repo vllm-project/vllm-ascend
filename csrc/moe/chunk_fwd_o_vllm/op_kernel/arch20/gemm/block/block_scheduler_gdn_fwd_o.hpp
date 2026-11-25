@@ -41,6 +41,8 @@ struct GDNFwdOOffsets {
     uint32_t hvWorkOffset;
     bool isFinalState;
     uint32_t blockTokens;
+    uint32_t vTileStart;
+    uint32_t vTileDim;
     uint32_t batchIdx;
     uint32_t headIdx;
     uint32_t chunkIdx;
@@ -111,6 +113,7 @@ struct BlockSchedulerGdnFwdO {
         vNumHead = gdnFwdOTilingData->vNumHead;
         kHeadDim = gdnFwdOTilingData->kHeadDim;
         vHeadDim = gdnFwdOTilingData->vHeadDim;
+        vBlockSize = gdnFwdOTilingData->vTileDim;
         chunkSize = gdnFwdOTilingData->chunkSize;
         isVariedLen = gdnFwdOTilingData->isVariedLen;
         tokenBatch = gdnFwdOTilingData->tokenBatch;
@@ -128,39 +131,31 @@ struct BlockSchedulerGdnFwdO {
 
         cubeCoreIdx = coreIdx;
         cubeCoreNum = coreNum;
-        vLoops = vHeadDim / vBlockSize;
+        vLoops = (vHeadDim + vBlockSize - 1) / vBlockSize;
         taskNum = vLoops * shapeBatch * numChunks * vNumHead;
         headGroups = vNumHead / kNumHead;
-        taskIdx = cubeCoreIdx * PING_PONG_STAGES;
+        taskIdx = cubeCoreIdx;
         isRunning = taskIdx < taskNum;
 
     }
 
     CATLASS_DEVICE
     void InitTask() {
-        if (processNewTask) {
-            if (unlikely(taskIdx >= taskNum)) {
-                isRunning = false;
-                // Drain the previous stage without reading metadata for a
-                // nonexistent next chunk (cu_seqlens/chunk_offsets may end here).
-                currStage = (currStage + 1) % PING_PONG_STAGES;
-                return;
-            }
-            vIdx = taskIdx / (shapeBatch * numChunks * vNumHead);
-            shapeBatchIdx = (taskIdx - vIdx * shapeBatch * numChunks * vNumHead) / (numChunks * vNumHead);
-            chunkIdx = (taskIdx - vIdx * shapeBatch * numChunks * vNumHead - shapeBatchIdx * numChunks * vNumHead) / vNumHead;
-            baseHeadIdx = taskIdx % vNumHead;
-            tokenBatchIdx = isVariedLen ? gmChunkOffsets.GetValue(2 * chunkIdx) : 0;
-            batchChunkIdx = isVariedLen ? gmChunkOffsets.GetValue(2 * chunkIdx + 1) : chunkIdx;
-            batchChunkStartIdx = chunkIdx - batchChunkIdx;
-            tokenOffset = isVariedLen ? gmSeqlen.GetValue(tokenBatchIdx) : 0;
-            batchTokens = isVariedLen ? (gmSeqlen.GetValue(tokenBatchIdx + 1) - tokenOffset) : seqlen;
-            headInnerIdx = 0;
-        } else {
-            headInnerIdx = (headInnerIdx + 1) % PING_PONG_STAGES;
+        if (unlikely(taskIdx >= taskNum)) {
+            isRunning = false;
+            // Drain the prior stage without reading metadata for a nonexistent task.
+            currStage = (currStage + 1) % PING_PONG_STAGES;
+            return;
         }
-        
-        vHeadIdx = baseHeadIdx + headInnerIdx;
+        vIdx = taskIdx / (shapeBatch * numChunks * vNumHead);
+        shapeBatchIdx = (taskIdx - vIdx * shapeBatch * numChunks * vNumHead) / (numChunks * vNumHead);
+        chunkIdx = (taskIdx - vIdx * shapeBatch * numChunks * vNumHead - shapeBatchIdx * numChunks * vNumHead) / vNumHead;
+        vHeadIdx = taskIdx % vNumHead;
+        tokenBatchIdx = isVariedLen ? gmChunkOffsets.GetValue(2 * chunkIdx) : 0;
+        batchChunkIdx = isVariedLen ? gmChunkOffsets.GetValue(2 * chunkIdx + 1) : chunkIdx;
+        batchChunkStartIdx = chunkIdx - batchChunkIdx;
+        tokenOffset = isVariedLen ? gmSeqlen.GetValue(tokenBatchIdx) : 0;
+        batchTokens = isVariedLen ? (gmSeqlen.GetValue(tokenBatchIdx + 1) - tokenOffset) : seqlen;
         kHeadIdx = vHeadIdx / headGroups;
         offsets[currStage].qkOffset = (shapeBatchIdx * kNumHead * seqlen + kHeadIdx * seqlen + tokenOffset + batchChunkIdx * chunkSize) * kHeadDim;
         offsets[currStage].ovOffset = (shapeBatchIdx * vNumHead * seqlen + vHeadIdx * seqlen + tokenOffset + batchChunkIdx * chunkSize) * vHeadDim;
@@ -170,14 +165,14 @@ struct BlockSchedulerGdnFwdO {
         offsets[currStage].hvWorkOffset = (cubeCoreIdx * PING_PONG_STAGES + currStage) * chunkSize * vHeadDim;
         offsets[currStage].isFinalState = chunkIdx == (numChunks - 1) || (isVariedLen && gmChunkOffsets.GetValue(2 * chunkIdx + 3) == 0);
         offsets[currStage].blockTokens = offsets[currStage].isFinalState ? (batchTokens - batchChunkIdx * chunkSize) : chunkSize;
+        offsets[currStage].vTileStart = vIdx * vBlockSize;
+        const uint32_t vRemaining = vHeadDim - offsets[currStage].vTileStart;
+        offsets[currStage].vTileDim = vRemaining < vBlockSize ? vRemaining : vBlockSize;
         offsets[currStage].batchIdx = batchIdx; 
         offsets[currStage].headIdx = vHeadIdx; 
         offsets[currStage].chunkIdx = chunkIdx; 
 
-        processNewTask = headInnerIdx == PING_PONG_STAGES - 1;
-        if (processNewTask) {
-            taskIdx += PING_PONG_STAGES * cubeCoreNum;
-        }
+        taskIdx += cubeCoreNum;
         
         currStage = (currStage + 1) % PING_PONG_STAGES;
     }
@@ -227,13 +222,13 @@ struct BlockSchedulerGdnFwdOCube : public BlockSchedulerGdnFwdO {
     CATLASS_DEVICE
     GemmCoord GetCube2Shape() {
         GDNFwdOOffsets& cube2Offsets = GetCube23Offsets();
-        return GemmCoord{kHeadDim, vHeadDim, cube2Offsets.blockTokens};
+        return GemmCoord{kHeadDim, cube2Offsets.vTileDim, cube2Offsets.blockTokens};
     }
 
     CATLASS_DEVICE
     GemmCoord GetCube3Shape() {
         GDNFwdOOffsets& cube2Offsets = GetCube23Offsets();
-        return GemmCoord{kHeadDim, vHeadDim, cube2Offsets.blockTokens};
+        return GemmCoord{kHeadDim, cube2Offsets.vTileDim, cube2Offsets.blockTokens};
     }
 
 };

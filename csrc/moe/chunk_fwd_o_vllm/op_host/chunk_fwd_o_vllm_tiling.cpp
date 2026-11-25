@@ -97,6 +97,33 @@ ge::graphStatus Tiling4ChunkFwdOVllm(gert::TilingContext *context)
     uint32_t aicCoreNum = ascendcPlatform.GetCoreNumAic();
     context->SetBlockDim(aicCoreNum);
 
+    // One 310P task handles at most one V tile. Bound it by the L1 V/H banks
+    // and by the fixed 64x128 fp32 UB/L0C and fp16 output windows.
+    int64_t vTileDim = vHeadDim;
+    if (ascendcPlatform.GetSocVersion() == platform_ascendc::SocVersion::ASCEND310P) {
+        constexpr int64_t kVSlotBytes = 16 * 1024;
+        constexpr int64_t kHSlotBytes = 48 * 1024;
+        constexpr int64_t kWorkTileBytes = 32 * 1024;
+        constexpr int64_t kOutputTileBytes = 16 * 1024;
+        constexpr int64_t kQKSlotBytes = 32 * 1024;
+        if (chunkSize != 64 || kHeadDim <= 0 || vHeadDim <= 0 ||
+            (kHeadDim % 16) != 0 || (vHeadDim % 16) != 0 ||
+            chunkSize * kHeadDim * 2 > kQKSlotBytes) {
+            return ge::GRAPH_FAILED;
+        }
+        const int64_t kAligned = (kHeadDim + 15) / 16 * 16;
+        int64_t bound = kVSlotBytes / (chunkSize * 2);
+        const int64_t hBound = kHSlotBytes / (kAligned * 2);
+        const int64_t workBound = kWorkTileBytes / (chunkSize * 4);
+        const int64_t outBound = kOutputTileBytes / (chunkSize * 2);
+        if (hBound < bound) bound = hBound;
+        if (workBound < bound) bound = workBound;
+        if (outBound < bound) bound = outBound;
+        if (vHeadDim < bound) bound = vHeadDim;
+        vTileDim = bound / 16 * 16;
+        if (vTileDim == 0) return ge::GRAPH_FAILED;
+    }
+
     constexpr size_t WORKSPACE_RSV_BYTE = 16 * 1024 * 1024;
     constexpr size_t GM_ALIGN = 512;
     int64_t pingpongStages = 2;
@@ -150,6 +177,7 @@ ge::graphStatus Tiling4ChunkFwdOVllm(gert::TilingContext *context)
     tiling.set_vNumHead(vNumHead);
     tiling.set_kHeadDim(kHeadDim);
     tiling.set_vHeadDim(vHeadDim);
+    tiling.set_vTileDim(vTileDim);
     tiling.set_scale(scale);
     tiling.set_chunkSize(chunkSize);
     tiling.set_isVariedLen(isVariedLen);
