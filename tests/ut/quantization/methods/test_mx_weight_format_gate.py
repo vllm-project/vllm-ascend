@@ -31,7 +31,7 @@ unsupported cache dtypes (``AscendAttentionBackend`` in ``attention_v1.py``).
 from unittest.mock import Mock, patch
 
 from tests.ut.base import TestBase
-from tests.ut.quantization.conftest_quantization import create_mock_ascend_config, create_mock_vllm_config
+from tests.ut.quantization.conftest_quantization import create_mock_vllm_config
 from vllm_ascend.device.hardware_profile import WeightFormat
 from vllm_ascend.quantization.methods.w4a4.w4a4_mxfp4 import (
     AscendW4A4MXFP4DynamicFusedMoEMethod,
@@ -79,10 +79,6 @@ def build_w8a8_mxfp8_moe():
             return_value=create_mock_vllm_config(),
         ),
         patch(
-            "vllm_ascend.quantization.methods.w8a8.w8a8_mxfp8.get_ascend_config",
-            return_value=create_mock_ascend_config(),
-        ),
-        patch(
             "vllm_ascend.quantization.methods.w8a8.w8a8_mxfp8.get_dynamic_mx_quant_scale_alg",
             return_value=0,
         ),
@@ -112,10 +108,6 @@ def build_w4a4_mxfp4_moe():
             "vllm_ascend.quantization.methods.w4a4.w4a4_mxfp4.get_current_vllm_config",
             return_value=create_mock_vllm_config(),
         ),
-        patch(
-            "vllm_ascend.quantization.methods.w4a4.w4a4_mxfp4.get_ascend_config",
-            return_value=create_mock_ascend_config(),
-        ),
     ):
         return AscendW4A4MXFP4DynamicFusedMoEMethod()
 
@@ -133,10 +125,6 @@ def build_w4a16_mxfp4_moe():
         patch(
             "vllm_ascend.quantization.methods.wna16.w4a16_mxfp4.get_current_vllm_config",
             return_value=create_mock_vllm_config(),
-        ),
-        patch(
-            "vllm_ascend.quantization.methods.wna16.w4a16_mxfp4.get_ascend_config",
-            return_value=create_mock_ascend_config(),
         ),
     ):
         return AscendW4A16MXFP4FusedMoEMethod()

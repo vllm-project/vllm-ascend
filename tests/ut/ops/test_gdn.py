@@ -26,7 +26,7 @@ from vllm.model_executor.model_loader.reload import (
     record_metadata_for_reloading,
 )
 
-from vllm_ascend.ops.gdn import (
+from vllm_ascend.attention.gdn import (
     _PACKED_CONV_WEIGHT_NAME,
     _get_base_conv1d,
     _get_packed_conv_weights,

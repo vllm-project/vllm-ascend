@@ -113,7 +113,6 @@ def _vllm_config(
     lora_config=None,
     prompt_adapter_config=None,
     pooler_config=None,
-    use_v2_model_runner=False,
     prefill_context_parallel_size=1,
     decode_context_parallel_size=1,
     use_sequence_parallel_moe=False,
@@ -152,7 +151,6 @@ def _vllm_config(
         lora_config=lora_config,
         prompt_adapter_config=prompt_adapter_config,
         pooler_config=pooler_config,
-        use_v2_model_runner=use_v2_model_runner,
         parallel_config=SimpleNamespace(
             tensor_parallel_size=tp_size,
             pipeline_parallel_size=1,
@@ -455,7 +453,6 @@ def test_runtime_tensor_layout_changes_do_not_partition_weight_seeds(identity_mo
         ({"cache_block_size": 64}, {}),
         ({"cache_dtype": "int8"}, {}),
         ({"mamba_cache_dtype": "float32"}, {}),
-        ({"use_v2_model_runner": True}, {}),
         ({"prefill_context_parallel_size": 2}, {}),
         ({"decode_context_parallel_size": 2}, {}),
         ({"use_sequence_parallel_moe": True}, {}),

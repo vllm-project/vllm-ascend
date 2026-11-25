@@ -1037,6 +1037,26 @@ at::Tensor npu_sparse_attn_sharedkv_metadata_meta(
     return output;
 }
 
+at::Tensor npu_quant_sparse_lightning_indexer_metadata_meta(
+    int64_t num_heads_q, int64_t num_heads_k, int64_t head_dim, int64_t topk, int64_t quant_mode,
+    const at::Tensor &candidate_block_length,
+    const c10::optional<at::Tensor> &cu_seqlens_q, const c10::optional<at::Tensor> &cu_seqlens_k,
+    const c10::optional<at::Tensor> &seqused_q, const c10::optional<at::Tensor> &seqused_k,
+    const c10::optional<at::Tensor> &cmp_residual_k, int64_t batch_size,
+    int64_t max_seqlen_q, int64_t max_seqlen_k,
+    const c10::string_view layout_q, const c10::string_view layout_k, int64_t mask_mode, int64_t cmp_ratio)
+{
+    TORCH_CHECK(candidate_block_length.scalar_type() == at::kInt,
+                "QSLI candidate_block_length must be int32");
+    TORCH_CHECK(candidate_block_length.dim() == 2 && candidate_block_length.sym_size(1) == 1,
+                "QSLI candidate_block_length must have shape [T, 1]");
+    TORCH_CHECK(candidate_block_length.is_contiguous(), "QSLI candidate lengths must be contiguous");
+    constexpr int64_t OUTPUT_SIZE = 1024;
+    return at::empty_symint(
+        c10::SymDimVector{c10::SymInt(OUTPUT_SIZE)},
+        candidate_block_length.options().dtype(torch::kInt32));
+}
+
 at::Tensor npu_quant_lightning_indexer_v2_metadata_meta(
     int64_t num_heads_q, int64_t num_heads_k, int64_t head_dim, int64_t topk, int64_t quant_mode,
     const c10::optional<at::Tensor> &cu_seqlens_q, const c10::optional<at::Tensor> &cu_seqlens_k,
@@ -1911,6 +1931,8 @@ TORCH_LIBRARY_IMPL_EXPAND(CONCAT(_C, _ascend), Meta, ops) {
     ops.impl("compressor_metadata", &vllm_ascend::meta::compressor_metadata_meta);
     ops.impl("npu_quant_lightning_indexer_v2", &vllm_ascend::meta::npu_quant_lightning_indexer_v2_meta);
     ops.impl("npu_quant_lightning_indexer_v2_metadata", &vllm_ascend::meta::npu_quant_lightning_indexer_v2_metadata_meta);
+    ops.impl("npu_quant_sparse_lightning_indexer_metadata",
+             &vllm_ascend::meta::npu_quant_sparse_lightning_indexer_metadata_meta);
     ops.impl("npu_sparse_attn_sharedkv", &vllm_ascend::meta::npu_sparse_attn_sharedkv_meta);
     ops.impl("npu_sparse_attn_sharedkv_metadata", &vllm_ascend::meta::npu_sparse_attn_sharedkv_metadata_meta);
     ops.impl("npu_hc_post", &vllm_ascend::meta::npu_hc_post_meta);

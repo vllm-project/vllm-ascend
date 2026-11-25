@@ -36,7 +36,7 @@ from vllm.logger import logger
 from vllm.utils.math_utils import round_up
 
 from vllm_ascend.ascend_config import AscendCompilationConfig, get_ascend_config
-from vllm_ascend.utils import COMPILATION_PASS_KEY, vllm_version_is
+from vllm_ascend.utils import COMPILATION_PASS_KEY
 
 
 def compile_fx(graph: GraphModule, example_inputs: list, inner_compile: Callable, decompositions: dict) -> Callable:
@@ -77,7 +77,7 @@ def _compute_decode_cudagraph_batch_sizes(vllm_config: VllmConfig) -> list[int]:
     max_num_tokens = vllm_config.scheduler_config.max_num_seqs * uniform_decode_query_len
     compilation_config = vllm_config.compilation_config
     capture_sizes = set(compilation_config.cudagraph_capture_sizes)
-    if vllm_config.use_v2_model_runner and compilation_config.cudagraph_mode.separate_routine():
+    if compilation_config.cudagraph_mode.separate_routine():
         # V2 uniform decode capture rounds token counts up to the query length.
         # With MTP5, for example, configured size 56 captures 60 tokens. Keep
         # the raw sizes as well for routines that do not perform this rounding.
@@ -302,14 +302,6 @@ class AscendCompiler(CompilerInterface):
         }
         logger.info("AscendCompiler hash factors: %s", factors)
         return factors
-
-    if vllm_version_is("0.33.0"):
-
-        def compute_hash(self, vllm_config: VllmConfig) -> str:
-            # Main rejects subclasses defining compute_hash (#65652).
-            from hashlib import sha256
-
-            return sha256(str(self.compile_factors(vllm_config)).encode(), usedforsecurity=False).hexdigest()[:10]
 
     def initialize_cache(self, cache_dir: str, disable_cache: bool = False, prefix: str = "") -> None:
         """Initialize cache settings and runtime state before compiling or loading a graph."""

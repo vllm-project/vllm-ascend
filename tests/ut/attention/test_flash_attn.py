@@ -16,7 +16,6 @@ from vllm.v1.kv_cache_interface import FullAttentionSpec
 from vllm_ascend.attention.attention_v1 import AscendAttentionBackend
 from vllm_ascend.attention.fa_v1 import AscendFlashAttentionBackend, AscendFlashAttentionImpl
 from vllm_ascend.models.minimax_m3 import msa_m3
-from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2 import attn_utils
 
 
@@ -171,7 +170,7 @@ def dflash2_config():
             target_model_config=SimpleNamespace(hf_text_config=SimpleNamespace(model_type="glm_moe_dsa")),
             draft_model_config=SimpleNamespace(architectures=["DFlash2DraftModel"]),
             draft_sample_method="greedy",
-            enforce_eager=True,
+            enforce_eager=False,
         ),
     )
 
@@ -236,9 +235,11 @@ def test_dspark_selects_flash_attn_for_eager_and_graph_drafts(
     assert not select(config, selector, "dspark_head")
 
 
-def test_flash_attn_is_selected_only_for_a5_dflash2_eager_drafts(select_flash_attn, dflash2_config):
+@pytest.mark.parametrize("model_type", ["glm_moe_dsa", "glm5_next_text"])
+def test_flash_attn_is_selected_for_supported_glm53_dflash2_targets(select_flash_attn, dflash2_config, model_type):
     select, profile = select_flash_attn
     config = dflash2_config
+    config.speculative_config.target_model_config.hf_text_config.model_type = model_type
     selector = AttentionSelectorConfig(head_size=128, block_size=128, dtype=torch.bfloat16, kv_cache_dtype="auto")
     assert select(config, selector)
     profile.supports = lambda _: False
@@ -263,11 +264,11 @@ def test_flash_attn_requires_live_dflash_loader_tag(monkeypatch, select_flash_at
 
 
 @pytest.mark.parametrize("enforce_eager", [False, True, None])
-def test_dflash_selection_requires_eager_draft(select_flash_attn, dflash2_config, enforce_eager):
+def test_dflash_selection_is_independent_of_eager(select_flash_attn, dflash2_config, enforce_eager):
     select, _ = select_flash_attn
     dflash2_config.speculative_config.enforce_eager = enforce_eager
     selector = AttentionSelectorConfig(head_size=128, block_size=128, dtype=torch.bfloat16, kv_cache_dtype="auto")
-    assert select(dflash2_config, selector) == bool(enforce_eager)
+    assert select(dflash2_config, selector)
 
 
 @pytest.mark.parametrize("sampling", ["greedy", "probabilistic"])
@@ -295,7 +296,7 @@ def test_other_drafts_retain_legacy_backend(select_flash_attn, dflash2_config, f
     assert not select(dflash2_config, selector)
 
 
-@pytest.mark.parametrize("model_type", ["qwen3", "deepseek_v32", "glm5_next"])
+@pytest.mark.parametrize("model_type", ["qwen3", "deepseek_v32", "other_glm"])
 def test_other_target_architectures_retain_legacy_backend(select_flash_attn, dflash2_config, model_type):
     select, _ = select_flash_attn
     dflash2_config.speculative_config.target_model_config.hf_text_config.model_type = model_type
@@ -405,12 +406,9 @@ def test_metadata_builder_does_not_materialize_exact_device_lengths(monkeypatch,
     with monkeypatch.context() as patches:
         for operation in ("tolist", "item", "cpu"):
             patches.setattr(torch.Tensor, operation, forbidden_host_materialization)
-        if vllm_version_is("0.33.0"):
-            result = builder.build_for_drafting(common, draft_index=0)
-        else:
-            # MRv2 builds each draft step directly; the V1 drafting helper was
-            # removed upstream. Retain the same device-length assertions.
-            result = builder.build(common_prefix_len=0, common_attn_metadata=common, fast_build=True)
+        # MRv2 builds each draft step directly; the V1 drafting helper was
+        # removed upstream. Retain the same device-length assertions.
+        result = builder.build(common_prefix_len=0, common_attn_metadata=common, fast_build=True)
     assert result.seq_lens_gpu.data_ptr() == common.seq_lens.data_ptr()
     assert result.query_start_loc_gpu.data_ptr() == common.query_start_loc.data_ptr()
     assert not result.causal

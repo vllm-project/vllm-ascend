@@ -36,7 +36,6 @@ from typing import Any
 import torch
 import vllm.model_executor.layers.fused_moe as _fused_moe_pkg
 import vllm.model_executor.layers.fused_moe.layer as _fused_moe_layer
-from vllm.config import get_current_vllm_config
 from vllm.model_executor.layers.fused_moe.router.fused_moe_router import FusedMoERouter
 
 from vllm_ascend.ascend_config import get_ascend_config
@@ -140,22 +139,11 @@ def _ascend_FusedMoE(
     image_sentinel_lo: int = 129257,
     **kwargs,
 ):
-    # vLLM 0.33.0's Ling model passes activation="silu" even for a routed layer
-    # with a configured swiglu_limit, which must clamp after SiLU (vllm#65088).
-    # Ling calls this factory directly from its module, which identifies it.
-    if (
-        kwargs.get("activation") == "silu"
-        and kwargs.get("swiglu_limit") is not None
-        and vllm_version_is("0.33.0")
-        and sys._getframe(1).f_globals.get("__name__") == "vllm.model_executor.models.bailing_moe_v3"
-    ):
-        kwargs["activation"] = "swiglustep"
-
     # Ascend-owned model callers retain the release booleans; native main
     # callers pass the enum introduced by vLLM #66859. Normalize before
     # constructing either the router or the native factory to scale once.
     scaling_kwargs: dict[str, Any]
-    if vllm_version_is("0.33.0"):
+    if vllm_version_is("0.34.0"):
         scaling_kwargs = {"apply_routed_scale_to_output": apply_routed_scale_to_output}
     else:
         from vllm.model_executor.layers.fused_moe.config import RoutedScaleMode
@@ -183,7 +171,7 @@ def _ascend_FusedMoE(
             )
         enable_eplb = True
         num_redundant_experts = configured_redundancy or upstream_redundancy
-    enable_router_eplb = enable_eplb and get_current_vllm_config().use_v2_model_runner
+    enable_router_eplb = enable_eplb
     if router is None:
         router = create_ascend_fused_moe_router(
             top_k=top_k,
@@ -230,6 +218,11 @@ def _ascend_FusedMoE(
         **kwargs,
     )
     _adapt_eplb_router(runner.router, enable_router_eplb)
+    if enable_router_eplb:
+        from vllm_ascend.ops.triton.eplb import _EPLB_MAP_KERNEL
+
+        # The model runner holds its JIT registry window during construction.
+        _EPLB_MAP_KERNEL.register_warmup(num_experts, top_k)
     return runner
 
 

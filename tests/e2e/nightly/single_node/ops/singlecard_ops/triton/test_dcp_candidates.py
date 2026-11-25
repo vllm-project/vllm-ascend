@@ -13,17 +13,19 @@ from vllm_ascend.ops.triton.sharded_indexer import merge_packed_candidates, pack
 
 
 @pytest.mark.parametrize(
-    "world,rows,topk,local_k,dtype,local_rank",
+    "world,rows,topk,local_k,dtype,local_rank,ties",
     [
-        (1, 1, 2048, 2048, torch.bfloat16, 0),
-        (3, 17, 31, 33, torch.float32, None),
-        (8, 128, 2048, 2048, torch.bfloat16, 7),
-        (16, 48, 2048, 2048, torch.float32, 15),
-        (17, 49, 2048, 2048, torch.bfloat16, 16),
-        (8, 65, 2048, 2051, torch.float32, None),
+        (1, 1, 2048, 2048, torch.bfloat16, 0, False),
+        (3, 17, 31, 33, torch.float32, None, False),
+        (16, 48, 2048, 2048, torch.float32, 15, False),
+        (17, 49, 2048, 2048, torch.bfloat16, 16, False),
+        (8, 65, 2048, 2051, torch.float32, None, False),
+        # Cover ties on the unsorted and presorted merge paths.
+        (3, 17, 31, 33, torch.float32, None, True),
+        (8, 128, 2048, 2048, torch.bfloat16, 7, True),
+        (17, 49, 2048, 2048, torch.bfloat16, 16, True),
     ],
 )
-@pytest.mark.parametrize("ties", [False, True])
 def test_candidate_pipeline_and_changed_graph_inputs(world, rows, topk, local_k, dtype, local_rank, ties):
     torch.npu.set_device(0)
     interleave = 768

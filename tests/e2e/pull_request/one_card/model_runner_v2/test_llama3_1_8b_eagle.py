@@ -15,8 +15,6 @@
 # limitations under the License.
 #
 
-import os
-from unittest.mock import patch
 
 import pytest
 from vllm import SamplingParams
@@ -44,7 +42,6 @@ EAGLE_MODELS = ["vllm-ascend/EAGLE-LLaMA3.1-Instruct-8B"]
         pytest.param({"cudagraph_mode": "NONE"}, id="eager"),
     ],
 )
-@patch.dict(os.environ, {"VLLM_USE_V2_MODEL_RUNNER": "1"})
 def test_eagle_spec_decoding(
     model: str,
     eagle_model: str,

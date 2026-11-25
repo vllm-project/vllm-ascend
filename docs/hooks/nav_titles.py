@@ -193,6 +193,10 @@ TITLES = {
     },
     "user_guide/configuration/env_vars.md": {"en": "Environment Variables", "zh": "环境变量"},
     "user_guide/configuration/runtime_config.md": {"en": "Runtime Configuration", "zh": "运行时配置"},
+    "user_guide/configuration/unified_output_directory.md": {
+        "en": "Unified Output Directory",
+        "zh": "统一输出目录",
+    },
     "user_guide/deployment_guide/using_mindie_motor.md": {"en": "Using MindIE Motor", "zh": "使用 MindIE Motor"},
     "user_guide/deployment_guide/using_volcano_kthena.md": {"en": "Using Volcano Kthena", "zh": "使用 Volcano Kthena"},
     "user_guide/feature_guide/Ai_QoS_introduction_en.md": {"en": "AI QoS", "zh": "AI QoS"},
