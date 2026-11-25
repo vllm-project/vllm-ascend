@@ -8,6 +8,12 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
 from vllm.distributed.kv_transfer.kv_connector.v1.multi_connector import MultiConnector
 
 from vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.dspark_context import uses_sfa_dspark_kv_transfer
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.cache_planner import (
+    get_layerwise_ascend_store_config,
+)
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.layerwise_cache_layout import (
+    get_layerwise_reuse_layout,
+)
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
@@ -38,6 +44,15 @@ class AscendMultiConnector(MultiConnector, SupportsHMA):
             "HMA should not be enabled unless all sub-connectors support it"
         )
         self._configure_layerwise_reuse_completion()
+        if (
+            role == KVConnectorRole.WORKER
+            and len(self._connectors) > 1
+            and not self._external_slot_release_sink_configured
+            and get_layerwise_reuse_layout(kv_cache_config) is not None
+        ):
+            store_config = get_layerwise_ascend_store_config(transfer)
+            if store_config is not None and store_config.get("backend", "mooncake").lower() == "mooncake":
+                raise ValueError("Mooncake Store shared KV buffers require a Push connector with slot-release fencing")
         # Handle to the (V2) mamba hybrid model state while its per-layer
         # align pre-copy is deferred behind a layerwise child connector.
         self._mamba_state: Any = None
@@ -198,6 +213,14 @@ class AscendMultiConnector(MultiConnector, SupportsHMA):
                 blocks if needs_full_blocks else empty_blocks,
                 num_external_tokens if needs_full_blocks else 0,
             )
+
+    def get_local_prefix_cache_limit(self, request: "Request") -> int | None:
+        limits = []
+        for connector in self._connectors:
+            get_limit = getattr(connector, "get_local_prefix_cache_limit", None)
+            if callable(get_limit) and (limit := get_limit(request)) is not None:
+                limits.append(limit)
+        return min(limits) if limits else None
 
     def get_num_new_matched_tokens(
         self,

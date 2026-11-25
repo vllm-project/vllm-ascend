@@ -668,6 +668,8 @@ class KVCacheStoreLayerSendingThread(KVCacheStoreLayerSendingThreadBase):
             if failed_keys:
                 self._revoke_range_keys(failed_keys)
                 self._active_put_keys.difference_update(failed_keys)
+                if self.raise_on_transfer_failure:
+                    raise RuntimeError("Mooncake offload failed while saving shared KV/state")
 
         if not (layer_id == self.final_layer_id if final_group_layer is None else final_group_layer):
             return
@@ -688,6 +690,8 @@ class KVCacheStoreLayerSendingThread(KVCacheStoreLayerSendingThreadBase):
             if self._session_tracker is not None:
                 self._session_tracker.commit_put_keys(committed_keys)
             self._remove_started_keys(active_keys)
+            if failed_keys and self.raise_on_transfer_failure:
+                raise RuntimeError("Mooncake offload failed to publish shared KV/state")
         self._active_put_keys = None
 
     def _handle_range_layer_tasks(self, transfer_tasks: list[LayerTransferTask]) -> None:
@@ -881,7 +885,7 @@ class KVCacheStoreLayerRecvingThread(KVTransferThread):
         self._invalid_block_ids_lock = invalid_block_ids_lock or threading.Lock()
         self._load_abort_event = load_abort_event or threading.Event()
         self._active_load_indices: set[int] | None = None
-        self._group_load_indices: dict[int, set[int] | None] = {}
+        self._group_load_indices: dict[int, tuple[SharedBlockData, set[int] | None]] = {}
         self.group_builders: list[LayerBatchBuilder] | None = group_builders
         if group_builders is not None:
             self.layer_batch_builder = group_builders[0]
@@ -1000,9 +1004,14 @@ class KVCacheStoreLayerRecvingThread(KVTransferThread):
                 if not isinstance(req_meta, LayerRangeReqMeta):
                     raise TypeError(f"Expected layerwise range metadata, got {type(req_meta).__name__}")
                 req_meta.layer_id = layer_id
-                self._active_load_indices = self._group_load_indices.get(task.group_id)
+                # Resident and shared layers can select different requests within one group.
+                previous = self._group_load_indices.get(task.group_id)
+                self._active_load_indices = previous[1] if previous is not None and previous[0] is shared else None
                 self._handle_range_request(req_meta, shared)
-                self._group_load_indices[task.group_id] = None if task.final_group_layer else self._active_load_indices
+                if task.final_group_layer:
+                    self._group_load_indices.pop(task.group_id, None)
+                else:
+                    self._group_load_indices[task.group_id] = (shared, self._active_load_indices)
         except Exception as exc:
             self._fatal_error = exc
             if self._active_load_indices is not None:
