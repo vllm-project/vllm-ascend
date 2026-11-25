@@ -55,6 +55,8 @@
 /docs/source/user_guide/feature_guide/rl.md @Ronald1995 @Liccol
 /docs/source/user_guide/feature_guide/batch_invariance.md @Ronald1995
 /docs/source/community/contributors.md @wangxiyuan
+/docs/source/developer_guide/Design_Documents/quantization.md @kunpengW-code @lcfenglinwan
+/docs/source/user_guide/feature_guide/quantization.md @kunpengW-code @lcfenglinwan
 /.readthedocs.yaml @liqian79 @MrZ20
 /README* @liqian79
 /mkdocs.yml @MrZ20
@@ -92,6 +94,7 @@
 
 # compilation
 /vllm_ascend/compilation @yiz-liu @wxsIcey
+/vllm_ascend/compilation/static_kernel.py @yiz-liu
 
 # device / device_allocator
 /vllm_ascend/device @zzzzwwjj @Tflowers-0129
@@ -148,6 +151,7 @@
 
 # kv cache
 /vllm_ascend/core/kv_cache_config_builder.py @yzeyu71 @Angazenn @zhenwenqi2024 @@yiz-liu
+/vllm_ascend/core/kv_cache_dtype_handlers.py @kunpengW-code @lcfenglinwan
 /vllm_ascend/core/kv_cache_interface.py @yzeyu71 @Angazenn @zhenwenqi2024 @yiz-liu
 /vllm_ascend/core/kv_cache_placement.py @yzeyu71 @Angazenn @zhenwenqi2024 @yiz-liu
 /vllm_ascend/core/single_type_kv_cache_manager.py @yzeyu71 @Angazenn @zhenwenqi2024 @yiz-liu

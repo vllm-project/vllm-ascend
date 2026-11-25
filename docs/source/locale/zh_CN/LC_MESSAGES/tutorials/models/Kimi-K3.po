@@ -1453,3 +1453,8 @@ msgid ""
 "The recommended configurations are the same as those specified in [Section "
 "5](#5-online-service-deployment)."
 msgstr "推荐配置与[第 5 节](#5-online-service-deployment)中指定的配置相同。"
+
+msgid ""
+"{% include \"getting_started/installation/ascend_docker_runtime.inc.md\" %}"
+msgstr ""
+"{% include \"getting_started/installation/ascend_docker_runtime.inc.md\" %}"
