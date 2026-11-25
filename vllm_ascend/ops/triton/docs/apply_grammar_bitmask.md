@@ -133,10 +133,7 @@
 ```python
 import torch
 
-from vllm.triton_utils import triton
-from vllm_ascend.ops.triton.apply_grammar_bitmask import (
-    _apply_grammar_bitmask_kernel,
-)
+from vllm_ascend.ops.triton.apply_grammar_bitmask import apply_grammar_bitmask_npu
 
 device = torch.device("npu:0")
 
@@ -177,12 +174,7 @@ bitmask = torch.full(
     device=device,
 )
 
-grid = (
-    rows,
-    triton.cdiv(vocab_size, block_size),
-)
-
-_apply_grammar_bitmask_kernel[grid](
+apply_grammar_bitmask_npu(
     logits,
     logits.stride(0),
     logits_indices,

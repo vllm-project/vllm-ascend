@@ -14,6 +14,13 @@
   4. Temporal 状态由 `TEMPORAL_TILES` 个 CTA 分段复制，tail 由 tile 0 处理。
 - 支持模式：SD/DS 卷积布局、temporal 状态、V1/V2 请求索引、单 tile/多 tile temporal 复制。
 
+## 生产路径
+
+- 生产入口：upstream 符号 `vllm.v1.worker.mamba_utils.precopy_mamba_align_fused_kernel` 由
+  `vllm_ascend/triton_kernel_overrides.py` 注册表重绑到本实现，upstream 与 NPU 侧 mamba 状态
+  管理器（`vllm_ascend/worker/v2/model_states/mamba_hybrid.py`）的调用均经此路由。
+- 本文调用示例即生产调用形态（raw kernel `[grid]` 直调）。
+
 ## 参数说明
 
 | 参数名 | 输入/输出/属性 | 描述 | 数据类型 | 数据格式 |
