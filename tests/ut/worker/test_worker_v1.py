@@ -1805,7 +1805,6 @@ class TestNPUWorker(TestBase):
             worker.vllm_config = MagicMock()
             worker.vllm_config.model_config = MagicMock()
             worker.vllm_config.model_config.enable_sleep_mode = True
-            worker.vllm_config.weight_transfer_config = None
 
             # Setup allocator mock - current usage is not 0
             mock_allocator = MagicMock()
@@ -2267,7 +2266,9 @@ class TestNPUWorkerWeightUpdate(TestBase):
             return worker.model_runner.reset_lora_state
         return worker.model_runner.on_target_weights_replaced
 
-    def test_check_engine_raises_when_unconfigured(self):
+    @patch("vllm_ascend.worker.worker.get_ascend_config")
+    def test_check_engine_raises_when_unconfigured(self, mock_get_ascend_config):
+        mock_get_ascend_config.return_value.weight_nz_mode = 0
         worker = self._make_worker(engine=None)
         with self.assertRaises(RuntimeError):
             worker.init_weight_transfer_engine({})
@@ -2313,17 +2314,17 @@ class TestNPUWorkerWeightUpdate(TestBase):
         engine.start_weight_update.assert_called_once_with()
 
     @patch("vllm_ascend.worker.worker.get_ascend_config")
-    def test_load_model_with_weight_transfer_rejects_nz(self, mock_get_ascend_config):
+    def test_start_weight_update_rejects_nz(self, mock_get_ascend_config):
         mock_get_ascend_config.return_value.weight_nz_mode = 1
         engine = MagicMock()
         worker = self._make_worker(engine=engine)
-        worker.vllm_config.weight_transfer_config = SimpleNamespace(backend="hccl")
 
-        with self.assertRaisesRegex(ValueError, "FRACTAL_NZ"):
-            worker.load_model()
+        for start in (worker.start_weight_update, worker.start_draft_weight_update):
+            with self.assertRaisesRegex(ValueError, "FRACTAL_NZ"):
+                start()
 
-        worker.model_runner.load_model.assert_not_called()
         engine.start_weight_update.assert_not_called()
+        self.assertFalse(worker._weight_update_active)
 
     @patch("vllm_ascend.worker.worker.get_ascend_config")
     def test_failed_start_can_be_restarted(self, mock_get_ascend_config):

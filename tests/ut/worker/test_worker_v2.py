@@ -325,6 +325,15 @@ class TestNPUWorkerV2(TestBase):
 
 
 class TestNPUWorkerV2WeightUpdate(TestBase):
+    def setUp(self):
+        super().setUp()
+        ascend_config = patch(
+            "vllm_ascend.worker.worker.get_ascend_config",
+            return_value=SimpleNamespace(weight_nz_mode=0),
+        )
+        ascend_config.start()
+        self.addCleanup(ascend_config.stop)
+
     @staticmethod
     def _make_worker():
         from vllm_ascend.worker.worker import NPUWorker

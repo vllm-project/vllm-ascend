@@ -492,6 +492,10 @@ class NPUWorker(GPUWorker):
                 "(enabled: true) which disables NZ automatically."
             )
 
+    def _start_weight_update(self, is_draft: bool = False) -> None:
+        self._check_nz_disabled()
+        super()._start_weight_update(is_draft=is_draft)
+
     def shutdown(self) -> None:
         model = getattr(getattr(self, "model_runner", None), "model", None)
         close_engram = getattr(model, "close_shared_engram", None)
@@ -1016,9 +1020,6 @@ class NPUWorker(GPUWorker):
         return output
 
     def load_model(self) -> None:
-        if self.vllm_config.weight_transfer_config is not None:
-            self._check_nz_disabled()
-
         if self.vllm_config.model_config.enable_sleep_mode:
             allocator = CaMemAllocator.get_instance()
             assert allocator.get_current_usage() == 0, "Sleep mode can only be used for one instance per process."
