@@ -35,6 +35,7 @@ import vllm_ascend.patch.platform.patch_mamba_manager  # noqa
 
 import vllm_ascend.patch.platform.patch_balance_schedule  # noqa
 import vllm_ascend.patch.platform.patch_engine_core  # noqa
+import vllm_ascend.patch.platform.patch_mm_staging_pool  # noqa
 import vllm_ascend.patch.platform.patch_metrics_level  # noqa
 
 import vllm_ascend.patch.platform.patch_kv_cache_coordinator  # noqa
@@ -112,3 +113,36 @@ import vllm_ascend.patch.platform.patch_example_connector  # noqa
 # Upstream plan: contribute physical-block accounting to vLLM and remove this
 # patch once both supported vLLM versions cover first-time and shared-block
 # admission accounting.
+
+# ** File: platform/patch_mm_staging_pool.py **
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.multimodal.inputs._nested_tensors_h2d`,
+#      `MultiModalFlatField._reduce_data`, `MultiModalBatchedField._reduce_data`
+#    Why:
+#      torch_npu 2.10 pinned allocations go through aclrtMallocHostWithCfg (VA
+#      flag), binding every allocation to 2MiB base-heap physical pages with no
+#      small-page fallback. The multimodal staging/merge path allocates
+#      per-request temporaries and cross-request merge outputs via
+#      new_empty(pin_memory=True), producing a high-frequency stream of
+#      variable-size driver grabs (tiny metadata + image staging/merges,
+#      observed 85MB-1GB). Under host memory pressure the 2MiB buddy inventory
+#      drains and these grabs fail with error 207001/EL0018, crashing serving.
+#    How:
+#      Fixed pinned staging pool allocated once per process at first use
+#      (VA-backed, full DMA speed); all mm staging/merge temporaries are
+#      routed through pool slices (multi-slot contiguous slices for oversize
+#      merges, event-gated slot recycle recorded after the H2D enqueue).
+#      Every pool interaction degrades to the original path on failure.
+#      Configured via additional_config.mm_staging_config (pinned_pool_mb,
+#      slot_mb); pinned_pool_mb=0 disables the pool. The patch never imports
+#      vllm.multimodal itself: a sys.meta_path import hook applies the
+#      attribute patches right after vllm imports vllm.multimodal.inputs on
+#      its own (importing the module during platform-plugin registration
+#      starves the EngineCore input rings; validated 2026-11-22 on the
+#      issue-21094 boxes).
+#    Related PR (if no, explain why):
+#      No upstream vllm PR: NPU-driver-specific allocation behavior (VA
+#      base-heap pinning) does not exist on CUDA; fix belongs to the platform
+#      patch layer. Allocator-side alternative tracked in torch_npu MR 49638.
+#    Future Plan:
+#      Keep while torch_npu lacks a failure fallback for the VA pinned path.
