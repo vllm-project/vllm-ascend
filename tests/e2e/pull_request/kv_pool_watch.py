@@ -27,6 +27,12 @@ DELAYED_BLOCKS_METRIC = "vllm:ascend_store_delayed_release_blocks"
 MEMCACHE_TRANSFER_GATE_TIMEOUT_S = 120
 
 
+def _skip_memcache_gate(reason: str) -> None:
+    # pytest only prints skip reasons with -r, so leave the signature in the log too.
+    print(f"[memcache_transfer_gate] {reason}", flush=True)
+    pytest.skip(reason)
+
+
 def ensure_memcache_transfer(protocol: str, local_rank_size: int) -> None:
     """Skip when the A5 data plane cannot carry a plain memfabric transfer.
 
@@ -36,7 +42,7 @@ def ensure_memcache_transfer(protocol: str, local_rank_size: int) -> None:
     ``device_sdma`` has no cross-rank data plane there and is not a fallback.
     """
     if shutil.which("mfcli") is None:
-        pytest.skip("memcache transfer gate: mfcli is not installed in the image")
+        _skip_memcache_gate("memcache transfer gate: mfcli is not installed in the image")
     env = dict(os.environ)
     env.setdefault("MF_HYBM_ENABLE_4K_PAGE", "1")
     command = [
@@ -63,13 +69,13 @@ def ensure_memcache_transfer(protocol: str, local_rank_size: int) -> None:
             env=env,
         )
     except subprocess.TimeoutExpired:
-        pytest.skip(
+        _skip_memcache_gate(
             f"memcache transfer gate: {protocol} did not finish in "
             f"{MEMCACHE_TRANSFER_GATE_TIMEOUT_S}s; blocked in HYBM init or the first copy"
         )
     if completed.returncode != 0:
         tail = (completed.stdout + completed.stderr).strip().splitlines()[-6:]
-        pytest.skip(f"memcache transfer gate failed rc={completed.returncode}: " + " / ".join(tail))
+        _skip_memcache_gate(f"memcache transfer gate failed rc={completed.returncode}: " + " / ".join(tail))
 
 
 @dataclass(frozen=True)
