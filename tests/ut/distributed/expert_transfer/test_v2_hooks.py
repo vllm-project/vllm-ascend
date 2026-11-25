@@ -86,6 +86,7 @@ def make_runner(load_hook_class, *, manager=None, has_prefill=False):
             "C8KVBlockZeroer": type("C8KVBlockZeroer", (), {}),
             "HostMirrorConnector": type("HostMirrorConnector", (), {}),
             "IntermediateTensors": type("IntermediateTensors", (), {}),
+            "ModelAclGraphManager": type("ModelAclGraphManager", (), {}),
             "get_pd_dspark_aux_layer_ids": lambda _vc: [9],
             # The stub parent creates no host-offload owners.
             "track_host_offload_owners": lambda: nullcontext([]),
