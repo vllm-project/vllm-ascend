@@ -98,6 +98,15 @@ class AscendDSparkSpeculator(LmheadTPDraftSamplingMixin, DSparkSpeculator):
         target_attn_layer_names: set[str],
     ) -> torch.nn.Module:
         model = super().load_draft_model(target_model, target_attn_layer_names)
+        from vllm_ascend.ops.fused_moe.mega_moe_context import try_share_dspark_mega_moe_buffer
+
+        try_share_dspark_mega_moe_buffer(
+            target_model,
+            model,
+            self.vllm_config,
+            getattr(self, "draft_model_config", None),
+            context_kv_only=getattr(self, "context_kv_only", False),
+        )
         if hasattr(model, "post_process"):
             model.post_process(self.vllm_config)
         if hasattr(model, "configure_target_aux_hidden_capture"):
