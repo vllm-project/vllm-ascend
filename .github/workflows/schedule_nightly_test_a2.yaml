@@ -21,7 +21,7 @@ name: Nightly-A2
 
 run-name: >-
   ${{ inputs.request_id != '' &&
-      (inputs.request_id == 'daily' &&
+      ((inputs.request_id == 'daily' || startsWith(inputs.request_id, 'daily-')) &&
         'Nightly-A2 (Daily)' ||
         format('Nightly-A2 (PR) {0}', inputs.request_id)) ||
       'Nightly-A2 (scheduled)' }}
@@ -329,6 +329,7 @@ jobs:
           )
         }}
     secrets:
+      PAT_TOKEN: ${{ secrets.PAT_TOKEN }}
       HW_OBS_PROFILE_AK: ${{ secrets.HW_OBS_PROFILE_AK }}
       HW_OBS_PROFILE_SK: ${{ secrets.HW_OBS_PROFILE_SK }}
       KUBECONFIG_B64: ${{ secrets.KUBECONFIG_HK_001_INTERNAL_B64 }}
@@ -381,6 +382,7 @@ jobs:
           )
         }}
     secrets:
+      PAT_TOKEN: ${{ secrets.PAT_TOKEN }}
       HW_OBS_PROFILE_AK: ${{ secrets.HW_OBS_PROFILE_AK }}
       HW_OBS_PROFILE_SK: ${{ secrets.HW_OBS_PROFILE_SK }}
       OBS_ACCESS_KEY_ID: ${{ secrets.OBS_ACCESS_KEY_ID }}
@@ -509,6 +511,8 @@ jobs:
       vllm_ascend_ref: ${{ inputs.vllm_ascend_ref || needs.parse-trigger.outputs.ref }}
       vllm_ref: ${{ inputs.vllm_ref || '' }}
       upload: false
+    secrets:
+      PAT_TOKEN: ${{ secrets.PAT_TOKEN }}
 
   single-node-accuracy-tests-pr-only:
     needs: [setup-vars, parse-trigger, build-image, generate-accuracy-matrix]
@@ -541,6 +545,8 @@ jobs:
       vllm_ascend_ref: ${{ inputs.vllm_ascend_ref || needs.parse-trigger.outputs.ref }}
       vllm_ref: ${{ inputs.vllm_ref || '' }}
       upload: false
+    secrets:
+      PAT_TOKEN: ${{ secrets.PAT_TOKEN }}
 
   clear-pre-logs:
     needs: [parse-trigger, multi-node-tests]

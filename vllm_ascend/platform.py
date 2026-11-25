@@ -61,12 +61,12 @@ from vllm_ascend.utils import (
     check_kv_extra_config,
     enable_sfa_dcp_replicated_indexer,
     is_moe_model,
+    model_supports_dcp,
     model_uses_kpool_indexer,
     model_uses_sfa_sparse,
     refresh_block_size,
     update_cudagraph_capture_sizes,
     enable_sp,
-    vllm_version_is,
 )
 
 if TYPE_CHECKING:
@@ -102,6 +102,123 @@ _MINIMAX_M3_ARCHITECTURES = frozenset(
 )
 _V2_EPLB_CONFIG_FIELDS = frozenset({"load_collection_phase", "stair_config"})
 _V2_STAIR_CONFIG_FIELDS = frozenset(StairConfig.__dataclass_fields__)
+
+_DEVICE_VISIBILITY_ENV_VAR = "ASCEND_RT_VISIBLE_DEVICES"
+
+
+def _split_visible_devices(value: str) -> list[str]:
+    return [item.strip() for item in value.split(",") if item.strip()]
+
+
+def _is_ray_backend(value: Any) -> bool:
+    if value is None:
+        return False
+    return value == "ray" or getattr(value, "value", None) == "ray"
+
+
+def _is_ray_deployment(engine_args) -> bool:
+    """Whether this launch will resolve to the Ray executor.
+
+    ``--distributed-executor-backend`` is the explicit switch, but vLLM also
+    selects Ray when ``--data-parallel-backend ray`` is set without an explicit
+    executor: ``ParallelConfig.__post_init__`` applies that default *after*
+    ``parse_args``. This parse-time hook must therefore inspect both fields,
+    otherwise it rewrites ``ASCEND_RT_VISIBLE_DEVICES`` for a launch that ends up
+    on Ray even though vLLM ignores ``device_ids`` there.
+    """
+    if _is_ray_backend(getattr(engine_args, "distributed_executor_backend", None)):
+        return True
+    return getattr(engine_args, "data_parallel_backend", None) == "ray"
+
+
+def _narrow_visible_devices_to_device_ids(engine_args) -> None:
+    """Restrict ``ASCEND_RT_VISIBLE_DEVICES`` to the chips named by ``device_ids``.
+
+    ``--device-ids`` only renumbers the device a worker eventually binds; it never
+    restricts what the process can see. vLLM resolves the model architecture while
+    it builds the engine config, and that import path reaches
+    ``vllm.third_party.flash_linear_attention.ops.utils.get_all_max_shared_mem()``,
+    which queries every device in ``device_count()``. torch_npu creates an ACL
+    context per query, so ``ASCEND_RT_VISIBLE_DEVICES=4,5 --device-ids 1``
+    initializes chip 4 as well and npu-smi reports a process on both cards.
+
+    Narrowing the environment before that import keeps every other chip untouched.
+    The ids are renumbered to ``0..N-1`` so the worker-side two-stage mapping
+    (local_rank -> assigned id -> visible ordinal) resolves the same physical
+    chips, and child processes inherit the narrowed set.
+    """
+    device_ids = getattr(engine_args, "device_ids", None)
+    if not device_ids:
+        return
+
+    # Ray selects devices through placement groups; --device-ids is ignored and
+    # vLLM already warns about it. ``--data-parallel-backend ray`` selects Ray
+    # implicitly (ParallelConfig.__post_init__), so check that path too.
+    if _is_ray_deployment(engine_args):
+        return
+
+    # UUIDs need the CANN-side translation, which already resolves them to the
+    # physical chip; rewriting the environment would break that mapping.
+    if any(not isinstance(device_id, int) for device_id in device_ids):
+        return
+
+    current_env = os.environ.get(_DEVICE_VISIBILITY_ENV_VAR, "")
+    visible = _split_visible_devices(current_env)
+    if not visible:
+        # Nothing restricts us today: the ids are already physical chip ids.
+        physical = [str(device_id) for device_id in device_ids]
+    else:
+        # Integer ids are zero-based indices into the visible list. Leave an
+        # out-of-range value alone so vLLM reports it with its own message.
+        if any(device_id < 0 or device_id >= len(visible) for device_id in device_ids):
+            return
+        physical = [visible[device_id] for device_id in device_ids]
+
+    if len(set(physical)) != len(physical):
+        # vLLM rejects duplicate ids later; keep the error path untouched.
+        return
+
+    new_env = ",".join(physical)
+    if new_env == current_env:
+        return
+
+    os.environ[_DEVICE_VISIBILITY_ENV_VAR] = new_env
+    engine_args.device_ids = list(range(len(physical)))
+    logger.info(
+        "Narrowed %s from %s to %s for device ids %s; no other NPU will be initialized.",
+        _DEVICE_VISIBILITY_ENV_VAR,
+        current_env or "<unset>",
+        new_env,
+        engine_args.device_ids,
+    )
+
+
+def _install_device_id_narrowing(parser) -> None:
+    """Narrow the visible NPU set as soon as the CLI arguments are parsed.
+
+    ``pre_register_and_update`` runs while vLLM assembles the argument parser,
+    which is before ``parse_args`` and long before ``EngineArgs`` resolves the
+    model architecture. Wrapping the parser keeps the hook inside the public
+    platform API: no vLLM object is replaced, and the wrapper only affects the
+    parser instance handed to the platform.
+    """
+
+    if getattr(parser, "_ascend_device_id_narrowing_installed", False):
+        return
+    parser._ascend_device_id_narrowing_installed = True
+
+    for name in ("parse_args", "parse_known_args"):
+        original = getattr(parser, name, None)
+        if original is None:
+            continue
+
+        def wrapper(*args, _original=original, **kwargs):
+            result = _original(*args, **kwargs)
+            namespace = result[0] if isinstance(result, tuple) else result
+            _narrow_visible_devices_to_device_ids(namespace)
+            return result
+
+        setattr(parser, name, wrapper)
 
 
 class NPUPlatform(Platform):
@@ -412,6 +529,11 @@ class NPUPlatform(Platform):
         # so we need to add "ascend" quantization method to quantization methods list
         # and the user can enable quantization using "vllm serve --quantization ascend".
         if parser is not None:
+            # Resolve ``--device-ids`` before vLLM imports the model: that
+            # import path probes every visible NPU and would initialize the
+            # chips the user did not select.
+            _install_device_id_narrowing(parser)
+
             quant_action = parser._option_string_actions.get("--quantization")
             if quant_action and hasattr(quant_action, "choices") and quant_action.choices:
                 if ASCEND_QUANTIZATION_METHOD not in quant_action.choices:
@@ -628,14 +750,12 @@ class NPUPlatform(Platform):
         apply_v2_model_runner_config_patch()
 
         # Lazy import vllm/vllm-ascend to avoid circular import
-        from vllm_ascend.ascend_forward_context import sync_v2_extra_kwargs
         from vllm_ascend.quantization.utils import maybe_auto_detect_quantization
         from vllm_ascend.logger import configure_ascend_file_logging, configure_ascend_logging
 
-        sync_v2_extra_kwargs(vllm_config)
-
         # 1.Configure logging
-        configure_ascend_file_logging()
+        additional_config = vllm_config.additional_config or {}
+        configure_ascend_file_logging(additional_config.get("ascend_log_path"))
         configure_ascend_logging()
 
         # 2.Early exit checks and validate parallel config
@@ -647,6 +767,8 @@ class NPUPlatform(Platform):
         if vllm_config.model_config is None:
             logger.warning("Model config is missing. Skipping Ascend-specific config updates.")
             return
+
+        _normalize_sleep_backend(vllm_config.model_config)
 
         # vLLM #61392 folds `compress_ratios` into `layer_types`/`compress_rates`.
         # Restore the legacy field before any runner/model/cache component reads
@@ -666,12 +788,10 @@ class NPUPlatform(Platform):
                 if ratios:
                     config.compress_ratios = list(ratios)
 
-        # TODO: Remove this guard once GLM-5.3-Flash DFlash2 supports pipeline parallelism.
-        _validate_glm5next_dflash2_pp_config(vllm_config)
         cls._validate_indexer_pp_config(vllm_config)
 
+        _validate_target_dcp_config(vllm_config)
         _validate_deepseek_v41_adaptive_config(vllm_config)
-        _validate_pcp_dcp_config(vllm_config)
         _validate_draft_decode_context_parallel_config(vllm_config)
         _validate_parallel_config(vllm_config)
         _validate_engram_config(vllm_config)
@@ -751,7 +871,6 @@ class NPUPlatform(Platform):
             get_mc2_mask,
             get_mrv2_in_profile_run,
             select_moe_comm_method,
-            sync_v2_extra_kwargs,
             use_cann_megamoe,
         )
         from vllm_ascend.ops.fused_moe.moe_comm_method import get_moe_comm_method
@@ -766,16 +885,9 @@ class NPUPlatform(Platform):
 
         if cudagraph_runtime_mode is None:
             cudagraph_runtime_mode = CUDAGraphMode.NONE
-        sync_v2_extra_kwargs(vllm_config)
-        # TODO(Ronald1995): model runner v1 still use ascend_forward_context,
-        # when v1's forward context is refactored, we can remove this branch.
-        # Currently, model runner v2 use the new forward context.
-        # compared to v1, v2's forward context lacks some fields, such as:
-        # is_first_layer, prefetch_mlp_gate_up_proj, prefetch_mlp_gate_down_proj,
-        # prefetch_mlp_enabled, model_instance, is_draft_model.
+        # V2's forward context carries the additional fields (is_draft_model,
+        # prefetch flags, ...) consumed by the FIA/MoE graph paths.
         dynamic_mx_quant_scale_alg = get_dynamic_mx_quant_scale_alg(vllm_config)
-        if not vllm_config.use_v2_model_runner:
-            return {"dynamic_mx_quant_scale_alg": dynamic_mx_quant_scale_alg}
 
         # is_draft_model will be removed later, so we set it to False temporarily.
         is_draft_model = False
@@ -788,7 +900,7 @@ class NPUPlatform(Platform):
             tp_world_size = get_tensor_model_parallel_world_size()
         except AssertionError:
             # Kernel / precision tests call set_forward_context without
-            # initializing TP. Keep V1 extras there.
+            # initializing TP. Keep the minimal extras there.
             return {"dynamic_mx_quant_scale_alg": dynamic_mx_quant_scale_alg}
 
         # NOTE: This cannot be set using set_forward_context
@@ -897,6 +1009,19 @@ def _configure_minimax_m3_a5_mixed_kv_cache(vllm_config: VllmConfig) -> None:
         ", ".join(gqa_layer_ids),
         cache_config.cache_dtype,
     )
+
+
+def _normalize_sleep_backend(model_config) -> None:
+    if not model_config.enable_sleep_mode:
+        return
+
+    if model_config.sleep_mode_backend == "cumem":
+        model_config.sleep_mode_backend = "camem"
+        logger.info_once("Using Ascend sleep-mode backend 'camem' for the default 'cumem' name.")
+    elif model_config.sleep_mode_backend != "camem":
+        raise ValueError(
+            "Only the in-tree camem backend is supported on Ascend; third-party backends are not supported yet."
+        )
 
 
 def _fix_incompatible_config(vllm_config: VllmConfig) -> None:
@@ -1145,73 +1270,60 @@ def _validate_eplb_config(vllm_config: VllmConfig) -> None:
     if not isinstance(eplb_config, dict):
         raise TypeError("additional_config.eplb_config must be a dictionary.")
 
-    use_v2_model_runner = bool(getattr(vllm_config, "use_v2_model_runner", False))
-    if use_v2_model_runner:
-        unsupported_eplb_fields = sorted(set(eplb_config) - _V2_EPLB_CONFIG_FIELDS)
-        stair_config = eplb_config.get("stair_config")
-        unsupported_stair_fields = (
-            sorted(set(stair_config) - _V2_STAIR_CONFIG_FIELDS) if isinstance(stair_config, dict) else []
+    unsupported_eplb_fields = sorted(set(eplb_config) - _V2_EPLB_CONFIG_FIELDS)
+    stair_config = eplb_config.get("stair_config")
+    unsupported_stair_fields = (
+        sorted(set(stair_config) - _V2_STAIR_CONFIG_FIELDS) if isinstance(stair_config, dict) else []
+    )
+    if unsupported_eplb_fields or unsupported_stair_fields:
+        ignored_fields = unsupported_eplb_fields + [f"stair_config.{field}" for field in unsupported_stair_fields]
+        logger.warning(
+            "Model Runner V2 EPLB currently supports only these parameters: "
+            "additional_config.eplb_config fields %s; stair_config fields %s. "
+            "The following parameters are unsupported and will be ignored: %s.",
+            sorted(_V2_EPLB_CONFIG_FIELDS),
+            sorted(_V2_STAIR_CONFIG_FIELDS),
+            ignored_fields,
         )
-        if unsupported_eplb_fields or unsupported_stair_fields:
-            ignored_fields = unsupported_eplb_fields + [f"stair_config.{field}" for field in unsupported_stair_fields]
-            logger.warning(
-                "Model Runner V2 EPLB currently supports only these parameters: "
-                "additional_config.eplb_config fields %s; stair_config fields %s. "
-                "The following parameters are unsupported and will be ignored: %s.",
-                sorted(_V2_EPLB_CONFIG_FIELDS),
-                sorted(_V2_STAIR_CONFIG_FIELDS),
-                ignored_fields,
-            )
-            eplb_config = {key: value for key, value in eplb_config.items() if key in _V2_EPLB_CONFIG_FIELDS}
-            if isinstance(stair_config, dict):
-                eplb_config["stair_config"] = {
-                    key: value for key, value in stair_config.items() if key in _V2_STAIR_CONFIG_FIELDS
-                }
-            additional_config = dict(additional_config)
-            additional_config["eplb_config"] = eplb_config
-            vllm_config.additional_config = additional_config
-        if os.getenv("DYNAMIC_EPLB", "false").lower() in ("true", "1") or os.getenv(
-            "EXPERT_MAP_RECORD", "false"
-        ).lower() in ("true", "1"):
-            logger.warning(
-                "DYNAMIC_EPLB and EXPERT_MAP_RECORD are Model Runner V1 controls and are ignored by "
-                "Model Runner V2. Use --enable-eplb and --eplb-config for MRv2; "
-                "additional_config.eplb_config supports only %s.",
-                sorted(_V2_EPLB_CONFIG_FIELDS),
-            )
-        load_collection_phase = eplb_config.get("load_collection_phase", "all")
-        # Disabled drafts inherit this target-only setting but never collect
-        # EPLB load. Keep target validation strict and preserve other checks.
-        if (
-            load_collection_phase != "all"
-            and not vllm_config.parallel_config.enable_eplb
-            and not is_draft_config_context()
-        ):
-            raise ValueError("additional_config.eplb_config.load_collection_phase requires --enable-eplb.")
-        if vllm_config.parallel_config.enable_eplb:
-            upstream_eplb_config = vllm_config.parallel_config.eplb_config
-            if upstream_eplb_config.communicator not in (None, "torch_gloo", "hixl"):
-                raise ValueError(
-                    "Async EPLB on Ascend requires the torch_gloo or hixl communicator "
-                    f"but got {upstream_eplb_config.communicator!r}. "
-                    "Set eplb_config.communicator to 'torch_gloo' or 'hixl'."
-                )
-            if not upstream_eplb_config.use_async:
-                logger.warning(
-                    "Synchronous EPLB is not supported on Ascend; "
-                    "parameter=eplb_config.use_async, value=False, "
-                    "action: forcing asynchronous EPLB."
-                )
-                upstream_eplb_config.use_async = True
-            if vllm_config.parallel_config.enable_elastic_ep:
-                raise ValueError("Async EPLB is not supported with elastic EP on Ascend.")
-    elif {"load_collection_phase", "stair_config"} & eplb_config.keys():
-        raise ValueError(
-            "stair_config and load_collection_phase are only supported by Model Runner V2; "
-            "use eplb_heat_collection_stage with Model Runner V1."
+        eplb_config = {key: value for key, value in eplb_config.items() if key in _V2_EPLB_CONFIG_FIELDS}
+        if isinstance(stair_config, dict):
+            eplb_config["stair_config"] = {
+                key: value for key, value in stair_config.items() if key in _V2_STAIR_CONFIG_FIELDS
+            }
+        additional_config = dict(additional_config)
+        additional_config["eplb_config"] = eplb_config
+        vllm_config.additional_config = additional_config
+    if os.getenv("DYNAMIC_EPLB", "false").lower() in ("true", "1") or os.getenv(
+        "EXPERT_MAP_RECORD", "false"
+    ).lower() in ("true", "1"):
+        logger.warning(
+            "DYNAMIC_EPLB and EXPERT_MAP_RECORD are Model Runner V1 controls and are ignored by "
+            "Model Runner V2. Use --enable-eplb and --eplb-config for MRv2; "
+            "additional_config.eplb_config supports only %s.",
+            sorted(_V2_EPLB_CONFIG_FIELDS),
         )
-    elif vllm_config.parallel_config.enable_eplb:
-        raise ValueError("Upstream EPLB is only supported by Model Runner V2 on Ascend.")
+    load_collection_phase = eplb_config.get("load_collection_phase", "all")
+    # Disabled drafts inherit this target-only setting but never collect
+    # EPLB load. Keep target validation strict and preserve other checks.
+    if load_collection_phase != "all" and not vllm_config.parallel_config.enable_eplb and not is_draft_config_context():
+        raise ValueError("additional_config.eplb_config.load_collection_phase requires --enable-eplb.")
+    if vllm_config.parallel_config.enable_eplb:
+        upstream_eplb_config = vllm_config.parallel_config.eplb_config
+        if upstream_eplb_config.communicator not in (None, "torch_gloo", "hixl"):
+            raise ValueError(
+                "Async EPLB on Ascend requires the torch_gloo or hixl communicator "
+                f"but got {upstream_eplb_config.communicator!r}. "
+                "Set eplb_config.communicator to 'torch_gloo' or 'hixl'."
+            )
+        if not upstream_eplb_config.use_async:
+            logger.warning(
+                "Synchronous EPLB is not supported on Ascend; "
+                "parameter=eplb_config.use_async, value=False, "
+                "action: forcing asynchronous EPLB."
+            )
+            upstream_eplb_config.use_async = True
+        if vllm_config.parallel_config.enable_elastic_ep:
+            raise ValueError("Async EPLB is not supported with elastic EP on Ascend.")
 
 
 def _check_ascend_config(vllm_config: VllmConfig, ascend_config) -> None:
@@ -1392,11 +1504,8 @@ def _update_compilation_modes(vllm_config: VllmConfig, ascend_config: AscendConf
         spec_config = vllm_config.speculative_config
         mixed_mode = CUDAGraphMode.NONE if xlite_config.full_mode else compilation_config.cudagraph_mode.mixed_mode()
         # TODO(SijieFu): properly resolve cudagraph_mode when xlite is enabled
-        decode_mode = (
-            CUDAGraphMode.NONE
-            if spec_config is None or vllm_config.use_v2_model_runner
-            else compilation_config.cudagraph_mode.decode_mode()
-        )
+        # V2 always uses NONE for the decode graph mode in this path.
+        decode_mode = CUDAGraphMode.NONE
         if not decode_mode or mixed_mode == decode_mode:
             compilation_config.cudagraph_mode = cudagraph_mode = mixed_mode
         else:
@@ -1472,18 +1581,18 @@ def _setup_compile_backend(
             set(compilation_config.cudagraph_capture_sizes or []) | {reduced_cg_cap}
         )
         compilation_config.max_cudagraph_capture_size = None
-        # Main resolves separate prefill/decode sizes on the first pass. They
-        # were derived from the truncated grid, so regenerate them alongside
-        # the restored off-stride default rather than mixing two size sets.
-        # Explicit split sizes never receive reduced_cg_cap (see below).
-        if not vllm_version_is("0.33.0"):
-            for name in (
-                "prefill_cudagraph_capture_token_sizes",
-                "max_prefill_cudagraph_capture_tokens",
-                "decode_cudagraph_capture_request_sizes",
-                "max_decode_cudagraph_capture_requests",
-            ):
-                setattr(compilation_config, name, None)
+        # Upstream resolves separate prefill/decode sizes on the first pass.
+        # They were derived from the truncated grid, so regenerate them
+        # alongside the restored off-stride default rather than mixing two
+        # size sets. Explicit split sizes never receive reduced_cg_cap (see
+        # below).
+        for name in (
+            "prefill_cudagraph_capture_token_sizes",
+            "max_prefill_cudagraph_capture_tokens",
+            "decode_cudagraph_capture_request_sizes",
+            "max_decode_cudagraph_capture_requests",
+        ):
+            setattr(compilation_config, name, None)
         delattr(compilation_config, "reduced_cg_cap")
 
     # Recompute cudagraph sizes before extending splitting_ops (honors the
@@ -1498,12 +1607,10 @@ def _setup_compile_backend(
         and not vllm_config.model_config.enforce_eager
         and requires_tp_aligned_capture_sizes
     ):
-        # Main V2 resolves prefill tokens and decode requests separately.
+        # Upstream resolves prefill tokens and decode requests separately.
         # The TP token-layout restriction applies to the prefill grid; keep
         # the resolved decode request grid used by the graph managers intact.
-        prefill_sizes = None
-        if not vllm_version_is("0.33.0"):
-            prefill_sizes = compilation_config.prefill_cudagraph_capture_token_sizes
+        prefill_sizes = compilation_config.prefill_cudagraph_capture_token_sizes
         original_sizes = prefill_sizes if prefill_sizes is not None else compilation_config.cudagraph_capture_sizes
         tp_size = vllm_config.parallel_config.tensor_parallel_size
         sp_aclgraph_sizes = [size for size in original_sizes if size % tp_size == 0]
@@ -1560,6 +1667,7 @@ def _setup_compile_backend(
                 "vllm::dsa_forward",
                 "vllm::minimax_m3_fused_sparse_forward",
                 "vllm::glm5next_kda_forward_with_output",
+                "vllm::step5_sparse_attention_forward",
             ]
         )
         # npugraph_ex compiles each piece (force_eager) and runs the static/
@@ -1582,8 +1690,6 @@ def _setup_worker_and_scheduler(
     ascend_config,
 ) -> None:
     # Select worker class and refresh block size.
-    # Decode sharding is derived by is_pcp_decode_sharding_enabled(); do not
-    # store it on ParallelConfig. Draft replace() rejects undeclared fields.
     parallel_config = vllm_config.parallel_config
     if parallel_config and parallel_config.worker_cls == "auto":
         hardware_profile = get_current_hardware_profile()
@@ -1696,7 +1802,6 @@ def _validate_sfa_dcp_kv_sp(vllm_config: VllmConfig) -> None:
     interleave = parallel_config.cp_kv_cache_interleave_size
     hybrid_kernel_interleave = (
         getattr(model_config, "architecture", None) == "KimiK31ForConditionalGeneration"
-        and vllm_config.use_v2_model_runner
         and cache_config.cache_dtype == "fp8"
         and vllm_config.kv_transfer_config is not None
         and vllm_config.kv_transfer_config.kv_connector in ("MooncakeConnectorV2", "MooncakePullConnector")
@@ -1787,16 +1892,17 @@ def _disable_expandable_segments() -> None:
         logger.info("Removed expandable_segments from PYTORCH_NPU_ALLOC_CONF: %s", updated_configs)
 
 
-def _is_supported_flash_attn_draft(spec: SpeculativeConfig, model_tag: str) -> bool:
+def _is_supported_flash_attn_draft(spec: SpeculativeConfig, model_tag: str | None) -> bool:
     """Match supported target/draft pairs against the live loader tag."""
     # V2 keeps the target model_config while loading the draft. Match the live
     # loader tag so the target and other auxiliary models retain their backend.
     target = spec.target_model_config
     if spec.method == "dflash":
+        target_text_config = getattr(target, "hf_text_config", None)
         return (
-            bool(spec.enforce_eager)
-            and model_tag == "dflash_head"
-            and target.hf_text_config.model_type == "glm_moe_dsa"
+            model_tag == "dflash_head"
+            and target_text_config is not None
+            and target_text_config.model_type in ("glm_moe_dsa", "glm5_next_text")
             and "DFlash2DraftModel" in (spec.draft_model_config.architectures or ())
         )
     if spec.method == "dspark":
@@ -1824,11 +1930,13 @@ def _validate_flash_attn_backend(backend_key, selector) -> bool:
     spec = config.speculative_config if config is not None else None
     if spec is None or spec.draft_model_config is None:
         return False
-    if backends.model_tag == "dspark_head" and {"MiniMaxM31FlashA3DSparkModel", "DSparkMiniMaxDraftModel"}.intersection(
-        spec.draft_model_config.architectures or ()
-    ):
+    model_tag = getattr(backends, "model_tag", None)
+    if model_tag == "dspark_head" and {
+        "MiniMaxM31FlashA3DSparkModel",
+        "DSparkMiniMaxDraftModel",
+    }.intersection(spec.draft_model_config.architectures or ()):
         return _validate_minimax_dspark_flash_attn(config, selector)
-    if not _is_supported_flash_attn_draft(spec, backends.model_tag):
+    if not _is_supported_flash_attn_draft(spec, model_tag):
         return False
 
     from vllm_ascend.attention.fa_v1 import AscendFlashAttentionBackend
@@ -1879,26 +1987,13 @@ def _validate_minimax_dspark_flash_attn(config, selector) -> bool:
     )
 
 
-def _validate_flash_attn_npu_3(backend_key, selector) -> bool:
-    """Select optional FA3 for compatible MiniMax or Step5 attention."""
-    if backend_key != (False, False, False) or not get_current_hardware_profile().supports(
-        HardwareCapability.FLASH_ATTN_NPU_3
-    ):
-        return False
-
-    # Model configuration imports platforms during initialization.
-    from vllm.config import get_current_vllm_config_or_none
-    from vllm.v1.attention.backend import AttentionType
-
-    config = get_current_vllm_config_or_none()
-    spec = config.speculative_config if config is not None else None
-    if spec is None or spec.draft_model_config is None:
-        return False
+def _validate_fa3_common_constraints(config, selector) -> bool:
+    """Validate attention properties shared by every FA3 model family."""
     if config is None or config.model_config is None:
         return False
-    if not (_uses_minimax_fa3(config) or _uses_step5_fa3(config)):
-        return False
-    parallel = config.parallel_config
+
+    from vllm.v1.attention.backend import AttentionType
+
     return (
         selector.attn_type == AttentionType.DECODER
         and selector.dtype in (torch.float16, torch.bfloat16)
@@ -1916,13 +2011,53 @@ def _validate_flash_attn_npu_3(backend_key, selector) -> bool:
                 "use_rswa",
             )
         )
-        and parallel.pipeline_parallel_size == 1
+        and config.cache_config.cache_dtype in ("auto", "float16", "bfloat16")
+        and not getattr(config.speculative_config, "enable_adaptive_verification", False)
+        and util.find_spec("flash_attn_npu_3") is not None
+    )
+
+
+def _validate_fa3_global_constraints(config, *, allow_local_draft: bool) -> bool:
+    """Validate target-global constraints unless a local draft explicitly owns FA3."""
+    if allow_local_draft:
+        return True
+    parallel = config.parallel_config
+    return (
+        parallel.pipeline_parallel_size == 1
         and parallel.prefill_context_parallel_size == 1
         and parallel.decode_context_parallel_size == 1
-        and config.cache_config.cache_dtype in ("auto", "float16", "bfloat16")
         and not getattr(config.quant_config, "enable_c8_quant", False)
-        and not getattr(spec, "enable_adaptive_verification", False)
-        and util.find_spec("flash_attn_npu_3") is not None
+    )
+
+
+def _validate_flash_attn_npu_3(backend_key, selector) -> bool:
+    """Select optional FA3 for compatible MiniMax, Step5, or local GLM DFlash2 attention."""
+    if backend_key != (False, False, False) or not get_current_hardware_profile().supports(
+        HardwareCapability.FLASH_ATTN_NPU_3
+    ):
+        return False
+
+    # Model configuration imports platforms during initialization.
+    from vllm.config import get_current_vllm_config_or_none
+
+    config = get_current_vllm_config_or_none()
+    spec = config.speculative_config if config is not None else None
+    if spec is None or spec.draft_model_config is None:
+        return False
+    from vllm.compilation import backends
+
+    local_glm_dflash = (
+        spec.method == "dflash"
+        and _is_supported_flash_attn_draft(spec, getattr(backends, "model_tag", None))
+        and not getattr(selector, "use_pcp", False)
+    )
+    if config is None or config.model_config is None:
+        return False
+    if not (local_glm_dflash or _uses_minimax_fa3(config) or _uses_step5_fa3(config)):
+        return False
+    return _validate_fa3_common_constraints(config, selector) and _validate_fa3_global_constraints(
+        config,
+        allow_local_draft=local_glm_dflash,
     )
 
 
@@ -2005,7 +2140,7 @@ def _get_reduced_cg_cap(vllm_config: VllmConfig) -> int | None:
         return None
     if compilation_config.cudagraph_capture_sizes is not None:
         return None
-    if not vllm_version_is("0.33.0") and any(
+    if any(
         getattr(compilation_config, name) is not None
         for name in (
             "prefill_cudagraph_capture_token_sizes",
@@ -2123,10 +2258,9 @@ def _validate_engram_config(vllm_config: VllmConfig) -> None:
     if (
         parallel_config.enable_elastic_ep
         or parallel_config.tensor_parallel_size not in (1, 2, 4, 8)
-        or parallel_config.pipeline_parallel_size != 1
         or parallel_config.decode_context_parallel_size != 1
     ):
-        raise ValueError("Ascend Engram requires TP=1/2/4/8 with PP=DCP=1.")
+        raise ValueError("Ascend Engram requires TP=1/2/4/8 with DCP=1.")
     load_format = vllm_config.load_config.load_format
     if load_format not in ("auto", "safetensors", "rfork", "dummy"):
         raise ValueError("Ascend Engram requires indexed safetensors (auto/safetensors/rfork), or dummy weights.")
@@ -2134,12 +2268,6 @@ def _validate_engram_config(vllm_config: VllmConfig) -> None:
 
 def _validate_parallel_config(vllm_config: VllmConfig) -> None:
     parallel_config = vllm_config.parallel_config
-    if not vllm_config.use_v2_model_runner and parallel_config.prefill_context_parallel_size > 1:
-        raise ValueError(
-            "PCP (Prefill Context Parallelism) is not supported by vLLM Ascend. "
-            "Please set --prefill-context-parallel-size to 1. "
-            f"Got prefill_context_parallel_size={parallel_config.prefill_context_parallel_size}."
-        )
 
     kvpp_config = KVPPConfig.from_vllm_config(vllm_config)
     if kvpp_config.size > 1:
@@ -2170,42 +2298,14 @@ def _validate_parallel_config(vllm_config: VllmConfig) -> None:
             )
 
 
-def _validate_model_pcp_dcp_config(
-    model_config: ModelConfig,
-    pcp_size: int,
-    dcp_size: int,
-) -> None:
-    """Require equal PCP/DCP sizes for GQA/MQA stacking."""
-    if model_config.use_mla or pcp_size <= 1 or dcp_size <= 1:
-        return
-    if pcp_size != dcp_size:
-        raise ValueError(
-            "GQA/MQA PCP+DCP requires prefill_context_parallel_size "
-            "to equal decode_context_parallel_size; "
-            f"got PCP={pcp_size}, DCP={dcp_size}."
-        )
-
-
-def _validate_pcp_dcp_config(vllm_config: VllmConfig) -> None:
-    """Validate GQA/MQA PCP+DCP sizes for the target model."""
-    parallel_config = vllm_config.parallel_config
-    model_config = vllm_config.model_config
-    if (
-        parallel_config.decode_context_parallel_size > 1
-        and not getattr(model_config, "use_mla", False)
-        and not model_uses_sfa_sparse(model_config)
+def _validate_target_dcp_config(vllm_config: VllmConfig) -> None:
+    """Validate DCP support for the target model."""
+    if vllm_config.parallel_config.decode_context_parallel_size > 1 and not model_supports_dcp(
+        vllm_config.model_config
     ):
-        logger.warning_once(
-            "Decode Context Parallelism (DCP) for GQA models is deprecated as of v0.32.0 "
-            "and has entered the sunset process. It will be removed in a future release. "
-            "GQA draft models can maintain native TP sharding under target DCP. "
-            "See RFC #21305 (https://github.com/vllm-project/vllm-ascend/issues/21305) for details."
+        raise ValueError(
+            "Decode Context Parallelism (DCP) is not supported for GQA/MQA models. Only MLA and SFA models support DCP."
         )
-    _validate_model_pcp_dcp_config(
-        vllm_config.model_config,
-        parallel_config.prefill_context_parallel_size,
-        parallel_config.decode_context_parallel_size,
-    )
 
 
 def _get_deepseek_v4_variant(model_config: ModelConfig) -> str | None:
@@ -2267,33 +2367,6 @@ def _validate_deepseek_v4_tp_config(vllm_config: VllmConfig) -> None:
         raise ValueError(f"DeepSeek {variant} supports at most TP{max_tp_size}. Got tp_size={tp_size}.")
 
 
-def _validate_glm5next_dflash2_pp_config(vllm_config: VllmConfig) -> None:
-    parallel_config = vllm_config.parallel_config
-    pp_size = parallel_config.pipeline_parallel_size
-    if pp_size <= 1:
-        return
-
-    speculative_config = vllm_config.speculative_config
-    if speculative_config is None or getattr(speculative_config, "method", None) != "dflash":
-        return
-
-    model_config = vllm_config.model_config
-    model_types = {
-        getattr(getattr(model_config, field, None), "model_type", None) for field in ("hf_config", "hf_text_config")
-    }
-    if model_types.isdisjoint({"glm5_next", "glm5_next_text"}):
-        return
-
-    draft_model_config = getattr(speculative_config, "draft_model_config", None)
-    draft_architectures = getattr(draft_model_config, "architectures", None) or ()
-    if "DFlash2DraftModel" not in draft_architectures:
-        return
-
-    raise ValueError(
-        f"GLM-5.3-Flash with DFlash2 currently requires pipeline_parallel_size=1. Got pipeline_parallel_size={pp_size}."
-    )
-
-
 def _validate_draft_decode_context_parallel_config(vllm_config: VllmConfig) -> None:
     speculative_config = vllm_config.speculative_config
     if speculative_config is None:
@@ -2311,61 +2384,4 @@ def _validate_draft_decode_context_parallel_config(vllm_config: VllmConfig) -> N
             "--decode-context-parallel-size to 1 or remove "
             "num_speculative_tokens_per_batch_size from "
             "--speculative-config."
-        )
-
-    draft_model_config = speculative_config.draft_model_config
-    if draft_model_config is None:
-        return
-
-    # Upstream DFlashSpeculator runs dense DSpark drafts at DCP=1 and the
-    # target runner marks their KV groups with dcp_sharded=False.
-    if vllm_config.use_v2_model_runner and speculative_config.use_dspark() and not draft_model_config.use_mla:
-        return
-
-    # MLA draft models do not use the GQA/MQA head-sharding rules below.
-    if draft_model_config.use_mla:
-        return
-
-    pcp_size = parallel_config.prefill_context_parallel_size
-    if pcp_size > 1:
-        _validate_model_pcp_dcp_config(draft_model_config, pcp_size, decode_context_parallel_size)
-        return
-
-    draft_parallel_config = speculative_config.draft_parallel_config
-    if draft_parallel_config is not None:
-        draft_tensor_parallel_size = draft_parallel_config.tensor_parallel_size
-    elif speculative_config.draft_tensor_parallel_size is not None:
-        draft_tensor_parallel_size = speculative_config.draft_tensor_parallel_size
-    else:
-        draft_tensor_parallel_size = parallel_config.tensor_parallel_size
-
-    total_num_attention_heads = draft_model_config.model_arch_config.total_num_attention_heads
-    total_num_kv_heads = draft_model_config.get_total_num_kv_heads()
-
-    if draft_tensor_parallel_size <= total_num_kv_heads:
-        raise ValueError(
-            "Invalid draft model parallel config for speculative decoding: "
-            f"tensor parallel size {draft_tensor_parallel_size} must be "
-            f"greater than total num kv heads {total_num_kv_heads} when "
-            "enable decode context parallel for GQA/MQA draft model"
-        )
-
-    max_dcp_size = draft_tensor_parallel_size // total_num_kv_heads
-    if decode_context_parallel_size > max_dcp_size:
-        raise ValueError(
-            "Invalid draft model parallel config for speculative decoding: "
-            "decode context parallel size must less than or equal to "
-            f"(draft tensor parallel size {draft_tensor_parallel_size} // "
-            f"draft total num kv heads {total_num_kv_heads}) = "
-            f"{max_dcp_size}, but got {decode_context_parallel_size}"
-        )
-
-    num_q_per_kv = total_num_attention_heads // total_num_kv_heads
-    if num_q_per_kv % decode_context_parallel_size != 0:
-        raise ValueError(
-            "Invalid draft model parallel config for speculative decoding: "
-            f"total number of q per kv attn heads ({num_q_per_kv}) must "
-            "be divisible by dcp world size when enable decode context "
-            f"parallel for GQA draft model "
-            f"({decode_context_parallel_size})."
         )

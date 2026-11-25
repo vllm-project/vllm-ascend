@@ -15,7 +15,7 @@ concurrency:
 
 jobs:
   main:
-    runs-on: linux-amd64-cpu-2-hk
+    runs-on: linux-amd64-cpu-1-hk
     steps:
       - name: check if prs are dirty
         uses: eps1lon/actions-label-merge-conflict@v3

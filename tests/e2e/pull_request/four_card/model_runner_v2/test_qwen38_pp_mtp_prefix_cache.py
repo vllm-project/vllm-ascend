@@ -79,7 +79,7 @@ class MambaAlignWorker:
     quantization="BF16",
     graph_mode="full_decode_only",
 )
-@patch.dict(os.environ, {"VLLM_USE_V2_MODEL_RUNNER": "1", "VLLM_WORKER_MULTIPROC_METHOD": "spawn"})
+@patch.dict(os.environ, {"VLLM_WORKER_MULTIPROC_METHOD": "spawn"})
 @wait_until_npu_memory_free()
 def test_qwen38_pp_mtp_prefix_cache():
     with VllmRunner(

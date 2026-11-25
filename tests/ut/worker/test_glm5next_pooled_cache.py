@@ -17,9 +17,6 @@ from vllm_ascend.core.kv_cache_interface import (
     AscendMLAAttentionSpec,
     requires_padded_page_layout,
 )
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.layerwise_cache_layout import (
-    apply_layerwise_kv_cache_plan,
-)
 from vllm_ascend.models.glm5next.cache_config import (
     get_glm5_next_kv_cache_config,
     get_glm5_next_kv_cache_groups,
@@ -157,7 +154,6 @@ def v2_glm_cache_plan(request, monkeypatch):
     config.model_config.get_num_layers = lambda _: 2
     monkeypatch.setattr(attn_utils, "get_current_vllm_config", lambda: config)
     monkeypatch.setattr(attn_utils.KVPPConfig, "from_vllm_config", lambda _: SimpleNamespace(size=1))
-    monkeypatch.setattr(attn_utils, "_is_dsv4_model", lambda _: False)
     monkeypatch.setattr(attn_utils, "enable_sfa", lambda _: False)
     return config, plan
 
@@ -176,7 +172,6 @@ def test_v2_glm_shared_slots_preserve_backings(monkeypatch, v2_glm_cache_plan, u
         config.kv_transfer_config = SimpleNamespace(
             kv_connector="AscendStoreConnector", kv_connector_extra_config=extra_config
         )
-    apply_layerwise_kv_cache_plan(plan, config)
     allocated_sizes = []
     allocate = attn_utils._allocate_int8_cache_tensor
 
@@ -245,11 +240,14 @@ def test_glm_fp8_indexer_keys_and_scales_share_padded_pages_without_overlapping(
     config.model_config.get_num_layers = lambda _: 2
     monkeypatch.setattr(attn_utils, "get_current_vllm_config", lambda: config)
     monkeypatch.setattr(attn_utils.KVPPConfig, "from_vllm_config", lambda _: SimpleNamespace(size=1))
-    monkeypatch.setattr(attn_utils, "_is_dsv4_model", lambda _: False)
     monkeypatch.setattr(attn_utils, "enable_sfa", lambda _: False)
     raw = attn_utils._allocate_kv_cache(plan, {}, torch.device("cpu"))
     group = SimpleNamespace(
-        kv_cache_group_id=0, kv_cache_spec=specs[INDEXER], layer_names=[INDEXER], backend=_AttentionBackend
+        kernel_block_size=None,
+        kv_cache_group_id=0,
+        kv_cache_spec=specs[INDEXER],
+        layer_names=[INDEXER],
+        backend=_AttentionBackend,
     )
     key, scale = attn_utils._reshape_kv_cache_v2([group], raw, "fp8", [kernel_size], {}, plan)[INDEXER]
     page_bytes = next(
@@ -273,14 +271,15 @@ def test_cann_tail_views_keep_interleaved_rows_and_shared_page_stride(monkeypatc
     config.model_config.get_num_layers = lambda _: 2
     monkeypatch.setattr(attn_utils, "get_current_vllm_config", lambda: config)
     monkeypatch.setattr(attn_utils.KVPPConfig, "from_vllm_config", lambda _: SimpleNamespace(size=1))
-    monkeypatch.setattr(attn_utils, "_is_dsv4_model", lambda _: False)
     monkeypatch.setattr(attn_utils, "enable_sfa", lambda _: False)
     raw_caches = attn_utils._allocate_kv_cache(plan, {}, torch.device("cpu"))
     spec = replace(_make_specs()[STATE], head_size=2)
     plan.kv_cache_groups = [KVCacheGroupSpec(layer_names=[STATE], kv_cache_spec=spec)]
     raw = raw_caches[STATE]
     expected = view_kpool_tail_cache(STATE, spec, raw, plan.num_blocks)[0]
-    group = SimpleNamespace(kv_cache_group_id=0, kv_cache_spec=spec, layer_names=[STATE], backend=_StateBackend)
+    group = SimpleNamespace(
+        kernel_block_size=None, kv_cache_group_id=0, kv_cache_spec=spec, layer_names=[STATE], backend=_StateBackend
+    )
     actual = attn_utils._reshape_kv_cache_v2([group], {STATE: raw}, "auto", [2], {}, plan)[STATE][0]
     assert actual.shape == expected.shape == (plan.num_blocks, 2, 4)
     assert actual.data_ptr() == expected.data_ptr() == raw.data_ptr()

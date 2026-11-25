@@ -2,7 +2,10 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 # Copyright (c) 2026 Huawei Technologies Co., Ltd. All Rights Reserved.
 
-"""Semantic profiles for supported Ascend hardware families.
+"""[Role] Declare semantic profiles for supported Ascend hardware families.
+[Invariants] Business code selects capabilities, not device-name strings.
+[Timeouts & Locks] Immutable registration; no waits or locks.
+[Side-Effect Policy] No device contexts or workloads are started here.
 
 This module is the boundary between hardware identity and shared business
 logic. Detection maps a SoC to one immutable :class:`HardwareProfile`; code
@@ -68,9 +71,12 @@ class HardwareCapability(Enum):
     CANN_MEGAMOE = auto()
     # Allow A5 MegaMoe's MXFP-only path and its A5-specific calling conventions.
     CANN_MEGAMOE_MXFP = auto()
-    # Fuse the shared expert into the A5 MegaMoe operator (enable_fused_mc2=3).
-    # A5 only: the fused shared-expert calling convention assumes the shared and
-    # routed experts share a residual width, which A3 does not provide.
+    # Fuse the shared expert into the MegaMoe operator (enable_fused_mc2=3).
+    # The capability states that the platform can run the shared expert inside
+    # the operator; which weight/scale family that payload uses is a property of
+    # the machine, taken from its routed MegaMoe contract: A5 keeps the MXFP
+    # layouts (CANN_MEGAMOE_MXFP), A3 (arch22) uses the INT8 W8A8 layout. Both
+    # assume the shared and routed experts share a residual width.
     CANN_MEGAMOE_SHARED_EXPERT_FUSION = auto()
     # Split a mixed chunked-prefill batch into separate prefill and decode FIA calls.
     CHUNKED_PREFILL_PHASE_SPLIT = auto()
@@ -93,6 +99,8 @@ class HardwareCapability(Enum):
     DSV41_PACKED_CACHE = auto()
     # Triton RMS/dot/gate/residual fusion for unrotated Engram inputs.
     ENGRAM_UNROTATED_GATE = auto()
+    # Separate inverse-rotation MatMul followed by a chunked fused A3 gate.
+    ENGRAM_ROTATED_GATE = auto()
     # Decode native FP8 codes and E8M0 group scales in Engram table lookups.
     ENGRAM_MXFP8 = auto()
     # Node-local shared INT8 Engram tables can use the A3 Host VMM backend.
@@ -103,6 +111,8 @@ class HardwareCapability(Enum):
     DYNAMIC_MX_QUANT_SCALE_ALG_ONE = auto()
     # Allow GDN prefill to use the external FLA NPU fused operator.
     FLA_GDN_PREFILL = auto()
+    # Hardware eligibility for A5 chunk32.
+    FLA_GDN_PREFILL_CHUNK32 = auto()
     # Enable the FP8/C8 attention KV-cache ABI and matching attention preprocess paths.
     # This is not a general statement that every FP8 operation is supported.
     FP8_ATTENTION = auto()
@@ -148,6 +158,8 @@ class HardwareCapability(Enum):
     LORA_CUSTOM_OPS = auto()
     # Use the token-fused MLA cache protocol for eligible FlashMLA models.
     MLA_FLASH = auto()
+    # NoPE Prolog V3 with W8A8 projections and per-group INT8 KV.
+    SFA_NOPE_PROLOG_V3 = auto()
     # Allow MLAPO with native floating-point projection weights, not only quantized weights.
     MLAPO_NATIVE_WEIGHTS = auto()
     # Accept ``fullmesh_v2`` as the MC2 communication algorithm.
@@ -163,11 +175,18 @@ class HardwareCapability(Enum):
     MOE_GATING_TOP_K_HASH_VISION = auto()
     # Allow the extended NPU graph backend; static-kernel mode depends on this contract.
     MM_REDUCE_SCATTER_AI_CPU_INFERENCE = auto()
+    # Fuse an unquantized BF16 matmul with the TP ReduceScatter over AIV
+    # communication, returning the SP token shard.
+    MM_REDUCE_SCATTER_BF16 = auto()
     NPUGRAPH_EX = auto()
     # Use ``torch_npu.npu_top_k_top_p`` for sampling instead of pytorch fallback.
     NPU_TOP_K_TOP_P = auto()
     # Allow shared paged-attention decode when graph mode, shape, and model checks pass.
     PAGED_ATTENTION = auto()
+    # Use eight-row Qwen4Exp HC gate-mix tiles for large prefill batches.
+    # A2, A3, and A5 validated parity and a performance benefit at the
+    # family-specific dispatch threshold; other profiles retain one-row dispatch.
+    QWEN4EXP_HC_GATE_MIX_ROW_BLOCK = auto()
     # Inspect PCIe topology to distinguish 310P Root-Complex and endpoint deployments.
     RC_DEVICE_DISCOVERY = auto()
     # Fused RMSNorm+cast is available for the A2/A3 (CANN 9.1) path.
@@ -319,6 +338,9 @@ class HardwareProfile:
     # query length to work around native operator numerical failures. None
     # retains native dispatch; this is a stack workaround, not a silicon limit.
     gdn_fixed_spec_recurrent_fallback_min_query_len: int | None = None
+    # First row count where the integrated Qwen4Exp HC gate-mix wrapper is
+    # faster than the one-row kernel on this hardware family.
+    qwen4exp_hc_gate_mix_row_block_min_rows: int = 2048
 
     def supports(self, capability: HardwareCapability) -> bool:
         """Return whether the exact documented ``capability`` contract is available."""
@@ -371,6 +393,7 @@ _STANDARD_CAPABILITIES = frozenset(
         HardwareCapability.NPUGRAPH_EX,
         HardwareCapability.PAGED_ATTENTION,
         HardwareCapability.RUNTIME_CUSTOM_OPS,
+        HardwareCapability.SFA_NOPE_PROLOG_V3,
         HardwareCapability.SCATTER_ND_CACHE_STORE,
         HardwareCapability.SCATTER_ND_STRIDED_CACHE_STORE,
         HardwareCapability.STANDARD_MAMBA_PATCH,
@@ -384,8 +407,11 @@ _A3_CAPABILITIES = _STANDARD_CAPABILITIES | {
     HardwareCapability.KDA_INT8_QUANT_OVERLAP,
     HardwareCapability.NATIVE_INT8_SPARSE,
     HardwareCapability.MINIMAX_M3_GBSA_METADATA_REUSE,
+    HardwareCapability.ENGRAM_ROTATED_GATE,
     HardwareCapability.RMS_NORM_DYNAMIC_QUANT,
     HardwareCapability.MC2_FULLMESH_V2_COMM,
+    HardwareCapability.MM_REDUCE_SCATTER_BF16,
+    HardwareCapability.QWEN4EXP_HC_GATE_MIX_ROW_BLOCK,
     HardwareCapability.RMS_NORM_CAST,
 }
 _DEFAULT_WORKER_CLS = "vllm_ascend.worker.worker.NPUWorker"
@@ -410,9 +436,18 @@ _HARDWARE_PROFILES: Mapping[AscendDeviceType, HardwareProfile] = MappingProxyTyp
             native_weight_formats=_INT4_WEIGHT_FORMATS,
             capabilities=_STANDARD_CAPABILITIES
             | {
+                HardwareCapability.FLASH_ATTN_NPU_3,
+                HardwareCapability.MM_REDUCE_SCATTER_BF16,
+                HardwareCapability.QWEN4EXP_HC_GATE_MIX_ROW_BLOCK,
                 HardwareCapability.RMS_NORM_CAST,
                 HardwareCapability.NPU_TOP_K_TOP_P,
-                HardwareCapability.FLASH_ATTN_NPU_3,
+                # Atlas A2 provides the CANN MegaMoe operator for the INT
+                # quant paths (arch22 kernel, e.g.
+                # mega_moe_kernel_a2_bf16_w4a8.hpp). CANN_MEGAMOE_MXFP is
+                # deliberately not granted: that capability also changes
+                # x_active_mask handling to a convention the A2 operator does
+                # not implement.
+                HardwareCapability.CANN_MEGAMOE,
             },
         ),
         AscendDeviceType.A3: HardwareProfile(
@@ -430,6 +465,7 @@ _HARDWARE_PROFILES: Mapping[AscendDeviceType, HardwareProfile] = MappingProxyTyp
             capabilities=_A3_CAPABILITIES
             | {
                 HardwareCapability.CANN_MEGAMOE,
+                HardwareCapability.CANN_MEGAMOE_SHARED_EXPERT_FUSION,
                 HardwareCapability.FLASH_ATTN_NPU_3,
                 HardwareCapability.MOE_DISPATCH_EXTRA_ARGS,
                 HardwareCapability.NPU_TOP_K_TOP_P,
@@ -466,6 +502,7 @@ _HARDWARE_PROFILES: Mapping[AscendDeviceType, HardwareProfile] = MappingProxyTyp
             # TODO: Route Step5 back to CANN flash_attn and remove this exception
             # once CANN supports Step5 and the integration is validated.
             flash_attn_npu_3_models=frozenset({FlashAttentionNpu3Model.STEP5}),
+            qwen4exp_hc_gate_mix_row_block_min_rows=1024,
             requires_2d_nz_linear_input=True,
             minimax_m3_gbsa_bf16_softmax_precision=1,
             attention_backend_family=AttentionBackendFamily.STANDARD,
@@ -497,6 +534,7 @@ _HARDWARE_PROFILES: Mapping[AscendDeviceType, HardwareProfile] = MappingProxyTyp
                     HardwareCapability.DYNAMIC_MX_QUANT_FUSION,
                     HardwareCapability.DYNAMIC_MX_QUANT_SCALE_ALG_ONE,
                     HardwareCapability.FLA_GDN_PREFILL,
+                    HardwareCapability.FLA_GDN_PREFILL_CHUNK32,
                     HardwareCapability.FP8_ATTENTION,
                     HardwareCapability.INDEXER_QUANT_CACHE,
                     HardwareCapability.FUSED_ROTARY_MUL_INTERLEAVE,
@@ -512,8 +550,10 @@ _HARDWARE_PROFILES: Mapping[AscendDeviceType, HardwareProfile] = MappingProxyTyp
                     HardwareCapability.MOE_DISPATCH_EXTRA_ARGS,
                     HardwareCapability.MOE_DISPATCH_SHARED_EXPERT_ARGS,
                     HardwareCapability.MM_REDUCE_SCATTER_AI_CPU_INFERENCE,
+                    HardwareCapability.MM_REDUCE_SCATTER_BF16,
                     HardwareCapability.MOE_GATING_TOP_K_HASH_VISION,
                     HardwareCapability.NPUGRAPH_EX,
+                    HardwareCapability.QWEN4EXP_HC_GATE_MIX_ROW_BLOCK,
                     HardwareCapability.RUNTIME_CUSTOM_OPS,
                     HardwareCapability.STANDARD_MAMBA_PATCH,
                     HardwareCapability.STANDARD_WORKER_PATCHES,

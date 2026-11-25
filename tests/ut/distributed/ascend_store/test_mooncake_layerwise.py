@@ -199,7 +199,7 @@ class TestMooncakeWorkerSessionPreparation(unittest.TestCase):
         worker = LayerwiseKVPoolWorker.__new__(LayerwiseKVPoolWorker)
         worker.sharded_mamba_group_ids = set()
         worker.kv_role = "kv_producer"
-        worker.consumer_is_to_put = False
+        worker.save_decode_cache = False
         worker.dcp_size = 1
         worker.dcp_rank = 0
         worker.tp_rank = 0
@@ -259,6 +259,27 @@ class TestMooncakeWorkerSessionPreparation(unittest.TestCase):
         worker.m_store.batch_put_start.assert_called_once_with(["model@6831@0"], [60])
         self.assertEqual(request.save_key_block_offset, 1)
         self.assertEqual(request.save_block_keys, ["model@6831@0"])
+
+    def test_decode_save_starts_only_missing_prefill_ancestors_and_decode_key(self):
+        worker = self._make_worker()
+        worker.kv_role = "kv_consumer"
+        worker.save_decode_cache = True
+        worker.m_store.batch_is_exist.side_effect = lambda keys: [int("@6830@" in key) for key in keys]
+        worker.m_store.batch_put_start.return_value = [0, 0]
+        request = ReqMeta(
+            "r1",
+            token_len_chunk=48,
+            save_start_token=0,
+            save_end_token=48,
+            block_ids=[1, 2, 3],
+            block_hashes=[b"h0", b"h1", b"h2"],
+            can_save=True,
+        )
+
+        worker._data_plane._prepare_single_put_session(request)
+
+        worker.m_store.batch_put_start.assert_called_once_with(["model@6831@0", "model@6832@0"], [60, 60])
+        self.assertEqual(request.save_block_keys, [None, "model@6831@0", "model@6832@0"])
 
     def test_full_remote_hit_loads_last_block_even_when_vllm_keeps_one_token(self):
         worker = self._make_worker()

@@ -8,7 +8,7 @@
 
     **For the production environment on the customer side, [MindIE Motor](https://www.hiascend.com/document/detail/en/mindie/latest/quickstart/docs/en/user_guide/quick_start.md) + vLLM-Ascend is recommended.**
 
-Qwen3.8-2.4T-A95B is a large-scale MoE model with 2400 billion total
+Qwen3.8-2.4T-A95B is a large-scale MoE model with 2.4 trillion total
 parameters and 95 billion activated parameters. It is built on the Qwen3.5
 architecture and improves coding, professional work, scientific research, and
 long-horizon agent tasks.
@@ -55,7 +55,7 @@ avoid prefetching the complete checkpoint from shared storage.
 
 It is recommended to download the model weight to the shared directory of multiple nodes, such as `/root/.cache/`.
 
->**Path description**: Download the model weights to a directory of your choice and record it. Ensure the model path in the subsequent deployment command matches this directory.
+> **Path description**: Download the model weights to a directory of your choice and record it. Ensure the model path in the subsequent deployment command matches this directory.
 
 ### 3.2 Verify Multi-node Communication (Optional)
 
@@ -67,79 +67,43 @@ communication environment according to
 
 ### 4.1 Docker Image Installation
 
-Select an image based on your machine type and start the docker image on your
+{% include "getting_started/installation/ascend_docker_runtime.inc.md" %}
+
+Select an image based on your machine type and start the Docker image on your
 node. Refer to [using a prebuilt image](../../getting_started/installation.md#installation-prebuilt-image).
 
 === "A3 series"
 
-    Start the docker image on each node.
+    Start the Docker image on each node.
 
     ```bash
     export IMAGE=quay.io/ascend/vllm-ascend:qwen3.8-a3
     export NAME=vllm-ascend
 
     docker run --rm \
+      -e ASCEND_VISIBLE_DEVICES=0-15 \
       --name $NAME \
       --net=host \
       --shm-size=1g \
-      --device /dev/davinci0 \
-      --device /dev/davinci1 \
-      --device /dev/davinci2 \
-      --device /dev/davinci3 \
-      --device /dev/davinci4 \
-      --device /dev/davinci5 \
-      --device /dev/davinci6 \
-      --device /dev/davinci7 \
-      --device /dev/davinci8 \
-      --device /dev/davinci9 \
-      --device /dev/davinci10 \
-      --device /dev/davinci11 \
-      --device /dev/davinci12 \
-      --device /dev/davinci13 \
-      --device /dev/davinci14 \
-      --device /dev/davinci15 \
-      --device /dev/davinci_manager \
-      --device /dev/devmm_svm \
-      --device /dev/hisi_hdc \
-      -v /usr/local/dcmi:/usr/local/dcmi \
       -v /usr/local/Ascend/driver/tools/hccn_tool:/usr/local/Ascend/driver/tools/hccn_tool \
-      -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
-      -v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
-      -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
-      -v /etc/ascend_install.info:/etc/ascend_install.info \
       -v /root/.cache:/root/.cache \
       -it $IMAGE bash
     ```
 
 === "A2 series"
 
-    Start the docker image on each node.
+    Start the Docker image on each node.
 
     ```bash
     export IMAGE=quay.io/ascend/vllm-ascend:qwen3.8-a2
     export NAME=vllm-ascend
 
     docker run --rm \
+      -e ASCEND_VISIBLE_DEVICES=0-7 \
       --name $NAME \
       --net=host \
       --shm-size=1g \
-      --device /dev/davinci0 \
-      --device /dev/davinci1 \
-      --device /dev/davinci2 \
-      --device /dev/davinci3 \
-      --device /dev/davinci4 \
-      --device /dev/davinci5 \
-      --device /dev/davinci6 \
-      --device /dev/davinci7 \
-      --device /dev/davinci_manager \
-      --device /dev/devmm_svm \
-      --device /dev/hisi_hdc \
-      -v /usr/local/dcmi:/usr/local/dcmi \
       -v /usr/local/Ascend/driver/tools/hccn_tool:/usr/local/Ascend/driver/tools/hccn_tool \
-      -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
-      -v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
-      -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
-      -v /etc/ascend_install.info:/etc/ascend_install.info \
       -v /root/.cache:/root/.cache \
       -it $IMAGE bash
     ```
@@ -648,7 +612,7 @@ actual workload.
 
 **Table 2: Detailed Configuration**
 
-| Max Num Seqs | Max Model Len | Max Num Batched Tokens | GPU Memory Utilization | MTP Tokens | Prefix Cache | Main Optimizations |
+| Max Num Seqs | Max Model Len | Max Num Batched Tokens | NPU Memory Utilization | MTPs | Prefix Cache | Main Optimizations |
 | ---: | ---: | ---: | ---: | ---: | --- | --- |
 | 8 per DP | 131072 | 16384 | 0.85 | 1 | On | Full decode ACL Graph, Fused MC2, CPU binding |
 

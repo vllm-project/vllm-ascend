@@ -1,0 +1,10 @@
+pr: 22517
+entries:
+  - category: performance
+    text: >-
+      Accelerated Qwen3.8-Flash-Next HyperConnections with the fused
+      TextGatedResidual operator. In an A3 P/D-separated benchmark with 128K input
+      and 1K output tokens, steady decode output throughput increased by 3.69%
+      under a mean request TPOT constraint of 20 ms.
+      Requires the matching CANN custom operator package and Torch extension.
+    model: qwen3.8-flash-next

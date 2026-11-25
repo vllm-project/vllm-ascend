@@ -70,7 +70,6 @@ config:
 
 env_common: &env_common
   VLLM_USE_MODELSCOPE: "true"
-  VLLM_USE_V2_MODEL_RUNNER: "1"
   VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS: "30000"
   VLLM_HOST_IP: "${LOCAL_IP}"
   HCCL_BUFFSIZE: "1024"
@@ -332,18 +331,6 @@ templates:
 
 benchmarks:
   # https://github.com/vllm-project/vllm-ascend/actions/runs/43008094175/job/130483618860
-  acc_gpqa:
-    case_type: accuracy
-    dataset_path: vllm-ascend/gpqa
-    request_conf: vllm_api_general_chat
-    dataset_conf: gpqa/gpqa_gen_0_shot_cot_chat_prompt
-    max_out_len: 81920
-    batch_size: 64
-    thinking: true
-    temperature: 1.0
-    top_p: 0.95
-    baseline: 92.42
-    threshold: 1
   perf_128k_warnup:
     case_type: performance
     dataset_path: vllm-ascend/GSM8K_prefix90_in131072_bs1000_kimi
@@ -366,3 +353,15 @@ benchmarks:
     request_rate: 0
     baseline: 371.0334
     threshold: 0.95
+  acc_gpqa:
+    case_type: accuracy
+    dataset_path: vllm-ascend/gpqa
+    request_conf: vllm_api_general_chat
+    dataset_conf: gpqa/gpqa_gen_0_shot_cot_chat_prompt
+    max_out_len: 65536
+    batch_size: 64
+    thinking: true
+    temperature: 1.0
+    top_p: 0.95
+    baseline: 92.42
+    threshold: 1

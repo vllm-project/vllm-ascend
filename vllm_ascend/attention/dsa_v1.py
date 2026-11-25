@@ -634,8 +634,22 @@ def build_dspark_swa_indices(
         slot_ids = (block_ids * block_size + block_offsets).to(torch.int32)
     slot_ids = slot_ids.where(col_mask, torch.full_like(slot_ids, -1))
 
-    per_token_slots = torch.repeat_interleave(slot_ids, query_lens, dim=0, output_size=num_decode_tokens).unsqueeze(1)
-    per_token_lens = torch.repeat_interleave(visible_lens, query_lens, dim=0, output_size=num_decode_tokens)
+    repeats = query_lens
+    active_rows = None
+    if (indices_output is not None or buffer is not None) and num_decode_tokens is not None and query_lens.numel() > 0:
+        # Match the fixed graph row count without reading device lengths on CPU.
+        active_rows = query_start_loc[-1]
+        repeats = query_lens.clone()
+        repeats[-1] += num_decode_tokens - active_rows
+
+    per_token_slots = torch.repeat_interleave(slot_ids, repeats, dim=0, output_size=num_decode_tokens).unsqueeze(1)
+    per_token_lens = torch.repeat_interleave(visible_lens, repeats, dim=0, output_size=num_decode_tokens)
+    if active_rows is not None:
+        valid_rows = (
+            torch.arange(num_decode_tokens, device=query_start_loc.device, dtype=query_start_loc.dtype) < active_rows
+        )
+        per_token_slots = per_token_slots.masked_fill(~valid_rows[:, None, None], -1)
+        per_token_lens = per_token_lens.masked_fill(~valid_rows, 0)
 
     if indices_output is not None:
         if indices_output.shape != per_token_slots.shape:
@@ -2373,15 +2387,9 @@ class AscendDSAImpl(AttentionImplBase[Any]):
             output[...] = self.wo_b(o_proj_input)
         return output
 
-    def _prepare_caches_before_attention(
-        self,
-        layer_name: str,
-        hidden_states: torch.Tensor,
-        kv_cache: tuple[torch.Tensor, ...],
-        attn_metadata: DSAMetadataDict,
-    ) -> bool:
-        """Prepare cache updates and report whether local writes can be skipped."""
-        return False
+    def _prepare_caches_and_query(self, layer_name, hidden_states, kv_cache, attn_metadata, layer_metadata):
+        """Prepare caches and optionally return invocation-local Q intermediates."""
+        return False, None
 
     def _get_o_proj_input_shape(
         self,
@@ -2433,11 +2441,12 @@ class AscendDSAImpl(AttentionImplBase[Any]):
         o_proj_input = hidden_states.new_zeros(o_proj_input_shape)
         assert kv_cache is not None, "kv_cache tensor tuple must be provided."
         wait_for_kv_layer_from_connector(layer_name)
-        cache_is_prepared = self._prepare_caches_before_attention(
+        cache_is_prepared, prepared_query = self._prepare_caches_and_query(
             layer_name,
             hidden_states,
             kv_cache,
             attn_metadata,
+            layer_metadata,
         )
         if actual_tokens == 0:
             output.zero_()
@@ -2459,6 +2468,7 @@ class AscendDSAImpl(AttentionImplBase[Any]):
             kv_cache,
             layer_metadata,
             cache_is_prepared,
+            prepared_query=prepared_query,
         )
         cos = req_metadata.cos[layer_name]
         sin = req_metadata.sin[layer_name]
@@ -2795,6 +2805,7 @@ class AscendDSAImpl(AttentionImplBase[Any]):
         kv_cache: tuple[torch.Tensor, ...],
         layer_metadata: AscendDSALayerMetadata,
         cache_is_prepared: bool = False,
+        prepared_query: tuple[torch.Tensor, torch.Tensor, torch.Tensor | None] | None = None,
     ) -> torch.Tensor:
         # DSA PCP sets cache_is_prepared after global cache updates and forces
         # single-stream attention because there is no local KV update to overlap.
@@ -2840,7 +2851,11 @@ class AscendDSAImpl(AttentionImplBase[Any]):
                     metadata=tail_compressor_metadata,
                 )
 
-        if self.multistream_dsv4_dsa_overlap:
+        if prepared_query is not None:
+            assert cache_is_prepared
+            q, qr, qr_pertoken_scale = prepared_query
+            compressor_overlap_output = None
+        elif self.multistream_dsv4_dsa_overlap:
             q, qr, qr_pertoken_scale, compressor_overlap_output = self._mla_prolog_multistream(
                 hidden_states,
                 cos,

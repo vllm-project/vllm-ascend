@@ -4,6 +4,8 @@
 
 from collections.abc import Callable
 from dataclasses import dataclass
+from functools import lru_cache
+from importlib import import_module
 from typing import Any
 
 import torch
@@ -24,6 +26,12 @@ from vllm_ascend.quantization.methods.kv_cache.turboquant import is_turboquant
 # "auto" means the model dtype, bfloat16, so it selects the bfloat16 layout on A5 and
 # belongs with the requests that name it.
 _BF16_KV_CACHE_DTYPES = frozenset({"auto", "bfloat16", "bf16"})
+
+
+@lru_cache(maxsize=1)
+def _get_kv_compress_epilog() -> Callable[..., Any]:
+    import_module("cann_ops_transformer")
+    return torch.ops.cann_ops_transformer.kv_compress_epilog
 
 
 def _supports_dsv4_compressed_cache() -> bool:
@@ -207,7 +215,7 @@ class DsaAttnKvPlan:
         # (same 8-bit storage; the in-place update lands in the original
         # tensor). quant_mode="fp8_bf16" (int 0): group(64) FP8(e4m3) with
         # bf16 scale, rope kept bf16.
-        torch.ops.cann_ops_transformer.kv_compress_epilog(
+        _get_kv_compress_epilog()(
             cache=cache.view(torch.uint8),
             x=x.view(-1, x.shape[-1]),
             slot_mapping=slot_mapping,

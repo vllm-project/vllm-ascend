@@ -172,11 +172,15 @@ class HostMirrorConnector:
         return self._connector.pre_forward(scheduler_output, input_batch, attn_metadata=attn_metadata)
 
     def finish_forward(self) -> None:
+        from vllm_ascend.hisparse.pcp import PCPHiSparseConnector
+
         eligible = self._eligible_forward
         self._eligible_forward = False
         worker = self._worker
         if not eligible or self._connector._disabled or not self._sources.can_defer(worker):
             return self._connector.finish_forward()
+        if isinstance(self._connector, PCPHiSparseConnector):
+            self._connector.prepare_host_mirror()
 
         compute_stream = torch.accelerator.current_stream()
         worker._forward_ready_event.record(compute_stream)
@@ -246,9 +250,13 @@ def overlap_target_host_mirror(runner):
     from vllm.v1.worker.gpu.kv_connector import ActiveKVConnector
 
     from vllm_ascend.hisparse.backend import AscendHiSparseBackend
+    from vllm_ascend.hisparse.pcp import PCPHiSparseConnector
 
     connector = runner.kv_connector
-    if type(connector) is not ActiveKVConnector or type(connector.kv_connector) is not HiSparseConnector:
+    if (
+        type(connector) not in (ActiveKVConnector, PCPHiSparseConnector)
+        or type(connector.kv_connector) is not HiSparseConnector
+    ):
         return connector
     worker = connector.kv_connector.connector_worker
     if (
@@ -257,7 +265,7 @@ def overlap_target_host_mirror(runner):
         or not isinstance(worker.backend, AscendHiSparseBackend)
         or worker.shared_host_region is not None
         or not worker.is_host_writer
-        or worker.cache_handles[0].runtime.hot_backing.device.type != "npu"
+        or worker.cache_handles[0].runtime.device.type != "npu"
     ):
         return connector
     sources = _DirectMirrorSources.bind(worker, runner.speculator)
@@ -270,7 +278,7 @@ def overlap_target_host_mirror(runner):
     compute_stream = torch.accelerator.current_stream()
     if (
         output_stream.device != compute_stream.device
-        or compute_stream.device != worker.cache_handles[0].runtime.hot_backing.device
+        or compute_stream.device != worker.cache_handles[0].runtime.device
         or output_stream == compute_stream
     ):
         return connector

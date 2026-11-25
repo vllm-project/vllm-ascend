@@ -594,6 +594,19 @@ def common(ends, lengths, pools=(1, 0), active=(True, True)):
         copy_sfa_restore_tails=True,
         req_topk_buffer_slots=torch.tensor(pools, dtype=torch.int32),
         req_topk_buffer_active=torch.tensor(active, dtype=torch.bool),
+        # Runner-owned stable prefixes: full blocks whose D2H has completed.
+        # The fixture derives them from computed tokens (seq_len minus the
+        # request's query width) rounded down to complete 128-token blocks, so
+        # the prefix never runs ahead of computed history. Callers that change
+        # seq_lens in place must refresh this tensor too.
+        req_topk_buffer_stable_prefixes=torch.tensor(
+            [
+                max(length - end + prev_end, 0) // 128 * 128
+                for length, end, prev_end in zip(lengths, ends, (0, *ends[:-1]))
+            ],
+            dtype=torch.int32,
+            device="npu",
+        ),
         block_table_tensor=torch.arange(count * 128, dtype=torch.int32, device="npu").reshape(count, 128),
         slot_mapping=torch.arange(16, dtype=torch.int64, device="npu") + 128,
         req_ids_tensor=None,
@@ -644,7 +657,9 @@ def test_device_lengths_tail_geometry_and_rejection():
     builder = make_builder()
     cm = common([4, 5], [10371, 8321])
     metadata = populate(builder, cm)
-    # [S-Q] are 10367 and 8320. Prefix rounds down to complete 128-token blocks.
+    # Query ends are cumulative ([4, 5] means widths [4, 1]), so computed
+    # tokens are [10367, 8320]. Prefixes are the runner's stable prefixes:
+    # computed tokens rounded down to complete 128-token blocks.
     assert metadata.copy_sfa_prefix_lens.cpu().tolist() == [10240, 8320]
     assert metadata.copy_sfa_cache_tokens.cpu().tolist() == [8192, 8192]
     assert metadata.copy_sfa_logical_lens.cpu().tolist() == [8323, 8193]
@@ -661,6 +676,7 @@ def test_device_lengths_tail_geometry_and_rejection():
     ] + [8192 + 8320 % 256]
     address = metadata.copy_sfa_prefix_lens.data_ptr()
     cm.seq_lens.copy_(torch.tensor([10243, 8321], dtype=torch.int32, device="npu"))
+    cm.req_topk_buffer_stable_prefixes.copy_(torch.tensor([10112, 8320], dtype=torch.int32, device="npu"))
     revised = populate(builder, cm)
     assert revised.copy_sfa_prefix_lens.data_ptr() == address
     assert revised.copy_sfa_prefix_lens.cpu().tolist() == [10112, 8320]
@@ -679,6 +695,7 @@ def test_slot_invalidation_compaction_and_prefix_rollback_reset():
     # Slot invalidation and rollback independently force cold fill.
     builder.lim_last_cache[:, [0]] = -1
     cm.seq_lens[1] = 10243
+    cm.req_topk_buffer_stable_prefixes[1] = 10112
     assert populate(builder, cm).lim_request_state.cpu().tolist() == [-2, -2]
 
 
@@ -814,7 +831,7 @@ def test_lim_consumes_shared_state_without_modifying_it(draft_index):
     assert builder.lim_last_cache[bank, 1].item() == 8192
     if draft_index == 0:
         assert impl.lim_reuse_request_count == 3
-        assert impl.copy_sfa_reuse_logical_lens.cpu().tolist() == [8192, 500, 0]
+        assert impl.copy_sfa_reuse_logical_lens.cpu().tolist() == [8323, 500, 0]
         assert impl.copy_sfa_reuse_cache_tokens.cpu().tolist() == [8192, 0, 2048]
     else:
         assert impl.lim_reuse_request_count == 0
@@ -832,7 +849,7 @@ def test_reuse_extent_is_prepared_once_per_draft_round():
     assert (storage == -999).all().item()
 
     first = populate(builder, cm, draft_index=0)
-    assert first.copy_sfa_reuse_logical_lens.cpu().tolist() == [500, 8192, 0]
+    assert first.copy_sfa_reuse_logical_lens.cpu().tolist() == [500, 8323, 0]
     address = first.copy_sfa_reuse_logical_lens.data_ptr()
     saved = storage.clone()
     for step in (1, 2):
@@ -894,11 +911,13 @@ def test_short_lifecycle_minus3_minus2_minus1():
     # Growth past the hot budget: the cache flip (0 -> hot) forces the -2
     # offload init, then -1 steady state.
     cm.seq_lens[0] = 8196
+    cm.req_topk_buffer_stable_prefixes[0] = 8192
     assert populate(builder, cm).lim_request_state.cpu().tolist() == [-2]
     assert populate(builder, cm).lim_request_state.cpu().tolist() == [-1]
     # Rollback below the budget: directly back to -3; the runner separately
     # refills the row because the sparse layout is unreadable in dense mode.
     cm.seq_lens[0] = 5000
+    cm.req_topk_buffer_stable_prefixes[0] = 4992
     assert populate(builder, cm).lim_request_state.cpu().tolist() == [-3]
 
 
@@ -943,13 +962,14 @@ def test_inactive_capture_becomes_active_on_graph_replay(draft_index):
     assert observed.cpu().tolist() == [[-3, -3], [0, 0], [0, 0]]
     assert observed_slots.cpu().tolist() == [-1] * 8
     cm.seq_lens.copy_(torch.tensor([10371, 0], dtype=torch.int32, device="npu"))
+    cm.req_topk_buffer_stable_prefixes.copy_(torch.tensor([10240, 0], dtype=torch.int32, device="npu"))
     cm.req_topk_buffer_active[0] = True
     cm.req_topk_buffer_slots[0] = 1
     # Real scheduling regenerates mappings before metadata preparation.
     cm.slot_mapping.copy_(torch.arange(16, dtype=torch.int64, device="npu") + 256)
     populate(builder, cm, draft_index=draft_index)
     graph.replay()
-    reuse = [8192, 0] if draft_index == 0 else [0, 0]
+    reuse = [8323, 0] if draft_index == 0 else [0, 0]
     assert observed.cpu().tolist() == [[-2, -3], [8323, 0], reuse]
     assert observed_slots.cpu().tolist() == [256, 257, 258, 259, -1, -1, -1, -1]
     populate(builder, cm, draft_index=draft_index)

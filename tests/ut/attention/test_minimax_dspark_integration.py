@@ -29,6 +29,12 @@ def selector_runtime(monkeypatch):
     )
     runtime = SimpleNamespace(config=None, tag="dspark_head", supported=True)
     backend = SimpleNamespace(AttentionType=SimpleNamespace(DECODER="decoder"))
+    # Keep selector contracts independent of native attention imports.
+    monkeypatch.setitem(
+        sys.modules,
+        "vllm_ascend.attention.fa_v1",
+        SimpleNamespace(AscendFlashAttentionBackend=SimpleNamespace(get_supported_head_sizes=lambda: [128])),
+    )
     config_module = SimpleNamespace(get_current_vllm_config_or_none=lambda: runtime.config)
     backends = SimpleNamespace(model_tag="dspark_head")
     monkeypatch.setitem(sys.modules, "vllm.compilation", SimpleNamespace(backends=backends))
@@ -101,12 +107,12 @@ def test_glm_dflash_selection_is_retained(selector_runtime):
     r = selector_runtime
     spec = r.config.speculative_config
     spec.method = "dflash"
-    spec.target_model_config.hf_text_config.model_type = "glm_moe_dsa"
+    spec.target_model_config.hf_text_config.model_type = "glm5_next_text"
     spec.draft_model_config.architectures = ["DFlash2DraftModel"]
     r.backends.model_tag = "dflash_head"
     assert r.select((False, False, False), r.selector)
     spec.enforce_eager = False
-    assert not r.select((False, False, False), r.selector)
+    assert r.select((False, False, False), r.selector)
 
 
 def test_flash_attn_plan_cache_separates_causal_masks(monkeypatch):

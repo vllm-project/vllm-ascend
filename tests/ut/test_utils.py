@@ -31,14 +31,33 @@ from vllm_ascend.device.hardware_profile import get_hardware_profile
 from vllm_ascend.ops.fused_moe.moe_comm_method import MoECommType
 
 
+def test_use_updatable_graph_does_not_require_current_vllm_config():
+    from vllm_ascend.attention.attention_v1 import AscendAttentionBackend
+    from vllm_ascend.attention.mla_v1 import AscendMLABackend
+
+    with (
+        mock.patch(
+            "vllm_ascend.attention.utils.get_current_vllm_config",
+            side_effect=AssertionError("Current vLLM config is not set"),
+        ),
+        mock.patch("vllm.distributed.get_dcp_group") as get_dcp_group,
+    ):
+        get_dcp_group.return_value.world_size = 1
+        assert utils.use_updatable_graph(AscendMLABackend)
+        get_dcp_group.return_value.world_size = 2
+        assert utils.use_updatable_graph(AscendMLABackend)
+        assert utils.use_updatable_graph(AscendAttentionBackend)
+        assert not utils.use_updatable_graph(None)
+
+
 @pytest.mark.parametrize("device_type", list(AscendDeviceType))
 def test_register_customop_selects_gdn_before_import(device_type):
-    from vllm_ascend._310p.ops.fla.gdn_310 import AscendGatedDeltaNetAttention310
+    from vllm_ascend._310p.attention.gdn_310 import AscendGatedDeltaNetAttention310
 
     if device_type == AscendDeviceType._310P:
         expected_gdn = AscendGatedDeltaNetAttention310
     else:
-        from vllm_ascend.ops.gdn import AscendGatedDeltaNetAttention
+        from vllm_ascend.attention.gdn import AscendGatedDeltaNetAttention
 
         expected_gdn = AscendGatedDeltaNetAttention
 
@@ -46,7 +65,7 @@ def test_register_customop_selects_gdn_before_import(device_type):
 
     def guarded_import(name, *args, **kwargs):
         if device_type == AscendDeviceType._310P and (
-            name == "vllm_ascend.ops.gdn" or name == "fla_npu" or name.startswith("fla_npu.")
+            name == "vllm_ascend.attention.gdn" or name == "fla_npu" or name.startswith("fla_npu.")
         ):
             raise ModuleNotFoundError(f"Unexpected 310P dependency: {name}", name=name)
         return original_import(name, *args, **kwargs)
@@ -966,13 +985,11 @@ def test_qkv_iproj_tp_keeps_dp_coordination(monkeypatch, input_proj_tp_size, is_
     assert utils.should_skip_allreduce_across_dp_group(config, is_draft_model=is_draft) is (input_proj_tp_size == 1)
 
 
-@pytest.mark.parametrize("v2", [False, True])
 @pytest.mark.parametrize("lmhead", [False, True])
 @pytest.mark.parametrize("dcp", [1, 2])
-def test_requires_lmhead_dp_sync_is_scoped_to_v2_reduced_padding(monkeypatch, v2, lmhead, dcp):
+def test_requires_lmhead_dp_sync_is_scoped_to_v2_reduced_padding(monkeypatch, lmhead, dcp):
     config = SimpleNamespace(
-        use_v2_model_runner=v2,
         parallel_config=SimpleNamespace(decode_context_parallel_size=dcp),
     )
     monkeypatch.setattr(utils, "lmhead_tp_enable", lambda: lmhead)
-    assert utils.requires_lmhead_dp_sync(config) is (v2 and lmhead and dcp == 1)
+    assert utils.requires_lmhead_dp_sync(config) is (lmhead and dcp == 1)

@@ -91,7 +91,7 @@ from vllm.utils.math_utils import cdiv
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.attention.utils import mark_fused_preprocess_weights
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
-from vllm_ascend.ops.kda_parallel import KDARowParallelLinear, get_kda_state_shape
+from vllm_ascend.ops.head_parallel import HeadParallelRowLinear, get_head_sharded_state_shape
 from vllm_ascend.ops.kimi_kda import (
     AscendKimiK3DeltaAttention as AscendKimiK3DeltaAttentionBase,
 )
@@ -102,11 +102,6 @@ from vllm_ascend.quantization.methods.base import PreparedLinearInput
 from vllm_ascend.quantization.methods.w8a8.w8a8_dynamic import AscendW8A8DynamicLinearMethod
 from vllm_ascend.quantization.methods.w8a8.w8a8_mxfp8 import AscendW8A8MXFP8DynamicLinearMethod
 from vllm_ascend.utils import get_rotation_path, is_950, vllm_version_is
-from vllm_ascend.worker.v2.pp_transport import (
-    PPTransportDataType,
-    add_pp_transport_tensors,
-    get_pp_transport_tensors,
-)
 from vllm_ascend.worker.v2.pp_transport import (
     make_empty_intermediate_tensors as make_pp_empty_intermediate_tensors,
 )
@@ -801,7 +796,7 @@ class AscendKimiDecoderLayer(UpstreamKimiDecoderLayer):
             return False
         o_proj = self.self_attn.o_proj
         # PCP KDA owns combined TP/PCP head shards and its own reductions.
-        if isinstance(o_proj, KDARowParallelLinear):
+        if isinstance(o_proj, HeadParallelRowLinear):
             return False
         if KimiOProjMMReduceScatterOp.unsupported_reason(o_proj) is not None:
             return False
@@ -951,6 +946,26 @@ class AscendKimiLinearModel(UpstreamKimiLinearModel):
     # prefix-sum stream used by upstream vLLM, so keep that as the default.
     dspark_aux_capture_materialized = False
 
+    def _maybe_add_hidden_state(
+        self,
+        aux_hidden_states: list[torch.Tensor],
+        layer_idx: int,
+        hidden_states: torch.Tensor,
+        residual: torch.Tensor | None,
+    ) -> list[torch.Tensor]:
+        # v0.34.0's mixin appends the live tensor when the additive residual
+        # is None; vLLM main clones it (#66177) because the first layer
+        # updates that buffer in place. Mirror the snapshot on the release
+        # lane, keeping upstream's attn-res bank reset so the capture stays
+        # the raw prefix sum.
+        if vllm_version_is("0.34.0") and layer_idx in self.aux_hidden_state_layers:
+            if self.config.attn_res_block_size is not None:
+                residual = None
+            if residual is None:
+                aux_hidden_states.append(hidden_states.clone())
+                return aux_hidden_states
+        return super()._maybe_add_hidden_state(aux_hidden_states, layer_idx, hidden_states, residual)
+
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
         nn.Module.__init__(self)
         config = vllm_config.model_config.hf_text_config
@@ -973,11 +988,7 @@ class AscendKimiLinearModel(UpstreamKimiLinearModel):
         self.n_redundant_experts = (
             parallel_config.eplb_config.num_redundant_experts if parallel_config.enable_eplb else 0
         )
-        self.use_sequence_parallel = (
-            (parallel_config.pipeline_parallel_size == 1 or vllm_config.use_v2_model_runner)
-            and parallel_config.enable_expert_parallel
-            and parallel_config.tensor_parallel_size > 1
-        )
+        self.use_sequence_parallel = parallel_config.enable_expert_parallel and parallel_config.tensor_parallel_size > 1
 
         if get_pp_group().is_first_rank:
             self.embed_tokens = VocabParallelEmbedding(
@@ -1050,23 +1061,23 @@ class AscendKimiLinearModel(UpstreamKimiLinearModel):
             # A materialized state at start_layer belongs to this stage,
             # unlike the raw state emitted by the preceding stage.
             self._aux_slot_base_cached = bisect_left(self.aux_hidden_state_layers, self.start_layer)
-        if vllm_version_is("0.33.0") and pp.is_last_rank:
-            self._aux_upstream_total_cached = self._aux_slot_base_cached
+            # v0.34.0 caches the receive count inside the mixin, before the
+            # boundary above moves into this stage; sync it for collection.
+            if vllm_version_is("0.34.0") and pp.is_last_rank:
+                self._aux_upstream_total_cached = self._aux_slot_base_cached
 
-    if not vllm_version_is("0.33.0"):
-
-        def aux_hidden_state_slot_keys(self) -> tuple[tuple[str, ...], tuple[str, ...]]:
-            if self.config.attn_res_block_size is None or not self.dspark_aux_capture_materialized:
-                return super().aux_hidden_state_slot_keys()
-            pp = get_pp_group()
-            if pp.world_size < 2:
-                return (), ()
-            # Materialized DSpark captures before layer L. A cut at L belongs
-            # to the receiving stage, unlike raw post-layer capture.
-            base = self._aux_slot_base_cached
-            end = base if pp.is_last_rank else bisect_left(self.aux_hidden_state_layers, self.end_layer)
-            key = self.AUX_HIDDEN_STATE_KEY
-            return tuple(f"{key}{i}" for i in range(base)), tuple(f"{key}{i}" for i in range(base, end))
+    def aux_hidden_state_slot_keys(self) -> tuple[tuple[str, ...], tuple[str, ...]]:
+        if self.config.attn_res_block_size is None or not self.dspark_aux_capture_materialized:
+            return super().aux_hidden_state_slot_keys()
+        pp = get_pp_group()
+        if pp.world_size < 2:
+            return (), ()
+        # Materialized DSpark captures before layer L. A cut at L belongs
+        # to the receiving stage, unlike raw post-layer capture.
+        base = self._aux_slot_base_cached
+        end = base if pp.is_last_rank else bisect_left(self.aux_hidden_state_layers, self.end_layer)
+        key = self.AUX_HIDDEN_STATE_KEY
+        return tuple(f"{key}{i}" for i in range(base)), tuple(f"{key}{i}" for i in range(base, end))
 
     def make_empty_intermediate_tensors(
         self,
@@ -1164,13 +1175,15 @@ class AscendKimiLinearModel(UpstreamKimiLinearModel):
             residual = intermediate_tensors["residual"]
 
         materialized_aux = self.dspark_aux_capture_materialized
-        # Main's runner relays upstream slots and merges them once on the last
-        # stage. The release model still carries the cumulative payload.
-        aux_hidden_states = (
-            get_pp_transport_tensors(intermediate_tensors, PPTransportDataType.AUX_HIDDEN_STATES)
-            if vllm_version_is("0.33.0")
-            else []
+        # v0.34.0 relays earlier stages' aux slots through the PP tensors;
+        # vLLM main merges them in the runner, so this yields [] there.
+        # Only this stage's own captures are packed into the outgoing payload:
+        # re-packing the relayed slots would duplicate them and shift the
+        # local slot keys.
+        remote_aux_hidden_states: list[torch.Tensor] = (
+            [] if get_pp_group().is_first_rank else self.collect_remote_aux_hidden_states(intermediate_tensors)
         )
+        aux_hidden_states: list[torch.Tensor] = []
         if self.use_sequence_parallel:
             if envs.VLLM_MOE_SKIP_PADDING and is_forward_context_available():
                 forward_context = get_forward_context()
@@ -1186,7 +1199,7 @@ class AscendKimiLinearModel(UpstreamKimiLinearModel):
             hidden_states = sp_shard(hidden_states)
             if residual is not None:
                 residual = sp_shard(residual)
-            aux_hidden_states = [sp_shard(aux) for aux in aux_hidden_states]
+            remote_aux_hidden_states = [sp_shard(aux) for aux in remote_aux_hidden_states]
         if not materialized_aux and get_pp_group().is_first_rank:
             aux_hidden_states = self._maybe_add_hidden_state(
                 aux_hidden_states,
@@ -1254,13 +1267,7 @@ class AscendKimiLinearModel(UpstreamKimiLinearModel):
                 residual = sp_all_gather(residual)[:full_num_tokens]
                 aux_hidden_states = [sp_all_gather(aux)[:full_num_tokens] for aux in aux_hidden_states]
             output = IntermediateTensors({"hidden_states": hidden_states, "residual": residual})
-            if not vllm_version_is("0.33.0"):
-                return IntermediateTensors({**output.tensors, **self.pack_local_aux_hidden_states(aux_hidden_states)})
-            return add_pp_transport_tensors(
-                output,
-                PPTransportDataType.AUX_HIDDEN_STATES,
-                aux_hidden_states,
-            )
+            return IntermediateTensors({**output.tensors, **self.pack_local_aux_hidden_states(aux_hidden_states)})
 
         # The loop above already captured aux for every ``(layer_idx + 1)``
         # in ``aux_hidden_state_layers``, including ``end_layer``; upstream
@@ -1276,6 +1283,9 @@ class AscendKimiLinearModel(UpstreamKimiLinearModel):
         )
         if materialized_aux and self.end_layer in self.aux_hidden_state_layers:
             aux_hidden_states.append(hidden_states)
+        # Order the states by global layer position: everything relayed by the
+        # upstream stages comes before this stage's own captures.
+        aux_hidden_states = remote_aux_hidden_states + aux_hidden_states
         if self.use_sequence_parallel:
             if aux_hidden_states:
                 hidden_size = hidden_states.shape[-1]
@@ -1349,7 +1359,7 @@ class AscendKimiLinearForCausalLM(UpstreamKimiLinearForCausalLM, KimiMixtureOfEx
 
     @classmethod
     def get_mamba_state_shape_from_config(cls, vllm_config):
-        return get_kda_state_shape(vllm_config, super().get_mamba_state_shape_from_config)
+        return get_head_sharded_state_shape(vllm_config, super().get_mamba_state_shape_from_config)
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
         nn.Module.__init__(self)
@@ -1459,7 +1469,7 @@ class AscendKimiK3ForConditionalGeneration(UpstreamKimiK3ForConditionalGeneratio
 
     @classmethod
     def get_mamba_state_shape_from_config(cls, vllm_config):
-        return get_kda_state_shape(vllm_config, super().get_mamba_state_shape_from_config)
+        return get_head_sharded_state_shape(vllm_config, super().get_mamba_state_shape_from_config)
 
     def __init__(self, vllm_config: VllmConfig, prefix: str = "") -> None:
         nn.Module.__init__(self)
