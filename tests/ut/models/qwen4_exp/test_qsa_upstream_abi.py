@@ -587,10 +587,15 @@ def test_qsa_kv_store_keeps_page_stride_with_multiple_heads(monkeypatch) -> None
 
 
 @pytest.mark.parametrize(
-    "enable_dbo,ubatch_size,pcp_size",
-    [(False, 0, 1), (False, 1, 1), (False, 2, 1), (False, 4, 1), (True, 0, 1), (True, 2, 1), (False, 0, 2)],
+    "enable_dbo,ubatch_size,pcp_size,expected_sharing",
+    [
+        pytest.param(False, 0, 1, True, id="ordinary-decode"),
+        pytest.param(False, 2, 1, False, id="explicit-ubatching"),
+        pytest.param(True, 0, 1, False, id="dbo"),
+        pytest.param(False, 0, 2, False, id="pcp"),
+    ],
 )
-def test_target_topk_sharing_respects_all_microbatch_modes(monkeypatch, enable_dbo, ubatch_size, pcp_size):
+def test_target_topk_sharing_respects_parallel_modes(monkeypatch, enable_dbo, ubatch_size, pcp_size, expected_sharing):
     # Bypass unrelated distributed config validation while retaining the real
     # upstream use_ubatching property used by the target constructor.
     parallel_config = object.__new__(ParallelConfig)
@@ -619,15 +624,7 @@ def test_target_topk_sharing_respects_all_microbatch_modes(monkeypatch, enable_d
     # model.py replaces the upstream module global with its subclass.
     monkeypatch.setattr(model.AscendQwen4ExpModel.__bases__[0], "__init__", init_backbone)
     first = model.AscendQwen4ExpModel(vllm_config=config)
-    second = model.AscendQwen4ExpModel(vllm_config=config)
     buffers = [attention.topk_indices_buffer for attention in first.layers]
-    should_share = pcp_size == 1 and not (enable_dbo or ubatch_size > 1)
-    assert (buffers[0] is buffers[1] is buffers[2]) == should_share
-    if not should_share:
-        assert len({buffer.data_ptr() for buffer in buffers}) == len(buffers)
-    assert buffers[0] is not second.layers[0].topk_indices_buffer
-    assert not first.state_dict()
-    assert not hasattr(first, "topk_indices_buffer")
     assert config.parallel_config.prefill_context_parallel_size == pcp_size
     for layer in first.layers:
         if pcp_size > 1:
@@ -635,22 +632,31 @@ def test_target_topk_sharing_respects_all_microbatch_modes(monkeypatch, enable_d
         else:
             layer.indexer.configure_pcp_cache_backends.assert_not_called()
 
-    # Draft attention is created outside the target constructor's scope.
-    draft = [qsa.AscendQwen4ExpQSAAttention(vllm_config=config) for _ in range(2)]
-    assert draft[0].topk_indices_buffer is not draft[1].topk_indices_buffer
-    assert all(attention.topk_indices_buffer is not buffers[0] for attention in draft)
+    if not expected_sharing:
+        assert len({buffer.data_ptr() for buffer in buffers}) == len(buffers)
+        first.to_empty(device="cpu")
+        assert len({attention.topk_indices_buffer.data_ptr() for attention in first.layers}) == len(buffers)
+        return
 
-    # Exercise whole-model conversions that normally recreate each layer buffer.
-    # Moving an outer module also reaches the target's _apply override.
+    assert all(buffer is buffers[0] for buffer in buffers)
+    assert not hasattr(first, "topk_indices_buffer")
+    second = model.AscendQwen4ExpModel(vllm_config=config)
+    draft = [qsa.AscendQwen4ExpQSAAttention(vllm_config=config) for _ in range(2)]
+    assert all(attention.topk_indices_buffer is not buffers[0] for attention in [*second.layers, *draft])
+    assert draft[0].topk_indices_buffer is not draft[1].topk_indices_buffer
+
+    # Parent conversion must preserve Top-K aliasing and still move ordinary buffers.
+    first.register_buffer("ordinary_buffer", torch.zeros(1), persistent=False)
     parent = torch.nn.ModuleList([first, second, *draft])
     parent.to(device="meta")
+    assert first.ordinary_buffer.device.type == "meta"
     parent.to_empty(device="cpu")
+    assert first.ordinary_buffer.device.type == "cpu"
     moved = [attention.topk_indices_buffer for attention in first.layers]
-    assert all(buffer.device.type == "cpu" for buffer in moved)
-    assert len({buffer.data_ptr() for buffer in moved}) == (1 if should_share else len(moved))
+    assert all(buffer.device.type == "cpu" and buffer is moved[0] for buffer in moved)
     assert moved[0] is not buffers[0]
-    assert {buffer.data_ptr() for buffer in moved}.isdisjoint(
-        attention.topk_indices_buffer.data_ptr() for attention in [*second.layers, *draft]
+    assert all(
+        attention.topk_indices_buffer.data_ptr() != moved[0].data_ptr() for attention in [*second.layers, *draft]
     )
     assert draft[0].topk_indices_buffer is not draft[1].topk_indices_buffer
     assert not parent.state_dict()

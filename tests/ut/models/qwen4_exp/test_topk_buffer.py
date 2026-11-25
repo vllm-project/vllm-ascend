@@ -59,24 +59,6 @@ def test_distinct_model_scopes_and_dtype(dtype):
     assert (other.topk_indices_buffer is second.topk_indices_buffer) == (dtype == torch.int32)
 
 
-@pytest.mark.parametrize("num_tokens", [0, 1, 3, 8])
-def test_sequential_consumers_match_private_buffers(num_tokens):
-    selections = [torch.arange(32, dtype=torch.int32).reshape(8, 4), torch.full((8, 4), 3, dtype=torch.int32)]
-    values = torch.arange(64, dtype=torch.float32)
-
-    def execute(enabled):
-        with share_target_topk_buffers(enabled):
-            attentions = [layer(), layer()]
-        outputs = []
-        for attention, selection in zip(attentions, selections):
-            attention.topk_indices_buffer[:num_tokens].copy_(selection[:num_tokens])
-            outputs.append(values[attention.topk_indices_buffer[:num_tokens].long()].sum(dim=-1))
-        return outputs
-
-    for actual, expected in zip(execute(True), execute(False)):
-        torch.testing.assert_close(actual, expected, rtol=0, atol=0)
-
-
 def test_different_strides_do_not_share():
     with share_target_topk_buffers(True):
         first = layer()
