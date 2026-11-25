@@ -43,7 +43,11 @@ def selector(monkeypatch):
     for module in (upstream, packing, utilities):
         monkeypatch.setitem(sys.modules, module.__name__, module)
     source = Path(__file__).resolve().parents[4] / "vllm_ascend/models/qwen4_exp/lightning_indexer.py"
-    spec = importlib.util.spec_from_file_location("qsa_liv2_contract", source)
+    # Use a package-qualified name so relative imports in the real module
+    # (for example ``.ops.qsa``) resolve exactly as they do at runtime.
+    spec = importlib.util.spec_from_file_location(
+        "vllm_ascend.models.qwen4_exp.lightning_indexer_test_contract", source
+    )
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
