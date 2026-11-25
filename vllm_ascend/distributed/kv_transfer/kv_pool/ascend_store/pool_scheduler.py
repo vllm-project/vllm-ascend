@@ -1109,11 +1109,14 @@ class KVPoolScheduler:
         scratch_blocks_by_group = dict.fromkeys(self.swa_group_ids, 0) | self.num_speculative_blocks_by_group
         if not scratch_blocks_by_group:
             return
-        using_event_id = self.get_sending_event_id()
-        req_meta.event_id = using_event_id
         current_step_sending: list[int] = []
-        for group_id, num_speculative_blocks in scratch_blocks_by_group.items():
-            group_block_ids = req_meta.block_ids_by_group[group_id]
+        # Running requests can refresh their block table before the sender reads it.
+        req_meta.block_ids_by_group = req_meta.block_ids_by_group.copy()
+        for group_id, group_block_ids in enumerate(req_meta.block_ids_by_group):
+            num_speculative_blocks = scratch_blocks_by_group.get(group_id)
+            if num_speculative_blocks is None:
+                continue
+            req_meta.block_ids_by_group[group_id] = group_block_ids.copy()
             # The last num_speculative_blocks slots are speculative scratch
             # blocks that the allocator relocates in place; relocation requires
             # them exclusively owned (ref_cnt == 1), so they must never be
@@ -1122,6 +1125,11 @@ class KVPoolScheduler:
                 group_block_ids[:-num_speculative_blocks] if num_speculative_blocks > 0 else group_block_ids
             )
             current_step_sending.extend([block_id for block_id in non_spec_block_ids if block_id > 0])
+        if not current_step_sending:
+            return
+
+        using_event_id = self.get_sending_event_id()
+        req_meta.event_id = using_event_id
         logger.debug("event: %s touch blocks: %s", using_event_id, current_step_sending)
         assert self._block_pool is not None
         self._block_pool.touch([self._block_pool.blocks[block_id] for block_id in current_step_sending])
@@ -1129,9 +1137,7 @@ class KVPoolScheduler:
         self.sending_blocks[using_event_id] = current_step_sending
 
     def update_connector_output(self, connector_output: KVConnectorOutput):
-        """
-        hand the connector_output, free non-null mamba blocks and so on.
-        """
+        """Process receive completions and release acknowledged bulk-save references."""
         self.update_finished_recving(connector_output.finished_recving)
 
         meta = connector_output.kv_connector_worker_meta

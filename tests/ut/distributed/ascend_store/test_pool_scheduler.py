@@ -657,8 +657,18 @@ class TestKVPoolScheduler(unittest.TestCase):
         connector = AscendStoreConnector.__new__(AscendStoreConnector)
         connector.connector_scheduler = scheduler
         self.assertFalse(connector.has_pending_push_work())
-        request = ReqMeta("r1", block_ids_by_group=[[0, 1, 2]], can_save=True)
+        # A compact request table may omit a configured group.
+        scheduler.swa_group_ids.add(1)
+        empty = ReqMeta("empty", block_ids_by_group=[[0]], can_save=True)
+        scheduler.retain_blocks_for_save(empty)
+        self.assertIsNone(empty.event_id)
+        pool.touch.assert_not_called()
+
+        tracker_table = [[0, 1, 2]]
+        request = ReqMeta("r1", block_ids_by_group=tracker_table, can_save=True)
         scheduler.retain_blocks_for_save(request)
+        tracker_table[0][:] = [0, 0, 3]
+        self.assertEqual(request.block_ids_by_group, [[0, 1, 2]])
         pool.touch.assert_called_once_with(pool.blocks[1:])
         assert request.event_id is not None
 

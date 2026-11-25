@@ -3510,6 +3510,8 @@ class KVPoolWorker:
             shard_rank=shard_rank,
             shard_size=shard_size,
         ):
+            if block_id <= 0:
+                continue
             token_count = end - start
             for sub_idx in range(self.num_sub_keys):
                 effective_rank = self.tp_rank * self.num_sub_keys + sub_idx
@@ -3610,13 +3612,16 @@ class KVPoolWorker:
                     else req_meta.original_block_size
                 )
                 stored_events: list[BlockStored] = []
-                prev_key = None
-                for idx, (start, end, _base_key) in enumerate(
-                    self.token_database.process_tokens(token_len, req_meta.block_hashes)
-                ):
-                    if idx >= len(req_meta.block_hashes):
-                        break
-                    block_hash = maybe_convert_block_hash(req_meta.block_hashes[idx])
+                group_hashes = get_block_hashes(
+                    req_meta.block_hashes, self.block_size, self.token_database.hash_block_size
+                )
+                live_chunks = self.token_database.process_token_key_strings_with_block_ids(
+                    token_len, req_meta.block_hashes, block_ids, skip_null_blocks=True
+                )
+                for start, end, _key, block_hash, _block_id in live_chunks:
+                    idx = start // self.block_size
+                    prev_key = maybe_convert_block_hash(group_hashes[idx - 1]) if idx else None
+                    block_hash = maybe_convert_block_hash(block_hash)
                     token_ids = req_meta.token_ids[start:end] if req_meta.token_ids is not None else None
                     stored_events.append(
                         BlockStored(
@@ -3629,7 +3634,6 @@ class KVPoolWorker:
                             lora_name=None,
                         )
                     )
-                    prev_key = block_hash
                 if stored_events:
                     send_thread.update_kv_event(stored_events)  # type: ignore[attr-defined]
         finally:

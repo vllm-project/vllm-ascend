@@ -2990,6 +2990,18 @@ class TestKVPoolWorkerTpMismatch(unittest.TestCase):
         self.assertEqual(addrs, [1264, 1280, 1296])
         self.assertEqual(sizes, [8, 8, 8])
 
+    def test_tp_mismatch_skips_null_slots_after_pcp_sharding(self):
+        worker = self._make_strided_worker(tp_rank=1)
+        for rank, expected in [(0, []), (1, [11, 11])]:
+            with self.subTest(rank=rank):
+                keys, addrs, sizes, blocks = worker._build_tp_mismatch_keys_and_addrs(
+                    [b"h0", b"h1"], [0, 11], 8, shard_rank=rank, shard_size=2
+                )
+                self.assertEqual(blocks, expected)
+                self.assertEqual(len(keys), len(expected))
+                self.assertEqual(len(addrs), len(expected))
+                self.assertEqual(len(sizes), len(expected))
+
     def test_build_tp_mismatch_keys_and_addrs(self):
         worker = self._make_strided_worker(tp_rank=1)
 
