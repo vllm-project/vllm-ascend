@@ -214,7 +214,7 @@ def test_cache_coordinator_uses_kv_cache_config_retention_interval(retention_int
     worker.hash_block_size = 16
     worker.grouped_block_size = [16]
     worker.kv_cache_group_families = ["mamba"]
-    config = SimpleNamespace(speculative_config=None)
+    config = SimpleNamespace(speculative_config=None, num_hash_lookahead_tokens=0)
     with patch.object(pool_worker, "AscendStoreCoordinator") as coordinator_cls:
         coordinator = worker._build_cache_coordinator(config)
     assert coordinator is coordinator_cls.return_value

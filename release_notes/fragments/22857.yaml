@@ -1,0 +1,4 @@
+pr: 22857
+entries:
+  - category: bugfix
+    text: Fixed missed AscendStore prefix-cache reuse for hybrid Mamba models when EAGLE speculation shifts the replay boundary.

@@ -22,14 +22,16 @@ from unittest.mock import patch
 from weakref import ref
 
 # isort: off
-import tests.ut.distributed.ascend_store._mock_deps  # noqa: F401, E402
+import tests.ut.distributed.ascend_store._mock_deps as mock_deps  # noqa: E402
 import torch
+from vllm.v1.core.kv_cache_coordinator import replay_boundaries
 from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheGroupSpec, MambaSpec, SlidingWindowSpec
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import get_block_hashes
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.coordinator import (
     AscendStoreCoordinator,
     ExternalCachedBlockPool,
     _reachable_block_mask,
+    _replay_boundaries,
 )
 # isort: on
 
@@ -297,6 +299,50 @@ class TestAscendStoreCoordinator(unittest.TestCase):
 
                 self.assertEqual(coord.find_reachable_hit_tokens(hashes, 1024, query), 768)
 
+    @unittest.skipIf(mock_deps._MOCK_VLLM_DEPS, "requires installed vLLM")
+    def test_replay_boundaries_uses_installed_upstream(self):
+        self.assertEqual(
+            _replay_boundaries(16388, scheduler_block_size=896, use_eagle=True, num_hash_lookahead_tokens=0),
+            (15232,),
+        )
+        has_hash_lookahead = "num_hash_lookahead_tokens" in inspect.signature(replay_boundaries).parameters
+        self.assertEqual(
+            _replay_boundaries(31857, scheduler_block_size=896, use_eagle=False, num_hash_lookahead_tokens=2),
+            (31855,) if has_hash_lookahead else (31856,),
+        )
+
+    @unittest.skipIf(mock_deps._MOCK_VLLM_DEPS, "requires installed vLLM")
+    def test_eagle_mamba_store_mask_matches_prefill_checkpoint_column(self):
+        block_size = 896
+        aligned_token_len = 16128
+        num_prompt_tokens = 16388
+        spec = MambaSpec(
+            block_size=block_size,
+            shapes=((1,),),
+            dtypes=(torch.float32,),
+            mamba_cache_mode="align",
+            num_prefill_checkpoint_blocks=1,
+            prefill_checkpoint_alignment=block_size,
+        )
+        coord = AscendStoreCoordinator(
+            [KVCacheGroupSpec(["state"], spec, is_eagle_group=True)],
+            scheduler_block_size=block_size,
+            hash_block_size=block_size,
+            group_block_sizes=[block_size],
+            group_cache_families=["default"],
+            use_eagle=True,
+            retention_interval=0,
+        )
+
+        replay_boundary = _replay_boundaries(
+            num_prompt_tokens, scheduler_block_size=block_size, use_eagle=True, num_hash_lookahead_tokens=0
+        )
+        mask = coord.store_mask(aligned_token_len, num_prompt_tokens)[0]
+        checkpoint_column = (aligned_token_len + block_size - 1) // block_size - 2
+        self.assertEqual(replay_boundary, (15232,))
+        self.assertEqual(checkpoint_column, 16)
+        self.assertEqual([i for i, selected in enumerate(mask) if selected], [checkpoint_column])
+
     def test_legacy_reachable_mask_ignores_new_boundary_argument(self):
         class LegacyManager:
             @staticmethod
@@ -352,6 +398,7 @@ class TestAscendStoreCoordinator(unittest.TestCase):
         self.assertEqual(calls, [True, True])
         self.assertEqual(masks, ([True, False, True, False], [True, False, True, False]))
 
+    @unittest.skipIf(mock_deps._MOCK_VLLM_DEPS, "requires installed vLLM")
     def test_reachable_mask_cache_preserves_inputs_and_caller_isolation(self):
         coord = AscendStoreCoordinator(
             [KVCacheGroupSpec(["layer.0"], _sliding_spec(16, 32))],
@@ -381,6 +428,7 @@ class TestAscendStoreCoordinator(unittest.TestCase):
         self.assertIsNone(coord_ref())
         self.assertGreater(cached_masks.cache_info().currsize, 0)
 
+    @unittest.skipIf(mock_deps._MOCK_VLLM_DEPS, "requires installed vLLM")
     def test_compressed_masks_use_full_attention_reachability(self):
         coord = AscendStoreCoordinator(
             [KVCacheGroupSpec(["layer.0"], _full_spec(block_size=512))],
