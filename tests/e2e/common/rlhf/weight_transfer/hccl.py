@@ -175,12 +175,16 @@ def collect_draft_observation(server, case: WeightUpdateModelCase):
     projections = post_control(server, "collective_rpc", json={"method": "snapshot_draft_context_projections"}).json()[
         "results"
     ]
-    return snapshot, {
+    # Contents are comparable across cold/live servers; addresses are only
+    # comparable before/after reload within the same live server.
+    observation = {
         "parameters": parameter_digests(snapshot),
         "generation": signature,
         "draft_outputs": draft_outputs,
-        "context_projections": projections,
+        "context_projections": [{name: value["digest"] for name, value in rank.items()} for rank in projections],
     }
+    projection_addresses = [{name: value["data_ptr"] for name, value in rank.items()} for rank in projections]
+    return snapshot, observation, projection_addresses
 
 
 def run_draft_hccl_weight_transfer(tmp_path, monkeypatch, packed: bool, enforce_eager: bool, speculative_case):
@@ -221,7 +225,7 @@ def run_draft_hccl_weight_transfer(tmp_path, monkeypatch, packed: bool, enforce_
             server_port=port,
             env_dict=env_dict,
         ) as server:
-            _, references[role] = collect_draft_observation(server, case)
+            _, references[role], _ = collect_draft_observation(server, case)
             (tmp_path / f"{role}-reference.json").write_text(json.dumps(references[role], indent=2))
 
     wait_for_free_device_memory(INFERENCE_DEVICE_INDEX, 0.2)
@@ -234,21 +238,19 @@ def run_draft_hccl_weight_transfer(tmp_path, monkeypatch, packed: bool, enforce_
         server_port=port,
         env_dict=env_dict,
     ) as server:
-        client = server.get_client()
         sync_client = WeightUpdateClient(server.url_root)
         assert first_draft_updated.draft_source is not None
         engine = create_hccl_trainer(sync_client, first_draft_updated.draft_source, packed, target_updated)
         try:
             # Reuse HCCL for warmup and all updates; capture graphs before
             # recording the addresses which live updates must preserve.
-            generation_signature(client, case.id, prompts=case.prompts)
             architectures = post_control(server, "collective_rpc", json={"method": "draft_model_architecture"}).json()[
                 "results"
             ]
             assert len(architectures) == INFERENCE_WORLD_SIZE and all(
                 name.endswith(speculative_case.draft_architecture) for name in architectures
             ), architectures
-            before = snapshot_weight_update_models(server)
+            before, _, original_projection_addresses = collect_draft_observation(server, case)
             original_addresses = parameter_addresses(before)
             (tmp_path / "initial-snapshot.json").write_text(json.dumps(before, indent=2))
             assert parameter_digests(before)["draft"] != references["draft-1"]["parameters"]["draft"], (
@@ -268,7 +270,10 @@ def run_draft_hccl_weight_transfer(tmp_path, monkeypatch, packed: bool, enforce_
                 # Failed transfers leave partially updated weights; keep generation paused.
                 engine.send_weights()
                 post_control(server, "resume")
-                after, observation = collect_draft_observation(server, case)
+                after, observation, projection_addresses = collect_draft_observation(server, case)
+                assert projection_addresses == original_projection_addresses, (
+                    f"{speculative_case.id}: {role} update {update_round} changed derived tensor storage"
+                )
                 (tmp_path / f"update-{update_round}-{role}-snapshot.json").write_text(json.dumps(after, indent=2))
                 (tmp_path / f"update-{update_round}-{role}-generation.json").write_text(
                     json.dumps(observation["generation"], indent=2)

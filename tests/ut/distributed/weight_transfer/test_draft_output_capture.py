@@ -52,9 +52,9 @@ def test_draft_outputs_are_observed_before_target_correction(monkeypatch, genera
         with pytest.raises(RuntimeError, match="generation failed"):
             hccl.collect_draft_observation(server, case)
     else:
-        _, initial = hccl.collect_draft_observation(server, case)
+        _, initial, _ = hccl.collect_draft_observation(server, case)
         payload = 2
-        _, updated = hccl.collect_draft_observation(server, case)
+        _, updated, _ = hccl.collect_draft_observation(server, case)
         assert initial["generation"] == updated["generation"]
         assert initial["draft_outputs"] == [[[[1, 1]]]]
         assert updated["draft_outputs"] == [[[[2, 2]]]]

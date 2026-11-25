@@ -364,12 +364,25 @@ class WeightUpdateTestWorkerExtension:
     def snapshot_draft_context_projections(self):
         draft_model = self.get_draft_model()
         assert draft_model is not None, "Draft model is missing"
+        # In these BF16 cases, EAGLE3/MTP need no separate weight-derived
+        # snapshot; DSpark's merged context WKV is also a registered Parameter.
+        # The full parameter snapshot covers their contents and storage.
+        # DFlash keeps fused/stacked weights and a norm alias as plain Tensors,
+        # outside named_parameters(), so check them separately after reload.
+        if not type(draft_model).__name__.endswith("DFlashQwen3ForCausalLM"):
+            return {}
         model = draft_model.model
-        return {
-            name: hashlib.sha256(value.detach().cpu().contiguous().view(torch.uint8).numpy().tobytes()).hexdigest()
-            for name in ("_fused_kv_weight", "_k_norm_weights", "_hidden_norm_weight")
-            if isinstance(value := getattr(model, name, None), torch.Tensor)
-        }
+        result = {}
+        for name in ("_fused_kv_weight", "_k_norm_weights", "_hidden_norm_weight"):
+            value = getattr(model, name, None)
+            assert isinstance(value, torch.Tensor), f"Missing required DFlash derived tensor: {name}"
+            result[name] = {
+                "digest": hashlib.sha256(
+                    value.detach().cpu().contiguous().view(torch.uint8).numpy().tobytes()
+                ).hexdigest(),
+                "data_ptr": value.data_ptr(),
+            }
+        return result
 
     def snapshot_weight_update_models(self):
         result = {}
@@ -384,6 +397,10 @@ class WeightUpdateTestWorkerExtension:
                 }
                 for key, value in model.named_parameters()
             }
+            if name == "draft" and type(model).__name__.endswith("DSparkDeepseekV4ForCausalLM"):
+                assert "model.context_wkv_proj.weight" in result[name], (
+                    "DSpark merged context WKV must be covered by the parameter snapshot"
+                )
         return result
 
 
