@@ -13,6 +13,7 @@ from vllm.model_executor.layers import linear
 import vllm_ascend.models.glm5next.kda as model_kda
 from vllm_ascend.models.glm5next.model import Glm5NextForCausalLM
 from vllm_ascend.models.glm5next.recoverssm_config import validate_glm_recoverssm
+from vllm_ascend.ops import head_parallel
 
 
 @pytest.fixture
@@ -39,8 +40,9 @@ def parallel_groups(monkeypatch):
     )
     group = SimpleNamespace(world_size=4, rank_in_group=2, all_gather=Mock(), all_reduce=Mock())
     monkeypatch.setattr(model_kda, "get_pcp_group", lambda: group)
+    monkeypatch.setattr(head_parallel, "get_pcp_group", lambda: group)
     monkeypatch.setattr(
-        model_kda,
+        head_parallel,
         "get_tp_group",
         lambda: SimpleNamespace(
             world_size=linear.get_tensor_model_parallel_world_size(),
@@ -52,12 +54,21 @@ def parallel_groups(monkeypatch):
 
 @pytest.mark.parametrize("loader_name", ["weight_loader", "weight_loader_v2"])
 @pytest.mark.parametrize("rank", [0, 1, 2, 3])
-def test_pcp_merged_projection_loads_heads_and_replicates_low_rank_shards(parallel_groups, loader_name, rank):
-    parallel_groups.rank_in_group = rank
+@pytest.mark.parametrize("explicit_group", [False, True])
+def test_pcp_merged_projection_loads_heads_and_replicates_low_rank_shards(
+    parallel_groups, loader_name, rank, explicit_group
+):
+    group = None
+    if explicit_group:
+        # QKV IProj TP owns its shard rank independently of the default PCP rank.
+        group = SimpleNamespace(world_size=4, rank_in_group=rank)
+    else:
+        parallel_groups.rank_in_group = rank
     sizes = [8, 8, 8, 4, 2, 2]
-    layer = model_kda.PCPGlm5NextMergedColumnParallelLinear(
-        3, sizes, replicated_shard_ids=(4, 5), tp_size=4, bias=False, params_dtype=torch.float32
+    layer = head_parallel.HeadParallelReplicatedMergedColumnLinear(
+        3, sizes, replicated_shard_ids=(4, 5), tp_size=4, tp_group=group, bias=False, params_dtype=torch.float32
     )
+    assert layer.pcp_group is (None if explicit_group else parallel_groups)
     weights = [
         torch.arange(size * 3, dtype=torch.float32).reshape(size, 3) + 100 * sid for sid, size in enumerate(sizes)
     ]
@@ -76,7 +87,9 @@ def test_pcp_merged_projection_loads_heads_and_replicates_low_rank_shards(parall
 @pytest.mark.parametrize("loader_name", ["weight_loader", "weight_loader_v2"])
 @pytest.mark.parametrize("gather_output", [False, True])
 def test_pcp_column_projection_gathers_with_pcp_group(parallel_groups, loader_name, gather_output):
-    layer = model_kda.PCPColumnParallelLinear(3, 8, bias=False, gather_output=gather_output, params_dtype=torch.float32)
+    layer = head_parallel.HeadParallelColumnLinear(
+        3, 8, bias=False, gather_output=gather_output, params_dtype=torch.float32
+    )
     weight = torch.arange(24, dtype=torch.float32).reshape(8, 3)
     getattr(layer, loader_name)(layer.weight, weight)
     x = torch.tensor([[1.0, 2.0, 3.0]])
@@ -94,7 +107,7 @@ def test_pcp_column_projection_gathers_with_pcp_group(parallel_groups, loader_na
 @pytest.mark.parametrize("loader_name", ["weight_loader", "weight_loader_v2"])
 @pytest.mark.parametrize("input_is_parallel", [False, True])
 def test_pcp_output_projection_loads_input_heads_and_reduces_over_pcp(parallel_groups, loader_name, input_is_parallel):
-    layer = model_kda.PCPRowParallelLinear(
+    layer = head_parallel.HeadParallelRowLinear(
         8, 3, bias=False, input_is_parallel=input_is_parallel, params_dtype=torch.float32
     )
     weight = torch.arange(24, dtype=torch.float32).reshape(3, 8)
@@ -226,13 +239,13 @@ def test_kda_projection_and_state_sharding_follow_tp_times_pcp(
         assert layer.recoverssm_records is None
     assert layer.local_projection_size == 1024 // size
     assert layer.use_pcp_head_sharding == (pcp_size > 1)
-    assert isinstance(layer.in_proj_qkvbfg_a, model_kda.PCPGlm5NextMergedColumnParallelLinear) == (
+    assert isinstance(layer.in_proj_qkvbfg_a, head_parallel.HeadParallelReplicatedMergedColumnLinear) == (
         layer.use_pcp_head_sharding or input_proj_tp_size > 1
     )
-    assert isinstance(layer.o_proj, model_kda.PCPRowParallelLinear) == layer.use_pcp_head_sharding
+    assert isinstance(layer.o_proj, head_parallel.HeadParallelRowLinear) == layer.use_pcp_head_sharding
     for name in ("f_b_proj", "g_b_proj", "conv1d"):
         projection = getattr(layer, name)
-        assert isinstance(projection, model_kda.PCPColumnParallelLinear) == layer.use_pcp_head_sharding
+        assert isinstance(projection, head_parallel.HeadParallelColumnLinear) == layer.use_pcp_head_sharding
         assert projection.weight.shape[0] == (3 if name == "conv1d" else 1) * 1024 // size
     projection_size = input_proj_tp_size if input_proj_tp_size > 1 else size
     assert layer.in_proj_qkvbfg_a.weight.shape[0] == 3 * 1024 // projection_size + 8 // projection_size + 2 * 128
@@ -252,7 +265,7 @@ def test_kda_projection_and_state_sharding_follow_tp_times_pcp(
 
 def test_pcp_head_count_must_be_divisible(monkeypatch, parallel_groups):
     with pytest.raises(AssertionError):
-        model_kda.PCPColumnParallelLinear(3, 6, bias=False)
+        head_parallel.HeadParallelColumnLinear(3, 6, bias=False)
 
 
 @pytest.mark.parametrize("loader_name", ["weight_loader", "weight_loader_v2"])
@@ -264,14 +277,14 @@ def test_explicit_projection_group_loads_and_communicates_independently(
     # An explicit projection group replaces both default groups, even when
     # TP and PCP are nontrivial. Its weights and collectives use only its ranks.
     tp_group = SimpleNamespace(world_size=2, rank_in_group=1, all_gather=Mock(), all_reduce=Mock())
-    monkeypatch.setattr(model_kda, "get_tp_group", lambda: tp_group)
+    monkeypatch.setattr(head_parallel, "get_tp_group", lambda: tp_group)
     group = SimpleNamespace(world_size=2, rank_in_group=1, all_gather=Mock(), all_reduce=Mock())
     if direction == "column":
-        layer = model_kda.PCPColumnParallelLinear(
+        layer = head_parallel.HeadParallelColumnLinear(
             8, 8, tp_group=group, bias=False, gather_output=communicate, params_dtype=torch.float32
         )
     else:
-        layer = model_kda.PCPRowParallelLinear(
+        layer = head_parallel.HeadParallelRowLinear(
             8, 8, tp_group=group, bias=False, reduce_results=communicate, params_dtype=torch.float32
         )
     weight = torch.arange(64, dtype=torch.float32).reshape(8, 8)
@@ -304,24 +317,40 @@ def test_explicit_projection_group_loads_and_communicates_independently(
 
 
 @pytest.mark.parametrize("reduce_results", [False, True])
-def test_joint_output_projection_reduces_pcp_before_optional_tp(monkeypatch, parallel_groups, reduce_results):
+@pytest.mark.parametrize("packed", [False, True])
+def test_joint_output_projection_reduces_pcp_before_optional_tp(monkeypatch, parallel_groups, reduce_results, packed):
     tp_group = SimpleNamespace(world_size=2, rank_in_group=1, all_reduce=Mock())
-    monkeypatch.setattr(model_kda, "get_tp_group", lambda: tp_group)
-    layer = model_kda.PCPRowParallelLinear(16, 3, bias=False, reduce_results=reduce_results, params_dtype=torch.float32)
+    monkeypatch.setattr(head_parallel, "get_tp_group", lambda: tp_group)
+    layer = head_parallel.HeadParallelRowLinear(
+        16, 3, bias=False, reduce_results=reduce_results, params_dtype=torch.float32
+    )
     weight = torch.arange(48, dtype=torch.float32).reshape(3, 16)
     layer.weight.weight_loader(layer.weight, weight)
     assert layer.tp_rank == 6
     torch.testing.assert_close(layer.weight, weight[:, 12:14])
 
-    x = torch.arange(16, dtype=torch.float32).reshape(1, 16)
+    x = torch.arange(8 * 16, dtype=torch.float32).reshape(8, 16)
     local = x[:, 12:14] @ weight[:, 12:14].T
     pcp_sum = x[:, 8:] @ weight[:, 8:].T
     full = x @ weight.T
-    parallel_groups.all_reduce.return_value = pcp_sum
+    indices = torch.tensor([0, 7, 1, 6, 2, 5, 3, 4]) if packed else None
+    parallel_groups.reduce_scatter = Mock()
+    if packed:
+        local_rows = indices.chunk(parallel_groups.world_size)[parallel_groups.rank_in_group]
+        pcp_sum, full = pcp_sum[local_rows], full[local_rows]
+        parallel_groups.reduce_scatter.return_value = pcp_sum
+    else:
+        parallel_groups.all_reduce.return_value = pcp_sum
     tp_group.all_reduce.return_value = full
 
-    torch.testing.assert_close(layer(x[:, 12:14])[0], full if reduce_results else pcp_sum)
-    torch.testing.assert_close(parallel_groups.all_reduce.call_args.args[0], local)
+    torch.testing.assert_close(layer(x[:, 12:14], pcp_output_indices=indices)[0], full if reduce_results else pcp_sum)
+    if packed:
+        parallel_groups.all_reduce.assert_not_called()
+        torch.testing.assert_close(parallel_groups.reduce_scatter.call_args.args[0], local[indices])
+        assert parallel_groups.reduce_scatter.call_args.kwargs == {"dim": 0}
+    else:
+        parallel_groups.reduce_scatter.assert_not_called()
+        torch.testing.assert_close(parallel_groups.all_reduce.call_args.args[0], local)
     if reduce_results:
         tp_group.all_reduce.assert_called_once_with(pcp_sum)
     else:

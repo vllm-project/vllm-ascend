@@ -12,7 +12,7 @@ import torch.nn.functional as F
 from vllm_ascend import ascend_forward_context
 from vllm_ascend.models.glm5next import kda as model_kda
 from vllm_ascend.models.glm5next import kda_input_projection_tp
-from vllm_ascend.ops import linear_op
+from vllm_ascend.ops import head_parallel, linear_op
 
 
 @pytest.mark.parametrize("size", [2, 4, 8])
@@ -31,10 +31,10 @@ def test_projection_selects_explicit_group_without_forwarding_it(monkeypatch, si
         self.update_param_tp_status = lambda: None
         seen.update(input_size=input_size, output_size=output_size, **kwargs)
 
-    monkeypatch.setattr(model_kda, "get_pcp_group", lambda: pcp_group)
-    monkeypatch.setattr(model_kda, "get_tp_group", lambda: tp_group)
+    monkeypatch.setattr(head_parallel, "get_pcp_group", lambda: pcp_group)
+    monkeypatch.setattr(head_parallel, "get_tp_group", lambda: tp_group)
     base = model_kda.ColumnParallelLinear if direction == "column" else model_kda.RowParallelLinear
-    cls = model_kda.PCPColumnParallelLinear if direction == "column" else model_kda.PCPRowParallelLinear
+    cls = head_parallel.HeadParallelColumnLinear if direction == "column" else head_parallel.HeadParallelRowLinear
     monkeypatch.setattr(base, "__init__", linear_init)
     layer = cls(4 * size, 8 * size, tp_group=kda_group if explicit_group else None)
     assert layer.tp_group is (kda_group if explicit_group else tp_group)
