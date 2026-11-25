@@ -27,32 +27,33 @@ Three rules when editing the table:
 - Keys must target the module where the kernel is *defined*
   (``func.__module__``), never a from-import copy site. The identity sweep
   matches the original object; a key pointing at a copy silently defeats it.
-- Parameter contract: mirror the original's parameter names or order
-  -- either one suffices for the call shape the impl receives, and
-  mirroring both covers every shape. The dispatcher forwards two call
-  shapes verbatim and adapts only the third:
+- Parameter contract, per call shape:
 
   * Plain calls (``kernel(...)``) and positional ``kernel[grid]``
-    calls reach the impl untouched -- no renaming, no reordering. The
-    impl must accept every argument name its callers pass, via an
-    explicit parameter or ``**kwargs``.
-  * Keyword-only ``kernel[grid]`` calls are adapted: matching names
-    forward by name; otherwise the dispatcher forwards positionally
-    in the original's order -- arguments the caller omitted are
-    skipped (later values shift left), and names outside the
-    original's signature are rejected.
+    calls reach the impl untouched. Plain calls bind by name, so the
+    impl must carry every argument name its callers pass, via an
+    explicit parameter or ``**kwargs``; positional calls bind by
+    slot, so only the arity matters.
+  * Keyword-only ``kernel[grid]`` calls are adapted: when the impl's
+    parameter tuple equals the original's -- names *and* order -- the
+    dispatcher forwards by name; otherwise it forwards positionally
+    in the original's order, skipping arguments the caller omitted
+    (later values shift left) and rejecting names outside the
+    original's signature, so the impl must keep the original's
+    relative order or values land in the wrong slots.
 
-  Two consequences: never rename an original parameter -- a verbatim
-  call site that passes it by name hits a TypeError, and a keyword-only
-  ``[grid]`` call silently shifts the value into the wrong positional
-  slot. Keep NPU-only parameters in the impl's tail with defaults so a
-  keyword-only ``[grid]`` relaunch still binds every original argument
-  to its slot (see ``rejection_sample``; plain-call hosts bind by name
-  and tolerate any position, the tail rule covers both shapes).
+  Mirroring names covers plain call sites, mirroring order covers
+  ``[grid]`` sites, and mirroring both also enables the by-name fast
+  path. Two consequences: never rename an original parameter -- a
+  verbatim call site that passes it by name hits a TypeError, and a
+  keyword-only ``[grid]`` call silently shifts the value into the
+  wrong positional slot. Keep NPU-only parameters in the impl's tail
+  with defaults so a keyword-only ``[grid]`` relaunch still binds
+  every original argument to its slot (see ``rejection_sample``).
 - Values are either plain callables or raw ``@triton.jit`` kernels. The
   dispatcher swaps a raw kernel in directly -- never wrapping it -- so it
   launches natively with the caller's grid and must mirror the original
-  kernel's parameter names or order; this is also the only shape that
+  kernel's parameter names and order; this is also the only shape that
   works for Triton *device functions*, which are inlined into other
   kernels at compile time. A plain callable is wrapped in
   ``KernelOverride`` and invoked as a plain function: launch arguments
