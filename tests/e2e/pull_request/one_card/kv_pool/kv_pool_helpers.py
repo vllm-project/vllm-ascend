@@ -8,8 +8,52 @@ The test files (``test_qwen38_mooncake_pool_ab_a2.py`` and
 ``test_qwen38_memcache_pool_ab_a2.py``) import :func:`run` and call it with
 their backend; only the backend-specific pool config builders stay in the
 per-backend modules.
+
+Environment knobs:
+
+- ``QWEN38_POOL_MODEL``: model id or local checkpoint path (default
+  ``Eco-Tech/Qwen3.8-27B-w8a8``);
+- ``KV_POOL_AB_MODE``: ``gate`` (default, A/B comparison must pass) or
+  ``record`` (only log the verdict);
+- ``QWEN38_POOL_HCCL_IF``: ``1`` (default) binds ``HCCL_IF_IP`` and
+  ``HCCL_SOCKET_IFNAME`` / ``GLOO_SOCKET_IFNAME`` / ``TP_SOCKET_IFNAME`` to the
+  probed business-plane NIC before any engine starts; ``0`` disables it.
+  ``QWEN38_POOL_HCCL_IF_IP`` and ``QWEN38_POOL_HCCL_IFNAME`` override the probe,
+  and an already-exported ``HCCL_IF_IP`` pair is honoured untouched. Without the
+  binding HIXL auto-picks an interface and, on a Kubernetes job pod, picks the
+  pod overlay, which cannot create its RoCE endpoint (E19999
+  HcommEndpointCreate);
+- ``KV_POOL_MEMCACHE_UBSIO_DISK``: raw block device used for the memcache
+  tier-3 UBS IO storage. When unset the case probes the known provisioning
+  locations in order - ``/mnt/boostio`` (bind-mount convention) then any
+  device-plugin injected ``/dev/loop[0-7]`` node (lowest index first; the node
+  number the plugin publishes drifts between runs) - and falls back to
+  ``/dev/loop0`` so the skip reason names the expected path. The path must be a
+  *block device* - dedicated, unmounted, no filesystem signature, and not the
+  backing image file: the ubsio SDK rejects non-block paths late and
+  cryptically, so the test checks it up front;
+- ``KV_POOL_MEMCACHE_UBSIO_DEVICES``: UBS IO standalone device count (default
+  ``TP_SIZE``, one per DRAM-enabled local service);
+- ``KV_POOL_MEMCACHE_DRAM_TIER``: memcache pool DRAM tier size written to
+  ``ock.mmc.local_service.dram.size`` (default ``8GB`` for tier-3). The tier-3
+  legs are eviction-free by design, so the tier must hold the whole working
+  set: a TP=1 layerwise save pre-allocates ~4.5GB for one 16128-token prefix;
+- ``KV_POOL_MEMCACHE_TIER3_ALLOW_TP1``: ``1`` runs the memcache tier-3 leg on
+  TP=1 even when the measured DRAM tier is below 8GB;
+- ``QWEN38_POOL_ENABLE_MEMCACHE``: ``1`` un-parks the memcache scenarios (they
+  skip by default until the runner reserves hugepages);
+- ``QWEN38_POOL_DEVICE_ROCE``: ``1`` pins the mooncake legs to the device RoCE
+  transport (``ASCEND_GLOBAL_RESOURCE_CONFIG`` with
+  ``protocol_desc=["roce:device"]``, ``HCCL_INTRA_PCIE_ENABLE=0``,
+  ``HCCL_INTRA_ROCE_ENABLE=1``); ``0`` (default) leaves HIXL on the platform
+  default;
+- ``QWEN38_POOL_STALL_TIMEOUT_SECONDS`` / ``QWEN38_POOL_TOTAL_TIMEOUT_SECONDS``:
+  watchdog ceilings (default ``900`` / ``5400``);
+- ``KV_POOL_DRIVER_VERSION_INFO``: path probed by the memcache driver check
+  (default ``/usr/local/Ascend/driver/version.info``).
 """
 
+import ipaddress
 import json
 import math
 import os
@@ -156,6 +200,16 @@ STORE_ROCE_RESOURCE_CONFIG = json.dumps(
 # Default to the platform behaviour (HIXL auto-derives from the target) and let
 # RoCE hosts opt in with QWEN38_POOL_DEVICE_ROCE=1.
 DEVICE_ROCE = os.environ.get("QWEN38_POOL_DEVICE_ROCE", "0") == "1"
+# Collective/HIXL NIC selection. The official multi-node script binds HCCL_IF_IP
+# plus the three *_SOCKET_IFNAME variables to a reachable NIC, and that is the
+# recipe that works on the dev A2 boxes. Left unset, HIXL auto-picks an
+# interface; on a Kubernetes job pod it picks the pod overlay (a failing engine
+# logged "Failed to init hixl cs server, ip:10.0.0.118" while the node's
+# RoCE-capable business plane was 172.16.1.188), which cannot create its RoCE
+# endpoint and aborts with "E19999 HcommEndpointCreate failed ... devPhyId=N".
+# QWEN38_POOL_HCCL_IF=0 disables the steering; an explicit
+# QWEN38_POOL_HCCL_IF_IP / _IFNAME pair wins over the probe.
+HCCL_IF_AUTOSET = os.environ.get("QWEN38_POOL_HCCL_IF", "1") == "1"
 # One module-level watchdog guards the whole module, and it is *progress aware*.
 # A fixed per-case timer cannot work here: a case may re-measure itself
 # (PERF_ATTEMPTS) and several cases run back to back, so run 44271971490 had the
@@ -1107,6 +1161,121 @@ def _log_env_diagnostics(case: str) -> None:
     _log_ubsio_disk(case)
 
 
+def _ipv4_by_interface() -> dict[str, list[str]]:
+    """Map interface name -> its IPv4 addresses, without assuming one tool."""
+    found: dict[str, list[str]] = {}
+    # iproute2 first: a stable one-line-per-address format.
+    try:
+        probe = subprocess.run(["ip", "-4", "-o", "addr", "show"], capture_output=True, text=True, timeout=10)
+        if probe.returncode == 0:
+            for line in probe.stdout.splitlines():
+                parts = line.split()
+                # "2: enp67s0f5    inet 172.16.1.188/24 brd ..."
+                if len(parts) >= 4 and parts[2] == "inet":
+                    found.setdefault(parts[1].rstrip(":"), []).append(parts[3].split("/")[0])
+            if found:
+                return found
+    except (OSError, subprocess.SubprocessError):
+        pass
+    # net-tools fallback (both the "inet addr:" and the plain "inet " spellings).
+    try:
+        probe = subprocess.run(["ifconfig", "-a"], capture_output=True, text=True, timeout=10)
+        if probe.returncode == 0:
+            current = ""
+            for line in probe.stdout.splitlines():
+                head = re.match(r"^(\S+?):?\s+flags=", line)
+                if head:
+                    current = head.group(1)
+                    continue
+                addr = re.search(r"inet (?:addr:)?(\d+\.\d+\.\d+\.\d+)", line)
+                if current and addr:
+                    found.setdefault(current, []).append(addr.group(1))
+    except (OSError, subprocess.SubprocessError):
+        pass
+    return found
+
+
+def _interface_score(name: str, address: str) -> int | None:
+    """Rank one interface address; ``None`` means "never use this one"."""
+    lowered = name.lower()
+    if lowered == "lo" or lowered.startswith("lo:"):
+        return None
+    # Kubernetes/Docker overlay and virtual interfaces are never the RoCE plane.
+    if lowered.startswith(("gw_", "cni", "flannel", "veth", "cali", "tunl", "docker", "kube", "br-", "virbr")):
+        return None
+    try:
+        ip = ipaddress.ip_address(address)
+    except ValueError:
+        return None
+    if ip.is_loopback or ip.is_link_local or ip.is_multicast:
+        return None
+    if ip in ipaddress.ip_network("172.16.0.0/12"):
+        return 100  # the A2 business/RoCE plane (172.16.1.188 here, 172.26.2.145 on 145)
+    if ip in ipaddress.ip_network("192.168.0.0/16"):
+        return 80
+    if ip in ipaddress.ip_network("10.0.0.0/8"):
+        return 20  # pod/gateway plane: last resort, and the failing default
+    if ip.is_private:
+        return 60
+    return 40
+
+
+def _apply_collective_if_env(case: str) -> None:
+    """Export HCCL_IF_IP / *_SOCKET_IFNAME for the collective and HIXL layers.
+
+    Mirrors the dev-box recipe that keeps HIXL off the pod overlay. Every
+    candidate the probe sees is printed so a future failure can be diagnosed
+    from the log alone; env values already present are respected and reported.
+    """
+    if not HCCL_IF_AUTOSET:
+        print(
+            f"[kv_pool_a2] {case}: collective NIC steering disabled (QWEN38_POOL_HCCL_IF=0)",
+            flush=True,
+        )
+        return
+    preset_ip = os.environ.get("HCCL_IF_IP", "")
+    preset_if = os.environ.get("HCCL_SOCKET_IFNAME", "")
+    if preset_ip and preset_if:
+        print(
+            f"[kv_pool_a2] {case}: collective NIC preset HCCL_IF_IP={preset_ip} HCCL_SOCKET_IFNAME={preset_if}",
+            flush=True,
+        )
+        return
+
+    by_iface = _ipv4_by_interface()
+    candidates: list[tuple[int, str, str]] = []
+    for name, addresses in by_iface.items():
+        for address in addresses:
+            score = _interface_score(name, address)
+            if score is not None:
+                candidates.append((score, name, address))
+    if not candidates:
+        print(
+            f"[kv_pool_a2] {case}: collective NIC probe found no usable interface "
+            f"(seen: {by_iface}); leaving HCCL_IF_IP unset",
+            flush=True,
+        )
+        return
+
+    candidates.sort(key=lambda item: (-item[0], item[1]))
+    score, ifname, address = candidates[0]
+    ip_ip = os.environ.get("QWEN38_POOL_HCCL_IF_IP") or address
+    ip_if = os.environ.get("QWEN38_POOL_HCCL_IFNAME") or ifname
+    seen = ", ".join(f"{n}={a}" for _, n, a in candidates)
+    print(
+        f"[kv_pool_a2] {case}: collective NIC probe -> {ip_if} ({ip_ip}) score={score}; candidates: {seen}",
+        flush=True,
+    )
+    # Plain interface names (no "=" exact-match prefix): that is the spelling the
+    # dev boxes were verified with. GLOO/TP drive the torch.distributed
+    # rendezvous, HCCL_* the collective and the HIXL/RoCE endpoint creation that
+    # fails when an overlay NIC is picked.
+    os.environ["HCCL_IF_IP"] = ip_ip
+    os.environ["HCCL_SOCKET_IFNAME"] = ip_if
+    os.environ["GLOO_SOCKET_IFNAME"] = ip_if
+    os.environ["TP_SOCKET_IFNAME"] = ip_if
+
+
 def _log_ubsio_disk(case: str) -> None:
     """Print the tier-3 device state that every skip decision below depends on.
 
@@ -1187,6 +1356,10 @@ def run(backend: str, use_layerwise: bool) -> None:
     mode = "layerwise" if use_layerwise else "bulk"
     tier = "tier3-ssd" if tier_ssd else "tier2-dram"
     case = f"qwen38_tp{TP_SIZE}_{backend}_{mode}_{tier}"
+    # Bind the collective/HIXL NIC before any engine process is spawned: on a
+    # Kubernetes job pod the auto-picked overlay interface cannot create its
+    # RoCE endpoint (E19999 HcommEndpointCreate).
+    _apply_collective_if_env(case)
 
     if backend == "memcache" and not ENABLE_MEMCACHE:
         # The memcache scenarios are parked until the loop-1 runner finishes
