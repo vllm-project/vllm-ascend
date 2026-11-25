@@ -417,11 +417,11 @@ def build_attn_metadata(
     gdn_graph_updates: dict[tuple, tuple[Any, list]] = {}
     provider = model_specific_attn_metadata
     # Either provider hook may be overridden on an instance to return group-local inputs.
-    standard_mamba = type(provider) is MambaHybridAttnMetadata and not (
-        {"get_extra_common_attn_kwargs", "get_extra_attn_kwargs"} & vars(provider).keys()
+    batch_global = provider is None or (
+        type(provider) is MambaHybridAttnMetadata
+        and not {"get_extra_common_attn_kwargs", "get_extra_attn_kwargs"}.intersection(vars(provider))
     )
-    batch_global = provider is None or standard_mamba
-    batch_common_kwargs = None
+    common_fields = None
     seq_lens = seq_lens[:num_reqs]
     kv_cache_groups = kv_cache_config.kv_cache_groups
     batch_tq_slots = uses_turboquant_groups(kv_cache_groups)
@@ -472,19 +472,11 @@ def build_attn_metadata(
         group_causal = causal if isinstance(causal, bool) else causal.get(i, True)
         common_v41_metadata: dict[str, Any] = {}
 
-        if batch_common_kwargs is None:
-            common_attn_metadata_extra_kwargs = (
-                provider.get_extra_common_attn_kwargs(i, num_reqs) if provider is not None else {}
-            )
-            if standard_mamba:
-                batch_common_kwargs = common_attn_metadata_extra_kwargs.copy()
-        else:
-            common_attn_metadata_extra_kwargs = batch_common_kwargs.copy()
-        v41_prefill_override = "is_prefilling" in common_attn_metadata_extra_kwargs
-        common_is_prefilling = common_attn_metadata_extra_kwargs.pop(
-            "is_prefilling",
-            is_prefilling,
-        )
+        if common_fields is None or not batch_global:
+            extra = provider.get_extra_common_attn_kwargs(i, num_reqs) if provider is not None else {}
+            prefill_override = "is_prefilling" in extra
+            common_fields = prefill_override, extra.pop("is_prefilling", is_prefilling), extra
+        v41_prefill_override, common_is_prefilling, common_attn_metadata_extra_kwargs = common_fields
         common_attn_metadata = AscendCommonAttentionMetadata(
             query_start_loc=query_start_loc_gpu,
             query_start_loc_cpu=query_start_loc_cpu,
@@ -567,11 +559,8 @@ def build_attn_metadata(
                 )
             template = cached_metadata.get(reuse_key) if reuse_key is not None else None
             attn_metadata_extra_kwargs = (
-                model_specific_attn_metadata.get_extra_attn_kwargs(
-                    attn_metadata_builder,
-                    num_reqs,
-                )
-                if template is None and not for_cudagraph_capture and model_specific_attn_metadata is not None
+                provider.get_extra_attn_kwargs(attn_metadata_builder, num_reqs)
+                if template is None and not for_cudagraph_capture and provider is not None
                 else {}
             )
             if is_dsa_builder:
