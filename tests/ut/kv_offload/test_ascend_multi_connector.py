@@ -8,6 +8,8 @@ import pytest
 pytest.importorskip("torch")
 pytest.importorskip("vllm")
 
+from vllm.config.kv_transfer import KVTransferConfig  # noqa: E402
+
 from vllm_ascend.distributed.kv_transfer.ascend_multi_connector import (  # noqa: E402
     AscendMultiConnector,
     MultiConnector,
@@ -372,3 +374,37 @@ def test_mamba_state_copy_skipped_without_deferral():
     connector.wait_for_layer_load("model.layers.7.linear_attn")
 
     first.wait_for_layer_load.assert_called_once_with("model.layers.7.linear_attn")
+
+
+def test_multi_connector_honors_child_engine_ids():
+    """Child connectors keep their own engine_id; others inherit the parent's.
+
+    Regression test for #22081: upstream MultiConnector builds each child
+    config with ``KVTransferConfig(**ktc, engine_id=engine_id)``, which
+    raises ``TypeError: got multiple values for keyword argument
+    'engine_id'`` when a child config explicitly sets ``engine_id``.
+    """
+    connectors = [
+        {
+            "kv_connector": "ExampleConnector",
+            "kv_role": "kv_both",
+            "engine_id": "child-engine",
+        },
+        {"kv_connector": "ExampleConnector", "kv_role": "kv_both"},
+    ]
+    config = SimpleNamespace(
+        kv_transfer_config=KVTransferConfig(
+            kv_connector="MultiConnector",
+            kv_role="kv_both",
+            engine_id="parent-engine",
+            kv_connector_extra_config={"connectors": connectors},
+        )
+    )
+    child_configs = AscendMultiConnector._get_connector_classes_and_configs(config)
+
+    assert [child.kv_transfer_config.engine_id for _, child in child_configs] == [
+        "child-engine",
+        "parent-engine",
+    ]
+    assert connectors[0]["engine_id"] == "child-engine"
+    assert "engine_id" not in connectors[1]

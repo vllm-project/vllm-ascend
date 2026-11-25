@@ -1,0 +1,4 @@
+pr: 22888
+entries:
+  - category: bugfix
+    text: Fixed an engine startup crash when a MultiConnector child connector config explicitly sets `engine_id`. Such deployments now start normally, with the child keeping its own engine ID and other children inheriting the parent ID.

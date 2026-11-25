@@ -1,5 +1,9 @@
+import copy
 from typing import TYPE_CHECKING, Any, cast
 
+from vllm.config.kv_transfer import KVTransferConfig
+from vllm.distributed.kv_transfer.kv_connector.base import KVConnectorBaseType
+from vllm.distributed.kv_transfer.kv_connector.factory import KVConnectorFactory
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorRole,
     SupportsHMA,
@@ -53,6 +57,43 @@ class AscendMultiConnector(MultiConnector, SupportsHMA):
         self.requires_mamba_state_copy_after_load = any(
             getattr(connector, "requires_mamba_state_copy_after_load", False) for connector in self._connectors
         )
+
+    @classmethod
+    def _get_connector_classes_and_configs(
+        cls, vllm_config: "VllmConfig"
+    ) -> list[tuple[type[KVConnectorBaseType], "VllmConfig"]]:
+        """Build per-child connector classes and configs.
+
+        Overrides upstream ``MultiConnector`` to honor a child connector's
+        own ``engine_id``. Upstream builds each child config with
+        ``KVTransferConfig(**ktc, engine_id=engine_id)``, which raises
+        ``TypeError: got multiple values for keyword argument 'engine_id'``
+        when a child connector config explicitly sets ``engine_id``
+        (#22081), so any MultiConnector deployment with per-child engine
+        IDs fails at engine startup. Merge the parent default underneath
+        the child config instead: an explicit child ``engine_id`` wins and
+        the parent one is inherited when omitted. The original child
+        config dicts are not mutated.
+
+        Remove this override once the upstream fix
+        (vllm-project/vllm#63353) is merged and picked up.
+        """
+        assert vllm_config.kv_transfer_config is not None
+        ktcs = vllm_config.kv_transfer_config.kv_connector_extra_config.get("connectors")
+        assert ktcs is not None
+        ret: list[tuple[type[KVConnectorBaseType], VllmConfig]] = []
+        for ktc in ktcs:
+            temp_config = copy.copy(vllm_config)
+            temp_config.kv_transfer_config = KVTransferConfig(
+                **{"engine_id": vllm_config.kv_transfer_config.engine_id, **ktc}
+            )
+            ret.append(
+                (
+                    KVConnectorFactory.get_connector_class(temp_config.kv_transfer_config),
+                    temp_config,
+                )
+            )
+        return ret
 
     def configure_dspark_prefix_cache(self, vllm_config: "VllmConfig") -> bool:
         """Select a store that restores both target and persistent draft KV."""
