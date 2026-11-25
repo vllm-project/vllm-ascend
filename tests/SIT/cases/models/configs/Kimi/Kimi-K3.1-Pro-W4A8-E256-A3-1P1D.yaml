@@ -221,8 +221,8 @@ benchmarks:
     thinking: true
     temperature: 0
     top_p: 0.95
-    baseline: 50
-    threshold: 50
+    baseline: 60
+    threshold: 10
     test_range: '[0:300]'
   acc_gsm8k_r02: *gsm8k_accuracy
   acc_gsm8k_r03: *gsm8k_accuracy
