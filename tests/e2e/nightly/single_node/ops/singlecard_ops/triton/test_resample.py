@@ -318,7 +318,7 @@ def test_greedy_non_bonus_preserves_verification_result():
 )
 @torch.inference_mode()
 def test_one_hot_none_and_dummy_tensor_are_semantically_identical():
-    """Support both direct draft_logits=None and the upper-layer dummy-tensor compatibility path."""
+    """Support both direct draft_logits_cache=None and the upper-layer dummy-tensor compatibility path."""
     probs = torch.tensor([0.0, 0.8, 0.0, 0.2, 0.0], dtype=torch.float32)
     target_row = torch.where(probs > 0, torch.log(probs), torch.tensor(float("-inf")))
     target_logits = torch.stack([target_row, torch.zeros_like(target_row)]).to(DEVICE)
@@ -1040,7 +1040,7 @@ def test_entropy_verify_uses_unscaled_recovery():
     mapping = torch.arange(num_reqs, dtype=torch.int32, device=DEVICE)
     sampled, counts = rejection_sample(
         target_logits=p.log().repeat(num_reqs * (steps + 1), 1),
-        draft_logits=torch.stack([q_first, q, q]).log()[None].expand(num_reqs, -1, -1).contiguous(),
+        draft_logits_cache=torch.stack([q_first, q, q]).log()[None].expand(num_reqs, -1, -1).contiguous(),
         draft_sampled=torch.tensor([0, 1, 0, 0], dtype=torch.int64, device=DEVICE).repeat(num_reqs),
         cu_num_logits=torch.arange(num_reqs + 1, dtype=torch.int32, device=DEVICE) * (steps + 1),
         pos=_position_tensor(num_reqs * (steps + 1)),

@@ -62,7 +62,7 @@ def _build_rejection_sample_inputs(
 
     return dict(
         target_logits=target_logits,
-        draft_logits=draft_logits,
+        draft_logits_cache=draft_logits,
         draft_sampled=draft_sampled,
         cu_num_logits=cu_num_logits,
         pos=pos,
@@ -419,7 +419,7 @@ def test_block_verification_ragged_requests_and_mapping(has_draft_logits):
     draft_sampled = torch.repeat_interleave(expected_ids, torch.tensor(lengths, device="npu"))
     inputs = dict(
         target_logits=state_logits[expanded_mapping.long()],
-        draft_logits=state_logits[:, None, :].expand(-1, 3, -1).contiguous() if has_draft_logits else None,
+        draft_logits_cache=state_logits[:, None, :].expand(-1, 3, -1).contiguous() if has_draft_logits else None,
         draft_sampled=draft_sampled,
         cu_num_logits=cu,
         pos=torch.arange(sum(lengths), dtype=torch.int32, device="npu"),

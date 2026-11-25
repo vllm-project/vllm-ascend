@@ -663,9 +663,9 @@ class TestGumbelSampling:
             num_speculative_steps=num_steps,
             use_entropy_verify=False,
         )
-        sampled, counts = rejection_sample(**inputs, draft_logits=cache, temperature=temperature)
+        sampled, counts = rejection_sample(**inputs, draft_logits_cache=cache, temperature=temperature)
         expected, expected_counts = rejection_sample(
-            **inputs, draft_logits=cache / temp, temperature=torch.ones_like(temperature)
+            **inputs, draft_logits_cache=cache / temp, temperature=torch.ones_like(temperature)
         )
         assert torch.equal(counts, expected_counts)
         # Output slots after the first rejection are unspecified.
