@@ -22,7 +22,6 @@ import logging
 import os
 import subprocess
 import sys
-from pathlib import Path
 from sysconfig import get_paths
 
 from setuptools import Command, Extension, find_packages, setup
@@ -283,6 +282,8 @@ class cmake_build_ext(build_ext):
         install_path = os.path.join(ROOT_DIR, self.build_lib)
         if isinstance(self.distribution.get_command_obj("develop"), develop):
             install_path = os.path.join(ROOT_DIR, "vllm_ascend")
+        package_dir = os.path.abspath(os.path.join(self.build_lib, "vllm_ascend"))
+        cmake_args += [f"-DVLLM_ASCEND_PACKAGE_DIR={package_dir}"]
         # add CMAKE_INSTALL_PATH
         cmake_args += [f"-DCMAKE_INSTALL_PREFIX={install_path}"]
 
@@ -327,21 +328,6 @@ class cmake_build_ext(build_ext):
             raise RuntimeError(f"CMake configuration failed: {e}")
 
     def build_extensions(self) -> None:
-        for ext in self.extensions:
-            if ext.name == "vllm_ascend.third_party.deep_gemm._C":
-                destination = Path(self.get_ext_fullpath(ext.name)).resolve().parent
-                subprocess.check_call(
-                    [
-                        sys.executable,
-                        os.path.join(ROOT_DIR, "tools", "deepgemm", "build.py"),
-                        "--source",
-                        os.path.join(ROOT_DIR, ".deps", "deepgemm-ascend"),
-                        "--work-dir",
-                        os.path.join(self.build_temp, "deepgemm-ascend"),
-                        "--destination",
-                        str(destination),
-                    ]
-                )
         if not envs.COMPILE_CUSTOM_KERNELS:
             return
         # Ensure that CMake is present and working
@@ -363,8 +349,6 @@ class cmake_build_ext(build_ext):
 
         # Build all the extensions
         for ext in self.extensions:
-            if not isinstance(ext, CMakeExtension):
-                continue
             self.configure(ext)
             targets.append(target_name(ext.name))
 
@@ -395,7 +379,9 @@ class cmake_build_ext(build_ext):
         if isinstance(self.distribution.get_command_obj("develop"), develop):
             import shutil
 
-            for root, _, files in os.walk(self.build_temp):
+            for root, dirs, files in os.walk(self.build_temp):
+                if root == self.build_temp and "deepgemm_C" in dirs:
+                    dirs.remove("deepgemm_C")  # Vendored extensions retain their package path.
                 for file in files:
                     if file.endswith(".so"):
                         src_path = os.path.join(root, file)
@@ -415,13 +401,12 @@ class cmake_build_ext(build_ext):
             print(f"Copy: {src_cann_ops_custom} -> {dst_cann_ops_custom}")
 
     def copy_extensions_to_source(self):
-        if any(ext.name == "vllm_ascend.third_party.deep_gemm._C" for ext in self.extensions):
+        super().copy_extensions_to_source()
+        if build_deepgemm:
             import shutil
 
-            relative = Path("vllm_ascend/third_party/deep_gemm")
-            # Stage the generated package before setuptools copies its extension.
-            shutil.copytree(Path(self.build_lib) / relative, Path(ROOT_DIR) / relative, dirs_exist_ok=True)
-        super().copy_extensions_to_source()
+            package = os.path.join("vllm_ascend", "third_party", "deep_gemm")
+            shutil.copytree(os.path.join(self.build_lib, package), os.path.join(ROOT_DIR, package), dirs_exist_ok=True)
 
     def run(self):
         if envs.COMPILE_CUSTOM_KERNELS:
@@ -447,11 +432,16 @@ except LookupError:
     VERSION = "0.0.0"
 
 ext_modules = []
+build_deepgemm = (
+    envs.COMPILE_CUSTOM_KERNELS
+    and hardware.device_type_from_soc_version(envs.SOC_VERSION) == hardware.AscendDeviceType.A5
+)
+native_build_requires = []
+if build_deepgemm:
+    with open(os.path.join(ROOT_DIR, "tools", "deepgemm", "requirements-build.txt"), encoding="utf-8") as requirements:
+        native_build_requires = requirements.read().splitlines()
 if envs.COMPILE_CUSTOM_KERNELS:
     ext_modules = [CMakeExtension(name="vllm_ascend.vllm_ascend_C")]
-    if hardware.device_type_from_soc_version(envs.SOC_VERSION) == hardware.AscendDeviceType.A5:
-        # Keep a real extension entry so wheels carry the Python/platform ABI tag.
-        ext_modules.append(Extension("vllm_ascend.third_party.deep_gemm._C", sources=[]))
 
 
 def get_path(*filepath) -> str:
@@ -524,12 +514,14 @@ setup(
         "Topic :: Scientific/Engineering :: Artificial Intelligence",
         "Topic :: Scientific/Engineering :: Information Analysis",
     ],
-    packages=find_packages(exclude=("docs", "examples", "tests*", "csrc")),
+    # CMake stages the complete native package only for a matching target.
+    packages=find_packages(exclude=("docs", "examples", "tests*", "csrc", "vllm_ascend.third_party.deep_gemm*")),
     package_data={
         "vllm_ascend.observability.ms_metrics": ["config/*.yaml"],
     },
     python_requires=">=3.10",
     install_requires=get_requirements(),
+    setup_requires=native_build_requires,
     ext_modules=ext_modules,
     cmdclass=cmdclass,
     extras_require={},

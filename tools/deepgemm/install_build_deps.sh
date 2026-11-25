@@ -7,17 +7,21 @@ set -euo pipefail
 
 # shellcheck source=/dev/null
 source /etc/os-release
+sdk_compiler="${ASCEND_HOME_PATH:-/usr/local/Ascend/ascend-toolkit/latest}/tools/hcc/bin/aarch64-target-linux-gnu-g++"
+have_sdk_compiler() { [[ $(uname -m) == aarch64 && -x "$sdk_compiler" ]]; }
 case "$ID" in
     ubuntu)
         apt-get update -y
-        # add-apt-repository invokes gpg-agent when importing the PPA key.
-        apt-get install -y --no-install-recommends software-properties-common gpg-agent
-        add-apt-repository -y ppa:ubuntu-toolchain-r/test
-        apt-get update -y
-        apt-get install -y --no-install-recommends g++-13 libdw-dev
+        if [[ -z "${CXX:-}" ]] && ! have_sdk_compiler && ! command -v g++-14 >/dev/null && ! command -v g++-13 >/dev/null; then
+            apt-get install -y --no-install-recommends software-properties-common gpg-agent
+            add-apt-repository -y ppa:ubuntu-toolchain-r/test
+            apt-get update -y
+            apt-get install -y --no-install-recommends g++-13
+        fi
+        apt-get install -y --no-install-recommends libdw-dev
         ;;
     openEuler|openeuler)
-        if [[ -x "${ASCEND_HOME_PATH:-/usr/local/Ascend/ascend-toolkit/latest}/tools/hcc/bin/aarch64-target-linux-gnu-g++" ]]; then
+        if have_sdk_compiler || [[ -n "${CXX:-}" ]]; then
             yum install -y elfutils-devel
         else
             yum install -y gcc-toolset-14-gcc-c++ elfutils-devel
@@ -28,7 +32,3 @@ case "$ID" in
         exit 1
         ;;
 esac
-
-# Build-only parser versions mirror pyproject.toml. Keep them out of runtime
-# requirements so clients such as ais_bench can use their own parser version.
-python3 -m pip install tree-sitter==0.25.2 tree-sitter-cpp==0.23.4

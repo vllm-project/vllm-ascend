@@ -209,7 +209,7 @@ jobs:
           cd "$GITHUB_WORKSPACE"
 
           # Match the cache producer's tracked csrc build inputs exactly.
-          CSRC_MANIFEST=$(git ls-files -s -- csrc setup.py CMakeLists.txt cmake pyproject.toml tools/deepgemm/build.py tools/deepgemm/install_build_deps.sh)
+          CSRC_MANIFEST=$(git ls-files -s -- csrc setup.py CMakeLists.txt cmake tools/deepgemm/build.py tools/deepgemm/install_build_deps.sh tools/deepgemm/requirements-build.txt)
           if [ -z "$CSRC_MANIFEST" ]; then
             echo "::error::No tracked csrc inputs found."
             exit 1
@@ -297,6 +297,9 @@ jobs:
             COMPILE_CUSTOM_KERNELS=0 uv pip install -e .
           else
             echo "csrc cache miss: compile kernels on the NPU runner"
+            if [[ "${{ matrix.group.npu_type }}" == a5 ]]; then
+              uv pip install -r tools/deepgemm/requirements-build.txt
+            fi
             uv pip install -e . --no-build-isolation
           fi
 

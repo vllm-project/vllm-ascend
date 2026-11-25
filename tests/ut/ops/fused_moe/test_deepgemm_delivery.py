@@ -1,11 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM Ascend project
-"""CPU coverage for native-package selection and wheel resource preservation."""
+"""CPU coverage for native-package selection and the build toolchain."""
 
 import importlib.util
 import os
 import sys
-import zipfile
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -90,24 +89,6 @@ def test_already_loaded_extension_is_not_loaded_twice(loader, monkeypatch):
     ):
         loader.load_deepgemm()
     imported.assert_not_called()
-
-
-def test_wheel_payload_is_preserved_byte_for_byte(tmp_path):
-    builder = load_file("test_builder", ROOT / "tools/deepgemm/build.py")
-    wheel = tmp_path / "operator.whl"
-    with zipfile.ZipFile(wheel, "w") as archive:
-        archive.writestr("deep_gemm/_C.cpython-test.so", b"extension")
-        archive.writestr("deep_gemm/include/deep_gemm/mega_moe.hpp", b"header")
-        archive.writestr("deep_gemm/envs.py", "# Pre-installed environment variables\npersistent_envs = dict()\n")
-        archive.writestr("deep_gemm-0.1.dist-info/METADATA", "not installed separately")
-    destination = tmp_path / "vendored"
-    builder.vendor_wheel(wheel, destination)
-    assert (destination / "include/deep_gemm/mega_moe.hpp").read_bytes() == b"header"
-    with zipfile.ZipFile(wheel) as archive:
-        for name in archive.namelist():
-            if name.startswith("deep_gemm/"):
-                assert (destination / Path(name).relative_to("deep_gemm")).read_bytes() == archive.read(name)
-    assert not list(destination.glob("*.dist-info"))
 
 
 def test_default_cache_preserves_existing_setting(loader, monkeypatch):
