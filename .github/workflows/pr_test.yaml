@@ -144,7 +144,10 @@ jobs:
       base_sha: ${{ needs.select-tests.outputs.base_sha }}
 
   run-selected-tests:
-    needs: [select-tests, prepare-csrc-cache]
+    # prepare-csrc-cache is observational (continue-on-error in the reusable
+    # workflow) and must not gate the NPU tests; the csrc cache is looked up by
+    # the test jobs themselves.
+    needs: select-tests
     # The reusable workflow runs every selected partition in parallel.
     uses: ./.github/workflows/_selected_tests.yaml
     with:
