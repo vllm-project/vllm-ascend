@@ -303,17 +303,23 @@ class TestCaMem(PytestBase):
         mock_ctx.__exit__.return_value = None
 
         with patch("vllm_ascend.device_allocator.camem.use_memory_pool_with_allocator", return_value=mock_ctx):
-            original_empty_cache = torch.npu.empty_cache
+            original_npu_empty_cache = torch.npu.empty_cache
+            original_cuda_empty_cache = torch.cuda.empty_cache
             with allocator.use_memory_pool(tag="my_tag"):
                 assert allocator.current_tag == "my_tag"
+                assert torch.npu.empty_cache is not original_npu_empty_cache
+                assert torch.cuda.empty_cache is not original_cuda_empty_cache
                 torch.npu.empty_cache()
+                torch.cuda.empty_cache(device="npu:0")
             # restore the allocator hook and tag after the context exits
-            assert torch.npu.empty_cache is original_empty_cache
+            assert torch.npu.empty_cache is original_npu_empty_cache
+            assert torch.cuda.empty_cache is original_cuda_empty_cache
             assert allocator.current_tag == old_tag
 
     def test_use_memory_pool_restores_empty_cache_on_error(self):
         allocator = CaMemAllocator.get_instance()
-        original_empty_cache = torch.npu.empty_cache
+        original_npu_empty_cache = torch.npu.empty_cache
+        original_cuda_empty_cache = torch.cuda.empty_cache
         mock_ctx = MagicMock()
         mock_ctx.__enter__.return_value = "data"
         mock_ctx.__exit__.return_value = None
@@ -325,7 +331,8 @@ class TestCaMem(PytestBase):
         ):
             raise RuntimeError("test error")
 
-        assert torch.npu.empty_cache is original_empty_cache
+        assert torch.npu.empty_cache is original_npu_empty_cache
+        assert torch.cuda.empty_cache is original_cuda_empty_cache
 
     def test_use_memory_pool_keeps_all_pools_per_tag(self, monkeypatch):
         allocator = CaMemAllocator.get_instance()

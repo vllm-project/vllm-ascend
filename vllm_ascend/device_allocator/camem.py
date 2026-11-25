@@ -295,12 +295,14 @@ class CaMemAllocator(CuMemAllocator):
         assert isinstance(tag, str)
 
         old_tag = self.current_tag
-        original_empty_cache = torch.npu.empty_cache
+        original_npu_empty_cache = torch.npu.empty_cache
+        original_cuda_empty_cache = torch.cuda.empty_cache
         self.current_tag = tag
         # empty_cache invalidates the pluggable allocator's bookkeeping while
-        # its pool is active. Framework helpers may invoke it during model
-        # loading, so suppress it for the duration of this context only.
-        torch.npu.empty_cache = lambda: None
+        # its pool is active. Framework helpers may invoke either the NPU
+        # function or a previously bound CUDA alias during model loading.
+        torch.npu.empty_cache = lambda *args, **kwargs: None
+        torch.cuda.empty_cache = lambda *args, **kwargs: None
         try:
             with use_memory_pool_with_allocator(self.python_malloc_callback, self.python_free_callback) as data:
                 # Keep the pool alive for tensors whose lifetimes outlast this
@@ -308,5 +310,6 @@ class CaMemAllocator(CuMemAllocator):
                 self.allocator_and_pools.setdefault(tag, []).append(data)
                 yield
         finally:
-            torch.npu.empty_cache = original_empty_cache
+            torch.npu.empty_cache = original_npu_empty_cache
+            torch.cuda.empty_cache = original_cuda_empty_cache
             self.current_tag = old_tag
