@@ -158,6 +158,36 @@ def requires_padded_page_layout(kv_cache_specs: Iterable[KVCacheSpec]) -> bool:
     return any(getattr(spec, "indexes_kv_by_block_stride", False) for spec in specs)
 
 
+def uses_mooncake_dsa_kv_transfer(vllm_config: VllmConfig) -> bool:
+    """Identify Mooncake DSA cache ownership without enabling DSpark's protocol."""
+    transfer = getattr(vllm_config, "kv_transfer_config", None)
+    if transfer is None:
+        return False
+    pending = [
+        (
+            transfer.kv_connector,
+            transfer.kv_connector_extra_config or {},
+            getattr(transfer, "kv_connector_module_path", None),
+        )
+    ]
+    while pending:
+        name, extra, module_path = pending.pop()
+        if module_path is not None:
+            continue
+        if name in ("MooncakeConnectorV1", "MooncakeConnectorV2") and extra.get("dsa_pd_offload") is True:
+            return True
+        if name == "MultiConnector":
+            pending.extend(
+                (
+                    child.get("kv_connector"),
+                    child.get("kv_connector_extra_config") or {},
+                    child.get("kv_connector_module_path"),
+                )
+                for child in extra.get("connectors", ())
+            )
+    return False
+
+
 def supports_component_major_mla_pd(vllm_config: VllmConfig) -> bool:
     """Whether PD transfer can preserve a component-major MLA cache layout.
 

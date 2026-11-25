@@ -109,6 +109,52 @@ def _get_owner_spec(monkeypatch, layer):
 
 
 @pytest.mark.parametrize(
+    "connector_name", ["MooncakeConnectorV1", "MooncakeConnectorV2", "SFAPDConnector", "AscendStoreConnector"]
+)
+@pytest.mark.parametrize("wrapper", ["direct", "multi", "nested"])
+@pytest.mark.parametrize("dsa_offload", [False, True])
+@pytest.mark.parametrize("ownership", ["target", "layer", "spec"])
+@pytest.mark.parametrize("method", ["mtp", "deepseek_mtp"])
+def test_mooncake_dsa_keeps_only_draft_mla_kv_on_device(
+    monkeypatch, wrapper, dsa_offload, ownership, method, connector_name
+):
+    source = MLAAttentionSpec(
+        block_size=128,
+        num_kv_heads=1,
+        head_size=576,
+        dtype=torch.bfloat16,
+        is_draft=ownership == "spec",
+    )
+    monkeypatch.setattr(MLAAttention, "get_kv_cache_spec", lambda *_: source)
+    impl = AscendSFAImpl.__new__(AscendSFAImpl)
+    impl.enable_sparse_sfa_c8 = False
+    impl.enable_sparse_sfa_turboquant = False
+    impl.store_kv_cache_on_host = True
+    layer = _make_owner(impl, AscendSFABackend)
+    layer.is_draft_layer = ownership == "layer"
+    connector = {
+        "kv_connector": connector_name,
+        "kv_connector_extra_config": {"dsa_pd_offload": dsa_offload},
+    }
+    for _ in range({"direct": 0, "multi": 1, "nested": 2}[wrapper]):
+        connector = {
+            "kv_connector": "MultiConnector",
+            "kv_connector_extra_config": {"connectors": [{"kv_connector": "AscendStoreConnector"}, connector]},
+        }
+    config = SimpleNamespace(
+        model_config=SimpleNamespace(hf_text_config=SimpleNamespace(model_type="glm_moe_dsa")),
+        speculative_config=SimpleNamespace(method=method),
+        kv_transfer_config=SimpleNamespace(**connector),
+    )
+    spec = layer.get_kv_cache_spec(config)
+    assert spec.store_on_host is not (
+        connector_name in ("MooncakeConnectorV1", "MooncakeConnectorV2") and dsa_offload and ownership != "target"
+    )
+    assert spec.is_draft is source.is_draft
+    assert impl.store_kv_cache_on_host is True
+
+
+@pytest.mark.parametrize(
     "format_name,width", [("bf16", 576), ("c8", 656), ("c8_nope", 528), ("tq", 386), ("tq_both", 386)]
 )
 @pytest.mark.parametrize("offload", [False, True])
