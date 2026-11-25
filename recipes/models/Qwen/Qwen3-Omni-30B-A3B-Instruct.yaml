@@ -1,0 +1,92 @@
+# yaml-language-server: $schema=https://recipes.vllm.ai/recipe.schema.json
+meta:
+  title: Qwen3-Omni-30B-A3B-Instruct
+  slug: qwen3-omni-30b-a3b-instruct
+  provider: Qwen
+  description: Generate text responses to multimodal inputs using the BF16 checkpoint on four Ascend 910B4-1 NPUs.
+  date_added: "2026-11-25"
+  date_updated: "2026-11-25"
+  tasks: [multimodal]
+  default_hardware: ascend_910b4_1_4x
+  hardware:
+    ascend_910b4_1_4x: verified
+
+model:
+  model_id: Qwen/Qwen3-Omni-30B-A3B-Instruct
+  min_vllm_version: "0.30.0"
+  architecture: moe
+  parameter_count: "30B"
+  active_parameters: "3B"
+  context_length: 65536
+  docker_image:
+    ascend_910b4_1_4x: quay.io/ascend/vllm-omni:v0.30.0
+  install:
+    docker:
+      command: docker pull --platform linux/arm64 quay.io/ascend/vllm-omni:v0.30.0
+      note: Use an AArch64 host with the Ascend driver and Docker runtime.
+    pip: false
+  base_args:
+    - "--disable-access-log-for-endpoints"
+    - "/metrics"
+    - "--enable-prompt-tokens-details"
+    - "--trust-remote-code"
+    - "--max-num-seqs=100"
+    - "--max-model-len=40960"
+    - "--max-num-batched-tokens=16384"
+    - "--enable-expert-parallel"
+    - "--distributed_executor_backend"
+    - "mp"
+    - "--no-enable-prefix-caching"
+    - "--async-scheduling"
+    - "--compilation-config"
+    - "{\"cudagraph_mode\": \"FULL_DECODE_ONLY\"}"
+    - "--gpu-memory-utilization=0.95"
+    - "--additional-config"
+    - "{\"enable_flashcomm1\": false, \"weight_nz_mode\": 2}"
+  base_env:
+    ASCEND_RT_VISIBLE_DEVICES: "0,1,2,3"
+    CPU_AFFINITY_CONF: "1"
+    HCCL_CONNECT_TIMEOUT: "7200"
+    HCCL_EXEC_TIMEOUT: "0"
+    HCCL_OP_EXPANSION_MODE: "AIV"
+    HCCL_RDMA_PCIE_DIRECT_POST_NOSTRICT: "TRUE"
+    OMP_NUM_THREADS: "1"
+    PYTHONFAULTHANDLER: "1"
+    PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
+    RUNAI_STREAMER_LOG_LEVEL: "INFO"
+    RUNAI_STREAMER_LOG_TO_STDERR: "1"
+    RUNAI_STREAMER_MEMORY_LIMIT: "0"
+    SAFETENSORS_FAST_GPU: "1"
+    TASK_QUEUE_ENABLE: "1"
+    VLLM_CACHE_ROOT: "/tmp/vllm-cache"
+    VLLM_PLUGINS: "ascend"
+
+variants:
+  default:
+    precision: bf16
+    vram_minimum_gb: 72
+    supported_hardware: [ascend_910b4_1_4x]
+    hardware_overrides:
+      ascend_910b4_1_4x:
+        docker_image: quay.io/ascend/vllm-omni:v0.30.0
+        docker_serve_command: vllm serve
+
+compatible_strategies: [single_node_tp]
+strategy_overrides:
+  single_node_tp:
+    tp: 4
+hardware_overrides: {}
+dependencies: []
+
+guide: |
+  ## Four-NPU deployment
+
+  The reference deployment used four 64 GiB Ascend 910B4-1 NPUs on one host.
+  It served the BF16 Instruct checkpoint with a 40,960-token context limit.
+  An audio transcription request reported 115 audio input tokens, and a
+  six-second video check identified three colors in order. Both checks
+  exercised text output.
+
+  See the [Ascend deployment tutorial](https://github.com/vllm-project/vllm-ascend/blob/main/docs/source/tutorials/models/Qwen3-Omni-30B-A3B-Instruct.md)
+  for the tested software versions, local checkpoint mount, device selection
+  and client requests.
