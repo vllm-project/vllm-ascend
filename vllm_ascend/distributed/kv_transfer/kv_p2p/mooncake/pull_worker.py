@@ -505,6 +505,7 @@ class MooncakePullRecvingThread(threading.Thread, MooncakeTransferAddressMixin):
             local_dcp_size=local_dcp_size,
             remote_dcp_size=remote_dcp_size,
             total_num_kv_heads=total_num_kv_heads,
+            remote_metadata=remote_metadata,
         )
 
     def _get_attention_dcp_sizes(
@@ -596,6 +597,7 @@ class MooncakePullRecvingThread(threading.Thread, MooncakeTransferAddressMixin):
         local_dcp_size: int,
         remote_dcp_size: int,
         total_num_kv_heads: int,
+        remote_metadata: MooncakePPTransferMetadata | None = None,
     ) -> list[list[int]]:
         """Build remote TP groups from an already inferred head topology.
 
@@ -621,10 +623,36 @@ class MooncakePullRecvingThread(threading.Thread, MooncakeTransferAddressMixin):
             head_end = min(local_head_interval[1], remote_head_interval[1])
             if head_start >= head_end:
                 continue
-            group_workers = range(remote_rank_start, remote_rank_start + remote_dcp_size)
-            ranks_by_head_piece.setdefault((head_start, head_end), []).extend(
-                sorted(group_workers, key=lambda rank: worker_rank_to_dcp_rank(rank, remote_pcp_size, remote_dcp_size))
-            )
+            group_workers = list(range(remote_rank_start, remote_rank_start + remote_dcp_size))
+            if remote_dcp_size > 1:
+                peer_dcp_ranks: dict[int, int] | None = None
+                metadata_by_pcp_rank = getattr(remote_metadata, "metadata_by_pcp_rank", None)
+                if metadata_by_pcp_rank:
+                    ranks: dict[int, int] = {}
+                    for m in group_workers:
+                        m_tp, m_pcp = divmod(m, remote_pcp_size)
+                        pcp_meta = metadata_by_pcp_rank.get(m_pcp)
+                        tp_meta = pcp_meta.metadata_by_tp_rank.get(m_tp) if pcp_meta is not None else None
+                        dcp_rank = getattr(tp_meta, "dcp_rank", None)
+                        if dcp_rank is not None:
+                            ranks[m] = dcp_rank
+                    if ranks:
+                        if len(ranks) != len(group_workers) or sorted(ranks.values()) != list(range(remote_dcp_size)):
+                            raise ValueError(
+                                f"Invalid remote DCP in-group ranks for group starting at {remote_rank_start}: "
+                                f"expected permutation of 0..{remote_dcp_size - 1}, got {ranks}"
+                            )
+                        peer_dcp_ranks = ranks
+                if peer_dcp_ranks is not None:
+                    ordered_workers = sorted(group_workers, key=peer_dcp_ranks.__getitem__)
+                else:
+                    ordered_workers = sorted(
+                        group_workers,
+                        key=lambda rank: worker_rank_to_dcp_rank(rank, remote_pcp_size, remote_dcp_size),
+                    )
+            else:
+                ordered_workers = group_workers
+            ranks_by_head_piece.setdefault((head_start, head_end), []).extend(ordered_workers)
 
         if not ranks_by_head_piece:
             raise ValueError(
