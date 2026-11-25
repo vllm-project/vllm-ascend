@@ -71,7 +71,7 @@ def exchange(monkeypatch):
                 if calls["decode"]:
                     # Close the abandoned decode before starting another P/D attempt.
                     assert scripts[len(calls["decode"]) - 1].is_closed
-                if prefill_error and len(calls[role]) == 2:
+                if prefill_error and len(calls[role]) >= 2:
                     raise prefill_error
                 return httpx.Response(
                     200,
@@ -102,6 +102,40 @@ def exchange(monkeypatch):
         return response, calls
 
     return lambda *args, **kwargs: asyncio.run(run(*args, **kwargs))
+
+
+@pytest.mark.parametrize("api", ["/chat/completions", "/completions", "/messages", "/responses"])
+@pytest.mark.parametrize("stage", ["prefill", "decode"])
+@pytest.mark.parametrize("failure", ["connect", "read", "http"])
+def test_transport_retries_are_shared_across_apis(api, stage, failure):
+    async def run():
+        calls = []
+        final = b'{"text":"done"}'
+
+        async def backend(request):
+            calls.append(json.loads(request.content))
+            if len(calls) == 1:
+                if failure == "connect":
+                    raise httpx.ConnectError("connection failed")
+                if failure == "read":
+                    return httpx.Response(200, stream=Body(b"", httpx.ReadError("failed before first byte")))
+                return httpx.Response(503, json={"error": "unavailable"})
+            return httpx.Response(200, content=final)
+
+        async with httpx.AsyncClient(base_url="http://backend/v1", transport=httpx.MockTransport(backend)) as client:
+            args = (client, api, {"model": "m", "stream": False}, "request-id")
+            if stage == "prefill":
+                response = await proxy.send_request_to_service(*args, max_retries=2, base_delay=0)
+                body = response.content
+            else:
+                body = b"".join(
+                    [chunk async for chunk in proxy.stream_service_response(*args, max_retries=2, base_delay=0)]
+                )
+        assert body == final
+        assert len(calls) == 2
+        assert calls[0] == calls[1]
+
+    asyncio.run(run())
 
 
 @pytest.mark.parametrize("api", ["/chat/completions", "/completions", "/messages", "/responses"])
@@ -269,21 +303,25 @@ def test_recompute_only_uses_protocol_stop_fields(exchange, api, stopped, option
 
 
 @pytest.mark.parametrize("api", ["/messages", "/responses"])
-@pytest.mark.parametrize("streaming", [False, True])
-def test_backend_error_is_forwarded_without_retry(exchange, api, streaming):
+@pytest.mark.parametrize("status", [200, 400, 500])
+def test_backend_error_uses_existing_retry_policy(exchange, api, status):
+    streaming = status == 200
     raw = (
         b'event: error\ndata: {"type":"error","message":"failed"}\n\n'
         if streaming
         else b'{"error":{"message":"failed"}}'
     )
-    status = 200 if streaming else 500
-    response, calls = exchange(api, {"stream": streaming}, [httpx.Response(status, content=raw)])
+    attempts = 2 if status == 500 else 1
+    response, calls = exchange(
+        api, {"stream": streaming}, [httpx.Response(status, content=raw) for _ in range(attempts)]
+    )
     assert response.status_code == status
     if streaming:
         assert response.content == raw
     else:
         assert response.json() == json.loads(raw)
-    assert len(calls["prefill"]) == len(calls["decode"]) == 1
+    assert len(calls["prefill"]) == 1
+    assert len(calls["decode"]) == attempts
 
 
 @pytest.mark.parametrize("api", ["/messages", "/responses"])

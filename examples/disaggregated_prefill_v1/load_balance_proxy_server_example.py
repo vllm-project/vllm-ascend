@@ -900,7 +900,7 @@ async def send_request_to_service(
 ):
     req_data = build_prefill_request(req_data, endpoint)
     headers = auth_headers(request_id)
-    max_attempts = 1 if endpoint in ("/messages", "/responses") else max(1, max_retries)
+    max_attempts = max(1, max_retries)
     for attempt in range(1, max_attempts + 1):
         try:
             response = await client.post(endpoint, json=req_data, headers=headers)
@@ -926,12 +926,13 @@ async def stream_service_response(
     base_delay: float = 0.2,
 ):
     headers = auth_headers(request_id)
-    max_attempts = 1 if endpoint in ("/messages", "/responses") else max(1, max_retries)
+    max_attempts = max(1, max_retries)
     req_data = req_data.copy()
     if not req_data.get("stream", False):
         req_data.pop("stream_options", None)
     for attempt in range(1, max_attempts + 1):
         first_chunk_sent = False
+        buffered_body = bytearray() if endpoint in ("/messages", "/responses") else None
         try:
             async with client.stream("POST", endpoint, json=req_data, headers=headers) as response:
                 if response.status_code >= 400:
@@ -941,30 +942,26 @@ async def stream_service_response(
                     # streaming context exits, so read it before raising.
                     await response.aread()
                     response.raise_for_status()
-                if endpoint in ("/messages", "/responses"):
-                    # Whole-request retries must not expose discarded native events.
-                    yield await response.aread()
-                    return
                 async for chunk in response.aiter_bytes():
                     first_chunk_sent = True
-                    yield chunk
+                    if buffered_body is None:
+                        yield chunk
+                    else:
+                        buffered_body.extend(chunk)
+                if buffered_body is not None:
+                    # Whole-request retries must not expose discarded native events.
+                    yield bytes(buffered_body)
                 return
         except httpx.HTTPStatusError as exc:
             if exc.response.status_code == 400 or attempt == max_attempts:
                 raise
             logger.warning("Attempt %s failed for streaming %s: %s", attempt, endpoint, exc)
         except httpx.RequestError as exc:
-            if first_chunk_sent:
-                logger.error("Streaming to client interrupted after response started: %s", exc)
-                return
-            if attempt == max_attempts:
+            if first_chunk_sent or attempt == max_attempts:
                 raise
             logger.warning("Attempt %s failed for streaming %s: %s", attempt, endpoint, exc)
         except Exception as exc:
-            if first_chunk_sent:
-                logger.error("Streaming to client interrupted after response started: %s", exc)
-                return
-            if attempt == max_attempts:
+            if first_chunk_sent or attempt == max_attempts:
                 raise
             logger.warning("Attempt %s failed for streaming %s: %s", attempt, endpoint, exc)
         await asyncio.sleep(base_delay * (2 ** (attempt - 1)))
