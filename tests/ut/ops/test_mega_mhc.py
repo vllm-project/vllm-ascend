@@ -377,7 +377,7 @@ def test_staging_bounds_and_preserves_layer0_and_write_kv():
         return torch.zeros(24, 20_480)
 
     keys = ("l0", "l1", "l2", "l3")
-    owners = (("layer0_entry",), ("write_kv_l1",), ("write_kv_l2",), ())
+    owners: tuple[tuple[str, ...], ...] = (("layer0_entry",), ("write_kv_l1",), ("write_kv_l2",), ())
     refs = []
     for i, (key, extra_callers) in enumerate(zip(keys, owners, strict=True)):
         source = load()
