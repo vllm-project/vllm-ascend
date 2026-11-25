@@ -38,6 +38,7 @@ from vllm.v1.attention.backend import AttentionBackend, AttentionMetadata  # typ
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID
 
+from vllm_ascend import envs
 from vllm_ascend.attention.gdn_attn_builder import AscendGDNFusedAttentionBackend, AscendGDNPCPBackend
 from vllm_ascend.attention.gdn_recoverssm_metadata import AscendGDNRecoverSSMAttentionBackend
 from vllm_ascend.attention.utils import (
@@ -55,6 +56,7 @@ from vllm_ascend.ops.triton.fla.chunk import chunk_gated_delta_rule
 from vllm_ascend.ops.triton.fla.fused_qkvzba_split_reshape import fused_qkvzba_split_reshape_cat
 from vllm_ascend.ops.triton.fla.utils import clear_ssm_states
 from vllm_ascend.ops.triton.gdn.gdn_recoverssm_verify import gdn_recoverssm_verify
+from vllm_ascend.ops.triton.gdn_decode_prepare import fused_gdn_decode_prepare
 from vllm_ascend.ops.triton.mamba.causal_conv1d import causal_conv1d_update_varlen, extract_last_width
 from vllm_ascend.ops.triton.mamba.state_index import gather_ssm_states, scatter_ssm_states_
 
@@ -761,7 +763,44 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
         else:
             mixed_qkv_non_spec = None
 
-        if mixed_qkv_spec is not None:
+        # Fast path for pure decode steps: one launch performs the QKV split
+        # copies, both l2norms and the GDN gating, closing the host-side gaps
+        # between those five dispatches. Mixed prefill batches and layouts the
+        # fused kernel does not cover fall back to the original sequence.
+        fused_prepare = None
+        use_recoverssm = has_spec_decode and getattr(self, "use_gdn_recoverssm", False)
+        if envs.VLLM_ASCEND_GDN_FUSED_PREPARE:
+            num_k_heads_local = self.key_dim // self.tp_size // self.head_k_dim
+            num_v_heads_local = self.value_dim // self.tp_size // self.head_v_dim
+            if has_spec_decode:
+                if attn_metadata.num_prefills == 0 and attn_metadata.num_decodes == 0 and not use_recoverssm:
+                    fused_prepare = fused_gdn_decode_prepare(
+                        mixed_qkv_spec,
+                        a,
+                        b,
+                        self.A_log,
+                        self.dt_bias,
+                        num_k_heads_local,
+                        num_v_heads_local,
+                        self.head_k_dim,
+                        self.head_v_dim,
+                    )
+            elif attn_metadata.num_prefills == 0 and attn_metadata.num_decodes > 0:
+                fused_prepare = fused_gdn_decode_prepare(
+                    mixed_qkv_non_spec,
+                    a,
+                    b,
+                    self.A_log,
+                    self.dt_bias,
+                    num_k_heads_local,
+                    num_v_heads_local,
+                    self.head_k_dim,
+                    self.head_v_dim,
+                )
+
+        if fused_prepare is not None:
+            query_spec, key_spec, value_spec = fused_prepare[:3]
+        elif mixed_qkv_spec is not None:
             query_spec, key_spec, value_spec = _rearrange_decode_qkv(
                 mixed_qkv_spec,
                 self.key_dim // self.tp_size,
@@ -778,18 +817,20 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
                 self.num_v_heads // self.tp_size,
             )
         elif attn_metadata.num_prefills == 0 and mixed_qkv_non_spec is not None:
-            query_non_spec, key_non_spec, value_non_spec = _rearrange_decode_qkv(
-                mixed_qkv_non_spec,
-                self.key_dim // self.tp_size,
-                self.value_dim // self.tp_size,
-                self.head_k_dim,
-                self.head_v_dim,
-            )
+            if fused_prepare is not None:
+                query_non_spec, key_non_spec, value_non_spec = fused_prepare[:3]
+            else:
+                query_non_spec, key_non_spec, value_non_spec = _rearrange_decode_qkv(
+                    mixed_qkv_non_spec,
+                    self.key_dim // self.tp_size,
+                    self.value_dim // self.tp_size,
+                    self.head_k_dim,
+                    self.head_v_dim,
+                )
         else:
             query_non_spec, key_non_spec, value_non_spec = self.rearrange_mixed_qkv(mixed_qkv_non_spec)
 
         # 2. Recurrent attention
-        use_recoverssm = has_spec_decode and getattr(self, "use_gdn_recoverssm", False)
         has_non_spec_tokens = attn_metadata.num_prefills > 0 or attn_metadata.num_decodes > 0
         is_mixed_batch = has_spec_decode and has_non_spec_tokens
 
@@ -810,7 +851,10 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
                     self.dt_bias,
                 )
         else:
-            g, beta = DeviceOperator.fused_gdn_gating(self.A_log, a, b, self.dt_bias)
+            if fused_prepare is not None:
+                g, beta = fused_prepare[3], fused_prepare[4]
+            else:
+                g, beta = DeviceOperator.fused_gdn_gating(self.A_log, a, b, self.dt_bias)
             if is_mixed_batch:
                 g_spec = g.index_select(1, spec_token_indx)
                 beta_spec = beta.index_select(1, spec_token_indx)
@@ -849,8 +893,9 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
             else:
                 assert g_spec is not None
                 assert beta_spec is not None
-                query_spec = l2norm_fwd(query_spec)
-                key_spec = l2norm_fwd(key_spec)
+                if fused_prepare is None:
+                    query_spec = l2norm_fwd(query_spec)
+                    key_spec = l2norm_fwd(key_spec)
                 if use_upstream_recurrent:
                     # The native packed-index API bounds accepted_prev by the
                     # current query length. Reuse vLLM's strided state-table API
@@ -1079,8 +1124,9 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
                 )
         elif attn_metadata.num_decodes > 0:
             actual_seq_lengths = attn_metadata.non_spec_decode_metadata.actual_seq_lengths
-            query_non_spec = l2norm_fwd(query_non_spec)
-            key_non_spec = l2norm_fwd(key_non_spec)
+            if fused_prepare is None:
+                query_non_spec = l2norm_fwd(query_non_spec)
+                key_non_spec = l2norm_fwd(key_non_spec)
             core_attn_out_non_spec = recurrent_gated_delta_rule(
                 query_non_spec.squeeze(0),
                 key_non_spec.squeeze(0),

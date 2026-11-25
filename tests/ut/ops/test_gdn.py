@@ -33,6 +33,7 @@ from vllm_ascend.attention.gdn import (
     _split_head_first_conv_output,
     initialize_packed_conv_weight,
 )
+from vllm_ascend.ops.triton.gdn_decode_prepare import fused_gdn_decode_prepare
 
 
 class _RecordingQuantMethod(QuantizeMethodBase):
@@ -163,3 +164,46 @@ def test_head_first_conv_split_preserves_values_and_token_axis():
             assert result.untyped_storage().data_ptr() == head_first.untyped_storage().data_ptr()
             # The public view keeps tokens on the sequence axis.
             torch.testing.assert_close(result[:, 2:], reference[:, 2:])
+
+
+def _decode_prepare_inputs(num_tokens=3, nk=2, nv=3, dk=8, dv=8):
+    row = 2 * nk * dk + nv * dv
+    return (
+        torch.randn(num_tokens, row),
+        torch.randn(num_tokens, nv),
+        torch.randn(num_tokens, nv),
+        torch.randn(nv),
+        torch.randn(nv),
+    )
+
+
+_DECODE_PREPARE_KWARGS = dict(num_k_heads=2, num_v_heads=3, head_k_dim=8, head_v_dim=8)
+
+
+def test_fused_decode_prepare_falls_back_off_npu():
+    # The Triton kernel only runs on NPU; CPU inputs (unit tests, profile
+    # runs) must fall back to the original dispatch sequence.
+    assert fused_gdn_decode_prepare(*_decode_prepare_inputs(), **_DECODE_PREPARE_KWARGS) is None
+
+
+def test_fused_decode_prepare_rejects_unsupported_layouts():
+    mixed, a, b, a_log, dt_bias = _decode_prepare_inputs()
+
+    # Non-contiguous QKV rows cannot be read by the flat-index kernel.
+    strided = torch.randn(mixed.shape[0], mixed.shape[1] * 2)[:, ::2]
+    assert fused_gdn_decode_prepare(strided, a, b, a_log, dt_bias, **_DECODE_PREPARE_KWARGS) is None
+
+    # The mixed_qkv row width must match 2*NK*DK + NV*DV.
+    wrong_row = torch.randn(mixed.shape[0], mixed.shape[1] + 1)
+    assert fused_gdn_decode_prepare(wrong_row, a, b, a_log, dt_bias, **_DECODE_PREPARE_KWARGS) is None
+
+    # Zero-token decode steps have nothing to prepare.
+    assert fused_gdn_decode_prepare(mixed[:0], a[:0], b[:0], a_log, dt_bias, **_DECODE_PREPARE_KWARGS) is None
+
+    # The per-token gate rows must match the head counts.
+    bad_a = torch.randn(a.shape[0], a.shape[1] + 1)
+    assert fused_gdn_decode_prepare(mixed, bad_a, b, a_log, dt_bias, **_DECODE_PREPARE_KWARGS) is None
+
+    # The per-head gate parameters must cover every value head.
+    bad_a_log = torch.randn(a_log.shape[0] + 1)
+    assert fused_gdn_decode_prepare(mixed, a, b, bad_a_log, dt_bias, **_DECODE_PREPARE_KWARGS) is None

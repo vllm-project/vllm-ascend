@@ -77,6 +77,8 @@ class _GDNForwardWrapper(nn.Module):
         self.tp_size = 1
         self.head_k_dim = 2
         self.head_v_dim = 2
+        self.key_dim = 2
+        self.value_dim = 2
         self.activation = None
         self.register_buffer("A_log", torch.zeros(1))
         self.register_buffer("dt_bias", torch.zeros(1))

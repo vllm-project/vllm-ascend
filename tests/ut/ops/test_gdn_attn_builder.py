@@ -2115,6 +2115,8 @@ def test_forward_core_uses_checkpoint_recurrence_for_cold_and_cache_hit_prefills
         _exports_checkpoints=True,
         head_k_dim=128,
         head_v_dim=128,
+        key_dim=128,
+        value_dim=128,
         num_k_heads=1,
         num_v_heads=1,
         tp_size=1,
