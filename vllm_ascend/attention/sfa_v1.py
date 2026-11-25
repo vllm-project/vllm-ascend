@@ -718,9 +718,8 @@ class AscendSFAMetadataBuilder(MLACommonMetadataBuilder[AscendSFAMetadata]):
             seq_lens_cpu = common_attn_metadata._seq_lens_cpu[:num_reqs]
         elif common_attn_metadata.seq_lens_cpu is not None:
             seq_lens_cpu = common_attn_metadata.seq_lens_cpu[:num_reqs]
-        elif self.nope:
-            # MTP accepted counts are device-resident. NoPE operators use
-            # device lengths and scheduler upper bounds, so need no CPU copy.
+        elif self.nope or getattr(self, "allow_a3_device_lengths", False):
+            # These builders consume device lengths and scheduler upper bounds.
             seq_lens_cpu = None
         else:
             seq_lens_cpu = common_attn_metadata.seq_lens[:num_reqs].to("cpu")
