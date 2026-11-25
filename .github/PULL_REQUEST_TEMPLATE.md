@@ -10,6 +10,9 @@ If possible, please consider writing useful notes for better and faster reviews 
 
 - Please clarify why the changes are needed. For instance, the use case and bug description.
 
+- Summarize your search for open PRs covering the same problem. Link any
+  overlapping PRs and explain how this PR differs.
+
 - Fixes #
 -->
 
