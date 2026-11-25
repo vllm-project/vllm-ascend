@@ -157,6 +157,10 @@ class AscendDeepseekV4ForConditionalGeneration(
             llm_offset += n_llm
         return tuple(embeds)
 
+    def reset_runtime_state_after_snapshot_restore(self) -> None:
+        # The stacked table is derived from restored Parameters, not checkpointed.
+        self._sentinel_table = None
+
     def _get_sentinel_table(self, dtype: torch.dtype, device: torch.device) -> torch.Tensor:
         # Read live parameters on each forward, including graph replay.
         # A detached cached copy can outlive both sleep and weight updates.

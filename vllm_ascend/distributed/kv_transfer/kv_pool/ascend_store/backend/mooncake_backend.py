@@ -425,6 +425,9 @@ class MooncakeBackend(Backend):
         self._store_initialized = False
         self._store_init_lock = threading.Lock()
         self._prefetch_conf = SsdPrefetchConf.disabled()
+        self._store_was_initialized: bool | None = None
+        self._registered_buffers: tuple[list[int], list[int]] | None = None
+        self._local_hostname = get_ip()
 
         if not self._lazy_init:
             self.store = self._setup_store()
@@ -454,7 +457,7 @@ class MooncakeBackend(Backend):
 
         self.set_device()
         store = MooncakeDistributedStore()
-        local_hostname = get_ip()
+        local_hostname = self._local_hostname
         # Resolve prefetch once; everything below reads self._prefetch_conf.
         self._prefetch_conf = _resolve_ssd_prefetch(self.config, self._contribute_memory)
         # Scheduler-only clients must not register SSD storage with Mooncake,
@@ -582,6 +585,7 @@ class MooncakeBackend(Backend):
         torch.npu.set_device(self.device_id)
 
     def register_buffer(self, ptrs: list[int], lengths: list[int]):
+        self._registered_buffers = (list(ptrs), list(lengths))
         if self._use_store_independent_te or self._prefetch_conf.use_dict_setup:
             assert self.store is not None
             for ptr, length in zip(ptrs, lengths):
@@ -594,9 +598,50 @@ class MooncakeBackend(Backend):
                         ret,
                     )
         elif not self._use_fabric_mem:
-            local_hostname = get_ip()
+            local_hostname = self._local_hostname
             global_te.get_transfer_engine(local_hostname, device_name=None)
             global_te.register_buffer(ptrs, lengths)
+
+    def prepare_for_snapshot_restore(self) -> None:
+        if self._store_was_initialized is not None:
+            return
+        self._store_was_initialized = self._store_initialized
+        self.store = None
+        self.local_seg = None
+        self._store_initialized = False
+
+        # Independent and config-dict stores own their engines. Only the
+        # shared-engine path touches the global singleton.
+        if not self._use_fabric_mem and not self._use_store_independent_te and not self._prefetch_conf.use_dict_setup:
+            old_engine = global_te.transfer_engine
+            if old_engine is not None and self._registered_buffers is not None:
+                ptrs, _ = self._registered_buffers
+                for ptr in dict.fromkeys(ptrs):
+                    ret = old_engine.unregister_memory(ptr)
+                    if ret != 0:
+                        raise RuntimeError(f"[snapshot] unregister {ptr:#x} failed: {ret}")
+            global_te.reset()
+            del old_engine
+
+        import gc
+
+        gc.collect()
+
+    def reset_after_snapshot(self, local_ip: str) -> None:
+        self.prepare_for_snapshot_restore()
+        restore_initialized_store = bool(self._store_was_initialized)
+        self.config = MooncakeStoreConfig.load_from_env()
+        if self.config.protocol != "ascend":
+            raise NotImplementedError(f"MooncakeBackend does not support protocol {self.config.protocol!r}.")
+        self._local_hostname = local_ip
+
+        if restore_initialized_store or not self._lazy_init:
+            self.store = self._setup_store()
+            self._store_initialized = True
+
+        if self._registered_buffers is not None:
+            self.register_buffer(*self._registered_buffers)
+        self._store_was_initialized = None
 
     def exists(self, keys: list[str]) -> list[int]:
         if self._lazy_init and not self._store_initialized:

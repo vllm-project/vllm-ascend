@@ -76,6 +76,12 @@ class Backend(ABC):
     # Whether the connector must filter existing keys before calling put().
     requires_exists_before_put: bool = True
 
+    def prepare_for_snapshot_restore(self) -> None:
+        raise NotImplementedError(f"{type(self).__name__} does not support snapshot restore")
+
+    def reset_after_snapshot(self, local_ip: str) -> None:
+        raise NotImplementedError(f"{type(self).__name__} does not support snapshot restore")
+
     @abstractmethod
     def __init__(self, parallel_config: ParallelConfig, lazy_init: bool = False):
         pass

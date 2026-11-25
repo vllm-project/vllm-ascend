@@ -8,6 +8,9 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
 from vllm.distributed.kv_transfer.kv_connector.v1.multi_connector import MultiConnector
 
 from vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.dspark_context import uses_sfa_dspark_kv_transfer
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector import (
+    AscendStoreConnector,
+)
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
@@ -185,6 +188,26 @@ class AscendMultiConnector(MultiConnector, SupportsHMA):
             hook = getattr(connector, "on_kv_cache_written", None)
             if callable(hook):
                 hook(layer_name)
+
+    def prepare_for_snapshot_restore(self) -> None:
+        """Release every owner's old transport before rebuilding any endpoint."""
+        # Stores must release their borrowed engine handles before P2P teardown.
+        for connector in self._connectors:
+            if isinstance(connector, AscendStoreConnector):
+                connector.prepare_for_snapshot_restore()
+        for connector in self._connectors:
+            if not isinstance(connector, AscendStoreConnector):
+                connector.prepare_for_snapshot_restore()
+
+    def rebuild_kv_transfer_endpoint(self, local_ip: str, new_engine_id: str | None = None) -> None:
+        """Rebuild P2P first so pooling can attach to the replacement engine."""
+        self.prepare_for_snapshot_restore()
+        pool_connectors = [connector for connector in self._connectors if isinstance(connector, AscendStoreConnector)]
+        other_connectors = [
+            connector for connector in self._connectors if not isinstance(connector, AscendStoreConnector)
+        ]
+        for connector in other_connectors + pool_connectors:
+            connector.rebuild_kv_transfer_endpoint(local_ip, new_engine_id)
 
     def update_state_after_alloc(self, request: "Request", blocks: "KVCacheBlocks", num_external_tokens: int):
         chosen_connector = self._requests_to_connector.get(request.request_id, -1)

@@ -86,6 +86,13 @@ _CUSTOM_OP_BASE_DIR = (
 )
 _IS_ROT_WEIGHT_USED = None
 
+RESTORE_FLAG_PATH = "/root/.grusflag"
+
+
+def is_restore() -> bool:
+    """Return True when the process is running after a container snapshot restore."""
+    return os.path.exists(RESTORE_FLAG_PATH)
+
 
 def get_pcp_profile_num_tokens(vllm_config: VllmConfig, max_num_tokens: int, max_num_reqs: int) -> int:
     """Keep replicated draft requests when profiling PCP-local prefill.

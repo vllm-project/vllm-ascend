@@ -24,6 +24,8 @@ from vllm.logger import logger
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.triton_utils import HAS_TRITON
 
+# Keep the existing import grouping stable for FT patches.
+# isort: split
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX, MoECommType, use_cann_megamoe
 from vllm_ascend.distributed.parallel_state import get_mc2_group

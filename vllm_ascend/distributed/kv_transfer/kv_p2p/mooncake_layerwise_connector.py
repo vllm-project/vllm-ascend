@@ -587,6 +587,7 @@ class KVCacheRecvingLayerThread(threading.Thread):
         local_engine_id: str,
         metadata: MooncakeAgentMetadata,
         ready_event: threading.Event,
+        snapshot_enabled: bool = False,
     ):
         super().__init__(daemon=True, name="KVCacheRecvingLayerThread")
         self.tp_rank = tp_rank
@@ -601,6 +602,17 @@ class KVCacheRecvingLayerThread(threading.Thread):
         self.task_tracker = dict[str, int]()
         self.ready_event = ready_event
         self.metadata = metadata
+        # Keep the baseline blocking receive loop unless snapshot lifecycle
+        # support needs to stop and rebind this listener after restore.
+        self._stop_event = threading.Event() if snapshot_enabled else None
+
+    def stop(self) -> None:
+        """[snapshot] Signal the recv loop to exit so the ROUTER socket can be
+        unbound (used when restarting the thread on a new pod IP after a
+        container snapshot restore)."""
+        if self._stop_event is None:
+            raise RuntimeError("KV receiver shutdown is only available when snapshot is enabled")
+        self._stop_event.set()
 
     def get_and_clear_done_requests(self) -> set[str]:
         """
@@ -660,8 +672,16 @@ class KVCacheRecvingLayerThread(threading.Thread):
         with zmq_ctx(zmq.ROUTER, path) as sock:  # type: ignore
             self.ready_event.set()
             decoder = msgspec.msgpack.Decoder(type=tuple)
-            while True:
+            poller = None
+            if self._stop_event is not None:
+                poller = zmq.Poller()  # type: ignore
+                poller.register(sock, zmq.POLLIN)  # type: ignore
+            while self._stop_event is None or not self._stop_event.is_set():
                 try:
+                    # Poll with a timeout so the loop can observe stop requests
+                    # (needed to rebind the ROUTER on a new IP after snapshot).
+                    if poller is not None and not dict(poller.poll(timeout=1000)).get(sock):
+                        continue
                     frames = sock.recv_multipart()
                     if len(frames) < 2:
                         logger.error(
@@ -863,6 +883,18 @@ class MooncakeLayerwiseConnector(KVConnectorBase_V1, SupportsHMA):
         """MooncakeLayerwiseConnector does not save explicitly."""
         pass
 
+    def prepare_for_snapshot_restore(self) -> None:
+        if self.connector_worker is not None:
+            self.connector_worker.prepare_for_snapshot_restore()
+
+    def rebuild_kv_transfer_endpoint(self, local_ip: str, new_engine_id: str | None = None) -> None:
+        if new_engine_id is not None:
+            self.engine_id = new_engine_id
+        if self.connector_scheduler is not None:
+            self.connector_scheduler.rebuild_kv_transfer_endpoint(local_ip, new_engine_id)
+        if self.connector_worker is not None:
+            self.connector_worker.rebuild_kv_transfer_endpoint(local_ip, new_engine_id)
+
 
 class MooncakeLayerwiseConnectorScheduler:
     """Implementation of Scheduler side methods"""
@@ -909,6 +941,14 @@ class MooncakeLayerwiseConnectorScheduler:
             )
         else:
             self.metaserver_client = httpx.Client(limits=httpx.Limits(max_connections=100000), timeout=None)
+
+    def rebuild_kv_transfer_endpoint(self, local_ip: str, new_engine_id: str | None = None) -> None:
+        self.side_channel_host = local_ip
+        if new_engine_id is not None:
+            self.engine_id = new_engine_id
+            kv_config = self.vllm_config.kv_transfer_config
+            assert kv_config is not None
+            kv_config.engine_id = new_engine_id
 
     @staticmethod
     def _iter_kv_cache_specs(kv_cache_config: KVCacheConfig):
@@ -1294,6 +1334,10 @@ class MooncakeLayerwiseConnectorWorker:
         self.timeout = 1.0  # seconds
         self.k_buffer: torch.Tensor | None = None
         self.v_buffer: torch.Tensor | None = None
+        # [snapshot] cache the registered KV memory regions so they can be
+        # re-registered on a freshly rebuilt transfer engine after a container
+        # snapshot restore (PD-disaggregated, pod IP changed).
+        self._registered_regions = None
         self.virtual_request: set[str] = set()
         self._invalid_block_ids: set[int] = set()
         self._recving_metadata: dict[str, ReqMeta] = {}
@@ -1350,6 +1394,109 @@ class MooncakeLayerwiseConnectorWorker:
             error = self._storage_send_errors.get(slot_id)
             if error is not None:
                 raise RuntimeError(f"Mooncake failed to transfer physical KV slot {slot_id}: {error}")
+
+    def prepare_for_snapshot_restore(self) -> None:
+        """Release the old transport before communication-group teardown."""
+        kv_cfg = self.vllm_config.kv_transfer_config
+        if kv_cfg is None or not (kv_cfg.is_kv_producer or kv_cfg.is_kv_consumer):
+            return
+        if self.engine is None:
+            return
+
+        old_engine = self.engine
+        old_recv = self.kv_recv_layer_thread
+        self._restart_recv_after_snapshot = old_recv is not None
+
+        # Stop the listener before tearing down the transfer engine. Leaving the
+        # pre-snapshot listener alive while a new engine is created can expose
+        # stale endpoint metadata and lets old/new transport lifetimes overlap.
+        if old_recv is not None:
+            old_recv.stop()
+            old_recv.join(timeout=10)
+            if old_recv.is_alive():
+                raise RuntimeError("[snapshot][rebuild] old KV recv thread did not stop")
+            self.kv_recv_layer_thread = None
+
+        # Detach all references to the old transfer engine before resetting the singleton.
+        self.engine = None
+        if self.kv_send_layer_thread is not None:
+            self.kv_send_layer_thread.engine = None
+
+        # Unregister all known regions while the old transfer engine is valid.
+        if old_engine is not None:
+            ptrs = []
+            if global_te.transfer_engine is old_engine and self._registered_regions is not None:
+                ptrs.extend(self._registered_regions.ptrs)
+            for tensor in (self.k_buffer, self.v_buffer):
+                if tensor is not None:
+                    ptrs.append(tensor.data_ptr())
+            for ptr in dict.fromkeys(ptrs):  # dedup, keep order
+                ret = old_engine.unregister_memory(ptr)
+                if ret != 0:
+                    raise RuntimeError(f"[snapshot] unregister {ptr:#x} failed: {ret}")
+
+        # Fully destroy the old transfer engine before creating the replacement. In
+        # particular, the local old_engine reference must be dropped before
+        # gc.collect(); otherwise old and new Ascend transports coexist.
+        global_te.reset()
+        import gc
+
+        del old_engine
+        gc.collect()
+
+    def rebuild_kv_transfer_endpoint(self, local_ip: str, new_engine_id: str | None = None) -> None:
+        """Recreate the transport and registrations after model/graph restore."""
+        self.prepare_for_snapshot_restore()
+        self.side_channel_host = local_ip
+        self.tp_group = get_tp_group()
+        kv_cfg = self.vllm_config.kv_transfer_config
+        if kv_cfg is None or not (kv_cfg.is_kv_producer or kv_cfg.is_kv_consumer):
+            return
+
+        # Create the replacement only after old transport finalization.
+        self.engine = global_te.get_transfer_engine(local_ip, device_name=None)
+        self.te_rpc_port = self.engine.get_rpc_port()
+
+        # Re-register KV memory with the replacement transfer engine.
+        if self._registered_regions is not None:
+            global_te.register_buffer(self._registered_regions.ptrs, self._registered_regions.lengths)
+        else:
+            logger.warning("[snapshot][rebuild] no cached register regions; KV memory not re-registered")
+
+        for tensor in (self.k_buffer, self.v_buffer):
+            if tensor is not None:
+                ret = self.engine.register_memory(tensor.data_ptr(), tensor.numel() * tensor.element_size())
+                if ret != 0:
+                    raise RuntimeError("Mooncake kv_buffer re-registration failed after snapshot restore.")
+
+        # Point the producer thread at the replacement engine.
+        if self.kv_send_layer_thread is not None:
+            self.kv_send_layer_thread.engine = self.engine
+
+        # Restart the consumer listener only after the new transfer engine and registrations
+        # are ready.
+        if not kv_cfg.is_kv_consumer or not self._restart_recv_after_snapshot:
+            return
+
+        ready_event = threading.Event()
+        metadata = MooncakeAgentMetadata(
+            te_rpc_port=self.te_rpc_port,
+            layer_metadata=self.layer_metadata,
+        )
+        new_recv = KVCacheRecvingLayerThread(
+            self.tp_rank,
+            self.side_channel_port,
+            self.tp_size,
+            self.pd_head_ratio,
+            self.engine_id,
+            metadata,
+            ready_event,
+            snapshot_enabled=getattr(self.vllm_config, "snapshot_config", None) is not None,
+        )
+        new_recv.side_channel_host = local_ip
+        new_recv.start()
+        ready_event.wait()
+        self.kv_recv_layer_thread = new_recv
 
     def create_kv_buffer(self, first_kv_cache_tuple):
         alignment = 2 * 1024 * 1024
@@ -1499,6 +1646,7 @@ class MooncakeLayerwiseConnectorWorker:
 
         validate_register_region_count(register_regions)
         global_te.register_buffer(register_regions.ptrs, register_regions.lengths)
+        self._registered_regions = register_regions
 
         if kv_buffer is not None:
             self.create_kv_buffer(kv_buffer)
@@ -1568,6 +1716,7 @@ class MooncakeLayerwiseConnectorWorker:
                 self.engine_id,
                 metadata,
                 ready_event,
+                snapshot_enabled=getattr(self.vllm_config, "snapshot_config", None) is not None,
             )
             self.kv_recv_layer_thread.start()
             ready_event.wait()

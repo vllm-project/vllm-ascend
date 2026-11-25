@@ -142,7 +142,8 @@ class MooncakePullRecvingThread(threading.Thread, MooncakeTransferAddressMixin):
         # engine_id -> remote_pp_rank
         # -> [(local_layer_index, remote_layer_index), ...]
         self.remote_layer_index_pairs: SizedDict[str, dict[int, list[tuple[int, int]]]] = SizedDict()
-        self.request_queue: queue.Queue[tuple[str, dict[str, ReqMeta]]] = queue.Queue()
+        self.request_queue: queue.Queue[tuple[str, dict[str, ReqMeta]] | None] = queue.Queue()
+        self.stop_event = threading.Event()
         self.finished_requests: queue.SimpleQueue[tuple[str, bool]] = queue.SimpleQueue()
         self.invalid_block_ids: set[int] = set()
         self.invalid_block_ids_lock = threading.Lock()
@@ -188,16 +189,32 @@ class MooncakePullRecvingThread(threading.Thread, MooncakeTransferAddressMixin):
             self.invalid_block_ids = set()
         return invalid_block_ids
 
+    def shutdown(self) -> None:
+        if not self.stop_event.is_set():
+            self.stop_event.set()
+            self.request_queue.put(None)
+        if self.ident is not None:
+            self.join(timeout=10)
+            if self.is_alive():
+                raise RuntimeError("[snapshot] Mooncake pull thread did not stop")
+        self.executor.shutdown(wait=True, cancel_futures=True)
+        # Do not retain the old native engine through a terminated Thread object.
+        self.engine = None
+
     def run(self) -> None:
         """Consume queued requests and invoke the transfer implementation."""
         torch.npu.set_device(self.device)
         self.ready_event.set()
-        while True:
+        while not self.stop_event.is_set():
             self._process_next()
 
     def _process_next_request(self) -> None:
         """Process one queue item with independent request completion."""
-        remote_engine_id, requests = self.request_queue.get()
+        item = self.request_queue.get()
+        if item is None:
+            self.request_queue.task_done()
+            return
+        remote_engine_id, requests = item
         try:
             try:
                 endpoints = {(request.remote_host, request.remote_port) for request in requests.values()}
@@ -232,7 +249,11 @@ class MooncakePullRecvingThread(threading.Thread, MooncakeTransferAddressMixin):
 
     def _process_next_batch(self) -> None:
         """Process one queue item with a batch completion barrier."""
-        remote_engine_id, requests = self.request_queue.get()
+        item = self.request_queue.get()
+        if item is None:
+            self.request_queue.task_done()
+            return
+        remote_engine_id, requests = item
         try:
             failed_request_ids: set[str] = set()
             future_to_task: dict[Future[None], tuple[int, int, int, set[str]]] = {}
@@ -1458,6 +1479,12 @@ class MooncakePullConnectorWorker(MooncakeBaseConnectorWorker):
     ) -> None:
         super().__init__(vllm_config, engine_id, kv_cache_config)
         self._recving_thread: MooncakePullRecvingThread | None = None
+
+    def prepare_for_snapshot_restore(self) -> None:
+        if self._recving_thread is not None:
+            self._recving_thread.shutdown()
+            self._recving_thread = None
+        super().prepare_for_snapshot_restore()
 
     def register_kv_caches(
         self,

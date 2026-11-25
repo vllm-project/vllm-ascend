@@ -424,6 +424,20 @@ class AscendMlaDCPImpl(DCPImplMixin, AscendMLAImpl):
             and attn_metadata.num_actual_tokens > attn_metadata.num_decode_tokens
         )
 
+    def reset_runtime_state_after_snapshot_restore(self) -> None:
+        self._refresh_dcp_group()
+
+    def restore_lazy_tensors_after_snapshot_restore(
+        self, act_dtype: torch.dtype, *, restored_tensor_ids: set[int] | frozenset[int] = frozenset()
+    ) -> None:
+        super().restore_lazy_tensors_after_snapshot_restore(act_dtype, restored_tensor_ids=restored_tensor_ids)
+        for buffers in (self._dcp_current_kv_buffers, self._dcp_prefill_current_kv_buffers):
+            if buffers is not None:
+                # Prolog overwrites current KV, but reads this constant index map.
+                indices = buffers[2]
+                if id(indices) not in restored_tensor_ids:
+                    indices.copy_(torch.arange(indices.numel(), dtype=indices.dtype, device=indices.device))
+
     @staticmethod
     def update_graph_params(
         update_stream,

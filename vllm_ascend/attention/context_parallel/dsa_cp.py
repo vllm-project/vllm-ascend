@@ -86,6 +86,14 @@ class AscendDSAPCPMetadataBuilder(AscendDSAMetadataBuilder):
     _request_capacity_factor: ClassVar[int] = 2
     _global_metadata_builder_cls = dsa_v1.AscendDSAMetadataBuilder
 
+    def reset_runtime_state_after_snapshot_restore(self) -> None:
+        super().reset_runtime_state_after_snapshot_restore()
+        self._global_metadata_builder.reset_runtime_state_after_snapshot_restore()
+
+    def restore_constants_after_snapshot_restore(self) -> None:
+        super().restore_constants_after_snapshot_restore()
+        self._global_metadata_builder.restore_constants_after_snapshot_restore()
+
     def __init__(
         self,
         kv_cache_spec: AscendMLAAttentionSpec,
@@ -517,6 +525,9 @@ class AscendDSAPCPImpl(AscendDSAImpl):
 
     o_proj_full_pools: ClassVar[dict[Any, torch.Tensor]] = {}
     o_proj_weight_switch_pool_key = "dsa_pcp_o_proj"
+
+    def reset_runtime_state_after_snapshot_restore(self) -> None:
+        self._parallel_o_proj.reset_runtime_state_after_snapshot_restore(group=get_pcp_group(), tp_group=get_tp_group())
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)

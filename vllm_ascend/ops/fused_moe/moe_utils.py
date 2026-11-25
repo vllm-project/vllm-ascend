@@ -444,6 +444,13 @@ def enable_fusion_gmmswigluquant():
 _PAD_ZERO_BLOCKS: dict[tuple, torch.Tensor] = {}
 
 
+@torch.inference_mode()
+def reset_moe_padding_cache_after_snapshot_restore() -> None:
+    """Restore cached padding zeros in place, preserving existing tensor aliases."""
+    for zero_block in _PAD_ZERO_BLOCKS.values():
+        zero_block.zero_()
+
+
 def _pad_tokens_with_cat(x: torch.Tensor, padded_len: int) -> torch.Tensor:
     """Token-dim padding of `x` ([n, ...] -> [padded_len, ...]) by concatenating
     a slice of a cached zero block: value-equivalent to

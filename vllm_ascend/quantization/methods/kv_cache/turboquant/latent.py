@@ -89,6 +89,20 @@ class TurboQuantLatent:
         codes = np.arange(256)
         self.norm_lut = torch.tensor(cent[codes & 15] ** 2 + cent[codes >> 4] ** 2, device=device)
 
+    @torch.inference_mode()
+    def restore_constants_after_snapshot_restore(self) -> None:
+        if self.rotation is None:
+            return
+        # These constants are owned by a plain helper, not the model state_dict.
+        # Bypass the legacy cache: its shared tensors also survived the snapshot
+        # with stale device contents. Refill them in place for all existing aliases.
+        restored = TurboQuantLatent(legacy_hadamard=self._legacy_hadamard)
+        restored._initialize_transforms(self.rotation.device)
+        for name in ("rotation", "centroids", "norm_lut"):
+            getattr(self, name).copy_(getattr(restored, name))
+        if self.inverse_rotation is not None:
+            self.inverse_rotation.copy_(restored.rotation.T)
+
     def forward(self, x):
         self._initialize(x.device)
         rotation = self.rotation

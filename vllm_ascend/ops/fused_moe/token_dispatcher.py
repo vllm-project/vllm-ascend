@@ -486,11 +486,7 @@ class TokenDispatcherWithAll2AllV(MoETokenDispatcher[MoEAllToAllCombineMetadata]
 
         assert self.num_local_experts > 0, "Expected at least one expert"
         if self.num_local_experts > 1:
-            self.expert_ids_per_ep_rank = torch.tensor(
-                [i % self.num_local_experts for i in range(self.num_experts)],
-                dtype=torch.int32,
-                device=torch.npu.current_device(),
-            )
+            self.expert_ids_per_ep_rank = self._build_expert_ids_per_ep_rank()
 
         local_expert_indices_offset = self.ep_rank * self.num_local_experts
 
@@ -532,6 +528,29 @@ class TokenDispatcherWithAll2AllV(MoETokenDispatcher[MoEAllToAllCombineMetadata]
         assert self._output_splits_staging is not None
         assert self._splits_copy_done is not None
         return self._input_splits_staging, self._output_splits_staging, self._splits_copy_done
+
+    def refresh_hccl_group(self) -> None:
+        """Refresh the All2AllV communicator name after group recreation."""
+        local_rank = torch.distributed.get_rank(group=self.ep_group)
+        backend = self.ep_group._get_backend(torch.device("npu"))
+        self.moe_all_to_all_group_name = backend.get_hccl_comm_name(local_rank)
+
+    def _build_expert_ids_per_ep_rank(self) -> torch.Tensor:
+        return torch.tensor(
+            [i % self.num_local_experts for i in range(self.num_experts)],
+            dtype=torch.int32,
+            device=torch.npu.current_device(),
+        )
+
+    @torch.inference_mode()
+    def reset_runtime_state_after_snapshot_restore(self) -> None:
+        # These lazy staging buffers are coupled to a native completion event.
+        # Recreate the entire set before the next asynchronous split copy.
+        self._input_splits_staging = None
+        self._output_splits_staging = None
+        self._splits_copy_done = None
+        if self.num_local_experts > 1:
+            self.expert_ids_per_ep_rank.copy_(self._build_expert_ids_per_ep_rank())
 
     def token_dispatch(
         self,

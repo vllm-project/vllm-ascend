@@ -186,6 +186,23 @@ class AscendSFADCPMetadataBuilder(
             device=device,
         )
 
+    def reset_runtime_state_after_snapshot_restore(self) -> None:
+        super().reset_runtime_state_after_snapshot_restore()
+        self.arange_buffer = torch.arange(
+            self.arange_buffer.numel(),
+            dtype=torch.int32,
+            device=self.device,
+        )
+        dcp_group = get_dcp_group()
+        collective_ranks = sorted(dcp_group.ranks)
+        self.dcp_collective_rank_order.copy_(
+            torch.tensor(
+                [collective_ranks.index(rank) for rank in dcp_group.ranks],
+                dtype=self.dcp_collective_rank_order.dtype,
+                device=self.dcp_collective_rank_order.device,
+            )
+        )
+
     def _get_dcp_local_seq_lens(self, seq_lens: torch.Tensor) -> torch.Tensor:
         return get_dcp_local_seq_lens(
             seq_lens,

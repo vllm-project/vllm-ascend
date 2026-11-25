@@ -232,6 +232,13 @@ class NPUWorker(GPUWorker):
                 is_driver_worker=is_driver_worker,
             )
 
+        if vllm_config.snapshot_config is not None:
+            # Worker and EngineCore receive separate config copies. Reserve the
+            # remaining port for rebuilding the worker process groups.
+            ports = self.parallel_config._snapshot_data_parallel_port_list
+            assert ports is not None and len(ports) == 2
+            ports.pop()
+
         if self.cache_config.cache_dtype == "auto":
             self.cache_dtype = self.model_config.dtype
         else:
@@ -1029,6 +1036,15 @@ class NPUWorker(GPUWorker):
         if getattr(self, "use_v2_model_runner", False) and has_ec_transfer():
             get_ec_transfer().start_worker_services()
 
+        if self.vllm_config.snapshot_config is not None:
+            from vllm_ascend.snapshot.model_runner_lifecycle.module_lifecycle import get_drafter_model
+            from vllm_ascend.snapshot.model_runner_lifecycle.tensor_inventory import capture_tensor_inventory
+
+            capture_tensor_inventory(self.model_runner.get_model())
+            draft_model = get_drafter_model(self.model_runner)
+            if draft_model is not None:
+                capture_tensor_inventory(draft_model)
+
         if self.vllm_config.weight_transfer_config is not None:
             from vllm.distributed.weight_transfer.factory import (
                 WeightTransferEngineFactory,
@@ -1389,6 +1405,26 @@ class NPUWorker(GPUWorker):
 
     def reload_weights(self, *args, **kwargs) -> None:
         self.model_runner.reload_weights(*args, **kwargs)
+
+    def suspend(self, model_save_path: str | None = None) -> None:
+        from vllm_ascend.snapshot.worker_lifecycle import suspend_worker
+
+        suspend_worker(self, model_save_path)
+
+    def device_unlock(self) -> None:
+        from vllm_ascend.snapshot.worker_lifecycle import unlock_worker
+
+        unlock_worker(self)
+
+    def resume(
+        self,
+        data_parallel_master_ip: str,
+        model_path: str | None = None,
+        new_engine_id: str | None = None,
+    ) -> None:
+        from vllm_ascend.snapshot.worker_lifecycle import resume_worker
+
+        resume_worker(self, data_parallel_master_ip, model_path, new_engine_id)
 
     def check_health(self) -> None:
         import subprocess

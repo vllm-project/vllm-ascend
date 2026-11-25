@@ -128,6 +128,22 @@ class WeightSwitchState:
     repeat_parts: dict[str, WeightSwitchRepeatPart] = field(default_factory=dict)
     handles: list[torch.distributed.Work] = field(default_factory=list)
 
+    def rebuild_after_snapshot_restore(self, config: WeightSwitchConfig) -> None:
+        """Refresh independent copies after checkpoint restores local tensors.
+
+        Keep storage and aliases intact. Gather destinations are overwritten by
+        the next collective before use; only its inputs and repeat copies need
+        rebuilding here.
+        """
+        for part in self.gather_parts.values():
+            dim = part.spec.gather_dim % part.local_tensor.ndim
+            if dim != 0:
+                part.gather_input.copy_(torch.movedim(part.local_tensor, dim, 0).contiguous())
+        for part in self.repeat_parts.values():
+            repeats = [1] * part.local_tensor.ndim
+            repeats[part.spec.repeat_dim] = config.world_size
+            part.full_tensor.copy_(part.local_tensor.repeat(*repeats))
+
 
 @dataclass(frozen=True)
 class WeightSwitchLoadState:

@@ -112,6 +112,32 @@ class TestGlobalTE(unittest.TestCase):
             self.assertIsNone(global_te.transfer_engine)
             factory.assert_called_once_with()
 
+    def test_snapshot_reset_allows_reinitialization_after_success(self):
+        global_te = self.global_te_cls()
+        first, second = MagicMock(), MagicMock()
+        first.initialize.return_value = second.initialize.return_value = 0
+        with patch("mooncake.engine.TransferEngine", side_effect=[first, second]) as factory:
+            self.assertIs(global_te.get_transfer_engine("old-host", None), first)
+            global_te.reset()
+            global_te.reset()
+            self.assertIsNone(global_te.hostname)
+            self.assertIs(global_te.get_transfer_engine("new-host", None), second)
+            self.assertEqual(global_te.hostname, "new-host")
+            self.assertEqual(factory.call_count, 2)
+            second.initialize.assert_called_once_with("new-host", "P2PHANDSHAKE", "ascend", "")
+
+    def test_snapshot_reset_does_not_allow_retry_after_failure(self):
+        global_te = self.global_te_cls()
+        failed = MagicMock()
+        failed.initialize.return_value = -1
+        with patch("mooncake.engine.TransferEngine", return_value=failed) as factory:
+            with self.assertRaises(RuntimeError):
+                global_te.get_transfer_engine("old-host", None)
+            global_te.reset()
+            with self.assertRaisesRegex(RuntimeError, "Restart the process"):
+                global_te.get_transfer_engine("new-host", None)
+            factory.assert_called_once_with()
+
     def test_waiting_getter_does_not_retry_failed_initialization(self):
         started, release, waiting = (threading.Event() for _ in range(3))
         engine = MagicMock()

@@ -140,6 +140,17 @@ class ParallelOProjection:
     def uses_full_weight(self) -> bool:
         return self.mode is OProjectionMode.FULL_WEIGHT
 
+    def reset_runtime_state_after_snapshot_restore(self, *, group: Any, tp_group: Any) -> None:
+        """Rebind communication and refresh copies not owned by the model inventory."""
+        self.config = WeightSwitchConfig.from_group(group, shard_axis=self.config.shard_axis)
+        self.tp_group = tp_group
+        self.mode = OProjectionMode.LOCAL_WEIGHT
+        for layer, method, state in self._weight_switch_states or ():
+            # Restored Work objects cannot be waited on in the new runtime.
+            state.handles.clear()
+            method.switch_weight(layer, state, use_full_weight=False)
+            state.rebuild_after_snapshot_restore(self.config)
+
     @property
     def exchanges_tokens(self) -> bool:
         return self.mode is OProjectionMode.EXCHANGE_TOKENS

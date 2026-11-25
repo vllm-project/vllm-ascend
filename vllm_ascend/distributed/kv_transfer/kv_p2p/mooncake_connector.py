@@ -295,6 +295,16 @@ class KVCacheSendingThread(threading.Thread):
         self.port_send_num: dict[str, int] = {}
 
         self.task_tracker = KVCacheTaskTracker()
+        # Cold start keeps the baseline blocking receive loop. Snapshot restore
+        # needs a stoppable listener so its ROUTER endpoint can be rebound.
+        self._stop_event = threading.Event() if vllm_config.snapshot_config is not None else None
+
+    def stop(self) -> None:
+        """[snapshot] Signal the send loop to exit so the ROUTER socket can be
+        unbound and rebound on a new pod IP after a container snapshot restore."""
+        if self._stop_event is None:
+            raise RuntimeError("KV sender shutdown is only available when snapshot is enabled")
+        self._stop_event.set()
 
     def get_and_clear_finished_requests(self) -> set[str]:
         """
@@ -349,8 +359,16 @@ class KVCacheSendingThread(threading.Thread):
             logger.debug("Size of encoded MooncakeAgentMetadata: %s bytes", str(size_in_bytes))
 
         decoder = msgspec.msgpack.Decoder(type=tuple)
-        while True:
+        poller = None
+        if self._stop_event is not None:
+            poller = zmq.Poller()  # type: ignore
+            poller.register(sock, zmq.POLLIN)  # type: ignore
+        while self._stop_event is None or not self._stop_event.is_set():
             try:
+                # Poll with a timeout so the loop can observe stop() (needed to
+                # rebind the ROUTER on a new pod IP after snapshot restore).
+                if poller is not None and not dict(poller.poll(timeout=1000)).get(sock):
+                    continue
                 frames = sock.recv_multipart()
                 if len(frames) < 2:
                     logger.error(
@@ -1761,6 +1779,18 @@ class MooncakeConnector(KVConnectorBase_V1, SupportsHMA):
         assert self.connector_scheduler is not None
         self.connector_scheduler.set_xfer_handshake_metadata_from_workers(metadata)
 
+    def prepare_for_snapshot_restore(self) -> None:
+        if self.connector_worker is not None:
+            self.connector_worker.prepare_for_snapshot_restore()
+
+    def rebuild_kv_transfer_endpoint(self, local_ip: str, new_engine_id: str | None = None) -> None:
+        if new_engine_id is not None:
+            self.engine_id = new_engine_id
+        if self.connector_scheduler is not None:
+            self.connector_scheduler.rebuild_kv_transfer_endpoint(local_ip, new_engine_id)
+        if self.connector_worker is not None:
+            self.connector_worker.rebuild_kv_transfer_endpoint(local_ip, new_engine_id)
+
 
 class MooncakeConnectorScheduler:
     """Implementation of Scheduler side methods"""
@@ -1808,6 +1838,14 @@ class MooncakeConnectorScheduler:
         self.use_compress = self._model_uses_compress()
         self.group_transfer_info = [self._get_group_transfer_info(group) for group in kv_cache_config.kv_cache_groups]
         self.need_truncate = self.use_compress or any(info.is_state_group for info in self.group_transfer_info)
+
+    def rebuild_kv_transfer_endpoint(self, local_ip: str, new_engine_id: str | None = None) -> None:
+        self.side_channel_host = local_ip
+        if new_engine_id is not None:
+            self.engine_id = new_engine_id
+            kv_config = self.vllm_config.kv_transfer_config
+            assert kv_config is not None
+            kv_config.engine_id = new_engine_id
 
     def _model_uses_compress(self) -> bool:
         hf_config = getattr(self.vllm_config.model_config, "hf_config", None)
@@ -2250,6 +2288,13 @@ class MooncakeConnectorWorker:
         # Handshake metadata of this worker
         self.xfer_handshake_metadata: MooncakeAgentMetadata | None = None
 
+        # [snapshot] cache the registered KV memory regions so they can be
+        # re-registered on a freshly rebuilt transfer engine after a container
+        # snapshot restore (PD-disaggregated, pod IP changed).
+        self._registered_regions = None
+        # [snapshot] engine device_name used at construction; preserved on rebuild.
+        self._engine_device_name = device_name
+
         # kv_transfer variables
         self.vllm_config = vllm_config
         self.block_size = vllm_config.cache_config.block_size
@@ -2660,6 +2705,145 @@ class MooncakeConnectorWorker:
 
         return ptrs, lengths
 
+    def _sync_engine_id_after_snapshot(self, new_engine_id: str) -> None:
+        """Rotate worker-side engine_id and drop stale remote metadata caches."""
+        # Preserve the old connector-level ID while migrating recv-thread state.
+        old_engine_id = self.engine_id
+
+        # Update state owned by the existing recv thread. Unlike the send
+        # thread, the recv thread is reused after resume, so its local identity
+        # and metadata caches must be refreshed in place.
+        thread = self.kv_recv_thread
+        if thread is not None:
+            local_port = thread.local_handshake_port
+            with thread.remote_metadata_lock:
+                old_local = thread.kv_caches_base_addr.get(old_engine_id)
+                local_addrs = old_local.get(local_port) if old_local is not None else None
+                if local_addrs is None:
+                    raise RuntimeError(
+                        "[snapshot][rebuild] local KV metadata is missing for "
+                        f"engine_id={old_engine_id}, port={local_port}"
+                    )
+                for cache in (
+                    thread.kv_caches_base_addr,
+                    thread.remote_te_port,
+                    thread.remote_block_size_scale,
+                    thread.remote_block_stride_per_addr,
+                    thread.remote_kv_group2layeridx,
+                ):
+                    cache.clear()
+                thread.kv_caches_base_addr[new_engine_id][local_port] = local_addrs
+                thread.local_engine_id = new_engine_id
+
+        # Reset connector-level state. A newly created send thread receives
+        # these updated values through its constructor and handshake metadata.
+        self.engine_id = new_engine_id
+        kv_cfg = self.vllm_config.kv_transfer_config
+        if kv_cfg is not None:
+            kv_cfg.engine_id = new_engine_id
+            if kv_cfg.is_kv_producer and self.xfer_handshake_metadata is not None:
+                self.xfer_handshake_metadata.engine_id = new_engine_id
+
+        logger.info(
+            "[snapshot][rebuild] worker engine_id %s->%s",
+            old_engine_id,
+            new_engine_id,
+        )
+
+    def prepare_for_snapshot_restore(self) -> None:
+        """Release the old transport before communication-group teardown."""
+        kv_cfg = self.vllm_config.kv_transfer_config
+        if kv_cfg is None or not (kv_cfg.is_kv_producer or kv_cfg.is_kv_consumer):
+            return
+        if self.engine is None:
+            return
+
+        old_engine = self.engine
+        old_send = self.kv_send_thread
+        self._restart_send_after_snapshot = old_send is not None
+
+        # Stop the listener before tearing down the transfer engine. Leaving the
+        # pre-snapshot listener alive while a new engine is created can expose
+        # stale endpoint metadata and lets old/new transport lifetimes overlap.
+        if old_send is not None:
+            old_send.stop()
+            old_send.join(timeout=10)
+            if old_send.is_alive():
+                raise RuntimeError("[snapshot][rebuild] old KV send thread did not stop")
+            self.kv_send_thread = None
+
+        # Detach all references to the old transfer engine before resetting the singleton.
+        self.engine = None
+        if self.kv_recv_thread is not None:
+            self.kv_recv_thread.engine = None
+
+        # Unregister all known regions while the old transfer engine is valid.
+        # A shared pool may already have unregistered/reset the singleton.
+        if global_te.transfer_engine is old_engine and self._registered_regions is not None:
+            for ptr in dict.fromkeys(self._registered_regions.ptrs):
+                ret = old_engine.unregister_memory(ptr)
+                if ret != 0:
+                    raise RuntimeError(f"[snapshot] unregister {ptr:#x} failed: {ret}")
+
+        # Fully destroy the old transfer engine before creating the replacement. In
+        # particular, the local old_engine reference must be dropped before
+        # gc.collect(); otherwise old and new Ascend transports coexist.
+        global_te.reset()
+        import gc
+
+        del old_engine
+        gc.collect()
+
+    def rebuild_kv_transfer_endpoint(self, local_ip: str, new_engine_id: str | None = None) -> None:
+        """Recreate the transport and registrations after model/graph restore."""
+        self.prepare_for_snapshot_restore()
+        self.side_channel_host = local_ip
+        kv_cfg = self.vllm_config.kv_transfer_config
+        if kv_cfg is None or not (kv_cfg.is_kv_producer or kv_cfg.is_kv_consumer):
+            return
+        if new_engine_id is not None:
+            self._sync_engine_id_after_snapshot(new_engine_id)
+
+        # Create the replacement only after old transport finalization.
+        self.engine = global_te.get_transfer_engine(local_ip, device_name=self._engine_device_name)
+        self.te_rpc_port = self.engine.get_rpc_port()
+
+        # Re-register KV memory with the replacement transfer engine.
+        if self._registered_regions is not None:
+            global_te.register_buffer(self._registered_regions.ptrs, self._registered_regions.lengths)
+        else:
+            logger.warning("[snapshot][rebuild] no cached register regions; KV memory not re-registered")
+
+        # Restart the producer listener only after the new transfer engine and registrations
+        # are ready.
+        if kv_cfg.is_kv_producer and self._restart_send_after_snapshot:
+            metadata = self.xfer_handshake_metadata
+            if metadata is not None:
+                metadata.te_rpc_port = self.te_rpc_port
+                metadata.local_ip = local_ip
+            ready_event = threading.Event()
+            new_send = KVCacheSendingThread(
+                self.vllm_config,
+                self.tp_rank,
+                self._prefill_tp_size,
+                self.engine_id,
+                local_ip,
+                self.side_channel_port,
+                metadata,
+                ready_event,
+                self.kv_caches,
+                self.pcp_rank,
+            )
+            new_send.start()
+            ready_event.wait()
+            self.kv_send_thread = new_send
+
+        # F. Consumer: the recv thread connects out and binds nothing, so just
+        #    re-point it at the rebuilt engine.
+        if kv_cfg.is_kv_consumer and self.kv_recv_thread is not None:
+            self.kv_recv_thread.engine = self.engine
+        self.tp_group = get_tp_group()
+
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
         """Register the KV Cache data."""
         self.use_mla = self.vllm_config.model_config.is_deepseek_mla
@@ -2724,6 +2908,7 @@ class MooncakeConnectorWorker:
 
         validate_register_region_count(register_regions)
         global_te.register_buffer(register_regions.ptrs, register_regions.lengths)
+        self._registered_regions = register_regions
 
         logger.debug(
             "Mooncake register kv caches metadata: kv_group2layeridx=%s, kv_caches_base_addr=%s, "

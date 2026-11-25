@@ -1013,6 +1013,41 @@ class AscendDSAV41MetadataBuilder(AttentionMetadataBuilder[AscendDSAV41Metadata]
         self._device_metadata_tasks = ()
         return tasks
 
+    def reset_runtime_state_after_snapshot_restore(self) -> None:
+        """Clear request metadata while preserving feature configuration."""
+        self._slot_mapping.fill_(-1)
+        self._slot_mapping_2d.fill_(-1)
+        self._flat_slot_mapping.fill_(-1)
+        for tensor in (self._dspark_swa_indices, self._a5_causal_swa_indices):
+            if tensor is not None:
+                tensor.fill_(-1)
+        for tensor in (
+            self._dspark_swa_lengths,
+            self._a5_causal_swa_lengths,
+            self._a5_smla_metadata,
+            self._a5_smla_length_rows,
+        ):
+            if tensor is not None:
+                tensor.zero_()
+        for tensor in (
+            self._seq_lens,
+            self._cache_seq_lens,
+            self._cmp_residual,
+            self._smla_metadata,
+            self._qli_metadata,
+            self._c2_ring_metadata,
+            self._c2_complete_mask,
+            self._c2_source_positions,
+            self._c2_source_sin,
+        ):
+            tensor.zero_()
+        self._c2_source_cos.fill_(1)
+        self._device_metadata_tasks = ()
+
+    def restore_constants_after_snapshot_restore(self) -> None:
+        # Global RoPE tables are rebuilt before metadata builders are reset.
+        self.prepare_source_rope()
+
     def _publish_task(
         self,
         shared: dict[str, Any],
