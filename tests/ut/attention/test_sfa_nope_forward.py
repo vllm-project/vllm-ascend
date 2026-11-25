@@ -47,6 +47,7 @@ def test_nope_exec_kv_preserves_padding_and_special_values(block_size, dtype, sl
         kv_lora_rank=dim,
         kv_a_layernorm=lambda x: x,
         enable_sparse_sfa_c8=False,
+        enable_sparse_sfa_hif8=False,
     )
     impl._exec_kv_local = AscendSFAImpl._exec_kv_local.__get__(impl)
     native = sparse_mla.torch_npu.npu_scatter_nd_update_
@@ -71,6 +72,7 @@ def test_nope_exec_kv_trims_unused_slots_and_converts_values():
         kv_lora_rank=8,
         kv_a_layernorm=lambda x: x,
         enable_sparse_sfa_c8=False,
+        enable_sparse_sfa_hif8=False,
     )
     impl._exec_kv_local = AscendSFAImpl._exec_kv_local.__get__(impl)
     AscendSFAImpl.exec_kv(impl, values, None, None, (cache,), slots, None)
@@ -92,6 +94,7 @@ def test_nope_exec_kv_rejects_unmergeable_pages():
         kv_lora_rank=8,
         kv_a_layernorm=lambda x: x,
         enable_sparse_sfa_c8=False,
+        enable_sparse_sfa_hif8=False,
     )
     impl._exec_kv_local = AscendSFAImpl._exec_kv_local.__get__(impl)
     with (
