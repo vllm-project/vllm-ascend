@@ -9,7 +9,19 @@ from vllm_ascend.core.kv_cache_interface import (
 )
 from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_manager import (
     get_host_device_memory_usage_ratio,
+    resolve_lru_workspace_threads,
 )
+
+
+class TestLRUWorkspaceThreads(unittest.TestCase):
+    def test_thread_budget_is_limited_by_available_cpus(self):
+        self.assertEqual(resolve_lru_workspace_threads(16, 8), 8)
+        self.assertEqual(resolve_lru_workspace_threads(8, 16), 8)
+
+    def test_thread_budget_requires_positive_values(self):
+        for configured_threads, available_cpus in ((0, 8), (-1, 8), (8, 0), (8, -1)):
+            with self.assertRaises(ValueError):
+                resolve_lru_workspace_threads(configured_threads, available_cpus)
 
 
 class TestHostDeviceMemoryRatio(unittest.TestCase):
