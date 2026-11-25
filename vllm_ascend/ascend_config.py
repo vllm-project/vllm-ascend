@@ -309,6 +309,23 @@ class EplbConfig:
     load_collection_phase: str = "all"
     stair_config: StairConfig = dataclasses.field(default_factory=StairConfig)
 
+    @field_validator(
+        "expert_heat_collection_interval",
+        "algorithm_execution_interval",
+        "num_redundant_experts",
+        "eplb_policy_type",
+        mode="before",
+    )
+    @classmethod
+    def _reject_bool(cls, value: Any) -> Any:
+        # pydantic coerces ``True`` to ``int`` 1 before ``after`` validators run,
+        # so the isinstance(int) check below cannot catch a bool once it reaches
+        # the model_validator. Reject it here, before the coercion, mirroring
+        # StairConfig._reject_bool.
+        if isinstance(value, bool):
+            raise ValueError("EPLB numeric fields must not be booleans")
+        return value
+
     @model_validator(mode="after")
     def _validate_config(self):
         if self.expert_map_path is not None:
@@ -332,10 +349,14 @@ class EplbConfig:
         if self.eplb_policy_type not in [0, 1, 2, 3]:
             raise ValueError("eplb_policy_type must in [0, 1, 2, 3]")
         if self.dynamic_eplb:
-            assert (
-                os.getenv("DYNAMIC_EPLB", "false").lower() in ("true", "1")
-                or os.getenv("EXPERT_MAP_RECORD", "false") == "true"
-            ), "The environment variable DYNAMIC_EPLB or EXPERT_MAP_RECORD of the EPLB must be set to true."
+            dynamic_eplb_env = os.getenv("DYNAMIC_EPLB", "false").lower()
+            expert_map_record_env = os.getenv("EXPERT_MAP_RECORD", "false").lower()
+            if dynamic_eplb_env not in ("true", "1") and expert_map_record_env not in ("true", "1"):
+                raise ValueError(
+                    "Dynamic EPLB requires the environment variable DYNAMIC_EPLB or EXPERT_MAP_RECORD "
+                    f"to be set to 'true' or '1'; got DYNAMIC_EPLB={dynamic_eplb_env!r}, "
+                    f"EXPERT_MAP_RECORD={expert_map_record_env!r}."
+                )
         if self.eplb_heat_collection_stage not in ["all", "prefill", "decode"]:
             raise ValueError('eplb_heat_collection_stage must be one of ["all", "prefill", "decode"]')
         if self.load_collection_phase not in ["all", "prefill", "decode"]:

@@ -1592,6 +1592,38 @@ class TestSubconfigPydanticTypeValidation(TestBase):
         cfg = EplbConfig(eplb_policy_type="2")
         self.assertEqual(cfg.eplb_policy_type, 2)
 
+    def test_eplb_config_rejects_bool_on_int_fields(self):
+        # bool is an int subclass; pydantic coerces True to 1 before the after
+        # validator runs, so the guard must reject it in a before validator.
+        for field in (
+            "expert_heat_collection_interval",
+            "algorithm_execution_interval",
+            "num_redundant_experts",
+            "eplb_policy_type",
+        ):
+            with self.subTest(field=field):
+                with self.assertRaisesRegex(ValueError, "must not be booleans"):
+                    EplbConfig(**{field: True})
+
+    @patch("vllm_ascend.ascend_config.os.getenv")
+    def test_eplb_dynamic_eplb_accepts_expert_map_record_one(self, mock_getenv):
+        # EXPERT_MAP_RECORD must accept "1" as well as "true", matching the
+        # relaxed parsing used in platform.py and patch/platform/__init__.py.
+        mock_getenv.side_effect = lambda key, default="false": {
+            "DYNAMIC_EPLB": "false",
+            "EXPERT_MAP_RECORD": "1",
+        }.get(key, default)
+        cfg = EplbConfig(dynamic_eplb=True)
+        # Must not raise; the validator accepts EXPERT_MAP_RECORD=1.
+        cfg._validate_config()
+
+    @patch("vllm_ascend.ascend_config.os.getenv")
+    def test_eplb_dynamic_eplb_rejects_when_neither_env_set(self, mock_getenv):
+        mock_getenv.side_effect = lambda key, default="false": default
+        cfg = EplbConfig(dynamic_eplb=True)
+        with self.assertRaisesRegex(ValueError, "DYNAMIC_EPLB or EXPERT_MAP_RECORD"):
+            cfg._validate_config()
+
 
 class TestUpstreamConfigCompatibility(TestBase):
     @patch(

@@ -1,0 +1,11 @@
+pr: "<PR_NUMBER>"
+entries:
+  - category: bugfix
+    text: >
+      EPLB config validation now rejects booleans on its integer fields
+      (expert_heat_collection_interval, algorithm_execution_interval,
+      num_redundant_experts, eplb_policy_type) instead of silently coercing
+      ``true`` to 1. The dynamic-EPLB precondition also accepts
+      ``EXPERT_MAP_RECORD=1`` (not only ``=true``), matching the relaxed parsing
+      already used in platform.py, and raises a clear ValueError instead of a
+      bare AssertionError that ``python -O`` would strip.
