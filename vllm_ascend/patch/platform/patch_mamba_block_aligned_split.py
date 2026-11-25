@@ -116,7 +116,9 @@ def _mamba_block_aligned_split(
     # one-block backoff (see the docstring). The sparse index-kpool
     # early-return path below must observe it too (it previously ran under
     # a temporary bit clear from the outer producer wrapper).
-    if _get_sparse_index_kpool(self.vllm_config.model_config) is not None:
+    if _get_sparse_index_kpool(self.vllm_config.model_config) is not None and not getattr(
+        self, "mamba_has_prefill_checkpoint_blocks", False
+    ):
         if num_computed_tokens < max(
             request.num_prompt_tokens,
             request.num_tokens - 1,

@@ -125,13 +125,18 @@ def test_kda_output_norm_uses_checkpoint_epsilon():
             enable_prompt_embeds=False,
         )
     )
-    with patch(
-        "vllm_ascend.ops.kimi_kda.KimiK3DeltaAttention.__init__",
-        new=fake_upstream_init,
+    with (
+        patch("vllm_ascend.ops.kimi_kda.KimiK3DeltaAttention.__init__", new=fake_upstream_init),
+        patch(
+            "vllm_ascend.ascend_config.get_ascend_config",
+            return_value=SimpleNamespace(kda_internal_prefill_checkpoints=False),
+        ),
     ):
         attention = AscendKimiK3DeltaAttention(config, vllm_config)
 
     assert attention.o_norm.eps == config.rms_norm_eps
+    assert attention.get_prefill_checkpoint_alignment() is None
+    assert not attention._ascend_internal_checkpoint_enabled
 
 
 def test_prepare_beta_slices_and_applies_sigmoid_in_fp32():
@@ -146,6 +151,28 @@ def test_prepare_beta_slices_and_applies_sigmoid_in_fp32():
     assert beta.shape == (1, 3, 1)
     torch.testing.assert_close(beta, raw_beta[:, :3].float().sigmoid())
     assert torch.all((beta >= 0.0) & (beta <= 1.0))
+
+
+@pytest.mark.parametrize("enabled,all_layers", [(False, True), (True, False), (True, True)])
+def test_kda_checkpoint_capability_uses_shared_mamba_grid(enabled, all_layers):
+    from vllm.v1.kv_cache_interface import MambaSpec
+
+    attention = AscendKimiK3DeltaAttention.__new__(AscendKimiK3DeltaAttention)
+    nn.Module.__init__(attention)
+    attention._checkpoint_alignment = 64 if enabled else None
+    attention._ascend_internal_checkpoint_enabled = enabled
+    spec = MambaSpec(block_size=384, shapes=((3, 12), (2, 4, 4)), dtypes=(torch.bfloat16, torch.float32))
+    with (
+        patch("vllm_ascend.ops.kimi_kda.KimiK3DeltaAttention.get_kv_cache_spec", return_value=spec),
+        patch(
+            "vllm_ascend.ops.kimi_kda.get_mamba_prefill_checkpoint_alignment", return_value=64 if all_layers else None
+        ),
+        patch("vllm_ascend.ops.kimi_kda.get_mamba_prefill_checkpoint_grid", return_value=384),
+    ):
+        result = attention.get_kv_cache_spec(SimpleNamespace())
+    assert attention.get_prefill_checkpoint_alignment() == (64 if enabled else None)
+    assert result.num_prefill_checkpoint_blocks == int(enabled and all_layers)
+    assert result.prefill_checkpoint_alignment == (384 if enabled and all_layers else None)
 
 
 def test_prepare_beta_does_not_repeat_auxiliary_sigmoid():

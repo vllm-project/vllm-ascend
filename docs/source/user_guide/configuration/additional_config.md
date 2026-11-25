@@ -377,6 +377,34 @@ Omitting `quant_dtype` selects MXFP8 on 950DT Products:
 }
 ```
 
+## Kimi KDA internal prefill checkpoints
+
+`--additional-config '{"kda_internal_prefill_checkpoints": true}'` opts into
+AscendC KDA internal checkpoints. The default is `false`. This requires a
+`fla_npu` wheel exposing `checkpoint_offsets` and `checkpoint_state` through
+`chunk_kda_fwd`; enabling it with an older wheel raises an error.
+
+The initial implementation targets Ascend950, BF16 KDA activations, a 128-wide
+head, FP32 recurrent cache, `mamba_cache_mode="align"`, and no ubatching.
+Unsupported configurations retain split prefill. All recurrent layers must
+advertise compatible export capability before the scheduler can use it.
+
+The AscendC chunk64 recurrence writes one selected native FP32 state per
+prefill row into scratch while completing the whole packed call. It does not
+cast the existing BF16 intermediate `h` back to FP32 or recompute the prefix.
+The common exporter writes the recurrent snapshot and its pre-convolution
+window to the reserved cache page. Final running states use their own pages.
+PCP keeps complete sequences with local heads; checkpoint offsets are sequence
+coordinates. Producer/standalone hash policy matches Ascend's scheduler and
+cache manager, including RecoverSSM metadata. Decode execution is unchanged.
+
+Scratch is allocated during memory profiling and reused by compatible layers
+on the same worker stream. Its size per worker is
+`max_num_seqs * local_num_heads * head_dim * head_dim * 4` bytes. The option
+does not remove token-budget, alignment or shared-prefix splits required for
+other reasons. Validate output accuracy, prefix restore, PCP/PD ordering and
+end-to-end performance before enabling it in a production deployment.
+
 ## GDN internal prefill checkpoints
 
 Enable with `--additional-config '{"gdn_internal_prefill_checkpoints": true}'`.

@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Ascend Kimi K3 delta attention with TP x PCP head-sharded state."""
 
+from dataclasses import replace
 from functools import wraps
 
 import torch
@@ -15,6 +16,10 @@ from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
     MergedColumnParallelLinear,
+)
+from vllm.model_executor.layers.mamba.abstract import (
+    get_mamba_prefill_checkpoint_alignment,
+    get_mamba_prefill_checkpoint_grid,
 )
 from vllm.model_executor.layers.quantization.modelopt import ModelOptMixedPrecisionConfig
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
@@ -44,7 +49,14 @@ from vllm_ascend.ops.head_parallel import (
     get_head_parallel_rank,
     get_head_parallel_size,
 )
-from vllm_ascend.ops.kda import run_chunk_kda, run_recurrent_kda
+from vllm_ascend.ops.kda import (
+    configure_kda_checkpoint_builder,
+    ensure_kda_checkpoint_workspace,
+    initialize_kda_checkpoints,
+    run_chunk_kda,
+    run_kda_checkpoint_prefill,
+    run_recurrent_kda,
+)
 from vllm_ascend.ops.recurrent_pcp import PCPRecurrentMetadataBuilderMixin
 from vllm_ascend.ops.triton.kda.recoverssm import kda_recoverssm_verify
 from vllm_ascend.quantization.methods.w4a8.w4a8_mxfp4 import (
@@ -214,7 +226,9 @@ def _prepare_beta(
 
 
 class KimiKDAHostMetadataBuilder(PCPRecurrentMetadataBuilderMixin, AscendGDNHostMetadataBuilder):
-    pass
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        configure_kda_checkpoint_builder(self)
 
 
 class KimiKDAHostMetadataBackend(AscendGDNHostMetadataBackend):
@@ -319,6 +333,21 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
             return result
 
         self.conv1d.quant_method.process_weights_after_loading = process_weights_and_pack
+        initialize_kda_checkpoints(self, vllm_config)
+
+    def get_prefill_checkpoint_alignment(self) -> int | None:
+        return self._checkpoint_alignment
+
+    def get_kv_cache_spec(self, vllm_config):
+        spec = super().get_kv_cache_spec(vllm_config)
+        enabled = (
+            self._ascend_internal_checkpoint_enabled and get_mamba_prefill_checkpoint_alignment(vllm_config) is not None
+        )
+        return replace(
+            spec,
+            num_prefill_checkpoint_blocks=int(enabled),
+            prefill_checkpoint_alignment=get_mamba_prefill_checkpoint_grid(vllm_config) if enabled else None,
+        )
 
     def _init_pcp_projections(self, vllm_config, prefix: str) -> None:
         """Bind every KDA head parameter and cache to the same TP x PCP shard."""
@@ -637,6 +666,9 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
         state_indices: torch.Tensor,
         has_initial_state: torch.Tensor,
         prebuilt_metadata,
+        *,
+        checkpoint_metadata=None,
+        raw_qkv=None,
     ) -> torch.Tensor:
         cu_seqlens = (
             prebuilt_metadata.cu_seqlens_host
@@ -659,6 +691,20 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
             raise RuntimeError("KDA state copy requires worker cache initialization before prefill")
         initial_state_vk = state_copy.gather(recurrent_state, state_indices, has_initial_state)
 
+        if checkpoint_metadata is not None and checkpoint_metadata.checkpoint is not None:
+            output, final_state = run_kda_checkpoint_prefill(
+                self,
+                checkpoint_metadata,
+                raw_qkv,
+                q,
+                k,
+                v,
+                raw_gate,
+                beta,
+                initial_state_vk,
+            )
+            state_copy.scatter(recurrent_state, final_state, state_indices)
+            return output
         output, final_state = run_chunk_kda(
             q,
             k,
@@ -690,6 +736,8 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
         forward_context = get_forward_context()
         attn_metadata_raw = forward_context.attn_metadata
         if attn_metadata_raw is None:
+            if getattr(self, "_ascend_internal_checkpoint_enabled", False):
+                ensure_kda_checkpoint_workspace(self)
             core_attn_out.zero_()
             return
 
@@ -807,6 +855,9 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
                 )
 
         core_non_spec = None
+        # The conv kernel returns a separate output; retain the pre-convolution
+        # values needed to reconstruct the checkpoint's convolution window.
+        raw_non_spec = mixed_non_spec
         if mixed_non_spec is not None and mixed_non_spec.shape[0] > 0:
             if attn_metadata.num_prefills > 0:
                 prefill_meta = attn_metadata.non_spec_prefill_metadata
@@ -881,6 +932,8 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
                     attn_metadata.prefill_state_indices,
                     attn_metadata.prefill_has_initial_state,
                     prefill_meta.chunk,
+                    checkpoint_metadata=attn_metadata,
+                    raw_qkv=raw_non_spec[num_decode_tokens:] if split_non_spec else raw_non_spec,
                 )
                 core_non_spec = (
                     torch.cat((core_decode, core_prefill), dim=1) if core_decode is not None else core_prefill
