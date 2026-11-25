@@ -15,8 +15,9 @@ from vllm.distributed import get_dcp_group, get_pcp_group
 from vllm.forward_context import get_forward_context
 from vllm.model_executor.models.deepseek_v2 import DeepseekV32IndexerCache
 from vllm.triton_utils import HAS_TRITON
+from vllm.utils.math_utils import round_up
 from vllm.utils.platform_utils import is_pin_memory_available
-from vllm.utils.torch_utils import kv_cache_dtype_str_to_dtype
+from vllm.utils.torch_utils import get_dtype_size, kv_cache_dtype_str_to_dtype
 from vllm.v1.attention.backend import (
     AttentionBackend,
     AttentionCGSupport,
@@ -330,6 +331,41 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
     @staticmethod
     def get_name() -> str:
         return "ASCEND_SFA_INDEXER"
+
+    @staticmethod
+    def prepare_layerwise_cache_view(
+        raw_cache: torch.Tensor,
+        spec: AscendSFAIndexerCacheSpec,
+        layer: AscendSFAIndexerCache,
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+        """Expose the native K and scale layout from a shared offload slot.
+
+        Without offload, allocation already provides separate K and scale
+        views. Before the first KV write, slice the shared slot into the same
+        two views, with all N K blocks followed by all N scale blocks.
+
+            | K B0 ... K B(N-1) | optional padding | scale B0 ... scale B(N-1) |
+            ^                   ^                  ^
+            0                   k_bytes            scale_offset
+
+        Padding aligns the start of the scale view to its dtype. Both views
+        share the slot's storage. Indexers without scales use one K view.
+        """
+        if not spec.scale_dim:
+            return raw_cache
+        num_blocks, remainder = divmod(raw_cache.numel(), spec.page_size_bytes)
+        assert remainder == 0
+        num_rows = num_blocks * spec.block_size * spec.num_kv_heads * spec.sfa_dcp_replicated_indexer_size
+        k_bytes = num_rows * spec.head_size * get_dtype_size(spec.dtype)
+        scale_elem_size = get_dtype_size(spec.scale_dtype)
+        scale_offset = round_up(k_bytes, scale_elem_size)
+        required_bytes = scale_offset + num_rows * spec.scale_dim * scale_elem_size
+        if required_bytes > raw_cache.numel():
+            raise ValueError(
+                f"Indexer KV cache for {layer.prefix} requires {required_bytes} bytes "
+                f"for aligned K/scale views, got {raw_cache.numel()} bytes."
+            )
+        return raw_cache[:k_bytes], raw_cache[scale_offset:required_bytes]
 
     @staticmethod
     def get_builder_cls():

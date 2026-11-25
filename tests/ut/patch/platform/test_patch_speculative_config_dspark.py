@@ -17,7 +17,6 @@ from vllm_ascend.patch.platform.patch_speculative_config import (
     _ascend_verify_with_parallel_config,
     _normalize_deepseek_dspark_draft,
 )
-from vllm_ascend.utils import vllm_version_is
 
 
 def test_legacy_qwen3_dspark_config_uses_qwen3_loader():
@@ -170,7 +169,7 @@ def initialize_dspark(monkeypatch):
         # normalization, draft parallel-config creation, and after-validator.
         # vLLM #63205 moves draft construction to a method that imports
         # ModelConfig from vllm.config rather than vllm.config.speculative.
-        model_config_module = patch_speculative_config.speculative_config if vllm_version_is("0.33.0") else vllm_config
+        model_config_module = vllm_config
         monkeypatch.setattr(model_config_module, "ModelConfig", lambda **_: draft)
         create_draft_pc = SpeculativeConfig.create_draft_parallel_config
         created = []

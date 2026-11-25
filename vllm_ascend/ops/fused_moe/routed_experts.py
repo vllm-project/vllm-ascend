@@ -107,11 +107,19 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
         super(UnquantizedFusedMoEMethod, self).process_weights_after_loading(layer)
 
         # Keep expert-aware loaders attached for later online weight updates.
-        w13_data = self._maybe_pad_weight(layer.w13_weight.data).transpose(1, 2).contiguous()
-        replace_parameter(layer, "w13_weight", w13_data)
-
-        w2_data = self._maybe_pad_weight(layer.w2_weight.data).transpose(1, 2).contiguous()
-        replace_parameter(layer, "w2_weight", w2_data)
+        enable_fused_mc2 = get_ascend_config().enable_fused_mc2
+        for name in ("w13_weight", "w2_weight"):
+            weight = getattr(layer, name)
+            transposed = self._maybe_pad_weight(weight.data).transpose(1, 2).contiguous()
+            if not enable_fused_mc2 or weight.shape == transposed.shape:
+                # ND weights are read in place by captured graphs, so keep the
+                # parameter's storage across direct reloads.
+                replace_parameter(layer, name, transposed)
+            else:
+                # NZ packing reads the NPU storage's base shape. Reusing the
+                # pre-transpose storage here would pack a rectangular matrix
+                # with its old dimensions.
+                weight.data = transposed
 
         # TODO: Current dispatch_ffn_combine/mega_moe fusion operator ONLY supports NZ format.
         # Therefore, we must cast weights to NZ when fusion is enabled.
@@ -119,7 +127,6 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
         # ND format (or other formats), remove this specific 'if' check and the forced
         # npu_format_cast. At that point, the operator should be able to handle weights
         # in their native format without explicit casting here.
-        enable_fused_mc2 = get_ascend_config().enable_fused_mc2
         if enable_fused_mc2:
             use_megamoe = use_cann_megamoe(get_current_vllm_config())
             if not use_megamoe:
