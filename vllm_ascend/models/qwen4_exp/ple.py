@@ -17,14 +17,21 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from copy import copy
 from functools import wraps
 from typing import Any, Literal
 
 import torch
 import torch.nn.functional as F
 import torch_npu
+from vllm.config import VllmConfig
 from vllm.logger import logger
+from vllm.v1.attention.backends.short_conv_attn import (
+    PleShortConvAttentionBackend,
+    PleShortConvAttentionMetadataBuilder,
+)
 from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
+from vllm.v1.kv_cache_interface import MambaSpec
 
 from vllm_ascend.attention.utils import wait_for_kv_layer_from_connector
 from vllm_ascend.ops.triton_ple import (
@@ -32,6 +39,42 @@ from vllm_ascend.ops.triton_ple import (
     ple_conv_prefill,
     ple_conv_spec,
 )
+
+
+class AscendQwen4ExpPLEMetadataBuilder(PleShortConvAttentionMetadataBuilder):
+    """Keep generic ReplaySSM state out of Qwen4Exp's PLE cache.
+
+    ``--use-replayssm`` applies to the model's GDN layers.  Pinned vLLM also
+    exposes that process-wide flag to every Mamba-like metadata builder and
+    consequently assumes a five-state generic ReplaySSM page.  Qwen4Exp PLE
+    is an independent one-state short convolution, so that assumption would
+    read ``MambaSpec.shapes[4]`` while its builder is initialized.
+
+    Give only the PLE builder a private configuration view with generic
+    ReplaySSM disabled.  The real configuration and the GDN RecoverSSM
+    backend remain unchanged.
+    """
+
+    def __init__(
+        self,
+        kv_cache_spec: MambaSpec,
+        layer_names: list[str],
+        vllm_config: VllmConfig,
+        device: torch.device,
+    ) -> None:
+        ple_cache_config = copy(vllm_config.cache_config)
+        ple_cache_config.use_replayssm = False
+        ple_vllm_config = copy(vllm_config)
+        ple_vllm_config.cache_config = ple_cache_config
+        super().__init__(kv_cache_spec, layer_names, ple_vllm_config, device)
+
+
+class AscendQwen4ExpPLEBackend(PleShortConvAttentionBackend):
+    """Qwen4Exp-local PLE backend with the scoped metadata builder."""
+
+    @staticmethod
+    def get_builder_cls() -> type[AscendQwen4ExpPLEMetadataBuilder]:
+        return AscendQwen4ExpPLEMetadataBuilder
 
 
 def _ple_conv_ascend(*args: Any, mode: Literal["decode", "spec", "prefill"], **kwargs: Any) -> None:
@@ -404,4 +447,8 @@ def patch_upstream_ple_short_conv() -> None:
     _patch_legacy_prefill(Qwen4ExpPLELayer)
 
 
-__all__ = ["patch_upstream_ple_short_conv"]
+__all__ = [
+    "AscendQwen4ExpPLEBackend",
+    "AscendQwen4ExpPLEMetadataBuilder",
+    "patch_upstream_ple_short_conv",
+]

@@ -9,6 +9,28 @@ performs no QSA-specific parameter conversion and never copies the key cache.
 import torch
 
 
+def _lightning_metadata_op():
+    try:
+        return torch.ops._C_ascend.npu_lightning_indexer_v2_metadata
+    except AttributeError:
+        from cann_ops_transformer.ops.attention.lightning_indexer_v2 import (
+            lightning_indexer_metadata,
+        )
+
+        return lightning_indexer_metadata
+
+
+def _lightning_op():
+    try:
+        return torch.ops._C_ascend.npu_lightning_indexer_v2
+    except AttributeError:
+        from cann_ops_transformer.ops.attention.lightning_indexer_v2 import (
+            lightning_indexer,
+        )
+
+        return lightning_indexer
+
+
 def lightning_indexer_v2_metadata(
     num_heads_q: int,
     num_heads_k: int,
@@ -43,7 +65,7 @@ def lightning_indexer_v2_metadata(
     layout_k = "BSND" if layout_k is None else layout_k
     mask_mode = 0 if mask_mode is None else mask_mode
     cmp_ratio = 1 if cmp_ratio is None else cmp_ratio
-    return torch.ops._C_ascend.npu_lightning_indexer_v2_metadata(
+    return _lightning_metadata_op()(
         num_heads_q,
         num_heads_k,
         head_dim,
@@ -92,7 +114,7 @@ def lightning_indexer_v2(
     PA_BBND keys may have a noncontiguous page stride. Hardware-specific
     parameter constraints are enforced by CANN. No candidate/V3 mode is used.
     """
-    return torch.ops._C_ascend.npu_lightning_indexer_v2(
+    return _lightning_op()(
         q,
         k,
         w,

@@ -312,7 +312,7 @@ def test_prefill_chunk_offsets_exclude_ordinary_decode(monkeypatch):
     chunk = object()
     prepare_chunk = Mock(return_value=chunk)
     monkeypatch.setattr(
-        "vllm_ascend.models.glm5next.recoverssm_metadata._build_non_spec_chunked_prefill_metadata", prepare_chunk
+        "vllm_ascend.attention.recoverssm_metadata._build_non_spec_chunked_prefill_metadata", prepare_chunk
     )
     m = SimpleNamespace(query_start_loc_cpu=starts, query_start_loc=starts)
     builder._build_conv_metadata(m, metadata, None)

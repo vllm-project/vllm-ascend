@@ -14,6 +14,43 @@ from vllm_ascend.models.qwen4_exp import ple as ple_adapter
 from vllm_ascend.models.qwen4_exp.ple import _ple_conv_ascend, patch_upstream_ple_short_conv
 
 
+def _upstream_staged_ple_conv(
+    *,
+    residual: torch.Tensor,
+    outer_residual: torch.Tensor | None,
+    token_indices: torch.Tensor | None = None,
+    **kwargs,
+) -> None:
+    """Keep upstream convolution/state routing, with eager residual rounding.
+
+    The upstream fused residual addition can omit the intermediate BF16
+    materialization on Ascend, so it cannot serve as the rounding reference.
+    Run only its convolution and then materialize the two Torch additions.
+    """
+    conv_output = torch.zeros_like(residual)
+    upstream_ple_conv(
+        **kwargs,
+        residual=conv_output,
+        outer_residual=None,
+        token_indices=token_indices,
+    )
+    if token_indices is None:
+        updated = conv_output
+        if outer_residual is not None:
+            updated = residual + updated
+            updated = updated + outer_residual
+        residual.copy_(updated)
+    else:
+        # Mixed batches leave physical rows outside this logical token group
+        # untouched. NULL decode/prefill slots still receive gated + zero + outer.
+        rows = token_indices.to(torch.long)
+        updated = conv_output.index_select(0, rows)
+        if outer_residual is not None:
+            updated = residual.index_select(0, rows) + updated
+            updated = updated + outer_residual.index_select(0, rows)
+        residual.index_copy_(0, rows, updated)
+
+
 def _check_output_accuracy(expected: torch.Tensor, actual: torch.Tensor) -> tuple[float, float]:
     atol = rtol = 2**-9 if expected.dtype == torch.float16 else 2**-6
     max_abs_limit = 0.1 if expected.dtype == torch.float16 else 1.0
@@ -81,7 +118,7 @@ def test_decode_batch_sizes():
             )
             expected, actual = residual.clone(), residual.clone()
             expected_state, actual_state = state.clone(), state.clone()
-            upstream_ple_conv(**kwargs, residual=expected, conv_state=expected_state.transpose(1, 2))
+            _upstream_staged_ple_conv(**kwargs, residual=expected, conv_state=expected_state.transpose(1, 2))
             _ple_conv_ascend(**kwargs, residual=actual, conv_state=actual_state)
             torch.npu.synchronize()
             assert torch.equal(expected, actual)
@@ -138,7 +175,7 @@ def test_modes_and_token_mapping():
                     kwargs.pop("spec_query_len")
                 expected, actual = residual.clone(), residual.clone()
                 expected_state, actual_state = state.clone(), state.clone()
-                upstream_ple_conv(**kwargs, residual=expected, conv_state=expected_state.transpose(1, 2))
+                _upstream_staged_ple_conv(**kwargs, residual=expected, conv_state=expected_state.transpose(1, 2))
                 _ple_conv_ascend(**kwargs, residual=actual, conv_state=actual_state)
                 torch.npu.synchronize()
                 pass_ratio, max_abs = _check_output_accuracy(expected, actual)
@@ -190,7 +227,7 @@ def test_prefill_one_request():
                             query_start_loc=torch.tensor([0, tokens], device="npu", dtype=torch.int32),
                             has_initial_states=torch.tensor([initialized], device="npu"),
                         )
-                        upstream_ple_conv(
+                        _upstream_staged_ple_conv(
                             **kwargs,
                             residual=expected_output,
                             conv_state=expected_state.transpose(1, 2),
@@ -233,7 +270,7 @@ def test_prefill_multiple_requests_across_token_chunks():
         )
         expected, actual = residual.clone(), residual.clone()
         expected_state, actual_state = state.clone(), state.clone()
-        upstream_ple_conv(**kwargs, residual=expected, conv_state=expected_state.transpose(1, 2))
+        _upstream_staged_ple_conv(**kwargs, residual=expected, conv_state=expected_state.transpose(1, 2))
         _ple_conv_ascend(**kwargs, residual=actual, conv_state=actual_state)
         torch.npu.synchronize()
         _check_output_accuracy(expected, actual)

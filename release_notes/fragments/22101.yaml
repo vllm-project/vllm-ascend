@@ -1,0 +1,6 @@
+pr: 22101
+entries:
+  - category: performance
+    text: Reduced Qwen3.8-Flash-Next QSA decode latency on Ascend A5 by sharing MRoPE position and cosine/sine loads across query heads.
+    model: qwen3.8-flash-next
+    hardware: [A5]
