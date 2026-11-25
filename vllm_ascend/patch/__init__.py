@@ -440,36 +440,29 @@
 #       separate hook that can be overridden per-model-type.
 #
 # ** 18. File: platform/patch_speculative_config.py**
-# Native MiniMax Flash draft extension:
-#   Targets: SpeculativeConfig.__post_init__ and draft HF configuration loading.
-#   Why: native DSpark exports use a standalone architecture and carry their
-#        own dspark/config.json, while upstream normalizes unknown drafts to
-#        DSparkDraftModel.
-#   How: preserve DSparkMiniMaxDraftModel before Pydantic validation and
-#        normalize the checkpoint's dspark/config.json without changing the
-#        target or checkpoint. The adapter, its checkpoint contract and weight
-#        loading live in models/minimax_m3/minimax_m3_dspark.py; it inherits
-#        DSpark drafting and changes only Flash norms, MLP and loading.
-#   Related PR:
-#        https://github.com/vllm-project/vllm/pull/64111
-#   Future Plan: remove the architecture guard and config/weight normalization
-#        once upstream loads native MiniMax Flash drafts. Retain only required
-#        Ascend quantized projection handling behind the upstream extension points.
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.config.speculative.SpeculativeConfig.hf_config_override`
 #    Why:
-#       Upstream v0.32.0 remaps most MTP draft model_types/architectures
-#       natively. The remaining Ascend deltas are legacy checkpoint
-#       normalization upstream does not cover: Kimi K2.5 DFlash YaRN amplitude,
-#       un-converted Qwen3 DSpark drafts, and the VL glm5_next_text wrapper.
+#       Upstream v0.34.0 remaps most MTP/DSpark draft model_types/architectures
+#       natively (including MiniMax DSpark subfolder discovery and architecture
+#       preservation in vllm#64111). The remaining Ascend deltas are legacy
+#       checkpoint normalizations upstream does not cover (Kimi K2.5 DFlash
+#       YaRN amplitude, un-converted Qwen3 DSpark drafts, and the VL
+#       glm5_next_text wrapper) plus MiniMax DSpark's Ascend config
+#       normalization and weight-header-derived quantization metadata.
 #    How：
-#       Call upstream `hf_config_override` first, then apply the legacy
-#       normalizations on top.
+#       Route MiniMax DSpark drafts through `draft_hf_override`; otherwise call
+#       upstream `hf_config_override` first and apply the legacy normalizations
+#       on top.
 #    Related PR (if no, explain why):
-#       No, Ascend-specific legacy checkpoint compatibility.
+#       https://github.com/vllm-project/vllm/pull/64111 handles native MiniMax
+#       DSpark recognition and default checkpoint selection. No upstream PR
+#       covers the remaining legacy compatibility or Ascend weight-header
+#       quantization metadata.
 #    Future Plan:
 #       Remove these normalizations once the checkpoints ship converted
-#       configs and upstream handles glm5_next_text MTP remapping.
+#       configs, upstream handles glm5_next_text MTP remapping, and Ascend can
+#       derive MiniMax metadata through a loader extension point.
 #
 #   2. `vllm.config.speculative.SpeculativeConfig.__post_init__`
 #    Why:
