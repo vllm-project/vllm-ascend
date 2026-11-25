@@ -695,9 +695,7 @@ class NPUModelRunner(GPUModelRunner):
         zeroed = set(scheduler_output.new_block_ids_to_zero or ())
         page_indices_by_layout: dict[tuple[int, int, torch.device], torch.Tensor] = {}
         for value_scale, cache, ratio, group_id in entries:
-            block_ids = sorted(
-                block_id for block_id in blocks_by_group.get(group_id, set()) - zeroed if block_id > 0
-            )
+            block_ids = sorted(block_id for block_id in blocks_by_group.get(group_id, set()) - zeroed if block_id > 0)
             if not block_ids:
                 continue
             if (block_ids[-1] + 1) * ratio > cache.shape[0]:

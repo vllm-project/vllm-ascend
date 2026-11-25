@@ -2203,9 +2203,7 @@ def test_pull_admission_restores_c8_v_scales_after_partial_page_copy(ratio):
     # physical page. Its V scales are static and must be repaired before forward.
     raw[128 + ratio * pitch : 128 + 2 * ratio * pitch].fill_(73)
     expected = raw.clone()
-    expected_views = mxfp_paged_cache_views(
-        expected[128:-128], 2 * ratio, 2, 64, 64, 512, page_stride_bytes=pitch
-    )
+    expected_views = mxfp_paged_cache_views(expected[128:-128], 2 * ratio, 2, 64, 64, 512, page_stride_bytes=pitch)
     fill_mxfp_v_scale_cache(layer.v_cache_scale, expected_views[3][ratio : 2 * ratio])
     output = SimpleNamespace(
         has_sync_kv_loads=False,
@@ -2225,9 +2223,7 @@ def test_pull_admission_restores_resumed_pages_but_skips_zeroed_pages():
     output = SimpleNamespace(
         has_sync_kv_loads=False,
         scheduled_new_reqs=[],
-        scheduled_cached_reqs=SimpleNamespace(
-            req_ids=["resumed"], new_block_ids=[([1],)], resumed_req_ids={"resumed"}
-        ),
+        scheduled_cached_reqs=SimpleNamespace(req_ids=["resumed"], new_block_ids=[([1],)], resumed_req_ids={"resumed"}),
         new_block_ids_to_zero=[1],
     )
 
