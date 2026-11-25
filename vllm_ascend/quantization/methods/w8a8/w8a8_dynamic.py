@@ -134,11 +134,26 @@ class AscendW8A8DynamicLinearMethod(AscendLinearScheme):
         return output
 
     def process_weights_after_loading(self, layer):
-        layer.weight.data = layer.weight.data.transpose(0, 1).contiguous()
-        # cast quantized weight tensors in NZ format for higher inference speed
-        if self.act_quant_type == torch.int8:
-            layer.weight.data = maybe_trans_nz(layer.weight.data)
-        layer.weight_scale.data = layer.weight_scale.data.flatten()
+        weight = layer.weight.data
+        mega_qkv = getattr(layer, "_mega_kda_int8_qkv", False)
+        if mega_qkv and (
+            weight.dtype != torch.int8
+            or weight.ndim != 2
+            or weight.shape[1] != 7168
+            or weight.shape[0] % 384
+            or layer.weight_scale.dtype != torch.bfloat16
+            or layer.weight_scale.shape not in ((weight.shape[0],), (weight.shape[0], 1))
+        ):
+            raise ValueError("INT8 MegaKDA requires Q/K/V weights [3*N*128,7168] and one BF16 scale per channel")
+        weight = weight.transpose(0, 1).contiguous()
+        if mega_qkv:
+            # The FLA ABI requires NZ even when generic linear layers use ND.
+            weight = torch_npu.npu_format_cast(weight, ACL_FORMAT_FRACTAL_NZ)
+        elif self.act_quant_type == torch.int8:
+            weight = maybe_trans_nz(weight)
+        layer.weight.data = weight
+        scale = layer.weight_scale.data.flatten()
+        layer.weight_scale.data = scale.contiguous() if mega_qkv else scale
         layer.weight_scale_fp32 = layer.weight_scale.data.to(torch.float32)
         layer.weight_offset.data = layer.weight_offset.data.flatten()
 
