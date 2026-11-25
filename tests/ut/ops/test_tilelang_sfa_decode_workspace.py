@@ -8,52 +8,19 @@ import pytest
 import torch
 
 from vllm_ascend.ops.tilelang.sfa_decode import runtime, weights
-from vllm_ascend.ops.tilelang.sfa_decode.single import (
-    WORKSPACE_PADDING_BYTES,
-    decode_context_bucket,
-    projection_rows,
-    resident_workspace_bytes,
+
+
+@pytest.mark.parametrize(
+    "spec",
+    [
+        None,
+        SimpleNamespace(method="mtp", num_speculative_tokens=1),
+        SimpleNamespace(method="eagle3", num_speculative_tokens=5),
+    ],
 )
-
-
-@pytest.mark.parametrize("model_context, compiled_context", [(65536, 65536), (131072, 131072), (524287, 524288)])
-def test_decode_arena_holds_every_graph_bucket(monkeypatch, model_context, compiled_context):
-    resources = {}
-
-    def get_resource(key, allocate):
-        if key not in resources:
-            resources[key] = allocate()
-        return resources[key]
-
-    weights = SimpleNamespace(
-        qkv_a=torch.empty(0, device="meta"),
-        index_heads=torch.empty((32, 4096), dtype=torch.bfloat16, device="meta"),
-    )
-    manager = SimpleNamespace(get_persistent_resource=get_resource)
-    monkeypatch.setattr(runtime, "current_workspace_manager", lambda: manager)
-    monkeypatch.setattr(runtime, "prepare_decode_weights", lambda impl: weights)
-    impl = Mock()
-    impl.indexer.impl.k_norm.eps = 1e-6
-    impl.vllm_config.speculative_config = None
-    impl.vllm_config.model_config.max_model_len = model_context
-    for capacity in (1, 2, 3, 4, 5, 32, 33, 1024):
-        impl.vllm_config.scheduler_config.max_num_seqs = capacity
-        layer = runtime.DecodeLayer(impl)
-        required = (
-            max(resident_workspace_bytes(b, compiled_context) for b in range(1, capacity + 1)) + WORKSPACE_PADDING_BYTES
-        )
-        assert layer.scratch.numel() == required
-        assert layer.indices.shape == (projection_rows(capacity), 2176)
-        assert layer.indices.storage_offset() * layer.indices.element_size() == required
-        assert runtime.DecodeLayer(impl).arena is layer.arena
-
-
-def test_long_index_scores_share_the_latent_arena():
-    assert decode_context_bucket(65536) == 65536
-    assert decode_context_bucket(65537) == 131072
-    assert decode_context_bucket(524289) is None
-    assert resident_workspace_bytes(4, 524288) == resident_workspace_bytes(4)
-    assert resident_workspace_bytes(1024, 524288) - resident_workspace_bytes(1024) == 1024 * (131072 - 32768) * 2
+def test_other_decode_modes_use_native_attention(spec):
+    impl = SimpleNamespace(vllm_config=SimpleNamespace(speculative_config=spec))
+    assert runtime.prepare_decode_layer(impl) is None
 
 
 def test_mtp5_1m_bind_uses_worker_tables_and_graph_geometry(monkeypatch):
@@ -64,7 +31,6 @@ def test_mtp5_1m_bind_uses_worker_tables_and_graph_geometry(monkeypatch):
     monkeypatch.setattr(runtime, "current_workspace_manager", lambda: manager)
     impl = Mock()
     impl.indexer.impl.k_norm.eps = 1e-6
-    impl.vllm_config.speculative_config.num_speculative_tokens = 5
     impl.vllm_config.model_config.max_model_len = 1048576
     impl.vllm_config.scheduler_config.max_num_seqs = 60
     for tokens, padded_rows in ((216, 256), (324, 384), (360, 384)):
@@ -84,7 +50,7 @@ def test_mtp5_1m_bind_uses_worker_tables_and_graph_geometry(monkeypatch):
     ix.tail_cache.prefix = "tail"
     ix._bound_caches.side_effect = lambda cache: (keys, scales) if cache is ix.k_cache else (ring,)
     tail = SimpleNamespace()
-    context = SimpleNamespace(cudagraph_runtime_mode=runtime.CUDAGraphMode.FULL, attn_metadata={"tail": tail})
+    context = SimpleNamespace(attn_metadata={"tail": tail})
     monkeypatch.setattr(runtime, "get_forward_context", lambda: context)
     main_cache = torch.empty((2, 128, 1, 528), dtype=torch.float8_e4m3fn, device=meta)
 
@@ -127,26 +93,6 @@ def test_mtp5_1m_bind_uses_worker_tables_and_graph_geometry(monkeypatch):
         idx.block_table = integers((requests, 8191))
         assert layer.bind(*args) is None
     assert compile_runner.call_count == len(graph_shapes)
-
-
-def test_output_weight_pack_preserves_codes_scales_and_native_alias(monkeypatch):
-    monkeypatch.setattr(weights, "_nd", lambda tensor: tensor.detach())
-    channels, outputs = 2048, 32
-    generator = torch.Generator().manual_seed(3510)
-    codes = torch.randint(256, (channels, outputs), dtype=torch.uint8, generator=generator)
-    scales = torch.randint(256, (channels // 64, outputs, 2), dtype=torch.uint8, generator=generator)
-    layer = SimpleNamespace(
-        weight=codes.view(torch.float8_e4m3fn), weight_scale=scales.reshape(channels // 64, outputs, 2)
-    )
-    packed, sf = weights._mx_weight(layer, outputs, channels, pack_output=True)
-    assert packed.is_contiguous() and packed.shape == (2, outputs, 1024)
-    assert sf.is_contiguous() and sf.shape == (2, outputs, 16)
-    assert torch.equal(packed.view(torch.uint8).transpose(0, 1).reshape(outputs, channels), codes.T)
-    expected_sf = layer.weight_scale.view(torch.int16).view(channels // 64, outputs)
-    assert torch.equal(sf.transpose(1, 2).reshape_as(expected_sf), expected_sf)
-    layer.weight = layer.weight.T.contiguous()
-    shared, sf = weights._mx_weight(layer, outputs, channels, pack_output=True)
-    assert shared.data_ptr() == layer.weight.data_ptr() and sf.data_ptr() == expected_sf.data_ptr()
 
 
 @pytest.mark.parametrize(
@@ -209,11 +155,7 @@ def test_mtp_native_projection_layout_matches_context(monkeypatch, context):
         W_UV=matrix(64, 512, 256),
         q_a_layernorm=norm,
         kv_a_layernorm=norm,
-        vllm_config=SimpleNamespace(
-            speculative_config=SimpleNamespace(num_speculative_tokens=5),
-            model_config=SimpleNamespace(max_model_len=context),
-            scheduler_config=SimpleNamespace(max_num_seqs=60),
-        ),
+        vllm_config=SimpleNamespace(model_config=SimpleNamespace(max_model_len=context)),
     )
     monkeypatch.setattr(
         weights,

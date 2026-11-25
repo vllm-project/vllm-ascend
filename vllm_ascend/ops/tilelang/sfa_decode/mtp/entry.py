@@ -21,10 +21,6 @@ from ..shared.joint_phase_tir import emit_stage, grid_barrier, rewrite_host
 from ..shared.tile_head_bmm_geometry import head_gemm
 from ..shared.tile_keypool_partial_row import partial_projection
 from ..shared.tile_mx_clamped_scale import quant_program as output_quant
-from ..single.output_pipelined import banked_mx
-from ..single.select_long_context import CHUNK_POOLS
-from ..single.tile_banked_dense_projection import projection
-from ..single.value_projection import project_and_quantize
 from . import (
     DENSE_PREFIX_TOKENS,
     MIN_BULK_QUERY_TOKENS,
@@ -42,14 +38,18 @@ from .index_select import pack_dense_indices, pack_program, rank_long_chunks
 from .live_cache_abi import abi_program
 from .live_row_wuv import wuv_program
 from .live_stride_ring import update_program
+from .long_context_topk import CHUNK_POOLS
 from .mtp_projection_slices import kg_slices, qa_slices
 from .native_output import lower_native_weight_copy
+from .output_pipelined import banked_mx
 from .pad_query_rows import prepare as input_edges
 from .scaled_head import finish as native_finish
 from .sparse_attention import DIM, large_main_program
 from .split_main_norm import program as rms_scatter
 from .split_state import state_norm
+from .tile_banked_dense_projection import projection
 from .tile_o_l1_panel import panel_mx
+from .value_projection import project_and_quantize
 
 
 def build(

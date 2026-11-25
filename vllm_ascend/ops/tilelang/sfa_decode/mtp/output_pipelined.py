@@ -3,7 +3,7 @@
 
 import tilelang.ascend.language as T
 
-from ..mtp.native_output import MXFP8_NZ_C0, make_native_weight_loader
+from .native_output import MXFP8_NZ_C0, make_native_weight_loader
 
 
 def banked_mx(batch, width, out_width, bm, bn, panel, bk, mode, output_rows, *, native_output=False):

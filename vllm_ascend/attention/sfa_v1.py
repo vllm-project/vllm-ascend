@@ -932,6 +932,11 @@ class AscendSFAImpl(MLAAttentionImpl):
         self.store_kv_cache_on_host = ascend_config.sparse_kv_offload_config.enabled
         # The draft cache dtype can differ from the target config.
         self.kv_cache_dtype = self.vllm_config.cache_config.cache_dtype
+        self._use_tilelang_decode = (
+            type(self) is AscendSFAImpl
+            and self.kv_cache_dtype == "fp8"
+            and ascend_config.ascend_fusion_config.fusion_ops_sfa_decode
+        )
         self.enable_sparse_sfa_turboquant = self.kv_cache_dtype == TURBOQUANT_CACHE_DTYPE
         self.enable_sparse_sfa_c8 = self.kv_cache_dtype in ("int8", "fp8")
         if self.enable_sparse_sfa_c8:
@@ -1075,7 +1080,7 @@ class AscendSFAImpl(MLAAttentionImpl):
         if self.has_indexer:
             self.indexer.process_weights_after_loading()
 
-        if type(self) is AscendSFAImpl and get_ascend_config().ascend_fusion_config.fusion_ops_sfa_decode:
+        if self._use_tilelang_decode:
             from vllm_ascend.ops.tilelang.sfa_decode.runtime import prepare_decode_layer
 
             self._tilelang_decode = prepare_decode_layer(self)

@@ -1,14 +1,39 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from dataclasses import dataclass
+
 import torch
 import torch_npu
 
 from vllm_ascend.utils import ACL_FORMAT_FRACTAL_ND, ACL_FORMAT_FRACTAL_NZ
 
-from .attention import DecodeWeights
 from .mtp import Q6_MAX_CONTEXT
-from .single import MAX_PACKED_OUTPUT_REQUESTS, OUTPUT_PANEL_CHANNELS
+
+
+@dataclass(frozen=True)
+class DecodeWeights:
+    """TP1 GLM-5.3-Flash weights. Prepared MX codes are [out, in] and the two E8M0
+    scales per 64 input channels are packed into int16 [in // 64, out].
+    Q6 can reuse a native FRACTAL_NZ [in, out] output matrix and input-major W_UK and W_UV.
+    """
+
+    qkv_a: torch.Tensor
+    qkv_a_scales: torch.Tensor
+    q_b: torch.Tensor
+    q_b_scales: torch.Tensor
+    w_uk: torch.Tensor
+    w_uv: torch.Tensor
+    out: torch.Tensor
+    out_scales: torch.Tensor
+    q_norm: torch.Tensor
+    kv_norm: torch.Tensor
+    index_key_gate: torch.Tensor
+    index_norm: torch.Tensor
+    index_bias: torch.Tensor
+    index_ape: torch.Tensor
+    index_query: torch.Tensor
+    index_heads: torch.Tensor
 
 
 def _nd(tensor):
@@ -29,7 +54,7 @@ def _output_major(tensor, out_features, in_features):
     return tensor
 
 
-def _mx_weight(layer, out_features, in_features, *, pack_output=False, allow_native_output=False):
+def _mx_weight(layer, out_features, in_features, *, allow_native_output=False):
     weight = layer.weight.detach()
     native_output = (
         allow_native_output
@@ -52,15 +77,6 @@ def _mx_weight(layer, out_features, in_features, *, pack_output=False, allow_nat
     scales = scales.contiguous().view(torch.int16).view(in_features // 64, out_features)
     if native_output:
         return codes, scales
-    # Pack directly into the worker's only prepared weight and preserve a native ND alias.
-    if pack_output and (
-        not codes.is_contiguous() or codes.untyped_storage().data_ptr() != layer.weight.untyped_storage().data_ptr()
-    ):
-        groups = in_features // OUTPUT_PANEL_CHANNELS
-        codes = codes.view(torch.uint8).view(out_features, groups, OUTPUT_PANEL_CHANNELS)
-        codes = codes.transpose(0, 1).contiguous().view(torch.float8_e4m3fn)
-        scales = scales.view(groups, OUTPUT_PANEL_CHANNELS // 64, out_features).transpose(1, 2).contiguous()
-        return codes, scales
     return codes.contiguous(), scales
 
 
@@ -76,20 +92,9 @@ def prepare_decode_weights(impl) -> DecodeWeights:
     indexer = impl.indexer.impl
     qkv_a, qkv_a_scales = _mx_weight(impl.fused_qkv_a_proj, 2048, 4096)
     q_b, q_b_scales = _mx_weight(impl.q_proj, 16384, 1536)
-    config = impl.vllm_config
     # At 1M the extra projection copies can evict reusable KV prefixes.
-    native_layout = config.speculative_config is not None and config.model_config.max_model_len == Q6_MAX_CONTEXT
-    pack_output = (
-        impl.vllm_config.speculative_config is None
-        and impl.vllm_config.scheduler_config.max_num_seqs <= MAX_PACKED_OUTPUT_REQUESTS
-    )
-    out, out_scales = _mx_weight(
-        impl.o_proj,
-        4096,
-        16384,
-        pack_output=pack_output,
-        allow_native_output=native_layout,
-    )
+    native_layout = impl.vllm_config.model_config.max_model_len == Q6_MAX_CONTEXT
+    out, out_scales = _mx_weight(impl.o_proj, 4096, 16384, allow_native_output=native_layout)
     key_heads = _nd(indexer.wk_weights_proj.weight)
     if key_heads.shape != (160, 4096) or indexer.head_dim != 128:
         raise ValueError("Expected a 128-channel index key and 32 index head weights")

@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import torch
-from vllm.config.compilation import CUDAGraphMode
 from vllm.forward_context import get_forward_context
 from vllm.v1.worker.workspace import current_workspace_manager
 
@@ -10,18 +9,17 @@ from vllm_ascend.attention.indexer_kpool import Glm5NextKPoolIndexerBackend
 from vllm_ascend.device.device_config import is_950
 from vllm_ascend.utils import is_mtp_layer
 
-from .attention import SingleQueryAttention
-from .mtp import PAGE_SIZE, Q6_MAX_CONTEXT, Q6_MAX_REQUESTS, mtp_projection_rows, mtp_scratch_bytes, score_context
-from .mtp_attention import MtpQueryAttention
-from .single import (
-    DECODE_CONTEXT_BUCKETS,
-    MAX_RESIDENT_REQUESTS,
+from .mtp import (
+    PAGE_SIZE,
+    Q6_MAX_CONTEXT,
+    Q6_MAX_REQUESTS,
+    TOKENS_PER_REQUEST,
     WORKSPACE_PADDING_BYTES,
-    decode_context_bucket,
-    head_panel_layout,
-    projection_rows,
-    resident_workspace_bytes,
+    mtp_projection_rows,
+    mtp_scratch_bytes,
+    score_context,
 )
+from .mtp_attention import MtpQueryAttention
 from .weights import prepare_decode_weights
 
 
@@ -37,8 +35,12 @@ def _epsilon(norm):
 
 def prepare_decode_layer(impl):
     config = impl.vllm_config
-    if config.speculative_config is not None and (
-        config.speculative_config.num_speculative_tokens != 5 or config.model_config.max_model_len > Q6_MAX_CONTEXT
+    spec = config.speculative_config
+    if (
+        spec is None
+        or spec.method != "mtp"
+        or spec.num_speculative_tokens != TOKENS_PER_REQUEST - 1
+        or config.model_config.max_model_len > Q6_MAX_CONTEXT
     ):
         return None
     if (
@@ -92,34 +94,19 @@ class DecodeLayer:
         self.weights = prepare_decode_weights(impl)
         self.indexer = impl.indexer.impl
         self.epsilon = _epsilon(self.indexer.k_norm)
-        self.capacity = min(impl.vllm_config.scheduler_config.max_num_seqs, 1024)
+        scheduler = impl.vllm_config.scheduler_config
         self.model_context = impl.vllm_config.model_config.max_model_len
-        spec = impl.vllm_config.speculative_config
-        self.queries = 1 if spec is None else 1 + spec.num_speculative_tokens
+        self.capacity = min(scheduler.max_num_seqs, Q6_MAX_REQUESTS)
+        self.max_tokens = min(self.capacity * TOKENS_PER_REQUEST, scheduler.max_num_batched_tokens)
+        rows = mtp_projection_rows(self.max_tokens)
+        self.head_panel = MtpQueryAttention.pack_head_panel(self.weights, rows)
+        size = mtp_scratch_bytes(self.capacity, self.max_tokens, score_context(self.model_context))
         device = self.weights.qkv_a.device
-        if self.queries == 6:
-            self.capacity = min(self.capacity, Q6_MAX_REQUESTS)
-            self.max_tokens = min(self.capacity * 6, impl.vllm_config.scheduler_config.max_num_batched_tokens)
-            rows = mtp_projection_rows(self.max_tokens)
-            self.head_panel = MtpQueryAttention.pack_head_panel(self.weights, rows)
-            size = mtp_scratch_bytes(self.capacity, self.max_tokens, score_context(self.model_context))
-        else:
-            rows = projection_rows(self.capacity)
-            self.panels = {
-                head_panel_layout(b): SingleQueryAttention.pack_head_panel(self.weights, b)
-                for b in (1, 129, 449)
-                if b == 1 or b <= self.capacity
-            }
-            context = decode_context_bucket(self.model_context) or DECODE_CONTEXT_BUCKETS[-1]
-            size = max(
-                resident_workspace_bytes(self.capacity, context),
-                resident_workspace_bytes(min(self.capacity, MAX_RESIDENT_REQUESTS), context),
-            )
         # All layers on one worker use the same arena. Reserve it before KV sizing.
         # Kernel scratch starts at zero; index exchange occupies the disjoint suffix.
         scratch_bytes = size + WORKSPACE_PADDING_BYTES
         self.arena = current_workspace_manager().get_persistent_resource(
-            ("tilelang_sfa_decode", self.queries, rows, size),
+            ("tilelang_sfa_decode", TOKENS_PER_REQUEST, rows, size),
             lambda: torch.empty(scratch_bytes + rows * 2176 * 4, dtype=torch.uint8, device=device),
         )
         self.scratch = self.arena[:scratch_bytes]
@@ -133,26 +120,13 @@ class DecodeLayer:
         tokens = hidden.shape[0]
         if requests < 1 or requests > self.capacity:
             return None
-        full = (
-            get_forward_context().cudagraph_runtime_mode == CUDAGraphMode.FULL
-            or torch.npu.is_current_stream_capturing()
-        )
-        if self.queries == 1:
-            if tokens != requests or md.max_query_len != 1 or (not full and md.num_actual_tokens != requests):
-                return None
-            # A replay may have a longer prefix than the capture step.
-            limit = self.model_context if full or self.model_context <= 131072 else md.max_seq_len
-            context = decode_context_bucket(limit)
-            if context is None:
-                return None
-        else:
-            if (
-                not 1 <= tokens <= min(self.max_tokens, 6 * requests)
-                or self.epsilon != 1e-6
-                or not 1 <= md.max_query_len <= 6
-            ):
-                return None
-            context = self.model_context
+        if (
+            not 1 <= tokens <= min(self.max_tokens, TOKENS_PER_REQUEST * requests)
+            or self.epsilon != 1e-6
+            or not 1 <= md.max_query_len <= TOKENS_PER_REQUEST
+        ):
+            return None
+        context = self.model_context
         output = output[:tokens]
         if not _dense(hidden, (tokens, 4096), torch.bfloat16) or not _dense(output, hidden.shape, torch.bfloat16):
             return None
@@ -217,84 +191,50 @@ class DecodeLayer:
             ids.stride(0),
             width,
         )
-        if self.queries == 1:
-            if self.epsilon is None or ring.shape[1:] != (4, 256) or ring.stride()[1:] != (256, 1):
+        if (
+            ring.shape[1:] != (9, 256)
+            or ring.stride() != (289 * 256, 256, 1)
+            or tail_md.cann_inputs is None
+            or not _dense(tail_md.cann_inputs.write_indices, (requests, 6), torch.int64)
+            or not _dense(idx.cum_query_lens, (requests,), torch.int64)
+            or not _dense(md.positions, (tokens,), torch.int64)
+            or not _dense(md.query_start_loc, (requests + 1,), torch.int32)
+            or not _dense(idx.slot_mapping[:tokens], (tokens,), torch.int64)
+        ):
+            return None
+        if geometry not in self.runners:
+            if torch.npu.is_current_stream_capturing():
                 return None
-            if geometry not in self.runners:
-                if torch.npu.is_current_stream_capturing():
-                    return None
-                self.runners[geometry] = SingleQueryAttention(
-                    self.weights,
-                    requests,
-                    len(cache),
-                    context,
-                    index_width=width,
-                    index_pages=len(keys),
-                    table_columns=(main_cols, index_cols),
-                    tail_layout=(len(ring), ring.stride(0), ids.stride(0)),
-                    index_norm_eps=self.epsilon,
-                    mask_padding=True,
-                    workspace=self.scratch,
-                    head_panel=self.panels[head_panel_layout(requests)],
-                )
-            args: tuple[torch.Tensor, ...] = (
-                hidden,
-                cache.view(torch.int32).view(-1, 128, 132),
-                md.block_table,
-                slots.view(-1, 1),
-                idx.raw_seq_lens,
-                ring,
-                ids,
-                idx.block_table,
-                storage,
-                selected,
-                output,
+            self.runners[geometry] = MtpQueryAttention(
+                self.weights,
+                requests,
+                len(keys),
+                len(cache),
+                len(ring),
+                workspace=self.scratch,
+                head_panel=self.head_panel,
+                tokens=tokens,
+                model_context=context,
+                table_columns=(main_cols, index_cols),
+                ring_table_stride=ids.stride(0),
+                index_width=width,
             )
-        else:
-            if (
-                ring.shape[1:] != (9, 256)
-                or ring.stride() != (289 * 256, 256, 1)
-                or tail_md.cann_inputs is None
-                or not _dense(tail_md.cann_inputs.write_indices, (requests, 6), torch.int64)
-                or not _dense(idx.cum_query_lens, (requests,), torch.int64)
-                or not _dense(md.positions, (tokens,), torch.int64)
-                or not _dense(md.query_start_loc, (requests + 1,), torch.int32)
-                or not _dense(idx.slot_mapping[:tokens], (tokens,), torch.int64)
-            ):
-                return None
-            if geometry not in self.runners:
-                if torch.npu.is_current_stream_capturing():
-                    return None
-                self.runners[geometry] = MtpQueryAttention(
-                    self.weights,
-                    requests,
-                    len(keys),
-                    len(cache),
-                    len(ring),
-                    workspace=self.scratch,
-                    head_panel=self.head_panel,
-                    tokens=tokens,
-                    model_context=context,
-                    table_columns=(main_cols, index_cols),
-                    ring_table_stride=ids.stride(0),
-                    index_width=width,
-                )
-            args = (
-                hidden,
-                cache,
-                md.block_table,
-                slots,
-                idx.raw_seq_lens,
-                idx.cum_query_lens,
-                md.positions,
-                md.query_start_loc,
-                idx.block_table,
-                storage,
-                ring,
-                ids,
-                idx.slot_mapping[:tokens],
-                tail_md.cann_inputs.write_indices,
-                selected,
-                output,
-            )
+        args = (
+            hidden,
+            cache,
+            md.block_table,
+            slots,
+            idx.raw_seq_lens,
+            idx.cum_query_lens,
+            md.positions,
+            md.query_start_loc,
+            idx.block_table,
+            storage,
+            ring,
+            ids,
+            idx.slot_mapping[:tokens],
+            tail_md.cann_inputs.write_indices,
+            selected,
+            output,
+        )
         return self.runners[geometry], args, selected

@@ -4,8 +4,8 @@
 import torch
 
 from . import compile_mtp_decode
-from .attention import DecodeWeights
 from .mtp import PAGE_SIZE, mtp_projection_rows, score_context
+from .weights import DecodeWeights
 from .workspace import scratch_allocator
 
 

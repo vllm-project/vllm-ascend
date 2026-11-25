@@ -56,27 +56,3 @@ def program(batch, pages, page, ctx, tail):
             T.copy(sf, IQS[row, start : start + chunk])
 
     return main
-
-
-def quantize_prefill_heads(tokens):
-    heads, channels = 32, 128
-
-    @T.prim_func
-    def main(
-        Raw: T.Tensor((tokens, heads * channels), T.bfloat16),
-        W: T.Tensor((tokens, heads), T.bfloat16),
-        Q: T.Tensor((tokens, heads, channels), T.float8_e4m3fn),
-        QS: T.Tensor((tokens, heads), T.float32),
-    ):
-        with T.Kernel(tokens) as row:
-            src = T.alloc_shared((heads, channels), T.bfloat16)
-            codes = T.alloc_shared((heads, channels), T.float8_e4m3fn)
-            coef = T.alloc_shared((heads,), T.float32)
-            weights = T.alloc_shared((heads,), T.bfloat16)
-            T.copy(W[row, :], weights)
-            T.copy(Raw[row, :], T.view(src, (heads * channels,)))
-            _quantize_heads(src, codes, coef, heads, weights)
-            T.copy(codes, Q[row, :, :])
-            T.copy(coef, QS[row, :])
-
-    return main

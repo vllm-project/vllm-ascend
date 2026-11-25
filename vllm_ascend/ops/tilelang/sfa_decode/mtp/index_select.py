@@ -4,7 +4,7 @@
 import tilelang.ascend.language as T
 from tilelang.ascend.language import simd as S
 
-from ..single.select_long_context import CHUNK_POOLS, TOP_K, make_long_rankers, make_long_selector
+from .long_context_topk import CHUNK_POOLS, TOP_K, make_long_rankers, make_long_selector
 
 
 def pack_dense_indices(batch, requests, width):
