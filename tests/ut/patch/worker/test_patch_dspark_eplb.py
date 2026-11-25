@@ -31,7 +31,6 @@ def test_invalid_target_is_still_rejected(phase):
         additional_config={"eplb_config": {"load_collection_phase": phase}},
         parallel_config=SimpleNamespace(enable_eplb=False),
         speculative_config=object(),
-        use_v2_model_runner=True,
     )
     with pytest.raises(ValueError, match="requires --enable-eplb"):
         _validate_eplb_config(config)

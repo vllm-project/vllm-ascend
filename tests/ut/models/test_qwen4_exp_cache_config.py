@@ -864,7 +864,6 @@ def _qsa_page_test_config(manager_block_size):
         parallel_config=SimpleNamespace(decode_context_parallel_size=1, cp_kv_cache_interleave_size=1),
         speculative_config=None,
         num_speculative_tokens=0,
-        use_v2_model_runner=True,
     )
     return groups, runtime_config
 

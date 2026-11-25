@@ -27,7 +27,6 @@ def make_config():
             ),
         ),
         speculative_config=NS(method="mtp", num_speculative_tokens=4),
-        use_v2_model_runner=True,
         cache_config=NS(
             use_replayssm=True,
             mamba_cache_mode="none",
@@ -82,7 +81,6 @@ def test_target_geometry_and_recoverssm_record_layout_agree(tp):
     [
         ("speculative_config", "num_speculative_tokens", 0, "requires speculative decoding"),
         (None, "speculative_config", None, "requires speculative decoding"),
-        (None, "use_v2_model_runner", False, "Runner V2"),
         ("cache_config", "mamba_ssm_cache_dtype", "float16", "BF16 or FP32 SSM"),
         ("cache_config", "mamba_cache_dtype", "float32", "BF16 convolution"),
         ("model_config", "dtype", torch.float16, "BF16 activations"),

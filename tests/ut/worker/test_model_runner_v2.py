@@ -53,7 +53,6 @@ def _make_runner(*args, **kwargs):
     )
     runner.vllm_config = SimpleNamespace(
         kv_transfer_config=None,
-        use_v2_model_runner=False,
         parallel_config=SimpleNamespace(prefill_context_parallel_size=1, decode_context_parallel_size=1),
     )
     runner.max_num_tokens = 16
@@ -810,7 +809,6 @@ def test_load_model_original_profiler_counts_post_load_weights(monkeypatch, with
     runner.vllm_config.model_config = runner.model_config
     runner.vllm_config.cache_config = SimpleNamespace(block_size=128)
     runner.vllm_config.compilation_config = runner.compilation_config
-    runner.vllm_config.use_v2_model_runner = True
     runner.compilation_config.static_forward_context = {}
     runner.compilation_config.mode = CompilationMode.NONE
     runner.req_states = Mock()
@@ -2413,6 +2411,35 @@ def test_glm_dflash2_device_lengths_do_not_require_attention_groups(model_type):
     runner, _, _ = _device_length_runner(model_type)
     del runner.attn_groups
     assert runner._can_skip_spec_cpu_length_sync() is True
+
+
+@pytest.mark.parametrize(
+    "target_arch,draft_arch,draft_uses_fa3,kv_transfer,expected",
+    [
+        ("Qwen3_5ForConditionalGeneration", "DFlash2DraftModel", True, None, True),
+        ("Qwen3_5ForConditionalGeneration", "DFlash2DraftModel", False, None, False),
+        ("Qwen3_5MoeForConditionalGeneration", "DFlash2DraftModel", True, None, False),
+        ("Qwen3_5ForConditionalGeneration", "Qwen3DFlashForCausalLM", True, None, False),
+        ("Qwen3_5ForConditionalGeneration", "DFlash2DraftModel", True, SimpleNamespace(), False),
+    ],
+)
+def test_qwen_dflash2_cpu_length_sync(target_arch, draft_arch, draft_uses_fa3, kv_transfer, expected):
+    from vllm_ascend.worker.v2.model_states.mamba_hybrid import AscendMambaHybridModelState
+
+    fa3 = SimpleNamespace(
+        full_cls_name=lambda: ("vllm_ascend.attention.flash_attention_v3", "AscendFlashAttentionBackend")
+    )
+    runner, _, _ = _device_length_runner("qwen3_5_text")
+    runner.model_config.architecture = target_arch
+    runner.model_state = AscendMambaHybridModelState.__new__(AscendMambaHybridModelState)
+    runner.speculative_config.draft_model_config.architectures = [draft_arch]
+    runner.vllm_config.kv_transfer_config = kv_transfer
+    draft_backend = fa3 if draft_uses_fa3 else AscendAttentionBackend
+    runner.speculator = SimpleNamespace(attn_groups=[[SimpleNamespace(backend=draft_backend)]])
+    runner.initialize_spec_cpu_length_sync()
+    for target_backend in (AscendAttentionBackend, fa3):
+        runner.attn_groups = [[SimpleNamespace(backend=target_backend)]]
+        assert runner._can_skip_spec_cpu_length_sync() is expected
 
 
 @pytest.mark.parametrize(

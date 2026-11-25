@@ -83,7 +83,6 @@ def test_checkpoint_loader_populates_every_local_physical_expert(draft_factory, 
     routed = experts.routed_experts = RoutedExperts.__new__(RoutedExperts)
     torch.nn.Module.__init__(routed)
     routed.moe_config = SimpleNamespace(ep_size=ep_size)
-    routed._use_v2_model_runner = True
     routed.shared_expert_online_loader = None
     routed.w13_weight = torch.nn.Parameter(torch.full((local, 2), -1.0), requires_grad=False)
     routed.w2_weight = torch.nn.Parameter(torch.full((local, 1), -1.0), requires_grad=False)

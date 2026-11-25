@@ -67,7 +67,7 @@ The image tags below are fixed to the release that matches this guide. If your v
 
     docker run -it --name "$CONTAINER_NAME" \
         -e ASCEND_VISIBLE_DEVICES=0-7 \
-        --network host --privileged --shm-size=100g \
+        --network host --shm-size=100g \
         -v /usr/local/Ascend/driver:/usr/local/Ascend/driver:ro \
         -v /usr/local/Ascend/firmware:/usr/local/Ascend/firmware:ro \
         -v /usr/local/sbin:/usr/local/sbin:ro \
@@ -90,7 +90,7 @@ The image tags below are fixed to the release that matches this guide. If your v
 
     docker run -it --name "$CONTAINER_NAME" \
         -e ASCEND_VISIBLE_DEVICES=0-15 \
-        --network host --privileged --shm-size=100g \
+        --network host --shm-size=100g \
         -v /usr/local/Ascend/driver:/usr/local/Ascend/driver:ro \
         -v /usr/local/Ascend/firmware:/usr/local/Ascend/firmware:ro \
         -v /usr/local/sbin:/usr/local/sbin:ro \
@@ -112,7 +112,7 @@ The image tags below are fixed to the release that matches this guide. If your v
 
     docker run -it --name "$CONTAINER_NAME" \
         -e ASCEND_VISIBLE_DEVICES=0-7 \
-        --network host --ipc host --privileged --shm-size=100g \
+        --network host --ipc host --shm-size=100g \
         -v /usr/local/Ascend/driver:/usr/local/Ascend/driver:ro \
         -v /usr/local/Ascend/firmware:/usr/local/Ascend/firmware:ro \
         -v /usr/local/sbin:/usr/local/sbin:ro \

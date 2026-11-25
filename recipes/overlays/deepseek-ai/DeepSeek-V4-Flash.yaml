@@ -49,6 +49,70 @@ variants:
         docker_image: quay.io/ascend/vllm-ascend:v0.23.0-a3
         install:
           pip: false
+  ascend_w8a8_0731:
+    model_id: Eco-Tech/DeepSeek-V4-Flash-0731-w8a8
+    label: W8A8 0731 (Ascend A2)
+    precision: int8
+    vram_minimum_gb: 341
+    description: >-
+      ModelSlim INT8 W8A8 quantization of the official DeepSeek-V4-Flash-0731
+      release for one Atlas 800I A2 node (8x Ascend 910B4, 64 GB each), using
+      TP8 with expert parallelism. Requires --quantization ascend.
+    supported_hardware:
+      - ascend_910b
+    supported_frontends:
+      - python
+    # The base recipe owns the spec-decoding mode allowlists, so no mode is
+    # selectable for this checkpoint yet; DSpark is fixed in the variant and
+    # the feature toggle is hidden until the core recipe lists the variant.
+    supported_features:
+      - tool_calling
+      - reasoning
+    tp:
+      ascend_910b: 8
+    min_vllm_version: '0.32.0'
+    # DSpark k=7 is carried on the variant because the base recipe's
+    # modes.dspark.variants does not list this checkpoint yet, and an overlay
+    # cannot extend that list. Move it back to the dspark mode once the core
+    # recipe lists ascend_w8a8_0731.
+    extra_args:
+      - '--quantization'
+      - ascend
+      - '--kv-cache-dtype'
+      - auto
+      - '--max-model-len'
+      - '800000'
+      - '--max-num-batched-tokens'
+      - '8192'
+      - '--max-num-seqs'
+      - '32'
+      - '--gpu-memory-utilization'
+      - '0.95'
+      - '--block-size'
+      - '128'
+      - '--attention_config.indexer_kv_dtype'
+      - int8
+      - '--no-disable-hybrid-kv-cache-manager'
+      - '--model-loader-extra-config'
+      - '{"enable_multithread_load": true, "num_threads": 128}'
+      - '--compilation-config'
+      - '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
+      - '--speculative-config'
+      - '{"method":"dspark","num_speculative_tokens":7,"enforce_eager":true}'
+    extra_env:
+      HCCL_OP_EXPANSION_MODE: AIV
+      HCCL_BUFFSIZE: '1024'
+      PYTORCH_NPU_ALLOC_CONF: expandable_segments:True
+      OMP_NUM_THREADS: '10'
+      TASK_QUEUE_ENABLE: '1'
+      VLLM_USE_MODELSCOPE: 'True'
+    hardware_overrides:
+      ascend_910b:
+        docker_image: quay.io/ascend/vllm-ascend:v0.32.0rc1
+        docker_shm_size: '512g'
+        docker_serve_command: vllm serve
+        install:
+          pip: false
   default:
     hardware_overrides:
       ascend_950pr_8x:
@@ -77,6 +141,7 @@ meta:
     ascend_950dt_8x: verified
     ascend_950pr_8x: verified
     ascend_910c: verified
+    ascend_910b: verified
 hardware_overrides:
   npu:
     extra_env:
@@ -104,17 +169,51 @@ hardware_notes:
     link:
       label: Ascend 910C A3 reference
       href: https://docs.vllm.ai/projects/ascend/en/latest/tutorials/models/DeepSeek-V4-Flash.html
+  ascend_910b:
+    title: W8A8 0731 on one Atlas 800I A2 node
+    body: >-
+      Single-node TP8 with expert parallelism on eight Ascend 910B4 (64 GB
+      each), serving the ModelSlim W8A8 quantization of the 0731 release.
+      Validated on vLLM 0.32.0 with vLLM Ascend 0.32.0rc1 (CANN 9.2.1, driver
+      26.0.rc1): weights load at 39.01 GiB per rank, leaving a 16.93 GiB KV
+      pool (887,046 tokens at the 800k context cap), and engine init takes
+      about 59 s. Pin quay.io/ascend/vllm-ascend:v0.32.0rc1, run the container
+      with --ipc=host --shm-size=512g, and export HCCL_IF_IP, VLLM_HOST_IP,
+      HCCL_SOCKET_IFNAME, GLOO_SOCKET_IFNAME and TP_SOCKET_IFNAME per host.
+      Set HCCL_BUFFSIZE=1024, HCCL_OP_EXPANSION_MODE=AIV, OMP_NUM_THREADS=10,
+      TASK_QUEUE_ENABLE=1 and PYTORCH_NPU_ALLOC_CONF=expandable_segments:True.
+      DSpark k=7 is carried on the variant and its spec-decoding toggle is
+      hidden because the core recipe's modes.dspark.variants does not list this
+      checkpoint yet; move it back to the dspark mode once the core recipe does.
+    link:
+      label: vLLM Ascend DeepSeek-V4-Flash tutorial
+      href: https://docs.vllm.ai/projects/ascend/en/latest/tutorials/models/DeepSeek-V4-Flash.html
 strategy_hardware:
   single_node_tp:
     npu: unsupported
   single_node_tep:
     npu: unsupported
+    ascend_910b: supported
+  # The validated A2 lane is one TP8+EP process, so the DEP shape (and its
+  # vLLM Router companion) is not offered there.
+  single_node_dep:
+    ascend_910b: unsupported
   multi_node_dep:
     npu: unsupported
   pd_cluster:
     npu: unsupported
     ascend_910c: supported
 strategy_overrides:
+  single_node_tep:
+    hardware_overrides:
+      ascend_910b:
+        # TEP derives TP from the card count; pin the measured TP8 and replace
+        # the generation-level four-device ASCEND_RT_VISIBLE_DEVICES from npu.
+        extra_args:
+          - '--tensor-parallel-size'
+          - '8'
+        extra_env:
+          ASCEND_RT_VISIBLE_DEVICES: 0,1,2,3,4,5,6,7
   single_node_dep:
     hardware_overrides:
       npu:
@@ -181,3 +280,45 @@ features:
             args:
               - '--speculative-config'
               - '{"method":"dspark","num_speculative_tokens":5,"enforce_eager":true}'
+          ascend_910b:
+            # The exact-GPU key wins over the generation-level `npu` value.
+            # Takes effect once the core recipe lists ascend_w8a8_0731 here.
+            args:
+              - '--speculative-config'
+              - '{"method":"dspark","num_speculative_tokens":7,"enforce_eager":true}'
+
+# Measured A2 lane as an opt-in preset. It is an empty delta on the baseline
+# command: every tunable stays on variants.ascend_w8a8_0731 and
+# strategy_overrides.single_node_tep, so the rendered argv is unchanged. The
+# preset exists to carry the evidence, the pinned image and the tested scope
+# on the page, in `?preset=`, and under /<hf_id>/presets/<key>.json.
+presets:
+  ascend_910b_w8a8_0731:
+    label: "A2 W8A8 0731 (TP8+EP, measured)"
+    hardware: ascend_910b
+    strategy: single_node_tep
+    variants: [ascend_w8a8_0731]
+    default: false
+    description: "Measured single-node lane on 8x Ascend 910B4: 800k context, block 128, int8 indexer KV, DSpark k=7, GMU 0.95."
+    source:
+      label: "vllm-ascend#22746 measured run"
+      href: "https://github.com/vllm-project/vllm-ascend/pull/22746"
+    image:
+      vllm: "quay.io/ascend/vllm-ascend:v0.32.0rc1"
+    runbook: |
+      ## Evidence
+
+      - Hardware: one Atlas 800I A2 node, 8x Ascend 910B4 (64 GB HBM each).
+      - Runtime: vLLM 0.32.0 with vLLM Ascend 0.32.0rc1 (CANN 9.2.1, driver 26.0.rc1).
+      - Checkpoint: `Eco-Tech/DeepSeek-V4-Flash-0731-w8a8` (ModelSlim INT8 W8A8),
+        downloaded through ModelScope.
+      - Weights load at 39.01 GiB per rank, leaving a 16.93 GiB KV pool
+        (887,046 tokens at the 800k context cap); engine init takes about 59 s.
+      - `/v1/models` reports `max_model_len=800000`; `/v1/chat/completions`
+        returns `finish_reason: stop`.
+
+      ## Scope
+
+      This preset records the lane that was actually run for this variant on
+      `ascend_910b`. It is not evidence for FP8 (Preview), NVFP4 (RedHat),
+      single-node DEP, PD, or any multi-node shape.
