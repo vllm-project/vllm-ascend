@@ -129,7 +129,7 @@ def test_dspark_device_metadata_executor_forward_lifecycle(has_task: bool, failu
         device_metadata_executor=executor,
         dcp_manager=None,
         input_batch=SimpleNamespace(lora_id_to_lora_request={}),
-        _sync_metadata_across_dp=lambda num_tokens, **kwargs: (num_tokens, torch.tensor(1), None),
+        _sync_metadata_across_dp=lambda num_tokens, **kwargs: (num_tokens, None, None),
         dynamic_eplb=False,
         eplb_heat_collection_status=False,
     )
@@ -140,6 +140,7 @@ def test_dspark_device_metadata_executor_forward_lifecycle(has_task: bool, failu
     proposer.get_model = lambda: proposer.model
     proposer.hidden_size = 4
     proposer.use_cuda_graph = False
+    proposer.dp_rank = 0
     proposer.dcp_size = 1
     proposer.vllm_config = SimpleNamespace(model_config=SimpleNamespace(use_mla=True))
     proposer.draft_window_size = None
