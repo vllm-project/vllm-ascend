@@ -159,19 +159,13 @@ class AscendMLABackend(AttentionBackend):
         kernel_blocks_per_manager = spec.block_size // block_size
         prefix = (num_blocks * kernel_blocks_per_manager, block_size, spec.num_kv_heads)
         widths = (spec.kv_lora_rank, spec.qk_rope_head_dim)
-        dtypes = (spec.dtype, spec.dtype)
+        dtypes = (spec.dtype, spec.rope_dtype if spec.rope_dtype is not None else spec.dtype)
         # Legacy MLA specs encode page bytes through head_size/dtype. Preserve
         # split FIA components (which can have mixed dtypes) and fused FlashMLA
         # storage until a follow-up unifies the storage metadata.
         if spec.mla_cache_layout == "token_interleaved":
             widths = (sum(widths),)
             dtypes = (spec.dtype,)
-        elif spec.fa_quant_layer:
-            config = get_current_vllm_config()
-            model_config = config.model_config
-            if spec.is_draft and config.speculative_config is not None:
-                model_config = config.speculative_config.draft_model_config
-            dtypes = (spec.dtype, model_config.dtype)
         if any(spec.page_size_bytes % (kernel_blocks_per_manager * dtype.itemsize) for dtype in dtypes):
             raise ValueError("MLA physical pages must split into dtype-aligned kernel slots.")
         slot_bytes = spec.page_size_bytes // kernel_blocks_per_manager
@@ -242,6 +236,17 @@ class AscendMLAAttention(MLAAttention):
             dtype, cache_dtype_str = self.impl.dtype, None
             values["kv_quant_mode"] = KVQuantMode.NONE
 
+        rope_dtype = None
+        if (
+            getattr(self.impl, "fa_quant_layer", False)
+            and not getattr(self.impl, "use_flashmla", False)
+            and not (use_sfa_turboquant or use_sfa_c8)
+        ):
+            model_config = vllm_config.model_config
+            if (spec.is_draft or self.is_draft_layer) and draft_config is not None:
+                model_config = draft_config
+            rope_dtype = model_config.dtype
+
         # Preserve upstream metadata and apply all owner fields together.
         # Reuse the physical packing selected by the execution implementation.
         values.update(
@@ -249,7 +254,7 @@ class AscendMLAAttention(MLAAttention):
             kv_lora_rank=self.kv_lora_rank,
             qk_rope_head_dim=self.qk_rope_head_dim,
             mla_cache_layout="token_interleaved" if getattr(self.impl, "use_flashmla", False) else "component_major",
-            fa_quant_layer=getattr(self.impl, "fa_quant_layer", False),
+            rope_dtype=rope_dtype,
             model_version=spec.model_version or getattr(self, "model_version", None),
             indexes_kv_by_block_stride=bool(
                 getattr(spec, "indexes_kv_by_block_stride", False) or getattr(self, "indexes_kv_by_block_stride", False)

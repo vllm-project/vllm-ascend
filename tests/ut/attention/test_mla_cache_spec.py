@@ -147,19 +147,32 @@ def test_fa_quant_decision_stays_with_each_owner(monkeypatch, quantized):
     assert spec.page_size_bytes == 128 * (640 if quantized else 1152)
     if quantized:
         assert spec.cache_dtype_str is None
-    assert spec.fa_quant_layer is quantized
+    assert spec.rope_dtype == (torch.bfloat16 if quantized else None)
+
+
+def test_quant_flashmla_keeps_one_storage_dtype(monkeypatch):
+    impl = AscendMLAImpl.__new__(AscendMLAImpl)
+    impl.fa_quant_layer = True
+    impl.use_flashmla = True
+    impl.head_size = 576
+    impl.dtype = torch.float8_e4m3fn
+    layer = _make_owner(impl, AscendMLABackend)
+    spec = _get_owner_spec(monkeypatch, layer)
+    assert spec.rope_dtype is None
+    shapes, dtypes = AscendMLABackend.get_runtime_shapes_and_dtypes(spec, 2, None)
+    assert shapes == ((2, 128, 1, 576),)
+    assert dtypes == (torch.float8_e4m3fn,)
 
 
 @pytest.mark.parametrize("cache_dtype", [torch.int8, torch.float8_e4m3fn])
 @pytest.mark.parametrize("fused", [False, True])
 @pytest.mark.parametrize("kernel_blocks_per_manager", [1, 2])
 @pytest.mark.parametrize("is_draft", [False, True])
-def test_mla_runtime_uses_fa_quant_flag(monkeypatch, cache_dtype, fused, kernel_blocks_per_manager, is_draft):
-    config = SimpleNamespace(
-        model_config=SimpleNamespace(dtype=torch.bfloat16),
-        speculative_config=SimpleNamespace(draft_model_config=SimpleNamespace(dtype=torch.float16)),
-    )
-    monkeypatch.setattr(mla_v1, "get_current_vllm_config", lambda: config)
+def test_mla_runtime_uses_rope_dtype(monkeypatch, cache_dtype, fused, kernel_blocks_per_manager, is_draft):
+    def unexpected_config_lookup():
+        raise AssertionError("Runtime component dtypes must come from the spec")
+
+    monkeypatch.setattr(mla_v1, "get_current_vllm_config", unexpected_config_lookup)
     widths = (576,) if fused else (512, 64)
     dtypes = (cache_dtype,) if fused else (cache_dtype, torch.float16 if is_draft else torch.bfloat16)
     row_bytes = sum(width * dtype.itemsize for width, dtype in zip(widths, dtypes, strict=True))
@@ -171,11 +184,11 @@ def test_mla_runtime_uses_fa_quant_flag(monkeypatch, cache_dtype, fused, kernel_
         kv_lora_rank=512,
         qk_rope_head_dim=64,
         mla_cache_layout="token_interleaved" if fused else "component_major",
-        fa_quant_layer=True,
+        rope_dtype=None if fused else dtypes[1],
         is_draft=is_draft,
     )
     merged = AscendMLAAttentionSpec.merge([spec, spec])
-    assert merged.fa_quant_layer is True
+    assert merged.rope_dtype == spec.rope_dtype
     shapes, actual_dtypes = AscendMLABackend.get_runtime_shapes_and_dtypes(merged, 2, None, 128)
     assert actual_dtypes == dtypes
     assert shapes == tuple((2 * kernel_blocks_per_manager, 128, 1, width) for width in widths)
@@ -188,9 +201,9 @@ def test_mla_runtime_uses_fa_quant_flag(monkeypatch, cache_dtype, fused, kernel_
         with pytest.raises(ValueError, match="smaller than its cache components"):
             AscendMLABackend.get_runtime_shapes_and_dtypes(replace(spec, head_size=576), 2, None, 128)
     with pytest.raises(AssertionError, match="same Ascend KV cache layout"):
-        AscendMLAAttentionSpec.merge([spec, replace(spec, fa_quant_layer=False)])
+        AscendMLAAttentionSpec.merge([spec, replace(spec, rope_dtype=torch.float32)])
     if not fused:
-        floating_spec = replace(spec, dtype=torch.bfloat16, head_size=576, fa_quant_layer=False)
+        floating_spec = replace(spec, dtype=torch.bfloat16, head_size=576, rope_dtype=None)
         _, floating_dtypes = AscendMLABackend.get_runtime_shapes_and_dtypes(floating_spec, 2, None, 128)
         assert floating_dtypes == (torch.bfloat16, torch.bfloat16)
 
