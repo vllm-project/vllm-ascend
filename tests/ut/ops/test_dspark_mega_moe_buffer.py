@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 from types import SimpleNamespace
-from unittest.mock import Mock
+from unittest.mock import Mock, call
 
 import pytest
 import torch
@@ -345,25 +345,25 @@ def test_w4a8_target_and_unquantized_draft_keep_native_communication(pair, targe
 
 
 @pytest.mark.parametrize(
-    "target_type,arch,device,mega,transport,kv_only,expected",
+    "target_type,arch,device,mega,transport,kv_only,use_ubatching,expected",
     [
-        ("deepseek_v41", "DeepseekV41DSparkModel", "A5", True, "FUSED_MC2", False, True),
-        ("deepseek_v41", "DeepseekV41DSparkModel", "A3", True, "FUSED_MC2", False, False),
-        ("deepseek_v41", "DeepseekV41DSparkModel", "A5", False, "FUSED_MC2", False, False),
-        ("deepseek_v41", "DeepseekV41DSparkModel", "A5", True, "FUSED_MC2", True, False),
-        ("deepseek_v41", "DeepseekV41DSparkModel", "A5", True, "MC2", False, False),
-        ("deepseek_v4", "DeepseekV41DSparkModel", "A5", True, "FUSED_MC2", False, False),
-        ("qwen3_moe", "DeepseekV41DSparkModel", "A5", True, "FUSED_MC2", False, False),
-        ("deepseek_v4", "DSparkDraftModel", "A5", True, "FUSED_MC2", False, False),
-        ("qwen3", "Qwen3DSparkModel", "A5", True, "FUSED_MC2", False, False),
+        ("deepseek_v41", "DeepseekV41DSparkModel", "A5", True, "FUSED_MC2", False, False, True),
+        ("deepseek_v41", "DeepseekV41DSparkModel", "A3", True, "FUSED_MC2", False, False, False),
+        ("deepseek_v41", "DeepseekV41DSparkModel", "A5", False, "FUSED_MC2", False, False, False),
+        ("deepseek_v41", "DeepseekV41DSparkModel", "A5", True, "FUSED_MC2", True, False, False),
+        ("deepseek_v41", "DeepseekV41DSparkModel", "A5", True, "MC2", False, False, False),
+        ("deepseek_v4", "DeepseekV41DSparkModel", "A5", True, "FUSED_MC2", False, False, False),
+        ("qwen3_moe", "DeepseekV41DSparkModel", "A5", True, "FUSED_MC2", False, False, False),
+        ("deepseek_v4", "DSparkDraftModel", "A5", True, "FUSED_MC2", False, False, False),
+        ("qwen3", "Qwen3DSparkModel", "A5", True, "FUSED_MC2", False, False, False),
+        ("deepseek_v41", "DeepseekV41DSparkModel", "A5", True, "FUSED_MC2", False, True, True),
     ],
 )
 def test_only_channel_v41_dspark_attempts_sharing_after_native_load(
-    monkeypatch, target_type, arch, device, mega, transport, kv_only, expected
+    monkeypatch, target_type, arch, device, mega, transport, kv_only, use_ubatching, expected
 ):
     from vllm.v1.worker.gpu.spec_decode.dspark.speculator import DSparkSpeculator
 
-    from vllm_ascend import ascend_forward_context
     from vllm_ascend.device import hardware_profile
     from vllm_ascend.device.hardware import AscendDeviceType
     from vllm_ascend.distributed import parallel_state
@@ -374,25 +374,54 @@ def test_only_channel_v41_dspark_attempts_sharing_after_native_load(
     spec.context_kv_only = kv_only
     spec.vllm_config = SimpleNamespace(model_config=SimpleNamespace(hf_config=SimpleNamespace(model_type=target_type)))
     spec._lmhead_tp_wrap_draft_logits = lambda model: None
-    spec.vllm_config.parallel_config = SimpleNamespace(use_ubatching=False)
-    target, draft, scope = object(), object(), object()
+    spec.vllm_config.parallel_config = SimpleNamespace(use_ubatching=use_ubatching)
+    target, draft, scope = object(), SimpleNamespace(), object()
     bind = Mock()
+    layouts = Mock(side_effect=lambda model: model)
+    get_group = Mock(return_value=scope)
+    agree = Mock()
+    entrypoint = Mock(wraps=context.try_share_dspark_mega_moe_buffer)
+    monkeypatch.setattr(context, "try_share_dspark_mega_moe_buffer", entrypoint)
     monkeypatch.setattr(context, "try_share_mega_moe_buffer", bind)
-    monkeypatch.setattr(context, "fused_layouts", lambda model: model)
-    monkeypatch.setattr(parallel_state, "get_mc2_group", lambda: scope)
+    monkeypatch.setattr(context, "fused_layouts", layouts)
+    monkeypatch.setattr(context, "_agree", agree)
+    monkeypatch.setattr(parallel_state, "get_mc2_group", get_group)
     profile = hardware_profile.get_hardware_profile(AscendDeviceType[device])
-    monkeypatch.setattr(hardware_profile, "get_current_hardware_profile", lambda: profile)
-    monkeypatch.setattr(ascend_forward_context, "use_cann_megamoe", lambda _: mega)
-    monkeypatch.setattr(ascend_forward_context, "select_moe_comm_method", lambda n, cfg: comms.MoECommType[transport])
+    monkeypatch.setattr(context, "get_current_hardware_profile", lambda: profile)
+    monkeypatch.setattr(context, "use_cann_megamoe", lambda _: mega)
+    monkeypatch.setattr(context, "select_moe_comm_method", lambda n, cfg: comms.MoECommType[transport])
 
     def load(self, model, names):
+        entrypoint.assert_not_called()
+        layouts.assert_not_called()
+        get_group.assert_not_called()
         bind.assert_not_called()
         assert model is target
         return draft
 
+    def post_process(config):
+        assert config is spec.vllm_config
+        entrypoint.assert_called_once_with(
+            target, draft, spec.vllm_config, spec.draft_model_config, context_kv_only=kv_only
+        )
+        if expected:
+            bind.assert_called_once_with(target, draft, scope, not use_ubatching)
+        else:
+            bind.assert_not_called()
+
+    draft.post_process = Mock(side_effect=post_process)
     monkeypatch.setattr(DSparkSpeculator, "load_draft_model", load)
     assert spec.load_draft_model(target, set()) is draft
+    draft.post_process.assert_called_once_with(spec.vllm_config)
+    entrypoint.assert_called_once_with(
+        target, draft, spec.vllm_config, spec.draft_model_config, context_kv_only=kv_only
+    )
     if expected:
-        bind.assert_called_once_with(target, draft, scope, True)
+        bind.assert_called_once_with(target, draft, scope, not use_ubatching)
+        assert layouts.call_args_list == [call(target), call(draft)]
+        get_group.assert_called_once_with()
     else:
         bind.assert_not_called()
+        layouts.assert_not_called()
+        get_group.assert_not_called()
+        agree.assert_not_called()

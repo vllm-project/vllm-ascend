@@ -5,13 +5,18 @@ from contextlib import contextmanager
 from importlib import import_module
 from inspect import signature
 from types import SimpleNamespace
-from typing import NamedTuple
+from typing import TYPE_CHECKING, NamedTuple
 
 import torch
 from vllm.logger import logger
 
-from vllm_ascend.ascend_forward_context import MoECommType
+from vllm_ascend.ascend_forward_context import MoECommType, select_moe_comm_method, use_cann_megamoe
+from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.quantization.quant_type import A5_SUPPORT_MEGA_MOE_QUANT_TYPES, QuantType
+from vllm_ascend.utils import is_deepseek_v41
+
+if TYPE_CHECKING:
+    from vllm.config import ModelConfig, VllmConfig
 
 
 class ExpertLayout(NamedTuple):
@@ -162,6 +167,42 @@ def _restore_step(scope, name):
     for rank, failure in enumerate(_agree(scope, error)):
         if failure is not None:
             raise RuntimeError(f"MegaMoE channel restore failed during {name} on rank {rank}: {failure}")
+
+
+def try_share_dspark_mega_moe_buffer(
+    target_model: torch.nn.Module,
+    draft_model: torch.nn.Module,
+    vllm_config: "VllmConfig",
+    draft_model_config: "ModelConfig | None",
+    *,
+    context_kv_only: bool = False,
+) -> bool:
+    """Check the supported DSpark configuration before probing its MoE buffers."""
+    draft_hf = getattr(draft_model_config, "hf_config", None)
+    # TODO: Validate more A5 DSpark models before relaxing the V4.1 gate.
+    # The sharing probe adds a startup collective even for dense drafts
+    # and can allocate the target buffer before the final capacity check.
+    if not (
+        getattr(draft_hf, "architectures", None) == ["DeepseekV41DSparkModel"]
+        and not context_kv_only
+        and is_deepseek_v41(vllm_config.model_config.hf_config)
+    ):
+        return False
+    if not (
+        get_current_hardware_profile().supports(HardwareCapability.CANN_MEGAMOE_MXFP)
+        and use_cann_megamoe(vllm_config)
+        and select_moe_comm_method(1, vllm_config) is MoECommType.FUSED_MC2
+    ):
+        return False
+
+    from vllm_ascend.distributed.parallel_state import get_mc2_group
+
+    return try_share_mega_moe_buffer(
+        fused_layouts(target_model),
+        fused_layouts(draft_model),
+        get_mc2_group(),
+        not vllm_config.parallel_config.use_ubatching,
+    )
 
 
 def fused_layouts(model):
