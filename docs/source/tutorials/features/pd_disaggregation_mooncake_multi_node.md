@@ -218,7 +218,7 @@ Replace `<super_pod_id>` below with the reported `Super Pod ID`. For example, an
 To find the host RoCE IP for each physical NPU:
 
 1. Use the host's network topology to identify the RoCE NIC and port connected to that physical NPU.
-2. Run `show_gids` on the host. Find the row for that NIC and port and read its RoCE IP. If needed, use `ip addr show dev <netdev>` to check the address on the network interface listed in that row.
+2. Run `hiroce5 show_gids` on the host. Find the row for that NIC and port and read its RoCE IP.
 3. Set `comm_id` in `ub_endpoint_npu_<physical_npu_id>.json` to that IP. For example, if physical NPU 2 maps to `192.0.2.17`, set `"comm_id": "192.0.2.17"` in `ub_endpoint_npu_2.json`.
 
 **Use ascending numerical IP order only if you have verified that it matches physical NPU ID order on this host.** Do not use the DP rank or visible-device order to select the address.
