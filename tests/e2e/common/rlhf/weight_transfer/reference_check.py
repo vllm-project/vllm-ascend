@@ -342,6 +342,59 @@ class WeightUpdateTestWorkerExtension:
     def draft_model_architecture(self):
         return type(self.get_draft_model()).__name__
 
+    def _weight_update_graph_managers(self):
+        managers = {}
+        seen = set()
+        for role, owner in (("target", self.model_runner), ("draft", self.model_runner.speculator)):
+            for name, manager in vars(owner).items():
+                if name.endswith("cudagraph_manager") and manager is not None and id(manager) not in seen:
+                    managers[f"{role}.{name}"] = manager
+                    seen.add(id(manager))
+        return managers
+
+    def start_graph_execution_capture(self):
+        self._graph_methods: list[tuple[Any, Callable, Callable]] = []
+        self._graph_replays: dict[str, int] = {}
+        self._graph_captures: dict[str, int] = {}
+        for name, manager in self._weight_update_graph_managers().items():
+            run, capture = manager.run_fullgraph, manager.capture
+            self._graph_methods.append((manager, run, capture))
+            self._graph_replays[name] = self._graph_captures[name] = 0
+
+            def record_replay(desc, *args, _run=run, _name=name, **kwargs):
+                # run_fullgraph replays the captured graph for desc. Count
+                # only after it succeeds, rather than counting dispatch attempts.
+                result = _run(desc, *args, **kwargs)
+                self._graph_replays[_name] += 1
+                return result
+
+            def record_capture(*args, _capture=capture, _name=name, **kwargs):
+                self._graph_captures[_name] += 1
+                return _capture(*args, **kwargs)
+
+            manager.run_fullgraph, manager.capture = record_replay, record_capture
+        return self.snapshot_graph_execution()
+
+    def snapshot_graph_execution(self):
+        # Discover current managers again so replacing a manager during reload
+        # cannot hide a recapture behind hooks attached to the previous one.
+        return {
+            "graphs": {
+                name: {
+                    "manager_id": id(manager),
+                    "graph_ids": {str(desc): id(graph) for desc, graph in manager.graphs.items()},
+                }
+                for name, manager in self._weight_update_graph_managers().items()
+            },
+            "replays": dict(self._graph_replays),
+            "captures": dict(self._graph_captures),
+        }
+
+    def finish_graph_execution_capture(self):
+        for manager, run, capture in self._graph_methods:
+            manager.run_fullgraph, manager.capture = run, capture
+        self._graph_methods.clear()
+
     def start_draft_output_capture(self):
         speculator = self.model_runner.speculator
         self._draft_propose = speculator.propose

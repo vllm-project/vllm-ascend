@@ -150,7 +150,18 @@ def draft_metrics(server) -> dict[str, float]:
     return counters
 
 
-def collect_draft_observation(server, case: WeightUpdateModelCase):
+def assert_graph_execution_reused(before, after):
+    assert len(before) == len(after) == INFERENCE_WORLD_SIZE, "Missing worker graph execution records"
+    for rank, (previous, current) in enumerate(zip(before, after)):
+        assert current["graphs"] == previous["graphs"], f"Worker {rank}: captured graphs or managers changed"
+        assert current["captures"] == previous["captures"], f"Worker {rank}: unexpected graph recapture"
+        for role in ("target", "draft"):
+            previous_replays = sum(n for name, n in previous["replays"].items() if name.startswith(f"{role}."))
+            current_replays = sum(n for name, n in current["replays"].items() if name.startswith(f"{role}."))
+            assert current_replays > previous_replays, f"Worker {rank}: {role} executed no full graph replay"
+
+
+def collect_draft_observation(server, case: WeightUpdateModelCase, *, capture_graphs: bool = False):
     """Measure startup and updated models after generation refreshes derived state."""
     metrics_before = draft_metrics(server)
     signature, draft_outputs = [], []
@@ -183,8 +194,14 @@ def collect_draft_observation(server, case: WeightUpdateModelCase):
         "draft_outputs": draft_outputs,
         "context_projections": [{name: value["digest"] for name, value in rank.items()} for rank in projections],
     }
-    projection_addresses = [{name: value["data_ptr"] for name, value in rank.items()} for rank in projections]
-    return snapshot, observation, projection_addresses
+    runtime = {
+        "projection_addresses": [{name: value["data_ptr"] for name, value in rank.items()} for rank in projections],
+    }
+    if capture_graphs:
+        runtime["graph_execution"] = post_control(
+            server, "collective_rpc", json={"method": "snapshot_graph_execution"}
+        ).json()["results"]
+    return snapshot, observation, runtime
 
 
 def run_draft_hccl_weight_transfer(tmp_path, monkeypatch, packed: bool, enforce_eager: bool, speculative_case):
@@ -241,16 +258,28 @@ def run_draft_hccl_weight_transfer(tmp_path, monkeypatch, packed: bool, enforce_
         sync_client = WeightUpdateClient(server.url_root)
         assert first_draft_updated.draft_source is not None
         engine = create_hccl_trainer(sync_client, first_draft_updated.draft_source, packed, target_updated)
+        graph_capture_started = False
         try:
-            # Reuse HCCL for warmup and all updates; capture graphs before
-            # recording the addresses which live updates must preserve.
+            # Exercise startup-captured graphs before recording storage baselines.
+            # Keep monitoring active through every transfer and generation.
             architectures = post_control(server, "collective_rpc", json={"method": "draft_model_architecture"}).json()[
                 "results"
             ]
             assert len(architectures) == INFERENCE_WORLD_SIZE and all(
                 name.endswith(speculative_case.draft_architecture) for name in architectures
             ), architectures
-            before, _, original_projection_addresses = collect_draft_observation(server, case)
+            if not enforce_eager:
+                previous_graph_execution = post_control(
+                    server, "collective_rpc", json={"method": "start_graph_execution_capture"}
+                ).json()["results"]
+                graph_capture_started = True
+            before, _, original_runtime = collect_draft_observation(server, case, capture_graphs=not enforce_eager)
+            if not enforce_eager:
+                (tmp_path / "initial-graph-execution.json").write_text(
+                    json.dumps(original_runtime["graph_execution"], indent=2)
+                )
+                assert_graph_execution_reused(previous_graph_execution, original_runtime["graph_execution"])
+                previous_graph_execution = original_runtime["graph_execution"]
             original_addresses = parameter_addresses(before)
             (tmp_path / "initial-snapshot.json").write_text(json.dumps(before, indent=2))
             assert parameter_digests(before)["draft"] != references["draft-1"]["parameters"]["draft"], (
@@ -270,10 +299,16 @@ def run_draft_hccl_weight_transfer(tmp_path, monkeypatch, packed: bool, enforce_
                 # Failed transfers leave partially updated weights; keep generation paused.
                 engine.send_weights()
                 post_control(server, "resume")
-                after, observation, projection_addresses = collect_draft_observation(server, case)
-                assert projection_addresses == original_projection_addresses, (
+                after, observation, runtime = collect_draft_observation(server, case, capture_graphs=not enforce_eager)
+                assert runtime["projection_addresses"] == original_runtime["projection_addresses"], (
                     f"{speculative_case.id}: {role} update {update_round} changed derived tensor storage"
                 )
+                if not enforce_eager:
+                    (tmp_path / f"update-{update_round}-{role}-graph-execution.json").write_text(
+                        json.dumps(runtime["graph_execution"], indent=2)
+                    )
+                    assert_graph_execution_reused(previous_graph_execution, runtime["graph_execution"])
+                    previous_graph_execution = runtime["graph_execution"]
                 (tmp_path / f"update-{update_round}-{role}-snapshot.json").write_text(json.dumps(after, indent=2))
                 (tmp_path / f"update-{update_round}-{role}-generation.json").write_text(
                     json.dumps(observation["generation"], indent=2)
@@ -283,7 +318,11 @@ def run_draft_hccl_weight_transfer(tmp_path, monkeypatch, packed: bool, enforce_
                 )
                 results.append((reference_name, observation, parameter_addresses(after)))
         finally:
-            engine.shutdown()
+            try:
+                if graph_capture_started:
+                    post_control(server, "collective_rpc", json={"method": "finish_graph_execution_capture"})
+            finally:
+                engine.shutdown()
 
     # Full parameter comparison also checks that draft-only updates leave the
     # target unchanged. Greedy generation alone cannot observe draft changes.
