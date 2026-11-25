@@ -551,9 +551,7 @@ def build_attn_metadata(
                     ]
             reuse_key = None
             if isinstance(attn_metadata_builder, AscendGDNAttentionMetadataBuilder):
-                can_share = (
-                    batch_global and common_attn_metadata.pcp_context is None and not common_attn_metadata_extra_kwargs
-                )
+                can_share = batch_global and common_attn_metadata.pcp_context is None
                 reuse_key = attn_metadata_builder.get_metadata_reuse_key(can_share, for_cudagraph_capture)
             template = cached_metadata.get(reuse_key) if reuse_key is not None else None
             attn_metadata_extra_kwargs = (
