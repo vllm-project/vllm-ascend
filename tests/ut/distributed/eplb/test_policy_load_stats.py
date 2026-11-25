@@ -27,6 +27,12 @@ def _model_state(**kwargs):
     return SimpleNamespace(**defaults)
 
 
+@pytest.fixture(autouse=True)
+def _single_replica_ep_group(monkeypatch):
+    # These tests drive one rank; no process group is initialized.
+    monkeypatch.setattr(state_module, "_needs_group_load_decision", lambda: False)
+
+
 def test_step_keeps_skipped_samples_on_shared_time_axis(monkeypatch):
     upstream_step = MagicMock()
     monkeypatch.setattr(upstream_eplb_state.EplbState, "step", upstream_step)
@@ -43,12 +49,13 @@ def test_step_keeps_skipped_samples_on_shared_time_axis(monkeypatch):
     state._load_stats_window_start_index = 0
     state._load_stats_window_write_index = 0
     state._is_load_sampling_step = True
-    state._should_collect_local_load = False
+    state.allgather_record_tensor = None
+    state._load_collection_phase_matched = False
 
     state.step()
     state.expert_load_window_step = 1
     state._is_load_sampling_step = True
-    state._should_collect_local_load = True
+    state._load_collection_phase_matched = True
     state.step()
 
     torch.testing.assert_close(
@@ -61,7 +68,7 @@ def test_step_keeps_skipped_samples_on_shared_time_axis(monkeypatch):
 
 
 @pytest.mark.parametrize(
-    "is_dummy,source_eligible,gathered,expected",
+    "is_dummy,phase_matched,gathered,expected",
     [
         (True, False, 1, True),
         (False, False, 1, True),
@@ -70,7 +77,7 @@ def test_step_keeps_skipped_samples_on_shared_time_axis(monkeypatch):
     ],
 )
 def test_allgather_step_uses_remote_eligibility_for_owner_load(
-    monkeypatch, is_dummy, source_eligible, gathered, expected
+    monkeypatch, is_dummy, phase_matched, gathered, expected
 ):
     upstream_step = MagicMock()
     monkeypatch.setattr(upstream_eplb_state.EplbState, "step", upstream_step)
@@ -79,13 +86,13 @@ def test_allgather_step_uses_remote_eligibility_for_owner_load(
     state._close_error = None
     state.policy = None
     state._is_load_sampling_step = True
-    state._should_collect_local_load = source_eligible
-    state._uses_phase_filter = True
+    state._load_collection_phase_matched = phase_matched
     state.allgather_record_tensor = torch.tensor(gathered)
     state._has_fresh_recorded_load = False
     state.step(is_dummy=is_dummy)
     assert state._has_fresh_recorded_load == expected
-    assert upstream_step.call_args.kwargs["is_dummy"] == (is_dummy and not expected)
+    # A step nobody commits is discarded, whether or not this rank was active.
+    assert upstream_step.call_args.kwargs["is_dummy"] == (not expected)
 
 
 def test_a5_default_policy_marks_freshness_only_on_actual_step(monkeypatch):
@@ -95,17 +102,15 @@ def test_a5_default_policy_marks_freshness_only_on_actual_step(monkeypatch):
     state._close_error = None
     state.policy = None
     state._is_load_sampling_step = True
-    state._should_collect_local_load = True
+    state._load_collection_phase_matched = True
     state.allgather_record_tensor = torch.tensor(1)
     state._has_fresh_recorded_load = False
     state.step(is_profile=True)
     assert not state._has_fresh_recorded_load
-    state._is_load_sampling_step = True
+    # step consumes the sampling flag: a new forward must publish it again.
     state.step()
-    # step consumes the forward flags: a new forward must publish eligibility.
     assert not state._has_fresh_recorded_load
     state._is_load_sampling_step = True
-    state._should_collect_local_load = True
     state.step()
     assert state._has_fresh_recorded_load
 

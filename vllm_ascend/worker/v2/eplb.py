@@ -99,18 +99,19 @@ class AscendEPLBController(EPLBController):
             if not supports_allgather:
                 return
         if supports_allgather:
-            state._uses_phase_filter = self.load_collection_phase != "all"
             if state.allgather_record_tensor is not None:
                 state.allgather_record_tensor.fill_(-1)
-        # AllGather needs source validity; other paths use operator counts.
         if state.should_record_tensor is not None:
             is_sampling = state._should_record_current_step(log_stats=self.parallel_config.eplb_config.log_balancedness)
-            should_record = is_sampling and self._load_collection_phase_matched
-            state.should_record_tensor.fill_(should_record)
+            # Expert counts come from the rank that executes the tokens, so idle
+            # DP ranks and batches outside the collection phase record too. The
+            # step decides group-wide whether the recorded load is committed.
+            state.should_record_tensor.fill_(is_sampling)
             state._is_load_sampling_step = is_sampling
-            state._should_collect_local_load = should_record
-            if should_record and not supports_allgather:
-                state._has_fresh_recorded_load = True
+            state._load_collection_phase_matched = self._load_collection_phase_matched
+            if state.allgather_source_record_tensor is not None:
+                # AllGather layers count per source rank, which filters by its own phase.
+                state.allgather_source_record_tensor.fill_(is_sampling and self._load_collection_phase_matched)
 
     # The two supported upstream revisions intentionally expose different signatures.
     def setup_from_mapping(

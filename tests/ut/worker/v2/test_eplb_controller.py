@@ -192,14 +192,16 @@ class TestAscendEPLBController(unittest.TestCase):
             log_stats=True,
         )
         self.assertTrue(state.should_record_tensor.item())
-        self.assertTrue(state._has_fresh_recorded_load)
+        self.assertTrue(state._load_collection_phase_matched)
+        # Load is marked fresh when the step commits it, not when it is recorded.
+        self.assertFalse(state._has_fresh_recorded_load)
 
-    def test_prepare_forward_disables_nonmatching_phase(self):
+    def test_prepare_forward_records_nonmatching_phase_for_group_decision(self):
         controller = self._make_controller(log_balancedness=True)
         controller.load_collection_phase = "prefill"
         controller.set_batch_phase(batch_has_prefill=False)
         state = MagicMock()
-        state.should_record_tensor = torch.ones((), dtype=torch.bool)
+        state.should_record_tensor = torch.zeros((), dtype=torch.bool)
         state._should_record_current_step.return_value = True
         state._has_fresh_recorded_load = False
         controller.state = state
@@ -209,8 +211,31 @@ class TestAscendEPLBController(unittest.TestCase):
         state._should_record_current_step.assert_called_once_with(
             log_stats=True,
         )
-        self.assertFalse(state.should_record_tensor.item())
+        self.assertTrue(state.should_record_tensor.item())
+        self.assertFalse(state._load_collection_phase_matched)
         self.assertFalse(state._has_fresh_recorded_load)
+
+    def test_allgather_sources_keep_their_own_phase_filter(self):
+        controller = self._make_controller()
+        controller.load_collection_phase = "decode"
+        controller.set_batch_phase(batch_has_prefill=True)
+        state = MagicMock()
+        state.should_record_tensor = torch.zeros((), dtype=torch.bool)
+        state.allgather_source_record_tensor = torch.ones((), dtype=torch.bool)
+        state.allgather_record_tensor = torch.ones((), dtype=torch.int32)
+        state._should_record_current_step.return_value = True
+        controller.state = state
+
+        with patch(
+            "vllm_ascend.worker.v2.eplb.get_current_hardware_profile",
+            return_value=get_hardware_profile(AscendDeviceType.A5),
+        ):
+            controller.prepare_forward(SimpleNamespace(), 3)
+
+        # Operator-counted layers record; AllGather layers exclude this source.
+        self.assertTrue(state.should_record_tensor.item())
+        self.assertFalse(state.allgather_source_record_tensor.item())
+        self.assertEqual(state.allgather_record_tensor.item(), -1)
 
     def test_prepare_forward_disables_closed_window(self):
         controller = self._make_controller()

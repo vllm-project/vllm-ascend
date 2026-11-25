@@ -5,11 +5,15 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+import pytest
 import torch
+from vllm.distributed.eplb import eplb_state as upstream_eplb_state
 from vllm.distributed.eplb.policy import DefaultEplbPolicy
 
 from vllm_ascend.ascend_config import EplbConfig
+from vllm_ascend.distributed.eplb import eplb_state as state_module
 from vllm_ascend.distributed.eplb.eplb_state import AscendEplbState
+from vllm_ascend.distributed.eplb.policy import PreparedLoadStats
 from vllm_ascend.distributed.eplb.policy.stair import StairEplbPolicy
 from vllm_ascend.worker.v2.eplb import (
     AscendEPLBController,
@@ -109,12 +113,12 @@ class TestEplbLoadCollectionPhase(unittest.TestCase):
         self.assertIs(controller.state, state)
         self.assertTrue(controller._has_registered_models)
 
-    def test_prepare_forward_combines_window_and_phase_device_gates(self):
-        for batch_has_prefill, expected_record in ((False, False), (True, True)):
+    def test_prepare_forward_publishes_phase_match_without_gating_recording(self):
+        for batch_has_prefill in (False, True):
             with self.subTest(batch_has_prefill=batch_has_prefill):
                 controller = self._make_controller(load_collection_phase="prefill")
                 state = MagicMock()
-                state.should_record_tensor = torch.tensor(True)
+                state.should_record_tensor = torch.tensor(False)
                 state._has_fresh_recorded_load = False
                 state._should_record_current_step.return_value = True
                 controller.state = state
@@ -124,13 +128,155 @@ class TestEplbLoadCollectionPhase(unittest.TestCase):
 
                 state.prepare_forward.assert_not_called()
                 state._should_record_current_step.assert_called_once_with(log_stats=False)
-                self.assertIs(bool(state.should_record_tensor), expected_record)
+                # The executing rank's counts are recorded; the step decides group-wide.
+                self.assertTrue(state.should_record_tensor.item())
                 self.assertTrue(state._is_load_sampling_step)
-                self.assertIs(state._should_collect_local_load, expected_record)
-                self.assertIs(state._has_fresh_recorded_load, expected_record)
+                self.assertIs(state._load_collection_phase_matched, batch_has_prefill)
+                self.assertFalse(state._has_fresh_recorded_load)
+
+
+def _reduced_by(rank_flags, sent):
+    """Return an all_reduce that records the input and sums ``rank_flags`` into it."""
+
+    def all_reduce(flags, **_kwargs):
+        sent.append(flags.tolist())
+        flags.copy_(torch.tensor(rank_flags, dtype=torch.int32).sum(dim=0))
+
+    return all_reduce
+
+
+def _decision_state(monkeypatch, *, phase_matched=True, gathered=None, shared_ep_group=True):
+    monkeypatch.setattr(state_module, "_needs_group_load_decision", lambda: shared_ep_group)
+    cpu_group = MagicMock()
+    cpu_group.size.return_value = 4
+    monkeypatch.setattr(state_module, "get_ep_group", lambda: SimpleNamespace(cpu_group=cpu_group))
+    upstream_step = MagicMock()
+    monkeypatch.setattr(upstream_eplb_state.EplbState, "step", upstream_step)
+    state = AscendEplbState.__new__(AscendEplbState)
+    state._hixl_session = None
+    state._close_error = None
+    state._has_fresh_recorded_load = False
+    state._is_load_sampling_step = True
+    state._load_collection_phase_matched = phase_matched
+    state.allgather_record_tensor = None if gathered is None else torch.tensor(gathered)
+    state.policy = SimpleNamespace(prepare_local_load_stats=lambda samples: PreparedLoadStats(samples))
+    state.model_states = {}
+    state.expert_load_window_size = 2
+    state.expert_load_window_step = 3
+    state._local_load_collection_mask = torch.zeros(2, dtype=torch.int32)
+    state._physical_load_sample_slots = torch.full((2,), -1)
+    state._num_recorded_load_steps = 0
+    state._load_stats_window_start_index = 0
+    state._load_stats_window_write_index = 0
+    return state, upstream_step, cpu_group
+
+
+def _assert_committed(state, upstream_step, committed):
+    # Committing passes ``is_dummy=False`` upstream so every rank keeps its window slot.
+    assert upstream_step.call_args.kwargs["is_dummy"] == (not committed)
+    assert int(state._local_load_collection_mask[0]) == int(committed)
+    assert int(state._physical_load_sample_slots[0]) == (3 if committed else -1)
+    assert state._has_fresh_recorded_load == committed
+
+
+@pytest.mark.parametrize(
+    "rank_flags,expected",
+    [
+        # An idle rank executes tokens sent by the active rank.
+        ([(0, 0), (1, 0)], True),
+        # Nobody schedules tokens.
+        ([(0, 0), (0, 0)], False),
+        # Every active rank is outside the collection phase.
+        ([(0, 0), (1, 1)], False),
+    ],
+)
+def test_idle_rank_follows_the_group(monkeypatch, rank_flags, expected):
+    state, upstream_step, cpu_group = _decision_state(monkeypatch)
+    sent = []
+    all_reduce = MagicMock(side_effect=_reduced_by(rank_flags, sent))
+    monkeypatch.setattr(state_module, "all_reduce", all_reduce)
+
+    state.step(is_dummy=True)
+
+    # An idle rank never asks for the step by itself.
+    assert sent == [[0, 0]]
+    assert all_reduce.call_args.kwargs["group"] is cpu_group
+    _assert_committed(state, upstream_step, expected)
+
+
+@pytest.mark.parametrize(
+    "phase_matched,rank_flags,expected",
+    [
+        # Every active rank is inside the collection phase.
+        (True, [(1, 0), (1, 0), (0, 0)], True),
+        # Another DP rank prefills while this one decodes: owner counts cannot split them.
+        (True, [(1, 0), (1, 1), (0, 0)], False),
+        (False, [(1, 1), (1, 0), (0, 0)], False),
+        # This rank is the only active one and is outside the phase.
+        (False, [(1, 1), (0, 0)], False),
+    ],
+)
+def test_mixed_phase_steps_are_skipped(monkeypatch, phase_matched, rank_flags, expected):
+    state, upstream_step, _ = _decision_state(monkeypatch, phase_matched=phase_matched)
+    sent = []
+    monkeypatch.setattr(state_module, "all_reduce", MagicMock(side_effect=_reduced_by(rank_flags, sent)))
+
+    state.step()
+
+    # The rank reports whether it is active and whether its batch matches the phase.
+    assert sent == [[1, int(not phase_matched)]]
+    _assert_committed(state, upstream_step, expected)
+
+
+def test_single_replica_ep_group_decides_locally(monkeypatch):
+    state, upstream_step, _ = _decision_state(monkeypatch, shared_ep_group=False)
+    all_reduce = MagicMock()
+    monkeypatch.setattr(state_module, "all_reduce", all_reduce)
+
+    state.step(is_dummy=True)
+
+    all_reduce.assert_not_called()
+    _assert_committed(state, upstream_step, False)
+
+
+@pytest.mark.parametrize("gathered,expected", ((1, True), (0, False)))
+def test_allgather_decision_wins_but_the_group_still_meets(monkeypatch, gathered, expected):
+    # Participation must not depend on which layers ran on a rank, or the
+    # collective would hang. An AllGather layer's gathered source eligibility
+    # is more precise than the per-rank phase, so it decides the step.
+    state, upstream_step, cpu_group = _decision_state(monkeypatch, gathered=gathered)
+    all_reduce = MagicMock(side_effect=_reduced_by([(0, 0), (1, 1)], []))
+    monkeypatch.setattr(state_module, "all_reduce", all_reduce)
+
+    state.step(is_dummy=True)
+
+    all_reduce.assert_called_once()
+    assert all_reduce.call_args.kwargs["group"] is cpu_group
+    _assert_committed(state, upstream_step, expected)
+
+
+def test_non_sampling_steps_do_not_meet(monkeypatch):
+    state, upstream_step, _ = _decision_state(monkeypatch)
+    all_reduce = MagicMock()
+    monkeypatch.setattr(state_module, "all_reduce", all_reduce)
+    state._is_load_sampling_step = False
+
+    state.step(is_dummy=True)
+
+    all_reduce.assert_not_called()
+    assert int(state._local_load_collection_mask[0]) == 0
+    assert upstream_step.call_args.kwargs["is_dummy"] is True
 
 
 class TestAscendEplbFreshLoadGate(unittest.TestCase):
+    def setUp(self):
+        patcher = patch(
+            "vllm_ascend.distributed.eplb.eplb_state._needs_group_load_decision",
+            return_value=False,
+        )
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
     @staticmethod
     def _make_state(*, rearrangement_step=1):
         state = object.__new__(AscendEplbState)

@@ -17,7 +17,7 @@ import numpy as np
 import torch
 from torch.distributed import all_reduce
 from vllm.config.utils import hash_config_cached
-from vllm.distributed import get_ep_group, get_eplb_group
+from vllm.distributed import get_dp_group, get_ep_group, get_eplb_group
 from vllm.distributed.eplb import eplb_state as _eplb_state
 from vllm.distributed.eplb.policy import AbstractEplbPolicy
 from vllm.distributed.parallel_state import (
@@ -48,6 +48,15 @@ EXPERT_MAPPING_EP_SIZE: ContextVar[int] = ContextVar("vllm_ascend_expert_mapping
 _ALLGATHER_SOURCE_MASK_SLOTS = "eplb_allgather_source_mask_slots"
 
 
+def _needs_group_load_decision() -> bool:
+    """Return whether idle and active ranks can share one EP-group step.
+
+    The ranks of a data-parallel replica schedule together, so only an EP
+    group spanning several replicas mixes them.
+    """
+    return get_ep_group().world_size > 1 and get_dp_group().world_size > 1
+
+
 @contextmanager
 def _configured_upstream_policy(name: str, policy: AbstractEplbPolicy | None) -> Iterator[None]:
     """Expose an Ascend policy only while upstream initializes its state."""
@@ -75,6 +84,7 @@ class AscendEplbLayerState(_eplb_state.EplbLayerState):
         self.expert_replica_routing_table: torch.Tensor | None = None
         self.allgather_expert_replica_routing_table: torch.Tensor | None = None
         self.allgather_record_tensor: torch.Tensor | None = None
+        self.allgather_source_record_tensor: torch.Tensor | None = None
         self.allgather_source_is_padding: torch.Tensor | None = None
         self.local_expert_start = 0
         self.local_expert_count = 0
@@ -150,10 +160,14 @@ class AscendEplbLayerState(_eplb_state.EplbLayerState):
                 is_padding = self.allgather_source_is_padding
                 if is_padding is None:
                     is_padding = getattr(forward_context, "is_padding", None)
+                source_record = self.allgather_source_record_tensor
+                if source_record is None:
+                    source_record = self.should_record_tensor
                 token_mask = make_allgather_mask(
                     num_source_tokens,
                     num_unpadded_tokens,
-                    self.should_record_tensor,
+                    # Each source keeps its own phase match in the gathered mask.
+                    source_record,
                     is_padding=is_padding,
                     tp_size=get_tensor_model_parallel_world_size() if is_sequence_parallel else 1,
                     tp_rank=get_tensor_model_parallel_rank() if is_sequence_parallel else 0,
@@ -278,9 +292,9 @@ class AscendEplbState(_eplb_state.EplbState):
             self.policy = policy
         self._has_fresh_recorded_load = False
         self._is_load_sampling_step = False
-        self._should_collect_local_load = False
         self.allgather_record_tensor: torch.Tensor | None = None
-        self._uses_phase_filter = False
+        self.allgather_source_record_tensor: torch.Tensor | None = None
+        self._load_collection_phase_matched = True
         self._stop_async = threading.Event()
         self._suspended = False
         self._close_error: Exception | None = None
@@ -329,9 +343,12 @@ class AscendEplbState(_eplb_state.EplbState):
             return
         if self.allgather_record_tensor is None:
             self.allgather_record_tensor = torch.full((), -1, dtype=torch.int32, device=self.device)
+        if self.allgather_source_record_tensor is None:
+            self.allgather_source_record_tensor = torch.ones((), dtype=torch.bool, device=self.device)
         for layer in model.moe_layers:
             if isinstance(layer.eplb_state, AscendEplbLayerState):
                 layer.eplb_state.allgather_record_tensor = self.allgather_record_tensor
+                layer.eplb_state.allgather_source_record_tensor = self.allgather_source_record_tensor
 
     def wait_for_rearrangement(self, stream) -> bool:
         """Allow an idle worker to stop without recording a fake device event."""
@@ -478,6 +495,34 @@ class AscendEplbState(_eplb_state.EplbState):
         )
         return PreparedLoadStats(logical_values[..., :-1], physical_stats.sample_counts)
 
+    def _group_collected_step(self, is_dummy: bool) -> bool:
+        """Return whether every EP rank commits this step's load.
+
+        Expert counts come from the rank that executes the tokens, so the load
+        of a step is complete only if all EP ranks commit it or none does.
+        """
+        active = not is_dummy
+        # [active ranks, active ranks outside the collection phase]
+        flags = torch.tensor(
+            (int(active), int(active and not self._load_collection_phase_matched)),
+            dtype=torch.int32,
+        )
+        if _needs_group_load_decision():
+            # Every rank calls this on the same steps: sampling depends on the
+            # rearrangement counter, which upstream keeps equal across ranks.
+            all_reduce(flags, group=get_ep_group().cpu_group)
+        if 0 < int(flags[1]) < int(flags[0]):
+            logger.debug("EPLB skips a step that mixes prefill and decode across DP ranks")
+        collected = int(flags[0]) > 0 and int(flags[1]) == 0
+        allgather_record = self.allgather_record_tensor
+        if allgather_record is not None:
+            gathered = int(allgather_record.item())
+            if gathered >= 0:
+                # An AllGather layer decided for the whole forward from the
+                # gathered source eligibility, which already filters by phase.
+                return gathered != 0
+        return collected
+
     def step(
         self,
         is_dummy: bool = False,
@@ -489,27 +534,19 @@ class AscendEplbState(_eplb_state.EplbState):
         if self._hixl_session is not None:
             _raise_if_async_worker_stopped(self)
         is_sampling = getattr(self, "_is_load_sampling_step", False) and not is_profile
-        should_collect = getattr(self, "_should_collect_local_load", False)
-        allgather_record = getattr(self, "allgather_record_tensor", None)
-        if is_sampling and allgather_record is not None:
-            if is_dummy or getattr(self, "_uses_phase_filter", False):
-                # A source-idle owner can still execute remote tokens. The
-                # device decision also preserves phase filtering under replay.
-                gathered = int(allgather_record.item())
-                if gathered >= 0:
-                    should_collect = gathered != 0
-                    if should_collect:
-                        is_dummy = False
-            if not is_dummy and should_collect:
-                self._has_fresh_recorded_load = True
+        if is_sampling:
+            # An idle DP rank still executes remote tokens, so whether its load
+            # counts is decided by the EP group rather than by this rank.
+            is_dummy = not self._group_collected_step(is_dummy)
+        if is_sampling and not is_dummy:
+            self._has_fresh_recorded_load = True
         is_sampling = is_sampling and not is_dummy
         self._is_load_sampling_step = False
-        self._should_collect_local_load = False
         if self.uses_custom_load_stats:
             self._discard_samples_from_old_mapping()
             if not is_profile:
                 index = self._load_stats_window_write_index
-                has_sample = is_sampling and should_collect
+                has_sample = is_sampling
                 self._local_load_collection_mask[index] = has_sample
                 self._physical_load_sample_slots[index] = self.expert_load_window_step if has_sample else -1
                 if self._num_recorded_load_steps < self.expert_load_window_size:
