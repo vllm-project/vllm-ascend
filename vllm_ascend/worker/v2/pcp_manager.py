@@ -233,6 +233,9 @@ class AscendPCPManager(PCPManager):
         self.vllm_config = vllm_config
         self.shard_decode_requests: bool = self.shard_decode_requests and self.is_decode_sharded
 
+    # TODO(vllm-project/vllm#69512): Remove the local short-prefill
+    # classification, dispatch sizing, and PCP partitioning overrides
+    # once all supported vLLM versions provide equivalent behavior.
     def prepare_pcp_batch_req_state(self, batch_state):
         """Classify cached one-token prompt tails as PCP decode work.
 

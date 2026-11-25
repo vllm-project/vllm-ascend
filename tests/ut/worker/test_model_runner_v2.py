@@ -70,6 +70,7 @@ def _make_runner(*args, **kwargs):
     runner.prompt_logprobs_worker = None
     runner.execute_model_state = None
     runner.dcp_size = 1
+    runner.pcp_manager = None
     runner.use_pp = False
     runner.is_last_pp_rank = False
     runner.is_pooling_model = False
