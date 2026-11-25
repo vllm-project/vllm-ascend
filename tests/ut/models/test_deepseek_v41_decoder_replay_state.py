@@ -15,7 +15,6 @@ from vllm_ascend.attention.utils import uses_pcp_sharded_layout
 from vllm_ascend.models.deepseek_v41 import decoder_replay_state as replay_mod
 from vllm_ascend.models.deepseek_v41.decoder_replay_layers import AscendDecoderReplayLayers
 from vllm_ascend.models.deepseek_v41.engram.model_state import EngramModelState
-from vllm_ascend.worker.metadata_async import AsyncTargetDeviceMetadata
 from vllm_ascend.worker.v2.model_states.default import AscendModelState
 
 
@@ -81,23 +80,84 @@ def test_prefill_trims_but_decode_and_prompt_logprobs_keep_rows(state):
 
 
 @pytest.mark.parametrize("uses_pcp_replay", [False, True])
-def test_only_pcp_compaction_waits_for_batch_producer(state, monkeypatch, uses_pcp_replay):
+@pytest.mark.parametrize("defer_wait", [False, True])
+def test_only_pcp_compaction_waits_for_batch_producer(state, monkeypatch, uses_pcp_replay, defer_wait):
     producer = object()
     calls = Mock()
     monkeypatch.setattr(torch.npu, "current_stream", lambda: calls.stream)
     monkeypatch.setattr(state, "_prepare_compact_replay", calls.prepare_compact_replay)
-    replay_inputs = replace(inputs(), metadata_producer_stream=producer)
+    replay_inputs = replace(inputs(), metadata_producer_stream=producer, defer_pcp_metadata_wait=defer_wait)
     plan = replace(state._build_replay_plan(replay_inputs), uses_pcp_replay=uses_pcp_replay)
     monkeypatch.setattr(state, "_build_replay_plan", lambda _: plan)
 
     state.prepare(replay_inputs, CUDAGraphMode.NONE)
 
     calls.prepare_compact_replay.assert_called_once()
-    if uses_pcp_replay:
+    if uses_pcp_replay and not defer_wait:
         calls.stream.wait_stream.assert_called_once_with(producer)
         assert calls.mock_calls[0][0] == "stream.wait_stream"
     else:
         calls.stream.wait_stream.assert_not_called()
+
+
+def test_deferred_pcp_wait_follows_compact_inputs_and_precedes_replay_builder(state, monkeypatch):
+    calls = Mock()
+    producer = object()
+    replay_inputs = inputs()
+    batch = replay_inputs.batch
+    batch.seq_lens = torch.from_numpy(batch.seq_lens_np)
+    batch.max_query_len = 6
+    batch.attn_state = None
+    state.config.model_config = SimpleNamespace(max_model_len=32)
+    state.builders = [(0, ["decoder.swa_cache"], calls.builder)]
+    calls.builder.take_device_metadata_tasks.return_value = ()
+    replay_inputs = replace(
+        replay_inputs,
+        block_tables=(torch.zeros(3, 1),),
+        pcp_context=SimpleNamespace(global_batch=batch),
+        metadata_producer_stream=producer,
+        defer_pcp_metadata_wait=True,
+    )
+    plan = replay_mod._DecoderReplayPlan(
+        kept_lens=np.array([1, 2, 2], dtype=np.int32),
+        replay_inputs=replay_inputs,
+        num_tokens=5,
+        requires_compaction=True,
+        uses_pcp_replay=True,
+    )
+
+    def all_gather(tensor, *, dim):
+        calls.all_gather(dim)
+        return torch.cat([tensor, tensor], dim=dim)
+
+    pcp_group = SimpleNamespace(all_gather=all_gather)
+
+    def build_replay_pcp_context(inputs, global_kept):
+        pcp_group.all_gather(torch.arange(5), dim=0)
+        return inputs.pcp_context
+
+    monkeypatch.setattr(replay_mod, "get_pcp_group", lambda: pcp_group)
+    monkeypatch.setattr(replay_mod, "get_cos_and_sin_dsa", lambda *args, **kwargs: None)
+    monkeypatch.setattr(torch.npu, "current_stream", lambda: calls.stream)
+    monkeypatch.setattr(state, "_gather", calls.gather)
+    monkeypatch.setattr(state, "_build_replay_plan", lambda _: plan)
+    monkeypatch.setattr(state, "_build_replay_pcp_context", build_replay_pcp_context)
+    monkeypatch.setattr(state, "_build_metadata", replay_mod.DecoderReplayState._build_metadata.__get__(state))
+
+    state.prepare(replay_inputs, CUDAGraphMode.NONE)
+
+    assert [call[0] for call in calls.mock_calls] == [
+        "gather",
+        "all_gather",
+        "all_gather",
+        "stream.wait_stream",
+        "builder.build",
+        "builder.take_device_metadata_tasks",
+    ]
+    assert calls.all_gather.call_args_list[0].args == (0,)
+    assert calls.all_gather.call_args_list[1].args == (1,)
+    calls.stream.wait_stream.assert_called_once_with(producer)
+    assert state.metadata["decoder.swa_cache"] is calls.builder.build.return_value
 
 
 @pytest.mark.parametrize("has_tasks", [False, True])
@@ -373,8 +433,7 @@ def test_replay_dp_coordination_overlaps_metadata_build(synchronized_dp, monkeyp
     calls = []
     metadata = {"layer": object()}
     pcp_context = SimpleNamespace()
-    model_state.device_metadata = AsyncTargetDeviceMetadata.__new__(AsyncTargetDeviceMetadata)
-    replay_inputs = inputs(dummy=True)
+    replay_inputs = replace(inputs(dummy=True), defer_pcp_metadata_wait=True)
 
     def reduce(values, group, *, async_op):
         assert async_op

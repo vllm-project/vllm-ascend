@@ -253,6 +253,7 @@ class EngramModelState(AscendModelState):
             metadata_producer_stream=(
                 self.device_metadata.executor.stream if self.device_metadata is not None else None
             ),
+            defer_pcp_metadata_wait=isinstance(self.device_metadata, AsyncTargetDeviceMetadata),
         )
         return self._prepare_attn_with_replay(build_attn, replay_inputs, cudagraph_mode, for_capture=for_capture)
 
@@ -267,7 +268,7 @@ class EngramModelState(AscendModelState):
         replay = self.decoder_replay_state
         assert replay is not None
         if (
-            not isinstance(self.device_metadata, AsyncTargetDeviceMetadata)
+            not inputs.defer_pcp_metadata_wait
             or mode != CUDAGraphMode.NONE
             or for_capture
             or replay.config.parallel_config.data_parallel_size <= 1

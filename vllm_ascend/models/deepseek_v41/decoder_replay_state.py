@@ -43,6 +43,7 @@ class DecoderReplayInputs:
     encoder_replay_start: torch.Tensor
     pcp_context: "AscendPCPAttentionContext | None" = None
     metadata_producer_stream: torch.npu.Stream | None = None
+    defer_pcp_metadata_wait: bool = False
 
 
 @dataclass(frozen=True)
@@ -295,8 +296,8 @@ class DecoderReplayState:
             self.layers.context_factory = self.forward_context
             return
 
-        # PCP retains its existing order because compaction performs device collectives.
-        if plan.uses_pcp_replay and inputs.metadata_producer_stream is not None:
+        # Keep the existing collective ordering for producers that require it.
+        if plan.uses_pcp_replay and inputs.metadata_producer_stream is not None and not inputs.defer_pcp_metadata_wait:
             torch.npu.current_stream().wait_stream(inputs.metadata_producer_stream)
         self._prepare_compact_replay(inputs, plan)
 
@@ -384,7 +385,10 @@ class DecoderReplayState:
 
         producer = None if plan.uses_pcp_replay else inputs.metadata_producer_stream
         if producer is None:
-            self.metadata = self._build_metadata(plan.replay_inputs, offsets)
+            wait_for_producer = (
+                inputs.metadata_producer_stream if plan.uses_pcp_replay and inputs.defer_pcp_metadata_wait else None
+            )
+            self.metadata = self._build_metadata(plan.replay_inputs, offsets, wait_for_producer=wait_for_producer)
         else:
             self._submit_compact_metadata(plan.replay_inputs, offsets, producer)
         # PCP selects valid rows and pads downstream; other paths may include padding row indices.
@@ -429,7 +433,12 @@ class DecoderReplayState:
             self.metadata_ready = None
 
     def _build_metadata(
-        self, inputs: DecoderReplayInputs, offsets: np.ndarray, *, tasks: list[DeviceMetadataTask] | None = None
+        self,
+        inputs: DecoderReplayInputs,
+        offsets: np.ndarray,
+        *,
+        tasks: list[DeviceMetadataTask] | None = None,
+        wait_for_producer: torch.npu.Stream | None = None,
     ) -> dict[str, AscendDSAV41Metadata]:
         batch = inputs.batch
         num_reqs = batch.num_reqs
@@ -446,6 +455,10 @@ class DecoderReplayState:
         seq_lens_cpu = torch.from_numpy(batch.seq_lens_np[:num_reqs])
         is_prefilling = torch.from_numpy(batch.is_prefilling_np[:num_reqs])
         max_query_len = max(int(np.diff(offsets).max(initial=0)), batch.max_query_len or 0)
+        if wait_for_producer is not None:
+            # Compaction can overlap batch metadata. Serialize the planners
+            # before compact builders can use the same operator scratch.
+            torch.npu.current_stream().wait_stream(wait_for_producer)
         for group_id, layer_names, builder in self.builders:
             common = AscendCommonAttentionMetadata(
                 query_start_loc=self.offsets[: num_reqs + 1],

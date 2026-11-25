@@ -405,6 +405,9 @@ one. The KV transfer role and PCP size do not gate enablement. LoRA and A5
 packed-cache configurations are rejected when enabled. Omit the option or set
 `enabled` to `false` to use the original path.
 
+With SWA bounded replay, eager PCP compaction can overlap with the original
+batch's SAS and QLI preparation. The main stream waits for that preparation
+after gathering the compact inputs, before it builds the replay metadata.
 With multiple DP replicas, eager SWA bounded replay starts DP coordination
 before preparing the original metadata and joins it before choosing the
 replay layout.
