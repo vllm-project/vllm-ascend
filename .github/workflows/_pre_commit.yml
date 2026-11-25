@@ -74,7 +74,15 @@ jobs:
 
     - name: Run mypy
       run: |
-        PYTHONPATH="$PYTHONPATH:$(pwd)/vllm-empty"
+        # The shared lint image can have a different xlite API. Expose only the
+        # release wheel's type stub to mypy, keeping its CPython 3.11 binary off sys.path.
+        python3 -m pip install --no-deps --only-binary=:all: --python-version 3.11 --abi cp311 \
+          --target "$RUNNER_TEMP/xlite-wheel" "$(grep '^xlite==' requirements-dev.txt)"
+        stub_dir="$RUNNER_TEMP/mypy-stubs/xlite-stubs"
+        mkdir -p "$stub_dir"
+        cp "$RUNNER_TEMP/xlite-wheel/xlite/_C.pyi" "$stub_dir/"
+        echo partial > "$stub_dir/py.typed"
+        PYTHONPATH="$RUNNER_TEMP/mypy-stubs:$PYTHONPATH:$(pwd)/vllm-empty"
         export PYTHONPATH
         git config --global --add safe.directory /__w/vllm-ascend/vllm-ascend
         # Run mypy for Python 3.10, 3.11, 3.12 manually

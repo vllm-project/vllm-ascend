@@ -1,0 +1,6 @@
+pr: 23191
+entries:
+  - category: bugfix
+    text: >-
+      Fixed a crash when requesting output log probabilities during synchronous
+      speculative decoding, including n-gram and suffix decoding.
