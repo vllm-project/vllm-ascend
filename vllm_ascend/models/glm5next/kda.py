@@ -9,22 +9,17 @@ import torch
 from torch import nn
 from transformers import Glm5NextTextConfig
 from vllm.compilation.breakable_cudagraph import eager_break_during_capture
-from vllm.config import ParallelConfig, VllmConfig, get_current_vllm_config
-from vllm.distributed import divide, get_pcp_group, get_tp_group
+from vllm.config import VllmConfig, get_current_vllm_config
+from vllm.distributed import divide, get_pcp_group
 from vllm.forward_context import get_forward_context
 from vllm.logger import logger
-from vllm.model_executor.layers.linear import (
-    ColumnParallelLinear,
-    MergedColumnParallelLinear,
-    RowParallelLinear,
-)
+from vllm.model_executor.layers.linear import ColumnParallelLinear, RowParallelLinear
 from vllm.model_executor.layers.mamba.gdn.base import GatedDeltaNetAttention
 from vllm.model_executor.layers.mamba.mamba_utils import (
     MambaStateDtypeCalculator,
     MambaStateShapeCalculator,
     is_conv_state_dim_first,
 )
-from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.utils.torch_utils import direct_register_custom_op
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
@@ -41,6 +36,15 @@ from vllm_ascend.models.glm5next.kda_input_projection_tp import KDAInputProjecti
 from vllm_ascend.models.glm5next.ops.causal_conv1d import causal_conv1d
 from vllm_ascend.models.glm5next.ops.kda import KDA_MAX_RECURRENT_TOKENS, chunk_kda, recurrent_kda
 from vllm_ascend.models.glm5next.recoverssm_config import use_glm_recoverssm
+from vllm_ascend.ops.head_parallel import (
+    HeadParallelColumnLinear,
+    HeadParallelReplicatedMergedColumnLinear,
+    HeadParallelRowLinear,
+    ReplicatedMergedColumnLinear,
+    get_head_parallel_rank,
+    get_head_parallel_size,
+    load_head_shard,
+)
 from vllm_ascend.ops.recurrent_pcp import prepare_recurrent_pcp_config
 from vllm_ascend.ops.triton.kda.recoverssm import kda_recoverssm_verify
 
@@ -128,186 +132,6 @@ class Glm5NextGDNHostMetadataBackend(AscendGDNHostMetadataBackend):
         # The GLM KDA layer gathers PCP tokens before its head-sharded
         # recurrent update and restores the PCP-local output afterward.
         return True
-
-
-def get_kda_parallel_size(parallel_config: ParallelConfig) -> int:
-    """Number of head shards shared by projections and KDA state."""
-    return parallel_config.tensor_parallel_size * parallel_config.prefill_context_parallel_size
-
-
-def _get_kda_parallel_rank(tp_group, pcp_group) -> int:
-    # Match the TP-major ordering of Mooncake state transfer.
-    return tp_group.rank_in_group * pcp_group.world_size + pcp_group.rank_in_group
-
-
-class PCPColumnParallelLinear(ColumnParallelLinear):
-    """Column-parallel projection using combined TP and PCP head shards."""
-
-    def __init__(self, input_size: int, output_size: int, *, tp_group=None, **kwargs) -> None:
-        # An explicit input-projection group already defines all its shards.
-        self.pcp_group = get_pcp_group() if tp_group is None else None
-        self.tp_group = get_tp_group() if tp_group is None else tp_group
-        rank = self.tp_group.rank_in_group
-        size = self.tp_group.world_size
-        if self.pcp_group is not None:
-            rank = _get_kda_parallel_rank(self.tp_group, self.pcp_group)
-            size *= self.pcp_group.world_size
-        super().__init__(
-            input_size,
-            output_size,
-            tp_rank=rank,
-            tp_size=size,
-            **kwargs,
-        )
-
-    def forward(self, input_):
-        bias = self.bias if not self.skip_bias_add else None
-        output = self.quant_method.apply(self, input_, bias)
-        if self.gather_output:
-            if self.pcp_group is not None and self.pcp_group.world_size > 1:
-                output = self.pcp_group.all_gather(output, dim=-1)
-            if self.tp_group.world_size > 1:
-                output = self.tp_group.all_gather(output, dim=-1)
-        if not self.return_bias:
-            return output
-        return output, self.bias if self.skip_bias_add else None
-
-
-class PCPRowParallelLinear(RowParallelLinear):
-    """Row-parallel projection reducing PCP and TP head contributions separately."""
-
-    def __init__(self, input_size: int, output_size: int, *, tp_group=None, **kwargs) -> None:
-        self.pcp_group = get_pcp_group() if tp_group is None else None
-        self.tp_group = get_tp_group() if tp_group is None else tp_group
-        rank = self.tp_group.rank_in_group
-        shard_count = self.tp_group.world_size
-        if self.pcp_group is not None:
-            rank = _get_kda_parallel_rank(self.tp_group, self.pcp_group)
-            shard_count *= self.pcp_group.world_size
-        # The pinned RowParallelLinear has no rank/size overrides. Allocate
-        # the local input shard, then bind its inherited weight loaders to the combined rank.
-        super().__init__(divide(input_size, shard_count), output_size, disable_tp=True, **kwargs)
-        self.input_size = input_size
-        self.disable_tp = False
-        self.tp_size = shard_count
-        self.tp_rank = rank
-        self.update_param_tp_status()
-
-    def forward(self, input_, pcp_output_indices=None):
-        if self.input_is_parallel:
-            input_parallel = input_
-        else:
-            input_parallel = input_.chunk(self.tp_size, dim=-1)[self.tp_rank].contiguous()
-        bias = None if self.tp_rank > 0 or self.skip_bias_add else self.bias
-        output = self.quant_method.apply(self, input_parallel, bias)
-        # The decoder can defer TP reduction to sequence-parallel reduce-scatter.
-        # It does not reduce over PCP, so always combine those shards here.
-        if self.pcp_group is not None and self.pcp_group.world_size > 1:
-            if pcp_output_indices is not None:
-                output = self.pcp_group.reduce_scatter(output[pcp_output_indices], dim=0)
-            else:
-                output = self.pcp_group.all_reduce(output)
-        if self.reduce_results and self.tp_group.world_size > 1:
-            if self.pcp_group is None and pcp_output_indices is not None:
-                output = self.tp_group.reduce_scatter(output[pcp_output_indices], dim=0)
-            else:
-                output = self.tp_group.all_reduce(output)
-        if not self.return_bias:
-            return output
-        return output, self.bias if self.skip_bias_add else None
-
-
-class _Glm5NextMergedColumnParallelLinear(MergedColumnParallelLinear):
-    """Merged projection with multiple replicated output shards.
-
-    Extends K3's ``_KimiGDNMergedColumnParallelLinear`` to support two
-    replicated shards (f_a, g_a) instead of one. Pre-multiplies each
-    replicated entry's output_size by tp_size so the per-rank shard
-    divides back to the full size, and forces tp_rank=0 during weight
-    loading for replicated shards.
-    """
-
-    # Owned by the base class; declared here so the temporary override in the
-    # weight loaders below does not read the attribute before its type is known.
-    tp_rank: int
-
-    def __init__(
-        self,
-        input_size: int,
-        output_sizes: list[int],
-        replicated_shard_ids: tuple[int, ...],
-        tp_size: int,
-        **kwargs,
-    ) -> None:
-        self.replicated_shard_ids = set(replicated_shard_ids)
-        output_sizes = output_sizes.copy()
-        for sid in self.replicated_shard_ids:
-            output_sizes[sid] *= tp_size
-        super().__init__(input_size, output_sizes, **kwargs)
-
-    def weight_loader(
-        self,
-        param: nn.Parameter,
-        loaded_weight: torch.Tensor,
-        loaded_shard_id: tuple[int, ...] | int | None = None,
-    ) -> None:
-        tp_rank = self.tp_rank
-        param_tp_rank = getattr(param, "tp_rank", None)
-        if loaded_shard_id in self.replicated_shard_ids:
-            self.tp_rank = 0
-            if param_tp_rank is not None:
-                param.tp_rank = 0
-        try:
-            super().weight_loader(param, loaded_weight, loaded_shard_id)
-        finally:
-            self.tp_rank = tp_rank
-            if param_tp_rank is not None:
-                param.tp_rank = param_tp_rank
-
-    def weight_loader_v2(
-        self,
-        param: nn.Parameter,
-        loaded_weight: torch.Tensor,
-        loaded_shard_id: tuple[int, ...] | int | None = None,
-    ) -> None:
-        tp_rank = self.tp_rank
-        param_tp_rank = getattr(param, "tp_rank", None)
-        if loaded_shard_id in self.replicated_shard_ids:
-            self.tp_rank = 0
-            if param_tp_rank is not None:
-                param.tp_rank = 0
-        try:
-            super().weight_loader_v2(param, loaded_weight, loaded_shard_id)
-        finally:
-            self.tp_rank = tp_rank
-            if param_tp_rank is not None:
-                param.tp_rank = param_tp_rank
-
-
-class PCPGlm5NextMergedColumnParallelLinear(_Glm5NextMergedColumnParallelLinear, PCPColumnParallelLinear):
-    """PCP-sharded Q/K/V/b with replicated low-rank f_a/g_a shards."""
-
-    def __init__(
-        self,
-        input_size: int,
-        output_sizes: list[int],
-        replicated_shard_ids: tuple[int, ...],
-        tp_size: int,
-        **kwargs,
-    ) -> None:
-        self.replicated_shard_ids = set(replicated_shard_ids)
-        # #66784's inherited merged loaders read this even for unpadded PCP
-        # projections, whose constructor bypasses the merged initializer.
-        self.padding_size = 0
-        self.output_sizes = output_sizes.copy()
-        for sid in self.replicated_shard_ids:
-            self.output_sizes[sid] *= tp_size
-        # MergedColumnParallelLinear's constructor hardcodes the TP group.
-        # Retain its shard loaders while allocating through the PCP column layer.
-        PCPColumnParallelLinear.__init__(self, input_size, sum(self.output_sizes), **kwargs)
-        # vLLM #63752: the PCP allocation bypasses the stacked initializer.
-        self.shard_ids = tuple(range(len(self.output_sizes)))
-        self.loaded_shard_ids: dict[str, set[str | int]] = {}
 
 
 def _fused_qkv_conv1d(
@@ -409,14 +233,14 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
         self.is_pcp_decode_sharded = vllm_config.parallel_config.pcp_shard_decode_requests
         self.use_pcp_head_sharding = self.pcp_size > 1
         column_linear = ColumnParallelLinear
-        merged_linear = _Glm5NextMergedColumnParallelLinear
+        merged_linear = ReplicatedMergedColumnLinear
         row_linear = RowParallelLinear
         if self.use_pcp_head_sharding:
-            self.tp_size = get_kda_parallel_size(vllm_config.parallel_config)
-            self.tp_rank = _get_kda_parallel_rank(get_tp_group(), self.pcp_group)
-            column_linear = PCPColumnParallelLinear
-            merged_linear = PCPGlm5NextMergedColumnParallelLinear
-            row_linear = PCPRowParallelLinear
+            self.tp_size = get_head_parallel_size(vllm_config.parallel_config)
+            self.tp_rank = get_head_parallel_rank()
+            column_linear = HeadParallelColumnLinear
+            merged_linear = HeadParallelReplicatedMergedColumnLinear
+            row_linear = HeadParallelRowLinear
 
         self.head_dim = config.linear_head_dim
         self.num_heads = config.linear_num_heads
@@ -437,7 +261,7 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
             group = get_qkv_iproj_tp_group()
             projection_tp_size = group.world_size
             self.projection_tp = KDAInputProjectionTP(group, self.num_heads, self.head_dim)
-            merged_linear = PCPGlm5NextMergedColumnParallelLinear
+            merged_linear = HeadParallelReplicatedMergedColumnLinear
             merged_linear_kwargs["tp_group"] = group
 
         # Merge q, k, v, b, f_a, g_a projections into one GEMM (6→1 launches).
@@ -565,15 +389,13 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
             self._merged_conv_weight.copy_(merged)
 
     def _dt_bias_weight_loader(self, param, loaded_weight):
-        shard_size = param.shape[0]
-        default_weight_loader(param, loaded_weight.narrow(0, self.tp_rank * shard_size, shard_size))
+        load_head_shard(param, loaded_weight, self.tp_rank)
 
     def _a_log_weight_loader(self, param, loaded_weight):
         # Checkpoints store A_log as 1-D; the model parameter is 4-D.
         if loaded_weight.dim() == 1:
             loaded_weight = loaded_weight.view(1, 1, -1, 1)
-        shard_size = param.shape[2]
-        default_weight_loader(param, loaded_weight.narrow(2, self.tp_rank * shard_size, shard_size))
+        load_head_shard(param, loaded_weight, self.tp_rank, dim=2)
 
     def get_attn_backend(self):
         return Glm5NextGDNHostMetadataBackend
@@ -665,7 +487,7 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
                 raise RuntimeError("KDA PCP token mapping does not match the rank-local model input.")
             # Sharded decodes have one owner, just like prefill chunks. Only
             # replicated mixed batches need the full AllReduce output.
-            use_pcp_reduce_scatter = isinstance(self.o_proj, PCPRowParallelLinear) and (
+            use_pcp_reduce_scatter = isinstance(self.o_proj, HeadParallelRowLinear) and (
                 self.is_pcp_decode_sharded or bool(pcp_context.global_batch.is_prefilling_np.all())
             )
         if use_pcp_reduce_scatter:

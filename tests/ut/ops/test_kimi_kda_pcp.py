@@ -3,10 +3,12 @@
 
 from contextlib import contextmanager
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import pytest
 import torch
+from vllm.model_executor.layers.linear import UnquantizedLinearMethod
+from vllm.model_executor.layers.quantization.modelopt import ModelOptMixedPrecisionConfig
 
 from vllm_ascend.attention.gdn_attn_builder import (
     AscendGDNAttentionMetadataBuilder,
@@ -103,9 +105,9 @@ def test_kda_input_projection_preserves_upstream_padding_and_replication(loader,
         torch.testing.assert_close(projection.weight[-padding:], torch.zeros(padding, 8))
 
 
-@pytest.mark.parametrize(("head_dim", "padding"), [(4, 10), (14, 0)])
+@pytest.mark.parametrize(("head_dim", "quant_algo", "padding"), [(4, None, 10), (14, None, 0), (4, "FP8_PB_WO", 90)])
 @pytest.mark.parametrize("loader", ["weight_loader", "weight_loader_v2"])
-def test_pcp_projection_allocates_padding_once(head_dim, padding, loader):
+def test_pcp_projection_allocates_padding_once(head_dim, quant_algo, padding, loader):
     layer = AscendKimiK3DeltaAttention.__new__(AscendKimiK3DeltaAttention)
     torch.nn.Module.__init__(layer)
     layer.num_heads = 8
@@ -114,6 +116,12 @@ def test_pcp_projection_allocates_padding_once(head_dim, padding, loader):
     layer.hidden_size = 8
     layer.conv_size = 4
     layer.quant_config = None
+    if quant_algo is not None:
+        layer.quant_config = Mock(spec=ModelOptMixedPrecisionConfig)
+        layer.quant_config.online_quantization_config = None
+        layer.quant_config._resolve_quant_algo.return_value = quant_algo
+        # Exercise the real allocation and loaders on CPU with the model's FP8 alignment.
+        layer.quant_config.get_quant_method.side_effect = lambda *_args, **_kwargs: UnquantizedLinearMethod()
     config = SimpleNamespace(parallel_config=SimpleNamespace(tensor_parallel_size=2, prefill_context_parallel_size=2))
     tp = SimpleNamespace(world_size=2, rank_in_group=1)
     pcp = SimpleNamespace(world_size=2, rank_in_group=1)

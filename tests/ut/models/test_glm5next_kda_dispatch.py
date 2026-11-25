@@ -134,7 +134,7 @@ def test_kda_pcp_restores_global_order_and_returns_local_output(
     layer.o_norm = lambda output, gate: output
     layer.o_proj = lambda x: (x, None)
     if pcp_projection:
-        projection = model_kda.PCPRowParallelLinear.__new__(model_kda.PCPRowParallelLinear)
+        projection = model_kda.HeadParallelRowLinear.__new__(model_kda.HeadParallelRowLinear)
         torch.nn.Module.__init__(projection)
         projection.input_is_parallel = True
         projection.tp_rank, projection.tp_size = pcp_rank, pcp_size

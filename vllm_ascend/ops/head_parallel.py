@@ -6,6 +6,7 @@ from copy import copy
 
 from vllm.distributed import divide, get_pcp_group, get_tp_group
 from vllm.model_executor.layers.linear import ColumnParallelLinear, MergedColumnParallelLinear, RowParallelLinear
+from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.utils import set_weight_attrs
 
 from vllm_ascend.utils import vllm_version_is
@@ -16,8 +17,19 @@ def get_head_parallel_size(parallel_config) -> int:
 
 
 def get_head_parallel_rank() -> int:
+    return _head_parallel_rank(get_tp_group(), get_pcp_group())
+
+
+def _head_parallel_rank(tp_group, pcp_group) -> int:
+    if pcp_group is None:
+        return tp_group.rank_in_group
     # Mooncake worker IDs use the same TP-major, PCP-minor order.
-    return get_tp_group().rank_in_group * get_pcp_group().world_size + get_pcp_group().rank_in_group
+    return tp_group.rank_in_group * pcp_group.world_size + pcp_group.rank_in_group
+
+
+def load_head_shard(param, loaded_weight, rank: int, *, dim: int = 0) -> None:
+    shard_size = param.size(dim)
+    default_weight_loader(param, loaded_weight.narrow(dim, rank * shard_size, shard_size))
 
 
 def get_head_sharded_state_shape(vllm_config, upstream_get_shape):
@@ -31,14 +43,16 @@ def get_head_sharded_state_shape(vllm_config, upstream_get_shape):
 
 
 class HeadParallelColumnLinear(ColumnParallelLinear):
-    def __init__(self, input_size: int, output_size: int, **kwargs) -> None:
-        self.pcp_group = get_pcp_group()
-        self.tp_group = get_tp_group()
+    def __init__(self, input_size: int, output_size: int, *, tp_group=None, **kwargs) -> None:
+        # An explicit projection group defines its own sharding and collectives.
+        self.pcp_group = get_pcp_group() if tp_group is None else None
+        self.tp_group = get_tp_group() if tp_group is None else tp_group
+        pcp_size = self.pcp_group.world_size if self.pcp_group is not None else 1
         super().__init__(
             input_size,
             output_size,
-            tp_rank=get_head_parallel_rank(),
-            tp_size=self.tp_group.world_size * self.pcp_group.world_size,
+            tp_rank=_head_parallel_rank(self.tp_group, self.pcp_group),
+            tp_size=self.tp_group.world_size * pcp_size,
             **kwargs,
         )
 
@@ -46,7 +60,7 @@ class HeadParallelColumnLinear(ColumnParallelLinear):
         bias = self.bias if not self.skip_bias_add else None
         output = self.quant_method.apply(self, input_, bias)
         if self.gather_output:
-            if self.pcp_group.world_size > 1:
+            if self.pcp_group is not None and self.pcp_group.world_size > 1:
                 output = self.pcp_group.all_gather(output, dim=-1)
             if self.tp_group.world_size > 1:
                 output = self.tp_group.all_gather(output, dim=-1)
@@ -56,59 +70,114 @@ class HeadParallelColumnLinear(ColumnParallelLinear):
 
 
 class HeadParallelMergedColumnLinear(MergedColumnParallelLinear, HeadParallelColumnLinear):
-    def __init__(self, input_size: int, output_sizes: list[int], *, padding_size: int = 0, **kwargs) -> None:
-        # #66784 moves padding ownership to the merged layer, but this class
-        # bypasses MergedColumnParallelLinear.__init__ (see below), so it must
-        # append and zero the padding rows on every supported vLLM revision.
-        # v0.34.0's upstream wrapper consumes the keyword before super() and
-        # only stashes it on the instance, so recover the budget from there.
-        padding_size = padding_size or getattr(self, "padding_size", 0)
+    def __init__(
+        self, input_size: int, output_sizes: list[int], *, padding_size: int = 0, tp_group=None, **kwargs
+    ) -> None:
+        # Reserve the padding rows here because we bypass the merged initializer.
         self.padding_size = padding_size
+        self._legacy_padding_size = padding_size if vllm_version_is("0.34.0") else 0
         self.output_sizes = output_sizes.copy()
         self.shard_ids = tuple(range(len(output_sizes)))
         if padding_size:
-            parallel_size = get_tp_group().world_size * get_pcp_group().world_size
+            parallel_size = (
+                tp_group.world_size
+                if tp_group is not None
+                else (get_tp_group().world_size * get_pcp_group().world_size)
+            )
             self.output_sizes.append(padding_size * parallel_size)
         # Keep the merged checkpoint loaders, but allocate with explicit ranks.
-        HeadParallelColumnLinear.__init__(self, input_size, sum(self.output_sizes), **kwargs)
+        HeadParallelColumnLinear.__init__(self, input_size, sum(self.output_sizes), tp_group=tp_group, **kwargs)
         # vLLM #63752: custom allocation bypasses the stacked initializer.
         self.loaded_shard_ids: dict[str, set[str | int]] = {}
         if padding_size:
-            # Padding lives in the last ``padding_size`` rows of each rank.
-            # v0.34.0's upstream wrapper re-applies the load-completion
-            # attribute after super() returns, so only the mainline lane
-            # tracks the loaders here; zeroing stays idempotent on both.
-            track_loaders = not vllm_version_is("0.34.0")
             for name in ["weight"] + (["bias"] if self.bias is not None else []):
                 param = getattr(self, name)
                 param.data[-padding_size:].zero_()
-                if track_loaders:
-                    set_weight_attrs(param, {"weight_loader_numel": param[:-padding_size].numel()})
+                set_weight_attrs(param, {"weight_loader_numel": param[:-padding_size].numel()})
+
+    def weight_loader(self, param, loaded_weight, loaded_shard_id=None):
+        super().weight_loader(param, loaded_weight, loaded_shard_id)
+        self._zero_legacy_padding(param)
+
+    def weight_loader_v2(self, param, loaded_weight, loaded_shard_id=None):
+        super().weight_loader_v2(param, loaded_weight, loaded_shard_id)
+        self._zero_legacy_padding(param)
+
+    def _zero_legacy_padding(self, param) -> None:
+        # The v0.34.0 merged loader leaves padding to its caller.
+        if self._legacy_padding_size and param is self.weight:
+            param.data[-self._legacy_padding_size :].zero_()
+
+
+class ReplicatedMergedColumnLinear(MergedColumnParallelLinear):
+    """A merged projection with selected checkpoint shards replicated on every rank."""
+
+    def __init__(
+        self, input_size: int, output_sizes: list[int], *, replicated_shard_ids: tuple[int, ...], tp_size: int, **kwargs
+    ) -> None:
+        self.replicated_shard_ids = frozenset(replicated_shard_ids)
+        output_sizes = output_sizes.copy()
+        for shard_id in self.replicated_shard_ids:
+            output_sizes[shard_id] *= tp_size
+        super().__init__(input_size, output_sizes, **kwargs)
+
+    def weight_loader(self, param, loaded_weight, loaded_shard_id=None):
+        self._load_replicated_shard(super().weight_loader, param, loaded_weight, loaded_shard_id)
+
+    def weight_loader_v2(self, param, loaded_weight, loaded_shard_id=None):
+        self._load_replicated_shard(super().weight_loader_v2, param, loaded_weight, loaded_shard_id)
+
+    def _load_replicated_shard(self, loader, param, loaded_weight, shard_id) -> None:
+        if shard_id not in self.replicated_shard_ids:
+            loader(param, loaded_weight, shard_id)
+            return
+        # The allocated local slice is the full replicated checkpoint shard.
+        rank = self.tp_rank
+        param_rank = getattr(param, "tp_rank", None)
+        self.tp_rank = 0
+        if param_rank is not None:
+            param.tp_rank = 0
+        try:
+            loader(param, loaded_weight, shard_id)
+        finally:
+            self.tp_rank = rank
+            if param_rank is not None:
+                param.tp_rank = param_rank
+
+
+class HeadParallelReplicatedMergedColumnLinear(ReplicatedMergedColumnLinear, HeadParallelMergedColumnLinear):
+    """Allocate replicated and sharded outputs with the effective projection group."""
 
 
 class HeadParallelRowLinear(RowParallelLinear):
-    def __init__(self, input_size: int, output_size: int, **kwargs) -> None:
-        self.pcp_group = get_pcp_group()
-        self.tp_group = get_tp_group()
-        size = self.tp_group.world_size * self.pcp_group.world_size
+    def __init__(self, input_size: int, output_size: int, *, tp_group=None, **kwargs) -> None:
+        self.pcp_group = get_pcp_group() if tp_group is None else None
+        self.tp_group = get_tp_group() if tp_group is None else tp_group
+        pcp_size = self.pcp_group.world_size if self.pcp_group is not None else 1
+        size = self.tp_group.world_size * pcp_size
         # The release RowParallelLinear has no explicit rank/size arguments.
         super().__init__(divide(input_size, size), output_size, disable_tp=True, **kwargs)
         self.input_size = input_size
         self.disable_tp = False
         self.tp_size = size
-        self.tp_rank = get_head_parallel_rank()
+        self.tp_rank = _head_parallel_rank(self.tp_group, self.pcp_group)
         self.update_param_tp_status()
 
-    def forward(self, input_):
+    def forward(self, input_, pcp_output_indices=None):
         if not self.input_is_parallel:
             input_ = input_.chunk(self.tp_size, dim=-1)[self.tp_rank].contiguous()
         bias = None if self.tp_rank > 0 or self.skip_bias_add else self.bias
         output = self.quant_method.apply(self, input_, bias)
         # Sequence parallelism defers only TP reduction to the decoder.
-        if self.pcp_group.world_size > 1:
-            output = self.pcp_group.all_reduce(output)
-        if self.reduce_results:
-            if self.tp_group.world_size > 1:
+        if self.pcp_group is not None and self.pcp_group.world_size > 1:
+            if pcp_output_indices is not None:
+                output = self.pcp_group.reduce_scatter(output[pcp_output_indices], dim=0)
+            else:
+                output = self.pcp_group.all_reduce(output)
+        if self.reduce_results and self.tp_group.world_size > 1:
+            if self.pcp_group is None and pcp_output_indices is not None:
+                output = self.tp_group.reduce_scatter(output[pcp_output_indices], dim=0)
+            else:
                 output = self.tp_group.all_reduce(output)
         if not self.return_bias:
             return output

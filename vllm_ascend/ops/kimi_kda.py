@@ -17,11 +17,9 @@ from vllm.model_executor.layers.linear import (
     MergedColumnParallelLinear,
 )
 from vllm.model_executor.layers.quantization.modelopt import ModelOptMixedPrecisionConfig
-from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.utils import replace_parameter
 from vllm.models.kimi_k3.nvidia.kda import (
     KimiK3DeltaAttention,
-    _KimiGDNMergedColumnParallelLinear,
     _make_decode_conv1d_weight_loader,
 )
 from vllm.v1.attention.backend import AttentionBackend
@@ -40,9 +38,11 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence im
 from vllm_ascend.ops.head_parallel import (
     HeadParallelColumnLinear,
     HeadParallelMergedColumnLinear,
+    HeadParallelReplicatedMergedColumnLinear,
     HeadParallelRowLinear,
     get_head_parallel_rank,
     get_head_parallel_size,
+    load_head_shard,
 )
 from vllm_ascend.ops.kda import run_chunk_kda, run_recurrent_kda
 from vllm_ascend.ops.recurrent_pcp import PCPRecurrentMetadataBuilderMixin
@@ -69,11 +69,9 @@ def _kda_bfg_stream() -> torch.npu.Stream:
     return _KDA_BFG_STREAM
 
 
-class KimiKDAInputParallelLinear(_KimiGDNMergedColumnParallelLinear, HeadParallelMergedColumnLinear):
+class KimiKDAInputParallelLinear(HeadParallelReplicatedMergedColumnLinear):
     def __init__(self, input_size: int, output_sizes: list[int], tp_size: int, **kwargs) -> None:
-        # Keep upstream replication/padding setup; the next MRO class allocates
-        # its merged projection using the combined TP/PCP rank.
-        super().__init__(input_size, output_sizes, replicated_shard_id=4, tp_size=tp_size, **kwargs)
+        super().__init__(input_size, output_sizes, replicated_shard_ids=(4,), tp_size=tp_size, **kwargs)
 
 
 class _KDAFusedBFGLinear(MergedColumnParallelLinear):
@@ -379,8 +377,7 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
 
     def _head_weight_loader(self, param, loaded_weight) -> None:
         # A_log checkpoints may use [1, 1, H, 1] or [H].
-        loaded_weight = loaded_weight.reshape(-1)
-        default_weight_loader(param, loaded_weight.narrow(0, self.tp_rank * param.numel(), param.numel()))
+        load_head_shard(param, loaded_weight.reshape(-1), self.tp_rank)
 
     def get_attn_backend(self) -> type[AttentionBackend]:
         if self.use_recoverssm:

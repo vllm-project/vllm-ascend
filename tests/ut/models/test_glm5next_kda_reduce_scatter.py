@@ -7,13 +7,13 @@ from unittest.mock import Mock
 import pytest
 import torch
 
-from vllm_ascend.models.glm5next.kda import PCPRowParallelLinear
+from vllm_ascend.ops.head_parallel import HeadParallelRowLinear
 
 
 @pytest.mark.parametrize("rank", range(4))
 @pytest.mark.parametrize("use_mapping", [False, True])
 def test_pcp_output_reduction_matches_allreduce_then_local_mapping(rank, use_mapping):
-    layer = PCPRowParallelLinear.__new__(PCPRowParallelLinear)
+    layer = HeadParallelRowLinear.__new__(HeadParallelRowLinear)
     torch.nn.Module.__init__(layer)
     layer.input_is_parallel = True
     layer.tp_rank = rank
