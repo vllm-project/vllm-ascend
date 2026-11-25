@@ -1,0 +1,9 @@
+pr: 23212
+entries:
+  - category: bugfix
+    text: >-
+      Fixed stale Step5 sparse attention metadata under speculative decoding
+      with FULL decode graphs: a captured decode shape that the configured
+      capture sizes do not mention was not recognised as a graph shape, so the
+      replayed graph used the attention metadata of an earlier step instead of
+      the metadata of the step being served.
