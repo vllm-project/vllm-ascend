@@ -38,8 +38,14 @@ def _builder(capture_sizes: set[int]) -> AscendStep5DSAMetadataBuilder:
     return builder
 
 
-def _common(num_reqs: int = 2) -> NS:
-    """A uniform MTP verify batch: ``num_reqs`` requests of 8 query tokens."""
+def _common(seq_lens: list[int] | None = None) -> NS:
+    """A uniform MTP verify batch: one request of 8 query tokens per length.
+
+    The number of requests follows the KV lengths, so a case cannot ask for
+    more requests than it provides lengths for.
+    """
+    lengths = [137, 73] if seq_lens is None else list(seq_lens)
+    num_reqs = len(lengths)
     tokens = num_reqs * 8
     return NS(
         num_reqs=num_reqs,
@@ -48,7 +54,7 @@ def _common(num_reqs: int = 2) -> NS:
         max_query_len=8,
         query_start_loc=torch.arange(0, tokens + 1, 8, dtype=torch.int32),
         query_start_loc_cpu=torch.arange(0, tokens + 1, 8, dtype=torch.int32),
-        seq_lens=torch.tensor([137, 73][:num_reqs], dtype=torch.int32),
+        seq_lens=torch.tensor(lengths, dtype=torch.int32),
         block_table_tensor=torch.zeros((num_reqs, 1), dtype=torch.int32),
         slot_mapping=torch.arange(tokens),
     )
@@ -104,7 +110,7 @@ def test_step5_gbsa_ignores_a_configured_size_that_was_not_captured(monkeypatch,
     """
     monkeypatch.setattr(step5, "get_graph_params", lambda: NS(events={16: []}))
     builder = _builder({10, 24})
-    common = _common(num_reqs=3)
+    common = _common([137, 73, 91])
 
     first = builder.build(0, common)
     common.seq_lens.copy_(torch.tensor([145, 81, 97], dtype=torch.int32))
