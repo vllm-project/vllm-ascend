@@ -34,7 +34,6 @@ from vllm_ascend.models.deepseek_v4.vision import (
     DeepseekV4Aligner,
     DeepseekV4ViT,
 )
-from vllm_ascend.utils import vllm_version_is
 
 
 def _vision_parameter_name(name: str) -> str | None:
@@ -262,15 +261,3 @@ class AscendDeepseekV4ForConditionalGeneration(
 
         loaded_language = self.language_model.load_weights(language_weights())
         return loaded_vision | {f"language_model.{name}" for name in loaded_language}
-
-    def process_weights_after_loading(self) -> None:
-        # #57678 already finalizes language_model in the children-first walk.
-        if not vllm_version_is("0.33.0"):
-            return
-        hook = getattr(
-            self.language_model,
-            "process_weights_after_loading",
-            None,
-        )
-        if hook is not None:
-            hook()

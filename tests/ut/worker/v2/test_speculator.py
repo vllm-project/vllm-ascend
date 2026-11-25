@@ -11,6 +11,7 @@ import numpy as np
 import pytest
 import torch
 from vllm.config.compilation import CUDAGraphMode
+from vllm.config.utils import hash_config_cached
 from vllm.v1.worker.gpu.dp_utils import DPSyncState
 from vllm.v1.worker.gpu.spec_decode.target_dependent_ar.speculator import (
     TargetDependentARSpeculator,
@@ -22,16 +23,12 @@ from vllm_ascend.attention.dsa_v1 import AscendDSABackend
 from vllm_ascend.attention.mla_v1 import AscendMLABackend, AscendMLAMetadata
 from vllm_ascend.attention.sfa_v1 import AscendSFABackend
 from vllm_ascend.distributed.eplb.tensor_ops import make_allgather_mask
-from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2.input_batch import AscendInputBuffers
 from vllm_ascend.worker.v2.spec_decode.target_dependent_ar.speculator import (
     AscendTargetDependentARSpeculator,
     gather,
     torch_gather_wrapper,
 )
-
-if not vllm_version_is("0.33.0"):
-    from vllm.config.utils import hash_config_cached
 
 
 def test_calc_next_seq_lens_cpu():
@@ -180,17 +177,15 @@ def test_init_cudagraph_manager_keeps_graph_mode():
     parent_init.assert_called_once_with(CUDAGraphMode.FULL)
 
 
-def test_generate_draft_updates_attn_metadata():
-    """Test updating attention metadata during draft generation."""
+def test_decode_updates_attn_metadata():
+    """Test updating attention metadata during draft decoding."""
     speculator = AscendTargetDependentARSpeculator.__new__(AscendTargetDependentARSpeculator)
     attn_metadata = {"layer.0": MagicMock()}
     speculator._update_decode_attn_metadata = MagicMock()
-    with patch.object(
-        TargetDependentARSpeculator, "_generate_draft" if vllm_version_is("0.33.0") else "_decode"
-    ) as parent_generate:
+    with patch.object(TargetDependentARSpeculator, "_decode") as parent_generate:
         # main always passes the per-batch step count; there is no fallback to
         # the configured count.
-        speculator._generate_draft(2, 4, attn_metadata, None, None, num_speculative_steps=3)
+        speculator._decode(2, 4, attn_metadata, None, None, num_speculative_steps=3)
     expected_args: tuple[Any, ...] = (2, 4, attn_metadata, None, None, CUDAGraphMode.NONE)
     # vLLM #60335 added `num_speculative_steps` on main.
     expected_args = (*expected_args, 3)
@@ -198,13 +193,13 @@ def test_generate_draft_updates_attn_metadata():
     speculator._update_decode_attn_metadata.assert_called_once_with(attn_metadata, 1, 2)
 
 
-def test_generate_draft_skips_update_without_attn_metadata():
+def test_decode_skips_update_without_attn_metadata():
     """Test skipping metadata updates when attention metadata is absent."""
     speculator = AscendTargetDependentARSpeculator.__new__(AscendTargetDependentARSpeculator)
     speculator.num_speculative_steps = 3
     speculator._update_decode_attn_metadata = MagicMock()
-    with patch.object(TargetDependentARSpeculator, "_generate_draft" if vllm_version_is("0.33.0") else "_decode"):
-        speculator._generate_draft(2, 4, None, None, None)
+    with patch.object(TargetDependentARSpeculator, "_decode"):
+        speculator._decode(2, 4, None, None, None)
     speculator._update_decode_attn_metadata.assert_not_called()
 
 
@@ -724,9 +719,8 @@ def test_propose_accepts_main_dp_sync_state_and_num_speculative_tokens(adaptive,
         eager=False,
         num_reqs=1,
         skip_drafts=True,
+        max_query_len=6,
     )
-    if not vllm_version_is("0.33.0"):
-        sync_kwargs["max_query_len"] = 6
     dp_sync = DPSyncState(**sync_kwargs)
     expected = object()
     with (
@@ -751,8 +745,7 @@ def test_propose_accepts_main_dp_sync_state_and_num_speculative_tokens(adaptive,
     assert dp_sync.uniform_token_count == sync_uniform
     assert forwarded.num_tokens_across_dp is dp_sync.num_tokens_across_dp
     assert (forwarded.num_reqs, forwarded.eager, forwarded.skip_drafts) == (1, False, True)
-    if not vllm_version_is("0.33.0"):
-        assert forwarded.max_query_len == 6
+    assert forwarded.max_query_len == 6
     assert parent_propose.call_args.kwargs.get("num_speculative_tokens") == 2
 
 
@@ -869,12 +862,9 @@ def test_eplb_draft_mask_tracks_prefill_decode_and_dummy_replay():
             "draft": SimpleNamespace(model=SimpleNamespace(moe_layers=[SimpleNamespace(eplb_state=layer_state)]))
         },
     )
-    model_config = speculator.speculative_config.draft_model_config
-    if vllm_version_is("0.33.0"):
-        key = model_config.compute_hash()
-    else:
-        key = hash_config_cached(model_config)
-    state.model_states[key] = state.model_states["draft"]
+    state.model_states[hash_config_cached(speculator.speculative_config.draft_model_config)] = state.model_states[
+        "draft"
+    ]
     speculator.set_eplb_state(state)
     mask = layer_state.allgather_source_is_padding
     speculator.set_eplb_state(state)
@@ -907,7 +897,7 @@ def test_eplb_draft_mask_tracks_prefill_decode_and_dummy_replay():
 
 
 @pytest.mark.parametrize("num_reqs,num_tokens", [(1, 4), (2, 8), (4, 16)])
-def test_generate_draft_capture_uses_request_rows(num_reqs, num_tokens):
+def test_decode_capture_uses_request_rows(num_reqs, num_tokens):
     speculator = AscendTargetDependentARSpeculator.__new__(AscendTargetDependentARSpeculator)
     speculator.method = "mtp"
     speculator.max_num_reqs = 8
@@ -919,12 +909,11 @@ def test_generate_draft_capture_uses_request_rows(num_reqs, num_tokens):
 
     module = "vllm_ascend.worker.v2.spec_decode."
     # #60989 renamed the native single-step draft entry point on main.
-    parent_method = "_generate_draft" if vllm_version_is("0.33.0") else "_decode"
     with (
         patch(module + "lmhead_tp_utils.lmhead_tp_enable", return_value=True),
-        patch.object(TargetDependentARSpeculator, parent_method, side_effect=parent) as generate,
+        patch.object(TargetDependentARSpeculator, "_decode", side_effect=parent) as generate,
     ):
-        speculator._generate_draft(num_reqs, num_tokens, None, None, None)
+        speculator._decode(num_reqs, num_tokens, None, None, None)
     expected = [num_reqs, num_tokens, None, None, None, CUDAGraphMode.NONE]
     expected.append(None)
     generate.assert_called_once_with(*expected)

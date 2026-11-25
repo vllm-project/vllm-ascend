@@ -3,31 +3,17 @@
 meta:
   hardware:
     ascend_950pr_8x: verified
-hardware_overrides:
-  npu:
-    extra_args:
-      - '--trust-remote-code'
-      - '--kv-cache-dtype'
-      - auto
-      - '--block-size'
-      - '512'
-      - '--max-model-len'
-      - '131072'
-      - '--max-num-seqs'
-      - '16'
-      - '--gpu-memory-utilization'
-      - '0.9'
-    extra_env:
-      PYTORCH_NPU_ALLOC_CONF: expandable_segments:True
-      OMP_PROC_BIND: 'false'
-      OMP_NUM_THREADS: '1'
-      TASK_QUEUE_ENABLE: '1'
-      HCCL_BUFFSIZE: '1024'
-      HCCL_OP_EXPANSION_MODE: AIV
+    ascend_910b: verified
 hardware_notes:
   ascend_950pr_8x:
     title: vLLM Ascend A5 image required
     body: Single-node TP8 on 8×950PR. Pin quay.io/ascend/vllm-ascend:nightly-main-a5 and overlay vllm-ascend#15346 for native FP8. EP is not available on this interconnect. Set HCCL_BUFFSIZE=1024 before launch.
+  ascend_910b:
+    title: W8A8C8 prefill/decode disaggregation on Ascend 910B
+    body: Validated on 8 nodes x 8 NPU (64x Ascend 910B, 64 GB HBM each), prefill pool 4 nodes at PP 4 x TP8 x DP1 and decode pool 4 nodes at DP16 x TP2
+    link:
+      label: vLLM Ascend GLM-5.2 & 5.3 tutorial
+      href: https://docs.vllm.ai/projects/ascend/en/v0.30.0/tutorials/models/GLM5.2.html      
 strategy_hardware:
   single_node_tep:
     npu: unsupported
@@ -41,6 +27,10 @@ strategy_hardware:
     npu: unsupported
   pd_cluster:
     npu: unsupported
+    ascend_910b: supported
+strategy_min_gpus:
+  ascend_910b:
+    pd_cluster: 64
 features:
   spec_decoding:
     modes:
@@ -58,5 +48,165 @@ variants:
     hardware_overrides:
       ascend_950pr_8x:
         docker_image: quay.io/ascend/vllm-ascend:nightly-main-a5
+        docker_serve_command: "vllm serve"
+        extra_args:
+          - '--trust-remote-code'
+          - '--kv-cache-dtype'
+          - auto
+          - '--block-size'
+          - '512'
+          - '--max-model-len'
+          - '131072'
+          - '--max-num-seqs'
+          - '16'
+          - '--gpu-memory-utilization'
+          - '0.9'
+        extra_env:
+          PYTORCH_NPU_ALLOC_CONF: expandable_segments:True
+          OMP_PROC_BIND: 'false'
+          OMP_NUM_THREADS: '1'
+          TASK_QUEUE_ENABLE: '1'
+          HCCL_BUFFSIZE: '1024'
+          HCCL_OP_EXPANSION_MODE: AIV
         install:
           pip: false
+  ascend_w8a8c8:
+    model_id: Eco-Tech/GLM-5.3-w8a8c8
+    label: W8A8C8
+    precision: int8
+    vram_minimum_gb: 855
+    description: 'ModelSlim INT8 w8a8c8 checkpoint measured on a 8-node Ascend 910B, Published on ModelScope at https://www.modelscope.cn/models/Eco-Tech/GLM-5.3-w8a8c8.'
+    supported_hardware:
+      - ascend_910b
+    min_vllm_version: '0.30.0'
+    extra_args:
+      - '--enable-expert-parallel'
+      - '--enable-chunked-prefill'
+      - '--seed'
+      - '1024'
+      - '--served-model-name'
+      - glm
+      - '--safetensors-load-strategy'
+      - prefetch
+      - '--max-model-len'
+      - '200000'
+      - '--trust-remote-code'
+      - '--quantization'
+      - ascend
+      - '--gpu-memory-utilization'
+      - '0.92'
+      - '--kv-cache-dtype'
+      - int8
+      - '--attention-config'
+      - '{"indexer_kv_dtype": "int8"}'
+      - '--enable-prefix-caching'
+      - '--tokenizer-mode'
+      - 'auto' 
+      - '--async-scheduling'
+    extra_env:
+      PYTORCH_NPU_ALLOC_CONF: expandable_segments:True
+      HCCL_BUFFSIZE: '1024'
+      HCCL_OP_EXPANSION_MODE: AIV
+    hardware_overrides:
+      ascend_910b:
+        docker_image: quay.io/ascend/vllm-ascend:v0.30.0
+        docker_shm_size: "512g"
+        docker_serve_command: "vllm serve"
+        install:
+          pip: false
+presets:
+  ascend_a2_w8a8c8_pd:
+    label: W8A8C8 PD (1P + 1D)
+    hardware: ascend_910b
+    strategy: pd_cluster
+    variants: [ascend_w8a8c8]
+    default: false
+    select:
+      pd_router: ascend
+      pd_connector: mooncake_ascend
+      frontend: python
+    workload: 'Prefill/decode disaggregation, 1M context, 8 nodes x 8 Ascend 910B'
+    image:
+      vllm: quay.io/ascend/vllm-ascend:v0.30.0
+    runbook: |
+      Transcribed from a validated 8-node x 8 NPU (Ascend 910B) W8A8 PD
+      deployment: prefill pool 4 nodes DP1 x TP8 x PP4, decode pool 4 nodes DP16 x TP2
+      (see the linked tutorial runbook).
+    roles:
+      prefill:
+        nodes: 4
+        parallelism: tp
+        tp: 8
+        pp: 4
+        args:
+          - '--distributed-executor-backend'
+          - 'mp'
+          - '--max-num-seqs'
+          - '64'
+          - '--max-num-batched-tokens'
+          - '8192'
+          - '--enforce-eager'
+          - '--additional-config'
+          - '{"enable_flashcomm1":true,"enable_shared_expert_dp":true,"ascend_compilation_config":{"fuse_muls_add":true}}'
+          - '--speculative-config'
+          - '{"method": "deepseek_mtp", "num_speculative_tokens": 1, "enforce_eager": true}'
+        env:
+          VLLM_PP_LAYER_PARTITION: 20,20,20,18
+          HCCL_IF_IP: $PREFILL_NODE_1
+          VLLM_HOST_IP: $PREFILL_NODE_1
+          HCCL_SOCKET_IFNAME: $IFACE_NAME
+          GLOO_SOCKET_IFNAME: $IFACE_NAME
+          TP_SOCKET_IFNAME: $IFACE_NAME
+        json_args:
+          --kv-transfer-config:
+            kv_connector: MooncakeConnectorV2
+            kv_role: kv_producer
+            kv_port: '30000'
+            engine_id: '0'
+            kv_connector_extra_config:
+              use_ascend_direct: true
+              prefill:
+                dp_size: 1
+                pp_size: 4
+                tp_size: 8
+                pp_layer_partition: 20,20,20,18
+              decode:
+                dp_size: 16
+                tp_size: 2
+      decode:
+        nodes: 4
+        parallelism: dep
+        tp: 2
+        args:
+          - '--max-num-seqs'
+          - '32'
+          - '--max-num-batched-tokens'
+          - '256'
+          - '--compilation-config'
+          - '{"cudagraph_mode": "FULL_DECODE_ONLY"}'
+          - '--additional-config'
+          - '{"recompute_scheduler_enable":true,"enable_sparse_sfa_c8":true,"enable_sparse_li_c8":true,"enable_shared_expert_dp":true}'
+          - '--speculative-config' 
+          - '{"num_speculative_tokens":3,"method":"deepseek_mtp","enforce_eager":true}' 
+        env:
+          HCCL_IF_IP: $DECODE_NODE_1
+          VLLM_HOST_IP: $DECODE_NODE_1
+          HCCL_SOCKET_IFNAME: $IFACE_NAME
+          GLOO_SOCKET_IFNAME: $IFACE_NAME
+          TP_SOCKET_IFNAME: $IFACE_NAME
+        json_args:
+          --kv-transfer-config:
+            kv_connector: MooncakeConnectorV2
+            kv_role: kv_consumer
+            kv_port: '30100'
+            engine_id: '1'
+            kv_connector_extra_config:
+              use_ascend_direct: true
+              prefill:
+                dp_size: 1
+                pp_size: 4
+                tp_size: 8
+                pp_layer_partition: 20,20,20,18
+              decode:
+                dp_size: 16
+                tp_size: 2

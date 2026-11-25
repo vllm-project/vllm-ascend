@@ -1236,6 +1236,8 @@ async def handle_completions_impl(api: str, request: Request):
                             if stop_reason == "recomputed":
                                 retry = True
                                 retry_count += 1
+                                previous_request_id = instance_info.request_id
+                                previous_max_tokens = req_data.get("max_tokens", origin_max_tokens)
                                 if chat_flag:
                                     messages[0]["content"] = (
                                         origin_prompt
@@ -1256,12 +1258,15 @@ async def handle_completions_impl(api: str, request: Request):
                                 )
                                 released_kv = False
                                 logger.info(
-                                    "[PD-RECOMPUTE] proxy retry: request_id=%s, retry_count=%d, "
-                                    "generated_token=%s, max_tokens=%d->%d",
+                                    "[PD-RECOMPUTE] request goes back to P: request_id=%s->%s, prefiller=%s, "
+                                    "retry_count=%d, generated_tokens=%d, completion_events=%d, max_tokens=%s->%s",
+                                    previous_request_id,
                                     instance_info.request_id,
+                                    instance_info.prefiller_key,
                                     retry_count,
-                                    generated_token,
-                                    origin_max_tokens,
+                                    len(generated_token),
+                                    completion_tokens,
+                                    previous_max_tokens,
                                     req_data["max_tokens"],
                                 )
                                 break
