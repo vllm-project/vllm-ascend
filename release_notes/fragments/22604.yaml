@@ -1,6 +1,11 @@
 pr: 22604
 entries:
   - category: hardware
-    text: Added an Ascend 910C recipe variant for DeepSeek-V3.1 W8A8 MTP with TP4xDP4 on one Atlas 800 A3. The recipe enables balance scheduling through `--additional-config '{"scheduler_config":{"enable_balance_scheduling":true}}'`.
+    text: >-
+      Added an Ascend 910C recipe variant for DeepSeek-V3.1 W8A8 MTP QuaRot
+      with TP4xDP4 on one Atlas 800 A3, plus an opt-in W8A8 PD (2P1D
+      Layerwise) preset for four-node Mooncake separation per the tutorial.
+      Balance scheduling is enabled through `--additional-config
+      '{"scheduler_config":{"enable_balance_scheduling":true}}'`.
     model: DeepSeek-V3.1
     hardware: [A3]

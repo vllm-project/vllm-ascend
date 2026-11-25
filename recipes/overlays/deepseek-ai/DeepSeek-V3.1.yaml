@@ -29,9 +29,13 @@ variants:
       - deepseek_v3
       - '--seed'
       - '1024'
+      - '--compilation-config'
+      - '{"cudagraph_mode": "FULL_DECODE_ONLY"}'
       - '--additional-config'
       - '{"scheduler_config":{"enable_balance_scheduling":true}}'
     extra_env:
+      VLLM_USE_MODELSCOPE: 'True'
+      VLLM_ENGINE_READY_TIMEOUT_S: '7200'
       HCCL_OP_EXPANSION_MODE: AIV
       PYTORCH_NPU_ALLOC_CONF: expandable_segments:True
     hardware_overrides:
@@ -50,6 +54,12 @@ strategy_hardware:
     # here. The verified single-node deployment is TP4×DP4 under
     # single_node_tp.
     ascend_910c: unsupported
+  single_node_dep:
+    # The DEP emitter renders --data-parallel-size 16 with no
+    # --tensor-parallel-size, overriding the variant's static
+    # --data-parallel-size 4 — 16 full replicas of this ~694 GB checkpoint
+    # cannot fit on 64 GB devices. Not offered on ascend_910c.
+    ascend_910c: unsupported
   multi_node_tp:
     # The multi-node TP/TP+PP/TEP emitters size TP across the whole cluster
     # (per node for TP+PP) and leave no room for this variant's static
@@ -60,17 +70,187 @@ strategy_hardware:
     ascend_910c: unsupported
   multi_node_tep:
     ascend_910c: unsupported
-  pd_cluster:
-    # The default PD pools render one full node per role (TP16) on this
-    # 16-NPU hardware; combined with the variant's static
-    # --data-parallel-size 4 this exceeds a single node, and this recipe
-    # declares no PD preset for Ascend. Not offered on ascend_910c.
+  multi_node_dep:
+    # Renders --data-parallel-size 32 --data-parallel-size-local 16 with no
+    # TP across two nodes — 32 full replicas of the checkpoint. Not offered;
+    # the tutorial §5.2 handwritten two-node commands (DP4×TP4) are the
+    # supported route (see notes).
     ascend_910c: unsupported
+  pd_cluster:
+    # Offered on ascend_910c only through the opt-in `ascend_a3_w8a8_pd`
+    # preset below (tutorial §5.3: 2P1D Layerwise on four Atlas 800 A3 nodes
+    # with Mooncake); the default pd_cluster pools render one full node per
+    # role and are not offered.
+    ascend_910c: supported
+
+strategy_min_gpus:
+  # The official PD topology is 2P1D Layerwise on four 16-NPU Atlas 800 A3
+  # nodes (tutorial §5.3); a pd_cluster pool below that floor drops out.
+  ascend_910c:
+    pd_cluster: 64
+
+presets:
+  ascend_a3_w8a8_pd:
+    label: W8A8 PD (2P1D Layerwise)
+    hardware: ascend_910c
+    strategy: pd_cluster
+    variants: [ascend_w8a8]
+    default: false
+    select:
+      pd_router: ascend
+      pd_connector: mooncake_ascend
+      frontend: python
+    workload: 'Prefill/decode separation (2P1D Layerwise), 4 nodes x 16-die Atlas 800 A3, Mooncake'
+    image:
+      vllm: quay.io/ascend/vllm-ascend:v0.30.0rc1-a3
+    runbook: |
+      Transcribed from tutorial §5.3 (Multi-Node PD Separation Deployment):
+      2P1D Layerwise on four Atlas 800 A3 (64GB x 16) nodes — 2 prefill
+      nodes (DP2 x TP8 each) and one decode pool of DP32 x TP1 spanning 2
+      nodes. 2P1D is recommended over 1P1D (2 nodes) there, because 1P1D
+      lacks the NPU memory to serve high concurrency. The tutorial
+      orchestrates per-node DP ranks with launch_online_dp.py /
+      run_dp_template.sh and forwards requests through proxy.sh on the
+      prefill master node; Mooncake is a prerequisite. Two simplifications
+      against the tutorial scripts: the builder renders one prefill pool
+      and one decode pool where the tutorial runs the prefill nodes as
+      independent replica groups (each starting at DP rank 0), and per-node
+      KV ports are folded to their first values (prefill 30000, decode
+      30200; the tutorial also uses 30100).
+    roles:
+      prefill:
+        nodes: 2
+        parallelism: tp
+        tp: 8
+        args:
+          - '--max-model-len'
+          - '65536'
+          - '--max-num-batched-tokens'
+          - '16384'
+          - '--max-num-seqs'
+          - '8'
+          - '--gpu-memory-utilization'
+          - '0.9'
+          - '--enforce-eager'
+        remove_args:
+          # The PD pool manages --data-parallel-size itself; the tutorial
+          # prefill lane runs neither a compilation config nor the variant's
+          # additional-config, so both are dropped rather than emptied.
+          - '--data-parallel-size'
+          - '--compilation-config'
+          - '--additional-config'
+        env:
+          VLLM_RPC_TIMEOUT: '3600000'
+          VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS: '30000'
+          HCCL_EXEC_TIMEOUT: '204'
+          HCCL_CONNECT_TIMEOUT: '120'
+          HCCL_BUFFSIZE: '256'
+          TASK_QUEUE_ENABLE: '1'
+          OMP_PROC_BIND: 'false'
+          OMP_NUM_THREADS: '10'
+          VLLM_ASCEND_ENABLE_FLASHCOMM1: '1'
+          VLLM_USE_V1: '1'
+          HCCL_IF_IP: $PREFILL_NODE_1
+          VLLM_HOST_IP: $PREFILL_NODE_1
+          HCCL_SOCKET_IFNAME: $IFACE_NAME
+          GLOO_SOCKET_IFNAME: $IFACE_NAME
+          TP_SOCKET_IFNAME: $IFACE_NAME
+        json_args:
+          # The tutorial PD lane runs 1-token MTP; the single-node variant
+          # pins 3 tokens, so the deep merge resizes it to 1.
+          --speculative-config:
+            num_speculative_tokens: 1
+          --kv-transfer-config:
+            kv_connector: MooncakeConnectorV1
+            kv_role: kv_producer
+            kv_port: '30000'
+            kv_connector_extra_config:
+              # The builder renders one prefill pool, so the KV metadata
+              # describes the whole pool (the tutorial's two prefill nodes
+              # are independent replica groups, each declaring its own
+              # dp_size 2); placeholders resolve to the rendered pool sizes.
+              prefill:
+                dp_size: '{prefill_dp_size}'
+                tp_size: 8
+              decode:
+                dp_size: '{decode_dp_size}'
+                tp_size: 1
+      decode:
+        nodes: 2
+        parallelism: dep
+        tp: 1
+        args:
+          - '--max-model-len'
+          - '65536'
+          - '--max-num-batched-tokens'
+          - '256'
+          - '--max-num-seqs'
+          - '28'
+        remove_args:
+          - '--data-parallel-size'
+        env:
+          VLLM_RPC_TIMEOUT: '3600000'
+          VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS: '30000'
+          HCCL_EXEC_TIMEOUT: '204'
+          HCCL_CONNECT_TIMEOUT: '120'
+          HCCL_BUFFSIZE: '1100'
+          TASK_QUEUE_ENABLE: '1'
+          OMP_PROC_BIND: 'false'
+          OMP_NUM_THREADS: '10'
+          VLLM_USE_V1: '1'
+          HCCL_IF_IP: $DECODE_NODE_1
+          VLLM_HOST_IP: $DECODE_NODE_1
+          HCCL_SOCKET_IFNAME: $IFACE_NAME
+          GLOO_SOCKET_IFNAME: $IFACE_NAME
+          TP_SOCKET_IFNAME: $IFACE_NAME
+        json_args:
+          --speculative-config:
+            num_speculative_tokens: 1
+          --additional-config:
+            # The tutorial decode config keys below are merged into the
+            # variant's additional-config; balance scheduling stays off
+            # (the tutorial PD lane does not enable it).
+            scheduler_config:
+              enable_balance_scheduling: null
+            recompute_scheduler_enable: true
+            multistream_overlap_shared_expert: true
+            finegrained_tp_config:
+              lmhead_tensor_parallel_size: 16
+          --kv-transfer-config:
+            kv_connector: MooncakeConnectorV1
+            kv_role: kv_consumer
+            kv_port: '30200'
+            kv_connector_extra_config:
+              prefill:
+                dp_size: '{prefill_dp_size}'
+                tp_size: 8
+              decode:
+                dp_size: '{decode_dp_size}'
+                tp_size: 1
+
+notes:
+  - title: "Multi-node data-parallel on Ascend 910C"
+    when: { hardware: [ascend_910c] }
+    body: |
+      The builder's `*_dep` renderings are not offered on this hardware.
+      For two-node data-parallel deployments the tutorial §5.2 carries
+      handwritten per-node commands (DP4×TP4, documented on Atlas 800 A2);
+      the PD preset below covers the disaggregated route.
+  - title: "Prefill/decode separation on Ascend 910C"
+    when: { hardware: [ascend_910c] }
+    body: |
+      PD separation is offered as the opt-in **W8A8 PD (2P1D Layerwise)**
+      preset: four Atlas 800 A3 nodes (2 prefill nodes + one DP32×TP1
+      decode pool spanning 2 nodes) with Mooncake, per tutorial §5.3 —
+      2P1D is recommended over 1P1D there. The tutorial additionally uses
+      per-node launcher scripts (launch_online_dp.py / run_dp_template.sh)
+      and a request proxy on the prefill master node.
 
 meta:
   hardware:
     # First-party bring-up 2026-10-28 (single-node TP4/DP4 + MTP, benchmarked
     # repeatedly without engine errors); official runner-CI end-to-end
-    # verification pending (weights not yet available; companion Ascend recipe
+    # verification still pending (weights confirmed fetchable from
+    # ModelScope; companion Ascend recipe
     # vllm-ascend/vllm-ascend-recipes#102).
     ascend_910c: supported
