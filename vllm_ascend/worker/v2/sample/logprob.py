@@ -59,15 +59,17 @@ def _topk_log_softmax_kernel(
         se += tl.sum(e)
     lse = tl.log(se)
 
-    for j in range(0, topk, TOPK_BLOCK_SIZE):
-        k_offset = j + tl.arange(0, TOPK_BLOCK_SIZE)
-        k_mask = k_offset < topk
-        topk_ids = tl.load(topk_ids_ptr + req_idx * topk_ids_stride + k_offset, mask=k_mask, other=0)
+    for candidate_start in range(0, topk, TOPK_BLOCK_SIZE):
+        candidate_offsets = candidate_start + tl.arange(0, TOPK_BLOCK_SIZE)
+        candidate_mask = candidate_offsets < topk
+        candidate_ids = tl.load(
+            topk_ids_ptr + req_idx * topk_ids_stride + candidate_offsets, mask=candidate_mask, other=0
+        )
 
-        logits = tl.load(row_ptr + topk_ids, mask=k_mask)
-        logits = logits.to(tl.float32)
-        o = logits - lse - max_val
-        tl.store(output_ptr + req_idx * topk + k_offset, o, mask=k_mask)
+        candidate_logits = tl.load(row_ptr + candidate_ids, mask=candidate_mask)
+        candidate_logits = candidate_logits.to(tl.float32)
+        token_logprobs = candidate_logits - lse - max_val
+        tl.store(output_ptr + req_idx * topk + candidate_offsets, token_logprobs, mask=candidate_mask)
 
 
 def compute_token_logprobs(logits: torch.Tensor, token_ids: torch.Tensor) -> torch.Tensor:
@@ -134,26 +136,27 @@ def compute_topk_scores(
 ) -> LogprobsTensors:
     assert num_logprobs >= 0
     batch_size, vocab_size = logits.shape
+    topk_indices = torch.topk(logits, num_logprobs, dim=-1).indices if num_logprobs > 0 else None
 
+    # Fast path when the batch has no custom token IDs.
     if max_per_req_token_ids == 0:
         logprob_token_ids = sampled_token_ids.unsqueeze(-1)
-        if num_logprobs > 0:
-            topk_indices = torch.topk(logits, num_logprobs, dim=-1).indices
+        if topk_indices is not None:
             logprob_token_ids = torch.cat((logprob_token_ids, topk_indices), dim=1)
         valid_mask = None
     else:
         assert logprob_token_ids_state is not None
         assert expanded_idx_mapping is not None
-        topk_indices = None
-        if num_logprobs > 0:
-            topk_indices = torch.topk(logits, num_logprobs, dim=-1).indices.to(torch.int32)
+        if topk_indices is not None:
+            topk_indices = topk_indices.to(torch.int32)
+        # Upstream names the device-visible buffers .gpu.
         logprob_token_ids, valid_mask = fill_logprob_token_ids(
             sampled_token_ids,
             topk_indices,
             expanded_idx_mapping,
-            logprob_token_ids_state.num_token_ids.gpu,
-            logprob_token_ids_state.token_ids.gpu,
-            max_per_req_token_ids,
+            num_per_req_token_ids=logprob_token_ids_state.num_token_ids.gpu,
+            per_req_token_ids=logprob_token_ids_state.token_ids.gpu,
+            max_per_req_token_ids=max_per_req_token_ids,
         )
     if logits_mode:
         scores = logits.gather(-1, logprob_token_ids).to(torch.float32)
