@@ -77,20 +77,8 @@ class Backend(ABC):
     requires_exists_before_put: bool = True
 
     @abstractmethod
-    def __init__(self, parallel_config: ParallelConfig, *, extra_config: dict[str, Any] | None = None):
+    def __init__(self, parallel_config: ParallelConfig, lazy_init: bool = False):
         pass
-
-    @classmethod
-    def create_worker_client(
-        cls,
-        parallel_config: ParallelConfig,
-        *,
-        extra_config: dict[str, Any],
-        use_compress: bool,
-        use_sparse: bool,
-        cache_dtype: str,
-    ):
-        return cls(parallel_config, extra_config=extra_config)
 
     @classmethod
     def create_scheduler_client(cls, parallel_config: ParallelConfig):

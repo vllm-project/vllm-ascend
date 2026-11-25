@@ -4192,24 +4192,19 @@ class TestKVPoolWorkerResetStore(unittest.TestCase):
 
 
 class TestWorkerBackendConstruction(unittest.TestCase):
-    def test_backend_receives_worker_config(self):
+    def test_passes_only_connector_config_to_backend(self):
         from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker import KVPoolWorker
 
         worker = KVPoolWorker.__new__(KVPoolWorker)
-        worker.backend = "memcache"
-        worker.use_compress = True
-        worker.use_sparse = False
-        worker.vllm_config = SimpleNamespace(cache_config=SimpleNamespace(cache_dtype="auto"))
         parallel_config = object()
         extra_config = {"qos_priority": 2}
         target = "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker.importlib"
-        with patch(target) as loader:
-            factory = loader.import_module.return_value.MemcacheBackend.create_worker_client
-            worker._init_backend(parallel_config, extra_config)
-        factory.assert_called_once_with(
-            parallel_config, extra_config=extra_config, use_compress=True, use_sparse=False, cache_dtype="auto"
-        )
-        self.assertIs(worker.m_store, factory.return_value)
+        for worker.backend, class_name in (("memcache", "MemcacheBackend"), ("mooncake", "MooncakeBackend")):
+            with self.subTest(backend=worker.backend), patch(target) as loader:
+                constructor = getattr(loader.import_module.return_value, class_name)
+                worker._init_backend(parallel_config, extra_config)
+                constructor.assert_called_once_with(parallel_config, extra_config=extra_config)
+                self.assertIs(worker.m_store, constructor.return_value)
 
 
 if __name__ == "__main__":

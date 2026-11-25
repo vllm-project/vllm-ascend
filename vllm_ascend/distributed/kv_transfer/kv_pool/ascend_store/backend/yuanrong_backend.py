@@ -56,9 +56,12 @@ class YuanrongBackend(Backend):
     def __init__(
         self,
         parallel_config: ParallelConfig,
+        lazy_init: bool = False,
         enable_data_plane: bool = True,
         extra_config: dict | None = None,
     ):
+        if lazy_init:
+            logger.warning("YuanrongBackend does not support lazy initialization; initializing eagerly.")
         try:
             from yr.datasystem.hetero_client import HeteroClient  # type: ignore[import-not-found]
             from yr.datasystem.kv_client import ExistenceOpt, SetParam  # type: ignore[import-not-found]

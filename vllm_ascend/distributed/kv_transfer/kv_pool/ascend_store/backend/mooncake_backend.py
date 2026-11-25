@@ -398,20 +398,6 @@ class MooncakeBackend(Backend):
     def send_fence_backlog(cls) -> int:
         return cls.LAYERWISE_SEND_FENCE_BACKLOG
 
-    @classmethod
-    def create_worker_client(
-        cls,
-        parallel_config: ParallelConfig,
-        *,
-        extra_config: dict[str, Any],
-        use_compress: bool,
-        use_sparse: bool,
-        cache_dtype: str,
-    ):
-        # Defer fabric-memory setup for compressed models and packed C8 caches.
-        packed_c8 = use_sparse and cache_dtype in ("fp8", "int8")
-        return cls(parallel_config, lazy_init=use_compress or packed_c8, extra_config=extra_config)
-
     def __init__(
         self,
         parallel_config: ParallelConfig,

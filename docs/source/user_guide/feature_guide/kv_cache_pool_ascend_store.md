@@ -1718,19 +1718,6 @@ Note the following when enabling KV Pool for DSv4. Other historical known issues
 
 For the v0.23.0 AscendStore KV Pool known issues, see [vllm-ascend issue #12390](https://github.com/vllm-project/vllm-ascend/issues/12390).
 
-### Issue 8: Lazy Init for KV Pool with Fabric Memory and Specific Models
+### Issue 8: KV Pool startup with fabric memory on older HDK versions
 
-The Memcache backend initializes the store during startup for all models.
-
-On HDK versions earlier than 26.1, when Mooncake fabric memory is enabled (`ASCEND_ENABLE_USE_FABRIC_MEM=1`) and running one of the affected model families below, the vLLM service hangs during startup with the KV Pool enabled. Lazy store initialization defers the store setup so the service starts normally.
-
-When lazy init is enabled, the store is not created during backend construction. Instead, it is set up on the first `put()` call and guarded by a lock, so later `put()` calls reuse the same store. Before the first `put()`, `exists()` treats keys as missing so the first store request can reach `put()`; pool lookups that happen before initialization therefore report a miss and the affected requests fall back to recompute once — a safe degradation, not an error.
-
-Lazy initialization is requested automatically — no configuration is needed — for the following model families when the Mooncake backend runs under fabric memory:
-
-| Model family | When lazy init is requested |
-| :--- | :--- |
-| DeepSeek V4 compressed models (checkpoint carries `compress_ratios`) | `ASCEND_ENABLE_USE_FABRIC_MEM=1` (fabric memory enabled) |
-| GLM-5.x sparse-indexer (SFA) models with an int8 or fp8 KV cache | `ASCEND_ENABLE_USE_FABRIC_MEM=1` + packed C8 KV cache path active. On v0.26-based releases this path is enabled by `c8_enable_reshape_optim`; on newer releases it is the native default for int8/fp8 KV cache dtype and the switch no longer exists. |
-
-All other models — dense models, and sparse-indexer models with other KV cache dtypes — keep the previous eager store setup unchanged.
+The KV pool worker initializes its backend at startup for all models. On HDK versions earlier than 26.1, startup can hang with fabric memory enabled (`ASCEND_ENABLE_USE_FABRIC_MEM=1`) for DeepSeek V4 compressed models or GLM-5.x sparse-indexer models with an int8 or fp8 KV cache.

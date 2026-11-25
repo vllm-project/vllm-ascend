@@ -370,13 +370,7 @@ class BaseKVPoolWorker(ABC):
         backend_module = importlib.import_module(backend_path)
         real_backend = getattr(backend_module, backend_name)
 
-        self.m_store = real_backend.create_worker_client(
-            parallel_config,
-            extra_config=extra_config,
-            use_compress=self.use_compress,
-            use_sparse=self.use_sparse,
-            cache_dtype=self.vllm_config.cache_config.cache_dtype,
-        )
+        self.m_store = real_backend(parallel_config, extra_config=extra_config)  # type: ignore[misc]
 
     def _init_kv_events(self, vllm_config) -> None:
         kv_event_config = vllm_config.kv_events_config
