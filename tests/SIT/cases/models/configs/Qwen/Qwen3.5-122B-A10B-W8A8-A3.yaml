@@ -46,6 +46,11 @@ test_cases:
     envs:
       <<: *envs
     server_cmd: *server_cmd
+    test_content:
+      - spec_decode_acceptance
+    acceptance_rate:
+      benchmark: acc_aime2025
+      baseline: [0.833890, 0.698162, 0.585633]
     benchmarks:
       acc_aime2025:
         case_type: accuracy
