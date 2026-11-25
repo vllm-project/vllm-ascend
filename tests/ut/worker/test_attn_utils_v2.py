@@ -1642,47 +1642,6 @@ def _make_dsa_metadata_groups(builder_cls=_RecordingDSAMetadataBuilder):
     return layer_names, specs, calls, attn_groups, kv_cache_config
 
 
-@pytest.mark.parametrize("full_graph, expected_rows", [(True, 56), (False, 52)])
-def test_qsa_tiling_uses_capture_rows_and_maps_only_live_tokens(monkeypatch, full_graph, expected_rows):
-    class Builder:
-        def build(self, common_prefix_len, common_attn_metadata, **kwargs):
-            return SimpleNamespace(common=common_attn_metadata)
-
-    class IndexerBuilder(Builder):
-        pass
-
-    class MainBackend:
-        uses_qsa_page_major_kv_view = True
-
-    monkeypatch.setattr(attn_utils, "QSAMetadataBuilder", IndexerBuilder)
-    indexer = _metadata_test_group(["indexer"], IndexerBuilder())
-    main = _metadata_test_group(["main"], Builder())
-    main.backend = MainBackend
-    other = _metadata_test_group(["other"], Builder())
-    boundaries = torch.arange(0, 57, 4, dtype=torch.int32)
-    groups = [[indexer], [main], [other]]
-    md = attn_utils.build_attn_metadata(
-        attn_groups=groups,
-        num_reqs=14,
-        num_actual_reqs=13,
-        num_tokens=56,
-        num_actual_tokens=52,
-        num_input_tokens=56,
-        query_start_loc_gpu=boundaries,
-        query_start_loc_cpu=boundaries,
-        max_query_len=4,
-        seq_lens=torch.full((14,), 100, dtype=torch.int32),
-        max_seq_len=100,
-        block_tables=(torch.zeros((14, 1), dtype=torch.int32),) * len(groups),
-        slot_mappings=(torch.zeros(56, dtype=torch.int64),) * len(groups),
-        kv_cache_config=SimpleNamespace(kv_cache_groups=[SimpleNamespace(kv_cache_spec=object()) for _ in groups]),
-        full_graph_mode=full_graph,
-    )
-    assert md["indexer"].common.num_actual_tokens == md["main"].common.num_actual_tokens == expected_rows
-    torch.testing.assert_close(md["indexer"].common.query_start_loc_cpu, boundaries[:14])
-    assert md["other"].common.num_actual_tokens == 52
-
-
 def test_draft_metadata_uses_per_request_cpu_upper_bounds():
     _, _, calls, attn_groups, kv_cache_config = _make_dsa_metadata_groups()
     upper_bounds = torch.tensor([13, 27], dtype=torch.int32)

@@ -538,20 +538,16 @@ def build_attn_metadata(
                 layer_common = layer_common.replace(
                     query_start_loc_cpu=layer_common.query_start_loc_cpu[: num_actual_reqs + 1],
                 )
-            if pcp_context is not None and (full_graph_mode or for_cudagraph_capture):
-                backend = getattr(attn_group, "backend", None)
-                if is_qsa_indexer or getattr(backend, "uses_qsa_page_major_kv_view", False):
+            backend = getattr(attn_group, "backend", None)
+            is_qsa_group = is_qsa_indexer or getattr(backend, "uses_qsa_page_major_kv_view", False)
+            if is_qsa_group:
+                if pcp_context is not None and (full_graph_mode or for_cudagraph_capture):
                     layer_common = layer_common.replace(graph_pad_size=num_input_tokens)
-            if (
-                full_graph_mode
-                and pcp_context is None
-                and num_input_tokens > num_actual_tokens
-                and (is_qsa_indexer or getattr(attn_group.backend, "uses_qsa_page_major_kv_view", False))
-            ):
-                # LI and GBSA replay the tiling buffers bound at capture. Build
-                # the same physical row geometry, keeping the CPU boundary
-                # above at the live token count to mask the unmapped tail.
-                layer_common = layer_common.replace(num_actual_tokens=num_input_tokens)
+                elif full_graph_mode and num_input_tokens > num_actual_tokens:
+                    # QSA sizes LI and GBSA tiling buffers from num_actual_tokens.
+                    # Replay needs the captured row count. The indexer's CPU
+                    # query boundary still marks the end of the live rows.
+                    layer_common = layer_common.replace(num_actual_tokens=num_input_tokens)
             metadata_variants = [(attn_group.layer_names, layer_common)]
             if is_sfa_builder and draft_layer_names:
                 target_names = [name for name in attn_group.layer_names if name not in draft_layer_names]
