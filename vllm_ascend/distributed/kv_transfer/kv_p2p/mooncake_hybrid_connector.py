@@ -503,6 +503,9 @@ class KVCacheRecvingThread(threading.Thread):
         self.block_stride_per_addr = block_stride_per_addr
         self.addr_group_idx = addr_group_idx
         self.hma_group_size = hma_group_size
+        # Warn only once per thread when P/D disagree on the group count;
+        # otherwise every request would log the same message.
+        self._group_mismatch_warned = False
         self.mamba_ssm_size = mamba_ssm_size
         self.remote_te_port: dict[str, dict[int, int]] = SizedDict()
         self.remote_metadata_lock = threading.Lock()
@@ -735,6 +738,32 @@ class KVCacheRecvingThread(threading.Thread):
                     remote_host_ = remote_port_send_num[remote_port]["host"]
                     self._send_done_recv_signal(request_id, remote_host_, remote_port, remote_port_send_num)
 
+    @staticmethod
+    def _common_group_count(hma_group_size: int, remote_block_ids: BlockIds, local_block_ids: BlockIds) -> int:
+        """Return the number of KV cache groups present on both P and D sides.
+
+        Prefill and decode do not necessarily agree on the group count. When
+        speculative decoding is enabled on the decode side only, the draft (MTP)
+        layers form an additional local KV cache group that the prefill side
+        never had, so ``remote_block_ids`` is shorter than ``hma_group_size``.
+        The transfer loop must stop at the groups that both sides actually have.
+        """
+        return min(hma_group_size, len(remote_block_ids), len(local_block_ids))
+
+    def _warn_group_mismatch_once(self, num_groups: int) -> None:
+        """Log the P/D group count mismatch once per thread."""
+        if self._group_mismatch_warned:
+            return
+        self._group_mismatch_warned = True
+        logger.warning(
+            "Prefill/decode KV cache group count mismatch: local hma_group_size=%d, "
+            "groups present on both sides=%d; the extra local groups are skipped. "
+            "This is expected when speculative decoding is enabled on one side only, "
+            "because draft layers form an additional KV cache group.",
+            self.hma_group_size,
+            num_groups,
+        )
+
     def _transfer_kv_cache_all_groups(self, req_meta: dict[str, Any]):
         """Handle a KV cache transfer request."""
         remote_request_id = req_meta["remote_request_id"]
@@ -804,7 +833,18 @@ class KVCacheRecvingThread(threading.Thread):
 
         req_start_time = time.perf_counter()
         src_list, dst_list, length_list = [], [], []
-        for i in range(self.hma_group_size):
+        # Prefill and decode may disagree on the number of KV cache groups. A
+        # typical case is speculative decoding enabled on the decode side only:
+        # the draft (MTP) layers then own an extra KV cache group locally, while
+        # remote_block_ids from the prefill side has no such group. Iterating to
+        # self.hma_group_size raised IndexError on remote_block_ids[i]; the
+        # exception was swallowed by _handle_request(), so the KV transfer never
+        # happened and the decode request waited for KV until the client timed
+        # out. Clamp the loop to the groups that exist on both sides.
+        num_groups = self._common_group_count(self.hma_group_size, remote_block_ids, local_block_ids)
+        if num_groups < self.hma_group_size:
+            self._warn_group_mismatch_once(num_groups)
+        for i in range(num_groups):
             if not remote_block_ids[i] or not local_block_ids[i]:
                 continue
             cur_remote_block_ids = remote_block_ids[i]
