@@ -460,6 +460,10 @@ class QuantizedAllReduceConfig:
         )
 
         tp_size = vllm_config.parallel_config.tensor_parallel_size
+        # TODO: the per-TP int8 payload gates and their end-to-end gain have not
+        # been measured on A5, so A5 must not inherit the A2 defaults. Remove
+        # this guard once the A5 per-TP min_numel values are measured and added
+        # to default_min_numel() in the int8 wrapper.
         if self.quant_dtype == "int8" and self.min_numel is None and is_950():
             raise ValueError(
                 "the per-TP min_numel defaults are measured on Atlas A2 only, and "
