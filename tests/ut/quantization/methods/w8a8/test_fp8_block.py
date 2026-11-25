@@ -29,6 +29,7 @@ from vllm_ascend.quantization.methods.w8a8.fp8_block import (
     AscendFp8BlockLinearMethod,
     resolve_block_scales,
 )
+from vllm_ascend.quantization.quant_type import QuantType
 from vllm_ascend.weight_switch import (
     WeightSwitchConfig,
     WeightSwitchGatherSpec,
@@ -297,15 +298,18 @@ class TestAscendFp8BlockLinearMethod(TestBase):
 
 
 class TestAscendFp8BlockFusedMoEMethod(TestBase):
-    def build_scheme(self, block_size=(4, 32), supports_fp8=True):
+    def build_scheme(self, block_size=(4, 32), supports_fp8=True, vllm_config=None):
+        if vllm_config is None:
+            vllm_config = create_mock_vllm_config()
         with (
-            patch(f"{MODULE}.get_current_vllm_config", return_value=create_mock_vllm_config()),
+            patch(f"{MODULE}.get_current_vllm_config", return_value=vllm_config),
             patch(f"{MODULE}.get_current_hardware_profile") as mock_profile,
             patch(f"{MODULE}.AscendW8A8MXFP8DynamicFusedMoEMethod") as mock_mxfp8,
         ):
             mock_profile.return_value.supports_weight_format.return_value = supports_fp8
             mock_mxfp8.return_value.dynamic_mx_quant_scale_alg = 0
             mock_mxfp8.return_value.group_size = MX_GROUP_SIZE
+            mock_mxfp8.return_value.quant_type = QuantType.W8A8MXFP
             scheme = AscendFp8BlockFusedMoEMethod(block_size, MagicMock())
         return scheme
 
@@ -369,7 +373,12 @@ class TestAscendFp8BlockFusedMoEMethod(TestBase):
         self.assertTrue(torch.equal(layer.w13_weight.data[0], expected))
 
     def test_requantizes_every_expert(self):
-        scheme = self.build_scheme()
+        draft_config = SimpleNamespace(draft_moe_quant_type=QuantType.NONE)
+        vllm_config = create_mock_vllm_config()
+        vllm_config.model_config.runner_type = "draft"
+        vllm_config.speculative_config = SimpleNamespace(draft_model_config=draft_config)
+        scheme = self.build_scheme(vllm_config=vllm_config)
+        self.assertEqual(draft_config.draft_moe_quant_type, QuantType.NONE)
         # Both weights need an even group count so the operator's split layout
         # is representable for each of them.
         layer = self._make_moe_layer(intermediate=64)
@@ -393,6 +402,7 @@ class TestAscendFp8BlockFusedMoEMethod(TestBase):
         self.assertEqual(layer.w13_weight_scale.dtype, torch.uint8)
         self.assertFalse(hasattr(layer, "w13_weight_scale_inv"))
         scheme.mxfp8_method.process_weights_after_loading.assert_called_once_with(layer)
+        self.assertEqual(draft_config.draft_moe_quant_type, QuantType.W8A8MXFP)
 
     def test_apply_delegates_to_the_active_method(self):
         scheme = self.build_scheme()
