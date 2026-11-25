@@ -688,15 +688,28 @@ class FusedMC2CommImpl(MoECommMethod):
                         raise RuntimeError("Fused MC2 EPLB recording state is not initialized")
                     if layer_state.local_expert_count != self.moe_config.num_local_experts:
                         raise RuntimeError("Fused MC2 EPLB local expert count does not match the MoE output")
+                    source_recording = weights.w1[0].dtype in (torch.int8, torch.int32)
+                    active_mask = fused_experts_input.routing.mc2_mask
                     load_recording_handled = (
                         expert_load_view.ndim == 1
                         and expert_load_view.dtype == torch.int32
                         and expert_load_view.device.type == "npu"
                         and expert_load_view.is_contiguous()
-                        and expert_load_view.numel() >= local_expert_start + self.moe_config.num_local_experts
+                        and expert_load_view.numel()
+                        >= self.token_dispatcher.ep_world_size * self.moe_config.num_local_experts
                         and record_enabled.ndim == 0
                         and record_enabled.dtype == torch.bool
                         and record_enabled.device == expert_load_view.device
+                        and (
+                            not source_recording
+                            or (
+                                active_mask is not None
+                                and active_mask.ndim == 1
+                                and active_mask.shape[0] == fused_experts_input.hidden_states.shape[0]
+                                and active_mask.dtype == torch.bool
+                                and active_mask.is_contiguous()
+                            )
+                        )
                     )
                     if not load_recording_handled:
                         expert_load_view = None

@@ -6,7 +6,6 @@ import torch.multiprocessing as mp
 import torch_npu
 from torch.distributed.distributed_c10d import _get_default_group
 
-from vllm_ascend.ops.fused_moe.eplb import record_expert_tokens
 from vllm_ascend.utils import enable_custom_op
 
 enable_custom_op()
@@ -144,7 +143,8 @@ class TestDispatchFFNCombine:
         e = 8
         k2 = n // 2
         n2 = k
-        active_num = m // 8
+        # Rank 1 owns experts used by rank 0 but has no source tokens itself.
+        active_num = m // 8 if self.rank == 0 else 0
 
         torch_npu.npu.config.allow_internal_format = True
         x = self.generate_random_tensor((m, k), dtype=torch.bfloat16)
@@ -216,17 +216,18 @@ class TestDispatchFFNCombine:
         torch.ops._C_ascend.dispatch_ffn_combine(**op_kwargs)
         baseline_counts = expert_token_nums.clone().view(-1)
         baseline_out = out.clone()
-        load = torch.full((e + 4,), 7, dtype=torch.int32, device="npu")
-        standalone_load = load.clone()
+        if self.rank == 1:
+            assert baseline_counts.sum() > 0, "idle source rank did not execute remote tokens"
+        load = torch.full((self.world_size * e,), 7, dtype=torch.int32, device="npu")
+        source_counts = torch.bincount(
+            expert_idx.cpu()[x_active_mask.cpu()].flatten().long(), minlength=load.numel()
+        ).to(device="npu", dtype=torch.int32)
         enabled = torch.tensor(True, dtype=torch.bool, device="npu")
-        record_expert_tokens(baseline_counts, standalone_load, enabled, 1, 2)
         torch.ops._C_ascend.dispatch_ffn_combine(
-            **op_kwargs, expert_load_view=load, record_enabled=enabled, local_expert_start=2
+            **op_kwargs, expert_load_view=load, record_enabled=enabled, local_expert_start=self.rank * e
         )
         torch.npu.synchronize()
-        assert torch.equal(load, standalone_load), "fused Record differs from standalone Record"
-        expected_load = torch.full_like(load, 7)
-        expected_load[2 : 2 + e].add_(baseline_counts)
+        expected_load = torch.full_like(load, 7) + source_counts
         assert torch.equal(load, expected_load)
         assert torch.equal(out, baseline_out)
         assert torch.equal(expert_token_nums.view(-1), baseline_counts)
@@ -336,7 +337,7 @@ def worker(rank: int, world_size: int, port: int, q: mp.SimpleQueue):
 @torch.inference_mode()
 def test_dispatch_ffn_combine_kernel():
     world_size = 2
-    mp.set_start_method("fork", force=True)
+    mp.set_start_method("spawn", force=True)
 
     q = mp.SimpleQueue()
     p_list = []
@@ -347,7 +348,7 @@ def test_dispatch_ffn_combine_kernel():
         p.start()
         p_list.append(p)
 
-    results = [q.get() for _ in range(world_size)]
+    results = [q.get() for _ in range(world_size * 2)]
 
     for p in p_list:
         p.join()

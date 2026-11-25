@@ -290,15 +290,11 @@ __aicore__ inline void DispatchFFNCombineW4A8<TemplateMMA2ACFunc>::Process()
         outGM_, layoutD1, layoutD2,
         expertIdGM_, moeInitRoutingQuantV2Scale, moeInitRoutingQuantV2Offset,
         expertTokensBeforeCapacity, probs_,
-        workspaceGM_, gmExpertTokenNums_, ubMoveNum, xActiveMaskGM_, moeInitRoutingQuantV2TilingData, swigluLimit};
+        workspaceGM_, gmExpertTokenNums_, ubMoveNum, xActiveMaskGM_, expertLoad_, recordEnabled_,
+        moeInitRoutingQuantV2TilingData, swigluLimit};
     //Call kernel
     MatmulKernel kernel(params);
     kernel(params);
-    if ASCEND_IS_AIV {
-        if (get_block_idx() == 0 && get_subblockid() == 0) {
-            RecordExpertLoad(gmExpertTokenNums_, expertLoad_, recordEnabled_, localExpertStart_, expertPerRank);
-        }
-    }
 }
 
 } // DispatchFFNCombineW4A8Impl

@@ -51,8 +51,8 @@ std::tuple<at::Tensor&, at::Tensor&> dispatch_ffn_combine(
                         expert_token_nums.device() == expert_load_view->device(),
                     "expert_token_nums must be a contiguous int32 tensor on the load device");
         TORCH_CHECK(local_expert_start >= 0 &&
-                        local_expert_start + expert_token_nums.numel() <= expert_load_view->numel(),
-                    "local expert range is outside expert_load_view");
+                        world_size * expert_token_nums.numel() <= expert_load_view->numel(),
+                    "expert_load_view must cover all physical experts");
     }
     char *group_ep_ptr = const_cast<char *>(group.data());
     bool is_int8 = weight1[0].dtype() == at::kChar;
