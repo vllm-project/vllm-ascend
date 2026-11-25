@@ -17,6 +17,7 @@ from tests.e2e.conftest import VllmRunner, wait_until_npu_memory_free
 from tests.e2e.pull_request.kv_pool_watch import (
     POOL_SECRET,
     build_pool_accuracy_prompt,
+    ensure_memcache_transfer,
     run_pool_ab,
     run_pool_hit_sequence,
 )
@@ -60,7 +61,7 @@ def _build_memcache_pool_config() -> MemcacheKVPoolConfig:
             "local": {
                 "ock.mmc.log_level": "error",
                 "ock.mmc.local_service.world_size": 256,
-                "ock.mmc.local_service.protocol": "device_sdma",
+                "ock.mmc.local_service.protocol": "device_urma",
                 "ock.mmc.local_service.dram.size": "10GB",
             },
         },
@@ -111,6 +112,7 @@ def _leg(use_pool: bool, case_name: str):
 )
 @wait_until_npu_memory_free(target_free_percentage=0.8)
 def test_qwen38_27b_tp2_mamba_pool_watch() -> None:
+    ensure_memcache_transfer("device_urma", TENSOR_PARALLEL_SIZE)
     tokenizer = AutoTokenizer.from_pretrained(MODEL, trust_remote_code=True)
     prompt_ids = build_pool_accuracy_prompt(tokenizer, POOL_PROMPT_TOKENS, POOL_MAX_MODEL_LEN)
 
