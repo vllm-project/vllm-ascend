@@ -383,3 +383,45 @@ def test_lora_linear_raises_runtime_error_for_collected_wrapper() -> None:
     b = [torch.zeros(1, 1, 4, 2, dtype=torch.bfloat16)]
     with pytest.raises(RuntimeError, match="no longer registered"):
         lora_ops.lora_linear(-1, y, x, a, b, 1.0, [4], None, None, True)
+
+
+def test_lora_linear_raises_runtime_error_for_stale_wrapper_id() -> None:
+    with (
+        patch(
+            "vllm_ascend.lora.punica_npu.get_current_hardware_profile",
+            return_value=get_hardware_profile(AscendDeviceType.A2),
+        ),
+        patch(
+            "vllm_ascend.lora.punica_npu.get_ascend_device_type",
+            return_value=AscendDeviceType.A2,
+        ),
+        patch("vllm_ascend.lora.punica_npu.refresh_all_lora_classes"),
+    ):
+        wrapper = PunicaWrapperNPU(
+            8,
+            2,
+            torch.device("cpu"),
+            lora_config=SimpleNamespace(
+                max_lora_rank=16,
+                max_loras=1,
+                fully_sharded_loras=False,
+                lora_dtype=torch.bfloat16,
+            ),
+        )
+
+    wrapper_id = wrapper._wrapper_id
+    wrapper_ref = weakref.ref(wrapper)
+    assert lora_ops._LORA_WRAPPERS.get(wrapper_id) is wrapper
+
+    del wrapper
+    gc.collect()
+
+    assert wrapper_ref() is None
+    assert wrapper_id not in lora_ops._LORA_WRAPPERS
+
+    y = torch.zeros(2, 4, dtype=torch.bfloat16)
+    x = torch.zeros(2, 4, dtype=torch.bfloat16)
+    a = [torch.zeros(1, 1, 2, 4, dtype=torch.bfloat16)]
+    b = [torch.zeros(1, 1, 4, 2, dtype=torch.bfloat16)]
+    with pytest.raises(RuntimeError, match=rf"wrapper id {wrapper_id} is no longer registered"):
+        lora_ops.lora_linear(wrapper_id, y, x, a, b, 1.0, [4], None, None, True)
