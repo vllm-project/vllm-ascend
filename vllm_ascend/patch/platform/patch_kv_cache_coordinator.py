@@ -112,8 +112,7 @@ def _has_ds4_compress_mla_group(kv_cache_config: KVCacheConfig, hash_block_size:
     so full-block prefix-cache hits are pinned to whole blocks and any
     shorter shared prefix misses entirely."""
     return any(
-        getattr(spec, "model_version", None) in ("deepseek_v4", "deepseek_v41")
-        and spec.block_size > hash_block_size
+        getattr(spec, "model_version", None) in ("deepseek_v4", "deepseek_v41") and spec.block_size > hash_block_size
         for g in kv_cache_config.kv_cache_groups
         for spec in _iter_layer_specs(_manager_spec(g.kv_cache_spec))
     )
@@ -463,9 +462,7 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
             return
         self._register_shared_prefix_junctions(request, num_computed_tokens)
 
-    def _register_shared_prefix_junctions(
-        self, request: Request, num_computed_tokens: int
-    ) -> None:
+    def _register_shared_prefix_junctions(self, request: Request, num_computed_tokens: int) -> None:
         """Register partial entries at the remembered shared-prefix junction."""
         junction = self._shared_prefix_junctions.get(id(request.block_hashes))
         if not junction:
@@ -495,9 +492,7 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
             # not re-register the entry on its later writes.
             self._shared_prefix_junctions.pop(id(request.block_hashes), None)
 
-    def _cache_junction_partial_block(
-        self, manager: FullAttentionManager, request: Request, junction: int
-    ) -> bool:
+    def _cache_junction_partial_block(self, manager: FullAttentionManager, request: Request, junction: int) -> bool:
         """Register one partial prefix-cache entry at ``junction`` tokens."""
         if junction % self.hash_block_size != 0:
             return False
