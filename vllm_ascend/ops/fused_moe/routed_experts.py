@@ -15,7 +15,6 @@
 # limitations under the License.
 #
 from collections.abc import Iterable
-from copy import copy
 from types import SimpleNamespace
 
 import torch
@@ -33,8 +32,6 @@ from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX, use_cann_megamoe
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.distributed.expert_transfer.expert_offload_utils import expert_offload_weights
-from vllm_ascend.eplb.adaptor.vllm_adaptor import VllmEplbAdaptor
-from vllm_ascend.eplb.core.eplb_utils import init_eplb_config
 from vllm_ascend.lora.fused_moe import sync_lora_context
 from vllm_ascend.ops.fused_moe.dataclass.fused_experts import MoEWeights, build_fused_experts_input
 from vllm_ascend.ops.fused_moe.dataclass.moe_mlp import MoEMlpComputeInput
@@ -66,8 +63,7 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
 
     def __init__(self, moe: FusedMoEConfig = None):
         super().__init__(moe=moe)
-        vllm_config = get_current_vllm_config()
-        self.dynamic_eplb = False if vllm_config.use_v2_model_runner else get_ascend_config().eplb_config.dynamic_eplb
+        self.dynamic_eplb = False
         self.lora_context = None
         self._lora_routing = None
 
@@ -424,8 +420,6 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
     matching upstream vLLM's RoutedExperts responsibility split.
     """
 
-    moe_counter = -1
-
     def __init__(
         self,
         *args,
@@ -444,19 +438,15 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
         self.n_shared_experts = n_shared_experts
         self.mix_placement = getattr(ascend_config, "mix_placement", False)
         self.enable_npugraph_ex_static_kernel = ascend_config.ascend_compilation_config.enable_static_kernel
-        self._use_v2_model_runner = bool(vllm_config.use_v2_model_runner)
         self.dynamic_eplb = False
         self.multi_stage = False
         self.load_counter = None
         self.num_iter = None
         self.moe_load: torch.Tensor | None = None
-        self.ascend_expert_map: torch.Tensor | None = None
         self.log2phy: torch.Tensor | None = None
         self.global_redundant_expert_num: int = 0
         self.ascend_pertoken_scale: torch.Tensor | None = None
         self.ascend_mc2_mask: torch.Tensor | None = None
-        if not self._use_v2_model_runner:
-            self.init_eplb(n_shared_experts)
         self.return_with_event = False
 
         runner_type = getattr(vllm_config.model_config, "runner_type", None)
@@ -507,123 +497,20 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
                 raise ValueError("Every Ascend EPLB expert row must be flattenable without a copy.") from exc
         return flattened_weights
 
-    def init_eplb(self, n_shared_experts):
-        # EPLB initialization (Ascend-specific; mirrors old AscendFusedMoE logic).
-        AscendRoutedExperts.moe_counter += 1
-        self.moe_instance_id = AscendRoutedExperts.moe_counter
-
-        eplb_config = get_ascend_config().eplb_config
-
-        # The upstream FusedMoEFactory factory has already included redundant expert
-        # slots in moe_config and allocated RoutedExperts weights accordingly.
-        # Ascend's placement builder operates on logical expert IDs, so give it
-        # a shallow config view with the logical count.
-        placement_moe_config = copy(self.moe_config)
-        placement_moe_config.num_experts = self.moe_config.num_logical_experts + (
-            n_shared_experts if self.mix_placement else 0
-        )
-        allocated_redundancy = self.moe_config.num_experts - self.moe_config.num_logical_experts
-        if eplb_config.num_redundant_experts not in (0, allocated_redundancy):
-            raise ValueError(
-                "Conflicting EPLB redundant expert counts: "
-                f"allocated={allocated_redundancy}, Ascend={eplb_config.num_redundant_experts}."
-            )
-        placement_eplb_config = make_eplb_placement_config(eplb_config, allocated_redundancy)
-        vllm_config = get_current_vllm_config()
-        (
-            self.global_expert_map,
-            self.ascend_expert_map,
-            self.log2phy,
-            self.global_redundant_expert_num,
-        ) = init_eplb_config(
-            placement_eplb_config,
-            AscendRoutedExperts.moe_counter,
-            placement_moe_config,
-            self.mix_placement,
-            n_shared_experts,
-            tp_size=vllm_config.parallel_config.tensor_parallel_size,
-        )
-
-        self.moe_config.global_redundant_expert_num = self.global_redundant_expert_num
-        local_num_experts = self.moe_config.num_local_experts
-        expected_local_num_experts = (
-            placement_moe_config.num_experts + self.global_redundant_expert_num
-        ) // self.moe_config.ep_size
-        if local_num_experts != expected_local_num_experts:
-            raise ValueError(
-                "EPLB local expert capacity mismatch: "
-                f"allocated={local_num_experts}, placement={expected_local_num_experts}. "
-                "Ensure vLLM and Ascend use the same redundant expert count."
-            )
-        # Keep ExpertMapManager's physical-expert map until checkpoint loading
-        # finishes. The upstream loader uses it to place both original and
-        # redundant physical experts. Ascend execution uses ascend_expert_map,
-        # which maps logical expert IDs to the local physical slots.
-
-        self.dynamic_eplb = eplb_config.dynamic_eplb and (self.log2phy is not None)
-        self.multi_stage = False
-        self.load_counter = None
-        self.num_iter = None
-        self.moe_load = torch.zeros(local_num_experts, dtype=torch.int64).npu()
-        # Only FlashLB consumes a time series of expert loads. Other EPLB
-        # policies (including the default SwiftBalance policy) expect one load
-        # vector per layer and rank. Using the collection interval alone here
-        # adds an unexpected window dimension and produces
-        # [layer, rank, interval, expert] after all-gather.
-        if use_multistage_eplb_load(
-            self.dynamic_eplb,
-            eplb_config.eplb_policy_type,
-            eplb_config.expert_heat_collection_interval,
-        ):
-            self.multi_stage = True
-            self.load_counter = torch.tensor(0, dtype=torch.int32, device="npu")
-            self.num_iter = eplb_config.expert_heat_collection_interval
-            self.moe_load = torch.zeros((self.num_iter, local_num_experts), dtype=torch.int32, device="npu")
-
-        # Level-2 sleep discards NPU tensors that are not parameters/buffers.
-        # Register Ascend runtime EPLB NPU state as named buffers for wake restore.
-        # ascend_expert_map stays a plain CPU attribute and does not need promotion.
-        self._promote_attr_to_buffer("log2phy")
-        if self.dynamic_eplb:
-            self._promote_attr_to_buffer("moe_load")
-            if self.multi_stage:
-                self._promote_attr_to_buffer("load_counter")
-
-        # Register this MoE layer with EPLB for PP compatibility.
-        # PPMissingLayer (nn.Identity) never calls AscendFusedMoE.__init__,
-        # so only real MoE layers on this rank are registered.
-        VllmEplbAdaptor.register_layer(self)
-
-    def _promote_attr_to_buffer(self, name: str) -> None:
-        """Move an existing tensor attribute onto a Level-2 restorable named buffer."""
-        tensor = getattr(self, name, None)
-        if tensor is None:
-            return
-        delattr(self, name)
-        self.register_buffer(name, tensor)
-
     def get_eplb_parameter(self, name: str):
         """Return an expert parameter from the refactored weight owner."""
         return getattr(self, name)
 
     @property
     def ascend_expert_map(self) -> torch.Tensor | None:
-        """Return the global-to-local map used by Ascend MoE execution."""
-        if getattr(self, "_use_v2_model_runner", False):
-            return self.expert_map
-        return getattr(self, "_ascend_expert_map", None)
+        """Return the global-to-local map used by Ascend MoE execution.
 
-    @ascend_expert_map.setter
-    def ascend_expert_map(self, expert_map: torch.Tensor | None) -> None:
-        object.__setattr__(self, "_ascend_expert_map", expert_map)
-
-    def update_expert_map(self, new_expert_map: torch.Tensor | None = None) -> None:
-        """Update the upstream map or preserve the legacy Ascend update API."""
-        if new_expert_map is None:
-            super().update_expert_map()
-            return
-        self.ascend_expert_map = new_expert_map
-        self.expert_map_manager._expert_map = new_expert_map
+        Ascend does not use the AITER expert-mask variant, so the upstream
+        ``expert_map`` property resolves to the registered ``_expert_map``
+        buffer. Read the buffer directly so partial instances used by tests do
+        not need the full ``quant_method`` graph.
+        """
+        return getattr(self, "_expert_map", None)
 
     def get_log2phy_map(self) -> torch.Tensor | None:
         return self.log2phy
@@ -762,26 +649,25 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
             self.ascend_pertoken_scale = None
             self.ascend_mc2_mask = None
 
-        if self._use_v2_model_runner:
-            eplb_state = self.router.eplb_state
-            if eplb_state is not None:
-                # eplb_state imports vllm_ascend.ops.fused_moe at module scope, so a
-                # top-level import here would close an import cycle.
-                from vllm_ascend.distributed.eplb.eplb_state import AscendEplbLayerState
+        eplb_state = self.router.eplb_state
+        if eplb_state is not None:
+            # eplb_state imports vllm_ascend.ops.fused_moe at module scope, so a
+            # top-level import here would close an import cycle.
+            from vllm_ascend.distributed.eplb.eplb_state import AscendEplbLayerState
 
-                assert isinstance(eplb_state, AscendEplbLayerState)
-                all_gather_mask = None
-                if use_allgather_eplb():
-                    assert isinstance(moe_comm_method.prepare_finalize, PrepareAndFinalizeWithAllGather)
-                    all_gather_mask = moe_comm_method.prepare_finalize.all_gather_eplb_mask
-                eplb_state.record_load(
-                    fused_experts_results.expert_tokens,
-                    fused_experts_results.group_list_type,
-                    topk_ids=topk_ids,
-                    num_source_tokens=num_source_tokens,
-                    is_sequence_parallel=self.moe_config.is_sequence_parallel,
-                    all_gather_mask=all_gather_mask,
-                )
+            assert isinstance(eplb_state, AscendEplbLayerState)
+            all_gather_mask = None
+            if use_allgather_eplb():
+                assert isinstance(moe_comm_method.prepare_finalize, PrepareAndFinalizeWithAllGather)
+                all_gather_mask = moe_comm_method.prepare_finalize.all_gather_eplb_mask
+            eplb_state.record_load(
+                fused_experts_results.expert_tokens,
+                fused_experts_results.group_list_type,
+                topk_ids=topk_ids,
+                num_source_tokens=num_source_tokens,
+                is_sequence_parallel=self.moe_config.is_sequence_parallel,
+                all_gather_mask=all_gather_mask,
+            )
 
         if self.dynamic_eplb and _EXTRA_CTX.eplb_heat_collection_status:
             expert_tokens = fused_experts_results.expert_tokens

@@ -60,7 +60,6 @@ GPU_MEMORY_UTILIZATION = 0.95
         "HCCL_OP_EXPANSION_MODE": "AIV",
         "LCCL_DETERMINISTIC": "1",
         "ATB_MATMUL_SHUFFLE_K_ENABLE": "0",
-        "VLLM_USE_V2_MODEL_RUNNER": "1",
         "HCCL_DETERMINISTIC": "true",
         "CLOSE_MATMUL_K_SHIFT": "1",
     },
