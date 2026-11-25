@@ -48,8 +48,7 @@ def align_hisparse_indexer_specs(
                 # to a whole page (block_size * packed_row_bytes). Because vllm
                 # Core's get_hisparse_kv_cache_groups() drops block_stride_alignment
                 # when rebuilding HiSparseHotSpec/HiSparseResidentSpec, propagate
-                # this alignment via the co-pooled AscendSFAIndexerCacheSpec;
-                # sfa_hisparse.py still keeps TND as a remainder != 0 fallback.
+                # this alignment via the co-pooled AscendSFAIndexerCacheSpec.
                 alignment = math.lcm(alignment, spec.block_size * packed_row_bytes)
         elif packed_row_bytes is not None and isinstance(spec, (HiSparseResidentSpec, HiSparseHotSpec)):
             # Core derives these synthetic specs without the source page alignment.

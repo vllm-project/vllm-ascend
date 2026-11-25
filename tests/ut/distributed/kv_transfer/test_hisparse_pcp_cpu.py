@@ -513,27 +513,19 @@ def test_c8_resident_prefill_handles_hma_stride_and_pcp_padding(monkeypatch, blo
     monkeypatch.setattr(sfa_hisparse, "get_forward_context", lambda: NS(cudagraph_runtime_mode=CUDAGraphMode.NONE))
     monkeypatch.setattr(sfa_hisparse.torch, "npu", NS(is_current_stream_capturing=lambda: False), raising=False)
     pa_bsnd = Mock(return_value="pa-bsnd-out")
-    tnd = Mock(return_value="tnd-out")
     monkeypatch.setattr(AscendSFAImpl, "_execute_sparse_flash_attention_process", pa_bsnd)
-    monkeypatch.setattr(impl, "_c8_physical_attention", tnd)
 
     out = impl._try_c8_resident_prefill(query, query_rope, logical_topk, meta, query_ends, key_lengths)
     if block_stride == 128:
         assert out == "pa-bsnd-out"
-        tnd.assert_not_called()
         q, q_rope, _, topk, _, q_ends, k_lens = pa_bsnd.call_args.args
         assert (q.shape, q_rope.shape, topk.shape) == ((2, 1, 8), (2, 1, 4), (2, 1, 128))
         assert q_ends.tolist() == [2]
         assert k_lens.tolist() == [20]
         assert pa_bsnd.call_args.kwargs["block_table"].tolist() == [[2, 0]]
     else:
-        assert out == "tnd-out"
+        assert out is None
         pa_bsnd.assert_not_called()
-        q, q_rope, _, indices = tnd.call_args.args
-        assert (q.shape, q_rope.shape) == ((2, 1, 8), (2, 1, 4))
-        assert tnd.call_args.kwargs == {"indices_are_mapped": True}
-        assert indices[:, :4].tolist() == [[384, 1, -1, -1], [0, 389, -1, -1]]
-        assert (indices[:, 4:] == -1).all()
 
 
 def test_bf16_staged_prefill_reuses_paged_sfa_with_pcp_padding(monkeypatch):
