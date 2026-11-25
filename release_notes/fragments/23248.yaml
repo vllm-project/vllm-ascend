@@ -1,0 +1,7 @@
+pr: 23248
+entries:
+  - category: performance
+    text: >-
+      Large GDN prefill batches with supported packed projections combine
+      projection copies and output initialization into one device launch.
+      Unsupported shapes retain the existing path; no configuration is needed.
