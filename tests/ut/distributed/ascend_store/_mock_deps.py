@@ -334,7 +334,7 @@ def _fake_replay_boundaries(num_prompt_tokens, scheduler_block_size, use_eagle):
 
 
 if _MOCK_VLLM_DEPS:
-    sys.modules["vllm.v1.core.kv_cache_coordinator"].replay_boundaries = _fake_replay_boundaries
+    sys.modules["vllm.v1.core.kv_cache_coordinator"].replay_boundaries = _fake_replay_boundaries  # type: ignore[attr-defined]
 
 
 class _FakeBlockPool:
