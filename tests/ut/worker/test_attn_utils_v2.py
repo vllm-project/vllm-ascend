@@ -1283,7 +1283,7 @@ def test_allocate_kv_cache_main_routes_kimi_variants(monkeypatch, hf_config, tex
     result = attn_utils.allocate_kv_cache_main(config, device, None, [])
 
     if use_unified:
-        unified.assert_called_once_with(config, device, [])
+        unified.assert_called_once_with(config, device, None, [])
         legacy_allocate.assert_not_called()
         legacy_reshape.assert_not_called()
         assert result is unified.return_value
@@ -1686,7 +1686,7 @@ def test_mrv2_initializes_dsv4_cache_only_layer(
         allocate=None,
     ) -> dict[str, Any]:
         assert allocate is None
-        return attn_utils.unified_allocate_kv_cache(_kv_cache_config, _device, _kernel_block_sizes)
+        return attn_utils.unified_allocate_kv_cache(_kv_cache_config, _device, _layout, _kernel_block_sizes)
 
     def _ascend_bind_kv_cache(
         kv_caches: dict[str, Any],
