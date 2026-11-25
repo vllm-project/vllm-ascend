@@ -16,6 +16,8 @@ from vllm.utils.torch_utils import direct_register_custom_op
 
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 
+_HC_COMBINE_FINAL_BLOCK_SIZE = 1024
+
 
 @triton.jit
 def _grouped_gemma_rmsnorm_kernel(
@@ -407,6 +409,147 @@ def _hc_combine(
     return output
 
 
+def _validate_combine_final_inputs(
+    residual: torch.Tensor,
+    block_output: torch.Tensor,
+    injection: torch.Tensor | None,
+    hc_count: int,
+) -> tuple[int, int]:
+    hc_count = int(hc_count)
+    if residual.ndim != 2:
+        raise ValueError("residual must be [rows, HC * hidden_size]")
+    rows, dim = residual.shape
+    dim = int(dim)
+    if hc_count <= 0 or dim % hc_count:
+        raise ValueError("HC residual width must be divisible by a positive channel count")
+    group_dim = dim // hc_count
+    if block_output.shape != (rows, group_dim):
+        raise ValueError(f"block output must have shape {(rows, group_dim)}")
+    if residual.stride(1) != 1 or block_output.stride(1) != 1:
+        raise ValueError("HC combine requires unit inner strides")
+    if injection is not None:
+        if injection.shape != (rows, hc_count):
+            raise ValueError(f"final injection must have shape {(rows, hc_count)}")
+        if injection.stride(1) != 1:
+            raise ValueError("HC combine requires unit inner strides")
+    return rows, group_dim
+
+
+@triton.jit
+def _hc_combine_final_kernel(
+    residual_ptr,
+    block_output_ptr,
+    injection_ptr,
+    output_ptr,
+    stride_residual_row,
+    stride_block_row,
+    stride_injection_row,
+    stride_output_row,
+    GROUP_DIM: tl.constexpr,
+    HC_COUNT: tl.constexpr,
+    HAS_INJECTION: tl.constexpr,
+    BLOCK_SIZE: tl.constexpr,
+) -> None:
+    row = tl.program_id(0)
+    stream = tl.program_id(1)
+    tile = tl.program_id(2)
+    inner_offsets = tile * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+    mask = inner_offsets < GROUP_DIM
+    offsets = stream * GROUP_DIM + inner_offsets
+    residual = tl.load(
+        residual_ptr + row * stride_residual_row + offsets,
+        mask=mask,
+        other=0.0,
+    ).to(tl.float32)
+    block_output = tl.load(
+        block_output_ptr + row * stride_block_row + inner_offsets,
+        mask=mask,
+        other=0.0,
+    ).to(tl.float32)
+    if HAS_INJECTION:
+        injection = tl.load(injection_ptr + row * stride_injection_row + stream).to(tl.float32)
+        block_output *= injection
+    tl.store(
+        output_ptr + row * stride_output_row + offsets,
+        residual + block_output,
+        mask=mask,
+    )
+
+
+def _hc_combine_final(
+    residual: torch.Tensor,
+    block_output: torch.Tensor,
+    injection: torch.Tensor | None,
+    hc_count: int,
+) -> torch.Tensor:
+    hc_count = int(hc_count)
+    if block_output.device != residual.device or (injection is not None and injection.device != residual.device):
+        raise ValueError("HC combine inputs must be on the same NPU device")
+    rows, group_dim = _validate_combine_final_inputs(residual, block_output, injection, hc_count)
+    output = residual.new_empty(residual.shape)
+    if rows:
+        _hc_combine_final_kernel[(rows, hc_count, triton.cdiv(group_dim, _HC_COMBINE_FINAL_BLOCK_SIZE))](
+            residual,
+            block_output,
+            residual if injection is None else injection,
+            output,
+            residual.stride(0),
+            block_output.stride(0),
+            0 if injection is None else injection.stride(0),
+            output.stride(0),
+            GROUP_DIM=group_dim,
+            HC_COUNT=hc_count,
+            HAS_INJECTION=injection is not None,
+            BLOCK_SIZE=_HC_COMBINE_FINAL_BLOCK_SIZE,
+        )
+    return output
+
+
+def _hc_combine_final_fake(
+    residual: torch.Tensor,
+    block_output: torch.Tensor,
+    injection: torch.Tensor | None,
+    hc_count: int,
+) -> torch.Tensor:
+    del block_output, injection, hc_count
+    return residual.new_empty(residual.shape)
+
+
+direct_register_custom_op(
+    op_name="qwen4_exp_ascend_hc_combine_final",
+    op_func=_hc_combine_final,
+    fake_impl=_hc_combine_final_fake,
+    mutates_args=[],
+    dispatch_key="PrivateUse1",
+)
+
+
+def _fallback_hc_combine_final(
+    residual: torch.Tensor,
+    block_output: torch.Tensor,
+    injection: torch.Tensor | None,
+    hc_count: int,
+) -> torch.Tensor:
+    group_dim = residual.shape[-1] // hc_count
+    residual_grouped = residual.unflatten(-1, (hc_count, group_dim)).float()
+    block = block_output.float().unsqueeze(-2)
+    if injection is not None:
+        block = block * injection.float().unsqueeze(-1)
+    return (residual_grouped + block).flatten(-2).to(residual.dtype)
+
+
+def combine_final(
+    residual: torch.Tensor,
+    block_output: torch.Tensor,
+    injection: torch.Tensor | None,
+    hc_count: int,
+) -> torch.Tensor:
+    """Write back final injection weights without applying another sigmoid."""
+    if residual.device.type != "npu":
+        return _fallback_hc_combine_final(residual, block_output, injection, hc_count)
+    return torch.ops.vllm.qwen4_exp_ascend_hc_combine_final(residual, block_output, injection, hc_count)
+
+
 @triton.jit
 def _hc_combine_norm_kernel(
     residual_ptr,
@@ -696,6 +839,7 @@ def hc_combine_norm(
 __all__ = [
     "grouped_gemma_rmsnorm",
     "hc_combine",
+    "combine_final",
     "hc_combine_norm",
     "hc_gate_mix",
     "hc_silu",

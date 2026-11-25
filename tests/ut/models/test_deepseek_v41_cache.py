@@ -19,8 +19,7 @@ import torch_npu
 from vllm.config import set_current_vllm_config
 from vllm.transformers_utils.configs.deepseek_v41 import DeepseekV41Config
 
-# vLLM #61183 moved the KV-cache planning helpers to `kv_cache_planning` on
-# main; the v0.33.0 lane still ships them in `kv_cache_utils`.
+# vLLM #61183 moved the KV-cache planning helpers to `kv_cache_planning` on main.
 from vllm.v1.core import kv_cache_planning, kv_cache_utils
 from vllm.v1.kv_cache_interface import CircularBufferSpec
 from vllm.v1.worker.gpu.spec_decode import adaptive_verification
