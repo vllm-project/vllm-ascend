@@ -84,7 +84,11 @@ RUN set -e; \
         sqlite-devel readline-devel ncurses-devel \
         numactl numactl-devel libibverbs-devel hiredis-devel libcurl-devel \
         yaml-cpp-devel gflags-devel boost-devel \
+        zstd libzstd-devel \
         jemalloc clang && \
+    for p in libaio-devel libunwind-devel jsoncpp-devel liburing-devel; do \
+        $PM install -y "$p" || echo "WARN: 可选依赖 $p 不可用，稍后由源码编译环节兜底"; \
+    done; \
     rm -rf /var/cache/yum/* /var/cache/dnf/*
 
 # 1b) C++20 工具链：vllm-ascend 的依赖 arctic-inference 用 nanobind 构建，要求 C++20，
