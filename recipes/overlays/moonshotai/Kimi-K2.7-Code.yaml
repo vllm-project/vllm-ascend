@@ -1,0 +1,357 @@
+# Source: https://github.com/vllm-project/vllm/blob/main/recipes/models/moonshotai/Kimi-K2.7-Code.yaml
+# Ascend overlay validated on 2 prefill + 2 decode Atlas 800I A2 nodes.
+meta:
+  date_updated: 2026-11-21
+  hardware:
+    ascend_910b: verified
+
+hardware_notes:
+  ascend_910b:
+    title: "Atlas 800I A2 (910B4) four-node PD"
+    body: |
+      Requires two prefill and two decode nodes, each with 8 x 64 GB NPUs.
+      Provide the model cache or weights path on every node, set
+      `MOONCAKE_CONFIG_PATH`, and start `mooncake_master` before the engines.
+      When using the rendered Docker command, add
+      `-v /etc/hccn.conf:/etc/hccn.conf:ro`; the default mount set omits it.
+    link:
+      label: vLLM Ascend PD disaggregation guide
+      href: https://docs.vllm.ai/projects/ascend/en/latest/tutorials/features/pd_disaggregation_mooncake_multi_node.html
+
+strategy_hardware:
+  single_node_tp:
+    npu: unsupported
+    ascend_910b: unsupported
+  single_node_tep:
+    npu: unsupported
+    ascend_910b: unsupported
+  single_node_dep:
+    npu: unsupported
+    ascend_910b: unsupported
+  multi_node_tp:
+    npu: unsupported
+    ascend_910b: unsupported
+  multi_node_tp_pp:
+    npu: unsupported
+    ascend_910b: unsupported
+  multi_node_dep:
+    npu: unsupported
+    ascend_910b: unsupported
+  multi_node_tep:
+    npu: unsupported
+    ascend_910b: unsupported
+  pd_cluster:
+    npu: unsupported
+    ascend_910b: supported
+
+# The validated lane uses four 8-device nodes: two prefill and two decode.
+strategy_min_gpus:
+  ascend_910b:
+    pd_cluster: 32
+
+features:
+  # The base recipe ships an Eagle3 draft. The Ascend lane was validated with
+  # the DFlash draft, which needs the Ascend dflash method and 15 draft tokens.
+  spec_decoding:
+    hardware_overrides:
+      ascend_910b:
+        args:
+          - '--speculative-config'
+          - '{"method":"dflash","model":"z-lab/Kimi-K2.5-DFlash","num_speculative_tokens":15}'
+
+variants:
+  ascend_w4a8:
+    model_id: Eco-Tech/Kimi-K2.7-Code-w4a8
+    precision: int4
+    label: W4A8 (Ascend A2)
+    vram_minimum_gb: 529
+    description: >-
+      ModelSlim INT4 W4A8 checkpoint for Atlas 800I A2 (910B4), served as a
+      two-node prefill pool (DP2 x TP8) and a two-node decode pool
+      (DP4 x TP4, two local DP ranks per node). Requires --quantization ascend.
+    supported_hardware:
+      - ascend_910b
+    min_vllm_version: '0.32.0'
+    extra_args:
+      - '--quantization'
+      - ascend
+      - '--host'
+      - 0.0.0.0
+      - '--served-model-name'
+      - kimi27
+      - '--seed'
+      - '1024'
+      - '--max-model-len'
+      - '71680'
+      - '--gpu-memory-utilization'
+      - '0.95'
+      - '--enable-prefix-caching'
+      - '--async-scheduling'
+      - '--mm-processor-cache-gb'
+      - '0'
+      - '--compilation-config'
+      - '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
+    extra_env:
+      PYTORCH_NPU_ALLOC_CONF: expandable_segments:True
+      OMP_PROC_BIND: 'false'
+      OMP_NUM_THREADS: '1'
+      TASK_QUEUE_ENABLE: '1'
+      VLLM_RPC_TIMEOUT: '3600000'
+      HCCL_OP_EXPANSION_MODE: AIV
+      HCCL_INTRA_ROCE_ENABLE: '1'
+      ACL_OP_INIT_MODE: '1'
+      PYTHONHASHSEED: '0'
+      # Both the W4A8 checkpoint and the DFlash draft are published on
+      # ModelScope; resolve model ids there instead of Hugging Face.
+      VLLM_USE_MODELSCOPE: 'true'
+      # The Mooncake-backed KV tiers read this path on every engine. Export the
+      # real path before launch; the runbook includes the shared config shape.
+      MOONCAKE_CONFIG_PATH: "$MOONCAKE_CONFIG_PATH"
+    hardware_overrides:
+      ascend_910b:
+        docker_image: quay.io/ascend/vllm-ascend:v0.32.0rc1
+        docker_shm_size: "1g"
+        docker_serve_command: "vllm serve"
+        install:
+          pip: false
+presets:
+  ascend_a2_w4a8_pd:
+    label: Ascend A2 W4A8 PD (2P + 2D)
+    hardware: ascend_910b
+    strategy: pd_cluster
+    variants: [ascend_w4a8]
+    default: true
+    select:
+      pd_router: ascend
+      pd_connector: mooncake_ascend
+      frontend: python
+      kv_offload: false
+      features:
+        spec_decoding: true
+        # The validated command does not pass --mm-encoder-tp-mode data.
+        encoder_parallel: false
+    source:
+      label: vLLM Ascend Mooncake multi-node PD guide
+      href: https://docs.vllm.ai/projects/ascend/en/latest/tutorials/features/pd_disaggregation_mooncake_multi_node.html
+      key: kimi-k27-a2-w4a8-pd
+      revision: '2026-11-21'
+    description: >-
+      Two prefill nodes (DP2 x TP8) and two decode nodes (DP4 x TP4), with
+      Mooncake KV transfer and the Ascend proxy in front.
+    workload: 64k input / 1k output chat and agentic coding traffic.
+
+    image:
+      vllm: quay.io/ascend/vllm-ascend:v0.32.0rc1
+      model_revision: a671b826a7329495a89d6ff70b9c4ea96588c035
+
+    # The Ascend proxy uses external DP. The base recipe may leave a hybrid-LB
+    # flag behind; clear it so the rendered rank endpoints stay consistent.
+    remove_args: ["--data-parallel-hybrid-lb"]
+    roles:
+      prefill:
+        nodes: 2
+        parallelism: dep
+        tp: 8
+        pp: 1
+        args:
+          - '--port'
+          - '7100'
+          - '--max-num-batched-tokens'
+          - '16384'
+          - '--max-num-seqs'
+          - '3'
+          # Kept from the validated prefill lane. It disables cudagraph, so
+          # the compilation-config entry is effectively inactive on prefill.
+          - '--enforce-eager'
+          - '--additional-config'
+          - '{"enable_cpu_binding":true,"enable_shared_expert_dp":true}'
+        env:
+          HCCL_BUFFSIZE: '256'
+          VLLM_ASCEND_ENABLE_FLASHCOMM1: '1'
+          VLLM_ASCEND_ENABLE_MLAPO: '1'
+          VLLM_ASCEND_ENABLE_NZ: '1'
+          VLLM_USE_V1: '1'
+          VLLM_ENGINE_ITER_TIMEOUT: '600'
+          HCCL_IF_IP: $PREFILL_NODE_1
+          HCCL_SOCKET_IFNAME: $IFACE_NAME
+          GLOO_SOCKET_IFNAME: $IFACE_NAME
+          TP_SOCKET_IFNAME: $IFACE_NAME
+        json_args:
+          --kv-transfer-config:
+            kv_connector: MultiConnector
+            kv_role: kv_producer
+            kv_port: null
+            kv_connector_extra_config:
+              # Drop the catalog MooncakeConnectorV2 fields; this lane uses the
+              # V1 live transfer plus the Ascend store tier inside a MultiConnector.
+              prefill: null
+              decode: null
+              connectors:
+                - kv_connector: MooncakeConnectorV1
+                  kv_role: kv_producer
+                  kv_port: '30000'
+                  kv_connector_extra_config:
+                    prefill: { dp_size: 2, tp_size: 8 }
+                    decode: { dp_size: 4, tp_size: 4 }
+                - kv_connector: AscendStoreConnector
+                  kv_role: kv_producer
+                  kv_connector_extra_config:
+                    lookup_rpc_port: '0'
+                    backend: mooncake
+      decode:
+        nodes: 2
+        parallelism: dep
+        tp: 4
+        pp: 1
+        args:
+          - '--port'
+          - '7100'
+          - '--max-num-batched-tokens'
+          - '200'
+          - '--max-num-seqs'
+          - '4'
+          # The validated lane enabled the recompute scheduler on decode only.
+          - '--additional-config'
+          - '{"enable_cpu_binding":true,"recompute_scheduler_enable":true,"enable_shared_expert_dp":true}'
+        env:
+          HCCL_BUFFSIZE: '1100'
+          VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS: '0'
+          VLLM_ASCEND_ENABLE_MLAPO: '1'
+          VLLM_ASCEND_ENABLE_NZ: '1'
+          VLLM_USE_V1: '1'
+          VLLM_ENGINE_ITER_TIMEOUT: '600'
+          HCCL_IF_IP: $DECODE_NODE_1
+          HCCL_SOCKET_IFNAME: $IFACE_NAME
+          GLOO_SOCKET_IFNAME: $IFACE_NAME
+          TP_SOCKET_IFNAME: $IFACE_NAME
+        json_args:
+          --kv-transfer-config:
+            kv_connector: MultiConnector
+            kv_role: kv_consumer
+            kv_port: null
+            kv_connector_extra_config:
+              prefill: null
+              decode: null
+              connectors:
+                - kv_connector: MooncakeConnectorV1
+                  kv_role: kv_consumer
+                  kv_port: '30100'
+                  kv_connector_extra_config:
+                    prefill: { dp_size: 2, tp_size: 8 }
+                    decode: { dp_size: 4, tp_size: 4 }
+                - kv_connector: AscendStoreConnector
+                  kv_role: kv_consumer
+                  kv_connector_extra_config:
+                    lookup_rpc_port: '0'
+                    backend: mooncake
+
+    runbook: |
+      ## Topology
+
+      Four Atlas 800I A2 nodes (8 x 910B4, 64 GB each):
+
+      - Prefill: two dedicated nodes, DEP with TP8 on 8 devices. Each node runs
+        one DP rank (global DP2, local DP1) on an external endpoint.
+      - Decode: two dedicated nodes, DEP with TP4 on 8 devices. Each node runs
+        two local DP ranks (global DP4, local DP2); HTTP ports are base port
+        plus the local rank, so 7100 and 7101 per node.
+      - The Ascend proxy enumerates all four decode endpoints and both prefill
+        endpoints. Do not send normal generation requests directly to a decode
+        endpoint; decode is a KV consumer and can wedge when it receives a plain
+        request.
+
+      The renderer emits external-DP worker commands for these two-node pools.
+      The validated cluster used the equivalent per-rank `vllm serve` processes
+      from `launch_online_dp.py`, with the same DP/TP sizes, rank offsets,
+      7100/7101 ports and KV connector settings.
+
+      ## Placeholders to fill
+
+      Export or replace the usual renderer variables before launch:
+      `$PREFILL_NODE_1`, `$PREFILL_NODE_2`, `$DECODE_NODE_1`, `$DECODE_NODE_2`,
+      `$PREFILL_DP_RPC_PORT`, `$DECODE_DP_RPC_PORT`, `$IFACE_NAME`,
+      `$ROUTER_HOST`, `$ROUTER_PORT`, and `$MOONCAKE_CONFIG_PATH`.
+
+      ## Mooncake
+
+      Every prefill and decode node needs the same shared config, an exported
+      `MOONCAKE_CONFIG_PATH`, and a reachable `mooncake_master`. The validated
+      config used 15 GB per TP rank (32 clients, 480 GB total); a 1 GB value
+      only yields 32 GB and triggers eviction under two concurrent 64k requests.
+      The master ran on the first prefill node:
+
+      ```json
+      {
+        "metadata_server": "P2PHANDSHAKE",
+        "protocol": "ascend",
+        "device_name": "",
+        "master_server_address": "$PREFILL_NODE_1:50088",
+        "global_segment_size": "15GB",
+        "preferred_segment": false,
+        "prefer_alloc_in_same_node": true
+      }
+      ```
+
+      Start `mooncake_master --rpc_port=50088` on the first prefill node before
+      the engines. When using the rendered Docker command, add
+      `-v /etc/hccn.conf:/etc/hccn.conf:ro` so the Ascend Mooncake backend can
+      read the host RoCE configuration; the renderer's default Ascend mount set
+      omits it.
+
+notes:
+  - title: "Use the Ascend PD preset"
+    when:
+      hardware: [ascend_910b]
+      strategies: [pd_cluster]
+      variants: [ascend_w4a8]
+    body: |
+      The supported path is the `ascend_a2_w4a8_pd` preset. It selects the Ascend proxy
+      and Mooncake (Ascend), with native external-DP workers. Baseline and other
+      routers are outside this overlay's verification scope.
+
+guide_sections:
+  ascend: |
+    ## Ascend overview
+
+    Kimi-K2.7-Code is a 1T-parameter MoE coding model with a MoonViT encoder.
+    The Ascend W4A8 checkpoint runs on Atlas 800I A2 (910B4) as a four-node
+    prefill/decode cluster: two prefill nodes with DP2 x TP8 and two decode
+    nodes with DP4 x TP4, connected through Mooncake KV transfer and fronted by
+    the Ascend proxy.
+
+    ## Ascend prerequisites
+
+    - Hardware and node topology: 4 x Atlas 800I A2, 8 x 910B4 (64 GB) each
+    - vLLM / vLLM Ascend runtime: vLLM-Ascend v0.32.0rc1
+    - Image: `quay.io/ascend/vllm-ascend:v0.32.0rc1`
+    - Checkpoint: `Eco-Tech/Kimi-K2.7-Code-w4a8` revision
+      `a671b826a7329495a89d6ff70b9c4ea96588c035`
+    - Draft: `z-lab/Kimi-K2.5-DFlash`
+    - Host: `/etc/hccn.conf` present, shared model storage mounted, one
+      `mooncake_master` reachable by every engine
+    - Both model ids resolve from ModelScope (`VLLM_USE_MODELSCOPE=true`)
+
+    ## Client usage
+
+    ```python
+    from openai import OpenAI
+
+    client = OpenAI(
+        base_url="http://<router-host>:<router-port>/v1",
+        api_key="EMPTY",
+    )
+    response = client.chat.completions.create(
+        model="kimi27",
+        messages=[{"role": "user", "content": "Hello"}],
+        max_tokens=1024,
+    )
+    print(response.choices[0].message.content)
+    ```
+
+    ## Ascend references
+
+    - [Kimi-K2.7-Code model card](https://huggingface.co/moonshotai/Kimi-K2.7-Code)
+    - [Base recipe](https://github.com/vllm-project/vllm/blob/main/recipes/models/moonshotai/Kimi-K2.7-Code.yaml)
+    - [W4A8 checkpoint](https://www.modelscope.cn/models/Eco-Tech/Kimi-K2.7-Code-w4a8)
+    - [DFlash draft](https://huggingface.co/z-lab/Kimi-K2.5-DFlash)
+    - [Ascend Mooncake PD guide](https://docs.vllm.ai/projects/ascend/en/latest/tutorials/features/pd_disaggregation_mooncake_multi_node.html)

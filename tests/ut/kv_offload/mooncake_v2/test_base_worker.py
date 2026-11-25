@@ -22,6 +22,18 @@ from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.stats import MooncakeKV
 from .helpers import make_full_spec, make_kv_cache_tensor, make_sfa_indexer_spec, make_sliding_spec
 
 
+def test_transfer_max_workers() -> None:
+    options: dict[str, int] = {}
+    config = SimpleNamespace(kv_transfer_config=SimpleNamespace(get_from_extra_config=options.get))
+    assert MooncakeBaseConnectorWorker._get_transfer_max_workers(config) == 32
+    options["transfer_max_workers"] = 64
+    assert MooncakeBaseConnectorWorker._get_transfer_max_workers(config) == 64
+    for value in (0, True):
+        options["transfer_max_workers"] = value
+        with pytest.raises(ValueError, match="transfer_max_workers must be a positive integer"):
+            MooncakeBaseConnectorWorker._get_transfer_max_workers(config)
+
+
 @pytest.mark.parametrize(
     ("pcp_rank", "tp_rank", "target_index"),
     [(0, 0, 0), (0, 1, 1), (1, 0, 2), (1, 1, 3)],

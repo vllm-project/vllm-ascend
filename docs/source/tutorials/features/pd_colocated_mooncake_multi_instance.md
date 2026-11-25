@@ -76,7 +76,7 @@ such as IP addresses according to your actual environment.
 
 ## Run with Docker
 
-Start a Docker container on each node.
+Start a Docker container on each node. The command needs [Ascend Docker Runtime](../../getting_started/installation.md#installation-ascend-docker-runtime) on the host and selects four NPUs with `ASCEND_VISIBLE_DEVICES=0-3`.
 
 ```bash
 # Update the vllm-ascend image
@@ -90,20 +90,9 @@ docker run --rm \
 --name $NAME \
 --net=host \
 --shm-size=1g \
---device /dev/davinci0 \
---device /dev/davinci1 \
---device /dev/davinci2 \
---device /dev/davinci3 \
---device /dev/davinci_manager \
---device /dev/devmm_svm \
---device /dev/hisi_hdc \
--v /usr/local/dcmi:/usr/local/dcmi \
+-e ASCEND_VISIBLE_DEVICES=0-3 \
 -v /usr/local/Ascend/driver/tools/hccn_tool:\
 /usr/local/Ascend/driver/tools/hccn_tool \
--v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
--v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
--v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
--v /etc/ascend_install.info:/etc/ascend_install.info \
 -v /etc/hccn.conf:/etc/hccn.conf \
 -v /root/.cache:/root/.cache \
 -it $IMAGE bash
