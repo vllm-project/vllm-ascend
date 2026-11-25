@@ -53,6 +53,8 @@ def _run(command: list[str]) -> str:
     parallel="DP",
     deploy="pd_mix",
     hardware="A5",
+    quantization="",
+    graph_mode="",
 )
 def test_a5_ub_topology_probe() -> None:
     for path in PROBE_PATHS:
