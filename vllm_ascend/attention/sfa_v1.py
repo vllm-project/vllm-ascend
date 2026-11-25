@@ -413,6 +413,9 @@ class AscendSFABackend(AttentionBackend):
         num_blocks: int,
         layout: Any,
         kernel_block_size: int | None = None,
+        *,
+        kv_lora_rank: int,
+        qk_rope_head_dim: int,
     ) -> KVCacheRuntimeShapesAndDtypes:
         """Describe the packed or split SFA main cache in storage elements."""
         # SFA main cache stores one row per token. Packing changes the row width.
@@ -423,9 +426,7 @@ class AscendSFABackend(AttentionBackend):
         if spec.uses_packed_sfa_main_cache:
             widths = (spec.head_size,)
         else:
-            if spec.kv_lora_rank is None or spec.qk_rope_head_dim is None:
-                raise ValueError("SFA runtime views require component dimensions in the cache spec.")
-            widths = (spec.kv_lora_rank, spec.qk_rope_head_dim)
+            widths = (kv_lora_rank, qk_rope_head_dim)
         shapes = tuple((runtime_blocks, block_size, spec.num_kv_heads, width) for width in widths)
         return shapes, (spec.dtype,) * len(widths)
 

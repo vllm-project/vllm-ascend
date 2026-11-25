@@ -26,7 +26,6 @@ from vllm.v1.kv_cache_interface import (
 from vllm.v1.worker.gpu import attn_utils as upstream_attn_utils
 from vllm.v1.worker.gpu import model_runner as upstream_model_runner
 from vllm.v1.worker.utils import AttentionGroup
-from vllm_ascend.ops.kda_pcp import KimiKDAHostMetadataBackend
 
 from vllm_ascend.attention import dsa_attn_kv_plan, dsa_v1
 from vllm_ascend.attention import utils as attention_utils
@@ -61,6 +60,7 @@ from vllm_ascend.device.hardware_profile import get_hardware_profile
 from vllm_ascend.models.deepseek_v4 import compressor as deepseek_v4_compressor
 from vllm_ascend.models.deepseek_v4 import indexer as deepseek_v4_indexer
 from vllm_ascend.models.deepseek_v4 import model as deepseek_v4_model
+from vllm_ascend.ops.kimi_kda import KimiKDAHostMetadataBackend
 from vllm_ascend.worker.utils import prepare_ascend_kernel_block_sizes
 from vllm_ascend.worker.v2 import attn_utils
 from vllm_ascend.worker.v2 import model_runner as v2_model_runner
@@ -1302,6 +1302,7 @@ def test_allocate_kv_cache_main_routes_kimi_variants(monkeypatch, hf_config, tex
 
 
 @pytest.mark.parametrize("use_flashmla", [False, True])
+@pytest.mark.parametrize("mixed_layouts", [False, True])
 @pytest.mark.parametrize(
     ("kernel_blocks_per_manager", "block_outer"),
     [
@@ -1312,7 +1313,7 @@ def test_allocate_kv_cache_main_routes_kimi_variants(monkeypatch, hf_config, tex
     ],
 )
 def test_k3_unified_allocator_preserves_runtime_views(
-    monkeypatch, use_flashmla, kernel_blocks_per_manager, block_outer
+    monkeypatch, use_flashmla, mixed_layouts, kernel_blocks_per_manager, block_outer
 ):
     mla_names = ["layers.0.mla", "layers.1.mla"]
     kda_name = "layers.2.kda"
@@ -1322,10 +1323,7 @@ def test_k3_unified_allocator_preserves_runtime_views(
         block_size=manager_block_size,
         num_kv_heads=1,
         head_size=576,
-        kv_lora_rank=512,
-        qk_rope_head_dim=64,
         dtype=torch.bfloat16,
-        mla_cache_layout="token_interleaved" if use_flashmla else "component_major",
         page_size_padded=manager_block_size * 640 * torch.bfloat16.itemsize,
     )
     mla_spec = AscendMLAAttentionSpec.merge([mla_spec, mla_spec])
@@ -1357,7 +1355,15 @@ def test_k3_unified_allocator_preserves_runtime_views(
             KVCacheGroupSpec(layer_names=[kda_name], kv_cache_spec=kda_spec),
         ],
     )
-    layers = dict.fromkeys(mla_names, SimpleNamespace(get_attn_backend=lambda: AscendMLABackend))
+    layers = {}
+    for index, name in enumerate(mla_names):
+        layer = AscendMLAAttention.__new__(AscendMLAAttention)
+        torch.nn.Module.__init__(layer)
+        layer.attn_backend = AscendMLABackend
+        layer.kv_lora_rank = 512
+        layer.qk_rope_head_dim = 64
+        layer.impl = SimpleNamespace(use_flashmla=use_flashmla ^ (mixed_layouts and index == 1))
+        layers[name] = layer
     layers[kda_name] = SimpleNamespace(get_attn_backend=lambda: KimiKDAHostMetadataBackend)
     vllm_config = SimpleNamespace(
         model_config=SimpleNamespace(hf_text_config=SimpleNamespace(model_type="kimi_linear")),
@@ -1377,12 +1383,13 @@ def test_k3_unified_allocator_preserves_runtime_views(
 
     assert caches.keys() == layers.keys()
     kernel_slot_bytes = block_stride // kernel_blocks_per_manager
-    widths = (576,) if use_flashmla else (512, 64)
     backing_addresses = set()
     for index, name in enumerate(mla_names):
+        layer_uses_flashmla = layers[name].impl.use_flashmla
+        widths = (576,) if layer_uses_flashmla else (512, 64)
         cache = caches[name]
-        assert isinstance(cache, torch.Tensor if use_flashmla else tuple)
-        components = (cache,) if use_flashmla else cache
+        assert isinstance(cache, torch.Tensor if layer_uses_flashmla else tuple)
+        components = (cache,) if layer_uses_flashmla else cache
         component_offset = offset + index * layer_stride
         for tensor, width in zip(components, widths, strict=True):
             assert tensor.shape == (num_blocks * kernel_blocks_per_manager, kernel_block_size, 1, width)
@@ -1474,8 +1481,6 @@ def test_mla_cache_spec_uses_physical_heads_for_kimi_k3(
 
     assert isinstance(spec, AscendMLAAttentionSpec)
     assert spec.num_heads == expected_num_heads
-    assert (spec.kv_lora_rank, spec.qk_rope_head_dim) == (512, 64)
-    assert spec.mla_cache_layout == "token_interleaved"
     assert spec.dcp_sharded is dcp_sharded
     assert spec.page_size_bytes == source_spec.page_size_bytes
     assert spec.is_draft is (source_is_draft or is_draft_layer)
@@ -3994,7 +3999,8 @@ def test_kernel_block_table_covers_encoder_manager_columns(initial_rows, initial
 
 
 @pytest.mark.parametrize("group_block_size", [128, None])
-def test_unified_runtime_views_use_attention_group_block_size(group_block_size):
+@pytest.mark.parametrize("use_layer_provider", [False, True])
+def test_unified_runtime_views_use_attention_group_block_size(group_block_size, use_layer_provider):
     name = "layer"
     spec = FullAttentionSpec(block_size=256, num_kv_heads=1, head_size=2, dtype=torch.float32)
     num_blocks = 2
@@ -4026,8 +4032,17 @@ def test_unified_runtime_views_use_attention_group_block_size(group_block_size):
         backend=SimpleNamespace(get_runtime_shapes_and_dtypes=get_components),
     )
     backing = torch.zeros(num_blocks * spec.page_size_bytes, dtype=torch.int8)
-    caches = attn_utils.create_kv_cache_runtime_views(config, backing, [group], [256], {"alias": name})
-    get_components.assert_called_once_with(spec, num_blocks, None, kernel_block_size=expected_block_size)
+    layout = object()
+    layers = None
+    if use_layer_provider:
+        layers = {name: SimpleNamespace(get_runtime_shapes_and_dtypes=get_components)}
+        group.backend.get_runtime_shapes_and_dtypes = MagicMock(
+            side_effect=AssertionError("Expected the layer provider")
+        )
+    caches = attn_utils.create_kv_cache_runtime_views(
+        config, backing, [group], [256], {"alias": name}, layout, attn_layers=layers
+    )
+    get_components.assert_called_once_with(spec, num_blocks, layout, kernel_block_size=expected_block_size)
     view = caches[name][0]
     assert view.shape == (num_blocks * 256 // expected_block_size, expected_block_size, 1, 4)
     assert view.stride(0) * view.element_size() == spec.page_size_bytes * expected_block_size // 256

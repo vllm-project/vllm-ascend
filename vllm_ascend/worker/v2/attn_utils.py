@@ -1481,8 +1481,10 @@ def create_kv_cache_runtime_views(
     kernel_block_sizes: Sequence[int],
     shared_layers: Mapping[str, str],
     layout: Any = None,
+    *,
+    attn_layers: Mapping[str, AttentionLayerBase] | None = None,
 ) -> dict[str, Any]:
-    """Delegate component views to backends using the descriptor block strides."""
+    """Resolve layer/backend component views using the descriptor block strides."""
     placements = {
         name: (descriptor, layer_index)
         for descriptor in kv_cache_config.kv_cache_tensors
@@ -1507,7 +1509,9 @@ def create_kv_cache_runtime_views(
             # The backend describes the cache views bound to the layer.
             # For token-compressed caches, the token axis counts stored rows after compression.
             # The last axis counts elements of each component's storage dtype.
-            cache_shapes, dtypes = group.backend.get_runtime_shapes_and_dtypes(
+            layer = attn_layers.get(name) if attn_layers is not None else None
+            view_provider = layer if hasattr(layer, "get_runtime_shapes_and_dtypes") else group.backend
+            cache_shapes, dtypes = view_provider.get_runtime_shapes_and_dtypes(
                 spec,
                 num_blocks,
                 layout,
@@ -1568,6 +1572,7 @@ def unified_allocate_kv_cache(
         kernel_block_sizes,
         shared_layers,
         layout,
+        attn_layers=attn_layers,
     )
 
 
