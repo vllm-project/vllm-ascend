@@ -12,6 +12,7 @@ from vllm.model_executor.layers.attention.mla_attention import MLACommonMetadata
 
 import vllm_ascend.attention.sfa_v1 as sfa
 import vllm_ascend.attention.sfa_v1 as sparse_mla
+from vllm_ascend.attention.sparse_flash_mla import get_smla_metadata_size
 from vllm_ascend.device.hardware_profile import DeviceAdaptorFamily
 
 
@@ -205,7 +206,7 @@ def test_a5_sparse_mla_splits_oversized_storage_pages(monkeypatch):
     monkeypatch.setattr(
         sparse_mla,
         "sparse_flash_mla_metadata",
-        lambda **kwargs: torch.zeros(sparse_mla.SMLA_METADATA_SIZE, dtype=torch.int32),
+        lambda **kwargs: torch.zeros(get_smla_metadata_size(), dtype=torch.int32),
     )
     builder = _builder(block_size, True, monkeypatch)
     metadata = builder.build(0, _common(block_size))
@@ -332,7 +333,7 @@ def test_nope_operator_returns_kernel_output_with_unwritten_graph_rows(monkeypat
 
 
 def test_a5_smla_uses_original_cache_sorted_indices_and_stable_metadata(monkeypatch):
-    buffer = torch.empty(sparse_mla.SMLA_METADATA_SIZE, dtype=torch.int32)
+    buffer = torch.empty(get_smla_metadata_size(), dtype=torch.int32)
     metadata = SimpleNamespace(
         query_start_loc=torch.tensor([0, 1, 2], dtype=torch.int32),
         seq_lens=torch.tensor([8, 4], dtype=torch.int32),
@@ -400,7 +401,7 @@ def test_a5_smla_rebuilds_plan_for_a_trimmed_query(monkeypatch):
         max_query_len=1,
         max_seq_len=8,
         block_table=torch.tensor([[2], [0]], dtype=torch.int32),
-        smla_metadata=torch.zeros(sparse_mla.SMLA_METADATA_SIZE, dtype=torch.int32),
+        smla_metadata=torch.zeros(get_smla_metadata_size(), dtype=torch.int32),
         # Predicted for the padded batch: four rows, three entries each.
         smla_topk_length=torch.full((4, 1), 3, dtype=torch.int32),
         smla_valid_mask=torch.tensor([[True], [False], [False], [False]]),
@@ -408,7 +409,7 @@ def test_a5_smla_rebuilds_plan_for_a_trimmed_query(monkeypatch):
         block_size=8,
         num_actual_tokens=1,
     )
-    regenerated = torch.full((sparse_mla.SMLA_METADATA_SIZE,), 5, dtype=torch.int32)
+    regenerated = torch.full((get_smla_metadata_size(),), 5, dtype=torch.int32)
 
     def plan(**kwargs):
         # Regenerated over the rows being passed, not the padded ones.
@@ -449,7 +450,7 @@ def test_a5_smla_rebuilds_plan_for_the_draft_model(monkeypatch):
         max_query_len=1,
         max_seq_len=8,
         block_table=torch.tensor([[2], [0]], dtype=torch.int32),
-        smla_metadata=torch.zeros(sparse_mla.SMLA_METADATA_SIZE, dtype=torch.int32),
+        smla_metadata=torch.zeros(get_smla_metadata_size(), dtype=torch.int32),
         # Prediction for the padded batch: two rows, three entries each.
         smla_topk_length=torch.full((2, 1), 3, dtype=torch.int32),
         smla_valid_mask=torch.ones(2, 1, dtype=torch.bool),
@@ -457,7 +458,7 @@ def test_a5_smla_rebuilds_plan_for_the_draft_model(monkeypatch):
         block_size=8,
         num_actual_tokens=2,
     )
-    regenerated = torch.full((sparse_mla.SMLA_METADATA_SIZE,), 5, dtype=torch.int32)
+    regenerated = torch.full((get_smla_metadata_size(),), 5, dtype=torch.int32)
 
     def plan(**kwargs):
         # Row 1 is padding: its indices are all -1, so it claims no entries
@@ -490,7 +491,7 @@ def test_a5_smla_plans_from_reused_indices_for_the_target(monkeypatch):
         max_query_len=1,
         max_seq_len=4100,
         block_table=torch.zeros(2, 33, dtype=torch.int32),
-        smla_metadata=torch.zeros(sparse_mla.SMLA_METADATA_SIZE, dtype=torch.int32),
+        smla_metadata=torch.zeros(get_smla_metadata_size(), dtype=torch.int32),
         smla_topk_length=torch.tensor([[2049], [2048], [2051]], dtype=torch.int32),
         smla_valid_mask=torch.tensor([[True], [True], [False]]),
         smla_sinks=torch.ones(2, dtype=torch.float32),
@@ -542,7 +543,7 @@ def test_build_smla_metadata_rejects_a_plan_of_the_wrong_size(monkeypatch):
         smla_topk_length=torch.ones(1, 1, dtype=torch.int32),
     )
     monkeypatch.setattr(sparse_mla, "sparse_flash_mla_metadata", lambda **_: torch.zeros(8, dtype=torch.int32))
-    buffer = torch.empty(sparse_mla.SMLA_METADATA_SIZE, dtype=torch.int32)
+    buffer = torch.empty(get_smla_metadata_size(), dtype=torch.int32)
     with pytest.raises(ValueError, match="int32 values"):
         sparse_mla.build_smla_metadata(metadata, buffer, 2, 128, 7, metadata.query_start_loc, metadata.smla_topk_length)
 
@@ -556,7 +557,7 @@ def _stub_metadata_op(monkeypatch):
     monkeypatch.setattr(
         sparse_mla,
         "sparse_flash_mla_metadata",
-        lambda **kwargs: torch.zeros(sparse_mla.SMLA_METADATA_SIZE, dtype=torch.int32),
+        lambda **kwargs: torch.zeros(get_smla_metadata_size(), dtype=torch.int32),
     )
 
 
@@ -625,7 +626,7 @@ def test_a5_smla_sinks_outlive_the_operator_call(monkeypatch):
 def _smla_metadata_stub(sinks):
     return SimpleNamespace(
         block_table=torch.zeros(1, 1, dtype=torch.int32),
-        smla_metadata=torch.zeros(sparse_mla.SMLA_METADATA_SIZE, dtype=torch.int32),
+        smla_metadata=torch.zeros(get_smla_metadata_size(), dtype=torch.int32),
         smla_topk_length=torch.ones(1, 1, dtype=torch.int32),
         smla_sinks=sinks,
         block_size=8,

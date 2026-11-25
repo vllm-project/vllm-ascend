@@ -30,7 +30,11 @@ from vllm_ascend.attention.context_parallel.common_cp import (
     get_pcp_num_replicated_tokens,
 )
 from vllm_ascend.attention.indexer import AscendSFAIndexerCache
-from vllm_ascend.attention.sparse_flash_mla import sparse_flash_mla, sparse_flash_mla_metadata
+from vllm_ascend.attention.sparse_flash_mla import (
+    get_smla_metadata_size,
+    sparse_flash_mla,
+    sparse_flash_mla_metadata,
+)
 from vllm_ascend.attention.utils import (
     MLAPO_MAX_SUPPORTED_TOKENS,
     SFA_QSFA_TILE_SIZE,
@@ -84,7 +88,9 @@ from vllm_ascend.utils import (
 from vllm_ascend.weight_switch import ParallelOProjection, WeightSwitchConfig
 
 # NoPE sparse MLA operator helpers.
-SMLA_METADATA_SIZE = 1024
+# The core-split plan size is an operator contract that changes with the
+# toolkit (CANN 9.2 uses 1024 int32 words, CANN 9.3 uses 2048), so it is
+# resolved from the installed operator package instead of being pinned here.
 # GLM5Next's SFA path carries no learnable attention sink, but SparseFlashMla
 # still requires a per-head float32 sinks tensor. This is the placeholder value
 # the path has always used; whether -inf is the correct "no sink" value is a
@@ -147,11 +153,16 @@ def generate_smla_plan(metadata, num_heads, head_dim, topk, cu_seqlens_q, topk_l
 def build_smla_metadata(metadata, buffer, num_heads, head_dim, topk, cu_seqlens_q, topk_length):
     generated = generate_smla_plan(metadata, num_heads, head_dim, topk, cu_seqlens_q, topk_length)
     if generated.numel() != buffer.numel():
-        # The persistent buffer is sized by the operator's fixed [1024] contract.
-        # A generated plan of any other size means this build does not match the
-        # operator this buffer was allocated for; say so here rather than letting
-        # copy_ decide.
-        raise ValueError(f"Sparse MLA plan must contain {buffer.numel()} int32 values, got {generated.numel()}.")
+        # The persistent buffer is sized from the installed operator package, so
+        # a mismatch means the operator that produced this plan and the one the
+        # buffer was sized for disagree. Name both sizes: the toolkit can grow
+        # the plan (CANN 9.3 uses 2048 int32 words where CANN 9.2 used 1024),
+        # and a stale toolkit or a mismatched vllm-ascend install shows up here.
+        raise ValueError(
+            f"Sparse MLA plan must contain {buffer.numel()} int32 values, got {generated.numel()}. "
+            "The plan buffer is sized from the installed SparseFlashMla operator package; check that "
+            "the CANN toolkit and the vllm-ascend installation match."
+        )
     buffer.copy_(generated)
     metadata.smla_metadata = buffer
 
@@ -283,7 +294,7 @@ class SparseMLAMetadataState:
                 if num_heads is None
                 else num_heads
             )
-            self.metadata_buffer = torch.empty(SMLA_METADATA_SIZE, dtype=torch.int32, device=device)
+            self.metadata_buffer = torch.empty(get_smla_metadata_size(), dtype=torch.int32, device=device)
             self.length_buffer = torch.empty(
                 vllm_config.scheduler_config.max_num_batched_tokens,
                 1,

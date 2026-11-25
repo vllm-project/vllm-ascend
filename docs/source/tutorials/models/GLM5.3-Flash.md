@@ -82,6 +82,22 @@ It requires D=256, Hckv=512 and Hcq=1536/2048. A5/MXFP8, C16, PCP, DCP and
 other incompatible configurations retain native preprocessing. No additional
 configuration switch is needed.
 
+### NoPE sparse MLA and the CANN toolkit
+
+On A5, the NoPE SFA path attends through the CANN `SparseFlashMla` operator.
+That operator writes its core-split plan into a fixed-size int32 buffer, and
+the size of that buffer is part of the operator contract: the CANN 9.2
+package produces 1024 words, the CANN 9.3 package produces 2048.
+vLLM-Ascend sizes its persistent plan buffer from the installed
+`cann_ops_transformer` package, so both toolkits are supported and no switch
+is needed.
+
+If the two sides disagree, the first attention step reports
+`Sparse MLA plan must contain <n> int32 values, got <m>`. That means the
+installed CANN toolkit and the vLLM-Ascend image do not belong together; use
+the toolkit that matches the image, as described in
+[Installation](../../getting_started/installation.md).
+
 ## 3 Prerequisites
 
 ### 3.1 Model Weight

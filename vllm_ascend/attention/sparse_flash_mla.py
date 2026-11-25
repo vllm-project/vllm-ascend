@@ -7,6 +7,53 @@ from importlib import import_module
 from typing import Any
 
 import torch
+from vllm.logger import logger
+
+# The SparseFlashMla core-split plan is a fixed-size int32 buffer whose size is
+# part of the operator contract: the CANN 9.2 operator package produced 1024
+# words, CANN 9.3 grew it to 2048. The persistent vllm-ascend plan buffer has to
+# match the operator that fills it, so the size is resolved from the installed
+# package instead of being pinned to one toolkit version here.
+_SMLA_METADATA_SIZE_FALLBACK = 1024
+_SMLA_METADATA_SIZE_MODULES = (
+    "cann_ops_transformer.ops.attention.sparse_flash_mla.sparse_flash_mla",
+    "cann_ops_transformer.ops.attention.sparse_flash_mla.sparse_flash_mla_metadata",
+)
+
+
+def _resolve_smla_metadata_size() -> int | None:
+    """Plan size declared by the installed operator package, if it declares one."""
+    for module_name in _SMLA_METADATA_SIZE_MODULES:
+        try:
+            module = import_module(module_name)
+        except Exception:  # noqa: BLE001 - the module layout differs per toolkit
+            continue
+        size = getattr(module, "SMLA_METADATA_SIZE", None)
+        if isinstance(size, int) and not isinstance(size, bool) and size > 0:
+            return size
+    return None
+
+
+@lru_cache
+def get_smla_metadata_size() -> int:
+    """Number of int32 words in the SparseFlashMla core-split plan.
+
+    The plan is written by the operator into a buffer that must keep its size
+    for the whole process lifetime: ACL Graph replay reads the address that was
+    captured on the first run, so the buffer cannot be resized later. Reading
+    the size from the installed operator package keeps the buffer and the
+    operator in step across toolkit versions.
+    """
+    size = _resolve_smla_metadata_size()
+    if size is None:
+        logger.warning_once(
+            "The installed cann_ops_transformer package does not declare SMLA_METADATA_SIZE; "
+            "using %d int32 words for the SparseFlashMla plan buffer. An operator that produces a "
+            "different plan size (CANN 9.3 uses 2048) fails the plan size check.",
+            _SMLA_METADATA_SIZE_FALLBACK,
+        )
+        return _SMLA_METADATA_SIZE_FALLBACK
+    return size
 
 
 @lru_cache
