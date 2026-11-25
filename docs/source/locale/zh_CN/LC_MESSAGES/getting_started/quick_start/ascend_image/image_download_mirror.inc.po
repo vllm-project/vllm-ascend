@@ -35,6 +35,5 @@ msgstr "您可以将其替换为："
 
 msgid ""
 "Replace only the registry prefix and preserve the complete original image "
-"tag, including suffixes such as `-a3`, `-310p`, `-950dt`, and `-openeuler`."
-msgstr ""
-"仅替换镜像仓库前缀，并保留完整的原始镜像标签，包括诸如 `-a3`、`-310p`、`-950dt` 和 `-openeuler` 等后缀。"
+"tag, including suffixes such as `-a3`, `-a5`, `-310p`, and `-openeuler`."
+msgstr "仅替换镜像仓库前缀，并保留完整的原始镜像标签，包括 `-a3`、`-a5`、`-310p` 和 `-openeuler` 等后缀。"

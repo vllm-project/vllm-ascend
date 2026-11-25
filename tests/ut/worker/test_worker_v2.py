@@ -130,6 +130,7 @@ class TestNPUWorkerV2(TestBase):
 
         with patch.object(NPUWorker, "__init__", lambda self, **kwargs: None):
             worker = NPUWorker()
+        worker._static_kernel_runtime_initialized = False
         worker.model_runner = MagicMock()
         worker.vllm_config = MagicMock()
         worker.vllm_config.model_config.enable_sleep_mode = False
@@ -156,6 +157,14 @@ class TestNPUWorkerV2(TestBase):
         with (
             patch.object(NPUWorker, "__init__", lambda self, **kwargs: None),
             patch.object(NPUWorker, "_init_device", return_value=device),
+            patch(
+                "vllm_ascend.worker.worker.get_ascend_config",
+                return_value=SimpleNamespace(
+                    ascend_compilation_config=SimpleNamespace(
+                        enable_static_kernel=False, enable_super_kernel=False, enable_npugraph_ex=False
+                    )
+                ),
+            ),
             patch("vllm_ascend.worker.worker.init_workspace_manager"),
             patch("vllm_ascend.worker.worker.report_usage_stats") as report_usage_stats,
             patch(
@@ -181,8 +190,10 @@ class TestNPUWorkerV2(TestBase):
 
     @patch("vllm_ascend.worker.worker.get_ec_transfer")
     @patch("vllm_ascend.worker.worker.has_ec_transfer", return_value=True)
+    @patch("vllm_ascend.worker.worker.shared_expert_tp_enable", return_value=False)
     def test_load_model_starts_ec_worker_services(
         self,
+        _mock_shared_tp,
         mock_has_ec_transfer,
         mock_get_ec_transfer,
     ):
@@ -202,8 +213,10 @@ class TestNPUWorkerV2(TestBase):
 
     @patch("vllm_ascend.worker.worker.get_ec_transfer")
     @patch("vllm_ascend.worker.worker.has_ec_transfer", return_value=False)
+    @patch("vllm_ascend.worker.worker.shared_expert_tp_enable", return_value=False)
     def test_load_model_skips_ec_worker_services_when_disabled(
         self,
+        _mock_shared_tp,
         mock_has_ec_transfer,
         mock_get_ec_transfer,
     ):

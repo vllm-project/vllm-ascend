@@ -24,6 +24,7 @@ from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers
 from vllm.v1.worker.gpu.model_runner import BatchReqState, ExecuteModelState, GPUModelRunner
 from vllm.v1.worker.gpu.spec_decode.dflash.speculator import DFlashSpeculator
 
+from vllm_ascend.ascend_config import FinegrainedTPConfig
 from vllm_ascend.ascend_forward_context import MoECommType
 from vllm_ascend.attention.attention_c8_mxfp import (
     AscendC8MXFPAttentionBackendImpl,
@@ -1377,7 +1378,7 @@ def test_init_selects_prefetch_offloader(enforce_eager, offload_backend, use_asc
         ),
     )
     ascend_config = SimpleNamespace(
-        finegrained_tp_config=SimpleNamespace(oproj_tensor_parallel_size=1, mlp_tensor_parallel_size=1),
+        finegrained_tp_config=FinegrainedTPConfig(),
         dump_config_path=None,
     )
     copy_stream = object()
@@ -1451,7 +1452,7 @@ def test_init_without_speculation(monkeypatch, use_pp, backend_name, env_buffer_
     ascend_config = SimpleNamespace(eplb_config=SimpleNamespace(load_collection_phase="all"), dump_config_path=None)
 
     # Complete the fake with the fields NPUModelRunner reads (mirrors FinegrainedTPConfig).
-    ascend_config.finegrained_tp_config = SimpleNamespace(
+    ascend_config.finegrained_tp_config = FinegrainedTPConfig(
         oproj_tensor_parallel_size=0,
         lmhead_tensor_parallel_size=0,
         embedding_tensor_parallel_size=0,
@@ -1550,7 +1551,7 @@ def test_init_spec_pp_full_graph_and_speculator(method):
     ascend_config = SimpleNamespace(eplb_config=SimpleNamespace(load_collection_phase="decode"), dump_config_path=None)
 
     # Complete the fake with the fields NPUModelRunner reads (mirrors FinegrainedTPConfig).
-    ascend_config.finegrained_tp_config = SimpleNamespace(
+    ascend_config.finegrained_tp_config = FinegrainedTPConfig(
         oproj_tensor_parallel_size=0,
         lmhead_tensor_parallel_size=0,
         embedding_tensor_parallel_size=0,
@@ -2022,6 +2023,8 @@ def test_prepare_inputs_refreshes_captured_padding_storage(monkeypatch, enabled)
     captured.fill_(True)  # Graph capture marks all dummy rows as padding.
 
     for valid, padded in ((13, 13), (6, 8), (4, 7), (8, 8)):
+        buffers.input_ids.fill_(-1)
+        buffers.positions.fill_(-1)
         scheduler_output.num_scheduled_tokens = {"r0": valid - 1, "r1": 1}
         state.num_scheduled_tokens = np.array([valid - 1, 1], dtype=np.int32)
         state.num_tokens = valid
@@ -2030,6 +2033,8 @@ def test_prepare_inputs_refreshes_captured_padding_storage(monkeypatch, enabled)
         assert batch.is_padding.shape == (padded,)
         assert batch.is_padding.data_ptr() == captured.data_ptr()
         torch.testing.assert_close(captured[:padded], torch.arange(padded) >= valid)
+        assert not buffers.input_ids[valid:padded].count_nonzero()
+        assert not buffers.positions[valid:padded].count_nonzero()
 
 
 @pytest.mark.parametrize("num_spec_tokens", [0, 1, 5])
@@ -2339,6 +2344,7 @@ def test_init_kv_zero_meta_excludes_only_registered_topk_components():
 
 def test_shutdown_releases_c8_views_and_unwraps_zeroer():
     _, _, _, runner, _ = _c8_packet(ratio=1)
+    runner.ascend_config = SimpleNamespace(ascend_compilation_config=SimpleNamespace(enable_static_kernel=False))
     entries = runner._c8_mxfp_v_scale_caches
     wrapper_entries = list(entries)
     delegate = MagicMock()
@@ -2357,6 +2363,7 @@ def test_vmm_shutdown_orders_and_retains_failures(failure):
     from vllm_ascend.models.deepseek_v41.engram.local_shared_vmm import EngramSharedReleaseError
 
     runner = NPUModelRunner.__new__(NPUModelRunner)
+    runner.ascend_config = SimpleNamespace(ascend_compilation_config=SimpleNamespace(enable_static_kernel=False))
     events = []
     first = SimpleNamespace(local_vmm=True, close_host_offload=Mock(side_effect=lambda: events.append("first")))
     error = EngramSharedReleaseError("sync") if failure == "synchronized" else RuntimeError("peer")
@@ -2400,6 +2407,7 @@ def test_vmm_shutdown_orders_and_retains_failures(failure):
 
 def test_shutdown_releases_shared_engram_after_parent_cleanup():
     runner = NPUModelRunner.__new__(NPUModelRunner)
+    runner.ascend_config = SimpleNamespace(ascend_compilation_config=SimpleNamespace(enable_static_kernel=False))
     embedding = MagicMock()
     embedding._shared_pool_client = object()
     runner.model = MagicMock()
@@ -2413,6 +2421,7 @@ def test_shutdown_releases_shared_engram_after_parent_cleanup():
 
 def test_shutdown_keeps_shared_engram_if_parent_cleanup_fails():
     runner = NPUModelRunner.__new__(NPUModelRunner)
+    runner.ascend_config = SimpleNamespace(ascend_compilation_config=SimpleNamespace(enable_static_kernel=False))
     embedding = MagicMock()
     embedding._shared_pool_client = object()
     runner.model = MagicMock()
@@ -2425,6 +2434,7 @@ def test_shutdown_keeps_shared_engram_if_parent_cleanup_fails():
 
 def test_shutdown_retries_failed_engram_and_closes_other_clients():
     runner = NPUModelRunner.__new__(NPUModelRunner)
+    runner.ascend_config = SimpleNamespace(ascend_compilation_config=SimpleNamespace(enable_static_kernel=False))
     failing, other = MagicMock(), MagicMock()
     failing._shared_pool_client = other._shared_pool_client = object()
     failing.close_host_offload.side_effect = [RuntimeError("failed"), None]
@@ -2440,6 +2450,7 @@ def test_shutdown_retries_failed_engram_and_closes_other_clients():
 
 def test_shutdown_retains_engram_when_parent_fails_after_deleting_model():
     runner = NPUModelRunner.__new__(NPUModelRunner)
+    runner.ascend_config = SimpleNamespace(ascend_compilation_config=SimpleNamespace(enable_static_kernel=False))
     embedding = MagicMock()
     embedding._shared_pool_client = object()
     runner.model = MagicMock()
@@ -2748,19 +2759,24 @@ def test_glm_mla_dspark_requires_cpu_length_sync(unsupported):
     assert runner._can_skip_spec_cpu_length_sync() is False
 
 
-def _kimi_k31_device_length_runner():
+def _kimi_k31_device_length_runner(*, local_tp=False):
     runner, output, batch = _glm_mla_device_length_runner()
     runner.model_config.architecture = "KimiK31ForConditionalGeneration"
     runner.speculative_config.draft_model_config.architectures = ["K3DSparkModel"]
-    runner.parallel_config.decode_context_parallel_size = 8
-    runner.model_state.device_metadata = object()
+    runner.parallel_config.decode_context_parallel_size = 1 if local_tp else 8
+    runner.model_state.device_metadata = None if local_tp else object()
+    runner._finegrained_tp_requires_graph = local_tp
+    runner.cache_config.cache_dtype = "fp8"
+    runner.ascend_config.enable_sparse_li_c8 = True
+    runner.vllm_config.attention_config = SimpleNamespace(indexer_kv_dtype="fp8", hisparse_config=None)
     return runner, output, batch
 
 
 @pytest.mark.parametrize("eager", [False, True])
 @pytest.mark.parametrize("kv_role", [None, "kv_producer", "kv_consumer"])
-def test_kimi_k31_dspark_flashmla_dcp_device_lengths(eager, kv_role):
-    runner, _, _ = _kimi_k31_device_length_runner()
+@pytest.mark.parametrize("local_tp", [False, True])
+def test_kimi_k31_dspark_flashmla_device_lengths(eager, kv_role, local_tp):
+    runner, _, _ = _kimi_k31_device_length_runner(local_tp=local_tp)
     runner.speculative_config.enforce_eager = eager
     runner.vllm_config.kv_transfer_config = None if kv_role is None else SimpleNamespace(kv_role=kv_role)
     assert runner._can_skip_spec_cpu_length_sync() is True
@@ -2780,8 +2796,9 @@ def test_kimi_k31_dspark_flashmla_dcp_device_lengths(eager, kv_role):
         "pp_exact_counts",
     ],
 )
-def test_kimi_k31_dspark_keeps_exact_cpu_lengths_for_unsupported_consumers(unsupported):
-    runner, _, _ = _kimi_k31_device_length_runner()
+@pytest.mark.parametrize("local_tp", [False, True])
+def test_kimi_k31_dspark_keeps_exact_cpu_lengths_for_unsupported_consumers(unsupported, local_tp):
+    runner, _, _ = _kimi_k31_device_length_runner(local_tp=local_tp)
     runner.vllm_config.kv_transfer_config = SimpleNamespace(kv_role="kv_consumer")
     if unsupported == "draft_arch":
         runner.speculative_config.draft_model_config.architectures = ["Qwen3DSparkModel"]
@@ -2789,6 +2806,7 @@ def test_kimi_k31_dspark_keeps_exact_cpu_lengths_for_unsupported_consumers(unsup
         runner.speculator.use_flashmla = False
     elif unsupported == "no_device_metadata":
         runner.model_state.device_metadata = None
+        runner._finegrained_tp_requires_graph = False
     elif unsupported == "no_backends":
         runner.speculator.attn_backends = {}
     elif unsupported.endswith("parallel_size"):
@@ -2799,6 +2817,22 @@ def test_kimi_k31_dspark_keeps_exact_cpu_lengths_for_unsupported_consumers(unsup
         runner.speculative_config.enable_adaptive_verification = True
     elif unsupported == "pp_exact_counts":
         runner.sync_spec_pp_cpu_counts = True
+    assert runner._can_skip_spec_cpu_length_sync() is False
+
+
+@pytest.mark.parametrize("unsupported", ["sharded", "kv_dtype", "indexer_backend", "indexer_dtype", "hisparse"])
+def test_kimi_local_tp_keeps_cpu_lengths_for_other_target_paths(unsupported):
+    runner, _, _ = _kimi_k31_device_length_runner(local_tp=True)
+    if unsupported == "sharded":
+        runner.parallel_config.decode_context_parallel_size = 2
+    elif unsupported == "kv_dtype":
+        runner.cache_config.cache_dtype = "auto"
+    elif unsupported == "indexer_backend":
+        runner.ascend_config.enable_sparse_li_c8 = False
+    elif unsupported == "indexer_dtype":
+        runner.vllm_config.attention_config.indexer_kv_dtype = "int8"
+    else:
+        runner.vllm_config.attention_config.hisparse_config = object()
     assert runner._can_skip_spec_cpu_length_sync() is False
 
 
@@ -2823,7 +2857,9 @@ def test_mla_dspark_fallback_copies_and_waits(target):
 
 
 @pytest.mark.parametrize("rejected", [0, 1, 5])
-@pytest.mark.parametrize("draft", ["dflash", "m3_dspark", "glm_dspark", "glm_mla_dspark", "kimi_k31_dspark"])
+@pytest.mark.parametrize(
+    "draft", ["dflash", "m3_dspark", "glm_dspark", "glm_mla_dspark", "kimi_k31_dspark", "kimi_k31_local_tp"]
+)
 @pytest.mark.parametrize("kv_role", [None, "kv_producer", "kv_consumer"])
 def test_rejection_reorder_and_padding_keep_device_lengths_without_d2h(rejected, draft, kv_role):
     runner, output, _ = _device_length_runner() if draft == "dflash" else _m3_device_length_runner()
@@ -2831,8 +2867,8 @@ def test_rejection_reorder_and_padding_keep_device_lengths_without_d2h(rejected,
         runner.model_config.architecture = "GlmMoeDsaForCausalLM"
     elif draft == "glm_mla_dspark":
         runner, output, _ = _glm_mla_device_length_runner()
-    elif draft == "kimi_k31_dspark":
-        runner, output, _ = _kimi_k31_device_length_runner()
+    elif draft in ("kimi_k31_dspark", "kimi_k31_local_tp"):
+        runner, output, _ = _kimi_k31_device_length_runner(local_tp=draft == "kimi_k31_local_tp")
     runner.vllm_config.kv_transfer_config = None if kv_role is None else SimpleNamespace(kv_role=kv_role)
     runner.num_computed_tokens_cpu.fill_(-99)  # An old staging snapshot must never be read.
     runner.input_buffers.seq_lens_cpu.fill_(777)
@@ -2968,6 +3004,7 @@ def test_sample_tokens_refreshes_lmhead_padding_each_step(monkeypatch, lmhead_tp
 
 def test_shutdown_releases_uva_owner_without_shared_pool_client():
     runner = NPUModelRunner.__new__(NPUModelRunner)
+    runner.ascend_config = SimpleNamespace(ascend_compilation_config=SimpleNamespace(enable_static_kernel=False))
     embedding = torch.nn.Module()
     calls = []
     embedding.close_host_offload = lambda: calls.append("release")
@@ -2983,6 +3020,7 @@ def test_load_failure_closes_unpublished_host_owners(published_model, cleanup_fa
     from vllm_ascend.models.host_offload import register_host_offload_owner
 
     runner = NPUModelRunner.__new__(NPUModelRunner)
+    runner.ascend_config = SimpleNamespace(ascend_compilation_config=SimpleNamespace(enable_static_kernel=False))
     runner.vllm_config = MagicMock()
     first, second = MagicMock(), MagicMock()
     if cleanup_fails:

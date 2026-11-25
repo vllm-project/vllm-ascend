@@ -460,6 +460,14 @@ class AscendModelState(DefaultModelState):
             return prepare_engram_graph_inputs(num_tokens)
         return {}
 
+    def _check_finegrained_tp_idle_graph_step(self, cudagraph_mode: CUDAGraphMode) -> None:
+        if (
+            ring_state_update_skipped()
+            and cudagraph_mode == CUDAGraphMode.NONE
+            and get_ascend_config().finegrained_tp_config.requires_graph(self.vllm_config)
+        ):
+            raise RuntimeError("Fine-grained projection / MLP TP require every DP rank on a captured graph.")
+
     def prepare_attn(
         self,
         input_batch: AscendInputBatch,
@@ -473,6 +481,7 @@ class AscendModelState(DefaultModelState):
         model_specific_attn_metadata: ModelSpecificAttnMetadata | None = None,
     ) -> dict[str, Any]:
         """Override prepare_attn method because `build_attn_metadata` is different from vllm."""
+        self._check_finegrained_tp_idle_graph_step(cudagraph_mode)
         # vLLM #50945 adds this contract; Ascend still disables DBO.
         assert ubatch_idx == 0, "DBO is not supported on Ascend"
         # Legacy callers (and pre-D2H unit fixtures) build this state via

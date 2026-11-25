@@ -986,8 +986,8 @@ class KVCacheStoreLayerRecvingThread(KVTransferThread):
             if not self._wait_for_reuse_saves(data):
                 return
 
-            if data.attention_start_gate is not None:
-                if not self._wait_for_event(data.attention_start_gate):
+            if data.load_gate is not None:
+                if not self._wait_for_event(data.load_gate):
                     return
             if self.external_slot_release_waiter is not None:
                 self.external_slot_release_waiter(layer_id)
@@ -1051,7 +1051,7 @@ class KVCacheStoreLayerRecvingThread(KVTransferThread):
         # protocol gate is on; every store call below sits on the Backend ABC.
         transfer_tasks = data.transfer_tasks
         layer_id = data.layer_id
-        attention_start_gate = data.attention_start_gate
+        load_gate = data.load_gate
         if not self._wait_for_reuse_saves(data):
             return False
 
@@ -1092,8 +1092,8 @@ class KVCacheStoreLayerRecvingThread(KVTransferThread):
             logger.debug("Layer load event set: layer %d", layer_id)
             return True
 
-        if attention_start_gate is not None:
-            if not self._wait_for_event(attention_start_gate):
+        if load_gate is not None:
+            if not self._wait_for_event(load_gate):
                 return False
 
         all_req_ids: set[str] = set()

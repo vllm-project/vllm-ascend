@@ -433,6 +433,7 @@ def build_attn_metadata(
         positions = torch.zeros(num_input_tokens, dtype=torch.int64, device=query_start_loc_gpu.device)
 
     attn_metadata: dict[str, Any] = {}
+    step_metadata_builders: list[tuple[list[str], Any]] = []
     # Share request-level DSA metadata across cache groups in one execution.
     common_ratio_to_sas_metadata: dict[Any, Any] = {}
     common_v41_batch_metadata: dict[str, Any] = {}
@@ -532,6 +533,8 @@ def build_attn_metadata(
 
         for attn_group in attn_groups[i]:
             attn_metadata_builder = attn_group.get_metadata_builder(0)
+            if callable(getattr(attn_metadata_builder, "prepare_step_metadata", None)):
+                step_metadata_builders.append((attn_group.layer_names, attn_metadata_builder))
             is_dsa_builder = isinstance(attn_metadata_builder, AscendDSAMetadataBuilder)
             is_v41_builder = isinstance(attn_metadata_builder, AscendDSAV41MetadataBuilder)
             is_sfa_builder = isinstance(attn_metadata_builder, AscendSFAMetadataBuilder)
@@ -544,10 +547,16 @@ def build_attn_metadata(
                 layer_common = layer_common.replace(
                     query_start_loc_cpu=layer_common.query_start_loc_cpu[: num_actual_reqs + 1],
                 )
-            if pcp_context is not None and (full_graph_mode or for_cudagraph_capture):
-                backend = getattr(attn_group, "backend", None)
-                if is_qsa_indexer or getattr(backend, "uses_qsa_page_major_kv_view", False):
+            backend = getattr(attn_group, "backend", None)
+            is_qsa_group = is_qsa_indexer or getattr(backend, "uses_qsa_page_major_kv_view", False)
+            if is_qsa_group:
+                if pcp_context is not None and (full_graph_mode or for_cudagraph_capture):
                     layer_common = layer_common.replace(graph_pad_size=num_input_tokens)
+                elif full_graph_mode and num_input_tokens > num_actual_tokens:
+                    # QSA sizes LI and GBSA tiling buffers from num_actual_tokens.
+                    # Replay needs the captured row count. The indexer's CPU
+                    # query boundary still marks the end of the live rows.
+                    layer_common = layer_common.replace(num_actual_tokens=num_input_tokens)
             metadata_variants = [(attn_group.layer_names, layer_common)]
             if is_sfa_builder and draft_layer_names:
                 target_names = [name for name in attn_group.layer_names if name not in draft_layer_names]
@@ -623,6 +632,11 @@ def build_attn_metadata(
                     common_ratio_to_sas_metadata = attn_metadata_builder.common_ratio_to_sas_metadata  # type: ignore[assignment]
                 for layer_name in variant_names:
                     attn_metadata[layer_name] = metadata
+    if step_metadata_builders:
+        rows = min(num_actual_tokens, int(query_start_loc_cpu[num_actual_reqs]))
+        prepared_metadata_ids: set[int] = set()
+        for layer_names, builder in step_metadata_builders:
+            builder.prepare_step_metadata(attn_metadata, layer_names, rows, prepared_metadata_ids)
     return attn_metadata
 
 

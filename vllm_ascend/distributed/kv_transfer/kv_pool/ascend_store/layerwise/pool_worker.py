@@ -19,8 +19,8 @@ from vllm.v1.kv_cache_interface import (
 )
 
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence import (
-    get_attention_compute_start_gate,
-    reset_attention_compute_start_gate,
+    get_attention_load_gate,
+    reset_attention_gates,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend import (
     get_backend_class,
@@ -667,7 +667,7 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
         self._dflash_save_pending = False
         self.layerwise_retrievers: list[Any] = []
         self.next_layer_to_submit = 0
-        reset_attention_compute_start_gate()
+        reset_attention_gates()
         if self.use_kvpp:
             assert self.layer_load_finished_events is not None
             for event in self.layer_load_finished_events:
@@ -1491,11 +1491,9 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
         assert self.sync_save_events is not None
         assert self.layer_save_finished_events is not None
         assert self.kv_send_thread is not None
-        sync_save_events = self.sync_save_events
         save_finished_events = self.layer_save_finished_events
         send_thread = cast(KVCacheStoreLayerSendingThreadBase, self.kv_send_thread)
         self._attention_saved_layers.add(layer_id)
-        sync_save_events[layer_id].record()
         tasks = self.layer_save_tasks[layer_id]
         if not tasks:
             save_finished_events[layer_id].set()
@@ -1523,9 +1521,10 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
         flight. Draining it here therefore waited, on every single layer, for
         transfers that were scheduled early on purpose, which is what pinned the
         fence at ~900 ms per layer and made layerwise slower than the
-        non-layerwise bulk path. This matches the MemCache layerwise path, which
-        gates the *start* of transfers to the attention boundary and never
-        quiesces the load queue.
+        non-layerwise bulk path. MemCache layerwise loads start after the
+        current layer's connector wait, or at the attention boundary for
+        callers that use the upstream wait wrapper. Neither path quiesces the
+        load queue here.
 
         The SAVE queue is bounded rather than drained. A committed block-key
         object is unreadable until the put session ends, so a put that is
@@ -1571,19 +1570,19 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
             reuse_sources = self.prefetch_layer_map.get(layer_id, ())
             if not self.layer_load_tasks[layer_id] and not reuse_sources:
                 return False
-            attention_start_gate = None
+            load_gate = None
             if (
                 self.layer_load_tasks[layer_id]
                 and layer_id != self.current_layer
                 and not getattr(self, "has_shared_kv", False)
             ):
-                attention_start_gate = get_attention_compute_start_gate()
+                load_gate = get_attention_load_gate()
             recv_thread.add_request(
                 LayerLoadTask(  # type: ignore[arg-type]
                     wait_for_save_layers=reuse_sources,
                     transfer_tasks=self.layer_load_tasks[layer_id],
                     layer_id=layer_id,
-                    attention_start_gate=attention_start_gate,
+                    load_gate=load_gate,
                 )
             )
             return True
@@ -1665,16 +1664,18 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
             return
         assert self.layer_load_finished_events is not None
         assert self.kv_recv_thread is not None
-        gate = reset_attention_compute_start_gate()
+        load_gate, save_gate = reset_attention_gates()
         try:
             self.kv_recv_thread.raise_if_failed()
             if getattr(self, "block_key_hybrid", False):
                 layer_id = self.current_layer
                 # Conv/recurrent state is updated inside attention, after this
                 # entry event. Preserve its post-compute save hook.
-                if layer_id not in self._recurrent_layers:
-                    gate.on_start = lambda: self._submit_attention_save(layer_id)
-                gate.on_finish = self._finish_attention_window
+                if layer_id not in self._recurrent_layers and is_kv_save_role(self.kv_role, self.save_decode_cache):
+                    assert self.sync_save_events is not None
+                    save_gate.event = self.sync_save_events[layer_id]
+                    save_gate.on_start = lambda: self._submit_attention_save(layer_id)
+                save_gate.on_finish = self._finish_attention_window
             if getattr(self, "block_key_hybrid", False) and self.next_layer_to_submit <= self.current_layer:
                 # An unprefetched demand load must not race earlier collectives.
                 boundary = torch.npu.Event()
@@ -1697,7 +1698,8 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
             if hasattr(self, "_layer_load_aborted"):
                 self._layer_load_aborted.set()
             if getattr(self, "block_key_hybrid", False):
-                gate.cancel()
+                load_gate.cancel()
+                save_gate.cancel()
                 # Range calls must finish before releasing their get sessions.
                 with suppress(Exception):
                     self._drain_attention_transfers(full=True)

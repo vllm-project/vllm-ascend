@@ -124,6 +124,62 @@ class _FakePrefixManager:
 
 
 class TestAscendStoreCoordinator(unittest.TestCase):
+    def test_group_geometry_must_be_explicit(self):
+        groups = [KVCacheGroupSpec(["attention"], _full_spec(32))]
+        with self.assertRaises(TypeError):
+            AscendStoreCoordinator(groups, 32, 16)
+        with self.assertRaises(TypeError):
+            AscendStoreCoordinator(groups, 32, 16, group_block_sizes=[32])
+
+    def test_partial_hash_hit_uses_existing_coordinator(self):
+        """Hit arbitration changes alignment, not the physical cache page."""
+        groups = [
+            KVCacheGroupSpec(["attention"], _full_spec(32)),
+            KVCacheGroupSpec(
+                ["state"], MambaSpec(block_size=32, shapes=((1, 1),), dtypes=(torch.float32,), mamba_cache_mode="align")
+            ),
+        ]
+        hashes = _hashes(4)
+        for partial, expected in ((False, 32), (True, 48)):
+            with self.subTest(partial=partial):
+                coord = AscendStoreCoordinator(
+                    groups,
+                    32,
+                    16,
+                    group_block_sizes=[32, 32],
+                    group_cache_families=["default", "default"],
+                    enable_partial_hash_hits=partial,
+                )
+                exists = {(group, hashes[index]) for group in (0, 1) for index in (1, 2)}
+                _, hit = coord.find_longest_cache_hit(hashes, 64, ExternalCachedBlockPool(16, exists))
+                self.assertEqual(hit, expected)
+                self.assertEqual(coord.group_effective_block_sizes, [32, 32])
+                # The second page must be populated even for a sub-page hit.
+                self.assertEqual(coord.load_mask(hashes, hit)[0], [True] * ((hit + 31) // 32))
+
+    def test_partial_hash_hit_requires_every_group_boundary(self):
+        groups = [
+            KVCacheGroupSpec(["attention"], _full_spec(32)),
+            KVCacheGroupSpec(
+                ["state"], MambaSpec(block_size=32, shapes=((1, 1),), dtypes=(torch.float32,), mamba_cache_mode="align")
+            ),
+        ]
+        coord = AscendStoreCoordinator(
+            groups,
+            32,
+            16,
+            group_block_sizes=[32, 32],
+            group_cache_families=["default", "default"],
+            enable_partial_hash_hits=True,
+        )
+        hashes = _hashes(4)
+        exists = {(0, hashes[1]), (1, hashes[1]), (0, hashes[2])}
+        _, hit = coord.find_longest_cache_hit(hashes, 64, ExternalCachedBlockPool(16, exists))
+        self.assertEqual(hit, 32)
+        # The positional recurrent table is never a valid source for a CoW
+        # boundary save: it is handled separately via Core's exact block ID.
+        self.assertEqual(coord.store_mask(48)[1], [False])
+
     def test_compressed_group_hits_on_effective_granularity(self):
         block_hashes = _hashes(128)
         grouped_hash = get_block_hashes(block_hashes, group_block_size=128 * 128, hash_block_size=128)[0]
@@ -221,7 +277,29 @@ class TestAscendStoreCoordinator(unittest.TestCase):
 
         self.assertEqual(masks, ([False, False, False, True],))
 
-    def test_lookup_mask_uses_reachability_without_retention(self):
+    def test_whole_page_eagle_save_matches_external_lookup(self):
+        # DeepSeek V4 layerwise: sparse retention, 128-token SWA and
+        # 16K compressed pages. The scheduler, not the mask, drops the tail.
+        coord = AscendStoreCoordinator(
+            [KVCacheGroupSpec(["layer.0"], _sliding_spec(128, 256))],
+            scheduler_block_size=16384,
+            hash_block_size=128,
+            group_block_sizes=[128],
+            group_cache_families=["c1"],
+            use_eagle=True,
+            retention_interval=0,
+        )
+        hashes = _hashes(128)
+        mask = coord.store_mask(16384, num_prompt_tokens=16393)[0]
+        self.assertTrue(mask[-1])
+        self.assertEqual(
+            coord.find_reachable_hit_tokens(
+                hashes, 16384, lambda group, values, allowed: [h for h, keep in zip(values, mask) if keep]
+            ),
+            16384,
+        )
+
+    def test_lookup_mask_preserves_retention_and_lcm_boundaries(self):
         coord = AscendStoreCoordinator(
             [KVCacheGroupSpec(["layer.0"], _sliding_spec(block_size=128, sliding_window=256))],
             scheduler_block_size=512,
@@ -238,6 +316,7 @@ class TestAscendStoreCoordinator(unittest.TestCase):
 
         self.assertEqual(masks, ([False, False, False, True],))
         self.assertEqual(reachable.call_args.kwargs["retention_interval"], 256)
+        self.assertEqual(list(reachable.call_args.kwargs["reachable_boundaries"]), [512])
 
     def test_reachable_mask_preserves_optional_kwargs_for_flexible_signature(self):
         class FlexibleManager:
@@ -272,11 +351,7 @@ class TestAscendStoreCoordinator(unittest.TestCase):
         if "reachable_boundaries" not in inspect.signature(MambaManager.reachable_block_mask).parameters:
             self.skipTest("requires the reachable_boundaries vLLM API")
         spec = MambaSpec(block_size=256, shapes=((1,),), dtypes=(torch.float32,), mamba_cache_mode="align")
-        for interval, expected in [
-            (0, [False, False, True, False]),
-            (512, [False, True, True, True]),
-            (None, [True, True, True, True]),
-        ]:
+        for interval in [0, 512, None]:
             with self.subTest(retention_interval=interval):
                 coord = AscendStoreCoordinator(
                     [KVCacheGroupSpec(["attention"], _full_spec(256)), KVCacheGroupSpec(["state"], spec)],
@@ -286,7 +361,8 @@ class TestAscendStoreCoordinator(unittest.TestCase):
                     group_cache_families=["default", "default"],
                     retention_interval=interval,
                 )
-                self.assertEqual(coord.store_mask(1024, num_prompt_tokens=769)[1], expected)
+                coord.enable_partial_hash_hits = True
+                self.assertEqual(coord.store_mask(1024, num_prompt_tokens=769)[1], [False] * 4)
                 hashes = _hashes(4)
 
                 def query(group_id, group_hashes, mask):
