@@ -1,0 +1,4 @@
+pr: 22394
+entries:
+  - category: bugfix
+    text: Fixed layerwise Memcache pooling for pipeline stages that consume shared KV from an earlier stage. Each stage now waits for pending cache writes at its last local layer.
