@@ -143,6 +143,16 @@ presets:
       pd_router: ascend
       pd_connector: mooncake_ascend
       frontend: python
+    remove_args:
+      # The tutorial PD lane runs no async scheduling anywhere, so the
+      # variant's flag is dropped globally here. Everything else the variant
+      # pins is handled per role: values the tutorial changes travel in the
+      # roles' args (applied after the variant layer, so the last-wins
+      # dedupe keeps them), flags a role omits are dropped in that role's
+      # own remove_args, and --data-parallel-size is never listed anywhere —
+      # the pd_cluster pool emits it from the role topology, and a preset-
+      # level drop would strip the pool's own flag and fail the check.
+      - '--async-scheduling'
     workload: 'Prefill/decode separation (2P1D), 4 nodes x 16-die Atlas 800 A3, Mooncake'
     image:
       vllm: quay.io/ascend/vllm-ascend:v0.30.0rc1-a3
@@ -159,8 +169,7 @@ presets:
       prefill pool and one decode pool where the tutorial runs the prefill
       nodes as independent replica groups (each starting at DP rank 0), and
       per-node KV ports are folded to their first values (prefill 30000,
-      decode 30200; the tutorial also uses 30100/30300). The PD lane seeds
-      1024 per the tutorial; the single-node variant pins 42.
+      decode 30200; the tutorial also uses 30100/30300).
     roles:
       prefill:
         nodes: 2
@@ -169,6 +178,8 @@ presets:
         args:
           - '--max-model-len'
           - '133120'
+          - '--max-num-batched-tokens'
+          - '16384'
           - '--max-num-seqs'
           - '1'
           - '--gpu-memory-utilization'
@@ -181,14 +192,15 @@ presets:
           - '--enforce-eager'
           - '--seed'
           - '1024'
+          - '--additional-config'
+          - '{"recompute_scheduler_enable":true,"enable_shared_expert_dp": true}'
         remove_args:
-          # The tutorial's prefill commands run without speculative decoding,
-          # async scheduling, or the variant's static cudagraph config; the
-          # PD pool manages --data-parallel-size itself.
+          # The tutorial prefill lane runs neither speculative decoding nor
+          # a compilation config; the variant's two flags are dropped in
+          # this role only (the decode role overrides/keeps its own via its
+          # args).
           - '--speculative-config'
           - '--compilation-config'
-          - '--data-parallel-size'
-          - '--async-scheduling'
         env:
           VLLM_RPC_TIMEOUT: '3600000'
           VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS: '30000'
@@ -204,15 +216,6 @@ presets:
           GLOO_SOCKET_IFNAME: $IFACE_NAME
           TP_SOCKET_IFNAME: $IFACE_NAME
         json_args:
-          --additional-config:
-            # PD-unrelated toggles stay off in this lane; the tutorial prefill
-            # config carries recompute scheduling and shared-expert DP only.
-            enable_mlapo: null
-            enable_flashcomm1: null
-            scheduler_config:
-              enable_balance_scheduling: null
-            recompute_scheduler_enable: true
-            enable_shared_expert_dp: true
           --kv-transfer-config:
             kv_connector: MooncakeConnectorV1
             kv_role: kv_producer
@@ -236,20 +239,29 @@ presets:
         args:
           - '--max-model-len'
           - '133120'
-          - '--max-num-seqs'
-          - '8'
           - '--max-num-batched-tokens'
           - '32'
+          - '--max-num-seqs'
+          - '8'
           - '--gpu-memory-utilization'
           - '0.91'
+          - '--enable-auto-tool-choice'
+          - '--tool-call-parser'
+          - kimi_k2
+          - '--reasoning-parser'
+          - kimi_k2
           - '--seed'
           - '1024'
+          - '--compilation-config'
+          - '{"cudagraph_mode": "FULL_DECODE_ONLY"}'
+          - '--additional-config'
+          - '{"recompute_scheduler_enable":true,"multistream_overlap_shared_expert":true,"enable_mlapo":true}'
+          - '--speculative-config'
+          - '{"method": "eagle3", "model":"lightseekorg/kimi-k2.6-eagle3", "num_speculative_tokens": 3}'
         remove_args:
-          # The pool manages --data-parallel-size; the tutorial decode lane
-          # runs without async scheduling and without the multimodal encoder
-          # TP mode (prefill-only there).
-          - '--data-parallel-size'
-          - '--async-scheduling'
+          # The tutorial decode lane runs without the multimodal encoder TP
+          # mode (prefill-only in the tutorial); the variant's flag is
+          # dropped in this role only.
           - '--mm-encoder-tp-mode'
         env:
           VLLM_RPC_TIMEOUT: '3600000'
@@ -266,19 +278,6 @@ presets:
           GLOO_SOCKET_IFNAME: $IFACE_NAME
           TP_SOCKET_IFNAME: $IFACE_NAME
         json_args:
-          --additional-config:
-            scheduler_config:
-              enable_balance_scheduling: null
-            enable_flashcomm1: null
-            recompute_scheduler_enable: true
-            multistream_overlap_shared_expert: true
-            enable_mlapo: true
-          # The single-node variant pins DFlash statically; the tutorial PD
-          # lane decodes with eagle3 on this checkpoint family instead.
-          --speculative-config:
-            method: eagle3
-            model: lightseekorg/kimi-k2.6-eagle3
-            num_speculative_tokens: 3
           --kv-transfer-config:
             kv_connector: MooncakeConnectorV1
             kv_role: kv_consumer
