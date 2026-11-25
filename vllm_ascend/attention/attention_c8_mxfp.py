@@ -586,7 +586,7 @@ class AscendC8MXFPAttentionBackendImpl(AscendAttentionBackendImpl):
         ends = attn_metadata.actual_seq_lengths_q
         num_decodes = attn_metadata.num_decodes
         num_reqs = num_decodes + attn_metadata.num_prefills
-        partitions = ()
+        partitions: tuple[_QFAPartition, ...] = ()
         if ends and len(ends) == num_reqs and ends[-1] == num_tokens:
             lengths = [end - start for start, end in zip([0] + ends[:-1], ends)]
             if all(n == 1 for n in lengths[:num_decodes]) and all(n > 1 for n in lengths[num_decodes:]):
