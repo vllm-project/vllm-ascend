@@ -344,29 +344,26 @@ class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
         # (speculative) decode where one request spans several query tokens:
         # single-token decode never pads requests beyond the query start loc,
         # and prefill (including the EAGLE drafter's merged prefill) reuses the
-        # target's num_input_tokens while its own query is shorter. Only the V2
-        # runner needs this: it applies the metadata to the FULL graph at every
-        # replay, while V1 bakes actual_seq_lengths_q into the captured graph
-        # (and trims the query to its last entry), so padding there only changes
-        # the captured graph. The V2 runner reports speculative decode as
+        # target's num_input_tokens while its own query is shorter. The V2
+        # runner applies the metadata to the FULL graph at every replay, so the
+        # padded tail must be reflected there. It reports speculative decode as
         # ChunkedPrefill, so decide from the per-request is_prefilling flags
         # (falling back to the state when they are unavailable).
-        if self.vllm_config.use_v2_model_runner:
-            is_prefilling = common_attn_metadata.is_prefilling
-            if is_prefilling is None:
-                decode_like = common_attn_metadata.attn_state in (
-                    AscendAttentionState.DecodeOnly,
-                    AscendAttentionState.SpecDecoding,
-                )
-            else:
-                decode_like = not bool(is_prefilling.any())
-            if (
-                decode_like
-                and (common_attn_metadata.max_query_len or 0) > 1
-                and actual_seq_lengths_q
-                and common_attn_metadata.num_input_tokens > actual_seq_lengths_q[-1]
-            ):
-                actual_seq_lengths_q = actual_seq_lengths_q + [common_attn_metadata.num_input_tokens]
+        is_prefilling = common_attn_metadata.is_prefilling
+        if is_prefilling is None:
+            decode_like = common_attn_metadata.attn_state in (
+                AscendAttentionState.DecodeOnly,
+                AscendAttentionState.SpecDecoding,
+            )
+        else:
+            decode_like = not bool(is_prefilling.any())
+        if (
+            decode_like
+            and (common_attn_metadata.max_query_len or 0) > 1
+            and actual_seq_lengths_q
+            and common_attn_metadata.num_input_tokens > actual_seq_lengths_q[-1]
+        ):
+            actual_seq_lengths_q = actual_seq_lengths_q + [common_attn_metadata.num_input_tokens]
         seq_lens_list = seq_lens.tolist()
         # Sequence-parallel (or cudagraph) padding makes the model runner insert a
         # dummy padding request into query_start_loc to satisfy the FIA TND-layout

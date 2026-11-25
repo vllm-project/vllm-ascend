@@ -434,19 +434,19 @@ jobs:
         # path, so the diff-cover trio is skipped in that case.
         # !cancelled(): run even when the tests failed, so the coverage
         # comment still describes a red run.
-        if: ${{ !cancelled() && matrix.group.npu_type == 'cpu' && inputs.enable-coverage != true && steps.filter.outputs.src == 'true' }}
+        if: ${{ !cancelled() && matrix.group.npu_type == 'cpu' && inputs.enable-coverage != true && steps.filter.outputs.src == 'true' && github.base_ref != '' }}
         run: |
           python -m slipcover --merge ./tests/coverage.json \
             --xml --out ./tests/coverage.xml
 
       - name: Generate diff coverage
-        if: ${{ !cancelled() && matrix.group.npu_type == 'cpu' && inputs.enable-coverage != true && steps.filter.outputs.src == 'true' }}
+        if: ${{ !cancelled() && matrix.group.npu_type == 'cpu' && inputs.enable-coverage != true && steps.filter.outputs.src == 'true' && github.base_ref != '' }}
         run: |
           diff-cover ./tests/coverage.xml --compare-branch=origin/${{ github.base_ref }} \
             --markdown-report ./tests/diff_coverage.md
 
       - name: Generate PR coverage comment
-        if: ${{ !cancelled() && matrix.group.npu_type == 'cpu' && inputs.enable-coverage != true && steps.filter.outputs.src == 'true' }}
+        if: ${{ !cancelled() && matrix.group.npu_type == 'cpu' && inputs.enable-coverage != true && steps.filter.outputs.src == 'true' && github.base_ref != '' }}
         run: |
            python3 .github/workflows/scripts/coverage_comment.py \
             --input-json ./tests/coverage.json \
@@ -455,7 +455,7 @@ jobs:
             --summary-url "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
 
       - name: Upload diff coverage report
-        if: ${{ !cancelled() && matrix.group.npu_type == 'cpu' && inputs.enable-coverage != true && steps.filter.outputs.src == 'true' }}
+        if: ${{ !cancelled() && matrix.group.npu_type == 'cpu' && inputs.enable-coverage != true && steps.filter.outputs.src == 'true' && github.base_ref != '' }}
         uses: actions/upload-artifact@v4
         with:
           name: coverage-report
@@ -467,7 +467,7 @@ jobs:
           if-no-files-found: ignore
 
       - name: Generate coverage comment on summary
-        if: ${{ !cancelled() && matrix.group.npu_type == 'cpu' && inputs.enable-coverage != true && steps.filter.outputs.src == 'true' }}
+        if: ${{ !cancelled() && matrix.group.npu_type == 'cpu' && inputs.enable-coverage != true && steps.filter.outputs.src == 'true' && github.base_ref != '' }}
         run: |
           cat ./tests/coverage_comment.md >> "${GITHUB_STEP_SUMMARY}"
           cat ./tests/diff_coverage.md >> "${GITHUB_STEP_SUMMARY}"

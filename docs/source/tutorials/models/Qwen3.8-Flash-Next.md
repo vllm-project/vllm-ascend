@@ -199,7 +199,6 @@ Verify that all host device and file paths exist before running Docker.
       --name $NAME \
       -e MEMCACHE_CONFIG_DIR \
       --net=host \
-      --privileged=true \
       --shm-size=128g \
       -e ASCEND_VISIBLE_DEVICES=0-7 \
       --device "${SSD_DEVICE_PATH}:${SSD_DEVICE_PATH}" \
@@ -228,7 +227,6 @@ Verify that all host device and file paths exist before running Docker.
       --name $NAME \
       -e MEMCACHE_CONFIG_DIR \
       --net=host \
-      --privileged=true \
       --shm-size=128g \
       -e ASCEND_VISIBLE_DEVICES=0-15 \
       --device "${SSD_DEVICE_PATH}:${SSD_DEVICE_PATH}" \
@@ -251,7 +249,6 @@ Verify that all host device and file paths exist before running Docker.
       --name $NAME \
       -e MEMCACHE_CONFIG_DIR \
       --net=host \
-      --privileged=true \
       --shm-size=500g \
       -e ASCEND_VISIBLE_DEVICES=0-7 \
       --device "${SSD_DEVICE_PATH}:${SSD_DEVICE_PATH}" \

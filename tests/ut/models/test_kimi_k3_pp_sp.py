@@ -69,9 +69,8 @@ class IntermediateTensors:
         return IntermediateTensors({name: torch.empty_like(tensor) for name, tensor in tensors.tensors.items()})
 
 
-def config(tp=2, pp=2, dp=1, ep=True, architecture="KimiLinearForCausalLM", runner_v2=False):
+def config(tp=2, pp=2, dp=1, ep=True, architecture="KimiLinearForCausalLM"):
     return SimpleNamespace(
-        use_v2_model_runner=runner_v2,
         model_config=SimpleNamespace(hf_config=SimpleNamespace(architectures=[architecture])),
         parallel_config=SimpleNamespace(
             tensor_parallel_size=tp,
@@ -532,7 +531,6 @@ def test_pipeline_shards_match_unsplit_model(runtime, materialized, sp, tp, num_
 
 
 @pytest.mark.parametrize("stage", range(4))
-@pytest.mark.parametrize("runner_v2", [False, True])
 @pytest.mark.parametrize(
     "draft_type,draft_arch,materialized",
     [
@@ -542,11 +540,11 @@ def test_pipeline_shards_match_unsplit_model(runtime, materialized, sp, tp, num_
         (None, None, False),
     ],
 )
-def test_aux_contract_selected_before_draft_load(runtime, stage, runner_v2, draft_type, draft_arch, materialized):
+def test_aux_contract_selected_before_draft_load(runtime, stage, draft_type, draft_arch, materialized):
     namespace, context = runtime
     context.tp = 2
     context.pp = SimpleNamespace(is_first_rank=stage == 0, is_last_rank=stage == 3)
-    cfg = config(tp=2, pp=4, runner_v2=runner_v2)
+    cfg = config(tp=2, pp=4)
     cfg.model_config.hf_text_config = SimpleNamespace(
         vocab_size=16,
         hidden_size=3,
@@ -576,7 +574,7 @@ def test_aux_contract_selected_before_draft_load(runtime, stage, runner_v2, draf
     namespace["AscendKimiLinearModel"].dspark_aux_capture_materialized = False
     model = namespace["AscendKimiLinearModel"](vllm_config=cfg)
     assert model.dspark_aux_capture_materialized is materialized
-    assert model.use_sequence_parallel is runner_v2
+    assert model.use_sequence_parallel is True
 
 
 @pytest.mark.parametrize("owns_embed", [False, True])

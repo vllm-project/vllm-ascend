@@ -234,7 +234,6 @@ export NAME=vllm-ascend-950
 docker run --rm \
     --name "$NAME" \
     --net=host \
-    --privileged \
     --shm-size=1g \
     -e ASCEND_VISIBLE_DEVICES=0-7 \
     --ulimit memlock=-1:-1 \
@@ -256,6 +255,7 @@ For Host RoCE, insert the following options before `-it "$IMAGE" bash` to expose
 
 ```bash
 --device /dev/infiniband \
+--cap-add=NET_ADMIN \
 -v /usr/lib64/libhrn5-rdmav34.so:/usr/lib64/libhrn5-rdmav34.so:ro \
 -v /etc/hixlep:/etc/hixlep:ro \
 ```
@@ -263,7 +263,7 @@ For Host RoCE, insert the following options before `-it "$IMAGE" bash` to expose
 Both paths in the endpoint-directory mount are configurable: the left side is the host directory containing the endpoint JSON files, and the right side is their directory inside the container. Set `ascend_local_comm_res_path` to the **container-side** directory. For example, `-v /srv/mooncake/endpoints:/opt/mooncake/endpoints:ro` requires `"ascend_local_comm_res_path": "/opt/mooncake/endpoints"`. Keep the `ub_endpoint_npu_<physical_npu_id>.json` filenames unchanged.
 
 - Use the provider library path/version matching the host driver and container RDMA userspace. Mount `/etc/libibverbs.d/hrn5.driver` with `-v /etc/libibverbs.d/hrn5.driver:/etc/libibverbs.d/hrn5.driver:ro` if required by that userspace; this configuration file does not replace the shared library.
-- `--privileged` exposes host devices. A non-privileged Host RoCE configuration must explicitly map the devices and provide `--cap-add=NET_ADMIN`; validate it for your driver and workload.
+- The Host RoCE options above explicitly map `/dev/infiniband` and add `NET_ADMIN` without granting privileged mode. Validate the device and permission requirements for your driver and workload.
 - Mounting the `hiroce5` diagnostic tool is **optional**, for example `-v /usr/local/bin/hiroce5:/usr/local/bin/hiroce5:ro` if that is its host path.
 
 ## Install Mooncake

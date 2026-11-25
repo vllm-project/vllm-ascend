@@ -47,7 +47,6 @@ env_common: &env_common
   MAX_JOBS: "2"
   SERVER_PORT: "${PORT}"
   ASCEND_RT_VISIBLE_DEVICES: "${VISIBLE_DEVICES}"
-  VLLM_USE_V2_MODEL_RUNNER: "1"
   PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
   VLLM_USE_MODELSCOPE: true
 

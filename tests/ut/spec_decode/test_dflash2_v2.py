@@ -91,7 +91,6 @@ def test_v2_loader_selects_flash_attn_and_restores_target_context(monkeypatch, c
     )
     # Keep the real V2 loader's config cloning, causality and model-tag scopes.
     fields = {
-        "use_v2_model_runner": True,
         "model_config": target_config,
         "speculative_config": spec,
         "attention_config": AttentionConfig(),
