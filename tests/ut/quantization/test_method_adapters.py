@@ -172,6 +172,53 @@ class TestAscendLinearMethod(TestBase):
         self.mock_scheme.apply.assert_called_once()
         self.assertEqual(output.shape, (4, 128))
 
+    def test_dynamic_int8_input_capability_and_layer_fallback(self):
+        from vllm.model_executor.layers.fusion.quant_activation import get_input_quant_key
+        from vllm.model_executor.layers.quantization.utils.quant_utils import kInt8DynamicTokenSym
+
+        from vllm_ascend.quantization.methods.w8a8.w8a8_dynamic import AscendW8A8DynamicLinearMethod
+
+        scheme = AscendW8A8DynamicLinearMethod()
+        layer = ColumnParallelLinear.__new__(ColumnParallelLinear)
+        torch.nn.Module.__init__(layer)
+        with patch.object(scheme, "process_weights_after_loading"):
+            AscendLinearMethod(scheme).process_weights_after_loading(layer)
+
+        self.assertEqual(get_input_quant_key(layer), kInt8DynamicTokenSym)
+        layer.requires_unquantized_input = True
+        self.assertIsNone(get_input_quant_key(layer))
+
+    def test_dynamic_scheme_subclass_must_opt_in(self):
+        from vllm_ascend.quantization.methods.w8a8.w8a8_dynamic import AscendW8A8DynamicLinearMethod
+
+        class OtherDynamicScheme(AscendW8A8DynamicLinearMethod):
+            pass
+
+        self.assertIsNone(OtherDynamicScheme().input_quant_key())
+        scheme = AscendW8A8DynamicLinearMethod()
+        scheme.act_quant_type = torch.float32
+        self.assertIsNone(scheme.input_quant_key())
+
+    def test_prequantized_input_reaches_dynamic_scheme_without_requantizing(self):
+        from vllm.model_executor.layers.fusion.quant_activation import QuantizedActivation
+        from vllm.model_executor.layers.quantization.utils.quant_utils import kInt8DynamicTokenSym
+
+        from vllm_ascend.quantization.methods.base import PreparedLinearInput
+
+        layer = MagicMock(spec=ColumnParallelLinear)
+        layer._input_quant_key = kInt8DynamicTokenSym
+        data = torch.ones((2, 4), dtype=torch.int8)
+        scale = torch.ones(2)
+        x = QuantizedActivation(data, scale, torch.bfloat16, torch.Size((2, 4)), kInt8DynamicTokenSym)
+
+        self.method.apply(layer, x)
+
+        prepared = self.mock_scheme.apply.call_args.args[1]
+        self.assertIsInstance(prepared, PreparedLinearInput)
+        self.assertIs(prepared.quantized, data)
+        self.assertIs(prepared.scale, scale)
+        self.assertEqual(prepared.output_dtype, torch.bfloat16)
+
 
 class TestAscendKVCacheMethod(TestBase):
     def setUp(self):

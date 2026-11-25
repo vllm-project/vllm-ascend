@@ -463,6 +463,19 @@ def _patched_forward(
 _ORIGINAL_DECODER_FORWARD = DeepseekV2DecoderLayer.forward
 
 
+def _supports_dense_norm_quant(layer, hidden_states, get_input_quant_key, quant_key):
+    """Select the decoder path before running attention or mutating residuals."""
+    return (
+        isinstance(layer.mlp, DeepseekV2MLP)
+        and not layer.use_sequence_parallel_moe
+        and hidden_states.dtype == torch.bfloat16
+        and isinstance(layer.post_attention_layernorm, AscendRMSNorm)
+        and get_input_quant_key(layer.mlp.gate_up_proj) == quant_key
+        and enable_custom_op()
+        and get_current_hardware_profile().supports(HardwareCapability.GRAPH_NORM_QUANT_FUSION)
+    )
+
+
 def _maybe_fused_add_rms_norm_quant(norm, hidden_states, residual, quantized_activation_cls, quant_key):
     """Prepare the dense MLP input with fused add/norm/quant when supported."""
     if (
@@ -504,15 +517,7 @@ def _decoder_forward_with_norm_quant(self, positions, hidden_states, residual, l
     # Restrict the model-level override to the observed dense W8A8 path. Other
     # layers, sequence-parallel boundaries and unsupported consumers retain
     # upstream's complete forward, including its FP16 overflow handling.
-    if (
-        not isinstance(self.mlp, DeepseekV2MLP)
-        or self.use_sequence_parallel_moe
-        or hidden_states.dtype != torch.bfloat16
-        or not isinstance(self.post_attention_layernorm, AscendRMSNorm)
-        or get_input_quant_key(self.mlp.gate_up_proj) != kInt8DynamicTokenSym
-        or not enable_custom_op()
-        or not get_current_hardware_profile().supports(HardwareCapability.GRAPH_NORM_QUANT_FUSION)
-    ):
+    if not _supports_dense_norm_quant(self, hidden_states, get_input_quant_key, kInt8DynamicTokenSym):
         return _ORIGINAL_DECODER_FORWARD(self, positions, hidden_states, residual, llama_4_scaling)
 
     if residual is None:
