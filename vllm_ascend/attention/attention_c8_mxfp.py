@@ -31,7 +31,8 @@ from typing import TYPE_CHECKING
 
 import torch
 import torch_npu
-from vllm.config import VllmConfig
+from vllm.config import CUDAGraphMode, VllmConfig
+from vllm.forward_context import get_forward_context
 from vllm.v1.attention.backend import (  # type: ignore
     AttentionCGSupport,
     AttentionLayer,
@@ -831,6 +832,9 @@ class AscendC8MXFPAttentionBackendImpl(AscendAttentionBackendImpl):
             and attn_metadata.num_decodes > 0
             and attn_metadata.num_prefills > 0
             and attn_metadata.num_decodes == attn_metadata.num_decode_tokens
+            # FULL_DECODE_ONLY dispatches mixed batches to NONE. Host-side
+            # partition boundaries must never be baked into a captured graph.
+            and get_forward_context().cudagraph_runtime_mode == CUDAGraphMode.NONE
         ):
             partitions = self._mixed_qfa_partitions(attn_metadata, num_tokens, cu_seqlens_q, seqused_kv)
             if partitions:
@@ -1039,5 +1043,9 @@ class AscendC8MXFPAttentionBackendImpl(AscendAttentionBackendImpl):
             kv_cache,
             attn_metadata,
             output,
-            split_mixed=self.vllm_config.model_config.enforce_eager and self.vllm_config.speculative_config is None,
+            split_mixed=self.vllm_config.speculative_config is None
+            and (
+                self.vllm_config.model_config.enforce_eager
+                or self.vllm_config.compilation_config.cudagraph_mode == CUDAGraphMode.FULL_DECODE_ONLY
+            ),
         )

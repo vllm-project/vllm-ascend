@@ -1,4 +1,4 @@
 pr: 23176
 entries:
   - category: performance
-    text: On Ascend 950, eager inference with MXFP8 KV cache runs single-token decode and multi-token prefill attention separately in eligible mixed batches when speculative decoding is disabled.
+    text: On Ascend 950, MXFP8 KV cache inference with `--enforce-eager` or `FULL_DECODE_ONLY` runs single-token decode and multi-token prefill attention separately in eligible mixed batches outside graph replay when speculative decoding is disabled. Pure decode can still use full-graph replay in `FULL_DECODE_ONLY` mode.

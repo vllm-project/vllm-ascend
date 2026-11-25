@@ -3,6 +3,7 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import torch
+from vllm.config import CUDAGraphMode
 
 from tests.ut.base import TestBase
 from vllm_ascend.attention.attention_c8_mxfp import AscendC8MXFPAttentionBackendImpl
@@ -395,8 +396,12 @@ class TestMixedQFASplit(TestBase):
         self.impl.scale = 128**-0.5
         self.impl.sliding_window = None
         self.impl.vllm_config = SimpleNamespace(
-            kv_transfer_config=None, model_config=SimpleNamespace(enforce_eager=True), speculative_config=None
+            kv_transfer_config=None,
+            model_config=SimpleNamespace(enforce_eager=True),
+            compilation_config=SimpleNamespace(cudagraph_mode=CUDAGraphMode.NONE),
+            speculative_config=None,
         )
+        self.runtime_mode = CUDAGraphMode.NONE
         self.query = torch.arange(24).view(24, 1, 1).expand(24, 8, 128).to(torch.bfloat16).contiguous()
         self.scale = torch.arange(24 * 8 * 4, dtype=torch.int32).to(torch.uint8).view(24, 8, 2, 2)
         self.kv = (torch.empty(1), torch.empty(1), torch.zeros(1, dtype=torch.uint8), torch.zeros(1, dtype=torch.uint8))
@@ -438,6 +443,10 @@ class TestMixedQFASplit(TestBase):
         with (
             patch("vllm_ascend.attention.attention_c8_mxfp.record_attention_compute_start"),
             patch(
+                "vllm_ascend.attention.attention_c8_mxfp.get_forward_context",
+                return_value=SimpleNamespace(cudagraph_runtime_mode=self.runtime_mode),
+            ),
+            patch(
                 "vllm_ascend.attention.attention_c8_mxfp.torch_npu.npu_dynamic_mx_quant",
                 return_value=(self.query, self.scale),
             ),
@@ -465,6 +474,38 @@ class TestMixedQFASplit(TestBase):
         self.assertIs(decode.kwargs["metadata"], next_decode.kwargs["metadata"])
         self.assertIs(prefill.kwargs["metadata"], next_prefill.kwargs["metadata"])
         self.assertIsNot(decode.kwargs["metadata"], prefill.kwargs["metadata"])
+
+    def test_full_decode_only_distinguishes_runtime_modes(self):
+        self.impl.vllm_config.model_config.enforce_eager = False
+        self.impl.vllm_config.compilation_config.cudagraph_mode = CUDAGraphMode.FULL_DECODE_ONLY
+        for mode, expected_calls in ((CUDAGraphMode.FULL, 1), (CUDAGraphMode.PIECEWISE, 1), (CUDAGraphMode.NONE, 2)):
+            with self.subTest(mode=mode):
+                self.runtime_mode = mode
+                self.metadata = replace(self.metadata, qfa_metadata_cache={})
+                self.ops.reset_mock()
+                self._forward()
+                self.assertEqual(self.ops.quant_flash_attn.call_count, expected_calls)
+
+    def test_full_decode_only_keeps_pure_decode_whole(self):
+        self.impl.vllm_config.model_config.enforce_eager = False
+        self.impl.vllm_config.compilation_config.cudagraph_mode = CUDAGraphMode.FULL_DECODE_ONLY
+        self.runtime_mode = CUDAGraphMode.FULL
+        num_reqs = len(self.query)
+        self.metadata = replace(
+            self.metadata,
+            attn_state=AscendAttentionState.DecodeOnly,
+            num_decodes=num_reqs,
+            num_decode_tokens=num_reqs,
+            num_prefills=0,
+            max_query_len=1,
+            actual_seq_lengths_q=list(range(1, num_reqs + 1)),
+            query_start_loc_gpu=torch.arange(num_reqs + 1, dtype=torch.int32),
+            seq_lens_gpu=torch.full((num_reqs,), 32, dtype=torch.int32),
+            block_tables=torch.arange(num_reqs, dtype=torch.int32).reshape(-1, 1),
+        )
+        self._forward()
+        self.assertEqual(self.ops.quant_flash_attn.call_count, 1)
+        self.assertEqual(self.ops.quant_flash_attn.call_args.kwargs["mask_mode"], 0)
 
     def test_ineligible_steps_keep_one_call(self):
         base_metadata = self.metadata
