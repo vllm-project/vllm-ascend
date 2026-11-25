@@ -981,8 +981,7 @@ vLLM Ascend revision.
 
     On the Prefill node, save the following script as `run_dp_template.sh`. Set
     `LOCAL_IP`, `NIC_NAME`, and `MODEL_PATH` to the Prefill node's service IP,
-    network interface, and local checkpoint path. Start both containers with
-    `--ulimit memlock=-1` so the scripts can set unlimited locked memory.
+    network interface, and local checkpoint path.
 
     The `--eplb-config` settings below use `window_size: 64` and
     `step_interval: 128` for short benchmark runs. These smaller values provide
@@ -992,9 +991,6 @@ vLLM Ascend revision.
 
     ```shell
     #!/usr/bin/env bash
-
-    set -euo pipefail
-    ulimit -l unlimited
 
     unset https_proxy
     unset http_proxy
@@ -1013,20 +1009,20 @@ vLLM Ascend revision.
     export VLLM_ENGINE_READY_TIMEOUT_S=36000
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
     export HCCL_BUFFSIZE=1024
-    export HCCL_EXEC_TIMEOUT=2048
+    export HCCL_EXEC_TIMEOUT=3600
     export HCCL_OP_EXPANSION_MODE="AIV"
-    export ASCEND_RT_VISIBLE_DEVICES="$1"
+    export ASCEND_RT_VISIBLE_DEVICES=$1
 
     # Ensure the model path matches the directory recorded during download
     vllm serve "$MODEL_PATH" \
         --host 0.0.0.0 \
-        --port "$2" \
-        --data-parallel-size "$3" \
-        --data-parallel-rank "$4" \
-        --data-parallel-address "$5" \
-        --data-parallel-rpc-port "$6" \
-        --tensor-parallel-size "$7" \
-        --prefill-context-parallel-size "$8" \
+        --port $2 \
+        --data-parallel-size $3 \
+        --data-parallel-rank $4 \
+        --data-parallel-address $5 \
+        --data-parallel-rpc-port $6 \
+        --tensor-parallel-size $7 \
+        --prefill-context-parallel-size $8 \
         --enable-expert-parallel \
         --enable-eplb \
         --eplb-config '{
@@ -1055,11 +1051,12 @@ vLLM Ascend revision.
         --enable-prefix-caching \
         --engram-config '{"cpu_offload":true,"dp_shared_memory":true}' \
         --additional-config '{
-            "enable_cpu_binding":true,
-            "weight_nz_mode":2,
-            "enable_fused_mc2":2,
-            "enable_flashcomm1":false,
-            "multistream_overlap_shared_expert":false
+            "enable_cpu_binding": true,
+            "weight_nz_mode": 2,
+            "enable_fused_mc2": 3,
+            "enable_flashcomm1": false,
+            "multistream_overlap_shared_expert": false,
+            "enable_shared_expert_dp": true
         }' \
         --kv-transfer-config '{
             "kv_connector":"MooncakeConnectorV2",
@@ -1094,9 +1091,6 @@ vLLM Ascend revision.
     ```shell
     #!/usr/bin/env bash
 
-    set -euo pipefail
-    ulimit -l unlimited
-
     unset https_proxy
     unset http_proxy
     export LD_LIBRARY_PATH="${LD_LIBRARY_PATH:+$LD_LIBRARY_PATH:}/usr/local/lib/"
@@ -1114,25 +1108,25 @@ vLLM Ascend revision.
     export TP_SOCKET_IFNAME="$NIC_NAME"
     export HCCL_SOCKET_IFNAME="$NIC_NAME"
     export HCCL_BUFFSIZE=4096
-    export HCCL_EXEC_TIMEOUT=2048
-    export ASCEND_RT_VISIBLE_DEVICES="$1"
+    export HCCL_EXEC_TIMEOUT=3600
+    export ASCEND_RT_VISIBLE_DEVICES=$1
 
     # Ensure the model path matches the directory recorded during download
     vllm serve "$MODEL_PATH" \
         --host 0.0.0.0 \
-        --port "$2" \
-        --data-parallel-size "$3" \
-        --data-parallel-rank "$4" \
-        --data-parallel-address "$5" \
-        --data-parallel-rpc-port "$6" \
-        --tensor-parallel-size "$7" \
-        --prefill-context-parallel-size "$8" \
+        --port $2 \
+        --data-parallel-size $3 \
+        --data-parallel-rank $4 \
+        --data-parallel-address $5 \
+        --data-parallel-rpc-port $6 \
+        --tensor-parallel-size $7 \
+        --prefill-context-parallel-size $8 \
         --enable-expert-parallel \
         --seed 1024 \
         --served-model-name dsv41 \
         --max-model-len 1048576 \
-        --max-num-batched-tokens 280 \
-        --max-num-seqs 40 \
+        --max-num-batched-tokens 432 \
+        --max-num-seqs 72 \
         --async-scheduling \
         --block-size 128 \
         --no-enable-prefix-caching \
@@ -1154,14 +1148,14 @@ vLLM Ascend revision.
         }' \
         --engram-config '{"cpu_offload":true,"dp_shared_memory":true}' \
         --additional-config '{
-            "ascend_compilation_config":{
-                "enable_npugraph_ex":true,
-                "enable_static_kernel":false
+            "ascend_compilation_config": {
+                "enable_npugraph_ex": true,
+                "enable_static_kernel": false
             },
-            "enable_cpu_binding":true,
-            "weight_nz_mode":2,
-            "multistream_overlap_shared_expert":true,
-            "recompute_scheduler_enable":true
+            "enable_cpu_binding": true,
+            "weight_nz_mode": 2,
+            "recompute_scheduler_enable": true,
+            "enable_fused_mc2": 3
         }'
     ```
 
@@ -1217,15 +1211,13 @@ vLLM Ascend revision.
       `7100-7115` on Decode. These endpoints must be reachable by the PD proxy.
     - Both roles use `--max-model-len 1048576`. Prefill uses
       `--max-num-batched-tokens 8192` and `--max-num-seqs 16` to favor prompt
-      throughput, while Decode uses `280` and `40` respectively to limit the
+      throughput, while Decode uses `432` and `72` respectively to limit the
       per-step token budget and active sequences. Tune these role-specific
       scheduler limits independently for the workload's latency and throughput.
     - `MooncakeConnectorV2` transfers KV cache between the two roles using its
       default non-layerwise pull mode.
       `kv_role` must be `kv_producer` on Prefill and `kv_consumer` on Decode.
       `kv_port` must be reachable and must not conflict with another service.
-    - Both roles use the same connector implementation. Configure the
-      DP/PCP/TP topology through the launcher arguments shown above.
     - Both roles use DSpark with five speculative tokens. Prefill runs the target
       model in eager mode. Decode uses `FULL_DECODE_ONLY` for the target model
       and allows graph execution for the DSpark draft model as well.
@@ -1245,10 +1237,13 @@ vLLM Ascend revision.
 
         - `enable_cpu_binding: true` enables Ascend-native CPU affinity for worker
         processes and runtime threads.
-        - `enable_fused_mc2: 2` selects the MegaMoE path on Prefill.
+        - `enable_fused_mc2: 3` requests MegaMoE with shared-expert fusion.
         - `enable_flashcomm1: false` disables FlashComm for compatibility with SWA bounded replay.
         - `multistream_overlap_shared_expert: false` disables shared-expert
         multistream overlap on Prefill, where MegaMoE is enabled.
+        - `enable_shared_expert_dp: true` requests shared-expert data parallelism.
+        This option requires expert parallelism and TP greater than 1; it is
+        inactive in this TP1 example.
 
     - Decode uses the following `--additional-config` options:
 
@@ -1258,17 +1253,18 @@ vLLM Ascend revision.
         kernel generation while retaining the enhanced ACL Graph path.
         - `enable_cpu_binding: true` enables Ascend-native CPU affinity for worker
         processes and runtime threads.
-        - `multistream_overlap_shared_expert: true` enables shared-expert multistream
-        overlap on Decode, where MegaMoE is not enabled. Shared-expert execution
-        overlaps routed-expert computation on separate streams.
+        - `enable_fused_mc2: 3` requests MegaMoE with shared-expert fusion.
         - `recompute_scheduler_enable: true` enables the PD Decode recomputation
         scheduler. When the Decode-side KV cache is unavailable, the request can be
         sent back to Prefill to recompute it. Enable this option only on Decode.
 
-      The Prefill and Decode configurations are role-specific. Do not copy the
-      Prefill MegaMoE and PCP options to Decode, or the Decode graph, multistream,
-      and recomputation options to Prefill, without validating the resulting
-      topology and performance.
+      Both roles request `enable_fused_mc2: 3`. The current upstream implementation
+      restricts this mode to A5; these settings require an A3 software build that
+      supports MegaMoE shared-expert fusion.
+
+      The Prefill and Decode configurations are role-specific. Validate the
+      topology and performance before changing the Prefill PCP settings or the
+      Decode graph and recomputation settings.
 
       `HCCL_IF_IP` and the socket interface variables must select the same high-speed
       service network used by the configured node IPs. `HCCL_BUFFSIZE` is `1024` on
@@ -2000,7 +1996,7 @@ Select the tab for the target hardware.
     cache in Memcache. Both connectors are configured as children of
     `MultiConnector`.
 
-    Use the same W4A8 checkpoint and A3 settings as [Section 5.2](#52-1p1d-pd-disaggregated-deployment):
+    Use the same W4A8 checkpoint as [Section 5.2](#52-1p1d-pd-disaggregated-deployment). This recipe uses
     Prefill DP4/PCP4/TP1 with EPLB, Decode DP16/TP1 with a 280-token budget and
     40 sequences, and `weight_nz_mode: 2` on both roles. Both containers must
     include `fastokens>=0.3.5` and start with `--ulimit memlock=-1`.
@@ -2401,8 +2397,8 @@ for the required software and networking versions.
 
 === "A3 series"
 
-    The A3 scripts use the same W4A8 checkpoint and serving settings as
-    [Section 5.2](#52-1p1d-pd-disaggregated-deployment): Prefill DP4/PCP4/TP1 with EPLB,
+    The A3 scripts use the same W4A8 checkpoint as
+    [Section 5.2](#52-1p1d-pd-disaggregated-deployment). This recipe uses Prefill DP4/PCP4/TP1 with EPLB,
     Decode DP16/TP1 with a 280-token budget and 40 sequences, and
     `weight_nz_mode: 2` on both roles. Both A3 containers must include
     `fastokens>=0.3.5` and start with `--ulimit memlock=-1`. Check connector port

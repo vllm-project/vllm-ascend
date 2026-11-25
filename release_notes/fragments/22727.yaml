@@ -3,8 +3,8 @@ entries:
   - category: documentation
     text: >-
       Expanded the DeepSeek V4.1 Flash A3 1P1D deployment guide with Mooncake
-      KV Cache Pool instructions and aligned the plain PD and Memcache recipes
-      with the same serving settings. The guide covers Prefill EPLB, fastokens,
+      KV Cache Pool instructions and updated the plain PD and Memcache recipes
+      with scenario-specific serving settings. The guide covers Prefill EPLB, fastokens,
       weight NZ conversion, and four proxy workers. The Mooncake recipe provides
       complete A3 and A2 deployment tabs with the required RoCE and HCCS
       environment settings and host huge-page preparation.
