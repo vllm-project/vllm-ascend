@@ -24,6 +24,8 @@ from vllm.v1.kv_cache_interface import (
 )
 from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry
 
+from vllm_ascend.device.device_config import AscendDeviceType, get_ascend_device_type
+
 
 def get_kv_cache_compression_ratio(kv_cache_spec: KVCacheSpec) -> int:
     """Return the MLA compression ratio across vLLM cache-spec APIs."""
@@ -181,11 +183,38 @@ def supports_component_major_mla_pd(vllm_config: VllmConfig) -> bool:
     if getattr(kv_transfer_config, "kv_connector_module_path", None) is not None:
         return False
 
-    connector_name = getattr(kv_transfer_config, "kv_connector", None)
-    if connector_name == "MooncakeConnectorV2":
-        extra_config = getattr(kv_transfer_config, "kv_connector_extra_config", {})
-        return not extra_config.get("use_layerwise", False)
-    return connector_name == "MooncakePullConnector"
+    connector = getattr(kv_transfer_config, "kv_connector", None)
+    extra = getattr(kv_transfer_config, "kv_connector_extra_config", {})
+    if connector == "MultiConnector":
+        if not (
+            getattr(vllm_config, "use_v2_model_runner", False)
+            and vllm_config.model_config.hf_config.model_type == "kimi_k31"
+            and vllm_config.speculative_config is not None
+            and vllm_config.speculative_config.method == "dspark"
+            and vllm_config.parallel_config.pipeline_parallel_size == 1
+            and vllm_config.parallel_config.prefill_context_parallel_size == 1
+            and get_ascend_device_type() == AscendDeviceType.A3
+        ):
+            return False
+        # A single child receives the original cache tensors unchanged. Keep
+        # composite/nested/custom connectors on the legacy layout until their
+        # transfer and completion contracts have been validated separately.
+        if not isinstance(extra, dict):
+            return False
+        children = extra.get("connectors")
+        if not isinstance(children, list) or len(children) != 1:
+            return False
+        child = children[0]
+        if not isinstance(child, dict) or child.get("kv_connector_module_path") is not None:
+            return False
+        connector = child.get("kv_connector")
+        extra = child.get("kv_connector_extra_config", {})
+
+    if connector == "MooncakeConnectorV2":
+        # The layerwise worker has a separate transfer contract; preserve the
+        # same exclusion for direct and wrapped connectors.
+        return isinstance(extra, dict) and not extra.get("use_layerwise", False)
+    return connector == "MooncakePullConnector"
 
 
 @dataclass(frozen=True, kw_only=True)

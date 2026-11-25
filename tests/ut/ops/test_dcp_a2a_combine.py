@@ -147,7 +147,7 @@ def test_a3_static_bucket_dispatch(monkeypatch, device_type, warmed, ranks, toke
         kernel = Mock()
         kernel.__getitem__ = Mock(return_value=launch)
         monkeypatch.setattr(dcp_a2a, f"_fused_dcp_lse_combine{suffix}_kernel", kernel)
-    with FakeTensorMode():
+    with FakeTensorMode() as fake_mode:
         recv = torch.empty(ranks, 4, tokens, 516, dtype=torch.bfloat16, device="npu:0")
         local = torch.empty_strided((tokens, 4, 512), (4 * 512, 512, 1), dtype=torch.bfloat16, device="npu:0")
         lse = torch.empty(tokens, 4, 1, dtype=torch.float32, device="npu:0")
@@ -164,6 +164,15 @@ def test_a3_static_bucket_dispatch(monkeypatch, device_type, warmed, ranks, toke
         assert static.call_args.kwargs["NUM_TOKENS"] == tokens
         assert static.call_args.kwargs["NUM_HEADS"] == 4
         assert static.call_args.kwargs["BLOCK_D"] == 512
+
+        # A warmed rank tile has no mask input. Empty local rows must still
+        # use a combine kernel that receives the caller's mask.
+        with fake_mode:
+            mask = torch.empty(tokens, dtype=torch.bool, device="npu:0")
+            dcp_a2a.fused_dcp_lse_combine(recv, 512, 1, local_output=local, local_lse=lse, local_output_mask=mask)
+        assert static.call_count == 1
+        assert scalar.call_count + batched.call_count == 1
+        assert (scalar if scalar.called else batched).call_args.kwargs["HAS_LOCAL_OUTPUT_MASK"] is True
 
 
 def test_a3_static_warmup_accumulates(monkeypatch):

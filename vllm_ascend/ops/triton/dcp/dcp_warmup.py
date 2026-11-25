@@ -167,7 +167,18 @@ def _record_exchange(output, lse, softmax_sum, ranks, vector_cores, launch):
 
 
 def _record_dcp_layout(
-    dtype, tokens, local_heads, head_dim, scatter_size, pcp_size, from_stats, mla, layout, vector_cores, record
+    dtype,
+    tokens,
+    local_heads,
+    head_dim,
+    scatter_size,
+    pcp_size,
+    from_stats,
+    mla,
+    layout,
+    vector_cores,
+    record,
+    masked_output=False,
 ):
     """One owner layout, routed through the production launch constructors."""
     heads = local_heads * scatter_size
@@ -188,10 +199,28 @@ def _record_dcp_layout(
     if mla:
         local_output, local_lse = _output_and_lse(dtype, tokens, local_heads, head_dim, layout)
         _launch_fused_dcp_lse_combine(recv, output, head_dim, 1, False, local_output, local_lse, vector_cores, record)
+    if mla and masked_output:
+        # A3 folds empty-row normalization into these same kernels. Register
+        # the masked variants before graph capture as well as the A5 variants.
+        output_mask = _Tensor(torch.bool, shape=(tokens,))
+        _launch_pack_dcp_output_lse(partial, lse, softmax_sum, send, 1, vector_cores, record, output_mask)
+        _launch_fused_dcp_lse_combine(
+            recv, output, head_dim, 1, False, local_output, local_lse, vector_cores, record, output_mask
+        )
 
 
 def register_dcp_warmup(
-    *, dtype, local_heads, head_dim, scatter_size, pcp_size, max_tokens, from_stats, mla=False, decode_buckets=None
+    *,
+    dtype,
+    local_heads,
+    head_dim,
+    scatter_size,
+    pcp_size,
+    max_tokens,
+    from_stats,
+    mla=False,
+    decode_buckets=None,
+    masked_output=False,
 ):
     """Register SFA and MLA owners' reachable output-merge layouts.
 
@@ -243,6 +272,7 @@ def register_dcp_warmup(
                     layout,
                     vector_cores,
                     record,
+                    masked_output=masked_output,
                 )
     finally:
         end_a3_static_warmup()

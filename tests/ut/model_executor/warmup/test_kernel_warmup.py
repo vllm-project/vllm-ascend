@@ -322,7 +322,8 @@ def test_merge_rank_stride_is_runtime_and_offset_alignment_is_covered():
     assert "lse_stride_rank" in do_not_specialize
 
 
-def test_dcp_target_and_draft_owners_register_before_compilation():
+@pytest.mark.parametrize("a3", [False, True])
+def test_dcp_target_and_draft_owners_register_before_compilation(a3):
     from vllm_ascend.attention.context_parallel.mla_cp import AscendMlaDCPImpl
     from vllm_ascend.attention.context_parallel.sfa_cp import AscendSFADCPImpl
 
@@ -337,6 +338,7 @@ def test_dcp_target_and_draft_owners_register_before_compilation():
         impl.local_num_heads = impl.num_heads = 12
         impl.kv_lora_rank = 512
     target.enable_sparse_sfa_turboquant = False
+    draft.use_a3_mla_sink = a3
     worker.vllm_config.compilation_config.static_forward_context = {
         "target": SimpleNamespace(impl=target),
         "same_target_layout": SimpleNamespace(impl=target),
@@ -363,3 +365,4 @@ def test_dcp_target_and_draft_owners_register_before_compilation():
         (torch.float16, True, False),
     ]
     assert all(case["scatter_size"] == 4 and case["pcp_size"] == 2 for case in registered)
+    assert [case["masked_output"] for case in registered] == [False, a3]
