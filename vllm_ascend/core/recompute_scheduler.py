@@ -864,6 +864,20 @@ class RecomputeScheduler(Scheduler):
                     request.record_event(EngineCoreEventType.SCHEDULED, scheduled_timestamp)
                 if request.status == RequestStatus.WAITING:
                     scheduled_new_reqs.append(request)
+                    if (
+                        self.vllm_config.kv_transfer_config is not None
+                        and self.vllm_config.kv_transfer_config.kv_role == "kv_consumer"
+                        and not request.kv_transfer_params
+                    ):
+                        logger.warning(
+                            "[D_NO_KV_TRANSFER_PARAMS] dp=%s request_id=%s prompt_len=%d: "
+                            "Request without KV transfer parameters may trigger local prefill "
+                            "on the decode node. If cross-DP synchronization is skipped, "
+                            "inconsistent MoE communication paths may cause the service to hang.",
+                            self.vllm_config.parallel_config.data_parallel_rank,
+                            request.request_id,
+                            request.num_prompt_tokens,
+                        )
                 elif request.status == RequestStatus.PREEMPTED:
                     scheduled_resumed_reqs.append(request)
                 else:
