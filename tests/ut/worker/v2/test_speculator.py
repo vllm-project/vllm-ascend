@@ -207,6 +207,7 @@ def test_decode_skips_update_without_attn_metadata():
 def test_multi_step_decode_full_graph(architecture):
     speculator = AscendTargetDependentARSpeculator.__new__(AscendTargetDependentARSpeculator)
     speculator.attn_architecture = architecture
+    speculator.attn_groups = []
     speculator.decode_cudagraph_manager = MagicMock()
     batch_desc = SimpleNamespace(cg_mode=CUDAGraphMode.FULL)
     with patch.object(TargetDependentARSpeculator, "_multi_step_decode") as parent_decode:
@@ -325,6 +326,9 @@ def test_build_uniform_attn_metadata_sets_decode_only():
     speculator.use_dcp = False
     speculator.draft_vllm_config = SimpleNamespace(parallel_config=object())
     speculator._update_decode_attn_metadata = MagicMock()
+    group = MagicMock(layer_names=["draft"])
+    speculator.attn_groups = [[group]]
+    speculator._fa3_decode_metadata = {}
     batch_desc = SimpleNamespace(num_tokens=2)
     seq_lens = torch.tensor([10, 20], dtype=torch.int32)
 
@@ -347,6 +351,10 @@ def test_build_uniform_attn_metadata_sets_decode_only():
             1,
         )
 
+        second = speculator._build_uniform_attn_metadata(batch_desc, 2, 1, seq_lens, 2)
+
+    assert second is result
+    group.get_metadata_builder.return_value.refresh_scheduler_metadata.assert_called_once_with(metadata)
     assert result == {"draft": metadata}
     assert metadata.attn_state == AscendAttentionState.DecodeOnly
     speculator._sparse_kv_offload_metadata.build_kwargs.assert_called_once()

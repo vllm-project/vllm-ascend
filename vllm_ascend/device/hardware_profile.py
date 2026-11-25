@@ -502,11 +502,11 @@ _HARDWARE_PROFILES: Mapping[AscendDeviceType, HardwareProfile] = MappingProxyTyp
         ),
         AscendDeviceType.A5: HardwareProfile(
             _device_type=AscendDeviceType.A5,
-            # A5 uses CANN flash_attn by default. Step5 temporarily uses the
+            # Hybrid MTP uses FA3 device tiling. Step5 temporarily uses the
             # ecosystem FA3 operator because CANN flash_attn does not support it.
             # TODO: Route Step5 back to CANN flash_attn and remove this exception
             # once CANN supports Step5 and the integration is validated.
-            flash_attn_npu_3_models=frozenset({FlashAttentionNpu3Model.STEP5}),
+            flash_attn_npu_3_models=frozenset({FlashAttentionNpu3Model.STEP5, FlashAttentionNpu3Model.HYBRID_MTP}),
             qwen4exp_hc_gate_mix_row_block_min_rows=1024,
             dcp_head_scatter_mode=DCP_HEAD_SCATTER_MULTI_ROW,
             requires_2d_nz_linear_input=True,
