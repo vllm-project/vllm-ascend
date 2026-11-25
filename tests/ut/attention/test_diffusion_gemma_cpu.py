@@ -16,13 +16,14 @@ SOURCE = Path(__file__).resolve().parents[3] / "vllm_ascend"
 
 def _load_class(path, name, method=None, **scope):
     """Exercise metadata logic without importing NPU kernels."""
-    node = next(
+    class_node = next(
         node
         for node in ast.parse((SOURCE / path).read_text()).body
         if isinstance(node, ast.ClassDef) and node.name == name
     )
+    node: ast.stmt = class_node
     if method is not None:
-        node = next(item for item in node.body if isinstance(item, ast.FunctionDef) and item.name == method)
+        node = next(item for item in class_node.body if isinstance(item, ast.FunctionDef) and item.name == method)
         name = method
     module = ast.fix_missing_locations(ast.Module(body=[node], type_ignores=[]))
     exec(compile(module, str(SOURCE / path), "exec"), scope)
