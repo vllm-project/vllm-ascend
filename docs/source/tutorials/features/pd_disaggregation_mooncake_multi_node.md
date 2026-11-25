@@ -498,7 +498,7 @@ Modify `run_dp_template.sh` on each node.
 
 `launch_online_dp.py` starts one vLLM instance per local DP rank. It passes the device slice as `$1`, the global DP rank as `$4`, and TP, PCP, and PP as `$7`, `$8`, and `$9`. The examples below correspond to [Start the service](#start-the-service).
 
-| Launcher option | Template value | Meaning | Example value | Constraints |
+| Setting | Template value | Meaning | Example value | Constraints |
 | --- | --- | --- | --- | --- |
 | `--dp-size` | `$3` / `--data-parallel-size` | Total DP ranks in the group. | P: `2`; D: `32` | Positive integer; identical within the same group. Total ranks must cover `[0, dp-size)` without overlap. |
 | `--tp-size` | `$7` / `--tensor-parallel-size` | NPUs used by each instance. | P: `8`; D: `1` | Positive integer; `dp-size-local * tp-size` must not exceed available NPUs on the node.|
@@ -507,7 +507,8 @@ Modify `run_dp_template.sh` on each node.
 | `--dp-address` | `$5` / `--data-parallel-address` | DP master address. | P: `192.0.0.1` or `192.0.0.2`; D: `192.0.0.3` | The IP address must be reachable and identical within the same DP group. |
 | `--dp-rpc-port` | `$6` / `--data-parallel-rpc-port` | DP master RPC port. | `12321` | Free, reachable port; identical within a DP group. |
 | `--vllm-start-port` | `$2` / `--port` = `vllm-start-port + i` | First local API port. | `7100`, then `7101`, ... | Consecutive free ports; must match the proxy configuration. |
-| `--device-ids` (optional) | `$1` and `${10}` when explicit | Ordered device list sliced by local DP rank. When omitted, the launcher supplies consecutive IDs in `$1`. | `8,9,0,1` | Provide `dp-size-local × tp-size × pcp-size × pp-size` distinct IDs. |
+| `ASCEND_RT_VISIBLE_DEVICES` (environment variable) | Set to `$1` by default. Inherited when `--device-ids` is supplied. | NPUs visible to each vLLM process. By default, the launcher passes a consecutive per-rank slice in `$1`. | Default rank slice: `0,1`. Inherited node list: `0,1,...,15`. | Use NPU IDs available on the node. |
+| `--device-ids` (optional launcher argument) | `${10}` → `vllm serve --device-ids` | Ordered device list sliced by local DP rank. | Launcher: `8,9,0,1`. TP2 rank slices: `8,9` and `0,1`. | Provide `dp-size-local × tp-size × pcp-size × pp-size` distinct IDs. When visibility is set, use zero-based indices into the inherited list. |
 
 #### Select devices for each DP rank
 
