@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """arch22 native HiSparse contracts against the A5 foundation's CPU oracle."""
 
+import ctypes
 from contextlib import contextmanager
 
 import pytest
@@ -9,11 +10,13 @@ import torch
 import torch_npu  # noqa: F401
 
 from vllm_ascend.hisparse.cache_ops import HiSparseNPUOps, ResolverWorkspace
-from vllm_ascend.hisparse.host_pool import allocate_mapped_host
+from vllm_ascend.hisparse.host_pool import _ACL_HAC_AIV, allocate_mapped_host
 from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
 
+_ACL_ERROR_RT_FEATURE_NOT_SUPPORT = 207000
 
-@pytest.fixture(autouse=True)
+
+@pytest.fixture(scope="module", autouse=True)
 def _require_arch22():
     if not torch.npu.is_available():
         pytest.skip("requires an Ascend NPU")
@@ -22,6 +25,25 @@ def _require_arch22():
     if not hasattr(torch.ops._C_ascend, "hisparse_resolve_residency"):
         import vllm_ascend.vllm_ascend_C  # type: ignore[import-not-found, import-untyped]  # noqa: F401
     assert hasattr(torch.ops._C_ascend, "hisparse_resolve_residency"), "rebuild the arch22 extension"
+
+
+@pytest.fixture(scope="module")
+def require_native_host_mapping(_require_arch22):
+    """Gate only tests that require native ACL AIV access to Host memory."""
+    device = torch.npu.current_device()
+    acl = ctypes.CDLL("libascendcl.so")
+    query = acl.aclrtHostMemMapCapabilities
+    query.argtypes = [ctypes.c_uint32, ctypes.c_int, ctypes.POINTER(ctypes.c_int)]
+    query.restype = ctypes.c_int
+    capability = ctypes.c_int()
+    status = query(device, _ACL_HAC_AIV, ctypes.byref(capability))
+    if status == _ACL_ERROR_RT_FEATURE_NOT_SUPPORT or (status == 0 and capability.value == 0):
+        pytest.skip(
+            f"Native AIV Host mapping unavailable: status={status}, "
+            f"capability={capability.value}; requires HDK with native AIV Host mapping support"
+        )
+    if status != 0:
+        raise RuntimeError(f"AIV Host mapping capability query failed unexpectedly: status={status}")
 
 
 def _reference_hisparse_resolve_residency(topk, requests, states, source, resident, hot_table, dgi, lru, block):
@@ -83,6 +105,7 @@ def _reference_hisparse_resolve_residency(topk, requests, states, source, reside
 
 @pytest.mark.parametrize("capture", [False, True])
 @pytest.mark.parametrize("compact", [False, True])
+@pytest.mark.usefixtures("require_native_host_mapping")
 def test_random_request_unions(capture, compact):
     """Vary query counts, request order, stable state, duplicates and residency."""
     rows, topk, hot_size, block, width, requests_count = 40, 8, 16, 4, 16, 8
@@ -244,6 +267,7 @@ def test_random_request_unions(capture, compact):
 
 @pytest.mark.parametrize("rows,topk,row_bytes", [(1, 17, 656), (4, 2048, 656), (16, 2048, 1152)])
 @pytest.mark.parametrize("capture", [False, True])
+@pytest.mark.usefixtures("require_native_host_mapping")
 def test_compact_refill_tiles_current_counts_and_preserves_page_gaps(rows, topk, row_bytes, capture):
     block = 128
     blocks = (rows * topk + block - 1) // block + 1
@@ -309,6 +333,7 @@ def test_compact_refill_tiles_current_counts_and_preserves_page_gaps(rows, topk,
 @pytest.mark.parametrize("query_rows,hot_size", [(2, 4096), (4, 10240), (3, 4096)])
 @pytest.mark.parametrize("cross_stream", [False, True])
 @pytest.mark.parametrize("dtype,width", [(torch.bfloat16, 576), (torch.int8, 656)])
+@pytest.mark.usefixtures("require_native_host_mapping")
 def test_topk_2048_speculative_union_graph(query_rows, hot_size, cross_stream, dtype, width):
     topk, block = 2048, 128
     positions = query_rows * topk
@@ -431,6 +456,7 @@ def test_topk_2048_speculative_union_graph(query_rows, hot_size, cross_stream, d
     mapping.close()
 
 
+@pytest.mark.usefixtures("require_native_host_mapping")
 def test_plan_gather_respects_request_state_padding():
     host = allocate_mapped_host((32, 16), torch.float32)
     mapping = host._hisparse_registration
@@ -988,6 +1014,7 @@ def test_resident_parallel_rows_preserve_output_neighbors(valid_count):
 
 
 @pytest.mark.parametrize("count", [1, 2047])
+@pytest.mark.usefixtures("require_native_host_mapping")
 def test_batch_dma_to_mapped_host(count):
     """The existing D2H ABI writes the same allocation that AIV reads."""
     if not hasattr(torch.ops._C_ascend, "swap_blocks_batch"):
