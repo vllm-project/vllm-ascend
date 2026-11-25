@@ -142,7 +142,10 @@ def test_v41_draft_routes_to_v41():
 
     from vllm_ascend.attention.dsa_v41 import AscendDSAV41Impl
 
-    config = SimpleNamespace(compilation_config=SimpleNamespace(static_forward_context={}))
+    config = SimpleNamespace(
+        compilation_config=SimpleNamespace(static_forward_context={}),
+        cache_config=SimpleNamespace(cache_dtype="auto"),
+    )
     with (
         patch.object(DeepseekV41SWAAttention, "__init__", initialize_base),
         # The draft is built under a PCP=1 config; is_pcp_enabled() reads the
@@ -260,7 +263,10 @@ def test_v41_draft_context_store_routes_packed_a5_cache_to_device_writer():
     cache = torch.empty(3, 128, 1, 8)
     writer = MagicMock()
     attn = SimpleNamespace(
-        packed_cache_ops=SimpleNamespace(write_attention_cache=writer),
+        # The A5 marker is what _store_standard_swa_kv keys off before it
+        # routes through the device writer; without it the call falls back to
+        # the scatter path this test is not exercising.
+        packed_cache_ops=SimpleNamespace(uses_a5_packed_cache=True, write_attention_cache=writer),
         dsa_attn=SimpleNamespace(swa_cache_layer=SimpleNamespace(block_size=128, kv_cache=[cache])),
     )
     slots = torch.tensor([129, -1, 258])
@@ -300,6 +306,7 @@ def test_draft_constructor_uses_upstream_head_contracts(monkeypatch, draft_vocab
         parallel_config=SimpleNamespace(use_sequence_parallel_moe=False),
         model_config=SimpleNamespace(dtype=torch.float16),
         quant_config=quant_config,
+        cache_config=SimpleNamespace(cache_dtype="auto"),
     )
     module = deepseek_v41_dspark_module
     draft_impls = []

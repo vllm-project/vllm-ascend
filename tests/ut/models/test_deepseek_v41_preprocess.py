@@ -124,6 +124,9 @@ def test_preprocess_equivalence_and_stream_dependencies(
                 cache[slot[0], slot[1]].copy_(value)
 
     class A5Backend:
+        # _packed_cache_ready() keys off this marker to recognise a packed ABI.
+        uses_a5_packed_cache = True
+
         @staticmethod
         def write_attention_cache(cache, slots, values, *, kind):
             assert kind == "win"

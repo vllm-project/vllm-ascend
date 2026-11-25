@@ -965,16 +965,18 @@ class AscendDSAV41MetadataBuilder(AttentionMetadataBuilder[AscendDSAV41Metadata]
         self._device_metadata_tasks: tuple[DeviceMetadataTask, ...] = ()
 
     def _resolve_layer_compress_ratio(self) -> int:
-        config = self.vllm_config.model_config.hf_text_config
-        ratios = tuple(config.compress_ratios)[: int(config.num_hidden_layers)]
         for name in self._v41_layer_names:
             _, sep, rest = name.partition(".layers.")
             if not sep:
                 continue
             head = rest.split(".", 1)[0]
-            if head.isdigit() and int(head) < len(ratios):
-                return int(ratios[int(head)])
-            return 0
+            # isdigit() alone accepts non-ASCII numerals that int() rejects.
+            if not (head.isascii() and head.isdigit()):
+                continue
+            layer_idx = int(head)
+            config = self.vllm_config.model_config.hf_text_config
+            ratios = tuple(config.compress_ratios)[: int(config.num_hidden_layers)]
+            return int(ratios[layer_idx]) if layer_idx < len(ratios) else 0
         return 0
 
     @classmethod

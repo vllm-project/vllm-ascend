@@ -329,7 +329,7 @@ def builders(monkeypatch):
                 cudagraph_capture_sizes=graph_sizes,
                 cudagraph_mode=CUDAGraphMode.NONE if decode_sharded else CUDAGraphMode.FULL_DECODE_ONLY,
             ),
-            cache_config=SimpleNamespace(block_size=8),
+            cache_config=SimpleNamespace(block_size=8, cache_dtype="auto"),
             model_config=SimpleNamespace(
                 hf_text_config=SimpleNamespace(
                     sliding_window=4,
@@ -337,6 +337,9 @@ def builders(monkeypatch):
                     head_dim=2,
                     qk_rope_head_dim=2,
                     index_topk=3,
+                    # Layer 0 of the backbone; ratio 2 matches the specs below.
+                    compress_ratios=[2],
+                    num_hidden_layers=1,
                 )
             ),
         )
@@ -567,10 +570,10 @@ class TestPCPMetadata:
         _build_planes(owners, _batch(4, 3, "prefill", decode_sharded=True))
         for builder in (owners["swa"], owners["compressor_state"]):
             if packed_cache:
-                builder._a5_smla_metadata = torch.ones(dsa_v41.V41_METADATA_BUFFER_SIZE, dtype=torch.int32)
+                builder._packed_smla_metadata = torch.ones(dsa_v41.V41_METADATA_BUFFER_SIZE, dtype=torch.int32)
             captured = [builder._smla_metadata, builder._qli_metadata, builder._c2_ring_metadata]
             if packed_cache:
-                captured.append(builder._a5_smla_metadata)
+                captured.append(builder._packed_smla_metadata)
             for buffer in captured:
                 buffer.fill_(1)
             addresses = [buffer.data_ptr() for buffer in captured]
@@ -772,7 +775,7 @@ class TestPCPMetadata:
         calls = []
         for owner in (swa_builder, swa_builder._global_builder):
             owner._uses_a5_packed_cache = True
-            owner._a5_smla_metadata = torch.zeros(dsa_v41.V41_METADATA_BUFFER_SIZE, dtype=torch.int32)
+            owner._packed_smla_metadata = torch.zeros(dsa_v41.V41_METADATA_BUFFER_SIZE, dtype=torch.int32)
             owner._a5_smla_length_rows = torch.empty(64, 1, dtype=torch.int32)
 
             def metadata(*args, **kwargs):
@@ -780,7 +783,7 @@ class TestPCPMetadata:
                 return torch.ones(dsa_v41.V41_METADATA_BUFFER_SIZE, dtype=torch.int32)
 
             owner._device_backend = SimpleNamespace(mixed_quant_sparse_flash_mla_metadata=metadata)
-        address = swa_builder._a5_smla_metadata.data_ptr()
+        address = swa_builder._packed_smla_metadata.data_ptr()
         for scenario in ("prefill", "dummy", "decode", "mixed", "empty", "prefill"):
             batch = _batch(2, rank, scenario)
             with swa_builder.defer_device_metadata(in_graph=batch.graph):
@@ -790,11 +793,11 @@ class TestPCPMetadata:
             assert len(tasks) == int(bool(batch.local_ids))
             for task in tasks:
                 assert task.stage == dsa_v41.DeviceMetadataStage.ATTENTION
-                assert task.group_id == id(swa_builder._a5_smla_metadata)
+                assert task.group_id == id(swa_builder._packed_smla_metadata)
                 task.run()
                 torch.testing.assert_close(calls[-1], result.query_start_loc)
-            assert swa_builder._a5_smla_metadata.data_ptr() == address
-            assert torch.count_nonzero(swa_builder._global_builder._a5_smla_metadata) == 0
+            assert swa_builder._packed_smla_metadata.data_ptr() == address
+            assert torch.count_nonzero(swa_builder._global_builder._packed_smla_metadata) == 0
 
     def test_rejects_unsupported_context(self, builders):
         with pytest.raises(NotImplementedError, match="DCP=1"):
