@@ -15,7 +15,7 @@ from .mtp import Q6_MAX_CONTEXT
 class DecodeWeights:
     """TP1 GLM-5.3-Flash weights. Prepared MX codes are [out, in] and the two E8M0
     scales per 64 input channels are packed into int16 [in // 64, out].
-    Q6 can reuse a native FRACTAL_NZ [in, out] output matrix and input-major W_UK and W_UV.
+    Q6 can reuse native FRACTAL_NZ [in, out] projection matrices and input-major W_UK and W_UV.
     """
 
     qkv_a: torch.Tensor
@@ -90,10 +90,10 @@ def prepare_decode_weights(impl) -> DecodeWeights:
     ):
         raise ValueError("Expected a replicated 64-head GLM-5.3-Flash NoPE layer with a runtime KeyPool indexer")
     indexer = impl.indexer.impl
-    qkv_a, qkv_a_scales = _mx_weight(impl.fused_qkv_a_proj, 2048, 4096)
-    q_b, q_b_scales = _mx_weight(impl.q_proj, 16384, 1536)
     # At 1M the extra projection copies can evict reusable KV prefixes.
     native_layout = impl.vllm_config.model_config.max_model_len == Q6_MAX_CONTEXT
+    qkv_a, qkv_a_scales = _mx_weight(impl.fused_qkv_a_proj, 2048, 4096, allow_native_output=native_layout)
+    q_b, q_b_scales = _mx_weight(impl.q_proj, 16384, 1536, allow_native_output=native_layout)
     out, out_scales = _mx_weight(impl.o_proj, 4096, 16384, allow_native_output=native_layout)
     key_heads = _nd(indexer.wk_weights_proj.weight)
     if key_heads.shape != (160, 4096) or indexer.head_dim != 128:

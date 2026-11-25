@@ -35,7 +35,7 @@ def _quantize_heads(src, code, sf, chunk, weights=None):
             S.vsts(code[h, 64], qb, mask, "PK4_B32")
 
 
-def program(batch, pages, page, ctx, tail):
+def program(batch):
     chunk = 8
 
     @T.prim_func

@@ -36,7 +36,7 @@ def test_mtp5_1m_bind_uses_worker_tables_and_graph_geometry(monkeypatch):
     for tokens, padded_rows in ((216, 256), (324, 384), (360, 384)):
         impl.vllm_config.scheduler_config.max_num_batched_tokens = tokens
         layer = runtime.DecodeLayer(impl)
-        assert layer.head_panel.shape == (padded_rows + 32, 4096)
+        assert layer.head_panel.shape == (28, 32, 176)
         assert layer.indices.shape == (padded_rows, 2176)
     compile_runner = Mock()
     monkeypatch.setattr(runtime, "MtpQueryAttention", compile_runner)
@@ -161,7 +161,7 @@ def test_mtp_native_projection_layout_matches_context(monkeypatch, context):
         weights,
         "torch_npu",
         SimpleNamespace(
-            get_npu_format=lambda t: 29 if t.shape == impl.o_proj.weight.shape else 2,
+            get_npu_format=lambda t: 29 if t.dtype == torch.float8_e4m3fn else 2,
             npu_format_cast=lambda t, fmt: t,
         ),
     )
@@ -169,8 +169,12 @@ def test_mtp_native_projection_layout_matches_context(monkeypatch, context):
     result = weights.prepare_decode_weights(impl)
 
     if context == 1048576:
+        assert result.qkv_a.shape == impl.fused_qkv_a_proj.weight.shape
+        assert result.q_b.shape == impl.q_proj.weight.shape
         assert result.out.shape == impl.o_proj.weight.shape
         assert result.w_uk.shape == impl.W_UK_T.shape and result.w_uv.shape == impl.W_UV.shape
     else:
+        assert result.qkv_a.shape == impl.fused_qkv_a_proj.weight.T.shape
+        assert result.q_b.shape == impl.q_proj.weight.T.shape
         assert result.out.shape == impl.o_proj.weight.T.shape
         assert result.w_uk.shape == impl.W_UK_T.mT.shape and result.w_uv.shape == impl.W_UV.mT.shape

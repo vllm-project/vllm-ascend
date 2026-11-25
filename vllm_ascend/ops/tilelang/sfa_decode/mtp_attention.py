@@ -4,7 +4,7 @@
 import torch
 
 from . import compile_mtp_decode
-from .mtp import PAGE_SIZE, mtp_projection_rows, score_context
+from .mtp import INDEX_HEAD_PANEL_SHAPE, PAGE_SIZE, mtp_projection_rows, score_context
 from .weights import DecodeWeights
 from .workspace import scratch_allocator
 
@@ -52,6 +52,8 @@ class MtpQueryAttention:
             tokens=self.tokens,
             model_context=model_context,
             table_columns=self.table_columns,
+            native_qkv_a=weights.qkv_a.shape == (4096, 2048),
+            native_q_b=weights.q_b.shape == (1536, 16384),
             native_output=weights.out.shape == (16384, 4096),
             native_head_weights=weights.w_uv.shape == (64, 512, 256),
         )
@@ -84,20 +86,46 @@ class MtpQueryAttention:
         self.parts = allocate((rows // 32, 32, 32, 32), f32)
         self.key_gate = allocate((rows, 256))
         self.projected = allocate((self.tokens, 256), f32)
-        self.head_panel = self.pack_head_panel(weights, rows) if head_panel is None else head_panel[: rows + 32]
+        self.head_panel = self.pack_head_panel(weights) if head_panel is None else head_panel
+
+        w = weights
+        self.input_projection = (
+            self.hidden_codes,
+            self.hidden_scales,
+            w.qkv_a,
+            w.qkv_a_scales,
+            self.qkv,
+            w.q_norm,
+            w.kv_norm,
+        )
+        self.query_projection = (
+            self.norm,
+            self.norm_codes,
+            self.norm_scales,
+            w.q_b,
+            w.q_b_scales,
+            self.query_b,
+            w.w_uk,
+            w.index_query,
+            w.index_heads,
+            self.head_panel,
+            self.parts,
+            w.index_key_gate.view(1, 256, 4096),
+            self.key_gate,
+            w.index_norm,
+            w.index_bias,
+            self.projected,
+            w.index_ape,
+        )
 
     @staticmethod
-    def pack_head_panel(weights, rows):
-        head_panel = torch.zeros((rows + 32, 4096), device=weights.index_heads.device, dtype=torch.float32)
-        # Each Cube partial starts on a 16-element boundary. Keep the leading
-        # padding, including the final 127-element segment starting at 3969.
-        panels = head_panel.flatten()[: 28 * 32 * 176].view(28, 32, 176)
-        for segment in range(28):
-            start = segment * 147
-            width = min(147, 4096 - start)
-            offset = start % 16
-            panels[segment, :, offset : offset + width].copy_(weights.index_heads[:, start : start + width])
-        return head_panel
+    def pack_head_panel(weights):
+        heads = weights.index_heads
+        panel = heads.new_zeros(INDEX_HEAD_PANEL_SHAPE, dtype=torch.float32)
+        for part, chunk in enumerate(heads.split(147, dim=1)):
+            offset = part * 147 % 16
+            panel[part, :, offset : offset + chunk.size(1)].copy_(chunk)
+        return panel
 
     def __call__(
         self,
@@ -127,11 +155,13 @@ class MtpQueryAttention:
         if hidden.shape != (self.tokens, 4096) or output.shape != hidden.shape:
             raise ValueError("Input and output must match the compiled decode bucket")
         if (
-            index_storage.shape != (self.index_pages, 4352)
-            or index_storage.dtype != torch.uint8
+            index_storage.dtype != torch.uint8
+            or index_storage.shape != (self.index_pages, 4352)
             or not index_storage.is_contiguous()
         ):
-            raise ValueError("Expected contiguous uint8 index pages of 4352 bytes")
+            raise ValueError("Expected contiguous uint8 index storage with 4352 bytes per page")
+        keys = index_storage.view(torch.float8_e4m3fn).view(self.index_pages, 34, 128)
+        scales = index_storage.view(torch.float32).view(self.index_pages, 1088)
         if ring.shape != (self.ring_pages, 9, 256) or ring.stride() != (289 * 256, 256, 1):
             raise ValueError("Expected the nine-row KeyPool ring view with a 289-row physical stride")
         if ring_pages.shape != (self.requests,) or ring_pages.stride() != (self.ring_table_stride,):
@@ -151,13 +181,11 @@ class MtpQueryAttention:
         ):
             raise ValueError("Page tables must match their compiled row widths")
         w = self.weights
-        keys = index_storage.view(torch.float8_e4m3fn).view(self.index_pages, 34, 128)
-        scales = index_storage.view(torch.float32).view(self.index_pages, 1088)[:, 1024:1056]
         self.kernel(
             self.q,
             self.q_scale,
             keys,
-            scales,
+            scales[:, 1024:1056],
             self.head_weight,
             index_table,
             lengths,
@@ -180,31 +208,9 @@ class MtpQueryAttention:
             w.out_scales,
             output,
             hidden,
-            self.hidden_codes,
-            self.hidden_scales,
-            w.qkv_a,
-            w.qkv_a_scales,
-            self.qkv,
-            w.q_norm,
-            w.kv_norm,
+            *self.input_projection,
             main_slots.view(self.tokens, 1),
-            self.norm,
-            self.norm_codes,
-            self.norm_scales,
-            w.q_b,
-            w.q_b_scales,
-            self.query_b,
-            w.w_uk,
-            w.index_query,
-            w.index_heads,
-            self.head_panel,
-            self.parts,
-            w.index_key_gate.view(1, 256, 4096),
-            self.key_gate,
-            w.index_norm,
-            w.index_bias,
-            self.projected,
-            w.index_ape,
+            *self.query_projection,
             ring_pages,
             ring,
             index_slots,

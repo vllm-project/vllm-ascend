@@ -5,19 +5,24 @@ from tilelang import tvm
 from tvm import tirx
 
 
+def instruction(op, *args):
+    return tirx.Evaluate(tirx.call_intrin("void", tvm.ir.Op.get("tl." + op), *args))
+
+
+def engine_block(kind, stmt):
+    attrs = {"vector_count": tirx.IntImm("int32", 2)} if kind == "VECTOR" else {}
+    return tirx.SBlock([], [], [], kind, stmt, annotations=attrs)
+
+
 def checkpoint():
     def half(name, send, receive, pipe):
-        def ev(op, *args):
-            return tirx.Evaluate(tirx.call_intrin("void", tvm.ir.Op.get("tl." + op), *args))
-
         ops = [
-            ev("ascend_pipe_barrier", "PIPE_ALL"),
-            ev("ascend_cross_core_set_flag", 2, pipe, send),
-            ev("ascend_cross_core_wait_flag", 2, "PIPE_MTE2", receive),
-            ev("ascend_pipe_barrier", "PIPE_ALL"),
+            instruction("ascend_pipe_barrier", "PIPE_ALL"),
+            instruction("ascend_cross_core_set_flag", 2, pipe, send),
+            instruction("ascend_cross_core_wait_flag", 2, "PIPE_MTE2", receive),
+            instruction("ascend_pipe_barrier", "PIPE_ALL"),
         ]
-        ann = {"vector_count": tirx.IntImm("int32", 2)} if name == "VECTOR" else {}
-        return tirx.SBlock([], [], [], name, tirx.SeqStmt(ops), annotations=ann)
+        return engine_block(name, tirx.SeqStmt(ops))
 
     return tirx.SeqStmt([half("CUBE", 15, 14, "PIPE_FIX"), half("VECTOR", 14, 15, "PIPE_MTE3")])
 
@@ -43,17 +48,13 @@ def body_at(fn, shared, logical_index):
 
 
 def grid_barrier(*, pair_at_entry=True):
-    def ev(op, *args):
-        return tirx.Evaluate(tirx.call_intrin("void", tvm.ir.Op.get("tl." + op), *args))
-
     def rendezvous(kind, pipeline, flag):
         statements = [
-            ev("ascend_pipe_barrier", "PIPE_ALL"),
-            ev("ascend_cross_core_set_flag", 0, pipeline, flag),
-            ev("ascend_cross_core_wait_flag", 0, pipeline, flag),
+            instruction("ascend_pipe_barrier", "PIPE_ALL"),
+            instruction("ascend_cross_core_set_flag", 0, pipeline, flag),
+            instruction("ascend_cross_core_wait_flag", 0, pipeline, flag),
         ]
-        ann = {"vector_count": tirx.IntImm("int32", 2)} if kind == "VECTOR" else {}
-        return tirx.SBlock([], [], [], kind, tirx.SeqStmt(statements), annotations=ann)
+        return engine_block(kind, tirx.SeqStmt(statements))
 
     barriers = [rendezvous("CUBE", "PIPE_FIX", 12), rendezvous("VECTOR", "PIPE_MTE3", 13), checkpoint()]
     if pair_at_entry:
@@ -104,8 +105,7 @@ def per_kind(stmt, kind):
     if kind in scopes:
         assert set(scopes) == {kind}, scopes
         return stmt
-    attrs = {"vector_count": tirx.IntImm("int32", 2)} if kind == "VECTOR" else {}
-    return tirx.SBlock([], [], [], kind, stmt, annotations=attrs)
+    return engine_block(kind, stmt)
 
 
 def _cube_tile_fence(body):

@@ -99,7 +99,7 @@ class DecodeLayer:
         self.capacity = min(scheduler.max_num_seqs, Q6_MAX_REQUESTS)
         self.max_tokens = min(self.capacity * TOKENS_PER_REQUEST, scheduler.max_num_batched_tokens)
         rows = mtp_projection_rows(self.max_tokens)
-        self.head_panel = MtpQueryAttention.pack_head_panel(self.weights, rows)
+        self.head_panel = MtpQueryAttention.pack_head_panel(self.weights)
         size = mtp_scratch_bytes(self.capacity, self.max_tokens, score_context(self.model_context))
         device = self.weights.qkv_a.device
         # All layers on one worker use the same arena. Reserve it before KV sizing.

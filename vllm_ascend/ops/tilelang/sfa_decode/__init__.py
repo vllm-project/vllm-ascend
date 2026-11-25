@@ -3,49 +3,11 @@
 
 """TileLang kernels for replicated GLM-5.3-Flash NoPE attention on Ascend 950."""
 
-from functools import lru_cache
 
+def compile_mtp_decode(requests, index_pages, main_pages, ring_pages, **options):
+    """Compile the target-model graph for MTP5, respecting each page table's physical width."""
+    from .mtp.entry import compile_mtp_decode as compile_graph
 
-@lru_cache(maxsize=128)
-def compile_mtp_decode(
-    requests,
-    index_pages,
-    main_pages,
-    ring_pages,
-    *,
-    ring_table_stride=1,
-    index_width=2176,
-    tokens=None,
-    model_context=139264,
-    table_columns=None,
-    native_output=False,
-    native_head_weights=False,
-):
-    """Compile the six-query C8 decode graph. Use the tensor layout in mtp.live_cache_abi.
-
-    The main and indexer page tables retain their own physical row strides.
-    The caller owns the workspace, output and writable cache buffers.
-    """
-    from .mtp import PAGE_SIZE, Q6_MAX_CONTEXT, score_context
-    from .mtp.entry import build
-
-    if not 0 < model_context <= Q6_MAX_CONTEXT:
-        raise ValueError("Expected an MTP5 context between 1 and 1048576 tokens")
-    required = (model_context + PAGE_SIZE - 1) // PAGE_SIZE
-    main_cols, index_cols = table_columns or (required, required)
-    if min(main_cols, index_cols) < required:
-        raise ValueError("Page tables cannot cover the configured context")
-    return build(
-        requests,
-        requests * 6 if tokens is None else tokens,
-        index_pages,
-        score_context(model_context),
-        main_pages,
-        main_cols,
-        ring_pages,
-        ring_table_stride,
-        index_width,
-        index_cols,
-        native_output=native_output,
-        native_head_weights=native_head_weights,
-    )
+    if options.get("table_columns") is not None:
+        options["table_columns"] = tuple(options["table_columns"])
+    return compile_graph(requests, index_pages, main_pages, ring_pages, **options)

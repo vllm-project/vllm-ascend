@@ -4,9 +4,10 @@
 import tilelang.ascend.language as T
 
 
-def partial_projection(batch, parts, bm, bn):
+def partial_projection(batch, parts, bm, bn, *, rollback=False):
     assert batch % bm == 256 % bn == 0 and parts <= 32
     width = ((4096 + parts - 1) // parts) // 16 * 16
+    width = 640 if rollback else width
     last = 4096 - (parts - 1) * width
 
     @T.macro
