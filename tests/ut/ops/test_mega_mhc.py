@@ -99,25 +99,25 @@ def test_ozaki_rejects_invalid_shapes_and_nz_alignment():
 
 def test_c4_index_map_gathers_coefficient_layout():
     offsets = build_c4_index_map()
-    assert (offsets.dtype, offsets.shape, offsets.nbytes) == (torch.int32, (408,), 1632)
+    assert (offsets.dtype, offsets.shape, offsets.nbytes) == (torch.int32, (304,), 1216)
     assert torch.all((offsets >= 0) & (offsets % 4 == 0) & (offsets < 192 * 1024))
-    reduction, sig, comb, scale1, scale2, post = (offsets // 4).split((256, 32, 64, 8, 16, 32))
-    matrix = torch.arange(64).reshape(4, 4, 4)
-    expected = (
-        matrix[:, :, [1, 0, 3, 2]],
-        matrix[:, :, [2, 3, 0, 1]],
-        matrix[:, [1, 0, 3, 2], :],
-        matrix[:, [2, 3, 0, 1], :],
-    )
-    for indices, permuted in zip(reduction.split(64), expected, strict=True):
-        assert torch.equal(matrix.flatten()[indices], permuted.flatten())
+    sig, comb, base_comb, scale_sig, scale_comb, post, unpack_comb = (offsets // 4).split((32, 128, 32, 8, 8, 32, 64))
     logits = torch.arange(256).reshape(4, 64)
     assert torch.equal(logits.flatten()[sig], logits[:, :8].flatten())
-    assert torch.equal(logits.flatten()[comb], logits[:, 8:24].flatten())
-    assert scale1.tolist() == [0, 0, 0, 0, 1, 1, 1, 1]
-    assert scale2.tolist() == [2] * 16
+    gathered_comb = logits.flatten()[comb].reshape(4, 4, 8)
+    assert torch.equal(gathered_comb[:, :, :4], logits[:, 8:24].reshape(4, 4, 4))
+    assert torch.all(gathered_comb[:, :, 4:] == logits[0, 0])
+    params = torch.arange(40)
+    expanded_base = params[base_comb].reshape(4, 8)
+    expected_base = params[24:40].reshape(4, 4)
+    assert torch.equal(expanded_base[:, :4], expected_base)
+    assert torch.equal(expanded_base[:, 4:], expected_base[:, 3:4].expand(4, 4))
+    assert scale_sig.tolist() == [0, 0, 0, 0, 1, 1, 1, 1]
+    assert scale_comb.tolist() == [2] * 8
     sigmoid = torch.arange(32).reshape(4, 8)
     assert torch.equal(sigmoid.flatten()[post].reshape(4, 8), sigmoid[:, 4:].repeat(1, 2))
+    padded_comb = torch.arange(128).reshape(4, 4, 8)
+    assert torch.equal(padded_comb.flatten()[unpack_comb].reshape(4, 4, 4), padded_comb[:, :, :4])
 
 
 def test_stable_sigmoid_boundary():
@@ -632,6 +632,7 @@ def test_decoupled_launch_coefficients_async_records_streams_and_handles_capture
     assert outputs == (out_post, out_comb, out_pre)
     assert recorded_streams == [
         (id(inputs.residual), "side"),
+        (id(prepared.tensor), "side"),
         (id(inputs.hc_scale), "side"),
         (id(inputs.hc_base), "side"),
         (id(r_sq), "side"),
@@ -647,7 +648,9 @@ def test_decoupled_launch_coefficients_async_records_streams_and_handles_capture
         ("exit_stream", "side"),
     ]
 
-    # When graph capture is active, record_stream is skipped.
+    # When graph capture is active on an explicit different main_stream, capture is
+    # queried on that stream and record_stream is skipped.
+    alt_main_stream = _FakeStream("alt_main")
     recorded_streams.clear()
     stream_events.clear()
     capturing_state["value"] = True
@@ -660,13 +663,22 @@ def test_decoupled_launch_coefficients_async_records_streams_and_handles_capture
         side_stream=side_stream,
         ready_event=ready_event,
         done_event=done_event,
-        main_stream=main_stream,
+        main_stream=alt_main_stream,
         r_sq=r_sq,
     )
     assert recorded_streams == []
-    assert stream_events[0] == ("record", ("ready", "main"))
+    assert stream_events == [
+        ("enter_stream", "alt_main"),
+        ("exit_stream", "alt_main"),
+        ("record", ("ready", "alt_main")),
+        ("enter_stream", "side"),
+        ("wait_event", ("side", "ready")),
+        ("record", ("done", "side")),
+        ("exit_stream", "side"),
+    ]
 
-    # On failure inside run_coefficients, done_event is still recorded before re-raising.
+    # Invalid inputs raise ValueError BEFORE touching ready_event, side_stream, or done_event.
+    recorded_streams.clear()
     stream_events.clear()
     capturing_state["value"] = False
     with pytest.raises(ValueError, match="hc_scale must have shape"):
@@ -681,8 +693,91 @@ def test_decoupled_launch_coefficients_async_records_streams_and_handles_capture
             done_event=done_event,
             main_stream=main_stream,
         )
-    assert ("record", ("done", "side")) in stream_events
-    assert stream_events[-1] == ("exit_stream", "side")
+    assert stream_events == []
+    assert recorded_streams == []
+
+    with pytest.raises(ValueError, match="device constants must be prepared"):
+        backend.launch_coefficients_async(
+            inputs.residual,
+            replace(prepared, index_map_ready=False),
+            inputs.hc_scale,
+            inputs.hc_base,
+            {},
+            side_stream=side_stream,
+            ready_event=ready_event,
+            done_event=done_event,
+            main_stream=main_stream,
+        )
+    assert stream_events == []
+
+    with pytest.raises(ValueError, match="Invalid mHC attributes"):
+        backend.launch_coefficients_async(
+            inputs.residual,
+            prepared,
+            inputs.hc_scale,
+            inputs.hc_base,
+            {"unknown_attr": 1},
+            side_stream=side_stream,
+            ready_event=ready_event,
+            done_event=done_event,
+            main_stream=main_stream,
+        )
+    assert stream_events == []
+
+    # On runtime failure inside run_coefficients, done_event is still recorded in finally:.
+    stream_events.clear()
+    recorded_streams.clear()
+
+    def failing_coeff(*args, **kwargs):
+        raise RuntimeError("kernel launch failed")
+
+    monkeypatch.setattr(torch.ops._C_ascend, "npu_mhc_coefficients_ozaki", failing_coeff, raising=False)
+    with pytest.raises(RuntimeError, match="kernel launch failed"):
+        backend.launch_coefficients_async(
+            inputs.residual,
+            prepared,
+            inputs.hc_scale,
+            inputs.hc_base,
+            {},
+            side_stream=side_stream,
+            ready_event=ready_event,
+            done_event=done_event,
+            main_stream=main_stream,
+        )
+    assert stream_events == [
+        ("record", ("ready", "main")),
+        ("enter_stream", "side"),
+        ("wait_event", ("side", "ready")),
+        ("record", ("done", "side")),
+        ("exit_stream", "side"),
+    ]
+
+    # On runtime failure inside record_stream (after wait_event), done_event is STILL recorded.
+    stream_events.clear()
+
+    def failing_record_stream(self, stream):
+        raise RuntimeError("record_stream failed")
+
+    monkeypatch.setattr(torch.Tensor, "record_stream", failing_record_stream)
+    with pytest.raises(RuntimeError, match="record_stream failed"):
+        backend.launch_coefficients_async(
+            inputs.residual,
+            prepared,
+            inputs.hc_scale,
+            inputs.hc_base,
+            {},
+            side_stream=side_stream,
+            ready_event=ready_event,
+            done_event=done_event,
+            main_stream=main_stream,
+        )
+    assert stream_events == [
+        ("record", ("ready", "main")),
+        ("enter_stream", "side"),
+        ("wait_event", ("side", "ready")),
+        ("record", ("done", "side")),
+        ("exit_stream", "side"),
+    ]
 
 
 def test_native_fallback_npu_without_rms_norm_cast_falls_back_to_npu_rms_norm(monkeypatch):
@@ -807,7 +902,7 @@ def test_torch_split_seam_vectorized_matches_loop_reference():
     prepared = backend.prepare({"hc_fn": hc_fn, "version_tag": "v1"}, "cpu", A3)
     out = backend.run(inputs, prepared, {"return_v_fp32": True})
 
-    # Reference explicit loop calculation for HcPost and collapse.
+    # Reference explicit loop calculation for HcPost and collapse with default norm_eps=1e-20.
     ref_updated = inputs.y.float().unsqueeze(1) * inputs.post.unsqueeze(-1)
     for lane, comb_col in zip(inputs.residual.float().unbind(1), inputs.comb.unbind(1)):
         ref_updated = ref_updated + lane.unsqueeze(1) * comb_col.unsqueeze(-1)
@@ -818,9 +913,98 @@ def test_torch_split_seam_vectorized_matches_loop_reference():
     for piece in ref_pieces[1:]:
         ref_collapsed = ref_collapsed + piece
     ref_collapsed = ref_collapsed.to(inputs.y.dtype).float()
-    ref_denom = (ref_collapsed.square().mean(-1, keepdim=True) + 1e-6).sqrt()
+    ref_denom = (ref_collapsed.square().mean(-1, keepdim=True) + 1e-20).sqrt()
     ref_v = ((ref_collapsed * ref_denom.reciprocal()) * inputs.gamma.float()).to(inputs.y.dtype)
 
-    torch.testing.assert_close(out.residual, ref_updated, atol=1e-2, rtol=1e-2)
-    torch.testing.assert_close(out.v, ref_v, atol=1e-2, rtol=1e-2)
+    # BF16 outputs from identical FP32 math may differ by at most 1 BF16 ULP from summation order.
+    assert torch.max((out.residual.view(torch.int16) - ref_updated.view(torch.int16)).abs()).item() <= 1
+    assert torch.max((out.v.view(torch.int16) - ref_v.view(torch.int16)).abs()).item() <= 1
     assert out.v_fp32 is not None and out.v_fp32.dtype == torch.float32
+    torch.testing.assert_close(out.v_fp32, out.v.bfloat16().float(), atol=0, rtol=0)
+
+    # Small-norm case where norm_eps=1e-20 vs custom norm_eps=1e-4 produces a sharp, verifiable gap.
+    tiny_inputs = replace(
+        inputs,
+        y=torch.full_like(inputs.y, 1e-4),
+        residual=torch.zeros_like(inputs.residual),
+        post=torch.ones_like(inputs.post),
+        comb=torch.zeros_like(inputs.comb),
+        pre_mix=torch.full_like(inputs.pre_mix, 0.25),
+        gamma=torch.ones_like(inputs.gamma),
+    )
+    out_default_eps = backend.run(tiny_inputs, prepared, {"return_v_fp32": True})
+    out_large_eps = backend.run(tiny_inputs, prepared, {"return_v_fp32": True, "norm_eps": 1e-4})
+    torch.testing.assert_close(
+        out_default_eps.v.float(), torch.ones_like(tiny_inputs.y, dtype=torch.float32), atol=1e-5, rtol=1e-5
+    )
+    tiny_val = float(torch.tensor(1e-4, dtype=torch.bfloat16).float())
+    expected_large = torch.full_like(
+        tiny_inputs.y,
+        tiny_val / math.sqrt(tiny_val**2 + 1e-4),
+    )
+    torch.testing.assert_close(out_large_eps.v.float(), expected_large.float(), atol=1e-5, rtol=1e-5)
+
+
+def test_torch_split_seam_avoids_bmm_when_npu_hf32_enabled(monkeypatch):
+    from vllm_ascend.ops.mhc import registry as mhc_registry
+
+    inputs, hc_fn = _seam_case(T=4, C=3, D=32, dtype=torch.bfloat16)
+    attrs = mhc_registry._parse_attrs({})
+    ref = mhc_registry._torch_split_seam(inputs, hc_fn, attrs)
+
+    bmm_calls = {"count": 0}
+    real_bmm = torch.bmm
+
+    def spy_bmm(a, b):
+        bmm_calls["count"] += 1
+        return real_bmm(a, b)
+
+    monkeypatch.setattr(torch, "bmm", spy_bmm)
+
+    # When NPU HF32 is enabled, _torch_split_seam uses the exact FP32 vector path without calling bmm.
+    monkeypatch.setattr(mhc_registry, "_npu_hf32_enabled", lambda dev: True)
+    out_vec = mhc_registry._torch_split_seam(inputs, hc_fn, attrs)
+    assert bmm_calls["count"] == 0
+    assert torch.max((out_vec.residual.view(torch.int16) - ref.residual.view(torch.int16)).abs()).item() <= 1
+    assert torch.max((out_vec.v.view(torch.int16) - ref.v.view(torch.int16)).abs()).item() <= 1
+
+    # When NPU HF32 is disabled, _torch_split_seam uses the fast bmm path.
+    monkeypatch.setattr(mhc_registry, "_npu_hf32_enabled", lambda dev: False)
+    out_bmm = mhc_registry._torch_split_seam(inputs, hc_fn, attrs)
+    assert bmm_calls["count"] == 1
+    torch.testing.assert_close(out_bmm.residual, ref.residual, atol=0, rtol=0)
+    torch.testing.assert_close(out_bmm.v, ref.v, atol=0, rtol=0)
+
+    # Verify _npu_hf32_enabled inspects torch.npu.matmul.allow_hf32 without mutating it.
+    monkeypatch.undo()
+    fake_dev = SimpleNamespace(type="npu")
+    monkeypatch.setattr(torch, "npu", SimpleNamespace(matmul=SimpleNamespace(allow_hf32=True)), raising=False)
+    assert mhc_registry._npu_hf32_enabled(fake_dev) is True
+    assert torch.npu.matmul.allow_hf32 is True
+    monkeypatch.setattr(torch, "npu", SimpleNamespace(matmul=SimpleNamespace(allow_hf32=False)), raising=False)
+    assert mhc_registry._npu_hf32_enabled(fake_dev) is False
+    assert mhc_registry._npu_hf32_enabled(torch.device("cpu")) is False
+
+
+def test_lifecycle_rejects_non_contiguous_canonical_weights():
+    manager = MhcWeightLifecycleManager("cpu", A3)
+    non_contig = torch.randn(256, 24, dtype=torch.float32).T
+    assert not non_contig.is_contiguous()
+
+    manager.register_layer(
+        "l0",
+        ("seam_l0", "layer0_entry"),
+        load_canonical=lambda: non_contig,
+        version_tag="v1",
+        canonical=non_contig,
+    )
+    with pytest.raises(ValueError, match="contiguous 2D float32"):
+        manager.canonical_for("l0", "layer0_entry")
+
+    with pytest.raises(ValueError, match="contiguous 2D float32"):
+        manager.on_weight_update(
+            "l0", canonical=non_contig, version_tag="v2", load_canonical=lambda: torch.ones(24, 256)
+        )
+
+    with pytest.raises(ValueError, match="contiguous 2D float32"):
+        manager.prepare_layer("l0", replace(BF16_SEAM, D=64))

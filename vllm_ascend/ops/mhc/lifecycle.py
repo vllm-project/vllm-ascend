@@ -37,6 +37,12 @@ class MhcWeightLifecycleManager:
     retires and drains replays before a hook drops bindings, either through
     retire_graphs or before calling the hook. Captured graphs hold bindings
     for their generation and call validate_graph before replay.
+
+    ``peak_staged_weight_bytes`` tracks the maximum single-layer packed weight
+    size staged during sequential ``prepare_layer`` calls. When migrating a
+    layer to a packed A3 layout, its canonical source is copied to CPU and the
+    manager drops its canonical reference before allocating the packed device
+    tensor, bounding transient per-layer device staging to one weight tensor.
     """
 
     def __init__(
@@ -93,8 +99,13 @@ class MhcWeightLifecycleManager:
         if consumer not in layer.fp32_consumers:
             raise ValueError(f"Consumer {consumer} of {key} has no FP32 binding")
         source = layer.canonical if layer.canonical is not None else layer.load_canonical()
-        if not isinstance(source, torch.Tensor) or source.dtype != torch.float32 or source.ndim != 2:
-            raise ValueError(f"Canonical weight {key} must be a 2D float32 tensor")
+        if (
+            not isinstance(source, torch.Tensor)
+            or source.dtype != torch.float32
+            or source.ndim != 2
+            or not source.is_contiguous()
+        ):
+            raise ValueError(f"Canonical weight {key} must be a contiguous 2D float32 tensor")
         layer.canonical = source.to(self._device)
         return layer.canonical
 
@@ -128,13 +139,27 @@ class MhcWeightLifecycleManager:
             del previous
 
         source = layer.canonical if layer.canonical is not None else layer.load_canonical()
-        actual_shape = tuple(source.shape) if isinstance(source, torch.Tensor) else None
+        if (
+            not isinstance(source, torch.Tensor)
+            or source.dtype != torch.float32
+            or source.ndim != 2
+            or not source.is_contiguous()
+        ):
+            raise ValueError(f"Canonical weight {key} must be a contiguous 2D float32 tensor")
+        actual_shape = tuple(source.shape)
         if actual_shape != expected_shape:
             raise ValueError(f"Weight group {key} must match seam shape {expected_shape}, got {actual_shape}")
-        source = source.cpu() if packed else source.to(self._device)
+        if packed:
+            staged_source = source.cpu()
+            # Release canonical device storage before backend.prepare allocates the packed
+            # device tensor so transient per-layer device staging stays bounded to 1x weight size.
+            del source
+            layer.canonical = None
+        else:
+            staged_source = source.to(self._device)
         prepared = backend.prepare(
             {
-                "hc_fn": source,
+                "hc_fn": staged_source,
                 "weight_format": layout,
                 "version_tag": layer.version_tag,
                 "native_adapter": self._native_adapter,
@@ -143,7 +168,7 @@ class MhcWeightLifecycleManager:
             self._cap,
         )
         if packed:
-            layer.canonical = None
+            del staged_source
             prepared = replace(prepared, source_released=True)
             self._constants_ready |= prepared.index_map_ready
             self.peak_staged_weight_bytes = max(self.peak_staged_weight_bytes, prepared.tensor.nbytes)
@@ -186,8 +211,13 @@ class MhcWeightLifecycleManager:
         layer = self._layers[key]
         if not isinstance(version_tag, str) or not version_tag or version_tag == layer.version_tag:
             raise ValueError("Weight update requires a new nonempty version_tag")
-        if not isinstance(canonical, torch.Tensor) or canonical.ndim != 2 or canonical.dtype != torch.float32:
-            raise ValueError(f"Canonical weight {key} must be a 2D float32 tensor")
+        if (
+            not isinstance(canonical, torch.Tensor)
+            or canonical.ndim != 2
+            or canonical.dtype != torch.float32
+            or not canonical.is_contiguous()
+        ):
+            raise ValueError(f"Canonical weight {key} must be a contiguous 2D float32 tensor")
         if layer.shape is not None and canonical.shape != layer.shape:
             raise ValueError(f"Updated weight group {key} must have shape {layer.shape}, got {tuple(canonical.shape)}")
         self._retire_generation()

@@ -380,13 +380,22 @@ class A3DecoupledMhcBackend(A3MegaMhcBackend):
         npu_mod = getattr(torch, "npu", None)
         if npu_mod is None:
             raise RuntimeError("torch.npu is required for launch_coefficients_async")
+        _validate_coefficient_inputs(residual, prepared, hc_scale, hc_base, r_sq)
+        if not prepared.index_map_ready:
+            raise ValueError("A3 device constants must be prepared before capture and run")
+        _parse_attrs(attrs)
+
+        current_stream = getattr(npu_mod, "current_stream", None)
+        current = current_stream() if callable(current_stream) else None
+        resolved_main_stream = main_stream if main_stream is not None else current
         is_capturing = getattr(npu_mod, "is_current_stream_capturing", None)
-        capturing = bool(is_capturing()) if callable(is_capturing) else False
-        resolved_main_stream = main_stream
-        if resolved_main_stream is None and npu_mod is not None:
-            current_stream = getattr(npu_mod, "current_stream", None)
-            if callable(current_stream):
-                resolved_main_stream = current_stream()
+        if not callable(is_capturing):
+            capturing = False
+        elif main_stream is not None and main_stream is not current:
+            with npu_mod.stream(main_stream):
+                capturing = bool(is_capturing())
+        else:
+            capturing = bool(is_capturing())
 
         if main_stream is None:
             ready_event.record()
@@ -394,19 +403,17 @@ class A3DecoupledMhcBackend(A3MegaMhcBackend):
             ready_event.record(main_stream)
         with npu_mod.stream(side_stream):
             side_stream.wait_event(ready_event)
-            if not capturing:
-                for tensor in (residual, hc_scale, hc_base, r_sq):
-                    if tensor is not None:
-                        tensor.record_stream(side_stream)
             try:
+                if not capturing:
+                    for tensor in (residual, prepared.tensor, hc_scale, hc_base, r_sq):
+                        if tensor is not None:
+                            tensor.record_stream(side_stream)
                 outputs = self.run_coefficients(residual, prepared, hc_scale, hc_base, attrs, r_sq=r_sq)
-            except Exception:
+                if not capturing and resolved_main_stream is not None:
+                    for tensor in outputs:
+                        tensor.record_stream(resolved_main_stream)
+            finally:
                 done_event.record(side_stream)
-                raise
-            if not capturing and resolved_main_stream is not None:
-                for tensor in outputs:
-                    tensor.record_stream(resolved_main_stream)
-            done_event.record(side_stream)
         return outputs
 
     def run(self, inputs: MhcSeamInputs, prepared: PreparedMhcWeights, attrs: dict) -> MhcSeamOutputs:
@@ -532,9 +539,24 @@ class NativeFallbackMhcBackend:
         return _torch_split_seam(inputs, prepared.tensor, args)
 
 
+def _npu_hf32_enabled(device: torch.device) -> bool:
+    if device.type != "npu":
+        return False
+    npu_mod = getattr(torch, "npu", None)
+    matmul_mod = getattr(npu_mod, "matmul", None)
+    return bool(getattr(matmul_mod, "allow_hf32", True))
+
+
 def _torch_split_seam(inputs: MhcSeamInputs, hc_fn: torch.Tensor, args: _SeamAttrs) -> MhcSeamOutputs:
     updated = inputs.y.float().unsqueeze(1) * inputs.post.unsqueeze(-1)
-    updated = updated + torch.bmm(inputs.comb.transpose(1, 2).float(), inputs.residual.float())
+    comb_fp32 = inputs.comb.float()
+    residual_fp32 = inputs.residual.float()
+    if _npu_hf32_enabled(inputs.residual.device):
+        # Thread-safe exact vector FP32 contraction that avoids Cube HF32 truncation in bmm.
+        for src_lane, comb_row in zip(residual_fp32.unbind(1), comb_fp32.unbind(1)):
+            updated = updated + src_lane.unsqueeze(1) * comb_row.unsqueeze(-1)
+    else:
+        updated = updated + torch.bmm(comb_fp32.transpose(1, 2), residual_fp32)
     updated = updated.to(inputs.y.dtype)
 
     collapsed = (updated.float() * inputs.pre_mix.unsqueeze(-1)).sum(dim=1).to(inputs.y.dtype).float()

@@ -83,16 +83,22 @@ def unpack_ozaki_weights(
 
 
 def build_c4_index_map() -> torch.Tensor:
-    """Build byte-offset gather table for C4 reduction, logits, scales, and post."""
-    reduction_maps = [(i ^ mask) * 4 for mask in (1, 2, 4, 8) for i in range(64)]
-    sigmoid = [(row * 64 + j) * 4 for row in range(4) for j in range(8)]
-    comb = [(row * 64 + 8 + j) * 4 for row in range(4) for j in range(16)]
-    sigmoid_scale = [0] * 4 + [4] * 4
-    comb_scale = [8] * 16
-    post = [(row * 8 + 4 + j % 4) * 4 for row in range(4) for j in range(8)]
-    sections = (reduction_maps, sigmoid, comb, sigmoid_scale, comb_scale, post)
-    for offsets, source_words in zip(sections, (64, 256, 256, 8, 8, 32), strict=True):
+    """Build the 304-entry byte-offset gather table matching C++ kHostIndexMap.
+
+    Sections match ``mega_mhc_index_map.h`` for 4 packed rows in the 4x8 padded
+    Sinkhorn layout: sigmoid (32), comb (128), base_comb (32), scale_sigmoid (8),
+    scale_comb (8), post (32), and unpack_comb (64) = 304 int32 entries (1,216 B).
+    """
+    sigmoid = [(row * 64 + i) * 4 for row in range(4) for i in range(8)]
+    comb = [((row * 64 + 8 + r * 4 + c) if c < 4 else 0) * 4 for row in range(4) for r in range(4) for c in range(8)]
+    base_comb = [(3 * 8 + r * 4 + (c if c < 4 else 3)) * 4 for r in range(4) for c in range(8)]
+    scale_sigmoid = [(i // 4) * 4 for i in range(8)]
+    scale_comb = [2 * 4] * 8
+    post = [(row * 8 + 4 + i % 4) * 4 for row in range(4) for i in range(8)]
+    unpack_comb = [(row * 32 + r * 8 + c) * 4 for row in range(4) for r in range(4) for c in range(4)]
+    sections = (sigmoid, comb, base_comb, scale_sigmoid, scale_comb, post, unpack_comb)
+    for offsets, source_words in zip(sections, (256, 256, 40, 8, 8, 32, 128), strict=True):
         assert all(0 <= offset < source_words * 4 and offset % 4 == 0 for offset in offsets)
     values = [offset for section in sections for offset in section]
-    assert len(values) == 408
+    assert len(values) == 304
     return torch.tensor(values, dtype=torch.int32, device="cpu")
