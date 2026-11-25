@@ -82,20 +82,26 @@ from vllm_ascend.platform import NPUPlatform  # noqa E402
 
 NPUPlatform.register_triton_kernel_overrides()
 
-# Routing tripwire for the raw-swap entries: production resolves these
-# through the defining-module attribute (see worker/v2/model_states/
-# mamba_hybrid.py), so after registration the attribute must be our own
-# kernel -- the raw swap installs it directly, never wrapped. If this
-# fires, a table value stopped being a Triton kernel and the dispatcher
-# silently wrapped it in KernelOverride instead. The 310P family never
-# installs the table (it gets the sampler dispatch instead), so skip.
+# Routing tripwire for the four raw-swap entries (values that are
+# themselves @triton.jit kernels): after registration the defining
+# module's attribute must be our own kernel -- the raw swap installs it
+# directly, never wrapped (production resolves these kernels through
+# exactly those module attributes, see worker/v2/model_states/
+# mamba_hybrid.py for the precopy consumer). If an assert fires, a
+# table value stopped being a Triton kernel and the dispatcher
+# silently wrapped it in KernelOverride instead. Two skips: the 310P
+# family never installs the table (it gets the sampler dispatch
+# instead), and a Triton-less environment mirrors the platform hook's
+# HAS_TRITON guard and skips registration entirely.
+from vllm.triton_utils import HAS_TRITON  # noqa E402
 from vllm_ascend.device.hardware_profile import (  # noqa E402
     DeviceAdaptorFamily,
     get_current_hardware_profile,
 )
 
-if get_current_hardware_profile().device_adaptor_family is not DeviceAdaptorFamily.COMPATIBILITY:
+if HAS_TRITON and (get_current_hardware_profile().device_adaptor_family is not DeviceAdaptorFamily.COMPATIBILITY):
     import vllm.v1.worker.gpu.sample.logprob as logprob_mod  # noqa E402
+    import vllm.v1.worker.gpu.sample.thinking_budget as thinking_budget_mod  # noqa E402
     import vllm.v1.worker.mamba_utils as mamba_utils  # noqa E402
 
     from vllm_ascend.ops.triton.mamba.precopy import (  # noqa E402
@@ -104,9 +110,15 @@ if get_current_hardware_profile().device_adaptor_family is not DeviceAdaptorFami
     from vllm_ascend.ops.triton.sample.fill_logprob_token_idx import (  # noqa E402
         _fill_logprob_token_ids_kernel,
     )
+    from vllm_ascend.ops.triton.sample.thinking_budget import (  # noqa E402
+        _load_effective_token_ascend,
+        _update_committed_marker_cache_kernel_ascend,
+    )
 
     assert mamba_utils.precopy_mamba_align_fused_kernel is precopy_mamba_align_fused_kernel
     assert logprob_mod._fill_logprob_token_ids_kernel is _fill_logprob_token_ids_kernel
+    assert thinking_budget_mod._load_effective_token is _load_effective_token_ascend
+    assert thinking_budget_mod._update_committed_marker_cache_kernel is _update_committed_marker_cache_kernel_ascend
 
 from vllm.distributed.parallel_state import (  # noqa E402
     destroy_distributed_environment,
