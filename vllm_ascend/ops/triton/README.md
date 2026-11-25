@@ -36,15 +36,15 @@ examples and links together.
 | Module | Runner ownership | Documentation |
 | --- | --- | --- |
 | [engram_lookback.py](engram_lookback.py) | `models/deepseek_v41/engram/model_state.py` | [engram.md](docs/engram.md) |
-| [apply_grammar_bitmask.py](apply_grammar_bitmask.py) | `patch/worker/patch_triton.py` | [apply_grammar_bitmask.md](docs/apply_grammar_bitmask.md) |
+| [apply_grammar_bitmask.py](apply_grammar_bitmask.py) | `triton_kernel_overrides.py` | [apply_grammar_bitmask.md](docs/apply_grammar_bitmask.md) |
 | [block_table/compute_slot_mappings.py](block_table/compute_slot_mappings.py) | `worker/v2/block_table.py` | [compute_slot_mappings.md](docs/compute_slot_mappings.md) |
-| [mamba/precopy.py](mamba/precopy.py) | `patch/worker/patch_triton.py` | [mamba_precopy.md](docs/mamba_precopy.md) |
+| [mamba/precopy.py](mamba/precopy.py) | `triton_kernel_overrides.py` | [mamba_precopy.md](docs/mamba_precopy.md) |
 | [mamba/postprocess.py](mamba/postprocess.py) | `patch/worker/patch_mamba_utils.py` | [mamba_postprocess.md](docs/mamba_postprocess.md) |
-| [metrics/num_nans.py](metrics/num_nans.py) | `patch/worker/patch_triton.py` | [num_nans.md](docs/num_nans.md) |
-| [sample/categorical_sample.py](sample/categorical_sample.py) | `patch/worker/patch_triton.py` | [categorical_sample.md](docs/categorical_sample.md) |
-| [sample/fill_logprob_token_idx.py](sample/fill_logprob_token_idx.py) | `patch/worker/patch_triton.py` | [fill_logprob_token_ids.md](docs/fill_logprob_token_ids.md) |
-| [sample/sampling_mask.py](sample/sampling_mask.py) | `patch/worker/patch_triton.py` | [sampling_mask.md](docs/sampling_mask.md) |
-| [sample/thinking_budget.py](sample/thinking_budget.py) | `patch/worker/patch_triton.py` | [thinking_budget.md](docs/thinking_budget.md) |
+| [metrics/num_nans.py](metrics/num_nans.py) | `triton_kernel_overrides.py` | [num_nans.md](docs/num_nans.md) |
+| [sample/categorical_sample.py](sample/categorical_sample.py) | `triton_kernel_overrides.py` | [categorical_sample.md](docs/categorical_sample.md) |
+| [sample/fill_logprob_token_idx.py](sample/fill_logprob_token_idx.py) | `triton_kernel_overrides.py` | [fill_logprob_token_ids.md](docs/fill_logprob_token_ids.md) |
+| [sample/sampling_mask.py](sample/sampling_mask.py) | `triton_kernel_overrides.py` | [sampling_mask.md](docs/sampling_mask.md) |
+| [sample/thinking_budget.py](sample/thinking_budget.py) | `triton_kernel_overrides.py` | [thinking_budget.md](docs/thinking_budget.md) |
 | [spec_decode/prepare_dflash_inputs.py](spec_decode/prepare_dflash_inputs.py) | `worker/v2/spec_decode/dflash/speculator.py` | [prepare_dflash_inputs.md](docs/prepare_dflash_inputs.md) |
 | [spec_decode/resample.py](spec_decode/resample.py) | `worker/v2/spec_decode/rejection_sampler_utils.py` | [resample.md](docs/resample.md) |
 | [mamba/gdn_prepare.py](mamba/gdn_prepare.py) | `attention/gdn_attn_builder.py` | [gdn_prepare.md](docs/gdn_prepare.md) |

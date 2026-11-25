@@ -39,6 +39,13 @@ Three rules when editing the table:
   are forwarded, but the caller's grid reaches the impl only when it
   reimplements ``__getitem__`` -- so impls that relaunch with a different
   grid are written as launch adapters (see the ``ops/triton/`` modules).
+
+Warmup: ``KernelOverride.warmup`` delegates only to values that are
+themselves Triton kernels, so raw swaps keep compiling before ACL graph
+capture while plain callables compile lazily on first launch. That
+matches the retired patch: the JIT warmup registry only ever registered
+vllm-ascend-owned kernels, so no table entry had pre-capture compilation
+to lose.
 """
 
 from __future__ import annotations

@@ -22,10 +22,11 @@ RMSNorm for the fused Q/K RMSNorm, and the mHC pre/post torch fallbacks. They
 used to live in ``patch_triton.py`` and were split out because nothing here is
 Triton.
 
-Import order matters: the ``_cc1d.causal_conv1d_update`` wrapper installed here
-is deliberately overwritten by the NPU Triton kernel in ``patch_triton.py``, so
-this module must be imported *before* ``patch_triton`` (see
-``vllm_ascend/patch/worker/__init__.py``).
+The AscendC wrappers installed here are the live path for the causal_conv1d
+entry points. The retired ``patch_triton.py`` tried to overwrite
+``_cc1d.causal_conv1d_update`` with an NPU Triton kernel after these rebinds,
+but that import never resolved (the symbol did not exist anywhere), so nothing
+is lost with the patch's retirement and no import order is required anymore.
 """
 
 import vllm.model_executor.layers.mamba.ops.causal_conv1d as _cc1d

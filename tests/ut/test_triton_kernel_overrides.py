@@ -127,7 +127,7 @@ def test_class_mount_receives_no_implicit_cls():
     lookups with a non-dict wrapper, crashing the sweep whenever
     numba/llvmlite is loaded in the session). If this ever fails against
     the CI vLLM, keep ``SamplingMaskTensors.from_logits`` as the only
-    manual assignment and migrate the other 17 entries only.
+    manual assignment and migrate the remaining entries only.
     """
     from vllm.triton_utils.dispatcher import KernelOverride
 
