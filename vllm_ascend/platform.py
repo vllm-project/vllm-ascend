@@ -1729,15 +1729,17 @@ def _setup_compile_backend(
             )
             if prefill_sizes is not None:
                 compilation_config.prefill_cudagraph_capture_token_sizes = new_prefill
+                compilation_config.max_prefill_cudagraph_capture_tokens = max(new_prefill, default=0)
             if decode_sizes is not None:
                 compilation_config.decode_cudagraph_capture_request_sizes = new_decode
-            # Write the union back to the deprecated fields: the engine handshake
-            # re-runs _split_cudagraph_capture_sizes and asserts they equal the
-            # split-grid union (vllm/config/vllm.py), or it raises ValueError.
-            uq = vllm_config.uniform_decode_query_len
-            union = sorted(set(new_prefill) | {n * uq for n in new_decode})
-            compilation_config.cudagraph_capture_sizes = union
-            compilation_config.max_cudagraph_capture_size = union[-1] if union else 0
+                compilation_config.max_decode_cudagraph_capture_requests = max(new_decode, default=0)
+            # Re-derive the legacy union (including decode token clamping,
+            # draft decode sizes, and adaptive varlen sizes) and refresh
+            # compile_sizes so engine handshake re-entry passes validation.
+            vllm_config._split_cudagraph_capture_sizes(
+                False, vllm_config.get_decode_cudagraph_query_lens(vllm_config.uniform_decode_query_len)
+            )
+            compilation_config.post_init_cudagraph_sizes()
 
         # Our is_cuda_alike is False so we cannot reuse the assertion of upstream
         if compilation_config.mode != CompilationMode.VLLM_COMPILE and not envs_vllm.VLLM_USE_BREAKABLE_CUDAGRAPH:

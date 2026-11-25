@@ -1159,6 +1159,64 @@ class TestNPUPlatform(TestBase):
                             )
                         self.assertEqual(config.compilation_config.cudagraph_mode, mode)
 
+    def test_setup_compile_backend_piecewise_stream_budget_reentry(self):
+        if vllm_version_is("0.33.0"):
+            return
+        cases = (
+            ("clamped_decode_tokens", 5, 256, [], False),
+            ("draft_decode_sizes", 5, None, [1, 2, 4, 8, 16], False),
+            ("adaptive_varlen_sizes", 5, None, [], True),
+        )
+        for name, query_len, decode_max_tokens, draft_sizes, adaptive in cases:
+            with self.subTest(case=name):
+                prefill_grid = [i * 16 for i in range(1, 51)]  # 50 sizes
+                decode_grid = list(range(1, 41))  # 40 sizes (total 90 > 48)
+                config = TestNPUPlatform.mock_vllm_config()
+                config.compilation_config = CompilationConfig(
+                    mode=CompilationMode.VLLM_COMPILE,
+                    cudagraph_mode=CUDAGraphMode.PIECEWISE,
+                    prefill_cudagraph_capture_token_sizes=list(prefill_grid),
+                    decode_cudagraph_capture_request_sizes=list(decode_grid),
+                    max_decode_cudagraph_capture_tokens=decode_max_tokens,
+                    compile_sizes=["cudagraph_capture_sizes"],
+                )
+                config.scheduler_config.max_num_seqs = 128
+                config.scheduler_config.max_num_batched_tokens = 8192
+                config.parallel_config.tensor_parallel_size = 1
+                config.uniform_decode_query_len = query_len
+                config.use_v2_model_runner = True
+                config.performance_mode = "balanced"
+                config.speculative_config = SimpleNamespace(enable_adaptive_verification=True) if adaptive else None
+                config.model_config.enforce_eager = False
+                config.additional_config = {"ascend_compilation_config": {}}
+                config.get_decode_cudagraph_query_lens = lambda q: {q: 128}
+                config.get_draft_decode_cudagraph_request_sizes = lambda ds=draft_sizes: list(ds)
+                config.get_varlen_decode_cudagraph_token_sizes = lambda q: [3, 7, 11]
+                config._split_cudagraph_capture_sizes = partial(VllmConfig._split_cudagraph_capture_sizes, config)
+                config._set_cudagraph_sizes = partial(VllmConfig._set_cudagraph_sizes, config)
+                config._set_cudagraph_sizes()
+
+                with patch("vllm_ascend.platform.enable_sp", return_value=False):
+                    _setup_compile_backend(config, compile_backend="test_backend")
+
+                new_prefill = config.compilation_config.prefill_cudagraph_capture_token_sizes
+                new_decode = config.compilation_config.decode_cudagraph_capture_request_sizes
+                self.assertLessEqual(len(new_prefill) + len(new_decode), 48)
+                self.assertEqual(new_prefill[0], prefill_grid[0])
+                self.assertEqual(new_prefill[-1], prefill_grid[-1])
+                self.assertEqual(new_decode[0], decode_grid[0])
+                self.assertEqual(new_decode[-1], decode_grid[-1])
+                # Engine handshake re-entry must pass without ValueError.
+                config._set_cudagraph_sizes()
+                config._set_cudagraph_sizes()
+                captured = config.compilation_config.cudagraph_capture_sizes
+                self.assertEqual(captured, sorted(captured))
+                self.assertEqual(captured[-1], config.compilation_config.max_cudagraph_capture_size)
+                if draft_sizes:
+                    self.assertTrue(set(draft_sizes).issubset(captured))
+                if adaptive:
+                    self.assertTrue({3, 7, 11}.issubset(captured))
+
     def test_apply_config_platform_defaults_sets_sp_threshold(self):
         for enabled_option in ("enable_sp", "fuse_gemm_comms"):
             with self.subTest(enabled_option=enabled_option):
