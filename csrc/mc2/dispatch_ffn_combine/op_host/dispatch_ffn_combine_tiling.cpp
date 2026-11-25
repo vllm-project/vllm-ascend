@@ -167,8 +167,8 @@ static ge::graphStatus DispatchFFNCombineCheckShapeAndSetTiling(gert::TilingCont
         OP_LOGE(K_INNER_DEBUG, "expertLoad and recordEnabled must be provided together"), return ge::GRAPH_FAILED);
     OP_TILING_CHECK(expertLoadShape != nullptr &&
         (expertLoadShape->GetStorageShape().GetDimNum() != 1 ||
-         expertLoadShape->GetStorageShape().GetDim(0) < static_cast<int64_t>(info.worldSize) * expertPerRank),
-        OP_LOGE(K_INNER_DEBUG, "expertLoad does not cover all physical experts"), return ge::GRAPH_FAILED);
+         expertLoadShape->GetStorageShape().GetDim(0) < static_cast<int64_t>(info.localExpertStart) + expertPerRank),
+        OP_LOGE(K_INNER_DEBUG, "expertLoad does not cover local experts"), return ge::GRAPH_FAILED);
     info.topK = topK;
     info.listLen = listLen;
     OP_LOGD(K_INNER_DEBUG, "M=%d ", info.M);

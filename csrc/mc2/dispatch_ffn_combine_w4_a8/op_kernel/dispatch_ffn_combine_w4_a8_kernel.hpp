@@ -94,8 +94,6 @@ public:
         LayoutD2 layoutD2;
         GM_ADDR ptrWorkspace;
         GM_ADDR ptrExpertTokenNums;
-        GM_ADDR expertLoad;
-        GM_ADDR recordEnabled;
         int32_t EP;
         int32_t listLen;
         int32_t expertPerRank;
@@ -136,7 +134,7 @@ public:
                GM_ADDR ptrOutput_, LayoutD2 layoutD1_, LayoutD2 layoutD2_, GM_ADDR expertIdx_,
                GM_ADDR moeInitRoutingQuantV2Scale_, GM_ADDR moeInitRoutingQuantV2Offset_,
                GM_ADDR expertTokensBeforeCapacity_, GM_ADDR probs_, GM_ADDR ptrWorkspace_, GM_ADDR gmExpertTokenNums_,
-               int32_t ubMoveNum_, GM_ADDR ptrXActiveMask_, GM_ADDR expertLoad_, GM_ADDR recordEnabled_,
+               int32_t ubMoveNum_, GM_ADDR ptrXActiveMask_,
                optiling::MoeInitRoutingQuantV2TilingData moeInitRoutingQuantV2TilingData_, float swigluLimit_,
                GM_ADDR symmetricPtr_ = nullptr)
             : problemShape(problemShape_),
@@ -175,8 +173,6 @@ public:
               ubMoveNum(ubMoveNum_),
               symmetricPtr(symmetricPtr_),
               ptrXActiveMask(ptrXActiveMask_),
-              expertLoad(expertLoad_),
-              recordEnabled(recordEnabled_),
               moeInitRoutingQuantV2TilingData(moeInitRoutingQuantV2TilingData_),
               swigluLimit(swigluLimit_)
         {
@@ -950,10 +946,6 @@ private:
             params.initRoutingQuantTilingKey);
         
         AscendC::SyncAll<true>();
-        if (coreIdx == 0) {
-            RecordSourceExpertLoad(localTokenPerExpert, params.expertLoad, params.recordEnabled,
-                                   params.EP * params.expertPerRank);
-        }
 
         CrossRankSyncAndlocalTokenPerExpertAllGatherAndGetSumPreRankV2(params, localTokenPerExpertOffset);
 
