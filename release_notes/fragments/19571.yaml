@@ -1,0 +1,7 @@
+pr: 19571
+entries:
+  - category: performance
+    text: >-
+      MLA KV-pool loads can read each cache block once across eligible tensor-parallel ranks
+      instead of once per rank, reducing duplicate pool read traffic on Ascend NPUs.
+      Small loads and unsupported cache layouts automatically retain the existing read path.

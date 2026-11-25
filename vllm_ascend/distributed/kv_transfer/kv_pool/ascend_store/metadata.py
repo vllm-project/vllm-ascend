@@ -26,6 +26,61 @@ if TYPE_CHECKING:
     from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.metadata import LayerPoolKey
 
 
+class KVCacheByteRange(NamedTuple):
+    """A cache storage span that can be merged before creating a Tensor."""
+
+    storage: Any
+    offset: int
+    size: int
+    device: torch.device
+
+    def as_tensor(self) -> torch.Tensor:
+        return torch.empty(0, dtype=torch.int8, device=self.device).set_(self.storage, self.offset, (self.size,), (1,))
+
+
+@dataclass(slots=True)
+class _KVCacheByteRanges:
+    storages: list[tuple[Any, int, torch.device]]
+    base_addrs: list[int]
+    descriptor_indices: Sequence[int]
+    addrs: list[int]
+    sizes: list[int]
+
+
+class KVCacheByteRangeMatrix:
+    """Columnar spans: retain backend address/size lists, not per-block proxies."""
+
+    def __init__(self):
+        self._storages: list[list[tuple[Any, int, torch.device]]] = []
+        self._base_addrs: list[list[int]] = []
+        self._descriptor_indices: list[Sequence[int]] = []
+        self._addrs: list[list[int]] = []
+        self._sizes: list[list[int]] = []
+
+    def append(self, spans: _KVCacheByteRanges) -> None:
+        self._storages.append(spans.storages)
+        self._base_addrs.append(spans.base_addrs)
+        self._descriptor_indices.append(spans.descriptor_indices)
+        self._addrs.append(spans.addrs)
+        self._sizes.append(spans.sizes)
+
+    def get_span(self, row: int, column: int) -> KVCacheByteRange:
+        descriptor = self._descriptor_indices[row][column]
+        storage, storage_offset, device = self._storages[row][descriptor]
+        offset = storage_offset + self._addrs[row][column] - self._base_addrs[row][descriptor]
+        return KVCacheByteRange(storage, offset, self._sizes[row][column], device)
+
+    def row_len(self, row: int) -> int:
+        return len(self._sizes[row])
+
+    def __len__(self) -> int:
+        return len(self._sizes)
+
+    @property
+    def device(self) -> torch.device | None:
+        return next((device for row in self._storages for _, _, device in row), None)
+
+
 def is_kv_save_role(kv_role: str, save_decode_cache: bool) -> bool:
     return kv_role in ("kv_producer", "kv_both") or save_decode_cache
 
@@ -349,6 +404,10 @@ class ChunkedTokenDatabase:
         self.metadata = metadata
         self.block_size = block_size
         self.group_kv_caches_base_addr: dict[int, list[int]] = {}
+        # Parallel to group_kv_caches_base_addr. Each entry identifies the
+        # backing storage and byte offset so selected pool ranges can also be
+        # exposed as int8 tensor views for TP collectives.
+        self.group_cache_storages: dict[int, list[tuple[Any, int, torch.device]]] = {}
         self.group_block_len: dict[int, list[int]] = {}
         self.group_block_stride: dict[int, list[int]] = {}
         self.group_layer_cache_entry_offsets: dict[int, list[int]] = {}
@@ -462,6 +521,7 @@ class ChunkedTokenDatabase:
         group_num_layers: dict[int, int] | None = None,
         group_layer_cache_entry_offsets: dict[int, list[int]] | None = None,
         group_cache_entry_segments: dict[int, list[tuple[int, int]]] | None = None,
+        group_cache_storages: dict[int, list[tuple[Any, int, torch.device]]] | None = None,
     ) -> None:
         if cache_role == "state":
             # Keep the interface for future explicit state groups, but this
@@ -473,6 +533,7 @@ class ChunkedTokenDatabase:
             self.group_block_stride = group_block_stride or {}
             self.group_layer_cache_entry_offsets = group_layer_cache_entry_offsets or {}
             self.group_cache_entry_segments = group_cache_entry_segments or {}
+            self.group_cache_storages = group_cache_storages or {}
         if group_cache_families is not None:
             self.group_cache_families[cache_role] = group_cache_families.copy()
             self._key_prefix_cache.clear()
@@ -494,7 +555,19 @@ class ChunkedTokenDatabase:
             self.group_block_stride.get(kv_cache_group_id),
         )
 
-    def prepare_value(
+    def load_bytes_upper_bound(self, token_len: int, cached_tokens: int, group_ids: Sequence[int]) -> int:
+        """Bound a load before creating per-block ranges; masks can only reduce it."""
+        total = 0
+        for group_id in group_ids:
+            block_size = self.get_block_size(group_id)
+            num_blocks = max(0, cdiv(token_len, block_size) - cached_tokens // block_size)
+            addrs, lengths, _ = self._get_group_buffers(group_id, "kv")
+            if lengths:
+                block_bytes = sum(lengths[index % len(lengths)] for index in range(len(addrs)))
+                total += num_blocks * block_bytes
+        return total
+
+    def _prepare_value_layout(
         self,
         start: int,
         end: int,
@@ -502,19 +575,22 @@ class ChunkedTokenDatabase:
         kv_cache_group_id: int = 0,
         cache_role: str = "kv",
         block_id: int | None = None,
+        *,
+        include_descriptors: bool = False,
     ):
         addr_list: list[int] = []
         size_list: list[int] = []
+        descriptor_indices: list[int] | None = [] if include_descriptors else None
         group_block_size = self.get_block_size(kv_cache_group_id)
         if block_id is None:
             block_idx = start // group_block_size
             if block_idx >= len(block_ids):
-                return addr_list, size_list, 0
+                return addr_list, size_list, descriptor_indices, 0
             block_id = block_ids[block_idx]
         group_addrs, group_block_len, group_block_stride = self._get_group_buffers(kv_cache_group_id, cache_role)
         length = len(group_block_len)
         if length == 0:
-            return addr_list, size_list, block_id
+            return addr_list, size_list, descriptor_indices, block_id
         segments = self.group_cache_entry_segments.get(kv_cache_group_id)
         block_start = start // group_block_size * group_block_size
         start_in_block = start - block_start
@@ -531,10 +607,65 @@ class ChunkedTokenDatabase:
             block_stride = group_block_stride[index % length] if group_block_stride else block_len
             byte_start = block_len * (copy_start - segment_start) // segment_tokens
             byte_end = block_len * (copy_end - segment_start) // segment_tokens
-            addr = base_addr + block_id * block_stride + byte_start
+            byte_offset = block_id * block_stride + byte_start
+            addr = base_addr + byte_offset
             addr_list.append(addr)
             size_list.append(byte_end - byte_start)
-        return addr_list, size_list, block_id
+            if descriptor_indices is not None:
+                descriptor_indices.append(index)
+        return addr_list, size_list, descriptor_indices, block_id
+
+    def prepare_value(
+        self,
+        start: int,
+        end: int,
+        block_ids: list[int],
+        kv_cache_group_id: int = 0,
+        cache_role: str = "kv",
+        block_id: int | None = None,
+    ):
+        addrs, sizes, _, resolved_block_id = self._prepare_value_layout(
+            start,
+            end,
+            block_ids,
+            kv_cache_group_id=kv_cache_group_id,
+            cache_role=cache_role,
+            block_id=block_id,
+        )
+        return addrs, sizes, resolved_block_id
+
+    def prepare_value_with_ranges(
+        self,
+        start: int,
+        end: int,
+        block_ids: list[int],
+        kv_cache_group_id: int = 0,
+        cache_role: str = "kv",
+        block_id: int | None = None,
+    ) -> tuple[list[int], list[int], _KVCacheByteRanges, int]:
+        """Return storage spans without allocating a Tensor for each block."""
+        addrs, sizes, descriptor_indices, resolved_block_id = self._prepare_value_layout(
+            start,
+            end,
+            block_ids,
+            kv_cache_group_id=kv_cache_group_id,
+            cache_role=cache_role,
+            block_id=block_id,
+            include_descriptors=True,
+        )
+        assert descriptor_indices is not None
+        storages = self.group_cache_storages.get(kv_cache_group_id)
+        if addrs and storages is None:
+            raise RuntimeError("KV cache storage metadata is unavailable for read deduplication")
+
+        # Keeping thousands of storage-bearing tuples alive per request can
+        # trigger full GC pauses and stall every TP peer at the collective.
+        indices: Sequence[int] = range(len(storages or []))
+        if len(descriptor_indices) != len(storages or []):
+            indices = tuple(descriptor_indices)
+        base_addrs, _, _ = self._get_group_buffers(kv_cache_group_id, cache_role)
+        ranges = _KVCacheByteRanges(storages or [], base_addrs, indices, addrs, sizes)
+        return addrs, sizes, ranges, resolved_block_id
 
     def prepare_value_layer(self, start: int, end: int, block_ids: list[int], layer_id: int):
         group_block_size = self.get_block_size(0)

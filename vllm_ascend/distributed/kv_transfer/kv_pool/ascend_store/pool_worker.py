@@ -6,6 +6,7 @@ import threading
 import time
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Iterator, Sequence
+from typing import Any
 
 import torch
 import vllm.envs as envs
@@ -15,6 +16,7 @@ from vllm.distributed import (
     get_pp_group,
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
+    get_tp_group,
 )
 from vllm.distributed.kv_events import BlockStored
 from vllm.distributed.utils import get_pp_indices
@@ -48,8 +50,13 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.kv_transfer import
     KVCacheStoreBatch,
     KVCacheStoreRecvingThread,
     KVCacheStoreSendingThread,
+    KVReadGroup,
     KVTransferThread,
+    _mla_read_dedup_byte_budget,
+    _partition_dedup_failure,
+    _uses_local_sdma,
     record_failed_blocks,
+    sharded_get_all_gather,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.kv_transfer import (
     KVCacheStoreLayerSendingThread,
@@ -63,6 +70,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     AscendStoreKVConnectorWorkerMetadata,
     ChunkedTokenDatabase,
     KeyMetadata,
+    KVCacheByteRangeMatrix,
     ReqMeta,
     StoreLookupResult,
     TailKeyBoundary,
@@ -130,6 +138,15 @@ class BaseKVPoolWorker(ABC):
         self._transfer_threads_started = False
         self._kv_stats = AscendStoreKVConnectorStats()
         self._kv_stats_lock = threading.Lock()
+        self._mla_read_group: KVReadGroup | None = None
+        self._mla_read_dedup_budget: int | None = None
+        self._mla_read_dedup_ready = False
+        if self.mla_read_dedup:
+            budget = _mla_read_dedup_byte_budget(self.tp_size, _uses_local_sdma(self.m_store))
+            if budget is not None and torch.distributed.is_initialized():
+                self._mla_read_dedup_budget = budget
+                self._mla_read_group = KVReadGroup(get_tp_group())
+                self._mla_read_dedup_ready = True
 
     @abstractmethod
     def _start_kv_transfer_threads(self) -> None:
@@ -343,6 +360,22 @@ class BaseKVPoolWorker(ABC):
             self.effective_heads_per_rank = tp_mismatch_info.effective_heads_per_rank
             self.num_sub_keys = tp_mismatch_info.num_sub_keys
 
+        self.mla_read_dedup = (
+            self.use_mla
+            and self.tp_size > 1
+            and self.put_step == self.tp_size
+            and self.dcp_size == 1
+            and self.pcp_size == 1
+            and not self.tp_mismatch
+            # Recurrent-state groups are TP-sharded, not replicated.
+            and not any(self.group_uses_align_state)
+            and not self.sharded_mamba_group_ids
+            and not self.use_layerwise
+            and not self.use_kvpp
+        )
+        if self.mla_read_dedup:
+            logger.info("MLA KV pool read deduplication eligible: local_tp=%d", self.tp_size)
+
     def _init_metadata(self, model_config, vllm_config, extra_config) -> None:
         partitions = None
         if self.kv_role == "kv_consumer" and self.can_put:
@@ -440,6 +473,11 @@ class BaseKVPoolWorker(ABC):
         for thread in threads:
             if thread.is_alive():
                 thread.join()
+
+        read_group = getattr(self, "_mla_read_group", None)
+        if read_group is not None:
+            read_group.close()
+            self._mla_read_group = None
 
     def shutdown(self) -> None:
         if self._closed:
@@ -632,6 +670,9 @@ class BaseKVPoolWorker(ABC):
         return shard_bytes
 
     def _infer_cache_group_metadata(self, group_id: int, layer_names: list[str]):
+        if not hasattr(self, "group_cache_storages"):
+            self.group_cache_storages: dict[int, list[tuple[Any, int, torch.device]]] = {}
+        group_cache_storages = []
         group_addrs: list[int] = []
         group_block_lens: list[int] = []
         group_block_strides: list[int] = []
@@ -654,14 +695,17 @@ class BaseKVPoolWorker(ABC):
                 caches = self._as_cache_tuple(cache_or_caches)
                 combined = self._get_combined_cache_transfer_segments(caches, group_id, num_blocks=num_blocks)
                 cache_segments = (
-                    [combined]
+                    [(combined, caches[0])]
                     if combined is not None
-                    else [self._get_cache_transfer_segments(cache, num_blocks=num_blocks) for cache in caches]
+                    else [(self._get_cache_transfer_segments(cache, num_blocks=num_blocks), cache) for cache in caches]
                 )
-                for segments in cache_segments:
+                for segments, segment_cache in cache_segments:
+                    storage = segment_cache.untyped_storage()
+                    storage_addr = storage.data_ptr()
                     for segment_index, (base_addr, block_len, block_stride) in enumerate(segments):
                         group_cache_entry_segments.append((segment_index, len(segments)))
                         group_addrs.append(base_addr)
+                        group_cache_storages.append((storage, base_addr - storage_addr, segment_cache.device))
                         group_block_lens.append(block_len)
                         group_block_strides.append(block_stride)
                 if combined is not None:
@@ -674,6 +718,7 @@ class BaseKVPoolWorker(ABC):
                     )
             layer_cache_entry_offsets.append(len(group_addrs))
         self.group_kv_caches_base_addr[group_id] = group_addrs
+        self.group_cache_storages[group_id] = group_cache_storages
         self.group_block_len[group_id] = group_block_lens
         self.group_block_stride[group_id] = group_block_strides
         self.group_layer_cache_entry_offsets[group_id] = layer_cache_entry_offsets
@@ -779,6 +824,7 @@ class BaseKVPoolWorker(ABC):
             self.block_stride.append(block_stride)
 
         self.group_kv_caches_base_addr: dict[int, list[int]] = {}
+        self.group_cache_storages = {}
         self.group_block_len: dict[int, list[int]] = {}
         self.group_block_stride: dict[int, list[int]] = {}
         self.group_layer_cache_entry_offsets: dict[int, list[int]] = {}
@@ -862,6 +908,7 @@ class BaseKVPoolWorker(ABC):
             group_num_layers=self.group_num_layers,
             group_layer_cache_entry_offsets=self.group_layer_cache_entry_offsets,
             group_cache_entry_segments=self.group_cache_entry_segments,
+            group_cache_storages=self.group_cache_storages,
         )
 
         if self.tp_mismatch:
@@ -1526,7 +1573,9 @@ class KVPoolWorker(BaseKVPoolWorker):
                 self.dcp_size,
                 invalid_block_ids=self._invalid_block_ids,
                 invalid_block_ids_lock=self._invalid_block_ids_lock,
-                worker=self if self.tp_mismatch else None,
+                worker=self if self.tp_mismatch or self._mla_read_dedup_ready else None,
+                read_dedup=self._mla_read_dedup_ready,
+                read_dedup_budget=self._mla_read_dedup_budget,
                 record_operation=self._record_kv_connector_operation,
                 host_memory_group_ids=host_memory_group_ids,
             )
@@ -1540,6 +1589,40 @@ class KVPoolWorker(BaseKVPoolWorker):
             self._stop_transfer_threads()
             raise
         self._transfer_threads_started = True
+
+    def _mla_read_dedup_supported_for_groups(self, group_ids: Sequence[int]) -> bool:
+        """Keep host/HiSparse buffers on their dedicated bulk-get path."""
+        layout = getattr(self, "_transfer_layout", None)
+        return layout is None or not any(group_id in layout.host_memory_group_ids for group_id in group_ids)
+
+    def _load_kv_read_dedup(
+        self,
+        keys: list[str],
+        addrs: list[list[int]],
+        sizes: list[list[int]],
+        block_ids: list[int],
+        views: KVCacheByteRangeMatrix,
+    ) -> tuple[bool, set[int], int] | None:
+        tp_group = getattr(self, "_mla_read_group", None)
+        if tp_group is None:
+            # Never use the model TP group from the background receive thread.
+            # Partially initialized callers retain the legacy full-read path.
+            return None
+        tp_group.stream.wait_stream(torch.npu.current_stream())
+        with torch.npu.stream(tp_group.stream):
+            result = sharded_get_all_gather(
+                self.m_store,
+                tp_group,
+                self.tp_rank,
+                keys,
+                addrs,
+                sizes,
+                block_ids,
+                views,
+            )
+        # The receive thread must not publish completion before cache copyback.
+        tp_group.stream.synchronize()
+        return result
 
     def start_load_kv(self, metadata: AscendConnectorMetadata):
         self.current_layer = 0
@@ -1597,10 +1680,22 @@ class KVPoolWorker(BaseKVPoolWorker):
                 continue
 
             load_group_ids = self.token_database.project_group_ids(requested_group_ids)
+            read_dedup = False
+            budget = self._mla_read_dedup_budget
+            if self._mla_read_dedup_ready and self._mla_read_dedup_supported_for_groups(load_group_ids):
+                read_dedup = budget is not None and (
+                    self.token_database.load_bytes_upper_bound(
+                        token_len,
+                        load_spec.vllm_cached_tokens,
+                        load_group_ids,
+                    )
+                    >= budget
+                )
             addr_list = []
             size_list = []
             key_list = []
             block_id_list: list[int] = []
+            view_list = KVCacheByteRangeMatrix() if read_dedup else None
             load_masks = self.token_database.load_mask(request.block_hashes, token_len)
             tail_boundaries = dict(load_spec.tail_key_boundaries)
             for group_id in load_group_ids:
@@ -1630,19 +1725,55 @@ class KVPoolWorker(BaseKVPoolWorker):
                     chunk_filter=chunk_filter,
                     tail_key_boundary=tail_boundaries.get(group_id),
                 ):
-                    addr, size, block_id = self.token_database.prepare_value(
-                        start,
-                        end,
-                        block_ids,
-                        kv_cache_group_id=group_id,
-                        block_id=block_id,
-                    )
+                    if read_dedup:
+                        addr, size, views, block_id = self.token_database.prepare_value_with_ranges(
+                            start,
+                            end,
+                            block_ids,
+                            kv_cache_group_id=group_id,
+                            block_id=block_id,
+                        )
+                        assert view_list is not None
+                        view_list.append(views)
+                    else:
+                        addr, size, block_id = self.token_database.prepare_value(
+                            start,
+                            end,
+                            block_ids,
+                            kv_cache_group_id=group_id,
+                            block_id=block_id,
+                        )
                     key_list.append(key)
                     addr_list.append(addr)
                     size_list.append(size)
                     block_id_list.append(block_id)
             if not key_list:
                 continue
+            if read_dedup:
+                assert view_list is not None
+                load_get_start = time.perf_counter()
+                read_result = self._load_kv_read_dedup(
+                    key_list,
+                    addr_list,
+                    size_list,
+                    block_id_list,
+                    view_list,
+                )
+                if read_result is None:
+                    logger.debug("KV read deduplication unavailable; using legacy full read")
+                else:
+                    request_failed, missing_block_ids, local_key_count = read_result
+                    self._record_kv_connector_operation(
+                        "load_get",
+                        time.perf_counter() - load_get_start,
+                        local_key_count,
+                    )
+                    invalid_block_ids, hybrid_failure = _partition_dedup_failure(request, missing_block_ids)
+                    if invalid_block_ids:
+                        self._invalid_block_ids.update(invalid_block_ids)
+                    if request_failed or hybrid_failure:
+                        self._record_failed_request(request)
+                    continue
             key_list_c = _circular_shift(key_list, self.tp_rank % len(key_list))
             addr_list_c = _circular_shift(addr_list, self.tp_rank % len(addr_list))
             size_list_c = _circular_shift(size_list, self.tp_rank % len(size_list))
