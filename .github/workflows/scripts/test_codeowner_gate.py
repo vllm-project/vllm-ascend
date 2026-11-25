@@ -554,7 +554,7 @@ class TestIgnoreOwner:
             rules,
             ["vllm_ascend/device/a.py"],
             {},
-            ("paths", ["vllm_ascend/device/a.py"]),
+            ("paths", ["vllm_ascend/device/a.py"], "alice"),
         )
         assert failures == [] and ignored == ["vllm_ascend/device/a.py"]
 
@@ -563,14 +563,17 @@ class TestIgnoreOwner:
             rules,
             ["vllm_ascend/device/a.py", "vllm_ascend/ops/b.py"],
             {},
-            ("paths", ["vllm_ascend/device/a.py"]),
+            ("paths", ["vllm_ascend/device/a.py"], "alice"),
         )
         assert ignored == ["vllm_ascend/device/a.py"]
         assert len(failures) == 1 and "ops/b.py" in failures[0]
 
     def test_all_ignore_passes_everything(self, rules):
         failures, _un, _self, ignored = self._approvals(
-            rules, ["vllm_ascend/device/a.py", "vllm_ascend/ops/b.py"], {}, ("all", [])
+            rules,
+            ["vllm_ascend/device/a.py", "vllm_ascend/ops/b.py"],
+            {},
+            ("all", [], "alice"),
         )
         assert failures == [] and sorted(ignored) == [
             "vllm_ascend/device/a.py",
@@ -582,7 +585,7 @@ class TestIgnoreOwner:
             rules,
             ["vllm_ascend/device/sub/a.py"],
             {},
-            ("paths", ["vllm_ascend/device"]),
+            ("paths", ["vllm_ascend/device"], "alice"),
         )
         assert failures == [] and ignored == ["vllm_ascend/device/sub/a.py"]
 
@@ -591,7 +594,7 @@ class TestIgnoreOwner:
             rules,
             ["vllm_ascend/ops/a.py", "vllm_ascend/ops/sub/b.py"],
             {},
-            ("paths", ["vllm_ascend/ops/*.py"]),
+            ("paths", ["vllm_ascend/ops/*.py"], "alice"),
         )
         assert ignored == ["vllm_ascend/ops/a.py"]
         # sub/b.py never matched the single-segment glob, and it is unowned
@@ -600,13 +603,13 @@ class TestIgnoreOwner:
 
     def test_none_spec_does_not_ignore(self, rules):
         failures, _un, _self, ignored = self._approvals(
-            rules, ["vllm_ascend/device/a.py"], {}, ("none", [])
+            rules, ["vllm_ascend/device/a.py"], {}, ("none", [], "")
         )
         assert failures and ignored == []
 
     def test_clear_spec_does_not_ignore(self, rules):
         failures, _un, _self, ignored = self._approvals(
-            rules, ["vllm_ascend/device/a.py"], {}, ("clear", [])
+            rules, ["vllm_ascend/device/a.py"], {}, ("clear", [], "")
         )
         assert failures and ignored == []
 
@@ -624,17 +627,23 @@ class TestIgnoreOwner:
 
 
 class TestGetIgnoreSpec:
-    """Parsing of /ignore-owner comments: latest human command wins; the
-    commenter needs write+; invalid commands block rather than fall back."""
+    """Parsing of /ignore-owner comments: the latest valid human command wins;
+    the commenter needs write+; bot/deleted/permissionless comments are skipped
+    rather than revoking an earlier valid waiver."""
 
     def _comment(self, body, login="alice", user_type="User"):
         return {"user": {"login": login, "type": user_type}, "body": body}
 
-    def _run(self, monkeypatch, comments, role="write"):
+    def _run(self, monkeypatch, comments, role="write", roles=None):
         # gh_api serves the comments list for the comments endpoint and the
-        # permission object for the collaborators endpoint.
+        # permission object for the collaborators endpoint. `role` is the
+        # fallback for any commenter without a per-user entry in `roles`.
+        role_map = roles or {}
+
         def fake_api(endpoint, **kw):
-            return comments if "comments" in endpoint else {"role_name": role}
+            if "comments" in endpoint:
+                return comments
+            return {"role_name": role_map.get(kw.get("user"), role)}
 
         monkeypatch.setattr(gate, "gh_api", fake_api)
         return gate.get_ignore_spec(1)
@@ -688,15 +697,17 @@ class TestGetIgnoreSpec:
         ]
         assert self._run(monkeypatch, comments) == ("paths", ["docs/a.md"], "alice")
 
-    def test_low_permission_command_invalid_no_fallback(self, monkeypatch):
-        # A triage-level (or below) command invalidates the ignore outright:
-        # falling back to an earlier valid command would resurrect a waiver
-        # after the commenter's permission was revoked.
+    def test_driveby_command_does_not_revoke_valid_ignore(self, monkeypatch):
+        # Alice (write) waives docs/a.md; a triage-level Bob then comments a
+        # bare /ignore-owner. Bob is skipped, so Alice's waiver survives - a
+        # permissionless commenter can neither grant nor revoke an ignore.
         comments = [
-            self._comment("/ignore-owner docs/a.md"),
-            self._comment("/ignore-owner docs/b.md", login="bob"),
+            self._comment("/ignore-owner docs/a.md", login="alice"),
+            self._comment("/ignore-owner", login="bob"),
         ]
-        assert self._run(monkeypatch, comments, role="triage") == ("none", [], "")
+        assert self._run(
+            monkeypatch, comments, roles={"alice": "write", "bob": "triage"}
+        ) == ("paths", ["docs/a.md"], "alice")
 
     def test_write_permission_required(self, monkeypatch):
         for role in ("read", "triage"):
@@ -711,6 +722,17 @@ class TestGetIgnoreSpec:
                 self._run(monkeypatch, [self._comment("/ignore-owner")], role=role)[0]
                 == "all"
             )
+
+    def test_legacy_permission_field_counts(self, monkeypatch):
+        # A custom role whose `role_name` is not a standard name but whose
+        # legacy `permission` maps to write still grants the waiver.
+        def fake_api(endpoint, **kw):
+            if "comments" in endpoint:
+                return [self._comment("/ignore-owner")]
+            return {"role_name": "custom-auditor", "permission": "write"}
+
+        monkeypatch.setattr(gate, "gh_api", fake_api)
+        assert gate.get_ignore_spec(1) == ("all", [], "alice")
 
     def test_non_collaborator_commander_is_invalid(self, monkeypatch):
         # Anyone can comment on a public repo; the collaborators API returns
@@ -733,5 +755,32 @@ class TestGetIgnoreSpec:
         assert self._run(monkeypatch, [comment]) == ("none", [], "")
 
     def test_path_is_ignored_normalizes_leading_slash(self):
-        assert gate.path_is_ignored("docs/a.md", ("paths", ["/docs/a.md"]))
-        assert gate.path_is_ignored("docs/sub/b.md", ("paths", ["docs/"]))
+        assert gate.path_is_ignored("docs/a.md", "paths", ["/docs/a.md"])
+        assert gate.path_is_ignored("docs/sub/b.md", "paths", ["docs/"])
+
+
+class TestIgnoreOwnerIntegration:
+    """Regression: the real chain get_ignore_spec (3-tuple) -> check_approvals
+    -> path_is_ignored. A tuple-shape mismatch here once crashed the gate for
+    every PR (ValueError: too many values to unpack)."""
+
+    def test_ignore_spec_feeds_check_approvals(self, monkeypatch, rules):
+        def fake_api(endpoint, **kw):
+            if "comments" in endpoint:
+                return [
+                    {
+                        "user": {"login": "alice", "type": "User"},
+                        "body": "/ignore-owner vllm_ascend/device",
+                    }
+                ]
+            if "permission" in endpoint:
+                return {"role_name": "write"}
+            raise AssertionError(f"unexpected endpoint: {endpoint}")
+
+        monkeypatch.setattr(gate, "gh_api", fake_api)
+        ignore_spec = gate.get_ignore_spec(1)
+        assert len(ignore_spec) == 3
+        failures, _un, _self, ignored = gate.check_approvals(
+            1, "author", rules, ["vllm_ascend/device/a.py"], {}, ignore_spec
+        )
+        assert failures == [] and ignored == ["vllm_ascend/device/a.py"]

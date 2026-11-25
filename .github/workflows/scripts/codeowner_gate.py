@@ -65,7 +65,15 @@ CODEOWNERS_PATH = ".github/CODEOWNERS"
 # but overriding ownership is a maintainer decision, not a triage one).
 IGNORE_COMMAND = "/ignore-owner"
 IGNORE_CLEAR_COMMAND = "/ignore-owner-clear"
+# role_name values that grant write+. Overriding ownership is a maintainer
+# decision, so triage is NOT accepted (unlike /run).
 IGNORE_ALLOWED_ROLES = ("write", "maintain", "admin")
+# Legacy `permission` field values that also grant write+. `permission` maps
+# `maintain` -> "write" and `triage` -> "read", and a custom repository role
+# that grants push also reports "write", so accepting this field catches
+# maintainers whose access comes from a custom role (their `role_name` is the
+# custom role's name, not one of IGNORE_ALLOWED_ROLES).
+IGNORE_ALLOWED_PERMISSIONS = ("write", "admin")
 
 
 @dataclass
@@ -260,59 +268,82 @@ def get_pr_reviews(pr_number: int) -> dict[str, str]:
     return latest
 
 
-def get_collaborator_role(user: str) -> str:
-    """The user's repository role name ("read", "triage", "write", ...).
+def is_write_plus(user: str) -> bool:
+    """Whether ``user`` currently has write, maintain, or admin on the repo.
 
-    Anyone can comment on a public repo, so a non-collaborator is a 404, not
-    an error: an unknown role means "not write+", never a gate crash.
+    Reads ``GET /repos/{owner}/{repo}/collaborators/{user}/permission`` and
+    accepts write+ when EITHER field indicates it:
+
+    - ``role_name``: the assigned role (admin/maintain/write/triage/read/none,
+      or a custom role name);
+    - ``permission``: the legacy base role (admin/write/read/none), where
+      ``maintain`` maps to "write" and a custom role granting push also maps
+      to "write".
+
+    This endpoint only requires "Metadata" repository read (per GitHub's
+    fine-grained permission table), so the ci-gate job's ``GITHUB_TOKEN``
+    suffices - including the read-only token fork PRs get. Anyone can comment
+    on a public repo, so a non-collaborator is a 404, not an error: an unknown
+    role means "not write+", never a gate crash.
     """
     try:
         data = gh_api("repos/{owner}/{repo}/collaborators/{user}/permission", user=user)
     except urllib.error.HTTPError as error:
         if error.code in (403, 404):
-            return ""
+            return False
         raise
-    return data.get("role_name", "")
+    return (
+        data.get("role_name") in IGNORE_ALLOWED_ROLES
+        or data.get("permission") in IGNORE_ALLOWED_PERMISSIONS
+    )
 
 
 def get_ignore_spec(pr_number: int) -> tuple[str, list[str], str]:
     """The effective ``/ignore-owner`` state of the PR, from its comments.
 
-    Scans issue comments for the latest command from a human account, then
-    validates that commenter's permission. Returns ``(kind, paths, by)``:
+    Scans issue comments oldest-first for the latest command from a human
+    account with write+ permission, then returns ``(kind, paths, by)``:
 
     - ``("paths", [...], user)``: ignore only the listed paths;
     - ``("all", [], user)``: ignore every file of the PR;
     - ``("clear", [], "")``: ignores were explicitly revoked;
     - ``("none", [], "")``: no valid command at all.
 
-    Replacement semantics: the newest matching command wins outright - an
-    invalid one (bot author, or commenter without write+) blocks rather than
-    falls back to older commands, so an ignore never resurrects after the
-    commenter's permission is revoked. Comments arrive oldest-first from the
-    API, so the last match is the newest. The ignore persists for the
-    lifetime of the PR: later commits keep it until it is replaced or cleared.
+    Replacement semantics: the newest *valid* command wins outright. A command
+    from a bot, a deleted account, or a user without write+ is skipped rather
+    than revoking an earlier valid waiver, so a drive-by commenter can neither
+    grant nor revoke an ignore. Permission is re-validated against the
+    commenter's CURRENT role on every run, so a waiver never outlives its
+    author's access. Comments arrive oldest-first from the API, so the last
+    valid match is the newest. The ignore persists for the lifetime of the PR:
+    later commits keep it until it is replaced or cleared.
     """
     comments = gh_api("repos/{owner}/{repo}/issues/{pr}/comments", pr=pr_number)
+    roles: dict[str, bool] = {}
     latest = None
     for comment in comments:
         if (comment.get("user") or {}).get("type") == "Bot":
             continue
         body = (comment.get("body") or "").strip()
         first_line = body.splitlines()[0].strip() if body else ""
-        if first_line in (
-            IGNORE_COMMAND,
-            IGNORE_CLEAR_COMMAND,
-        ) or first_line.startswith(IGNORE_COMMAND + " "):
-            latest = comment
+        if not (
+            first_line in (IGNORE_COMMAND, IGNORE_CLEAR_COMMAND)
+            or first_line.startswith(IGNORE_COMMAND + " ")
+        ):
+            continue
+        user = (comment.get("user") or {}).get("login") or ""
+        # A deleted account (empty login) or a non-write+ commenter must never
+        # grant an ignore; skip it instead of revoking a prior valid waiver.
+        if not user:
+            continue
+        if user not in roles:
+            roles[user] = is_write_plus(user)
+        if not roles[user]:
+            continue
+        latest = comment
     if latest is None:
         return "none", [], ""
     user = (latest.get("user") or {}).get("login") or ""
-    # An empty login (deleted account) or a missing role must both count as
-    # "not write+": `user and ...` would silently skip the check for a
-    # deleted account and let its command through.
-    if not user or get_collaborator_role(user) not in IGNORE_ALLOWED_ROLES:
-        return "none", [], ""
     first_line = (latest.get("body") or "").strip().splitlines()[0].strip()
     if first_line == IGNORE_CLEAR_COMMAND:
         return "clear", [], ""
@@ -322,9 +353,8 @@ def get_ignore_spec(pr_number: int) -> tuple[str, list[str], str]:
     return "paths", paths, user
 
 
-def path_is_ignored(path: str, ignore_spec: tuple[str, list[str]]) -> bool:
+def path_is_ignored(path: str, kind: str, patterns: list[str]) -> bool:
     """Whether ``path`` is covered by the effective ignore spec."""
-    kind, patterns = ignore_spec
     if kind == "all":
         return True
     if kind == "paths":
@@ -338,7 +368,7 @@ def check_approvals(
     rules: list[Rule],
     files: list[str],
     reviews: dict[str, str],
-    ignore_spec: tuple[str, list[str]] = ("none", []),
+    ignore_spec: tuple[str, list[str], str] = ("none", [], ""),
 ) -> tuple[list[str], list[str], list[str], list[str]]:
     """Gate on owner approvals.
 
@@ -360,8 +390,9 @@ def check_approvals(
     unclaimed = []
     self_owned = []
     ignored = []
+    ignore_kind, ignore_patterns, _ignore_by = ignore_spec
     for path in files:
-        if path_is_ignored(path, ignore_spec):
+        if path_is_ignored(path, ignore_kind, ignore_patterns):
             ignored.append(path)
             continue
         owners, skipped = resolve_owners(rules, path)
@@ -512,11 +543,14 @@ def main() -> int:
                 args.author = pr_data["user"]["login"]
         if args.ignore_json:
             with open(args.ignore_json) as f:
-                ignore_spec = tuple(json.load(f))
+                loaded = json.load(f)
+            ignore_spec = (
+                tuple(loaded) if len(loaded) == 3 else (loaded[0], loaded[1], "")
+            )
         elif args.pr:
             ignore_spec = get_ignore_spec(args.pr)
         else:
-            ignore_spec = ("none", [])
+            ignore_spec = ("none", [], "")
         failures, unclaimed, self_owned, ignored = check_approvals(
             args.pr or 0, args.author, rules, files, reviews, ignore_spec
         )
@@ -542,8 +576,10 @@ def main() -> int:
             print(
                 f"  ::warning::{path}: sole owner is the PR author; no additional approval required"
             )
+        ignore_by = ignore_spec[2] if len(ignore_spec) > 2 else ""
         for path in ignored:
-            print(f"  ::warning::{path}: codeowner approval ignored by /ignore-owner")
+            who = f" by @{ignore_by}" if ignore_by else ""
+            print(f"  ::warning::{path}: codeowner approval ignored{who} (/ignore-owner)")
         if failures:
             print("codeowner approval check FAILED:")
             for failure in failures:
