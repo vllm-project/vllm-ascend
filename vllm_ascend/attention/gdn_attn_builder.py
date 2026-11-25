@@ -31,7 +31,7 @@ from vllm.v1.attention.backends.utils import (
     mamba_get_block_table_tensor,
     split_decodes_and_prefills,
 )
-from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheSpec, MambaSpec
+from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheSpec
 
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.ops.recurrent_pcp import PCPRecurrentMetadataBuilderMixin
@@ -404,18 +404,6 @@ def _split_gdn_batch(
 class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
     _cudagraph_support = AttentionCGSupport.UNIFORM_BATCH
     build_device_chunk_metadata = True
-    _gdn_reuse_at_capture: bool | None = None
-
-    def get_metadata_reuse_key(self, batch_global: bool, for_capture: bool) -> tuple | None:
-        eligible = batch_global and self.supports_update_block_table and isinstance(self.kv_cache_spec, MambaSpec)
-        # Replay must refresh the same buffers that capture recorded.
-        if for_capture:
-            self._gdn_reuse_at_capture = eligible
-        elif self._gdn_reuse_at_capture is False:
-            return None
-        elif self._gdn_reuse_at_capture and not eligible:
-            raise ValueError("Captured GDN metadata reuse requires a batch-global Mamba provider")
-        return (self.kv_cache_spec, type(self)) if eligible else None
 
     @classmethod
     def get_varlen_cudagraph_max_query_len(cls, vllm_config: VllmConfig, kv_cache_spec: KVCacheSpec) -> int | None:

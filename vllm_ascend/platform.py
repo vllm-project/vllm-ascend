@@ -102,10 +102,6 @@ _MINIMAX_M3_ARCHITECTURES = frozenset(
         "MiniMaxM3SparseForConditionalGeneration",
     }
 )
-QWEN_MTP_DRAFTS = {
-    "Qwen3_5ForConditionalGeneration": "Qwen3_5MTP",
-    "Qwen3_5MoeForConditionalGeneration": "Qwen3_5MoeMTP",
-}
 FA3_BACKEND = ("vllm_ascend.attention.flash_attention_v3", "AscendFlashAttentionBackend")
 QWEN_FA3_TARGETS = frozenset(
     {
@@ -2092,7 +2088,13 @@ def _validate_flash_attn_npu_3(backend_key, selector) -> bool:
     )
     if config is None or config.model_config is None:
         return False
-    if not (local_glm_dflash or _uses_minimax_fa3(config) or _uses_step5_fa3(config) or _uses_qwen_fa3(config)):
+    if not (
+        local_glm_dflash
+        or _uses_minimax_fa3(config)
+        or _uses_step5_fa3(config)
+        or _uses_hybrid_mtp_fa3(config, selector)
+        or _uses_qwen_fa3(config)
+    ):
         return False
     return _validate_fa3_common_constraints(config, selector) and _validate_fa3_global_constraints(
         config,
@@ -2128,35 +2130,28 @@ def _uses_minimax_fa3(config) -> bool:
     )
 
 
+def _uses_hybrid_mtp_fa3(config: VllmConfig, selector) -> bool:
+    spec = config.speculative_config
+    if spec.method != "mtp" or not getattr(spec.target_model_config, "is_hybrid", False):
+        return False
+    # The A3 paged kernel supports head dimensions up to 256 and has no ALiBi input.
+    if not 0 < selector.head_size <= 256 or config.model_config.uses_alibi:
+        return False
+    if FlashAttentionNpu3Model.HYBRID_MTP not in get_current_hardware_profile().flash_attn_npu_3_models:
+        return False
+    # Older paged forwards copy device lengths to the host during capture.
+    try:
+        return Version(metadata.version("flash-attn-npu")) >= Version("0.5.1")
+    except metadata.PackageNotFoundError:
+        return False
+
+
 def _uses_qwen_fa3(config: VllmConfig) -> bool:
     from vllm.compilation import backends
 
     architectures = config.model_config.hf_config.architectures or ()
     supported = get_current_hardware_profile().flash_attn_npu_3_models
     spec = config.speculative_config
-    if spec.method == "mtp":
-        if FlashAttentionNpu3Model.QWEN3_5_MTP not in supported:
-            return False
-        # With one draft token MTP reuses the target metadata for its only forward.
-        target = getattr(spec.target_model_config, "architecture", None)
-        draft = spec.draft_model_config.architecture
-        if not (
-            spec.num_speculative_tokens == 1
-            and config.kv_transfer_config is None
-            and spec.target_parallel_config is not None
-            and spec.target_parallel_config.pipeline_parallel_size == 1
-            and spec.target_parallel_config.prefill_context_parallel_size == 1
-            and spec.target_parallel_config.decode_context_parallel_size == 1
-            and QWEN_MTP_DRAFTS.get(target) == draft
-            and backends.model_tag in ("backbone", "eagle_head")
-            and bool({target, draft}.intersection(architectures))
-        ):
-            return False
-        # The 0.5.0 paged forward copies device lengths to the host during graph capture.
-        try:
-            return Version(metadata.version("flash-attn-npu")) >= Version("0.5.1")
-        except metadata.PackageNotFoundError:
-            return False
     # DFlash keeps the target model config while loading the draft.
     if FlashAttentionNpu3Model.QWEN not in supported or QWEN_FA3_TARGETS.isdisjoint(architectures):
         return False

@@ -2569,15 +2569,16 @@ def test_qwen_dflash2_cpu_length_sync(target_arch, draft_arch, draft_uses_fa3, k
         ("Qwen3_5ForConditionalGeneration", "Qwen3_5MTP", 1, True, True),
         ("Qwen3_5MoeForConditionalGeneration", "Qwen3_5MoeMTP", 1, True, True),
         ("Qwen3_5ForConditionalGeneration", "Qwen3_5MTP", 1, False, False),
-        ("Qwen3_5ForConditionalGeneration", "Qwen3_5MTP", 2, True, False),
+        ("OtherHybrid", "OtherMTP", 3, True, True),
     ],
 )
-def test_qwen_mtp_cpu_length_sync(architecture, draft, steps, target_fa3, expected):
+def test_hybrid_mtp_cpu_length_sync(architecture, draft, steps, target_fa3, expected):
     from vllm_ascend.attention.gdn_attn_builder import AscendGDNFusedAttentionBackend
     from vllm_ascend.platform import FA3_BACKEND
     from vllm_ascend.worker.v2.model_states.mamba_hybrid import AscendMambaHybridModelState
 
     runner, _, _ = _device_length_runner("qwen3_5_text")
+    runner.vllm_config.kv_transfer_config = object()
     runner.model_config.architecture = architecture
     runner.model_state = AscendMambaHybridModelState.__new__(AscendMambaHybridModelState)
     runner.speculative_config = SimpleNamespace(

@@ -79,7 +79,7 @@ class SparseAttentionBackend(AscendAttentionBackend):
         return True
 
 
-class _RecordingGDNReuseBuilder(AscendGDNAttentionMetadataBuilder):
+class _RecordingMambaReuseBuilder:
     def __init__(self):
         self.supports_update_block_table = True
         self.num_spec = 3
@@ -110,9 +110,13 @@ class _RecordingGDNReuseBuilder(AscendGDNAttentionMetadataBuilder):
         return SimpleNamespace(batch=metadata.batch, block_table=blk_table)
 
 
-def _make_gdn_reuse_inputs(num_groups):
+class _RecordingGDNReuseBuilder(_RecordingMambaReuseBuilder, AscendGDNAttentionMetadataBuilder):
+    pass
+
+
+def _make_gdn_reuse_inputs(num_groups, builder_cls=_RecordingGDNReuseBuilder):
     spec = MambaSpec(block_size=16, shapes=((1,), (1,)), dtypes=(torch.float32,), num_speculative_blocks=3)
-    builders = [_RecordingGDNReuseBuilder() for _ in range(num_groups)]
+    builders = [builder_cls() for _ in range(num_groups)]
     for builder in builders:
         builder.kv_cache_spec = spec
     groups = [
@@ -218,8 +222,17 @@ def test_custom_gdn_provider_keeps_group_builds_separate(for_capture):
 
 
 @pytest.mark.parametrize("for_capture", [False, True])
-def test_batch_global_mamba_gdn_groups_reuse_during_capture_and_replay(for_capture, monkeypatch):
-    builders, kwargs = _make_gdn_reuse_inputs(24)
+@pytest.mark.parametrize("builder_cls", [_RecordingMambaReuseBuilder, _RecordingGDNReuseBuilder])
+def test_batch_global_mamba_groups_reuse_during_capture_and_replay(for_capture, builder_cls, monkeypatch):
+    builders, kwargs = _make_gdn_reuse_inputs(24, builder_cls)
+    # Exercise kernel block mapping on both the first build and a template hit.
+    split_groups = (0, len(builders) - 1)
+    for i in split_groups:
+        group = kwargs["attn_groups"][i][0]
+        group.kernel_block_size = group.kv_cache_spec.block_size // 2
+        group.kernel_block_offsets = torch.arange(2, dtype=torch.int32)
+        rows, cols = kwargs["block_tables"][i].shape
+        group.kernel_block_table = torch.empty((1, rows, cols * 2), dtype=torch.int32)
     kwargs["model_specific_attn_metadata"] = MambaHybridAttnMetadata(
         is_prefilling=torch.zeros(2, dtype=torch.bool),
         num_accepted_tokens=torch.tensor([2, 3], dtype=torch.int32),

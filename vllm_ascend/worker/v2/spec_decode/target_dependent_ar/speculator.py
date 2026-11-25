@@ -78,6 +78,7 @@ class AscendTargetDependentARSpeculator(LmheadTPDraftSamplingMixin, TargetDepend
     DSA and SFA manage their draft state in their metadata builders.
     """
 
+    attn_architecture: str | None = None
     model_state: "AscendModelState"
 
     def supports_batch_sharded_draft_logits(self) -> bool:
@@ -94,7 +95,6 @@ class AscendTargetDependentARSpeculator(LmheadTPDraftSamplingMixin, TargetDepend
         super().__init__(vllm_config, device)
         self._lmhead_tp_validate_draft_sampling()
 
-        self.attn_architecture: str | None = None
         self.attn_backend: type[AttentionBackend] | None = None
         self.draft_vllm_config = self._create_draft_vllm_config()
         self._init_dcp()
@@ -390,7 +390,7 @@ class AscendTargetDependentARSpeculator(LmheadTPDraftSamplingMixin, TargetDepend
             self.attn_architecture = "QSA"
         elif issubclass(self.attn_backend, AscendAttentionBackend):
             self.attn_architecture = "GQA"
-        elif self.num_speculative_steps == 1 and self.attn_backend.full_cls_name() == FA3_BACKEND:
+        elif self.attn_backend.full_cls_name() == FA3_BACKEND:
             self.attn_architecture = "FA3"
         else:
             raise ValueError(f"Unsupported attention backend: {self.attn_backend}")
@@ -482,15 +482,8 @@ class AscendTargetDependentARSpeculator(LmheadTPDraftSamplingMixin, TargetDepend
         seq_lens_cpu_upper_bound: torch.Tensor | None = None,
         num_speculative_steps: int | None = None,
     ) -> None:
-        """Minimal override to handle the merged multi-step graph in FULL mode.
-
-        In FULL mode the captured graph already contains all speculative
-        steps, so ``run_fullgraph`` is called once instead of once per
-        step.  For PIECEWISE / NONE modes we delegate to the upstream
-        ``_multi_step_decode`` which iterates over steps and calls
-        ``_generate_draft`` per step.
-        """
-        if batch_desc.cg_mode == CUDAGraphMode.FULL:
+        """Replay the merged draft graph, or let upstream prepare FA3 tiling before each step."""
+        if batch_desc.cg_mode == CUDAGraphMode.FULL and self.attn_architecture != "FA3":
             assert self.decode_cudagraph_manager is not None
             self.decode_cudagraph_manager.run_fullgraph(batch_desc)
             return
@@ -686,9 +679,8 @@ class AscendTargetDependentARSpeculator(LmheadTPDraftSamplingMixin, TargetDepend
         if attn_metadata is None:
             return
 
-        # DSA/SFA manage draft state in their metadata builders; QSA has no
-        # host-side FIA fields to patch here.
-        if self.attn_architecture in ("DSA", "SFA", "QSA"):
+        # These backends do not consume host-side FIA decode parameters.
+        if self.attn_architecture in ("DSA", "SFA", "QSA", "FA3"):
             return
 
         attn_meta = next(iter(attn_metadata.values()))

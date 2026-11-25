@@ -313,26 +313,26 @@ def test_qwen_dflash2_fa3_routing(monkeypatch, dflash2_config, target, draft, ta
     assert platform.NPUPlatform._select_attn_backend_cls(selector) == expected
 
 
-@pytest.mark.parametrize("version,expected", [("0.5.0", False), ("0.5.1", True)])
-def test_qwen_mtp_fa3_requires_graph_safe_forward(monkeypatch, dflash2_config, version, expected):
+@pytest.mark.parametrize(
+    "is_hybrid,version,head_size,alibi,expected",
+    [
+        (True, "0.5.1", 256, False, True),
+        (True, "0.5.0", 256, False, False),
+        (False, "0.5.1", 256, False, False),
+        (True, "0.5.1", 512, False, False),
+        (True, "0.5.1", 256, True, False),
+    ],
+)
+def test_hybrid_mtp_fa3(monkeypatch, is_hybrid, version, head_size, alibi, expected):
     from vllm_ascend import platform
     from vllm_ascend.device.hardware import AscendDeviceType
     from vllm_ascend.device.hardware_profile import get_hardware_profile
 
-    config = dflash2_config
-    config.kv_transfer_config = None
-    config.model_config.hf_config.architectures = ["Qwen3_5ForConditionalGeneration"]
-    config.speculative_config = SimpleNamespace(
-        method="mtp",
-        num_speculative_tokens=1,
-        target_parallel_config=config.parallel_config,
-        target_model_config=SimpleNamespace(architecture="Qwen3_5ForConditionalGeneration"),
-        draft_model_config=SimpleNamespace(architecture="Qwen3_5MTP"),
-    )
-    monkeypatch.setattr("vllm.compilation.backends.model_tag", "backbone")
+    spec = SimpleNamespace(method="mtp", target_model_config=SimpleNamespace(is_hybrid=is_hybrid))
+    config = SimpleNamespace(speculative_config=spec, model_config=SimpleNamespace(uses_alibi=alibi))
     monkeypatch.setattr(platform, "get_current_hardware_profile", lambda: get_hardware_profile(AscendDeviceType.A3))
     monkeypatch.setattr(platform.metadata, "version", lambda _: version)
-    assert platform._uses_qwen_fa3(config) is expected
+    assert platform._uses_hybrid_mtp_fa3(config, SimpleNamespace(head_size=head_size)) is expected
 
 
 @pytest.mark.parametrize(

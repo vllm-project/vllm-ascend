@@ -350,7 +350,7 @@ def test_every_device_type_has_a_profile() -> None:
         (
             AscendDeviceType.A3,
             frozenset(
-                {FlashAttentionNpu3Model.MINIMAX, FlashAttentionNpu3Model.QWEN, FlashAttentionNpu3Model.QWEN3_5_MTP}
+                {FlashAttentionNpu3Model.MINIMAX, FlashAttentionNpu3Model.QWEN, FlashAttentionNpu3Model.HYBRID_MTP}
             ),
         ),
         (AscendDeviceType.A5, frozenset({FlashAttentionNpu3Model.STEP5})),

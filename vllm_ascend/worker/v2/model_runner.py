@@ -116,7 +116,7 @@ from vllm_ascend.observability.runtime_guard.hooks import (
 )
 from vllm_ascend.observability.runtime_guard.processor import RuntimeGuardProcessor
 from vllm_ascend.ops.rotary_embedding import set_cos_and_sin, update_cos_sin
-from vllm_ascend.platform import FA3_BACKEND, QWEN_FA3_TARGETS, QWEN_MTP_DRAFTS
+from vllm_ascend.platform import FA3_BACKEND, QWEN_FA3_TARGETS
 from vllm_ascend.utils import (
     create_hccl_pg_options,
     enable_sfa_dcp_sharded_indexer,
@@ -1402,19 +1402,16 @@ class NPUModelRunner(GPUModelRunner):
             backend.full_cls_name() == FA3_BACKEND for backend in draft_backends
         )
 
-        if (
-            self._skip_fa3_cpu_length_sync
-            and self.speculative_config.method == "mtp"
-            and self.model_config.architecture in QWEN_MTP_DRAFTS
-        ):
+        if self._skip_fa3_cpu_length_sync and self.speculative_config.method == "mtp":
             from vllm_ascend.attention.gdn_attn_builder import AscendGDNFusedAttentionBackend
 
             # A target layer using ordinary FIA still needs exact host lengths after a rejection.
             target_backends = {group.backend.full_cls_name() for groups in self.attn_groups for group in groups}
-            self._skip_fa3_cpu_length_sync = target_backends == {
-                FA3_BACKEND,
-                AscendGDNFusedAttentionBackend.full_cls_name(),
-            }
+            self._skip_fa3_cpu_length_sync = (
+                isinstance(self.model_state, MambaHybridModelState)
+                and bool(target_backends)
+                and target_backends <= {FA3_BACKEND, AscendGDNFusedAttentionBackend.full_cls_name()}
+            )
 
     def _can_skip_spec_cpu_length_sync(self) -> bool:
         """Allow device lengths for supported speculative-decoding paths."""
@@ -1459,23 +1456,16 @@ class NPUModelRunner(GPUModelRunner):
             )
 
         if getattr(self, "_skip_fa3_cpu_length_sync", False):
+            if spec is not None and spec.method == "mtp":
+                return True
             architecture = getattr(self.model_config, "architecture", None)
             if architecture in QWEN_FA3_TARGETS:
                 return (
                     spec is not None
                     and spec.draft_model_config is not None
-                    and (
-                        (
-                            architecture == "Qwen3_5ForConditionalGeneration"
-                            and spec.method == "dflash"
-                            and "DFlash2DraftModel" in (spec.draft_model_config.architectures or ())
-                        )
-                        or (
-                            spec.method == "mtp"
-                            and spec.num_speculative_tokens == 1
-                            and QWEN_MTP_DRAFTS.get(architecture) in (spec.draft_model_config.architectures or ())
-                        )
-                    )
+                    and architecture == "Qwen3_5ForConditionalGeneration"
+                    and spec.method == "dflash"
+                    and "DFlash2DraftModel" in (spec.draft_model_config.architectures or ())
                     and isinstance(getattr(self, "model_state", None), MambaHybridModelState)
                     and self.vllm_config.kv_transfer_config is None
                 )

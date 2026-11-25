@@ -316,6 +316,48 @@ def _get_parallel_config_for_attn_metadata(attn_groups: list[list[AttentionGroup
     return vllm_config.parallel_config if vllm_config is not None else None
 
 
+def initialize_kernel_block_table_buffers(
+    attn_groups: Iterable[AttentionGroup], max_num_reqs: int, manager_table_widths: Sequence[int]
+) -> None:
+    """Reserve Ascend mapping capacity before warmup or graph capture.
+
+    Upstream sizes Group mappings for scheduler requests. PCP can expose two
+    local rows per request, and FIA can append a padding request. Reallocate
+    once during initialization so mapping never resizes graph-owned storage.
+    Use actual manager-table widths because encoder tables can be wider than
+    the decoder-based allocation made by AttentionGroup.
+    """
+    for group in attn_groups:
+        table = group.kernel_block_table
+        if table is None:
+            continue
+        assert group.kernel_block_size is not None
+        blocks_per_manager = group.kv_cache_spec.block_size // group.kernel_block_size
+        required_columns = manager_table_widths[group.kv_cache_group_id] * blocks_per_manager
+        rows = max(table.shape[1], max_num_reqs)
+        columns = max(table.shape[2], required_columns)
+        if rows == table.shape[1] and columns == table.shape[2]:
+            continue
+        expanded = table.new_zeros((table.shape[0], rows, columns))
+        expanded[:, : table.shape[1], : table.shape[2]].copy_(table)
+        group.kernel_block_table = expanded
+
+
+def _mamba_metadata_reuse_key(attn_group, builder, batch_global: bool, for_capture: bool):
+    if not isinstance(getattr(attn_group, "kv_cache_spec", None), MambaSpec) or not builder.supports_update_block_table:
+        return None
+    # Replay must refresh the buffers selected at capture, including when a provider supplies group-local inputs.
+    if for_capture:
+        builder._ascend_batch_global_at_capture = batch_global
+    else:
+        captured = getattr(builder, "_ascend_batch_global_at_capture", None)
+        if captured is False:
+            return None
+        if captured is True and not batch_global:
+            raise ValueError("Captured metadata reuse requires a batch-global Mamba provider")
+    return (attn_group.kv_cache_spec, type(builder)) if batch_global else None
+
+
 def build_attn_metadata(
     *,
     attn_groups: list[list[AttentionGroup]],
@@ -549,10 +591,12 @@ def build_attn_metadata(
                     metadata_variants = ([(target_names, common_attn_metadata)] if target_names else []) + [
                         (draft_names, draft_common)
                     ]
-            reuse_key = None
-            if isinstance(attn_metadata_builder, AscendGDNAttentionMetadataBuilder):
-                can_share = batch_global and common_attn_metadata.pcp_context is None
-                reuse_key = attn_metadata_builder.get_metadata_reuse_key(can_share, for_cudagraph_capture)
+            reuse_key = _mamba_metadata_reuse_key(
+                attn_group,
+                attn_metadata_builder,
+                batch_global and common_attn_metadata.pcp_context is None,
+                for_cudagraph_capture,
+            )
             template = cached_metadata.get(reuse_key) if reuse_key is not None else None
             attn_metadata_extra_kwargs = (
                 provider.get_extra_attn_kwargs(attn_metadata_builder, num_reqs)

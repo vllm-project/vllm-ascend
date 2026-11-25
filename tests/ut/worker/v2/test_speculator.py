@@ -203,15 +203,20 @@ def test_decode_skips_update_without_attn_metadata():
     speculator._update_decode_attn_metadata.assert_not_called()
 
 
-def test_multi_step_decode_full_graph():
-    """Test multi-step decode with full graph execution."""
+@pytest.mark.parametrize("architecture", ["GQA", "FA3"])
+def test_multi_step_decode_full_graph(architecture):
     speculator = AscendTargetDependentARSpeculator.__new__(AscendTargetDependentARSpeculator)
+    speculator.attn_architecture = architecture
     speculator.decode_cudagraph_manager = MagicMock()
     batch_desc = SimpleNamespace(cg_mode=CUDAGraphMode.FULL)
     with patch.object(TargetDependentARSpeculator, "_multi_step_decode") as parent_decode:
-        speculator._multi_step_decode(2, False, batch_desc, None)
-    speculator.decode_cudagraph_manager.run_fullgraph.assert_called_once_with(batch_desc)
-    parent_decode.assert_not_called()
+        speculator._multi_step_decode(2, False, batch_desc, None, num_speculative_steps=3)
+    if architecture == "FA3":
+        parent_decode.assert_called_once_with(2, False, batch_desc, None, None, 3)
+        speculator.decode_cudagraph_manager.run_fullgraph.assert_not_called()
+    else:
+        speculator.decode_cudagraph_manager.run_fullgraph.assert_called_once_with(batch_desc)
+        parent_decode.assert_not_called()
 
 
 def test_multi_step_decode_non_full_graph():
