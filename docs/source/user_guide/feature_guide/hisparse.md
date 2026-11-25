@@ -120,8 +120,9 @@ JSON to `--kv-transfer-config`.
 ```
 
 See [KV Cache Pool](kv_cache_pool_ascend_store.md) for MemCache setup and
-[AscendStore settings](#ascendstore-settings) for the required options. After
-startup, [verify an external replay](#verifying-ascendstore-external-replay).
+[AscendStore settings](#ascendstore-settings) for the required options.
+See [Monitoring AscendStore prefix reuse](#monitoring-ascendstore-prefix-reuse)
+for the metrics to check after startup.
 Mooncake support is deferred pending a fix for
 [PUT timeout data corruption](https://github.com/kvcache-ai/Mooncake/issues/4491).
 
@@ -138,40 +139,17 @@ pool. Files overwritten in place keep the same model path.
 
 Send a request and check the server's metrics endpoint for the HiSparse miss
 counter. The counter can stay at zero when selected rows are already on the NPU.
-Use the external replay check below to verify that AscendStore reads from MemCache.
 
 ```bash
 curl -fsS http://127.0.0.1:8000/metrics | grep '^vllm:hisparse_cache_misses_total'
 ```
 
-#### Verifying AscendStore external replay
+#### Monitoring AscendStore prefix reuse
 
-Use a dedicated test server with `VLLM_SERVER_DEV_MODE=1`, prefix caching
-enabled, and `kv_load_failure_policy=fail`. Add
-`--enable-prompt-tokens-details` to report per-request cached tokens.
-
-1. Send a `/v1/completions` request with a fresh `cache_salt`, a prompt that
-   spans several full KV blocks, and `temperature=0`. Set
-   `return_token_ids=true` and `logprobs=5` to compare the outputs. Send the same
-   request again. Check that `vllm:prefix_cache_hits_total` increases and
-   `vllm:external_prefix_cache_hits_total` stays unchanged to establish a local-hit reference.
-2. Clear only the server's local prefix cache and check that the response
-   contains `"success": true`. Leave the MemCache pool running.
-
-   ```bash
-   curl -fsS -X POST 'http://127.0.0.1:8000/reset_prefix_cache?reset_external=false'
-   ```
-
-3. Replay the same request. Compare `/metrics` immediately before and after
-   this replay. Check that the request succeeds, that
-   `vllm:ascend_store_load_get_keys_total` and
-   `vllm:external_prefix_cache_hits_total` increase, and that
-   `vllm:prefix_cache_hits_total` stays unchanged. The external hit count
-   should match `usage.prompt_tokens_details.cached_tokens` in the response
-   and the number of cached tokens in the local-hit reference.
-   The `vllm:prompt_tokens_by_source_total{source="local_compute"}` series
-   should increase only by the uncached suffix length. Compare the output
-   token IDs and logprobs with the local-hit reference.
+Check the server's `/metrics` endpoint for
+`vllm:external_prefix_cache_hits_total` to track prefix hits in MemCache and
+`vllm:ascend_store_load_get_keys_total` to track keys read by AscendStore.
+A request served from the local prefix cache may leave both counters unchanged.
 
 ## Configuration Parameters
 
