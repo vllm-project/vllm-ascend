@@ -511,7 +511,17 @@ Modify `run_dp_template.sh` on each node.
 
 #### Select devices for each DP rank
 
-The [example template](https://github.com/vllm-project/vllm-ascend/blob/main/examples/external_online_dp/run_dp_template.sh) defaults to setting `ASCEND_RT_VISIBLE_DEVICES="$1"` for each rank. To use `--device-ids`, set `USE_DEVICE_IDS=1` with that template. The template then keeps the inherited visibility and passes the rank's slice as `--device-ids "$1"`. If the inherited variable is set, supply zero-based indices into that list.
+`ASCEND_RT_VISIBLE_DEVICES` and `--device-ids` can be used together. When
+`ASCEND_RT_VISIBLE_DEVICES` is set, integer `--device-ids` are zero-based
+indices into the process's current visible list. Both examples below select
+NPUs 8 and 9 for a TP2 rank:
+
+| `ASCEND_RT_VISIBLE_DEVICES` | `--device-ids` | Selected NPUs |
+| --- | --- | --- |
+| `0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15` | `8,9` | `8,9` |
+| `8,9` | `0,1` | `8,9` |
+
+The [example template](https://github.com/vllm-project/vllm-ascend/blob/main/examples/external_online_dp/run_dp_template.sh) defaults to setting `ASCEND_RT_VISIBLE_DEVICES="$1"` for each rank. Set `USE_DEVICE_IDS=1` to keep the inherited visibility and pass the rank's slice as `--device-ids "$1"`, as in the first row.
 
 For example, after configuring the template for your model and node, start two TP2 ranks with the following device order:
 
@@ -524,9 +534,9 @@ ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15 \
 
 Rank 0 receives `--device-ids 8,9` and rank 1 receives `--device-ids 0,1`. Each independently launched rank on the same node needs a disjoint slice.
 
-The P/D templates below set visibility directly. To use explicit device IDs in
-those templates, set the node's visibility in the launcher environment, then
-apply this change to the role template:
+To use the first row's configuration with the inline P/D templates below,
+export the node-wide visible list in the launcher environment. Update the
+role template to inherit that list and pass the rank's slice:
 
 ```diff
 -export ASCEND_RT_VISIBLE_DEVICES=$1
@@ -535,10 +545,11 @@ apply this change to the role template:
    --host 0.0.0.0 \
 ```
 
-`USE_DEVICE_IDS=1` is handled by the linked example template. With an inline
-template, the change above is what passes the slice to `--device-ids`. If you
-keep `ASCEND_RT_VISIBLE_DEVICES="$1"` in the role template, omit
-`--device-ids` or use indices into that reduced list.
+`USE_DEVICE_IDS=1` is handled by the linked example template. For the second
+row, keep `ASCEND_RT_VISIBLE_DEVICES="$1"` in the role template and use
+`--device-ids 0,1` when `$1` is `8,9`. With that two-device visibility list,
+`--device-ids 8,9` would be out of range. You can also omit `--device-ids` to
+use the two visible devices for TP2.
 
 See [NPU Device Selection](../../user_guide/configuration/device_selection.md) for the mapping rules.
 
