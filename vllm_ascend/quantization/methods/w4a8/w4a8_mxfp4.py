@@ -257,6 +257,10 @@ class AscendW4A8MXFPDynamicFusedMoEMethod(AscendMoEScheme):
                 views = getattr(layer, "_mxfp4_megamoe_views", None)
                 if views is None:
                     views = self._make_megamoe_views(layer)
+                    # The loader has bound its final storage by the first
+                    # forward. EPLB can still replace expert slots afterwards.
+                    if not self.enable_eplb:
+                        layer._mxfp4_megamoe_views = views
                 w1, w1_scale, w2_scale = views
                 w2 = layer.w2_weight_list
             else:
@@ -367,10 +371,7 @@ class AscendW4A8MXFPDynamicFusedMoEMethod(AscendMoEScheme):
             # gets zero-copy transposed views from _get_mlp_weights.
             layer.w13_weight_scale_list = [scale.clone() for scale in layer.w13_weight_scale.data.unbind(dim=0)]
             layer.w2_weight_scale_list = [scale.clone() for scale in layer.w2_weight_scale.data.unbind(dim=0)]
-            # EPLB can replace expert list entries during redistribution. For
-            # fixed experts the views are valid for the lifetime of these lists.
-            if not self.enable_eplb:
-                layer._mxfp4_megamoe_views = self._make_megamoe_views(layer)
+            layer._mxfp4_megamoe_views = None
             del layer.w13_weight
             del layer.w2_weight
             del layer.w13_weight_scale

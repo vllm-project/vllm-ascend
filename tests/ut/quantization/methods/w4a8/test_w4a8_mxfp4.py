@@ -371,6 +371,9 @@ class TestAscendW4A8MXFP4MoEMethod(TestBase):
         self.assertTrue(self.scheme.use_expert_weight_list)
         self.assertFalse(hasattr(layer, "w13_weight"))
         self.assertFalse(hasattr(layer, "cann_mega_moe_w13_weight_list"))
+        # A loader can bind the final storage after post-processing.
+        for group in (layer.w13_weight_list, layer.w13_weight_scale_list, layer.w2_weight_scale_list):
+            group[0].data = group[0].clone()
         with patch("vllm_ascend.quantization.methods.w4a8.w4a8_mxfp4._EXTRA_CTX") as context:
             context.use_mega_moe = True
             weights = self.scheme.get_fused_mc2_weights(layer)
