@@ -5,8 +5,8 @@
 
 The trainer broadcasts the checkpoint in two pause/update/resume rounds. The
 shared server lifecycle supplies an independent startup-load reference and the
-dummy pre-update signature. Draft coverage sends two draft updates followed by
-one target update. IPC's same-device sleep/wake protocol is not used.
+dummy pre-update signature. Draft coverage sends draft, target, then different
+draft weights. IPC's same-device sleep/wake protocol is not used.
 """
 
 import json
@@ -38,7 +38,6 @@ from tests.e2e.common.rlhf.weight_transfer.reference_check import (
     weight_transfer_servers,
 )
 from tests.e2e.common.rlhf.weight_transfer.weight_source import (
-    FIXED_WEIGHT_SEED,
     FixedRandomWeightSource,
     make_weight_source,
     packed_buffer_size_for,
@@ -162,28 +161,30 @@ def collect_draft_observation(server, case: WeightUpdateModelCase):
 
 
 def run_draft_hccl_weight_transfer(tmp_path, monkeypatch, packed: bool, enforce_eager: bool, speculative_case):
-    """Compare two draft updates and one target update with independent loads."""
+    """Compare draft -> target -> draft updates with independent loads."""
     monkeypatch.setenv("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
     torch.npu.set_device(TRAINER_DEVICE_INDEX)
     device = torch.device("npu", TRAINER_DEVICE_INDEX)
     case, draft_case = speculative_case.target, speculative_case.draft
-    initial = FixedRandomWeightSource(case, device, draft_case=draft_case)
-    draft_updated = FixedRandomWeightSource(case, device, draft_case=draft_case, draft_seed=FIXED_WEIGHT_SEED + 2)
-    target_updated = FixedRandomWeightSource(
-        case, device, seed=FIXED_WEIGHT_SEED + 3, draft_case=draft_case, draft_seed=FIXED_WEIGHT_SEED + 2
-    )
+    initial_source = FixedRandomWeightSource(case, device, seed=0, draft_case=draft_case, draft_seed=0)
+    first_draft_updated = FixedRandomWeightSource(case, device, seed=0, draft_case=draft_case, draft_seed=1)
+    target_updated = FixedRandomWeightSource(case, device, seed=1, draft_case=draft_case, draft_seed=1)
+    second_draft_updated = FixedRandomWeightSource(case, device, seed=1, draft_case=draft_case, draft_seed=2)
     initial_path = tmp_path / "initial"
-    initial.write_checkpoint(initial_path)
+    initial_source.write_checkpoint(initial_path)
     env_dict = {
         "VLLM_SERVER_DEV_MODE": "1",
         "VLLM_WORKER_MULTIPROC_METHOD": "spawn",
         "ASCEND_RT_VISIBLE_DEVICES": server_visible_devices(INFERENCE_DEVICE_INDEX, INFERENCE_WORLD_SIZE),
     }
 
-    # The draft reference keeps the initial target. The target reference
-    # contains the updated target together with the same updated draft.
+    # Cold-load the complete target/draft state expected after each update.
     references = {}
-    for role, source in (("draft", draft_updated), ("target", target_updated)):
+    for role, source in (
+        ("draft-1", first_draft_updated),
+        ("target", target_updated),
+        ("draft-2", second_draft_updated),
+    ):
         checkpoint = tmp_path / f"{role}-reference"
         source.write_checkpoint(checkpoint)
         wait_for_free_device_memory(INFERENCE_DEVICE_INDEX, 0.2)
@@ -212,8 +213,8 @@ def run_draft_hccl_weight_transfer(tmp_path, monkeypatch, packed: bool, enforce_
     ) as server:
         client = server.get_client()
         sync_client = WeightUpdateClient(server.url_root)
-        assert draft_updated.draft_source is not None
-        engine = create_hccl_trainer(sync_client, draft_updated.draft_source, packed, target_updated)
+        assert first_draft_updated.draft_source is not None
+        engine = create_hccl_trainer(sync_client, first_draft_updated.draft_source, packed, target_updated)
         try:
             # Reuse HCCL for warmup and all updates; capture graphs before
             # recording the addresses which live updates must preserve.
@@ -227,16 +228,16 @@ def run_draft_hccl_weight_transfer(tmp_path, monkeypatch, packed: bool, enforce_
             before = snapshot_weight_update_models(server)
             original_addresses = parameter_addresses(before)
             (tmp_path / "initial-snapshot.json").write_text(json.dumps(before, indent=2))
-            assert parameter_digests(before)["draft"] != references["draft"]["parameters"]["draft"], (
+            assert parameter_digests(before)["draft"] != references["draft-1"]["parameters"]["draft"], (
                 "Draft payload is not observable"
             )
 
             updates = (
-                ("draft", draft_updated.draft_source),
-                ("draft", draft_updated.draft_source),
-                ("target", target_updated),
+                ("draft", first_draft_updated.draft_source, "draft-1"),
+                ("target", target_updated, "target"),
+                ("draft", second_draft_updated.draft_source, "draft-2"),
             )
-            for update_round, (role, source) in enumerate(updates, start=1):
+            for update_round, (role, source, reference_name) in enumerate(updates, start=1):
                 print(f"[trainer] {speculative_case.id}: {role} update round={update_round}", flush=True)
                 sync_client.is_draft = role == "draft"
                 engine.source = source
@@ -252,7 +253,7 @@ def run_draft_hccl_weight_transfer(tmp_path, monkeypatch, packed: bool, enforce_
                 (tmp_path / f"update-{update_round}-{role}-draft-outputs.json").write_text(
                     json.dumps(observation["draft_outputs"], indent=2)
                 )
-                results.append((role, observation, parameter_addresses(after)))
+                results.append((reference_name, observation, parameter_addresses(after)))
         finally:
             engine.shutdown()
 
