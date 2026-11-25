@@ -584,7 +584,14 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
 
     @torch.no_grad()
     def _prepare_kda_prolog_weights(self) -> bool:
-        """Materialize the input/output NZ weights consumed by KDA Prolog."""
+        """Materialize Prolog's four complete NZ projection allocations.
+
+        The original projections remain resident for decode and fallback. With
+        H=7168, 96 heads and D=128, the extra BF16 payload per layer/rank is
+        65.29 MiB at TP8 or 33.52 MiB at TP16, before NZ padding/workspaces.
+        These allocations are prepared before memory profiling so they reduce
+        the available KV-cache budget.
+        """
         if self._prefill_fused_kda_operator is None:
             return False
         if self.model_config.dtype != torch.bfloat16 or self._mega_pd_decode_worker:
@@ -827,17 +834,19 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
         return super().forward(hidden_states, positions)
 
     def _can_use_kda_prolog_prefill(self) -> bool:
+        # Quantized projections keep the original path. Do not inspect request
+        # metadata here: this check also runs while Dynamo traces projections.
+        if (
+            getattr(self, "_prefill_fused_kda_operator", None) is None
+            or getattr(self, "_kda_prolog_qkv_weight", None) is None
+            or self.gate_lower_bound is None
+        ):
+            return False
         raw = self._get_kda_forward_metadata()
         if not isinstance(raw, dict) or self.prefix not in raw:
             return False
         metadata = raw[self.prefix]
-        if not isinstance(metadata, GDNAttentionMetadata) or metadata.num_prefills == 0:
-            return False
-        return (
-            self._prefill_fused_kda_operator is not None
-            and self.gate_lower_bound is not None
-            and self._kda_prolog_qkv_weight is not None
-        )
+        return isinstance(metadata, GDNAttentionMetadata) and metadata.num_prefills > 0
 
     def _project_recurrent_inputs(
         self, hidden_states: torch.Tensor
