@@ -1201,7 +1201,6 @@ vLLM Ascend revision.
           attempts. When this exceeds `window_size`, only metrics from the last
           `window_size` steps are used.
         - `policy: "stair"`: Selects Ascend's STAIR expert load-balancing policy.
-          Use `"default"` for comparison with the upstream policy.
         - `num_redundant_experts: 16`: Total number of redundant physical experts
           across the EP group, not per rank. Redundant experts consume additional
           device memory, and `(num_experts + num_redundant_experts)` must be
