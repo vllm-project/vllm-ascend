@@ -23,6 +23,7 @@ from vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.protocol import (
     SendTask,
     get_external_request_id,
 )
+from vllm_ascend.distributed.kv_transfer.load_failure_registry import is_failed_load
 
 THREAD_SHUTDOWN_TIMEOUT_SECONDS = 5.0
 
@@ -183,12 +184,12 @@ class MembPullSendingThread(threading.Thread):
 
         # Group this layer's notifications by D-side endpoint so requests for
         # the same ``(remote_host, remote_port)`` share one READ_READY_BATCH.
-        # Each value is ``(read_reqs, done_ext_ids)``; a read request contains
-        # ``(external_req_id, main_block_ids, indexer_block_ids,
+        # Each value is ``(read_reqs, done_req_keys)``; a read request contains
+        # ``(external_req_id, transfer_generation, main_block_ids, indexer_block_ids,
         # main_start_block, indexer_start_block)``.
         endpoint_payloads: dict[
             tuple[str, int],
-            tuple[list[tuple[str, list[int], list[int], int, int]], list[str]],
+            tuple[list[tuple[str, str, list[int], list[int], int, int]], list[tuple[str, str]]],
         ] = {}
         layer_meta = self._state.layer_metadata[layer_name]
         layer_has_indexer = layer_meta.has_indexer
@@ -216,23 +217,35 @@ class MembPullSendingThread(threading.Thread):
             return list(all_block_ids[start_block:end_block]), start_block
 
         for req_id, rm in send_task.send_request.items():
+            load_generation = send_task.load_generations.get(req_id, 0)
+            if is_failed_load(req_id, load_generation):
+                logger.warning(
+                    "MembPull P skip READ_READY item for load-failed req=%s generation=%d layer=%d (%s)",
+                    req_id,
+                    load_generation,
+                    layer_idx,
+                    layer_name,
+                )
+                continue
             p_main_block_ids, main_start_block = _blocks_for_chunk(rm, self._state.main_group_idx)
             if layer_has_indexer:
                 p_indexer_block_ids, indexer_start_block = _blocks_for_chunk(rm, self._state.indexer_group_idx)
             else:
                 p_indexer_block_ids, indexer_start_block = [], 0
             ext_id = get_external_request_id(req_id)
+            transfer_generation = str(getattr(rm, "transfer_generation", "") or "")
             has_endpoint = bool(rm.remote_host) and bool(rm.remote_port)
             chunk_done = layer_idx == self.last_layer_idx and rm.chunk_finish and has_endpoint
             if (p_main_block_ids or p_indexer_block_ids or chunk_done) and has_endpoint:
                 assert rm.remote_host is not None
                 assert rm.remote_port is not None
                 endpoint = (rm.remote_host, rm.remote_port)
-                read_reqs, done_ext_ids = endpoint_payloads.setdefault(endpoint, ([], []))
+                read_reqs, done_req_keys = endpoint_payloads.setdefault(endpoint, ([], []))
                 if p_main_block_ids or p_indexer_block_ids:
                     read_reqs.append(
                         (
                             ext_id,
+                            transfer_generation,
                             p_main_block_ids,
                             p_indexer_block_ids,
                             main_start_block,
@@ -240,7 +253,7 @@ class MembPullSendingThread(threading.Thread):
                         )
                     )
                 if chunk_done:
-                    done_ext_ids.append(ext_id)
+                    done_req_keys.append((ext_id, transfer_generation))
             logger.debug(
                 "MembPull P add READ_READY_BATCH item: layer=%d (%s), req=%s, "
                 "main_blocks=%d, indexer_blocks=%d, done=%s",
@@ -260,14 +273,14 @@ class MembPullSendingThread(threading.Thread):
             any_meta = next(iter(send_task.send_request.values()))
             group_member_idx = any_meta.group_member_idx
             tp_ratio = any_meta.tp_ratio
-            for (remote_host, remote_port), (read_reqs, done_ext_ids) in endpoint_payloads.items():
+            for (remote_host, remote_port), (read_reqs, done_req_keys) in endpoint_payloads.items():
                 path = make_zmq_path("tcp", remote_host, remote_port)
                 dealer = self._ensure_dealer(path)
                 if path not in self._mf_meta_sent_paths:
                     self._send_mf_meta(path, dealer, encoder)
                 dealer.send(
                     encoder.encode(
-                        (READ_READY_BATCH, layer_idx, layer_name, read_reqs, done_ext_ids, group_member_idx, tp_ratio)
+                        (READ_READY_BATCH, layer_idx, layer_name, read_reqs, done_req_keys, group_member_idx, tp_ratio)
                     )
                 )
                 logger.debug(
@@ -277,7 +290,7 @@ class MembPullSendingThread(threading.Thread):
                     remote_host,
                     remote_port,
                     len(read_reqs),
-                    len(done_ext_ids),
+                    len(done_req_keys),
                 )
         else:
             self._signal_layer_done(layer_idx)

@@ -2,6 +2,7 @@
 
 import asyncio
 import threading
+import time
 from concurrent.futures import Future
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -49,6 +50,11 @@ from vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.send_thread import (
 from vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.worker import (  # noqa: E402
     SFAPDRD2HConsumerWorker,
     SFAPDRD2HProducerWorker,
+)
+from vllm_ascend.distributed.kv_transfer.load_failure_registry import (  # noqa: E402
+    begin_load_generation,
+    is_failed_load,
+    record_failed_load,
 )
 from vllm_ascend.distributed.kv_transfer.utils.memfabric_transfer_engine import (  # noqa: E402
     BACKEND_MEMFABRIC,
@@ -165,7 +171,8 @@ def _make_read_thread() -> MembPullReadThread:
         main_block_lens=[],
         indexer_tensors=[],
         indexer_scale_tensors=[],
-        dest_blocks_by_req={"req-0": ([3, 4], [8])},
+        dest_blocks_by_req={("req-0", "gen-0"): ([3, 4], [8])},
+        active_generation_by_ext={"req-0": "gen-0"},
         get_offload_layer_id=lambda _: 0,
     )
     return thread
@@ -207,6 +214,7 @@ def test_read_descriptors_use_independent_main_and_indexer_block_ids():
     local, peer, lengths, info = thread._build_req_descriptors(
         _make_layer(k_cpu_ptr=3000, v_cpu_ptr=4000),
         "req-0",
+        transfer_generation="gen-0",
         p_main_block_ids=[1, 2],
         p_indexer_block_ids=[7],
         want_info=True,
@@ -226,6 +234,7 @@ def test_non_tp0_read_descriptors_still_transfer_indexer():
     local, peer, lengths, info = thread._build_req_descriptors(
         _make_layer(k_cpu_ptr=None, v_cpu_ptr=None),
         "req-0",
+        transfer_generation="gen-0",
         p_main_block_ids=[1, 2],
         p_indexer_block_ids=[7],
         want_info=True,
@@ -362,6 +371,7 @@ def test_resolve_read_layer_builds_indexer_scale_transfer_descriptor():
     local, peer, lengths, info = thread._build_req_descriptors(
         layer,
         "req-0",
+        transfer_generation="gen-0",
         p_main_block_ids=[1, 2],
         p_indexer_block_ids=[7],
         want_info=True,
@@ -413,6 +423,7 @@ def test_read_descriptors_cover_tp_ownership_and_optional_indexer(
             has_indexer=has_indexer,
         ),
         "req-0",
+        transfer_generation="gen-0",
         p_main_block_ids=[1, 2],
         p_indexer_block_ids=[7] if has_indexer else [],
         want_info=True,
@@ -431,7 +442,7 @@ def test_non_tp0_main_only_layer_acknowledges_without_memfabric_read():
 
     thread._do_read_batch(
         layer["layer_name"],
-        [("req-0", [1, 2], [], 0, 0)],
+        [("req-0", "gen-0", [1, 2], [], 0, 0)],
         p_session="p-session",
         p_layer_meta={},
     )
@@ -450,11 +461,12 @@ def test_tp_ranks_split_main_blocks_into_disjoint_contiguous_ranges():
         thread = _make_read_thread()
         thread.tp_rank = tp_rank
         thread._state.tp_size = 2
-        thread._state.dest_blocks_by_req["req-0"] = ([0, 1, 2, 3], [])
+        thread._state.dest_blocks_by_req[("req-0", "gen-0")] = ([0, 1, 2, 3], [])
 
         local, peer, lengths, info = thread._build_req_descriptors(
             layer,
             "req-0",
+            transfer_generation="gen-0",
             p_main_block_ids=[0, 1, 2, 3],
             p_indexer_block_ids=[],
             want_info=True,
@@ -477,7 +489,7 @@ def test_tp_rank_without_blocks_in_small_chunk_acknowledges_without_read():
 
     thread._do_read_batch(
         layer["layer_name"],
-        [("req-0", [1], [], 0, 0)],
+        [("req-0", "gen-0", [1], [], 0, 0)],
         p_session="p-session",
         p_layer_meta={},
     )
@@ -493,11 +505,12 @@ def test_small_chunks_rotate_across_tp_ranks():
             thread = _make_read_thread()
             thread.tp_rank = tp_rank
             thread._state.tp_size = 4
-            thread._state.dest_blocks_by_req["req-0"] = ([0, 1, 2, 3], [])
+            thread._state.dest_blocks_by_req[("req-0", "gen-0")] = ([0, 1, 2, 3], [])
 
             local, _, _, _ = thread._build_req_descriptors(
                 layer,
                 "req-0",
+                transfer_generation="gen-0",
                 p_main_block_ids=[chunk_start],
                 p_indexer_block_ids=[],
                 want_info=False,
@@ -511,12 +524,19 @@ def _make_consumer_worker_for_completion_test():
     worker = SFAPDRD2HConsumerWorker.__new__(SFAPDRD2HConsumerWorker)
     worker.tp_rank = 0
     worker.tp_size = 2
-    worker.request_map = {"req-0": "req-0-internal"}
-    worker._dest_blocks_by_req = {"req-0": ([1, 2], [3])}
+    req_key = ("req-0", "gen-0")
+    worker.request_map = {req_key: "req-0-internal"}
+    worker._req_key_by_internal = {"req-0-internal": req_key}
+    worker._active_generation_by_ext = {"req-0": "gen-0"}
+    worker._dest_blocks_by_req = {req_key: ([1, 2], [3])}
     worker._cpu_blocks_by_req = {}
     worker._invalid_block_ids = set()
     worker._pending_done = set()
-    worker._terminal_ext_ids = set()
+    worker._terminal_req_keys = set()
+    worker._rendezvous_failed_req_keys = set()
+    worker._reported_terminal_req_keys = set()
+    worker._retired_req_keys = {}
+    worker._deferred_cleanup_ids = set()
     worker._mf_read_thread = MagicMock()
     worker._mf_read_thread.get_and_clear_failed.return_value = set()
     return worker
@@ -524,11 +544,12 @@ def _make_consumer_worker_for_completion_test():
 
 def test_consumer_completion_waits_for_every_tp_rank():
     worker = _make_consumer_worker_for_completion_test()
-    worker._mf_read_thread.get_and_clear_done.side_effect = [{"req-0"}, set()]
+    req_key = ("req-0", "gen-0")
+    worker._mf_read_thread.get_and_clear_done.side_effect = [{req_key}, set()]
     worker._gather_tp_read_status = MagicMock(
         side_effect=[
-            [({"req-0"}, set()), (set(), set())],
-            [({"req-0"}, set()), ({"req-0"}, set())],
+            [({req_key}, set()), (set(), set())],
+            [({req_key}, set()), ({req_key}, set())],
         ]
     )
 
@@ -538,9 +559,10 @@ def test_consumer_completion_waits_for_every_tp_rank():
 
 def test_consumer_load_errors_are_unioned_across_tp():
     worker = _make_consumer_worker_for_completion_test()
+    req_key = ("req-0", "gen-0")
     worker._mf_read_thread.get_and_clear_done.return_value = set()
     worker._mf_read_thread.get_and_clear_failed.return_value = set()
-    worker._gather_tp_read_status = MagicMock(return_value=[({"req-0"}, set()), ({"req-0"}, {"req-0"})])
+    worker._gather_tp_read_status = MagicMock(return_value=[({req_key}, set()), ({req_key}, {req_key})])
 
     assert worker.get_finished() == (set(), {"req-0-internal"})
 
@@ -550,18 +572,174 @@ def test_consumer_load_errors_are_unioned_across_tp():
 
 def test_failed_tp_rank_remains_terminal_until_other_ranks_finish():
     worker = _make_consumer_worker_for_completion_test()
+    req_key = ("req-0", "gen-0")
     worker._mf_read_thread.get_and_clear_done.return_value = set()
-    worker._mf_read_thread.get_and_clear_failed.side_effect = [{"req-0"}, set()]
+    worker._mf_read_thread.get_and_clear_failed.side_effect = [{req_key}, set()]
     worker._gather_tp_read_status = MagicMock(
         side_effect=[
-            [({"req-0"}, {"req-0"}), (set(), set())],
-            [({"req-0"}, set()), ({"req-0"}, set())],
+            [({req_key}, {req_key}), (set(), set())],
+            [({req_key}, set()), ({req_key}, set())],
         ]
     )
 
     assert worker.get_finished() == (set(), set())
     assert worker.get_finished() == (set(), {"req-0-internal"})
-    assert worker._gather_tp_read_status.call_args_list[1].args[0] == {"req-0"}
+    assert worker._gather_tp_read_status.call_args_list[1].args[0] == {req_key}
+
+
+def test_consumer_rendezvous_failure_reports_terminal_and_invalid_blocks():
+    worker = _make_consumer_worker_for_completion_test()
+    worker.tp_size = 1
+    metadata = SimpleNamespace(
+        requests=[],
+        failed_requests=[("req-0-internal", "gen-0", [1, 2], [3])],
+    )
+
+    worker.start_load_kv(metadata)
+    req_key = ("req-0", "gen-0")
+    worker._mf_read_thread.mark_failed_requests.assert_called_once_with({req_key})
+    worker._mf_read_thread.get_and_clear_done.return_value = set()
+    worker._mf_read_thread.get_and_clear_failed.return_value = {req_key}
+
+    assert worker.get_finished() == (set(), {"req-0-internal"})
+    assert worker.get_block_ids_with_load_errors() == {1, 2, 3}
+
+
+def test_consumer_late_failure_after_report_does_not_invalidate_blocks():
+    worker = _make_consumer_worker_for_completion_test()
+    worker.tp_size = 1
+    req_key = ("req-0", "gen-0")
+    worker._mf_read_thread.get_and_clear_done.side_effect = [{req_key}, set()]
+    worker._mf_read_thread.get_and_clear_failed.side_effect = [set(), {req_key}]
+
+    assert worker.get_finished() == (set(), {"req-0-internal"})
+    assert worker.get_block_ids_with_load_errors() == set()
+
+    assert worker.get_finished() == (set(), set())
+    assert worker.get_block_ids_with_load_errors() == set()
+
+
+def test_consumer_defers_cleanup_until_receive_terminal_is_reported():
+    worker = _make_consumer_worker_for_completion_test()
+    req_key = ("req-0", "gen-0")
+
+    worker._cleanup_request_state({"req-0-internal"})
+
+    assert worker.request_map[req_key] == "req-0-internal"
+    assert worker._deferred_cleanup_ids == {"req-0-internal"}
+    worker._mf_read_thread.mark_failed_requests.assert_called_once_with({req_key})
+
+    worker._reported_terminal_req_keys.add(req_key)
+    worker._cleanup_request_state({"req-0-internal"})
+
+    assert req_key not in worker.request_map
+    assert worker._deferred_cleanup_ids == set()
+
+
+def test_late_rendezvous_failure_does_not_rearm_reported_generation():
+    worker = _make_consumer_worker_for_completion_test()
+    req_key = ("req-0", "gen-0")
+    worker._reported_terminal_req_keys.add(req_key)
+
+    worker.start_load_kv(
+        SimpleNamespace(
+            requests=[],
+            failed_requests=[("req-0-internal", "gen-0", [1, 2], [3])],
+        )
+    )
+
+    worker._mf_read_thread.mark_failed_requests.assert_not_called()
+    assert worker.request_map[req_key] == "req-0-internal"
+
+
+def test_consumer_reregistration_retires_old_generation_and_ignores_late_failure():
+    worker = _make_consumer_worker_for_completion_test()
+    old_key = ("req-0", "gen-0")
+    new_key = ("req-0", "gen-1")
+
+    worker.start_load_kv(
+        SimpleNamespace(
+            requests=[
+                SimpleNamespace(
+                    req_id="req-0-internal",
+                    transfer_generation="gen-1",
+                    main_block_ids=[4, 5],
+                    indexer_block_ids=[6],
+                )
+            ],
+            failed_requests=[],
+        )
+    )
+
+    assert worker._active_generation_by_ext["req-0"] == "gen-1"
+    assert old_key not in worker.request_map
+    assert old_key not in worker._dest_blocks_by_req
+    assert old_key in worker._retired_req_keys
+    assert worker.request_map[new_key] == "req-0-internal"
+    worker._mf_read_thread.discard_requests.assert_called_once_with({old_key})
+
+    worker._mf_read_thread.reset_mock()
+    worker.start_load_kv(
+        SimpleNamespace(
+            requests=[],
+            failed_requests=[("req-0-internal", "gen-0", [1, 2], [3])],
+        )
+    )
+
+    assert worker._active_generation_by_ext["req-0"] == "gen-1"
+    assert old_key not in worker.request_map
+    assert worker.request_map[new_key] == "req-0-internal"
+    worker._mf_read_thread.mark_failed_requests.assert_not_called()
+
+
+def test_consumer_drops_stale_terminal_after_new_generation_is_active():
+    worker = _make_consumer_worker_for_completion_test()
+    worker.tp_size = 1
+    old_key = ("req-0", "gen-0")
+
+    worker.start_load_kv(
+        SimpleNamespace(
+            requests=[
+                SimpleNamespace(
+                    req_id="req-0-internal",
+                    transfer_generation="gen-1",
+                    main_block_ids=[4, 5],
+                    indexer_block_ids=[6],
+                )
+            ],
+            failed_requests=[],
+        )
+    )
+    worker._mf_read_thread.get_and_clear_done.return_value = {old_key}
+    worker._mf_read_thread.get_and_clear_failed.return_value = {old_key}
+
+    assert worker.get_finished() == (set(), set())
+    assert old_key not in worker._reported_terminal_req_keys
+
+
+def test_consumer_retired_terminal_ignores_failure_after_cleanup():
+    worker = _make_consumer_worker_for_completion_test()
+    worker.tp_size = 1
+    req_key = ("req-0", "gen-0")
+    worker._mf_read_thread.get_and_clear_done.return_value = {req_key}
+    worker._mf_read_thread.get_and_clear_failed.return_value = set()
+
+    assert worker.get_finished() == (set(), {"req-0-internal"})
+    worker._cleanup_request_state({"req-0-internal"})
+    assert req_key in worker._retired_req_keys
+    assert req_key not in worker._reported_terminal_req_keys
+
+    worker._mf_read_thread.reset_mock()
+    worker.start_load_kv(
+        SimpleNamespace(
+            requests=[],
+            failed_requests=[("req-0-internal", "gen-0", [1, 2], [3])],
+        )
+    )
+
+    assert req_key not in worker.request_map
+    assert "req-0" not in worker._active_generation_by_ext
+    worker._mf_read_thread.mark_failed_requests.assert_not_called()
 
 
 def test_owned_component_without_descriptors_still_fails():
@@ -576,7 +754,7 @@ def test_owned_component_without_descriptors_still_fails():
     with pytest.raises(RuntimeError, match="built no transfer descriptors"):
         thread._do_read_batch(
             layer["layer_name"],
-            [("req-0", [1, 2], [], 0, 0)],
+            [("req-0", "gen-0", [1, 2], [], 0, 0)],
             p_session="p-session",
             p_layer_meta={},
         )
@@ -592,10 +770,40 @@ def test_read_descriptor_rejects_missing_destination_blocks():
         thread._build_req_descriptors(
             _make_layer(k_cpu_ptr=None, v_cpu_ptr=None, has_indexer=False),
             "req-0",
+            transfer_generation="gen-0",
             p_main_block_ids=[1],
             p_indexer_block_ids=[],
             want_info=False,
         )
+
+
+def test_read_descriptor_waits_for_late_destination_blocks():
+    thread = _make_read_thread()
+    thread._state.dest_blocks_by_req.clear()
+    thread._stop_event = threading.Event()
+
+    def register_late_dest_blocks():
+        time.sleep(0.02)
+        thread._state.dest_blocks_by_req[("req-0", "gen-0")] = ([3, 4], [])
+
+    register_thread = threading.Thread(target=register_late_dest_blocks)
+    register_thread.start()
+    try:
+        local, peer, lengths, info = thread._build_req_descriptors(
+            _make_layer(k_cpu_ptr=3000, v_cpu_ptr=4000, has_indexer=False),
+            "req-0",
+            transfer_generation="gen-0",
+            p_main_block_ids=[1, 2],
+            p_indexer_block_ids=[],
+            want_info=True,
+        )
+    finally:
+        register_thread.join(timeout=1)
+
+    assert local == [3030, 4060]
+    assert peer == [1010, 2020]
+    assert lengths == [20, 40]
+    assert info is not None
 
 
 def test_read_descriptor_rejects_incomplete_indexer_transfer():
@@ -605,6 +813,7 @@ def test_read_descriptor_rejects_incomplete_indexer_transfer():
         thread._build_req_descriptors(
             _make_layer(k_cpu_ptr=3000, v_cpu_ptr=4000),
             "req-0",
+            transfer_generation="gen-0",
             p_main_block_ids=[1, 2],
             p_indexer_block_ids=[7, 9],
             want_info=False,
@@ -617,6 +826,7 @@ def test_main_only_layer_uses_chunk_destination_slice():
     local, peer, lengths, info = thread._build_req_descriptors(
         _make_layer(k_cpu_ptr=3000, v_cpu_ptr=4000, has_indexer=False),
         "req-0",
+        transfer_generation="gen-0",
         p_main_block_ids=[2],
         p_indexer_block_ids=[],
         want_info=True,
@@ -682,11 +892,19 @@ def test_send_thread_wires_both_cache_group_block_lists():
         chunk_finish=True,
         local_transed_tokens=0,
         local_computed_tokens=32,
+        transfer_generation="gen-0",
     )
+
+    old_generation = begin_load_generation("req-0")
+    record_failed_load((("req-0", old_generation),))
+    new_generation = begin_load_generation("req-0")
+    assert is_failed_load("req-0", old_generation)
+    assert not is_failed_load("req-0", new_generation)
 
     thread._process_send_task(
         SendTask(
             send_request={"req-0": req_meta},
+            load_generations={"req-0": new_generation},
             layer_idx=0,
             layer_name=layer_name,
         ),
@@ -695,11 +913,70 @@ def test_send_thread_wires_both_cache_group_block_lists():
 
     sent_message = dealer.send.call_args.args[0]
     assert sent_message[0] == READ_READY_BATCH
-    assert sent_message[3] == [("req-0", [3, 4], [7], 0, 0)]
-    assert sent_message[4] == ["req-0"]
+    assert sent_message[3] == [("req-0", "gen-0", [3, 4], [7], 0, 0)]
+    assert sent_message[4] == [("req-0", "gen-0")]
     # Contributor identity defaults: single contributor group (member 0 of ratio 1).
     assert sent_message[5] == 0
     assert sent_message[6] == 1
+
+
+def test_send_thread_skips_load_failed_request():
+    layer_name = "model.layers.0.self_attn"
+    thread = MembPullSendingThread.__new__(MembPullSendingThread)
+    thread._state = ProducerSendState(
+        last_layer_idx=0,
+        main_group_idx=0,
+        indexer_group_idx=0,
+        block_sizes=(16,),
+        layer_metadata={
+            layer_name: LayerMetadata(
+                tensor_group_idx=[0],
+                kv_caches_base_addr=[1000],
+                block_len=[10],
+                block_size_scale=[1],
+                main_tensor_count=1,
+                has_indexer=False,
+            )
+        },
+        layer_storage_slots={0: (0,)},
+        p_session="p-session",
+    )
+    thread.last_layer_idx = 0
+    thread._p_save_events = {}
+    thread._pending_reads_by_layer = {}
+    done_event = threading.Event()
+    thread.storage_send_done_events = [done_event]
+    thread._ensure_dealer = MagicMock()  # type: ignore[method-assign]
+
+    req_id = "req-failed-old-generation"
+    old_generation = begin_load_generation(req_id)
+    record_failed_load(((req_id, old_generation),))
+    new_generation = begin_load_generation(req_id)
+    assert not is_failed_load(req_id, new_generation)
+
+    thread._process_send_task(
+        SendTask(
+            send_request={req_id: object()},
+            load_generations={req_id: old_generation},
+            layer_idx=0,
+            layer_name=layer_name,
+        ),
+        MagicMock(),
+    )
+
+    thread._ensure_dealer.assert_not_called()
+    assert thread._pending_reads_by_layer == {}
+    assert done_event.is_set()
+
+
+def test_failed_load_registry_expires_entries():
+    with patch(
+        "vllm_ascend.distributed.kv_transfer.load_failure_registry.time.monotonic",
+        side_effect=[10.0, 10.0, 611.0],
+    ):
+        record_failed_load((("req-expiring", 3),))
+        assert is_failed_load("req-expiring", 3)
+        assert not is_failed_load("req-expiring", 3)
 
 
 def test_send_thread_slices_each_group_at_chunk_boundaries():
@@ -752,6 +1029,7 @@ def test_send_thread_slices_each_group_at_chunk_boundaries():
         chunk_finish=False,
         local_transed_tokens=16,
         local_computed_tokens=40,
+        transfer_generation="gen-0",
     )
 
     thread._process_send_task(
@@ -764,7 +1042,7 @@ def test_send_thread_slices_each_group_at_chunk_boundaries():
     )
 
     sent_message = dealer.send.call_args.args[0]
-    assert sent_message[3] == [("req-0", [11], [20], 1, 0)]
+    assert sent_message[3] == [("req-0", "gen-0", [11], [20], 1, 0)]
     assert sent_message[5] == 0
     assert sent_message[6] == 1
 
@@ -987,7 +1265,7 @@ def test_consumer_scheduler_closes_remote_prefill_before_rendezvous():
     scheduler._request_trackers = {}
     scheduler._reqs_need_recv = set()
     scheduler._metaserver_lock = threading.Lock()
-    scheduler._cancelled_metaserver_requests = set()
+    scheduler._cancelled_metaserver_requests = {}
     scheduler._submit_metaserver_request = MagicMock()  # type: ignore[method-assign]
     params = {
         "do_remote_prefill": True,
@@ -1004,31 +1282,39 @@ def test_consumer_scheduler_closes_remote_prefill_before_rendezvous():
     scheduler.update_state_after_alloc(request, blocks, num_external_tokens=0)
 
     assert params["do_remote_prefill"] is False
+    assert params["transfer_generation"]
+    tracker = scheduler._request_trackers["req-0"]
+    assert tracker[:2] == ([1], [2])
+    assert tracker[2] == params["transfer_generation"]
+    message = scheduler._submit_metaserver_request.call_args.kwargs["message"]
+    assert message["transfer_generation"] == params["transfer_generation"]
     scheduler._submit_metaserver_request.assert_called_once()
 
 
-def test_metaserver_treats_legacy_http_error_as_delivered():
+@pytest.mark.parametrize("status_code", [302, 307, 500])
+def test_metaserver_rejects_non_2xx_without_retry(status_code):
     scheduler = SFAPDRD2HScheduler.__new__(SFAPDRD2HScheduler)
     response = MagicMock()
-    response.is_error = True
-    response.status_code = 500
+    response.is_success = False
+    response.status_code = status_code
     client = MagicMock()
     client.post.return_value = response
 
     with patch("vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.scheduler.httpx.Client") as client_cls:
         client_cls.return_value.__enter__.return_value = client
-        scheduler._access_metaserver("http://metaserver", {"request_id": "req-0"})
+        with pytest.raises(RuntimeError, match=f"HTTP {status_code}"):
+            scheduler._access_metaserver("http://metaserver", {"request_id": "req-0"})
 
     client.post.assert_called_once_with(
         "http://metaserver",
         json={"request_id": "req-0"},
     )
-    assert client_cls.call_args.kwargs["timeout"] is None
+    assert client_cls.call_args.kwargs["timeout"] is not None
 
 
 def test_metaserver_retries_transport_errors():
     scheduler = SFAPDRD2HScheduler.__new__(SFAPDRD2HScheduler)
-    response = MagicMock(is_error=False)
+    response = MagicMock(is_success=True)
     client = MagicMock()
     client.post.side_effect = [
         httpx.ConnectError("connection refused"),
@@ -1042,12 +1328,26 @@ def test_metaserver_retries_transport_errors():
     assert client.post.call_count == 2
 
 
+def test_metaserver_does_not_retry_read_timeout():
+    scheduler = SFAPDRD2HScheduler.__new__(SFAPDRD2HScheduler)
+    client = MagicMock()
+    client.post.side_effect = httpx.ReadTimeout("response timed out")
+
+    with patch("vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.scheduler.httpx.Client") as client_cls:
+        client_cls.return_value.__enter__.return_value = client
+        with pytest.raises(RuntimeError, match="transport failed after send"):
+            scheduler._access_metaserver("http://metaserver", {"request_id": "req-0"})
+
+    client.post.assert_called_once()
+
+
 def test_metaserver_callback_retries_without_changing_request_state():
     scheduler = SFAPDRD2HScheduler.__new__(SFAPDRD2HScheduler)
     scheduler._metaserver_lock = threading.Lock()
     scheduler._shutdown_event = threading.Event()
     scheduler._metaserver_retry_timers = {}
-    scheduler._cancelled_metaserver_requests = set()
+    scheduler._metaserver_retry_counts = {}
+    scheduler._cancelled_metaserver_requests = {}
     failed_future: Future[None] = Future()
     scheduler._metaserver_futures = {"req-0": failed_future}
     failed_future.set_exception(RuntimeError("metaserver unavailable"))
@@ -1074,7 +1374,8 @@ def test_metaserver_callback_clears_completed_future():
     scheduler._metaserver_lock = threading.Lock()
     scheduler._shutdown_event = threading.Event()
     scheduler._metaserver_retry_timers = {}
-    scheduler._cancelled_metaserver_requests = set()
+    scheduler._metaserver_retry_counts = {}
+    scheduler._cancelled_metaserver_requests = {}
     succeeded_future: Future[None] = Future()
     scheduler._metaserver_futures = {"req-0": succeeded_future}
     succeeded_future.set_result(None)
@@ -1087,6 +1388,20 @@ def test_metaserver_callback_clears_completed_future():
     )
 
     assert "req-0" not in scheduler._metaserver_futures
+
+
+def test_consumer_scheduler_flushes_rendezvous_failure_metadata():
+    scheduler = SFAPDRD2HScheduler.__new__(SFAPDRD2HScheduler)
+    scheduler._metaserver_lock = threading.Lock()
+    scheduler._request_trackers = {"req-0": ([1, 2], [3], "gen-0")}
+    scheduler._reqs_need_recv = {"req-0"}
+    scheduler._rendezvous_failed_reqs = {"req-0": ([1, 2], [3], "gen-0")}
+
+    metadata = scheduler.build_connector_meta(MagicMock())
+
+    assert metadata.requests == []
+    assert metadata.failed_requests == [("req-0", "gen-0", [1, 2], [3])]
+    assert scheduler._rendezvous_failed_reqs == {}
 
 
 @pytest.mark.parametrize(
@@ -1216,7 +1531,8 @@ def test_scheduler_shutdown_cancels_rendezvous_and_executor():
     scheduler._metaserver_lock = threading.Lock()
     scheduler._shutdown_event = threading.Event()
     scheduler._metaserver_retry_timers = {}
-    scheduler._cancelled_metaserver_requests = set()
+    scheduler._metaserver_retry_counts = {}
+    scheduler._cancelled_metaserver_requests = {}
     pending_future: Future[None] = Future()
     scheduler._metaserver_futures = {"req-0": pending_future}
     scheduler.executor = MagicMock()
@@ -1268,7 +1584,8 @@ def _make_indexer_only_read_thread(indexer_dest: list[int], main_dest: list[int]
         main_block_lens=[],
         indexer_tensors=[],
         indexer_scale_tensors=[],
-        dest_blocks_by_req={"req-0": (main_dest or [], indexer_dest)},
+        dest_blocks_by_req={("req-0", "gen-0"): (main_dest or [], indexer_dest)},
+        active_generation_by_ext={"req-0": "gen-0"},
         get_offload_layer_id=lambda _: 0,
     )
     return thread
@@ -1282,6 +1599,7 @@ def test_member0_pulls_main_and_indexer_slice():
     local, peer, lengths, info = thread._build_req_descriptors(
         layer,
         "req-0",
+        transfer_generation="gen-0",
         p_main_block_ids=[1, 2],
         p_indexer_block_ids=[7, 8, 9, 10],
         want_info=True,
@@ -1307,6 +1625,7 @@ def test_nonzero_member_skips_main_and_pulls_other_indexer_slice():
     local, peer, lengths, info = thread._build_req_descriptors(
         layer,
         "req-0",
+        transfer_generation="gen-0",
         p_main_block_ids=[1, 2],
         p_indexer_block_ids=[7, 8, 9, 10],
         want_info=True,
@@ -1334,6 +1653,7 @@ def test_indexer_slices_are_disjoint_and_cover_full_range():
         local, _, _, info = thread._build_req_descriptors(
             layer,
             "req-0",
+            transfer_generation="gen-0",
             p_main_block_ids=[],
             p_indexer_block_ids=[7, 8, 9, 10],
             want_info=True,
@@ -1354,6 +1674,7 @@ def test_ratio_one_degenerates_to_full_pull():
     _, _, _, info = thread._build_req_descriptors(
         layer,
         "req-0",
+        transfer_generation="gen-0",
         p_main_block_ids=[1, 2],
         p_indexer_block_ids=[7, 8, 9, 10],
         want_info=True,
@@ -1366,10 +1687,26 @@ def test_ratio_one_degenerates_to_full_pull():
     assert info["n_indexer"] == 4  # full indexer, no split
 
 
+def _req_key(req_id: str, generation: str = "gen-0") -> tuple[str, str]:
+    return (req_id, generation)
+
+
 def _make_completion_thread() -> MembPullReadThread:
     thread = MembPullReadThread.__new__(MembPullReadThread)
+    thread._state = SimpleNamespace(
+        active_generation_by_ext={
+            "req-0": "gen-0",
+            "req-complete": "gen-0",
+            "req-discarded": "gen-0",
+            "req-fresh": "gen-0",
+            "req-mismatch": "gen-0",
+        }
+    )
     thread._done_requests = set()
     thread._failed_requests = set()
+    thread._completed_req_keys = set()
+    thread._discarded_req_keys = {}
+    thread._pending_failures = set()
     thread._done_contributors = {}
     thread._expected_ratio = {}
     thread._lock = threading.Lock()
@@ -1378,35 +1715,116 @@ def _make_completion_thread() -> MembPullReadThread:
 
 def test_request_done_requires_all_contributors():
     thread = _make_completion_thread()
-    thread._record_chunk_done(["req-0"], 0, 4)
-    thread._record_chunk_done(["req-0"], 1, 4)
-    thread._record_chunk_done(["req-0"], 2, 4)
-    assert "req-0" not in thread._done_requests
-    thread._record_chunk_done(["req-0"], 3, 4)
-    assert "req-0" in thread._done_requests
+    req_key = _req_key("req-0")
+    thread._record_chunk_done([req_key], 0, 4)
+    thread._record_chunk_done([req_key], 1, 4)
+    thread._record_chunk_done([req_key], 2, 4)
+    assert req_key not in thread._done_requests
+    thread._record_chunk_done([req_key], 3, 4)
+    assert req_key in thread._done_requests
     # contributor state released once complete
-    assert "req-0" not in thread._done_contributors
-    assert "req-0" not in thread._expected_ratio
+    assert req_key not in thread._done_contributors
+    assert req_key not in thread._expected_ratio
 
 
 def test_duplicate_contributor_does_not_double_count():
     thread = _make_completion_thread()
-    thread._record_chunk_done(["req-0"], 0, 3)
-    thread._record_chunk_done(["req-0"], 0, 3)  # same member re-delivers
-    thread._record_chunk_done(["req-0"], 1, 3)
-    assert "req-0" not in thread._done_requests  # still missing member 2
+    req_key = _req_key("req-0")
+    thread._record_chunk_done([req_key], 0, 3)
+    thread._record_chunk_done([req_key], 0, 3)  # same member re-delivers
+    thread._record_chunk_done([req_key], 1, 3)
+    assert req_key not in thread._done_requests  # still missing member 2
 
 
 def test_ratio_one_completes_immediately():
     thread = _make_completion_thread()
-    thread._record_chunk_done(["req-0"], 0, 1)
-    assert "req-0" in thread._done_requests
+    req_key = _req_key("req-0")
+    thread._record_chunk_done([req_key], 0, 1)
+    assert req_key in thread._done_requests
 
 
 def test_discard_requests_clears_partial_contributor_state():
     thread = _make_completion_thread()
-    thread._record_chunk_done(["req-0"], 0, 4)
-    assert "req-0" in thread._done_contributors
-    thread.discard_requests({"req-0"})
-    assert "req-0" not in thread._done_contributors
-    assert "req-0" not in thread._expected_ratio
+    req_key = _req_key("req-0")
+    thread._record_chunk_done([req_key], 0, 4)
+    assert req_key in thread._done_contributors
+    thread.discard_requests({req_key})
+    assert req_key not in thread._done_contributors
+    assert req_key not in thread._expected_ratio
+
+
+def test_read_thread_filters_completed_and_discarded_batches():
+    thread = _make_completion_thread()
+    complete = _req_key("req-complete")
+    discarded = _req_key("req-discarded")
+    fresh = _req_key("req-fresh")
+    thread._record_chunk_done([complete], 0, 1)
+    thread.discard_requests({discarded})
+
+    read_reqs, done_req_keys = thread._filter_stale_batch(
+        [
+            ("req-complete", "gen-0", [1], [], 0, 0),
+            ("req-discarded", "gen-0", [2], [], 0, 0),
+            ("req-fresh", "gen-0", [3], [], 0, 0),
+        ],
+        [complete, discarded, fresh],
+    )
+
+    assert read_reqs == [("req-fresh", "gen-0", [3], [], 0, 0)]
+    assert done_req_keys == [fresh]
+
+
+def test_read_thread_drops_old_generation_before_destination_access():
+    thread = _make_completion_thread()
+    thread._state.active_generation_by_ext["req-0"] = "gen-new"
+
+    read_reqs, done_req_keys = thread._filter_stale_batch(
+        [
+            ("req-0", "gen-old", [1], [], 0, 0),
+            ("req-0", "gen-new", [2], [], 0, 0),
+        ],
+        [_req_key("req-0", "gen-old"), _req_key("req-0", "gen-new")],
+    )
+
+    assert read_reqs == [("req-0", "gen-new", [2], [], 0, 0)]
+    assert done_req_keys == [_req_key("req-0", "gen-new")]
+
+
+def test_read_thread_serializes_failed_terminal_and_rearm():
+    thread = _make_completion_thread()
+    req_key = _req_key("req-0")
+    thread.mark_failed_requests({req_key})
+    thread._drain_pending_failures()
+
+    assert thread.get_and_clear_failed() == {req_key}
+    assert req_key in thread._discarded_req_keys
+
+    thread._done_requests.add(req_key)
+    thread._failed_requests.add(req_key)
+    thread.rearm_requests({req_key})
+    read_reqs, done_req_keys = thread._filter_stale_batch(
+        [("req-0", "gen-0", [1], [], 0, 0)],
+        [req_key],
+    )
+    assert read_reqs == [("req-0", "gen-0", [1], [], 0, 0)]
+    assert done_req_keys == [req_key]
+    assert thread.get_and_clear_done() == set()
+    assert thread.get_and_clear_failed() == set()
+
+
+def test_pp_request_done_waits_for_every_stage_and_rejects_topology_change():
+    thread = _make_completion_thread()
+    req_key = _req_key("req-0")
+    mismatch = _req_key("req-mismatch")
+
+    for contributor in range(3):
+        thread._record_chunk_done([req_key], contributor, 4)
+    assert req_key not in thread._done_requests
+
+    thread._record_chunk_done([mismatch], 0, 4)
+    thread._record_chunk_done([mismatch], 1, 2)
+    assert mismatch in thread._failed_requests
+    assert mismatch not in thread._done_requests
+
+    thread._record_chunk_done([req_key], 3, 4)
+    assert req_key in thread._done_requests
