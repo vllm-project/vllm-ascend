@@ -10,6 +10,8 @@ from vllm.model_executor.model_loader.utils import process_weights_after_loading
 
 from tests.ut.base import TestBase
 from vllm_ascend import ascend_config
+from vllm_ascend.device.hardware import AscendDeviceType
+from vllm_ascend.device.hardware_profile import get_hardware_profile
 from vllm_ascend.distributed import parallel_state
 from vllm_ascend.ops import linear
 from vllm_ascend.ops.head_parallel import HeadParallelMergedColumnLinear
@@ -229,6 +231,43 @@ class TestShouldReshapeWoATo3d(unittest.TestCase):
 
 
 class TestAscendRowParallelLinear(BaseLinearTest):
+    @torch.inference_mode()
+    def test_try_forward_into(self):
+        with patch("vllm_ascend.ops.linear.get_parallel_op", return_value=(None, 0, 1)):
+            layer = AscendRowParallelLinear(input_size=4, output_size=8, bias=False, params_dtype=torch.bfloat16)
+
+        device = SimpleNamespace(type="npu")
+        x = MagicMock(spec=torch.Tensor, device=device, dtype=torch.bfloat16, ndim=2, shape=(2, 4))
+        out = MagicMock(spec=torch.Tensor, device=device, dtype=torch.bfloat16, ndim=2, shape=(2, 8))
+        weight = MagicMock(spec=torch.Tensor, device=device, dtype=torch.bfloat16, ndim=2, shape=(8, 4))
+        for tensor in (x, out, weight):
+            tensor.is_contiguous.return_value = True
+        with (
+            patch.object(layer, "_parameters", {"weight": weight, "bias": None}),
+            patch.object(
+                linear, "get_current_hardware_profile", return_value=get_hardware_profile(AscendDeviceType.A3)
+            ) as profile,
+            patch.object(linear, "is_internal_npu_format", return_value=False),
+            patch.object(torch, "is_autocast_enabled", return_value=False),
+            patch.object(torch, "matmul") as matmul,
+        ):
+            self.assertTrue(layer.try_forward_into(x, out))
+            matmul.assert_called_once_with(x, weight.t.return_value, out=out)
+            matmul.reset_mock()
+
+            with layer.register_forward_hook(MagicMock()):
+                self.assertFalse(layer.try_forward_into(x, out))
+            with patch.dict(layer._parameters, bias=torch.nn.Parameter(torch.zeros(8))):
+                self.assertFalse(layer.try_forward_into(x, out))
+            with patch.object(layer, "reduce_results", True), patch.object(layer, "tp_size", 2):
+                self.assertFalse(layer.try_forward_into(x, out))
+            out.shape = (2, 7)
+            self.assertFalse(layer.try_forward_into(x, out))
+            out.shape = (2, 8)
+            profile.return_value = get_hardware_profile(AscendDeviceType.A2)
+            self.assertFalse(layer.try_forward_into(x, out))
+            matmul.assert_not_called()
+
     @patch("vllm_ascend.ops.linear.get_current_vllm_config", return_value=MagicMock())
     @patch(
         "vllm_ascend.ops.linear.AscendUnquantizedLinearMethod.apply",
