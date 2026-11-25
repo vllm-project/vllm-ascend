@@ -135,6 +135,49 @@ class TestHybridKVCacheRecvingThreadDispatch(unittest.TestCase):
                 self.assertFalse(thread.proc_not_transfer_request)
                 self.assertEqual(thread.request_queue.unfinished_tasks, 0)
 
+    def test_group_count_mismatch_transfers_intersection_and_fails_closed(self):
+        thread = self._make_thread()
+        self.addCleanup(thread.executor.shutdown, wait=True)
+        thread.tp_rank = 0
+        thread._prefill_pp_size = 1
+        thread.hma_group_size = 3
+        thread.kv_cache_specs = [MagicMock(), MagicMock()]
+        thread.local_engine_id = "decode"
+        thread.local_handshake_port = 32000
+        thread.side_channel_port = 32000
+        thread.remote_metadata_lock = threading.Lock()
+        thread.kv_caches_base_addr = {
+            "decode": {32000: [0x1000, 0x2000, 0x3000]},
+            "prefill": {31002: [0x4000, 0x5000, 0x6000]},
+        }
+        thread.remote_te_port = {"prefill": {31002: 7777}}
+        thread.addr_group_idx = [[0], [0], [1]]
+        thread.block_len_per_addr = [16, 8, 32]
+        thread.block_stride_per_addr = [32, 16, 64]
+        thread.engine = MagicMock()
+        thread.engine.batch_transfer_sync_read.return_value = 0
+        req_meta = {
+            "remote_request_id": "prefill-req",
+            "remote_block_ids": ([1, 2], [3]),
+            "local_block_ids": ([2, 3], [4]),
+            "remote_engine_id": "prefill",
+            "remote_host": "192.0.2.1",
+            "remote_handshake_port": 31002,
+        }
+
+        # Remote and local both carry two groups while the decode side has
+        # three: transfer the two overlapping groups instead of indexing the
+        # missing third entry.
+        thread._transfer_kv_cache_all_groups(req_meta)
+        thread.engine.batch_transfer_sync_read.assert_called_once()
+
+        # No overlapping group is an explicit failure, not an IndexError.
+        thread.engine.reset_mock()
+        req_meta["remote_block_ids"] = ()
+        with self.assertRaisesRegex(RuntimeError, "no overlapping KV cache groups"):
+            thread._transfer_kv_cache_all_groups(req_meta)
+        thread.engine.batch_transfer_sync_read.assert_not_called()
+
     def test_executor_workers_bind_kv_cache_device_before_handling_requests(self):
         expected_device_index = 5
         kv_cache = MagicMock(device=expected_device_index)

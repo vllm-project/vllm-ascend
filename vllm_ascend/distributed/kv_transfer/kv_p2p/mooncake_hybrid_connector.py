@@ -849,10 +849,35 @@ class KVCacheRecvingThread(threading.Thread):
                 len(remote_kv_caches_base_addrs),
             )
 
+        # The prefill and decode schedulers can materialize different numbers of
+        # KV cache groups (for example when only one side runs
+        # swa_bounded_replay). Never index past either group array: transfer the
+        # groups both sides agree on and fail closed when there is no overlap.
+        remote_group_count = len(remote_block_ids) if remote_block_ids is not None else 0
+        local_group_count = len(local_block_ids) if local_block_ids is not None else 0
+        transfer_group_count = min(self.hma_group_size, remote_group_count, local_group_count)
+        if remote_group_count != local_group_count:
+            logger.warning(
+                "KV cache group-count mismatch for request %s: remote=%d local=%d hma=%d; "
+                "transferring %d overlapping groups",
+                remote_request_id,
+                remote_group_count,
+                local_group_count,
+                self.hma_group_size,
+                transfer_group_count,
+            )
+        if transfer_group_count == 0:
+            if local_group_count > 0:
+                raise RuntimeError(
+                    f"no overlapping KV cache groups for request {remote_request_id}: "
+                    f"remote={remote_group_count} local={local_group_count}"
+                )
+            return
+
         owner_slot_of: dict[tuple[int, int], int] | None = None
         if owner_staging:
             owner_group_blocks: list[tuple[int, list[int]]] = []
-            for group_idx in range(self.hma_group_size):
+            for group_idx in range(transfer_group_count):
                 if not remote_block_ids[group_idx] or not local_block_ids[group_idx]:
                     continue
                 if isinstance(self.kv_cache_specs[group_idx], MambaSpec):
@@ -870,7 +895,7 @@ class KVCacheRecvingThread(threading.Thread):
 
         req_start_time = time.perf_counter()
         src_list, dst_list, length_list = [], [], []
-        for i in range(self.hma_group_size):
+        for i in range(transfer_group_count):
             if not remote_block_ids[i] or not local_block_ids[i]:
                 continue
             cur_remote_block_ids = remote_block_ids[i]
