@@ -153,13 +153,44 @@ def test_peer_restore_failure_stops_before_next_collective(
     assert shared_buffer.owner.group is not scope.device_group
 
 
+def test_restore_factory_failure_after_tag_creation_requires_new_group(pair, monkeypatch):
+    layout, scope, calls = pair
+    main = layout(384, 6)
+    assert context.try_share_mega_moe_buffer(main, layout(128, 3), scope, True)
+    shared_buffer = next(iter(main.values()))._shared_mega_moe_buffer
+    factory = shared_buffer.factory
+    tagged_groups = []
+    failed_group = scope.device_group = object()
+
+    def allocate(group, **params):
+        tagged_groups.append(group)
+        if group is failed_group:
+            raise RuntimeError("device registration failed after creating the HCCL tag")
+        return factory(group, **params)
+
+    monkeypatch.setattr(shared_buffer, "factory", allocate)
+    monkeypatch.setattr(context.torch.distributed, "barrier", Mock())
+    monkeypatch.setattr(context.torch.npu, "current_device", lambda: 0)
+    with pytest.raises(RuntimeError, match="device registration failed"):
+        shared_buffer.restore(scope)
+    with pytest.raises(RuntimeError, match="recreate the MC2 group"):
+        shared_buffer.restore(scope)
+    assert tagged_groups == [failed_group]
+
+    scope.device_group = object()
+    shared_buffer.restore(scope)
+    assert tagged_groups == [failed_group, scope.device_group]
+    assert len(calls) == 2
+    assert shared_buffer.owner.group is shared_buffer.views[0].group is scope.device_group
+
+
 def test_restore_partial_allocation_requires_new_group(pair, monkeypatch):
     layout, scope, calls = pair
     main = layout(384, 6)
     assert context.try_share_mega_moe_buffer(main, layout(128, 3), scope, True)
     shared_buffer = next(iter(main.values()))._shared_mega_moe_buffer
     scope.device_group = object()
-    monkeypatch.setattr(context, "_agree", lambda _, state: [state, (False, True)])
+    monkeypatch.setattr(context, "_agree", lambda _, state: [state, (False, True, False)])
     with pytest.raises(RuntimeError, match="recreate the MC2 group"):
         shared_buffer.restore(scope)
     shared_buffer.owner.destroy.assert_not_called()
@@ -174,7 +205,7 @@ def test_published_rank_participates_in_peer_restore_retry(pair, monkeypatch):
     target._mega_moe_hccl_state_stale = False
     monkeypatch.setattr(comms, "get_mc2_group", lambda: scope)
     monkeypatch.setattr(
-        context, "_agree", lambda _, value: [value, (False, True) if isinstance(value, tuple) else value]
+        context, "_agree", lambda _, value: [value, (False, True, False) if isinstance(value, tuple) else value]
     )
     barrier = Mock()
     monkeypatch.setattr(context.torch.distributed, "barrier", barrier)
@@ -193,8 +224,10 @@ def test_window_without_release_api_keeps_target_lifecycle(pair):
     owner = target.get_symm_buffer_for_mega_moe(scope.device_group, **params)
     del owner.destroy
     target.mega_moe_symm_buffer = owner
-    assert not context.try_share_mega_moe_buffer(main, layout(128, 3), scope, True)
+    with pytest.raises(RuntimeError, match="target already owns the MegaMoE buffer"):
+        context.try_share_mega_moe_buffer(main, layout(128, 3), scope, True)
     assert calls == [scope.device_group]
+    assert target.mega_moe_symm_buffer is owner
     assert not hasattr(target, "_shared_mega_moe_buffer")
 
 
@@ -248,15 +281,25 @@ def test_overlapping_execution_disables_sharing(pair):
     assert not calls
 
 
-def test_size_query_exceeds_window(pair, monkeypatch):
+@pytest.mark.parametrize("peer_only", [False, True])
+def test_size_query_exceeds_window(pair, monkeypatch, peer_only):
     layout, scope, calls = pair
-    monkeypatch.setattr(
-        __import__(__name__, fromlist=["_"]), "_get_mega_moe_ccl_buffer_size", lambda moe_expert_num: 4097
-    )
-    main = layout(384, 6)
-    assert not context.try_share_mega_moe_buffer(main, layout(128, 3), scope, True)
+    if peer_only:
+
+        def agree(_, value):
+            return [value, (True, False) if value == (True, True) else value]
+
+        monkeypatch.setattr(context, "_agree", agree)
+    else:
+        monkeypatch.setattr(
+            __import__(__name__, fromlist=["_"]), "_get_mega_moe_ccl_buffer_size", lambda moe_expert_num: 4097
+        )
+    main, draft = layout(384, 6), layout(128, 3)
+    with pytest.raises(RuntimeError, match="Disable CANN MegaMoE"):
+        context.try_share_mega_moe_buffer(main, draft, scope, True)
     assert not hasattr(next(iter(main.values())), "_shared_mega_moe_buffer")
-    assert len(calls) == 1
+    assert next(iter(draft.values())).mega_moe_symm_buffer is None
+    assert calls == [scope.device_group]
 
 
 def test_peer_disagreement_avoids_collective_allocation(pair, monkeypatch):

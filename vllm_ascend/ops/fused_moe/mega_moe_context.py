@@ -41,6 +41,7 @@ class MainOwnedMegaMoEBuffer:
         self.owner = owner
         self.views = []
         self._allocation = owner
+        self._failed_factory_group = None
 
     def fits(self, params):
         owner = self.owner
@@ -90,6 +91,9 @@ class MainOwnedMegaMoEBuffer:
         return 0 < required <= owner.ccl_buffer_size
 
     def view(self, params):
+        # On A5 r148, serial target and draft forwards can use different expert
+        # counts on the same communicator and tag when their communication
+        # settings match and the draft fits the target's allocation.
         view = SimpleNamespace(**vars(self.owner))
         vars(view).update(params)
         self.views.append(view)
@@ -99,10 +103,12 @@ class MainOwnedMegaMoEBuffer:
         group = scope.device_group
         owner = self.owner
         allocated = self._allocation is not None and self._allocation.group is group
-        states = _agree(scope, (owner.group is group, allocated))
-        if all(published for published, _ in states):
+        states = _agree(scope, (owner.group is group, allocated, self._failed_factory_group is group))
+        if any(factory_failed for _, _, factory_failed in states):
+            raise RuntimeError("MegaMoE allocation failed on this communicator; recreate the MC2 group before retrying")
+        if all(published for published, _, _ in states):
             return
-        if any(has_buffer != allocated for _, has_buffer in states):
+        if any(has_buffer != allocated for _, has_buffer, _ in states):
             # CANN may already have cached the successful ranks' allocations.
             # Calling its collective factory on a subset cannot repair this group.
             raise RuntimeError("Partial MegaMoE channel allocation; recreate the MC2 group before retrying")
@@ -116,7 +122,10 @@ class MainOwnedMegaMoEBuffer:
                         self._allocation = None
             with _restore_step(scope, "validate"):
                 if not allocated:
+                    # CANN can register the tag before the factory returns a buffer.
+                    self._failed_factory_group = group
                     self._allocation = self.factory(group, **self.params)
+                    self._failed_factory_group = None
                 replacement = self._allocation
                 for name in ("ep_world_size", "topo_type", "rank_num_per_server"):
                     if getattr(replacement, name, None) != getattr(owner, name, None):
@@ -220,12 +229,20 @@ def try_share_mega_moe_buffer(main, draft, scope, allow_sharing):
     shared_buffer = getattr(target, "_shared_mega_moe_buffer", None)
     if shared_buffer is None:
         shared_buffer = MainOwnedMegaMoEBuffer(target.get_symm_buffer_for_mega_moe, owner, main_params)
+    owns_group = getattr(owner, "group", None) is scope.device_group
     try:
-        fits = owner.group is scope.device_group and shared_buffer.fits(draft_params)
+        fits = owns_group and shared_buffer.fits(draft_params)
     except (ImportError, AttributeError, TypeError, ValueError, RuntimeError) as exc:
         logger.warning("Could not verify the draft MegaMoE window size: %s", exc)
         fits = False
-    if not all(_agree(scope, fits)):
+    checks = _agree(scope, (owns_group, fits))
+    if not all(peer_fits for _, peer_fits in checks):
+        if any(peer_owns_group for peer_owns_group, _ in checks):
+            raise RuntimeError(
+                f"The target already owns the MegaMoE buffer on the draft's MC2 group, but sharing could not "
+                f"be verified (target experts={main_shape.num_experts}, draft experts={draft_shape.num_experts}). "
+                "Disable CANN MegaMoE or use a draft with compatible communication settings and buffer requirements."
+            )
         return False
     proposer.mega_moe_symm_buffer = shared_buffer.view(draft_params)
     target._shared_mega_moe_buffer = shared_buffer
