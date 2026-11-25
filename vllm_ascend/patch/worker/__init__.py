@@ -50,6 +50,7 @@ else:
 
 import vllm_ascend.patch.worker.patch_kimi_k25  # noqa
 import vllm_ascend.patch.worker.patch_deepseek_v2  # noqa
+import vllm_ascend.patch.worker.patch_deepseek_v41_vit_metadata  # noqa
 
 # Re-apply the V2-only runner selection on pickled configs, plus the V2
 # feature patches, in worker processes.

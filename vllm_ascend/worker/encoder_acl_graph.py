@@ -406,6 +406,9 @@ class EncoderAclGraphManager(EncoderCudaGraphManager):
         buffer_items = graph_meta.input_buffers.items()
 
         for key, buf in buffer_items:
+            if key == "cu_seqlens":
+                # FIA consumes host endpoints at task update.
+                continue
             src = replay.values.get(key)
             if src is None:
                 continue
@@ -415,7 +418,7 @@ class EncoderAclGraphManager(EncoderCudaGraphManager):
                 padding_logic = self.config.padding_logics.get(key, self._copy_padded_buffer)
                 padding_logic(buf, src)
 
-        cu_seqlens = graph_meta.input_buffers.get("cu_seqlens")
+        cu_seqlens = replay.values.get("cu_seqlens")
         cu_seqlens_cpu = None if cu_seqlens is None else cu_seqlens.cpu()
 
         update_stream = self.update_stream

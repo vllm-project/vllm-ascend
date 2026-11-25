@@ -732,6 +732,22 @@
 # ========#
 # Entries are listed in alphabetical order by file name.
 #
+# ** File: worker/patch_deepseek_v41_vit_metadata.py **
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.models.deepseek_v41.common.vl_cudagraph.build_packed_vit_metadata`
+#    Why:
+#       Upstream build_packed_vit_metadata uploads cu_seqlens to device, forcing
+#       a device copy and synchronous D2H readback on Ascend FIA graph replay.
+#    How:
+#       Rebind the vl_cudagraph helper alias to keep cu_seqlens on CPU while
+#       still uploading vit_cos and vit_sin to device.
+#    Related PR (if no, explain why):
+#       No upstream PR yet; DeepSeek V4.1 does not route cu_seqlens through
+#       MMEncoderAttention.maybe_recompute_cu_seqlens.
+#    Future Plan:
+#       Remove once upstream DeepSeek V4.1 routes cu_seqlens through
+#       MMEncoderAttention.maybe_recompute_cu_seqlens or keeps host boundaries.
+#
 # ** 2. File: worker/patch_deepseek_v2.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.model_executor.models.deepseek_v2.DeepseekV2MLAAttention.__init__`
