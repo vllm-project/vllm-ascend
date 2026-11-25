@@ -1,0 +1,4 @@
+pr: 23281
+entries:
+  - category: bugfix
+    text: Fixed a Mooncake hybrid PD KV transfer `IndexError` that hung decode-side requests when speculative decoding was enabled on the decode side only; only the KV cache groups shared by prefill and decode are now transferred.
