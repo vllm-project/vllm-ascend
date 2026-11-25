@@ -167,6 +167,25 @@ def _save_entries(worker, request, view, group, hashes, snapshots):
     return entries if worker._is_layerwise_save_owner(group) else []
 
 
+def _open_missing(worker, target_sizes, started, *, allow_fallback):
+    conflicts = set()
+    missing = worker._filter_pool_existing_keys(list(target_sizes))
+    for batch in worker._layerwise_key_batches(missing):
+        codes = require_aligned_batch_results(
+            "batch_put_start", batch, worker.m_store.batch_put_start(batch, [target_sizes[key] for key in batch])
+        )
+        opened = {key for key, code in zip(batch, codes, strict=True) if code == 0}
+        started.update(opened)
+        with worker._put_started_keys_lock:
+            worker._put_started_keys.update(opened)
+        rejected = {key: code for key, code in zip(batch, codes, strict=True) if code != 0}
+        for key in worker._filter_pool_existing_keys(list(rejected)):
+            if not allow_fallback or rejected[key] != _OBJECT_ALREADY_EXISTS or "offload_v1:" in key:
+                raise RuntimeError("Mooncake offload could not open a required PUT session")
+            conflicts.add(key)
+    return conflicts
+
+
 def _open_puts(worker, slots):
     # One metadata RPC per batch across requests and groups, with each group's
     # own object size. Deduplication also prevents duplicate concurrent writers.
@@ -177,29 +196,11 @@ def _open_puts(worker, slots):
         sizes[key] = size
     started = set()
 
-    def open_missing(target_sizes, *, allow_fallback):
-        conflicts = set()
-        missing = worker._filter_pool_existing_keys(list(target_sizes))
-        for batch in worker._layerwise_key_batches(missing):
-            codes = require_aligned_batch_results(
-                "batch_put_start", batch, worker.m_store.batch_put_start(batch, [target_sizes[key] for key in batch])
-            )
-            opened = {key for key, code in zip(batch, codes, strict=True) if code == 0}
-            started.update(opened)
-            with worker._put_started_keys_lock:
-                worker._put_started_keys.update(opened)
-            rejected = {key: code for key, code in zip(batch, codes, strict=True) if code != 0}
-            for key in worker._filter_pool_existing_keys(list(rejected)):
-                if not allow_fallback or rejected[key] != _OBJECT_ALREADY_EXISTS or "offload_v1:" in key:
-                    raise RuntimeError("Mooncake offload could not open a required PUT session")
-                conflicts.add(key)
-        return conflicts
-
     fallbacks = []
     resolved_slots = []
     fallback_sizes = {}
     try:
-        conflicts = open_missing(sizes, allow_fallback=True)
+        conflicts = _open_missing(worker, sizes, started, allow_fallback=True)
         for view, key, slot, size in slots:
             if key in conflicts:
                 incarnation = view.layerwise_request_id
@@ -212,7 +213,7 @@ def _open_puts(worker, slots):
                 fallbacks.append((view, slot, key))
             resolved_slots.append((view, key, slot, size))
         if fallback_sizes:
-            open_missing(fallback_sizes, allow_fallback=False)
+            _open_missing(worker, fallback_sizes, started, allow_fallback=False)
     except Exception:
         worker._queue_layerwise_revoke_keys(list(started))
         raise
