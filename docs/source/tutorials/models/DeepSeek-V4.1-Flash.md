@@ -195,6 +195,16 @@ vLLM Ascend revision.
 
 ## 5 Online Service Deployment
 
+!!! warning
+
+    On a low-memory server, for example a 1 TB machine, free the host from
+    long-lived large memory consumers before deploying, so that enough
+    contiguous 2 MB host pages are available. Otherwise a pinned host
+    allocation can fail with `207001` or `EL0018 ... Insufficient_Host_Memory`
+    during startup or serving, even though the host has free memory. See
+    [FAQ 26](../../faqs.md#faq-host-pinned-memory-207001) for checks and
+    recovery commands.
+
 ### 5.1 Single-Node Colocated Deployment
 
 === "950DT products"
