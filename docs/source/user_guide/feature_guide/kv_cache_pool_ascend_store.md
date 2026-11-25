@@ -661,7 +661,7 @@ For MooncakeStore with `ASCEND_BUFFER_POOL` enabled, perform a warm-up phase bef
 
 ### Configuration Examples
 
-> **Before deployment:** See [Memcache Software Compatibility Reference](#memcache-software-compatibility-reference). If Memcache fails to start or reports KV pool or KV transfer errors, see [Memcache Log Diagnosis](#memcache-log-diagnosis) in Reference.
+> **Before deployment:** See [Memcache Software Compatibility Reference](#memcache-software-compatibility-reference).
 
 #### Environment Preparation
 
@@ -679,7 +679,7 @@ For MooncakeStore with `ASCEND_BUFFER_POOL` enabled, perform a warm-up phase bef
     export PYTHONHASHSEED=0
     ```
 
-#### Step 1: Prerequisite Checks {: #memcache-step-1-prerequisite-checks }
+#### Step 1: Prerequisite Checks
 
 1. **Check memory:**
 
@@ -1661,17 +1661,6 @@ This table adds Memcache-specific checks to the [HDK and CANN Version Compatibil
 
 If A3 `device_sdma` reports `sdma move comperr`, verify the HDK firmware version.
 
-### Memcache Log Diagnosis {: #memcache-log-diagnosis }
-
-Use these signatures to confirm startup or localize failures. Healthy startup: the MetaService ports from `mmc-meta.conf` (default `5000`, `6000`, metrics `18000`) are listening, and vLLM logs contain no `memcache_backend` or `smem_bm_init` errors.
-
-| Log | Meaning | Action |
-| --- | ------- | ------ |
-| `read version is empty` / `does not support mf` (hybm) | Driver does not meet the MemFabric Hybrid requirement. | Check the [Memcache software compatibility reference](#memcache-software-compatibility-reference). |
-| `smem_bm_init` returns non-zero (an `assert res == 0` failure in `memcache_backend.py`) | KV pool creation failed, typically due to driver or HYBM initialization. | Check the [Memcache software compatibility reference](#memcache-software-compatibility-reference) and the `memcache-hybrid` / `memfabric-hybrid` versions. |
-| `Failed to get N keys out of N. error_codes=[...]` followed by `Failed to load blocks` | Memcache KV get failed for the request. | With `kv_load_failure_policy=recompute`, the request is recomputed. Check MetaService connectivity and pool health. |
-| `transfer page error` | KV transfer failed across the HCCS domain. | Confirm all ranks are in the same super pod; see the super pod check in [Step 1](#memcache-step-1-prerequisite-checks). |
-
 ### QoS Configuration
 
 Both the Mooncake and Memcache backends support configuring the transfer QoS. The valid range is **0-4 (integers only)**, and the default value is 0 when not configured. A larger value means a higher transfer priority. Invalid values (non-integer, out of range) cause startup to fail fast with a validation error.
@@ -1754,7 +1743,7 @@ Public FAQ references:
 
 ### Issue 5: Memcache Related Issues
 
-For compatibility, see [Memcache Software Compatibility Reference](#memcache-software-compatibility-reference); for pre-operation checks, see "Step 1: Prerequisite Checks" in [Scenario 2: Memcache Backend](#scenario-2-memcache-backend); for log signatures and other troubleshooting, see [Memcache Log Diagnosis](#memcache-log-diagnosis) and the [Memcache FAQ](https://gitcode.com/Ascend/memcache/wiki/FAQ.md).
+For compatibility, see [Memcache Software Compatibility Reference](#memcache-software-compatibility-reference); for pre-operation checks, see "Step 1: Prerequisite Checks" in [Scenario 2: Memcache Backend](#scenario-2-memcache-backend); for other troubleshooting, see the [Memcache FAQ](https://gitcode.com/Ascend/memcache/wiki/FAQ.md).
 
 ### Issue 6: DSv4 Deployment Notes
 
