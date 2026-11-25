@@ -274,7 +274,7 @@ This is often due to system compatibility issues. You can resolve this by using 
 
 ### 20. Why am I getting an error when executing the script to start a Docker container? The error message is: "operation not permitted"
 
-When using `--shm-size`, you may need to add the `--privileged=true` flag to your `docker run` command to grant the container necessary permissions. Please be aware that using `--privileged=true` grants the container extensive privileges on the host system, which can be a security risk. Only use this option if you understand the implications and trust the container's source.
+`--shm-size` sets the size of `/dev/shm`; it does not itself require a privileged container. Check which operation reports "operation not permitted". For NPU access, pass the required device nodes with `--device` and ensure the container user can access them. If the failure is caused by insufficient shared memory, increase `--shm-size` instead.
 
 ### 21. How to set SOC_VERSION when building from source on a CPU-only machine?
 
@@ -319,3 +319,89 @@ Single-node deployment is recommended when the model fits within the memory of a
 ### 25. What is the difference between FIA and PA operators for attention?
 
 FIA (Fused Infer Attention) is the default attention operator in vLLM-Ascend. In some batch-size settings (particularly medium concurrency), FIA may exhibit suboptimal performance. The PA (Page Attention) operator can be manually enabled via `pa_shape_list` in `--additional-config`. When the runtime batch size matches a value in `pa_shape_list`, the framework switches to PA. This is a temporary tuning knob — future FIA optimizations will make this parameter obsolete.
+
+### 26. Why do host pinned memory allocations fail with 207001 / EL0018 "out of memory" when the host still has free memory? {: #faq-host-pinned-memory-207001 }
+
+```text
+torch.OutOfMemoryError: allocate_host_memory_slowpath:
+  ../torch_npu/csrc/core/npu/CachingHostAllocator.cpp:252
+  NPU function error: aclrtMallocHostWithCfg, error code is 207001
+
+[Error]: EL0018 Resource_Error_Insufficient_Host_Memory:
+  Failed to allocate 134217728 bytes (128MB) host memory requested by
+  the RUNTIME module. rtsMallocHost execution failed,
+  reason=driver error: out of memory
+```
+
+`207001` (torch_npu) and `EL0018` (CANN runtime) report the same failed host
+pinned allocation.
+
+**Root cause:** the Ascend driver backs host pinned memory with 2 MB compound
+pages, so one 128 MB request needs 64 contiguous 2 MB blocks. On a host that
+also runs long-lived large host-memory consumers, the remaining free memory is
+mostly 4 KB fragments, and the kernel can rebuild 2 MB blocks only by
+compaction, which needs CPU time. When the supply of 2 MB blocks reaches zero,
+the allocation fails even though hundreds of GB are still free. The failure can
+occur while a worker starts or while the service is running, and it is a
+host-side problem: `free -g` and `dmesg` look normal and every NPU stays
+healthy.
+
+**Mitigation:**
+
+**Step 1: check how many 2 MB blocks the host still has free.**
+
+```bash
+# Free 2 MB blocks in every Normal zone. The buddy order follows the page size:
+# 4 KB pages use order 9, 64 KB pages (common on ARM64 servers) use order 5.
+ps=$(getconf PAGESIZE 2>/dev/null || echo 4096)
+awk -v ps="$ps" 'BEGIN {o = 0; while ((2 ^ o) * ps < 2097152) o++} $4 == "Normal" {s += $(5 + o)} END {print s + 0}' /proc/buddyinfo
+```
+
+Compare the result with a known-good value from the same host: a healthy
+idle 2-3 TB host reports several thousand, and a 1 TB server proportionally
+less. Close to zero means the next pinned allocation will probably fail.
+
+**Step 2: if the number is low, check where the host memory went.**
+
+```bash
+free -h
+```
+
+When `free` is small while `buff/cache` is large, reclaim the file cache.
+Only page cache, dentries and inodes are dropped; process memory and pinned
+memory are not affected:
+
+```bash
+# Needs root; if the shell is not root, use:
+#   echo 3 | sudo tee /proc/sys/vm/drop_caches
+echo 3 > /proc/sys/vm/drop_caches
+```
+
+**Step 3: merge the fragmented 4 KB pages back into 2 MB blocks.**
+
+```bash
+# Needs root; if the shell is not root, use:
+#   echo 1 | sudo tee /proc/sys/vm/compact_memory
+echo 1 > /proc/sys/vm/compact_memory
+```
+
+Run the check from step 1 again. The count normally recovers within seconds
+to a couple of minutes; start the service after it is back to the healthy
+range.
+
+**Step 4: once the service is up, check `free -h` again.** If `free` is still
+small, clear the cache to give the memory back:
+
+```bash
+# Drops clean file cache only; the running service keeps its memory.
+# Needs root; if the shell is not root, use:
+#   echo 3 | sudo tee /proc/sys/vm/drop_caches
+echo 3 > /proc/sys/vm/drop_caches
+```
+
+The next weight load will be slower, because the weights have to be read
+from storage again.
+
+Steps 2 and 3 are most effective right before a (re)start, because weight
+loading fills the page cache again and compaction recovers the blocks only for a
+short while.

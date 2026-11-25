@@ -30,7 +30,6 @@ config:
     dp_address: "${NODE_1_IP}"
 
 env_common: &env_common
-  VLLM_USE_V2_MODEL_RUNNER: "1"
   VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS: "3000"
   HCCL_EXEC_TIMEOUT: "204"
   HCCL_CONNECT_TIMEOUT: "120"

@@ -15,8 +15,6 @@
 # limitations under the License.
 #
 
-import os
-from unittest.mock import patch
 
 import pytest
 from vllm import SamplingParams
@@ -29,7 +27,6 @@ MODELS = ["Qwen/Qwen3-0.6B"]
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("max_tokens", [32])
 @pytest.mark.parametrize("enforce_eager", [True])
-@patch.dict(os.environ, {"VLLM_USE_V2_MODEL_RUNNER": "1"})
 def test_qwen3_dense_eager_mode(
     model: str,
     max_tokens: int,
@@ -72,7 +69,6 @@ def test_qwen3_dense_eager_mode(
         pytest.param({}, id="default_full_and_piecewise"),
     ],
 )
-@patch.dict(os.environ, {"VLLM_USE_V2_MODEL_RUNNER": "1"})
 @wait_until_npu_memory_free(target_free_percentage=0.8)
 def test_qwen3_dense_graph_mode(
     model: str,

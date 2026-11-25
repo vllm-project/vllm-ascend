@@ -116,7 +116,7 @@ def create_ascend_mooncake_embedding_store_client(
     except ImportError as error:
         raise ImportError("Install mooncake with Store support to enable cross_encoder_cache.") from error
 
-    if vllm_version_is("0.33.0"):
+    if vllm_version_is("0.34.0"):
         from vllm.distributed.kv_transfer.kv_connector.v1.mooncake import rdma_utils
     else:
         from vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store import rdma_utils

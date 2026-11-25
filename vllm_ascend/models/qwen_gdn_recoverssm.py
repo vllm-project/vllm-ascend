@@ -65,8 +65,6 @@ def validate_qwen_gdn_recoverssm(config: "VllmConfig") -> None:
     spec = config.speculative_config
     if spec is None or spec.num_speculative_tokens < 1:
         raise ValueError("Qwen GDN RecoverSSM requires speculative decoding with at least one speculative token")
-    if not config.use_v2_model_runner:
-        raise ValueError("Qwen GDN RecoverSSM requires Model Runner V2")
     cache = config.cache_config
     if config.mamba_config.enable_stochastic_rounding:
         raise ValueError("Qwen GDN RecoverSSM does not support stochastic rounding")

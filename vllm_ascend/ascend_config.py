@@ -834,8 +834,6 @@ class AscendConfig:
             os.environ.setdefault("VLLM_WORKER_SHUTDOWN_TIMEOUT_SECONDS", "120")
         engram_config = getattr(vc, "engram_config", None)
         if self.shared_engram is not None and self.shared_engram.backend == "a3":
-            if not vc.use_v2_model_runner:
-                raise ValueError("shared_engram requires Model Runner V2")
             if not engram_config or not engram_config.cpu_offload:
                 raise ValueError("shared_engram requires Engram cpu_offload")
             if vc.load_config.load_format == "dummy" or vc.model_config.enable_sleep_mode:
@@ -844,7 +842,6 @@ class AscendConfig:
             engram_config is not None
             and getattr(engram_config, "cpu_offload", False)
             and not engram_config.dp_shared_memory
-            and vc.use_v2_model_runner
             and (vc.parallel_config.data_parallel_size > 1 or vc.parallel_config.prefill_context_parallel_size > 1)
         ):
             # DP-dummy ranks have no hash work in MRV2. Share host tables
@@ -1059,7 +1056,7 @@ class AscendConfig:
         ) = self._parse_sparse_li_layers_from_quant_config(quant_config, ("W8A8_MXFP8",))
         self._sparse_li_layer_filter_enabled = self._has_sparse_li_layer_config(quant_config)
         # vLLM #60517 removed the torch.compile-based sequence-parallelism pass
-        # (and `PassConfig.enable_sp`) in both v0.33.0 and verified main.
+        # (and `PassConfig.enable_sp`).
 
         enable_sp_by_pass = False
         self.enable_sp_by_pass = vc.model_config is not None and not vc.model_config.enforce_eager and enable_sp_by_pass
@@ -1907,14 +1904,6 @@ class SparseKVOffloadConfig:
                     "you can enable keep_device_kv_cache."
                 )
         self.topk = vllm_config.model_config.hf_text_config.index_topk
-        speculative = getattr(vllm_config, "speculative_config", None)
-        if (
-            speculative is not None
-            and speculative.method == "dspark"
-            and not getattr(vllm_config, "use_v2_model_runner", False)
-        ):
-            # Only V2 initializes the resident draft KV from remote prompt context.
-            raise ValueError("Sparse KV offload with DSpark requires V2 remote prompt-context initialization")
         if self.topk_buffer_size < self.topk:
             raise ValueError(
                 "sparse_kv_offload_config.topk_buffer_size must be >= topk, "

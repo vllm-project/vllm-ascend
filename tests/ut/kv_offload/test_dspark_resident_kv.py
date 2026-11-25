@@ -217,7 +217,6 @@ def test_worker_registers_draft_ownership_before_sfa_or_layerwise_connector_cons
     worker.model_runner = SimpleNamespace(
         speculator=SimpleNamespace(draft_attn_layer_names={"draft.attn"}), initialize_kv_cache=Mock()
     )
-    worker.use_v2_model_runner = True
     cache_config = SimpleNamespace(has_mamba_layers=False, needs_kv_cache_zeroing=False)
     enabled = method == "dspark" and (
         connector == "SfaRemoteD2HConnector" or connector == "AscendStoreConnector" and layerwise
@@ -468,7 +467,6 @@ def test_real_allocator_separates_host_target_and_persistent_mla_draft(monkeypat
     runtime = SimpleNamespace(kv_transfer_config=None, compilation_config=SimpleNamespace(static_forward_context={}))
     monkeypatch.setattr(attn_utils, "get_current_vllm_config", lambda: runtime)
     monkeypatch.setattr(attn_utils.KVPPConfig, "from_vllm_config", lambda _: SimpleNamespace(size=1))
-    monkeypatch.setattr(attn_utils, "_is_dsv4_model", lambda _: False)
     monkeypatch.setattr(attn_utils, "enable_sfa", lambda _: True)
     monkeypatch.setattr(attn_utils, "enable_fa_quant", lambda _: False)
     monkeypatch.setattr(attn_utils, "_get_attention_kv_cache_dims", lambda *_: (512, 64))

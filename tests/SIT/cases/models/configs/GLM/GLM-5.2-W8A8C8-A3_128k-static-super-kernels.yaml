@@ -5,7 +5,6 @@ num_nodes: 2
 npu_per_node: 16
 dp_load_balancing: internal
 env_common: &env_common
-  VLLM_USE_V2_MODEL_RUNNER: "1"
   LOCAL_WORLD_SIZE: "16"
   HCCL_OP_EXPANSION_MODE: "AIV"
   OMP_PROC_BIND: "false"
