@@ -11,7 +11,7 @@ import torch
 from vllm.logger import logger
 from vllm.models.qwen4_exp.amd.hyperconnection import GatedResidual
 
-from vllm_ascend.ops.triton.qwen4_exp.hc import combine_final
+from vllm_ascend.models.qwen4_exp.ops.hc import combine_final
 
 
 class AscendTextGatedResidual(GatedResidual):

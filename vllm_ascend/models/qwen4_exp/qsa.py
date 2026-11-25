@@ -1440,7 +1440,7 @@ def qwen4_exp_ascend_qsa_core_with_output(
     hidden_states: torch.Tensor,
     positions: torch.Tensor,
     output: torch.Tensor,
-    layer_name: Any,
+    layer_name: str,
 ) -> None:
     _resolve_qsa_layer(layer_name)._forward_core_with_output(
         positions,
@@ -1464,7 +1464,7 @@ def qwen4_exp_ascend_qsa_prepare_with_output(
     index_token_k: torch.Tensor,
     output: torch.Tensor,
     gate: torch.Tensor,
-    layer_name: Any,
+    layer_name: str,
 ) -> None:
     _resolve_qsa_layer(layer_name)._run_qsa(
         hidden_states,
@@ -1496,7 +1496,7 @@ def qwen4_exp_ascend_qsa_with_output(
     index_query: torch.Tensor,
     index_token_k: torch.Tensor,
     output: torch.Tensor,
-    layer_name: Any,
+    layer_name: str,
 ) -> None:
     _resolve_qsa_layer(layer_name)._run_qsa(
         hidden_states,

@@ -1,7 +1,7 @@
 import pytest
 import torch
 import torch_npu
-from vllm_ascend.ops.triton.linearnorm.qsa_rmsnorm_mrope import (
+from vllm_ascend.models.qwen4_exp.ops.qsa_rmsnorm_mrope import (
     triton_qsa_rmsnorm_mrope,
 )
 

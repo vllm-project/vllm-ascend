@@ -7,7 +7,7 @@ import torch
 import torch.nn.functional as F
 import torch_npu  # noqa: F401
 from torch import nn
-from vllm_ascend.ops.triton.qwen4_exp.hc import combine_final
+from vllm_ascend.models.qwen4_exp.ops.hc import combine_final
 
 from vllm_ascend.models.qwen4_exp.hc_fused import AscendTextGatedResidual
 
