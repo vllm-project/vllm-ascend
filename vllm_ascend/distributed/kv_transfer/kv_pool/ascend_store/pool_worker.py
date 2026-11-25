@@ -3303,7 +3303,6 @@ class KVPoolWorker:
             )
         if requests:
             self._previous_save_batch = send_thread.add_save_batch(requests)
-        send_thread.request_queue.join()
         send_thread.raise_if_failed()
 
     def retrieve_layer(
@@ -3652,8 +3651,8 @@ class KVPoolWorker:
                 if isinstance(send_thread, (KVCacheStoreSendingThread, KVCacheStoreLayerSendingThread)):
                     send_thread.delete_finished_stored_request(req_id)
             self.kv_send_thread.discard_finished_requests(meta.preempted_req_ids)
-            # Saves complete synchronously in wait_for_save(), so the scheduler
-            # never waits for a request-level finished_sending notification.
+            # Bulk save pins are released by per-event worker acknowledgements.
+            # The scheduler does not defer request-level cleanup for these saves.
             self.kv_send_thread.get_and_clear_finished_requests()
             done_sending: set[str] = set()
         else:

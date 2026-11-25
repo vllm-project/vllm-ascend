@@ -34,6 +34,7 @@ from vllm.v1.kv_cache_interface import (
 from vllm.v1.outputs import KVConnectorOutput
 
 import tests.ut.distributed.ascend_store._mock_deps  # noqa: F401, E402
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector import AscendStoreConnector
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.coordinator import AscendStoreCoordinator
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.dspark_prefix_cache import DSparkPrefixKeys
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
@@ -653,6 +654,9 @@ class TestKVPoolScheduler(unittest.TestCase):
         pool = MagicMock()
         pool.blocks = [object(), object(), object()]
         scheduler.bind_gpu_block_pool(pool)
+        connector = AscendStoreConnector.__new__(AscendStoreConnector)
+        connector.connector_scheduler = scheduler
+        self.assertFalse(connector.has_pending_push_work())
         request = ReqMeta("r1", block_ids_by_group=[[0, 1, 2]], can_save=True)
         scheduler.retain_blocks_for_save(request)
         pool.touch.assert_called_once_with(pool.blocks[1:])
@@ -661,7 +665,9 @@ class TestKVPoolScheduler(unittest.TestCase):
         output = KVConnectorOutput(kv_connector_worker_meta=AscendStoreKVConnectorWorkerMetadata({request.event_id: 1}))
         scheduler.update_connector_output(output)
         pool.free_blocks.assert_not_called()
+        self.assertTrue(connector.has_pending_push_work())
         scheduler.update_connector_output(output)
+        self.assertFalse(connector.has_pending_push_work())
         pool.free_blocks.assert_called_once()
         self.assertCountEqual(pool.free_blocks.call_args.args[0], pool.blocks[1:])
 

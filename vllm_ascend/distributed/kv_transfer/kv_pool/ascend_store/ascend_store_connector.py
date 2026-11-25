@@ -454,6 +454,9 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
         assert self.connector_scheduler is not None
         self.connector_scheduler.bind_gpu_block_pool(gpu_block_pool)
 
+    def has_pending_push_work(self) -> bool:
+        return bool(self.connector_scheduler and self.connector_scheduler.sending_events)
+
     def build_connector_worker_meta(self) -> AscendStoreKVConnectorWorkerMetadata | None:
         assert self.connector_worker is not None
         return self.connector_worker.build_connector_worker_meta()
