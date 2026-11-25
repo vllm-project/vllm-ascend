@@ -1,5 +1,4 @@
 # SPDX-License-Identifier: Apache-2.0
-
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 """Check the target-side K3.1 speculative length policy without a native provider."""
