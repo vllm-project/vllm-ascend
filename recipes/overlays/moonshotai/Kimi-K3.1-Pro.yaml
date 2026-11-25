@@ -55,8 +55,8 @@ presets:
     variants: [ascend_mxfp]
     default: true
     description: >-
-      Eight hosts with eight NPUs per host. Prefill uses TP1, PP4 and PCP8.
-      Decode uses four external DP ranks with TP8 and DCP8.
+      Eight hosts with eight NPUs per host. Each pool uses DP4 / TP8 / PP1
+      with one external DP rank per host. Decode also uses DCP8.
     source:
       label: vLLM Ascend Kimi-K3.1-Pro PD deployment tutorial
       href: https://docs.vllm.ai/projects/ascend/en/latest/tutorials/models/Kimi-K3.1-Pro.html#51-pd-deployment
@@ -117,18 +117,20 @@ presets:
       TASK_QUEUE_ENABLE: '1'
       HCCL_OP_EXPANSION_MODE: CCU_SCHED
       VLLM_USE_V2_MODEL_RUNNER: '1'
+    json_args:
+      '--speculative-config':
+        draft_tensor_parallel_size: 8
     roles:
       prefill:
         nodes: 4
-        parallelism: tp
-        tp: 1
-        pp: 4
-        pcp: 8
+        parallelism: dep
+        tp: 8
+        pp: 1
         args:
           - '--port'
           - '8000'
-          - '--master-port'
-          - '41000'
+          - '--data-parallel-rpc-port'
+          - '12320'
           - '--max-num-batched-tokens'
           - '16384'
           - '--gpu-memory-utilization'
@@ -140,15 +142,10 @@ presets:
           HCCL_IF_IP: $PREFILL_NODE_1
           VLLM_HOST_IP: $PREFILL_NODE_1
           HCCL_BUFFSIZE: '2000'
-          VLLM_PP_LAYER_PARTITION: '24,24,24,21'
         json_args:
           '--kv-transfer-config':
             MooncakeConnectorV2:
               kv_port: 30100
-              kv_connector_extra_config:
-                prefill: {pcp_size: 8}
-          '--speculative-config':
-            draft_tensor_parallel_size: 1
       decode:
         nodes: 4
         parallelism: dep
@@ -177,10 +174,6 @@ presets:
           '--kv-transfer-config':
             MooncakeConnectorV2:
               kv_port: 30300
-              kv_connector_extra_config:
-                prefill: {pcp_size: 8}
-          '--speculative-config':
-            draft_tensor_parallel_size: 8
     points:
       basic:
         label: 140K
@@ -201,10 +194,12 @@ presets:
       mount it at the same container path on every host and use that path in each
       worker command.
 
-      Start the Prefill master and Decode coordinator before their respective
-      followers. Only the Prefill master serves HTTP. Start one external DP
-      rank on each Decode host. After the Prefill API on port 8000 and the four
-      Decode APIs on port 8001 are healthy, start the Ascend Router and send a
+      Start the first host in each pool as its DP coordinator, then start the
+      remaining ranks. Each host serves HTTP. Prefill uses API port 8000 and
+      DP RPC port 12320. Decode uses API port 8001 and DP RPC port 12321.
+      Once all eight APIs are healthy, start the Ascend Router and send a
       request with model `kimi-k3.1-pro`.
-      For 1M requests, see
-      [the tutorial's long-context deployment and verification steps](https://docs.vllm.ai/projects/ascend/en/latest/tutorials/models/Kimi-K3.1-Pro.html#52-long-context).
+
+      This recipe uses an external DP Prefill pool. See the
+      [tutorial's long-context verification steps](https://docs.vllm.ai/projects/ascend/en/latest/tutorials/models/Kimi-K3.1-Pro.html#52-long-context)
+      to check KV-cache capacity and test 1M requests on the selected topology.
