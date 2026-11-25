@@ -206,6 +206,9 @@ def collect_draft_observation(server, case: WeightUpdateModelCase, *, capture_gr
 
 def run_draft_hccl_weight_transfer(tmp_path, monkeypatch, packed: bool, enforce_eager: bool, speculative_case):
     """Compare draft -> target -> draft updates with independent loads."""
+    if INFERENCE_DEVICE_INDEX < 0 or torch.npu.device_count() <= TRAINER_DEVICE_INDEX:
+        pytest.skip("HCCL weight transfer e2e test requires at least 2 NPUs.")
+
     monkeypatch.setenv("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
     torch.npu.set_device(TRAINER_DEVICE_INDEX)
     device = torch.device("npu", TRAINER_DEVICE_INDEX)
