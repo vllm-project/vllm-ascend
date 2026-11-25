@@ -898,18 +898,25 @@ class BaseDeviceAdaptor:
         # Ascend versions make these queries safe before device selection.
         from vllm.third_party.flash_linear_attention.ops.l2norm import l2norm_fwd
 
-        q = l2norm_fwd(q.contiguous()).contiguous()
-        k = l2norm_fwd(k.contiguous()).contiguous()
-        v = v.contiguous()
+        # Conv1d produces head-first storage exposed to attention as BSND views.
+        # L2Norm reduces D only, so dense BNSD rows can be normalized directly.
+        head_first_qkv = tuple(x.transpose(1, 2) for x in (q, k, v))
+        if all(x.is_contiguous() for x in head_first_qkv):
+            q, k, v = head_first_qkv
+            q = l2norm_fwd(q)
+            k = l2norm_fwd(k)
+        else:
+            # A token slice across heads can leave gaps in the convolution storage.
+            q = l2norm_fwd(q.contiguous()).contiguous()
+            k = l2norm_fwd(k.contiguous()).contiguous()
+            v = v.contiguous()
+            q = q.transpose(1, 2).contiguous()
+            k = k.transpose(1, 2).contiguous()
+            v = v.transpose(1, 2).contiguous()
+
         g = g.to(torch.float32).contiguous()
         beta = beta.to(v.dtype).contiguous()
         initial_state = initial_state.contiguous()
-
-        # BNSD/NTD take [B, H, T, D]; q/k/v arrive sequence-major. The output is
-        # still returned sequence-major, so only the inputs are permuted.
-        q = q.transpose(1, 2).contiguous()
-        k = k.transpose(1, 2).contiguous()
-        v = v.transpose(1, 2).contiguous()
 
         cu_seqlens = prebuilt_meta.cu_seqlens_host
         chunk_indices = prebuilt_meta.chunk_indices_chunk64_host
@@ -1233,6 +1240,12 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
         eps: float = 1e-20,
         bias_opt: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        # Qwen3.8-Next computes its softmax router logits in FP32. Keep the
+        # Top-K renormalization inside MoeGatingTopK for that path instead of
+        # launching a separate ReduceSum and Div. Other dtypes retain the
+        # established post-op path because rounding before renormalization is
+        # observably different for BF16 outputs.
+        native_renorm = renorm if norm_type == 0 and x.dtype == torch.float32 else 0
         topk_weights, topk_ids, out = torch_npu.npu_moe_gating_top_k(
             x,
             k=k,
@@ -1240,12 +1253,12 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
             k_group=k_group,
             group_count=group_count,
             group_select_mode=group_select_mode,
-            renorm=0,
+            renorm=native_renorm,
             norm_type=norm_type,
             routed_scaling_factor=routed_scaling_factor,
             eps=eps,
         )
-        if norm_type == 0 and renorm == 1:
+        if norm_type == 0 and renorm == 1 and native_renorm == 0:
             topk_weights = topk_weights / topk_weights.sum(dim=-1, keepdim=True)
 
         return topk_weights, topk_ids.to(torch.int32), out

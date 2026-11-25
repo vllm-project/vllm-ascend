@@ -155,6 +155,19 @@ def test_empty_preparation():
         torch.testing.assert_close(result, reference, rtol=0, atol=0)
 
 
+@pytest.mark.parametrize("groups", [8, 511, 512])
+@pytest.mark.parametrize("tail", range(4))
+@pytest.mark.parametrize("pattern", ["full", "holes", "invalid"])
+def test_union_omits_only_unused_row_metadata(groups, tail, pattern):
+    compact, positions, lengths, requests, table = make_inputs(groups, tail, pattern, torch.int32)
+    expected = reference_prepare(compact, positions, lengths, requests, table, 1)
+    actual = load_cpu_preparation()(compact, positions, lengths, requests, table, 1, write_row_metadata=False)
+    for result, reference in zip(actual[:3], expected[:3], strict=True):
+        torch.testing.assert_close(result, reference, rtol=0, atol=0)
+    assert actual[3].shape == (0,)
+    assert actual[4].shape == (0, table.shape[1])
+
+
 @pytest.mark.parametrize("dtype", [torch.int32, torch.int64])
 def test_pack_wide_positions_and_strided_buffers(dtype):
     source = Path(__file__).resolve().parents[4] / "vllm_ascend/ops/triton/qwen4_exp/qsa.py"

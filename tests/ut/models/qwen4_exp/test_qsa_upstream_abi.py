@@ -1,11 +1,141 @@
 # SPDX-License-Identifier: Apache-2.0
 
+from contextlib import nullcontext
 from types import SimpleNamespace
-from unittest.mock import Mock
+from unittest.mock import MagicMock, Mock
 
 import torch
 
 from vllm_ascend.models.qwen4_exp import qsa
+
+
+def test_indexer_projection_runs_on_auxiliary_stream(monkeypatch) -> None:
+    main_stream = Mock()
+    aux_stream = Mock()
+    ready = Mock()
+    main_stream.record_event.return_value = ready
+    monkeypatch.setattr(qsa.torch.npu, "current_stream", lambda: main_stream)
+    monkeypatch.setattr(qsa, "_qsa_indexer_stream", lambda: aux_stream)
+    monkeypatch.setattr(qsa, "npu_stream_switch", lambda stream: nullcontext())
+
+    query = Mock()
+    token_k = Mock()
+    indexer = Mock()
+    metadata = SimpleNamespace(num_actual_tokens=2)
+    indexer._metadata.return_value = (metadata, metadata)
+    indexer.project_qk.return_value = (query, token_k)
+    layer = qsa.AscendQwen4ExpQSAAttention.__new__(qsa.AscendQwen4ExpQSAAttention)
+    torch.nn.Module.__init__(layer)
+    layer.indexer = indexer
+    hidden_states = MagicMock()
+    positions = MagicMock()
+
+    actual = layer._start_indexer_projection(hidden_states, positions)
+
+    assert actual == (query, token_k)
+    hidden_states.record_stream.assert_called_once_with(aux_stream)
+    positions.record_stream.assert_called_once_with(aux_stream)
+    aux_stream.wait_event.assert_called_once_with(ready)
+    indexer.project_qk.assert_called_once_with(
+        hidden_states[:2],
+        positions[..., :2],
+    )
+    query.record_stream.assert_called_once_with(main_stream)
+    token_k.record_stream.assert_called_once_with(main_stream)
+
+
+def test_qsa_projections_pipeline_indexer_vector_before_main_cube() -> None:
+    launches: list[str] = []
+    qkv = Mock()
+    index_query = Mock()
+    index_token_k = Mock()
+
+    def project_main(_hidden_states):
+        launches.append("main_qkv")
+        return qkv, None
+
+    def project_indexer(_hidden_states, _positions):
+        launches.append("indexer")
+        return index_query, index_token_k
+
+    layer = SimpleNamespace(
+        qkv_proj=Mock(side_effect=project_main),
+        _start_indexer_projection=Mock(side_effect=project_indexer),
+    )
+    hidden_states = Mock()
+    positions = Mock()
+
+    actual = qsa.AscendQwen4ExpQSAAttention._start_staggered_projections(
+        layer,
+        hidden_states,
+        positions,
+    )
+
+    assert actual == (qkv, index_query, index_token_k)
+    assert launches == ["indexer", "main_qkv"]
+
+
+def test_qsa_core_side_effect_op_writes_graph_output(monkeypatch) -> None:
+    hidden_states = torch.empty((2, 8))
+    positions = torch.arange(2)
+    output = torch.empty((2, 2, 4))
+    layer = Mock()
+    monkeypatch.setattr(qsa, "_ascend_qsa_layer", lambda _name: layer)
+
+    qsa.qwen4_exp_ascend_qsa_core_with_output(
+        hidden_states,
+        positions,
+        output,
+        "layer",
+    )
+
+    layer._forward_core_with_output.assert_called_once_with(
+        positions,
+        hidden_states,
+        output,
+    )
+
+
+def test_qsa_opaque_forward_runs_output_projection_after_core(monkeypatch) -> None:
+    class OutputProjection(torch.nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.input: torch.Tensor | None = None
+
+        def forward(self, tensor: torch.Tensor) -> tuple[torch.Tensor, None]:
+            self.input = tensor.clone()
+            return tensor.add(1), None
+
+    def core_with_output(
+        hidden_states: torch.Tensor,
+        positions: torch.Tensor,
+        output: torch.Tensor,
+        layer_name: str,
+    ) -> None:
+        del hidden_states, positions, layer_name
+        output.copy_(torch.arange(output.numel(), dtype=output.dtype).reshape_as(output))
+
+    monkeypatch.setattr(qsa.current_platform, "opaque_attention_op", lambda: True)
+    monkeypatch.setattr(
+        qsa.torch.ops.vllm,
+        "qwen4_exp_ascend_qsa_core_with_output",
+        core_with_output,
+    )
+    layer = qsa.AscendQwen4ExpQSAAttention.__new__(qsa.AscendQwen4ExpQSAAttention)
+    torch.nn.Module.__init__(layer)
+    layer.layer_name = "model.layers.0.self_attn.attn"
+    layer.num_heads = 2
+    layer.head_dim = 4
+    projection = OutputProjection()
+    layer.o_proj = projection
+    hidden_states = torch.empty((2, 8))
+    positions = torch.arange(2)
+
+    result = layer.forward(positions, hidden_states)
+
+    expected_core = torch.arange(16, dtype=hidden_states.dtype).reshape(2, 8)
+    torch.testing.assert_close(projection.input, expected_core)
+    torch.testing.assert_close(result, expected_core + 1)
 
 
 def test_main_uses_ascend_projection_and_draft_uses_upstream(monkeypatch) -> None:
@@ -31,6 +161,107 @@ def test_main_uses_ascend_projection_and_draft_uses_upstream(monkeypatch) -> Non
 
     assert layer._project_qkv_gate(qkv, positions) == ("q", "k", "v", "gate")
     upstream_projection.assert_called_once_with(qkv, positions)
+
+
+def test_main_falls_back_when_fused_projection_abi_is_not_satisfied(monkeypatch) -> None:
+    upstream_projection = Mock(return_value=("q", "k", "v", "gate"))
+    monkeypatch.setattr(
+        qsa.upstream_qsa.Qwen4ExpQSAAttention,
+        "_project_qkv_gate",
+        upstream_projection,
+    )
+    layer = qsa.AscendQwen4ExpQSAAttention.__new__(qsa.AscendQwen4ExpQSAAttention)
+    torch.nn.Module.__init__(layer)
+    layer.layer_name = "model.layers.0.self_attn.attn"
+    layer._main_fused_norm_rope_eligible = Mock(return_value=False)
+    qkv = torch.empty((2, 8))
+    positions = torch.arange(2)
+
+    assert layer._project_qkv_gate(qkv, positions) == ("q", "k", "v", "gate")
+    upstream_projection.assert_called_once_with(qkv, positions)
+
+
+def test_indexer_query_falls_back_when_fused_abi_is_not_satisfied(monkeypatch) -> None:
+    upstream_projection = Mock(return_value=("query", "key"))
+    monkeypatch.setattr(
+        qsa.upstream_indexer.QSAIndexer,
+        "project_qk",
+        upstream_projection,
+    )
+    layer = qsa.AscendQSAIndexer.__new__(qsa.AscendQSAIndexer)
+    torch.nn.Module.__init__(layer)
+    layer.index_n_heads = 2
+    layer.index_head_dim = 4
+    layer.index_kv_heads = 1
+    layer.index_qk_proj = Mock(return_value=(torch.empty((2, 12)), None))
+    layer._fused_norm_rope_eligible = Mock(return_value=False)
+    hidden_states = torch.empty((2, 8))
+    positions = torch.arange(2)
+
+    assert layer.project_qk(hidden_states, positions) == ("query", "key")
+    upstream_projection.assert_called_once_with(hidden_states, positions)
+
+
+def test_indexer_compressed_key_falls_back_when_fused_abi_is_not_satisfied(monkeypatch) -> None:
+    upstream_projection = Mock(return_value="keys")
+    monkeypatch.setattr(
+        qsa.upstream_indexer.QSAIndexer,
+        "normalize_compressed_keys",
+        upstream_projection,
+    )
+    layer = qsa.AscendQSAIndexer.__new__(qsa.AscendQSAIndexer)
+    torch.nn.Module.__init__(layer)
+    layer.index_head_dim = 4
+    layer.rotary_emb = SimpleNamespace(mrope_section=[1, 1, 0])
+    layer._fused_norm_rope_eligible = Mock(return_value=False)
+    pooled = torch.empty((2, 4))
+    first_positions = torch.arange(6).reshape(2, 3)
+
+    assert layer.normalize_compressed_keys(pooled, first_positions) == "keys"
+    upstream_projection.assert_called_once_with(pooled, first_positions)
+
+
+def test_indexer_compression_falls_back_when_graph_shape_misses_fused_abi(monkeypatch) -> None:
+    layer = qsa.AscendQSAIndexer.__new__(qsa.AscendQSAIndexer)
+    torch.nn.Module.__init__(layer)
+    raw_cache = torch.empty((4, 1, 4))
+    compressed_cache = torch.empty_like(raw_cache)
+    layer.raw_key_cache = SimpleNamespace(key_cache=raw_cache, rope_position_cache=None)
+    layer.compressed_key_cache = SimpleNamespace(kv_cache=compressed_cache)
+    layer.compress_ratio = 4
+    layer._fused_norm_rope_eligible = Mock(return_value=False)
+
+    pooled = torch.empty((1, 4))
+    first_positions = torch.zeros((1, 3), dtype=torch.long)
+    compress = Mock(return_value=(pooled, first_positions))
+    normalize = Mock(return_value=torch.ones_like(pooled))
+    store = Mock()
+    fused_compress = Mock(side_effect=AssertionError("fused path must not run"))
+    monkeypatch.setattr(qsa, "_compress_qsa_groups", compress)
+    monkeypatch.setattr(qsa, "_store_qsa_cache_rows", store)
+    monkeypatch.setattr(qsa, "qsa_compress_groups_with_ratio_fused", fused_compress)
+    layer.normalize_compressed_keys = normalize
+
+    raw_metadata = SimpleNamespace(
+        num_actual_tokens=2,
+        logical_positions=torch.tensor([0, 1]),
+        block_table=torch.empty((1, 1), dtype=torch.int32),
+        token_to_req=torch.zeros(2, dtype=torch.int32),
+        query_start_loc=torch.tensor([0, 2], dtype=torch.int32),
+        slot_mapping=torch.tensor([0, 1]),
+    )
+    compressed_metadata = SimpleNamespace(slot_mapping=torch.tensor([0]))
+    token_k = torch.empty((2, 1, 4))
+    positions = torch.arange(2)
+
+    layer._update_and_compress(token_k, positions, raw_metadata, compressed_metadata)
+
+    compress.assert_called_once()
+    normalize.assert_called_once_with(pooled, first_positions)
+    fused_compress.assert_not_called()
+    assert store.call_count == 2
+    assert store.call_args_list[0].args[0] is compressed_cache
+    assert store.call_args_list[1].args[0] is raw_cache
 
 
 def test_fused_prepare_upstream_abi_materializes_qkv_and_gate(monkeypatch) -> None:
@@ -76,7 +307,14 @@ def test_fused_prepare_upstream_abi_materializes_qkv_and_gate(monkeypatch) -> No
     projected_k = torch.arange(8, dtype=torch.float32).reshape(2, 4)
     projected_v = projected_k + 10
     projected_gate = projected_q + 20
-    layer._project_qkv_gate = Mock(return_value=(projected_q, projected_k, projected_v, projected_gate))
+
+    def project_into_gate(qkv_arg, positions_arg, gate_out=None):
+        assert qkv_arg is qkv
+        assert positions_arg is positions
+        gate_out.copy_(projected_gate.view_as(gate_out))
+        return projected_q, projected_k, projected_v, gate_out.view(2, 8)
+
+    layer._project_qkv_gate = Mock(side_effect=project_into_gate)
 
     hidden_states = torch.empty((2, 8))
     positions = torch.arange(2)
@@ -95,7 +333,7 @@ def test_fused_prepare_upstream_abi_materializes_qkv_and_gate(monkeypatch) -> No
         gate=gate,
     )
 
-    layer._project_qkv_gate.assert_called_once_with(qkv, positions)
+    layer._project_qkv_gate.assert_called_once_with(qkv, positions, gate_out=gate)
     torch.testing.assert_close(gate, projected_gate.view_as(gate))
     layer.impl.do_kv_cache_update.assert_called_once()
     update_args = layer.impl.do_kv_cache_update.call_args.args

@@ -168,6 +168,11 @@ class GDNSpecDecodeMetadata:
     spec_causal_conv1d: GDNSpecCausalConv1dMetadata
     # 310P derives lengths in its recurrent wrapper and only consumes conv metadata.
     actual_seq_lengths: torch.Tensor | None
+    # Keep the dispatch contract explicit even when the fixed-length release
+    # path uses the native kernels. Adaptive/full-graph paths may opt into the
+    # upstream fallbacks without changing every metadata constructor.
+    use_upstream_recurrent: bool = False
+    use_upstream_conv: bool = False
 
 
 def _build_actual_seq_lengths(
@@ -522,6 +527,8 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
             raise RuntimeError("Expected spec_state_indices_tensor for Ascend GDN speculative conv1d path.")
         if attn_metadata.num_accepted_tokens is None:
             raise RuntimeError("Expected num_accepted_tokens for Ascend GDN speculative conv1d path.")
+        if attn_metadata.num_accepted_tokens.dtype != torch.int32:
+            raise RuntimeError("Ascend recurrent GDN requires INT32 num_accepted_tokens metadata.")
 
         num_sequences = attn_metadata.num_spec_decodes
         actual_seq_lengths_buffer = None
@@ -773,6 +780,10 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
                 spec_sequence_masks = self.spec_sequence_masks[:num_reqs]
 
         batch = _split_gdn_batch(m, spec_sequence_masks_cpu, num_spec_decodes)
+        # The recurrent GDN ABI consumes INT32 accepted-token counts. Normalize
+        # once while building step metadata instead of casting in every layer.
+        if num_accepted_tokens is not None and num_accepted_tokens.dtype != torch.int32:
+            num_accepted_tokens = num_accepted_tokens.to(torch.int32)
         (
             num_decodes,
             num_prefills,
@@ -1332,7 +1343,7 @@ class AscendGDNFusedAttentionBackend(AscendGDNAttentionBackend):
     def get_builder_cls() -> type[AscendGDNAttentionMetadataBuilder]:
         # Import lazily to avoid the gdn <-> builder import cycle at module
         # initialization.  The probe result is cached by the attention class.
-        from vllm_ascend.ops.gdn import AscendGatedDeltaNetAttention
+        from vllm_ascend.attention.gdn import AscendGatedDeltaNetAttention
 
         if get_pcp_group().world_size == 1 and AscendGatedDeltaNetAttention._supports_host_metadata_prefill():
             return AscendGDNHostMetadataBuilder

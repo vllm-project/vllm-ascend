@@ -13,18 +13,20 @@ from vllm.v1.attention.backend import CommonAttentionMetadata
 from vllm.v1.attention.backends.utils import NULL_BLOCK_ID, PAD_SLOT_ID
 from vllm.v1.kv_cache_interface import MambaSpec
 
-from vllm_ascend._310p.ops.gdn_attn_builder_310 import GDNAttentionMetadataBuilder310
-from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
-from vllm_ascend.ops import gdn as ascend_gdn
-from vllm_ascend.ops import gdn_attn_builder as ascend_gdn_attn_builder
-from vllm_ascend.ops.gdn import AscendGatedDeltaNetAttention
-from vllm_ascend.ops.gdn_attn_builder import (
+from vllm_ascend._310p.attention.gdn_attn_builder_310 import (
+    GDNAttentionMetadataBuilder310,
+)
+from vllm_ascend.attention import gdn as ascend_gdn
+from vllm_ascend.attention import gdn_attn_builder as ascend_gdn_attn_builder
+from vllm_ascend.attention.gdn import AscendGatedDeltaNetAttention
+from vllm_ascend.attention.gdn_attn_builder import (
     AscendGDNAttentionBackend,
     AscendGDNAttentionMetadataBuilder,
     AscendGDNFusedAttentionBackend,
     AscendGDNHostMetadataBackend,
     AscendGDNHostMetadataBuilder,
 )
+from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
 from vllm_ascend.ops.triton.fla import utils as fla_utils
 from vllm_ascend.ops.triton.fla.utils import (
     prepare_chunk_indices as runtime_prepare_chunk_indices,
@@ -694,7 +696,7 @@ def test_spec_conv1d_args_use_device_cache_and_accepted_tokens():
         num_heads=32,
         num_speculative_tokens=3,
     )
-    num_accepted_tokens = torch.tensor([2, 4], dtype=torch.int32)
+    num_accepted_tokens = torch.tensor([2, 4], dtype=torch.int64)
 
     attn_metadata = builder.build(
         0,
@@ -710,7 +712,10 @@ def test_spec_conv1d_args_use_device_cache_and_accepted_tokens():
         spec_conv1d_meta.cache_indices,
         torch.tensor([[10, 11, 12, 13], [20, 21, 22, 23]], dtype=torch.int32),
     )
-    assert torch.equal(spec_conv1d_meta.num_accepted_tokens, num_accepted_tokens)
+    assert torch.equal(
+        spec_conv1d_meta.num_accepted_tokens,
+        torch.tensor([2, 4], dtype=torch.int32),
+    )
     assert torch.equal(
         attn_metadata.spec_decode_metadata.actual_seq_lengths,
         torch.tensor([0, 4, 4], dtype=torch.int32),

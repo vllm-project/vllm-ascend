@@ -477,6 +477,49 @@ def test_runner_materializes_packed_kv_and_contiguous_ssm_views(monkeypatch, run
     assert compressed.is_contiguous()
 
 
+def test_qsa_raw_view_honors_padded_hybrid_page_stride(monkeypatch) -> None:
+    groups = _groups()
+    raw_group = groups.pop(1)
+    layer_name = raw_group.layer_names[0]
+    groups.insert(
+        1,
+        KVCacheGroupSpec([layer_name], raw_group.kv_cache_spec),
+    )
+    groups.insert(
+        2,
+        KVCacheGroupSpec(
+            raw_group.layer_names[1:],
+            replace(raw_group.kv_cache_spec, block_size=12),
+        ),
+    )
+    config = get_qwen4_exp_kv_cache_config(
+        SimpleNamespace(
+            cache_config=SimpleNamespace(
+                num_gpu_blocks_override=3,
+                prefix_cache_retention_interval=None,
+            )
+        ),
+        groups,
+        10**9,
+    )
+    assert config is not None
+    raw, caches, layout = _allocate_mrv2_kv_cache(config, monkeypatch)
+    assert layout is not None
+
+    raw_qsa = caches[layer_name]
+    region = layout.region("r4")
+    assert region.page_size_bytes == 12 * 1 * 32 * 2
+    assert raw_qsa.shape == (3, 8, 1, 32)
+    assert raw_qsa.stride(0) * raw_qsa.element_size() == region.block_stride
+    assert not raw_qsa.is_contiguous()
+    assert raw_qsa.untyped_storage().data_ptr() == raw[layer_name].untyped_storage().data_ptr()
+
+    raw_qsa[1].fill_(7)
+    assert torch.count_nonzero(raw_qsa[0]) == 0
+    assert torch.count_nonzero(raw_qsa[1]) == raw_qsa[1].numel()
+    assert torch.count_nonzero(raw_qsa[2]) == 0
+
+
 def test_qsa_source_sets_must_match() -> None:
     groups = _groups()
     groups[1].layer_names[-1] = "model.layers.46.self_attn.indexer.raw_key_cache"
@@ -746,6 +789,152 @@ def test_qsa_block_alignment_reuses_vllm_for_whole_gdn_page(monkeypatch, cache_m
     expected_mamba_block_size = 896 if cache_mode == "align" or vllm_version_is("0.31.0") else None
     assert cache.mamba_block_size == expected_mamba_block_size
     assert cache.mamba_page_size_padded == 896 * 1024
+
+
+def test_qwen4_recoverssm_alignment_uses_complete_three_state_geometry(monkeypatch):
+    from vllm_ascend.models.qwen4_exp.model import (
+        AscendQwen4ExpForCausalLM,
+        AscendQwen4ExpForConditionalGeneration,
+    )
+    from vllm_ascend.models.qwen4_exp.qsa import AscendQSABackend
+
+    for model_cls in (
+        AscendQwen4ExpForCausalLM,
+        AscendQwen4ExpForConditionalGeneration,
+    ):
+        text_config = SimpleNamespace(
+            model_type="qwen4_exp_text",
+            linear_num_key_heads=16,
+            linear_num_value_heads=48,
+            linear_key_head_dim=128,
+            linear_value_head_dim=128,
+            linear_conv_kernel_dim=4,
+            ple_conv_kernel_size=4,
+            ngram_size=3,
+            hc_count=4,
+            hidden_size=2560,
+            indexer_compress_ratio=4,
+        )
+        cache = SimpleNamespace(
+            cache_dtype="auto",
+            block_size=128,
+            mamba_cache_mode="align",
+            mamba_block_size=None,
+            user_specified_mamba_block_size=False,
+            mamba_page_size_padded=None,
+            mamba_cache_dtype="auto",
+            mamba_ssm_cache_dtype="bfloat16",
+            use_replayssm=True,
+        )
+        config = SimpleNamespace(
+            model_config=SimpleNamespace(
+                use_mla=False,
+                architecture="Qwen4ExpForConditionalGeneration",
+                hf_config=SimpleNamespace(
+                    architectures=["Qwen4ExpForConditionalGeneration"],
+                ),
+                hf_text_config=text_config,
+                dtype=torch.bfloat16,
+                get_num_kv_heads=lambda config: 2,
+                get_head_size=lambda: 128,
+                get_mamba_chunk_size=lambda: 64,
+            ),
+            cache_config=cache,
+            parallel_config=SimpleNamespace(tensor_parallel_size=2),
+            speculative_config=SimpleNamespace(num_speculative_tokens=3),
+            compilation_config=SimpleNamespace(static_forward_context={}),
+        )
+
+        expected_shapes = (
+            (6, 5120),
+            (24, 128, 128),
+            (24, 4, 257),
+        )
+        expected_dtypes = (
+            torch.bfloat16,
+            torch.bfloat16,
+            torch.float32,
+        )
+        assert model_cls.get_mamba_state_shape_from_config(config) == expected_shapes
+        assert model_cls.get_mamba_state_dtype_from_config(config) == expected_dtypes
+        (gdn_spec,) = model_cls.get_mamba_specs_from_config(config)
+        assert gdn_spec.shapes == expected_shapes
+        assert gdn_spec.dtypes == expected_dtypes
+        assert gdn_spec.real_page_size_bytes == 946560
+
+        # This is the exact stale page selected from the old two-state model
+        # descriptor: 896 tokens * 1024 bytes/token. The runtime GDN layer
+        # appends the replay record and therefore needs 946560 bytes.
+        stale_spec = replace(gdn_spec, page_size_padded=917504)
+        with pytest.raises(AssertionError):
+            _ = stale_spec.page_size_bytes
+
+        monkeypatch.setattr(
+            ModelRegistry,
+            "resolve_model_cls",
+            lambda *args, model_cls=model_cls, **kwargs: (model_cls, "test"),
+        )
+        monkeypatch.setattr(
+            NPUPlatform,
+            "_find_non_ssm_backends",
+            classmethod(lambda cls, config: [AscendQSABackend]),
+        )
+        NPUPlatform._align_hybrid_block_size(config, AscendQSABackend)
+        assert cache.block_size == 1024
+        assert cache.mamba_page_size_padded == 1024 * 1024
+        assert (
+            replace(
+                gdn_spec,
+                page_size_padded=cache.mamba_page_size_padded,
+            ).page_size_bytes
+            == 1024 * 1024
+        )
+
+
+def test_recoverssm_three_state_layout_materializes_all_state_views(monkeypatch):
+    groups = _groups()
+    gdn_group = groups[3]
+    gdn_spec = gdn_group.kv_cache_spec
+    assert isinstance(gdn_spec, MambaSpec)
+    replay_spec = replace(
+        gdn_spec,
+        shapes=(*gdn_spec.shapes, (2, 4, 257)),
+        dtypes=(*gdn_spec.dtypes, torch.float32),
+    )
+    groups[3] = KVCacheGroupSpec(gdn_group.layer_names, replay_spec)
+
+    config = get_qwen4_exp_kv_cache_config(
+        SimpleNamespace(
+            cache_config=SimpleNamespace(
+                num_gpu_blocks_override=3,
+                prefix_cache_retention_interval=None,
+            )
+        ),
+        groups,
+        10**9,
+    )
+    assert config is not None
+    raw, caches, layout = _allocate_mrv2_kv_cache(config, monkeypatch)
+    assert layout is not None
+    assert layout.owner("model.layers.0.linear_attn").role == GDN
+    assert layout.owner("model.ple").role == PLE
+    assert layout.region("r3").offset == layout.region("r2").offset + layout.region("r2").page_size_bytes
+
+    states = caches["model.layers.0.linear_attn"]
+    assert len(states) == 3
+    backing = raw["model.layers.0.linear_attn"]
+    owner = layout.owner("model.layers.0.linear_attn")
+    for state, region_name, expected_dtype in zip(
+        states,
+        ("r1", "r2", "r3"),
+        replay_spec.dtypes,
+        strict=True,
+    ):
+        region = layout.region(region_name)
+        assert state.dtype == expected_dtype
+        assert state.untyped_storage().data_ptr() == backing.untyped_storage().data_ptr()
+        assert state.storage_offset() * state.element_size() == (owner.slot * layout.slot_backing_size + region.offset)
+        assert state.stride(0) * state.element_size() == region.block_stride
 
 
 def test_large_ple_uses_one_dense_bank_without_expanding_shared_slots(monkeypatch) -> None:
