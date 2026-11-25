@@ -108,8 +108,10 @@ def rejection_greedy_sample_triton(
         is_greedy = tl.load(is_greedy_ptr + offset, mask=mask, other=0)
         is_greedy_mask = mask & (is_greedy != 0)
 
-    start_idx = tl.where(offset == 0, 0, tl.load(cu_num_draft_tokens_ptr + offset - 1, is_greedy_mask))
-    end_idx = tl.load(cu_num_draft_tokens_ptr + offset, is_greedy_mask)
+    prev_mask = is_greedy_mask & (offset > 0)
+    prev_end_idx = tl.load(cu_num_draft_tokens_ptr + offset - 1, mask=prev_mask, other=0)
+    start_idx = tl.where(offset == 0, 0, prev_end_idx)
+    end_idx = tl.load(cu_num_draft_tokens_ptr + offset, mask=is_greedy_mask, other=0)
     num_draft_tokens = end_idx - start_idx
 
     for pos in tl.range(0, BLOCK_SIZE):
@@ -203,8 +205,10 @@ def rejection_random_sample_kernel(
     mask = offsets < vec_len
     is_greedy = tl.load(is_greedy_ptr + offsets, mask, other=1)
     not_greedy_mask = is_greedy == 0
-    start_idxs = tl.where(offsets == 0, 0, tl.load(cu_num_draft_tokens_ptr + offsets - 1, not_greedy_mask))
-    end_idxs = tl.load(cu_num_draft_tokens_ptr + offsets, not_greedy_mask)
+    prev_mask = not_greedy_mask & (offsets > 0)
+    prev_end_idxs = tl.load(cu_num_draft_tokens_ptr + offsets - 1, mask=prev_mask, other=0)
+    start_idxs = tl.where(offsets == 0, 0, prev_end_idxs)
+    end_idxs = tl.load(cu_num_draft_tokens_ptr + offsets, mask=not_greedy_mask, other=0)
     n_num_draft_tokens = end_idxs - start_idxs
 
     for req_i in range(BLOCK_SIZE):
@@ -368,19 +372,22 @@ def expand_kernel(
     offset = req_idx * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
     len_mask = offset < vec_len
 
-    start_idx = tl.where(offset == 0, 0, tl.load(cu_num_tokens_ptr + offset - 1, len_mask))
-    end_idx = tl.load(cu_num_tokens_ptr + offset, len_mask)
+    prev_mask = len_mask & (offset > 0)
+    prev_end_idx = tl.load(cu_num_tokens_ptr + offset - 1, mask=prev_mask, other=0)
+    start_idx = tl.where(offset == 0, 0, prev_end_idx)
+    end_idx = tl.load(cu_num_tokens_ptr + offset, mask=len_mask, other=0)
     num_tokens = end_idx - start_idx
 
-    src_val = tl.load(input_ptr + offset, len_mask)
+    src_val = tl.load(input_ptr + offset, mask=len_mask, other=0)
     src_val = tl.where(src_val == replace_from, replace_to, src_val)
 
     for i in tl.range(0, BLOCK_SIZE):
+        valid_req = get_element(len_mask, (i,))
         num_tokens1 = get_element(num_tokens, (i,))
         start_idx1 = get_element(start_idx, (i,))
         src_val1 = get_element(src_val, (i,))
         offset1 = tl.arange(0, MAX_NUM_TOKENS)
-        tl.store(output_ptr + start_idx1 + offset1, src_val1, mask=offset1 < num_tokens1)
+        tl.store(output_ptr + start_idx1 + offset1, src_val1, mask=valid_req & (offset1 < num_tokens1))
 
 
 @triton.jit
@@ -403,7 +410,8 @@ def sample_recovered_tokens_kernel(
     pos = tl.program_id(1)
 
     # Compute token index
-    start_idx = tl.where(req_idx == 0, 0, tl.load(cu_num_draft_tokens_ptr + req_idx - 1))
+    prev_end_idx = tl.load(cu_num_draft_tokens_ptr + req_idx - 1, mask=req_idx > 0, other=0)
+    start_idx = tl.where(req_idx == 0, 0, prev_end_idx)
     end_idx = tl.load(cu_num_draft_tokens_ptr + req_idx)
     num_draft_tokens = end_idx - start_idx
 

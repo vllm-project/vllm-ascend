@@ -147,6 +147,102 @@ def test_sample_recovered_tokens_kernel():
     torch.npu.reset_peak_memory_stats()
 
 
+@torch.inference_mode()
+def test_request_zero_with_no_draft_tokens():
+    """Exercise every predecessor load at the request-zero boundary."""
+    device = "npu"
+    batch_size = 1
+    max_spec_len = 1
+    vocab_size = 4
+    grid, block_size = cal_grid_and_block_size(batch_size)
+
+    cu_num_draft_tokens = torch.zeros(batch_size, dtype=torch.int32, device=device)
+    no_token_ids = torch.empty(0, dtype=torch.int64, device=device)
+    no_probs = torch.empty((0, vocab_size), dtype=torch.float32, device=device)
+    no_uniform_probs = torch.empty(0, dtype=torch.float32, device=device)
+
+    expanded = torch.tensor([17], dtype=torch.int64, device=device)
+    expand_kernel[(grid,)](
+        expanded,
+        torch.tensor([7], dtype=torch.int64, device=device),
+        cu_num_draft_tokens,
+        -1,
+        99,
+        batch_size,
+        MAX_NUM_TOKENS=max_spec_len,
+        BLOCK_SIZE=block_size,
+    )
+
+    recovered = torch.tensor([23], dtype=torch.int64, device=device)
+    sample_recovered_tokens_kernel[(batch_size, max_spec_len)](
+        recovered,
+        cu_num_draft_tokens,
+        no_token_ids,
+        None,
+        no_probs,
+        None,
+        torch.ones((batch_size, vocab_size), dtype=torch.float32, device=device),
+        vocab_size,
+        vocab_size,
+        NO_DRAFT_PROBS=True,
+        ENABLE_REDUCE_SAMPLING=False,
+        SUB_BLOCK=vocab_size,
+        VOCAB_BLOCK_SIZE=vocab_size,
+    )
+
+    greedy_output = torch.full((batch_size, max_spec_len + 1), -1, dtype=torch.int64, device=device)
+    rejection_greedy_sample_triton[(grid,)](
+        greedy_output,
+        cu_num_draft_tokens,
+        no_token_ids,
+        no_token_ids,
+        torch.tensor([[31]], dtype=torch.int64, device=device),
+        torch.ones(batch_size, dtype=torch.bool, device=device),
+        batch_size,
+        max_spec_len,
+        None,
+        None,
+        SYNTHETIC_MODE=False,
+        BLOCK_SIZE=block_size,
+    )
+
+    random_output = torch.full_like(greedy_output, -1)
+    rejection_random_sample_kernel[(grid,)](
+        random_output,
+        cu_num_draft_tokens,
+        no_token_ids,
+        None,
+        no_probs,
+        None,
+        torch.tensor([37], dtype=torch.int64, device=device),
+        no_token_ids,
+        no_uniform_probs,
+        torch.zeros(batch_size, dtype=torch.bool, device=device),
+        max_spec_len,
+        vocab_size,
+        vocab_size,
+        batch_size,
+        None,
+        None,
+        NO_ORI_TARGET_PROBS=True,
+        NO_DRAFT_PROBS=True,
+        ENABLE_REDUCE_SAMPLING=False,
+        SYNTHETIC_MODE=False,
+        ENTROPY_VERIFY=False,
+        BLOCK_SIZE=block_size,
+    )
+
+    torch.npu.synchronize()
+    assert expanded.cpu().tolist() == [17]
+    assert recovered.cpu().tolist() == [23]
+    assert greedy_output.cpu().tolist() == [[31, -1]]
+    assert random_output.cpu().tolist() == [[37, -1]]
+
+    gc.collect()
+    torch.npu.empty_cache()
+    torch.npu.reset_peak_memory_stats()
+
+
 @pytest.mark.parametrize("synthetic_mode", [False, True])
 @pytest.mark.parametrize("max_spec_len", [1, 2, 3])
 @pytest.mark.parametrize("vocab_size", [1024])
