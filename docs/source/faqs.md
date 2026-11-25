@@ -335,49 +335,59 @@ healthy.
 
 **Mitigation:**
 
-1. Check how many 2 MB blocks the host still has free:
+**Step 1: check how many 2 MB blocks the host still has free.**
 
-   ```bash
-   # Column 14 of a Normal zone row counts free 2 MB blocks.
-   awk '$4 == "Normal" {s += $14} END {print s + 0}' /proc/buddyinfo
-   ```
+```bash
+# Free 2 MB blocks in every Normal zone. The buddy order follows the page size:
+# 4 KB pages use order 9, 64 KB pages (common on ARM64 servers) use order 5.
+ps=$(getconf PAGESIZE 2>/dev/null || echo 4096)
+awk -v ps="$ps" 'BEGIN {o = 0; while ((2 ^ o) * ps < 2097152) o++} $4 == "Normal" {s += $(5 + o)} END {print s + 0}' /proc/buddyinfo
+```
 
-   Compare the result with a known-good value from the same host: a healthy
-   idle 2-3 TB host reports several thousand, and a 1 TB server proportionally
-   less. Close to zero means the next pinned allocation will probably fail.
-2. If the number is low, check where the host memory went:
+Compare the result with a known-good value from the same host: a healthy
+idle 2-3 TB host reports several thousand, and a 1 TB server proportionally
+less. Close to zero means the next pinned allocation will probably fail.
 
-   ```bash
-   free -h
-   ```
+**Step 2: if the number is low, check where the host memory went.**
 
-   When `free` is small while `buff/cache` is large, reclaim the file cache.
-   Only page cache, dentries and inodes are dropped; process memory and pinned
-   memory are not affected:
+```bash
+free -h
+```
 
-   ```bash
-   echo 3 > /proc/sys/vm/drop_caches
-   ```
-3. Merge the fragmented 4 KB pages back into contiguous 2 MB blocks and check
-   again:
+When `free` is small while `buff/cache` is large, reclaim the file cache.
+Only page cache, dentries and inodes are dropped; process memory and pinned
+memory are not affected:
 
-   ```bash
-   echo 1 > /proc/sys/vm/compact_memory
-   ```
+```bash
+# Needs root; if the shell is not root, use:
+#   echo 3 | sudo tee /proc/sys/vm/drop_caches
+echo 3 > /proc/sys/vm/drop_caches
+```
 
-   Run the check from step 1 again. The count normally recovers within seconds
-   to a couple of minutes; start the service after it is back to the healthy
-   range.
-4. After the service is up, check `free -h` again. If `free` is still small,
-   clear the cache to give the memory back:
+**Step 3: merge the fragmented 4 KB pages back into 2 MB blocks.**
 
-   ```bash
-   # Drops clean file cache only; the running service keeps its memory.
-   echo 3 > /proc/sys/vm/drop_caches
-   ```
+```bash
+# Needs root; if the shell is not root, use:
+#   echo 1 | sudo tee /proc/sys/vm/compact_memory
+echo 1 > /proc/sys/vm/compact_memory
+```
 
-   The next weight load will be slower, because the weights have to be read
-   from storage again.
+Run the check from step 1 again. The count normally recovers within seconds
+to a couple of minutes; start the service after it is back to the healthy
+range.
+
+**Step 4: once the service is up, check `free -h` again.** If `free` is still
+small, clear the cache to give the memory back:
+
+```bash
+# Drops clean file cache only; the running service keeps its memory.
+# Needs root; if the shell is not root, use:
+#   echo 3 | sudo tee /proc/sys/vm/drop_caches
+echo 3 > /proc/sys/vm/drop_caches
+```
+
+The next weight load will be slower, because the weights have to be read
+from storage again.
 
 Steps 2 and 3 are most effective right before a (re)start, because weight
 loading fills the page cache again and compaction recovers the blocks only for a
