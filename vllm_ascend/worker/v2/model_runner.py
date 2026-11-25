@@ -1314,7 +1314,7 @@ class NPUModelRunner(GPUModelRunner):
         self,
         lora_config: LoRAConfig | None,
         num_scheduled_tokens: np.ndarray,
-        num_sampled_tokens: np.ndarray,
+        num_sampled_tokens: np.ndarray | None,
         remove_lora: bool = True,
         num_active_loras: int = 0,
         mapping_type: LoRAMappingType = LoRAMappingType.LANGUAGE,

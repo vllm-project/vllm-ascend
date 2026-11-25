@@ -36,13 +36,20 @@ class PunicaWrapperNPU(PunicaWrapperBase):
         )
         if not self._use_custom_lora_ops:
             from vllm_ascend.lora.lora_ops import (
-                bgmv_expand_slice_torch as bgmv_expand_slice,
-                bgmv_expand_torch as bgmv_expand,
-                bgmv_shrink_torch as bgmv_shrink,
-                sgmv_expand_slice_torch as sgmv_expand_slice,
-                sgmv_expand_torch as sgmv_expand,
-                sgmv_shrink_torch as sgmv_shrink,
+                bgmv_expand_slice_torch,
+                bgmv_expand_torch,
+                bgmv_shrink_torch,
+                sgmv_expand_slice_torch,
+                sgmv_expand_torch,
+                sgmv_shrink_torch,
             )
+
+            self.bgmv_expand = bgmv_expand_torch
+            self.bgmv_expand_slice = bgmv_expand_slice_torch
+            self.bgmv_shrink = bgmv_shrink_torch
+            self.sgmv_expand = sgmv_expand_torch
+            self.sgmv_expand_slice = sgmv_expand_slice_torch
+            self.sgmv_shrink = sgmv_shrink_torch
         else:
             from vllm_ascend.lora.lora_ops import (
                 bgmv_expand,
@@ -52,12 +59,13 @@ class PunicaWrapperNPU(PunicaWrapperBase):
                 sgmv_expand_slice,
                 sgmv_shrink,
             )
-        self.bgmv_expand = bgmv_expand
-        self.bgmv_expand_slice = bgmv_expand_slice
-        self.bgmv_shrink = bgmv_shrink
-        self.sgmv_expand = sgmv_expand
-        self.sgmv_expand_slice = sgmv_expand_slice
-        self.sgmv_shrink = sgmv_shrink
+
+            self.bgmv_expand = bgmv_expand
+            self.bgmv_expand_slice = bgmv_expand_slice
+            self.bgmv_shrink = bgmv_shrink
+            self.sgmv_expand = sgmv_expand
+            self.sgmv_expand_slice = sgmv_expand_slice
+            self.sgmv_shrink = sgmv_shrink
         self._single_lora_slot = (
             ascend_device_type in {AscendDeviceType.A2, AscendDeviceType.A3}
             and self.lora_config is not None
