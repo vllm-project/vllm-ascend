@@ -309,11 +309,14 @@ def _maybe_use_dedicated_checkpoint(
     start = request.num_computed_tokens + local_hit
     end = start + num_new_tokens
     block_size = self.cache_config.block_size
+    # Within the same physical page, the ordinary block-floored junction is
+    # the query start. Only a checkpoint-enabled junction can require a stop.
+    junction_stop = self.mamba_shared_prefix_checkpoint and start < request.shared_prefix_boundary < end
     if (
         end != request.num_prompt_tokens
         or end != request.num_tokens
         or start // block_size != (end - 1) // block_size
-        or start < request.shared_prefix_boundary < end
+        or junction_stop
     ):
         return aligned_tokens
     position = get_mamba_prefill_checkpoint_position(

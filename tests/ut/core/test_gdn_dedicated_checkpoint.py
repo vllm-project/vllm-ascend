@@ -58,9 +58,12 @@ def test_plan_accounts_for_every_extra_page():
 
 
 @pytest.mark.parametrize(
-    "available_blocks,external_tokens,split_tokens", [(10, 0, 1408), (3, 0, 1408), (10, 1, 1408), (10, 0, 1024)]
+    "available_blocks,external_tokens,split_tokens,junction_enabled",
+    [(10, 0, 1408, False), (3, 0, 1408, False), (10, 1, 1408, False), (10, 0, 1024, False), (10, 0, 1408, True)],
 )
-def test_scheduler_replaces_only_an_admitted_same_page_tail_stop(available_blocks, external_tokens, split_tokens):
+def test_scheduler_replaces_only_an_admitted_same_page_tail_stop(
+    available_blocks, external_tokens, split_tokens, junction_enabled
+):
     groups, pool = managers()
     pool.get_num_free_blocks.return_value = available_blocks
     scheduler = SimpleNamespace(
@@ -68,6 +71,7 @@ def test_scheduler_replaces_only_an_admitted_same_page_tail_stop(available_block
         _ascend_gdn_checkpoint_policy=GDNCheckpointPolicy(8192, True, False),
         cache_config=SimpleNamespace(block_size=2048),
         hash_block_size=128,
+        mamba_shared_prefix_checkpoint=junction_enabled,
         use_eagle_block_drop=False,
         num_hash_lookahead_tokens=1,
         num_lookahead_tokens=0,
@@ -77,10 +81,10 @@ def test_scheduler_replaces_only_an_admitted_same_page_tail_stop(available_block
         ),
     )
     request = SimpleNamespace(
-        request_id="req", num_tokens=3500, num_prompt_tokens=3500, num_computed_tokens=0, shared_prefix_boundary=0
+        request_id="req", num_tokens=3500, num_prompt_tokens=3500, num_computed_tokens=0, shared_prefix_boundary=2176
     )
     chosen = split_patch._maybe_use_dedicated_checkpoint(scheduler, request, 1452, 2048, external_tokens, split_tokens)
-    eligible = available_blocks == 10 and external_tokens == 0 and split_tokens == 1408
+    eligible = available_blocks == 10 and external_tokens == 0 and split_tokens == 1408 and not junction_enabled
     assert chosen == (1452 if eligible else split_tokens)
     assert all(bool(group.dedicated_plans) == eligible for group in groups)
 
@@ -182,6 +186,7 @@ def test_real_hybrid_cache_publishes_only_the_acknowledged_branch():
         kv_cache_manager=cache,
         cache_config=SimpleNamespace(block_size=2048),
         hash_block_size=128,
+        mamba_shared_prefix_checkpoint=False,
         use_eagle_block_drop=False,
         num_hash_lookahead_tokens=1,
         num_lookahead_tokens=1,
