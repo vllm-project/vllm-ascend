@@ -47,7 +47,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence im
     record_attention_compute_start,
 )
 from vllm_ascend.ops.gdn_attn_builder import AscendGDNHostMetadataBackend, AscendMegaKDAHostMetadataBackend
-from vllm_ascend.ops.kda import run_recurrent_kda
+from vllm_ascend.ops.kda import run_chunk_kda, run_recurrent_kda
 from vllm_ascend.ops.kimi_mega_kda import (
     MegaKDAWeights,
     ensure_mega_kda_bf16,
@@ -833,13 +833,11 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
         metadata = raw[self.prefix]
         if not isinstance(metadata, GDNAttentionMetadata) or metadata.num_prefills == 0:
             return False
-        if self._prefill_fused_kda_operator is None:
-            raise RuntimeError("Kimi K3 prefill requires ops.kda_prolog and ops.flash_kda_dev")
-        if self.gate_lower_bound is None:
-            raise RuntimeError("KDA Prolog prefill requires gate_lower_bound")
-        if self._kda_prolog_qkv_weight is None:
-            raise RuntimeError("KDA Prolog weights were not prepared after loading")
-        return True
+        return (
+            self._prefill_fused_kda_operator is not None
+            and self.gate_lower_bound is not None
+            and self._kda_prolog_qkv_weight is not None
+        )
 
     def _project_recurrent_inputs(
         self, hidden_states: torch.Tensor
@@ -929,6 +927,7 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
             raise RuntimeError("KDA state copy requires worker cache initialization before prefill")
         wait_for_kv_layer_from_connector(self.prefix)
         record_attention_compute_start()
+        num_tokens = hidden_states.shape[0]
         hidden_states = hidden_states[: metadata.num_actual_tokens].contiguous()
         conv_state, recurrent_state = self.kv_cache[:2]
         spec_masks = metadata.spec_sequence_masks
@@ -997,6 +996,7 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
         self.o_norm.forward_oot(output, output_gate, out=output)
         output = rearrange(output, "1 n h d -> n (h d)")
         maybe_save_kv_layer_to_connector("", [])
+        output = _restore_token_rows(output, num_tokens)
         return self.o_proj(output)[0]
 
     def _get_kda_forward_metadata(self):
@@ -1572,6 +1572,55 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
             num_accepted_tokens=num_accepted_tokens,
         )
 
+    def _run_prefill(
+        self,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        raw_gate: torch.Tensor,
+        beta: torch.Tensor,
+        recurrent_state: torch.Tensor,
+        state_indices: torch.Tensor,
+        has_initial_state: torch.Tensor,
+        prebuilt_metadata,
+    ) -> torch.Tensor:
+        cu_seqlens = (
+            prebuilt_metadata.cu_seqlens_host
+            if prebuilt_metadata.cu_seqlens_kern is None
+            else prebuilt_metadata.cu_seqlens_kern
+        )
+        # Unlike the standalone copy API, prefill requires per-request flags.
+        # Missing flags must not silently preserve potentially stale cache rows.
+        if has_initial_state is None:
+            raise ValueError("KDA prefill requires has_initial_state metadata")
+        keep = prebuilt_metadata.keep_meta
+        if keep is not None:
+            state_indices = state_indices[keep]
+            has_initial_state = has_initial_state[keep]
+
+        # The recurrent cache uses [H,V,K]. The fused prefill operator accepts
+        # that state layout directly through state_v_first.
+        state_copy = getattr(self, "_ascend_kda_state_copy", None)
+        if state_copy is None or not getattr(self, "_kda_state_copy_ready", False):
+            raise RuntimeError("KDA state copy requires worker cache initialization before prefill")
+        initial_state_vk = state_copy.gather(recurrent_state, state_indices, has_initial_state)
+
+        output, final_state = run_chunk_kda(
+            q,
+            k,
+            v,
+            raw_gate,
+            beta,
+            initial_state_vk,
+            cu_seqlens,
+            prebuilt_metadata.chunk_indices_chunk64_host,
+            self.A_log,
+            self.dt_bias,
+            lower_bound=self.gate_lower_bound,
+        )
+        state_copy.scatter(recurrent_state, final_state, state_indices)
+        return output
+
     @eager_break_during_capture
     def _forward(
         self,
@@ -1613,8 +1662,6 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
         assert isinstance(attn_metadata_raw, dict)
         attn_metadata = attn_metadata_raw[self.prefix]
         assert isinstance(attn_metadata, GDNAttentionMetadata)
-        if attn_metadata.num_prefills:
-            raise RuntimeError("Kimi K3 prefill must enter through the KDA Prolog path")
 
         # Layerwise KV pool hooks must stay inside this eager-break region:
         # the forward() caller may be traced, and these side effects (thread
@@ -1727,8 +1774,49 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
             assert raw_gate_non_spec is not None
             assert beta_non_spec is not None
 
+            split_non_spec = spec_masks is None and attn_metadata.num_prefills > 0 and attn_metadata.num_decodes > 0
+            num_decode_tokens = attn_metadata.num_decode_tokens
+            core_decode = None
+            if split_non_spec:
+                assert attn_metadata.non_spec_query_start_loc is not None
+                assert attn_metadata.non_spec_state_indices_tensor is not None
+                core_decode = self._run_recurrent(
+                    q_non_spec[:, :num_decode_tokens],
+                    k_non_spec[:, :num_decode_tokens],
+                    v_non_spec[:, :num_decode_tokens],
+                    raw_gate_non_spec[:, :num_decode_tokens],
+                    beta_non_spec[:, :num_decode_tokens],
+                    recurrent_state,
+                    attn_metadata.non_spec_query_start_loc[: attn_metadata.num_decodes + 1],
+                    attn_metadata.non_spec_state_indices_tensor[: attn_metadata.num_decodes],
+                )
+
             if attn_metadata.num_prefills > 0:
-                raise RuntimeError("Kimi K3 prefill must enter through the KDA Prolog path")
+                if split_non_spec:
+                    q_non_spec = q_non_spec[:, num_decode_tokens:]
+                    k_non_spec = k_non_spec[:, num_decode_tokens:]
+                    v_non_spec = v_non_spec[:, num_decode_tokens:]
+                    raw_gate_non_spec = raw_gate_non_spec[:, num_decode_tokens:]
+                    beta_non_spec = beta_non_spec[:, num_decode_tokens:]
+
+                assert attn_metadata.prefill_state_indices is not None
+                assert attn_metadata.prefill_has_initial_state is not None
+                prefill_meta = attn_metadata.non_spec_prefill_metadata
+                assert prefill_meta is not None
+                core_prefill = self._run_prefill(
+                    q_non_spec,
+                    k_non_spec,
+                    v_non_spec,
+                    raw_gate_non_spec,
+                    beta_non_spec,
+                    recurrent_state,
+                    attn_metadata.prefill_state_indices,
+                    attn_metadata.prefill_has_initial_state,
+                    prefill_meta.chunk,
+                )
+                core_non_spec = (
+                    torch.cat((core_decode, core_prefill), dim=1) if core_decode is not None else core_prefill
+                )
             elif attn_metadata.num_decodes > 0:
                 assert attn_metadata.non_spec_query_start_loc is not None
                 assert attn_metadata.non_spec_state_indices_tensor is not None
