@@ -55,16 +55,16 @@ from vllm_ascend.ops.triton.kda.kda import (
     fused_kda_gate,
     fused_recurrent_kda,
 )
-from vllm_ascend.ops.triton.mamba.precopy import precopy_mamba_align_fused_npu
+from vllm_ascend.ops.triton.mamba.precopy import precopy_mamba_align_fused_kernel
 from vllm_ascend.ops.triton.metrics.num_nans import get_num_nans
 from vllm_ascend.ops.triton.sample.categorical_sample import categorical_sample
 from vllm_ascend.ops.triton.sample.fill_logprob_token_idx import (
-    fill_logprob_token_ids_npu,
+    _fill_logprob_token_ids_kernel,
 )
 from vllm_ascend.ops.triton.sample.sampling_mask import sampling_mask_from_logits_npu
 from vllm_ascend.ops.triton.sample.thinking_budget import (
     _load_effective_token_ascend,
-    update_committed_marker_cache_npu,
+    _update_committed_marker_cache_kernel_ascend,
 )
 from vllm_ascend.worker.v2.sample.apply_top_k_top_p import apply_top_k_top_p
 from vllm_ascend.worker.v2.sample.bad_words import apply_bad_words
@@ -113,7 +113,7 @@ TRITON_KERNEL_OVERRIDES: dict[str, Callable[..., Any]] = {
     # TODO: Remove after Triton-Ascend 3.6.0 is the minimum supported
     # version.
     "vllm.v1.worker.gpu.sample.thinking_budget._update_committed_marker_cache_kernel": (  # noqa: E501
-        update_committed_marker_cache_npu
+        _update_committed_marker_cache_kernel_ascend
     ),
     # A Triton *device function* (inlined into other kernels at compile
     # time), so the value must itself be a Triton kernel: the dispatcher
@@ -134,7 +134,7 @@ TRITON_KERNEL_OVERRIDES: dict[str, Callable[..., Any]] = {
     "vllm.v1.worker.gpu.sample.output.SamplingMaskTensors.from_logits": sampling_mask_from_logits_npu,
     # TODO: Remove once the compiler and Triton-Ascend toolkit support the
     # upstream fill_logprob_token_ids_kernel.
-    "vllm.v1.worker.gpu.sample.logprob._fill_logprob_token_ids_kernel": fill_logprob_token_ids_npu,
+    "vllm.v1.worker.gpu.sample.logprob._fill_logprob_token_ids_kernel": _fill_logprob_token_ids_kernel,
     # Defined in metrics/logits.py; sampler.py and rejection_sampler.py are
     # copy sites (retired patch: two assignments).
     # TODO: Remove once the compiler and Triton-Ascend toolkit support the
@@ -150,7 +150,7 @@ TRITON_KERNEL_OVERRIDES: dict[str, Callable[..., Any]] = {
     # it. The identity sweep covers every copy site.
     "vllm.v1.sample.ops.topk_topp_triton.apply_top_k_top_p_triton": apply_top_k_top_p,
     "vllm.v1.worker.gpu.structured_outputs._apply_grammar_bitmask_kernel": apply_grammar_bitmask_npu,
-    "vllm.v1.worker.mamba_utils.precopy_mamba_align_fused_kernel": precopy_mamba_align_fused_npu,
+    "vllm.v1.worker.mamba_utils.precopy_mamba_align_fused_kernel": precopy_mamba_align_fused_kernel,
     # ---- vllm.third_party.flash_linear_attention.* ------------------------
     # chunk_gated_delta_rule is defined in ops/chunk.py; the ops package
     # re-exports it and the olmo/qwen GDN layers import that copy. The

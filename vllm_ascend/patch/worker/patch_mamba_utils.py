@@ -17,8 +17,8 @@ from vllm_ascend.ops.triton.mamba.postprocess import postprocess_mamba_fused_ker
 #
 # Consumed by the V2 Mamba-Hybrid state, which reads ``_TEMPORAL_TILES`` and
 # ``precopy_mamba_align_fused_kernel`` off this module at call time (the precopy
-# kernel itself is rebound by ``patch_triton.py``), and launches
-# ``postprocess_mamba_fused_kernel`` from
+# kernel itself is rebound by the NPU triton-kernel override registration),
+# and launches ``postprocess_mamba_fused_kernel`` from
 # ``MambaSpecDecodeGPUContext.run_fused_postprocess_align``.
 mamba_utils._TEMPORAL_TILES = 1
 
