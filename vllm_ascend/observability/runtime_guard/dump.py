@@ -236,8 +236,9 @@ def block_ids_for_request(
 
     - ``requests[].block_ids`` are scheduler/manager ids and are expanded by
       ``blocks_per_kv_block`` before return.
-    - ``runner.block_tables`` rows are already kernel-expanded by
-      ``AscendBlockTables``; those paths are returned as-is.
+    - ``runner.block_tables``: kernel ids when the table exposes
+      ``blocks_per_kv_block`` (_310p); otherwise manager ids expanded here
+      (current main keeps public tables at manager granularity).
 
     The MRV1 ``input_batch`` host-mirror table path is intentionally omitted so
     callers never silently receive manager-granularity ids.
@@ -258,8 +259,8 @@ def block_ids_for_request(
             if parsed:
                 # ``requests[].block_ids`` are scheduler/manager ids. Ascend
                 # kernel-paged caches use dim0 = manager_id * R + k; expand here.
-                # ``runner.block_tables`` paths below are already kernel-expanded
-                # by AscendBlockTables — do not expand those twice.
+                # ``runner.block_tables`` path expands only when tables are
+                # still manager-granularity (no ``blocks_per_kv_block`` attr).
                 ratio = _blocks_per_kv_block_for_group(runner, kv_cache_group)
                 return expand_manager_block_ids(parsed, ratio)
 
@@ -334,7 +335,12 @@ def _block_ids_from_v2_block_tables(
     state_idx: int | None,
     kv_cache_group: int,
 ) -> list[int]:
-    """Read one request's block row from MRV2 ``runner.block_tables``."""
+    """Read one request's block row from MRV2 ``runner.block_tables``.
+
+    ``_310p`` tables store already-expanded kernel ids (and expose
+    ``blocks_per_kv_block``). Current main keeps manager-granularity rows, so
+    expand with the same R used for ``requests[].block_ids``.
+    """
     if state_idx is None:
         return []
     block_tables = getattr(runner, "block_tables", None)
@@ -352,9 +358,14 @@ def _block_ids_from_v2_block_tables(
             row = host[state_idx, :num_blocks]
         else:
             row = entry.gpu[state_idx, :num_blocks].cpu()
-        return [int(x) for x in row.tolist()]
+        ids = [int(x) for x in row.tolist()]
     except Exception:
         return []
+    # Attribute present ⇒ table already kernel-expanded (_310p / older paths).
+    if getattr(block_tables, "blocks_per_kv_block", None) is not None:
+        return ids
+    ratio = _blocks_per_kv_block_for_group(runner, kv_cache_group)
+    return expand_manager_block_ids(ids, ratio)
 
 
 def _normalize_block_ids(raw: Any, *, kv_cache_group: int) -> list[int]:
@@ -451,16 +462,70 @@ def _group_for_layer(layer_name: str, layer_to_group: dict[str, int]) -> int | N
     return int(layer_to_group[logical])
 
 
+def _derive_blocks_per_kv_block(runner: Any, kv_cache_group: int) -> int:
+    """Match KV tensor dim0 bind: ``get_storage_block_size(spec) // kernel``.
+
+    Public ``AscendBlockTables`` on main no longer carries
+    ``blocks_per_kv_block``; dump tensors are allocated with the *storage*
+    ratio in ``attn_utils``, which differs from logical
+    ``block_size // kernel_block_size`` for compressed MLA / C8 groups.
+    """
+    try:
+        from vllm_ascend.core.kv_cache_interface import get_storage_block_size
+    except Exception:
+        return 1
+    cfg = getattr(runner, "kv_cache_config", None)
+    groups = getattr(cfg, "kv_cache_groups", None) if cfg is not None else None
+    if not groups or kv_cache_group < 0 or kv_cache_group >= len(groups):
+        return 1
+    spec = getattr(groups[kv_cache_group], "kv_cache_spec", None)
+    if spec is None:
+        return 1
+    try:
+        storage = int(get_storage_block_size(spec))
+    except Exception:
+        return 1
+    kbs: int | None = None
+    sizes = getattr(runner, "kernel_block_sizes", None)
+    if sizes is not None:
+        try:
+            kbs = int(sizes[kv_cache_group])
+        except (IndexError, TypeError, ValueError):
+            kbs = None
+    if not kbs:
+        for group_list in getattr(runner, "attn_groups", None) or ():
+            for ag in group_list:
+                if int(getattr(ag, "kv_cache_group_id", -1)) != kv_cache_group:
+                    continue
+                raw = getattr(ag, "kernel_block_size", None)
+                if raw is not None:
+                    try:
+                        kbs = int(raw)
+                    except (TypeError, ValueError):
+                        kbs = None
+                break
+            if kbs:
+                break
+    if not kbs or kbs <= 0 or storage <= 0 or storage % kbs:
+        return 1
+    return max(1, storage // kbs)
+
+
 def _blocks_per_kv_block_for_group(runner: Any, kv_cache_group: int) -> int:
     """Kernel pages per manager block for ``kv_cache_group`` (default 1).
 
-    Accepts a per-group sequence or a scalar shared by all groups. A scalar
+    Prefer ``runner.block_tables.blocks_per_kv_block`` when present (_310p /
+    tests): per-group sequence or a scalar shared by all groups. A scalar
     must not be treated as ``R=1`` via a failed subscript (wrong expansion).
+
+    When the attribute is missing (current main ``AscendBlockTables``), derive
+    R from storage block size so dump indexing matches tensor dim0 for
+    compressed / C8 groups.
     """
     block_tables = getattr(runner, "block_tables", None)
     ratios = getattr(block_tables, "blocks_per_kv_block", None) if block_tables is not None else None
     if ratios is None:
-        return 1
+        return _derive_blocks_per_kv_block(runner, kv_cache_group)
     # Scalar ratio shared by all groups (int/float; not bool).
     if isinstance(ratios, (int, float)) and not isinstance(ratios, bool):
         return max(1, int(ratios))
@@ -600,6 +665,21 @@ class KvCacheReader:
                 else:
                     rebuilt[str(layer_name)] = kv
             if rebuilt:
+                flat = getattr(runner, "kv_caches", None)
+                flat_n = len(flat) if isinstance(flat, (list, dict)) else 0
+                ctx_n = len(rebuilt)
+                # Flattened bind may pack C8 parts as separate list entries, so
+                # unequal counts are expected for some layouts — still surface
+                # the coverage change so a silent layer drop is visible.
+                if flat_n and flat_n != ctx_n:
+                    logger.warning_once(
+                        "[runtime_guard dump_kv] static_forward_context has %s "
+                        "layers with kv_cache; runner.kv_caches has %s entries — "
+                        "dump uses forward_context only (layers missing from "
+                        "context will be omitted)",
+                        ctx_n,
+                        flat_n,
+                    )
                 return [("static_forward_context", rebuilt)]
 
         kv = getattr(runner, "kv_caches", None)

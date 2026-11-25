@@ -457,6 +457,68 @@ def test_scalar_blocks_per_kv_block_expands_not_silent_r1():
     assert block_ids_for_request(runner, "r1", kv_cache_group=0) == [2, 3]
 
 
+def test_derive_ratio_uses_storage_block_size_not_logical():
+    """Alex #3: dump tensor dim0 uses storage R, not logical block_size//kernel."""
+    import numpy as np
+
+    from vllm_ascend.observability.runtime_guard.dump import (
+        _blocks_per_kv_block_for_group,
+        block_ids_for_request,
+    )
+
+    # logical would be 128/32=4; storage layout is 64/32=2
+    spec = SimpleNamespace(block_size=128, storage_block_size=64)
+    runner = SimpleNamespace(
+        requests={"r1": SimpleNamespace(block_ids=([1],))},
+        block_tables=SimpleNamespace(),  # no blocks_per_kv_block (main path)
+        kernel_block_sizes=[32],
+        kv_cache_config=SimpleNamespace(kv_cache_groups=[SimpleNamespace(kv_cache_spec=spec)]),
+        attn_groups=None,
+        input_batch=None,
+        execute_model_state=None,
+        req_states=None,
+    )
+    assert _blocks_per_kv_block_for_group(runner, 0) == 2
+    assert block_ids_for_request(runner, "r1", kv_cache_group=0) == [2, 3]
+
+    # Manager-granularity public tables must expand too when attr is absent.
+    entry = SimpleNamespace(np=np.array([[5, 6]], dtype=np.int32), gpu=None)
+    runner_bt = SimpleNamespace(
+        requests=None,
+        block_tables=SimpleNamespace(
+            num_blocks=SimpleNamespace(np=np.array([[2]], dtype=np.int32)),
+            block_tables=[entry],
+        ),
+        kernel_block_sizes=[32],
+        kv_cache_config=SimpleNamespace(kv_cache_groups=[SimpleNamespace(kv_cache_spec=spec)]),
+        attn_groups=None,
+        input_batch=None,
+        execute_model_state=None,
+        req_states=SimpleNamespace(req_id_to_index={"r1": 0}),
+    )
+    assert block_ids_for_request(runner_bt, "r1", kv_cache_group=0) == [10, 11, 12, 13]
+
+
+def test_kv_source_logs_coverage_when_counts_differ(monkeypatch):
+    """Alex #4: surface layer-count mismatch between forward_context and flat list."""
+    from vllm_ascend.observability.runtime_guard import dump as dump_mod
+    from vllm_ascend.observability.runtime_guard.dump import KvCacheReader
+
+    calls: list[tuple] = []
+    monkeypatch.setattr(dump_mod.logger, "warning_once", lambda *a, **_k: calls.append(a))
+
+    k = torch.arange(0, 2 * 4, dtype=torch.float32).reshape(2, 4)
+    v = torch.arange(50, 50 + 2 * 4, dtype=torch.float32).reshape(2, 4)
+    layer = SimpleNamespace(kv_cache=(k, v))
+    runner = SimpleNamespace(
+        kv_caches=[k, v, k],  # 3 flat entries vs 1 forward_context layer
+        compilation_config=SimpleNamespace(static_forward_context={"L0": layer}),
+    )
+    src = KvCacheReader(runner)._kv_sources()
+    assert src[0][0] == "static_forward_context"
+    assert calls and "static_forward_context has" in calls[0][0]
+
+
 def test_kv_source_prefers_forward_context_tuple_parts(tmp_path: Path):
     """C8-style tuple on static_forward_context keeps part names (not flat list)."""
     from vllm_ascend.observability.runtime_guard.dump import KvCacheReader
