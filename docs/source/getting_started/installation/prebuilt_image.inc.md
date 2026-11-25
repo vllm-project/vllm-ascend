@@ -2,7 +2,7 @@
 
     <span id="installation-prebuilt-image"></span>
 
-    The host needs only a working Ascend driver and firmware, plus Docker. The image includes the CANN user-space environment, PyTorch/TorchNPU, vLLM, and vLLM Ascend.
+    The host needs a working Ascend driver and firmware, plus Docker and [Ascend Docker Runtime](#installation-ascend-docker-runtime). The image includes the CANN user-space environment, PyTorch/TorchNPU, vLLM, and vLLM Ascend.
 
     Choose an official image for the fastest setup, or build an image manually when you need to customize it.
 

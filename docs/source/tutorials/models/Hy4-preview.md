@@ -76,6 +76,8 @@ If you want to deploy a multi-node environment, verify multi-node communication 
 
 ### 4.1 Docker Image Installation
 
+{% include "getting_started/installation/ascend_docker_runtime.inc.md" %}
+
 #### Download Docker Image
 
 ```bash
@@ -92,31 +94,18 @@ The output should contain the downloaded `quay.io/ascend/vllm-ascend:hy4-a3`.
 
 #### Create Docker Container
 
-Use the following command to create the container. The Atlas A3 products are 16-card devices, so you need to mount `/dev/davinci[0-15]` and the management devices. Also mount the driver library and the weight directory (this guide assumes the weights are stored on the host at `/mnt/weight` and mounted to the same path inside the container).
+Use the following command to create the container. The Atlas 800I A3 exposes 16 DIE devices, so select all of them with `ASCEND_VISIBLE_DEVICES=0-15`. Ascend Docker Runtime mounts the device nodes, the management devices, and the driver libraries. Also mount the weight directory (this guide assumes the weights are stored on the host at `/mnt/weight` and mounted to the same path inside the container).
 
 ```bash
 export IMAGE=quay.io/ascend/vllm-ascend:hy4-a3
 export CONTAINER_NAME=vllm_ascend_hy4
 
-# Generate NPU device mount parameters (Atlas A3 products: /dev/davinci[0-15])
-DEVICES=""
-for i in $(seq 0 15); do
-    DEVICES="${DEVICES} --device /dev/davinci${i}"
-done
-
 docker run -itd \
+    --net=host \
     --name ${CONTAINER_NAME} \
     --shm-size=1000g \
-    ${DEVICES} \
-    --device /dev/davinci_manager \
-    --device /dev/devmm_svm \
-    --device /dev/hisi_hdc \
-    -v /usr/local/dcmi:/usr/local/dcmi \
+    -e ASCEND_VISIBLE_DEVICES=0-15 \
     -v /usr/local/Ascend/driver/tools/hccn_tool:/usr/local/Ascend/driver/tools/hccn_tool \
-    -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
-    -v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
-    -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
-    -v /etc/ascend_install.info:/etc/ascend_install.info \
     -v /mnt/weight:/mnt/weight \
     ${IMAGE} bash
 ```
@@ -160,13 +149,13 @@ vllm serve /path/to/Hy4-preview-w8a8 \
   --gpu-memory-utilization 0.92 \
   --seed 1024 \
   --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
-  --speculative-config '{"method": "mtp","num_speculative_tokens": 3}' \
+  --speculative-config '{"method": "mtp", "num_speculative_tokens": 3}' \
   --additional-config '{"enable_mlapo": true, "enable_fused_mc2": 1, "ascend_compilation_config": {"enable_npugraph_ex": true}}'
 ```
 
 ### 5.2 Multi-Node Co-Located Deployment
 
-DP=2 cross-machine deployment with TP=16 per node extends the context to 96k. Node 1 (Node1, demo IP `192.168.1.1`) hosts DP rank 0 and the API, and Node 2 (Node2, demo IP `192.168.1.2`) is a headless worker. Both nodes share the host network via `--net=host`. Use the same command as the A3 single-node deployment, executed inside the container.
+DP=2 cross-machine deployment with TP=16 per node extends the context to 96k. Node 1 (Node1, demo IP `192.168.1.1`) hosts DP rank 0 and the API, and Node 2 (Node2, demo IP `192.168.1.2`) is a headless worker. Both nodes must be started with `--net=host` (add this flag to the `docker run` command in Section 4.1); otherwise they do not share the host network and multi-node DP/HCCL communication will fail. Use the same command as the A3 single-node deployment, executed inside the container.
 
 Startup order:
 
@@ -218,7 +207,7 @@ vllm serve ${MODEL} \
   --enable-prefix-caching \
   --seed 1024 \
   --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
-  --speculative-config '{"method": "mtp","num_speculative_tokens": 3}' \
+  --speculative-config '{"method": "mtp", "num_speculative_tokens": 3}' \
   --additional-config '{"enable_mlapo": true, "enable_fused_mc2": 1, "ascend_compilation_config": {"enable_npugraph_ex": true}}'
 ```
 
@@ -264,7 +253,7 @@ vllm serve ${MODEL} \
   --enable-prefix-caching \
   --seed 1024 \
   --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
-  --speculative-config '{"method": "mtp","num_speculative_tokens": 3}' \
+  --speculative-config '{"method": "mtp", "num_speculative_tokens": 3}' \
   --additional-config '{"enable_mlapo": true, "enable_fused_mc2": 1, "ascend_compilation_config": {"enable_npugraph_ex": true}}'
 ```
 

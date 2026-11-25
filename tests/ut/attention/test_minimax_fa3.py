@@ -149,7 +149,14 @@ def selection(monkeypatch, profiles):
     path = ROOT / "vllm_ascend/platform.py"
     execute_nodes(
         path,
-        {"_validate_flash_attn_npu_3", "_uses_minimax_fa3", "_uses_step5_fa3", "_is_supported_flash_attn_draft"},
+        {
+            "_validate_flash_attn_npu_3",
+            "_validate_fa3_common_constraints",
+            "_validate_fa3_global_constraints",
+            "_uses_minimax_fa3",
+            "_uses_step5_fa3",
+            "_is_supported_flash_attn_draft",
+        },
         namespace,
     )
     cls = next(n for n in ast.parse(path.read_text()).body if isinstance(n, ast.ClassDef) and n.name == "NPUPlatform")
@@ -361,6 +368,7 @@ def test_cache_write_precedes_attention_and_transfer_completion(fa3):
         for fault in [
             "target_tag",
             "other_target",
+            "missing_text_config",
             "other_draft",
             "use_pcp",
             "use_dcp",
@@ -371,10 +379,12 @@ def test_cache_write_precedes_attention_and_transfer_completion(fa3):
         ]
     ],
 )
-def test_glm_dflash_local_draft_routing(selection, device, eager, fault):
+@pytest.mark.parametrize("model_type", ["glm_moe_dsa", "glm5_next_text"])
+def test_glm_dflash_local_draft_routing(selection, device, eager, fault, model_type):
     r = selection
     r.device = getattr(r.profiles.AscendDeviceType, device)
-    target = NS(hf_text_config=NS(model_type="glm_moe_dsa"), hf_config=NS(architectures=["GlmMoeDsaForCausalLM"]))
+    target_arch = "GlmMoeDsaForCausalLM" if model_type == "glm_moe_dsa" else "Glm5NextForCausalLM"
+    target = NS(hf_text_config=NS(model_type=model_type), hf_config=NS(architectures=[target_arch]))
     r.config.model_config = target
     r.config.speculative_config = NS(
         method="dflash",
@@ -395,6 +405,8 @@ def test_glm_dflash_local_draft_routing(selection, device, eager, fault):
         backends.model_tag = "backbone"
     elif fault == "other_target":
         target.hf_text_config.model_type = "other"
+    elif fault == "missing_text_config":
+        target.hf_text_config = None
     elif fault == "other_draft":
         r.config.speculative_config.draft_model_config.architectures = ["Other"]
     elif fault in ("use_pcp", "use_dcp"):
@@ -409,10 +421,10 @@ def test_glm_dflash_local_draft_routing(selection, device, eager, fault):
     elif fault == "no_model":
         r.config.model_config = None
     actual = r.select()
-    assert ("flash_attention_v3" in actual) == (fault is None and eager)
+    assert ("flash_attention_v3" in actual) == (fault is None)
 
 
-@pytest.mark.parametrize("layout", ["NHD", "HND"])
+@pytest.mark.parametrize("layout", ["NHD", "HND", "LBHNC", "BLHNC"])
 @pytest.mark.parametrize("heads", [1, 8])
 def test_physical_cache_layout_write_and_fa3_view(fa3, monkeypatch, layout, heads):
     _check_cache_layout(fa3, monkeypatch, layout, heads, "env", True, None)
@@ -474,7 +486,7 @@ def _check_cache_layout(fa3, monkeypatch, layout, heads, layout_source, runtime_
     fa3.AscendFlashAttentionMetadataBuilder(
         NS(block_size=128, dtype=torch.bfloat16), ["draft"], config, torch.device("cpu")
     )
-    hnd = layout in ("HND", "LBHNC")
+    hnd = layout in ("HND", "LBHNC", "BLHNC")
     assert impl.use_hnd_kv_cache is hnd
     shape = fa3.AscendFlashAttentionBackend.get_kv_cache_shape(2, 128, heads, 16)
     assert shape == ((2, 2, heads, 128, 16) if hnd else (2, 2, 128, heads, 16))
