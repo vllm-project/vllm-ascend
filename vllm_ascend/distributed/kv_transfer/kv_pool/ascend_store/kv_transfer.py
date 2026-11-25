@@ -874,7 +874,8 @@ class KVCacheStoreSendingThread(KVTransferThread):
                 return True
             return skip_end > skip_start and start >= skip_start and end <= skip_end
 
-        for group_id in req_meta.kv_cache_group_ids or [0]:
+        group_ids = self.token_database.project_group_ids(req_meta.kv_cache_group_ids or [0])
+        for group_id in group_ids:
             group_block_size = self._get_block_size(group_id)
 
             group_store_mask = (
@@ -1109,7 +1110,7 @@ class KVCacheStoreRecvingThread(KVTransferThread):
             size_list = []
             key_list = []
             block_id_list: list[int] = []
-            group_ids = req_meta.kv_cache_group_ids or [0]
+            group_ids = self.token_database.project_group_ids(req_meta.kv_cache_group_ids or [0])
             load_masks = self.token_database.load_mask(req_meta.block_hashes, token_len)
             for group_id in group_ids:
                 block_ids = req_meta.block_ids_by_group[group_id]

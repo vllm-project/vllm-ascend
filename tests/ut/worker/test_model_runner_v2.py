@@ -2022,6 +2022,8 @@ def test_prepare_inputs_refreshes_captured_padding_storage(monkeypatch, enabled)
     captured.fill_(True)  # Graph capture marks all dummy rows as padding.
 
     for valid, padded in ((13, 13), (6, 8), (4, 7), (8, 8)):
+        buffers.input_ids.fill_(-1)
+        buffers.positions.fill_(-1)
         scheduler_output.num_scheduled_tokens = {"r0": valid - 1, "r1": 1}
         state.num_scheduled_tokens = np.array([valid - 1, 1], dtype=np.int32)
         state.num_tokens = valid
@@ -2030,6 +2032,8 @@ def test_prepare_inputs_refreshes_captured_padding_storage(monkeypatch, enabled)
         assert batch.is_padding.shape == (padded,)
         assert batch.is_padding.data_ptr() == captured.data_ptr()
         torch.testing.assert_close(captured[:padded], torch.arange(padded) >= valid)
+        assert not buffers.input_ids[valid:padded].count_nonzero()
+        assert not buffers.positions[valid:padded].count_nonzero()
 
 
 @pytest.mark.parametrize("num_spec_tokens", [0, 1, 5])

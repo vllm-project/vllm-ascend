@@ -103,6 +103,7 @@ class BaseKVPoolWorker(ABC):
 
         self._init_parallelism_info(model_config, parallel_config)
         self._init_kv_transfer_config(vllm_config, extra_config, use_layerwise, kv_cache_config)
+        self._group_pp_ranks = self._collect_group_pp_ranks()
         self._init_key_head_config(model_config)
         self._init_metadata(model_config, vllm_config, extra_config)
         self._init_backend(parallel_config, extra_config)
@@ -243,6 +244,20 @@ class BaseKVPoolWorker(ABC):
             self.hash_block_size,
             self.lcm_block_size,
         )
+
+    def _collect_group_pp_ranks(self) -> tuple[tuple[int, ...], ...] | None:
+        """Collect the PP ranks that own each projected global cache group."""
+        if self.kv_cache_config is None or self.pp_size <= 1 or self.use_layerwise:
+            return None
+        local_groups = tuple(bool(group.layer_names) for group in self.kv_cache_config.kv_cache_groups)
+        gathered: list[tuple[bool, ...]] = [()] * self.pp_size
+        torch.distributed.all_gather_object(gathered, local_groups, group=get_pp_group().cpu_group)
+        owners = tuple(
+            tuple(rank for rank, rank_groups in enumerate(gathered) if rank_groups[group_id])
+            for group_id in range(len(local_groups))
+        )
+        assert all(owners), "Each global cache group must have at least one PP owner"
+        return owners
 
     def _compute_use_hybrid(self, vllm_config, kv_cache_groups) -> bool:
         return uses_hybrid_kv_cache(vllm_config.scheduler_config, kv_cache_groups)
@@ -1067,7 +1082,8 @@ class BaseKVPoolWorker(ABC):
         num_head_or_tp_ranks = self.get_group_tp_size(group_id)
         # Keep each rank shard's block/layer keys contiguous to match
         # lookup_scheduler()'s [rank_shard][block] result slicing.
-        for pp_rank in range(self.pp_size):
+        pp_ranks = self._group_pp_ranks[group_id] if self._group_pp_ranks is not None else range(self.pp_size)
+        for pp_rank in pp_ranks:
             for dcp_rank in range(self.dcp_size):
                 for head_or_tp_rank in range(num_head_or_tp_ranks):
                     for key in keys:
@@ -1413,7 +1429,7 @@ class KVPoolWorker(BaseKVPoolWorker):
                 )
                 continue
             request.skip_null_blocks_by_group = self.group_uses_align_state
-            load_group_ids = request.kv_cache_group_ids or [0]
+            requested_group_ids = request.kv_cache_group_ids or [0]
             token_len = request.token_len_chunk
             if (load_spec.kvpool_cached_tokens % self.cache_transfer_granularity != 0) and (
                 load_spec.kvpool_cached_tokens == token_len - 1
@@ -1430,7 +1446,7 @@ class KVPoolWorker(BaseKVPoolWorker):
                 token_len,
                 load_spec.vllm_cached_tokens,
                 load_spec.kvpool_cached_tokens,
-                load_group_ids,
+                requested_group_ids,
                 self.load_async,
             )
             if self.load_async:
@@ -1453,6 +1469,7 @@ class KVPoolWorker(BaseKVPoolWorker):
                     self._record_failed_request(request)
                 continue
 
+            load_group_ids = self.token_database.project_group_ids(requested_group_ids)
             addr_list = []
             size_list = []
             key_list = []

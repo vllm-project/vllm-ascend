@@ -1164,6 +1164,9 @@ class NPUModelRunner(GPUModelRunner):
             # prompt_lens is only used in R-SWA case.
             prompt_lens = self.req_states.prompt_len.gpu[idx_mapping]
 
+        if num_tokens_after_padding > num_tokens:
+            self.input_buffers.input_ids[num_tokens:num_tokens_after_padding].zero_()
+            self.input_buffers.positions[num_tokens:num_tokens_after_padding].zero_()
         input_batch = AscendInputBatch(
             req_ids=req_ids,
             num_reqs=num_reqs,
