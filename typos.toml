@@ -35,6 +35,7 @@ typ = "typ"
 nin_shortcut = "nin_shortcut"
 UperNetDecoder = "UperNetDecoder"
 subtile = "subtile"
+extrac_params = "extrac_params"
 SFOuput = "SFOuput"
 # huggingface transformers repo uses these words
 depthwise_seperable_out_channel = "depthwise_seperable_out_channel"
