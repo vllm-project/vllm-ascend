@@ -270,6 +270,7 @@ Select an image based on your host operating system and start it on every node. 
 If you don't want to use the docker image as above, you can also build all from source:
 
 - Install `vllm-ascend` from source, refer to [installation](../../installation.md).
+- On Atlas 950, install the KDA kernel compiler dependencies with `pip install ninja==1.13.0 cannbot-dsl`.
 
 If you want to deploy multi-node environment, you need to set up environment on each node.
 

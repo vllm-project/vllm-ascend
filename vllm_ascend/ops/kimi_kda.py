@@ -18,23 +18,20 @@
 
 The vLLM implementation provides the projections, cache specification, and
 opaque ``kda_attention`` custom op.  This OOT replacement keeps that public
-surface while routing prefill through the Kimi AscendC kernels and decode
-through the recurrent KDA AscendC kernel.
+surface while routing Kimi K3 through the CANNBot DSL kernels optimized for
+Atlas 950.
 """
 
 from collections.abc import Callable
 from functools import partial, wraps
 
+import cann_ops_transformer.ops  # noqa: F401
 import torch
+import torch.nn.functional as F
 from einops import rearrange
 from vllm.config import VllmConfig
 from vllm.distributed import get_pcp_group, get_tensor_model_parallel_rank
 from vllm.forward_context import get_forward_context
-
-try:
-    from vllm.model_executor.layers.fla.ops.l2norm import l2norm_fwd  # type: ignore[import-not-found]
-except ModuleNotFoundError:
-    from vllm.third_party.flash_linear_attention.ops.l2norm import l2norm_fwd
 from vllm.model_executor.layers.linear import ColumnParallelLinear, QKVParallelLinear
 from vllm.model_executor.layers.mamba.gdn.kimi_gdn_linear_attn import (
     KimiGatedDeltaNetAttention,
@@ -44,12 +41,14 @@ from vllm.model_executor.utils import replace_parameter
 from vllm.triton_utils import HAS_TRITON
 from vllm.v1.attention.backend import AttentionBackend, AttentionMetadata
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
-from vllm.v1.attention.backends.utils import PAD_SLOT_ID
 
+from ops.cannbot_dsl.flash_kda import flash_kda as _flash_kda_impl
+from ops.cannbot_dsl.fused_recurrent_kda import (
+    fused_recurrent_kda_op as _recurrent_kda_impl,
+)
 from vllm_ascend.ops.gdn_attn_builder import AscendGDNAttentionBackend
 from vllm_ascend.ops.kimi_kda_state import kimi_kda_state_shape
 from vllm_ascend.ops.triton.fla.utils import clear_ssm_states
-from vllm_ascend.ops.triton.kda.kda import fused_kda_gate
 from vllm_ascend.utils import is_vl_model, parse_layer_idx
 
 apply_kda_rms_norm_sigmoid_gate: (
@@ -77,7 +76,7 @@ def _zero_padded_spec_output(
 ) -> torch.Tensor:
     """Zero graph-padding rows skipped by the recurrent KDA kernel.
 
-    ``recurrent_kda`` leaves the output for zero-length sequences
+    The recurrent KDA kernel leaves the output for zero-length sequences
     uninitialized. FULL graph replay keeps those rows in the static output
     shape, so explicitly clear the uncovered tail before it reaches the
     residual and MoE layers.
@@ -145,20 +144,8 @@ def _load_a_log(
     )
 
 
-def _require_ascendc_prefill_ops() -> None:
-    required_ops = ("kda_gate_cumsum", "chunk_kda_fwd")
-    missing_ops = [name for name in required_ops if not hasattr(torch.ops._C_ascend, name)]
-    if missing_ops:
-        qualified_ops = ", ".join(f"torch.ops._C_ascend.{name}" for name in missing_ops)
-        raise RuntimeError(
-            "Kimi KDA prefill requires the PR141 AscendC operators, but the "
-            f"following schemas are missing: {qualified_ops}. Rebuild and install "
-            "the vllm-ascend custom operators with KDA support."
-        )
-
-
 class AscendKimiGatedDeltaNetAttention(KimiGatedDeltaNetAttention):
-    """Kimi KDA with Ascend prefill/decode kernels.
+    """Kimi KDA with CANNBot DSL prefill/decode kernels for Atlas 950.
 
     Kimi K3 adds two details that are absent from vLLM 0.23's base layer:
     a full-rank output gate (``g_proj``) and a bounded sigmoid decay gate.
@@ -172,6 +159,8 @@ class AscendKimiGatedDeltaNetAttention(KimiGatedDeltaNetAttention):
         self.use_full_rank_gate = bool(kda_config.get("use_full_rank_gate", False))
         gate_lower_bound = kda_config.get("gate_lower_bound")
         self.gate_lower_bound = float(gate_lower_bound) if gate_lower_bound is not None else None
+        if self.gate_lower_bound is None:
+            raise ValueError("The Atlas 950 CANNBot KDA kernels require gate_lower_bound.")
 
         # KDA uses the same hidden states and TP head layout for Q, K, and V.
         # Pack their checkpoint shards into one standard QKV linear so MXFP8
@@ -269,7 +258,7 @@ class AscendKimiGatedDeltaNetAttention(KimiGatedDeltaNetAttention):
         projection_size = self.local_num_heads * self.head_dim
         q, k, v = qkv.split([projection_size] * 3, dim=-1)
 
-        beta = self.b_proj(hidden_states)[0].float().sigmoid().unsqueeze(0)
+        raw_beta = self.b_proj(hidden_states)[0].unsqueeze(0)
         raw_gate = self.f_b_proj(self.f_a_proj(hidden_states)[0])[0]
         raw_gate = rearrange(raw_gate, "n (h d) -> 1 n h d", d=self.head_dim)
 
@@ -289,7 +278,7 @@ class AscendKimiGatedDeltaNetAttention(KimiGatedDeltaNetAttention):
             k,
             v,
             raw_gate,
-            beta,
+            raw_beta,
             core_attn_out,
             self.prefix,
         )
@@ -321,22 +310,59 @@ class AscendKimiGatedDeltaNetAttention(KimiGatedDeltaNetAttention):
         run_mode: int,
         num_accepted_tokens: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        out = torch.empty_like(mixed_qkv)
-        torch.ops._C_ascend.npu_causal_conv1d_custom(
-            out,
-            mixed_qkv,
-            conv_weights_t,
-            conv_state=conv_state,
-            bias_opt=None,
-            query_start_loc_opt=metadata.query_start_loc,
-            cache_indices_opt=metadata.cache_indices,
-            initial_state_mode_opt=getattr(metadata, "initial_state_mode", None),
-            num_accepted_tokens_opt=num_accepted_tokens,
-            activation_mode=1,
-            pad_slot_id=PAD_SLOT_ID,
-            run_mode=run_mode,
-        )
-        return out
+        # Match KimiShortConvolution in cann-recipes-infer
+        # models/kimi_k3/models/modeling_kimi_k3.py (803c3120f483): official
+        # varlen prefill, fixed-batch ordinary decode, and varlen verify.
+        # vLLM supplies initial-state flags for chunked/prefix-cache prefill.
+        cache_indices = metadata.cache_indices
+        if cache_indices.ndim > 1:
+            cache_indices = cache_indices[:, 0]
+        cache_indices = cache_indices.clamp_min(0).contiguous()
+
+        if run_mode == 0:
+            has_initial_state = getattr(metadata, "initial_state_mode", None)
+            if has_initial_state is None:
+                has_initial_state = torch.zeros(
+                    metadata.query_start_loc.shape[0] - 1,
+                    dtype=torch.int32,
+                    device=mixed_qkv.device,
+                )
+            has_initial_state = has_initial_state.to(dtype=torch.int32).contiguous()
+            return torch.ops.cann_ops_transformer.causal_conv1d_fn(
+                x=mixed_qkv,
+                conv_states=conv_state,
+                cache_indices=cache_indices,
+                weight=conv_weights_t,
+                bias=None,
+                query_start_loc=metadata.query_start_loc,
+                has_initial_state=has_initial_state,
+            )
+        if run_mode == 1:
+            if num_accepted_tokens is None:
+                # CANN's non-speculative update contract requires fixed-batch
+                # 3-D input [batch, 1, dim].  The 2-D form is reserved for
+                # variable-length speculative decode and requires real
+                # num_accepted_tokens values.
+                output = torch.ops.cann_ops_transformer.causal_conv1d_update(
+                    x=mixed_qkv.unsqueeze(1),
+                    conv_state=conv_state,
+                    conv_state_indices=cache_indices,
+                    weight=conv_weights_t,
+                    bias=None,
+                    query_start_loc=metadata.query_start_loc,
+                    num_accepted_tokens=None,
+                )
+                return output.squeeze(1)
+            return torch.ops.cann_ops_transformer.causal_conv1d_update(
+                x=mixed_qkv,
+                conv_state=conv_state,
+                conv_state_indices=cache_indices,
+                weight=conv_weights_t,
+                bias=None,
+                query_start_loc=metadata.query_start_loc,
+                num_accepted_tokens=num_accepted_tokens,
+            )
+        raise ValueError(f"Unsupported causal convolution run_mode: {run_mode}")
 
     def _packed_conv_shape(self) -> tuple[int, int]:
         local_channels = self.local_num_heads * self.head_dim
@@ -388,52 +414,52 @@ class AscendKimiGatedDeltaNetAttention(KimiGatedDeltaNetAttention):
     def _conv_weights_t(self) -> torch.Tensor:
         return self.q_conv1d.get_parameter(_PACKED_CONV_WEIGHT_NAME)
 
-    def _recurrent_gate(self, raw_gate: torch.Tensor) -> torch.Tensor:
-        flat_gate = rearrange(raw_gate, "1 n h d -> n (h d)")
-        gate = fused_kda_gate(
-            flat_gate,
-            self.A_log,
-            self.head_dim,
-            g_bias=self.dt_bias,
-            safe_gate=self.gate_lower_bound is not None,
-            lower_bound=self.gate_lower_bound if self.gate_lower_bound is not None else -5.0,
-        )
-        return gate.unsqueeze(0)
-
     def _run_recurrent(
         self,
         q: torch.Tensor,
         k: torch.Tensor,
         v: torch.Tensor,
         raw_gate: torch.Tensor,
-        beta: torch.Tensor,
+        raw_beta: torch.Tensor,
         recurrent_state: torch.Tensor,
         cu_seqlens: torch.Tensor,
         state_indices: torch.Tensor,
         *,
         num_accepted_tokens: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        out = torch.ops._C_ascend.recurrent_kda(
-            q.contiguous(),
-            k.contiguous(),
-            v.contiguous(),
-            raw_gate.contiguous(),
-            beta.contiguous(),
+        del cu_seqlens
+        if state_indices.ndim == 1:
+            batch_size = state_indices.shape[0]
+            sequence_length = q.shape[1] // batch_size
+        elif state_indices.ndim == 2:
+            batch_size, sequence_length = state_indices.shape
+        else:
+            raise ValueError(f"KDA state indices must be rank 1 or 2, got rank {state_indices.ndim}")
+
+        expected_tokens = batch_size * sequence_length
+        if q.shape[1] != expected_tokens:
+            raise ValueError(
+                "KDA recurrent input and state indices describe different token counts: "
+                f"{q.shape[1]} != {batch_size} * {sequence_length}"
+            )
+
+        sequence_shape = (batch_size, sequence_length, self.local_num_heads, self.head_dim)
+        output = _recurrent_kda_impl(
+            q.reshape(sequence_shape).contiguous(),
+            k.reshape(sequence_shape).contiguous(),
+            v.reshape(sequence_shape).contiguous(),
             recurrent_state,
-            cu_seqlens,
-            state_indices,
+            raw_beta.reshape(batch_size, sequence_length, self.local_num_heads, 1).contiguous(),
+            raw_gate.reshape(sequence_shape).contiguous(),
+            self.head_dim**-0.5,
             self.A_log.reshape(-1).contiguous(),
-            self.dt_bias.contiguous(),
+            self.dt_bias.reshape(self.local_num_heads, self.head_dim).contiguous(),
+            self.gate_lower_bound,
+            "BSND",
+            ssm_state_indices=state_indices.reshape(-1).clamp_min(0).contiguous(),
             num_accepted_tokens=num_accepted_tokens,
-            scale=self.head_dim**-0.5,
-            use_qk_l2norm_in_kernel=True,
-            use_gate_in_kernel=True,
-            use_beta_sigmoid_in_kernel=False,
-            allow_neg_eigval=False,
-            safe_gate=self.gate_lower_bound is not None,
-            lower_bound=self.gate_lower_bound if self.gate_lower_bound is not None else -5.0,
         )
-        return out
+        return output.reshape(1, expected_tokens, self.local_num_heads, self.head_dim)
 
     def _run_prefill(
         self,
@@ -441,7 +467,7 @@ class AscendKimiGatedDeltaNetAttention(KimiGatedDeltaNetAttention):
         k: torch.Tensor,
         v: torch.Tensor,
         raw_gate: torch.Tensor,
-        beta: torch.Tensor,
+        raw_beta: torch.Tensor,
         recurrent_state: torch.Tensor,
         state_indices: torch.Tensor,
         has_initial_state: torch.Tensor,
@@ -449,7 +475,6 @@ class AscendKimiGatedDeltaNetAttention(KimiGatedDeltaNetAttention):
     ) -> torch.Tensor:
         if get_pcp_group().world_size > 1:
             raise NotImplementedError("Kimi KDA prefill does not yet support PCP.")
-        _require_ascendc_prefill_ops()
 
         cu_seqlens_kern = prebuilt_metadata.cu_seqlens_kern
         cu_seqlens = prebuilt_metadata.cu_seqlens_host if cu_seqlens_kern is None else cu_seqlens_kern
@@ -470,57 +495,51 @@ class AscendKimiGatedDeltaNetAttention(KimiGatedDeltaNetAttention):
                 "state_indices, and has_initial_state must describe the same number of sequences."
             )
 
-        # The recurrent cache uses [H,V,K].  PR141's AscendC prefill operator
-        # uses [H,K,V], so transpose only at that operator boundary.
-        initial_state_vk = recurrent_state[state_indices].contiguous()
-        clear_ssm_states(initial_state_vk, has_initial_state)
+        initial_state = recurrent_state[state_indices].float().contiguous()
+        clear_ssm_states(initial_state, has_initial_state)
 
-        initial_state_kv = initial_state_vk.transpose(-1, -2).contiguous()
-        cu_seqlens_ascendc = (
+        sequence_boundaries = (
             tuple(cu_seqlens.detach().cpu().tolist()) if isinstance(cu_seqlens, torch.Tensor) else cu_seqlens
         )
-
-        q = l2norm_fwd(q.contiguous())
-        k = l2norm_fwd(k.contiguous())
-
-        if self.gate_lower_bound is not None:
-            gate_cumsum = torch.ops._C_ascend.kda_gate_cumsum(
-                raw_gate.contiguous(),
-                _KDA_CHUNK_SIZE,
-                A_log=self.A_log.reshape(-1).contiguous(),
-                dt_bias=self.dt_bias.contiguous(),
-                cu_seqlens=cu_seqlens_ascendc,
-                use_gate_in_kernel=True,
-                safe_gate=True,
+        sequence_lengths = tuple(end - start for start, end in zip(sequence_boundaries, sequence_boundaries[1:]))
+        if not sequence_lengths or min(sequence_lengths) <= 0:
+            raise ValueError("CANNBot FlashKDA requires non-empty prefill sequences.")
+        # Follow recipes KimiDeltaAttention._prefill_flash_kda (803c3120f483):
+        # each request runs separately, padded only to its next 64-token chunk.
+        # Preserve vLLM's cache-derived initial state for continued prefills.
+        outputs = []
+        final_states = []
+        a_log = self.A_log.reshape(-1).contiguous()
+        dt_bias = self.dt_bias.reshape(self.local_num_heads, self.head_dim).contiguous()
+        for request_index, (start, end) in enumerate(zip(sequence_boundaries, sequence_boundaries[1:])):
+            length = end - start
+            request_q, request_k, request_v, request_gate, request_beta = (
+                tensor[:, start:end] for tensor in (q, k, v, raw_gate, raw_beta)
+            )
+            pad_length = (-length) % _KDA_CHUNK_SIZE
+            if pad_length:
+                request_q, request_k, request_v = (
+                    F.pad(tensor, (0, 0, 0, 0, 0, pad_length)) for tensor in (request_q, request_k, request_v)
+                )
+                request_gate = F.pad(request_gate, (0, 0, 0, 0, 0, pad_length), value=float("-inf"))
+                request_beta = F.pad(request_beta, (0, 0, 0, pad_length), value=float("-inf"))
+            request_output, final_state = _flash_kda_impl(
+                request_q.contiguous(),
+                request_k.contiguous(),
+                request_v.contiguous(),
+                g=request_gate.contiguous(),
+                beta=request_beta.contiguous(),
+                scale=self.head_dim**-0.5,
+                initial_state=initial_state[request_index : request_index + 1],
+                A_log=a_log,
+                dt_bias=dt_bias,
                 lower_bound=self.gate_lower_bound,
-                layout="BSND",
+                layout_qkv="BSND",
             )
-        else:
-            gate = self._recurrent_gate(raw_gate)
-            gate_cumsum = torch.ops._C_ascend.kda_gate_cumsum(
-                gate.contiguous(),
-                _KDA_CHUNK_SIZE,
-                cu_seqlens=cu_seqlens_ascendc,
-                layout="BSND",
-            )
-
-        result = torch.ops._C_ascend.chunk_kda_fwd(
-            q,
-            k,
-            v.contiguous(),
-            gate_cumsum,
-            beta.contiguous(),
-            self.head_dim**-0.5,
-            _KDA_CHUNK_SIZE,
-            layout="BSND",
-            initial_state=initial_state_kv,
-            output_final_state=True,
-            cu_seqlens=cu_seqlens_ascendc,
-            chunk_indices=prebuilt_metadata.chunk_indices_chunk64_host,
-            return_intermediate=False,
-        )
-        recurrent_state[state_indices] = result[1].transpose(-1, -2).contiguous().to(recurrent_state.dtype)
-        return result[0]
+            outputs.append(request_output[:, :length])
+            final_states.append(final_state)
+        recurrent_state[state_indices] = torch.cat(final_states, dim=0).to(recurrent_state.dtype)
+        return torch.cat(outputs, dim=1)
 
     def _forward(
         self,
@@ -545,7 +564,8 @@ class AscendKimiGatedDeltaNetAttention(KimiGatedDeltaNetAttention):
         k_proj_states = k_proj_states[:num_actual_tokens]
         v_proj_states = v_proj_states[:num_actual_tokens]
         g1 = g1[:, :num_actual_tokens]
-        beta = beta[:, :num_actual_tokens]
+        # Preserve vLLM's beta keyword while passing raw logits to CANNBot.
+        raw_beta = beta[:, :num_actual_tokens]
 
         conv_state, recurrent_state = self.kv_cache
         mixed_qkv = torch.cat((q_proj_states, k_proj_states, v_proj_states), dim=-1)
@@ -559,20 +579,20 @@ class AscendKimiGatedDeltaNetAttention(KimiGatedDeltaNetAttention):
             if attn_metadata.num_prefills == 0 and attn_metadata.num_decodes == 0:
                 mixed_spec = mixed_qkv
                 raw_gate_spec = g1
-                beta_spec = beta
+                beta_spec = raw_beta
                 mixed_non_spec = raw_gate_non_spec = beta_non_spec = None
             else:
                 mixed_spec = mixed_qkv.index_select(0, spec_token_indices)
                 raw_gate_spec = g1.index_select(1, spec_token_indices)
-                beta_spec = beta.index_select(1, spec_token_indices)
+                beta_spec = raw_beta.index_select(1, spec_token_indices)
                 mixed_non_spec = mixed_qkv.index_select(0, non_spec_token_indices)
                 raw_gate_non_spec = g1.index_select(1, non_spec_token_indices)
-                beta_non_spec = beta.index_select(1, non_spec_token_indices)
+                beta_non_spec = raw_beta.index_select(1, non_spec_token_indices)
         else:
             mixed_spec = raw_gate_spec = beta_spec = None
             mixed_non_spec = mixed_qkv
             raw_gate_non_spec = g1
-            beta_non_spec = beta
+            beta_non_spec = raw_beta
 
         core_spec = None
         if mixed_spec is not None:
