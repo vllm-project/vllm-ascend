@@ -27,8 +27,24 @@ Three rules when editing the table:
 - Keys must target the module where the kernel is *defined*
   (``func.__module__``), never a from-import copy site. The identity sweep
   matches the original object; a key pointing at a copy silently defeats it.
-- Values only need their parameter *order* to match the original kernel;
-  parameter names may differ (the dispatcher reorders launch kwargs).
+- Parameter contract: mirror the original's parameter names and order.
+  The dispatcher forwards two call shapes verbatim and adapts only the
+  third:
+
+  * Plain calls (``kernel(...)``) and positional ``kernel[grid]``
+    calls reach the impl untouched -- no renaming, no reordering. The
+    impl must accept every argument name its callers pass, via an
+    explicit parameter or ``**kwargs``.
+  * Keyword-only ``kernel[grid]`` calls are adapted: matching names
+    forward by name; otherwise the dispatcher forwards positionally
+    in the original's order -- arguments the caller omitted are
+    skipped (later values shift left), and names outside the
+    original's signature are rejected.
+
+  Two consequences: never rename an original parameter (a keyword-only
+  call site will hit a TypeError), and let NPU-only parameters extend
+  the tail of an impl with defaults so upstream additions land without
+  a table edit (see ``rejection_sample``).
 - Values are either plain callables or raw ``@triton.jit`` kernels. The
   dispatcher swaps a raw kernel in directly -- never wrapping it -- so it
   launches natively with the caller's grid and must mirror the original
@@ -139,8 +155,14 @@ TRITON_KERNEL_OVERRIDES: dict[str, Callable[..., Any]] = {
     # TODO: Remove when Triton-Ascend can compile and efficiently lower
     # the upstream kernel.
     "vllm.v1.worker.gpu.sample.output.SamplingMaskTensors.from_logits": sampling_mask_from_logits_npu,
-    # TODO: Remove once the compiler and Triton-Ascend toolkit support the
-    # upstream fill_logprob_token_ids_kernel.
+    # Production-dead today: upstream's only call site sits inside
+    # compute_topk_scores, which the registration above replaces with
+    # the Ascend host path -- that path warns and falls back to default
+    # topk (worker/v2/sample/logprob.py) and never launches this kernel.
+    # Revives as-is once the Ascend host grows the custom
+    # logprob_token_ids branch.
+    # TODO: Remove once the compiler and Triton-Ascend toolkit support
+    # the upstream fill_logprob_token_ids_kernel.
     "vllm.v1.worker.gpu.sample.logprob._fill_logprob_token_ids_kernel": _fill_logprob_token_ids_kernel,
     # Defined in metrics/logits.py; sampler.py and rejection_sampler.py are
     # copy sites (retired patch: two assignments).
@@ -166,12 +188,25 @@ TRITON_KERNEL_OVERRIDES: dict[str, Callable[..., Any]] = {
     "vllm.third_party.flash_linear_attention.ops.chunk.chunk_gated_delta_rule": (  # noqa: E501
         chunk_gated_delta_rule
     ),
-    # The KDA primitives are defined in ops/kda.py; bailing_moe_v3 and the
-    # Kimi GDN layers from-import them directly from the module.
+    # The KDA primitives are defined in ops/kda.py. The upstream
+    # bailing_moe_v3 layer from-imports them directly from the module
+    # and is their only consumer on this route: Kimi K3 ships a
+    # self-contained vendored copy under models/kimi_k3/nvidia and
+    # GLM-5 runs the AscendC kernels through
+    # vllm_ascend/models/glm5next/ops/kda.py, so neither reaches these
+    # keys. chunk_kda_with_fused_gate has no upstream caller today; it
+    # stays for parity with the retired patch so a future
+    # vllm.third_party consumer lands on the NPU impl.
     "vllm.third_party.flash_linear_attention.ops.kda.chunk_kda": chunk_kda,
     "vllm.third_party.flash_linear_attention.ops.kda.chunk_kda_with_fused_gate": (  # noqa: E501
         chunk_kda_with_fused_gate
     ),
+    # Known-broken at its only launch site: bailing_moe_v3 passes
+    # ``lower_bound=``, which the Ascend impl does not accept yet, so the
+    # verbatim forward raises TypeError. No bailing e2e exists, so CI
+    # cannot catch it; the impl fix (grow the parameter, upstream feeds
+    # ``lower_bound or 0.0`` / ``USE_LOWER_BOUND=lower_bound is not
+    # None``) is tracked as a separate follow-up.
     "vllm.third_party.flash_linear_attention.ops.kda.fused_kda_gate": fused_kda_gate,
     "vllm.third_party.flash_linear_attention.ops.kda.fused_recurrent_kda": (  # noqa: E501
         fused_recurrent_kda
