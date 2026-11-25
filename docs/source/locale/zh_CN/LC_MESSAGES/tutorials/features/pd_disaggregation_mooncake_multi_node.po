@@ -1094,3 +1094,24 @@ msgid ""
 msgstr ""
 "- 有关 aisbench 命令和参数的更多详细信息，请参阅 "
 "[aisbench](https://github.com/AISBench/benchmark)。"
+
+msgid "2. Network interface selection for multi-node deployments"
+msgstr "2. 多节点部署中的通信网口选择"
+
+msgid "Depending on the hardware and cluster network configuration, a node may have both a management interface for administration (for example, 1 Gb/s) and a high-speed interface for traffic between nodes (for example, 100 Gb/s). In the launch examples, some components use `nic_name` to select an interface for cross-node TCP connections. If bandwidth limits these connections, try setting `nic_name` to a higher-bandwidth interface and compare performance under the same workload."
+msgstr "根据机型和集群网络配置，节点可能同时配有用于日常运维的管理网口（例如 1 Gb/s）和用于节点间通信的高速网口（例如 100 Gb/s）。启动示例中，部分组件通过 `nic_name` 选择跨节点 TCP 通信的网口。如果这些 TCP 连接受限于网口带宽，可以尝试将 `nic_name` 设为带宽更高的网口，并在相同负载下对比切换前后的性能。"
+
+msgid "Run the following command inside the service container to list the interfaces it can see and their IP addresses."
+msgstr "在服务容器内运行以下命令，查看可见的网口及其 IP 地址。"
+
+msgid "Set `nic_name` to the name of a listed interface that can reach the other nodes in the deployment."
+msgstr "从中选择能与其他节点互通的网口，将其名称填入 `nic_name`。"
+
+msgid "To check the link speed, run the following command on the host. Replace `<physical-interface>` with the name of the physical interface."
+msgstr "如需确认链路速率，请在宿主机上运行以下命令，将 `<物理网口名>` 替换为实际的物理网口名称。"
+
+msgid "ethtool <physical-interface>"
+msgstr "ethtool <物理网口名>"
+
+msgid "Check `Speed` in the output. For example, `100000Mb/s` means 100 Gb/s."
+msgstr "查看输出中的 `Speed`。例如，`100000Mb/s` 表示 100 Gb/s。"

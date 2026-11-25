@@ -1393,6 +1393,24 @@ ais_bench --models vllm_api_stream_chat --datasets gsm8k_gen_0_shot_cot_str_perf
 
 Since the computation of some NPU operators requires several rounds of warm-up to achieve best performance, we recommend preheating the service with some requests before conducting performance tests to achieve the best end-to-end throughput.
 
+### 2. Network interface selection for multi-node deployments {: #2-gloo}
+
+Depending on the hardware and cluster network configuration, a node may have both a management interface for administration (for example, 1 Gb/s) and a high-speed interface for traffic between nodes (for example, 100 Gb/s). In the launch examples, some components use `nic_name` to select an interface for cross-node TCP connections. If bandwidth limits these connections, try setting `nic_name` to a higher-bandwidth interface and compare performance under the same workload.
+
+Run the following command inside the service container to list the interfaces it can see and their IP addresses.
+
+```bash
+ip -br addr
+```
+
+Set `nic_name` to the name of a listed interface that can reach the other nodes in the deployment.
+
+To check the link speed, run the following command on the host. Replace `<physical-interface>` with the name of the physical interface.
+
+    ethtool <physical-interface>
+
+Check `Speed` in the output. For example, `100000Mb/s` means 100 Gb/s.
+
 ## Verification
 
 Check service health using the proxy server endpoint.
