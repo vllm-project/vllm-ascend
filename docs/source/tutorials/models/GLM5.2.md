@@ -22,6 +22,75 @@ Refer to [Supported Features List](../../user_guide/support_matrix/supported_mod
 
 Refer to [Feature Guide](../../user_guide/feature_guide/index.md) to get the feature's configuration.
 
+### GLM-5.2 DCP Reproduction on Main
+
+`tests/e2e/models/glm52_dcp_probe.py` provides the task #13747 functional
+and accuracy protocol. Use the current main and its verified vLLM pin,
+compile the Ascend native operators, and verify every checkpoint shard before
+running it. A config-only initialization check is not a model-inference result.
+
+Inspect the actual checkpoint architecture, not an older issue's GQA label:
+`Eco-Tech/GLM-5.2-w8a8c8` declares `GlmMoeDsaForCausalLM` and uses sparse
+attention with a replicated indexer. With PCP1, the current implementation
+accepts DCP1 or DCP=TP. For example, TP8/DCP2 is not a legal substitute for
+TP2/DCP2 on this path. Keep PCP1 for decode-only context parallelism.
+
+On a free 16-die A3 node, start with the following paired protocol. This is a
+resource-constrained test configuration, not the multi-node production
+recommendation in this guide. KV/workspace/replication overhead must fit each
+die; checkpoint file size divided by the device count is not sufficient.
+
+```shell
+cd /workspace
+export HCCL_OP_EXPANSION_MODE=AIV
+python /vllm-workspace/vllm-ascend/tests/e2e/models/glm52_dcp_probe.py \
+  --model /models/GLM-5.2-w8a8c8 --tp 8 --dp 2 --dcp 1 \
+  --output /results/tp8-dcp1.json
+python /vllm-workspace/vllm-ascend/tests/e2e/models/glm52_dcp_probe.py \
+  --model /models/GLM-5.2-w8a8c8 --tp 8 --dp 2 --dcp 8 \
+  --baseline /results/tp8-dcp1.json --output /results/tp8-dcp8.json
+```
+
+Configure the visible device IDs and HCCL/Gloo interfaces for the host first.
+The probe refuses an occupied API port and only terminates its own server
+process group. Use an external monitor for device HBM, process memory and
+timeouts; never stop another task to obtain a free node.
+
+Repeat with TP4/DP4/DCP1 versus DCP4, and TP2/DP8/DCP1 versus DCP2 if the
+actual memory budget permits. The default requests include exactly
+4096/16384/65536 input tokens, plus short English, Chinese and code prompts,
+with greedy and sampled decoding. Prompt hashes, complete responses, token
+IDs, top-5 logprobs, commands, startup time and exceptions are saved alongside
+the report. Greedy comparisons require identical token sequences; sampled
+comparisons require mutual top-5 membership at the first divergence under
+the same prefix. Different-length identical prefixes do not pass implicitly.
+
+The baseline must use the same checkpoint, TP/DP/PP/PCP, graph mode, MTP
+setting and KV budget. Requests are pinned to DP rank zero by default using
+the upstream `X-data-parallel-rank` header; use `--request-dp-rank` to validate
+another replica in both runs. Do not compare load-balanced and pinned reports.
+When PP is used, the report also records `VLLM_PP_LAYER_PARTITION` and requires
+the same partition in the paired baseline. Inspect shared-indexer ownership
+at stage boundaries before choosing a partition; configuration initialization
+alone does not prove that a shared layer can start a pipeline stage.
+Cache controls default to `--kv-cache-dtype int8 --indexer-kv-dtype int8`.
+For an explicitly labeled cache-precision isolation experiment, use
+`--kv-cache-dtype auto --indexer-kv-dtype bf16` in both runs and reserve enough
+KV memory. `--disable-mlapo` disables the existing MLAPO setting in both runs
+to avoid changing that preprocessing choice together with cache precision.
+These controls are part of report compatibility checks; another configuration
+passing does not erase a failing C8 result. Batch-invariant mode has separate
+scheduling limitations and must not replace the required chunked-prefill test.
+The report also captures `LCCL_DETERMINISTIC`, `HCCL_DETERMINISTIC`, `HCCL_ALGO`,
+the HCCL buffer size and allocator controls. Both runs must use identical
+values; otherwise a numerical difference cannot be attributed to DCP.
+For graph coverage add `--graph` to both paired runs;
+for the checkpoint's MTP path add `--mtp` to both. The probe always uses
+chunked prefill. Eagle3/DSpark require separately identified compatible draft
+weights and cannot be marked passed merely because an MTP checkpoint exists.
+Preserve initialization errors for illegal DCP topologies and publish the
+actual completed matrix rather than treating this protocol as a pass report.
+
 ## 3 Prerequisites
 
 ### 3.1 Model Weight
