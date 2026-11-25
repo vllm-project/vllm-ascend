@@ -47,7 +47,7 @@ def _pack_candidates(
     row = tl.program_id(0) * ROWS_PER_PROGRAM + tl.arange(0, ROWS_PER_PROGRAM)[:, None]
     mask = (col < K) & _candidate_row_valid(visible_lengths, row, ROWS)
     local = tl.load(indices + row * index_row_stride + col * index_col_stride, mask, -1)
-    # A5 exposes its native BF16 comparator; A3 already produces FP32.
+    # Pack either BF16 or FP32 QLI scores as FP32 comparison keys.
     score = tl.load(scores + row * score_row_stride + col * score_col_stride, mask, -float("inf")).to(tl.float32)
     valid = (local >= 0) & (tl.abs(score) < float("inf"))
     local = tl.where(valid, local, 0).to(tl.int32)

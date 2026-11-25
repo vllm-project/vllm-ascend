@@ -130,7 +130,7 @@ class BaseDeviceAdaptor:
             or kv_cache.dtype != torch.int8
         ):
             raise NotImplementedError("DCP QLI requires A3 INT8 query and key caches")
-        indices, scores = torch.ops._C_ascend.npu_quant_lightning_indexer_v2(
+        return torch.ops._C_ascend.npu_quant_lightning_indexer_v2(
             q_li.contiguous(),
             kv_cache,
             weights.to(torch.float16).contiguous(),
@@ -155,7 +155,6 @@ class BaseDeviceAdaptor:
             return_value=1,
             initialize_outputs=initialize_outputs,
         )
-        return indices, scores
 
     @staticmethod
     def indexer_select_local_candidates(

@@ -14,6 +14,7 @@
 | indices, scores | Input | Native local QLI candidates `[T,1,K_local]`, positive strides | INT32; FP32/BF16 | ND |
 | world_size, rank, interleave | Attribute | DCP group geometry and token stripe width | int | Scalar |
 | sort_candidates, fuse_sort | Attribute | Establish comparator order; permit workload-based fused preparation | bool | Scalar |
+| visible_lengths | Optional pack input | Per-query local causal prefix `[T]`; zero skips the entire candidate row before reading it | INT32 | Contiguous ND |
 | packed | Input/Output | Exact global ID and FP32 score-bit pairs `[P*T,K_local,2]` after gather | INT32 | Contiguous ND |
 | rows, topk | Attribute | Query count and global winner count | int | Scalar |
 | local_rank | Optional attribute | Owner-local output; None selects global coordinates | int/None | Scalar |
@@ -21,7 +22,6 @@
 | out | Optional output | Destination `[T,1,topk]`; may be a contiguous row slice | INT32 | ND |
 | seq_lens, query_ends | Input | Global sequence lengths and cumulative query endpoints | INT32 | ND |
 | key_lengths, visible_lengths | Output | Per-request local length and per-query local causal prefix | INT32 | ND |
-| query_start_loc | Input | Cumulative query bounds including leading zero for native candidate normalization | INT32 | ND |
 
 ## Constraints
 
@@ -30,7 +30,7 @@
 - K2048 has fused preparation/merge. Other supported K values retain native stable sorting. Fused preparation uses one inline stable radix algorithm for BF16 and FP32, with 16 and 32 score-key bits respectively. The public wrapper rejects other score dtypes before allocation or launch; the kernel receives `SCORE_BITS` as a compile-time parameter. BF16 values widen exactly to FP32 for transport; FP32 scores retain all their bits.
 - Owner-prefix merge requires `presorted=True`, `owner_sharded=True`, `K_local=topk=2048`, and a valid local rank. Other calls use full selection.
 - Non-power-of-two rank tiles clamp padded peer addresses before masked loads; this prevents A3 GM faults without changing any valid peer or selection result.
-- Invalid/nonfinite candidates do not enter the valid output prefix. Empty requests and graph padding produce zero lengths or -1 IDs. Normalization writes only the native QLI-owned output buffers in place.
+- Invalid/nonfinite candidates do not enter the valid output prefix. By default the native DCP QLI entry pre-fills graph-padding rows with -1 IDs and -inf scores. A3 may skip this initialization only when packing receives reliable `visible_lengths`: zero-length rows are masked before any candidate loads, and packing writes -1 IDs and -inf scores for them. Positive-length rows still filter negative IDs and nonfinite BF16/FP32 scores without a separate normalization kernel. The optional lengths apply to plain packing, separate sorting and fused sorting alike; all paths preserve the collective shape.
 - ROWS is runtime and does not specialize transport/merge kernels. K, topology, strides and sorting tiles are fixed compilation/layout parameters. Length kernels keep row/request counts dynamic; power-of-two tiles and binary-search step counts select compilation buckets. Input values update on replay. Black-box compilation counts and hardware/model validation belong in the PR evidence.
 
 ## Origin and Differences
@@ -50,7 +50,7 @@ The wrapper keeps grid selection and routing outside the kernel. Fusion requires
 
 ## Test Cases
 
-Actual K2048 deployment shapes include T48/DCP16 and T128/DCP8. Shared tests also cover generic K, partial tiles, non-power-of-two DCP, ties, near-ULP scores, invalid owners, strided input, exact score bits, the local-ID limit `2**20 - 1`, large mapped global IDs and changing-input graph replay.
+Actual K2048 deployment shapes include T48/DCP16 and T128/DCP8. Shared tests also cover generic K, partial tiles, non-power-of-two DCP, ties, near-ULP scores, invalid owners, strided input, exact score bits, the local-ID limit `2**20 - 1`, large mapped global IDs and changing-input graph replay. BF16 and FP32 tests poison empty-history and padding rows and change their visibility on graph replay. The QLI accuracy tests cover A3 BF16 output with initialization enabled and disabled.
 
 ```bash
 pytest -q tests/ut/attention/test_sharded_indexer.py
