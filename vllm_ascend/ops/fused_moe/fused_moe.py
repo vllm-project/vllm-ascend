@@ -678,7 +678,11 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
         trunc_size: int,
     ) -> torch.Tensor:
         if not self._allgather_requires_early_routed_reduce:
-            states = torch.ops.vllm.maybe_all_reduce_tensor_model_parallel(states)
+            prefetch_layer_name = getattr(self, "_qwen35_prefetch_layer_name", "")
+            if prefetch_layer_name:
+                states = torch.ops.vllm.maybe_all_reduce_tensor_model_parallel(states, prefetch_layer_name)
+            else:
+                states = torch.ops.vllm.maybe_all_reduce_tensor_model_parallel(states)
         return states[..., :trunc_size]
 
     def apply_routed_output_transform(

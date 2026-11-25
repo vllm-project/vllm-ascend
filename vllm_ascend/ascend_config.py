@@ -61,6 +61,17 @@ class AscendConfig:
     def __init__(self, vllm_config: "VllmConfig"):
         self.vllm_config = vllm_config
         additional_config = vllm_config.additional_config if vllm_config.additional_config is not None else {}
+        from vllm_ascend.ops.weight_prefetch_config import Qwen35WeightPrefetchConfig
+
+        self.qwen35_weight_prefetch = Qwen35WeightPrefetchConfig.parse(
+            additional_config.get("qwen35_weight_prefetch", {})
+        )
+        if self.qwen35_weight_prefetch.enabled and (
+            vllm_config.model_config.enable_sleep_mode or vllm_config.weight_transfer_config is not None
+        ):
+            raise ValueError(
+                "Qwen3.5 weight prefetch requires static weights; sleep and weight transfer are unsupported"
+            )
         self._check_mooncake_c8_kv_cache_quant(vllm_config)
 
         xlite_graph_config = additional_config.get("xlite_graph_config", {})

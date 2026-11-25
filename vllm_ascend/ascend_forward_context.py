@@ -61,6 +61,29 @@ def _is_decode_only_node(vllm_config: VllmConfig) -> bool:
     return bool(getattr(scheduler_config, "recompute_scheduler_enable", False))
 
 
+def decode_concurrency():
+    """Min decode-request count across kv groups when the batch is pure decode, else 0."""
+    try:
+        context = get_forward_context()
+    except AssertionError:
+        return 0
+    if getattr(context, "is_draft_model", False):
+        return 0
+    metadata = context.attn_metadata
+    if not isinstance(metadata, dict) or not metadata:
+        return 0
+    found = False
+    concurrency = None
+    for value in metadata.values():
+        if not hasattr(value, "num_prefills") or not hasattr(value, "num_decodes"):
+            continue
+        found = True
+        if value.num_prefills != 0 or value.num_decodes <= 0:
+            return 0
+        concurrency = value.num_decodes if concurrency is None else min(concurrency, value.num_decodes)
+    return concurrency if found else 0
+
+
 @contextmanager
 def override_mrv2_in_profile_run(enabled: bool):
     """Override MRv2's extra profile-run marker for one forward path.
