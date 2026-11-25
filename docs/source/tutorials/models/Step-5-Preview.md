@@ -67,6 +67,7 @@ It is recommended to download the weights to a shared directory across nodes,
 such as `/root/.cache/`, so that every serving node loads the same path.
 
 > **Path description**: Download the model weights to a directory of your choice and record it. Use the same directory on every node and ensure that the model path in the subsequent deployment commands matches this directory.
+>
 ### 3.2 Verify Multi-node Communication (Optional) {: #32-verify-multi-node-communication-optional }
 
 For multi-node deployment, verify the communication environment by following [Verify Multi-node Communication Environment](../../getting_started/installation.md#installation-multi-node-interconnect).
@@ -112,6 +113,7 @@ docker run --rm \
 -v "${MEMCACHE_CONFIG_DIR}:${MEMCACHE_CONFIG_DIR}" \
 -it $IMAGE bash
 ```
+
 Inside the container, run `npu-smi info` and confirm that all eight NPUs are visible. Run `vllm --version` to check the installed vLLM version.
 
 The container runs without `--privileged`: Ascend Docker Runtime injects the eight Davinci devices selected by `-e ASCEND_VISIBLE_DEVICES=0-7`, so no `--device` entry is needed for them. Add `--device` only if you start the container without that runtime.
@@ -273,7 +275,6 @@ Run the following script on each node. Select the tab for the node:
         --tool-call-parser step5 \
         --reasoning-parser step5
     ```
-
 
 The following values differ between the master and the worker node:
 
