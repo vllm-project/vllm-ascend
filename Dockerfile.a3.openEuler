@@ -363,8 +363,17 @@ RUN export PIP_EXTRA_INDEX_URL="${ASCEND_INDEX_URL}" && \
     python3 -m pip cache purge
 
 # 8) 从源码编译 mooncake 0.3.12.post1（与客户环境一致，不走 pip 二进制）
+#    mooncake 的 cmake 通过 find_package(yalantinglibs) 找 coro_rpc 依赖，该库以子模块
+#    extern/yalantinglibs 形式提供，必须 --recurse-submodules 一起拉下来并先装好，
+#    否则 configure 直接报 "Could not find a package configuration file provided by yalantinglibs"。
 RUN for f in /usr/local/Ascend/cann/set_env.sh /usr/local/Ascend/ascend-toolkit/set_env.sh; do if [ -f "$f" ]; then . "$f"; fi; done && \
-    git clone --depth 1 -b ${MOONCAKE_TAG} ${MOONCAKE_REPO} /tmp/Mooncake && \
+    git clone -b ${MOONCAKE_TAG} --recurse-submodules ${MOONCAKE_REPO} /tmp/Mooncake && \
+    cmake -S /tmp/Mooncake/extern/yalantinglibs -B /tmp/ylt-build \
+        -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/usr/local \
+        -DBUILD_EXAMPLES=OFF -DBUILD_BENCHMARK=OFF -DBUILD_UNIT_TESTS=OFF && \
+    cmake --build /tmp/ylt-build -j"${MAX_JOBS:-$(nproc)}" && \
+    cmake --install /tmp/ylt-build && \
+    rm -rf /tmp/ylt-build && ldconfig && \
     cd /tmp/Mooncake && mkdir -p build && cd build && \
     cmake .. -DCMAKE_BUILD_TYPE=Release \
         -DWITH_TE=ON -DUSE_CUDA=OFF -DUSE_ASCEND=ON && \
