@@ -1981,6 +1981,44 @@ def test_host_conv_indices_are_shared_and_refreshed(monkeypatch):
     assert indices.tolist() == [40, 50]
 
 
+@pytest.mark.parametrize("num_reqs", [2, 4])
+def test_hisparse_eager_gdn_decode_matches_generic_metadata(num_reqs):
+    device = torch.device("cpu")
+    builder = _make_builder(
+        device=device,
+        num_heads=32,
+        num_speculative_tokens=0,
+        builder_cls=AscendGDNHostMetadataBuilder,
+    )
+    builder.compilation_config.static_forward_context = {
+        "layer0": SimpleNamespace(use_contiguous_conv_indices=True),
+    }
+    common = create_common_attn_metadata(BatchSpec([64] * num_reqs, [1] * num_reqs), 16, device)
+    common.is_prefilling = torch.zeros(num_reqs, dtype=torch.bool)
+    common.block_table_tensor = torch.arange(2 * num_reqs, dtype=torch.int32).reshape(num_reqs, 2) + 11
+    reference = builder.build(0, common, num_actual_reqs=num_reqs)
+    conv_indices = reference.non_spec_decode_metadata.causal_conv1d.cache_indices.clone()
+
+    builder._use_hisparse_decode_path = True
+    actual = builder.build(0, common, num_actual_reqs=num_reqs)
+    assert actual.num_decodes == actual.num_actual_tokens == num_reqs
+    assert actual.non_spec_prefill_metadata is None
+    torch.testing.assert_close(actual.non_spec_query_start_loc, reference.non_spec_query_start_loc)
+    torch.testing.assert_close(actual.non_spec_state_indices_tensor, reference.non_spec_state_indices_tensor)
+    torch.testing.assert_close(
+        actual.non_spec_decode_metadata.actual_seq_lengths, reference.non_spec_decode_metadata.actual_seq_lengths
+    )
+    torch.testing.assert_close(actual.non_spec_decode_metadata.causal_conv1d.cache_indices, conv_indices)
+
+    common.block_table_tensor = common.block_table_tensor + 20
+    next_metadata = builder.build(0, common, num_actual_reqs=num_reqs)
+    torch.testing.assert_close(next_metadata.non_spec_decode_metadata.causal_conv1d.cache_indices, conv_indices + 20)
+    assert (
+        next_metadata.non_spec_decode_metadata.actual_seq_lengths.data_ptr()
+        == actual.non_spec_decode_metadata.actual_seq_lengths.data_ptr()
+    )
+
+
 @pytest.mark.parametrize("builder_cls", [AscendGDNAttentionMetadataBuilder, AscendGDNHostMetadataBuilder])
 @pytest.mark.parametrize("device_type", [AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5])
 @pytest.mark.parametrize("num_speculative_tokens", [7, 8, 9])

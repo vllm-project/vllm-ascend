@@ -1177,6 +1177,16 @@ class AscendGDNHostMetadataBuilder(AscendGDNAttentionMetadataBuilder):
         self._conv_output_buffer: torch.Tensor | None = None
         self._fused_layout_cpu: torch.Tensor | None = None
         self._fused_layout: torch.Tensor | None = None
+        self._uniform_decode_lengths: torch.Tensor | None = None
+        self._use_hisparse_decode_path = (
+            getattr(getattr(vllm_config, "attention_config", None), "hisparse_config", None) is not None
+            and vllm_config.model_config.enforce_eager
+            and vllm_config.model_config.hf_text_config.model_type in ("qwen4_exp", "qwen4_exp_text")
+            and vllm_config.speculative_config is None
+            and vllm_config.parallel_config.prefill_context_parallel_size == 1
+            and not vllm_config.cache_config.enable_prefix_caching
+            and getattr(vllm_config.cache_config, "mamba_cache_mode", "none") == "none"
+        )
 
     def _ensure_conv_output_buffer(self) -> None:
         if self._conv_output_buffer is not None:
@@ -1388,6 +1398,18 @@ class AscendGDNHostMetadataBuilder(AscendGDNAttentionMetadataBuilder):
     ) -> GDNAttentionMetadata:
         self._ensure_conv_index_buffers()
         self._ensure_conv_output_buffer()
+        common = common_attn_metadata
+        if (
+            self._use_hisparse_decode_path
+            and common.max_query_len == 1
+            and 0 < common.num_actual_tokens == common.num_reqs
+            and num_actual_reqs == common.num_reqs
+            and getattr(common, "pcp_context", None) is None
+            and common.is_prefilling is not None
+            and common.is_prefilling.device.type == "cpu"
+            and not common.is_prefilling.any()
+        ):
+            return self._build_hisparse_decode_metadata(common)
         metadata = super().build(
             common_prefix_len,
             common_attn_metadata,
@@ -1398,6 +1420,35 @@ class AscendGDNHostMetadataBuilder(AscendGDNAttentionMetadataBuilder):
         )
         metadata.pcp_context = getattr(common_attn_metadata, "pcp_context", None)
         return metadata
+
+    def _build_hisparse_decode_metadata(self, common: CommonAttentionMetadata) -> GDNAttentionMetadata:
+        # Single-token eager decode has one live state and a fixed length per
+        # request. Recurrent cache groups still own their individual indices.
+        num_reqs = common.num_reqs
+        query_start_loc = common.query_start_loc[: num_reqs + 1]
+        state_table = common.block_table_tensor[:num_reqs]
+        state_indices = state_table[:, 0]
+        if self._uniform_decode_lengths is None:
+            capacity = self.vllm_config.scheduler_config.max_num_seqs
+            self._uniform_decode_lengths = query_start_loc.new_ones(capacity + 1)
+            self._uniform_decode_lengths[0] = 0
+        metadata = GDNAttentionMetadata(
+            num_prefills=0,
+            num_prefill_tokens=0,
+            num_decodes=num_reqs,
+            num_decode_tokens=num_reqs,
+            num_spec_decodes=0,
+            num_spec_decode_tokens=0,
+            num_actual_tokens=num_reqs,
+            non_spec_query_start_loc=query_start_loc,
+            non_spec_state_indices_tensor=state_indices,
+        )
+        self._attach_non_spec_prefill_metadata(metadata, None, None)
+        self._attach_spec_decode_metadata(metadata)
+        conv_indices = state_indices if self._non_spec_conv_indices is not None else state_table
+        self._attach_non_spec_decode_metadata(metadata, conv_indices, self._uniform_decode_lengths)
+        metadata.pcp_context = None
+        return self._finalize_metadata(metadata)
 
     def _finalize_metadata(self, metadata: GDNAttentionMetadata, fused: bool = False) -> GDNAttentionMetadata:
         if self._conv_output_buffer is not None:

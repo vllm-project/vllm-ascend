@@ -105,8 +105,8 @@ class AscendQSAHiSparseBackend(AscendQSABackend):
 
 def build_hisparse_indexer_metadata(common, *buffers, **kwargs):
     if (
-        common.max_query_len == 1
-        and 0 < common.num_actual_tokens == common.num_reqs
+        common.num_reqs > 0
+        and common.num_actual_tokens > 0
         and common.query_start_loc.device.type == "npu"
         and getattr(common, "pcp_context", None) is None
         and getattr(common, "graph_pad_size", -1) < 0
@@ -193,7 +193,7 @@ def run_qsa_hisparse(layer, meta, side, selected, query, key, value, output):
     width = layer.indexer.token_topk // layer.indexer.compress_ratio + GBSA_RESIDUAL_TOKENS
     compact = selected[:n, :width]
     d = meta.num_decode_tokens
-    if d and cache.decode_batch and cache.all_context_pages_resident and resident.shape[1] == GBSA_PAGE_SIZE:
+    if d and cache.all_context_pages_resident and resident.shape[1] == GBSA_PAGE_SIZE:
         # The connector has already proved every logical page is resident.
         # Its page table is indexed by persistent state slots, not batch rows.
         states = cache.runtime.request_state_indices
@@ -209,8 +209,7 @@ def run_qsa_hisparse(layer, meta, side, selected, query, key, value, output):
             side.seq_lens[: meta.num_reqs],
             output[:d],
         )
-        return
-    if d:
+    elif d:
         requests = side.token_to_req[:d].long()
         visible = torch.minimum(side.logical_positions[:d] + 1, side.seq_lens[requests])
         logical = group.logical_topk_indices[:d]

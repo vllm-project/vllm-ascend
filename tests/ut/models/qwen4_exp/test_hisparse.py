@@ -2,6 +2,8 @@
 
 import ast
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import Mock
 
 import pytest
 import torch
@@ -64,3 +66,60 @@ def test_physical_attention_reads_selected_rows_per_kv_head(ops, kv_heads):
         key, value = rows[:, head * kv_heads // heads].split(dim, dim=-1)
         expected[0, head] = ((key @ query[0, head]) * dim**-0.5).softmax(0) @ value
     torch.testing.assert_close(actual, expected)
+
+
+def test_mixed_resident_batch_uses_decode_fast_path_and_stages_prefill(ops):
+    resident = torch.empty(3, 128, 16)
+    group = Mock()
+    group.stage_prefill_rows.return_value = (
+        resident[:1],
+        torch.tensor([[0]], dtype=torch.int32),
+        torch.tensor([0, 0, 0], dtype=torch.int32),
+    )
+    cache = Mock(
+        all_context_pages_resident=True,
+        decode_batch=False,
+        block_table=torch.tensor([[11], [21], [31]], dtype=torch.int32),
+        runtime=SimpleNamespace(
+            request_state_indices=torch.tensor([2, 0, 1], dtype=torch.int32),
+            host_cache=resident,
+            row_width=16,
+        ),
+    )
+    slots = torch.arange(5)
+    cache.write_target.return_value = resident, slots, 5
+    layer = SimpleNamespace(
+        index_group=group,
+        hisparse_cache=cache,
+        indexer=SimpleNamespace(token_topk=8, compress_ratio=4),
+        num_kv_heads=1,
+        head_dim=8,
+    )
+    meta = SimpleNamespace(
+        num_actual_tokens=5,
+        num_decode_tokens=2,
+        num_reqs=3,
+        num_decodes=2,
+        slot_mapping=slots,
+        block_size=128,
+        prefill_dispatch=object(),
+    )
+    side = SimpleNamespace(
+        token_to_req=torch.tensor([0, 1, 2, 2, 2]),
+        logical_positions=torch.tensor([8192, 8193, 0, 1, 2]),
+        seq_lens=torch.tensor([8193, 8194, 3]),
+    )
+    for name in ("_store_qsa_cache_rows", "qsa_resident_gbsa_attention", "dispatch_qsa_attention"):
+        ops[name] = Mock()
+    qkv = torch.zeros(5, 1, 8)
+    ops["run_qsa_hisparse"](layer, meta, side, torch.zeros(5, 5, dtype=torch.int32), qkv, qkv, qkv, qkv)
+
+    cache.swap_in.assert_not_called()
+    group.stage_prefill_rows.assert_called_once()
+    fast_args = ops["qsa_resident_gbsa_attention"].call_args.args
+    assert fast_args[0].shape[0] == 2
+    assert fast_args[3].tolist() == [[31], [11], [21]]
+    assert fast_args[4].tolist() == [0, 1]
+    prefill_args = ops["dispatch_qsa_attention"].call_args.args
+    assert prefill_args[0].shape[0] == 3
+    assert prefill_args[-1] is meta.prefill_dispatch
