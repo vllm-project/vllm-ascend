@@ -24,6 +24,7 @@ from vllm_ascend.ops.fused_moe.shared_experts import AscendSharedExperts
 
 def _build_runner() -> AscendMoERunner310:
     runner = AscendMoERunner310.__new__(AscendMoERunner310)
+    runner._enable_moe_super_kernel_scopes = False
     nn.Module.__init__(runner)
     runner.routed_input_transform = None
     runner.routed_output_transform = None
@@ -230,6 +231,7 @@ def test_shared_experts_part2_310_applies_optional_gate(with_gate):
         expert_gate=_Gate() if with_gate else None,
     )
     shared_experts = AscendSharedExperts.__new__(AscendSharedExperts)
+    shared_experts._enable_moe_super_kernel_scopes = False
     shared_experts.layer = shared_experts_layer
     hidden_states = torch.randn(3, 4)
     shared_act = torch.randn(3, 4)
