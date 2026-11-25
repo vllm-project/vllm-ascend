@@ -1,0 +1,14 @@
+pr: 23178
+entries:
+  - category: bugfix
+    text: >-
+      Model Runner V2 EPLB no longer undercounts expert load on the MC2, FusedMC2
+      and All2All paths when data parallelism is larger than one: the load executed
+      by the experts of idle data-parallel ranks is now recorded, so rebalancing
+      no longer sees those ranks as empty.
+  - category: config
+    text: >-
+      With `load_collection_phase` set to `prefill` or `decode`, data parallelism
+      larger than one and a MoE path other than AllGather, a step in which
+      data-parallel ranks run different phases is now skipped instead of being
+      recorded partially.
