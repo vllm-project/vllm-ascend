@@ -89,6 +89,11 @@ RUN set -e; \
     for p in libaio-devel libunwind-devel jsoncpp-devel liburing-devel xxhash xxhash-devel; do \
         $PM install -y "$p" || echo "WARN: 可选依赖 $p 不可用，稍后由源码编译环节兜底"; \
     done; \
+    if ! command -v mpicc >/dev/null 2>&1; then \
+        $PM install -y mpich mpich-devel >/dev/null 2>&1 || \
+        $PM install -y openmpi openmpi-devel >/dev/null 2>&1 || \
+        echo "WARN: 软件源无 MPI 开发包，mooncake 的 USE_ASCEND 传输层将无法编译"; \
+    fi; \
     rm -rf /var/cache/yum/* /var/cache/dnf/*
 
 # 1b) C++20 工具链：vllm-ascend 的依赖 arctic-inference 用 nanobind 构建，要求 C++20，
@@ -392,8 +397,17 @@ RUN for f in /usr/local/Ascend/cann/set_env.sh /usr/local/Ascend/ascend-toolkit/
           rm -rf /tmp/xxHash && ldconfig; \
       fi; \
       cd /tmp/Mooncake && mkdir -p build && cd build && \
+      MPI_ARGS=""; \
+      for d in /usr/lib64/mpich /usr/lib64/openmpi /usr/lib/x86_64-linux-gnu/openmpi \
+               /usr/lib/aarch64-linux-gnu/openmpi; do \
+          if [ -x "$d/bin/mpicc" ]; then \
+              MPI_ARGS="-DMPI_C_COMPILER=$d/bin/mpicc -DMPI_CXX_COMPILER=$d/bin/mpicxx"; \
+              export LD_LIBRARY_PATH="$d/lib:$d/lib64:$LD_LIBRARY_PATH"; \
+              break; \
+          fi; \
+      done; \
       cmake .. -DCMAKE_BUILD_TYPE=Release \
-          -DWITH_TE=ON -DUSE_CUDA=OFF -DUSE_ASCEND=ON && \
+          -DWITH_TE=ON -DUSE_CUDA=OFF -DUSE_ASCEND=ON ${MPI_ARGS} && \
       make -j"${MAX_JOBS:-$(nproc)}" && make install && ldconfig; } 2>&1 | tee -a "$LOG"
 
 # 9) mooncake python 绑定
