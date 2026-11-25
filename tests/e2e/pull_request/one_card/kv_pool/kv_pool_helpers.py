@@ -4,10 +4,12 @@
 
 Constants, environment diagnostics, the stall watchdog, the leg context
 manager, the three measurement phases and the gated A/B runner live here.
-The test files (``test_qwen38_mooncake_pool_ab_a2.py`` and
-``test_qwen38_memcache_pool_ab_a2.py``) import :func:`run` and call it with
-their backend; only the backend-specific pool config builders stay in the
-per-backend modules.
+The per-backend test files import :func:`run` and call it with their backend;
+``test_qwen38_mooncake_pool_ab_a2.py`` is the driver shipped in this PR, and
+the memcache driver (``test_qwen38_memcache_pool_ab_a2.py``) lands once the
+loop-1 runner reserves the hugepages its local service needs. The memcache
+implementation below is therefore exercised only on demand
+(``QWEN38_POOL_ENABLE_MEMCACHE=1``) until that driver returns.
 
 Environment knobs:
 

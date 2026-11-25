@@ -112,10 +112,6 @@ estimated_times:
   tests/e2e/pull_request/two_card/aclgraph/test_aclgraph_capture_replay.py: 20
   # Mooncake pair: ~700s per scenario pair on the a2-1 pool (TP1, gate mode).
   tests/e2e/pull_request/one_card/kv_pool/test_qwen38_mooncake_pool_ab_a2.py: 1500
-  # Memcache pair on the loop-1 runner (TP1, gate mode): ~700s when both
-  # scenarios execute; the file currently skips both until the runner reserves
-  # hugepages, so this is headroom for the re-enabled shape.
-  tests/e2e/pull_request/one_card/kv_pool/test_qwen38_memcache_pool_ab_a2.py: 1500
   tests/e2e/pull_request/two_card/lora/test_ilama_lora_tp2.py: 180
   tests/e2e/pull_request/two_card/lora/test_llama32_lora_tp2.py: 430
   tests/e2e/pull_request/two_card/lora/test_qwen3moe_lora.py: 470
