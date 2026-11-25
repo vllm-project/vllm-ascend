@@ -29,7 +29,6 @@ from typing import TYPE_CHECKING, Any
 from unittest.mock import patch
 
 import torch
-import torch.nn as nn
 import torch_npu
 from torch_npu.op_plugin.atb._atb_ops import _register_atb_extensions
 from torch_npu.profiler import dynamic_profile as dp
