@@ -631,7 +631,7 @@ vllm serve "${MODEL_PATH}" \
     --no-enable-prefix-caching \
     --trust-remote-code \
     --speculative-config '{"method": "qwen3_5_mtp", "num_speculative_tokens": 3}' \
-    --additional-config '{"enable_cpu_binding": true, "recompute_scheduler_enable": true}' \
+    --additional-config '{"enable_cpu_binding": true, "scheduler_config": {"recompute_scheduler_enable": true}}' \
     --kv-transfer-config '{
         "kv_connector": "MooncakeConnectorV1",
         "kv_buffer_device": "npu",
@@ -676,8 +676,8 @@ The P:D group ratio and the parameter values in the two scripts should be adapte
 - The P:D group ratio follows the workload. Workloads dominated by long, uncached inputs (e.g., long-context summarization over unique documents) need more Prefill groups; workloads with a high prefix-cache hit rate spend most wall time in decode and shift capacity toward Decode (e.g., 1P2D).
 - On Prefill, `--max-num-batched-tokens` should be no smaller than the effective uncached input length (within the HBM activation budget), so a prompt is prefilled in a single chunk instead of being split into multiple rounds. The example uses `66000` for a 64K-token 0%-cache-hit input budget; scale it down when prefix caching absorbs most of the input, because a cold request of the full length can transiently exceed the activation budget and cause OOM.
 - `--max-num-seqs` on Prefill bounds concurrent prefill batches per group. Keep it small for long-input workloads so each chunk gets the full HBM activation budget; larger values are reasonable for short inputs.
-- Qwen3.8-27B is a hybrid-attention model: only 16 of 64 layers use full attention, and the other 48 Gated DeltaNet layers carry a recurrent state. Enabling prefix caching in PD mode therefore requires `--mamba-cache-mode align` so the recurrent state is aligned with the cached KV blocks; enable both prefix caching and `--mamba-cache-mode align` on P and D (replace `--no-enable-prefix-caching` with `--enable-prefix-caching --mamba-cache-mode align` in both scripts).
-- For short-prompt or multimodal workloads, `"gdn_prefill_backend": "fla_npu"` in the Prefill `--additional-config` selects the FLA NPU prefill backend for the linear-attention layers and improves prefill throughput.
+- Qwen3.8-27B is a hybrid-attention model: only 16 of 64 layers use full attention, and the other 48 Gated DeltaNet layers carry a recurrent state. To enable prefix caching in PD mode, replace `--no-enable-prefix-caching` with `--enable-prefix-caching` on P and D, and keep the choice identical on both roles; the recurrent-state cache is aligned with the KV blocks automatically, no extra flag is needed.
+- The FLA AscendC prefill kernel for the linear-attention layers is enabled automatically on hardware profiles that support it, so no extra configuration is needed for prefill throughput.
 - `HCCL_OP_EXPANSION_MODE="AIV"` is set only on Decode. Do not export it (directly or through a shared terminal) when launching Prefill; long-input prefill slows down with AIV.
 - Keep `--served-model-name`, the checkpoint, and the MTP `method`/`num_speculative_tokens` identical on P and D; change them only together.
 - On Decode, the `cudagraph_capture_sizes` are coupled to MTP: with `num_speculative_tokens = N`, each capture size must be a multiple of `N + 1` (the example uses `4`-multiples for `num_speculative_tokens = 3`). If you change `num_speculative_tokens` or disable MTP, regenerate the list accordingly (e.g., `N = 4` → `5, 10, 15, ...`); otherwise the actual decode batch size cannot hit a captured graph, aclgraph silently falls back to eager, and TPOT degrades.
@@ -808,7 +808,7 @@ vllm serve "${MODEL_PATH}" \
     --mm-encoder-tp-mode data \
     --mm-processor-cache-type shm \
     --compilation-config '{"cudagraph_capture_sizes": [4,8,12,16,20,24,28,32,36,40,44,48,52,56,60,64,68,72,76,80,84,88,92,96,100,104,108,112,116,120,124,128,132,136,140,144,148,152,156,160,164,168,172,176,180,184,188,192,196,200,204,208,212,216,220,224,228,232,236,240,244,248,252,256], "cudagraph_mode": "FULL_DECODE_ONLY"}' \
-    --additional-config '{"enable_cpu_binding": true, "recompute_scheduler_enable": true}' \
+    --additional-config '{"enable_cpu_binding": true, "scheduler_config": {"recompute_scheduler_enable": true}}' \
     --distributed-executor-backend mp \
     --no-disable-hybrid-kv-cache-manager \
     --kv-transfer-config '{
