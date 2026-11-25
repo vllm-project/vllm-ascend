@@ -12,7 +12,7 @@ from vllm.distributed.kv_events import BlockStored
 from vllm.logger import logger
 from vllm.v1.core.kv_cache_utils import maybe_convert_block_hash
 
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence import AttentionComputeStartGate
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence import AttentionLoadGate
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.base import (
     Backend,
     require_aligned_batch_results,
@@ -1350,23 +1350,19 @@ class KVCacheStoreRecvingThread(_WholeBlockKVTransferThread):
                     time.perf_counter() - load_get_start,
                     len(key_list),
                 )
-            if memory_locations is not None or getattr(self.m_store, "strict_get_results", False) is True:
+            # A hybrid request must acknowledge a failed import as a unit.
+            if (
+                memory_locations is not None
+                or len(req_meta.block_ids_by_group) > 1
+                or getattr(self.m_store, "strict_get_results", False) is True
+            ):
                 if ret is None or len(ret) != len(key_list) or any(r != 0 for r in ret):
                     self._finish_failed_receives([req_meta])
                     return
             elif ret is None or any(r != 0 for r in ret):
                 missing_block_ids = record_failed_blocks(block_id_list, ret if ret is not None else [1] * len(key_list))
-                if len(req_meta.block_ids_by_group) == 1:
-                    with self._invalid_block_ids_lock:
-                        self._invalid_block_ids.update(missing_block_ids)
-                elif missing_block_ids:
-                    logger.error(
-                        "KV load failed for hybrid request %s. "
-                        "Skip invalid-block fallback to avoid scheduler crash. "
-                        "failed_blocks=%s",
-                        req_id,
-                        missing_block_ids,
-                    )
+                with self._invalid_block_ids_lock:
+                    self._invalid_block_ids.update(missing_block_ids)
             logger.debug(
                 "KV pool async recv backend get returned request=%s token_len=%d groups=%s keys=%d",
                 req_id,

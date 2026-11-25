@@ -28,6 +28,7 @@ from uuid import UUID, uuid4
 import pytest
 import torch
 from vllm.distributed.kv_transfer.kv_connector.utils import KVOutputAggregator
+from vllm.v1.core.sched.output import KVConnectorBlockState
 from vllm.v1.core.sched.scheduler import Scheduler
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
@@ -39,6 +40,7 @@ from vllm.v1.kv_cache_interface import (
 )
 from vllm.v1.outputs import KVConnectorOutput
 from vllm.v1.request import RequestStatus
+from vllm.v1.serial_utils import MsgpackEncoder
 from zmq.constants import RCVTIMEO, REP
 from zmq.error import ZMQError
 from zmq.sugar.context import Context
@@ -1724,11 +1726,12 @@ class TestKVPoolSchedulerUpdateFinished(unittest.TestCase):
 def test_failed_hisparse_import_skips_repeated_get(hisparse, finished, should_recompute):
     config = make_config()
     config.kv_transfer_config.kv_connector_extra_config["load_async"] = True
-    scheduler = KVPoolScheduler(config, use_layerwise=False)
+    cache = make_resolved_cache_config(config)
     if hisparse:
-        scheduler.kv_cache_config = SimpleNamespace(hisparse_host_num_blocks=8)
+        cache.hisparse_host_num_blocks = 8
+    scheduler = KVPoolScheduler(config, use_layerwise=False, kv_cache_config=cache)
     scheduler.client = MagicMock(closed=False)
-    scheduler.client.lookup.return_value = 256
+    scheduler.client.lookup.return_value = StoreLookupResult(256)
     request = SimpleNamespace(
         request_id="req",
         num_tokens=512,
@@ -1763,7 +1766,7 @@ def test_failed_hisparse_import_skips_repeated_get(hisparse, finished, should_re
 @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.LookupKeyClient")
 def test_abort_after_deferred_load_is_released_before_worker_dispatch(_):
     config = make_config(kv_role="kv_both", extra_config={"load_async": True})
-    store = KVPoolScheduler(config, use_layerwise=False)
+    store = KVPoolScheduler(config, use_layerwise=False, kv_cache_config=make_resolved_cache_config(config))
     request = MagicMock(request_id="req", status=RequestStatus.WAITING_FOR_REMOTE_KVS)
     request.is_finished.side_effect = lambda: RequestStatus.is_finished(request.status)
     store.load_specs["req"] = LoadSpec(vllm_cached_tokens=0, kvpool_cached_tokens=16, can_load=False)

@@ -265,16 +265,21 @@ class TestPCPPoolWorker(unittest.TestCase):
     def test_scheduler_and_worker_share_resolved_cache_policy(self):
         from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler import KVPoolScheduler
 
-        for dcp, alignment in ((1, 4), (2, 4), (2, 32), (4, 64)):
-            with self.subTest(dcp=dcp, alignment=alignment):
+        for dcp, alignment, host_blocks in ((1, 4, None), (2, 4, None), (2, 32, None), (4, 64, None), (1, 4, 32)):
+            with self.subTest(dcp=dcp, alignment=alignment, host_blocks=host_blocks):
                 spec = FullAttentionSpec(block_size=16, num_kv_heads=1, head_size=4, dtype=torch.bfloat16)
                 cache = SimpleNamespace(
                     kv_cache_groups=[KVCacheGroupSpec(["layer.0"], spec)],
                     hash_block_size=4,
                     cache_hit_alignment_tokens=alignment,
                     prefix_cache_retention_interval=None,
+                    hisparse_host_num_blocks=host_blocks,
                 )
-                worker = make_worker(self, dcp_size=dcp, kv_cache_config=cache)
+                with patch(
+                    "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker.build_pool_key_namespace",
+                    return_value="test",
+                ):
+                    worker = make_worker(self, dcp_size=dcp, kv_cache_config=cache)
                 with patch(
                     "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.mooncake_backend."
                     "MooncakeBackend.create_scheduler_client"
@@ -290,6 +295,9 @@ class TestPCPPoolWorker(unittest.TestCase):
                     "use_eagle",
                 ):
                     self.assertEqual(getattr(scheduler, field), getattr(worker, field), field)
+                self.assertEqual(
+                    worker.enable_partial_hash_hits, host_blocks is None and alignment < worker.lcm_block_size
+                )
 
     def test_partial_hits_follow_core_alignment(self):
         for alignment, layerwise, expected in ((32, False, True), (640, False, False), (32, True, False)):

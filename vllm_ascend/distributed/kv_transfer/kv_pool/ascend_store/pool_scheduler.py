@@ -129,11 +129,11 @@ class BaseKVPoolScheduler(ABC):
             assert group_block_size % self.hash_block_size == 0, "block_size must be divisible by hash_block_size"
         self._block_size = self.grouped_block_size[0]
         self.lcm_block_size = math.lcm(*(self.grouped_block_size[i] for i in self.cacheable_group_ids))
-        # TODO: Adapt layerwise save/load paths to support partial hash hits.
-        # Layerwise IO keeps its existing whole-page protocol; Core may still
-        # use finer alignment for local APC independently of external restores.
+        # Layerwise and HiSparse external transfers use complete pages.
         self.enable_partial_hash_hits = (
-            not use_layerwise and kv_cache_config.cache_hit_alignment_tokens < self.lcm_block_size
+            not use_layerwise
+            and not has_hisparse_cache_layout(kv_cache_config)
+            and kv_cache_config.cache_hit_alignment_tokens < self.lcm_block_size
         )
         self.cache_transfer_granularity = infer_cache_transfer_granularity(
             self.grouped_block_size, self.lcm_block_size, self.cacheable_group_ids
@@ -918,9 +918,131 @@ class KVPoolScheduler(BaseKVPoolScheduler):
 
     def retain_blocks_for_save(self, req_meta: ReqMeta) -> None:
         """Keep Mamba source blocks alive until bulk save completes."""
-        self._in_flight_save_blocks.retain(req_meta, self.num_speculative_blocks_by_group, self._block_pool)
+        if req_meta.can_save and req_meta.event_id is None and self.cache_coordinator is not None:
+            if tail := self._partial_tail_non_mamba_puts(req_meta):
+                req_meta.boundary_puts = [*tail, *(req_meta.boundary_puts or [])]
+        self._in_flight_save_blocks.retain(
+            req_meta,
+            self._block_pool,
+        )
 
-    def _lookup_external_hit_tokens(self, request: Request, num_computed_tokens: int) -> int | None:
+    def _partial_tail_non_mamba_puts(self, req_meta: ReqMeta) -> list[BoundaryPut]:
+        """Locate the non-Mamba blocks a partial-tail save publishes.
+
+        A later request resumes at the prompt's Mamba checkpoint (``boundary``)
+        only if both pieces of KV are stored:
+
+        - Mamba groups: the state at ``boundary``, handed off by Core as a
+          boundary put of its own, so Mamba groups are not listed here.
+        - Other groups: the KV from the last LCM-aligned normal save up to
+          ``boundary`` plus the group's EAGLE proof margin (``proof_end``).
+          Each block is keyed by the hash at its end, clipped to ``proof_end``.
+
+        Groups whose proof is not computed yet are omitted. For example, with
+        LCM 16, blocks of 4 tokens, and a checkpoint at 44, the full-attention
+        blocks are 8-10, keyed at 36, 40 and 44.
+
+        A Mamba state handed off at any other position, i.e. a shared-prefix
+        junction (``--enable-mamba-shared-prefix-checkpoint``), adds no puts here.
+        """
+        coord = self.cache_coordinator
+        assert coord is not None
+        mamba_tails = [
+            put.num_tokens
+            for put in req_meta.boundary_puts or []
+            if put.group_id in coord.mamba_group_ids and put.num_tokens % self.grouped_block_size[put.group_id]
+        ]
+        # The tail is due on the save that first covers the prompt, or when Mamba
+        # hands off its checkpoint state.
+        if not mamba_tails and not req_meta.publish_partial_tail:
+            return []
+        prompt_tokens = req_meta.num_prompt_tokens
+        completed = req_meta.completed_token_len
+        assert prompt_tokens is not None and completed is not None
+        hash_block_size = coord.hash_block_size
+        # Core drops the Mamba checkpoint whenever EAGLE block drop is on,
+        # whichever groups carry the eagle flag.
+        boundary = get_mamba_prefill_checkpoint_position(prompt_tokens, hash_block_size, coord.use_eagle)
+        # Any other sub-block Mamba hand-off is a shared-prefix junction. Its
+        # attention KV, EAGLE proof included, ends on an attention block end no
+        # later than this checkpoint's proof, so normal and prompt-tail saves
+        # store it.
+        if not req_meta.publish_partial_tail and boundary not in mamba_tails:
+            return []
+        num_hashes = len(req_meta.block_hashes)
+        if boundary == 0 or boundary // hash_block_size > num_hashes:
+            return []
+        start = boundary // coord.lcm_block_size * coord.lcm_block_size
+        puts: list[BoundaryPut] = []
+        # Ascend keeps original group IDs; exclude non-cacheable groups here
+        # rather than renumbering the block tables as Mooncake Store does.
+        for group_id in self.cacheable_group_ids:
+            if group_id in coord.mamba_group_ids:
+                continue
+            proof_end = boundary + coord.eagle_proof_margin_by_group.get(group_id, 0)
+            if proof_end > completed or proof_end // hash_block_size > num_hashes:
+                continue
+            block_size = self.grouped_block_size[group_id]
+            group_blocks = req_meta.block_ids_by_group[group_id]
+            for block_idx in range(start // block_size, cdiv(proof_end, block_size)):
+                if block_idx >= len(group_blocks):
+                    break
+                block_id = group_blocks[block_idx]
+                if block_id == NULL_BLOCK_ID:
+                    continue
+                num_tokens = min((block_idx + 1) * block_size, proof_end)
+                puts.append(BoundaryPut(group_id, block_id, num_tokens))
+        return puts
+
+    def register_finished_partial_tail(
+        self,
+        request: Request,
+        block_ids: tuple[list[int], ...],
+        partial_tail_offloads: list[tuple[int, int, int]],
+    ) -> bool:
+        """Queue and pin a finish-time tail for the next connector step."""
+        if not self.can_put or not partial_tail_offloads:
+            return False
+        tracker = self._request_trackers.get(request.request_id)
+        if tracker is None or not any(block_ids):
+            return False
+        boundaries = {boundary for _, _, boundary in partial_tail_offloads}
+        if len(boundaries) != 1:
+            raise ValueError("Partial-tail offloads for one request must share a boundary")
+        boundary_tokens = next(iter(boundaries))
+        assert tracker.prefill_end_tokens is not None
+        if boundary_tokens > tracker.prefill_end_tokens:
+            return False
+
+        coord = self.cache_coordinator
+        assert coord is not None
+        mamba_puts: list[BoundaryPut] = []
+        for group_id, block_id, boundary in partial_tail_offloads:
+            # Ascend retains Core's group IDs instead of remapping Store groups.
+            if group_id not in coord.mamba_group_ids:
+                return False
+            if block_id == NULL_BLOCK_ID:
+                return False
+            mamba_puts.append(BoundaryPut(group_id, block_id, boundary))
+        req_meta = ReqMeta(
+            req_id=request.request_id,
+            token_len_chunk=0,
+            can_save=True,
+            block_ids_by_group=[list(group) for group in block_ids],
+            block_hashes=list(request.block_hashes),
+            num_prompt_tokens=request.num_prompt_tokens,
+            completed_token_len=request.num_computed_tokens,
+            boundary_puts=mamba_puts,
+        )
+        req_meta.boundary_puts = [*self._partial_tail_non_mamba_puts(req_meta), *mamba_puts]
+        assert request.request_id not in self._finished_partial_tail_metas
+        # This job has no normal save range. Pin only its exact boundary sources.
+        self._in_flight_save_blocks.retain(req_meta, self._block_pool)
+        self._finished_partial_tail_metas[request.request_id] = req_meta
+        # The store job owns exact block refs, so request cleanup need not wait.
+        return False
+
+    def _lookup_external_hit_tokens(self, request: Request, num_computed_tokens: int) -> StoreLookupResult | None:
         # Core may reschedule the request with zero computed tokens after an
         # import failure. A key can still be visible to lookup while GET fails.
         if request.request_id in self._failed_external_load_req_ids:

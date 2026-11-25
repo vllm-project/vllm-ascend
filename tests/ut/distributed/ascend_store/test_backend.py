@@ -629,7 +629,7 @@ class TestMooncakeBackendSetup(unittest.TestCase):
                 self.assertIs(store.setup.call_args.kwargs["engine"], engine.get_engine.return_value)
                 self.assertEqual(store.setup.call_args.kwargs["local_buffer_size"], config.local_buffer_size)
                 self.assertEqual(store.setup.call_args.kwargs["global_segment_size"], config.global_segment_size)
-                backend.register_buffer([2**21], [4096])
+                backend.register_buffer([BufferDescriptor(address=2**21, size_bytes=4096)])
                 global_engine.register_buffer.assert_called_once_with([2**21], [4096])
             store.register_buffer.assert_not_called()
 

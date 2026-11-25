@@ -34,7 +34,10 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend import (
     backend_map,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.buffer import DEVICE_BUFFER_ALIGNMENT, BufferDescriptor
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.coordinator import AscendStoreCoordinator
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.coordinator import (
+    AscendStoreCoordinator,
+    ExternalCachedBlockPool,
+)
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.hisparse.layout import (
     HiSparseTransferLayout,
     build_pool_key_namespace,
@@ -232,9 +235,11 @@ class BaseKVPoolWorker(ABC):
             assert group_block_size % self.hash_block_size == 0, "block_size must be divisible by hash_block_size"
         self.block_size = self.grouped_block_size[0]
         self.lcm_block_size = math.lcm(*(self.grouped_block_size[i] for i in self.cacheable_group_ids))
-        # TODO: Adapt layerwise save/load paths to support partial hash hits.
+        # Match the scheduler's whole-page protocol for layerwise and HiSparse.
         self.enable_partial_hash_hits = (
-            not use_layerwise and kv_cache_config.cache_hit_alignment_tokens < self.lcm_block_size
+            not use_layerwise
+            and not has_hisparse_cache_layout(kv_cache_config)
+            and kv_cache_config.cache_hit_alignment_tokens < self.lcm_block_size
         )
         self.num_kv_cache_groups = len(self.grouped_block_size)
         self.kv_cache_group_families = infer_group_cache_families(kv_cache_groups, self.compress_ratios, self.hf_config)

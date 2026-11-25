@@ -181,6 +181,7 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
             raise ValueError("consumer_is_to_load has been replaced by enable_lookup")
         self.use_layerwise = extra_config.get("use_layerwise", False)
         self.save_decode_cache = extra_config.get("save_decode_cache", False)
+        self.supports_attention_prefetch_gate = bool(self.use_layerwise)
         self.backend_name = extra_config.get("backend", "mooncake").lower()
         if has_hisparse_cache_layout(kv_cache_config):
             incompatibilities = []
