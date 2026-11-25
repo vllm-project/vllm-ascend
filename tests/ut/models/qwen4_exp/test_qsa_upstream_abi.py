@@ -370,7 +370,7 @@ def test_qsa_store_kv_rows_accepts_independent_singleton_head_layouts(monkeypatc
 
             return launch
 
-    monkeypatch.setattr(qsa_ops, "_store_qsa_kv_rows_kernel", FakeKernel())
+    monkeypatch.setattr(qsa_ops, "_store_qsa_key_position_rows_kernel", FakeKernel())
     key_cache = torch.empty((1, 2, 1, 4), dtype=torch.bfloat16)
     value_cache = torch.empty_like(key_cache)
     key_rows = torch.empty((2, 1, 4), dtype=torch.bfloat16)
@@ -532,6 +532,10 @@ def test_pcp_indexer_global_write_invalidates_the_local_layout(monkeypatch) -> N
     common._num_computed_tokens_cache = torch.tensor([0])
     monkeypatch.setattr(qsa.QSAIndexerMetadataBuilder, "build", lambda *_: SimpleNamespace())
     builder = qsa.AscendPCPQSAIndexerMetadataBuilder.__new__(qsa.AscendPCPQSAIndexerMetadataBuilder)
+    # This test covers PCP global-write metadata invalidation, not compressed
+    # QSA preparation.  Keep the compressed path disabled as a real builder
+    # configured with a non-compressing cache would do.
+    builder.compress_ratio = 1
     builder.write_builder = Mock()
 
     builder.build(0, common)
@@ -563,6 +567,9 @@ def test_pcp_qsa_full_graph_keeps_capture_and_replay_extents(monkeypatch, local_
         ),
         torch.device("cpu"),
     )
+    # The extent assertions below exercise the PCP gather/write metadata.  A
+    # compressed-cache owner is intentionally not part of this focused setup.
+    indexer_builder.compress_ratio = 1
 
     def token_to_req(query_starts, out, num_mapped, num_tokens):
         tokens = torch.arange(num_tokens, dtype=query_starts.dtype)
