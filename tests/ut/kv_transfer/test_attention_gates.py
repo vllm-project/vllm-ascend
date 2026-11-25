@@ -2,8 +2,10 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import ast
+from collections.abc import Callable
 from pathlib import Path
 from types import SimpleNamespace
+from typing import cast
 from unittest.mock import Mock
 
 import pytest
@@ -96,7 +98,7 @@ def test_recurrent_layer_leaves_save_event_for_post_compute_hook(fake_npu):
 @pytest.mark.parametrize("route", ["unrelated", "direct", "multi_connector"])
 def test_connector_wait_opens_only_ascend_store_prefetch_gate(route):
     source = Path(__file__).resolve().parents[3] / "vllm_ascend/attention/utils.py"
-    functions = [
+    functions: list[ast.stmt] = [
         node
         for node in ast.parse(source.read_text(encoding="utf-8")).body
         if isinstance(node, ast.FunctionDef)
@@ -120,7 +122,7 @@ def test_connector_wait_opens_only_ascend_store_prefetch_gate(route):
     }
     exec(compile(ast.Module(body=functions, type_ignores=[]), str(source), "exec"), scope)
 
-    scope["wait_for_kv_layer_from_connector"]("model.layers.0.attn")
+    cast(Callable[[str], None], scope["wait_for_kv_layer_from_connector"])("model.layers.0.attn")
 
     connector.wait_for_layer_load.assert_called_once_with("model.layers.0.attn")
     assert record_prefetch.call_count == int(route != "unrelated")
