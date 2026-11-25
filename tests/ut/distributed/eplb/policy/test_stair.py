@@ -399,6 +399,40 @@ class TestStairLoadStatistics(unittest.TestCase):
         self.assertTrue(all(len(set(rank)) == len(rank) for rank in first.rank_expert_ids.tolist()))
         np.testing.assert_array_equal(StairEplbPolicy.placement_replica_counts(first.rank_expert_ids, 3), [2, 1, 1])
 
+    def test_lpt_placement_preserves_current_ranks_on_unlimited_risk_ties(self):
+        current = np.array([[2, 3], [0, 1]])
+        kwargs = dict(
+            expert_means=np.zeros(4),
+            expert_variances=np.zeros(4),
+            expert_covariance=np.zeros((4, 4)),
+            replica_counts=np.ones(4, dtype=np.int64),
+            num_ranks=2,
+            z_score=0.0,
+            current_rank_expert_ids=current,
+            rank_node_ids=np.zeros(2, dtype=np.int64),
+            cross_node_transfer_limit=-1,
+            backtrack_limit=0,
+        )
+
+        limited = StairEplbPolicy.lpt_placement(**kwargs, rank_transfer_limit=2)
+        unlimited = StairEplbPolicy.lpt_placement(**kwargs, rank_transfer_limit=-1)
+
+        np.testing.assert_array_equal(limited.rank_expert_ids, [[0, 1], [2, 3]])
+        np.testing.assert_array_equal(unlimited.rank_expert_ids, current)
+        np.testing.assert_array_equal(unlimited.source_rank_ids, [[0, 0], [1, 1]])
+        np.testing.assert_array_equal(unlimited.source_slot_ids, [[0, 1], [0, 1]])
+
+    def test_lpt_affinity_matching_preserves_node_expert_sets(self):
+        current = np.array([[0, 1], [2, 3], [4, 5], [6, 7]])
+        target = np.array([[4, 5], [6, 7], [0, 1], [2, 3]])
+        node_ids = np.array([0, 0, 1, 1])
+
+        node_local = StairEplbPolicy._preserve_placement_affinity(current, target, node_ids, 0)
+        global_match = StairEplbPolicy._preserve_placement_affinity(current, target, node_ids, -1)
+
+        np.testing.assert_array_equal(node_local, target)
+        np.testing.assert_array_equal(global_match, current)
+
     def test_lpt_placement_rejects_invalid_covariance_shape(self):
         with self.assertRaises(ValueError):
             StairEplbPolicy.lpt_placement(
@@ -711,7 +745,7 @@ class TestStairLoadStatistics(unittest.TestCase):
             )
         )
 
-    def test_plan_layer_breaks_mean_tie_by_migration_count(self):
+    def test_plan_layer_preserves_current_placement_on_mean_tie(self):
         plan = StairEplbPolicy.plan_layer(
             np.ones((1, 3)),
             np.ones(1, dtype=np.int64),
@@ -720,10 +754,7 @@ class TestStairLoadStatistics(unittest.TestCase):
             StairConfig(),
         )
 
-        self.assertIsNotNone(plan)
-        self.assertEqual(plan.predicted_imbalance.mean_ratio, 1.0)
-        np.testing.assert_array_equal(plan.placement.rank_expert_ids, [[0, 2], [2, 1]])
-        self.assertEqual(np.sum(plan.placement.source_rank_ids != np.arange(2)[:, None]), 1)
+        self.assertIsNone(plan)
 
     def test_plan_layer_rejects_mean_regression(self):
         samples = np.array(
