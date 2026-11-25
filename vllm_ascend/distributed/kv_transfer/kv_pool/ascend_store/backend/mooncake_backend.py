@@ -492,6 +492,13 @@ class MooncakeBackend(Backend):
                 self.config.metadata_server,
             )
             raise RuntimeError(msg)
+        if self._use_store_independent_te and self._contribute_memory and self.config.preferred_segment:
+            get_hostname = getattr(store, "get_hostname", None)
+            if get_hostname is not None:
+                configured_segment = get_hostname()
+                if configured_segment:
+                    self.local_seg = configured_segment
+                    logger.info("Mooncake preferred segment for store worker: %s", self.local_seg)
         if ssd_kwargs:
             logger.info(
                 "Mooncake SSD offload enabled (Mode A): path=%s",

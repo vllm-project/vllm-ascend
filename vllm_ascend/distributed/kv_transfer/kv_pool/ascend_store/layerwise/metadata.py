@@ -4,6 +4,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass, field
 
 import numpy as np
+import torch
 
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence import AttentionLoadGate
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
@@ -173,3 +174,4 @@ class LayerLoadTask:
     transfer_tasks: list[LayerTransferTask]
     layer_id: int
     load_gate: AttentionLoadGate | None = None
+    compute_boundary: torch.npu.Event | None = None
