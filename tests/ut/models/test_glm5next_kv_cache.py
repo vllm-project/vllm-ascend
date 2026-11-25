@@ -27,7 +27,6 @@ from vllm_ascend.core.kv_cache_interface import (
     AscendIndexerKPoolTailSpec,
     AscendMLAAttentionSpec,
     get_kv_cache_compression_ratio,
-    get_storage_block_size,
     is_prefix_cacheable,
     register_ascend_kv_cache_specs,
 )
@@ -88,7 +87,7 @@ def test_tail_uses_one_full_precision_page(capacity):
     )
     assert spec.page_size_bytes == 2 * capacity * 128 * 4
     assert spec.block_size == spec.compress_ratio == 4
-    assert spec.num_states == spec.get_num_kernel_states(4) == get_storage_block_size(spec) == capacity
+    assert spec.num_states == spec.get_num_kernel_states(4) == capacity
     assert not spec.dcp_sharded
     assert spec.uses_slot_mapping
     kernel_block_size = select_common_block_size(4, [AscendIndexerKPoolTailBackend], [spec])
@@ -318,7 +317,7 @@ def test_model_cache_layers_publish_source_compatible_specs(dtype, lookahead):
     assert len(indexer.kv_cache) == len(state.kv_cache) == 2
     assert isinstance(indexer_spec, AscendMLAAttentionSpec)
     assert indexer_spec.block_size == 256
-    assert get_storage_block_size(indexer_spec) == 16
+    assert indexer_spec.num_states == 16
     assert get_kv_cache_compression_ratio(indexer_spec) == 16
     assert indexer_spec.model_version == "glm5_next"
     assert indexer_spec.indexes_kv_by_block_stride

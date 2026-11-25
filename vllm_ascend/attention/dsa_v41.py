@@ -9,7 +9,7 @@ moving cache or scheduler knowledge back into the model.
 """
 
 from contextlib import contextmanager
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from typing import Any
 
 import torch
@@ -40,7 +40,6 @@ from vllm_ascend.core.kv_cache_interface import (
     AscendMLAAttentionSpec,
     AscendSlidingWindowMLASpec,
     get_kv_cache_compression_ratio,
-    get_storage_block_size,
 )
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.models.deepseek_v41.cache_config import STATE_RING_ROWS
@@ -857,10 +856,7 @@ class AscendDSAV41MetadataBuilder(AttentionMetadataBuilder[AscendDSAV41Metadata]
         ):
             logical_block_size = vllm_config.cache_config.block_size
             if kv_cache_spec.block_size != logical_block_size:
-                updates = {"block_size": logical_block_size}
-                if "storage_block_size" in kv_cache_spec.__dataclass_fields__:
-                    updates["storage_block_size"] = logical_block_size // get_kv_cache_compression_ratio(kv_cache_spec)
-                kv_cache_spec = replace(kv_cache_spec, **updates)
+                kv_cache_spec = kv_cache_spec.copy_with_new_block_size(logical_block_size)
         super().__init__(kv_cache_spec, layer_names, vllm_config, device)
         max_tokens = getattr(vllm_config.scheduler_config, "max_num_batched_tokens", 4096)
         max_reqs = getattr(vllm_config.scheduler_config, "max_num_seqs", 256)
@@ -1077,7 +1073,7 @@ class AscendDSAV41MetadataBuilder(AttentionMetadataBuilder[AscendDSAV41Metadata]
             slot_mapping=(self._slot_mapping[:num_tokens] if is_state else self._slot_mapping_2d[:0]),
             flat_slot_mapping=None,
             compress_ratio=get_kv_cache_compression_ratio(self.kv_cache_spec),
-            storage_block_size=get_storage_block_size(self.kv_cache_spec),
+            storage_block_size=self.kv_cache_spec.num_states,
             logical_block_size=self.kv_cache_spec.block_size,
             is_compressor_state=is_state,
             cache_kind=self._cache_kind,

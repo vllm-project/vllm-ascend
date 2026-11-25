@@ -106,7 +106,6 @@ class Glm5NextIndexerCache(nn.Module, AttentionLayerBase):
 
     def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec:
         del vllm_config
-        ratio_kwargs: dict[str, Any] = {"tokens_per_state": self.compress_ratio}
         return AscendMLAAttentionSpec(
             block_size=self.cache_config.block_size,
             num_kv_heads=1,
@@ -117,7 +116,7 @@ class Glm5NextIndexerCache(nn.Module, AttentionLayerBase):
             cache_dtype_str=None,
             model_version="glm5_next",
             indexes_kv_by_block_stride=True,
-            **ratio_kwargs,
+            tokens_per_state=self.compress_ratio,
         )
 
     def get_attn_backend(self):
