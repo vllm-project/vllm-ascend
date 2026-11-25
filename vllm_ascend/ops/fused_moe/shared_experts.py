@@ -210,8 +210,8 @@ class AscendSharedExperts:
         if getattr(self.moe_config, "deepgemm_mega_moe", False) is True:
             # The routed layer's post-load hook packs both FP8 linears directly
             # from their checkpoint tensors. Keep the normal mode-3 forward.
-            for linear in (self.layer.gate_up_proj, self.layer.down_proj):
-                linear._deepgemm_mega_moe_shared_linear = True
+            self._wrap_linear_for_megamoe_fusion(self.layer.gate_up_proj, "w1", preserve_checkpoint=True)
+            self._wrap_linear_for_megamoe_fusion(self.layer.down_proj, "w2", preserve_checkpoint=True)
             self.megamoe_shared_weights_ready = True
             return
         if not use_cann_megamoe(get_current_vllm_config()):
@@ -389,7 +389,9 @@ class AscendSharedExperts:
             return ("swigluoai", params)
         return None
 
-    def _wrap_linear_for_megamoe_fusion(self, linear: torch.nn.Module, slot: str) -> None:
+    def _wrap_linear_for_megamoe_fusion(
+        self, linear: torch.nn.Module, slot: str, *, preserve_checkpoint: bool = False
+    ) -> None:
         """Rebuild the shared weight right after its linear is processed.
 
         The wrapper is attached to the linear's own quant-method instance and
@@ -399,15 +401,19 @@ class AscendSharedExperts:
         quant_method = getattr(linear, "quant_method", None)
         original = getattr(quant_method, "process_weights_after_loading", None)
         if original is None:
+            if preserve_checkpoint:
+                return  # No linear post-load conversion to bypass.
             self._disable_megamoe_shared_fusion(
                 f"shared linear {type(linear).__name__} has no process_weights_after_loading"
             )
             return
 
         @wraps(original)
-        def wrapped_megamoe_collect(*args, **kwargs):
-            result = original(*args, **kwargs)
-            if args and args[0] is linear:
+        def wrapped_megamoe_collect(layer, *args, **kwargs):
+            if layer is linear and preserve_checkpoint:
+                return None
+            result = original(layer, *args, **kwargs)
+            if layer is linear:
                 self._collect_megamoe_shared_weight(slot, linear)
             return result
 

@@ -383,3 +383,19 @@ def test_rejects_incompatible_symmetric_buffer_scheduling(context, name, value):
         backend.DeepGemmExperts(layer())
     dependency.SymmBuffer.assert_not_called()
     dependency.transform_weights_for_mega_moe.assert_not_called()
+
+
+def test_shared_post_load_preserves_only_the_two_fused_linears():
+    from vllm_ascend.ops.fused_moe.shared_experts import AscendSharedExperts
+
+    original = MagicMock()
+    method = SimpleNamespace(process_weights_after_loading=original)
+    gate_up, down, other = (SimpleNamespace(quant_method=method) for _ in range(3))
+    owner = AscendSharedExperts.__new__(AscendSharedExperts)
+    owner._wrap_linear_for_megamoe_fusion(gate_up, "w1", preserve_checkpoint=True)
+    owner._wrap_linear_for_megamoe_fusion(down, "w2", preserve_checkpoint=True)
+
+    method.process_weights_after_loading(gate_up)
+    method.process_weights_after_loading(layer=down)
+    assert method.process_weights_after_loading(other) is original.return_value
+    original.assert_called_once_with(other)
