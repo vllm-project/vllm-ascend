@@ -1020,7 +1020,11 @@ class AscendConfig:
         # Sparse C8 derivation. StoreKVBlock can be disabled by users, and is
         # otherwise enabled only for SFA + Lightning Indexer C8 on PD prefill
         # nodes.
-        from vllm_ascend.utils import model_uses_kpool_indexer, model_uses_sfa_sparse
+        from vllm_ascend.utils import (
+            is_hif8_c8_kv_quant,
+            model_uses_kpool_indexer,
+            model_uses_sfa_sparse,
+        )
 
         use_sparse = model_uses_sfa_sparse(vc.model_config)
         # The SFA C8 packed KV cache path is indexer-agnostic; kpool-indexer
@@ -1092,7 +1096,7 @@ class AscendConfig:
         self._check_mix_placement()
 
         # sparse KV offload vs packed SFA main cache mutex
-        self._validate_sparse_packed_kv_offload_compatibility()
+        self._validate_sparse_packed_kv_offload_compatibility(is_hif8_c8_kv_quant(vllm_config))
         if fallback_for_swiglu_limits:
             # Keep the derived flags until the mode-3 hardware and model checks have run.
             self._megamoe_supported = False
@@ -1170,10 +1174,10 @@ class AscendConfig:
                 "such as Kimi K3. Set additional_config.enable_fused_mc2 to 0, 1, or 2."
             )
 
-    def _validate_sparse_packed_kv_offload_compatibility(self) -> None:
-        if self.sparse_kv_offload_config.enabled and self.uses_packed_sfa_main_cache:
+    def _validate_sparse_packed_kv_offload_compatibility(self, is_hif8_c8_kv_quant) -> None:
+        if self.sparse_kv_offload_config.enabled and (self.uses_packed_sfa_main_cache or is_hif8_c8_kv_quant):
             raise NotImplementedError(
-                "Sparse KV offload does not support packed SFA main caches (C8 or TQ4). "
+                "Sparse KV offload does not support SFA main-cache quantization (C8, TQ4 or HIF8). "
                 "Sparse LI C8 is supported because the indexer cache remains device-resident."
             )
 

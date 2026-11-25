@@ -7,6 +7,7 @@ from unittest.mock import Mock
 import pytest
 import torch
 from vllm.config import ParallelConfig
+from vllm.v1.attention.backend import AttentionBackend
 from vllm.v1.attention.ops import metadata as upstream_metadata_ops
 from vllm.v1.kv_cache_interface import MLAAttentionSpec
 from vllm.v1.worker import cp_utils
@@ -426,8 +427,68 @@ def test_pcp_indexer_global_write_invalidates_the_local_layout(monkeypatch) -> N
     assert common._token_to_req_indices_cache is local_mapping
 
 
+@pytest.fixture
+def cpu_token_to_req(monkeypatch):
+    def token_to_req(query_starts, out, num_mapped, num_tokens):
+        tokens = torch.arange(num_tokens, dtype=query_starts.dtype)
+        requests = torch.searchsorted(query_starts[1:], tokens, right=True)
+        out[:num_tokens].copy_(torch.where(tokens < num_mapped, requests, 0))
+        return out[:num_tokens]
+
+    monkeypatch.setattr(upstream_metadata_ops, "compute_token_to_req_indices", token_to_req)
+
+
+@pytest.mark.parametrize("full_graph, expected_rows", [(True, 56), (False, 52)])
+def test_qsa_padded_decode_maps_only_live_rows(cpu_token_to_req, full_graph, expected_rows):
+    spec = MLAAttentionSpec(block_size=16, num_kv_heads=1, head_size=128, dtype=torch.bfloat16, tokens_per_state=4)
+    config = SimpleNamespace(
+        scheduler_config=SimpleNamespace(max_num_seqs=14, max_num_batched_tokens=56),
+        speculative_config=SimpleNamespace(
+            num_speculative_tokens=3, parallel_drafting=False, max_num_new_slots_for_drafting=0
+        ),
+        parallel_config=SimpleNamespace(decode_context_parallel_size=1),
+    )
+    device = torch.device("cpu")
+    indexer = qsa.QSAIndexerMetadataBuilder(spec, ["indexer"], config, device)
+    main = qsa.AscendQSAMetadataBuilder(spec, ["main"], config, device)
+    other = Mock()
+    other.build.side_effect = lambda common_prefix_len, common_attn_metadata: common_attn_metadata
+    groups = [
+        AttentionGroup(
+            backend=backend, layer_names=[name], kv_cache_spec=spec, kv_cache_group_id=0, metadata_builders=[builder]
+        )
+        for name, backend, builder in (
+            ("indexer", qsa.QSAIndexerBackend, indexer),
+            ("main", qsa.AscendQSABackend, main),
+            ("other", AttentionBackend, other),
+        )
+    ]
+    starts = torch.arange(0, 57, 4, dtype=torch.int32)
+    metadata = build_attn_metadata(
+        attn_groups=[groups],
+        num_reqs=14,
+        num_actual_reqs=13,
+        num_tokens=56,
+        num_actual_tokens=52,
+        query_start_loc_gpu=starts,
+        query_start_loc_cpu=starts,
+        max_query_len=4,
+        seq_lens=torch.full((14,), 100, dtype=torch.int32),
+        max_seq_len=100,
+        is_prefilling=torch.zeros(14, dtype=torch.bool),
+        block_tables=(torch.zeros((14, 7), dtype=torch.int32),),
+        slot_mappings=(torch.arange(56),),
+        kv_cache_config=SimpleNamespace(kv_cache_groups=[SimpleNamespace(kv_cache_spec=spec)]),
+        full_graph_mode=full_graph,
+        skip_ring_state_update=False,
+    )
+    assert metadata["indexer"].num_actual_tokens == metadata["main"].num_actual_tokens == expected_rows
+    assert metadata["indexer"].logical_positions.tolist() == [96, 97, 98, 99] * 13 + [-1] * (expected_rows - 52)
+    assert metadata["other"].num_actual_tokens == 52
+
+
 @pytest.mark.parametrize("local_live_tokens", [0, 1, 2])
-def test_pcp_qsa_full_graph_keeps_capture_and_replay_extents(monkeypatch, local_live_tokens) -> None:
+def test_pcp_qsa_full_graph_keeps_capture_and_replay_extents(monkeypatch, cpu_token_to_req, local_live_tokens) -> None:
     local_table = torch.tensor([[3], [0]], dtype=torch.int32)
     global_table = torch.tensor([[3], [4], [0], [0]], dtype=torch.int32)
     global_slots = torch.full((1, 4), -1, dtype=torch.long)
@@ -447,13 +508,6 @@ def test_pcp_qsa_full_graph_keeps_capture_and_replay_extents(monkeypatch, local_
         torch.device("cpu"),
     )
 
-    def token_to_req(query_starts, out, num_mapped, num_tokens):
-        tokens = torch.arange(num_tokens, dtype=query_starts.dtype)
-        requests = torch.searchsorted(query_starts[1:], tokens, right=True)
-        out[:num_tokens].copy_(torch.where(tokens < num_mapped, requests, 0))
-        return out[:num_tokens]
-
-    monkeypatch.setattr(upstream_metadata_ops, "compute_token_to_req_indices", token_to_req)
     monkeypatch.setattr(
         qsa.upstream_qsa.Qwen4ExpQSAMetadataBuilder,
         "build",
