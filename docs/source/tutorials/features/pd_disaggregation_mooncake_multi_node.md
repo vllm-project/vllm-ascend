@@ -120,6 +120,35 @@ Execute the following commands on each node in sequence. The results must all be
         for i in {0..7}; do hccn_tool -i $i -tls -g ; done | grep switch
         ```
 
+### A2 Products Communication Configuration {: #a2-products-communication-configuration}
+
+On A2 the PD transfer between the two roles runs over the cross-node RoCE links and needs no extra variable. The KV cache pool path does. `HCCL_INTRA_ROCE_ENABLE` selects the link used for communication inside a server: the default `0` uses PCIe, and `1` uses the RoCE links. With `0`, the store cannot export its host global segment over IPC, so a request still returns HTTP 200 while every KV write fails, with `aclrtIpcMemImportByKey ... 107000` (empty handle name) on the Mooncake side and `Failed to put ... error_codes=[-800]` from `AscendStoreConnector`. The A2 model templates and the A2 branch of the [KV Cache Pool guide](../../user_guide/feature_guide/kv_cache_pool_ascend_store.md) both export it in the prefiller and decoder environments:
+
+```bash
+export HCCL_INTRA_ROCE_ENABLE=1
+```
+
+### A3 Products Communication Configuration {: #a3-products-communication-configuration}
+
+On A3 the PD transfer uses the RoCE links when they are cabled and needs no extra configuration. When the NPU RoCE ports are not cabled, the transport has to be pinned. An A3 server exposes 16 logical devices, each with its own RoCE port; check them first:
+
+```bash
+# Link status of the Ethernet ports: UP or DOWN
+for i in {0..15}; do hccn_tool -i $i -link -g ; done
+```
+
+If the ports report DOWN, inter-node traffic runs over HCCS, and both the prefiller and decoder serving environments must pin the HCCS communication resource:
+
+```bash
+export ASCEND_GLOBAL_RESOURCE_CONFIG='{"comm_resource_config.protocol_desc":["hccs:device"]}'
+```
+
+Without the pin, the HIXL/ADXL transport fails while creating a RoCE endpoint for every NPU card during initialization: the engine exits with `EI0009 ... The network port is down`, and vLLM reports `TransferEngine initialization failed with ret_value: -1`. Do not set `HCCL_INTRA_ROCE_ENABLE=1` on such a supernode either: it routes LLM-DataDist traffic over the uncabled RoCE links.
+
+`ASCEND_LOCAL_COMM_RES` does not need to be set for this case: since Mooncake v0.3.13 it is injected automatically as `{"version":"1.3"}` when the HIXL client-server capability is present. If the same error persists on an older stack, add `export ASCEND_LOCAL_COMM_RES='{"version":"1.2"}'`, which selects the classic `CommEngine` resource format.
+
+See the [HIXL user guide](https://gitcode.com/cann/hixl/wiki/HIXL%E4%BD%BF%E7%94%A8%E6%8C%87%E5%8D%97%28%E6%9E%84%E5%BB%BA%E4%B8%AD%29.md) for the full `protocol_desc` list and its hardware prerequisites.
+
 ### 950PR&950DT Products Communication Configuration {: #950pr950dt-products-communication-configuration}
 
 For 950PR&950DT Products, PD disaggregation uses the super plane (based on UB port and UBC protocol) by default. No additional network configuration is required for this default path.

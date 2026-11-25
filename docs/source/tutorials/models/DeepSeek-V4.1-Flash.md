@@ -822,6 +822,14 @@ vLLM Ascend revision.
     For W8A8 weights, use Prefill DP4/TP4 and Decode DP8/TP2. Adjust the
     launcher, connector layouts, and proxy endpoints to match that topology.
 
+    !!! note "A3 supernodes whose NPU RoCE ports are not cabled"
+
+        PD KV cache transfer then runs over HCCS: both the prefiller and decoder
+        environments must export
+        `ASCEND_GLOBAL_RESOURCE_CONFIG='{"comm_resource_config.protocol_desc":["hccs:device"]}'`
+        or startup fails with `EI0009` / `TransferEngine initialization failed
+        with ret_value: -1`. See [A3 Products Communication Configuration](../features/pd_disaggregation_mooncake_multi_node.md#a3-products-communication-configuration).
+
     #### 5.2.1.1 Prepare the DP Launcher
 
     Save the following script as `launch_online_dp.py` on both nodes. It divides
@@ -1932,6 +1940,14 @@ Select the tab for the target hardware.
     This example uses separated Memcache deployment so that the pool reserves host
     memory before vLLM loads the model. Prepare one MetaService configuration and
     two LocalService configurations as described below.
+
+    !!! note "A3 supernodes whose NPU RoCE ports are not cabled"
+
+        PD KV cache transfer then runs over HCCS: both the prefiller and decoder
+        environments must export
+        `ASCEND_GLOBAL_RESOURCE_CONFIG='{"comm_resource_config.protocol_desc":["hccs:device"]}'`
+        or startup fails with `EI0009` / `TransferEngine initialization failed
+        with ret_value: -1`. See [A3 Products Communication Configuration](../features/pd_disaggregation_mooncake_multi_node.md#a3-products-communication-configuration).
 
     ##### 5.3.2.1 Prepare the Memcache Services
 
