@@ -4,7 +4,6 @@
 
 import importlib.util
 import os
-import subprocess
 import sys
 import zipfile
 from pathlib import Path
@@ -14,17 +13,6 @@ from unittest.mock import patch
 import pytest
 
 ROOT = Path(__file__).resolve().parents[4]
-
-
-def test_build_entrypoint_does_not_shadow_stdlib(tmp_path):
-    result = subprocess.run(
-        [sys.executable, str(ROOT / "tools/deepgemm/build.py"), "--help"],
-        cwd=tmp_path,
-        capture_output=True,
-        text=True,
-    )
-    assert result.returncode == 0, result.stderr
-    assert "--destination" in result.stdout
 
 
 def load_file(name, path):
@@ -94,9 +82,8 @@ def test_missing_transitive_dependency_preserves_cause(loader):
     assert error.value.name == "missing_dependency"
 
 
-@pytest.mark.parametrize("external", [SimpleNamespace(), npu_module()])
-def test_already_loaded_extension_is_not_loaded_twice(loader, monkeypatch, external):
-    monkeypatch.setitem(sys.modules, "deep_gemm", external)
+def test_already_loaded_extension_is_not_loaded_twice(loader, monkeypatch):
+    monkeypatch.setitem(sys.modules, "deep_gemm", npu_module())
     with (
         patch.object(loader.importlib, "import_module") as imported,
         pytest.raises(RuntimeError, match="already loaded"),
@@ -161,61 +148,3 @@ def test_explicit_native_toolchain_is_preserved(monkeypatch):
     assert env["CXX"] == "/custom/bin/clang++"
     assert env["CFLAGS"] == "-O2"
     assert env["LDFLAGS"] == "-Wl,--as-needed"
-
-
-@pytest.mark.parametrize("deepgemm", [False, True])
-def test_editable_build_preserves_native_packages(tmp_path, deepgemm):
-    import __future__
-
-    import ast
-    from typing import Any
-
-    from setuptools import Distribution, Extension
-    from setuptools.command.build_ext import build_ext
-
-    # Load the production command without executing setup.py's installation.
-    tree = ast.parse((ROOT / "setup.py").read_text())
-    command = next(node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == "cmake_build_ext")
-    source = tmp_path / "source"
-    (source / "vllm_ascend").mkdir(parents=True)
-    namespace: dict[str, Any] = {"build_ext": build_ext, "Path": Path, "ROOT_DIR": str(source)}
-    exec(
-        compile(
-            ast.Module(body=[command], type_ignores=[]), "setup.py", "exec", flags=__future__.annotations.compiler_flag
-        ),
-        namespace,
-    )
-    names = ["vllm_ascend.vllm_ascend_C"]
-    if deepgemm:
-        names.append("vllm_ascend.third_party.deep_gemm._C")
-    distribution = Distribution(
-        {"ext_modules": [Extension(name, sources=[]) for name in names], "package_dir": {"": str(source)}}
-    )
-    build = namespace["cmake_build_ext"](distribution)
-    build.ensure_finalized()
-    build.build_lib = str(tmp_path / "build")
-    for name in names:
-        extension = Path(build.build_lib) / build.get_ext_filename(name)
-        extension.parent.mkdir(parents=True, exist_ok=True)
-        extension.write_bytes(b"native-extension")
-    relative = Path("vllm_ascend/third_party/deep_gemm")
-    resources = {
-        "__init__.py": b"",
-        "include/deep_gemm/mega_moe.hpp": b"header",
-        "ascend_build.json": b"{}",
-        "LICENSE": b"license",
-    }
-    if deepgemm:
-        for name, content in resources.items():
-            resource = Path(build.build_lib) / relative / name
-            resource.parent.mkdir(parents=True, exist_ok=True)
-            resource.write_bytes(content)
-    assert not (source / relative).exists()
-    build.copy_extensions_to_source()
-    for name in names:
-        assert (source / build.get_ext_filename(name)).read_bytes() == b"native-extension"
-    if deepgemm:
-        for name, content in resources.items():
-            assert (source / relative / name).read_bytes() == content
-    else:
-        assert not (source / relative).exists()

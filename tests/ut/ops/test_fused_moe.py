@@ -3182,6 +3182,7 @@ def test_deepgemm_runner_leaves_step_execution_to_the_backend(monkeypatch, with_
     assert runner.ascend_shared_experts is None
     assert runner._forward_entry is torch.ops.vllm.moe_forward
     fused_moe_module.AscendSharedExperts.assert_not_called()
+    assert runner.routed_experts._deepgemm_mega_moe is None
     assert runner.routed_experts.ascend_megamoe_fold_scale == 1.5
     output = torch.full((2, 4), 3.0, dtype=torch.bfloat16)
     shared_output, routed_output = runner._maybe_apply_routed_scale_to_output(None, output)

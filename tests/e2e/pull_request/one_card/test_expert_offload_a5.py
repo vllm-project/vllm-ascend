@@ -15,7 +15,6 @@ from transformers import Qwen3MoeConfig
 from vllm import LLM, SamplingParams
 from vllm.config import VllmConfig, set_current_vllm_config
 
-from vllm_ascend import ascend_config
 from vllm_ascend.distributed.expert_transfer.expert_offload_manager import (
     ExpertOffloadManager,
     HostExpertStore,
@@ -70,12 +69,7 @@ def expert_bundle(monkeypatch):
     scheme = object.__new__(AscendW4A8MXFPDSDynamicFusedMoEMethod)
     scheme.group_size = GROUP_SIZE
     scheme.use_expert_weight_list = False
-    config = VllmConfig()
-    # Standalone post-loading must establish the same default backend config
-    # as a real worker. Restore the module singleton when this fixture exits.
-    monkeypatch.setattr(ascend_config, "_ASCEND_CONFIG", None)
-    with set_current_vllm_config(config):
-        ascend_config.init_ascend_config(config)
+    with set_current_vllm_config(VllmConfig()):
         yield MXFPExpertAdapter(SimpleNamespace(activation="silu"), scheme), store
 
 

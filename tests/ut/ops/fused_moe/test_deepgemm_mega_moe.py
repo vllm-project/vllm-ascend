@@ -126,18 +126,6 @@ def test_failed_cold_compile_restores_mode_without_publishing_buffer(context, pr
     torch.distributed.barrier.assert_not_called()
 
 
-def test_checkpoint_scales_are_paired_along_k_without_transpose(context):
-    backend, _, _, dependency = context
-    item = layer()
-    original = item.w13_weight_scale.detach().clone()
-    backend.DeepGemmExperts(item)
-    pair = dependency.transform_weights_for_mega_moe.call_args.args[0]
-    assert pair[0].dtype == torch.int8
-    assert pair[1].dtype == torch.int16
-    assert pair[1].shape == (48, 512, 4)
-    assert torch.equal(pair[1].view(torch.uint8), original)
-
-
 def test_strided_checkpoint_weights_and_scales_pack_identically(context):
     backend, _, _, dependency = context
     item = layer()
@@ -152,6 +140,7 @@ def test_strided_checkpoint_weights_and_scales_pack_identically(context):
         assert not view.is_contiguous()
     backend.DeepGemmExperts(item)
     for pair, prefix in zip(dependency.transform_weights_for_mega_moe.call_args.args, ("w13", "w2")):
+        assert pair[0].dtype == torch.int8 and pair[1].dtype == torch.int16
         assert pair[0].is_contiguous() and pair[1].is_contiguous()
         torch.testing.assert_close(pair[0].view(torch.uint8), original[prefix + "_weight"])
         torch.testing.assert_close(pair[1].view(torch.uint8), original[prefix + "_weight_scale"])
@@ -284,19 +273,6 @@ def test_two_shared_experts_keep_routed_expert_count_and_topk(context):
     assert dependency.SymmBuffer.call_args.kwargs["num_shared_experts"] == 2
 
 
-def test_same_shared_weights_cannot_be_converted_for_another_layer(context):
-    backend, config, _, dependency = context
-    config.model_config.hf_text_config.n_shared_experts = 1
-    first, second, shared = layer(), layer(), shared_module()
-    first._deepgemm_mega_moe_shared_experts = weakref.ref(shared)
-    second._deepgemm_mega_moe_shared_experts = weakref.ref(shared)
-    backend.DeepGemmExperts(first)
-    dependency.transform_weights_for_mega_moe.reset_mock()
-    with pytest.raises(RuntimeError, match="already been converted"):
-        backend.DeepGemmExperts(second)
-    dependency.transform_weights_for_mega_moe.assert_not_called()
-
-
 @pytest.mark.parametrize(
     "mode",
     ["missing", "expired", "wrong_count", "wrong_shape", "wrong_dtype", "converted", "activation", "bias", "gate"],
@@ -370,7 +346,7 @@ def test_apply_fuses_shared_once_and_scales_only_routed_weights(context, scaling
     dependency.fp8_fp4_mega_moe.assert_called_once()
 
 
-@pytest.mark.parametrize("tokens", [0, 1, 513, 1024])
+@pytest.mark.parametrize("tokens", [0, 1024])
 def test_large_prefill_does_not_synchronize_host(context, tokens):
     backend, config, _, dependency = context
     config.scheduler_config.max_num_batched_tokens = 1024

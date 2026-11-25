@@ -184,6 +184,8 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
                 raise ValueError("V4.1 DeepGEMM requires shared and routed experts to use the same input")
             # Keep shared parameters registered for checkpoint loading, while
             # the fused kernel owns their execution and final accumulation.
+            # Presence of the slot selects DeepGEMM for this layer's post-load hook.
+            routed_experts._deepgemm_mega_moe = None
             if shared_experts is not None:
                 routed_experts._deepgemm_mega_moe_shared_experts = weakref.ref(shared_experts)
                 shared_experts.gate_up_proj._deepgemm_mega_moe_shared_linear = True

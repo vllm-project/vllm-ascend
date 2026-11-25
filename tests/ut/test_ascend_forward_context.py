@@ -325,13 +325,14 @@ def test_select_moe_comm_method_uses_allgather_without_effective_expert_parallel
     assert afc.select_moe_comm_method(16, vllm_config) == MoECommType.ALLGATHER
 
 
-def test_deepgemm_adapter_keeps_local_tokens(monkeypatch):
+@pytest.mark.parametrize("tokens", [16, 256])
+def test_select_moe_comm_method_uses_deepgemm_across_mc2_threshold(monkeypatch, tokens):
     _patch_select_moe_comm_method_deps(
         monkeypatch,
         device_type=AscendDeviceType.A5,
         deepgemm_mega_moe=True,
     )
-    assert afc.select_moe_comm_method(16, _make_vllm_config()) == MoECommType.DEEPGEMM
+    assert afc.select_moe_comm_method(tokens, _make_vllm_config()) == MoECommType.DEEPGEMM
 
 
 @pytest.mark.parametrize(
