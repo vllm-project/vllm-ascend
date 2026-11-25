@@ -112,6 +112,10 @@ class AscendKVCacheConfigBuilder(DefaultKVCacheConfigBuilder):
             return qwen4_exp_groups
 
         if is_deepseek_v41_cache(kv_cache_spec):
+            if vllm_config.attention_config.hisparse_config is not None:
+                from vllm_ascend.models.deepseek_v41.hisparse import cache_groups
+
+                return cache_groups(vllm_config, kv_cache_spec)
             return make_cache_groups(group_cache_specs(kv_cache_spec))
 
         grouped_specs = group_and_unify_kv_cache_specs(kv_cache_spec)
@@ -178,7 +182,7 @@ class AscendKVCacheConfigBuilder(DefaultKVCacheConfigBuilder):
             return sum(_upstream_pool_bytes_per_block(vllm_config, pool) for pool in pools)
         if is_step5_groups(kv_cache_groups):
             return get_step5_pool_bytes_per_block(kv_cache_groups)
-        if is_deepseek_v41_cache(kv_cache_groups):
+        if is_deepseek_v41_cache(kv_cache_groups) and vllm_config.attention_config.hisparse_config is None:
             return get_deepseek_v41_pool_bytes_per_block(kv_cache_groups)
         if _get_glm5_next_cache_layout(kv_cache_groups) is not None:
             return get_glm5_next_pool_bytes_per_block(kv_cache_groups)
@@ -536,7 +540,7 @@ def get_ascend_kv_cache_config_from_groups(
         )
     elif qwen_config is not None:
         kv_cache_config = qwen_config
-    elif is_deepseek_v41_cache(kv_cache_groups):
+    elif is_deepseek_v41_cache(kv_cache_groups) and vllm_config.attention_config.hisparse_config is None:
         kv_cache_config = get_deepseek_v41_kv_cache_config(vllm_config, kv_cache_groups, available_memory)
     elif _get_glm5_next_cache_layout(kv_cache_groups) is not None:
         kv_cache_config = get_glm5_next_kv_cache_config(vllm_config, kv_cache_groups, available_memory)

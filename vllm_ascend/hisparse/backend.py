@@ -54,6 +54,40 @@ def _install_worker_dma_hooks() -> None:
             return original_invalidate(worker, block_ids, request_state_indices)
 
     HiSparseConnectorWorker.invalidate_blocks = invalidate
+    from vllm.v1.hisparse import runtime as hisparse_runtime
+
+    # Core's cached current_stream() stays on stream 0 when torch.npu.graph switches
+    # to the capture stream; query the live NPU stream so cross-stream events join capture.
+    hisparse_runtime.current_stream = torch.npu.current_stream
+
+    import numpy as np
+    from vllm.distributed.kv_transfer.kv_connector.v1.hisparse import worker as hisparse_worker
+    from vllm.utils.torch_utils import async_tensor_h2d
+
+    def _ascend_update_hisparse_residency(residency, updates, request_ids, request_state_indices):
+        if not updates:
+            return
+        batch_rows = {request_id: row for row, request_id in enumerate(request_ids)}
+        num_groups = residency.shape[0]
+        rows = []
+        pages = []
+        block_ids = [[] for _ in range(num_groups)]
+        for request_id, update in updates.items():
+            rows.append(batch_rows[request_id])
+            pages.extend(update.pages)
+            for group_block_ids, update_block_ids in zip(block_ids, update.block_ids, strict=True):
+                group_block_ids.extend(update_block_ids)
+        # Row-major [2 + num_groups, num_pages] keeps each slice contiguous for aclnnIndexPutImpl.
+        host_values = np.empty((2 + num_groups, len(pages)), dtype=np.int32)
+        host_values[0] = np.repeat(rows, [len(update.pages) for update in updates.values()])
+        host_values[1] = pages
+        host_values[2:] = np.asarray(block_ids, dtype=np.int32)
+        values = async_tensor_h2d(host_values, device=request_state_indices.device, dtype=torch.int32)
+        state_rows = request_state_indices[values[0]]
+        residency[:, state_rows, values[1]] = values[2:]
+
+    hisparse_runtime.update_hisparse_residency = _ascend_update_hisparse_residency
+    hisparse_worker.update_hisparse_residency = _ascend_update_hisparse_residency
 
 
 def _allocate_resolver_workspace(runtime: HiSparseRuntime):
@@ -194,6 +228,10 @@ class AscendHiSparseBackend(HiSparseBackend):
         )
         if prepared is not None:
             del runtime._ascend_profiled_cache_ops
+        if getattr(runtime, "_ascend_v41_source", False):
+            from vllm_ascend.models.deepseek_v41.hisparse import prepare_source_attention
+
+            prepare_source_attention(runtime._ascend_v41_handle)
         return ops
 
     def validate_kv_cache_config(self, kv_cache_config: KVCacheConfig) -> None:
@@ -211,6 +249,9 @@ class AscendHiSparseBackend(HiSparseBackend):
         from .binding import _bind_indexer_views, get_hisparse_indexer_specs
 
         _bind_indexer_views(kv_caches, get_hisparse_indexer_specs(kv_cache_config), forward_context)
+        from vllm_ascend.models.deepseek_v41.hisparse import prepare_cache_views
+
+        prepare_cache_views(kv_cache_config, kv_caches)
 
     def is_current_stream_capturing(self) -> bool:
         return torch.npu.is_current_stream_capturing()

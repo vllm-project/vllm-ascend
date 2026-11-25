@@ -285,6 +285,12 @@ def get_kv_cache_spec(vllm_config: VllmConfig) -> dict[str, KVCacheSpec]:
             kv_cache_spec.update(mamba_specs)
 
     if vllm_config.attention_config.hisparse_config is not None:
+        from vllm_ascend.models.deepseek_v41.cache_config import is_deepseek_v41_cache
+
+        if is_deepseek_v41_cache(kv_cache_spec):
+            from vllm_ascend.models.deepseek_v41.hisparse import resolve_specs
+
+            return resolve_specs(vllm_config, kv_cache_spec)
         from vllm.v1.hisparse.binding import resolve_hisparse_specs
 
         from vllm_ascend.hisparse.binding import align_hisparse_indexer_specs
