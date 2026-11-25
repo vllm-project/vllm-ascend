@@ -1,0 +1,4 @@
+pr: 15827
+entries:
+  - category: bugfix
+    text: Aligned MC2 mask capacity to the tensor-parallel padded token count.
