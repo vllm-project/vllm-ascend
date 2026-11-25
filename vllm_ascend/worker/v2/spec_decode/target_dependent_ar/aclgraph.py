@@ -17,6 +17,7 @@ from vllm.v1.worker.gpu.cudagraph_utils import (
 )
 from vllm.v1.worker.gpu.input_batch import InputBuffers
 from vllm.v1.worker.gpu.model_states.interface import ModelState
+from vllm.v1.worker.gpu.spec_decode.autoregressive.cudagraph_utils import SpeculatorCudaGraphManager
 from vllm.v1.worker.utils import AttentionGroup
 
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX, MoECommType, select_moe_comm_method
@@ -25,23 +26,13 @@ from vllm_ascend.compilation.acl_graph import (
     set_draft_graph_prefill_params,
     update_full_graph_params,
 )
-from vllm_ascend.compilation.updatable_graph import (
-    SharedSource,
-    UpdatableGraph,
-)
-from vllm_ascend.utils import is_drafter_moe_model, use_updatable_graph, vllm_version_is
+from vllm_ascend.compilation.updatable_graph import UpdatableGraph
+from vllm_ascend.utils import is_drafter_moe_model, use_updatable_graph
 from vllm_ascend.worker.v2.aclgraph_utils import (
     collect_sorted_captured_token_sizes,
     model_capture_wrapper,
 )
 from vllm_ascend.worker.v2.utils import communicator_switch
-
-if vllm_version_is("0.33.0"):
-    from vllm.v1.worker.gpu.spec_decode.target_dependent_ar.cudagraph_utils import (  # type: ignore[import-not-found]
-        SpeculatorCudaGraphManager,
-    )
-else:
-    from vllm.v1.worker.gpu.spec_decode.autoregressive.cudagraph_utils import SpeculatorCudaGraphManager
 
 if TYPE_CHECKING:
     from vllm.v1.worker.gpu.pcp_manager import PCPManager
@@ -68,53 +59,42 @@ class AutoRegressiveAclGraphManager(SpeculatorCudaGraphManager):
         vllm_config: VllmConfig,
         device: torch.device,
         cudagraph_mode: CUDAGraphMode,
-        decode_query_len: int | Mapping[int, int] | None = None,
+        decode_query_lens: Mapping[int, int],
         lora_capture_cases: list[int] | None = None,
         varlen_decode: bool = False,
         *,
-        decode_query_lens: Mapping[int, int] | None = None,
         decode_request_sizes: Sequence[int] | None = None,
     ):
         # Upstream uses num_speculative_steps + 1 as the draft-prefill query
         # length and 1 for draft decode.
         # vLLM #63406 keys uniform decode graphs by request count.
-        graph_kwargs = {}
-        if vllm_version_is("0.33.0"):
-            query_shapes = decode_query_len
-        else:
-            if decode_query_lens is None:
-                assert isinstance(decode_query_len, Mapping)
-                decode_query_lens = decode_query_len
-            query_shapes = decode_query_lens
-            decode_query_len = max(decode_query_lens)
-            if (
-                decode_query_len == 1
-                and decode_request_sizes is not None
-                and cudagraph_mode.decode_mode() == CUDAGraphMode.FULL
-                and is_drafter_moe_model(vllm_config)
-            ):
-                # Main expands this independent draft grid beyond the target
-                # capture bound (#63406). ALLTOALL preprocess synchronizes
-                # dynamic token counts on the host and cannot run in FULL.
-                # Native dispatch keeps larger batches eager, with all their
-                # requests/tokens, when they have no compatible capture size.
-                decode_request_sizes = [
-                    size
-                    for size in decode_request_sizes
-                    if select_moe_comm_method(size, vllm_config) != MoECommType.ALLTOALL
-                ]
-            graph_kwargs["decode_request_sizes"] = decode_request_sizes
-        assert isinstance(decode_query_len, int)
+        decode_query_len = max(decode_query_lens)
+        if (
+            decode_query_len == 1
+            and decode_request_sizes is not None
+            and cudagraph_mode.decode_mode() == CUDAGraphMode.FULL
+            and is_drafter_moe_model(vllm_config)
+        ):
+            # Upstream expands this independent draft grid beyond the target
+            # capture bound (#63406). ALLTOALL preprocess synchronizes
+            # dynamic token counts on the host and cannot run in FULL.
+            # Native dispatch keeps larger batches eager, with all their
+            # requests/tokens, when they have no compatible capture size.
+            decode_request_sizes = [
+                size
+                for size in decode_request_sizes
+                if select_moe_comm_method(size, vllm_config) != MoECommType.ALLTOALL
+            ]
         if decode_query_len > 1:
             cudagraph_mode = get_draft_prefill_cudagraph_mode(vllm_config, cudagraph_mode)
         super().__init__(
             vllm_config,
             device,
             cudagraph_mode,
-            query_shapes,
+            decode_query_lens,
             lora_capture_cases=lora_capture_cases,
             varlen_decode=varlen_decode,
-            **graph_kwargs,
+            decode_request_sizes=decode_request_sizes,
         )
 
         # Upstream constructs graph managers without a speculator reference.
@@ -261,12 +241,13 @@ class AutoRegressiveAclGraphManager(SpeculatorCudaGraphManager):
     def _updatable_graph_replay(self, desc, draft_attn_metadatas):
         graph = self.graphs[desc]
         assert isinstance(graph, UpdatableGraph)
-        fia_params = self.speculator.build_fia_params(
+        source = self.speculator.build_param_source(
             desc.num_reqs,
             draft_attn_metadatas[0],
             self.is_draft_model_prefill,
+            num_tokens=desc.num_tokens,
         )
-        resolved_tasks = graph.resolve_tasks(SharedSource(fia_params))
+        resolved_tasks = graph.resolve_tasks(source)
         self.update_stream.wait_stream(torch.npu.current_stream())
         ret = super().run_fullgraph(desc)
         graph.update(self.update_stream, resolved_tasks)

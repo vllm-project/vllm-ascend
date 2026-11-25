@@ -80,6 +80,34 @@ def test_RMSNorm_supports_quant_config_without_quant_description(default_vllm_co
     assert layer.bias is None
 
 
+def test_ascend_rms_norm_registers_existing_weightless_tensor_as_buffer(monkeypatch, default_vllm_config):
+    default_vllm_config.quant_config = None
+    original_init = RMSNorm.__init__
+    original_weights = []
+
+    def capture_weight(module, *args, **kwargs):
+        original_init(module, *args, **kwargs)
+        original_weights.append(module.weight)
+
+    monkeypatch.setattr(RMSNorm, "__init__", capture_weight)
+    layer = AscendRMSNorm(hidden_size=8, has_weight=False)
+
+    assert layer.weight is original_weights[-1]
+    assert dict(layer.named_buffers())["weight"] is layer.weight
+    assert "weight" not in dict(layer.named_parameters())
+    assert "weight" not in layer.state_dict()
+
+
+def test_ascend_rms_norm_keeps_learned_weight_as_parameter(default_vllm_config):
+    default_vllm_config.quant_config = None
+    layer = AscendRMSNorm(hidden_size=8, has_weight=True)
+
+    assert isinstance(layer.weight, torch.nn.Parameter)
+    assert dict(layer.named_parameters())["weight"] is layer.weight
+    assert "weight" not in dict(layer.named_buffers())
+    assert "weight" in layer.state_dict()
+
+
 def test_RMSNorm_creates_bias_from_quant_description(default_vllm_config):
     quant_config = MagicMock()
     quant_config.quant_description = {"model.layers.0.input_layernorm.bias": "W8A8"}

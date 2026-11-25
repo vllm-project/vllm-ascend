@@ -79,12 +79,12 @@ def test_real_allocator_aliases_only_planned_slots(monkeypatch, reuse_enabled, z
     vllm_config = SimpleNamespace(kv_transfer_config=None)
     monkeypatch.setattr(attn_utils, "get_current_vllm_config", lambda: vllm_config)
     monkeypatch.setattr(attn_utils.KVPPConfig, "from_vllm_config", lambda _: SimpleNamespace(size=1))
-    monkeypatch.setattr(attn_utils, "_is_dsv4_model", lambda _: False)
     monkeypatch.setattr(attn_utils, "enable_sfa", lambda _: cache_kind == "sfa_c8")
     monkeypatch.setattr(attn_utils, "enable_fa_quant", lambda _: False)
-    monkeypatch.setattr(
-        attn_utils, "get_layerwise_reuse_config", lambda _, *, vllm_config: {} if reuse_enabled else None
-    )
+    shares = reuse_enabled and zero_stride
+    view_sizes = {name: (config.num_blocks - 1) * max_page_size + spec.page_size_bytes for name, spec in specs.items()}
+    reuse_layout = SimpleNamespace(cache_view_sizes=view_sizes) if shares else None
+    monkeypatch.setattr(attn_utils, "get_layerwise_reuse_layout", lambda _: reuse_layout)
     layer = SimpleNamespace(get_attn_backend=lambda: SimpleNamespace(is_sparse=lambda: False))
     monkeypatch.setattr(attn_utils, "get_layers_from_vllm_config", lambda *_: dict.fromkeys(names, layer))
     allocations = []
@@ -95,18 +95,15 @@ def test_real_allocator_aliases_only_planned_slots(monkeypatch, reuse_enabled, z
 
     monkeypatch.setattr(attn_utils, "_allocate_int8_cache_tensor", allocate)
     raw = attn_utils._allocate_kv_cache(config, shared_layers={}, device=torch.device("cpu"))
-    shares = reuse_enabled and zero_stride
     assert len(allocations) == (1 if shares else 2)
-    if cache_kind == "indexer_mixed":
-        assert len(raw[names[0]]) == 1
-        assert len(raw[names[1]]) == 2
+    if shares:
         assert allocations == [size]
-        assert raw[names[0]][0].numel() == 3 * specs[names[0]].page_size_bytes
-        assert sum(t.numel() for t in raw[names[1]]) == 3 * specs[names[1]].page_size_bytes
-    else:
-        assert (raw[names[0]] is raw[names[1]]) == shares
+        assert {name: tensor.numel() for name, tensor in raw.items()} == view_sizes
     first = raw[names[0]] if isinstance(raw[names[0]], torch.Tensor) else raw[names[0]][0]
     second = raw[names[1]] if isinstance(raw[names[1]], torch.Tensor) else raw[names[1]][0]
+    assert (first.data_ptr() == second.data_ptr()) == shares
     first.fill_(7)
-    assert torch.all(second == (7 if shares else 0))
+    shared_bytes = min(first.numel(), second.numel()) if shares else 0
+    assert torch.all(second[:shared_bytes] == 7)
+    assert torch.all(second[shared_bytes:] == 0)
     assert config.kv_cache_tensors[0].layers == names

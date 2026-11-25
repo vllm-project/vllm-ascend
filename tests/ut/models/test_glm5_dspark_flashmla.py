@@ -56,3 +56,20 @@ def test_context_writer_preserves_fused_cache_backing(fused, use_prolog):
     else:
         assert components is cache
     assert attn.attn.kv_cache is cache
+
+
+@pytest.mark.parametrize("slot_mapping", [None, [None]])
+def test_context_projection_without_cache(slot_mapping):
+    projection = MagicMock(return_value=(torch.zeros(4, 580), None))
+    attn = SimpleNamespace(
+        rotary_emb=SimpleNamespace(cos_sin_cache=torch.ones(8, 64)),
+        fused_qkv_a_proj=projection,
+        q_lora_rank=4,
+    )
+    model = SimpleNamespace(layers=[SimpleNamespace(self_attn=attn)])
+    context = torch.zeros(4, 8)
+    glm5_dspark.Glm5DSparkModel.precompute_and_store_context_kv(model, context, torch.arange(4), slot_mapping)
+    if slot_mapping is None:
+        projection.assert_called_once_with(context)
+    else:
+        projection.assert_not_called()

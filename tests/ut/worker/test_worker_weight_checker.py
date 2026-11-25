@@ -2,20 +2,19 @@
 # Copyright (c) 2026 Huawei Technologies Co., Ltd. All Rights Reserved.
 """Unit tests for the NPUWorker weight-checker methods.
 
-The checksum/reset behavior comes from the paired vLLM's
-``vllm.model_executor.model_loader.weight_checksum`` (PR #51350); these tests
-only cover the NPUWorker wiring: method presence, rank-key prefixes, model
-access for both runner shapes, and the weight_nz_mode warning.
+The checksum/reset implementation comes from vLLM's ``gpu_worker.Worker``.
+These tests cover the rank-key prefix, checksum/reset behavior over a real
+model, and the Host VMM reset restriction.
 """
 
 from types import SimpleNamespace
 from typing import Any, cast
-from unittest.mock import MagicMock
 
 import pytest
 import torch
 import torch.nn as nn
 from vllm.config import ParallelConfig
+from vllm.v1.worker import gpu_worker
 
 from vllm_ascend._310p.worker_310p import NPUWorker310
 from vllm_ascend.worker import worker as npu_worker_module
@@ -35,16 +34,14 @@ class _TinyModel(nn.Module):
 def mock_parallel_groups(monkeypatch):
     group = SimpleNamespace(rank_in_group=0)
     for name in ("get_pp_group", "get_pcp_group", "get_tp_group"):
-        monkeypatch.setattr(npu_worker_module, name, lambda: group)
+        monkeypatch.setattr(gpu_worker, name, lambda: group)
 
 
 @pytest.fixture
 def mock_ascend_config(monkeypatch):
-    monkeypatch.setattr(
-        npu_worker_module,
-        "get_ascend_config",
-        lambda: SimpleNamespace(weight_nz_mode=0, input_embedding_host_vmm=False),
-    )
+    config = SimpleNamespace(input_embedding_host_vmm=False)
+    monkeypatch.setattr(npu_worker_module, "get_ascend_config", lambda: config)
+    return config
 
 
 def _make_worker(dp_rank: int) -> NPUWorker:
@@ -88,8 +85,8 @@ def test_reset_weights_zeroes_params_not_buffers(mock_parallel_groups, mock_asce
     assert model.scale.item() == 2.0
 
 
-def test_reset_weights_rejects_host_vmm_before_mutating_params(monkeypatch):
-    monkeypatch.setattr(npu_worker_module, "get_ascend_config", lambda: SimpleNamespace(input_embedding_host_vmm=True))
+def test_reset_weights_rejects_host_vmm_before_mutating_params(mock_ascend_config):
+    mock_ascend_config.input_embedding_host_vmm = True
     model = _TinyModel()
     worker = _make_worker(dp_rank=0)
     worker.model_runner = cast(Any, SimpleNamespace(get_model=lambda: model))
@@ -98,36 +95,3 @@ def test_reset_weights_rejects_host_vmm_before_mutating_params(monkeypatch):
         worker.reset_weights()
 
     assert torch.all(model.linear.weight == 1)
-
-
-def test_reset_weights_warns_under_nz_mode(mock_parallel_groups, monkeypatch):
-    """weight_nz_mode=1: reset still zeroes params and logs the NZ warning."""
-    monkeypatch.setattr(
-        npu_worker_module,
-        "get_ascend_config",
-        lambda: SimpleNamespace(weight_nz_mode=1, input_embedding_host_vmm=False),
-    )
-    mock_logger = MagicMock()
-    monkeypatch.setattr(npu_worker_module, "logger", mock_logger)
-    model = _TinyModel()
-    worker = _make_worker(dp_rank=0)
-    worker.model_runner = cast(Any, SimpleNamespace(get_model=lambda: model))
-
-    worker.reset_weights()
-
-    assert torch.all(model.linear.weight == 0)
-    mock_logger.warning.assert_called_once()
-    assert "weight_nz_mode" in mock_logger.warning.call_args.args[0]
-
-
-def test_methods_work_with_v2_runner_shape(mock_parallel_groups, mock_ascend_config):
-    model = _TinyModel()
-    # The v2 model runner only exposes the model attribute, no get_model().
-    worker = _make_worker(dp_rank=0)
-    worker.model_runner = cast(Any, SimpleNamespace(model=model))
-
-    checksums = worker.compute_weight_checksums()
-    assert set(checksums) == {"dp0:pp0:pcp0:tp0:linear.weight"}
-
-    worker.reset_weights()
-    assert torch.all(model.linear.weight == 0)

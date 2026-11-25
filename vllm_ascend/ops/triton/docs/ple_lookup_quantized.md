@@ -13,8 +13,8 @@
   unsigned E8M0 scales: byte `s` represents `2**(s - 127)`, including
   `s = 0`; `s = 255` represents NaN. Non-owned IDs produce zero.
 - **Algorithm flow**: One program handles one requested row, checks shard
-  ownership, selects the host allocation chunk through device pointer tables,
-  loads the requested columns and one scale per group, broadcasts scales
+  ownership, selects the host allocation chunk through the device code pointer table,
+  loads the requested columns from host and one scale per group from the rank-local NPU parameter, broadcasts scales
   across each group of 32 columns, and writes BF16 results. Columns
   outside the width are masked. The caller owns cross-rank reduction.
   Both INT8 and MXFP8 specializations branch on shard ownership before host
@@ -34,7 +34,7 @@ All parameters are required; `is_mxfp8` is keyword-only for `lookup_quantized`.
 | Parameter | Input/Output/Attribute | Description | Data type | Data format |
 | --- | --- | --- | --- | --- |
 | `code_chunk_ptrs` | Input | Device addresses of registered host code chunks | NPU INT64 | Contiguous 1-D |
-| `scale_chunk_ptrs` | Input | Device addresses of registered host scale chunks; quantized entry only | NPU INT64 | Contiguous 1-D |
+| `scales` | Input | Local scale shard in HBM | NPU UINT8 (MXFP8) or FP32 (INT8) | Contiguous 2-D |
 | `embedding_ids` | Input | Global embedding IDs; non-owned IDs produce zero | NPU INT32/INT64 | Any shape; copied to contiguous if needed |
 | `output` | Output | Requested rows, written in place | NPU BF16 | `(*embedding_ids.shape, width)`, contiguous for quantized lookup |
 | `shard_start`, `shard_end` | Attribute | Inclusive/exclusive global bounds of the owned shard | Python int | `0 <= shard_start < shard_end` |
@@ -49,14 +49,14 @@ fixed tile size and does not use those properties to select its grid or tile.
 
 - Quantized width must be positive and divisible by 32. The target model uses
   width 160 (five scale groups); width 256 is an additional supported test case.
-- All device tensors must be on the same NPU. Each pointer table must contain
+- All device tensors must be on the same NPU. The code pointer table must contain
   at least `ceil((shard_end - shard_start) / chunk_rows)` addresses. Code chunks contain rows of
-  `width` elements; scale chunks contain rows of `width // 32` elements.
+  `width` elements; the scale tensor contains rows of `width // 32` elements.
 - Host code storage is INT8 with FP32 scales, or E4M3FN with UINT8 E8M0 scales.
   Host allocations must remain registered and alive until all eager and graph
   work completes. Pointer-table contents are an owner contract, not validated
   by reading back addresses on the hot path. Metadata errors raise `ValueError`.
-- The output must not alias either pointer table, IDs or host storage. Only the
+- The output must not alias the code pointer table, scales, IDs or host storage. Only the
   output is modified. Empty IDs perform no launch after metadata validation.
 - IDs outside the shard, including negative IDs, are zeroed. No error is raised
   for a non-owned ID because other ranks may own it. Quantized host integration
@@ -72,7 +72,7 @@ fixed tile size and does not use those properties to select its grid or tile.
   the model caller selects the operator before invocation. `is_mxfp8` selects
   the INT8 or MXFP8 quantized format at compile time, not BF16 versus quantized
   lookup at runtime.
-- **Differences**: Keeps compressed codes and scales in separate host buffers,
+- **Differences**: Keeps compressed codes in registered host memory and scales in rank-local HBM,
   decodes selected rows, preserves out-of-shard zeroing, and retains upstream
   reduction and host-buffer ownership. It is a model-support feature; there is
   no unconditional throughput improvement claim. No autotuning is used.
@@ -97,37 +97,9 @@ results or sampled-row correctness do not replace final-revision model tests.
 
 ## Performance comparison
 
-The reproducible single-rank benchmark compares quantized lookup against the
-existing BF16 host lookup using exactly the same dequantized values and IDs.
-It reports allocated host bytes, graph replay latency and compiler-entry counts.
-Both buffers remain alive and share the same NUMA placement policy; it does not
-measure full-model throughput, multi-rank reduction or NUMA tuning.
-
-Use production-size tables as well as small smoke tests. For the target
-checkpoints, per-rank shards contain 40,000,192 rows at TP8 (INT8) or
-80,000,384 rows at TP4 (MXFP8), each of width 160. Report fully owned IDs and
-uniform cross-shard IDs separately, including the actual owned ID count.
-A single non-owned ID measures zero output rather than host lookup latency.
-The benchmark retains every event sample; small shapes can expose overhead
-and timing noise even when larger gathers benefit from reduced storage.
-
-```bash
-TRITON_CACHE_DIR=$(mktemp -d) python benchmarks/benchmark_ple_lookup.py --format int8
-# TP8-like ownership: approximately one eighth of IDs belong to this shard.
-TRITON_CACHE_DIR=$(mktemp -d) python benchmarks/benchmark_ple_lookup.py --format int8 --ownership-shards 8
-# Run on 950DT, in another fresh process/cache:
-TRITON_CACHE_DIR=$(mktemp -d) python benchmarks/benchmark_ple_lookup.py --format mxfp8
-```
-
-For production-size runs, use `--rows 40000192 --ownership-shards 8` for
-A3 INT8 or `--rows 80000384 --ownership-shards 4` for A5 MXFP8. Both use
-`--width 160`. Set `--ownership-shards 1` to measure fully owned IDs.
-Use `--tokens 1 32 128 256 4096 32768 65536` to cover small and large gathers;
-`--tokens 131072` adds a large operator shape, not a full model prefill.
-
 ### Measured operator results
 
-The following results use CANN 9.2.1 r89, torch 2.10.0, torch_npu
+The following historical results used host-resident scales. They were measured using CANN 9.2.1 r89, torch 2.10.0, torch_npu
 2.10.0.post7 and triton-ascend 3.6.0.post2. Full registered host tables remain
 resident in the same process. Codes and scales are synthetic; the BF16 table
 contains exactly their dequantized values. IDs and outputs are checked for
@@ -188,11 +160,6 @@ performance result.
   compiler entry points, then checks changing shapes, offsets and graph replay.
   This verifies reuse after priming, not compile-only registry warmup or absence
   of first-request compilation in a full service.
-- With a fresh `TRITON_CACHE_DIR`, the benchmark reports startup compiler entries
-  separately from additional synthetic runtime entries. These include persistent
-  cache resolution if the cache is reused. Full-model serving must separately
-  record observed shapes/types/compile-time values and startup versus serving
-  compilation counts; synthetic results do not establish GPQA compilation counts.
 - If real service workloads expose required variants not reached during startup,
   first reduce unnecessary specialization, then use the existing Ascend
   `AscendTritonJitKernel`/`JitWarmupRegistry` mechanism for required variants, with

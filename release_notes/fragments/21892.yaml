@@ -1,0 +1,7 @@
+pr: 21892
+entries:
+  - category: feature
+    text: >-
+      Added HiSparse support for prefill context parallelism (PCP) and PCP
+      decode request sharding in Model Runner V2 (enable with
+      `--prefill-context-parallel-size` > 1).

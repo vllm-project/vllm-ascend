@@ -28,6 +28,7 @@ from typing import TYPE_CHECKING, Any
 
 import numpy as np
 import torch
+import vllm.models.qwen4_exp.common.qsa_indexer as qsa_indexer  # type: ignore[import-not-found]
 import vllm.v1.worker.gpu.spec_decode.speculator as _speculator
 from vllm.config import (
     ParallelConfig,
@@ -41,11 +42,12 @@ from vllm.logger import logger
 from vllm.model_executor.layers.attention.attention import Attention
 from vllm.model_executor.layers.attention.mla_attention import MLAAttention
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
-from vllm.utils.torch_utils import get_dtype_size, kv_cache_dtype_str_to_dtype
+from vllm.utils.torch_utils import get_dtype_size
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadataBuilder
 from vllm.v1.attention.backends.utils import get_dcp_local_seq_lens
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
+    EncoderOnlyAttentionSpec,
     FullAttentionSpec,
     KVCacheConfig,
     KVCacheSpec,
@@ -58,7 +60,7 @@ from vllm.v1.kv_cache_interface import (
 )
 from vllm.v1.worker.gpu.attn_utils import get_shared_kv_cache_layers
 from vllm.v1.worker.gpu.model_states.interface import ModelSpecificAttnMetadata
-from vllm.v1.worker.utils import AttentionGroup, customize_attention_spec
+from vllm.v1.worker.utils import AttentionGroup, customize_attention_spec, select_common_block_size
 
 from vllm_ascend.ascend_config import KVPPConfig, get_ascend_config
 from vllm_ascend.attention.attention_c8_mxfp import (
@@ -84,9 +86,10 @@ from vllm_ascend.core.kv_cache_interface import (
     requires_padded_page_layout,
     supports_component_major_mla_pd,
 )
+from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.utils import KV_CACHE_BUFFER_ALIGNMENT
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.layerwise_cache_layout import (
-    allocate_shared_indexer_cache,
-    get_layerwise_reuse_config,
+    allocate_cache_backing,
+    get_layerwise_reuse_layout,
 )
 from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_manager import (
     allocate_kv_cache_tensors_for_sparse_kv_offload,
@@ -104,7 +107,6 @@ from vllm_ascend.models.qwen4_exp.cache_config import (
     make_qsa_kernel_page_cache,
     make_slab_view,
 )
-from vllm_ascend.quantization.methods.kv_cache.turboquant import TURBOQUANT_CACHE_DTYPE
 from vllm_ascend.quantization.methods.kv_cache.turboquant.cache import uses_turboquant_groups
 from vllm_ascend.quantization.utils import enable_fa_quant
 from vllm_ascend.utils import (
@@ -114,7 +116,6 @@ from vllm_ascend.utils import (
     is_c8_mxfp_kv_quant,
     is_hidden_state_cache_spec,
     kv_cache_spec_uses_packed_sfa_main_cache,
-    vllm_version_is,
 )
 from vllm_ascend.worker.kvpp_cache import allocate_kvpp_cache
 from vllm_ascend.worker.utils import (
@@ -125,14 +126,7 @@ from vllm_ascend.worker.utils import (
 if TYPE_CHECKING:
     from vllm_ascend.worker.v2.pcp_manager import AscendPCPAttentionContext
 
-if vllm_version_is("0.33.0"):
-    import vllm.models.qwen4_exp.common.qsa_cache as qsa_cache  # type: ignore[import-not-found]
-
-    QSAMetadataBuilder = qsa_cache.QSAMetadataBuilder
-else:
-    import vllm.models.qwen4_exp.common.qsa_indexer as qsa_indexer  # type: ignore[import-not-found]
-
-    QSAMetadataBuilder = qsa_indexer.QSAIndexerMetadataBuilder
+QSAMetadataBuilder = qsa_indexer.QSAIndexerMetadataBuilder
 
 
 # MRV2's upstream _dummy_run drops runner-specific kwargs such as``skip_gdn_state_update``
@@ -320,6 +314,33 @@ def _get_parallel_config_for_attn_metadata(attn_groups: list[list[AttentionGroup
     return vllm_config.parallel_config if vllm_config is not None else None
 
 
+def initialize_kernel_block_table_buffers(
+    attn_groups: Iterable[AttentionGroup], max_num_reqs: int, manager_table_widths: Sequence[int]
+) -> None:
+    """Reserve Ascend mapping capacity before warmup or graph capture.
+
+    Upstream sizes Group mappings for scheduler requests. PCP can expose two
+    local rows per request, and FIA can append a padding request. Reallocate
+    once during initialization so mapping never resizes graph-owned storage.
+    Use actual manager-table widths because encoder tables can be wider than
+    the decoder-based allocation made by AttentionGroup.
+    """
+    for group in attn_groups:
+        table = group.kernel_block_table
+        if table is None:
+            continue
+        assert group.kernel_block_size is not None
+        blocks_per_manager = group.kv_cache_spec.block_size // group.kernel_block_size
+        required_columns = manager_table_widths[group.kv_cache_group_id] * blocks_per_manager
+        rows = max(table.shape[1], max_num_reqs)
+        columns = max(table.shape[2], required_columns)
+        if rows == table.shape[1] and columns == table.shape[2]:
+            continue
+        expanded = table.new_zeros((table.shape[0], rows, columns))
+        expanded[:, : table.shape[1], : table.shape[2]].copy_(table)
+        group.kernel_block_table = expanded
+
+
 def build_attn_metadata(
     *,
     attn_groups: list[list[AttentionGroup]],
@@ -357,6 +378,7 @@ def build_attn_metadata(
     offload_dummy: bool = False,
     req_topk_buffer_slots: torch.Tensor | None = None,
     req_topk_buffer_active: torch.Tensor | None = None,
+    req_topk_buffer_stable_prefixes: torch.Tensor | None = None,
     copy_sfa_draft_index: int | None = None,
     copy_sfa_restore_tails: bool = False,
     draft_layer_names: set[str] | None = None,
@@ -490,6 +512,7 @@ def build_attn_metadata(
             offload_dummy=offload_dummy,
             req_topk_buffer_slots=req_topk_buffer_slots,
             req_topk_buffer_active=req_topk_buffer_active,
+            req_topk_buffer_stable_prefixes=req_topk_buffer_stable_prefixes,
             copy_sfa_draft_index=copy_sfa_draft_index,
             copy_sfa_restore_tails=copy_sfa_restore_tails,
             dcp_local_seq_lens=dcp_local_seq_lens,
@@ -506,15 +529,20 @@ def build_attn_metadata(
             is_dsa_builder = isinstance(attn_metadata_builder, AscendDSAMetadataBuilder)
             is_v41_builder = isinstance(attn_metadata_builder, AscendDSAV41MetadataBuilder)
             is_sfa_builder = isinstance(attn_metadata_builder, AscendSFAMetadataBuilder)
-            if isinstance(attn_metadata_builder, QSAMetadataBuilder) and num_reqs > num_actual_reqs:
+            is_qsa_indexer = isinstance(attn_metadata_builder, QSAMetadataBuilder)
+            layer_common = common_attn_metadata
+            if is_qsa_indexer and num_reqs > num_actual_reqs:
                 # FULL graph padding appends dummy request boundaries to the
                 # shared query_start_loc, while QSA reads the CPU tail as its
                 # mapped-token count. Expose only the live request boundaries.
-                common_attn_metadata = replace(  # type: ignore[call-arg]
-                    common_attn_metadata,
-                    query_start_loc_cpu=common_attn_metadata.query_start_loc_cpu[: num_actual_reqs + 1],
+                layer_common = layer_common.replace(
+                    query_start_loc_cpu=layer_common.query_start_loc_cpu[: num_actual_reqs + 1],
                 )
-            metadata_variants = [(attn_group.layer_names, common_attn_metadata)]
+            if pcp_context is not None and (full_graph_mode or for_cudagraph_capture):
+                backend = getattr(attn_group, "backend", None)
+                if is_qsa_indexer or getattr(backend, "uses_qsa_page_major_kv_view", False):
+                    layer_common = layer_common.replace(graph_pad_size=num_input_tokens)
+            metadata_variants = [(attn_group.layer_names, layer_common)]
             if is_sfa_builder and draft_layer_names:
                 target_names = [name for name in attn_group.layer_names if name not in draft_layer_names]
                 draft_names = [name for name in attn_group.layer_names if name in draft_layer_names]
@@ -564,17 +592,21 @@ def build_attn_metadata(
                     # branches in the graph even for a short dummy sequence.
                     full_graph_mode=full_graph_mode or for_cudagraph_capture,
                 )
-
+            # Map manager block IDs to this AttentionGroup's kernel blocks
+            # before building metadata for either execution or graph capture.
+            group_pcp_context = pcp_context.for_attention_group(attn_group) if pcp_context is not None else None
             for variant_names, variant_common in metadata_variants:
+                if group_pcp_context is not pcp_context:
+                    variant_common = replace(variant_common, pcp_context=group_pcp_context)
                 if for_cudagraph_capture:
                     metadata = attn_metadata_builder.build_for_cudagraph_capture(
-                        variant_common,
+                        attn_group._with_kernel_block_table(variant_common),
                         **attn_metadata_extra_kwargs,
                     )
                 else:
                     if isinstance(attn_metadata_builder, GDNAttentionMetadataBuilder):
                         attn_metadata_extra_kwargs["num_actual_reqs"] = num_actual_reqs
-                    metadata = attn_metadata_builder.build(
+                    metadata = attn_group.build_metadata(
                         common_prefix_len=0,
                         common_attn_metadata=variant_common,
                         **attn_metadata_extra_kwargs,
@@ -631,12 +663,6 @@ def _get_layer_kv_cache_specs(kv_cache_config: KVCacheConfig) -> dict[str, KVCac
             else:
                 layer_kv_cache_spec[layer_name] = group_spec
     return layer_kv_cache_spec
-
-
-def _is_dsv4_model(vllm_config: VllmConfig) -> bool:
-    model_config = getattr(vllm_config, "model_config", None)
-    hf_config = getattr(model_config, "hf_config", None) if model_config else None
-    return hf_config is not None and hasattr(hf_config, "compress_ratios")
 
 
 def _get_attention_kv_cache_dims(
@@ -965,12 +991,20 @@ def _allocate_kv_cache(
             name: parts if isinstance(specs[name], AscendSFAIndexerCacheSpec) or len(parts) > 1 else parts[0]
             for name, parts in caches.items()
         }
-    is_dsv4_model = _is_dsv4_model(vllm_config)
     # init kv cache tensors
     kv_cache_raw_tensors: dict[str, Any] = {}
     # prefill disaggregation need the addr of cache tensor be aligned with 2M
-    alignment = 2 * 1024 * 1024
+    alignment = KV_CACHE_BUFFER_ALIGNMENT
     layer_kv_cache_spec = _get_layer_kv_cache_specs(kv_cache_config)
+    reuse_layout = get_layerwise_reuse_layout(kv_cache_config)
+    if reuse_layout is not None:
+        return allocate_cache_backing(
+            kv_cache_config,
+            layer_kv_cache_spec,
+            lambda size: _allocate_int8_cache_tensor(size, alignment, device),
+            reuse_layout.cache_view_sizes,
+        )
+
     attn_layers: dict[str, AttentionLayerBase] | None = None
     # Gemma 4 full/sliding groups share one pool while retaining contiguous
     # K/V views. The worker keeps the full budget only for this V2 path.
@@ -1054,48 +1088,6 @@ def _allocate_kv_cache(
                 kv_cache_raw_tensors[cache_owner.layer_name] = backing
         return kv_cache_raw_tensors
 
-    # The restored DeepSeek-V4 planner on main computes capacity for one
-    # shared-tuple backing and emits every KVCacheTensor as a view into it.
-    # Validate all descriptors before allocating so an unsupported geometry
-    # cannot partially materialize and then fall back to duplicate buffers.
-    dsv4_backing: torch.Tensor | None = None
-    if is_dsv4_model:
-        tensor_sizes = {descriptor.size for descriptor in kv_cache_config.kv_cache_tensors}
-        if len(tensor_sizes) != 1:
-            raise ValueError("DeepSeek-V4 KV cache descriptors must share one backing allocation.")
-        backing_size = tensor_sizes.pop()
-        uses_turboquant = uses_turboquant_groups(kv_cache_config.kv_cache_groups)
-        dsv4_regions: list[tuple[str, int, int]] = []
-        for descriptor in kv_cache_config.kv_cache_tensors:
-            for layer_idx, layer_name in enumerate(get_kv_cache_tensor_layers(descriptor)):
-                spec = layer_kv_cache_spec[layer_name]
-                if not uses_turboquant and descriptor.block_stride != spec.page_size_bytes:
-                    raise ValueError(
-                        "DeepSeek-V4 requires contiguous per-layer pages, "
-                        f"but {layer_name} has block_stride="
-                        f"{descriptor.block_stride} and page_size="
-                        f"{spec.page_size_bytes}."
-                    )
-                if descriptor.block_stride < spec.page_size_bytes:
-                    raise ValueError(f"DSA physical stride is smaller than the page for {layer_name}")
-                layer_size = (kv_cache_config.num_blocks - 1) * descriptor.block_stride + spec.page_size_bytes
-                start = descriptor.offset + layer_idx * descriptor.layer_stride
-                if start < 0 or start + layer_size > backing_size:
-                    raise ValueError(
-                        f"DeepSeek-V4 KV cache view for {layer_name} exceeds the shared backing allocation."
-                    )
-                dsv4_regions.append((layer_name, start, layer_size))
-
-        if not dsv4_regions:
-            raise ValueError("DeepSeek-V4 KV cache config has no materializable layers.")
-        dsv4_backing = _allocate_int8_cache_tensor(
-            backing_size,
-            alignment,
-            device,
-        )
-        for layer_name, start, layer_size in dsv4_regions:
-            kv_cache_raw_tensors[layer_name] = dsv4_backing[start : start + layer_size]
-
     # Hybrid groups share one backing; descriptors carry per-layer offsets.
     hybrid_backing: torch.Tensor | None = None
     step_backings: dict[tuple[int, int], torch.Tensor] = {}
@@ -1104,61 +1096,18 @@ def _allocate_kv_cache(
     # K3.1 PP ranks with only recurrent or draft layers still use paired backing.
     hf_config = getattr(getattr(vllm_config, "model_config", None), "hf_config", None)
     is_paired_sfa = getattr(hf_config, "model_type", None) == "kimi_k31"
-    if (use_hybrid_layout or is_paired_sfa) and not is_dsv4_model:
+    if use_hybrid_layout or is_paired_sfa:
         hybrid_backing = _allocate_int8_cache_tensor(kv_cache_config.kv_cache_tensors[0].size, alignment, device)
 
-    layerwise_reuse = get_layerwise_reuse_config(vllm_config.kv_transfer_config, vllm_config=vllm_config) is not None
-    layerwise_aliases: dict[str, str] = {}
     for kv_cache_tensor in kv_cache_config.kv_cache_tensors:
         shared_names = get_kv_cache_tensor_layers(kv_cache_tensor)
         if not shared_names:
-            continue
-
-        # Only the layerwise planner's zero-stride descriptors share a
-        # physical slot. Ordinary packed descriptors still own private layers.
-        if layerwise_reuse and kv_cache_tensor.layer_stride == 0:
-            if all(isinstance(layer_kv_cache_spec[name], AscendSFAIndexerCacheSpec) for name in shared_names):
-                indexer_specs = {
-                    name: spec
-                    for name in shared_names
-                    if isinstance((spec := layer_kv_cache_spec[name]), AscendSFAIndexerCacheSpec)
-                }
-                kv_cache_raw_tensors.update(
-                    allocate_shared_indexer_cache(
-                        indexer_specs,
-                        kv_cache_config.num_blocks,
-                        lambda size: _allocate_int8_cache_tensor(size, alignment, device),
-                    )
-                )
-                continue
-            owner_name = shared_names[0]
-            if any(layer_kv_cache_spec[name] != layer_kv_cache_spec[owner_name] for name in shared_names[1:]):
-                raise ValueError("Layerwise V2 KV aliases require identical cache specs.")
-            layerwise_aliases.update({name: owner_name for name in shared_names[1:]})
-            shared_names = shared_names[:1]
-
-        if dsv4_backing is not None:
             continue
 
         if any(isinstance(layer_kv_cache_spec[name], AscendIndexerKPoolTailSpec) for name in shared_names):
             # The compressed indexer and request-private tail share a physical
             # small-page slot. Both need the same single backing allocation.
             raw_tensor = _allocate_int8_cache_tensor(kv_cache_tensor.size, alignment, device)
-            for layer_name in shared_names:
-                kv_cache_raw_tensors[layer_name] = raw_tensor
-            continue
-
-        if is_dsv4_model:
-            # DSA reshapes it with its own page-strided layout below.
-            if vllm_config.kv_transfer_config is None:
-                raw_tensor = torch.zeros(kv_cache_tensor.size, dtype=torch.int8, device=device)
-            else:
-                raw_tensor = torch.zeros(
-                    kv_cache_tensor.size + alignment,
-                    dtype=torch.int8,
-                    device=device,
-                )
-                raw_tensor = _align_memory(raw_tensor, alignment)[: kv_cache_tensor.size]
             for layer_name in shared_names:
                 kv_cache_raw_tensors[layer_name] = raw_tensor
             continue
@@ -1373,9 +1322,6 @@ def _allocate_kv_cache(
                 v_tensor = _allocate_int8_cache_tensor(v_size, alignment, device)
                 kv_cache_raw_tensors[layer_name] = (k_tensor, v_tensor)
 
-    for layer_name, owner_name in layerwise_aliases.items():
-        kv_cache_raw_tensors[layer_name] = kv_cache_raw_tensors[owner_name]
-
     layer_names = {layer_name for group in kv_cache_config.kv_cache_groups for layer_name in group.layer_names}
     assert layer_names == (kv_cache_raw_tensors.keys() | shared_layers.keys()), (
         "Some layers are not correctly initialized"
@@ -1387,6 +1333,7 @@ def _get_cache_attention_groups(
     kv_cache_config: KVCacheConfig,
     attn_layers: Mapping[str, AttentionLayerBase],
     shared_layers: Mapping[str, str],
+    kernel_block_sizes: Sequence[int] = (),
 ) -> list[AttentionGroup]:
     """Resolve each cache owner's backend and spec without changing placement."""
     attn_groups: list[AttentionGroup] = []
@@ -1400,15 +1347,29 @@ def _get_cache_attention_groups(
             layer_spec = kv_cache_group.kv_cache_spec
             if isinstance(layer_spec, UniformTypeKVCacheSpecs):
                 layer_spec = layer_spec.kv_cache_specs[layer_name]
+            if isinstance(layer_spec, EncoderOnlyAttentionSpec):
+                continue
             backend = layer.get_attn_backend()
             key = (backend.full_cls_name(), layer_spec, getattr(layer, "num_heads", 0))
             if key not in group_map:
-                group_map[key] = AttentionGroup(
+                attn_group = AttentionGroup(
                     backend=backend,
                     layer_names=[layer_name],
                     kv_cache_spec=layer_spec,
                     kv_cache_group_id=group_id,
                 )
+                if (
+                    isinstance(layer_spec, AttentionSpec)
+                    and layer_spec.has_layer_views
+                    and group_id < len(kernel_block_sizes)
+                ):
+                    # Match create_metadata_builders() without rebuilding its
+                    # metadata buffers. Each backend can use smaller pages than
+                    # the common view size of its KV cache group.
+                    kernel_block_size = select_common_block_size(kernel_block_sizes[group_id], [backend], [layer_spec])
+                    if kernel_block_size != layer_spec.block_size:
+                        attn_group.kernel_block_size = kernel_block_size
+                group_map[key] = attn_group
                 group_order.append(key)
             else:
                 group_map[key].layer_names.append(layer_name)
@@ -1578,7 +1539,19 @@ def allocate_kv_cache_main(
         device=device,
     )
 
-    attn_groups = _get_cache_attention_groups(kv_cache_config, attn_layers, shared_layers)
+    attn_groups = _get_cache_attention_groups(kv_cache_config, attn_layers, shared_layers, kernel_block_sizes)
+
+    # Different KV groups can share a slot by using separate block pages.
+    # Splitting the whole slot by component can put data in another group's page.
+    if len(kv_cache_config.kv_cache_groups) == 1 and get_layerwise_reuse_layout(kv_cache_config) is not None:
+        for group in attn_groups:
+            prepare_view = getattr(group.backend, "prepare_layerwise_cache_view", None)
+            if prepare_view is None:
+                continue
+            for layer_name in group.layer_names:
+                raw_cache = raw_tensors[layer_name]
+                if isinstance(raw_cache, torch.Tensor):
+                    raw_tensors[layer_name] = prepare_view(raw_cache, group.kv_cache_spec, attn_layers[layer_name])
 
     return _reshape_kv_cache_v2(
         attn_groups=attn_groups,
@@ -1636,17 +1609,22 @@ def _reshape_kv_cache_v2(
             continue
 
         group_spec = group.kv_cache_spec
+        selected_kernel_block_size = (
+            group.kernel_block_size
+            if group.kernel_block_size is not None
+            else kernel_block_sizes[group.kv_cache_group_id]
+        )
         group_storage_block_size = get_storage_block_size(group_spec)
         kernel_block_size = (
             group_storage_block_size
             if group_storage_block_size != group_spec.block_size
-            else kernel_block_sizes[group.kv_cache_group_id]
+            else selected_kernel_block_size
         )
         if group_storage_block_size != group_spec.block_size and getattr(
             group_spec, "indexes_kv_by_block_stride", False
         ):
             compression_ratio = get_kv_cache_compression_ratio(group_spec)
-            kernel_block_size = kernel_block_sizes[group.kv_cache_group_id] // compression_ratio
+            kernel_block_size = selected_kernel_block_size // compression_ratio
 
         for layer_name in group.layer_names:
             if layer_name in shared_kv_cache_layers:
@@ -2065,11 +2043,8 @@ def _reshape_kv_cache_v2(
 
             if packed_sfa_main_cache:
                 raw_k_tensor = raw_cache
-                k_dtype = (
-                    torch.int8
-                    if vllm_config.cache_config.cache_dtype == TURBOQUANT_CACHE_DTYPE
-                    else kv_cache_dtype_str_to_dtype(vllm_config.cache_config.cache_dtype, vllm_config.model_config)
-                )
+                # Allocation and the layer's reader/writer share this spec.
+                k_dtype = kv_cache_spec.dtype
                 k_cache = raw_k_tensor.view(k_dtype).view(k_shape)
                 kv_caches[layer_name] = (k_cache,)
             elif isinstance(raw_cache, tuple):

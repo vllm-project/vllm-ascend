@@ -12,11 +12,11 @@
 
             | Hardware | Ubuntu | openEuler |
             | --- | --- | --- |
-            | Ascend A2 series products | `quay.io/ascend/cann:{{ release_cann_version }}-910b-ubuntu22.04-py3.12` | `quay.io/ascend/cann:{{ release_cann_version }}-910b-openeuler24.03-py3.12` |
-            | Ascend A3 series products | `quay.io/ascend/cann:{{ release_cann_version }}-a3-ubuntu22.04-py3.12` | `quay.io/ascend/cann:{{ release_cann_version }}-a3-openeuler24.03-py3.12` |
-            | Atlas 300I DUO | `quay.io/ascend/cann:{{ release_cann_version }}-310p-ubuntu22.04-py3.12` | `quay.io/ascend/cann:{{ release_cann_version }}-310p-openeuler24.03-py3.12` |
+            | Atlas A2 Products | `quay.io/ascend/cann:{{ release_cann_version }}-910b-ubuntu22.04-py3.12` | `quay.io/ascend/cann:{{ release_cann_version }}-910b-openeuler24.03-py3.12` |
+            | Atlas A3 Products | `quay.io/ascend/cann:{{ release_cann_version }}-a3-ubuntu22.04-py3.12` | `quay.io/ascend/cann:{{ release_cann_version }}-a3-openeuler24.03-py3.12` |
+            | Atlas 300I Duo | `quay.io/ascend/cann:{{ release_cann_version }}-310p-ubuntu22.04-py3.12` | `quay.io/ascend/cann:{{ release_cann_version }}-310p-openeuler24.03-py3.12` |
             | Atlas 200I Pro | `quay.io/ascend/cann:{{ release_cann_version }}-310p-ubuntu22.04-py3.12` | `quay.io/ascend/cann:{{ release_cann_version }}-310p-openeuler24.03-py3.12` |
-            | 950DT Products | `quay.io/ascend/cann:{{ release_cann_version }}-950-ubuntu22.04-py3.12` | `quay.io/ascend/cann:{{ release_cann_version }}-950-openeuler24.03-py3.12` |
+            | Ascend 950DT Products | `quay.io/ascend/cann:{{ release_cann_version }}-950-ubuntu22.04-py3.12` | `quay.io/ascend/cann:{{ release_cann_version }}-950-openeuler24.03-py3.12` |
 
         The CANN base image already includes the Toolkit, the operator package for the target hardware, and NNAL. You do not need to reinstall CANN in the container. For other operating systems and tags, see the [CANN Container Images Overview](https://github.com/Ascend/cann-container-image/blob/main/OVERVIEW.md).
 
@@ -39,6 +39,7 @@
             Confirm that `/usr/local/Ascend/nnal/atb/set_env.sh` and `libatb.so` are available. If CANN is installed elsewhere, source the corresponding `set_env.sh`. If a "libatb.so not found" error occurs at runtime, make sure that the manual installation steps installed NNAL correctly.
 
         ```bash
+        # Source the CANN and NNAL environments, then confirm that the NPU is visible
         source /usr/local/Ascend/ascend-toolkit/set_env.sh
 
         if [ -f /usr/local/Ascend/nnal/atb/set_env.sh ]; then
