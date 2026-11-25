@@ -292,6 +292,7 @@ def test_public_builder_mounts_kv_transfer_config_on_default_path(monkeypatch, k
     # drop used for external cache loads.
     sentinel_config = SimpleNamespace()
     vllm_config = SimpleNamespace(
+        attention_config=SimpleNamespace(hisparse_config=None),
         model_config=SimpleNamespace(hf_config=SimpleNamespace(model_type="llama")),
         kv_transfer_config=kv_transfer_config,
     )

@@ -16,6 +16,8 @@ from vllm_ascend.core.kv_cache_interface import (
     get_storage_block_size,
 )
 
+GLM5_NEXT_SFA_KERNEL_BLOCK_SIZE = 128
+
 
 def _row_major_strides(shape: tuple[int, ...]) -> list[int]:
     strides = [1] * len(shape)

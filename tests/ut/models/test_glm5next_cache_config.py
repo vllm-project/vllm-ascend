@@ -20,6 +20,7 @@ from vllm.v1.kv_cache_interface import (
 )
 
 from vllm_ascend.core.kv_cache_interface import AscendIndexerKPoolTailSpec, AscendMLAAttentionSpec
+from vllm_ascend.hisparse.layout import regroup_pooled_hisparse_kda
 from vllm_ascend.models.glm5next.cache_config import (
     _get_glm5_next_cache_layout,
     get_glm5_next_kv_cache_config,
@@ -135,6 +136,95 @@ def make_specs(pool: int = 16):
             dtypes=(torch.bfloat16, torch.float32),
         )
     return specs
+
+
+def test_hisparse_caps_kda_layers_per_physical_group_at_six():
+    template = make_specs(pool=4)
+    state = template["model.layers.0.linear_attn"]
+    attention = template["model.layers.3.attn"]
+    kda_names = [f"model.layers.{index}.linear_attn" for index in range(45) if index % 4 != 3]
+    regular = {f"model.layers.{index}.attn": attention for index in range(3, 45, 4)}
+    specs = {**regular, **dict.fromkeys(kda_names, state)}
+    other = [KVCacheGroupSpec([name], spec) for name, spec in regular.items()]
+    original_kda = [KVCacheGroupSpec([name], state) for name in kda_names]
+
+    groups = regroup_pooled_hisparse_kda(specs, [*other, *original_kda])
+
+    assert all(after is before for after, before in zip(groups, other))
+    recurrent = groups[len(other) :]
+    assert [len(group.layer_names) for group in recurrent] == [6, 6, 6, 5, 6, 5]
+    assert sorted(name for group in recurrent for name in group.layer_names) == sorted(kda_names)
+    assert all(group.kv_cache_spec == state for group in recurrent)
+
+
+@pytest.mark.parametrize(
+    ("padded_page_bytes", "mixed_indexers", "core_supported", "expected_error"),
+    [
+        (608256, False, True, None),
+        (None, False, True, "requires a recurrent page of whole packed KV rows"),
+        (608257, False, True, "requires a recurrent page of whole packed KV rows"),
+        (608256, True, True, "requires the same packed indexer format in all layers"),
+        (608256, False, False, "verified vLLM main pin"),
+    ],
+)
+def test_fp8_hisparse_kpool_validates_native_manager_page(
+    monkeypatch, padded_page_bytes, mixed_indexers, core_supported, expected_error
+):
+    from vllm.v1.kv_cache_interface import KVCacheGroupRole, SparseCacheRole, UniformTypeKVCacheSpecs
+
+    from vllm_ascend import hisparse
+    from vllm_ascend.core import kv_cache_config_builder as builder
+    from vllm_ascend.device.hardware_profile import DeviceAdaptorFamily
+
+    name = "model.layers.3.indexer.k_cache"
+    kpool = AscendMLAAttentionSpec(
+        block_size=128,
+        num_kv_heads=1,
+        head_size=128,
+        dtype=torch.float8_e4m3fn,
+        model_version="glm5_next",
+        tokens_per_state=4,
+        cache_role=SparseCacheRole.INDEXER,
+        scale_dim=1,
+        scale_dtype=torch.float32,
+    )
+    specs = {name: kpool}
+    expanded = UniformTypeKVCacheSpecs.from_specs({name: replace(kpool, block_size=1536)})
+    groups = [KVCacheGroupSpec([name], expanded, role=KVCacheGroupRole.HISPARSE_INDEXER)]
+    if mixed_indexers:
+        native_name = "model.layers.7.indexer.k_cache"
+        specs[native_name] = replace(kpool, tokens_per_state=1)
+        native = UniformTypeKVCacheSpecs.from_specs({native_name: specs[native_name]})
+        groups.append(KVCacheGroupSpec([native_name], native, role=KVCacheGroupRole.HISPARSE_INDEXER))
+    monkeypatch.setattr(hisparse, "supports_hybrid_hisparse_core", lambda: core_supported)
+    monkeypatch.setattr(builder, "_upstream_get_kv_cache_groups", lambda *_: groups)
+    config = make_config()
+    config.attention_config = SimpleNamespace(hisparse_config=object(), indexer_kv_dtype="fp8")
+    config.parallel_config.data_parallel_size = 1
+    config.parallel_config.pipeline_parallel_size = 1
+    config.cache_config.block_size = 128
+    config.cache_config.cache_dtype = "fp8"
+    config.cache_config.mamba_page_size_padded = padded_page_bytes
+    config.model_config.hf_text_config = SimpleNamespace(
+        model_type="glm5_next_text", index_kpool=4, kv_lora_rank=512, qk_rope_head_dim=0
+    )
+    monkeypatch.setattr(
+        hisparse,
+        "get_current_hardware_profile",
+        lambda: SimpleNamespace(device_adaptor_family=DeviceAdaptorFamily.FP8_OPTIMIZED),
+    )
+
+    if expected_error is not None:
+        with pytest.raises(ValueError, match=expected_error):
+            builder.AscendKVCacheConfigBuilder().get_kv_cache_groups(config, specs)
+        return
+
+    [planned] = builder.AscendKVCacheConfigBuilder().get_kv_cache_groups(config, specs)
+
+    assert planned.layer_names == [name]
+    assert planned.role == KVCacheGroupRole.HISPARSE_INDEXER
+    assert planned.kv_cache_spec.block_size == 1152
+    assert builder._compact_hisparse_kpool_pages([planned]) == {name: 38016}
 
 
 @pytest.fixture(autouse=True)
