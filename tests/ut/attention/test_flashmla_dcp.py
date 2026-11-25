@@ -17,6 +17,7 @@ from pathlib import Path
 from types import MethodType, ModuleType, SimpleNamespace
 from unittest.mock import Mock
 
+import numpy as np
 import pytest
 import torch
 
@@ -144,7 +145,13 @@ def runtime(monkeypatch):
         return install(name, **runpy.run_path(str(ROOT / relative)))
 
     install("vllm_ascend")
-    utils = install("vllm_ascend.attention.utils", get_flashmla_ops=lambda: None, get_quant_flashmla_ops=lambda: None)
+    utils = install(
+        "vllm_ascend.attention.utils",
+        get_flashmla_ops=lambda: None,
+        get_quant_flashmla_ops=lambda: None,
+        np=np,
+        torch=torch,
+    )
     tree = ast.parse((ROOT / "vllm_ascend/attention/utils.py").read_text(encoding="utf-8"))
     constant = next(
         node
@@ -152,7 +159,13 @@ def runtime(monkeypatch):
         if isinstance(node, ast.Assign)
         and any(isinstance(target, ast.Name) and target.id == "MLA_FLASH_SUPPORTED_Q_HEADS" for target in node.targets)
     )
-    exec(compile(ast.Module(body=[constant], type_ignores=[]), "<heads>", "exec"), utils.__dict__)
+    prefill_flags = next(
+        node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "apply_prefill_as_decode_mask"
+    )
+    exec(
+        compile(ast.Module(body=[constant, prefill_flags], type_ignores=[]), "<attention-utils>", "exec"),
+        utils.__dict__,
+    )
     install("vllm.v1.attention.backends.utils", get_dcp_local_seq_lens=local_lengths)
     install(
         "vllm.forward_context", BatchDescriptor=object, get_forward_context=Mock(), is_forward_context_available=Mock()

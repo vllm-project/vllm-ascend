@@ -21,10 +21,10 @@ from vllm.distributed.device_communicators.base_device_communicator import Devic
 from vllm.logger import logger
 
 from vllm_ascend.ascend_config import get_ascend_config
-from vllm_ascend.distributed.device_communicators.mxfp8_all_reduce import Mxfp8AllReduce
-from vllm_ascend.distributed.device_communicators.quantized_all_reduce import (
+from vllm_ascend.distributed.device_communicators.int8_all_reduce import (
     QuantizedAllReduce,
 )
+from vllm_ascend.distributed.device_communicators.mxfp8_all_reduce import Mxfp8AllReduce
 
 
 class _NpuAll2AllManager:

@@ -16,7 +16,6 @@ from vllm_ascend.attention.gdn_attn_builder import (
 from vllm_ascend.models.kimi_k3 import kimi_k3
 from vllm_ascend.ops import head_parallel, recurrent_pcp
 from vllm_ascend.ops.kimi_kda import AscendKimiK3DeltaAttention, KimiKDAHostMetadataBuilder, KimiKDAInputParallelLinear
-from vllm_ascend.utils import vllm_version_is
 
 
 @contextmanager
@@ -92,8 +91,6 @@ def test_kda_input_projection_preserves_upstream_padding_and_replication(loader,
     tp = SimpleNamespace(world_size=2, rank_in_group=1)
     pcp = SimpleNamespace(world_size=2, rank_in_group=1)
     output_sizes = [32] * 4 + [4, 8]
-    if padding and vllm_version_is("0.33.0"):
-        output_sizes.append(padding * 4)
     with parallel_groups(tp, pcp):
         projection = KimiKDAInputParallelLinear(8, output_sizes, 4, padding_size=padding, bias=False)
     projection.weight.data.fill_(9)
@@ -108,7 +105,7 @@ def test_kda_input_projection_preserves_upstream_padding_and_replication(loader,
 
 @pytest.mark.parametrize(("head_dim", "padding"), [(4, 10), (14, 0)])
 @pytest.mark.parametrize("loader", ["weight_loader", "weight_loader_v2"])
-def test_pcp_projection_caller_allocates_padding_once(head_dim, padding, loader):
+def test_pcp_projection_allocates_padding_once(head_dim, padding, loader):
     layer = AscendKimiK3DeltaAttention.__new__(AscendKimiK3DeltaAttention)
     torch.nn.Module.__init__(layer)
     layer.num_heads = 8
@@ -149,9 +146,8 @@ def test_pcp_projection_caller_allocates_padding_once(head_dim, padding, loader)
     if padding:
         split_sizes.append(padding)
     assert len(output.split(split_sizes, dim=-1)) == len(split_sizes)
-    if not vllm_version_is("0.33.0"):
-        assert projection.shard_ids == tuple(range(6))
-        assert projection.pop_missing_shards() == []
+    assert projection.shard_ids == tuple(range(6))
+    assert projection.pop_missing_shards() == []
 
 
 @pytest.mark.parametrize("reduce_results", [False, True])
@@ -351,3 +347,26 @@ def test_kimi_head_parameters_and_conv_load_the_same_combined_rank(rank):
         attention.conv1d.weight.weight_loader(attention.conv1d.weight, projection, shard_id)
     expected = torch.cat([projection.chunk(4)[rank] for projection in conv.chunk(3)])
     torch.testing.assert_close(attention.conv1d.weight, expected)
+
+
+@pytest.mark.parametrize("size", [2, 4])
+def test_explicit_projection_group_preserves_merged_checkpoint_shards(size):
+    hidden, width = 4, 8
+    inputs = torch.arange(2 * hidden, dtype=torch.float32).reshape(2, hidden)
+    weights = [
+        torch.arange(width * hidden, dtype=torch.float32).reshape(width, hidden) + offset for offset in (0, 100, 200)
+    ]
+    native = SimpleNamespace(world_size=2, rank_in_group=1)
+    for rank in range(size):
+        group = SimpleNamespace(world_size=size, rank_in_group=rank)
+        with parallel_groups(native, native):
+            layer = head_parallel.HeadParallelMergedColumnLinear(
+                hidden, [width] * 3, tp_group=group, bias=False, params_dtype=torch.float32
+            )
+        for shard, weight in enumerate(weights):
+            layer.weight.weight_loader(layer.weight, weight, shard)
+        expected_weight = torch.cat([weight.chunk(size)[rank] for weight in weights])
+        torch.testing.assert_close(layer.weight, expected_weight)
+        output, _ = layer(inputs)
+        torch.testing.assert_close(output, torch.nn.functional.linear(inputs, expected_weight))
+        assert layer.tp_rank == rank and layer.tp_size == size

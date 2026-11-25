@@ -28,6 +28,10 @@ _DTYPE_BF16 = 15
 _DTYPE_E4M3FN = 292
 _SCALE_ALG_CEIL = 1
 
+# 32 MiB of bf16 payload, retained from the A2 int8 crossover study. MXFP8 has
+# no per-TP calibration yet, so unlike int8 the gate is not split by TP degree.
+_DEFAULT_MIN_NUMEL = 16_777_216
+
 
 class Mxfp8AllReduce:
     """BF16 -> MXFP8 AllToAll -> BF16 local SUM -> BF16 AllGather."""
@@ -35,12 +39,12 @@ class Mxfp8AllReduce:
     def __init__(
         self,
         group: "dist.ProcessGroup",
-        min_numel: int,
+        min_numel: int | None = None,
         group_name: str = "",
     ) -> None:
         self.group = group
         self.group_name = group_name
-        self.min_numel = min_numel
+        self.min_numel = _DEFAULT_MIN_NUMEL if min_numel is None else min_numel
         self.world_size = dist.get_world_size(group)
         device_type = get_ascend_device_type()
         if device_type != AscendDeviceType.A5:

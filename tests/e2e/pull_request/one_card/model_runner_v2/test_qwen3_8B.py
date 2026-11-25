@@ -41,7 +41,6 @@ EXPECTED_ACCEPTANCE_LENGTH = 2.03
     os.environ,
     {
         "HCCL_BUFFSIZE": "1024",
-        "VLLM_USE_V2_MODEL_RUNNER": "1",
         "VLLM_WORKER_MULTIPROC_METHOD": "spawn",
         "PYTORCH_NPU_ALLOC_CONF": "expandable_segments:True",
         "OMP_NUM_THREADS": "10",

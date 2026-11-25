@@ -9,6 +9,7 @@ from unittest.mock import patch
 import numpy as np
 
 import tests.ut.distributed.ascend_store._mock_deps  # noqa: F401
+from tests.ut.distributed.ascend_store.cache_config_helpers import make_resolved_cache_config
 
 # isort: split
 from tests.ut.distributed.ascend_store import test_mooncake_hybrid as hybrid_tests
@@ -103,7 +104,9 @@ class TestMooncakePCP(unittest.TestCase):
                     ),
                 ):
                     scheduler = create_kv_pool_scheduler(
-                        first.vllm_config, use_layerwise=True, kv_cache_config=first.kv_cache_config
+                        first.vllm_config,
+                        use_layerwise=True,
+                        kv_cache_config=make_resolved_cache_config(first.vllm_config, first.kv_cache_config),
                     )
                 scheduler.store_scheduler = store
                 self.assertEqual(first.grouped_block_size, first.original_block_size)

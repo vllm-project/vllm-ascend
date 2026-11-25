@@ -12,7 +12,7 @@ from vllm.distributed.kv_events import BlockStored
 from vllm.logger import logger
 from vllm.v1.core.kv_cache_utils import maybe_convert_block_hash
 
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence import AttentionComputeStartGate
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence import AttentionLoadGate
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.base import Backend
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.memcache_backend import (
     MemcacheBackend,
@@ -20,6 +20,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.memcache_b
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     ChunkedTokenDatabase,
     ReqMeta,
+    block_hash_to_str,
     get_block_hashes,
 )
 
@@ -113,7 +114,7 @@ class KVTransferThread(threading.Thread):
 
     def _wait_for_event(
         self,
-        event: threading.Event | AttentionComputeStartGate,
+        event: threading.Event | AttentionLoadGate,
         failure_checker: Callable[[], None] | None = None,
     ) -> bool:
         while not self._stopping.is_set():
@@ -753,6 +754,42 @@ class KVCacheStoreSendingThread(KVTransferThread):
                     self.completed_events[req_meta.event_id] = 1
             self.request_queue.task_done()
 
+    def _store_boundary_puts(self, req_meta: ReqMeta) -> bool:
+        """Store complete pages/checkpoints under their exact boundary keys."""
+        current_event = req_meta.current_event
+        # A boundary value is a complete physical page/checkpoint, keyed by
+        # its logical hash boundary. Never slice a head-major page by bytes.
+        if current_event is not None:
+            current_event.synchronize()
+        boundary_values = {}
+        assert req_meta.boundary_puts is not None
+        for group, block, boundary in req_meta.boundary_puts:
+            if block <= 0 or boundary <= 0 or boundary % self.token_database.hash_block_size:
+                raise ValueError("Invalid Core boundary-state handoff")
+            index = boundary // self.token_database.hash_block_size - 1
+            if index >= len(req_meta.block_hashes):
+                raise ValueError("Boundary state has no committed hash")
+            key = self.token_database._get_key_prefix(group) + block_hash_to_str(req_meta.block_hashes[index])
+            page = self._get_block_size(group)
+            addrs, sizes, _ = self._prepare_value(0, page, [], kv_cache_group_id=group, block_id=block)
+            if not addrs or len(addrs) != len(sizes):
+                raise ValueError("Boundary state has no transferable buffers")
+            boundary_values[key] = (addrs, sizes)
+        keys = list(boundary_values)
+        missing_indices = self._get_missing_indices(keys)
+        if not missing_indices:
+            return True
+        keys = [keys[index] for index in missing_indices]
+        adds = [boundary_values[key][0] for key in keys]
+        sizes = [boundary_values[key][1] for key in keys]
+        result = self.m_store.put(keys, adds, sizes)
+        if isinstance(result, list):
+            if len(result) != len(keys) or not all(result):
+                return False
+        elif result is False:
+            return False
+        return True
+
     def _build_cpu_stored_events(
         self,
         req_meta: ReqMeta,
@@ -846,6 +883,8 @@ class KVCacheStoreSendingThread(KVTransferThread):
         token_len = req_meta.token_len_chunk
         req_id = req_meta.req_id
         current_event = req_meta.current_event
+        if req_meta.boundary_puts and not self._store_boundary_puts(req_meta):
+            return False
         try:
             store_masks = self.token_database.store_mask(token_len, req_meta.num_prompt_tokens)
         except AssertionError as exc:
@@ -874,7 +913,8 @@ class KVCacheStoreSendingThread(KVTransferThread):
                 return True
             return skip_end > skip_start and start >= skip_start and end <= skip_end
 
-        for group_id in req_meta.kv_cache_group_ids or [0]:
+        group_ids = self.token_database.project_group_ids(req_meta.kv_cache_group_ids or [0])
+        for group_id in group_ids:
             group_block_size = self._get_block_size(group_id)
 
             group_store_mask = (
@@ -1109,8 +1149,9 @@ class KVCacheStoreRecvingThread(KVTransferThread):
             size_list = []
             key_list = []
             block_id_list: list[int] = []
-            group_ids = req_meta.kv_cache_group_ids or [0]
+            group_ids = self.token_database.project_group_ids(req_meta.kv_cache_group_ids or [0])
             load_masks = self.token_database.load_mask(req_meta.block_hashes, token_len)
+            tail_boundaries = {boundary.group_id: boundary.num_tokens for boundary in load_spec.tail_key_boundaries}
             for group_id in group_ids:
                 block_ids = req_meta.block_ids_by_group[group_id]
                 group_block_size = self._get_block_size(group_id)
@@ -1127,6 +1168,7 @@ class KVCacheStoreRecvingThread(KVTransferThread):
                     kv_cache_group_id=group_id,
                     skip_null_blocks=self._skip_null_blocks(req_meta, group_id),
                     chunk_filter=chunk_filter,
+                    tail_key_boundary=tail_boundaries.get(group_id),
                 )
                 for start, end, key, _block_hash, block_id in token_iter:
                     addr, size, block_id = self._prepare_value(
@@ -1165,7 +1207,7 @@ class KVCacheStoreRecvingThread(KVTransferThread):
                     time.perf_counter() - load_get_start,
                     len(key_list_c),
                 )
-            if isinstance(self.m_store, MemcacheBackend) and (
+            if (isinstance(self.m_store, MemcacheBackend) or len(req_meta.block_ids_by_group) > 1) and (
                 ret is None or len(ret) != len(key_list_c) or any(r != 0 for r in ret)
             ):
                 self._mark_failed_requests([req_meta])

@@ -26,6 +26,7 @@ estimated_times:
   tests/e2e/pull_request/one_card/test_hisparse_int8_prolog.py: 30
   tests/e2e/pull_request/one_card/test_hisparse_integration.py: 30
   tests/e2e/pull_request/one_card/test_hisparse_prefill_staging.py: 30
+  tests/e2e/pull_request/one_card/test_packed_clone_order.py: 30
   tests/e2e/pull_request/four_card/model_runner_v2/test_kvpp_pp.py: 300
   tests/e2e/pull_request/four_card/test_kvpp_pd.py: 230
   tests/e2e/pull_request/two_card/test_kvpp.py: 290
@@ -79,6 +80,8 @@ estimated_times:
   tests/e2e/pull_request/one_card/test_ec_cpu_offload.py: 1200
   tests/e2e/pull_request/one_card/test_cpu_weight_offload.py: 360
   tests/e2e/pull_request/one_card/test_decoder_replay.py: 60
+  # Initial estimate for graph capture/replay with two input-ID dtypes.
+  tests/e2e/pull_request/one_card/test_routing_ids_graph_refresh.py: 60
   tests/e2e/pull_request/one_card/test_fla_lazy_imports.py: 60
   tests/e2e/pull_request/one_card/test_gdn_block_packed_states.py: 60
   tests/e2e/pull_request/one_card/test_gdn_checkpoint_states.py: 600

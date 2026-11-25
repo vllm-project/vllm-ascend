@@ -98,6 +98,32 @@ class MaskedFakeTokenDatabase(FakeTokenDatabase):
         return block_idx < len(masks[kv_cache_group_id]) and masks[kv_cache_group_id][block_idx]
 
 
+def make_projected_database():
+    database = ChunkedTokenDatabase(
+        [KeyMetadata("m", 0, 0, 0, 0), KeyMetadata("m", 0, 0, 0, 1)],
+        [16, 16],
+        None,
+    )
+    database.set_group_buffers(
+        {0: [1000], 1: []},
+        {0: [16], 1: []},
+        {0: [16], 1: []},
+    )
+    return database
+
+
+def make_projected_request(block_id, *, for_load=False):
+    load_spec = LoadSpec(0, 16, can_load=True, token_len=16) if for_load else None
+    return ReqMeta(
+        req_id="projected-empty-group",
+        token_len_chunk=16,
+        block_ids_by_group=[[block_id], [block_id]],
+        block_hashes=["h0"],
+        kv_cache_group_ids=[0, 1],
+        load_spec=load_spec,
+    )
+
+
 class TestLayerBatchBuilderOffsets(unittest.TestCase):
     def test_uses_real_offsets_for_variable_cache_entries_per_layer(self):
         database = FakeTokenDatabase()
@@ -566,6 +592,21 @@ class TestKVCacheStoreSendingThread(unittest.TestCase):
             sharded_mamba_group_ids=sharded_mamba_group_ids,
         )
         return t, store
+
+    def test_put_uses_only_locally_projected_groups(self):
+        thread, store = self._make_thread([0])
+        thread.token_database = make_projected_database()
+        thread.block_size = [16, 16]
+        store.exists = MagicMock(return_value=[0])
+        request = make_projected_request(1)
+        thread.add_stored_request(request)
+        thread.request_queue.put(request)
+
+        thread._handle_request(request)
+
+        store.exists.assert_called_once()
+        keys, addrs, sizes = store.put_calls[0]
+        self.assertEqual((len(keys), addrs, sizes), (1, [[1016]], [[16]]))
 
     def test_save_keeps_checks_for_align_state_slots(self):
         thread, store = self._make_thread()
@@ -1294,6 +1335,45 @@ class TestKVCacheStoreSendingThread(unittest.TestCase):
 
 
 class TestKVCacheStoreRecvingThread(unittest.TestCase):
+    def test_hybrid_get_failure_is_independent_of_partial_hit_capability(self):
+        for partial_hits in (False, True):
+            for result in (None, [], [0, 0], [-1]):
+                with (
+                    self.subTest(partial_hits=partial_hits, result=result),
+                    patch.object(FakeStore, "get", return_value=result),
+                ):
+                    store = FakeStore()
+                    db = MaskedFakeTokenDatabase(masks=([True], [True]))
+                    db.cache_coordinator = MagicMock(enable_partial_hash_hits=partial_hits)
+                    db.process_token_key_strings_with_block_ids = MagicMock(
+                        return_value=iter([(0, 16, "key", b"hash", 1)])
+                    )
+                    thread = KVCacheStoreRecvingThread(
+                        m_store=store,
+                        token_database=db,
+                        block_size=16,
+                        tp_rank=0,
+                        dcp_size=1,
+                        ready_event=threading.Event(),
+                        invalid_block_ids=set(),
+                        invalid_block_ids_lock=threading.Lock(),
+                    )
+                    request = ReqMeta(
+                        "hybrid",
+                        block_ids_by_group=[[1], [2]],
+                        kv_cache_group_ids=[0],
+                        block_hashes=[b"hash"],
+                        can_save=True,
+                        load_spec=LoadSpec(0, 16, can_load=True, token_len=16),
+                    )
+                    thread.request_queue.put(request)
+                    thread._handle_request(request)
+                    self.assertEqual(thread.get_and_clear_failed_requests(), {"hybrid"})
+                    self.assertEqual(thread._invalid_block_ids, set())
+                    self.assertFalse(request.can_save)
+                    self.assertEqual(thread.get_and_clear_finished_requests(), {"hybrid"})
+                    self.assertEqual(thread.request_queue.unfinished_tasks, 0)
+
     def test_handle_request(self):
         store = FakeStore()
         db = FakeTokenDatabase()
@@ -1320,6 +1400,24 @@ class TestKVCacheStoreRecvingThread(unittest.TestCase):
         self.assertEqual(len(store.get_calls), 1)
         finished = t.get_and_clear_finished_requests()
         self.assertIn("r1", finished)
+
+    def test_async_get_uses_only_locally_projected_groups(self):
+        store = FakeStore()
+        thread = KVCacheStoreRecvingThread(
+            m_store=store,
+            token_database=make_projected_database(),
+            block_size=[16, 16],
+            tp_rank=0,
+            dcp_size=1,
+            ready_event=threading.Event(),
+        )
+        request = make_projected_request(0, for_load=True)
+        thread.request_queue.put(request)
+
+        thread._handle_request(request)
+
+        keys, addrs, sizes = store.get_calls[0]
+        self.assertEqual((len(keys), addrs, sizes), (1, [[1000]], [[16]]))
 
     def test_handle_request_applies_load_mask(self):
         store = FakeStore()

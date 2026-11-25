@@ -26,7 +26,6 @@ from vllm.v1.worker.gpu.model_states.mamba_hybrid import MambaHybridModelState
 from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec
 from vllm_ascend.device.hardware import AscendDeviceType
 from vllm_ascend.device.hardware_profile import get_hardware_profile
-from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.device_metadata import DeviceMetadataStage, DeviceMetadataTask, TargetDeviceMetadata
 from vllm_ascend.worker.v2 import attn_utils
 from vllm_ascend.worker.v2.attn_utils import (
@@ -45,6 +44,12 @@ if not hasattr(_cp_utils, "prepare_dcp_local_seq_lens") and hasattr(_cp_utils, "
     _cp_utils.prepare_dcp_local_seq_lens = (
         lambda dcp_local_seq_lens, seq_lens, num_reqs, dcp_size, dcp_rank, cp_interleave: None
     )
+
+
+class _MetadataState(SimpleNamespace):
+    # Metadata-only doubles still use the real inherited entry check.
+    _check_finegrained_tp_idle_graph_step = AscendMambaHybridModelState._check_finegrained_tp_idle_graph_step
+    _uses_global_mamba_pcp = AscendMambaHybridModelState._uses_global_mamba_pcp
 
 
 class _FakeAttentionBackend:
@@ -205,7 +210,7 @@ def test_layerwise_connector_defers_mamba_pre_copy(mock_has_group, mock_get_grou
     spec = _mamba_spec()
     kv_cache_config = _kv_cache_config(spec)
     state = _make_defer_state(kv_cache_config)
-    ctx = MagicMock()
+    ctx = MagicMock(is_initialized=True)
     # vLLM main removed `MambaHybridModelState._ensure_align_ctx`; the
     # Ascend override must resolve the context built in initialize_kv_cache.
     state._mamba_ctx = ctx
@@ -232,16 +237,28 @@ def test_layerwise_connector_defers_mamba_pre_copy(mock_has_group, mock_get_grou
     connector.finish_mamba_state_copy.assert_called_once()
 
 
-def test_ensure_align_ctx_falls_back_to_mamba_ctx():
-    # vLLM main removed `MambaHybridModelState._ensure_align_ctx`; the Ascend
-    # override must return the context built in initialize_kv_cache instead of
-    # calling the (now absent) inherited helper.
+def test_ensure_align_ctx_preserves_initialized_persistent_tables():
     spec = _mamba_spec()
     kv_cache_config = _kv_cache_config(spec)
     state = _make_defer_state(kv_cache_config)
-    ctx = MagicMock()
+    persistent_tables = torch.tensor([11, 22], dtype=torch.int64)
+    aligned_index_tables = torch.tensor([33, 44], dtype=torch.int64)
+    ctx = SimpleNamespace(
+        is_initialized=True,
+        block_table_ptrs=persistent_tables,
+        aligned_index_block_table_ptrs=aligned_index_tables,
+        initialize_from_forward_context=MagicMock(),
+    )
     state._mamba_ctx = ctx
-    assert state._ensure_align_ctx(kv_cache_config, [0], ()) is ctx
+    batch_tables = (torch.tensor([[7], [2]], dtype=torch.int32),)
+
+    assert state._ensure_align_ctx(kv_cache_config, [0], batch_tables) is ctx
+
+    # Incoming attention tables are batch ordered. They must not replace the
+    # persistent request-slot pointers installed by initialize_kv_cache.
+    assert ctx.block_table_ptrs is persistent_tables
+    assert ctx.aligned_index_block_table_ptrs is aligned_index_tables
+    ctx.initialize_from_forward_context.assert_not_called()
 
 
 def test_ensure_align_ctx_lazily_recreates_mamba_ctx():
@@ -283,13 +300,9 @@ def test_ensure_align_ctx_lazily_recreates_mamba_ctx():
     mock_create.assert_called_once()
     # Enforce the installed upstream signature, rather than accepting any
     # keyword/omitted argument through an unconstrained MagicMock.
-    if not vllm_version_is("0.33.0"):
-        assert (
-            mock_create.call_args.kwargs["forward_context"]
-            is state.vllm_config.compilation_config.static_forward_context
-        )
-    else:
-        assert "forward_context" not in mock_create.call_args.kwargs
+    assert (
+        mock_create.call_args.kwargs["forward_context"] is state.vllm_config.compilation_config.static_forward_context
+    )
     ctx.initialize_from_forward_context.assert_called_once_with(
         kv_cache_config,
         state.vllm_config.compilation_config.static_forward_context,
@@ -396,7 +409,7 @@ def test_prepare_attn_keeps_actual_counts_separate_from_padding(
 ):
     expected_metadata = {"gdn": object()}
     mock_build_attn_metadata.return_value = expected_metadata
-    state = SimpleNamespace(
+    state = _MetadataState(
         vllm_config=SimpleNamespace(
             num_speculative_tokens=num_spec,
             parallel_config=SimpleNamespace(decode_context_parallel_size=1),
@@ -463,7 +476,7 @@ def test_prepare_attn_classifies_one_token_prompt_tails(
     """vLLM #58400 requires prompt-tail drafts to use rollback-capable decode metadata."""
     drafts_missing = num_draft_tokens is None
     num_draft_tokens = num_draft_tokens or 0
-    state = SimpleNamespace(
+    state = _MetadataState(
         vllm_config=SimpleNamespace(
             num_speculative_tokens=3,
             speculative_config=SimpleNamespace(enable_adaptive_verification=adaptive),
@@ -519,8 +532,7 @@ def test_prepare_attn_classifies_one_token_prompt_tails(
 @pytest.mark.parametrize("is_target", [False, True])
 def test_kimi_pcp_metadata_respects_target_and_draft_groups(is_target):
     context = SimpleNamespace(global_batch=object(), global_block_tables=object(), global_slot_mappings=object())
-    state = SimpleNamespace(
-        _uses_global_mamba_pcp=lambda: True,
+    state = _MetadataState(
         vllm_config=SimpleNamespace(
             model_config=SimpleNamespace(
                 hf_text_config=SimpleNamespace(model_type="kimi_linear", linear_attn_config={"num_heads": 96})
@@ -601,8 +613,7 @@ def test_pcp_builds_metadata_in_one_device_lifecycle(graph_mode, for_capture, is
         global_block_tables=object(),
         global_slot_mappings=object(),
     )
-    state = SimpleNamespace(
-        _uses_global_mamba_pcp=lambda: True,
+    state = _MetadataState(
         vllm_config=SimpleNamespace(
             model_config=SimpleNamespace(
                 hf_text_config=SimpleNamespace(model_type="kimi_linear", linear_attn_config={"num_heads": 96})
@@ -658,7 +669,7 @@ def test_pcp_builds_metadata_in_one_device_lifecycle(graph_mode, for_capture, is
 def test_mamba_padding_is_independent_of_pcp_context(
     mock_build_attn_metadata, graph_mode, use_pcp_padding, has_pcp_context
 ):
-    state = SimpleNamespace(
+    state = _MetadataState(
         vllm_config=SimpleNamespace(num_speculative_tokens=0, parallel_config=SimpleNamespace()),
         max_model_len=1024,
     )
@@ -1421,7 +1432,7 @@ def test_init_model_state_uses_override_then_default():
 @patch("vllm_ascend.worker.v2.model_states.mamba_hybrid.build_attn_metadata")
 def test_prepare_attn_uses_promised_varlen_capture_bound(mock_build_attn_metadata):
     """A 16x1 dummy capture must allow a real 9-token verification query."""
-    state = SimpleNamespace(
+    state = _MetadataState(
         vllm_config=SimpleNamespace(num_speculative_tokens=8, parallel_config=SimpleNamespace()),
         max_model_len=32768,
     )

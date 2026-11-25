@@ -179,6 +179,7 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
         if "consumer_is_to_load" in extra_config:
             raise ValueError("consumer_is_to_load has been replaced by enable_lookup")
         self.use_layerwise = extra_config.get("use_layerwise", False)
+        self.supports_attention_prefetch_gate = bool(self.use_layerwise)
         self.backend_name = extra_config.get("backend", "mooncake").lower()
         self.backend_class = get_backend_class(self.backend_name) if self.use_layerwise else None
         self.layerwise_data_plane = self.backend_class.layerwise_data_plane if self.backend_class is not None else None
@@ -320,6 +321,17 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
     ) -> tuple[bool, dict[str, Any] | None]:
         assert self.connector_scheduler is not None
         return self.connector_scheduler.request_finished_all_groups(request, block_ids)
+
+    def register_finished_partial_tail(
+        self,
+        request: Request,
+        block_ids: tuple[list[int], ...],
+        partial_tail_offloads: list[tuple[int, int, int]],
+    ) -> bool:
+        assert self.connector_scheduler is not None
+        if self.connector_scheduler.use_layerwise:
+            return False
+        return self.connector_scheduler.register_finished_partial_tail(request, block_ids, partial_tail_offloads)
 
     def update_connector_output(self, connector_output: KVConnectorOutput):
         """
