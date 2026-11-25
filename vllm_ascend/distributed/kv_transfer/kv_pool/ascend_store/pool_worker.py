@@ -370,18 +370,12 @@ class BaseKVPoolWorker(ABC):
         backend_module = importlib.import_module(backend_path)
         real_backend = getattr(backend_module, backend_name)
 
-        backend_kwargs = {}
-        if self.backend.lower() != "memcache":
-            # Request deferred setup for compressed models and the packed C8 cache path.
-            cache_dtype = self.vllm_config.cache_config.cache_dtype
-            packed_c8_path = self.use_sparse and cache_dtype in ("fp8", "int8")
-            backend_kwargs["lazy_init"] = self.use_compress or packed_c8_path
-        # The connector's extra_config (with MultiConnector the child's own
-        # config, not the top-level one) carries the QoS the backends inject.
-        backend_kwargs["extra_config"] = extra_config
-        self.m_store = real_backend(  # type: ignore[misc]
+        self.m_store = real_backend.create_worker_client(
             parallel_config,
-            **backend_kwargs,
+            extra_config=extra_config,
+            use_compress=self.use_compress,
+            use_sparse=self.use_sparse,
+            cache_dtype=self.vllm_config.cache_config.cache_dtype,
         )
 
     def _init_kv_events(self, vllm_config) -> None:

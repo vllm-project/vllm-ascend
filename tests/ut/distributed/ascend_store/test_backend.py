@@ -1568,6 +1568,31 @@ class TestMemcacheBackendMethods(unittest.TestCase):
         with patch.object(MemcacheBackend, "_setup_store"):
             return MemcacheBackend(MagicMock(), device_id=0)
 
+    def test_worker_clients_apply_backend_initialization_policy(self):
+        for compress, sparse, dtype, mooncake_lazy in (
+            (False, False, "auto", False),
+            (True, False, "auto", True),
+            (False, True, "int8", True),
+            (False, True, "fp8", True),
+            (False, True, "auto", False),
+        ):
+            for cls in (memcache_module.MemcacheBackend, MooncakeBackend):
+                with self.subTest(cls=cls, compress=compress, sparse=sparse, dtype=dtype):
+                    parallel_config = MagicMock()
+                    extra_config = {"qos_priority": 2}
+                    with patch.object(cls, "__init__", return_value=None) as init:
+                        cls.create_worker_client(
+                            parallel_config,
+                            extra_config=extra_config,
+                            use_compress=compress,
+                            use_sparse=sparse,
+                            cache_dtype=dtype,
+                        )
+                    expected = {"extra_config": extra_config}
+                    if cls is MooncakeBackend:
+                        expected["lazy_init"] = mooncake_lazy
+                    init.assert_called_once_with(parallel_config, **expected)
+
     def test_store_ready_before_first_put(self):
         cls = memcache_module.MemcacheBackend
         with patch.object(cls, "_setup_store") as setup:
