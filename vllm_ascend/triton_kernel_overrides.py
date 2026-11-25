@@ -27,9 +27,10 @@ Three rules when editing the table:
 - Keys must target the module where the kernel is *defined*
   (``func.__module__``), never a from-import copy site. The identity sweep
   matches the original object; a key pointing at a copy silently defeats it.
-- Parameter contract: mirror the original's parameter names and order.
-  The dispatcher forwards two call shapes verbatim and adapts only the
-  third:
+- Parameter contract: mirror the original's parameter names or order
+  -- either one suffices for the call shape the impl receives, and
+  mirroring both covers every shape. The dispatcher forwards two call
+  shapes verbatim and adapts only the third:
 
   * Plain calls (``kernel(...)``) and positional ``kernel[grid]``
     calls reach the impl untouched -- no renaming, no reordering. The
@@ -41,10 +42,13 @@ Three rules when editing the table:
     skipped (later values shift left), and names outside the
     original's signature are rejected.
 
-  Two consequences: never rename an original parameter (a keyword-only
-  call site will hit a TypeError), and let NPU-only parameters extend
-  the tail of an impl with defaults so upstream additions land without
-  a table edit (see ``rejection_sample``).
+  Two consequences: never rename an original parameter -- a verbatim
+  call site that passes it by name hits a TypeError, and a keyword-only
+  ``[grid]`` call silently shifts the value into the wrong positional
+  slot. Keep NPU-only parameters in the impl's tail with defaults so a
+  keyword-only ``[grid]`` relaunch still binds every original argument
+  to its slot (see ``rejection_sample``; plain-call hosts bind by name
+  and tolerate any position, the tail rule covers both shapes).
 - Values are either plain callables or raw ``@triton.jit`` kernels. The
   dispatcher swaps a raw kernel in directly -- never wrapping it -- so it
   launches natively with the caller's grid and must mirror the original
@@ -177,6 +181,10 @@ TRITON_KERNEL_OVERRIDES: dict[str, Callable[..., Any]] = {
     # ---- other upstream modules --------------------------------------------
     # Defined in topk_topp_triton.py; topk_topp_sampler only from-imports
     # it. The identity sweep covers every copy site.
+    # Latent mismatch: upstream's ``mask_value`` has no parameter on the
+    # Ascend impl. The sole caller never passes it today, so nothing
+    # breaks; the parameter (and its semantics) belong with the follow-up
+    # signature work.
     "vllm.v1.sample.ops.topk_topp_triton.apply_top_k_top_p_triton": apply_top_k_top_p,
     "vllm.v1.worker.gpu.structured_outputs._apply_grammar_bitmask_kernel": apply_grammar_bitmask_npu,
     "vllm.v1.worker.mamba_utils.precopy_mamba_align_fused_kernel": precopy_mamba_align_fused_kernel,
@@ -202,11 +210,16 @@ TRITON_KERNEL_OVERRIDES: dict[str, Callable[..., Any]] = {
         chunk_kda_with_fused_gate
     ),
     # Known-broken at its only launch site: bailing_moe_v3 passes
-    # ``lower_bound=``, which the Ascend impl does not accept yet, so the
-    # verbatim forward raises TypeError. No bailing e2e exists, so CI
-    # cannot catch it; the impl fix (grow the parameter, upstream feeds
-    # ``lower_bound or 0.0`` / ``USE_LOWER_BOUND=lower_bound is not
-    # None``) is tracked as a separate follow-up.
+    # ``lower_bound=``, which the Ascend impl does not accept yet, so
+    # the verbatim forward raises TypeError; upstream feeds
+    # ``lower_bound or 0.0`` plus a ``USE_LOWER_BOUND`` constexpr. No
+    # bailing e2e exists, so CI cannot catch it; the impl fix is a
+    # separate follow-up. The other two bailing calls are safe:
+    # ``safe_gate``/``lower_bound`` vanish into upstream's own
+    # ``**kwargs`` on GPU (upstream never reads them) and the NPU
+    # impls swallow them the same way; fused_recurrent_kda goes
+    # further and implements ``lower_bound`` (an NPU extension with
+    # its own default), a superset there, not a gap.
     "vllm.third_party.flash_linear_attention.ops.kda.fused_kda_gate": fused_kda_gate,
     "vllm.third_party.flash_linear_attention.ops.kda.fused_recurrent_kda": (  # noqa: E501
         fused_recurrent_kda
