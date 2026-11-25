@@ -198,6 +198,15 @@ Mount the endpoint directory (here `/etc/hixlep`) inside each container. Merge t
 
 ##### Host RoCE endpoint example
 
+!!! warning "Host RoCE requires manual endpoint files"
+
+    Selecting Host RoCE with the environment variable alone is not yet supported. Use the per-NPU endpoint files and `ascend_local_comm_res_path` on both sides.
+
+    ```bash
+    # NOT YET SUPPORTED: do not use this in current deployments.
+    # export ASCEND_GLOBAL_RESOURCE_CONFIG='{"comm_resource_config.protocol_desc":"roce:host"}'
+    ```
+
 Use the host's physical SuperPod ID to follow the HIXL naming convention for `net_instance_id`. On hosts that expose `spod-info`, query the target NPU and chip (here both IDs are 0).
 
 ```bash
@@ -206,7 +215,13 @@ npu-smi info -t spod-info -i 0 -c 0
 
 Replace `<super_pod_id>` below with the reported `Super Pod ID`. For example, an ID of `3` gives `superpod_3`.
 
-Use the host topology to identify the RoCE NIC attached to each physical NPU. Run `show_gids` on the host to find that NIC's IP address and use it as `comm_id` in the corresponding NPU file.
+To find the host RoCE IP for each physical NPU:
+
+1. Use the host's network topology to identify the RoCE NIC and port connected to that physical NPU.
+2. Run `show_gids` on the host. Find the row for that NIC and port and read its RoCE IP. If needed, use `ip addr show dev <netdev>` to check the address on the network interface listed in that row.
+3. Set `comm_id` in `ub_endpoint_npu_<physical_npu_id>.json` to that IP. For example, if physical NPU 2 maps to `192.0.2.17`, set `"comm_id": "192.0.2.17"` in `ub_endpoint_npu_2.json`.
+
+**Use ascending numerical IP order only if you have verified that it matches physical NPU ID order on this host.** Do not use the DP rank or visible-device order to select the address.
 
 ```json
 {
