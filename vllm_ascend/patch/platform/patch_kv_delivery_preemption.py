@@ -79,6 +79,64 @@ class KVDeliveryScheduler(Scheduler):
         )
         self.requires_kv_delivery = bool(self.connector is not None and self.connector.requires_kv_delivery)
 
+    def _mamba_block_aligned_split(
+        self,
+        request: Request,
+        num_new_tokens: int,
+        num_new_local_computed_tokens: int = 0,
+        num_external_computed_tokens: int = 0,
+    ) -> int:
+        """Align Qwen hybrid prefill checkpoints to the scheduler page size.
+
+        The upstream implementation uses ``cache_config.block_size``.  Ascend's
+        heterogeneous Qwen layout keeps the ordinary attention hash block at 8
+        tokens while resolving the scheduler/Mamba page to 768 tokens.  Using
+        the 8-token value here skips the recurrent checkpoint boundaries, so a
+        first request publishes attention blocks without the matching GDN/PLE
+        state and the next request's common hit collapses to zero.
+        """
+        # Preserve upstream behavior byte-for-byte for the ordinary homogeneous
+        # path (including an 8-token KV block).  The scheduler page differs
+        # from cache_config.block_size only for Ascend's heterogeneous aligned
+        # Mamba layout, which is the sole path this backport needs to adapt.
+        if self.block_size == self.cache_config.block_size:
+            return super()._mamba_block_aligned_split(
+                request,
+                num_new_tokens,
+                num_new_local_computed_tokens,
+                num_external_computed_tokens,
+            )
+
+        start = request.num_computed_tokens + num_new_local_computed_tokens + num_external_computed_tokens
+        if start >= max(request.num_prompt_tokens, request.num_tokens - 1):
+            return num_new_tokens
+
+        block_size = self.block_size
+        last_cache_position = request.num_tokens - request.num_tokens % block_size
+        if self.use_eagle:
+            last_cache_position = max(last_cache_position - block_size, 0)
+
+        end = start + num_new_tokens
+        if end < last_cache_position:
+            end = end // block_size * block_size
+
+        next_block_boundary = (start // block_size + 1) * block_size
+        tail_boundary = (
+            request.num_prompt_tokens // self.hash_block_size * self.hash_block_size
+            if self.mamba_partial_cache_hit
+            else 0
+        )
+        stops = (
+            next_block_boundary if start % block_size != 0 and next_block_boundary <= last_cache_position else 0,
+            last_cache_position,
+            tail_boundary if last_cache_position < tail_boundary < request.num_prompt_tokens else 0,
+            start + (request.shared_prefix_boundary - start) // block_size * block_size
+            if start < request.shared_prefix_boundary < end
+            else 0,
+        )
+        end = min((stop for stop in stops if start < stop < end), default=end)
+        return max(end - start, 0)
+
     def schedule(self, throttle_prefills: bool = False) -> SchedulerOutput:
         self.current_step += 1
         # NOTE(woosuk) on the scheduling algorithm:
