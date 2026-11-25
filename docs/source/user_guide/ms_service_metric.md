@@ -6,14 +6,23 @@ For installation, configuration syntax, and complete usage, see the [MS Service 
 
 ## Basic Usage
 
-Enable metric collection before starting the service:
+Install `ms_service_metric`, then start the service:
+
+```bash
+pip install ms_service_metric
+vllm serve <model-path>
+```
+
+On Ascend startup:
+
+1. If `PROMETHEUS_MULTIPROC_DIR` is unset, vLLM Ascend auto-sets it (reuses vLLM's multiprocess helper so MS hooks in engine/worker and `/metrics` on the API server share one directory). Native vLLM only auto-sets this when `--api-server-count > 1`; MS still needs it for a single API server.
+2. If `ms_service_metric` is installed, collection defaults to **ON** (same control plane as `ms-service-metric on`). Disable at runtime with `ms-service-metric off`.
+
+Optional explicit multiprocess directory (recommended for multi-instance hosts):
 
 ```bash
 export PROMETHEUS_MULTIPROC_DIR=/dev/shm/vllm_metrics
 mkdir -p "$PROMETHEUS_MULTIPROC_DIR"
-
-ms-service-metric on
-vllm serve <model-path>
 ```
 
 `PROMETHEUS_MULTIPROC_DIR` stores the Prometheus multiprocess metric files. Use a separate directory for each service instance. Before restarting a service for validation, remove stale files only after confirming that no running service is using the directory.

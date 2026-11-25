@@ -526,6 +526,12 @@ class NPUPlatform(Platform):
 
         adapt_patch(is_global_patch=True)
 
+        # Auto-set PROMETHEUS_MULTIPROC_DIR when unset; if ms_service_metric is
+        # installed, default collection to ON (runtime: ms-service-metric off).
+        from vllm_ascend.observability.ms_metrics.bootstrap import bootstrap_ms_metrics
+
+        bootstrap_ms_metrics()
+
         # Eager side-effect import: registers the Ascend KV-cache dtype
         # handlers (fp8 -> torch.float8_e4m3fn, int8, mxfp8) via vLLM's
         # register_kv_cache_dtype mechanism. This runs in the launcher
