@@ -65,8 +65,6 @@ from vllm.v1.kv_cache_interface import (
 from vllm.v1.request import RequestStatus
 from vllm.v1.structured_output import StructuredOutputManager
 
-from vllm_ascend.utils import vllm_version_is
-
 # NOTE: vllm-ascend applies ALL platform patches at ``vllm_ascend`` import
 # time (the platform-patch registry), which runs BEFORE this test module's
 # body. So by the time we can execute anything, ``EngineCoreProc.run_engine_core``
@@ -92,12 +90,12 @@ from vllm_ascend.patch.platform.patch_balance_schedule import (  # noqa: E402
     BalanceScheduler,
     _balance_scheduling_enabled,
 )
+from vllm_ascend.utils import vllm_version_is  # noqa: E402
 
 # Importing any vLLM module can activate the Ascend platform plugin before this
 # test module finishes importing, so a direct ``Scheduler`` import may already
-# resolve to ``BalanceScheduler``, and on v0.33.0 a compatibility shim sits
-# between ``BalanceScheduler`` and the upstream ``Scheduler``. Locate the
-# genuine upstream class directly from the MRO.
+# resolve to ``BalanceScheduler``. Locate the genuine upstream class directly
+# from the MRO.
 _UpstreamScheduler = next(
     cls
     for cls in BalanceScheduler.__mro__

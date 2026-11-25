@@ -20,7 +20,6 @@ from __future__ import annotations
 import time
 from collections import deque
 from dataclasses import dataclass, fields
-from typing import TYPE_CHECKING
 
 from vllm.config import SchedulerConfig, VllmConfig
 from vllm.distributed.ec_transfer.ec_connector.base import ECConnectorMetadata
@@ -51,22 +50,13 @@ from vllm_ascend.core.dyntra_lb_scheduler import (
 )
 from vllm_ascend.core.scheduler_compat import (
     get_max_async_kv_loads_per_step,
-    get_max_num_inflight_kv_loads,
-    get_new_request_prefill_token_ids,
     scheduler_output_version_kwargs,
-    should_skip_external_kv,
-    with_v033_compat,
 )
 from vllm_ascend.core.scheduler_output import make_cached_request_data
 from vllm_ascend.utils import get_ascend_config, vllm_version_is
 
-if not vllm_version_is("0.33.0"):
+if not vllm_version_is("0.34.0"):
     from vllm.v1.core.sched.output import IterationDetails
-
-if TYPE_CHECKING:
-    from vllm.v1.core.sched.scheduler import Scheduler as _SchedulerCompatBase
-else:
-    _SchedulerCompatBase = with_v033_compat(Scheduler)
 
 
 @dataclass
@@ -102,7 +92,7 @@ class RecomputeSchedulerOutput(SchedulerOutput):
     recomputed_reqs: list[RecomputeReqInfo] | None = None
 
 
-class RecomputeScheduler(_SchedulerCompatBase):
+class RecomputeScheduler(Scheduler):
     """Use vLLM scheduling with best-effort decode-side preemption offload.
 
     This keeps a local copy of vLLM's schedule() only to pad the first decode
@@ -229,8 +219,8 @@ class RecomputeScheduler(_SchedulerCompatBase):
         preempted_reqs: list[Request] = []
 
         iteration_details = None
-        # vLLM v0.33.0 does not define IterationDetails.
-        if not vllm_version_is("0.33.0") and (
+        # vLLM v0.34.0 does not define IterationDetails.
+        if not vllm_version_is("0.34.0") and (
             (self.log_stats and self.observability_config.enable_logging_iteration_details)
             or self.vllm_config.profiler_config.profiler is not None
         ):
@@ -561,7 +551,7 @@ class RecomputeScheduler(_SchedulerCompatBase):
                     step_skipped_waiting.appendleft(request_to_skip)
 
             num_async_kv_loads = 0
-            # Compatibility with vLLM v0.33.0, which lacks max_async_kv_loads_per_step.
+            # Compatibility with vLLM v0.34.0, which lacks max_async_kv_loads_per_step.
             max_async_kv_loads = get_max_async_kv_loads_per_step(self.scheduler_config) or float("inf")
             # Cleared once self.async_kv_waiting's head can't start a load.
             take_async_kv = True
@@ -578,8 +568,7 @@ class RecomputeScheduler(_SchedulerCompatBase):
                         request_queue = self._next_waiting_queue(take_async_kv)
                 elif (
                     take_async_kv
-                    # Compatibility with vLLM v0.33.0, which lacks max_num_inflight_kv_loads.
-                    and get_max_num_inflight_kv_loads(self.scheduler_config)
+                    and self.scheduler_config.max_num_inflight_kv_loads
                     and self._pause_state == PauseState.UNPAUSED
                 ):
                     # No running slot or token budget left: start async KV loads
@@ -658,8 +647,7 @@ class RecomputeScheduler(_SchedulerCompatBase):
                         ext_tokens, load_kv_async = self.connector.get_num_new_matched_tokens(
                             request, block_aligned_local
                         )
-                        # Compatibility with vLLM v0.33.0, which uses skip_reading_prefix_cache.
-                        if should_skip_external_kv(request):
+                        if request.skip_reading_external_kv:
                             ext_tokens, load_kv_async = 0, False
 
                         if ext_tokens is None:
@@ -1131,8 +1119,7 @@ class RecomputeScheduler(_SchedulerCompatBase):
             NewRequestData.from_request(
                 req,
                 req_to_new_blocks[req.request_id].get_block_ids(),
-                # Compatibility with vLLM v0.33.0, where V2 prefill tokens come from _all_token_ids.
-                get_new_request_prefill_token_ids(req),
+                req.prefill_token_ids,
                 uses_mrope=self.model_uses_mrope,
             )
             for req in scheduled_new_reqs
@@ -1197,7 +1184,7 @@ class RecomputeScheduler(_SchedulerCompatBase):
             total_num_scheduled_tokens=total_num_scheduled_tokens,
             scheduled_spec_decode_tokens=scheduled_spec_decode_tokens,
             scheduled_encoder_inputs=scheduled_encoder_inputs,
-            # Pass iteration_details on vLLM main, or encoder stats and ec_manager_metadata on v0.33.0.
+            # Pass iteration_details on vLLM main, or scheduled_encoder_input_stats on v0.34.0.
             **scheduler_output_version_kwargs(self, iteration_details, scheduled_encoder_inputs),
             preempted_req_ids=self.reset_preempted_req_ids,
             # finished_req_ids is an existing state in the scheduler,

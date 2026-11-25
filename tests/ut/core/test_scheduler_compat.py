@@ -5,6 +5,8 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import pytest
 from vllm.v1.core.sched.async_scheduler import AsyncScheduler
 
@@ -24,8 +26,8 @@ from vllm_ascend.core.recompute_scheduler import (
     RecomputeScheduler,
 )
 from vllm_ascend.core.scheduler_compat import (
-    _V033SchedulerMembers,
-    with_v033_compat,
+    get_max_async_kv_loads_per_step,
+    scheduler_output_version_kwargs,
 )
 from vllm_ascend.patch.platform.patch_balance_schedule import BalanceScheduler
 from vllm_ascend.utils import vllm_version_is
@@ -41,8 +43,7 @@ _ALL_SCHEDULER_CLASSES = (
     AsyncScheduler,
 )
 
-# Baseline MROs recorded prior to scheduler synchronization (without any
-# v0.33.0 compatibility shim classes).
+# Baseline MROs preserved across both vLLM main and v0.34.0.
 _EXPECTED_BASELINE_MROS: dict[type, tuple[str, ...]] = {
     RecomputeScheduler: (
         "vllm_ascend.core.recompute_scheduler.RecomputeScheduler",
@@ -121,73 +122,39 @@ _EXPECTED_BASELINE_MROS: dict[type, tuple[str, ...]] = {
     ),
 }
 
-_UPSTREAM_SCHEDULER = next(
-    cls
-    for cls in BalanceScheduler.__mro__
-    if cls.__module__ == "vllm.v1.core.sched.scheduler" and cls.__name__ == "Scheduler"
-)
-
 
 @pytest.mark.parametrize("scheduler_cls", _ALL_SCHEDULER_CLASSES)
 def test_scheduler_mro_matches_baseline(scheduler_cls: type) -> None:
-    """All concrete schedulers preserve their baseline inheritance chains."""
-    compat_count = sum(cls is _V033SchedulerMembers for cls in scheduler_cls.__mro__)
-    if vllm_version_is("0.33.0"):
-        assert compat_count == 1
-    else:
-        assert compat_count == 0
+    """All concrete schedulers preserve their exact baseline inheritance chains."""
+    actual = tuple(f"{cls.__module__}.{cls.__name__}" for cls in scheduler_cls.__mro__)
+    assert actual == _EXPECTED_BASELINE_MROS[scheduler_cls]
 
-    filtered = tuple(
-        f"{cls.__module__}.{cls.__name__}"
-        for cls in scheduler_cls.__mro__
-        if cls.__module__ != "vllm_ascend.core.scheduler_compat"
+
+def test_get_max_async_kv_loads_per_step_version_compat() -> None:
+    """Return None on v0.34.0 and read the configured field on main."""
+    if vllm_version_is("0.34.0"):
+        assert get_max_async_kv_loads_per_step(SimpleNamespace()) is None
+    else:
+        assert get_max_async_kv_loads_per_step(SimpleNamespace(max_async_kv_loads_per_step=3)) == 3
+
+
+def test_scheduler_output_version_kwargs() -> None:
+    """Return scheduled_encoder_input_stats on v0.34.0 and iteration_details on main."""
+    sentinel_stats = object()
+    sentinel_details = object()
+    scheduler = SimpleNamespace(
+        log_stats=True,
+        observability_config=SimpleNamespace(enable_logging_iteration_details=True),
+        _make_scheduled_encoder_input_stats=lambda inputs: sentinel_stats,
     )
-    assert filtered == _EXPECTED_BASELINE_MROS[scheduler_cls]
-
-
-def test_with_v033_compat_factory_semantics() -> None:
-    """Factory is a no-op on main and idempotent for already-wrapped bases on v0.33.0."""
-
-    class _DummyBase:
-        pass
-
-    if vllm_version_is("0.33.0"):
-        wrapped = with_v033_compat(_DummyBase)
-        assert wrapped is not _DummyBase
-        assert issubclass(wrapped, _V033SchedulerMembers)
-        assert with_v033_compat(wrapped) is wrapped
-        assert with_v033_compat(BalanceScheduler) is BalanceScheduler
+    kwargs = scheduler_output_version_kwargs(scheduler, sentinel_details, {"req-1": [0]})
+    if vllm_version_is("0.34.0"):
+        assert kwargs == {"scheduled_encoder_input_stats": sentinel_stats}
     else:
-        assert with_v033_compat(_DummyBase) is _DummyBase
-        assert with_v033_compat(BalanceScheduler) is BalanceScheduler
+        assert kwargs == {"iteration_details": sentinel_details}
 
 
-@pytest.mark.skipif(
-    not vllm_version_is("0.33.0"),
-    reason="v0.33.0 member non-shadowing check only applies on v0.33.0",
-)
-def test_v033_compat_members_do_not_shadow_upstream_schedulers() -> None:
-    """No non-dunder member on _V033SchedulerMembers exists on v0.33.0 Scheduler/AsyncScheduler."""
-    compat_members = [
-        name for name in _V033SchedulerMembers.__dict__ if not (name.startswith("__") and name.endswith("__"))
-    ]
-    assert compat_members
-
-    # Inspect upstream Scheduler and AsyncScheduler own attributes (excluding
-    # the injected compat shim class in AsyncScheduler.__mro__).
-    upstream_classes = [
-        cls
-        for cls in (*_UPSTREAM_SCHEDULER.__mro__, AsyncScheduler)
-        if cls.__module__ != "vllm_ascend.core.scheduler_compat" and cls is not BalanceScheduler
-    ]
-    for member in compat_members:
-        for cls in upstream_classes:
-            assert member not in cls.__dict__, (
-                f"_V033SchedulerMembers.{member} would shadow {cls.__module__}.{cls.__name__}.{member}"
-            )
-
-
-def test_v033_compat_per_instance_async_kv_waiting_isolation() -> None:
+def test_per_instance_async_kv_waiting_isolation() -> None:
     """Distinct scheduler instances must never share async_kv_waiting or _parked_reservations."""
     cfg1 = make_dyntra_test_config()
     cfg2 = make_dyntra_test_config()

@@ -26,12 +26,6 @@ from tests.ut.core.test_dyntra_lb_scheduler import (
     create_dyntra_lb_scheduler,
     make_dyntra_test_config,
 )
-from tests.ut.core.test_score_encoder_cache_scheduler import (
-    _request as make_mm_request,
-)
-from tests.ut.core.test_score_encoder_cache_scheduler import (
-    _seed as seed_score_ec,
-)
 from tests.ut.kv_offload.utils import (
     assert_scheduler_empty,
     create_model_runner_output,
@@ -52,7 +46,6 @@ from vllm_ascend.core.recompute_scheduler import (
     RecomputeScheduler,
 )
 from vllm_ascend.core.short_request_first_scheduler import ShortRequestFirstRequestQueue
-from vllm_ascend.ec_manager.score_ec_manager import ScoreEncoderCacheManager
 from vllm_ascend.patch.platform.patch_balance_schedule import BalanceScheduler
 from vllm_ascend.platform import NPUPlatform
 from vllm_ascend.utils import vllm_version_is
@@ -86,9 +79,9 @@ def _make_scheduler(
     if not with_connector:
         cfg.kv_transfer_config = None
     cfg.scheduler_config.async_scheduling = async_scheduling
-    if not vllm_version_is("0.33.0"):
+    cfg.scheduler_config.max_num_inflight_kv_loads = max_num_inflight_kv_loads
+    if not vllm_version_is("0.34.0"):
         cfg.scheduler_config.max_async_kv_loads_per_step = max_async_kv_loads_per_step
-        cfg.scheduler_config.max_num_inflight_kv_loads = max_num_inflight_kv_loads
     if additional_config is not None:
         cfg.additional_config = additional_config
     elif balance_enabled:
@@ -103,11 +96,8 @@ def _make_scheduler(
 
 
 def _assert_parked_reservation(scheduler, request) -> None:
-    if vllm_version_is("0.33.0"):
-        assert request in scheduler._inflight_prefills
-    else:
-        assert request in scheduler._parked_reservations
-        assert request not in scheduler._inflight_prefills
+    assert request in scheduler._parked_reservations
+    assert request not in scheduler._inflight_prefills
     assert scheduler._inflight_prefill_reserved_blocks() == scheduler._request_remaining_blocks(request)
 
 
@@ -118,9 +108,8 @@ def _assert_no_kv_load_leaks(scheduler) -> None:
     assert len(scheduler._inflight_prefills) == 0
     assert len(scheduler._parked_reservations) == 0
     assert scheduler._inflight_prefill_reserved_blocks() == 0
-    if not vllm_version_is("0.33.0"):
-        assert len(scheduler._aborted_kv_loads) == 0
-        assert all(scheduler._kv_fetch_counts[stage] == 0 for stage in KV_FETCH_STAGES)
+    assert len(scheduler._aborted_kv_loads) == 0
+    assert all(scheduler._kv_fetch_counts[stage] == 0 for stage in KV_FETCH_STAGES)
 
 
 def _empty_runner_output(
@@ -134,7 +123,6 @@ def _empty_runner_output(
     )
     return ModelRunnerOutput(
         req_ids=[],
-        **({"req_id_to_index": {}} if vllm_version_is("0.33.0") else {}),
         sampled_token_ids=[],
         spec_token_ids=None,
         logprobs=None,
@@ -208,8 +196,7 @@ def test_balance_rank_snapshot_freezes_waiting_and_async_loads_then_resumes():
     assert out2.num_scheduled_tokens == {r_run.request_id: 1}
     assert r_wait in scheduler.waiting
     assert r_remote.status == RequestStatus.WAITING
-    if not vllm_version_is("0.33.0"):
-        assert r_remote in scheduler.async_kv_waiting
+    assert r_remote in scheduler.async_kv_waiting
 
     # Phase 3: snapshot drops below cap (max=1 < 2) -> waiting & async load resume.
     scheduler.update_from_output(out2, create_model_runner_output([r_run]))
@@ -219,31 +206,21 @@ def test_balance_rank_snapshot_freezes_waiting_and_async_loads_then_resumes():
     assert r_run in scheduler.running
     assert r_wait in scheduler.running
     assert out3.num_scheduled_tokens[r_wait.request_id] == block_size
-    if vllm_version_is("0.33.0"):
-        # Without max_num_inflight_kv_loads on v0.33.0, full running slots wait
-        # until a slot frees before starting the remote load.
-        assert r_remote.status == RequestStatus.WAITING
-        scheduler.update_from_output(out3, create_model_runner_output([r_run, r_wait], use_eos=True))
-        scheduler.schedule()
     assert r_remote.status == RequestStatus.WAITING_FOR_REMOTE_KVS
     assert r_remote in scheduler.kv_holding_waiting
 
 
 # ---------------------------------------------------------------------------
-# v0.33.0 Score encoder cache metadata delivery
+# Versioned iteration details / encoder input stats output fields
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.skipif(
-    not vllm_version_is("0.33.0"),
-    reason="ec_manager_metadata in SchedulerOutput is specific to vLLM v0.33.0",
-)
 @pytest.mark.parametrize(
     "scheduler_cls",
     [BalanceScheduler, DyntraLBScheduler, RecomputeScheduler],
 )
-def test_v033_score_ec_manager_metadata_delivered_once_across_schedulers(scheduler_cls):
-    """On v0.33.0, all three copied schedulers deliver Score EC metadata once."""
+def test_versioned_iteration_details_and_encoder_stats_across_schedulers(scheduler_cls):
+    """All three copied schedulers emit iteration_details on main and encoder stats on v0.34.0."""
     scheduler = _make_scheduler(
         scheduler_cls,
         max_num_seqs=2,
@@ -253,30 +230,19 @@ def test_v033_score_ec_manager_metadata_delivered_once_across_schedulers(schedul
         with_connector=False,
         balance_enabled=(scheduler_cls is BalanceScheduler),
     )
-    cfg = scheduler.vllm_config
-    cfg.cache_config.enable_prefix_caching = False
-    cfg.model_config.hf_config.vision_config = SimpleNamespace(num_heads=1, hidden_size=1, intermediate_size=1)
-    cfg.ec_manager_config.manager_config = {"cpu_cache_slots": 8}
-    manager = ScoreEncoderCacheManager(8, cfg)
-    scheduler.encoder_cache_manager = manager
-    scheduler.max_num_encoder_input_tokens = 32
+    scheduler.observability_config.enable_logging_iteration_details = True
+    req = create_request(1, num_tokens=16, block_size=16)
+    scheduler.add_request(req)
 
-    # Seed a CPU-resident entry, clear initial metadata, then trigger promotion
-    # so pending metadata is non-empty before schedule().
-    seed_score_ec(manager, "shared", 3)
-    manager.get_manager_metadata()
-    promoter = make_mm_request("promoter", [("shared", [True] * 3)])
-    assert manager.check_and_update_cache(promoter, 0)
-    manager.free(promoter)
-
-    out1 = scheduler.schedule()
-    assert out1.ec_manager_metadata is not None
-    assert out1.ec_manager_metadata.promoting_mm_hashes == ["shared"]
-
-    out2 = scheduler.schedule()
-    assert out2.ec_manager_metadata is not None
-    assert out2.ec_manager_metadata.promoting_mm_hashes == []
-    assert out2.ec_manager_metadata.cpu_get_encoder_mm_hashes == []
+    out = scheduler.schedule()
+    assert out.total_num_scheduled_tokens == 16
+    if vllm_version_is("0.34.0"):
+        assert not hasattr(out, "iteration_details")
+        assert not hasattr(out, "ec_manager_metadata")
+        assert out.scheduled_encoder_input_stats is None
+    else:
+        assert out.iteration_details is not None
+        assert out.iteration_details.num_prefill_requests == 1
 
 
 # ---------------------------------------------------------------------------
@@ -284,7 +250,7 @@ def test_v033_score_ec_manager_metadata_delivered_once_across_schedulers(schedul
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.skipif(vllm_version_is("0.33.0"), reason="async KV load caps require vLLM main")
+@pytest.mark.skipif(vllm_version_is("0.34.0"), reason="max_async_kv_loads_per_step requires vLLM main")
 @pytest.mark.parametrize("scheduler_cls", [DyntraLBScheduler, DyntraLBRecomputeScheduler])
 def test_dyntra_lb_capped_async_kv_load_acceptance(monkeypatch, scheduler_cls):
     """Verify DyntraLB async KV load throttling with per-step cap=1 and inflight cap=2."""
@@ -394,35 +360,11 @@ def test_dyntra_lb_capped_async_kv_load_acceptance(monkeypatch, scheduler_cls):
     _assert_no_kv_load_leaks(scheduler)
 
 
-@pytest.mark.skipif(vllm_version_is("0.33.0"), reason="async KV load caps require vLLM main")
-def test_dyntra_lb_single_cap_full_batch_and_empty_whitelist():
-    """Verify single-cap configs, full running batch, and empty whitelist."""
+def test_dyntra_lb_inflight_cap_only_full_batch_and_empty_whitelist():
+    """Verify inflight-cap-only full batch throttling and empty whitelist on both v0.34.0 and main."""
     block_size = 16
 
-    # 1. Per-step cap only: prefetch disabled; full running batch blocks loads.
-    sched_step = _make_scheduler(
-        DyntraLBScheduler,
-        max_num_seqs=1,
-        block_size=block_size,
-        max_async_kv_loads_per_step=1,
-        max_num_inflight_kv_loads=None,
-    )
-    sched_step._lb_kv_prefetch_enabled = True
-
-    local = create_request(1, num_tokens=block_size, block_size=block_size, do_remote_prefill=False)
-    remote = create_request(2, num_tokens=block_size * 3, block_size=block_size, do_remote_prefill=True)
-    sched_step.add_request(local)
-    out = sched_step.schedule()
-    assert sched_step.running == [local]
-
-    sched_step.add_request(remote)
-    sched_step.prepare_dyntra_lb_step()
-    assert remote.status == RequestStatus.WAITING
-    sched_step.update_from_output(out, create_model_runner_output([local]))
-    sched_step.schedule()
-    assert remote.status == RequestStatus.WAITING
-
-    # 2. In-flight cap only: prefetch disabled; full batch allows loads up to cap.
+    # 1. In-flight cap only: prefetch disabled; full batch allows loads up to cap.
     sched_inflight = _make_scheduler(
         DyntraLBScheduler,
         max_num_seqs=1,
@@ -453,12 +395,12 @@ def test_dyntra_lb_single_cap_full_batch_and_empty_whitelist():
         RequestStatus.WAITING,
     ]
 
-    # 3. Empty whitelist with free slot: pure async load still starts with 0 forward tokens.
+    # 2. Empty whitelist with free slot: pure async load still starts with 0 forward tokens.
     sched_empty = _make_scheduler(
         DyntraLBScheduler,
         max_num_seqs=2,
         block_size=block_size,
-        max_async_kv_loads_per_step=1,
+        max_async_kv_loads_per_step=None,
         max_num_inflight_kv_loads=2,
     )
     sched_empty._lb_kv_prefetch_enabled = True
@@ -471,6 +413,33 @@ def test_dyntra_lb_single_cap_full_batch_and_empty_whitelist():
     assert out_empty.total_num_scheduled_tokens == 0
     assert r_only.status == RequestStatus.WAITING_FOR_REMOTE_KVS
     assert r_only in sched_empty.kv_holding_waiting
+
+
+@pytest.mark.skipif(vllm_version_is("0.34.0"), reason="max_async_kv_loads_per_step requires vLLM main")
+def test_dyntra_lb_per_step_cap_only_blocks_loads_on_full_batch():
+    """Per-step cap only disables prefetch and blocks new async loads when running is full."""
+    block_size = 16
+    sched_step = _make_scheduler(
+        DyntraLBScheduler,
+        max_num_seqs=1,
+        block_size=block_size,
+        max_async_kv_loads_per_step=1,
+        max_num_inflight_kv_loads=None,
+    )
+    sched_step._lb_kv_prefetch_enabled = True
+
+    local = create_request(1, num_tokens=block_size, block_size=block_size, do_remote_prefill=False)
+    remote = create_request(2, num_tokens=block_size * 3, block_size=block_size, do_remote_prefill=True)
+    sched_step.add_request(local)
+    out = sched_step.schedule()
+    assert sched_step.running == [local]
+
+    sched_step.add_request(remote)
+    sched_step.prepare_dyntra_lb_step()
+    assert remote.status == RequestStatus.WAITING
+    sched_step.update_from_output(out, create_model_runner_output([local]))
+    sched_step.schedule()
+    assert remote.status == RequestStatus.WAITING
 
 
 @pytest.mark.parametrize("policy", ["fcfs", "priority"])
@@ -904,7 +873,6 @@ def test_batch_job_aware_blocks_unadmittable_batch_and_admits_interactive(balanc
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.skipif(vllm_version_is("0.33.0"), reason="cache_aware_admission_window requires vLLM main")
 @pytest.mark.parametrize("balance_enabled", [False, True])
 @pytest.mark.parametrize(
     "cache_aware_window",
@@ -1112,7 +1080,6 @@ def test_async_kv_lifecycle_normal_abort_and_failure(
     _assert_no_kv_load_leaks(scheduler)
 
 
-@pytest.mark.skipif(vllm_version_is("0.33.0"), reason="async KV load caps require vLLM main")
 @pytest.mark.parametrize(
     "scheduler_cls",
     [BalanceScheduler, DyntraLBScheduler, RecomputeScheduler],
@@ -1120,9 +1087,23 @@ def test_async_kv_lifecycle_normal_abort_and_failure(
 @pytest.mark.parametrize(
     ("max_per_step", "max_inflight"),
     [
-        (1, None),
+        pytest.param(
+            1,
+            None,
+            marks=pytest.mark.skipif(
+                vllm_version_is("0.34.0"),
+                reason="max_async_kv_loads_per_step requires vLLM main",
+            ),
+        ),
         (None, 2),
-        (1, 2),
+        pytest.param(
+            1,
+            2,
+            marks=pytest.mark.skipif(
+                vllm_version_is("0.34.0"),
+                reason="max_async_kv_loads_per_step requires vLLM main",
+            ),
+        ),
     ],
 )
 def test_async_kv_load_caps_combinations_across_copied_schedulers(

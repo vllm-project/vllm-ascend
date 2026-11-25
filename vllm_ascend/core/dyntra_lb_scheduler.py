@@ -36,24 +36,18 @@ from vllm.v1.utils import record_function_or_nullcontext
 from vllm_ascend.ascend_config import DyntraLBConfig
 from vllm_ascend.core.scheduler_compat import (
     get_max_async_kv_loads_per_step,
-    get_max_num_inflight_kv_loads,
-    get_new_request_prefill_token_ids,
     scheduler_output_version_kwargs,
-    should_skip_external_kv,
-    with_v033_compat,
 )
 from vllm_ascend.core.scheduler_output import make_cached_request_data
 from vllm_ascend.utils import vllm_version_is
 
-if not vllm_version_is("0.33.0"):
+if not vllm_version_is("0.34.0"):
     from vllm.v1.core.sched.output import IterationDetails
 
 if TYPE_CHECKING:
     from vllm.v1.core.sched.scheduler import Scheduler as _SchedulerBase
-    from vllm.v1.core.sched.scheduler import Scheduler as _SchedulerCompatBase
 else:
     _SchedulerBase = object
-    _SchedulerCompatBase = with_v033_compat(Scheduler)
 
 
 def get_dyntra_lb_block_size(scheduler: Any) -> int:
@@ -201,9 +195,7 @@ class DyntraLBPolicyMixin(_SchedulerBase):
     def _run_lb_kv_prefetch(self) -> set[str]:
         if self.connector is None or not self._lb_kv_prefetch_enabled:
             return set()
-        if get_max_async_kv_loads_per_step(self.scheduler_config) or get_max_num_inflight_kv_loads(
-            self.scheduler_config
-        ):
+        if get_max_async_kv_loads_per_step(self.scheduler_config) or self.scheduler_config.max_num_inflight_kv_loads:
             # When an async KV load cap is configured, defer all async load
             # starts to schedule() so per-step and in-flight limits are
             # enforced in one place. Trade-off: WAITING requests in
@@ -258,7 +250,7 @@ class DyntraLBPolicyMixin(_SchedulerBase):
             partial_tail = num_new_local_computed_tokens % self.block_size
             block_aligned_local = num_new_local_computed_tokens - partial_tail
             ext_tokens, load_kv_async = self.connector.get_num_new_matched_tokens(request, block_aligned_local)
-            if should_skip_external_kv(request):
+            if request.skip_reading_external_kv:
                 ext_tokens, load_kv_async = 0, False
 
             if ext_tokens is None:
@@ -498,7 +490,7 @@ class DyntraLBPolicyMixin(_SchedulerBase):
         return super()._free_request(request, delay_free_blocks)
 
 
-class DyntraLBScheduler(DyntraLBPolicyMixin, _SchedulerCompatBase):
+class DyntraLBScheduler(DyntraLBPolicyMixin, Scheduler):
     prefill_capacity_bound: bool
 
     def schedule(self, throttle_prefills: bool = False) -> SchedulerOutput:
@@ -519,8 +511,8 @@ class DyntraLBScheduler(DyntraLBPolicyMixin, _SchedulerCompatBase):
         preempted_reqs: list[Request] = []
 
         iteration_details = None
-        # vLLM v0.33.0 does not define IterationDetails.
-        if not vllm_version_is("0.33.0") and (
+        # vLLM v0.34.0 does not define IterationDetails.
+        if not vllm_version_is("0.34.0") and (
             (self.log_stats and self.observability_config.enable_logging_iteration_details)
             or self.vllm_config.profiler_config.profiler is not None
         ):
@@ -841,7 +833,7 @@ class DyntraLBScheduler(DyntraLBPolicyMixin, _SchedulerCompatBase):
                     step_skipped_waiting.appendleft(request_to_skip)
 
             num_async_kv_loads = 0
-            # Compatibility with vLLM v0.33.0, which lacks max_async_kv_loads_per_step.
+            # Compatibility with vLLM v0.34.0, which lacks max_async_kv_loads_per_step.
             max_async_kv_loads = get_max_async_kv_loads_per_step(self.scheduler_config) or float("inf")
             # Cleared once self.async_kv_waiting's head can't start a load.
             take_async_kv = True
@@ -858,8 +850,7 @@ class DyntraLBScheduler(DyntraLBPolicyMixin, _SchedulerCompatBase):
                         request_queue = self._next_waiting_queue(take_async_kv)
                 elif (
                     take_async_kv
-                    # Compatibility with vLLM v0.33.0, which lacks max_num_inflight_kv_loads.
-                    and get_max_num_inflight_kv_loads(self.scheduler_config)
+                    and self.scheduler_config.max_num_inflight_kv_loads
                     and self._pause_state == PauseState.UNPAUSED
                 ):
                     # No running slot or token budget left: start async KV loads
@@ -938,8 +929,7 @@ class DyntraLBScheduler(DyntraLBPolicyMixin, _SchedulerCompatBase):
                         ext_tokens, load_kv_async = self.connector.get_num_new_matched_tokens(
                             request, block_aligned_local
                         )
-                        # Compatibility with vLLM v0.33.0, which uses skip_reading_prefix_cache.
-                        if should_skip_external_kv(request):
+                        if request.skip_reading_external_kv:
                             ext_tokens, load_kv_async = 0, False
 
                         if ext_tokens is None:
@@ -1396,8 +1386,7 @@ class DyntraLBScheduler(DyntraLBPolicyMixin, _SchedulerCompatBase):
             NewRequestData.from_request(
                 req,
                 req_to_new_blocks[req.request_id].get_block_ids(),
-                # Compatibility with vLLM v0.33.0, where V2 prefill tokens come from _all_token_ids.
-                get_new_request_prefill_token_ids(req),
+                req.prefill_token_ids,
                 uses_mrope=self.model_uses_mrope,
             )
             for req in scheduled_new_reqs
@@ -1461,7 +1450,7 @@ class DyntraLBScheduler(DyntraLBPolicyMixin, _SchedulerCompatBase):
             total_num_scheduled_tokens=total_num_scheduled_tokens,
             scheduled_spec_decode_tokens=scheduled_spec_decode_tokens,
             scheduled_encoder_inputs=scheduled_encoder_inputs,
-            # Pass iteration_details on vLLM main, or encoder stats and ec_manager_metadata on v0.33.0.
+            # Pass iteration_details on vLLM main, or scheduled_encoder_input_stats on v0.34.0.
             **scheduler_output_version_kwargs(self, iteration_details, scheduled_encoder_inputs),
             preempted_req_ids=self.reset_preempted_req_ids,
             # finished_req_ids is an existing state in the scheduler,

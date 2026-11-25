@@ -40,7 +40,7 @@ _EXPECTED_BALANCE_DIFF: tuple[str, ...] = (
         "self.vllm_config.profiler_config.profiler is not None:"
     ),
     (
-        "+    if not vllm_version_is('0.33.0') and (self.log_stats and "
+        "+    if not vllm_version_is('0.34.0') and (self.log_stats and "
         "self.observability_config.enable_logging_iteration_details or "
         "self.vllm_config.profiler_config.profiler is not None):"
     ),
@@ -57,18 +57,6 @@ _EXPECTED_BALANCE_DIFF: tuple[str, ...] = (
     "         while True:",
     "             num_running = len(self.running) + self.num_waiting_for_streaming_input",
     "@@",
-    "                 request_queue = self.kv_holding_waiting",
-    "                 if not request_queue and self._pause_state == PauseState.UNPAUSED:",
-    "                     request_queue = self._next_waiting_queue(take_async_kv)",
-    (
-        "-            elif take_async_kv and self.scheduler_config.max_num_inflight_kv_loads and "
-        "(self._pause_state == PauseState.UNPAUSED):"
-    ),
-    (
-        "+            elif take_async_kv and get_max_num_inflight_kv_loads(self.scheduler_config) and "
-        "(self._pause_state == PauseState.UNPAUSED):"
-    ),
-    "                 request_queue = self.async_kv_waiting",
     "             else:",
     "                 break",
     "             if not request_queue or (not loads_only and input_budget <= draft_slots):",
@@ -78,29 +66,10 @@ _EXPECTED_BALANCE_DIFF: tuple[str, ...] = (
     "             request = request_queue.peek_request()",
     "             request_id = request.request_id",
     "@@",
-    "                     partial_tail = num_new_local_computed_tokens % self.block_size",
-    "                     block_aligned_local = num_new_local_computed_tokens - partial_tail",
-    (
-        "                     ext_tokens, load_kv_async = self.connector.get_num_new_matched_tokens(request, "
-        "block_aligned_local)"
-    ),
-    "-                    if request.skip_reading_external_kv:",
-    "+                    if should_skip_external_kv(request):",
-    "                         ext_tokens, load_kv_async = (0, False)",
-    "                     if ext_tokens is None:",
-    "                         skip_request(request_queue)",
-    "@@",
-    "     assert input_budget >= 0",
-    "     assert len(self.running) <= self.max_num_running_reqs",
     "     assert len(scheduled_new_reqs) + len(scheduled_running_reqs) <= len(self.running)",
     (
-        "-    new_reqs_data = [NewRequestData.from_request(req, "
+        "     new_reqs_data = [NewRequestData.from_request(req, "
         "req_to_new_blocks[req.request_id].get_block_ids(), req.prefill_token_ids, "
-        "uses_mrope=self.model_uses_mrope) for req in scheduled_new_reqs]"
-    ),
-    (
-        "+    new_reqs_data = [NewRequestData.from_request(req, "
-        "req_to_new_blocks[req.request_id].get_block_ids(), get_new_request_prefill_token_ids(req), "
         "uses_mrope=self.model_uses_mrope) for req in scheduled_new_reqs]"
     ),
     "     with record_function_or_nullcontext('schedule: make_cached_request_data'):",
@@ -171,7 +140,7 @@ _EXPECTED_DYNTRA_LB_DIFF: tuple[str, ...] = (
         "self.vllm_config.profiler_config.profiler is not None:"
     ),
     (
-        "+    if not vllm_version_is('0.33.0') and (self.log_stats and "
+        "+    if not vllm_version_is('0.34.0') and (self.log_stats and "
         "self.observability_config.enable_logging_iteration_details or "
         "self.vllm_config.profiler_config.profiler is not None):"
     ),
@@ -190,45 +159,18 @@ _EXPECTED_DYNTRA_LB_DIFF: tuple[str, ...] = (
     "         while True:",
     "             num_running = len(self.running) + self.num_waiting_for_streaming_input",
     "@@",
-    "                 request_queue = self.kv_holding_waiting",
-    "                 if not request_queue and self._pause_state == PauseState.UNPAUSED:",
-    "                     request_queue = self._next_waiting_queue(take_async_kv)",
-    (
-        "-            elif take_async_kv and self.scheduler_config.max_num_inflight_kv_loads and "
-        "(self._pause_state == PauseState.UNPAUSED):"
-    ),
-    (
-        "+            elif take_async_kv and get_max_num_inflight_kv_loads(self.scheduler_config) and "
-        "(self._pause_state == PauseState.UNPAUSED):"
-    ),
-    "                 request_queue = self.async_kv_waiting",
-    "             else:",
-    "                 break",
-    "@@",
     "                 skip_request(request_queue)",
     "                 continue",
     "             if request.num_stale_output_tokens and (not request.drop_stale_output):",
     "+                skip_request(request_queue)",
     "+                continue",
-    ("+            if request_queue is not self.async_kv_waiting and (not self._can_admit_waiting_request(request)):"),
+    "+            if request_queue is not self.async_kv_waiting and (not self._can_admit_waiting_request(request)):",
     "                 skip_request(request_queue)",
     "                 continue",
     (
         "             if self.lora_config and request.lora_request and (len(scheduled_loras) == "
         "self.lora_config.max_loras and request.lora_request.lora_int_id not in scheduled_loras):"
     ),
-    "@@",
-    "                     partial_tail = num_new_local_computed_tokens % self.block_size",
-    "                     block_aligned_local = num_new_local_computed_tokens - partial_tail",
-    (
-        "                     ext_tokens, load_kv_async = self.connector.get_num_new_matched_tokens(request, "
-        "block_aligned_local)"
-    ),
-    "-                    if request.skip_reading_external_kv:",
-    "+                    if should_skip_external_kv(request):",
-    "                         ext_tokens, load_kv_async = (0, False)",
-    "                     if ext_tokens is None:",
-    "                         skip_request(request_queue)",
     "@@",
     "                     break",
     "                 take_async_kv = False",
@@ -240,7 +182,7 @@ _EXPECTED_DYNTRA_LB_DIFF: tuple[str, ...] = (
     "                 assert num_external_computed_tokens > 0",
     "                 num_new_tokens = 0",
     "@@",
-    ("                     num_replay_tokens = self._mark_prefix_replay(request, num_computed_tokens, window_loaded)"),
+    "                     num_replay_tokens = self._mark_prefix_replay(request, num_computed_tokens, window_loaded)",
     "                     num_computed_tokens -= num_replay_tokens",
     "                 num_new_tokens = request.num_tokens - num_computed_tokens",
     (
@@ -259,17 +201,10 @@ _EXPECTED_DYNTRA_LB_DIFF: tuple[str, ...] = (
     ),
     "                         if padded_num_tokens > request_token_budget:",
     "@@",
-    "     assert input_budget >= 0",
-    "     assert len(self.running) <= self.max_num_running_reqs",
     "     assert len(scheduled_new_reqs) + len(scheduled_running_reqs) <= len(self.running)",
     (
-        "-    new_reqs_data = [NewRequestData.from_request(req, "
+        "     new_reqs_data = [NewRequestData.from_request(req, "
         "req_to_new_blocks[req.request_id].get_block_ids(), req.prefill_token_ids, "
-        "uses_mrope=self.model_uses_mrope) for req in scheduled_new_reqs]"
-    ),
-    (
-        "+    new_reqs_data = [NewRequestData.from_request(req, "
-        "req_to_new_blocks[req.request_id].get_block_ids(), get_new_request_prefill_token_ids(req), "
         "uses_mrope=self.model_uses_mrope) for req in scheduled_new_reqs]"
     ),
     "     with record_function_or_nullcontext('schedule: make_cached_request_data'):",
@@ -347,7 +282,7 @@ _EXPECTED_RECOMPUTE_DIFF: tuple[str, ...] = (
         "self.vllm_config.profiler_config.profiler is not None:"
     ),
     (
-        "+    if not vllm_version_is('0.33.0') and (self.log_stats and "
+        "+    if not vllm_version_is('0.34.0') and (self.log_stats and "
         "self.observability_config.enable_logging_iteration_details or "
         "self.vllm_config.profiler_config.profiler is not None):"
     ),
@@ -383,7 +318,7 @@ _EXPECTED_RECOMPUTE_DIFF: tuple[str, ...] = (
     ),
     "         assert len(scheduled_loras) <= self.lora_config.max_loras",
     "-    if not preempted_reqs and self._pause_state != PauseState.PAUSED_ALL:",
-    ("+    if not preempted_reqs and (not self._recomputed_reqs) and (self._pause_state != PauseState.PAUSED_ALL):"),
+    "+    if not preempted_reqs and (not self._recomputed_reqs) and (self._pause_state != PauseState.PAUSED_ALL):",
     "         if self.cache_aware_window and (not defer_prefills):",
     "             self._reorder_waiting_by_cached_prefix()",
     "         step_skipped_waiting: deque[Request] = deque()",
@@ -397,45 +332,18 @@ _EXPECTED_RECOMPUTE_DIFF: tuple[str, ...] = (
     "         while True:",
     "             num_running = len(self.running) + self.num_waiting_for_streaming_input",
     "@@",
-    "                 request_queue = self.kv_holding_waiting",
-    "                 if not request_queue and self._pause_state == PauseState.UNPAUSED:",
-    "                     request_queue = self._next_waiting_queue(take_async_kv)",
-    (
-        "-            elif take_async_kv and self.scheduler_config.max_num_inflight_kv_loads and "
-        "(self._pause_state == PauseState.UNPAUSED):"
-    ),
-    (
-        "+            elif take_async_kv and get_max_num_inflight_kv_loads(self.scheduler_config) and "
-        "(self._pause_state == PauseState.UNPAUSED):"
-    ),
-    "                 request_queue = self.async_kv_waiting",
-    "             else:",
-    "                 break",
-    "@@",
     "                 skip_request(request_queue)",
     "                 continue",
     "             if request.num_stale_output_tokens and (not request.drop_stale_output):",
     "+                skip_request(request_queue)",
     "+                continue",
-    ("+            if request_queue is not self.async_kv_waiting and (not self._can_admit_waiting_request(request)):"),
+    "+            if request_queue is not self.async_kv_waiting and (not self._can_admit_waiting_request(request)):",
     "                 skip_request(request_queue)",
     "                 continue",
     (
         "             if self.lora_config and request.lora_request and (len(scheduled_loras) == "
         "self.lora_config.max_loras and request.lora_request.lora_int_id not in scheduled_loras):"
     ),
-    "@@",
-    "                     partial_tail = num_new_local_computed_tokens % self.block_size",
-    "                     block_aligned_local = num_new_local_computed_tokens - partial_tail",
-    (
-        "                     ext_tokens, load_kv_async = self.connector.get_num_new_matched_tokens(request, "
-        "block_aligned_local)"
-    ),
-    "-                    if request.skip_reading_external_kv:",
-    "+                    if should_skip_external_kv(request):",
-    "                         ext_tokens, load_kv_async = (0, False)",
-    "                     if ext_tokens is None:",
-    "                         skip_request(request_queue)",
     "@@",
     "                     break",
     "                 take_async_kv = False",
@@ -447,7 +355,7 @@ _EXPECTED_RECOMPUTE_DIFF: tuple[str, ...] = (
     "                 assert num_external_computed_tokens > 0",
     "                 num_new_tokens = 0",
     "@@",
-    ("                     num_replay_tokens = self._mark_prefix_replay(request, num_computed_tokens, window_loaded)"),
+    "                     num_replay_tokens = self._mark_prefix_replay(request, num_computed_tokens, window_loaded)",
     "                     num_computed_tokens -= num_replay_tokens",
     "                 num_new_tokens = request.num_tokens - num_computed_tokens",
     (
@@ -466,17 +374,10 @@ _EXPECTED_RECOMPUTE_DIFF: tuple[str, ...] = (
     ),
     "                         if padded_num_tokens > request_token_budget:",
     "@@",
-    "     assert input_budget >= 0",
-    "     assert len(self.running) <= self.max_num_running_reqs",
     "     assert len(scheduled_new_reqs) + len(scheduled_running_reqs) <= len(self.running)",
     (
-        "-    new_reqs_data = [NewRequestData.from_request(req, "
+        "     new_reqs_data = [NewRequestData.from_request(req, "
         "req_to_new_blocks[req.request_id].get_block_ids(), req.prefill_token_ids, "
-        "uses_mrope=self.model_uses_mrope) for req in scheduled_new_reqs]"
-    ),
-    (
-        "+    new_reqs_data = [NewRequestData.from_request(req, "
-        "req_to_new_blocks[req.request_id].get_block_ids(), get_new_request_prefill_token_ids(req), "
         "uses_mrope=self.model_uses_mrope) for req in scheduled_new_reqs]"
     ),
     "     with record_function_or_nullcontext('schedule: make_cached_request_data'):",
@@ -594,7 +495,7 @@ def _normalized_schedule_diff(cls: type[Any]) -> list[str]:
 
 
 @pytest.mark.skipif(
-    vllm_version_is("0.33.0"),
+    vllm_version_is("0.34.0"),
     reason="upstream parity diff targets the pinned vLLM main commit",
 )
 @pytest.mark.parametrize(

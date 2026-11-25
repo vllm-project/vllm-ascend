@@ -252,11 +252,8 @@ def test_dyntra_lb_prepare_moves_prefetched_request_to_kv_holding_waiting():
     assert request in scheduler.kv_holding_waiting
     assert request not in scheduler.waiting
     assert request not in candidates
-    if vllm_version_is("0.33.0"):
-        assert request in scheduler._inflight_prefills
-    else:
-        assert request in scheduler._parked_reservations
-        assert request not in scheduler._inflight_prefills
+    assert request in scheduler._parked_reservations
+    assert request not in scheduler._inflight_prefills
     assert scheduler._inflight_prefill_reserved_blocks() == scheduler._request_remaining_blocks(request)
 
 
