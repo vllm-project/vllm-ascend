@@ -38,6 +38,8 @@ The examples use ModelScope model IDs with `VLLM_USE_MODELSCOPE=True`. Both PD r
 
 ### 4.1 Docker Image Installation
 
+{% include "getting_started/installation/ascend_docker_runtime.inc.md" %}
+
 Refer to [using docker](../../getting_started/installation.md#installation-prebuilt-image) for the complete installation guide.
 
 Select the image for your target hardware.
@@ -56,26 +58,11 @@ Select the image for your target hardware.
     export NAME=vllm-ascend
 
     docker run --rm \
+      -e ASCEND_VISIBLE_DEVICES=0-7 \
       --name $NAME \
       --net=host \
       --shm-size=128g \
-      --device /dev/davinci0 \
-      --device /dev/davinci1 \
-      --device /dev/davinci2 \
-      --device /dev/davinci3 \
-      --device /dev/davinci4 \
-      --device /dev/davinci5 \
-      --device /dev/davinci6 \
-      --device /dev/davinci7 \
-      --device /dev/davinci_manager \
-      --device /dev/devmm_svm \
-      --device /dev/hisi_hdc \
-      -v /usr/local/dcmi:/usr/local/dcmi \
       -v /usr/local/Ascend/driver/tools/hccn_tool:/usr/local/Ascend/driver/tools/hccn_tool \
-      -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
-      -v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
-      -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
-      -v /etc/ascend_install.info:/etc/ascend_install.info \
       -v /etc/hccn.conf:/etc/hccn.conf:ro \
       -v /root/.cache:/root/.cache \
       -it $IMAGE bash
@@ -89,34 +76,11 @@ Select the image for your target hardware.
     export NAME=vllm-ascend
 
     docker run --rm \
+      -e ASCEND_VISIBLE_DEVICES=0-15 \
       --name $NAME \
       --net=host \
       --shm-size=128g \
-      --device /dev/davinci0 \
-      --device /dev/davinci1 \
-      --device /dev/davinci2 \
-      --device /dev/davinci3 \
-      --device /dev/davinci4 \
-      --device /dev/davinci5 \
-      --device /dev/davinci6 \
-      --device /dev/davinci7 \
-      --device /dev/davinci8 \
-      --device /dev/davinci9 \
-      --device /dev/davinci10 \
-      --device /dev/davinci11 \
-      --device /dev/davinci12 \
-      --device /dev/davinci13 \
-      --device /dev/davinci14 \
-      --device /dev/davinci15 \
-      --device /dev/davinci_manager \
-      --device /dev/devmm_svm \
-      --device /dev/hisi_hdc \
-      -v /usr/local/dcmi:/usr/local/dcmi \
       -v /usr/local/Ascend/driver/tools/hccn_tool:/usr/local/Ascend/driver/tools/hccn_tool \
-      -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
-      -v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
-      -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
-      -v /etc/ascend_install.info:/etc/ascend_install.info \
       -v /etc/hccn.conf:/etc/hccn.conf:ro \
       -v /root/.cache:/root/.cache \
       -it $IMAGE bash
@@ -130,29 +94,15 @@ Select the image for your target hardware.
     export NAME=vllm-ascend
 
     docker run --rm \
+      -e ASCEND_VISIBLE_DEVICES=0-7 \
       --name $NAME \
       --net=host \
       --shm-size=500g \
-      --device /dev/davinci_manager \
-      --device /dev/hisi_hdc \
-      --device /dev/ummu \
-      --device /dev/uburma \
-      --device /dev/davinci0 \
-      --device /dev/davinci1 \
-      --device /dev/davinci2 \
-      --device /dev/davinci3 \
-      --device /dev/davinci4 \
-      --device /dev/davinci5 \
-      --device /dev/davinci6 \
-      --device /dev/davinci7 \
       -v /usr/local/Ascend/driver:/usr/local/Ascend/driver \
       -v /usr/local/Ascend/firmware:/usr/local/Ascend/firmware \
       -v /root/host:/root/host \
       -v /usr/local/sbin:/usr/local/sbin \
-      -v /usr/local/dcmi:/usr/local/dcmi \
       -v /var/log/npu:/usr/slog \
-      -v /etc/ascend_install.info:/etc/ascend_install.info \
-      -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
       -v /etc/hixlep:/etc/hixlep \
       -v /root/.cache:/root/.cache \
       -it $IMAGE bash
@@ -251,24 +201,9 @@ Verify that all host device and file paths exist before running Docker.
       --net=host \
       --privileged=true \
       --shm-size=128g \
-      --device /dev/davinci0 \
-      --device /dev/davinci1 \
-      --device /dev/davinci2 \
-      --device /dev/davinci3 \
-      --device /dev/davinci4 \
-      --device /dev/davinci5 \
-      --device /dev/davinci6 \
-      --device /dev/davinci7 \
-      --device /dev/davinci_manager \
+      -e ASCEND_VISIBLE_DEVICES=0-7 \
       --device "${SSD_DEVICE_PATH}:${SSD_DEVICE_PATH}" \
-      --device /dev/devmm_svm \
-      --device /dev/hisi_hdc \
-      -v /usr/local/dcmi:/usr/local/dcmi \
       -v /usr/local/Ascend/driver/tools/hccn_tool:/usr/local/Ascend/driver/tools/hccn_tool \
-      -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
-      -v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
-      -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
-      -v /etc/ascend_install.info:/etc/ascend_install.info \
       -v /etc/hccn.conf:/etc/hccn.conf:ro \
       -v /root/.cache:/root/.cache \
       -v "${MEMCACHE_CONFIG_DIR}:${MEMCACHE_CONFIG_DIR}" \
@@ -295,33 +230,10 @@ Verify that all host device and file paths exist before running Docker.
       --net=host \
       --privileged=true \
       --shm-size=128g \
-      --device /dev/davinci0 \
-      --device /dev/davinci1 \
-      --device /dev/davinci2 \
-      --device /dev/davinci3 \
-      --device /dev/davinci4 \
-      --device /dev/davinci5 \
-      --device /dev/davinci6 \
-      --device /dev/davinci7 \
-      --device /dev/davinci8 \
-      --device /dev/davinci9 \
-      --device /dev/davinci10 \
-      --device /dev/davinci11 \
-      --device /dev/davinci12 \
-      --device /dev/davinci13 \
-      --device /dev/davinci14 \
-      --device /dev/davinci15 \
-      --device /dev/davinci_manager \
+      -e ASCEND_VISIBLE_DEVICES=0-15 \
       --device "${SSD_DEVICE_PATH}:${SSD_DEVICE_PATH}" \
       --device "${SSD_DEVICE_PATH_2}:${SSD_DEVICE_PATH_2}" \
-      --device /dev/devmm_svm \
-      --device /dev/hisi_hdc \
-      -v /usr/local/dcmi:/usr/local/dcmi \
       -v /usr/local/Ascend/driver/tools/hccn_tool:/usr/local/Ascend/driver/tools/hccn_tool \
-      -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
-      -v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
-      -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
-      -v /etc/ascend_install.info:/etc/ascend_install.info \
       -v /etc/hccn.conf:/etc/hccn.conf:ro \
       -v /root/.cache:/root/.cache \
       -v "${MEMCACHE_CONFIG_DIR}:${MEMCACHE_CONFIG_DIR}" \
@@ -341,27 +253,13 @@ Verify that all host device and file paths exist before running Docker.
       --net=host \
       --privileged=true \
       --shm-size=500g \
-      --device /dev/davinci_manager \
+      -e ASCEND_VISIBLE_DEVICES=0-7 \
       --device "${SSD_DEVICE_PATH}:${SSD_DEVICE_PATH}" \
-      --device /dev/hisi_hdc \
-      --device /dev/ummu \
-      --device /dev/uburma \
-      --device /dev/davinci0 \
-      --device /dev/davinci1 \
-      --device /dev/davinci2 \
-      --device /dev/davinci3 \
-      --device /dev/davinci4 \
-      --device /dev/davinci5 \
-      --device /dev/davinci6 \
-      --device /dev/davinci7 \
       -v /usr/local/Ascend/driver:/usr/local/Ascend/driver \
       -v /usr/local/Ascend/firmware:/usr/local/Ascend/firmware \
       -v /root/host:/root/host \
       -v /usr/local/sbin:/usr/local/sbin \
-      -v /usr/local/dcmi:/usr/local/dcmi \
       -v /var/log/npu:/usr/slog \
-      -v /etc/ascend_install.info:/etc/ascend_install.info \
-      -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
       -v /etc/hixlep:/etc/hixlep \
       -v /etc/hccn.conf:/etc/hccn.conf:ro \
       -v /usr/bin/urma_admin:/usr/bin/urma_admin:ro \
@@ -1517,7 +1415,7 @@ This section extends the model context for PD separation on A2 series, A3 series
 
     Each request must satisfy `input token count + maximum output token count <= max-model-len`. With this configuration, the total must not exceed 1,010,000 tokens.
 
-    The runtime must also size the Qwen4Exp MTP draft's position cache for the configured context length. The 0.32 RC branch applies the Qwen4Exp-specific fix in [PR #21347](https://github.com/vllm-project/vllm-ascend/pull/21347). With main, use a compatible vLLM build with the upstream draft position-cache expansion, such as vLLM v0.33.0, and verify the long-context request on your target image.
+    The runtime must also size the Qwen4Exp MTP draft's position cache for the configured context length. The 0.32 RC branch applies the Qwen4Exp-specific fix in [PR #21347](https://github.com/vllm-project/vllm-ascend/pull/21347). With main, use a compatible vLLM build with the upstream draft position-cache expansion, such as vLLM v0.34.0, and verify the long-context request on your target image.
 
 On 950DT products, this case reuses ports 8247, 8248, and 8246 from the image-and-text case. Stop that deployment before starting this case.
 
