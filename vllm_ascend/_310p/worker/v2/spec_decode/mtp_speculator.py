@@ -398,10 +398,14 @@ class AscendMTPSpeculator310(AscendTargetDependentARSpeculator, MTPSpeculator):
                 layers = getattr(draft_config, "num_nextn_predict_layers", None)
             if layers != 1:
                 use_full = False
+                # Preserve DP-negotiated token/request padding when num_tokens_across_dp
+                # is active so DPMetadata.make() never sees a rank token mismatch.
+                fallback_tokens = batch_desc.num_tokens if num_tokens_across_dp is not None else num_reqs
+                fallback_reqs = batch_desc.num_reqs if num_tokens_across_dp is not None else num_reqs
                 batch_desc = BatchExecutionDescriptor(
                     cg_mode=CUDAGraphMode.NONE,
-                    num_tokens=num_reqs,
-                    num_reqs=num_reqs,
+                    num_tokens=fallback_tokens,
+                    num_reqs=fallback_reqs,
                 )
         attn_metadata = None
         slot_mappings_by_layer = None
