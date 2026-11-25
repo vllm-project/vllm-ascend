@@ -67,6 +67,7 @@ def test_external_forward_reuses_upstream_dcp_prolog(dcp, causal, speculative, h
     attention_output[:, -1, :4] = torch.tensor([7.0, torch.nan, torch.inf, -torch.inf])
     flash = SimpleNamespace(
         slots=slots,
+        draft_window=None,
         current=object() if split else None,
         query=torch.empty(tokens, heads, 576),
         adapter=SimpleNamespace(attention=Mock(return_value=(attention_output, None))),
@@ -136,6 +137,7 @@ def test_external_forward_reuses_upstream_dcp_prolog(dcp, causal, speculative, h
         "supports_prolog_v3_dtype",
         "_supports_strided_mla_projection",
         "supports_prolog_v3_writer",
+        "_is_token_fused_mla_cache",
         "_validate_mla_cache_layout",
         "_cache_requires_prolog_v3_writer",
         "mla_preprocess_prolog_v3",
@@ -281,6 +283,7 @@ def test_prolog_writer_stages_interleaved_cache_and_preserves_guards(interleaved
     for name in (
         "_prolog_v3_writer_workspace",
         "_run_prolog_v3",
+        "_is_token_fused_mla_cache",
         "_validate_mla_cache_layout",
         "exec_context_kv_prolog_v3",
     ):

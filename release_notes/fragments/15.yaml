@@ -1,0 +1,9 @@
+pr: 15
+entries:
+  - category: performance
+    text: >-
+      Mistral Large 4 supports opt-in FlashComm1 with attention output
+      reduce-scatter and sequence-parallel residual, normalization, router and
+      MoE execution. Shared expert data parallelism remains independently
+      configurable.
+    model: mistral-large-4

@@ -653,11 +653,21 @@ def build_attn_state(
     return attn_state
 
 
-def _get_layer_kv_cache_specs(kv_cache_config: KVCacheConfig) -> dict[str, KVCacheSpec]:
+def _get_layer_kv_cache_specs(
+    kv_cache_config: KVCacheConfig,
+    shared_layers: Iterable[str] = (),
+) -> dict[str, KVCacheSpec]:
+    shared_layer_names = set(shared_layers)
     layer_kv_cache_spec: dict[str, KVCacheSpec] = {}
     for group_kv_cache_spec in kv_cache_config.kv_cache_groups:
         group_spec = group_kv_cache_spec.kv_cache_spec
         for layer_name in group_kv_cache_spec.layer_names:
+            # KV-sharing layers are logical consumers of their target layer's
+            # cache. They remain in ``layer_names`` for scheduler bookkeeping,
+            # but UniformTypeKVCacheSpecs intentionally has no independent
+            # entry or allocation for them.
+            if layer_name in shared_layer_names:
+                continue
             if isinstance(group_spec, UniformTypeKVCacheSpecs):
                 layer_kv_cache_spec[layer_name] = group_spec.kv_cache_specs[layer_name]
             else:
@@ -984,7 +994,7 @@ def _allocate_kv_cache(
     vllm_config = get_current_vllm_config()
     if KVPPConfig.from_vllm_config(vllm_config).size > 1:
         caches = allocate_kvpp_cache(vllm_config, kv_cache_config, device)
-        specs = _get_layer_kv_cache_specs(kv_cache_config)
+        specs = _get_layer_kv_cache_specs(kv_cache_config, shared_layers)
         # Indexer reshape expects a tuple even without a quantization scale.
         # Single-component main MLA caches still use a raw Tensor.
         return {
@@ -995,7 +1005,7 @@ def _allocate_kv_cache(
     kv_cache_raw_tensors: dict[str, Any] = {}
     # prefill disaggregation need the addr of cache tensor be aligned with 2M
     alignment = KV_CACHE_BUFFER_ALIGNMENT
-    layer_kv_cache_spec = _get_layer_kv_cache_specs(kv_cache_config)
+    layer_kv_cache_spec = _get_layer_kv_cache_specs(kv_cache_config, shared_layers)
     reuse_layout = get_layerwise_reuse_layout(kv_cache_config)
     if reuse_layout is not None:
         return allocate_cache_backing(
@@ -1595,7 +1605,7 @@ def _reshape_kv_cache_v2(
         raise ValueError("Reshape KV cache requires KVCacheConfig.")
 
     vllm_config = get_current_vllm_config()
-    layer_kv_cache_spec = _get_layer_kv_cache_specs(kv_cache_config)
+    layer_kv_cache_spec = _get_layer_kv_cache_specs(kv_cache_config, shared_kv_cache_layers)
     kv_caches: dict[str, Any] = {}
     # Qwen4 QSA hybrids (Qwen3.8 Flash Next) reconstruct every owner's
     # view from the same deterministic layout that _allocate_kv_cache used:

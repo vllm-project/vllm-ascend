@@ -28,6 +28,7 @@ class TestSharedMXFPActivation(unittest.TestCase):
         cls = next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == "AscendSharedExperts")
         names = {
             "_apply_output_gate",
+            "_block_fp8_down_mx_scheme",
             "_can_fuse_w8a8_mxfp_activation",
             "_prepare_w8a8_mxfp_down_input",
             "_prepare_gate_up_input",
@@ -39,7 +40,12 @@ class TestSharedMXFPActivation(unittest.TestCase):
             "validate_consistency",
         }
         methods = [n for n in cls.body if isinstance(n, ast.FunctionDef) and n.name in names]
-        constant_names = {"MXFP8_ACTIVATION_GROUP_SIZE", "SWIGLU_MX_INPUT_ALIGNMENT", "SWIGLU_MX_QUANT_MODE"}
+        constant_names = {
+            "BLOCK_FP8_SWIGLU_MX_MAX_TOKENS",
+            "MXFP8_ACTIVATION_GROUP_SIZE",
+            "SWIGLU_MX_INPUT_ALIGNMENT",
+            "SWIGLU_MX_QUANT_MODE",
+        }
         constants = [
             n
             for n in tree.body
@@ -48,14 +54,21 @@ class TestSharedMXFPActivation(unittest.TestCase):
         self.quant = QuantType
         self.activation_cls = type("AscendSiluAndMul", (), {})
         self.scheme_cls = type("AscendW8A8MXFP8DynamicLinearMethod", (), {})
+        self.block_scheme_cls = type("AscendFp8BlockLinearMethod", (), {})
         scheme_module = ModuleType("vllm_ascend.quantization.methods.w8a8.w8a8_mxfp8")
         setattr(scheme_module, self.scheme_cls.__name__, self.scheme_cls)
-        patcher = patch.dict("sys.modules", {scheme_module.__name__: scheme_module})
+        block_module = ModuleType("vllm_ascend.quantization.methods.w8a8.fp8_block")
+        setattr(block_module, self.block_scheme_cls.__name__, self.block_scheme_cls)
+        patcher = patch.dict(
+            "sys.modules", {scheme_module.__name__: scheme_module, block_module.__name__: block_module}
+        )
         patcher.start()
         self.addCleanup(patcher.stop)
         self.prepared_cls = PreparedLinearInput
         self.quantized = SimpleNamespace(shape=(36, 2048))
         self.fused = Mock(return_value=(self.quantized, "scale", None))
+        self.fused_block = Mock(return_value=(self.quantized, "scale"))
+        self.envs = SimpleNamespace(VLLM_ASCEND_MISTRAL_SHARED_SWIGLU_MX=False)
         self.torch = SimpleNamespace(
             bfloat16="bf16",
             float8_e4m3fn="fp8",
@@ -63,6 +76,8 @@ class TestSharedMXFPActivation(unittest.TestCase):
         )
         self.namespace: dict[str, Any] = {
             "torch": self.torch,
+            "torch_npu": SimpleNamespace(npu_swiglu_mx_quant=self.fused_block),
+            "envs": self.envs,
             "QuantType": self.quant,
             "Enum": Enum,
             "auto": auto,
@@ -173,6 +188,28 @@ class TestSharedMXFPActivation(unittest.TestCase):
                 self.executor.apply_activation.assert_called_once_with(self.gate_up)
                 self.executor._prepare_linear_input_for_overlap.assert_called_once_with(down, "original_activation")
                 down.assert_called_once_with("original_activation")
+
+    def test_block_fp8_fusion_is_opt_in_and_limited_to_small_batches(self):
+        down = self.executor.layer.down_proj
+        block = self.block_scheme_cls()
+        block.mxfp8_method = down.quant_method.quant_method
+        down.quant_method.quant_method = block
+        self.executor.quant_type = self.quant.NONE
+        for enabled, tokens, can_fuse in ((False, 8, False), (True, 8, True), (True, 9, False)):
+            with self.subTest(enabled=enabled, tokens=tokens):
+                self.envs.VLLM_ASCEND_MISTRAL_SHARED_SWIGLU_MX = enabled
+                self.gate_up.shape = (tokens, 4096)
+                self.fused_block.reset_mock()
+                down.reset_mock()
+                self.assertEqual(self.run_mlp(), 7)
+                if can_fuse:
+                    self.fused_block.assert_called_once_with(
+                        self.gate_up, activate_left=True, swiglu_mode=0, dst_type="fp8", scale_alg=0
+                    )
+                    down.assert_called_once_with(self.prepared_cls(self.quantized, "scale", "bf16"))
+                else:
+                    self.fused_block.assert_not_called()
+                    down.assert_called_once_with("original_activation")
 
     def test_mx_scale_pair_alignment_falls_back(self):
         for width in (0, 64, 192, 320):

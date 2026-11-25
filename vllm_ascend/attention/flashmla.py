@@ -15,10 +15,12 @@ from typing import TYPE_CHECKING, Any, ClassVar
 
 import numpy as np
 import torch
+from vllm.triton_utils import HAS_TRITON
 from vllm.v1.attention.backends.utils import get_dcp_local_seq_lens
 
+from vllm_ascend import envs
 from vllm_ascend.attention.utils import MLA_FLASH_SUPPORTED_Q_HEADS, get_flashmla_ops, get_quant_flashmla_ops
-from vllm_ascend.ops.rotary_embedding import get_cos_and_sin_mla
+from vllm_ascend.ops.rotary_embedding import gather_mla_rope, get_cos_and_sin_mla
 
 if TYPE_CHECKING:
     from vllm.v1.worker.gpu.model_runner import BatchReqState
@@ -32,6 +34,7 @@ FLASHMLA_NON_CAUSAL_MASK_MODE = 0
 FLASHMLA_CAUSAL_MASK_MODE = 3
 FLASHMLA_KV_LAYOUT = "PA_BBND"
 FLASHMLA_MAX_BATCH_SIZE = 65535
+FLASHMLA_BAND_MASK = 4
 
 
 def prepare_flashmla_batch_req_state(
@@ -115,11 +118,23 @@ class FlashMLAConfig:
     mask_mode: int = FLASHMLA_CAUSAL_MASK_MODE
     layout_kv: str = FLASHMLA_KV_LAYOUT
     return_softmax_lse: bool = False
+    win_left: int | None = None
 
     def __post_init__(self) -> None:
         if self.num_heads not in MLA_FLASH_SUPPORTED_Q_HEADS:
             raise ValueError(f"FlashMLA requires local Q heads in {MLA_FLASH_SUPPORTED_Q_HEADS}, got {self.num_heads}")
-        _check_mask_and_kv_layout(self.mask_mode, self.layout_kv)
+        if self.mask_mode not in (0, 3, FLASHMLA_BAND_MASK):
+            raise ValueError("FlashMLA mask_mode must be 0, 3 or 4")
+        if self.mask_mode == FLASHMLA_BAND_MASK:
+            if self.win_left is None or self.win_left < 0:
+                raise ValueError("FlashMLA BAND requires a nonnegative left window")
+        elif self.win_left is not None:
+            raise ValueError("FlashMLA left window requires BAND mask")
+        if self.layout_kv != "PA_BBND":
+            raise ValueError("FlashMLA layout_kv must be PA_BBND")
+
+    def window_args(self) -> dict[str, int]:
+        return {} if self.win_left is None else {"win_left": self.win_left, "win_right": 0}
 
 
 @dataclass(frozen=True)
@@ -198,7 +213,7 @@ def _check_attention_inputs(
         raise ValueError("FlashMLA metadata must be a nonempty int32 tensor from the metadata operator")
     if config.mask_mode == FLASHMLA_NON_CAUSAL_MASK_MODE and attn_mask is not None:
         raise ValueError("FlashMLA mask_mode=0 requires attn_mask=None")
-    if config.mask_mode == FLASHMLA_CAUSAL_MASK_MODE:
+    if config.mask_mode in (FLASHMLA_CAUSAL_MASK_MODE, FLASHMLA_BAND_MASK):
         if attn_mask is None:
             raise ValueError("FlashMLA mask_mode=3 requires the upper-triangular int8 mask")
         _check_tensor("attn_mask", attn_mask, (FLASHMLA_MASK_SIZE, FLASHMLA_MASK_SIZE), torch.int8)
@@ -257,6 +272,7 @@ class FlashMLAImpl:
             head_dim_v=FLASHMLA_V_DIM,
             mask_mode=self.config.mask_mode,
             layout_q="TND",
+            **self.config.window_args(),
         )
 
     def attention(
@@ -301,6 +317,7 @@ class FlashMLAImpl:
             layout_kv=self.config.layout_kv,
             layout_out="NTD",
             return_softmax_lse=self.config.return_softmax_lse,
+            **self.config.window_args(),
         )
         if self.config.return_softmax_lse:
             # TND queries return NTD latent output and NT FP32 statistics.
@@ -424,6 +441,27 @@ class FlashMLACurrent:
 
 
 @dataclass
+class FlashMLADraftWindow:
+    cu: torch.Tensor
+    used_q: torch.Tensor
+    cache_lens: torch.Tensor
+    block_table: torch.Tensor
+
+    def refresh(self, flash: "FlashMLADecode", window_size: int) -> None:
+        # Treat each query as a separate one-token sequence. The right-aligned
+        # band then ends at the same last KV token for every draft query.
+        reqs = torch.searchsorted(flash.cu[1:], self.cu[:-1], right=True).clamp_max(flash.used_q.numel() - 1)
+        lengths = flash.cache_lens.index_select(0, reqs)
+        first_pages = (lengths - window_size).clamp_min(0) // FLASHMLA_BLOCK_SIZE
+        columns = first_pages[:, None] + torch.arange(self.block_table.shape[1], device=self.cu.device)
+        columns = columns.clamp_max(flash.block_table.shape[1] - 1)
+        self.used_q.copy_(flash.token_live)
+        self.cache_lens.copy_(lengths - first_pages * FLASHMLA_BLOCK_SIZE)
+        self.cache_lens.masked_fill_(~flash.token_live, 0)
+        self.block_table.copy_(flash.block_table[reqs[:, None], columns])
+
+
+@dataclass
 class FlashMLADecode:
     adapter: Any
     query: torch.Tensor
@@ -440,6 +478,7 @@ class FlashMLADecode:
     cos: torch.Tensor | None
     sin: torch.Tensor | None
     current: FlashMLACurrent | None = None
+    draft_window: FlashMLADraftWindow | None = None
 
 
 class FlashMLAMetadataBuilder:
@@ -464,6 +503,12 @@ class FlashMLAMetadataBuilder:
         # Ordinary decode reads current KV from its owning rank's cache;
         # speculative causal queries need the replicated current chunk.
         self.use_spec_decode = impl.vllm_config.speculative_config is not None
+        spec_config = impl.vllm_config.speculative_config
+        self.window_size = (
+            getattr(impl, "sliding_window", None)
+            if self.dcp_size == 1 and spec_config is not None and getattr(spec_config, "method", None) == "dspark"
+            else None
+        )
         self.cp_interleave = impl.vllm_config.parallel_config.cp_kv_cache_interleave_size if self.dcp_size > 1 else 1
         if adapter is None:
             adapter = FlashMLAImpl.load(
@@ -479,10 +524,16 @@ class FlashMLAMetadataBuilder:
             config=replace(adapter.config, num_heads=impl.num_heads * query_gather_size, mask_mode=0),
         )
         self.adapters = {True: history_adapter if self.dcp_size > 1 else adapter, False: history_adapter}
+        if self.window_size is not None:
+            self.adapters[False] = replace(
+                history_adapter,
+                config=replace(history_adapter.config, mask_mode=FLASHMLA_BAND_MASK, win_left=self.window_size - 1),
+            )
         self.device = device
         self.dtype = impl.dtype
         self.rope_dtype = getattr(getattr(impl.vllm_config, "model_config", None), "dtype", impl.dtype)
         self.use_rope = impl.use_mla_rope
+        self.rope_metadata_source = getattr(impl, "rope_metadata_source", None)
         self.max_num_reqs = max_num_reqs
         self.quant_max_cache_len = impl.vllm_config.model_config.max_model_len if impl.use_quant_flashmla else None
         # Use the parent's stable decode/speculative capacity for every graph
@@ -494,6 +545,7 @@ class FlashMLAMetadataBuilder:
             raise ValueError("QuantFlashMLA requires a positive per-request decode query capacity")
         self.buffers: dict[tuple, FlashMLADecode] = {}
         self.attn_mask = attn_mask
+        self.fuse_draft_metadata = HAS_TRITON and envs.VLLM_ASCEND_MISTRAL_FLASHMLA_METADATA_FUSION
 
     def _metadata_bounds(self, *, current: bool = False) -> dict[str, int]:
         max_cache_len = self.quant_max_cache_len
@@ -515,10 +567,25 @@ class FlashMLAMetadataBuilder:
         cu = torch.zeros(rows + 1, **ints)
         used = torch.zeros(rows, **ints)
         lengths = torch.zeros(rows, **ints)
+        draft_window = None
+        if not causal and self.window_size is not None:
+            # Include one partial page at the beginning of the window.
+            pages = (self.window_size + 2 * FLASHMLA_BLOCK_SIZE - 2) // FLASHMLA_BLOCK_SIZE
+            draft_window = FlashMLADraftWindow(
+                cu=torch.arange(tokens + 1, **ints),
+                used_q=torch.zeros(tokens, **ints),
+                cache_lens=torch.zeros(tokens, **ints),
+                block_table=torch.zeros((tokens, min(pages, columns)), **ints),
+            )
+        schedule_lens, schedule_cu, schedule_used = (
+            (draft_window.cache_lens, draft_window.cu, draft_window.used_q)
+            if draft_window is not None
+            else (lengths, cu, used)
+        )
         schedule_meta = adapter.build_metadata(
-            torch.empty_like(lengths, device="meta"),
-            torch.empty_like(cu, device="meta"),
-            torch.empty_like(used, device="meta"),
+            torch.empty_like(schedule_lens, device="meta"),
+            torch.empty_like(schedule_cu, device="meta"),
+            torch.empty_like(schedule_used, device="meta"),
             **self._metadata_bounds(),
         )
         rope_shape = (tokens, 1, 1, FLASHMLA_QK_DIM - FLASHMLA_V_DIM)
@@ -536,9 +603,10 @@ class FlashMLAMetadataBuilder:
             positions=torch.zeros(tokens, dtype=torch.int64, device=self.device),
             token_live=torch.zeros(tokens, dtype=torch.bool, device=self.device),
             live_boundaries=torch.zeros(tokens + 1, **ints),
-            attn_mask=self.attn_mask if adapter.config.mask_mode == 3 else None,
+            attn_mask=self.attn_mask if adapter.config.mask_mode != 0 else None,
             cos=torch.empty(rope_shape, dtype=self.rope_dtype, device=self.device) if self.use_rope else None,
             sin=torch.empty(rope_shape, dtype=self.rope_dtype, device=self.device) if self.use_rope else None,
+            draft_window=draft_window,
         )
         if self.dcp_size > 1 and causal and self.use_spec_decode:
             # As in split DCP attention, each rank retains every current row.
@@ -606,48 +674,66 @@ class FlashMLAMetadataBuilder:
                 flash = cached_flash
 
         def refresh():
-            # The extra zero-used request owns physical graph/SP padding.
-            flash.cu.fill_(tokens)
-            flash.cu[: num_decodes + 1].copy_(common.query_start_loc[: num_decodes + 1].clamp_max(num_decode_tokens))
-            flash.used_q.zero_()
-            flash.used_q[:num_decodes].copy_(flash.cu[1 : num_decodes + 1] - flash.cu[:num_decodes])
-            flash.used_q[:num_decodes].masked_fill_(common.seq_lens[:num_decodes] <= 0, 0)
-            flash.cache_lens.zero_()
-            lengths = common.seq_lens[:num_decodes]
-            if flash.current is not None:
-                # Remove the query globally before interleave-aware sharding.
-                # Ordinary decode and noncausal draft see the entire local sequence.
-                lengths = (lengths - flash.used_q[:num_decodes]).clamp_min(0)
-            if self.dcp_size > 1:
-                lengths = get_dcp_local_seq_lens(
-                    lengths,
-                    dcp_size=self.dcp_size,
-                    dcp_rank=self.dcp_rank_tensor,
-                    cp_kv_cache_interleave_size=self.cp_interleave,
+            fused = False
+            if self.fuse_draft_metadata and flash.draft_window is not None and not has_prefill:
+                from vllm_ascend.ops.triton.flashmla_draft_metadata import try_prepare_flashmla_draft
+
+                assert self.window_size is not None
+                fused = try_prepare_flashmla_draft(
+                    flash, common, num_decodes, num_decode_tokens, self.window_size, FLASHMLA_BLOCK_SIZE
                 )
-            flash.cache_lens[:num_decodes].copy_(lengths)
-            flash.cache_lens.masked_fill_(flash.used_q == 0, 0)
-            flash.block_table.zero_()
-            flash.block_table[:num_decodes].copy_(common.block_table_tensor[:num_decodes])
-            flash.slots.fill_(-1)
-            slots = common.slot_mapping[:num_decode_tokens]
-            flash.slots[: slots.numel()].copy_(slots)
-            flash.live_boundaries.zero_()
-            live = (flash.used_q > 0).to(torch.int32)
-            flash.live_boundaries.scatter_add_(0, flash.cu[:-1].long(), live)
-            flash.live_boundaries.scatter_add_(0, (flash.cu[:-1] + flash.used_q).long(), -live)
-            flash.token_live.copy_(flash.live_boundaries.cumsum(0)[:tokens] > 0)
-            flash.slots.masked_fill_(~flash.token_live, -1)
-            flash.positions.zero_()
-            positions = common.positions[:num_decode_tokens]
-            flash.positions[: positions.numel()].copy_(positions)
+            if not fused:
+                # The extra zero-used request owns physical graph/SP padding.
+                flash.cu.fill_(tokens)
+                flash.cu[: num_decodes + 1].copy_(
+                    common.query_start_loc[: num_decodes + 1].clamp_max(num_decode_tokens)
+                )
+                flash.used_q.zero_()
+                flash.used_q[:num_decodes].copy_(flash.cu[1 : num_decodes + 1] - flash.cu[:num_decodes])
+                flash.used_q[:num_decodes].masked_fill_(common.seq_lens[:num_decodes] <= 0, 0)
+                flash.cache_lens.zero_()
+                lengths = common.seq_lens[:num_decodes]
+                if flash.current is not None:
+                    # Remove the query globally before interleave-aware sharding.
+                    # Ordinary decode and noncausal draft see the entire local sequence.
+                    lengths = (lengths - flash.used_q[:num_decodes]).clamp_min(0)
+                if self.dcp_size > 1:
+                    lengths = get_dcp_local_seq_lens(
+                        lengths,
+                        dcp_size=self.dcp_size,
+                        dcp_rank=self.dcp_rank_tensor,
+                        cp_kv_cache_interleave_size=self.cp_interleave,
+                    )
+                flash.cache_lens[:num_decodes].copy_(lengths)
+                flash.cache_lens.masked_fill_(flash.used_q == 0, 0)
+                flash.block_table.zero_()
+                flash.block_table[:num_decodes].copy_(common.block_table_tensor[:num_decodes])
+                flash.slots.fill_(-1)
+                slots = common.slot_mapping[:num_decode_tokens]
+                flash.slots[: slots.numel()].copy_(slots)
+                flash.live_boundaries.zero_()
+                live = (flash.used_q > 0).to(torch.int32)
+                flash.live_boundaries.scatter_add_(0, flash.cu[:-1].long(), live)
+                flash.live_boundaries.scatter_add_(0, (flash.cu[:-1] + flash.used_q).long(), -live)
+                flash.token_live.copy_(flash.live_boundaries.cumsum(0)[:tokens] > 0)
+                flash.slots.masked_fill_(~flash.token_live, -1)
+                flash.positions.zero_()
+                positions = common.positions[:num_decode_tokens]
+                flash.positions[: positions.numel()].copy_(positions)
             if self.use_rope:
                 assert flash.cos is not None and flash.sin is not None
-                cos, sin = get_cos_and_sin_mla(flash.positions)
+                if self.rope_metadata_source is None:
+                    cos, sin = get_cos_and_sin_mla(flash.positions)
+                else:
+                    cos, sin = gather_mla_rope(self.rope_metadata_source.cos_sin_cache, flash.positions)
                 flash.cos.copy_(cos)
                 flash.sin.copy_(sin)
+            if flash.draft_window is not None and not fused:
+                assert self.window_size is not None
+                flash.draft_window.refresh(flash, self.window_size)
+            inputs = flash.draft_window or flash
             flash.schedule.copy_(
-                flash.adapter.build_metadata(flash.cache_lens, flash.cu, flash.used_q, **self._metadata_bounds())
+                flash.adapter.build_metadata(inputs.cache_lens, inputs.cu, inputs.used_q, **self._metadata_bounds())
             )
             if flash.current is not None:
                 current = flash.current

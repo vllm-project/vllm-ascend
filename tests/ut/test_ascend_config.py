@@ -2206,6 +2206,51 @@ class TestTopLevelSwitchTypeValidation(TestBase):
             self.assertFalse(enable_sp(vc))
 
     @_clean_up
+    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
+    def test_mistral_large4_flashcomm_enables_sp_independently_of_shared_expert_dp(self, mock_fix):
+        for dp_size in (1, 2):
+            for use_legacy_env in (False, True):
+                for shared_expert_dp in (False, True):
+                    with (
+                        self.subTest(dp_size=dp_size, legacy_env=use_legacy_env, shared_dp=shared_expert_dp),
+                        patch.dict(os.environ, {"VLLM_ASCEND_ENABLE_FLASHCOMM1": "1" if use_legacy_env else "0"}),
+                    ):
+                        clear_ascend_config()
+                        vc = VllmConfig()
+                        vc.model_config.hf_text_config.model_type = "mistral_large4"
+                        vc.parallel_config.enable_expert_parallel = True
+                        vc.parallel_config.tensor_parallel_size = 2
+                        vc.parallel_config.data_parallel_size = dp_size
+                        vc.parallel_config.all2all_backend = "allgather_reducescatter"
+                        vc.additional_config = {
+                            "enable_shared_expert_dp": shared_expert_dp,
+                            "enable_flashcomm1": not use_legacy_env,
+                        }
+
+                        config = init_ascend_config(vc)
+
+                        self.assertTrue(vc.parallel_config.use_sequence_parallel_moe)
+                        self.assertTrue(enable_sp(vc))
+                        self.assertEqual(vc.parallel_config.all2all_backend, "allgather_reducescatter")
+                        self.assertEqual(config.enable_shared_expert_dp, shared_expert_dp)
+
+    @_clean_up
+    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
+    def test_mistral_moe_sp_can_be_disabled_without_disabling_flashcomm(self, mock_fix):
+        vc = VllmConfig()
+        vc.model_config.hf_text_config.model_type = "mistral_large4"
+        vc.parallel_config.enable_expert_parallel = True
+        vc.parallel_config.tensor_parallel_size = 2
+        vc.parallel_config.all2all_backend = "allgather_reducescatter"
+        vc.additional_config = {"enable_flashcomm1": True, "enable_mistral_moe_sp": False}
+
+        config = init_ascend_config(vc)
+
+        self.assertFalse(config.enable_mistral_moe_sp)
+        self.assertTrue(vc.parallel_config.use_sequence_parallel_moe)
+        self.assertTrue(enable_sp(vc))
+
+    @_clean_up
     @patch("vllm_ascend.utils.model_uses_sfa_sparse", return_value=False)
     @patch("vllm_ascend.utils.enable_sp", return_value=True)
     @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
@@ -2251,9 +2296,18 @@ class TestTopLevelSwitchTypeValidation(TestBase):
     @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
     def test_sparse_sfa_user_input_is_derived_on_factory_path(self, mock_fix, mock_sparse):
         vc = VllmConfig()
-        # enable_sparse_sfa_c8 is derived from cache_dtype (see
-        # init_ascend_config): cache_dtype "fp8" makes it active.
         vc.cache_config.cache_dtype = "fp8"
+
+        config = init_ascend_config(vc)
+
+        self.assertTrue(config.enable_sparse_sfa_c8)
+
+    @_clean_up
+    @patch("vllm_ascend.utils.model_uses_sfa_sparse", return_value=True)
+    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
+    def test_mistral_fp8_ds_mla_uses_sparse_c8(self, mock_fix, mock_sparse):
+        vc = VllmConfig()
+        vc.cache_config.cache_dtype = "fp8_ds_mla"
 
         config = init_ascend_config(vc)
 

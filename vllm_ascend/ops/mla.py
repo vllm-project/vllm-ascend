@@ -21,6 +21,7 @@
 # limitations under the License.
 
 from collections.abc import Callable
+from typing import Any
 
 import torch
 from torch import nn
@@ -145,6 +146,31 @@ class AscendMultiHeadLatentAttention(MultiHeadLatentAttentionWrapper):
         if impl is not None and hasattr(impl, "skip_topk"):
             impl.skip_topk = self.__dict__["_skip_topk"]
 
+    # Keep these below the skip_topk setter: a property split across
+    # non-adjacent statements reads as a redefinition, which costs the setter
+    # above its pair and makes skip_topk look read-only at the __init__
+    # assignment.
+    @property
+    def impl(self) -> Any:
+        """Expose the wrapped backend through the upstream MLA contract."""
+        return self.mla_attn.impl
+
+    @property
+    def kv_cache(self) -> Any:
+        return self.mla_attn.kv_cache
+
+    @kv_cache.setter
+    def kv_cache(self, value: Any) -> None:
+        self.mla_attn.kv_cache = value
+
+    @property
+    def kv_cache_dtype(self) -> Any:
+        return self.mla_attn.kv_cache_dtype
+
+    @property
+    def _k_scale(self) -> Any:
+        return self.mla_attn._k_scale
+
     @property
     def topk_indices_buffer(self) -> torch.Tensor | None:
         impl = getattr(getattr(self, "mla_attn", None), "impl", None)
@@ -186,6 +212,8 @@ class AscendMultiHeadLatentAttention(MultiHeadLatentAttentionWrapper):
         skip_topk: bool = False,
         non_causal_multi_token_decode: bool = False,
         allow_short_prefill_indexer_scoring_skip: bool = False,
+        kv_sharing_target_layer_name: str | None = None,
+        sliding_window: int | None = None,
         # Upstream fuses the q_a/kv_a RMSNorms on the CUDA path. On Ascend the
         # whole MLA preprocess runs inside the attention impl, which receives
         # both layernorms as extra args, so this flag has no effect here and is
@@ -244,6 +272,8 @@ class AscendMultiHeadLatentAttention(MultiHeadLatentAttentionWrapper):
             skip_topk=skip_topk,
             topk_indices_buffer=getattr(mla_modules, "topk_indices_buffer", None),
             non_causal_multi_token_decode=non_causal_multi_token_decode,
+            kv_sharing_target_layer_name=kv_sharing_target_layer_name,
+            sliding_window=sliding_window,
             # extra args
             rotary_emb=mla_modules.rotary_emb,
             fused_qkv_a_proj=mla_modules.fused_qkv_a_proj,
@@ -258,6 +288,11 @@ class AscendMultiHeadLatentAttention(MultiHeadLatentAttentionWrapper):
             layer_name=f"{prefix}.attn",
             layer_quant_config=quant_config,
         )
+        # Some model-specific speculative decoders (for example Mistral
+        # DSpark) access the cache layer directly through the outer MLA
+        # wrapper. Keep the same public layer-name contract as the wrapped
+        # attention layer so KV-cache discovery resolves the registered key.
+        self.layer_name = self.mla_attn.layer_name
 
         # Fused preprocess (mlapo/prolog_v3) owns transpose+NZ for these
         # layers, so quant methods must skip their own NZ conversion.
@@ -293,12 +328,18 @@ class AscendMultiHeadLatentAttention(MultiHeadLatentAttentionWrapper):
         hidden_states: torch.Tensor,
         kv_cache: torch.Tensor | None = None,
         attn_metadata: AttentionMetadata | None = None,
+        # Per-step values for a model whose attention needs more than the
+        # generic contract carries; Mistral Large 4's scalable softmax is the
+        # one user. They go through the op rather than onto the impl so that a
+        # traced forward cannot hand the impl a previous step's tensor. A model
+        # that passes them must install a set_log_positions hook.
+        log_positions: torch.Tensor | None = None,
     ) -> torch.Tensor:
         hidden_dim = self.hidden_size
         num_output_tokens = (hidden_states.shape[0] + self.output_token_shard_size - 1) // self.output_token_shard_size
         output = torch.empty((num_output_tokens, hidden_dim), dtype=hidden_states.dtype, device=hidden_states.device)
 
-        torch.ops.vllm.mla_forward(hidden_states, output, self.prefix)
+        torch.ops.vllm.mla_forward(hidden_states, output, self.prefix, log_positions)
         output = output.view(-1, hidden_dim)
         return output
 
@@ -308,9 +349,25 @@ def mla_forward(
     hidden_states: torch.Tensor,
     output: torch.Tensor,
     layer_name: str,
+    log_positions: torch.Tensor | None = None,
 ) -> None:
     forward_context: ForwardContext = get_forward_context()
     self = forward_context.no_compile_layers[layer_name]
+    if log_positions is not None:
+        # Per-step values a model needs to hand the impl outside the generic
+        # attention contract. They are delivered here, from inside the op, and
+        # not by the model's forward, because that forward is traced: Dynamo
+        # replays a plain attribute write *after* the compiled graph has
+        # already called this op, so the impl would read the previous step's
+        # values. An explicit op input is also what makes the value survive
+        # cudagraph replay, since the capture holds a reference to this tensor
+        # and the graph refills it each step.
+        set_log_positions = getattr(self, "set_log_positions", None)
+        if set_log_positions is None:
+            raise RuntimeError(
+                f"{layer_name} was handed log_positions but installed no set_log_positions hook to receive them."
+            )
+        set_log_positions(log_positions)
     if forward_context.attn_metadata:
         attn_metadata = forward_context.attn_metadata[self.mla_attn.layer_name]
     else:
@@ -324,6 +381,7 @@ def mla_forward_fake(
     hidden_states: torch.Tensor,
     output: torch.Tensor,
     layer_name: str,
+    log_positions: torch.Tensor | None = None,
 ) -> None:
     return
 

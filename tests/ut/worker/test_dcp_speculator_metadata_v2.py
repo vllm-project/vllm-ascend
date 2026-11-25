@@ -119,6 +119,8 @@ def _speculator(monkeypatch, kind, architecture, width, padded, step, use_dcp=Tr
         is_prefilling_np=np.array([True, False]),
         seq_lens_cpu_upper_bound=target[:2],
     )
+    if kind == "dspark":
+        spec._num_draft_reqs = spec.input_batch.num_reqs
     # Deliberately different from the target CPU upper bound. DSpark's input
     # preparation has already applied rejection correction and query width;
     # its host metadata must copy this exact view without modifying either input.

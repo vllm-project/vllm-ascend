@@ -697,6 +697,8 @@ class AscendConfig:
     )
     enable_prefill_mc2: bool = False
     multistream_overlap_shared_expert: bool = False
+    # Isolate Mistral MoE SP while retaining FlashComm1 attention/norm SP.
+    enable_mistral_moe_sp: bool = True
     enable_kv_nz: bool = False
     kv_trace: KVTraceConfig = dataclasses.field(default_factory=KVTraceConfig)
     kv_pool_range_debug: bool = False
@@ -1034,7 +1036,15 @@ class AscendConfig:
         cache_config = getattr(vc, "cache_config", None)
         cache_dtype = getattr(cache_config, "cache_dtype", None)
         self.enable_sparse_sfa_turboquant = cache_dtype == "turboquant_4bit_nc" and use_sparse_sfa
-        self.enable_sparse_sfa_c8 = vllm_config.cache_config.cache_dtype in ["fp8", "int8"] and use_sparse_sfa
+        self.enable_sparse_sfa_c8 = (
+            vllm_config.cache_config.cache_dtype
+            in [
+                "fp8",
+                "int8",
+                "fp8_ds_mla",
+            ]
+            and use_sparse_sfa
+        )
         self.enable_sparse_li_c8 = vllm_config.attention_config.indexer_kv_dtype in ["fp8", "int8"] and use_sparse
         self.enable_sparse_li_c4 = vllm_config.attention_config.indexer_kv_dtype == "mxfp4" and use_sparse
         if self.enable_sparse_li_c8 and self.enable_sparse_li_c4:
