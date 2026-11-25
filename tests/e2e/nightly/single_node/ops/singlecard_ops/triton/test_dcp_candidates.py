@@ -128,11 +128,12 @@ def test_sorted_pack_preserves_score_bits_at_local_id_limit(dtype, world, rows):
 
 
 @pytest.mark.parametrize("sort_candidates,fuse_sort", [(False, False), (True, False), (True, True)])
-def test_pack_skips_empty_local_prefix_and_padding(sort_candidates, fuse_sort):
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
+def test_pack_skips_empty_local_prefix_and_padding(sort_candidates, fuse_sort, dtype):
     # All raw slots look valid, including the empty prefix between two live rows.
     rows, k = 128, 2048
     ids = torch.arange(k, dtype=torch.int32).repeat(rows, 1).view(rows, 1, k)
-    scores = (k - ids).float()
+    scores = (k - ids).to(dtype)
     visible = torch.zeros(rows, dtype=torch.int32)
     visible[[0, 2]] = k
     packed = pack_local_candidates(
@@ -147,7 +148,7 @@ def test_pack_skips_empty_local_prefix_and_padding(sort_candidates, fuse_sort):
     )
     live = visible[:, None] > 0
     expected_ids = torch.where(live, local_to_global(ids[:, 0], 8, 0, 768), -1)
-    expected_scores = torch.where(live, scores[:, 0], -torch.inf)
+    expected_scores = torch.where(live, scores[:, 0].float(), -torch.inf)
     assert torch.equal(packed.cpu(), torch.stack((expected_ids, expected_scores.view(torch.int32)), -1))
 
 

@@ -454,15 +454,16 @@ def test_qli_adaptive_topk_boundaries(topk, ratio, mode):
 
 
 @pytest.mark.parametrize(
-    "arch,enable_dcp",
+    "arch,enable_dcp,initialize_outputs",
     [
-        pytest.param(AscendDeviceType.A3, False, id="a3-int8"),
-        pytest.param(AscendDeviceType.A3, True, id="a3-int8-dcp"),
-        pytest.param(AscendDeviceType.A5, False, id="a5-fp8"),
+        pytest.param(AscendDeviceType.A3, False, True, id="a3-int8"),
+        pytest.param(AscendDeviceType.A3, True, True, id="a3-int8-dcp"),
+        pytest.param(AscendDeviceType.A3, True, False, id="a3-int8-dcp-skip-fill"),
+        pytest.param(AscendDeviceType.A5, False, True, id="950dt-fp8"),
     ],
 )
 @torch.inference_mode()
-def test_quant_lightning_indexer_v2_accuracy(arch, enable_dcp):
+def test_quant_lightning_indexer_v2_accuracy(arch, enable_dcp, initialize_outputs):
     """Compare paged QLI indices and scores with the operator's CPU formula."""
     if get_ascend_device_type() != arch:
         pytest.skip(f"requires {arch.name} NPU")
@@ -546,6 +547,7 @@ def test_quant_lightning_indexer_v2_accuracy(arch, enable_dcp):
         block_table=block_table,
         metadata=metadata,
         return_value=1,
+        initialize_outputs=initialize_outputs,
         **common,
         **dcp,
     )

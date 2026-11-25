@@ -1102,8 +1102,17 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
             if not self.enable_sparse_li_c8 or self.enable_sparse_li_c4:
                 raise NotImplementedError("Sharded Kimi indexer requires the native C8 QLI path.")
             cu_seqlens_q, seqused_k, qli_metadata = self._get_local_qli_inputs(indexer_metadata)
+            dcp_args = indexer_metadata.qli_dcp_args
+            if dcp_args is None and get_current_hardware_profile().supports(HardwareCapability.NATIVE_INT8_SPARSE):
+                group = get_dcp_group()
+                dcp_args = dict(
+                    global_seq_lens=indexer_metadata.seq_lens,
+                    cp_world=group.world_size,
+                    cp_rank=group.rank_in_group,
+                    cp_interleave=self._dcp_interleave,
+                )
             pack_visible_lengths = None
-            if indexer_metadata.qli_dcp_args is not None:
+            if dcp_args is not None:
                 visible = indexer_metadata.local_visible_lengths
                 rows = q_li_shape_ori[0]
                 if (
@@ -1126,24 +1135,7 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
                     qli_metadata=qli_metadata,
                     topk=self.topk_tokens,
                     initialize_outputs=pack_visible_lengths is None,
-                    **indexer_metadata.qli_dcp_args,
-                )
-            elif get_current_hardware_profile().supports(HardwareCapability.NATIVE_INT8_SPARSE):
-                indices, scores = DeviceOperator.indexer_select_dcp_candidates(
-                    q_li.view(*q_li_shape_ori),
-                    weights,
-                    self.k_cache.kv_cache[INDEXER_K_CACHE_SLOT],
-                    self.k_cache.kv_cache[INDEXER_SCALE_CACHE_SLOT],
-                    indexer_metadata.block_table,
-                    cu_seqlens_q,
-                    seqused_k,
-                    q_li_scale,
-                    global_seq_lens=indexer_metadata.seq_lens,
-                    cp_world=get_dcp_group().world_size,
-                    cp_rank=get_dcp_group().rank_in_group,
-                    cp_interleave=self._dcp_interleave,
-                    qli_metadata=qli_metadata,
-                    topk=self.topk_tokens,
+                    **dcp_args,
                 )
             else:
                 assert indexer_metadata.local_visible_lengths is not None
@@ -1777,12 +1769,14 @@ class AscendSFAIndexerMetadataBuilder(AttentionMetadataBuilder[AscendSFAIndexerM
                 global_dcp_num_blocks=None if counts is None else counts[group_idx],
             )
         elif self.use_sharded_dcp:
-            from vllm_ascend.ops.triton.sharded_indexer import build_local_key_lengths, build_local_lengths
+            from vllm_ascend.ops.triton.sharded_indexer import build_local_lengths
 
             group = get_dcp_group()
             interleave = self.vllm_config.parallel_config.cp_kv_cache_interleave_size
             visible_rows = num_input_tokens
-            if self.use_native_dcp_qli:
+            if self.use_native_dcp_qli or get_current_hardware_profile().supports(
+                HardwareCapability.NATIVE_INT8_SPARSE
+            ):
                 # A graph and its replay share this buffer. Refresh the full
                 # capture range so a smaller live batch cannot expose old rows.
                 max_capture = self.vllm_config.compilation_config.max_cudagraph_capture_size or 0
@@ -1809,25 +1803,18 @@ class AscendSFAIndexerMetadataBuilder(AttentionMetadataBuilder[AscendSFAIndexerM
                     cp_rank=group.rank_in_group,
                     cp_interleave=interleave,
                 )
-            if not self.use_native_dcp_qli and get_current_hardware_profile().supports(
-                HardwareCapability.NATIVE_INT8_SPARSE
-            ):
-                build_local_key_lengths(
-                    seq_lens, actual_seq_lengths_key, group.world_size, group.rank_in_group, interleave
-                )
-            else:
-                if visible_rows > visible_buffer.numel():
-                    raise ValueError(f"Sharded indexer row count {visible_rows} exceeds visible length capacity")
-                local_visible = visible_buffer[:visible_rows]
-                build_local_lengths(
-                    seq_lens,
-                    cum_query_lens,
-                    actual_seq_lengths_key,
-                    local_visible,
-                    group.world_size,
-                    group.rank_in_group,
-                    interleave,
-                )
+            if visible_rows > visible_buffer.numel():
+                raise ValueError(f"Sharded indexer row count {visible_rows} exceeds visible length capacity")
+            local_visible = visible_buffer[:visible_rows]
+            build_local_lengths(
+                seq_lens,
+                cum_query_lens,
+                actual_seq_lengths_key,
+                local_visible,
+                group.world_size,
+                group.rank_in_group,
+                interleave,
+            )
         if copy_rope:
             cos, sin = self._copy_rope_to_metadata_buffers(
                 cos,

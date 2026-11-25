@@ -31,7 +31,7 @@ from vllm.model_executor.layers.fused_moe.runner.moe_runner import _moe_forward_
 from vllm.utils.torch_utils import direct_register_custom_op
 
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX, MoECommType
-from vllm_ascend.device.hardware_profile import DeviceAdaptorFamily, get_current_hardware_profile
+from vllm_ascend.device.hardware_profile import DeviceAdaptorFamily, HardwareCapability, get_current_hardware_profile
 from vllm_ascend.distributed.parallel_state import get_mc2_group
 from vllm_ascend.ops.fused_moe.dataclass.shared_experts import PreparedSharedExpertInput, RoutedMoEMilestones
 from vllm_ascend.ops.fused_moe.moe_comm_method import get_moe_comm_method, setup_moe_comm_method
@@ -132,9 +132,12 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
 
         config = get_current_vllm_config_or_none()
         hf_config = getattr(getattr(config, "model_config", None), "hf_config", None)
-        self._use_single_pair_add = (
-            getattr(hf_config, "model_type", None) == "kimi_k31" or getattr(type(hf_config), "is_kimi_k31", False)
-        ) and get_current_hardware_profile().device_adaptor_family is DeviceAdaptorFamily.FP8_OPTIMIZED
+        if getattr(hf_config, "model_type", None) == "kimi_k31" or getattr(type(hf_config), "is_kimi_k31", False):
+            profile = get_current_hardware_profile()
+            self._use_single_pair_add = (
+                profile.supports(HardwareCapability.NATIVE_INT8_SPARSE)
+                or profile.device_adaptor_family is DeviceAdaptorFamily.FP8_OPTIMIZED
+            )
 
         self.quant_type = routed_experts.quant_type
         self.routed_experts.router = router
@@ -190,7 +193,7 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
         through the OOT PluggableLayer dispatch of ``MoERunner``).
 
         Upstream inlines the shared+routed output combine, which is not
-        exposed as an overridable hook. Kimi K3.1 on 950dt adds its single
+        exposed as an overridable hook. Kimi K3.1 on A3 and 950dt adds its single
         shared/routed tensor pair directly. Other combinations use the fused
         multi-tensor add kernel. The runtime-aware reduction hooks (#16550)
         still apply.
