@@ -798,6 +798,7 @@ class AscendSFAImpl(MLAAttentionImpl):
     understand this class
     """
 
+    _use_tilelang_decode = False
     _tilelang_decode = None
 
     # SFA consumes top-k indices itself and has no native dense-MHA entrypoint.
