@@ -1167,12 +1167,15 @@ class NPUModelRunner310V2(NPUModelRunner):
         """Build host-owned inputs, then patch decode tokens from NPU state."""
         draft_tokens_map = draft_tokens_map or {}
         num_reqs = idx_mapping_np.size
-        # Fast path for uniform MTP pure-decode batches: assemble
+        # Fast path for uniform greedy MTP pure-decode batches: assemble
         # [last_sampled_tokens, draft_tokens[:, :k]] directly on device,
         # avoiding 5 H2D index/zero copies and 2 ScatterUpdate kernels per step.
+        temp_np = getattr(getattr(self, "sampler", None), "_temperature_np", None)
+        greedy_only = temp_np is None or not bool(np.any(temp_np[idx_mapping_np] >= 1e-5))
         if (
             draft_tokens_map
             and num_reqs > 0
+            and greedy_only
             and not np.any(self.req_states.num_computed_tokens_np[idx_mapping_np] < prefill_len_np)
         ):
             first_drafts = draft_tokens_map.get(req_ids[0], ())

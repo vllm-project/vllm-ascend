@@ -37,6 +37,7 @@ from vllm_ascend._310p.worker.v2.spec_utils import (
     cached_offsets,
     copy_prefix_310p,
     get_async_mtp_state,
+    prepare_decode_inputs_cpu,
     set_async_mtp_state,
     set_draft_step_host,
     update_draft_inputs_cpu,
@@ -254,6 +255,27 @@ class AscendMTPSpeculator310(AscendTargetDependentARSpeculator, MTPSpeculator):
             if step > 0:
                 self._update_decode_attn_metadata(attn_metadata, step, num_reqs)
         return attn_metadata
+
+    def _prepare_decode_inputs(
+        self,
+        input_batch: Any,
+        num_rejected: torch.Tensor,
+        num_reqs: int,
+        skip_attn: bool,
+        batch_desc: Any,
+    ) -> None:
+        """Override upstream Triton _prepare_decode_inputs_kernel for 310P."""
+        del skip_attn, batch_desc
+        prepare_decode_inputs_cpu(
+            self.draft_tokens[:num_reqs, 0],
+            input_batch.seq_lens,
+            num_rejected,
+            self.input_buffers,
+            self.sample_src_positions,
+            self.max_model_len,
+            self.max_num_reqs,
+            self.advance_draft_positions,
+        )
 
     @staticmethod
     def _device_decode_slots(
