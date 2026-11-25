@@ -289,7 +289,10 @@ def test_sfa_indexer_pcp_maps_global_prefill_to_repeated_local_rows(mock_cos_sin
     common.seq_lens = torch.tensor([5, 6, 7, 0])
     common.block_table_tensor = torch.zeros((4, 2), dtype=torch.int32)
     common.pcp_context = SimpleNamespace(
-        global_batch=SimpleNamespace(is_prefilling_np=np.array([True, False])),
+        global_batch=SimpleNamespace(
+            is_prefilling_np=np.array([True, True]),
+            prefill_runs_as_decode_np=np.array([False, True]),
+        ),
         local_to_global_req_indices=(1, 0, 0),
     )
 

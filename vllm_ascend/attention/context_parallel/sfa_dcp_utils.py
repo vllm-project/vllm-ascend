@@ -9,6 +9,8 @@ from typing import TYPE_CHECKING, Any
 import torch
 from vllm.utils.math_utils import cdiv
 
+from vllm_ascend.attention.utils import apply_prefill_as_decode_mask
+
 if TYPE_CHECKING:
     from vllm_ascend.worker.v2.pcp_manager import AscendPCPAttentionContext
 
@@ -81,7 +83,10 @@ def project_pcp_prefill_flags(pcp_context: "AscendPCPAttentionContext | None") -
     """Project global prefill flags into local request order for SFA cache gathering."""
     if pcp_context is None or (local_rows := getattr(pcp_context, "local_to_global_req_indices", None)) is None:
         return None
-    global_flags = pcp_context.global_batch.is_prefilling_np
+    global_batch = pcp_context.global_batch
+    global_flags = apply_prefill_as_decode_mask(
+        global_batch.is_prefilling_np, getattr(global_batch, "prefill_runs_as_decode_np", None)
+    )
     if not global_flags.any():
         return None
 
