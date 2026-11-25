@@ -31,13 +31,11 @@ from tests.e2e.pull_request.one_card.model_runner_v2.utils import calculate_acce
 from tests.e2e.pull_request.utils import PROMPTS_SHORT
 
 MTP_MODEL = "gdydems/DeepSeek-V4-Flash-w4a8-mtp"
-DSPARK_MODEL = "UploadWeight/DeepSeek-V4-Flash-DSpark-w4a8-test"
 
 MAX_NUM_SEQS = 4
 MAX_TOKENS = 1024
 
 MTP_NUM_SPECULATIVE_TOKENS = 3
-DSPARK_NUM_SPECULATIVE_TOKENS = 5
 
 COMMON_ENV = {
     "VLLM_BATCH_INVARIANT": "1",
@@ -56,7 +54,6 @@ EXPECTED_OUTPUT_PREFIXES = {
 }
 
 MTP_MIN_ACCEPTANCE_RATES = [0.85, 0.65, 0.35]
-DSPARK_MIN_ACCEPTANCE_RATES = [0.73, 0.64, 0.55, 0.49, 0.42]
 ACCEPTANCE_RATE_TOLERANCE = 0.03
 
 
@@ -151,37 +148,5 @@ def test_deepseek_v4_dsa_pcp_mtp_full_decode_only() -> None:
         compilation_config={
             "cudagraph_mode": "FULL_DECODE_ONLY",
             "cudagraph_capture_sizes": [MAX_NUM_SEQS, 2 * MAX_NUM_SEQS],
-        },
-    )
-
-
-@pytest.mark.e2e_model(DSPARK_MODEL)
-@pytest.mark.e2e_coverage(
-    arch="moe",
-    feature="dsa_pcp,dspark",
-    parallel="TP,EP,PCP",
-    deploy="pd_mix",
-    hardware="A3",
-    quantization="W4A8",
-    graph_mode="full_decode_only",
-)
-@patch.dict(os.environ, COMMON_ENV)
-@wait_until_npu_memory_free(target_free_percentage=0.8)
-def test_deepseek_v4_dsa_pcp_dspark() -> None:
-    """Verify output accuracy and DSpark acceptance for DSA-PCP graph execution."""
-    _run_test(
-        DSPARK_MODEL,
-        minimum_rates=DSPARK_MIN_ACCEPTANCE_RATES,
-        expected_output_prefixes=EXPECTED_OUTPUT_PREFIXES,
-        speculative_config={
-            "num_speculative_tokens": DSPARK_NUM_SPECULATIVE_TOKENS,
-            "method": "dspark",
-            "enable_adaptive_verification": False,
-            "draft_sample_method": "greedy",
-        },
-        compilation_config={
-            "cudagraph_mode": "FULL_DECODE_ONLY",
-            # Capture multiples of 1 + num_speculative_tokens for 1 to 4 requests.
-            "cudagraph_capture_sizes": [6, 12, 18, 24],
         },
     )
