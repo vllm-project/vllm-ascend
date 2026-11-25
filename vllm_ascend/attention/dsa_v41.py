@@ -330,12 +330,6 @@ def scatter_cache_sk(
 
 
 def _packed_cache_ready(backend, *caches: torch.Tensor | None) -> bool:
-    """Return whether this attention call really owns packed cache tensors.
-
-    DSpark draft layers can inherit an A5/A3 backend while keeping standard
-    BF16 SWA caches.  They must stay on the scatter/fallback path instead of
-    receiving 608-byte INT8 records.
-    """
     if backend is None:
         return False
     if getattr(backend, "uses_a5_packed_cache", False):
@@ -971,17 +965,6 @@ class AscendDSAV41MetadataBuilder(AttentionMetadataBuilder[AscendDSAV41Metadata]
         self._device_metadata_tasks: tuple[DeviceMetadataTask, ...] = ()
 
     def _resolve_layer_compress_ratio(self) -> int:
-        """Return this cache group's layer compression ratio.
-
-        Reads ``compress_ratios`` directly instead of building the full
-        layer plan: ``role.compress_ratio`` is exactly
-        ``compress_ratios[layer_idx]`` across the backbone range.
-
-        The spec's ``tokens_per_state`` cannot be used instead -- a group
-        may hold long-KV, index-K and folded-index specs at once, and the
-        folded index rows report ``INDEX_FOLD_ROWS`` rather than the layer
-        ratio.
-        """
         config = self.vllm_config.model_config.hf_text_config
         ratios = tuple(config.compress_ratios)[: int(config.num_hidden_layers)]
         for name in self._v41_layer_names:
