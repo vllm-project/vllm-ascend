@@ -315,7 +315,7 @@ def builders(monkeypatch):
     for module in (dsa_v41, dsa_v41_cp):
         monkeypatch.setattr(module, "get_full_cos_and_sin_dsa_for_layer", lambda name: (full_cos, full_sin))
 
-    def make(world=2, rank=0, *, max_seqs=2, graph_sizes=(12, 24), dcp=1, decode_sharded=False):
+    def make(world=2, rank=0, *, max_seqs=2, graph_sizes=(12, 24), dcp=1, decode_sharded=False, bounded_replay=False):
         config = SimpleNamespace(
             parallel_config=SimpleNamespace(
                 tensor_parallel_size=1,
@@ -342,7 +342,7 @@ def builders(monkeypatch):
         )
         common = dict(block_size=8, num_kv_heads=1, head_size=2, dtype=torch.float32)
         specs = {
-            "swa": AscendSlidingWindowMLASpec(**common, sliding_window=4),
+            "swa": AscendSlidingWindowMLASpec(**common, sliding_window=4, bounded_replay=bounded_replay),
             "long_kv": AscendMLAAttentionSpec(**common, tokens_per_state=2),
             "index_k": AscendMLAAttentionSpec(**common, tokens_per_state=2, scale_dim=1),
             "compressor_state": CircularBufferSpec(**common, tokens_per_state=2),
@@ -545,6 +545,28 @@ def _build_planes(builders, batch):
 
 
 class TestPCPMetadata:
+    @pytest.mark.parametrize(
+        "scenario,mode,full_graph_mode,bounded_replay",
+        [
+            ("mixed", CUDAGraphMode.FULL_DECODE_ONLY, False, True),
+            ("decode", CUDAGraphMode.FULL_DECODE_ONLY, False, True),
+            ("prefill", CUDAGraphMode.FULL_DECODE_ONLY, True, True),
+            ("prefill", CUDAGraphMode.PIECEWISE, False, True),
+            ("prefill", CUDAGraphMode.FULL_DECODE_ONLY, False, False),
+        ],
+        ids=["mixed", "decode", "full-graph", "piecewise", "prefix-cacheable"],
+    )
+    def test_swa_direct_write_uses_baseline_for_other_batches(
+        self, builders, scenario, mode, full_graph_mode, bounded_replay
+    ):
+        batch = _batch(2, 0, scenario, decode_sharded=True)
+        builder = builders(specialized=True, decode_sharded=True, bounded_replay=bounded_replay)["swa"]
+        builder.vllm_config.compilation_config.cudagraph_mode = mode
+
+        metadata = builder.build(0, batch.local, full_graph_mode=full_graph_mode)
+
+        assert metadata.gathered_swa_slot_mapping is None
+
     def test_sharded_decode_graph_reuses_c2_buffers_and_masks_padding(self, builders):
         owners = builders(2, 1, specialized=True, decode_sharded=True)
         addresses = None
@@ -909,6 +931,46 @@ def runtime(builders, monkeypatch):
 
 
 class TestPCPBatchLifecycle:
+    @pytest.mark.parametrize("scenario", ["prefill", "empty"])
+    def test_swa_scatter_writes_all_gather_rows_without_restoring_order(self, builders, monkeypatch, scenario):
+        world, rank = 4, 3
+        batch = _batch(world, rank, scenario)
+        builder = builders(world, rank, specialized=True, bounded_replay=True)["swa"]
+        num_tokens = len(batch.positions)
+        global_slots = batch.context.global_slot_mappings[0, :num_tokens]
+        if scenario == "prefill":
+            global_slots[0] = -1
+        shared = {"common_v41_metadata": {}, "common_v41_batch_metadata": {}}
+        metadata = builder.build(0, batch.local, **shared)
+        second = builder.build(0, batch.local, **shared)
+        assert second.gathered_swa_slot_mapping is metadata.gathered_swa_slot_mapping
+
+        values = torch.arange(2 * num_tokens, dtype=torch.bfloat16).view(-1, 2)
+        gathered = values.new_full((world, batch.local.num_input_tokens, 2), 99)
+        for peer, indices in enumerate(batch.rows):
+            gathered[peer, : len(indices)] = values[indices]
+        gathered = gathered.flatten(0, 1)
+        all_gather = Mock(return_value=gathered)
+        monkeypatch.setattr(dsa_v41_cp, "get_pcp_group", lambda: SimpleNamespace(all_gather=all_gather))
+
+        cache = values.new_full((8, 8, 1, 2), -10)
+        attn = SimpleNamespace(dsa_attn=SimpleNamespace(swa_cache_layer=SimpleNamespace(kv_cache=cache)))
+        expected = cache.clone()
+        valid = global_slots >= 0
+        expected.view(-1, 2)[global_slots[valid]] = values[valid]
+
+        def scatter(cache, slots, updates):
+            assert updates is gathered
+            valid = slots[:, 0] >= 0
+            assert torch.all(slots[~valid] == -1)
+            cache[slots[valid, 0].long(), slots[valid, 1].long()] = updates[valid]
+
+        monkeypatch.setattr(torch.ops._C_ascend, "npu_scatter_nd_update_sk", scatter, raising=False)
+        dsa_v41_cp.AscendDSAV41PCPImpl._write_swa_cache(attn, metadata, values[batch.local_ids])
+
+        all_gather.assert_called_once()
+        torch.testing.assert_close(cache, expected, rtol=0, atol=0)
+
     @pytest.mark.parametrize("wrapped", [False, True])
     @pytest.mark.parametrize(
         "q_scheme,kv_scheme,quantizations",

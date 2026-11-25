@@ -8,6 +8,7 @@ from dataclasses import dataclass, fields
 from typing import Any, ClassVar
 
 import torch
+from vllm.config import CUDAGraphMode
 from vllm.distributed import get_pcp_group
 from vllm.forward_context import get_forward_context
 from vllm.v1.worker.gpu.pcp_manager import PCPManager
@@ -25,7 +26,11 @@ from vllm_ascend.attention.dsa_v41 import (
     AscendDSAV41MetadataBuilder,
 )
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata, is_pcp_enabled, uses_pcp_sharded_layout
-from vllm_ascend.core.kv_cache_interface import get_kv_cache_compression_ratio, get_storage_block_size
+from vllm_ascend.core.kv_cache_interface import (
+    get_kv_cache_compression_ratio,
+    get_storage_block_size,
+    is_prefix_cacheable,
+)
 from vllm_ascend.models.deepseek_v41.cache_config import STATE_RING_ROWS
 from vllm_ascend.ops.rope_dsv4 import get_cos_and_sin_dsa, get_full_cos_and_sin_dsa_for_layer
 from vllm_ascend.worker.device_metadata import DeviceMetadataStage, wait_for_device_metadata
@@ -227,6 +232,7 @@ class AscendDSAV41PCPMetadata(AscendDSAV41Metadata):
     # Maps scheduler token order to the rank-major gathered layout.
     hidden_restore_idx: torch.Tensor
     c2_metadata: V41PCPC2Metadata
+    gathered_swa_slot_mapping: torch.Tensor | None = None
 
     @classmethod
     def from_local_metadata(
@@ -236,6 +242,8 @@ class AscendDSAV41PCPMetadata(AscendDSAV41Metadata):
         local_num_tokens_after_padding: int,
         hidden_restore_idx: torch.Tensor,
         c2_metadata: V41PCPC2Metadata,
+        *,
+        gathered_swa_slot_mapping: torch.Tensor | None = None,
     ) -> "AscendDSAV41PCPMetadata":
         values = {field.name: getattr(local, field.name) for field in fields(AscendDSAV41Metadata)}
         values["global_metadata"] = global_metadata
@@ -244,6 +252,7 @@ class AscendDSAV41PCPMetadata(AscendDSAV41Metadata):
             local_num_tokens_after_padding=local_num_tokens_after_padding,
             hidden_restore_idx=hidden_restore_idx,
             c2_metadata=c2_metadata,
+            gathered_swa_slot_mapping=gathered_swa_slot_mapping,
         )
 
 
@@ -581,9 +590,34 @@ class AscendDSAV41PCPMetadataBuilder(_ReplicatedCacheMetadataBuilder):
 
         if not needs_global_metadata:
             return local_metadata
+        batch = pcp_context.global_batch
+        gathered_swa_slot_mapping = None
+        # Reordering writes is safe for private SWA pages with distinct slots.
+        if (
+            self._cache_kind == "swa"
+            and has_prefill
+            and not full_graph_mode
+            and not batch.is_dummy
+            and not self._uses_a5_packed_cache
+            and not is_prefix_cacheable(self.kv_cache_spec)
+            and self.vllm_config.compilation_config.cudagraph_mode in (
+                CUDAGraphMode.NONE,
+                CUDAGraphMode.FULL_DECODE_ONLY,
+            )
+            and batch.is_prefilling_np[: batch.num_reqs].all()
+        ):
+            slot_key = ("gathered_swa_slot_mapping", pcp_cache_group_idx)
+            gathered_swa_slot_mapping = shared.get(slot_key)
+            if gathered_swa_slot_mapping is None:
+                slots = global_metadata.slot_mapping[: batch.num_tokens]
+                num_gathered_rows = self._pcp_world_size * local_common.num_input_tokens
+                gathered_swa_slot_mapping = slots.new_full((num_gathered_rows, 2), -1)
+                # Move cache coordinates to the AllGather layout once per group.
+                # Rows absent from the restore map remain invalid for scatter.
+                gathered_swa_slot_mapping.index_copy_(0, pcp_context.hidden_restore_idx, slots)
+                shared[slot_key] = gathered_swa_slot_mapping
         c2_metadata = shared.get("c2_metadata")
         if c2_metadata is None:
-            batch = pcp_context.global_batch
             c2_metadata = build_v41_pcp_c2_metadata(
                 batch,
                 self._pcp_world_size,
@@ -598,7 +632,12 @@ class AscendDSAV41PCPMetadataBuilder(_ReplicatedCacheMetadataBuilder):
             )
             shared["c2_metadata"] = c2_metadata
         return AscendDSAV41PCPMetadata.from_local_metadata(
-            local_metadata, global_metadata, local_common.num_input_tokens, pcp_context.hidden_restore_idx, c2_metadata
+            local_metadata,
+            global_metadata,
+            local_common.num_input_tokens,
+            pcp_context.hidden_restore_idx,
+            c2_metadata,
+            gathered_swa_slot_mapping=gathered_swa_slot_mapping,
         )
 
 
@@ -652,11 +691,13 @@ class AscendDSAV41PCPImpl(_ReplicatedCacheImpl):
         return prepared
 
     @staticmethod
-    def _gather_cache_rows(rows, metadata):
+    def _gather_cache_rows(rows, metadata, *, restore_order=True):
         padded = rows.new_zeros((metadata.local_num_tokens_after_padding, *rows.shape[1:]))
         padded[: rows.shape[0]].copy_(rows)
         gathered = get_pcp_group().all_gather(padded, dim=0)
-        return torch.index_select(gathered, 0, metadata.hidden_restore_idx)
+        if restore_order:
+            return torch.index_select(gathered, 0, metadata.hidden_restore_idx)
+        return gathered
 
     def _compress_local_c2(self, attn, hidden_states, local_metadata, global_metadata):
         """Pool each local chunk with its predecessor, then update the persistent request rings."""
@@ -707,7 +748,11 @@ class AscendDSAV41PCPImpl(_ReplicatedCacheImpl):
     @staticmethod
     def _write_swa_cache(attn, metadata, value):
         if isinstance(metadata, AscendDSAV41PCPMetadata):
-            value = AscendDSAV41PCPImpl._gather_cache_rows(value, metadata)
+            slots = metadata.gathered_swa_slot_mapping
+            value = AscendDSAV41PCPImpl._gather_cache_rows(value, metadata, restore_order=slots is None)
+            if slots is not None:
+                v41.scatter_cache_sk(attn.dsa_attn.swa_cache_layer.kv_cache, slots, value)
+                return
             metadata = metadata.global_metadata
         AscendDSAV41Impl._write_swa_cache(attn, metadata, value)
 
