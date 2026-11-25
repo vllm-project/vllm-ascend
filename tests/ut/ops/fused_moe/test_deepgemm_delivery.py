@@ -109,6 +109,7 @@ def test_sdk_toolchain_is_scoped_to_build_and_recordable(tmp_path, monkeypatch):
     monkeypatch.delenv("CXX", raising=False)
     monkeypatch.setenv("CFLAGS", "-g1")
     monkeypatch.setenv("DG_JIT_CACHE_DIR", "/build-cache")
+    monkeypatch.setattr(builder.platform, "machine", lambda: "aarch64")
     monkeypatch.setattr(builder.shutil, "which", lambda name: None)
     monkeypatch.setattr(builder.Path, "is_file", lambda path: path == compiler)
     env = builder.native_build_env()
