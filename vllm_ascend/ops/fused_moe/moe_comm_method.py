@@ -412,9 +412,7 @@ class FusedMC2CommImpl(MoECommMethod):
                 1, int(self.token_dispatcher.global_bs // self.token_dispatcher.ep_world_size)
             )
         else:
-            num_max_tokens_per_rank = max(
-                1, int(getattr(self.token_dispatcher, "max_num_tokens_per_rank", 0))
-            )
+            num_max_tokens_per_rank = max(1, int(getattr(self.token_dispatcher, "max_num_tokens_per_rank", 0)))
         from cann_ops_transformer.ops import get_symm_buffer_for_mega_moe
 
         # The KFC context reserves a rank-invariant CCL buffer (2 GiB on A2)
