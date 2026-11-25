@@ -788,8 +788,7 @@ def _kimi_gdn_forward_ascend(
             lower_bound=self.gate_lower_bound,
         )
         valid = state_indices >= 0
-        if valid.any():
-            recurrent_state[state_indices[valid]] = final_state[valid]
+        recurrent_state[state_indices[valid]] = final_state[valid]
     else:
         core = run_recurrent_kda(
             q,

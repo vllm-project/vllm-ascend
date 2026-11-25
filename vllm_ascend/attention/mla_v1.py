@@ -1264,16 +1264,18 @@ class AscendMLAImpl(MLAAttentionImpl):
                 raise AssertionError(f"unexpected kv_b_proj weight rank {weight.dim()}")
             if scale.dim() == 2 and scale.shape[-1] == 1:
                 scale = scale.squeeze(-1)
+            scale_f32 = scale.to(device=weight.device, dtype=torch.float32)
+            weight_f32 = weight.to(torch.float32)
             if scale.numel() == weight.shape[0]:
-                dequantized = weight.to(torch.float32) * scale.reshape(-1, 1).to(torch.float32)
+                dequantized = weight_f32 * scale_f32.reshape(-1, 1)
             elif scale.numel() == weight.shape[1]:
-                dequantized = (weight.to(torch.float32) * scale.reshape(1, -1).to(torch.float32)).t()
+                dequantized = (weight_f32 * scale_f32.reshape(1, -1)).t()
             else:
                 raise AssertionError(
                     f"kv_b_proj weight/scale mismatch: weight {tuple(weight.shape)}, scale {tuple(scale.shape)}"
                 )
-            if dequantized.dtype not in (torch.bfloat16, torch.float16):
-                dequantized = dequantized.to(torch.bfloat16)
+            if dequantized.dtype != act_dtype:
+                dequantized = dequantized.to(act_dtype)
             kv_b_layer.weight = torch.nn.Parameter(dequantized.contiguous(), requires_grad=False)
             kv_b_layer.quant_method = UnquantizedLinearMethod()
         # NOTE: Weight will be reshaped next, we need to revert and transpose it.
