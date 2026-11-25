@@ -415,3 +415,32 @@ def test_a_layer_that_may_replay_warns_about_nothing():
         resolve_bounded_replay(_vllm_config(), _cache_config())
 
     warning.assert_not_called()
+
+
+# --- HIF8 C8 spec behavior -------------------------------------------------
+#
+# The hif8 flag changes the main cache's payload dtype (bf16 latents become
+# raw uint8 HIF8 bytes) without repacking the pages, so it must participate in
+# every group-geometry decision: a merged group must not alias HIF8 pages with
+# plain bf16 latent pages.
+
+
+def test_hif8_flag_disqualifies_single_raw_backing():
+    plain = _mla_spec()
+    assert plain.supports_single_raw_backing
+
+    hif8 = replace(_mla_spec(), cache_sparse_sfa_hif8=True)
+    assert not hif8.supports_single_raw_backing
+
+
+def test_hif8_and_plain_mla_specs_cannot_share_a_group():
+    plain = _mla_spec()
+    hif8 = replace(_mla_spec(), cache_sparse_sfa_hif8=True)
+    with pytest.raises(AssertionError, match="same Ascend KV cache layout"):
+        AscendMLAAttentionSpec.merge([plain, hif8])
+
+
+def test_uniform_hif8_group_merges_with_flag_preserved():
+    specs = [replace(_mla_spec(), cache_sparse_sfa_hif8=True) for _ in range(2)]
+    merged = AscendMLAAttentionSpec.merge(specs)
+    assert merged.cache_sparse_sfa_hif8

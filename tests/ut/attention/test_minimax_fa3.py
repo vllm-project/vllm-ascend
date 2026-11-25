@@ -143,6 +143,7 @@ def selection(monkeypatch, profiles):
         "_MINIMAX_M3_ARCHITECTURES": frozenset(
             {"MiniMaxM3SparseForCausalLM", "MiniMaxM3SparseForConditionalGeneration"}
         ),
+        "_uses_qwen_fa3": lambda _: False,
         "_validate_fa3_backend": lambda *args: False,
         "_validate_flash_attn_backend": lambda *args: False,
     }
