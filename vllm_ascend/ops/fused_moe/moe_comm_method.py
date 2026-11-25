@@ -297,7 +297,9 @@ class FusedMC2CommImpl(MoECommMethod):
         super().__init__(moe_config)
         self._mega_moe_hccl_state_stale = False
         self.enable_fused_mc2 = get_ascend_config().enable_fused_mc2
-        if self.enable_fused_mc2 == 1 and is_mega_moe_supported() and not self.uses_deepgemm:
+        if self.uses_deepgemm:
+            return
+        if self.enable_fused_mc2 == 1 and is_mega_moe_supported():
             self.mega_moe_symm_buffer = None
             self.get_symm_buffer_for_mega_moe, self.mega_moe = moe_utils.load_cann_mega_moe_ops()
             # TODO(ZT-AIA): Different CANN versions accept a different set of
@@ -340,8 +342,8 @@ class FusedMC2CommImpl(MoECommMethod):
 
     def _get_prepare_finalize(self):
         if self.uses_deepgemm:
-            # The kernel consumes local rows; DP padding would count fake routes.
-            return PrepareAndFinalizeWithAll2All(self.moe_config)
+            # The kernel consumes local rows, including zero rows on an idle rank.
+            return PrepareAndFinalizeWithAll2All(self.moe_config, local_only=True)
         return PrepareAndFinalizeWithMC2(self.moe_config)
 
     def prepare_hccl_teardown(self) -> bool:

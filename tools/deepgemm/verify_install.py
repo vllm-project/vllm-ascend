@@ -4,11 +4,12 @@
 
 from pathlib import Path
 
-from vllm_ascend.ops.fused_moe.deepgemm_loader import load_deepgemm
-
 
 def main() -> None:
-    package = load_deepgemm()
+    import torch_npu  # noqa: F401 -- initialize the extension dependencies
+
+    from vllm_ascend.third_party import deep_gemm as package
+
     package_dir = Path(package.__file__).resolve().parent
     import vllm_ascend
 

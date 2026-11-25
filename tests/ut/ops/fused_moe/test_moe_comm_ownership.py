@@ -5,6 +5,7 @@ from types import SimpleNamespace
 from unittest.mock import Mock
 
 import pytest
+import torch
 
 from vllm_ascend.ascend_forward_context import MoECommType
 from vllm_ascend.ops.fused_moe import moe_comm_method as comm
@@ -35,12 +36,14 @@ def test_model_snapshots_and_layer_lookup_survive_draft_registration(monkeypatch
 
 def test_deepgemm_uses_common_prepare_execute_finalize_contract(monkeypatch):
     prepare_finalize = Mock()
-    monkeypatch.setattr(comm, "PrepareAndFinalizeWithAll2All", lambda config: prepare_finalize)
+    make_prepare = Mock(return_value=prepare_finalize)
+    monkeypatch.setattr(comm, "PrepareAndFinalizeWithAll2All", make_prepare)
     monkeypatch.setattr(comm, "TokenDispatcherWithMC2", Mock)
     monkeypatch.setattr(comm, "get_ascend_config", lambda: SimpleNamespace(enable_fused_mc2=0))
     backend = comm.FusedMC2CommImpl(
         SimpleNamespace(deepgemm_mega_moe=True, swiglu_limit=None, swiglu_alpha=None, swiglu_beta=None)
     )
+    make_prepare.assert_called_once_with(backend.moe_config, local_only=True)
     tokens, logits, weights, ids, result = (object() for _ in range(5))
     layer = SimpleNamespace(_deepgemm_mega_moe=SimpleNamespace(apply=Mock(return_value=result)))
     backend.prepare(tokens, logits)
@@ -52,3 +55,17 @@ def test_deepgemm_uses_common_prepare_execute_finalize_contract(monkeypatch):
     prepare_finalize.finalize.assert_called_once_with(result, False, None)
     backend.pad_and_split_input_ids(ids)
     prepare_finalize.pad_and_split_input_ids.assert_called_once_with(ids)
+
+
+def test_local_prepare_preserves_an_empty_rank(monkeypatch):
+    from vllm_ascend.ops.fused_moe import prepare_finalize as pf
+
+    monkeypatch.setattr(pf, "get_tensor_model_parallel_world_size", lambda: 1)
+    monkeypatch.setattr(pf, "get_tensor_model_parallel_rank", lambda: 0)
+    monkeypatch.setattr(pf, "get_dynamic_mx_quant_scale_alg", lambda: 0)
+    local = pf.PrepareAndFinalizeWithAll2All(SimpleNamespace(), local_only=True)
+    tokens, logits, ids = torch.empty(0, 128), torch.empty(0, 16), torch.empty(0, dtype=torch.long)
+    prepared = local.prepare(tokens, logits)
+    assert prepared.hidden_states is tokens and prepared.router_logits is logits
+    assert local.pad_and_split_input_ids(ids) is ids
+    assert local.finalize(tokens, False) is tokens

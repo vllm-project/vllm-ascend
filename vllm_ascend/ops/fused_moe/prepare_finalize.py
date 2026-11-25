@@ -125,8 +125,9 @@ class PrepareAndFinalizeWithAll2All(PrepareAndFinalize):
     Will be used when num_tokens exceed mc2's limitation (512 tokens/rank).
     """
 
-    def __init__(self, moe_config: FusedMoEConfig):
+    def __init__(self, moe_config: FusedMoEConfig, *, local_only: bool = False):
         super().__init__(moe_config)
+        self.local_only = local_only
         self._restore_tp_across_dp()
 
     def _restore_tp_across_dp(self):
@@ -152,7 +153,8 @@ class PrepareAndFinalizeWithAll2All(PrepareAndFinalize):
         Returns:
             MoEPrepareOutput where `mc2_mask` is None for All2All path.
         """
-        self.replace_allreduce = replace_allreduce
+        # Native collectives accept the local tensor, including an empty rank.
+        self.replace_allreduce = replace_allreduce or self.local_only
 
         padded_hidden_states_shape = hidden_states.shape
         if not self.replace_allreduce:

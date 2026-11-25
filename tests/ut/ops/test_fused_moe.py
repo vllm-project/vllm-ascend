@@ -3185,7 +3185,6 @@ def test_deepgemm_runner_leaves_step_execution_to_the_backend(monkeypatch, with_
         assert runner.ascend_shared_experts is not None
         assert runner.routed_experts.return_with_event
     assert runner.moe_config.deepgemm_mega_moe
-    assert runner.routed_experts._deepgemm_mega_moe is None
     assert runner.routed_scaling_factor == 1.5
 
 

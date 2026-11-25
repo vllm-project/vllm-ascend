@@ -8,6 +8,12 @@ fused dispatch/GEMM/SwiGLU/combine operation, including the shared FP8 experts.
 Each EP rank owns a contiguous range of physical expert slots.
 """
 
+import importlib
+import os
+import sys
+from functools import cache
+from pathlib import Path
+
 import torch
 from vllm.config import get_current_vllm_config
 from vllm.distributed import get_ep_group, get_tensor_model_parallel_world_size
@@ -18,6 +24,32 @@ from vllm_ascend.utils import is_deepseek_v41
 
 # The pinned kernel launches this many Cube blocks and waits for all of them.
 _DEEPGEMM_CUBE_CORES = 32
+
+
+_BUNDLED = "vllm_ascend.third_party.deep_gemm"
+
+
+@cache
+def load_deepgemm():
+    """Load once per worker; the build pins the native API and JIT headers."""
+    import torch_npu  # noqa: F401 -- load NPU shared libraries before the extension
+    from vllm import envs as vllm_envs
+
+    # Both forks register global pybind11 types. Do not load two extensions
+    # into one process, even if the other package also targets NPU.
+    if "deep_gemm" in sys.modules:
+        raise RuntimeError("An external deep_gemm is already loaded; MegaMoE requires the bundled Ascend backend")
+    os.environ.setdefault("DG_JIT_CACHE_DIR", str(Path(vllm_envs.VLLM_CACHE_ROOT) / "deep_gemm" / "ascend"))
+    try:
+        module = importlib.import_module(_BUNDLED)
+    except ModuleNotFoundError as exc:
+        if exc.name is None or not _BUNDLED.startswith(exc.name):
+            raise
+        raise RuntimeError(
+            "NPU MegaMoE was not built. Reinstall vLLM Ascend with its Ascend 950 native backend."
+        ) from exc
+    logger.info("Loaded bundled NPU DeepGEMM %s from %s", module.__version__, module.__file__)
+    return module
 
 
 def deepgemm_device_supported(group):
@@ -50,9 +82,6 @@ class DeepGemmExperts:
     """One layer's weights over process-group-owned symmetric scratch."""
 
     def __init__(self, layer):
-        # Import in workers only; the dependency owns native NPU state.
-        from vllm_ascend.ops.fused_moe.deepgemm_loader import load_deepgemm
-
         config = get_current_vllm_config()
         text = config.model_config.hf_text_config
         if not (

@@ -54,7 +54,7 @@ def context():
 
     dependency.SymmBuffer.side_effect = buffer
     with (
-        patch("vllm_ascend.ops.fused_moe.deepgemm_loader.load_deepgemm", return_value=dependency),
+        patch.object(backend, "load_deepgemm", return_value=dependency),
         patch.object(torch, "npu", SimpleNamespace(synchronize=MagicMock()), create=True),
         patch.object(torch.distributed, "barrier"),
     ):
@@ -163,7 +163,7 @@ def test_unsupported_config_fails_before_weight_conversion(context, mode):
     if mode == "lora":
         config.lora_config = object()
     with (
-        patch("vllm_ascend.ops.fused_moe.deepgemm_loader.load_deepgemm") as load,
+        patch.object(backend, "load_deepgemm") as load,
         pytest.raises(ValueError),
     ):
         backend.DeepGemmExperts(item)

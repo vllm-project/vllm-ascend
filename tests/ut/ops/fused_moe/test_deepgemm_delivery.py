@@ -24,7 +24,7 @@ def load_file(name, path):
 
 @pytest.fixture
 def loader(tmp_path, monkeypatch):
-    module = load_file("test_loader", ROOT / "vllm_ascend/ops/fused_moe/deepgemm_loader.py")
+    module = load_file("test_loader", ROOT / "vllm_ascend/ops/fused_moe/deepgemm_mega_moe.py")
     monkeypatch.setitem(sys.modules, "vllm", SimpleNamespace(envs=SimpleNamespace(VLLM_CACHE_ROOT=str(tmp_path))))
     monkeypatch.setitem(sys.modules, "torch_npu", SimpleNamespace())
     monkeypatch.delitem(sys.modules, "deep_gemm", raising=False)

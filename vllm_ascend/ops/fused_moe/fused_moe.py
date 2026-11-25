@@ -189,7 +189,6 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
                 ):
                     raise ValueError("DeepGEMM shared and routed experts must use the same input without a gate")
                 self.moe_config.deepgemm_mega_moe = True
-                routed_experts._deepgemm_mega_moe = None
                 if shared_experts is not None:
                     routed_experts._deepgemm_mega_moe_shared_experts = weakref.ref(shared_experts)
         self.ascend_shared_experts = None
