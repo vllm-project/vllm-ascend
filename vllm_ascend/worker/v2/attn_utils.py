@@ -344,7 +344,7 @@ def initialize_kernel_block_table_buffers(
 def _prepare_qsa_step_metadata(
     attn_metadata: dict[str, Any],
     qsa_main_builders: list[tuple[list[str], Any]],
-    num_actual_tokens: int,
+    rows: int,
 ) -> None:
     """Prepare cross-layer QSA metadata once while inputs are being built."""
     from vllm_ascend.models.qwen4_exp.attention_dispatch import prepare_qsa_union_batches
@@ -368,10 +368,6 @@ def _prepare_qsa_step_metadata(
             continue
         if id(main_metadata) in prepared_metadata_ids:
             continue
-        rows = min(
-            num_actual_tokens,
-            int(getattr(compressed_metadata, "qsa_num_live_tokens", num_actual_tokens)),
-        )
         device = compressed_metadata.seq_lens.device
         max_tokens = builder.vllm_config.scheduler_config.max_num_batched_tokens
         signature = (device, max_tokens)
@@ -673,10 +669,6 @@ def build_attn_metadata(
                         common_attn_metadata=variant_common,
                         **attn_metadata_extra_kwargs,
                     )
-                if isinstance(attn_metadata_builder, QSAMetadataBuilder):
-                    # Preserve live prefixes for graph-padded inputs without
-                    # reading device lengths back on the host.
-                    metadata.qsa_num_live_tokens = int(variant_common.query_start_loc_cpu[num_actual_reqs])
                 if is_dsa_builder:
                     # Preserve sharing even if a builder replaces one of the
                     # dictionaries while constructing its metadata.
@@ -687,7 +679,7 @@ def build_attn_metadata(
         _prepare_qsa_step_metadata(
             attn_metadata,
             qsa_main_builders,
-            num_actual_tokens,
+            min(num_actual_tokens, int(query_start_loc_cpu[num_actual_reqs])),
         )
     return attn_metadata
 
