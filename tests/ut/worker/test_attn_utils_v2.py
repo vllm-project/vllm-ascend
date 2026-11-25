@@ -236,9 +236,8 @@ def test_batch_global_mamba_gdn_groups_reuse_during_capture_and_replay(for_captu
         num_accepted_tokens=torch.tensor([2, 3], dtype=torch.int32),
         num_decode_draft_tokens_cpu=torch.tensor([3, 3], dtype=torch.int32),
     )
-    provider = kwargs["model_specific_attn_metadata"]
-    extra_inputs = MagicMock(wraps=provider.get_extra_attn_kwargs)
-    monkeypatch.setattr(provider, "get_extra_attn_kwargs", extra_inputs)
+    extra_inputs = MagicMock(wraps=MambaHybridAttnMetadata.get_extra_attn_kwargs)
+    monkeypatch.setattr(MambaHybridAttnMetadata, "get_extra_attn_kwargs", lambda *args: extra_inputs(*args))
     visited_groups = []
 
     def record_group(group_id, common):
@@ -314,12 +313,11 @@ def test_gdn_provider_changes_preserve_capture_contract(shared_capture):
 )
 def test_gdn_reuse_keeps_different_group_semantics_separate(difference):
     builders, kwargs = _make_gdn_reuse_inputs(2)
-    if difference in ("disabled", "spec_width", "cache_mode", "pcp"):
-        kwargs["model_specific_attn_metadata"] = MambaHybridAttnMetadata(
-            is_prefilling=torch.zeros(2, dtype=torch.bool),
-            num_accepted_tokens=torch.ones(2, dtype=torch.int32),
-            num_decode_draft_tokens_cpu=torch.full((2,), 3, dtype=torch.int32),
-        )
+    kwargs["model_specific_attn_metadata"] = MambaHybridAttnMetadata(
+        is_prefilling=torch.zeros(2, dtype=torch.bool),
+        num_accepted_tokens=torch.ones(2, dtype=torch.int32),
+        num_decode_draft_tokens_cpu=torch.full((2,), 3, dtype=torch.int32),
+    )
     if difference == "disabled":
         builders[1].supports_update_block_table = False
     elif difference == "spec_width":
