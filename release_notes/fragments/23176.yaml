@@ -1,0 +1,4 @@
+pr: 23176
+entries:
+  - category: performance
+    text: On Ascend 950, eager inference with MXFP8 KV cache runs single-token decode and multi-token prefill attention separately in eligible mixed batches when speculative decoding is disabled.
