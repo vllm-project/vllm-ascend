@@ -1,0 +1,8 @@
+pr: 23223
+entries:
+  - category: other
+    text: >-
+      The recompute scheduler now warns when a new request without KV transfer
+      parameters is scheduled on a decode-only node. The warning includes the
+      request ID, DP rank, and prompt length to help diagnose local prefill and
+      potential communication hangs when cross-DP synchronization is skipped.
