@@ -294,7 +294,9 @@ class AscendStoreCoordinator:
             # Whole-page lookup uses apply_eagle=False and trims the final
             # block in the scheduler. Applying Core's replay drop here too
             # moves sparse SWA saves one LCM below the lookup boundary.
-            reachable_boundaries = (max(0, num_prompt_tokens - 1),)
+            # Also retain Core's lower boundary for callers doing the drop
+            # themselves; the two read entry points must both be recoverable.
+            reachable_boundaries = tuple(sorted({*reachable_boundaries, max(0, num_prompt_tokens - 1)}))
         masks: list[tuple[int, list[bool] | None]] = []
         for group_id, spec in enumerate(self.group_effective_specs):
             if group_id not in self.cacheable_group_ids:

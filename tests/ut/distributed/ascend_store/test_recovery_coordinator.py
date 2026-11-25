@@ -413,7 +413,8 @@ def test_store_mask_retention_interval_zero_eagle_keeps_lookup_tail():
     # num_prompt=100 -> boundary 64 -> chunks 7, 8 (8 is the EAGLE peek).
     masks = coord.store_mask(96, num_prompt_tokens=100)
     assert masks[0] == [True] * 3
-    assert masks[1] == [i in (7, 8) for i in range(12)]
+    # Whole-page external lookup does not drop: keep its tail at 96 too.
+    assert masks[1] == [i in (7, 8, 11) for i in range(12)]
     # Aligned num_prompt=96 -> boundaries 32 (resend) and 64 (longer sibling).
     masks = coord.store_mask(96, num_prompt_tokens=96)
     assert masks[1] == [i in (3, 4, 7, 8) for i in range(12)]
