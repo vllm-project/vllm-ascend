@@ -16,6 +16,7 @@ from vllm.v1.kv_cache_interface import (
     CircularBufferSpec,
     FullAttentionSpec,
     KVCacheSpec,
+    KVCacheTensor,
     MambaSpec,
     MLAAttentionSpec,
     SlidingWindowMLASpec,
@@ -23,6 +24,14 @@ from vllm.v1.kv_cache_interface import (
     UniformTypeKVCacheSpecs,
 )
 from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry
+
+
+@dataclass(kw_only=True)
+class AlignedKVCacheTensor(KVCacheTensor):
+    """Allocator padding carried explicitly through copies of the base descriptor."""
+
+    logical_size: int
+    alignment: int
 
 
 def get_kv_cache_compression_ratio(kv_cache_spec: KVCacheSpec) -> int:
@@ -181,10 +190,11 @@ def supports_component_major_mla_pd(vllm_config: VllmConfig) -> bool:
     if getattr(kv_transfer_config, "kv_connector_module_path", None) is not None:
         return False
 
-    return getattr(kv_transfer_config, "kv_connector", None) in {
-        "MooncakeConnectorV2",
-        "MooncakePullConnector",
-    }
+    connector_name = getattr(kv_transfer_config, "kv_connector", None)
+    if connector_name == "MooncakeConnectorV2":
+        extra_config = getattr(kv_transfer_config, "kv_connector_extra_config", {})
+        return not extra_config.get("use_layerwise", False)
+    return connector_name == "MooncakePullConnector"
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -209,6 +219,13 @@ class AscendMLAAttentionSpec(MLAAttentionSpec):
     # indexer spec.
     cache_sparse_sfa_c8: bool = False
     cache_sparse_sfa_turboquant: bool = False
+    # HIF8 C8 (Ascend 950PR/950DT) marks layers whose latent KV cache is
+    # per-tensor-quantized to HIF8 with a static scale. Unlike C8/TQ above it
+    # does NOT repack the cache: the geometry stays the plain MLA latent
+    # layout (kv_lora_rank bytes per token, no embedded scale, empty RoPE
+    # view for NoPE models); only the payload dtype becomes uint8 HIF8
+    # bytes. The flag exists for group-merge uniformity checks.
+    cache_sparse_sfa_hif8: bool = False
     store_on_host: bool = False
     # Ascend kernels consume padded pages through an explicit physical block
     # stride. vLLM main removed this field from AttentionSpec, but it remains
@@ -238,6 +255,7 @@ class AscendMLAAttentionSpec(MLAAttentionSpec):
             and self.model_version is None
             and not self.indexes_kv_by_block_stride
             and not self.cache_sparse_sfa_c8
+            and not self.cache_sparse_sfa_hif8
         )
 
     @property
@@ -266,6 +284,7 @@ class AscendMLAAttentionSpec(MLAAttentionSpec):
                 spec.scale_dtype,
                 spec.cache_sparse_sfa_c8,
                 spec.cache_sparse_sfa_turboquant,
+                spec.cache_sparse_sfa_hif8,
                 spec.store_on_host,
                 spec.alignment,
                 get_kv_cache_compression_ratio(spec),
@@ -291,6 +310,7 @@ class AscendMLAAttentionSpec(MLAAttentionSpec):
             alignment=first_spec.alignment,
             cache_sparse_sfa_c8=first_spec.cache_sparse_sfa_c8,
             cache_sparse_sfa_turboquant=first_spec.cache_sparse_sfa_turboquant,
+            cache_sparse_sfa_hif8=first_spec.cache_sparse_sfa_hif8,
             store_on_host=first_spec.store_on_host,
             indexes_kv_by_block_stride=first_spec.indexes_kv_by_block_stride,
             # A merged mixed group must remain in the target lookup. Per-layer
@@ -358,9 +378,6 @@ class AscendSFAIndexerCacheSpec(MLAAttentionSpec):
         assert all(isinstance(spec, AscendSFAIndexerCacheSpec) for spec in specs), (
             "All attention layers in the same KV cache group must be AscendSFAIndexerCacheSpec."
         )
-        cache_dtype_str_set = set(spec.cache_dtype_str for spec in specs)
-        dtype_set = set(spec.dtype for spec in specs)
-        max_tp_shards_set = {spec.max_tp_shards for spec in specs}
         scale_dim_set = set(spec.scale_dim for spec in specs)
         scale_dtype_set = set(spec.scale_dtype for spec in specs)
         cache_sparse_li_c8_set = set(spec.cache_sparse_li_c8 for spec in specs)
@@ -368,10 +385,7 @@ class AscendSFAIndexerCacheSpec(MLAAttentionSpec):
         sfa_dcp_replicated_indexer_size_set = set(spec.sfa_dcp_replicated_indexer_size for spec in specs)
         assert len({spec.dcp_sharded for spec in specs}) == 1
         assert (
-            len(cache_dtype_str_set) == 1
-            and len(dtype_set) == 1
-            and len(max_tp_shards_set) == 1
-            and len(scale_dim_set) == 1
+            len(scale_dim_set) == 1
             and len(scale_dtype_set) == 1
             and len(cache_sparse_li_c8_set) == 1
             and len(cache_sparse_li_c4_set) == 1
@@ -381,14 +395,10 @@ class AscendSFAIndexerCacheSpec(MLAAttentionSpec):
             "the same dtype, scale layout, quantization method, LI quant flags "
             "and DCP replication size."
         )
-        return cls(
-            block_size=specs[0].block_size,
-            dcp_sharded=specs[0].dcp_sharded,
-            num_kv_heads=specs[0].num_kv_heads,
-            head_size=specs[0].head_size,
-            dtype=dtype_set.pop(),
-            max_tp_shards=max_tp_shards_set.pop(),
-            cache_dtype_str=cache_dtype_str_set.pop(),
+        # Preserve Core's role, padding and stride alignment, and reuse its
+        # standard-field validation before restoring the Ascend-only fields.
+        return replace(
+            super().merge(specs),
             scale_dim=scale_dim_set.pop(),
             scale_dtype=scale_dtype_set.pop(),
             cache_sparse_li_c8=cache_sparse_li_c8_set.pop(),

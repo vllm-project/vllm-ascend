@@ -25,8 +25,7 @@ Two concerns, one module (both are transport-layer, no config knowledge):
 Task-bus pattern (last-PP TP broadcast **wave-head**):
 
 1. **One** source-owned ``broadcast([wave_idx, due_0, due_1, …])`` from TP0 —
-   ask which lanes have work (``sync_due_bits_from_src``; the symmetric
-   ``all_reduce`` variant stays for the single-lane path)
+   ask which lanes have work (``broadcast_due_bits_from_src``)
 2. For each due lane → its own ``broadcast_object`` (config and dump stay
    separate)
 
@@ -244,62 +243,36 @@ def _group_rank(group: Any, src: int = 0) -> int:
         ) from None
 
 
-def _cpu_gate(group: Any) -> Any | None:
+def _require_cpu_group(group: Any) -> Any:
+    """Return ``group.cpu_group`` for due-bit collectives (Gloo / CPU tensors).
+
+    vLLM ``GroupCoordinator`` always builds ``cpu_group``. There is no
+    ``device_group`` / HCCL fallback — NPU would contend with forward.
+    """
     gate = getattr(group, "cpu_group", None)
     if gate is None:
-        gate = getattr(group, "device_group", None)
+        raise RuntimeError(
+            "[runtime_config] due-bit collective requires group.cpu_group (Gloo/CPU); device_group/HCCL is not used"
+        )
     return gate
 
 
-def sync_due_bits(group: Any, due_locals: Sequence[bool]) -> list[bool]:
-    """Agree on a due bit-vector via ``all_reduce(MAX)``.
-
-    All ranks in ``group`` must call with the same vector length. When ``group``
-    is missing or world_size<=1, returns the local bits unchanged.
-    """
-    bits = [bool(x) for x in due_locals]
-    if not bits:
-        return []
-    if group is None or int(getattr(group, "world_size", 1) or 1) <= 1:
-        return bits
-
-    import torch
-
-    gate = _cpu_gate(group)
-    if gate is None:
-        return bits
-
-    # HCCL device_group only accepts NPU tensors; Gloo cpu_group accepts CPU.
-    device = "npu" if gate == getattr(group, "device_group", None) else "cpu"
-    due_t = torch.tensor(
-        [1.0 if b else 0.0 for b in bits],
-        dtype=torch.float32,
-        device=device,
-    )
-    torch.distributed.all_reduce(
-        due_t,
-        op=torch.distributed.ReduceOp.MAX,
-        group=gate,
-    )
-    return [float(due_t[i].item()) >= 0.5 for i in range(len(bits))]
-
-
-def sync_due_bits_from_src(
+def broadcast_due_bits_from_src(
     group: Any,
     due_locals: Sequence[bool],
     *,
     wave_idx: int | None = None,
 ) -> list[bool]:
-    """Agree on a due bit-vector via one ``broadcast`` from rank 0 of ``group``.
+    """Agree on a due bit-vector via one CPU/Gloo ``broadcast`` from rank 0.
 
-    Same per-wave merged-bus contract as :func:`sync_due_bits`, but bits are
-    computed once by ``rank_in_group == 0`` and pushed to peers (dump jobs and
-    periodic config reload are source-owned). Empirically this removes the
-    wave-tail drain tax seen with a symmetric ``all_reduce`` under TP CPU
+    Bits are computed once by ``rank_in_group == 0`` and pushed to peers (dump
+    jobs and periodic config reload are source-owned). Empirically this removes
+    the wave-tail drain tax seen with a symmetric ``all_reduce`` under TP CPU
     phase drift (C2 hot path); peers must still enter the collective.
 
     ``wave_idx`` rides in the payload and is asserted on receivers so a rank
     that skipped a wave fails fast instead of consuming a crossed payload.
+    Requires ``group.cpu_group`` (no HCCL/NPU path).
     """
     bits = [bool(x) for x in due_locals]
     if not bits:
@@ -309,13 +282,8 @@ def sync_due_bits_from_src(
 
     import torch
 
-    gate = _cpu_gate(group)
-    if gate is None:
-        return bits
-
-    # HCCL device_group only accepts NPU tensors; Gloo cpu_group accepts CPU.
-    device = "npu" if gate == getattr(group, "device_group", None) else "cpu"
-    payload = torch.zeros(len(bits) + 1, dtype=torch.float32, device=device)
+    gate = _require_cpu_group(group)
+    payload = torch.zeros(len(bits) + 1, dtype=torch.float32, device="cpu")
     if _group_rank(group, 0) == 0:
         payload[0] = float(int(wave_idx) % _WAVE_IDX_MOD) if wave_idx is not None else -1.0
         for i, b in enumerate(bits):
@@ -347,9 +315,8 @@ def broadcast_when_due(
 ) -> Any | None:
     """If ``due``, ``broadcast_object`` from ``src``; else return ``None``.
 
-    All ranks must pass the same agreed ``due`` (from
-    :func:`sync_due_bits_from_src` on the merged bus, or :func:`sync_due_bits`
-    on the single-lane path).
+    All ranks must pass the same agreed ``due`` from
+    :func:`broadcast_due_bits_from_src`.
     """
     if not due:
         return None
@@ -367,26 +334,3 @@ def broadcast_when_due(
     # Do not swallow broadcast failures: peers that already entered the
     # collective would hang if this rank returned early.
     return group.broadcast_object(src_obj, src=src)
-
-
-def sync_task_bus(
-    group: Any,
-    *,
-    due_local: bool,
-    payload: Any = None,
-    build_payload: Callable[[], Any] | None = None,
-    src: int = 0,
-) -> Any | None:
-    """Single-lane bus: one due bit → optional one broadcast.
-
-    Used when only dump (or only config) participates — e.g. PP>1 file mode
-    dump drain on the last-PP TP group.
-    """
-    due = sync_due_bits(group, [due_local])[0]
-    return broadcast_when_due(
-        group,
-        due=due,
-        payload=payload,
-        build_payload=build_payload,
-        src=src,
-    )

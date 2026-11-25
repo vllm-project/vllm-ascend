@@ -1,0 +1,8 @@
+pr: 22485
+entries:
+  - category: bugfix
+    text: >-
+      DeepSeek V4.1 serving with DSpark no longer reserves an unused hidden-state
+      buffer, leaving more device memory available for KV cache. No configuration
+      changes are required.
+    model: deepseek-v4.1

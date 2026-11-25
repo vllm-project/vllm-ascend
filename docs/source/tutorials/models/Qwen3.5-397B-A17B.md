@@ -48,15 +48,17 @@ It is recommended to download the model weights to a shared directory across mul
 
 ### 3.2 Verify Multi-node Communication
 
-For multi-node deployment, verify inter-node connectivity by following [Verify Multi-node Communication](../../getting_started/installation.md#installation-multi-node-interconnect).
+For multi-node deployment, verify inter-node connectivity by following [Verify Multi-node Communication Environment](../../getting_started/installation.md#installation-multi-node-interconnect).
 
 Use mutually reachable service IPs on all nodes. In the scripts below, `local_ip` must belong to `nic_name`.
 
-For 950DT PD deployment, prepare the [Mooncake communication environment](../features/pd_disaggregation_mooncake_multi_node.md) and mount the required host-specific communication resources into each serving container. When `ascend_local_comm_res_path=/etc/hixlep` is set, ensure that `/etc/hixlep` contains the configuration required for that host.
+For 950DT PD deployment, prepare the communication environment in [Prefill-Decode Disaggregation](../features/pd_disaggregation_mooncake_multi_node.md) and mount the required host-specific communication resources into each serving container. When `ascend_local_comm_res_path=/etc/hixlep` is set, ensure that `/etc/hixlep` contains the configuration required for that host.
 
 ## 4 Installation
 
 ### 4.1 Docker Image Installation
+
+{% include "getting_started/installation/ascend_docker_runtime.inc.md" %}
 
 Select an image for your hardware and start a container on each node. Refer to [Using Docker](../../getting_started/installation.md#installation-prebuilt-image) for details.
 
@@ -81,30 +83,16 @@ sysctl kernel.sched_migration_cost_ns=50000
     export NAME=vllm-ascend
 
     docker run --rm \
+      -e ASCEND_VISIBLE_DEVICES=0-7 \
       --name $NAME \
       --net=host \
       --shm-size=64g \
       --ulimit memlock=-1 \
-      --device /dev/davinci0 \
-      --device /dev/davinci1 \
-      --device /dev/davinci2 \
-      --device /dev/davinci3 \
-      --device /dev/davinci4 \
-      --device /dev/davinci5 \
-      --device /dev/davinci6 \
-      --device /dev/davinci7 \
-      --device /dev/davinci_manager \
-      --device /dev/hisi_hdc \
-      --device /dev/ummu \
-      --device /dev/uburma \
       -v /usr/local/Ascend/driver:/usr/local/Ascend/driver \
-      -v /etc/ascend_install.info:/etc/ascend_install.info \
       -v /etc/hccl_rootinfo.json:/etc/hccl_rootinfo.json \
       -v /etc/hixlep/:/etc/hixlep/ \
       -v /root/.cache:/root/.cache \
       -v /usr/local/sbin:/usr/local/sbin \
-      -v /usr/local/dcmi:/usr/local/dcmi \
-      -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
       -v /usr/local/sbin/npu-smi:/usr/local/sbin/npu-smi \
       -itd $IMAGE bash
     ```
@@ -120,35 +108,12 @@ sysctl kernel.sched_migration_cost_ns=50000
     export NAME=vllm-ascend
 
     docker run --rm \
+      -e ASCEND_VISIBLE_DEVICES=0-15 \
       --name $NAME \
       --net=host \
       --shm-size=64g \
       --ulimit memlock=-1 \
-      --device /dev/davinci0 \
-      --device /dev/davinci1 \
-      --device /dev/davinci2 \
-      --device /dev/davinci3 \
-      --device /dev/davinci4 \
-      --device /dev/davinci5 \
-      --device /dev/davinci6 \
-      --device /dev/davinci7 \
-      --device /dev/davinci8 \
-      --device /dev/davinci9 \
-      --device /dev/davinci10 \
-      --device /dev/davinci11 \
-      --device /dev/davinci12 \
-      --device /dev/davinci13 \
-      --device /dev/davinci14 \
-      --device /dev/davinci15 \
-      --device /dev/davinci_manager \
-      --device /dev/devmm_svm \
-      --device /dev/hisi_hdc \
-      -v /usr/local/dcmi:/usr/local/dcmi \
       -v /usr/local/Ascend/driver/tools/hccn_tool:/usr/local/Ascend/driver/tools/hccn_tool \
-      -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
-      -v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
-      -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
-      -v /etc/ascend_install.info:/etc/ascend_install.info \
       -v /root/.cache:/root/.cache \
       -it $IMAGE bash
     ```
@@ -162,34 +127,19 @@ sysctl kernel.sched_migration_cost_ns=50000
     export NAME=vllm-ascend
 
     docker run --rm \
+      -e ASCEND_VISIBLE_DEVICES=0-7 \
       --name $NAME \
       --net=host \
       --shm-size=64g \
       --ulimit memlock=-1 \
-      --device /dev/davinci0 \
-      --device /dev/davinci1 \
-      --device /dev/davinci2 \
-      --device /dev/davinci3 \
-      --device /dev/davinci4 \
-      --device /dev/davinci5 \
-      --device /dev/davinci6 \
-      --device /dev/davinci7 \
-      --device /dev/davinci_manager \
-      --device /dev/devmm_svm \
-      --device /dev/hisi_hdc \
-      -v /usr/local/dcmi:/usr/local/dcmi \
       -v /usr/local/Ascend/driver/tools/hccn_tool:/usr/local/Ascend/driver/tools/hccn_tool \
-      -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
-      -v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
-      -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
-      -v /etc/ascend_install.info:/etc/ascend_install.info \
       -v /root/.cache:/root/.cache \
       -it $IMAGE bash
     ```
 
 !!! note
 
-    `--shm-size=64g` is recommended for the documented 397B long-context deployment recipes. Use both sufficient shared memory and an unlimited memlock setting: a 1g shared memory or the default 64 MB locked-memory limit is too small, and worker startup and memory profiling can fail with `torch.OutOfMemoryError` / `aclrtMallocHostWithCfg error 207001` (host memory allocation failure) and HCCL link setup can time out. If the container runtime does not permit `--ulimit memlock=-1`, configure the host/runtime policy or grant the minimum required capability. Increasing `--shm-size` alone does not remove the memlock limit.
+    `--shm-size=64g` is recommended for the documented 397B long-context deployment recipes. Use both sufficient shared memory and an unlimited memlock setting: a 1 GB shared memory or the default 64 MB locked-memory limit is too small, and worker startup and memory profiling can fail with `torch.OutOfMemoryError` / `aclrtMallocHostWithCfg error 207001` (host memory allocation failure) and HCCL link setup can time out. If the container runtime does not permit `--ulimit memlock=-1`, configure the host/runtime policy or grant the minimum required capability. Increasing `--shm-size` alone does not remove the memlock limit.
 
     The CPU governor and `sysctl` tuning commands must run on the host before starting the container; see the host preparation block at the top of this section. Do not run them inside the serving container, where `/sys` and `/proc/sys` are read-only.
 
@@ -223,7 +173,7 @@ If you want to deploy a multi-node service, set up the same environment on each 
 
 ### 4.2 Source Code Installation
 
-You can also build and install `vllm-ascend` from source. Refer to [set up using python](../../getting_started/installation.md#installation-existing-cann-install).
+You can also build and install `vllm-ascend` from source. Refer to [set up using Python](../../getting_started/installation.md#installation-existing-cann-install).
 
 If you want to deploy a multi-node service, install the same version of vLLM and vLLM-Ascend on each node.
 
@@ -377,7 +327,7 @@ vllm serve Eco-Tech/Qwen3.5-397B-A17B-w8a8-mtp \
   --additional-config '{"enable_cpu_binding":true, "multistream_overlap_shared_expert": true}'
 ```
 
-Common Issues Tip: If node 1 cannot join the service or HCCL initialization times out, refer to [verify multi-node communication environment](../../getting_started/installation.md#installation-multi-node-interconnect) and [FAQs](../../faqs.md). Make sure the network interface names, IP addresses, and RPC ports are consistent across nodes.
+Common Issues Tip: If node 1 cannot join the service or HCCL initialization times out, refer to [Verify Multi-node Communication Environment](../../getting_started/installation.md#installation-multi-node-interconnect) and [Public FAQs](../../faqs.md). Make sure the network interface names, IP addresses, and RPC ports are consistent across nodes.
 
 Run the following script on node 1.
 
@@ -471,7 +421,7 @@ The 16 NPUs are divided into two non-overlapping device sets:
 
 Prefill and Decode use the same service NIC and IP because they run on the same host, but they use different HTTP and Mooncake ports. The Decode launcher creates two local DP engines, each with TP4. Do not start a second copy of the Decode command.
 
-We recommend using Mooncake for deployment. Refer to [Mooncake](../features/pd_disaggregation_mooncake_multi_node.md) for the general PD disaggregation workflow. This example uses `MooncakeConnectorV1` with the standard Pull proxy in [Section 5.7](#57-request-forwarding).
+We recommend using Mooncake for deployment. Refer to [Prefill-Decode Disaggregation](../features/pd_disaggregation_mooncake_multi_node.md) for the general PD disaggregation workflow. This example uses `MooncakeConnectorV1` with the standard Pull proxy in [Section 5.7](#57-request-forwarding).
 
 #### 5.4.1 Prefill Service Group
 
@@ -572,7 +522,7 @@ bash run_p.sh
 
 If the Prefill service starts successfully, information similar to the following example is displayed:
 
-```text
+```output
 INFO:     Started server process [44610]
 INFO:     Waiting for application startup.
 INFO:     Application startup complete.
@@ -683,7 +633,7 @@ bash run_d.sh
 
 If the Decode service starts successfully, information similar to the following example is displayed:
 
-```text
+```output
 INFO:     Started server process [44611]
 INFO:     Waiting for application startup.
 INFO:     Application startup complete.
@@ -841,7 +791,7 @@ bash run_p.sh
 
 If the Prefill service starts successfully, information similar to the following example is displayed:
 
-```text
+```output
 INFO:     Started server process [44610]
 INFO:     Waiting for application startup.
 INFO:     Application startup complete.
@@ -953,7 +903,7 @@ bash run_d.sh
 
 If the Decode service starts successfully, information similar to the following example is displayed:
 
-```text
+```output
 INFO:     Started server process [44611]
 INFO:     Waiting for application startup.
 INFO:     Application startup complete.
@@ -992,7 +942,7 @@ C8 KV cache is part of this performance recipe, not just a model-name convention
 
 - Use the same compatible W4A8C8 checkpoint revision, tokenizer, chat template, quantization metadata, and `--kv-cache-dtype mxfp8` on P and D.
 - Use `MooncakeConnectorV2` and the standard Pull proxy in [Section 5.7](#57-request-forwarding).
-- Use a v0.30.0 MRv1 build containing [the MXFP8 KV-scale fix #19017](https://github.com/vllm-project/vllm-ascend/pull/19017), merged into `releases/v0.30.0` as `14c6c3f43`, or a build with an equivalent verified fix.
+- Use a v0.30.0 MRv1 build containing the MXFP8 KV-scale fix in [#19017](https://github.com/vllm-project/vllm-ascend/pull/19017), merged into `releases/v0.30.0` as `14c6c3f43`, or a build with an equivalent verified fix.
 - Keep `VLLM_USE_V2_MODEL_RUNNER=0`, the P DP1/TP8 and D DP2/TP4 topology, and the connector topology consistent.
 - Keep MTP settings identical on P and D. To run an MTP-off comparison, remove `--speculative-config` from both commands.
 - Prefix caching and asynchronous scheduling are enabled on both nodes for this performance case.
@@ -1007,7 +957,7 @@ Use the standard Pull proxy with Prefill port 30060 and Decode port 30050. Start
 
 PD disaggregation separates Prefill and Decode into different service groups. Prefill nodes process large prompt chunks, Decode nodes serve token generation, and a proxy forwards requests between them. These examples demonstrate how to tune prefill and decode resource ratios.
 
-We recommend using Mooncake for deployment. Refer to [Mooncake](../features/pd_disaggregation_mooncake_multi_node.md) for the general PD disaggregation workflow.
+We recommend using Mooncake for deployment. Refer to [Prefill-Decode Disaggregation](../features/pd_disaggregation_mooncake_multi_node.md) for the general PD disaggregation workflow.
 
 For Atlas 800I A2 (64 GB x 8), we recommend deploying 1P1D with 2 nodes for `Qwen3.5-397B-A17B-w4a8-mtp`:
 
@@ -1153,7 +1103,7 @@ Common Issues Tip: If the decode node fails to initialize, check that `--tensor-
 - `kv_connector_extra_config.prefill.dp_size/tp_size` and `decode.dp_size/tp_size` must match the actual global DP and TP layout.
 - `--compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}'` is recommended on the decode node to reduce decode dispatch overhead.
 
-Run the two scripts on their respective hosts after filling in each host's NIC and IP. The examples use seven argument positions: visible devices, HTTP port, global DP size, DP rank, DP master address, DP RPC port, and TP size. P reads only positions 1–3 and 7; positions 4–6 are unused and retained for invocation compatibility. D uses all seven positions; its argument 5 is the D host's service IP. Use DP1/TP8 to match the fixed KV topology; changing topology also requires updating the connector JSON and device allocation. Set the A2 proxy's `--prefiller-ports` and `--decoder-ports` in [Section 5.6.3](#563-proxy) to the HTTP ports passed as argument 2 to the respective scripts.
+Run the two scripts on their respective hosts after filling in each host's NIC and IP. The examples use seven argument positions: visible devices, HTTP port, global DP size, DP rank, DP master address, DP RPC port, and TP size. P reads only positions 1-3 and 7; positions 4-6 are unused and retained for invocation compatibility. D uses all seven positions; its argument 5 is the D host's service IP. Use DP1/TP8 to match the fixed KV topology; changing topology also requires updating the connector JSON and device allocation. Set the A2 proxy's `--prefiller-ports` and `--decoder-ports` in [Section 5.6.3](#563-proxy) to the HTTP ports passed as argument 2 to the respective scripts.
 
 Prefill uses the self-contained DP1 mode and therefore does not set the DP address or RPC port. Decode explicitly sets `--data-parallel-rank`, so the launcher also supplies its DP control-plane address and RPC port. In this DP1/rank0 example, the Decode address points to the Decode host itself. The Prefill and Decode services are separate vLLM instances and do not share a DP group. Do not mistake the DP RPC port for the HTTP port; the proxy always uses the HTTP ports (argument 2), never the DP RPC port.
 
@@ -1195,16 +1145,16 @@ Use the proxy paired with the actual connector, rather than choosing it by hardw
 
 | Connector | Request Order | Proxy | Scope |
 |-----------|---------------|-------|-------|
-| `MooncakeConnectorV1` | Proxy calls P, then D; D pulls KV | `load_balance_proxy_server_example.py` | A3 and A2 PD recipes in [Section 5.4](#54-prefill-decode-disaggregation-a3) and [Section 5.6](#56-prefill-decode-disaggregation-a2) |
-| `MooncakeConnectorV2` | Proxy calls P, then D; D pulls KV | `load_balance_proxy_server_example.py` | 950DT W4A8C8 unequal-TP recipe in [Section 5.5](#55-prefill-decode-disaggregation-950dt-products) |
+| `MooncakeConnectorV1` | Proxy calls P, then D; D pulls KV. | `load_balance_proxy_server_example.py` | A3 and A2 PD recipes in [Section 5.4](#54-prefill-decode-disaggregation-a3) and [Section 5.6](#56-prefill-decode-disaggregation-a2) |
+| `MooncakeConnectorV2` | Proxy calls P, then D; D pulls KV. | `load_balance_proxy_server_example.py` | 950DT W4A8C8 unequal-TP recipe in [Section 5.5](#55-prefill-decode-disaggregation-950dt-products) |
 
 Equal TP sizes do not make these connectors interchangeable. For unequal TP, verify the direction, divisibility, replicated KV heads, hybrid state layout, and quantization support of the selected implementation. The TP8-to-TP4 example does not imply arbitrary TP ratios or reverse-direction support. Use scripts from the same vLLM-Ascend revision as the serving stack.
 
 Use the complete proxy command for the selected deployment:
 
-- [A3 single-host 1P1D](#543-proxy): P and D use the same service IP and different HTTP ports.
-- [950DT two-host 1P1D](#553-proxy): P and D use their respective high-speed service IPs; the D backend is HTTP port `30050`.
-- [A2 two-host 1P1D](#563-proxy): P and D use their respective service IPs and the HTTP ports passed to the launcher scripts.
+- A3 single-host 1P1D in [Section 5.4.3](#543-proxy): P and D use the same service IP and different HTTP ports.
+- 950DT two-host 1P1D in [Section 5.5.3](#553-proxy): P and D use their respective high-speed service IPs; the D backend is HTTP port `30050`.
+- A2 two-host 1P1D in [Section 5.6.3](#563-proxy): P and D use their respective service IPs and the HTTP ports passed to the launcher scripts.
 
 Do not use a DP RPC port or Mooncake KV-transfer port as a proxy backend. If requests reach the proxy but return no output, verify the P and D `/health` endpoints from the proxy host, confirm that the configured backend addresses exactly match each service's `--host` and HTTP port, and then run the end-to-end checks in [Section 6](#6-functional-verification).
 
@@ -1238,7 +1188,7 @@ Expected result: the HTTP status is 200 and the JSON response contains nonempty,
 
 To enable tool calling, append the following options to the `vllm serve` command. For PD deployment, add them to both the Prefill and Decode commands and restart both services.
 
-```text
+```bash
 --enable-auto-tool-choice --tool-call-parser qwen3_coder --reasoning-parser qwen3
 ```
 
@@ -1349,7 +1299,7 @@ Refer to [vllm benchmark](https://docs.vllm.ai/en/latest/benchmarking/) for more
 
 The table summarizes the deployment examples in [Section 5](#5-online-service-deployment--5-online-service-deployment-). Follow the linked scripts for the complete configuration, and tune the values for your workload. NPUs are allocated to the listed role on each host; the A3 PD roles share one host with 8 NPUs each. DP is shown as global/local. `Max Num Seqs` and `Max Num Batched Tokens` apply to each DP group.
 
-| Deployment Example | Node Role | NPUs | TP | DP (global/local) | Max Model Len | Max Num Seqs | Max Num Batched Tokens | MTP Tokens | Prefix Cache |
+| Deployment Example | Node Role | NPUs | TP | DP (global/local) | Max Model Len | Max Num Seqs | Max Num Batched Tokens | MTPs | Prefix Cache |
 | ------------------ | --------- | ---- | -- | ----------------- | ------------- | ------------ | ---------------------- | ---------- | ------------ |
 | [5.1 A3 single node](#51-single-node-online-deployment) | Mixed | 16 | 16 | 1/1 | 133000 | 128 | 16384 | 3 | On |
 | [5.1 950DT single node](#51-single-node-online-deployment) | Mixed | 8 | 8 | 1/1 | 133000 | 128 | 8192 | 3 | On |
@@ -1381,7 +1331,7 @@ Use the settings in the selected deployment script as a starting point. Merge th
 | Fused MC2 | `enable_fused_mc2` | `1`: dispatch-FFN-combine; `2`: CANN MegaMoe with matching operators. `0` disables fusion. The A3 PD performance case uses `2`; the 950DT W4A8C8 and A2 PD examples use `0` or do not enable it. |
 | MoE sequence parallelism | `enable_flashcomm1=true` | Requires `--enable-expert-parallel` and TP greater than 1. |
 | Shared expert data parallelism | `enable_shared_expert_dp=true` | Enabled on both P and D in [Section 5.4](#54-prefill-decode-disaggregation-a3) and [Section 5.5](#55-prefill-decode-disaggregation-950dt-products), and on Prefill in [Section 5.6](#56-prefill-decode-disaggregation-a2). Requires EP and TP greater than 1; increases weight memory usage. |
-| Shared expert overlap | `multistream_overlap_shared_expert=true` | Used by the [MP example](#52-multi-node-deployment-with-mp-recommended). |
+| Shared expert overlap | `multistream_overlap_shared_expert=true` | See [Section 5.2](#52-multi-node-deployment-with-mp-recommended) for multi-node deployment with MP. |
 | Recompute scheduler | `scheduler_config.recompute_scheduler_enable=true` | Enabled on PD Decode, where `kv_role=kv_consumer`; keep it nested under `scheduler_config`. |
 | CPU binding | `enable_cpu_binding=true` | Explicitly enabled in the single-node, MP, A3 PD, and 950DT W4A8C8 PD scripts. |
 
@@ -1399,7 +1349,7 @@ Verify connectivity using [Section 3.2](#32-verify-multi-node-communication). Se
 
 ### Q3: Can I enable prefix caching in PD disaggregation?
 
-The [A3 PD](#54-prefill-decode-disaggregation-a3), [950DT W4A8C8 PD](#55-prefill-decode-disaggregation-950dt-products), and [A2 PD](#56-prefill-decode-disaggregation-a2) examples enable prefix caching. When changing this setting, compare cached and uncached outputs, request completion, and cache reuse with the same connector and software version.
+The [5.4 A3 PD](#54-prefill-decode-disaggregation-a3), [5.5 950DT W4A8C8 PD](#55-prefill-decode-disaggregation-950dt-products), and [5.6 A2 PD](#56-prefill-decode-disaggregation-a2) examples enable prefix caching. When changing this setting, compare cached and uncached outputs, request completion, and cache reuse with the same connector and software version.
 
 ### Q4: Why does performance regress after enabling sequence parallelism or Fused MC2?
 
@@ -1419,4 +1369,4 @@ Inspect predictions for empty responses, truncated outputs, and answer-extractio
 
 ### Q8: Why do HIXL/Mooncake connections time out after the HTTP service starts?
 
-HTTP readiness does not verify KV transfer. Check P/D service IPs, NICs, routes, physical NPU IDs, communication resource mounts, and KV ports using [Section 3.2](#32-verify-multi-node-communication) and the [Mooncake deployment guide](../features/pd_disaggregation_mooncake_multi_node.md). Ensure both nodes use matching runtime environments. After correcting the configuration, restart both services and send a request through the proxy as described in [Section 6](#6-functional-verification).
+HTTP readiness does not verify KV transfer. Check P/D service IPs, NICs, routes, physical NPU IDs, communication resource mounts, and KV ports using [Section 3.2](#32-verify-multi-node-communication) and the [Prefill-Decode Disaggregation](../features/pd_disaggregation_mooncake_multi_node.md). Ensure both nodes use matching runtime environments. After correcting the configuration, restart both services and send a request through the proxy as described in [Section 6](#6-functional-verification).

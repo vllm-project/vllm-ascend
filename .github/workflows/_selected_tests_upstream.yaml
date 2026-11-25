@@ -78,7 +78,7 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  UV_EXTRA_INDEX_URL: "https://mirrors.huaweicloud.com/ascend/repos/pypi https://mirrors.huaweicloud.com/ascend/repos/pypi/nightly https://download.pytorch.org/whl/cpu/"
+  UV_EXTRA_INDEX_URL: "https://repo.huaweicloud.com/ascend/repos/pypi https://repo.huaweicloud.com/ascend/repos/pypi/nightly https://download.pytorch.org/whl/cpu/"
   UV_INDEX_STRATEGY: unsafe-best-match
   UV_HTTP_TIMEOUT: 120
   UV_NO_CACHE: 1
@@ -229,7 +229,7 @@ jobs:
           - name: Install FLA NPU for A2 upstream tests
             run: |
               set -euo pipefail
-              uv pip install --no-deps flash-linear-attention-npu-a2===26.9.1
+              uv pip install --no-deps flash-linear-attention-npu-a2===26.10.0+feature
               python3 -c "import fla_npu.ops.ascendc"
 
           - name: Run vllm-project/vllm test

@@ -37,13 +37,13 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.base impor
     Backend,
     parse_qos_from_extra_config,
 )
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.layerwise_keys import LayerwiseKeyBuilder
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.memcache_backend import (
     MemcacheBackend,
     MmcDirect,
     _inject_device_ub_qos,
     _validate_device_ub_qos,
     make_full_key,
-    make_hit_check_keys,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.mooncake_backend import (
     DEFAULT_TENANT_ID,
@@ -60,6 +60,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.mooncake_b
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.yuanrong_backend import (
     YuanrongConfig,
 )
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.buffer import BufferDescriptor, MemoryLocation
 
 
 def _format_log_call(call):
@@ -588,6 +589,50 @@ class TestMooncakeBackendSetup(unittest.TestCase):
                 self.assertNotIn("tenant_id", store.setup.call_args.kwargs)
                 set_device.assert_called_once_with(3)
 
+    def test_init_preserves_configured_engine_selection(self):
+        config = _make_mooncake_store_config()
+        for fabric_mem, resource_config, expected_fabric, expected_independent in (
+            ("0", "", False, False),
+            ("1", "{}", True, False),
+            ("0", "{}", False, True),
+        ):
+            with (
+                self.subTest(fabric_mem=fabric_mem, resource_config=resource_config),
+                patch.dict(
+                    os.environ,
+                    {"ASCEND_ENABLE_USE_FABRIC_MEM": fabric_mem, "ASCEND_GLOBAL_RESOURCE_CONFIG": resource_config},
+                ),
+                patch.object(MooncakeStoreConfig, "load_from_env", return_value=config),
+                patch.object(MooncakeBackend, "_setup_store", return_value=MagicMock()),
+            ):
+                backend = MooncakeBackend(MagicMock())
+                self.assertEqual(backend._use_fabric_mem, expected_fabric)
+                self.assertEqual(backend._use_store_independent_te, expected_independent)
+                self.assertEqual(os.environ["ASCEND_ENABLE_USE_FABRIC_MEM"], fabric_mem)
+                self.assertEqual(os.environ["ASCEND_GLOBAL_RESOURCE_CONFIG"], resource_config)
+
+    def test_shared_engine_preserves_configured_pool_and_local_buffer(self):
+        config = _make_mooncake_store_config()
+        with (
+            patch.dict(os.environ, {"ASCEND_ENABLE_USE_FABRIC_MEM": "0", "ASCEND_GLOBAL_RESOURCE_CONFIG": ""}),
+            patch.object(MooncakeStoreConfig, "load_from_env", return_value=config),
+            patch.object(MooncakeBackend, "_setup_store", return_value=MagicMock()),
+        ):
+            backend = MooncakeBackend(MagicMock())
+            self.assertFalse(backend._use_fabric_mem)
+            self.assertFalse(backend._use_store_independent_te)
+            store = MagicMock()
+            engine = MagicMock()
+            with patch.object(mooncake_module, "global_te") as global_engine:
+                global_engine.get_transfer_engine.return_value = engine
+                backend._setup_store_kwargs(store, "host", {})
+                self.assertIs(store.setup.call_args.kwargs["engine"], engine.get_engine.return_value)
+                self.assertEqual(store.setup.call_args.kwargs["local_buffer_size"], config.local_buffer_size)
+                self.assertEqual(store.setup.call_args.kwargs["global_segment_size"], config.global_segment_size)
+                backend.register_buffer([BufferDescriptor(address=2**21, size_bytes=4096)])
+                global_engine.register_buffer.assert_called_once_with([2**21], [4096])
+            store.register_buffer.assert_not_called()
+
     def test_setup_forwards_tenant_for_all_memory_paths(self):
         for use_fabric_mem in (False, True):
             with self.subTest(use_fabric_mem=use_fabric_mem):
@@ -924,7 +969,7 @@ class TestMooncakeBackendMethods(unittest.TestCase):
             ) as mock_te,
             patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.mooncake_backend.get_ip"),
         ):
-            b.register_buffer([100], [200])
+            b.register_buffer([BufferDescriptor(address=100, size_bytes=200)])
             mock_te.register_buffer.assert_called_once()
 
     def test_layerwise_put_start_passes_replicate_config(self):
@@ -968,7 +1013,9 @@ class TestMooncakeBackendMethods(unittest.TestCase):
         with patch(
             "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.mooncake_backend.global_te"
         ) as mock_te:
-            b.register_buffer([100, 101], [200, 201])
+            b.register_buffer(
+                [BufferDescriptor(address=100, size_bytes=200), BufferDescriptor(address=101, size_bytes=201)]
+            )
             b.store.register_buffer.assert_any_call(100, 200)
             b.store.register_buffer.assert_any_call(101, 201)
             self.assertEqual(b.store.register_buffer.call_count, 2)
@@ -977,7 +1024,7 @@ class TestMooncakeBackendMethods(unittest.TestCase):
     def test_register_buffer_skips_fabric_mem(self):
         b = self._make_backend()
         b._use_fabric_mem = True
-        b.register_buffer([100], [200])
+        b.register_buffer([BufferDescriptor(address=100, size_bytes=200)])
         b.store.register_buffer.assert_not_called()
 
     def test_setup_store_with_store_independent_te(self):
@@ -1356,7 +1403,7 @@ class TestYuanrongBackendMethods(unittest.TestCase):
 
     def test_register_buffer_noop_when_remote_h2d_disabled(self):
         b = self._make_backend()
-        b.register_buffer([100], [200])
+        b.register_buffer([BufferDescriptor(address=100, size_bytes=200)])
         b.store.pre_register_device_memory.assert_not_called()
 
     def test_register_buffer_noop_when_pregister_toggle_off(self):
@@ -1374,13 +1421,13 @@ class TestYuanrongBackendMethods(unittest.TestCase):
             and not b.config.enable_fabric_mem
             and b.config.enable_dev_mem_pregister
         )
-        b.register_buffer([100], [200])
+        b.register_buffer([BufferDescriptor(address=100, size_bytes=200)])
         b.store.pre_register_device_memory.assert_not_called()
 
     def test_register_buffer_when_remote_h2d_enabled_hixl(self):
         b = self._make_backend()
         b._needs_dev_mem_pregister = True
-        b.register_buffer([100], [200])
+        b.register_buffer([BufferDescriptor(address=100, size_bytes=200)])
         b.store.pre_register_device_memory.assert_called_once_with([100], [200])
 
     def test_register_buffer_noop_when_p2p_transfer_link(self):
@@ -1389,7 +1436,7 @@ class TestYuanrongBackendMethods(unittest.TestCase):
         b.config.enable_remote_h2d = True
         b.config.remote_h2d_transport_backend = "P2P_TRANSFER"
         b._needs_dev_mem_pregister = False
-        b.register_buffer([100], [200])
+        b.register_buffer([BufferDescriptor(address=100, size_bytes=200)])
         b.store.pre_register_device_memory.assert_not_called()
 
     def test_register_buffer_noop_when_fabric_mem(self):
@@ -1405,14 +1452,14 @@ class TestYuanrongBackendMethods(unittest.TestCase):
             and b.config.remote_h2d_transport_backend == "HIXL"
             and not b.config.enable_fabric_mem
         )
-        b.register_buffer([100], [200])
+        b.register_buffer([BufferDescriptor(address=100, size_bytes=200)])
         b.store.pre_register_device_memory.assert_not_called()
 
     def test_register_buffer_idempotent(self):
         b = self._make_backend()
         b._needs_dev_mem_pregister = True
-        b.register_buffer([100], [200])
-        b.register_buffer([300], [400])
+        b.register_buffer([BufferDescriptor(address=100, size_bytes=200)])
+        b.register_buffer([BufferDescriptor(address=300, size_bytes=400)])
         b.store.pre_register_device_memory.assert_called_once_with([100], [200])
 
     def test_register_buffers_if_needed_no_buffers(self):
@@ -1441,10 +1488,7 @@ class TestYuanrongBackendMethods(unittest.TestCase):
 # =========================================================================
 # Memcache layerwise backend capabilities
 # =========================================================================
-_LAYERWISE_KEY_FUNCTIONS = (
-    "make_full_key",
-    "make_hit_check_keys",
-)
+_LAYERWISE_KEY_FUNCTIONS = ("make_full_key",)
 
 _LAYERWISE_STORE_METHODS = (
     "batch_get_key_info",
@@ -1489,6 +1533,15 @@ class TestLayerwiseKeyFormats(unittest.TestCase):
     pool_scheduler implementations.
     """
 
+    @staticmethod
+    def _bound_builder(num_groups: int, pp_size: int = 1) -> LayerwiseKeyBuilder:
+        """The builder MemcacheBackend.bind_layerwise_keys binds for this layout."""
+
+        def make_key(group: int, block_hash: str, head: int, stage: int) -> str:
+            return make_full_key("model", group, block_hash, head, num_groups, stage, pp_size)
+
+        return LayerwiseKeyBuilder(make_key, pp_size)
+
     def test_full_key_single_group_keeps_pr_11585_format(self):
         self.assertEqual(
             make_full_key("model", 0, "hash0", 3, 1),
@@ -1503,7 +1556,7 @@ class TestLayerwiseKeyFormats(unittest.TestCase):
 
     def test_partial_key_format(self):
         self.assertEqual(
-            MemcacheBackend.make_partial_key("model", "r1", 0, 1, 20, 3),
+            self._bound_builder(1).make_partial_key("model", "r1", 0, 1, 20, 3),
             "model@partial@r1@0@1@20@3",
         )
 
@@ -1513,11 +1566,11 @@ class TestLayerwiseKeyFormats(unittest.TestCase):
             "model@2@pp1@hash0@3",
         )
         self.assertEqual(
-            MemcacheBackend.make_partial_key("model", "r1", 0, 1, 20, 3, 1, 2),
+            self._bound_builder(1, 2).make_partial_key("model", "r1", 0, 1, 20, 3, 1),
             "model@partial@r1@0@1@20@pp1@3",
         )
         self.assertEqual(
-            make_hit_check_keys("model", 0, "hash0", 2, 1, 2),
+            self._bound_builder(1, 2).make_hit_check_keys(0, "hash0", 2),
             [
                 "model@pp0@hash0@0",
                 "model@pp0@hash0@1",
@@ -1528,18 +1581,18 @@ class TestLayerwiseKeyFormats(unittest.TestCase):
 
     def test_hit_check_keys_single_group_one_key_per_rank(self):
         self.assertEqual(
-            make_hit_check_keys("model", 0, "hash0", 4, 1),
+            self._bound_builder(1).make_hit_check_keys(0, "hash0", 4),
             ["model@hash0@0", "model@hash0@1", "model@hash0@2", "model@hash0@3"],
         )
 
     def test_hit_check_keys_multi_group_one_key_per_rank(self):
         self.assertEqual(
-            make_hit_check_keys("model", 1, "hash0", 2, 3),
+            self._bound_builder(3).make_hit_check_keys(1, "hash0", 2),
             ["model@1@hash0@0", "model@1@hash0@1"],
         )
 
     def test_hit_check_keys_empty_when_no_ranks(self):
-        self.assertEqual(make_hit_check_keys("model", 0, "hash0", 0, 1), [])
+        self.assertEqual(self._bound_builder(1).make_hit_check_keys(0, "hash0", 0), [])
 
     def test_full_key_and_hit_check_key_share_rank_format(self):
         """The hit-check key of rank r must equal that rank's full key."""
@@ -1547,7 +1600,7 @@ class TestLayerwiseKeyFormats(unittest.TestCase):
             for rank in range(3):
                 with self.subTest(num_groups=num_groups, rank=rank):
                     self.assertEqual(
-                        make_hit_check_keys("model", 0, "hash0", 3, num_groups)[rank],
+                        self._bound_builder(num_groups).make_hit_check_keys(0, "hash0", 3)[rank],
                         make_full_key("model", 0, "hash0", rank, num_groups),
                     )
 
@@ -1567,6 +1620,7 @@ class TestMemcacheBackendMethods(unittest.TestCase):
             backend._lazy_init = False
             backend._store_initialized = True
             backend._pending_buffers = None
+            backend._checked_buffer_sizes = {}
             return backend
 
     def test_ssd_load_rewarms_via_registered_full_sized_npu_read(self):
@@ -1710,7 +1764,7 @@ class TestMemcacheBackendMethods(unittest.TestCase):
 
     def test_register_buffer(self):
         b = self._make_backend()
-        b.register_buffer([100], [200])
+        b.register_buffer([BufferDescriptor(address=100, size_bytes=200)])
         b.store.register_buffer.assert_called_once()
 
     def test_unregister_buffer(self):
@@ -1804,6 +1858,10 @@ class TestMemcacheBackendMethods(unittest.TestCase):
         b = self._make_backend()
         b.store.batch_put_from_layers.return_value = [1]
         self.assertEqual(b.put(["k1"], [[100]], [[10]]), [False])
+        for malformed in ([False], ["0"], [], [0, 0]):
+            with self.subTest(malformed=malformed):
+                b.store.batch_put_from_layers.return_value = malformed
+                self.assertIs(b.put(["k1"], [[100]], [[10]], memory_location=MemoryLocation.HOST), False)
 
     def test_put_exception(self):
         b = self._make_backend()

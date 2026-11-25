@@ -198,12 +198,7 @@ class NPUIPCWeightTransferEngine(IPCWeightTransferEngine):
                 weight = rebuild_npu_tensor(*list_args)
                 weights.append((name, weight))
 
-        from vllm.model_executor.model_loader.mtp_validation import (
-            disable_mtp_completeness_check,
-        )
-
-        with disable_mtp_completeness_check():
-            self.model.load_weights(weights)
+        self.model.load_weights(weights)
 
 
 class NPUIPCTrainerWeightTransferEngine(IPCTrainerWeightTransferEngine):
@@ -289,13 +284,13 @@ class NPUIPCTrainerWeightTransferEngine(IPCTrainerWeightTransferEngine):
             post_iter_func=lambda item: item[1],
             buffer_size_bytes=self.packed_buffer_size_bytes,
         ):
-            ipc_handle = self._all_gather_and_merge_handles([chunk["ipc_handle"]])[0]
+            ipc_handle = self._all_gather_and_merge_handles([chunk.ipc_handle])[0]
             self._do_send(
-                names=chunk["names"],
-                dtype_names=chunk["dtype_names"],
-                shapes=chunk["shapes"],
+                names=chunk.names,
+                dtype_names=chunk.dtype_names,
+                shapes=chunk.shapes,
                 ipc_handles=ipc_handle,
-                tensor_sizes=chunk["tensor_sizes"],
+                tensor_sizes=chunk.tensor_sizes,
             )
             # Per-chunk barrier: the producer reuses a single IPC buffer
             # across chunks. Without syncing every rank here, non-sender

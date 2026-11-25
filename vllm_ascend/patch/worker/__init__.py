@@ -17,8 +17,8 @@
 
 from vllm.triton_utils import HAS_TRITON
 
+import vllm_ascend.patch.worker.patch_worker_profiler  # noqa
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
-from vllm_ascend.utils import vllm_version_is
 
 # patch_ascend_ops rebinds causal_conv1d to the AscendC wrappers and
 # patch_triton overwrites causal_conv1d_update with the NPU Triton kernel, so
@@ -27,11 +27,6 @@ if HAS_TRITON:
     import vllm_ascend.patch.worker.patch_ascend_ops  # noqa
     import vllm_ascend.patch.worker.patch_triton  # noqa
 
-
-# Flip STR_DTYPE_TO_TORCH_DTYPE["fp8"] -> torch.float8_e4m3fn on vllm builds
-# that lack register_kv_cache_dtype (e.g. releases/v0.27.1). Must run in every
-# worker before model loading resolves kv_cache_dtype. No-op on kvquant_27.
-import vllm_ascend.patch.worker.patch_kv_cache_dtype  # noqa
 
 # Apply before model construction on every device, including 310P.
 
@@ -53,7 +48,6 @@ else:
 # left to rebind on Ascend.
 
 import vllm_ascend.patch.worker.patch_kimi_k25  # noqa
-import vllm_ascend.patch.worker.patch_eagle3_init  # noqa
 import vllm_ascend.patch.worker.patch_deepseek_v2  # noqa
 
 # Re-apply the V2-only runner selection on pickled configs, plus the V2
@@ -66,6 +60,7 @@ import vllm_ascend.patch.worker.patch_uva  # noqa
 import vllm_ascend.patch.worker.patch_input_batch  # noqa
 import vllm_ascend.patch.worker.patch_model_state  # noqa
 import vllm_ascend.patch.worker.patch_block_table  # noqa
+import vllm_ascend.patch.worker.patch_staged_writes  # noqa
 import vllm_ascend.patch.worker.patch_attn_utils  # noqa
 import vllm_ascend.patch.worker.patch_model_runner  # noqa
 
@@ -73,13 +68,10 @@ import vllm_ascend.patch.worker.patch_eagle_speculator  # noqa
 import vllm_ascend.patch.worker.patch_dflash_speculator  # noqa
 import vllm_ascend.patch.worker.patch_dspark  # noqa
 
-# Remove this block and patch_adaptive_verification.py when vLLM 0.33.0 support ends.
-if vllm_version_is("0.33.0"):
-    import vllm_ascend.patch.worker.patch_adaptive_verification  # noqa
-
 # 310P: draft FULL must use AutoRegressiveAclGraphManager310 (no FIA graph_task).
 # patch_eagle_speculator above installs the 910 manager; re-override here.
 if not get_current_hardware_profile().supports(HardwareCapability.STANDARD_WORKER_PATCHES):
+    from vllm.v1.worker.gpu.spec_decode.autoregressive import speculator as _shared_ar_spec
     from vllm.v1.worker.gpu.spec_decode.target_dependent_ar import speculator as _ar_spec
 
     from vllm_ascend._310p.worker.v2.spec_decode.aclgraph import (
@@ -87,6 +79,8 @@ if not get_current_hardware_profile().supports(HardwareCapability.STANDARD_WORKE
     )
 
     _ar_spec.SpeculatorCudaGraphManager = AutoRegressiveAclGraphManager310
+    _shared_ar_spec.SpeculatorCudaGraphManager = AutoRegressiveAclGraphManager310
 
 # only patch routed experts capture in main2main.
 import vllm_ascend.patch.worker.patch_routed_experts_capture  # noqa
+import vllm_ascend.patch.worker.patch_v2_static_kernel  # noqa

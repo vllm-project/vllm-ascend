@@ -90,7 +90,6 @@ class TestTokenDispatcherWithMC2(TestBase):
         self.mock_get_config = self.config_patcher.start()
 
         mock_config = MagicMock()
-        mock_config.use_v2_model_runner = False
 
         mock_config.scheduler_config.max_num_seqs = 256
 
@@ -175,45 +174,43 @@ class TestTokenDispatcherWithMC2(TestBase):
         self.assertEqual(self.dispatcher.global_bs, 0)
 
     def test_lmhead_sync_keeps_dispatch_and_combine_masks_paired(self):
-        for v2 in (False, True):
-            for lmhead in (False, True):
-                for dcp in (1, 2):
-                    for base_skip in (False, True):
-                        with self.subTest(v2=v2, lmhead=lmhead, dcp=dcp, base_skip=base_skip):
-                            config = self.mock_get_config.return_value
-                            config.use_v2_model_runner = v2
-                            config.parallel_config.decode_context_parallel_size = dcp
-                            self.mock_skip_allreduce.return_value = base_skip
-                            with patch("vllm_ascend.utils.lmhead_tp_enable", return_value=lmhead):
-                                dispatcher = TokenDispatcherWithMC2(with_quant=False, top_k=1, num_experts=8)
-                            uniform = not base_skip or (v2 and lmhead and dcp == 1)
-                            self.assertEqual(dispatcher.global_bs, 0 if uniform else 1024)
-                            mask = torch.tensor([True, True, False, False])
-                            dispatch_input = build_token_dispatch_input_fixture(
-                                hidden_states=torch.randn(4, 8),
-                                topk_weights=torch.ones(4, 1),
-                                topk_ids=torch.zeros(4, 1, dtype=torch.int32),
-                                expert_map=torch.arange(8),
-                                mc2_mask=mask,
-                            )
-                            with patch(
-                                "torch_npu.npu_moe_distribute_dispatch_v2",
-                                return_value=(torch.randn(4, 8),) * 5 + (None, None),
-                                create=True,
-                            ) as dispatch:
-                                output = dispatcher.token_dispatch(dispatch_input)
-                            dispatch_kwargs = dispatch.call_args.kwargs
-                            metadata = output.combine_metadata
-                            combine_kwargs = dispatcher.get_combine_mc_kwargs(output.hidden_states, metadata)
-                            if uniform:
-                                self.assertIs(dispatch_kwargs["x_active_mask"], mask)
-                                self.assertIs(metadata.mc2_mask, mask)
-                                self.assertIs(combine_kwargs["x_active_mask"], mask)
-                            else:
-                                self.assertNotIn("x_active_mask", dispatch_kwargs)
-                                self.assertIsNone(metadata.mc2_mask)
-                                self.assertNotIn("x_active_mask", combine_kwargs)
-                            self.assertEqual(dispatch_kwargs["global_bs"], combine_kwargs["global_bs"])
+        for lmhead in (False, True):
+            for dcp in (1, 2):
+                for base_skip in (False, True):
+                    with self.subTest(lmhead=lmhead, dcp=dcp, base_skip=base_skip):
+                        config = self.mock_get_config.return_value
+                        config.parallel_config.decode_context_parallel_size = dcp
+                        self.mock_skip_allreduce.return_value = base_skip
+                        with patch("vllm_ascend.utils.lmhead_tp_enable", return_value=lmhead):
+                            dispatcher = TokenDispatcherWithMC2(with_quant=False, top_k=1, num_experts=8)
+                        uniform = not base_skip or (lmhead and dcp == 1)
+                        self.assertEqual(dispatcher.global_bs, 0 if uniform else 1024)
+                        mask = torch.tensor([True, True, False, False])
+                        dispatch_input = build_token_dispatch_input_fixture(
+                            hidden_states=torch.randn(4, 8),
+                            topk_weights=torch.ones(4, 1),
+                            topk_ids=torch.zeros(4, 1, dtype=torch.int32),
+                            expert_map=torch.arange(8),
+                            mc2_mask=mask,
+                        )
+                        with patch(
+                            "torch_npu.npu_moe_distribute_dispatch_v2",
+                            return_value=(torch.randn(4, 8),) * 5 + (None, None),
+                            create=True,
+                        ) as dispatch:
+                            output = dispatcher.token_dispatch(dispatch_input)
+                        dispatch_kwargs = dispatch.call_args.kwargs
+                        metadata = output.combine_metadata
+                        combine_kwargs = dispatcher.get_combine_mc_kwargs(output.hidden_states, metadata)
+                        if uniform:
+                            self.assertIs(dispatch_kwargs["x_active_mask"], mask)
+                            self.assertIs(metadata.mc2_mask, mask)
+                            self.assertIs(combine_kwargs["x_active_mask"], mask)
+                        else:
+                            self.assertNotIn("x_active_mask", dispatch_kwargs)
+                            self.assertIsNone(metadata.mc2_mask)
+                            self.assertNotIn("x_active_mask", combine_kwargs)
+                        self.assertEqual(dispatch_kwargs["global_bs"], combine_kwargs["global_bs"])
 
     def test_init_uses_mc2_capacity_for_non_uniform_global_bs(self):
         self.mock_get_config.return_value.parallel_config.tensor_parallel_size = 4
@@ -1060,6 +1057,10 @@ class TestTokenDispatcherWithAll2AllV(TestBase):
         self.addCleanup(patcher12.stop)
         self.mock_repeat_interleave.return_value = torch.arange(16)
 
+        patcher13 = patch("torch.npu.Event")
+        self.mock_npu_event = patcher13.start()
+        self.addCleanup(patcher13.stop)
+
         self.dispatcher = TokenDispatcherWithAll2AllV(top_k=2, num_experts=4, num_local_experts=2, with_quant=False)
 
     @pytest.mark.skip("Skip as register_kernels has NPU SocName checking in CANN 8.5.0.")
@@ -1109,11 +1110,164 @@ class TestTokenDispatcherWithAll2AllV(TestBase):
 
         # This test covers dispatch-side activation quantization, not the
         # separately tested LoRA index exchange collective.
-        with patch("vllm_ascend.ops.fused_moe.token_dispatcher.all2all_lora_indices"):
+        with (
+            self._mock_split_copy_state(self.dispatcher),
+            patch("vllm_ascend.ops.fused_moe.token_dispatcher.all2all_lora_indices"),
+        ):
             result = self.dispatcher.token_dispatch(token_dispatch_input=token_dispatch_input)
 
         self.mock_npu_dynamic_quant.assert_not_called()
         self.assertIsNone(result.dynamic_scale)
+
+    def _mock_split_copy_state(self, dispatcher):
+        input_splits_cpu = torch.empty(2, dtype=torch.int64)
+        output_splits_cpu = torch.empty(2, dtype=torch.int64)
+        return patch.object(
+            dispatcher,
+            "_get_split_copy_state",
+            return_value=(input_splits_cpu, output_splits_cpu, self.mock_npu_event.return_value),
+        )
+
+    def test_dispatch_preprocess_enqueues_permute_before_split_wait(self):
+        hidden_states = torch.randn(8, 16)
+        topk_ids = torch.randint(0, 4, (8, 2)).long()
+        call_order = MagicMock()
+        call_order.attach_mock(self.mock_npu_event.return_value.record, "record")
+        call_order.attach_mock(self.mock_npu_moe_token_permute, "permute")
+        call_order.attach_mock(self.mock_npu_event.return_value.synchronize, "split_wait")
+
+        with self._mock_split_copy_state(self.dispatcher), patch("torch.npu.synchronize") as mock_device_sync:
+            (
+                _,
+                _,
+                _,
+                input_splits,
+                output_splits,
+                global_input_tokens_local_experts_indices,
+                _,
+                _,
+            ) = self.dispatcher._dispatch_preprocess(hidden_states, topk_ids)
+
+        mock_device_sync.assert_not_called()
+        self.assertEqual(
+            [call[0] for call in call_order.mock_calls],
+            ["record", "permute", "split_wait"],
+        )
+        self.mock_npu_event.return_value.record.assert_called_once()
+        np.testing.assert_array_equal(input_splits, [4, 4])
+        np.testing.assert_array_equal(output_splits, [4, 4])
+        self.mock_repeat_interleave.assert_called_once()
+        self.assertEqual(self.mock_repeat_interleave.call_args.kwargs["output_size"], 8)
+        self.assertTrue(torch.equal(global_input_tokens_local_experts_indices, torch.arange(16)))
+
+    def test_dispatch_preprocess_single_local_expert_avoids_device_sync(self):
+        dispatcher = TokenDispatcherWithAll2AllV(top_k=2, num_experts=2, num_local_experts=1)
+        self.mock_histc.return_value = torch.tensor([2, 2], dtype=torch.int64)
+        self.mock_gather_from_sequence_parallel_region.return_value = torch.tensor([[2, 2], [2, 2]], dtype=torch.int64)
+        hidden_states = torch.randn(8, 16)
+        topk_ids = torch.randint(0, 2, (8, 2)).long()
+
+        with self._mock_split_copy_state(dispatcher), patch("torch.npu.synchronize") as mock_device_sync:
+            (
+                _,
+                _,
+                _,
+                input_splits,
+                output_splits,
+                global_input_tokens_local_experts_indices,
+                _,
+                _,
+            ) = dispatcher._dispatch_preprocess(hidden_states, topk_ids)
+
+        mock_device_sync.assert_not_called()
+        self.mock_npu_event.return_value.synchronize.assert_called_once()
+        self.assertIsNone(global_input_tokens_local_experts_indices)
+        self.mock_repeat_interleave.assert_not_called()
+        np.testing.assert_array_equal(input_splits, [2, 2])
+        np.testing.assert_array_equal(output_splits, [2, 2])
+
+    def test_dispatch_preprocess_returns_owned_split_arrays(self):
+        hidden_states = torch.randn(8, 16)
+        topk_ids = torch.randint(0, 4, (8, 2)).long()
+        input_splits_cpu = torch.empty(2, dtype=torch.int64)
+        output_splits_cpu = torch.empty(2, dtype=torch.int64)
+
+        with patch.object(
+            self.dispatcher,
+            "_get_split_copy_state",
+            return_value=(input_splits_cpu, output_splits_cpu, self.mock_npu_event.return_value),
+        ):
+            _, _, _, input_splits, output_splits, _, _, _ = self.dispatcher._dispatch_preprocess(
+                hidden_states, topk_ids
+            )
+
+        # Reusing the pinned staging buffers must not mutate metadata already
+        # returned by an earlier dispatch.
+        input_splits_cpu.fill_(99)
+        output_splits_cpu.fill_(77)
+        np.testing.assert_array_equal(input_splits, [4, 4])
+        np.testing.assert_array_equal(output_splits, [4, 4])
+
+    def test_preprocess_only_enqueues_nonblocking_split_copies(self):
+        topk_ids = torch.randint(0, 4, (8, 2)).long()
+        input_splits_cpu = MagicMock()
+        output_splits_cpu = MagicMock()
+        splits_copy_done = MagicMock()
+
+        with patch.object(
+            self.dispatcher,
+            "_get_split_copy_state",
+            return_value=(input_splits_cpu, output_splits_cpu, splits_copy_done),
+        ):
+            self.dispatcher._preprocess(topk_ids)
+
+        self.assertTrue(input_splits_cpu.copy_.call_args.kwargs["non_blocking"])
+        self.assertTrue(output_splits_cpu.copy_.call_args.kwargs["non_blocking"])
+        splits_copy_done.record.assert_called_once()
+        input_splits_cpu.numpy.assert_not_called()
+        output_splits_cpu.numpy.assert_not_called()
+
+    def test_dispatch_preprocess_zero_received_tokens_uses_zero_output_size(self):
+        hidden_states = torch.randn(8, 16)
+        topk_ids = torch.randint(0, 4, (8, 2)).long()
+        self.mock_gather_from_sequence_parallel_region.return_value = torch.zeros((2, 4), dtype=torch.int64)
+
+        with self._mock_split_copy_state(self.dispatcher):
+            _, _, _, input_splits, output_splits, _, _, _ = self.dispatcher._dispatch_preprocess(
+                hidden_states, topk_ids
+            )
+
+        np.testing.assert_array_equal(input_splits, [4, 4])
+        np.testing.assert_array_equal(output_splits, [0, 0])
+        self.assertEqual(self.mock_repeat_interleave.call_args.kwargs["output_size"], 0)
+
+    def test_dispatch_preprocess_ep1_uses_one_split(self):
+        dispatcher = TokenDispatcherWithAll2AllV(top_k=2, num_experts=1, num_local_experts=1)
+        self.mock_histc.return_value = torch.tensor([4], dtype=torch.int64)
+        self.mock_gather_from_sequence_parallel_region.return_value = torch.tensor([[4]], dtype=torch.int64)
+        hidden_states = torch.randn(8, 16)
+        topk_ids = torch.zeros(8, 2, dtype=torch.long)
+        input_splits_cpu = torch.empty(1, dtype=torch.int64)
+        output_splits_cpu = torch.empty(1, dtype=torch.int64)
+
+        with (
+            patch.object(
+                TokenDispatcherWithAll2AllV,
+                "ep_size",
+                new_callable=PropertyMock,
+                return_value=1,
+            ),
+            patch.object(
+                dispatcher,
+                "_get_split_copy_state",
+                return_value=(input_splits_cpu, output_splits_cpu, self.mock_npu_event.return_value),
+            ),
+        ):
+            _, _, _, input_splits, output_splits, _, _, _ = dispatcher._dispatch_preprocess(hidden_states, topk_ids)
+
+        np.testing.assert_array_equal(input_splits, [4])
+        np.testing.assert_array_equal(output_splits, [4])
+        self.mock_repeat_interleave.assert_not_called()
 
     @pytest.mark.skip("Skip as register_kernels has NPU SocName checking in CANN 8.5.0.")
     def test_token_combine(self):

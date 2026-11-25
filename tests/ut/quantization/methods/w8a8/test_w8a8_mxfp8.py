@@ -7,7 +7,6 @@ from vllm.model_executor.layers.linear import RowParallelLinear
 
 from tests.ut.base import TestBase
 from tests.ut.quantization.conftest_quantization import (
-    create_mock_ascend_config,
     create_mock_vllm_config,
     create_mxfp_moe_layer,
 )
@@ -19,11 +18,24 @@ from vllm_ascend.quantization.methods.w8a8.w8a8_mxfp8 import (
 )
 from vllm_ascend.quantization.prepared_linear_input import PreparedLinearInput
 
+# The MXFP schemes gate on the MX weight format at construction; tests build
+# them on any machine by pinning a profile that reports MXFP8 support.
+MX_PROFILE = "vllm_ascend.quantization.methods.base.get_current_hardware_profile"
+
+
+def allow_mx_weight_format():
+    """Return an unstarted patch swapping in a profile with MXFP8 support."""
+    profile = Mock(supports_weight_format=Mock(return_value=True))
+    return patch(MX_PROFILE, new=Mock(return_value=profile))
+
 
 class TestAscendW8A8MXFP8LinearMethod(TestBase):
     @patch("vllm_ascend.quantization.methods.w8a8.w8a8_mxfp8.get_current_vllm_config")
     def setUp(self, mock_vllm):
         mock_vllm.return_value = create_mock_vllm_config()
+        mx_profile = allow_mx_weight_format()
+        mx_profile.start()
+        self.addCleanup(mx_profile.stop)
         self.scheme = AscendW8A8MXFP8DynamicLinearMethod()
         nz_config = patch("vllm_ascend.utils.get_ascend_config", return_value=SimpleNamespace(weight_nz_mode=1))
         self.addCleanup(nz_config.stop)
@@ -44,6 +56,7 @@ class TestAscendW8A8MXFP8LinearMethod(TestBase):
                 "vllm_ascend.quantization.methods.w8a8.w8a8_mxfp8.get_dynamic_mx_quant_scale_alg",
                 return_value=0,
             ),
+            allow_mx_weight_format(),
         ):
             scheme = AscendW8A8MXFP8DynamicLinearMethod()
 
@@ -368,10 +381,11 @@ class TestAscendW8A8MXFP8MoEMethod(TestBase):
     intermediate_size = 256
 
     @patch("vllm_ascend.quantization.methods.w8a8.w8a8_mxfp8.get_current_vllm_config")
-    @patch("vllm_ascend.quantization.methods.w8a8.w8a8_mxfp8.get_ascend_config")
-    def setUp(self, mock_ascend, mock_vllm):
+    def setUp(self, mock_vllm):
         mock_vllm.return_value = create_mock_vllm_config()
-        mock_ascend.return_value = create_mock_ascend_config()
+        mx_profile = allow_mx_weight_format()
+        mx_profile.start()
+        self.addCleanup(mx_profile.stop)
         self.scheme = AscendW8A8MXFP8DynamicFusedMoEMethod()
         self.scheme.use_expert_weight_list = True
         nz_config = patch("vllm_ascend.utils.get_ascend_config", return_value=SimpleNamespace(weight_nz_mode=1))
@@ -384,28 +398,17 @@ class TestAscendW8A8MXFP8MoEMethod(TestBase):
         self.addCleanup(mega_moe.stop)
         mega_moe.start()
 
-    def test_expert_lists_follow_v1_and_v2_eplb_configuration(self):
-        for use_v2, dynamic_eplb, enable_eplb, expected in (
-            (False, False, False, False),
-            (False, True, False, True),
-            (True, False, True, True),
-            (True, True, False, False),
-        ):
-            with self.subTest(use_v2=use_v2, dynamic_eplb=dynamic_eplb, enable_eplb=enable_eplb):
+    def test_expert_lists_follow_eplb_configuration(self):
+        for enable_eplb, expected in ((True, True), (False, False)):
+            with self.subTest(enable_eplb=enable_eplb):
                 config = create_mock_vllm_config()
-                config.use_v2_model_runner = use_v2
                 config.parallel_config.enable_eplb = enable_eplb
-                ascend_config = create_mock_ascend_config()
-                ascend_config.eplb_config.dynamic_eplb = dynamic_eplb
                 with (
                     patch(
                         "vllm_ascend.quantization.methods.w8a8.w8a8_mxfp8.get_current_vllm_config",
                         return_value=config,
                     ),
-                    patch(
-                        "vllm_ascend.quantization.methods.w8a8.w8a8_mxfp8.get_ascend_config",
-                        return_value=ascend_config,
-                    ),
+                    allow_mx_weight_format(),
                 ):
                     scheme = AscendW8A8MXFP8DynamicFusedMoEMethod()
                 self.assertEqual(scheme.use_expert_weight_list, expected)
@@ -486,16 +489,12 @@ class TestAscendW8A8MXFP8MoEMethod(TestBase):
     def test_modelopt_config_defaults_group_size(self):
         vllm_config = create_mock_vllm_config()
         vllm_config.quant_config = SimpleNamespace()
-        vllm_config.use_v2_model_runner = True
         with (
             patch(
                 "vllm_ascend.quantization.methods.w8a8.w8a8_mxfp8.get_current_vllm_config",
                 return_value=vllm_config,
             ),
-            patch(
-                "vllm_ascend.quantization.methods.w8a8.w8a8_mxfp8.get_ascend_config",
-                return_value=create_mock_ascend_config(),
-            ),
+            allow_mx_weight_format(),
         ):
             scheme = AscendW8A8MXFP8DynamicFusedMoEMethod()
 
