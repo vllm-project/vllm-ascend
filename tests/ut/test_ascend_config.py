@@ -141,9 +141,15 @@ class TestQuantizedAllReduceConfig(TestBase):
             with self.subTest(is_a5=is_a5), patch("vllm_ascend.ascend_config.is_950", return_value=is_a5):
                 config = QuantizedAllReduceConfig()
                 self.assertFalse(config.enable)
-                self.assertEqual(config.min_numel, 16777216)
+                # None means "pick the per-TP int8 default measured on A2".
+                self.assertIsNone(config.min_numel)
                 self.assertEqual(config.quant_dtype, expected_dtype)
                 self.assertEqual(dataclasses.asdict(config)["quant_dtype"], expected_dtype)
+
+    def test_auto_min_numel_accepts_null(self):
+        config = QuantizedAllReduceConfig(enable=True, min_numel=None)
+        self.assertTrue(config.enable)
+        self.assertIsNone(config.min_numel)
 
     def test_explicit_values_and_lax_bool(self):
         config = QuantizedAllReduceConfig(enable="true", min_numel="2097152")  # type: ignore[arg-type]
@@ -482,6 +488,34 @@ class TestAscendConfig(TestBase):
         test_vllm_config.additional_config = {"quantized_all_reduce_config": {"min_numel": 0}}
         with self.assertRaises(ValueError):
             init_ascend_config(test_vllm_config)
+
+    @_clean_up_ascend_config
+    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
+    @patch("vllm_ascend.ascend_config.is_950", return_value=True)
+    def test_quantized_all_reduce_requires_explicit_min_numel_on_a5(self, mock_is_950, mock_fix_incompatible_config):
+        # The per-TP gates are A2 measurements; A5 int8 has no calibration, so
+        # None must fail at config time instead of silently reusing an A2 gate.
+        test_vllm_config = VllmConfig()
+        test_vllm_config.parallel_config.tensor_parallel_size = 4
+        test_vllm_config.additional_config = {"quantized_all_reduce_config": {"enable": True, "quant_dtype": "int8"}}
+        with self.assertRaisesRegex(ValueError, "measured on Atlas A2 only"):
+            init_ascend_config(test_vllm_config)
+
+    @_clean_up_ascend_config
+    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
+    @patch("vllm_ascend.ascend_config.is_950", return_value=True)
+    def test_quantized_all_reduce_accepts_explicit_min_numel_on_a5(self, mock_is_950, mock_fix_incompatible_config):
+        test_vllm_config = VllmConfig()
+        test_vllm_config.parallel_config.tensor_parallel_size = 4
+        test_vllm_config.additional_config = {
+            "quantized_all_reduce_config": {
+                "enable": True,
+                "quant_dtype": "int8",
+                "min_numel": 16777216,
+            }
+        }
+        ascend_config = init_ascend_config(test_vllm_config)
+        self.assertEqual(ascend_config.quantized_all_reduce_config.min_numel, 16777216)
 
     @_clean_up_ascend_config
     @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")

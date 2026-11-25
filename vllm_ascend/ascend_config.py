@@ -413,9 +413,16 @@ class QuantizedAllReduceConfig:
     value overrides the hardware default. Both select calls by group size,
     dtype, shape and payload rather than forward phase.
     A collective takes the selected path only when its payload reaches
-    ``min_numel`` elements, i.e. ``min_numel * 2`` bytes of bf16 data. The
-    default is 16,777,216 elements (32 MiB), retained from the INT8 crossover
-    measurements. Benchmark MXFP8 independently on the intended A5 workload.
+    ``min_numel`` elements, i.e. ``min_numel * 2`` bytes of bf16 data. Left at
+    ``None`` (the default) the int8 gate is picked per tensor-parallel degree
+    from the A2 measurements: 8,388,608 (16 MiB) at TP=2, 16,777,216 (32 MiB)
+    at TP=4 and 31,457,280 (60 MiB) at TP=8. The first two are 1.5x above their
+    measured break-even; the TP=8 gate is 1.6-1.9x above its 31-38 MiB
+    collective crossing and is the lowest payload that is strictly profitable
+    end to end. These gates are A2-only: A5 has no int8 payload calibration,
+    so forcing the int8 backend there requires an explicit ``min_numel``.
+    MXFP8 has no per-TP calibration yet and keeps 16,777,216 (32 MiB);
+    benchmark it on the intended A5 workload before lowering it.
 
     The wrapper is built for every parallel group; unsupported group sizes
     keep bf16. MXFP8 supports groups of 2/4/8 ranks, while INT8 supports up to
@@ -423,13 +430,16 @@ class QuantizedAllReduceConfig:
     """
 
     enable: bool = False
-    min_numel: int = 16777216
+    # None selects the per-TP int8 default measured on A2. A5 int8 has no
+    # calibration, so it requires an explicit value; MXFP8 falls back to its
+    # own 32 MiB default. See vllm_ascend.distributed.device_communicators.
+    min_numel: int | None = None
     quant_dtype: Literal["int8", "mxfp8"] = dataclasses.field(default_factory=lambda: "mxfp8" if is_950() else "int8")
 
     @field_validator("min_numel")
     @classmethod
-    def _check_min_numel(cls, value: int) -> int:
-        if value < 1:
+    def _check_min_numel(cls, value: int | None) -> int | None:
+        if value is not None and value < 1:
             raise ValueError("additional_config.quantized_all_reduce_config.min_numel must be >= 1")
         return value
 
@@ -438,11 +448,22 @@ class QuantizedAllReduceConfig:
             return
         # Imported lazily: the wrapper module imports torch_npu, which should not
         # be pulled in from the config factory at module import time.
-        from vllm_ascend.distributed.device_communicators.quantized_all_reduce import (
+        from vllm_ascend.distributed.device_communicators.int8_all_reduce import (
             _MAX_VALID_WORLD_SIZE,
         )
 
         tp_size = vllm_config.parallel_config.tensor_parallel_size
+        # TODO: the per-TP int8 payload gates and their end-to-end gain have not
+        # been measured on A5, so A5 must not inherit the A2 defaults. Remove
+        # this guard once the A5 per-TP min_numel values are measured and added
+        # to default_min_numel() in the int8 wrapper.
+        if self.quant_dtype == "int8" and self.min_numel is None and is_950():
+            raise ValueError(
+                "the per-TP min_numel defaults are measured on Atlas A2 only, and "
+                "A5 has no int8 payload calibration. Set "
+                "additional_config.quantized_all_reduce_config.min_numel explicitly, "
+                "or leave quant_dtype as mxfp8."
+            )
         if self.quant_dtype == "int8" and tp_size > _MAX_VALID_WORLD_SIZE:
             raise ValueError(
                 "additional_config.quantized_all_reduce_config supports "
@@ -608,7 +629,7 @@ class AscendConfig:
             },
             "quantized_all_reduce_config": {
                 "enable": false,
-                "min_numel": 16777216
+                "min_numel": null
             },
             "xlite_graph_config": {
                 "enabled": false,
