@@ -335,6 +335,52 @@ def test_kv_transfer_finished_handler_counts_finished_recving(monkeypatch):
     metrics.record_metric.assert_not_called()
 
 
+def test_kv_transfer_outcome_handler_counts_each_request_once(monkeypatch):
+    metric_type = type("MetricType", (), {"GAUGE": "gauge", "HISTOGRAM": "histogram", "COUNTER": "counter"})
+    metrics = Mock()
+    _install_provider_api(
+        monkeypatch,
+        MetricType=metric_type,
+        get_metric_recorder=lambda: metrics,
+    )
+    handlers = _load_feature_handlers(monkeypatch, "test_kv_transfer_outcome_once", "kv_transfer")
+    scheduler = type("MooncakePullConnectorScheduler", (), {})()
+    output = type("KVConnectorOutput", (), {"finished_recving": {"a", "b"}, "failed_recving": set()})()
+
+    assert handlers.kv_transfer_outcome_handler(lambda current, out: "ok", scheduler, output) == "ok"
+    metrics.record_metric.assert_called_once_with(
+        "kv:xfer_finished_total",
+        value=2.0,
+        labels={"connector": "mooncake"},
+    )
+
+
+def test_kv_transfer_outcome_handler_separates_failed_receives(monkeypatch):
+    metric_type = type("MetricType", (), {"GAUGE": "gauge", "HISTOGRAM": "histogram", "COUNTER": "counter"})
+    metrics = Mock()
+    _install_provider_api(
+        monkeypatch,
+        MetricType=metric_type,
+        get_metric_recorder=lambda: metrics,
+    )
+    handlers = _load_feature_handlers(monkeypatch, "test_kv_transfer_outcome_failed", "kv_transfer")
+    scheduler = type("MooncakePushConnectorScheduler", (), {})()
+    output = type(
+        "KVConnectorOutput",
+        (),
+        {"finished_recving": {"a", "b"}, "failed_recving": {"b"}},
+    )()
+
+    handlers.kv_transfer_outcome_handler(lambda current, out: None, scheduler, output)
+    recorded = {call.args[0]: call.kwargs["value"] for call in metrics.record_metric.call_args_list}
+    assert recorded == {"kv:xfer_finished_total": 2.0, "kv:xfer_failed_total": 1.0}
+
+    metrics.reset_mock()
+    empty = type("KVConnectorOutput", (), {"finished_recving": set(), "failed_recving": set()})()
+    handlers.kv_transfer_outcome_handler(lambda current, out: None, scheduler, empty)
+    metrics.record_metric.assert_not_called()
+
+
 def test_kv_transfer_invalid_blocks_handler_counts_blocks(monkeypatch):
     metric_type = type("MetricType", (), {"GAUGE": "gauge", "HISTOGRAM": "histogram", "COUNTER": "counter"})
     metrics = Mock()
@@ -383,6 +429,57 @@ def test_kv_transfer_remote_waiting_handler_reports_pending_before_drain(monkeyp
 
     metrics.reset_mock()
     scheduler._reqs_need_recv = set()
+    handlers.kv_transfer_remote_waiting_handler(lambda current: "meta", scheduler)
+    metrics.record_metric.assert_called_once_with(
+        "kv:remote_kv_waiting_requests",
+        value=0.0,
+        labels={"connector": "mooncake"},
+    )
+
+
+def test_kv_transfer_remote_waiting_handler_keeps_inflight_across_steps(monkeypatch):
+    metric_type = type("MetricType", (), {"GAUGE": "gauge", "HISTOGRAM": "histogram", "COUNTER": "counter"})
+    metrics = Mock()
+    _install_provider_api(
+        monkeypatch,
+        MetricType=metric_type,
+        get_metric_recorder=lambda: metrics,
+    )
+    handlers = _load_feature_handlers(monkeypatch, "test_kv_transfer_remote_waiting_inflight", "kv_transfer")
+    scheduler = type(
+        "MooncakePullConnectorScheduler",
+        (),
+        {
+            "_reqs_need_recv": {"req"},
+            "_reqs_recv_info": {"req": ("host", 1, "remote-req")},
+        },
+    )()
+
+    def build_connector_meta(current):
+        # Dispatch drains the pending queue while the READ is still in flight.
+        current._reqs_need_recv.clear()
+        return "meta"
+
+    assert handlers.kv_transfer_remote_waiting_handler(build_connector_meta, scheduler) == "meta"
+    metrics.record_metric.assert_called_once_with(
+        "kv:remote_kv_waiting_requests",
+        value=1.0,
+        labels={"connector": "mooncake"},
+    )
+
+    # Next step: nothing is queued, but the transfer has not completed yet, so
+    # the in-flight registration keeps the gauge above zero.
+    metrics.reset_mock()
+    handlers.kv_transfer_remote_waiting_handler(lambda current: "meta", scheduler)
+    metrics.record_metric.assert_called_once_with(
+        "kv:remote_kv_waiting_requests",
+        value=1.0,
+        labels={"connector": "mooncake"},
+    )
+
+    # Completion drops the in-flight registration and the gauge returns to zero.
+    metrics.reset_mock()
+    scheduler._reqs_recv_info.clear()
     handlers.kv_transfer_remote_waiting_handler(lambda current: "meta", scheduler)
     metrics.record_metric.assert_called_once_with(
         "kv:remote_kv_waiting_requests",
