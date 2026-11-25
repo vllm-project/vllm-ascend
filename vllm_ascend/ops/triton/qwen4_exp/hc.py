@@ -16,6 +16,8 @@ from vllm.utils.torch_utils import direct_register_custom_op
 
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 
+# Scale in the upstream HC injection formula: 2 * sigmoid(logit / hc_count).
+_HC_INJECTION_SIGMOID_SCALE = tl.constexpr(2.0)
 _HC_COMBINE_FINAL_BLOCK_SIZE = 1024
 
 
@@ -572,6 +574,59 @@ def combine_final(
 
 
 @triton.jit
+def _hc_combine_norm_stream(
+    residual_ptr,
+    injection_ptr,
+    weight_ptr,
+    combined_ptr,
+    normalized_ptr,
+    block_output,
+    row,
+    stream,
+    inner_offsets,
+    mask,
+    stride_residual_row,
+    stride_injection_row,
+    stride_combined_row,
+    stride_normalized_row,
+    GROUP_DIM: tl.constexpr,
+    HC_COUNT: tl.constexpr,
+    HAS_INJECTION: tl.constexpr,
+    WEIGHT_SHARED: tl.constexpr,
+    EPS: tl.constexpr,
+) -> None:
+    offsets = stream * GROUP_DIM + inner_offsets
+    weight_offsets = inner_offsets if WEIGHT_SHARED else offsets
+
+    residual = tl.load(
+        residual_ptr + row * stride_residual_row + offsets,
+        mask=mask,
+        other=0.0,
+    ).to(tl.float32)
+    if HAS_INJECTION:
+        injection = tl.load(injection_ptr + row * stride_injection_row + stream).to(tl.float32)
+        block_output *= _HC_INJECTION_SIGMOID_SCALE * tl.sigmoid(injection / HC_COUNT)
+
+    # Preserve the unfused combine -> BF16 materialization -> RMSNorm boundary.
+    combined = (residual + block_output).to(combined_ptr.dtype.element_ty)
+    tl.store(
+        combined_ptr + row * stride_combined_row + offsets,
+        combined,
+        mask=mask,
+    )
+    combined_fp32 = combined.to(tl.float32)
+    reciprocal_rms = tl.rsqrt(tl.sum(combined_fp32 * combined_fp32) / GROUP_DIM + EPS)
+    weights = tl.load(weight_ptr + weight_offsets, mask=mask, other=0.0)
+    normalized = combined_fp32 * reciprocal_rms
+    normalized += normalized * weights.to(tl.float32)
+    tl.store(
+        normalized_ptr + row * stride_normalized_row + offsets,
+        normalized,
+        mask=mask,
+    )
+
+
+@triton.jit
 def _hc_combine_norm_kernel(
     residual_ptr,
     block_output_ptr,
@@ -596,39 +651,31 @@ def _hc_combine_norm_kernel(
     stream = program % HC_COUNT
     inner_offsets = tl.arange(0, BLOCK_SIZE)
     mask = inner_offsets < GROUP_DIM
-    offsets = stream * GROUP_DIM + inner_offsets
-    weight_offsets = inner_offsets if WEIGHT_SHARED else offsets
-
-    residual = tl.load(
-        residual_ptr + row * stride_residual_row + offsets,
-        mask=mask,
-        other=0.0,
-    ).to(tl.float32)
     block_output = tl.load(
         block_output_ptr + row * stride_block_row + inner_offsets,
         mask=mask,
         other=0.0,
     ).to(tl.float32)
-    if HAS_INJECTION:
-        injection = tl.load(injection_ptr + row * stride_injection_row + stream).to(tl.float32)
-        block_output *= 2.0 * tl.sigmoid(injection / HC_COUNT)
-
-    # Preserve the unfused combine -> BF16 materialization -> RMSNorm boundary.
-    combined = (residual + block_output).to(combined_ptr.dtype.element_ty)
-    tl.store(
-        combined_ptr + row * stride_combined_row + offsets,
-        combined,
-        mask=mask,
-    )
-    combined_fp32 = combined.to(tl.float32)
-    reciprocal_rms = tl.rsqrt(tl.sum(combined_fp32 * combined_fp32) / GROUP_DIM + EPS)
-    weights = tl.load(weight_ptr + weight_offsets, mask=mask, other=0.0)
-    normalized = combined_fp32 * reciprocal_rms
-    normalized += normalized * weights.to(tl.float32)
-    tl.store(
-        normalized_ptr + row * stride_normalized_row + offsets,
-        normalized,
-        mask=mask,
+    _hc_combine_norm_stream(
+        residual_ptr,
+        injection_ptr,
+        weight_ptr,
+        combined_ptr,
+        normalized_ptr,
+        block_output,
+        row,
+        stream,
+        inner_offsets,
+        mask,
+        stride_residual_row,
+        stride_injection_row,
+        stride_combined_row,
+        stride_normalized_row,
+        GROUP_DIM,
+        HC_COUNT,
+        HAS_INJECTION,
+        WEIGHT_SHARED,
+        EPS,
     )
 
 
@@ -665,34 +712,26 @@ def _hc_combine_norm_row_wise_kernel(
     ).to(tl.float32)
 
     for stream in tl.static_range(HC_COUNT):
-        offsets = stream * GROUP_DIM + inner_offsets
-        weight_offsets = inner_offsets if WEIGHT_SHARED else offsets
-        residual = tl.load(
-            residual_ptr + row * stride_residual_row + offsets,
-            mask=mask,
-            other=0.0,
-        ).to(tl.float32)
-        stream_block_output = block_output
-        if HAS_INJECTION:
-            injection = tl.load(injection_ptr + row * stride_injection_row + stream).to(tl.float32)
-            stream_block_output *= 2.0 * tl.sigmoid(injection / HC_COUNT)
-
-        # Preserve the unfused combine -> BF16 materialization -> RMSNorm boundary.
-        combined = (residual + stream_block_output).to(combined_ptr.dtype.element_ty)
-        tl.store(
-            combined_ptr + row * stride_combined_row + offsets,
-            combined,
-            mask=mask,
-        )
-        combined_fp32 = combined.to(tl.float32)
-        reciprocal_rms = tl.rsqrt(tl.sum(combined_fp32 * combined_fp32) / GROUP_DIM + EPS)
-        weights = tl.load(weight_ptr + weight_offsets, mask=mask, other=0.0)
-        normalized = combined_fp32 * reciprocal_rms
-        normalized += normalized * weights.to(tl.float32)
-        tl.store(
-            normalized_ptr + row * stride_normalized_row + offsets,
-            normalized,
-            mask=mask,
+        _hc_combine_norm_stream(
+            residual_ptr,
+            injection_ptr,
+            weight_ptr,
+            combined_ptr,
+            normalized_ptr,
+            block_output,
+            row,
+            stream,
+            inner_offsets,
+            mask,
+            stride_residual_row,
+            stride_injection_row,
+            stride_combined_row,
+            stride_normalized_row,
+            GROUP_DIM,
+            HC_COUNT,
+            HAS_INJECTION,
+            WEIGHT_SHARED,
+            EPS,
         )
 
 

@@ -231,6 +231,36 @@ def _legacy_combine_norm(
     return combined, normalized
 
 
+@torch.inference_mode()
+def test_hc_combine_norm_per_branch_weights_matches_reference() -> None:
+    rows = 513
+    residual = _make_input(rows, HYPER_HIDDEN_SIZE, row_strided=True)
+    block_output = _make_input(rows, GROUP_DIM, row_strided=True)
+    injection_logits = _make_input(rows, HC_COUNT, row_strided=True)
+    norm_weight = torch.randn(HYPER_HIDDEN_SIZE, device="npu", dtype=DTYPE) * 0.1
+    eps = 1e-6
+
+    actual_combined, actual_normalized = hc_combine_norm(
+        residual,
+        block_output,
+        injection_logits,
+        norm_weight,
+        eps,
+        HC_COUNT,
+    )
+    expected_combined = hc_module._fallback_hc_combine(residual, block_output, injection_logits, HC_COUNT)
+    expected_normalized = hc_module._fallback_grouped_gemma_rmsnorm(
+        expected_combined,
+        norm_weight,
+        eps,
+        HC_COUNT,
+    )
+    torch.npu.synchronize()
+
+    assert_dcp_close(actual_combined, expected_combined)
+    assert_dcp_close(actual_normalized, expected_normalized)
+
+
 @pytest.mark.skipif(
     get_current_hardware_profile().qwen4exp_hc_combine_norm_row_wise_min_rows is None,
     reason="Qwen4Exp HC row-wise combine-norm is not enabled for this hardware profile",

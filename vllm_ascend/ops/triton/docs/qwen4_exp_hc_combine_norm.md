@@ -89,8 +89,10 @@ Source: `vllm_ascend/ops/triton/qwen4_exp/hc.py` (public wrapper:
   was already present in this module.
 - **Differences**: The A3 row-wise specialization reduces program count by
   `hc_count` and loads each block-output row once instead of once per stream.
-  It does not change the combine/normalization arithmetic order or the BF16
-  materialization boundary.
+  Both schedules call the same single-stream JIT helper, so injection, combine,
+  BF16 materialization, RMSNorm reduction, affine transform, and stores have a
+  single implementation. The row-wise kernel keeps the block-output load
+  outside that helper call. This does not change the arithmetic order.
 - **Replacement plan**: This is a permanent performance specialization. A
   temporary replacement or removal plan is N/A.
 - **Production integration**: `vllm_ascend/models/qwen4_exp/model.py` installs
@@ -129,9 +131,12 @@ pytest -q \
 
 Coverage includes the 512-row dispatch boundary, row tails, padded row strides,
 per-stream weights with present and absent injection, forced INT64 addressing,
-NPUGraph replay with refreshed inputs, and compile reuse across row counts. CPU
-dispatch tests cover the shared-weight fallback and wide-offset detection for
-every row-addressed tensor.
+NPUGraph replay with refreshed inputs, and compile reuse across row counts. A
+hardware-independent public-wrapper test exercises per-branch weights and checks
+both returned tensors against the PyTorch reference; on A2 and other profiles
+without a row-wise threshold it covers the legacy schedule, while A3 covers the
+row-wise schedule. CPU dispatch tests cover the shared-weight fallback and
+wide-offset detection for every row-addressed tensor.
 
 CPU dispatch tests use mocked launch entry points:
 
