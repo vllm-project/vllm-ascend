@@ -213,7 +213,7 @@ The quantized model `DeepSeek-V4-Pro-w4a8-mtp` requires at least 2 Atlas 800I A3
 
     **Node1**
 
-    Use the same environment variables as Node0, with the following DP changes (start rank 1 and `--headless`):
+    Use the same environment variables as Node0 and set the DP start rank to 1. Keep the API server enabled: hybrid DP load balancing requires non-master nodes to serve requests, so do not add `--headless`.
 
     ```bash
     # nic_name is the network interface that owns local_ip on the current node.
@@ -279,8 +279,7 @@ The quantized model `DeepSeek-V4-Pro-w4a8-mtp` requires at least 2 Atlas 800I A3
           "enable_fused_mc2":0,
           "enable_shared_expert_dp":true,
           "multistream_overlap_shared_expert":true
-        }' \
-        --headless
+        }'
     ```
 
 === "A3 series with DSpark"
@@ -380,7 +379,6 @@ The quantized model `DeepSeek-V4-Pro-w4a8-mtp` requires at least 2 Atlas 800I A3
     vllm serve /path/to/DeepSeek-V4-Pro-0813-w4a8 \
       --host 0.0.0.0 \
       --port 8000 \
-      --headless \
       --data-parallel-address $node0_ip \
       --data-parallel-rpc-port 13399 \
       --data-parallel-size 2 \
@@ -528,7 +526,6 @@ The quantized model `DeepSeek-V4-Pro-w4a8-mtp` requires at least 2 Atlas 800I A3
     vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/DeepSeek-V4-Pro-w4a8-mtp \
       --host 0.0.0.0 \
       --port 8000 \
-      --headless \
       --data-parallel-address $node0_ip  \
       --data-parallel-size 4 \
       --data-parallel-size-local 1 \
@@ -575,13 +572,13 @@ The quantized model `DeepSeek-V4-Pro-w4a8-mtp` requires at least 2 Atlas 800I A3
 Key Parameter Descriptions:
 
 - `--data-parallel-size` sets the global number of data parallel ranks, and `--data-parallel-size-local` sets the number of DP ranks on the current node.
-- `--data-parallel-start-rank` specifies the starting data parallel rank of the current node. Set a unique value on each headless node (e.g., Node1 = 1). On Node0, omit `--data-parallel-start-rank` even when the start rank is 0, to avoid enabling hybrid load balancing with headless remote engines.
+- `--data-parallel-start-rank` specifies the starting data parallel rank of the current node. Set a unique value on each non-master node (e.g., Node1 = 1). On Node0, omit `--data-parallel-start-rank` even when the start rank is 0. In these hybrid DP load-balancing configurations, keep the API server enabled on every node and distribute requests across all node endpoints instead of sending every request to Node0.
 - `--data-parallel-address` specifies the IP address of the data parallel master node (Node0). It must be consistent across all nodes.
 - `--data-parallel-rpc-port` is the DP RPC port. Use the same value on all nodes and ensure the port is available.
 - `--tensor-parallel-size` sets the tensor parallel size within each DP rank. Configure it together with the DP sizes according to the deployment topology and available NPUs.
 - `--prefill-context-parallel-size` configures prefill context parallelism (PCP) on Model Runner V2 (MRv2), which spreads a long prompt across multiple NPUs during prefill. Besides speeding up prefill, enabling PCP also shards the o_proj weights across the PCP group, providing partial tensor parallelism even when `--tensor-parallel-size` is `1`. The 950DT DP mixed-deployment uses `DP2/TP1` with PCP `8`, and the o_proj weight sharding also relieves its memory pressure. Do not combine it with `enable_dsa_cp`, which is mutually exclusive with PCP and unsupported by the V2 model runner.
 - `--enable-expert-parallel` enables expert parallelism for MoE layers. Do not mix MoE tensor parallelism and expert parallelism in the same MoE layer.
-- `--headless` (used on non-master nodes) disables the API server on the node, since only the master node serves requests.
+- `--headless` disables the node's API server and is valid for the PP worker nodes in the PD examples below. Do not use it for non-master nodes in the hybrid DP load-balancing examples above; those nodes must serve requests.
 - `--max-model-len` specifies the maximum context length. The example values are intended to allow startup with the documented hardware and configuration. To tune this value, check the startup log `Maximum concurrency for L tokens per request: Cx`: `L × C` provides a rough KV-cache capacity reference for increasing the context length with the same configuration. Use the smallest estimate across all ranks and, for PD-disaggregated deployment, across both Prefill and Decode pools.
 - `--max-num-seqs` indicates the maximum number of requests that each DP group is allowed to process. If the number of requests sent to the service exceeds this limit, the excess requests will remain in a waiting state and will not be scheduled. Note that the time spent in the waiting state is also counted in metrics such as TTFT and TPOT. Therefore, when testing performance, it is generally recommended that `--max-num-seqs` * `--data-parallel-size` >= the actual total concurrency.
 - `--max-num-batched-tokens` is the maximum number of tokens processed in one scheduler step. A larger value can improve prefill efficiency but consumes more activation memory.
