@@ -240,6 +240,16 @@ class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
     reorder_batch_threshold: int = 1
     metadata_cls: type[AscendMetadata] = AscendMetadata
 
+    def get_metadata_reuse_key(self, batch_global: bool, for_capture: bool, causal: bool) -> tuple | None:
+        if (
+            batch_global
+            and not for_capture
+            and type(self) is AscendAttentionMetadataBuilder
+            and self.supports_update_block_table
+        ):
+            return self.kv_cache_spec, self.decode_threshold, causal
+        return None
+
     def __init__(
         self,
         kv_cache_spec: AttentionSpec,

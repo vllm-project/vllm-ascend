@@ -60,6 +60,7 @@ from vllm.v1.kv_cache_interface import (
 )
 from vllm.v1.worker.gpu.attn_utils import get_shared_kv_cache_layers
 from vllm.v1.worker.gpu.model_states.interface import ModelSpecificAttnMetadata
+from vllm.v1.worker.gpu.model_states.mamba_hybrid import MambaHybridAttnMetadata
 from vllm.v1.worker.utils import AttentionGroup, customize_attention_spec
 
 from vllm_ascend.ascend_config import KVPPConfig, get_ascend_config
@@ -67,7 +68,7 @@ from vllm_ascend.attention.attention_c8_mxfp import (
     mxfp_cache_spec,
     mxfp_cache_views_for_spec,
 )
-from vllm_ascend.attention.attention_v1 import AscendAttentionState
+from vllm_ascend.attention.attention_v1 import AscendAttentionMetadataBuilder, AscendAttentionState
 from vllm_ascend.attention.dsa_attn_kv_plan import get_dsa_attn_kv_plan
 from vllm_ascend.attention.dsa_v1 import AscendDSAMetadataBuilder
 from vllm_ascend.attention.dsa_v41 import AscendDSAV41MetadataBuilder, DeepseekV41CacheBackend
@@ -106,6 +107,7 @@ from vllm_ascend.models.qwen4_exp.cache_config import (
     make_qsa_kernel_page_cache,
     make_slab_view,
 )
+from vllm_ascend.ops.gdn_attn_builder import AscendGDNAttentionMetadataBuilder
 from vllm_ascend.quantization.methods.kv_cache.turboquant import TURBOQUANT_CACHE_DTYPE
 from vllm_ascend.quantization.methods.kv_cache.turboquant.cache import uses_turboquant_groups
 from vllm_ascend.quantization.utils import enable_fa_quant
@@ -122,7 +124,6 @@ from vllm_ascend.worker.utils import (
     get_single_raw_mla_backing,
     make_page_strided_cache_view,
 )
-from vllm_ascend.worker.v2.attention_metadata_cache import AttentionMetadataCache
 
 if TYPE_CHECKING:
     from vllm_ascend.worker.v2.pcp_manager import AscendPCPAttentionContext
@@ -412,7 +413,15 @@ def build_attn_metadata(
     # Share request-level DSA metadata across cache groups in one execution.
     common_ratio_to_sas_metadata: dict[Any, Any] = {}
     common_v41_batch_metadata: dict[str, Any] = {}
-    cache = AttentionMetadataCache(model_specific_attn_metadata, num_reqs, for_cudagraph_capture)
+    cached_metadata: dict[tuple, Any] = {}
+    gdn_graph_updates: dict[tuple, tuple[Any, list]] = {}
+    provider = model_specific_attn_metadata
+    # Either provider hook may be overridden on an instance to return group-local inputs.
+    standard_mamba = type(provider) is MambaHybridAttnMetadata and not (
+        {"get_extra_common_attn_kwargs", "get_extra_attn_kwargs"} & vars(provider).keys()
+    )
+    batch_global = provider is None or standard_mamba
+    batch_common_kwargs = None
     seq_lens = seq_lens[:num_reqs]
     kv_cache_groups = kv_cache_config.kv_cache_groups
     batch_tq_slots = uses_turboquant_groups(kv_cache_groups)
@@ -463,7 +472,14 @@ def build_attn_metadata(
         group_causal = causal if isinstance(causal, bool) else causal.get(i, True)
         common_v41_metadata: dict[str, Any] = {}
 
-        common_attn_metadata_extra_kwargs = cache.common_kwargs(i)
+        if batch_common_kwargs is None:
+            common_attn_metadata_extra_kwargs = (
+                provider.get_extra_common_attn_kwargs(i, num_reqs) if provider is not None else {}
+            )
+            if standard_mamba:
+                batch_common_kwargs = common_attn_metadata_extra_kwargs.copy()
+        else:
+            common_attn_metadata_extra_kwargs = batch_common_kwargs.copy()
         v41_prefill_override = "is_prefilling" in common_attn_metadata_extra_kwargs
         common_is_prefilling = common_attn_metadata_extra_kwargs.pop(
             "is_prefilling",
@@ -541,8 +557,15 @@ def build_attn_metadata(
                     metadata_variants = ([(target_names, common_attn_metadata)] if target_names else []) + [
                         (draft_names, draft_common)
                     ]
-            reuse_key = cache.key_for(attn_metadata_builder, common_attn_metadata, common_attn_metadata_extra_kwargs)
-            template = cache.templates.get(reuse_key) if reuse_key is not None else None
+            reuse_key = None
+            if isinstance(attn_metadata_builder, (AscendGDNAttentionMetadataBuilder, AscendAttentionMetadataBuilder)):
+                can_share = (
+                    batch_global and common_attn_metadata.pcp_context is None and not common_attn_metadata_extra_kwargs
+                )
+                reuse_key = attn_metadata_builder.get_metadata_reuse_key(
+                    can_share, for_cudagraph_capture, common_attn_metadata.causal
+                )
+            template = cached_metadata.get(reuse_key) if reuse_key is not None else None
             attn_metadata_extra_kwargs = (
                 model_specific_attn_metadata.get_extra_attn_kwargs(
                     attn_metadata_builder,
@@ -587,9 +610,13 @@ def build_attn_metadata(
             group_pcp_context = pcp_context.for_attention_group(attn_group) if pcp_context is not None else None
             for variant_names, variant_common in metadata_variants:
                 if template is not None:
-                    cached_metadata, update_kwargs = template
+                    if reuse_key in gdn_graph_updates:
+                        attn_metadata_extra_kwargs["graph_state_updates"] = gdn_graph_updates[reuse_key][1]
                     metadata = attn_metadata_builder.update_block_table(
-                        cached_metadata, variant_common.block_table_tensor, variant_common.slot_mapping, **update_kwargs
+                        template,
+                        variant_common.block_table_tensor,
+                        variant_common.slot_mapping,
+                        **attn_metadata_extra_kwargs,
                     )
                 elif for_cudagraph_capture:
                     metadata = attn_metadata_builder.build_for_cudagraph_capture(
@@ -605,14 +632,17 @@ def build_attn_metadata(
                         **attn_metadata_extra_kwargs,
                     )
                 if reuse_key is not None and template is None:
-                    cache.store(reuse_key, metadata, attn_metadata_builder)
+                    cached_metadata[reuse_key] = metadata
+                    if (updater := getattr(attn_metadata_builder, "graph_state_updater", None)) is not None:
+                        gdn_graph_updates[reuse_key] = (updater, [])
                 if is_dsa_builder:
                     # Preserve sharing even if a builder replaces one of the
                     # dictionaries while constructing its metadata.
                     common_ratio_to_sas_metadata = attn_metadata_builder.common_ratio_to_sas_metadata  # type: ignore[assignment]
                 for layer_name in variant_names:
                     attn_metadata[layer_name] = metadata
-    cache.apply_graph_updates()
+    for updater, updates in gdn_graph_updates.values():
+        updater.apply(updates)
     return attn_metadata
 
 
