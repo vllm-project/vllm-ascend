@@ -25,7 +25,7 @@ Read linked documentation when it applies to the current task, using the relevan
     - [Model Runner Changes](#model-runner-changes)
 - [Release Notes](#release-notes)
 - [Commit Messages and Pull Requests](#commit-messages-and-pull-requests)
-    - [Duplicate-work Checks](#duplicate-work-checks)
+    - [Duplicate-work checks](#duplicate-work-checks)
     - [Commit Message Format](#commit-message-format)
 - [Quick Start for Contributors](#quick-start-for-contributors)
 - [References](#references)
@@ -260,12 +260,9 @@ For release management workflows (release checklist issues, critical bug triage,
 
 ## Commit Messages and Pull Requests
 
-### Duplicate-work Checks
+### Duplicate-work checks
 
-Before opening a PR, including a draft, search for open PRs that address the
-same problem. If there is a related issue, read its comments and search PR
-descriptions for the issue number. In all cases, search by a few keywords such as
-the affected component, symptom, or error message.
+Before proposing a PR, run these checks:
 
 ```bash
 gh issue view <issue_number> --repo vllm-project/vllm-ascend --comments
@@ -273,12 +270,8 @@ gh pr list --repo vllm-project/vllm-ascend --state open --search "<issue_number>
 gh pr list --repo vllm-project/vllm-ascend --state open --search "<short area keywords>"
 ```
 
-- Inspect the matching PRs. If an open PR already addresses the same problem,
-  contribute to that PR and do not open another.
-- If your approach is materially different, explain the difference in the
-  related issue when one exists.
-- Summarize the search in your PR description. Link any overlapping PRs
-  and explain how your PR differs.
+- If an open PR already addresses the same fix, do not open another.
+- If your approach is materially different, explain the difference in the issue.
 
 ### Commit Message Format
 
