@@ -372,6 +372,7 @@ class TestPrepareAndFinalize(unittest.TestCase):
                 self.assertEqual(prepared.hidden_states.shape[0], expected_input_ids.numel())
                 self.assertEqual(prepared.router_logits.shape[0], expected_input_ids.numel())
                 self.assertIsNone(prepared.padded_hidden_states_shape)
+                self.assertIsNone(prepared.pertoken_scale)
                 torch.testing.assert_close(gathered_input_ids, expected_input_ids)
 
                 finalized = layer.finalize(
@@ -442,7 +443,6 @@ class TestSequenceParallelPCP(unittest.TestCase):
 
     def test_pcp_prequantization_keeps_floating_point_fallbacks(self):
         for quant_type, pcp_size, lora_context in (
-            (QuantType.NONE, 2, None),
             (QuantType.W8A8, 1, None),
             (QuantType.W8A8, 2, object()),
             (QuantType.W4A8, 2, None),

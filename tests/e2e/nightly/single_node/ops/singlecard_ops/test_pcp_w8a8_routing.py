@@ -19,9 +19,8 @@ def test_prequantized_pcp_routing_matches_fused_quantization(num_tokens):
     # Padding rows must remain well-defined through either quantizer.
     if num_tokens > 1:
         hidden_states[0].zero_()
-    topk_ids = torch.stack([torch.randperm(NUM_EXPERTS)[:TOP_K] for _ in range(num_tokens)]).to(
-        device="npu", dtype=torch.int32
-    )
+    # Cyclic routing sends row 0 to local experts so its padding is compared.
+    topk_ids = torch.arange(num_tokens * TOP_K, device="npu", dtype=torch.int32).view(num_tokens, TOP_K) % NUM_EXPERTS
     quantized, scale = torch_npu.npu_dynamic_quant(hidden_states)
     routing_args = dict(
         active_num=num_tokens * TOP_K,

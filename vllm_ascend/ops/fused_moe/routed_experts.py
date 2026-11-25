@@ -28,7 +28,6 @@ from vllm.model_executor.layers.fused_moe.config import FusedMoEConfig
 from vllm.model_executor.layers.fused_moe.unquantized_fused_moe_method import UnquantizedFusedMoEMethod
 from vllm.model_executor.utils import replace_parameter
 
-from vllm_ascend._310p.fused_moe.grouped_topk_router import AscendGroupedTopKRouter310
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX, use_cann_megamoe
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
@@ -626,7 +625,7 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
             and (
                 self.apply_router_weight_on_input
                 # Subclasses can override expert selection and read activation values.
-                or type(self.router) not in (AscendFusedTopKRouter, AscendGroupedTopKRouter, AscendGroupedTopKRouter310)
+                or type(self.router) not in (AscendFusedTopKRouter, AscendGroupedTopKRouter)
             )
         ):
             prepare_quant_type = QuantType.NONE

@@ -11,7 +11,6 @@ from vllm.model_executor.layers.fused_moe.router.custom_routing_router import Cu
 
 import vllm_ascend.ops.fused_moe.prepare_finalize as prepare_module
 import vllm_ascend.ops.fused_moe.routed_experts as routed_experts_module
-from vllm_ascend._310p.fused_moe.grouped_topk_router import AscendGroupedTopKRouter310
 from vllm_ascend.ops.fused_moe.moe_comm_method import AllGatherCommImpl
 from vllm_ascend.ops.fused_moe.routed_experts import AscendRoutedExperts, EplbExpertTensorList
 from vllm_ascend.ops.fused_moe.router.fused_topk_router import AscendFusedTopKRouter
@@ -29,7 +28,6 @@ class _ModelRouter(AscendGroupedTopKRouter):
     [
         (AscendFusedTopKRouter, False, torch.int8),
         (AscendGroupedTopKRouter, False, torch.int8),
-        (AscendGroupedTopKRouter310, False, torch.int8),
         (AscendFusedTopKRouter, True, torch.bfloat16),
         (CustomRoutingRouter, False, torch.bfloat16),
         (_ModelRouter, False, torch.bfloat16),
