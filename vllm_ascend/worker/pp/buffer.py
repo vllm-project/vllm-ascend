@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Bounded snapshots of PP outputs whose sends may outlive the next forward."""
+"""Bounded storage for PP sends and dynamically allocated receives."""
 
 from collections import deque
 from collections.abc import Callable, Mapping, Sequence
@@ -185,3 +185,101 @@ class PPSendBuffer:
         self.cancel()
         while self._pending:
             self._finish_oldest()
+
+
+class _PendingReceive:
+    def __init__(self, device_module, tensors, handles, postprocess):
+        self.device_module = device_module
+        self.tensors = tensors
+        self.handles = handles
+        self.postprocess = postprocess
+        self.transport_waited = False
+        self.consumed = False
+        self.failure = None
+        self.done = None
+
+    def wait_transport(self):
+        if self.failure is not None:
+            raise RuntimeError("A PP receive previously failed") from self.failure
+        if not self.transport_waited:
+            try:
+                for handle in self.handles:
+                    handle.wait()
+            except Exception as error:
+                self.failure = error
+                raise
+            self.transport_waited = True
+
+    def wait(self):
+        if self.consumed:
+            return
+        self.wait_transport()
+        try:
+            consumer = self.device_module.current_stream()
+            for tensor in self.tensors.values():
+                if hasattr(tensor, "device") and tensor.device.type == "npu":
+                    tensor.record_stream(consumer)
+            for callback in self.postprocess:
+                callback()
+        except Exception as error:
+            self.failure = error
+            raise
+        self.consumed = True
+
+
+class PPRecvBuffer:
+    """Bound live receive batches without reserving or copying their payloads.
+
+    Call release after forward to fence all reads of the active input. A full
+    queue waits for the oldest consumer event before allocating another batch.
+    """
+
+    def __init__(self, capacity: int, device_module: Any, pp_group: Any):
+        if type(capacity) is not int or capacity < 1:
+            raise ValueError("PP receive buffer capacity must be a positive integer")
+        self.capacity = capacity
+        self._device_module = device_module
+        self._pp = pp_group
+        self._comm_stream = device_module.Stream()
+        self._pending = deque()
+        self._active = None
+        self.num_backpressure_waits = 0
+        self.num_receives = 0
+
+    @property
+    def pending_count(self):
+        return len(self._pending) + int(self._active is not None)
+
+    def receive(self, all_gather_group):
+        if self._active is not None:
+            raise RuntimeError("Release the preceding PP input before receiving again")
+        while self._pending and self._pending[0].done.query():
+            self._pending.popleft()
+        if len(self._pending) == self.capacity:
+            self.num_backpressure_waits += 1
+            self._pending[0].done.synchronize()
+            self._pending.popleft()
+        # Allocation and HCCL submission must not inherit the compute stream tail.
+        with self._device_module.stream(self._comm_stream):
+            tensors, handles, postprocess = self._pp.irecv_tensor_dict(all_gather_group=all_gather_group)
+        assert tensors is not None
+        self._active = _PendingReceive(self._device_module, tensors, handles, postprocess)
+        self.num_receives += 1
+        return tensors, [self._active], []
+
+    def release(self):
+        if self._active is None:
+            return
+        # Even an unused input must finish transport before its storage is freed.
+        self._active.wait_transport()
+        self._active.done = self._device_module.Event()
+        self._active.done.record(self._device_module.current_stream())
+        self._pending.append(self._active)
+        self._active = None
+
+    def drain(self):
+        if self._active is not None:
+            self._active.wait_transport()
+        self._device_module.synchronize()
+        self._active = None
+        self._pending.clear()

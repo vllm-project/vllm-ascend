@@ -938,11 +938,11 @@ class AscendConfig:
         # sparse KV offload vs packed SFA main cache mutex
         self._validate_sparse_packed_kv_offload_compatibility()
         if self.pp_send_buffer_size:
-            from vllm_ascend.worker.pp.config import get_pp_buffer_size
+            from vllm_ascend.worker.pp.config import get_pp_send_buffer_size
 
             from vllm_ascend.utils import enable_sp
 
-            get_pp_buffer_size(vc)
+            get_pp_send_buffer_size(vc)
             parallel = vc.parallel_config
             if (
                 enable_sp(vc)

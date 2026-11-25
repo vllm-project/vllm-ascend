@@ -6,7 +6,7 @@ from collections.abc import Mapping
 from typing import Any
 
 from vllm_ascend.worker.pp.buffer import PPSendBuffer
-from vllm_ascend.worker.pp.config import get_pp_buffer_size
+from vllm_ascend.worker.pp.config import get_pp_send_buffer_size
 
 
 class PPSendRuntime:
@@ -14,7 +14,7 @@ class PPSendRuntime:
         self.pp = pp_group
         self.tp = tp_group
         self.buffer = None
-        size = get_pp_buffer_size(config)
+        size = get_pp_send_buffer_size(config)
         if size and pp_group.world_size > 1 and not pp_group.is_last_rank:
             self.buffer = PPSendBuffer(size, device_module, metadata_handles=1)
             tensor_factory = model.make_empty_intermediate_tensors

@@ -143,7 +143,7 @@ torch.npu.config.allow_internal_format = True
 
 
 class NPUWorker(WorkerBase):
-    _pp_runtime: Any = None
+    _pp_send_runtime: Any = None
 
     def __init__(
         self,
@@ -228,7 +228,8 @@ class NPUWorker(WorkerBase):
         self.use_v2_model_runner = self.vllm_config.use_v2_model_runner
         self._kvpp_cache_allocation_plan: KVPPPhysicalCachePlan | None = None
         self._pp_send_work: list[Handle] = []
-        self._pp_runtime = None
+        self._pp_send_runtime = None
+        self._pp_recv_runtime = None
 
         ascend_compilation_config = get_ascend_config().ascend_compilation_config
         if ascend_compilation_config.enable_npugraph_ex and ascend_compilation_config.enable_static_kernel:
@@ -304,8 +305,10 @@ class NPUWorker(WorkerBase):
         self._sleep_saved_parameters.clear()
 
     def sleep(self, level: int = 1) -> None:
-        if self._pp_runtime is not None:
-            self._pp_runtime.drain()
+        if recv_runtime := getattr(self, "_pp_recv_runtime", None):
+            recv_runtime.drain()
+        if self._pp_send_runtime is not None:
+            self._pp_send_runtime.drain()
         self.synchronize_device()
         free_bytes_before_sleep = torch.npu.mem_get_info()[0]
         # Level-1 only offloads the weights pool. Persistent metadata such as
@@ -438,8 +441,10 @@ class NPUWorker(WorkerBase):
         self._weight_update_active = False
 
     def shutdown(self) -> None:
-        if self._pp_runtime is not None:
-            self._pp_runtime.drain()
+        if recv_runtime := getattr(self, "_pp_recv_runtime", None):
+            recv_runtime.drain()
+        if self._pp_send_runtime is not None:
+            self._pp_send_runtime.drain()
         state = getattr(getattr(self, "model_runner", None), "eplb_state", None)
         if isinstance(state, AscendEplbState):
             state.close()
@@ -723,10 +728,10 @@ class NPUWorker(WorkerBase):
             "isolate vLLM in its own container."
         )
         self.available_kv_cache_memory_bytes = self.requested_memory - profile_result.non_kv_cache_memory
-        if self._pp_runtime is not None and self._pp_runtime.buffer is not None:
+        if self._pp_send_runtime is not None and self._pp_send_runtime.buffer is not None:
             # Ascend profiling counts model weights and activation growth,
             # so separately budget persistent snapshots allocated after loading.
-            self.available_kv_cache_memory_bytes -= self._pp_runtime.buffer.reserved_bytes
+            self.available_kv_cache_memory_bytes -= self._pp_send_runtime.buffer.reserved_bytes
         self.available_kv_cache_memory_bytes = self._scale_kv_cache_memory_for_multi_group(
             self.available_kv_cache_memory_bytes,
         )
@@ -882,7 +887,8 @@ class NPUWorker(WorkerBase):
 
         intermediate_tensors = None
         forward_pass = scheduler_output.total_num_scheduled_tokens > 0
-        runtime = self._pp_runtime
+        runtime = self._pp_send_runtime
+        recv_runtime = getattr(self, "_pp_recv_runtime", None)
         if runtime is not None:
             runtime.prepare(scheduler_output)
         if forward_pass and not get_pp_group().is_first_rank:
@@ -890,9 +896,12 @@ class NPUWorker(WorkerBase):
                 all_gather_group = None
             else:
                 all_gather_group = get_tp_group()
-            tensor_dict, comm_handles, comm_postprocess = get_pp_group().irecv_tensor_dict(
-                all_gather_group=all_gather_group
-            )
+            if recv_runtime is not None:
+                tensor_dict, comm_handles, comm_postprocess = recv_runtime.receive(all_gather_group)
+            else:
+                tensor_dict, comm_handles, comm_postprocess = get_pp_group().irecv_tensor_dict(
+                    all_gather_group=all_gather_group
+                )
             assert tensor_dict is not None
             intermediate_tensors = AsyncIntermediateTensors(
                 tensor_dict,
@@ -908,6 +917,8 @@ class NPUWorker(WorkerBase):
             if runtime is not None:
                 runtime.cancel()
             raise
+        if recv_runtime is not None:
+            recv_runtime.release()
         if self.use_v2_model_runner and self.model_runner.is_pooling_model and output is None:
             output = self.model_runner.pool()  # type: ignore
         if isinstance(output, (ModelRunnerOutput, AsyncModelRunnerOutput, NoneType)):
@@ -984,10 +995,17 @@ class NPUWorker(WorkerBase):
             get_ec_transfer().start_worker_services()
 
         additional = self.vllm_config.additional_config or {}
+        from vllm_ascend.worker.pp.config import get_pp_recv_buffer_size
+
+        recv_size = get_pp_recv_buffer_size(self.vllm_config)
+        if recv_size and not get_pp_group().is_first_rank:
+            from vllm_ascend.worker.pp.buffer import PPRecvBuffer
+
+            self._pp_recv_runtime = PPRecvBuffer(recv_size, torch.npu, get_pp_group())
         if additional.get("pp_send_buffer_size", 0):
             from vllm_ascend.worker.pp.runtime import PPSendRuntime
 
-            self._pp_runtime = PPSendRuntime(
+            self._pp_send_runtime = PPSendRuntime(
                 self.vllm_config,
                 self.model_runner.model,
                 self.device,
