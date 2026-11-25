@@ -1743,7 +1743,10 @@ class TestMemcacheBackendMethods(unittest.TestCase):
             patch(f"{module_path}.time.sleep"),
             patch(f"{module_path}._read_driver_innerversion", return_value=None),
         ):
-            with self.assertRaisesRegex(RuntimeError, "return code -1"):
+            with self.assertRaisesRegex(
+                RuntimeError,
+                r"return code -1.*missing/empty driver version file",
+            ):
                 b._setup_store()
 
     def test_read_driver_innerversion_missing_file(self):

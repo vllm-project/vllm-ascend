@@ -272,20 +272,11 @@ class MemcacheBackend(Backend):
             self.set_device()
         store = DistributedObjectStore()
 
-        # memfabric validates the host driver version during init. A missing or
-        # empty version.info makes that check fail with a misleading "driver
-        # does not support mf" message, so surface the effective version here
-        # before the store is created.
+        # memfabric validates the host driver version during init. Surface the
+        # effective version for diagnosis; the init failure below includes the
+        # missing-file and mount hints when validation fails.
         driver_version = _read_driver_innerversion()
-        if driver_version is None:
-            logger.warning(
-                "Memcache driver version file %s is missing or empty. "
-                "memfabric will fail to validate the Ascend driver; mount the "
-                "host driver directory into the container (e.g. "
-                "-v /usr/local/Ascend/driver:/usr/local/Ascend/driver).",
-                ASCEND_DRIVER_VERSION_INFO_PATH,
-            )
-        else:
+        if driver_version is not None:
             logger.info("Memcache driver Innerversion=%s", driver_version)
 
         try:
