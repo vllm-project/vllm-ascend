@@ -1,4 +1,0 @@
-pr: 23135
-entries:
-  - category: bugfix
-    text: Fixed corrupted or repeated output in Mooncake Pull PD inference with C8 MXFP KV cache when a transferred request reuses a physical cache page.

@@ -38,7 +38,7 @@ from vllm_ascend.attention.mla_v1 import AscendMLABackend, AscendMLAImpl
 from vllm_ascend.model_executor.offloader import AscendPrefetchOffloader
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch, AscendInputBuffers
 from vllm_ascend.worker.v2.kv_connector import C8VScaleKVConnector
-from vllm_ascend.worker.v2.model_runner import NPUModelRunner
+from vllm_ascend.worker.v2.model_runner import NPUModelRunner, _kv_connector_tree
 from vllm_ascend.worker.v2.pcp_manager import AscendPCPManager
 from vllm_ascend.worker.v2.spec_decode import pcp_utils as draft_pcp_utils
 from vllm_ascend.worker.v2.spec_decode.dflash import speculator as ascend_dflash
@@ -2281,6 +2281,18 @@ def test_c8_connector_restores_after_delegate_pre_forward():
     connector.pre_forward(output)
 
     assert calls == ["delegate", ("restore", output)]
+
+
+def test_kv_connector_tree_includes_pool_and_mooncake_children():
+    mooncake = SimpleNamespace()
+    pool = SimpleNamespace(requires_mamba_state_copy_after_load=True)
+    nested = SimpleNamespace(sub_connectors=[mooncake, pool])
+    root = SimpleNamespace(sub_connectors=[nested])
+
+    connectors = list(_kv_connector_tree(root))
+
+    assert connectors == [root, nested, mooncake, pool]
+    assert any(getattr(connector, "requires_mamba_state_copy_after_load", False) for connector in connectors)
 
 
 def test_fill_c8_mxfp_v_scale_caches_fills_and_registers():

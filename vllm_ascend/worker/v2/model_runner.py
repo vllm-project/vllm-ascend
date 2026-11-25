@@ -19,7 +19,7 @@
 
 import inspect
 import logging
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
 from contextlib import AbstractContextManager, contextmanager, nullcontext
 from copy import deepcopy
 from typing import TYPE_CHECKING, Any
@@ -157,6 +157,13 @@ from vllm_ascend.worker.v2.utils import (
 
 if TYPE_CHECKING:
     from vllm.v1.worker.utils import AttentionGroup
+
+
+def _kv_connector_tree(connector: Any) -> Iterator[Any]:
+    """Include connectors nested in a vLLM MultiConnector."""
+    yield connector
+    for child in getattr(connector, "sub_connectors", ()):
+        yield from _kv_connector_tree(child)
 
 
 class NPUModelRunner(GPUModelRunner):
@@ -599,7 +606,10 @@ class NPUModelRunner(GPUModelRunner):
         if (
             callable(copy_mamba_state)
             and has_kv_transfer_group()
-            and getattr(get_kv_transfer_group(), "requires_mamba_state_copy_after_load", False)
+            and any(
+                getattr(connector, "requires_mamba_state_copy_after_load", False)
+                for connector in _kv_connector_tree(get_kv_transfer_group())
+            )
         ):
             self.kv_connector = MambaCopyKVConnector(self.kv_connector, copy_mamba_state)
 
@@ -639,7 +649,10 @@ class NPUModelRunner(GPUModelRunner):
         ):
             from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.connector import MooncakePullConnector
 
-            if type(get_kv_transfer_group()) is MooncakePullConnector:
+            if any(
+                isinstance(connector, MooncakePullConnector)
+                for connector in _kv_connector_tree(get_kv_transfer_group())
+            ):
                 self.kv_connector = C8VScaleKVConnector(self.kv_connector, self._restore_c8_mxfp_loaded_v_scales)
         guard = getattr(self, "_kv_trace", None)
         if guard is not None:
