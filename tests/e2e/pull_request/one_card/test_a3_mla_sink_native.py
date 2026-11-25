@@ -14,6 +14,7 @@ import sys
 from dataclasses import dataclass, replace
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
 import torch
@@ -202,6 +203,35 @@ def test_native_split_query_and_fused_dcp_mask_graph(sink, tokens):
         assert output_mask.data_ptr() == pointer
 
 
+@pytest.mark.parametrize("causal,heads", [(False, 96), (True, 6)])
+def test_native_matches_fia_on_live_dcp_rows(sink, causal, heads):
+    qlens, klens = (2, 1), ((2, 1) if causal else (257, 33))
+    adapter, data, _ = make_case(sink, torch.bfloat16, qlens, klens, causal, heads=heads)
+    output, lse = invoke(adapter, data)
+    content, rope = data["k_cache"]
+    q = data["q"]
+    fia, fia_lse = torch_npu.npu_fused_infer_attention_score_v2(
+        q[..., :512].contiguous(),
+        content.transpose(1, 2).contiguous(),
+        content.transpose(1, 2).contiguous(),
+        query_rope=q[..., 512:].contiguous(),
+        key_rope=rope.transpose(1, 2).contiguous(),
+        num_query_heads=heads,
+        num_key_value_heads=1,
+        input_layout="TND",
+        softmax_scale=adapter.config.softmax_scale,
+        block_table=data["block_table"],
+        block_size=128,
+        actual_seq_qlen=[2, 3],
+        actual_seq_kvlen=list(klens),
+        atten_mask=torch.ones(2048, 2048, dtype=torch.bool, device="npu").triu(1) if causal else None,
+        sparse_mode=3 if causal else 0,
+        return_softmax_lse=True,
+    )
+    torch.testing.assert_close(output, fia.transpose(0, 1), atol=0.003, rtol=0.02)
+    torch.testing.assert_close(lse, fia_lse.reshape(3, heads).T, atol=0.003, rtol=0.001)
+
+
 def test_native_eager_does_not_read_device_scalars(sink):
     adapter, data, _ = make_case(sink, torch.bfloat16, (2, 1), (257, 33), False)
     invoke(adapter, data)
@@ -236,7 +266,15 @@ def test_native_production_builder_refreshes_padded_batch(sink):
         or isinstance(node, ast.Assign)
         and any(isinstance(target, ast.Name) and target.id in names for target in node.targets)
     ]
-    scope = dict(torch=torch, dataclass=dataclass, replace=replace, FlashMLAImpl=object, A3MLAAdapter=sink.A3MLAAdapter)
+    scope = dict(
+        torch=torch,
+        dataclass=dataclass,
+        replace=replace,
+        FlashMLAImpl=object,
+        Any=Any,
+        QuantFlashMLAImpl=object,
+        A3MLAAdapter=sink.A3MLAAdapter,
+    )
     exec(compile(ast.Module(nodes, type_ignores=[]), str(path), "exec"), scope)
     adapter, data, oracle = make_case(sink, torch.bfloat16, (2, 1), (257, 33), False, padded=True)
     impl = SimpleNamespace(
@@ -245,6 +283,7 @@ def test_native_production_builder_refreshes_padded_batch(sink):
         scale=adapter.config.softmax_scale,
         dtype=torch.bfloat16,
         use_mla_rope=False,
+        use_quant_flashmla=False,
         vllm_config=SimpleNamespace(speculative_config=object()),
     )
     builder = scope["FlashMLAMetadataBuilder"](impl, torch.device("npu"), 4, torch.empty(0, device="npu"))

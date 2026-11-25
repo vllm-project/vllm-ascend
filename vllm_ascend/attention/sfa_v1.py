@@ -596,6 +596,7 @@ class AscendSFAMetadataBuilder(MLACommonMetadataBuilder[AscendSFAMetadata]):
         self.nope = layer.qk_rope_head_dim == 0
         self.use_rope = not getattr(vllm_config.model_config.hf_text_config, "mla_use_nope", False)
         self.nope_states: dict[int | None, SparseMLAMetadataState] = {}
+
         self.use_pcp = vllm_config.parallel_config.prefill_context_parallel_size > 1
         self.is_pcp_decode_sharded = vllm_config.parallel_config.pcp_shard_decode_requests
         self.speculative_config = vllm_config.speculative_config
@@ -717,9 +718,9 @@ class AscendSFAMetadataBuilder(MLACommonMetadataBuilder[AscendSFAMetadata]):
             seq_lens_cpu = common_attn_metadata._seq_lens_cpu[:num_reqs]
         elif common_attn_metadata.seq_lens_cpu is not None:
             seq_lens_cpu = common_attn_metadata.seq_lens_cpu[:num_reqs]
-        elif self.nope or getattr(self, "allow_a3_device_lengths", False):
-            # These consumers use device lengths and scheduler upper bounds;
-            # do not recreate an exact CPU mirror when it is absent.
+        elif self.nope:
+            # MTP accepted counts are device-resident. NoPE operators use
+            # device lengths and scheduler upper bounds, so need no CPU copy.
             seq_lens_cpu = None
         else:
             seq_lens_cpu = common_attn_metadata.seq_lens[:num_reqs].to("cpu")

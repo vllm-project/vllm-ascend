@@ -489,7 +489,6 @@ class NPUModelRunner(GPUModelRunner):
     ) -> None:
         # Match V1's physical buffer plan without mutating the scheduler's
         # logical cache configuration. Allocation must honor zero-stride aliases.
-        self._a3_target_device_lengths = False
         kv_cache_config = deepcopy(kv_cache_config)
         sparse_cfg = self.ascend_config.sparse_kv_offload_config
         configure_dspark_kv_transfer(
@@ -606,7 +605,6 @@ class NPUModelRunner(GPUModelRunner):
             for layer in self.compilation_config.static_forward_context.values()
         ):
             self.attn_groups = target_attn_groups_without_draft_flashmla(self.attn_groups, draft_layer_names)
-            self._a3_target_device_lengths = self._configure_a3_target_lengths(draft_layer_names)
         self.use_fia = any(
             (group.backend is AscendAttentionBackend or group.backend is AscendMLABackend)
             and any(layer_name not in draft_layer_names for layer_name in group.layer_names)
@@ -1385,45 +1383,6 @@ class NPUModelRunner(GPUModelRunner):
         self._finalize_dump_data(dump=False)
         return output
 
-    def _configure_a3_target_lengths(self, draft_layer_names: set[str]) -> bool:
-        """Bind the K3.1 target length policy once per KV cache initialization."""
-        from vllm.v1.worker.gpu.model_states.recoverssm import RecoverSSMState
-
-        from vllm_ascend.attention.context_parallel.sfa_cp import AscendSFADCPMetadataBuilder
-        from vllm_ascend.attention.indexer import AscendSFAIndexerMetadataBuilder
-        from vllm_ascend.attention.sfa_v1 import AscendSFAMetadataBuilder
-        from vllm_ascend.models.kimi_k3.recoverssm_metadata import AscendKimiKDARecoverSSMMetadataBuilder
-        from vllm_ascend.ops.kimi_kda import KimiKDAHostMetadataBuilder
-        from vllm_ascend.worker.v2.model_states.mamba_hybrid import AscendMambaHybridModelState
-
-        if (
-            type(self.model_state) is not AscendMambaHybridModelState
-            # Native RecoverSSM commits accepted tokens using device lengths and state indices.
-            or (self.model_state.recoverssm is not None and type(self.model_state.recoverssm) is not RecoverSSMState)
-            or self.parallel_config.prefill_context_parallel_size != 1
-        ):
-            return False
-        sfa_types = (AscendSFAMetadataBuilder, AscendSFADCPMetadataBuilder)
-        supported = (
-            *sfa_types,
-            AscendSFAIndexerMetadataBuilder,
-            KimiKDAHostMetadataBuilder,
-            AscendKimiKDARecoverSSMMetadataBuilder,
-        )
-        builders = [
-            builder
-            for groups in self.attn_groups
-            for group in groups
-            if any(name not in draft_layer_names for name in group.layer_names)
-            for builder in group.metadata_builders
-        ]
-        if not builders or any(type(builder) not in supported for builder in builders):
-            return False
-        for builder in builders:
-            if type(builder) in sfa_types:
-                builder.allow_a3_device_lengths = True
-        return True
-
     def initialize_spec_cpu_length_sync(self) -> None:
         """Initialize model-specific and draft length policies after attention setup."""
         initialize_cpu_lengths = getattr(self.model_state, "initialize_spec_cpu_length_sync", None)
@@ -1488,17 +1447,13 @@ class NPUModelRunner(GPUModelRunner):
 
         draft_architectures = spec.draft_model_config.architectures or ()
         use_flashmla = getattr(self.speculator, "use_flashmla", False)
-        # Backend selection already checked the PD cache layout. Only the
-        # initialized target consumers remain to be checked here, as on A5.
-        a3_device_lengths = getattr(self.speculator, "use_a3_mla_sink", False) and getattr(
-            self, "_a3_target_device_lengths", False
-        )
         # K3.1 SFA/KDA and the FlashMLA draft consume corrected device lengths.
         # The initialized target producer also covers sharded SFA DCP metadata.
         kimi_k31_device_lengths = (
             self.model_config.architecture == "KimiK31ForConditionalGeneration"
             and "K3DSparkModel" in draft_architectures
-            and ((use_flashmla and getattr(self.model_state, "device_metadata", None) is not None) or a3_device_lengths)
+            and use_flashmla
+            and getattr(self.model_state, "device_metadata", None) is not None
         )
         if not kimi_k31_device_lengths and (
             self.model_config.architecture
@@ -1524,7 +1479,6 @@ class NPUModelRunner(GPUModelRunner):
             and (
                 all(backend is AscendFlashAttentionBackend for backend in draft_backends.values())
                 or getattr(self.speculator, "use_flashmla", False)
-                or a3_device_lengths
             )
             and parallel_config.pipeline_parallel_size == 1
             and parallel_config.prefill_context_parallel_size == 1

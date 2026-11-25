@@ -8,9 +8,12 @@ Each packed Q segment is wholly live or wholly padding; the builder sets
 padding KV lengths to zero before either operator consumes them.
 """
 
+import json
 import math
 from dataclasses import dataclass, replace
 from importlib import import_module
+from importlib.metadata import PackageNotFoundError, distribution
+from pathlib import Path
 from typing import Any
 
 import torch
@@ -20,6 +23,28 @@ LATENT_DIM = 512
 QK_DIM = ROPE_DIM + LATENT_DIM
 PAGE_SIZE = 128
 OPERATOR_MODULE = "flash_attn_npu_3"
+
+
+# Both patched and unpatched builds report 0.5.3. Pin the wheel tested on A3
+# until the provider publishes a distinct release with the eager scalar-read fix.
+_VALIDATED_WHEEL_SHA256 = "763de22f3d1d68239ce3e43ecf0965563576d22437f4784bdb56567376d6d124"
+
+
+def _validated_provider(module):
+    try:
+        dist = distribution("flash-attn-npu")
+    except PackageNotFoundError:
+        return False
+    if Path(module.__file__).resolve() != Path(dist.locate_file("flash_attn_npu_3/__init__.py")).resolve():
+        return False
+    provenance = dist.read_text("direct_url.json")
+    if not provenance:
+        return False
+    try:
+        archive = json.loads(provenance)["archive_info"]
+        return archive["hashes"]["sha256"] == _VALIDATED_WHEEL_SHA256
+    except (KeyError, TypeError, ValueError):
+        return False
 
 
 def get_a3_mla_ops():
@@ -32,7 +57,9 @@ def get_a3_mla_ops():
         raise
     attention = getattr(module, "flash_attn_with_kvcache", None)
     metadata = getattr(module, "get_scheduler_metadata", None)
-    return (attention, metadata) if callable(attention) and callable(metadata) else None
+    if callable(attention) and callable(metadata) and _validated_provider(module):
+        return attention, metadata
+    return None
 
 
 @dataclass(frozen=True)
@@ -102,7 +129,8 @@ class A3MLAAdapter:
         ops = get_a3_mla_ops()
         if ops is None:
             raise ImportError(
-                "A3 MLA requires flash_attn_with_kvcache and get_scheduler_metadata in " + OPERATOR_MODULE
+                "A3 MLA requires a validated build with flash_attn_with_kvcache and get_scheduler_metadata in "
+                + OPERATOR_MODULE
             )
         return cls(config, *ops)
 
