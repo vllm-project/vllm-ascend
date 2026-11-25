@@ -1196,9 +1196,11 @@ def test_d_side_control_plane_port_uses_global_dp_rank(dp_rank, tp_size, expecte
     """SFAPDRD2HScheduler must derive the TP control-plane port from the GLOBAL
     data_parallel_rank (never the per-host local rank) so single-host and
     multi-host DP both get disjoint per-engine port ranges."""
+    from tests.ut.kv_cache_test_utils import make_full_attention_layer_config, make_kv_cache_group
+
     kv_port = 1000
     kv_cache_config = SimpleNamespace(
-        kv_cache_groups=[SimpleNamespace(kv_cache_spec=SimpleNamespace(block_size=16))],
+        kv_cache_groups=[make_kv_cache_group(["layer.0"], make_full_attention_layer_config(block_size=16))],
         num_blocks=8,
     )
     vllm_config = SimpleNamespace(

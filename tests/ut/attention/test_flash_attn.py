@@ -11,18 +11,23 @@ from vllm.config import AttentionConfig
 from vllm.model_executor.layers.attention.attention import Attention
 from vllm.v1.attention.backend import AttentionType
 from vllm.v1.attention.selector import AttentionSelectorConfig
-from vllm.v1.kv_cache_interface import FullAttentionSpec
+from vllm.v1.kv_cache_interface import AttentionSpec
 
 from vllm_ascend.attention.attention_v1 import AscendAttentionBackend
 from vllm_ascend.attention.fa_v1 import AscendFlashAttentionBackend, AscendFlashAttentionImpl
 from vllm_ascend.models.minimax_m3 import msa_m3
+from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2 import attn_utils
 
 
 @pytest.mark.parametrize("head_size", [64, 72, 128, 192, 256])
 @pytest.mark.parametrize("padding", [None, 64, 1048576])
 def test_flash_attn_physical_cache_budget(head_size, padding):
-    original = FullAttentionSpec(
+    if vllm_version_is("0.34.0"):
+        from vllm.v1.kv_cache_interface import FullAttentionSpec as spec_cls
+    else:
+        spec_cls = AttentionSpec
+    original = spec_cls(
         block_size=128, num_kv_heads=8, head_size=head_size, dtype=torch.bfloat16, page_size_padded=padding
     )
     physical = AscendFlashAttentionBackend.customize_spec(original)
@@ -132,7 +137,10 @@ def test_flash_attn_192_cache_spec_integration(monkeypatch, backend):
         cache_config=SimpleNamespace(cache_dtype="fp8", block_size=128, skip_page_size_padded=None),
     )
     monkeypatch.setattr(attn_utils, "get_layers_from_vllm_config", lambda *_args: {"draft.attn": layer})
-    spec = attn_utils.get_kv_cache_spec(config)["draft.attn"]
+    if vllm_version_is("0.34.0"):
+        spec = attn_utils.get_kv_cache_spec(config)["draft.attn"]
+    else:
+        spec = attn_utils.get_kv_cache_layer_configs(config)["draft.attn"].spec
     physical_size = 256 if backend is AscendFlashAttentionBackend else 192
     assert spec.head_size == spec.head_size_v == physical_size
     assert spec.page_size_bytes == 2 * 128 * 8 * physical_size * 2
@@ -534,16 +542,24 @@ def test_only_undersized_draft_swa_pages_drop_inherited_padding(
         attention_config=AttentionConfig(),
         cache_config=SimpleNamespace(cache_dtype="fp8", block_size=128, skip_page_size_padded=padding),
     )
-    original = layer.get_kv_cache_spec(config)
+    is_v034 = vllm_version_is("0.34.0")
+    method_name = "get_kv_cache_spec" if is_v034 else "get_kv_cache_config"
+    original_entry = getattr(layer, method_name)(config)
+    original = original_entry if is_v034 else original_entry.spec
     incompatible = window is not None and padding_kind == "undersized"
     if incompatible:
         with pytest.raises(AssertionError):
             _ = original.page_size_bytes
-    get_spec = Mock(wraps=layer.get_kv_cache_spec)
-    monkeypatch.setattr(layer, "get_kv_cache_spec", get_spec)
+    get_spec = Mock(wraps=getattr(layer, method_name))
+    monkeypatch.setattr(layer, method_name, get_spec)
     monkeypatch.setattr(attn_utils, "get_layers_from_vllm_config", lambda *_args: {"draft.attn": layer})
 
-    spec = attn_utils.get_kv_cache_spec(config)["draft.attn"]
+    if is_v034:
+        result = attn_utils.get_kv_cache_spec(config)["draft.attn"]
+        spec = result
+    else:
+        result = attn_utils.get_kv_cache_layer_configs(config)["draft.attn"]
+        spec = result.spec
 
     recover = incompatible and is_draft
     if incompatible and not is_draft:
@@ -554,8 +570,8 @@ def test_only_undersized_draft_swa_pages_drop_inherited_padding(
         assert spec.page_size_bytes == (expected_padding or natural_page)
         assert spec.page_size_padded == expected_padding
     # Both supported versions propagate the draft marker.
-    if hasattr(original, "is_draft"):
-        assert spec.is_draft is is_draft
+    if hasattr(result, "is_draft"):
+        assert result.is_draft is is_draft
     assert config.cache_config.skip_page_size_padded == padding
     assert get_spec.call_count == (2 if recover else 1)
     assert get_spec.call_args_list[0].args[0] is config

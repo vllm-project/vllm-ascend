@@ -17,18 +17,23 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorTransfe
 from vllm.logger import logger
 from vllm.model_executor.models.utils import extract_layer_index
 from vllm.utils.network_utils import make_zmq_path, make_zmq_socket
+from vllm.v1.core.single_type_kv_cache_manager import (
+    FullAttentionManager,
+    SlidingWindowManager,
+)
 from vllm.v1.kv_cache_interface import (
-    FullAttentionSpec,
+    AttentionSpec,
     MambaSpec,
-    MLAAttentionSpec,
-    SlidingWindowMLASpec,
-    SlidingWindowSpec,
 )
 from zmq.constants import SocketOption, SocketType
 from zmq.error import Again, ZMQError
 from zmq.sugar.context import Context
 
-from vllm_ascend.core.kv_cache_interface import AscendSFAIndexerCacheSpec, is_circular_kv_cache_spec
+from vllm_ascend.core.kv_cache_interface import (
+    MLA_SPEC_TYPES,
+    AscendSFAIndexerCacheSpec,
+    is_circular_cache_group,
+)
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.base_worker import MooncakeBaseConnectorWorker
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.metadata import (
     MooncakeConnectorMetadata,
@@ -443,12 +448,14 @@ class MooncakePushConnectorWorker(MooncakeBaseConnectorWorker):
         """Resolve each peer's sequence sharding independently for this cache."""
         if self.dcp_size == remote.dcp_size == 1:
             return 1, 1
-        spec = self.kv_cache_specs[self.layer_name_to_spec_index[layer_name]]
+        spec_index = self.layer_name_to_spec_index[layer_name]
+        spec = self.kv_cache_specs[spec_index]
+        group = self.spec_index_to_group[spec_index]
         pp = remote.metadata_by_pp_rank[rank[0]]
         index = pp.layer_names.index(layer_name)
         local_size = self.dcp_size if spec.dcp_sharded else 1
         remote_size = remote.dcp_size if pp.dcp_sharded[index] else 1
-        if is_circular_kv_cache_spec(spec):
+        if is_circular_cache_group(group):
             return 1, 1
         if isinstance(spec, AscendSFAIndexerCacheSpec):
             # Packed indexer pages already contain all DCP sequence pieces.
@@ -471,7 +478,9 @@ class MooncakePushConnectorWorker(MooncakeBaseConnectorWorker):
         if remote_index not in worker.layer_indices:
             return None
         local_dcp_size, remote_dcp_size = self._get_layer_dcp_sizes(layer_name, remote, rank)
-        spec = self.kv_cache_specs[self.layer_name_to_spec_index[layer_name]]
+        spec_index = self.layer_name_to_spec_index[layer_name]
+        spec = self.kv_cache_specs[spec_index]
+        group = self.spec_index_to_group[spec_index]
         local_rank = self.tp_rank
         remote_rank = rank[2]
         local_size, remote_size = self.tp_size, remote.tp_size
@@ -491,7 +500,7 @@ class MooncakePushConnectorWorker(MooncakeBaseConnectorWorker):
                 local_rank // ratio == remote_rank if local_size >= remote_size else remote_rank // ratio == local_rank
             )
             return (0, 0, 1) if matched else None
-        whole = isinstance(spec, (MLAAttentionSpec, SlidingWindowMLASpec)) or is_circular_kv_cache_spec(spec)
+        whole = isinstance(spec, MLA_SPEC_TYPES) or is_circular_cache_group(group)
         if whole:
             # Registration exposes each KVPP target layer only on its persistent owner.
             # That owner supplies the full page to every destination holding the layer.
@@ -503,7 +512,10 @@ class MooncakePushConnectorWorker(MooncakeBaseConnectorWorker):
             owner = (rank[2] * remote.pcp_size + rank[1]) % replicas
             local_group = (self.tp_rank * self.pcp_size + self.pcp_rank) // local_dcp_size
             return (0, 0, 1) if local_group == owner else None
-        if not isinstance(spec, (FullAttentionSpec, SlidingWindowSpec)):
+        if not (
+            isinstance(spec, AttentionSpec)
+            and issubclass(group.manager_cls, (FullAttentionManager, SlidingWindowManager))
+        ):
             raise ValueError(f"Unsupported Push cache spec: {type(spec).__name__}")
         if local_dcp_size > 1 or remote_dcp_size > 1:
             raise ValueError(f"Push DCP does not support cache spec {type(spec).__name__}")
@@ -544,13 +556,12 @@ class MooncakePushConnectorWorker(MooncakeBaseConnectorWorker):
         pp = remote.metadata_by_pp_rank[params["consumer_rank"][0]]
         local_index = self._layer_indices[layer_name]
         remote_index = pp.layer_names.index(layer_name)
-        spec = self.kv_cache_specs[self.layer_name_to_spec_index[layer_name]]
+        spec_index = self.layer_name_to_spec_index[layer_name]
+        spec = self.kv_cache_specs[spec_index]
+        group = self.spec_index_to_group[spec_index]
+        is_circular = is_circular_cache_group(group)
         final = available >= meta.num_prompt_tokens
-        final_only = (
-            isinstance(spec, MambaSpec)
-            or is_circular_kv_cache_spec(spec)
-            or getattr(spec, "sliding_window", None) is not None
-        )
+        final_only = isinstance(spec, MambaSpec) or is_circular or group.sliding_window_reach > 0
         if final_only and not final:
             return None
         local_blocks = meta.local_block_ids[self.transfer_metadata.group_indices[local_index]]
@@ -562,7 +573,7 @@ class MooncakePushConnectorWorker(MooncakeBaseConnectorWorker):
             remote_ids = [remote_blocks[-1]]
             if not local_ids[0] or not remote_ids[0]:
                 raise ValueError("Required Mamba state block is not resident")
-        elif is_circular_kv_cache_spec(spec):
+        elif is_circular:
             if len(local_blocks) != 1 or len(remote_blocks) != 1:
                 raise ValueError("Circular Push requires one state block per request")
             local_scale = self.transfer_metadata.block_size_scales[local_index][0]
@@ -598,7 +609,7 @@ class MooncakePushConnectorWorker(MooncakeBaseConnectorWorker):
                 return None
             if final_only:
                 # Window tables retain logical positions, including null slots.
-                start = max(start, end - getattr(spec, "num_retained_tokens", spec.sliding_window - 1) - 1)
+                start = max(start, end - group.sliding_window_reach - 1)
             first, last = start // block_size, (end + block_size - 1) // block_size
             local_ids, remote_ids = [], []
             for index in range(first, last):
@@ -644,7 +655,9 @@ class MooncakePushConnectorWorker(MooncakeBaseConnectorWorker):
             pp = remote.metadata_by_pp_rank[batch.remote_rank[0]]
             remote_index = pp.layer_names.index(batch.layer_name)
             worker = pp.metadata_by_pcp_rank[batch.remote_rank[1]].metadata_by_tp_rank[batch.remote_rank[2]]
-            spec = self.kv_cache_specs[self.layer_name_to_spec_index[batch.layer_name]]
+            spec_index = self.layer_name_to_spec_index[batch.layer_name]
+            spec = self.kv_cache_specs[spec_index]
+            group = self.spec_index_to_group[spec_index]
             if isinstance(spec, MambaSpec):
                 self._append_mamba_transfer_addresses(
                     spec,
@@ -666,7 +679,7 @@ class MooncakePushConnectorWorker(MooncakeBaseConnectorWorker):
                 partition = self._get_transfer_partition(batch.layer_name, remote, batch.remote_rank)
                 assert partition is not None
                 local_offset, remote_offset, heads = partition
-                whole = isinstance(spec, (MLAAttentionSpec, SlidingWindowMLASpec)) or is_circular_kv_cache_spec(spec)
+                whole = isinstance(spec, MLA_SPEC_TYPES) or is_circular_cache_group(group)
                 local = self.transfer_metadata
                 for cache_index, (local_addr, remote_addr) in enumerate(
                     zip(local.kv_caches_base_addr[local_index], worker.kv_caches_base_addr[remote_index], strict=True)

@@ -25,6 +25,7 @@ from vllm_ascend._310p.worker.v2.sampler import Ascend310PSampler
 from vllm_ascend._310p.worker.v2.states import Ascend310PStagedWriteTensor
 from vllm_ascend.device.hardware import AscendDeviceType
 from vllm_ascend.device.hardware_profile import get_hardware_profile
+from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2.model_runner import NPUModelRunner
 from vllm_ascend.worker.v2.model_states.default import AscendModelState
 from vllm_ascend.worker.v2.model_states.mamba_hybrid import AscendMambaHybridModelState
@@ -251,22 +252,25 @@ def test_get_kv_cache_spec_restores_qwen35_linear_attn() -> None:
     runner = object.__new__(NPUModelRunner310V2)
     runner.device = torch.device("cpu")
     runner.vllm_config = object()
-    restored = object()
-    linear_layer = SimpleNamespace(get_kv_cache_spec=lambda _cfg: restored)
+    is_v034 = vllm_version_is("0.34.0")
+    restored = object() if is_v034 else SimpleNamespace(manager_cls=object)
+    layer_getter = "get_kv_cache_spec" if is_v034 else "get_kv_cache_config"
+    runner_method = "get_kv_cache_spec" if is_v034 else "get_kv_cache_layer_configs"
+    linear_layer = SimpleNamespace(**{layer_getter: lambda _cfg: restored})
     runner.compilation_config = SimpleNamespace(
         static_forward_context={
             "model.layers.0.self_attn": object(),
             "model.layers.1.linear_attn": linear_layer,
-            "model.layers.2.linear_attn": SimpleNamespace(get_kv_cache_spec=lambda _cfg: None),
+            "model.layers.2.linear_attn": SimpleNamespace(**{layer_getter: lambda _cfg: None}),
         }
     )
 
     with patch.object(
         NPUModelRunner,
-        "get_kv_cache_spec",
+        runner_method,
         return_value={"model.layers.0.self_attn": object()},
     ):
-        specs = runner.get_kv_cache_spec()
+        specs = getattr(runner, runner_method)()
 
     assert "model.layers.1.linear_attn" in specs
     assert specs["model.layers.1.linear_attn"] is restored
@@ -286,7 +290,9 @@ def test_kv_cache_allocation_qwen35_mamba_stays_nd() -> None:
     layer_name = "model.layers.1.linear_attn"
     kv_cache_config = SimpleNamespace(
         num_blocks=2,
-        kv_cache_groups=[SimpleNamespace(kv_cache_spec=spec, layer_names=[layer_name])],
+        kv_cache_groups=[
+            SimpleNamespace(kv_cache_spec=spec, kv_cache_specs={layer_name: spec}, layer_names=[layer_name])
+        ],
         kv_cache_tensors=[
             SimpleNamespace(
                 size=160,
@@ -330,6 +336,7 @@ def test_main_mamba_descriptor_allocates_private_per_layer_pages() -> None:
         kv_cache_groups=[
             SimpleNamespace(
                 kv_cache_spec=spec,
+                kv_cache_specs={name: spec for name in layer_names},
                 layer_names=layer_names,
             )
         ],
@@ -1254,6 +1261,8 @@ def test_attention_metadata_uses_preexpanded_310p_block_table(_pin_memory, for_c
 
 
 def test_initialize_kv_cache_marks_310p_target_and_draft_groups(monkeypatch) -> None:
+    from tests.ut.kv_cache_test_utils import make_full_attention_spec, make_kv_cache_group
+
     target_group = SimpleNamespace()
     draft_group = SimpleNamespace()
     target_groups = [[target_group]]
@@ -1262,7 +1271,12 @@ def test_initialize_kv_cache_marks_310p_target_and_draft_groups(monkeypatch) -> 
     runner.max_model_len = 512
     runner.speculator = MagicMock(spec=model_runner_module.DraftModelSpeculator)
     kv_cache_config = SimpleNamespace(
-        kv_cache_groups=[SimpleNamespace(kv_cache_spec=SimpleNamespace(block_size=256))],
+        kv_cache_groups=[
+            make_kv_cache_group(
+                ["layer.0"],
+                make_full_attention_spec(block_size=256, num_kv_heads=1, head_size=64, dtype=torch.bfloat16),
+            )
+        ],
         needs_kv_cache_zeroing=False,
     )
 
@@ -1312,7 +1326,13 @@ def test_kv_cache_allocation_uses_separate_nz_k_and_v() -> None:
     spec = FakeAttentionSpec()
     kv_cache_config = SimpleNamespace(
         num_blocks=2,
-        kv_cache_groups=[SimpleNamespace(kv_cache_spec=spec, layer_names=["model.layers.0.self_attn"])],
+        kv_cache_groups=[
+            SimpleNamespace(
+                kv_cache_spec=spec,
+                kv_cache_specs={"model.layers.0.self_attn": spec},
+                layer_names=["model.layers.0.self_attn"],
+            )
+        ],
         kv_cache_tensors=[
             SimpleNamespace(
                 size=8192,
@@ -1384,6 +1404,7 @@ def test_main_attention_descriptor_allocates_private_kv_per_layer() -> None:
         kv_cache_groups=[
             SimpleNamespace(
                 kv_cache_spec=spec,
+                kv_cache_specs={name: spec for name in layer_names},
                 layer_names=layer_names,
             )
         ],
@@ -1516,22 +1537,14 @@ def test_adjust_kernel_block_sizes_respects_physical_blocks(block_sizes, head_si
             self.block_size = block_size
             self.head_size = head_size
 
-    class FakeUniformTypeKVCacheSpecs:
-        def __init__(self, specs):
-            self.kv_cache_specs = dict(enumerate(specs))
-
     specs = [FakeAttentionSpec(b, h) for b, h in zip(block_sizes, head_sizes)]
-    group_spec = specs[0] if len(specs) == 1 else FakeUniformTypeKVCacheSpecs(specs)
     runner = object.__new__(NPUModelRunner310V2)
     runner.kernel_block_sizes = [128]
     runner.attn_groups = [
         [SimpleNamespace(backend=SimpleNamespace(get_supported_kernel_block_sizes=lambda: [128, 64]))]
     ]
-    config = SimpleNamespace(kv_cache_groups=[SimpleNamespace(kv_cache_spec=group_spec)])
-    with (
-        patch.object(model_runner_module, "AttentionSpec", FakeAttentionSpec),
-        patch.object(model_runner_module, "UniformTypeKVCacheSpecs", FakeUniformTypeKVCacheSpecs),
-    ):
+    config = SimpleNamespace(kv_cache_groups=[SimpleNamespace(distinct_specs=tuple(specs))])
+    with patch.object(model_runner_module, "AttentionSpec", FakeAttentionSpec):
         runner._adjust_kernel_block_sizes(config)
     assert runner.kernel_block_sizes == [expected_kernel_size]
     assert all(b % expected_kernel_size == 0 for b in block_sizes)
@@ -1547,7 +1560,7 @@ def test_adjust_kernel_block_sizes_rejects_incompatible_physical_blocks():
     runner.attn_groups = [
         [SimpleNamespace(backend=SimpleNamespace(get_supported_kernel_block_sizes=lambda: [128, 64]))]
     ]
-    config = SimpleNamespace(kv_cache_groups=[SimpleNamespace(kv_cache_spec=FakeAttentionSpec())])
+    config = SimpleNamespace(kv_cache_groups=[SimpleNamespace(distinct_specs=(FakeAttentionSpec(),))])
     with (
         patch.object(model_runner_module, "AttentionSpec", FakeAttentionSpec),
         pytest.raises(NotImplementedError, match="divides every attention cache block size"),

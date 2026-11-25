@@ -10,16 +10,16 @@ import msgspec
 import pytest
 import torch
 from vllm.config import KVTransferConfig
-from vllm.v1.core.single_type_kv_cache_manager import register_all_kvcache_specs
+from vllm.v1.core.single_type_kv_cache_manager import FullAttentionManager
 from vllm.v1.kv_cache_layout import KVCacheLayout
 
+from tests.ut.kv_cache_test_utils import is_v034
 from vllm_ascend.attention.indexer import AscendSFAIndexerBackend
 from vllm_ascend.attention.sfa_v1 import AscendSFABackend
 from vllm_ascend.core.kv_cache_config_builder import AscendKVCacheConfigBuilder
 from vllm_ascend.core.kv_cache_interface import (
     AscendMLAAttentionSpec,
     AscendSFAIndexerCacheSpec,
-    register_ascend_kv_cache_specs,
 )
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake import base_worker, push_worker
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.base_scheduler import MooncakeMetadataThread
@@ -34,8 +34,13 @@ from vllm_ascend.worker.v2 import attn_utils
 
 @pytest.mark.parametrize("dtype", [torch.float8_e4m3fn, torch.bfloat16], ids=["fp8_c8", "bf16"])
 def test_glm_dsa_reuses_mla_and_indexer_and_preserves_views(monkeypatch, dtype):
-    register_all_kvcache_specs(None)
-    register_ascend_kv_cache_specs()
+    if is_v034():
+        from vllm.v1.core.single_type_kv_cache_manager import register_all_kvcache_specs
+
+        from vllm_ascend.core.kv_cache_interface import register_ascend_kv_cache_specs
+
+        register_all_kvcache_specs(None)
+        register_ascend_kv_cache_specs()
     packed = dtype == torch.float8_e4m3fn
     cache_dtype = "fp8" if packed else "bfloat16"
     text_config = SimpleNamespace(model_type="glm_moe_dsa", num_hidden_layers=78, index_topk=2048)
@@ -89,11 +94,18 @@ def test_glm_dsa_reuses_mla_and_indexer_and_preserves_views(monkeypatch, dtype):
     indexer_entries = {layer: f"model.layers.{layer}.self_attn.indexer.k_cache" for layer in (0, 1, *range(2, 79, 4))}
     specs = dict.fromkeys(main_entries.values(), main) | dict.fromkeys(indexer_entries.values(), indexer)
     draft_entries = {main_entries[78], indexer_entries[78]}
-    for name in draft_entries:
-        specs[name] = replace(specs[name], is_draft=True)
+    if is_v034():
+        for name in draft_entries:
+            specs[name] = replace(specs[name], is_draft=True)
+        builder_input = specs
+    else:
+        builder_input = {
+            name: replace(FullAttentionManager.layer_config(spec), is_draft=(name in draft_entries))
+            for name, spec in specs.items()
+        }
 
     builder = AscendKVCacheConfigBuilder()
-    groups = builder.get_kv_cache_groups(runtime, specs)
+    groups = builder.get_kv_cache_groups(runtime, builder_input)
     assert len(groups) == 1 and len(groups[0].layer_names) == 101
     bytes_per_block = builder._get_pool_bytes_per_block(runtime, groups)
     assert bytes_per_block == 5 * (main.page_size_bytes + indexer.page_size_bytes)
@@ -114,6 +126,7 @@ def test_glm_dsa_reuses_mla_and_indexer_and_preserves_views(monkeypatch, dtype):
             prefix=name,
             kv_lora_rank=512,
             qk_rope_head_dim=64,
+            is_draft_layer=(name in draft_entries),
             get_attn_backend=lambda spec=spec: (
                 AscendSFAIndexerBackend if isinstance(spec, AscendSFAIndexerCacheSpec) else AscendSFABackend
             ),
@@ -209,7 +222,7 @@ def _register_push_worker(runtime, config, caches, engine_id):
     worker.vllm_config = runtime
     worker.kv_cache_config = config
     worker.ascend_config = SimpleNamespace(kvpp_config=attn_utils.KVPPConfig.from_vllm_config(runtime))
-    worker.block_size = config.kv_cache_groups[0].kv_cache_spec.block_size
+    worker.block_size = config.kv_cache_groups[0].block_size
     worker.tp_size = worker.pcp_size = worker.dcp_size = 1
     worker.tp_rank = worker.pcp_rank = 0
     worker.engine_id = engine_id

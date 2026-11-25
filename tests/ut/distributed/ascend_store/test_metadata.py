@@ -24,7 +24,14 @@ import tests.ut.distributed.ascend_store._mock_deps  # noqa: F401, E402
 
 # isort: split
 import torch
-from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheGroupSpec, MambaSpec, UniformTypeKVCacheSpecs
+from vllm.v1.core.single_type_kv_cache_manager import FullAttentionManager, MambaManager
+
+from tests.ut.kv_cache_test_utils import (
+    is_v034,
+    make_full_attention_spec,
+    make_kv_cache_group,
+    make_mamba_layer_config,
+)
 
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.metadata import (
     LayerPoolKey,
@@ -68,27 +75,41 @@ class TestCacheLayoutHelpers(unittest.TestCase):
             self.assertIs(get_engine_transfer_config(config, None), child)
 
     def test_sharded_mamba_groups_exclude_tp_replicas(self):
-        mamba_spec = MambaSpec(
+        mamba_lc = make_mamba_layer_config(
             shapes=((4,),),
             dtypes=(torch.float32,),
             block_size=16,
             mamba_cache_mode="align",
         )
-        specs = [
-            FullAttentionSpec(block_size=16, num_kv_heads=1, head_size=1, dtype=torch.float32),
-            mamba_spec,
-            replace(mamba_spec, tp_replicated=True),
-            UniformTypeKVCacheSpecs.from_specs({"layer.3": mamba_spec}),
-        ]
+        replicated_lc = make_mamba_layer_config(
+            shapes=((4,),),
+            dtypes=(torch.float32,),
+            block_size=16,
+            mamba_cache_mode="align",
+            tp_replicated=True,
+        )
+        if is_v034():
+            from vllm.v1.kv_cache_interface import KVCacheGroupSpec, UniformTypeKVCacheSpecs
+
+            wrapped_group = KVCacheGroupSpec(["layer.3"], UniformTypeKVCacheSpecs.from_specs({"layer.3": mamba_lc}))
+        else:
+            wrapped_group = make_kv_cache_group({"layer.3": mamba_lc})
         config = SimpleNamespace(
-            kv_cache_groups=[KVCacheGroupSpec([f"layer.{group_id}"], spec) for group_id, spec in enumerate(specs)]
+            kv_cache_groups=[
+                make_kv_cache_group(
+                    ["layer.0"], make_full_attention_spec(block_size=16, num_kv_heads=1, head_size=1, dtype=torch.float32)
+                ),
+                make_kv_cache_group(["layer.1"], mamba_lc),
+                make_kv_cache_group(["layer.2"], replicated_lc),
+                wrapped_group,
+            ]
         )
         self.assertEqual(get_sharded_mamba_group_ids(config), {1, 3})
 
     def test_uses_hybrid_kv_cache(self):
         groups = [
-            SimpleNamespace(kv_cache_spec=SimpleNamespace(block_size=16)),
-            SimpleNamespace(kv_cache_spec=SimpleNamespace(block_size=32)),
+            SimpleNamespace(block_size=16, manager_cls=FullAttentionManager, prefix_cacheable=True),
+            SimpleNamespace(block_size=32, manager_cls=MambaManager, prefix_cacheable=True),
         ]
         scheduler_config = SimpleNamespace(disable_hybrid_kv_cache_manager=False)
         self.assertTrue(uses_hybrid_kv_cache(scheduler_config, groups))
@@ -96,16 +117,16 @@ class TestCacheLayoutHelpers(unittest.TestCase):
 
     def test_uses_hybrid_kv_cache_disabled(self):
         groups = [
-            SimpleNamespace(kv_cache_spec=SimpleNamespace(block_size=16)),
-            SimpleNamespace(kv_cache_spec=SimpleNamespace(block_size=32)),
+            SimpleNamespace(block_size=16, manager_cls=FullAttentionManager, prefix_cacheable=True),
+            SimpleNamespace(block_size=32, manager_cls=MambaManager, prefix_cacheable=True),
         ]
         scheduler_config = SimpleNamespace(disable_hybrid_kv_cache_manager=True)
         self.assertFalse(uses_hybrid_kv_cache(scheduler_config, groups))
 
     def test_infer_group_block_sizes(self):
         groups = [
-            SimpleNamespace(kv_cache_spec=SimpleNamespace(block_size=16)),
-            SimpleNamespace(kv_cache_spec=SimpleNamespace(block_size=32)),
+            SimpleNamespace(block_size=16),
+            SimpleNamespace(block_size=32),
         ]
         self.assertEqual(infer_group_block_sizes(8, groups), [16, 32])
         self.assertEqual(infer_group_block_sizes(8, None), [8])

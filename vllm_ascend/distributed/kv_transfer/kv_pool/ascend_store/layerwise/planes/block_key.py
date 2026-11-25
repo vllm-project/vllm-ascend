@@ -19,9 +19,10 @@ from copy import copy
 from typing import TYPE_CHECKING
 
 from vllm.logger import logger
-from vllm.v1.kv_cache_interface import FullAttentionSpec, RSWASpec, UniformTypeKVCacheSpecs
+from vllm.v1.core.single_type_kv_cache_manager import FullAttentionManager, RSWAManager
 
 from vllm_ascend.core.kv_cache_interface import supports_bounded_replay
+from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.planes.base import (
     LayerwiseDataPlane,
 )
@@ -65,11 +66,20 @@ class BlockKeyDataPlane(LayerwiseDataPlane):
         ):
             return False
         for group_id in worker.cacheable_group_ids:
-            spec = worker.kv_cache_config.kv_cache_groups[group_id].kv_cache_spec
-            specs = spec.kv_cache_specs.values() if isinstance(spec, UniformTypeKVCacheSpecs) else (spec,)
-            if not all(
-                isinstance(layer_spec, FullAttentionSpec) and not isinstance(layer_spec, RSWASpec)
-                for layer_spec in specs
+            group = worker.kv_cache_config.kv_cache_groups[group_id]
+            if vllm_version_is("0.34.0"):
+                from vllm.v1.kv_cache_interface import FullAttentionSpec, RSWASpec, UniformTypeKVCacheSpecs
+
+                spec = group.kv_cache_spec
+                specs = spec.kv_cache_specs.values() if isinstance(spec, UniformTypeKVCacheSpecs) else (spec,)
+                if not all(
+                    isinstance(layer_spec, FullAttentionSpec) and not isinstance(layer_spec, RSWASpec)
+                    for layer_spec in specs
+                ):
+                    return False
+            elif not (
+                issubclass(group.manager_cls, FullAttentionManager)
+                and not issubclass(group.manager_cls, RSWAManager)
             ):
                 return False
         return True

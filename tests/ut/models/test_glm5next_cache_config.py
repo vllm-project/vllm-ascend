@@ -9,14 +9,15 @@ import pytest
 import torch
 from vllm.config import AttentionConfig
 from vllm.v1.core.single_type_kv_cache_manager import (
-    register_all_kvcache_specs,
+    FullAttentionManager,
+    MambaManager,
+    SlidingWindowManager,
 )
 from vllm.v1.kv_cache_interface import (
-    KVCacheGroupSpec,
+    AttentionSpec,
     KVCacheTensor,
     MambaSpec,
     MLAAttentionSpec,
-    SlidingWindowSpec,
 )
 
 from vllm_ascend.core.kv_cache_interface import AscendIndexerKPoolTailSpec, AscendMLAAttentionSpec
@@ -27,7 +28,18 @@ from vllm_ascend.models.glm5next.cache_config import (
     get_glm5_next_pool_bytes_per_block,
 )
 from vllm_ascend.models.glm5next.cache_views import view_compressed_indexer_cache, view_kpool_tail_cache
-from vllm_ascend.utils import get_kv_cache_tensor_layers
+from vllm_ascend.models.glm5next.kv_cache import KpoolTailManager
+from vllm_ascend.utils import get_kv_cache_tensor_layers, vllm_version_is
+
+
+def _extract_spec(entry):
+    return getattr(entry, "spec", entry)
+
+
+def _replace_spec(entry, **changes):
+    if vllm_version_is("0.34.0"):
+        return replace(entry, **changes)
+    return replace(entry, spec=replace(entry.spec, **changes))
 
 
 @pytest.mark.parametrize("pool", [4, 16])
@@ -42,10 +54,19 @@ def test_platform_builder_accounts_for_both_glm_page_classes(pool, speculative_b
 
     config = make_config()
     config.attention_config = SimpleNamespace(hisparse_config=None)
-    specs = {
-        name: replace(spec, num_speculative_blocks=speculative_blocks) if isinstance(spec, MambaSpec) else spec
-        for name, spec in make_specs(pool).items()
-    }
+    is_v034 = vllm_version_is("0.34.0")
+    specs = {}
+    for name, entry in make_specs(pool).items():
+        if isinstance(_extract_spec(entry), MambaSpec):
+            if is_v034:
+                specs[name] = replace(entry, num_speculative_blocks=speculative_blocks)
+            else:
+                specs[name] = replace(
+                    entry,
+                    manager_config=entry.manager_config.replace_params(num_speculative_blocks=speculative_blocks),
+                )
+        else:
+            specs[name] = entry
     groups = get_glm5_next_kv_cache_groups(config, specs)
     physical = get_glm5_next_kv_cache_config(config, groups, get_glm5_next_pool_bytes_per_block(groups))
     assert len({tensor.size for tensor in physical.kv_cache_tensors}) == 2
@@ -60,8 +81,15 @@ def test_platform_builder_preserves_default_non_glm_accounting():
     pytest.importorskip("vllm.v1.core.kv_cache_planning")
     from vllm_ascend.core.kv_cache_config_builder import AscendKVCacheConfigBuilder
 
-    groups = [KVCacheGroupSpec(layer_names=["attn"], kv_cache_spec=make_specs()["model.layers.3.attn"])]
-    groups[0].kv_cache_spec = replace(groups[0].kv_cache_spec, model_version=None)
+    attn_entry = _replace_spec(make_specs()["model.layers.3.attn"], model_version=None)
+    if vllm_version_is("0.34.0"):
+        from vllm.v1.kv_cache_interface import KVCacheGroupSpec
+
+        groups = [KVCacheGroupSpec(layer_names=["attn"], kv_cache_spec=attn_entry)]
+    else:
+        from vllm.v1.kv_cache_interface import KVCacheGroup
+
+        groups = [KVCacheGroup.from_layers({"attn": attn_entry})]
     assert AscendKVCacheConfigBuilder()._get_pool_bytes_per_block(make_config(), groups) is None
 
 
@@ -100,47 +128,57 @@ def test_kv_cache_config_preserves_retention_interval(retention_interval):
 
 
 def make_specs(pool: int = 16):
+    is_v034 = vllm_version_is("0.34.0")
+    attn_spec = MLAAttentionSpec(
+        block_size=512,
+        num_kv_heads=1,
+        head_size=512,
+        dtype=torch.bfloat16,
+        model_version="glm5_next",
+    )
+    indexer_spec = MLAAttentionSpec(
+        block_size=512,
+        num_kv_heads=1,
+        head_size=128,
+        dtype=torch.bfloat16,
+        model_version="glm5_next",
+        **_ratio_kwargs(pool),
+    )
+    tail_spec = AscendIndexerKPoolTailSpec(
+        block_size=pool,
+        ring_capacity=pool,
+        **({"sliding_window": pool} if is_v034 else {}),
+        compress_ratio=pool,
+        num_kv_heads=1,
+        head_size=128,
+        dtype=torch.float32,
+        model_version="glm5_next",
+        indexes_kv_by_block_stride=True,
+    )
     specs = {
-        "model.layers.3.attn": MLAAttentionSpec(
-            block_size=512,
-            num_kv_heads=1,
-            head_size=512,
-            dtype=torch.bfloat16,
-            model_version="glm5_next",
-        ),
-        "model.layers.3.indexer.k_cache": MLAAttentionSpec(
-            block_size=512,
-            num_kv_heads=1,
-            head_size=128,
-            dtype=torch.bfloat16,
-            model_version="glm5_next",
-            **_ratio_kwargs(pool),
-        ),
-        "model.layers.3.indexer.tail_cache": AscendIndexerKPoolTailSpec(
-            block_size=pool,
-            ring_capacity=pool,
-            sliding_window=pool,
-            compress_ratio=pool,
-            num_kv_heads=1,
-            head_size=128,
-            dtype=torch.float32,
-            model_version="glm5_next",
-            indexes_kv_by_block_stride=True,
-        ),
+        "model.layers.3.attn": attn_spec if is_v034 else FullAttentionManager.layer_config(attn_spec),
+        "model.layers.3.indexer.k_cache": indexer_spec if is_v034 else FullAttentionManager.layer_config(indexer_spec),
+        "model.layers.3.indexer.tail_cache": tail_spec if is_v034 else KpoolTailManager.layer_config(tail_spec),
     }
     for layer_idx in range(3):
-        specs[f"model.layers.{layer_idx}.linear_attn"] = MambaSpec(
+        mamba_spec = MambaSpec(
             block_size=512,
             shapes=((3, 16), (1, 16, 16)),
             dtypes=(torch.bfloat16, torch.float32),
+        )
+        specs[f"model.layers.{layer_idx}.linear_attn"] = (
+            mamba_spec if is_v034 else MambaManager.layer_config(mamba_spec)
         )
     return specs
 
 
 @pytest.fixture(autouse=True)
 def register_cache_specs():
-    # Match production: vLLM registers built-in specs before the Ascend hook.
-    register_all_kvcache_specs(None)
+    if vllm_version_is("0.34.0"):
+        from vllm.v1.core.single_type_kv_cache_manager import register_all_kvcache_specs
+
+        # Match production: vLLM registers built-in specs before the Ascend hook.
+        register_all_kvcache_specs(None)
 
 
 @pytest.mark.parametrize("pool", [4, 16])
@@ -195,11 +233,14 @@ def test_groups_share_block_ids_and_pack_two_page_classes(pool):
     }
 
     # Scheduler groups consume disjoint IDs from the shared global BlockPool.
-    required_blocks = sum(
-        (group.kv_cache_spec.max_memory_usage_bytes(config) + group.kv_cache_spec.page_size_bytes - 1)
-        // group.kv_cache_spec.page_size_bytes
-        for group in groups
-    )
+    if vllm_version_is("0.34.0"):
+        required_blocks = sum(
+            (group.kv_cache_spec.max_memory_usage_bytes(config) + group.kv_cache_spec.page_size_bytes - 1)
+            // group.kv_cache_spec.page_size_bytes
+            for group in groups
+        )
+    else:
+        required_blocks = sum(group.max_allocated_blocks_per_request(config) for group in groups)
     assert get_glm5_next_pool_bytes_per_block(groups) == bytes_per_block
     assert planning._max_memory_usage_bytes_from_groups(AscendKVCacheConfigBuilder(), config, groups) == (
         required_blocks * bytes_per_block
@@ -207,7 +248,7 @@ def test_groups_share_block_ids_and_pack_two_page_classes(pool):
 
 
 def test_standalone_mtp_layout_has_no_mamba_groups():
-    specs = {name: spec for name, spec in make_specs().items() if not isinstance(spec, MambaSpec)}
+    specs = {name: spec for name, spec in make_specs().items() if not isinstance(_extract_spec(spec), MambaSpec)}
     groups = get_glm5_next_kv_cache_groups(make_config(), specs)
     layout = _get_glm5_next_cache_layout(groups)
     assert len(groups) == 2
@@ -216,11 +257,12 @@ def test_standalone_mtp_layout_has_no_mamba_groups():
 
 
 def test_fp8_shared_pages_preserve_tail_rows_and_kernel_scale_alignment():
+    is_v034 = vllm_version_is("0.34.0")
     specs = make_specs(pool=4)
     indexer_name = "model.layers.3.indexer.k_cache"
     tail_name = "model.layers.3.indexer.tail_cache"
-    specs["model.layers.3.attn"] = replace(specs["model.layers.3.attn"], block_size=640)
-    specs[indexer_name] = AscendMLAAttentionSpec(
+    specs["model.layers.3.attn"] = _replace_spec(specs["model.layers.3.attn"], block_size=640)
+    indexer_spec = AscendMLAAttentionSpec(
         block_size=640,
         num_kv_heads=1,
         head_size=128,
@@ -230,16 +272,18 @@ def test_fp8_shared_pages_preserve_tail_rows_and_kernel_scale_alignment():
         model_version="glm5_next",
         tokens_per_state=4,
     )
+    specs[indexer_name] = indexer_spec if is_v034 else FullAttentionManager.layer_config(indexer_spec)
     groups = get_glm5_next_kv_cache_groups(make_config(), specs)
     plan = get_glm5_next_kv_cache_config(make_config(), groups, 3 * get_glm5_next_pool_bytes_per_block(groups))
     descriptor = next(tensor for tensor in plan.kv_cache_tensors if indexer_name in get_kv_cache_tensor_layers(tensor))
     raw = torch.zeros(descriptor.size, dtype=torch.uint8)
-    (tail,) = view_kpool_tail_cache(tail_name, specs[tail_name], raw, plan.num_blocks)
-    page_rows = specs[tail_name].page_size_bytes // (2 * specs[tail_name].head_size * tail.element_size())
+    tail_spec = _extract_spec(specs[tail_name])
+    (tail,) = view_kpool_tail_cache(tail_name, tail_spec, raw, plan.num_blocks)
+    page_rows = tail_spec.page_size_bytes // (2 * tail_spec.head_size * tail.element_size())
     assert page_rows * tail.shape[-1] == tail.stride(0)
 
     backend = SimpleNamespace(get_kv_cache_shape=lambda n, b, h, d: (n, b, h, d))
-    keys, scales = view_compressed_indexer_cache(indexer_name, specs[indexer_name], raw, backend, 128)
+    keys, scales = view_compressed_indexer_cache(indexer_name, _extract_spec(specs[indexer_name]), raw, backend, 128)
     page_bytes = descriptor.size // plan.num_blocks
     assert keys.shape == (15, 32, 1, 128)
     assert scales.shape == (15, 32, 1, 1)
@@ -253,13 +297,14 @@ def test_fp8_shared_pages_preserve_tail_rows_and_kernel_scale_alignment():
     [(128, 0, 8192, 5120), (128, 5, 9216, 9216), (512, 5, 32768, 17408), (640, 5, 40960, 25600)],
 )
 def test_fp8_cache_budget_accounts_for_scales_tail_and_padding(block_size, lookahead, bf16_page_bytes, fp8_page_bytes):
+    is_v034 = vllm_version_is("0.34.0")
     config = make_config()
     budget = 64 * 1024 * 1024
     bytes_per_block, capacities = [], []
     for dtype, expected_page_bytes in ((torch.bfloat16, bf16_page_bytes), (torch.float8_e4m3fn, fp8_page_bytes)):
         specs = make_specs(pool=4)
-        specs["model.layers.3.attn"] = replace(specs["model.layers.3.attn"], block_size=block_size)
-        specs["model.layers.3.indexer.k_cache"] = AscendMLAAttentionSpec(
+        specs["model.layers.3.attn"] = _replace_spec(specs["model.layers.3.attn"], block_size=block_size)
+        indexer_spec = AscendMLAAttentionSpec(
             block_size=block_size,
             num_kv_heads=1,
             head_size=128,
@@ -269,7 +314,10 @@ def test_fp8_cache_budget_accounts_for_scales_tail_and_padding(block_size, looka
             model_version="glm5_next",
             tokens_per_state=4,
         )
-        specs["model.layers.3.indexer.tail_cache"] = replace(
+        specs["model.layers.3.indexer.k_cache"] = (
+            indexer_spec if is_v034 else FullAttentionManager.layer_config(indexer_spec)
+        )
+        specs["model.layers.3.indexer.tail_cache"] = _replace_spec(
             specs["model.layers.3.indexer.tail_cache"], ring_capacity=4 + lookahead
         )
         groups = get_glm5_next_kv_cache_groups(config, specs)
@@ -292,13 +340,25 @@ def test_pipeline_projection_supports_a_mamba_only_worker():
     config = make_config()
     groups = get_glm5_next_kv_cache_groups(config, make_specs())
     local_mamba_name = groups[2].layer_names[0]
-    projected_groups = [
-        KVCacheGroupSpec(
-            [local_mamba_name] if group is groups[2] else [],
-            group.kv_cache_spec,
-        )
-        for group in groups
-    ]
+    if vllm_version_is("0.34.0"):
+        from vllm.v1.kv_cache_interface import KVCacheGroupSpec
+
+        projected_groups = [
+            KVCacheGroupSpec(
+                [local_mamba_name] if group is groups[2] else [],
+                group.kv_cache_spec,
+            )
+            for group in groups
+        ]
+    else:
+        projected_groups = [
+            replace(
+                group,
+                kv_cache_specs={local_mamba_name: group.kv_cache_specs[local_mamba_name]} if group is groups[2] else {},
+                unprojected_specs=group.distinct_specs,
+            )
+            for group in groups
+        ]
 
     layout = _get_glm5_next_cache_layout(projected_groups)
     assert layout is not None
@@ -321,19 +381,33 @@ def test_missing_paired_cache_is_rejected():
 
 
 def test_sliding_window_draft_caches_use_independent_physical_tensors():
+    is_v034 = vllm_version_is("0.34.0")
     config = make_config()
     specs = make_specs()
     draft_names = []
     for layer_idx in range(10, 14):
         name = f"model.layers.{layer_idx}.self_attn.attn"
         draft_names.append(name)
-        specs[name] = SlidingWindowSpec(
-            block_size=16,
-            num_kv_heads=1,
-            head_size=8,
-            dtype=torch.bfloat16,
-            sliding_window=16,
-        )
+        if is_v034:
+            from vllm.v1.kv_cache_interface import SlidingWindowSpec
+
+            specs[name] = SlidingWindowSpec(
+                block_size=16,
+                num_kv_heads=1,
+                head_size=8,
+                dtype=torch.bfloat16,
+                sliding_window=16,
+            )
+        else:
+            specs[name] = SlidingWindowManager.layer_config(
+                AttentionSpec(
+                    block_size=16,
+                    num_kv_heads=1,
+                    head_size=8,
+                    dtype=torch.bfloat16,
+                ),
+                sliding_window=16,
+            )
 
     groups = get_glm5_next_kv_cache_groups(config, specs)
     layout = _get_glm5_next_cache_layout(groups)
@@ -353,7 +427,7 @@ def test_sliding_window_draft_caches_use_independent_physical_tensors():
 def test_misaligned_logical_block_is_rejected():
     specs = make_specs(pool=16)
     object.__setattr__(
-        specs["model.layers.3.indexer.k_cache"],
+        _extract_spec(specs["model.layers.3.indexer.k_cache"]),
         "tokens_per_state",
         15,
     )
@@ -368,6 +442,7 @@ def test_worker_preserves_glm5_next_physical_pool_budget(monkeypatch, use_sparse
     from vllm_ascend.core.kv_cache_config_builder import AscendKVCacheConfigBuilder
     from vllm_ascend.worker.worker import NPUWorker
 
+    is_v034 = vllm_version_is("0.34.0")
     config = make_config()
     config.attention_config = SimpleNamespace(hisparse_config=None)
     config.model_config.max_model_len = 1048576
@@ -377,7 +452,7 @@ def test_worker_preserves_glm5_next_physical_pool_budget(monkeypatch, use_sparse
     )
     specs = make_specs()
     if packed_main:
-        specs["model.layers.3.attn"] = AscendMLAAttentionSpec(
+        main_spec = AscendMLAAttentionSpec(
             block_size=512,
             num_kv_heads=1,
             head_size=528,
@@ -386,6 +461,7 @@ def test_worker_preserves_glm5_next_physical_pool_budget(monkeypatch, use_sparse
             model_version="glm5_next",
             indexes_kv_by_block_stride=True,
         )
+        specs["model.layers.3.attn"] = main_spec if is_v034 else FullAttentionManager.layer_config(main_spec)
     groups = get_glm5_next_kv_cache_groups(config, specs)
     # Supply exactly enough physical memory for the configured context. The
     # generic discount incorrectly makes this valid shared pool fail admission.
@@ -393,7 +469,10 @@ def test_worker_preserves_glm5_next_physical_pool_budget(monkeypatch, use_sparse
     worker = NPUWorker.__new__(NPUWorker)
     worker.vllm_config = config
     worker.model_config = config.model_config
-    worker.get_kv_cache_spec = lambda: specs
+    if is_v034:
+        worker.get_kv_cache_spec = lambda: specs
+    else:
+        worker.get_kv_cache_layer_configs = lambda: specs
     worker.model_runner = SimpleNamespace(
         use_sparse=use_sparse,
         use_compress=False,

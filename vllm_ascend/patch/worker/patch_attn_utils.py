@@ -13,11 +13,14 @@ from vllm_ascend.patch.worker.patch_bind_kv_cache import (
     bind_kv_cache,
     bind_kv_cache_to_layers,
 )
+from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.utils import prepare_ascend_kernel_block_sizes
-from vllm_ascend.worker.v2.attn_utils import (
-    allocate_kv_cache_main,
-    get_kv_cache_spec,
-)
+from vllm_ascend.worker.v2.attn_utils import allocate_kv_cache_main
+
+if vllm_version_is("0.34.0"):
+    from vllm_ascend.worker.v2.attn_utils import get_kv_cache_spec
+else:
+    from vllm_ascend.worker.v2.attn_utils import get_kv_cache_layer_configs
 
 
 def _get_ascend_sfa_indexer_backend(self):
@@ -107,7 +110,10 @@ vllm.v1.worker.gpu.attn_utils.bind_kv_cache_to_layers = bind_kv_cache_to_layers
 v1_worker_utils.bind_kv_cache = bind_kv_cache
 v1_worker_utils.bind_kv_cache_to_layers = bind_kv_cache_to_layers
 
-vllm.v1.worker.gpu.model_runner.get_kv_cache_spec = get_kv_cache_spec
+if vllm_version_is("0.34.0"):
+    vllm.v1.worker.gpu.model_runner.get_kv_cache_spec = get_kv_cache_spec
+else:
+    vllm.v1.worker.gpu.model_runner.get_kv_cache_layer_configs = get_kv_cache_layer_configs
 
 
 if hasattr(v1_worker_utils.AttentionGroup, "_with_kernel_block_table"):

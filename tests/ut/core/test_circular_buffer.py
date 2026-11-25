@@ -6,20 +6,21 @@ import torch
 from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_manager import KVCacheManager
 from vllm.v1.core.single_type_kv_cache_manager import CircularBufferManager
-from vllm.v1.kv_cache_interface import (
-    CircularBufferSpec,
-    FullAttentionSpec,
-    KVCacheGroupSpec,
-    MambaSpec,
-    UniformTypeKVCacheSpecs,
-)
 
-from vllm_ascend.core.kv_cache_interface import is_circular_kv_cache_spec, is_prefix_cacheable
+from tests.ut.kv_cache_test_utils import (
+    get_group_spec,
+    is_v034,
+    make_circular_buffer_layer_config,
+    make_full_attention_layer_config,
+    make_kv_cache_group,
+    make_mamba_layer_config,
+)
+from vllm_ascend.core.kv_cache_interface import is_circular_cache_group
 from vllm_ascend.patch.platform.patch_kv_cache_coordinator import AscendHybridKVCacheCoordinator
 
 
 def ring_spec():
-    return CircularBufferSpec(
+    return make_circular_buffer_layer_config(
         block_size=32,
         num_kv_heads=1,
         head_size=1024,
@@ -30,8 +31,9 @@ def ring_spec():
 
 def test_ring_lifetime_reuse_and_external_tokens():
     pool = BlockPool(num_gpu_blocks=5, enable_caching=True, hash_block_size=32)
+    ring_arg = ring_spec() if is_v034() else make_kv_cache_group(["state"], ring_spec())
     manager = CircularBufferManager(
-        ring_spec(),
+        ring_arg,
         pool,
         enable_caching=True,
         kv_cache_group_id=0,
@@ -69,24 +71,36 @@ def test_ring_lifetime_reuse_and_external_tokens():
 
 
 def test_uniform_properties_and_single_plane_size():
-    spec = ring_spec()
-    uniform = UniformTypeKVCacheSpecs(block_size=32, kv_cache_specs={"s0": spec, "s1": spec})
+    ring = ring_spec()
+    group = make_kv_cache_group({"s0": ring, "s1": ring})
+    spec = get_group_spec(group, "s0")
     assert spec.page_size_bytes == 131072
-    assert spec.max_memory_usage_bytes(None) == 131072
-    assert uniform.max_num_blocks_per_req(None, 65536) == 1
-    assert is_circular_kv_cache_spec(uniform) and not is_prefix_cacheable(uniform)
-    assert not uniform.prefix_cacheable
-    assert not is_prefix_cacheable(SimpleNamespace(participates_in_prefix_caching=False))
+    assert group.max_num_blocks_per_req(None, 65536) == 1
+    assert is_circular_cache_group(group)
+    assert not group.prefix_cacheable
+    if is_v034():
+        from vllm.v1.kv_cache_interface import UniformTypeKVCacheSpecs
+
+        from vllm_ascend.core.kv_cache_interface import is_circular_kv_cache_spec, is_prefix_cacheable
+
+        uniform = UniformTypeKVCacheSpecs(block_size=32, kv_cache_specs={"s0": spec, "s1": spec})
+        assert spec.max_memory_usage_bytes(None) == 131072
+        assert is_circular_kv_cache_spec(uniform) and not is_prefix_cacheable(uniform)
+        assert not uniform.prefix_cacheable
+        assert not is_prefix_cacheable(SimpleNamespace(participates_in_prefix_caching=False))
+    else:
+        assert group.max_memory_usage_bytes(None) == 131072 * 2
 
 
 def test_scratch_groups_do_not_reduce_prefix_hits_or_truncation():
-    full = FullAttentionSpec(block_size=128, num_kv_heads=1, head_size=8, dtype=torch.float32)
+    full = make_full_attention_layer_config(block_size=128, num_kv_heads=1, head_size=8, dtype=torch.float32)
     scratch = ring_spec()
-    groups = [KVCacheGroupSpec(["kv"], full), KVCacheGroupSpec(["state"], scratch)]
+    groups = [make_kv_cache_group(["kv"], full), make_kv_cache_group(["state"], scratch)]
     coordinator = SimpleNamespace(
         kv_cache_config=SimpleNamespace(kv_cache_groups=groups),
-        single_type_managers=[SimpleNamespace(), SimpleNamespace()],
+        single_type_managers=[SimpleNamespace(block_size=128), SimpleNamespace(block_size=32)],
         eagle_group_ids=set(),
+        drop_eagle_group_ids=set(),
         scheduler_block_size=128,
         _get_effective_block_size=lambda spec: spec.block_size,
     )
@@ -102,8 +116,8 @@ def test_scratch_groups_do_not_reduce_prefix_hits_or_truncation():
     )
     assert KVCacheManager.truncate_computed_blocks(host, SimpleNamespace(blocks=([1, 2], [])), 128) == ([1], [])
 
-    mamba = MambaSpec(block_size=128, shapes=((1,),), dtypes=(torch.float32,))
-    host.kv_cache_config.kv_cache_groups = [groups[0], KVCacheGroupSpec(["mamba"], mamba), groups[1]]
+    mamba = make_mamba_layer_config(block_size=128, shapes=((1,),), dtypes=(torch.float32,))
+    host.kv_cache_config.kv_cache_groups = [groups[0], make_kv_cache_group(["mamba"], mamba), groups[1]]
     host.coordinator.single_type_managers = [
         SimpleNamespace(block_size=128),
         SimpleNamespace(block_size=128),

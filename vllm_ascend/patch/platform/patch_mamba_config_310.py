@@ -9,7 +9,7 @@ from vllm.model_executor.models import ModelRegistry
 from vllm.model_executor.models.config import MambaModelConfig
 from vllm.utils.math_utils import cdiv
 from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
-from vllm.v1.kv_cache_interface import FullAttentionSpec, MambaSpec
+from vllm.v1.kv_cache_interface import AttentionSpec, MambaSpec
 
 
 @classmethod
@@ -41,7 +41,7 @@ def verify_and_update_config(cls, vllm_config) -> None:
     if model_config.use_mla:
         raise RuntimeError("MLA is not supported on 310P currently.")
     kernel_block_alignment_size = 128
-    attn_page_size_1_token = FullAttentionSpec(
+    attn_page_size_1_token = AttentionSpec(
         block_size=1,
         num_kv_heads=model_config.get_num_kv_heads(parallel_config),
         head_size=model_config.get_head_size(),

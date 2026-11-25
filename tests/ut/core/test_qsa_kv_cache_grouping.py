@@ -3,17 +3,15 @@ from unittest.mock import Mock
 
 import torch
 from vllm.v1.core.kv_cache_planning import DefaultKVCacheConfigBuilder
-from vllm.v1.kv_cache_interface import (
-    FullAttentionSpec,
-    KVCacheGroupSpec,
-    KVCacheSpec,
-)
+
+from tests.ut.kv_cache_test_utils import is_v034, make_full_attention_layer_config, make_kv_cache_group
+from vllm_ascend.core.kv_cache_interface import KVCacheGroup
 
 from vllm_ascend.core import kv_cache_config_builder
 
 
-def _ordinary_specs() -> dict[str, KVCacheSpec]:
-    ordinary = FullAttentionSpec(
+def _ordinary_specs():
+    ordinary = make_full_attention_layer_config(
         block_size=256,
         num_kv_heads=1,
         head_size=64,
@@ -36,7 +34,7 @@ def _ordinary_config() -> SimpleNamespace:
 def test_non_qsa_grouping_delegates_to_upstream_vllm(monkeypatch) -> None:
     specs = _ordinary_specs()
     vllm_config = _ordinary_config()
-    expected = [Mock(spec=KVCacheGroupSpec)]
+    expected = [Mock(spec=KVCacheGroup)]
     upstream_grouping = Mock(return_value=expected)
     monkeypatch.setattr(
         DefaultKVCacheConfigBuilder,
@@ -55,12 +53,7 @@ def test_non_qsa_grouping_delegates_to_upstream_vllm(monkeypatch) -> None:
 
 def test_non_qsa_config_uses_upstream_vllm_planner(monkeypatch) -> None:
     ordinary = next(iter(_ordinary_specs().values()))
-    groups = [
-        KVCacheGroupSpec(
-            layer_names=["model.layers.0.self_attn"],
-            kv_cache_spec=ordinary,
-        )
-    ]
+    groups = [make_kv_cache_group(["model.layers.0.self_attn"], ordinary)]
     expected = SimpleNamespace()
     upstream_planner = Mock(return_value=expected)
     monkeypatch.setattr(

@@ -15,6 +15,7 @@
 # This file is a part of the vllm-ascend project.
 #
 
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any
@@ -39,7 +40,7 @@ from vllm.v1.attention.backends.registry import (  # type: ignore
     register_backend,
 )
 from vllm.v1.attention.ops.pcp import _gather_prefill_cache_inputs  # type: ignore[import-not-found]
-from vllm.v1.kv_cache_interface import AttentionSpec, CrossAttentionSpec
+from vllm.v1.kv_cache_interface import AttentionSpec
 
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.attention.attention_mask import AttentionMaskBuilder
@@ -62,6 +63,7 @@ from vllm_ascend.compilation.updatable_graph import (
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence import attention_transfer_window
+from vllm_ascend.utils import vllm_version_is
 
 # default max value of sliding window size
 SWA_INT_MAX = 2147483647
@@ -274,6 +276,21 @@ class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
         scheduler_config = vllm_config.scheduler_config
         self.chunked_prefill_enabled = scheduler_config.enable_chunked_prefill
         self.attn_mask_builder = AttentionMaskBuilder(self.device)
+        if vllm_version_is("0.34.0"):
+            from vllm.v1.kv_cache_interface import CrossAttentionSpec
+
+            self.is_cross_attention = isinstance(kv_cache_spec, CrossAttentionSpec)
+        else:
+            static_ctx = getattr(vllm_config.compilation_config, "static_forward_context", None)
+            if isinstance(static_ctx, Mapping):
+                attn_types = {
+                    layer.attn_type
+                    for name in (layer_names or ())
+                    if (layer := static_ctx.get(name)) is not None and hasattr(layer, "attn_type")
+                }
+            else:
+                attn_types = set()
+            self.is_cross_attention = attn_types == {AttentionType.ENCODER_DECODER}
 
     @classmethod
     def get_cudagraph_support(
@@ -320,11 +337,12 @@ class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
             kv_cache_spec=self.kv_cache_spec,
             speculative_config=self.speculative_config,
             vllm_config=self.vllm_config,
+            is_cross_attention=self.is_cross_attention,
         )
         slot_mapping = common_attn_metadata.slot_mapping[:num_actual_tokens]
         # this slot_mapping override doesn't work since vllm will override it again. We should fix it vllm.
         # see: https://github.com/vllm-project/vllm/blob/ce88756b967c2c5006746a424c15dd59a284ed8c/vllm/model_executor/layers/attention/cross_attention.py#L117
-        if isinstance(self.kv_cache_spec, CrossAttentionSpec):
+        if self.is_cross_attention:
             slot_mapping = common_attn_metadata.slot_mapping.to(torch.int32)
 
         attn_state = common_attn_metadata.attn_state

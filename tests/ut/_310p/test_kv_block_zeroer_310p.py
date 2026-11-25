@@ -16,9 +16,9 @@
 from types import SimpleNamespace
 
 import torch
-from vllm.v1.kv_cache_interface import FullAttentionSpec
 
 from tests.ut.base import TestBase
+from tests.ut.kv_cache_test_utils import make_full_attention_spec
 from vllm_ascend._310p.kv_block_zeroer import AscendKVBlockZeroer310
 
 
@@ -49,7 +49,7 @@ class TestAscendKVBlockZeroer310(TestBase):
         k_cache = torch.zeros(4, 2, 3)
         v_cache = k_cache
         layer_context = SimpleNamespace(kv_cache=(k_cache, v_cache))
-        spec = FullAttentionSpec(
+        spec = make_full_attention_spec(
             block_size=128,
             num_kv_heads=2,
             head_size=64,

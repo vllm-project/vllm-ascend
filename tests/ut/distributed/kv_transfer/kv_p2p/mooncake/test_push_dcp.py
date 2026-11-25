@@ -3,11 +3,20 @@
 
 import ctypes
 from dataclasses import replace
+from types import SimpleNamespace
 from unittest.mock import Mock
 
 import msgspec
 import pytest
+from vllm.v1.core.single_type_kv_cache_manager import (
+    CircularBufferManager,
+    FullAttentionManager,
+    MambaManager,
+    SlidingWindowManager,
+)
+from vllm.v1.kv_cache_interface import MambaSpec, MLAAttentionSpec
 
+from tests.ut.kv_cache_test_utils import get_full_attention_spec_cls, is_v034
 from tests.ut.kv_offload.mooncake_v2 import test_push_sending
 from tests.ut.kv_offload.mooncake_v2.test_push_sending import drive, multi_cache_remote, remote_metadata, target_params
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake import push_worker
@@ -16,9 +25,18 @@ from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.metadata import Mooncak
 worker = test_push_sending.worker
 
 
+def _mock_group(spec, *, manager_cls=FullAttentionManager, sliding_window_reach=0):
+    return SimpleNamespace(
+        kv_cache_spec=spec,
+        manager_cls=manager_cls,
+        sliding_window_reach=sliding_window_reach,
+    )
+
+
 def configure(worker, monkeypatch, dcp=2, tp=2, interleave=4, local_scale=1, remote_scale=1, pcp=1):
-    spec = Mock(spec=push_worker.MLAAttentionSpec, dcp_sharded=True, sliding_window=None, is_circular=False)
+    spec = Mock(spec=MLAAttentionSpec, dcp_sharded=True, sliding_window=None, is_circular=False)
     worker.kv_cache_specs = [spec]
+    worker.spec_index_to_group = [_mock_group(spec)]
     local = worker.transfer_metadata
     local.layer_block_sizes[:] = [4 * local_scale]
     local.block_size_scales[:] = [[local_scale]]
@@ -64,15 +82,15 @@ def test_chunked_write_matches_token_oracle(
     remote = configure(worker, monkeypatch, dcp, tp, interleave, local_scale, remote_scale)
     effective_dcp = dcp
     if cache_kind != "mla":
-        worker.kv_cache_specs = [
-            Mock(
-                spec=push_worker.AscendSFAIndexerCacheSpec,
-                dcp_sharded=True,
-                sliding_window=None,
-                is_circular=False,
-                sfa_dcp_replicated_indexer_size=1,
-            )
-        ]
+        idx_spec = Mock(
+            spec=push_worker.AscendSFAIndexerCacheSpec,
+            dcp_sharded=True,
+            sliding_window=None,
+            is_circular=False,
+            sfa_dcp_replicated_indexer_size=1,
+        )
+        worker.kv_cache_specs = [idx_spec]
+        worker.spec_index_to_group = [_mock_group(idx_spec)]
         if cache_kind == "replicated_indexer":
             remote.metadata_by_pp_rank[0].indexer_replication_sizes[:] = [dcp]
             effective_dcp = 1
@@ -165,7 +183,9 @@ def test_mamba_dcp_rejects_noninteger_tp_ratio_before_write(worker, monkeypatch,
     remote = configure(worker, monkeypatch, dcp=d_tp, tp=d_tp)
     remote.metadata_by_pp_rank[0].dcp_sharded[:] = [False]
     worker.tp_size = worker.dcp_size = p_tp
-    worker.kv_cache_specs = [Mock(spec=push_worker.MambaSpec, dcp_sharded=False, tp_replicated=False)]
+    mamba_spec = Mock(spec=MambaSpec, dcp_sharded=False, tp_replicated=False)
+    worker.kv_cache_specs = [mamba_spec]
+    worker.spec_index_to_group = [_mock_group(mamba_spec, manager_cls=MambaManager)]
     worker.start_load_kv(metadata(0, 8, prompt=8, tp=d_tp))
     worker.wait_for_save()
     worker.engine.batch_transfer_sync_write.assert_not_called()
@@ -176,17 +196,31 @@ def test_mamba_dcp_rejects_noninteger_tp_ratio_before_write(worker, monkeypatch,
 @pytest.mark.parametrize("kind", ["swa", "circular", "replicated_indexer", "sharded_indexer"])
 def test_effective_dcp_depends_on_cache_layout(worker, monkeypatch, kind):
     remote = configure(worker, monkeypatch)
-    spec_type = {
-        "swa": push_worker.SlidingWindowMLASpec,
-        "circular": push_worker.MLAAttentionSpec,
-        "replicated_indexer": push_worker.AscendSFAIndexerCacheSpec,
-        "sharded_indexer": push_worker.AscendSFAIndexerCacheSpec,
+    if kind == "swa" and is_v034():
+        from vllm.v1.kv_cache_interface import SlidingWindowMLASpec
+
+        spec_type = SlidingWindowMLASpec
+    else:
+        spec_type = {
+            "swa": MLAAttentionSpec,
+            "circular": MLAAttentionSpec,
+            "replicated_indexer": push_worker.AscendSFAIndexerCacheSpec,
+            "sharded_indexer": push_worker.AscendSFAIndexerCacheSpec,
+        }[kind]
+    manager_cls = {
+        "swa": SlidingWindowManager,
+        "circular": CircularBufferManager,
+        "replicated_indexer": FullAttentionManager,
+        "sharded_indexer": FullAttentionManager,
     }[kind]
-    worker.kv_cache_specs = [
-        Mock(
-            spec=spec_type, dcp_sharded=kind != "swa", is_circular=kind == "circular", sfa_dcp_replicated_indexer_size=1
-        )
-    ]
+    spec = Mock(
+        spec=spec_type,
+        dcp_sharded=kind != "swa",
+        is_circular=kind == "circular",
+        sfa_dcp_replicated_indexer_size=1,
+    )
+    worker.kv_cache_specs = [spec]
+    worker.spec_index_to_group = [_mock_group(spec, manager_cls=manager_cls)]
     remote.metadata_by_pp_rank[0].dcp_sharded[:] = [kind != "swa"]
     remote.metadata_by_pp_rank[0].indexer_replication_sizes[:] = [2 if kind == "replicated_indexer" else 1]
     assert worker._get_layer_dcp_sizes("model.layers.0.attn", remote, (0, 0, 0)) == (
@@ -213,8 +247,9 @@ def test_dcp_flags_follow_layer_names_across_peers(worker):
     worker.dcp_size = 2
     sharded, _, unsharded = worker.transfer_metadata.layer_names
     worker.kv_cache_specs = [
-        Mock(spec=push_worker.MLAAttentionSpec, dcp_sharded=flag, is_circular=False) for flag in (True, False)
+        Mock(spec=MLAAttentionSpec, dcp_sharded=flag, is_circular=False) for flag in (True, False)
     ]
+    worker.spec_index_to_group = [_mock_group(s) for s in worker.kv_cache_specs]
     worker.layer_name_to_spec_index[unsharded] = 1
     remote = replace(multi_cache_remote(worker), dcp_size=4)
     pp = remote.metadata_by_pp_rank[0]
@@ -231,9 +266,9 @@ def test_full_attention_with_dcp_requires_unsharded_layout(worker, monkeypatch, 
     remote = configure(worker, monkeypatch, dcp=4, tp=4)
     worker.tp_size = 4
     worker.dcp_size = 2
-    worker.kv_cache_specs = [
-        Mock(spec=push_worker.FullAttentionSpec, dcp_sharded=p_sharded, sliding_window=None, is_circular=False)
-    ]
+    full_spec = Mock(spec=get_full_attention_spec_cls(), dcp_sharded=p_sharded, sliding_window=None, is_circular=False)
+    worker.kv_cache_specs = [full_spec]
+    worker.spec_index_to_group = [_mock_group(full_spec)]
     pp = remote.metadata_by_pp_rank[0]
     pp.dcp_sharded[:] = [d_sharded]
     worker.transfer_metadata.block_shapes[:] = [[(2, 4, 1)]]
@@ -272,9 +307,9 @@ def test_dcp_keeps_layer_event_snapshot(worker, monkeypatch):
 @pytest.mark.parametrize("p_dcp", [1, 2, 4])
 def test_dcp_draft_waits_for_its_own_hook(worker, monkeypatch, p_dcp):
     worker.dcp_size = worker.tp_size = p_dcp
-    worker.kv_cache_specs = [
-        Mock(spec=push_worker.MLAAttentionSpec, dcp_sharded=True, sliding_window=None, is_circular=False)
-    ]
+    mla_spec = Mock(spec=MLAAttentionSpec, dcp_sharded=True, sliding_window=None, is_circular=False)
+    worker.kv_cache_specs = [mla_spec]
+    worker.spec_index_to_group = [_mock_group(mla_spec)]
     remote = replace(multi_cache_remote(worker), dcp_size=2, tp_size=2)
     pp = remote.metadata_by_pp_rank[0]
     pp.metadata_by_pcp_rank[0].metadata_by_tp_rank[1] = replace(pp.metadata_by_pcp_rank[0].metadata_by_tp_rank[0])

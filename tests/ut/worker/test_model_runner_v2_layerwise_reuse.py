@@ -4,13 +4,11 @@ from types import SimpleNamespace
 import pytest
 import torch
 from vllm.v1.kv_cache_interface import (
-    FullAttentionSpec,
     KVCacheConfig,
-    KVCacheGroupSpec,
     KVCacheTensor,
-    UniformTypeKVCacheSpecs,
 )
 
+from tests.ut.kv_cache_test_utils import make_full_attention_spec, make_kv_cache_group
 from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec, AscendSFAIndexerCacheSpec
 from vllm_ascend.worker.v2 import attn_utils
 
@@ -19,7 +17,7 @@ from vllm_ascend.worker.v2 import attn_utils
 @pytest.mark.parametrize("zero_stride", [False, True])
 @pytest.mark.parametrize("cache_kind", ["full", "sfa_c8", "indexer", "indexer_scale", "indexer_mixed"])
 def test_real_allocator_aliases_only_planned_slots(monkeypatch, reuse_enabled, zero_stride, cache_kind):
-    spec = FullAttentionSpec(block_size=2, num_kv_heads=1, head_size=4, dtype=torch.float16)
+    spec = make_full_attention_spec(block_size=2, num_kv_heads=1, head_size=4, dtype=torch.float16)
     if cache_kind == "sfa_c8":
         spec = AscendMLAAttentionSpec(
             block_size=2,
@@ -69,12 +67,7 @@ def test_real_allocator_aliases_only_planned_slots(monkeypatch, reuse_enabled, z
                 offset=0,
             )
         ],
-        kv_cache_groups=[
-            KVCacheGroupSpec(
-                layer_names=names,
-                kv_cache_spec=UniformTypeKVCacheSpecs(block_size=2, kv_cache_specs=specs),
-            )
-        ],
+        kv_cache_groups=[make_kv_cache_group(specs)],
     )
     vllm_config = SimpleNamespace(kv_transfer_config=None)
     monkeypatch.setattr(attn_utils, "get_current_vllm_config", lambda: vllm_config)

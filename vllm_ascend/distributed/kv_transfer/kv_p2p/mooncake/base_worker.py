@@ -24,17 +24,19 @@ from vllm.logger import logger
 from vllm.utils.network_utils import get_ip
 from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
 from vllm.v1.kv_cache_interface import (
-    FullAttentionSpec,
+    AttentionSpec,
     KVCacheSpec,
     MambaSpec,
     MLAAttentionSpec,
-    SlidingWindowMLASpec,
-    SlidingWindowSpec,
-    UniformTypeKVCacheSpecs,
 )
 
 from vllm_ascend.ascend_config import get_ascend_config, init_ascend_config
-from vllm_ascend.core.kv_cache_interface import AscendSFAIndexerCacheSpec, is_circular_kv_cache_spec
+from vllm_ascend.core.kv_cache_interface import (
+    MLA_SPEC_TYPES,
+    AscendSFAIndexerCacheSpec,
+    KVCacheGroup,
+    is_circular_cache_group,
+)
 from vllm_ascend.core.kv_cache_placement import map_kvpp_layers_to_owners
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.metadata import (
     MooncakeConnectorMetadata,
@@ -395,18 +397,14 @@ class MooncakeBaseConnectorWorker(MooncakeTransferAddressMixin):
         even when their specs compare equal.
         """
         self.kv_cache_specs: list[KVCacheSpec] = []
+        self.spec_index_to_group: list[KVCacheGroup] = []
         self.layer_name_to_group_index: dict[str, int] = {}
         self.layer_name_to_spec_index: dict[str, int] = {}
 
         for group_index, group in enumerate(self.kv_cache_config.kv_cache_groups):
-            group_spec = group.kv_cache_spec
             group_spec_indices: list[int] = []
 
-            for layer_name in group.layer_names:
-                if isinstance(group_spec, UniformTypeKVCacheSpecs):
-                    layer_spec = group_spec.kv_cache_specs[layer_name]
-                else:
-                    layer_spec = group_spec
+            for layer_name, layer_spec in group.kv_cache_specs.items():
                 spec_index = next(
                     (index for index in group_spec_indices if self.kv_cache_specs[index] == layer_spec),
                     -1,
@@ -414,6 +412,7 @@ class MooncakeBaseConnectorWorker(MooncakeTransferAddressMixin):
                 if spec_index < 0:
                     spec_index = len(self.kv_cache_specs)
                     self.kv_cache_specs.append(layer_spec)
+                    self.spec_index_to_group.append(group)
                     group_spec_indices.append(spec_index)
 
                 self.layer_name_to_group_index[layer_name] = group_index
@@ -482,13 +481,17 @@ class MooncakeBaseConnectorWorker(MooncakeTransferAddressMixin):
         )
 
     @staticmethod
-    def _get_transfer_block_shape(spec: KVCacheSpec, cache: torch.Tensor) -> tuple[int, ...]:
+    def _get_transfer_block_shape(
+        spec: KVCacheSpec,
+        cache: torch.Tensor,
+        group: KVCacheGroup,
+    ) -> tuple[int, ...]:
         """Describe single-head NHD as byte-equivalent HND without changing the cache."""
         shape = tuple(cache.shape[1:])
         if (
-            not isinstance(spec, (FullAttentionSpec, SlidingWindowSpec))
-            or isinstance(spec, (MLAAttentionSpec, SlidingWindowMLASpec, AscendSFAIndexerCacheSpec))
-            or is_circular_kv_cache_spec(spec)
+            not isinstance(spec, AttentionSpec)
+            or isinstance(spec, (*MLA_SPEC_TYPES, AscendSFAIndexerCacheSpec))
+            or is_circular_cache_group(group)
         ):
             return shape
 
@@ -545,7 +548,7 @@ class MooncakeBaseConnectorWorker(MooncakeTransferAddressMixin):
             raise ValueError("MooncakeConnectorV2 does not support KV sharing with KV parallelism.")
 
         for layer_name, target_name in sorted(sharing_targets.items()):
-            if target_name not in configured_layers:
+            if not target_name or target_name not in configured_layers:
                 raise ValueError(
                     f"KV sharing layer {layer_name!r} must target a configured owner, got {target_name!r}."
                 )
@@ -623,11 +626,10 @@ class MooncakeBaseConnectorWorker(MooncakeTransferAddressMixin):
 
                 spec_index = self.layer_name_to_spec_index[layer_name]
                 spec = self.kv_cache_specs[spec_index]
+                group = self.kv_cache_config.kv_cache_groups[self.layer_name_to_group_index[layer_name]]
                 caches = as_kv_cache_tensors(cache_or_caches)
                 shared_page_metadata = (
-                    self._get_shared_page_metadata(caches)
-                    if isinstance(spec, (MLAAttentionSpec, SlidingWindowMLASpec))
-                    else None
+                    self._get_shared_page_metadata(caches) if isinstance(spec, MLA_SPEC_TYPES) else None
                 )
                 if shared_page_metadata is not None and _is_component_major_mla_binding(spec, caches):
                     # MooncakeV2 is layout-agnostic: it only needs the raw
@@ -653,7 +655,7 @@ class MooncakeBaseConnectorWorker(MooncakeTransferAddressMixin):
                     for cache in caches:
                         tensor_num_blocks = cache.shape[0]
                         element_size = cache.element_size()
-                        block_shape = self._get_transfer_block_shape(spec, cache)
+                        block_shape = self._get_transfer_block_shape(spec, cache, group)
                         base_addrs.append(cache.data_ptr())
                         block_strides.append(cache.stride(0) * element_size)
                         block_lens.append(math.prod(block_shape) * element_size)

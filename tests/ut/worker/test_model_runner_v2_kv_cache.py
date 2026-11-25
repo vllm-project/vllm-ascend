@@ -19,8 +19,9 @@ def test_initialize_hisparse_slab_padding_survives_both_runner_copies():
     pytest.importorskip("vllm.v1.hisparse.backend")
     pytest.importorskip("vllm.v1.hisparse.binding")
     from vllm.v1.hisparse import binding
-    from vllm.v1.kv_cache_interface import KVCacheGroupSpec, KVCacheLayout, KVCacheTensor, SparseCacheRole
+    from vllm.v1.kv_cache_interface import KVCacheLayout, KVCacheTensor, SparseCacheRole
 
+    from tests.ut.kv_cache_test_utils import make_kv_cache_group
     from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec, AscendSFAIndexerCacheSpec
     from vllm_ascend.hisparse.backend import AscendHiSparseBackend
     from vllm_ascend.worker.v2.model_runner import NPUModelRunner
@@ -34,8 +35,8 @@ def test_initialize_hisparse_slab_padding_survives_both_runner_copies():
         block_size=128, num_kv_heads=1, head_size=128, dtype=torch.bfloat16, cache_role=SparseCacheRole.INDEXER
     )
     groups = [
-        KVCacheGroupSpec(["source"], source, host_resident=True),
-        KVCacheGroupSpec(["indexer"], indexer),
+        make_kv_cache_group(["source"], source, host_resident=True),
+        make_kv_cache_group(["indexer"], indexer),
     ]
     tensors = [
         KVCacheTensor(3 * page, ["source"], page, page, host_resident=True),

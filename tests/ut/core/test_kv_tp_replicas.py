@@ -6,12 +6,13 @@ from dataclasses import replace
 
 import pytest
 import torch
-from vllm.v1.kv_cache_interface import (
-    FullAttentionSpec,
-    KVCacheGroupSpec,
-    UniformTypeKVCacheSpecs,
-)
 
+from tests.ut.kv_cache_test_utils import (
+    is_v034,
+    make_full_attention_layer_config,
+    make_kv_cache_group,
+    make_mla_layer_config,
+)
 from vllm_ascend.core.kv_cache_interface import (
     AscendMLAAttentionSpec,
     AscendSFAIndexerCacheSpec,
@@ -27,11 +28,12 @@ except ModuleNotFoundError as exc:
 
 
 def _mla_spec():
-    return AscendMLAAttentionSpec(
+    return make_mla_layer_config(
         block_size=16,
         num_kv_heads=1,
         head_size=576,
         dtype=torch.bfloat16,
+        ascend=True,
     )
 
 
@@ -44,11 +46,12 @@ def _mla_spec():
 def test_mla_indexer_groups_publish_tp_replicas(tp_size, main_layers, indexer_layers):
     """Offloading must see one latent copy, including IndexShare's fewer indexers."""
     main = _mla_spec()
-    indexer = AscendSFAIndexerCacheSpec(
+    indexer = make_full_attention_layer_config(
         block_size=16,
         num_kv_heads=1,
         head_size=128,
         dtype=torch.int8,
+        spec_cls=AscendSFAIndexerCacheSpec,
         scale_dim=1,
         scale_dtype=torch.float16,
     )
@@ -56,29 +59,32 @@ def test_mla_indexer_groups_publish_tp_replicas(tp_size, main_layers, indexer_la
         **{f"main.{i}": main for i in range(main_layers)},
         **{f"indexer.{i}": indexer for i in range(indexer_layers)},
     }
-    wrapper = UniformTypeKVCacheSpecs(block_size=16, kv_cache_specs=specs)
-    groups = [KVCacheGroupSpec(list(specs), wrapper)]
+    groups = [make_kv_cache_group(specs)]
 
     assert kv_cache_groups_tp_replicas(groups, tp_size) == tp_size
     assert kv_cache_groups_tp_replicas(groups, tp_size, dcp_size=2) == 1
 
-    sharded = FullAttentionSpec(
+    sharded = make_full_attention_layer_config(
         block_size=16,
         num_kv_heads=1,
         head_size=128,
         dtype=torch.bfloat16,
         max_tp_shards=tp_size,
     )
-    groups.append(KVCacheGroupSpec(["sharded"], sharded))
+    groups.append(make_kv_cache_group(["sharded"], sharded))
     assert kv_cache_groups_tp_replicas(groups, tp_size) == 1
 
 
 @pytest.mark.parametrize("spec_type", [AscendMLAAttentionSpec, AscendSFAIndexerCacheSpec])
 def test_mla_replication_metadata_survives_merge(spec_type):
     spec = spec_type(block_size=16, num_kv_heads=1, head_size=128, dtype=torch.bfloat16)
-    merged = spec_type.merge([spec, spec])
-    assert merged.max_tp_shards == 1
     unknown = replace(spec, max_tp_shards=None)
-    assert spec_type.merge([unknown, unknown]).max_tp_shards is None
-    groups = [KVCacheGroupSpec(["unknown"], unknown)]
+    if is_v034():
+        merged = spec_type.merge([spec, spec])
+        assert merged.max_tp_shards == 1
+        assert spec_type.merge([unknown, unknown]).max_tp_shards is None
+    else:
+        assert spec.max_tp_shards == 1
+        assert unknown.max_tp_shards is None
+    groups = [make_kv_cache_group(["unknown"], unknown)]
     assert kv_cache_groups_tp_replicas(groups, 4) == 1

@@ -7,8 +7,14 @@ from types import SimpleNamespace
 import pytest
 import torch
 from vllm.config import KVTransferConfig
-from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheConfig, KVCacheGroupSpec, KVCacheTensor, MambaSpec
+from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheTensor, MambaSpec
 
+from tests.ut.kv_cache_test_utils import (
+    get_full_attention_spec_cls,
+    make_full_attention_spec,
+    make_kv_cache_group,
+    make_mamba_layer_config,
+)
 from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.cache_planner import (
     LayerwiseCachePlanner,
@@ -31,13 +37,13 @@ def _native_config(groups, num_blocks=3):
         kv_cache_groups=groups,
         kv_cache_tensors=[
             KVCacheTensor(
-                size=num_blocks * group.kv_cache_spec.page_size_bytes,
+                size=num_blocks * spec.page_size_bytes,
                 layers=[name],
                 layer_stride=0,
-                block_stride=group.kv_cache_spec.page_size_bytes,
+                block_stride=spec.page_size_bytes,
             )
             for group in groups
-            for name in group.layer_names
+            for name, spec in group.kv_cache_specs.items()
         ],
     )
 
@@ -69,7 +75,7 @@ def _plan(config, runtime, rules):
 
 
 def _attention_spec(dtype=torch.int8, head_size=8):
-    return FullAttentionSpec(block_size=2, num_kv_heads=1, head_size=head_size, head_size_v=head_size, dtype=dtype)
+    return make_full_attention_spec(block_size=2, num_kv_heads=1, head_size=head_size, head_size_v=head_size, dtype=dtype)
 
 
 def test_default_layout_keeps_native_buffers():
@@ -78,15 +84,15 @@ def test_default_layout_keeps_native_buffers():
     assert settings.num_prefetch_layers == 8
     assert settings.independent_layers == [0]
     names = [f"model.layers.{index}.self_attn" for index in range(27)]
-    config = _native_config([KVCacheGroupSpec(names, _attention_spec())])
+    config = _native_config([make_kv_cache_group(names, _attention_spec())])
     assert plan_layerwise_cache_reuse(config, _runtime(27, None)) is None
 
 
 def test_reuse_layout_matches_round_robin_buffer_assignments():
     names = [f"model.layers.{index}.self_attn" for index in range(27)]
-    config = _native_config([KVCacheGroupSpec(names, _attention_spec())])
+    config = _native_config([make_kv_cache_group(names, _attention_spec())])
     runtime = _runtime(27, 6)
-    layout = _plan(config, runtime, {FullAttentionSpec: True})
+    layout = _plan(config, runtime, {get_full_attention_spec_cls(): True})
     assert layout.prefetch_layer_map[7] == (1,)
     assert layout.prefetch_layer_map[8] == (2,)
     assert [tensor.layers for tensor in layout.kv_cache_tensors][:3] == [[names[0]], names[1::6], names[2::6]]
@@ -194,9 +200,9 @@ def test_physical_layer_index_supports_mtp_names(
 
 def test_pp_stage_uses_global_independent_layers():
     names = [f"model.layers.{index}.attn" for index in range(4, 8)]
-    config = _native_config([KVCacheGroupSpec(names, _attention_spec())])
+    config = _native_config([make_kv_cache_group(names, _attention_spec())])
     runtime = _runtime(8, 1, layerwise_independent_layers=[0, 6])
-    layout = _plan(config, runtime, {FullAttentionSpec: True})
+    layout = _plan(config, runtime, {get_full_attention_spec_cls(): True})
     assert layout.layers == (4, 5, 6, 7)
     assert layout.independent_layers == [6]
     assert layout.prefetch_layer_map == {5: (4,), 7: (5,)}
@@ -205,9 +211,9 @@ def test_pp_stage_uses_global_independent_layers():
 @pytest.mark.parametrize("num_buffers", [None, 6])
 @pytest.mark.parametrize("model_type", ["glm5_next_text", "deepseek_v4"])
 def test_no_reuse_preserves_native_descriptors(num_buffers, model_type):
-    state = MambaSpec(block_size=2, shapes=((4,),), dtypes=(torch.int8,), mamba_cache_mode="align")
+    state = make_mamba_layer_config(block_size=2, shapes=((4,),), dtypes=(torch.int8,), mamba_cache_mode="align")
     names = [f"model.layers.{index}.state" for index in range(6)]
-    config = _native_config([KVCacheGroupSpec(names, state)])
+    config = _native_config([make_kv_cache_group(names, state)])
     original_tensors = tuple(config.kv_cache_tensors)
     assert plan_layerwise_cache_reuse(config, _runtime(6, num_buffers, model_type)) is None
     assert tuple(config.kv_cache_tensors) == original_tensors
@@ -224,8 +230,8 @@ def test_registered_glm_reuse_preserves_resident_components_and_native_views(num
     indexer = replace(main, head_size=4, tokens_per_state=2)
     config = _native_config(
         [
-            KVCacheGroupSpec(names + [draft], main),
-            KVCacheGroupSpec(indexer_names, indexer),
+            make_kv_cache_group(names + [draft], main),
+            make_kv_cache_group(indexer_names, indexer),
         ],
         num_blocks,
     )
@@ -259,11 +265,15 @@ def test_registered_glm_reuse_preserves_resident_components_and_native_views(num
 
 def test_layout_resolves_two_source_dependencies_on_one_target_layer():
     attention = _attention_spec()
-    state = MambaSpec(block_size=2, shapes=((attention.page_size_bytes,),), dtypes=(torch.int8,))
+    state = make_mamba_layer_config(block_size=2, shapes=((attention.page_size_bytes,),), dtypes=(torch.int8,))
     attn_names = ["model.layers.0.attn", "model.layers.2.attn"]
     state_names = ["model.layers.1.state", "model.layers.2.state"]
-    config = _native_config([KVCacheGroupSpec(attn_names, attention), KVCacheGroupSpec(state_names, state)])
-    layout = _plan(config, _runtime(3, 1, layerwise_independent_layers=[]), {FullAttentionSpec: True, MambaSpec: True})
+    config = _native_config([make_kv_cache_group(attn_names, attention), make_kv_cache_group(state_names, state)])
+    layout = _plan(
+        config,
+        _runtime(3, 1, layerwise_independent_layers=[]),
+        {get_full_attention_spec_cls(): True, MambaSpec: True},
+    )
     assert layout.prefetch_layer_map == {2: (0, 1)}
     assert set(layout.kv_cache_tensors[0].layers) == set(attn_names + state_names)
 
@@ -278,7 +288,7 @@ def test_layout_resolves_two_source_dependencies_on_one_target_layer():
 )
 def test_invalid_native_view_is_rejected(changes, message):
     names = [f"model.layers.{index}.attn" for index in range(3)]
-    config = _native_config([KVCacheGroupSpec(names, _attention_spec(torch.float16))])
+    config = _native_config([make_kv_cache_group(names, _attention_spec(torch.float16))])
     config.kv_cache_tensors[-1] = replace(config.kv_cache_tensors[-1], **changes)
     with pytest.raises(ValueError, match=message):
-        _plan(config, _runtime(3, 1), {FullAttentionSpec: True})
+        _plan(config, _runtime(3, 1), {get_full_attention_spec_cls(): True})

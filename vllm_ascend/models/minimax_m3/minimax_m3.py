@@ -91,8 +91,9 @@ from vllm.model_executor.models.utils import (
 from vllm.sequence import IntermediateTensors
 from vllm.triton_utils import HAS_TRITON
 from vllm.utils.torch_utils import kv_cache_dtype_str_to_dtype
+from vllm.v1.core.single_type_kv_cache_manager import FullAttentionManager
 from vllm.v1.kv_cache_interface import (
-    FullAttentionSpec,
+    AttentionSpec,
     KVCacheSpec,
     get_kv_quant_mode,
 )
@@ -356,6 +357,8 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
         return self.attn_backend
 
     def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec | None:
+        from vllm.v1.kv_cache_interface import FullAttentionSpec
+
         return FullAttentionSpec(
             block_size=vllm_config.cache_config.block_size,
             num_kv_heads=self.num_kv_heads,
@@ -363,6 +366,18 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
             head_size_v=self.head_dim,
             dtype=self.kv_cache_torch_dtype,
             kv_quant_mode=get_kv_quant_mode(self.kv_cache_dtype),
+        )
+
+    def get_kv_cache_config(self, vllm_config: VllmConfig):
+        return FullAttentionManager.layer_config(
+            AttentionSpec(
+                block_size=vllm_config.cache_config.block_size,
+                num_kv_heads=self.num_kv_heads,
+                head_size=self.head_dim,
+                head_size_v=self.head_dim,
+                dtype=self.kv_cache_torch_dtype,
+                kv_quant_mode=get_kv_quant_mode(self.kv_cache_dtype),
+            )
         )
 
     def _insert_kv(

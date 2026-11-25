@@ -6,14 +6,16 @@ import pytest
 import torch
 from vllm.config import AttentionConfig, CUDAGraphMode, KVTransferConfig
 from vllm.sequence import IntermediateTensors
+from vllm.v1.core.single_type_kv_cache_manager import FullAttentionManager, MambaManager
 from vllm.v1.kv_cache_interface import (
-    KVCacheGroupSpec,
     MambaSpec,
     MLAAttentionSpec,
 )
 from vllm.v1.kv_cache_layout import KVCacheLayout
 
 from tests.ut.base import TestBase
+from tests.ut.kv_cache_test_utils import make_kv_cache_group
+from vllm_ascend.utils import vllm_version_is
 
 
 @pytest.mark.parametrize("enforce_eager", [False, True])
@@ -341,14 +343,8 @@ def test_mrv2_block_outermost_hybrid_budget_respects_shared_backing(with_kv_tran
         dtypes=(torch.float32,),
     )
     groups = [
-        KVCacheGroupSpec(
-            layer_names=["compressed_attn"],
-            kv_cache_spec=compressed_spec,
-        ),
-        KVCacheGroupSpec(
-            layer_names=["linear_attn"],
-            kv_cache_spec=mamba_spec,
-        ),
+        make_kv_cache_group(["compressed_attn"], compressed_spec),
+        make_kv_cache_group(["linear_attn"], mamba_spec),
     ]
     worker = NPUWorker.__new__(NPUWorker)
     worker.model_config = SimpleNamespace(hf_text_config=SimpleNamespace(model_type="qwen4_exp"))
@@ -359,12 +355,20 @@ def test_mrv2_block_outermost_hybrid_budget_respects_shared_backing(with_kv_tran
             KVTransferConfig(kv_connector="MooncakeConnector", kv_role="kv_both") if with_kv_transfer else None
         ),
     )
-    worker.get_kv_cache_spec = MagicMock(
-        return_value={
-            "compressed_attn": compressed_spec,
-            "linear_attn": mamba_spec,
-        }
-    )
+    if vllm_version_is("0.34.0"):
+        worker.get_kv_cache_spec = MagicMock(
+            return_value={
+                "compressed_attn": compressed_spec,
+                "linear_attn": mamba_spec,
+            }
+        )
+    else:
+        worker.get_kv_cache_layer_configs = MagicMock(
+            return_value={
+                "compressed_attn": FullAttentionManager.layer_config(compressed_spec),
+                "linear_attn": MambaManager.layer_config(mamba_spec),
+            }
+        )
     for use_sparse in (False, True):
         worker.model_runner = SimpleNamespace(
             supports_standardized_shared_kv_backing=True,

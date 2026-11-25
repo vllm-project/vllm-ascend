@@ -10,7 +10,6 @@ from unittest.mock import Mock
 import httpx
 import msgspec
 import pytest
-from vllm.v1.kv_cache_interface import FullAttentionSpec, MambaSpec
 from vllm.v1.request import RequestStatus
 from zmq.constants import SocketOption, SocketType
 from zmq.sugar.context import Context
@@ -28,6 +27,8 @@ from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.pull_scheduler import (
 )
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.push_scheduler import MooncakePushConnectorScheduler
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.utils import MooncakeMetaserverClient
+
+from .helpers import make_full_group, make_mamba_group, set_scheduler_groups
 
 
 def workers():
@@ -70,8 +71,7 @@ def scheduler():
     obj._metadata_thread = None
     obj.metaserver_client = None
     obj._remote_worker_addresses = ()
-    obj.group_block_size = [16, 16]
-    obj.group_unique_specs = [[Mock(spec=FullAttentionSpec, is_circular=False)] for _ in range(2)]
+    set_scheduler_groups(obj, [make_full_group(["layer.0"]), make_full_group(["layer.1"])])
     obj.num_speculative_tokens = 0
     obj._reqs_pending_recv = {}
     obj._reqs_need_send_layerwise = {}
@@ -250,9 +250,13 @@ def test_producer_snapshots_new_and_cached_prefill_chunks(producer_scheduler):
 
 @pytest.mark.parametrize("num_speculative_blocks", [0, 2])
 def test_producer_mamba_excludes_speculative_tail(producer_scheduler, num_speculative_blocks):
-    producer_scheduler.group_unique_specs[1] = [
-        Mock(spec=MambaSpec, num_speculative_blocks=num_speculative_blocks, is_circular=False)
-    ]
+    set_scheduler_groups(
+        producer_scheduler,
+        [
+            producer_scheduler.kv_cache_groups[0],
+            make_mamba_group(["layer.1"], num_speculative_blocks=num_speculative_blocks),
+        ],
+    )
     request = prefill_request()
     blocks = ([1, 2, 3], [10, 11, 12])
     allocate(producer_scheduler, request, blocks)
@@ -437,9 +441,13 @@ def test_push_load_order_covers_chunks_pending_sends_and_idle(producer_scheduler
 def test_metaserver_mamba_blocks_exclude_only_speculative_tail(scheduler, use_replayssm, metaserver):
     # MambaSpec derives this count from use_replayssm at model registration.
     num_speculative_blocks = 0 if use_replayssm else 2
-    scheduler.group_unique_specs[1] = [
-        Mock(spec=MambaSpec, num_speculative_blocks=num_speculative_blocks, is_circular=False)
-    ]
+    set_scheduler_groups(
+        scheduler,
+        [
+            scheduler.kv_cache_groups[0],
+            make_mamba_group(["layer.1"], num_speculative_blocks=num_speculative_blocks),
+        ],
+    )
     scheduler.dcp_size = 1
     scheduler._metadata_thread = Mock(error=None)
     messages = []

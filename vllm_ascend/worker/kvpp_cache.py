@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 import torch
 from vllm.config import VllmConfig
-from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheSpec, UniformTypeKVCacheSpecs
+from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheSpec
 
 from vllm_ascend.core.kv_cache_placement import (
     KVPP_SCRATCH_BUFFER_COUNT,
@@ -19,12 +19,7 @@ def _allocate_kvpp_buffer(size: int, device: torch.device) -> torch.Tensor:
 
 
 def get_kvpp_cache_specs(kv_cache_config: KVCacheConfig) -> dict[str, KVCacheSpec]:
-    specs: dict[str, KVCacheSpec] = {}
-    for group in kv_cache_config.kv_cache_groups:
-        spec = group.kv_cache_spec
-        for name in group.layer_names:
-            specs[name] = spec.kv_cache_specs[name] if isinstance(spec, UniformTypeKVCacheSpecs) else spec
-    return specs
+    return {name: spec for group in kv_cache_config.kv_cache_groups for name, spec in group.kv_cache_specs.items()}
 
 
 def allocate_kvpp_cache(

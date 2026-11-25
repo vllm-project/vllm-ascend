@@ -68,6 +68,7 @@ from vllm_ascend.utils import (
     refresh_block_size,
     update_cudagraph_capture_sizes,
     enable_sp,
+    vllm_version_is,
 )
 
 if TYPE_CHECKING:
@@ -339,11 +340,13 @@ class NPUPlatform(Platform):
     def set_device(cls, device: torch.device):
         torch.npu.set_device(device)
 
-    @classmethod
-    def register_custom_kv_cache_specs(cls, vllm_config: VllmConfig) -> None:
-        from vllm_ascend.core.kv_cache_interface import register_ascend_kv_cache_specs
+    if vllm_version_is("0.34.0"):
 
-        register_ascend_kv_cache_specs()
+        @classmethod
+        def register_custom_kv_cache_specs(cls, vllm_config: VllmConfig) -> None:
+            from vllm_ascend.core.kv_cache_interface import register_ascend_kv_cache_specs
+
+            register_ascend_kv_cache_specs()
 
     @classmethod
     def get_pass_manager_cls(cls) -> str:

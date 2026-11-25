@@ -4,26 +4,47 @@
 import inspect
 from collections.abc import Iterable
 from dataclasses import dataclass, replace
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import torch
 from typing_extensions import Self
 from vllm.config import CacheConfig, VllmConfig
 from vllm.utils.math_utils import cdiv
 from vllm.utils.torch_utils import get_dtype_size
-from vllm.v1.core.single_type_kv_cache_manager import FullAttentionManager, SlidingWindowManager
+from vllm.v1.core.single_type_kv_cache_manager import CircularBufferManager, FullAttentionManager, SlidingWindowManager
 from vllm.v1.kv_cache_interface import (
-    CircularBufferSpec,
-    FullAttentionSpec,
+    AttentionSpec,
     KVCacheSpec,
     KVCacheTensor,
     MambaSpec,
     MLAAttentionSpec,
-    SlidingWindowMLASpec,
-    SlidingWindowSpec,
-    UniformTypeKVCacheSpecs,
 )
-from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry
+
+from vllm_ascend.utils import vllm_version_is
+
+if TYPE_CHECKING:
+    from vllm.v1.kv_cache_interface import KVCacheGroup
+
+if vllm_version_is("0.34.0"):
+    import vllm_ascend.patch.platform.patch_kv_cache_v034_compat  # noqa: F401
+    from vllm.v1.kv_cache_interface import (
+        CircularBufferSpec,
+        FullAttentionSpec,
+        KVCacheGroupSpec,
+        SlidingWindowMLASpec,
+        SlidingWindowSpec,
+        UniformTypeKVCacheSpecs,
+    )
+    from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry  # type: ignore[import-not-found]
+
+    if not TYPE_CHECKING:
+        KVCacheGroup = KVCacheGroupSpec
+    MLA_SPEC_TYPES: tuple[type[KVCacheSpec], ...] = (MLAAttentionSpec, SlidingWindowMLASpec)
+else:
+    if not TYPE_CHECKING:
+        from vllm.v1.kv_cache_interface import KVCacheGroup
+
+    MLA_SPEC_TYPES = (MLAAttentionSpec,)
 
 
 @dataclass(kw_only=True)
@@ -39,25 +60,33 @@ def get_kv_cache_compression_ratio(kv_cache_spec: KVCacheSpec) -> int:
     return kv_cache_spec.tokens_per_state
 
 
-def is_circular_kv_cache_spec(kv_cache_spec: KVCacheSpec) -> bool:
-    """Resolve the fixed-block addressing capability through grouped specs."""
-    if isinstance(kv_cache_spec, UniformTypeKVCacheSpecs):
-        specs = tuple(kv_cache_spec.kv_cache_specs.values())
-        return bool(specs) and all(is_circular_kv_cache_spec(spec) for spec in specs)
-    return isinstance(kv_cache_spec, CircularBufferSpec) or getattr(kv_cache_spec, "is_circular", False)
+def is_circular_cache_group(group: KVCacheGroup) -> bool:
+    """Return whether a KV cache group uses fixed single-block circular ring addressing."""
+    if vllm_version_is("0.34.0"):
+        return is_circular_kv_cache_spec(group.kv_cache_spec)  # type: ignore[attr-defined]
+    return issubclass(group.manager_cls, CircularBufferManager)
 
 
-def is_prefix_cacheable(kv_cache_spec: KVCacheSpec) -> bool:
-    """Resolve cacheability through uniform wrappers.
+if vllm_version_is("0.34.0"):
 
-    ``prefix_cacheable`` is the upstream API on the lanes that define it; the
-    release lane predates it, so an unset attribute means cacheable.
-    """
-    if isinstance(kv_cache_spec, UniformTypeKVCacheSpecs):
-        return all(is_prefix_cacheable(spec) for spec in kv_cache_spec.kv_cache_specs.values())
-    return bool(getattr(kv_cache_spec, "prefix_cacheable", True)) and bool(
-        getattr(kv_cache_spec, "participates_in_prefix_caching", True)
-    )
+    def is_circular_kv_cache_spec(kv_cache_spec: KVCacheSpec) -> bool:
+        """Resolve the fixed-block addressing capability through grouped specs."""
+        if isinstance(kv_cache_spec, UniformTypeKVCacheSpecs):
+            specs = tuple(kv_cache_spec.kv_cache_specs.values())
+            return bool(specs) and all(is_circular_kv_cache_spec(spec) for spec in specs)
+        return isinstance(kv_cache_spec, CircularBufferSpec) or getattr(kv_cache_spec, "is_circular", False)
+
+    def is_prefix_cacheable(kv_cache_spec: KVCacheSpec) -> bool:
+        """Resolve cacheability through uniform wrappers.
+
+        ``prefix_cacheable`` is the upstream API on the lanes that define it; the
+        release lane predates it, so an unset attribute means cacheable.
+        """
+        if isinstance(kv_cache_spec, UniformTypeKVCacheSpecs):
+            return all(is_prefix_cacheable(spec) for spec in kv_cache_spec.kv_cache_specs.values())
+        return bool(getattr(kv_cache_spec, "prefix_cacheable", True)) and bool(
+            getattr(kv_cache_spec, "participates_in_prefix_caching", True)
+        )
 
 
 def declared_kwarg(owner: type, name: str, value: Any) -> dict[str, Any]:
@@ -255,63 +284,69 @@ class AscendMLAAttentionSpec(MLAAttentionSpec):
     def unpadded_page_size_bytes(self) -> int:
         return self.real_page_size_bytes
 
-    @classmethod
-    def merge(cls, specs: list[Self]) -> Self:
-        # Uniformity probes may include indexer specs, which share the upstream
-        # MLA base class but do not have the main cache's layout metadata.
-        assert all(isinstance(spec, AscendMLAAttentionSpec) for spec in specs), (
-            "All attention layers in the same KV cache group must be AscendMLAAttentionSpec."
-        )
-        ascend_layouts = {
-            (
-                spec.scale_dim,
-                spec.num_heads,
-                spec.scale_dtype,
-                spec.cache_sparse_sfa_c8,
-                spec.cache_sparse_sfa_turboquant,
-                spec.cache_sparse_sfa_hif8,
-                spec.store_on_host,
-                spec.alignment,
-                get_kv_cache_compression_ratio(spec),
-                spec.indexes_kv_by_block_stride,
-                spec.dcp_sharded,
-            )
-            for spec in specs
-        }
-        assert len(ascend_layouts) == 1, (
-            "All attention layers in the same KV cache group must use the same Ascend KV cache layout."
-        )
-        non_causal_multi_token_decode_set = set(spec.non_causal_multi_token_decode for spec in specs)
-        assert len(non_causal_multi_token_decode_set) == 1, (
-            "Causal target layers and non-causal multi-token draft layers must use separate KV cache groups."
-        )
-        first_spec = specs[0]
-        merged = super().merge(specs)
-        return replace(
-            merged,
-            scale_dim=first_spec.scale_dim,
-            num_heads=first_spec.num_heads,
-            scale_dtype=first_spec.scale_dtype,
-            alignment=first_spec.alignment,
-            cache_sparse_sfa_c8=first_spec.cache_sparse_sfa_c8,
-            cache_sparse_sfa_turboquant=first_spec.cache_sparse_sfa_turboquant,
-            cache_sparse_sfa_hif8=first_spec.cache_sparse_sfa_hif8,
-            store_on_host=first_spec.store_on_host,
-            indexes_kv_by_block_stride=first_spec.indexes_kv_by_block_stride,
-            # A merged mixed group must remain in the target lookup. Per-layer
-            # draft ownership is retained by UniformTypeKVCacheSpecs where
-            # target and draft have distinct physical layouts.
-            is_draft=all(spec.is_draft for spec in specs),
-        )
+    @property
+    def state_content_size_bytes(self) -> int:
+        return self.head_size * get_dtype_size(self.dtype) + self.scale_dim * get_dtype_size(self.scale_dtype)
 
-    def max_memory_usage_bytes(self, vllm_config: VllmConfig) -> int:
-        max_model_len = vllm_config.model_config.max_model_len
-        dcp_world_size = vllm_config.parallel_config.decode_context_parallel_size
-        # Note(hc): each dcp rank only need save
-        # (max_model_len//dcp_world_size) tokens locally.
-        if self.dcp_sharded and dcp_world_size > 1:
-            max_model_len = cdiv(max_model_len, dcp_world_size)
-        return cdiv(max_model_len, self.block_size) * self.page_size_bytes
+    if vllm_version_is("0.34.0"):
+
+        @classmethod
+        def merge(cls, specs: list[Self]) -> Self:
+            # Uniformity probes may include indexer specs, which share the upstream
+            # MLA base class but do not have the main cache's layout metadata.
+            assert all(isinstance(spec, AscendMLAAttentionSpec) for spec in specs), (
+                "All attention layers in the same KV cache group must be AscendMLAAttentionSpec."
+            )
+            ascend_layouts = {
+                (
+                    spec.scale_dim,
+                    spec.num_heads,
+                    spec.scale_dtype,
+                    spec.cache_sparse_sfa_c8,
+                    spec.cache_sparse_sfa_turboquant,
+                    spec.cache_sparse_sfa_hif8,
+                    spec.store_on_host,
+                    spec.alignment,
+                    get_kv_cache_compression_ratio(spec),
+                    spec.indexes_kv_by_block_stride,
+                    spec.dcp_sharded,
+                )
+                for spec in specs
+            }
+            assert len(ascend_layouts) == 1, (
+                "All attention layers in the same KV cache group must use the same Ascend KV cache layout."
+            )
+            non_causal_multi_token_decode_set = set(spec.non_causal_multi_token_decode for spec in specs)
+            assert len(non_causal_multi_token_decode_set) == 1, (
+                "Causal target layers and non-causal multi-token draft layers must use separate KV cache groups."
+            )
+            first_spec = specs[0]
+            merged = super().merge(specs)
+            return replace(
+                merged,
+                scale_dim=first_spec.scale_dim,
+                num_heads=first_spec.num_heads,
+                scale_dtype=first_spec.scale_dtype,
+                alignment=first_spec.alignment,
+                cache_sparse_sfa_c8=first_spec.cache_sparse_sfa_c8,
+                cache_sparse_sfa_turboquant=first_spec.cache_sparse_sfa_turboquant,
+                cache_sparse_sfa_hif8=first_spec.cache_sparse_sfa_hif8,
+                store_on_host=first_spec.store_on_host,
+                indexes_kv_by_block_stride=first_spec.indexes_kv_by_block_stride,
+                # A merged mixed group must remain in the target lookup. Per-layer
+                # draft ownership is retained by UniformTypeKVCacheSpecs where
+                # target and draft have distinct physical layouts.
+                is_draft=all(spec.is_draft for spec in specs),
+            )
+
+        def max_memory_usage_bytes(self, vllm_config: VllmConfig) -> int:
+            max_model_len = vllm_config.model_config.max_model_len
+            dcp_world_size = vllm_config.parallel_config.decode_context_parallel_size
+            # Note(hc): each dcp rank only need save
+            # (max_model_len//dcp_world_size) tokens locally.
+            if self.dcp_sharded and dcp_world_size > 1:
+                max_model_len = cdiv(max_model_len, dcp_world_size)
+            return cdiv(max_model_len, self.block_size) * self.page_size_bytes
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -358,78 +393,47 @@ class AscendSFAIndexerCacheSpec(MLAAttentionSpec):
         num_heads_per_page = self.block_size * self.num_kv_heads
         return num_heads_per_page * self.state_content_size_bytes
 
-    @classmethod
-    def merge(cls, specs: list[Self]) -> Self:
-        assert all(isinstance(spec, AscendSFAIndexerCacheSpec) for spec in specs), (
-            "All attention layers in the same KV cache group must be AscendSFAIndexerCacheSpec."
-        )
-        scale_dim_set = set(spec.scale_dim for spec in specs)
-        scale_dtype_set = set(spec.scale_dtype for spec in specs)
-        cache_sparse_li_c8_set = set(spec.cache_sparse_li_c8 for spec in specs)
-        cache_sparse_li_c4_set = set(spec.cache_sparse_li_c4 for spec in specs)
-        sfa_dcp_replicated_indexer_size_set = set(spec.sfa_dcp_replicated_indexer_size for spec in specs)
-        assert len({spec.dcp_sharded for spec in specs}) == 1
-        assert (
-            len(scale_dim_set) == 1
-            and len(scale_dtype_set) == 1
-            and len(cache_sparse_li_c8_set) == 1
-            and len(cache_sparse_li_c4_set) == 1
-            and len(sfa_dcp_replicated_indexer_size_set) == 1
-        ), (
-            "All SFA indexer cache layers in the same KV cache group must use "
-            "the same dtype, scale layout, quantization method, LI quant flags "
-            "and DCP replication size."
-        )
-        # Preserve Core's role, padding and stride alignment, and reuse its
-        # standard-field validation before restoring the Ascend-only fields.
-        return replace(
-            super().merge(specs),
-            scale_dim=scale_dim_set.pop(),
-            scale_dtype=scale_dtype_set.pop(),
-            cache_sparse_li_c8=cache_sparse_li_c8_set.pop(),
-            cache_sparse_li_c4=cache_sparse_li_c4_set.pop(),
-            sfa_dcp_replicated_indexer_size=sfa_dcp_replicated_indexer_size_set.pop(),
-        )
+    if vllm_version_is("0.34.0"):
+
+        @classmethod
+        def merge(cls, specs: list[Self]) -> Self:
+            assert all(isinstance(spec, AscendSFAIndexerCacheSpec) for spec in specs), (
+                "All attention layers in the same KV cache group must be AscendSFAIndexerCacheSpec."
+            )
+            scale_dim_set = set(spec.scale_dim for spec in specs)
+            scale_dtype_set = set(spec.scale_dtype for spec in specs)
+            cache_sparse_li_c8_set = set(spec.cache_sparse_li_c8 for spec in specs)
+            cache_sparse_li_c4_set = set(spec.cache_sparse_li_c4 for spec in specs)
+            sfa_dcp_replicated_indexer_size_set = set(spec.sfa_dcp_replicated_indexer_size for spec in specs)
+            assert len({spec.dcp_sharded for spec in specs}) == 1
+            assert (
+                len(scale_dim_set) == 1
+                and len(scale_dtype_set) == 1
+                and len(cache_sparse_li_c8_set) == 1
+                and len(cache_sparse_li_c4_set) == 1
+                and len(sfa_dcp_replicated_indexer_size_set) == 1
+            ), (
+                "All SFA indexer cache layers in the same KV cache group must use "
+                "the same dtype, scale layout, quantization method, LI quant flags "
+                "and DCP replication size."
+            )
+            # Preserve Core's role, padding and stride alignment, and reuse its
+            # standard-field validation before restoring the Ascend-only fields.
+            return replace(
+                super().merge(specs),
+                scale_dim=scale_dim_set.pop(),
+                scale_dtype=scale_dtype_set.pop(),
+                cache_sparse_li_c8=cache_sparse_li_c8_set.pop(),
+                cache_sparse_li_c4=cache_sparse_li_c4_set.pop(),
+                sfa_dcp_replicated_indexer_size=sfa_dcp_replicated_indexer_size_set.pop(),
+            )
+
+
+_KPOOL_TAIL_BASE: type[KVCacheSpec] = SlidingWindowSpec if vllm_version_is("0.34.0") else AttentionSpec
 
 
 @dataclass(frozen=True, kw_only=True)
-class AscendSlidingWindowMLASpec(SlidingWindowMLASpec):
-    """Sliding window attention with MLA cache format."""
-
-    cache_dtype_str: str | None = None
-    # DeepseekV4-only: see MLAAttentionSpec.model_version.
-    alignment: int | None = None  # Default to None for no padding.
-    model_version: str | None = None
-    indexes_kv_by_block_stride: bool = False
-    bounded_replay: bool = False
-
-    @property
-    def prefix_cacheable(self) -> bool:
-        return not self.bounded_replay
-
-    @property
-    def prefix_replay_tokens(self) -> int:
-        return self.sliding_window if self.bounded_replay else 0
-
-    def __post_init__(self):
-        pass
-
-    @classmethod
-    def merge(cls, specs: list[Self]) -> Self:
-        assert all(isinstance(spec, AscendSlidingWindowMLASpec) for spec in specs), (
-            "All attention layers in the same KV cache group must be AscendSlidingWindowMLASpec."
-        )
-        assert len({spec.alignment for spec in specs}) == 1
-        assert len({spec.indexes_kv_by_block_stride for spec in specs}) == 1
-        return replace(
-            super().merge(specs),
-            alignment=specs[0].alignment,
-            indexes_kv_by_block_stride=specs[0].indexes_kv_by_block_stride,
-        )
-
-
-@dataclass(frozen=True, kw_only=True)
-class AscendIndexerKPoolTailSpec(SlidingWindowSpec):
+class AscendIndexerKPoolTailSpec(_KPOOL_TAIL_BASE):  # type: ignore[misc]
     """One fixed FP32 ``[ring_capacity, 2 * head_size]`` page per request.
 
     ``block_size`` is the logical pool size (``compress_ratio``), while
@@ -471,70 +475,112 @@ class AscendIndexerKPoolTailSpec(SlidingWindowSpec):
             raise ValueError("Tail ring capacity must be at least the compression ratio, which must exceed one.")
         if self.block_size != self.compress_ratio:
             raise ValueError("Tail logical block size must equal the compression ratio.")
-        if self.sliding_window != self.compress_ratio:
+        if vllm_version_is("0.34.0") and self.sliding_window != self.compress_ratio:
             raise ValueError("Tail sliding_window describes the logical pool size and must equal compress_ratio.")
 
-    @classmethod
-    def merge(cls, specs: list[Self]) -> Self:
-        assert all(isinstance(spec, cls) for spec in specs)
-        return super().merge(specs)
+    if vllm_version_is("0.34.0"):
 
-    def max_memory_usage_bytes(self, vllm_config: VllmConfig) -> int:
-        del vllm_config
-        return self.page_size_bytes
+        @property
+        def prefix_cacheable(self) -> bool:
+            return False
 
-    def max_admission_blocks_per_request(self, max_in_flight_tokens: int, max_model_len: int) -> int:
-        return 1
+        @classmethod
+        def merge(cls, specs: list[Self]) -> Self:
+            assert all(isinstance(spec, cls) for spec in specs)
+            return super().merge(specs)
 
-    def max_num_blocks_per_req(self, vllm_config: VllmConfig, max_len: int) -> int:
-        return 1
+        def max_memory_usage_bytes(self, vllm_config: VllmConfig) -> int:
+            del vllm_config
+            return self.page_size_bytes
 
-    def is_uniform_with_collection(self, kv_cache_specs: dict[str, KVCacheSpec]) -> bool:
-        return all(
-            isinstance(spec, AscendIndexerKPoolTailSpec)
-            and spec.block_size == self.block_size
-            and spec.compress_ratio == self.compress_ratio
-            and spec.ring_capacity == self.ring_capacity
-            for spec in kv_cache_specs.values()
+        def max_admission_blocks_per_request(self, max_in_flight_tokens: int, max_model_len: int) -> int:
+            return 1
+
+        def max_num_blocks_per_req(self, vllm_config: VllmConfig, max_len: int) -> int:
+            return 1
+
+        def is_uniform_with_collection(self, kv_cache_specs: dict[str, KVCacheSpec]) -> bool:
+            return all(
+                isinstance(spec, AscendIndexerKPoolTailSpec)
+                and spec.block_size == self.block_size
+                and spec.compress_ratio == self.compress_ratio
+                and spec.ring_capacity == self.ring_capacity
+                for spec in kv_cache_specs.values()
+            )
+
+
+if vllm_version_is("0.34.0"):
+
+    @dataclass(frozen=True, kw_only=True)
+    class AscendSlidingWindowMLASpec(SlidingWindowMLASpec):
+        """Sliding window attention with MLA cache format."""
+
+        cache_dtype_str: str | None = None
+        # DeepseekV4-only: see MLAAttentionSpec.model_version.
+        alignment: int | None = None  # Default to None for no padding.
+        model_version: str | None = None
+        indexes_kv_by_block_stride: bool = False
+        bounded_replay: bool = False
+
+        @property
+        def prefix_cacheable(self) -> bool:
+            return not self.bounded_replay
+
+        @property
+        def prefix_replay_tokens(self) -> int:
+            return self.sliding_window if self.bounded_replay else 0
+
+        def __post_init__(self):
+            pass
+
+        @classmethod
+        def merge(cls, specs: list[Self]) -> Self:
+            assert all(isinstance(spec, AscendSlidingWindowMLASpec) for spec in specs), (
+                "All attention layers in the same KV cache group must be AscendSlidingWindowMLASpec."
+            )
+            assert len({spec.alignment for spec in specs}) == 1
+            assert len({spec.indexes_kv_by_block_stride for spec in specs}) == 1
+            return replace(
+                super().merge(specs),
+                alignment=specs[0].alignment,
+                indexes_kv_by_block_stride=specs[0].indexes_kv_by_block_stride,
+            )
+
+    @dataclass(frozen=True, kw_only=True)
+    class AscendCircularBufferSpec(CircularBufferSpec):
+        """Circular state whose physical pages participate in Ascend KV zeroing."""
+
+        def is_uniform_with_collection(self, kv_cache_specs: dict[str, KVCacheSpec]) -> bool:
+            return all(isinstance(spec, AscendCircularBufferSpec) for spec in kv_cache_specs.values())
+
+    def register_ascend_kv_cache_specs() -> None:
+        from vllm_ascend.core.single_type_kv_cache_manager import AscendCircularBufferManager
+        from vllm_ascend.models.glm5next.kv_cache import KpoolTailManager
+
+        KVCacheSpecRegistry.register(
+            kvcache_spec_cls=AscendCircularBufferSpec,
+            manager_class=AscendCircularBufferManager,
+            uniform_type_base_spec=AscendCircularBufferSpec,
         )
 
+        KVCacheSpecRegistry.register(
+            kvcache_spec_cls=AscendMLAAttentionSpec,
+            manager_class=FullAttentionManager,
+            uniform_type_base_spec=FullAttentionSpec,
+        )
+        KVCacheSpecRegistry.register(
+            kvcache_spec_cls=AscendSFAIndexerCacheSpec,
+            manager_class=FullAttentionManager,
+            uniform_type_base_spec=FullAttentionSpec,
+        )
+        KVCacheSpecRegistry.register(
+            kvcache_spec_cls=AscendSlidingWindowMLASpec,
+            manager_class=SlidingWindowManager,
+            uniform_type_base_spec=SlidingWindowMLASpec,
+        )
 
-@dataclass(frozen=True, kw_only=True)
-class AscendCircularBufferSpec(CircularBufferSpec):
-    """Circular state whose physical pages participate in Ascend KV zeroing."""
-
-    def is_uniform_with_collection(self, kv_cache_specs: dict[str, KVCacheSpec]) -> bool:
-        return all(isinstance(spec, AscendCircularBufferSpec) for spec in kv_cache_specs.values())
-
-
-def register_ascend_kv_cache_specs() -> None:
-    from vllm_ascend.core.single_type_kv_cache_manager import AscendCircularBufferManager
-    from vllm_ascend.models.glm5next.kv_cache import KpoolTailManager
-
-    KVCacheSpecRegistry.register(
-        kvcache_spec_cls=AscendCircularBufferSpec,
-        manager_class=AscendCircularBufferManager,
-        uniform_type_base_spec=AscendCircularBufferSpec,
-    )
-
-    KVCacheSpecRegistry.register(
-        kvcache_spec_cls=AscendMLAAttentionSpec,
-        manager_class=FullAttentionManager,
-        uniform_type_base_spec=FullAttentionSpec,
-    )
-    KVCacheSpecRegistry.register(
-        kvcache_spec_cls=AscendSFAIndexerCacheSpec,
-        manager_class=FullAttentionManager,
-        uniform_type_base_spec=FullAttentionSpec,
-    )
-    KVCacheSpecRegistry.register(
-        kvcache_spec_cls=AscendSlidingWindowMLASpec,
-        manager_class=SlidingWindowManager,
-        uniform_type_base_spec=SlidingWindowMLASpec,
-    )
-
-    KVCacheSpecRegistry.register(
-        kvcache_spec_cls=AscendIndexerKPoolTailSpec,
-        manager_class=KpoolTailManager,
-        uniform_type_base_spec=AscendIndexerKPoolTailSpec,
-    )
+        KVCacheSpecRegistry.register(
+            kvcache_spec_cls=AscendIndexerKPoolTailSpec,
+            manager_class=KpoolTailManager,
+            uniform_type_base_spec=AscendIndexerKPoolTailSpec,
+        )

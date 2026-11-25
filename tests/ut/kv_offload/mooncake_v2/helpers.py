@@ -7,13 +7,21 @@ from unittest.mock import MagicMock
 
 import torch
 from vllm.v1.kv_cache_interface import (
-    CircularBufferSpec,
-    FullAttentionSpec,
+    AttentionSpec,
+    KVCacheSpec,
     KVCacheTensor,
     MambaSpec,
-    SlidingWindowSpec,
 )
 
+from tests.ut.kv_cache_test_utils import (
+    get_group_spec,
+    is_v034,
+    make_circular_buffer_layer_config,
+    make_full_attention_layer_config,
+    make_kv_cache_group,
+    make_mamba_layer_config,
+    make_sliding_window_layer_config,
+)
 from vllm_ascend.core.kv_cache_interface import (
     AscendIndexerKPoolTailSpec,
     AscendSFAIndexerCacheSpec,
@@ -49,24 +57,67 @@ def make_kv_cache_tensor(
     return KVCacheTensor(size=size, layers=layers, layer_stride=layer_stride, block_stride=block_stride, offset=offset)
 
 
-def make_full_spec(block_size: int = 16, num_kv_heads: int = 1) -> FullAttentionSpec:
-    return FullAttentionSpec(
+def make_full_spec(block_size: int = 16, num_kv_heads: int = 1, *, dcp_sharded: bool = True) -> KVCacheSpec:
+    if is_v034():
+        from vllm.v1.kv_cache_interface import FullAttentionSpec
+
+        return FullAttentionSpec(
+            block_size=block_size,
+            num_kv_heads=num_kv_heads,
+            head_size=8,
+            head_size_v=8,
+            dtype=torch.float16,
+            dcp_sharded=dcp_sharded,
+        )
+    return AttentionSpec(
         block_size=block_size,
         num_kv_heads=num_kv_heads,
         head_size=8,
         head_size_v=8,
         dtype=torch.float16,
+        dcp_sharded=dcp_sharded,
     )
 
 
-def make_sliding_spec(block_size: int = 16) -> SlidingWindowSpec:
-    return SlidingWindowSpec(
-        block_size=block_size,
-        num_kv_heads=1,
-        head_size=8,
-        dtype=torch.float16,
-        sliding_window=64,
-        dcp_sharded=False,
+def make_full_group(
+    layer_names: list[str] | None = None,
+    *,
+    block_size: int = 16,
+    num_kv_heads: int = 1,
+    dcp_sharded: bool = True,
+):
+    return make_kv_cache_group(
+        layer_names or ["layer.0"],
+        make_full_attention_layer_config(
+            block_size=block_size,
+            num_kv_heads=num_kv_heads,
+            head_size=8,
+            head_size_v=8,
+            dtype=torch.float16,
+            dcp_sharded=dcp_sharded,
+        ),
+    )
+
+
+def make_sliding_group(
+    layer_names: list[str] | None = None,
+    *,
+    block_size: int = 16,
+    sliding_window: int = 64,
+    extra_retained_tokens: int = 0,
+    dcp_sharded: bool = False,
+):
+    return make_kv_cache_group(
+        layer_names or ["layer.0"],
+        make_sliding_window_layer_config(
+            block_size=block_size,
+            num_kv_heads=1,
+            head_size=8,
+            dtype=torch.float16,
+            sliding_window=sliding_window,
+            extra_retained_tokens=extra_retained_tokens,
+            dcp_sharded=dcp_sharded,
+        ),
     )
 
 
@@ -78,26 +129,62 @@ def make_mamba_spec(block_size: int = 16) -> MambaSpec:
     )
 
 
-def make_circular_spec(block_size: int = 16) -> CircularBufferSpec:
-    return CircularBufferSpec(
-        block_size=block_size,
-        num_kv_heads=1,
-        head_size=8,
-        head_size_v=0,
-        dtype=torch.float32,
+def make_mamba_group(
+    layer_names: list[str] | None = None,
+    *,
+    block_size: int = 16,
+    num_speculative_blocks: int = 0,
+    mamba_cache_mode: str = "none",
+    **spec_kwargs: Any,
+):
+    return make_kv_cache_group(
+        layer_names or ["layer.0"],
+        make_mamba_layer_config(
+            block_size=block_size,
+            shapes=((3, 16), (2, 4, 4)),
+            dtypes=(torch.float16, torch.float16),
+            num_speculative_blocks=num_speculative_blocks,
+            mamba_cache_mode=mamba_cache_mode,
+            **spec_kwargs,
+        ),
+    )
+
+
+def make_circular_group(layer_names: list[str] | None = None, *, block_size: int = 16):
+    return make_kv_cache_group(
+        layer_names or ["layer.0"],
+        make_circular_buffer_layer_config(
+            block_size=block_size,
+            num_kv_heads=1,
+            head_size=8,
+            head_size_v=0,
+            dtype=torch.float32,
+        ),
     )
 
 
 def make_kpool_tail_spec(block_size: int = 16) -> AscendIndexerKPoolTailSpec:
+    kwargs: dict[str, Any] = {}
+    if is_v034():
+        kwargs["sliding_window"] = 8
     return AscendIndexerKPoolTailSpec(
         block_size=8,
         ring_capacity=block_size,
         num_kv_heads=1,
         head_size=8,
         dtype=torch.float32,
-        sliding_window=8,
         compress_ratio=8,
+        **kwargs,
     )
+
+
+def make_kpool_tail_group(layer_names: list[str] | None = None, *, block_size: int = 16):
+    spec = make_kpool_tail_spec(block_size=block_size)
+    if is_v034():
+        return make_kv_cache_group(layer_names or ["layer.0"], spec)
+    from vllm_ascend.models.glm5next.kv_cache import KpoolTailManager
+
+    return make_kv_cache_group(layer_names or ["layer.0"], spec, manager_config=KpoolTailManager.config())
 
 
 def make_sfa_indexer_spec(
@@ -111,6 +198,20 @@ def make_sfa_indexer_spec(
         dtype=torch.float16,
         sfa_dcp_replicated_indexer_size=replication_size,
     )
+
+
+def make_group_for_spec(spec: KVCacheSpec, layer_names: list[str] | None = None):
+    if isinstance(spec, AscendIndexerKPoolTailSpec) and not is_v034():
+        from vllm_ascend.models.glm5next.kv_cache import KpoolTailManager
+
+        return make_kv_cache_group(layer_names or ["layer.0"], spec, manager_config=KpoolTailManager.config())
+    return make_kv_cache_group(layer_names or ["layer.0"], spec)
+
+
+def set_scheduler_groups(scheduler: Any, groups: list[Any]) -> None:
+    scheduler.kv_cache_groups = groups
+    scheduler.group_block_size = [group.block_size for group in groups]
+    scheduler.group_unique_specs = [list(group.distinct_specs) for group in groups]
 
 
 def make_transfer_metadata(

@@ -10,12 +10,13 @@ from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
 from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks, KVCacheManager
 from vllm.v1.core.sched.output import NewRequestData, SchedulerOutput
+from vllm.v1.core.single_type_kv_cache_manager import (
+    RSWAManager,
+    SlidingWindowManager,
+)
 from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
     MambaSpec,
-    RSWASpec,
-    SlidingWindowSpec,
-    UniformTypeKVCacheSpecs,
     get_mamba_prefill_checkpoint_position,
 )
 from vllm.v1.outputs import KVConnectorOutput
@@ -110,16 +111,7 @@ class BaseKVPoolScheduler(ABC):
             group_id
             for group_id in self.cacheable_group_ids
             if kv_cache_groups is not None
-            and (
-                isinstance(kv_cache_groups[group_id].kv_cache_spec, (SlidingWindowSpec, RSWASpec))
-                or (
-                    isinstance(kv_cache_groups[group_id].kv_cache_spec, UniformTypeKVCacheSpecs)
-                    and any(
-                        isinstance(spec, (SlidingWindowSpec, RSWASpec))
-                        for spec in kv_cache_groups[group_id].kv_cache_spec.kv_cache_specs.values()
-                    )
-                )
-            )
+            and issubclass(kv_cache_groups[group_id].manager_cls, (SlidingWindowManager, RSWAManager))
         }
         self.grouped_block_size = [block_size * self.dcp_size for block_size in self.original_block_size]
         assert kv_cache_config is not None, "AscendStore requires Core's resolved KV cache configuration"
@@ -237,17 +229,16 @@ class BaseKVPoolScheduler(ABC):
 
         num_mamba_speculative_blocks_by_group: dict[int, int] = {}
         for group_id, kv_cache_group in enumerate(self.kv_cache_config.kv_cache_groups):
-            kv_cache_spec = kv_cache_group.kv_cache_spec
-            if isinstance(kv_cache_spec, UniformTypeKVCacheSpecs):
-                kv_cache_spec = next(iter(kv_cache_spec.kv_cache_specs.values()))
+            kv_cache_spec = kv_cache_group.distinct_specs[0]
             if not isinstance(kv_cache_spec, MambaSpec):
                 continue
-            if getattr(kv_cache_spec, "mamba_cache_mode", None) != "align":
+            params = kv_cache_group.manager_config.params
+            if getattr(params, "mamba_cache_mode", None) != "align":
                 raise NotImplementedError(
                     "AscendStore hybrid linear-attention support currently requires mamba_cache_mode='align'."
                 )
             if self.use_hybrid:
-                num_mamba_speculative_blocks_by_group[group_id] = kv_cache_spec.num_speculative_blocks
+                num_mamba_speculative_blocks_by_group[group_id] = params.num_speculative_blocks
         return num_mamba_speculative_blocks_by_group
 
     def get_num_new_matched_tokens(

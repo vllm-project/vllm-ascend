@@ -42,15 +42,16 @@ from vllm.utils.math_utils import round_down
 from vllm.utils.network_utils import get_ip, make_zmq_path, make_zmq_socket
 from vllm.utils.torch_utils import get_dtype_size
 from vllm.v1.core.sched.output import SchedulerOutput
+from vllm.v1.core.single_type_kv_cache_manager import (
+    FullAttentionManager,
+    SlidingWindowManager,
+)
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
-    FullAttentionSpec,
     KVCacheConfig,
     KVCacheSpec,
     MambaSpec,
     MLAAttentionSpec,
-    SlidingWindowSpec,
-    UniformTypeKVCacheSpecs,
 )
 from vllm.v1.worker.utils import extract_layer_index
 
@@ -870,7 +871,7 @@ class MooncakeLayerwiseConnectorScheduler:
     def __init__(self, vllm_config: VllmConfig, kv_cache_config: KVCacheConfig, engine_id: str):
         self.vllm_config = vllm_config
         self.kv_cache_config = kv_cache_config
-        self.block_size = [group_spec.kv_cache_spec.block_size for group_spec in kv_cache_config.kv_cache_groups]
+        self.block_size = [group_spec.block_size for group_spec in kv_cache_config.kv_cache_groups]
         self.engine_id = engine_id
         logger.info("Initializing Mooncake Scheduler %s", engine_id)
 
@@ -913,11 +914,7 @@ class MooncakeLayerwiseConnectorScheduler:
     @staticmethod
     def _iter_kv_cache_specs(kv_cache_config: KVCacheConfig):
         for kv_cache_group in kv_cache_config.kv_cache_groups:
-            kv_cache_spec = kv_cache_group.kv_cache_spec
-            if isinstance(kv_cache_spec, UniformTypeKVCacheSpecs):
-                yield from kv_cache_spec.kv_cache_specs.values()
-            else:
-                yield kv_cache_spec
+            yield from kv_cache_group.kv_cache_specs.values()
 
     @classmethod
     def _has_attn_mamba_hybrid_cache(cls, kv_cache_config: KVCacheConfig) -> bool:
@@ -1215,7 +1212,9 @@ class MooncakeLayerwiseConnectorWorker:
         self.vllm_config = vllm_config
         self.kv_cache_config = kv_cache_config
         self.num_kv_cache_groups = len(self.kv_cache_config.kv_cache_groups)
-        self.kv_cache_specs: list[KVCacheSpec] = [spec.kv_cache_spec for spec in self.kv_cache_config.kv_cache_groups]
+        self.kv_cache_specs: list[KVCacheSpec] = [
+            group.distinct_specs[0] for group in self.kv_cache_config.kv_cache_groups
+        ]
         self.local_engine_id: str = " "
         self.engine_id = engine_id
         self.dp_rank: int = vllm_config.parallel_config.data_parallel_rank
@@ -1414,9 +1413,8 @@ class MooncakeLayerwiseConnectorWorker:
             if isinstance(kv_cache_tuple, (list, tuple)) is False:
                 kv_cache_tuple = [kv_cache_tuple]
             layer_kv_group_id = layer2group_ids[layer_name]
-            layer_kv_cache_spec = kv_cache_groups[layer_kv_group_id].kv_cache_spec
-            if isinstance(layer_kv_cache_spec, UniformTypeKVCacheSpecs):
-                layer_kv_cache_spec = layer_kv_cache_spec.kv_cache_specs[layer_name]
+            layer_kv_group = kv_cache_groups[layer_kv_group_id]
+            layer_kv_cache_spec = layer_kv_group.kv_cache_specs[layer_name]
             # Read the layout flags directly: some Ascend versions expose the
             # cache spec flags without the corresponding utils helpers.
             is_mla = isinstance(layer_kv_cache_spec, MLAAttentionSpec)
@@ -1438,7 +1436,8 @@ class MooncakeLayerwiseConnectorWorker:
                 and (
                     (
                         self.pd_head_ratio > 1
-                        and (isinstance(layer_kv_cache_spec, (FullAttentionSpec, SlidingWindowSpec)))
+                        and isinstance(layer_kv_cache_spec, AttentionSpec)
+                        and issubclass(layer_kv_group.manager_cls, (FullAttentionManager, SlidingWindowManager))
                     )
                     or self.enable_kv_quant
                     or self.enable_c8_quant
@@ -1921,7 +1920,11 @@ class MooncakeLayerwiseConnectorWorker:
             if layer_name not in self.sparse_sfa_c8_layers and (
                 (
                     self.pd_head_ratio != 1
-                    and (isinstance(self.kv_cache_specs[layer_group_idx], (FullAttentionSpec, SlidingWindowSpec)))
+                    and isinstance(self.kv_cache_specs[layer_group_idx], AttentionSpec)
+                    and issubclass(
+                        self.kv_cache_config.kv_cache_groups[layer_group_idx].manager_cls,
+                        (FullAttentionManager, SlidingWindowManager),
+                    )
                     and send_task.group_num_blocks[layer_group_idx] > 0
                 )
                 or (self.enable_c8_quant and self.current_layer in self.vllm_config.quant_config.c8_quant_layers)

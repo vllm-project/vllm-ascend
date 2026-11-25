@@ -33,13 +33,14 @@ from vllm.v1.worker.gpu.model_states.mamba_hybrid import (
 )
 from vllm.v1.worker.mamba_utils import (
     MambaSpecDecodeGPUContext,
+    get_mamba_group_ids,
     get_mamba_groups,
     preprocess_mamba_align_fused_kernel,
     validate_mamba_state_copy_funcs,
 )
 from vllm.v1.worker.utils import AttentionGroup
 
-from vllm_ascend.utils import model_uses_kimi_kda, model_uses_kpool_indexer
+from vllm_ascend.utils import model_uses_kimi_kda, model_uses_kpool_indexer, vllm_version_is
 from vllm_ascend.worker.v2.attn_utils import build_attn_metadata
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch
 from vllm_ascend.worker.v2.model_states.default import AscendModelState
@@ -100,10 +101,16 @@ class AscendMambaHybridModelState(MambaHybridModelState, AscendModelState):
         ``MambaSpecDecodeGPUContext`` (same iteration order as
         ``initialize_from_forward_context``)."""
         if self._layer_state_ranges is None:
-            assert self._mamba_spec is not None
+            if vllm_version_is("0.34.0"):
+                assert self._mamba_spec is not None
+                mamba_group_ids = self._mamba_group_ids
+            elif self._mamba_ctx is not None:
+                mamba_group_ids = self._mamba_ctx.mamba_group_ids
+            else:
+                mamba_group_ids = get_mamba_group_ids(get_mamba_groups(kv_cache_config))
             ranges: dict[str, tuple[int, int]] = {}
             idx = 0
-            for mamba_group_id in self._mamba_group_ids:
+            for mamba_group_id in mamba_group_ids:
                 group = kv_cache_config.kv_cache_groups[mamba_group_id]
                 for layer_name in group.layer_names:
                     # Match the per-type rows populated by the existing copy context.
@@ -211,7 +218,7 @@ class AscendMambaHybridModelState(MambaHybridModelState, AscendModelState):
     def _ensure_align_ctx(
         self,
         kv_cache_config: KVCacheConfig,
-        mamba_group_ids: list[int],
+        mamba_group_ids: list[int] | None,
         block_tables: tuple[torch.Tensor, ...],
     ) -> MambaSpecDecodeGPUContext:
         if self._mamba_ctx is None:
@@ -231,11 +238,12 @@ class AscendMambaHybridModelState(MambaHybridModelState, AscendModelState):
             )
         ctx = self._mamba_ctx
         if not ctx.is_initialized:
+            group_ids = ctx.mamba_group_ids if mamba_group_ids is None else mamba_group_ids
             ctx.initialize_from_forward_context(
                 kv_cache_config,
                 self.vllm_config.compilation_config.static_forward_context,
                 self._mamba_state_copy_funcs,
-                [block_tables[gid] for gid in mamba_group_ids],
+                [block_tables[gid] for gid in group_ids],
             )
         return ctx
 
@@ -268,8 +276,13 @@ class AscendMambaHybridModelState(MambaHybridModelState, AscendModelState):
         if num_reqs == 0:
             return
         self._finish_previous_layerwise_mamba_copy()
-        mamba_group_ids, mamba_spec = self._get_mamba_group_info(kv_cache_config)
-        ctx = self._ensure_align_ctx(kv_cache_config, mamba_group_ids, block_tables)
+        if vllm_version_is("0.34.0"):
+            mamba_group_ids, mamba_spec = self._get_mamba_group_info(kv_cache_config)
+            ctx = self._ensure_align_ctx(kv_cache_config, mamba_group_ids, block_tables)
+            mamba_block_size = mamba_spec.block_size
+        else:
+            ctx = self._ensure_align_ctx(kv_cache_config, None, block_tables)
+            mamba_block_size = ctx.block_size
 
         # The state-advance + pre-copy kernels run every step; they fast-exit
         # per request when src_col < 0 or src_col == dst_col, so no copy
@@ -285,8 +298,16 @@ class AscendMambaHybridModelState(MambaHybridModelState, AscendModelState):
             self._mamba_src_off_gpu,
             num_reqs,
             BLOCK_SIZE=_PREPROCESS_BLOCK_SIZE,
-            MAMBA_BLOCK_SIZE=mamba_spec.block_size,
+            MAMBA_BLOCK_SIZE=mamba_block_size,
         )
+        replayssm = getattr(ctx, "replayssm", None)
+        if replayssm is not None:
+            replayssm.reset_new_slots(
+                idx_mapping=input_batch.idx_mapping,
+                src_cols=self._mamba_src_col_gpu,
+                dst_cols=self._mamba_state_idx_gpu,
+                num_reqs=num_reqs,
+            )
         if self._prepare_layerwise_mamba_copy(ctx, num_reqs, input_batch.idx_mapping, kv_cache_config):
             # Per-layer copies are executed by the connector right after each
             # layer's KV load finishes (do_mamba_copy_for_layer).

@@ -328,6 +328,11 @@ class AscendMiniMaxM3IndexerCache(nn.Module, AttentionLayerBase):
             cache_dtype_str=self.kv_cache_dtype,
         )
 
+    def get_kv_cache_config(self, vllm_config: VllmConfig):
+        from vllm.v1.core.single_type_kv_cache_manager import FullAttentionManager
+
+        return FullAttentionManager.layer_config(self.get_kv_cache_spec(vllm_config))
+
     def forward(self) -> None: ...
 
     def get_attn_backend(self) -> type[AttentionBackend]:

@@ -1,24 +1,29 @@
 # SPDX-License-Identifier: Apache-2.0
 
-from dataclasses import replace
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
-from vllm.v1.kv_cache_interface import KVCacheGroupSpec, KVCacheSpec, UniformTypeKVCacheSpecs
+import torch
 
+from tests.ut.kv_cache_test_utils import (
+    get_group_spec,
+    make_kv_cache_group,
+    make_sliding_window_layer_config,
+)
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake import base_scheduler
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.base_scheduler import (
     MooncakeBaseConnectorScheduler,
 )
 
 from .helpers import (
-    make_circular_spec,
-    make_full_spec,
-    make_kpool_tail_spec,
-    make_mamba_spec,
+    make_circular_group,
+    make_full_group,
+    make_kpool_tail_group,
+    make_mamba_group,
     make_request,
-    make_sliding_spec,
+    make_sliding_group,
+    set_scheduler_groups,
 )
 
 
@@ -56,8 +61,7 @@ def test_base_scheduler_initializes_parallel_layout_and_control_port(
     sliding_window: bool,
 ) -> None:
     config = make_scheduler_config()
-    spec = make_sliding_spec() if sliding_window else make_full_spec()
-    group = KVCacheGroupSpec(layer_names=["layer.0"], kv_cache_spec=spec)
+    group = make_sliding_group(["layer.0"]) if sliding_window else make_full_group(["layer.0"])
     kv_cache_config = SimpleNamespace(kv_cache_groups=[group])
     ascend_config = object()
     init_ascend_config = MagicMock()
@@ -87,7 +91,7 @@ def test_base_scheduler_initializes_parallel_layout_and_control_port(
     assert scheduler.max_device_id == 24
     assert scheduler.side_channel_port == 6025
     assert scheduler.group_block_size == [16]
-    assert scheduler.group_unique_specs == [[group.kv_cache_spec]]
+    assert scheduler.group_unique_specs == [[get_group_spec(group)]]
     assert scheduler.need_truncate is sliding_window
     init_ascend_config.assert_called_once_with(config)
 
@@ -170,21 +174,20 @@ def test_base_scheduler_accepts_producer_pcp(monkeypatch: pytest.MonkeyPatch) ->
 
 
 def test_base_scheduler_expands_unique_uniform_specs_in_layer_order() -> None:
-    full = make_full_spec()
-    sliding = make_sliding_spec()
-    uniform = UniformTypeKVCacheSpecs(
-        block_size=16,
-        kv_cache_specs={"layer.0": full, "layer.1": full, "layer.2": sliding},
+    sliding_a = make_sliding_window_layer_config(
+        block_size=16, num_kv_heads=1, head_size=8, dtype=torch.float16, sliding_window=64, dcp_sharded=False
     )
-    group = KVCacheGroupSpec(
-        layer_names=["layer.1", "layer.0", "layer.2"],
-        kv_cache_spec=uniform,
+    sliding_b = make_sliding_window_layer_config(
+        block_size=16, num_kv_heads=2, head_size=8, dtype=torch.float16, sliding_window=64, dcp_sharded=False
     )
+    group = make_kv_cache_group({"layer.1": sliding_a, "layer.0": sliding_a, "layer.2": sliding_b})
+    spec_a = get_group_spec(group, "layer.1")
+    spec_b = get_group_spec(group, "layer.2")
 
-    assert MooncakeBaseConnectorScheduler._get_group_unique_specs(group) == [full, sliding]
+    assert MooncakeBaseConnectorScheduler._get_group_unique_specs(group) == [spec_a, spec_b]
     scheduler = MooncakeBaseConnectorScheduler.__new__(MooncakeBaseConnectorScheduler)
     scheduler.vllm_config = SimpleNamespace(model_config=SimpleNamespace(hf_config=SimpleNamespace()))
-    scheduler.group_unique_specs = [scheduler._get_group_unique_specs(group)]
+    set_scheduler_groups(scheduler, [group])
     assert scheduler._needs_prefill_token_truncation() is True
 
 
@@ -193,8 +196,7 @@ def test_base_scheduler_transfer_blocks_handles_empty_and_state_without_speculat
     scheduler.pcp_size = 1
     scheduler.dcp_size = 1
     scheduler.num_speculative_tokens = 0
-    scheduler.group_block_size = [16]
-    scheduler.group_unique_specs = [[make_mamba_spec()]]
+    set_scheduler_groups(scheduler, [make_mamba_group()])
 
     assert scheduler._get_transfer_block_ids((), prompt_len=32) == ()
     assert scheduler._get_transfer_block_ids(([10, 11],), prompt_len=32) == ([10, 11],)
@@ -205,8 +207,7 @@ def test_base_scheduler_keeps_recoverssm_checkpoint_and_trims_native_scratch_blo
     scheduler.pcp_size = 1
     scheduler.dcp_size = 1
     scheduler.num_speculative_tokens = 5
-    scheduler.group_block_size = [16, 16]
-    scheduler.group_unique_specs = [[make_mamba_spec()], [replace(make_mamba_spec(), num_speculative_blocks=5)]]
+    set_scheduler_groups(scheduler, [make_mamba_group(), make_mamba_group(num_speculative_blocks=5)])
 
     assert scheduler._get_transfer_block_ids(([7], [20, 21, 22, 23, 24, 25]), prompt_len=32) == ([7], [20])
 
@@ -216,8 +217,7 @@ def test_base_scheduler_pcp_does_not_shard_attention_blocks() -> None:
     scheduler.pcp_size = 2
     scheduler.dcp_size = 1
     scheduler.num_speculative_tokens = 0
-    scheduler.group_block_size = [16]
-    scheduler.group_unique_specs = [[make_full_spec()]]
+    set_scheduler_groups(scheduler, [make_full_group()])
 
     assert scheduler._get_transfer_block_ids(([10, 11, 12, 13],), prompt_len=64) == ([10, 11, 12, 13],)
 
@@ -227,8 +227,7 @@ def test_base_scheduler_dcp_shards_full_attention_but_keeps_swa_block_size() -> 
     scheduler.pcp_size = 2
     scheduler.dcp_size = 2
     scheduler.num_speculative_tokens = 0
-    scheduler.group_block_size = [16, 16]
-    scheduler.group_unique_specs = [[make_full_spec()], [make_sliding_spec()]]
+    set_scheduler_groups(scheduler, [make_full_group(), make_sliding_group()])
 
     assert scheduler._get_transfer_block_ids(
         ([10, 11, 12, 13], [20, 21, 22, 23]),
@@ -236,14 +235,13 @@ def test_base_scheduler_dcp_shards_full_attention_but_keeps_swa_block_size() -> 
     ) == ([10, 11], [20, 21, 22, 23])
 
 
-@pytest.mark.parametrize("spec", [make_circular_spec(), make_kpool_tail_spec()])
-def test_base_scheduler_keeps_single_circular_block_independent_of_prompt(spec: KVCacheSpec) -> None:
+@pytest.mark.parametrize("group_factory", [make_circular_group, make_kpool_tail_group])
+def test_base_scheduler_keeps_single_circular_block_independent_of_prompt(group_factory) -> None:
     scheduler = MooncakeBaseConnectorScheduler.__new__(MooncakeBaseConnectorScheduler)
     scheduler.pcp_size = 2
     scheduler.dcp_size = 4
     scheduler.num_speculative_tokens = 3
-    scheduler.group_block_size = [16]
-    scheduler.group_unique_specs = [[spec]]
+    set_scheduler_groups(scheduler, [group_factory()])
 
     assert scheduler._get_transfer_block_ids(([10],), prompt_len=4096) == ([10],)
 

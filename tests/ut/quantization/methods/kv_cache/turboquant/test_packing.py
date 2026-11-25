@@ -18,7 +18,7 @@ def _spec(rows, width, dtype, tq=False):
 
 
 def _group(specs):
-    return SimpleNamespace(layer_names=list(specs), kv_cache_spec=SimpleNamespace(kv_cache_specs=specs))
+    return SimpleNamespace(layer_names=list(specs), kv_cache_specs=specs)
 
 
 @pytest.mark.parametrize("block_size", [32, 64, 128])
@@ -37,7 +37,7 @@ def test_packed_pages_never_alias_other_block_ids(block_size, monkeypatch):
     assert num_blocks == 3
     assert {d.size for d in descriptors} == {bytes_per_block * 3}
     descriptors = {d.layers[0]: d for d in descriptors}
-    specs = {name: spec for g in groups for name, spec in g.kv_cache_spec.kv_cache_specs.items()}
+    specs = {name: spec for g in groups for name, spec in g.kv_cache_specs.items()}
     # Any two simultaneously live (group, block) pairs must be disjoint.
     for group_id, group in enumerate(groups):
         for name in group.layer_names:

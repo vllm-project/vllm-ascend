@@ -16,9 +16,11 @@ from vllm.config import (
 from vllm.config.model import ModelDType
 from vllm.distributed.parallel_state import all_gather_fake
 from vllm.utils.math_utils import cdiv
-from vllm.v1.kv_cache_interface import FullAttentionSpec
+from vllm.v1.kv_cache_interface import AttentionSpec
 
+from tests.ut.kv_cache_test_utils import get_full_attention_spec_cls, make_full_attention_spec
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
+from vllm_ascend.core.kv_cache_interface import declared_kwarg
 
 
 def _update_out_and_lse(out_list: torch.Tensor, lse_list: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
@@ -242,14 +244,15 @@ def create_vllm_config(
     )
 
 
-def create_standard_kv_cache_spec(vllm_config: VllmConfig) -> FullAttentionSpec:
-    """Create a FullAttentionSpec from ModelParams only."""
-    return FullAttentionSpec(
+def create_standard_kv_cache_spec(vllm_config: VllmConfig) -> AttentionSpec:
+    """Create a standard attention KV cache spec from ModelParams only."""
+    spec_cls = get_full_attention_spec_cls()
+    return make_full_attention_spec(
         block_size=vllm_config.cache_config.block_size,
         num_kv_heads=vllm_config.model_config.get_num_kv_heads(vllm_config.parallel_config),
         head_size=vllm_config.model_config.get_head_size(),
         dtype=vllm_config.model_config.dtype,
-        sliding_window=vllm_config.model_config.get_sliding_window(),
+        **declared_kwarg(spec_cls, "sliding_window", vllm_config.model_config.get_sliding_window()),
     )
 
 

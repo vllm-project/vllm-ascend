@@ -1,6 +1,7 @@
 import contextlib
 import typing
 from dataclasses import dataclass
+from typing import Any
 
 import numpy as np
 import torch
@@ -25,7 +26,6 @@ from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     KVCacheConfig,
     KVCacheSpec,
-    UniformTypeKVCacheSpecs,
 )
 from vllm.v1.utils import CpuGpuBuffer
 
@@ -227,41 +227,56 @@ class SparseKVOffloadMemoryBudget:
 
 
 def _split_host_device_kv_specs(
-    kv_cache_spec: dict[str, KVCacheSpec],
-) -> tuple[list[KVCacheSpec], list[KVCacheSpec]]:
+    kv_cache_spec: dict[str, Any],
+) -> tuple[list[Any], list[Any]]:
     if not kv_cache_spec:
         raise ValueError("Sparse KV offload requires a non-empty kv_cache_spec")
-    host_specs: list[KVCacheSpec] = []
-    device_specs: list[KVCacheSpec] = []
-    for spec in kv_cache_spec.values():
+    host_entries: list[Any] = []
+    device_entries: list[Any] = []
+    for entry in kv_cache_spec.values():
+        spec = getattr(entry, "spec", entry)
         if getattr(spec, "store_on_host", False):
-            host_specs.append(spec)
+            host_entries.append(entry)
         else:
-            device_specs.append(spec)
-    if not host_specs:
+            device_entries.append(entry)
+    if not host_entries:
         raise ValueError("Sparse KV offload requires at least one host KV cache spec")
-    if not device_specs:
+    if not device_entries:
         raise ValueError("Sparse KV offload requires at least one device KV cache spec")
-    block_sizes = {spec.block_size for spec in host_specs + device_specs}
+    block_sizes = {getattr(entry, "spec", entry).block_size for entry in host_entries + device_entries}
     if len(block_sizes) != 1:
         raise ValueError(f"Sparse KV offload memory planning requires one shared block size, got {sorted(block_sizes)}")
-    return host_specs, device_specs
+    return host_entries, device_entries
+
+
+def _entry_max_blocks_per_request(entry: Any, vllm_config: VllmConfig) -> int:
+    spec = getattr(entry, "spec", entry)
+    if hasattr(entry, "max_memory_usage_bytes"):
+        return cdiv(entry.max_memory_usage_bytes(vllm_config), spec.page_size_bytes)
+    from vllm.v1.core.single_type_kv_cache_manager import FullAttentionManager
+
+    return FullAttentionManager.max_allocated_blocks_per_request(
+        FullAttentionManager.config(),
+        spec.block_size,
+        getattr(spec, "dcp_sharded", False),
+        vllm_config,
+    )
 
 
 def plan_sparse_kv_offload_memory(
-    kv_cache_spec: dict[str, KVCacheSpec],
+    kv_cache_spec: dict[str, Any],
     vllm_config: VllmConfig,
     available_device_memory_bytes: int,
     dram_limit_bytes: int,
     keep_device_kv_cache: bool,
 ) -> SparseKVOffloadMemoryBudget:
     """Bound sparse KV offload blocks by NPU, DRAM, and active demand."""
-    host_specs, device_specs = _split_host_device_kv_specs(kv_cache_spec)
-    host_page_size_bytes = sum(spec.page_size_bytes for spec in host_specs)
-    device_page_size_bytes = sum(spec.page_size_bytes for spec in device_specs)
+    host_entries, device_entries = _split_host_device_kv_specs(kv_cache_spec)
+    host_page_size_bytes = sum(getattr(entry, "spec", entry).page_size_bytes for entry in host_entries)
+    device_page_size_bytes = sum(getattr(entry, "spec", entry).page_size_bytes for entry in device_entries)
     total_page_size_bytes = host_page_size_bytes + device_page_size_bytes
 
-    host_alignment_reserve_bytes = len(host_specs) * _CPU_CACHE_MAX_ALIGNMENT_OVERHEAD_PER_LAYER
+    host_alignment_reserve_bytes = len(host_entries) * _CPU_CACHE_MAX_ALIGNMENT_OVERHEAD_PER_LAYER
     usable_dram_bytes = max(dram_limit_bytes - host_alignment_reserve_bytes, 0)
     dram_limit_blocks = usable_dram_bytes // host_page_size_bytes
 
@@ -269,11 +284,7 @@ def plan_sparse_kv_offload_memory(
     npu_limit_blocks = max(available_device_memory_bytes, 0) // npu_page_size_bytes
 
     max_blocks_per_request = max(
-        cdiv(
-            spec.max_memory_usage_bytes(vllm_config),
-            spec.page_size_bytes,
-        )
-        for spec in host_specs + device_specs
+        _entry_max_blocks_per_request(entry, vllm_config) for entry in host_entries + device_entries
     )
     workload_limit_blocks = max_blocks_per_request * vllm_config.scheduler_config.max_num_seqs + _VLLM_NULL_BLOCK_COUNT
 
@@ -317,10 +328,7 @@ def get_sparse_kv_offload_cpu_pool_size_bytes(
     """Return a safe upper bound for aligned host KV allocations."""
     layer_specs: dict[str, KVCacheSpec] = {}
     for group in kv_cache_config.kv_cache_groups:
-        if isinstance(group.kv_cache_spec, UniformTypeKVCacheSpecs):
-            layer_specs.update(group.kv_cache_spec.kv_cache_specs)
-        else:
-            layer_specs.update((layer_name, group.kv_cache_spec) for layer_name in group.layer_names)
+        layer_specs.update(group.kv_cache_specs)
     host_specs = [spec for spec in layer_specs.values() if getattr(spec, "store_on_host", False)]
     if not host_specs:
         raise ValueError("Sparse KV offload requires host-resident KV cache specs")
@@ -616,7 +624,7 @@ class SparseKVOffloadManager:
         self,
         kv_cache_config: KVCacheConfig,
     ) -> int:
-        block_sizes = {group.kv_cache_spec.block_size for group in kv_cache_config.kv_cache_groups}
+        block_sizes = {group.block_size for group in kv_cache_config.kv_cache_groups}
         if len(block_sizes) != 1:
             raise ValueError("Sparse KV offload requires one shared block size across target and draft groups.")
         return block_sizes.pop()
@@ -630,10 +638,7 @@ class SparseKVOffloadManager:
     def _register_offload_layers(self, kv_caches: dict[str, torch.Tensor]) -> None:
         host_layer_names = set()
         for group in self.kv_cache_config.kv_cache_groups:
-            for layer_name in group.layer_names:
-                spec = group.kv_cache_spec
-                if isinstance(spec, UniformTypeKVCacheSpecs):
-                    spec = spec.kv_cache_specs[layer_name]
+            for layer_name, spec in group.kv_cache_specs.items():
                 if getattr(spec, "store_on_host", False):
                     host_layer_names.add(layer_name)
         self.offload_layer_names = [layer_name for layer_name in kv_caches if layer_name in host_layer_names]
@@ -1563,11 +1568,7 @@ class SparseKVOffloadManager:
     def _infer_host_kv_cache_group_id(kv_cache_config: KVCacheConfig) -> int:
         host_group_ids = []
         for group_id, group in enumerate(kv_cache_config.kv_cache_groups):
-            group_spec = group.kv_cache_spec
-            specs = (
-                group_spec.kv_cache_specs.values() if isinstance(group_spec, UniformTypeKVCacheSpecs) else (group_spec,)
-            )
-            if any(getattr(spec, "store_on_host", False) for spec in specs):
+            if any(getattr(spec, "store_on_host", False) for spec in group.distinct_specs):
                 host_group_ids.append(group_id)
         if len(host_group_ids) != 1:
             raise ValueError(

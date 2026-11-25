@@ -62,6 +62,7 @@ from vllm.models.deepseek_v41.common.engram import EngramLayout
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.utils.torch_utils import kv_cache_dtype_str_to_dtype
+from vllm.v1.core.single_type_kv_cache_manager import FullAttentionManager
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import MoECommType, select_moe_comm_method
@@ -86,6 +87,7 @@ from vllm_ascend.ops.triton.mul_add import muls_add_triton
 from vllm_ascend.utils import (
     get_rotation_path,
     normalize_deepseek_v41_config,
+    vllm_version_is,
 )
 from vllm_ascend.worker.v2.pp_transport import (
     PPDependencyTransport,
@@ -103,6 +105,7 @@ from .cache_config import (
     make_folded_index_cache_spec,
     make_index_cache_spec,
     make_mla_cache_spec,
+    make_swa_cache_config,
     make_swa_cache_spec,
     uses_a5_packed_cache,
 )
@@ -708,11 +711,22 @@ class V41PPCacheHandler(PPDependencyTransport):
                 ),
             )
             if source in incoming.cache_sources:
-                self.remote_caches[f"{source}_long"] = DeepseekV41CacheLayer(vllm_config, long_prefix, long_spec)
-                self.remote_caches[f"{source}_index"] = DeepseekV41CacheLayer(vllm_config, index_prefix, index_spec)
+                self.remote_caches[f"{source}_long"] = DeepseekV41CacheLayer(
+                    vllm_config,
+                    long_prefix,
+                    long_spec if vllm_version_is("0.34.0") else FullAttentionManager.layer_config(long_spec),
+                )
+                self.remote_caches[f"{source}_index"] = DeepseekV41CacheLayer(
+                    vllm_config,
+                    index_prefix,
+                    index_spec if vllm_version_is("0.34.0") else FullAttentionManager.layer_config(index_spec),
+                )
                 if uses_a5_packed_cache() and source == config.candidate_source_layer_id:
+                    folded_spec = make_folded_index_cache_spec(block_size=block_size)
                     self.remote_caches[f"{source}_folded"] = DeepseekV41CacheLayer(
-                        vllm_config, index_prefix + "_folded", make_folded_index_cache_spec(block_size=block_size)
+                        vllm_config,
+                        index_prefix + "_folded",
+                        folded_spec if vllm_version_is("0.34.0") else FullAttentionManager.layer_config(folded_spec),
                     )
         self.incoming_caches = tuple(spec for source in incoming.cache_sources for spec in cache_specs[source])
         self.outgoing_caches = tuple(spec for source in outgoing.cache_sources for spec in cache_specs[source])
@@ -773,15 +787,27 @@ class AscendDeepseekV41SWACache(DeepseekV41CacheLayer):
 
     def __init__(self, head_dim, window_size, dtype, prefix, cache_config, bounded_replay=False):
         block_size = cache_config.block_size
-        spec = make_swa_cache_spec(
-            block_size=block_size,
-            window_size=window_size,
-            head_size=head_dim,
-            dtype=dtype,
-            cache_dtype=cache_config.cache_dtype,
-            bounded_replay=bounded_replay,
-        )
-        super().__init__(get_current_vllm_config(), prefix, spec)
+        from vllm_ascend.utils import vllm_version_is
+
+        if vllm_version_is("0.34.0"):
+            target = make_swa_cache_spec(
+                block_size=block_size,
+                window_size=window_size,
+                head_size=head_dim,
+                dtype=dtype,
+                cache_dtype=cache_config.cache_dtype,
+                bounded_replay=bounded_replay,
+            )
+        else:
+            target = make_swa_cache_config(
+                block_size=block_size,
+                window_size=window_size,
+                head_size=head_dim,
+                dtype=dtype,
+                cache_dtype=cache_config.cache_dtype,
+                bounded_replay=bounded_replay,
+            )
+        super().__init__(get_current_vllm_config(), prefix, target)
         self.head_dim = head_dim
         self.window_size = window_size
         self.dtype = dtype
@@ -919,14 +945,15 @@ class DeepseekV41Attention(DeepseekV41SWAAttention):
         width = config.head_dim
         self.softmax_scale = width**-0.5
         if role.is_kv_source:
+            mla_spec = make_mla_cache_spec(
+                block_size=block_size,
+                head_size=width,
+                compress_ratio=role.compress_ratio,
+            )
             self.long_kv_cache = DeepseekV41CacheLayer(
                 vllm_config,
                 f"{prefix}.long_kv_cache",
-                make_mla_cache_spec(
-                    block_size=block_size,
-                    head_size=width,
-                    compress_ratio=role.compress_ratio,
-                ),
+                mla_spec if vllm_version_is("0.34.0") else FullAttentionManager.layer_config(mla_spec),
             )
         self.compressor = (
             DeepseekV41Compressor(config, role.compress_ratio, vllm_config, f"{prefix}.compressor")

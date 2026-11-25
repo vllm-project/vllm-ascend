@@ -230,7 +230,9 @@ def _context_speculator(monkeypatch, group_ids=(0, 1), layer_map=(1, 0)):
     spec.draft_kv_cache_group_ids = group_ids
     spec._layer_group_idx = layer_map
     spec.kv_cache_config = SimpleNamespace(
-        kv_cache_groups=[SimpleNamespace(kv_cache_spec=SimpleNamespace(block_size=size)) for size in (64, 128)]
+        kv_cache_groups=[
+            SimpleNamespace(block_size=size, kv_cache_spec=SimpleNamespace(block_size=size)) for size in (64, 128)
+        ]
     )
     spec.attn_architecture, spec.use_dcp = "MLA", False
     spec.device = torch.device("cpu")

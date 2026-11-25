@@ -13,12 +13,14 @@ from vllm.model_executor.layers.mamba.mamba_utils import (
     is_conv_state_dim_first,
 )
 from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
-from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheGroupSpec, MambaSpec
+from vllm.v1.core.single_type_kv_cache_manager import MambaManager
+from vllm.v1.kv_cache_interface import KVCacheConfig, MambaSpec
 from vllm.v1.worker.mamba_utils import MambaSpecDecodeGPUContext
 
 import vllm_ascend.patch.worker.patch_mamba_utils  # noqa: F401
 from vllm_ascend.device.device_config import get_ascend_device_type
 from vllm_ascend.device.hardware import AscendDeviceType
+from vllm_ascend.utils import vllm_version_is
 
 _COPY_FUNCS: MambaStateCopyFuncsByType = {
     MambaAttentionBackendEnum.MAMBA2: (get_conv_copy_spec, get_temporal_copy_spec)
@@ -105,16 +107,31 @@ def test_matches_python_postprocess_mamba():
     conv_dim_first = is_conv_state_dim_first()
     conv_shape = (cfg.conv_inner_dim, cfg.conv_width) if conv_dim_first else (cfg.conv_width, cfg.conv_inner_dim)
     temporal_shape = (cfg.temporal_state_dim,)
-    mamba_spec = MambaSpec(
-        block_size=cfg.block_size,
-        shapes=(conv_shape, temporal_shape),
-        dtypes=(cfg.dtype, cfg.dtype),
-        mamba_cache_mode="align",
-    )
+    if vllm_version_is("0.34.0"):
+        from vllm.v1.kv_cache_interface import KVCacheGroupSpec
+
+        mamba_spec = MambaSpec(
+            block_size=cfg.block_size,
+            shapes=(conv_shape, temporal_shape),
+            dtypes=(cfg.dtype, cfg.dtype),
+            mamba_cache_mode="align",
+        )
+        kv_cache_group = KVCacheGroupSpec(layer_names=layer_names, kv_cache_spec=mamba_spec)
+    else:
+        from vllm.v1.kv_cache_interface import KVCacheGroup
+
+        mamba_spec = MambaSpec(
+            block_size=cfg.block_size,
+            shapes=(conv_shape, temporal_shape),
+            dtypes=(cfg.dtype, cfg.dtype),
+        )
+        kv_cache_group = KVCacheGroup.from_layers(
+            {name: MambaManager.layer_config(mamba_spec, mamba_cache_mode="align") for name in layer_names}
+        )
     kv_cache_config = KVCacheConfig(
         num_blocks=cfg.num_blocks,
         kv_cache_tensors=[],
-        kv_cache_groups=[KVCacheGroupSpec(layer_names=layer_names, kv_cache_spec=mamba_spec)],
+        kv_cache_groups=[kv_cache_group],
     )
 
     conv_states = [torch.randn(cfg.num_blocks, *conv_shape, dtype=cfg.dtype, device=device) for _ in layer_names]

@@ -12,6 +12,7 @@ from vllm.v1.kv_cache_interface import MambaSpec
 
 from vllm_ascend.models.glm5next.recoverssm_metadata import AscendKDARecoverSSMMetadataBuilder
 from vllm_ascend.ops.triton.kda.recoverssm import KDARecoverSSMCommitContext
+from vllm_ascend.utils import vllm_version_is
 
 
 @pytest.mark.parametrize("graph_mode", [False, True])
@@ -20,13 +21,21 @@ def test_align_indices_follow_sequence_position_and_refresh_each_step(monkeypatc
     builder = AscendKDARecoverSSMMetadataBuilder.__new__(AscendKDARecoverSSMMetadataBuilder)
     builder.vllm_config = SimpleNamespace(cache_config=SimpleNamespace(mamba_cache_mode="align"))
     builder.use_full_cuda_graph = graph_mode
-    builder.kv_cache_spec = MambaSpec(
-        block_size=8,
-        shapes=((3, 4), (2, 2)),
-        dtypes=(torch.bfloat16, torch.float32),
-        mamba_cache_mode="align",
-        num_speculative_blocks=1,
-    )
+    if vllm_version_is("0.34.0"):
+        builder.kv_cache_spec = MambaSpec(
+            block_size=8,
+            shapes=((3, 4), (2, 2)),
+            dtypes=(torch.bfloat16, torch.float32),
+            mamba_cache_mode="align",
+            num_speculative_blocks=1,
+        )
+    else:
+        builder.kv_cache_spec = MambaSpec(
+            block_size=8,
+            shapes=((3, 4), (2, 2)),
+            dtypes=(torch.bfloat16, torch.float32),
+        )
+        builder.num_speculative_blocks = 1
     table = torch.tensor([[9, 7, 5, 3], [2, 4, 6, 8], [11, 12, 13, 14], [0, 0, 0, 0]], dtype=torch.int32)
     original = table.clone()
     starts = torch.tensor([0, 6, 12, 18, 24], dtype=torch.int32)

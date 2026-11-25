@@ -36,7 +36,7 @@ def test_bulk_copy_reads_state_after_pre_forward(monkeypatch, sync_load):
         num_accepted_tokens_gpu=None,
         _finish_previous_layerwise_mamba_copy=lambda: None,
         _get_mamba_group_info=lambda cfg: (None, SimpleNamespace(block_size=384)),
-        _ensure_align_ctx=lambda *args: SimpleNamespace(run_fused_precopy=copy),
+        _ensure_align_ctx=lambda *args: SimpleNamespace(run_fused_precopy=copy, block_size=384),
         _prepare_layerwise_mamba_copy=lambda *args: False,
     )
     monkeypatch.setattr(mamba_hybrid, "preprocess_mamba_align_fused_kernel", DecisionKernel())

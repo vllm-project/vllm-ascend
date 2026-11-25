@@ -18,7 +18,6 @@ from unittest.mock import MagicMock
 
 import pytest
 import torch
-from vllm.v1.kv_cache_interface import CrossAttentionSpec
 
 from vllm_ascend.attention import utils as attention_utils
 from vllm_ascend.attention.utils import (
@@ -29,6 +28,7 @@ from vllm_ascend.attention.utils import (
     get_or_register_attention_buffer,
     get_quant_flashmla_ops,
 )
+from vllm_ascend.utils import vllm_version_is
 
 NUM_REQS = 2
 # Distinct values so the selected source (CPU mirror vs NPU tensor) is identifiable.
@@ -210,12 +210,23 @@ def test_select_seq_lens_reads_the_speculator_capability(
 
 
 def test_select_seq_lens_cross_attention_uses_npu_seq_lens() -> None:
-    kv_cache_spec = CrossAttentionSpec(block_size=16, num_kv_heads=8, head_size=128, dtype=torch.float16)
+    if vllm_version_is("0.34.0"):
+        from vllm.v1.kv_cache_interface import CrossAttentionSpec
 
-    # Cross-attention wins even under dspark + GLM5.2.
-    seq_lens = _select_seq_lens(
-        _common_attn_metadata(), kv_cache_spec, _spec_config("dspark", True), _vllm_config("glm5_next")
-    )
+        kv_cache_spec = CrossAttentionSpec(block_size=16, num_kv_heads=8, head_size=128, dtype=torch.float16)
+        # Cross-attention wins even under dspark + GLM5.2.
+        seq_lens = _select_seq_lens(
+            _common_attn_metadata(), kv_cache_spec, _spec_config("dspark", True), _vllm_config("glm5_next")
+        )
+    else:
+        # Cross-attention wins even under dspark + GLM5.2.
+        seq_lens = _select_seq_lens(
+            _common_attn_metadata(),
+            None,
+            _spec_config("dspark", True),
+            _vllm_config("glm5_next"),
+            is_cross_attention=True,
+        )
 
     assert seq_lens is NPU_SEQ_LENS
 

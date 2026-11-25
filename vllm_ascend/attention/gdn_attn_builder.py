@@ -41,6 +41,7 @@ from vllm_ascend.ops.triton.fla.utils import (
     prepare_update_chunk_offsets,
 )
 from vllm_ascend.ops.triton.mamba.gdn_prepare import prepare_gdn
+from vllm_ascend.utils import vllm_version_is
 
 _GDN_CHUNK_SIZE = 64
 _GDN_CHUNK32_SIZE = 32
@@ -421,12 +422,17 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
     ):
         super().__init__(kv_cache_spec, layer_names, vllm_config, device)
         context = getattr(vllm_config.compilation_config, "static_forward_context", {}) or {}
+        has_prefill_checkpoints = (
+            bool(getattr(kv_cache_spec, "num_prefill_checkpoint_blocks", 0))
+            if vllm_version_is("0.34.0")
+            else self.checkpoint_alignment is not None
+        )
         self._ascend_gdn_checkpoints = (
             bool(layer_names)
             and all(getattr(context.get(name), "_ascend_internal_checkpoint_enabled", False) for name in layer_names)
-            and bool(getattr(kv_cache_spec, "num_prefill_checkpoint_blocks", 0))
+            and has_prefill_checkpoints
         )
-        if getattr(kv_cache_spec, "num_prefill_checkpoint_blocks", 0) and not self._ascend_gdn_checkpoints:
+        if has_prefill_checkpoints and not self._ascend_gdn_checkpoints:
             raise ValueError("Internal GDN checkpoint specs require Ascend-owned checkpoint-capable layers")
         sequence_index_capacity = max(
             self.vllm_config.scheduler_config.max_num_seqs,
@@ -869,12 +875,21 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
         # Restrict recurrent state lookup to real request rows.
         if mamba_cache_mode != "none" and mamba_block_table.shape[0] != m.seq_lens.shape[0]:
             mamba_block_table = mamba_block_table[: m.seq_lens.shape[0]]
-        block_table_tensor = mamba_get_block_table_tensor(
-            mamba_block_table,
-            m.seq_lens,
-            self.kv_cache_spec,
-            mamba_cache_mode,
-        )
+        if vllm_version_is("0.34.0"):
+            block_table_tensor = mamba_get_block_table_tensor(
+                mamba_block_table,
+                m.seq_lens,
+                self.kv_cache_spec,
+                mamba_cache_mode,
+            )
+        else:
+            block_table_tensor = mamba_get_block_table_tensor(
+                mamba_block_table,
+                m.seq_lens,
+                self.kv_cache_spec,
+                mamba_cache_mode,
+                self.num_speculative_blocks,
+            )
 
         non_spec_conv1d_cache_indices: torch.Tensor | None = None
         if spec_sequence_masks is not None:
@@ -1239,10 +1254,13 @@ class AscendGDNHostMetadataBuilder(AscendGDNAttentionMetadataBuilder):
         batch: tuple[int, int, int, int, int, torch.Tensor | None],
     ) -> GDNAttentionMetadata | None:
         # Request validation and phase classification have already run in build.
+        num_speculative_blocks = (
+            self.kv_cache_spec.num_speculative_blocks if vllm_version_is("0.34.0") else self.num_speculative_blocks
+        )
         if (
             self._spec_conv_indices is None
             or self.vllm_config.cache_config.mamba_cache_mode != "align"
-            or (num_spec_decodes > 0 and self.kv_cache_spec.num_speculative_blocks < self.num_spec)
+            or (num_spec_decodes > 0 and num_speculative_blocks < self.num_spec)
         ):
             return None
 

@@ -12,7 +12,11 @@ import pytest
 SOURCE = Path(__file__).resolve().parents[3] / "vllm_ascend/distributed/kv_transfer/kv_p2p/mooncake"
 
 
-class FullAttentionSpec(SimpleNamespace):
+class AttentionSpec(SimpleNamespace):
+    pass
+
+
+class FullAttentionSpec(AttentionSpec):
     pass
 
 
@@ -20,7 +24,7 @@ class MLAAttentionSpec(FullAttentionSpec):
     pass
 
 
-class SlidingWindowSpec(SimpleNamespace):
+class SlidingWindowSpec(AttentionSpec):
     pass
 
 
@@ -36,6 +40,25 @@ class MambaSpec(SimpleNamespace):
     pass
 
 
+class FullAttentionManager:
+    pass
+
+
+class SlidingWindowManager:
+    pass
+
+
+MLA_SPEC_TYPES = (MLAAttentionSpec, SlidingWindowMLASpec)
+
+
+def make_group(spec, manager_cls=FullAttentionManager):
+    return SimpleNamespace(
+        manager_cls=manager_cls,
+        dcp_sharded=getattr(spec, "dcp_sharded", False),
+        manager_config=SimpleNamespace(params=SimpleNamespace(num_speculative_blocks=0)),
+    )
+
+
 def load_class(filename, name, methods, dependencies=None):
     tree = ast.parse((SOURCE / filename).read_text())
     cls = next(node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == name)
@@ -46,7 +69,9 @@ def load_class(filename, name, methods, dependencies=None):
         math=math,
         prod=math.prod,
         dataclass=dataclass,
+        is_circular_cache_group=lambda group: False,
         is_circular_kv_cache_spec=lambda spec: False,
+        vllm_version_is=lambda _: False,
         cdiv=lambda a, b: -(-a // b),
     )
     scope.update(dependencies or {})
@@ -125,6 +150,9 @@ def worker():
     worker.pcp_rank = 0
     worker.dcp_size = 2
     worker.dcp_rank = 0
+    worker.group_indices = [0]
+    worker.kv_cache_config = SimpleNamespace(kv_cache_groups=[])
+    worker.spec_index_to_group = []
     worker.vllm_config = SimpleNamespace(parallel_config=SimpleNamespace(cp_kv_cache_interleave_size=16))
     return worker
 
@@ -135,9 +163,11 @@ def worker():
 @pytest.mark.parametrize("remote_sharded", [False, True])
 def test_layout_uses_independent_endpoint_flags(worker, spec_type, heads, local_sharded, remote_sharded):
     spec = spec_type(dcp_sharded=local_sharded)
+    manager_cls = SlidingWindowManager if issubclass(spec_type, SlidingWindowSpec) else FullAttentionManager
+    group = make_group(spec, manager_cls)
     worker.block_shapes = [[(heads, 16, 4)]]
     remote = SimpleNamespace(dcp_sharded=[remote_sharded], block_shapes=[[(heads, 16, 4)]])
-    assert worker._get_attention_dcp_sizes(spec, 0, remote, 4) == (
+    assert worker._get_attention_dcp_sizes(spec, 0, remote, 4, group=group) == (
         2 if local_sharded else 1,
         4 if remote_sharded else 1,
     )
@@ -156,11 +186,14 @@ def test_routing_and_block_mapping_follow_layout(
     worker, local_sharded, remote_sharded, local_heads, remote_heads, expected
 ):
     spec = FullAttentionSpec(dcp_sharded=local_sharded)
+    group = make_group(spec)
+    worker.kv_cache_config = SimpleNamespace(kv_cache_groups=[group])
+    worker.spec_index_to_group = [group]
     worker.block_shapes = [[(local_heads, 16, 4)]]
     remote = SimpleNamespace(dcp_sharded=[remote_sharded], block_shapes=[[(remote_heads, 16, 4)]])
     groups = worker._get_layer_remote_tp_rank_groups(0, 0, spec, remote, 1, 4, 2)
     assert groups == expected
-    local_size, remote_size = worker._get_attention_dcp_sizes(spec, 0, remote, 2)
+    local_size, remote_size = worker._get_attention_dcp_sizes(spec, 0, remote, 2, group=group)
     result = worker._compute_group_block_ids(
         "request",
         groups,
@@ -194,7 +227,9 @@ def test_scheduler_prompt_blocks_follow_layout(sharded, expected):
     cls = load_class("base_scheduler.py", "MooncakeBaseConnectorScheduler", {"_get_transfer_block_ids"})
     scheduler = cls()
     scheduler.dcp_size = 2
-    scheduler.group_unique_specs = [[FullAttentionSpec(dcp_sharded=sharded)]]
+    spec = FullAttentionSpec(dcp_sharded=sharded)
+    scheduler.kv_cache_groups = [make_group(spec)]
+    scheduler.group_unique_specs = [[spec]]
     scheduler.group_block_size = [16]
     assert scheduler._get_transfer_block_ids(([0, 1, 2, 3, 4],), 64) == (expected,)
 
@@ -231,7 +266,7 @@ def test_indexer_replication_uses_explicit_metadata(worker, local_replicas, remo
         indexer_replication_sizes=[remote_replicas],
         block_size_scales=[[remote_scale]],
     )
-    assert worker._get_attention_dcp_sizes(spec, 0, remote, 4) == (
+    assert worker._get_attention_dcp_sizes(spec, 0, remote, 4, group=make_group(spec)) == (
         1 if local_replicas > 1 else 2,
         1 if remote_replicas > 1 else 4,
     )

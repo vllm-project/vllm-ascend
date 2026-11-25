@@ -27,7 +27,9 @@ from vllm.utils.network_utils import get_ip, make_zmq_path, make_zmq_socket
 from vllm.v1.core import kv_cache_utils
 from vllm.v1.kv_cache_interface import KVCacheConfig, MambaSpec
 
-from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec, AscendSlidingWindowMLASpec
+from vllm.v1.core.single_type_kv_cache_manager import SlidingWindowManager
+
+from vllm_ascend.core.kv_cache_interface import MLA_SPEC_TYPES, AscendMLAAttentionSpec
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector import (
     GroupPull,
     GroupTransferInfo,
@@ -1788,8 +1790,10 @@ class MooncakeConnectorScheduler(BaseMooncakeConnectorScheduler):
 
     def _get_scheduler_block_size(self) -> int:
         for group in self.kv_cache_config.kv_cache_groups:
+            if not issubclass(group.manager_cls, SlidingWindowManager):
+                continue
             for spec in self._get_group_unique_specs(group):
-                if isinstance(spec, AscendSlidingWindowMLASpec) and spec.model_version == "deepseek_v4":
+                if isinstance(spec, MLA_SPEC_TYPES) and spec.model_version == "deepseek_v4":
                     return spec.block_size
         return self.vllm_config.cache_config.block_size
 
@@ -2044,7 +2048,7 @@ class MooncakeConnectorScheduler(BaseMooncakeConnectorScheduler):
             prefill_pp_rank = remote_rank // prefill_tp_size
             group_pulls: list[GroupPull] = []
             for group_id, group in enumerate(self.kv_cache_groups):
-                if isinstance(group.kv_cache_spec, MambaSpec):
+                if isinstance(group.distinct_specs[0], MambaSpec):
                     num_group_pulls = max(1, prefill_tp_size // self._decode_tp_size)
                 else:
                     group_spec = self._serialize_group_for_scheduler(group)
@@ -2070,7 +2074,7 @@ class MooncakeConnectorScheduler(BaseMooncakeConnectorScheduler):
 
     @staticmethod
     def _serialize_group_for_scheduler(group: Any) -> dict[str, Any]:
-        kv_cache_spec = group.kv_cache_spec
+        kv_cache_spec = group.distinct_specs[0]
         return {
             "kv_cache_spec_type": type(kv_cache_spec).__name__,
             "kv_cache_spec": {

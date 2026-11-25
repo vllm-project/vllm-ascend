@@ -6,8 +6,9 @@ from unittest.mock import Mock
 import pytest
 import torch
 from vllm.model_executor.layers.attention import MLAAttention
-from vllm.v1.kv_cache_interface import SlidingWindowSpec
+from vllm.v1.kv_cache_interface import MambaSpec
 
+from tests.ut.kv_cache_test_utils import is_v034
 from tests.ut.kvpp_utils import indexer_name, layer_name, make_dspark_kvpp_case, make_kvpp_config, make_kvpp_specs
 from vllm_ascend.ascend_config import KVPPConfig
 from vllm_ascend.core import kv_cache_placement as placement
@@ -153,9 +154,14 @@ def test_dspark_draft_only_stage_has_no_scratch_cost():
 def test_mtp_still_rejects_sliding_window_cache_specs():
     config, specs, drafts = make_dspark_kvpp_case()
     config.speculative_config.method = "mtp"
-    specs[drafts[0]] = SlidingWindowSpec(
-        block_size=2, num_kv_heads=2, head_size=8, dtype=torch.float16, sliding_window=4
-    )
+    if is_v034():
+        from vllm.v1.kv_cache_interface import SlidingWindowSpec
+
+        specs[drafts[0]] = SlidingWindowSpec(
+            block_size=2, num_kv_heads=2, head_size=8, dtype=torch.float16, sliding_window=4
+        )
+    else:
+        specs[drafts[0]] = MambaSpec(block_size=2, shapes=((4, 8),), dtypes=(torch.float16,))
     with pytest.raises(ValueError, match="KVPP requires one full-attention cache group"):
         placement.create_kvpp_cache_allocation_plan(config, specs, 0)
 

@@ -7,13 +7,11 @@ from typing import Any
 
 import torch
 from vllm.v1.kv_cache_interface import (
-    FullAttentionSpec,
     KVCacheConfig,
-    KVCacheGroupSpec,
     KVCacheTensor,
-    UniformTypeKVCacheSpecs,
 )
 
+from tests.ut.kv_cache_test_utils import make_full_attention_spec, make_kv_cache_group
 from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec, AscendSFAIndexerCacheSpec
 
 
@@ -89,7 +87,7 @@ def make_dspark_kvpp_case(tp=3, draft_names=None):
     # independent of the target's one MTP layer and of the draft token count.
     drafts = tuple(draft_names) if draft_names is not None else tuple(layer_name(i) for i in range(17, 20))
     for name in drafts:
-        specs[name] = FullAttentionSpec(block_size=2, num_kv_heads=2, head_size=8, dtype=torch.float16)
+        specs[name] = make_full_attention_spec(block_size=2, num_kv_heads=2, head_size=8, dtype=torch.float16)
     config.compilation_config = SimpleNamespace(
         static_forward_context={
             name: SimpleNamespace(impl=SimpleNamespace(), _kvpp_is_draft=name in drafts) for name in specs
@@ -120,12 +118,7 @@ def make_cache_config(specs, num_blocks=3):
     return KVCacheConfig(
         num_blocks=num_blocks,
         kv_cache_tensors=kv_cache_tensors,
-        kv_cache_groups=[
-            KVCacheGroupSpec(
-                layer_names=list(specs),
-                kv_cache_spec=UniformTypeKVCacheSpecs(block_size=2, kv_cache_specs=specs),
-            )
-        ],
+        kv_cache_groups=[make_kv_cache_group(specs)],
     )
 
 

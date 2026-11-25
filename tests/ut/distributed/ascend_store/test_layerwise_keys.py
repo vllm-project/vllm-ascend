@@ -13,8 +13,14 @@ import tests.ut.distributed.ascend_store._mock_deps  # noqa: F401
 
 # isort: split
 import torch
-from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheGroupSpec, MambaSpec, SlidingWindowSpec
 
+from tests.ut.kv_cache_test_utils import (
+    is_v034,
+    make_full_attention_spec,
+    make_kv_cache_group,
+    make_mamba_layer_config,
+    make_sliding_window_layer_config,
+)
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend import mooncake_layerwise
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.memcache_backend import MemcacheBackend
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.mooncake_backend import MooncakeBackend
@@ -61,11 +67,14 @@ class TestBoundLayerwiseKeys(unittest.TestCase):
         config = self.make_config()
         config.parallel_config.tensor_parallel_size = 1
         cache = self.make_cache_config(2)
-        cache.kv_cache_groups[1].kv_cache_spec = MambaSpec(
-            block_size=32,
-            shapes=((4,),),
-            dtypes=(torch.float32,),
-            mamba_cache_mode="align",
+        cache.kv_cache_groups[1] = make_kv_cache_group(
+            ["model.layers.1.kv"],
+            make_mamba_layer_config(
+                block_size=32,
+                shapes=((4,),),
+                dtypes=(torch.float32,),
+                mamba_cache_mode="align",
+            ),
         )
         for backend_class in (MooncakeBackend, MemcacheBackend):
             with self.subTest(backend=backend_class.__name__):
@@ -151,9 +160,9 @@ class TestBoundLayerwiseKeys(unittest.TestCase):
         config.parallel_config.decode_context_parallel_size = 2
         cache = SimpleNamespace(
             kv_cache_groups=[
-                KVCacheGroupSpec(
+                make_kv_cache_group(
                     ["model.layers.0.state"],
-                    MambaSpec(
+                    make_mamba_layer_config(
                         block_size=16,
                         shapes=((4,),),
                         dtypes=("uint8",),
@@ -177,9 +186,9 @@ class TestBoundLayerwiseKeys(unittest.TestCase):
         config.parallel_config.decode_context_parallel_size = 2
         cache = SimpleNamespace(
             kv_cache_groups=[
-                KVCacheGroupSpec(
+                make_kv_cache_group(
                     ["model.layers.0.swa"],
-                    SlidingWindowSpec(
+                    make_sliding_window_layer_config(
                         block_size=16,
                         sliding_window=16,
                         num_kv_heads=1,
@@ -216,9 +225,9 @@ class TestBoundLayerwiseKeys(unittest.TestCase):
         config.parallel_config.decode_context_parallel_size = 2
         cache = SimpleNamespace(
             kv_cache_groups=[
-                KVCacheGroupSpec(
+                make_kv_cache_group(
                     ["model.layers.0.state"],
-                    MambaSpec(
+                    make_mamba_layer_config(
                         block_size=16,
                         shapes=((4,),),
                         dtypes=("uint8",),
@@ -270,13 +279,13 @@ class TestBoundLayerwiseKeys(unittest.TestCase):
         config.parallel_config.decode_context_parallel_size = 2
         cache = SimpleNamespace(
             kv_cache_groups=[
-                KVCacheGroupSpec(
+                make_kv_cache_group(
                     ["model.layers.0.kv"],
-                    FullAttentionSpec(block_size=16, num_kv_heads=1, head_size=1, dtype="uint8"),
+                    make_full_attention_spec(block_size=16, num_kv_heads=1, head_size=1, dtype="uint8"),
                 ),
-                KVCacheGroupSpec(
+                make_kv_cache_group(
                     ["model.layers.1.kv"],
-                    FullAttentionSpec(block_size=24, num_kv_heads=1, head_size=1, dtype="uint8"),
+                    make_full_attention_spec(block_size=24, num_kv_heads=1, head_size=1, dtype="uint8"),
                 ),
             ]
         )
@@ -354,9 +363,9 @@ class TestBoundLayerwiseKeys(unittest.TestCase):
     def make_cache_config(num_groups):
         return SimpleNamespace(
             kv_cache_groups=[
-                KVCacheGroupSpec(
+                make_kv_cache_group(
                     [f"model.layers.{group}.kv"],
-                    FullAttentionSpec(block_size=16 * (group + 1), num_kv_heads=1, head_size=1, dtype="uint8"),
+                    make_full_attention_spec(block_size=16 * (group + 1), num_kv_heads=1, head_size=1, dtype="uint8"),
                 )
                 for group in range(num_groups)
             ]
@@ -420,7 +429,12 @@ class TestBoundLayerwiseKeys(unittest.TestCase):
                 # Neither caller-owned lists nor config objects remain live inputs.
                 config.parallel_config.pipeline_parallel_size = 4
                 sizes[1] = 64
-                cache.kv_cache_groups[1].layer_names.append("model.layers.9.kv")
+                if is_v034():
+                    cache.kv_cache_groups[1].layer_names.append("model.layers.9.kv")
+                else:
+                    cache.kv_cache_groups[1].kv_cache_specs["model.layers.9.kv"] = cache.kv_cache_groups[
+                        1
+                    ].distinct_specs[0]
                 with (
                     patch.object(mooncake_layerwise, "hybrid_layout_id", side_effect=AssertionError("rehash")),
                     patch.object(
@@ -431,7 +445,10 @@ class TestBoundLayerwiseKeys(unittest.TestCase):
 
     def test_mooncake_rejects_empty_pp_groups_at_binding(self):
         cache = self.make_cache_config(2)
-        cache.kv_cache_groups[1].layer_names.clear()
+        if is_v034():
+            cache.kv_cache_groups[1].layer_names.clear()
+        else:
+            cache.kv_cache_groups[1].kv_cache_specs.clear()
         with self.assertRaisesRegex(ValueError, "empty groups"):
             MooncakeBackend.bind_layerwise_keys(
                 vllm_config=self.make_config(2),
@@ -445,7 +462,12 @@ class TestBoundLayerwiseKeys(unittest.TestCase):
         config = self.make_config()
         cache = self.make_cache_config(2)
         changed_cache = deepcopy(cache)
-        changed_cache.kv_cache_groups[1].layer_names.append("model.layers.2.kv")
+        if is_v034():
+            changed_cache.kv_cache_groups[1].layer_names.append("model.layers.2.kv")
+        else:
+            changed_cache.kv_cache_groups[1].kv_cache_specs["model.layers.2.kv"] = changed_cache.kv_cache_groups[
+                1
+            ].distinct_specs[0]
         builders = [
             MooncakeBackend.bind_layerwise_keys(
                 vllm_config=config,

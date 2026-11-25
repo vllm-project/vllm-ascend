@@ -21,12 +21,17 @@ import pytest
 import torch
 import vllm.distributed as vllm_distributed
 from vllm.config import CUDAGraphMode
-from vllm.v1.kv_cache_interface import CircularBufferSpec
+from vllm.v1.core.single_type_kv_cache_manager import (
+    CircularBufferManager,
+    FullAttentionManager,
+    SlidingWindowManager,
+)
+from vllm.v1.kv_cache_interface import AttentionSpec
 
 from vllm_ascend.attention import dsa_v41
 from vllm_ascend.attention.context_parallel import dsa_cp, dsa_v41_cp
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
-from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec, AscendSlidingWindowMLASpec
+from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec
 from vllm_ascend.models.deepseek_v41.cache_config import STATE_RING_ROWS
 from vllm_ascend.models.deepseek_v41.compressor import DeepseekV41Compressor
 from vllm_ascend.models.deepseek_v41.indexer import DeepseekV41Indexer
@@ -37,6 +42,7 @@ from vllm_ascend.quantization.method_adapters import AscendLinearMethod
 from vllm_ascend.quantization.methods import AscendW8A8DynamicLinearMethod
 from vllm_ascend.quantization.methods.w4a8.w4a8 import AscendW4A8DynamicLinearMethod
 from vllm_ascend.quantization.methods.w8a8.w8a8_mxfp8 import AscendW8A8MXFP8DSDynamicLinearMethod
+from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.weight_switch import ParallelOProjection, WeightSwitchConfig
 from vllm_ascend.worker.device_metadata import DeviceMetadataExecutor
 from vllm_ascend.worker.v2.pcp_manager import AscendPCPAttentionContext
@@ -377,6 +383,7 @@ def builders(monkeypatch):
             compilation_config=SimpleNamespace(
                 cudagraph_capture_sizes=graph_sizes,
                 cudagraph_mode=CUDAGraphMode.NONE if decode_sharded else CUDAGraphMode.FULL_DECODE_ONLY,
+                static_forward_context={},
             ),
             cache_config=SimpleNamespace(block_size=8),
             model_config=SimpleNamespace(
@@ -390,12 +397,32 @@ def builders(monkeypatch):
             ),
         )
         common = dict(block_size=8, num_kv_heads=1, head_size=2, dtype=torch.float32)
-        specs = {
-            "swa": AscendSlidingWindowMLASpec(**common, sliding_window=4),
-            "long_kv": AscendMLAAttentionSpec(**common, tokens_per_state=2),
-            "index_k": AscendMLAAttentionSpec(**common, tokens_per_state=2, scale_dim=1),
-            "compressor_state": CircularBufferSpec(**common, tokens_per_state=2),
-        }
+        if vllm_version_is("0.34.0"):
+            from vllm.v1.kv_cache_interface import CircularBufferSpec
+
+            from vllm_ascend.core.kv_cache_interface import AscendSlidingWindowMLASpec
+
+            specs = {
+                "swa": AscendSlidingWindowMLASpec(**common, sliding_window=4),
+                "long_kv": AscendMLAAttentionSpec(**common, tokens_per_state=2),
+                "index_k": AscendMLAAttentionSpec(**common, tokens_per_state=2, scale_dim=1),
+                "compressor_state": CircularBufferSpec(**common, tokens_per_state=2),
+            }
+        else:
+            specs = {
+                "swa": AscendMLAAttentionSpec(**common),
+                "long_kv": AscendMLAAttentionSpec(**common, tokens_per_state=2),
+                "index_k": AscendMLAAttentionSpec(**common, tokens_per_state=2, scale_dim=1),
+                "compressor_state": AttentionSpec(**common, tokens_per_state=2),
+            }
+            layer_configs = {
+                "swa": SlidingWindowManager.layer_config(specs["swa"], sliding_window=4),
+                "long_kv": FullAttentionManager.layer_config(specs["long_kv"]),
+                "index_k": FullAttentionManager.layer_config(specs["index_k"]),
+                "compressor_state": CircularBufferManager.layer_config(specs["compressor_state"]),
+            }
+            for kind, layer_config in layer_configs.items():
+                dsa_v41.DeepseekV41CacheLayer(config, PREFIXES[kind], layer_config)
         monkeypatch.setattr(dsa_v41_cp, "get_pcp_group", lambda: SimpleNamespace(rank_in_group=rank))
         monkeypatch.setattr(dsa_cp, "get_tp_group", lambda: SimpleNamespace(world_size=world, rank_in_group=rank))
         builder_class = dsa_v41_cp.AscendDSAV41PCPMetadataBuilder

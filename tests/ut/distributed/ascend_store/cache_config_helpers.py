@@ -6,9 +6,8 @@ from types import SimpleNamespace
 
 import torch
 from vllm.v1.core.kv_cache_utils import resolve_cache_hit_alignment_tokens, resolve_kv_cache_block_sizes
-from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheGroupSpec, UniformTypeKVCacheSpecs
 
-from vllm_ascend.core.kv_cache_interface import register_ascend_kv_cache_specs
+from tests.ut.kv_cache_test_utils import is_v034, make_full_attention_spec, make_kv_cache_group
 
 
 def make_resolved_cache_config(config, cache=None):
@@ -17,9 +16,9 @@ def make_resolved_cache_config(config, cache=None):
         num_layers = config.model_config.get_num_layers(config.parallel_config)
         cache = SimpleNamespace(
             kv_cache_groups=[
-                KVCacheGroupSpec(
+                make_kv_cache_group(
                     [f"model.layers.{index}.attn" for index in range(num_layers)],
-                    FullAttentionSpec(
+                    make_full_attention_spec(
                         block_size=config.cache_config.block_size,
                         num_kv_heads=1,
                         head_size=1,
@@ -40,10 +39,15 @@ def make_resolved_cache_config(config, cache=None):
     # metadata to worker plans (whose UniformType containers remain intact).
     scheduler_cache = copy(cache)
     scheduler_cache.kv_cache_groups = [copy(group) for group in cache.kv_cache_groups]
-    for group in scheduler_cache.kv_cache_groups:
-        if isinstance(group.kv_cache_spec, UniformTypeKVCacheSpecs):
-            group.kv_cache_spec = next(iter(group.kv_cache_spec.kv_cache_specs.values()))
-    register_ascend_kv_cache_specs()
+    if is_v034():
+        from vllm.v1.kv_cache_interface import UniformTypeKVCacheSpecs
+
+        from vllm_ascend.core.kv_cache_interface import register_ascend_kv_cache_specs
+
+        for group in scheduler_cache.kv_cache_groups:
+            if isinstance(group.kv_cache_spec, UniformTypeKVCacheSpecs):
+                group.kv_cache_spec = next(iter(group.kv_cache_spec.kv_cache_specs.values()))
+        register_ascend_kv_cache_specs()
     scheduler_block_size, hash_block_size = resolve_kv_cache_block_sizes(scheduler_cache, config)
     if not isinstance(getattr(cache, "hash_block_size", None), int):
         cache.hash_block_size = hash_block_size

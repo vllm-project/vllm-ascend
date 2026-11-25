@@ -7,16 +7,52 @@ from unittest.mock import Mock
 
 import pytest
 import torch
-from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheGroupSpec, MambaSpec
+from vllm.v1.kv_cache_interface import MambaSpec
 
-from vllm_ascend.core import kv_cache_config_builder
-from vllm_ascend.core.kv_cache_config_builder import AscendKVCacheConfigBuilder
-from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec, AscendSFAIndexerCacheSpec
+from tests.ut.kv_cache_test_utils import (
+    get_group_spec,
+    is_v034,
+    make_full_attention_layer_config,
+    make_kv_cache_group,
+    make_mamba_layer_config,
+    make_mla_layer_config,
+)
+from vllm_ascend.core.kv_cache_interface import (
+    AscendMLAAttentionSpec,
+    AscendSFAIndexerCacheSpec,
+    declared_kwarg,
+)
 from vllm_ascend.models.kimi_k3.paired_sfa_cache import (
     paired_sfa_cache_config,
     paired_sfa_cache_groups,
     paired_sfa_pool_bytes,
 )
+
+from vllm_ascend.core import kv_cache_config_builder
+from vllm_ascend.core.kv_cache_config_builder import AscendKVCacheConfigBuilder
+
+
+def _entry_spec(entry):
+    return getattr(entry, "spec", entry)
+
+
+def _replace_spec(entry, **kwargs):
+    if is_v034():
+        return replace(entry, **kwargs)
+    return replace(entry, spec=replace(entry.spec, **kwargs))
+
+
+def _project_groups(groups, predicate):
+    if is_v034():
+        return [replace(g, layer_names=[n for n in g.layer_names if predicate(n)]) for g in groups]
+    return [
+        replace(
+            g,
+            kv_cache_specs={n: s for n, s in g.kv_cache_specs.items() if predicate(n)},
+            unprojected_specs=g.distinct_specs,
+        )
+        for g in groups
+    ]
 
 
 def make_specs():
@@ -25,24 +61,26 @@ def make_specs():
     for layer in range(93):
         name = f"model.layers.{layer}"
         if layer in sparse:
-            specs[name + ".attn"] = AscendMLAAttentionSpec(
+            specs[name + ".attn"] = make_mla_layer_config(
                 block_size=1536,
                 num_kv_heads=1,
                 head_size=656,
                 dtype=torch.int8,
+                ascend=True,
                 cache_sparse_sfa_c8=True,
             )
-            specs[name + ".indexer.k_cache"] = AscendSFAIndexerCacheSpec(
+            specs[name + ".indexer.k_cache"] = make_full_attention_layer_config(
                 block_size=1536,
                 num_kv_heads=1,
                 head_size=128,
                 dtype=torch.int8,
+                spec_cls=AscendSFAIndexerCacheSpec,
                 scale_dim=1,
                 scale_dtype=torch.float32,
                 cache_sparse_li_c8=True,
             )
         else:
-            specs[name + ".linear_attn"] = MambaSpec(
+            specs[name + ".linear_attn"] = make_mamba_layer_config(
                 block_size=1536,
                 shapes=((3, 4608), (12, 128, 128)),
                 dtypes=(torch.bfloat16, torch.float32),
@@ -73,9 +111,9 @@ def test_token_blocks_unchanged_and_components_share_ids():
     groups = paired_sfa_cache_groups(config, specs)
     assert len(groups) == 4
     assert [len(g.layer_names) for g in groups] == [48, 23, 23, 23]
-    assert all(isinstance(g.kv_cache_spec, MambaSpec) for g in groups[1:])
-    assert {s.block_size for s in specs.values()} == {1536}
-    assert {s.page_size_bytes for s in specs.values()} == {1007616, 202752}
+    assert all(isinstance(get_group_spec(g), MambaSpec) for g in groups[1:])
+    assert {_entry_spec(s).block_size for s in specs.values()} == {1536}
+    assert {_entry_spec(s).page_size_bytes for s in specs.values()} == {1007616, 202752}
     assert paired_sfa_pool_bytes(groups) == 29048832
     plan = paired_sfa_cache_config(config, groups, 17556701184)
     assert plan.num_blocks == 604
@@ -83,7 +121,7 @@ def test_token_blocks_unchanged_and_components_share_ids():
     assert backing_size <= 17556701184
     assert {tensor.size for tensor in plan.kv_cache_tensors} == {backing_size}
     assert len(plan.kv_cache_tensors) == 5
-    assert len(groups[0].kv_cache_spec.kv_cache_specs) == 48
+    assert len(groups[0].kv_cache_specs) == 48
     main, *recurrent, indexer = plan.kv_cache_tensors
     assert len(main.layers) == len(indexer.layers) == 24
     assert main.offset == 0
@@ -111,9 +149,7 @@ def test_paired_config_propagates_prefix_cache_retention_interval(interval):
 
 def test_pipeline_projection_retains_only_local_slot_cost():
     groups = paired_sfa_cache_groups(make_config(), make_specs())
-    projected = [
-        KVCacheGroupSpec([n for n in g.layer_names if int(n.split(".")[2]) < 24], g.kv_cache_spec) for g in groups
-    ]
+    projected = _project_groups(groups, lambda n: int(n.split(".")[2]) < 24)
     assert paired_sfa_pool_bytes(projected) == 6 * (1007616 + 202752)
 
 
@@ -126,16 +162,21 @@ def test_dspark_preserves_target_recurrent_budget_and_order():
     # Enough draft layers to change recurrent grouping if they were counted
     # as target overlay slots. Supply drafts first and targets in reverse order.
     draft = {
-        f"model.layers.{layer}.attn": AscendMLAAttentionSpec(
+        f"model.layers.{layer}.attn": make_mla_layer_config(
             block_size=1536,
             num_kv_heads=1,
             head_size=576,
             dtype=torch.bfloat16,
+            ascend=True,
             is_draft=True,
-            non_causal_multi_token_decode=True,
+            **declared_kwarg(AscendMLAAttentionSpec, "non_causal_multi_token_decode", True),
         )
         for layer in reversed(range(93, 108))
     }
+    if not is_v034():
+        config.compilation_config = SimpleNamespace(
+            static_forward_context={name: SimpleNamespace(non_causal_multi_token_decode=True) for name in draft}
+        )
     specs = {**draft, **dict(reversed(target.items()))}
     groups = paired_sfa_cache_groups(config, specs)
     draft_names = [f"model.layers.{layer}.attn" for layer in range(93, 108)]
@@ -143,14 +184,20 @@ def test_dspark_preserves_target_recurrent_budget_and_order():
     assert groups[0].layer_names == target_groups[0].layer_names + draft_names
     assert groups[0].is_eagle_group
     assert groups[1:] == target_groups[1:]
-    assert groups[0].kv_cache_spec.kv_cache_specs == {**target_groups[0].kv_cache_spec.kv_cache_specs, **draft}
-    draft_bytes = sum(spec.page_size_bytes for spec in draft.values())
+    assert groups[0].kv_cache_specs == {
+        **target_groups[0].kv_cache_specs,
+        **{name: _entry_spec(entry) for name, entry in draft.items()},
+    }
+    draft_bytes = sum(_entry_spec(spec).page_size_bytes for spec in draft.values())
     assert paired_sfa_pool_bytes(groups) == paired_sfa_pool_bytes(target_groups) + draft_bytes
 
     # PP filters only local layer names; the global full-history specs still
     # identify the target geometry on a stage that owns only draft layers.
-    projected = [replace(g, layer_names=[n for n in g.layer_names if n in draft]) for g in groups]
-    assert projected[0].kv_cache_spec is groups[0].kv_cache_spec
+    projected = _project_groups(groups, lambda n: n in draft)
+    if is_v034():
+        assert projected[0].kv_cache_spec is groups[0].kv_cache_spec
+    else:
+        assert projected[0].distinct_specs == groups[0].distinct_specs
     assert paired_sfa_pool_bytes(projected) == draft_bytes
 
 
@@ -163,7 +210,7 @@ def test_dense_draft_retains_sharding_coverage_and_separate_storage(dcp_size, dc
     specs = make_specs()
     target_groups = paired_sfa_cache_groups(config, specs)
     name = "model.layers.93.attn"
-    draft = FullAttentionSpec(
+    draft = make_full_attention_layer_config(
         block_size=1536,
         num_kv_heads=2,
         head_size=64,
@@ -171,34 +218,35 @@ def test_dense_draft_retains_sharding_coverage_and_separate_storage(dcp_size, dc
         is_draft=True,
         dcp_sharded=dcp_sharded,
     )
+    draft_spec = _entry_spec(draft)
     groups = paired_sfa_cache_groups(config, {**specs, name: draft})
     draft_group = next(group for group in groups if name in group.layer_names)
-    assert draft_group.kv_cache_spec.dcp_sharded == dcp_sharded
+    assert draft_group.dcp_sharded == dcp_sharded
     assert not draft_group.is_eagle_group
-    assert draft_group.kv_cache_spec.max_num_blocks_per_req(config, 32768) == draft.max_num_blocks_per_req(
-        config, 32768
-    )
+    assert draft_group.max_num_blocks_per_req(config, 32768) == make_kv_cache_group(
+        [name], draft
+    ).max_num_blocks_per_req(config, 32768)
     assert (draft_group is groups[0]) == dcp_sharded
     assert groups[1:4] == target_groups[1:]
-    assert paired_sfa_pool_bytes(groups) == paired_sfa_pool_bytes(target_groups) + draft.page_size_bytes
+    assert paired_sfa_pool_bytes(groups) == paired_sfa_pool_bytes(target_groups) + draft_spec.page_size_bytes
     plan = paired_sfa_cache_config(config, groups, 2**30)
     draft_tensor = next(tensor for tensor in plan.kv_cache_tensors if tensor.layers == [name])
-    assert draft_tensor.block_stride == draft.page_size_bytes
+    assert draft_tensor.block_stride == draft_spec.page_size_bytes
     assert draft_tensor.offset + draft_tensor.layer_stride == draft_tensor.size
 
 
 def test_target_only_without_recurrent_layers_keeps_one_full_history_group():
-    specs = {name: spec for name, spec in make_specs().items() if not isinstance(spec, MambaSpec)}
+    specs = {name: entry for name, entry in make_specs().items() if not isinstance(_entry_spec(entry), MambaSpec)}
     groups = paired_sfa_cache_groups(make_config(), specs)
     assert [len(g.layer_names) for g in groups] == [48]
-    assert groups[0].kv_cache_spec.kv_cache_specs == specs
+    assert groups[0].kv_cache_specs == {name: _entry_spec(entry) for name, entry in specs.items()}
     assert paired_sfa_pool_bytes(groups) == 29048832
 
 
 def test_mismatched_component_blocks_rejected():
     specs = make_specs()
     name = next(n for n in specs if n.endswith(".k_cache"))
-    specs[name] = replace(specs[name], block_size=3072)
+    specs[name] = _replace_spec(specs[name], block_size=3072)
     with pytest.raises(ValueError, match="same local token block"):
         paired_sfa_cache_groups(make_config(), specs)
 
@@ -211,7 +259,10 @@ def test_paired_planner_selection_uses_outer_model_type(monkeypatch, model_type)
     upstream = Mock(return_value=[])
     monkeypatch.setattr(kv_cache_config_builder, "paired_sfa_cache_groups", paired)
     monkeypatch.setattr(kv_cache_config_builder, "get_qwen4_exp_kv_cache_groups", lambda *_: None)
-    monkeypatch.setattr(kv_cache_config_builder, "group_and_unify_kv_cache_specs", lambda *_: None)
+    if is_v034():
+        monkeypatch.setattr(kv_cache_config_builder, "group_and_unify_kv_cache_specs", lambda *_: None)
+    else:
+        monkeypatch.setattr(kv_cache_config_builder, "_group_deepseek_v4_layers", lambda *_: None)
     monkeypatch.setattr(kv_cache_config_builder, "_get_kimi_k3_dspark_mixed_kv_cache_groups", lambda *_: None)
     monkeypatch.setattr(kv_cache_config_builder.DefaultKVCacheConfigBuilder, "get_kv_cache_groups", upstream)
 
@@ -239,17 +290,14 @@ def test_generic_planner_reproduces_paired_sfa_pool_accounting():
 
     specs, config = make_specs(), make_config()
     config.model_config.max_model_len = 4096
+    config.max_in_flight_tokens = 4096
     config.parallel_config = SimpleNamespace(decode_context_parallel_size=1)
     config.attention_config = SimpleNamespace(hisparse_config=None)
     groups = paired_sfa_cache_groups(config, specs)
 
     # Admission must derive from the same per-group page counts and the same
     # paired-SFA pool divisor the tensors are materialized with.
-    request_blocks = sum(
-        (group.kv_cache_spec.max_memory_usage_bytes(config) + group.kv_cache_spec.page_size_bytes - 1)
-        // group.kv_cache_spec.page_size_bytes
-        for group in groups
-    )
+    request_blocks = sum(group.max_allocated_blocks_per_request(config) for group in groups)
     assert planning._max_memory_usage_bytes_from_groups(AscendKVCacheConfigBuilder(), config, groups) == (
         request_blocks * paired_sfa_pool_bytes(groups)
     )
@@ -257,7 +305,8 @@ def test_generic_planner_reproduces_paired_sfa_pool_accounting():
 
 def test_grouping_rejects_obsolete_state_padding():
     specs = {
-        n: replace(s, page_size_padded=66502656) if isinstance(s, MambaSpec) else s for n, s in make_specs().items()
+        n: _replace_spec(s, page_size_padded=66502656) if isinstance(_entry_spec(s), MambaSpec) else s
+        for n, s in make_specs().items()
     }
     with pytest.raises(ValueError, match="recurrent pages must match"):
         paired_sfa_cache_groups(make_config(), specs)
@@ -265,26 +314,27 @@ def test_grouping_rejects_obsolete_state_padding():
 
 def test_a3_int8_fp16_pages_preserve_tp16_recurrent_ownership():
     specs = {}
-    for name, spec in make_specs().items():
+    for name, entry in make_specs().items():
+        spec = _entry_spec(entry)
         if isinstance(spec, MambaSpec):
-            spec = replace(spec, shapes=((3, 2304), (6, 128, 128)), page_size_padded=768 * 656)
+            entry = _replace_spec(entry, shapes=((3, 2304), (6, 128, 128)), page_size_padded=768 * 656)
         elif isinstance(spec, AscendSFAIndexerCacheSpec):
-            spec = replace(spec, scale_dtype=torch.float16)
-        specs[name] = replace(spec, block_size=768)
+            entry = _replace_spec(entry, scale_dtype=torch.float16)
+        specs[name] = _replace_spec(entry, block_size=768)
     config = make_config()
     groups = paired_sfa_cache_groups(config, specs)
     # 24 packed-MLA pages (768*656 bytes) plus 24 INT8/FP16 indexer
     # pages (768*(128+2) bytes); recurrent checkpoints alias main slots.
-    assert {spec.page_size_bytes for spec in specs.values()} == {503808, 99840}
-    assert {spec.block_size for spec in specs.values()} == {768}
+    assert {_entry_spec(entry).page_size_bytes for entry in specs.values()} == {503808, 99840}
+    assert {_entry_spec(entry).block_size for entry in specs.values()} == {768}
     assert paired_sfa_pool_bytes(groups) == 14487552
     plan = paired_sfa_cache_config(config, groups, 115900539)
     assert plan.num_blocks == 8
     assert {tensor.size for tensor in plan.kv_cache_tensors} == {115900416}
     assert all(
-        spec.sfa_dcp_replicated_indexer_size == 1
-        for spec in specs.values()
-        if isinstance(spec, AscendSFAIndexerCacheSpec)
+        _entry_spec(entry).sfa_dcp_replicated_indexer_size == 1
+        for entry in specs.values()
+        if isinstance(_entry_spec(entry), AscendSFAIndexerCacheSpec)
     )
 
 
@@ -294,23 +344,28 @@ def test_dspark_c8_draft_uses_dense_fp8_regions_without_changing_target_groups()
     config.parallel_config = SimpleNamespace(decode_context_parallel_size=1)
     target_groups = paired_sfa_cache_groups(config, make_specs())
     draft = {
-        f"model.layers.{layer}.attn": AscendMLAAttentionSpec(
+        f"model.layers.{layer}.attn": make_mla_layer_config(
             block_size=1536,
             num_kv_heads=1,
             head_size=576,
             dtype=torch.float8_e4m3fn,
+            ascend=True,
             is_draft=True,
-            non_causal_multi_token_decode=True,
+            **declared_kwarg(AscendMLAAttentionSpec, "non_causal_multi_token_decode", True),
         )
         for layer in range(93, 98)
     }
+    if not is_v034():
+        config.compilation_config = SimpleNamespace(
+            static_forward_context={name: SimpleNamespace(non_causal_multi_token_decode=True) for name in draft}
+        )
     groups = paired_sfa_cache_groups(config, {**make_specs(), **draft})
 
     assert [len(group.layer_names) for group in groups] == [53, 23, 23, 23]
     assert groups[1:] == target_groups[1:]
-    assert all(not spec.uses_packed_sfa_main_cache for spec in draft.values())
+    assert all(not _entry_spec(spec).uses_packed_sfa_main_cache for spec in draft.values())
     draft_page_bytes = 1536 * 576
-    assert {spec.page_size_bytes for spec in draft.values()} == {draft_page_bytes}
+    assert {_entry_spec(spec).page_size_bytes for spec in draft.values()} == {draft_page_bytes}
     assert paired_sfa_pool_bytes(groups) == 29048832 + 5 * draft_page_bytes == 33472512
 
     plan = paired_sfa_cache_config(config, groups, 2 * paired_sfa_pool_bytes(groups))

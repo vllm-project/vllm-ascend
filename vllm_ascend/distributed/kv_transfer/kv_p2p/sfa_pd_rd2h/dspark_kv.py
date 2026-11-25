@@ -61,11 +61,13 @@ def apply_dspark_resident_kv_specs(
         shared_kv_cache_layers=shared_kv_cache_layers,
     )
     for name in names & specs.keys():
-        spec = specs[name]
+        entry = specs[name]
+        spec = entry.spec if hasattr(entry, "spec") else entry
         if not isinstance(spec, AscendMLAAttentionSpec):
             raise ValueError("Sparse KV offload currently requires an MLA DSpark draft checkpoint.")
         # Preserve dtype, non-causal attention and CP layout; change placement only.
-        specs[name] = replace(spec, store_on_host=False)
+        updated = replace(spec, store_on_host=False)
+        specs[name] = replace(entry, spec=updated) if hasattr(entry, "spec") else updated
     return specs
 
 
@@ -105,7 +107,7 @@ def build_draft_kv_metadata(kv_cache_config: Any, kv_caches: Mapping[str, Any]) 
     """Use loader-owned names; never infer draft ownership from layer numbers."""
     names = tuple(getattr(kv_cache_config, "dspark_draft_layer_names", ()))
     groups = {
-        name: (group_id, group.kv_cache_spec.block_size)
+        name: (group_id, group.block_size)
         for group_id, group in enumerate(kv_cache_config.kv_cache_groups)
         for name in group.layer_names
     }

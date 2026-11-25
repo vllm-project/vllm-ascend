@@ -5,12 +5,14 @@ from unittest.mock import Mock
 import pytest
 import torch
 from vllm.utils.torch_utils import get_dtype_size
-from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheGroupSpec, KVCacheTensor, UniformTypeKVCacheSpecs
+from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheTensor
 
+from tests.ut.kv_cache_test_utils import make_kv_cache_group
 from vllm_ascend.attention import dsa_v1
 from vllm_ascend.attention.dsa_v1 import AscendDSAC4Backend, AscendDSAImpl
 from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec
 from vllm_ascend.quantization.methods.kv_cache.turboquant import cache
+from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2 import attn_utils
 
 
@@ -92,7 +94,7 @@ def test_dsv4_cache_view_validates_backing_size_in_bytes():
     config = KVCacheConfig(
         num_blocks=1,
         kv_cache_tensors=[],
-        kv_cache_groups=[KVCacheGroupSpec(layer_names=["attn"], kv_cache_spec=spec)],
+        kv_cache_groups=[make_kv_cache_group(["attn"], spec)],
     )
     raw = torch.empty(
         spec.page_size_bytes // torch.empty((), dtype=torch.bfloat16).element_size(),
@@ -124,7 +126,7 @@ def test_unified_dsv4_rejects_undersized_block_stride(monkeypatch):
     config = KVCacheConfig(
         num_blocks=2,
         kv_cache_tensors=[descriptor],
-        kv_cache_groups=[KVCacheGroupSpec(layer_names=["attn"], kv_cache_spec=spec)],
+        kv_cache_groups=[make_kv_cache_group(["attn"], spec)],
     )
     layers = {"attn": SimpleNamespace(get_attn_backend=lambda: AscendDSAC4Backend)}
     runtime = SimpleNamespace(
@@ -165,8 +167,8 @@ def test_tq_v2_uses_one_backing_and_preserves_strided_pages(monkeypatch):
         model_version="deepseek_v4",
     )
     groups = [
-        KVCacheGroupSpec(layer_names=list(specs), kv_cache_spec=UniformTypeKVCacheSpecs.from_specs(specs)),
-        KVCacheGroupSpec(layer_names=["swa"], kv_cache_spec=UniformTypeKVCacheSpecs.from_specs({"swa": swa})),
+        make_kv_cache_group(specs),
+        make_kv_cache_group({"swa": swa}),
     ]
     layers = {name: SimpleNamespace(get_attn_backend=lambda: AscendDSAC4Backend) for name in (*specs, "swa")}
     runtime = SimpleNamespace(
@@ -235,11 +237,8 @@ def test_unified_dsv4_allocates_aligned_views_and_aliases(monkeypatch, turboquan
             KVCacheTensor(size=pool_size, layers=[alias_name], offset=0, layer_stride=0, block_stride=stride),
         ],
         kv_cache_groups=[
-            KVCacheGroupSpec(
-                [*names, consumer_name],
-                UniformTypeKVCacheSpecs.from_specs(dict.fromkeys([*names, consumer_name], spec)),
-            ),
-            KVCacheGroupSpec([alias_name], UniformTypeKVCacheSpecs.from_specs({alias_name: spec})),
+            make_kv_cache_group(dict.fromkeys([*names, consumer_name], spec)),
+            make_kv_cache_group({alias_name: spec}),
         ],
     )
     layers = {name: SimpleNamespace(get_attn_backend=lambda: AscendDSAC4Backend) for name in (*names, alias_name)}

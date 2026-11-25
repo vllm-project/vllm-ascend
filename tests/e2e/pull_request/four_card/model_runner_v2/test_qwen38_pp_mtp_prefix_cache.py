@@ -37,7 +37,7 @@ class MambaAlignWorker:
         def postprocess(idx_mapping, num_sampled, num_computed_tokens=None):
             if num_computed_tokens is not None and state._mamba_ctx is not None:
                 indices = idx_mapping.clamp_min(0).long()
-                block_size = state._mamba_spec.block_size
+                block_size = state._mamba_ctx.block_size
                 computed = num_computed_tokens[indices]
                 aligned = computed // block_size * block_size
                 running = computed - num_sampled + 1
@@ -49,7 +49,7 @@ class MambaAlignWorker:
                     & ((state._mamba_state_idx_gpu[indices] != aligned // block_size - 1) | (aligned != running))
                 )
                 self.align_probe[0].logical_or_(copies.any())
-                for group_id in state._mamba_group_ids:
+                for group_id in state._mamba_ctx.mamba_group_ids:
                     expected = tables.block_tables[group_id].gpu[indices]
                     actual = tables.input_block_tables[group_id][: len(indices)]
                     valid = copies[:, None] & (

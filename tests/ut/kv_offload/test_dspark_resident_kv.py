@@ -1,17 +1,23 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vllm-ascend project
 
-from dataclasses import replace
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 import pytest
 import torch
 from vllm.config import CUDAGraphMode, KVTransferConfig
-from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheConfig, KVCacheGroupSpec, KVCacheTensor
+from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheTensor
 from vllm.v1.worker.gpu.model_runner import GPUModelRunner
 
-from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec, AscendSFAIndexerCacheSpec
+from tests.ut.kv_cache_test_utils import (
+    is_v034,
+    make_full_attention_layer_config,
+    make_kv_cache_group,
+    make_mla_layer_config,
+    with_is_draft,
+)
+from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec, AscendSFAIndexerCacheSpec, declared_kwarg
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.cache_planner import LayerwiseCachePlanner
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.layerwise_cache_layout import (
     apply_layerwise_kv_cache_plan,
@@ -33,8 +39,29 @@ def _mla_spec(*, host=True, non_causal=False, block_size=128):
         head_size=576,
         dtype=torch.bfloat16,
         store_on_host=host,
-        non_causal_multi_token_decode=non_causal,
+        **declared_kwarg(AscendMLAAttentionSpec, "non_causal_multi_token_decode", non_causal),
     )
+
+
+def _mla_layer_config(*, host=True, non_causal=False, block_size=128, is_draft=False):
+    return make_mla_layer_config(
+        block_size=block_size,
+        num_kv_heads=1,
+        head_size=576,
+        dtype=torch.bfloat16,
+        ascend=True,
+        is_draft=is_draft,
+        store_on_host=host,
+        **declared_kwarg(AscendMLAAttentionSpec, "non_causal_multi_token_decode", non_causal),
+    )
+
+
+def _unwrap_spec(entry):
+    return getattr(entry, "spec", entry)
+
+
+def _kv_cache_req_method() -> str:
+    return "get_kv_cache_spec" if is_v034() else "get_kv_cache_layer_configs"
 
 
 def _runner(*, method="dspark", sparse=True, last_rank=True, names=None):
@@ -248,10 +275,11 @@ def test_worker_reports_draft_specs_to_core_for_budget(pd_connector, method):
             is_kv_consumer=False,
         ),
     )
-    specs = {"target.attn": _mla_spec(), "draft.attn": _mla_spec()}
+    specs = {"target.attn": _mla_layer_config(), "draft.attn": _mla_layer_config()}
+    req_method = _kv_cache_req_method()
     worker.model_runner = SimpleNamespace(
         speculator=SimpleNamespace(draft_attn_layer_names={"draft.attn"}),
-        get_kv_cache_spec=Mock(return_value=specs),
+        **{req_method: Mock(return_value=specs)},
     )
     with (
         patch.object(module.KVPPConfig, "from_vllm_config", return_value=SimpleNamespace(size=1)),
@@ -261,7 +289,7 @@ def test_worker_reports_draft_specs_to_core_for_budget(pd_connector, method):
             return_value=SimpleNamespace(sparse_kv_offload_config=SimpleNamespace(enabled=False)),
         ),
     ):
-        result = worker.get_kv_cache_spec()
+        result = getattr(worker, req_method)()
     assert result is specs
     assert set(result) == {"target.attn", "draft.attn"}
 
@@ -286,16 +314,18 @@ def test_prefill_aux_config_delegates_to_backend_before_loading():
 @pytest.mark.parametrize("sparse", [False, True])
 def test_draft_placement_changes_only_dspark_sparse(method, sparse):
     runner = _runner(method=method, sparse=sparse)
-    target = _mla_spec()
-    draft = _mla_spec(non_causal=True)
+    target = _mla_layer_config()
+    draft = _mla_layer_config(non_causal=True)
     original = {"model.layers.0.attn": target, "draft.layers.0.attn": draft}
-    with patch.object(GPUModelRunner, "get_kv_cache_spec", return_value=original.copy()):
-        result = runner.get_kv_cache_spec()
+    req_method = _kv_cache_req_method()
+    with patch.object(GPUModelRunner, req_method, return_value=original.copy()):
+        result = getattr(runner, req_method)()
     assert result["model.layers.0.attn"] is target
     resident = method == "dspark" and sparse
-    assert result["draft.layers.0.attn"].store_on_host is not resident
-    assert result["draft.layers.0.attn"].non_causal_multi_token_decode
-    assert draft.store_on_host  # No mutation of upstream specs.
+    assert _unwrap_spec(result["draft.layers.0.attn"]).store_on_host is not resident
+    if is_v034():
+        assert _unwrap_spec(result["draft.layers.0.attn"]).non_causal_multi_token_decode
+    assert _unwrap_spec(draft).store_on_host  # No mutation of upstream specs.
 
 
 @pytest.mark.parametrize("has_shared_layers", [False, True])
@@ -304,41 +334,45 @@ def test_dspark_ownership_is_exact_even_with_target_like_names(has_shared_layers
     runner = _runner(names=names)
     if not has_shared_layers:
         del runner.shared_kv_cache_layers
-    specs = {name: _mla_spec() for name in [*sorted(names), "draft.layers.0.attn"]}
-    with patch.object(GPUModelRunner, "get_kv_cache_spec", return_value=specs.copy()):
-        result = runner.get_kv_cache_spec()
-    assert all(not result[name].store_on_host for name in names)
-    assert result["draft.layers.0.attn"].store_on_host
+    specs = {name: _mla_layer_config() for name in [*sorted(names), "draft.layers.0.attn"]}
+    req_method = _kv_cache_req_method()
+    with patch.object(GPUModelRunner, req_method, return_value=specs.copy()):
+        result = getattr(runner, req_method)()
+    assert all(not _unwrap_spec(result[name]).store_on_host for name in names)
+    assert _unwrap_spec(result["draft.layers.0.attn"]).store_on_host
 
 
 def test_dspark_non_last_pp_rank_has_no_resident_draft():
     runner = _runner(last_rank=False, names=set())
     runner.speculator = None
-    specs = {"target.attn": _mla_spec()}
-    with patch.object(GPUModelRunner, "get_kv_cache_spec", return_value=specs):
-        assert runner.get_kv_cache_spec() is specs
-    assert specs["target.attn"].store_on_host
+    specs = {"target.attn": _mla_layer_config()}
+    req_method = _kv_cache_req_method()
+    with patch.object(GPUModelRunner, req_method, return_value=specs):
+        assert getattr(runner, req_method)() is specs
+    assert _unwrap_spec(specs["target.attn"]).store_on_host
 
 
 @pytest.mark.parametrize("names", [None, set()])
 def test_dspark_missing_loaded_ownership_fails_closed(names):
     runner = _runner()
     runner.speculator = SimpleNamespace(draft_attn_layer_names=names)
+    req_method = _kv_cache_req_method()
     with (
-        patch.object(GPUModelRunner, "get_kv_cache_spec", return_value={}),
+        patch.object(GPUModelRunner, req_method, return_value={}),
         pytest.raises(ValueError, match="loaded draft model"),
     ):
-        runner.get_kv_cache_spec()
+        getattr(runner, req_method)()
 
 
 def test_dspark_rejects_gqa_checkpoint_cache():
     runner = _runner()
-    spec = FullAttentionSpec(block_size=128, num_kv_heads=8, head_size=128, dtype=torch.bfloat16)
+    spec = make_full_attention_layer_config(block_size=128, num_kv_heads=8, head_size=128, dtype=torch.bfloat16)
+    req_method = _kv_cache_req_method()
     with (
-        patch.object(GPUModelRunner, "get_kv_cache_spec", return_value={"draft.layers.0.attn": spec}),
+        patch.object(GPUModelRunner, req_method, return_value={"draft.layers.0.attn": spec}),
         pytest.raises(ValueError, match="MLA DSpark"),
     ):
-        runner.get_kv_cache_spec()
+        getattr(runner, req_method)()
 
 
 @pytest.mark.parametrize("module_alias", [False, True])
@@ -350,11 +384,12 @@ def test_dspark_cannot_alias_target_kv(module_alias):
         }
     else:
         runner.shared_kv_cache_layers = {"draft.layers.0.attn": "target.attn"}
+    req_method = _kv_cache_req_method()
     with (
-        patch.object(GPUModelRunner, "get_kv_cache_spec", return_value={}),
+        patch.object(GPUModelRunner, req_method, return_value={}),
         pytest.raises(ValueError, match="share target-model"),
     ):
-        runner.get_kv_cache_spec()
+        getattr(runner, req_method)()
 
 
 @pytest.mark.parametrize("producer,consumer", [(False, True), (False, False)])
@@ -368,7 +403,7 @@ def test_d_side_and_local_dspark_do_not_enable_p_prefill_generation(producer, co
 
 
 def _cache_config(specs, num_blocks=3):
-    groups = [KVCacheGroupSpec(layer_names=[name], kv_cache_spec=spec) for name, spec in specs.items()]
+    groups = [make_kv_cache_group([name], spec) for name, spec in specs.items()]
     return KVCacheConfig(num_blocks=num_blocks, kv_cache_tensors=[], kv_cache_groups=groups)
 
 
@@ -406,6 +441,7 @@ def test_resident_draft_is_counted_in_hbm_not_host_budget():
     specs = {"target": target, "draft": draft, "indexer": indexer}
     runtime = SimpleNamespace(
         model_config=SimpleNamespace(max_model_len=1024),
+        max_in_flight_tokens=1024,
         parallel_config=SimpleNamespace(decode_context_parallel_size=1),
         scheduler_config=SimpleNamespace(max_num_seqs=4),
     )
@@ -496,15 +532,16 @@ def test_real_allocator_separates_host_target_and_persistent_mla_draft(monkeypat
 def test_layerwise_reuse_retains_independent_draft_descriptors():
     target_names = [f"model.layers.{index}.attn" for index in range(5)]
     draft_names = [f"draft.layers.{index}.attn" for index in range(2)]
-    spec = _mla_spec(host=False)
-    draft_spec = replace(spec, is_draft=True)
+    target_cfg = _mla_layer_config(host=False)
+    draft_cfg = with_is_draft(target_cfg)
+    spec = _unwrap_spec(target_cfg)
     names = target_names + draft_names
     layer_bytes = 3 * spec.page_size_bytes
     config = KVCacheConfig(
         num_blocks=3,
         kv_cache_groups=[
-            KVCacheGroupSpec(layer_names=target_names, kv_cache_spec=spec),
-            KVCacheGroupSpec(layer_names=draft_names, kv_cache_spec=draft_spec),
+            make_kv_cache_group(target_names, target_cfg),
+            make_kv_cache_group(draft_names, draft_cfg, is_eagle_group=True),
         ],
         kv_cache_tensors=[
             KVCacheTensor(
@@ -516,7 +553,10 @@ def test_layerwise_reuse_retains_independent_draft_descriptors():
             )
         ],
     )
-    runtime = SimpleNamespace(model_config=SimpleNamespace(get_total_num_hidden_layers=lambda: 5))
+    runtime = SimpleNamespace(
+        model_config=SimpleNamespace(get_total_num_hidden_layers=lambda: 5),
+        _ascend_draft_layer_names=frozenset(draft_names),
+    )
     transfer = KVTransferConfig(
         kv_connector="AscendStoreConnector",
         kv_role="kv_producer",
