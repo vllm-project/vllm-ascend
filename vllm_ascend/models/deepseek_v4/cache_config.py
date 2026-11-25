@@ -24,7 +24,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from types import MappingProxyType
 
-from vllm.utils.math_utils import cdiv, round_up
+from vllm.utils.math_utils import cdiv
 from vllm.v1.core.kv_cache_planning import _approximate_gcd, get_uniform_page_size
 from vllm.v1.kv_cache_interface import (
     KVCacheGroupSpec,
@@ -158,8 +158,6 @@ def _get_kv_cache_groups_uniform_groups(
     num_layer_tuples_per_group: list[int] = [g_spec.get_max_layers_per_page_size() for g_spec in grouped_specs]
     # Choose `num_layer_tuples` to minimize total padding across groups.
     num_layer_tuples = _approximate_gcd(num_layer_tuples_per_group, lower_bound=num_layer_tuples_per_group[0])
-    # Round up to the nearest multiple of `num_layer_tuples` (i.e., padding)
-    num_layer_tuples_per_group = [round_up(x, num_layer_tuples) for x in num_layer_tuples_per_group]
 
     # TODO(cmq): this is not general enough
     swa_mla_specs = grouped_specs[2:]
