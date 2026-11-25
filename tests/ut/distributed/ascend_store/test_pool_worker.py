@@ -3764,8 +3764,9 @@ class TestKVPoolWorkerProcessLayerData(unittest.TestCase):
                 self.assertEqual(
                     requests[0].save_keys, [f"llama-7b@{value.hex()}@0" for value in (b"prefix", b"first")]
                 )
-                self.assertEqual(requests[1].save_keys, [f"llama-7b@{b'prefix'.hex()}@0", "llama-7b@second@0"])
-        # Existence checks and allocation must still run for every request/step.
+                self.assertEqual(requests[1].save_keys, ["llama-7b@second@0"])
+                self.assertEqual(requests[1].block_gvas_np.tolist(), [0, 101])
+        # Each step rechecks both requests and allocates their missing keys.
         self.assertEqual(worker.m_store.batch_is_exist.call_count, 4)
         self.assertEqual(worker.m_store.batch_alloc.call_count, 4)
 
