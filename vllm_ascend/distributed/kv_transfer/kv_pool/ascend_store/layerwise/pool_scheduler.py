@@ -16,6 +16,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.layerwis
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     LoadSpec,
+    ReqMeta,
     RequestTracker,
     block_hash_to_str,
     get_block_hashes,
@@ -78,6 +79,20 @@ class LayerwiseKVPoolScheduler(BaseKVPoolScheduler):
     def _process_hit_without_alloc(self, store_skip_tokens: int) -> bool:
         return store_skip_tokens > 0
 
+    def _build_req_meta(
+        self,
+        request_tracker: RequestTracker,
+        block_hashes: list[BlockHash],
+        load_spec: LoadSpec | None,
+        prompt_token_ids: list[int],
+        skip_save: bool | None,
+    ) -> ReqMeta | None:
+        request_tuple = self._unfinished_requests.get(request_tracker.req_id)
+        if self.layerwise_offload and request_tuple is not None:
+            # Verifier rows have no corresponding input KV or state to snapshot.
+            request_tracker.token_len = min(request_tracker.token_len, len(request_tuple[0].all_token_ids))
+        return super()._build_req_meta(request_tracker, block_hashes, load_spec, prompt_token_ids, skip_save)
+
     def get_running_target_token_len(self, request: Request, num_new_tokens: int) -> int:
         target_token_len = request.num_computed_tokens + num_new_tokens
         if self.layerwise_offload:
@@ -121,6 +136,13 @@ class LayerwiseKVPoolScheduler(BaseKVPoolScheduler):
         num_computed_tokens: int,
     ) -> int:
         self._get_or_create_request_tracker(request.request_id)
+        if self.layerwise_offload and (
+            self.num_speculative_blocks_by_group or len(self.cacheable_group_ids) != len(self.original_block_size)
+        ):
+            # Resolve a saved checkpoint at the replayable endpoint before looking up the prefix.
+            token_len = min(token_len, self._floor_to_cache_transfer_granularity(request.num_tokens - 1))
+            if token_len <= 0:
+                return 0
         if self.cache_coordinator is not None:
             if self.use_eagle:
                 final_block_start = (request.num_tokens - 1) // self.lcm_block_size * self.lcm_block_size

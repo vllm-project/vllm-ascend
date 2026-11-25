@@ -3012,8 +3012,8 @@ class AscendMLAImpl(MLAAttentionImpl):
                 "dequant_scale_value": self.fak_descale_float,
             }
             common_kwargs.update(extra_fa_args)
-        # Release subsequent layer prefetches at the decode attention boundary,
-        # just as prefill and external FlashMLA do.
+        # Record the save boundary and release prefetches if the earlier
+        # connector wait did not open their load gate.
         record_attention_compute_start()
         if _EXTRA_CTX.capturing:
             workspace = get_capture_resource(
