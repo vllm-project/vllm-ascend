@@ -450,9 +450,7 @@ def _dsv41_text_config(case: Any) -> dict[str, Any]:
     return config.get("text_config", config)
 
 
-def _dsv41_engram_table_shapes(
-    text_config: dict[str, Any],
-) -> dict[str, tuple[int, int]]:
+def _dsv41_engram_table_shapes(text_config: dict[str, Any]) -> dict[str, tuple[int, int]]:
     """Exact engram table shapes for the reduced config.
 
     ``EngramLayout`` draws one prime near ``engram_vocab_size`` per (n-gram size,
@@ -730,12 +728,7 @@ class DeepseekV41WeightSource(WeightSource):
 
         target = Path(directory)
         target.mkdir(parents=True, exist_ok=True)
-        for name in (
-            "config.json",
-            "tokenizer.json",
-            "tokenizer_config.json",
-            "generation_config.json",
-        ):
+        for name in ("config.json", "tokenizer.json", "tokenizer_config.json", "generation_config.json"):
             source = self._model_dir / name
             if source.exists():
                 shutil.copyfile(source, target / name)

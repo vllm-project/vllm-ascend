@@ -138,8 +138,7 @@ def reference_serve_args(
 # Reuse a startup reference only for the same model, memory, TP, logical device
 # and effective child-server environment. Transport and packing do not affect it.
 _REFERENCE_SIGNATURES: dict[
-    tuple[str, float, int, int, tuple[tuple[str, str], ...]],
-    list[tuple[str, tuple[float, ...]]],
+    tuple[str, float, int, int, tuple[tuple[str, str], ...]], list[tuple[str, tuple[float, ...]]]
 ] = {}
 
 
@@ -191,10 +190,7 @@ def reference_signature(
         ) as server,
     ):
         signature = generation_signature(
-            server.get_client(),
-            case.model,
-            prompts=case.prompts,
-            image_prompt=case.image_prompt,
+            server.get_client(), case.model, prompts=case.prompts, image_prompt=case.image_prompt
         )
 
     _REFERENCE_SIGNATURES[cache_key] = signature
@@ -224,11 +220,7 @@ IMAGE_DATA_URL = _quadrant_png_data_url()
 
 
 def generation_signature(
-    client,
-    model: str,
-    *,
-    prompts: tuple[str | tuple[int, ...], ...],
-    image_prompt: bool = False,
+    client, model: str, *, prompts: tuple[str | tuple[int, ...], ...], image_prompt: bool = False
 ) -> list[tuple[str, tuple[float, ...]]]:
     """Capture deterministic text and logprobs for exact reload comparison.
 
@@ -329,10 +321,7 @@ def weight_transfer_servers(
         env_dict=env_dict,
     ) as server:
         dummy_signature = generation_signature(
-            server.get_client(),
-            case.model,
-            prompts=case.prompts,
-            image_prompt=case.image_prompt,
+            server.get_client(), case.model, prompts=case.prompts, image_prompt=case.image_prompt
         )
         yield server, reference, dummy_signature
 
@@ -405,10 +394,7 @@ def quantized_weight_transfer_servers(
 
 
 def assert_weight_update_matches_reference(
-    dummy_signature,
-    reference_signature,
-    updated_signatures,
-    case: WeightUpdateModelCase,
+    dummy_signature, reference_signature, updated_signatures, case: WeightUpdateModelCase
 ) -> None:
     """Compare every live update against independent startup loading.
 

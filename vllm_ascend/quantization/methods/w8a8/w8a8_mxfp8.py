@@ -227,10 +227,9 @@ class AscendW8A8MXFP8DynamicLinearMethod(AscendLinearScheme):
         - weight: (output_size, input_size) -> (input_size, output_size)
         - weight_scale: (n_dim, k_dim) -> (k_dim//2, n_dim, 2)
 
-        For RL training scenarios where weights need to be reloaded multiple times,
-        this method stores original shapes and can be called multiple times safely.
-        Use restore_weights_for_rl_loading() before weight reload, then call this
-        method again after loading.
+        vLLM reload restores checkpoint-layout parameters and clears the
+        post-loading guard before calling this method again. Callers managing
+        loading themselves must call restore_weights_for_rl_loading() first.
 
         Address stability for ACL graph:
         The transformed buffer is what the ACL graph captures and replays. It is
@@ -239,8 +238,8 @@ class AscendW8A8MXFP8DynamicLinearMethod(AscendLinearScheme):
         data_ptr never changes across RL weight reloads.
         """
 
-        # Check if already transformed to avoid double transformation
-        if getattr(layer, "_mxfp8_transformed", False):
+        # vLLM clears this guard before processing freshly reloaded weights.
+        if getattr(layer, "_already_called_process_weights_after_loading", False):
             return
 
         # Store the unpadded shapes expected by the checkpoint loader.
@@ -306,13 +305,14 @@ class AscendW8A8MXFP8DynamicLinearMethod(AscendLinearScheme):
 
         # Mark as transformed
         layer._mxfp8_transformed = True
+        layer._already_called_process_weights_after_loading = True
 
     def restore_weights_for_rl_loading(self, layer):
         """Restore weights to original shapes for RL weight reloading.
 
-        This method must be called BEFORE model.load_weights() in RL training
-        loops to restore the tensors to their original shapes that the weight
-        loader expects.
+        Call this before model.load_weights() when managing reloads manually.
+        vLLM's reload lifecycle restores the checkpoint layout itself and does
+        not need this method.
 
         After weight loading, call process_weights_after_loading() again to
         re-apply the MXFP8 transformations.
@@ -358,6 +358,7 @@ class AscendW8A8MXFP8DynamicLinearMethod(AscendLinearScheme):
 
         # Mark as not transformed (ready for weight loading)
         layer._mxfp8_transformed = False
+        layer._already_called_process_weights_after_loading = False
 
 
 @register_scheme("W8A8_MXFP8", "moe")
@@ -511,14 +512,13 @@ class AscendW8A8MXFP8DynamicFusedMoEMethod(AscendMoEScheme):
         - w13_weight_scale: (g_num, n_size, k_size) -> (g_num, k_size//2, n_size, 2)
         - w2_weight_scale: (g_num, n_size, k_size) -> (g_num, k_size//2, n_size, 2)
 
-        For RL training scenarios where weights need to be reloaded multiple times,
-        this method stores original shapes and can be called multiple times safely.
-        Use restore_weights_for_rl_loading() before weight reload, then call this
-        method again after loading.
+        vLLM reload restores checkpoint-layout parameters and clears the
+        post-loading guard before calling this method again. Callers managing
+        loading themselves must call restore_weights_for_rl_loading() first.
         """
 
-        # Check if already transformed to avoid double transformation
-        if getattr(layer, "_mxfp8_transformed", False):
+        # vLLM clears this guard before processing freshly reloaded weights.
+        if getattr(layer, "_already_called_process_weights_after_loading", False):
             return
 
         # Store original shapes for RL weight reloading
@@ -535,6 +535,7 @@ class AscendW8A8MXFP8DynamicFusedMoEMethod(AscendMoEScheme):
         if not use_mega_moe and not self.use_expert_weight_list:
             self._process_batched_weights(layer)
             layer._mxfp8_transformed = True
+            layer._already_called_process_weights_after_loading = True
             return
 
         if not hasattr(layer, "_mxfp8_moe_parameters"):
@@ -578,6 +579,7 @@ class AscendW8A8MXFP8DynamicFusedMoEMethod(AscendMoEScheme):
             delattr(layer, tensor_name)
 
         layer._mxfp8_transformed = True
+        layer._already_called_process_weights_after_loading = True
         torch.npu.empty_cache()
 
     @staticmethod
@@ -636,9 +638,9 @@ class AscendW8A8MXFP8DynamicFusedMoEMethod(AscendMoEScheme):
     def restore_weights_for_rl_loading(self, layer):
         """Restore weights to original shapes for RL weight reloading.
 
-        This method must be called BEFORE model.load_weights() in RL training
-        loops to restore the tensors to their original shapes that the weight
-        loader expects.
+        Call this before model.load_weights() when managing reloads manually.
+        vLLM's reload lifecycle restores the checkpoint layout itself and does
+        not need this method.
 
         After weight loading, call process_weights_after_loading() again to
         re-apply the MXFP8 transformations.
@@ -677,6 +679,7 @@ class AscendW8A8MXFP8DynamicFusedMoEMethod(AscendMoEScheme):
                 weight.data = weight_nd.transpose(1, 2).contiguous()
                 scale.data = scale.data.transpose(1, 2).reshape(orig_shapes[scale_name]).contiguous()
             layer._mxfp8_transformed = False
+            layer._already_called_process_weights_after_loading = False
             return
         parameters = layer._mxfp8_moe_parameters
 
@@ -708,6 +711,7 @@ class AscendW8A8MXFP8DynamicFusedMoEMethod(AscendMoEScheme):
 
         # Mark as not transformed (ready for weight loading)
         layer._mxfp8_transformed = False
+        layer._already_called_process_weights_after_loading = False
 
     def _get_weights(self, layer, name):
         """Use per-expert lists only for EPLB; otherwise wrap the batched tensor."""
