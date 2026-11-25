@@ -1122,6 +1122,18 @@ def enable_sp(vllm_config=None) -> bool:
     return enable_dense_sp(vllm_config)
 
 
+def pad_num_tokens(
+    num_tokens: int,
+    vllm_config: VllmConfig,
+    enable_shared_expert_dp: bool = False,
+) -> int:
+    """Pad TP-shared token rows to the tensor-parallel world size."""
+    tp_size = vllm_config.parallel_config.tensor_parallel_size
+    if tp_size <= 1 or not (enable_sp(vllm_config) or enable_shared_expert_dp):
+        return num_tokens
+    return (num_tokens + tp_size - 1) // tp_size * tp_size
+
+
 def pad_sequence_parallel_tokens(hidden_states: torch.Tensor) -> torch.Tensor:
     """Pad the token dim of ``hidden_states`` up to the TP size.
 
