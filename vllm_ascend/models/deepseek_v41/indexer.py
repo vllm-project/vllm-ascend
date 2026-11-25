@@ -2,12 +2,16 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """V4.1 index projections, quantized QLI and cross-layer candidate selection."""
 
+from collections.abc import Callable
+from typing import cast
+
 import torch
 import torch_npu
 from torch import nn
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import ReplicatedLinear
 
+from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.attention.dsa_v41 import (
     DeepseekV41CacheLayer,
     scatter_cache_sk,
@@ -28,6 +32,7 @@ from vllm_ascend.ops.triton.quantize_indexer_query import (
     quantize_indexer_query,
 )
 from vllm_ascend.ops.triton.quantize_mxfp4_indexer import quantize_mxfp4_indexer
+from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ
 from vllm_ascend.worker.device_metadata import (
     DeviceMetadataStage,
     wait_for_device_metadata,
@@ -65,6 +70,13 @@ class DeepseekV41Indexer(nn.Module):
         _QUANTIZE_INDEXER_QUERY_KERNEL.register_warmup(vllm_config)
         self.softmax_scale = self.width**-0.5
         self.weights_scale = self.softmax_scale * self.n_heads**-0.5
+        self.fused_prologue_qw = None
+        if get_ascend_config().dsv41_indexer_prologue:
+            if self.packed_cache_ops is None:
+                raise ValueError("dsv41_indexer_prologue requires the A5 packed index cache")
+            from ops.indexer_prologue_qw_vllm import indexer_prologue_qw  # type: ignore[import-not-found]
+
+            self.fused_prologue_qw = indexer_prologue_qw
         self.wq_b = ReplicatedLinear(
             config.q_lora_rank,
             self.n_heads * self.width,
@@ -107,6 +119,19 @@ class DeepseekV41Indexer(nn.Module):
                 if is_candidate_source and uses_a5_packed_cache()
                 else None
             )
+
+    def process_weights_after_loading(self):
+        if self.fused_prologue_qw is None:
+            return
+        weight = self.wq_b.weight
+        scale = self.wq_b.weight_scale
+        # The MXFP8 linear method puts K first. QW needs output channels first
+        # for both tensors, including when finalization runs again after a reload.
+        if scale.shape[0] != self.n_heads * self.width:
+            weight.data = torch_npu.npu_format_cast(weight.data.T, ACL_FORMAT_FRACTAL_NZ)
+            scale.data = scale.data.transpose(0, 1)
+        head_weight = self.weights_proj.weight
+        head_weight.data = torch_npu.npu_format_cast(head_weight.data, ACL_FORMAT_FRACTAL_NZ)
 
     @staticmethod
     def _output(linear, value):
@@ -176,6 +201,21 @@ class DeepseekV41Indexer(nn.Module):
 
     def project_query(self, qr):
         return self._output(self.wq_b, qr).unflatten(-1, (self.n_heads, self.width))
+
+    def project_fused(self, hidden_states, quantized_qr, qr_scale, cos, sin):
+        """Reuse the main Q projection's MXFP8 inputs, with no second quantize."""
+        prologue = cast(Callable[..., tuple[torch.Tensor, ...]], self.fused_prologue_qw)
+        return prologue(
+            hidden_states,
+            quantized_qr,
+            self.wq_b.weight.data,
+            self.weights_proj.weight.data,
+            qr_scale,
+            self.wq_b.weight_scale.data,
+            sin.view(-1, self.rope_width),
+            cos.view(-1, self.rope_width),
+            softmax_scale=self.weights_scale,
+        )
 
     def apply_query_rope(self, query, cos, sin):
         DeviceOperator.apply_partial_rotary_inplace(query, cos, sin, start=self.width - self.rope_width, end=self.width)

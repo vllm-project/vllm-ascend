@@ -701,6 +701,7 @@ class AscendConfig:
     enable_cpu_binding: bool = True
     shared_engram: SharedEngramConfig | None = None
     multistream_dsv4_dsa_overlap: bool = True
+    dsv41_indexer_prologue: bool = False
     # Prepare Engram hashes, lookups and DP/TP exchanges on an auxiliary stream;
     # FULL graphs wait on descriptor-specific external events at consumers.
     # Default to overlap on A5 only; explicit settings override this policy.
