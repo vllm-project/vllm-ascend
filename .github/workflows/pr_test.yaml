@@ -77,7 +77,6 @@ jobs:
       cpu_ut_versions: ${{ steps.vllm.outputs.cpu_ut_versions }}
       src: ${{ steps.filter.outputs.src }}
       ci_pipeline: ${{ steps.filter.outputs.ci_pipeline }}
-      cpu_ut: ${{ steps.filter.outputs.cpu_ut }}
     steps:
       - name: Validate PR title prefix
         run: |
@@ -248,27 +247,6 @@ jobs:
               - 'requirements.txt'
               - 'requirements-dev.txt'
               - 'pyproject.toml'
-            # Files that can affect CPU UT execution but are covered by neither
-            # src nor ci_pipeline: everything tests/ut reads from disk, not only
-            # what it imports from under tests/. That includes shared tests/
-            # helpers (e.g. tests/deepseek_v41_utils.py), example scripts that UT
-            # imports or spawns as subprocesses (e.g.
-            # examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py,
-            # examples/rl/rlhf_http_hccl.py), and the specific .github files UT
-            # inspects: top-level workflow YAMLs (FLA pin checks in
-            # tests/ut/ops/test_gdn_window_guard.py), workflow scripts and the
-            # csrc-l1-restore action imported/read by tests/ut/_tools, and the
-            # pinned vLLM refs that decide which versions the UT matrix runs
-            # against. Other .github metadata (CODEOWNERS, labeler, templates)
-            # cannot affect UT and is intentionally left out.
-            # A cpu_ut-only change runs cpu-ut without requiring a test label.
-            cpu_ut:
-                - 'tests/**'
-                - 'examples/**'
-                - 'Dockerfile*'
-                - '.github/vllm-release-tag.commit'
-                - '.github/vllm-main-verified.commit'
-                - '!**/*.md'
 
       - name: Install vllm-ascend dev (conditional)
         if: steps.filter.outputs.lint_tracker == 'true'
