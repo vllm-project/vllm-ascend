@@ -44,3 +44,38 @@ class MambaCopyKVConnector(KVConnector):
 
     def reset_capture_state(self) -> None:
         self._connector.reset_capture_state()
+
+
+class C8VScaleKVConnector(KVConnector):
+    """Restore static C8 V scales after Pull admission and Mamba copies.
+
+    Async Pull requests reach this hook only after their receive has completed.
+    Wrapping the runner's connector keeps the restore before eager execution
+    and FULL graph replay without modifying vLLM's shared connector class.
+    """
+
+    def __init__(self, connector: KVConnector, restore: Callable[["SchedulerOutput"], None]) -> None:
+        self._connector = connector
+        self._restore = restore
+
+    def pre_forward(self, scheduler_output: "SchedulerOutput", *args: Any, **kwargs: Any) -> None:
+        self._connector.pre_forward(scheduler_output, *args, **kwargs)
+        self._restore(scheduler_output)
+
+    def finish_forward(self) -> None:
+        self._connector.finish_forward()
+
+    def finalize_step(self) -> None:
+        self._connector.finalize_step()
+
+    def post_forward(self, finished_req_ids: set[str], *args: Any, **kwargs: Any) -> "KVConnectorOutput | None":
+        return self._connector.post_forward(finished_req_ids, *args, **kwargs)
+
+    def no_forward(self, scheduler_output: "SchedulerOutput") -> "ModelRunnerOutput":
+        return self._connector.no_forward(scheduler_output)
+
+    def set_disabled(self, disabled: bool) -> None:
+        self._connector.set_disabled(disabled)
+
+    def reset_capture_state(self) -> None:
+        self._connector.reset_capture_state()

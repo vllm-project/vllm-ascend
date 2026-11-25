@@ -140,7 +140,7 @@ from vllm_ascend.worker.v2.attn_utils import (
 )
 from vllm_ascend.worker.v2.eplb import AscendEPLBController
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch, AscendInputBuffers
-from vllm_ascend.worker.v2.kv_connector import MambaCopyKVConnector
+from vllm_ascend.worker.v2.kv_connector import C8VScaleKVConnector, MambaCopyKVConnector
 from vllm_ascend.worker.v2.kvpp import KVPPRuntime
 from vllm_ascend.worker.v2.pcp_manager import AscendPCPManager
 from vllm_ascend.worker.v2.pp_transport import resolve_spec_pp_support
@@ -630,6 +630,17 @@ class NPUModelRunner(GPUModelRunner):
         if self.vllm_config.attention_config.hisparse_config is not None:
             self.kv_connector = adapt_pcp_hisparse_connector(self)
             self.kv_connector = overlap_target_host_mirror(self)
+        transfer_config = self.vllm_config.kv_transfer_config
+        if (
+            self._c8_mxfp_v_scale_group_entries
+            and transfer_config is not None
+            and transfer_config.is_kv_consumer
+            and has_kv_transfer_group()
+        ):
+            from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.connector import MooncakePullConnector
+
+            if type(get_kv_transfer_group()) is MooncakePullConnector:
+                self.kv_connector = C8VScaleKVConnector(self.kv_connector, self._restore_c8_mxfp_loaded_v_scales)
         guard = getattr(self, "_kv_trace", None)
         if guard is not None:
             guard.configure(self)
@@ -637,16 +648,55 @@ class NPUModelRunner(GPUModelRunner):
     def _fill_c8_mxfp_v_scale_caches(self) -> None:
         """Initialize C8 V scales and retain views for page reassignment."""
         self._c8_mxfp_v_scale_caches = []
+        self._c8_mxfp_v_scale_group_entries = []
         num_blocks = self.kv_cache_config.num_blocks
         if num_blocks <= 0:
             return
-        for layer in self.compilation_config.static_forward_context.values():
+        group_by_layer = {
+            layer_name: group_id
+            for group_id, group in enumerate(getattr(self.kv_cache_config, "kv_cache_groups", ()))
+            for layer_name in group.layer_names
+        }
+        for layer_name, layer in self.compilation_config.static_forward_context.items():
             if isinstance(getattr(layer, "impl", None), AscendC8MXFPAttentionBackendImpl):
                 value_scale_cache = layer.kv_cache[3]
                 assert value_scale_cache.shape[0] % num_blocks == 0
                 kernel_blocks_per_page = value_scale_cache.shape[0] // num_blocks
                 self._c8_mxfp_v_scale_caches.append((layer.v_cache_scale, value_scale_cache, kernel_blocks_per_page))
+                group_id = group_by_layer.get(layer_name)
+                if group_id is not None:
+                    self._c8_mxfp_v_scale_group_entries.append(
+                        (layer.v_cache_scale, value_scale_cache, kernel_blocks_per_page, group_id)
+                    )
                 fill_mxfp_v_scale_cache(layer.v_cache_scale, value_scale_cache)
+
+    def _restore_c8_mxfp_loaded_v_scales(self, scheduler_output: SchedulerOutput) -> None:
+        """Restore untransferred V-scale tails on newly admitted Pull pages."""
+        if scheduler_output.has_sync_kv_loads:
+            return
+        entries = self._c8_mxfp_v_scale_group_entries
+        if not entries:
+            return
+        blocks_by_group: dict[int, set[int]] = {}
+        for request in scheduler_output.scheduled_new_reqs:
+            for group_id, blocks in enumerate(request.block_ids):
+                blocks_by_group.setdefault(group_id, set()).update(blocks)
+        cached = scheduler_output.scheduled_cached_reqs
+        for req_id, block_ids in zip(cached.req_ids, cached.new_block_ids):
+            if req_id in cached.resumed_req_ids and block_ids is not None:
+                for group_id, blocks in enumerate(block_ids):
+                    blocks_by_group.setdefault(group_id, set()).update(blocks)
+        if not blocks_by_group:
+            return
+        zeroed = set(scheduler_output.new_block_ids_to_zero or ())
+        for value_scale, cache, ratio, group_id in entries:
+            for block_id in sorted(blocks_by_group.get(group_id, set()) - zeroed):
+                if block_id <= 0:
+                    continue
+                start = block_id * ratio
+                if start + ratio > cache.shape[0]:
+                    raise IndexError(f"C8 physical block ID out of range: {block_id}")
+                fill_mxfp_v_scale_cache(value_scale, cache[start : start + ratio])
 
     def shutdown(self) -> None:
         from vllm_ascend.distributed.expert_transfer import expert_offload_utils as expert_offload
@@ -673,6 +723,9 @@ class NPUModelRunner(GPUModelRunner):
         entries = getattr(self, "_c8_mxfp_v_scale_caches", None)
         if entries is not None:
             entries.clear()
+        group_entries = getattr(self, "_c8_mxfp_v_scale_group_entries", None)
+        if group_entries is not None:
+            group_entries.clear()
         zeroer = getattr(self, "kv_block_zeroer", None)
         if isinstance(zeroer, C8KVBlockZeroer):
             zeroer.entries.clear()

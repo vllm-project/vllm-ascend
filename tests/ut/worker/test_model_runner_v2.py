@@ -37,6 +37,7 @@ from vllm_ascend.attention.fa_v1 import AscendFlashAttentionBackend
 from vllm_ascend.attention.mla_v1 import AscendMLABackend, AscendMLAImpl
 from vllm_ascend.model_executor.offloader import AscendPrefetchOffloader
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch, AscendInputBuffers
+from vllm_ascend.worker.v2.kv_connector import C8VScaleKVConnector
 from vllm_ascend.worker.v2.model_runner import NPUModelRunner
 from vllm_ascend.worker.v2.pcp_manager import AscendPCPManager
 from vllm_ascend.worker.v2.spec_decode import pcp_utils as draft_pcp_utils
@@ -2163,7 +2164,9 @@ def test_copy_num_computed_tokens_to_cpu_records_event():
 
 def _c8_mxfp_runner(layers: dict, num_blocks: int = 2) -> NPUModelRunner:
     runner = NPUModelRunner.__new__(NPUModelRunner)
-    runner.kv_cache_config = SimpleNamespace(num_blocks=num_blocks)
+    runner.kv_cache_config = SimpleNamespace(
+        num_blocks=num_blocks, kv_cache_groups=[SimpleNamespace(layer_names=list(layers))]
+    )
     runner.compilation_config = SimpleNamespace(static_forward_context=layers)
     runner.vllm_config = SimpleNamespace(
         cache_config=SimpleNamespace(cache_dtype="mxfp8"),
@@ -2191,6 +2194,61 @@ def _c8_packet(ratio: int, k_dim: int = 64, v_dim: int = 64, num_pages: int = 2)
     runner = _c8_mxfp_runner({"attn": layer}, num_blocks=num_pages)
     runner._fill_c8_mxfp_v_scale_caches()
     return raw, views, layer, runner, pitch
+
+
+@pytest.mark.parametrize("ratio", [3, 5])
+def test_pull_admission_restores_c8_v_scales_after_partial_page_copy(ratio):
+    raw, _, layer, runner, pitch = _c8_packet(ratio)
+    # A partial Pull transfer and Mamba copy can overwrite a newly assigned
+    # physical page. Its V scales are static and must be repaired before forward.
+    raw[128 + ratio * pitch : 128 + 2 * ratio * pitch].fill_(73)
+    expected = raw.clone()
+    expected_views = mxfp_paged_cache_views(
+        expected[128:-128], 2 * ratio, 2, 64, 64, 512, page_stride_bytes=pitch
+    )
+    fill_mxfp_v_scale_cache(layer.v_cache_scale, expected_views[3][ratio : 2 * ratio])
+    output = SimpleNamespace(
+        has_sync_kv_loads=False,
+        scheduled_new_reqs=[SimpleNamespace(block_ids=([1],))],
+        scheduled_cached_reqs=SimpleNamespace(req_ids=[], new_block_ids=[], resumed_req_ids=set()),
+        new_block_ids_to_zero=[],
+    )
+
+    runner._restore_c8_mxfp_loaded_v_scales(output)
+
+    assert torch.equal(raw, expected)
+
+
+def test_pull_admission_restores_resumed_pages_but_skips_zeroed_pages():
+    _, views, layer, runner, _ = _c8_packet(3)
+    views[3][3:6].fill_(73)
+    output = SimpleNamespace(
+        has_sync_kv_loads=False,
+        scheduled_new_reqs=[],
+        scheduled_cached_reqs=SimpleNamespace(
+            req_ids=["resumed"], new_block_ids=[([1],)], resumed_req_ids={"resumed"}
+        ),
+        new_block_ids_to_zero=[1],
+    )
+
+    runner._restore_c8_mxfp_loaded_v_scales(output)
+    assert torch.all(views[3][3:6] == 73)
+
+    output.new_block_ids_to_zero = []
+    runner._restore_c8_mxfp_loaded_v_scales(output)
+    assert torch.equal(views[3][3, :, :, 0, :, 0].reshape(-1), layer.v_cache_scale)
+
+
+def test_c8_connector_restores_after_delegate_pre_forward():
+    calls = []
+    delegate = MagicMock()
+    delegate.pre_forward.side_effect = lambda *args, **kwargs: calls.append("delegate")
+    output = object()
+    connector = C8VScaleKVConnector(delegate, lambda arg: calls.append(("restore", arg)))
+
+    connector.pre_forward(output)
+
+    assert calls == ["delegate", ("restore", output)]
 
 
 def test_fill_c8_mxfp_v_scale_caches_fills_and_registers():
