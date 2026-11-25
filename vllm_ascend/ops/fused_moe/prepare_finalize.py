@@ -35,11 +35,12 @@ from vllm.v1.worker.ubatching import dbo_current_ubatch_id
 # Registers torch.ops.vllm.ascend_sp_padding_mask_impl.
 import vllm_ascend.models.common.ops.sequence_parallel  # noqa: F401
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
+from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.lora.fused_moe import prepare_lora_indices
 from vllm_ascend.ops.fused_moe.dataclass.prepare_finalize import MoEPrepareOutput
 from vllm_ascend.ops.fused_moe.moe_utils import _pad_and_split_tokens, _pad_tokens_with_cat
 from vllm_ascend.quantization.quant_type import QuantType
-from vllm_ascend.quantization.utils import get_dynamic_mx_quant_scale_alg
+from vllm_ascend.quantization.utils import DynamicMXQuantScaleAlg, get_dynamic_mx_quant_scale_alg
 
 # ForwardContext.additional_kwargs key for the per-forward MC2 mask cache.
 _MC2_RUNNER_PADDING_MASK_KEY = "ascend_mc2_runner_padding_mask"
@@ -533,9 +534,15 @@ class PrepareAndFinalizeWithAllGather(PrepareAndFinalize):
                 router_logits = nn.functional.pad(router_logits, (0, 0, 0, pad_size))
 
             pcp_group = get_pcp_group()
-            if quant_type == QuantType.W4A8MXFP and hidden_states.dtype == torch.bfloat16 and hidden_states.numel():
+            if (
+                quant_type == QuantType.W4A8MXFP
+                and hidden_states.dtype == torch.bfloat16
+                and hidden_states.numel()
+                and get_current_hardware_profile().supports(HardwareCapability.DYNAMIC_MX_QUANT_SCALE_ALG_ONE)
+            ):
+                # Match the scale calculation in MoEInitRoutingV2 with quant_mode=3.
                 values, scales = torch_npu.npu_dynamic_mx_quant(
-                    hidden_states, dst_type=torch.float8_e4m3fn, scale_alg=self.dynamic_mx_quant_scale_alg
+                    hidden_states, dst_type=torch.float8_e4m3fn, scale_alg=DynamicMXQuantScaleAlg.CEIL
                 )
                 # Send values and their E8M0 scales in one collective, preserving their byte encodings.
                 payload = torch.cat((values.view(torch.uint8), scales.view(torch.uint8).flatten(1)), dim=-1)
