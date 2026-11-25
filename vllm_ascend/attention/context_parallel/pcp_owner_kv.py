@@ -31,11 +31,17 @@ OWNER_COMPATIBLE_KV_CONNECTORS = frozenset(
     {
         "AscendStoreConnector",
         "MooncakeConnectorStoreV1",
-        # Direct P2P connectors. The prefill worker cannot register the owner
+        # Direct P2P connector. The prefill worker cannot register the owner
         # VMM range (peer-mapped pages), so it stages each requested complete
         # logical block through its registered HBM buffer and the decode side
         # pulls from those slots. See owner_transfer.OwnerP2PStageController.
-        "MooncakeConnectorV1",
+        #
+        # MooncakeConnectorV1 is deliberately absent. Its hybrid-cache decode
+        # registration asserts a 2 MiB-aligned KV tensor base
+        # (``_get_registered_kv_tensor_buffers_hybrid``) while the model's
+        # cache allocation is not page aligned, so a PD pair using it fails
+        # at registration even before owner staging is involved. The hybrid
+        # connector recovers aligned regions and is the validated P2P path.
         "MooncakeHybridConnector",
     }
 )

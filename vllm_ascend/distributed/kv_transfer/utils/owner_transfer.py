@@ -30,6 +30,11 @@ from vllm.logger import logger
 # staying inside the ``gpu-memory-utilization`` slack used by owner staging.
 OWNER_TRANSFER_STAGING_BYTES = 128 << 20
 _STAGING_CANDIDATES = (128 << 20, 64 << 20, 32 << 20, 16 << 20)
+# The transport engines (HIXL / Mooncake) register page-aligned memory.  A
+# plain ``torch.empty`` returned by the caching allocator is not necessarily
+# 2 MiB aligned, and Mooncake rejects an unaligned registration range.  The
+# staging allocation is over-allocated and sliced so its base is aligned.
+OWNER_TRANSFER_STAGING_ALIGN = 2 << 20
 
 # Direct P2P connectors do not push blocks into a store.  The decode worker
 # pulls them from prefill memory, so the prefill worker has to stage the
@@ -62,12 +67,17 @@ def owner_backed_tensor(kv_caches: dict) -> torch.Tensor | None:
 
 def _allocate_staging_tensor(device: torch.device, requested: int) -> torch.Tensor:
     """Allocate an int8 staging allocation, falling back to smaller sizes."""
-    torch.npu.set_device(device)
+    if device.type == "npu":
+        torch.npu.set_device(device)
     candidates = [requested, *(size for size in _STAGING_CANDIDATES if size < requested)]
+    align = OWNER_TRANSFER_STAGING_ALIGN
     last_error: BaseException | None = None
     for nbytes in candidates:
         try:
-            return torch.empty(nbytes, dtype=torch.int8, device=device)
+            raw = torch.empty(nbytes + align, dtype=torch.int8, device=device)
+            # The slice keeps the raw allocation alive and is still contiguous.
+            offset = (-raw.data_ptr()) % align
+            return raw[offset : offset + nbytes]
         except RuntimeError as error:  # OOM: try the next smaller buffer
             last_error = error
             logger.warning_once(

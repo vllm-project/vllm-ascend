@@ -140,3 +140,18 @@ def test_unknown_group_is_rejected(monkeypatch):
 def test_a_block_larger_than_the_staging_buffer_is_rejected():
     with pytest.raises(ValueError, match="needs .* bytes per complete block"):
         _contiguous_stager([("kv", 4096)], 1024)
+
+
+def test_staging_allocation_is_transport_aligned():
+    # The transport engine registers page-aligned memory; a plain allocation
+    # from the caching allocator can start anywhere. The stager must hand the
+    # engine a 2 MiB-aligned base while keeping the requested capacity.
+    requested = 4096
+    buffer = owner_transfer._allocate_staging_tensor(torch.device("cpu"), requested)
+
+    assert buffer.dtype == torch.int8
+    assert buffer.numel() == requested
+    assert buffer.is_contiguous()
+    assert buffer.data_ptr() % owner_transfer.OWNER_TRANSFER_STAGING_ALIGN == 0
+    # The aligned slice is a view of a larger allocation that stays alive.
+    assert buffer.untyped_storage().nbytes() >= requested

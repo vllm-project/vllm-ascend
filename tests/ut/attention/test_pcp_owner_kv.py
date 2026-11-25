@@ -85,24 +85,10 @@ def test_owner_connector_gate_accepts_multi_connector_store_children():
     assert owner_kv.validate_owner_connector(_config(kv_transfer=multi)) == (True, "")
 
 
-def test_owner_connector_gate_accepts_staged_direct_p2p_connectors():
-    direct = _kv_transfer("MooncakeConnectorV1", {})
-    assert owner_kv.validate_owner_connector(_config(kv_transfer=direct)) == (True, "")
-    assert owner_kv.validate_owner_sharing(_config(kv_transfer=direct))[0] is True
-
+def test_owner_connector_gate_accepts_staged_p2p_hybrid_connector():
     hybrid = _kv_transfer("MooncakeHybridConnector", {"backend": "mooncake"})
     assert owner_kv.validate_owner_connector(_config(kv_transfer=hybrid)) == (True, "")
-
-    multi = _kv_transfer(
-        "MultiConnector",
-        {
-            "connectors": [
-                {"kv_connector": "AscendStoreConnector", "kv_connector_extra_config": {}},
-                {"kv_connector": "MooncakeConnectorV1", "kv_connector_extra_config": {}},
-            ]
-        },
-    )
-    assert owner_kv.validate_owner_connector(_config(kv_transfer=multi)) == (True, "")
+    assert owner_kv.validate_owner_sharing(_config(kv_transfer=hybrid))[0] is True
 
     mixed = _kv_transfer(
         "MultiConnector",
@@ -116,12 +102,35 @@ def test_owner_connector_gate_accepts_staged_direct_p2p_connectors():
     assert owner_kv.validate_owner_connector(_config(kv_transfer=mixed)) == (True, "")
 
 
+def test_owner_connector_gate_rejects_unvalidated_mooncake_v1():
+    # The V1 hybrid-cache decode registration expects a 2 MiB-aligned KV
+    # tensor base and fails on the model's allocation before owner staging
+    # is engaged. A device run confirmed it cannot form a PD pair.
+    direct = _kv_transfer("MooncakeConnectorV1", {})
+    supported, reason = owner_kv.validate_owner_connector(_config(kv_transfer=direct))
+    assert supported is False
+    assert "not owner-aware" in reason
+    assert owner_kv.validate_owner_sharing(_config(kv_transfer=direct))[0] is False
+
+    multi = _kv_transfer(
+        "MultiConnector",
+        {
+            "connectors": [
+                {"kv_connector": "AscendStoreConnector", "kv_connector_extra_config": {}},
+                {"kv_connector": "MooncakeConnectorV1", "kv_connector_extra_config": {}},
+            ]
+        },
+    )
+    supported, reason = owner_kv.validate_owner_connector(_config(kv_transfer=multi))
+    assert supported is False
+    assert "not owner-aware" in reason
+
+
 def test_owner_connector_gate_rejects_layerwise_direct_p2p():
-    for name in ("MooncakeConnectorV1", "MooncakeHybridConnector"):
-        layerwise = _kv_transfer(name, {"use_layerwise": True})
-        supported, reason = owner_kv.validate_owner_connector(_config(kv_transfer=layerwise))
-        assert supported is False
-        assert "layerwise" in reason
+    layerwise = _kv_transfer("MooncakeHybridConnector", {"use_layerwise": True})
+    supported, reason = owner_kv.validate_owner_connector(_config(kv_transfer=layerwise))
+    assert supported is False
+    assert "layerwise" in reason
 
     # Options are not normalized across connector groups; a nested truthy
     # layerwise switch must also fail closed.
@@ -130,7 +139,7 @@ def test_owner_connector_gate_rejects_layerwise_direct_p2p():
         {
             "connectors": [
                 {
-                    "kv_connector": "MooncakeConnectorV1",
+                    "kv_connector": "MooncakeHybridConnector",
                     "kv_connector_extra_config": {"transfer": {"use_layerwise": True}},
                 }
             ]

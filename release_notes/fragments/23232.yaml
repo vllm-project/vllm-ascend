@@ -2,12 +2,14 @@ pr: 23232
 entries:
   - category: feature
     text: >-
-      Owner-sharded PCP prefill now accepts the MooncakeConnectorV1 and
-      MooncakeHybridConnector leaves of a MultiConnector KV transfer config.
-      The prefill engine stages complete logical KV blocks into a registered
-      buffer so the decode engine pulls from registered HBM instead of
-      peer-mapped owner pages. Layerwise transfer and other connectors still
-      fall back to the replicated cache. Owner sharing remains opt-in through
+      Owner-sharded PCP prefill now accepts the MooncakeHybridConnector leaf
+      of a MultiConnector KV transfer config. The prefill engine stages
+      complete logical KV blocks into a registered buffer so the decode engine
+      pulls from registered HBM instead of peer-mapped owner pages.
+      MooncakeConnectorV1 is not accepted: its hybrid-cache decode registration
+      requires a 2 MiB aligned KV tensor base that the model allocation does
+      not provide. Layerwise transfer and other connectors still fall back to
+      the replicated cache. Owner sharing remains opt-in through
       `additional_config.pcp_config`.
     model: deepseek-v4.1
     hardware: [A2]
