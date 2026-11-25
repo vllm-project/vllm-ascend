@@ -141,7 +141,7 @@ def draft_metrics(server) -> dict[str, float]:
     response = requests.get(server.url_for("metrics"), timeout=5)
     response.raise_for_status()
     names = ("vllm:spec_decode_num_drafts_total", "vllm:spec_decode_num_draft_tokens_total")
-    counters = {}
+    counters: dict[str, float] = {}
     for family in text_string_to_metric_families(response.text):
         for sample in family.samples:
             if sample.name in names:
@@ -259,6 +259,7 @@ def run_draft_hccl_weight_transfer(tmp_path, monkeypatch, packed: bool, enforce_
     ) as server:
         sync_client = WeightUpdateClient(server.url_root)
         assert first_draft_updated.draft_source is not None
+        assert second_draft_updated.draft_source is not None
         engine = create_hccl_trainer(sync_client, first_draft_updated.draft_source, packed, target_updated)
         graph_capture_started = False
         try:
