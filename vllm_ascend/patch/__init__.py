@@ -1664,5 +1664,5 @@
 # Different RoPE modules do not share results. Each model invocation creates a
 # new dictionary; MTP keeps its existing independent lookup per invocation.
 # The copied forward paths retain upstream PP, SP and auxiliary hidden states.
-# Related PR: local optimization; no upstream PR submitted yet.
+# Related PR: https://github.com/vllm-project/vllm-ascend/pull/23227
 # Future Plan: remove once upstream accepts forward-local rotary inputs.
