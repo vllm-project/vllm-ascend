@@ -36,9 +36,9 @@ def _check_native_dispatch(fake):
 
     ops = torch.ops._C_ascend
     for name, count in (
-        ("npu_quant_lightning_indexer_v2", 26),
+        ("npu_quant_lightning_indexer_v2", 27),
         ("npu_quant_lightning_indexer_v2_metadata", 23),
-        ("npu_quant_lightning_indexer_v3", 31),
+        ("npu_quant_lightning_indexer_v3", 32),
         ("npu_quant_sparse_lightning_indexer_metadata", 18),
         ("npu_quant_lightning_indexer_local_candidates", 11),
     ):
