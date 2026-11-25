@@ -53,7 +53,7 @@ def _build_meta(convs, ssms, device, conv_dim_first):
     )
 
 
-def _reference(convs, ssms, block_table, src_col, dst_col, bias, conv_dim_first, request_slots):
+def _reference(convs, ssms, block_table, src_col, dst_col, bias, conv_dim_first, request_slots, zero_bias=False):
     conv_before, ssm_before = [state.cpu() for state in convs], [state.cpu() for state in ssms]
     conv_ref, ssm_ref = [state.clone() for state in conv_before], [state.clone() for state in ssm_before]
     for req_idx in request_slots:
@@ -63,7 +63,11 @@ def _reference(convs, ssms, block_table, src_col, dst_col, bias, conv_dim_first,
         if src < 0 or src == dst:
             continue
         src_block, dst_block = int(block_table[req_idx, src]), int(block_table[req_idx, dst])
-        temporal_block = int(block_table[req_idx, src + token_bias])
+        # ZERO_TEMPORAL_TOKEN_BIAS zeroes the bias only for pure SSM states
+        # (conv_width == 0): their temporal source column becomes src itself,
+        # while conv states keep the token bias for the in-block offset.
+        ssm_bias = 0 if zero_bias else token_bias
+        temporal_block = int(block_table[req_idx, src + ssm_bias])
         for layer in range(NUM_LAYERS):
             if conv_dim_first:
                 conv_ref[layer][dst_block, :, : CONV_WIDTH - token_bias] = conv_before[layer][src_block, :, token_bias:]
@@ -89,8 +93,17 @@ def _reference(convs, ssms, block_table, src_col, dst_col, bias, conv_dim_first,
         pytest.param(True, (5, -1, 2, -1), 4, id="filtered-padding"),
     ],
 )
+@pytest.mark.parametrize(
+    "zero_bias",
+    [
+        # False passes the kwarg explicitly, like run_fused_precopy does.
+        pytest.param(False, id="bias-live"),
+        # Exercises the kernel's ZERO_TEMPORAL_TOKEN_BIAS branch.
+        pytest.param(True, id="ssm-bias-zeroed"),
+    ],
+)
 @pytest.mark.skipif(not torch.npu.is_available(), reason="NPU required")
-def test_precopy_matches_reference(conv_dim_first, has_idx_mapping, request_slots, temporal_tiles):
+def test_precopy_matches_reference(conv_dim_first, has_idx_mapping, request_slots, temporal_tiles, zero_bias):
     device = torch.device("npu:0")
     torch.manual_seed(0)
     num_reqs = len(request_slots)
@@ -103,7 +116,15 @@ def test_precopy_matches_reference(conv_dim_first, has_idx_mapping, request_slot
     bias = torch.tensor([0, 0, 1, 2, 3, 1, 2, 3], dtype=torch.int32, device=device)
     convs, ssms = _build_states(num_blocks, device, conv_dim_first)
     conv_ref, ssm_ref = _reference(
-        convs, ssms, block_table.cpu(), src_col.cpu(), dst_col.cpu(), bias.cpu(), conv_dim_first, request_slots
+        convs,
+        ssms,
+        block_table.cpu(),
+        src_col.cpu(),
+        dst_col.cpu(),
+        bias.cpu(),
+        conv_dim_first,
+        request_slots,
+        zero_bias,
     )
     base, block_stride, elem_size, inner_size, conv_width, group, row_count, row_stride = _build_meta(
         convs, ssms, device, conv_dim_first
@@ -130,6 +151,7 @@ def test_precopy_matches_reference(conv_dim_first, has_idx_mapping, request_slot
         CONV_STATE_DIM_FIRST=conv_dim_first,
         HAS_IDX_MAPPING=has_idx_mapping,
         TEMPORAL_TILES=temporal_tiles,
+        ZERO_TEMPORAL_TOKEN_BIAS=zero_bias,
     )
     torch.accelerator.synchronize()
     for layer in range(NUM_LAYERS):
