@@ -399,6 +399,7 @@ def load_builder():
         return ("prefill-plan",)
 
     namespace: dict[str, Any] = dict(
+        Any=Any,
         upstream_qsa=SimpleNamespace(Qwen4ExpQSAMetadataBuilder=Base),
         AttentionCGSupport=SimpleNamespace(UNIFORM_BATCH="uniform"),
         CommonAttentionMetadata=object,
