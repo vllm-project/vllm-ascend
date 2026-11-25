@@ -796,7 +796,7 @@ For 950DT products, basic PD, the image-and-text 10K case, and the long-context 
     export HCCL_SOCKET_IFNAME="${nic_name}"
     export VLLM_VERSION=0.32.0
     export VLLM_RPC_TIMEOUT=3600000
-    export HCCL_EXEC_TIMEOUT=204
+    export HCCL_EXEC_TIMEOUT=3600
     export HCCL_CONNECT_TIMEOUT=120
     export VLLM_ASCEND_ENABLE_MLAPO=1
     export VLLM_USE_V1=1
@@ -862,7 +862,7 @@ For 950DT products, basic PD, the image-and-text 10K case, and the long-context 
     export HCCL_SOCKET_IFNAME="${nic_name}"
     export VLLM_VERSION=0.32.0
     export VLLM_RPC_TIMEOUT=3600000
-    export HCCL_EXEC_TIMEOUT=204
+    export HCCL_EXEC_TIMEOUT=3600
     export HCCL_CONNECT_TIMEOUT=120
     export VLLM_ASCEND_ENABLE_MLAPO=1
     export VLLM_USE_V1=1

@@ -164,7 +164,7 @@ The quantized model `DeepSeek-V4-Pro-w4a8-mtp` requires at least 2 Atlas 800I A3
     export TASK_QUEUE_ENABLE=1
 
     export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=3000
-    export HCCL_EXEC_TIMEOUT=2040
+    export HCCL_EXEC_TIMEOUT=3600
     export HCCL_CONNECT_TIMEOUT=1200
 
     export VLLM_USE_V2_MODEL_RUNNER=1
@@ -236,7 +236,7 @@ The quantized model `DeepSeek-V4-Pro-w4a8-mtp` requires at least 2 Atlas 800I A3
     export TASK_QUEUE_ENABLE=1
 
     export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=3000
-    export HCCL_EXEC_TIMEOUT=2040
+    export HCCL_EXEC_TIMEOUT=3600
     export HCCL_CONNECT_TIMEOUT=1200
 
     export VLLM_USE_V2_MODEL_RUNNER=1
@@ -304,7 +304,7 @@ The quantized model `DeepSeek-V4-Pro-w4a8-mtp` requires at least 2 Atlas 800I A3
     export HCCL_OP_EXPANSION_MODE="AIV"
     export HCCL_BUFFSIZE=1024
     export HCCL_CONNECT_TIMEOUT=1200
-    export HCCL_EXEC_TIMEOUT=2040
+    export HCCL_EXEC_TIMEOUT=3600
     export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=3000
     export ASCEND_CONNECT_TIMEOUT=10000
     export ASCEND_TRANSFER_TIMEOUT=10000
@@ -366,7 +366,7 @@ The quantized model `DeepSeek-V4-Pro-w4a8-mtp` requires at least 2 Atlas 800I A3
     export HCCL_OP_EXPANSION_MODE="AIV"
     export HCCL_BUFFSIZE=1024
     export HCCL_CONNECT_TIMEOUT=1200
-    export HCCL_EXEC_TIMEOUT=2040
+    export HCCL_EXEC_TIMEOUT=3600
     export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=3000
     export ASCEND_CONNECT_TIMEOUT=10000
     export ASCEND_TRANSFER_TIMEOUT=10000
@@ -668,7 +668,7 @@ Select the tab that matches the deployment hardware.
             export TASK_QUEUE_ENABLE=1
 
             export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=3000
-            export HCCL_EXEC_TIMEOUT=2040
+            export HCCL_EXEC_TIMEOUT=3600
             export HCCL_CONNECT_TIMEOUT=1200
 
             export VLLM_USE_V2_MODEL_RUNNER=1
@@ -742,7 +742,7 @@ Select the tab that matches the deployment hardware.
         export TASK_QUEUE_ENABLE=1
 
         export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=3000
-        export HCCL_EXEC_TIMEOUT=2040
+        export HCCL_EXEC_TIMEOUT=3600
         export HCCL_CONNECT_TIMEOUT=1200
 
         export VLLM_USE_V2_MODEL_RUNNER=1
@@ -897,7 +897,7 @@ Select the tab that matches the deployment hardware.
             export HCCL_OP_EXPANSION_MODE="AIV"
             export HCCL_BUFFSIZE=1024
             export HCCL_CONNECT_TIMEOUT=1200
-            export HCCL_EXEC_TIMEOUT=2040
+            export HCCL_EXEC_TIMEOUT=3600
             export VLLM_RPC_TIMEOUT=3600000
             export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=3000
             export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
@@ -975,7 +975,7 @@ Select the tab that matches the deployment hardware.
         export HCCL_OP_EXPANSION_MODE="AIV"
         export HCCL_BUFFSIZE=1800
         export HCCL_CONNECT_TIMEOUT=1200
-        export HCCL_EXEC_TIMEOUT=2040
+        export HCCL_EXEC_TIMEOUT=3600
         export VLLM_RPC_TIMEOUT=3600000
         export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=3000
         export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
@@ -1086,7 +1086,7 @@ Select the tab that matches the deployment hardware.
 
             export VLLM_RPC_TIMEOUT=3600000
             export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=30000
-            export HCCL_EXEC_TIMEOUT=204
+            export HCCL_EXEC_TIMEOUT=3600
             export HCCL_CONNECT_TIMEOUT=6000
 
             export HCCL_IF_IP=$local_ip
@@ -1160,7 +1160,7 @@ Select the tab that matches the deployment hardware.
 
             export VLLM_RPC_TIMEOUT=3600000
             export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=30000
-            export HCCL_EXEC_TIMEOUT=204
+            export HCCL_EXEC_TIMEOUT=3600
             export HCCL_CONNECT_TIMEOUT=1200
 
             export HCCL_IF_IP=$local_ip
@@ -1529,7 +1529,7 @@ Select the tab that matches the deployment hardware.
         export TASK_QUEUE_ENABLE=1
 
         export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=3000
-        export HCCL_EXEC_TIMEOUT=2040
+        export HCCL_EXEC_TIMEOUT=3600
         export HCCL_CONNECT_TIMEOUT=1200
 
         export VLLM_USE_V2_MODEL_RUNNER=1
@@ -1630,7 +1630,7 @@ Select the tab that matches the deployment hardware.
     export TASK_QUEUE_ENABLE=1
 
     export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=3000
-    export HCCL_EXEC_TIMEOUT=2040
+    export HCCL_EXEC_TIMEOUT=3600
     export HCCL_CONNECT_TIMEOUT=1200
 
     export VLLM_USE_V2_MODEL_RUNNER=1
@@ -1943,7 +1943,7 @@ Select the tab that matches the deployment hardware.
         export HCCL_OP_EXPANSION_MODE="AIV"
         export HCCL_BUFFSIZE=1024
         export HCCL_CONNECT_TIMEOUT=1200
-        export HCCL_EXEC_TIMEOUT=2040
+        export HCCL_EXEC_TIMEOUT=3600
         export VLLM_RPC_TIMEOUT=3600000
         export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=3000
         export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
@@ -2078,7 +2078,7 @@ Select the tab that matches the deployment hardware.
     export HCCL_OP_EXPANSION_MODE="AIV"
     export HCCL_BUFFSIZE=2200
     export HCCL_CONNECT_TIMEOUT=1200
-    export HCCL_EXEC_TIMEOUT=2040
+    export HCCL_EXEC_TIMEOUT=3600
     export VLLM_RPC_TIMEOUT=3600000
     export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=3000
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
@@ -2259,7 +2259,7 @@ Select the tab that matches the deployment hardware.
     export HCCL_SOCKET_IFNAME=$nic_name
     export VLLM_RPC_TIMEOUT=3600000
     export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=30000
-    export HCCL_EXEC_TIMEOUT=204
+    export HCCL_EXEC_TIMEOUT=3600
     export HCCL_INTRA_ROCE_ENABLE=1
     export PYTHONHASHSEED=0
     export ASCEND_CONNECT_TIMEOUT=16000
@@ -2374,7 +2374,7 @@ Select the tab that matches the deployment hardware.
     export HCCL_OP_EXPANSION_MODE="AIV"
     export VLLM_RPC_TIMEOUT=3600000
     export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=30000
-    export HCCL_EXEC_TIMEOUT=204
+    export HCCL_EXEC_TIMEOUT=3600
     export HCCL_INTRA_ROCE_ENABLE=1
     export PYTHONHASHSEED=0
     export ASCEND_CONNECT_TIMEOUT=16000
