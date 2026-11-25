@@ -2,6 +2,11 @@
 """Single-launch BF16 KDA verify for six-token GLM-5.3 requests on Ascend."""
 import tilelang.ascend.language as T
 
+if __package__:
+    from .optimized_replay.tilelang_whole_kda import WholeKDA as _OptimizedWholeKDA
+else:
+    from optimized_replay.tilelang_whole_kda import WholeKDA as _OptimizedWholeKDA
+
 
 def whole_program(c, page_layout):
     B, L, I, H, D = T.dynamic("B"), 6, 4096, 64, 128
@@ -271,71 +276,27 @@ def whole_program(c, page_layout):
                 T.copy(accum, Out[row:row + M, col:col + N])
     return main
 
-class WholeKDA:
-    """Bind BF16 verify weights and paged ReplaySSM storage for a single layer.
 
-    metadata contains conv page IDs, checkpoint page IDs, and accepted lengths.
-    Prepare metadata with the scheduler before calling the layer.
-    """
+class _Workspace(tuple):
+    """Expose the three public buffers and retain the two gate buffers with them."""
+
+    def __new__(cls, buffers):
+        workspace = super().__new__(cls, buffers[:3])
+        workspace._optimized_buffers = buffers
+        return workspace
+
+
+class WholeKDA:
+    """Run the optimized QKV-to-O kernel with the original three-buffer interface."""
 
     def __init__(self, layer):
-        import tilelang
-        import torch
-        import torch_npu
-        from types import SimpleNamespace
-
-        conv, state, corr, kg = layer.kv_cache
-        if layer._conv_state_dim_first:
-            conv = conv.transpose(-1, -2)
-        if conv.stride(2) != 1 or any(not t[0].is_contiguous() for t in (state, corr, kg)):
-            raise ValueError("Unsupported ReplaySSM page layout")
-        strides = (conv.stride(0), conv.stride(1), state.stride(0), corr.stride(0), kg.stride(0))
-        widths = (128, 128, 128, 128, 256)
-        if any(stride % width for stride, width in zip(strides, widths)):
-            raise ValueError("Cache strides must be multiples of the corresponding head width")
-        layout = tuple(stride // width for stride, width in zip(strides, widths))
-        config = SimpleNamespace(eps=layer.o_norm.eps, lower_bound=layer.kda_lower_bound)
-        self.kernel = tilelang.compile(whole_program(config, layout), target="ascend", execution_backend="cython")
-
-        def flat(t, width):
-            size = 1 + sum((n - 1) * s for n, s in zip(t.shape, t.stride()))
-            if size % width:
-                raise ValueError("Cache ends in an incomplete head row")
-            return t.as_strided((size // width, width), (width, 1))
-
-        def weight(module):
-            return torch_npu.npu_format_cast(module.weight, 2).contiguous()
-
-        self.win = weight(layer.in_proj_qkvbfg_a)
-        self.wo = weight(layer.o_proj)
-        self.wf = weight(layer.f_b_proj).reshape(32, 256, 128)
-        self.wg = weight(layer.g_b_proj).reshape(32, 256, 128)
-        self.cw = torch.stack(
-            [m.weight.reshape(64, 128, 4) for m in (layer.q_conv1d, layer.k_conv1d, layer.v_conv1d)], dim=1
-        ).permute(0, 1, 3, 2).bfloat16().contiguous()
-        self.a = layer.A_log.reshape(64).float().contiguous()
-        self.dt = layer.dt_bias.reshape(64, 128).float().contiguous()
-        self.nw = layer.o_norm.weight.reshape(128).bfloat16().contiguous()
-        self.conv, self.state, self.corr, self.kg = [
-            flat(t, w) for t, w in zip((conv, state, corr, kg), (128, 128, 128, 256))
-        ]
+        self._optimized = _OptimizedWholeKDA(layer)
 
     @staticmethod
     def allocate(x):
-        rows = x.shape[0]
-        padded = (rows + 63) // 64 * 64
-        return x.new_empty((padded, 24896)), x.new_empty((rows, 8192)), x.new_empty((padded, 4096))
+        return _Workspace(_OptimizedWholeKDA.allocate(x))
 
     def __call__(self, x, metadata, workspace=None):
-        import torch
-        rows = x.shape[0]
-        if x.shape != (rows, 4096) or x.dtype != torch.bfloat16 or not x.is_contiguous():
-            raise ValueError("Expected contiguous BF16 hidden states with width 4096")
-        if rows == 0 or rows % 6 or metadata.shape != (3, rows // 6):
-            raise ValueError("Expected six tokens per request and three metadata fields")
-        if metadata.dtype != torch.int32 or not metadata.is_contiguous():
-            raise ValueError("Expected contiguous int32 metadata")
-        p, y, out = self.allocate(x) if workspace is None else workspace
-        self.kernel(x, self.win, self.wo, out, p, self.wf, self.wg, self.cw, self.conv,
-                    self.state, metadata, self.a, self.dt, self.nw, y, self.corr, self.kg)
-        return out[:rows]
+        if isinstance(workspace, _Workspace):
+            workspace = workspace._optimized_buffers
+        return self._optimized(x, metadata, workspace)

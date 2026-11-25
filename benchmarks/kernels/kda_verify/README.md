@@ -1,10 +1,25 @@
 # GLM5Next KDA verify benchmark
 
-## Single-kernel QKV-to-O replay
+### Optimized single-launch TileLang QKV-to-O replay
+
+Each request verifies six tokens with ReplaySSM. Every optimized batch from 1 to 50 recorded one device compute task per invocation, with 11 device-time samples per batch on each board. The baseline is the previously published multi-kernel TileLang path.
+
+| Device | Batches at or below the prior multi-kernel time | Batch 10, old → new (µs) | Batch 50, old → new (µs) |
+| --- | --- | --- | --- |
+| 850E | 50/50 | 141.556 → 121.274 | 387.144 → 376.788 |
+| 850 | 50/50 | 275.561 → 242.507 | 560.738 → 555.678 |
+
+An independent paired check on Atlas 850 at batch 49 measured 554.682 → 550.206 µs with fixed weight addresses and 553.285 → 548.454 µs when rotating four identical copies at different addresses. Both medians compare the prior multi-kernel implementation with the optimized single kernel. Each condition included 20 samples per implementation, with each execution order used ten times. [Paired device samples](optimized_replay/atlas-850-b49-paired-device-times.json)
+
+[Optimized kernel and reproduction instructions](optimized_replay/) · [All 100 comparisons](optimized_replay/mtp5-optimized-whole-kda-b1-50.csv)
+
+## First single-kernel QKV-to-O replay
+
+The timings below were captured with the first single-kernel implementation. To reproduce those measurements, use its pinned benchmark revision. [Benchmark at 61bc608](https://github.com/Biuapha/vllm-ascend/tree/61bc608d3bbdc2602ff520cb7574098c10fad4cb/benchmarks/kernels/kda_verify)
 
 For six-token BF16 verification with 64 heads of width 128 and a hidden size of 4096, `WholeKDA` runs the input projection, both gate projections, four-tap convolution, ReplaySSM recurrence, gated RMSNorm and output projection in one TileLang mixed kernel. The entry point accepts hidden states and three rows of int32 metadata containing convolution page IDs, checkpoint page IDs and accepted token counts. It writes convolution history, correction records and packed KG records. The checkpoint is read-only. The measured path uses prepacked weights and device workspaces for the projected and normalized intermediates.
 
-With a captured replay fixture, run `python verify_whole_kda.py --trace trace.pt --out checked.json --batches 1,10,50 --stress 4`. For use from a caller, construct `fused = WholeKDA(layer)` after binding the paged cache, then call `out = fused(hidden_states, metadata)`. Each verification call dispatches one device kernel. The default serving path and the earlier middle-kernel benchmark are separately available.
+The current public `WholeKDA(layer)` entry point uses the optimized kernel reported above. To verify the current code with a captured replay fixture, run `python verify_whole_kda.py --trace trace.pt --out checked.json --batches 1,10,50 --stress 4`. For use from a caller, construct `fused = WholeKDA(layer)` after binding the paged cache, then call `out = fused(hidden_states, metadata)`. Each verification call dispatches one device kernel. The default serving path and the earlier middle-kernel benchmark are separately available.
 
 [Device timing and numerical checks for batches 1–50](mtp5-whole-kda-device-b1-50.csv) · [Per-invocation timing samples](whole-kda-device-evidence.json)
 
