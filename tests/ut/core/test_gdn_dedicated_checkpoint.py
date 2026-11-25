@@ -1,9 +1,20 @@
 # SPDX-License-Identifier: Apache-2.0
 
+from copy import deepcopy
 from types import SimpleNamespace
 from unittest.mock import Mock
 
 import pytest
+import torch
+from vllm.sampling_params import SamplingParams
+from vllm.utils.hashing import sha256
+from vllm.v1.core.kv_cache_manager import KVCacheManager
+from vllm.v1.core.kv_cache_utils import get_request_block_hasher, init_none_hash
+from vllm.v1.core.sched.output import SchedulerOutput
+from vllm.v1.core.single_type_kv_cache_manager import register_all_kvcache_specs
+from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheConfig, KVCacheGroupSpec, MambaSpec
+from vllm.v1.outputs import ModelRunnerOutput
+from vllm.v1.request import Request
 
 from vllm_ascend.core.gdn_checkpoint_policy import GDNCheckpointPolicy
 from vllm_ascend.core.gdn_dedicated_checkpoint import (
@@ -11,7 +22,9 @@ from vllm_ascend.core.gdn_dedicated_checkpoint import (
     GDNCheckpointAcknowledgement,
     confirmed_writes,
 )
+from vllm_ascend.core.kv_cache_interface import register_ascend_kv_cache_specs
 from vllm_ascend.patch.platform import patch_mamba_block_aligned_split as split_patch
+from vllm_ascend.patch.platform.patch_mamba_manager import AscendMambaManager
 
 
 def managers():
@@ -127,3 +140,94 @@ def test_worker_requires_all_layers_in_every_group_to_write():
     assert confirmed_writes(writes, metadata, groups) == {}
     group_a.layers.add("layer1")
     assert confirmed_writes(writes, metadata, groups) == writes
+
+
+def test_real_hybrid_cache_publishes_only_the_acknowledged_branch():
+    register_all_kvcache_specs(None)
+    register_ascend_kv_cache_specs()
+    init_none_hash(sha256)
+    hasher = get_request_block_hasher(128, sha256, num_hash_lookahead_tokens=1)
+    full_spec = FullAttentionSpec(block_size=2048, num_kv_heads=1, head_size=8, dtype=torch.bfloat16)
+    mamba_spec = MambaSpec(
+        block_size=2048,
+        shapes=((1,),),
+        dtypes=(torch.float32,),
+        mamba_cache_mode="align",
+        num_speculative_blocks=3,
+        num_prefill_checkpoint_blocks=1,
+        prefill_checkpoint_alignment=64,
+    )
+    cache = KVCacheManager(
+        KVCacheConfig(
+            num_blocks=128,
+            kv_cache_tensors=[],
+            kv_cache_groups=[KVCacheGroupSpec(["full"], full_spec)]
+            + [KVCacheGroupSpec([f"gdn{i}"], mamba_spec) for i in range(3)],
+        ),
+        max_model_len=8192,
+        scheduler_block_size=2048,
+        hash_block_size=128,
+        num_hash_lookahead_tokens=1,
+    )
+    all_managers = cache.coordinator.single_type_managers
+    gdn_managers = tuple(all_managers[1:])
+    assert all(isinstance(manager, AscendMambaManager) for manager in gdn_managers)
+    state = DedicatedGDNCheckpoints(gdn_managers)
+    policy = GDNCheckpointPolicy(8192, True, False)
+    for manager in gdn_managers:
+        manager.gdn_checkpoint_policy = policy
+    scheduler = SimpleNamespace(
+        _ascend_dedicated_checkpoints=state,
+        _ascend_gdn_checkpoint_policy=policy,
+        kv_cache_manager=cache,
+        cache_config=SimpleNamespace(block_size=2048),
+        hash_block_size=128,
+        use_eagle_block_drop=False,
+        num_hash_lookahead_tokens=1,
+        num_lookahead_tokens=1,
+    )
+    prefix = [11] * 2275
+
+    def request(name, ids):
+        return Request(name, ids, SamplingParams(max_tokens=32), None, block_hasher=hasher)
+
+    seed = request("seed", prefix)
+    assert cache.allocate_slots(seed, 2048) is not None
+    cache.free(seed)
+    cache.coordinator.new_step_starts()
+
+    prompts = [prefix + [token] * 1225 for token in (101, 202)]
+    live = {name: request(name, prompt) for name, prompt in zip(("a", "b"), prompts, strict=True)}
+    step = SchedulerOutput.make_empty()
+    for req in live.values():
+        cached, hit, req.shared_prefix_boundary = cache.get_computed_blocks(req)
+        assert hit == 2048
+        count = split_patch._maybe_use_dedicated_checkpoint(scheduler, req, 1452, hit, 0, 1408)
+        assert count == 1452
+        assert cache.allocate_slots(req, count, hit, cached, num_lookahead_tokens=1) is not None
+        step.num_scheduled_tokens[req.request_id] = count
+    state.dispatch(live, step)
+    transferred = deepcopy(step).gdn_dedicated_checkpoints
+    ids = {page_id for writes in transferred.values() for _, _, page_id in writes}
+    assert len(ids) == 6
+    assert all(
+        page_id not in {block.block_id for block in manager.req_to_blocks[req_id]}
+        for manager in gdn_managers
+        for req_id in live
+        for page_id in ids
+    )
+    assert [cache.get_computed_blocks(request(f"before-{i}", prompt))[1] for i, prompt in enumerate(prompts)] == [
+        2048,
+        2048,
+    ]
+
+    output = ModelRunnerOutput(req_ids=list(live))
+    # Only one branch receives an acknowledgement for the full set of writes.
+    output.gdn_dedicated_checkpoint_writes = {"a": transferred["a"]}
+    state.publish(live, step, deepcopy(output))
+    assert all(cache.block_pool.blocks[page_id].ref_cnt == 0 for page_id in ids)
+    cache.coordinator.new_step_starts()
+    assert [cache.get_computed_blocks(request(f"after-{i}", prompt))[1] for i, prompt in enumerate(prompts)] == [
+        3456,
+        2048,
+    ]
