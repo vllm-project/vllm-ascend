@@ -469,7 +469,7 @@ def test_pcp_prolog_gathers_local_scratch_before_resident_write(monkeypatch, cap
     assert impl.hisparse_cache.submit_layer_mirror.call_count == int(prefill and not capture)
 
 
-@pytest.mark.parametrize("block_stride", [128, 192])
+@pytest.mark.parametrize("block_stride", [128, 256, 192])
 def test_c8_resident_prefill_handles_hma_stride_and_pcp_padding(monkeypatch, block_stride):
     from vllm.config.compilation import CUDAGraphMode
 
@@ -485,9 +485,10 @@ def test_c8_resident_prefill_handles_hma_stride_and_pcp_padding(monkeypatch, blo
     cache.draft_layer = False
     cache.block_table = torch.tensor([[3, 1], [2, 0]], dtype=torch.int32)
     cache.runtime.request_state_indices = torch.tensor([0, 1], dtype=torch.int32)
+    page_stride = block_stride // 128
     cache.view = NS(
         cache=torch.zeros(4, block_stride, C8_ROW_BYTES, dtype=torch.int8),
-        attention_cache=torch.zeros(6, 128, C8_ROW_BYTES, dtype=torch.int8),
+        attention_cache=torch.zeros(max(6, 4 * page_stride), 128, C8_ROW_BYTES, dtype=torch.int8),
         block_size=128,
         attention_block_stride=block_stride,
     )
@@ -500,7 +501,6 @@ def test_c8_resident_prefill_handles_hma_stride_and_pcp_padding(monkeypatch, blo
         num_reqs=2,
         num_actual_tokens=3,
         hisparse_for_capture=False,
-        req_id_per_token=torch.tensor([0, 1, 1, 0], dtype=torch.int32),
     )
     query = torch.zeros(4, 1, 8)
     query_rope = torch.zeros(4, 1, 4)
@@ -516,13 +516,13 @@ def test_c8_resident_prefill_handles_hma_stride_and_pcp_padding(monkeypatch, blo
     monkeypatch.setattr(AscendSFAImpl, "_execute_sparse_flash_attention_process", pa_bsnd)
 
     out = impl._try_c8_resident_prefill(query, query_rope, logical_topk, meta, query_ends, key_lengths)
-    if block_stride == 128:
+    if block_stride % 128 == 0:
         assert out == "pa-bsnd-out"
         q, q_rope, _, topk, _, q_ends, k_lens = pa_bsnd.call_args.args
         assert (q.shape, q_rope.shape, topk.shape) == ((2, 1, 8), (2, 1, 4), (2, 1, 128))
         assert q_ends.tolist() == [2]
         assert k_lens.tolist() == [20]
-        assert pa_bsnd.call_args.kwargs["block_table"].tolist() == [[2, 0]]
+        assert pa_bsnd.call_args.kwargs["block_table"].tolist() == [[2 * page_stride, 0]]
     else:
         assert out is None
         pa_bsnd.assert_not_called()
