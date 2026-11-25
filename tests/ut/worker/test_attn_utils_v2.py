@@ -27,7 +27,7 @@ from vllm.v1.worker.gpu import attn_utils as upstream_attn_utils
 from vllm.v1.worker.gpu import model_runner as upstream_model_runner
 from vllm.v1.worker.utils import AttentionGroup
 
-from vllm_ascend.attention import dsa_attn_kv_plan, dsa_v1, sfa_hisparse
+from vllm_ascend.attention import dsa_attn_kv_plan, dsa_v1
 from vllm_ascend.attention import utils as attention_utils
 from vllm_ascend.attention.attention_c8_mxfp import mxfp_cache_spec, mxfp_paged_cache_views
 from vllm_ascend.attention.attention_v1 import (
@@ -60,7 +60,6 @@ from vllm_ascend.device.hardware_profile import get_hardware_profile
 from vllm_ascend.models.deepseek_v4 import compressor as deepseek_v4_compressor
 from vllm_ascend.models.deepseek_v4 import indexer as deepseek_v4_indexer
 from vllm_ascend.models.deepseek_v4 import model as deepseek_v4_model
-from vllm_ascend.models.glm5next.kda import Glm5NextGDNHostMetadataBuilder
 from vllm_ascend.worker.utils import prepare_ascend_kernel_block_sizes
 from vllm_ascend.worker.v2 import attn_utils
 from vllm_ascend.worker.v2 import model_runner as v2_model_runner
@@ -2303,6 +2302,10 @@ def test_dsa_builder_receives_full_graph_mode(capture, full_graph):
 
 @pytest.mark.parametrize("pcp", [False, True])
 def test_glm_flash_q6_uses_grouped_gdn_only_without_pcp(monkeypatch, pcp):
+    pytest.importorskip("vllm.v1.hisparse.backend")
+    from vllm_ascend.attention import sfa_hisparse
+    from vllm_ascend.models.glm5next.kda import Glm5NextGDNHostMetadataBuilder
+
     monkeypatch.setattr(sfa_hisparse, "supports_hisparse_resident_decode_graph", lambda _: True)
     builder = Glm5NextGDNHostMetadataBuilder.__new__(Glm5NextGDNHostMetadataBuilder)
     builder.vllm_config = SimpleNamespace()
@@ -2313,7 +2316,7 @@ def test_glm_flash_q6_uses_grouped_gdn_only_without_pcp(monkeypatch, pcp):
     builder.build_grouped_spec_gdn = Mock(return_value=object())
     builder.build = Mock(return_value=object())
     group = _metadata_test_group(["layer.0"], builder)
-    pcp_context = SimpleNamespace(for_attention_group=lambda _: pcp_context) if pcp else None
+    pcp_context: SimpleNamespace | None = SimpleNamespace(for_attention_group=lambda _: pcp_context) if pcp else None
     query_start = torch.tensor([0, 6], dtype=torch.int32)
     model_metadata = SimpleNamespace(
         get_extra_common_attn_kwargs=lambda *_: {},

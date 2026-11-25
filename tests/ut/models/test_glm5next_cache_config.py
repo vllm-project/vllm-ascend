@@ -158,16 +158,17 @@ def test_hisparse_caps_kda_layers_per_physical_group_at_six():
 
 
 @pytest.mark.parametrize(
-    ("padded_page_bytes", "mixed_indexers", "expected_error"),
+    ("padded_page_bytes", "mixed_indexers", "core_supported", "expected_error"),
     [
-        (608256, False, None),
-        (None, False, "requires a recurrent page of whole packed KV rows"),
-        (608257, False, "requires a recurrent page of whole packed KV rows"),
-        (608256, True, "requires the same packed indexer format in all layers"),
+        (608256, False, True, None),
+        (None, False, True, "requires a recurrent page of whole packed KV rows"),
+        (608257, False, True, "requires a recurrent page of whole packed KV rows"),
+        (608256, True, True, "requires the same packed indexer format in all layers"),
+        (608256, False, False, "verified vLLM main pin"),
     ],
 )
 def test_fp8_hisparse_kpool_validates_native_manager_page(
-    monkeypatch, padded_page_bytes, mixed_indexers, expected_error
+    monkeypatch, padded_page_bytes, mixed_indexers, core_supported, expected_error
 ):
     from vllm.v1.kv_cache_interface import KVCacheGroupRole, SparseCacheRole, UniformTypeKVCacheSpecs
 
@@ -195,6 +196,7 @@ def test_fp8_hisparse_kpool_validates_native_manager_page(
         specs[native_name] = replace(kpool, tokens_per_state=1)
         native = UniformTypeKVCacheSpecs.from_specs({native_name: specs[native_name]})
         groups.append(KVCacheGroupSpec([native_name], native, role=KVCacheGroupRole.HISPARSE_INDEXER))
+    monkeypatch.setattr(hisparse, "supports_hybrid_hisparse_core", lambda: core_supported)
     monkeypatch.setattr(builder, "_upstream_get_kv_cache_groups", lambda *_: groups)
     config = make_config()
     config.attention_config = SimpleNamespace(hisparse_config=object(), indexer_kv_dtype="fp8")

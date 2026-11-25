@@ -25,6 +25,7 @@ from vllm.v1.kv_cache_interface import (
 )
 
 from vllm_ascend.core.kv_cache_interface import AscendSFAIndexerCacheSpec
+from vllm_ascend.hisparse import require_hybrid_hisparse_core
 
 
 def _is_native_indexer(spec: KVCacheSpec) -> bool:
@@ -65,6 +66,7 @@ def get_hybrid_sfa_hisparse_groups(
     if not has_hybrid_sfa_hisparse_specs(specs):
         return None
 
+    require_hybrid_hisparse_core()
     if vllm_config.speculative_config is not None or any(
         spec.is_draft or (isinstance(spec, MambaSpec) and spec.num_speculative_blocks) for spec in specs
     ):

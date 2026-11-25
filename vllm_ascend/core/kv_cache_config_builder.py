@@ -49,7 +49,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.layerwis
     LAYERWISE_REUSE_BACKING_BYTES,
     get_layerwise_reuse_backing_bytes,
 )
-from vllm_ascend.hisparse import supports_pooled_hisparse, uses_pooled_hisparse
+from vllm_ascend.hisparse import require_hybrid_hisparse_core, supports_pooled_hisparse, uses_pooled_hisparse
 from vllm_ascend.hisparse.layout import (
     get_hybrid_sfa_hisparse_groups,
     has_hybrid_sfa_hisparse_groups,
@@ -162,6 +162,7 @@ class AscendKVCacheConfigBuilder(DefaultKVCacheConfigBuilder):
         then vLLM's generic grouping.
         """
         if uses_pooled_hisparse(vllm_config):
+            require_hybrid_hisparse_core()
             if not supports_pooled_hisparse(vllm_config):
                 raise ValueError(
                     "Pooled HiSparse requires A5 FP8 NoPE main KV, FP8 indexer KV, "

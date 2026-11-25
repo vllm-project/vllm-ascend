@@ -98,7 +98,12 @@ from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_man
     allocate_kv_cache_tensors_for_sparse_kv_offload,
     reshape_kv_cache_tensors_for_sparse_kv_offload,
 )
-from vllm_ascend.hisparse import HISPARSE_GROUPED_QUERY_LEN, supports_pooled_hisparse, uses_pooled_hisparse
+from vllm_ascend.hisparse import (
+    HISPARSE_GROUPED_QUERY_LEN,
+    require_hybrid_hisparse_core,
+    supports_pooled_hisparse,
+    uses_pooled_hisparse,
+)
 from vllm_ascend.hisparse.layout import has_hybrid_sfa_hisparse_specs
 from vllm_ascend.models.glm5next.cache_views import view_compressed_indexer_cache, view_kpool_tail_cache
 from vllm_ascend.models.qwen4_exp.cache_config import (
@@ -198,11 +203,13 @@ def get_kv_cache_spec(vllm_config: VllmConfig) -> dict[str, KVCacheSpec]:
     mamba_specs: dict[str, MambaSpec] = {}
     hisparse_enabled = vllm_config.attention_config.hisparse_config is not None
     pooled_hisparse = uses_pooled_hisparse(vllm_config)
-    if pooled_hisparse and not supports_pooled_hisparse(vllm_config):
-        raise ValueError(
-            "Pooled HiSparse requires A5 FP8 NoPE main KV, FP8 indexer KV, "
-            "pool size 4 and DP, PP, PCP and DCP set to 1."
-        )
+    if pooled_hisparse:
+        require_hybrid_hisparse_core()
+        if not supports_pooled_hisparse(vllm_config):
+            raise ValueError(
+                "Pooled HiSparse requires A5 FP8 NoPE main KV, FP8 indexer KV, "
+                "pool size 4 and DP, PP, PCP and DCP set to 1."
+            )
     packed_sources: dict[str, int] = {}
     layer_type = AttentionLayerBase
     attn_layers = get_layers_from_vllm_config(vllm_config, layer_type)
@@ -317,6 +324,7 @@ def get_kv_cache_spec(vllm_config: VllmConfig) -> dict[str, KVCacheSpec]:
 
         native_hybrid = has_hybrid_sfa_hisparse_specs(kv_cache_spec.values())
         if native_hybrid:
+            require_hybrid_hisparse_core()
             if any(
                 isinstance(spec, MLAAttentionSpec)
                 and spec.cache_role is SparseCacheRole.SPARSE

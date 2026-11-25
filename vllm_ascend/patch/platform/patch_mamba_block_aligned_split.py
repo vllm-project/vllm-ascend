@@ -39,7 +39,7 @@ import inspect
 from vllm.v1.core.sched.scheduler import Scheduler
 from vllm.v1.request import Request
 
-from vllm_ascend.hisparse import uses_pooled_hisparse
+from vllm_ascend.hisparse import supports_pooled_hisparse
 from vllm_ascend.patch.platform.patch_kv_cache_coordinator import (
     _skips_eagle_block_drop,
 )
@@ -101,16 +101,16 @@ def _mamba_block_aligned_split(
     the split off would only erase cacheable hit length.
     """
     kv_transfer_config = self.vllm_config.kv_transfer_config
-    local_flash_hisparse = getattr(
+    local_pooled_hisparse = getattr(
         kv_transfer_config, "kv_connector", None
-    ) == "HiSparseConnector" and uses_pooled_hisparse(self.vllm_config)
+    ) == "HiSparseConnector" and supports_pooled_hisparse(self.vllm_config)
     # Extra verifier or asynchronous output rows need an unsplit window.
     # Ordinary prefills must still stop at reusable checkpoints.
     num_computed_tokens = request.num_computed_tokens + num_new_local_computed_tokens + num_external_computed_tokens
     remaining_tokens = max(request.num_tokens - num_computed_tokens, 0)
     if (
         kv_transfer_config is not None
-        and not local_flash_hisparse
+        and not local_pooled_hisparse
         and kv_transfer_config.is_kv_consumer
         and num_computed_tokens > 0
         and num_new_tokens > remaining_tokens
@@ -128,8 +128,8 @@ def _mamba_block_aligned_split(
         ):
             block_size = self.block_size
             last_cache_position = request.num_tokens - request.num_tokens % block_size
-            # Flash HiSparse mirrors local prefill pages across the final checkpoint.
-            if self.use_eagle and not local_flash_hisparse and not _skips_eagle_block_drop(kv_transfer_config):
+            # Pooled HiSparse mirrors local prefill pages across the final checkpoint.
+            if self.use_eagle and not local_pooled_hisparse and not _skips_eagle_block_drop(kv_transfer_config):
                 last_cache_position = max(last_cache_position - block_size, 0)
             scheduled_end = num_computed_tokens + num_new_tokens
             if scheduled_end < last_cache_position:

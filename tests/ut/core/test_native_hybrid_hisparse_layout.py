@@ -6,6 +6,8 @@ from types import SimpleNamespace
 
 import pytest
 import torch
+
+pytest.importorskip("vllm.v1.hisparse.backend")
 from vllm.v1.core.kv_cache_planning import (
     DefaultKVCacheConfigBuilder,
     _max_memory_usage_bytes_from_groups,
@@ -26,7 +28,12 @@ from vllm.v1.kv_cache_interface import (
 from vllm.v1.kv_cache_layout import KVCacheLayout
 
 from vllm_ascend.core.kv_cache_interface import AscendSFAIndexerCacheSpec, register_ascend_kv_cache_specs
+from vllm_ascend.hisparse import supports_hybrid_hisparse_core
 from vllm_ascend.hisparse.layout import get_hybrid_sfa_hisparse_groups, has_hybrid_sfa_hisparse_groups
+
+requires_hybrid_core = pytest.mark.skipif(
+    not supports_hybrid_hisparse_core(), reason="The runtime layout requires Core Mamba page fitting"
+)
 
 
 @pytest.fixture(autouse=True)
@@ -86,6 +93,7 @@ def make_specs():
 
 
 @pytest.mark.parametrize("model_type", ["kimi_k31", "unregistered_sparse_model"])
+@requires_hybrid_core
 def test_native_hybrid_retains_separate_cache_geometry(model_type):
     specs = make_specs()
     groups = get_hybrid_sfa_hisparse_groups(make_runtime(model_type), specs)
@@ -107,6 +115,7 @@ def test_native_hybrid_retains_separate_cache_geometry(model_type):
     assert has_hybrid_sfa_hisparse_groups(groups[1:])
 
 
+@requires_hybrid_core
 def test_layout_feedback_fits_more_state_layers_within_same_stride(monkeypatch):
     specs = {f"{name}.{i}": spec for i in range(6) for name, spec in make_specs().items()}
     provisional = get_hybrid_sfa_hisparse_groups(make_runtime(), specs)
@@ -136,6 +145,7 @@ def test_layout_feedback_fits_more_state_layers_within_same_stride(monkeypatch):
 
 
 @pytest.mark.parametrize("model_type", ["kimi_k31", "unregistered_sparse_model"])
+@requires_hybrid_core
 def test_ascend_builder_routes_native_hybrid_to_core_placement(model_type, monkeypatch):
     from vllm_ascend.core import kv_cache_config_builder as builder_module
 
@@ -180,7 +190,17 @@ def test_native_provider_leaves_other_layouts_to_their_owners():
     assert get_hybrid_sfa_hisparse_groups(runtime, specs) is None
 
 
+def test_native_hybrid_requires_core_page_fitting(monkeypatch):
+    from vllm_ascend import hisparse
+
+    monkeypatch.setattr(hisparse, "supports_hybrid_hisparse_core", lambda: False)
+
+    with pytest.raises(ValueError, match="verified vLLM main pin"):
+        get_hybrid_sfa_hisparse_groups(make_runtime(), make_specs())
+
+
 @pytest.mark.parametrize("draft_source", ["config", "indexer", "state"])
+@requires_hybrid_core
 def test_native_hybrid_rejects_speculative_and_draft_caches(draft_source):
     runtime = make_runtime()
     specs = make_specs()
@@ -194,6 +214,7 @@ def test_native_hybrid_rejects_speculative_and_draft_caches(draft_source):
         get_hybrid_sfa_hisparse_groups(runtime, specs)
 
 
+@requires_hybrid_core
 def test_native_hybrid_rejects_unsupported_attention_cache():
     specs = make_specs()
     specs["dense"] = FullAttentionSpec(block_size=128, num_kv_heads=1, head_size=128, dtype=torch.bfloat16)
@@ -202,6 +223,7 @@ def test_native_hybrid_rejects_unsupported_attention_cache():
 
 
 @pytest.mark.parametrize(("rope_dim", "row_bytes"), [(0, 528), (64, 656)])
+@requires_hybrid_core
 def test_worker_native_hybrid_uses_runtime_row_width(rope_dim, row_bytes, monkeypatch):
     from vllm.v1.attention.backend import AttentionBackend
 

@@ -2,11 +2,27 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM Ascend project
 """Shared HiSparse cache operations, layouts and Core backend integration."""
 
+from importlib.util import find_spec
+
 from vllm.config import VllmConfig
 
 from vllm_ascend.device.hardware_profile import DeviceAdaptorFamily, get_current_hardware_profile
 
 HISPARSE_GROUPED_QUERY_LEN = 6
+
+
+def supports_hybrid_hisparse_core() -> bool:
+    """Require Core support for separate indexer pages and fitted recurrent state."""
+    if find_spec("vllm.v1.hisparse") is None:
+        return False
+    from vllm.v1.hisparse import binding
+
+    return callable(getattr(binding, "fit_mamba_blocks_to_attention", None))
+
+
+def require_hybrid_hisparse_core() -> None:
+    if not supports_hybrid_hisparse_core():
+        raise ValueError("Hybrid HiSparse requires the verified vLLM main pin with Mamba cache fitting.")
 
 
 def uses_pooled_hisparse(vllm_config: VllmConfig) -> bool:

@@ -140,7 +140,9 @@ class GroupedSpecGDN:
     """Combine pure spec metadata launches without changing graph-owned buffers."""
 
     def __init__(self) -> None:
-        self._pending = []
+        self._pending: list[
+            tuple[int, tuple[torch.Tensor | None, ...], dict[str, int], tuple[torch.Tensor, ...], tuple[int, ...]]
+        ] = []
         self._addresses: tuple[tuple[int, ...], ...] | None = None
         self._pointers: torch.Tensor | None = None
 

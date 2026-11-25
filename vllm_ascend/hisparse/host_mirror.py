@@ -161,7 +161,7 @@ class _LegacyDecodeRowMirror:
             if not self.deferred:
                 return callback(*args, **kwargs)
 
-        guarded._ascend_legacy_decode_row_mirror = self
+        vars(guarded)["_ascend_legacy_decode_row_mirror"] = self
         return guarded
 
 

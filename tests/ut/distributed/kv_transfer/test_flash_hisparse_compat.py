@@ -11,17 +11,22 @@ pytest.importorskip("vllm.v1.hisparse.runtime")
 
 from vllm.v1.hisparse.runtime import HiSparseCacheHandle, HiSparseRuntime
 
+from vllm_ascend.hisparse import supports_hybrid_hisparse_core
 from vllm_ascend.hisparse.flash_compat import install_flash_layer_view_bounds
-from vllm_ascend.utils import vllm_version_is
 
-pytestmark = pytest.mark.skipif(vllm_version_is("0.33.0"), reason="Flash HiSparse uses the verified main pin")
+pytestmark = pytest.mark.skipif(not supports_hybrid_hisparse_core(), reason="Flash HiSparse uses the verified main pin")
 
 
 @pytest.mark.parametrize(
-    ("enabled", "declared_budget", "expected"),
-    [(True, 1168, 1168), (True, None, 1024), (False, 1168, 1024)],
+    ("enabled", "pooled", "declared_budget", "expected"),
+    [
+        (True, True, 1168, 1168),
+        (True, True, None, 1024),
+        (True, False, 1168, 1024),
+        (False, True, 1168, 1024),
+    ],
 )
-def test_hisparse_pool_budget_preserves_generic_fallback(monkeypatch, enabled, declared_budget, expected):
+def test_hisparse_pool_budget_preserves_generic_fallback(monkeypatch, enabled, pooled, declared_budget, expected):
     from vllm.v1.core import kv_cache_planning
 
     from vllm_ascend.patch.platform import patch_flash_hisparse
@@ -30,10 +35,15 @@ def test_hisparse_pool_budget_preserves_generic_fallback(monkeypatch, enabled, d
     groups = [object()]
     builder = Mock()
     builder._get_pool_bytes_per_block.return_value = declared_budget
+    monkeypatch.setattr(
+        patch_flash_hisparse,
+        "supports_pooled_hisparse",
+        lambda cfg: cfg.attention_config.hisparse_config is not None and pooled,
+    )
     monkeypatch.setattr(patch_flash_hisparse, "_ORIGINAL_POOL_BYTES_PER_BLOCK", lambda *_: 1024)
 
     assert kv_cache_planning._pool_bytes_per_block_from_builder(builder, config, groups) == expected
-    assert builder._get_pool_bytes_per_block.call_count == int(enabled)
+    assert builder._get_pool_bytes_per_block.call_count == int(enabled and pooled)
 
 
 @pytest.mark.parametrize("supports_flash", [False, True])

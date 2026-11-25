@@ -19,6 +19,8 @@ import pytest
 import vllm.v1.core.sched.scheduler as scheduler_module
 
 import vllm_ascend.patch.platform.patch_mamba_block_aligned_split as mod
+from vllm_ascend import hisparse
+from vllm_ascend.device.hardware_profile import DeviceAdaptorFamily
 from vllm_ascend.patch.platform.patch_mamba_block_aligned_split import (
     _mamba_block_aligned_split,
     _original_mamba_block_aligned_split,
@@ -133,12 +135,30 @@ def test_kv_both_cold_prefill_retains_mamba_boundary_split():
     assert result == 4224
 
 
-@pytest.mark.parametrize(("model_type", "expected_tokens"), [("glm5_next_text", 2304), ("other_model", 1152)])
-def test_local_hisparse_preserves_last_flash_kpool_checkpoint(model_type, expected_tokens):
+@pytest.mark.parametrize(
+    ("model_type", "main_kv_dtype", "expected_tokens"),
+    [("glm5_next_text", "fp8", 2304), ("other_model", "fp8", 2304), ("other_model", "bf16", 1152)],
+)
+def test_local_hisparse_preserves_last_pooled_checkpoint(monkeypatch, model_type, main_kv_dtype, expected_tokens):
     scheduler = _scheduler(is_kv_consumer=True, is_kv_producer=True, uses_sparse_index_kpool=True)
-    scheduler.vllm_config.kv_transfer_config.kv_connector = "HiSparseConnector"
-    scheduler.vllm_config.attention_config = SimpleNamespace(hisparse_config=object())
-    scheduler.vllm_config.model_config.hf_text_config.model_type = model_type
+    config = scheduler.vllm_config
+    config.kv_transfer_config.kv_connector = "HiSparseConnector"
+    config.attention_config = SimpleNamespace(hisparse_config=object(), indexer_kv_dtype="fp8")
+    config.cache_config = SimpleNamespace(cache_dtype=main_kv_dtype)
+    config.parallel_config = SimpleNamespace(
+        data_parallel_size=1,
+        pipeline_parallel_size=1,
+        prefill_context_parallel_size=1,
+        decode_context_parallel_size=1,
+    )
+    text_config = config.model_config.hf_text_config
+    text_config.model_type = model_type
+    text_config.qk_rope_head_dim = 0
+    monkeypatch.setattr(
+        hisparse,
+        "get_current_hardware_profile",
+        lambda: SimpleNamespace(device_adaptor_family=DeviceAdaptorFamily.FP8_OPTIMIZED),
+    )
     scheduler.block_size = 1152
     request = _request(num_computed_tokens=29952, num_prompt_tokens=32768, num_tokens=32768)
 

@@ -13,7 +13,7 @@ _ORIGINAL_BIND_KV_CACHE_MANAGER = HiSparseConnector.bind_kv_cache_manager
 
 
 def _pool_bytes_per_block_from_builder(builder, vllm_config, kv_cache_groups):
-    if kv_cache_groups and vllm_config.attention_config.hisparse_config is not None:
+    if kv_cache_groups and supports_pooled_hisparse(vllm_config):
         pool_bytes = builder._get_pool_bytes_per_block(vllm_config, kv_cache_groups)
         if pool_bytes is not None:
             return pool_bytes
