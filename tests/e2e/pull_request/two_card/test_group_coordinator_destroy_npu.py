@@ -179,13 +179,16 @@ def _validate_coordinator_without_backend(world_size: int) -> None:
 
 def _worker(rank: int, port: int) -> None:
     """One of the two ranks: validate the destroy path on a real HCCL group."""
+    # The same environment a torchrun launch provides, so the HCCL backend
+    # uses the usual rendezvous.
+    os.environ["MASTER_ADDR"] = "127.0.0.1"
+    os.environ["MASTER_PORT"] = str(port)
+    os.environ["RANK"] = str(rank)
+    os.environ["LOCAL_RANK"] = str(rank)
+    os.environ["WORLD_SIZE"] = str(_WORLD_SIZE)
+
     torch.npu.set_device(rank)
-    dist.init_process_group(
-        "hccl",
-        init_method=f"tcp://127.0.0.1:{port}",
-        rank=rank,
-        world_size=_WORLD_SIZE,
-    )
+    dist.init_process_group(backend="hccl", rank=rank, world_size=_WORLD_SIZE)
 
     # The HCCL pg options helper reads the current vLLM config.
     from vllm.config import VllmConfig, set_current_vllm_config
