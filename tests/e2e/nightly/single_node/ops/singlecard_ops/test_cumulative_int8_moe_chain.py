@@ -91,7 +91,7 @@ def chain(layer, states, ids, weights, cumulative, prequantized=False, snapshots
     dispatched = dispatcher.token_dispatch(request)
     assert dispatched.group_list_type == (0 if cumulative else 1)
     mlp = build_mlp_compute_input(fused_experts_input=source, token_dispatch_output=dispatched, use_fusion_ops=True)
-    values = {}
+    values: dict[str, torch.Tensor] = {}
     if snapshots:
         values.update(
             routed=dispatched.hidden_states.clone(),
@@ -139,11 +139,11 @@ def require_real_ops():
 def test_exact_complete_int8_chain(shape, rows, pattern, prequantized):
     experts, hidden, intermediate, topk = shape
     layer = make_layer(experts, hidden, intermediate)
-    inputs = make_inputs(rows, experts, hidden, topk, pattern)
+    states, ids, weights = make_inputs(rows, experts, hidden, topk, pattern)
     topology, forward, fusion = local_context()
     with topology, forward, fusion:
-        baseline = chain(layer, *inputs, False, prequantized)
-        candidate = chain(layer, *inputs, True, prequantized)
+        baseline = chain(layer, states, ids, weights, cumulative=False, prequantized=prequantized)
+        candidate = chain(layer, states, ids, weights, cumulative=True, prequantized=prequantized)
         torch.npu.synchronize()
         assert_stages_equal(baseline, candidate)
 
