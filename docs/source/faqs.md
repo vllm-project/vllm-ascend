@@ -274,7 +274,7 @@ This is often due to system compatibility issues. You can resolve this by using 
 
 ### 20. Why am I getting an error when executing the script to start a Docker container? The error message is: "operation not permitted"
 
-When using `--shm-size`, you may need to add the `--privileged=true` flag to your `docker run` command to grant the container necessary permissions. Please be aware that using `--privileged=true` grants the container extensive privileges on the host system, which can be a security risk. Only use this option if you understand the implications and trust the container's source.
+`--shm-size` sets the size of `/dev/shm`; it does not itself require a privileged container. Check which operation reports "operation not permitted". For NPU access, pass the required device nodes with `--device` and ensure the container user can access them. If the failure is caused by insufficient shared memory, increase `--shm-size` instead.
 
 ### 21. How to set SOC_VERSION when building from source on a CPU-only machine?
 

@@ -78,7 +78,6 @@ docker run --rm \
 -e ASCEND_VISIBLE_DEVICES=0-7 \
 --name $CONTAINER_NAME \
 --net=host \
---privileged=true \
 --shm-size=60g \
 -v /usr/local/Ascend/driver:/usr/local/Ascend/driver \
 -v /usr/local/Ascend/firmware:/usr/local/Ascend/firmware \

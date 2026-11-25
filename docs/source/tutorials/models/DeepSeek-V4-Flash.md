@@ -84,7 +84,6 @@ Select an image based on your machine type and start the docker image on your no
         --name vllm-ascend \
         --shm-size=512g \
         --net=host \
-        --privileged=true \
         -v /usr/local/Ascend/driver/tools/hccn_tool:/usr/local/Ascend/driver/tools/hccn_tool \
         -v /etc/hccn.conf:/etc/hccn.conf \
         -v /root/.cache:/root/.cache \
@@ -104,7 +103,6 @@ Select an image based on your machine type and start the docker image on your no
         --name vllm-ascend \
         --shm-size=512g \
         --net=host \
-        --privileged=true \
         -v /usr/local/Ascend/driver/tools/hccn_tool:/usr/local/Ascend/driver/tools/hccn_tool \
         -v /etc/hccn.conf:/etc/hccn.conf \
         -v /root/.cache:/root/.cache \
