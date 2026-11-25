@@ -382,7 +382,7 @@ class BaseKVPoolWorker(ABC):
         packed_c8_path = self.use_sparse and cache_dtype in ("fp8", "int8")
         # Qwen3.8-Flash-Next also needs deferred setup without compress_ratios,
         # including cache dtypes outside the packed C8 path.
-        architectures = getattr(self.vllm_config.model_config.hf_config, "architectures", None) or []
+        architectures = getattr(self.hf_config, "architectures", None) or []
         backend_kwargs["lazy_init"] = (
             self.use_compress or packed_c8_path or "Qwen4ExpForConditionalGeneration" in architectures
         )

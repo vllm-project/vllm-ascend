@@ -4007,9 +4007,9 @@ class TestLazyInitGate(unittest.TestCase):
         worker.backend = "mooncake"
         worker.use_compress = use_compress
         worker.use_sparse = use_sparse
+        worker.hf_config = SimpleNamespace(architectures=architectures)
         worker.vllm_config = SimpleNamespace(
             cache_config=SimpleNamespace(cache_dtype=cache_dtype),
-            model_config=SimpleNamespace(hf_config=SimpleNamespace(architectures=architectures)),
         )
         backend_cls = MagicMock()
         fake_module = SimpleNamespace(Backend=backend_cls)
