@@ -18,6 +18,7 @@
 #
 
 
+import inspect
 import math
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from contextlib import contextmanager
@@ -341,6 +342,56 @@ def initialize_kernel_block_table_buffers(
         group.kernel_block_table = expanded
 
 
+_BUILDER_NUM_ACTUAL_REQS_CACHE: dict[type, bool] = {}
+
+
+def _callable_accepts_num_actual_reqs(build_fn: Callable[..., Any]) -> bool:
+    try:
+        params = inspect.signature(build_fn).parameters
+    except (TypeError, ValueError):
+        return False
+    if "num_actual_reqs" in params:
+        return True
+    return any(param.kind == inspect.Parameter.VAR_KEYWORD for param in params.values())
+
+
+def _builder_cls_accepts_num_actual_reqs(builder_cls: type) -> bool:
+    cached = _BUILDER_NUM_ACTUAL_REQS_CACHE.get(builder_cls)
+    if cached is not None:
+        return cached
+    result = True
+    for cls in builder_cls.__mro__:
+        if "build" not in cls.__dict__:
+            continue
+        build_fn = inspect.unwrap(cls.__dict__["build"])
+        try:
+            params = inspect.signature(build_fn).parameters
+        except (TypeError, ValueError):
+            result = False
+            break
+        if "num_actual_reqs" in params:
+            result = True
+            break
+        if not any(param.kind == inspect.Parameter.VAR_KEYWORD for param in params.values()):
+            result = False
+            break
+    _BUILDER_NUM_ACTUAL_REQS_CACHE[builder_cls] = result
+    return result
+
+
+def _gdn_builder_accepts_num_actual_reqs(attn_metadata_builder: GDNAttentionMetadataBuilder) -> bool:
+    """Check whether a GDN builder overrides ``build`` to accept ``num_actual_reqs``.
+
+    Ascend GDN and RecoverSSM builders accept ``num_actual_reqs`` to unpad FULL
+    graph batches before staging device buffers, whereas upstream vLLM
+    ``GDNAttentionMetadataBuilder`` and ``KimiK3KDAMetadataBuilder`` do not.
+    """
+    instance_dict = getattr(attn_metadata_builder, "__dict__", None)
+    if instance_dict and "build" in instance_dict:
+        return _callable_accepts_num_actual_reqs(attn_metadata_builder.build)
+    return _builder_cls_accepts_num_actual_reqs(type(attn_metadata_builder))
+
+
 def build_attn_metadata(
     *,
     attn_groups: list[list[AttentionGroup]],
@@ -604,7 +655,9 @@ def build_attn_metadata(
                         **attn_metadata_extra_kwargs,
                     )
                 else:
-                    if isinstance(attn_metadata_builder, GDNAttentionMetadataBuilder):
+                    if isinstance(
+                        attn_metadata_builder, GDNAttentionMetadataBuilder
+                    ) and _gdn_builder_accepts_num_actual_reqs(attn_metadata_builder):
                         attn_metadata_extra_kwargs["num_actual_reqs"] = num_actual_reqs
                     metadata = attn_group.build_metadata(
                         common_prefix_len=0,

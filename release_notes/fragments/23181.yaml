@@ -1,0 +1,7 @@
+pr: 23181
+entries:
+  - category: bugfix
+    text: >-
+      Fixed a TypeError (`unexpected keyword argument 'num_actual_reqs'`) on forward
+      passes for GDN linear-attention models (such as Kimi-Linear-48B-A3B-Instruct)
+      whose metadata builders use the upstream vLLM `build()` signature.
