@@ -653,6 +653,13 @@ class NPUWorker(GPUWorker):
 
         # Initialize the distributed environment.
         self._init_worker_distributed_environment()
+        if get_ascend_config().deepgemm_mega_moe:
+            from vllm.distributed import get_ep_group
+
+            from vllm_ascend.ops.fused_moe.deepgemm_mega_moe import resolve_deepgemm_device_support
+
+            resolve_deepgemm_device_support(self.vllm_config, device, get_ep_group())
+
         # Set random seed.
         set_random_seed(self.model_config.seed)
         # Initialize device properties used by triton kernels.

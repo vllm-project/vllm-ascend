@@ -276,8 +276,8 @@ class AscendSharedExperts:
         # for both routed and shared experts, so it cannot represent configs
         # where the two differ. Remove this activation-signature equality check
         # once the operator supports distinct routed/shared activations.
-        routed_activation = self._routed_megamoe_activation_signature()
-        shared_activation = self._shared_megamoe_activation_signature()
+        routed_activation = self._routed_megamoe_activation_signature(self.moe_config)
+        shared_activation = self._shared_megamoe_activation_signature(self.layer)
         if shared_activation is None or shared_activation != routed_activation:
             self._disable_megamoe_shared_fusion(
                 f"shared activation {type(self.layer.act_fn).__name__} {shared_activation} "
@@ -311,7 +311,8 @@ class AscendSharedExperts:
         ):
             self._wrap_linear_for_megamoe_fusion(linear, slot)
 
-    def _routed_megamoe_activation_signature(self) -> tuple[str, dict[str, float]] | None:
+    @staticmethod
+    def _routed_megamoe_activation_signature(moe_config: FusedMoEConfig) -> tuple[str, dict[str, float]] | None:
         """Canonical ``(name, params)`` of the activation the operator executes.
 
         Mirrors :func:`select_mega_moe_activation_kwargs`: whatever kwargs this
@@ -321,7 +322,6 @@ class AscendSharedExperts:
         cannot represent (GELU variants, swiglustep, ...), which always keeps
         the separate shared-expert forward.
         """
-        moe_config = self.moe_config
         activation = getattr(moe_config, "activation", "silu")
         name = str(getattr(activation, "value", activation)).lower()
         clamp = moe_config.swiglu_limit if (moe_config.swiglu_limit or 0.0) > 0 else None
@@ -345,14 +345,15 @@ class AscendSharedExperts:
             return ("silu", params)
         return None
 
-    def _shared_megamoe_activation_signature(self) -> tuple[str, dict[str, float]] | None:
+    @staticmethod
+    def _shared_megamoe_activation_signature(layer: torch.nn.Module) -> tuple[str, dict[str, float]] | None:
         """Canonical ``(name, params)`` of the shared expert's activation module.
 
         ``None`` when the activation has no MegaMoe counterpart (GELU variants,
         unknown custom activations) or its standalone Ascend semantics cannot
         be reproduced by the operator's single global activation.
         """
-        act_fn = self.layer.act_fn
+        act_fn = layer.act_fn
         if isinstance(act_fn, SituAndMul):
             params = {"beta": act_fn.beta}
             if act_fn.linear_beta is not None:

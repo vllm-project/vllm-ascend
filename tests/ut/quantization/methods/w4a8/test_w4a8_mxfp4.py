@@ -5,7 +5,7 @@ import torch.nn as nn
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 
 from tests.ut.base import TestBase
-from tests.ut.quantization.conftest_quantization import create_mock_vllm_config
+from tests.ut.quantization.conftest_quantization import create_mock_ascend_config, create_mock_vllm_config
 from vllm_ascend.quantization.methods.w4a8.w4a8_mxfp4 import (
     AscendW4A8MXFPDynamicFusedMoEMethod,
     AscendW4A8MXFPDynamicLinearMethod,
@@ -153,6 +153,12 @@ class TestAscendW4A8MXFP4MoEMethod(TestBase):
     @patch("vllm_ascend.quantization.methods.w4a8.w4a8_mxfp4.get_current_vllm_config")
     def setUp(self, mock_vllm):
         mock_vllm.return_value = create_mock_vllm_config()
+        ascend_config_patch = patch(
+            "vllm_ascend.quantization.methods.w4a8.w4a8_mxfp4.get_ascend_config",
+            return_value=create_mock_ascend_config(),
+        )
+        self.addCleanup(ascend_config_patch.stop)
+        ascend_config_patch.start()
         mx_profile = patch("vllm_ascend.quantization.methods.base.get_current_hardware_profile")
         mx_profile.start().return_value.supports_weight_format.return_value = True
         self.addCleanup(mx_profile.stop)

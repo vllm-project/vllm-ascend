@@ -23,6 +23,7 @@ import torch_npu
 from vllm.config import get_current_vllm_config
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 
+from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX, use_cann_megamoe
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.device.hardware_profile import WeightFormat
@@ -308,6 +309,12 @@ class AscendW4A8MXFPDynamicFusedMoEMethod(AscendMoEScheme):
         ``restore_weights_for_rl_loading`` can reverse it before an RL reload.
         Expert-list weights are intentionally not reversible for RL reload.
         """
+        if get_ascend_config().deepgemm_mega_moe:
+            from vllm_ascend.ops.fused_moe.deepgemm_mega_moe import DeepGemmExperts
+
+            if not hasattr(layer, "_deepgemm_mega_moe"):
+                layer._deepgemm_mega_moe = DeepGemmExperts(layer)
+            return
         if getattr(layer, "_mxfp4_transformed", False):
             return
         # MegaMoe and EPLB share one canonical, non-transposed NZ list.

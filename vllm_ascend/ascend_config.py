@@ -581,6 +581,7 @@ class AscendConfig:
             "mega_moe_max_tokens": 0,
             "ascend_log_path": "~/ascend/log/vllm_ascend",
             "enable_fused_mc2": 0,
+            "deepgemm_mega_moe": false,
             "enable_mlapo": true,
             "mlapo_keep_prefill_weights": false,
             "msmonitor_use_daemon": false,
@@ -752,6 +753,8 @@ class AscendConfig:
     # the operator instead of the separate shared-expert forward. enable_fused_mc2=2
     # keeps the shared expert separate. Internal flag, not user-settable.
     megamoe_shared_expert_fusion: bool = False
+    # DeepSeek V4 family FP8 x FP4 backend from DeepGEMM-Ascend.
+    deepgemm_mega_moe: bool = False
     enable_mlapo: bool = True
     # When True, keep MLAPO prefill weights on NPU instead of freeing them
     # on kv_consumer D nodes. Trades NPU memory for stability — D nodes have
@@ -811,6 +814,14 @@ class AscendConfig:
         # TODO(zzzzwwjj): remove it after deprecating `enable_mc2_hierarchy_comm`.
         if self.enable_mc2_hierarchy_comm:
             self.mc2_comm_alg = "hierarchy"
+        if self.deepgemm_mega_moe:
+            if self.enable_fused_mc2 != 3:
+                raise ValueError("deepgemm_mega_moe requires enable_fused_mc2=3")
+            self.megamoe_shared_expert_fusion = True
+            # The resolved enable_fused_mc2 controls the CANN implementation.
+            self.enable_fused_mc2 = 0
+            return self
+
         # TODO(zzzzwwjj): Currently, there are many problems with the megamoe op.
         # We will first roll back the megamoe internally and keep `enable_fused_mc2=2`
         # to enable the megamoe for testing capabilities.
@@ -966,11 +977,11 @@ class AscendConfig:
         if fallback_for_swiglu_limits:
             self.enable_fused_mc2 = 0
             logger.warning_once("Disabling fused MC2 because per-layer SwiGLU limits require regular MoE.")
-        if self.enable_fused_mc2 == 1 and self.multistream_overlap_shared_expert:
+        if (self.enable_fused_mc2 == 1 or self.deepgemm_mega_moe) and self.multistream_overlap_shared_expert:
             self.multistream_overlap_shared_expert = False
             logger.warning_once(
-                "enable_fused_mc2 and multistream_overlap_shared_expert "
-                "cannot be enabled at the same time. Setting multistream_overlap_shared_expert to False."
+                "Fused MoE is incompatible with multistream_overlap_shared_expert. "
+                "Setting multistream_overlap_shared_expert to False."
             )
         if self.enable_fused_mc2 == 1 and self._megamoe_supported and not self._is_megamoe_supported_by_config(vc):
             self.enable_fused_mc2 = 0

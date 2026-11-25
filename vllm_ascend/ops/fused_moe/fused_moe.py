@@ -16,6 +16,8 @@
 #
 from __future__ import annotations
 
+import weakref
+
 import torch
 import torch.nn.functional as F
 from vllm.distributed import (
@@ -42,6 +44,7 @@ from vllm_ascend.ops.fused_moe.shared_experts import (
     SharedExpertParallelMode,
     SubmittedSharedExpertGateUp,
 )
+from vllm_ascend.quantization.quant_type import QuantType
 from vllm_ascend.utils import vllm_version_is
 
 
@@ -170,7 +173,25 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
             self.moe_config.mc2_group = get_mc2_group()
 
         self.ascend_shared_experts = None
-        if shared_experts is not None:
+        if get_ascend_config().deepgemm_mega_moe:
+            if self.quant_type != QuantType.W4A8MXFP:
+                raise ValueError("DeepGEMM MegaMoE requires routed MXFP4 weights")
+            if (
+                shared_expert_gate is not None
+                or routed_input_transform is not None
+                or routed_output_transform is not None
+            ):
+                raise ValueError("V4.1 DeepGEMM requires shared and routed experts to use the same input")
+            # Keep shared parameters registered for checkpoint loading, while
+            # the fused kernel owns their execution and final accumulation.
+            if shared_experts is not None:
+                routed_experts._deepgemm_mega_moe_shared_experts = weakref.ref(shared_experts)
+                shared_experts.gate_up_proj._deepgemm_mega_moe_shared_linear = True
+                shared_experts.down_proj._deepgemm_mega_moe_shared_linear = True
+            routed_experts.ascend_megamoe_fold_scale = routed_scaling_factor
+            self.routed_scaling_factor = 1.0  # The DeepGEMM kernel scales only the routed experts.
+            self._forward_entry = torch.ops.vllm.moe_forward
+        elif shared_experts is not None:
             routed_experts.return_with_event = True
             self.ascend_shared_experts = AscendSharedExperts(
                 shared_experts,
@@ -380,6 +401,7 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
             MoECommType.ALLTOALL,
             MoECommType.MC2,
             MoECommType.FUSED_MC2,
+            MoECommType.DEEPGEMM,
         } or (moe_comm_type == MoECommType.ALLGATHER and self.moe_config.is_sequence_parallel)
 
     def _get_shared_expert_parallel_mode(self) -> SharedExpertParallelMode:

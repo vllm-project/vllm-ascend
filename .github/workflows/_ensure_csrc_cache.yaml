@@ -79,6 +79,7 @@ jobs:
       targets: ${{ steps.targets.outputs.targets }}
       has_targets: ${{ steps.targets.outputs.has_targets }}
       csrc_hash: ${{ steps.hash.outputs.csrc_hash }}
+      a5_csrc_hash: ${{ steps.hash.outputs.a5_csrc_hash }}
       missing_targets: ${{ steps.misses.outputs.missing_targets }}
       has_missing: ${{ steps.misses.outputs.has_missing }}
       has_write_credentials: ${{ steps.writer-credentials.outputs.present }}
@@ -159,6 +160,11 @@ jobs:
 
           CSRC_HASH=$(printf '%s\n' "$CSRC_MANIFEST" | sha256sum | awk '{print $1}')
           echo "csrc_hash=$CSRC_HASH" >> "$GITHUB_OUTPUT"
+          # A5 also packages the pinned DeepGEMM wheel with the csrc artifacts.
+          A5_CSRC_MANIFEST=$(git ls-files -s -- csrc setup.py CMakeLists.txt cmake \
+            pyproject.toml tools/deepgemm/build.py tools/deepgemm/install_build_deps.sh)
+          A5_CSRC_HASH=$(printf '%s\n' "$A5_CSRC_MANIFEST" | sha256sum | awk '{print $1}')
+          echo "a5_csrc_hash=$A5_CSRC_HASH" >> "$GITHUB_OUTPUT"
 
       - name: Resolve requested cache targets
         id: targets
@@ -231,7 +237,8 @@ jobs:
             vllm_ascend/*.so
             vllm_ascend/lib
             vllm_ascend/include
-          key: vllm-ascend-build-v2-ARM64-9.2.1-950-ubuntu22.04-py3.12-${{ steps.hash.outputs.csrc_hash }}
+            vllm_ascend/third_party/deep_gemm
+          key: vllm-ascend-build-v2-ARM64-9.2.1-950-ubuntu22.04-py3.12-${{ steps.hash.outputs.a5_csrc_hash }}
           lookup-only: 'true'
 
       - name: Summarize csrc cache results
@@ -305,7 +312,9 @@ jobs:
       HW_OBS_SK: ${{ secrets.HW_OBS_SK }}
     with:
       target: ${{ toJSON(matrix.target) }}
-      csrc_hash: ${{ needs.prepare-cache-checks.outputs.csrc_hash }}
+      csrc_hash: >-
+        ${{ startsWith(matrix.target.soc_version, 'ascend950') &&
+          needs.prepare-cache-checks.outputs.a5_csrc_hash || needs.prepare-cache-checks.outputs.csrc_hash }}
       source_ref: ${{ inputs.source_ref }}
       repository: ${{ inputs.repository }}
       base_repository: ${{ inputs.base_repository }}

@@ -1,0 +1,4 @@
+pr: 20299
+entries:
+  - category: feature
+    text: Added an experimental opt-in DeepGEMM MegaMoE backend with fused shared experts for the DeepSeek V4 family on Ascend 950, using TP1 and linear expert placement. Set `enable_fused_mc2=3` and `deepgemm_mega_moe=true` in additional configuration.
