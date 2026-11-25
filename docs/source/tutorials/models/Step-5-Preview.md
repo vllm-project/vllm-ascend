@@ -32,7 +32,7 @@ The official model is available on [Hugging Face](https://huggingface.co/stepfun
 | --- | --- |
 | Step-5-Preview-w8a8-mxfp8 | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/Step-5-Preview-w8a8-mxfp8) |
 
->**Path description**: Download the model weights to a directory of your choice and record it. Ensure the model path in the subsequent deployment command matches this directory.
+> **Path description**: Download the model weights to a directory of your choice and record it. Ensure the model path in the subsequent deployment command matches this directory.
 
 ### 3.2 Hardware and Software Preparation
 
@@ -56,6 +56,8 @@ This experimental deployment example targets 950DT products only.
 
 ### 4.1 Docker Image Installation
 
+{% include "getting_started/installation/ascend_docker_runtime.inc.md" %}
+
 #### Download Docker Image
 
 ```bash
@@ -73,27 +75,12 @@ export CONTAINER_NAME=step5
 
 # 950DT products have 8 NPUs and use Device UB.
 docker run --rm \
+-e ASCEND_VISIBLE_DEVICES=0-7 \
 --name $CONTAINER_NAME \
 --net=host \
---privileged=true \
 --shm-size=60g \
---device /dev/davinci_manager \
---device /dev/hisi_hdc \
---device /dev/ummu \
---device /dev/uburma \
---device /dev/davinci0 \
---device /dev/davinci1 \
---device /dev/davinci2 \
---device /dev/davinci3 \
---device /dev/davinci4 \
---device /dev/davinci5 \
---device /dev/davinci6 \
---device /dev/davinci7 \
 -v /usr/local/Ascend/driver:/usr/local/Ascend/driver \
 -v /usr/local/Ascend/firmware:/usr/local/Ascend/firmware \
--v /usr/local/dcmi:/usr/local/dcmi \
--v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
--v /etc/ascend_install.info:/etc/ascend_install.info \
 -v /etc/hixlep:/etc/hixlep \
 -v /etc/hccn.conf:/etc/hccn.conf \
 -v /var/log/npu/:/usr/slog \
@@ -223,7 +210,7 @@ vllm serve ${WEIGHT_PATH} \
 
 Because the weights are large, the load time is related to the disk read speed, and the first load usually takes about 10 minutes. The following logs indicate that the service has been started successfully:
 
-```text
+```output
 INFO:     Started server process [PID]
 INFO:     Waiting for application startup.
 INFO:     Application startup complete.
@@ -243,13 +230,13 @@ Key Parameter Descriptions:
 
 | Feature | Description | Configuration |
 | --- | --- | --- |
-| Tensor Parallel (TP) | Splits the model across all 4 NPUs within a node. | `--tensor-parallel-size 4` |
+| Tensor Parallelism (TP) | Splits the model across all 4 NPUs within a node. | `--tensor-parallel-size 4` |
 | Expert Parallelism (EP) | Distributes the MoE experts across NPUs. | `--enable-expert-parallel` |
-| Data Parallel (DP) | Multi-node DP across 2 nodes, extending the context to 1M. | `--data-parallel-size 4` |
-| Speculative Decoding (MTP) | Uses the native MTP layer for Multi-Token Prediction. | `--speculative-config '{"method": "mtp", "num_speculative_tokens": 3}'` |
+| Data Parallelism (DP) | Multi-node DP across 2 nodes, extending the context to 1M. | `--data-parallel-size 4` |
+| Multi-Token Prediction (MTP) | Uses the native MTP layer for Multi-Token Prediction. | `--speculative-config '{"method": "mtp", "num_speculative_tokens": 3}'` |
 | Decode Graph Capture | Captures the decode phase into a graph to reduce kernel launch overhead. | `--compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}'` |
-| Data parallelism for shared experts | Use data parallelism to deploy shared experts | `"enable_shared_expert_dp": true` |
-| Shared-expert overlap | Overlaps shared-expert execution with other work | `multistream_overlap_shared_expert: true` |
+| Data parallelism for shared experts | Use data parallelism to deploy shared experts. | `"enable_shared_expert_dp": true` |
+| Shared-expert overlap | Overlaps shared-expert execution with other work. | `multistream_overlap_shared_expert: true` |
 
 > **Note:** The features listed above are the ones enabled in the verified deployment commands in this document. Other features, such as LoRA, Pipeline Parallel, and Prefill-Decode Disaggregation, are not verified in this document.
 

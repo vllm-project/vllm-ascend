@@ -9,13 +9,14 @@ import pytest
 import torch
 from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheGroupSpec, MambaSpec
 
+from vllm_ascend.core import kv_cache_config_builder
+from vllm_ascend.core.kv_cache_config_builder import AscendKVCacheConfigBuilder
 from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec, AscendSFAIndexerCacheSpec
 from vllm_ascend.models.kimi_k3.paired_sfa_cache import (
     paired_sfa_cache_config,
     paired_sfa_cache_groups,
     paired_sfa_pool_bytes,
 )
-from vllm_ascend.patch.platform import patch_kv_cache_utils
 
 
 def make_specs():
@@ -58,7 +59,11 @@ def make_config():
             hf_text_config=SimpleNamespace(model_type="kimi_linear"),
         ),
         scheduler_config=SimpleNamespace(disable_hybrid_kv_cache_manager=False),
-        cache_config=SimpleNamespace(num_gpu_blocks_override=None, prefix_cache_retention_interval=None),
+        cache_config=SimpleNamespace(
+            num_gpu_blocks_override=None,
+            prefix_cache_retention_interval=None,
+            mamba_cache_mode="align",
+        ),
     )
 
 
@@ -203,11 +208,13 @@ def test_paired_planner_selection_uses_outer_model_type(monkeypatch, model_type)
     config.model_config.hf_config.model_type = model_type
     paired = Mock(return_value=[])
     upstream = Mock(return_value=[])
-    monkeypatch.setattr(patch_kv_cache_utils, "paired_sfa_cache_groups", paired)
-    monkeypatch.setattr(patch_kv_cache_utils, "_orig_get_kv_cache_groups", upstream)
-    monkeypatch.setattr(patch_kv_cache_utils, "get_qwen4_exp_kv_cache_groups", lambda *_: None)
+    monkeypatch.setattr(kv_cache_config_builder, "paired_sfa_cache_groups", paired)
+    monkeypatch.setattr(kv_cache_config_builder, "get_qwen4_exp_kv_cache_groups", lambda *_: None)
+    monkeypatch.setattr(kv_cache_config_builder, "group_and_unify_kv_cache_specs", lambda *_: None)
+    monkeypatch.setattr(kv_cache_config_builder, "_get_kimi_k3_dspark_mixed_kv_cache_groups", lambda *_: None)
+    monkeypatch.setattr(kv_cache_config_builder.DefaultKVCacheConfigBuilder, "get_kv_cache_groups", upstream)
 
-    actual = patch_kv_cache_utils._get_ascend_kv_cache_groups(config, specs)
+    actual = AscendKVCacheConfigBuilder().get_kv_cache_groups(config, specs)
 
     # The same hybrid cache geometry must not opt unrelated models into K3.1.
     # K3.1's nested text config still reports kimi_linear.
@@ -224,6 +231,27 @@ def test_grouping_preserves_platform_aligned_specs():
     second = paired_sfa_cache_groups(make_config(), specs)
     assert specs == original
     assert paired_sfa_pool_bytes(first) == paired_sfa_pool_bytes(second) == 29048832
+
+
+def test_generic_planner_reproduces_paired_sfa_pool_accounting():
+    planning = pytest.importorskip("vllm.v1.core.kv_cache_planning")
+
+    specs, config = make_specs(), make_config()
+    config.model_config.max_model_len = 4096
+    config.parallel_config = SimpleNamespace(decode_context_parallel_size=1)
+    config.attention_config = SimpleNamespace(hisparse_config=None)
+    groups = paired_sfa_cache_groups(config, specs)
+
+    # Admission must derive from the same per-group page counts and the same
+    # paired-SFA pool divisor the tensors are materialized with.
+    request_blocks = sum(
+        (group.kv_cache_spec.max_memory_usage_bytes(config) + group.kv_cache_spec.page_size_bytes - 1)
+        // group.kv_cache_spec.page_size_bytes
+        for group in groups
+    )
+    assert planning._max_memory_usage_bytes_from_groups(AscendKVCacheConfigBuilder(), config, groups) == (
+        request_blocks * paired_sfa_pool_bytes(groups)
+    )
 
 
 def test_grouping_rejects_obsolete_state_padding():
@@ -257,3 +285,38 @@ def test_a3_int8_fp16_pages_preserve_tp16_recurrent_ownership():
         for spec in specs.values()
         if isinstance(spec, AscendSFAIndexerCacheSpec)
     )
+
+
+def test_dspark_c8_draft_uses_dense_fp8_regions_without_changing_target_groups():
+    config = make_config()
+    config.model_config.max_model_len = 8192
+    config.parallel_config = SimpleNamespace(decode_context_parallel_size=1)
+    target_groups = paired_sfa_cache_groups(config, make_specs())
+    draft = {
+        f"model.layers.{layer}.attn": AscendMLAAttentionSpec(
+            block_size=1536,
+            num_kv_heads=1,
+            head_size=576,
+            dtype=torch.float8_e4m3fn,
+            is_draft=True,
+            non_causal_multi_token_decode=True,
+        )
+        for layer in range(93, 98)
+    }
+    groups = paired_sfa_cache_groups(config, {**make_specs(), **draft})
+
+    assert [len(group.layer_names) for group in groups] == [53, 23, 23, 23]
+    assert groups[1:] == target_groups[1:]
+    assert all(not spec.uses_packed_sfa_main_cache for spec in draft.values())
+    draft_page_bytes = 1536 * 576
+    assert {spec.page_size_bytes for spec in draft.values()} == {draft_page_bytes}
+    assert paired_sfa_pool_bytes(groups) == 29048832 + 5 * draft_page_bytes == 33472512
+
+    plan = paired_sfa_cache_config(config, groups, 2 * paired_sfa_pool_bytes(groups))
+    assert plan.num_blocks == 2
+    assert len(plan.kv_cache_tensors) == 10
+    draft_tensors = plan.kv_cache_tensors[-5:]
+    assert [tensor.layers for tensor in draft_tensors] == [[name] for name in draft]
+    assert all(tensor.block_stride == draft_page_bytes for tensor in draft_tensors)
+    assert [tensor.offset for tensor in draft_tensors] == sorted(tensor.offset for tensor in draft_tensors)
+    assert draft_tensors[-1].offset + draft_tensors[-1].layer_stride == plan.kv_cache_tensors[0].size

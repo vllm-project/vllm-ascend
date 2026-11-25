@@ -227,22 +227,23 @@ def test_host_close_retries_failed_unregister():
     nn.Module.__init__(layer)
     layer.register_parameter("weight", nn.Parameter(torch.zeros(1), requires_grad=False))
     layer.register_parameter("weight_scale", nn.Parameter(torch.zeros(1), requires_grad=False))
-    table, scale = Mock(), Mock()
-    layer._host_table, layer._host_scale = table, scale
-    scale.close.side_effect = [RuntimeError("unregister failed"), None]
+    layer._quantized = True
+    table = Mock()
+    layer._host_table = table
+    table.close.side_effect = [RuntimeError("unregister failed"), None]
     with pytest.raises(RuntimeError, match="unregister failed"):
         layer.close_host_offload()
-    assert layer._host_scale is scale
-    table.close.assert_not_called()
+    assert layer._host_table is table
     layer.close_host_offload()
     assert layer.weight is None and layer.weight_scale is None
-    assert layer._host_table is None and layer._host_scale is None
+    assert layer._host_table is None
     layer.close_host_offload()
-    table.close.assert_called_once()
+    assert table.close.call_count == 2
 
 
 @pytest.mark.parametrize("rank", [0, 1])
-def test_shared_host_scale_loader_uses_owner_only(monkeypatch, rank):
+@pytest.mark.parametrize("is_scale", [False, True])
+def test_quantized_loader_respects_storage_ownership(monkeypatch, rank, is_scale):
     from vllm.models.qwen4_exp.common.ngram_embedding import Qwen4ExpPLEEmbedding
 
     from vllm_ascend.models.qwen4_exp import ple_embedding
@@ -255,8 +256,13 @@ def test_shared_host_scale_loader_uses_owner_only(monkeypatch, rank):
     collective = Mock()
     monkeypatch.setattr(ple_embedding.dist, "all_gather_object", collective)
     value = torch.ones(2, 5)
-    layer.weight_loader(value, value, checkpoint_start=3)
-    assert loader.call_count == (1 if rank == 0 else 0)
+    layer.weight_scale = nn.Parameter(value, requires_grad=False)
+    param = layer.weight_scale if is_scale else nn.Parameter(value.clone(), requires_grad=False)
+    layer.weight_loader(param, value, checkpoint_start=3)
+    if is_scale or rank == 0:
+        loader.assert_called_once_with(param, value, 3)
+    else:
+        loader.assert_not_called()
     collective.assert_called_once()
 
 
@@ -269,15 +275,18 @@ def test_host_constructor_preserves_partial_quantized_buffers(monkeypatch, mxfp8
     from vllm_ascend.models.qwen4_exp import ple_embedding
 
     method = AscendPLEQuantizedEmbeddingMethod(mxfp8=mxfp8)
-    failed_dtype = method.scale_dtype if fail_scale else method.weight_dtype
+
+    def fail_hbm_allocation(*args, **kwargs):
+        raise RuntimeError("scale allocation failed")
+
     owners = {}
 
     def allocate(shape, dtype, device, buffer_name, module):
-        assert buffer_name == ("_host_scale" if dtype == method.scale_dtype else "_host_table")
+        assert buffer_name == "_host_table" and dtype == method.weight_dtype
         assert isinstance(module, nn.Module)
-        owner = Mock(tensor=torch.zeros(shape, dtype=dtype))
+        owner = Mock(tensor=torch.empty(shape, dtype=dtype))
         owners[dtype] = owner
-        if dtype == failed_dtype:
+        if not fail_scale:
             raise ple_embedding.HostUvaBufferCleanupError(
                 owner, ValueError("allocation failed"), RuntimeError("unregister failed")
             )
@@ -294,24 +303,24 @@ def test_host_constructor_preserves_partial_quantized_buffers(monkeypatch, mxfp8
     monkeypatch.setattr(ple_embedding, "get_tp_group", lambda: SimpleNamespace(world_size=1))
     monkeypatch.setattr(Qwen4ExpPLEEmbedding, "__init__", initialize)
 
+    if fail_scale:
+        monkeypatch.setattr(torch, "zeros", fail_hbm_allocation)
     with track_host_offload_owners() as tracked:
-        with pytest.raises(ple_embedding.HostUvaBufferCleanupError):
+        with pytest.raises(RuntimeError if fail_scale else ple_embedding.HostUvaBufferCleanupError):
             ple_embedding.AscendPLEHostEmbedding(embedding_method=method, params_dtype=torch.bfloat16)
         assert len(tracked) == 1
         layer = tracked[0]
-        assert layer._host_table is owners[method.weight_dtype]
-        if fail_scale:
-            assert layer._host_scale is owners[method.scale_dtype]
+        assert layer._host_table is (None if fail_scale else owners[method.weight_dtype])
         layer.close_host_offload()
-        assert layer._host_table is None and layer._host_scale is None
+        assert layer._host_table is None
     for owner in owners.values():
         owner.close.assert_called_once()
 
 
 @pytest.mark.parametrize("mxfp8", [False, True])
 @pytest.mark.parametrize("shared", [False, True])
-def test_quantized_host_registers_distinct_pointer_buffers(monkeypatch, mxfp8, shared):
-    """Sleep-mode restoration must preserve both the codes and scale addresses."""
+def test_quantized_host_registers_only_code_pointers(monkeypatch, mxfp8, shared):
+    """The scale parameter owns NPU storage without a cached device address."""
     from vllm_ascend.models.qwen4_exp import ple_embedding
 
     method = AscendPLEQuantizedEmbeddingMethod(mxfp8=mxfp8)
@@ -341,11 +350,14 @@ def test_quantized_host_registers_distinct_pointer_buffers(monkeypatch, mxfp8, s
     barrier = Mock()
     monkeypatch.setattr(ple_embedding.dist, "barrier", barrier)
     layer.allocate_embedding_weight(2, 160, method.weight_dtype)
-    layer.allocate_embedding_weight(2, 5, method.scale_dtype)
+    zeros = Mock(return_value=torch.empty(2, 5, dtype=method.scale_dtype))
+    monkeypatch.setattr(torch, "zeros", zeros)
+    scale = layer.allocate_embedding_weight(2, 5, method.scale_dtype)
+    zeros.assert_called_once_with((2, 5), dtype=method.scale_dtype, device=torch.device("npu", 0))
+    assert scale is zeros.return_value
     pointers = dict(layer.named_buffers())
     assert pointers["_host_table_ptrs"] is allocations[0].ptrs
-    assert pointers["_host_scale_ptrs"] is allocations[1].ptrs
+    assert len(allocations) == len(pointers) == 1
     assert layer._host_table is allocations[0]
-    assert layer._host_scale is allocations[1]
     assert not layer.state_dict()
-    assert barrier.call_count == (2 if shared else 0)
+    assert barrier.call_count == (1 if shared else 0)

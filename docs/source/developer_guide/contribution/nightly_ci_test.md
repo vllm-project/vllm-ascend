@@ -20,7 +20,7 @@ by combining a GitHub label with a comment command.
 
 ### 1. Post a comment
 
-Post one of the following comments in the PR to specify which tests to run.
+Post one of the following comments in the PR to specify which tests to run:
 The comment itself triggers the workflow — no label is required.
 
 | Comment | Effect |
@@ -144,7 +144,7 @@ To add a new test case (no need to touch the workflow YAMLs):
 1. Append an entry under the appropriate section in
    `.github/workflows/configs/nightly_config.yaml`. Each entry needs at least:
    - `name`: unique identifier used in `/nightly <name>` filters
-   - `os` (for single-node / multi-card pytest+yaml tests) or `runner` is inferred
+   - `os` (for single-node / multi-card pytest+YAML tests) or `runner` is inferred
    - one of `tests:` (pytest directory) or `config_file_path:` (YAML-driven model config)
    - `size` (multi-node / double-node only)
 2. Add the actual test files (pytest modules under `tests/e2e/nightly/...` or
@@ -710,9 +710,9 @@ The workflow will:
 - The matrix is loaded from your PR branch, so make sure the file is committed
   to the same branch the `/nightly` comment was posted on.
 
-**How to obtain more detailed logs to pinpoint problems for multi-node tests**
+**How to obtain more detailed logs to pinpoint problems for multi-node tests?**
 
-- For most issues, the stdout pop-up logs from GitHub actions are sufficient (this log always represents the logs from the first node).
+- For most issues, the stdout pop-up logs from GitHub Actions are sufficient (this log always represents the logs from the first node).
 - If the logs from a first node are no longer sufficient to provide effective logging information, see the summary of your jobs to download log archive for the corresponding test, which includes the framework-side logs and plog information for each node, structured as follows:
 
   ```shell

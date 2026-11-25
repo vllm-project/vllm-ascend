@@ -26,7 +26,7 @@ multiple cache groups, see [Mooncake Layerwise Hybrid Attention](mooncake_hybrid
 | Category | Constraint |
 | --- | --- |
 | Software | Requires a Mooncake NPU client with session and range transfer APIs; use Mooncake 0.3.14 or later. Required interfaces are checked at startup. |
-| Deployment | Use the corresponding producer/consumer role on each P/D node. Decode pool reads and writes are controlled separately by `consumer_is_to_load` and `consumer_is_to_put`. |
+| Deployment | Use the corresponding producer/consumer role on each P/D node. Decode pool reads and writes are controlled separately by `enable_lookup` and `save_decode_cache`. Lookup defaults to enabled on Prefill and disabled on Decode. |
 | Parallelism | Instances sharing layerwise objects must use matching TP, PP, PCP, and DCP sizes and the same PP layer partition. PCP and DCP cannot be enabled together. TP mismatch is not supported. |
 | PP | Uneven layer partitions are supported, but each stage must own layers in every cache group. Empty stage-local cache groups are not supported. |
 | Cache layout | Readers and writers must agree on model weights, cache format, block sizes, and transfer mode. Use separate pool namespaces for incompatible configurations. |
@@ -110,7 +110,7 @@ host, assign distinct `lookup_rpc_port` identifiers and HTTP ports.
 Follow the **PD Disaggregation Scenario** in the
 [Mooncake deployment guide](kv_cache_pool_ascend_store.md#scenario-1-mooncake-backend)
 for node startup, P/D transfer, and proxy configuration. Configure the
-`AscendStoreConnector` on each node as follows.
+`AscendStoreConnector` on each node as follows:
 
 **Prefill (P) node:**
 
@@ -151,7 +151,7 @@ guide's `MultiConnector`, update the `AscendStoreConnector` entry and set
 The Prefill node saves and reuses prefixes through the pool. Decode pool reads
 and writes are disabled by default; P/D KV transfer is handled by the other
 connector in `MultiConnector`. To enable Decode pool loading, add
-`"consumer_is_to_load": true` to its `kv_connector_extra_config`. Setting
+`"enable_lookup": true` to its `kv_connector_extra_config`. Setting
 `use_layerwise=true` alone does not enable consumer pool access.
 
 The `recompute` policy above applies to non-hybrid models. For hybrid models,
@@ -172,8 +172,7 @@ PCP and DCP cannot be combined. Every cache group must be DCP-sharded;
 sliding-window, recurrent/align-state, circular-buffer and other non-DCP-scaled
 groups must keep DCP disabled. The smallest cacheable block size must divide
 the others; `--prefix-match-unit` must be unset with DCP.
-GQA/MQA also requires `tensor_parallel_size // num_key_value_heads >=
-decode_context_parallel_size`.
+GQA/MQA models do not support DCP.
 
 In P/D disaggregation both sides must use the same DCP size; set
 `prefill_dcp_size` / `decode_dcp_size` in `kv_connector_extra_config` so the

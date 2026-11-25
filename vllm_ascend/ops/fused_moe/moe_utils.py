@@ -141,6 +141,31 @@ def gather_from_sequence_parallel_region(
     return _gather_along_first_dim(input_, group, output_split_sizes)
 
 
+@lru_cache(maxsize=1)
+def supports_cann_mega_moe_mixed_int_shared() -> bool:
+    """Check that CANN can describe INT4 routed and INT8 shared weights independently."""
+    try:
+        mega_moe = import_module("cann_ops_transformer.ops").mega_moe
+        parameters = inspect.signature(mega_moe).parameters
+    except (ImportError, AttributeError, TypeError, ValueError):
+        return False
+    required = {
+        "shared_l1_weights",
+        "shared_l2_weights",
+        "shared_l1_weights_sf",
+        "shared_l2_weights_sf",
+        "shared_expert_quant_out_dtype",
+        "shared_weight1_type",
+        "shared_weight2_type",
+    }
+    keyword_parameters = {
+        name
+        for name, parameter in parameters.items()
+        if parameter.kind in (inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.KEYWORD_ONLY)
+    }
+    return required <= keyword_parameters
+
+
 def load_cann_mega_moe_ops():
     ops_module = import_module("cann_ops_transformer.ops")
     get_symm_buffer_for_mega_moe = ops_module.get_symm_buffer_for_mega_moe

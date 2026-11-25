@@ -230,6 +230,33 @@ class TestApprovedReview:
         fake.install(monkeypatch)
         assert_refused(rerun_env, rerun.main(), "Re-run it manually")
 
+    def test_no_run_is_a_notice_not_a_failure(self, rerun_env, monkeypatch, capsys):
+        # Review on a commit pushed without /run: expected flow, not a
+        # malfunction. The run must stay green (exit 0, ::notice::) with the
+        # fix carried only by the reason file the workflow ships to the PR
+        # comment bot - a red run here reads as "the CI is broken" (the
+        # motivating noise case).
+        fake = _FakeGitHub(runs=[])
+        fake.install(monkeypatch)
+        assert rerun.main() == 0
+        reason = (rerun_env / "ci_gate_failure_reason.txt").read_text(encoding="utf-8")
+        assert "no E2E run for" in reason
+        assert "/run" in reason
+        assert "::notice::" in capsys.readouterr().out
+        assert "::error::" not in capsys.readouterr().out
+
+    def test_no_run_emits_step_outputs_for_the_comment_bot(self, rerun_env, monkeypatch):
+        # The workflow's Package/Upload steps gate on these outputs to ship
+        # the reason file even though the script exits 0.
+        outputs = rerun_env / "github_output.txt"
+        monkeypatch.setenv("GITHUB_OUTPUT", str(outputs))
+        fake = _FakeGitHub(runs=[])
+        fake.install(monkeypatch)
+        assert rerun.main() == 0
+        content = outputs.read_text(encoding="utf-8")
+        assert "needs_comment=true" in content
+        assert "gate_verdict=no-ci" in content
+
 
 class TestVetoReview:
     def test_changes_requested_on_green_run_reruns_owner_job(self, rerun_env, monkeypatch):
@@ -316,10 +343,8 @@ class TestNoopsAndErrors:
         assert rerun.main() == 0
         assert fake.posts == []
 
-    def test_no_ci_run_fails(self, rerun_env, monkeypatch):
-        fake = _FakeGitHub(runs=[])
-        fake.install(monkeypatch)
-        assert_refused(rerun_env, rerun.main(), "no E2E run")
+    # The old test_no_ci_run_fails is gone: a review on a commit with no CI
+    # run is now a green notice (see TestApprovedReview), not a red failure.
 
 
 class TestHelpers:

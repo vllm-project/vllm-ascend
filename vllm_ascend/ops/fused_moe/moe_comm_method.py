@@ -551,10 +551,10 @@ class FusedMC2CommImpl(MoECommMethod):
         if activation_kwargs is None:
             activation_kwargs = getattr(self, "mega_moe_activation_kwargs", {}) or {}
 
-        # Shared experts fused into the MegaMoe operator (A5 only): their
-        # GMM1 + activation + GMM2 runs inside the kernel on the local tokens,
-        # so no Dispatch/Combine traffic is involved. The caller skips the
-        # separate shared-expert forward when this payload is present.
+        # Shared experts fused into the MegaMoe operator (A5 MXFP and A3 INT8):
+        # their GMM1 + activation + GMM2 runs inside the kernel on the local
+        # tokens, so no Dispatch/Combine traffic is involved. The caller skips
+        # the separate shared-expert forward when this payload is present.
         shared_kwargs: dict = {}
         # Live payload installed by AscendMoERunner; its fields are filled in
         # when the shared linears finish loading.
@@ -573,9 +573,11 @@ class FusedMC2CommImpl(MoECommMethod):
             )
             # Mixed quantization: declare the shared weight dtype explicitly,
             # otherwise the operator inherits the routed weight type for the
-            # shared descriptors and resolves the wrong shared GMM mode.
+            # shared descriptors and resolves the wrong shared GMM mode. The
+            # payload carries the descriptor family resolved from the shared
+            # linear's own quant type when its weights were rebuilt.
             shared_weight_type = getattr(shared_fusion, "weight_type", None)
-            if shared_weight_type is not None and shared_weight_type != weight_type:
+            if shared_weight_type is not None:
                 shared_kwargs["shared_weight1_type"] = shared_weight_type
                 shared_kwargs["shared_weight2_type"] = shared_weight_type
         # Older CANN MegaMoe ABI lacks the shared-quant-out-dtype /

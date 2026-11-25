@@ -1,14 +1,10 @@
----
-render_macros: false
----
-
 # Kimi K3.1 Pro (Experimental)
 
 This guide covers feature configuration, environment preparation, multi-node Prefill/Decode (PD) separation, functional verification, and accuracy and performance evaluation for Kimi K3.1 Pro. Deployment scenarios include basic PD separation, 1M long-context PD separation, and pooled PD separation.
 
 This guide covers the validated Atlas 800I A3 and 950DT Products platforms. A2 and 950PR Products are not currently supported.
 
-## 1 Introduction {#1-introduction}
+## 1 Introduction {: #1-introduction}
 
 !!! note
 
@@ -22,15 +18,15 @@ This guide provides eight-node 4P4D basic and 1M configurations for Atlas 800I A
 
 This guide is based on **vLLM-Ascend 0.30.0**, which introduces experimental support for Kimi K3.1 Pro for evaluation and validation with the configurations provided here. Supported scenarios, performance, and configuration interfaces may evolve in later releases.
 
-## 2 Supported Features {#2-supported-features}
+## 2 Supported Features {: #2-supported-features}
 
 Refer to [supported features](../../user_guide/support_matrix/supported_models.md#generative-models_1) for the model's supported feature matrix.
 
 Refer to the [feature guide](../../user_guide/feature_guide/index.md) for feature configuration.
 
-## 3 Prerequisites {#3-prerequisites}
+## 3 Prerequisites {: #3-prerequisites}
 
-### 3.1 Model Weights {#31-model-weights}
+### 3.1 Model Weights {: #31-model-weights}
 
 | Weight Version | Hardware Requirements | Download Links | Notes |
 |---|---|---|---|
@@ -43,13 +39,15 @@ For each role, `draft_tensor_parallel_size` must match the target model's `--ten
 
 **Paths:** Download the target checkpoint for your platform from the table above. The commands below use example local directories: `/root/.cache/Kimi-K3.1-Pro-w4a8` on A3 and `/root/.cache/Kimi-K3.1-Pro-w4a8-mxfp` on 950DT Products. Download the complete checkpoint into the corresponding directory; if you use another directory, update the `vllm serve` path in every template for that platform. `<YOUR_DRAFT_MODEL_PATH>` still denotes the local directory of the compatible DSpark draft checkpoint. Use the same paths on every node and mount the weight directories inside every container. Weight directory names are independent of the API service name; keep `kimi-k3.1-pro` for both the served model name and the request `model` field.
 
-### 3.2 Verify Multi-node Communication {#32-verify-multi-node-communication}
+### 3.2 Verify Multi-node Communication {: #32-verify-multi-node-communication}
 
 Before multi-node deployment, follow the [multi-node communication verification guide](../../getting_started/installation.md#installation-multi-node) to check communication within and between nodes.
 
-## 4 Installation {#4-installation}
+## 4 Installation {: #4-installation}
 
-### 4.1 Docker Image Installation {#41-docker-image-installation}
+### 4.1 Docker Image Installation {: #41-docker-image-installation}
+
+{% include "getting_started/installation/ascend_docker_runtime.inc.md" %}
 
 Select an image for the deployment platform and host operating system, and start a container on every node. Refer to the [installation guide](../../getting_started/installation.md) for additional container options.
 
@@ -64,35 +62,11 @@ Select an image for the deployment platform and host operating system, and start
         ```bash
         export IMAGE="quay.io/ascend/vllm-ascend:kimi-k3.1-pro-a3"
         docker run --rm \
+            -e ASCEND_VISIBLE_DEVICES=0-15 \
             --name kimi-k31 \
             --shm-size=1g \
             --net=host \
-            --privileged=true \
-            --device /dev/davinci0 \
-            --device /dev/davinci1 \
-            --device /dev/davinci2 \
-            --device /dev/davinci3 \
-            --device /dev/davinci4 \
-            --device /dev/davinci5 \
-            --device /dev/davinci6 \
-            --device /dev/davinci7 \
-            --device /dev/davinci8 \
-            --device /dev/davinci9 \
-            --device /dev/davinci10 \
-            --device /dev/davinci11 \
-            --device /dev/davinci12 \
-            --device /dev/davinci13 \
-            --device /dev/davinci14 \
-            --device /dev/davinci15 \
-            --device /dev/davinci_manager \
-            --device /dev/devmm_svm \
-            --device /dev/hisi_hdc \
-            -v /usr/local/dcmi:/usr/local/dcmi \
             -v /usr/local/Ascend/driver/tools/hccn_tool:/usr/local/Ascend/driver/tools/hccn_tool \
-            -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
-            -v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
-            -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
-            -v /etc/ascend_install.info:/etc/ascend_install.info \
             -v /root/.cache:/root/.cache \
             -it "$IMAGE" bash
         ```
@@ -102,35 +76,11 @@ Select an image for the deployment platform and host operating system, and start
         ```bash
         export IMAGE="quay.io/ascend/vllm-ascend:kimi-k3.1-pro-a3-openeuler"
         docker run --rm \
+            -e ASCEND_VISIBLE_DEVICES=0-15 \
             --name kimi-k31 \
             --shm-size=1g \
             --net=host \
-            --privileged=true \
-            --device /dev/davinci0 \
-            --device /dev/davinci1 \
-            --device /dev/davinci2 \
-            --device /dev/davinci3 \
-            --device /dev/davinci4 \
-            --device /dev/davinci5 \
-            --device /dev/davinci6 \
-            --device /dev/davinci7 \
-            --device /dev/davinci8 \
-            --device /dev/davinci9 \
-            --device /dev/davinci10 \
-            --device /dev/davinci11 \
-            --device /dev/davinci12 \
-            --device /dev/davinci13 \
-            --device /dev/davinci14 \
-            --device /dev/davinci15 \
-            --device /dev/davinci_manager \
-            --device /dev/devmm_svm \
-            --device /dev/hisi_hdc \
-            -v /usr/local/dcmi:/usr/local/dcmi \
             -v /usr/local/Ascend/driver/tools/hccn_tool:/usr/local/Ascend/driver/tools/hccn_tool \
-            -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
-            -v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
-            -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
-            -v /etc/ascend_install.info:/etc/ascend_install.info \
             -v /root/.cache:/root/.cache \
             -it "$IMAGE" bash
         ```
@@ -144,24 +94,11 @@ Select an image for the deployment platform and host operating system, and start
         ```bash
         export IMAGE="quay.io/ascend/vllm-ascend:kimi-k3.1-pro-a5"
         docker run --rm \
+            -e ASCEND_VISIBLE_DEVICES=0-7 \
             --name kimi-k31 \
             --shm-size=1g \
             --net=host \
-            --privileged=true \
-            --device /dev/davinci0 \
-            --device /dev/davinci1 \
-            --device /dev/davinci2 \
-            --device /dev/davinci3 \
-            --device /dev/davinci4 \
-            --device /dev/davinci5 \
-            --device /dev/davinci6 \
-            --device /dev/davinci7 \
-            --device /dev/davinci_manager \
-            --device /dev/hisi_hdc \
-            -v /usr/local/dcmi:/usr/local/dcmi \
             -v /usr/local/Ascend/driver:/usr/local/Ascend/driver \
-            -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
-            -v /etc/ascend_install.info:/etc/ascend_install.info \
             -v /root/.cache:/root/.cache \
             -it "$IMAGE" bash
         ```
@@ -171,39 +108,26 @@ Select an image for the deployment platform and host operating system, and start
         ```bash
         export IMAGE="quay.io/ascend/vllm-ascend:kimi-k3.1-pro-a5-openeuler"
         docker run --rm \
+            -e ASCEND_VISIBLE_DEVICES=0-7 \
             --name kimi-k31 \
             --shm-size=1g \
             --net=host \
-            --privileged=true \
-            --device /dev/davinci0 \
-            --device /dev/davinci1 \
-            --device /dev/davinci2 \
-            --device /dev/davinci3 \
-            --device /dev/davinci4 \
-            --device /dev/davinci5 \
-            --device /dev/davinci6 \
-            --device /dev/davinci7 \
-            --device /dev/davinci_manager \
-            --device /dev/hisi_hdc \
-            -v /usr/local/dcmi:/usr/local/dcmi \
             -v /usr/local/Ascend/driver:/usr/local/Ascend/driver \
-            -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
-            -v /etc/ascend_install.info:/etc/ascend_install.info \
             -v /root/.cache:/root/.cache \
             -it "$IMAGE" bash
         ```
 
 After starting the container, run `docker ps` in another terminal and confirm that the container specified by `--name` is listed with status `Up`. The commands above use `--rm`, which removes the container when it exits; if startup fails, inspect the output in the launch terminal first. To retain the exit status and logs, rerun without `--rm`, then inspect the container with `docker ps -a` and `docker logs <CONTAINER_NAME>`.
 
-The containers above use privileged mode, host networking, and writable host mounts, and are intended for a controlled deployment environment. Services listen on `0.0.0.0`, and the examples do not configure access authentication; restrict network access to Proxy, engine, and cache service ports. Save scripts, configuration, and logs that must persist in explicitly mounted directories. `--rm` removes files in the container writable layer but does not delete host files in bind-mounted directories.
+The containers above use host networking and writable host mounts, and are intended for a controlled deployment environment. Services listen on `0.0.0.0`, and the examples do not configure access authentication; restrict network access to Proxy, engine, and cache service ports. Save scripts, configuration, and logs that must persist in explicitly mounted directories. `--rm` removes files in the container writable layer but does not delete host files in bind-mounted directories.
 
-### 4.2 Source Code Installation {#42-source-code-installation}
+### 4.2 Source Code Installation {: #42-source-code-installation}
 
 If you do not use the Docker images above, you can build from source. Follow the [installation guide](../../getting_started/installation.md) to install vLLM-Ascend and prepare the same runtime environment on every deployment node.
 
 Kimi K3.1 Pro model configuration, multimodal processing, reasoning parsing, and tool-call parsing are registered by vLLM-Ascend. Use vLLM and vLLM-Ascend source revisions compatible with **vLLM-Ascend 0.30.0**, the version used in this guide.
 
-## 5 Online Service Deployment {#5-online-service-deployment}
+## 5 Online Service Deployment {: #5-online-service-deployment}
 
 This section covers basic PD separation, 1M long-context PD separation, and pooled PD separation. Enable `VLLM_USE_V2_MODEL_RUNNER=1` on every node, use `kimi-k3.1-pro` as the served model name, and fill in model paths as described in [Section 3.1](#31-model-weights). The A3 and 950DT Products basic and 1M configurations follow their respective deployment scripts; the A3 pooled reference and 950DT Products pooled configurations are listed in [Section 5.3](#53-pooled-pd).
 
@@ -211,9 +135,9 @@ If startup or a request fails, inspect the relevant engine and Proxy logs, then 
 
 MegaMoE refers to the fused MoE computation path controlled by `enable_fused_mc2`. Use the setting specified in each deployment template.
 
-### 5.1 Basic Multi-node PD Separation Deployment {#51-pd-deployment}
+### 5.1 Basic Multi-node PD Separation Deployment {: #51-pd-deployment}
 
-#### 5.1.1 Create the Engine Templates {#511-create-the-engine-templates}
+#### 5.1.1 Create the Engine Templates {: #511-create-the-engine-templates}
 
 === "A3 series"
 
@@ -223,13 +147,13 @@ MegaMoE refers to the fused MoE computation path controlled by `enable_fused_mc2
 
     Leave `HCCL_OP_EXPANSION_MODE` unset on Prefill and set it to `AIV` on Decode. Both roles use `HCCL_BUFFSIZE=1024`. The main attention cache and indexer K cache use INT8, with a block size of `768`; Decode also uses an interleave size of `768`. The Prefill topology in the connector configuration on both roles is TP4 / PCP4 / PP4.
 
-    DSpark3 is optional. Draft TP is 4 on Prefill and 16 on Decode and must match the target TP on each role; both roles use three speculative tokens. Refer to the [Mooncake PD disaggregation guide](../../tutorials/features/pd_disaggregation_mooncake_multi_node.md) for the general service workflow.
+    DSpark is optional. Draft TP is 4 on Prefill and 16 on Decode and must match the target TP on each role; both roles use three speculative tokens. Refer to the [Mooncake PD disaggregation guide](../../tutorials/features/pd_disaggregation_mooncake_multi_node.md) for the general service workflow.
 
     MooncakeConnectorV2 exchanges actual layer metadata through its handshake and does not read `pp_layer_partition` from `kv_connector_extra_config`. Keep `VLLM_PP_LAYER_PARTITION=25,25,24,19` on every Prefill node for model layer partitioning; leave the environment variable unset on Decode. This applies to the basic, 1M, and pooled templates.
 
 
 
-    To enable DSpark3, replace `<YOUR_DRAFT_MODEL_PATH>` with the local directory of a draft model compatible with the A3 target model. Use the same draft checkpoint on both roles and the same directory path on every node.
+    To enable DSpark, replace `<YOUR_DRAFT_MODEL_PATH>` with the local directory of a draft model compatible with the A3 target model. Use the same draft checkpoint on both roles and the same directory path on every node.
 
     === "Prefill"
 
@@ -338,7 +262,7 @@ MegaMoE refers to the fused MoE computation path controlled by `enable_fused_mc2
             }'
         ```
 
-        **Optional: Enable DSpark3**
+        **Optional: Enable DSpark**
 
         Add the following option to the `vllm serve` command above, retaining a trailing backslash if it is inserted before the last line. Enable it on both roles, using the same draft checkpoint and three speculative tokens.
 
@@ -443,7 +367,7 @@ MegaMoE refers to the fused MoE computation path controlled by `enable_fused_mc2
             }'
         ```
 
-        **Optional: Enable DSpark3**
+        **Optional: Enable DSpark**
 
         Add the following option to the `vllm serve` command above, retaining a trailing backslash if it is inserted before the last line. Enable it on both roles, using the same draft checkpoint and three speculative tokens.
 
@@ -461,7 +385,7 @@ MegaMoE refers to the fused MoE computation path controlled by `enable_fused_mc2
 
     Prefill retains `enable_flashcomm1=true` in this section. The current TP1 configuration does not meet the TP > 1 requirement for generic MoE sequence parallelism or shared-expert DP, so the configured values do not imply that these paths are active; check startup logs for the matching version. All 950DT Products templates configure MLAPO through `--additional-config`: `enable_mlapo=false` on Prefill and `enable_mlapo=true` on Decode.
 
-    The 950DT Products basic and 1M templates enable DSpark3 with the same draft checkpoint on both roles, draft TP `1/8` on Prefill/Decode matching the target TP on each role, three speculative tokens, draft `enforce_eager=false`, and `kv_cache_dtype=auto`. The Prefill target model retains `--enforce-eager`. Replace `<YOUR_DRAFT_MODEL_PATH>` with the local directory of a draft checkpoint compatible with the target model on this platform.
+    The 950DT Products basic and 1M templates enable DSpark with the same draft checkpoint on both roles, draft TP `1/8` on Prefill/Decode matching the target TP on each role, three speculative tokens, draft `enforce_eager=false`, and `kv_cache_dtype=auto`. The Prefill target model retains `--enforce-eager`. Replace `<YOUR_DRAFT_MODEL_PATH>` with the local directory of a draft checkpoint compatible with the target model on this platform.
 
     The templates use `--tokenizer-mode kimi_k3`. For reasoning parsing and tool calling, also configure `--reasoning-parser kimi_k3`, `--tool-call-parser kimi_k3`, and `--enable-auto-tool-choice` together as described in [Section 10](#10-faq).
 
@@ -688,7 +612,7 @@ MegaMoE refers to the fused MoE computation path controlled by `enable_fused_mc2
 | `--speculative-config` | Configure the DSpark draft model and speculative token count. Draft TP must equal target-model TP for each role; evaluate gains using acceptance rate and end-to-end throughput. |
 | `--enable-expert-parallel` / `--additional-config` | Control expert parallelism and platform optimization options. Start from the template for each platform and role, then change and measure one option at a time. |
 
-#### 5.1.2 Start the Engines and Proxy {#512-start-the-engines-and-proxy}
+#### 5.1.2 Start the Engines and Proxy {: #512-start-the-engines-and-proxy}
 
 The Decode launcher is located at [`vllm-ascend/examples/external_online_dp/launch_online_dp.py`](https://github.com/vllm-project/vllm-ascend/blob/main/examples/external_online_dp/launch_online_dp.py) in the vLLM-Ascend repository. Place it in the same directory as the corresponding `run_dp_template.sh` on each Decode node.
 
@@ -752,7 +676,7 @@ The Decode launcher is located at [`vllm-ascend/examples/external_online_dp/laun
 
     Register only P0 as the Prefill service. Send client inference requests to the Proxy, which forwards them to P0 and the four Decode nodes. The Decode APIs also support health checks, metrics queries, and profiling.
 
-    **Key PD Settings**
+    **Key PD Settings:**
 
     | Setting | A3 Prefill | A3 Decode |
     |---|---|---|
@@ -780,10 +704,10 @@ The Decode launcher is located at [`vllm-ascend/examples/external_online_dp/laun
     | Prefix Cache | Enabled | Enabled |
     | Model Runner | V2 | V2 |
     | KV connector | `MooncakeConnectorV2` | `MooncakeConnectorV2` |
-    | Draft TP (optional DSpark3) | `4` | `16` |
-    | Draft `enforce_eager` (optional DSpark3) | `true` | `false` |
-    | Draft KV dtype (optional DSpark3) | `bfloat16` | `bfloat16` |
-    | `num_speculative_tokens` (optional DSpark3) | `3` | `3` |
+    | Draft TP (optional DSpark) | `4` | `16` |
+    | Draft `enforce_eager` (optional DSpark) | `true` | `false` |
+    | Draft KV dtype (optional DSpark) | `bfloat16` | `bfloat16` |
+    | `num_speculative_tokens` (optional DSpark) | `3` | `3` |
 
     For 1M context, change only `--max-model-len` to `1048576` on both roles and keep all other settings unchanged. See [Section 5.2](#52-long-context).
 
@@ -850,7 +774,7 @@ The Decode launcher is located at [`vllm-ascend/examples/external_online_dp/laun
     |---|---|---|
     | DP / TP / PP | `1 / 1 / 4` | `4 / 8 / 1` |
     | PCP / DCP | `8 / 1` | `1 / 8` |
-    | VLLM_PP_LAYER_PARTITION | `24,24,24,21` | — |
+    | `VLLM_PP_LAYER_PARTITION` | `24,24,24,21` | — |
     | `--block-size` / `--cp-kv-cache-interleave-size` | `1536 / 1536` | `1536 / 1536` |
     | `--max-model-len` | `140000` | `140000` |
     | `--max-num-batched-tokens` | `16384` | `768` |
@@ -863,9 +787,9 @@ The Decode launcher is located at [`vllm-ascend/examples/external_online_dp/laun
     | Draft enforce_eager / kv_cache_dtype | `false / auto` | `false / auto` |
     | `--tokenizer-mode` | `kimi_k3` | `kimi_k3` |
 
-### 5.2 Long-Context and 1M PD Separation Deployment {#52-long-context}
+### 5.2 Long-Context and 1M PD Separation Deployment {: #52-long-context}
 
-#### 5.2.1 Create the Engine Templates {#521-create-the-engine-templates}
+#### 5.2.1 Create the Engine Templates {: #521-create-the-engine-templates}
 
 === "A3 series"
 
@@ -873,7 +797,7 @@ The Decode launcher is located at [`vllm-ascend/examples/external_online_dp/laun
 
     The 1M limit includes both input and output tokens. Reserve space for the generated response.
 
-    To enable DSpark3, replace `<YOUR_DRAFT_MODEL_PATH>` with the local directory of a draft model compatible with the A3 target model and add the role-specific options from [Section 5.1](#51-pd-deployment). Use the same draft checkpoint on both roles and the same directory path on every node. Complete Prefill and Decode templates and launch and verification instructions are provided below.
+    To enable DSpark, replace `<YOUR_DRAFT_MODEL_PATH>` with the local directory of a draft model compatible with the A3 target model and add the role-specific options from [Section 5.1](#51-pd-deployment). Use the same draft checkpoint on both roles and the same directory path on every node. Complete Prefill and Decode templates and launch and verification instructions are provided below.
 
     === "Prefill"
 
@@ -1085,7 +1009,7 @@ The Decode launcher is located at [`vllm-ascend/examples/external_online_dp/laun
 
     The 1M limit includes both input and output tokens. Reserve space for the generated response.
 
-    The 950DT Products basic and 1M templates enable DSpark3 with the same draft checkpoint on both roles, draft TP `1/8` on Prefill/Decode matching the target TP on each role, three speculative tokens, draft `enforce_eager=false`, and `kv_cache_dtype=auto`. The Prefill target model retains `--enforce-eager`. Replace `<YOUR_DRAFT_MODEL_PATH>` with the local directory of a draft checkpoint compatible with the target model on this platform.
+    The 950DT Products basic and 1M templates enable DSpark with the same draft checkpoint on both roles, draft TP `1/8` on Prefill/Decode matching the target TP on each role, three speculative tokens, draft `enforce_eager=false`, and `kv_cache_dtype=auto`. The Prefill target model retains `--enforce-eager`. Replace `<YOUR_DRAFT_MODEL_PATH>` with the local directory of a draft checkpoint compatible with the target model on this platform.
 
     The templates use `--tokenizer-mode kimi_k3`. For reasoning parsing and tool calling, also configure `--reasoning-parser kimi_k3`, `--tool-call-parser kimi_k3`, and `--enable-auto-tool-choice` together as described in [Section 10](#10-faq).
 
@@ -1295,7 +1219,7 @@ The Decode launcher is located at [`vllm-ascend/examples/external_online_dp/laun
             --speculative-config "$SPECULATIVE_CONFIG"
         ```
 
-#### 5.2.2 Start and Verify the Service {#522-start-and-verify-the-service}
+#### 5.2.2 Start and Verify the Service {: #522-start-and-verify-the-service}
 
 === "A3 series"
 
@@ -1307,15 +1231,15 @@ The Decode launcher is located at [`vllm-ascend/examples/external_online_dp/laun
 
     Using the 1M templates above, follow [Section 5.1.2](#512-start-the-engines-and-proxy) to run Bash directly on each P node and the Python launcher on each D node, then start the Proxy. Check maximum length `1048576` on both roles and DCP8 on Decode; validate a short request before testing long sequences through the Proxy.
 
-### 5.3 Pooled PD Separation Deployment {#53-pooled-pd}
+### 5.3 Pooled PD Separation Deployment {: #53-pooled-pd}
 
 The pooling flow differs by platform: A3 uses a separate MetaService, eight standalone MemCache providers, and zero-capacity engine clients. 950DT Products uses the same MetaService startup procedure without standalone providers. See [Section 5.3.2](#532-prepare-the-memcache-configuration-files) for configuration.
 
-The supplied A3 reference uses eight nodes with **DP1 / PP4 / PCP4 / TP4 / DCP1** on Prefill and **DP4 / PP1 / PCP1 / TP16 / DCP16** on Decode. Both roles use a maximum model length of `1048576`, INT8 attention/indexer caches, DSpark3, and non-layerwise pool transfer (`use_layerwise=false`). The pooled example uses a separate MetaService host and one 1 GiB DRAM provider per P/D node. The 950DT Products engine templates below follow [Section 5.1.1](#511-create-the-engine-templates); see [Section 5.3.5](#535-create-the-engine-templates) for their lookup identifier assignments.
+The supplied A3 reference uses eight nodes with **DP1 / PP4 / PCP4 / TP4 / DCP1** on Prefill and **DP4 / PP1 / PCP1 / TP16 / DCP16** on Decode. Both roles use a maximum model length of `1048576`, INT8 attention/indexer caches, DSpark, and non-layerwise pool transfer (`use_layerwise=false`). The pooled example uses a separate MetaService host and one 1 GiB DRAM provider per P/D node. The 950DT Products engine templates below follow [Section 5.1.1](#511-create-the-engine-templates); see [Section 5.3.5](#535-create-the-engine-templates) for their lookup identifier assignments.
 
 These are supplied deployment references. Environment readiness does not establish model-side pool hits, output correctness, or performance. Verify those on the deployed runtime as described in [Section 5.3.7](#537-verify-the-pool-and-model-service). The A3 reference retains different P/D TP sizes; the equal-TP settings in the K3 templates are not a universal pooling requirement. Do not infer support for another cache layout from this reference.
 
-#### 5.3.1 Prepare the MF Components {#531-prepare-the-mf-components}
+#### 5.3.1 Prepare the MF Components {: #531-prepare-the-mf-components}
 
 === "A3 series"
 
@@ -1337,11 +1261,11 @@ These are supplied deployment references. Environment readiness does not establi
 
     | File | Purpose |
     |---|---|
-    | `runtime_env.sh` | Select the Python interpreter, add package libraries to `LD_LIBRARY_PATH`, and set `PYTHONHASHSEED=0` |
-    | `mmc-meta.conf` | MetaService configuration; needed only on the MetaService host |
-    | `mmc-local-standalone.conf` | Standalone provider configuration, with DRAM capacity |
-    | `mmc-local.conf` | Engine client configuration, with `dram.size=0GB` |
-    | `memcache_standalone.py` | Start and keep the standalone provider running |
+    | `runtime_env.sh` | Select the Python interpreter, add package libraries to `LD_LIBRARY_PATH`, and set `PYTHONHASHSEED=0`. |
+    | `mmc-meta.conf` | MetaService configuration; needed only on the MetaService host. |
+    | `mmc-local-standalone.conf` | Standalone provider configuration, with DRAM capacity. |
+    | `mmc-local.conf` | Engine client configuration, with `dram.size=0GB`. |
+    | `memcache_standalone.py` | Start and keep the standalone provider running. |
 
     Save the following as `<MEMCACHE_CONFIG_DIR>/runtime_env.sh`. Set `MEMC_PYTHON` before sourcing it if the interpreter is not `python3`. Both packages must be installed in the selected interpreter's environment:
 
@@ -1367,7 +1291,7 @@ These are supplied deployment references. Environment readiness does not establi
 
     Use MF package versions compatible with 950DT Products. On the MetaService host, prepare `runtime_env.sh` as shown in the A3 tab and select a Python environment with the matching packages installed. Standalone-provider files and startup steps apply only to A3. Use the prepared model and MF runtime environment on P/D nodes; set each node configuration path explicitly in [Section 5.3.6](#536-start-the-engines-and-proxy).
 
-#### 5.3.2 Prepare the MemCache Configuration Files {#532-prepare-the-memcache-configuration-files}
+#### 5.3.2 Prepare the MemCache Configuration Files {: #532-prepare-the-memcache-configuration-files}
 
 This guide uses `ock.mmc.local_service.dram.size=1GB` by default. It specifies the host DRAM capacity contributed to the cache pool by one MemCache LocalService instance, not NPU memory or total cluster capacity. Size it for the available memory on your machine, reserving resources for the model, operating system, and other processes. See the [MemCache configuration documentation](https://gitcode.com/Ascend/memcache) for adjustments. A3 standalone providers use this default, while engine clients retain `dram.size=0GB` to avoid duplicate allocations. 950DT Products node configurations use `1GB`.
 
@@ -1406,7 +1330,7 @@ This guide uses `ock.mmc.local_service.dram.size=1GB` by default. It specifies t
     ock.mmc.local_service.max.dram.size = 1024GB
     ```
 
-    `world_size=256` is the LocalService communication capacity, not the number of standalone providers to start. The reference starts one provider on each of the eight P/D nodes. Its eight 1 GiB DRAM segments total `8589934592` bytes (8 GiB).
+    `world_size=256` is the LocalService communication capacity, not the number of standalone providers to start. The reference starts one provider on each of the eight P/D nodes. Its eight 1 GiB DRAM segments total 8GiB.
 
 === "950DT Products"
 
@@ -1416,7 +1340,7 @@ This guide uses `ock.mmc.local_service.dram.size=1GB` by default. It specifies t
 
     Create the MetaService `mmc-meta.conf` using the A3 tab as a reference. Set addresses and ports for your environment and keep them consistent across all node configurations.
 
-#### 5.3.3 Start MetaService {#533-start-metaservice}
+#### 5.3.3 Start MetaService {: #533-start-metaservice}
 
 === "A3 series"
 
@@ -1442,7 +1366,7 @@ This guide uses `ock.mmc.local_service.dram.size=1GB` by default. It specifies t
 
     Keep the process running and ensure all P/D nodes can reach the configured MetaService address and ports. Reuse an existing healthy service. This step starts only MetaService, without per-node standalone MMC processes.
 
-#### 5.3.4 Start the Standalone MemCache Processes {#534-start-the-standalone-memcache-processes}
+#### 5.3.4 Start the Standalone MemCache Processes {: #534-start-the-standalone-memcache-processes}
 
 === "A3 series"
 
@@ -1482,7 +1406,7 @@ This guide uses `ock.mmc.local_service.dram.size=1GB` by default. It specifies t
 
     Skip this step for 950DT Products. Once MetaService is ready, start the P/D engines as described in [Section 5.3.6](#536-start-the-engines-and-proxy).
 
-#### 5.3.5 Create the Engine Templates {#535-create-the-engine-templates}
+#### 5.3.5 Create the Engine Templates {: #535-create-the-engine-templates}
 
 === "A3 series"
 
@@ -1733,7 +1657,7 @@ This guide uses `ock.mmc.local_service.dram.size=1GB` by default. It specifies t
 
         The 950DT Products pooled launch commands follow [Section 5.1.1](#511-create-the-engine-templates): DP1 / PP4 / PCP8 / TP1 on Prefill and DP4 / TP8 / DCP8 on Decode, with matching connector topology. Both roles use maximum length `172032`. All four PP4 Prefill nodes use `LOOKUP_RPC_PORT=0`. The four DP4 Decode nodes use `4/5/6/7` for DP ranks `0/1/2/3`, respectively, calculated as `$4 + 4` in the template. These lookup identifiers identify local IPC endpoints, not PP ranks or MemCache registration ranks.
 
-    The 950DT Products pooled templates enable DSpark3. Fill in the local directory of a draft checkpoint compatible with the 950DT Products target model. Use the same draft checkpoint on both roles, with draft TP `1/8` on Prefill/Decode matching each target TP, three speculative tokens, draft `enforce_eager=false`, and `kv_cache_dtype=auto`. The Prefill target model retains `--enforce-eager`. Model, cache, quantization, and scheduling settings follow [Section 5.1.1](#511-create-the-engine-templates); only maximum length and pool configuration change. Configure optional reasoning and tool-call flags as described in [Section 5.1.1](#511-create-the-engine-templates), using `kimi_k3` parsers.
+    The 950DT Products pooled templates enable DSpark. Fill in the local directory of a draft checkpoint compatible with the 950DT Products target model. Use the same draft checkpoint on both roles, with draft TP `1/8` on Prefill/Decode matching each target TP, three speculative tokens, draft `enforce_eager=false`, and `kv_cache_dtype=auto`. The Prefill target model retains `--enforce-eager`. Model, cache, quantization, and scheduling settings follow [Section 5.1.1](#511-create-the-engine-templates); only maximum length and pool configuration change. Configure optional reasoning and tool-call flags as described in [Section 5.1.1](#511-create-the-engine-templates), using `kimi_k3` parsers.
 
     === "Prefill"
 
@@ -1983,7 +1907,7 @@ This guide uses `ock.mmc.local_service.dram.size=1GB` by default. It specifies t
             --speculative-config "$SPECULATIVE_CONFIG"
         ```
 
-#### 5.3.6 Start the Engines and Proxy {#536-start-the-engines-and-proxy}
+#### 5.3.6 Start the Engines and Proxy {: #536-start-the-engines-and-proxy}
 
 === "A3 series"
 
@@ -2065,7 +1989,7 @@ This guide uses `ock.mmc.local_service.dram.size=1GB` by default. It specifies t
 
     Keep maximum length `172032` on both roles. Lookup identifiers are `0` on P0–P3 and `4, 5, 6, 7` on D0–D3. P1–P3 use `--headless`; register only P0 and the four Decode APIs with the Proxy.
 
-#### 5.3.7 Verify the Pool and Model Service {#537-verify-the-pool-and-model-service}
+#### 5.3.7 Verify the Pool and Model Service {: #537-verify-the-pool-and-model-service}
 
 === "A3 series"
 
@@ -2080,7 +2004,7 @@ This guide uses `ock.mmc.local_service.dram.size=1GB` by default. It specifies t
         | grep -E '^memcache_(segment_capacity_bytes|total_capacity_bytes)'
     ```
 
-    For the eight-provider 1 GiB reference, expect eight DRAM segments of `1073741824` bytes and a total of `8589934592` bytes. MemCache registration ranks are dynamic; do not map a segment rank directly to a model P/D rank. MetaService metrics establish provider registration and capacity, not model-side cache hits.
+    For the eight-provider 1 GiB reference, expect eight DRAM segments of 1GiB and a total of 8GiB. MemCache registration ranks are dynamic; do not map a segment rank directly to a model P/D rank. MetaService metrics establish provider registration and capacity, not model-side cache hits.
 
     After the engines and Proxy are ready, send the text and multimodal requests in [Section 6](#6-functional-verification) using `kimi-k3.1-pro`. Inspect the active engine configuration for `MultiConnector`, `backend=memcache`, `use_layerwise=false`, and the client `MMC_LOCAL_CONFIG_PATH`. Repeat a request with the same sufficiently long prefix and correlate the engine's external-cache lookup/load/save logs or metrics with the request and the returned output. Local prefix caching is also enabled; a faster repeated request alone does not prove a MemCache hit.
 
@@ -2090,9 +2014,9 @@ This guide uses `ock.mmc.local_service.dram.size=1GB` by default. It specifies t
 
     Do not apply the A3 eight-standalone-provider or 8 GiB registration criteria to 950DT Products. Inspect MetaService and actual engine/worker logs for the effective `MMC_LOCAL_CONFIG_PATH`, the matching node configuration adjusted to available capacity (reference value: `1GB`), cache initialization, and observed registered capacity. Do not infer registration from node count alone. Then validate request outputs and external-cache reuse through the Proxy, recording accuracy and performance separately.
 
-## 6 Functional Verification {#6-functional-verification}
+## 6 Functional Verification {: #6-functional-verification}
 
-### 6.1 Text and Multimodal Requests {#61-text-and-multimodal-requests}
+### 6.1 Text and Multimodal Requests {: #61-text-and-multimodal-requests}
 
 Once the P/D engines and Proxy are ready, replace `<PROXY_IP>` and `<PROXY_PORT>` with the actual service address and the port used to start the Proxy. Both the request's `model` field and `--served-model-name` are `kimi-k3.1-pro`.
 
@@ -2136,7 +2060,7 @@ curl "http://<PROXY_IP>:<PROXY_PORT>/v1/chat/completions" \
 
 The request should return HTTP 200, with generated content in the response's `choices` field. For image requests, the response should match the image. If generation stops at the output token limit, adjust the output budget for the reasoning mode in use.
 
-## 7 Accuracy Evaluation {#7-accuracy-evaluation}
+## 7 Accuracy Evaluation {: #7-accuracy-evaluation}
 
 The following accuracy results were reported for Kimi K3.1 Pro with PD separation.
 
@@ -2147,19 +2071,19 @@ The following accuracy results were reported for Kimi K3.1 Pro with PD separatio
 | GPQA | - | accuracy | gen | 94.44 | 950DT Products, PD separation, 64 cards |
 | MMMU PRO | - | accuracy | gen | 81.40 | 950DT Products, PD separation, 64 cards |
 
-### 7.1 Using AISBench {#71-using-aisbench}
+### 7.1 Using AISBench {: #71-using-aisbench}
 
 1. Refer to the [AISBench guide](../../developer_guide/evaluation/using_ais_bench.md) to prepare the environment and evaluation configuration.
 2. Run evaluation through the Proxy API and save the configuration, generated outputs, and evaluation report.
 3. When comparing results, keep the model and tokenizer revisions, chat template, sampling settings, output length, dataset, and evaluation-tool version fixed.
 
-## 8 Performance Evaluation {#8-performance-evaluation}
+## 8 Performance Evaluation {: #8-performance-evaluation}
 
-### 8.1 Using AISBench {#81-using-aisbench}
+### 8.1 Using AISBench {: #81-using-aisbench}
 
 Refer to the [AISBench performance evaluation guide](../../developer_guide/evaluation/using_ais_bench.md#execute-performance-evaluation) to prepare the environment and test configuration.
 
-### 8.2 Using vLLM Benchmark {#82-using-vllm-benchmark}
+### 8.2 Using vLLM Benchmark {: #82-using-vllm-benchmark}
 
 The following minimal random-text benchmark sends 16 requests through the Proxy with concurrency 1, 1024 input tokens, and 128 output tokens. Replace the service address with the actual Proxy endpoint, set `<LOCAL_MODEL_PATH>` to the platform checkpoint directory accessible to the benchmark client, and choose a writable results directory.
 
@@ -2187,19 +2111,19 @@ After a successful run, check that 16 requests succeeded and record request thro
 
 See the [vLLM Benchmark guide](../../developer_guide/performance_and_debug/performance_benchmark.md) for more parameters, and check options using `vllm bench serve --help` from the installed version. Keep test data, concurrency, lengths, cache state, and metric definitions consistent when comparing results, and save the commands used.
 
-## 9 Performance Tuning {#9-performance-tuning}
+## 9 Performance Tuning {: #9-performance-tuning}
 
-### 9.1 Recommended Configurations {#91-recommended-configurations}
+### 9.1 Recommended Configurations {: #91-recommended-configurations}
 
 Use the configurations in [Chapter 5, Online Service Deployment](#5-online-service-deployment) as the starting point for tuning. The optimal configuration depends on the workload and hardware environment.
 
-### 9.2 Tuning Guide {#92-tuning-guide}
+### 9.2 Tuning Guide {: #92-tuning-guide}
 
 Use the deployment settings above as a baseline. Adjust `max-model-len`, `max-num-seqs`, `max-num-batched-tokens`, and `gpu-memory-utilization` together for the target workload.
 
 Refer to the [performance tuning guide](../../developer_guide/performance_and_debug/optimization_and_tuning.md) and [feature matrix](../../user_guide/support_matrix/feature_matrix.md) for additional guidance.
 
-## 10 FAQ {#10-faq}
+## 10 FAQ {: #10-faq}
 
 For common environment, installation, and parameter questions, refer to the [public FAQ](../../faqs.md).
 
@@ -2209,4 +2133,4 @@ For common environment, installation, and parameter questions, refer to the [pub
 
 - **Q: How should TP size be selected?** A: The attention-head count in the checkpoint must be divisible by TP size. TP also changes the KDA state layout and expert placement; check memory requirements and communication performance together.
 
-- **Q: How is DSpark enabled in PD separation?** A: Prepare a DSpark draft checkpoint compatible with the target model on this platform and replace `<YOUR_DRAFT_MODEL_PATH>` in both templates with its local directory. Apply the role-specific `--speculative-config` from Section [5.1](#51-pd-deployment), [5.2](#52-long-context), or [5.3](#53-pooled-pd). Keep the draft checkpoint and `num_speculative_tokens` identical on both sides, and retain `--enforce-eager` for the Prefill target model.
+- **Q: How is DSpark enabled in PD separation?** A: Prepare a DSpark draft checkpoint compatible with the target model on this platform and replace `<YOUR_DRAFT_MODEL_PATH>` in both templates with its local directory. Apply the role-specific `--speculative-config` from [Section 5.1](#51-pd-deployment), [Section 5.2](#52-long-context), or [Section 5.3](#53-pooled-pd). Keep the draft checkpoint and `num_speculative_tokens` identical on both sides, and retain `--enforce-eager` for the Prefill target model.

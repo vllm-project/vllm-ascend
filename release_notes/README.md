@@ -53,6 +53,35 @@ Scope note: "in doubt" means genuinely unsure whether users can observe the chan
 know the change is internal, the decision is already made — do not write a fragment, and do
 not write one whose only content is the implementation.
 
+### Changes that cancel out before a release
+
+The unit of a release note is the **net change relative to the previous release**, not the
+individual PR. Two cases follow from this:
+
+**A bugfix immediately following the bug it fixes:**
+
+- **The buggy PR was already included in a released version.** The fix must have a
+  `bugfix` fragment: users upgrading from that release carry the bug, and the entry states
+  the symptom they may have hit. Note that at merge time you usually cannot know whether a
+  release will be cut in between — this is why "prefer writing" wins for bugfixes.
+- **The bug and the fix both land between two releases** (the bug never reached any wheel
+  or image). The fix introduces no net change, so it needs no fragment of its own — but
+  the buggy PR's **not-yet-archived fragment must be removed or amended in the fix PR**.
+  Otherwise the release would announce a bug that no released artifact ever contained.
+
+In short: a fix for a shipped bug writes a fragment; a fix for an unshipped bug deletes the
+bug's fragment. Both actions happen in the fix PR.
+
+**A revert of a PR merged after the last release:**
+
+- The net change is zero, so the revert PR needs **no fragment** — a revert is not a
+  bugfix, there is no symptom left for any user to hit.
+- The reverted PR's **not-yet-archived fragment must be removed in the revert PR**,
+  together with any docs or config-table entries it added. If the reverted PR shipped in a
+  released version, the revert is instead a behavior change users will see when upgrading
+  — write a fragment (usually `breaking`, or `bugfix` if it reverts a regression) stating
+  what disappears and what to do.
+
 ## Fragment format
 
 Copy `TEMPLATE.yaml` to `fragments/<PR number>.yaml` (for example `fragments/18123.yaml`) and
@@ -202,4 +231,7 @@ fragments directory (so `release_notes/archive` by default), and `--repo` to
 Fragments are archived, never deleted: they are the raw material behind the final notes, so
 the history of what each PR promised at the time keeps its value. Archiving is also the safe
 choice: if the archive step is forgotten, the next release's audit flags those fragments as
-"not found in the commit list" instead of silently losing them.
+"not found in the commit list" instead of silently losing them. The one exception is a
+fragment for a change that never reached a released artifact (an unreleased bug's fix, or
+a revert of an unreleased PR) — deleting that unarchived fragment is correct (see
+[Changes that cancel out before a release](#changes-that-cancel-out-before-a-release)).

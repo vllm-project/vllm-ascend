@@ -47,10 +47,19 @@ run finished need a re-run:
   reviews) cannot change the gate verdict and is a no-op: the original run's
   own failure comment already explains what to do.
 
-This job's own failures - no pull_request run for the commit yet, rerun API
-error - are written to ``$RUNNER_TEMP/ci_gate_failure_reason.txt``; the
-``Package gate result`` step ships them to the PR through the
-failure-comment bot, mirroring the ci-gate job's artifact contract.
+This job's own failures and notices are written to
+``$RUNNER_TEMP/ci_gate_failure_reason.txt``; the ``Package gate result``
+step ships them to the PR through the failure-comment bot, mirroring the
+ci-gate job's artifact contract. Two kinds exist:
+
+- ``rerun-error`` (rerun API error): the job fails (exit 1) - something is
+  actually broken and a red run is the honest signal;
+- ``no-ci`` (no pull_request run exists for the reviewed commit, i.e. the
+  author pushed without ``/run``): expected flow, not a malfunction, so the
+  job exits 0 (``::notice::``, green run) and only the PR comment carries
+  the fix. A red run here was noise: maintainers read it as "CI is broken"
+  when nothing is (PR #21892 is the motivating example). The job signals a
+  comment is wanted via the ``needs_comment``/``gate_verdict`` step outputs.
 
 Environment inputs: ``GITHUB_REPOSITORY``, ``HEAD_SHA``, ``GH_TOKEN``,
 ``REVIEW_STATE``, ``REVIEW_ACTION``, ``REVIEWER``, ``PR_NUMBER``,
@@ -200,12 +209,36 @@ def main() -> int:
     state = os.environ["REVIEW_STATE"].upper()
     failure_file = os.path.join(os.environ["RUNNER_TEMP"], "ci_gate_failure_reason.txt")
 
+    def emit_step_outputs(verdict: str) -> None:
+        # The workflow's Package/Upload steps read these to ship the reason
+        # file even when this script exits 0 (see bot_ci_gate_refresh.yaml).
+        output_path = os.environ.get("GITHUB_OUTPUT")
+        if not output_path:
+            return
+        with open(output_path, "a", encoding="utf-8") as f:
+            f.write(f"needs_comment=true\ngate_verdict={verdict}\n")
+
     def fail(verdict: str, detail: str = "") -> int:
         message = failure_message(verdict, detail, sha)
         with open(failure_file, "w", encoding="utf-8") as f:
             f.write(message + "\n")
         print(f"::error::{message}")
+        emit_step_outputs(verdict)
         return 1
+
+    def notify(verdict: str) -> int:
+        """A PR comment is wanted, but the run itself stays green.
+
+        Used for expected-flow outcomes a review cannot fix by re-running
+        (no CI run for the reviewed commit yet): a red run here reads as
+        "the CI is broken" when it is not - the fix lives in the comment.
+        """
+        message = failure_message(verdict, "", sha)
+        with open(failure_file, "w", encoding="utf-8") as f:
+            f.write(message + "\n")
+        print(f"::notice::{message}")
+        emit_step_outputs(verdict)
+        return 0
 
     # COMMENTED reviews never change the approval state (the job's if already
     # filters bot reviews), so there is nothing to re-evaluate.
@@ -238,7 +271,7 @@ def main() -> int:
     try:
         run = latest_pull_request_run(repo, token, sha)
         if run is None:
-            return fail("no-ci")
+            return notify("no-ci")
 
         def try_rerun(rerun) -> bool:
             # Another retrigger may already have started the re-run: a conflict

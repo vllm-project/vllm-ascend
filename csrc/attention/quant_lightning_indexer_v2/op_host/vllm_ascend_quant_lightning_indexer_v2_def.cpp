@@ -80,6 +80,14 @@ public:
             .DataTypeList({ge::DT_INT32})
             .FormatList({ge::FORMAT_ND})
             .AutoContiguous();
+        // 每行有效候选块数（DSL QSLI 的 candidate_block_length 语义）：
+        // 与 candidate_topk_index 一起构成"定长容量 + 有效前缀"的稀疏候选描述。
+        // 可选：未传时 kernel 保持全量 S2 扫描（现网行为不变）。
+        this->Input("candidate_block_length")
+            .ParamType(OPTIONAL)
+            .DataTypeList({ge::DT_INT32})
+            .FormatList({ge::FORMAT_ND})
+            .AutoContiguous();
         // DCP (Decode Context Parallel, 解码上下文并行): 每请求本次 Q 片段的全局 exclusive 上界 C。
         // Device Tensor, 避免每轮把全局边界同步回 CPU; 非 DCP 场景不传。
         this->Input("causal_seqlens_kv_global")
@@ -90,6 +98,10 @@ public:
         this->Output("sparse_indices").ParamType(REQUIRED).DataTypeList({ge::DT_INT32}).FormatList({ge::FORMAT_ND});
         this->Output("sparse_values").ParamType(REQUIRED).DataType({ge::DT_BF16, ge::DT_FLOAT}).FormatList({ge::FORMAT_ND});
         this->Output("candidate_topk_index_out").ParamType(OPTIONAL).DataTypeList({ge::DT_INT32}).FormatList({ge::FORMAT_ND});
+        // mode=1（candidate source）的每行有效候选块数（DSL candidate_length 语义：
+        // min(ceil(可见 key 长度 / candidate_block_size), candidate_topk_blocks)），
+        // int32、形状 [T1, N2]；候选功能关闭时为空 Tensor。
+        this->Output("candidate_block_length_out").ParamType(OPTIONAL).DataTypeList({ge::DT_INT32}).FormatList({ge::FORMAT_ND});
         this->Attr("topk").AttrType(REQUIRED).Int(2048);       // 2048: 筛选前2048个作为输出index
         this->Attr("quant_mode").AttrType(REQUIRED).Int(1);    // 1: per-token-head
         this->Attr("max_seqlen_q").AttrType(OPTIONAL).Int(-1); // -1: 默认值，表示任意可能长度
