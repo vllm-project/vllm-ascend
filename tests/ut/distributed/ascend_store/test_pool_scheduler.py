@@ -37,6 +37,7 @@ import tests.ut.distributed.ascend_store._mock_deps  # noqa: F401, E402
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.coordinator import AscendStoreCoordinator
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.dspark_prefix_cache import DSparkPrefixKeys
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
+    AscendStoreKVConnectorWorkerMetadata,
     LoadSpec,
     ReqMeta,
     RequestTracker,
@@ -293,7 +294,7 @@ class TestKVPoolScheduler(unittest.TestCase):
                 self.assertEqual(scheduler.get_num_new_matched_tokens(request, 0), (0, False))
 
     @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.LookupKeyClient")
-    def test_touch_sending_mamba_blocks_excludes_speculative_tail(self, mock_client_cls):
+    def test_retain_blocks_for_save_excludes_speculative_tail(self, mock_client_cls):
         """Speculative scratch blocks must never be pinned for async sends.
 
         The allocator relocates speculative scratch blocks in place and
@@ -341,7 +342,7 @@ class TestKVPoolScheduler(unittest.TestCase):
             block_ids_by_group=[[13], [1, 2, 3, 4, 5, 6, 7, 8, 9], [10, 11, 12]],
             can_save=True,
         )
-        scheduler.touch_sending_mamba_blocks(req_meta)
+        scheduler.retain_blocks_for_save(req_meta)
 
         touched = [block.block_id for block in scheduler._block_pool.touch.call_args[0][0]]
         self.assertEqual(touched, [1, 2, 3, 4, 5, 6, 10, 11, 12])
@@ -634,19 +635,35 @@ class TestKVPoolScheduler(unittest.TestCase):
         self.assertTrue(is_async)
 
     @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.LookupKeyClient")
-    def test_swa_group_selected_for_save_retention(self, mock_client_cls):
+    def test_swa_save_retains_live_blocks_until_all_workers_finish(self, mock_client_cls):
         groups = [
             KVCacheGroupSpec(
                 ["layer.0"],
                 SlidingWindowSpec(block_size=16, num_kv_heads=1, head_size=1, dtype=torch.float32, sliding_window=32),
             )
         ]
+        config = self._make_config(extra_config={"backend": "memcache"})
+        config.parallel_config.world_size = 2
         scheduler = KVPoolScheduler(
-            self._make_config(extra_config={"backend": "memcache"}),
+            config,
             use_layerwise=False,
             kv_cache_config=MagicMock(kv_cache_groups=groups),
         )
         self.assertEqual(scheduler.swa_group_ids, {0})
+        pool = MagicMock()
+        pool.blocks = [object(), object(), object()]
+        scheduler.bind_gpu_block_pool(pool)
+        request = ReqMeta("r1", block_ids_by_group=[[0, 1, 2]], can_save=True)
+        scheduler.retain_blocks_for_save(request)
+        pool.touch.assert_called_once_with(pool.blocks[1:])
+        assert request.event_id is not None
+
+        output = KVConnectorOutput(kv_connector_worker_meta=AscendStoreKVConnectorWorkerMetadata({request.event_id: 1}))
+        scheduler.update_connector_output(output)
+        pool.free_blocks.assert_not_called()
+        scheduler.update_connector_output(output)
+        pool.free_blocks.assert_called_once()
+        self.assertCountEqual(pool.free_blocks.call_args.args[0], pool.blocks[1:])
 
     @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.LookupKeyClient")
     @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.infer_cacheable_group_ids")
@@ -1058,10 +1075,6 @@ class TestKVPoolSchedulerUpdateConnectorOutput(unittest.TestCase):
         return scheduler
 
     def test_completed_event_frees_blocks(self):
-        from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
-            AscendStoreKVConnectorWorkerMetadata,
-        )
-
         for pcp_size in (1, 2, 4):
             with self.subTest(pcp_size=pcp_size):
                 scheduler = self._make_scheduler(pcp_size=pcp_size)
@@ -1080,10 +1093,6 @@ class TestKVPoolSchedulerUpdateConnectorOutput(unittest.TestCase):
         scheduler = self._make_scheduler()
         scheduler.sending_events = {}
         scheduler.sending_blocks = {}
-
-        from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
-            AscendStoreKVConnectorWorkerMetadata,
-        )
 
         meta = AscendStoreKVConnectorWorkerMetadata({99: 1})
         output = MagicMock()

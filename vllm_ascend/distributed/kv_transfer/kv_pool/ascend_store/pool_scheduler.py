@@ -1045,7 +1045,7 @@ class KVPoolScheduler:
         for request in scheduler_output.scheduled_new_reqs:
             req_meta = self._process_new_request(request, scheduler_output, force_skip_save)
             if req_meta is not None:
-                self.touch_sending_mamba_blocks(req_meta)
+                self.retain_blocks_for_save(req_meta)
                 meta.add_request(req_meta)
 
         cached_reqs = scheduler_output.scheduled_cached_reqs
@@ -1080,7 +1080,7 @@ class KVPoolScheduler:
                         force_skip_save,
                     )
                 if req_meta is not None:
-                    self.touch_sending_mamba_blocks(req_meta)
+                    self.retain_blocks_for_save(req_meta)
                     meta.add_request(req_meta)
 
         request_ids = [req.req_id for req in scheduler_output.scheduled_new_reqs]
@@ -1088,7 +1088,7 @@ class KVPoolScheduler:
             if request_id not in request_ids and request_id not in cached_reqs.req_ids:
                 req_meta = self._process_async_load_request(request_id, request, block_ids)
                 if req_meta is not None:
-                    self.touch_sending_mamba_blocks(req_meta)
+                    self.retain_blocks_for_save(req_meta)
                     meta.add_request(req_meta)
 
         return meta
@@ -1102,21 +1102,17 @@ class KVPoolScheduler:
         self.sending_event_id += 1
         return using_id
 
-    def touch_sending_mamba_blocks(self, req_meta: ReqMeta):
-        """
-        keep the reference of all non-null mamba blocks that will send to external kv store
-        """
-        if not self.use_hybrid or not self.num_speculative_blocks_by_group or not req_meta.can_save:
+    def retain_blocks_for_save(self, req_meta: ReqMeta):
+        """Hold SWA and Mamba source blocks until all workers finish saving."""
+        if self.use_layerwise or not req_meta.can_save:
             return
-        # Layerwise transfer frees mamba blocks layer by layer on its own
-        # completion path (see KVCacheStoreSendingThread); bulk-touching them
-        # here would double-reference the block pool and leak blocks.
-        if self.use_layerwise:
+        scratch_blocks_by_group = dict.fromkeys(self.swa_group_ids, 0) | self.num_speculative_blocks_by_group
+        if not scratch_blocks_by_group:
             return
         using_event_id = self.get_sending_event_id()
         req_meta.event_id = using_event_id
         current_step_sending: list[int] = []
-        for group_id, num_speculative_blocks in self.num_speculative_blocks_by_group.items():
+        for group_id, num_speculative_blocks in scratch_blocks_by_group.items():
             group_block_ids = req_meta.block_ids_by_group[group_id]
             # The last num_speculative_blocks slots are speculative scratch
             # blocks that the allocator relocates in place; relocation requires
