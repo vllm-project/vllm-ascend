@@ -528,6 +528,13 @@ Modify `run_dp_template.sh` on each node.
 
     On Ascend, the visibility variable is `ASCEND_RT_VISIBLE_DEVICES`.
 
+    For a manual launch of two TP2 ranks on one node, both `vllm serve`
+    processes can inherit `ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15`.
+    Give each process only its own device IDs.
+
+    - Rank 0: `--device-ids 8,9`
+    - Rank 1: `--device-ids 0,1`
+
 #### Layerwise
 
 === "Prefiller node 1"
