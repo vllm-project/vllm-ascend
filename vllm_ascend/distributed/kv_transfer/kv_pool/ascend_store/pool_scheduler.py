@@ -730,7 +730,7 @@ class BaseKVPoolScheduler(ABC):
         request: "Request",
         block_ids: list[int],
     ) -> tuple[bool, dict[str, Any] | None]:
-        """Allow the scheduler to free blocks after synchronous saving."""
+        """Release request ownership; bulk save events hold their own block references."""
         return False, None
 
     def request_finished_all_groups(
@@ -738,7 +738,7 @@ class BaseKVPoolScheduler(ABC):
         request: "Request",
         block_ids: tuple[list[int], ...],
     ) -> tuple[bool, dict[str, Any] | None]:
-        """Allow the scheduler to free all groups after synchronous saving."""
+        """Release request ownership across all groups."""
         return False, None
 
     def bind_gpu_block_pool(self, gpu_block_pool: "BlockPool") -> None:

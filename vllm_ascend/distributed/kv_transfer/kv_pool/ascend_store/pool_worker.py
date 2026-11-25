@@ -900,8 +900,8 @@ class BaseKVPoolWorker(ABC):
                         send_thread.reset_saved_request(req_id)
                         self._retired_store_req_ids.discard(req_id)
             self.kv_send_thread.discard_finished_requests(meta.preempted_req_ids)
-            # Saves complete synchronously in wait_for_save(), so the scheduler
-            # never waits for a request-level finished_sending notification.
+            # Bulk save pins are released by per-event worker acknowledgements.
+            # The scheduler does not defer request-level cleanup for these saves.
             self.kv_send_thread.get_and_clear_finished_requests()
             done_sending: set[str] = set()
         else:
@@ -1581,8 +1581,6 @@ class KVPoolWorker(BaseKVPoolWorker):
 
         if requests:
             self._previous_save_batch = send_thread.add_save_batch(requests)
-        # Complete queued PUTs before the next prefill chunk can reuse SWA slots.
-        send_thread.request_queue.join()
         send_thread.raise_if_failed()
 
     def _make_sub_key_str(self, base_key: str, effective_rank: int) -> str:
