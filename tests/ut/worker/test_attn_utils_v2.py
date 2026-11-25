@@ -9,6 +9,7 @@ import torch
 from vllm.config.attention import AttentionConfig
 from vllm.config.compilation import CUDAGraphMode
 from vllm.model_executor.layers.attention import MLAAttention
+from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadataBuilder
 from vllm.v1.kv_cache_interface import (
     CircularBufferSpec,
     FullAttentionSpec,
@@ -25,6 +26,7 @@ from vllm.v1.kv_cache_interface import (
 )
 from vllm.v1.worker.gpu import attn_utils as upstream_attn_utils
 from vllm.v1.worker.gpu import model_runner as upstream_model_runner
+from vllm.v1.worker.gpu.model_states.mamba_hybrid import MambaHybridAttnMetadata
 from vllm.v1.worker.utils import AttentionGroup
 
 from vllm_ascend.attention import dsa_attn_kv_plan, dsa_v1
@@ -3822,76 +3824,121 @@ def test_kernel_block_table_covers_encoder_manager_columns(initial_rows, initial
     assert group.kernel_block_table is buffer
 
 
-def test_build_attn_metadata_omits_num_actual_reqs_for_upstream_gdn_builders():
+class _UpstreamSignatureGDNBuilder(GDNAttentionMetadataBuilder):
+    def __init__(self):
+        self.calls = []
+
+    def build(
+        self,
+        common_prefix_len,
+        common_attn_metadata,
+        num_accepted_tokens=None,
+        num_decode_draft_tokens_cpu=None,
+        fast_build=False,
+    ):
+        self.calls.append(
+            {
+                "common_prefix_len": common_prefix_len,
+                "common_attn_metadata": common_attn_metadata,
+                "num_accepted_tokens": num_accepted_tokens,
+                "num_decode_draft_tokens_cpu": num_decode_draft_tokens_cpu,
+                "fast_build": fast_build,
+            }
+        )
+        return SimpleNamespace(common=common_attn_metadata)
+
+
+class _ForwardingWrapperGDNBuilder(_UpstreamSignatureGDNBuilder):
+    def build(self, *args, **kwargs):
+        return super().build(*args, **kwargs)
+
+
+class _AscendSignatureGDNBuilder(GDNAttentionMetadataBuilder):
+    def __init__(self):
+        self.calls = []
+
+    def build(
+        self,
+        common_prefix_len,
+        common_attn_metadata,
+        num_accepted_tokens=None,
+        num_decode_draft_tokens_cpu=None,
+        fast_build=False,
+        num_actual_reqs=None,
+    ):
+        self.calls.append(
+            {
+                "common_prefix_len": common_prefix_len,
+                "common_attn_metadata": common_attn_metadata,
+                "num_accepted_tokens": num_accepted_tokens,
+                "num_decode_draft_tokens_cpu": num_decode_draft_tokens_cpu,
+                "fast_build": fast_build,
+                "num_actual_reqs": num_actual_reqs,
+            }
+        )
+        return SimpleNamespace(common=common_attn_metadata)
+
+
+@pytest.fixture
+def gdn_padded_batch():
+    accepted = torch.tensor([1, 2, 1, 1], dtype=torch.int32)
+    drafts = torch.tensor([0, 1, -1, -1], dtype=torch.int32)
+    model_specific = MambaHybridAttnMetadata(
+        is_prefilling=torch.tensor([False, False, False, False]),
+        num_accepted_tokens=accepted,
+        num_decode_draft_tokens_cpu=drafts,
+    )
+    batch_kwargs = {
+        "num_reqs": 4,
+        "num_actual_reqs": 2,
+        "num_tokens": 4,
+        "num_actual_tokens": 3,
+        "query_start_loc_gpu": torch.tensor([0, 1, 3, 3, 3], dtype=torch.int32),
+        "query_start_loc_cpu": torch.tensor([0, 1, 3, 3, 3], dtype=torch.int32),
+        "max_query_len": 2,
+        "seq_lens": torch.tensor([5, 7, 0, 0], dtype=torch.int32),
+        "max_seq_len": 64,
+        "block_tables": (torch.zeros((4, 1), dtype=torch.int32),),
+        "slot_mappings": (torch.zeros(4, dtype=torch.int32),),
+        "kv_cache_config": SimpleNamespace(kv_cache_groups=[SimpleNamespace()]),
+        "seq_lens_np": np.array([5, 7, 0, 0], dtype=np.int32),
+        "model_specific_attn_metadata": model_specific,
+    }
+    return accepted, drafts, batch_kwargs
+
+
+@pytest.mark.parametrize(
+    ("builder_cls", "expected_extra_kwargs"),
+    [
+        pytest.param(_UpstreamSignatureGDNBuilder, {}, id="upstream"),
+        pytest.param(_ForwardingWrapperGDNBuilder, {}, id="forwarding_wrapper"),
+        pytest.param(_AscendSignatureGDNBuilder, {"num_actual_reqs": 2}, id="ascend"),
+    ],
+)
+def test_build_attn_metadata_gdn_num_actual_reqs_forwarding(
+    gdn_padded_batch,
+    builder_cls,
+    expected_extra_kwargs,
+):
+    accepted, drafts, batch_kwargs = gdn_padded_batch
+    builder = builder_cls()
+    group = _metadata_test_group(["gdn.layer"], builder)
+    metadata = attn_utils.build_attn_metadata(
+        attn_groups=[[group]],
+        **batch_kwargs,
+    )
+
+    assert len(builder.calls) == 1
+    call = builder.calls[0]
+    assert metadata["gdn.layer"].common is call["common_attn_metadata"]
+    torch.testing.assert_close(call["num_accepted_tokens"], accepted)
+    torch.testing.assert_close(call["num_decode_draft_tokens_cpu"], drafts)
+    extra_kwargs = {k: v for k, v in call.items() if k == "num_actual_reqs"}
+    assert extra_kwargs == expected_extra_kwargs
+
+
+def test_gdn_builder_cls_accepts_num_actual_reqs():
     from vllm.models.kimi_k3.nvidia.kda_metadata import KimiK3KDAMetadataBuilder
-    from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadataBuilder
-    from vllm.v1.worker.gpu.model_states.mamba_hybrid import MambaHybridAttnMetadata
-
-    class UpstreamSignatureGDNBuilder(GDNAttentionMetadataBuilder):
-        def __init__(self):
-            self.calls = []
-
-        def build(
-            self,
-            common_prefix_len,
-            common_attn_metadata,
-            num_accepted_tokens=None,
-            num_decode_draft_tokens_cpu=None,
-            fast_build=False,
-        ):
-            self.calls.append(
-                {
-                    "common_prefix_len": common_prefix_len,
-                    "common_attn_metadata": common_attn_metadata,
-                    "num_accepted_tokens": num_accepted_tokens,
-                    "num_decode_draft_tokens_cpu": num_decode_draft_tokens_cpu,
-                    "fast_build": fast_build,
-                }
-            )
-            return SimpleNamespace(common=common_attn_metadata)
-
-    class PassthroughMixinGDNBuilder(UpstreamSignatureGDNBuilder):
-        def build(self, *args, **kwargs):
-            return super().build(*args, **kwargs)
-
-    assert not attn_utils._builder_cls_accepts_num_actual_reqs(GDNAttentionMetadataBuilder)
-    assert not attn_utils._builder_cls_accepts_num_actual_reqs(KimiK3KDAMetadataBuilder)
-
-    for builder in (UpstreamSignatureGDNBuilder(), PassthroughMixinGDNBuilder()):
-        group = _metadata_test_group(["gdn.layer"], builder)
-        accepted = torch.tensor([1, 2, 1, 1], dtype=torch.int32)
-        drafts = torch.tensor([0, 1, -1, -1], dtype=torch.int32)
-        model_specific = MambaHybridAttnMetadata(
-            is_prefilling=torch.tensor([False, False, False, False]),
-            num_accepted_tokens=accepted,
-            num_decode_draft_tokens_cpu=drafts,
-        )
-        metadata = attn_utils.build_attn_metadata(
-            attn_groups=[[group]],
-            num_reqs=4,
-            num_actual_reqs=2,
-            num_tokens=4,
-            num_actual_tokens=3,
-            query_start_loc_gpu=torch.tensor([0, 1, 3, 3, 3], dtype=torch.int32),
-            query_start_loc_cpu=torch.tensor([0, 1, 3, 3, 3], dtype=torch.int32),
-            max_query_len=2,
-            seq_lens=torch.tensor([5, 7, 0, 0], dtype=torch.int32),
-            max_seq_len=64,
-            block_tables=(torch.zeros((4, 1), dtype=torch.int32),),
-            slot_mappings=(torch.zeros(4, dtype=torch.int32),),
-            kv_cache_config=SimpleNamespace(kv_cache_groups=[SimpleNamespace()]),
-            seq_lens_np=np.array([5, 7, 0, 0], dtype=np.int32),
-            model_specific_attn_metadata=model_specific,
-        )
-
-        assert len(builder.calls) == 1
-        assert metadata["gdn.layer"].common is builder.calls[0]["common_attn_metadata"]
-        torch.testing.assert_close(builder.calls[0]["num_accepted_tokens"], accepted)
-        torch.testing.assert_close(builder.calls[0]["num_decode_draft_tokens_cpu"], drafts)
-
-
-def test_build_attn_metadata_passes_num_actual_reqs_for_ascend_gdn_builders():
-    from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadataBuilder
 
     from vllm_ascend.attention.gdn_attn_builder import AscendGDNAttentionMetadataBuilder
     from vllm_ascend.attention.gdn_recoverssm_metadata import AscendGDNRecoverSSMMetadataBuilder
@@ -3900,6 +3947,9 @@ def test_build_attn_metadata_passes_num_actual_reqs_for_ascend_gdn_builders():
         Glm5NextRecoverSSMMetadataBuilder,
     )
 
+    for cls in (GDNAttentionMetadataBuilder, KimiK3KDAMetadataBuilder):
+        assert not attn_utils._builder_cls_accepts_num_actual_reqs(cls)
+
     for cls in (
         AscendGDNAttentionMetadataBuilder,
         AscendGDNRecoverSSMMetadataBuilder,
@@ -3907,41 +3957,3 @@ def test_build_attn_metadata_passes_num_actual_reqs_for_ascend_gdn_builders():
         Glm5NextRecoverSSMMetadataBuilder,
     ):
         assert attn_utils._builder_cls_accepts_num_actual_reqs(cls)
-
-    class AscendSignatureGDNBuilder(GDNAttentionMetadataBuilder):
-        def __init__(self):
-            self.calls = []
-
-        def build(
-            self,
-            common_prefix_len,
-            common_attn_metadata,
-            num_accepted_tokens=None,
-            num_decode_draft_tokens_cpu=None,
-            fast_build=False,
-            num_actual_reqs=None,
-        ):
-            self.calls.append(num_actual_reqs)
-            return SimpleNamespace(num_actual_reqs=num_actual_reqs)
-
-    builder = AscendSignatureGDNBuilder()
-    group = _metadata_test_group(["ascend_gdn.layer"], builder)
-    metadata = attn_utils.build_attn_metadata(
-        attn_groups=[[group]],
-        num_reqs=4,
-        num_actual_reqs=2,
-        num_tokens=4,
-        num_actual_tokens=2,
-        query_start_loc_gpu=torch.tensor([0, 1, 2, 2, 2], dtype=torch.int32),
-        query_start_loc_cpu=torch.tensor([0, 1, 2, 2, 2], dtype=torch.int32),
-        max_query_len=1,
-        seq_lens=torch.tensor([5, 7, 0, 0], dtype=torch.int32),
-        max_seq_len=64,
-        block_tables=(torch.zeros((4, 1), dtype=torch.int32),),
-        slot_mappings=(torch.zeros(4, dtype=torch.int32),),
-        kv_cache_config=SimpleNamespace(kv_cache_groups=[SimpleNamespace()]),
-        seq_lens_np=np.array([5, 7, 0, 0], dtype=np.int32),
-    )
-
-    assert builder.calls == [2]
-    assert metadata["ascend_gdn.layer"].num_actual_reqs == 2
