@@ -479,6 +479,10 @@ class ChunkedTokenDatabase:
         if group_num_layers is not None:
             self.group_num_layers[cache_role] = group_num_layers.copy()
 
+    def project_group_ids(self, group_ids: list[int]) -> list[int]:
+        """Project global cache-group IDs onto locally registered regions."""
+        return [group_id for group_id in group_ids if self.group_block_len.get(group_id)]
+
     def _get_group_buffers(
         self, kv_cache_group_id: int, cache_role: str = "kv"
     ) -> tuple[list[int], list[int], list[int] | None]:

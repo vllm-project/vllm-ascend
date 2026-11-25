@@ -4,8 +4,8 @@
 import torch
 
 from vllm_ascend.ops.gbsa import (
+    generic_block_sparse_attention,
     generic_block_sparse_attention_metadata,
-    generic_block_sparse_attention_out,
 )
 from vllm_ascend.ops.triton.qwen4_exp.gbsa import prepare_qsa_gbsa_inputs
 
@@ -83,19 +83,19 @@ def qsa_gbsa_attention(
             max_seqlen_kv=int(logical_max_seqlen_kv),
             **common,
         )
-    generic_block_sparse_attention_out(
+    result, _ = generic_block_sparse_attention(
         query.contiguous(),
         key_cache,
         value_cache,
         sparse_idx,
         sparse_count,
         [1, GBSA_COMPRESS_RATIO],
-        output,
         metadata=metadata,
         block_table=row_block_table,
         softmax_scale=query.shape[-1] ** -0.5,
         **common,
     )
+    output.copy_(result)
     return output
 
 
