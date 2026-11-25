@@ -225,6 +225,7 @@ class ProxyState:
             self.metaserver_params.pop(parent_request_id, None)
             self.metaserver_ready_events.pop(parent_request_id, None)
             self.metaserver_dispatch_tasks.pop(parent_request_id, None)
+            self.req_to_prefiller.pop(parent_request_id, None)
 
     def select_prefiller(self, token_count):  # Changed to synchronous
         # No lock needed - entire function is atomic
@@ -590,7 +591,7 @@ async def _handle_completions(api: str, request: Request):
                             if stop_reason == "recomputed":
                                 retry = True
                                 retry_count += 1
-                                previous_max_tokens = req_data.get("max_tokens")
+                                previous_max_tokens = req_data.get("max_tokens", origin_max_tokens)
                                 if chat_flag:
                                     messages[0]["content"] = (
                                         origin_prompt
@@ -598,21 +599,23 @@ async def _handle_completions(api: str, request: Request):
                                         if isinstance(origin_prompt, list)
                                         else (origin_prompt or "") + generated_token
                                     )
-                                    prompt_len_after = len(messages[0]["content"])
                                 else:
                                     req_data["prompt"] = origin_prompt + generated_token
-                                    prompt_len_after = len(req_data["prompt"])
                                 req_data["max_tokens"] = origin_max_tokens - completion_tokens + retry_count
+                                # The parent request id, unlike the pull-mode proxy, is
+                                # stable across a layerwise recompute round, so the
+                                # prefiller named below is the one that just failed.
                                 logger.info(
-                                    "[PD-RECOMPUTE] kv insufficient, request goes back to P: request_id=%s, "
-                                    "retry_count=%d, generated_tokens=%d, max_tokens=%s->%s, prompt_len=%d->%d",
+                                    "[PD-RECOMPUTE] request goes back to P: request_id=%s, prefiller=%s, "
+                                    "retry_count=%d, generated_tokens=%d, completion_events=%d, "
+                                    "max_tokens=%s->%s",
                                     request_id,
+                                    proxy_state.req_to_prefiller.get(request_id, "-"),
                                     retry_count,
+                                    len(generated_token),
                                     completion_tokens,
                                     previous_max_tokens,
                                     req_data["max_tokens"],
-                                    len(origin_prompt or ""),
-                                    prompt_len_after,
                                 )
                                 break
                             if retry_count > 0 and not stream_flag:
@@ -717,6 +720,9 @@ async def dispatch_prefill_batch(
     prefiller_idx = proxy_state.select_prefiller(prefiller_score)
     try:
         prefiller = proxy_state.prefillers[prefiller_idx]
+        # Remember which prefiller serves this attempt, so the recompute log can
+        # name it when the decoder reports stop_reason="recomputed".
+        proxy_state.req_to_prefiller[parent_request_id] = f"{prefiller.host}:{prefiller.port}"
         req_data = copy.deepcopy(req_data)
         if len(expected_request_ids) == 1:
             req_data["kv_transfer_params"] = params_by_request_id[expected_request_ids[0]]
