@@ -338,8 +338,10 @@ healthy.
 **Step 1: check how many 2 MB blocks the host still has free.**
 
 ```bash
-# Column 14 of a Normal zone row counts free 2 MB blocks.
-awk '$4 == "Normal" {s += $14} END {print s + 0}' /proc/buddyinfo
+# Free 2 MB blocks in every Normal zone. The buddy order follows the page size:
+# 4 KB pages use order 9, 64 KB pages (common on ARM64 servers) use order 5.
+ps=$(getconf PAGESIZE 2>/dev/null || echo 4096)
+awk -v ps="$ps" 'BEGIN {o = 0; while ((2 ^ o) * ps < 2097152) o++} $4 == "Normal" {s += $(5 + o)} END {print s + 0}' /proc/buddyinfo
 ```
 
 Compare the result with a known-good value from the same host: a healthy
@@ -357,12 +359,16 @@ Only page cache, dentries and inodes are dropped; process memory and pinned
 memory are not affected:
 
 ```bash
+# Needs root; if the shell is not root, use:
+#   echo 3 | sudo tee /proc/sys/vm/drop_caches
 echo 3 > /proc/sys/vm/drop_caches
 ```
 
 **Step 3: merge the fragmented 4 KB pages back into 2 MB blocks.**
 
 ```bash
+# Needs root; if the shell is not root, use:
+#   echo 1 | sudo tee /proc/sys/vm/compact_memory
 echo 1 > /proc/sys/vm/compact_memory
 ```
 
@@ -375,6 +381,8 @@ small, clear the cache to give the memory back:
 
 ```bash
 # Drops clean file cache only; the running service keeps its memory.
+# Needs root; if the shell is not root, use:
+#   echo 3 | sudo tee /proc/sys/vm/drop_caches
 echo 3 > /proc/sys/vm/drop_caches
 ```
 
