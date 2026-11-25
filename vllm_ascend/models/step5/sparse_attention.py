@@ -52,6 +52,7 @@ from vllm.v1.attention.backend import (
 from vllm.v1.attention.backends.utils import split_decodes_and_prefills
 from vllm.v1.kv_cache_interface import AttentionSpec
 
+from vllm_ascend.compilation.acl_graph import get_graph_params
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence import attention_transfer_window
 from vllm_ascend.models.step5.ops.generic_block_sparse_attention import (
     GBSAPrefillMetadata,
@@ -399,6 +400,24 @@ class AscendStep5DSAMetadataBuilder(AttentionMetadataBuilder[AscendStep5DSAMetad
         buffer.copy_(metadata)
         return buffer
 
+    def _use_graph_shape(self, num_input_tokens: int, num_prefills: int) -> bool:
+        """Whether this step runs under a captured graph.
+
+        The captured token counts are the ones the graph manager captured, not
+        the configured capture sizes: under speculative decoding it rounds
+        every configured size up to a multiple of the decode query width, so a
+        captured shape can be a token count the configuration never mentions
+        (10 configured, query width 8 -> 16 captured). A step that runs under
+        a captured graph has to refresh the persistent GBSA buffer, or the
+        graph replays the metadata of the step that captured it.
+        """
+        if num_prefills:
+            # Mixed batches run eager, whatever their token count is.
+            return False
+        graph_params = get_graph_params()
+        capture_sizes = self.capture_sizes if graph_params is None else graph_params.events.keys()
+        return num_input_tokens in capture_sizes
+
     def build(
         self,
         common_prefix_len: int,
@@ -420,7 +439,7 @@ class AscendStep5DSAMetadataBuilder(AttentionMetadataBuilder[AscendStep5DSAMetad
             decode_threshold=self.reorder_batch_threshold,
             require_uniform=True,
         )
-        use_graph_shape = num_input_tokens in self.capture_sizes and num_prefills == 0
+        use_graph_shape = self._use_graph_shape(num_input_tokens, num_prefills)
 
         prefill_metadata: AscendStep5DSAPrefillMetadata | None = None
         active_prefills = 0
