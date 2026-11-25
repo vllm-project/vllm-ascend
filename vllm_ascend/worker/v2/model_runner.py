@@ -326,6 +326,11 @@ class NPUModelRunner(GPUModelRunner):
         self._kv_trace = install_trace(self)
 
     @property
+    def _nova_request_state(self):
+        runtime = self.model_state.nova_kv
+        return runtime.state if runtime is not None else None
+
+    @property
     def pcp_manager_cls(self) -> type[AscendPCPManager]:
         return AscendPCPManager
 

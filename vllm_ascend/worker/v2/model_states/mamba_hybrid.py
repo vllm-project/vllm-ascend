@@ -511,6 +511,8 @@ class AscendMambaHybridModelState(MambaHybridModelState, AscendModelState):
         max_query_len = getattr(input_batch, "max_query_len", None)
         if max_query_len is None:
             max_query_len = input_batch.num_scheduled_tokens.max().item()
+        nova_runtime = getattr(self, "nova_kv", None)
+        nova_metadata = nova_runtime.prepare(input_batch, num_reqs, for_capture=for_capture) if nova_runtime else {}
         return build_attn_metadata(
             attn_groups=attn_groups,
             num_reqs=num_reqs,
@@ -535,4 +537,5 @@ class AscendMambaHybridModelState(MambaHybridModelState, AscendModelState):
             pcp_context=pcp_context,
             full_graph_mode=cudagraph_mode == CUDAGraphMode.FULL,
             for_cudagraph_capture=for_capture,
+            **nova_metadata,
         )

@@ -50,18 +50,46 @@ def _run_engine_core_patch_func(*args, dp_rank: int = 0, local_dp_rank: int = 0,
     return _OriginalRunEngineCore(*args, dp_rank=dp_rank, local_dp_rank=local_dp_rank, **kwargs)
 
 
+def _apply_nova_scheduler_patch():
+    engine_core = _engine_core_mod.EngineCore
+    if getattr(engine_core, "_nova_scheduler_patched", False):
+        return
+    original_init = engine_core.__init__
+
+    def init_with_nova_scheduler(self, vllm_config, *args, **kwargs):
+        options = (vllm_config.additional_config or {}).get("nova_kv") or {}
+        if not options.get("artifact_path"):
+            return original_init(self, vllm_config, *args, **kwargs)
+        scheduler_config = vllm_config.scheduler_config
+        if scheduler_config.async_scheduling or vllm_config.parallel_config.pipeline_parallel_size != 1:
+            raise ValueError("NOVA-KV recovery requires synchronous scheduling and pipeline parallel size 1")
+        if scheduler_config.scheduler_cls is not None:
+            raise ValueError("NOVA-KV recovery cannot be combined with a custom scheduler")
+        # Keep the config serializable when the executor starts its workers.
+        scheduler_config.scheduler_cls = "vllm_ascend.core.nova_scheduler.NovaScheduler"
+        try:
+            original_init(self, vllm_config, *args, **kwargs)
+            self.scheduler.nova_executor = self.model_executor
+        finally:
+            scheduler_config.scheduler_cls = None
+
+    engine_core.__init__ = init_with_nova_scheduler
+    engine_core._nova_scheduler_patched = True
+
+
 def _apply_patch() -> None:
     global _PATCHED
     if _PATCHED:
         return
     _PATCHED = True
 
+    _apply_nova_scheduler_patch()
+
     # Patch EngineCore.post_step
     pp_mtp_patch_post_step()
     # Patch EngineCoreProc.run_engine_core
     # And in _run_engine_core_patch_func:
-    # 1. Patch EngineCore.__init__ by _apply_profiling_patches
-    # 2. Patch class DPEngineCoreProc by _patch_dp_engine_core_proc
+    # Select the DPEngineCoreProc implementation in the child process.
     EngineCoreProc.run_engine_core = staticmethod(_run_engine_core_patch_func)
 
 

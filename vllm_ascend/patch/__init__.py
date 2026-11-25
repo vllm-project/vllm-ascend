@@ -140,10 +140,13 @@
 #      wrapper)
 #   3. `vllm.v1.engine.core.EngineCore.post_step` (pp-mtp patch, invocation
 #      moved here from patch_pp_mtp.py)
+#   4. `vllm.v1.engine.core.EngineCore.__init__`
+#      for opt-in NOVA-KV recovery.
 #    Why:
 #       Previously patch_balance_schedule and patch_dyntra_lb_core
 #       each wrapped `EngineCoreProc.run_engine_core` independently, forming
 #       an implicit wrapper chain whose correctness depended on import order.
+#       NOVA-KV also needs scheduler access to per-worker exact-window state.
 #    How：
 #       Install the single `run_engine_core` wrapper: initialize the ascend
 #       config, select `DyntraLBDPEngineCoreProc` (dyntra-lb enabled) or
@@ -152,6 +155,7 @@
 #       import. In `spawn` children, unpickling this wrapper imports this
 #       module, deterministically re-applying all engine-core-level patches
 #       before any `EngineCore` is instantiated.
+#       For NOVA-KV, install its scheduler and connect the executor after init.
 #    Related PR (if no, explain why):
 #       No, vllm-ascend internal refactor of its own platform patches.
 #    Future Plan:
@@ -1633,6 +1637,25 @@
 #    Future Plan:
 #       Once #65565 is included in all supported vLLM versions, remove this
 #       patch and implement the NPUWorker profiler-validation hook instead.
+#
+# ** NOVA-KV. File: worker/patch_nova_kv.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `Attention.__init__` and `Attention.get_kv_cache_spec`
+#    Why:
+#       Additional configuration cannot select a backend per full-attention
+#       layer before upstream Attention creates its implementation. The packed
+#       cache also requires a custom full-attention specification.
+#    How:
+#       Opt-in Qwen3.5 only: pass attn_backend through the existing constructor
+#       argument and customize its cache spec without discarding page padding.
+#       Model Runner V2 supplies NOVA request slots to the compressed backend.
+#       Capture mode wraps forward without changing the cache representation.
+#       The disabled path calls the original constructor and spec methods.
+#    Related PR (if no, explain why):
+#       No upstream PR yet; this experimental packed format is Ascend-specific.
+#    Future Plan:
+#       Remove these wrappers when upstream exposes per-layer backend selection
+#       from additional_config and a compressed full-attention cache layout hook.
 #
 # ** 35. File: platform/patch_parallel_config.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~

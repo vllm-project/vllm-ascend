@@ -195,6 +195,8 @@ class AscendMetadata:
     # never run again after capture.
     query_start_loc_gpu: torch.Tensor = None
     seq_lens_gpu: torch.Tensor = None
+    nova_request_slots: torch.Tensor | None = None
+    nova_request_slots_cpu: list[int] | None = None
 
     # ********************** KV Cache Related Properties ********************* #
     # Block addresses per sequence (Seq id -> list of physical block).
@@ -409,6 +411,8 @@ class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
             query_start_loc=query_start_loc,
             query_start_loc_gpu=common_attn_metadata.query_start_loc,
             seq_lens_gpu=common_attn_metadata.seq_lens,
+            nova_request_slots=common_attn_metadata.nova_request_slots,
+            nova_request_slots_cpu=common_attn_metadata.nova_request_slots_cpu,
             seq_lens=seq_lens,
             seq_lens_cpu=seq_lens,
             seq_lens_list=seq_lens_list,

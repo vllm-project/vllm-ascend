@@ -383,6 +383,8 @@ def build_attn_metadata(
     copy_sfa_restore_tails: bool = False,
     draft_layer_names: set[str] | None = None,
     common_metadata_callback=None,
+    nova_request_slots: torch.Tensor | None = None,
+    nova_request_slots_cpu: list[int] | None = None,
 ) -> dict[str, Any]:
     """Build attention metadata for Ascend NPUs."""
     if skip_ring_state_update is None:
@@ -500,6 +502,8 @@ def build_attn_metadata(
             max_query_len=max_query_len,
             block_table_tensor=block_table,
             slot_mapping=slot_mapping,
+            nova_request_slots=nova_request_slots,
+            nova_request_slots_cpu=nova_request_slots_cpu,
             positions=positions,
             attn_state=attn_state,
             graph_pad_size=graph_pad_size,
@@ -1631,6 +1635,12 @@ def _reshape_kv_cache_v2(
                 continue
 
             kv_cache_spec = layer_kv_cache_spec[layer_name]
+
+            if getattr(getattr(group, "backend", None), "uses_nova_kv_cache", False) is True:
+                kv_caches[layer_name] = group.backend.reshape_cache(
+                    kv_cache_raw_tensors[layer_name], kv_cache_spec, kernel_block_size
+                )
+                continue
 
             if type(kv_cache_spec) is FullAttentionSpec and is_c8_mxfp_kv_quant(vllm_config):
                 raw_cache = kv_cache_raw_tensors[layer_name]
