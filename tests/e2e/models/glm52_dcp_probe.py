@@ -35,6 +35,7 @@ RUNTIME_ENV_KEYS = (
     "PYTORCH_NPU_ALLOC_CONF",
     "VLLM_ENGINE_READY_TIMEOUT_S",
     "VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS",
+    "ASCEND_LAUNCH_BLOCKING",
 )
 
 
@@ -119,7 +120,7 @@ def command_for(args):
         "--max-num-seqs",
         "1",
         "--max-num-batched-tokens",
-        "1024",
+        str(args.max_num_batched_tokens),
         "--kv-cache-memory-bytes",
         str(args.kv_cache_bytes),
         "--kv-cache-dtype",
@@ -135,6 +136,8 @@ def command_for(args):
         command += ["--compilation-config", '{"cudagraph_mode":"FULL_DECODE_ONLY","cudagraph_capture_sizes":[1]}']
     else:
         command += ["--enforce-eager"]
+    if args.hf_overrides is not None:
+        command += ["--hf-overrides", args.hf_overrides]
     if args.mtp:
         command += ["--speculative-config", '{"method":"deepseek_mtp","num_speculative_tokens":3,"enforce_eager":true}']
     return command
@@ -201,11 +204,13 @@ def compare_baseline(report, path):
         "pcp",
         "mtp",
         "graph",
+        "max_num_batched_tokens",
         "kv_cache_bytes",
         "request_dp_rank",
         "kv_cache_dtype",
         "indexer_kv_dtype",
         "disable_mlapo",
+        "hf_overrides",
         "runtime_env",
     ):
         assert field in baseline, f"Baseline lacks {field}; rerun with the same probe protocol"
@@ -247,10 +252,16 @@ def main():
     parser.add_argument("--dcp", type=int, default=1)
     parser.add_argument("--request-dp-rank", type=int, default=0)
     parser.add_argument("--lengths", type=int, nargs="+", default=[4096, 16384, 65536])
+    parser.add_argument("--max-num-batched-tokens", type=int, default=1024)
     parser.add_argument("--kv-cache-bytes", type=int, default=4 * 1024**3)
     parser.add_argument("--kv-cache-dtype", choices=("int8", "auto"), default="int8")
     parser.add_argument("--indexer-kv-dtype", choices=("int8", "bf16"), default="int8")
     parser.add_argument("--disable-mlapo", action="store_true")
+    parser.add_argument(
+        "--hf-overrides",
+        type=json.loads,
+        help="JSON model-config overrides for a labeled diagnostic run; require the same value in both runs.",
+    )
     parser.add_argument("--mtp", action="store_true")
     parser.add_argument("--graph", action="store_true")
     parser.add_argument("--prepare-only", action="store_true")
@@ -261,6 +272,12 @@ def main():
     args = parser.parse_args()
     if not 0 <= args.request_dp_rank < args.dp:
         parser.error("--request-dp-rank must be within the configured DP group")
+    if args.max_num_batched_tokens <= 0:
+        parser.error("--max-num-batched-tokens must be positive")
+    if args.hf_overrides is not None:
+        if not isinstance(args.hf_overrides, dict):
+            parser.error("--hf-overrides must decode to a JSON object")
+        args.hf_overrides = json.dumps(args.hf_overrides, sort_keys=True, separators=(",", ":"))
     if args.dcp > 1 and args.baseline is None and not args.prepare_only:
         parser.error("A DCP>1 run requires --baseline from the same TP/DP/PP with DCP1")
     cases = build_cases(args.model, args.lengths)
@@ -279,10 +296,12 @@ def main():
         "dcp": args.dcp,
         "mtp": args.mtp,
         "graph": args.graph,
+        "max_num_batched_tokens": args.max_num_batched_tokens,
         "kv_cache_bytes": args.kv_cache_bytes,
         "kv_cache_dtype": args.kv_cache_dtype,
         "indexer_kv_dtype": args.indexer_kv_dtype,
         "disable_mlapo": args.disable_mlapo,
+        "hf_overrides": args.hf_overrides,
         "request_dp_rank": args.request_dp_rank,
         "runtime_env": {key: os.environ.get(key) for key in RUNTIME_ENV_KEYS},
         "probe_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),

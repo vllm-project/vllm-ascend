@@ -38,7 +38,7 @@ def test_build_cases_accounts_for_cross_boundary_token_merging(monkeypatch):
 @pytest.mark.parametrize("broken_output", [{"input_ids": [1, 2]}, [1, 2]])
 def test_build_cases_rejects_invalid_or_nonexpanding_tokenization(monkeypatch, broken_output):
     tokenizer = FakeTokenizer()
-    tokenizer.apply_chat_template = lambda *args, **kwargs: broken_output
+    monkeypatch.setattr(tokenizer, "apply_chat_template", lambda *args, **kwargs: broken_output)
     monkeypatch.setattr(probe.AutoTokenizer, "from_pretrained", lambda *args, **kwargs: tokenizer)
     with pytest.raises((AssertionError, ValueError)):
         probe.build_cases("unused", [256])
@@ -93,11 +93,13 @@ def _report():
         "dcp": 1,
         "mtp": False,
         "graph": False,
+        "max_num_batched_tokens": 1024,
         "kv_cache_bytes": 4 * 1024**3,
         "request_dp_rank": 0,
         "kv_cache_dtype": "int8",
         "indexer_kv_dtype": "int8",
         "disable_mlapo": False,
+        "hf_overrides": None,
         "runtime_env": {key: None for key in probe.RUNTIME_ENV_KEYS},
         "passed": True,
         "results": {"english-greedy": copy.deepcopy(result), "english-sampled": copy.deepcopy(result)},
@@ -121,12 +123,14 @@ def test_comparison_keeps_greedy_strict_and_sampling_topk(tmp_path, sampling, ex
         "tp",
         "mtp",
         "graph",
+        "max_num_batched_tokens",
         "kv_cache_bytes",
         "request_dp_rank",
         "pp_layer_partition",
         "kv_cache_dtype",
         "indexer_kv_dtype",
         "disable_mlapo",
+        "hf_overrides",
         "runtime_env",
         "prompt",
         "case-set",
@@ -141,7 +145,7 @@ def test_comparison_rejects_incomparable_runs(tmp_path, field):
         actual["tp"] = 4
     elif field in ("mtp", "graph", "disable_mlapo"):
         actual[field] = True
-    elif field == "kv_cache_bytes":
+    elif field in ("max_num_batched_tokens", "kv_cache_bytes"):
         actual[field] //= 2
     elif field == "request_dp_rank":
         actual[field] = 1
@@ -153,6 +157,8 @@ def test_comparison_rejects_incomparable_runs(tmp_path, field):
         actual[field]["LCCL_DETERMINISTIC"] = "1"
     elif field == "prompt":
         actual["results"]["english-greedy"]["prompt_sha256"] = "different"
+    elif field == "hf_overrides":
+        actual[field] = '{"index_topk":8192}'
     else:
         actual["results"].pop("english-greedy")
     with pytest.raises(AssertionError):
@@ -180,15 +186,18 @@ def test_serve_command_preserves_cache_and_preprocess_controls(cache_dtype, inde
         pcp=1,
         dcp=8,
         lengths=[4096],
+        max_num_batched_tokens=128,
         kv_cache_bytes=4 * 1024**3,
         kv_cache_dtype=cache_dtype,
         indexer_kv_dtype=indexer_dtype,
         disable_mlapo=disable_mlapo,
+        hf_overrides='{"index_topk":8192}',
         graph=False,
         mtp=False,
     )
     command = probe.command_for(args)
     assert command[command.index("--kv-cache-dtype") + 1] == cache_dtype
     assert command[command.index("--attention_config.indexer_kv_dtype") + 1] == indexer_dtype
+    assert command[command.index("--hf-overrides") + 1] == '{"index_topk":8192}'
     additional = json.loads(command[command.index("--additional-config") + 1])
     assert additional == {"enable_fused_mc2": 0, "enable_mlapo": not disable_mlapo}
