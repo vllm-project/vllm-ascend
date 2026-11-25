@@ -761,6 +761,14 @@ class TestNPUWorker(TestBase):
         with (
             patch.object(NPUWorker, "__init__", lambda self, **kwargs: None),
             patch.object(NPUWorker, "_init_device", return_value=device),
+            patch(
+                "vllm_ascend.worker.worker.get_ascend_config",
+                return_value=SimpleNamespace(
+                    ascend_compilation_config=SimpleNamespace(
+                        enable_static_kernel=False, enable_super_kernel=False, enable_npugraph_ex=False
+                    )
+                ),
+            ),
             patch("vllm_ascend.worker.worker.init_workspace_manager"),
             patch("vllm_ascend.worker.worker.report_usage_stats") as report_usage_stats,
             patch("vllm_ascend.worker.v2.utils.torch_cuda_wrapper", wrapper),
@@ -2109,6 +2117,7 @@ class TestNPUWorkerWeightUpdate(TestBase):
         worker = object.__new__(NPUWorker)
         worker.weight_transfer_engine = engine
         worker._weight_update_active = False
+        worker._static_kernel_runtime_initialized = False
         worker._weight_update_is_draft = False
         worker._incomplete_weight_updates = set()
         worker._kv_cache_reclaimable = False

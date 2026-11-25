@@ -27,6 +27,7 @@ from typing import Any
 import numpy as np
 import torch
 from vllm.compilation import breakable_cudagraph
+from vllm.compilation.cuda_graph import CUDAGraphWrapper
 from vllm.config import VllmConfig
 from vllm.config.compilation import CompilationMode, CUDAGraphMode
 from vllm.distributed.kv_transfer import get_kv_transfer_group, has_kv_transfer_group
@@ -56,6 +57,7 @@ from vllm.v1.worker.gpu.model_runner import (
 )
 from vllm.v1.worker.gpu.model_states.mamba_hybrid import MambaHybridModelState
 from vllm.v1.worker.gpu.spec_decode.speculator import DraftModelSpeculator
+from vllm.v1.worker.utils import get_uniform_decode_token_count
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import (
@@ -110,6 +112,7 @@ from vllm_ascend.observability.runtime_guard.hooks import (
 )
 from vllm_ascend.observability.runtime_guard.processor import RuntimeGuardProcessor
 from vllm_ascend.ops.rotary_embedding import set_cos_and_sin, update_cos_sin
+from vllm_ascend.platform import QWEN_FA3_TARGETS
 from vllm_ascend.utils import (
     create_hccl_pg_options,
     enable_sfa_dcp_sharded_indexer,
@@ -151,6 +154,9 @@ from vllm_ascend.worker.v2.utils import (
 
 class NPUModelRunner(GPUModelRunner):
     """Model runner for Ascend NPUs."""
+
+    # The base runner initializes this using self.pcp_manager_cls.
+    pcp_manager: AscendPCPManager | None
 
     # vLLM #51718 overlays hybrid Attention/Mamba groups in one standardized
     # backing allocation. Ascend MRV2 preserves that allocation and exposes
@@ -644,6 +650,11 @@ class NPUModelRunner(GPUModelRunner):
                 for module in model.modules()
                 if id(module) not in owner_ids and callable(getattr(module, "close_host_offload", None))
             )
+        config = self.ascend_config.ascend_compilation_config
+        if config.enable_static_kernel and not config.enable_npugraph_ex:
+            torch.npu.synchronize()
+            breakable_cudagraph.BreakableCUDAGraphWrapper.clear_all_graphs()
+            CUDAGraphWrapper.clear_all_graphs()
         # Drop C8 packet views before the parent collects tensors and
         # empties the allocator cache.
         entries = getattr(self, "_c8_mxfp_v_scale_caches", None)
@@ -888,9 +899,22 @@ class NPUModelRunner(GPUModelRunner):
 
     def gather_batch_req_state(self, scheduler_output: SchedulerOutput, dummy_run: bool):
         batch_state, uniform_token_count = super().gather_batch_req_state(scheduler_output, dummy_run)
+        if self.pcp_manager is not None:
+            batch_state = self.pcp_manager.prepare_pcp_batch_req_state(batch_state)
+
+            if batch_state is not None and batch_state.prefill_runs_as_decode_np is not None:
+                max_query_len = int(batch_state.num_scheduled_tokens.max())
+                uniform_token_count = get_uniform_decode_token_count(
+                    len(batch_state.req_ids),
+                    batch_state.num_tokens,
+                    max_query_len,
+                    batch_state.decode_graph_eligible,
+                )
         if self._target_uses_flashmla and batch_state is not None:
             # The backend order must precede derived inputs and graph dispatch.
             batch_state, uniform_token_count = prepare_flashmla_batch_req_state(batch_state, uniform_token_count)
+        if self.pcp_manager is not None:
+            self.pcp_manager.set_dispatch_batch_req_state(batch_state)
         expert_offload.prepare_batch(self, batch_state)
         return batch_state, uniform_token_count
 
@@ -1406,6 +1430,18 @@ class NPUModelRunner(GPUModelRunner):
             )
 
         if getattr(self, "_skip_fa3_cpu_length_sync", False):
+            architecture = getattr(self.model_config, "architecture", None)
+            if architecture in QWEN_FA3_TARGETS:
+                # Only this Qwen hybrid has been validated without the runner's CPU length snapshot.
+                return (
+                    architecture == "Qwen3_5ForConditionalGeneration"
+                    and spec is not None
+                    and spec.method == "dflash"
+                    and spec.draft_model_config is not None
+                    and "DFlash2DraftModel" in (spec.draft_model_config.architectures or ())
+                    and isinstance(getattr(self, "model_state", None), MambaHybridModelState)
+                    and self.vllm_config.kv_transfer_config is None
+                )
             return True
 
         if spec is None or self.speculator is None or spec.method != "dspark" or spec.draft_model_config is None:
