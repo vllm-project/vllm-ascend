@@ -149,12 +149,10 @@ class AscendMLABackend(AttentionBackend):
         num_blocks: int,
         layout: Any,
         kernel_block_size: int | None = None,
-        *,
-        kv_lora_rank: int,
-        qk_rope_head_dim: int,
-        use_flashmla: bool,
     ) -> KVCacheRuntimeShapesAndDtypes:
         """Return NHD Tensor shapes and storage dtypes for FIA and FlashMLA."""
+        if spec.kv_lora_rank is None or spec.qk_rope_head_dim is None:
+            raise ValueError("MLA runtime views require component dimensions in the cache spec.")
         block_size = spec.block_size if kernel_block_size is None else kernel_block_size
         if block_size <= 0 or spec.block_size % block_size:
             raise ValueError("MLA kernel block size must divide the manager block size.")
@@ -164,18 +162,21 @@ class AscendMLABackend(AttentionBackend):
             raise ValueError("MLA physical pages must split into dtype-aligned kernel slots.")
         slot_bytes = spec.page_size_bytes // kernel_blocks_per_manager
         prefix = (num_blocks * kernel_blocks_per_manager, block_size, spec.num_kv_heads)
-        widths = (kv_lora_rank, qk_rope_head_dim)
+        widths = (spec.kv_lora_rank, spec.qk_rope_head_dim)
         if spec.num_kv_heads * block_size * sum(widths) * itemsize > slot_bytes:
             raise ValueError("MLA kernel slot is smaller than its cache components.")
-        if use_flashmla:
+        if spec.mla_cache_layout == "token_interleaved":
             widths = (sum(widths),)
         return tuple((*prefix, width) for width in widths), (spec.dtype,) * len(widths)
 
     @staticmethod
     def format_runtime_views(
-        _spec: AscendMLAAttentionSpec, components: list[torch.Tensor]
+        spec: AscendMLAAttentionSpec, components: list[torch.Tensor]
     ) -> torch.Tensor | tuple[torch.Tensor, ...]:
-        return components[0] if len(components) == 1 else tuple(components)
+        if spec.mla_cache_layout == "token_interleaved":
+            (cache,) = components
+            return cache
+        return tuple(components)
 
     @staticmethod
     def get_impl_cls() -> type["MLAAttentionImpl"]:
@@ -203,39 +204,6 @@ class AscendMLAAttention(MLAAttention):
     """
 
     supports_pcp_dcp: ClassVar[bool] = True
-
-    def get_runtime_shapes_and_dtypes(
-        self,
-        spec: AscendMLAAttentionSpec,
-        num_blocks: int,
-        layout: Any,
-        kernel_block_size: int | None = None,
-    ) -> KVCacheRuntimeShapesAndDtypes:
-        """Supply layer-owned MLA geometry without adding it to the cache spec."""
-        # Resolve SFA lazily so importing MLA does not initialize the sparse backend.
-        from vllm_ascend.attention.sfa_v1 import AscendSFABackend
-
-        backend = self.get_attn_backend()
-        if issubclass(backend, AscendMLABackend):
-            return backend.get_runtime_shapes_and_dtypes(
-                spec,
-                num_blocks,
-                layout,
-                kernel_block_size,
-                kv_lora_rank=self.kv_lora_rank,
-                qk_rope_head_dim=self.qk_rope_head_dim,
-                use_flashmla=getattr(self.impl, "use_flashmla", False),
-            )
-        if issubclass(backend, AscendSFABackend):
-            return backend.get_runtime_shapes_and_dtypes(
-                spec,
-                num_blocks,
-                layout,
-                kernel_block_size,
-                kv_lora_rank=self.kv_lora_rank,
-                qk_rope_head_dim=self.qk_rope_head_dim,
-            )
-        return backend.get_runtime_shapes_and_dtypes(spec, num_blocks, layout, kernel_block_size)
 
     def get_kv_cache_spec(self, vllm_config: VllmConfig) -> AscendMLAAttentionSpec:
         """Publish the complete cache demand using the selected execution format."""
@@ -267,6 +235,9 @@ class AscendMLAAttention(MLAAttention):
         # Reuse the physical packing selected by the execution implementation.
         values.update(
             num_heads=storage_heads,
+            kv_lora_rank=self.kv_lora_rank,
+            qk_rope_head_dim=self.qk_rope_head_dim,
+            mla_cache_layout="token_interleaved" if getattr(self.impl, "use_flashmla", False) else "component_major",
             model_version=spec.model_version or getattr(self, "model_version", None),
             indexes_kv_by_block_stride=bool(
                 getattr(spec, "indexes_kv_by_block_stride", False) or getattr(self, "indexes_kv_by_block_stride", False)
