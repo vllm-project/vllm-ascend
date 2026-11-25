@@ -302,7 +302,7 @@ Key multi-node co-located deployment parameters:
 | `--reasoning-parser step5` | Splits the output at Step-5's thinking markers, returning the chain of thought in `reasoning_content` instead of mixing it into `content`. |
 | `VLLM_USE_FASTOKENS=1` | Replaces the default Hugging Face tokenizer backend with the [fastokens](https://github.com/crusoecloud/fastokens) Rust implementation, which is faster on long prompts. Install `fastokens` (version 0.2.0 or later) in the same Python environment and check `python -c "import fastokens"`; with the variable set and the package missing, the engine stops at startup. Only the API server process on Node 0 builds a tokenizer, so the variable has no effect on the headless worker. |
 
-Because the weights are large, the load time is related to the disk read speed, and the first load usually takes about 10 minutes. After both nodes have joined and node 0 reports `Application startup complete`, the service is ready; see [Section 6](#6-functional-verification) for verification. 
+Because the weights are large, the load time is related to the disk read speed, and the first load usually takes about 10 minutes. After both nodes have joined and node 0 reports `Application startup complete`, the service is ready; see [Section 6](#6-functional-verification) for verification.
 
 ### 5.2 Multi-Node PD Separation Deployment (2P4D) {: #52-multi-node-pd-separation-deployment-2p4d }
 
@@ -315,7 +315,7 @@ both roles.
 The parallelism layout, `--max-model-len`, and the scheduler limits in this
 section come from the validated Prefill and Decode scripts. Both roles use
 `--max-model-len 1048576` and `--max-num-seqs 256`; Prefill uses
-`--max-num-batched-tokens 16384` and Decode uses `2048`. 
+`--max-num-batched-tokens 16384` and Decode uses `2048`.
 
 Before starting the service:
 
@@ -654,10 +654,10 @@ ock.mmc.local_service.protocol = device_urma
 ock.mmc.local_service.dram.size = 64GB
 ock.mmc.local_service.hcom_url = tcp://<HCCL_IF_IP>:27000
 ```
+
 !!! note
 
     `hcom_url` must use the real IP of the node. The default `tcp://127.0.0.1:7000` makes cross-host ranks unreachable and fails with `hybm_transport_connect failed: -6`. The port base plus the local rank selects the port, so eight ranks on one host use `27000–27007`. A single generic file without `hcom_url`, or with one shared `127.0.0.1`, only works for a one-node pool — do not reuse it for a multi-node deployment.
-
 
 Both roles start the pool client inside the engine through `MMC_LOCAL_CONFIG_PATH`; no separate pool worker process is started.
 
@@ -1061,7 +1061,7 @@ Refer to the [performance tuning guide](../../developer_guide/performance_and_de
 
 ## 10 FAQ {: #10-faq }
 
-For common environment, installation, and general parameter issues, please refer to the [Public FAQs](../../faqs.md). 
+For common environment, installation, and general parameter issues, please refer to the [Public FAQs](../../faqs.md).
 
 - **Q: The service fails to start, or reports an out-of-memory error soon after accepting requests.**
 A: The scheduler limits, context length, or graph capture do not fit device memory. Lower `--max-num-seqs` or `--max-num-batched-tokens` first, then `--max-model-len` or `--gpu-memory-utilization`. On Decode, DP8 × TP4 can report `No available memory for the cache blocks`; keep the four-node group and cut the context or batch-token budget first, or fall back to TP8.
