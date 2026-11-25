@@ -326,6 +326,85 @@ def test_add_lora_fused_moe_scales_shrink_buffer_by_routed_weight() -> None:
     torch.testing.assert_close(delta, torch.tensor([[1.0, 1.0], [3.0, 3.0]]))
 
 
+def test_add_lora_fused_moe_shared_lora_w13_and_w2_math_matches_dense_reference() -> None:
+    from vllm.lora.ops.torch_ops import bgmv_expand_slice, bgmv_shrink
+
+    wrapper = _make_wrapper(is_prefill=False, no_lora=False)
+    wrapper.bgmv_shrink = bgmv_shrink
+    wrapper.bgmv_expand_slice = bgmv_expand_slice
+
+    torch.manual_seed(0)
+    max_loras, num_experts, rank = 2, 4, 3
+    hidden, inter = 6, 4
+    num_tokens = 6
+    token_lora_mapping = torch.tensor([0, 1, -1, 1, 0, 1], dtype=torch.long)
+    expert_ids = torch.tensor([2, 0, 1, 3, 4, 1], dtype=torch.long)
+    adapter_enabled = torch.tensor([0, 1], dtype=torch.int32)
+
+    # w13 shared LoRA: a_gate/a_up shape [max_loras, 1, rank, hidden], b shape [max_loras, num_experts, inter, rank]
+    a_gate = torch.randn(max_loras, 1, rank, hidden, dtype=torch.float32)
+    a_up = torch.randn(max_loras, 1, rank, hidden, dtype=torch.float32)
+    b_gate = torch.randn(max_loras, num_experts, inter, rank, dtype=torch.float32)
+    b_up = torch.randn(max_loras, num_experts, inter, rank, dtype=torch.float32)
+    x_w13 = torch.randn(num_tokens, hidden, dtype=torch.float32)
+    offset = 2
+    y_w13_base = torch.randn(num_tokens, offset + 2 * inter, dtype=torch.float32)
+    y_w13 = y_w13_base.clone()
+
+    wrapper.add_lora_fused_moe(
+        y_w13,
+        x_w13,
+        (a_gate, a_up),
+        (b_gate, b_up),
+        expert_ids=expert_ids,
+        adapter_enabled=adapter_enabled,
+        token_lora_mapping=token_lora_mapping,
+        offset=offset,
+    )
+
+    y_w13_ref = y_w13_base.clone()
+    for row in range(num_tokens):
+        lora_id = int(token_lora_mapping[row].item())
+        exp_id = int(expert_ids[row].item())
+        if lora_id < 0 or exp_id >= num_experts or not adapter_enabled[lora_id].item():
+            continue
+        gate_delta = (x_w13[row] @ a_gate[lora_id, 0].T) @ b_gate[lora_id, exp_id].T
+        up_delta = (x_w13[row] @ a_up[lora_id, 0].T) @ b_up[lora_id, exp_id].T
+        y_w13_ref[row, offset : offset + inter] += gate_delta
+        y_w13_ref[row, offset + inter : offset + 2 * inter] += up_delta
+    torch.testing.assert_close(y_w13, y_w13_ref, atol=1e-5, rtol=1e-5)
+
+    # w2 shared LoRA: a shape [max_loras, num_experts, rank, inter], b shape [max_loras, 1, hidden, rank]
+    a_down = torch.randn(max_loras, num_experts, rank, inter, dtype=torch.float32)
+    b_down = torch.randn(max_loras, 1, hidden, rank, dtype=torch.float32)
+    x_w2 = torch.randn(num_tokens, inter, dtype=torch.float32)
+    topk_weights = torch.tensor([0.25, 0.5, 0.75, 1.25, 0.4, 0.9], dtype=torch.float32)
+    y_w2_base = torch.randn(num_tokens, hidden, dtype=torch.float32)
+    y_w2 = y_w2_base.clone()
+
+    wrapper.add_lora_fused_moe(
+        y_w2,
+        x_w2,
+        (a_down,),
+        (b_down,),
+        expert_ids=expert_ids,
+        adapter_enabled=adapter_enabled,
+        token_lora_mapping=token_lora_mapping,
+        mul_routed_weight=True,
+        topk_weights=topk_weights,
+    )
+
+    y_w2_ref = y_w2_base.clone()
+    for row in range(num_tokens):
+        lora_id = int(token_lora_mapping[row].item())
+        exp_id = int(expert_ids[row].item())
+        if lora_id < 0 or exp_id >= num_experts or not adapter_enabled[lora_id].item():
+            continue
+        down_delta = ((x_w2[row] @ a_down[lora_id, exp_id].T) * topk_weights[row]) @ b_down[lora_id, 0].T
+        y_w2_ref[row] += down_delta
+    torch.testing.assert_close(y_w2, y_w2_ref, atol=1e-5, rtol=1e-5)
+
+
 def test_add_lora_logits_uses_sampler_indices() -> None:
     wrapper = _make_wrapper()
     y = torch.zeros(2, 8)
@@ -335,3 +414,120 @@ def test_add_lora_logits_uses_sampler_indices() -> None:
     wrapper.add_lora_logits(y, x, a, b, 0.5)
     assert torch.equal(wrapper.bgmv_shrink.call_args.args[3], torch.tensor([1, 0]))
     wrapper.bgmv_expand.assert_called_once()
+
+
+@pytest.mark.parametrize("is_prefill", [False, True])
+@pytest.mark.parametrize("add_inputs", [True, False])
+def test_apply_expand_and_shrink_fp32_uses_weight_dtype_workspace(is_prefill: bool, add_inputs: bool) -> None:
+    wrapper = _make_wrapper(is_prefill=is_prefill, no_lora=False, device_type=AscendDeviceType.A3)
+    seen: dict[str, object] = {}
+
+    def strict_shrink(inp, weight, out, *args) -> None:
+        assert inp.dtype in (torch.half, torch.bfloat16)
+        seen["shrink_x_dtype"] = inp.dtype
+        out.copy_(torch.full_like(out, 2.0))
+
+    def strict_expand_slice(inp, weight, out, *args) -> None:
+        assert out.dtype in (torch.half, torch.bfloat16)
+        slice_offset, slice_size, passed_add_inputs = args[-3:]
+        seen["expand_out_dtype"] = out.dtype
+        seen["expand_offset"] = slice_offset
+        seen["expand_slice_size"] = slice_size
+        seen["expand_add_inputs"] = passed_add_inputs
+        out[:, slice_offset : slice_offset + slice_size] += 1.5
+
+    if is_prefill:
+        wrapper.sgmv_shrink = Mock(side_effect=strict_shrink)
+        wrapper.sgmv_expand_slice = Mock(side_effect=strict_expand_slice)
+    else:
+        wrapper.bgmv_shrink = Mock(side_effect=strict_shrink)
+        wrapper.bgmv_expand_slice = Mock(side_effect=strict_expand_slice)
+
+    shrink_buf = torch.zeros(2, 4, dtype=torch.float32)
+    x_fp32 = torch.ones(2, 8, dtype=torch.float32)
+    w_a = torch.ones(2, 4, 8, dtype=torch.bfloat16)
+    wrapper._apply_shrink(shrink_buf, x_fp32, w_a, 0.5)
+    assert seen["shrink_x_dtype"] == torch.bfloat16
+
+    y_base = torch.tensor([[1.0, 2.0, 3.0, 4.0, 5.0, 6.0], [7.0, 8.0, 9.0, 10.0, 11.0, 12.0]], dtype=torch.float32)
+    y = y_base.clone()
+    w_b = torch.ones(2, 4, 4, dtype=torch.bfloat16)
+    wrapper._apply_expand(y, shrink_buf, w_b, y_offset=2, y_slice_size=4, add_inputs=add_inputs)
+
+    assert y.dtype == torch.float32
+    assert seen["expand_out_dtype"] == torch.bfloat16
+    assert seen["expand_offset"] == 0
+    assert seen["expand_slice_size"] == 4
+    assert seen["expand_add_inputs"] is True
+    expected = y_base.clone()
+    if add_inputs:
+        expected[:, 2:6] += 1.5
+    else:
+        expected[:, 2:6] = 1.5
+    torch.testing.assert_close(y, expected)
+
+
+@pytest.mark.parametrize("is_prefill", [False, True])
+def test_add_lora_linear_max_loras_gt1_supports_fp32_gating_output(is_prefill: bool) -> None:
+    from vllm.lora.ops import torch_ops
+
+    wrapper = object.__new__(PunicaWrapperNPU)
+    wrapper.is_prefill = is_prefill
+    wrapper.no_lora = False
+    wrapper.ascend_device_type = AscendDeviceType.A3
+    wrapper._single_lora_slot = False
+    wrapper._single_lora_mask = None
+    wrapper._lora_shrink_buffers = {}
+    wrapper._lora_triton_workspaces = {}
+    wrapper._max_num_batched_tokens = 8
+    wrapper.batch_size = 3
+    wrapper.max_length = 2
+    wrapper.token_nums = 4
+    wrapper._seq_start_locs = torch.tensor([0, 2, 3, 4], dtype=torch.int32)
+    wrapper._seq_lengths = torch.tensor([2, 1, 1], dtype=torch.int32)
+    wrapper._lora_indices_per_batch = torch.tensor([0, -1, 1], dtype=torch.int32)
+    wrapper._token_lora_indices = torch.tensor([0, 0, -1, 1], dtype=torch.int64)
+    wrapper._sampler_indices = torch.tensor([0, 0, -1, 1], dtype=torch.int64)
+    wrapper.indices_len = [4, 4, 3, 3]
+
+    def checked_bgmv_shrink(x, w, y, indices, scale):
+        assert x.dtype in (torch.half, torch.bfloat16)
+        return torch_ops.bgmv_shrink(x, w, y, indices, scale)
+
+    def checked_bgmv_expand_slice(x, w, y, indices, y_offset, y_slice_size, add_inputs=True):
+        assert y.dtype in (torch.half, torch.bfloat16)
+        return torch_ops.bgmv_expand_slice(x, w, y, indices, y_offset, y_slice_size, add_inputs=add_inputs)
+
+    def checked_sgmv_shrink(x, w, y, *args):
+        assert x.dtype in (torch.half, torch.bfloat16)
+        return torch_ops.sgmv_shrink(x, w, y, *args)
+
+    def checked_sgmv_expand_slice(x, w, y, *args):
+        assert y.dtype in (torch.half, torch.bfloat16)
+        return torch_ops.sgmv_expand_slice(x, w, y, *args)
+
+    wrapper.bgmv_shrink = checked_bgmv_shrink
+    wrapper.bgmv_expand_slice = checked_bgmv_expand_slice
+    wrapper.sgmv_shrink = checked_sgmv_shrink
+    wrapper.sgmv_expand_slice = checked_sgmv_expand_slice
+
+    rank, in_features, out_features = 4, 8, 6
+    torch.manual_seed(42)
+    x = torch.randn(4, in_features, dtype=torch.bfloat16)
+    lora_a = torch.randn(2, 1, rank, in_features, dtype=torch.bfloat16)
+    lora_b = torch.randn(2, 1, out_features, rank, dtype=torch.bfloat16)
+    y_base = torch.randn(4, out_features, dtype=torch.float32)
+    y = y_base.clone()
+
+    with patch.object(wrapper, "_in_graph_mode", return_value=False):
+        wrapper._lora_linear_kernel(y, x, (lora_a,), (lora_b,), 0.5, (out_features,))
+
+    assert y.dtype == torch.float32
+    y_ref = y_base.clone()
+    for row in range(4):
+        slot = int(wrapper._token_lora_indices[row].item())
+        if slot < 0:
+            continue
+        delta = (((x[row].float() @ lora_a[slot, 0].float().T) * 0.5) @ lora_b[slot, 0].float().T).to(torch.bfloat16)
+        y_ref[row] += delta.float()
+    torch.testing.assert_close(y, y_ref, atol=2e-2, rtol=2e-2)
