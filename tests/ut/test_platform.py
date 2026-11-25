@@ -3178,3 +3178,26 @@ def test_update_compilation_modes_allows_full_mode_hnd_enforce_eager(pin_kv_layo
     vllm_config = _gate_vllm_config(CUDAGraphMode.FULL, enforce_eager=True)
     _update_compilation_modes(vllm_config, _gate_ascend_config())
     assert vllm_config.compilation_config.cudagraph_mode == CUDAGraphMode.FULL
+
+
+def test_resolved_layout_name_tolerates_missing_cache_config(pin_kv_layout):
+    """Review thread (gemini-code-assist): a config whose cache_config is
+    absent, None, or silent about the layout must fall back to the
+    environment instead of raising. RED on the unpatched tree with
+    AttributeError."""
+    from vllm_ascend.platform import _resolved_kv_cache_layout_name
+
+    partial_configs = [
+        SimpleNamespace(),  # no cache_config attribute at all
+        SimpleNamespace(cache_config=None),  # attribute present but None
+        SimpleNamespace(cache_config=SimpleNamespace()),  # names no layout
+    ]
+    pin_kv_layout(None)
+    for config in partial_configs:
+        assert _resolved_kv_cache_layout_name(config) is None
+    pin_kv_layout("HND")
+    for config in partial_configs:
+        assert _resolved_kv_cache_layout_name(config) == "LBHNC"
+    # Precedence is untouched: an explicit cache_config layout still wins.
+    explicit = SimpleNamespace(cache_config=SimpleNamespace(kv_cache_layout="NHD"))
+    assert _resolved_kv_cache_layout_name(explicit) == "NHD"

@@ -1527,7 +1527,10 @@ def _resolved_kv_cache_layout_name(vllm_config: VllmConfig) -> str | None:
     explicit choice (the Ascend attention backend reads it directly too).
     The legacy HND alias is normalized to its canonical LBHNC name.
     """
-    layout = getattr(vllm_config.cache_config, "kv_cache_layout", None)
+    # cache_config can be absent or None on a partially built config (e.g. a
+    # test fixture); such a config names no explicit layout to honor.
+    cache_config = getattr(vllm_config, "cache_config", None)
+    layout = getattr(cache_config, "kv_cache_layout", None)
     if layout is None:
         layout = envs_vllm.VLLM_KV_CACHE_LAYOUT
     if layout is None:
