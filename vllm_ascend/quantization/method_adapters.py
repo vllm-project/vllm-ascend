@@ -238,9 +238,10 @@ class AscendLinearMethod(LinearMethodBase):
             from vllm.model_executor.layers.fusion.quant_activation import as_quantized_activation
             from vllm.model_executor.layers.quantization.utils.quant_utils import kInt8DynamicTokenSym
 
-            quantized = as_quantized_activation(x, getattr(layer, "_input_quant_key", None))
+            input_quant_key = getattr(layer, "_input_quant_key", None)
+            quantized = as_quantized_activation(x, input_quant_key)
             if quantized is not None:
-                if layer._input_quant_key != kInt8DynamicTokenSym:
+                if input_quant_key != kInt8DynamicTokenSym:
                     raise ValueError("Unsupported pre-quantized input for Ascend linear")
                 x = PreparedLinearInput(quantized.data, quantized.scale, quantized.orig_dtype)
         if isinstance(layer, RowParallelLinear):
