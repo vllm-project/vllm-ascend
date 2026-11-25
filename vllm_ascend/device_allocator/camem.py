@@ -55,6 +55,8 @@ def unmap_and_release(allocation_handle: HandleType) -> None:
     python_unmap_and_release(*allocation_handle)
 
 
+# TODO: Use the upstream implementation once torch_npu provides the
+# required memory-pool snapshot support.
 def discardable_allocations(tensors: Collection[int]) -> set[int]:
     """Map parameter storages to allocation addresses, like upstream."""
     if not tensors:
@@ -259,6 +261,9 @@ class CaMemAllocator(CuMemAllocator):
         finally:
             data.is_asleep = True
 
+    # TODO: Remove this override once all supported vLLM versions include
+    # the upstream discard support. Inherit CuMemAllocator.discard and keep
+    # the Ascend _put_to_sleep implementation.
     def discard(self, tags: tuple[str, ...] | str) -> None:
         """Discard mapped allocations with the given tags without CPU backup."""
         if isinstance(tags, str):

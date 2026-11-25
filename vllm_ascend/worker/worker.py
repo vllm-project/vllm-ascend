@@ -271,6 +271,8 @@ class NPUWorker(GPUWorker):
             signal.signal(signal.SIGTERM, signal_handler)
             signal.signal(signal.SIGINT, signal_handler)
 
+    # TODO: Remove this override and inherit GPUWorker._discardable_parameters
+    # once all supported vLLM versions include the upstream implementation.
     def _discardable_parameters(self, model: nn.Module) -> set[int]:
         """Storage of the parameters the weight update rewrites."""
         storage = {
