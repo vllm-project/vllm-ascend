@@ -58,8 +58,10 @@ from vllm_ascend.quantization.methods import (
 from vllm_ascend.utils import (
     ACL_FORMAT_FRACTAL_ND,
     ACL_FORMAT_FRACTAL_NZ,
+    COMPRESSED_TENSORS_METHOD,
     AscendDeviceType,
     _round_up,
+    attention_calculation_stream,
     dispose_layer,
     enable_dsa_cp,
     enable_dsa_cp_with_o_proj_tp,
@@ -67,6 +69,7 @@ from vllm_ascend.utils import (
     enable_sp,
     get_ascend_device_type,
     maybe_trans_nz,
+    npu_stream_switch,
 )
 from vllm_ascend.worker.npu_input_batch import NPUInputBatch
 
@@ -634,6 +637,9 @@ class AscendSFAImpl(MLAAttentionImpl):
                 self.sfa_qsfa_tile_size,
             )
         self.preprocess_type = PreprocessType.NATIVE
+        # Overlap the indexer q-projection with the indexer k pre-processing by
+        # running the former on the attention calculation stream.
+        self.enable_indexer_multistream = ascend_config.multistream_sfa_indexer_overlap
 
         self.enable_mlapo = bool(get_ascend_config().enable_mlapo)
 
@@ -1391,17 +1397,12 @@ class AscendSFAImpl(MLAAttentionImpl):
         )
         return hidden_states, ql_nope, q_pe, q_c
 
-    def indexer_select_pre_process(
+    def _indexer_pre_vector_part(
         self,
         kw: torch.Tensor,
         cos: torch.Tensor,
         sin: torch.Tensor,
-    ):
-        if not self.has_indexer:
-            raise RuntimeError(
-                f"indexer_select_pre_process should not be called when indexer is None. layer_name={self.layer_name}."
-            )
-
+    ) -> torch.Tensor:
         assert kw is not None
         assert self.k_norm is not None
 
@@ -1428,7 +1429,9 @@ class AscendSFAImpl(MLAAttentionImpl):
             k_li_pe = k_li_pe.squeeze(2)
 
             k_li = torch.cat([k_li_pe, k_li_nope], dim=-1)  # [b*s,128]
+        return k_li
 
+    def _indexer_pre_c8_quant(self, k_li: torch.Tensor):
         if self.enable_sparse_li_c8:
             k_li = k_li @ AscendSFAImpl.k_hadamard
             k_li, k_li_scale = torch_npu.npu_dynamic_quant(k_li.view(-1, self.head_dim), dst_type=self.c8_k_cache_dtype)
@@ -1436,35 +1439,52 @@ class AscendSFAImpl(MLAAttentionImpl):
             k_li_scale = k_li_scale.unsqueeze(-1)  # [b*s,1]
         else:
             k_li_scale = None
-
         return k_li, k_li_scale
 
-    def indexer_select_post_process(
+    def indexer_select_pre_process(
         self,
         kw: torch.Tensor,
-        q_c: torch.Tensor | tuple[torch.Tensor, torch.Tensor],
-        kv_cache: tuple[torch.Tensor, ...],
-        attn_metadata: M,
         cos: torch.Tensor,
         sin: torch.Tensor,
-        actual_seq_lengths_query: torch.Tensor,
-        actual_seq_lengths_key: torch.Tensor,
     ):
         if not self.has_indexer:
             raise RuntimeError(
-                f"indexer_select_post_process should not be called when indexer is None. layer_name={self.layer_name}."
+                f"indexer_select_pre_process should not be called when indexer is None. layer_name={self.layer_name}."
             )
 
-        assert kw is not None
-        assert self.wq_b is not None
+        k_li = self._indexer_pre_vector_part(kw, cos, sin)
+        return self._indexer_pre_c8_quant(k_li)
 
-        weights = kw[:, self.head_dim :]
+    def _can_overlap_indexer_q_proj(self, q_c) -> bool:
+        """Whether the indexer q projection can be split into its vector part
+        (quantization) and cube part (quant matmul) so that they can be issued
+        on an auxiliary stream. Only the static W8A8 path exposes the ACLNN
+        quantization parameters required by the split."""
         if isinstance(q_c, tuple):
-            q_c_tensor, q_c_scale = q_c
+            return True
+        if isinstance(q_c, torch.Tensor) and q_c.dtype == torch.int8:
+            return True
+        return hasattr(self.wq_b, "aclnn_input_scale")
+
+    def _indexer_q_quantize(self, q_c):
+        """Vector part of the indexer q projection: int8 quantization of q_c."""
+        if isinstance(q_c, tuple) or q_c.dtype == torch.int8:
+            return q_c
+        return torch.ops.vllm.quantize(
+            q_c,
+            self.wq_b.aclnn_input_scale,
+            self.wq_b.aclnn_input_scale_reciprocal,
+            self.wq_b.aclnn_input_offset,
+        )
+
+    def _indexer_q_matmul(self, q_c_quant, x: torch.Tensor) -> torch.Tensor:
+        """Cube part of the indexer q projection: int8 quant matmul."""
+        if isinstance(q_c_quant, tuple):
+            q_c_tensor, q_c_scale = q_c_quant
             q_c_tensor = q_c_tensor.view(-1, q_c_tensor.shape[-1])
             quant_matmul_kwargs = dict(
                 bias=None,
-                output_dtype=kw.dtype,
+                output_dtype=x.dtype,
             )
             if q_c_tensor.dtype == torch.float8_e4m3fn:
                 if q_c_scale.dim() == 2:
@@ -1476,15 +1496,114 @@ class AscendSFAImpl(MLAAttentionImpl):
                 )
             elif q_c_scale.dim() > 1 and q_c_scale.shape[-1] == 1:
                 q_c_scale = q_c_scale.squeeze(dim=-1)
-            q_li = torch_npu.npu_quant_matmul(
+            return torch_npu.npu_quant_matmul(
                 q_c_tensor,
                 self.wq_b.weight,
                 self.wq_b.weight_scale,
                 pertoken_scale=q_c_scale,
                 **quant_matmul_kwargs,
             )
-        else:
-            q_li, _ = self.wq_b(q_c)
+
+        quant_bias = self.wq_b.quant_bias
+        if getattr(self.wq_b, "ascend_quant_method", "") == COMPRESSED_TENSORS_METHOD:
+            # compressed-tensors folds the bias into the quantized input, and
+            # wq_b is invoked without an explicit bias here.
+            quant_bias = None
+        return torch_npu.npu_quant_matmul(
+            q_c_quant,
+            self.wq_b.weight,
+            self.wq_b.deq_scale,
+            bias=quant_bias,
+            output_dtype=self.wq_b.params_dtype,
+        )
+
+    def _indexer_pre_process_overlapped(
+        self,
+        hidden_states: torch.Tensor,
+        q_c,
+        cos: torch.Tensor,
+        sin: torch.Tensor,
+    ):
+        """Run the indexer pre-processing while overlapping the indexer q
+        projection on the attention calculation stream.
+
+        main stream: wk_weights_proj (cube) -> k vector part -> c8 quant
+        aux stream : q_c quantize (vector) -> q quant matmul (cube)
+
+        Each aux kernel waits for the main stream right before it is issued, so
+        that the two cube phases never contend with each other:
+          1. aux waits for main, then quantizes q_c (vector) while main runs the
+             wk projection (cube).
+          2. aux waits for the main cube phase, then runs the q quant matmul
+             (cube) while main runs the k vector part.
+          3. main waits for aux before the c8 quantization of k.
+        """
+        aux_stream = attention_calculation_stream()
+        main_stream = torch.npu.current_stream()
+
+        aux_stream.wait_stream(main_stream)
+        with npu_stream_switch(aux_stream, enabled=True):
+            q_c_quant = self._indexer_q_quantize(q_c)
+
+        indexer_kw, _ = self.wk_weights_proj(hidden_states)
+
+        aux_stream.wait_stream(main_stream)
+        with npu_stream_switch(aux_stream, enabled=True):
+            q_li = self._indexer_q_matmul(q_c_quant, indexer_kw)
+
+        k_li = self._indexer_pre_vector_part(indexer_kw, cos, sin)
+        main_stream.wait_stream(aux_stream)
+        k_li, k_li_scale = self._indexer_pre_c8_quant(k_li)
+        return indexer_kw, k_li, k_li_scale, q_li
+
+    def indexer_select_post_process(
+        self,
+        kw: torch.Tensor,
+        q_c: torch.Tensor | tuple[torch.Tensor, torch.Tensor],
+        kv_cache: tuple[torch.Tensor, ...],
+        attn_metadata: M,
+        cos: torch.Tensor,
+        sin: torch.Tensor,
+        actual_seq_lengths_query: torch.Tensor,
+        actual_seq_lengths_key: torch.Tensor,
+        q_li: torch.Tensor | None = None,
+    ):
+        if not self.has_indexer:
+            raise RuntimeError(
+                f"indexer_select_post_process should not be called when indexer is None. layer_name={self.layer_name}."
+            )
+
+        assert kw is not None
+        assert self.wq_b is not None
+
+        weights = kw[:, self.head_dim :]
+        if q_li is None:
+            if isinstance(q_c, tuple):
+                q_c_tensor, q_c_scale = q_c
+                q_c_tensor = q_c_tensor.view(-1, q_c_tensor.shape[-1])
+                quant_matmul_kwargs = dict(
+                    bias=None,
+                    output_dtype=kw.dtype,
+                )
+                if q_c_tensor.dtype == torch.float8_e4m3fn:
+                    if q_c_scale.dim() == 2:
+                        q_c_scale = q_c_scale.view(q_c_scale.shape[0], -1, 2)
+                    quant_matmul_kwargs.update(
+                        scale_dtype=FLOAT8_E8M0FNU_DTYPE,
+                        pertoken_scale_dtype=FLOAT8_E8M0FNU_DTYPE,
+                        group_sizes=[1, 1, getattr(self.wq_b.quant_method.quant_method, "group_size", 32)],
+                    )
+                elif q_c_scale.dim() > 1 and q_c_scale.shape[-1] == 1:
+                    q_c_scale = q_c_scale.squeeze(dim=-1)
+                q_li = torch_npu.npu_quant_matmul(
+                    q_c_tensor,
+                    self.wq_b.weight,
+                    self.wq_b.weight_scale,
+                    pertoken_scale=q_c_scale,
+                    **quant_matmul_kwargs,
+                )
+            else:
+                q_li, _ = self.wq_b(q_c)
         q_li = q_li.view(-1, self.n_head, self.head_dim)
         if HAS_TRITON:
             q_li = rope_forward_triton_siso(
@@ -1858,6 +1977,10 @@ class AscendSFAImpl(MLAAttentionImpl):
         # indexer_select_pre_process (k_li half) and indexer_select_post_process
         # (weights half) to avoid calling wk_weights_proj twice on the same input.
         indexer_kw: torch.Tensor | None = None
+        # Indexer q projection result produced on the auxiliary stream by
+        # _indexer_pre_process_overlapped, and consumed by
+        # indexer_select_post_process.
+        indexer_q_li: torch.Tensor | None = None
         # Prefill/mixed DSA-CP computes o_proj with a temporary full weight.
         # Decode keeps the original TP path and only exchanges activations.
         full_gather_o_proj_enabled = self.enable_dsa_cp_with_o_proj_tp and attn_metadata.attn_state not in {
@@ -1883,7 +2006,11 @@ class AscendSFAImpl(MLAAttentionImpl):
                     "SFA Prolog V3 requires one cache index per input token, "
                     f"got token_x={hidden_states.shape[0]} and cache_index={slot_mapping.numel()}."
                 )
-            if self.has_indexer:
+            # When the indexer q projection is overlapped, the indexer
+            # pre-processing needs q_c and is therefore deferred until after the
+            # preprocess below. Otherwise it keeps the original position.
+            overlap_indexer = self.has_indexer and self.enable_indexer_multistream
+            if self.has_indexer and not self.enable_indexer_multistream:
                 indexer_kw, _ = self.wk_weights_proj(hidden_states)
                 k_li, k_li_scale = self.indexer_select_pre_process(kw=indexer_kw, cos=cos, sin=sin)
             else:
@@ -1907,6 +2034,15 @@ class AscendSFAImpl(MLAAttentionImpl):
                     slot_mapping=slot_mapping,
                     num_input_tokens=num_input_tokens,
                 )
+
+            if overlap_indexer:
+                if self._can_overlap_indexer_q_proj(q_c):
+                    indexer_kw, k_li, k_li_scale, indexer_q_li = self._indexer_pre_process_overlapped(
+                        hidden_states, q_c, cos, sin
+                    )
+                else:
+                    indexer_kw, _ = self.wk_weights_proj(hidden_states)
+                    k_li, k_li_scale = self.indexer_select_pre_process(kw=indexer_kw, cos=cos, sin=sin)
         # native
         else:
             assert self.fused_qkv_a_proj is not None, "q lora is required for DSA."
@@ -1923,12 +2059,17 @@ class AscendSFAImpl(MLAAttentionImpl):
             q_c = self.q_a_layernorm(q_c)
 
             if self.has_indexer:
-                indexer_kw, _ = self.wk_weights_proj(hidden_states)
-                k_li, k_li_scale = self.indexer_select_pre_process(
-                    kw=indexer_kw,
-                    cos=cos,
-                    sin=sin,
-                )
+                if self.enable_indexer_multistream and self._can_overlap_indexer_q_proj(q_c):
+                    indexer_kw, k_li, k_li_scale, indexer_q_li = self._indexer_pre_process_overlapped(
+                        hidden_states, q_c, cos, sin
+                    )
+                else:
+                    indexer_kw, _ = self.wk_weights_proj(hidden_states)
+                    k_li, k_li_scale = self.indexer_select_pre_process(
+                        kw=indexer_kw,
+                        cos=cos,
+                        sin=sin,
+                    )
             else:
                 k_li, k_li_scale = None, None
 
@@ -2052,6 +2193,7 @@ class AscendSFAImpl(MLAAttentionImpl):
                 sin=sin,
                 actual_seq_lengths_query=actual_seq_lengths_query,
                 actual_seq_lengths_key=actual_seq_lengths_key,
+                q_li=indexer_q_li,
             )
             if self.use_index_cache:
                 self._update_indexcache_topk_indices(topk_indices)
