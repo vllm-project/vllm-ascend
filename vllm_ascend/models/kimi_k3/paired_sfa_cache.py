@@ -26,6 +26,14 @@ from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec, AscendSF
 from vllm_ascend.models.kimi_k3.cache_config import make_kimi_cache_groups
 
 
+def uses_paired_sfa_cache(vllm_config: VllmConfig) -> bool:
+    attention_config = getattr(vllm_config, "attention_config", None)
+    return (
+        getattr(attention_config, "hisparse_config", None) is None
+        and vllm_config.model_config.hf_config.model_type == "kimi_k31"
+    )
+
+
 def _draft_layer_specs(groups):
     """Return local draft specs; empty PP-local groups allocate no tensors."""
     result = {}

@@ -1170,9 +1170,9 @@ class AscendKimiLinearModel(UpstreamKimiLinearModel):
         self,
         weights: Iterable[tuple[str, torch.Tensor] | tuple[str, torch.Tensor, dict[str, Any]]],
     ) -> set[str]:
-        """Load standalone gates before upstream packed mappings and EPLB."""
+        """Load registered Ascend gates and indexer weights before upstream remapping."""
         params_dict = dict(self.named_parameters())
-        standalone_gate_params: set[str] = set()
+        directly_loaded_params: set[str] = set()
         gate_mapping = (
             (".indexer.wk.", ".indexer.wk_weights_proj.", 0),
             (".indexer.weights_proj.", ".indexer.wk_weights_proj.", 1),
@@ -1182,17 +1182,23 @@ class AscendKimiLinearModel(UpstreamKimiLinearModel):
             (".g_proj.weight", ".fused_bfg_proj.weight", 2),
         )
 
+        def load_direct(name, loaded_weight, kwargs):
+            param = params_dict[name]
+            weight_loader = getattr(param, "weight_loader", default_weight_loader)
+            weight_loader(param, loaded_weight, **kwargs)
+            directly_loaded_params.add(name)
+
         def remap_mixed_gate_weights():
             for args in weights:
                 name, loaded_weight = args[:2]
-                # Load standalone G, B and F_a before upstream can map them into packed projections.
-                # Upstream loads standalone F_b by name. Only fused F_b needs the mapping below.
-                if name in params_dict and any(token in name for token in (".g_proj.", ".b_proj.", ".f_a_proj.")):
-                    param = params_dict[name]
-                    weight_loader = getattr(param, "weight_loader", default_weight_loader)
+                # Load standalone G, B and F_a before upstream packs them, and
+                # keep registered indexer names before upstream remaps them.
+                # Upstream already loads standalone F_b by name.
+                if name in params_dict and any(
+                    token in name for token in (".g_proj.", ".b_proj.", ".f_a_proj.", ".self_attn.indexer.")
+                ):
                     kwargs = args[2] if len(args) > 2 else {}
-                    weight_loader(param, loaded_weight, **kwargs)
-                    standalone_gate_params.add(name)
+                    load_direct(name, loaded_weight, kwargs)
                     continue
                 for source, target, shard_id in gate_mapping:
                     if source not in name:
@@ -1201,7 +1207,10 @@ class AscendKimiLinearModel(UpstreamKimiLinearModel):
                     if mapped_name in params_dict:
                         kwargs = dict(args[2]) if len(args) > 2 else {}
                         kwargs["loaded_shard_id"] = shard_id
-                        yield mapped_name, loaded_weight, kwargs
+                        if ".self_attn.indexer." in mapped_name:
+                            load_direct(mapped_name, loaded_weight, kwargs)
+                        else:
+                            yield mapped_name, loaded_weight, kwargs
                         break
                 else:
                     yield args
@@ -1209,7 +1218,7 @@ class AscendKimiLinearModel(UpstreamKimiLinearModel):
         loaded_params = super().load_weights(
             load_eplb_expert_weights(self, remap_mixed_gate_weights(), self.n_redundant_experts)
         )
-        return loaded_params | standalone_gate_params
+        return loaded_params | directly_loaded_params
 
     def forward(
         self,

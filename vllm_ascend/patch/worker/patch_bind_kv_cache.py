@@ -2,6 +2,7 @@ from collections.abc import Sequence
 
 import torch
 from vllm.model_executor.layers.attention import Attention
+from vllm.model_executor.layers.mamba.abstract import MambaBase
 from vllm.v1.kv_cache_interface import KVCacheGroupSpec
 from vllm.v1.worker.utils import defaultdict, extract_layer_index
 
@@ -64,14 +65,21 @@ def bind_kv_cache_to_layers(
 
     Upstream init_kv_cache switched from bind_kv_cache to
     bind_kv_cache_to_layers on main, which calls each layer's bind_kv_cache
-    with the standardized single-tensor layout (vLLM #51718). Ascend
-    allocates per-layer (k, v) tuples, so assign the raw allocation directly,
-    matching the Ascend bind_kv_cache patch above.
+    with the standardized single-tensor layout (vLLM #51718). The Ascend
+    allocator already materializes K/V and Mamba state views. HiSparse uses
+    the upstream allocator, which returns raw Mamba pages that need unpacking.
     """
     unpacking_layers = (DeepseekV41CacheLayer, AscendStep5CSATailRing, AscendStep5SparseSummaryCacheLayer)
     for layer_name, kv_cache in kv_caches.items():
         layer = forward_context[layer_name]
-        if isinstance(layer, unpacking_layers):
+        is_raw_mamba_page = (
+            isinstance(layer, MambaBase)
+            and isinstance(kv_cache, torch.Tensor)
+            and kv_cache.dtype == torch.int8
+            and kv_cache.ndim == 4
+            and kv_cache.shape[1:3] == (1, 1)
+        )
+        if isinstance(layer, unpacking_layers) or is_raw_mamba_page:
             layer.bind_kv_cache(kv_cache)
         else:
             layer.kv_cache = kv_cache

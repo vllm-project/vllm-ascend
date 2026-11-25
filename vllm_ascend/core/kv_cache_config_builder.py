@@ -44,6 +44,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.layerwis
     LAYERWISE_REUSE_BACKING_BYTES,
     get_layerwise_reuse_backing_bytes,
 )
+from vllm_ascend.hisparse.layout import get_hybrid_sfa_hisparse_groups, has_hybrid_sfa_hisparse_groups
 from vllm_ascend.models.deepseek_v41.cache_config import (
     get_deepseek_v41_kv_cache_config,
     get_deepseek_v41_pool_bytes_per_block,
@@ -63,6 +64,7 @@ from vllm_ascend.models.kimi_k3.paired_sfa_cache import (
     paired_sfa_cache_config,
     paired_sfa_cache_groups,
     paired_sfa_pool_bytes,
+    uses_paired_sfa_cache,
 )
 from vllm_ascend.models.qwen4_exp.cache_config import (
     get_qwen4_exp_kv_cache_config,
@@ -90,11 +92,13 @@ class AscendKVCacheConfigBuilder(DefaultKVCacheConfigBuilder):
     ) -> list[KVCacheGroupSpec]:
         """Group layers, preferring the Ascend layout when one applies.
 
-        Precedence: Kimi-K3.1, GLM-Next, Qwen4-Exp MTP, then DSV4.1 /
-        mixed-page-size shared slots, then the Kimi-K3 DSpark mixed grouping,
+        Prefer native hybrid SFA HiSparse, then the model-specific layouts,
         then vLLM's generic grouping.
         """
-        if vllm_config.model_config.hf_config.model_type == "kimi_k31":
+        groups = get_hybrid_sfa_hisparse_groups(vllm_config, kv_cache_spec)
+        if groups is not None:
+            return groups
+        if uses_paired_sfa_cache(vllm_config):
             return paired_sfa_cache_groups(vllm_config, kv_cache_spec)
         step5_groups = get_step5_kv_cache_groups(vllm_config, kv_cache_spec, super().get_kv_cache_groups)
         if step5_groups is not None:
@@ -159,16 +163,17 @@ class AscendKVCacheConfigBuilder(DefaultKVCacheConfigBuilder):
         pool cost so the model planners materialize exactly the requested block
         count before layerwise reuse is planned.
         """
-        bytes_per_block = self._get_native_pool_bytes_per_block(vllm_config, kv_cache_groups)
-        if bytes_per_block is None:
-            return _attach_transfer_and_speculation_metadata(
-                vllm_config,
-                super().get_kv_cache_config_from_groups(vllm_config, kv_cache_groups, num_blocks),
-            )
-        return get_ascend_kv_cache_config_from_groups(
+        if not has_hybrid_sfa_hisparse_groups(kv_cache_groups):
+            bytes_per_block = self._get_native_pool_bytes_per_block(vllm_config, kv_cache_groups)
+            if bytes_per_block is not None:
+                return get_ascend_kv_cache_config_from_groups(
+                    vllm_config,
+                    kv_cache_groups,
+                    num_blocks * bytes_per_block,
+                )
+        return _attach_transfer_and_speculation_metadata(
             vllm_config,
-            kv_cache_groups,
-            num_blocks * bytes_per_block,
+            super().get_kv_cache_config_from_groups(vllm_config, kv_cache_groups, num_blocks),
         )
 
     def _get_pool_bytes_per_block(
@@ -191,7 +196,7 @@ class AscendKVCacheConfigBuilder(DefaultKVCacheConfigBuilder):
         kv_cache_groups: list[KVCacheGroupSpec],
     ) -> int | None:
         """Return the pool cost used to build the native descriptors."""
-        if vllm_config.model_config.hf_config.model_type == "kimi_k31":
+        if uses_paired_sfa_cache(vllm_config):
             return paired_sfa_pool_bytes(kv_cache_groups)
         pools = _get_replicated_draft_pools(kv_cache_groups)
         if pools is not None:
@@ -525,7 +530,7 @@ def get_ascend_kv_cache_config_from_groups(
         else get_qwen4_exp_kv_cache_config(vllm_config, kv_cache_groups, available_memory)
     )
     pools = _get_replicated_draft_pools(kv_cache_groups)
-    if vllm_config.model_config.hf_config.model_type == "kimi_k31":
+    if uses_paired_sfa_cache(vllm_config):
         kv_cache_config = paired_sfa_cache_config(vllm_config, kv_cache_groups, available_memory)
     elif is_step5_groups(kv_cache_groups):
         kv_cache_config = get_step5_kv_cache_config_from_groups(vllm_config, kv_cache_groups, available_memory)

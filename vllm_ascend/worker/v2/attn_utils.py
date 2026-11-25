@@ -55,6 +55,7 @@ from vllm.v1.kv_cache_interface import (
     MambaSpec,
     MLAAttentionSpec,
     SlidingWindowSpec,
+    SparseCacheRole,
     UniformTypeKVCacheSpecs,
     compute_layer_kv_cache_shape_bytes,
 )
@@ -73,6 +74,7 @@ from vllm_ascend.attention.dsa_v1 import AscendDSAMetadataBuilder
 from vllm_ascend.attention.dsa_v41 import AscendDSAV41MetadataBuilder, DeepseekV41CacheBackend
 from vllm_ascend.attention.sfa_v1 import AscendSFAMetadataBuilder
 from vllm_ascend.attention.utils import (
+    SFA_QSFA_TILE_SIZE,
     AscendCommonAttentionMetadata,
     requires_contiguous_pa_kv_cache,
     supports_strided_mla_cache,
@@ -94,6 +96,8 @@ from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_man
     allocate_kv_cache_tensors_for_sparse_kv_offload,
     reshape_kv_cache_tensors_for_sparse_kv_offload,
 )
+from vllm_ascend.hisparse.c8 import C8_ROW_BYTES
+from vllm_ascend.hisparse.layout import has_hybrid_sfa_hisparse_specs
 from vllm_ascend.models.glm5next.cache_views import view_compressed_indexer_cache, view_kpool_tail_cache
 from vllm_ascend.models.qwen4_exp.cache_config import (
     GDN,
@@ -190,6 +194,9 @@ def get_kv_cache_spec(vllm_config: VllmConfig) -> dict[str, KVCacheSpec]:
     kv_cache_spec: dict[str, KVCacheSpec] = {}
     attention_layer_names: list[str] = []
     mamba_specs: dict[str, MambaSpec] = {}
+    packed_sources: dict[str, int] = {}
+    attention_config = getattr(vllm_config, "attention_config", None)
+    hisparse_enabled = getattr(attention_config, "hisparse_config", None) is not None
     layer_type = AttentionLayerBase
     attn_layers = get_layers_from_vllm_config(vllm_config, layer_type)
     for layer_name, attn_module in attn_layers.items():
@@ -223,13 +230,13 @@ def get_kv_cache_spec(vllm_config: VllmConfig) -> dict[str, KVCacheSpec]:
             mamba_specs[layer_name] = spec
             continue
 
-        if isinstance(attn_module, MLAAttention) and vllm_config.attention_config.hisparse_config is not None:
+        if isinstance(attn_module, MLAAttention) and hisparse_enabled:
             # Keep Core's row-packed source spec and actual index-group ownership.
             source_layout: dict[str, Any] = {}
             if getattr(attn_module.impl, "enable_sparse_sfa_c8", False):
-                from vllm_ascend.hisparse.c8 import C8_ROW_BYTES
-
                 source_layout.update(head_size=C8_ROW_BYTES, dtype=attn_module.impl.c8_cache_dtype)
+                if isinstance(spec, MLAAttentionSpec) and spec.cache_role is SparseCacheRole.SPARSE:
+                    packed_sources[layer_name] = attn_module.impl.sfa_qsfa_packed_kv_head_dim
             kv_cache_spec[layer_name] = replace(
                 spec, is_index_group_leader=attn_module.hisparse_cache.runtime.is_group_leader, **source_layout
             )
@@ -244,12 +251,13 @@ def get_kv_cache_spec(vllm_config: VllmConfig) -> dict[str, KVCacheSpec]:
             attention_layer_names.append(layer_name)
             continue
 
-    if mamba_specs:
-        if any(isinstance(spec, AscendSFAIndexerCacheSpec) for spec in kv_cache_spec.values()):
-            # K3.1 recurrent padding is settled by NPUPlatform before the
-            # layers construct their specs. Keep indexer/draft pages native.
-            kv_cache_spec.update(mamba_specs)
+    if mamba_specs and any(isinstance(spec, AscendSFAIndexerCacheSpec) for spec in kv_cache_spec.values()):
+        # Without HiSparse, platform planning has already prepared the paired
+        # state padding. HiSparse still needs to resolve the native page sizes.
+        kv_cache_spec.update(mamba_specs)
+        if not hisparse_enabled:
             return kv_cache_spec
+    elif mamba_specs:
         # QSA/CSA hybrid models (descriptor-native cache owners) need
         # the descriptor-native cache alignment: every align_kv_cache_with_mamba
         # attention layer (including the QSA main owners) pads its page up
@@ -283,19 +291,35 @@ def get_kv_cache_spec(vllm_config: VllmConfig) -> dict[str, KVCacheSpec]:
                     mamba_specs[layer_name] = replace(spec, page_size_padded=common_page_size)
             kv_cache_spec.update(mamba_specs)
 
-    if vllm_config.attention_config.hisparse_config is not None:
+    if hisparse_enabled:
         from vllm.v1.hisparse.binding import resolve_hisparse_specs
 
         from vllm_ascend.hisparse.binding import align_hisparse_indexer_specs
 
-        packed_row_bytes = None
-        if get_ascend_config().enable_sparse_sfa_c8:
-            from vllm_ascend.hisparse.c8 import C8_ROW_BYTES
-
-            packed_row_bytes = C8_ROW_BYTES
-        return align_hisparse_indexer_specs(
-            resolve_hisparse_specs(vllm_config, kv_cache_spec, attn_layers), packed_row_bytes=packed_row_bytes
-        )
+        hybrid_sfa = has_hybrid_sfa_hisparse_specs(kv_cache_spec.values())
+        packed_row_bytes = C8_ROW_BYTES if get_ascend_config().enable_sparse_sfa_c8 else None
+        if hybrid_sfa:
+            for name, row_bytes in packed_sources.items():
+                if row_bytes != C8_ROW_BYTES:
+                    raise ValueError(f"Ascend HiSparse C8 layer {name} requires {C8_ROW_BYTES} bytes per row.")
+                # Resident and hot alias one slab at whole QSFA page strides.
+                kv_cache_spec[name] = replace(
+                    kv_cache_spec[name],
+                    state_content_bytes=row_bytes,
+                    block_stride_alignment=SFA_QSFA_TILE_SIZE * row_bytes,
+                    page_size_padded=None,
+                )
+        specs = resolve_hisparse_specs(vllm_config, kv_cache_spec, attn_layers)
+        state_padding = getattr(vllm_config.cache_config, "mamba_page_size_padded", None)
+        if hybrid_sfa and state_padding is not None:
+            # Core has now resolved checkpoint geometry. Drop the padding from
+            # the ordinary paired layout so the planner sees actual state bytes.
+            for name in mamba_specs:
+                state_spec = specs[name]
+                assert isinstance(state_spec, MambaSpec)
+                if state_spec.page_size_padded == state_padding:
+                    specs[name] = replace(state_spec, page_size_padded=None)
+        return align_hisparse_indexer_specs(specs, packed_row_bytes=packed_row_bytes)
     return kv_cache_spec
 
 
