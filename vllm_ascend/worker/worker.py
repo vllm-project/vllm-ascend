@@ -52,12 +52,9 @@ from vllm.distributed.kv_transfer import (
 from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorHandshakeMetadata
 from vllm.distributed.parallel_state import get_pp_group, get_tp_group
 from vllm.logger import logger
-from vllm.lora.request import LoRARequest
 from vllm.model_executor.model_loader import get_model_loader
-from vllm.model_executor.model_loader.weight_checksum import compute_tensor_digests, zero_weights
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
-from vllm.tasks import SupportedTask
 from vllm.utils.mem_constants import GiB_bytes
 from vllm.utils.mem_utils import MemorySnapshot, format_gib, memory_profiling
 from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
@@ -73,7 +70,7 @@ from vllm.v1.kv_cache_interface import (
     SlidingWindowSpec,
     UniformTypeKVCacheSpecs,
 )
-from vllm.v1.outputs import EMPTY_MODEL_RUNNER_OUTPUT, AsyncModelRunnerOutput, DraftTokenIds, ModelRunnerOutput
+from vllm.v1.outputs import AsyncModelRunnerOutput, ModelRunnerOutput
 from vllm.v1.utils import report_usage_stats
 from vllm.v1.worker import gpu_worker
 from vllm.v1.worker.gpu_worker import AsyncIntermediateTensors
@@ -133,7 +130,6 @@ from vllm_ascend.utils import (
     register_ascend_fla_customop,
     register_device_print,
     setup_ascend_local_comm_res,
-    vllm_version_is,
 )
 
 if TYPE_CHECKING:
@@ -205,12 +201,10 @@ class NPUWorker(GPUWorker):
         # hook (NPUPlatform.check_and_update_config) never runs here. Re-apply the
         # Ascend V2 model runner overrides so the worker resolves the same
         # runner version as the engine. Idempotent.
-        from vllm_ascend.ascend_forward_context import sync_v2_extra_kwargs
         from vllm_ascend.mrv2_utils import apply_v2_model_runner_config_patch
         from vllm_ascend.utils import adapt_patch
 
         apply_v2_model_runner_config_patch()
-        sync_v2_extra_kwargs(vllm_config)
         adapt_patch()
 
         from vllm_ascend.patch.worker.patch_kda_recoverssm import patch_kda_recoverssm
@@ -311,14 +305,6 @@ class NPUWorker(GPUWorker):
 
     def _get_cudagraph_capture_context(self) -> AbstractContextManager[None]:
         raise NotImplementedError("GPUWorker._get_cudagraph_capture_context is not validated on Ascend.")
-
-    def reset_mm_cache(self) -> None:
-        reset_fn = getattr(self.model_runner, "reset_mm_cache", None)
-        if callable(reset_fn):
-            reset_fn()
-
-    def get_draft_model(self) -> nn.Module | None:
-        raise NotImplementedError("GPUWorker.get_draft_model is not validated on Ascend.")
 
     def supports_draft_weight_updates(self) -> bool:
         return False
@@ -904,12 +890,10 @@ class NPUWorker(GPUWorker):
         model_runner = getattr(self, "model_runner", None)
         layout = self.vllm_config.cache_config.get_resolved_kv_cache_layout()
         shares_attention_pool = False
-        if getattr(self, "use_v2_model_runner", False):
-            # Load V2 helpers only for V2 workers; V1 retains private allocation
-            # and must keep its original multi-group budget scaling.
-            from vllm_ascend.worker.v2.attn_utils import can_share_full_and_sliding_kv_cache
+        # V2 is the only model runner; its KV-cache helpers apply unconditionally.
+        from vllm_ascend.worker.v2.attn_utils import can_share_full_and_sliding_kv_cache
 
-            shares_attention_pool = can_share_full_and_sliding_kv_cache(self.vllm_config, per_layer_specs)
+        shares_attention_pool = can_share_full_and_sliding_kv_cache(self.vllm_config, per_layer_specs)
         # TODO: The Step-3.5/3.7 models will be sunset in the future. Once they
         # are, remove this is_step_model exemption: this line and the
         # `or is_step_model` budget gate below.
@@ -985,7 +969,7 @@ class NPUWorker(GPUWorker):
         intermediate_tensors = None
         forward_pass = scheduler_output.total_num_scheduled_tokens > 0
         if forward_pass and not get_pp_group().is_first_rank:
-            if self.use_v2_model_runner and enable_sp(self.vllm_config):
+            if enable_sp(self.vllm_config):
                 all_gather_group = None
             else:
                 all_gather_group = get_tp_group()
@@ -1003,7 +987,7 @@ class NPUWorker(GPUWorker):
             profiler.step()
 
         output = self.model_runner.execute_model(scheduler_output, intermediate_tensors)
-        if self.use_v2_model_runner and self.model_runner.is_pooling_model and output is None:
+        if self.model_runner.is_pooling_model and output is None:
             output = self.model_runner.pool()  # type: ignore
         if isinstance(output, (ModelRunnerOutput, AsyncModelRunnerOutput, NoneType)):
             return output
@@ -1011,7 +995,7 @@ class NPUWorker(GPUWorker):
         assert isinstance(output, IntermediateTensors)
         parallel_config = self.vllm_config.parallel_config
         assert parallel_config.distributed_executor_backend != ("external_launcher") and not get_pp_group().is_last_rank
-        if self.use_v2_model_runner and enable_sp(self.vllm_config):
+        if enable_sp(self.vllm_config):
             all_gather_group = None
         else:
             all_gather_group = get_tp_group()
@@ -1020,23 +1004,9 @@ class NPUWorker(GPUWorker):
             all_gather_group=all_gather_group,
         )
 
-        # Align with upstream GPUWorker: Model Runner V2 has no
-        # kv_connector_output to propagate from non-last PP ranks. Model Runner
-        # V1 must continue below to handle the PP + KV connector path.
-        if self.use_v2_model_runner:
-            return None
-
-        kv_connector_output = output.kv_connector_output
-        if not kv_connector_output:
-            return None
-
-        # In case of PP with kv transfer, we need to pass through the
-        # kv_connector_output
-        if not kv_connector_output.finished_sending and not kv_connector_output.finished_recving:
-            return EMPTY_MODEL_RUNNER_OUTPUT
-        output = copy.copy(EMPTY_MODEL_RUNNER_OUTPUT)
-        output.kv_connector_output = kv_connector_output
-        return output
+        # Model Runner V2 has no kv_connector_output to propagate from
+        # non-last PP ranks.
+        return None
 
     @torch.inference_mode()
     def sample_tokens(self, grammar_output: "GrammarOutput") -> ModelRunnerOutput | AsyncModelRunnerOutput:
@@ -1094,7 +1064,7 @@ class NPUWorker(GPUWorker):
             self.init_snapshot.cuda_memory -= correction
             self.init_snapshot.non_torch_memory -= correction
 
-        if getattr(self, "use_v2_model_runner", False) and has_ec_transfer():
+        if has_ec_transfer():
             get_ec_transfer().start_worker_services()
 
         if self.vllm_config.weight_transfer_config is not None:
@@ -1253,30 +1223,9 @@ class NPUWorker(GPUWorker):
         c = torch.rand((4, 4), dtype=torch.float32).npu()
         torch_npu._npu_matmul_add_fp32(x, weight, c)
 
-    def get_model(self) -> nn.Module:
-        return self.model_runner.get_model()
-
-    def _weight_checksum_model(self) -> nn.Module:
-        # The v1 model runner exposes get_model(); the v2 runner (still under
-        # development) only exposes the model attribute.
-        get_model = getattr(self.model_runner, "get_model", None)
-        if callable(get_model):
-            return get_model()
-        return self.model_runner.model
-
-    def compute_weight_checksums(self) -> dict[str, str]:
-        prefix = self._weight_checksum_prefix()
-        digests = compute_tensor_digests(self._weight_checksum_model())
-        return {prefix + name: digest for name, digest in digests.items()}
-
     def reset_weights(self) -> None:
         require_private_weights(self.load_config, "reset_weights")
-        if get_ascend_config().weight_nz_mode:
-            logger.warning(
-                "weight_nz_mode is enabled: weight transfer update is unavailable, "
-                "reset weights can only be restored via checkpoint reload (reload_weights)."
-            )
-        zero_weights(self._weight_checksum_model())
+        super().reset_weights()
 
     def get_kv_connector_handshake_metadata(
         self,
@@ -1445,21 +1394,6 @@ class NPUWorker(GPUWorker):
                 return
             profiler.stop()
 
-    def add_lora(self, lora_request: LoRARequest) -> bool:
-        return self.model_runner.add_lora(lora_request)
-
-    def remove_lora(self, lora_id: int) -> bool:
-        return self.model_runner.remove_lora(lora_id)
-
-    def list_loras(self) -> set[int]:
-        return self.model_runner.list_loras()
-
-    def pin_lora(self, lora_id: int) -> bool:
-        return self.model_runner.pin_lora(lora_id)
-
-    def reset_encoder_cache(self) -> None:
-        self.model_runner.reset_encoder_cache()
-
     def synchronize_device(self) -> None:
         torch.npu.synchronize()
 
@@ -1489,11 +1423,7 @@ class NPUWorker(GPUWorker):
     @runtime_guard_idle_step
     def execute_dummy_batch(self) -> None:
         self.log_memory_stats()
-        num_tokens = (
-            getattr(self.model_runner, "uniform_decode_query_len", 1)
-            if vllm_version_is("0.33.0")
-            else self.model_runner.decode_query_len
-        )
+        num_tokens = self.model_runner.decode_query_len
         # Idle DP worker RPCs also need the current config for replay metadata.
         with set_current_vllm_config(self.vllm_config):
             self.model_runner._dummy_run(num_tokens, uniform_decode=True, skip_gdn_state_update=True)
@@ -1523,12 +1453,6 @@ class NPUWorker(GPUWorker):
 
     def get_supported_pooling_tasks(self):
         return self.model_runner.get_supported_pooling_tasks()
-
-    def get_supported_tasks(self) -> "tuple[SupportedTask, ...]":
-        return self.model_runner.get_supported_tasks()
-
-    def take_draft_token_ids(self) -> DraftTokenIds | None:
-        return self.model_runner.take_draft_token_ids()
 
     def update_config(self, overrides: dict[str, Any]) -> None:
         self.model_runner.update_config(overrides)

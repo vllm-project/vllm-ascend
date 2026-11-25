@@ -45,7 +45,6 @@ config:
     dp_address: "${NODE_1_IP}"
 
 env_common: &env_common
-  VLLM_USE_V2_MODEL_RUNNER: "1"
   VLLM_ALLOW_LONG_MAX_MODEL_LEN: "1"
   VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS: "7200"
   VLLM_ENGINE_READY_TIMEOUT_S: "7200"

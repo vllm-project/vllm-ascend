@@ -3,14 +3,15 @@
 """Unit tests for the NPUWorker weight-checker methods.
 
 The checksum/reset behavior comes from the paired vLLM's
-``vllm.model_executor.model_loader.weight_checksum`` (PR #51350); these tests
-only cover the NPUWorker wiring: method presence, rank-key prefixes, model
-access for both runner shapes, shared-weight protection, and the weight_nz_mode warning.
+``vllm.model_executor.model_loader.weight_checksum`` (PR #51350) and the worker
+methods themselves are inherited from vLLM's ``gpu_worker.Worker``; these tests
+pin the contract the NPU worker relies on: method presence, the rank-key
+prefix, checksum/reset behavior over a real model, and shared-weight protection
+at the NPU worker entry point.
 """
 
 from types import SimpleNamespace
 from typing import Any, cast
-from unittest.mock import MagicMock
 
 import pytest
 import torch
@@ -19,7 +20,6 @@ from vllm.config import LoadConfig, ParallelConfig
 from vllm.v1.worker import gpu_worker
 
 from vllm_ascend._310p.worker_310p import NPUWorker310
-from vllm_ascend.worker import worker as npu_worker_module
 from vllm_ascend.worker.worker import NPUWorker
 
 
@@ -37,15 +37,6 @@ def mock_parallel_groups(monkeypatch):
     group = SimpleNamespace(rank_in_group=0)
     for name in ("get_pp_group", "get_pcp_group", "get_tp_group"):
         monkeypatch.setattr(gpu_worker, name, lambda: group)
-
-
-@pytest.fixture
-def mock_ascend_config(monkeypatch):
-    monkeypatch.setattr(
-        npu_worker_module,
-        "get_ascend_config",
-        lambda: SimpleNamespace(weight_nz_mode=0),
-    )
 
 
 def _make_worker(dp_rank: int) -> NPUWorker:
@@ -80,7 +71,7 @@ def test_compute_weight_checksums_prefixes_keys(mock_parallel_groups):
 
 
 @pytest.mark.parametrize("load_format, extra_config", [("auto", {}), ("ipc_cache", {"mode": "copy"})])
-def test_reset_weights_zeroes_params_not_buffers(load_format, extra_config, mock_ascend_config):
+def test_reset_weights_zeroes_params_not_buffers(load_format, extra_config, mock_parallel_groups):
     model = _TinyModel()
     worker = _make_worker(dp_rank=0)
     worker.load_config = LoadConfig(load_format=load_format, model_loader_extra_config=extra_config)
@@ -93,46 +84,13 @@ def test_reset_weights_zeroes_params_not_buffers(load_format, extra_config, mock
 
 
 @pytest.mark.parametrize("extra_config", [{}, {"mode": "zero_copy"}])
-def test_reset_weights_rejects_daemon_owned_weights(extra_config, mock_ascend_config):
+def test_reset_weights_rejects_daemon_owned_weights(extra_config, mock_parallel_groups):
     model = _TinyModel()
     worker = _make_worker(dp_rank=0)
     worker.load_config = LoadConfig(load_format="ipc_cache", model_loader_extra_config=extra_config)
-    worker.model_runner = cast(Any, SimpleNamespace(model=model))
+    worker.model_runner = cast(Any, SimpleNamespace(get_model=lambda: model))
 
     with pytest.raises(ValueError, match="reset_weights is unsupported with daemon-owned zero_copy weights"):
         worker.reset_weights()
 
     assert torch.all(model.linear.weight == 1)
-
-
-def test_reset_weights_warns_under_nz_mode(mock_parallel_groups, monkeypatch):
-    """weight_nz_mode=1: reset still zeroes params and logs the NZ warning."""
-    monkeypatch.setattr(
-        npu_worker_module,
-        "get_ascend_config",
-        lambda: SimpleNamespace(weight_nz_mode=1),
-    )
-    mock_logger = MagicMock()
-    monkeypatch.setattr(npu_worker_module, "logger", mock_logger)
-    model = _TinyModel()
-    worker = _make_worker(dp_rank=0)
-    worker.model_runner = cast(Any, SimpleNamespace(get_model=lambda: model))
-
-    worker.reset_weights()
-
-    assert torch.all(model.linear.weight == 0)
-    mock_logger.warning.assert_called_once()
-    assert "weight_nz_mode" in mock_logger.warning.call_args.args[0]
-
-
-def test_methods_work_with_v2_runner_shape(mock_parallel_groups, mock_ascend_config):
-    model = _TinyModel()
-    # The v2 model runner only exposes the model attribute, no get_model().
-    worker = _make_worker(dp_rank=0)
-    worker.model_runner = cast(Any, SimpleNamespace(model=model))
-
-    checksums = worker.compute_weight_checksums()
-    assert set(checksums) == {"dp0:pp0:pcp0:tp0:linear.weight"}
-
-    worker.reset_weights()
-    assert torch.all(model.linear.weight == 0)

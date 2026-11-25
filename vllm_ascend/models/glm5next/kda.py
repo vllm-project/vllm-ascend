@@ -50,8 +50,7 @@ if TYPE_CHECKING:
 
 def prepare_glm_pcp_config(vllm_config):
     if (
-        vllm_config.use_v2_model_runner
-        and vllm_config.parallel_config.pcp_shard_decode_requests
+        vllm_config.parallel_config.pcp_shard_decode_requests
         and vllm_config.compilation_config.cudagraph_mode.has_full_cudagraphs()
     ):
         return prepare_recurrent_pcp_config(vllm_config)
@@ -551,7 +550,7 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
         Updating the derived tensor in place preserves decode graph arguments across
         every reload.
         """
-        # Current vLLM calls without arguments; v0.33.0 passes the dtype.
+        # Some upstream pins invoke this hook without the dtype argument.
         if act_dtype is None:
             act_dtype = self.model_config.dtype
         # AscendC consumes [kernel width, Q|K|V] in the activation dtype,

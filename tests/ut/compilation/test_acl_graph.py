@@ -152,6 +152,7 @@ class TestACLGraphWrapper(TestBase):
 
         # Mock ForwardContext
         self.mock_forward_context = MagicMock(spec=ForwardContext)
+        self.mock_forward_context.additional_kwargs = {}
         self.mock_forward_context.batch_descriptor = self.mock_batch_descriptor
         self.mock_forward_context.cudagraph_runtime_mode = CUDAGraphMode.FULL
 
@@ -362,10 +363,7 @@ class TestACLGraphWrapper(TestBase):
         result = wrapper(test_tensor, "arg2")
 
         # Verify graph capture happened
-        if acl_graph.vllm_version_is("0.33.0"):
-            mock_validate_cudagraph_capturing_enabled.assert_called_once()
-        else:
-            mock_validate_cudagraph_capturing_enabled.assert_not_called()
+        mock_validate_cudagraph_capturing_enabled.assert_not_called()
         self.mock_updatable_graph.assert_called_once()
         mock_torch.npu.graph.assert_called_once_with(mock_npu_graph, pool=self.mock_graph_pool)
         self.mock_runnable.assert_called_once_with(test_tensor, "arg2")
@@ -506,10 +504,7 @@ class TestACLGraphWrapper(TestBase):
         first_result = wrapper(test_tensor, "arg2")
 
         # Verify graph capture happened during first call
-        if acl_graph.vllm_version_is("0.33.0"):
-            mock_validate_cudagraph_capturing_enabled.assert_called_once()
-        else:
-            mock_validate_cudagraph_capturing_enabled.assert_not_called()
+        mock_validate_cudagraph_capturing_enabled.assert_not_called()
         self.mock_updatable_graph.assert_called_once()
         mock_torch.npu.graph.assert_called_once()
 
@@ -730,10 +725,7 @@ class TestACLGraphWrapper(TestBase):
         self.assertTrue(mock_patch.called)
 
         # Verify graph capture happened
-        if acl_graph.vllm_version_is("0.33.0"):
-            mock_validate_cudagraph_capturing_enabled.assert_called_once()
-        else:
-            mock_validate_cudagraph_capturing_enabled.assert_not_called()
+        mock_validate_cudagraph_capturing_enabled.assert_not_called()
         self.mock_updatable_graph.assert_called_once()
         mock_torch.npu.graph.assert_called_once_with(mock_npu_graph, pool=self.mock_graph_pool)
 
@@ -807,10 +799,7 @@ class TestACLGraphWrapper(TestBase):
         self.assertEqual(mock_weak_ref_tensors.call_count, 2)
 
         # Verify graph capture happened
-        if acl_graph.vllm_version_is("0.33.0"):
-            mock_validate_cudagraph_capturing_enabled.assert_called_once()
-        else:
-            mock_validate_cudagraph_capturing_enabled.assert_not_called()
+        mock_validate_cudagraph_capturing_enabled.assert_not_called()
         self.mock_updatable_graph.assert_called_once()
         mock_torch.npu.graph.assert_called_once_with(mock_npu_graph, pool=self.mock_graph_pool)
 

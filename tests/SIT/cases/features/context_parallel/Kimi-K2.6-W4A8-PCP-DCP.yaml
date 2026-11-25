@@ -6,7 +6,6 @@ test_cases:
   - name: "Kimi-K2.6-W4A8-PCP-DCP"
     model: "Eco-Tech/Kimi-K2.6-w4a8"
     envs:
-      VLLM_USE_V2_MODEL_RUNNER: "1"
       VLLM_WORKER_MULTIPROC_METHOD: "spawn"
       OMP_NUM_THREADS: "10"
       OMP_PROC_BIND: "false"

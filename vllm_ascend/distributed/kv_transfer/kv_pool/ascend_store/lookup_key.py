@@ -13,7 +13,7 @@ from vllm.v1.serial_utils import MsgpackDecoder, MsgpackEncoder
 
 from vllm_ascend.utils import vllm_version_is
 
-if vllm_version_is("0.33.0"):
+if vllm_version_is("0.34.0"):
     from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.protocol import (  # type: ignore[import-not-found]
         LOOKUP_MSG,
         RESET_MSG,

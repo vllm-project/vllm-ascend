@@ -9,8 +9,7 @@ import pytest
 import torch
 from vllm.v1.core.block_pool import BlockPool
 
-# vLLM #61183 moved `is_kv_cache_spec_uniform` to `kv_cache_planning` on main;
-# the v0.33.0 lane still ships it in `kv_cache_utils`.
+# vLLM #61183 moved `is_kv_cache_spec_uniform` to `kv_cache_planning` on main.
 from vllm.v1.core.kv_cache_planning import is_kv_cache_spec_uniform
 from vllm.v1.core.single_type_kv_cache_manager import CircularBufferManager, register_all_kvcache_specs
 from vllm.v1.kv_cache_interface import (
@@ -312,11 +311,8 @@ def test_the_swa_spec_accepts_whatever_the_probe_returns():
 # --- which layers may declare a replay window --------------------------------
 
 
-def _vllm_config(
-    *, v2_runner: bool = False, pcp_size: int = 1, dp_size: int = 1, architectures=("DeepseekV41ForCausalLM",)
-):
+def _vllm_config(*, pcp_size: int = 1, dp_size: int = 1, architectures=("DeepseekV41ForCausalLM",)):
     return SimpleNamespace(
-        use_v2_model_runner=v2_runner,
         parallel_config=SimpleNamespace(prefill_context_parallel_size=pcp_size, data_parallel_size=dp_size),
         model_config=SimpleNamespace(architectures=list(architectures)),
     )
@@ -383,32 +379,30 @@ def test_the_upstream_switch_is_all_that_is_left():
 
 def test_the_v2_runner_keeps_supported_replay_enabled():
     """Ascend V2 pads replayed writes in its model-state attention setup."""
-    assert resolve_bounded_replay(_vllm_config(v2_runner=True), _cache_config())
+    assert resolve_bounded_replay(_vllm_config(), _cache_config())
 
 
 def test_the_v2_runner_does_not_warn():
     """V2 has its own slot-padding implementation for supported replay."""
     with patch("vllm.logger.logger.warning_once") as warning:
-        resolve_bounded_replay(_vllm_config(v2_runner=True), _cache_config())
+        resolve_bounded_replay(_vllm_config(), _cache_config())
 
     warning.assert_not_called()
 
 
 def test_prefill_context_parallelism_with_prefix_caching_keeps_replay_on():
-    assert resolve_bounded_replay(_vllm_config(v2_runner=True, pcp_size=2), _cache_config())
+    assert resolve_bounded_replay(_vllm_config(pcp_size=2), _cache_config())
 
 
 def test_pcp_without_prefix_caching_keeps_replay_on():
     with patch("vllm.logger.logger.warning_once") as warning:
-        assert resolve_bounded_replay(
-            _vllm_config(v2_runner=True, pcp_size=4), _cache_config(enable_prefix_caching=False)
-        )
+        assert resolve_bounded_replay(_vllm_config(pcp_size=4), _cache_config(enable_prefix_caching=False))
     warning.assert_not_called()
 
 
 def test_pcp_with_dp_keeps_replay_on():
     with patch("vllm.logger.logger.warning_once") as warning:
-        assert resolve_bounded_replay(_vllm_config(v2_runner=True, pcp_size=4, dp_size=2), _cache_config())
+        assert resolve_bounded_replay(_vllm_config(pcp_size=4, dp_size=2), _cache_config())
 
     warning.assert_not_called()
 
