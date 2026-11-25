@@ -368,9 +368,10 @@ class KVPoolWorker:
         real_backend = getattr(backend_module, backend_name)
 
         backend_kwargs = {}
-        # lazy_init is requested only for compressed models. Each backend owns
-        # the hardware/protocol checks that decide whether it can honor it.
-        backend_kwargs["lazy_init"] = self.use_compress
+        # Qwen3.8-Flash-Next has no compress_ratios but also needs deferred
+        # FabricMem setup. Each backend retains its hardware/protocol checks.
+        architectures = getattr(self.vllm_config.model_config.hf_config, "architectures", None) or []
+        backend_kwargs["lazy_init"] = self.use_compress or "Qwen4ExpForConditionalGeneration" in architectures
         # The connector's extra_config (with MultiConnector the child's own
         # config, not the top-level one) carries the QoS the backends inject.
         backend_kwargs["extra_config"] = extra_config
