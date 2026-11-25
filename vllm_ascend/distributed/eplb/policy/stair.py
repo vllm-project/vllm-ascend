@@ -891,7 +891,12 @@ class StairEplbPolicy(AbstractEplbPolicy):
             current_group = current_placement[ranks]
             target_group = target_placement[ranks]
             group_size = len(ranks)
-            overlap = (target_group[:, None, :, None] == current_group[None, :, None, :]).any(axis=3).sum(axis=2)
+            num_experts = int(max(current_group.max(), target_group.max())) + 1
+            target_by_expert = np.zeros((group_size, num_experts), dtype=np.int32)
+            target_by_expert[np.arange(group_size)[:, None], target_group] = 1
+            current_by_expert = np.zeros((group_size, num_experts), dtype=np.int32)
+            current_by_expert[np.arange(group_size)[:, None], current_group] = 1
+            overlap = target_by_expert @ current_by_expert.T
             displacement = np.abs(np.arange(group_size)[:, None] - np.arange(group_size)[None, :])
             cost = (current_placement.shape[1] - overlap) * (group_size * group_size + 1) + displacement
             target_rows, destination_ranks = linear_sum_assignment(cost)
