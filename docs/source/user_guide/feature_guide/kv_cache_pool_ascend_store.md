@@ -661,7 +661,7 @@ For MooncakeStore with `ASCEND_BUFFER_POOL` enabled, perform a warm-up phase bef
 
 ### Configuration Examples
 
-> **Before deployment:** See the [Memcache software compatibility reference](#memcache-software-compatibility-reference). If Memcache fails to start or KV transfer reports errors, see [Memcache Log Diagnosis](#memcache-log-diagnosis).
+> **Before deployment:** See [Memcache Software Compatibility Reference](#memcache-software-compatibility-reference). If Memcache fails to start or reports KV pool or KV transfer errors, see [Memcache Log Diagnosis](#memcache-log-diagnosis) in Reference.
 
 #### Environment Preparation
 
@@ -1663,14 +1663,14 @@ If A3 `device_sdma` reports `sdma move comperr`, verify the HDK firmware version
 
 ### Memcache Log Diagnosis {: #memcache-log-diagnosis }
 
-Use these log signatures to confirm startup or localize failures. Healthy startup means the MetaService ports from `mmc-meta.conf` (default `5000`, `6000`, metrics `18000`) are listening, and vLLM logs no `memcache_backend` or `smem_bm_init` errors.
+Use these signatures to confirm startup or localize failures. Healthy startup: the MetaService ports from `mmc-meta.conf` (default `5000`, `6000`, metrics `18000`) are listening, and vLLM logs contain no `memcache_backend` or `smem_bm_init` errors.
 
 | Log | Meaning | Action |
 | --- | ------- | ------ |
-| `read version is empty` / `does not support mf` (hybm) | The driver does not meet the MemFabric Hybrid requirement. | Check the [Memcache software compatibility reference](#memcache-software-compatibility-reference). |
-| `smem_bm_init` returns non-zero (an `assert res == 0` failure in `memcache_backend.py`) | KV pool creation failed, typically a driver or HYBM initialization problem. | Check the [Memcache software compatibility reference](#memcache-software-compatibility-reference) and the `memcache-hybrid` / `memfabric-hybrid` versions. |
-| `Failed to get N keys out of N. error_codes=[...]` followed by `Failed to load blocks` | A Memcache KV get failed for the affected request. | With `kv_load_failure_policy=recompute`, the request is recomputed. Check MetaService connectivity and pool health. |
-| `transfer page error` | KV data transfer failed across the HCCS domain. | Confirm all ranks are in the same super pod; see the super pod check in [Step 1](#memcache-step-1-prerequisite-checks). |
+| `read version is empty` / `does not support mf` (hybm) | Driver does not meet the MemFabric Hybrid requirement. | Check the [Memcache software compatibility reference](#memcache-software-compatibility-reference). |
+| `smem_bm_init` returns non-zero (an `assert res == 0` failure in `memcache_backend.py`) | KV pool creation failed, typically due to driver or HYBM initialization. | Check the [Memcache software compatibility reference](#memcache-software-compatibility-reference) and the `memcache-hybrid` / `memfabric-hybrid` versions. |
+| `Failed to get N keys out of N. error_codes=[...]` followed by `Failed to load blocks` | Memcache KV get failed for the request. | With `kv_load_failure_policy=recompute`, the request is recomputed. Check MetaService connectivity and pool health. |
+| `transfer page error` | KV transfer failed across the HCCS domain. | Confirm all ranks are in the same super pod; see the super pod check in [Step 1](#memcache-step-1-prerequisite-checks). |
 
 ### QoS Configuration
 
