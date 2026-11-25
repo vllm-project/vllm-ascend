@@ -89,6 +89,11 @@ bool StoreKvBlockMetadataCpuKernel::GenMetaData()
             continue;
         }
 
+        if (idxGroups >= outCapacity) {
+            KERNEL_LOG_ERROR("group output capacity %ld is too small to store all groups", outCapacity);
+            return false;
+        }
+
         int32_t blockId = cacheSlot / blockSize_;
 
         // Record group start: source index and destination cache index
