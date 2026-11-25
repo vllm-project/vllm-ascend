@@ -35,14 +35,14 @@ class DFlashAclGraphManager(DFlashCudaGraphManager):
         vllm_config: VllmConfig,
         device: torch.device,
         cudagraph_mode: CUDAGraphMode,
-        decode_query_len: int,
+        decode_query_lens: Mapping[int, int],
         speculator: Any = None,
     ):
         super().__init__(
             vllm_config,
             device,
             cudagraph_mode,
-            decode_query_len,
+            decode_query_lens,
         )
 
         # It is set by AscendDFlashSpeculator.init_cudagraph_manager after creation,

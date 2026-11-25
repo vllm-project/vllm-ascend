@@ -6,7 +6,7 @@ Qwen3 is the latest generation of large language models in Qwen series, offering
 
 This document will demonstrate the main validation steps for Qwen3 Dense models in the vLLM-Ascend environment, including supported features, environment preparation, model quantization, single-node and multi-node deployment, as well as accuracy and performance evaluation. By tailoring service-level configurations to fit different use cases, you can ensure optimal performance across various scenarios.
 
-The Qwen3 Dense models are first supported in v0.8.4rc2. W8A8 quantization was first supported in v0.8.4rc2, and W4A4 is supported since v0.11.0rc1. Atlas 300I DUO uses the W8A8SC-310 quantized weights listed in this tutorial. This document is validated and written based on **vLLM-Ascend v0.21.0**. All **v0.21.0 and later versions** can run stably. To use the latest features, it is recommended to use the latest release candidate or official version.
+The Qwen3 Dense models are first supported in v0.8.4rc2. W8A8 quantization was first supported in v0.8.4rc2, and W4A4 is supported since v0.11.0rc1. Atlas 300I Duo uses the W8A8SC-310 quantized weights listed in this tutorial. This document is validated and written based on **vLLM-Ascend v0.21.0**. All **v0.21.0 and later versions** can run stably. To use the latest features, it is recommended to use the latest release candidate or official version.
 
 ## 2 Supported Features
 
@@ -24,12 +24,12 @@ The following model variants are available. It is recommended to download the mo
 
 | Model | Hardware Requirement | Download |
 |-------|---------------------|----------|
-| Qwen3-0.6B | 1 Atlas A3 inference products (64GB × 16), 1 Atlas A2 inference products (64GB × 8) | [Modelers](https://modelers.cn/models/Modelers_Park/Qwen3-0.6B) |
-| Qwen3-1.7B | 1 Atlas A3 inference products (64GB × 16), 1 Atlas A2 inference products (64GB × 8) | [Modelers](https://modelers.cn/models/Modelers_Park/Qwen3-1.7B) |
-| Qwen3-4B | 1 Atlas A3 inference products (64GB × 16), 1 Atlas A2 inference products (64GB × 8) | [Modelers](https://modelers.cn/models/Modelers_Park/Qwen3-4B) |
-| Qwen3-8B | 1 Atlas A3 inference products (64GB × 16), 1 Atlas A2 inference products (64GB × 8) | [Modelers](https://modelers.cn/models/Modelers_Park/Qwen3-8B) |
-| Qwen3-14B | 1 Atlas A3 inference products (64GB × 16), 1 Atlas A2 inference products (64GB × 8) | [Modelers](https://modelers.cn/models/Modelers_Park/Qwen3-14B) |
-| Qwen3-32B | 1 Atlas A3 inference products (64GB × 16), 1 Atlas A2 inference products (64GB × 8) | [Modelers](https://modelers.cn/models/Modelers_Park/Qwen3-32B) |
+| Qwen3-0.6B | 1 Atlas A3 inference products (64GB × 16), 1 Atlas A2 inference products (64GB × 8) | [Hugging Face](https://huggingface.co/Qwen/Qwen3-0.6B) \| [ModelScope](https://www.modelscope.cn/models/Qwen/Qwen3-0.6B) \| [Modelers](https://modelers.cn/models/Modelers_Park/Qwen3-0.6B) |
+| Qwen3-1.7B | 1 Atlas A3 inference products (64GB × 16), 1 Atlas A2 inference products (64GB × 8) | [Hugging Face](https://huggingface.co/Qwen/Qwen3-1.7B) \| [ModelScope](https://www.modelscope.cn/models/Qwen/Qwen3-1.7B) \| [Modelers](https://modelers.cn/models/Modelers_Park/Qwen3-1.7B) |
+| Qwen3-4B | 1 Atlas A3 inference products (64GB × 16), 1 Atlas A2 inference products (64GB × 8) | [Hugging Face](https://huggingface.co/Qwen/Qwen3-4B) \| [ModelScope](https://www.modelscope.cn/models/Qwen/Qwen3-4B) \| [Modelers](https://modelers.cn/models/Modelers_Park/Qwen3-4B) |
+| Qwen3-8B | 1 Atlas A3 inference products (64GB × 16), 1 Atlas A2 inference products (64GB × 8) | [Hugging Face](https://huggingface.co/Qwen/Qwen3-8B) \| [ModelScope](https://www.modelscope.cn/models/Qwen/Qwen3-8B) \| [Modelers](https://modelers.cn/models/Modelers_Park/Qwen3-8B) |
+| Qwen3-14B | 1 Atlas A3 inference products (64GB × 16), 1 Atlas A2 inference products (64GB × 8) | [Hugging Face](https://huggingface.co/Qwen/Qwen3-14B) \| [ModelScope](https://www.modelscope.cn/models/Qwen/Qwen3-14B) \| [Modelers](https://modelers.cn/models/Modelers_Park/Qwen3-14B) |
+| Qwen3-32B | 1 Atlas A3 inference products (64GB × 16), 1 Atlas A2 inference products (64GB × 8) | [Hugging Face](https://huggingface.co/Qwen/Qwen3-32B) \| [ModelScope](https://www.modelscope.cn/models/Qwen/Qwen3-32B) \| [Modelers](https://modelers.cn/models/Modelers_Park/Qwen3-32B) |
 
 **Quantized Versions for Atlas A2/A3 inference products:**
 
@@ -38,21 +38,27 @@ The following model variants are available. It is recommended to download the mo
 | Qwen3-32B-W4A4 | W4A4 | 1 Atlas A3 inference products (64GB × 16) or 1 Atlas A2 inference products (64GB × 8) | [ModelScope](https://www.modelscope.cn/models/vllm-ascend/Qwen3-32B-W4A4) |
 | Qwen3-32B-W8A8 | W8A8 | 1 Atlas A3 inference products (64GB × 16) or 1 Atlas A2 inference products (64GB × 8) | [ModelScope](https://www.modelscope.cn/models/vllm-ascend/Qwen3-32B-W8A8) |
 
-**Quantized Versions for Atlas 300I DUO:**
+**Quantized Versions for Atlas 300I Duo:**
 
 | Model | Quantization | Hardware Requirement | Download |
 |-------|-------------|---------------------|----------|
-| Qwen3-8B-W8A8SC | W8A8SC | Atlas 300I DUO (TP1) | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/Qwen3-8B-w8a8sc-310-vllm) |
-| Qwen3-14B-W8A8SC | W8A8SC | Atlas 300I DUO (TP1) | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/Qwen3-14B-w8a8sc-310-vllm) |
-| Qwen3-32B-W8A8SC | W8A8SC | Atlas 300I DUO (TP4) | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/Qwen3-32B-w8a8sc-310-vllm) |
+| Qwen3-8B-W8A8SC | W8A8SC | Atlas 300I Duo (TP1) | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/Qwen3-8B-w8a8sc-310-vllm) |
+| Qwen3-14B-W8A8SC | W8A8SC | Atlas 300I Duo (TP1) | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/Qwen3-14B-w8a8sc-310-vllm) |
+| Qwen3-32B-W8A8SC | W8A8SC | Atlas 300I Duo (TP4) | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/Qwen3-32B-w8a8sc-310-vllm) |
 
 These are the recommended numbers of cards, which can be adjusted according to the actual situation.
 
->**Path description**: Download the model weights to a directory of your choice and record it. Ensure the model path in the subsequent deployment command matches this directory.
+!!! note
+
+    The W4A4, W8A8, and W8A8SC-310 quantized weights listed above are currently published on ModelScope only, so no Hugging Face link is provided for them.
+
+> **Path description**: Download the model weights to a directory of your choice and record it, for example `/mnt/weight/Qwen3-32B-W8A8`. In the deployment commands below, `your_model_path` is a placeholder: replace it with the directory recorded here.
 
 ## 4 Installation
 
 ### 4.1 Docker Image Installation
+
+{% include "getting_started/installation/ascend_docker_runtime.inc.md" %}
 
 You can use the official all-in-one Docker image for Qwen3 Dense models.
 
@@ -74,42 +80,19 @@ Start the docker image on each node.
     export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}-a3
 
     docker run --rm \
+        -e ASCEND_VISIBLE_DEVICES=0-15 \
         --name vllm-ascend-env \
         --shm-size=1g \
         --net=host \
-        --device /dev/davinci0 \
-        --device /dev/davinci1 \
-        --device /dev/davinci2 \
-        --device /dev/davinci3 \
-        --device /dev/davinci4 \
-        --device /dev/davinci5 \
-        --device /dev/davinci6 \
-        --device /dev/davinci7 \
-        --device /dev/davinci8 \
-        --device /dev/davinci9 \
-        --device /dev/davinci10 \
-        --device /dev/davinci11 \
-        --device /dev/davinci12 \
-        --device /dev/davinci13 \
-        --device /dev/davinci14 \
-        --device /dev/davinci15 \
-        --device /dev/davinci_manager \
-        --device /dev/devmm_svm \
-        --device /dev/hisi_hdc \
-        -v /usr/local/dcmi:/usr/local/dcmi \
         -v /usr/local/Ascend/driver/tools/hccn_tool:/usr/local/Ascend/driver/tools/hccn_tool \
-        -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
-        -v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
-        -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
-        -v /etc/ascend_install.info:/etc/ascend_install.info \
         -v /root/.cache:/root/.cache \
         -it $IMAGE bash
     ```
 
     !!! note
 
-        Atlas A3 inference products have 8 NPUs with dual-die design (16 chips total: `/dev/davinci[0-15]`).
-        If you are on a shared machine, map only the chips you need (e.g., `/dev/davinci[0-7]` for NPU 0-3).
+        Atlas A3 inference products have 8 NPUs with a dual-die design, so `ASCEND_VISIBLE_DEVICES=0-15` selects all 16 DIE devices.
+        If you are on a shared machine, select only the devices you need, for example `ASCEND_VISIBLE_DEVICES=0-7` for NPU 0-3.
 
 === "Atlas A2 inference products"
 
@@ -118,31 +101,16 @@ Start the docker image on each node.
     export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}
 
     docker run --rm \
+        -e ASCEND_VISIBLE_DEVICES=0-7 \
         --name vllm-ascend-env \
         --shm-size=1g \
         --net=host \
-        --device /dev/davinci0 \
-        --device /dev/davinci1 \
-        --device /dev/davinci2 \
-        --device /dev/davinci3 \
-        --device /dev/davinci4 \
-        --device /dev/davinci5 \
-        --device /dev/davinci6 \
-        --device /dev/davinci7 \
-        --device /dev/davinci_manager \
-        --device /dev/devmm_svm \
-        --device /dev/hisi_hdc \
-        -v /usr/local/dcmi:/usr/local/dcmi \
         -v /usr/local/Ascend/driver/tools/hccn_tool:/usr/local/Ascend/driver/tools/hccn_tool \
-        -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
-        -v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
-        -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
-        -v /etc/ascend_install.info:/etc/ascend_install.info \
         -v /root/.cache:/root/.cache \
         -it $IMAGE bash
     ```
 
-=== "Atlas 300I DUO"
+=== "Atlas 300I Duo"
 
     ```bash
 
@@ -150,24 +118,9 @@ Start the docker image on each node.
     export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}-310p
 
     docker run --rm \
+    -e ASCEND_VISIBLE_DEVICES=0-7 \
     --name vllm-ascend \
     --shm-size=10g \
-    --device /dev/davinci0 \
-    --device /dev/davinci1 \
-    --device /dev/davinci2 \
-    --device /dev/davinci3 \
-    --device /dev/davinci4 \
-    --device /dev/davinci5 \
-    --device /dev/davinci6 \
-    --device /dev/davinci7 \
-    --device /dev/davinci_manager \
-    --device /dev/devmm_svm \
-    --device /dev/hisi_hdc \
-    -v /usr/local/dcmi:/usr/local/dcmi \
-    -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
-    -v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
-    -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
-    -v /etc/ascend_install.info:/etc/ascend_install.info \
     -v /root/.cache:/root/.cache \
     -p 8080:8080 \
     -it $IMAGE bash
@@ -179,7 +132,8 @@ Installation Verification:
 After starting the container, run the following command to verify the installation:
 
 ```bash
-docker ps | grep vllm-ascend-env
+# The A2/A3 tabs name the container vllm-ascend-env; the Atlas 300I Duo tab names it vllm-ascend.
+docker ps | grep vllm-ascend
 ```
 
 Expected result: The container is listed with status Up. You can also verify the vllm-ascend version inside the container:
@@ -196,7 +150,7 @@ If you prefer to build from source instead of using the Docker image, install vL
 
 !!! note
 
-    For Atlas 300I DUO, source installation may pull in `triton` and `triton-ascend`. Uninstall them before running vLLM-Ascend on Atlas 300I DUO:
+    For Atlas 300I Duo, source installation may pull in `triton` and `triton-ascend`. Uninstall them before running vLLM-Ascend on Atlas 300I Duo:
 
     ```bash
     pip uninstall -y triton-ascend triton
@@ -216,7 +170,7 @@ Expected result: The version information is displayed, confirming a successful i
 
 ## 5 Online Service Deployment {: #5-online-service-deployment }
 
-### 5.1 Single-Node Online Deployment
+### 5.1 Single-Node Online Deployment {: #51-single-node-online-deployment }
 
 Single-node deployment completes both Prefill and Decode within the same node, suitable for development, testing, and small-to-medium scale inference scenarios.
 
@@ -231,7 +185,7 @@ Single-node deployment completes both Prefill and Decode within the same node, s
     export HCCL_OP_EXPANSION_MODE="AIV"
     export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-    # Ensure the model path matches the directory recorded during download
+    # Replace your_model_path with the directory recorded in Section 3.1 Model Weight
     vllm serve your_model_path \
         --served-model-name qwen3 \
         --trust-remote-code \
@@ -250,7 +204,7 @@ Single-node deployment completes both Prefill and Decode within the same node, s
     ```bash
     export HCCL_BUFFSIZE=1024
     export ASCEND_RT_VISIBLE_DEVICES=0,1
-    # Ensure the model path matches the directory recorded during download
+    # Replace your_model_path with the directory recorded in Section 3.1 Model Weight
     vllm serve your_model_path \
         --port 8004 \
         --data-parallel-size 1 \
@@ -267,7 +221,13 @@ Single-node deployment completes both Prefill and Decode within the same node, s
         --additional-config '{"ascend_compilation_config": {"fuse_norm_quant": false}}'
     ```
 
-=== "Atlas 300I DUO"
+=== "Atlas 300I Duo"
+
+    !!! note
+
+        With `VLLM_USE_MODELSCOPE=True`, the `vllm serve` path below is a ModelScope repository plus the
+        TP-specific sub-directory, so it does not need to be replaced. If you downloaded the weights locally,
+        replace it with your own absolute path (the directory recorded in Section 3.1 Model Weight).
 
     Qwen3-8B-W8A8SC:
 
@@ -275,7 +235,6 @@ Single-node deployment completes both Prefill and Decode within the same node, s
     export VLLM_USE_MODELSCOPE=True
     export ASCEND_RT_VISIBLE_DEVICES=0
 
-    # Ensure the model path matches the directory recorded during download
     vllm serve Eco-Tech/Qwen3-8B-w8a8sc-310-vllm/TP1/Qwen3-8B-w8a8sc-310-vllm-tp1 \
         --host 127.0.0.1 \
         --port 8080 \
@@ -298,7 +257,6 @@ Single-node deployment completes both Prefill and Decode within the same node, s
     export VLLM_USE_MODELSCOPE=True
     export ASCEND_RT_VISIBLE_DEVICES=0
 
-    # Ensure the model path matches the directory recorded during download
     vllm serve Eco-Tech/Qwen3-14B-w8a8sc-310-vllm/TP1/Qwen3-14B-w8a8sc-310-vllm-tp1 \
         --host 127.0.0.1 \
         --port 8080 \
@@ -321,7 +279,6 @@ Single-node deployment completes both Prefill and Decode within the same node, s
     export VLLM_USE_MODELSCOPE=True
     export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3
 
-    # Ensure the model path matches the directory recorded during download
     vllm serve Eco-Tech/Qwen3-32B-w8a8sc-310-vllm/TP4/Qwen3-32B-w8a8sc-310-vllm-tp4 \
         --host 127.0.0.1 \
         --port 8080 \
@@ -338,6 +295,17 @@ Single-node deployment completes both Prefill and Decode within the same node, s
         --load-format sharded_state
     ```
 
+**Key parameters:**
+
+- `--tensor-parallel-size`: number of NPU chips the model is sharded across. Choose a value that divides the attention head count of the chosen model size.
+- `--max-model-len`: maximum sequence length (prompt plus generated tokens). Larger values allocate more KV cache memory and attention workspace; lower it if the service reports OOM at startup.
+- `--max-num-batched-tokens`: maximum number of tokens processed in one scheduler step. Larger values improve prefill throughput at the cost of first-token latency.
+- `--max-num-seqs`: maximum number of concurrently running sequences; it bounds KV cache and graph capture pressure.
+- `--compilation-config`: ACLGraph settings. `FULL_DECODE_ONLY` enables graph replay for the decode phase, and `cudagraph_capture_sizes` lists the batch sizes captured at startup, so it should cover your expected concurrency.
+- `--gpu-memory-utilization`: fraction of NPU memory reserved for the KV cache; reduce it when startup or runtime requests report OOM.
+- `--quantization ascend`: required for the W8A8/W4A4/W8A8SC weights listed in Section 3.1; remove it when serving BF16 weights.
+- `--distributed-executor-backend "mp"`: uses multi-process execution for multi-card tensor parallelism.
+
 !!! note
 
     - [vLLM Serving Arguments documentation](https://docs.vllm.ai/en/latest/cli/serve/#arguments) — Additional parameter details for vLLM serve commands.
@@ -352,6 +320,16 @@ If the service starts successfully, the following startup log will be displayed:
 (APIServer pid=<pid>) INFO:     Waiting for application startup.
 (APIServer pid=<pid>) INFO:     Application startup complete.
 ```
+
+You can also verify the service from another terminal:
+
+```bash
+curl http://127.0.0.1:<port>/health
+```
+
+Expected result: HTTP 200 with an empty body. A request to `/v1/models` should return the served model name `qwen3`.
+
+For troubleshooting, refer to [Section 10 FAQ](#10-faq) and the [Public FAQs](../../faqs.md).
 
 ## 6 Functional Verification
 
@@ -386,7 +364,7 @@ The following is an example configuration for the accuracy evaluation config fil
 
 **Accuracy Evaluation Config File:**
 
-```bash
+```python
 # Example configuration: benchmarks/ais_bench/benchmark/configs/models/vllm_api/vllm_api_general_chat.py
 from ais_bench.benchmark.models import VLLMCustomAPIChat
 from ais_bench.benchmark.utils.postprocess.model_postprocessors import extract_non_reasoning_content
@@ -429,9 +407,9 @@ ais_bench --models vllm_api_general_chat --datasets aime2025_gen_0_shot_chat_pro
 
 For setup details, including installation, dataset download, and configuration, please refer to [Using AISBench](../../developer_guide/evaluation/using_ais_bench.md#execute-performance-evaluation) for details.
 
-The following is an example configuration for the accuracy evaluation config file:
+The following is an example configuration for the performance evaluation config file:
 
-```bash
+```python
 # Example configuration: benchmarks/ais_bench/benchmark/configs/models/vllm_api/vllm_api_stream_chat.py
 from ais_bench.benchmark.models import VLLMCustomAPIChat
 from ais_bench.benchmark.utils.postprocess.model_postprocessors import extract_non_reasoning_content
@@ -466,6 +444,17 @@ models = [
 ais_bench --models vllm_api_stream_chat --datasets gsm8k_gen_0_shot_cot_str_perf --debug --summarizer default_perf --mode perf --num-prompts 360
 ```
 
+**Expected result:**
+
+AISBench prints one line per finished request and then a summary table. Check the following fields in the summary; the exact values depend on hardware, model size, and input/output lengths:
+
+- `Request throughput (req/s)`: completed requests per second.
+- `Output token throughput (tok/s)`: generated tokens per second.
+- `Mean TTFT (ms)` / `P99 TTFT (ms)`: time to first token, average and 99th percentile.
+- `Mean TPOT (ms)` / `P99 TPOT (ms)`: time per output token, average and 99th percentile.
+
+The detailed results are written under `outputs/` (or the directory given by `--work-dir`), including the per-request CSV and the summary JSON.
+
 ### 8.2 Using vLLM Benchmark
 
 Refer to [vLLM benchmark](https://docs.vllm.ai/en/latest/benchmarking/) for more details.
@@ -491,7 +480,7 @@ vllm bench serve \
     --result-dir ./
 ```
 
-After several minutes, you will get the performance evaluation result.
+After the benchmark finishes (usually after several minutes for 200 requests), vLLM prints a summary that includes `Request throughput (req/s)`, `Output token throughput (tok/s)`, `Mean TTFT (ms)`, `Mean TPOT (ms)`, and their P99 values. With `--save-result`, the same metrics are written to a JSON file in `--result-dir`, which makes it easy to compare runs.
 
 ## 9 Performance Tuning
 

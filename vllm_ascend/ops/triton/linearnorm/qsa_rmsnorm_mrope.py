@@ -24,9 +24,8 @@ def _qsa_rmsnorm_mrope_kernel(
     has_mrope: tl.constexpr,
     block_dim: tl.constexpr,
 ):
-    program_id = tl.program_id(0)
-    token_id = program_id // num_heads
-    head_id = program_id % num_heads
+    token_id = tl.program_id(0)
+    head_id = tl.program_id(1)
     offsets = tl.arange(0, block_dim)
     mask = offsets < head_dim
     input_row = input_ptr + token_id * input_stride_token + head_id * input_stride_head
@@ -41,13 +40,19 @@ def _qsa_rmsnorm_mrope_kernel(
     if has_mrope:
         h_mask = (rotary_offsets % 3 == 1) & (rotary_offsets < mrope_section_h * 3)
         w_mask = (rotary_offsets % 3 == 2) & (rotary_offsets < mrope_section_w * 3)
-        axis = tl.where(h_mask, 1, tl.where(w_mask, 2, 0))
-        cache_row = cos_sin_ptr + axis * cos_sin_stride_axis + token_id * cos_sin_stride_token
+        cache_row = cos_sin_ptr + token_id * cos_sin_stride_token
+        cos_t = tl.load(cache_row + rotary_offsets).to(tl.float32)
+        cos_h = tl.load(cache_row + cos_sin_stride_axis + rotary_offsets).to(tl.float32)
+        cos_w = tl.load(cache_row + 2 * cos_sin_stride_axis + rotary_offsets).to(tl.float32)
+        sin_t = tl.load(cache_row + rotary_offsets + half_rope_dim).to(tl.float32)
+        sin_h = tl.load(cache_row + cos_sin_stride_axis + rotary_offsets + half_rope_dim).to(tl.float32)
+        sin_w = tl.load(cache_row + 2 * cos_sin_stride_axis + rotary_offsets + half_rope_dim).to(tl.float32)
+        cos = tl.where(h_mask, cos_h, tl.where(w_mask, cos_w, cos_t))
+        sin = tl.where(h_mask, sin_h, tl.where(w_mask, sin_w, sin_t))
     else:
         cache_row = cos_sin_ptr + token_id * cos_sin_stride_token
-
-    cos = tl.load(cache_row + rotary_offsets).to(tl.float32)
-    sin = tl.load(cache_row + rotary_offsets + half_rope_dim).to(tl.float32)
+        cos = tl.load(cache_row + rotary_offsets).to(tl.float32)
+        sin = tl.load(cache_row + rotary_offsets + half_rope_dim).to(tl.float32)
     first = tl.load(input_row + rotary_offsets).to(tl.float32)
     first_weight = tl.load(weight_ptr + rotary_offsets).to(tl.float32) + 1.0
     first = (first * reciprocal_std * first_weight).to(tl.bfloat16)
@@ -101,7 +106,7 @@ def triton_qsa_rmsnorm_mrope(
     num_tokens, num_heads, head_dim = tensor.shape
     if not num_tokens:
         return output
-    _qsa_rmsnorm_mrope_kernel[(num_tokens * num_heads,)](
+    _qsa_rmsnorm_mrope_kernel[(num_tokens, num_heads)](
         tensor,
         weight,
         cos_sin,

@@ -1,0 +1,4 @@
+pr: 20361
+entries:
+  - category: bugfix
+    text: Enable DSpark adaptive verification for GDN hybrid models with initialization capability checks, strided convolution and recurrent updates, and correct accepted-state and variable-length FULL-graph handling. Scope the long fixed-verification query workaround to the A2 hardware profile, retain device query boundaries, and avoid redundant FIA boundary synchronization for full and zero draft budgets. Ascend 310P remains unsupported for adaptive GDN verification.

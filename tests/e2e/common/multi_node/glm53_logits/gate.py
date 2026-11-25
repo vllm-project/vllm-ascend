@@ -48,8 +48,9 @@ def validate_model(model, manifest):
         raise ValueError(f"Provision the completed 1D7M1MTP checkpoint at {model}")
     for record in manifest["model_hashes"]:
         name, expected = record["file"], record["sha256"]
-        if sha256(model / name) != expected:
-            raise ValueError(f"Model identity mismatch: {name}")
+        actual = sha256(model / name)
+        if actual != expected:
+            raise ValueError(f"Model identity mismatch: {name}; expected {expected}, got {actual}")
 
 
 def validate_features(health, case, role):

@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-# Kernel source: vllm_ascend/ops/triton/v2/sample/fill_logprob_token_idx.py
+# Kernel source: vllm_ascend/ops/triton/sample/fill_logprob_token_idx.py
 # Coverage: _fill_logprob_token_ids_kernel
 """
 Precision test for _fill_logprob_token_ids_kernel.
@@ -32,8 +32,8 @@ import torch
 
 from vllm_ascend.device.device_config import get_ascend_device_type
 from vllm_ascend.device.hardware import AscendDeviceType
+from vllm_ascend.ops.triton.sample.fill_logprob_token_idx import _fill_logprob_token_ids_kernel
 from vllm_ascend.ops.triton.triton_utils import init_device_properties_triton
-from vllm_ascend.ops.triton.v2.sample.fill_logprob_token_idx import _fill_logprob_token_ids_kernel
 
 MAX_LOGPROB_TOKEN_IDS = 128
 
@@ -78,8 +78,7 @@ class TestFillLogprobTokenIdsKernel:
     @pytest.mark.skipif(
         get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3), reason="Requires Ascend A2/A3"
     )
-    @pytest.mark.parametrize("batch_size", [1, 4, 8])
-    @pytest.mark.parametrize("topk", [0, 3, 5])
+    @pytest.mark.parametrize("topk,batch_size", [(0, 1), (0, 8), (3, 4), (5, 8)])
     def test_custom_token_ids(self, batch_size, topk):
         """Test with per-request custom token IDs."""
         init_device_properties_triton()

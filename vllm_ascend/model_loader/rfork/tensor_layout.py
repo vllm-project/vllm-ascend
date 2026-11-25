@@ -2,36 +2,60 @@
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
-"""Collect live model tensors and adapt their layout for RFork transfer."""
+"""RFork layout digests, summaries, and shape adaptation.
+
+Tensor enumeration itself lives in the shared ``weight_state`` module
+(strategy B: canonical shortest-path BFS, registered-first collection);
+this module keeps RFork's protocol-side layout concerns -- structural
+digests, bounded layout summaries, seed-shape adaptation, and the
+non-NPU state check -- and re-exports the enumeration API it is built on
+for existing RFork consumers (session, transfer_backend, tests).
+"""
 
 import hashlib
-import inspect
 import json
 import logging
-from collections.abc import Iterable, Iterator
 from typing import Any
 
 import torch
 from torch import nn
 from vllm.logger import logger
 
+# Module handle: find_non_npu_state_tensors resolves the transferability
+# predicate late, through weight_state (the predicate's home), so monkeypatches
+# on weight_state are visible to it. A from-import binding would snapshot the
+# original function at import time and miss them.
+from vllm_ascend.model_loader import weight_state
+from vllm_ascend.model_loader.rfork.local_weights import get_local_tensor_ids
 from vllm_ascend.model_loader.rfork.manifest import (
     normalize_dtype_name,
     numel_from_shape,
     read_npu_format,
 )
+from vllm_ascend.model_loader.weight_state import (
+    collect_transferable_tensors as collect_transferable_tensors,  # noqa: F401 (re-export)
+)
+from vllm_ascend.model_loader.weight_state import (
+    is_tensor_on_transfer_device as is_tensor_on_transfer_device,  # noqa: F401 (re-export)
+)
+from vllm_ascend.model_loader.weight_state import (
+    is_transferable_tensor as is_transferable_tensor,  # noqa: F401 (re-export)
+)
+from vllm_ascend.model_loader.weight_state import (
+    validate_transferable_tensor_layout as validate_transferable_tensor_layout,  # noqa: F401 (re-export)
+)
 
 TENSOR_LAYOUT_SAMPLE_LIMIT = 3
-
-# Runtime scratch tensors are local execution state, not checkpoint-derived
-# model state.  They must keep the capacity selected by the receiving instance
-# instead of being copied from a seed that may use different scheduler limits.
-_RUNTIME_ONLY_TENSOR_NAMES = frozenset({"topk_indices_buffer"})
-
-
-def _is_runtime_only_tensor(name: str) -> bool:
-    return name.rsplit(".", 1)[-1] in _RUNTIME_ONLY_TENSOR_NAMES
 
 
 def _layout_digest(records: list[dict[str, Any]]) -> str:
@@ -39,22 +63,22 @@ def _layout_digest(records: list[dict[str, Any]]) -> str:
     return hashlib.sha256(payload.encode()).hexdigest()
 
 
-def build_structural_digest(tensors: list[tuple[str, torch.Tensor]]) -> str:
-    """Digest the transferable tensor set's names, shapes, dtypes, and NPU formats.
+def build_structural_digest(
+    tensors: list[tuple[str, torch.Tensor]], known_formats: dict[str, int] | None = None
+) -> str:
+    """Hash the manifest's tensor IDs, shapes, dtypes, and NPU formats.
 
-    This summarizes exactly what ``validate_weight_manifest`` compares between a
-    seed and a receiver, derived from the built model rather than from
-    configuration fields.  Pass the output of ``collect_transferable_tensors``
-    so runtime-only scratch buffers stay excluded.  ``read_npu_format`` yields
-    ``None`` off-device, which keeps the digest well defined during CPU-only
-    inspection.
+    Pass ``collect_transferable_tensors`` output to exclude runtime buffers.
+    ``known_formats`` reuses NPU formats read during registration.
     """
     records = [
         {
             "name": name,
             "shape": tuple(int(dim) for dim in tensor.shape),
             "dtype": normalize_dtype_name(tensor.dtype),
-            "npu_format": read_npu_format(tensor),
+            "npu_format": (
+                known_formats[name] if known_formats is not None and name in known_formats else read_npu_format(tensor)
+            ),
         }
         for name, tensor in sorted(tensors, key=lambda item: item[0])
     ]
@@ -205,7 +229,7 @@ def reshape_tensor_to_seed_shape(
     if seed_shape is None or tuple(tensor.shape) == seed_shape:
         return True
     if tensor.numel() != numel_from_shape(seed_shape):
-        logger.error("Weight shape mismatch for %s: local=%s, seed=%s", name, tuple(tensor.shape), seed_shape)
+        logger.error("Weight shape mismatch for %s, local=%s, seed=%s", name, tuple(tensor.shape), seed_shape)
         return False
     local_shape = tuple(tensor.shape)
     try:
@@ -218,183 +242,17 @@ def reshape_tensor_to_seed_shape(
     return True
 
 
-def is_tensor_on_transfer_device(tensor: torch.Tensor) -> bool:
-    return tensor.device.type == "npu"
-
-
-def is_transferable_tensor(tensor: torch.Tensor) -> bool:
-    return not tensor.is_meta and tensor.numel() > 0 and is_tensor_on_transfer_device(tensor)
-
-
-def is_non_overlapping_dense_tensor(tensor: torch.Tensor) -> bool:
-    """Return whether logical elements occupy one contiguous byte range."""
-    if tensor.numel() <= 1:
-        return True
-
-    dense_stride = 1
-    for stride, size in sorted(
-        (int(stride), int(size)) for size, stride in zip(tensor.shape, tensor.stride(), strict=True) if size > 1
-    ):
-        if stride != dense_stride:
-            return False
-        dense_stride *= size
-    return True
-
-
-def validate_transferable_tensor_layout(name: str, tensor: torch.Tensor) -> None:
-    """Reject tensor views that cannot be represented by RFork byte ranges."""
-    if is_non_overlapping_dense_tensor(tensor):
-        return
-    raise ValueError(
-        "RFork cannot transfer a tensor with gapped or overlapping storage: "
-        f"{name!r}; shape={tuple(tensor.shape)}, stride={tuple(tensor.stride())}."
-    )
-
-
-def _iter_tensors_in_value(
-    prefix: str,
-    value: Any,
-    visited_object_ids: set[int],
-    scan_objects: bool = False,
-) -> Iterator[tuple[str, torch.Tensor]]:
-    if isinstance(value, torch.Tensor):
-        yield prefix, value
-        return
-    if isinstance(value, (nn.Module, str, bytes)):
-        return
-    # Scan callable instances for tensors, but skip executable function, method, and class objects.
-    if inspect.isfunction(value) or inspect.ismethod(value) or inspect.isclass(value):
-        return
-    if isinstance(value, (list, tuple)):
-        value_id = id(value)
-        if value_id in visited_object_ids:
-            return
-        visited_object_ids.add(value_id)
-        try:
-            for index, item in enumerate(value):
-                yield from _iter_tensors_in_value(f"{prefix}.{index}", item, visited_object_ids, scan_objects)
-        finally:
-            visited_object_ids.remove(value_id)
-        return
-    if isinstance(value, dict):
-        value_id = id(value)
-        if value_id in visited_object_ids:
-            return
-        visited_object_ids.add(value_id)
-        try:
-            for key, item in value.items():
-                yield from _iter_tensors_in_value(f"{prefix}.{key}", item, visited_object_ids, scan_objects)
-        finally:
-            visited_object_ids.remove(value_id)
-        return
-    if callable(value) and (not scan_objects or not hasattr(value, "__dict__")):
-        return
-    if not scan_objects or not hasattr(value, "__dict__"):
-        return
-    value_id = id(value)
-    if value_id in visited_object_ids:
-        return
-    visited_object_ids.add(value_id)
-    try:
-        for attr_name, attr_value in vars(value).items():
-            if not attr_name.startswith("_"):
-                yield from _iter_tensors_in_value(
-                    f"{prefix}.{attr_name}",
-                    attr_value,
-                    visited_object_ids,
-                    scan_objects,
-                )
-    finally:
-        visited_object_ids.remove(value_id)
-
-
-def _try_collect(
-    name: str,
-    tensor: torch.Tensor,
-    seen_names: dict[str, int],
-    seen_tensors: dict[tuple[Any, ...], int],
-    collected: list[tuple[str, torch.Tensor]],
-) -> None:
-    if _is_runtime_only_tensor(name) or not is_transferable_tensor(tensor):
-        return
-    validate_transferable_tensor_layout(name, tensor)
-    data_ptr = tensor.data_ptr()
-    tensor_signature = (
-        data_ptr,
-        tensor.numel(),
-        tuple(tensor.shape),
-        tensor.dtype,
-        tensor.device,
-        tuple(tensor.stride()),
-    )
-    existing_index = seen_names.get(name)
-    if existing_index is not None:
-        existing_tensor = collected[existing_index][1]
-        if existing_tensor is tensor or tensor_signature == (
-            existing_tensor.data_ptr(),
-            existing_tensor.numel(),
-            tuple(existing_tensor.shape),
-            existing_tensor.dtype,
-            existing_tensor.device,
-            tuple(existing_tensor.stride()),
-        ):
-            return
-        raise ValueError(
-            "RFork encountered conflicting tensor entries for logical name "
-            f"{name!r}; shape, dtype, stride, or storage differs."
-        )
-
-    # Parameters and buffers are canonical. An implementation object may expose
-    # the exact same tensor under another public name; transferring that range
-    # twice only bloats the manifest. Distinct views retain separate entries.
-    existing_index = seen_tensors.get(tensor_signature)
-    if existing_index is not None:
-        seen_names[name] = existing_index
-        return
-
-    seen_names[name] = len(collected)
-    seen_tensors[tensor_signature] = len(collected)
-    collected.append((name, tensor))
-
-
-def collect_transferable_tensors(model: nn.Module, processed_layout: bool) -> list[tuple[str, torch.Tensor]]:
-    seen: dict[str, int] = {}
-    seen_tensors: dict[tuple[Any, ...], int] = {}
-    collected: list[tuple[str, torch.Tensor]] = []
-    for name, tensor in model.named_parameters():
-        _try_collect(name, tensor, seen, seen_tensors, collected)
-    for name, tensor in model.named_buffers():
-        _try_collect(name, tensor, seen, seen_tensors, collected)
-    for module_prefix, module in model.named_modules():
-        attributes: Iterable[tuple[str, Any, bool]]
-        if processed_layout:
-            attributes = (
-                (name, value, name == "impl")
-                for name, value in vars(module).items()
-                if not name.startswith("_") and not isinstance(value, nn.Module)
-            )
-        else:
-            impl = getattr(module, "impl", None)
-            attributes = () if impl is None or isinstance(impl, nn.Module) else (("impl", impl, True),)
-
-        for attr_name, attr_value, scan_objects in attributes:
-            for tensor_name, tensor in _iter_tensors_in_value(
-                attr_name,
-                attr_value,
-                set(),
-                scan_objects,
-            ):
-                full_name = f"{module_prefix}.{tensor_name}" if module_prefix else tensor_name
-                _try_collect(full_name, tensor, seen, seen_tensors, collected)
-    return collected
-
-
 def find_non_npu_state_tensors(model: Any) -> list[str]:
+    """Reject host state unless RFork completed its supported local loading."""
     if not isinstance(model, nn.Module):
         return []
+    local_tensor_ids = get_local_tensor_ids(model)
     return [
         name
         for iterator in (model.named_parameters(), model.named_buffers())
         for name, tensor in iterator
-        if not tensor.is_meta and tensor.numel() > 0 and not is_tensor_on_transfer_device(tensor)
+        if not tensor.is_meta
+        and tensor.numel() > 0
+        and not weight_state.is_tensor_on_transfer_device(tensor)
+        and id(tensor) not in local_tensor_ids
     ]

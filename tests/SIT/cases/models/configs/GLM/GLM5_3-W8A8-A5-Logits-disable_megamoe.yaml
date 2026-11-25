@@ -1,0 +1,208 @@
+# Derived from main tests/SIT/cases/features/pp/GLM-5.3-W8A8C8-A3-200k-PP-PD.yaml.
+# Standard vllm serve / external-DP launcher; only the model, A5 topology, test hooks and feature toggle differ.
+test_name: glm53-w8a8-a5-logits-disable-megamoe
+model: /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5___3-W8A8C8-MXFP8-1D7M1MTP
+num_nodes: 2
+npu_per_node: 8
+dp_load_balancing: external
+routing:
+  type: disaggregated_prefill
+  groups:
+    prefiller:
+    - 0
+    decoder:
+    - 1
+config:
+- node_index: 0
+  port_start: 7100
+  dp_rpc_port: 12321
+  dp_size: 1
+  dp_size_local: 1
+  dp_rank_start: 0
+  tp_size: 2
+  cp_size: 2
+  pp_size: 2
+  nnodes: 1
+  node_rank: 0
+  master_addr: ${NODE_0_IP}
+  master_port: 7060
+  is_headless: false
+  dp_address: ${NODE_0_IP}
+  pp_layer_partition: 4,4
+- node_index: 1
+  port_start: 7100
+  dp_rpc_port: 12321
+  dp_size: 4
+  dp_size_local: 4
+  dp_rank_start: 0
+  tp_size: 2
+  dp_address: ${NODE_1_IP}
+templates:
+- node_index: 0
+  envs:
+    SERVER_PORT: ${PORT}
+    ASCEND_RT_VISIBLE_DEVICES: ${VISIBLE_DEVICES}
+    PYTORCH_NPU_ALLOC_CONF: expandable_segments:True
+    HCCL_OP_EXPANSION_MODE: AIV
+    HCCL_BUFFSIZE: '2560'
+    TASK_QUEUE_ENABLE: '1'
+    VLLM_USE_V2_MODEL_RUNNER: '1'
+    ASCEND_GLOBAL_RESOURCE_CONFIG: '{"comm_resource_config.protocol_desc":["hccs:device"]}'
+    ASCEND_LOCAL_COMM_RES: '{"version":"1.2"}'
+    VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS: '30000'
+    HCCL_EXEC_TIMEOUT: '1800'
+    HCCL_CONNECT_TIMEOUT: '1800'
+    ASCEND_TRANSFER_TIMEOUT: '10000'
+    VLLM_USE_MODELSCOPE: 'true'
+    VLLM_USE_FASTOKENS: '1'
+    VLLM_PP_LAYER_PARTITION: 4,4
+  server_cmd_template:
+  - --host
+  - 0.0.0.0
+  - --port
+  - $SERVER_PORT
+  - --tensor-parallel-size
+  - ${TP_SIZE}
+  - --prefill-context-parallel-size
+  - ${CP_SIZE}
+  - --pipeline-parallel-size
+  - ${PP_SIZE}
+  - --distributed-executor-backend
+  - mp
+  - --enable-expert-parallel
+  - --enable-chunked-prefill
+  - --no-enable-prefix-caching
+  - --async-scheduling
+  - --seed
+  - '1024'
+  - --max-model-len
+  - '17408'
+  - --max-num-batched-tokens
+  - '16384'
+  - --trust-remote-code
+  - --max-num-seqs
+  - '64'
+  - --gpu-memory-utilization
+  - '0.92'
+  - --quantization
+  - ascend
+  - --safetensors-load-strategy
+  - prefetch
+  - --enable-auto-tool-choice
+  - --tool-call-parser
+  - glm47
+  - --reasoning-parser
+  - glm47
+  - --enforce-eager
+  - --kv-cache-dtype
+  - fp8
+  - --attention_config.indexer_kv_dtype
+  - fp8
+  - --additional-config
+  - '{"enable_fused_mc2": 0, "enable_flashcomm1": true}'
+  - --speculative-config
+  - '{"num_speculative_tokens": 1, "method": "deepseek_mtp", "enforce_eager": true}'
+  - --kv-transfer-config
+  - '{"kv_connector": "MooncakeConnectorV2", "kv_role": "kv_producer", "kv_port": "30000", "engine_id": "0", "kv_connector_extra_config": {"use_ascend_direct":
+    true, "prefill": {"dp_size": 1, "pp_size": 2, "tp_size": 2, "pcp_size": 2, "pp_layer_partition": "4,4"}, "decode": {"dp_size": 4, "tp_size":
+    2}}}'
+  - --api-server-count
+  - '1'
+  - --logprobs-mode
+  - raw_logits
+  - --max-logprobs
+  - '-1'
+  - --logits-processors
+  - tests.e2e.common.multi_node.glm53_logits.trace_processor:FixedTraceProcessor
+  - --worker-extension-cls
+  - tests.e2e.common.multi_node.glm53_logits.probe_extension.LogitsProbeExtension
+  - --middleware
+  - tests.e2e.common.multi_node.glm53_logits.middleware.LogitsCaptureMiddleware
+- node_index: 1
+  envs:
+    SERVER_PORT: ${PORT}
+    ASCEND_RT_VISIBLE_DEVICES: ${VISIBLE_DEVICES}
+    PYTORCH_NPU_ALLOC_CONF: expandable_segments:True
+    HCCL_OP_EXPANSION_MODE: AIV
+    HCCL_BUFFSIZE: '1024'
+    TASK_QUEUE_ENABLE: '1'
+    VLLM_USE_V2_MODEL_RUNNER: '1'
+    ASCEND_GLOBAL_RESOURCE_CONFIG: '{"comm_resource_config.protocol_desc":["hccs:device"]}'
+    ASCEND_LOCAL_COMM_RES: '{"version":"1.2"}'
+    VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS: '30000'
+    HCCL_EXEC_TIMEOUT: '1800'
+    HCCL_CONNECT_TIMEOUT: '1800'
+    ASCEND_TRANSFER_TIMEOUT: '10000'
+    VLLM_USE_MODELSCOPE: 'true'
+    OMP_PROC_BIND: 'false'
+    OMP_NUM_THREADS: '10'
+  server_cmd_template:
+  - --host
+  - 0.0.0.0
+  - --port
+  - $SERVER_PORT
+  - --data-parallel-size
+  - ${DP_SIZE}
+  - --data-parallel-rank
+  - ${DP_RANK}
+  - --data-parallel-address
+  - ${DP_ADDRESS}
+  - --data-parallel-rpc-port
+  - ${DP_RPC_PORT}
+  - --tensor-parallel-size
+  - ${TP_SIZE}
+  - --enable-expert-parallel
+  - --enable-chunked-prefill
+  - --no-enable-prefix-caching
+  - --seed
+  - '1024'
+  - --max-model-len
+  - '17408'
+  - --max-num-batched-tokens
+  - '256'
+  - --trust-remote-code
+  - --max-num-seqs
+  - '64'
+  - --gpu-memory-utilization
+  - '0.92'
+  - --async-scheduling
+  - --quantization
+  - ascend
+  - --safetensors-load-strategy
+  - prefetch
+  - --enable-auto-tool-choice
+  - --tool-call-parser
+  - glm47
+  - --reasoning-parser
+  - glm47
+  - --kv-cache-dtype
+  - fp8
+  - --attention_config.indexer_kv_dtype
+  - fp8
+  - --additional-config
+  - '{"recompute_scheduler_enable": true, "enable_fused_mc2": 0}'
+  - --speculative-config
+  - '{"num_speculative_tokens": 5, "method": "deepseek_mtp", "enforce_eager": true}'
+  - --compilation-config
+  - '{"cudagraph_mode": "FULL_DECODE_ONLY"}'
+  - --kv-transfer-config
+  - '{"kv_connector": "MooncakeConnectorV2", "kv_role": "kv_consumer", "kv_port": "30100", "engine_id": "1", "kv_connector_extra_config": {"use_ascend_direct":
+    true, "prefill": {"dp_size": 1, "pp_size": 2, "tp_size": 2, "pcp_size": 2, "pp_layer_partition": "4,4"}, "decode": {"dp_size": 4, "tp_size":
+    2}}}'
+  - --api-server-count
+  - '1'
+  - --logprobs-mode
+  - raw_logits
+  - --max-logprobs
+  - '-1'
+  - --logits-processors
+  - tests.e2e.common.multi_node.glm53_logits.trace_processor:FixedTraceProcessor
+  - --worker-extension-cls
+  - tests.e2e.common.multi_node.glm53_logits.probe_extension.LogitsProbeExtension
+  - --middleware
+  - tests.e2e.common.multi_node.glm53_logits.middleware.LogitsCaptureMiddleware
+benchmarks: {}
+logits_regression:
+  baseline_path: /root/.cache/glm53-logits-golden/20261102
+  case: disable_megamoe
+  timeout_seconds: 3600

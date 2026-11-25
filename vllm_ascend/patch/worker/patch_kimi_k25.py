@@ -21,13 +21,11 @@ import torch.nn.functional as F
 from vllm.model_executor.models.kimi_k25_vit import (
     Learnable2DInterpPosEmbDivided_fixed,
     MoonViT3dPretrainedModel,
-    get_rope_shape_decorate,
 )
 
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 
 
-@get_rope_shape_decorate
 def get_rope_shape(org, interpolation_mode, shape):
     return (
         F.interpolate(

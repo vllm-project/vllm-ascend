@@ -14,7 +14,8 @@ from vllm_ascend.patch.worker import patch_model_runner  # noqa: F401
 
 
 @pytest.mark.parametrize("is_profiling", [False, True])
-def test_initialize_preserves_connector_containers_and_flattens_runner_cache(is_profiling):
+@pytest.mark.parametrize("has_trackers", [False, True])
+def test_initialize_preserves_connector_containers_and_flattens_runner_cache(is_profiling, has_trackers):
     k, v, conv, ssm, single = [torch.empty(3, 4) for _ in range(5)]
     other = torch.empty(3, 4, device="meta")
     caches = {"attention": (k, None, v), "mamba": [conv, ssm], "single": single, "other": other}
@@ -29,36 +30,69 @@ def test_initialize_preserves_connector_containers_and_flattens_runner_cache(is_
     # the test exercises the KV-connector path only (main-only branch).
     runner.vllm_config.aux_output_config.enabled = False
     runner.jit_warmup_registry.activate.side_effect = nullcontext
+    stale_trackers = [torch.empty(3, dtype=torch.int32)]
+    runner.replayssm_block_copy_tensors = stale_trackers
+    trackers = [torch.zeros(3, dtype=torch.int32), torch.ones(3, dtype=torch.int32)] if has_trackers else []
     config = KVCacheConfig(num_blocks=3, kv_cache_tensors=[], kv_cache_groups=[])
+    persistent_tables = MagicMock(name="persistent_block_tables")
     registration_order = []
     runner._register_sparse_kv_caches.side_effect = lambda _: registration_order.append("offload")
+
+    def allocate_caches(*_args, **_kwargs):
+        registration_order.append("allocate")
+        return caches
+
+    def initialize_model_state(resolved_config, block_tables):
+        # Align-mode Mamba copies index persistent request slots. Passing the
+        # batch-ordered input tables here would silently corrupt reordered
+        # requests, while skipping this hook leaves the first request unready.
+        assert resolved_config is runner.kv_cache_config
+        assert block_tables is persistent_tables
+        assert block_tables is not persistent_tables.input_block_tables
+        assert [id(tensor) for tensor in runner.kv_caches] == [id(tensor) for tensor in (k, v, conv, ssm, single)]
+        registration_order.append("model_state")
+
+    runner.model_state.initialize_kv_cache.side_effect = initialize_model_state
 
     def register_connector(*_args):
         registration_order.append("connector")
 
+    def collect_initialized_trackers(*_args):
+        # Model-state initialization can replace the tracker tensors.
+        assert registration_order[-1] == "model_state"
+        return trackers
+
+    tracker_context = patch.object(
+        upstream, "get_replayssm_block_copy_tensors", side_effect=collect_initialized_trackers
+    )
     with (
         patch.object(upstream, "init_attn_backend", return_value=([], MagicMock(), [])),
         patch.object(upstream, "maybe_create_adaptive_verification_manager", return_value=None),
-        patch.object(upstream, "BlockTables"),
+        patch.object(upstream, "BlockTables", return_value=persistent_tables),
         patch.object(upstream.pcp, "maybe_build_pcp_manager", return_value=None),
         patch.object(upstream, "maybe_build_ubatch_runner", return_value=None),
         patch.object(upstream, "initialize_mamba_ssu_backend"),
         patch.object(upstream, "has_compiled_submodule", return_value=False),
         patch.object(upstream, "ModelCudaGraphManager"),
         patch.object(upstream, "check_attention_cp_compatibility"),
-        patch.object(upstream, "init_kv_cache", return_value=caches),
+        patch.object(upstream, "init_kv_cache", side_effect=allocate_caches),
+        tracker_context as collect_trackers,
         patch.object(upstream, "get_kv_connector", side_effect=register_connector) as connector,
     ):
         upstream.GPUModelRunner.initialize_kv_cache(runner, config, is_profiling=is_profiling)
 
     assert [id(tensor) for tensor in runner.kv_caches] == [id(tensor) for tensor in (k, v, conv, ssm, single)]
+    collect_trackers.assert_called_once_with(runner.compilation_config.static_forward_context)
+    assert runner.replayssm_block_copy_tensors is trackers
+    assert type(runner.replayssm_block_copy_tensors) is list
     runner._register_sparse_kv_caches.assert_called_once_with(caches)
+    runner.model_state.initialize_kv_cache.assert_called_once_with(runner.kv_cache_config, persistent_tables)
     if is_profiling:
-        assert registration_order == ["offload"]
+        assert registration_order == ["allocate", "offload", "model_state"]
         connector.assert_not_called()
         assert runner.kv_connector is upstream.NO_OP_KV_CONNECTOR
     else:
-        assert registration_order == ["offload", "connector"]
+        assert registration_order == ["allocate", "offload", "model_state", "connector"]
         assert connector.call_args.args[1] is caches
         assert type(caches["attention"]) is tuple
         assert type(caches["mamba"]) is list
@@ -79,6 +113,8 @@ def test_initialize_builds_aux_output_connector_when_enabled():
     runner.cache_config.kv_sharing_fast_prefill = False
     # Mirror of the case above: exercise the AuxOutput branch only.
     runner.vllm_config.aux_output_config.enabled = True
+    connector = MagicMock()
+    runner.aux_output_connector = None
     runner.jit_warmup_registry.activate.side_effect = nullcontext
     config = KVCacheConfig(num_blocks=3, kv_cache_tensors=[], kv_cache_groups=[])
 
@@ -94,14 +130,17 @@ def test_initialize_builds_aux_output_connector_when_enabled():
         patch.object(upstream, "check_attention_cp_compatibility"),
         patch.object(upstream, "init_kv_cache", return_value=caches),
         patch.object(upstream, "get_kv_connector"),
-        patch.object(upstream, "get_aux_output_connector", return_value="aux") as get_aux,
+        patch.object(upstream, "get_aux_output_connector", return_value=connector) as get_aux,
     ):
         upstream.GPUModelRunner.initialize_kv_cache(runner, config, is_profiling=False)
 
     # The initializer deep-copies the config, so assert against the resolved one
     # (identity shortcut) instead of comparing the original object by value.
-    get_aux.assert_called_once_with(runner.model, runner.vllm_config, runner.kv_cache_config)
-    assert runner.aux_output_connector == "aux"
+    # Main creates the connector without the KV-cache config and
+    # initializes its storage once the layout is resolved.
+    get_aux.assert_called_once_with(runner.model, runner.vllm_config)
+    connector.initialize_output_storage.assert_called_once_with(runner.kv_cache_config)
+    assert runner.aux_output_connector is connector
 
 
 def test_mrv2_block_copy_preserves_segmented_mamba_storage():
@@ -109,8 +148,14 @@ def test_mrv2_block_copy_preserves_segmented_mamba_storage():
     conv = storage[:12].view(3, 4)
     ssm = storage[12:].view(3, 8)
     before_conv, before_ssm = conv.clone(), ssm.clone()
-    upstream.copy_kv_cache_blocks_inplace([conv, ssm, conv, ssm], 3, [KVCacheBlockCopy(src_block_id=0, dst_block_id=2)])
+    ring_start = torch.tensor([10, 20, 30], dtype=torch.int32)
+    num_committed = torch.tensor([1, 2, 3], dtype=torch.int32)
+    upstream.copy_kv_cache_blocks_inplace(
+        [conv, ssm, conv, ssm, ring_start, num_committed], 3, [KVCacheBlockCopy(src_block_id=0, dst_block_id=2)]
+    )
     torch.testing.assert_close(conv[2], before_conv[0])
     torch.testing.assert_close(ssm[2], before_ssm[0])
     torch.testing.assert_close(conv[:2], before_conv[:2])
     torch.testing.assert_close(ssm[:2], before_ssm[:2])
+    torch.testing.assert_close(ring_start, torch.tensor([10, 20, 10], dtype=torch.int32))
+    torch.testing.assert_close(num_committed, torch.tensor([1, 2, 1], dtype=torch.int32))

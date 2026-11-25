@@ -11,7 +11,7 @@ import aiohttp
 from aiohttp import web
 
 from tests.e2e.common.multi_node.glm53_logits.gate import load_golden
-from tests.e2e.common.multi_node.glm53_logits.runner import capture_and_compare, wait_ready
+from tests.e2e.common.multi_node.glm53_logits.runner import capture_and_compare, collect_health, wait_completion
 from tests.ut.glm53_logits_helpers import make_fixture
 
 
@@ -25,6 +25,7 @@ class TestLogitsProtocol(unittest.IsolatedAsyncioTestCase):
         self.entries = {(e["sample"], e["role"]): e for e in self.manifest["cases"]["disable_pp"]}
         self.bad_handoff = False
         self.requests = []
+        self.paths = []
         self.runners = []
         self.urls = {}
         for role in ("P", "D"):
@@ -32,6 +33,10 @@ class TestLogitsProtocol(unittest.IsolatedAsyncioTestCase):
             app["role"] = role
             app.router.add_post("/capture", self.capture)
             app.router.add_get("/artifacts/{name}", self.artifact)
+            if role == "D":
+                for rank in range(4):
+                    app.router.add_post(f"/d{rank}/capture", self.capture)
+                    app.router.add_get(f"/d{rank}/artifacts/{{name}}", self.artifact)
             runner = web.AppRunner(app)
             await runner.setup()
             site = web.TCPSite(runner, "127.0.0.1", 0)
@@ -48,6 +53,7 @@ class TestLogitsProtocol(unittest.IsolatedAsyncioTestCase):
         data = await request.json()
         role = request.app["role"]
         self.requests.append((role, data))
+        self.paths.append(request.path)
         name = f"len{len(data['prompt_ids'])}"
         entry = self.entries[name, role]
         result = {"file": entry["file"], "logits_mode": "raw_logits"}
@@ -89,15 +95,30 @@ class TestLogitsProtocol(unittest.IsolatedAsyncioTestCase):
         process = Mock()
         process.poll.return_value = 1
         async with aiohttp.ClientSession() as session:
-            with self.assertRaisesRegex(RuntimeError, "server exited"):
-                await wait_ready(session, self.urls, process, 10)
+            with self.assertRaisesRegex(RuntimeError, "process exited"):
+                await collect_health(session, self.urls, [(process, None, None)], 10)
 
     async def test_readiness_timeout_is_a_failure(self):
         process = Mock()
         process.poll.return_value = None
         async with aiohttp.ClientSession() as session:
             with self.assertRaises(TimeoutError):
-                await wait_ready(session, self.urls, process, 0)
+                await collect_health(session, self.urls, [(process, None, None)], 0)
+
+    async def test_external_decode_endpoints_are_all_exercised(self):
+        urls = {"P": self.urls["P"], "D": [self.urls["D"] + f"/d{rank}" for rank in range(4)]}
+        with tempfile.TemporaryDirectory() as directory:
+            async with aiohttp.ClientSession() as session:
+                metrics = await capture_and_compare(
+                    session, urls, "disable_pp", self.manifest, self.corpus, Path(directory), self.root
+                )
+        self.assertTrue(all(row["passed"] for row in metrics))
+        self.assertEqual(self.paths[1::2], [f"/d{rank}/capture" for rank in range(4)])
+
+    async def test_missing_completion_cannot_pass(self):
+        async with aiohttp.ClientSession() as session:
+            with self.assertRaises(TimeoutError):
+                await wait_completion(session, [self.urls["D"]], [], 0)
 
 
 if __name__ == "__main__":

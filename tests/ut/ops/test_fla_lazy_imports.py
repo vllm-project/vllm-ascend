@@ -126,19 +126,27 @@ class TestFLALazyImports(unittest.TestCase):
             events.append("device")
             return object()
 
+        # `init_device` builds the runner through the
+        # `_init_workspace_and_model_runner` / `_make_model_runner` hooks; the
+        # runner module they import through has to be faked instead of the bound class.
+        runner_module = ModuleType("vllm_ascend.worker.v2.model_runner")
+        runner_module.__dict__.update(NPUModelRunner=lambda *args: events.append("model_runner"))
         namespace = {
             "register_ascend_fla_customop": lambda: events.append("register"),
             "init_workspace_manager": Mock(),
-            "NPUModelRunner": lambda *args: events.append("model_runner"),
         }
         init_device = _load_function("vllm_ascend/worker/worker.py", "init_device", namespace)
-        worker = SimpleNamespace(
+        init_wam = _load_function("vllm_ascend/worker/worker.py", "_init_workspace_and_model_runner", namespace)
+        make_model_runner = _load_function("vllm_ascend/worker/worker.py", "_make_model_runner", namespace)
+        worker: SimpleNamespace = SimpleNamespace(
             _init_device=select_device,
-            use_v2_model_runner=False,
-            vllm_config=object(),
+            _init_workspace_and_model_runner=lambda: init_wam(worker),
+            _make_model_runner=lambda: make_model_runner(worker),
+            vllm_config=SimpleNamespace(is_mm_encoder_only=False),
             rank=1,
         )
-        init_device(worker)
+        with patch.dict(sys.modules, {"vllm_ascend.worker.v2.model_runner": runner_module}):
+            init_device(worker)
         self.assertEqual(events, ["device", "register", "model_runner"])
 
 

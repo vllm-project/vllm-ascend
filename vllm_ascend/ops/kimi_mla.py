@@ -13,3 +13,8 @@ class AscendKimiK3MultiHeadLatentAttention(AscendMultiHeadLatentAttention, KimiK
     OOT lookup uses the concrete class name. Inherit the upstream subclass too
     so Python runs the Ascend initializer on the replacement instance.
     """
+
+    # vLLM #60110 added this flag and reads it in the upstream
+    # process_weights_after_loading hook. The AMD initializer never runs on
+    # Ascend, so expose the fold as disabled.
+    _fold_qb_uk = False

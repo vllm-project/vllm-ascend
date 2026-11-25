@@ -17,6 +17,12 @@ from vllm_ascend.attention.mla_v1 import AscendMLAImpl
 from vllm_ascend.device.hardware_profile import HardwareCapability
 
 
+def _selector_impl(**attrs):
+    impl = AscendMLAImpl.__new__(AscendMLAImpl)
+    vars(impl).update(attrs)
+    return impl
+
+
 def test_flashmla_api_detection_distinguishes_absence_from_broken_import(monkeypatch):
     monkeypatch.setattr(flashmla, "_has_flashmla_module", lambda: True)
 
@@ -68,8 +74,9 @@ def test_flashmla_selection_requires_operator_and_supported_mla_config(monkeypat
         use_v2_model_runner=True,
         speculative_config=None,
         parallel_config=SimpleNamespace(decode_context_parallel_size=1),
+        model_config=SimpleNamespace(hf_config=SimpleNamespace(model_type="deepseek_v3")),
     )
-    impl = SimpleNamespace(
+    impl = _selector_impl(
         vllm_config=config,
         num_heads=8,
         num_kv_heads=1,
@@ -86,8 +93,8 @@ def test_flashmla_selection_requires_operator_and_supported_mla_config(monkeypat
         lambda: SimpleNamespace(supports=lambda capability: capability is HardwareCapability.MLA_FLASH),
     )
     monkeypatch.setattr(mla_v1, "supports_component_major_mla_pd", lambda _config: True)
-    monkeypatch.setattr(mla_v1, "enable_sfa", lambda _config: False)
     monkeypatch.setattr(mla_v1, "get_flashmla_ops", lambda: (lambda: None, lambda: None))
+    monkeypatch.setattr(mla_v1, "get_pcp_group", lambda: SimpleNamespace(world_size=1))
 
     assert AscendMLAImpl._can_use_flashmla(impl)
 
@@ -111,6 +118,135 @@ def test_flashmla_selection_requires_operator_and_supported_mla_config(monkeypat
     impl.num_heads = 12
     assert AscendMLAImpl._can_use_flashmla(impl)
     config.parallel_config.decode_context_parallel_size = 4
+    assert not AscendMLAImpl._can_use_flashmla(impl)
+
+
+def test_quant_flashmla_selection_is_k3_dspark_c8_mrv2_only(monkeypatch):
+    config = SimpleNamespace(
+        use_v2_model_runner=True,
+        speculative_config=None,
+        parallel_config=SimpleNamespace(decode_context_parallel_size=1),
+        model_config=SimpleNamespace(dtype=torch.bfloat16, hf_config=SimpleNamespace(model_type="kimi_linear")),
+    )
+    impl = _selector_impl(
+        vllm_config=config,
+        _is_k3_dspark_draft=False,
+        support_fp8_attention=True,
+        num_heads=8,
+        num_kv_heads=1,
+        kv_lora_rank=512,
+        qk_rope_head_dim=64,
+        fa_quant_layer=True,
+        dtype=torch.float8_e4m3fn,
+        enable_kv_nz=False,
+        use_pcp=False,
+    )
+    monkeypatch.setattr(mla_v1, "get_current_hardware_profile", lambda: SimpleNamespace(supports=lambda _: True))
+    monkeypatch.setattr(mla_v1, "supports_component_major_mla_pd", lambda _: True)
+    monkeypatch.setattr(mla_v1, "get_quant_flashmla_ops", lambda: (object(), object()))
+
+    assert not AscendMLAImpl._can_use_quant_flashmla(impl)
+    config.model_config.hf_config.model_type = "kimi_k3"
+    assert not AscendMLAImpl._can_use_quant_flashmla(impl)
+
+    config.speculative_config = SimpleNamespace(method="dspark")
+    impl._is_k3_dspark_draft = True
+    assert AscendMLAImpl._can_use_quant_flashmla(impl)
+    config.use_v2_model_runner = False
+    assert not AscendMLAImpl._can_use_quant_flashmla(impl)
+    config.use_v2_model_runner = True
+    impl.fa_quant_layer = False
+    assert not AscendMLAImpl._can_use_quant_flashmla(impl)
+    impl.fa_quant_layer = True
+    config.parallel_config.decode_context_parallel_size = 2
+    assert AscendMLAImpl._can_use_quant_flashmla(impl)
+    impl.num_heads = 96
+    assert not AscendMLAImpl._can_use_quant_flashmla(impl)
+    impl.num_heads = 8
+    config.parallel_config.decode_context_parallel_size = 1
+    monkeypatch.setattr(mla_v1, "get_quant_flashmla_ops", lambda: None)
+    assert not AscendMLAImpl._can_use_quant_flashmla(impl)
+
+
+def test_quant_flashmla_selection_supports_k31_dspark_draft_c8(monkeypatch):
+    config = SimpleNamespace(
+        use_v2_model_runner=True,
+        speculative_config=SimpleNamespace(method="dspark"),
+        parallel_config=SimpleNamespace(decode_context_parallel_size=1),
+        model_config=SimpleNamespace(dtype=torch.bfloat16, hf_config=SimpleNamespace(model_type="kimi_k31")),
+    )
+    impl = _selector_impl(
+        vllm_config=config,
+        _is_k3_dspark_draft=True,
+        support_fp8_attention=True,
+        num_heads=96,
+        num_kv_heads=1,
+        kv_lora_rank=512,
+        qk_rope_head_dim=64,
+        fa_quant_layer=True,
+        dtype=torch.float8_e4m3fn,
+        enable_kv_nz=False,
+        use_pcp=False,
+    )
+    monkeypatch.setattr(mla_v1, "get_current_hardware_profile", lambda: SimpleNamespace(supports=lambda _: True))
+    monkeypatch.setattr(mla_v1, "supports_component_major_mla_pd", lambda _: True)
+    monkeypatch.setattr(mla_v1, "get_quant_flashmla_ops", lambda: (object(), object()))
+    assert AscendMLAImpl._can_use_quant_flashmla(impl)
+
+    # K3.1 target SFA remains on its sparse attention path. Only a DSpark
+    # draft is allowed to use the dense 576-wide QuantFlashMLA cache.
+    impl._is_k3_dspark_draft = False
+    assert not AscendMLAImpl._can_use_quant_flashmla(impl)
+
+
+@pytest.mark.parametrize("dcp_size", [1, 8])
+@pytest.mark.parametrize("pcp_size", [1, 8])
+@pytest.mark.parametrize(
+    "model_type, expected_flashmla",
+    [
+        ("kimi_k31", True),
+        ("glm4_moe", True),
+        ("glm4_moe_lite", True),
+        ("deepseek_v3", True),
+        ("kimi_k3", True),
+        ("kimi_linear", True),
+    ],
+)
+def test_flashmla_dspark_target_model_gate(monkeypatch, dcp_size, pcp_size, model_type, expected_flashmla):
+    config = SimpleNamespace(
+        use_v2_model_runner=True,
+        speculative_config=SimpleNamespace(method="dspark"),
+        parallel_config=SimpleNamespace(decode_context_parallel_size=dcp_size),
+        model_config=SimpleNamespace(
+            hf_config=SimpleNamespace(model_type=model_type),
+            hf_text_config=SimpleNamespace(model_type="kimi_linear", index_topk=2048),
+        ),
+    )
+    impl = _selector_impl(
+        vllm_config=config,
+        num_heads=8,
+        num_kv_heads=1,
+        kv_lora_rank=512,
+        qk_rope_head_dim=64,
+        fa_quant_layer=False,
+        dtype=torch.bfloat16,
+        enable_kv_nz=False,
+        use_pcp=False,
+    )
+    monkeypatch.setattr(mla_v1, "get_current_hardware_profile", lambda: SimpleNamespace(supports=lambda _: True))
+    monkeypatch.setattr(mla_v1, "supports_component_major_mla_pd", lambda _: True)
+    monkeypatch.setattr(mla_v1, "get_flashmla_ops", lambda: (object(), object()))
+    monkeypatch.setattr(mla_v1, "get_pcp_group", lambda: SimpleNamespace(world_size=pcp_size))
+    if model_type == "kimi_k31":
+        # K3.1 has 96 global Q heads: TP8 yields 12 local heads, and
+        # DCP8 consumes all 96 for history attention.
+        impl.num_heads = 96 if pcp_size > 1 else 12
+    assert AscendMLAImpl._can_use_flashmla(impl) is expected_flashmla
+    if model_type == "kimi_k31":
+        monkeypatch.setattr(mla_v1, "get_current_hardware_profile", lambda: SimpleNamespace(supports=lambda _: False))
+        assert not AscendMLAImpl._can_use_flashmla(impl)
+        monkeypatch.setattr(mla_v1, "get_current_hardware_profile", lambda: SimpleNamespace(supports=lambda _: True))
+    config.speculative_config.method = "eagle"
     assert not AscendMLAImpl._can_use_flashmla(impl)
 
 

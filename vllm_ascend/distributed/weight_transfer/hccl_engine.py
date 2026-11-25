@@ -153,13 +153,9 @@ class HCCLWeightTransferEngine(NCCLWeightTransferEngine):
         else:
             update_info = self._last_hccl_update_info.get(self.model, update_info)
 
-        from vllm.model_executor.model_loader.mtp_validation import (
-            disable_mtp_completeness_check,
-        )
-
         # The worker is handed an explicit NPU device, so bind it before touching
         # any stream: the packed helpers resolve the ambient device.
-        with torch.npu.device(self.device), disable_mtp_completeness_check():
+        with torch.npu.device(self.device):
             metadata = zip(update_info.names, update_info.shapes, update_info.dtype_names)
             if params["packed"]:
                 packed_broadcast_consumer(
@@ -294,16 +290,30 @@ class HCCLTrainerWeightTransferEngine(NCCLTrainerWeightTransferEngine):
                 self._release_group()
             raise
 
-    def _broadcast(self, source: WeightSource, meta: list[ParamMeta]) -> None:
+    def _broadcast(self, meta: list[ParamMeta], src: int) -> None:  # type: ignore[misc]
+        """Broadcast one update slice from the single HCCL trainer sender.
+
+        Upstream calls `_broadcast(meta, src)` once per broadcasting rank.
+        HCCL keeps a single sender at group rank 0, which also drives the
+        worker RPC in `_send_update`.
+        """
         with torch.npu.device(self.device):
             if not self.is_sender:
-                # Non-sender ranks only replay the source to stay in the
-                # trainer-side collective (an FSDP `full_tensor()` gather, say).
-                super()._broadcast(source, meta)
+                # Non-sender trainer ranks hold no HCCL communicator. They
+                # still have to replay the source so the trainer-side
+                # gather (an FSDP `full_tensor()`, say) keeps every rank in
+                # the collective; only the rank-0 sender ships weights.
+                source = self.source
+                if source is not None:
+                    for _ in source.iter_full():
+                        pass
                 return
             if self.model_update_group is None:
                 raise RuntimeError("HCCL trainer communicator is not initialized")
-            pairs = self._checked_iter(source, meta)
+            if src != 0:
+                raise RuntimeError(f"HCCL weight transfer has a single trainer sender at group rank 0, got {src}.")
+            assert self.source is not None
+            pairs = self._checked_iter(self.source, meta)
             if self.packed:
                 packed_broadcast_producer(
                     iterator=pairs,

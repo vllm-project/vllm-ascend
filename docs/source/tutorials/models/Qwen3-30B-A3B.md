@@ -22,17 +22,19 @@ The following model variants are available. It is recommended to download the mo
 
 | Model                | Hardware Requirement                                                 | Download                                                                 |
 | -------------------- | -------------------------------------------------------------------- | ------------------------------------------------------------------------ |
-| Qwen3-30B-A3B (BF16) | Atlas 800I A3 (64GB, 1\~2 cards)<br>Atlas 800I A2 (64GB, 2\~4 cards) | [ModelScope](https://www.modelscope.cn/models/Qwen/Qwen3-30B-A3B)        |
+| Qwen3-30B-A3B (BF16) | Atlas 800I A3 (64GB, 1\~2 cards)<br>Atlas 800I A2 (64GB, 2\~4 cards) | [Hugging Face](https://huggingface.co/Qwen/Qwen3-30B-A3B) \| [ModelScope](https://www.modelscope.cn/models/Qwen/Qwen3-30B-A3B) |
 | Qwen3-30B-A3B-W8A8   | Atlas 800I A3 (64GB, 1\~2 cards)<br>Atlas 800I A2 (64GB, 2\~4 cards) | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/Qwen3-30B-A3B-w8a8) |
 | Eagle3 Draft Model   | NA                                                                   | [Hugging Face](https://huggingface.co/AngelSlim/Qwen3-a3B_eagle3) |
 
->**Path description**: Download the model weights to a directory of your choice and record it. Ensure the model path in the subsequent deployment command matches this directory.
+> The Qwen3-30B-A3B-W8A8 weight is currently published on ModelScope only, and the Eagle3 draft model on Hugging Face only, so no mirror link is provided for these two rows.
+>
+> **Path description**: Download the model weights to a directory of your choice and record it. In the deployment commands below, `your_model_path` and `your_eagle3_model_path` are placeholders: replace them with the directories recorded here.
 
-**Quantized Versions for Atlas 300I DUO:**
+**Quantized Versions for Atlas 300I Duo:**
 
 | Model | Quantization | Hardware Requirement | Download |
 |-------|-------------|---------------------|----------|
-| Qwen3-30B-A3B-w8a8-QuaRot-310  |W8A8 | Atlas 300I DUO (TP2)                                                                                               | [Download](https://www.modelscope.cn/models/Eco-Tech/Qwen3-30B-A3B-w8a8-QuaRot-310)            |
+| Qwen3-30B-A3B-w8a8-QuaRot-310  | W8A8 | Atlas 300I Duo (TP2) | [Download](https://www.modelscope.cn/models/Eco-Tech/Qwen3-30B-A3B-w8a8-QuaRot-310) |
 
 These are the recommended numbers of cards, which can be adjusted according to the actual situation.
 
@@ -52,6 +54,8 @@ If the W8A8 quantized weights are not available for direct download, you can obt
 
 ### 4.1 Docker Image Installation
 
+{% include "getting_started/installation/ascend_docker_runtime.inc.md" %}
+
 You can use the official all-in-one Docker image for Qwen3 MoE models.
 
 === "A3 series"
@@ -63,40 +67,19 @@ You can use the official all-in-one Docker image for Qwen3 MoE models.
     export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}-a3
 
     docker run \
+        -e ASCEND_VISIBLE_DEVICES=0-15 \
         --name vllm-ascend-env \
         --ipc host \
         --net host \
-        --device /dev/davinci0 \
-        --device /dev/davinci1 \
-        --device /dev/davinci2 \
-        --device /dev/davinci3 \
-        --device /dev/davinci4 \
-        --device /dev/davinci5 \
-        --device /dev/davinci6 \
-        --device /dev/davinci7 \
-        --device /dev/davinci8 \
-        --device /dev/davinci9 \
-        --device /dev/davinci10 \
-        --device /dev/davinci11 \
-        --device /dev/davinci12 \
-        --device /dev/davinci13 \
-        --device /dev/davinci14 \
-        --device /dev/davinci15 \
-        --device /dev/davinci_manager \
-        --device /dev/devmm_svm \
-        --device /dev/hisi_hdc \
         -v /usr/local/Ascend/driver:/usr/local/Ascend/driver \
-        -v /usr/local/dcmi:/usr/local/dcmi \
-        -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
-        -v /etc/ascend_install.info:/etc/ascend_install.info \
         -v /usr/local/sbin:/usr/local/sbin \
         -it -d $IMAGE bash
     ```
 
     !!! note
 
-        A3 has 8 NPUs with dual-die design (16 chips total: `/dev/davinci[0-15]`).
-        If you are on a shared machine, map only the chips you need (e.g., `/dev/davinci[0-7]` for NPU 0-3).
+        A3 has 8 NPUs with a dual-die design, so `ASCEND_VISIBLE_DEVICES=0-15` selects all 16 DIE devices.
+        If you are on a shared machine, select only the devices you need, for example `ASCEND_VISIBLE_DEVICES=0-7` for NPU 0-3.
 
 === "A2 series"
 
@@ -107,28 +90,15 @@ You can use the official all-in-one Docker image for Qwen3 MoE models.
     export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}
 
     docker run \
+        -e ASCEND_VISIBLE_DEVICES=0-7 \
         --name vllm-ascend-env \
         --ipc host \
         --net host \
-        --device /dev/davinci0 \
-        --device /dev/davinci1 \
-        --device /dev/davinci2 \
-        --device /dev/davinci3 \
-        --device /dev/davinci4 \
-        --device /dev/davinci5 \
-        --device /dev/davinci6 \
-        --device /dev/davinci7 \
-        --device /dev/davinci_manager \
-        --device /dev/devmm_svm \
-        --device /dev/hisi_hdc \
         -v /usr/local/Ascend/driver:/usr/local/Ascend/driver \
-        -v /usr/local/dcmi:/usr/local/dcmi \
-        -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
-        -v /etc/ascend_install.info:/etc/ascend_install.info \
         -v /usr/local/sbin:/usr/local/sbin \
         -it -d $IMAGE bash
     ```
-=== "Atlas 300I DUO"
+=== "Atlas 300I Duo"
 
     **Docker Run:**
 
@@ -137,19 +107,11 @@ You can use the official all-in-one Docker image for Qwen3 MoE models.
     export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}-310p
 
     docker run --rm \
+        -e ASCEND_VISIBLE_DEVICES=0 \
         --name vllm-ascend \
         --shm-size=1g \
         --net=host \
-        --device /dev/davinci0 \
-        --device /dev/davinci_manager \
-        --device /dev/devmm_svm \
-        --device /dev/hisi_hdc \
-        -v /usr/local/dcmi:/usr/local/dcmi \
         -v /usr/local/Ascend/driver/tools/hccn_tool:/usr/local/Ascend/driver/tools/hccn_tool \
-        -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
-        -v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
-        -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
-        -v /etc/ascend_install.info:/etc/ascend_install.info \
         -v /root/.cache:/root/.cache \
         -it $IMAGE bash
     ```
@@ -164,7 +126,8 @@ The default workdir is `/workspace`. vLLM and vLLM-Ascend are installed as Pytho
 After starting the container, run the following command to verify the installation:
 
 ```bash
-docker ps | grep vllm-ascend-env
+# The A3/A2 tabs name the container vllm-ascend-env; the Atlas 300I Duo tab names it vllm-ascend.
+docker ps | grep vllm-ascend
 ```
 
 Expected result: The container is listed with status `Up`. You can also verify the vllm-ascend version inside the container:
@@ -197,7 +160,7 @@ If you prefer not to use the Docker image, you can build from source. Install vL
 
 !!! note
 
-    For Atlas 300I DUO, source installation may pull in `triton` and `triton-ascend`. Uninstall them before running vLLM-Ascend on Atlas 300I DUO:
+    For Atlas 300I Duo, source installation may pull in `triton` and `triton-ascend`. Uninstall them before running vLLM-Ascend on Atlas 300I Duo:
 
     ```bash
     pip uninstall -y triton-ascend triton
@@ -243,7 +206,7 @@ Single-node deployment completes both Prefill and Decode within the same node, s
         --tensor-parallel-size 4 \
         --enable-expert-parallel \
         --quantization ascend \
-        --distributed_executor_backend "mp" \
+        --distributed-executor-backend "mp" \
         --no-enable-prefix-caching \
         --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
         --additional-config '{"weight_nz_mode": 2}' \
@@ -252,23 +215,23 @@ Single-node deployment completes both Prefill and Decode within the same node, s
         --speculative-config '{"method": "eagle3", "model": "your_eagle3_model_path", "num_speculative_tokens": 3}'
     ```
 
-=== "Atlas 300I DUO"
+=== "Atlas 300I Duo"
 
     ```bash
     export VLLM_USE_MODELSCOPE=True
     export ASCEND_RT_VISIBLE_DEVICES=0,1
-    
+
     # Ensure the model path matches the directory recorded during download
     vllm serve your_model_path  \
         --host 127.0.0.1 \
         --port 8000 \
         --tensor-parallel-size 2 \
         --max-num-seqs 32 \
-        --served_model_name qwen3 \
+        --served-model-name qwen3 \
         --dtype float16 \
         --quantization ascend \
         --max-model-len 16384 \
-        --additional-config '{"ascend_compilation_config": {"fuse_norm_quant": false,"enable_npu_graph_ex":false}}' \
+        --additional-config '{"ascend_compilation_config": {"fuse_norm_quant": false,"enable_npugraph_ex":false}}' \
         --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [1,32]}' \
         --no-enable-prefix-caching
     ```
@@ -276,15 +239,15 @@ Single-node deployment completes both Prefill and Decode within the same node, s
     **Key parameters:**
 
     - `--tensor-parallel-size 2` maps the model across two Atlas inference devices. Adjust it together with `ASCEND_RT_VISIBLE_DEVICES` according to the available devices and memory.
-    - `--dtype float16` is used for Atlas 300I DUO to match the Atlas inference execution path.
-    - `--max-model-len 16384` is intentionally conservative. On Atlas 300I DUO, large context lengths allocate large attention masks, so do not rely on automatic max-model-len detection.
-    - `--max-num-seqs 16` limits concurrent active requests to reduce KV cache and graph capture pressure on Atlas 300I DUO.
+    - `--dtype float16` is used for Atlas 300I Duo to match the Atlas inference execution path.
+    - `--max-model-len 16384` is intentionally conservative. On Atlas 300I Duo, large context lengths allocate large attention masks, so do not rely on automatic max-model-len detection.
+    - `--max-num-seqs 32` limits concurrent active requests to reduce KV cache and graph capture pressure on Atlas 300I Duo.
     - `--gpu-memory-utilization` controls KV cache capacity. Reduce it if startup or runtime requests report OOM.
-    - `--additional-config '{"ascend_compilation_config": {"fuse_norm_quant": false}}'` disables norm-quant fusion for the Atlas 300I DUO serving path.
-    - `--compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [1,2,4,8,16]}'` enables decode ACLGraph replay and explicitly limits capture sizes for Atlas 300I DUO.
-    - `--no-enable-prefix-caching` is the default recommendation for this Atlas 300I DUO example to reduce memory pressure.
+    - `--additional-config '{"ascend_compilation_config": {"fuse_norm_quant": false, "enable_npugraph_ex": false}}'` disables norm-quant fusion and the `npugraph_ex` graph path, which are not used on the Atlas 300I Duo serving path.
+    - `--compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [1,32]}'` enables decode ACLGraph replay and explicitly limits capture sizes to the two batch sizes used by the Atlas 300I Duo example.
+    - `--no-enable-prefix-caching` is the default recommendation for this Atlas 300I Duo example to reduce memory pressure.
     - `--quantization ascend` enables Ascend quantization for the W8A8 model. Remove this option when deploying the BF16 model.
-    - To enable MTP speculative decoding, use --speculative_config '{"method": "mtp", "num_speculative_tokens": 1}'. We recommend setting num_speculative_tokens to 1.
+    - To enable MTP speculative decoding, use `--speculative-config '{"method": "mtp", "num_speculative_tokens": 1}'`. We recommend setting `num_speculative_tokens` to 1.
 
 !!! note
 
@@ -303,7 +266,15 @@ Single-node deployment completes both Prefill and Decode within the same node, s
 
 **Service Verification:**
 
-After the service is started, verify it is running by sending a prompt. Refer to [Section 6](#6-functional-verification) for a usage example.
+After the service is started, check the health endpoint:
+
+```bash
+curl http://127.0.0.1:8000/health
+```
+
+Expected result: HTTP 200 with an empty body. A request to `http://127.0.0.1:8000/v1/models` should return the served model name `qwen3`. For an end-to-end chat request, refer to [Section 6](#6-functional-verification).
+
+For troubleshooting, refer to [Section 10 FAQ](#10-faq) and the [Public FAQs](../../faqs.md).
 
 ## 6 Functional Verification
 
@@ -344,7 +315,7 @@ For setup details, including installation, dataset download, and configuration, 
 The following is an example configuration for the accuracy evaluation config file, demonstrated using the GSM8K dataset:
 
 ```python
-# Example configuration: benchmarks/ais_bench/benchmark/configs/models/vllm_api/vllm_api_general_chat.py
+# Example configuration: benchmark/ais_bench/benchmark/configs/models/vllm_api/vllm_api_general_chat.py
 from ais_bench.benchmark.models import VLLMCustomAPIChat
 
 models = [
@@ -444,32 +415,22 @@ models = [
 
 > Key differences from the accuracy config: `stream=True`, `ignore_eos=True` (ensures output reaches `max_out_len` for consistent TPOT measurement), and `batch_size` controls concurrency.
 
-Then, configure the synthetic dataset distribution (`ais_bench/datasets/synthetic/synthetic_config.py`). Adjust the configuration based on your actual scenario. Note that random synthetic data is not suitable for benchmarking scenarios where prefix caching is enabled, as random inputs produce zero cache hit rate.
-
-```python
-synthetic_config = {
-    "Type": "string",
-    "RequestCount": 200,
-    "StringConfig": {
-        "Input": {
-            "Method": "uniform",
-            "Params": {"MinValue": 3500, "MaxValue": 3500}
-        },
-        "Output": {
-            "Method": "uniform",
-            "Params": {"MinValue": 1500, "MaxValue": 1500}
-        }
-    }
-}
-```
-
-Then run the performance evaluation:
+Then run the performance evaluation using the GSM8K dataset as an example. The GSM8K perf dataset sends real prompts, so record the request lengths together with the result when you compare runs.
 
 ```shell
-ais_bench --models vllm_api_stream_chat --datasets synthetic_gen --mode perf --debug
+ais_bench --models vllm_api_stream_chat --datasets gsm8k_gen_0_shot_cot_str_perf --debug --summarizer default_perf --mode perf
 ```
 
-> The `--models` value should match the `abbr` in your model config file. Use `--num-prompts` to limit the number of test requests.
+**Expected result:**
+
+AISBench prints one line per finished request and then a summary table. Check the following fields; the exact values depend on hardware, concurrency, and input/output lengths:
+
+- `Request throughput (req/s)`: completed requests per second.
+- `Output token throughput (tok/s)`: generated tokens per second.
+- `Mean TTFT (ms)` / `P99 TTFT (ms)`: time to first token, average and 99th percentile.
+- `Mean TPOT (ms)` / `P99 TPOT (ms)`: time per output token, average and 99th percentile.
+
+The detailed results are written under `outputs/` (or the directory given by `--work-dir`), including the per-request CSV and the summary JSON.
 
 ### 8.2 Using vLLM Benchmark
 
@@ -483,7 +444,7 @@ vllm bench serve \
     --served-model-name qwen3 \
     --port 8000 \
     --dataset-name random \
-    --random-input 200 \
+    --random-input-len 200 \
     --random-output-len 2048 \
     --num-prompts 200 \
     --request-rate 1 \
@@ -535,7 +496,7 @@ vllm serve your_model_path \
     --max-num-batched-tokens 16384 \
     --tensor-parallel-size 4 \
     --enable-expert-parallel \
-    --distributed_executor_backend "mp" \
+    --distributed-executor-backend "mp" \
     --no-enable-prefix-caching \
     --quantization ascend \
     --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
@@ -568,7 +529,7 @@ vllm serve your_model_path \
     --max-model-len 37364 \
     --max-num-batched-tokens 16384 \
     --tensor-parallel-size 1 \
-    --distributed_executor_backend "mp" \
+    --distributed-executor-backend "mp" \
     --no-enable-prefix-caching \
     --quantization ascend \
     --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
@@ -602,7 +563,7 @@ vllm serve your_model_path \
     --max-num-batched-tokens 16384 \
     --tensor-parallel-size 4 \
     --enable-expert-parallel \
-    --distributed_executor_backend "mp" \
+    --distributed-executor-backend "mp" \
     --no-enable-prefix-caching \
     --quantization ascend \
     --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \

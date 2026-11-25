@@ -5,6 +5,7 @@ from unittest.mock import MagicMock
 
 import pytest
 import torch
+from vllm.config import CUDAGraphMode
 
 from vllm_ascend import ascend_forward_context as afc
 from vllm_ascend.ascend_forward_context import MoECommType
@@ -20,7 +21,7 @@ def reset_mc2_tokens_capacity(monkeypatch):
     monkeypatch.setattr(
         afc,
         "get_ascend_config",
-        lambda: SimpleNamespace(enable_prefill_mc2=False, enable_fused_mc2=0),
+        lambda: SimpleNamespace(enable_prefill_mc2=False, enable_fused_mc2=0, megamoe_shared_expert_fusion=False),
     )
 
 
@@ -50,6 +51,7 @@ def _make_vllm_config(
     hf_text_config_attrs["hidden_size"] = hidden_size
 
     model_config = SimpleNamespace(
+        enforce_eager=True,
         hf_text_config=SimpleNamespace(**hf_text_config_attrs),
         get_num_experts=lambda: num_experts,
     )
@@ -58,11 +60,15 @@ def _make_vllm_config(
         world_size_across_dp=world_size,
         pipeline_parallel_size=pipeline_parallel_size,
         tensor_parallel_size=tensor_parallel_size,
+        prefill_context_parallel_size=1,
+        decode_context_parallel_size=1,
     )
     compilation_config = SimpleNamespace(
+        cudagraph_mode=CUDAGraphMode.NONE,
         cudagraph_capture_sizes=cudagraph_capture_sizes or [],
         max_cudagraph_capture_size=max_cudagraph_capture_size,
     )
+    compilation_config.decode_cudagraph_capture_request_sizes = None
     kv_transfer_config = (
         SimpleNamespace(kv_connector=kv_connector, kv_role=kv_role)
         if kv_connector is not None or kv_role is not None
@@ -194,6 +200,46 @@ def test_set_mc2_tokens_capacity_prefill_mc2_uses_max_num_batched_tokens(monkeyp
     assert afc.get_mc2_tokens_capacity() == 520
 
 
+@pytest.mark.parametrize(
+    "prefill_tokens,decode_sizes,query_lens,token_cap,tp_size,expected",
+    [
+        (16, [1, 2, 3, 4], {4: 1024}, None, 2, 16),
+        (16, [1, 2, 3, 4], {4: 256}, None, 2, 16),
+        (8, [1, 4, 16], {4: 16}, None, 2, 64),
+        (8, [1, 4, 16], {4: 16}, 20, 2, 20),
+        (8, [1, 4, 16], {1: 16, 4: 3}, None, 2, 16),
+        (17, [1, 2], {4: 16}, None, 6, 18),
+        (4096, [1, 2], {4: 16}, None, 2, 1024),
+    ],
+)
+def test_mc2_capacity_excludes_independent_draft_capture_grid(
+    monkeypatch, prefill_tokens, decode_sizes, query_lens, token_cap, tp_size, expected
+):
+    monkeypatch.setattr(afc, "use_cann_megamoe", lambda _: False)
+    vllm_config = _make_vllm_config(
+        tensor_parallel_size=tp_size,
+        cudagraph_capture_sizes=[4, 8, 12, 16, 1024],
+        max_cudagraph_capture_size=1024,
+        max_num_batched_tokens=8192,
+    )
+    compilation_config = vllm_config.compilation_config
+    compilation_config.decode_cudagraph_capture_request_sizes = decode_sizes
+    compilation_config.max_decode_cudagraph_capture_tokens = token_cap
+    compilation_config.max_prefill_cudagraph_capture_tokens = prefill_tokens
+    vllm_config.get_decode_cudagraph_query_lens = lambda _: query_lens
+    original_sizes = compilation_config.cudagraph_capture_sizes.copy()
+
+    afc.set_mc2_tokens_capacity(vllm_config, max_num_reqs=1024, uniform_decode_query_len=4)
+
+    assert afc.get_mc2_tokens_capacity() == expected
+    assert compilation_config.cudagraph_capture_sizes == original_sizes
+    assert compilation_config.max_cudagraph_capture_size == 1024
+    assert compilation_config.decode_cudagraph_capture_request_sizes == decode_sizes
+    if expected == 16:
+        assert afc._select_fused_or_capacity_moe_comm_method(16, vllm_config, expected) == MoECommType.MC2
+        assert afc._select_fused_or_capacity_moe_comm_method(1024, vllm_config, expected) == MoECommType.ALLTOALL
+
+
 def test_is_decode_only_node_false_without_kv_transfer():
     assert afc._is_decode_only_node(_make_vllm_config()) is False
 
@@ -295,6 +341,51 @@ def test_select_moe_comm_method_a2_uses_mc2_within_capacity(monkeypatch, num_tok
     vllm_config = _make_vllm_config(world_size=16, num_experts=128)
 
     assert afc.select_moe_comm_method(num_tokens, vllm_config) == expected
+
+
+@pytest.mark.parametrize(
+    ("num_tokens", "ep_world_size", "expected"),
+    [
+        (128, 8, MoECommType.FUSED_MC2),
+        (4097, 8, MoECommType.FUSED_MC2),
+        (128, 128, MoECommType.MC2),
+        (4097, 128, MoECommType.ALLGATHER),
+    ],
+)
+def test_select_moe_comm_method_a2_enable_fused_mc2(
+    monkeypatch,
+    num_tokens,
+    ep_world_size,
+    expected,
+):
+    _patch_select_moe_comm_method_deps(
+        monkeypatch,
+        device_type=AscendDeviceType.A2,
+        capacity=128,
+        ep_world_size=ep_world_size,
+        enable_fused_mc2=1,
+    )
+    vllm_config = _make_vllm_config(world_size=ep_world_size, num_experts=128, quant_type="w4a8")
+
+    assert afc.select_moe_comm_method(num_tokens, vllm_config) == expected
+
+
+@pytest.mark.parametrize("cann_megamoe_available", [True, False])
+def test_select_moe_comm_method_a2_cann_megamoe_selection(monkeypatch, cann_megamoe_available):
+    # EP=48 is above the plain dispatch_ffn_combine bound (32), so only the
+    # MegaMoe capability branch can select FUSED_MC2 here.
+    _patch_select_moe_comm_method_deps(
+        monkeypatch,
+        device_type=AscendDeviceType.A2,
+        capacity=128,
+        ep_world_size=48,
+        enable_fused_mc2=1,
+    )
+    monkeypatch.setattr(afc, "use_cann_megamoe", lambda _: cann_megamoe_available)
+    vllm_config = _make_vllm_config(world_size=48, num_experts=128, quant_type="w4a8")
+
+    expected = MoECommType.FUSED_MC2 if cann_megamoe_available else MoECommType.ALLGATHER
+    assert afc.select_moe_comm_method(4097, vllm_config) == expected
 
 
 @pytest.mark.parametrize(
@@ -665,3 +756,94 @@ def test_extra_ctx_env_true_uses_additional_kwargs(monkeypatch):
     assert afc._EXTRA_CTX.capturing is False
     assert forward_context.capturing is True
     assert forward_context.additional_kwargs["capturing"] is False
+
+
+@pytest.mark.parametrize(
+    "tp,pcp,tokens,requests,query,method,expected",
+    [
+        (1, 8, 16384, 500, 2, "mtp", 3923),
+        (8, 1, 16384, 500, 2, "mtp", 16384),
+        (3, 8, 513, 16, 1, "mtp", 111),
+        (1, 16, 16384, 512, 4, "mtp", 3968),
+        (1, 8, 16384, 64, 4, "dspark", 2400),
+        (1, 8, 16384, 64, 4, "dflash", 2400),
+    ],
+)
+@pytest.mark.parametrize("prefill_mc2", [True, False])
+def test_prefill_mc2_capacity_reuses_profile_budget(
+    monkeypatch, tp, pcp, tokens, requests, query, method, expected, prefill_mc2
+):
+    monkeypatch.setattr(
+        afc, "get_ascend_config", lambda: SimpleNamespace(enable_prefill_mc2=prefill_mc2, enable_fused_mc2=1)
+    )
+    monkeypatch.setattr(afc, "use_cann_megamoe", lambda _: True)
+    config = _make_vllm_config(tensor_parallel_size=tp, max_num_batched_tokens=tokens)
+    config.parallel_config.prefill_context_parallel_size = pcp
+    config.speculative_config = SimpleNamespace(method=method, num_speculative_tokens=query - 1)
+    afc.set_mc2_tokens_capacity(config, requests, query)
+    assert afc.get_mc2_tokens_capacity() == expected
+
+
+@pytest.mark.parametrize("pcp", [1, 8])
+@pytest.mark.parametrize("graph", [False, True])
+@pytest.mark.parametrize("mega_moe", [False, True])
+def test_decode_mc2_capacity_keeps_local_graph_and_request_budget(monkeypatch, pcp, graph, mega_moe):
+    monkeypatch.setattr(
+        afc,
+        "get_ascend_config",
+        lambda: SimpleNamespace(
+            enable_prefill_mc2=False, enable_fused_mc2=int(mega_moe), megamoe_shared_expert_fusion=False
+        ),
+    )
+    monkeypatch.setattr(afc, "use_cann_megamoe", lambda _: mega_moe)
+    monkeypatch.setattr(afc, "_is_decode_only_node", lambda _: True)
+    config = _make_vllm_config(
+        tensor_parallel_size=8,
+        max_num_batched_tokens=16384,
+        cudagraph_capture_sizes=[257] if graph else [],
+        max_cudagraph_capture_size=257 if graph else 0,
+    )
+    config.parallel_config.prefill_context_parallel_size = pcp
+    afc.set_mc2_tokens_capacity(config, 200, 3)
+    assert afc.get_mc2_tokens_capacity() == (264 if graph else 600)
+
+
+@pytest.mark.parametrize("device_type", [AscendDeviceType.A3, AscendDeviceType.A5])
+@pytest.mark.parametrize("shared_fusion,expected", [(False, 432), (True, 512)])
+def test_shared_expert_megamoe_capacity_covers_decode_profiling(monkeypatch, device_type, shared_fusion, expected):
+    monkeypatch.setattr(
+        afc,
+        "get_ascend_config",
+        lambda: SimpleNamespace(
+            enable_prefill_mc2=False,
+            enable_fused_mc2=1,
+            megamoe_shared_expert_fusion=shared_fusion,
+            scheduler_config=SimpleNamespace(recompute_scheduler_enable=True),
+        ),
+    )
+    monkeypatch.setattr(afc, "is_mega_moe_supported", lambda: True)
+    monkeypatch.setattr(afc, "is_moe_model", lambda _: True)
+    monkeypatch.setattr(afc, "get_ep_group", lambda: SimpleNamespace(world_size=16))
+    monkeypatch.setattr(afc, "get_current_hardware_profile", lambda: get_hardware_profile(device_type))
+    config = _make_vllm_config(
+        tensor_parallel_size=8,
+        max_num_batched_tokens=512,
+        cudagraph_capture_sizes=[432],
+        max_cudagraph_capture_size=432,
+        kv_role="kv_consumer",
+    )
+    afc.set_mc2_tokens_capacity(config, 432, 1)
+    assert afc.get_mc2_tokens_capacity() == expected
+
+
+@pytest.mark.parametrize("fused,mega_moe,expected", [(0, False, 1024), (1, False, 1024), (1, True, 32768)])
+def test_prefill_mc2_capacity_keeps_per_rank_operator_limit(monkeypatch, fused, mega_moe, expected):
+    monkeypatch.setattr(
+        afc, "get_ascend_config", lambda: SimpleNamespace(enable_prefill_mc2=True, enable_fused_mc2=fused)
+    )
+    monkeypatch.setattr(afc, "use_cann_megamoe", lambda _: mega_moe)
+    config = _make_vllm_config(tensor_parallel_size=2, max_num_batched_tokens=524288)
+    config.parallel_config.prefill_context_parallel_size = 8
+    config.speculative_config = None
+    afc.set_mc2_tokens_capacity(config, 500, 1)
+    assert afc.get_mc2_tokens_capacity() == expected

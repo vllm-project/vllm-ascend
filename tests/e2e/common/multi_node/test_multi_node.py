@@ -13,7 +13,7 @@ async def test_multi_node() -> None:
     if isinstance(raw, dict) and "logits_regression" in raw:
         from tests.e2e.common.multi_node.glm53_logits.runner import run
 
-        await run(raw)
+        await run(resolve_config_path())
         return
     mode = resolve_dp_load_balancing()
 

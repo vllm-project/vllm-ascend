@@ -1764,40 +1764,46 @@ __aicore__ inline void QSFAVectorService<QSFAT>::MergeKvOptimized(const RunInfo&
     if (unlikely(qsfaS2GmStartOffset + qsfaMte2Size < qsfaS2GmLimit)) {
         SetFlag<AscendC::HardEvent::MTE3_V>(0);
         WaitFlag<AscendC::HardEvent::MTE3_V>(0);
-        WaitFlag<AscendC::HardEvent::MTE3_MTE2>(qsfaMergeMte3Idx % MTE2_SLOT_NUM);
-        LocalTensor<K_ROPE_T> mergeUb = kvMergUb_.template ReinterpretCast<K_ROPE_T>();
-        Duplicate(mergeUb, static_cast<K_ROPE_T>(0.0), constInfo.headDim);
+        const int64_t slot = qsfaMergeMte3Idx % MTE2_SLOT_NUM;
+        WaitFlag<AscendC::HardEvent::MTE3_MTE2>(slot);
+        // Only reuse the slot whose MTE3_MTE2 flag was acquired. The other
+        // slots may still contain input for outstanding pipeline operations.
+        LocalTensor<K_ROPE_T> mergeUb =
+            kvMergUb_[slot * mte2SlotElems_].template ReinterpretCast<K_ROPE_T>();
+        const uint32_t zeroRowsCapacity = mte2SlotElems_ * sizeof(KV_T) / (constInfo.headDim * sizeof(K_ROPE_T));
+        const int64_t zeroStart = qsfaS2GmStartOffset + qsfaMte2Size;
+        const uint32_t zeroRows = (qsfaS2GmLimit - zeroStart < zeroRowsCapacity) ?
+            static_cast<uint32_t>(qsfaS2GmLimit - zeroStart) : zeroRowsCapacity;
+        Duplicate(mergeUb, static_cast<K_ROPE_T>(0.0), zeroRows * constInfo.headDim);
         SetFlag<AscendC::HardEvent::V_MTE3>(0);
         WaitFlag<AscendC::HardEvent::V_MTE3>(0);
 
-        uint64_t blockElementNum = FP32_BLOCK_ELEMENT_NUM * 2;
-        DataCopyExtParams dataCopyParams;
-        dataCopyParams.blockCount = constInfo.headDim / blockElementNum;
-        dataCopyParams.blockLen = blockElementNum * sizeof(K_ROPE_T);
-        dataCopyParams.srcStride = 0;
-        dataCopyParams.dstStride = (constInfo.s2BaseSize - 1) * blockElementNum * sizeof(K_ROPE_T);
-        for (int64_t s2GmOffset = qsfaS2GmStartOffset + qsfaMte2Size; s2GmOffset < qsfaS2GmLimit; s2GmOffset++) {
+        const uint64_t blockElementNum = FP32_BLOCK_ELEMENT_NUM * 2;
+        for (int64_t s2GmOffset = zeroStart; s2GmOffset < qsfaS2GmLimit; s2GmOffset += zeroRows) {
+            const uint32_t rows = (qsfaS2GmLimit - s2GmOffset < zeroRows) ?
+                static_cast<uint32_t>(qsfaS2GmLimit - s2GmOffset) : zeroRows;
             if constexpr (QSFAT::noRope) {
-                DataCopyExtParams ndParams{1, static_cast<uint32_t>(constInfo.headDim * sizeof(K_ROPE_T)), 0, 0,
-                                           0};
+                DataCopyExtParams ndParams{1, static_cast<uint32_t>(rows * constInfo.headDim * sizeof(K_ROPE_T)),
+                                           0, 0, 0};
                 DataCopyPad(kvMergeGm_[kvVecRunInfo.loop % MERGE_CACHE_GM_BUF_NUM * 512 * 576 +
                                        s2GmOffset * constInfo.headDim],
                             mergeUb, ndParams);
             } else {
+                DataCopyExtParams dataCopyParams;
+                dataCopyParams.blockCount = constInfo.headDim / blockElementNum;
+                dataCopyParams.blockLen = rows * blockElementNum * sizeof(K_ROPE_T);
+                dataCopyParams.srcStride = 0;
+                dataCopyParams.dstStride = (constInfo.s2BaseSize - rows) * blockElementNum * sizeof(K_ROPE_T);
                 DataCopyPad(
                     kvMergeGm_[kvVecRunInfo.loop % MERGE_CACHE_GM_BUF_NUM * 512 * 576 + s2GmOffset * blockElementNum],
                     mergeUb, dataCopyParams);
-            }
-        }
-        if constexpr (!QSFAT::noRope) {
-            dataCopyParams.blockCount = (QSFAT::noRope ? 0U : 64U) / blockElementNum;
-            for (int64_t s2GmOffset = qsfaS2GmStartOffset + qsfaMte2Size; s2GmOffset < qsfaS2GmLimit; s2GmOffset++) {
+                dataCopyParams.blockCount = 64U / blockElementNum;
                 DataCopyPad(kvMergeGm_[kvVecRunInfo.loop % MERGE_CACHE_GM_BUF_NUM * 512 * 576 +
                                        512 * constInfo.headDim + s2GmOffset * blockElementNum],
                             mergeUb, dataCopyParams);
             }
         }
-        SetFlag<AscendC::HardEvent::MTE3_MTE2>(qsfaMergeMte3Idx % MTE2_SLOT_NUM);
+        SetFlag<AscendC::HardEvent::MTE3_MTE2>(slot);
         qsfaMergeMte3Idx++;
     }
     WaitFlag<AscendC::HardEvent::MTE3_MTE2>(0);

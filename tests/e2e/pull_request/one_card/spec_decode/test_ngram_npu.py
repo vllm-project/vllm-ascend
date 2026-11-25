@@ -1,16 +1,12 @@
 from __future__ import annotations
 
 from types import SimpleNamespace
-from typing import Any
 
 import pytest
 import torch
 from vllm import SamplingParams
-from vllm.config import CompilationConfig
-from vllm.v1.metrics.reader import Counter, Vector
 
 from tests.e2e.conftest import VllmRunner
-from tests.e2e.pull_request.one_card.spec_decode.utils import calculate_acceptance_per_pos
 from vllm_ascend.worker.v2.spec_decode import init_speculator
 from vllm_ascend.worker.v2.states import AscendRequestState
 
@@ -63,7 +59,11 @@ def test_mrv2_ngram_kernel_matches_reference(max_model_len, k, staged_history):
     lengths_before = total_len.clone()
     config = SimpleNamespace(
         speculative_config=SimpleNamespace(
-            method="ngram_gpu", prompt_lookup_min=2, prompt_lookup_max=5, num_speculative_tokens=k
+            method="ngram_gpu",
+            prompt_lookup_min=2,
+            prompt_lookup_max=5,
+            num_speculative_tokens=k,
+            enforce_eager=False,
         ),
         scheduler_config=SimpleNamespace(max_num_seqs=8),
         model_config=SimpleNamespace(max_model_len=max_model_len),
@@ -106,9 +106,8 @@ def test_mrv2_ngram_kernel_matches_reference(max_model_len, k, staged_history):
 
 @pytest.mark.parametrize("async_scheduling", [False, True])
 @pytest.mark.parametrize("enforce_eager", [False, True])
-def test_mrv2_ngram_greedy_accuracy(monkeypatch, test_prompts, model_name, async_scheduling, enforce_eager):
+def test_mrv2_ngram_greedy_accuracy(test_prompts, model_name, async_scheduling, enforce_eager):
     """Compare target token IDs, including chunked prefill and request slot reuse."""
-    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
     sampling_params = SamplingParams(temperature=0, max_tokens=64)
     common = dict(
         max_model_len=2048,
@@ -134,59 +133,3 @@ def test_mrv2_ngram_greedy_accuracy(monkeypatch, test_prompts, model_name, async
     ) as runner:
         speculative = runner.model.chat(prompts, sampling_params)
     assert [o.outputs[0].token_ids for o in speculative] == [o.outputs[0].token_ids for o in baseline]
-
-
-pytestmark = pytest.mark.skip(reason="Model Runner V1 is outside the default CI path")
-
-
-@pytest.mark.parametrize("num_speculative_tokens", [3])
-def test_ngram_npu_async_acceptance(
-    test_prompts: list[list[dict[str, Any]]],
-    num_speculative_tokens: int,
-    model_name: str,
-):
-    sampling_params = SamplingParams(
-        temperature=0,
-        ignore_eos=False,
-        max_tokens=256,
-    )
-
-    speculative_config = {
-        "method": "ngram_gpu",
-        "prompt_lookup_max": 5,
-        "prompt_lookup_min": 2,
-        "num_speculative_tokens": num_speculative_tokens,
-    }
-
-    compilation_config = CompilationConfig(
-        cudagraph_mode="PIECEWISE",
-        cudagraph_capture_sizes=[12],
-    )
-
-    with VllmRunner(
-        model_name,
-        max_model_len=2048,
-        disable_log_stats=False,
-        tensor_parallel_size=1,
-        max_num_seqs=256,
-        distributed_executor_backend="mp",
-        gpu_memory_utilization=0.7,
-        speculative_config=speculative_config,
-        compilation_config=compilation_config,
-        async_scheduling=True,
-    ) as llm:
-        outputs = llm.model.chat(test_prompts, sampling_params)
-        metrics = llm.model.get_metrics()
-
-    for output in outputs:
-        prompt = output.prompt
-        generated_text = output.outputs[0].text
-        output_tokens = output.outputs[0].token_ids
-        print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
-        print(f"Output tokens: {output_tokens}")
-
-    acceptance_per_pos = calculate_acceptance_per_pos(metrics, num_speculative_tokens, Counter, Vector)
-    golden = [0.50, 0.30, 0.20]
-
-    match = all(abs(a - b) < 1.0 for a, b in zip(acceptance_per_pos, golden))
-    assert match, f"acceptance_per_pos {acceptance_per_pos} does not match golden {golden}"

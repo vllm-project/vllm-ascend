@@ -170,10 +170,9 @@ class TestGlobalTE(unittest.TestCase):
 
     def test_unregister_and_reregister_registered_buffers(self):
         global_te = self.global_te_cls()
-        global_te.transfer_engine = MagicMock()
+        global_te.transfer_engine = MagicMock(spec_set=["register_memory", "unregister_memory"])
         global_te.transfer_engine.register_memory.return_value = 0
         global_te.transfer_engine.unregister_memory.return_value = 0
-        global_te.transfer_engine.disconnect_all_peers.return_value = 0
 
         global_te.register_buffer([0x1000, 0x2000], [128, 256])
         global_te.unregister_buffer()
@@ -183,7 +182,6 @@ class TestGlobalTE(unittest.TestCase):
             [
                 call.register_memory(0x1000, 128),
                 call.register_memory(0x2000, 256),
-                call.disconnect_all_peers(),
                 call.unregister_memory(0x1000),
                 call.unregister_memory(0x2000),
             ]
@@ -197,9 +195,8 @@ class TestGlobalTE(unittest.TestCase):
 
     def test_unregister_failure_leaves_completed_buffers_unregistered(self):
         global_te = self.global_te_cls()
-        global_te.transfer_engine = MagicMock()
+        global_te.transfer_engine = MagicMock(spec_set=["register_memory", "unregister_memory"])
         global_te.transfer_engine.unregister_memory.side_effect = [0, -1]
-        global_te.transfer_engine.disconnect_all_peers.return_value = 0
         global_te.registered_buffers = [(0x1000, 128), (0x2000, 256)]
         global_te.is_register_buffer = True
 
@@ -208,19 +205,3 @@ class TestGlobalTE(unittest.TestCase):
 
         global_te.transfer_engine.register_memory.assert_not_called()
         self.assertTrue(global_te.is_register_buffer)
-
-    def test_disconnect_failure_stops_memory_unregistration(self):
-        global_te = self.global_te_cls()
-        global_te.transfer_engine = MagicMock()
-        global_te.transfer_engine.disconnect_all_peers.return_value = -1
-        global_te.registered_buffers = [(0x1000, 128)]
-        global_te.is_register_buffer = True
-
-        with self.assertRaisesRegex(RuntimeError, "peer disconnection failed"):
-            global_te.unregister_buffer()
-
-        global_te.transfer_engine.unregister_memory.assert_not_called()
-        self.assertTrue(global_te.is_register_buffer)
-
-    def test_disconnect_all_peers_is_noop_before_engine_initialization(self):
-        self.global_te_cls().disconnect_all_peers()

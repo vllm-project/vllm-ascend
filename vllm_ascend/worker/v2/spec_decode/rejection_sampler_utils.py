@@ -17,6 +17,8 @@
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 
+from typing import Any, cast
+
 import torch
 from vllm.triton_utils import tl, triton
 from vllm.v1.worker.gpu.sample.gumbel import _TL_RAND_MIN
@@ -33,12 +35,11 @@ from vllm.v1.worker.gpu.spec_decode.rejection_sampler_utils import (
 )
 
 from vllm_ascend.ascend_config import get_ascend_config
-from vllm_ascend.ops.triton.v2.spec_decode.entropy_verify import (
+from vllm_ascend.ops.triton.spec_decode.entropy_verify import (
     _entropy_partials_kernel,
     _entropy_verify,
 )
-from vllm_ascend.ops.triton.v2.spec_decode.resample import resample
-from vllm_ascend.utils import vllm_version_is
+from vllm_ascend.ops.triton.spec_decode.resample import resample
 
 _ENTROPY_EPSILON = 1e-10
 
@@ -343,12 +344,32 @@ def rejection_sample(
     use_entropy_verify: bool | None = None,
     posterior_threshold: float = 0.95,
     posterior_alpha: float = 0.4,
+    # vLLM #65100 hints that masked vocab blocks may be skipped. The NPU
+    # resampler keeps its full residual scan, which preserves the same result.
+    skip_masked_vocab_blocks: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     # Upstream passes logits after applying sampling parameters. Resolve the
     # worker configuration here to keep its sampler and chunking flow unchanged.
     # An explicit flag bypasses configuration lookup for standalone callers.
     if use_fp64:
         raise NotImplementedError("FP64 rejection sampling is not supported on NPU.")
+    # Upstream passes a `DraftLogitsCache` (values plus an optional per-row
+    # mapping) in the same positional slot.
+    draft_logits_cache = cast(Any, draft_logits)
+    if draft_logits_cache is None:
+        draft_logits = None
+        draft_logits_row_mapping = None
+    elif isinstance(draft_logits_cache, torch.Tensor):
+        # Public callers (and the frozen one-card E2E) still pass the raw
+        # per-step tensor, which never carries a per-row mapping.
+        draft_logits_row_mapping = None
+    else:
+        draft_logits = draft_logits_cache.values
+        draft_logits_row_mapping = draft_logits_cache.row_mapping
+    if draft_logits_row_mapping is not None:
+        # vLLM #63554 can shard the draft logits cache across TP ranks;
+        # the NPU kernels index it by request state, so reject sharding.
+        raise NotImplementedError("Batch-sharded draft logits are not supported on NPU.")
     if fly_window_size > 0:
         raise NotImplementedError("FLy rejection sampling is not supported on NPU.")
     if (
@@ -378,14 +399,8 @@ def rejection_sample(
     num_logits, vocab_size = target_logits.shape
     has_draft_logits = draft_logits is not None
 
-    # vLLM main renamed the `num_speculative_steps` argument of the logits-stats
-    # kernels to `num_logits` and moved bonus-token detection into
-    # `_is_bonus_logit`, which masks its look-ahead load with the total logit
-    # count. Passing `num_speculative_steps` there makes the kernels treat every
-    # logit after the first one as a bonus token and return early, leaving the
-    # `new_empty` block-statistics buffers uninitialized. v0.32.0 still expects
-    # `num_speculative_steps`.
-    stats_num_logits = num_speculative_steps if vllm_version_is("0.32.0") else num_logits
+    # Both upstream kernels detect bonus rows using the total logit count.
+    stats_num_logits = num_logits
 
     if draft_logits is None:
         # When draft_logits is None, create a dummy tensor so that Triton
@@ -424,6 +439,7 @@ def rejection_sample(
         draft_logits,
         draft_logits.stride(0),
         draft_logits.stride(1),
+        draft_logits_row_mapping,
         expanded_idx_mapping,
         expanded_local_pos,
         temperature,
@@ -472,6 +488,7 @@ def rejection_sample(
             draft_logits,
             draft_logits.stride(0),
             draft_logits.stride(1),
+            draft_logits_row_mapping,
             draft_local_max,
             draft_local_max.stride(0),
             draft_local_sumexp,
@@ -500,6 +517,7 @@ def rejection_sample(
                     draft_logits,
                     draft_logits.stride(0),
                     draft_logits.stride(1),
+                    draft_logits_row_mapping,
                     draft_local_max,
                     draft_local_max.stride(0),
                     draft_local_sumexp,

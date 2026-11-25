@@ -16,13 +16,13 @@
 #
 
 # This workflow related to the resources atlas 800 A3
-# **Please note**: current A3 resource pool's maximum allowed concurrency is 5*16 NPUs
-# We will limit the concurrency of jobs on A3 to avoid the risk of insufficient resources
+# All test jobs are submitted together; pending LWS jobs are queued in FIFO
+# order by the npu-scheduler instead of being serialized by workflow `needs`.
 name: Nightly-A3
 
 run-name: >-
   ${{ inputs.request_id != '' &&
-      (inputs.request_id == 'daily' &&
+      ((inputs.request_id == 'daily' || startsWith(inputs.request_id, 'daily-')) &&
         'Nightly-A3 (Daily)' ||
         format('Nightly-A3 (PR) {0}', inputs.request_id)) ||
       'Nightly-A3 (scheduled)' }}
@@ -49,6 +49,11 @@ on:
         description: 'Skip build-image job (used when triggered by /nightly command)'
         required: false
         default: 'false'
+        type: string
+      image_repo_suffix:
+        description: 'Suffix appended to the SWR repository the tests pull the nightly image from (base_image/ascend-ci/vllm-ascend<suffix>). Used by /nightly --presmoke to consume the images published by /presmoke. Empty uses the standard repository.'
+        required: false
+        default: ''
         type: string
       vllm_ascend_ref:
         description: 'PR commit SHA for PR-triggered tests'
@@ -79,6 +84,11 @@ on:
         description: 'JSON profiling options: enabled, start_after or start_after_requests, duration, with_stack, output, benchmark_names'
         type: string
         default: '{}'
+      drain_pr_runs:
+        description: 'Cancel in-flight PR runs of this workflow before starting (set by the external scheduler)'
+        required: false
+        default: false
+        type: boolean
 permissions:
   contents: read
   pull-requests: read
@@ -92,7 +102,7 @@ defaults:
     shell: bash -el {0}
 
 concurrency:
-  group: ascend-nightly-${{ github.ref }}-a3${{ inputs.request_id && format('-{0}', inputs.request_id) || '' }}
+  group: ascend-nightly-${{ github.ref }}-a3-${{ inputs.vllm_ascend_branch }}${{ inputs.request_id && format('-{0}', inputs.request_id) || '' }}
   cancel-in-progress: true
 
 env:
@@ -138,7 +148,7 @@ jobs:
   setup-vars:
     name: Export global env vars as job outputs
     needs: parse-trigger
-    runs-on: linux-amd64-cpu-8-hk
+    runs-on: linux-amd64-cpu-2-hk
     outputs:
       ascend_log_prefix: ${{ steps.export.outputs.ascend_log_prefix }}
       vllm_ascend_branches: ${{ steps.export.outputs.vllm_ascend_branches }}
@@ -149,6 +159,56 @@ jobs:
       single_node: ${{ steps.set-matrix.outputs.single_node }}
       multi_card: ${{ steps.set-matrix.outputs.multi_card }}
     steps:
+      # The external scheduler dispatches scheduled runs with request_id empty,
+      # test_cases=all and drain_pr_runs=true. Force-cancel PR-triggered runs
+      # of this workflow before the tests start, otherwise their pending LWS
+      # pods stay ahead of this run in the npu-scheduler FIFO queue. Requiring
+      # the explicit opt-in keeps a manual dispatch (request_id also defaults
+      # to empty) from cancelling unrelated PR runs. The run-name carries (PR)
+      # so the display title can be used for matching.
+      - name: Cancel PR nightly runs before scheduled test
+        if: ${{ inputs.request_id == '' && inputs.drain_pr_runs }}
+        continue-on-error: true
+        uses: actions/github-script@v9
+        with:
+          github-token: ${{ secrets.PAT_TOKEN }}
+          script: |
+            // Best-effort cleanup: never fail the job.
+            try {
+              // Only drain PR runs of this workflow, never other platforms.
+              const workflowRef = process.env.GITHUB_WORKFLOW_REF || '';
+              const workflow_id = workflowRef.split('@')[0].split('/').pop();
+              if (!workflow_id) {
+                core.warning('Cannot derive workflow file from GITHUB_WORKFLOW_REF; skip');
+                return;
+              }
+
+              const { owner, repo } = context.repo;
+              const { data } = await github.rest.actions.listWorkflowRuns({
+                owner, repo, workflow_id, per_page: 100,
+              });
+              for (const run of data.workflow_runs) {
+                if (run.id === context.runId) continue;
+                if (run.status === 'completed') continue;
+                if (!(run.display_title || '').includes('(PR)')) continue;
+                core.info(`Force-cancelling ${run.display_title}: ${run.html_url}`);
+                try {
+                  await github.request(
+                    'POST /repos/{owner}/{repo}/actions/runs/{run_id}/force-cancel',
+                    { owner, repo, run_id: run.id },
+                  );
+                } catch (error) {
+                  if (error.status === 409 || error.status === 410) {
+                    core.info(`Run ${run.id} already finished`);
+                  } else {
+                    core.warning(`Failed to force-cancel ${run.id}: ${error.message}`);
+                  }
+                }
+              }
+            } catch (error) {
+              core.warning(`Skipping PR run cleanup: ${error.message}`);
+            }
+
       - id: export
         run: |
           {
@@ -228,7 +288,6 @@ jobs:
       (needs.build-image.result == 'success' || needs.build-image.result == 'skipped')
     strategy:
       fail-fast: false
-      max-parallel: 2
       matrix:
         vllm_ascend_branch: ${{ fromJSON(needs.setup-vars.outputs.vllm_ascend_branches) }}
         test_config: ${{ fromJson(needs.setup-vars.outputs.multi_node) }}
@@ -236,7 +295,7 @@ jobs:
     with:
       soc_version: a3
       runner: linux-aarch64-a3-800t-0
-      image: 'swr.cn-north-12.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-ci-${{ matrix.vllm_ascend_branch }}-a3'
+      image: "swr.cn-north-12.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend${{ inputs.image_repo_suffix }}:nightly-ci-${{ matrix.vllm_ascend_branch }}-a3"
       ascend_log_prefix: ${{ needs.setup-vars.outputs.ascend_log_prefix }}/${{ matrix.vllm_ascend_branch }}
       vllm_ascend_branch: ${{ matrix.vllm_ascend_branch }}
       replicas: 1
@@ -247,6 +306,8 @@ jobs:
       vllm_ascend_ref: ${{ inputs.vllm_ascend_ref || needs.parse-trigger.outputs.ref }}
       vllm_ref: ${{ inputs.vllm_ref || '' }}
       aop_multi_enabled: ${{ inputs.aop_enabled }}
+      testcase_timeout: 120
+      job_timeout: 360
       profile_options_json: ${{ needs.setup-vars.outputs.profile_options }}
       bisect_good_commit: ${{ fromJSON(inputs.bisect_args_json || '{}').good_commit || '' }}
       bisect_bad_commit: ${{ fromJSON(inputs.bisect_args_json || '{}').bad_commit || 'HEAD' }}
@@ -267,6 +328,7 @@ jobs:
           )
         }}
     secrets:
+      PAT_TOKEN: ${{ secrets.PAT_TOKEN }}
       HW_OBS_PROFILE_AK: ${{ secrets.HW_OBS_PROFILE_AK }}
       HW_OBS_PROFILE_SK: ${{ secrets.HW_OBS_PROFILE_SK }}
       KUBECONFIG_B64: ${{ secrets.KUBECONFIG_B64 }}
@@ -276,14 +338,13 @@ jobs:
 
   double-node-tests:
     name: double-node
-    needs: [setup-vars, parse-trigger, build-image, multi-node-tests]
+    needs: [setup-vars, parse-trigger, build-image]
     if: >-
       always() &&
       needs.parse-trigger.outputs.run == 'true' &&
       (needs.build-image.result == 'success' || needs.build-image.result == 'skipped')
     strategy:
       fail-fast: false
-      max-parallel: 4
       matrix:
         vllm_ascend_branch: ${{ fromJSON(needs.setup-vars.outputs.vllm_ascend_branches) }}
         test_config: ${{ fromJson(needs.setup-vars.outputs.double_node) }}
@@ -291,7 +352,7 @@ jobs:
     with:
       soc_version: a3
       runner: linux-aarch64-a3-800t-0
-      image: 'swr.cn-north-12.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-ci-${{ matrix.vllm_ascend_branch }}-a3'
+      image: "swr.cn-north-12.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend${{ inputs.image_repo_suffix }}:nightly-ci-${{ matrix.vllm_ascend_branch }}-a3"
       ascend_log_prefix: ${{ needs.setup-vars.outputs.ascend_log_prefix }}/${{ matrix.vllm_ascend_branch }}
       vllm_ascend_branch: ${{ matrix.vllm_ascend_branch }}
       replicas: 1
@@ -302,6 +363,8 @@ jobs:
       vllm_ascend_ref: ${{ inputs.vllm_ascend_ref || needs.parse-trigger.outputs.ref }}
       vllm_ref: ${{ inputs.vllm_ref || '' }}
       aop_multi_enabled: ${{ inputs.aop_enabled }}
+      testcase_timeout: 120
+      job_timeout: 360
       profile_options_json: ${{ needs.setup-vars.outputs.profile_options }}
       bisect_good_commit: ${{ fromJSON(inputs.bisect_args_json || '{}').good_commit || '' }}
       bisect_bad_commit: ${{ fromJSON(inputs.bisect_args_json || '{}').bad_commit || 'HEAD' }}
@@ -322,6 +385,7 @@ jobs:
           )
         }}
     secrets:
+      PAT_TOKEN: ${{ secrets.PAT_TOKEN }}
       HW_OBS_PROFILE_AK: ${{ secrets.HW_OBS_PROFILE_AK }}
       HW_OBS_PROFILE_SK: ${{ secrets.HW_OBS_PROFILE_SK }}
       KUBECONFIG_B64: ${{ secrets.KUBECONFIG_B64 }}
@@ -331,7 +395,7 @@ jobs:
 
   single-node-tests:
     name: single-node
-    needs: [setup-vars, parse-trigger, build-image, double-node-tests]
+    needs: [setup-vars, parse-trigger, build-image]
     if: >-
       always() &&
       needs.parse-trigger.outputs.run == 'true' &&
@@ -348,7 +412,8 @@ jobs:
     with:
       runner: ${{ matrix.test_config.os }}
       soc_version: a3
-      image: 'swr.cn-north-12.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-ci-${{ matrix.vllm_ascend_branch }}-a3'
+      image: "swr.cn-north-12.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend${{ inputs.image_repo_suffix }}:nightly-ci-${{ matrix.vllm_ascend_branch }}-a3"
+      tests: ${{ matrix.test_config.tests }}
       config_file_path: ${{ matrix.test_config.config_file_path }}
       config_base_path: ${{ matrix.test_config.config_base_path }}
       name: ${{ matrix.test_config.name }}
@@ -376,6 +441,7 @@ jobs:
       bisect_force_initial_build: ${{ fromJSON(inputs.bisect_args_json || '{}').force_initial_build || false }}
       bisect_config_base_path: ${{ matrix.test_config.config_base_path }}
     secrets:
+      PAT_TOKEN: ${{ secrets.PAT_TOKEN }}
       HW_OBS_PROFILE_AK: ${{ secrets.HW_OBS_PROFILE_AK }}
       HW_OBS_PROFILE_SK: ${{ secrets.HW_OBS_PROFILE_SK }}
       OBS_ACCESS_KEY_ID: ${{ secrets.OBS_ACCESS_KEY_ID }}
@@ -384,7 +450,7 @@ jobs:
 
   multi-card-tests:
     name: single-node
-    needs: [setup-vars, parse-trigger, build-image, double-node-tests]
+    needs: [setup-vars, parse-trigger, build-image]
     if: >-
       always() &&
       needs.parse-trigger.outputs.run == 'true' &&
@@ -400,7 +466,7 @@ jobs:
     with:
       runner: ${{ matrix.test_config.os }}
       soc_version: a3
-      image: 'swr.cn-north-12.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-ci-${{ matrix.vllm_ascend_branch }}-a3'
+      image: "swr.cn-north-12.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend${{ inputs.image_repo_suffix }}:nightly-ci-${{ matrix.vllm_ascend_branch }}-a3"
       tests: ${{ matrix.test_config.tests }}
       config_file_path: ${{ matrix.test_config.config_file_path }}
       config_base_path: ${{ matrix.test_config.config_base_path }}
@@ -430,6 +496,7 @@ jobs:
       bisect_force_initial_build: ${{ fromJSON(inputs.bisect_args_json || '{}').force_initial_build || false }}
       bisect_config_base_path: ${{ matrix.test_config.config_base_path }}
     secrets:
+      PAT_TOKEN: ${{ secrets.PAT_TOKEN }}
       HW_OBS_PROFILE_AK: ${{ secrets.HW_OBS_PROFILE_AK }}
       HW_OBS_PROFILE_SK: ${{ secrets.HW_OBS_PROFILE_SK }}
       OBS_ACCESS_KEY_ID: ${{ secrets.OBS_ACCESS_KEY_ID }}
@@ -451,7 +518,7 @@ jobs:
         test_config: ${{ fromJSON(needs.setup-vars.outputs.multi_node) }}
     uses: ./.github/workflows/_e2e_profile_parse.yaml
     with:
-      image: 'swr.cn-north-12.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-ci-${{ matrix.vllm_ascend_branch }}-a3'
+      image: "swr.cn-north-12.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend${{ inputs.image_repo_suffix }}:nightly-ci-${{ matrix.vllm_ascend_branch }}-a3"
       prefix: nightly-profiling/${{ github.repository }}/${{ github.run_id }}/${{ github.run_attempt }}/multi-node/${{ matrix.vllm_ascend_branch }}-${{ matrix.test_config.name }}
       ref: ${{ github.sha }}
       should_run: >-
@@ -476,7 +543,7 @@ jobs:
         test_config: ${{ fromJSON(needs.setup-vars.outputs.double_node) }}
     uses: ./.github/workflows/_e2e_profile_parse.yaml
     with:
-      image: 'swr.cn-north-12.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-ci-${{ matrix.vllm_ascend_branch }}-a3'
+      image: "swr.cn-north-12.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend${{ inputs.image_repo_suffix }}:nightly-ci-${{ matrix.vllm_ascend_branch }}-a3"
       prefix: nightly-profiling/${{ github.repository }}/${{ github.run_id }}/${{ github.run_attempt }}/multi-node/${{ matrix.vllm_ascend_branch }}-${{ matrix.test_config.name }}
       ref: ${{ github.sha }}
       should_run: >-
@@ -501,7 +568,7 @@ jobs:
         test_config: ${{ fromJSON(needs.setup-vars.outputs.single_node) }}
     uses: ./.github/workflows/_e2e_profile_parse.yaml
     with:
-      image: 'swr.cn-north-12.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-ci-${{ matrix.vllm_ascend_branch }}-a3'
+      image: "swr.cn-north-12.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend${{ inputs.image_repo_suffix }}:nightly-ci-${{ matrix.vllm_ascend_branch }}-a3"
       prefix: nightly-profiling/${{ github.repository }}/${{ github.run_id }}/${{ github.run_attempt }}/single-node/${{ matrix.vllm_ascend_branch }}-${{ matrix.test_config.name }}
       ref: ${{ github.sha }}
       should_run: >-
@@ -527,7 +594,7 @@ jobs:
         test_config: ${{ fromJSON(needs.setup-vars.outputs.multi_card) }}
     uses: ./.github/workflows/_e2e_profile_parse.yaml
     with:
-      image: 'swr.cn-north-12.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-ci-${{ matrix.vllm_ascend_branch }}-a3'
+      image: "swr.cn-north-12.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend${{ inputs.image_repo_suffix }}:nightly-ci-${{ matrix.vllm_ascend_branch }}-a3"
       prefix: nightly-profiling/${{ github.repository }}/${{ github.run_id }}/${{ github.run_attempt }}/single-node/${{ matrix.vllm_ascend_branch }}-${{ matrix.test_config.name }}
       ref: ${{ github.sha }}
       should_run: >-
@@ -544,9 +611,18 @@ jobs:
     if: (needs.multi-node-tests.result != 'skipped' || needs.double-node-tests.result != 'skipped')
     steps:
       - name: Clear pre-logs on pvc
+        env:
+          VLLM_ASCEND_BRANCH: ${{ inputs.vllm_ascend_branch }}
         run: |
-          # Clear logs generated before the test to avoid confusion
-          rm -rf "${ASCEND_LOG_PREFIX:?}"/* || true
+          # Only clear this branch's directory so a concurrent run of another
+          # branch keeps its in-flight logs on the shared PVC.
+          branch=$(printf '%s' "$VLLM_ASCEND_BRANCH" | tr '/' '-')
+          if [ -z "$branch" ]; then
+            echo "vllm_ascend_branch is empty; skip clearing logs"
+            exit 0
+          fi
+          echo "Clearing ${ASCEND_LOG_PREFIX}/${branch}"
+          rm -rf "${ASCEND_LOG_PREFIX:?}/${branch:?}"/* || true
 
   merge-benchmark-artifacts:
     name: Merge benchmark artifacts into nightly-a3.zip
@@ -555,7 +631,7 @@ jobs:
       always() &&
       github.event_name == 'workflow_dispatch' &&
       needs.parse-trigger.result == 'success'
-    runs-on: linux-amd64-cpu-8-hk
+    runs-on: linux-amd64-cpu-2-hk
     steps:
       - name: Merge all benchmark result artifacts
         continue-on-error: true
@@ -565,23 +641,3 @@ jobs:
           pattern: nightly-test-benchmark-results-*
           compression-level: 0
           delete-merged: true
-
-  remove-taints:
-    name: Remove node taints
-    needs: [multi-node-tests, double-node-tests, single-node-tests, multi-card-tests]
-    if: >-
-      always() &&
-      inputs.request_id == '' &&
-      (needs.multi-node-tests.result != 'skipped' || needs.double-node-tests.result != 'skipped')
-    runs-on: linux-aarch64-a3-800t-0
-    container:
-      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-cpu
-      env:
-        KUBECONFIG: /tmp/kubeconfig
-    steps:
-      - name: Decode kubeconfig
-        run: echo "${{ secrets.KUBECONFIG_B64 }}" | base64 -d > "$KUBECONFIG"
-
-      - name: Remove dedicated taint from test nodes
-        run: |
-          kubectl taint nodes ${{ vars.A3_TAINT_NODES }} dedicated- || true

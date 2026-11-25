@@ -1,90 +1,59 @@
-# Pull Request Summary Style Guide
+# Review Guidance for vllm-ascend
 
-## Output Instructions
+vLLM Ascend is a hardware plugin integrating Ascend NPUs into vLLM. Formatting,
+PR title tags, and PR description templates are enforced by CI (`format.sh ci`,
+check gates) and by the coding agents developers already use — do NOT comment
+on them.
 
-**IMPORTANT**: When doing PR review, you MUST output them in markdown code blocks so users can easily copy them:
+Focus your review on issues that automated tooling cannot catch:
 
-1. **PR Title**: Output the generated title in a code block with triple backticks
-2. **PR Summary**: Output the generated summary in a markdown code block with triple backticks
+## NPU-specific correctness and performance
+- `tensor.item()`, `.cpu()`, `.tolist()`, or data-dependent control flow on
+  device tensors in hot paths: each forces a host-device synchronization and
+  can stall AsyncScheduler. Suggest device-side alternatives
+  (`torch.argmax`, `torch.sum`, keeping values on device, batching).
+- Unnecessary CPU↔NPU transfers or avoidable copies in hot paths.
+- Long-running-process memory concerns: fragmentation, tensors that should be
+  freed, per-step allocations that could be reused.
 
-This allows users to directly copy the content without manual formatting.
+## Architecture rules (see AGENTS.md at repo root)
+- New environment variables need strong justification; user-facing config
+  belongs in `--additional-config` via a typed sub-config in
+  `vllm_ascend/ascend_config.py` (follow `EplbConfig`/`RlConfig` patterns).
+  Flag scattered/hardcoded env var access instead of `vllm_ascend.envs`.
+- New patches under `vllm_ascend/patch/`: check the patch is minimal, targets
+  the right layer (`platform/` vs `worker/`), and is a candidate for upstream
+  contribution to vLLM.
+- Model runner changes (`vllm_ascend/worker/v2/model_runner.py`): check
+  existing upstream extension points (inheritance, composition) were considered
+  first, and flag device-side hot-path costs.
+- No new module-level mutable globals; constants (`ALL_UPPER_CASE`) are fine.
+- All imports at top of file, except circular imports, lazy worker-process
+  loading, and `if TYPE_CHECKING:` blocks.
 
-## Pull Request Summary Format
+## Triton operators
+- JIT specialization / recompilation risks from changing arguments.
+- Warmup: required variants registered in the component's active registry
+  window; runtime calls reuse the same wrapper as warmup.
+- Device-applicability across Ascend 910B / 910C / 310P.
 
-The summary should follow the format:
+## Docs consistency
+- Behavior changes (config keys, env vars, defaults) should be reflected in the
+  relevant docs (`docs/source/user_guide/configuration/`, additional_config
+  table). Flag docs that contradict the code in the same PR.
 
-   ```markdown
-    ### What this PR does / why we need it?
-    <!--
-    - Please clarify what changes you are proposing. The purpose of this section is to outline the changes and how this PR fixes the issue.
-    If possible, please consider writing useful notes for better and faster reviews in your PR.
+## Release notes
+- Every user-facing PR must add `release_notes/fragments/<PR number>.yaml`
+  following `release_notes/TEMPLATE.yaml`.
+- Flag fragments that: describe internal refactors users cannot observe,
+  state performance numbers without a scenario (model/workload/hardware) or an
+  invented magnitude, or change config/env behavior without old→new plus the
+  migration step.
+- Bug-fix fragments should describe the user-visible symptom, not the internal
+  root cause.
 
-    - Please clarify why the changes are needed. For instance, the use case and bug description.
-
-    - Fixes #
-    -->
-
-    ### Does this PR introduce _any_ user-facing change?
-    <!--
-    Note that it means *any* user-facing change including all aspects such as API, interface or other behavior changes.
-    Documentation-only updates are not considered user-facing changes.
-    -->
-
-    ### How was this patch tested?
-    <!--
-    CI passed with new added/existing test.
-    If it was tested in a way different from regular unit tests, please clarify how you tested step by step, ideally copy and paste-able, so that other reviewers can test and check, and descendants can verify in the future.
-    If tests were not added, please describe why they were not added and/or why it was difficult to add.
-    -->
-   ```
-
-## Pull Request Title Format
-
-The summary should also refresh the Pull Request Title to follow the format:
-
-    ```txt
-    [Branch][Module][Action] Pull Request Title
-    ```
-
-- Branch: The branch name where the PR is based. If the base branch is main, this prefix can be omitted.
-- Module: The module or component being changed. It includes but is not limited to the following:
-    - [Attention]
-    - [Ops]
-    - [Doc]
-    - [Test]
-    - [CI]
-    - [Benchmark]
-- Action: The action being performed. It includes but is not limited to the following:
-    - [BugFix]
-    - [Feature]
-    - [Misc]
-
-## Example Output Format
-
-When providing a PR review, format your response like this:
-
-**Suggested PR Title:**
-
-```markdown
-[Branch][Module][Action] Your generated title here
-```
-
-**Suggested PR Summary:**
-
-```markdown
-### What this PR does / why we need it?
-
-Your analysis of what the PR does and why it's needed.
-
-Fixes #issue_number
-
-### Does this PR introduce _any_ user-facing change?
-
-Your assessment of user-facing changes.
-
-### How was this patch tested?
-
-Your description of testing approach.
-```
-
-And please print your review suggestion in markdown format no matter the pull request description is empty or not.
+## Testing
+- Changes to kernels, model runners, or config parsing should come with or
+  update CPU-runnable unit tests under `tests/ut`.
+- Do not ask authors for NPU/E2E/performance runs when they lack hardware —
+  that evidence comes from CI; just say so.

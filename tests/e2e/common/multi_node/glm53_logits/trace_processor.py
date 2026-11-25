@@ -9,19 +9,7 @@ reference history. This is a numerical regression tool, not a benchmark.
 
 from vllm.v1.worker.gpu.sample.logits_processor.interface import LogitsProcessor
 
-
-def mask_trace_logits(logits, slots, positions, prompt_lengths, traces, lengths):
-    import torch
-
-    safe_slots = slots.long().clamp(min=0)
-    steps = positions.long() + 1 - prompt_lengths[safe_slots].long()
-    active = (slots >= 0) & (steps >= 0) & (steps < lengths[safe_slots])
-    safe_steps = steps.clamp(min=0, max=traces.shape[1] - 1)
-    forced_ids = traces[safe_slots, safe_steps]
-    vocabulary = torch.arange(logits.shape[1], device=logits.device)
-    mask = active[:, None] & (vocabulary[None, :] != forced_ids[:, None])
-    logits.masked_fill_(mask, -float("inf"))
-    return logits
+from .trace_utils import mask_trace_logits
 
 
 class FixedTraceProcessor(LogitsProcessor):

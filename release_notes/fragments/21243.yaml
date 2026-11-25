@@ -1,0 +1,4 @@
+pr: 21243
+entries:
+  - category: bugfix
+    text: DeepSeek V4.1 SWA cache now uses the configured KV cache block size directly instead of remapping it through the DeepSeek V4 block-size table.

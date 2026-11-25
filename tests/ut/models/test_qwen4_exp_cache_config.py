@@ -1,3 +1,4 @@
+# mypy: disable-error-code="operator, union-attr"
 from dataclasses import replace
 from types import SimpleNamespace
 
@@ -5,6 +6,7 @@ import pytest
 import torch
 from vllm.config import KVTransferConfig
 from vllm.model_executor.models import ModelRegistry
+from vllm.v1.core import kv_cache_planning as planning
 from vllm.v1.kv_cache_interface import (
     CircularBufferSpec,
     FullAttentionSpec,
@@ -16,6 +18,7 @@ from vllm.v1.kv_cache_interface import (
     UniformTypeKVCacheSpecs,
 )
 
+from vllm_ascend.core.kv_cache_config_builder import AscendKVCacheConfigBuilder
 from vllm_ascend.models.qwen4_exp.cache_config import (
     GDN,
     HIDDEN,
@@ -29,11 +32,7 @@ from vllm_ascend.models.qwen4_exp.cache_config import (
     get_qwen4_exp_pool_bytes_per_block,
     make_slab_view,
 )
-from vllm_ascend.patch.platform.patch_kv_cache_utils import (
-    _ascend_max_memory_usage_bytes_from_groups,
-)
 from vllm_ascend.platform import NPUPlatform
-from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2 import attn_utils as attn_utils_v2
 
 
@@ -154,8 +153,9 @@ def _ungrouped_qwen_specs() -> dict[str, KVCacheSpec]:
         specs[f"{source}.indexer.compressed_key_cache"] = compressed
         specs[f"{source}.indexer.raw_key_cache"] = raw
         specs[f"{source}.attn"] = main
-    for index in range(36):
-        specs[f"model.layers.{index}.linear_attn"] = gdn
+    for index in range(48):
+        if index % 4 != 3:
+            specs[f"model.layers.{index}.linear_attn"] = gdn
     specs["model.ple"] = ple
     assert len(specs) == 76
     return specs
@@ -334,7 +334,11 @@ def _allocate_mrv2_kv_cache(
     )
     monkeypatch.setattr(attn_utils_v2, "get_current_vllm_config", lambda: vllm_config)
     monkeypatch.setattr(attn_utils_v2, "enable_sfa", lambda _: False)
-    backend = SimpleNamespace(full_cls_name=lambda: "qwen-cache-test")
+    block_sizes = kernel_block_sizes or [128] * len(config.kv_cache_groups)
+    backend = SimpleNamespace(
+        full_cls_name=lambda: "qwen-cache-test",
+        get_supported_kernel_block_sizes=lambda _spec: block_sizes,
+    )
     layers = {
         name: SimpleNamespace(get_attn_backend=lambda: backend, num_heads=1)
         for group in config.kv_cache_groups
@@ -346,7 +350,6 @@ def _allocate_mrv2_kv_cache(
         lambda *_: layers,
     )
     raw = attn_utils_v2._allocate_kv_cache(config, {}, torch.device("cpu"))
-    block_sizes = kernel_block_sizes or [128] * len(config.kv_cache_groups)
     if use_main:
         monkeypatch.setattr(attn_utils_v2, "_allocate_kv_cache", lambda *_, **__: raw)
         caches = attn_utils_v2.allocate_kv_cache_main(
@@ -358,6 +361,7 @@ def _allocate_mrv2_kv_cache(
     else:
         groups = [
             SimpleNamespace(
+                kernel_block_size=None,
                 kv_cache_group_id=i,
                 kv_cache_spec=group.kv_cache_spec,
                 layer_names=group.layer_names,
@@ -532,7 +536,7 @@ def test_qwen4_cache_admission_matches_shared_planner_allocation() -> None:
         *owners,
     )
     vllm_config = SimpleNamespace(
-        model_config=SimpleNamespace(max_model_len=135168),
+        model_config=SimpleNamespace(max_model_len=135168, hf_config=SimpleNamespace(model_type="qwen4_exp")),
         parallel_config=SimpleNamespace(decode_context_parallel_size=1),
         cache_config=SimpleNamespace(
             mamba_cache_mode="align",
@@ -540,8 +544,10 @@ def test_qwen4_cache_admission_matches_shared_planner_allocation() -> None:
             prefix_cache_retention_interval=None,
         ),
         max_in_flight_tokens=4096,
+        attention_config=SimpleNamespace(hisparse_config=None),
     )
-    required_bytes = _ascend_max_memory_usage_bytes_from_groups(
+    required_bytes = planning._max_memory_usage_bytes_from_groups(
+        AscendKVCacheConfigBuilder(),
         vllm_config,
         groups,
     )
@@ -580,7 +586,7 @@ def test_mamba_state_groups_merge_shares_one_block_table(monkeypatch) -> None:
         *owners,
     )
     vllm_config = SimpleNamespace(
-        model_config=SimpleNamespace(max_model_len=135168),
+        model_config=SimpleNamespace(max_model_len=135168, hf_config=SimpleNamespace(model_type="qwen4_exp")),
         parallel_config=SimpleNamespace(decode_context_parallel_size=1),
         cache_config=SimpleNamespace(
             mamba_cache_mode="align",
@@ -588,6 +594,7 @@ def test_mamba_state_groups_merge_shares_one_block_table(monkeypatch) -> None:
             prefix_cache_retention_interval=None,
         ),
         max_in_flight_tokens=4096,
+        attention_config=SimpleNamespace(hisparse_config=None),
     )
 
     def is_gdn_group(group) -> bool:
@@ -608,12 +615,14 @@ def test_mamba_state_groups_merge_shares_one_block_table(monkeypatch) -> None:
     gdn_blocks_each = required_blocks(gdn_groups[:1])
 
     blocks_before = required_blocks(groups)
-    bytes_before = _ascend_max_memory_usage_bytes_from_groups(vllm_config, groups)
+    bytes_before = planning._max_memory_usage_bytes_from_groups(AscendKVCacheConfigBuilder(), vllm_config, groups)
 
     merged = _merge_mamba_state_groups(groups, 13)
 
     gdn_merged = [g for g in merged if is_gdn_group(g)]
-    assert [len(group.layer_names) for group in gdn_merged] == [13, 13, 10]
+    assert [group.layer_names for group in gdn_merged] == [
+        [f"model.layers.{index}.linear_attn" for index in range(offset, 48, 4)] for offset in range(3)
+    ]
     # PLE (single-shape MambaSpec) keeps its own group.
     ple_groups = [g for g in merged if isinstance(g.kv_cache_spec, MambaSpec) and len(g.kv_cache_spec.shapes) == 1]
     assert len(ple_groups) == 1
@@ -629,7 +638,7 @@ def test_mamba_state_groups_merge_shares_one_block_table(monkeypatch) -> None:
         owner.spec.real_page_size_bytes for owner in probe.owners if owner.role == PLE
     )
 
-    bytes_after = _ascend_max_memory_usage_bytes_from_groups(vllm_config, merged)
+    bytes_after = planning._max_memory_usage_bytes_from_groups(AscendKVCacheConfigBuilder(), vllm_config, merged)
     assert bytes_after == blocks_after * pool_block_bytes
     assert bytes_before - bytes_after == 33 * gdn_blocks_each * pool_block_bytes
 
@@ -668,7 +677,7 @@ def test_mamba_state_groups_merge_shares_one_block_table(monkeypatch) -> None:
     assert config is not None
     gdn_names = {name for group in gdn_merged for name in group.layer_names}
     descriptors = [tensor for tensor in config.kv_cache_tensors if set(tensor.layers) & gdn_names]
-    assert [len(tensor.layers) for tensor in descriptors] == [13, 13, 10]
+    assert [tensor.layers for tensor in descriptors] == [group.layer_names for group in gdn_merged]
     for tensor in descriptors:
         assert tensor.offset + (len(tensor.layers) - 1) * tensor.layer_stride + region.size <= tensor.size
 
@@ -743,7 +752,7 @@ def test_qsa_block_alignment_reuses_vllm_for_whole_gdn_page(monkeypatch, cache_m
     )
     NPUPlatform._align_hybrid_block_size(config, AscendQSABackend)
     assert cache.block_size == 896
-    expected_mamba_block_size = 896 if cache_mode == "align" or vllm_version_is("0.31.0") else None
+    expected_mamba_block_size = 896 if cache_mode == "align" else None
     assert cache.mamba_block_size == expected_mamba_block_size
     assert cache.mamba_page_size_padded == 896 * 1024
 
@@ -809,15 +818,24 @@ def test_platform_builder_uses_qwen_pool_accounting() -> None:
     groups = _groups()
     expected = get_qwen4_exp_pool_bytes_per_block(groups)
     assert expected is not None
-    assert AscendKVCacheConfigBuilder()._get_pool_bytes_per_block(SimpleNamespace(), groups) == expected
+    assert (
+        AscendKVCacheConfigBuilder()._get_pool_bytes_per_block(
+            SimpleNamespace(model_config=SimpleNamespace(hf_config=SimpleNamespace(model_type="qwen4_exp"))), groups
+        )
+        == expected
+    )
 
 
 @pytest.mark.parametrize("manager_block_size", [256, 384, 768])
 def test_compressed_qsa_builder_and_cache_use_matching_pages(monkeypatch, manager_block_size):
+    import vllm.models.qwen4_exp.common.qsa_indexer as qsa_module  # type: ignore[import-not-found]
     from vllm.v1.attention.backend import CommonAttentionMetadata
     from vllm.v1.worker.utils import AttentionGroup
 
     from vllm_ascend.models.qwen4_exp import qsa
+
+    QSARawKeyCache = qsa_module.QSARawKeyCache
+    QSAIndexerBackend = qsa_module.QSAIndexerBackend
 
     groups = [
         KVCacheGroupSpec(
@@ -852,7 +870,7 @@ def test_compressed_qsa_builder_and_cache_use_matching_pages(monkeypatch, manage
     )
     compressed_group = groups[2]
     spec = compressed_group.kv_cache_spec
-    backend = qsa.qsa_cache.QSAStateBackend
+    backend = QSAIndexerBackend
     monkeypatch.setattr(attn_utils_v2, "get_current_vllm_config", lambda: runtime_config)
     monkeypatch.setattr(attn_utils_v2, "enable_sfa", lambda _: False)
     raw = attn_utils_v2._allocate_kv_cache(config, {}, torch.device("cpu"))
@@ -863,7 +881,7 @@ def test_compressed_qsa_builder_and_cache_use_matching_pages(monkeypatch, manage
     group.create_metadata_builders(runtime_config, torch.device("cpu"), kernel_block_size=128)
     builder = group.get_metadata_builder(0)
     name = compressed_group.layer_names[0]
-    layer = qsa.qsa_cache.QSACompressedKeyCache(
+    layer = qsa.qsa_indexer.QSACompressedKeyCache(
         head_size=spec.head_size,
         dtype=spec.dtype,
         prefix=name,
@@ -876,7 +894,7 @@ def test_compressed_qsa_builder_and_cache_use_matching_pages(monkeypatch, manage
     bind_kv_cache_to_layers({name: caches[name]}, {name: layer})
     assert layer.kv_cache is caches[name]
     raw_name = groups[1].layer_names[0]
-    raw_layer = qsa.qsa_cache.QSAKeyStateCache(
+    raw_layer = QSARawKeyCache(
         head_size=20,
         dtype=spec.dtype,
         prefix=raw_name,
@@ -913,7 +931,7 @@ def test_compressed_qsa_builder_and_cache_use_matching_pages(monkeypatch, manage
     )
     # One real request owns all eight tokens; avoid the device-only mapping kernel.
     common._token_to_req_indices_cache = torch.zeros(8, dtype=torch.int32)
-    monkeypatch.setattr(qsa.qsa_cache, "build_qsa_metadata", qsa.qsa_cache._build_qsa_metadata_torch)
+    monkeypatch.setattr(qsa.qsa_indexer, "build_qsa_metadata", qsa.qsa_indexer._build_qsa_metadata_torch)
     metadata = builder.build(0, common)
     torch.testing.assert_close(metadata.block_table, virtual)
     # Cross the manager-block boundary: flattened storage addresses must agree

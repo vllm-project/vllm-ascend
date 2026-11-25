@@ -184,6 +184,21 @@ recipe values after the same root normalization contract. `--set-env` compiler
 overrides also participate, using their exact values: an override may point to
 an input not otherwise covered by the prepared-input identity.
 
+The custom-operator command sets its generated `ASCEND_CUSTOM_OPP_PATH` through
+`env`, so the existing command normalization handles its declared OPP root.
+Operator host/tiling sources, including the definitions that generate OPP
+configuration, remain in the operator namespace. The rebuilt tiling library is not
+hashed again: its log strings can embed a different checkout path even when
+the sources are identical. With matching source and toolchain inputs, moving
+the entire `csrc/build_cache` to another checkout can restore kernel artifacts
+into an empty build directory. Host libraries still follow the normal build.
+
+Custom-operator callers exclude README, Markdown/reStructuredText and `docs/`
+from both prepared inputs and the operator namespace. They also exclude
+`tests/` when `ENABLE_TEST` and `BENCHMARK` are both off. Test builds retain
+their test-source identity; kernel, host/tiling and shared compiler sources
+remain identity-sensitive.
+
 The compiler-environment identity covers the host platform, selected compiler
 profile, tool version output, CANN metadata, and explicit environment values.
 Absolute compiler installation paths are not semantic when the reported tool
@@ -203,6 +218,8 @@ update the matching identity group in the same change:
   compiler/toolkit environment; and
 - `NORMALIZE_PATH` removes only a physical location whose referenced semantic
   content is already covered by one of those identity groups.
+
+`EXCLUDE` applies consistently to prepared inputs and the operator namespace.
 
 Removing or omitting an identity argument can cause a false HIT. Adding a
 non-semantic physical path can cause avoidable cross-workspace misses. Changes
@@ -257,7 +274,7 @@ keyed outer snapshot with compatibility prefixes, and removes `.updated` before
 the build. `.github/actions/csrc-l1-save/action.yaml` publishes only when the
 caller supplies a primary key, the local cache contains `.updated`, and trusted
 writer credentials are present. The local engine creates `.updated` only after
-an entry is newly saved or replaced; an all-hit build consequently does not
+an entry is newly saved or replaced; an all-HIT build consequently does not
 republish an unchanged snapshot. Restore and save transport failures are
 availability failures and remain fail-open. A missing or unparsable manifest,
 or a manifest object that fails schema or artifact validation, is a MISS and is

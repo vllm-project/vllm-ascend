@@ -25,7 +25,9 @@ def _builder(
             get_head_size=lambda: 512,
             hf_text_config=SimpleNamespace(num_attention_heads=4, kv_lora_rank=512),
         ),
-        parallel_config=SimpleNamespace(tensor_parallel_size=tp_size, prefill_context_parallel_size=1),
+        parallel_config=SimpleNamespace(
+            tensor_parallel_size=tp_size, prefill_context_parallel_size=1, pcp_shard_decode_requests=False
+        ),
         scheduler_config=SimpleNamespace(max_num_seqs=2, max_num_batched_tokens=32 if speculative else 4),
         speculative_config=SimpleNamespace(num_speculative_tokens=5) if speculative else None,
         compilation_config=SimpleNamespace(
@@ -38,7 +40,6 @@ def _builder(
         "get_current_hardware_profile",
         lambda: SimpleNamespace(device_adaptor_family=DeviceAdaptorFamily.FP8_OPTIMIZED if a5 else None),
     )
-    monkeypatch.setattr(sfa, "select_common_block_size", lambda *args: 128)
     config_flags = SimpleNamespace(enable_sparse_sfa_c8=False, enable_sparse_sfa_turboquant=False)
     monkeypatch.setattr(sfa, "get_ascend_config", lambda: config_flags)
     monkeypatch.setattr(
@@ -53,7 +54,8 @@ def _builder(
         self.model_config, self.metadata_cls = cfg.model_config, metadata_cls
 
     with patch.object(MLACommonMetadataBuilder, "__init__", base_init):
-        return builder_cls(SimpleNamespace(block_size=block_size), ["layer"], config, torch.device("cpu"))
+        # AttentionGroup passes the selected kernel spec; config keeps the manager size.
+        return builder_cls(SimpleNamespace(block_size=128), ["layer"], config, torch.device("cpu"))
 
 
 def _common(block_size):
@@ -62,7 +64,6 @@ def _common(block_size):
     expanded = (pages.unsqueeze(-1) * split + torch.arange(split, dtype=torch.int32)).reshape(2, -1)
     expanded[1, split:] = -1
     return SimpleNamespace(
-        context_parallel_metadata=None,
         pcp_context=None,
         pcp_cache_group_idx=None,
         num_reqs=2,
@@ -124,11 +125,9 @@ def test_shared_sfa_nope_metadata_pages_and_draft_buffers(monkeypatch, block_siz
         assert draft.smla_topk_length.data_ptr() != first.smla_topk_length.data_ptr()
     else:
         assert first.smla_metadata is None and not seen
-    common.block_table_tensor[0, : builder.nope_states[None].split] = 3 * builder.nope_states[
-        None
-    ].split + torch.arange(builder.nope_states[None].split)
+    page_multiplier = block_size // builder.kernel_block_size
+    common.block_table_tensor[0, :page_multiplier] = 3 * page_multiplier + torch.arange(page_multiplier)
     builder.build(0, common)
-    page_multiplier = builder.nope_states[None].split
     assert first.block_table[0, 0] == 3 * page_multiplier
     assert draft.block_table[0, 0] == 5 * page_multiplier
     if a5:
@@ -148,7 +147,9 @@ def test_nope_metadata_preserves_all_pcp_request_chunks(monkeypatch, pcp_size, a
     config.scheduler_config.max_num_seqs = 8
     config.scheduler_config.max_num_batched_tokens = 32
     config.parallel_config.prefill_context_parallel_size = pcp_size
-    state = sparse_mla.SparseMLAMetadataState(SimpleNamespace(block_size=128), config, torch.device("cpu"))
+    state = sparse_mla.SparseMLAMetadataState(
+        SimpleNamespace(block_size=128), config, torch.device("cpu"), kernel_block_size=builder.kernel_block_size
+    )
     address = state.block_table_buffer.data_ptr()
     rows = 17 if pcp_size > 1 else 9
     width = state.block_table_buffer.shape[1]
@@ -263,7 +264,7 @@ def test_rope_sfa_keeps_rotary_tables_and_kernel_pages(monkeypatch):
         metadata = builder.build(0, common)
     rotary.assert_called_once()
     torch.testing.assert_close(rotary.call_args.args[0], common.positions)
-    assert rotary.call_args.kwargs == {"use_cache": True}
+    assert rotary.call_args.kwargs == {"use_cache": True, "use_rope": True}
     assert metadata.cos.data_ptr() == cos.data_ptr()
     assert metadata.sin.data_ptr() == sin.data_ptr()
     assert metadata.block_table.data_ptr() == common.block_table_tensor.data_ptr()
@@ -642,3 +643,19 @@ def test_sparse_mla_rejects_missing_sinks():
             _smla_metadata_stub(None),
             0.5,
         )
+
+
+def test_nope_c8_output_returns_kernel_buffer_without_python_mask(monkeypatch):
+    """NoPE c8 returns the operator output unmodified: the fork kernel defines its
+    own padding rows (TND tail zero-init), so no Python masked_fill remains."""
+    impl = object.__new__(sfa.AscendSFAImpl)
+    impl.qk_rope_head_dim = 0
+    impl.enable_sparse_sfa_c8 = True
+    impl.enable_sparse_sfa_turboquant = False
+    cache = torch.empty(8, 2, 1, 12, dtype=torch.int8)
+    metadata = SimpleNamespace(block_size=2)
+    with patch.object(sfa.DeviceOperator, "execute_sparse_flash_attention_process") as dispatch:
+        result = impl._execute_sparse_flash_attention_process(
+            torch.empty(4, 2, 8), None, (cache,), None, metadata, None, None
+        )
+    assert result is dispatch.return_value

@@ -101,7 +101,6 @@ Set `NPU_DEVICE_ID` to an available NPU on the test host. Run the repository tes
 
 ```bash
 export ASCEND_RT_VISIBLE_DEVICES="${NPU_DEVICE_ID:?Set NPU_DEVICE_ID to an available NPU}"
-export VLLM_USE_V2_MODEL_RUNNER=1
 python -m pytest -q tests/ut/worker/v2/test_entropy_verify.py
 python -m pytest -q \
   tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_rejection_sample_v2.py \

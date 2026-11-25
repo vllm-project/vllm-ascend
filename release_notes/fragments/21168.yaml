@@ -1,0 +1,4 @@
+pr: 21168
+entries:
+  - category: bugfix
+    text: Fixed DeepSeek V4 DSpark expert weight loading with redundant experts and MoE layer discovery for EPLB registration.

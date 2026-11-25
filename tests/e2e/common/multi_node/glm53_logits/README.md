@@ -22,10 +22,38 @@ All cases use MRV2 and MooncakeConnectorV2, with no DSACP configuration.
 ## Nightly integration
 
 The checkpoint and baseline assets must be mounted on both pods.
-The five YAMLs in `tests/e2e/cases/models/configs/GLM` are registered in the A5
+The five YAMLs in `tests/SIT/cases/models/configs/GLM` are registered in the A5
 nightly matrix. The common multi-node pytest entry dispatches configs containing
 `logits_regression` to this runner. LWS provides the two pod addresses and node
 indices; no host credentials, fixed machine addresses, or SSH are needed.
+
+The service templates derive from main's
+`tests/SIT/cases/features/pp/GLM-5.3-W8A8C8-A3-200k-PP-PD.yaml`, adapted to the
+cropped A5 model and topology above. They use the common external-DP launcher,
+standard `vllm serve` servers and the main PD proxy. The capture middleware adds
+test-only routes under `/glm53_logits/`; normal OpenAI routes remain available.
+P retains eager execution, D retains FULL_DECODE_ONLY and MTP remains P1/D5.
+Prefix caching is off on both sides. P/D batch limits are 16384/256, with 64
+sequences and memory utilization 0.92, following the full-service template.
+These differ from the original capture's small engine settings, so successful
+historical captures do not establish that this service configuration passes.
+
+Use the ModelScope repository
+`vllm-ascend/GLM-5.3-W8A8C8-MXFP8-1D7M1MTP`. Its default cache path is recorded
+in each YAML. It contains A5 MXFP8 weights and must not be used on A3. Downloading
+the model to one community runner does not provision the A5 pods or the separate
+40-array golden bundle; both must be verified on the actual CI mounts.
+
+**Provisioning blocker:** the community checkpoint was regenerated on November
+21 and retains source shard filenames (for example `00001-of-00193`), whereas
+the November 2 golden checkpoint numbered its 50 output shards consecutively.
+Their index SHA256 hashes differ. A name/order reconstruction has not established
+index identity. The existing identity gate intentionally rejects that community
+index; do not bypass it or relabel the historical golden as validated on this
+checkpoint. Before merging/enabling these cases, establish tensor equivalence
+and review the identity update, or independently validate and review a new
+per-configuration golden bundle for the community checkpoint. Current-main
+service execution also remains unverified on A5 hardware.
 
 For a standalone two-host reproduction in prepared NPU containers, copy one
 case YAML, set its existing model path and `cluster_hosts: [P_IP, D_IP]`, and run
@@ -41,9 +69,10 @@ Both nodes run the same command with their own index. The leader checks every
 worker's effective MRV2/PP/PCP/TP/DP, MegaMoE, FlashComm1, LIC8 and SFAC8 state,
 then makes real P-to-D KV handoffs. Transfer failure is fatal; local recomputation
 must not substitute for the PD path. An HTTP artifact endpoint retrieves D-side
-captures even without a shared filesystem. The leader returns the test outcome
+captures even without a shared filesystem. Four lengths rotate through all four
+external D endpoints. The leader returns the test outcome
 to D; missing completion, startup failure and timeouts fail the test. Only the
-server process group created by the runner is stopped.
+server processes created by the common launcher are stopped.
 
 Reports, effective config, raw arrays and server logs are written beneath
 `LOG_PREFIX/glm53_logits/<case>/<role>/<run-id>`. Pytest propagates failure into
@@ -92,11 +121,10 @@ Python sources overlaid an existing image; native extensions came from that
 image. Image ID and package versions are recorded in the manifest. They are not
 measurements of a fresh complete build of today's main.
 
-The paired main left `fp8` mapped to `torch.uint8` even though the registration
-API existed, causing MRV2 C8 scale-cache initialization to fail. The captures
-used the narrow fallback included in this PR: change only an unregistered
-raw-byte FP8 mapping to native FP8, preserving an existing native/custom handler.
-Candidate runs use their installed runtime; the harness does not rewrite it.
+The historical captures used a temporary FP8 mapping fallback. That obsolete
+runtime patch is not part of this PR against current main. Candidate runs use
+their installed runtime; the harness does not rewrite it. The new standard
+service launch path still requires an actual A5 CI hardware run.
 
 The five source experiments completed real PD inference. Differences between
 on/off configurations are intentionally not nightly pass/fail criteria.

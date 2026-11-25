@@ -15,6 +15,7 @@
 #
 
 import importlib
+from collections.abc import Mapping
 from typing import Any
 
 backend_map: dict[str, dict[str, str]] = {
@@ -35,7 +36,17 @@ backend_map: dict[str, dict[str, str]] = {
 
 def get_backend_class(backend_name: str) -> type[Any] | None:
     """Resolve a backend without constructing its store client."""
-    backend = backend_map.get(backend_name.strip().lower())
+    return _load_backend_class(backend_name.strip().lower())
+
+
+def resolve_backend(extra_config: Mapping[str, Any]) -> tuple[str, type[Any] | None]:
+    """Resolve the configured name and class, preserving strict whitespace validation."""
+    backend_name = str(extra_config.get("backend", "mooncake")).lower()
+    return backend_name, _load_backend_class(backend_name)
+
+
+def _load_backend_class(backend_name: str) -> type[Any] | None:
+    backend = backend_map.get(backend_name)
     if backend is None:
         return None
     return getattr(importlib.import_module(backend["path"]), backend["name"])

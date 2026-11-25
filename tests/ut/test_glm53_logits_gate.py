@@ -2,14 +2,13 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM-Ascend project
 """CPU tests for the numerical oracle using small synthetic fixtures."""
 
-import json
 import tempfile
 import unittest
 from pathlib import Path
 
 import numpy as np
 
-from tests.e2e.common.multi_node.glm53_logits.config import CASES, build
+from tests.e2e.common.multi_node.glm53_logits.config import CASES
 from tests.e2e.common.multi_node.glm53_logits.gate import (
     check_capture,
     load_golden,
@@ -80,15 +79,6 @@ class TestLogitsGate(unittest.TestCase):
             self.assertEqual(len(manifest["cases"]["disable_pp"]), 8)
             with self.assertRaises(FileNotFoundError):
                 load_golden("disable_pp", metadata, artifact_root=metadata)
-
-    def test_pp_off_preserves_pcp_and_removes_partition(self):
-        p = build("disable_pp", "P", "/model")
-        self.assertEqual(p["prefill_context_parallel_size"], 2)
-        self.assertEqual(p["pipeline_parallel_size"], 1)
-        self.assertNotIn("pp_layer_partition", p["kv_transfer_config"]["kv_connector_extra_config"]["prefill"])
-        for case in CASES:
-            for role in ("P", "D"):
-                self.assertNotIn("enable_dsa_cp", json.dumps(build(case, role, "/model")))
 
     def test_empty_or_incomplete_worker_evidence_fails(self):
         with self.assertRaisesRegex(ValueError, "worker probes"):

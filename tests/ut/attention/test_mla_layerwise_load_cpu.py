@@ -74,7 +74,6 @@ def make_forward(path, batch, wait):
         # A 3076-token prompt with 3072 cached tokens is still prefilling,
         # but its four scheduled rows use the decode path at spec=3.
         common = SimpleNamespace(
-            context_parallel_metadata=None,
             num_reqs=1,
             num_actual_tokens=4,
             max_query_len=4,

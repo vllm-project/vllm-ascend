@@ -568,8 +568,11 @@ def _merge_mamba_state_groups(
     for members in buckets.values():
         first = members[0][0]
         drop.update(index for index, _, _ in members)
-        for start in range(0, len(members), slot_count):
-            chunk = members[start : start + slot_count]
+        # Interleave layers in model order while keeping each group within the slot limit.
+        members.sort(key=lambda member: _owner_sort_key(member[1]))
+        num_groups = cdiv(len(members), slot_count)
+        for i in range(num_groups):
+            chunk = members[i::num_groups]
             specs = {name: spec for _, name, spec in chunk}
             uniform = UniformTypeKVCacheSpecs.from_specs(specs)
             assert uniform is not None
@@ -602,21 +605,6 @@ def get_qwen4_exp_pool_bytes_per_block(
         return None
     private_bytes = sum(_private_page_bytes(owner) for owner in layout.owners if owner.role in (HIDDEN, PLE))
     return layout.slot_count * layout.slot_backing_size + private_bytes
-
-
-def get_qwen4_exp_max_memory_usage(
-    vllm_config: VllmConfig,
-    kv_cache_groups: list[KVCacheGroupSpec],
-) -> int | None:
-    """Use the allocation divisor for admission across all group lifetimes."""
-    bytes_per_block = get_qwen4_exp_pool_bytes_per_block(kv_cache_groups)
-    if bytes_per_block is None:
-        return None
-    required_blocks = sum(
-        cdiv(group.kv_cache_spec.max_memory_usage_bytes(vllm_config), group.kv_cache_spec.page_size_bytes)
-        for group in kv_cache_groups
-    )
-    return required_blocks * bytes_per_block
 
 
 def get_qwen4_exp_kv_cache_groups(

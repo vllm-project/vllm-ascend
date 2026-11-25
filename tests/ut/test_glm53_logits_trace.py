@@ -6,7 +6,7 @@ import unittest
 
 import torch
 
-from tests.e2e.common.multi_node.glm53_logits.trace_processor import mask_trace_logits
+from tests.e2e.common.multi_node.glm53_logits.trace_utils import mask_trace_logits
 
 
 class TestTraceProcessor(unittest.TestCase):
