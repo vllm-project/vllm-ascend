@@ -2,7 +2,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from collections.abc import Callable
 from contextlib import contextmanager
 from typing import Any, cast
 
@@ -21,7 +20,6 @@ from vllm_ascend.attention.attention_v1 import AscendAttentionBackend
 from vllm_ascend.ops.triton.spec_decode.prepare_dflash_inputs import prepare_dflash_inputs_triton
 from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2.attn_utils import build_attn_metadata_wrapper
-from vllm_ascend.worker.v2.pcp_manager import AscendPCPManager
 from vllm_ascend.worker.v2.spec_decode.lmhead_tp_utils import LmheadTPDraftSamplingMixin
 from vllm_ascend.worker.v2.spec_decode.pcp_utils import prepare_replicated_draft_profile_inputs
 
@@ -39,185 +37,67 @@ def draft_metadata_request_count(speculator: Any, num_reqs: int):
         speculator._draft_metadata_num_reqs = previous
 
 
-def prepare_dflash_inputs_factory(
-    kv_cache_block_size: int,
-    block_tables: Any | None = None,
-) -> Callable[..., None]:
-    # vLLM main (#57169) dropped ``kernel_block_sizes`` from ``BlockTables``
-    # and the DFlash caller now forwards ``BlockTables.block_sizes`` (physical
-    # KV blocks) as ``block_size``, while ``AscendBlockTables`` keeps the block
-    # table kernel-block addressed (a physical block is re-expanded into
-    # ``blocks_per_kv_block`` kernel rows) and the Ascend prep indexes it at
-    # kernel granularity. DCP ownership still uses the physical size, so only
-    # ``block_size`` is restored, per group.
-    kernel_block_sizes = getattr(block_tables, "kernel_block_sizes", None)
-    input_block_tables = getattr(block_tables, "input_block_tables", None)
-    if block_tables is not None and (kernel_block_sizes is None or input_block_tables is None):
-        raise RuntimeError(
-            "DFlash on vLLM main needs AscendBlockTables.kernel_block_sizes and "
-            "input_block_tables to restore the kernel block size"
-        )
-    # The upstream caller passes ``input_block_tables[gid]`` verbatim, so the
-    # per-group kernel block size is looked up by tensor identity. Callers
-    # that do not supply Ascend block tables keep the physical size forwarded
-    # by the DFlash caller.
-    kernel_block_size_by_table = (
-        {id(table): int(size) for table, size in zip(input_block_tables, kernel_block_sizes)}
-        if kernel_block_sizes is not None and input_block_tables is not None
-        else {}
+def install_ascend_dflash_input_preparation() -> None:
+    # DFlash and DSpark share the input-preparation symbol in the upstream module.
+    if vllm_version_is("0.34.0"):
+        dflash_speculator.prepare_dflash_inputs = prepare_dflash_inputs_triton
+    else:
+        dflash_speculator.prepare_dflash_inputs = _prepare_dflash_inputs_with_block_stride
+
+
+def _prepare_dflash_inputs_with_block_stride(
+    input_buffers: InputBuffers,
+    query_slot_mapping: torch.Tensor,
+    context_positions: torch.Tensor,
+    context_slot_mapping: torch.Tensor,
+    sample_indices: torch.Tensor,
+    sample_pos: torch.Tensor,
+    sample_idx_mapping: torch.Tensor,
+    temperature: torch.Tensor,
+    seeds: torch.Tensor,
+    input_batch: InputBatch,
+    num_sampled: torch.Tensor,
+    num_rejected: torch.Tensor,
+    last_sampled: torch.Tensor,
+    next_prefill_tokens: torch.Tensor,
+    input_temperature: torch.Tensor,
+    input_seeds: torch.Tensor,
+    block_table: torch.Tensor,
+    block_size: int,
+    block_stride: int,
+    *args: Any,
+    **kwargs: Any,
+) -> None:
+    # Upstream main passes block_stride between block_size and cp_rank.
+    prepare_dflash_inputs_triton(
+        input_buffers,
+        query_slot_mapping,
+        context_positions,
+        context_slot_mapping,
+        sample_indices,
+        sample_pos,
+        sample_idx_mapping,
+        temperature,
+        seeds,
+        input_batch,
+        num_sampled,
+        num_rejected,
+        last_sampled,
+        next_prefill_tokens,
+        input_temperature,
+        input_seeds,
+        block_table,
+        block_size,
+        *args,
+        block_stride=block_stride,
+        **kwargs,
     )
-
-    def prepare_with_block_stride(
-        input_buffers: InputBuffers,
-        query_slot_mapping: torch.Tensor,
-        context_positions: torch.Tensor,
-        context_slot_mapping: torch.Tensor,
-        sample_indices: torch.Tensor,
-        sample_pos: torch.Tensor,
-        sample_idx_mapping: torch.Tensor,
-        temperature: torch.Tensor,
-        seeds: torch.Tensor,
-        input_batch: InputBatch,
-        num_sampled: torch.Tensor,
-        num_rejected: torch.Tensor,
-        last_sampled: torch.Tensor,
-        next_prefill_tokens: torch.Tensor,
-        input_temperature: torch.Tensor,
-        input_seeds: torch.Tensor,
-        block_table: torch.Tensor,
-        block_size: int,
-        block_stride: int | None,
-        cp_rank: int,
-        cp_size: int,
-        cp_interleave: int,
-        parallel_drafting_token_id: int,
-        num_query_per_req: int,
-        num_speculative_steps: int,
-        max_num_reqs: int,
-        max_num_tokens: int,
-        max_model_len: int,
-        sample_from_anchor: bool = False,
-        num_reqs_override: int | None = None,
-    ) -> None:
-        # vLLM #66604 adds manager-block stride after block_size. Ascend's
-        # table already contains expanded kernel-page IDs, so block_stride is
-        # unused here; keep restoring the per-table kernel block size instead.
-        kernel_block_size = kernel_block_size_by_table.get(id(block_table))
-        if kernel_block_size is None:
-            if kernel_block_size_by_table:
-                raise RuntimeError("DFlash received a block table unknown to AscendBlockTables")
-            # No Ascend block tables were supplied; keep the caller's size.
-            kernel_block_size = block_size
-        prepare_dflash_inputs(
-            input_buffers,
-            query_slot_mapping,
-            context_positions,
-            context_slot_mapping,
-            sample_indices,
-            sample_pos,
-            sample_idx_mapping,
-            temperature,
-            seeds,
-            input_batch,
-            num_sampled,
-            num_rejected,
-            last_sampled,
-            next_prefill_tokens,
-            input_temperature,
-            input_seeds,
-            block_table,
-            kernel_block_size,
-            cp_rank,
-            cp_size,
-            cp_interleave,
-            parallel_drafting_token_id,
-            num_query_per_req,
-            num_speculative_steps,
-            max_num_reqs,
-            max_num_tokens,
-            max_model_len,
-            sample_from_anchor,
-            num_reqs_override=num_reqs_override,
-            kv_cache_block_size=kv_cache_block_size,
-        )
-
-    if vllm_version_is("0.33.0"):
-
-        def prepare_with_block_size(
-            input_buffers: InputBuffers,
-            query_slot_mapping: torch.Tensor,
-            context_positions: torch.Tensor,
-            context_slot_mapping: torch.Tensor,
-            sample_indices: torch.Tensor,
-            sample_pos: torch.Tensor,
-            sample_idx_mapping: torch.Tensor,
-            temperature: torch.Tensor,
-            seeds: torch.Tensor,
-            input_batch: InputBatch,
-            num_sampled: torch.Tensor,
-            num_rejected: torch.Tensor,
-            last_sampled: torch.Tensor,
-            next_prefill_tokens: torch.Tensor,
-            input_temperature: torch.Tensor,
-            input_seeds: torch.Tensor,
-            block_table: torch.Tensor,
-            block_size: int,
-            cp_rank: int,
-            cp_size: int,
-            cp_interleave: int,
-            parallel_drafting_token_id: int,
-            num_query_per_req: int,
-            num_speculative_steps: int,
-            max_num_reqs: int,
-            max_num_tokens: int,
-            max_model_len: int,
-            sample_from_anchor: bool = False,
-            num_reqs_override: int | None = None,
-        ) -> None:
-            prepare_with_block_stride(
-                input_buffers=input_buffers,
-                query_slot_mapping=query_slot_mapping,
-                context_positions=context_positions,
-                context_slot_mapping=context_slot_mapping,
-                sample_indices=sample_indices,
-                sample_pos=sample_pos,
-                sample_idx_mapping=sample_idx_mapping,
-                temperature=temperature,
-                seeds=seeds,
-                input_batch=input_batch,
-                num_sampled=num_sampled,
-                num_rejected=num_rejected,
-                last_sampled=last_sampled,
-                next_prefill_tokens=next_prefill_tokens,
-                input_temperature=input_temperature,
-                input_seeds=input_seeds,
-                block_table=block_table,
-                block_size=block_size,
-                block_stride=None,
-                cp_rank=cp_rank,
-                cp_size=cp_size,
-                cp_interleave=cp_interleave,
-                parallel_drafting_token_id=parallel_drafting_token_id,
-                num_query_per_req=num_query_per_req,
-                num_speculative_steps=num_speculative_steps,
-                max_num_reqs=max_num_reqs,
-                max_num_tokens=max_num_tokens,
-                max_model_len=max_model_len,
-                sample_from_anchor=sample_from_anchor,
-                num_reqs_override=num_reqs_override,
-            )
-
-        return prepare_with_block_size
-
-    return prepare_with_block_stride
 
 
 class AscendDFlashSpeculator(LmheadTPDraftSamplingMixin, DFlashSpeculator):
-    if not vllm_version_is("0.33.0"):
-
-        def supports_batch_sharded_draft_logits(self) -> bool:
-            # NPU draft-logits kernels index the cache by request state.
-            return False
+    def supports_batch_sharded_draft_logits(self) -> bool:
+        # NPU draft-logits kernels index the cache by request state.
+        return False
 
     @draft_config_context()
     def load_draft_model(
@@ -337,10 +217,7 @@ class AscendDFlashSpeculator(LmheadTPDraftSamplingMixin, DFlashSpeculator):
                 attn_backends[layer_name] = attn_layers[layer_name].get_attn_backend()
 
         self.attn_backends = attn_backends
-        dflash_speculator.prepare_dflash_inputs = prepare_dflash_inputs_factory(  # type: ignore[call-arg]
-            self.vllm_config.cache_config.block_size,
-            block_tables,
-        )
+        install_ascend_dflash_input_preparation()
 
     def propose(
         self,
@@ -405,76 +282,4 @@ class AscendDFlashSpeculator(LmheadTPDraftSamplingMixin, DFlashSpeculator):
                 is_profile=is_profile,
                 num_speculative_tokens=num_speculative_tokens,
             )
-        # vLLM 0.33.0 needs this call; newer runners synchronize after
-        # propose(). Never communicate during dummy runs.
-        if vllm_version_is("0.33.0") and self.pcp_manager is not None and not dummy_run:
-            assert isinstance(self.pcp_manager, AscendPCPManager)
-            self.pcp_manager.sync_drafts(draft_tokens, input_batch.idx_mapping, self.draft_logits)
         return draft_tokens
-
-
-def prepare_dflash_inputs(
-    input_buffers: InputBuffers,
-    query_slot_mapping: torch.Tensor,
-    context_positions: torch.Tensor,
-    context_slot_mapping: torch.Tensor,
-    sample_indices: torch.Tensor,
-    sample_pos: torch.Tensor,
-    sample_idx_mapping: torch.Tensor,
-    temperature: torch.Tensor,
-    seeds: torch.Tensor,
-    input_batch: InputBatch,
-    num_sampled: torch.Tensor,
-    num_rejected: torch.Tensor,
-    last_sampled: torch.Tensor,
-    next_prefill_tokens: torch.Tensor,
-    input_temperature: torch.Tensor,
-    input_seeds: torch.Tensor,
-    block_table: torch.Tensor,
-    block_size: int,
-    cp_rank: int,
-    cp_size: int,
-    cp_interleave: int,
-    parallel_drafting_token_id: int,
-    num_query_per_req: int,
-    num_speculative_steps: int,
-    max_num_reqs: int,
-    max_num_tokens: int,
-    max_model_len: int,
-    sample_from_anchor: bool = False,
-    num_reqs_override: int | None = None,
-    *,
-    kv_cache_block_size: int,
-) -> None:
-    prepare_dflash_inputs_triton(
-        input_buffers,
-        query_slot_mapping,
-        context_positions,
-        context_slot_mapping,
-        sample_indices,
-        sample_pos,
-        sample_idx_mapping,
-        temperature,
-        seeds,
-        input_batch,
-        num_sampled,
-        num_rejected,
-        last_sampled,
-        next_prefill_tokens,
-        input_temperature,
-        input_seeds,
-        block_table,
-        block_size,
-        cp_rank,
-        cp_size,
-        cp_interleave,
-        parallel_drafting_token_id,
-        num_query_per_req,
-        num_speculative_steps,
-        max_num_reqs,
-        max_num_tokens,
-        max_model_len,
-        sample_from_anchor,
-        num_reqs_override=num_reqs_override,
-        kv_cache_block_size=kv_cache_block_size,
-    )

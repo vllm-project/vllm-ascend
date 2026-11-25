@@ -28,6 +28,7 @@ from vllm.v1.attention.backend import AttentionBackend
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID
 
+from vllm_ascend.attention.gdn_attn_builder import AscendGDNHostMetadataBackend, AscendGDNHostMetadataBuilder
 from vllm_ascend.attention.utils import (
     maybe_save_kv_layer_to_connector,
     wait_for_kv_layer_from_connector,
@@ -36,7 +37,6 @@ from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence import (
     record_attention_compute_start,
 )
-from vllm_ascend.ops.gdn_attn_builder import AscendGDNHostMetadataBackend, AscendGDNHostMetadataBuilder
 from vllm_ascend.ops.head_parallel import (
     HeadParallelColumnLinear,
     HeadParallelMergedColumnLinear,
@@ -55,7 +55,7 @@ from vllm_ascend.quantization.methods.w8a8.w8a8_mxfp8 import (
     AscendW8A8MXFP8DynamicLinearMethod,
 )
 from vllm_ascend.quantization.prepared_linear_input import PreparedLinearInput
-from vllm_ascend.utils import npu_stream_switch, vllm_version_is
+from vllm_ascend.utils import npu_stream_switch
 
 _PACKED_CONV_WEIGHT_NAME = "ascend_conv1d_weight"
 _F_PROJ_SHARD_ID = 1
@@ -335,9 +335,6 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
         )
         self.in_proj_padding = -local_output_size % alignment
         output_sizes = [self.projection_size] * 4 + [self.head_dim, self.num_heads]
-        # Main's merged layer owns padding allocation after vLLM #66784.
-        if self.in_proj_padding and vllm_version_is("0.33.0"):
-            output_sizes.append(self.in_proj_padding * self.tp_size)
         self.in_proj_qkvgfab = KimiKDAInputParallelLinear(
             self.hidden_size,
             output_sizes,

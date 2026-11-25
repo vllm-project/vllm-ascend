@@ -66,9 +66,9 @@
 /examples/rfork/ @yangsonglin13
 
 # c++ source code
-/cmake @zzzzwwjj @ZT-AIA
-/csrc @zzzzwwjj @ZT-AIA
-/CMakeLists.txt @zzzzwwjj @ZT-AIA
+/cmake @ZT-AIA
+/csrc @ZT-AIA
+/CMakeLists.txt @ZT-AIA
 /vllm_ascend/_cann_ops_custom @ZT-AIA
 
 # attention
@@ -94,7 +94,7 @@
 /vllm_ascend/compilation @yiz-liu @wxsIcey
 
 # device / device_allocator
-/vllm_ascend/device @zzzzwwjj
+/vllm_ascend/device @zzzzwwjj @Tflowers-0129
 /vllm_ascend/device_allocator @weijinqian0 @Ronald1995
 
 # distributed
@@ -114,7 +114,7 @@
 
 # ops
 /vllm_ascend/ops @zzzzwwjj
-/vllm_ascend/ops/dsa.py @zzzzwwjj @lcfenglinwan @GDzhu01 @linfeng-yuan
+/vllm_ascend/ops/dsa.py @lcfenglinwan @GDzhu01 @linfeng-yuan
 /vllm_ascend/ops/linear_op.py @xuchi-0808
 /vllm_ascend/ops/vocab_parallel_embedding.py @xuchi-0808
 /vllm_ascend/ops/triton @ShyRa1n @ZT-AIA @yiz-liu
@@ -234,7 +234,7 @@
 /vllm_ascend/xlite @lulina @SijieFu
 
 # release_notes
-/release_notes/ @wangxiyuan
+/release_notes/ @wangxiyuan @zhenwenqi2024 @weijinqian0
 
 # recipes
 /recipes/ @SOMEONEUNSEEN

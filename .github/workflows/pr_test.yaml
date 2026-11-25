@@ -244,6 +244,9 @@ jobs:
               - '.github/workflows/scripts/test_config.yaml'
               - '.github/workflows/scripts/runner_label.json'
               - '.github/workflows/scripts/coverage.py'
+              - 'requirements.txt'
+              - 'requirements-dev.txt'
+              - 'pyproject.toml'
             # Files that can affect CPU UT execution but are covered by neither
             # src nor ci_pipeline: everything tests/ut reads from disk, not only
             # what it imports from under tests/. That includes shared tests/
@@ -269,7 +272,7 @@ jobs:
       - name: Install vllm-ascend dev (conditional)
         if: steps.filter.outputs.lint_tracker == 'true'
         env:
-          UV_EXTRA_INDEX_URL: "https://mirrors.huaweicloud.com/ascend/repos/pypi https://mirrors.huaweicloud.com/ascend/repos/pypi/nightly https://download.pytorch.org/whl/cpu"
+          UV_EXTRA_INDEX_URL: "https://repo.huaweicloud.com/ascend/repos/pypi https://repo.huaweicloud.com/ascend/repos/pypi/nightly https://download.pytorch.org/whl/cpu"
           UV_INDEX_STRATEGY: unsafe-best-match
           UV_NO_CACHE: 1
           UV_SYSTEM_PYTHON: 1

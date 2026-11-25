@@ -167,6 +167,7 @@ def worker(monkeypatch, request):
         self.kv_transfer_config = SimpleNamespace(
             is_kv_producer=True, get_from_extra_config=lambda name, default: default
         )
+        self.vllm_config.kv_transfer_config = self.kv_transfer_config
         self.ascend_config = SimpleNamespace(kvpp_config=SimpleNamespace(size=1))
         self.kvpp_layer_owners = {}
         self.transfer_metadata = descriptor()
@@ -608,7 +609,10 @@ def test_kvpp_push_writes_every_decode_replica_and_deduplicates_mtp(monkeypatch)
         self.dcp_size = config.parallel_config.decode_context_parallel_size
         self.dcp_rank = 0
         self.ascend_config = SimpleNamespace(kvpp_config=KVPPConfig.from_vllm_config(config))
-        self.kv_transfer_config = SimpleNamespace(is_kv_producer=engine_id == "p")
+        self.kv_transfer_config = SimpleNamespace(
+            is_kv_producer=engine_id == "p", get_from_extra_config=lambda name, default: default
+        )
+        self.vllm_config.kv_transfer_config = self.kv_transfer_config
         self.block_size, self.side_channel_host, self.handshake_port = 2, "127.0.0.1", 0
         self.te_rpc_port = 1
 

@@ -41,6 +41,31 @@ does not necessarily mean host device `0`. Container device mounts can further
 restrict or remap devices; use IDs available inside the container. Neither
 setting exposes devices that the container has not been granted.
 
+## Device probing in the engine core
+
+vLLM resolves the model architecture while it builds the engine configuration,
+before any worker binds an NPU. That import path probes every *visible* device,
+and the NPU runtime creates a context for each probed chip. A launch that reaches
+vLLM through its command line is normalized by vLLM Ascend: the visible set is
+narrowed to the chips named by `--device-ids` before the model is imported, so no
+other chip is initialized.
+
+The Python API has no equivalent hook. When you construct `LLM(...)` or
+`EngineArgs(...)` yourself, express the selection through the visible set instead
+of a wider set plus `device_ids`. Set the variable before importing `vllm` or
+`torch_npu`; `device_ids` can then be omitted, or set to the contiguous indices
+`0..N-1`:
+
+```python
+import os
+
+os.environ["ASCEND_RT_VISIBLE_DEVICES"] = "5"
+
+from vllm import LLM
+
+llm = LLM(model="Qwen/Qwen3-8B")
+```
+
 ## Tensor parallelism
 
 Select two non-contiguous devices without a visibility override:

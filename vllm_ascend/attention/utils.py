@@ -36,7 +36,6 @@ from vllm_ascend.utils import (
     _is_glm_model,
     get_ascend_config,
     is_pd_decode_recompute_scheduler_enabled,
-    vllm_version_is,
 )
 
 if TYPE_CHECKING:
@@ -139,6 +138,31 @@ def get_flashmla_ops() -> tuple[Callable, Callable] | None:
 
     attention_op = getattr(ops, "flash_mla", None)
     metadata_op = getattr(ops, "flash_mla_metadata", None)
+    if callable(attention_op) and callable(metadata_op):
+        return attention_op, metadata_op
+    return None
+
+
+def get_quant_flashmla_ops() -> tuple[Callable, Callable] | None:
+    """Find the two full-quant FlashMLA APIs in ops-transformer.
+
+    QuantFlashMLA is delivered independently from the floating-point operator,
+    so backend selection must test its own attention and device-metadata APIs.
+    Keep import failures from an installed package visible for the same reason
+    as :func:`get_flashmla_ops`.
+    """
+    if not _has_flashmla_module():
+        return None
+
+    try:
+        ops = import_module("cann_ops_transformer.ops")
+    except ModuleNotFoundError as exc:
+        if exc.name in ("cann_ops_transformer", "cann_ops_transformer.ops"):
+            return None
+        raise
+
+    attention_op = getattr(ops, "quant_flash_mla", None)
+    metadata_op = getattr(ops, "quant_flash_mla_metadata", None)
     if callable(attention_op) and callable(metadata_op):
         return attention_op, metadata_op
     return None
@@ -745,11 +769,7 @@ def _select_seq_lens(
         seq_lens = common_attn_metadata.seq_lens
     if speculative_config is not None:
         # vLLM #63373 moved this capability off the deprecated legacy field.
-        parallel_drafting = (
-            speculative_config.parallel_drafting
-            if vllm_version_is("0.33.0")
-            else speculative_config.speculator_config.parallel_drafting
-        )
+        parallel_drafting = speculative_config.speculator_config.parallel_drafting
         # PARD / DFlash (and DSpark on other models) keep the NPU seq_lens;
         # only DSpark on the GLM5.2 family keeps the CPU mirror above.
         if parallel_drafting and not (speculative_config.use_dspark() and _is_glm_model(model_config)):
