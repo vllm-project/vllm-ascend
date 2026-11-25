@@ -134,7 +134,7 @@ Automatic discovery requires HIXL 9.1.0 or later. Check the prerequisites for yo
 export ASCEND_LOCAL_COMM_RES='{"version":"1.3"}'
 ```
 
-For the default UB super plane, this setting is sufficient. On supported A5 systems, HIXL also selects the scale-out protocol (UBG or UBoE) from the hardware interconnect type. For automatic selection, leave `HCCL_INTRA_ROCE_ENABLE` unset and omit `comm_resource_config.protocol_desc` from `ASCEND_GLOBAL_RESOURCE_CONFIG`.
+For the default UB super plane, this setting is sufficient. On supported 950PR&950DT Products, such as Atlas 850E/850, HIXL also selects the scale-out protocol (UBG or UBoE) from the hardware interconnect type. For automatic selection, leave `HCCL_INTRA_ROCE_ENABLE` unset and omit `comm_resource_config.protocol_desc` from `ASCEND_GLOBAL_RESOURCE_CONFIG`.
 
 To restrict P/D traffic to a specific protocol, set the matching value on both sides.
 
