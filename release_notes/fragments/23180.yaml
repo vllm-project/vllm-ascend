@@ -1,0 +1,4 @@
+pr: 23180
+entries:
+  - category: bugfix
+    text: Bulk KV pooling now keeps sliding-window KV blocks available until all workers finish saving them during chunked prefill.
