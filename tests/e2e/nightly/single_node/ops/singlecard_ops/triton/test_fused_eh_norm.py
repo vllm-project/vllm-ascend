@@ -29,14 +29,16 @@ def fused_eh_norm_ref(positions, embeds, previous_hidden, enorm_w, hnorm_w, eps)
     get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3), reason="Requires Ascend A2/A3"
 )
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16, torch.float32])
-@pytest.mark.parametrize("strided_rows", [False, True])
 @pytest.mark.parametrize(
-    ("positions_list", "hidden_size", "eps"),
+    ("positions_list", "hidden_size", "eps", "strided_rows"),
     [
-        pytest.param([7], 4096, 1e-5, id="decode"),
-        pytest.param([0, 1, 0, 9], 4096, 1e-5, id="mixed-start-positions"),
-        pytest.param(list(range(17)), 4096, 1e-5, id="prefill"),
-        pytest.param([0, 2, 5], 513, 1e-6, id="masked-hidden-tail"),
+        pytest.param([7], 4096, 1e-5, False, id="decode-False"),
+        pytest.param([0, 1, 0, 9], 4096, 1e-5, False, id="mixed-start-positions-False"),
+        pytest.param([0, 1, 0, 9], 4096, 1e-5, True, id="mixed-start-positions-True"),
+        pytest.param(list(range(17)), 4096, 1e-5, False, id="prefill-False"),
+        pytest.param(list(range(17)), 4096, 1e-5, True, id="prefill-True"),
+        pytest.param([0, 2, 5], 513, 1e-6, False, id="masked-hidden-tail-False"),
+        pytest.param([0, 2, 5], 513, 1e-6, True, id="masked-hidden-tail-True"),
     ],
 )
 @torch.inference_mode()

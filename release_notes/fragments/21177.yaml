@@ -1,0 +1,7 @@
+pr: 21177
+entries:
+  - category: performance
+    text: >-
+      DeepSeek V4.1 can project each tensor-parallel rank's local token shard before
+      all-gather to reduce repeated attention input projections during prefill.
+      Enable this path with dsv41_projected_sp in --additional-config.

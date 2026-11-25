@@ -155,11 +155,7 @@ class AscendW8A8DynamicFusedMoEMethod(AscendMoEScheme):
 
     def __init__(self):
         vllm_config = get_current_vllm_config()
-        ascend_config = get_ascend_config()
-        self.dynamic_eplb = False if vllm_config.use_v2_model_runner else ascend_config.eplb_config.dynamic_eplb
-        self.use_expert_weight_list = self.dynamic_eplb or (
-            vllm_config.use_v2_model_runner is True and vllm_config.parallel_config.enable_eplb is True
-        )
+        self.use_expert_weight_list = vllm_config.parallel_config.enable_eplb is True
         self.in_dtype = vllm_config.model_config.dtype
         try:
             device_group = get_mc2_group().device_group
@@ -367,6 +363,8 @@ class AscendW8A8DynamicFusedMoEMethod(AscendMoEScheme):
         use_mega_moe = is_fused_mc2 and _EXTRA_CTX.use_mega_moe
         if self.use_expert_weight_list:
             if use_mega_moe:
+                shared_fusion = getattr(layer, "ascend_megamoe_shared_fusion", None)
+                shared = shared_fusion.weights if shared_fusion is not None else None
                 return MoEWeights(
                     w1=layer.w13_weight_list,
                     w2=layer.w2_weight_list,
@@ -374,6 +372,10 @@ class AscendW8A8DynamicFusedMoEMethod(AscendMoEScheme):
                     w2_scale=[scale.reshape(-1) for scale in layer.fused_w2_scale_list],
                     w1_scale_bias=None,
                     w2_scale_bias=None,
+                    shared_w1=shared.w1 if shared else None,
+                    shared_w2=shared.w2 if shared else None,
+                    shared_w1_scale=shared.w1_scale if shared else None,
+                    shared_w2_scale=shared.w2_scale if shared else None,
                 )
             else:
                 return MoEWeights(
@@ -385,6 +387,13 @@ class AscendW8A8DynamicFusedMoEMethod(AscendMoEScheme):
                     w2_scale_bias=layer.fused_w2_scale_bias if fused_scale_flag else None,
                 )
         elif use_mega_moe:
+            # MegaMoe shared-expert fusion (enable_fused_mc2=3): forward the
+            # shared weights rebuilt by the shared-expert executor so the
+            # operator computes routed + shared together. Without them the
+            # operator runs routed experts only while the runner skips the
+            # separate shared forward, silently dropping the shared GMM.
+            shared_fusion = getattr(layer, "ascend_megamoe_shared_fusion", None)
+            shared = shared_fusion.weights if shared_fusion is not None else None
             return MoEWeights(
                 w1=layer.cann_mega_moe_w13_weight_list,
                 w2=layer.cann_mega_moe_w2_weight_list,
@@ -392,6 +401,10 @@ class AscendW8A8DynamicFusedMoEMethod(AscendMoEScheme):
                 w2_scale=layer.cann_mega_moe_fused_w2_scale_list,
                 w1_scale_bias=None,
                 w2_scale_bias=None,
+                shared_w1=shared.w1 if shared else None,
+                shared_w2=shared.w2 if shared else None,
+                shared_w1_scale=shared.w1_scale if shared else None,
+                shared_w2_scale=shared.w2_scale if shared else None,
             )
         return MoEWeights(
             w1=[layer.w13_weight],

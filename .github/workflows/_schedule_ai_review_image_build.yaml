@@ -1,0 +1,61 @@
+name: 'Image build ai-review'
+on:
+  # No daily schedule: the image only carries Node + the dsh CLI and
+  # changes deliberately, not on a clock. Editing the Dockerfile triggers a
+  # rebuild; this workflow can also be dispatched manually.
+  workflow_dispatch:
+  push:
+    paths:
+      - '.github/workflows/dockerfiles/Dockerfile.ai-review'
+
+# only cancel in-progress runs of the same workflow
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+
+  build:
+    name: vllm-ascend ai-review image build
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v7
+      with:
+        fetch-depth: 0
+        persist-credentials: false
+
+    - name: Docker meta
+      id: meta
+      uses: docker/metadata-action@v6
+      with:
+        images: |
+          quay.io/ascend-ci/vllm-ascend
+        tags: ai-review
+        flavor:
+          latest=false
+
+    - name: Build - Set up QEMU
+      uses: docker/setup-qemu-action@v4
+
+    - name: Build - Set up Docker Buildx
+      uses: docker/setup-buildx-action@v4
+
+    - name: Publish - Login to Quay Container Registry
+      if: ${{ github.repository_owner == 'vllm-project' }}
+      uses: docker/login-action@v4
+      with:
+        registry: quay.io
+        username: ${{ vars.QUAY_CI_USERNAME }}
+        password: ${{ secrets.QUAY_CI_PASSWORD }}
+
+    - name: Build and push
+      uses: docker/build-push-action@v7
+      with:
+        # ai-review only runs on the amd64 CPU pool
+        platforms: 'linux/amd64'
+        context: .
+        file: .github/workflows/dockerfiles/Dockerfile.ai-review
+        push: true
+        labels: ${{ steps.meta.outputs.labels }}
+        tags: ${{ steps.meta.outputs.tags }}
+        provenance: false

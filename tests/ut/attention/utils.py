@@ -21,6 +21,20 @@ from vllm.v1.kv_cache_interface import FullAttentionSpec
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
 
 
+def _update_out_and_lse(out_list: torch.Tensor, lse_list: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    """LSE_final = log(sum(exp(LSE_i))), O_final = sum(exp(LSE_i - LSE_final) * O_i)
+    Args:
+        out_list: shape = [N, batch_size, num_heads, head_size]
+        lse_list: shape = [N, batch_size, num_heads, 1]
+    Returns:
+        out_final: shape = [batch_size, num_heads, head_size]
+        lse_final: shape = [batch_size, num_heads, 1]
+    """
+    lse_final = torch.logsumexp(lse_list, dim=0, keepdim=False)
+    out_final = torch.sum(torch.exp(lse_list - lse_final) * out_list, dim=0)
+    return out_final, lse_final
+
+
 def patch_distributed_groups(dcp_size=1, dcp_rank=0, needs_mocks=True):
     """
     Decorator to patch common distributed group mocks with configuration

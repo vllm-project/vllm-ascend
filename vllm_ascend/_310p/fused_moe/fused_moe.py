@@ -140,8 +140,8 @@ class AscendUnquantizedFusedMoEMethod310(UnquantizedFusedMoEMethod):
 
 
 class AscendRoutedExperts310(AscendRoutedExperts):
-    def __init__(self, *args, tid2eid=None, n_shared_experts: int = 0, **kwargs):
-        super().__init__(*args, tid2eid=tid2eid, n_shared_experts=n_shared_experts, **kwargs)
+    def __init__(self, *args, n_shared_experts: int = 0, **kwargs):
+        super().__init__(*args, n_shared_experts=n_shared_experts, **kwargs)
         if self.quant_config is None:
             # Preserve the pre-refactor BF16 lifecycle: let upstream create
             # weights first, then install the Ascend execution method.
@@ -166,8 +166,9 @@ class AscendMoERunner310(AscendMoERunner):
         routed_input_transform=None,
         routed_output_transform=None,
         routed_scaling_factor=1,
-        tid2eid=None,
         n_shared_experts: int = 0,
+        divide_shared_output_in_fp16=False,
+        routed_scale_mode=None,
     ):
         super().__init__(
             layer_name=layer_name,
@@ -181,6 +182,8 @@ class AscendMoERunner310(AscendMoERunner):
             routed_input_transform=routed_input_transform,
             routed_output_transform=routed_output_transform,
             routed_scaling_factor=routed_scaling_factor,
+            divide_shared_output_in_fp16=divide_shared_output_in_fp16,
+            routed_scale_mode=routed_scale_mode,
         )
         gate_weight = getattr(gate, "weight", None)
         if isinstance(gate_weight, torch.Tensor) and gate_weight.dtype == torch.float16:

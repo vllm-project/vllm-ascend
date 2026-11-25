@@ -274,7 +274,7 @@ class AscendMTPSpeculator310(AscendTargetDependentARSpeculator, MTPSpeculator):
         """Skip Ascend metadata H2D under ACLGraph capture (pageable memcpy ban)."""
         # Call GPU AR generate_draft (sample + update_draft_inputs) without the
         # Ascend post-step ``seq_lens_cpu.copy_`` which is illegal while capturing.
-        TargetDependentARSpeculator._generate_draft(
+        TargetDependentARSpeculator._decode(
             self,
             num_reqs,
             num_tokens_padded,
@@ -292,6 +292,9 @@ class AscendMTPSpeculator310(AscendTargetDependentARSpeculator, MTPSpeculator):
     def _set_draft_step(self, step: int) -> None:
         self.current_draft_step.fill_(step)
         set_draft_step_host(step)
+
+    # #60989 invokes _decode through the new shared AR loop.
+    _decode = _generate_draft
 
     def _multi_step_decode(
         self,

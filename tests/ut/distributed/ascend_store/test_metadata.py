@@ -21,8 +21,12 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import tests.ut.distributed.ascend_store._mock_deps  # noqa: F401, E402
+
+# isort: split
+import torch
+from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheGroupSpec, MambaSpec, UniformTypeKVCacheSpecs
+
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.metadata import (
-    LayerMultiBlockReqMeta,
     LayerPoolKey,
     masked_block_runs,
 )
@@ -37,6 +41,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     get_block_hashes,
     get_group_block_size,
     get_group_cache_family,
+    get_sharded_mamba_group_ids,
     infer_cache_transfer_granularity,
     infer_dcp_mismatch_info,
     infer_group_block_sizes,
@@ -45,6 +50,24 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
 
 
 class TestCacheLayoutHelpers(unittest.TestCase):
+    def test_sharded_mamba_groups_exclude_tp_replicas(self):
+        mamba_spec = MambaSpec(
+            shapes=((4,),),
+            dtypes=(torch.float32,),
+            block_size=16,
+            mamba_cache_mode="align",
+        )
+        specs = [
+            FullAttentionSpec(block_size=16, num_kv_heads=1, head_size=1, dtype=torch.float32),
+            mamba_spec,
+            replace(mamba_spec, tp_replicated=True),
+            UniformTypeKVCacheSpecs.from_specs({"layer.3": mamba_spec}),
+        ]
+        config = SimpleNamespace(
+            kv_cache_groups=[KVCacheGroupSpec([f"layer.{group_id}"], spec) for group_id, spec in enumerate(specs)]
+        )
+        self.assertEqual(get_sharded_mamba_group_ids(config), {1, 3})
+
     def test_uses_hybrid_kv_cache(self):
         groups = [
             SimpleNamespace(kv_cache_spec=SimpleNamespace(block_size=16)),
@@ -803,22 +826,6 @@ class TestAscendConnectorMetadata(unittest.TestCase):
         meta.add_request(req)
         self.assertEqual(len(meta.requests), 1)
         self.assertEqual(meta.requests[0].req_id, "r1")
-
-
-class TestLayerMultiBlockReqMeta(unittest.TestCase):
-    def test_fields(self):
-        meta = LayerMultiBlockReqMeta(
-            req_id="r1",
-            keys=[],
-            starts=[0, 16],
-            ends=[16, 32],
-            block_ids=[0, 1],
-            layer_id=2,
-        )
-        self.assertEqual(meta.req_id, "r1")
-        self.assertEqual(meta.layer_id, 2)
-        self.assertTrue(meta.is_last_chunk)
-        self.assertIsNone(meta.current_event)
 
 
 if __name__ == "__main__":

@@ -34,7 +34,7 @@
 
 ## 函数原型
 
-每个算子分为[两段式接口](../../../docs/zh/context/two_phase_api.md)，必须先调用"aclnnQuantLightningIndexerV2MetadataGetWorkspaceSize"获取workspace大小，再调用"aclnnQuantLightningIndexerV2Metadata"执行计算
+每个算子分为[两段式接口](https://gitcode.com/cann/ops-transformer/blob/master/docs/zh/context/two_phase_api.md)，必须先调用"aclnnQuantLightningIndexerV2MetadataGetWorkspaceSize"获取workspace大小，再调用"aclnnQuantLightningIndexerV2Metadata"执行计算
 
 ``` cpp
 aclnnStatus aclnnQuantLightningIndexerV2MetadataGetWorkspaceSize(
@@ -55,6 +55,7 @@ aclnnStatus aclnnQuantLightningIndexerV2MetadataGetWorkspaceSize(
     char              *layoutKOptional,
     int64_t            maskMode,
     int64_t            cmpRatio,
+    int64_t            enableDcp,
     const aclTensor   *metadata,
     uint64_t          *workspaceSize,
     aclOpExecutor    **executor)
@@ -265,6 +266,16 @@ aclnnStatus aclnnQuantLightningIndexerV2Metadata(
       <td>-</td>
     </tr>
     <tr>
+      <td>enableDcp（int64_t）</td>
+      <td>输入</td>
+      <td>表示主算子本次是否走 DCP（Decode Context Parallel，解码上下文并行）场景。</td>
+      <td><ul><li>取值0或1，默认0。</li><li>仅当主算子 enable_dcp=1 且 A2/A3 时传1。</li><li>为1且cmpRatio=1时，A2/A3 上才启用 FD/LD（跨核 S2 切分 + TopK 归约）；950 始终按原有逻辑判断。</li></ul></td>
+      <td>-</td>
+      <td>-</td>
+      <td>-</td>
+      <td>-</td>
+    </tr>
+    <tr>
       <td>metadata（aclTensor*）</td>
       <td>输出</td>
       <td>表示负载均衡结果输出。</td>
@@ -308,7 +319,7 @@ aclnnStatus aclnnQuantLightningIndexerV2Metadata(
 
 - **返回值：**
 
-    返回aclnnStatus状态码，具体参见[aclnn返回码](../../../docs/zh/context/aclnn_return_code.md)。
+    返回aclnnStatus状态码，具体参见[aclnn返回码](https://gitcode.com/cann/ops-transformer/blob/master/docs/zh/context/aclnn_return_code.md)。
 
     第一段接口完成入参校验，出现以下场景时报错：
 
@@ -384,7 +395,7 @@ aclnnStatus aclnnQuantLightningIndexerV2Metadata(
 
 - **返回值：**
 
-    返回aclnnStatus状态码，具体参见[aclnn返回码](../../../docs/zh/context/aclnn_return_code.md)。
+    返回aclnnStatus状态码，具体参见[aclnn返回码](https://gitcode.com/cann/ops-transformer/blob/master/docs/zh/context/aclnn_return_code.md)。
 
 ## 约束说明
 
@@ -416,7 +427,7 @@ aclnnStatus aclnnQuantLightningIndexerV2Metadata(
 
 ## 调用示例
 
-示例代码如下，仅供参考，具体编译和执行过程请参考[编译与运行样例](../../../docs/zh/context/compile_and_run_sample.md)。
+示例代码如下，仅供参考，具体编译和执行过程请参考[编译与运行样例](https://gitcode.com/cann/ops-transformer/blob/master/docs/zh/context/compile_and_run_sample.md)。
 
 ``` cpp
 #include <iostream>

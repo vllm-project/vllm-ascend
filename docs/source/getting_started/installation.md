@@ -29,13 +29,14 @@ The following hardware and software stack is validated together for this release
     | Layer | Component | Validated version / requirement | Role |
     | --- | --- | --- | --- |
     | Runtime environment | Python | `{{ release_image_python_version }}` | Python version used by the validated release image |
-    | Host enablement | Ascend HDK | `{{ release_hdk_version }}` | Driver and firmware requirements for the selected CANN release |
+    | Host enablement | Ascend HDK | `{{ release_hdk_version_a2_a3_300i_200i }}` | Driver and firmware for A2, A3, Atlas 300I Duo, and Atlas 200I Pro |
+    | ^^ | ^^ | `{{ release_hdk_version_a5 }}` | Driver and firmware for Atlas 850E and Atlas 650E |
     | Ascend runtime | CANN Toolkit + Ops | `{{ release_cann_version }}` | Ascend user-space runtime, including the CANN Toolkit and hardware-specific Ops packages |
     | Ascend runtime | NNAL | `{{ release_nnal_version }}` | Provides `libatb.so` and ATB runtime capabilities |
     | Framework | PyTorch | `{{ release_pytorch_version }}` | Tensor framework used by vLLM |
     | Framework | TorchNPU | `{{ release_torch_npu_version }}` | Connects PyTorch to the Ascend runtime |
-    | Kernel acceleration | Triton Ascend | `{{ release_triton_ascend_version }}` | Used on A2, A3, and 950DT Products; not used on Atlas 300I DUO or Atlas 200I Pro |
-    | Kernel acceleration | FLA NPU | `{{ release_fla_npu_version }}` | Provides convolution and gated delta-rule operators on A2, A3, and 950DT Products; not required on Atlas 300I DUO or Atlas 200I Pro |
+    | Kernel acceleration | Triton Ascend | `{{ release_triton_ascend_version }}` | Used on A2, A3, and 950DT Products; not used on Atlas 300I Duo or Atlas 200I Pro |
+    | Kernel acceleration | FLA NPU | `{{ release_fla_npu_version }}` | Provides convolution and gated delta-rule operators on A2, A3, and 950DT Products; not required on Atlas 300I Duo or Atlas 200I Pro |
     | Inference engine | vLLM | `{{ release_vllm_version }}` | Model inference engine |
     | Hardware plugin | vLLM Ascend | `{{ release_vllm_ascend_version }}` | Connects vLLM to the Ascend software stack |
 
@@ -55,7 +56,7 @@ npu-smi info
 
 The output should list the expected NPU devices, with `Health` shown as `OK` and no driver initialization errors. Device names, chip counts, and table columns vary by hardware and driver version. A missing device or a health status other than `OK` needs investigation before continuing.
 
-```bash
+```output
 +------------------------------------------------------------------------------------------------+
 | npu-smi xx.x.x                   Version: xx.x.x                                               |
 +---------------------------+---------------+----------------------------------------------------+
@@ -76,7 +77,11 @@ The host Linux distribution and kernel must be supported by the selected Ascend 
 
 ### Set up the software environment {: #installation-software-environment }
 
-Choose one complete path based on your requirements. Container-based paths require Docker; see the [Docker installation guide](https://docs.docker.com/get-started/get-docker/) if needed.
+Choose one complete path based on your requirements. Container-based paths require Docker; see the [Docker installation guide](https://docs.docker.com/get-started/get-docker/) if needed. Those paths also need Ascend Docker Runtime on the host. [Use Ascend Docker Runtime](#installation-ascend-docker-runtime) introduces the runtime and gives the installation steps. If the host cannot install it, the other steps stay the same and only the Docker device mapping changes: use the flags in [Manual device mapping without Ascend Docker Runtime](#installation-container-without-runtime).
+
+!!! note "Docker version"
+
+    Docker Engine 20.10 or later is recommended when the host uses cgroup v2. Earlier Docker versions do not support cgroup v2; devices passed with `--device` may therefore be inaccessible inside the container, causing NPU initialization to fail. Check the Docker Engine and cgroup versions on the host if this occurs.
 
 | Requirement | Recommended method | Intended users |
 | --- | --- | --- |
@@ -100,6 +105,37 @@ Choose one complete path based on your requirements. Container-based paths requi
     **PyTorch and TorchNPU:** Installed as dependencies during the **Install vLLM and vLLM Ascend** step; no separate installation step is required.
 
     **FLA NPU:** Installed explicitly in the common follow-up step for pip, uv, and source installations on A2, A3, and 950DT Products.
+
+#### Use Ascend Docker Runtime {: #installation-ascend-docker-runtime }
+
+Both container-based paths — the prebuilt image and the CANN environment — need Ascend Docker Runtime on the **host**. The runtime mounts the NPU devices and driver paths of the host into the container.
+
+Download the run package from the [MindCluster releases](https://gitcode.com/Ascend/mind-cluster/releases): in `Ascend-docker-runtime_<version>_linux-<arch>.run`, `<version>` is the release you select and `<arch>` is `x86_64` or `aarch64`. Choose a release that supports the Ascend HDK version of the node, then install it as `root` on every node that runs containers:
+
+```bash
+chmod u+x Ascend-docker-runtime_<version>_linux-<arch>.run
+./Ascend-docker-runtime_<version>_linux-<arch>.run --install
+systemctl daemon-reload && systemctl restart docker
+```
+
+Confirm that the runtime is the default:
+
+{% raw %}
+
+```bash
+docker info --format 'default={{.DefaultRuntime}}'
+```
+
+{% endraw %}
+
+The output must be `default=ascend`. If it prints `runc`, check the `Runtimes:` line of `docker info`:
+
+1. If `ascend` is listed, either add `--runtime ascend` to `docker run`, or set `"default-runtime": "ascend"` in `/etc/docker/daemon.json` and restart Docker.
+2. If `ascend` is missing, rerun the installation and restart Docker.
+
+The container commands in this guide assume Ascend Docker Runtime **26.3.0 or later**, whose default mount lists include `/usr/local/Ascend/driver/version.info` and `/etc/ascend_install.info`. The installed version is the `version=` field in `/usr/local/Ascend/Ascend-Docker-Runtime/ascend_docker_runtime_install.info` (for example `version=v26.3.0`). With an earlier release, mount those two paths explicitly with `-v <path>:<path>` or upgrade.
+
+To mount an extra host path, create a lowercase `.list` file in `/etc/ascend-docker-runtime.d/`, one path per line, and name it in `ASCEND_RUNTIME_MOUNTS` for the containers that need it, for example `-e ASCEND_RUNTIME_MOUNTS=mylist,base`: that variable replaces the default list, so include `base`; otherwise the container loses the driver libraries and `npu-smi`. The default lists mount `/usr/local/bin/npu-smi`; on a product that installs `npu-smi` under `/usr/local/sbin`, such as Atlas 200I Pro, mount that path explicitly as the tutorial commands do.
 
 {% include "getting_started/installation/prebuilt_image.inc.md" %}
 
@@ -144,7 +180,7 @@ COMPILE_CUSTOM_KERNELS=0 SOC_VERSION=ascend910b1 \
 ```
 
 - `COMPILE_CUSTOM_KERNELS=0` skips building the native extensions and custom operators. These components are enabled by default for a normal NPU installation.
-- `SOC_VERSION` supplies the package's target hardware without querying `npu-smi`. Use `ascend910b1` for A2, `ascend910_9391` for A3, `ascend310p1` for Atlas 300I DUO / Atlas 200I Pro, or `ascend950dt_9582` for 950DT Products. This selects build metadata; it does not emulate an NPU.
+- `SOC_VERSION` supplies the package's target hardware without querying `npu-smi`. Use `ascend910b1` for A2, `ascend910_9391` for A3, `ascend310p1` for Atlas 300I Duo / Atlas 200I Pro, or `ascend950dt_9582` for 950DT Products. This selects build metadata; it does not emulate an NPU.
 - `--no-build-isolation` uses the packaging tools installed in this virtual environment instead of installing the full `pyproject.toml` build requirements.
 - `--no-deps` skips runtime dependencies from `requirements.txt`. Do not install those dependencies for this packaging-only check.
 
@@ -172,7 +208,7 @@ Exit the disposable container when finished; `--rm` removes it and the files cre
 
 Check the physical links, the status of each node, and inter-node connectivity in order.
 
-The commands below use `hccn_tool` (Huawei Collective Communications Network Tool), the Ascend NPU cluster network management tool installed with the driver. if the command is missing, check the driver installation and executable path.
+The commands below use `hccn_tool` (Huawei Collective Communication Network Tool), the Ascend NPU cluster network management tool installed with the driver; if the command is missing, check the driver installation and executable path.
 
 #### Physical link requirements {: #installation-multi-node-physical }
 
@@ -231,24 +267,31 @@ Run the following commands on each node in order:
 
 === "950DT Products"
 
+    950DT Products connect NPUs over UB instead of RoCE. The RoCE-oriented `hccn_tool`
+    subcommands used on A2 and A3 (`-lldp`, `-ip`, `-gateway`, `-net_health`, `-ping`)
+    reject the `-i <dev> -<cmd> -g` argument order on this product, and some of them are
+    not supported at all (`Unsupported operation: The command is not supported on this
+    product`). Use the UB-oriented checks below instead.
+
     ```bash
-    # Check the remote switch ports
-    for i in {0..7}; do hccn_tool -i $i -lldp -g | grep Ifname; done
-    # Get the link status of the Ethernet ports (UP or DOWN)
-    for i in {0..7}; do hccn_tool -i $i -link -g ; done
-    # Check the network health status
-    for i in {0..7}; do hccn_tool -i $i -net_health -g ; done
-    # View the network detected IP configuration
-    for i in {0..7}; do hccn_tool -i $i -netdetect -g ; done
-    # View gateway configuration
-    for i in {0..7}; do hccn_tool -i $i -gateway -g ; done
+    # Show the UB port matrix of each NPU (UDie, port, speed, link status)
+    for i in {0..7}; do hccn_tool -g -dev_info -i $i; done
+    # Get the link status of individual UB ports (UP or DOWN)
+    # -u selects the UDie and -p the port; see dev_info above for valid values
+    for i in {0..7}; do for u in 0 1; do for p in {0..7}; do
+        hccn_tool -g -link -i $i -u $u -p $p
+    done; done; done
+    # Check the driver and firmware version of the NPU network
+    hccn_tool -g -version -i 0
+    # List the UB endpoints, their EIDs and link state
+    urma_admin show
     # View NPU network configuration
     cat /etc/hccn.conf
     ```
 
 #### Verify inter-node connectivity {: #installation-multi-node-interconnect }
 
-##### Obtain NPU IP addresses {: #installation-multi-node-npu-ip }
+##### Obtain NPU addresses {: #installation-multi-node-npu-ip }
 
 === "A2"
 
@@ -264,29 +307,68 @@ Run the following commands on each node in order:
 
 === "950DT Products"
 
+    950DT Products address the peer NPUs by UB EID rather than by an IPv4 address. Run this on each node and keep the `ACTIVE` entries:
+
     ```bash
-    for i in {0..7}; do hccn_tool -i $i -ip -g | grep ipaddr; done
+    urma_admin show
     ```
 
 ##### Run a cross-node ping test {: #installation-multi-node-ping }
 
-On the source node, use a local NPU device ID and an NPU IP address obtained from the other node. The destination is the remote NPU's network address, not the host's management IP:
+A2 and A3 Products address the peer NPU by IPv4. 950DT Products connect the NPUs over UB and address them by UB EID instead; run `urma_admin show` on the peer node to obtain its EIDs.
 
-```bash
-# Replace 0 with the source NPU device ID and x.x.x.x with the remote NPU IP.
-hccn_tool -i 0 -ping -g address x.x.x.x
-```
+=== "A2"
 
-Successful output includes received replies and a summary with equal transmitted/received packet counts and zero packet loss, for example:
+    On the source node, use a local NPU device ID and an NPU IP address obtained from the other node. The destination is the remote NPU's network address, not the host's management IP:
 
-```text
+    ```bash
+    # Replace 0 with the source NPU device ID and x.x.x.x with the remote NPU IP.
+    hccn_tool -i 0 -ping -g address x.x.x.x
+    ```
+
+=== "A3"
+
+    On the source node, use a local NPU device ID and an NPU IP address obtained from the other node. The destination is the remote NPU's network address, not the host's management IP:
+
+    ```bash
+    # Replace 0 with the source NPU device ID and x.x.x.x with the remote NPU IP.
+    hccn_tool -i 0 -ping -g address x.x.x.x
+    ```
+
+=== "950DT Products"
+
+    A UB EID is a 128-bit endpoint identifier written as eight hexadecimal groups, and
+    each NPU exposes several of them. The EID after `-I` is a local EID of the source
+    node, and the argument is the EID of the remote node, both taken from the `ACTIVE`
+    rows of `urma_admin show` on the respective node:
+
+    ```bash
+    # Replace the placeholders with a local and a remote UB EID.
+    urma_ping -I <local-eid> <remote-eid>
+    ```
+
+    This requires a working UB stack on both nodes: `urma_admin show topo` must return the
+    fabric topology built from `/etc/hixlep`, `/lib/route.conf` and
+    `/etc/hccl_rootinfo.json`. If it reports `Failed to recv netlink msg, ret=-1` or
+    `Failed to get ubagg topo, ret:-1`, the UB stack is not ready and `urma_ping` cannot
+    send any packet.
+
+Successful output includes received replies and a summary with equal transmitted/received packet counts and zero packet loss. For A2 and A3 Products (`hccn_tool`), for example:
+
+```output
 3 packets transmitted, 3 received, 0.00% packet loss
 ```
 
-Repeat for the NPU pairs used by your deployment in both directions. Missing replies or packet loss require checking the links, NPU IP addresses, and network configuration. This checks basic connectivity; it does not replace a distributed inference test.
+`urma_ping` reports the same counters in its own `N packets transmitted, N received, 0% packet loss` summary.
+
+Repeat for the NPU pairs used by your deployment in both directions. Missing replies or packet loss require checking the links, the NPU IP addresses (A2/A3 Products) or EIDs (950DT Products), and the network configuration. This checks basic connectivity; it does not replace a distributed inference test.
 
 #### Start containers on each node {: #installation-multi-node-container }
 
 - Use the official vLLM Ascend containers described in [Quick Start > Installation](quick_start.md#quick-start-installation) to quickly prepare consistent multi-node runtime environments.
 
 - Commands for multi-node model serving are outside the scope of this installation guide. Continue with the relevant [Feature Tutorial](../tutorials/features/index.md) or [Model Tutorial](../tutorials/models/index.md).
+
+### Manual device mapping without Ascend Docker Runtime {: #installation-container-without-runtime }
+
+{% include "getting_started/installation/without_ascend_docker_runtime.inc.md" %}

@@ -38,7 +38,6 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.kv_transfer import
     KVCacheStoreRecvingThread,
     KVCacheStoreSendingThread,
 )
-from vllm_ascend.utils import vllm_version_is
 
 
 def aligned_buffer(size):
@@ -240,6 +239,8 @@ def test_raw_sequence_lifecycle(
     )
     config.scheduler_config.disable_hybrid_kv_cache_manager = False
     config.cache_config.prefix_match_unit = prefix_unit
+    # The hit-boundary assertions below exercise dense prefix retention.
+    config.cache_config.prefix_cache_retention_interval = None
     config.cache_config.num_gpu_blocks = plan.num_blocks
     # Match the planner's role annotation so kv_both keeps the EAGLE safety drop.
     plan.kv_transfer_config = config.kv_transfer_config
@@ -263,6 +264,10 @@ def test_raw_sequence_lifecycle(
         block_size=block_size,
         hash_block_size=hash_size,
     )
+    # #65448 makes core lookahead hashing opt-out. AscendStore's masks still
+    # use the legacy EAGLE drop, so both hashing and local lookup must agree.
+    assert config.num_hash_lookahead_tokens == scheduler.num_hash_lookahead_tokens == 0
+    assert scheduler.use_eagle_block_drop == (speculative_method == "mtp")
     producer_tokens = list(range(512))
 
     def run_request(req_id, tokens, expected_hit, expected_local=0):
@@ -350,11 +355,10 @@ def test_raw_sequence_lifecycle(
             scheduler.update_from_output(output, result)
             if drafts:
                 expected_computed = computed_before_update - len(drafts) + accepted
-                if not vllm_version_is("0.32.0"):
-                    # vLLM main trims ``num_computed_tokens`` to cover only the
-                    # tokens actually kept when a request stops mid token-list.
-                    appended = request.num_output_tokens - output_tokens_before_update
-                    expected_computed -= (accepted + 1) - appended
+                # vLLM main trims ``num_computed_tokens`` to cover only the
+                # tokens actually kept when a request stops mid token-list.
+                appended = request.num_output_tokens - output_tokens_before_update
+                expected_computed -= (accepted + 1) - appended
                 assert request.num_computed_tokens == expected_computed
             if speculative_method:
                 scheduler.update_draft_token_ids(
@@ -434,7 +438,7 @@ def test_raw_sequence_lifecycle(
         # pure full-attention dspark layout sees the doubled local prefix hit.
         only_full_attention = isinstance(plan.kv_cache_groups[0].kv_cache_spec, FullAttentionSpec)
         mixed_local = 128
-        if not vllm_version_is("0.32.0") and speculative_method == "dspark" and only_full_attention:
+        if speculative_method == "dspark" and only_full_attention:
             mixed_local = 256
         run_request("mixed-local-remote", list(range(513)), 512, expected_local=mixed_local)
         assert scheduler.reset_prefix_cache()

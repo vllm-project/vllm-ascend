@@ -18,7 +18,7 @@
 1. 在 **NPU 容器**内、`vllm-ascend` 仓库根目录下运行(例如 `/workspace/vllm-ascend`)。
 2. 直接用 `python -m tools.bisect.auto_bisect ...` 运行(在仓库根目录下,包可被导入)。
 3. **vllm-ascend 必须是 editable 安装**(`uv pip install -e .`)——这样纯 `.py` 改动 checkout 后即时生效、无需重装。nightly 容器默认就是 editable。
-4. **vLLM 不需要改动**,容器里现有的 vLLM 即为配套版本(本工具只切换 vllm-ascend)。
+4. 工具会按候选提交的 Dockerfile 检查并按需切换 vLLM、vLLM Ascend 及相关依赖。
 5. 依赖:`pytest`、`openai`、`aisbench`、`psutil`、`filelock`、`regex`(nightly 容器已具备)。
 
 ---
@@ -154,6 +154,8 @@ python -m tools.bisect.auto_bisect \
 - 两端版本不同,**或环境实际版本与两端共同的 pin 不一致**(nightly 镜像自带构建,不保证跟随 pin):每次切换到候选 commit 后读取候选 commit 的版本文件,若运行环境版本不同则先切换依赖,再运行 nightly;
 
 vLLM 切换优先使用配置的 vLLM 源码目录(nightly 默认 `/vllm-workspace/vllm`) checkout 对应 release tag 并重新 editable 安装;找不到源码目录时回退到 pip 安装对应 release。torch-npu 使用 pip 强制重装目标版本。切换失败会将本轮标记为 `SKIP`,不会把环境问题误判成测试失败。
+
+vLLM 的安装沿用 Dockerfile 的 PyTorch CPU 额外索引。Dockerfile 中单独安装 torch-npu 的步骤已注释;二分工具切换 torch-npu 时默认使用华为云 PyPI 镜像。若运行环境已设置 `PIP_INDEX_URL` 或 `PIP_EXTRA_INDEX_URL`,则保留已有设置;可在启动二分工具前设置这两个变量以覆盖默认源。
 
 ---
 
@@ -345,3 +347,18 @@ vLLM 切换优先使用配置的 vLLM 源码目录(nightly 默认 `/vllm-workspa
 4. 直接跑第四节命令;第一轮(bad=HEAD)应**直接进 pytest、不 pip**;
 5. 想看实时进度:`tail -f $BISECT_WORK_DIR/<scene>__<yaml>/logs/round*.log`;
 6. 中断了就原命令重跑(自动续跑)。
+
+## 十一、不占用 NPU 的环境切换预检
+
+单节点可加 `--mock-tests`。二分工具仍会在选中的提交之间真实切换 vLLM、
+vLLM Ascend 和依赖，并按需构建；它不会运行 pytest 或启动模型服务。
+模拟 PASS/FAIL 只用于推进二分搜索，日志和报告位于独立的 `__mock` 目录，
+报告不会给出真实的首个坏提交。每轮日志中的 `[pairing:before]` 和
+`[pairing:after]` 会记录候选提交对应的 vLLM、torch-npu、CANN 镜像、
+硬件 Dockerfile 和实际安装版本。`[pairing:detail]` 逐项列出
+`requirements.txt`、`requirements-nightly.txt` 及其 `-r` 引用的要求与宿主
+环境中的版本；`[pairing:build-only]` 列出 `pyproject.toml` 的临时构建环境要求。
+`[pairing:docker]` 列出 Dockerfile 的版本参数、安装命令和固定组件。
+这些记录是配套清单，不能将宿主环境的构建依赖版本或 Dockerfile 声明的
+CANN 镜像误认为临时构建环境及运行容器的完整验证。预检完成后，去掉该参数
+再运行真实用例。

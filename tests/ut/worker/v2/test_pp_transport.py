@@ -100,6 +100,7 @@ def _make_config(
         "KimiLinearForCausalLM",
         "KimiK3ForCausalLM",
         "KimiK3ForConditionalGeneration",
+        "KimiK31ForConditionalGeneration",
     ],
 )
 def test_kimi_k3_dspark_pp_supports_all_target_aliases(architecture):
@@ -113,8 +114,10 @@ def test_kimi_k3_dspark_pp_supports_all_target_aliases(architecture):
     "config",
     [
         _make_config("KimiLinearForCausalLM", pipeline_parallel_size=1),
+        _make_config("KimiK31ForConditionalGeneration", pipeline_parallel_size=1),
         _make_config("UnsupportedForPP"),
         _make_config("KimiLinearForCausalLM", method="eagle"),
+        _make_config("KimiK31ForConditionalGeneration", method="eagle"),
     ],
 )
 def test_kimi_k3_dspark_pp_support_stays_scoped(config):

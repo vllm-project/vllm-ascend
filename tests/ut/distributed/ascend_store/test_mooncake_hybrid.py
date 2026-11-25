@@ -49,6 +49,9 @@ class MemoryRangeStore:
         self.complete = set()
         self.open_reads = set()
 
+    def set_device(self):
+        pass
+
     def register_buffer(self, ptrs, lengths):
         assert all(length > 0 for length in lengths)
 
@@ -162,7 +165,7 @@ class TestMooncakeHybrid(unittest.TestCase):
             groups.append(KVCacheGroupSpec([name], UniformTypeKVCacheSpecs.from_specs({name: tail})))
         config = SimpleNamespace(num_blocks=8, kv_cache_groups=groups)
         with patch(
-            "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker.KVPoolWorker._build_cache_coordinator",
+            "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker.BaseKVPoolWorker._build_cache_coordinator",
             return_value=None,
         ):
             worker = make_worker(
@@ -305,7 +308,7 @@ class TestMooncakeHybrid(unittest.TestCase):
             load_spec=LoadSpec(0, 32, True, 64),
         )
         with patch.object(worker, "_open_layerwise_get_sessions") as open_get:
-            views = mooncake_layerwise.prepare_group_sessions(worker, [request])
+            views = worker._data_plane.prepare_sessions([request])
         worker.token_database.load_mask.assert_called_with(request.block_hashes, 32)
         self.assertFalse(views[3])
         self.assertTrue(all(slot < 2 for _, _, _, slot in open_get.call_args.args[0]))
@@ -447,6 +450,7 @@ class TestMooncakeHybrid(unittest.TestCase):
 
     def test_coordinator_queries_all_heads_using_mooncake_existence(self):
         scheduler = object.__new__(LayerwiseKVPoolScheduler)
+        scheduler.sharded_mamba_group_ids = set()
         scheduler.dspark_prefix_keys = None
         scheduler.num_speculative_blocks_by_group = {}
         scheduler.block_key_hybrid = True

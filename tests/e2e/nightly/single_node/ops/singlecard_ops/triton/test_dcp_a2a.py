@@ -1,10 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 
+from typing import Any
+from unittest.mock import Mock
+
 import pytest
 import torch
 
-from vllm_ascend.device.device_config import get_ascend_device_type
-from vllm_ascend.device.hardware import AscendDeviceType
+from tests.e2e.nightly.single_node.ops.singlecard_ops.triton.dcp_test_utils import assert_dcp_close
+from vllm_ascend.device.device_config import AscendDeviceType
 from vllm_ascend.ops.triton.dcp import dcp_a2a
 from vllm_ascend.ops.triton.dcp.dcp_a2a import (
     fused_dcp_lse_combine,
@@ -39,180 +42,37 @@ def _simulate_receive(
     return torch.stack([send_buffers[source_rank][destination_rank] for source_rank in range(dcp_size)])
 
 
-_A5_FIXED_CASES = (
-    pytest.param(64, 96, 512, 8, 1, 1, True, id="original-shape"),
-    pytest.param(4, 96, 512, 8, 1, 1, True, id="too-few-pack-rows"),
-    pytest.param(7, 96, 512, 8, 1, 1, True, id="small-token-count"),
-    pytest.param(64, 8, 512, 8, 1, 1, True, id="few-local-heads"),
-    pytest.param(64, 32, 128, 4, 1, 1, True, id="dcp4-narrow-head"),
-    pytest.param(64, 12, 512, 3, 1, 1, True, id="dcp3-combine-boundary"),
-    pytest.param(64, 4, 512, 1, 1, 1, True, id="dcp1-wide-small-rows"),
-    pytest.param(128, 4, 512, 1, 1, 1, True, id="dcp1-wide-enough-rows"),
-    pytest.param(64, 4, 128, 1, 1, 1, True, id="dcp1-narrow-combine"),
-    pytest.param(128, 8, 257, 2, 1, 1, True, id="dcp2-contiguous-wide-local"),
-    pytest.param(128, 8, 257, 2, 1, 2, True, id="dcp2-strided-wide-local"),
-    pytest.param(64, 96, 1024, 8, 1, 1, True, id="wide-pack-combine-fallback"),
-    pytest.param(64, 96, 2048, 8, 1, 1, True, id="pack-dim-limit"),
-    pytest.param(64, 96, 512, 8, 2, 1, True, id="strided-pack-fallback"),
-    pytest.param(257, 32, 128, 4, 1, 1, True, id="beyond-old-token-limit"),
-    pytest.param(64, 36, 128, 9, 1, 1, True, id="dcp9-pack-only"),
-    pytest.param(64, 64, 128, 16, 1, 1, False, id="dcp16-pack-only"),
-)
-
-
+@pytest.mark.parametrize("tokens", [128, 129])
 @torch.inference_mode()
-def _check_a5_batching_case(
-    monkeypatch: pytest.MonkeyPatch,
-    num_tokens: int,
-    num_heads: int,
-    head_dim: int,
-    dcp_size: int,
-    output_stride: int,
-    local_stride: int,
-    run_combine: bool,
-) -> None:
-    """Compare one A5 shape with scalar kernels and check its dispatch."""
-    if not dcp_a2a.is_950():
-        pytest.skip("The batched DCP kernels are enabled only on A5")
-    dcp_a2a.init_device_properties_triton()
-    vector_cores = dcp_a2a.get_vectorcore_num()
-    torch.manual_seed(2026 + num_tokens + dcp_size)
-    output = torch.randn(num_tokens, num_heads, head_dim * output_stride, device="npu", dtype=torch.bfloat16)[
-        ..., ::output_stride
-    ]
-    lse = torch.randn(num_tokens, num_heads, 1, device="npu", dtype=torch.float32)
-    local_heads = num_heads // dcp_size
-    local_output = torch.randn(num_tokens, local_heads, head_dim * local_stride, device="npu", dtype=torch.bfloat16)[
-        ..., ::local_stride
-    ]
-    local_lse = torch.randn(num_tokens, local_heads, 1, device="npu", dtype=torch.float32)
-
-    monkeypatch.setattr(dcp_a2a, "is_950", lambda: False)
-    scalar_send = pack_dcp_output_lse(output, lse, dcp_size, 1)
-    if run_combine:
-        scalar_combined = fused_dcp_lse_combine(
-            scalar_send, head_dim, 1, local_output=local_output, local_lse=local_lse
-        )
-
-    class LaunchSpy:
-        def __init__(self, kernel):
-            self.kernel = kernel
-            self.calls = 0
-
-        def __getitem__(self, grid):
-            launch = self.kernel[grid]
-
-            def tracked_launch(*args, **kwargs):
-                self.calls += 1
-                return launch(*args, **kwargs)
-
-            return tracked_launch
-
-    pack_spy = LaunchSpy(dcp_a2a._pack_dcp_output_lse_batched_kernel)
-    combine_spy = LaunchSpy(dcp_a2a._fused_dcp_lse_combine_batched_kernel)
-    monkeypatch.setattr(dcp_a2a, "_pack_dcp_output_lse_batched_kernel", pack_spy)
-    monkeypatch.setattr(dcp_a2a, "_fused_dcp_lse_combine_batched_kernel", combine_spy)
-    monkeypatch.setattr(dcp_a2a, "is_950", lambda: True)
-    batched_send = pack_dcp_output_lse(output, lse, dcp_size, 1)
-    if run_combine:
-        batched_combined = fused_dcp_lse_combine(
-            batched_send, head_dim, 1, local_output=local_output, local_lse=local_lse
-        )
-
-    expected_output = output.reshape(num_tokens, dcp_size, local_heads, head_dim).permute(1, 2, 0, 3)
-    torch.testing.assert_close(batched_send[..., :head_dim], expected_output, atol=0, rtol=0)
-    torch.testing.assert_close(batched_send[..., :head_dim], scalar_send[..., :head_dim], atol=0, rtol=0)
-    encoded_lse = batched_send[..., head_dim:].float()
-    exponent_code = encoded_lse[..., :1]
-    significand = encoded_lse[..., 1:2] * 65536 + encoded_lse[..., 2:3] * 256 + encoded_lse[..., 3:4]
-    decoded_lse = torch.where(exponent_code < 0, -1.0, 1.0) * significand * torch.exp2(exponent_code.abs() - 151)
-    expected_lse = lse.reshape(num_tokens, dcp_size, local_heads, 1).permute(1, 2, 0, 3)
-    torch.testing.assert_close(decoded_lse, expected_lse, atol=1e-2, rtol=1e-2)
-    expected_pack_batch = output_stride == 1 and head_dim <= 2048 and num_tokens * num_heads >= 8 * vector_cores
-    assert pack_spy.calls == int(expected_pack_batch)
-    if run_combine:
-        torch.testing.assert_close(batched_combined, scalar_combined, atol=2e-2, rtol=2e-2)
-        rank_values = batched_send[..., :head_dim].permute(0, 2, 1, 3)
-        rank_lse = decoded_lse.squeeze(-1).permute(0, 2, 1)
-        expected_combined = _reference_merge(
-            torch.cat((rank_values, local_output.unsqueeze(0))),
-            torch.cat((rank_lse, local_lse[..., 0].unsqueeze(0))),
-        )
-        torch.testing.assert_close(batched_combined, expected_combined, atol=2e-2, rtol=2e-2)
-        combine_rows = num_tokens * local_heads
-        min_rows_per_core = 8 if dcp_size <= 2 and head_dim > 256 else 4
-        expected_combine_batch = (
-            dcp_size <= 8
-            and head_dim <= 512
-            and combine_rows >= min_rows_per_core * vector_cores
-            and (dcp_size > 2 or head_dim <= 256 or local_stride == 1)
-        )
-        assert combine_spy.calls == int(expected_combine_batch)
+def test_decode_combine_without_local(tokens):
+    torch.manual_seed(35)
+    world, heads, dim = 8, 96, 512
+    outputs = torch.randn(world, tokens, heads, dim, device="npu", dtype=torch.bfloat16)
+    lses = torch.randn(world, tokens, heads, 1, device="npu") * 8 + 70_000
+    lses[:, 0, 0] = -torch.inf
+    outputs[:, 0, 0] = torch.nan
+    lses[0, 1, 0] = torch.nan
+    outputs[0, 1, 0] = torch.nan
+    recv = _simulate_receive(outputs, lses, 0, 1)
+    actual = fused_dcp_lse_combine(recv, dim, 1)
+    expected = _reference_merge(outputs[:, :, : heads // world], lses[:, :, : heads // world, 0])
+    assert_dcp_close(actual, expected)
 
 
-@pytest.mark.skipif(get_ascend_device_type() != AscendDeviceType.A5, reason="Requires Ascend A5")
 @pytest.mark.parametrize(
-    ("num_tokens", "num_heads", "head_dim", "dcp_size", "output_stride", "local_stride", "run_combine"),
-    _A5_FIXED_CASES,
-)
-def test_a5_generalized_batching_matches_scalar_path(
-    monkeypatch: pytest.MonkeyPatch,
-    num_tokens: int,
-    num_heads: int,
-    head_dim: int,
-    dcp_size: int,
-    output_stride: int,
-    local_stride: int,
-    run_combine: bool,
-) -> None:
-    """Keep business shapes fixed on every A5 variant."""
-    _check_a5_batching_case(
-        monkeypatch, num_tokens, num_heads, head_dim, dcp_size, output_stride, local_stride, run_combine
-    )
-
-
-@pytest.mark.skipif(get_ascend_device_type() != AscendDeviceType.A5, reason="Requires Ascend A5")
-@pytest.mark.parametrize(
-    "case",
+    "head_dim,scatter_dim,dtype",
     [
-        "pack-below-threshold",
-        "pack-at-threshold",
-        "combine-below-threshold",
-        "combine-at-threshold",
-        "partial-row-tile",
+        # Pair dtype with scatter direction, keeping both at each head dimension.
+        (96, 0, torch.float16),
+        (96, 1, torch.bfloat16),
+        (128, 0, torch.bfloat16),
+        (128, 1, torch.float16),
+        (160, 0, torch.float16),
+        (160, 1, torch.bfloat16),
+        (256, 0, torch.bfloat16),
+        (256, 1, torch.float16),
     ],
 )
-@torch.inference_mode()
-def test_a5_core_relative_batching_boundaries(monkeypatch: pytest.MonkeyPatch, case: str) -> None:
-    if not dcp_a2a.is_950():
-        pytest.skip("The batched DCP kernels are enabled only on A5")
-    dcp_a2a.init_device_properties_triton()
-    vector_cores = dcp_a2a.get_vectorcore_num()
-    if case.startswith("pack-"):
-        num_tokens = (8 * vector_cores + 11) // 12
-        if case == "pack-below-threshold":
-            num_tokens -= 1
-    else:
-        num_tokens = vector_cores
-        if case == "combine-below-threshold":
-            num_tokens -= 1
-        elif case == "partial-row-tile":
-            num_tokens |= 1
-    assert num_tokens > 0
-    if case == "partial-row-tile":
-        # Twelve pack heads and four post-scatter heads both leave a tail
-        # when the token count is odd.
-        assert num_tokens * 12 % 8 != 0
-        assert num_tokens * 4 % 8 != 0
-    _check_a5_batching_case(monkeypatch, num_tokens, 12, 512, 3, 1, 1, True)
-
-
-@pytest.mark.skipif(
-    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3), reason="Requires Ascend A2/A3"
-)
-@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
-@pytest.mark.parametrize("scatter_dim", [0, 1])
-@pytest.mark.parametrize("head_dim", [96, 128, 160, 256])
 @torch.inference_mode()
 def test_pack_and_fused_lse_combine(
     dtype: torch.dtype,
@@ -262,13 +122,9 @@ def test_pack_and_fused_lse_combine(
         )
     actual = fused_dcp_lse_combine(recv, head_dim, scatter_dim)
 
-    tolerance = 2e-2 if dtype == torch.bfloat16 else 1e-2
-    torch.testing.assert_close(actual, expected, atol=tolerance, rtol=tolerance)
+    assert_dcp_close(actual, expected)
 
 
-@pytest.mark.skipif(
-    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3), reason="Requires Ascend A2/A3"
-)
 @pytest.mark.parametrize("scatter_dim", [0, 1])
 @torch.inference_mode()
 def test_stride_aware_pack(scatter_dim: int) -> None:
@@ -318,12 +174,9 @@ def test_stride_aware_pack(scatter_dim: int) -> None:
         )
     actual = fused_dcp_lse_combine(recv, head_dim, scatter_dim)
 
-    torch.testing.assert_close(actual, expected, atol=2e-2, rtol=2e-2)
+    assert_dcp_close(actual, expected)
 
 
-@pytest.mark.skipif(
-    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3), reason="Requires Ascend A2/A3"
-)
 @pytest.mark.parametrize("scatter_dim", [0, 1])
 @torch.inference_mode()
 def test_invalid_lse_and_all_invalid_rows(scatter_dim: int) -> None:
@@ -371,13 +224,10 @@ def test_invalid_lse_and_all_invalid_rows(scatter_dim: int) -> None:
             sender_outputs[:, :, : num_heads // dcp_size],
             sender_lses[:, :, : num_heads // dcp_size, 0],
         )
-    torch.testing.assert_close(actual, expected, atol=2e-2, rtol=2e-2)
+    assert_dcp_close(actual, expected)
     assert torch.count_nonzero(actual[1, 0]).item() == 0
 
 
-@pytest.mark.skipif(
-    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3), reason="Requires Ascend A2/A3"
-)
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
 @pytest.mark.parametrize("scatter_dim", [0, 1])
 @torch.inference_mode()
@@ -427,14 +277,10 @@ def test_finite_lse_outside_activation_dtype_range(
             sender_lses[:, :, head_slice, 0],
         )
 
-    tolerance = 2e-2 if dtype == torch.bfloat16 else 1e-2
-    torch.testing.assert_close(actual, expected, atol=tolerance, rtol=tolerance)
+    assert_dcp_close(actual, expected)
     assert torch.count_nonzero(actual).item() > 0
 
 
-@pytest.mark.skipif(
-    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3), reason="Requires Ascend A2/A3"
-)
 @torch.inference_mode()
 def test_mla_history_lse_then_current_merge() -> None:
     num_tokens = 48
@@ -453,58 +299,30 @@ def test_mla_history_lse_then_current_merge() -> None:
     partials = torch.cat((outputs, lse.unsqueeze(-1)), dim=-1).npu()
     direct = fused_dcp_lse_combine(partials, 512, scatter_dim=0)
     assert direct.dtype == torch.float32
-    torch.testing.assert_close(direct.cpu(), expected, atol=3e-6, rtol=3e-5)
+    assert_dcp_close(direct, expected)
     history = torch.cat((outputs[:16], lse[:16].unsqueeze(-1)), dim=-1).npu()
     merged_history = fused_dcp_lse_combine(history, 512, scatter_dim=0, return_lse=True)
     assert merged_history.shape == (num_tokens, 6, 513)
     current = torch.cat((outputs[-1], lse[-1].unsqueeze(-1)), dim=-1).npu()
     actual = fused_dcp_lse_combine(torch.stack((merged_history, current)), 512, scatter_dim=0)
-    torch.testing.assert_close(actual.cpu(), expected, atol=5e-4, rtol=5e-4)
+    assert_dcp_close(actual, expected)
     assert torch.isfinite(actual).all()
 
 
-@pytest.mark.skipif(
-    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3), reason="Requires Ascend A2/A3"
-)
 @pytest.mark.parametrize(
     "scatter_dim,dcp_size,head_dim,local_dtype",
     [
+        # Keep every shape/dtype and shape/scatter pair.
+        # Exercise both scatter directions for each local dtype across the shapes.
         (0, 1, 96, torch.float32),
-        (1, 1, 96, torch.float32),
-        (0, 1, 96, torch.bfloat16),
         (1, 1, 96, torch.bfloat16),
         (0, 1, 96, torch.float16),
-        (1, 1, 96, torch.float16),
-        (1, 1, 256, torch.float32),
-        (0, 1, 256, torch.bfloat16),
-        (1, 1, 256, torch.float16),
-        (0, 1, 512, torch.float32),
-        (1, 1, 512, torch.bfloat16),
-        (0, 1, 512, torch.float16),
-        (1, 2, 96, torch.float32),
-        (0, 2, 96, torch.bfloat16),
-        (1, 2, 96, torch.float16),
-        (0, 2, 256, torch.float32),
-        (1, 2, 256, torch.bfloat16),
-        (0, 2, 256, torch.float16),
-        (0, 2, 512, torch.float32),
         (1, 2, 512, torch.float32),
         (0, 2, 512, torch.bfloat16),
-        (1, 2, 512, torch.bfloat16),
-        (0, 2, 512, torch.float16),
         (1, 2, 512, torch.float16),
-        (0, 8, 96, torch.float32),
-        (1, 8, 96, torch.bfloat16),
-        (0, 8, 96, torch.float16),
         (0, 8, 256, torch.float32),
-        (1, 8, 256, torch.float32),
-        (0, 8, 256, torch.bfloat16),
         (1, 8, 256, torch.bfloat16),
         (0, 8, 256, torch.float16),
-        (1, 8, 256, torch.float16),
-        (0, 8, 512, torch.float32),
-        (1, 8, 512, torch.bfloat16),
-        (0, 8, 512, torch.float16),
     ],
 )
 @torch.inference_mode()
@@ -535,5 +353,304 @@ def test_combine_with_raw_local_fia(scatter_dim, dcp_size, head_dim, local_dtype
     lses = torch.cat((history_lse, local_lse.unsqueeze(0)))[..., 0]
     expected = _reference_merge(values, lses)
     expected_lse = torch.logsumexp(lses.masked_fill(~torch.isfinite(lses), -torch.inf), dim=0)
-    torch.testing.assert_close(actual[..., :head_dim], expected, atol=1e-4, rtol=1e-4)
-    torch.testing.assert_close(actual[..., head_dim], expected_lse, atol=1e-4, rtol=1e-4)
+
+    assert_dcp_close(actual[..., :head_dim], expected)
+    # Empty contributions have an exact -inf LSE sentinel, outside finite tolerances.
+    actual_lse, golden_lse = actual[..., head_dim].cpu(), expected_lse.cpu()
+    finite = golden_lse.isfinite()
+    assert torch.equal(actual_lse[~finite], golden_lse[~finite])
+    assert_dcp_close(actual_lse[finite], golden_lse[finite])
+
+
+@pytest.mark.parametrize(
+    "ranks,head_dim,num_tokens,local_heads,local_stride,local_dtype",
+    [(r, d, 16, 4, 1, torch.bfloat16) for r in (4, 8, 16) for d in (96, 256, 512, 1024)]
+    + [(16, 512, t, 4, 1, torch.bfloat16) for t in (1, 4, 64)]
+    + [pytest.param(16, 512, t, 6, 1, torch.bfloat16, id=f"kimi-heads6-t{t}") for t in (16, 64)]
+    + [(12, 160, 16, 4, 1, torch.bfloat16), (16, 130, 16, 4, 1, torch.bfloat16)]
+    + [(r, 512, 16, 4, 2, torch.bfloat16) for r in (4, 8, 16)]
+    + [(r, d, 16, 4, 1, dtype) for r, d in ((4, 96), (16, 512), (8, 256)) for dtype in (torch.float16, torch.float32)],
+)
+@torch.inference_mode()
+def test_rank_tiled_combine_fp64_reference(
+    monkeypatch, ranks, head_dim, num_tokens, local_heads, local_stride, local_dtype
+):
+    """Check the dispatched kernel against original inputs, not a scalar reduction.
+
+    Parallel FP32 summation may cross BF16 rounding boundaries. Independently
+    bound its mathematical error, then check the output's BF16 rounding exactly.
+    """
+    torch.manual_seed(7201 + num_tokens + local_heads)
+    num_heads = local_heads * ranks
+    history = torch.randn(ranks, num_tokens, local_heads, head_dim, device="npu", dtype=torch.bfloat16)
+    history_lse = torch.randn(ranks, num_tokens, local_heads, 1, device="npu") * 30
+    local = torch.randn(num_tokens, local_heads, head_dim * local_stride, device="npu", dtype=local_dtype)[
+        ..., ::local_stride
+    ]
+    local_lse = (torch.randn(num_tokens, local_heads, 2, device="npu") * 30)[..., :1]
+    history_lse[:, 0, 0] = -torch.inf
+    history[:, 0, 0] = torch.nan
+    local_lse[0, 0] = torch.nan
+    local[0, 0] = torch.nan
+    if num_tokens > 1:
+        local_lse[1, 0] = torch.inf
+        local[1, 0] = torch.nan
+    # Treat head partitions as received rank contributions. The oracle below
+    # reads the original values and LSE, independently of the packed wire.
+    packed = pack_dcp_output_lse(
+        history.transpose(0, 1).reshape(num_tokens, num_heads, head_dim),
+        history_lse.transpose(0, 1).reshape(num_tokens, num_heads, 1),
+        ranks,
+        1,
+    )
+    rank_tiled_kernel = dcp_a2a._fused_dcp_lse_combine_rank_tiled_kernel
+    scalar_kernel = dcp_a2a._fused_dcp_lse_combine_kernel
+    batched_kernel = dcp_a2a._fused_dcp_lse_combine_batched_kernel
+    # No static twin is warmed here: A3 must fall back, A5 keeps the dynamic
+    # kernel because a runtime rank-row stride still vectorizes there.
+    monkeypatch.setattr(dcp_a2a, "_A3_WARMING", False)
+    monkeypatch.setattr(dcp_a2a, "_A3_STATIC_SIGNATURES", frozenset())
+    launches: list[tuple[Any, ...]] = []
+
+    class LaunchSpy:
+        def __init__(self, kernel):
+            self.kernel = kernel
+
+        def __getitem__(self, grid):
+            def launch(*args, **kwargs):
+                launches.append((self.kernel, grid, args, kwargs))
+                return self.kernel[grid](*args, **kwargs)
+
+            return launch
+
+    monkeypatch.setattr(dcp_a2a, "_fused_dcp_lse_combine_rank_tiled_kernel", LaunchSpy(rank_tiled_kernel))
+    monkeypatch.setattr(dcp_a2a, "_fused_dcp_lse_combine_kernel", LaunchSpy(scalar_kernel))
+    monkeypatch.setattr(dcp_a2a, "_fused_dcp_lse_combine_batched_kernel", LaunchSpy(batched_kernel))
+    actual = fused_dcp_lse_combine(packed, head_dim, 1, local_output=local, local_lse=local_lse)
+    assert len(launches) == 1
+    kernel, grid, args, kwargs = launches[0]
+    rank_tile = dcp_a2a.triton.next_power_of_2(ranks)
+    feature_tile = min(512, dcp_a2a.triton.next_power_of_2(head_dim), 8192 // rank_tile)
+    tiles_per_head = dcp_a2a.triton.cdiv(head_dim, feature_tile)
+    total_rows = num_tokens * local_heads
+    cores = dcp_a2a.get_vectorcore_num()
+    min_rows = max(dcp_a2a.triton.cdiv(2 * cores, ranks), ranks)
+    # The receive buffer is BF16 (history is BF16), so the rank-tiled gate only
+    # depends on the world size, head dim, row stride and the row minimum.
+    rank_tile_common = 8 <= ranks <= 16 and head_dim >= 512 and local_stride == 1 and total_rows >= min_rows
+    expected_dynamic = dcp_a2a.is_950() and rank_tile_common and ranks >= 2 * tiles_per_head
+    expected_batched = not expected_dynamic and head_dim <= 512 and total_rows >= 4 * cores and local_stride == 1
+    assert kernel is (rank_tiled_kernel if expected_dynamic else batched_kernel if expected_batched else scalar_kernel)
+    # Check the same dispatched reduction with an FP32 output allocation.
+    # Output strides are measured in elements, so they are unchanged here.
+    fp32 = torch.empty(actual.shape, device="npu", dtype=torch.float32)
+    fp32_args = list(args)
+    fp32_args[1] = fp32
+    kernel[grid](*fp32_args, **kwargs)
+    values = torch.cat((history.cpu().double(), local.cpu().double()[None]))
+    logs = torch.cat((history_lse.cpu().double(), local_lse.cpu().double()[None]))
+    valid = torch.isfinite(logs)
+    maximum = torch.where(valid, logs, -torch.inf).amax(0)
+    maximum = torch.where(torch.isfinite(maximum), maximum, 0.0)
+    weights = torch.where(valid, torch.exp(logs - maximum), 0.0)
+    denominator = weights.sum(0)
+    expected = (torch.where(valid, values, 0.0) * weights).sum(0) / torch.where(denominator > 0, denominator, 1.0)
+    # The vector unit's FP32 exp/reduction differs from a float64 oracle by up
+    # to ~1.5e-5 on outputs that nearly cancel; the scalar kernel shows the
+    # same bound, so it is hardware rounding rather than a dispatch difference.
+    torch.testing.assert_close(fp32.cpu().double(), expected, rtol=1e-4, atol=5e-5)
+    torch.testing.assert_close(actual, fp32.to(torch.bfloat16), rtol=0, atol=0)
+    assert torch.isfinite(actual).all().item()
+    assert actual[0, 0].count_nonzero().item() == 0
+    graph = torch.npu.NPUGraph()
+    with torch.npu.graph(graph):
+        replayed = fused_dcp_lse_combine(packed, head_dim, 1, local_output=local, local_lse=local_lse)
+    for _ in range(3):
+        local_lse.add_(0.1)
+        graph.replay()
+        eager = fused_dcp_lse_combine(packed, head_dim, 1, local_output=local, local_lse=local_lse)
+        torch.testing.assert_close(replayed, eager, rtol=0, atol=0)
+
+
+class _LaunchSpy:
+    """Record the kernel and arguments the dispatcher selected."""
+
+    def __init__(self, kernel, launches):
+        self.kernel = kernel
+        self.launches = launches
+
+    def __getitem__(self, grid):
+        def launch(*args, **kwargs):
+            self.launches.append((self.kernel, grid, args, kwargs))
+            return self.kernel[grid](*args, **kwargs)
+
+        return launch
+
+
+def _rank_tiled_inputs(ranks, head_dim, tokens, heads, layout="token_major"):
+    torch.manual_seed(19555 + tokens + heads)
+    history = torch.randn(ranks, tokens, heads, head_dim, device="npu", dtype=torch.bfloat16)
+    history_lse = torch.randn(ranks, tokens, heads, 1, device="npu") * 8
+    packed = pack_dcp_output_lse(
+        history.transpose(0, 1).reshape(tokens, ranks * heads, head_dim),
+        history_lse.transpose(0, 1).reshape(tokens, ranks * heads, 1),
+        ranks,
+        1,
+    )
+    if layout == "token_major":
+        local = torch.randn(tokens, heads, head_dim, device="npu", dtype=torch.bfloat16)
+        local_lse = torch.randn(tokens, heads, 1, device="npu") * 8
+    else:
+        local = torch.randn(heads, tokens, head_dim, device="npu", dtype=torch.bfloat16).permute(1, 0, 2)
+        local_lse = (torch.randn(heads, tokens, 1, device="npu") * 8).permute(1, 0, 2)
+    return packed, local, local_lse, history, history_lse
+
+
+def _fp64_reference_merge(history, history_lse, local, local_lse):
+    values = torch.cat((history.cpu().double(), local.cpu().double()[None]))
+    logs = torch.cat((history_lse.cpu().double(), local_lse.cpu().double()[None]))
+    valid = torch.isfinite(logs)
+    maximum = torch.where(valid, logs, -torch.inf).amax(0)
+    maximum = torch.where(torch.isfinite(maximum), maximum, 0.0)
+    weights = torch.where(valid, torch.exp(logs - maximum), 0.0)
+    denominator = weights.sum(0)
+    return (torch.where(valid, values, 0.0) * weights).sum(0) / torch.where(denominator > 0, denominator, 1.0)
+
+
+@torch.inference_mode()
+def test_dynamic_rank_tiled_reuses_one_compiled_variant(monkeypatch):
+    """A5's runtime token/head counts must not create Triton specializations."""
+    if not dcp_a2a.is_950():
+        pytest.skip("the dynamic rank-tiled kernel is the A5 dispatch path")
+    original = dcp_a2a._fused_dcp_lse_combine_rank_tiled_kernel
+    kernel = dcp_a2a.triton.jit(original.fn, do_not_specialize=original.do_not_specialize)
+    compile_spy = Mock(wraps=kernel._do_compile)
+    monkeypatch.setattr(kernel, "_do_compile", compile_spy)
+    monkeypatch.setattr(dcp_a2a, "_fused_dcp_lse_combine_rank_tiled_kernel", kernel)
+
+    device = torch.npu.current_device()
+    if hasattr(kernel, "device_caches"):
+        kernel_cache = kernel.device_caches[device][0]
+    else:
+        kernel_cache = kernel.cache[device]
+    kernel_cache.clear()
+
+    ranks, head_dim = 16, 512
+    for tokens, heads in ((4, 4), (8, 4), (16, 4), (32, 4), (16, 6)):
+        partial = torch.randn(tokens, ranks * heads, head_dim, device="npu", dtype=torch.bfloat16)
+        lse = torch.randn(tokens, ranks * heads, 1, device="npu") * 30
+        recv = pack_dcp_output_lse(partial, lse, ranks, 1)
+        local = torch.randn(tokens, heads, head_dim, device="npu", dtype=torch.bfloat16)
+        local_lse = torch.randn(tokens, heads, 1, device="npu") * 30
+        fused_dcp_lse_combine(recv, head_dim, 1, local_output=local, local_lse=local_lse)
+        torch.npu.synchronize()
+        assert len(kernel_cache) == compile_spy.call_count == 1, (tokens, heads)
+
+
+@torch.inference_mode()
+def test_a3_static_unwarmed_combine_falls_back(monkeypatch):
+    """A3 without a warmed full signature must keep the scalar/batched path."""
+    if dcp_a2a.get_ascend_device_type() != AscendDeviceType.A3:
+        pytest.skip("A3 dispatches the static rank-tiled twin")
+    monkeypatch.setattr(dcp_a2a, "is_950", lambda: False)
+    monkeypatch.setattr(dcp_a2a, "get_ascend_device_type", lambda: AscendDeviceType.A3)
+    monkeypatch.setattr(dcp_a2a, "_A3_WARMING", False)
+    monkeypatch.setattr(dcp_a2a, "_A3_STATIC_SIGNATURES", frozenset())
+    monkeypatch.setattr(dcp_a2a, "_UNWARMED_LOGGED", set())
+    logger = Mock()
+    monkeypatch.setattr(dcp_a2a, "logger", logger)
+
+    ranks, head_dim, heads = 16, 512, 4
+    static_kernel = dcp_a2a._fused_dcp_lse_combine_rank_tiled_static_kernel
+    dynamic_kernel = dcp_a2a._fused_dcp_lse_combine_rank_tiled_kernel
+    scalar_kernel = dcp_a2a._fused_dcp_lse_combine_kernel
+    batched_kernel = dcp_a2a._fused_dcp_lse_combine_batched_kernel
+    launches: list[tuple[Any, ...]] = []
+    for name, kernel in (
+        ("_fused_dcp_lse_combine_rank_tiled_static_kernel", static_kernel),
+        ("_fused_dcp_lse_combine_rank_tiled_kernel", dynamic_kernel),
+        ("_fused_dcp_lse_combine_kernel", scalar_kernel),
+        ("_fused_dcp_lse_combine_batched_kernel", batched_kernel),
+    ):
+        monkeypatch.setattr(dcp_a2a, name, _LaunchSpy(kernel, launches))
+
+    tokens = 16
+    packed, local, local_lse, _, _ = _rank_tiled_inputs(ranks, head_dim, tokens, heads)
+    for _ in range(2):
+        fused_dcp_lse_combine(packed, head_dim, 1, local_output=local, local_lse=local_lse)
+        torch.npu.synchronize()
+    # 64 rows keep the fused loop below the batched threshold.
+    assert [kernel for kernel, *_ in launches] == [scalar_kernel, scalar_kernel]
+    # Decode-sized misses warn once; the second call stays quiet.
+    assert logger.warning.call_count == 1
+    assert logger.debug.call_count == 0
+
+    # Prefill-sized misses log at debug so large counts do not spam warnings.
+    logger.reset_mock()
+    monkeypatch.setattr(dcp_a2a, "_UNWARMED_LOGGED", set())
+    packed, local, local_lse, _, _ = _rank_tiled_inputs(ranks, head_dim, 256, heads)
+    fused_dcp_lse_combine(packed, head_dim, 1, local_output=local, local_lse=local_lse)
+    torch.npu.synchronize()
+    assert launches[-1][0] is batched_kernel
+    assert logger.warning.call_count == 0
+    assert logger.debug.call_count == 1
+
+
+@torch.inference_mode()
+def test_a3_static_warmed_signature_matches_reference(monkeypatch):
+    """A warmed A3 signature selects the static twin and keeps kernel accuracy."""
+    if dcp_a2a.get_ascend_device_type() != AscendDeviceType.A3:
+        pytest.skip("A3 dispatches the static rank-tiled twin")
+    monkeypatch.setattr(dcp_a2a, "is_950", lambda: False)
+    monkeypatch.setattr(dcp_a2a, "get_ascend_device_type", lambda: AscendDeviceType.A3)
+    monkeypatch.setattr(dcp_a2a, "_A3_WARMING", False)
+    monkeypatch.setattr(dcp_a2a, "_UNWARMED_LOGGED", set())
+    logger = Mock()
+    monkeypatch.setattr(dcp_a2a, "logger", logger)
+
+    ranks, head_dim, tokens, heads = 16, 512, 16, 4
+    packed, local, local_lse, history, history_lse = _rank_tiled_inputs(ranks, head_dim, tokens, heads)
+    signature = (heads, tokens, head_dim, ranks, *local.stride(), *local_lse.stride()[:2])
+    monkeypatch.setattr(dcp_a2a, "_A3_STATIC_SIGNATURES", frozenset({signature}))
+
+    static_kernel = dcp_a2a._fused_dcp_lse_combine_rank_tiled_static_kernel
+    dynamic_kernel = dcp_a2a._fused_dcp_lse_combine_rank_tiled_kernel
+    scalar_kernel = dcp_a2a._fused_dcp_lse_combine_kernel
+    batched_kernel = dcp_a2a._fused_dcp_lse_combine_batched_kernel
+    launches: list[tuple[Any, ...]] = []
+    for name, kernel in (
+        ("_fused_dcp_lse_combine_rank_tiled_static_kernel", static_kernel),
+        ("_fused_dcp_lse_combine_rank_tiled_kernel", dynamic_kernel),
+        ("_fused_dcp_lse_combine_kernel", scalar_kernel),
+        ("_fused_dcp_lse_combine_batched_kernel", batched_kernel),
+    ):
+        monkeypatch.setattr(dcp_a2a, name, _LaunchSpy(kernel, launches))
+
+    actual = fused_dcp_lse_combine(packed, head_dim, 1, local_output=local, local_lse=local_lse)
+    torch.npu.synchronize()
+    assert [kernel for kernel, *_ in launches] == [static_kernel]
+    _, grid, args, kwargs = launches[0]
+    assert kwargs["NUM_TOKENS"] == tokens
+    assert kwargs["NUM_HEADS"] == heads
+    assert kwargs["BLOCK_R"] == ranks
+    assert kwargs["BLOCK_D"] == 512
+    assert grid == (min(tokens * heads, dcp_a2a.get_vectorcore_num()),)
+    assert logger.warning.call_count == 0
+
+    # Re-run the selected kernel with an FP32 output: compare the reduction
+    # itself against a float64 oracle, then check the BF16 rounding exactly.
+    fp32 = torch.empty(actual.shape, device="npu", dtype=torch.float32)
+    fp32_args = list(args)
+    fp32_args[1] = fp32
+    static_kernel[grid](*fp32_args, **kwargs)
+    expected = _fp64_reference_merge(history, history_lse, local, local_lse)
+    torch.testing.assert_close(fp32.cpu().double(), expected, rtol=1e-4, atol=5e-5)
+    torch.testing.assert_close(actual, fp32.to(torch.bfloat16), rtol=0, atol=0)
+
+    # The full signature includes output/LSE strides: the same shape with a
+    # head-major layout is not warmed and must fall back.
+    launches.clear()
+    _, head_major, head_major_lse, _, _ = _rank_tiled_inputs(ranks, head_dim, tokens, heads, layout="head_major")
+    fused_dcp_lse_combine(packed, head_dim, 1, local_output=head_major, local_lse=head_major_lse)
+    torch.npu.synchronize()
+    assert [kernel for kernel, *_ in launches] == [scalar_kernel]

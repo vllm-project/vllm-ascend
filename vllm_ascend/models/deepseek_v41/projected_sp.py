@@ -15,7 +15,7 @@ def projected_sp_supported(config, ascend_config, *, is_draft_layer: bool, batch
     return (
         ascend_config.dsv41_projected_sp
         and not is_draft_layer
-        and (parallel.tensor_parallel_size > 1 or parallel.prefill_context_parallel_size > 1)
+        and parallel.tensor_parallel_size > 1
         and parallel.decode_context_parallel_size == 1
         and not parallel.use_ubatching
         and (speculative is None or dspark)

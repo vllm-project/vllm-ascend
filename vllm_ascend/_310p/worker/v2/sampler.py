@@ -4,9 +4,8 @@
 
 """Triton-free MRV2 sampler for Ascend 310P.
 
-Aligns temperature / top-k / top-p post-processing with MRV1's
-``AscendSampler310`` (inverse-CDF random sampling) while keeping the MRV2
-``sampling_states`` surface required by MTP draft ``propose()``.
+Applies temperature, top-k, and top-p on the logits device and exposes the
+sampling states required by MTP draft ``propose()``.
 """
 
 from __future__ import annotations
@@ -33,9 +32,7 @@ from vllm_ascend._310p.worker.v2.sample.penalties import (
     build_penalty_token_tensors,
     use_penalty,
 )
-from vllm_ascend._310p.worker.v2.sample_utils import (
-    _random_sample_310p,
-)
+from vllm_ascend._310p.worker.v2.sample.random_sample import random_sample
 
 _NP_INT64_MIN = np.iinfo(np.int64).min
 _NP_INT64_MAX = np.iinfo(np.int64).max
@@ -43,7 +40,7 @@ _SAMPLING_EPS = 1e-5
 
 
 class Ascend310PSampler:
-    """Triton-free sampler for 310P MRV2 with MRV1-aligned temperature sampling.
+    """Triton-free sampler for 310P MRV2.
 
     Exposes ``sampling_states.temperature/seeds/top_k/top_p/min_p`` so MTP draft
     ``propose()`` (and ``_dummy_run``) can read device buffers without UVA
@@ -124,7 +121,7 @@ class Ascend310PSampler:
         self._bad_words_token_ids: dict[int, list[list[int]]] = {}
         self._num_logprobs = np.full(max_num_reqs, fill_value=-1, dtype=np.int32)
         self._seeds_set = np.zeros(max_num_reqs, dtype=bool)
-        # Source generators keyed by req_idx (MRV1 CPU RNG cache semantics).
+        # Source generators keyed by req_idx (request-owned device RNG).
         self._source_generators: dict[int, torch.Generator] = {}
 
     def add_request(
@@ -207,7 +204,7 @@ class Ascend310PSampler:
         self._sampling_state_dirty = True
 
         if self._seeds_set[req_idx]:
-            source = torch.Generator(device="cpu")
+            source = torch.Generator(device=self.device)
             source.manual_seed(int(seed))
             self._source_generators[req_idx] = source
         else:
@@ -371,7 +368,7 @@ class Ascend310PSampler:
         """FP32 copy + post-process for MTP rejection verify.
 
         Mirrors upstream ``Sampler.apply_sampling_params`` so
-        ``RejectionSampler310V2`` matches MRV1 tempered verify.
+        ``RejectionSampler310V2`` verifies drafts with the filtered logits.
         """
         self._maybe_bind_vocab_size(logits.shape[-1])
         processed = torch.empty_like(logits, dtype=torch.float32).copy_(logits)
@@ -389,7 +386,7 @@ class Ascend310PSampler:
         self,
         expanded_idx_mapping_np: np.ndarray,
     ) -> dict[int, torch.Generator]:
-        """Map logit-row index → CPU generator for seeded random requests."""
+        """Map logit-row index → device generator for seeded random requests."""
         sources: dict[int, torch.Generator] = {}
         for row_idx, req_idx in enumerate(expanded_idx_mapping_np.tolist()):
             if req_idx < 0:
@@ -445,12 +442,12 @@ class Ascend310PSampler:
         if not self._any_random(idx_mapping_np):
             sampled = processed.argmax(dim=-1).to(torch.int32)
         else:
-            # Greedy rows keep argmax; random rows use MRV1 inverse-CDF sampling.
+            # Greedy rows keep argmax; random rows use device sampling.
             greedy = processed.argmax(dim=-1)
             probs = processed.softmax(dim=-1, dtype=torch.float32)
-            expanded_np = expanded_idx_mapping.detach().to("cpu").numpy()
+            expanded_np = np.repeat(idx_mapping_np, np.diff(input_batch.cu_num_logits_np[: num_reqs + 1]))
             generators = self._build_row_generators(expanded_np)
-            random_sampled = _random_sample_310p(probs, generators)
+            random_sampled = random_sample(probs, generators)
             is_random = self.sampling_states.temperature.gpu[expanded_idx_mapping] >= _SAMPLING_EPS
             sampled = torch.where(is_random, random_sampled, greedy).to(torch.int32)
 

@@ -345,6 +345,12 @@ def _wrap_communicator_factory(original_factory):
         if backend == "torch_gloo":
             return AscendGlooEplbCommunicator(
                 cpu_group=bound.arguments["group_coordinator"].cpu_group,
+                # Host staging has to rebuild an NZ source for each receive
+                # destination, which needs the cast behind the buffer it
+                # receives into. The weights come along to validate that every
+                # layer agrees with those shared buffers.
+                expert_buffer=bound.arguments["expert_buffer"],
+                all_expert_weights=bound.arguments["expert_weights"],
             )
         if backend == "hixl":
             return AscendHixlEplbCommunicator(
@@ -419,9 +425,7 @@ def _patch_initial_expert_layout() -> None:
     if not getattr(original_get, _PATCH_MARKER, False):
         routed_experts.get_expert_mapping = _with_expert_mapping_ep_size(
             original_get,
-            lambda self, *_args, **_kwargs: (
-                self.moe_config.ep_size if getattr(self, "_use_v2_model_runner", False) else 1
-            ),
+            lambda self, *_args, **_kwargs: self.moe_config.ep_size,
         )
 
     original_make = routed_experts.make_expert_params_mapping
@@ -433,11 +437,7 @@ def _patch_initial_expert_layout() -> None:
             if not bound.arguments.get("num_redundant_experts", 0):
                 return 1
             model = bound.arguments["model"]
-            ep_sizes = {
-                module.moe_config.ep_size
-                for module in model.modules()
-                if isinstance(module, routed_experts) and getattr(module, "_use_v2_model_runner", False)
-            }
+            ep_sizes = {module.moe_config.ep_size for module in model.modules() if isinstance(module, routed_experts)}
             if len(ep_sizes) > 1:
                 raise RuntimeError("MRV2 redundant expert loading requires one EP size")
             return ep_sizes.pop() if ep_sizes else 1
@@ -607,6 +607,9 @@ def _wrap_async_worker(original_worker):
                     assert model_state.pending_result is None
                     continue
 
+                # Pinning may replace the tensor, and the foreground clears the
+                # communicator's target before acknowledging the last result.
+                cycle_target = new_mapping
                 new_mapping, new_logical_map, new_replica_count = _prepare_commit_maps(
                     model_state,
                     new_mapping,
@@ -660,11 +663,44 @@ def _wrap_async_worker(original_worker):
                         # use upstream's helper instead of the wrapped commit
                         # path, so report completion from this worker.
                         if rank == 0:
-                            logger.info(
-                                "%s: model=%s",
-                                ASYNC_EPLB_CYCLE_COMMITTED_LOG,
-                                model_state.model_name,
-                            )
+                            if not _has_explicit_sources(cycle_target):
+                                logger.info(
+                                    "%s: model=%s",
+                                    ASYNC_EPLB_CYCLE_COMMITTED_LOG,
+                                    model_state.model_name,
+                                )
+                            else:
+                                source_ranks = np.asarray(cycle_target.source_rank_ids)
+                                destination_ranks = np.arange(source_ranks.shape[-2])[None, :, None]
+                                rank_transfers = np.count_nonzero(source_ranks != destination_ranks)
+                                imbalance = getattr(cycle_target, "predicted_imbalance_summary", None)
+                                rank_node_ids = getattr(cycle_target, "rank_node_ids", None)
+                                if imbalance is None or rank_node_ids is None:
+                                    logger.info(
+                                        "%s: model=%s rank_transfers=%d",
+                                        ASYNC_EPLB_CYCLE_COMMITTED_LOG,
+                                        model_state.model_name,
+                                        rank_transfers,
+                                    )
+                                else:
+                                    rank_node_ids = np.asarray(rank_node_ids)
+                                    cross_node_transfers = np.count_nonzero(
+                                        rank_node_ids[source_ranks] != rank_node_ids[destination_ranks]
+                                    )
+                                    mean_before, p95_before, mean_after, p95_after = imbalance
+                                    logger.info(
+                                        "%s: model=%s mean=%.4f->%.4f p95=%.4f->%.4f changed_layers=%d "
+                                        "rank_transfers=%d cross_node_transfers=%d",
+                                        ASYNC_EPLB_CYCLE_COMMITTED_LOG,
+                                        model_state.model_name,
+                                        mean_before,
+                                        mean_after,
+                                        p95_before,
+                                        p95_after,
+                                        len(changed_layers),
+                                        rank_transfers,
+                                        cross_node_transfers,
+                                    )
 
     @wraps(original_worker)
     def _transfer_run_periodically(*args, **kwargs):

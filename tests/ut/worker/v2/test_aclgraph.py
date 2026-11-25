@@ -9,12 +9,12 @@ from unittest.mock import MagicMock, patch
 import pytest
 import torch
 from vllm.config.compilation import CUDAGraphMode
-from vllm.v1.worker.gpu.spec_decode.target_dependent_ar.cudagraph_utils import (
-    SpeculatorCudaGraphManager,
-)
 
+from vllm_ascend.ascend_forward_context import MoECommType
 from vllm_ascend.worker.v2.spec_decode.target_dependent_ar.aclgraph import (
     AutoRegressiveAclGraphManager,
+    CudaGraphManager,
+    SpeculatorCudaGraphManager,
 )
 
 
@@ -23,9 +23,10 @@ def _parent_init(
     vllm_config,
     device,
     cudagraph_mode,
-    decode_query_len,
+    decode_query_lens,
     lora_capture_cases=None,
     varlen_decode=False,
+    **kwargs,
 ):
     """Mock the parent graph manager initialization."""
     self._capture_descs = [object()]
@@ -34,6 +35,10 @@ def _parent_init(
 
 def _graph_config(pcp_size: int = 1) -> SimpleNamespace:
     return SimpleNamespace(parallel_config=SimpleNamespace(prefill_context_parallel_size=pcp_size))
+
+
+def _query_shape(query_len):
+    return {"decode_query_lens": {query_len: 8}}
 
 
 def test_init_draft_prefill_graph():
@@ -51,7 +56,7 @@ def test_init_draft_prefill_graph():
         patch("vllm_ascend.worker.v2.spec_decode.target_dependent_ar.aclgraph.set_draft_graph_params") as set_decode,
     ):
         manager = AutoRegressiveAclGraphManager(
-            _graph_config(), torch.device("cpu"), CUDAGraphMode.FULL, decode_query_len=2
+            _graph_config(), torch.device("cpu"), CUDAGraphMode.FULL, **_query_shape(2)
         )
     assert manager.capture_sizes == [4, 8]
     assert manager.is_draft_model_prefill is True
@@ -79,7 +84,7 @@ def test_sharded_pcp_draft_prefill_avoids_full_graphs(decode_query_len, mode, ex
         ),
     ):
         manager = AutoRegressiveAclGraphManager(
-            _graph_config(pcp_size=2), torch.device("cpu"), mode, decode_query_len=decode_query_len
+            _graph_config(pcp_size=2), torch.device("cpu"), mode, **_query_shape(decode_query_len)
         )
     assert manager.cudagraph_mode == expected
 
@@ -98,10 +103,102 @@ def test_init_draft_decode_graph():
         ) as set_prefill,
         patch("vllm_ascend.worker.v2.spec_decode.target_dependent_ar.aclgraph.set_draft_graph_params") as set_decode,
     ):
-        manager = AutoRegressiveAclGraphManager(object(), torch.device("cpu"), CUDAGraphMode.FULL, decode_query_len=1)
+        manager = AutoRegressiveAclGraphManager(object(), torch.device("cpu"), CUDAGraphMode.FULL, **_query_shape(1))
     assert manager.is_draft_model_prefill is False
     set_decode.assert_called_once_with([4, 8])
     set_prefill.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "draft_moe,method,query_len,mode,limit,expected_max_requests",
+    [
+        (True, MoECommType.MC2, 1, CUDAGraphMode.FULL_DECODE_ONLY, 16, 16),
+        (True, MoECommType.MC2, 1, CUDAGraphMode.FULL_DECODE_ONLY, 8, 8),
+        (True, MoECommType.FUSED_MC2, 1, CUDAGraphMode.FULL_DECODE_ONLY, 512, 512),
+        (True, MoECommType.ALLGATHER, 1, CUDAGraphMode.FULL_DECODE_ONLY, 512, 512),
+        (False, MoECommType.MC2, 1, CUDAGraphMode.FULL_DECODE_ONLY, 16, 512),
+        (True, MoECommType.MC2, 4, CUDAGraphMode.FULL_DECODE_ONLY, 16, 512),
+        (True, MoECommType.MC2, 1, CUDAGraphMode.NONE, 16, 512),
+        (True, MoECommType.ALLTOALL, 1, CUDAGraphMode.FULL_DECODE_ONLY, 512, 0),
+    ],
+)
+def test_draft_decode_capture_respects_moe_comm_policy(
+    draft_moe, method, query_len, mode, limit, expected_max_requests
+):
+    sizes = [1, 4, 8, 16, 32, 512]
+    original_sizes = sizes.copy()
+    parent_kwargs: dict[str, Any] = {}
+
+    def parent_init(self, *args, **kwargs):
+        parent_kwargs.update(kwargs)
+        _parent_init(self, *args, **kwargs)
+
+    with (
+        patch.object(SpeculatorCudaGraphManager, "__init__", parent_init),
+        patch.object(SpeculatorCudaGraphManager, "needs_capture", return_value=False),
+        patch(
+            "vllm_ascend.worker.v2.spec_decode.target_dependent_ar.aclgraph.collect_sorted_captured_token_sizes",
+            return_value=[],
+        ),
+        patch(
+            "vllm_ascend.worker.v2.spec_decode.target_dependent_ar.aclgraph.is_drafter_moe_model",
+            return_value=draft_moe,
+        ),
+        patch(
+            "vllm_ascend.worker.v2.spec_decode.target_dependent_ar.aclgraph.select_moe_comm_method",
+            side_effect=lambda size, _: method if size <= limit else MoECommType.ALLTOALL,
+        ),
+    ):
+        AutoRegressiveAclGraphManager(
+            _graph_config(),
+            torch.device("cpu"),
+            mode,
+            decode_query_lens={query_len: 512},
+            decode_request_sizes=sizes,
+        )
+    compatible_sizes = parent_kwargs["decode_request_sizes"]
+    assert max(compatible_sizes, default=0) == expected_max_requests
+    assert sizes == original_sizes
+
+    # Exercise native descriptor creation and dispatch, including the eager
+    # boundary, without allocating a device graph or changing the config grid.
+    compilation = SimpleNamespace(
+        prefill_cudagraph_capture_token_sizes=[4, 8, 12, 16],
+        decode_cudagraph_capture_request_sizes=[1, 2, 3, 4],
+        max_decode_cudagraph_capture_tokens=None,
+        max_cudagraph_capture_size=4096,
+    )
+    native: Any = SimpleNamespace(
+        compilation_config=compilation,
+        cudagraph_mode=mode,
+        max_num_reqs=512,
+        decode_query_len=query_len,
+        decode_max_reqs={query_len: 512},
+        decode_request_sizes=compatible_sizes,
+        varlen_decode=False,
+        lora_capture_cases=[0],
+        vllm_config=SimpleNamespace(uniform_decode_query_len=4, cache_config=SimpleNamespace(use_kda_recoverssm=False)),
+        _capture_descs={},
+        _decode_descs={},
+        _candidates={},
+        _graphs_captured=True,
+        _maybe_ubatch_twin=lambda _: None,
+        _resolve_effective_loras=lambda count: count,
+    )
+    CudaGraphManager._init_candidates(native)
+    captured = [desc for descs in native._capture_descs.values() for desc in descs]
+    if mode == CUDAGraphMode.NONE:
+        assert not captured
+    else:
+        assert max((desc.num_reqs for desc in captured), default=0) == expected_max_requests
+    if draft_moe and query_len == 1 and method == MoECommType.MC2 and mode != CUDAGraphMode.NONE:
+        at_limit = CudaGraphManager.dispatch(native, limit, limit, uniform_token_count=1, num_active_loras=0)
+        above_limit = CudaGraphManager.dispatch(native, limit + 1, limit + 1, uniform_token_count=1, num_active_loras=0)
+        assert at_limit.cg_mode == CUDAGraphMode.FULL
+        assert above_limit.cg_mode == CUDAGraphMode.NONE
+        assert above_limit.num_reqs == limit + 1
+        assert above_limit.num_tokens == limit + 1
+    assert compilation.decode_cudagraph_capture_request_sizes == [1, 2, 3, 4]
 
 
 def test_run_fullgraph_uses_updatable_graph():
@@ -370,10 +467,10 @@ def test_graph_replay_updates_full_graph_params():
     )
 
 
-@pytest.mark.parametrize("use_dcp,architecture", [(False, "GQA"), (True, "GQA"), (True, "MLA")])
+@pytest.mark.parametrize("use_dcp,architecture", [(False, "GQA"), (True, "MLA")])
 @pytest.mark.parametrize("is_prefill", [False, True])
-def test_updatable_graph_replay_reuses_shared_source(use_dcp, architecture, is_prefill):
-    """Build every draft step from the first metadata with one shared-source update."""
+def test_updatable_graph_replay_uses_param_source(use_dcp, architecture, is_prefill):
+    """Resolve the parameter source built for the current draft graph."""
     manager = AutoRegressiveAclGraphManager.__new__(AutoRegressiveAclGraphManager)
     manager.update_stream = MagicMock()
     manager.is_draft_model_prefill = is_prefill
@@ -383,13 +480,12 @@ def test_updatable_graph_replay_reuses_shared_source(use_dcp, architecture, is_p
     graph.resolve_tasks.return_value = resolved_tasks
     manager.graphs = {desc: graph}
     steps = [{"draft": object()} for _ in range(1 if is_prefill else 2)]
-    fia_params = [{"layer_name": "draft", "step": i} for i in range(len(steps))]
+    source = object()
     manager.speculator = SimpleNamespace(
         use_dcp=use_dcp,
         attn_architecture=architecture,
-        build_fia_params=MagicMock(return_value=fia_params),
+        build_param_source=MagicMock(return_value=source),
     )
-    source = object()
     current_stream = object()
 
     with (
@@ -397,10 +493,6 @@ def test_updatable_graph_replay_reuses_shared_source(use_dcp, architecture, is_p
             "vllm_ascend.worker.v2.spec_decode.target_dependent_ar.aclgraph.UpdatableGraph",
             MagicMock,
         ),
-        patch(
-            "vllm_ascend.worker.v2.spec_decode.target_dependent_ar.aclgraph.SharedSource",
-            return_value=source,
-        ) as shared_source,
         patch(
             "vllm_ascend.worker.v2.spec_decode.target_dependent_ar.aclgraph.torch.npu.current_stream",
             return_value=current_stream,
@@ -413,10 +505,48 @@ def test_updatable_graph_replay_reuses_shared_source(use_dcp, architecture, is_p
     ):
         result = manager._updatable_graph_replay(desc, steps)
 
-    manager.speculator.build_fia_params.assert_called_once_with(2, steps[0], is_prefill)
-    shared_source.assert_called_once_with(fia_params)
+    manager.speculator.build_param_source.assert_called_once_with(2, steps[0], is_prefill, num_tokens=desc.num_tokens)
     assert result == "result"
     graph.resolve_tasks.assert_called_once_with(source)
     manager.update_stream.wait_stream.assert_called_once_with(current_stream)
     parent_replay.assert_called_once_with(desc)
     graph.update.assert_called_once_with(manager.update_stream, resolved_tasks)
+
+
+@pytest.mark.parametrize(
+    "use_dcp,architecture,is_prefill",
+    [(True, "MLA", True), (True, "MLA", False), (True, "GQA", True), (False, "MLA", True)],
+)
+def test_target_dependent_param_source_selects_metadata_or_fia(use_dcp, architecture, is_prefill):
+    from vllm_ascend.compilation.updatable_graph import ContextSource, SharedSource
+    from vllm_ascend.worker.v2.spec_decode.target_dependent_ar.speculator import AscendTargetDependentARSpeculator
+
+    metadata = {"layer": object()}
+    params = [{"layer_name": "layer", "actual_seq_kvlen": [3]}]
+    speculator = SimpleNamespace(
+        use_dcp=use_dcp, attn_architecture=architecture, build_fia_params=MagicMock(return_value=params)
+    )
+    source = AscendTargetDependentARSpeculator.build_param_source(speculator, 2, metadata, is_prefill, num_tokens=4)
+
+    if use_dcp and architecture == "MLA" and is_prefill:
+        assert isinstance(source, ContextSource)
+        assert source.context is metadata
+        speculator.build_fia_params.assert_not_called()
+    else:
+        assert isinstance(source, SharedSource)
+        assert source.params is params
+        speculator.build_fia_params.assert_called_once_with(2, metadata, is_prefill, num_tokens=4)
+
+
+def test_multi_module_param_source_keeps_fia_parameters():
+    from vllm_ascend.compilation.updatable_graph import SharedSource
+    from vllm_ascend.worker.v2.spec_decode.multi_module_mtp.speculator import AscendMultiModuleMTPSpeculator
+
+    metadata = {"layer": object()}
+    params = [{"layer_name": "layer", "actual_seq_kvlen": [3]}]
+    speculator = SimpleNamespace(build_fia_params=MagicMock(return_value=params))
+    source = AscendMultiModuleMTPSpeculator.build_param_source(speculator, 2, metadata, False, num_tokens=4)
+
+    assert isinstance(source, SharedSource)
+    assert source.params is params
+    speculator.build_fia_params.assert_called_once_with(2, metadata, False, num_tokens=4)

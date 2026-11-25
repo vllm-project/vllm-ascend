@@ -17,6 +17,9 @@ from vllm_ascend.attention.sfa_kv_offload import AscendSFAKVOffloadImpl  # noqa:
 from vllm_ascend.distributed.kv_transfer.sparse_kv_offload import (  # noqa: E402
     sparse_kv_offload_manager as manager_module,
 )
+from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.request_identity import (  # noqa: E402
+    RequestIdentityRegistry,
+)
 from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_manager import (  # noqa: E402
     FSA_EXTERNAL_PLAN_READY_MARKER,
     FSA_PAIRED_SELECTION_COPY_MARKER,
@@ -56,6 +59,7 @@ def test_v2_sparse_offload_metadata_accepts_numpy_query_boundaries():
         np=np.full(8, -1, dtype=np.int32),
         copy_to_gpu=lambda count: copied.append(("token_to_req", count)),
     )
+    request_identity = RequestIdentityRegistry()
 
     update_sparse_kv_offload_metadata(
         num_tokens=3,
@@ -66,11 +70,80 @@ def test_v2_sparse_offload_metadata_accepts_numpy_query_boundaries():
         query_start_loc=np.array([0, 2, 3], dtype=np.int32),
         offload_req_ids_tensor=req_ids,
         offload_token_to_req=token_to_req,
+        request_identity=request_identity,
     )
 
-    assert req_ids.np.tolist() == [adler32(b"first"), adler32(b"second"), 0, 0]
+    assert req_ids.np.tolist() == [
+        request_identity.get_or_create("first"),
+        request_identity.get_or_create("second"),
+        0,
+        0,
+    ]
     assert token_to_req.np[:6].tolist() == [0, 0, 1, 0, 0, 0]
     assert copied == [("req_ids", 4), ("token_to_req", 6)]
+
+
+@pytest.mark.parametrize("capturing", [False, True])
+@pytest.mark.parametrize(
+    "next_request_id",
+    ["234054828099429543", "471754017250656876", "304399536143223879"],
+)
+def test_fallback_owner_change_invalidates_colliding_and_reincarnated_requests(capturing, next_request_id):
+    first_request_id = "234054828099429543"
+    assert adler32(first_request_id.encode()) == adler32(next_request_id.encode())
+    registry = RequestIdentityRegistry()
+    first_owner = registry.get_or_create(first_request_id)
+    impl = AscendSFAKVOffloadImpl.__new__(AscendSFAKVOffloadImpl)
+    topk = 4
+    status = torch.tensor([[[0, 1, 2, 3, 64]]], dtype=torch.int32)
+    membership = torch.zeros((1, FSA_SELECTION_MEMBERSHIP_STORAGE_INT16_COUNT), dtype=torch.int16)
+    control = membership[
+        :,
+        FSA_SELECTION_MEMBERSHIP_CONTROL_OFFSET_INT16_CNT : FSA_SELECTION_MEMBERSHIP_CONTROL_OFFSET_INT16_CNT
+        + FSA_SELECTION_MEMBERSHIP_CONTROL_INT16_COUNT,
+    ]
+    control.fill_(123)
+    last_req_ids = torch.tensor([first_owner], dtype=torch.int64)
+    metadata = SimpleNamespace(
+        req_ids_tensor=torch.tensor([first_owner], dtype=torch.int64),
+        token_to_req=torch.tensor([0], dtype=torch.int32),
+    )
+
+    def invalidate(seq_len, query_len):
+        impl._invalidate_fused_overlap_selection_rows(
+            status,
+            membership,
+            last_req_ids,
+            metadata,
+            num_tokens=1,
+            num_reqs=1,
+            topk_count=topk,
+            seq_lens=torch.tensor([seq_len], dtype=torch.int32),
+            cum_query_lens=torch.tensor([query_len], dtype=torch.int32),
+        )
+
+    with patch("vllm_ascend.attention.sfa_kv_offload._EXTRA_CTX", SimpleNamespace(capturing=capturing)):
+        # Same-owner decode preserves resident history and its membership data.
+        invalidate(seq_len=64, query_len=1)
+        assert status.tolist() == [[[0, 1, 2, 3, 64]]]
+        assert bool((control == 123).all())
+
+        # Same-owner MTP rejects only the rewritten suffix, keeping its prefix.
+        invalidate(seq_len=4, query_len=2)
+        assert status.tolist() == [[[0, 1, -1, -1, 64]]]
+        assert bool((control == -1).all())
+
+        status.copy_(torch.tensor([[[0, 1, 2, 3, 64]]], dtype=torch.int32))
+        control.fill_(123)
+        registry.remove(first_request_id)
+        next_owner = registry.get_or_create(next_request_id)
+        assert next_owner != first_owner
+        metadata.req_ids_tensor[0] = next_owner
+        invalidate(seq_len=64, query_len=1)
+
+    assert status.tolist() == [[[-1, -1, -1, -1, -1]]]
+    assert bool((control == -1).all())
+    assert last_req_ids.tolist() == [next_owner]
 
 
 @pytest.mark.parametrize("device_block_table", [False, True])

@@ -44,7 +44,6 @@ it does not forward requests between the proxy and PD.
 
 - Install compatible vLLM, vLLM Ascend, CANN, and Mooncake builds. See [Install Mooncake](../../tutorials/features/pd_disaggregation_mooncake_multi_node.md#install-mooncake)
   for installation guidance.
-- Use Model Runner V2 on E and PD: `VLLM_USE_V2_MODEL_RUNNER=1`.
 - Each producer must use TP=1, PP=1, and DP=1. Scale encoding by starting
   independent producer instances.
 - Reserve NPU memory for the model and EC pools, and provision Store storage
@@ -94,7 +93,7 @@ Before serving:
    `ASCEND_RT_VISIBLE_DEVICES` must use the device identifiers accepted by that
    installation; do not assume host physical IDs equal process-local IDs.
 2. For RoCE, check each selected device's IP, link, and peer reachability with
-   `hccn_tool` and the [A2/A3 communication checks](../../tutorials/features/pd_disaggregation_mooncake_multi_node.md#verify-multi-node-communication-environment).
+   `hccn_tool` and the [Verify Multi-Node Communication Environment](../../tutorials/features/pd_disaggregation_mooncake_multi_node.md#verify-multi-node-communication-environment).
 3. For HCCS/FabricMem, verify the fabric domain, device visibility, permissions,
    and the A3 communication checks. A missing RoCE IP does not by itself rule
    out HCCS/FabricMem. Conversely, topology output showing HCCS does not verify
@@ -127,7 +126,6 @@ model path or identifier on E and PD:
 
 ```bash
 export MODEL=Qwen/Qwen3.5-9B
-export VLLM_USE_V2_MODEL_RUNNER=1
 ```
 
 ### A2: EC and Store over RoCE
@@ -470,7 +468,7 @@ EOF
 Store reuse is an optional producer-side feature. Configure it only on the
 Encoders; PD keeps its EC consumer configuration. For independently managed
 capacity, prefer [standalone Store mode](#standalone-store-mode), following the
-[upstream vLLM cross-Encoder deployment pattern](https://github.com/vllm-project/vllm/blob/main/docs/features/cross_encoder_cache.md).
+[Upstream cross-Encoder cache guide](https://github.com/vllm-project/vllm/blob/main/docs/features/cross_encoder_cache.md).
 The embedded example below keeps storage in the Encoder processes.
 
 ### Start a RAM Store
@@ -736,7 +734,7 @@ supports E + PD only. See the upstream
 for registration and authentication.
 
 For Ascend P-to-D deployment, use the
-[Mooncake multi-node guide](../../tutorials/features/pd_disaggregation_mooncake_multi_node.md)
+[Mooncake PD disaggregation across nodes](../../tutorials/features/pd_disaggregation_mooncake_multi_node.md)
 and [Ascend EPD example](https://github.com/vllm-project/vllm-ascend/tree/main/examples/epd_disaggregated).
 Those examples are separate deployment paths; do not assume their proxy flags
 implement this guide's Mooncake EC routing contract.
@@ -745,6 +743,6 @@ implement this guide's Mooncake EC routing contract.
 
 - [Upstream ECMooncakeConnector documentation PR #59196](https://github.com/vllm-project/vllm/pull/59196)
 - [Upstream cross-Encoder cache guide](https://github.com/vllm-project/vllm/blob/main/docs/features/cross_encoder_cache.md)
-- [Ascend encoder-cache CPU offload](encoder_cache_cpu_offload.md) for shared CPU-memory caching with `ECCPUConnector`.
+- [Ascend encoder-cache CPU offload](encoder_cache_cpu_offload.md) for shared CPU-memory caching with `ECCPUConnector`
 - [Mooncake PD disaggregation on one node](../../tutorials/features/pd_disaggregation_mooncake_single_node.md)
 - [Mooncake PD disaggregation across nodes](../../tutorials/features/pd_disaggregation_mooncake_multi_node.md)
