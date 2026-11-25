@@ -11,7 +11,7 @@ import torch_npu
 from vllm.model_executor.model_loader.reload import direct as vllm_direct
 from vllm.model_executor.model_loader.reload.direct import direct_reload_enabled
 
-from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ, _should_trans_nz
+from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ
 
 # Keep upstream ND planning and its safety checks unchanged.
 _UPSTREAM_CHECKPOINT_VIEWS = vllm_direct._checkpoint_views
@@ -63,12 +63,7 @@ def refill_runtime_parameter(layer, name, tensor):
 
 
 def refill_runtime_tensor(layer, name, tensor):
-    """Retain an owned runtime allocation, including non-Module attention impls.
-
-    Store the physical-format tensor independently of public attributes: PWAL
-    may temporarily rebind an attribute.
-    Checkpoint parameters must use refill_runtime_parameter for ND staging.
-    """
+    """Retain an owned conversion allocation across direct reloads."""
     if not direct_reload_enabled():
         return tensor
     buffers = layer.__dict__.setdefault("_reload_runtime_buffers", {})
@@ -89,18 +84,12 @@ def refill_runtime_tensor(layer, name, tensor):
     return tensor
 
 
-def refill_nz_weight(layer, name, *, force: bool = True):
-    """Refill NZ storage, optionally preserving the configured cast policy.
-
-    Fused kernels require NZ unconditionally. Optional BF16 conversions pass
-    force=False so disabled/unsupported casts keep the original ND allocation.
-    """
+def refill_nz_weight(layer, name):
+    """Refill the NZ storage required by fused kernels."""
     # A tensor rebuilt with set_/as_strided can retain the storage's old
     # base-size descriptor. Clone before casting so NZ conversion uses the
     # final runtime shape rather than the checkpoint storage description.
     source = getattr(layer, name).data
-    if not force and not _should_trans_nz(source):
-        return
     if direct_reload_enabled():
         source = source.clone(memory_format=torch.contiguous_format)
     tensor = torch_npu.npu_format_cast(source, ACL_FORMAT_FRACTAL_NZ)

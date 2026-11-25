@@ -52,6 +52,7 @@ from vllm_ascend.ops.fused_moe.moe_utils import get_moe_num_logical_experts
 from vllm_ascend.ops.fused_moe.prepare_finalize import PrepareAndFinalizeWithAllGather
 from vllm_ascend.quantization.nz import NzCastSpec
 from vllm_ascend.quantization.quant_type import QuantType
+from vllm_ascend.utils import maybe_trans_nz
 
 
 class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
@@ -133,8 +134,8 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
                         "(FUSED_MC2) operator. Falling back to the original MoE "
                         "computation for this layer."
                     )
-                    refill_nz_weight(layer, "w13_weight", force=False)
-                    refill_nz_weight(layer, "w2_weight", force=False)
+                    layer.w13_weight.data = maybe_trans_nz(layer.w13_weight.data)
+                    layer.w2_weight.data = maybe_trans_nz(layer.w2_weight.data)
                 else:
                     for name in ("w13_weight", "w2_weight"):
                         refill_expert_list(layer, f"{name}_list", getattr(layer, name).data.unbind(dim=0))
@@ -144,8 +145,8 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
                             delattr(layer, name)
                     torch.npu.empty_cache()
         else:
-            refill_nz_weight(layer, "w13_weight", force=False)
-            refill_nz_weight(layer, "w2_weight", force=False)
+            layer.w13_weight.data = maybe_trans_nz(layer.w13_weight.data)
+            layer.w2_weight.data = maybe_trans_nz(layer.w2_weight.data)
 
     def apply(
         self,

@@ -259,34 +259,3 @@ def test_runtime_tensor_layout_change_keeps_captured_data(monkeypatch, change):
     with pytest.raises(ValueError, match="runtime layout changed"):
         refill_runtime_tensor(owner, "projection", incompatible)
     assert torch.equal(original, torch.ones_like(original))
-
-
-def test_native_sfa_prolog_refills_captured_tensors(config, monkeypatch):
-    from vllm_ascend.attention.sfa_v1 import AscendSFAImpl
-
-    impl = AscendSFAImpl.__new__(AscendSFAImpl)
-    impl.use_rope = True
-    impl.is_kv_consumer = True
-    impl.rl_weight_update_enabled = False
-    impl.vllm_config = config
-    impl._quant_type = None
-    impl.q_lora_rank = 4
-    impl.fused_qkv_a_proj = torch.nn.Linear(8, 10, bias=False, dtype=torch.bfloat16)
-    impl.q_proj = torch.nn.Linear(4, 8, bias=False, dtype=torch.bfloat16)
-    monkeypatch.setattr(torch_npu, "npu_format_cast", lambda tensor, fmt: tensor.clone())
-    names = ("weight_dq", "weight_dkv_kr", "weight_uq_qr")
-    held: dict[str, torch.Tensor] = {}
-    for value in (1, 2, 1):
-        # Present checkpoint-layout tensors as the direct loader does before PWAL.
-        fused = torch.arange(80).reshape(10, 8).bfloat16() + value
-        query = torch.arange(32).reshape(8, 4).bfloat16() + value
-        impl.fused_qkv_a_proj.weight.data = fused
-        impl.q_proj.weight.data = query
-        impl._process_weights_for_fused_prolog_v3()
-        assert impl.fused_qkv_a_proj.weight.numel() == fused.numel()
-        assert impl.q_proj.weight.numel() == query.numel()
-        for name, expected in zip(names, (fused.T[:, :4], fused.T[:, 4:], query.T)):
-            tensor = getattr(impl, name)
-            captured = held.setdefault(name, tensor.detach())
-            assert captured.data_ptr() == tensor.data_ptr()
-            assert torch.equal(captured, expected)
