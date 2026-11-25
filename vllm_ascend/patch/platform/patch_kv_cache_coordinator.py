@@ -23,6 +23,7 @@ from vllm.v1.core.kv_cache_utils import (
     KVCacheBlock,
 )
 from vllm.v1.core.single_type_kv_cache_manager import (
+    FullAttentionManager,
     MambaManager,
     SlidingWindowManager,
     get_manager_for_kv_cache_spec,
@@ -35,6 +36,7 @@ from vllm.v1.kv_cache_interface import (
     MambaSpec,
     UniformTypeKVCacheSpecs,
 )
+from vllm.v1.request import Request
 from vllm_ascend.core.kv_cache_interface import is_prefix_cacheable
 
 logger = logging.getLogger(__name__)
@@ -133,6 +135,13 @@ def _ds4_tail_alignment_divides_hash(kv_cache_config: KVCacheConfig, hash_block_
                 ratio = getattr(spec, "compress_ratio", 1) or 1
                 tail_alignment = lcm(tail_alignment, ratio)
     return hash_block_size % tail_alignment == 0
+
+
+# Bound on remembered shared-prefix junctions (one entry per request whose
+# lookup observed per-group hit divergence; popped after registration).
+# Requests aborted before the write path runs never free their entry, so
+# the table is cleared wholesale once the bound is reached.
+_SHARED_PREFIX_JUNCTION_TABLE_LIMIT = 1024
 
 
 class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
@@ -288,6 +297,14 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
                 )
                 for manager, g in zip(self.single_type_managers, kv_cache_config.kv_cache_groups)
             )
+        # Shared-prefix junction memory for fine-grained partial-hash hits:
+        # find_longest_cache_hit records the boundary where the finest group
+        # hit stopped while the reconciled hybrid hit fell short, keyed by
+        # the request's block_hashes list (the lookup receives no request
+        # identity; the list object is stable for the request's lifetime).
+        # cache_blocks consumes the entry to register a partial hash entry
+        # there, then pops it.
+        self._shared_prefix_junctions: dict = {}
         self.verify_and_split_kv_cache_groups()
 
         # Align the WRITE-path mask granularity (reachable_block_mask) with the
@@ -430,6 +447,95 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
         block_sizes = [self._get_effective_block_size(group.spec) for group in self.attention_groups]
         self.lcm_block_size = lcm(*block_sizes)
 
+    def cache_blocks(self, request: Request, num_computed_tokens: int) -> None:
+        """Cache the request's blocks, then register the shared-prefix junction.
+
+        The upstream write path only registers a partial entry at each
+        request's own prompt endpoint, so traffic that shares a long prefix
+        but diverges mid-block can only hit whole blocks (e.g. DeepSeek-V4
+        C128 groups with 4096-token blocks hit 4096 of a 6912-token shared
+        prefix). After the upstream registration completes, re-register a
+        partial entry at the junction this request's lookup remembered during
+        hit reconciliation.
+        """
+        super().cache_blocks(request, num_computed_tokens)
+        if not self.enable_partial_hash_hits:
+            return
+        self._register_shared_prefix_junctions(request, num_computed_tokens)
+
+    def _register_shared_prefix_junctions(
+        self, request: Request, num_computed_tokens: int
+    ) -> None:
+        """Register partial entries at the remembered shared-prefix junction."""
+        junction = self._shared_prefix_junctions.get(id(request.block_hashes))
+        if not junction:
+            return
+        registered = False
+        for group_id, manager in enumerate(self.single_type_managers):
+            if not manager.enable_caching:
+                continue
+            # Only full-attention groups whose blocks are coarser than the
+            # hash granularity need a junction entry: their whole-block
+            # hits are pinned to whole blocks, while finer groups already
+            # hit (and register) at their own granularity.
+            if not isinstance(manager, FullAttentionManager):
+                continue
+            if manager.block_size <= self.hash_block_size:
+                continue
+            num_tokens = self.get_num_cacheable_tokens(num_computed_tokens, group_id)
+            if junction >= num_tokens:
+                # The junction prefix is not final at this write; retry on
+                # later steps once more tokens are computed.
+                continue
+            if self._cache_junction_partial_block(manager, request, junction):
+                registered = True
+        if registered:
+            # The junction hash is registered now; requests sharing the
+            # prefix will hit it on the read path, and this request must
+            # not re-register the entry on its later writes.
+            self._shared_prefix_junctions.pop(id(request.block_hashes), None)
+
+    def _cache_junction_partial_block(
+        self, manager: FullAttentionManager, request: Request, junction: int
+    ) -> bool:
+        """Register one partial prefix-cache entry at ``junction`` tokens."""
+        if junction % self.hash_block_size != 0:
+            return False
+        if junction % manager.block_size == 0:
+            # Whole-block boundary: already covered by the full-block hash.
+            return False
+        if junction // self.hash_block_size > len(request.block_hashes):
+            return False
+        blocks = manager.req_to_blocks.get(request.request_id)
+        if not blocks:
+            return False
+        block_idx = junction // manager.block_size
+        if block_idx >= len(blocks):
+            return False
+        blk = blocks[block_idx]
+        if blk.is_null:
+            return False
+        if blk.block_hash_num_tokens == junction:
+            # Already registered at exactly this boundary (e.g. the prompt
+            # endpoint registered by the upstream write path).
+            return False
+        manager.block_pool.cache_partial_block(
+            request=request,
+            block=blk,
+            num_tokens=junction,
+            kv_cache_group_id=manager.kv_cache_group_id,
+            block_size=manager.block_size,
+        )
+        logger.info(
+            "Registered shared-prefix junction partial entry: "
+            "request_id=%s, group_id=%d, junction_tokens=%d, block_size=%d",
+            request.request_id,
+            manager.kv_cache_group_id,
+            junction,
+            manager.block_size,
+        )
+        return True
+
     def find_longest_cache_hit(
         self,
         block_hashes: list[BlockHash],
@@ -549,6 +655,24 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
                 if (blks := hit_blocks_by_group[group_id]) is not None:
                     del blks[num_blocks:]
                     hit_length_by_group[group_id] = hit_length
+
+        if self.enable_partial_hash_hits and longest_hit_length > hit_length:
+            # Shared-prefix junction: some group hit at ``longest_hit_length``
+            # (the upstream ``shared_prefix_boundary``: the reconciled
+            # ``hit_length`` plus the returned uncached common prefix) while
+            # the reconciled hybrid hit stopped at ``hit_length``. Remember it
+            # so the write path can register a partial entry at that
+            # junction; upstream only registers each request's own prompt
+            # endpoint, so cross-request traffic sharing a long prefix but
+            # diverging mid-block (DeepSeek-V4 C128) can otherwise only hit
+            # whole blocks. Keyed by id() of the request's block_hashes list
+            # (lists are unhashable; the lookup receives no request identity,
+            # and the list object is stable for the request's lifetime).
+            if len(self._shared_prefix_junctions) >= _SHARED_PREFIX_JUNCTION_TABLE_LIMIT:
+                # Requests aborted before any write never free their entry;
+                # drop the whole table rather than grow without bound.
+                self._shared_prefix_junctions.clear()
+            self._shared_prefix_junctions[id(block_hashes)] = longest_hit_length
 
         cache_hit_blocks = tuple(blocks if blocks is not None else [] for blocks in hit_blocks_by_group)
         return cache_hit_blocks, hit_length, longest_hit_length - hit_length
