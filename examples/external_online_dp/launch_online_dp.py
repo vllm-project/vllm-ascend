@@ -23,7 +23,6 @@ def parse_args():
     parser.add_argument("--dp-rpc-port", type=int, default=12345, help="DP RPC port.")
     parser.add_argument("--vllm-start-port", type=int, default=9000, help="First API port on this node.")
     parser.add_argument("--template", "--script", default="./run_dp_template.sh", help="Shell template path.")
-    parser.add_argument("--device-ids", help="Ordered, comma-separated device IDs to split across local ranks.")
     args = parser.parse_args()
 
     if args.dp_size_local == -1:
@@ -34,15 +33,6 @@ def parse_args():
         parser.error("Local DP ranks exceed the global DP range.")
     if not os.path.isfile(args.template):
         parser.error(f"Template does not exist: {args.template}")
-    num_devices = args.dp_size_local * args.tp_size * args.pcp_size * args.pp_size
-    if args.device_ids is not None:
-        try:
-            ids = [int(value) for value in args.device_ids.split(",")]
-        except ValueError:
-            parser.error("--device-ids must contain comma-separated integers.")
-        if len(ids) != num_devices or len(set(ids)) != num_devices or min(ids) < 0:
-            parser.error(f"--device-ids must contain {num_devices} distinct non-negative IDs.")
-        args.device_ids = list(map(str, ids))
     return args
 
 
@@ -53,21 +43,19 @@ def handle_sigterm(signum, frame):
 def main():
     args = parse_args()
     devices_per_rank = args.tp_size * args.pcp_size * args.pp_size
-    device_ids = args.device_ids or list(map(str, range(args.dp_size_local * devices_per_rank)))
     processes = []
     try:
         signal.signal(signal.SIGTERM, handle_sigterm)
         for i in range(args.dp_size_local):
             dp_rank = args.dp_rank_start + i
             port = args.vllm_start_port + i
-            start = i * devices_per_rank
-            devices = ",".join(device_ids[start : start + devices_per_rank])
+            devices = ",".join(str(x) for x in range(i * devices_per_rank, (i + 1) * devices_per_rank))
             command = [
                 "bash",
                 "-o",
                 "pipefail",
                 args.template,
-                devices,  # $1: this rank's device slice
+                devices,  # $1: visible devices
                 str(port),  # $2: API port
                 str(args.dp_size),  # $3: global DP size
                 str(dp_rank),  # $4: global DP rank
@@ -77,8 +65,6 @@ def main():
                 str(args.pcp_size),  # $8: PCP
                 str(args.pp_size),  # $9: PP
             ]
-            if args.device_ids is not None:
-                command.append(devices)  # ${10}: explicit device IDs for this rank
 
             print(f"DP rank={dp_rank}, devices={devices}, API port={port}", flush=True)
             # Start all local ranks before waiting; each rank owns a process group.

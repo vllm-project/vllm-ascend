@@ -507,10 +507,10 @@ Modify `run_dp_template.sh` on each node.
 | `--dp-address` | `$5` / `--data-parallel-address` | DP master address. | P: `192.0.0.1` or `192.0.0.2`; D: `192.0.0.3` | The IP address must be reachable and identical within the same DP group. |
 | `--dp-rpc-port` | `$6` / `--data-parallel-rpc-port` | DP master RPC port. | `12321` | Free, reachable port; identical within a DP group. |
 | `--vllm-start-port` | `$2` / `--port` = `vllm-start-port + i` | First local API port. | `7100`, then `7101`, ... | Consecutive free ports; must match the proxy configuration. |
-| `ASCEND_RT_VISIBLE_DEVICES` (environment variable) | Set to `$1` by default. Inherited when `--device-ids` is supplied. | NPUs visible to each vLLM process. By default, the launcher passes a consecutive per-rank slice in `$1`. | Default rank slice: `0,1`. Inherited node list: `0,1,...,15`. | Use NPU IDs available on the node. |
-| `--device-ids` (optional launcher argument) | `${10}` → `vllm serve --device-ids` | Ordered device list sliced by local DP rank. | Launcher: `8,9,0,1`. TP2 rank slices: `8,9` and `0,1`. | Provide `dp-size-local × tp-size × pcp-size × pp-size` distinct IDs. When visibility is set, use zero-based indices into the inherited list. |
+| `ASCEND_RT_VISIBLE_DEVICES` (environment variable) | Set to `$1` by the example template. | NPUs visible to each vLLM process. The launcher passes a consecutive per-rank slice in `$1`. | TP2 rank slices: `0,1` and `2,3`. | Use NPU IDs available on the node. |
+| `--device-ids` (optional `vllm serve` argument) | Pass directly to each manually launched rank. | Devices selected by that rank. | TP2 rank lists: `8,9` and `0,1`. | When visibility is set, use zero-based indices into that process's visible list. |
 
-#### Select devices for each DP rank
+#### Manually launch DP ranks with device IDs
 
 `ASCEND_RT_VISIBLE_DEVICES` and `--device-ids` can be used together. When
 `ASCEND_RT_VISIBLE_DEVICES` is set, integer `--device-ids` are zero-based
@@ -522,36 +522,34 @@ NPUs 8 and 9 for a TP2 rank:
 | `0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15` | `8,9` | `8,9` |
 | `8,9` | `0,1` | `8,9` |
 
-The [example template](https://github.com/vllm-project/vllm-ascend/blob/main/examples/external_online_dp/run_dp_template.sh) defaults to setting `ASCEND_RT_VISIBLE_DEVICES="$1"` for each rank. When the launcher receives `--device-ids`, it passes each rank's slice in `${10}`. The template keeps the inherited visibility and passes that slice to `vllm serve --device-ids`. The launcher takes a list for all local ranks. Each `vllm serve` invocation takes only its own rank's slice.
+**On the same node, independently launched ranks must select disjoint NPU
+sets.** Check the selected NPUs after applying each process's visibility
+mapping. With the same visible list, `8,9` and `9,10` overlap on NPU 9 even
+though the arguments differ. Passing the same full device list to every rank
+can bind multiple ranks to the same NPU. See
+[External Load Balancing in vLLM](https://docs.vllm.ai/en/stable/serving/data_parallel_deployment/#external-load-balancing).
 
-For example, after configuring the template for your model and node, start two TP2 ranks with the following device order:
+For example, launch two TP2 Decode ranks manually with a shared visible list.
+Set `MODEL_PATH`, configure networking as in the role template below, and set
+`KV_TRANSFER_CONFIG` to the Decode connector configuration for your
+deployment, with Decode DP2 and TP2. Add any other model-specific options from
+the role template.
 
 ```bash
-ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15 \
-  python launch_online_dp.py \
-  --dp-size 2 --dp-size-local 2 --tp-size 2 \
-  --device-ids 8,9,0,1 --dp-address 192.0.0.1
+export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15
+common_args=(
+  --host 0.0.0.0 --tensor-parallel-size 2 --data-parallel-size 2 --enable-expert-parallel
+  --data-parallel-address 192.0.0.3 --data-parallel-rpc-port 12321
+  --kv-transfer-config "$KV_TRANSFER_CONFIG"
+)
+vllm serve "$MODEL_PATH" "${common_args[@]}" --data-parallel-rank 0 --port 7100 --device-ids 8,9 &
+vllm serve "$MODEL_PATH" "${common_args[@]}" --data-parallel-rank 1 --port 7101 --device-ids 0,1 &
+wait
 ```
 
-Rank 0 receives `--device-ids 8,9` and rank 1 receives `--device-ids 0,1`. Each independently launched rank on the same node needs a disjoint slice. See [External Load Balancing in vLLM](https://docs.vllm.ai/en/stable/serving/data_parallel_deployment/#external-load-balancing).
-
-To use the first row's configuration with the inline P/D templates below,
-export the node-wide visible list in the launcher environment. Update the
-role template to inherit that list and pass the rank's slice:
-
-```diff
--export ASCEND_RT_VISIBLE_DEVICES=$1
- vllm serve /path_to_weight/DeepSeek-r1_w8a8_mtp \
-+  --device-ids "${10}" \
-   --host 0.0.0.0 \
-```
-
-Pass `--device-ids` to the launcher whenever you use this adapted inline
-template. For the second row, keep `ASCEND_RT_VISIBLE_DEVICES="$1"` in
-the role template and use
-`--device-ids 0,1` when `$1` is `8,9`. With that two-device visibility list,
-`--device-ids 8,9` would be out of range. You can also omit `--device-ids` to
-use the two visible devices for TP2.
+Register both Decode endpoints with the PD proxy. For launcher-managed
+startup, the templates below set `ASCEND_RT_VISIBLE_DEVICES="$1"` for each
+rank and can omit `--device-ids`.
 
 See [NPU Device Selection](../../user_guide/configuration/device_selection.md) for the mapping rules.
 

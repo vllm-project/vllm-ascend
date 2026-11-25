@@ -1,4 +1,0 @@
-pr: 23239
-entries:
-  - category: documentation
-    text: The Mooncake PD deployment guide and launcher example show how to pass an ordered device list to separately launched DP ranks using --device-ids.
