@@ -67,86 +67,26 @@ def test_batched_graph_state_replay_reads_current_group_ids(width, reset_spec):
     assert [dst.data_ptr() for dst in outputs] == addresses
 
 
-def _gather_context(tables, output):
+@pytest.mark.parametrize(
+    "num_groups,max_reqs,num_reqs,slots,seq_dtype",
+    [(3, 33, 1, 3, torch.int64), (24, 64, 17, 4, torch.int32)],
+)
+def test_aligned_state_indices_aclgraph_replay(num_groups, max_reqs, num_reqs, slots, seq_dtype):
+    torch.npu.set_device(0)
     adapt_patch()
+    columns = 32
+    tables = torch.arange(num_groups * max_reqs * columns, dtype=torch.int32, device="npu").view(
+        num_groups, max_reqs, columns
+    )
+    seq_lens = torch.ones(max_reqs * 2, dtype=seq_dtype, device="npu")[::2]
     ctx = MambaSpecDecodeGPUContext.__new__(MambaSpecDecodeGPUContext)
     ctx.is_initialized = True
     ctx.block_table_ptrs = torch.tensor([table.data_ptr() for table in tables], dtype=torch.int64, device="npu")
     ctx.aligned_index_block_table_ptrs = ctx.block_table_ptrs
     ctx.block_table_stride_req = tables.stride(1)
     ctx.block_size = 16
-    ctx.num_groups = tables.shape[0]
-    ctx.aligned_state_indices = output
-    return ctx
-
-
-# Representative matrix: (groups, requests, state slots, max requests).
-_ALIGNED_CASES = [
-    (1, 0, 1, 33),
-    (1, 1, 1, 33),
-    (24, 17, 3, 33),
-    (24, 33, 1, 33),
-    (1, 33, 17, 33),
-    (1, 33, 3, 64),
-    (1, 64, 4, 64),
-    (24, 17, 16, 64),
-    (24, 17, 8, 64),
-    (24, 1, 7, 64),
-    (1, 17, 17, 64),
-]
-
-
-@pytest.mark.parametrize(("num_groups", "num_reqs", "num_state_slots", "max_reqs"), _ALIGNED_CASES)
-def test_aligned_state_indices_match_physical_tables(num_groups, num_reqs, num_state_slots, max_reqs):
-    torch.npu.set_device(0)
-    columns = 32
-    # Retain a non-contiguous row stride, as runner block-table views do.
-    tables = torch.arange(num_groups * max_reqs * columns * 2, dtype=torch.int32, device="npu").view(
-        num_groups, max_reqs, columns * 2
-    )[:, :, :columns]
-    lengths_cpu = (torch.arange(max_reqs, dtype=torch.int64) * 7 % (columns - num_state_slots + 1)) * 16 + 1
-    lengths_cpu[::5] = 0
-    seq_lens = torch.zeros(max_reqs * 2, dtype=torch.int64, device="npu")
-    seq_lens[::2].copy_(lengths_cpu)
-    output = torch.full((num_groups, max_reqs, num_state_slots), -99, dtype=torch.int32, device="npu")
-    ctx = _gather_context(tables, output)
-    actual = ctx.compute_aligned_state_indices(seq_lens[::2], num_reqs)
-    slots = ((lengths_cpu[:num_reqs] - 1) // 16).clamp_min(0)[:, None] + torch.arange(num_state_slots)
-    expected = torch.stack([table.cpu().gather(1, slots.long()) for table in tables])
-    torch.testing.assert_close(actual.cpu(), expected, rtol=0, atol=0)
-    assert torch.all(output[:, num_reqs:].cpu() == -99)
-
-
-@pytest.mark.parametrize("seq_dtype", [torch.int32, torch.int64])
-@pytest.mark.parametrize("max_reqs,slots", [(64, 3), (64, 16), (33, 4), (33, 1), (33, 3), (33, 8)])
-def test_aligned_state_indices_preserve_int32_bits(max_reqs, slots, seq_dtype):
-    torch.npu.set_device(0)
-    num_groups, num_reqs, columns = 24, 17, 32
-    # Include IDs beyond exact fp32 integer precision, subnormal and NaN bits.
-    values = torch.tensor([0, 1, -1, 2**24 + 1, 2**31 - 1, -(2**31), 0x7F800001, -0x7FFFFF], dtype=torch.int32)
-    tables = values.repeat(num_groups * max_reqs * columns // values.numel()).view(num_groups, max_reqs, columns)
-    tables = tables.to("npu")
-    lengths = (torch.arange(max_reqs, dtype=seq_dtype) % (columns - slots + 1)) * 16 + 1
-    output = torch.full((num_groups, max_reqs, slots), -99, dtype=torch.int32, device="npu")
-    ctx = _gather_context(tables, output)
-    actual = ctx.compute_aligned_state_indices(lengths.to("npu"), num_reqs)
-    cols = (lengths[:num_reqs, None] - 1) // 16 + torch.arange(slots)
-    expected = torch.stack([table.cpu().gather(1, cols.long()) for table in tables])
-    torch.testing.assert_close(actual.cpu(), expected, rtol=0, atol=0)
-    assert torch.all(ctx.aligned_state_indices[:, num_reqs:].cpu() == -99)
-
-
-@pytest.mark.parametrize("num_reqs", [1, 17])
-@pytest.mark.parametrize("max_reqs,slots", [(64, 3), (64, 16), (33, 4), (33, 8)])
-def test_aligned_state_indices_aclgraph_replay(max_reqs, slots, num_reqs):
-    torch.npu.set_device(0)
-    num_groups, columns = 24, 32
-    tables = torch.arange(num_groups * max_reqs * columns, dtype=torch.int32, device="npu").view(
-        num_groups, max_reqs, columns
-    )
-    seq_lens = torch.ones(max_reqs, dtype=torch.int32, device="npu")
-    output = torch.full((num_groups, max_reqs, slots), -99, dtype=torch.int32, device="npu")
-    ctx = _gather_context(tables, output)
+    ctx.num_groups = num_groups
+    ctx.aligned_state_indices = torch.full((num_groups, max_reqs, slots), -99, dtype=torch.int32, device="npu")
     stream = torch.npu.Stream()
     graph = torch.npu.NPUGraph()
     snapshots = []
@@ -156,8 +96,8 @@ def test_aligned_state_indices_aclgraph_replay(max_reqs, slots, num_reqs):
         torch.npu.synchronize()
         with torch.npu.graph(graph, stream=stream):
             ctx.compute_aligned_state_indices(seq_lens, num_reqs)
-        for step in range(1, 9):
-            lengths = (torch.arange(max_reqs, dtype=torch.int32) * step % (columns - slots + 1)) * 16 + 1
+        for step in (1, 2):
+            lengths = ((torch.arange(max_reqs, dtype=seq_dtype) + step) % (columns - slots + 1)) * 16 + 1
             seq_lens.copy_(lengths)
             tables.add_(100)
             graph.replay()

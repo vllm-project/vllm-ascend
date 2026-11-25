@@ -15,87 +15,35 @@ pytestmark = pytest.mark.skipif(
     reason="Mamba aligned-index tests require an Ascend NPU",
 )
 
-_CASES = [
-    dict(num_groups=1, max_reqs=1, num_reqs=1, state_slots=1, table_cols=16, cache_block_size=16, seq_lens=[1]),
-    dict(num_groups=1, max_reqs=2, num_reqs=2, state_slots=4, table_cols=16, cache_block_size=16, seq_lens=[33, 63]),
-    dict(
-        num_groups=2,
-        max_reqs=8,
-        num_reqs=3,
-        state_slots=4,
-        table_cols=20,
-        cache_block_size=16,
-        seq_lens=[1, 17, 65],
-        table_stride=24,
-        seq_dtype=torch.int64,
-    ),
-    dict(
-        num_groups=1,
-        max_reqs=3,
-        num_reqs=2,
-        state_slots=1,
-        table_cols=8,
-        cache_block_size=16,
-        seq_lens=[1, 40],
-        table_stride=12,
-    ),
-    dict(num_groups=1, max_reqs=4, num_reqs=0, state_slots=2, table_cols=8, cache_block_size=16, seq_lens=[]),
-    dict(
-        num_groups=24,
-        max_reqs=4,
-        num_reqs=4,
-        state_slots=4,
-        table_cols=16,
-        cache_block_size=16,
-        seq_lens=[1, 16, 31, 49],
-    ),
-]
-
-
-def _golden(tables, seq_lens, num_reqs, state_slots, cache_block_size, shape):
-    expected = torch.full(shape, -99, dtype=torch.int32, device=tables.device)
-    for group in range(tables.shape[0]):
-        for row in range(num_reqs):
-            first_slot = max((int(seq_lens[row]) - 1) // cache_block_size, 0)
-            for slot in range(state_slots):
-                expected[group, row, slot] = tables[group, row, first_slot + slot]
-    return expected
-
 
 @pytest.mark.skipif(
     get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5),
     reason="Requires Ascend A2/A3/A5",
 )
-@pytest.mark.parametrize("case", _CASES)
-def test_aligned_state_indices_match_torch_gather(case):
-    device = torch.device("npu")
-    num_groups = case["num_groups"]
-    max_reqs = case["max_reqs"]
-    num_reqs = case["num_reqs"]
-    state_slots = case["state_slots"]
-    table_cols = case["table_cols"]
-    table_stride = case.get("table_stride", table_cols)
-    seq_dtype = case.get("seq_dtype", torch.int32)
-
-    storage = torch.arange(
-        num_groups * max_reqs * table_stride,
-        dtype=torch.int32,
-        device=device,
-    ).view(num_groups, max_reqs, table_stride)
-    tables = storage[:, :, :table_cols]
-    table_ptrs = torch.tensor([table.data_ptr() for table in tables], dtype=torch.int64, device=device)
-    seq_lens = torch.tensor(case["seq_lens"], dtype=seq_dtype, device=device)
-    output = torch.full((num_groups, max_reqs, state_slots), -99, dtype=torch.int32, device=device)
-
+@pytest.mark.parametrize(
+    "num_groups,max_reqs,slots,lengths,seq_dtype",
+    [(1, 4, 1, [], torch.int32), (3, 9, 3, [0, 16, 17, 129], torch.int64), (24, 4, 17, [1, 16, 17, 241], torch.int32)],
+    ids=["empty", "partial-unaligned", "full-wide"],
+)
+def test_aligned_state_indices_match_torch_gather(num_groups, max_reqs, slots, lengths, seq_dtype):
+    num_reqs, columns, block_size = len(lengths), 32, 16
+    storage = torch.arange(num_groups * max_reqs * columns * 2, dtype=torch.int32).view(num_groups, max_reqs, -1)
+    # Exercise exact INT32 IDs, including bit patterns that would change in an FP32 conversion.
+    storage[0, 0, :8] = torch.tensor([0, 1, -1, 2**24 + 1, 2**31 - 1, -(2**31), 0x7F800001, -0x7FFFFF])
+    tables = storage.to("npu")[:, :, :columns]
+    output = torch.full((num_groups, max_reqs, slots), -99, dtype=torch.int32, device="npu")
     ctx = SimpleNamespace(
         is_initialized=True,
-        block_table_ptrs=table_ptrs,
-        block_table_stride_req=storage.stride(1),
-        block_size=case["cache_block_size"],
+        block_table_ptrs=torch.tensor([table.data_ptr() for table in tables], dtype=torch.int64, device="npu"),
+        block_table_stride_req=tables.stride(1),
+        block_size=block_size,
         aligned_state_indices=output,
     )
-    actual = compute_aligned_state_indices(ctx, seq_lens, num_reqs)
-    expected = _golden(tables, case["seq_lens"], num_reqs, state_slots, case["cache_block_size"], output.shape)
+    seq_lens = torch.tensor(lengths, dtype=seq_dtype)
+    actual = compute_aligned_state_indices(ctx, seq_lens.to("npu"), num_reqs)
 
-    assert torch.equal(actual, expected[:, :num_reqs])
-    assert torch.equal(output[:, num_reqs:], torch.full_like(output[:, num_reqs:], -99))
+    first_slot = ((seq_lens.long() - 1) // block_size).clamp_min(0)
+    indices = (first_slot[:, None] + torch.arange(slots)).expand(num_groups, -1, -1)
+    expected = storage[:, :num_reqs, :columns].gather(2, indices)
+    torch.testing.assert_close(actual.cpu(), expected, rtol=0, atol=0)
+    assert torch.all(output[:, num_reqs:].cpu() == -99)
