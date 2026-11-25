@@ -25,7 +25,6 @@ from vllm.model_executor.layers.fused_moe import FusedMoEConfig
 from vllm_ascend.ascend_config import _CANN_OPS_TRANSFORMER_AVAILABLE, get_ascend_config
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX, MoECommType
 from vllm_ascend.distributed.parallel_state import get_mc2_group
-from vllm_ascend.ops.activation import SituActivationConfig
 from vllm_ascend.ops.fused_moe import comm_utils
 from vllm_ascend.ops.fused_moe.moe_mlp import unified_apply_mlp
 from vllm_ascend.ops.fused_moe.moe_runtime_args import (
@@ -283,10 +282,11 @@ class FusedMC2CommImpl(MoECommMethod):
 
     def __init__(self, moe_config):
         super().__init__(moe_config)
+        self.mega_moe_symm_buffer = None
+        self._mega_moe_supports_situ = False
         if _CANN_OPS_TRANSFORMER_AVAILABLE:
-            self.mega_moe_symm_buffer = None
             self.get_symm_buffer_for_mega_moe, self.mega_moe = comm_utils.load_cann_mega_moe_ops()
-
+            self._mega_moe_supports_situ = comm_utils.cann_mega_moe_supports_situ(self.mega_moe)
         if get_ascend_config().enable_fused_mc2 == 1:
             self.expert_token_nums = torch.zeros([self.moe_config.num_local_experts], dtype=torch.int32, device="npu")
         else:
@@ -368,7 +368,6 @@ class FusedMC2CommImpl(MoECommMethod):
             getattr(self.token_dispatcher, "ep_world_size", "?"),
             self.token_dispatcher.global_bs,
         )
-
         return self.get_symm_buffer_for_mega_moe(
             group,
             num_experts,
@@ -410,8 +409,29 @@ class FusedMC2CommImpl(MoECommMethod):
         # CheckWeight2Input). The op prototype also REQUIRES FRACTAL_NZ per expert. The W4A8 quant
         # method therefore builds per-expert int8 + FRACTAL_NZ lists (cann_mega_moe_*_weight_list) and
         # they are passed through as-is here. W8A8 weights are already int8 + FRACTAL_NZ, also as-is.
-        weight_scales1 = fused_experts_input.weights.w1_scale
-        weight_scales2 = fused_experts_input.weights.w2_scale
+        weight_scales1 = (
+            None if fused_experts_input.weights.w1_scale is None else to_list(fused_experts_input.weights.w1_scale)
+        )
+        weight_scales2 = (
+            None if fused_experts_input.weights.w2_scale is None else to_list(fused_experts_input.weights.w2_scale)
+        )
+        # MegaMoe requires per-expert weight scales to be 1-D. The W4A8 method
+        # squeezes w13 scales but leaves w2 scales as [1, hidden]; drop the
+        # leading singleton dim so CheckWeightScaleInput passes. Guarded to the
+        # [1, N] per-channel case to avoid flattening genuine per-group scales.
+        if weight_scales1 is not None:
+            weight_scales1 = [t.squeeze(0) if (t.dim() == 2 and t.shape[0] == 1) else t for t in weight_scales1]
+        if weight_scales2 is not None:
+            weight_scales2 = [t.squeeze(0) if (t.dim() == 2 and t.shape[0] == 1) else t for t in weight_scales2]
+
+        activation, activation_params = comm_utils.get_cann_mega_moe_activation_settings(
+            fused_experts_input.activation
+        )
+        if activation == "situglu" and not self._mega_moe_supports_situ:
+            raise RuntimeError(
+                "Kimi K3 MegaMoe requires a cann_ops_transformer build with SiTUGLU support "
+                "(ops-transformer commit 0a5860c or newer)."
+            )
 
         activation_clamp = fused_experts_input.swiglu_limit if fused_experts_input.swiglu_limit > 0 else None
         x_active_mask = None
@@ -430,6 +450,10 @@ class FusedMC2CommImpl(MoECommMethod):
         l1_bias = fused_experts_input.weights.w1_scale_bias
         l2_bias = fused_experts_input.weights.w2_scale_bias
 
+        activation_kwargs = {}
+        if self._mega_moe_supports_situ:
+            activation_kwargs["activation"] = activation
+            activation_kwargs["activation_params"] = activation_params
         dispatch_quant_mode, dispatch_quant_out_dtype, weight_type = comm_utils._get_cann_mega_moe_quant_settings(
             fused_experts_input.quant.quant_type
         )
@@ -457,6 +481,7 @@ class FusedMC2CommImpl(MoECommMethod):
             l2_bias=l2_bias,
             x_active_mask=x_active_mask,
             activation_clamp=activation_clamp,
+            **activation_kwargs,
             weight1_type=weight_type,
             weight2_type=weight_type,
         )
@@ -471,11 +496,6 @@ class FusedMC2CommImpl(MoECommMethod):
         self,
         fused_experts_input: MoEFusedExpertsInput,
     ):
-        # SiTU is implemented by the generic MoE path. Keep other activations
-        # on the upstream MegaMoE path, including unquantized shared experts.
-        if isinstance(fused_experts_input.activation, SituActivationConfig):
-            return super().fused_experts(fused_experts_input)
-
         assert isinstance(self.token_dispatcher, TokenDispatcherWithMC2), (
             "token_dispatcher must be an instance of TokenDispatcherWithMC2."
         )
