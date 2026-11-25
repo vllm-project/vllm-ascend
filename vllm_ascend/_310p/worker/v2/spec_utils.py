@@ -6,6 +6,9 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
+from contextvars import ContextVar, Token
+from functools import lru_cache
 from typing import Any
 
 import numpy as np
@@ -13,6 +16,55 @@ import torch
 from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers
 
 from vllm_ascend._310p.worker.v2.sample.random_sample import random_sample
+
+_ASYNC_MTP_STATE: ContextVar[tuple[Callable[[], None] | None, torch.Tensor] | None] = ContextVar(
+    "310p_async_mtp_state",
+    default=None,
+)
+
+
+def get_async_mtp_state() -> tuple[Callable[[], None] | None, torch.Tensor] | None:
+    return _ASYNC_MTP_STATE.get()
+
+
+def set_async_mtp_state(
+    state: tuple[Callable[[], None] | None, torch.Tensor] | None,
+) -> Token[tuple[Callable[[], None] | None, torch.Tensor] | None]:
+    return _ASYNC_MTP_STATE.set(state)
+
+
+def reset_async_mtp_state(
+    token: Token[tuple[Callable[[], None] | None, torch.Tensor] | None],
+) -> None:
+    _ASYNC_MTP_STATE.reset(token)
+
+
+@lru_cache(maxsize=16)
+def cached_offsets(device: torch.device, capacity: int) -> torch.Tensor:
+    return torch.arange(capacity, device=device)
+
+
+@lru_cache(maxsize=64)
+def cached_layout(
+    device: torch.device,
+    num_reqs: int,
+    width: int,
+    qsl_dtype: torch.dtype,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    bounds = torch.arange(0, (num_reqs + 1) * width, width)
+    return bounds.to(device, dtype=qsl_dtype), bounds[1:].to(device)
+
+
+def copy_prefix_310p(buffer: torch.Tensor, values: torch.Tensor, offsets: torch.Tensor) -> None:
+    values = values.reshape(-1)
+    count = values.numel()
+    if count == 0:
+        return
+    if buffer.device.type == "npu" and (count * buffer.element_size()) % 32 != 0:
+        # An unaligned 310P prefix copy can overwrite the next padded slots.
+        buffer.index_copy_(0, offsets[:count], values)
+    else:
+        buffer[:count].copy_(values)
 
 
 def expand_idx_mapping_cpu(
@@ -312,6 +364,51 @@ def prepare_prefill_inputs_cpu(
     Full-buffer ``.cpu()`` of target/draft tensors was a major 310P MTP cost.
     """
     del max_num_reqs
+    async_state = _ASYNC_MTP_STATE.get()
+    if async_state is not None:
+        _, last = async_state
+        n = input_batch.num_reqs
+        num_tokens = input_batch.num_tokens
+        width = num_tokens // n
+        device = input_buffers.input_ids.device
+        offsets = cached_offsets(device, input_buffers.input_ids.numel())[:num_tokens]
+        qsl, ends = cached_layout(device, n, width, input_buffers.query_start_loc.dtype)
+        rejected = num_rejected[:n].long()
+        kept_last = ends - 1 - rejected
+        kept_width = width - 1 - rejected
+        column = offsets[:width].reshape(1, width)
+        shift = input_batch.input_ids.index_select(0, (offsets + 1).clamp_max(num_tokens - 1))
+        keep = column < kept_width.reshape(n, 1)
+        replace_last = column == kept_width.reshape(n, 1)
+        old_ids = input_buffers.input_ids[:num_tokens].reshape(n, width)
+        copy_prefix_310p(
+            input_buffers.input_ids,
+            torch.where(
+                keep,
+                shift.reshape(n, width),
+                torch.where(replace_last, last.reshape(n, 1).to(old_ids.dtype), old_ids),
+            ),
+            offsets,
+        )
+        old_pos = input_buffers.positions[:num_tokens].reshape(n, width)
+        copy_prefix_310p(
+            input_buffers.positions,
+            torch.where(
+                keep | replace_last,
+                input_batch.positions[:num_tokens].reshape(n, width),
+                old_pos,
+            ),
+            offsets,
+        )
+        current_draft_step.zero_()
+        input_buffers.query_start_loc.fill_(num_tokens)
+        copy_prefix_310p(input_buffers.query_start_loc, qsl, offsets)
+        input_buffers.seq_lens.zero_()
+        copy_prefix_310p(input_buffers.seq_lens, input_batch.seq_lens[:n], offsets)
+        last_token_indices.zero_()
+        copy_prefix_310p(last_token_indices, kept_last, offsets)
+        return last_token_indices
+
     num_reqs = input_batch.num_reqs
     query_start_loc_np = input_batch.query_start_loc_np
     idx_mapping_np = input_batch.idx_mapping_np
@@ -424,6 +521,25 @@ def prepare_decode_inputs_cpu(
     ``sample_src_positions``) so patched call sites stay compatible.
     """
     del max_num_reqs
+    if _ASYNC_MTP_STATE.get() is not None:
+        n = draft_tokens.shape[0]
+        device = input_buffers.input_ids.device
+        indices = cached_offsets(device, input_buffers.input_ids.numel())
+        qsl, _ = cached_layout(device, n, 1, input_buffers.query_start_loc.dtype)
+        copy_prefix_310p(input_buffers.input_ids, draft_tokens.to(input_buffers.input_ids.dtype), indices)
+        sample_src_positions[:n].add_(1)
+        seq_lens = target_seq_lens[:n] - num_rejected[:n]
+        if advance_draft_positions:
+            pos = input_buffers.positions[:n]
+            pos.add_(1)
+            pos.clamp_max_(max_model_len - 1)
+            seq_lens = (seq_lens + 1).clamp_max(max_model_len)
+        input_buffers.query_start_loc.fill_(n)
+        copy_prefix_310p(input_buffers.query_start_loc, qsl, indices)
+        input_buffers.seq_lens.zero_()
+        copy_prefix_310p(input_buffers.seq_lens, seq_lens.to(input_buffers.seq_lens.dtype), indices)
+        return
+
     num_reqs = draft_tokens.shape[0]
     device = input_buffers.input_ids.device
     draft_np = draft_tokens[:num_reqs].detach().cpu().numpy()
@@ -498,6 +614,11 @@ def set_prefill_host_meta(
     }
 
 
+def clear_prefill_host_meta() -> None:
+    global _PREFILL_HOST_META
+    _PREFILL_HOST_META = None
+
+
 def update_draft_inputs_cpu(
     draft_tokens: torch.Tensor,
     current_draft_step: torch.Tensor,
@@ -510,6 +631,8 @@ def update_draft_inputs_cpu(
     max_model_len: int,
     num_speculative_steps: int,
     advance_draft_positions: bool = True,
+    *,
+    safe_replay_write: bool = False,
 ) -> None:
     """Update draft buffers for the next step using on-device ops where possible.
 
@@ -521,12 +644,21 @@ def update_draft_inputs_cpu(
     del current_draft_step
     step = _DRAFT_STEP_HOST
     tokens = draft_tokens[:num_reqs]
-    output_draft_tokens[:num_reqs, step].copy_(tokens)
+    if safe_replay_write:
+        rows = cached_offsets(tokens.device, max(output_draft_tokens.shape[0], input_buffers.input_ids.numel()))[
+            :num_reqs
+        ]
+        output_draft_tokens[:, step].index_copy_(0, rows, tokens.to(output_draft_tokens.dtype))
+    else:
+        output_draft_tokens[:num_reqs, step].copy_(tokens)
     if step >= num_speculative_steps - 1:
         return
     # Align with Triton: advance sampling key before preparing next draft inputs.
     sample_src_positions[:num_reqs].add_(1)
-    input_buffers.input_ids[:num_reqs].copy_(tokens)
+    if safe_replay_write:
+        input_buffers.input_ids.index_copy_(0, rows, tokens.to(input_buffers.input_ids.dtype))
+    else:
+        input_buffers.input_ids[:num_reqs].copy_(tokens)
     next_input_hidden_states[:num_reqs].copy_(hidden_states[:num_reqs])
     if advance_draft_positions:
         pos = input_buffers.positions[:num_reqs]

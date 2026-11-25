@@ -23,6 +23,7 @@ import torch.nn as nn
 from vllm.config import VllmConfig, replace
 from vllm.config.compilation import CUDAGraphMode
 from vllm.logger import logger
+from vllm.v1.attention.backends.utils import PAD_SLOT_ID
 from vllm.v1.worker.gpu.attn_utils import build_slot_mappings_by_layer
 from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
 from vllm.v1.worker.gpu.spec_decode.eagle.utils import load_eagle_model
@@ -32,7 +33,14 @@ from vllm.v1.worker.gpu.spec_decode.target_dependent_ar.speculator import (
 )
 
 from vllm_ascend._310p.ops.rotary_embedding import AscendRotaryEmbedding310
-from vllm_ascend._310p.worker.v2.spec_utils import set_draft_step_host
+from vllm_ascend._310p.worker.v2.spec_utils import (
+    cached_offsets,
+    copy_prefix_310p,
+    get_async_mtp_state,
+    set_async_mtp_state,
+    set_draft_step_host,
+    update_draft_inputs_cpu,
+)
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.worker.v2.attn_utils import build_attn_metadata_factory
 from vllm_ascend.worker.v2.spec_decode.target_dependent_ar.speculator import (
@@ -247,8 +255,44 @@ class AscendMTPSpeculator310(AscendTargetDependentARSpeculator, MTPSpeculator):
                 self._update_decode_attn_metadata(attn_metadata, step, num_reqs)
         return attn_metadata
 
+    @staticmethod
+    def _device_decode_slots(
+        tables: Any,
+        batch: Any,
+        positions: torch.Tensor,
+        num_tokens_padded: int,
+    ) -> torch.Tensor | None:
+        """Compute K>1 draft-decode slot_mappings on device without D2H sync."""
+        n = positions.shape[0]
+        if get_async_mtp_state() is None or batch is None or n != batch.num_reqs or n > num_tokens_padded:
+            return None
+        cache_key = getattr(tables, "_gather_cache_key", None)
+        if cache_key is None or cache_key[0] < n or cache_key[1] != tables._table_version:
+            return None
+        rows_np = batch.idx_mapping_np[:n].astype(np.int64, copy=False)
+        if cache_key[2][: rows_np.nbytes] != rows_np.tobytes():
+            return None
+        offsets = cached_offsets(positions.device, max(tables.max_num_reqs, num_tokens_padded))[:n]
+        for group, (table, block_size, enabled) in enumerate(
+            zip(tables.input_block_tables, tables.kernel_block_sizes, tables._slot_mapping_enabled)
+        ):
+            slots = tables.slot_mappings[group]
+            if enabled:
+                if num_tokens_padded > n:
+                    slots[n:num_tokens_padded].fill_(PAD_SLOT_ID)
+                block_offsets = positions.div(block_size, rounding_mode="floor")
+                blocks = table.flatten().index_select(0, offsets * table.shape[1] + block_offsets)
+                values = (blocks * block_size + positions.remainder(block_size)).to(slots.dtype)
+                copy_prefix_310p(slots, values, offsets)
+            else:
+                slots[:num_tokens_padded].fill_(PAD_SLOT_ID)
+        return tables.slot_mappings[:, :num_tokens_padded]
+
     @torch.inference_mode()
     def propose(self, *args, **kwargs):  # type: ignore[no-untyped-def]
+        if get_async_mtp_state() is not None:
+            # Async MTP step 0 prepares inputs on device; skip pre-step0 host D2H.
+            return super().propose(*args, **kwargs)
         num_rejected = kwargs.get("num_rejected")
         if num_rejected is None and len(args) >= 7:
             num_rejected = args[6]
@@ -306,6 +350,13 @@ class AscendMTPSpeculator310(AscendTargetDependentARSpeculator, MTPSpeculator):
         num_speculative_steps: int | None = None,
     ) -> None:
         """K>1 draft decode: per-step FULL replay or eager CPU slot mappings."""
+        state = get_async_mtp_state()
+        if state is not None:
+            commit, last = state
+            if commit is not None:
+                commit()
+                set_async_mtp_state((None, last))
+
         assert seq_lens_cpu_upper_bound is not None
         positions = self.input_buffers.positions[:num_reqs]
         query_start_loc = self.input_buffers.query_start_loc[: num_reqs + 1]
@@ -317,18 +368,42 @@ class AscendMTPSpeculator310(AscendTargetDependentARSpeculator, MTPSpeculator):
             seq_ub[:num_reqs] = seq_ub[:num_reqs] - rejected[:num_reqs].to(seq_ub.dtype)
 
         use_full = batch_desc.cg_mode == CUDAGraphMode.FULL
+        # A graph captured for step 1 cannot switch between distinct draft layers.
+        if use_full and self.num_speculative_steps > 2:
+            draft_config = self.draft_vllm_config.model_config.hf_text_config
+            layers = getattr(draft_config, "mtp_num_hidden_layers", None)
+            if layers is None:
+                layers = getattr(draft_config, "num_nextn_predict_layers", None)
+            if layers != 1:
+                use_full = False
+                batch_desc = BatchExecutionDescriptor(
+                    cg_mode=CUDAGraphMode.NONE,
+                    num_tokens=num_reqs,
+                    num_reqs=num_reqs,
+                )
         attn_metadata = None
         slot_mappings_by_layer = None
+        assert num_speculative_steps is not None
         # vLLM #60335 passes the per-batch step count on main.
         for step in range(1, num_speculative_steps):
             if not skip_attn and (self.advance_draft_positions or step == 1):
-                # Host slot_mapping + attn metadata must run outside capture.
-                slot_mappings_by_layer = self._compute_draft_slot_mappings(
-                    idx_mapping,
-                    query_start_loc,
+                # Prefer device-side slot computation (supports padded decode graphs);
+                # fall back to CPU block-table lookup on cache miss.
+                slots = self._device_decode_slots(
+                    self.block_tables,
+                    getattr(self, "input_batch", None),
                     positions,
                     batch_desc.num_tokens,
                 )
+                if slots is not None:
+                    slot_mappings_by_layer = build_slot_mappings_by_layer(slots, self.kv_cache_config)
+                else:
+                    slot_mappings_by_layer = self._compute_draft_slot_mappings(
+                        idx_mapping,
+                        query_start_loc,
+                        positions,
+                        batch_desc.num_tokens,
+                    )
                 attn_metadata = self._build_draft_attn_metadata(
                     num_reqs=num_reqs,
                     num_reqs_padded=batch_desc.num_reqs or num_reqs,
@@ -350,7 +425,23 @@ class AscendMTPSpeculator310(AscendTargetDependentARSpeculator, MTPSpeculator):
                 assert self.decode_cudagraph_manager is not None
                 self._pending_draft_attn_metadata = attn_metadata
                 self.decode_cudagraph_manager.run_fullgraph(batch_desc)
-                if attn_metadata is not None:
+                if self.num_speculative_steps > 2:
+                    tokens, hidden = self.decode_cudagraph_manager.decode_step_outputs[batch_desc]
+                    update_draft_inputs_cpu(
+                        tokens,
+                        self.current_draft_step,
+                        hidden,
+                        self.draft_tokens,
+                        self.hidden_states,
+                        self.input_buffers,
+                        self.sample_src_positions,
+                        num_reqs,
+                        self.max_model_len,
+                        num_speculative_steps,
+                        self.advance_draft_positions,
+                        safe_replay_write=True,
+                    )
+                if attn_metadata is not None and step < num_speculative_steps - 1 and not self.advance_draft_positions:
                     self._update_decode_attn_metadata(attn_metadata, 1, num_reqs)
             else:
                 self._generate_draft(

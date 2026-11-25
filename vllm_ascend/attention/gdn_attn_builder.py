@@ -891,7 +891,6 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
             non_spec_query_start_loc = query_start_loc
             num_accepted_tokens = None
         else:
-            query_lens = query_start_loc[1:] - query_start_loc[:-1]
             assert spec_sequence_masks_cpu is not None
 
             if num_prefills == 0 and num_decodes == 0:
@@ -899,16 +898,25 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
                     num_spec_decodes * (self.num_spec + 1),
                     query_start_loc_cpu[-1].item(),
                 )
-                spec_token_indx = torch.arange(
-                    spec_token_size,
-                    dtype=torch.int32,
-                    device=query_start_loc.device,
-                )
-                non_spec_token_indx = torch.empty(
-                    0,
-                    dtype=torch.int32,
-                    device=query_start_loc.device,
-                )
+                cached_spec_indx = getattr(self, "_pure_spec_token_indx", None)
+                if (
+                    cached_spec_indx is None
+                    or cached_spec_indx.device != query_start_loc.device
+                    or cached_spec_indx.numel() < spec_token_size
+                ):
+                    cap = max(spec_token_size, getattr(self, "max_num_tokens", spec_token_size))
+                    cached_spec_indx = torch.arange(
+                        cap,
+                        dtype=torch.int32,
+                        device=query_start_loc.device,
+                    )
+                    self._pure_spec_token_indx = cached_spec_indx
+                spec_token_indx = cached_spec_indx[:spec_token_size]
+                cached_empty = getattr(self, "_empty_int32_indx", None)
+                if cached_empty is None or cached_empty.device != query_start_loc.device:
+                    cached_empty = torch.empty(0, dtype=torch.int32, device=query_start_loc.device)
+                    self._empty_int32_indx = cached_empty
+                non_spec_token_indx = cached_empty
                 # Reuse vLLM's pure-spec path: real requests precede padding,
                 # so neither device sequence indices nor a gather are needed.
                 spec_state_indices_tensor = block_table_tensor[:num_spec_decodes, : self.num_spec + 1]
@@ -917,6 +925,7 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
                 non_spec_query_start_loc = None
                 non_spec_query_start_loc_cpu = None
             else:
+                query_lens = query_start_loc[1:] - query_start_loc[:-1]
                 spec_sequence_indices, non_spec_sequence_indices = self._copy_sequence_indices_to_device(
                     spec_sequence_masks_cpu,
                     num_spec_decodes,

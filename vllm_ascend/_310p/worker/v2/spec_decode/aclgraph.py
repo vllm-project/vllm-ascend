@@ -167,6 +167,7 @@ class AutoRegressiveAclGraphManager310(AutoRegressiveAclGraphManager):
 
         # Graphs bind tensor addresses: retain metadata for their lifetime.
         self._decode_capture_attn_metadata = {}
+        self.decode_step_outputs: dict[BatchExecutionDescriptor, tuple[torch.Tensor, torch.Tensor]] = {}
         with communicator_switch(), model_capture_wrapper(self.speculator, False):
 
             def create_forward_fn(desc: BatchExecutionDescriptor, warmup: bool):
@@ -241,8 +242,12 @@ class AutoRegressiveAclGraphManager310(AutoRegressiveAclGraphManager):
                         self.speculator.current_draft_step,
                         self.speculator.draft_logits,
                     )
-                    # Persist sampled drafts into the capture-stable buffer.
-                    self.speculator.draft_tokens[:num_reqs, 1].copy_(draft_tokens[:num_reqs])
+                    if self.speculator.num_speculative_steps == 2:
+                        # Persist sampled drafts into the capture-stable buffer.
+                        self.speculator.draft_tokens[:num_reqs, 1].copy_(draft_tokens[:num_reqs])
+                    elif not warmup:
+                        # Replay writes fixed addresses; host routes outputs by live step.
+                        self.decode_step_outputs[desc] = (draft_tokens, _hidden_states)
 
                 return run
 

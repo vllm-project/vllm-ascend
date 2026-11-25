@@ -220,10 +220,9 @@ class RejectionSampler310V2(RejectionSampler):
 
         sampled_inputs = input_batch.input_ids[input_batch.logits_indices]
         draft_token_ids = sampled_inputs.index_select(0, draft_rows)
-        target_logits = processed.index_select(0, target_rows)
-        bonus_token_ids = processed.index_select(0, bonus_rows).argmax(dim=-1).to(torch.int32).view(-1, 1)
-
-        target_argmax = target_logits.argmax(dim=-1).to(torch.int32)
+        greedy_tokens = processed.argmax(dim=-1).to(torch.int32)
+        target_argmax = greedy_tokens.index_select(0, target_rows)
+        bonus_token_ids = greedy_tokens.index_select(0, bonus_rows).view(-1, 1)
         sampled = torch.full(
             (num_reqs, self.num_speculative_steps + 1),
             PLACEHOLDER_TOKEN_ID,
