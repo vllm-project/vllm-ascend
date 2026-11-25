@@ -14,7 +14,8 @@ entries:
       Enable fault tolerance to use recovery; unsupported faults fail recovery
       and require engine restart. HBM retry requires abort=true and evicts cleared
       pages from the local prefix cache before recovery succeeds; non-HBM retry
-      does not perform this eviction.
+      does not perform this eviction. If HBM graph recovery fails, the engine
+      must restart; subsequent retries cannot resume with incomplete graphs.
   - category: config
     text: >-
       Add additional_config.ft_communication_abort_timeout to configure the

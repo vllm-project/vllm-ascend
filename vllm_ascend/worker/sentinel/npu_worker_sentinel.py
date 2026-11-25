@@ -148,6 +148,7 @@ class WorkerSentinel(GPUWorkerSentinel):
         self.worker_faulted = False
         self._unrecoverable_uce = None
         self._non_kv_repair_attempted = False
+        self._hbm_graph_recovery_pending = False
         self.retry_cache_plan = None
         self._fault_keepalive: list[object] = []
         self._completed_async_outputs: list[object] = []
@@ -243,6 +244,8 @@ class WorkerSentinel(GPUWorkerSentinel):
         classification = _RETRY_CLASSIFICATION_RECOVERABLE
         registry = getattr(self.worker.model_runner, "kv_cache_region_registry", None)
         try:
+            if getattr(self, "_hbm_graph_recovery_pending", False):
+                raise RuntimeError("Previous HBM graph recovery failed; engine restart required")
             if getattr(self, "_non_kv_repair_attempted", False):
                 raise RuntimeError("Non-KV UCE repair already attempted; engine restart required")
             self._stop_device()
@@ -393,7 +396,9 @@ class WorkerSentinel(GPUWorkerSentinel):
             self._restart_device()
             logger.info("[FT] Retry device restarted: request_id=%s rank=%s", ft_request.request_id, self.worker.rank)
         else:
-            # scale_down calls this override from the upstream worker flow.
+            # scale_down must not resume a worker with partially rebuilt graphs.
+            if getattr(self, "_hbm_graph_recovery_pending", False):
+                raise RuntimeError("Previous HBM graph recovery failed; engine restart required")
             self.reset_device()
         super().retry(ft_request)
         logger.info("[FT] Recovery groups rebuilt: request_id=%s rank=%s", ft_request.request_id, self.worker.rank)
@@ -408,7 +413,10 @@ class WorkerSentinel(GPUWorkerSentinel):
             # The flag is agreed across DP/TP, unlike the local damaged blocks.
             # Every participant must recapture in the same collective order.
             if self.retry_cache_plan.get("hbm_detected"):
+                # Latch failures across retries even after the device UCE has cleared.
+                self._hbm_graph_recovery_pending = True
                 recover_acl_graphs(self.worker, ft_request.request_id)
+                self._hbm_graph_recovery_pending = False
         self._release_fault_state()
         self.worker_faulted = False
         logger.info("[FT] Worker recovery complete: request_id=%s rank=%s", ft_request.request_id, self.worker.rank)

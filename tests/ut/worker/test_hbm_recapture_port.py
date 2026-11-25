@@ -3,6 +3,8 @@
 """Exercise recapture ordering and recovery failures with CPU boundaries."""
 
 import ast
+import json
+import time
 from collections import namedtuple
 from contextlib import nullcontext
 from pathlib import Path
@@ -261,10 +263,62 @@ def test_only_uce_recaptures_and_failure_keeps_worker_quarantined(hbm, failure):
         with pytest.raises(RuntimeError, match="recapture failed"):
             sentinel.retry(request)
         assert sentinel.worker_faulted
+        assert sentinel._hbm_graph_recovery_pending
         sentinel._release_fault_state.assert_not_called()
+
+        # No new UCE on the next retry must not hide the failed graph rebuild.
+        ns.update(
+            json=json,
+            time=time,
+            HbmUceNonKvFault=type("NonKvFault", (RuntimeError,), {}),
+            _RETRY_CLASSIFICATION_RECOVERABLE=b"recoverable",
+        )
+        values = {}
+        store = NS(
+            set=lambda key, value: values.__setitem__(key, value),
+            compare_set=lambda key, old, value: values.setdefault(key, value.encode()),
+            check=lambda keys: all(key in values for key in keys),
+            get=values.__getitem__,
+        )
+        context = NS(
+            prefix="round-2",
+            round_id="round-2",
+            dp_rank=0,
+            local_rank=0,
+            dp_size=2,
+            local_size=1,
+            store=store,
+            timeout=1,
+        )
+        sentinel._build_retry_context = Mock(return_value=context)
+        sentinel._prepare_retry = ns["WorkerSentinel"]._prepare_retry.__get__(sentinel)
+        sentinel._stop_device = Mock()
+        sentinel._classify_uce = Mock()
+        registry.partial_block_ids = Mock(return_value=set())
+        sentinel._restart_device.reset_mock()
+        with pytest.raises(RuntimeError, match="Previous HBM graph recovery failed; engine restart required"):
+            sentinel.retry(NS(instruction="retry", request_id="round-2"))
+        assert sentinel.worker_faulted
+        assert sentinel.retry_cache_plan is None
+        sentinel._classify_uce.assert_not_called()
+        sentinel._restart_device.assert_not_called()
+        sentinel._release_fault_state.assert_not_called()
+
+        # The rejection is shared, so a healthy peer cannot enter device restart.
+        peer = ns["WorkerSentinel"].__new__(ns["WorkerSentinel"])
+        with pytest.raises(RuntimeError, match="Previous HBM graph recovery failed"):
+            peer._wait_for_classification(context, time.monotonic() + 1)
+
+        # A later scale-down must not bypass the restart requirement either.
+        sentinel.reset_device = Mock()
+        with pytest.raises(RuntimeError, match="engine restart required"):
+            sentinel.retry(NS(instruction="scale_down", request_id="round-3"))
+        sentinel.reset_device.assert_not_called()
+        assert sentinel.worker_faulted
     else:
         sentinel.retry(request)
         assert not sentinel.worker_faulted
+        assert not getattr(sentinel, "_hbm_graph_recovery_pending", False)
         assert events == ["classify", "restart", "groups", "zero", "sync"] + (["graphs"] if hbm else []) + ["release"]
 
 
