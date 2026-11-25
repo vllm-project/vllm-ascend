@@ -54,6 +54,19 @@ class TestAscendAttentionBackend310(TestBase):
         self.assertEqual(AscendAttentionBackend310.get_preferred_block_size(64), 128)
         self.assertEqual(AscendAttentionBackend310.get_preferred_block_size(128), 128)
 
+    def test_get_supported_kernel_block_sizes(self):
+        self.assertEqual(AscendAttentionBackend310.get_supported_kernel_block_sizes(), [128, 64])
+        self.assertEqual(
+            AscendAttentionBackend310.get_supported_kernel_block_sizes(MagicMock(head_size=128)),
+            [128, 64],
+        )
+        self.assertEqual(
+            AscendAttentionBackend310.get_supported_kernel_block_sizes(MagicMock(head_size=256)),
+            [64],
+        )
+        with self.assertRaises(NotImplementedError):
+            AscendAttentionBackend310.get_supported_kernel_block_sizes(MagicMock(head_size=512))
+
 
 class TestAscendAttentionBackendImpl310(TestBase):
     def setUp(self):
