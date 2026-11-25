@@ -120,6 +120,20 @@ def test_completion_log_failure_releases_registered_range(shared_buffer_factory,
         real_shm(name=names[0])
 
 
+def test_end_clock_failure_releases_registered_range(shared_buffer_factory, monkeypatch):
+    construct, lib, names, real_shm = shared_buffer_factory
+    monkeypatch.setattr(npu, "monotonic", Mock(side_effect=[10.0, OSError("end clock failed")]))
+
+    with pytest.raises(RuntimeError, match="OSError: end clock failed"):
+        construct("_codes_uva", 14)
+
+    lib.aclrtHostRegisterV2.assert_called_once()
+    lib.aclrtHostUnregister.assert_called_once_with(lib.aclrtHostRegisterV2.call_args.args[0])
+    lib.aclrtHostGetDevicePointer.assert_not_called()
+    with pytest.raises(FileNotFoundError):
+        real_shm(name=names[0])
+
+
 @pytest.mark.parametrize("failure", ["register", "device_pointer", "peer"])
 def test_failed_initialization_unlinks_shared_name(shared_buffer_factory, monkeypatch, failure):
     construct, lib, names, real_shm = shared_buffer_factory

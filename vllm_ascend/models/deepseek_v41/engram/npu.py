@@ -348,11 +348,10 @@ class SharedUvaBuffer:
                 logger.info("Shared Engram registration start %s", registration)
             started = monotonic()
             rc = self.lib.aclrtHostRegisterV2(address_of_mapping, size, flags)
-            elapsed = monotonic() - started
             if not rc:
-                # Claim the registration before logging or looking up the device pointer:
-                # close() must unregister it if either operation raises.
+                # Let close() unregister the range even if the end clock or logger raises.
                 self.pointer = address_of_mapping
+            elapsed = monotonic() - started
             if checkpoint_layer_id is not None:
                 logger.info("Shared Engram registration end %s elapsed=%.6fs rc=%d", registration, elapsed, rc)
             if rc:

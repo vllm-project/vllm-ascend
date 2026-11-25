@@ -2970,20 +2970,27 @@ For common environment, installation, and parameter issues, refer to the
 
 ### 10.2 Which shared Engram table is still registering on A5?
 
-With `--engram-config '{"cpu_offload":true,"dp_shared_memory":true}'`, each
-worker logs `Shared Engram registration start` before entering
-`aclrtHostRegisterV2`. Match it to the `end` event by global rank, checkpoint
-layer, table (`codes` or `scales`), bytes and shared memory name (`shm`).
+With `--engram-config '{"cpu_offload":true,"dp_shared_memory":true}'`, these
+events come only from the local `SharedUvaBuffer` path, where DP or PCP peers
+map the same TP shard. With four-card TP4/DP1/PCP1 and local host offload,
+each shard has no sharing peer and uses a private `HostUvaBuffer`. The A5
+remote Engram path skips local table allocation. Skip this check for both paths.
+
+Each participating worker logs `Shared Engram registration start` before
+entering `aclrtHostRegisterV2`. Match it to the `end` event by global rank,
+checkpoint layer, table (`codes` or `scales`), bytes and shared memory name (`shm`).
 An unmatched start identifies the last call entered by that worker. The end
 event gives the time inside the call in seconds and the CANN return code.
 For the 1017 checkpoint, compare the maximum `elapsed` across ranks for
 `layer=14 table=codes`. Each rank registers each table in one call.
 
-To check the actual backing, wait for successful end events and sample while
-the workers are still alive. In a four-rank 1017 run this is 16 returns
-with `rc=0` (layers 1 and 14, codes and scales). From the worker's PID
-namespace, use its PID and the exact `shm` name from its log. This reads
-mapping metadata without touching table contents.
+To check a mapping's backing, wait for its matching `end` with `rc=0` and
+sample while that worker still holds the mapping. In the single-node
+DP4/TP1/PCP1 run of the 1017 checkpoint, all four ranks registered codes and
+scales for layers 1 and 14. We sampled after all 16 calls succeeded
+(4 ranks × 2 layers × 2 tables). From the worker's PID namespace, use its PID
+and the exact `shm` name from its log. This reads mapping metadata without
+touching table contents.
 
 ```bash
 pid=1234       # worker PID
