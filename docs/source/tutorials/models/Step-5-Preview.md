@@ -26,7 +26,7 @@ This guide covers two deployment scenarios on 950DT products:
 - **Prefill-Decode (PD) separation deployment**: six nodes (2 Prefill + 4
   Decode), with an optional KV cache pool for prefix reuse.
 
-Step-5-Preview is supported in **vLLM Ascend v0.34.0rc1 and later**. The examples below follow vLLM Ascend `main`.
+Step-5-Preview is supported in **vLLM Ascend v0.34.0rc1 and later**.
 
 ## 2 Supported Features {: #2-supported-features }
 
@@ -89,7 +89,7 @@ Use the following command to create the container.
 
 ```bash
 # Set the vLLM Ascend image name.
-export IMAGE=quay.io/ascend/vllm-ascend:nightly-releases-v0.34.0rc-a5
+export IMAGE=quay.io/ascend/vllm-ascend:nightly-releases-v0.34.0rc1-a5
 export CONTAINER_NAME=step5
 
 # Host directory that holds the KV cache pool configuration files from
@@ -147,8 +147,7 @@ Before starting the service:
 - Set `NODE0_IP`, `NODE1_IP`, and `NIC_NAME` to each node's service IP and the
   local network interface. Set `HCCL_IF_IP` to the communication IP owned by
   that interface; use the same value as the service IP when the two are equal.
-  `--host` always binds the service IP, and `VLLM_HOST_IP` follows
-  `HCCL_IF_IP`.
+  `--host` always binds the service IP.
 - Start Node 0 first, then start Node 1 as soon as possible. On Node 1,
   `NODE0_IP` must equal `LOCAL_IP` on Node 0.
 - Node 1 joins the DP group as a headless worker with
@@ -160,27 +159,22 @@ Run the following script on each node. Select the tab for the node:
 === "Node 0"
 
     ```bash
-    # Values that must be adapted to the target environment.
     export MODEL_PATH=<MODEL_PATH>
     export NODE0_IP=<P0_IP>
     export NODE1_IP=<P1_IP>
     export NIC_NAME=<NIC_NAME>
-    export HCCL_IF_IP=<NODE0_NIC_IP>
     LOCAL_IP="${NODE0_IP}"
+    export VLLM_USE_FASTOKENS=1
 
     unset http_proxy https_proxy ftp_proxy all_proxy
     unset HTTP_PROXY HTTPS_PROXY FTP_PROXY ALL_PROXY
 
-    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-    export TASK_QUEUE_ENABLE=0
     export HCCL_BUFFSIZE=1024
+    export HCCL_IF_IP=<NODE0_NIC_IP>
     export HCCL_OP_EXPANSION_MODE=CCU_MS
-    export VLLM_USE_FASTOKENS=1
-
-    export GLOO_SOCKET_IFNAME="${NIC_NAME}"
-    export TP_SOCKET_IFNAME="${NIC_NAME}"
     export HCCL_SOCKET_IFNAME="${NIC_NAME}"
-    export VLLM_HOST_IP="${HCCL_IF_IP}"
+    export GLOO_SOCKET_IFNAME="${NIC_NAME}"
+    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 
     vllm serve "${MODEL_PATH}" \
         --host "${LOCAL_IP}" \
@@ -211,27 +205,22 @@ Run the following script on each node. Select the tab for the node:
 === "Node 1"
 
     ```bash
-    # Values that must be adapted to the target environment.
     export MODEL_PATH=<MODEL_PATH>
     export NODE0_IP=<P0_IP>
     export NODE1_IP=<P1_IP>
     export NIC_NAME=<NIC_NAME>
-    export HCCL_IF_IP=<NODE1_NIC_IP>
     LOCAL_IP="${NODE1_IP}"
+    export VLLM_USE_FASTOKENS=1
 
     unset http_proxy https_proxy ftp_proxy all_proxy
     unset HTTP_PROXY HTTPS_PROXY FTP_PROXY ALL_PROXY
 
-    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-    export TASK_QUEUE_ENABLE=0
     export HCCL_BUFFSIZE=1024
+    export HCCL_IF_IP=<NODE1_NIC_IP>
     export HCCL_OP_EXPANSION_MODE=CCU_MS
-    export VLLM_USE_FASTOKENS=1
-
-    export GLOO_SOCKET_IFNAME="${NIC_NAME}"
-    export TP_SOCKET_IFNAME="${NIC_NAME}"
     export HCCL_SOCKET_IFNAME="${NIC_NAME}"
-    export VLLM_HOST_IP="${HCCL_IF_IP}"
+    export GLOO_SOCKET_IFNAME="${NIC_NAME}"
+    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 
     vllm serve "${MODEL_PATH}" \
         --host "${LOCAL_IP}" \
@@ -357,33 +346,25 @@ Select the tab for the role:
     the examples use `48100` and `48200`, which keeps the two ranges disjoint.
 
     ```bash
-    # Values that must be adapted to the target environment.
     export MODEL_PATH=<MODEL_PATH>
     export LOCAL_IP=<P0_IP>         # service IP bound by --host
-    export HCCL_IF_IP=<P0_NIC_IP>   # communication IP owned by NIC_NAME
     export NIC_NAME=<P0_NIC>
     export MASTER_ADDR=<P0_IP>
+    export HCCL_IF_BASE_PORT=55000
+    export VLLM_USE_FASTOKENS=1
 
     # Each Prefill node exports its own IP and NIC; do not copy one node's values to the other.
     unset http_proxy https_proxy ftp_proxy all_proxy
     unset HTTP_PROXY HTTPS_PROXY FTP_PROXY ALL_PROXY
 
-    export VLLM_HOST_IP="${HCCL_IF_IP}"
-    export GLOO_SOCKET_IFNAME="${NIC_NAME}"
-    export TP_SOCKET_IFNAME="${NIC_NAME}"
-    export HCCL_SOCKET_IFNAME="${NIC_NAME}"
-    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-    export TASK_QUEUE_ENABLE=0
-
-    # 950DT products communication settings.
-    export HCCL_BUFFSIZE=1024
-    export HCCL_CONNECT_TIMEOUT=240
-    export HCCL_IF_BASE_PORT=55000
-    export HCCL_OP_EXPANSION_MODE=CCU_MS
-    export VLLM_USE_FASTOKENS=1
-
     # Layer distribution across the four pipeline stages; the first stage also holds the MTP draft.
     export VLLM_PP_LAYER_PARTITION="24,25,25,18"
+    export HCCL_BUFFSIZE=1024
+    export HCCL_IF_IP=<P0_NIC_IP>   # communication IP owned by NIC_NAME
+    export HCCL_OP_EXPANSION_MODE=CCU_MS
+    export HCCL_SOCKET_IFNAME="${NIC_NAME}"
+    export GLOO_SOCKET_IFNAME="${NIC_NAME}"
+    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 
     vllm serve "${MODEL_PATH}" \
         --host "${LOCAL_IP}" \
@@ -439,30 +420,23 @@ Select the tab for the role:
     as headless workers.
 
     ```bash
-    # Values that must be adapted to the target environment.
     export MODEL_PATH=<MODEL_PATH>
     export LOCAL_IP=<D0_IP>         # service IP bound by --host
-    export HCCL_IF_IP=<D0_NIC_IP>   # communication IP owned by NIC_NAME
     export NIC_NAME=<D0_NIC>
     export DP_ADDRESS=<D0_IP>
+    export HCCL_IF_BASE_PORT=56000
+    export VLLM_USE_FASTOKENS=1
 
     # Each Decode node exports its own IP and NIC; only the DP address is shared.
     unset http_proxy https_proxy ftp_proxy all_proxy
     unset HTTP_PROXY HTTPS_PROXY FTP_PROXY ALL_PROXY
 
-    export VLLM_HOST_IP="${HCCL_IF_IP}"
-    export GLOO_SOCKET_IFNAME="${NIC_NAME}"
-    export TP_SOCKET_IFNAME="${NIC_NAME}"
-    export HCCL_SOCKET_IFNAME="${NIC_NAME}"
-    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-    export TASK_QUEUE_ENABLE=0
-
-    # 950DT products communication settings.
     export HCCL_BUFFSIZE=1024
-    export HCCL_CONNECT_TIMEOUT=240
-    export HCCL_IF_BASE_PORT=56000
+    export HCCL_IF_IP=<D0_NIC_IP>   # communication IP owned by NIC_NAME
     export HCCL_OP_EXPANSION_MODE=CCU_MS
-    export VLLM_USE_FASTOKENS=1
+    export HCCL_SOCKET_IFNAME="${NIC_NAME}"
+    export GLOO_SOCKET_IFNAME="${NIC_NAME}"
+    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 
     vllm serve "${MODEL_PATH}" \
         --host "${LOCAL_IP}" \
@@ -603,7 +577,7 @@ Before starting the service:
 | MetaService ports | `5000` (metadata), `6000` (config store), `8000` (metrics) |
 | Mooncake transfer port | `48100` (Prefill), `48200` (Decode) |
 | AscendStore lookup port | `"0"` (Prefill), `"1"` (Decode) |
-| AscendStore layerwise mode | Enabled on both roles (`"use_layerwise": true`) |
+| AscendStore layerwise mode | Prefill only: `"use_layerwise": true` on Prefill and `false` on Decode.|
 | DRAM contributed per rank | `64GB`, on every rank of both roles (48 ranks → `3TiB` total) |
 
 !!! note
@@ -656,8 +630,10 @@ ock.mmc.local_service.protocol = device_urma
 ock.mmc.local_service.dram.size = 64GB
 ock.mmc.local_service.hcom_url = tcp://<HCCL_IF_IP>:27000
 ```
+!!! note
 
-> Note: `hcom_url` must use the real IP of the node. The default `tcp://127.0.0.1:7000` makes cross-host ranks unreachable and fails with `hybm_transport_connect failed: -6`. The port base plus the local rank selects the port, so eight ranks on one host use `27000–27007`. A single generic file without `hcom_url`, or with one shared `127.0.0.1`, only works for a one-node pool — do not reuse it for a multi-node deployment.
+    `hcom_url` must use the real IP of the node. The default `tcp://127.0.0.1:7000` makes cross-host ranks unreachable and fails with `hybm_transport_connect failed: -6`. The port base plus the local rank selects the port, so eight ranks on one host use `27000–27007`. A single generic file without `hcom_url`, or with one shared `127.0.0.1`, only works for a one-node pool — do not reuse it for a multi-node deployment.
+
 
 Both roles start the pool client inside the engine through `MMC_LOCAL_CONFIG_PATH`; no separate pool worker process is started.
 
@@ -675,39 +651,31 @@ The `MooncakeConnectorV2` child keeps the `prefill`/`decode` topology block from
 === "Prefill"
 
     ```bash
-    # Values that must be adapted to the target environment.
     export MODEL_PATH=<MODEL_PATH>
     export LOCAL_IP=<P0_IP>         # service IP bound by --host
-    export HCCL_IF_IP=<P0_NIC_IP>   # communication IP owned by NIC_NAME
     export NIC_NAME=<P0_NIC>
     export MASTER_ADDR=<P0_IP>
     export MEMCACHE_CONFIG_DIR=<MEMCACHE_CONFIG_DIR>
-    export MMC_LOCAL_CONFIG_PATH="${MEMCACHE_CONFIG_DIR}/mmc-local-p0.conf"
+    export HCCL_IF_BASE_PORT=55000
+    export VLLM_USE_FASTOKENS=1
+    export ASCEND_LOCAL_COMM_RES='{"version":"1.3"}'
 
     # Each Prefill node exports its own IP, NIC, and pool-client file; do not copy one node's values to the other.
     unset http_proxy https_proxy ftp_proxy all_proxy
     unset HTTP_PROXY HTTPS_PROXY FTP_PROXY ALL_PROXY
 
+    # Layer distribution across the four pipeline stages; the first stage also holds the MTP draft.
+    export VLLM_PP_LAYER_PARTITION="24,25,25,18"
+    export HCCL_BUFFSIZE=1024
+    export HCCL_IF_IP=<P0_NIC_IP>   # communication IP owned by NIC_NAME
+    export HCCL_OP_EXPANSION_MODE=CCU_MS
+    export HCCL_SOCKET_IFNAME="${NIC_NAME}"
     # AscendStoreConnector loads the bundled MemCache libraries from here.
     PYLIB=$(python -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')
     export LD_LIBRARY_PATH=${PYLIB}/memfabric_hybrid/lib:${PYLIB}/memcache_hybrid/lib:${LD_LIBRARY_PATH}
-
-    export VLLM_HOST_IP="${HCCL_IF_IP}"
     export GLOO_SOCKET_IFNAME="${NIC_NAME}"
-    export TP_SOCKET_IFNAME="${NIC_NAME}"
-    export HCCL_SOCKET_IFNAME="${NIC_NAME}"
+    export MMC_LOCAL_CONFIG_PATH="${MEMCACHE_CONFIG_DIR}/mmc-local-p0.conf"
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-    export TASK_QUEUE_ENABLE=0
-
-    # 950DT products communication settings.
-    export HCCL_BUFFSIZE=1024
-    export HCCL_CONNECT_TIMEOUT=240
-    export HCCL_IF_BASE_PORT=55000
-    export HCCL_OP_EXPANSION_MODE=CCU_MS
-    export VLLM_USE_FASTOKENS=1
-
-    # Layer distribution across the four pipeline stages; the first stage also holds the MTP draft.
-    export VLLM_PP_LAYER_PARTITION="24,25,25,18"
 
     vllm serve "${MODEL_PATH}" \
         --host "${LOCAL_IP}" \
@@ -779,36 +747,29 @@ The `MooncakeConnectorV2` child keeps the `prefill`/`decode` topology block from
 === "Decode"
 
     ```bash
-    # Values that must be adapted to the target environment.
     export MODEL_PATH=<MODEL_PATH>
     export LOCAL_IP=<D0_IP>         # service IP bound by --host
-    export HCCL_IF_IP=<D0_NIC_IP>   # communication IP owned by NIC_NAME
     export NIC_NAME=<D0_NIC>
     export DP_ADDRESS=<D0_IP>
     export MEMCACHE_CONFIG_DIR=<MEMCACHE_CONFIG_DIR>
-    export MMC_LOCAL_CONFIG_PATH="${MEMCACHE_CONFIG_DIR}/mmc-local-d0.conf"
+    export HCCL_IF_BASE_PORT=56000
+    export VLLM_USE_FASTOKENS=1
+    export ASCEND_LOCAL_COMM_RES='{"version":"1.3"}'
 
     # Each Decode node exports its own IP, NIC, and pool-client file; only the DP address is shared.
     unset http_proxy https_proxy ftp_proxy all_proxy
     unset HTTP_PROXY HTTPS_PROXY FTP_PROXY ALL_PROXY
 
+    export HCCL_BUFFSIZE=1024
+    export HCCL_IF_IP=<D0_NIC_IP>   # communication IP owned by NIC_NAME
+    export HCCL_OP_EXPANSION_MODE=CCU_MS
+    export HCCL_SOCKET_IFNAME="${NIC_NAME}"
     # AscendStoreConnector loads the bundled MemCache libraries from here.
     PYLIB=$(python -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')
     export LD_LIBRARY_PATH=${PYLIB}/memfabric_hybrid/lib:${PYLIB}/memcache_hybrid/lib:${LD_LIBRARY_PATH}
-
-    export VLLM_HOST_IP="${HCCL_IF_IP}"
     export GLOO_SOCKET_IFNAME="${NIC_NAME}"
-    export TP_SOCKET_IFNAME="${NIC_NAME}"
-    export HCCL_SOCKET_IFNAME="${NIC_NAME}"
+    export MMC_LOCAL_CONFIG_PATH="${MEMCACHE_CONFIG_DIR}/mmc-local-d0.conf"
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-    export TASK_QUEUE_ENABLE=0
-
-    # 950DT products communication settings.
-    export HCCL_BUFFSIZE=1024
-    export HCCL_CONNECT_TIMEOUT=240
-    export HCCL_IF_BASE_PORT=56000
-    export HCCL_OP_EXPANSION_MODE=CCU_MS
-    export VLLM_USE_FASTOKENS=1
 
     vllm serve "${MODEL_PATH}" \
         --host "${LOCAL_IP}" \
@@ -862,7 +823,7 @@ The `MooncakeConnectorV2` child keeps the `prefill`/`decode` topology block from
                   "backend": "memcache",
                   "lookup_rpc_port": "1",
                   "enable_lookup": true,
-                  "use_layerwise": true
+                  "use_layerwise": false
                 }
               }
             ]
