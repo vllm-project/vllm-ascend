@@ -14,7 +14,7 @@ from multiprocessing.connection import Connection
 
 import numpy as np
 import torch
-from scipy.optimize import linear_sum_assignment
+from scipy.optimize import linear_sum_assignment  # type: ignore
 from vllm.distributed import get_eplb_group
 from vllm.distributed.eplb.policy import AbstractEplbPolicy
 
