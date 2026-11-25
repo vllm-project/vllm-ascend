@@ -405,6 +405,10 @@ one. The KV transfer role and PCP size do not gate enablement. LoRA and A5
 packed-cache configurations are rejected when enabled. Omit the option or set
 `enabled` to `false` to use the original path.
 
+With multiple DP replicas, eager SWA bounded replay starts DP coordination
+before preparing the original metadata and joins it before choosing the
+replay layout.
+
 A PCP rank can have no local query work. In a non-FULL step, it runs any
 synchronous metadata tasks and skips the auxiliary submission if no asynchronous
 tasks are present. FULL capture and replay still require a non-empty, stable set

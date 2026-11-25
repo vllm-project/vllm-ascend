@@ -15,6 +15,7 @@ from vllm_ascend.attention.utils import uses_pcp_sharded_layout
 from vllm_ascend.models.deepseek_v41 import decoder_replay_state as replay_mod
 from vllm_ascend.models.deepseek_v41.decoder_replay_layers import AscendDecoderReplayLayers
 from vllm_ascend.models.deepseek_v41.engram.model_state import EngramModelState
+from vllm_ascend.worker.metadata_async import AsyncTargetDeviceMetadata
 from vllm_ascend.worker.v2.model_states.default import AscendModelState
 
 
@@ -327,7 +328,8 @@ def test_idle_dp_rank_participates_when_peer_trims(state, monkeypatch):
     monkeypatch.setattr(replay_mod, "should_skip_dp_coordination", lambda: False)
     monkeypatch.setattr(replay_mod, "get_dp_group", lambda: SimpleNamespace(rank_in_group=0, cpu_group=None))
 
-    def agree(values, group):
+    def agree(values, group, *, async_op):
+        assert not async_op
         values[:, 1] = torch.tensor([1, 2])
 
     monkeypatch.setattr(replay_mod.dist, "all_reduce", agree)
@@ -355,11 +357,61 @@ def synchronized_dp(state, monkeypatch):
     monkeypatch.setattr(replay_mod, "should_skip_dp_coordination", lambda: False)
     monkeypatch.setattr(replay_mod, "get_dp_group", lambda: SimpleNamespace(rank_in_group=0, cpu_group=None))
 
-    def agree(values, group):
+    def agree(values, group, *, async_op):
+        assert not async_op
         values[:, 1] = torch.tensor([1, 2])
 
     monkeypatch.setattr(replay_mod.dist, "all_reduce", agree)
     return state
+
+
+@pytest.mark.parametrize("metadata_fails", [False, True])
+def test_replay_dp_coordination_overlaps_metadata_build(synchronized_dp, monkeypatch, metadata_fails):
+    state = synchronized_dp
+    model_state = EngramModelState.__new__(EngramModelState)
+    model_state.decoder_replay_state = state
+    calls = []
+    metadata = {"layer": object()}
+    pcp_context = SimpleNamespace()
+    model_state.device_metadata = AsyncTargetDeviceMetadata.__new__(AsyncTargetDeviceMetadata)
+    replay_inputs = inputs(dummy=True)
+
+    def reduce(values, group, *, async_op):
+        assert async_op
+        assert values.tolist() == [[0, 0], [16, 0]]
+        calls.append("submit")
+
+        def wait():
+            calls.append("wait")
+            values[:, 1] = torch.tensor([1, 2])
+
+        return SimpleNamespace(wait=wait)
+
+    def build_attn(*, before_metadata_build):
+        before_metadata_build(pcp_context)
+        assert state.dp_tokens is None
+        calls.append("metadata")
+        if metadata_fails:
+            raise RuntimeError("metadata preparation failed")
+        return metadata
+
+    monkeypatch.setattr(replay_mod.dist, "all_reduce", reduce)
+    plan = Mock(wraps=state._build_replay_plan)
+    monkeypatch.setattr(state, "_build_replay_plan", plan)
+
+    if metadata_fails:
+        with pytest.raises(RuntimeError, match="metadata preparation failed"):
+            model_state._prepare_attn_with_replay(build_attn, replay_inputs, CUDAGraphMode.NONE, for_capture=False)
+        assert state.dp_tokens is None
+    else:
+        result = model_state._prepare_attn_with_replay(build_attn, replay_inputs, CUDAGraphMode.NONE, for_capture=False)
+        assert result is metadata
+        assert state.dp_tokens.tolist() == [16, 2]
+        assert state.layers.context_factory is not None
+    assert calls == ["submit", "metadata", "wait"]
+    plan.assert_called_once()
+    assert plan.call_args.args[0].pcp_context is pcp_context
+    state._gather.assert_not_called()
 
 
 @pytest.mark.parametrize("local_tokens", [0, 1, 3])

@@ -59,6 +59,18 @@ class _DecoderReplayPlan:
     uses_pcp_replay: bool
 
 
+@dataclass(frozen=True)
+class _DecoderReplayPreparation:
+    inputs: DecoderReplayInputs
+    plan: _DecoderReplayPlan
+    replica_info: torch.Tensor | None
+    work: dist.Work | None
+
+    def wait(self) -> None:
+        if self.work is not None:
+            self.work.wait()
+
+
 class DecoderReplayState:
     def __init__(self, config: VllmConfig, layers: AscendDecoderReplayLayers, device: torch.device) -> None:
         self.config = config
@@ -226,6 +238,13 @@ class DecoderReplayState:
         )
 
     def prepare(self, inputs: DecoderReplayInputs, mode: CUDAGraphMode, *, for_capture: bool = False) -> None:
+        preparation = self.begin_prepare(inputs, mode, for_capture=for_capture)
+        if preparation is not None:
+            self.finish_prepare(preparation)
+
+    def begin_prepare(
+        self, inputs: DecoderReplayInputs, mode: CUDAGraphMode, *, for_capture: bool = False, async_dp: bool = False
+    ) -> _DecoderReplayPreparation | None:
         # Default to the original batch so no replay state leaks across steps.
         self.layers.rows = None
         self.layers.context_factory = None
@@ -238,16 +257,22 @@ class DecoderReplayState:
         if self.slots is None:
             self._initialize(inputs)
         if for_capture or mode != CUDAGraphMode.NONE or get_mrv2_in_profile_run():
-            return
+            return None
 
         # Compaction requires coordinated execution lengths across DP replicas.
         parallel = self.config.parallel_config
         if parallel.data_parallel_size > 1 and (
             should_skip_allreduce_across_dp_group(self.config) or should_skip_dp_coordination()
         ):
-            return
+            return None
 
         plan = self._build_replay_plan(inputs)
+        replica_info, work = self._start_dp_coordination(plan, async_dp=async_dp)
+        return _DecoderReplayPreparation(inputs, plan, replica_info, work)
+
+    def finish_prepare(self, preparation: _DecoderReplayPreparation) -> None:
+        inputs, plan = preparation.inputs, preparation.plan
+        preparation.wait()
         self.num_actual_tokens = int(plan.kept_lens.sum())
         self.num_tokens = plan.num_tokens
 
@@ -256,7 +281,10 @@ class DecoderReplayState:
             self.num_actual_tokens = 0
 
         # No replica needs compaction; keep the original execution context.
-        any_replica_compacts = self._coordinate_replay_across_dp(plan)
+        any_replica_compacts = plan.requires_compaction
+        if preparation.replica_info is not None:
+            self.dp_tokens = preparation.replica_info[1]
+            any_replica_compacts = bool(preparation.replica_info[0].any())
         if not any_replica_compacts:
             return
 
@@ -311,10 +339,12 @@ class DecoderReplayState:
             uses_pcp_replay=False,
         )
 
-    def _coordinate_replay_across_dp(self, plan: _DecoderReplayPlan) -> bool:
+    def _start_dp_coordination(
+        self, plan: _DecoderReplayPlan, *, async_dp: bool
+    ) -> tuple[torch.Tensor | None, dist.Work | None]:
         dp_size = self.config.parallel_config.data_parallel_size
         if dp_size == 1:
-            return plan.requires_compaction
+            return None, None
 
         dp_group = get_dp_group()
         # Each rank writes its own column; reduction shares all replicas' values.
@@ -323,9 +353,8 @@ class DecoderReplayState:
         replica_info[:, dp_group.rank_in_group] = torch.tensor(
             [plan.requires_compaction, plan.num_tokens], dtype=torch.int32
         )
-        dist.all_reduce(replica_info, group=dp_group.cpu_group)
-        self.dp_tokens = replica_info[1]
-        return bool(replica_info[0].any())
+        work = dist.all_reduce(replica_info, group=dp_group.cpu_group, async_op=async_dp)
+        return replica_info, work
 
     def _prepare_compact_replay(self, inputs: DecoderReplayInputs, plan: _DecoderReplayPlan) -> None:
         batch = inputs.batch

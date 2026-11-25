@@ -472,6 +472,8 @@ class AscendModelState(DefaultModelState):
         for_capture: bool = False,
         ubatch_idx: int = 0,
         model_specific_attn_metadata: ModelSpecificAttnMetadata | None = None,
+        *,
+        before_metadata_build: "Callable[[AscendPCPAttentionContext | None], None] | None" = None,
     ) -> dict[str, Any]:
         """Override prepare_attn method because `build_attn_metadata` is different from vllm."""
         # vLLM #50945 adds this contract; Ascend still disables DBO.
@@ -620,6 +622,8 @@ class AscendModelState(DefaultModelState):
             build_metadata = partial(self.device_metadata.run_build, build_attn_metadata)
         self._decoder_replay_common_metadata = {}
         xlite_cfg: XliteGraphConfig | None = getattr(get_ascend_config(), "xlite_graph_config", None)
+        if before_metadata_build is not None:
+            before_metadata_build(pcp_context)
         self.attn_metadata = build_metadata(
             attn_groups=attn_groups,
             num_reqs=num_reqs,
