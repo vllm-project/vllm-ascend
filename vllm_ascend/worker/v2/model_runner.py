@@ -27,12 +27,13 @@ from typing import Any
 import numpy as np
 import torch
 from vllm.compilation import breakable_cudagraph
-from vllm.config import VllmConfig
+from vllm.config import LoRAConfig, VllmConfig
 from vllm.config.compilation import CompilationMode, CUDAGraphMode
 from vllm.distributed.kv_transfer import get_kv_transfer_group, has_kv_transfer_group
 from vllm.distributed.parallel_state import get_pp_group
 from vllm.distributed.utils import get_distributed_timeout_or_none
 from vllm.logger import logger
+from vllm.lora.layers import LoRAMapping, LoRAMappingType
 from vllm.model_executor.offloader.base import set_offloader
 from vllm.sequence import IntermediateTensors
 from vllm.utils.torch_utils import async_tensor_h2d as async_copy_to_gpu
@@ -1299,6 +1300,53 @@ class NPUModelRunner(GPUModelRunner):
         finally:
             self.input_buffers.dummy_num_tokens = previous_dummy_tokens
 
+    @contextmanager
+    def _preserve_dummy_active_loras(self, enabled: bool):
+        previous = getattr(self, "_preserve_active_loras_in_dummy_run", False)
+        self._preserve_active_loras_in_dummy_run = enabled
+        try:
+            yield
+        finally:
+            self._preserve_active_loras_in_dummy_run = previous
+
+    @contextmanager
+    def maybe_dummy_run_with_lora(
+        self,
+        lora_config: LoRAConfig | None,
+        num_scheduled_tokens: np.ndarray,
+        num_sampled_tokens: np.ndarray,
+        remove_lora: bool = True,
+        num_active_loras: int = 0,
+        mapping_type: LoRAMappingType = LoRAMappingType.LANGUAGE,
+    ):
+        if lora_config is not None and getattr(self, "_preserve_active_loras_in_dummy_run", False):
+            # DP idle step: keep active real LoRA weights/slots intact so remote
+            # EP AlltoAll tokens from active DP ranks hit real weights, while
+            # marking this rank's own dummy tokens as no-LoRA (id=0 -> slot=-1).
+            assert self.lora_manager is not None, "LoRA is not enabled"
+            if num_sampled_tokens is None:
+                num_sampled_tokens = np.ones_like(num_scheduled_tokens, dtype=np.int32)
+            prompt_lora_mapping = (0,) * int(np.sum(num_sampled_tokens))
+            token_lora_mapping = (0,) * int(np.sum(num_scheduled_tokens))
+            lora_mapping = LoRAMapping(
+                token_lora_mapping,
+                prompt_lora_mapping,
+                is_prefill=True,
+                type=mapping_type,
+            )
+            self.lora_manager._adapter_manager.set_adapter_mapping(lora_mapping)
+            yield
+            return
+        with super().maybe_dummy_run_with_lora(
+            lora_config,
+            num_scheduled_tokens,
+            num_sampled_tokens,
+            remove_lora=remove_lora,
+            num_active_loras=num_active_loras,
+            mapping_type=mapping_type,
+        ):
+            yield
+
     @step_eplb_after(is_dummy=True)
     def _dummy_run(
         self,
@@ -1315,6 +1363,7 @@ class NPUModelRunner(GPUModelRunner):
         steps via ``step_eplb_after`` (#17233). The lmhead TP join lives in the
         ``execute_model`` tail — joining after ``super()._dummy_run`` deadlocks."""
         skip_ring = bool(kwargs.pop("skip_gdn_state_update", False))
+        preserve_active_loras = bool(kwargs.pop("preserve_active_loras", False))
         # Adaptive verification profiles eager tail sizes after graph capture.
         # Use balanced dummy routing, as the initial memory profile does, so a
         # synthetic router hotspot cannot exhaust one EP rank during startup.
@@ -1329,6 +1378,7 @@ class NPUModelRunner(GPUModelRunner):
         with (
             # Preserve scheduled query tokens before PIECEWISE graph padding.
             self._preserve_dummy_query_tokens(num_tokens, uniform_decode),
+            self._preserve_dummy_active_loras(preserve_active_loras),
             skip_ring_state_update(skip_ring),
             load_balance_ctx,
         ):

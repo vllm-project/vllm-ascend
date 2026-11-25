@@ -515,3 +515,157 @@ def _lora_linear_fake(
     add_inputs,
 ) -> None:
     pass
+
+
+def _align_indices_len(indices: torch.Tensor, target_rows: int) -> torch.Tensor:
+    if indices.shape[0] == target_rows:
+        return indices
+    if indices.shape[0] > target_rows:
+        return indices[:target_rows]
+    pad = torch.full(
+        (target_rows - indices.shape[0],),
+        -1,
+        dtype=indices.dtype,
+        device=indices.device,
+    )
+    return torch.cat((indices, pad), dim=0)
+
+
+def bgmv_shrink_torch(
+    inputs: torch.Tensor,
+    lora_a_weights: torch.Tensor,
+    output_tensor: torch.Tensor,
+    lora_indices_tensor: torch.Tensor,
+    scaling: float = 1.0,
+) -> None:
+    """Slot-loop LoRA shrink without per-token weight gather (graph-safe and low-HBM)."""
+    if inputs.shape[0] == 0:
+        return
+    weights = lora_a_weights.squeeze(1) if lora_a_weights.ndim == 4 else lora_a_weights
+    num_slots, rank, in_features = weights.shape
+    common_k = min(inputs.shape[1], in_features)
+    common_r = min(rank, output_tensor.shape[1])
+    x = inputs[:, :common_k].to(weights.dtype)
+    indices = _align_indices_len(lora_indices_tensor, x.shape[0])
+
+    acc = torch.zeros((x.shape[0], common_r), dtype=output_tensor.dtype, device=output_tensor.device)
+    for slot in range(num_slots):
+        mask = (indices == slot).unsqueeze(-1)
+        delta = torch.matmul(x, weights[slot, :common_r, :common_k].transpose(0, 1)).to(output_tensor.dtype)
+        acc = acc + delta.masked_fill(~mask, 0)
+    if scaling != 1.0:
+        acc.mul_(scaling)
+    output_tensor[:, :common_r].copy_(acc)
+
+
+def bgmv_expand_slice_torch(
+    inputs: torch.Tensor,
+    lora_b_weights: torch.Tensor,
+    output_tensor: torch.Tensor,
+    lora_indices_tensor: torch.Tensor,
+    slice_offset: int,
+    slice_size: int,
+    add_inputs: bool = True,
+) -> None:
+    """Slot-loop LoRA sliced expand without per-token weight gather (graph-safe and low-HBM)."""
+    if inputs.shape[0] == 0 or output_tensor.shape[0] == 0:
+        return
+    weights = lora_b_weights.squeeze(1) if lora_b_weights.ndim == 4 else lora_b_weights
+    num_slots, out_features, rank = weights.shape
+    limit = min(inputs.shape[0], output_tensor.shape[0])
+    common_r = min(inputs.shape[1], rank)
+    common_len = min(out_features, slice_size)
+    x = inputs[:limit, :common_r].to(weights.dtype)
+    indices = _align_indices_len(lora_indices_tensor, limit)
+
+    acc = torch.zeros((limit, common_len), dtype=output_tensor.dtype, device=output_tensor.device)
+    for slot in range(num_slots):
+        mask = (indices == slot).unsqueeze(-1)
+        delta = torch.matmul(x, weights[slot, :common_len, :common_r].transpose(0, 1)).to(output_tensor.dtype)
+        acc = acc + delta.masked_fill(~mask, 0)
+
+    target = output_tensor[:limit, slice_offset : slice_offset + common_len]
+    if add_inputs:
+        target.add_(acc)
+    else:
+        no_lora_mask = (indices == -1).unsqueeze(-1)
+        target.copy_(torch.where(no_lora_mask, target, acc))
+
+
+def bgmv_expand_torch(
+    inputs: torch.Tensor,
+    lora_b_weights: torch.Tensor,
+    output_tensor: torch.Tensor,
+    lora_indices_tensor: torch.Tensor,
+    add_inputs: bool = True,
+) -> None:
+    bgmv_expand_slice_torch(
+        inputs,
+        lora_b_weights,
+        output_tensor,
+        lora_indices_tensor,
+        0,
+        output_tensor.shape[1],
+        add_inputs=add_inputs,
+    )
+
+
+def sgmv_shrink_torch(
+    inputs: torch.Tensor,
+    lora_a_weights: torch.Tensor,
+    output_tensor: torch.Tensor,
+    b_seq_start_loc: torch.Tensor,
+    seq_len_tensor: torch.Tensor,
+    lora_indices_tensor: torch.Tensor,
+    batches: int,
+    max_seq_length: int,
+    token_nums: int,
+    scaling: float,
+) -> None:
+    del b_seq_start_loc, batches, max_seq_length, token_nums
+    exploded_indices = torch.repeat_interleave(lora_indices_tensor, seq_len_tensor)
+    bgmv_shrink_torch(inputs, lora_a_weights, output_tensor, exploded_indices, scaling)
+
+
+def sgmv_expand_torch(
+    inputs: torch.Tensor,
+    lora_b_weights: torch.Tensor,
+    output_tensor: torch.Tensor,
+    b_seq_start_loc: torch.Tensor,
+    seq_len_tensor: torch.Tensor,
+    lora_indices_tensor: torch.Tensor,
+    batches: int,
+    max_seq_length: int,
+    token_nums: int,
+    add_inputs: bool = False,
+) -> None:
+    del b_seq_start_loc, batches, max_seq_length, token_nums
+    exploded_indices = torch.repeat_interleave(lora_indices_tensor, seq_len_tensor)
+    bgmv_expand_torch(inputs, lora_b_weights, output_tensor, exploded_indices, add_inputs=add_inputs)
+
+
+def sgmv_expand_slice_torch(
+    inputs: torch.Tensor,
+    lora_b_weights: torch.Tensor,
+    output_tensor: torch.Tensor,
+    b_seq_start_loc: torch.Tensor,
+    seq_len_tensor: torch.Tensor,
+    lora_indices_tensor: torch.Tensor,
+    batches: int,
+    max_seq_length: int,
+    token_nums: int,
+    slice_offset: int,
+    slice_size: int,
+    add_inputs: bool = False,
+) -> None:
+    del b_seq_start_loc, batches, max_seq_length, token_nums
+    exploded_indices = torch.repeat_interleave(lora_indices_tensor, seq_len_tensor)
+    bgmv_expand_slice_torch(
+        inputs,
+        lora_b_weights,
+        output_tensor,
+        exploded_indices,
+        slice_offset,
+        slice_size,
+        add_inputs=add_inputs,
+    )

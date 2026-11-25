@@ -20,6 +20,8 @@ class PunicaWrapperNPU(PunicaWrapperBase):
     Multi-LoRA, and to provide the interface for the pytorch punica ops.
     """
 
+    _use_custom_lora_ops: bool = True
+
     def __init__(self, max_num_batched_tokens: int, max_batches: int, device: torch.device | str, **kwargs):
         PunicaWrapperBase.__init__(self, max_num_batched_tokens, max_batches, device)
         refresh_all_lora_classes()
@@ -29,16 +31,17 @@ class PunicaWrapperNPU(PunicaWrapperBase):
         self.lora_config = kwargs.get("lora_config")
         ascend_device_type = get_ascend_device_type()
         self.ascend_device_type = ascend_device_type
-        if not get_current_hardware_profile().supports(HardwareCapability.LORA_CUSTOM_OPS) or (
-            self.lora_config is not None and self.lora_config.max_lora_rank >= 128
-        ):
-            from vllm.lora.ops.torch_ops import (
-                bgmv_expand,
-                bgmv_expand_slice,
-                bgmv_shrink,
-                sgmv_expand,
-                sgmv_expand_slice,
-                sgmv_shrink,
+        self._use_custom_lora_ops = get_current_hardware_profile().supports(HardwareCapability.LORA_CUSTOM_OPS) and (
+            self.lora_config is None or self.lora_config.max_lora_rank < 128
+        )
+        if not self._use_custom_lora_ops:
+            from vllm_ascend.lora.lora_ops import (
+                bgmv_expand_slice_torch as bgmv_expand_slice,
+                bgmv_expand_torch as bgmv_expand,
+                bgmv_shrink_torch as bgmv_shrink,
+                sgmv_expand_slice_torch as sgmv_expand_slice,
+                sgmv_expand_torch as sgmv_expand,
+                sgmv_shrink_torch as sgmv_shrink,
             )
         else:
             from vllm_ascend.lora.lora_ops import (
@@ -214,7 +217,7 @@ class PunicaWrapperNPU(PunicaWrapperBase):
             return False
 
     def _use_sgmv(self) -> bool:
-        if not self.is_prefill:
+        if not self.is_prefill or not self._use_custom_lora_ops:
             return False
         return not (self.ascend_device_type == AscendDeviceType._310P and self._in_graph_mode())
 
@@ -494,6 +497,8 @@ class PunicaWrapperNPU(PunicaWrapperBase):
         fully_sharded: bool = False,
         offset: int = 0,
         token_lora_mapping: torch.Tensor | None = None,
+        group_list: torch.Tensor | None = None,
+        group_list_type: int = 0,
     ) -> None:
         """
         Ascend-native fused MoE LoRA (v2): static-shape per-row gather via the
@@ -537,6 +542,34 @@ class PunicaWrapperNPU(PunicaWrapperBase):
             torch.full_like(token_lora_mapping, -1),
         ).contiguous()
 
+        if not self._use_custom_lora_ops:
+            if group_list is not None:
+                self._add_lora_fused_moe_gmm(
+                    y2d=y2d,
+                    x2d=x2d,
+                    lora_a_stacked=lora_a_stacked,
+                    lora_b_stacked=lora_b_stacked,
+                    token_lora_mapping=token_lora_mapping,
+                    adapter_enabled=adapter_enabled,
+                    topk_weights=topk_weights,
+                    mul_routed_weight=mul_routed_weight,
+                    offset=offset,
+                    group_list=group_list,
+                    group_list_type=group_list_type,
+                )
+            else:
+                self._add_lora_fused_moe_chunked(
+                    y2d=y2d,
+                    x2d=x2d,
+                    lora_a_stacked=lora_a_stacked,
+                    lora_b_stacked=lora_b_stacked,
+                    combined_idx=combined_idx,
+                    topk_weights=topk_weights,
+                    mul_routed_weight=mul_routed_weight,
+                    offset=offset,
+                )
+            return
+
         # bgmv_shrink writes fp32 (its Y_T); bgmv_expand reads fp32 (its X_T),
         # so the shrink buffer is fp32.
         rank = lora_a_stacked[0].shape[-2]
@@ -560,6 +593,105 @@ class PunicaWrapperNPU(PunicaWrapperBase):
                 delta = shrink_out * topk_weights.view(-1, 1)
 
             self.bgmv_expand_slice(delta, b_flat, y2d, combined_idx, cur_offset, out_size, add_inputs=True)
+            cur_offset += out_size
+
+    def _add_lora_fused_moe_gmm(
+        self,
+        *,
+        y2d: torch.Tensor,
+        x2d: torch.Tensor,
+        lora_a_stacked: tuple[torch.Tensor, ...],
+        lora_b_stacked: tuple[torch.Tensor, ...],
+        token_lora_mapping: torch.Tensor,
+        adapter_enabled: torch.Tensor,
+        topk_weights: torch.Tensor | None,
+        mul_routed_weight: bool,
+        offset: int,
+        group_list: torch.Tensor,
+        group_list_type: int,
+    ) -> None:
+        import torch_npu
+
+        if x2d.shape[0] == 0:
+            return
+        num_slots = lora_a_stacked[0].shape[0]
+        in_graph = self._in_graph_mode() or torch.compiler.is_compiling()
+        cur_offset = offset
+        for slice_idx in range(len(lora_a_stacked)):
+            a = lora_a_stacked[slice_idx]
+            b = lora_b_stacked[slice_idx]
+            out_size = b.shape[-2]
+            for slot in range(num_slots):
+                slot_enabled = (token_lora_mapping == slot) & adapter_enabled[slot].bool()
+                if not in_graph and not bool(slot_enabled.any().item()):
+                    continue
+                x_slot = x2d.to(a.dtype) * slot_enabled.to(a.dtype).unsqueeze(-1)
+                a_w = a[slot].transpose(1, 2).contiguous()
+                shrink_slot = torch_npu.npu_grouped_matmul(
+                    x=[x_slot],
+                    weight=[a_w],
+                    split_item=2,
+                    group_list_type=group_list_type,
+                    group_type=0,
+                    group_list=group_list,
+                )[0]
+                if mul_routed_weight and topk_weights is not None:
+                    shrink_slot = shrink_slot * topk_weights.view(-1, 1).to(shrink_slot.dtype)
+                b_w = b[slot].transpose(1, 2).contiguous()
+                delta_slot = torch_npu.npu_grouped_matmul(
+                    x=[shrink_slot.to(b.dtype)],
+                    weight=[b_w],
+                    split_item=2,
+                    group_list_type=group_list_type,
+                    group_type=0,
+                    group_list=group_list,
+                )[0]
+                y2d[:, cur_offset : cur_offset + out_size].add_(delta_slot.to(y2d.dtype))
+            cur_offset += out_size
+
+    def _add_lora_fused_moe_chunked(
+        self,
+        *,
+        y2d: torch.Tensor,
+        x2d: torch.Tensor,
+        lora_a_stacked: tuple[torch.Tensor, ...],
+        lora_b_stacked: tuple[torch.Tensor, ...],
+        combined_idx: torch.Tensor,
+        topk_weights: torch.Tensor | None,
+        mul_routed_weight: bool,
+        offset: int,
+        chunk_size: int = 512,
+    ) -> None:
+        total_rows = x2d.shape[0]
+        if total_rows == 0:
+            return
+        rank = lora_a_stacked[0].shape[-2]
+        cur_offset = offset
+        for slice_idx in range(len(lora_a_stacked)):
+            a = lora_a_stacked[slice_idx]
+            b = lora_b_stacked[slice_idx]
+            out_size = b.shape[-2]
+            a_flat = a.view(-1, rank, a.shape[-1])
+            b_flat = b.view(-1, out_size, rank)
+            for start in range(0, total_rows, chunk_size):
+                end = min(start + chunk_size, total_rows)
+                idx_chunk = combined_idx[start:end]
+                active = idx_chunk >= 0
+                safe_idx = idx_chunk.clamp(min=0)
+                x_chunk = x2d[start:end].to(a.dtype)
+                shrink = torch.bmm(
+                    x_chunk.unsqueeze(1),
+                    a_flat[safe_idx].transpose(1, 2),
+                ).squeeze(1)
+                shrink = shrink.masked_fill(~active.unsqueeze(-1), 0)
+                if mul_routed_weight and topk_weights is not None:
+                    shrink = shrink * topk_weights.view(-1, 1)[start:end].to(shrink.dtype)
+                delta = torch.bmm(
+                    shrink.to(b.dtype).unsqueeze(1),
+                    b_flat[safe_idx].transpose(1, 2),
+                ).squeeze(1)
+                delta = delta.masked_fill(~active.unsqueeze(-1), 0)
+                y2d[start:end, cur_offset : cur_offset + out_size].add_(delta.to(y2d.dtype))
             cur_offset += out_size
 
     def add_lora_logits(
@@ -595,7 +727,7 @@ class PunicaWrapperNPU(PunicaWrapperBase):
 
         indices = torch.narrow(self._sampler_indices, 0, 0, x.size(0))
 
-        if y.size(1) < r:
+        if self._use_custom_lora_ops and y.size(1) < r:
             # Ascend bgmv_expand requires hidden_out >= hidden_in (LoRA rank).
             # The sequence-classification LoRA head (#53555) can have
             # num_labels < rank, so use the matmul fallback.
