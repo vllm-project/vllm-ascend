@@ -463,6 +463,36 @@ def _patched_forward(
 _ORIGINAL_DECODER_FORWARD = DeepseekV2DecoderLayer.forward
 
 
+def _maybe_fused_add_rms_norm_quant(norm, hidden_states, residual, quantized_activation_cls, quant_key):
+    """Prepare the dense MLP input with fused add/norm/quant when supported."""
+    if (
+        hidden_states.ndim != 2
+        or hidden_states.dtype != torch.bfloat16
+        or residual.dtype != hidden_states.dtype
+        or hidden_states.shape != residual.shape
+        or not hidden_states.is_contiguous()
+        or not residual.is_contiguous()
+    ):
+        return norm(hidden_states, residual)
+
+    output = torch.ops.npu.npu_add_rms_norm_dynamic_quant(
+        hidden_states,
+        residual,
+        norm.weight,
+        beta=norm.bias,
+        epsilon=norm.variance_epsilon,
+        output_mask=[True, False],
+    )
+    prepared = quantized_activation_cls(
+        data=output[0],
+        scale=output[3],
+        orig_dtype=hidden_states.dtype,
+        orig_shape=hidden_states.shape,
+        quant_key=quant_key,
+    )
+    return prepared, output[2]
+
+
 def _decoder_forward_with_norm_quant(self, positions, hidden_states, residual, llama_4_scaling=None):
     """Explicit dense-MLP norm/quant fusion; remove when upstream owns it."""
     try:
@@ -496,34 +526,14 @@ def _decoder_forward_with_norm_quant(self, positions, hidden_states, residual, l
     else:
         hidden_states = self.self_attn(positions, hidden_states, llama_4_scaling)
 
-    norm = self.post_attention_layernorm
-    if (
-        hidden_states.ndim != 2
-        or hidden_states.dtype != torch.bfloat16
-        or residual.dtype != hidden_states.dtype
-        or hidden_states.shape != residual.shape
-        or not hidden_states.is_contiguous()
-        or not residual.is_contiguous()
-    ):
-        hidden_states, residual = norm(hidden_states, residual)
-        return self.mlp(hidden_states), residual
-
-    output = torch.ops.npu.npu_add_rms_norm_dynamic_quant(
+    hidden_states, residual = _maybe_fused_add_rms_norm_quant(
+        self.post_attention_layernorm,
         hidden_states,
         residual,
-        norm.weight,
-        beta=norm.bias,
-        epsilon=norm.variance_epsilon,
-        output_mask=[True, False],
+        QuantizedActivation,
+        kInt8DynamicTokenSym,
     )
-    prepared = QuantizedActivation(
-        data=output[0],
-        scale=output[3],
-        orig_dtype=hidden_states.dtype,
-        orig_shape=hidden_states.shape,
-        quant_key=kInt8DynamicTokenSym,
-    )
-    return self.mlp(prepared), output[2]
+    return self.mlp(hidden_states), residual
 
 
 DeepseekV2DecoderLayer.forward = _decoder_forward_with_norm_quant
