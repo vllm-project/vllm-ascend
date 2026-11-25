@@ -857,6 +857,8 @@ class KVCacheStoreLayerRecvingThread(KVTransferThread):
         invalid_block_ids: set[int] | None = None,
         invalid_block_ids_lock: threading.Lock | None = None,
         load_abort_event: threading.Event | None = None,
+        *,
+        max_g2l_transfer_addrs: int = 0,
     ):
         super().__init__(
             m_store,
@@ -867,6 +869,7 @@ class KVCacheStoreLayerRecvingThread(KVTransferThread):
             dcp_size,
             ready_event,
             name="KVCacheStoreLayerRecvingThread",
+            max_g2l_transfer_addrs=max_g2l_transfer_addrs,
         )
         self.layer_load_finished_events = layer_load_finished_events
         self.layer_save_finished_events = layer_save_finished_events

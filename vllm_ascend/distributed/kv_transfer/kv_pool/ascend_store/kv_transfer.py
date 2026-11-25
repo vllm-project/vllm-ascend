@@ -17,6 +17,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.base impor
     Backend,
     require_aligned_batch_results,
 )
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.memcache_backend import MemcacheBackend
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.buffer import MemoryLocation
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     ChunkedTokenDatabase,
@@ -78,9 +79,12 @@ class KVTransferThread(threading.Thread):
         dcp_size: int = 1,
         ready_event: threading.Event | None = None,
         name: str = "KVTransferThread",
+        *,
+        max_g2l_transfer_addrs: int = 0,
     ):
         super().__init__(daemon=True, name=name)
         self.m_store = m_store
+        self.max_g2l_transfer_addrs = max_g2l_transfer_addrs if isinstance(m_store, MemcacheBackend) else 0
         self.ready_event = ready_event or threading.Event()
         self.block_size = block_size
         self.tp_rank = tp_rank
@@ -256,6 +260,7 @@ class KVTransferThread(threading.Thread):
             max_transfer_addrs = len(gvas)
 
         assert self.m_store.store is not None
+        max_g2l_transfer_addrs = self.max_g2l_transfer_addrs if direction == 1 else 0
         for start in range(0, len(gvas), max_transfer_addrs):
             end = start + max_transfer_addrs
             split_gvas, split_addrs, split_sizes = self._split_transfer_packets(
@@ -270,15 +275,20 @@ class KVTransferThread(threading.Thread):
                 split_gvas.tolist(),
                 split_sizes.tolist(),
             )
-            res = self.m_store.store.batch_copy(
-                split_gvas.tolist(),
-                split_addrs.tolist(),
-                split_sizes.tolist(),
-                direction,
-            )
-            if res != 0:
-                logger.error("[KVPOOL] batch_copy %s FAILED res=%d", dir_name, res)
-                return res
+            # Bound native G2L submissions after packet splitting can expand the address list.
+            batch_end = max(1, len(split_gvas))
+            batch_size = max_g2l_transfer_addrs or batch_end
+            for first in range(0, batch_end, batch_size):
+                last = first + batch_size
+                res = self.m_store.store.batch_copy(
+                    split_gvas[first:last].tolist(),
+                    split_addrs[first:last].tolist(),
+                    split_sizes[first:last].tolist(),
+                    direction,
+                )
+                if res != 0:
+                    logger.error("[KVPOOL] batch_copy %s FAILED res=%d", dir_name, res)
+                    return res
         return 0
 
     @staticmethod

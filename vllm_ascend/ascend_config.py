@@ -571,6 +571,7 @@ class AscendConfig:
             "enable_kv_nz": false,
             "kv_trace": {"enabled": false, "action": "log"},
             "kv_pool_range_debug": false,
+            "kv_pool_memcache_g2l_max_transfer_addrs": 0,
             "enable_mc2_hierarchy_comm": false,
             "sfa_dcp_force_tmajor_restore": false,
             "enable_force_eplb": false,
@@ -714,6 +715,7 @@ class AscendConfig:
     enable_kv_nz: bool = False
     kv_trace: KVTraceConfig = dataclasses.field(default_factory=KVTraceConfig)
     kv_pool_range_debug: bool = False
+    kv_pool_memcache_g2l_max_transfer_addrs: int = Field(default=0, ge=0, strict=True)
     enable_mc2_hierarchy_comm: bool = False  # deprecated, will be replaced by mc2_comm_alg = "hierarchy"
     sfa_dcp_force_tmajor_restore: bool = False
     enable_force_eplb: bool = False

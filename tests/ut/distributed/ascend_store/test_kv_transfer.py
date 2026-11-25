@@ -47,6 +47,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
 
 # isort: on
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector import AscendStoreConnector
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.base import Backend
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.memcache_backend import MemcacheBackend, MmcDirect
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.buffer import MemoryLocation
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.kv_transfer import (
@@ -409,10 +410,8 @@ class TestGVALayerTransferFailures(unittest.TestCase):
 
 
 class TestGVALayerReceivingTaskOwnership(unittest.TestCase):
-    def _make_thread(self, external_slot_release_waiter=None, save_failure_checker=None):
-        # Plain mock store: the layerwise threads are backend-agnostic.
-        # `.store` is attached explicitly to pin batch_copy's return value.
-        store = MagicMock()
+    def _make_thread(self, external_slot_release_waiter=None, save_failure_checker=None, **transfer_options):
+        store = MagicMock(spec=MemcacheBackend)
         store.store = MagicMock(batch_copy=MagicMock(return_value=0))
         load_finished = [threading.Event(), threading.Event()]
         save_finished = [threading.Event(), threading.Event()]
@@ -442,8 +441,82 @@ class TestGVALayerReceivingTaskOwnership(unittest.TestCase):
             group_builders=[builder],
             external_slot_release_waiter=external_slot_release_waiter,
             save_failure_checker=save_failure_checker,
+            **transfer_options,
         )
         return thread, load_finished, save_finished, sync_events
+
+    def test_memcache_gva_read_bounds_native_calls_before_signaling_ready(self):
+        thread, load_finished, _, _ = self._make_thread(max_g2l_transfer_addrs=128, max_transfer_bytes=16)
+        gvas = np.arange(1000, 1000 + 130 * 32, 32)
+        addrs = gvas + 10_000
+        thread.group_builders[0].build_addrs.return_value = LayerBatchReqMeta(
+            req_ids=["r1"],
+            layer_id=1,
+            is_last_chunks=[False],
+            addr_array=addrs,
+            size_array=np.full(130, 24),
+            gvas_array=gvas,
+        )
+        task = LayerTransferTask(
+            layer_id=1,
+            block_ranges=[],
+            shared_block_data=SharedBlockData(
+                block_ids_arr=np.asarray([1]),
+                block_gvas_arr=np.asarray([1000]),
+                req_ids=["r1"],
+                is_last_chunks=[False],
+            ),
+        )
+        load_task = LayerLoadTask(wait_for_save_layers=(), transfer_tasks=[task], layer_id=1)
+        native_copy = thread.m_store.store.batch_copy
+
+        def copy_chunk(chunk_gvas, chunk_addrs, chunk_sizes, direction):
+            self.assertFalse(load_finished[1].is_set())
+            self.assertEqual(direction, 1)
+            self.assertLessEqual(len(chunk_gvas), 128)
+            self.assertEqual(len(chunk_gvas), len(chunk_addrs))
+            self.assertEqual(len(chunk_gvas), len(chunk_sizes))
+            return 0
+
+        native_copy.side_effect = copy_chunk
+        thread.request_queue.put(load_task)
+        thread._handle_request(load_task)
+
+        chunks = [call.args for call in native_copy.call_args_list]
+        self.assertEqual([len(gvas) for gvas, _, _, _ in chunks], [128, 128, 4])
+        self.assertEqual(
+            [entry for gvas, addrs, sizes, _ in chunks for entry in zip(gvas, addrs, sizes, strict=True)],
+            list(zip(gvas.tolist(), addrs.tolist(), [16] * 130, strict=True))
+            + list(zip((gvas + 16).tolist(), (addrs + 16).tolist(), [8] * 130, strict=True)),
+        )
+        self.assertTrue(load_finished[1].is_set())
+
+    def test_memcache_gva_read_stops_at_failing_chunk(self):
+        thread, _, _, _ = self._make_thread(max_g2l_transfer_addrs=128)
+        native_copy = thread.m_store.store.batch_copy
+        native_copy.side_effect = [0, -5, 0]
+        gvas = np.arange(273)
+
+        self.assertEqual(thread._batch_copy_with_limits(gvas, gvas + 1000, np.full(273, 16), 1, 0, 0), -5)
+        self.assertEqual([len(call.args[0]) for call in native_copy.call_args_list], [128, 128])
+
+    def test_native_copy_without_gva_read_cap(self):
+        gvas = np.arange(129)
+        addrs = gvas + 1000
+        sizes = np.full(129, 16)
+        for backend, direction, cap in ((MemcacheBackend, 1, 0), (MemcacheBackend, 0, 128), (Backend, 1, 128)):
+            with self.subTest(backend=backend, direction=direction, cap=cap):
+                store = MagicMock(spec=backend)
+                store.store = MagicMock(batch_copy=MagicMock(return_value=0))
+                thread = KVTransferThread(store, FakeTokenDatabase(), 16, 0, max_g2l_transfer_addrs=cap)
+                self.assertEqual(thread._batch_copy_with_limits(gvas, addrs, sizes, direction, 0, 0), 0)
+                store.store.batch_copy.assert_called_once_with(gvas.tolist(), addrs.tolist(), sizes.tolist(), direction)
+
+    def test_empty_memcache_gva_read_does_not_submit_native_copy(self):
+        thread, _, _, _ = self._make_thread(max_g2l_transfer_addrs=128)
+        empty = np.empty(0, dtype=np.int64)
+        self.assertEqual(thread._batch_copy_with_limits(empty, empty, empty, 1, 0, 0), 0)
+        thread.m_store.store.batch_copy.assert_not_called()
 
     def test_gva_load_failure_policy(self):
         for hybrid in (False, True):
