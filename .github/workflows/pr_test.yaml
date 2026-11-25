@@ -244,6 +244,9 @@ jobs:
               - '.github/workflows/scripts/test_config.yaml'
               - '.github/workflows/scripts/runner_label.json'
               - '.github/workflows/scripts/coverage.py'
+              - 'requirements.txt'
+              - 'requirements-dev.txt'
+              - 'pyproject.toml'
             # Files that can affect CPU UT execution but are covered by neither
             # src nor ci_pipeline: everything tests/ut reads from disk, not only
             # what it imports from under tests/. That includes shared tests/
@@ -269,7 +272,7 @@ jobs:
       - name: Install vllm-ascend dev (conditional)
         if: steps.filter.outputs.lint_tracker == 'true'
         env:
-          UV_EXTRA_INDEX_URL: "https://mirrors.huaweicloud.com/ascend/repos/pypi https://mirrors.huaweicloud.com/ascend/repos/pypi/nightly https://download.pytorch.org/whl/cpu"
+          UV_EXTRA_INDEX_URL: "https://repo.huaweicloud.com/ascend/repos/pypi https://repo.huaweicloud.com/ascend/repos/pypi/nightly https://download.pytorch.org/whl/cpu"
           UV_INDEX_STRATEGY: unsafe-best-match
           UV_NO_CACHE: 1
           UV_SYSTEM_PYTHON: 1
@@ -837,8 +840,9 @@ jobs:
     # for fork PRs, so the PR number must travel through this run's
     # artifacts instead. Runs regardless of test outcomes because the
     # comment workflow fires on any completed run.
-    if: ${{ !cancelled() }}
-    runs-on: linux-amd64-cpu-2-hk
+    if: ${{ !cancelled() && needs.pre-commit.outputs.src == 'true' }}
+    needs: pre-commit
+    runs-on: linux-amd64-cpu-1-hk
     steps:
       - name: Write PR context
         run: |

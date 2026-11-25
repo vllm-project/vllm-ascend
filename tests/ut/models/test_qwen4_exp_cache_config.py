@@ -6,7 +6,7 @@ import pytest
 import torch
 from vllm.config import KVTransferConfig
 from vllm.model_executor.models import ModelRegistry
-from vllm.v1.core.kv_cache_planning import DefaultKVCacheConfigBuilder
+from vllm.v1.core import kv_cache_planning as planning
 from vllm.v1.kv_cache_interface import (
     CircularBufferSpec,
     FullAttentionSpec,
@@ -18,6 +18,7 @@ from vllm.v1.kv_cache_interface import (
     UniformTypeKVCacheSpecs,
 )
 
+from vllm_ascend.core.kv_cache_config_builder import AscendKVCacheConfigBuilder
 from vllm_ascend.models.qwen4_exp.cache_config import (
     GDN,
     HIDDEN,
@@ -31,11 +32,7 @@ from vllm_ascend.models.qwen4_exp.cache_config import (
     get_qwen4_exp_pool_bytes_per_block,
     make_slab_view,
 )
-from vllm_ascend.patch.platform.patch_kv_cache_utils import (
-    _ascend_max_memory_usage_bytes_from_groups,
-)
 from vllm_ascend.platform import NPUPlatform
-from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2 import attn_utils as attn_utils_v2
 
 
@@ -337,7 +334,11 @@ def _allocate_mrv2_kv_cache(
     )
     monkeypatch.setattr(attn_utils_v2, "get_current_vllm_config", lambda: vllm_config)
     monkeypatch.setattr(attn_utils_v2, "enable_sfa", lambda _: False)
-    backend = SimpleNamespace(full_cls_name=lambda: "qwen-cache-test")
+    block_sizes = kernel_block_sizes or [128] * len(config.kv_cache_groups)
+    backend = SimpleNamespace(
+        full_cls_name=lambda: "qwen-cache-test",
+        get_supported_kernel_block_sizes=lambda _spec: block_sizes,
+    )
     layers = {
         name: SimpleNamespace(get_attn_backend=lambda: backend, num_heads=1)
         for group in config.kv_cache_groups
@@ -349,7 +350,6 @@ def _allocate_mrv2_kv_cache(
         lambda *_: layers,
     )
     raw = attn_utils_v2._allocate_kv_cache(config, {}, torch.device("cpu"))
-    block_sizes = kernel_block_sizes or [128] * len(config.kv_cache_groups)
     if use_main:
         monkeypatch.setattr(attn_utils_v2, "_allocate_kv_cache", lambda *_, **__: raw)
         caches = attn_utils_v2.allocate_kv_cache_main(
@@ -361,6 +361,7 @@ def _allocate_mrv2_kv_cache(
     else:
         groups = [
             SimpleNamespace(
+                kernel_block_size=None,
                 kv_cache_group_id=i,
                 kv_cache_spec=group.kv_cache_spec,
                 layer_names=group.layer_names,
@@ -543,9 +544,10 @@ def test_qwen4_cache_admission_matches_shared_planner_allocation() -> None:
             prefix_cache_retention_interval=None,
         ),
         max_in_flight_tokens=4096,
+        attention_config=SimpleNamespace(hisparse_config=None),
     )
-    required_bytes = _ascend_max_memory_usage_bytes_from_groups(
-        DefaultKVCacheConfigBuilder(),
+    required_bytes = planning._max_memory_usage_bytes_from_groups(
+        AscendKVCacheConfigBuilder(),
         vllm_config,
         groups,
     )
@@ -592,6 +594,7 @@ def test_mamba_state_groups_merge_shares_one_block_table(monkeypatch) -> None:
             prefix_cache_retention_interval=None,
         ),
         max_in_flight_tokens=4096,
+        attention_config=SimpleNamespace(hisparse_config=None),
     )
 
     def is_gdn_group(group) -> bool:
@@ -612,7 +615,7 @@ def test_mamba_state_groups_merge_shares_one_block_table(monkeypatch) -> None:
     gdn_blocks_each = required_blocks(gdn_groups[:1])
 
     blocks_before = required_blocks(groups)
-    bytes_before = _ascend_max_memory_usage_bytes_from_groups(DefaultKVCacheConfigBuilder(), vllm_config, groups)
+    bytes_before = planning._max_memory_usage_bytes_from_groups(AscendKVCacheConfigBuilder(), vllm_config, groups)
 
     merged = _merge_mamba_state_groups(groups, 13)
 
@@ -635,7 +638,7 @@ def test_mamba_state_groups_merge_shares_one_block_table(monkeypatch) -> None:
         owner.spec.real_page_size_bytes for owner in probe.owners if owner.role == PLE
     )
 
-    bytes_after = _ascend_max_memory_usage_bytes_from_groups(DefaultKVCacheConfigBuilder(), vllm_config, merged)
+    bytes_after = planning._max_memory_usage_bytes_from_groups(AscendKVCacheConfigBuilder(), vllm_config, merged)
     assert bytes_after == blocks_after * pool_block_bytes
     assert bytes_before - bytes_after == 33 * gdn_blocks_each * pool_block_bytes
 
@@ -749,7 +752,7 @@ def test_qsa_block_alignment_reuses_vllm_for_whole_gdn_page(monkeypatch, cache_m
     )
     NPUPlatform._align_hybrid_block_size(config, AscendQSABackend)
     assert cache.block_size == 896
-    expected_mamba_block_size = 896 if cache_mode == "align" or vllm_version_is("0.31.0") else None
+    expected_mamba_block_size = 896 if cache_mode == "align" else None
     assert cache.mamba_block_size == expected_mamba_block_size
     assert cache.mamba_page_size_padded == 896 * 1024
 
@@ -825,21 +828,14 @@ def test_platform_builder_uses_qwen_pool_accounting() -> None:
 
 @pytest.mark.parametrize("manager_block_size", [256, 384, 768])
 def test_compressed_qsa_builder_and_cache_use_matching_pages(monkeypatch, manager_block_size):
+    import vllm.models.qwen4_exp.common.qsa_indexer as qsa_module  # type: ignore[import-not-found]
     from vllm.v1.attention.backend import CommonAttentionMetadata
     from vllm.v1.worker.utils import AttentionGroup
 
     from vllm_ascend.models.qwen4_exp import qsa
 
-    if vllm_version_is("0.33.0"):
-        import vllm.models.qwen4_exp.common.qsa_cache as qsa_module  # type: ignore[import-not-found]
-
-        QSARawKeyCache = qsa_module.QSAKeyStateCache
-        QSAIndexerBackend = qsa_module.QSAStateBackend
-    else:
-        import vllm.models.qwen4_exp.common.qsa_indexer as qsa_module  # type: ignore[import-not-found]
-
-        QSARawKeyCache = qsa_module.QSARawKeyCache
-        QSAIndexerBackend = qsa_module.QSAIndexerBackend
+    QSARawKeyCache = qsa_module.QSARawKeyCache
+    QSAIndexerBackend = qsa_module.QSAIndexerBackend
 
     groups = [
         KVCacheGroupSpec(
@@ -870,7 +866,6 @@ def test_compressed_qsa_builder_and_cache_use_matching_pages(monkeypatch, manage
         parallel_config=SimpleNamespace(decode_context_parallel_size=1),
         speculative_config=None,
         num_speculative_tokens=0,
-        use_v2_model_runner=True,
     )
     compressed_group = groups[2]
     spec = compressed_group.kv_cache_spec

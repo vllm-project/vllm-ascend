@@ -6,13 +6,13 @@ The context parallel features include Prefill Context Parallel (PCP) and Decode 
 
 Prefill Context Parallel splits prefill tokens across additional ranks to reduce time to first token. See the [Context Parallel Guide](../../user_guide/feature_guide/context_parallel.md#prefill-context-parallel) for PCP configuration, supported feature combinations, and constraints.
 
-Decode Context Parallel shards the KV cache along the sequence dimension across ranks in a DCP group, which may reuse TP ranks, PCP ranks, or both. It eliminates redundant KV-cache storage without adding devices to the process world.
+Decode Context Parallel shards the KV cache along the sequence dimension across ranks in a DCP group, which may reuse TP ranks, PCP ranks, or both. It eliminates redundant KV cache storage without adding devices to the process world.
 
 This document describes PCP execution and DCP cache sharding. See the [PCP/DCP RFC](https://github.com/vllm-project/vllm-ascend/issues/12622) for the design rationale.
 
 !!! warning "GQA DCP Support Removed"
 
-    Decode Context Parallelism (DCP) for GQA models has been removed. GQA draft models maintain native TP sharding under target DCP. DCP for MLA and SFA models remains fully supported. See [RFC #21305](https://github.com/vllm-project/vllm-ascend/issues/21305).
+    Decode Context Parallel (DCP) for GQA models has been removed. GQA draft models maintain native TP sharding under target DCP. DCP for MLA and SFA models remains fully supported. See [RFC #21305](https://github.com/vllm-project/vllm-ascend/issues/21305).
 
 ## KV-cache layout
 
@@ -87,7 +87,7 @@ PCP rank 2:         [2]      [5]
 PCP rank 3:            [3][4]
 ```
 
-Each fragment keeps its original positions and computed-prefix length, so tail queries can attend to earlier chunks. Local buffers are padded for collectives. Short requests can leave PCP-only ranks without queries; the PCP+DCP path replicates short prefills when splitting would leave an empty chunk.
+Each fragment keeps its original positions and computed-prefix length, so tail queries can attend to earlier chunks. Local buffers are padded for collectives. With PCP-only decode request sharding, a cached one-token prompt tail uses decode request ownership instead of prefill splitting across attention backends; its original prefill lifecycle state is retained. Speculative draft tokens do not count toward this one-token check. Fresh prompts still use prefill splitting, and PCP+DCP replicates short prefills when splitting would leave an empty chunk.
 
 #### Decode: request ownership and cache shards
 

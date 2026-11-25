@@ -26,6 +26,7 @@ def _build_impl(rope_dim: int) -> AscendMLAImpl:
     impl.head_padding = 0
     impl.scale = 1.0
     impl.fa_quant_layer = False
+    impl.use_quant_flashmla = False
     impl.kv_b_proj = lambda x: (torch.zeros(x.size(0), NUM_HEADS * (QK_NOPE_HEAD_DIM + V_HEAD_DIM)),)
     impl.get_context_seq_len_npu = lambda index, metadata: torch.tensor([CHUNK_TOKS], dtype=torch.int32)
     return impl

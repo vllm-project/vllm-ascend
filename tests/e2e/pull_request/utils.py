@@ -7,6 +7,7 @@ from typing import Any
 import requests
 from vllm import SamplingParams
 from vllm.inputs import TokensPrompt
+from vllm.outputs import RequestOutput
 from vllm.utils.network_utils import get_open_port
 from vllm.v1.metrics.reader import Counter, Vector
 
@@ -356,6 +357,15 @@ PROMPTS_LONG = [
 ]
 
 
+def assert_valid_generation_outputs(outputs: Sequence[RequestOutput], num_requests: int, vocab_size: int) -> None:
+    assert len(outputs) == num_requests, f"Expected {num_requests} outputs, got {len(outputs)}"
+    for prompt_idx, output in enumerate(outputs):
+        assert output.finished and len(output.outputs) == 1, f"Prompt {prompt_idx}: expected one finished completion"
+        token_ids = output.outputs[0].token_ids
+        assert token_ids, f"Prompt {prompt_idx}: empty completion"
+        assert all(0 <= token_id < vocab_size for token_id in token_ids), f"Prompt {prompt_idx}: invalid token ID"
+
+
 @dataclass(frozen=True)
 class LLMTestCase:
     model: str
@@ -510,7 +520,6 @@ def run_pd_disaggregation(
     prefill_pcp_size: int,
     decode_tp_size: int,
     async_scheduling: bool,
-    use_model_runner_v2: bool,
 ) -> str:
     """Run one 1P1D request through the disaggregated proxy."""
     prefiller_port = [get_open_port()]
@@ -524,8 +533,6 @@ def run_pd_disaggregation(
     # A5 UB requires the v1.3 HIXL resource format; preserve explicit transport configuration.
     if is_950() and not any(name in os.environ for name in ("ASCEND_LOCAL_COMM_RES", "ASCEND_GLOBAL_RESOURCE_CONFIG")):
         env_dict["ASCEND_LOCAL_COMM_RES"] = '{"version":"1.3"}'
-    if use_model_runner_v2:
-        env_dict["VLLM_USE_V2_MODEL_RUNNER"] = "1"
 
     vllm_server_args = [
         [

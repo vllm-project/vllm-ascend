@@ -5,8 +5,8 @@
 vLLM #60271 ("Check batch-invariance support for every attention backend") added
 a hard check in ``vllm/v1/worker/gpu/attn_utils.init_attn_backend`` on main:
 ``VLLM_BATCH_INVARIANT`` mode now rejects any attention backend whose
-``supports_batch_invariance()`` returns False. Both v0.33.0 and verified main
-enforce this check, so Ascend advertises support in both lanes.
+``supports_batch_invariance()`` returns False. Verified main enforces this
+check, so Ascend advertises support.
 """
 
 import pytest
@@ -16,6 +16,11 @@ from vllm_ascend.attention.attention_c8_mxfp import AscendC8MXFPAttentionBackend
 from vllm_ascend.attention.attention_v1 import AscendAttentionBackend
 from vllm_ascend.attention.dsa_v1 import AscendDSABackend
 from vllm_ascend.attention.dsa_v41 import DeepseekV41CacheBackend
+from vllm_ascend.attention.gdn_attn_builder import (
+    AscendGDNAttentionBackend,
+    AscendGDNFusedAttentionBackend,
+    AscendGDNHostMetadataBackend,
+)
 from vllm_ascend.attention.indexer import AscendSFAIndexerBackend
 from vllm_ascend.attention.indexer_kpool import (
     AscendIndexerKPoolBackend,
@@ -26,11 +31,6 @@ from vllm_ascend.attention.sfa_v1 import AscendSFABackend
 from vllm_ascend.models.minimax_m3.msa_m3 import (
     AscendMiniMaxM3IndexerBackend,
     AscendMiniMaxM3SparseBackend,
-)
-from vllm_ascend.ops.gdn_attn_builder import (
-    AscendGDNAttentionBackend,
-    AscendGDNFusedAttentionBackend,
-    AscendGDNHostMetadataBackend,
 )
 
 _BACKENDS = [

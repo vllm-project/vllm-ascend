@@ -4,6 +4,7 @@
 
 import time
 from types import SimpleNamespace
+from unittest.mock import MagicMock
 
 import msgspec
 import pytest
@@ -14,6 +15,34 @@ from zmq.sugar.context import Context
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake import push_worker
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.base_worker import MooncakeBaseConnectorWorker
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.metadata import MooncakeConnectorMetadata
+
+
+@pytest.mark.parametrize("options,expected", [({}, 32), ({"transfer_max_workers": 64}, 64)])
+def test_push_executor_uses_configured_max_workers(monkeypatch, options, expected):
+    worker = push_worker.MooncakePushConnectorWorker.__new__(push_worker.MooncakePushConnectorWorker)
+    worker.kv_transfer_config = SimpleNamespace(is_kv_producer=True, get_from_extra_config=options.get)
+    worker.vllm_config = SimpleNamespace(
+        kv_transfer_config=worker.kv_transfer_config,
+        compilation_config=SimpleNamespace(static_forward_context={}),
+        model_config=SimpleNamespace(hf_text_config=SimpleNamespace(model_type="llama")),
+    )
+    worker.ascend_config = SimpleNamespace(kvpp_config=SimpleNamespace(size=1))
+    worker.transfer_metadata = SimpleNamespace(
+        layer_names=["model.layers.0.attn"], kv_caches_base_addr=[], block_shapes=[], block_strides=[], block_lens=[]
+    )
+    monkeypatch.setattr(MooncakeBaseConnectorWorker, "register_kv_caches", lambda *args: None)
+    monkeypatch.setattr(push_worker.torch.npu, "current_device", lambda: 0)
+    monkeypatch.setattr(push_worker, "Context", MagicMock())
+    executor = MagicMock()
+    monkeypatch.setattr(push_worker, "ThreadPoolExecutor", executor)
+    worker.register_kv_caches({})
+    executor.assert_called_once_with(
+        max_workers=expected,
+        initializer=push_worker.torch.npu.set_device,
+        initargs=(0,),
+        thread_name_prefix="MooncakePushSending",
+    )
+    assert worker._sender_executor is executor.return_value
 
 
 @pytest.fixture(params=[1, 2])

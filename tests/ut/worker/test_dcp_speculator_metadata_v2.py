@@ -4,6 +4,7 @@
 
 from contextlib import contextmanager, nullcontext
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 import numpy as np
 import pytest
@@ -12,6 +13,7 @@ from vllm.config import AttentionConfig
 from vllm.config.compilation import CUDAGraphMode
 from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
 from vllm.v1.worker.gpu.spec_decode import speculator as upstream_speculator
+from vllm.v1.worker.gpu.spec_decode.dflash import speculator as upstream_dflash
 from vllm.v1.worker.gpu.spec_decode.target_dependent_ar.speculator import (
     TargetDependentARSpeculator,
 )
@@ -22,6 +24,8 @@ from vllm_ascend.attention.context_parallel.sfa_cp import AscendSFADCPMetadata, 
 from vllm_ascend.attention.mla_v1 import AscendMLABackend
 from vllm_ascend.worker.dcp_utils import DCPManager
 from vllm_ascend.worker.v2 import attn_utils
+from vllm_ascend.worker.v2.spec_decode import pcp_utils
+from vllm_ascend.worker.v2.spec_decode.dflash import aclgraph as dflash_graph
 from vllm_ascend.worker.v2.spec_decode.dspark.speculator import AscendDSparkSpeculator
 from vllm_ascend.worker.v2.spec_decode.mtp.speculator import AscendMTPSpeculator
 
@@ -115,8 +119,9 @@ def _speculator(monkeypatch, kind, architecture, width, padded, step, use_dcp=Tr
         is_prefilling_np=np.array([True, False]),
         seq_lens_cpu_upper_bound=target[:2],
     )
-    # Deliberately different from the CPU view: the device path must not be
-    # overwritten while rejection correction on CPU remains deferred.
+    # Deliberately different from the target CPU upper bound. DSpark's input
+    # preparation has already applied rejection correction and query width;
+    # its host metadata must copy this exact view without modifying either input.
     device_lengths = torch.tensor([30 + step, 126, 0, 0], dtype=torch.int32)
     spec.input_buffers = SimpleNamespace(
         seq_lens=device_lengths,
@@ -222,12 +227,16 @@ def test_dspark_common_dcp_preparation(monkeypatch, architecture, padded, width,
         expected_is_prefilling = [False] * padded
         assert common.is_prefilling.tolist() == expected_is_prefilling
     else:
-        expected = [31 + width, 128] + [0] * (padded - 2)
+        # DSpark consumes initialized draft KV lengths, not the target's
+        # optimistic upper bound advanced by another query block.
+        expected = device_lengths[:2].tolist() + [0] * (padded - 2)
         assert common.seq_lens_cpu.tolist() == expected
+        assert common.seq_lens_cpu.data_ptr() != spec.input_buffers.seq_lens.data_ptr()
         assert torch.equal(common.dcp_local_seq_lens_cpu, _local(expected))
         assert common.is_prefilling.tolist() == [False] * padded
     assert torch.equal(common.dcp_local_seq_lens, _local(device_lengths[:padded].tolist()))
     assert common.causal is False
+    assert torch.equal(spec.input_buffers.seq_lens, device_lengths)
     assert torch.equal(spec.target_input_buffers.seq_lens_cpu, original_target)
     if architecture == "MLA":
         assert result["draft.layer"].decode.actual_seq_lengths_q == [(i + 1) * width for i in range(padded)]
@@ -405,9 +414,13 @@ def test_dspark_propose_passes_cpu_lengths_through_existing_factory(monkeypatch,
     monkeypatch.setattr(DSparkSpeculator, "propose", propose)
     result = spec.propose(spec.input_batch, {}, {}, None, None, None, None, None, None, None, None)
     common = result["draft.layer"].common
-    expected = (
-        device_lengths[:padded].tolist() if architecture == "MLA" and not use_dcp else [34, 128] + [0] * (padded - 2)
-    )
+    if architecture == "MLA" or (architecture == "GQA" and use_dcp):
+        # The Ascend hook supplies a current draft-length snapshot after input
+        # preparation, including DCP>1. Other paths retain upstream bounds.
+        expected = device_lengths[:2].tolist() + [0] * (padded - 2)
+        assert common.seq_lens_cpu.data_ptr() != spec.input_buffers.seq_lens.data_ptr()
+    else:
+        expected = [34, 128] + [0] * (padded - 2)
     assert common.seq_lens_cpu.tolist() == expected
     if use_dcp:
         torch.testing.assert_close(common.dcp_local_seq_lens_cpu, _local(expected))
@@ -431,7 +444,79 @@ def test_dspark_propose_passes_cpu_lengths_through_existing_factory(monkeypatch,
     assert common.attn_state is expected_attn_state
     torch.testing.assert_close(common.positions, spec.input_buffers.positions)
     torch.testing.assert_close(spec.target_input_buffers.seq_lens_cpu, target)
+    torch.testing.assert_close(spec.input_buffers.seq_lens, device_lengths)
     assert module.build_attn_metadata is original_builder
+
+
+@pytest.mark.parametrize("flashmla", [True, False], ids=["all-flashmla", "fia"])
+def test_dspark_full_proposal_shares_prepared_lengths_with_replay(monkeypatch, flashmla):
+    width, padded = 3, 4
+    spec, target, _ = _speculator(monkeypatch, "dspark", "MLA", width, padded, width)
+    spec.use_flashmla = flashmla
+    spec.max_num_reqs, spec.max_num_tokens = padded, padded * width
+    spec.num_speculative_steps = width - 1
+    spec.input_batch.num_tokens = 2
+    spec.context_kv_only = spec.supports_decode_metadata_update = False
+    spec.dp_size, spec.dp_rank = 1, 0
+    spec.draft_kv_cache_group_id, spec.draft_kv_cache_group_ids = 0, [0]
+    spec.attn_groups[0][0].kernel_block_stride = 0
+    spec.block_tables.block_sizes = [128]
+    spec.parallel_drafting_token_id, spec.sample_from_anchor = 0, False
+    spec.draft_tokens = torch.zeros((padded, width - 1), dtype=torch.int64)
+    spec.context_positions = spec.sample_indices = spec.sample_pos = spec.sample_idx_mapping = torch.empty(0)
+    spec.temperature = spec.seeds = torch.empty(0)
+    spec._context_slot_mappings = [torch.empty(0)]
+
+    desc = BatchExecutionDescriptor(cg_mode=CUDAGraphMode.FULL, num_tokens=padded * width, num_reqs=padded)
+    manager = dflash_graph.DFlashAclGraphManager.__new__(dflash_graph.DFlashAclGraphManager)
+    manager.speculator = spec
+    spec.query_cudagraph_manager = manager
+    replay = Mock()
+    monkeypatch.setattr(upstream_dflash, "dispatch_cg_and_sync_dp", lambda *args, **kwargs: (desc, None))
+    monkeypatch.setattr(spec, "_prepare_graph_replay", Mock())
+    monkeypatch.setattr(spec, "_prepare_eplb_forward", Mock())
+    monkeypatch.setattr(dflash_graph, "use_updatable_graph", lambda backend: False)
+    monkeypatch.setattr(manager, "_graph_replay", replay)
+
+    # Stand in for the input preparation kernel, which corrects the device
+    # lengths before upstream builds metadata and dispatches the captured graph.
+    device_lengths = spec.input_buffers.seq_lens
+
+    def prepare_inputs(*args):
+        device_lengths[:2] = target[:2] + width - rejected
+
+    monkeypatch.setattr(upstream_dflash, "prepare_dflash_inputs", prepare_inputs)
+    copies = []
+    copy_tensor = torch.Tensor.copy_
+
+    def count_length_copy(dst, src, *args, **kwargs):
+        if src.data_ptr() == device_lengths.data_ptr():
+            copies.append(dst)
+        return copy_tensor(dst, src, *args, **kwargs)
+
+    monkeypatch.setattr(torch.Tensor, "copy_", count_length_copy)
+    prepare_metadata = spec._prepare_draft_dcp_metadata_inputs
+    snapshots = []
+
+    def record_snapshot(*args):
+        result = prepare_metadata(*args)
+        snapshots.append(result[0])
+        return result
+
+    monkeypatch.setattr(spec, "_prepare_draft_dcp_metadata_inputs", record_snapshot)
+    for rejected in (torch.tensor([2, 3]), torch.tensor([3, 4])):
+        copies.clear()
+        snapshots.clear()
+        spec.propose(spec.input_batch, {}, {}, None, None, None, rejected, None, None, None, None)
+        replay.assert_called_once()
+        replay.reset_mock()
+        assert len(snapshots) == 2  # Pre-dispatch build and Ascend graph replay.
+        if flashmla:
+            assert snapshots == [None, None] and not copies
+        else:
+            assert len(copies) == 1
+            assert snapshots[0] is snapshots[1]
+            assert snapshots[0].tolist() == (target[:2] + width - rejected).tolist() + [0, 0]
 
 
 def test_dspark_profile_without_attention_skips_cpu_lengths(monkeypatch):
@@ -441,6 +526,7 @@ def test_dspark_profile_without_attention_skips_cpu_lengths(monkeypatch):
     spec.max_num_tokens = 12
     del spec.target_input_buffers
     sentinel = object()
+    monkeypatch.setattr(pcp_utils, "get_pcp_group", lambda: SimpleNamespace(world_size=1))
     monkeypatch.setattr(DSparkSpeculator, "propose", lambda *args, **kwargs: sentinel)
     result = spec.propose(
         spec.input_batch,
@@ -456,5 +542,6 @@ def test_dspark_profile_without_attention_skips_cpu_lengths(monkeypatch):
         None,
         dummy_run=True,
         skip_attn_for_dummy_run=True,
+        is_profile=True,
     )
     assert result is sentinel

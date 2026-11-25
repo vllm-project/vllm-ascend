@@ -26,19 +26,21 @@ Refer to [Feature Guide](../../user_guide/feature_guide/index.md) to get feature
 
 |  Weight Version  | Hardware Requirements | Download Links |
 |------------------|-----------------------|----------------|
-| `Qwen3.6-35B-A3B` (BF16 version) | 1 950DT Products (96GB x 8) node, 1 A3 series (64GB x 16) node, 1 A2 series (64GB x 8) node, or Atlas 300I DUO | [ModelScope](https://www.modelscope.cn/models/Qwen/Qwen3.6-35B-A3B) |
-| `Qwen3.6-35B-A3B-w8a8` (quantized version) | 1 A3 series (64GB x 16) node, 1 A2 series (64GB x 8) node, or Atlas 300I DUO | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/Qwen3.6-35B-A3B-w8a8) |
+| `Qwen3.6-35B-A3B` (BF16 version) | 1 950DT Products (96GB x 8) node, 1 A3 series (64GB x 16) node, 1 A2 series (64GB x 8) node, or Atlas 300I Duo | [ModelScope](https://www.modelscope.cn/models/Qwen/Qwen3.6-35B-A3B) |
+| `Qwen3.6-35B-A3B-w8a8` (quantized version) | 1 A3 series (64GB x 16) node, 1 A2 series (64GB x 8) node, or Atlas 300I Duo | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/Qwen3.6-35B-A3B-w8a8) |
 | `Qwen3.6-35B-A3B-w8a8-mxfp8` (quantized version) | 1 950DT Products (96GB x 8) node | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/Qwen3.6-35B-A3B-w8a8-mxfp8) |
 | `Qwen3.6-35B-A3B-w8a8c8-mxfp8` (quantized version) | 1 950DT Products (96GB x 8) node | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/Qwen3.6-35B-A3B-w8a8c8-mxfp8) |
 | `Qwen3.6-35B-A3B-w4a8-mxfp` (quantized version) | 1 950DT Products (96GB x 8) node | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/Qwen3.6-35B-A3B-w4a8-mxfp) |
 
 It is recommended to download the model weight to the shared directory of multiple nodes, such as `/root/.cache/`.
 
->**Path description**: Download the model weights to a directory of your choice and record it. Ensure the model path in the subsequent deployment command matches this directory.
+> **Path description**: Download the model weights to a directory of your choice and record it. Ensure the model path in the subsequent deployment command matches this directory.
 
 ## 4 Installation
 
 ### 4.1 Docker Image Installation
+
+{% include "getting_started/installation/ascend_docker_runtime.inc.md" %}
 
 Refer to [using docker](../../getting_started/installation.md#installation-prebuilt-image) for the complete installation guide.
 
@@ -50,29 +52,15 @@ Refer to [using docker](../../getting_started/installation.md#installation-prebu
     export NAME=vllm-ascend
 
     docker run --rm \
+      -e ASCEND_VISIBLE_DEVICES=0-7 \
       --name $NAME \
       --net=host \
       --shm-size=500g \
-      --device /dev/davinci_manager \
-      --device /dev/hisi_hdc \
-      --device /dev/ummu \
-      --device /dev/uburma \
-      --device /dev/davinci0 \
-      --device /dev/davinci1 \
-      --device /dev/davinci2 \
-      --device /dev/davinci3 \
-      --device /dev/davinci4 \
-      --device /dev/davinci5 \
-      --device /dev/davinci6 \
-      --device /dev/davinci7 \
       -v /usr/local/Ascend/driver:/usr/local/Ascend/driver \
       -v /usr/local/Ascend/firmware:/usr/local/Ascend/firmware \
       -v /root/host:/root/host  \
       -v /usr/local/sbin:/usr/local/sbin \
-      -v /usr/local/dcmi:/usr/local/dcmi \
       -v /var/log/npu:/usr/slog \
-      -v /etc/ascend_install.info:/etc/ascend_install.info \
-      -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
       -v /etc/hixlep:/etc/hixlep \
       -v /root/.cache:/root/.cache \
       -it $IMAGE bash
@@ -87,34 +75,11 @@ Refer to [using docker](../../getting_started/installation.md#installation-prebu
     export NAME=vllm-ascend
 
     docker run --rm \
+      -e ASCEND_VISIBLE_DEVICES=0-15 \
       --name $NAME \
       --net=host \
       --shm-size=1g \
-      --device /dev/davinci0 \
-      --device /dev/davinci1 \
-      --device /dev/davinci2 \
-      --device /dev/davinci3 \
-      --device /dev/davinci4 \
-      --device /dev/davinci5 \
-      --device /dev/davinci6 \
-      --device /dev/davinci7 \
-      --device /dev/davinci8 \
-      --device /dev/davinci9 \
-      --device /dev/davinci10 \
-      --device /dev/davinci11 \
-      --device /dev/davinci12 \
-      --device /dev/davinci13 \
-      --device /dev/davinci14 \
-      --device /dev/davinci15 \
-      --device /dev/davinci_manager \
-      --device /dev/devmm_svm \
-      --device /dev/hisi_hdc \
-      -v /usr/local/dcmi:/usr/local/dcmi \
       -v /usr/local/Ascend/driver/tools/hccn_tool:/usr/local/Ascend/driver/tools/hccn_tool \
-      -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
-      -v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
-      -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
-      -v /etc/ascend_install.info:/etc/ascend_install.info \
       -v /root/.cache:/root/.cache \
       -it $IMAGE bash
     ```
@@ -128,31 +93,16 @@ Refer to [using docker](../../getting_started/installation.md#installation-prebu
     export NAME=vllm-ascend
 
     docker run --rm \
+      -e ASCEND_VISIBLE_DEVICES=0-7 \
       --name $NAME \
       --net=host \
       --shm-size=1g \
-      --device /dev/davinci0 \
-      --device /dev/davinci1 \
-      --device /dev/davinci2 \
-      --device /dev/davinci3 \
-      --device /dev/davinci4 \
-      --device /dev/davinci5 \
-      --device /dev/davinci6 \
-      --device /dev/davinci7 \
-      --device /dev/davinci_manager \
-      --device /dev/devmm_svm \
-      --device /dev/hisi_hdc \
-      -v /usr/local/dcmi:/usr/local/dcmi \
       -v /usr/local/Ascend/driver/tools/hccn_tool:/usr/local/Ascend/driver/tools/hccn_tool \
-      -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
-      -v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
-      -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
-      -v /etc/ascend_install.info:/etc/ascend_install.info \
       -v /root/.cache:/root/.cache \
       -it $IMAGE bash
     ```
 
-=== "Atlas 300I DUO"
+=== "Atlas 300I Duo"
 
     #### Standard container
 
@@ -162,24 +112,9 @@ Refer to [using docker](../../getting_started/installation.md#installation-prebu
     export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}-310p
 
     docker run --rm \
+    -e ASCEND_VISIBLE_DEVICES=0-7 \
     --name vllm-ascend \
     --shm-size=10g \
-    --device /dev/davinci0 \
-    --device /dev/davinci1 \
-    --device /dev/davinci2 \
-    --device /dev/davinci3 \
-    --device /dev/davinci4 \
-    --device /dev/davinci5 \
-    --device /dev/davinci6 \
-    --device /dev/davinci7 \
-    --device /dev/davinci_manager \
-    --device /dev/devmm_svm \
-    --device /dev/hisi_hdc \
-    -v /usr/local/dcmi:/usr/local/dcmi \
-    -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
-    -v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
-    -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
-    -v /etc/ascend_install.info:/etc/ascend_install.info \
     -v /root/.cache:/root/.cache \
     -p 8080:8080 \
     -it $IMAGE bash
@@ -197,7 +132,7 @@ You can also build and install `vllm-ascend` from source. Refer to [set up using
 
 !!! note
 
-    For Atlas 300I DUO, source installation may pull in `triton` and `triton-ascend`. Uninstall them before running vLLM-Ascend on Atlas 300I DUO:
+    For Atlas 300I Duo, source installation may pull in `triton` and `triton-ascend`. Uninstall them before running vLLM-Ascend on Atlas 300I Duo:
 
     ```bash
     pip uninstall -y triton-ascend triton
@@ -207,7 +142,7 @@ You can also build and install `vllm-ascend` from source. Refer to [set up using
 
 ### 5.1 Single-Node Online Deployment
 
-Single-node deployment runs both Prefill and Decode on the same node. `Qwen3.6-35B-A3B-w8a8` can be deployed on 1 A3 series (64GB x 16) or 1 A2 series (64GB x 8), or Atlas 300I DUO. `Qwen3.6-35B-A3B-w8a8-mxfp8` can be deployed on a single NPU of a 950DT Products (96GB x 8) node. The quantized versions need `--quantization ascend`.
+Single-node deployment runs both Prefill and Decode on the same node. `Qwen3.6-35B-A3B-w8a8` can be deployed on 1 A3 series (64GB x 16) or 1 A2 series (64GB x 8), or Atlas 300I Duo. `Qwen3.6-35B-A3B-w8a8-mxfp8` can be deployed on a single NPU of a 950DT Products (96GB x 8) node. The quantized versions need `--quantization ascend`.
 
 === "950DT Products"
 
@@ -237,9 +172,9 @@ Single-node deployment runs both Prefill and Decode on the same node. `Qwen3.6-3
       --max-num-seqs 128 \
       --max-num-batched-tokens 4096 \
       --gpu-memory-utilization 0.90 \
-      --speculative-config '{"method":"qwen3_5_mtp","num_speculative_tokens":3}' \
-      --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
-      --additional-config '{"enable_cpu_binding":true,"ascend_compilation_config":{"enable_npugraph_ex":true,"enable_static_kernel":true,"enable_super_kernel":false}}' \
+      --speculative-config '{"method": "qwen3_5_mtp", "num_speculative_tokens": 3}' \
+      --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
+      --additional-config '{"enable_cpu_binding": true, "ascend_compilation_config": {"enable_npugraph_ex": true, "enable_static_kernel": true, "enable_super_kernel":false}}' \
       --enable-prefix-caching
     ```
 
@@ -306,10 +241,10 @@ Single-node deployment runs both Prefill and Decode on the same node. `Qwen3.6-3
       --trust-remote-code \
       --safetensors-load-strategy lazy \
       --gpu-memory-utilization 0.90 \
-      --speculative-config '{"method":"qwen3_5_mtp","num_speculative_tokens":3}' \
+      --speculative-config '{"method": "qwen3_5_mtp", "num_speculative_tokens": 3}' \
       --enable-prefix-caching \
-      --compilation-config '{"cudagraph_mode":"FULL_AND_PIECEWISE"}' \
-      --additional-config '{"enable_cpu_binding":true, "multistream_overlap_shared_expert": true}'
+      --compilation-config '{"cudagraph_mode": "FULL_AND_PIECEWISE"}' \
+      --additional-config '{"enable_cpu_binding": true, "multistream_overlap_shared_expert": true}'
     ```
 
     **Key parameters:**
@@ -319,7 +254,7 @@ Single-node deployment runs both Prefill and Decode on the same node. `Qwen3.6-3
     - `HCCL_BUFFSIZE=1024` sets the HCCL communication buffer size for this example.
     - `--enable-expert-parallel` enables expert parallelism for MoE layers.
     - `--safetensors-load-strategy lazy` uses lazy loading for Safetensors model weights.
-    - The example keeps the model's native `bfloat16` dtype (from the model config, no `--dtype` override is needed). `float16` is required only on Atlas 300I DUO.
+    - The example keeps the model's native `bfloat16` dtype (from the model config, no `--dtype` override is needed). `float16` is required only on Atlas 300I Duo.
     - `--max-model-len 135168` sets the maximum input plus output length for a single request. Ensure enough KV cache is available for the required context length.
     - `--max-num-seqs 128` sets the maximum number of active requests scheduled concurrently. Reduce it if KV cache or graph capture memory is insufficient.
     - `--max-num-batched-tokens 4096` limits the number of tokens processed in one scheduler step. Increase it only after checking prefill throughput and activation memory usage.
@@ -330,7 +265,7 @@ Single-node deployment runs both Prefill and Decode on the same node. `Qwen3.6-3
     - `--quantization ascend` enables Ascend quantization for the W8A8 model used in this example.
     - `--compilation-config '{"cudagraph_mode":"FULL_AND_PIECEWISE"}'` enables the hybrid full and piecewise ACLGraph mode.
 
-=== "Atlas 300I DUO"
+=== "Atlas 300I Duo"
 
     ```shell
     export VLLM_USE_MODELSCOPE=True
@@ -355,12 +290,12 @@ Single-node deployment runs both Prefill and Decode on the same node. `Qwen3.6-3
     **Key parameters:**
 
     - `--tensor-parallel-size 2` maps the model across two Atlas inference devices. Adjust it together with `ASCEND_RT_VISIBLE_DEVICES` according to the available devices and memory.
-    - `--dtype float16` is used for Atlas 300I DUO to match the Atlas inference execution path.
-    - `--max-num-seqs 16` limits concurrent active requests to reduce KV cache and graph capture pressure on Atlas 300I DUO.
+    - `--dtype float16` is used for Atlas 300I Duo to match the Atlas inference execution path.
+    - `--max-num-seqs 16` limits concurrent active requests to reduce KV cache and graph capture pressure on Atlas 300I Duo.
     - `--gpu-memory-utilization` controls KV cache capacity. Reduce it if startup or runtime requests report OOM.
-    - `--additional-config` with `"ascend_compilation_config": {"enable_npugraph_ex": false}` is required because `enable_npugraph_ex` is not supported on Atlas 300I DUO.
-    - `--compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [1,8]}'` enables decode ACLGraph replay and explicitly limits capture sizes for Atlas 300I DUO.
-    - `--no-enable-prefix-caching` is the default recommendation for this Atlas 300I DUO example to reduce memory pressure.
+    - `--additional-config` with `"ascend_compilation_config": {"enable_npugraph_ex": false}` is required because `enable_npugraph_ex` is not supported on Atlas 300I Duo.
+    - `--compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [1,8]}'` enables decode ACLGraph replay and explicitly limits capture sizes for Atlas 300I Duo.
+    - `--no-enable-prefix-caching` is the default recommendation for this Atlas 300I Duo example to reduce memory pressure.
     - `--quantization ascend` enables Ascend quantization for the W8A8 model. Remove this option when deploying the BF16 model.
     - To enable MTP speculative decoding, use `--speculative-config '{"method": "mtp", "num_speculative_tokens": 1}'`. We recommend setting `num_speculative_tokens` to 1. If your usage scenario involves fewer than two concurrent requests, it is recommended to enable MTP. Otherwise, it is recommended not to enable MTP.
 
@@ -376,7 +311,7 @@ Use the API port configured in the selected deployment command. For example, che
 curl -fsS -o /dev/null -w '%{http_code}\n' http://127.0.0.1:8000/health
 ```
 
-For other deployments, use their configured API port. The Atlas 300I DUO example listens on `127.0.0.1:8080`, so run its check on the serving node or container. A healthy service returns HTTP `200`. If the check fails, inspect the startup log for errors and wait for initialization to finish. After the health check passes, use [Section 6](#6-functional-verification) to verify that the model generates a response.
+For other deployments, use their configured API port. The Atlas 300I Duo example listens on `127.0.0.1:8080`, so run its check on the serving node or container. A healthy service returns HTTP `200`. If the check fails, inspect the startup log for errors and wait for initialization to finish. After the health check passes, use [Section 6](#6-functional-verification) to verify that the model generates a response.
 
 ## 6 Functional Verification
 
@@ -475,8 +410,8 @@ Recommended tuning order:
 | Hybrid attention support | Enabled by model implementation | Supports Qwen3.6 long-context inference. | Tune context length based on KV cache capacity. |
 | Full decode ACLGraph | `--compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}'` | Reduces operator dispatch overhead and stabilizes decode performance. | Recommended for decode-heavy serving. |
 | Shared expert overlap | `--additional-config '{"multistream_overlap_shared_expert": true}'` | Overlaps shared expert computation in MoE workloads. | Recommended for throughput scenarios. |
-| Prefix caching | `--enable-prefix-caching` | Improves repeated-prefix workloads. | Monitor HBM usage for long-context workloads; keep prefix caching disabled on Atlas 300I DUO (see [Section 5.1](#51-single-node-online-deployment)). |
-| Qwen3.6 MTP speculative decoding | `--speculative-config '{"method": "qwen3_5_mtp", "num_speculative_tokens": 3, "enforce_eager": true}'` | Can improve decode throughput when stable and accepted tokens are high. | In [Section 5.1](#51-single-node-online-deployment), 950DT Products and A2/A3 Series use 3 speculative tokens; the optional Atlas 300I DUO configuration uses 1. Validate stability, TTFT, TPOT, and throughput for your workload. |
+| Prefix caching | `--enable-prefix-caching` | Improves repeated-prefix workloads. | Monitor HBM usage for long-context workloads; keep prefix caching disabled on Atlas 300I Duo (see [Section 5.1](#51-single-node-online-deployment)). |
+| Qwen3.6 MTP speculative decoding | `--speculative-config '{"method": "qwen3_5_mtp", "num_speculative_tokens": 3, "enforce_eager": true}'` | Can improve decode throughput when stable and accepted tokens are high. | In [Section 5.1](#51-single-node-online-deployment), 950DT Products and A2/A3 Series use 3 speculative tokens; the optional Atlas 300I Duo configuration uses 1. Validate stability, TTFT, TPOT, and throughput for your workload. |
 
 ## 10 FAQ
 

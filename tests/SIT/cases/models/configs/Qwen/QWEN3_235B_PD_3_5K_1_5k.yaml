@@ -42,7 +42,6 @@ env_common: &env_common
   VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS: "30000"
   VLLM_USE_MODELSCOPE: "true"
   HCCL_OP_EXPANSION_MODE: "AIV"
-  VLLM_USE_V2_MODEL_RUNNER: "1"
   ASCEND_RT_VISIBLE_DEVICES: "${VISIBLE_DEVICES}"
   LD_LIBRARY_PATH: "/usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake:$LD_LIBRARY_PATH"
   PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
