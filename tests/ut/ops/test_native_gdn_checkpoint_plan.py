@@ -1,11 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 import pytest
 import torch
 
 from vllm_ascend.core.gdn_checkpoint_policy import GDNCheckpointPolicy
+from vllm_ascend.ops import native_gdn_checkpoint
 from vllm_ascend.ops.gdn_checkpoint import build_gdn_checkpoint_metadata
 from vllm_ascend.ops.native_gdn_checkpoint import plan_native_checkpoint
 
@@ -25,6 +27,51 @@ def test_mixed_batch_restores_original_token_order():
 def test_plan_requires_a_checkpoint_with_a_nonempty_tail(offsets, lengths):
     with pytest.raises(AssertionError):
         plan_native_checkpoint(offsets, lengths)
+
+
+@pytest.mark.parametrize("joint_pack", [False, True])
+def test_contiguous_checkpoint_keeps_token_order_and_packs_heads_once(monkeypatch, joint_pack):
+    head_first = torch.arange(56).reshape(4, 7, 2)
+    tensors = tuple(part.transpose(0, 1).unsqueeze(0) for part in head_first.split((1, 1, 2)))
+    checkpoint = SimpleNamespace(query_lens=[7], offsets=[4])
+    metadata = SimpleNamespace(checkpoint=checkpoint)
+    initial_state = torch.zeros(1, 2, 2, 2)
+    gate = torch.ones(1, 7, 2)
+    calls = []
+
+    def recur(inputs, state, partition, scale, fused, fla_fwd, *, save_training_intermediates):
+        calls.append((inputs, state, partition, save_training_intermediates))
+        return inputs[2], state + 1
+
+    export = Mock()
+    monkeypatch.setattr(native_gdn_checkpoint, "_apply_recurrence", recur)
+    monkeypatch.setattr(native_gdn_checkpoint, "_export_checkpoint", export)
+    layer = SimpleNamespace()
+    output, state = native_gdn_checkpoint.run_gdn_native_checkpoint_prefill(
+        layer,
+        metadata,
+        None,
+        *tensors,
+        gate,
+        gate,
+        initial_state,
+        fused=None,
+        fla_fwd=object(),
+        head_first_qkv=head_first if joint_pack else None,
+    )
+
+    assert len(calls) == 2
+    for (inputs, _, _, saves), tokens in zip(calls, (slice(0, 4), slice(4, None)), strict=True):
+        assert saves is not joint_pack
+        for actual, expected in zip(inputs[:3], tensors, strict=True):
+            torch.testing.assert_close(actual, expected[:, tokens])
+        if joint_pack:
+            assert all(part.transpose(1, 2).is_contiguous() for part in inputs[:3])
+            assert len({part.untyped_storage().data_ptr() for part in inputs[:3]}) == 1
+    torch.testing.assert_close(calls[1][1], initial_state + 1)
+    torch.testing.assert_close(export.call_args.args[-1], initial_state + 1)
+    torch.testing.assert_close(output, tensors[2])
+    torch.testing.assert_close(state, initial_state + 2)
 
 
 def test_host_block_ids_match_device_null_mask():

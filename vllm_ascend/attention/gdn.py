@@ -44,6 +44,7 @@ from vllm_ascend.attention.utils import (
     maybe_save_kv_layer_to_connector,
     wait_for_kv_layer_from_connector,
 )
+from vllm_ascend.device.device_config import is_950
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.device.hardware_profile import (
     HardwareCapability,
@@ -975,6 +976,16 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
                 initial_state = gather_ssm_states(
                     ssm_state, prefill_state_indices, prefill_has_initial_state, output_dtype=output_dtype
                 )
+                head_first_qkv = None
+                if (
+                    fla_gdn_prefill_op is not None
+                    and is_950()
+                    and conv_head_num
+                    and mixed_qkv_non_spec is not None
+                    and mixed_qkv_non_spec.ndim == 3
+                    and mixed_qkv_non_spec.shape[1] == query_non_spec.shape[1]
+                ):
+                    head_first_qkv = mixed_qkv_non_spec
                 core_attn_out_non_spec, last_recurrent_state = run_gdn_native_checkpoint_prefill(
                     self,
                     attn_metadata,
@@ -987,6 +998,7 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
                     initial_state,
                     fused=AscendGatedDeltaNetAttention._chunk_gated_delta_rule_fused,
                     fla_fwd=fla_gdn_prefill_op,
+                    head_first_qkv=head_first_qkv,
                 )
                 scatter_ssm_states_(
                     ssm_state, prefill_state_indices, last_recurrent_state.to(ssm_state.dtype).contiguous()

@@ -68,11 +68,19 @@ def _partition_metadata(cu_lens, device, fla):
     return NativeFlaPartition(tuple(cu_lens), tuple(indices))
 
 
-def _apply_recurrence(tensors, state, partition, scale, fused, fla_fwd):
+def _apply_recurrence(tensors, state, partition, scale, fused, fla_fwd, *, save_training_intermediates=True):
     if fla_fwd is not None:
         from vllm_ascend.device.device_op import DeviceOperator
 
-        return DeviceOperator.fla_gdn_prefill(*tensors, state, scale, prebuilt_meta=partition, fused_fwd=fla_fwd)
+        return DeviceOperator.fla_gdn_prefill(
+            *tensors,
+            state,
+            scale,
+            prebuilt_meta=partition,
+            fused_fwd=fla_fwd,
+            save_training_intermediates=save_training_intermediates,
+            allow_chunk32=False,
+        )
     return fused(*tensors, state, partition, scale)
 
 
@@ -87,7 +95,18 @@ def _native_checkpoint_plan(checkpoint, device, fla):
     return plan
 
 
-def _run_contiguous_tail(layer, metadata, raw_qkv, tensors, initial_state, scale, fused, fla_fwd):
+def _slice_inputs(tensors, tokens, head_first_qkv):
+    q, k, v, g, beta = tensors
+    if head_first_qkv is None:
+        return tuple(tensor[:, tokens] for tensor in tensors)
+    # The convolution produces all heads in one allocation. Pack the segment
+    # once, then expose the same sequence-major Q/K/V views to the FLA backend.
+    packed = head_first_qkv[:, tokens].contiguous()
+    qkv = packed.split((q.shape[2], k.shape[2], v.shape[2]), dim=0)
+    return (*(part.transpose(0, 1).unsqueeze(0) for part in qkv), g[:, tokens], beta[:, tokens])
+
+
+def _run_contiguous_tail(layer, metadata, raw_qkv, tensors, initial_state, scale, fused, fla_fwd, head_first_qkv):
     checkpoint = metadata.checkpoint
     query_lens = checkpoint.query_lens
     offset = checkpoint.offsets[-1]
@@ -102,11 +121,16 @@ def _run_contiguous_tail(layer, metadata, raw_qkv, tensors, initial_state, scale
             _partition_metadata([0, query_lens[-1] - offset], device, fla),
         )
         checkpoint._ascend_native_contiguous_lengths = lengths
-    prefix = tuple(tensor[:, :split] for tensor in tensors)
-    prefix_output, prefix_state = _apply_recurrence(prefix, initial_state, lengths[0], scale, fused, fla_fwd)
+    save_intermediates = head_first_qkv is None
+    prefix = _slice_inputs(tensors, slice(0, split), head_first_qkv)
+    prefix_output, prefix_state = _apply_recurrence(
+        prefix, initial_state, lengths[0], scale, fused, fla_fwd, save_training_intermediates=save_intermediates
+    )
     _export_checkpoint(layer, metadata, raw_qkv, prefix_state)
-    tail = tuple(tensor[:, split:] for tensor in tensors)
-    tail_output, tail_state = _apply_recurrence(tail, prefix_state[-1:], lengths[1], scale, fused, fla_fwd)
+    tail = _slice_inputs(tensors, slice(split, None), head_first_qkv)
+    tail_output, tail_state = _apply_recurrence(
+        tail, prefix_state[-1:], lengths[1], scale, fused, fla_fwd, save_training_intermediates=save_intermediates
+    )
     if len(query_lens) == 1:
         return torch.cat((prefix_output, tail_output), dim=1), tail_state
     prefix_state[-1:].copy_(tail_state)
@@ -126,7 +150,7 @@ def _export_checkpoint(layer, metadata, raw_qkv, state):
 
 
 def run_gdn_native_checkpoint_prefill(
-    layer, metadata, raw_qkv, q, k, v, g, beta, initial_state, *, fused, fla_fwd=None
+    layer, metadata, raw_qkv, q, k, v, g, beta, initial_state, *, fused, fla_fwd=None, head_first_qkv=None
 ):
     checkpoint = metadata.checkpoint
     assert checkpoint is not None
@@ -136,7 +160,9 @@ def run_gdn_native_checkpoint_prefill(
         if len(checkpoint.offsets) > 1:
             logger.info_once("Native GDN checkpoints use contiguous batched tails")
         # Only the final row has a tail, so the packed token order is already contiguous.
-        return _run_contiguous_tail(layer, metadata, raw_qkv, tensors, initial_state, scale, fused, fla_fwd)
+        return _run_contiguous_tail(
+            layer, metadata, raw_qkv, tensors, initial_state, scale, fused, fla_fwd, head_first_qkv
+        )
 
     plan = _native_checkpoint_plan(checkpoint, q.device, fla_fwd is not None)
 
