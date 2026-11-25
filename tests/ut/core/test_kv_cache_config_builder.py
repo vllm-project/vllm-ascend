@@ -128,8 +128,10 @@ def test_generic_uniform_spec_falls_back_to_default_grouping():
     assert set(result[0].layer_names) == {"layer.a", "layer.b"}
 
 
-def test_layerwise_offload_budget_uses_one_block_backing(monkeypatch):
+@pytest.mark.parametrize("backend", ["memcache", "mooncake"])
+def test_layerwise_offload_budget_uses_one_block_backing(monkeypatch, backend):
     runtime = make_runtime()
+    runtime.model_config.hf_text_config = SimpleNamespace(model_type="glm5_next_text")
     runtime.cache_config = SimpleNamespace(
         num_gpu_blocks_override=None,
         prefix_cache_retention_interval=0,
@@ -139,7 +141,7 @@ def test_layerwise_offload_budget_uses_one_block_backing(monkeypatch):
     runtime.kv_transfer_config = KVTransferConfig(
         kv_connector="AscendStoreConnector",
         kv_role="kv_producer",
-        kv_connector_extra_config={"backend": "memcache", "use_layerwise": True, "layerwise_num_shared_buffers": 1},
+        kv_connector_extra_config={"backend": backend, "use_layerwise": True, "layerwise_num_shared_buffers": 1},
     )
     builder = AscendKVCacheConfigBuilder()
     spec = generic_specs()["layer.a"]

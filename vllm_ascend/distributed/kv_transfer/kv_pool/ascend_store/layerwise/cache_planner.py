@@ -77,8 +77,6 @@ def get_layerwise_gva_config(kv_transfer_config: Any) -> dict[str, Any] | None:
 
 def get_layerwise_offload_config(kv_transfer_config: Any) -> dict[str, Any] | None:
     """Find a layerwise store with an explicit shared-buffer count."""
-    # TODO(bowgneo): Mooncake support for shared-buffer offload is pending. Detect the
-    # request from config regardless of backend.
     extra_config = get_layerwise_ascend_store_config(kv_transfer_config)
     if extra_config is not None and extra_config.get("layerwise_num_shared_buffers") is not None:
         return extra_config
@@ -297,10 +295,16 @@ def plan_layerwise_cache_reuse(
     if not layout.has_layer_reuse:
         return None
     backend_name = str(extra_config.get("backend", "mooncake")).strip().lower()
-    if backend_name != "memcache":
+    text_config = getattr(vllm_config.model_config, "hf_text_config", None)
+    model_type = getattr(text_config, "model_type", None)
+    # Qwen4Exp uses the MemCache GVA data plane for its shared caches.
+    qwen4_exp = model_type in ("qwen4_exp", "qwen4_exp_text")
+    supported_backends = ("memcache",) if qwen4_exp else ("memcache", "mooncake")
+    if backend_name not in supported_backends:
+        choices = " or ".join(supported_backends)
         raise ValueError(
-            "Layerwise shared-buffer offload requires the memcache backend. "
-            "Set backend to 'memcache' or remove layerwise_num_shared_buffers."
+            f"Layerwise shared-buffer offload requires the {choices} backend. "
+            "Select a supported backend or remove layerwise_num_shared_buffers."
         )
 
     for name in layout.reused_cache_names:

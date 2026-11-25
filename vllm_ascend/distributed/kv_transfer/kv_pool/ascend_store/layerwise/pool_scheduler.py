@@ -1,9 +1,11 @@
 from collections.abc import Sequence
 from typing import Any
+from uuid import uuid4
 
 from vllm.config import VllmConfig
 from vllm.logger import logger
 from vllm.v1.core.kv_cache_utils import BlockHash
+from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.request import Request
 
@@ -15,6 +17,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.layerwis
     get_layerwise_reuse_backing_bytes,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
+    AscendConnectorMetadata,
     LoadSpec,
     ReqMeta,
     RequestTracker,
@@ -50,9 +53,7 @@ class LayerwiseKVPoolScheduler(BaseKVPoolScheduler):
         super().__init__(vllm_config, use_layerwise, kv_cache_config)
         self.sharded_mamba_group_ids = get_sharded_mamba_group_ids(kv_cache_config)
         self.load_async = False
-        self.layerwise_offload = (
-            self.use_layerwise_transfer and get_layerwise_reuse_backing_bytes(kv_cache_config) is not None
-        )
+        self.layerwise_offload = self.use_layerwise and get_layerwise_reuse_backing_bytes(kv_cache_config) is not None
         self.block_key_hybrid = self.use_block_key_layerwise and self.use_hybrid
         self.layerwise_keys = (
             self.layerwise_backend.bind_layerwise_keys(
@@ -110,6 +111,13 @@ class LayerwiseKVPoolScheduler(BaseKVPoolScheduler):
             )
         return None
 
+    def build_connector_meta(self, scheduler_output: SchedulerOutput) -> AscendConnectorMetadata:
+        metadata = super().build_connector_meta(scheduler_output)
+        if self.use_block_key_layerwise and self.layerwise_offload and metadata.requests:
+            # All ranks need the same keys, including ranks that share a writer.
+            metadata.snapshot_batch_id = uuid4().hex
+        return metadata
+
     def _use_hybrid(self, vllm_config: VllmConfig, kv_cache_groups: list[Any] | None) -> bool:
         return super()._use_hybrid(vllm_config, kv_cache_groups) or (
             self.use_block_key_layerwise and kv_cache_groups is not None and len(kv_cache_groups) > 1
@@ -118,9 +126,14 @@ class LayerwiseKVPoolScheduler(BaseKVPoolScheduler):
     def _lookup_external_hit_tokens(self, request: Request, num_computed_tokens: int) -> StoreLookupResult | None:
         prompt_token_len = len(request.prompt_token_ids)
         if self.use_block_key_layerwise:
-            token_len = self._floor_to_cache_transfer_granularity(prompt_token_len)
-            if not self.use_eagle and len(self.cacheable_group_ids) != len(self.original_block_size):
-                token_len = self._floor_to_cache_transfer_granularity(max(prompt_token_len - 1, 0))
+            if self.layerwise_offload:
+                if getattr(request, "skip_reading_external_kv", False):
+                    return None
+                # KDA needs a checkpoint at the restart boundary before the final prompt token.
+                prompt_token_len -= 1
+            elif not self.use_eagle and len(self.cacheable_group_ids) != len(self.original_block_size):
+                prompt_token_len -= 1
+            token_len = self._floor_to_cache_transfer_granularity(max(prompt_token_len, 0))
             if token_len < self.cache_transfer_granularity:
                 return None
             return StoreLookupResult(self._get_block_key_layerwise_hit_tokens(request, token_len, num_computed_tokens))

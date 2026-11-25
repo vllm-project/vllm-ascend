@@ -464,6 +464,42 @@ def test_update_state_after_alloc_forwards_observer_without_chosen_connector():
     )
 
 
+@pytest.mark.parametrize(("has_layout", "has_fence"), [(True, False), (True, True), (False, False)])
+def test_mooncake_shared_buffers_require_a_push_fence(has_layout, has_fence):
+    config = SimpleNamespace(
+        kv_transfer_config=SimpleNamespace(
+            kv_connector="MultiConnector",
+            kv_connector_extra_config={
+                "connectors": [
+                    {"kv_connector": "AscendStoreConnector", "kv_connector_extra_config": {"use_layerwise": True}},
+                    {"kv_connector": "MooncakePushConnector"},
+                ]
+            },
+        ),
+        speculative_config=None,
+        scheduler_config=SimpleNamespace(disable_hybrid_kv_cache_manager=True),
+    )
+    layout = SimpleNamespace(
+        kv_transfer_config=SimpleNamespace(kv_connector_extra_config={"_layerwise_reuse_layout": object()})
+    )
+    store = SimpleNamespace(set_external_slot_release_waiter=MagicMock(return_value=True))
+    push = SimpleNamespace(
+        is_producer=True,
+        connector_worker=object(),
+        supports_layerwise_buffer_reuse=has_fence,
+        wait_for_layer_reuse=MagicMock(),
+    )
+    connector = AscendMultiConnector.__new__(AscendMultiConnector)
+    connector._connectors = [store, push]
+    with patch.object(MultiConnector, "__init__", return_value=None):
+        if has_layout and not has_fence:
+            with pytest.raises(ValueError, match="slot-release fence for every PD connector"):
+                connector.__init__(config, KVConnectorRole.WORKER, layout)
+        else:
+            connector.__init__(config, KVConnectorRole.WORKER, layout if has_layout else None)
+    assert store.set_external_slot_release_waiter.called is has_fence
+
+
 def test_layerwise_reuse_completion_is_wired_and_provider_hooks_run_first():
     call_order = []
     provider = SimpleNamespace(

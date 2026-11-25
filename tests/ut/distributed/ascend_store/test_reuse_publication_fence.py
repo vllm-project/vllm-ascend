@@ -30,7 +30,7 @@ class TestReusePublicationFence(unittest.TestCase):
             (True, True, 16, 1, ["tp"]),
             (True, True, 1, 1, []),
             (True, False, 16, 4, []),
-            (False, True, 16, 4, []),
+            (False, True, 16, 4, ["tp", "pcp"]),
         ]:
             for requests in ([], [object()]):
                 with self.subTest(
@@ -59,7 +59,9 @@ class TestReusePublicationFence(unittest.TestCase):
                         patch.object(module, "get_pcp_group", return_value=pcp_group),
                         patch.object(module, "reset_attention_gates"),
                     ):
-                        worker.prepare_layerwise_step(SimpleNamespace(requests=requests))
+                        metadata = module.AscendConnectorMetadata(set())
+                        metadata.requests = requests
+                        worker.prepare_layerwise_step(metadata)
                     self.assertEqual(calls, ["drain", *barriers, "prepare"])
 
     def test_failed_local_save_does_not_query(self):
@@ -71,6 +73,6 @@ class TestReusePublicationFence(unittest.TestCase):
             patch.object(module, "get_tp_group") as group,
             self.assertRaisesRegex(RuntimeError, "save failed"),
         ):
-            worker.prepare_layerwise_step(SimpleNamespace(requests=[]))
+            worker.prepare_layerwise_step(module.AscendConnectorMetadata(set()))
         prepare.assert_not_called()
         group.assert_not_called()

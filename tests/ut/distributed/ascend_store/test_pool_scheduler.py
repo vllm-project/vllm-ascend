@@ -89,6 +89,7 @@ def _mock_scheduler_clients():
 
 def test_layerwise_metadata_preserves_request_tables_and_skips_bulk_checkpoints():
     scheduler = LayerwiseKVPoolScheduler.__new__(LayerwiseKVPoolScheduler)
+    scheduler.use_block_key_layerwise = False
     scheduler.use_layerwise = True
     scheduler.kv_role = "kv_both"
     scheduler.can_put = True
@@ -1214,26 +1215,35 @@ class TestKVPoolSchedulerBuildMeta(unittest.TestCase):
 
     @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.LookupKeyClient")
     def test_running_chunk_reloads_prefix_with_layer_reuse(self, mock_client_cls):
-        config = self._make_config(
-            extra_config={
-                "backend": "memcache",
-                "layerwise_num_shared_buffers": 1,
-            },
-            num_layers=4,
-        )
-        scheduler = self._make_offload_scheduler(config)
-        self._set_running_chunk(scheduler)
+        for backend in ("memcache", "mooncake"):
+            with self.subTest(backend=backend):
+                config = self._make_config(
+                    extra_config={
+                        "backend": backend,
+                        "layerwise_num_shared_buffers": 1,
+                    },
+                    num_layers=4,
+                )
+                scheduler = self._make_offload_scheduler(config)
+                self._set_running_chunk(scheduler)
+                request, _ = scheduler._unfinished_requests["r1"]
+                # Verifier rows past the known input must not extend the saved checkpoint.
+                request.all_token_ids = range(32)
+                output = self._make_running_chunk_output([])
+                output.num_scheduled_tokens["r1"] = 19
 
-        meta = self._build_connector_meta(scheduler, self._make_running_chunk_output([]))
+                meta = self._build_connector_meta(scheduler, output)
 
-        self.assertTrue(scheduler.layerwise_offload)
-        self.assertEqual(len(meta.requests), 1)
-        load_spec = meta.requests[0].load_spec
-        self.assertIsNotNone(load_spec)
-        self.assertEqual(load_spec.vllm_cached_tokens, 16)
-        self.assertEqual(load_spec.kvpool_cached_tokens, 16)
-        self.assertTrue(load_spec.can_load)
-        self.assertTrue(load_spec.layerwise_previous_step)
+                self.assertTrue(scheduler.layerwise_offload)
+                self.assertEqual(len(meta.requests), 1)
+                self.assertEqual(meta.requests[0].target_token_len, 32)
+                self.assertEqual(meta.snapshot_batch_id is not None, backend == "mooncake")
+                load_spec = meta.requests[0].load_spec
+                self.assertIsNotNone(load_spec)
+                self.assertEqual(load_spec.vllm_cached_tokens, 16)
+                self.assertEqual(load_spec.kvpool_cached_tokens, 16)
+                self.assertTrue(load_spec.can_load)
+                self.assertTrue(load_spec.layerwise_previous_step)
 
     @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.LookupKeyClient")
     def test_running_prefill_preserves_partial_block_with_layer_reuse(self, mock_client_cls):
