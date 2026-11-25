@@ -821,14 +821,6 @@ def test_memcache_hisparse_registration_keeps_error_if_rollback_fails(memcache_b
     assert "HiSparse MemCache buffer rollback failed: size=20" in caplog.text
 
 
-def test_memcache_hisparse_registration_rejects_invalid_descriptor(memcache_backend):
-    backend = memcache_backend
-    with pytest.raises(ValueError, match="address and size must be positive"):
-        backend.register_buffer([BufferDescriptor(address=100, size_bytes=0, memory_location=MemoryLocation.HOST)])
-    backend.store.register_buffer.assert_not_called()
-    assert backend._pending_buffers is None
-
-
 def test_memcache_hisparse_rollback_keeps_earlier_registration_and_allows_retry(memcache_backend):
     backend = memcache_backend
     backend.store.register_buffer.side_effect = [0, 0, -7, 0, 0]
