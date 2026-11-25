@@ -100,6 +100,7 @@ def make_runner(load_hook_class, *, manager=None, has_prefill=False):
         },
     )
     runner = runner_class()
+    runner.pcp_manager = None
     runner.model = torch.nn.Module()
     if manager is not None:
         runner.model._expert_offload_manager = manager

@@ -89,7 +89,6 @@ Select the `docker run` command for your hardware platform:
     -e ASCEND_VISIBLE_DEVICES=0-7 \
     --name $NAME \
     --net=host \
-    --privileged=true \
     --shm-size=60g \
     -v /usr/local/Ascend/driver:/usr/local/Ascend/driver \
     -v /usr/local/Ascend/firmware:/usr/local/Ascend/firmware \

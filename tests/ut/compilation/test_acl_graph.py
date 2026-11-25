@@ -152,6 +152,7 @@ class TestACLGraphWrapper(TestBase):
 
         # Mock ForwardContext
         self.mock_forward_context = MagicMock(spec=ForwardContext)
+        self.mock_forward_context.additional_kwargs = {}
         self.mock_forward_context.batch_descriptor = self.mock_batch_descriptor
         self.mock_forward_context.cudagraph_runtime_mode = CUDAGraphMode.FULL
 

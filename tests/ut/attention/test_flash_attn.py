@@ -196,6 +196,7 @@ def select_flash_attn(monkeypatch):
     )
     monkeypatch.setattr(platform, "get_current_hardware_profile", lambda: profile)
     monkeypatch.setattr(platform, "_validate_fa3_backend", lambda *_: False)
+    monkeypatch.setattr(platform, "util", SimpleNamespace(find_spec=lambda _: None))
 
     def select(config, selector, tag="dflash_head"):
         monkeypatch.setattr("vllm.config.get_current_vllm_config_or_none", lambda: config)
@@ -277,6 +278,39 @@ def test_flash_attn_selection_is_independent_of_draft_sampling(select_flash_attn
     dflash2_config.speculative_config.draft_sample_method = sampling
     selector = AttentionSelectorConfig(head_size=128, block_size=128, dtype=torch.bfloat16, kv_cache_dtype="auto")
     assert select(dflash2_config, selector)
+
+
+FA3 = "vllm_ascend.attention.flash_attention_v3.AscendFlashAttentionBackend"
+FIA = "vllm_ascend.attention.attention_v1.AscendAttentionBackend"
+
+
+@pytest.mark.parametrize(
+    "target,draft,tag,expected",
+    [
+        ("Qwen3_5ForConditionalGeneration", "DFlash2DraftModel", "backbone", FA3),
+        ("Qwen3_5ForConditionalGeneration", "DFlash2DraftModel", "dflash_head", FA3),
+        ("Qwen4ExpForCausalLM", "DFlash2DraftModel", "dflash_head", FIA),
+        ("Qwen3_5ForConditionalGeneration", "Qwen3DFlashForCausalLM", "backbone", FIA),
+        ("Qwen3_5ForConditionalGeneration", "DFlash2DraftModel", "eagle_head", FIA),
+    ],
+)
+def test_qwen_dflash2_fa3_routing(monkeypatch, dflash2_config, target, draft, tag, expected):
+    from vllm_ascend import platform
+    from vllm_ascend.device.hardware import AscendDeviceType
+    from vllm_ascend.device.hardware_profile import get_hardware_profile
+
+    config = dflash2_config
+    config.model_config.hf_config.architectures = [target]
+    config.model_config.hf_text_config = SimpleNamespace(model_type="qwen3_5_text")
+    config.speculative_config.target_model_config = config.model_config
+    config.speculative_config.draft_model_config.architectures = [draft]
+    monkeypatch.setattr("vllm.config.get_current_vllm_config_or_none", lambda: config)
+    monkeypatch.setattr("vllm.compilation.backends.model_tag", tag)
+    monkeypatch.setattr(platform, "get_current_hardware_profile", lambda: get_hardware_profile(AscendDeviceType.A3))
+    monkeypatch.setattr(platform, "_validate_fa3_backend", lambda *_: False)
+    monkeypatch.setattr(platform, "util", SimpleNamespace(find_spec=lambda _: object()))
+    selector = AttentionSelectorConfig(head_size=128, dtype=torch.bfloat16, kv_cache_dtype="auto", block_size=128)
+    assert platform.NPUPlatform._select_attn_backend_cls(selector) == expected
 
 
 @pytest.mark.parametrize(

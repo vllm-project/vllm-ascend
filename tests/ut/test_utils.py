@@ -985,13 +985,30 @@ def test_qkv_iproj_tp_keeps_dp_coordination(monkeypatch, input_proj_tp_size, is_
     assert utils.should_skip_allreduce_across_dp_group(config, is_draft_model=is_draft) is (input_proj_tp_size == 1)
 
 
-@pytest.mark.parametrize("v2", [False, True])
 @pytest.mark.parametrize("lmhead", [False, True])
 @pytest.mark.parametrize("dcp", [1, 2])
-def test_requires_lmhead_dp_sync_is_scoped_to_v2_reduced_padding(monkeypatch, v2, lmhead, dcp):
+def test_requires_lmhead_dp_sync_is_scoped_to_v2_reduced_padding(monkeypatch, lmhead, dcp):
     config = SimpleNamespace(
-        use_v2_model_runner=v2,
         parallel_config=SimpleNamespace(decode_context_parallel_size=dcp),
     )
     monkeypatch.setattr(utils, "lmhead_tp_enable", lambda: lmhead)
-    assert utils.requires_lmhead_dp_sync(config) is (v2 and lmhead and dcp == 1)
+    assert utils.requires_lmhead_dp_sync(config) is (lmhead and dcp == 1)
+
+
+def test_is_hif8_c8_kv_quant_tolerates_missing_cache_config():
+    # The check runs in partially constructed contexts (SimpleNamespace mocks,
+    # config-derivation passes before cache_config is attached): a missing
+    # cache_config means the hif8 KV cache dtype is not enabled, not a crash.
+    assert not utils.is_hif8_c8_kv_quant(SimpleNamespace())
+    assert not utils.is_hif8_c8_kv_quant(SimpleNamespace(cache_config=None))
+
+
+@pytest.mark.parametrize("cache_dtype", ["auto", "fp8", "mxfp8", "C8"])
+def test_is_hif8_c8_kv_quant_selects_only_the_hif8_dtype(cache_dtype):
+    config = SimpleNamespace(cache_config=SimpleNamespace(cache_dtype=cache_dtype))
+    assert not utils.is_hif8_c8_kv_quant(config)
+
+
+def test_is_hif8_c8_kv_quant_accepts_the_hif8_dtype():
+    config = SimpleNamespace(cache_config=SimpleNamespace(cache_dtype=utils.HIF8_C8_KV_CACHE_DTYPE))
+    assert utils.is_hif8_c8_kv_quant(config)

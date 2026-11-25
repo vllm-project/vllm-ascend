@@ -955,7 +955,7 @@ For DP>1, the launcher executes the role script without filtering.
         "enable_flashcomm1": false,
         "enable_fused_mc2": 2,
         "finegrained_tp_config": {"qkv_iproj_tensor_parallel_size":8,"oproj_tensor_parallel_size":1},
-        "ascend_compilation_config": {"enable_npugraph_ex":true,"enable_static_kernel":true,"enable_super_kernel":false}
+        "ascend_compilation_config": {"enable_npugraph_ex":true,"enable_static_kernel":false,"enable_super_kernel":false}
       }' \
       --kv-transfer-config \
       '{"kv_connector": "MooncakeConnectorV2", "kv_role": "kv_consumer", "engine_id": "1", "kv_port": "36580"}'

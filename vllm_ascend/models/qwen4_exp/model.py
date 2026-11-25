@@ -14,6 +14,10 @@
 
 """Ascend wrappers for the upstream Qwen4Exp model implementation."""
 
+from collections.abc import Callable
+from typing import TYPE_CHECKING
+
+from typing_extensions import Self
 from vllm.config import VllmConfig
 from vllm.model_executor.models.qwen3_vl import Qwen3VLDummyInputsBuilder
 from vllm.models.qwen4_exp.amd import (
@@ -35,7 +39,12 @@ from vllm_ascend.ops.triton.qwen4_exp.hc import (
 )
 
 from . import ple_embedding  # noqa: F401 - register the OOT host embedding before model construction
+from .hc_fused import AscendTextGatedResidual, prepare_model_textgr_weights
 from .ple import AscendPCPPLELayer, patch_upstream_ple_short_conv
+from .topk_buffer import share_target_topk_buffers
+
+if TYPE_CHECKING:
+    from torch import Tensor
 
 # Keep the upstream model and weight loader authoritative. HyperConnection's
 # CUDA glue functions are module globals, so replace them before importing the
@@ -45,6 +54,7 @@ upstream_hc.hc_combine = hc_combine
 upstream_hc.hc_combine_norm = hc_combine_norm
 upstream_hc.hc_gate_mix = hc_gate_mix
 upstream_hc.hc_silu = hc_silu
+upstream_hc.GatedResidual = AscendTextGatedResidual
 
 # PLE's depthwise F.conv1d otherwise lowers to ACLop Conv2D when torch-npu
 # internal formats are enabled. Scope the graph-safe option override to the
@@ -57,6 +67,7 @@ from vllm.models.qwen4_exp.amd.ple_layer import Qwen4ExpPLELayer  # noqa: E402
 from .qsa import AscendQwen4ExpQSAAttention  # noqa: E402
 
 upstream_model.Qwen4ExpQSAAttention = AscendQwen4ExpQSAAttention
+upstream_model.GatedResidual = AscendTextGatedResidual
 
 
 def _build_ascend_ple(config, vllm_config: VllmConfig, **kwargs) -> Qwen4ExpPLELayer:
@@ -87,7 +98,10 @@ class AscendQwen4ExpModel(upstream_model.Qwen4ExpModel):
             head_shards = get_head_parallel_size(parallel)
             if text_config.linear_num_key_heads % head_shards or text_config.linear_num_value_heads % head_shards:
                 raise ValueError("Qwen4Exp GDN key and value heads must be divisible by TP * PCP")
-        super().__init__(vllm_config=vllm_config, prefix=prefix)
+        # PCP has separate cache and graph paths. Keep its scratch buffers private.
+        self._share_qsa_topk_buffers = not use_pcp and not parallel.use_ubatching
+        with share_target_topk_buffers(self._share_qsa_topk_buffers):
+            super().__init__(vllm_config=vllm_config, prefix=prefix)
         if use_pcp:
             from vllm_ascend.attention.gdn import shard_gdn_heads_over_pcp
 
@@ -103,6 +117,39 @@ class AscendQwen4ExpModel(upstream_model.Qwen4ExpModel):
                 name: dims for name, dims in dynamic_arg_dims.items() if name != "query_start_loc"
             }
 
+    def process_weights_after_loading(self) -> None:
+        parent_hook = getattr(super(), "process_weights_after_loading", None)
+        if parent_hook is not None:
+            parent_hook()
+        prepare_model_textgr_weights(self)
+
+    def _apply(self, fn: "Callable[[Tensor], Tensor]", recurse: bool = True) -> Self:
+        if not recurse or not self._share_qsa_topk_buffers:
+            return super()._apply(fn, recurse=recurse)
+
+        # Module._apply normally converts each registered buffer independently.
+        # Reuse conversions of the exact Top-K tensors within this backbone.
+        topk_buffers = {}
+        for module in self.modules():
+            if isinstance(module, AscendQwen4ExpQSAAttention):
+                buffer = module.topk_indices_buffer
+                # Keep input tensors alive so their IDs cannot be reused during conversion.
+                topk_buffers[id(buffer)] = buffer
+        if not topk_buffers:
+            return super()._apply(fn, recurse=recurse)
+
+        converted: dict[int, Tensor] = {}
+
+        def convert(tensor: "Tensor") -> "Tensor":
+            key = id(tensor)
+            if key not in topk_buffers:
+                return fn(tensor)
+            if key not in converted:
+                converted[key] = fn(tensor)
+            return converted[key]
+
+        return super()._apply(convert, recurse=recurse)
+
 
 # Qwen4ExpForCausalLM resolves this module global when it creates the backbone.
 upstream_model.Qwen4ExpModel = AscendQwen4ExpModel
@@ -110,6 +157,12 @@ upstream_model.Qwen4ExpModel = AscendQwen4ExpModel
 
 class AscendQwen4ExpForCausalLM(upstream_model.Qwen4ExpForCausalLM):
     """Qwen3.8-Flash-Next text model using Ascend platform operators."""
+
+    def process_weights_after_loading(self) -> None:
+        parent_hook = getattr(super(), "process_weights_after_loading", None)
+        if parent_hook is not None:
+            parent_hook()
+        prepare_model_textgr_weights(self)
 
     @classmethod
     def get_gdn_mamba_state_shape_from_config(cls, vllm_config: VllmConfig):
@@ -146,6 +199,12 @@ class AscendQwen4ExpProcessingInfo(_AscendProcessorMixin, upstream_model.Qwen4Ex
 )
 class AscendQwen4ExpForConditionalGeneration(_AscendVLPreprocessMixin, upstream_model.Qwen4ExpForConditionalGeneration):
     """Qwen3.8-Flash-Next multimodal model using Ascend operators."""
+
+    def process_weights_after_loading(self) -> None:
+        parent_hook = getattr(super(), "process_weights_after_loading", None)
+        if parent_hook is not None:
+            parent_hook()
+        prepare_model_textgr_weights(self)
 
     @classmethod
     def get_mamba_state_shape_from_config(cls, vllm_config: VllmConfig):

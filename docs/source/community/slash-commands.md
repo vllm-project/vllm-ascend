@@ -282,15 +282,26 @@ Force-cancel all workflow runs on the current PR commit. This cancels runs direc
 
 ### `/ai-review` family
 
-Trigger and manage the AI review agent on a pull request (requires the `ai-review` label and an allowlisted PR author — see [AI Code Review](ai-review.md)):
+Trigger and manage the AI review agent on a pull request. An allowlisted
+maintainer starts review by applying `ai-review`; the PR author does not
+need to be allowlisted. See [AI Code Review](ai-review.md).
 
 | Command | Effect |
 |---|---|
-| `/ai-review` | Trigger the next review round; also works as a reply inside one of the agent's inline finding threads |
-| `/ai-review-waive` | Waive findings: in a top-level comment waives all open findings (then one re-evaluation round runs); as a reply inside a finding's thread waives only that finding (reviewer only) |
-| `/ai-review-stop` | Stop the review entirely; the agent stays silent until the label is re-applied (reviewer only) |
+| `/ai-review explanation` | Request one review of the latest code, using the supplied explanation and existing findings |
+| `/ai-review-waive F003 reason` or `/ai-review-waive all reason` | Waive the selected open findings for the reviewed commit, update their inline annotations and recalculate the result without calling the model (maintainer only) |
+| `/ai-review-stop` | Stop review and remove the review labels; reapply `ai-review` to restart (maintainer only) |
+
+Use new top-level PR comments; inline replies do not trigger these commands.
+The bot appends feedback and the Actions link directly to your command
+comment. Rejections explain the reason there, including permissions and
+round limits. These messages do not count as review rounds. Review results
+update the bot's separate summary comment.
 
 ## Behavior
+
+The AI review family uses the feedback flow described above. Other commands
+use the general dispatcher flow:
 
 1. When you comment a slash command, a 👀 reaction is added to your comment to indicate it has been received.
 2. The corresponding CI workflow is triggered asynchronously.
@@ -322,7 +333,7 @@ Trigger and manage the AI review agent on a pull request (requires the `ai-revie
 | `/cherry-pick` | PR author, or users with triage+ permission on the repository |
 | `/revert` | PR author, or users with triage+ permission on the repository |
 | `/nightly` | Users with triage+ permission on the repository only |
-| `/ai-review` | PR author (once the PR is allowlisted and labeled) |
+| `/ai-review` | PR author or users with write permission, while `ai-review` is enabled |
 | `/ai-review-waive` | Users with write permission on the repository |
 | `/ai-review-stop` | Users with write permission on the repository |
 

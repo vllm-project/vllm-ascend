@@ -810,11 +810,11 @@ msgstr ""
 
 msgid ""
 "- Use the provider library path/version matching the host driver and container RDMA userspace. Mount `/etc/libibverbs.d/hrn5.driver` with `-v /etc/libibverbs.d/hrn5.driver:/etc/libibverbs.d/hrn5.driver:ro` if required by that userspace; this configuration file does not replace the shared library.\n"
-"- `--privileged` exposes host devices. A non-privileged Host RoCE configuration must explicitly map the devices and provide `--cap-add=NET_ADMIN`; validate it for your driver and workload.\n"
+"- The Host RoCE options above explicitly map `/dev/infiniband` and add `NET_ADMIN` without granting privileged mode. Validate the device and permission requirements for your driver and workload.\n"
 "- Mounting the `hiroce5` diagnostic tool is **optional**, for example `-v /usr/local/bin/hiroce5:/usr/local/bin/hiroce5:ro` if that is its host path."
 msgstr ""
 "- 使用与宿主机驱动和容器 RDMA 用户态匹配的 provider 库路径/版本。如果该用户态需要，请使用 `-v /etc/libibverbs.d/hrn5.driver:/etc/libibverbs.d/hrn5.driver:ro` 挂载 `/etc/libibverbs.d/hrn5.driver`；该配置文件不能替代共享库。\n"
-"- `--privileged` 会暴露宿主机设备。非特权的 Host RoCE 配置必须显式映射设备并提供 `--cap-add=NET_ADMIN`；请针对你的驱动和工作负载进行验证。\n"
+"- 上述 Host RoCE 选项显式映射 `/dev/infiniband` 并添加 `NET_ADMIN`，无需授予特权模式。请针对你的驱动和工作负载验证设备及权限要求。\n"
 "- 挂载 `hiroce5` 诊断工具是**可选的**，例如，如果其宿主机路径为 `/usr/local/bin/hiroce5`，可使用 `-v /usr/local/bin/hiroce5:/usr/local/bin/hiroce5:ro`。"
 
 msgid ""
