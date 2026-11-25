@@ -1,0 +1,8 @@
+pr: 18476
+entries:
+  - category: bugfix
+    text: >-
+      Fixed crashes during Mooncake PD disaggregation when prefill and decode
+      use different KV-head partitions, including MiniMax-M3 with index caches.
+      Also fixed incorrect generated answers when KV reformatting is required
+      across multiple prefill pipeline stages.
