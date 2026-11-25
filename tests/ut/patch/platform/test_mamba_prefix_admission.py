@@ -5,6 +5,7 @@ from types import SimpleNamespace
 
 import pytest
 import torch
+from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
 from vllm.v1.core.single_type_kv_cache_manager import register_all_kvcache_specs
 from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheConfig, KVCacheGroupSpec, MambaSpec
 
@@ -13,13 +14,20 @@ from vllm_ascend.patch.platform.patch_kv_cache_coordinator import AscendHybridKV
 from vllm_ascend.patch.platform.patch_mamba_manager import AscendMambaManager
 
 
-def make_coordinator():
+def make_coordinator(mamba_type=MambaAttentionBackendEnum.MAMBA2):
     register_all_kvcache_specs(None)
     register_ascend_kv_cache_specs()
     specs = [
         FullAttentionSpec(block_size=b, num_kv_heads=1, head_size=8, dtype=torch.bfloat16) for b in (251904, 50688)
     ] + [
-        MambaSpec(block_size=1536, shapes=((1,),), dtypes=(torch.float32,), mamba_cache_mode="align") for _ in range(3)
+        MambaSpec(
+            block_size=1536,
+            shapes=((1,),),
+            dtypes=(torch.float32,),
+            mamba_cache_mode="align",
+            mamba_type=mamba_type,
+        )
+        for _ in range(3)
     ]
     config = KVCacheConfig(
         num_blocks=12,
@@ -38,6 +46,44 @@ def make_coordinator():
         scheduler_block_size=8312832,
         max_in_flight_tokens=4096,
     )
+
+
+def _observe_checkpoint(manager, request_id, key, *, prompt_length=1024, junction=0):
+    boundary = 768
+    request = SimpleNamespace(
+        request_id=request_id,
+        block_hashes=[key, b"z" * 32],
+        num_prompt_tokens=prompt_length,
+        num_computed_tokens=0,
+        shared_prefix_boundary=junction,
+    )
+    if not manager.req_to_blocks[request_id]:
+        manager.allocate_new_blocks(request_id, boundary, boundary)
+    return manager._cache_partial_tail_block(request, boundary, None)
+
+
+def test_gdn_partial_checkpoint_is_cached_on_second_request():
+    manager = make_coordinator(MambaAttentionBackendEnum.GDN_ATTN).single_type_managers[2]
+    manager.shared_prefix_checkpoint = True
+    key = b"x" * 32
+    group_ids = [manager.kv_cache_group_id]
+    assert _observe_checkpoint(manager, "first", key) is None
+    assert _observe_checkpoint(manager, "first", key) is None
+    assert manager.block_pool.get_cached_block(key, group_ids) is None
+
+    assert _observe_checkpoint(manager, "second", key, prompt_length=1792, junction=768) is not None
+    assert manager.block_pool.get_cached_block(key, group_ids) == [manager.req_to_blocks["second"][0]]
+
+
+def test_gdn_partial_checkpoint_candidate_tracking_is_bounded(monkeypatch):
+    monkeypatch.setattr(AscendMambaManager, "MAX_CHECKPOINT_CANDIDATES", 2)
+    manager = make_coordinator(MambaAttentionBackendEnum.GDN_ATTN).single_type_managers[2]
+    keys = [bytes([index]) * 32 for index in range(3)]
+    for index, key in enumerate(keys):
+        assert _observe_checkpoint(manager, str(index), key) is None
+    assert list(manager._checkpoint_candidates) == keys[1:]
+    assert _observe_checkpoint(manager, "evicted", keys[0]) is None
+    assert _observe_checkpoint(manager, "retained", keys[2]) is not None
 
 
 def test_partial_boundary_decode_fits_available_blocks():

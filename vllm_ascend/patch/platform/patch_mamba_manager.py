@@ -4,9 +4,12 @@
 # Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
 # This file is a part of the vllm-ascend project.
 #
+from collections import OrderedDict
 from collections.abc import Sequence
 
 import vllm.v1.core.single_type_kv_cache_manager as single_type_kv_cache_manager
+from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
+from vllm.v1.core.kv_cache_utils import BlockHash, BlockHashWithGroupId
 from vllm.v1.core.single_type_kv_cache_manager import (
     BlockHashList,
     BlockPool,
@@ -14,9 +17,69 @@ from vllm.v1.core.single_type_kv_cache_manager import (
     KVCacheSpec,
     MambaManager,
 )
+from vllm.v1.kv_cache_interface import get_mamba_prefill_checkpoint_position
+from vllm.v1.request import Request
 
 
 class AscendMambaManager(MambaManager):
+    MAX_CHECKPOINT_CANDIDATES = 4096
+    _checkpoint_candidates: OrderedDict[BlockHash, str] | None = None
+
+    def _cache_partial_tail_block(
+        self, request: Request, num_tokens: int, retention_interval: int | None
+    ) -> BlockHashWithGroupId | None:
+        unit = self.block_pool.hash_block_size
+        if (
+            self.kv_cache_spec.mamba_type != MambaAttentionBackendEnum.GDN_ATTN
+            or request.request_id in self._checkpoints
+            or not 0 < num_tokens < request.num_prompt_tokens
+            or num_tokens % unit
+            or num_tokens % self.block_size == 0
+        ):
+            return super()._cache_partial_tail_block(request, num_tokens, retention_interval)
+
+        tail = get_mamba_prefill_checkpoint_position(
+            request.num_prompt_tokens,
+            unit,
+            self.drop_eagle_checkpoint_block,
+            num_hash_lookahead_tokens=self.block_pool.num_hash_lookahead_tokens,
+        )
+        is_junction = (
+            self.shared_prefix_checkpoint
+            and num_tokens == request.shared_prefix_boundary
+            and request.num_computed_tokens < num_tokens
+        )
+        if num_tokens != tail and not is_junction:
+            return None
+
+        block_index = (num_tokens - 1) // self.block_size
+        blocks = self.req_to_blocks[request.request_id]
+        if block_index >= len(blocks) or blocks[block_index].is_null:
+            return None
+        if blocks[block_index].block_hash_num_tokens == num_tokens:
+            return None
+
+        hash_index = num_tokens // unit - 1
+        if hash_index >= len(request.block_hashes):
+            return None
+        key = request.block_hashes[hash_index]
+        if self._checkpoint_candidates is None:
+            self._checkpoint_candidates = OrderedDict()
+        candidates = self._checkpoint_candidates
+        first_request = candidates.get(key)
+        if first_request is None:
+            candidates[key] = request.request_id
+            if len(candidates) > self.MAX_CHECKPOINT_CANDIDATES:
+                candidates.popitem(last=False)
+            return None
+        if first_request == request.request_id:
+            return None
+
+        published = super()._cache_partial_tail_block(request, num_tokens, retention_interval)
+        if published is not None:
+            del candidates[key]
+        return published
+
     @classmethod
     def find_longest_cache_hit(
         cls,
