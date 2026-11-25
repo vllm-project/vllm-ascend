@@ -927,11 +927,11 @@ class AscendConfig:
                     str(vc.scheduler_config.max_num_batched_tokens),
                 )
 
-        finegrained_tp_enabled = self.finegrained_tp_config.requires_graph(vc)
-        if finegrained_tp_enabled and not self.scheduler_config.recompute_scheduler_enable:
+        finegrained_tp_requires_graph = self.finegrained_tp_config.requires_graph(vc)
+        if finegrained_tp_requires_graph and not self.scheduler_config.recompute_scheduler_enable:
             raise AssertionError(
-                "oproj_tensor_parallel_size / mlp_tensor_parallel_size require "
-                "recompute_scheduler_enable=true: it keeps decode-node steps decode-shaped.",
+                "Graph-only fine-grained TP requires recompute_scheduler_enable=true "
+                "to keep decode-node steps decode-shaped."
             )
 
         # enable_fused_mc2 enum + MiniMax mutex + multistream auto-disable
@@ -1541,9 +1541,8 @@ class FinegrainedTPConfig:
         if self.gproj_tensor_parallel_size > 1 and getattr(vc.model_config.hf_config, "model_type", None) != "kimi_k31":
             raise ValueError("gproj_tensor_parallel_size > 1 is supported only on Kimi K3.1 Pro.")
 
-        projection_tp = self.gproj_tensor_parallel_size > 1 or (
-            self.qkv_iproj_tensor_parallel_size > 1 and model_uses_kimi_kda(vc.model_config)
-        )
+        kimi_kda_qkv_iproj_tp = self.qkv_iproj_tensor_parallel_size > 1 and model_uses_kimi_kda(vc.model_config)
+        kimi_projection_tp = self.gproj_tensor_parallel_size > 1 or kimi_kda_qkv_iproj_tp
         shared_tp = self.shared_expert_tensor_parallel_size > 1
         if self.qkv_iproj_tensor_parallel_size > 1:
             parallel = vc.parallel_config
@@ -1562,7 +1561,7 @@ class FinegrainedTPConfig:
             elif vc.model_config.hf_config.model_type != "kimi_k31":
                 raise ValueError("QKV input projection TP currently supports GLM-5.3-Flash and Kimi-K3.1 only.")
             enabled_configs.append(f"qkv_iproj_tensor_parallel_size={self.qkv_iproj_tensor_parallel_size}")
-        if projection_tp or shared_tp:
+        if kimi_projection_tp or shared_tp:
             parallel = vc.parallel_config
             if (
                 parallel.tensor_parallel_size != 1
@@ -1587,9 +1586,9 @@ class FinegrainedTPConfig:
             enabled_configs.append(f"shared_expert_tensor_parallel_size={self.shared_expert_tensor_parallel_size}")
         if self.gproj_tensor_parallel_size > 1:
             enabled_configs.append(f"gproj_tensor_parallel_size={self.gproj_tensor_parallel_size}")
-        if self.oproj_tensor_parallel_size > 1 or self.mlp_tensor_parallel_size > 1 or projection_tp or shared_tp:
+        if self.oproj_tensor_parallel_size > 1 or self.mlp_tensor_parallel_size > 1 or kimi_projection_tp or shared_tp:
             # o_proj's _forward_o_proj reshape misaligns under tp > 1; mlp is untested there.
-            if not (projection_tp or shared_tp) and vc.parallel_config.tensor_parallel_size > 1:
+            if not (kimi_projection_tp or shared_tp) and vc.parallel_config.tensor_parallel_size > 1:
                 raise AssertionError(
                     "oproj_tensor_parallel_size / mlp_tensor_parallel_size currently "
                     "require tensor_parallel_size == 1, got "
@@ -1597,11 +1596,14 @@ class FinegrainedTPConfig:
                 )
             # Graph dispatch is the only lane that aligns DP token counts (eager keeps per-rank counts).
             if vc.compilation_config.cudagraph_mode == CUDAGraphMode.NONE:
-                raise AssertionError("Fine-grained projection / MLP TP are only supported in graph mode")
+                raise AssertionError(
+                    "Fine-grained TP for Kimi KDA QKV input, Kimi output gates, attention output projections, "
+                    "dense MLP, or shared experts is only supported in graph mode."
+                )
             if vc.kv_transfer_config is None or not vc.kv_transfer_config.is_kv_consumer:
-                raise AssertionError("Fine-grained projection / MLP TP require a PD decode node.")
+                raise AssertionError("The selected graph-only fine-grained TP settings require a PD decode node.")
             # PCP's dispatch recomputes num_tokens per rank, breaking the group-uniform step size.
-            if not (projection_tp or shared_tp) and vc.parallel_config.prefill_context_parallel_size > 1:
+            if not (kimi_projection_tp or shared_tp) and vc.parallel_config.prefill_context_parallel_size > 1:
                 raise AssertionError(
                     "oproj_tensor_parallel_size / mlp_tensor_parallel_size are not supported "
                     "with prefill_context_parallel_size > 1."
@@ -1621,7 +1623,7 @@ class FinegrainedTPConfig:
                 capture_bound = max(capture_sizes) if capture_sizes else None
             # A step beyond the capture bound dispatches to eager and desyncs the cross-DP collectives.
             if capture_bound is None or capture_bound < max_step:
-                if projection_tp or shared_tp:
+                if kimi_projection_tp or shared_tp:
                     raise ValueError("Fine-grained TP requires graph capture capacity covering every decode step.")
                 logger.warning(
                     "Disabling oproj_tensor_parallel_size=%d and mlp_tensor_parallel_size=%d: "
