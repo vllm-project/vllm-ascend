@@ -146,6 +146,9 @@ def _export_checkpoint(layer, metadata, raw_qkv, state):
         recurrent_state=layer.kv_cache[1],
         cu_seqlens=metadata.prefill_query_start_loc,
     )
+    ack = getattr(metadata.checkpoint, "dedicated_ack", None)
+    if ack is not None:
+        ack.layers.add(layer.prefix)
     logger.info_once("Native GDN prefills have launched the checkpoint export kernel")
 
 

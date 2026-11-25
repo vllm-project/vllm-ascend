@@ -11,6 +11,7 @@ from vllm.v1.kv_cache_interface import get_mamba_prefill_checkpoint_position, is
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.core.gdn_checkpoint_policy import GDNCheckpointPolicy
+from vllm_ascend.core.gdn_dedicated_checkpoint import GDNCheckpointAcknowledgement
 from vllm_ascend.ops.triton.fla.chunk import chunk_gated_delta_rule_checkpoint
 
 logger = init_logger(__name__)
@@ -82,12 +83,26 @@ def build_gdn_checkpoint_metadata(
     all_query_lens = metadata.query_start_loc_cpu.diff().tolist()
     query_lens = [all_query_lens[row] for row in rows]
     offsets, columns = [], []
-    for row, query_len in zip(rows, query_lens, strict=True):
+    dedicated = getattr(metadata, "gdn_dedicated_checkpoint_rows", None)
+    dedicated_blocks = [NULL_BLOCK_ID] * len(rows) if dedicated else None
+    dedicated_writes = {}
+    for index, (row, query_len) in enumerate(zip(rows, query_lens, strict=True)):
         end = seq_lens[row]
         start = end - query_len
         position = get_mamba_prefill_checkpoint_position(
             end, hit_alignment, builder.drop_eagle_block, config.num_hash_lookahead_tokens
         )
+        plan = dedicated.get(row) if dedicated else None
+        if plan is not None:
+            req_id, write = plan
+            _, planned_position, page = write
+            valid = page > NULL_BLOCK_ID and start < position < end and position == planned_position
+            offsets.append(position - start if valid else 0)
+            columns.append(-1)
+            if valid:
+                dedicated_blocks[index] = page
+                dedicated_writes[req_id] = (write,)
+            continue
         position = policy.internal_position(position, start, end, spec.block_size, spec.prefill_checkpoint_alignment)
         valid = is_mamba_prefill_checkpoint_valid(
             start, end, position, hash_size, spec.block_size, spec.prefill_checkpoint_alignment
@@ -111,7 +126,12 @@ def build_gdn_checkpoint_metadata(
         request_rows=async_tensor_h2d(rows, dtype=torch.int64, device=device),
         block_cols=async_tensor_h2d(columns, dtype=torch.int64, device=device),
     )
-    return checkpoint.regather_state_indices(metadata.block_table_tensor)
+    checkpoint = checkpoint.regather_state_indices(metadata.block_table_tensor)
+    if dedicated_writes:
+        pages = async_tensor_h2d(dedicated_blocks, dtype=checkpoint.state_indices.dtype, device=device)
+        checkpoint.state_indices = torch.where(pages > NULL_BLOCK_ID, pages, checkpoint.state_indices)
+        checkpoint.dedicated_ack = GDNCheckpointAcknowledgement(dedicated_writes)
+    return checkpoint
 
 
 def ensure_gdn_checkpoint_workspace(layer, tensor):

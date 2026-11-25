@@ -24,6 +24,27 @@ from vllm_ascend.core.gdn_checkpoint_policy import GDNCheckpointPolicy
 class AscendMambaManager(MambaManager):
     gdn_checkpoint_policy: GDNCheckpointPolicy | None = None
 
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self.dedicated_plans: dict[str, tuple[int, int]] = {}
+        self.dedicated_pages: dict[str, tuple[int, KVCacheBlock]] = {}
+
+    def allocate_new_blocks(self, request_id: str, num_tokens: int, num_tokens_main_model: int) -> list[KVCacheBlock]:
+        blocks = super().allocate_new_blocks(request_id, num_tokens, num_tokens_main_model)
+        plan = self.dedicated_plans.pop(request_id, None)
+        if plan is not None and plan[1] == num_tokens_main_model:
+            # The extra page is not part of the position-addressed or MTP state table.
+            self.dedicated_pages[request_id] = (plan[0], self.block_pool.get_new_blocks(1)[0])
+        return blocks
+
+    def pop_blocks_for_free(self, request_id: str) -> list[KVCacheBlock]:
+        self.dedicated_plans.pop(request_id, None)
+        page = self.dedicated_pages.pop(request_id, None)
+        blocks = super().pop_blocks_for_free(request_id)
+        if page is not None:
+            blocks.append(page[1])
+        return blocks
+
     def _gdn_internal_position(self, position: int, start: int, end: int) -> int:
         policy = self.gdn_checkpoint_policy
         if policy is None:
@@ -145,6 +166,9 @@ class AscendMambaManager(MambaManager):
         has_new_scheduled_tokens = num_tokens_main_model > total_computed_tokens
         if has_external_tokens and has_new_scheduled_tokens:
             # one more block for external computed tokens
+            num_new_blocks += 1
+        plan = self.dedicated_plans.get(request_id) if not apply_admission_cap else None
+        if plan is not None and plan[1] == num_tokens_main_model:
             num_new_blocks += 1
         return num_new_blocks
 

@@ -413,6 +413,7 @@ class AscendCommonAttentionMetadata(CommonAttentionMetadata):
 
     # Scheduler-owned block IDs for real rows in this GDN cache group.
     gdn_checkpoint_block_rows: tuple[list[int], ...] | None = None
+    gdn_dedicated_checkpoint_rows: dict[int, tuple[str, tuple[int, int, int]]] | None = None
 
     # CPU tensor of already computed tokens count per request.
     # E.g., tensor([100, 200, 50]) means req0 has 100 tokens already computed.

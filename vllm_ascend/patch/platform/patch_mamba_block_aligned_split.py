@@ -39,10 +39,11 @@ from collections import OrderedDict
 
 from vllm.logger import init_logger
 from vllm.v1.core.sched.scheduler import Scheduler
-from vllm.v1.kv_cache_interface import get_mamba_prefill_checkpoint_position
+from vllm.v1.kv_cache_interface import MambaSpec, get_mamba_prefill_checkpoint_position
 from vllm.v1.request import Request
 
 from vllm_ascend.core.gdn_checkpoint_policy import GDNCheckpointPolicy
+from vllm_ascend.core.gdn_dedicated_checkpoint import DedicatedGDNCheckpoints, allocation_bound
 from vllm_ascend.patch.platform.patch_kv_cache_coordinator import (
     _skips_eagle_block_drop,
 )
@@ -66,6 +67,7 @@ _original_scheduler_init = Scheduler.__init__
 _original_add_request = Scheduler.add_request
 _original_reset_prefix_cache = Scheduler.reset_prefix_cache
 _original_schedule = Scheduler.schedule
+_original_update_from_output = Scheduler.update_from_output
 
 
 @functools.wraps(_original_scheduler_init)
@@ -74,6 +76,7 @@ def _init_scheduler(self: Scheduler, *args, **kwargs) -> None:
     self._ascend_gdn_checkpoint_policy = GDNCheckpointPolicy.from_config(self.vllm_config)
     policy = self._ascend_gdn_checkpoint_policy
     self._ascend_seen_mamba_tails = None
+    self._ascend_dedicated_checkpoints = None
     self._ascend_short_prefill_interval = 1
     options = self.vllm_config.additional_config or {}
     if (
@@ -95,10 +98,59 @@ def _init_scheduler(self: Scheduler, *args, **kwargs) -> None:
         manager.gdn_checkpoint_policy = policy
     if policy.elide_singleton_warm_tail and self.mamba_partial_cache_hit:
         self._ascend_seen_mamba_tails = OrderedDict()
+    if options.get("gdn_dedicated_prefill_checkpoints") and self.mamba_partial_cache_hit:
+        self._ascend_dedicated_checkpoints = _dedicated_checkpoints(self)
+
+
+def _dedicated_checkpoints(scheduler: Scheduler) -> DedicatedGDNCheckpoints | None:
+    config = scheduler.vllm_config
+    parallel = config.parallel_config
+    spec = config.speculative_config
+    if (
+        not config.use_v2_model_runner
+        or config.kv_transfer_config is not None
+        or parallel.tensor_parallel_size != 1
+        or parallel.pipeline_parallel_size != 1
+        or parallel.prefill_context_parallel_size != 1
+        or parallel.decode_context_parallel_size != 1
+        or parallel.data_parallel_size != 1
+        or parallel.use_ubatching
+        or (
+            spec is not None
+            and (spec.method != "mtp" or (spec.use_eagle_block_drop() and not scheduler.num_hash_lookahead_tokens))
+        )
+    ):
+        return None
+    managers = tuple(
+        manager
+        for manager in scheduler.kv_cache_manager.coordinator.single_type_managers
+        if isinstance(manager.kv_cache_spec, MambaSpec)
+    )
+    if managers and all(isinstance(m, AscendMambaManager) and m.has_prefill_checkpoint_blocks for m in managers):
+        return DedicatedGDNCheckpoints(managers)
+    return None
 
 
 @functools.wraps(_original_schedule)
 def _schedule(self: Scheduler, throttle_prefills: bool = False):
+    dedicated = getattr(self, "_ascend_dedicated_checkpoints", None)
+    if dedicated is None:
+        return _schedule_with_policy(self, throttle_prefills)
+    dedicated.begin_step()
+    output = _schedule_with_policy(self, throttle_prefills)
+    dedicated.dispatch(self.requests, output)
+    return output
+
+
+@functools.wraps(_original_update_from_output)
+def _update_from_output(self: Scheduler, scheduler_output, model_runner_output):
+    dedicated = getattr(self, "_ascend_dedicated_checkpoints", None)
+    if dedicated is not None:
+        dedicated.publish(self.requests, scheduler_output, model_runner_output)
+    return _original_update_from_output(self, scheduler_output, model_runner_output)
+
+
+def _schedule_with_policy(self: Scheduler, throttle_prefills: bool):
     interval = getattr(self, "_ascend_short_prefill_interval", 1)
     requests = self.requests
     if interval == 1 or not requests:
@@ -178,6 +230,11 @@ def _add_request(self: Scheduler, request: Request) -> None:
 
 @functools.wraps(_original_reset_prefix_cache)
 def _reset_prefix_cache(self: Scheduler, *args, **kwargs) -> bool:
+    dedicated = getattr(self, "_ascend_dedicated_checkpoints", None)
+    if dedicated is not None and dedicated.inflight:
+        # Core's forced reset assumes preempting requests frees every page.
+        # An independent write still owns its page until worker completion.
+        return False
     success = _original_reset_prefix_cache(self, *args, **kwargs)
     if success and self._ascend_seen_mamba_tails is not None:
         self._ascend_seen_mamba_tails.clear()
@@ -241,6 +298,36 @@ def _split_with_gdn_policy(
     finally:
         self.mamba_has_prefill_checkpoint_blocks = True
         self.mamba_partial_cache_hit = partial_cache_hit
+
+
+def _maybe_use_dedicated_checkpoint(
+    self: Scheduler, request: Request, num_new_tokens: int, local_hit: int, external_hit: int, aligned_tokens: int
+) -> int:
+    dedicated = getattr(self, "_ascend_dedicated_checkpoints", None)
+    if dedicated is None or local_hit <= 0 or external_hit or aligned_tokens == num_new_tokens:
+        return aligned_tokens
+    start = request.num_computed_tokens + local_hit
+    end = start + num_new_tokens
+    block_size = self.cache_config.block_size
+    if (
+        end != request.num_prompt_tokens
+        or end != request.num_tokens
+        or start // block_size != (end - 1) // block_size
+        or start < request.shared_prefix_boundary < end
+    ):
+        return aligned_tokens
+    position = get_mamba_prefill_checkpoint_position(
+        end, self.hash_block_size, self.use_eagle_block_drop, self.num_hash_lookahead_tokens
+    )
+    if start + aligned_tokens != position or not self._ascend_gdn_checkpoint_policy.allows_internal_checkpoint(
+        position, end, block_size
+    ):
+        return aligned_tokens
+    managers = self.kv_cache_manager.coordinator.single_type_managers
+    bound = allocation_bound(managers, end + self.num_lookahead_tokens, self.kv_cache_manager.watermark_blocks)
+    if dedicated.plan(request.request_id, start, position, end, self.hash_block_size, block_size, bound):
+        return num_new_tokens
+    return aligned_tokens
 
 
 @functools.wraps(_original_mamba_block_aligned_split)
@@ -344,6 +431,9 @@ def _mamba_block_aligned_split(
             num_new_local_computed_tokens,
             num_external_computed_tokens,
         )
+        result = _maybe_use_dedicated_checkpoint(
+            self, request, num_new_tokens, num_new_local_computed_tokens, num_external_computed_tokens, result
+        )
         # A resend must recompute its last input token for logits. When the
         # prompt ends exactly on a state-page boundary, its reusable state is
         # therefore one page earlier. Materialize that checkpoint before the
@@ -378,5 +468,6 @@ if current_parameters != _EXPECTED_PARAMETERS:
 Scheduler._mamba_block_aligned_split = _mamba_block_aligned_split
 Scheduler.__init__ = _init_scheduler
 Scheduler.schedule = _schedule
+Scheduler.update_from_output = _update_from_output
 Scheduler.add_request = _add_request
 Scheduler.reset_prefix_cache = _reset_prefix_cache

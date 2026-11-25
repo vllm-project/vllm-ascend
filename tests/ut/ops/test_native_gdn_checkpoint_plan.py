@@ -98,3 +98,25 @@ def test_host_block_ids_match_device_null_mask():
     assert optimized.state_indices.tolist() == fallback.state_indices.tolist() == [0, 17, 0]
     assert optimized.query_lens == fallback.query_lens
     assert build_gdn_checkpoint_metadata(builder, metadata, [1, 2], policy, host_blocks=host_blocks) is None
+
+
+def test_dedicated_page_coexists_with_another_rows_positional_checkpoint():
+    cache = SimpleNamespace(hash_block_size=128, cache_hit_alignment_tokens=128)
+    config = SimpleNamespace(cache_config=cache, num_hash_lookahead_tokens=1)
+    spec = SimpleNamespace(block_size=2048, prefill_checkpoint_alignment=64)
+    builder = SimpleNamespace(vllm_config=config, kv_cache_spec=spec, drop_eagle_block=False)
+    query_starts = torch.tensor([0, 1452, 4852], dtype=torch.int32)
+    metadata = SimpleNamespace(
+        seq_lens_cpu_upper_bound=torch.tensor([3500, 3400], dtype=torch.int32),
+        query_start_loc_cpu=query_starts,
+        query_start_loc=query_starts,
+        block_table_tensor=torch.tensor([[31, 40], [22, 33]], dtype=torch.int32),
+        gdn_dedicated_checkpoint_rows={0: ("req", (1, 3456, 77))},
+    )
+    checkpoint = build_gdn_checkpoint_metadata(
+        builder, metadata, [0, 1], GDNCheckpointPolicy(8192, False, False), host_blocks=([31, 40], [22, 33])
+    )
+    assert checkpoint.offsets == [1408, 3328]
+    assert checkpoint.state_indices.tolist() == [77, 22]
+    assert checkpoint.dedicated_ack.writes == {"req": ((1, 3456, 77),)}
+    assert checkpoint.dedicated_ack.layers == set()

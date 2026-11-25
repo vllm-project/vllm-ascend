@@ -76,6 +76,7 @@ from vllm_ascend.attention.attention_v1 import AscendAttentionBackend
 from vllm_ascend.attention.fa_v1 import AscendFlashAttentionBackend
 from vllm_ascend.attention.flashmla import prepare_flashmla_batch_req_state
 from vllm_ascend.attention.mla_v1 import AscendMLABackend
+from vllm_ascend.core.gdn_dedicated_checkpoint import confirmed_writes
 from vllm_ascend.core.kv_cache_interface import is_circular_kv_cache_spec
 from vllm_ascend.distributed.expert_transfer import expert_offload_utils as expert_offload
 from vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.dspark_context import (
@@ -402,6 +403,12 @@ class NPUModelRunner(GPUModelRunner):
         self._lmhead_pad_size = self._get_lmhead_pad_size(state) if state is not None and lmhead_tp_enable() else None
         output = super().sample_tokens(grammar_output)
         d2h_record_source_ready(self)
+        plans = getattr(state.input_batch, "gdn_dedicated_checkpoints", None) if state is not None else None
+        if plans and output is not None and state.attn_metadata is not None:
+            result = getattr(output, "model_runner_output", output)
+            result.gdn_dedicated_checkpoint_writes = confirmed_writes(
+                plans, state.attn_metadata, self.kv_cache_config.kv_cache_groups
+            )
         self._lmhead_pad_size = None
         # Close the per-step msprobe dump cycle on the normal last-PP-rank
         # path (v1 parity: v1 finalizes at the end of sample_tokens).
@@ -1179,6 +1186,7 @@ class NPUModelRunner(GPUModelRunner):
             self.input_buffers.positions[num_tokens:num_tokens_after_padding].zero_()
         input_batch = AscendInputBatch(
             req_ids=req_ids,
+            gdn_dedicated_checkpoints=getattr(scheduler_output, "gdn_dedicated_checkpoints", None),
             num_reqs=num_reqs,
             num_reqs_after_padding=num_reqs_padded,
             idx_mapping=idx_mapping,

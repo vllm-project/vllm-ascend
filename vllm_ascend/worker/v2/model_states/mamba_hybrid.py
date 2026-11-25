@@ -550,7 +550,20 @@ class AscendMambaHybridModelState(MambaHybridModelState, AscendModelState):
         if max_query_len is None:
             max_query_len = input_batch.num_scheduled_tokens.max().item()
 
+        dedicated = getattr(input_batch, "gdn_dedicated_checkpoints", None)
+
         def attach_gdn_blocks(group_id, common):
+            if dedicated:
+                dedicated_rows = {
+                    row: (req_id, write)
+                    for row, req_id in enumerate(input_batch.req_ids[: input_batch.num_reqs])
+                    for write in dedicated.get(req_id, ())
+                    if write[0] == group_id
+                }
+                if dedicated_rows:
+                    common.gdn_dedicated_checkpoint_rows = dedicated_rows
+            if not block_mirror_available:
+                return
             requests = self._gdn_checkpoint_blocks.get(group_id)
             if requests is None:
                 return
@@ -590,5 +603,5 @@ class AscendMambaHybridModelState(MambaHybridModelState, AscendModelState):
             pcp_context=pcp_context,
             full_graph_mode=cudagraph_mode == CUDAGraphMode.FULL,
             for_cudagraph_capture=for_capture,
-            common_metadata_callback=attach_gdn_blocks if block_mirror_available else None,
+            common_metadata_callback=attach_gdn_blocks if block_mirror_available or dedicated else None,
         )

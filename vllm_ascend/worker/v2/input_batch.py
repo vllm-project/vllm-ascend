@@ -78,6 +78,7 @@ class AscendInputBatch(InputBatch):
     # attn_state is used to build attention metadata.
     attn_state: AscendAttentionState | None = None
     is_dummy: bool = False
+    gdn_dedicated_checkpoints: dict[str, tuple[tuple[int, int, int], ...]] | None = None
 
     @classmethod
     def make_dummy(

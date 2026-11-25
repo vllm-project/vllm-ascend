@@ -787,6 +787,7 @@ class AscendConfig:
     # numerical equivalence and performance are qualified on supported NPUs.
     gdn_internal_prefill_checkpoints: bool = False
     gdn_native_prefill_checkpoints: bool = False
+    gdn_dedicated_prefill_checkpoints: bool = False
     gdn_native_preserve_physical_prefix: bool = False
     gdn_native_checkpoint_max_tokens: int = Field(default=0, ge=0, strict=True)
     gdn_elide_singleton_warm_tail: bool = False
@@ -813,6 +814,10 @@ class AscendConfig:
     def _validate_user_input_ranges(self):
         if self.gdn_native_prefill_checkpoints and not self.gdn_internal_prefill_checkpoints:
             raise ValueError("gdn_native_prefill_checkpoints requires gdn_internal_prefill_checkpoints")
+        if self.gdn_dedicated_prefill_checkpoints and (
+            not self.gdn_native_prefill_checkpoints or self.gdn_elide_singleton_warm_tail
+        ):
+            raise ValueError("Dedicated GDN checkpoints require native prefill and warm-tail publication")
         if (
             self.gdn_native_checkpoint_max_tokens or self.gdn_native_preserve_physical_prefix
         ) and not self.gdn_native_prefill_checkpoints:
