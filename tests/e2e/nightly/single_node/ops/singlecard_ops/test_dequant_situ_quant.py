@@ -158,6 +158,31 @@ def test_kimi_k3_predequantized_bf16_situ_quant(rows: int):
 
 
 @pytest.mark.skip_global_cleanup
+@torch.inference_mode()
+def test_kimi_k3_predequantized_bf16_group_list_skips_dispatch_padding():
+    if not hasattr(torch.ops._C_ascend, "dequant_situ_quant"):
+        pytest.skip("requires the DequantSituQuant custom operator")
+
+    valid_rows = 5
+    capacity_rows = 16
+    group_index = torch.tensor([2, 0, 1, 2], dtype=torch.int64)
+    values = torch.linspace(
+        -32.0,
+        32.0,
+        capacity_rows * K3_ROUTED_INPUT_WIDTH,
+        dtype=torch.float32,
+    )
+    x = values.to(torch.bfloat16).reshape(capacity_rows, K3_ROUTED_INPUT_WIDTH)
+    expected_y, expected_scale = _kimi_k3_predequantized_reference(x[:valid_rows])
+    actual_y, actual_scale = _run_dequant_situ_quant(x, None, None, None, group_index)
+
+    assert tuple(actual_y.shape) == (capacity_rows, K3_ROUTED_INPUT_WIDTH // 2)
+    assert tuple(actual_scale.shape) == (capacity_rows,)
+    torch.testing.assert_close(actual_y[:valid_rows].cpu(), expected_y, rtol=0, atol=1)
+    torch.testing.assert_close(actual_scale[:valid_rows].cpu(), expected_scale, rtol=5e-3, atol=1e-5)
+
+
+@pytest.mark.skip_global_cleanup
 @pytest.mark.parametrize(
     ("tp_size", "input_width"),
     K3_SHARED_TP_CASES,
