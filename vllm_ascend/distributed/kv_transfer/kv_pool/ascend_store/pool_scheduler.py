@@ -812,8 +812,9 @@ class KVPoolScheduler(BaseKVPoolScheduler):
         return super().reset_store()
 
     def retain_blocks_for_save(self, req_meta: ReqMeta) -> None:
-        """Keep Mamba source blocks alive until bulk save completes."""
-        self._in_flight_save_blocks.retain(req_meta, self.num_speculative_blocks_by_group, self._block_pool)
+        """Hold SWA and Mamba source blocks until all workers finish saving."""
+        scratch_blocks_by_group = dict.fromkeys(self.swa_group_ids, 0) | self.num_speculative_blocks_by_group
+        self._in_flight_save_blocks.retain(req_meta, scratch_blocks_by_group, self._block_pool)
 
     def _lookup_external_hit_tokens(self, request: Request, num_computed_tokens: int) -> int | None:
         prompt_token_len = len(request.prompt_token_ids)
