@@ -70,19 +70,21 @@ def test_unknown_allocation_and_out_of_range_uce_fail_closed(allocation_modules)
     assert not registry.uce_ranges
 
 
-def test_current_tuple_cache_adapter_preserves_connector_mapping():
-    from functools import wraps
+def test_runner_tensor_list_registers_original_allocations(allocation_modules):
+    from .test_v2_kv_cache_mapping import initialize_cache_consumers
 
-    from .test_fault_tolerance_port import load_definitions
-
-    ns = load_definitions(
-        "vllm_ascend/patch/worker/patch_attn_utils.py",
-        ["RunnerKVCacheView", "with_runner_cache_view", "with_layer_cache_mapping"],
-        wraps=wraps,
-    )
-    mapping = {"layer": (torch.ones(8, 2), torch.ones(8, 2))}
-    cache_view = ns["with_runner_cache_view"](lambda: mapping)()
-    assert list(cache_view.values()) == list(mapping["layer"])
-    connector = Mock()
-    ns["with_layer_cache_mapping"](connector)("config", cache_view)
-    connector.assert_called_once_with("config", mapping)
+    allocation, registry_mod = allocation_modules
+    raw = torch.ones(8, 4)
+    key, value = raw[:, :2], raw[:, 2:]
+    mapping = {"layer": (key, value)}
+    allocation["register_kv_allocations"]({"layer": raw}, mapping, 8)
+    runner, connector = initialize_cache_consumers(mapping, raw.device)
+    connector.assert_called_once_with(runner.vllm_config, mapping)
+    registry = registry_mod["KvCacheRegionRegistry"]()
+    registry.register(runner.kv_caches)
+    registry.validate_block_space(8)
+    registry.uce_ranges = [(raw.data_ptr(), raw.element_size())]
+    assert registry.partial_block_ids(8) == {0}
+    registry.invalidate_blocks([0])
+    assert raw[0].count_nonzero() == 0
+    assert torch.all(raw[1:] == 1)
