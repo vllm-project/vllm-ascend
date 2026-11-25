@@ -21,20 +21,26 @@ if TYPE_CHECKING:
     from vllm_ascend.distributed.device_communicators.pyhccl import PyHcclCommunicator
 
 
+# Byte alignment for mixed-dtype views packed into a single uint8 staging buffer.
+_PACK_ALIGNMENT_BYTES = 16
+
+
+def _aligned_nbytes(nbytes: int) -> int:
+    return ((nbytes + _PACK_ALIGNMENT_BYTES - 1) // _PACK_ALIGNMENT_BYTES) * _PACK_ALIGNMENT_BYTES
+
+
 def plan_batches(metas: Sequence[M2NParamMeta], max_bytes: int) -> tuple[range, ...]:
     """Partition the shared parameter order without using rank-local sizes."""
     batches = []
     start = 0
     total_bytes = 0
-    dtype = None
     for index, meta in enumerate(metas):
         size = math.prod(meta.shape) * meta.dtype.itemsize
-        if start < index and (dtype != meta.dtype or total_bytes + size > max_bytes):
+        if start < index and total_bytes + size > max_bytes:
             batches.append(range(start, index))
             start = index
             total_bytes = 0
         total_bytes += size
-        dtype = meta.dtype
     if start < len(metas):
         batches.append(range(start, len(metas)))
     return tuple(batches)
@@ -44,11 +50,13 @@ class _PackedSlot:
     def __init__(self) -> None:
         self.buffers: dict[int, torch.Tensor] = {}
         self.tensors: list[torch.Tensor] = []
+        self.needs_sync: bool = False
         self._ready: torch.npu.Event | None = None
 
     def wait(self) -> None:
         if self._ready is not None:
             self._ready.synchronize()
+            self._ready = None
 
     def submit(
         self,
@@ -59,9 +67,11 @@ class _PackedSlot:
         pieces: Sequence[tuple[TransferPiece, ...]],
         *,
         send: bool,
+        needs_sync: bool = False,
     ) -> None:
         self.wait()
         self.tensors = tensors
+        self.needs_sync = needs_sync
 
         peer_views: dict[int, list[torch.Tensor]] = defaultdict(list)
         for tensor, tensor_pieces in zip(tensors, pieces, strict=True):
@@ -70,36 +80,40 @@ class _PackedSlot:
 
         buffers = []
         copies = []
-        # Allocate on the first stream to access the staging memory. A receive
-        # can then proceed while the caller stream unpacks the previous slot.
+        # Allocate uint8 staging buffers on the first stream to access them so
+        # mixed-dtype parameters can share one P2P transfer per peer and a
+        # receive can proceed while the caller stream unpacks the previous slot.
         with torch.npu.stream(stream if send else comm_stream):
             for peer, views in sorted(peer_views.items()):
-                size = sum(view.numel() for view in views)
+                total_bytes = sum(_aligned_nbytes(view.numel() * view.element_size()) for view in views)
                 buffer = self.buffers.get(peer)
-                if buffer is None or buffer.numel() < size or buffer.dtype != views[0].dtype:
-                    buffer = views[0].new_empty((size,))
+                if buffer is None or buffer.numel() < total_bytes:
+                    buffer = torch.empty((total_bytes,), dtype=torch.uint8, device=views[0].device)
                     self.buffers[peer] = buffer
-                buffers.append((peer, buffer[:size]))
+                buffers.append((peer, buffer[:total_bytes]))
                 offset = 0
                 for view in views:
-                    end = offset + view.numel()
-                    copies.append((view, buffer[offset:end]))
-                    offset = end
+                    nbytes = view.numel() * view.element_size()
+                    end = offset + nbytes
+                    copies.append((view, buffer[offset:end].view(view.dtype).view(view.shape)))
+                    offset += _aligned_nbytes(nbytes)
 
         if not buffers:
             self._ready = stream.record_event()
             return
 
         if send:
-            for view, payload in copies:
-                payload.view(view.shape).copy_(view)
+            with torch.npu.stream(stream):
+                for view, payload in copies:
+                    payload.copy_(view)
             comm_stream.wait_event(stream.record_event())
         group.batch_send_recv(buffers, send=send, stream=comm_stream)
         comm_done = comm_stream.record_event()
         if not send:
             stream.wait_event(comm_done)
-            for view, payload in copies:
-                view.copy_(payload.view(view.shape))
+            with torch.npu.stream(stream):
+                for view, payload in copies:
+                    view.copy_(payload)
         self._ready = comm_done if send else stream.record_event()
 
 
@@ -116,21 +130,43 @@ def transfer_packed_parameters(
     batches: Sequence[range],
     *,
     send: bool,
+    comm_stream: torch.npu.Stream | None = None,
+    needs_host_sync: Sequence[bool] | None = None,
 ) -> Iterator[torch.Tensor]:
     """Alternate two staging slots while preserving loader parameter order."""
-    comm_stream = torch.npu.Stream(device=group.device)
+    if comm_stream is None:
+        comm_stream = torch.npu.Stream(device=group.device)
     slots = (_PackedSlot(), _PackedSlot())
+    keepalive: list[torch.Tensor] = []
     next_slot = 0
-    pending = None
+    pending: _PackedSlot | None = None
     try:
         for batch in batches:
+            batch_needs_sync = not send and (needs_host_sync is None or any(needs_host_sync[i] for i in batch))
             if len(batch) == 1:
                 if pending is not None:
+                    # Drain comm_stream before switching the communicator to stream.
                     pending.wait()
-                    yield from pending.tensors
+                    yielded = pending.tensors
+                    pending.tensors = []
+                    yield from yielded
                     pending = None
                 tensor = next(tensors)
-                transfer_parameter(group, stream, tensor, pieces[batch.start], send=send)
+                if batch_needs_sync:
+                    transfer_parameter(group, stream, tensor, pieces[batch.start], send=send, sync=True)
+                    keepalive.clear()
+                else:
+                    transfer_parameter(
+                        group,
+                        stream,
+                        tensor,
+                        pieces[batch.start],
+                        send=send,
+                        sync=False,
+                        keepalive=keepalive,
+                    )
+                    # Keep the next comm_stream collective ordered after this stream op.
+                    comm_stream.wait_event(stream.record_event())
                 yield tensor
                 continue
 
@@ -146,17 +182,22 @@ def transfer_packed_parameters(
                 batch_tensors,
                 pieces[batch.start : batch.stop],
                 send=send,
+                needs_sync=batch_needs_sync,
             )
             if pending is not None:
-                if not send:
+                if not send and pending.needs_sync:
                     pending.wait()
-                yield from pending.tensors
+                yielded = pending.tensors
+                pending.tensors = []
+                yield from yielded
             pending = slot
 
         if pending is not None:
-            if not send:
+            if not send and pending.needs_sync:
                 pending.wait()
-            yield from pending.tensors
+            yielded = pending.tensors
+            pending.tensors = []
+            yield from yielded
         if next(tensors, None) is not None:
             raise RuntimeError("hccl_m2n packed update exceeded the negotiated parameter list")
     finally:
@@ -165,6 +206,11 @@ def transfer_packed_parameters(
                 comm_stream.synchronize()
             finally:
                 stream.synchronize()
+            keepalive.clear()
         except BaseException:
             _UNSYNCHRONIZED_SLOTS.extend(slots)
+            if keepalive:
+                failed_slot = _PackedSlot()
+                failed_slot.tensors = keepalive
+                _UNSYNCHRONIZED_SLOTS.append(failed_slot)
             raise

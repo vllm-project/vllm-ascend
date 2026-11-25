@@ -207,26 +207,29 @@ engine = WeightTransferTrainerFactory.trainer_init(
 engine.send_weights()
 ```
 
-The initial implementation targets dense, unquantized models with FP16,
-BF16, or FP32 ND weights and TP or DP on the rollout side. It supports
-the upstream M2N layout rules for uniformly sharded tensors of up to three
-dimensions. Use disjoint trainer and rollout NPUs and a CANN build with
-`HcclBatchSendRecv` support. The trainer and rollout must use the same
-parameter names and checkpoint semantics.
+The implementation supports ND weights across the dtypes supported by both
+upstream M2N and HCCL (such as FP16, BF16, FP32, FP64, INT8, UINT8, INT32, and
+INT64), following the upstream M2N layout rules for uniformly sharded tensors
+of up to three dimensions. Use disjoint trainer and rollout NPUs and a CANN
+build with `HcclBatchSendRecv` support. The trainer and rollout must use the
+same parameter names and checkpoint semantics.
 
 Workers use upstream destination resolution to select eligible direct targets
-automatically. Remaining weights are reconstructed and passed through the
-model loader. Workers use the full loader path if the model has precomputed
-FP32 weight copies or a selected direct destination fails the NPU ND format
-check. Set `direct_write=False` in `HCCLM2NTrainerInitInfo` to use the loader
-for all parameters.
+automatically for dense, unquantized TP/DP rollouts. Remaining weights—as well
+as PP, MoE, quantized, or sleep-mode rollouts—are reconstructed and passed
+through the model loader. Modules with precomputed FP32 weight copies or a
+direct target that fails the NPU ND format check fall back to the loader at
+module granularity without forcing unrelated modules off the direct path. Set
+`direct_write=False` in `HCCLM2NTrainerInitInfo` to use the loader for all
+parameters.
 
 Set `packed_buffer_size_bytes=128 * 1024 * 1024` in
 `HCCLM2NTrainerInitInfo` to enable experimental cross-parameter batching.
-The limit is based on logical checkpoint bytes per batch. A parameter larger
-than the limit uses the single-parameter path. All trainer ranks must use the
-same settings. Keep the contents of each tensor yielded by `iter_local()`
-unchanged until `send_weights()` returns when using batching.
+The limit is based on logical checkpoint bytes per batch and merges consecutive
+parameters across dtypes into aligned `uint8` per-peer buffers. A parameter
+larger than the limit uses the single-parameter path. All trainer ranks must
+use the same settings. Keep the contents of each tensor yielded by
+`iter_local()` unchanged until `send_weights()` returns when using batching.
 
 Packed transfer uses PyTorch `copy_()` to pack and unpack weight slices in
 per-peer staging buffers. It works with both direct and loader destinations.

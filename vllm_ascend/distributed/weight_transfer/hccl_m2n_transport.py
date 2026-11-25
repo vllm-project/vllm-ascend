@@ -39,7 +39,12 @@ def _rank_regions(
 
 
 def plan_rank_transfers(
-    shape: tuple[int, ...], source: M2NLayout, destination: M2NLayout, rank: int
+    shape: tuple[int, ...],
+    source: M2NLayout,
+    destination: M2NLayout,
+    rank: int,
+    *,
+    param_index: int = 0,
 ) -> tuple[TransferPiece, ...]:
     """Intersect logical shards and pick one source replica per destination tile."""
     src_shape, src_regions = _rank_regions(source, shape)
@@ -67,7 +72,7 @@ def plan_rank_transfers(
             local_origin = src_origin if sending else dst_origin
             local_slice = tuple(slice(lo - base, hi - base) for lo, hi, base in zip(start, stop, local_origin))
             for replica, dst_rank in enumerate(dst_ranks):
-                src_rank = src_ranks[(dst_index + replica) % len(src_ranks)]
+                src_rank = src_ranks[(param_index + dst_index + replica) % len(src_ranks)]
                 if sending and rank == src_rank:
                     pieces.append(TransferPiece(dst_rank, local_slice))
                 elif not sending and rank == dst_rank:
@@ -82,8 +87,14 @@ def transfer_parameter(
     pieces: tuple[TransferPiece, ...],
     *,
     send: bool,
+    sync: bool = True,
+    keepalive: list[torch.Tensor] | None = None,
 ) -> None:
-    """Transfer one parameter. Stage only views that are not contiguous."""
+    """Transfer one parameter. Stage only views that are not contiguous.
+
+    When ``sync=False``, the caller owns draining ``stream`` before releasing
+    tensors appended to ``keepalive``.
+    """
     if not pieces:
         return
 
@@ -96,6 +107,11 @@ def transfer_parameter(
             buffers.append(view.contiguous())
         else:
             buffers.append(view.new_empty(view.shape))
+    if not sync and keepalive is not None:
+        keepalive.append(tensor)
+        for view, buffer in zip(views, buffers):
+            if view is not buffer:
+                keepalive.append(buffer)
     # Raw HCCL pointers are invisible to PyTorch's allocator. Keep tensors
     # alive through the stream drain, including when HCCL reports an error.
     try:
@@ -107,4 +123,5 @@ def transfer_parameter(
                 if view is not buffer:
                     view.copy_(buffer)
     finally:
-        stream.synchronize()
+        if sync:
+            stream.synchronize()
