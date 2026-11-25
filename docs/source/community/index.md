@@ -12,6 +12,7 @@ Welcome to the vLLM Ascend community! This section covers governance, contributi
 
 - **[Issue Workflow Guidelines](issue-workflow-guidelines.md)** — How issues are triaged and managed
 - **[Slash Commands](slash-commands.md)** — CI/CD slash commands for pull requests
+- **[AI Code Review](ai-review.md)** — The AI review agent: triggering, review rounds, and knowledge base maintenance
 
 ## User Stories
 

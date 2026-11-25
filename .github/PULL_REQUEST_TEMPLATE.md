@@ -25,9 +25,20 @@ See release_notes/README.md for the principles and format.
 
 ### How was this patch tested?
 <!--
-CI passed with new added/existing test.
-If it was tested in a way different from regular unit tests, please clarify how you tested step by step, ideally copy and paste-able, so that other reviewers can test and check, and descendants can verify in the future.
-If tests were not added, please describe why they were not added and/or why it was difficult to add.
+Give the commands and observed results for this revision. If you did not add tests, explain why.
+For inference accuracy or performance changes, identify the baseline and PR revisions and include
+the applicable evidence below. Link longer logs and note any relevant checks still pending.
+
+- For accuracy, name the model, dataset (split and sample count), and metric. Report baseline and PR scores
+  and their difference under the same evaluation settings.
+- For performance, name the model, NPU type, and card count. State whether
+  prefill and decode are colocated or disaggregated. For disaggregation, give instances per side and cards
+  per instance. Report input and output lengths in tokens (or their distributions) and request concurrency.
+  Compare the same workload and report both values, units, and the change for the claimed metric
+  (e.g. output tokens/s or P95 time per output token in ms).
+- For an optimization, say whether it uses a shared path across NPUs (e.g. A3 and A5) or a chip-specific path.
+  Give results separately for each NPU and deployment mode tested, and identify any untested configurations
+  within the claimed scope.
 -->
 
 ---

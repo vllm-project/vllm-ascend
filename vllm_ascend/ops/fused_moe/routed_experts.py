@@ -32,6 +32,7 @@ from vllm.model_executor.utils import replace_parameter
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX, use_cann_megamoe
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
+from vllm_ascend.distributed.expert_transfer.expert_offload_utils import expert_offload_weights
 from vllm_ascend.eplb.adaptor.vllm_adaptor import VllmEplbAdaptor
 from vllm_ascend.eplb.core.eplb_utils import init_eplb_config
 from vllm_ascend.lora.fused_moe import sync_lora_context
@@ -106,11 +107,19 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
         super(UnquantizedFusedMoEMethod, self).process_weights_after_loading(layer)
 
         # Keep expert-aware loaders attached for later online weight updates.
-        w13_data = self._maybe_pad_weight(layer.w13_weight.data).transpose(1, 2).contiguous()
-        replace_parameter(layer, "w13_weight", w13_data)
-
-        w2_data = self._maybe_pad_weight(layer.w2_weight.data).transpose(1, 2).contiguous()
-        replace_parameter(layer, "w2_weight", w2_data)
+        enable_fused_mc2 = get_ascend_config().enable_fused_mc2
+        for name in ("w13_weight", "w2_weight"):
+            weight = getattr(layer, name)
+            transposed = self._maybe_pad_weight(weight.data).transpose(1, 2).contiguous()
+            if not enable_fused_mc2 or weight.shape == transposed.shape:
+                # ND weights are read in place by captured graphs, so keep the
+                # parameter's storage across direct reloads.
+                replace_parameter(layer, name, transposed)
+            else:
+                # NZ packing reads the NPU storage's base shape. Reusing the
+                # pre-transpose storage here would pack a rectangular matrix
+                # with its old dimensions.
+                weight.data = transposed
 
         # TODO: Current dispatch_ffn_combine/mega_moe fusion operator ONLY supports NZ format.
         # Therefore, we must cast weights to NZ when fusion is enabled.
@@ -118,7 +127,6 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
         # ND format (or other formats), remove this specific 'if' check and the forced
         # npu_format_cast. At that point, the operator should be able to handle weights
         # in their native format without explicit casting here.
-        enable_fused_mc2 = get_ascend_config().enable_fused_mc2
         if enable_fused_mc2:
             use_megamoe = use_cann_megamoe(get_current_vllm_config())
             if not use_megamoe:
@@ -376,6 +384,12 @@ class EplbExpertTensorList(list[torch.Tensor]):
         self.nz_cast_spec: NzCastSpec | None = nz_cast_spec
 
     @property
+    def is_cuda(self) -> bool:
+        # NPU expert lists take the native per-row copy path rather than the
+        # CUDA kernel, which requires a single contiguous weight allocation.
+        return self[0].is_cuda
+
+    @property
     def shape(self) -> torch.Size:
         return torch.Size((len(self), *self[0].shape))
 
@@ -418,7 +432,8 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
         n_shared_experts: int = 0,
         **kwargs,
     ):
-        super().__init__(*args, **kwargs)
+        with expert_offload_weights(self, get_ascend_config()):
+            super().__init__(*args, **kwargs)
         if self.quant_config is None:
             # Preserve the pre-refactor BF16 lifecycle: let upstream create
             # weights first, then install the Ascend execution method.

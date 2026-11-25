@@ -10,7 +10,7 @@
 
 [DeepSeek-V4.1-Flash](https://huggingface.co/deepseek-ai/DeepSeek-V4.1-Flash)
 is a native multimodal Mixture-of-Experts (MoE) model with 552B backbone
-parameters and a context length of up to one million tokens. It uses a
+parameters and a context length of up to 1M tokens. It uses a
 40-layer Causal Encoder-Decoder (CED) architecture with 20 causal-encoder
 layers and 20 decoder layers, activating 8B parameters per token during
 Prefill and 16B during Decode.
@@ -96,6 +96,8 @@ interfaces, and the service ports must not be blocked.
 
 ### 4.1 Docker Image Installation
 
+{% include "getting_started/installation/ascend_docker_runtime.inc.md" %}
+
 Select the tab for the target hardware. A2, A3, and 950DT products use
 separate images.
 
@@ -111,35 +113,11 @@ separate images.
     docker pull "$IMAGE"
 
     docker run --rm -it \
+      -e ASCEND_VISIBLE_DEVICES=0-15 \
       --name deepseek-v41 \
       --net=host \
       --ipc=host \
-      --privileged=true \
-      --device /dev/davinci0 \
-      --device /dev/davinci1 \
-      --device /dev/davinci2 \
-      --device /dev/davinci3 \
-      --device /dev/davinci4 \
-      --device /dev/davinci5 \
-      --device /dev/davinci6 \
-      --device /dev/davinci7 \
-      --device /dev/davinci8 \
-      --device /dev/davinci9 \
-      --device /dev/davinci10 \
-      --device /dev/davinci11 \
-      --device /dev/davinci12 \
-      --device /dev/davinci13 \
-      --device /dev/davinci14 \
-      --device /dev/davinci15 \
-      --device /dev/davinci_manager \
-      --device /dev/devmm_svm \
-      --device /dev/hisi_hdc \
-      -v /usr/local/dcmi:/usr/local/dcmi \
       -v /usr/local/Ascend/driver/tools/hccn_tool:/usr/local/Ascend/driver/tools/hccn_tool \
-      -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
-      -v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
-      -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
-      -v /etc/ascend_install.info:/etc/ascend_install.info \
       -v /etc/hccn.conf:/etc/hccn.conf \
       -v "$MODEL_ROOT:$MODEL_ROOT" \
       "$IMAGE" bash
@@ -156,34 +134,22 @@ separate images.
     docker pull "$IMAGE"
 
     docker run --rm -it \
+      -e ASCEND_VISIBLE_DEVICES=0-7 \
       --name deepseek-v41 \
       --net=host \
       --ipc=host \
       --shm-size=512g \
-      --privileged=true \
-      --device /dev/davinci0 \
-      --device /dev/davinci1 \
-      --device /dev/davinci2 \
-      --device /dev/davinci3 \
-      --device /dev/davinci4 \
-      --device /dev/davinci5 \
-      --device /dev/davinci6 \
-      --device /dev/davinci7 \
-      --device /dev/davinci_manager \
-      --device /dev/devmm_svm \
-      --device /dev/hisi_hdc \
-      -v /usr/local/dcmi:/usr/local/dcmi \
       -v /usr/local/Ascend/driver/tools/hccn_tool:/usr/local/Ascend/driver/tools/hccn_tool \
-      -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
-      -v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
-      -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
-      -v /etc/ascend_install.info:/etc/ascend_install.info \
       -v /etc/hccn.conf:/etc/hccn.conf \
       -v "$MODEL_ROOT:$MODEL_ROOT" \
       "$IMAGE" bash
     ```
 
 === "950DT products"
+
+    Prepare Ascend HDK `{{ release_hdk_version_a5 }}` on each host and verify
+    the driver and firmware with `npu-smi info`. See the
+    [validated software stack](../../getting_started/installation.md#installation-hardware-software-stack).
 
     On each participating server, pull the 950DT Ubuntu release image. Set
     `MODEL_ROOT` to the parent directory of the checkpoint.
@@ -195,27 +161,11 @@ separate images.
 
     docker pull "$IMAGE"
     docker run --rm -it \
+      -e ASCEND_VISIBLE_DEVICES=0-7 \
       --name deepseek-v41-950dt \
       --net=host \
       --shm-size=512g \
-      --privileged=true \
-      --device /dev/davinci0 \
-      --device /dev/davinci1 \
-      --device /dev/davinci2 \
-      --device /dev/davinci3 \
-      --device /dev/davinci4 \
-      --device /dev/davinci5 \
-      --device /dev/davinci6 \
-      --device /dev/davinci7 \
-      --device /dev/davinci_manager \
-      --device /dev/hisi_hdc \
-      --device /dev/ummu \
-      --device /dev/uburma \
       -v /usr/local/Ascend/driver:/usr/local/Ascend/driver \
-      -v /usr/local/dcmi:/usr/local/dcmi \
-      -v "$NPU_SMI:/usr/local/bin/npu-smi:ro" \
-      -v /etc/ascend_install.info:/etc/ascend_install.info:ro \
-      -v /usr/bin/urma_admin:/usr/bin/urma_admin:ro \
       -v "$MODEL_ROOT:$MODEL_ROOT" \
       "$IMAGE" bash
     ```
@@ -244,6 +194,16 @@ commit recorded in `.github/vllm-main-verified.commit` at the selected
 vLLM Ascend revision.
 
 ## 5 Online Service Deployment
+
+!!! warning
+
+    On a low-memory server, for example a 1 TB machine, free the host from
+    long-lived large memory consumers before deploying, so that enough
+    contiguous 2 MB host pages are available. Otherwise a pinned host
+    allocation can fail with `207001` or `EL0018 ... Insufficient_Host_Memory`
+    during startup or serving, even though the host has free memory. See
+    [FAQ 26](../../faqs.md#faq-host-pinned-memory-207001) for checks and
+    recovery commands.
 
 ### 5.1 Single-Node Colocated Deployment
 
@@ -393,8 +353,8 @@ vLLM Ascend revision.
 
     | Role | DP / TP / EP | API ports | DP RPC port | KV handshake ports |
     | ---- | ------------ | --------- | ----------- | ------------------ |
-    | Prefill | 8 / 1 / 8 | 7100–7107 | 12321 | 26010–26017 |
-    | Decode | 8 / 1 / 8 | 7100–7107 | 12321 | 27010–27017 |
+    | Prefill | 8 / 1 / 8 | 7100-7107 | 12321 | 26010-26017 |
+    | Decode | 8 / 1 / 8 | 7100-7107 | 12321 | 27010-27017 |
 
     Use the 950DT runtime from [Section 4.1](#41-docker-image-installation)
     on both nodes. Prefill requires native SWA bounded replay with the PD connector.
@@ -798,7 +758,7 @@ vLLM Ascend revision.
     | `--prefill-context-parallel-size` | 1 (default) | 8 |
     | `--max-num-batched-tokens` | 5120 | 16384 |
     | Visible devices per process | One NPU | All eight NPUs |
-    | Prefill API endpoints | 7100–7107 | 7100 |
+    | Prefill API endpoints | 7100-7107 | 7100 |
     | Connector `prefill.dp_size` on both roles | 8 | 1 |
 
     Replace Prefill's `--additional-config` with the following configuration.
@@ -833,7 +793,7 @@ vLLM Ascend revision.
     the Decode template. Increasing global DP to 16 gives EP16. Retain its
     batch limits, graph mode, DSpark, and other model settings as a starting point.
 
-    Verify [cross-node communication](../../getting_started/installation.md#installation-multi-node-interconnect)
+    Verify [Verify Multi-node Communication](../../getting_started/installation.md#installation-multi-node-interconnect)
     first. Set the Decode template's local IP and network interface separately
     on each Decode server. Both servers use the first Decode server's IP as
     the DP master:
@@ -855,8 +815,8 @@ vLLM Ascend revision.
     Set `decode.dp_size` to `16` in the connector configuration on both
     Prefill and Decode. Keep `prefill.dp_size=8` and `tp_size=1`. For Memcache,
     change the same values in the nested `MooncakeHybridConnector`. Keep the
-    Decode KV base port at `27010`. Global DP ranks use `27010–27025`.
-    Register ports `7100–7107` from each Decode server in the proxy, for 16
+    Decode KV base port at `27010`. Global DP ranks use `27010-27025`.
+    Register ports `7100-7107` from each Decode server in the proxy, for 16
     Decode endpoints in total. Start both servers before waiting for readiness.
     Recheck Decode latency and throughput for the target workload before
     changing the batch limits.
@@ -1531,7 +1491,7 @@ vLLM Ascend revision.
       across the DP ranks (12 heads per Prefill rank and 3 heads per Decode
       rank), and the host-memory table must still be shared across the node's
       local DP ranks. That requires the container to run with `--ipc=host`
-      or a `/dev/shm` of at least 320g.
+      or a `/dev/shm` of at least 320 GiB.
     - The Decode role uses `--kv-cache-memory-bytes 4600000000` (about
       4.28 GiB) to fix the KV cache budget. On A2 with DP8/TP1 a device
       holds about 53.6 GiB of weights, so at `0.97` utilization the KV cache
@@ -2307,7 +2267,7 @@ Select the tab for the target hardware.
       is not supported by the layerwise path.
 
     For Memcache configuration, capacity tuning, and troubleshooting, refer to the
-    [KV Cache Pool guide](../../user_guide/feature_guide/kv_cache_pool_ascend_store.md#scenario-2-memcache-backend).
+    [Memcache backend guide](../../user_guide/feature_guide/kv_cache_pool_ascend_store.md#scenario-2-memcache-backend).
 
 ### 5.4 1P1D Deployment with Mooncake KV Cache Pool
 
@@ -2372,8 +2332,6 @@ zero contributed capacity and SSD offload disabled:
 }
 ```
 
-Start mooncake_master:
-
 After the configurations are ready, start the mooncake_master process on the
 Prefill node; the validated configuration runs it there, and any node reachable
 from both roles works as well. Wait until the process stays alive and port
@@ -2383,14 +2341,11 @@ from both roles works as well. Wait until the process stays alive and port
 mooncake_master --port 50088 --eviction_high_watermark_ratio 0.9 --eviction_ratio 0.1 --default_kv_lease_ttl 11000 --enable_offload=true --offload_on_evict=true --offload_force_evict=false --client_ttl=120
 ```
 
-eviction_high_watermark_ratio determines the watermark where Mooncake Store will perform eviction.
-eviction_ratio determines the portion of stored objects that would be evicted.
-default_kv_lease_ttl controls the default lease TTL for KV objects (milliseconds).
-configure it via --default_kv_lease_ttl and keep it larger than ASCEND_CONNECT_TIMEOUT and ASCEND_TRANSFER_TIMEOUT.
-`--enable_offload` and `--offload_on_evict` enable the SSD tier, so objects
-evicted from pool DRAM are written under the Prefill node's `ssd_offload_path`
-instead of being dropped. `--client_ttl=120` keeps a slow-compiling worker from
-being removed from the pool during startup.
+- `eviction_high_watermark_ratio`: Determines the high watermark where Mooncake Store triggers eviction.
+- `eviction_ratio`: Determines the share of stored objects to be evicted.
+- `default_kv_lease_ttl`: Controls the default lease TTL (milliseconds) for KV objects. Configured via `--default_kv_lease_ttl`, and should be larger than `ASCEND_CONNECT_TIMEOUT` and `ASCEND_TRANSFER_TIMEOUT`.
+- `--enable_offload` and `--offload_on_evict`: Enable the SSD tier. Objects evicted from the DRAM pool are written to the Prefill node's `ssd_offload_path` rather than dropped.
+- `--client_ttl=120`: Avoid slow-compiling workers from being removed from the pool during startup.
 
 #### 5.4.2 Start the Prefill Node with Pooling
 
@@ -2647,7 +2602,7 @@ For Mooncake configuration, and troubleshooting, refer to the [KV Cache Pool gui
     local DP rank per server and a global DP2/TP8/EP16 topology. It uses the
     W4A8 checkpoint and model runner V2 with DSpark speculative decoding and
     `FULL_DECODE_ONLY` ACL Graph. This configuration has been validated for
-    startup, text and image smoke requests, and 16K-input serving; long-context
+    startup, text and image smoke requests, and 16k-input serving; long-context
     and high-concurrency performance has not been qualified.
 
     Run this script on both A2 servers. Set `NODE_RANK` to `0` or
@@ -2868,10 +2823,10 @@ For common environment, installation, and parameter issues, refer to the
 - The documented A2 deployments use two servers: one Prefill and one Decode
   server in 1P1D mode with an Ascend W4A8 checkpoint, or two servers in
   DP2/TP8/EP16 colocated mode. The A2 two-node colocated configuration has been
-  validated with W4A8 weights for startup, smoke requests, and 16K-input
+  validated with W4A8 weights for startup, smoke requests, and 16k-input
   serving only; long-context and high-concurrency performance remain
   unqualified. The A2 Mooncake KV Cache Pool variant has been validated with
-  W4A8 weights for startup, smoke requests, 16K-input saturation, and 128K
+  W4A8 weights for startup, smoke requests, 16k-input saturation, and 128K
   multi-prefix serving; other workloads are not qualified.
 - In the A2 PD example, the Decode KV cache is fixed with
   `--kv-cache-memory-bytes`, so `--gpu-memory-utilization` does not determine

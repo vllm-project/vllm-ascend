@@ -1,0 +1,666 @@
+# Source: https://github.com/vllm-project/vllm/blob/9b088c6667cbb9cce3eaa5ad937548aad36e8e7e/recipes/models/MiniMaxAI/MiniMax-M3.1-Flash.yaml
+# Extracted with vllm-project/recipes@4cfcfcd36d439dbc1e61bea4e3e86f43efd9a00f.
+meta:
+  date_updated: 2026-11-20
+  hardware:
+    ascend_910c: verified
+    ascend_950dt_8x: verified
+strategy_hardware:
+  # The tutorial documents a single-node split (A3: DP4 x TP4, 950DT: DP2 x TP4)
+  # and a 1P1D split (prefill TP4 x PP4/PP2, decode DEP over two hosts). The
+  # variants carry the common flags and every lane-specific flag lives in a
+  # preset, so the strategies that would re-size TP or add a second DP on top of
+  # the documented split are opted out:
+  #   - TEP/DEP single-node pin TP to the whole node and add their own DP
+  #     (TP16 on A3), and the multi-node TP/TEP variants spread one instance
+  #     across hosts instead of the tutorial's per-host DP ranks;
+  #   - multi_node_dep would size each host as a whole-node DEP pool, not the
+  #     tutorial's global DP8 (A3) / DP4 (950DT) group;
+  #   - single_node_tp is kept because the presets declare the extra DP flags;
+  #   - pd_cluster is enabled for the two qualified Huawei profiles only.
+  single_node_tep:
+    npu: unsupported
+  single_node_dep:
+    npu: unsupported
+  multi_node_tp:
+    npu: unsupported
+  multi_node_dep:
+    npu: unsupported
+  multi_node_tep:
+    npu: unsupported
+  pd_cluster:
+    npu: unsupported
+    ascend_910c: supported
+    ascend_950dt_8x: supported
+features:
+  spec_decoding:
+    # DSpark draft shipped in the checkpoint: seven draft tokens, eager draft
+    # model, BF16 draft KV cache on both Ascend builds. Unlike the NVIDIA/AMD
+    # overrides there is no draft attention-backend field: the tutorial's
+    # validated command does not pass one.
+    hardware_overrides:
+      npu:
+        args:
+          - '--speculative-config'
+          - '{"method":"dspark","num_speculative_tokens":7,"enforce_eager":true,"kv_cache_dtype":"bfloat16"}'
+hardware_overrides:
+  npu:
+    extra_args:
+      - '--trust-remote-code'
+      # Both Ascend images ship no default executor backend for the documented
+      # DP/PP layouts.
+      - '--distributed-executor-backend'
+      - mp
+    extra_env:
+      VLLM_USE_MODELSCOPE: 'True'
+      VLLM_USE_V2_MODEL_RUNNER: '1'
+      PYTORCH_NPU_ALLOC_CONF: expandable_segments:True
+variants:
+  ascend_w8a8:
+    model_id: Eco-Tech/Minimax-M3.1-Flash-w8a8
+    label: W8A8 (ASCEND A3)
+    precision: int8
+    # The base recipe's AMD-only opt-ins (DBO/SP prefill, NVFP4 top-k, mono
+    # decode) have no Ascend path. Their modes are variant-filtered, so a new
+    # variant has to exclude them explicitly to stay renderable.
+    supported_features:
+      - tool_calling
+      - reasoning
+      - spec_decoding
+      - text_only
+    vram_minimum_gb: 514
+    description: >-
+      ModelSlim W8A8 build of the MiniMax M3.1-Flash checkpoint (~428B total /
+      23B active), served on one Atlas 800I A3 host with 16 x Ascend 910C
+      (64 GB). Requires --quantization ascend and the ModelScope repository.
+    supported_hardware:
+      - ascend_910c
+    tp:
+      ascend_910c: 4
+    extra_args:
+      - '--host'
+      - '0.0.0.0'
+      - '--served-model-name'
+      - minimax-m3.1-flash
+      - '--quantization'
+      - ascend
+      - '--max-model-len'
+      - '133000'
+      - '--enable-prefix-caching'
+    extra_env:
+      HCCL_OP_EXPANSION_MODE: AIV
+    install:
+      pip: false
+      docker:
+        command: "docker pull quay.io/ascend/vllm-ascend:minimax-m3.1-flash-a3-openeuler"
+    hardware_overrides:
+      ascend_910c:
+        docker_image: quay.io/ascend/vllm-ascend:minimax-m3.1-flash-a3-openeuler
+        docker_shm_size: 100g
+        docker_serve_command: "vllm serve"
+        install:
+          pip: false
+  ascend_w8a8_mxfp8:
+    model_id: Eco-Tech/Minimax-M3.1-Flash-w8a8-mxfp8
+    label: W8A8 MXFP8 (ASCEND A5)
+    precision: mxfp8
+    supported_features:
+      - tool_calling
+      - reasoning
+      - spec_decoding
+      - text_only
+    vram_minimum_gb: 514
+    description: >-
+      ModelSlim W8A8 MXFP8 build of the MiniMax M3.1-Flash checkpoint (~428B
+      total / 23B active), served on one Atlas 950DT host with 8 x Ascend
+      950DT NPUs (96 GB). Requires --quantization ascend and the ModelScope
+      repository.
+    supported_hardware:
+      - ascend_950dt_8x
+    tp:
+      ascend_950dt_8x: 4
+    extra_args:
+      - '--host'
+      - '0.0.0.0'
+      - '--served-model-name'
+      - minimax-m3.1-flash
+      - '--quantization'
+      - ascend
+      - '--max-model-len'
+      - '133000'
+      - '--enable-prefix-caching'
+    extra_env:
+      HCCL_OP_EXPANSION_MODE: CCU_SCHED
+    install:
+      pip: false
+      docker:
+        command: "docker pull quay.io/ascend/vllm-ascend:minimax-m3.1-flash-a5-openeuler"
+    hardware_overrides:
+      ascend_950dt_8x:
+        docker_image: quay.io/ascend/vllm-ascend:minimax-m3.1-flash-a5-openeuler
+        docker_shm_size: 100g
+        docker_serve_command: "vllm serve"
+        install:
+          pip: false
+presets:
+  ascend_a3_w8a8_agg:
+    label: A3 W8A8 single node (DP4 x TP4)
+    hardware: ascend_910c
+    strategy: single_node_tp
+    variants: [ascend_w8a8]
+    workload: 128K context, DSpark, vision input
+    default: true
+    description: >-
+      One Atlas 800I A3 host, all 16 NPUs, DP4 x TP4 with expert parallelism
+      across the node. The variant fixes TP4; this preset adds the DP4 group,
+      the 32-sequence limit and the node-local ports the tutorial uses.
+    source:
+      label: vLLM Ascend MiniMax-M3.1-Flash tutorial, single-node A3
+      href: https://docs.vllm.ai/projects/ascend/en/latest/tutorials/models/MiniMax-M3.1-Flash.html
+      key: minimax-m3.1-flash-a3-agg
+      revision: '2026-11-20'
+    image:
+      vllm: quay.io/ascend/vllm-ascend:minimax-m3.1-flash-a3-openeuler
+    args:
+      - '--port'
+      - '11223'
+      - '--data-parallel-size'
+      - '4'
+      - '--enable-expert-parallel'
+      - '--max-num-seqs'
+      - '32'
+      - '--gpu-memory-utilization'
+      - '0.92'
+      - '--limit-mm-per-prompt'
+      - '{"image":1,"video":0}'
+      - '--enable-chunked-prefill'
+      - '--compilation-config'
+      - '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
+      - '--additional-config'
+      - '{"enable_cpu_binding":true,"enable_flashcomm1":true,"multistream_overlap_shared_expert":true,"enable_shared_expert_dp":true,"weight_nz_mode":1}'
+      - '--safetensors-load-strategy'
+      - prefetch
+    env:
+      HCCL_BUFFSIZE: '1024'
+      HCCL_IF_BASE_PORT: '61000'
+    runbook: |
+      ## Topology
+
+      One Atlas 800I A3 host with 16 Ascend 910C (64 GB each), one `vllm serve`
+      process at DP4 x TP4 x EP16. The full W8A8 checkpoint is replicated four
+      times, one replica per DP rank, TP4 within a replica.
+
+      ## Environment
+
+      `HCCL_IF_BASE_PORT=61000` keeps this lane's HCCL ports clear of the PD
+      presets, which can run on the same host. Set `HCCL_IF_IP` to this host's
+      communication address when the host is multi-homed; on a single node the
+      recipe has no placeholder to name it.
+
+      ## Limits
+
+      Vision input is enabled (`--limit-mm-per-prompt` keeps one image per
+      prompt). Tool calling and the MiniMax reasoning parser are on. The 133K
+      context limit leaves room for a 128K prompt plus 1K generated tokens.
+  ascend_a5_w8a8_mxfp8_agg:
+    label: 950DT MXFP8 single node (DP2 x TP4)
+    hardware: ascend_950dt_8x
+    strategy: single_node_tp
+    variants: [ascend_w8a8_mxfp8]
+    workload: 128K context, DSpark, vision input
+    default: true
+    description: >-
+      One Atlas 950DT host, all eight NPUs, DP2 x TP4 with expert parallelism
+      across the node. Same command as the A3 lane with half the DP width, the
+      950DT additional config and no tool-call flags.
+    source:
+      label: vLLM Ascend MiniMax-M3.1-Flash tutorial, single-node 950DT
+      href: https://docs.vllm.ai/projects/ascend/en/latest/tutorials/models/MiniMax-M3.1-Flash.html
+      key: minimax-m3.1-flash-a5-agg
+      revision: '2026-11-20'
+    image:
+      vllm: quay.io/ascend/vllm-ascend:minimax-m3.1-flash-a5-openeuler
+    select:
+      features:
+        # The 950DT single-node command passes no tool-call flags.
+        tool_calling: false
+    args:
+      - '--port'
+      - '11223'
+      - '--data-parallel-size'
+      - '2'
+      - '--enable-expert-parallel'
+      - '--max-num-seqs'
+      - '32'
+      - '--gpu-memory-utilization'
+      - '0.92'
+      - '--limit-mm-per-prompt'
+      - '{"image":1,"video":0}'
+      - '--enable-chunked-prefill'
+      - '--compilation-config'
+      - '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
+      - '--additional-config'
+      - '{"enable_cpu_binding":true,"enable_flashcomm1":true,"multistream_overlap_shared_expert":true,"enable_shared_expert_dp":true}'
+      - '--safetensors-load-strategy'
+      - prefetch
+    env:
+      HCCL_BUFFSIZE: '1024'
+    runbook: |
+      ## Topology
+
+      One Atlas 950DT host with eight NPUs (96 GB each), one `vllm serve`
+      process at DP2 x TP4 x EP8. The MXFP8 checkpoint is replicated twice.
+
+      ## Environment
+
+      `HCCL_OP_EXPANSION_MODE=CCU_SCHED` comes from the variant; it replaces the
+      AIV expansion the A3 image uses. Set `HCCL_IF_IP` to this host's
+      communication address on a multi-homed host.
+
+      ## Limits
+
+      Vision input is enabled, tool calling is off (the tutorial's 950DT
+      single-node lane does not pass the tool-call flags), and the reasoning
+      parser is on. Use the PD preset when you need tool calling on 950DT.
+  ascend_a3_w8a8_pd:
+    label: A3 W8A8 PD (1P1D)
+    hardware: ascend_910c
+    strategy: pd_cluster
+    variants: [ascend_w8a8]
+    workload: Prefill/decode disaggregation, 128K context, DSpark
+    default: true
+    description: >-
+      One prefill host at DP1 x TP4 x PP4 and a distributed decode service over
+      two hosts at global DP8 x TP4, launched as one supervisor per decode host
+      in vLLM's multi-port external load-balancer mode. KV moves over
+      MooncakeConnectorV2 and the Ascend Router fronts both pools.
+    select:
+      pd_router: ascend
+      pd_connector: mooncake_ascend
+      frontend: python
+      features:
+        # The A3 PD scripts pass neither --tool-call-parser nor
+        # --enable-auto-tool-choice, and both roles load text only.
+        tool_calling: false
+        text_only: true
+    source:
+      label: vLLM Ascend MiniMax-M3.1-Flash tutorial, PD on A3
+      href: https://docs.vllm.ai/projects/ascend/en/latest/tutorials/models/MiniMax-M3.1-Flash.html
+      key: minimax-m3.1-flash-a3-pd
+      revision: '2026-11-20'
+    image:
+      vllm: quay.io/ascend/vllm-ascend:minimax-m3.1-flash-a3-openeuler
+    args:
+      - '--hf-overrides'
+      - '{"architectures":["MiniMaxM3SparseForCausalLM"]}'
+    env:
+      ASCEND_LOCAL_COMM_RES: '{"version":"1.2"}'
+    roles:
+      prefill:
+        nodes: 1
+        parallelism: tep
+        pp: 4
+        args:
+          - '--dtype'
+          - bfloat16
+          - '--enforce-eager'
+          - '--max-num-seqs'
+          - '8'
+          - '--max-num-batched-tokens'
+          - '8192'
+          - '--gpu-memory-utilization'
+          - '0.85'
+          - '--kv-cache-dtype'
+          - bfloat16
+          - '--enable-chunked-prefill'
+          - '--long-prefill-token-threshold'
+          - '2048'
+          - '--seed'
+          - '1024'
+          - '--additional-config'
+          - '{"enable_cpu_binding":true,"multistream_overlap_shared_expert":true,"enable_shared_expert_dp":true,"weight_nz_mode":1,"enable_flashcomm1":true,"enable_fused_mc2":0}'
+        env:
+          VLLM_PP_LAYER_PARTITION: '15,15,15,15'
+          VLLM_USE_FASTOKENS: '1'
+          HCCL_BUFFSIZE: '512'
+          HCCL_IF_IP: $PREFILL_NODE_1
+          VLLM_HOST_IP: $PREFILL_NODE_1
+          HCCL_SOCKET_IFNAME: $IFACE_NAME
+          GLOO_SOCKET_IFNAME: $IFACE_NAME
+      decode:
+        nodes: 2
+        parallelism: dep
+        tp: 4
+        pp: 1
+        args:
+          - '--dtype'
+          - bfloat16
+          - '--max-num-seqs'
+          - '128'
+          - '--max-num-batched-tokens'
+          - '2048'
+          - '--gpu-memory-utilization'
+          - '0.92'
+          - '--kv-cache-dtype'
+          - bfloat16
+          - '--enable-chunked-prefill'
+          - '--seed'
+          - '1024'
+          - '--compilation-config'
+          - '{"cudagraph_mode":"FULL_DECODE_ONLY","max_cudagraph_capture_size":512}'
+          - '--additional-config'
+          - '{"enable_cpu_binding":true,"multistream_overlap_shared_expert":true,"enable_shared_expert_dp":true,"enable_flashcomm1":true,"weight_nz_mode":1}'
+        env:
+          HCCL_BUFFSIZE: '1024'
+          HCCL_IF_IP: $DECODE_NODE_1
+          VLLM_HOST_IP: $DECODE_NODE_1
+          HCCL_SOCKET_IFNAME: $IFACE_NAME
+          GLOO_SOCKET_IFNAME: $IFACE_NAME
+    runbook: |
+      ## Topology
+
+      Three Atlas 800I A3 hosts with 16 Ascend 910C (64 GB) each: one prefill
+      host (DP1 x TP4 x PP4, expert parallel across the node) and two decode
+      hosts sharing one global DP8 x TP4 group - four local DP ranks per host,
+      ranks 0-3 on D1 and 4-7 on D2.
+
+      ## Launch model
+
+      One `vllm serve` per host. The decode command runs the multi-port external
+      load balancer: the supervisor process starts four child API servers per
+      host, one per local DP rank and four NPUs each, and assigns
+      `--data-parallel-start-rank` 0 (D1) / 4 (D2). Do not add
+      `--data-parallel-rank`, `--data-parallel-external-lb` or
+      `--data-parallel-hybrid-lb`; the supervisor assigns the rank per child and
+      rejects those flags. Start prefill, D1 and D2 within a few seconds of each
+      other so the DP rendezvous completes, and start the router after every
+      host prints `Application startup complete`.
+
+      ## Evidence and limits
+
+      Validated as TP4 x PP4 prefill against a global DP8 x TP4 decode group with
+      MooncakeConnectorV1 and one proxy endpoint per rank. This preset keeps the
+      validated parallelism and the same DSpark draft, and switches the launch
+      to the external-LB supervisor with MooncakeConnectorV2 (the catalog
+      default), so the tutorial's per-rank `vllm serve` loops and per-rank KV
+      port arithmetic are not needed.
+  ascend_a5_w8a8_mxfp8_pd:
+    label: 950DT MXFP8 PD (1P1D)
+    hardware: ascend_950dt_8x
+    strategy: pd_cluster
+    variants: [ascend_w8a8_mxfp8]
+    workload: Prefill/decode disaggregation, 128K context, DSpark
+    default: true
+    description: >-
+      One prefill host at DP1 x TP4 x PP2 and a distributed decode service over
+      two hosts at global DP4 x TP4, one supervisor per decode host in
+      multi-port external load-balancer mode. FP8 main-model KV cache with a
+      BF16 DSpark draft, MooncakeConnectorV2 and the Ascend Router.
+    select:
+      pd_router: ascend
+      pd_connector: mooncake_ascend
+      frontend: python
+      features:
+        text_only: true
+    source:
+      label: vLLM Ascend MiniMax-M3.1-Flash tutorial, PD on 950DT
+      href: https://docs.vllm.ai/projects/ascend/en/latest/tutorials/models/MiniMax-M3.1-Flash.html
+      key: minimax-m3.1-flash-a5-pd
+      revision: '2026-11-20'
+    image:
+      vllm: quay.io/ascend/vllm-ascend:minimax-m3.1-flash-a5-openeuler
+    # The 950DT PD scripts do not pass --hf-overrides, unlike the A3 ones.
+    roles:
+      prefill:
+        nodes: 1
+        parallelism: tep
+        pp: 2
+        args:
+          - '--dtype'
+          - bfloat16
+          - '--enforce-eager'
+          - '--max-num-seqs'
+          - '128'
+          - '--max-num-batched-tokens'
+          - '8000'
+          - '--gpu-memory-utilization'
+          - '0.85'
+          - '--kv-cache-dtype'
+          - fp8
+          - '--enable-chunked-prefill'
+          - '--safetensors-load-strategy'
+          - prefetch
+          - '--additional-config'
+          - '{"enable_cpu_binding":true,"multistream_overlap_shared_expert":true,"enable_shared_expert_dp":true,"enable_flashcomm1":true,"enable_fused_mc2":0}'
+        env:
+          VLLM_USE_FASTOKENS: '1'
+          VLLM_ENGINE_READY_TIMEOUT_S: '1800'
+          HCCL_BUFFSIZE: '512'
+          HCCL_IF_IP: $PREFILL_NODE_1
+          VLLM_HOST_IP: $PREFILL_NODE_1
+          HCCL_SOCKET_IFNAME: $IFACE_NAME
+          GLOO_SOCKET_IFNAME: $IFACE_NAME
+      decode:
+        nodes: 2
+        parallelism: dep
+        tp: 4
+        pp: 1
+        args:
+          - '--dtype'
+          - bfloat16
+          - '--max-num-seqs'
+          - '128'
+          - '--max-num-batched-tokens'
+          - '8000'
+          - '--gpu-memory-utilization'
+          - '0.92'
+          - '--kv-cache-dtype'
+          - fp8
+          - '--safetensors-load-strategy'
+          - prefetch
+          - '--seed'
+          - '1024'
+          - '--compilation-config'
+          - '{"cudagraph_mode":"FULL_DECODE_ONLY","max_cudagraph_capture_size":1024}'
+          - '--additional-config'
+          - '{"enable_cpu_binding":true,"ascend_compilation_config":{"fuse_norm_quant":false,"fuse_qknorm_rope":true},"multistream_overlap_shared_expert":true,"enable_shared_expert_dp":true,"enable_flashcomm1":true}'
+        env:
+          VLLM_ENGINE_READY_TIMEOUT_S: '1800'
+          HCCL_BUFFSIZE: '1024'
+          HCCL_IF_IP: $DECODE_NODE_1
+          VLLM_HOST_IP: $DECODE_NODE_1
+          HCCL_SOCKET_IFNAME: $IFACE_NAME
+          GLOO_SOCKET_IFNAME: $IFACE_NAME
+    runbook: |
+      ## Topology
+
+      Three Atlas 950DT hosts with eight NPUs (96 GB) each: one prefill host
+      (DP1 x TP4 x PP2) and two decode hosts sharing one global DP4 x TP4 group -
+      two local DP ranks per host, ranks 0-1 on D1 and 2-3 on D2.
+
+      ## Launch model
+
+      One `vllm serve` per host. The decode supervisor starts two child API
+      servers per host on `--port` + local rank and passes
+      `--data-parallel-start-rank` 0 (D1) / 2 (D2). Both decode hosts serve
+      HTTP; do not make D2 headless. Start the three engines within a few
+      seconds of each other; the 950DT presets raise
+      `VLLM_ENGINE_READY_TIMEOUT_S` to 1800 so the multi-host rendezvous and the
+      weight load fit in one window. Start the router after every host prints
+      `Application startup complete`.
+
+      ## Evidence and limits
+
+      Validated as TP4 x PP2 prefill against global DP4 x TP4 decode with
+      MooncakeConnectorV1, FP8 main-model KV cache and a BF16 DSpark draft. This
+      preset keeps the parallelism, the KV dtypes and the 1024-token graph
+      capture, and switches the launch to the external-LB supervisor with
+      MooncakeConnectorV2. For 16K-input workloads the tutorial halves
+      `max-num-seqs` to 64 and drops `max_cudagraph_capture_size`; that variant
+      is not a separate preset.
+hardware_notes:
+  ascend_910c:
+    title: Atlas 800I A3 runs the W8A8 ModelScope build with 100g of shm
+    body: >-
+      Verified on Atlas 800I A3 (16 x Ascend 910C, 64 GB HBM per NPU) with
+      quay.io/ascend/vllm-ascend:minimax-m3.1-flash-a3-openeuler. The weights are
+      Eco-Tech/Minimax-M3.1-Flash-w8a8 from ModelScope; the recipe sets
+      VLLM_USE_MODELSCOPE and passes --quantization ascend, and no model revision
+      is pinned because the tutorial pins none. The Docker command starts the
+      container with 100g of shared memory, --network host and --privileged. The
+      Ascend deployment guide below covers the PD placeholders, the minimal
+      decode launch and the ports.
+    link:
+      label: Ascend deployment
+      href: '#ascend-deployment'
+  ascend_950dt_8x:
+    title: Atlas 950DT runs the W8A8 MXFP8 build with CCU_SCHED expansion
+    body: >-
+      Verified on Atlas 950DT (8 NPUs, 96 GB HBM each) with
+      quay.io/ascend/vllm-ascend:minimax-m3.1-flash-a5-openeuler. The weights are
+      Eco-Tech/Minimax-M3.1-Flash-w8a8-mxfp8 from ModelScope, again with
+      --quantization ascend and no pinned revision. The generated Docker command
+      sets 100g of shared memory, --network host and --privileged; add
+      --ipc host yourself because the recipe cannot express extra Docker flags.
+      The PD presets use an FP8 main-model KV cache with a BF16 DSpark draft; the
+      Ascend deployment guide lists the rest.
+    link:
+      label: Ascend deployment
+      href: '#ascend-deployment'
+notes:
+  - title: Ascend PD requires the qualified preset
+    when:
+      hardware: [ascend_910c, ascend_950dt_8x]
+      strategies: [pd_cluster]
+    body: >-
+      The prefill/decode cost model and role sizing in Baseline, Dynamo, SMG and
+      the vLLM router do not describe the validated Ascend 1P1D lanes. Use the
+      A3 or 950DT PD preset, which pins the prefill TP/PP split, the global
+      decode DP group, the Ascend Router and MooncakeConnectorV2 on both pools.
+guide_sections:
+  ascend: |
+    ### Ascend deployment
+
+    MiniMax M3.1-Flash on Ascend runs from ModelScope builds of the
+    quantization-aware checkpoint: `Eco-Tech/Minimax-M3.1-Flash-w8a8` on Atlas
+    800I A3 (16 x Ascend 910C, 64 GB HBM per NPU) and
+    `Eco-Tech/Minimax-M3.1-Flash-w8a8-mxfp8` on Atlas 950DT (8 NPUs, 96 GB each).
+    The Hugging Face checkpoint `MiniMaxAI/MiniMax-M3.1-Flash` stores NVFP4
+    experts and does not run on NPU; both Ascend builds need
+    `--quantization ascend`. No model revision is pinned, matching the tutorial.
+
+    The two images are model-specific builds. Each Docker command starts the
+    container with `--network host --privileged --shm-size=100g`; the 950DT
+    container also needs `--ipc host`. The recipe sets the shared-memory size for
+    you.
+
+    | Lane | Preset |
+    | --- | --- |
+    | A3, 128K context, DP4 x TP4 / EP16, one host | `ascend_a3_w8a8_agg` |
+    | 950DT, 128K context, DP2 x TP4 / EP8, one host | `ascend_a5_w8a8_mxfp8_agg` |
+    | A3, 1P1D, prefill DP1 x TP4 x PP4 + decode DP8 x TP4 over two hosts | `ascend_a3_w8a8_pd` |
+    | 950DT, 1P1D, prefill DP1 x TP4 x PP2 + decode DP4 x TP4 over two hosts | `ascend_a5_w8a8_mxfp8_pd` |
+
+    Each PD preset is the default for the `pd_cluster` strategy on its hardware;
+    it needs three hosts and the Ascend Router. The single-node presets remain
+    the defaults for the single-node strategy.
+
+    **Placeholders in the generated commands.** The PD lanes carry six shell
+    variables; substitute them before launch:
+
+    - `$PREFILL_NODE_1` — the prefill host's address on the interface the decode
+      hosts and the router can reach.
+    - `$DECODE_NODE_1` — the first decode host, and the address of the global DP
+      group: both decode hosts pass it as `--data-parallel-address`, and the
+      rank-0 child API server on D1 binds the DP coordination endpoint there.
+      The supervisor process itself only serves the aggregated `/health`.
+    - `$DECODE_NODE_2` — the second decode host's own address, used for its
+      `HCCL_IF_IP` and `VLLM_HOST_IP`. It is not the DP address: every decode
+      host keeps `--data-parallel-address $DECODE_NODE_1`.
+    - `$DECODE_DP_RPC_PORT` — a free TCP port for the DP rendezvous, reachable
+      from both decode hosts and not bound by any other pool (for example 16920
+      on A3 and 6885 on 950DT, the values the tutorial uses).
+    - `$ROUTER_PORT` — the Ascend Router's listening port; the command builder
+      supplies a default, and the tutorial's proxy uses 19080. Make sure it is
+      free on the host that runs the router.
+    - `$IFACE_NAME` — the business NIC on that host, for `HCCL_SOCKET_IFNAME` and
+      `GLOO_SOCKET_IFNAME`. The recipe leaves `HCCL_IF_IP`, `VLLM_HOST_IP`, and
+      the socket variables explicit on every PD role because a multi-homed host
+      needs them to agree; the single-node presets do not set them.
+
+    Every other port is literal: prefill HTTP 8001, decode `--port` 8002, KV
+    transfer 36000 (prefill) and 36100 (decode).
+
+    **Prefill.** One `vllm serve` process per role, TP4 with PP4 (A3) or PP2
+    (950DT) and expert parallelism across the node, `--language-model-only`,
+    eager main model, and a DSpark draft on both pools. The A3 role exports
+    `VLLM_PP_LAYER_PARTITION=15,15,15,15` (the model has 60 layers, so this is
+    also the even split) and `ASCEND_LOCAL_COMM_RES`; unset the partition
+    variable before starting any other lane on the same shell. Before launch,
+    run `unset HCCL_INTRA_ROCE_ENABLE` on the A3 PD hosts: the tutorial requires
+    it and it cannot be expressed as a recipe environment variable.
+
+    **A3 `ASCEND_LOCAL_COMM_RES`.** This variable selects the HIXL local
+    communication resource for the HCCS fabric and must be the JSON string
+    `{"version":"1.2"}`. The recipe renderer currently emits environment values
+    without shell quotes, so the copied A3 PD command passes `{version:1.2}`
+    and HIXL cannot parse it. Until the renderer is fixed, quote it by hand: in
+    the bare command, export `ASCEND_LOCAL_COMM_RES='{"version":"1.2"}'`; in
+    the Docker command, remove the generated `-e ASCEND_LOCAL_COMM_RES=...` and
+    pass `-e ASCEND_LOCAL_COMM_RES` after that export. The 950DT lanes do not
+    set this variable.
+
+    **Decode.** One `vllm serve` supervisor per decode host, not one process per
+    rank. Both PD presets use vLLM's multi-port external load balancer: the
+    supervisor starts one child API server per local DP rank, each child owning
+    TP4 worth of NPUs, and it assigns `--data-parallel-start-rank` 0 (A3 D1), 4
+    (A3 D2), 0 (950DT D1) and 2 (950DT D2). A3 therefore serves children on
+    8002-8005 per host and 950DT on 8002-8003; the supervisor publishes
+    aggregated `/health` on vLLM's default port 9256, and
+    `--data-parallel-supervisor-port` moves only that health port. Do not add
+    `--data-parallel-rank`, `--data-parallel-external-lb` or
+    `--data-parallel-hybrid-lb`: the supervisor assigns ranks to children and
+    rejects those flags. Both decode hosts serve HTTP, so do not make the second
+    one headless.
+
+    The decode graph capture sizes are not cosmetic: at 128 sequences and seven
+    draft tokens an A3 decode step holds 1024 tokens while that lane captures
+    512, and the 950DT lane captures 1024. With 64 sequences the default limit
+    is enough, which is why the 16K-input variant of the tutorial drops
+    `max_cudagraph_capture_size` instead of raising it.
+
+    **KV transfer.** Both pools use `MooncakeConnectorV2` (the catalog default
+    for `mooncake_ascend`) instead of the tutorial's `MooncakeConnectorV1`
+    config. The `kv_port` is the base side-channel port and the connector
+    derives the per-rank ports from the device index, so the tutorial's
+    `25000 + rank * 32` arithmetic is not needed. Keep
+    `kv_connector_extra_config` in sync with the tp/pp/dp flags if you change
+    the topology: the recipe fills the pool shapes from the rendered roles. A
+    tp or dp mismatch fails fast at startup with a `ValueError`; `pp` is not
+    part of that check, so a pp mismatch can surface later as a KV handshake
+    failure.
+
+    **Startup order.** Start prefill, D1 and D2 within a few seconds of each
+    other - a role started later blocks the distributed rendezvous, and the
+    roles started earlier fail when their ready timeout expires. On 950DT the
+    presets raise `VLLM_ENGINE_READY_TIMEOUT_S` to 1800 for the weight load and
+    multi-host rendezvous. Start the Ascend Router only after every host prints
+    `Application startup complete`, and point it at the prefill child (8001) and
+    at every decode child (8002-8005 or 8002-8003 on both decode hosts); a
+    single decode endpoint per host leaves the other local ranks idle.
+
+    **Features.** DSpark speculative decoding (seven tokens, eager draft, BF16
+    draft KV) is on in every lane. Tool calling is on for the A3 single-node and
+    950DT PD lanes and off for the A3 PD and 950DT single-node lanes, exactly as
+    in the tutorial; the MiniMax reasoning parser is on everywhere. Both PD
+    lanes load text only (`--language-model-only`). The A3 PD preset also passes
+    `--hf-overrides` with the sparse architecture its scripts use; the 950DT PD
+    scripts do not pass it, so that preset does not either.
+
+    **Not covered here.** The A2 two-node colocated layout (section 5.2), the KV
+    cache pool with `MultiConnector` (section 5.4), the 1M-token PD layout
+    (section 5.5) and the 16K-input decode variant (64 sequences, default graph
+    capture) stay in the tutorial. The per-rank `vllm serve` scripts of section
+    5.3 are replaced by the supervisor; the Python load-balance proxy is now
+    launched as the catalog's Ascend Router, which runs the same
+    `load_balance_proxy_server_example.py` from the image.

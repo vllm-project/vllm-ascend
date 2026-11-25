@@ -7,6 +7,7 @@ from unittest.mock import Mock, patch
 
 import pytest
 import torch
+from vllm.v1.worker.utils import AttentionGroup
 
 from vllm_ascend.attention.context_parallel.mla_cp import AscendMLADCPDecodeMetadata
 from vllm_ascend.worker.dcp_utils import DCPManager
@@ -60,7 +61,16 @@ def test_v2_common_lengths_are_shared_by_groups(monkeypatch, for_capture, use_dc
             return common_attn_metadata
 
     groups = [
-        [SimpleNamespace(get_metadata_builder=lambda _: Builder(), layer_names=[name])] for name in ("layer0", "layer1")
+        [
+            AttentionGroup(
+                backend=Mock(),
+                layer_names=[name],
+                kv_cache_spec=Mock(),
+                kv_cache_group_id=group_id,
+                metadata_builders=[Builder()],
+            )
+        ]
+        for group_id, name in enumerate(("layer0", "layer1"))
     ]
     lengths = torch.tensor([37, 128, 0, 0], dtype=torch.int32)
     device_local = torch.tensor([5, 16, 0, 0], dtype=torch.int32) if use_dcp else None

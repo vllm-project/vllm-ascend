@@ -4,8 +4,7 @@
 """Rotate the positional part of a Mistral Large 4 MLA KV projection."""
 
 import torch
-import triton
-import triton.language as tl
+from vllm.triton_utils import tl, triton
 
 from .mistral_mla_q import _round_bf16
 

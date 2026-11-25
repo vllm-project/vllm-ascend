@@ -37,6 +37,8 @@ def _make_impl() -> AscendMLAImpl:
     impl = AscendMLAImpl.__new__(AscendMLAImpl)
     impl.layer_name = "model.layers.0.self_attn.attn"
     impl.use_flashmla = False
+    impl.use_quant_flashmla = False
+    impl._is_k3_dspark_draft = False
     impl.dcp_q_replicate_enabled = False
     impl.use_mla_rope = True
     impl.qk_rope_head_dim = ROPE_DIM
@@ -85,6 +87,7 @@ def _construct_impl(pcp_size: int, dcp_size: int) -> AscendMLAImpl:
         parallel_config=SimpleNamespace(
             prefill_context_parallel_size=pcp_size,
             decode_context_parallel_size=dcp_size,
+            pcp_shard_decode_requests=pcp_size > 1 and dcp_size == 1,
         ),
         cache_config=SimpleNamespace(cache_dtype="auto"),
         speculative_config=None,

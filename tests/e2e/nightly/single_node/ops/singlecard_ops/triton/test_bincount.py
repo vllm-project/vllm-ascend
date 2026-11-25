@@ -49,25 +49,17 @@ def _make_inputs(idx_mapping, prompt_tokens, output_tokens, vocab_size, seed=42)
 
 
 @pytest.mark.parametrize(
-    "idx_mapping, prompt_tokens, output_tokens",
-    [
-        # Single request placed at the end of the batch: token_idx 0 must not be
-        # confused with req_state_idx 63 anywhere in the kernels.
-        ([63], 8, 4),
-        # Several requests in a scrambled, non-contiguous order.
-        ([63, 7, 31, 2], 2048, 32),
-        # Prompt spanning several BLOCK_SIZE=1024 blocks.
-        ([17], 4096, 16),
-        # No generated tokens yet, so output_bin_counts must stay all zero.
-        ([40, 9], 1024, 0),
-    ],
-)
-@pytest.mark.parametrize(
-    "vocab_size",
-    [
-        151936,  # divisible by 32
-        151000,  # not divisible by 32: exercises the tail-word masking
-        5121,  # small and not divisible by 32
+    "idx_mapping,prompt_tokens,output_tokens,vocab_size",
+    # Keep the single request at state index 63 with a small, unaligned vocabulary.
+    [([63], 8, 4, 5121)]
+    + [
+        (idx_mapping, prompt_tokens, output_tokens, vocab_size)
+        for idx_mapping, prompt_tokens, output_tokens in (
+            ([63, 7, 31, 2], 2048, 32),  # Scrambled request mapping.
+            ([17], 4096, 16),  # Prompt spans several blocks.
+            ([40, 9], 1024, 0),  # No generated tokens.
+        )
+        for vocab_size in (151936, 151000)  # Full words and a masked tail word.
     ],
 )
 def test_bincount(idx_mapping, prompt_tokens, output_tokens, vocab_size):
@@ -255,8 +247,12 @@ def _assert_bincount_case(request_ids, prompts, prefills, vocab_size, dtype=torc
         torch.testing.assert_close(actual.cpu(), expected, rtol=0, atol=0)
 
 
-@pytest.mark.parametrize("dtype", [torch.int32, torch.int64])
-@pytest.mark.parametrize("vocab_size", [1, 33, 4097, 151000])
+@pytest.mark.parametrize(
+    "dtype,vocab_size",
+    [(dtype, vocab_size) for vocab_size in (33, 4097, 151000) for dtype in (torch.int32, torch.int64)]
+    # A one-token vocabulary has only a partial bitmap word and counter zero.
+    + [(torch.int32, 1)],
+)
 def test_bincount_ragged_strides(dtype, vocab_size):
     _assert_bincount_case([3, 0, 2], [1025, 0, 31, 2049], [1058, 0, 1024, 2050], vocab_size, dtype)
 

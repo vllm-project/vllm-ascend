@@ -1,4 +1,5 @@
 import time
+from copy import copy
 from types import SimpleNamespace
 from typing import Any, TypeVar
 from unittest.mock import patch
@@ -678,6 +679,10 @@ def test_dyntra_lb_forwards_block_state_and_encoder_cache_metadata(monkeypatch):
 
     scheduler_output = scheduler.schedule()
 
+    # Main removed encoder metadata from its wire payload. Observe the
+    # manager's real extension payload separately for the original checks.
+    scheduler_output.ec_manager_metadata = scheduler.encoder_cache_manager.get_manager_metadata()
+
     assert len(block_states) == 1
     assert block_states[0].boundary_state_offloads is boundary_state_offloads
     assert block_states[0].req_ids == set()
@@ -1098,6 +1103,17 @@ def test_dyntra_lb_paused_request_resumes_as_cached():
     assert request.request_id not in scheduler.reset_preempted_req_ids
 
     resumed_output = scheduler.schedule()
+
+    # Native MRv2 transports readmitted requests as new payloads. Verify
+    # those real payloads before exposing the old classification view used
+    # by the original pause/resume assertions below.
+    assert [data.req_id for data in resumed_output.scheduled_new_reqs] == [request.request_id]
+    assert resumed_output.scheduled_new_reqs[0].block_ids == block_ids
+    assert resumed_output.scheduled_cached_reqs.req_ids == []
+    resumed_output = copy(resumed_output)
+    resumed_output.scheduled_cached_reqs = copy(resumed_output.scheduled_cached_reqs)
+    resumed_output.scheduled_cached_reqs.resumed_req_ids = {data.req_id for data in resumed_output.scheduled_new_reqs}
+    resumed_output.scheduled_new_reqs = []
 
     assert request.status == RequestStatus.RUNNING
     assert request.request_id not in scheduler._lb_paused_req_ids

@@ -56,13 +56,26 @@
 #   Target: VllmConfig.validate_mamba_cached_kernel and its Pydantic validator.
 #   Why: Ascend's GLM and Kimi KDA RecoverSSM paths have platform-specific
 #        cache and parallelism restrictions, and upstream does not recognize
-#        all Kimi K3.1 architecture aliases.
+#        all Kimi K3.1 architecture aliases. Ascend also implements it for GLM-Next and Qwen GDN.
 #   How: Select the request-indexed KDA path from its text-config contract,
 #        validate its execution constraints and derive use_kda_recoverssm from
 #        use_replayssm. Other models and disabled configurations retain the
 #        upstream validator.
 #   Related PR: No upstream platform-specific ReplaySSM selector exists yet.
 #   Future plan: Remove when upstream supports the Ascend KDA configuration contract.
+# --------------------------------
+# * worker/patch_qwen3_5.py (RecoverSSM):
+#   Target: QwenGatedDeltaNetAttention descriptors/forward and Qwen3.5/Qwen3-Next text model descriptors.
+#   Why: Qwen GDN has scalar gates and grouped Q/K heads, unlike KDA.
+#   How: Select AscendGDNRecoverSSMAttentionBackend and three paged views
+#   (conv, checkpoint, FP32 replay) only when enabled.
+#        Keep use_kda_recoverssm as the paired upstream's generic lifecycle flag;
+#        the GDN builder creates its own context without patching Kimi's kernels.
+#        Text model entrypoints delegate to shared model-side config helpers,
+#        using the same enable predicate as the layer.
+#   Related PR: https://github.com/vllm-project/vllm/pull/61309 (not in the paired checkout).
+#   Future plan: Remove model descriptor patches when the paired upstream provides
+#        compatible helpers; remove the selector patch when GDN recovery hooks are available.
 # --------------------------------
 # * Platform Patch:
 # ==========#
@@ -146,24 +159,39 @@
 #       engine-core-level customization, or when the feature modules no longer
 #       need an entry-point hook.
 #
+# ** 5b. File: platform/patch_metrics_level.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.v1.engine.core.EngineCore.set_metrics_level`
+#   2. `vllm.entrypoints.serve.register_vllm_serve_api_routers`
+#    Why:
+#       The MS metric level is an integer in each process. A file poll on the
+#       last pipeline stage does not update earlier stages, and the API server
+#       has no command that reaches every worker.
+#    How:
+#       Add `POST /set_metrics_level` on the API server. The handler utility-RPCs
+#       `set_metrics_level` to every EngineCore. That method sets the engine
+#       process level and collective-RPCs the same method on every worker.
+#    Related PR (if no, explain why):
+#       No upstream PR. The command is Ascend MS metric control.
+#    Future Plan:
+#       Drop the monkeypatch if upstream grows a generic runtime-config RPC.
+#
 # ** 6. File: platform/patch_engram_config.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-#   1. `vllm.config.engram.EngramConfig.verify_model_config`
+#   1. `vllm.config.engram.EngramConfig.verify_parallel_config`
 #    Why:
-#       Upstream Engram model validation requires CUDA before the platform hook.
+#       Upstream requires dp_shared_memory to run with DP > 1; Ascend Engram
+#       also supports host table sharing across PCP replicas (DP x PCP groups),
+#       which upstream validation rejects.
 #    How:
-#       Keep upstream model/layer checks and lift only the CUDA requirement.
-#       Use the native EngramConfig and resolver. Ascend's normal platform hook
-#       supplies missing defaults and checks its model, topology and loader limits.
-#       Skip this patch when vLLM does not provide EngramConfig.
+#       Override verify_parallel_config to accept DP > 1 or PCP > 1 and keep
+#       the elastic-EP restrictions. Skip this patch when vLLM does not provide
+#       EngramConfig.
 #    Related PR (if no, explain why):
-#       https://github.com/vllm-project/vllm/pull/59171
-#       Tracks https://github.com/vllm-project/vllm/issues/59169.
-#       Removes CUDA-alike restrictions from model validation and defaults.
+#       No, Ascend-specific PCP topology support.
 #    Future Plan:
-#       Once the pinned vLLM includes that change, remove this patch and
-#       platform-side default creation. Keep Ascend's
-#       model, topology and loader restrictions in the normal platform hook.
+#       Remove this patch once upstream natively supports Engram PCP, including
+#       DP x PCP groups and parallel validation.
 #
 # ** 7. File: platform/patch_eplb.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -187,6 +215,10 @@
 #       available in the supported vLLM version. Retain only the NPU backend,
 #       operator, communicator, load normalization, and weight views.
 #
+# Main2main November 12: vLLM #66859 replaces routed-scale booleans with
+# RoutedScaleMode. Translate Ascend model callers before router construction
+# and forward native modes to both runners. Remove the boolean bridge when
+# the matched release also uses the enum.
 # ** 8. File: platform/patch_fused_moe.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.model_executor.layers.fused_moe.FusedMoEFactory`
@@ -201,11 +233,17 @@
 #       module so model imports pick up the Ascend runner. `worker/patch_fused_moe.py`
 #       reuses this platform patch to avoid double-wrapping the factory during
 #       worker initialization.
+#       The existing Ascend EPLB mapping hook reads the router's fixed fusion
+#       choice to avoid remapping physical IDs, preserving upstream
+#       BaseRouter._select_experts. Remove this check when upstream exposes
+#       a routing-result contract for IDs already mapped by the backend.
 #    Related PR (if no, explain why):
 #       No, vllm-ascend-specific MoE runner integration.
 #    Future Plan:
 #       Remove this patch once upstream exposes a backend dispatch / plugin hook
-#       for selecting the MoE runner implementation.
+#       for selecting the MoE runner implementation. Register warmup from the
+#       selected Ascend router initialization when that hook is available.
+#       Until then the factory registers EPLB map variants during model construction.
 #
 #   2. `vllm.model_executor.layers.fused_moe.FusedMoEFactory`
 #    Why:
@@ -223,28 +261,6 @@
 #       Remove this DeepSeek-V4-specific argument bridge once upstream exposes
 #       a backend-neutral router configuration object or MoE factory extension
 #       hook that carries vision routing metadata into the Ascend runner.
-#
-# ** File: platform/patch_glm53_reasoning.py**
-# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-#   1. `vllm.parser.glm47_moe.Glm47MoeParser.__init__`
-#    Why:
-#       GLM-5.3 always generates reasoning. This compatibility fallback
-#       normalizes thinking=False and enable_thinking=False to prevent
-#       reasoning from leaking into content; v0.33.0 also handles this
-#       upstream through PR #56994.
-#    How:
-#       Detect the GLM-5.3 template using the upstream signature and normalize
-#       both switches on a copy of the parser kwargs before initialization.
-#       The shared GLM parser then enables reasoning for the glm45/glm47
-#       reasoning adapters and the glm47 tool adapter. Older GLM templates
-#       retain their thinking switch. Skip patching versions with the upstream
-#       helper, and do not wrap the constructor more than once.
-#    Related PR (if no, explain why):
-#       https://github.com/vllm-project/vllm/pull/56994
-#       Original fix by Shijin Zhang (Dovis01), commit d95d1dcfb975.
-#    Future Plan:
-#       Remove this patch and its platform import once all supported vLLM
-#       release tags and verified main pins include the upstream fix.
 #
 # ** 9. File: platform/patch_kv_cache_coordinator.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -294,36 +310,6 @@
 #    Future Plan:
 #       Remove once upstream exposes the PD role to the coordinator or
 #       removes the EAGLE last-block drop for verified prompt blocks.
-#
-# ** 10. File: platform/patch_kv_cache_utils.py**
-# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-#   1. `vllm.v1.core.kv_cache_planning.get_kv_cache_config_from_groups`,
-#      `..._max_memory_usage_bytes_from_groups`, `..._pool_bytes_per_block`
-#    Why:
-#       Ascend cache layouts need platform-specific materialization and memory
-#       accounting.
-#    How:
-#       Both supported versions select AscendKVCacheConfigBuilder through
-#       NPUPlatform. Its default materialization delegates to the patched
-#       planning functions.
-#    Related PR:
-#       https://github.com/vllm-project/vllm/pull/53558
-#   2. `vllm.v1.core.kv_cache_planning.get_kv_cache_config_from_groups`
-#      `vllm.v1.core.kv_cache_planning._pool_bytes_per_block`
-#    Why:
-#       Ascend dense GQA attention requires contiguous K/V pools. Replicated
-#       draft pages cannot alias block-strided target/Mamba pages with different
-#       scheduler block IDs in hybrid DCP models.
-#    How:
-#       Use dcp_sharded to identify replicated dense attention groups, then
-#       delegate each physical pool's descriptors to the upstream planner.
-#       Sum the pools' bytes per block to keep allocation within the budget.
-#    Related PR:
-#       https://github.com/vllm-project/vllm/pull/56723 supplies dcp_sharded;
-#       the remaining physical-layout restriction is specific to Ascend.
-#    Future Plan:
-#       Remove pool separation when Ascend dense attention supports the
-#       upstream block-strided shared-pool layout.
 #
 # ** 11. File: platform/patch_mamba_block_aligned_split.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -412,88 +398,12 @@
 #          hybrid prefix cache lookup for DCP.
 #       2. Remove this patch once upstream accept 46892 pr or fixed the bug by other pr.
 #
-# ** 14. File: platform/patch_minimax_m2_config.py**
-# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-#   1. `vllm.config.model.ModelConfig._verify_quantization`
-#    Why:
-#       MiniMax-M2 fp8 checkpoints on NPU may fail upstream quantization validation.
-#       vllm-ascend needs to disable fp8 quantization and load bf16 dequantized
-#       weights in worker-side patches instead.
-#    How：
-#       Monkey-patch `_verify_quantization` and intercept platform quantization
-#       verification to force `cfg.quantization=None` for MiniMax-M2 fp8 on NPU.
-#    Related PR (if no, explain why):
-#       No, upstream behavior differs across versions and needs discussion.
-#    Future Plan:
-#       Remove this patch once upstream supports MiniMax-M2 fp8 on NPU or provides
-#       a backend-safe validation / override mechanism.
-#
-#   2. `vllm.config.model.ModelConfig._verify_cuda_graph`
-#    Why:
-#       For MiniMax-M2 on NPU with ACL graph capture enabled, HCCL op expansion
-#       mode affects graph shape coverage. Users may forget to set it.
-#    How：
-#       If user doesn't set it, set `HCCL_OP_EXPANSION_MODE=AIV` for this model
-#       and log a warning when a different value is detected.
-#    Related PR (if no, explain why):
-#       No, this is an environment-specific tuning knob.
-#    Future Plan:
-#       Remove this patch if upstream provides an official NPU graph-capture
-#       guidance / auto-configuration path for HCCL.
-#
-#   3. `vllm.config.speculative.SpeculativeConfig._verify_args`
-#    Why:
-#       Upstream vLLM's eagle3/extract_hidden_states restricts target model types
-#       via a whitelist. MiniMax-M2 should be allowed once the worker-side model
-#       can emit auxiliary hidden states.
-#    How：
-#       Monkey-patch `_verify_args` to bypass only the whitelist ValueError for
-#       MiniMax model_type when method is eagle3/extract_hidden_states.
-#       SpeculativeConfig is a Pydantic dataclass (`@config`); init validation calls
-#       `__pydantic_decorators__.model_validators["_verify_args"].func`, so that
-#       `Decorator.func` must be replaced (not only `SpeculativeConfig._verify_args`),
-#       then `rebuild_dataclass(SpeculativeConfig, force=True)`.
-#       If `VllmConfig` was imported earlier, also `rebuild_dataclass(VllmConfig, ...)`
-#       so nested `speculative_config` validation does not use a stale schema.
-#    Related PR (if no, explain why):
-#       https://github.com/vllm-project/vllm/pull/37512
-#    Future Plan:
-#       Remove this patch once upstream whitelist includes MiniMax.
-#
-#   4. `vllm.model_executor.models.registry` (spec decode aliases)
-#    Why:
-#       Some Eagle3 draft checkpoints may declare a MiniMax-specific architecture
-#       string while reusing the shared Eagle3 implementation.
-#    How：
-#       Register `Eagle3MiniMaxM2ForCausalLM` as an alias pointing to the
-#       existing Eagle3 implementation in the speculative decoding registry.
-#    Related PR (if no, explain why):
-#       https://github.com/vllm-project/vllm/pull/37512
-#    Future Plan:
-#       Drop the alias once upstream registry includes it or the checkpoint
-#       standardizes architecture strings.
-#
 # ** 15. File: platform/patch_mla_prefill_backend.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-#   1. `vllm.v1.attention.backends.mla.common.get_mla_prefill_backend`
-#    Why:
-#       PR vllm-project/vllm#32623 introduced a new MLAPrefillBackend abstraction.
-#       When MLAAttention.__init__ calls get_mla_prefill_backend(), the upstream
-#       selector sees that Ascend NPU returns None for get_device_capability() and
-#       falls back to FlashAttnPrefillBackend, which asserts flash_attn_varlen_func
-#       is available — crashing on Ascend.
-#    How：
-#       Register a no-op AscendMLAPrefillBackend and patch get_mla_prefill_backend
-#       so that MLAAttention.__init__ completes without error. Ascend's
-#       AscendSFAImpl/AscendMLAImpl handles the full forward pass (including
-#       prefill) via impl.forward(), so prefill_backend.run_prefill_* is never
-#       called.
-#    Related PR (if no, explain why):
-#       https://github.com/vllm-project/vllm/pull/32623
-#    Future Plan:
-#       Remove this patch once upstream `get_mla_prefill_backend` provides a
-#       platform/device hook so Ascend can be selected (or skipped) without
-#       monkey-patching.
+#   REMOVED: upstream vLLM v0.32.0 exposes the official
+#   `Platform.get_mla_prefill_backend_cls` hook, implemented on `NPUPlatform`
+#   (vllm_ascend/platform.py) returning the no-op `AscendMLAPrefillBackend`
+#   from `vllm_ascend/attention/mla_prefill.py`.
 #
 # ** 16. File: platform/patch_multiproc_executor.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -601,28 +511,37 @@
 #       supports local drafter models with PP > 1, or moves the PP validation to a
 #       separate hook that can be overridden per-model-type.
 #
-# ** 19. File: platform/patch_speculative_config.py**
+# ** 18. File: platform/patch_speculative_config.py**
+# Native MiniMax Flash draft extension:
+#   Targets: SpeculativeConfig.__post_init__ and draft HF configuration loading.
+#   Why: native DSpark exports use a standalone architecture and carry their
+#        own dspark/config.json, while upstream normalizes unknown drafts to
+#        DSparkDraftModel.
+#   How: preserve DSparkMiniMaxDraftModel before Pydantic validation and
+#        normalize the checkpoint's dspark/config.json without changing the
+#        target or checkpoint. The adapter, its checkpoint contract and weight
+#        loading live in models/minimax_m3/minimax_m3_dspark.py; it inherits
+#        DSpark drafting and changes only Flash norms, MLP and loading.
+#   Related PR:
+#        https://github.com/vllm-project/vllm/pull/64111
+#   Future Plan: remove the architecture guard and config/weight normalization
+#        once upstream loads native MiniMax Flash drafts. Retain only required
+#        Ascend quantized projection handling behind the upstream extension points.
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.config.speculative.SpeculativeConfig.hf_config_override`
 #    Why:
-#       Several MTP draft models (DeepSeek-V3/V4, Pangu, MiMo, GLM4-MoE, ERNIE,
-#       Nemotron-H, Qwen3-Next, Qwen3.5, Exaone, LongCat-Flash, Step3.5/3.7) are
-#       loaded as the target model's MTP layer rather than a standalone model.
-#       Upstream `SpeculativeConfig.hf_config_override` does not remap these
-#       target model_types/architectures to their MTP variants, so spec decoding
-#       cannot locate the drafter.
+#       Upstream v0.32.0 remaps most MTP draft model_types/architectures
+#       natively. The remaining Ascend deltas are legacy checkpoint
+#       normalization upstream does not cover: Kimi K2.5 DFlash YaRN amplitude,
+#       un-converted Qwen3 DSpark drafts, and the VL glm5_next_text wrapper.
 #    How：
-#       Replace `SpeculativeConfig.hf_config_override` to detect the supported
-#       target model_type/architecture, derive `n_predict` from
-#       `num_nextn_predict_layers` (or `mtp_num_hidden_layers`), and rewrite
-#       `model_type`/`architectures` to the corresponding MTP model. Also remaps
-#       MistralLarge3 to its Eagle variant.
+#       Call upstream `hf_config_override` first, then apply the legacy
+#       normalizations on top.
 #    Related PR (if no, explain why):
-#       No, vllm-ascend-specific MTP model type remapping.
+#       No, Ascend-specific legacy checkpoint compatibility.
 #    Future Plan:
-#       Remove this patch once upstream vLLM supports loading these MTP draft
-#       models without a custom `hf_config_override`, or exposes a plugin hook
-#       for MTP model_type/architecture remapping.
+#       Remove these normalizations once the checkpoints ship converted
+#       configs and upstream handles glm5_next_text MTP remapping.
 #
 #   2. `vllm.config.speculative.SpeculativeConfig.__post_init__`
 #    Why:
@@ -662,7 +581,7 @@
 #       parallelism for non-MoE draft models (upstream #56930) or exposes a
 #       backend-safe draft parallel config selection.
 #
-# ** 20. File: platform/patch_structured_output.py**
+# ** 19. File: platform/patch_structured_output.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.sampling_params.SamplingParams._validate_structured_outputs`
 #      `vllm.v1.structured_output.StructuredOutputManager.grammar_init`
@@ -684,74 +603,21 @@
 #       before grammar compilation or safely handles mixed-backend grammar
 #       failures without killing the engine.
 #
-#   2. `vllm.v1.structured_output.backend_outlines.OutlinesGrammar.accept_tokens`
+#   2. `xgrammar.GrammarCompiler.compile_json_schema`
 #    Why:
-#       After the outlines FSM finishes (e.g. the JSON is complete), the
-#       scheduler emits one more mask that allows EOS/stop tokens so the
-#       request can terminate normally. Those tokens are not part of the FSM
-#       alphabet built from the JSON regex, so `guide.accepts_tokens()` rejects
-#       them and the scheduler terminates the request with FINISHED_ERROR,
-#       logging "Unexpected: grammar rejected tokens". The xgrammar backend
-#       already short-circuits in this case (`if self._is_terminated:
-#       return True`); outlines is missing the same guard.
+#       vLLM #58067 passes `separators=(",", ":")` when `disable_any_whitespace`
+#       is set. The xgrammar releases shipped with Ascend (0.2.7/0.2.8)
+#       mishandle it: the stricter grammar makes small models loop on `","`
+#       until `max_tokens` and emit truncated, invalid JSON (e.g. the xgrammar
+#       guided-decoding e2e test).
 #    How:
-#       Wrap `OutlinesGrammar.accept_tokens` with a terminal short-circuit
-#       that returns True once `guide.is_finished()` is set, mirroring the
-#       xgrammar behavior. Applies to both model runner v1 and v2 since the
-#       fix targets the scheduler-side grammar class.
-#    Related PR (if no, explain why):
-#       https://github.com/vllm-project/vllm/pull/49227 (fixed the analogous
-#       stop-token handling for xgrammar only; outlines was left out)
-#    Future Plan:
-#       Remove this patch once upstream vLLM adds the terminal short-circuit
-#       to the outlines backend.
-#
-#   3. `xgrammar.GrammarCompiler.compile_json_schema`
-#    Why:
-#       vLLM #58067 (included in v0.33.0 and verified main) passes
-#       `separators=(",", ":")` when `disable_any_whitespace` is set. The
-#       xgrammar releases shipped with Ascend (0.2.7/0.2.8) mishandle it: the
-#       stricter grammar makes small models loop on `","` until `max_tokens`
-#       and emit truncated, invalid JSON (e.g. the xgrammar guided-decoding e2e
-#       test).
-#    How:
-#       Wrap `GrammarCompiler.compile_json_schema` in both supported lanes to
-#       force `separators=None`, restoring the legacy grammar.
+#       Wrap `GrammarCompiler.compile_json_schema` to force `separators=None`,
+#       restoring the legacy grammar.
 #    Related PR (if no, explain why):
 #       https://github.com/vllm-project/vllm/pull/58067
 #    Future Plan:
 #       Remove once xgrammar >= 0.2.9 (which fixes separators handling) is
 #       pinned.
-#
-# ** 20. File: platform/patch_swa_bounded_replay.py (V1 resume)**
-# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-#   1. `vllm.v1.core.sched.output.CachedRequestData` (new field `replay_start`)
-#   2. `vllm.v1.core.sched.scheduler.Scheduler._make_cached_request_data`
-#    Why:
-#       Sliding-window bounded replay (vLLM #56227) rebuilds the sliding-window KV
-#       of a prefix hit by recomputing the hit's last window, and tells the
-#       worker where that run begins through `NewRequestData.replay_start`.
-#       Upstream's V2 model runner folds resumed requests into that same
-#       new-request list, so one field covers them. The V1 runner resumes a
-#       preempted request through `CachedRequestData` instead, and a resumed
-#       request is exactly the one that can be rewound a second time --
-#       preemption clears the computed count, so readmission runs the prefix
-#       lookup again and re-sets the replay start. Without the field on that
-#       payload, the worker would not know to stop writing the replayed
-#       positions and would overwrite blocks still shared with every other
-#       request that hit the same prefix.
-#    How:
-#       Declare `replay_start` on the payload -- msgpack encodes only declared
-#       fields, so an attribute set after construction never crosses the process
-#       boundary -- and fill it from the resumed requests inside the single
-#       method upstream builds that payload in. The field list is redeclared at
-#       import time because msgspec caches it per type. Inert on a pin that
-#       predates the feature, which is probed rather than version-compared.
-#    Related PR (if no, explain why):
-#       https://github.com/vllm-project/vllm/pull/56227
-#    Future Plan:
-#       Remove this patch once upstream carries the replay start on the V1
-#       resume path as well, i.e. once `CachedRequestData` declares the field.
 #
 # ** 21. File: platform/patch_torch_accelerator.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -822,40 +688,6 @@
 # ========#
 # Entries are listed in alphabetical order by file name.
 #
-# ** 0. File: worker/patch_kv_cache_dtype.py**
-# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-#   1. `vllm.utils.torch_utils.STR_DTYPE_TO_TORCH_DTYPE["fp8"]`
-#    Why:
-#       vLLM ``releases/v0.27.1`` does not ship the pluggable kv-cache-dtype
-#       mechanism that the ``kvquant_27`` branch added
-#       (``register_kv_cache_dtype`` injects ``fp8 -> torch.float8_e4m3fn``
-#       in place). On such vLLM builds the upstream
-#       ``STR_DTYPE_TO_TORCH_DTYPE["fp8"]`` is ``torch.uint8`` (raw fp8 bytes
-#       for NVIDIA cutlass), but Ascend MLA/DSA kernels need native
-#       ``torch.float8_e4m3fn``. Without the flip, the call sites in
-#       ``vllm_ascend/models/deepseek_v4/{model,indexer}.py`` that do
-#       ``kv_cache_dtype_str_to_dtype("fp8", ...)`` resolve to ``uint8`` and
-#       the Ascend kernels fail (e.g. GLM-5.1 with ``--kv-cache-dtype fp8``
-#       and ``--attention_config.indexer_kv_dtype fp8``).
-#       ``vllm_ascend/core/kv_cache_dtype_handlers.py`` is import-guarded so
-#       it no longer raises ``ImportError`` on vLLM without
-#       ``register_kv_cache_dtype``; this worker patch then performs the
-#       dtype flip the handler would have done, in every spawned Worker
-#       process (the dtype is resolved per-worker, before model loading).
-#    How：
-#       At worker patch time, if ``register_kv_cache_dtype`` cannot be
-#       imported from ``vllm.config.cache``, mutate
-#       ``vllm.utils.torch_utils.STR_DTYPE_TO_TORCH_DTYPE["fp8"]`` to
-#       ``torch.float8_e4m3fn`` in place. When the API exists, also replace
-#       the upstream ``torch.uint8`` default if no handler updated it yet.
-#       Preserve any other dtype supplied by a registered handler.
-#    Related PR (if no, explain why):
-#       vLLM commit ``dd7e350c9 pluggable kv quant dtype`` (on kvquant_27).
-#    Future Plan:
-#       Remove this patch once the pluggable kv-cache-dtype mechanism lands on
-#       the vLLM release vllm-ascend targets, so the handler path alone
-#       handles the dtype flip.
-#
 # ** 2. File: worker/patch_deepseek_v2.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.model_executor.models.deepseek_v2.DeepseekV2MLAAttention.__init__`
@@ -910,6 +742,21 @@
 #       Remove the forward patch when upstream extension points cover Ascend
 #       capture, gathering, and TopK transport without copying the forward.
 #
+#   4. `vllm.model_executor.models.deepseek_v2.DeepseekV2Model`
+#    Why:
+#       vLLM main #66177 identifies aux decoders by EagleModelMixin and moves
+#       remote-state aggregation into PPHandler. Copying release-only fields
+#       fails at import and does not provide the required decoder identity.
+#    How:
+#       Replace the module's decoder class with an EagleModelMixin subclass of
+#       the decorated, Ascend-patched native decoder. Native slot bookkeeping
+#       and PPHandler own local/remote relay; Ascend retains capture and TP
+#       gathering.
+#    Related PR:
+#       https://github.com/vllm-project/vllm/pull/66177
+#    Future Plan:
+#       Remove the replacement when native DeepseekV2Model inherits the mixin.
+#
 # ** 3. File: worker/patch_distributed.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.distributed.parallel_state.GroupCoordinator`
@@ -931,30 +778,26 @@
 #       Remove this patch once upstream exposes process-group reuse and teardown
 #       hooks.
 #
-# ** 4. File: worker/patch_eagle3_init.py**
+# ** 4. File: worker/patch_v1/patch_eagle3_pp_aux.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-#   1. `vllm.model_executor.models.llama_eagle3.Eagle3LlamaForCausalLM`,
-#      `vllm.model_executor.models.deepseek_v2.Eagle3DeepseekV2ForCausalLM` /
-#      `Eagle3DeepseekV3ForCausalLM`
+#   1. Eagle3 target inner models (`DeepseekV2Model`, EagleModelMixin-based models)
+#      `forward`, `make_empty_intermediate_tensors`
 #    Why:
-#       Upstream Eagle3 draft models compute `target_layer_num` via
-#       `model_config.get_num_layers(parallel_config)` which, under PP, returns the
-#       per-PP-stage count. This value feeds into the draft model's
-#       `start_layer_id` (used to build parameter name prefixes like
-#       `model.layers.<start_layer_id + i>`). With PP>1 the prefixes collide with
-#       the checkpoint (e.g. a 61-layer target + 2-way PP builds prefixes 31..34
-#       while the checkpoint expects 61..64), breaking weight loading. Additionally,
-#       `config.target_layer_count` (used to index `layer_types` for draft
-#       attention) ends up wrong.
+#       In Eagle3 speculative decoding with Pipeline Parallelism (PP), auxiliary
+#       hidden states are collected from specific target model layers (e.g.,
+#       layers 2, N/2, N-3). When these layers span multiple PP stages, the last
+#       PP rank (where the drafter runs) only sees a subset of aux states, causing
+#       `combine_hidden_states` to fail with a k-axis shape mismatch.
 #    How：
-#       Patch the affected Eagle3 draft models to use
-#       `get_total_num_hidden_layers()` instead, which matches the checkpoint's
-#       global layer indices and keeps `target_layer_count` correct.
+#       Wrap the inner model's `forward` and `make_empty_intermediate_tensors` to
+#       transparently pass aux hidden states through IntermediateTensors across PP
+#       stages. Each PP stage carries forward all aux states from previous stages,
+#       and the last PP rank merges them into a single list for the drafter.
 #    Related PR (if no, explain why):
-#       No, vllm-ascend-specific Eagle3 + PP weight-loading fix.
+#       No, vllm-ascend-specific Eagle3 + PP aux-state propagation.
 #    Future Plan:
-#       Remove this patch once upstream Eagle3 draft models compute
-#       `target_layer_num` from the total (not per-stage) hidden layer count.
+#       Remove this patch once upstream Eagle3 supports collecting aux hidden
+#       states that span PP stages without cross-stage propagation.
 #
 # ** 6. File: worker/patch_fused_moe.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -1063,8 +906,7 @@
 #
 #
 # ** 11. File: worker/patch_mm_input_norm.py (removed) **
-# Both vLLM v0.33.0 and verified main include #62767 and keep the
-# processor-derived normalization buffers nonpersistent.
+# vLLM #62767 keeps the processor-derived normalization buffers nonpersistent.
 #
 # ** 12. File: worker/patch_ascend_ops.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -1531,6 +1373,16 @@
 #       Remove once upstream exposes a backend hook for KV cache
 #       allocation/binding.
 #
+#   5. `vllm.v1.worker.utils.AttentionGroup._with_kernel_block_table`
+#    Why:
+#       310P V2 already supplies kernel block IDs.
+#    How:
+#       Skip expansion for groups marked as kernel-granular.
+#    Related PR (if no, explain why):
+#       https://github.com/vllm-project/vllm/pull/57169
+#    Future Plan:
+#       Remove when 310P target and draft paths supply manager block IDs.
+#
 # ** 23. File: worker/patch_block_table.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.v1.worker.gpu.block_table.BlockTables`
@@ -1598,6 +1450,17 @@
 #    Future Plan:
 #       remove this when vllm-ascend's attention metadata is align with vllm.
 #
+#   2. `vllm.v1.worker.gpu.model_states.interface.ModelState.gather_mm_embeddings`
+#    Why:
+#       An idle PCP rank can retain a zero-token request inside an image span.
+#    How:
+#       Return empty media embeddings and a mask for an idle PCP rank so it
+#       can continue to the shared padded token embedding exchange.
+#    Related PR:
+#       https://github.com/vllm-project/vllm/pull/64435
+#    Future Plan:
+#       Remove the wrapper once the paired vLLM includes the upstream guard.
+#
 # ** 28. File: worker/patch_use_v2_model_runner.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.config.vllm.VllmConfig.use_v2_model_runner`
@@ -1660,21 +1523,23 @@
 #       same-checkpoint drafts that require the target's quant config.
 #       Remove the draft scope when upstream exposes draft construction context
 #       to the platform validation hook.
-#
-# ** 31. File: worker/patch_adaptive_verification.py**
-# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-#   1. `vllm.v1.worker.gpu.spec_decode.adaptive_verification._assign_draft_token_budget_compiled`
+#   2. `vllm.v1.worker.gpu.spec_decode.dspark.speculator.DSparkSpeculator.__init__`,
+#      `vllm.v1.worker.gpu.spec_decode.dflash.speculator.replace`, and
+#      `vllm.v1.worker.gpu.spec_decode.dspark.utils.replace`
 #    Why:
-#       The upstream adaptive-verification draft-budget allocator is wrapped by
-#       `torch.compile`, whose compiled path is not supported on Ascend.
+#       Kimi MLA DSpark replicates draft queries over the target's PCP/DCP KV
+#       group. Upstream validates the replicated PCP=1 view as a worker topology
+#       and rejects configurations such as TP1/PCP8/DCP8.
 #    How:
-#       Run the original upstream allocator eagerly, preserving its algorithm.
-#       Apply this only for vLLM 0.33.0 in the worker patch registry. Newer vLLM
-#       Triton allocators are reused directly without replacing their kernels.
-#    Related PR (if no, explain why):
-#       https://github.com/vllm-project/vllm/pull/47808
+#       Scope the physical topology to Kimi MLA DSpark construction and loading.
+#       Validate that topology before exposing the replicated query layout.
+#    Related PR:
+#       https://github.com/vllm-project/vllm/pull/65643
 #    Future Plan:
-#       Remove this patch when vLLM 0.33.0 support ends.
+#       TODO: Once the upstream fix is in the vLLM versions supported by Ascend,
+#       verify construction and draft loading at TP1/PCP8/DCP8 with the upstream
+#       implementation. Then remove the DSpark constructor wrapper, topology
+#       context, and the two module-local `replace` overrides.
 #
 # ** 32. File: worker/patch_model_runner.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -1719,7 +1584,7 @@
 #       the runner still passes the global request count, so no uniform decode
 #       graph matches.
 #    How:
-#       When `is_pcp_decode_sharding_enabled()` holds, derive the request
+#       When `parallel_config.pcp_shard_decode_requests` holds, derive the request
 #       count from the local tokens and the uniform query length.
 #    Related PR (if no, explain why):
 #       No upstream PR yet; vLLM #52162 still passes the global request count.
@@ -1752,36 +1617,22 @@
 #       Remove this patch once vllm-ascend's bundled PyTorch >= 2.13.0
 #       (which, like upstream, allows eps >= 0 for inference).
 #
-# ** 34. File: platform/patch_indexer_kv_dtype.py**
+# ** 34. File: worker/patch_worker_profiler.py **
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-#   1. `vllm.config.attention.AttentionConfig.indexer_kv_dtype`
-#      `vllm.config.attention.IndexerKVDType`
+#   1. `vllm.profiler.wrapper.validate_worker_profiler_config`
+#      `vllm.v1.worker.gpu_worker.validate_worker_profiler_config`
 #    Why:
-#       DeepSeek V4 (and similar Ascend sparse-attention models) use an `int8`
-#       indexer K cache. Upstream vLLM types `indexer_kv_dtype` as the Literal
-#       `IndexerKVDType = Literal["bf16", "fp8", "mxfp4", "nvfp4"]`, which rejects
-#       `"int8"` at CLI/config validation with a pydantic `literal_error` -- before
-#       the value reaches `kv_cache_dtype_str_to_dtype`, which already supports
-#       `int8` (maps to `torch.int8` upstream, see `worker/patch_kv_cache_dtype.py`).
-#       So `vllm serve ... --attention_config.indexer_kv_dtype int8` fails to start
-#       even though the Ascend indexer kernels (`vllm_ascend/models/deepseek_v4/`)
-#       expect it.
-#    How：
-#       Widen the accepted `Literal` to include `"int8"` and rebuild the pydantic
-#       dataclass schema in place -- without editing the upstream vllm tree. The
-#       field's Literal is held in three places (the module-level `IndexerKVDType`
-#       symbol, the class `__annotations__`, and the stdlib `__dataclass_fields__`
-#       `.type`); all three are updated, then `pydantic.dataclasses.rebuild_dataclass`
-#       is called with `force=True` to regenerate the validator + core schema. Runs
-#       as a platform patch (in `pre_register_and_update`, after the `--attention-config`
-#       argparse args are registered and before `parse_args`), so the per-call
-#       `TypeAdapter(AttentionConfig)` used to validate the dotted-path argument
-#       picks up the widened Literal. Idempotent: no-ops if `int8` is already present.
-#    Related PR (if no, explain why):
-#       No, Ascend-specific int8 indexer cache support not yet upstream.
+#       The upstream profiler support table has no NPU entry, so enabled
+#       profiling prevents NPUWorker from using the parent constructor.
+#    How:
+#       Rebind the validator and its GPUWorker import before parent construction.
+#       Accept disabled/torch profiling on NPU and preserve upstream validation
+#       for other platforms. Elastic EP initialization remains upstream-owned.
+#    Related PR:
+#       https://github.com/vllm-project/vllm/pull/65565
 #    Future Plan:
-#       Remove this patch once upstream `IndexerKVDType` includes `"int8"` (or once
-#       the indexer kv dtype is pluggable like the fp8 kv-cache-dtype mechanism).
+#       Once #65565 is included in all supported vLLM versions, remove this
+#       patch and implement the NPUWorker profiler-validation hook instead.
 #
 # ** 35. File: platform/patch_parallel_config.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -1823,3 +1674,55 @@
 # How: initialize the capability-gated per-layer NPU adaptation after upstream init.
 # Related PR: vllm-project/vllm#60050.
 # Future Plan: remove this initialization hook when a shared backend extension supports it.
+
+# ** 36. File: worker/patch_staged_writes.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.v1.worker.gpu.block_table.BlockTables.__init__`,
+#      `vllm.v1.worker.gpu.block_table.BlockTables.append_block_ids`
+#    Why:
+#      num_blocks.np is written only in append_block_ids, but upstream flushes
+#      num_blocks.copy_to_uva unconditionally on every step, costing one H2D
+#      copy per decode step even when no block was appended.
+#    How:
+#      Track a dirty flag set by append_block_ids and make the instance-level
+#      num_blocks.copy_to_uva a no-op when clean. apply_staged_writes keeps
+#      calling it, so upstream logic and ordering are untouched. The flag is
+#      cleared only after a successful copy so failed flushes are retried.
+#    Related PR (if no, explain why):
+#      Upstream vllm#62748 already guarded the Sampler staged-write flush
+#      (removed here per review; arrives via main2main). No upstream PR yet
+#      for the num_blocks flush; follow https://github.com/vllm-project/vllm/pull/65880.
+#    Future Plan:
+#      Remove when upstream adds dirty tracking to UvaBackedTensor flushes.
+#
+
+# ** File: platform/patch_kimi_k31_config.py **
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.transformers_utils.config._CONFIG_REGISTRY["kimi_k31"]`
+#    Why:
+#       Expose the K3.1 config identity and Ascend DSA constraints. Native
+#       vLLM #66030 consumes a KimiLinearDSAConfig.
+#    How:
+#       Register the existing platform config subclass once and delegate the
+#       dataclass construction, layer lookup and serialization to native
+#       KimiLinearConfig.
+#    Related PR:
+#       https://github.com/vllm-project/vllm/pull/66030
+#    Future Plan:
+#       Remove this registration/subclass when native kimi_k31 registration
+#       provides the required config identity and Ascend DSA validation.
+#   2. `vllm.model_executor.models.config.MODELS_CONFIG_MAP` Kimi entries
+#    Why:
+#       #66037 defaults Kimi DSA and MLA drafts to GPU cache/backend formats.
+#       In DSpark reconstruction its fp8 draft default fails A2/A3 validation.
+#    How:
+#       On main register an Ascend verifier that retains native model-level
+#       quantization resolution and delegates generic config verification to
+#       the base hook; NPUPlatform and Ascend layers own attention selection.
+#       Release registration and explicit cache/backend settings are unchanged.
+#    Related PR:
+#       https://github.com/vllm-project/vllm/pull/66037
+#    Future Plan:
+#       Remove the verifier override once native Kimi defaults dispatch through
+#       the platform's attention/cache configuration interface.
+#

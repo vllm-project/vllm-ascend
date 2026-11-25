@@ -18,7 +18,7 @@ test_cases:
       - "4"
       - "--max-model-len"
       - "32768"
-      - "quantization"
+      - "--quantization"
       - "ascend"
       - "--max-num-batched-tokens"
       - "40960"

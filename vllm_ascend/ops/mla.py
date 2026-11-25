@@ -36,7 +36,6 @@ from vllm.v1.attention.backend import AttentionMetadata  # type: ignore
 
 from vllm_ascend.attention.mla_v1 import AscendMLAAttention
 from vllm_ascend.attention.utils import mark_fused_preprocess_weights
-from vllm_ascend.utils import vllm_version_is
 
 
 class IndexerWrapper(nn.Module):
@@ -287,6 +286,7 @@ class AscendMultiHeadLatentAttention(MultiHeadLatentAttentionWrapper):
             g_proj=mla_modules.g_proj,
             use_mla_rope=mla_modules.rotary_emb is not None,
             layer_name=f"{prefix}.attn",
+            layer_quant_config=quant_config,
         )
         # Some model-specific speculative decoders (for example Mistral
         # DSpark) access the cache layer directly through the outer MLA
@@ -309,10 +309,7 @@ class AscendMultiHeadLatentAttention(MultiHeadLatentAttentionWrapper):
             if self.dcp_q_replicate_enabled:
                 self.mla_attn.impl.process_weights_after_loading(act_dtype)
             elif not isinstance(self.mla_attn.impl, AscendSFAImpl):
-                if vllm_version_is("0.33.0"):
-                    original_process_weights(act_dtype)
-                else:
-                    original_process_weights()
+                original_process_weights()
             else:
                 # SFA disposes kv_b_proj, so bypass upstream's dense packing.
                 self.mla_attn.impl.process_weights_after_loading(act_dtype)

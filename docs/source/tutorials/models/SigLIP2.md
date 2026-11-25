@@ -6,7 +6,7 @@ SigLIP2 is a family of vision-language embedding models from Google. Each checkp
 
 Supported use cases include image-text similarity, zero-shot ImageNet classification, and multimodal retrieval. **Text and image must be embedded in separate requests**; do not pass both in one call.
 
-This guide describes how to deploy and evaluate SigLIP2 with vLLM Ascend on **Atlas 300I DUO**.
+This guide describes how to deploy and evaluate SigLIP2 with vLLM Ascend on **Atlas 300I Duo**.
 
 This document is validated and written based on the **vLLM-Ascend main branch** as of **2026-09-03**. The current model (`siglip2-base-patch16-224`) is fully supported for text and image embedding on this branch. As a pooling model, SigLIP2 is used for offline `llm.embed()` and online `/v1/embeddings` serving; features such as PD separation and MTP are not applicable. Use the **main branch** snapshot from that date or a later official release that includes SigLIP2 support.
 
@@ -20,9 +20,9 @@ Refer to [Supported Models](../../user_guide/support_matrix/supported_models.md)
 
 | Weight Version | Hardware Requirements | Download Links |
 |----------------|-----------------------|----------------|
-| `siglip2-base-patch16-224` (FP16) | 1 Atlas 300I DUO node | [Modelscope](https://modelscope.cn/models/google/siglip2-base-patch16-224) \| [HuggingFace](https://huggingface.co/google/siglip2-base-patch16-224) |
+| `siglip2-base-patch16-224` (FP16) | 1 Atlas 300I Duo node | [Modelscope](https://modelscope.cn/models/google/siglip2-base-patch16-224) \| [HuggingFace](https://huggingface.co/google/siglip2-base-patch16-224) |
 
->**Path description:** Please download the model weights to a directory of your choice and record this path. For example: `/root/.cache/modelscope/hub/models/google/siglip2-base-patch16-224`. In subsequent commands, replace `<YOUR_MODEL_PATH>` with the path you recorded here (a local directory or a Hugging Face / ModelScope model id such as `google/siglip2-base-patch16-224`).
+> **Path description:** Please download the model weights to a directory of your choice and record this path. For example: `/root/.cache/modelscope/hub/models/google/siglip2-base-patch16-224`. In subsequent commands, replace `<YOUR_MODEL_PATH>` with the path you recorded here (a local directory or a Hugging Face / ModelScope model id such as `google/siglip2-base-patch16-224`).
 
 ### 3.2 ImageNet Labels (Optional, for Accuracy Evaluation)
 
@@ -34,9 +34,11 @@ For ImageNet val zero-shot Top-1 evaluation, prepare:
 
 ## 4 Installation
 
-> **Hardware support:** SigLIP2 in this tutorial is supported and validated on **Atlas 300I DUO** only. Use the corresponding Docker image and the installation steps below.
+> **Hardware support:** SigLIP2 in this tutorial is supported and validated on **Atlas 300I Duo** only. Use the corresponding Docker image and the installation steps below.
 
 ### 4.1 Docker Image Installation
+
+{% include "getting_started/installation/ascend_docker_runtime.inc.md" %}
 
 You can use the official all-in-one Docker image. For the available image tags and published versions, refer to [Using Docker](../../getting_started/installation.md#installation-prebuilt-image).
 
@@ -54,22 +56,13 @@ You can use the official all-in-one Docker image. For the available image tags a
   export NAME=siglip2-dev
 
   # Start the container with the variables defined above.
-  # Atlas 300I DUO uses a single NPU device (/dev/davinci0).
+  # Atlas 300I Duo: select its single NPU (/dev/davinci0).
   docker run --rm \
+  -e ASCEND_VISIBLE_DEVICES=0 \
   --name $NAME \
   --net=host \
   --shm-size=1g \
-  --privileged=true \
-  --device /dev/davinci0 \
-  --device /dev/davinci_manager \
-  --device /dev/devmm_svm \
-  --device /dev/hisi_hdc \
-  -v /usr/local/dcmi:/usr/local/dcmi \
   -v /usr/local/Ascend/driver/tools/hccn_tool:/usr/local/Ascend/driver/tools/hccn_tool \
-  -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
-  -v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
-  -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
-  -v /etc/ascend_install.info:/etc/ascend_install.info \
   -v /root/.cache:/root/.cache \
   -it $IMAGE bash
   ```
@@ -82,13 +75,13 @@ You can use the official all-in-one Docker image. For the available image tags a
   docker ps | grep $NAME
   ```
 
-  Expected result: The container is listed with status `Up`. You can also verify the vllm-ascend version inside the container:
+  Expected Result: The container is listed with status `Up`. You can also verify the vllm-ascend version inside the container:
 
   ```bash
   pip show vllm-ascend
   ```
 
-  Expected result: The version information is displayed, matching the pulled image version.
+  Expected Result: The version information is displayed, matching the pulled image version.
 
 ### 4.2 Source Code Installation
 
@@ -102,7 +95,7 @@ If you want to deploy multi-node environment, you need to set up environment on 
 
 ### 5.1 Single-Node Online Deployment
 
-Single-node deployment runs text and image embedding on one Atlas 300I DUO node, suitable for development, testing, and online `/v1/embeddings` serving.
+Single-node deployment runs text and image embedding on one Atlas 300I Duo node, suitable for development, testing, and online `/v1/embeddings` serving.
 
 Startup command:
 
@@ -127,7 +120,7 @@ Expected Result:
 
 If the service starts successfully, the log contains:
 
-```text
+```output
 INFO:     Started server process [<pid>]
 INFO:     Waiting for application startup.
 INFO:     Application startup complete.
@@ -135,11 +128,11 @@ INFO:     Application startup complete.
 
 Required Parameter Descriptions:
 
-- `--compilation-config` For Atlas 300I DUO, due to limited hardware streams, the size of cudagraph_capture_sizes is restricted.
+- `--compilation-config` For Atlas 300I Duo, due to limited hardware streams, the size of cudagraph_capture_sizes is restricted.
 
 Key Parameter Descriptions:
 
-- **Tensor parallelism (TP) is not supported** for SigLIP2 online serving. Do not set `--tensor-parallel-size`; deploy on a single Atlas 300I DUO NPU as shown above.
+- **Tensor parallelism (TP) is not supported** for SigLIP2 online serving. Do not set `--tensor-parallel-size`; deploy on a single Atlas 300I Duo NPU as shown above.
 - `--served-model-name` must match the `"model"` field in `/v1/embeddings` requests; use the same value as `MODEL_PATH`.
 - `--runner pooling` is required. SigLIP2 is an embedding model, not a generative LLM.
 - `--max-model-len 64` matches SigLIP2 text tokenization (`padding=max_length`, `max_length=64`).
@@ -285,7 +278,7 @@ ImageNet val zero-shot Top-1 is a common accuracy benchmark for SigLIP2.
 ### 7.1 Dataset and Labels
 
 1. Download [ImageNet ILSVRC 2012 val images](https://www.image-net.org/download.php) (login required).
-2. Download `val_label.txt` ([example](https://github.com/rentainhe/simple-imagenet-test/blob/master/val_label.txt)). Each line: `ILSVRC2012_val_00000001.JPEG 65` (PyTorch class id 0–999).
+2. Download `val_label.txt` ([example-imagenet-test](https://github.com/rentainhe/simple-imagenet-test/blob/master/val_label.txt)). Each line: `ILSVRC2012_val_00000001.JPEG 65` (PyTorch class id 0–999).
 3. Download `imagenet1000_clsidx_to_labels.txt` for the 1000 class text templates from [yrevar gist](https://gist.github.com/yrevar/942d3a0ac09ec9e5eb3a)
 
 ### 7.2 Offline Evaluation
@@ -300,7 +293,7 @@ import numpy as np
 from PIL import Image
 from vllm import LLM
 
-TEXT_TEMPLATE = "This is a photo of {}."
+TEXT_TEMPLATE = "This is a photo of a {}."
 TOKEN_KWARGS = {"padding": "max_length", "max_length": 64}
 
 MODEL_PATH = "<YOUR_MODEL_PATH>"  # Replace with the path recorded in Section 3.1
@@ -523,7 +516,7 @@ After about several minutes, you can get the performance evaluation result.
 
 ### 9.1 Recommended Configurations
 
-The following configurations are validated on Atlas 300I DUO and are categorized by use case. Start from the [§5.1 Single-Node Online Deployment](#51-single-node-online-deployment) command, then adjust the serve flags below.
+The following configurations are validated on Atlas 300I Duo and are categorized by use case. Start from the [§5.1 Single-Node Online Deployment](#51-single-node-online-deployment) command, then adjust the serve flags below.
 
 | Scenario | Workload | Deployment | NPUs | Max Num Seqs | Max Num Batched Tokens | Max Model Len | Client Concurrency (ref.) |
 |----------|----------|------------|------|--------------|------------------------|---------------|---------------------------|
@@ -549,13 +542,13 @@ vllm serve $MODEL_PATH \
 
 ##### Optimizations Enabled by Default
 
-The following optimizations are enabled in the recommended [§5.1](#51-single-node-online-deployment) configuration:
+The following optimizations are enabled in the recommended [§5.1 Single-Node Online Deployment](#51-single-node-online-deployment) configuration:
 
 | Optimization Technique | Technical Principle | Performance Benefit |
 | ---------------------- | ------------------- | ------------------- |
-| ACL graph capture | Uses `--compilation-config '{"cudagraph_capture_sizes": [64,32]}'` to capture fixed small batch shapes on Atlas 300I DUO | Reduces per-request scheduling overhead for short text and image embed paths |
+| ACL graph capture | Uses `--compilation-config '{"cudagraph_capture_sizes": [64,32]}'` to capture fixed small batch shapes on Atlas 300I Duo | Reduces per-request scheduling overhead for short text and image embed paths |
 | Pooling runner | Uses `--runner pooling` for embedding-only forward passes | Required for SigLIP2; avoids generative decode paths |
-| FP16 inference | Uses `--dtype float16` on Atlas 300I DUO | Matches 300I DUO supported precision and model weights |
+| FP16 inference | Uses `--dtype float16` on Atlas 300I Duo | Matches 300I DUO supported precision and model weights |
 
 ##### Optimizations That Require Explicit Enabling
 
