@@ -18,6 +18,7 @@ from dataclasses import dataclass
 import torch
 from vllm.config import VllmConfig, get_current_vllm_config_or_none
 from vllm.distributed import get_pcp_group
+from vllm.utils.torch_utils import async_tensor_h2d
 from vllm.v1.attention.backend import AttentionCGSupport, CommonAttentionMetadata
 from vllm.v1.attention.backends.gdn_attn import (
     GDNAttentionBackend,
@@ -32,7 +33,12 @@ from vllm.v1.attention.backends.utils import (
 )
 from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheSpec
 
+from vllm_ascend.core.kv_cache_interface import AscendGDNCheckpointSpec
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
+from vllm_ascend.ops.gdn_ascendc_checkpoint import (
+    AscendCCheckpointPlan,
+    build_ascendc_checkpoint_plan,
+)
 from vllm_ascend.ops.recurrent_pcp import PCPRecurrentMetadataBuilderMixin
 from vllm_ascend.ops.triton.fla.utils import (
     prepare_chunk_indices,
@@ -143,6 +149,7 @@ class GDNChunkedPrefillMetadata:
     head_sharded_pcp: bool = False
     # A5 chunk32 uses the compacted kernel sequence IDs; shared across layers.
     chunk_indices_chunk32_host: tuple[int, ...] | None = None
+    ascendc_checkpoint_plan: AscendCCheckpointPlan | None = None
 
 
 @dataclass
@@ -428,6 +435,9 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
         )
         if getattr(kv_cache_spec, "num_prefill_checkpoint_blocks", 0) and not self._ascend_gdn_checkpoints:
             raise ValueError("Internal GDN checkpoint specs require Ascend-owned checkpoint-capable layers")
+        if isinstance(kv_cache_spec, AscendGDNCheckpointSpec):
+            # Physical IDs belong to a KV group, independently of its token table.
+            self.supports_update_block_table = False
         sequence_index_capacity = max(
             self.vllm_config.scheduler_config.max_num_seqs,
             self.decode_cudagraph_max_bs,
@@ -855,7 +865,7 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
             num_spec_decode_tokens,
             non_spec_query_start_loc_cpu,
         ) = batch
-        if runtime_batch and num_actual_reqs > 0 and not (self._ascend_gdn_checkpoints and num_prefills):
+        if runtime_batch and num_actual_reqs > 0:
             fused = self._build_fused_metadata(
                 m, num_accepted_tokens, spec_sequence_masks_cpu, num_spec_decodes, graph_request_count, batch
             )
@@ -1028,7 +1038,7 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
                         (prefill_query_start_loc_cpu[:1], prefill_query_start_loc_cpu[1:][live_rows])
                     )
                     prefill_query_start_loc = prefill_query_start_loc_cpu.to(query_start_loc.device, non_blocking=True)
-                checkpoint = self.checkpoint_builder.build(m, prefill_rows)
+                checkpoint = self._build_checkpoint_metadata(m, prefill_rows)
                 if checkpoint is not None:
                     # Do not round at a boundary without a reserved cache page.
                     checkpoint.checkpoint_offsets.masked_fill_(checkpoint.state_indices == NULL_BLOCK_ID, 0)
@@ -1037,8 +1047,17 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
                     self,
                     prefill_query_start_loc_cpu,
                     query_start_loc.device,
-                    build_device_metadata=self.build_device_chunk_metadata or self._ascend_gdn_checkpoints,
+                    build_device_metadata=self.build_device_chunk_metadata
+                    or (self._ascend_gdn_checkpoints and not getattr(self, "_use_fused_checkpoint_metadata", False)),
                 )
+                if checkpoint is not None:
+                    assert checkpoint.offsets is not None
+                    non_spec_chunked_prefill_metadata.ascendc_checkpoint_plan = build_ascendc_checkpoint_plan(
+                        tuple(prefill_query_start_loc_cpu.tolist()),
+                        checkpoint.offsets,
+                        query_start_loc.device,
+                        chunk32=non_spec_chunked_prefill_metadata.chunk_indices_chunk32_host is not None,
+                    )
                 # Common GDN/KDA callers also consume the upstream chunk fields.
                 chunk_indices = non_spec_chunked_prefill_metadata.chunk_indices_chunk64
                 chunk_offsets = non_spec_chunked_prefill_metadata.chunk_offsets_chunk64
@@ -1127,6 +1146,40 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
             )
         return has_initial_state
 
+    def _build_checkpoint_metadata(self, m: CommonAttentionMetadata, rows: list[int]):
+        base = self.checkpoint_builder.build(m, rows)
+        plans = getattr(m, "mamba_prefill_checkpoints", None)
+        if plans is None or not any(plans[row][0] for row in rows):
+            return base
+
+        from vllm.model_executor.layers.mamba.checkpoint import MambaPrefillCheckpointMetadata
+
+        assert m.seq_lens_cpu_upper_bound is not None
+        query_lengths = m.query_start_loc_cpu.diff().tolist()
+        seq_lens = m.seq_lens_cpu_upper_bound.tolist()
+        offsets = [0] * len(rows) if base is None else list(base.offsets)
+        ids = [NULL_BLOCK_ID] * len(rows)
+        for i, row in enumerate(rows):
+            position, block_id = plans[row]
+            if position:
+                offset = position - (seq_lens[row] - query_lengths[row])
+                if not 0 < offset < query_lengths[row] or block_id == NULL_BLOCK_ID:
+                    raise ValueError("Scheduled GDN checkpoint is outside the prefill query or has no state page")
+                offsets[i] = offset
+                ids[i] = block_id
+        device = m.query_start_loc.device
+        indices = async_tensor_h2d(ids, dtype=torch.int64, device=device)
+        if base is not None:
+            # This group can carry positional cold and private warm rows in
+            # the same step. Keep the inherited destinations for cold rows.
+            indices = torch.where(indices != NULL_BLOCK_ID, indices, base.state_indices)
+        return MambaPrefillCheckpointMetadata(
+            async_tensor_h2d(offsets, dtype=torch.int32, device=device),
+            indices,
+            offsets=offsets,
+            query_lens=[query_lengths[row] for row in rows],
+        )
+
 
 class AscendGDNAttentionBackend(GDNAttentionBackend):
     @classmethod
@@ -1177,6 +1230,17 @@ class AscendGDNHostMetadataBuilder(AscendGDNAttentionMetadataBuilder):
         self._conv_output_buffer: torch.Tensor | None = None
         self._fused_layout_cpu: torch.Tensor | None = None
         self._fused_layout: torch.Tensor | None = None
+        self._use_fused_checkpoint_metadata = False
+        if (
+            self._ascend_gdn_checkpoints
+            and isinstance(kv_cache_spec, AscendGDNCheckpointSpec)
+            and kv_cache_spec.dtypes[-1] == torch.float32
+            and not self.use_spec_decode
+            and get_current_hardware_profile().supports(HardwareCapability.FLA_GDN_PREFILL)
+        ):
+            from vllm_ascend.attention.gdn import _get_fla_gdn_prefill_op
+
+            self._use_fused_checkpoint_metadata = _get_fla_gdn_prefill_op() is not None
 
     def _ensure_conv_output_buffer(self) -> None:
         if self._conv_output_buffer is not None:
@@ -1203,7 +1267,9 @@ class AscendGDNHostMetadataBuilder(AscendGDNAttentionMetadataBuilder):
         # Resolve the group's representative layer when building metadata.
         # Only opted-in models allocate the additional convolution buffers.
         layers = getattr(self.compilation_config, "static_forward_context", {})
-        if not getattr(layers.get(self._conv_layer_name), "use_contiguous_conv_indices", False):
+        if not self._use_fused_checkpoint_metadata and not getattr(
+            layers.get(self._conv_layer_name), "use_contiguous_conv_indices", False
+        ):
             return
         # Each group owns its buffers, with fixed addresses for graph replay.
         device = self.spec_sequence_masks.device
@@ -1258,6 +1324,14 @@ class AscendGDNHostMetadataBuilder(AscendGDNAttentionMetadataBuilder):
             return None
         assert not num_spec_decodes or num_accepted_tokens is not None
         num_decodes, num_prefills, num_decode_tokens, num_prefill_tokens, num_spec_tokens, non_spec_query_cpu = batch
+        checkpoint_rows = None
+        if self._ascend_gdn_checkpoints and num_prefills:
+            if not self._use_fused_checkpoint_metadata or num_spec_decodes or non_spec_query_cpu is None:
+                return None
+            # Keep the generic compaction path for padded/empty prefill rows.
+            if not bool((non_spec_query_cpu[num_decodes:].diff() > 0).all()):
+                return None
+            checkpoint_rows = list(range(num_decodes, m.num_reqs))
         spec_rows = num_spec_decodes
         non_spec_rows = m.num_reqs - num_spec_decodes
         if self.use_full_cuda_graph and num_prefills == 0:
@@ -1366,12 +1440,25 @@ class AscendGDNHostMetadataBuilder(AscendGDNAttentionMetadataBuilder):
         chunk = None
         if num_prefills:
             assert non_spec_query_cpu is not None
+            prefill_query_cpu = non_spec_query_cpu[num_decodes:] - num_decode_tokens
             chunk = _build_non_spec_chunked_prefill_metadata(
                 self,
-                non_spec_query_cpu[num_decodes:] - num_decode_tokens,
+                prefill_query_cpu,
                 m.seq_lens.device,
                 build_device_metadata=False,
             )
+            if checkpoint_rows is not None:
+                metadata.checkpoint = self._build_checkpoint_metadata(m, checkpoint_rows)
+                if metadata.checkpoint is not None:
+                    checkpoint = metadata.checkpoint
+                    checkpoint.checkpoint_offsets.masked_fill_(checkpoint.state_indices == NULL_BLOCK_ID, 0)
+                    assert checkpoint.offsets is not None
+                    chunk.ascendc_checkpoint_plan = build_ascendc_checkpoint_plan(
+                        tuple(prefill_query_cpu.tolist()),
+                        checkpoint.offsets,
+                        m.seq_lens.device,
+                        chunk32=chunk.chunk_indices_chunk32_host is not None,
+                    )
         self._attach_non_spec_prefill_metadata(metadata, chunk, non_spec_states)
         self._attach_spec_decode_metadata(metadata, spec_lengths, self._spec_conv_indices)
         self._attach_non_spec_decode_metadata(metadata, non_spec_states, non_spec_lengths)

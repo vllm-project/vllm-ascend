@@ -413,6 +413,9 @@ class AscendCommonAttentionMetadata(CommonAttentionMetadata):
 
     # Host mirror of this cache group's block table, including padded rows.
 
+    # Per-row (absolute position, private block ID) for warm GDN exports.
+    mamba_prefill_checkpoints: list[tuple[int, int]] | None = None
+
     # CPU tensor of already computed tokens count per request.
     # E.g., tensor([100, 200, 50]) means req0 has 100 tokens already computed.
     num_computed_tokens_cpu: torch.Tensor = None

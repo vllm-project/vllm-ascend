@@ -1,0 +1,14 @@
+pr: 23040
+entries:
+  - category: performance
+    text: >-
+      With `gdn_internal_prefill_checkpoints` enabled, Model Runner V2 on
+      Ascend can retain a warm GDN checkpoint in a single forward for eligible
+      in-page prefills. Later prompts that match the exported tail can reuse
+      that state.
+  - category: performance
+    text: >-
+      With local align-mode prefix caching and internal checkpoint exports
+      disabled, set `gdn_checkpoint_policy` to `prefix_only` to reuse the
+      matched GDN prefix and skip suffix checkpoint publication on warm
+      requests. Eligible prefills can then finish in one forward.

@@ -16,7 +16,7 @@
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 #
-from dataclasses import dataclass, fields
+from dataclasses import dataclass, field, fields
 
 import numpy as np
 import torch
@@ -69,6 +69,8 @@ class AscendInputBuffers(InputBuffers):
 @dataclass
 class AscendInputBatch(InputBatch):
     """Input batch for Ascend NPUs."""
+
+    mamba_prefill_checkpoints: dict[str, list[tuple[int, int, int]]] = field(default_factory=dict)
 
     # Create seq_lens_np.
     # npu's attention backend still needs seq_lens on CPU side.

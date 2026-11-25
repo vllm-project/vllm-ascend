@@ -3,7 +3,7 @@
 
 import inspect
 from collections.abc import Iterable
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, fields, replace
 from typing import Any
 
 import torch
@@ -23,6 +23,20 @@ from vllm.v1.kv_cache_interface import (
     UniformTypeKVCacheSpecs,
 )
 from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry
+
+
+@dataclass(frozen=True)
+class AscendGDNPrefixOnlySpec(MambaSpec):
+    """Select the Ascend prefix-only manager with the original GDN layout."""
+
+    @classmethod
+    def from_mamba_spec(cls, spec: MambaSpec) -> Self:
+        return cls(**{field.name: getattr(spec, field.name) for field in fields(MambaSpec) if field.init})
+
+
+@dataclass(frozen=True)
+class AscendGDNCheckpointSpec(AscendGDNPrefixOnlySpec):
+    """Select the MRV2 manager that owns dedicated checkpoint pages."""
 
 
 def get_kv_cache_compression_ratio(kv_cache_spec: KVCacheSpec) -> int:
@@ -564,7 +578,11 @@ class AscendCircularBufferSpec(CircularBufferSpec):
 
 
 def register_ascend_kv_cache_specs() -> None:
-    from vllm_ascend.core.single_type_kv_cache_manager import AscendCircularBufferManager
+    from vllm_ascend.core.single_type_kv_cache_manager import (
+        AscendCircularBufferManager,
+        AscendGDNCheckpointManager,
+        AscendGDNPrefixOnlyManager,
+    )
     from vllm_ascend.models.glm5next.kv_cache import KpoolTailManager
 
     KVCacheSpecRegistry.register(
@@ -593,4 +611,14 @@ def register_ascend_kv_cache_specs() -> None:
         kvcache_spec_cls=AscendIndexerKPoolTailSpec,
         manager_class=KpoolTailManager,
         uniform_type_base_spec=AscendIndexerKPoolTailSpec,
+    )
+    KVCacheSpecRegistry.register(
+        kvcache_spec_cls=AscendGDNPrefixOnlySpec,
+        manager_class=AscendGDNPrefixOnlyManager,
+        uniform_type_base_spec=MambaSpec,
+    )
+    KVCacheSpecRegistry.register(
+        kvcache_spec_cls=AscendGDNCheckpointSpec,
+        manager_class=AscendGDNCheckpointManager,
+        uniform_type_base_spec=MambaSpec,
     )

@@ -37,8 +37,9 @@ from vllm.logger import logger
 from vllm.model_executor.offloader.base import set_offloader
 from vllm.sequence import IntermediateTensors
 from vllm.utils.torch_utils import async_tensor_h2d as async_copy_to_gpu
+from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
 from vllm.v1.core.sched.output import SchedulerOutput
-from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheSpec
+from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheSpec, MambaSpec
 from vllm.v1.worker.dp_utils import skip_dp_coordination
 from vllm.v1.worker.gpu import model_runner as vllm_model_runner
 from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
@@ -76,7 +77,7 @@ from vllm_ascend.attention.attention_v1 import AscendAttentionBackend
 from vllm_ascend.attention.fa_v1 import AscendFlashAttentionBackend
 from vllm_ascend.attention.flashmla import prepare_flashmla_batch_req_state
 from vllm_ascend.attention.mla_v1 import AscendMLABackend
-from vllm_ascend.core.kv_cache_interface import is_circular_kv_cache_spec
+from vllm_ascend.core.kv_cache_interface import AscendGDNPrefixOnlySpec, is_circular_kv_cache_spec
 from vllm_ascend.distributed.expert_transfer import expert_offload_utils as expert_offload
 from vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.dspark_context import (
     bind_dspark_context_receiver,
@@ -418,6 +419,15 @@ class NPUModelRunner(GPUModelRunner):
 
     def get_kv_cache_spec(self) -> dict[str, KVCacheSpec]:
         kv_cache_spec = super().get_kv_cache_spec()
+        if self.ascend_config.gdn_checkpoint_policy == "prefix_only":
+            for name, spec in kv_cache_spec.items():
+                if isinstance(spec, MambaSpec) and spec.mamba_type == MambaAttentionBackendEnum.GDN_ATTN:
+                    kv_cache_spec[name] = AscendGDNPrefixOnlySpec.from_mamba_spec(spec)
+        elif self.ascend_config.gdn_internal_prefill_checkpoints:
+            from vllm_ascend.ops.gdn_checkpoint import separate_gdn_checkpoint_spec
+
+            for name, spec in kv_cache_spec.items():
+                kv_cache_spec[name] = separate_gdn_checkpoint_spec(self.vllm_config, spec)
 
         return apply_dspark_resident_kv_specs(
             kv_cache_spec,
@@ -1166,6 +1176,7 @@ class NPUModelRunner(GPUModelRunner):
             self.input_buffers.input_ids[num_tokens:num_tokens_after_padding].zero_()
             self.input_buffers.positions[num_tokens:num_tokens_after_padding].zero_()
         input_batch = AscendInputBatch(
+            mamba_prefill_checkpoints=getattr(scheduler_output, "mamba_prefill_checkpoints", {}),
             req_ids=req_ids,
             num_reqs=num_reqs,
             num_reqs_after_padding=num_reqs_padded,

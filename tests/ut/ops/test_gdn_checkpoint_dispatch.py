@@ -94,6 +94,54 @@ def test_checkpoint_export_uses_metadata_and_cache_dtype(monkeypatch, creates_ch
         assert layer._checkpoint_exporter.export.call_args.kwargs["raw_qkv"] is raw
 
 
+@pytest.mark.parametrize("creates_checkpoint", [False, True])
+def test_fused_prefill_keeps_value_first_state_on_checkpoint_and_dense_paths(monkeypatch, creates_checkpoint):
+    initial = torch.zeros(1, 2, 4, 4)
+    workspace = torch.empty_like(initial)
+    output, final = torch.empty(1), torch.ones_like(initial)
+    checkpoint = SimpleNamespace(checkpoint_offsets=torch.tensor([64])) if creates_checkpoint else None
+    plan = object()
+    metadata = SimpleNamespace(
+        checkpoint=checkpoint,
+        prefill_query_start_loc=torch.tensor([0, 128]),
+        non_spec_prefill_metadata=SimpleNamespace(chunk=SimpleNamespace(ascendc_checkpoint_plan=plan)),
+    )
+    layer = SimpleNamespace(
+        _ascend_checkpoint_workspace=workspace,
+        kv_cache=(torch.empty(2, 3, 4), torch.empty(2, 2, 4, 4)),
+        _checkpoint_exporter=SimpleNamespace(export=Mock()),
+    )
+    dense, segmented, fallback = [Mock(return_value=(output, final)) for _ in range(3)]
+    monkeypatch.setattr(gdn_checkpoint.DeviceOperator, "fla_gdn_prefill", dense)
+    monkeypatch.setattr(gdn_checkpoint, "fused_gdn_checkpoint_prefill", segmented)
+    monkeypatch.setattr(gdn_checkpoint, "chunk_gated_delta_rule_checkpoint", fallback)
+    qkv = torch.empty(1, 128, 2, 4, dtype=torch.bfloat16)
+    fused_fwd = object()
+    actual = gdn_checkpoint.run_gdn_checkpoint_prefill(
+        layer,
+        metadata,
+        torch.empty(128, 4),
+        qkv,
+        qkv,
+        qkv,
+        torch.empty(1),
+        torch.empty(1),
+        initial,
+        fused_fwd=fused_fwd,
+    )
+    assert actual[0] is output and actual[1] is final
+    assert segmented.call_count == int(creates_checkpoint)
+    assert dense.call_count == int(not creates_checkpoint)
+    assert not fallback.called
+    assert layer._checkpoint_exporter.export.call_count == int(creates_checkpoint)
+    if creates_checkpoint:
+        assert segmented.call_args.args[-2] is plan
+        assert (
+            layer._checkpoint_exporter.export.call_args.kwargs["recurrent_checkpoint"].data_ptr()
+            == workspace.data_ptr()
+        )
+
+
 @pytest.mark.parametrize(
     "transfer,drop,lookahead,expected",
     [
@@ -141,6 +189,30 @@ def test_workspace_sharing_and_fallback():
     assert first._ascend_checkpoint_workspace.shape == (2, 2, 8, 4)
     assert first._ascend_checkpoint_workspace.dtype == torch.float32
     assert fallback._ascend_checkpoint_workspace is None
+
+
+@pytest.mark.parametrize(
+    "enabled,checkpoint_scheduler,expected",
+    [(True, True, True), (False, True, False), (True, False, False)],
+)
+def test_private_checkpoint_spec_requires_supported_worker(enabled, checkpoint_scheduler, expected):
+    from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
+    from vllm.v1.core.sched.scheduler import Scheduler
+    from vllm.v1.kv_cache_interface import MambaSpec
+
+    spec = MambaSpec(
+        block_size=2048,
+        shapes=((1,),),
+        dtypes=(torch.float32,),
+        mamba_cache_mode="align",
+        mamba_type=MambaAttentionBackendEnum.GDN_ATTN,
+        num_prefill_checkpoint_blocks=int(enabled),
+    )
+    cls = gdn_checkpoint.GDNCheckpointScheduler if checkpoint_scheduler else Scheduler
+    config = SimpleNamespace(scheduler_config=SimpleNamespace(get_scheduler_cls=lambda: cls))
+    actual = gdn_checkpoint.separate_gdn_checkpoint_spec(config, spec)
+    assert isinstance(actual, gdn_checkpoint.AscendGDNCheckpointSpec) is expected
+    assert actual.num_prefill_checkpoint_blocks == spec.num_prefill_checkpoint_blocks
 
 
 @pytest.mark.parametrize("suppress_level", [0, 3])
