@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 
 # Arguments: devices, API port, DP size, DP rank, DP address, DP RPC port, TP, PCP, PP.
-# The Python launcher supplies all nine arguments, including PCP/PP defaults.
+# The launcher supplies an optional tenth argument with this rank's explicit device IDs.
 export HCCL_IF_IP=your_ip_here
 export GLOO_SOCKET_IFNAME=your_socket_ifname_here
 export TP_SOCKET_IFNAME=your_socket_ifname_here
@@ -15,9 +15,9 @@ export HCCL_BUFFSIZE=1024
 export TASK_QUEUE_ENABLE=1
 
 device_args=()
-if [[ "${USE_DEVICE_IDS:-0}" == "1" ]]; then
-    # Keep the inherited visibility. The slice contains indices into that list.
-    device_args=(--device-ids "$1")
+if [[ -n "${10:-}" ]]; then
+    # Keep the inherited visibility: integer IDs index that list when it is set.
+    device_args=(--device-ids "${10}")
 else
     export ASCEND_RT_VISIBLE_DEVICES="$1"
 fi
