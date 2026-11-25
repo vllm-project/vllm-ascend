@@ -98,6 +98,7 @@ from vllm_ascend.device_allocator.camem import CaMemAllocator
 from vllm_ascend.device_allocator.sleep_mem_optimized import SleepWakeupManager
 from vllm_ascend.distributed.eplb.eplb_state import AscendEplbState
 from vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.dspark_context import uses_sfa_dspark_kv_transfer
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.buffer import DEVICE_BUFFER_ALIGNMENT
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.cache_planner import (
     get_layerwise_gva_config,
     plan_layerwise_cache_reuse,
@@ -870,7 +871,11 @@ class NPUWorker(GPUWorker):
         buffers to fit.
         """
         if self.vllm_config.attention_config.hisparse_config is not None:
-            # Core budgets the shared Resident/Hot/Indexer slab, not per-layer buffers.
+            # The combined worker allocates one shared slab with alignment
+            # headroom after Core plans the number of blocks.
+            transfer = self.vllm_config.kv_transfer_config
+            if transfer is not None and transfer.has_connector("AscendStoreConnector"):
+                return max(0, available_memory - (DEVICE_BUFFER_ALIGNMENT - 1))
             return available_memory
         kv_cache_spec = self.get_kv_cache_spec()
         if not isinstance(kv_cache_spec, dict):

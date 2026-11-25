@@ -223,9 +223,9 @@ def test_ec_get_batch_reuses_one_temporary_buffer_for_oversized_values() -> None
     # Register_buffer can only be called once.
     connector._backend.register_buffer.assert_called_once()
     register_args = connector._backend.register_buffer.call_args.args
-    temporary_buffer_ptr = register_args[0][0]
+    temporary_buffer_ptr = register_args[0][0].address
     # Assert that the size of the registered buffer is the size of the largest embedding.
-    assert register_args[1] == [10 * bytes_per_token]
+    assert register_args[0][0].size_bytes == 10 * bytes_per_token
     assert connector._backend.batch_get_into_buffers.call_args_list == [
         call(
             ["key0", "key1"],
