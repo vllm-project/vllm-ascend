@@ -2239,6 +2239,36 @@ def test_pull_admission_restores_resumed_pages_but_skips_zeroed_pages():
     assert torch.equal(views[3][3, :, :, 0, :, 0].reshape(-1), layer.v_cache_scale)
 
 
+def test_pull_admission_batches_disjoint_pages_and_ignores_missing_blocks():
+    _, views, layer, runner, _ = _c8_packet(3, num_pages=4)
+    views[3][3:12].fill_(73)
+    output = SimpleNamespace(
+        has_sync_kv_loads=False,
+        scheduled_new_reqs=[SimpleNamespace(block_ids=None), SimpleNamespace(block_ids=([1, None, 3],))],
+        scheduled_cached_reqs=SimpleNamespace(req_ids=[], new_block_ids=[], resumed_req_ids=set()),
+        new_block_ids_to_zero=[],
+    )
+
+    runner._restore_c8_mxfp_loaded_v_scales(output)
+
+    for block_id in (1, 3):
+        assert torch.equal(views[3][block_id * 3, :, :, 0, :, 0].reshape(-1), layer.v_cache_scale)
+    assert torch.all(views[3][6:9] == 73)
+
+
+def test_pull_admission_rejects_out_of_range_page():
+    _, _, _, runner, _ = _c8_packet(3)
+    output = SimpleNamespace(
+        has_sync_kv_loads=False,
+        scheduled_new_reqs=[SimpleNamespace(block_ids=([2],))],
+        scheduled_cached_reqs=SimpleNamespace(req_ids=[], new_block_ids=[], resumed_req_ids=set()),
+        new_block_ids_to_zero=[],
+    )
+
+    with pytest.raises(IndexError, match="C8 physical block ID out of range: 2"):
+        runner._restore_c8_mxfp_loaded_v_scales(output)
+
+
 def test_c8_connector_restores_after_delegate_pre_forward():
     calls = []
     delegate = MagicMock()

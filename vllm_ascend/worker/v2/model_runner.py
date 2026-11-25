@@ -679,24 +679,42 @@ class NPUModelRunner(GPUModelRunner):
             return
         blocks_by_group: dict[int, set[int]] = {}
         for request in scheduler_output.scheduled_new_reqs:
-            for group_id, blocks in enumerate(request.block_ids):
-                blocks_by_group.setdefault(group_id, set()).update(blocks)
+            for group_id, blocks in enumerate(getattr(request, "block_ids", None) or ()):
+                blocks_by_group.setdefault(group_id, set()).update(
+                    block_id for block_id in (blocks or ()) if block_id is not None
+                )
         cached = scheduler_output.scheduled_cached_reqs
-        for req_id, block_ids in zip(cached.req_ids, cached.new_block_ids):
+        for req_id, block_ids in zip(cached.req_ids, cached.new_block_ids or ()):
             if req_id in cached.resumed_req_ids and block_ids is not None:
                 for group_id, blocks in enumerate(block_ids):
-                    blocks_by_group.setdefault(group_id, set()).update(blocks)
+                    blocks_by_group.setdefault(group_id, set()).update(
+                        block_id for block_id in (blocks or ()) if block_id is not None
+                    )
         if not blocks_by_group:
             return
         zeroed = set(scheduler_output.new_block_ids_to_zero or ())
+        page_indices_by_layout: dict[tuple[int, int, torch.device], torch.Tensor] = {}
         for value_scale, cache, ratio, group_id in entries:
-            for block_id in sorted(blocks_by_group.get(group_id, set()) - zeroed):
-                if block_id <= 0:
-                    continue
-                start = block_id * ratio
-                if start + ratio > cache.shape[0]:
-                    raise IndexError(f"C8 physical block ID out of range: {block_id}")
-                fill_mxfp_v_scale_cache(value_scale, cache[start : start + ratio])
+            block_ids = sorted(
+                block_id for block_id in blocks_by_group.get(group_id, set()) - zeroed if block_id > 0
+            )
+            if not block_ids:
+                continue
+            if (block_ids[-1] + 1) * ratio > cache.shape[0]:
+                raise IndexError(f"C8 physical block ID out of range: {block_ids[-1]}")
+            layout = (group_id, ratio, cache.device)
+            page_indices = page_indices_by_layout.get(layout)
+            if page_indices is None:
+                page_indices = torch.tensor(
+                    [block_id * ratio + offset for block_id in block_ids for offset in range(ratio)],
+                    dtype=torch.long,
+                    device=cache.device,
+                )
+                page_indices_by_layout[layout] = page_indices
+            source = value_scale.view(1, cache.shape[1], cache.shape[2], 1, cache.shape[4], 1)
+            cache[page_indices] = source.expand(
+                page_indices.numel(), cache.shape[1], cache.shape[2], cache.shape[3], cache.shape[4], cache.shape[5]
+            )
 
     def shutdown(self) -> None:
         from vllm_ascend.distributed.expert_transfer import expert_offload_utils as expert_offload
