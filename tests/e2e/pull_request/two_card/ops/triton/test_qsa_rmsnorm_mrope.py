@@ -1,12 +1,12 @@
 import pytest
 import torch
 import torch_npu
-
-from vllm_ascend.device.device_config import get_ascend_device_type
-from vllm_ascend.device.hardware import AscendDeviceType
 from vllm_ascend.ops.triton.linearnorm.qsa_rmsnorm_mrope import (
     triton_qsa_rmsnorm_mrope,
 )
+
+from vllm_ascend.device.device_config import get_ascend_device_type
+from vllm_ascend.device.hardware import AscendDeviceType
 
 pytestmark = [
     pytest.mark.skipif(

@@ -7,9 +7,9 @@ import torch
 import torch.nn.functional as F
 import torch_npu  # noqa: F401
 from torch import nn
+from vllm_ascend.ops.triton.qwen4_exp.hc import combine_final
 
 from vllm_ascend.models.qwen4_exp.hc_fused import AscendTextGatedResidual
-from vllm_ascend.ops.triton.qwen4_exp.hc import combine_final
 
 pytest.importorskip("cann_ops_transformer.ops.mhc.text_gated_residual.text_gated_residual")
 
