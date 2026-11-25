@@ -18,6 +18,8 @@
 # This file is a part of the vllm-ascend project.
 
 
+from typing import TYPE_CHECKING
+
 import torch
 from vllm.triton_utils import tl, triton
 from vllm.v1.worker.gpu.sample.gumbel import _TL_RAND_MIN
@@ -39,6 +41,9 @@ from vllm_ascend.ops.triton.spec_decode.entropy_verify import (
     _entropy_verify,
 )
 from vllm_ascend.ops.triton.spec_decode.resample import resample
+
+if TYPE_CHECKING:
+    from vllm.v1.worker.gpu.spec_decode.draft_logits import DraftLogitsCache
 
 _ENTROPY_EPSILON = 1e-10
 
@@ -307,7 +312,7 @@ def rejection_sample(
     target_logits: torch.Tensor,
     # [max_num_reqs, num_speculative_steps, V] raw tensor, or the
     # upstream DraftLogitsCache in the same positional slot.
-    draft_logits_cache: torch.Tensor | None,
+    draft_logits_cache: torch.Tensor | DraftLogitsCache | None,
     # [num_logits]
     draft_sampled: torch.Tensor,
     # [num_reqs + 1]
