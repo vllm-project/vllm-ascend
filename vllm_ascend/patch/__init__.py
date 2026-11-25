@@ -407,19 +407,6 @@
 #   (vllm_ascend/platform.py) returning the no-op `AscendMLAPrefillBackend`
 #   from `vllm_ascend/attention/mla_prefill.py`.
 #
-# ** 16. File: platform/patch_multiproc_executor.py**
-# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-#   1. `vllm.v1.executor.multiproc_executor.MultiprocExecutor`
-#    Why:
-#       vLLM create child process with daemon=True, which doesn't work with EPLB case, since EPLB will create
-#       a new process which is not allowed by daemon=True.
-#    How：
-#       Set daemon=False in MultiprocExecutor.
-#    Related PR (if no, explain why):
-#       Find a way to support daemon=False in vLLM
-#    Future Plan:
-#       Remove this patch when vLLM fix the issue.
-#
 # ** 17. File: platform/patch_pp_mtp.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.config.model.ModelConfig.verify_with_parallel_config`

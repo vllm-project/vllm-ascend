@@ -28,7 +28,6 @@ _GPROJ_TP: GroupCoordinator | None = None
 
 _P_TP: GroupCoordinator | None = None
 
-_DYNAMIC_EPLB: GroupCoordinator | None = None
 _KVPP: GroupCoordinator | None = None
 
 
@@ -196,12 +195,6 @@ def init_ascend_model_parallel(
     global _MC2
     _MC2 = init_model_parallel_group(group_ranks, get_world_group().local_rank, backend, group_name="mc2")
 
-    if get_ascend_config().eplb_config.dynamic_eplb:
-        global _DYNAMIC_EPLB
-        _DYNAMIC_EPLB = init_model_parallel_group(
-            group_ranks, get_world_group().local_rank, backend, group_name="dynamic_eplb"
-        )
-
     # Components with the same local TP size reuse the same group along the DP axis.
     _group_cache = {}
 
@@ -302,11 +295,6 @@ def get_p_tp_group() -> GroupCoordinator:
     return _P_TP
 
 
-def get_dynamic_eplb_group() -> GroupCoordinator:
-    assert _DYNAMIC_EPLB is not None, "Dynamic eplb group is not initialized"
-    return _DYNAMIC_EPLB
-
-
 def get_kvpp_group() -> GroupCoordinator:
     assert _KVPP is not None, "KV layer parallel group is not initialized"
     return _KVPP
@@ -335,11 +323,6 @@ def destroy_ascend_model_parallel():
     if _P_TP:
         _P_TP.destroy()
     _P_TP = None
-
-    global _DYNAMIC_EPLB
-    if _DYNAMIC_EPLB:
-        _DYNAMIC_EPLB.destroy()
-    _DYNAMIC_EPLB = None
 
 
 def get_global_rank(parallel_config: ParallelConfig | None = None) -> int:
