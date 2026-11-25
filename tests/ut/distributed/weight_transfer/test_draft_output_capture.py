@@ -38,6 +38,13 @@ def test_draft_outputs_are_observed_before_target_correction(monkeypatch, genera
     monkeypatch.setattr(hccl, "post_control", post_control)
     monkeypatch.setattr(hccl, "generation_signature", generate)
     monkeypatch.setattr(hccl, "snapshot_weight_update_models", lambda server: {"target": {}, "draft": {}})
+    metric_values = iter(range(4))
+
+    def draft_metrics(server):
+        value = next(metric_values)
+        return {"num_drafts": value, "num_draft_tokens": 2 * value}
+
+    monkeypatch.setattr(hccl, "draft_metrics", draft_metrics)
     server = SimpleNamespace(get_client=lambda: object())
     case = SimpleNamespace(id="draft", prompts=("fixed prompt",))
 

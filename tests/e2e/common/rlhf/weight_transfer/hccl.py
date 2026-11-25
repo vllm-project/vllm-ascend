@@ -13,8 +13,10 @@ import json
 import os
 
 import pytest
+import requests
 import torch
 import torch_npu  # noqa: F401  # registers the NPU backend
+from prometheus_client.parser import text_string_to_metric_families
 from vllm.distributed.weight_transfer.clients import HTTPVLLMWeightSyncClient
 from vllm.distributed.weight_transfer.factory import WeightTransferTrainerFactory
 from vllm.utils.network_utils import get_ip, get_open_port
@@ -135,8 +137,22 @@ def create_hccl_trainer(client, source, packed: bool, buffer_source=None):
     )
 
 
+def draft_metrics(server) -> dict[str, float]:
+    response = requests.get(server.url_for("metrics"), timeout=5)
+    response.raise_for_status()
+    names = ("vllm:spec_decode_num_drafts_total", "vllm:spec_decode_num_draft_tokens_total")
+    counters = {}
+    for family in text_string_to_metric_families(response.text):
+        for sample in family.samples:
+            if sample.name in names:
+                counters[sample.name] = counters.get(sample.name, 0.0) + sample.value
+    assert all(name in counters for name in names), f"Missing speculative decoding counters: {counters}"
+    return counters
+
+
 def collect_draft_observation(server, case: WeightUpdateModelCase):
     """Measure startup and updated models after generation refreshes derived state."""
+    metrics_before = draft_metrics(server)
     signature, draft_outputs = [], []
     for prompt in case.prompts:
         post_control(server, "collective_rpc", json={"method": "start_draft_output_capture"})
@@ -148,6 +164,13 @@ def collect_draft_observation(server, case: WeightUpdateModelCase):
             ]
         assert len(outputs) == INFERENCE_WORLD_SIZE and all(outputs), "No draft proposal was captured"
         draft_outputs.append(outputs)
+
+    # Non-streaming generation has completed. Check participation without
+    # requiring an acceptance rate for randomly initialized weights.
+    metrics_after = draft_metrics(server)
+    assert all(metrics_after[name] > value for name, value in metrics_before.items()), (
+        f"{case.id}: speculative decoding counters did not increase: before={metrics_before}, after={metrics_after}"
+    )
     snapshot = snapshot_weight_update_models(server)
     projections = post_control(server, "collective_rpc", json={"method": "snapshot_draft_context_projections"}).json()[
         "results"
