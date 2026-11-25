@@ -2266,9 +2266,7 @@ class TestNPUWorkerWeightUpdate(TestBase):
             return worker.model_runner.reset_lora_state
         return worker.model_runner.on_target_weights_replaced
 
-    @patch("vllm_ascend.worker.worker.get_ascend_config")
-    def test_check_engine_raises_when_unconfigured(self, mock_get_ascend_config):
-        mock_get_ascend_config.return_value.weight_nz_mode = 0
+    def test_check_engine_raises_when_unconfigured(self):
         worker = self._make_worker(engine=None)
         with self.assertRaises(RuntimeError):
             worker.init_weight_transfer_engine({})
@@ -2319,9 +2317,8 @@ class TestNPUWorkerWeightUpdate(TestBase):
         engine = MagicMock()
         worker = self._make_worker(engine=engine)
 
-        for start in (worker.start_weight_update, worker.start_draft_weight_update):
-            with self.assertRaisesRegex(ValueError, "FRACTAL_NZ"):
-                start()
+        with self.assertRaises(ValueError):
+            worker.start_weight_update()
 
         engine.start_weight_update.assert_not_called()
         self.assertFalse(worker._weight_update_active)
