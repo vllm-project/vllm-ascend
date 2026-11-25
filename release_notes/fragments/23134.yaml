@@ -1,4 +1,4 @@
-pr: 20949
+pr: 23134
 entries:
   - category: feature
     text: Enabled Qwen4Exp prefill KV offload through the shared model-rule layerwise planner, including QSA main KV, GDN state, and compressed indexer cache reuse.
@@ -6,3 +6,5 @@ entries:
   - category: bugfix
     text: Fixed PD decode waiting indefinitely for GDN state when prefill KV caches use layerwise shared buffers.
     model: qwen4-exp
+  - category: performance
+    text: For layerwise AscendStore KV pooling, next-layer KV prefetch can start after the current layer's load completes, instead of waiting for attention submission. No configuration change is needed.
