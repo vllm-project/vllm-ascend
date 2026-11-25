@@ -111,6 +111,7 @@ def _validate_inputs(inputs: MhcSeamInputs, prepared: PreparedMhcWeights) -> tup
     )
     for name, shape, tensor_dtype in expected:
         _check_tensor(name, getattr(inputs, name), shape, tensor_dtype, device)
+    weight_shape: tuple[int, ...]
     if prepared.weight_format == WeightFormat.FP32_CANONICAL:
         weight_shape, weight_dtype = (mixes, lanes * width), torch.float32
     else:
@@ -377,6 +378,8 @@ class A3DecoupledMhcBackend(A3MegaMhcBackend):
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Fork Ozaki coefficients onto side_stream after ready_event; caller joins done_event."""
         npu_mod = getattr(torch, "npu", None)
+        if npu_mod is None:
+            raise RuntimeError("torch.npu is required for launch_coefficients_async")
         is_capturing = getattr(npu_mod, "is_current_stream_capturing", None)
         capturing = bool(is_capturing()) if callable(is_capturing) else False
         resolved_main_stream = main_stream
@@ -389,7 +392,7 @@ class A3DecoupledMhcBackend(A3MegaMhcBackend):
             ready_event.record()
         else:
             ready_event.record(main_stream)
-        with torch.npu.stream(side_stream):
+        with npu_mod.stream(side_stream):
             side_stream.wait_event(ready_event)
             if not capturing:
                 for tensor in (residual, hc_scale, hc_base, r_sq):
