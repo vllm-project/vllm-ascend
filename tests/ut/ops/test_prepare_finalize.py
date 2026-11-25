@@ -8,12 +8,15 @@ from vllm.config import set_current_vllm_config
 from vllm.model_executor.layers.fused_moe import FusedMoEConfig
 from vllm.model_executor.models.utils import sequence_parallel_chunk_impl
 
+from vllm_ascend.device.hardware_profile import HardwareCapability
 from vllm_ascend.ops.fused_moe.prepare_finalize import (
     _MC2_RUNNER_PADDING_MASK_KEY,
     PrepareAndFinalizeWithAll2All,
     PrepareAndFinalizeWithAllGather,
     PrepareAndFinalizeWithMC2,
 )
+from vllm_ascend.quantization.quant_type import QuantType
+from vllm_ascend.quantization.utils import DynamicMXQuantScaleAlg
 
 
 class TestPrepareAndFinalize(unittest.TestCase):
@@ -303,6 +306,129 @@ class TestPrepareAndFinalize(unittest.TestCase):
         # Should concat back
         self.assertEqual(final_result.shape[0], 2)
 
+    @patch("vllm_ascend.ops.fused_moe.prepare_finalize.get_current_hardware_profile")
+    @patch("vllm_ascend.ops.fused_moe.prepare_finalize.torch_npu.npu_dynamic_mx_quant")
+    @patch("vllm_ascend.ops.fused_moe.prepare_finalize.get_pcp_group")
+    @patch("vllm_ascend.ops.fused_moe.prepare_finalize._EXTRA_CTX", max_tokens_across_pcp=2)
+    def test_allgather_pcp_mxfp8_activation_and_scale(
+        self, _context, mock_get_pcp_group, mock_quantize, mock_hardware_profile
+    ):
+        self.moe_config.pcp_size = 2
+        self.moe_config.is_sequence_parallel = False
+        mock_hardware_profile.return_value.supports.return_value = True
+        hidden_states = torch.ones((1, 64), dtype=torch.bfloat16)
+        router_logits = torch.tensor([[1.0, 2.0]])
+        value_bytes = torch.arange(128, dtype=torch.uint8).reshape(2, 64)
+        scale_bytes = torch.tensor([[[120, 121]], [[127, 127]]], dtype=torch.uint8)
+        scale_dtype = torch.float8_e8m0fnu
+        mock_quantize.return_value = (value_bytes.view(torch.float8_e4m3fn), scale_bytes.view(scale_dtype))
+
+        local_packet = torch.cat((value_bytes, scale_bytes.flatten(1)), dim=-1)
+        remote_packet = local_packet + 1
+        padded_logits = torch.nn.functional.pad(router_logits, (0, 0, 0, 1))
+        gathered_logits = torch.cat((padded_logits, padded_logits + 10), dim=0)
+        gather = mock_get_pcp_group.return_value.all_gather
+        gather.side_effect = [torch.cat((local_packet, remote_packet), dim=0), gathered_logits]
+
+        layer = PrepareAndFinalizeWithAllGather(self.moe_config)
+        output = layer.prepare(hidden_states, router_logits, quant_type=QuantType.W4A8MXFP)
+
+        mock_quantize.assert_called_once()
+        padded_hidden_states = torch.nn.functional.pad(hidden_states, (0, 0, 0, 1))
+        torch.testing.assert_close(mock_quantize.call_args.args[0], padded_hidden_states)
+        self.assertEqual(mock_quantize.call_args.kwargs["scale_alg"], DynamicMXQuantScaleAlg.CEIL)
+        mock_hardware_profile.return_value.supports.assert_called_once_with(
+            HardwareCapability.DYNAMIC_MX_QUANT_SCALE_ALG_ONE
+        )
+        self.assertEqual(gather.call_count, 2)
+        torch.testing.assert_close(gather.call_args_list[0].args[0], local_packet)
+        torch.testing.assert_close(gather.call_args_list[1].args[0], padded_logits)
+        self.assertEqual(output.hidden_states.dtype, torch.float8_e4m3fn)
+        self.assertEqual(output.pertoken_scale.dtype, scale_dtype)
+        torch.testing.assert_close(output.hidden_states.view(torch.uint8), torch.cat((value_bytes, value_bytes + 1)))
+        torch.testing.assert_close(output.pertoken_scale.view(torch.uint8), torch.cat((scale_bytes, scale_bytes + 1)))
+        torch.testing.assert_close(output.router_logits, gathered_logits)
+
+    @patch("vllm_ascend.ops.fused_moe.prepare_finalize.get_current_hardware_profile")
+    @patch("vllm_ascend.ops.fused_moe.prepare_finalize.torch_npu.npu_dynamic_mx_quant")
+    @patch("vllm_ascend.ops.fused_moe.prepare_finalize.get_pcp_group")
+    @patch("vllm_ascend.ops.fused_moe.prepare_finalize._EXTRA_CTX", max_tokens_across_pcp=2)
+    def test_allgather_pcp_mxfp8_packs_int32_router_into_single_collective(
+        self, _context, mock_get_pcp_group, mock_quantize, mock_hardware_profile
+    ):
+        self.moe_config.pcp_size = 2
+        self.moe_config.is_sequence_parallel = False
+        mock_hardware_profile.return_value.supports.return_value = True
+        hidden_states = torch.ones((1, 64), dtype=torch.bfloat16)
+        local_weights = torch.tensor([[0.6, 0.4], [0.0, 0.0]], dtype=torch.float32)
+        local_ids = torch.tensor([[3, 7], [0, 0]], dtype=torch.int32)
+        packed_router = torch.cat((local_weights.view(torch.int32), local_ids), dim=1)
+        remote_router = torch.cat(((local_weights + 0.1).view(torch.int32), local_ids + 1), dim=1)
+
+        value_bytes = torch.arange(128, dtype=torch.uint8).reshape(2, 64)
+        scale_bytes = torch.tensor([[[120, 121]], [[127, 127]]], dtype=torch.uint8)
+        scale_dtype = torch.float8_e8m0fnu
+        mock_quantize.return_value = (value_bytes.view(torch.float8_e4m3fn), scale_bytes.view(scale_dtype))
+
+        local_packet = torch.cat((value_bytes, scale_bytes.flatten(1), packed_router.view(torch.uint8)), dim=-1)
+        remote_packet = torch.cat(
+            (value_bytes + 1, (scale_bytes + 1).flatten(1), remote_router.view(torch.uint8)),
+            dim=-1,
+        )
+        gather = mock_get_pcp_group.return_value.all_gather
+        gather.return_value = torch.cat((local_packet, remote_packet), dim=0)
+
+        output = PrepareAndFinalizeWithAllGather(self.moe_config).prepare(
+            hidden_states, packed_router, quant_type=QuantType.W4A8MXFP
+        )
+
+        self.assertEqual(gather.call_count, 1)
+        torch.testing.assert_close(gather.call_args.args[0], local_packet)
+        torch.testing.assert_close(output.hidden_states.view(torch.uint8), torch.cat((value_bytes, value_bytes + 1)))
+        torch.testing.assert_close(output.pertoken_scale.view(torch.uint8), torch.cat((scale_bytes, scale_bytes + 1)))
+        torch.testing.assert_close(output.router_logits, torch.cat((packed_router, remote_router), dim=0))
+
+    @patch("vllm_ascend.ops.fused_moe.prepare_finalize.torch_npu.npu_dynamic_mx_quant")
+    @patch("vllm_ascend.ops.fused_moe.prepare_finalize.get_pcp_group")
+    @patch("vllm_ascend.ops.fused_moe.prepare_finalize._EXTRA_CTX", max_tokens_across_pcp=0)
+    def test_allgather_pcp_mxfp8_skips_empty_batch(self, _context, mock_get_pcp_group, mock_quantize):
+        self.moe_config.pcp_size = 2
+        self.moe_config.is_sequence_parallel = False
+        hidden_states = torch.empty((0, 64), dtype=torch.bfloat16)
+        router_logits = torch.empty((0, 2))
+        mock_get_pcp_group.return_value.all_gather.side_effect = lambda tensor, dim: tensor
+
+        output = PrepareAndFinalizeWithAllGather(self.moe_config).prepare(
+            hidden_states, router_logits, quant_type=QuantType.W4A8MXFP
+        )
+
+        mock_quantize.assert_not_called()
+        self.assertIsNone(output.pertoken_scale)
+        self.assertIs(output.hidden_states, hidden_states)
+
+    @patch("vllm_ascend.ops.fused_moe.prepare_finalize.get_current_hardware_profile")
+    @patch("vllm_ascend.ops.fused_moe.prepare_finalize.torch_npu.npu_dynamic_mx_quant")
+    @patch("vllm_ascend.ops.fused_moe.prepare_finalize.get_pcp_group")
+    @patch("vllm_ascend.ops.fused_moe.prepare_finalize._EXTRA_CTX", max_tokens_across_pcp=2)
+    def test_allgather_pcp_mxfp8_skips_unsupported_platform(
+        self, _context, mock_get_pcp_group, mock_quantize, mock_hardware_profile
+    ):
+        self.moe_config.pcp_size = 2
+        self.moe_config.is_sequence_parallel = False
+        mock_hardware_profile.return_value.supports.return_value = False
+        mock_get_pcp_group.return_value.all_gather.side_effect = lambda tensor, dim: torch.cat(
+            [tensor, tensor], dim=dim
+        )
+        hidden_states = torch.ones((2, 64), dtype=torch.bfloat16)
+        router_logits = torch.zeros((2, 2))
+        output = PrepareAndFinalizeWithAllGather(self.moe_config).prepare(
+            hidden_states, router_logits, quant_type=QuantType.W4A8MXFP
+        )
+
+        mock_quantize.assert_not_called()
+        self.assertIsNone(output.pertoken_scale)
+        torch.testing.assert_close(output.hidden_states, hidden_states.repeat(2, 1))
+
     @patch("vllm_ascend.ops.fused_moe.prepare_finalize.get_pcp_group")
     @patch("vllm_ascend.ops.fused_moe.prepare_finalize.get_dp_group")
     @patch("vllm_ascend.ascend_forward_context.get_forward_context")
@@ -312,7 +438,7 @@ class TestPrepareAndFinalize(unittest.TestCase):
         mock_get_dp_group,
         mock_get_pcp_group,
     ):
-        hidden_states = torch.arange(12, dtype=torch.float32).view(3, 4)
+        hidden_states = torch.arange(12, dtype=torch.bfloat16).view(3, 4)
         router_logits = torch.arange(6, dtype=torch.float32).view(3, 2)
         input_ids = torch.tensor([11, 22, 33])
 
@@ -351,7 +477,8 @@ class TestPrepareAndFinalize(unittest.TestCase):
                 self.moe_config.dp_group = mock_dp_group
                 layer = PrepareAndFinalizeWithAllGather(self.moe_config)
 
-                prepared = layer.prepare(hidden_states, router_logits)
+                quant_type = QuantType.W4A8MXFP if pcp_size == 1 else QuantType.NONE
+                prepared = layer.prepare(hidden_states, router_logits, quant_type=quant_type)
                 gathered_input_ids = layer.all_gather_input_ids(input_ids)
 
                 expected_input_ids = input_ids
@@ -371,6 +498,7 @@ class TestPrepareAndFinalize(unittest.TestCase):
                 self.assertEqual(prepared.hidden_states.shape[0], expected_input_ids.numel())
                 self.assertEqual(prepared.router_logits.shape[0], expected_input_ids.numel())
                 self.assertIsNone(prepared.padded_hidden_states_shape)
+                self.assertIsNone(prepared.pertoken_scale)
                 torch.testing.assert_close(gathered_input_ids, expected_input_ids)
 
                 finalized = layer.finalize(

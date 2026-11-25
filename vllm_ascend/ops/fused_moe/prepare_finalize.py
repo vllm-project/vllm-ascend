@@ -35,14 +35,25 @@ from vllm.v1.worker.ubatching import dbo_current_ubatch_id
 # Registers torch.ops.vllm.ascend_sp_padding_mask_impl.
 import vllm_ascend.models.common.ops.sequence_parallel  # noqa: F401
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
+from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.lora.fused_moe import prepare_lora_indices
 from vllm_ascend.ops.fused_moe.dataclass.prepare_finalize import MoEPrepareOutput
 from vllm_ascend.ops.fused_moe.moe_utils import _pad_and_split_tokens, _pad_tokens_with_cat
 from vllm_ascend.quantization.quant_type import QuantType
-from vllm_ascend.quantization.utils import get_dynamic_mx_quant_scale_alg
+from vllm_ascend.quantization.utils import DynamicMXQuantScaleAlg, get_dynamic_mx_quant_scale_alg
 
 # ForwardContext.additional_kwargs key for the per-forward MC2 mask cache.
 _MC2_RUNNER_PADDING_MASK_KEY = "ascend_mc2_runner_padding_mask"
+
+
+def can_pcp_allgather_mxfp8(hidden_states: torch.Tensor, quant_type: QuantType) -> bool:
+    """Return whether PCP all-gather can pre-quantize BF16 activations to MXFP8."""
+    return (
+        quant_type == QuantType.W4A8MXFP
+        and hidden_states.dtype == torch.bfloat16
+        and hidden_states.shape[-1] > 0
+        and get_current_hardware_profile().supports(HardwareCapability.DYNAMIC_MX_QUANT_SCALE_ALG_ONE)
+    )
 
 
 class PrepareAndFinalize(ABC):
@@ -456,7 +467,7 @@ class PrepareAndFinalizeWithAllGather(PrepareAndFinalize):
         if self._use_ep_sequence_parallel():
             return self._prepare_with_ep_group(hidden_states, router_logits, quant_type)
 
-        return self._prepare_with_dp_group(hidden_states, router_logits, replace_allreduce)
+        return self._prepare_with_dp_group(hidden_states, router_logits, replace_allreduce, quant_type)
 
     def _prepare_with_ep_group(
         self, hidden_states: torch.Tensor, router_logits: torch.Tensor, quant_type=QuantType.NONE
@@ -509,6 +520,7 @@ class PrepareAndFinalizeWithAllGather(PrepareAndFinalize):
         Returns:
             MoEPrepareOutput with global tensors.
         """
+        pertoken_scale = None
         if self.moe_config.dp_size > 1:
             max_tokens_across_dp = _EXTRA_CTX.max_tokens_across_dp
 
@@ -529,23 +541,46 @@ class PrepareAndFinalizeWithAllGather(PrepareAndFinalize):
             pad_size = max_tokens_across_pcp - self.num_tokens_pcp
             if pad_size > 0:
                 hidden_states = nn.functional.pad(hidden_states, (0, 0, 0, pad_size))
-                router_logits = nn.functional.pad(router_logits, (0, 0, 0, pad_size))
+            router_pad = max_tokens_across_pcp - router_logits.shape[0]
+            if router_pad > 0:
+                router_logits = nn.functional.pad(router_logits, (0, 0, 0, router_pad))
 
-            hidden_states = get_pcp_group().all_gather(
-                hidden_states,
-                dim=0,
-            )
-            router_logits = get_pcp_group().all_gather(
-                router_logits,
-                dim=0,
-            )
+            pcp_group = get_pcp_group()
+            if hidden_states.shape[0] > 0 and can_pcp_allgather_mxfp8(hidden_states, quant_type):
+                # Match the scale calculation in MoEInitRoutingV2 with quant_mode=3.
+                values, scales = torch_npu.npu_dynamic_mx_quant(
+                    hidden_states, dst_type=torch.float8_e4m3fn, scale_alg=DynamicMXQuantScaleAlg.CEIL
+                )
+                values_u8 = values.view(torch.uint8)
+                scales_u8 = scales.view(torch.uint8).flatten(1)
+                hidden_size = values_u8.shape[-1]
+                scale_end = hidden_size + scales_u8.shape[-1]
+                # When local TopK routing is packed as int32, send it in the same all_gather
+                # as values and E8M0 scales to eliminate the second PCP collective.
+                pack_router = router_logits.dtype == torch.int32
+                parts = (
+                    [values_u8, scales_u8, router_logits.contiguous().view(torch.uint8)]
+                    if pack_router
+                    else [values_u8, scales_u8]
+                )
+                gathered = pcp_group.all_gather(torch.cat(parts, dim=-1), dim=0)
+                hidden_states = gathered[:, :hidden_size].contiguous().view(values.dtype)
+                pertoken_scale = gathered[:, hidden_size:scale_end].contiguous().view(scales.dtype)
+                pertoken_scale = pertoken_scale.reshape(gathered.shape[0], *scales.shape[1:])
+                if pack_router:
+                    router_logits = gathered[:, scale_end:].contiguous().view(torch.int32)
+                else:
+                    router_logits = pcp_group.all_gather(router_logits, dim=0)
+            else:
+                hidden_states = pcp_group.all_gather(hidden_states, dim=0)
+                router_logits = pcp_group.all_gather(router_logits, dim=0)
 
         return MoEPrepareOutput(
             hidden_states=hidden_states,
             router_logits=router_logits,
             mc2_mask=None,
             padded_hidden_states_shape=None,
-            pertoken_scale=None,
+            pertoken_scale=pertoken_scale,
         )
 
     def all_gather_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:

@@ -44,7 +44,11 @@ from vllm_ascend.ops.fused_moe.moe_comm_method import (
     get_moe_comm_method,
 )
 from vllm_ascend.ops.fused_moe.moe_utils import get_moe_num_logical_experts
-from vllm_ascend.ops.fused_moe.prepare_finalize import PrepareAndFinalizeWithAllGather
+from vllm_ascend.ops.fused_moe.prepare_finalize import (
+    PrepareAndFinalizeWithAllGather,
+    can_pcp_allgather_mxfp8,
+)
+from vllm_ascend.ops.fused_moe.router import AscendFusedMoERouter
 from vllm_ascend.quantization.nz import NzCastSpec
 from vllm_ascend.quantization.quant_type import QuantType
 from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ, maybe_trans_nz
@@ -589,6 +593,43 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
 
         return topk_weights, topk_ids
 
+    def _supports_pcp_mxfp8_prepare(self, moe_comm_method, lora_context) -> bool:
+        return (
+            self.quant_type == QuantType.W4A8MXFP
+            and isinstance(moe_comm_method, AllGatherCommImpl)
+            and not self.moe_config.is_sequence_parallel
+            and self.moe_config.pcp_size > 1
+            and isinstance(self.router, AscendFusedMoERouter)
+            and self.router.scoring_func == "sqrtsoftplus"
+            and not getattr(self, "apply_router_weight_on_input", False)
+            and lora_context is None
+        )
+
+    def _can_pre_route_pcp(
+        self,
+        hidden_states: torch.Tensor,
+        prepare_quant_type: QuantType,
+        enable_force_load_balance: bool,
+    ) -> bool:
+        router = self.router
+        return (
+            can_pcp_allgather_mxfp8(hidden_states, prepare_quant_type)
+            and self.moe_config.dp_size == 1
+            and self.moe_config.tp_size == 1
+            and _EXTRA_CTX.max_tokens_across_pcp > 0
+            and not _EXTRA_CTX.capturing
+            and not enable_force_load_balance
+            and getattr(self, "log2phy", None) is None
+            and not getattr(self, "mix_placement", False)
+            and not get_ascend_config().enable_force_eplb
+            and isinstance(router, AscendFusedMoERouter)
+            and router.bias_vl is None
+            and router.eplb_state is None
+            and router.capture_fn is None
+            and not router.is_routing_input_ids_producer
+            and router.is_fused_supported(hidden_states)
+        )
+
     def forward_impl(
         self,
         *,
@@ -614,12 +655,48 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
             sync_lora_context(self.quant_method, lora_context)
 
         num_source_tokens = hidden_states.shape[0]
+        supports_pcp_mxfp8 = self._supports_pcp_mxfp8_prepare(moe_comm_method, lora_context)
+        prepare_quant_type = self.quant_type
+        if (
+            prepare_quant_type == QuantType.W4A8MXFP
+            and isinstance(moe_comm_method, AllGatherCommImpl)
+            and not self.moe_config.is_sequence_parallel
+            and self.moe_config.pcp_size > 1
+            and not supports_pcp_mxfp8
+        ):
+            # The PCP gather may quantize before routing only on the DeepSeek V4 routing path.
+            prepare_quant_type = QuantType.NONE
+
+        local_routing = supports_pcp_mxfp8 and self._can_pre_route_pcp(
+            hidden_states, prepare_quant_type, enable_force_load_balance
+        )
+        if local_routing:
+            assert isinstance(self.router, AscendFusedMoERouter)
+            local_router_logits = router_logits
+            local_input_ids = input_ids
+            padding = _EXTRA_CTX.max_tokens_across_pcp - num_source_tokens
+            if padding > 0:
+                local_router_logits = torch.nn.functional.pad(local_router_logits, (0, 0, 0, padding))
+                if self.router.tid2eid is not None and local_input_ids is not None:
+                    local_input_ids = torch.nn.functional.pad(local_input_ids, (0, padding))
+            local_weights, local_ids = self.router._compute_routing(
+                hidden_states,
+                local_router_logits,
+                None,
+                input_ids=local_input_ids,
+                local_input_ids=True,
+            )
+            router_logits = torch.cat(
+                (local_weights.contiguous().view(torch.int32), local_ids.to(torch.int32)),
+                dim=1,
+            )
+
         prepare_output = moe_comm_method.prepare(
             hidden_states=hidden_states,
             router_logits=router_logits,
             # The SP model wrapper already shards and gathers the MoE sequence.
             replace_allreduce=self.moe_config.is_sequence_parallel,
-            quant_type=self.quant_type,
+            quant_type=prepare_quant_type,
         )
         hidden_states = prepare_output.hidden_states
         router_logits = prepare_output.router_logits
@@ -628,12 +705,17 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
         pertoken_scale = prepare_output.pertoken_scale
         if self.router is None:
             raise RuntimeError("AscendRoutedExperts requires a router for expert selection.")
-        topk_weights, topk_ids = self._select_experts(
-            hidden_states=hidden_states,
-            router_logits=router_logits,
-            enable_force_load_balance=enable_force_load_balance,
-            input_ids=input_ids,
-        )
+        if local_routing:
+            topk_weights, topk_ids = router_logits.split(self.router.top_k, dim=1)
+            topk_weights = topk_weights.contiguous().view(torch.float32)
+            topk_ids = topk_ids.contiguous()
+        else:
+            topk_weights, topk_ids = self._select_experts(
+                hidden_states=hidden_states,
+                router_logits=router_logits,
+                enable_force_load_balance=enable_force_load_balance,
+                input_ids=input_ids,
+            )
         self.ascend_pertoken_scale = pertoken_scale
         self.ascend_mc2_mask = mc2_mask
         try:

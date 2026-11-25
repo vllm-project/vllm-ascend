@@ -197,6 +197,7 @@ class AscendFusedTopKRouter(AscendGroupedTopKRouter):
         indices_type: torch.dtype | None,
         *,
         input_ids: torch.Tensor | None = None,
+        local_input_ids: bool = False,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         if self._use_gating_top_k_with_map is None:
             self._use_gating_top_k_with_map = self._can_fuse_gating_map(hidden_states)
@@ -215,7 +216,8 @@ class AscendFusedTopKRouter(AscendGroupedTopKRouter):
             if self.tid2eid is not None or self.bias_vl is not None:
                 if input_ids is None:
                     raise ValueError("DeepSeek V4 vision/hash MoE routing requires input_ids.")
-                input_ids = self._prepare_routing_input_ids(input_ids, router_logits.shape[0])
+                if not local_input_ids:
+                    input_ids = self._prepare_routing_input_ids(input_ids, router_logits.shape[0])
                 tid2eid_ones = self.tid2eid.to(torch.int32) if self.tid2eid is not None else None
             else:
                 input_ids = None
