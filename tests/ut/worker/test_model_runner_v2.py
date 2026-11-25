@@ -34,7 +34,6 @@ from vllm_ascend.attention.attention_v1 import AscendAttentionBackend
 from vllm_ascend.attention.fa_v1 import AscendFlashAttentionBackend
 from vllm_ascend.attention.mla_v1 import AscendMLABackend, AscendMLAImpl
 from vllm_ascend.model_executor.offloader import AscendPrefetchOffloader
-from vllm_ascend.models.host_offload import register_host_offload_owner
 from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch, AscendInputBuffers
 from vllm_ascend.worker.v2.model_runner import NPUModelRunner
@@ -812,6 +811,7 @@ def test_input_embedding_host_vmm_skips_memory_accounting_on_empty_pipeline_stag
 @pytest.mark.parametrize("memory_delta", [-64, 0, 64])
 def test_input_embedding_host_vmm_keeps_installed_mappings(memory_delta):
     from vllm_ascend.models.deepseek_v41 import input_embedding
+    from vllm_ascend.models.host_offload import register_host_offload_owner
 
     runner = _make_runner()
     runner.device = torch.device("cpu")
@@ -2810,6 +2810,7 @@ def test_shutdown_releases_shared_engram_after_input_embedding_release_fails():
 @pytest.mark.parametrize("published_model,cleanup_fails", [(False, False), (False, True), (True, True)])
 def test_load_failure_closes_unpublished_host_owners(published_model, cleanup_fails):
     from vllm_ascend.model_executor.warmup import nz_warmup
+    from vllm_ascend.models.host_offload import register_host_offload_owner
 
     runner = NPUModelRunner.__new__(NPUModelRunner)
     runner.vllm_config = MagicMock()
