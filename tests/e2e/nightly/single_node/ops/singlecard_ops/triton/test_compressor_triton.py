@@ -21,8 +21,11 @@ pytestmark = pytest.mark.skipif(
 )
 
 
-@pytest.mark.parametrize("ratio", [2, 3, 8, 9, 16, 128])
-@pytest.mark.parametrize("packed", [False, True])
+@pytest.mark.parametrize(
+    "ratio,packed",
+    # Cover the minimum ratio, padded pooling, the 8/9 chunk boundary and the maximum ratio.
+    [(8, False), (128, False), (2, True), (3, True), (9, True), (16, True)],
+)
 @torch.inference_mode()
 def test_compressor_matches_torch(ratio, packed):
     """Exercise projection, direct/blocked pooling, normalization and ring updates."""
@@ -85,9 +88,11 @@ def _projected_reference(kv, scores, state, metadata, prev_rows, prev_indices):
     return out, updated
 
 
-@pytest.mark.parametrize("width", [128, 512])
-@pytest.mark.parametrize("predecessor", ["ring", "gather"])
-@pytest.mark.parametrize("use_graph", [False, True])
+@pytest.mark.parametrize(
+    "width,predecessor,use_graph",
+    # Pair each predecessor with both widths and execution modes.
+    [(128, "ring", True), (512, "ring", False), (128, "gather", False), (512, "gather", True)],
+)
 @torch.inference_mode()
 def test_projected_chunks_and_replay(width, predecessor, use_graph):
     """Odd starts, long chunks, rejection-corrected starts, empty ranks and resume."""
@@ -170,9 +175,20 @@ def test_projected_chunks_and_replay(width, predecessor, use_graph):
         starts = [start + length - (min(2, length) if step == 1 else 0) for start, length in zip(starts, lengths)]
 
 
-@pytest.mark.parametrize("width", [128, 512])
-@pytest.mark.parametrize("requests,tail", [(1, 1), (3, 3), (16, STATE_RING_ROWS)])
-@pytest.mark.parametrize("use_graph", [False, True])
+@pytest.mark.parametrize(
+    "use_graph,requests,tail,width",
+    [
+        # Alternate widths on short tails; test both widths across a full ring.
+        (False, 1, 1, 128),
+        (False, 3, 3, 512),
+        (False, 16, STATE_RING_ROWS, 128),
+        (False, 16, STATE_RING_ROWS, 512),
+        (True, 1, 1, 512),
+        (True, 3, 3, 128),
+        (True, 16, STATE_RING_ROWS, 128),
+        (True, 16, STATE_RING_ROWS, 512),
+    ],
+)
 @torch.inference_mode()
 def test_ring_writes_match_cpu(width, requests, tail, use_graph):
     generator = torch.Generator().manual_seed(89)

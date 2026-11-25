@@ -25,7 +25,7 @@ from vllm.config import VllmConfig
 from vllm.distributed import tensor_model_parallel_all_gather
 from vllm.distributed.parallel_state import get_pp_group
 from vllm.model_executor.layers.mamba.gdn.qwen_gdn_linear_attn import QwenGatedDeltaNetAttention as _GDNBaseCls
-from vllm.model_executor.models.qwen3_5 import Qwen3_5DecoderLayer
+from vllm.model_executor.models.qwen3_5 import Qwen3_5DecoderLayer, Qwen3_5ForCausalLM, Qwen3_5MoeForCausalLM
 from vllm.model_executor.models.qwen3_next import Qwen3NextAttention, Qwen3NextSparseMoeBlock
 
 try:
@@ -34,10 +34,16 @@ try:
 except ImportError:
     Qwen3_5MultiTokenPredictor = None
     IntermediateTensors = None
+from vllm.model_executor.models.qwen3_next import Qwen3NextForCausalLM
 
+from vllm_ascend.attention.gdn import AscendGatedDeltaNetAttention, initialize_packed_conv_weight
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.models.common.ops.sequence_parallel import sp_all_gather, sp_reduce_scatter
-from vllm_ascend.ops.gdn import AscendGatedDeltaNetAttention, initialize_packed_conv_weight
+from vllm_ascend.models.qwen_gdn_recoverssm import (
+    _uses_gdn_recoverssm,
+    gdn_mamba_state_dtype_from_config,
+    gdn_mamba_state_shape_from_config,
+)
 from vllm_ascend.ops.gdn_checkpoint import initialize_gdn_checkpoints
 
 _GDN_PATCH_TARGET = _GDNBaseCls
@@ -361,6 +367,24 @@ def _gdn_init_with_packed_weight(self, *args, **kwargs):
     initialize_packed_conv_weight(self)
 
 
+def _patch_gdn_model_state_classmethods(target):
+    # Delegate upstream text model entrypoints to the shared Ascend descriptors.
+    if getattr(target, "_gdn_recoverssm_state_patched", False):
+        return
+
+    @classmethod
+    def get_mamba_state_shape_from_config(cls, config):
+        return gdn_mamba_state_shape_from_config(config)
+
+    @classmethod
+    def get_mamba_state_dtype_from_config(cls, config):
+        return gdn_mamba_state_dtype_from_config(config)
+
+    target.get_mamba_state_shape_from_config = get_mamba_state_shape_from_config
+    target.get_mamba_state_dtype_from_config = get_mamba_state_dtype_from_config
+    target._gdn_recoverssm_state_patched = True
+
+
 # Apply this module's patches only where the standard worker patches load:
 # patch/worker/__init__.py imports this module exclusively under
 # STANDARD_WORKER_PATCHES, and utils.enable_sp reaches enable_dense_sp
@@ -376,8 +400,13 @@ if get_current_hardware_profile().supports(HardwareCapability.STANDARD_WORKER_PA
     # Qwen3.5-family FlashComm SP extension) and the dense-SP layer wiring.
     Qwen3_5DecoderLayer.__init__ = _qwen3_5_decoder_layer_init_with_dense_sp
     Qwen3_5DecoderLayer.forward = AscendQwen3_5DecoderLayer.forward
+
+    for _model_cls in (Qwen3_5ForCausalLM, Qwen3_5MoeForCausalLM, Qwen3NextForCausalLM):
+        _patch_gdn_model_state_classmethods(_model_cls)
+
     _GDN_PATCH_TARGET._split_ba_for_tp = AscendGatedDeltaNetAttention._split_ba_for_tp
     _GDN_PATCH_TARGET.get_state_shape = AscendGatedDeltaNetAttention.get_state_shape
+    _GDN_PATCH_TARGET.get_state_dtype = AscendGatedDeltaNetAttention.get_state_dtype
     _GDN_PATCH_TARGET.get_attn_backend = AscendGatedDeltaNetAttention.get_attn_backend
     # STANDARD_WORKER_PATCHES hardware never carries the 310P-only
     # GDN_COMPATIBILITY capability, so the former 310P branch of the GDN
@@ -388,6 +417,7 @@ if get_current_hardware_profile().supports(HardwareCapability.STANDARD_WORKER_PA
     @wraps(_GDN_ORIGINAL_INIT)
     def _gdn_init_with_packed_weight(self, *args, **kwargs):
         _GDN_ORIGINAL_INIT(self, *args, **kwargs)
+        self.use_gdn_recoverssm = _uses_gdn_recoverssm(self.vllm_config)
         initialize_packed_conv_weight(self)
         initialize_gdn_checkpoints(self)
 

@@ -15,13 +15,25 @@ This guide uses [Qwen3-0.6B](../tutorials/models/Qwen3-Dense.md) as an example t
 
     The prebuilt image includes a validated Python and Ascend user-space software stack, including CANN, NNAL, PyTorch, TorchNPU, vLLM, and vLLM Ascend.
 
-    Atlas A2 Products (A2), Atlas A3 Products (A3), and 950DT Products images also include the matching Triton Ascend runtime. Atlas 300I DUO and Atlas 200I Pro do not use Triton Ascend.
+    Atlas A2 Products (A2), Atlas A3 Products (A3), and 950DT Products images also include the matching Triton Ascend runtime. Atlas 300I Duo and Atlas 200I Pro do not use Triton Ascend.
 
     For component roles and the exact validated versions, see [Installation Guide > Hardware and software stack](installation.md#installation-hardware-software-stack).
 
 ## Installation {: #quick-start-installation }
 
 Before using containers, make sure Docker is installed on your system. If Docker is not installed, please refer to the [Docker installation guide](https://docs.docker.com/get-started/get-docker/) for installation instructions.
+
+The container commands below need [Ascend Docker Runtime](installation.md#installation-ascend-docker-runtime) on the **host**: it is the container engine's runtime, it reads `ASCEND_VISIBLE_DEVICES` and binds the selected devices into the container. Install it once on every node that runs containers, then confirm that it is active:
+
+{% raw %}
+
+```bash
+docker info --format 'default={{.DefaultRuntime}}'
+```
+
+{% endraw %}
+
+The output must be `default=ascend`. If it prints `runc`, install or repair the runtime as described in [Use Ascend Docker Runtime](installation.md#installation-ascend-docker-runtime); a container started without it has no NPU inside. If the host cannot install it, use the device and driver flags in [Manual device mapping without Ascend Docker Runtime](installation.md#installation-container-without-runtime).
 
 {% include "getting_started/quick_start/ascend_image/atlas-a2.inc.md" %}
 
@@ -70,7 +82,7 @@ The following sections provide offline inference and online serving examples. Ch
 
 {% filter indent(4, true) %}{% include "getting_started/quick_start/offline/qwen3-0.6b.inc.md" %}{% endfilter %}
 
-=== "Atlas 300I DUO / Atlas 200I Pro"
+=== "Atlas 300I Duo / Atlas 200I Pro"
 
     <span id="quick-start-atlas-300i-duo-offline"></span>
     <span id="quick-start-atlas-200i-pro-offline"></span>
@@ -87,7 +99,7 @@ The following sections provide offline inference and online serving examples. Ch
 
 {% filter indent(4, true) %}{% include "getting_started/quick_start/online/qwen3-0.6b.inc.md" %}{% endfilter %}
 
-=== "Atlas 300I DUO / Atlas 200I Pro"
+=== "Atlas 300I Duo / Atlas 200I Pro"
 
     <span id="quick-start-atlas-300i-duo-online"></span>
     <span id="quick-start-atlas-200i-pro-online"></span>

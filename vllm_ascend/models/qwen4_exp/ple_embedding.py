@@ -26,7 +26,6 @@ class AscendPLEHostEmbedding(Qwen4ExpPLEPinnedHostEmbedding):
 
     def __init__(self, *args, **kwargs):
         self._host_table: HostUvaBuffer | SharedUvaBuffer | None = None
-        self._host_scale: HostUvaBuffer | SharedUvaBuffer | None = None
         method = kwargs.get("embedding_method")
         self._quantized = isinstance(method, AscendPLEQuantizedEmbeddingMethod)
         self._mxfp8 = isinstance(method, AscendPLEQuantizedEmbeddingMethod) and method.mxfp8
@@ -63,8 +62,7 @@ class AscendPLEHostEmbedding(Qwen4ExpPLEPinnedHostEmbedding):
         except HostUvaBufferCleanupError as exc:
             # The buffer constructor could not finish assigning _host_table.
             # Preserve its owner without hiding the original cleanup failure.
-            if exc.host_buffer is not self._host_scale:
-                self._host_table = exc.host_buffer
+            self._host_table = exc.host_buffer
             raise
         except Exception as initialization_error:
             try:
@@ -77,12 +75,8 @@ class AscendPLEHostEmbedding(Qwen4ExpPLEPinnedHostEmbedding):
 
     def close_host_offload(self) -> None:
         """Release after graph teardown; failed unregister remains retryable."""
-        if self._host_scale is not None:
-            # Drop aliases before closing shared storage, retaining failed owners.
-            if hasattr(self, "_parameters"):
-                self.register_parameter("weight_scale", None)
-            self._host_scale.close()
-            self._host_scale = None
+        if self._quantized and hasattr(self, "weight_scale"):
+            self.register_parameter("weight_scale", None)
         table = self._host_table
         if table is None:
             return
@@ -99,25 +93,17 @@ class AscendPLEHostEmbedding(Qwen4ExpPLEPinnedHostEmbedding):
         if dtype not in allowed:
             raise ValueError(f"Unsupported PLE host storage dtype: {dtype}")
         device = torch.device("npu", torch.npu.current_device())
-        buffer_name = "_host_scale" if dtype == self._scale_dtype else "_host_table"
-        table: HostUvaBuffer | SharedUvaBuffer
-        try:
-            if self._shared_group is None:
-                table = HostUvaBuffer((num_embeddings, embedding_dim), dtype, device, buffer_name, self)
-            else:
-                table = SharedUvaBuffer(
-                    (num_embeddings, embedding_dim), dtype, device, self._shared_group, buffer_name, self
-                )
-        except HostUvaBufferCleanupError as exc:
-            if dtype == self._scale_dtype:
-                self._host_scale = exc.host_buffer
-            else:
-                self._host_table = exc.host_buffer
-            raise
         if dtype == self._scale_dtype:
-            self._host_scale = table
+            # Each DP replica keeps its own ETP-local scale shard on its NPU.
+            return torch.zeros((num_embeddings, embedding_dim), dtype=dtype, device=device)
+        table: HostUvaBuffer | SharedUvaBuffer
+        if self._shared_group is None:
+            table = HostUvaBuffer((num_embeddings, embedding_dim), dtype, device, "_host_table", self)
         else:
-            self._host_table = table
+            table = SharedUvaBuffer(
+                (num_embeddings, embedding_dim), dtype, device, self._shared_group, "_host_table", self
+            )
+        self._host_table = table
         tensor = table.tensor
         assert tensor is not None
         if self._shared_group is None or self._shared_group.rank_in_group == 0:
@@ -139,7 +125,8 @@ class AscendPLEHostEmbedding(Qwen4ExpPLEPinnedHostEmbedding):
             super().weight_loader(param, loaded_weight, checkpoint_start)
             return
         error = None
-        if group.rank_in_group == 0:
+        # Only the host weight table is shared across DP replicas.
+        if group.rank_in_group == 0 or param is getattr(self, "weight_scale", None):
             try:
                 super().weight_loader(param, loaded_weight, checkpoint_start)
             except Exception as exc:
@@ -161,7 +148,7 @@ class AscendPLEHostEmbedding(Qwen4ExpPLEPinnedHostEmbedding):
     def _lookup(self, input_ids: torch.Tensor, output: torch.Tensor | None = None) -> torch.Tensor:
         if self._host_table is None or self.weight is None:
             raise RuntimeError("PLE host table has been closed")
-        if self._quantized and (self._host_scale is None or self.weight_scale is None):
+        if self._quantized and self.weight_scale is None:
             raise RuntimeError("Quantized PLE host storage has been closed")
         expected_shape = (*input_ids.shape, self.embedding_dim)
         if output is None:
@@ -174,10 +161,9 @@ class AscendPLEHostEmbedding(Qwen4ExpPLEPinnedHostEmbedding):
         ):
             raise ValueError("PLE prefetch output must match the input shape, lookup dtype, and input device")
         if self._quantized:
-            assert self._host_scale is not None
             ple_lookup_quantized.lookup_quantized(
                 self._host_table.ptrs,
-                self._host_scale.ptrs,
+                self.weight_scale,
                 input_ids,
                 output,
                 self.shard_indices.org_vocab_start_index,

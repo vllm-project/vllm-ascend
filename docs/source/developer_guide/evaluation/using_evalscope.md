@@ -4,25 +4,19 @@ This document will guide you through model inference stress testing and accuracy
 
 ## 1. Online server
 
-You can run docker container to start the vLLM server on a single NPU:
+You can run Docker container to start the vLLM server on a single NPU:
+
+The container needs [Ascend Docker Runtime](../../getting_started/installation.md#installation-ascend-docker-runtime) on the host; it selects the NPUs with `ASCEND_VISIBLE_DEVICES`.
 
 ```bash
-# Update DEVICE according to your device (/dev/davinci[0-7])
-export DEVICE=/dev/davinci7
+# Update ASCEND_VISIBLE_DEVICES according to the NPU you want (/dev/davinci[0-7])
+export ASCEND_VISIBLE_DEVICES=7
 # Update the vllm-ascend image
 export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}
 docker run --rm \
 --shm-size=1g \
 --name vllm-ascend \
---device $DEVICE \
---device /dev/davinci_manager \
---device /dev/devmm_svm \
---device /dev/hisi_hdc \
--v /usr/local/dcmi:/usr/local/dcmi \
--v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
--v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
--v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
--v /etc/ascend_install.info:/etc/ascend_install.info \
+-e ASCEND_VISIBLE_DEVICES \
 -v /root/.cache:/root/.cache \
 -p 8000:8000 \
 -e VLLM_USE_MODELSCOPE=True \
@@ -33,7 +27,7 @@ vllm serve Qwen/Qwen2.5-7B-Instruct --max-model-len 26240
 
 If the vLLM server is started successfully, you can see information shown below:
 
-```shell
+```output
 INFO:     Started server process [6873]
 INFO:     Waiting for application startup.
 INFO:     Application startup complete.
@@ -172,4 +166,4 @@ Percentile results:
 +------------+----------+---------+-------------+--------------+---------------+----------------------+
 ```
 
-See more detail in [EvalScope doc - Model Inference Stress Testing](https://evalscope.readthedocs.io/en/latest/user_guides/stress_test/quick_start.html#basic-usage).
+See more details in [EvalScope doc - Model Inference Stress Testing](https://evalscope.readthedocs.io/en/latest/user_guides/stress_test/quick_start.html#basic-usage).

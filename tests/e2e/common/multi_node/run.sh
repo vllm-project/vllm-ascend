@@ -216,7 +216,8 @@ check_and_config() {
     git config --global http.lowSpeedTime 30
     pip config set global.index-url https://mirrors.huaweicloud.com/repository/pypi/simple/
     pip config set global.trusted-host mirrors.huaweicloud.com
-    export PIP_EXTRA_INDEX_URL="https://mirrors.huaweicloud.com/ascend/repos/pypi"
+    export PIP_EXTRA_INDEX_URL="https://repo.huaweicloud.com/ascend/repos/pypi \
+        https://repo.huaweicloud.com/ascend/repos/pypi/nightly"
     pip config set global.timeout 120
 }
 
@@ -289,7 +290,12 @@ checkout_src() {
         echo "Cloning vllm-ascend from $VLLM_ASCEND_REMOTE_URL"
         git clone --depth 1 --recurse-submodules "$VLLM_ASCEND_REMOTE_URL" "$WORKSPACE/vllm-ascend"
         cd "$WORKSPACE/vllm-ascend"
-        PR_REF=$(git ls-remote origin 'refs/pull/*/head' | grep "^${VLLM_ASCEND_REF}" | awk '{print $2}' | head -1)
+        # Under `set -euo pipefail` grep exits 1 when VLLM_ASCEND_REF is a
+        # branch name (e.g. main) that matches no refs/pull/*/head entry,
+        # which silently killed the whole script right after cloning. Add
+        # `|| true` so "no PR ref matched" falls through to the branch
+        # checkout in the else branch below, as intended.
+        PR_REF=$(git ls-remote origin 'refs/pull/*/head' | grep "^${VLLM_ASCEND_REF}" | awk '{print $2}' | head -1 || true)
         if [ -n "$PR_REF" ]; then
             git fetch --depth 1 origin "$PR_REF"
             git checkout FETCH_HEAD

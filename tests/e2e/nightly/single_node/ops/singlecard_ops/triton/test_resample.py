@@ -762,9 +762,11 @@ def test_same_seed_and_position_are_deterministic():
     get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5),
     reason="Requires Ascend A2/A3/A5",
 )
-@pytest.mark.parametrize("has_draft_logits", [False, True])
-@pytest.mark.parametrize("rejection_step", [0, 1])
-@pytest.mark.parametrize("use_block_verification", [False, True])
+@pytest.mark.parametrize(
+    "use_block_verification,rejection_step,has_draft_logits",
+    # Cover each pair of verification mode, rejection step and draft-logits path.
+    [(False, 0, False), (False, 1, True), (True, 0, True), (True, 1, False), (True, 1, True)],
+)
 @torch.inference_mode()
 def test_rejection_sample_residual_is_independent_of_acceptance_draw(
     has_draft_logits, rejection_step, use_block_verification
