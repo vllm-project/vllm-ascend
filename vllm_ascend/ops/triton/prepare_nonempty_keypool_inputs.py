@@ -25,6 +25,7 @@ def _prepare_nonempty_keypool_inputs_kernel(
     HEADS: tl.constexpr,
     DIM: tl.constexpr,
     TABLE_COLS: tl.constexpr,
+    TABLE_PAGE_RATIO: tl.constexpr,
     BLOCK: tl.constexpr,
 ):
     block = tl.program_id(0)
@@ -50,11 +51,16 @@ def _prepare_nonempty_keypool_inputs_kernel(
         tl.store(padded_tails + offsets, tail, offsets < requests + 1)
     if block * BLOCK < (table_rows + 1) * TABLE_COLS:
         offsets = block * BLOCK + tl.arange(0, BLOCK)
-        value = tl.load(table + offsets, offsets < table_rows * TABLE_COLS, other=0)
+        active = offsets < table_rows * TABLE_COLS
+        if TABLE_PAGE_RATIO == 1:
+            value = tl.load(table + offsets, active, other=0)
+        else:
+            page = tl.load(table + offsets // TABLE_PAGE_RATIO, active, other=0)
+            value = tl.where(active, page * TABLE_PAGE_RATIO + offsets % TABLE_PAGE_RATIO, 0)
         tl.store(padded_table + offsets, value, offsets < (table_rows + 1) * TABLE_COLS)
 
 
-def prepare_nonempty_keypool_inputs(query, weights, ends, lengths, tails, table):
+def prepare_nonempty_keypool_inputs(query, weights, ends, lengths, tails, table, table_page_ratio=1):
     """Append safe CANN sentinel inputs in one launch, without temporary fills.
 
     Allocate outputs per invocation so independently captured graphs and layers
@@ -65,7 +71,8 @@ def prepare_nonempty_keypool_inputs(query, weights, ends, lengths, tails, table)
     """
     tokens, heads, dim = query.shape
     requests = ends.numel()
-    table_rows, table_cols = table.shape
+    table_rows, manager_cols = table.shape
+    table_cols = manager_cols * table_page_ratio
     padded_query = query.new_empty((tokens + 1, heads, dim))
     padded_weights = weights.new_empty((tokens + 1, heads))
     padded_ends = ends.new_empty((requests + 1,))
@@ -94,6 +101,7 @@ def prepare_nonempty_keypool_inputs(query, weights, ends, lengths, tails, table)
         heads,
         dim,
         table_cols,
+        table_page_ratio,
         block,
     )
     return padded_query, padded_weights, padded_ends, padded_lengths, padded_tails, padded_table

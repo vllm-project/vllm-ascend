@@ -345,7 +345,7 @@ def test_builder_padding_uses_safe_prefill_request_without_forward_ops(
     monkeypatch.setattr(
         sfa_hisparse,
         "build_hisparse_prefill_staging_plan",
-        lambda table, *args: NS(block_table=table, block_size=128),
+        lambda table, *args, **kwargs: NS(block_table=table, block_size=128),
     )
     built = builder._build(common, pcp_context=context)
     assert calls == [(padded, padded)]

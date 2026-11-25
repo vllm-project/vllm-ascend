@@ -201,7 +201,11 @@ __simt_vf__ __launch_bounds__(kThreads) inline void resolve_vf(
     // Source/Resident tables are immutable for this invocation. A complete
     // device-table proof lets every AIV translate its own row independently;
     // a mixed request still uses the original leader-owned union/LRU path.
-    if (kQualified && source && resident && requests && attention && num_valid_rows &&
+    // Flash's KPool tail expands top-k beyond 2048. Resident translation
+    // uses the same 128-token pages without fixed Hot/hash capacities.
+    const bool can_translate_resident = kQualified ||
+        (topk == 2176 && d[42] == 128 && d[46] == 128 && d[48] == 128);
+    if (can_translate_resident && source && resident && requests && attention && num_valid_rows &&
         int(d[50]) == topk && state_valid && state < int(d[43]) &&
         request >= 0 && request < int(d[39]) && int(d[40]) > 0 && int(d[44]) > 0) {
         const int host0 = source[int64_t(request) * d[41]];
