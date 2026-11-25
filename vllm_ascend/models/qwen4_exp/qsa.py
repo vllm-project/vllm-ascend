@@ -610,7 +610,60 @@ class AscendQSAMetadataBuilder(upstream_qsa.Qwen4ExpQSAMetadataBuilder):
     # FULL_DECODE_ONLY captures a fixed GBSA path. Unlike sequence thresholds,
     # decode phase cannot cross into FIA when a request grows during replay.
     _cudagraph_support = AttentionCGSupport.UNIFORM_BATCH
-    prepares_qsa_step_metadata = True
+
+    def prepare_step_metadata(
+        self,
+        attn_metadata: dict[str, Any],
+        layer_names: list[str],
+        rows: int,
+        prepared_metadata_ids: set[int],
+    ) -> None:
+        """Prepare shared QSA inputs after all cache metadata has been built."""
+        from vllm_ascend.models.qwen4_exp.attention_dispatch import prepare_qsa_union_batches
+        from vllm_ascend.ops.triton.qwen4_exp.prepare_qsa_visible_lengths_triton import prepare_qsa_visible_lengths
+
+        if not layer_names:
+            return
+        main_metadata = attn_metadata.get(layer_names[0])
+        if main_metadata is None:
+            return
+        request_plan = getattr(main_metadata, "qsa_request_plan", None)
+        if request_plan is None:
+            return
+        layer = self.vllm_config.compilation_config.static_forward_context.get(layer_names[0])
+        if not hasattr(layer, "indexer"):
+            return
+        compressed_metadata = attn_metadata.get(layer.indexer.compressed_key_cache.prefix)
+        if compressed_metadata is None:
+            return
+        if id(main_metadata) in prepared_metadata_ids:
+            return
+        device = compressed_metadata.seq_lens.device
+        max_tokens = self.vllm_config.scheduler_config.max_num_batched_tokens
+        signature = (device, max_tokens)
+        buffer_cache = getattr(self, "_qsa_visible_length_buffers", None)
+        if buffer_cache is None:
+            buffer_cache = {}
+            self._qsa_visible_length_buffers = buffer_cache
+        visible_lengths = buffer_cache.get(signature)
+        if visible_lengths is None:
+            visible_lengths = torch.empty(max_tokens, dtype=torch.int32, device=device)
+            buffer_cache[signature] = visible_lengths
+
+        prepare_qsa_visible_lengths(
+            compressed_metadata.logical_positions,
+            compressed_metadata.seq_lens,
+            compressed_metadata.token_to_req,
+            visible_lengths,
+            rows,
+        )
+        main_metadata.qsa_request_plan = prepare_qsa_union_batches(
+            request_plan,
+            visible_lengths,
+            compressed_metadata.seq_lens,
+            main_metadata.block_table,
+        )
+        prepared_metadata_ids.add(id(main_metadata))
 
     def build(
         self,
