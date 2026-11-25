@@ -23,7 +23,6 @@ import logging
 from collections.abc import Iterator
 from contextlib import AbstractContextManager, contextmanager, nullcontext
 from datetime import timedelta
-from fnmatch import filter as fnmatch_filter
 from threading import RLock
 from types import NoneType
 from typing import TYPE_CHECKING, Any
@@ -270,31 +269,6 @@ class NPUWorker(GPUWorker):
 
             signal.signal(signal.SIGTERM, signal_handler)
             signal.signal(signal.SIGINT, signal_handler)
-
-    # TODO: Remove this override and inherit GPUWorker._discardable_parameters
-    # once all supported vLLM versions include the upstream implementation.
-    def _discardable_parameters(self, model: nn.Module) -> set[int]:
-        """Storage of the parameters the weight update rewrites."""
-        storage = {
-            name: parameter.untyped_storage().data_ptr()
-            for name, parameter in self._get_sleep_parameters(model).items()
-        }
-        patterns = getattr(self.model_config, "sleep_preserve_parameter_names", [])
-        preserved: set[int] = set()
-        for pattern in patterns:
-            matches = fnmatch_filter(storage, pattern)
-            if not matches and pattern != "draft.*":
-                raise ValueError(f"No parameter matches sleep retention: {pattern}")
-            preserved.update(storage[name] for name in matches)
-        draft_names = fnmatch_filter(storage, "draft.*")
-        if draft_names and not any(fnmatch_filter(draft_names, pattern) for pattern in patterns):
-            logger.warning_once(
-                "Level 2 sleep discards draft model weights; reload_weights "
-                "restores only the target. Unless the draft is updated "
-                "separately, set --sleep-preserve-parameter-names 'draft.*' "
-                "to keep them."
-            )
-        return set(storage.values()) - preserved
 
     def discard(self, tags: tuple[str, ...]) -> None:
         raise NotImplementedError("GPUWorker.discard is not validated on Ascend.")
