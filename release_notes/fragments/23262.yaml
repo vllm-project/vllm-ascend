@@ -7,3 +7,5 @@ entries:
       with the Piggy12/Qwen3.6-27B-DMTP draft. Set `method` to `dmtp` and
       `num_speculative_tokens` to 7 for BF16 greedy text generation in eager mode,
       with synchronous scheduling, prefix caching disabled, and up to 3,072 tokens of context.
+      Installing `flash_attn_npu_3` enables FA3 automatically for the target's full-attention
+      layers and the DMTP draft on supported A3 hardware.

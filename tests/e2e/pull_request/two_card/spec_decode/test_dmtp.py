@@ -4,6 +4,33 @@ from vllm import SamplingParams
 from tests.e2e.conftest import VllmRunner
 
 
+class DMTPBackendCheck:
+    def check_dmtp_attention_backends(self):
+        from importlib.util import find_spec
+
+        from vllm_ascend.device.hardware_profile import FlashAttentionNpu3Model, get_current_hardware_profile
+
+        runner = self.model_runner
+        fa3_expected = (
+            find_spec("flash_attn_npu_3") is not None
+            and FlashAttentionNpu3Model.QWEN in get_current_hardware_profile().flash_attn_npu_3_models
+        )
+        fa3 = ("vllm_ascend.attention.flash_attention_v3", "AscendFlashAttentionBackend")
+        draft_groups = [group for groups in runner.speculator.attn_groups for group in groups]
+        assert all((group.backend.full_cls_name() == fa3) == fa3_expected for group in draft_groups)
+        assert runner._can_skip_spec_cpu_length_sync() == fa3_expected
+        if fa3_expected:
+            draft_layers = {name for group in draft_groups for name in group.layer_names}
+            target_fa3_layers = sum(
+                len(set(group.layer_names) - draft_layers)
+                for groups in runner.attn_groups
+                for group in groups
+                if group.backend.full_cls_name() == fa3
+            )
+            assert target_fa3_layers == 16
+        return True
+
+
 def test_qwen36_dmtp_matches_target_greedy():
     target = "Qwen/Qwen3.6-27B"
     draft = "Piggy12/Qwen3.6-27B-DMTP"
@@ -11,7 +38,9 @@ def test_qwen36_dmtp_matches_target_greedy():
     sampling = SamplingParams(temperature=0, max_tokens=32, ignore_eos=True)
     common = dict(
         revision="1cda14dd71a3f47115850eb790f416f165da1cb5",
+        worker_extension_cls="tests.e2e.pull_request.two_card.spec_decode.test_dmtp.DMTPBackendCheck",
         tensor_parallel_size=2,
+        block_size=128,
         dtype="bfloat16",
         enforce_eager=True,
         async_scheduling=False,
@@ -30,6 +59,7 @@ def test_qwen36_dmtp_matches_target_greedy():
         "num_speculative_tokens": 7,
     }
     with VllmRunner(target, speculative_config=spec, **common) as llm:
+        assert all(llm.model.collective_rpc("check_dmtp_attention_backends"))
         stop_after_first = SamplingParams(temperature=0, max_tokens=32, stop_token_ids=[reference[0][0]])
         stopped = llm.model.generate(prompts[:1], stop_after_first)[0].outputs[0]
         assert stopped.finish_reason == "stop" and len(stopped.token_ids) <= 1

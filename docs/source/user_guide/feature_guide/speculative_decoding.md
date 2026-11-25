@@ -399,6 +399,11 @@ each generation request. The native predictor and its private KV cache are
 replicated on each rank. Its KV storage is allocated for the configured request
 slots and context length, so bound `max-num-seqs` when sizing the engine.
 
+On supported A3 hardware, installing `flash_attn_npu_3` enables FA3 automatically
+for the target's full-attention layers and all five draft layers. This path uses
+device-side sequence lengths for speculative attention. The native MTP predictor
+uses eager attention and reads the accepted-prefix offsets on the CPU each round.
+
 The target verifies each proposed token. On A3 with BF16, the target can rank
 near-tied tokens differently when it processes the same prefix incrementally or
 in a single prefill. Greedy output can therefore diverge from a target-only run.

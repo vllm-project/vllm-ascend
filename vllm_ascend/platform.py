@@ -2119,10 +2119,12 @@ def _uses_qwen_fa3(config: VllmConfig) -> bool:
         return False
     # DFlash keeps the target model config while loading the draft.
     spec = config.speculative_config
-    return (
-        backends.model_tag in ("backbone", "dflash_head")
-        and spec.method == "dflash"
-        and "DFlash2DraftModel" in (spec.draft_model_config.architectures or ())
+    return backends.model_tag in ("backbone", "dflash_head") and (
+        (spec.method == "dflash" and "DFlash2DraftModel" in (spec.draft_model_config.architectures or ()))
+        or (
+            getattr(spec, "custom_method", None) == "dmtp"
+            and "DFlash2T1ResidualDraftModel" in (spec.draft_model_config.architectures or ())
+        )
     )
 
 
