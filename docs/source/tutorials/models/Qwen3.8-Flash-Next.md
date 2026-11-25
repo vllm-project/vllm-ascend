@@ -199,7 +199,6 @@ Verify that all host device and file paths exist before running Docker.
       --name $NAME \
       -e MEMCACHE_CONFIG_DIR \
       --net=host \
-      --privileged=true \
       --shm-size=128g \
       -e ASCEND_VISIBLE_DEVICES=0-7 \
       --device "${SSD_DEVICE_PATH}:${SSD_DEVICE_PATH}" \
@@ -228,7 +227,6 @@ Verify that all host device and file paths exist before running Docker.
       --name $NAME \
       -e MEMCACHE_CONFIG_DIR \
       --net=host \
-      --privileged=true \
       --shm-size=128g \
       -e ASCEND_VISIBLE_DEVICES=0-15 \
       --device "${SSD_DEVICE_PATH}:${SSD_DEVICE_PATH}" \
@@ -251,7 +249,6 @@ Verify that all host device and file paths exist before running Docker.
       --name $NAME \
       -e MEMCACHE_CONFIG_DIR \
       --net=host \
-      --privileged=true \
       --shm-size=500g \
       -e ASCEND_VISIBLE_DEVICES=0-7 \
       --device "${SSD_DEVICE_PATH}:${SSD_DEVICE_PATH}" \
@@ -799,7 +796,7 @@ For 950DT products, basic PD, the image-and-text 10K case, and the long-context 
     export HCCL_SOCKET_IFNAME="${nic_name}"
     export VLLM_VERSION=0.32.0
     export VLLM_RPC_TIMEOUT=3600000
-    export HCCL_EXEC_TIMEOUT=204
+    export HCCL_EXEC_TIMEOUT=3600
     export HCCL_CONNECT_TIMEOUT=120
     export VLLM_ASCEND_ENABLE_MLAPO=1
     export VLLM_USE_V1=1
@@ -865,7 +862,7 @@ For 950DT products, basic PD, the image-and-text 10K case, and the long-context 
     export HCCL_SOCKET_IFNAME="${nic_name}"
     export VLLM_VERSION=0.32.0
     export VLLM_RPC_TIMEOUT=3600000
-    export HCCL_EXEC_TIMEOUT=204
+    export HCCL_EXEC_TIMEOUT=3600
     export HCCL_CONNECT_TIMEOUT=120
     export VLLM_ASCEND_ENABLE_MLAPO=1
     export VLLM_USE_V1=1

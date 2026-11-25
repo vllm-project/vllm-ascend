@@ -83,8 +83,7 @@ def _run_mtp_case(model_name, use_replayssm, example_prompts, max_tokens):
 
 @pytest.mark.parametrize("model_name", MODELS)
 @pytest.mark.parametrize("use_replayssm", [False, True], ids=["replayssm_off", "replayssm_on"])
-def test_qwen3_next_mtp_acceptance_tp4(model_name, use_replayssm, monkeypatch):
-    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
+def test_qwen3_next_mtp_acceptance_tp4(model_name, use_replayssm):
     golden = [0.85, 0.46, 0.19]
 
     example_prompts = [

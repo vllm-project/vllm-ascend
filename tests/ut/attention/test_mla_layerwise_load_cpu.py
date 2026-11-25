@@ -50,7 +50,7 @@ def make_pool(has_load):
         kv_recv_thread=SimpleNamespace(raise_if_failed=Mock()),
         _submit_ready_layer_loads=Mock(),
     )
-    scope = {"reset_attention_compute_start_gate": Mock(), "logger": Mock()}
+    scope = {"reset_attention_gates": Mock(return_value=(Mock(), Mock())), "logger": Mock()}
     worker.wait_for_layer_load = MethodType(load(POOL, "wait_for_layer_load", scope, "LayerwiseKVPoolWorker"), worker)
     return worker, event, tracked_event
 

@@ -66,7 +66,6 @@ Select an image for the deployment platform and host operating system, and start
             --name kimi-k31 \
             --shm-size=1g \
             --net=host \
-            --privileged=true \
             -v /usr/local/Ascend/driver/tools/hccn_tool:/usr/local/Ascend/driver/tools/hccn_tool \
             -v /root/.cache:/root/.cache \
             -it "$IMAGE" bash
@@ -81,7 +80,6 @@ Select an image for the deployment platform and host operating system, and start
             --name kimi-k31 \
             --shm-size=1g \
             --net=host \
-            --privileged=true \
             -v /usr/local/Ascend/driver/tools/hccn_tool:/usr/local/Ascend/driver/tools/hccn_tool \
             -v /root/.cache:/root/.cache \
             -it "$IMAGE" bash
@@ -100,7 +98,6 @@ Select an image for the deployment platform and host operating system, and start
             --name kimi-k31 \
             --shm-size=1g \
             --net=host \
-            --privileged=true \
             -v /usr/local/Ascend/driver:/usr/local/Ascend/driver \
             -v /root/.cache:/root/.cache \
             -it "$IMAGE" bash
@@ -115,7 +112,6 @@ Select an image for the deployment platform and host operating system, and start
             --name kimi-k31 \
             --shm-size=1g \
             --net=host \
-            --privileged=true \
             -v /usr/local/Ascend/driver:/usr/local/Ascend/driver \
             -v /root/.cache:/root/.cache \
             -it "$IMAGE" bash
@@ -123,7 +119,7 @@ Select an image for the deployment platform and host operating system, and start
 
 After starting the container, run `docker ps` in another terminal and confirm that the container specified by `--name` is listed with status `Up`. The commands above use `--rm`, which removes the container when it exits; if startup fails, inspect the output in the launch terminal first. To retain the exit status and logs, rerun without `--rm`, then inspect the container with `docker ps -a` and `docker logs <CONTAINER_NAME>`.
 
-The containers above use privileged mode, host networking, and writable host mounts, and are intended for a controlled deployment environment. Services listen on `0.0.0.0`, and the examples do not configure access authentication; restrict network access to Proxy, engine, and cache service ports. Save scripts, configuration, and logs that must persist in explicitly mounted directories. `--rm` removes files in the container writable layer but does not delete host files in bind-mounted directories.
+The containers above use host networking and writable host mounts, and are intended for a controlled deployment environment. Services listen on `0.0.0.0`, and the examples do not configure access authentication; restrict network access to Proxy, engine, and cache service ports. Save scripts, configuration, and logs that must persist in explicitly mounted directories. `--rm` removes files in the container writable layer but does not delete host files in bind-mounted directories.
 
 ### 4.2 Source Code Installation {: #42-source-code-installation}
 
@@ -432,7 +428,7 @@ MegaMoE refers to the fused MoE computation path controlled by `enable_fused_mc2
         export ASCEND_LOCAL_COMM_RES='{"version":"1.3"}'
         export VLLM_RPC_TIMEOUT=3600000
         export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=30000
-        export HCCL_EXEC_TIMEOUT=2040
+        export HCCL_EXEC_TIMEOUT=3600
         export HCCL_CONNECT_TIMEOUT=1200
         export HCCL_BUFFSIZE=2000
         export OMP_PROC_BIND=false
@@ -531,7 +527,7 @@ MegaMoE refers to the fused MoE computation path controlled by `enable_fused_mc2
         export ASCEND_LOCAL_COMM_RES='{"version":"1.3"}'
         export VLLM_RPC_TIMEOUT=3600000
         export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=30000
-        export HCCL_EXEC_TIMEOUT=2040
+        export HCCL_EXEC_TIMEOUT=3600
         export HCCL_CONNECT_TIMEOUT=1200
         export HCCL_BUFFSIZE=800
         export OMP_PROC_BIND=false
@@ -1056,7 +1052,7 @@ The Decode launcher is located at [`vllm-ascend/examples/external_online_dp/laun
         export ASCEND_LOCAL_COMM_RES='{"version":"1.3"}'
         export VLLM_RPC_TIMEOUT=3600000
         export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=30000
-        export HCCL_EXEC_TIMEOUT=2040
+        export HCCL_EXEC_TIMEOUT=3600
         export HCCL_CONNECT_TIMEOUT=1200
         export HCCL_BUFFSIZE=2000
         export OMP_PROC_BIND=false
@@ -1155,7 +1151,7 @@ The Decode launcher is located at [`vllm-ascend/examples/external_online_dp/laun
         export ASCEND_LOCAL_COMM_RES='{"version":"1.3"}'
         export VLLM_RPC_TIMEOUT=3600000
         export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=30000
-        export HCCL_EXEC_TIMEOUT=2040
+        export HCCL_EXEC_TIMEOUT=3600
         export HCCL_CONNECT_TIMEOUT=1200
         export HCCL_BUFFSIZE=800
         export OMP_PROC_BIND=false
@@ -1700,7 +1696,7 @@ This guide uses `ock.mmc.local_service.dram.size=1GB` by default. It specifies t
         export ASCEND_LOCAL_COMM_RES='{"version":"1.3"}'
         export VLLM_RPC_TIMEOUT=3600000
         export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=30000
-        export HCCL_EXEC_TIMEOUT=2040
+        export HCCL_EXEC_TIMEOUT=3600
         export HCCL_CONNECT_TIMEOUT=1200
         export HCCL_BUFFSIZE=2000
         export OMP_PROC_BIND=false
@@ -1821,7 +1817,7 @@ This guide uses `ock.mmc.local_service.dram.size=1GB` by default. It specifies t
         export ASCEND_LOCAL_COMM_RES='{"version":"1.3"}'
         export VLLM_RPC_TIMEOUT=3600000
         export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=30000
-        export HCCL_EXEC_TIMEOUT=2040
+        export HCCL_EXEC_TIMEOUT=3600
         export HCCL_CONNECT_TIMEOUT=1200
         export HCCL_BUFFSIZE=800
         export OMP_PROC_BIND=false

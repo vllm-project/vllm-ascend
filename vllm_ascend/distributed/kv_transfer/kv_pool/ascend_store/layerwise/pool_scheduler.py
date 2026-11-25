@@ -17,8 +17,8 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.layerwis
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     LoadSpec,
-    LookupResult,
     RequestTracker,
+    StoreLookupResult,
     block_hash_to_str,
     get_block_hashes,
     get_sharded_mamba_group_ids,
@@ -101,7 +101,7 @@ class LayerwiseKVPoolScheduler(BaseKVPoolScheduler):
             self.use_block_key_layerwise and kv_cache_groups is not None and len(kv_cache_groups) > 1
         )
 
-    def _lookup_external_hit(self, request: Request, num_computed_tokens: int) -> LookupResult | None:
+    def _lookup_external_hit_tokens(self, request: Request, num_computed_tokens: int) -> StoreLookupResult | None:
         prompt_token_len = len(request.prompt_token_ids)
         if self.use_block_key_layerwise:
             token_len = self._floor_to_cache_transfer_granularity(prompt_token_len)
@@ -109,27 +109,30 @@ class LayerwiseKVPoolScheduler(BaseKVPoolScheduler):
                 token_len = self._floor_to_cache_transfer_granularity(max(prompt_token_len - 1, 0))
             if token_len < self.cache_transfer_granularity:
                 return None
-            replay_token_limit = self._floor_to_cache_transfer_granularity(
-                (request.num_tokens - 1) // self.lcm_block_size * self.lcm_block_size
+            replay_token_limit = (
+                self._floor_to_cache_transfer_granularity(
+                    (request.num_tokens - 1) // self.lcm_block_size * self.lcm_block_size
+                )
+                if self.use_eagle and self.block_key_hybrid
+                else token_len
             )
-            if self.block_key_hybrid and self.use_eagle and token_len > replay_token_limit:
+            if token_len > replay_token_limit:
                 coordinator = self.cache_coordinator
                 assert coordinator is not None
                 # Block-key layerwise lookup also probes the local prefix, as
                 # before, to preserve its original save boundary.
-                return coordinator.find_reachable_hits_with_replay(
+                hits = coordinator.find_reachable_hits_with_replay(
                     request.block_hashes,
                     token_len,
                     partial(self._query_layerwise_group_hits, 0),
                     replay_token_limit=replay_token_limit,
                     log_context=f"hit_check: req={request.request_id}",
                 )
-            hit = self._get_block_key_layerwise_hit_tokens(request, token_len, num_computed_tokens)
-            return LookupResult(hit, hit)
+                return StoreLookupResult(hits.raw_hit_tokens, replay_hit_tokens=hits.replay_hit_tokens)
+            return StoreLookupResult(self._get_block_key_layerwise_hit_tokens(request, token_len, num_computed_tokens))
 
         if self.use_layerwise_transfer:
-            hit = self._get_layerwise_hit_tokens(request, prompt_token_len, num_computed_tokens)
-            return LookupResult(hit, hit)
+            return StoreLookupResult(self._get_layerwise_hit_tokens(request, prompt_token_len, num_computed_tokens))
 
         raise RuntimeError(f"Unsupported layerwise data plane: {self.layerwise_data_plane!r}")
 
@@ -330,7 +333,7 @@ class LayerwiseKVPoolScheduler(BaseKVPoolScheduler):
         if draft_keys is not None and group_id in self.dspark_draft_only_group_ids:
             # Draft-only groups have no ordinary layerwise target object.
             return draft_keys.make_hit_check_keys(block_hash_hex)
-        if group_id in self.sharded_mamba_group_ids or group_id in self.num_speculative_blocks_by_group:
+        if group_id in self.sharded_mamba_group_ids or group_id in self.num_mamba_speculative_blocks_by_group:
             head_or_tp_ranks = self.tp_size
         else:
             head_or_tp_ranks = self.tp_size // self.put_step

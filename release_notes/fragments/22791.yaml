@@ -1,0 +1,9 @@
+pr: 22791
+entries:
+  - category: bugfix
+    text: >-
+      Fixed AscendStore whole-block prefix reuse during speculative decoding
+      selecting a prefix without the recurrent checkpoint or sliding-window
+      cache needed to resume, which could cause cache-load failures or incorrect
+      output. Recovery now falls back to a usable prefix while preserving the
+      existing cache-save policy.

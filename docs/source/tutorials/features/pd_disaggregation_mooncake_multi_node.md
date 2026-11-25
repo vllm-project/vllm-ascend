@@ -122,17 +122,21 @@ Execute the following commands on each node in sequence. The results must all be
 
 ### 950PR&950DT Products Communication Configuration {: #950pr950dt-products-communication-configuration}
 
-For 950PR&950DT Products, PD disaggregation uses the super plane (based on UB port and UBC protocol) by default. No additional network configuration is required for this default path.
+On 950PR&950DT Products, PD disaggregation uses the UB super plane (UBC) by default. The parameter plane supports UBG, UBoE, and Host RoCE on appropriately configured hardware.
 
-Automatic UB configuration requires HIXL 9.1.0 or later. Upgrade HIXL before using the configuration below. Set the following environment variable in both the prefiller and decoder serving environments to generate the communication configuration automatically:
+UBG and UBoE support both automatic and manual endpoint configuration. Host RoCE requires manual configuration. Also use it when HIXL cannot discover the topology of your A5 system, as can happen with custom hardware.
+
+#### Automatic configuration
+
+Automatic discovery requires HIXL 9.1.0 or later. Check the prerequisites for your CANN version in the [HIXL A5 LocalCommRes guide][hixl-localcommres]. Enable discovery in both serving environments before starting the prefiller and decoder.
 
 ```bash
 export ASCEND_LOCAL_COMM_RES='{"version":"1.3"}'
 ```
 
-The parameter plane supports UBG, UBoE, and RoCE network protocols. Each protocol requires compatible hardware and network configuration completed in advance. Consult your environment provider or administrator for the required environment and configuration.
+For the default UB super plane, this setting is sufficient. On supported 950PR&950DT Products, such as Atlas 850E/850, HIXL also selects the scale-out protocol (UBG or UBoE) from the hardware interconnect type. For automatic selection, leave `HCCL_INTRA_ROCE_ENABLE` unset and omit `comm_resource_config.protocol_desc` from `ASCEND_GLOBAL_RESOURCE_CONFIG`.
 
-For UBG or UBoE network protocols, keep the automatic configuration setting above and select the corresponding protocol before starting the serving processes:
+To restrict P/D traffic to a specific protocol, set the matching value on both sides.
 
 === "UBG"
 
@@ -146,60 +150,94 @@ For UBG or UBoE network protocols, keep the automatic configuration setting abov
     export ASCEND_GLOBAL_RESOURCE_CONFIG='{"comm_resource_config.protocol_desc":["uboe:device"]}'
     ```
 
-=== "RoCE"
+#### Manual configuration
 
-    Host RoCE parameter-plane configuration for 950PR&950DT Products currently requires manual endpoint files and checking the mapping between physical NPUs and host RoCE IP addresses. Prepare the endpoint configuration files under `/etc/hixlep` and set `ascend_local_comm_res_path` in `kv_connector_extra_config` on both sides. The directory is configurable; `/etc/hixlep` is only an example. For example, with `DP=4` and `TP=1` on each side:
+On each prefiller and decoder host, prepare one `ub_endpoint_npu_<physical_npu_id>.json` file per participating NPU. Use the host's physical NPU ID in the filename. For UB, UBG, and UBoE endpoint contents, follow the [HIXL A5 LocalCommRes guide][hixl-localcommres]. For Host RoCE, use the example below.
 
-    ```json
-    {
-        "kv_connector_extra_config": {
-            "prefill": {
-                "dp_size": 4,
-                "tp_size": 1
-            },
-            "decode": {
-                "dp_size": 4,
-                "tp_size": 1
-            },
-            "ascend_local_comm_res_path": "/etc/hixlep"
-        }
-    }
+Mount the endpoint directory (here `/etc/hixlep`) inside each container. Merge the corresponding prefiller example into your launch configuration, keeping your deployment's parallelism settings and KV port. On the decoder, change every `kv_role` to `kv_consumer`.
+
+=== "MooncakeConnectorV2"
+
+    ```bash
+    --kv-transfer-config '{
+      "kv_connector": "MooncakeConnectorV2",
+      "kv_role": "kv_producer",
+      "kv_port": 36000,
+      "kv_connector_extra_config": {
+        "ascend_local_comm_res_path": "/etc/hixlep"
+      }
+    }'
     ```
 
-    Merge these fields into your existing `--kv-transfer-config` and adjust the parallelism settings to your deployment.
+=== "MultiConnector"
 
-    When combining PD disaggregation with KV pooling through `MultiConnector`, place `ascend_local_comm_res_path` in the **outer** `MultiConnector`'s `kv_connector_extra_config`, alongside the `connectors` list. Do not place it in a child connector's `kv_connector_extra_config`: the worker loads the endpoint files from the outer KV transfer configuration. Keep the `prefill` and `decode` parallelism settings in the Mooncake P/D child connector's configuration.
+    For P/D with a [Mooncake KV pool](../../user_guide/feature_guide/kv_cache_pool_ascend_store.md#scenario-1-mooncake-backend), set the endpoint directory alongside `connectors`.
 
-    Create an endpoint file for each physical NPU used on the host, named `/etc/hixlep/ub_endpoint_npu_<physical_npu_id>.json`. The suffix is the host physical NPU ID, not the DP rank or the ordinal within the visible devices.
-
-    Check the host's NPU-to-RoCE-IP mapping before filling in these files. For a host whose RoCE IP addresses correspond to physical NPU IDs in ascending order, populate `ub_endpoint_npu_0.json`, `ub_endpoint_npu_1.json`, and so on in that order. **RoCE IPs can be populated in ascending numerical order**, after verifying the actual host mapping. Each file's `comm_id` must match the RoCE IP associated with that physical NPU; do not use the DP rank or visible-device order to select the address. The JSON content of each endpoint file follows this format:
-
-    ```json
-    {
-        "version": "1.3",
-        "net_instance_id": "superpod_0",
-        "endpoint_list": [
-            {
-                "protocol": "roce",
-                "comm_id": "<host_roce_ip>",
-                "placement": "host"
-            }
+    ```bash
+    --kv-transfer-config '{
+      "kv_connector": "MultiConnector",
+      "kv_role": "kv_producer",
+      "kv_port": 36000,
+      "kv_connector_extra_config": {
+        "ascend_local_comm_res_path": "/etc/hixlep",
+        "connectors": [
+          {
+            "kv_connector": "MooncakeConnectorV2",
+            "kv_role": "kv_producer",
+            "kv_port": 36000
+          },
+          {
+            "kv_connector": "AscendStoreConnector",
+            "kv_role": "kv_producer",
+            "kv_connector_extra_config": {"backend": "mooncake"}
+          }
         ]
-    }
+      }
+    }'
     ```
 
-    Replace `<host_roce_ip>` with the actual host RoCE IP address. Ensure the endpoint files are available at the configured path inside each container.
+##### Host RoCE endpoint example
 
-    !!! warning "Simplified Host RoCE configuration is NOT YET SUPPORTED"
+!!! warning "Host RoCE requires manual endpoint files"
 
-        A future configuration is intended to select Host RoCE with only the following environment variable:
+    Selecting Host RoCE with the environment variable alone is not yet supported. Use the per-NPU endpoint files and `ascend_local_comm_res_path` on both sides.
 
-        ```bash
-        # NOT YET SUPPORTED: do not use this in current deployments.
-        export ASCEND_GLOBAL_RESOURCE_CONFIG='{"comm_resource_config.protocol_desc":"roce:host"}'
-        ```
+    ```bash
+    # NOT YET SUPPORTED: do not use this in current deployments.
+    # export ASCEND_GLOBAL_RESOURCE_CONFIG='{"comm_resource_config.protocol_desc":"roce:host"}'
+    ```
 
-        **This configuration is not yet supported and does not replace the manual endpoint files above.** Continue to configure the per-NPU endpoint files and `ascend_local_comm_res_path` for current deployments.
+Use the host's physical SuperPod ID to follow the HIXL naming convention for `net_instance_id`. On hosts that expose `spod-info`, query the target NPU and chip (here both IDs are 0).
+
+```bash
+npu-smi info -t spod-info -i 0 -c 0
+```
+
+Replace `<super_pod_id>` below with the reported `Super Pod ID`. For example, an ID of `3` gives `superpod_3`.
+
+To find the host RoCE IP for each physical NPU:
+
+1. Use the host's network topology to identify the RoCE NIC and port connected to that physical NPU.
+2. Run `hiroce5 show_gids` on the host. Find the row for that NIC and port and read its RoCE IP.
+3. Set `comm_id` in `ub_endpoint_npu_<physical_npu_id>.json` to that IP. For example, if physical NPU 2 maps to `192.0.2.17`, set `"comm_id": "192.0.2.17"` in `ub_endpoint_npu_2.json`.
+
+**Use ascending numerical IP order only if you have verified that it matches physical NPU ID order on this host.** Do not use the DP rank or visible-device order to select the address.
+
+```json
+{
+    "version": "1.3",
+    "net_instance_id": "superpod_<super_pod_id>",
+    "endpoint_list": [
+        {
+            "protocol": "roce",
+            "comm_id": "<host_roce_ip>",
+            "placement": "host"
+        }
+    ]
+}
+```
+
+[hixl-localcommres]: https://gitcode.com/cann/hixl/wiki/A5%20LocalCommRes%E9%85%8D%E7%BD%AE%E6%8C%87%E5%8D%97.md
 
 ## Run with Docker
 
@@ -234,7 +272,6 @@ export NAME=vllm-ascend-950
 docker run --rm \
     --name "$NAME" \
     --net=host \
-    --privileged \
     --shm-size=1g \
     -e ASCEND_VISIBLE_DEVICES=0-7 \
     --ulimit memlock=-1:-1 \
@@ -250,12 +287,13 @@ For automatic UB configuration, set `ASCEND_LOCAL_COMM_RES='{"version":"1.3"}'` 
 - **CANN 9.2.0 and later:** This file is no longer a dependency; omit the mount.
 - **CANN 9.1.0 and 9.1.1:** The default UB P/D configuration above uses device-only endpoints and does not require this mount. If you explicitly enable Host UB (`ub_ctp:host`), mount the file unless the driver can provide the routing information through procfs.
 
-If needed, generate the file on the host first (see the [LocalCommRes Configuration Guide](https://gitcode.com/cann/hixl/wiki/A5%20LocalCommRes%E9%85%8D%E7%BD%AE%E6%8C%87%E5%8D%97.md)) and add `-v /lib/route.conf:/lib/route.conf:ro`. Host RoCE uses the separate endpoint files described above.
+If needed, generate the file on the host first (see the [LocalCommRes Configuration Guide][hixl-localcommres]) and add `-v /lib/route.conf:/lib/route.conf:ro`.
 
 For Host RoCE, insert the following options before `-it "$IMAGE" bash` to expose the RDMA devices, provide the HRN5 shared library, and mount the endpoint directory configured by `ascend_local_comm_res_path`:
 
 ```bash
 --device /dev/infiniband \
+--cap-add=NET_ADMIN \
 -v /usr/lib64/libhrn5-rdmav34.so:/usr/lib64/libhrn5-rdmav34.so:ro \
 -v /etc/hixlep:/etc/hixlep:ro \
 ```
@@ -263,7 +301,7 @@ For Host RoCE, insert the following options before `-it "$IMAGE" bash` to expose
 Both paths in the endpoint-directory mount are configurable: the left side is the host directory containing the endpoint JSON files, and the right side is their directory inside the container. Set `ascend_local_comm_res_path` to the **container-side** directory. For example, `-v /srv/mooncake/endpoints:/opt/mooncake/endpoints:ro` requires `"ascend_local_comm_res_path": "/opt/mooncake/endpoints"`. Keep the `ub_endpoint_npu_<physical_npu_id>.json` filenames unchanged.
 
 - Use the provider library path/version matching the host driver and container RDMA userspace. Mount `/etc/libibverbs.d/hrn5.driver` with `-v /etc/libibverbs.d/hrn5.driver:/etc/libibverbs.d/hrn5.driver:ro` if required by that userspace; this configuration file does not replace the shared library.
-- `--privileged` exposes host devices. A non-privileged Host RoCE configuration must explicitly map the devices and provide `--cap-add=NET_ADMIN`; validate it for your driver and workload.
+- The Host RoCE options above explicitly map `/dev/infiniband` and add `NET_ADMIN` without granting privileged mode. Validate the device and permission requirements for your driver and workload.
 - Mounting the `hiroce5` diagnostic tool is **optional**, for example `-v /usr/local/bin/hiroce5:/usr/local/bin/hiroce5:ro` if that is its host path.
 
 ## Install Mooncake
@@ -1392,6 +1430,24 @@ ais_bench --models vllm_api_stream_chat --datasets gsm8k_gen_0_shot_cot_str_perf
 ### 1. Prefiller nodes need to warmup
 
 Since the computation of some NPU operators requires several rounds of warm-up to achieve best performance, we recommend preheating the service with some requests before conducting performance tests to achieve the best end-to-end throughput.
+
+### 2. Network interface selection for multi-node deployments {: #2-gloo}
+
+Depending on the hardware and cluster network configuration, a node may have both a management interface for administration (for example, 1 Gb/s) and a high-speed interface for traffic between nodes (for example, 100 Gb/s). In the launch examples, some components use `nic_name` to select an interface for cross-node TCP connections. If bandwidth limits these connections, try setting `nic_name` to a higher-bandwidth interface and compare performance under the same workload.
+
+Run the following command inside the service container to list the interfaces it can see and their IP addresses.
+
+```bash
+ip -br addr
+```
+
+Set `nic_name` to the name of a listed interface that can reach the other nodes in the deployment.
+
+To check the link speed, run the following command on the host. Replace `<physical-interface>` with the name of the physical interface.
+
+    ethtool <physical-interface>
+
+Check `Speed` in the output. For example, `100000Mb/s` means 100 Gb/s.
 
 ## Verification
 

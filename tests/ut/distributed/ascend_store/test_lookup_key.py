@@ -5,12 +5,13 @@ from unittest.mock import MagicMock, patch
 
 import torch
 from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheGroupSpec, MambaSpec
+from vllm.v1.serial_utils import MsgpackEncoder
 from zmq.error import ZMQError
 
 import tests.ut.distributed.ascend_store._mock_deps  # noqa: F401
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.coordinator import AscendStoreCoordinator
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.lookup_key import LookupKeyClient, LookupKeyServer
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import LookupResult
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import StoreLookupResult, TailKeyBoundary
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker import KVPoolWorker
 
 
@@ -22,6 +23,30 @@ def _config():
 
 
 class TestReplayLookupProtocol(unittest.TestCase):
+    def test_replay_and_partial_tail_responses_share_one_connection(self):
+        worker = MagicMock()
+        partial_hit = StoreLookupResult(44, (TailKeyBoundary(0, 48), TailKeyBoundary(1, 44)))
+        replay_hit = StoreLookupResult(64, replay_hit_tokens=32)
+        worker.lookup_scheduler.return_value = partial_hit
+        worker.lookup_scheduler_with_replay.return_value = replay_hit
+        with (
+            tempfile.TemporaryDirectory(prefix="kv-replay-") as rpc_dir,
+            patch(
+                "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.lookup_key.envs.VLLM_RPC_BASE_PATH",
+                rpc_dir,
+            ),
+        ):
+            server = LookupKeyServer(worker, _config())
+            client = LookupKeyClient(_config())
+            try:
+                self.assertEqual(client.lookup(64, [b"a"], [0, 1]), partial_hit)
+                self.assertEqual(client.lookup_with_replay(64, [b"a"], [0, 1], replay_token_limit=48), replay_hit)
+                self.assertEqual(client.lookup(64, [b"a"], [0, 1]), partial_hit)
+                self.assertFalse(client.closed)
+            finally:
+                client.close()
+                server.close()
+
     def test_real_rpc_preserves_save_boundary_and_requires_all_replicas(self):
         """Exercise client, server, worker and managers with only store I/O faked."""
         for ranks in (1, 2, 4):
@@ -93,25 +118,25 @@ class TestReplayLookupProtocol(unittest.TestCase):
                     try:
                         self.assertEqual(
                             client.lookup_with_replay(64, hashes, [0, 1], replay_token_limit=48),
-                            LookupResult(64, 32),
+                            StoreLookupResult(64, replay_hit_tokens=32),
                         )
                         self.assertEqual(worker.m_store.exists.call_count, 2)
                         self.assertTrue(all(c.args[2] for c in key_variants.call_args_list))
                         present.remove(f"g1:{hashes[1].hex()}@{ranks - 1}")
                         self.assertEqual(
                             client.lookup_with_replay(64, hashes, [0, 1], replay_token_limit=48),
-                            LookupResult(64, 0),
+                            StoreLookupResult(64, replay_hit_tokens=0),
                         )
                         self.assertEqual(worker.m_store.exists.call_count, 4)
                         # The legacy wire format and reset remain usable on the
                         # same socket after paired responses.
-                        self.assertEqual(client.lookup(64, hashes, [0, 1]), 64)
+                        self.assertEqual(client.lookup(64, hashes, [0, 1]), StoreLookupResult(64))
                         self.assertTrue(client.reset())
                         worker.m_store.remove_all.assert_called_once()
                         worker.m_store.exists.side_effect = RuntimeError("store unavailable")
                         self.assertEqual(
                             client.lookup_with_replay(64, hashes, [0, 1], replay_token_limit=48),
-                            LookupResult(0, 0),
+                            StoreLookupResult(0, replay_hit_tokens=0),
                         )
                     finally:
                         client.close()
@@ -119,9 +144,18 @@ class TestReplayLookupProtocol(unittest.TestCase):
 
     def test_invalid_or_failed_response_cannot_become_a_hit(self):
         def response(raw, replay):
-            return raw.to_bytes(4, "big") + replay.to_bytes(4, "big")
+            return MsgpackEncoder().encode((raw, replay))
 
-        for reply in (b"\x00", b"", response(80, 32), response(64, 64), response(16, 32), ZMQError("timeout")):
+        for reply in (
+            [b"\x00"],
+            [b""],
+            response(-1, 0),
+            response(32, -1),
+            response(80, 32),
+            response(64, 64),
+            response(16, 32),
+            ZMQError("timeout"),
+        ):
             with (
                 self.subTest(reply=reply),
                 patch(
@@ -130,19 +164,19 @@ class TestReplayLookupProtocol(unittest.TestCase):
             ):
                 socket = socket_factory.return_value
                 if isinstance(reply, Exception):
-                    socket.recv.side_effect = reply
+                    socket.recv_multipart.side_effect = reply
                 else:
-                    socket.recv.return_value = reply
+                    socket.recv_multipart.return_value = reply
                 client = LookupKeyClient(_config())
                 try:
                     self.assertEqual(
                         client.lookup_with_replay(64, [b"a"], [0, 1], replay_token_limit=48),
-                        LookupResult(0, 0),
+                        StoreLookupResult(0, replay_hit_tokens=0),
                     )
                     self.assertTrue(client.closed)
                     self.assertEqual(
                         client.lookup_with_replay(64, [b"a"], [0, 1], replay_token_limit=48),
-                        LookupResult(0, 0),
+                        StoreLookupResult(0, replay_hit_tokens=0),
                     )
                     socket.send_multipart.assert_called_once()
                 finally:
@@ -160,7 +194,10 @@ class TestReplayLookupProtocol(unittest.TestCase):
             server = LookupKeyServer(worker, _config())
             client = LookupKeyClient(_config())
             try:
-                self.assertEqual(client.lookup_with_replay(64, [b"a"], [0], replay_token_limit=48), LookupResult(0, 0))
+                self.assertEqual(
+                    client.lookup_with_replay(64, [b"a"], [0], replay_token_limit=48),
+                    StoreLookupResult(0, replay_hit_tokens=0),
+                )
                 self.assertTrue(client.closed)
             finally:
                 client.close()

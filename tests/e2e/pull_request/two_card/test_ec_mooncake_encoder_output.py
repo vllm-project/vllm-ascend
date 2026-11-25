@@ -323,7 +323,6 @@ def _run_epd(baseline_outputs: dict[str, str]) -> None:
         env_dict={
             "EC_MOONCAKE_RESERVATION_PORT": str(reservation_port),
             "MOONCAKE_EC_PROTOCOL": "ascend",
-            "VLLM_USE_V2_MODEL_RUNNER": "1",
         },
     ):
         assert _run_epd_requests(encode_port, pd_port, reservation_port) == baseline_outputs
@@ -357,7 +356,6 @@ def baseline_outputs() -> dict[str, str]:
         auto_port=False,
         env_dict={
             "ASCEND_RT_VISIBLE_DEVICES": "0",
-            "VLLM_USE_V2_MODEL_RUNNER": "1",
         },
     ) as baseline_server:
         return _run_requests(baseline_server)

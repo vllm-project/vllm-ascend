@@ -54,6 +54,7 @@ from vllm_ascend.ops.triton.qwen4_exp.qsa import (
 from .attention_dispatch import build_qsa_request_plan, dispatch_qsa_attention
 from .gbsa import GBSA_PAGE_SIZE, qsa_gbsa_attention
 from .lightning_indexer import QSAIndexerMetadataProtocol, qsa_select_paged_tokens_lightning_v2
+from .topk_buffer import share_topk_buffer
 
 if TYPE_CHECKING:
     import vllm.models.qwen4_exp.amd.qsa_indexer as upstream_indexer
@@ -797,6 +798,8 @@ class AscendQwen4ExpQSAAttention(upstream_qsa.Qwen4ExpQSAAttention):
     def __init__(self, *, vllm_config: VllmConfig, **kwargs) -> None:
         if vllm_config.parallel_config.prefill_context_parallel_size == 1:
             super().__init__(vllm_config=vllm_config, **kwargs)
+            # Rebind as each layer is constructed to limit live allocations.
+            share_topk_buffer(self)
             return
         # Upstream constructs token-local projections and cache owners. The
         # Ascend forward and metadata builders handle the PCP layout.

@@ -52,7 +52,7 @@ RUNNER_KWARGS: _RunnerKwargs = {
 
 @pytest.fixture(scope="module", autouse=True)
 def mrv2_environment():
-    with patch.dict(os.environ, {"VLLM_USE_V2_MODEL_RUNNER": "1", "VLLM_WORKER_MULTIPROC_METHOD": "spawn"}):
+    with patch.dict(os.environ, {"VLLM_WORKER_MULTIPROC_METHOD": "spawn"}):
         yield
 
 
