@@ -203,10 +203,12 @@ class AscendMLAAttentionSpec(MLAAttentionSpec):
     # Per-rank query heads used by FlashMLA layout selection. Auxiliary MLA
     # caches without query heads use the one-latent-head cache contract.
     num_heads: int = 1
+    # TODO: Remove the backend-only component dimensions, layout and FA quant
+    # flag from this spec when runtime cache metadata ownership is refactored.
+    # These fields are temporary compatibility metadata for the migration.
     kv_lora_rank: int | None = None
     qk_rope_head_dim: int | None = None
     mla_cache_layout: Literal["component_major", "token_interleaved"] = "component_major"
-    # Transitional owner decision for quantized MLA runtime views.
     fa_quant_layer: bool = False
     scale_dim: int = 0
     scale_dtype: torch.dtype = torch.int8
