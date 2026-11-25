@@ -114,7 +114,9 @@ def test_grouped_lora_mixed_adapters_local_tp_shard(tp_size, tp_rank, fully_shar
     assert actual.is_contiguous()
     expected = _reference(impl, x, adapter_ids, adapter_a, adapter_b)
     torch.testing.assert_close(actual.cpu(), expected, atol=0.02, rtol=0.02)
-    base_only = impl.wo_a.base_layer.grouped_forward(x)
+    base_impl = AscendDSAImpl.__new__(AscendDSAImpl)
+    base_impl.wo_a = impl.wo_a.base_layer
+    base_only = base_impl._wo_a_bmm(x)
     assert (actual[::4] - base_only[::4]).abs().max().item() > 0.01
     torch.testing.assert_close(actual[1::4], base_only[1::4], atol=0, rtol=0)
 
@@ -160,6 +162,9 @@ def test_grouped_mxfp8_lora_preserves_bf16_adapter_input(is_prefill):
     _set_mapping(punica, adapter_ids, is_prefill=is_prefill)
     actual = impl._wo_a_bmm(x).cpu()
     base_only = torch.full((NUM_TOKENS, NUM_GROUPS, GROUP_OUTPUT_SIZE), 2 * scale, dtype=torch.bfloat16)
+    base_impl = AscendDSAImpl.__new__(AscendDSAImpl)
+    base_impl.wo_a = base
+    torch.testing.assert_close(base_impl._wo_a_bmm(x).cpu(), base_only, atol=0, rtol=0)
     delta = (1.03125 - 1.0) * torch.tensor((0, *gains), dtype=torch.bfloat16)[adapter_ids]
     torch.testing.assert_close(actual, base_only + delta[:, None, None], atol=0, rtol=0)
 

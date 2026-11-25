@@ -666,6 +666,7 @@ class DeepseekV4Attention(nn.Module):
             quant_config=quant_config,
             # prefix=f'{prefix}.attn',
             prefix=f"{prefix}",
+            output_projection_owner=self,
         )
 
     def forward(

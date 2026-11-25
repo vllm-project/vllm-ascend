@@ -5,8 +5,6 @@ entries:
       Fixed DeepSeek V4 LoRA adapters for the main and indexer compressor wkv/wgate
       projections and grouped wo_a projection being silently ignored. These adapters
       now affect their selected requests, including batches mixed with base-model requests.
-      DSA multi-stream overlap is automatically disabled with --enable-lora for
-      correctness, which can reduce throughput.
   - category: bugfix
     text: >-
       Fixed LoRA prefill and decode failing on Ascend 950 with missing sgmv_shrink
@@ -14,8 +12,14 @@ entries:
       default of 16.
   - category: bugfix
     text: >-
-      Fixed LoRA prefill graph capture on Atlas A2 and A3 when --max-lora-rank
-      is 128 or higher.
+      Fixed failures during LoRA prefill graph capture on Atlas A2 and A3 when
+      --max-lora-rank is 128 or higher.
+  - category: breaking
+    text: >-
+      DeepSeek V4 now disables DSA multi-stream overlap when --enable-lora is set,
+      ignoring multistream_dsv4_dsa_overlap in --additional-config even if it is true
+      (the default). Existing LoRA deployments need no configuration changes, but
+      the serial execution can reduce throughput.
   - category: breaking
     text: >-
       DeepSeek V4 with LoRA now fails at initialization for unsupported context-parallel

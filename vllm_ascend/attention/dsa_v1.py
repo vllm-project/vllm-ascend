@@ -58,6 +58,7 @@ from vllm_ascend.distributed.parallel_state import get_otp_group
 from vllm_ascend.lora.deepseek_v4 import AscendDeepseekV4GroupedWoAWithLoRA
 from vllm_ascend.models.deepseek_v4.cache_reuse import get_swa_save_layer_name
 from vllm_ascend.models.deepseek_v4.compressor import AscendCompressorMetadata
+from vllm_ascend.models.deepseek_v4.grouped_wo_a import AscendDeepseekV4GroupedWoA
 from vllm_ascend.models.deepseek_v4.indexer import AscendIndexerMetadata, IndexerOverlapPlan
 from vllm_ascend.ops.cv_linear import CVLinearWrapper
 from vllm_ascend.ops.linear import AscendUnquantizedLinearMethod
@@ -2269,6 +2270,8 @@ class AscendDSAImpl(AttentionImplBase[Any]):
         """Project grouped activations with FP8 or BF16, preserving the 3D layout."""
         if isinstance(self.wo_a, AscendDeepseekV4GroupedWoAWithLoRA):
             return self.wo_a(o_proj_input)
+        if isinstance(self.wo_a, AscendDeepseekV4GroupedWoA):
+            return self.wo_a.grouped_forward(o_proj_input)
         if self.support_fp8_attention and _has_weight_scale(self.wo_a):
             o_proj_input, act_scale = torch_npu.npu_dynamic_mx_quant(o_proj_input, dst_type=torch.float8_e4m3fn)
             return torch_npu.npu_transpose_quant_batchmatmul(

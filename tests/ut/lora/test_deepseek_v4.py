@@ -8,13 +8,17 @@ import pytest
 import torch
 import vllm.lora.utils as lora_utils
 from torch import nn
+from vllm.config.lora import LoRAConfig
 from vllm.lora.layers import ColumnParallelLinearWithLoRA, DeepseekV4GroupedWoAWithLoRA
+from vllm.lora.lora_model import LoRAModel
+from vllm.lora.lora_weights import LoRALayerWeights
+from vllm.lora.model_manager import LoRAModelManager
 
 from vllm_ascend.attention.dsa_v1 import AscendDSAImpl
 from vllm_ascend.lora.deepseek_v4 import AscendDeepseekV4GroupedWoAWithLoRA
 from vllm_ascend.lora.utils import refresh_all_lora_classes
 from vllm_ascend.models.deepseek_v4.grouped_wo_a import AscendDeepseekV4GroupedWoA
-from vllm_ascend.ops.dsa import dsa_forward
+from vllm_ascend.ops.dsa import AscendDeepseekSparseAttention, DSAModules, dsa_forward
 
 
 class _ReferencePunica:
@@ -197,3 +201,116 @@ def test_dsa_forward_refreshes_projection_aliases_after_lora_wrapping():
     assert impl.wo_a is owner.wo_a
     assert impl.wo_b is owner.wo_b
     impl.forward.assert_called_once_with("attn", hidden_states, None, None, output)
+
+
+def _make_dsa_projection_model():
+    owner = nn.Module()
+    owner.wo_a = _make_grouped_projection(1, 0)
+    owner.wo_b = nn.Identity()
+    impl = AscendDSAImpl.__new__(AscendDSAImpl)
+    impl.support_fp8_attention = False
+    impl.forward = lambda name, x, cache, metadata, output: output.copy_(impl._wo_a_bmm(x))
+    backend = nn.Module()
+    backend.impl, backend.layer_name = impl, "attn"
+    modules = DSAModules(
+        wq_a=nn.Identity(),
+        q_norm=nn.Identity(),
+        q_norm_without_weight=nn.Identity(),
+        wq_b=nn.Identity(),
+        wkv=nn.Identity(),
+        kv_norm=nn.Identity(),
+        wo_a=owner.wo_a,
+        wo_b=owner.wo_b,
+        attn_sink=nn.Identity(),
+        indexer=None,
+        compressor=None,
+        swa_cache_layer=nn.Identity(),
+    )
+    config = SimpleNamespace(compilation_config=SimpleNamespace(static_forward_context={}))
+    with (
+        patch("vllm_ascend.ops.dsa.DSAAttention", return_value=backend),
+        patch("vllm_ascend.ops.dsa.get_current_vllm_config", return_value=config),
+    ):
+        owner.dsa_attn = AscendDeepseekSparseAttention(
+            dim=12,
+            n_heads=4,
+            scale=1.0,
+            n_local_heads=4,
+            q_lora_rank=2,
+            o_lora_rank=3,
+            head_dim=4,
+            rope_head_dim=0,
+            nope_head_dim=4,
+            eps=1e-6,
+            n_groups=4,
+            n_local_groups=4,
+            window_size=8,
+            compress_ratio=1,
+            dsa_modules=modules,
+            prefix="layer",
+            output_projection_owner=owner,
+        )
+    assert all(module is not owner for module in owner.dsa_attn.modules())
+    model = nn.Module()
+    model.config, model.packed_modules_mapping = SimpleNamespace(), {}
+    model.embed_input_ids = lambda input_ids: input_ids
+    model.forward = lambda input_ids, positions: input_ids
+    model.model = nn.Module()
+    model.model.layers = nn.ModuleList([nn.Module() for _ in range(3)])
+    model.model.layers[2].self_attn = owner
+    return model, owner, config.compilation_config.static_forward_context
+
+
+@pytest.mark.parametrize(
+    "target", [None, "wo_a", "model.layers.2.self_attn.wo_a", "model.layers.2.self_attn.dsa_attn.wo_a"]
+)
+@pytest.mark.parametrize("is_profiling", [False, True])
+def test_dsa_applies_adapter_loaded_with_target_allowlist(monkeypatch, target, is_profiling):
+    monkeypatch.setattr(lora_utils, "_all_lora_classes", lora_utils._all_lora_classes)
+    refresh_all_lora_classes()
+    model, owner, layers = _make_dsa_projection_model()
+    base = owner.wo_a
+    x = torch.arange(48, dtype=torch.float32).reshape(3, 4, 4) / 16
+    base_output = torch.einsum("tgi,gio->tgo", x, base.weight)
+    a = torch.arange(8, dtype=torch.float32).reshape(2, 4) / 8
+    b = torch.arange(24, dtype=torch.float32).reshape(12, 2) / 16
+    targets_alias = target is not None and ".dsa_attn." in target
+    module_name = target if targets_alias else "model.layers.2.self_attn.wo_a"
+    lora_config = LoRAConfig(
+        max_loras=1,
+        max_lora_rank=8,
+        lora_dtype=torch.float32,
+        target_modules=None if target is None else [target],
+    )
+    vllm_config = SimpleNamespace(parallel_config=SimpleNamespace(enable_expert_parallel=False))
+    with patch("vllm.lora.model_manager.get_punica_wrapper", return_value=_ReferencePunica([0, -1, 0])):
+        manager = LoRAModelManager(model, 3, 8, 16, lora_config, torch.device("cpu"), vllm_config)
+    projection = owner.dsa_attn.wo_a if targets_alias else owner.wo_a
+    assert isinstance(projection, AscendDeepseekV4GroupedWoAWithLoRA)
+    assert set(manager.modules) == {module_name}
+    if targets_alias:
+        assert owner.wo_a is base
+    elif target == module_name:
+        # The real manager intentionally leaves the non-matching alias unwrapped.
+        assert owner.dsa_attn.wo_a is base
+    manager.add_adapter(LoRAModel(1, 2, {module_name: LoRALayerWeights(module_name, 2, 2, a, b)}))
+    manager.activate_adapter(1)
+
+    context = SimpleNamespace(no_compile_layers=layers, attn_metadata=None if is_profiling else {})
+    actual = torch.empty_like(base_output)
+    with (
+        patch("vllm_ascend.ops.dsa.get_forward_context", return_value=context),
+        patch("vllm_ascend.ops.dsa._build_kv_cache", return_value=None),
+        patch(
+            "torch_npu.npu_transpose_batchmatmul",
+            side_effect=lambda inputs, weight, **kwargs: torch.einsum("tgi,gio->tgo", inputs, weight).contiguous(),
+            create=True,
+        ),
+    ):
+        dsa_forward(x, actual, "layer")
+    delta = torch.einsum("tgi,ri,gor->tgo", x, a, b.reshape(4, 3, 2))
+    delta[1].zero_()
+    torch.testing.assert_close(actual, base_output + delta)
+    torch.testing.assert_close(actual[1], base_output[1])
+    assert not torch.allclose(actual[0], base_output[0])
+    assert owner.dsa_attn.dsa_attn.impl.wo_a is projection
