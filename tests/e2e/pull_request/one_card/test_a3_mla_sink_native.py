@@ -299,15 +299,17 @@ def test_native_production_builder_refreshes_padded_batch(sink):
     )
     first = builder.build(common, 2, 3, False, retain_for_graph=True)
     pointer = first.schedule.data_ptr()
-    first.query.zero_()
-    first.query[:3].copy_(data["q"])
+    assert first.query is None  # A3 consumes the two preprocessed query components.
+    padded_q = data["q"].new_zeros((first.slots.numel(), *data["q"].shape[1:]))
+    padded_q[:3].copy_(data["q"])
+    query = padded_q[..., :512].contiguous(), padded_q[..., 512:].contiguous()
     for qlens, klens in [((2, 1), (257, 33)), ((1, 2), (37, 143))]:
         common.seq_lens.copy_(torch.tensor(klens, dtype=torch.int32, device="npu"))
         common.query_start_loc.copy_(torch.tensor([0, qlens[0], 3], dtype=torch.int32, device="npu"))
         batch = builder.build(common, 2, 3, False)
         assert batch is first and batch.schedule.data_ptr() == pointer
         out, lse = batch.adapter.attention(
-            batch.query,
+            query,
             data["k_cache"],
             block_table=batch.block_table,
             cache_seqlens=batch.cache_lens,
