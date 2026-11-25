@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM Ascend project
 
+from functools import partial
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
@@ -8,36 +9,66 @@ import pytest
 import torch
 from vllm.model_executor.layers.fused_moe.router.custom_routing_router import CustomRoutingRouter
 
+import vllm_ascend.ops.fused_moe.prepare_finalize as prepare_module
 import vllm_ascend.ops.fused_moe.routed_experts as routed_experts_module
+from vllm_ascend._310p.fused_moe.grouped_topk_router import AscendGroupedTopKRouter310
 from vllm_ascend.ops.fused_moe.moe_comm_method import AllGatherCommImpl
 from vllm_ascend.ops.fused_moe.routed_experts import AscendRoutedExperts, EplbExpertTensorList
+from vllm_ascend.ops.fused_moe.router.fused_topk_router import AscendFusedTopKRouter
+from vllm_ascend.ops.fused_moe.router.grouped_topk_router import AscendGroupedTopKRouter
 from vllm_ascend.quantization.nz import NzCastSpec
 from vllm_ascend.quantization.quant_type import QuantType
 
 
-@pytest.mark.parametrize(("weight_on_input", "custom_router"), [(False, False), (True, False), (False, True)])
-def test_pcp_preserves_float_activations_for_routing(monkeypatch, weight_on_input, custom_router):
+class _ModelRouter(AscendGroupedTopKRouter):
+    """A model-supplied router may override the built-in selection logic."""
+
+
+@pytest.mark.parametrize(
+    ("router_cls", "weight_on_input", "expected_dtype"),
+    [
+        (AscendFusedTopKRouter, False, torch.int8),
+        (AscendGroupedTopKRouter, False, torch.int8),
+        (AscendGroupedTopKRouter310, False, torch.int8),
+        (AscendFusedTopKRouter, True, torch.bfloat16),
+        (CustomRoutingRouter, False, torch.bfloat16),
+        (_ModelRouter, False, torch.bfloat16),
+    ],
+)
+def test_pcp_router_receives_expected_activations(monkeypatch, router_cls, weight_on_input, expected_dtype):
+    config = SimpleNamespace(pcp_size=2, dp_size=1, is_sequence_parallel=False)
     layer = SimpleNamespace(
         enable_npugraph_ex_static_kernel=False,
-        moe_config=SimpleNamespace(pcp_size=8, is_sequence_parallel=False),
+        moe_config=config,
         quant_type=QuantType.W8A8,
-        router=MagicMock(spec=CustomRoutingRouter) if custom_router else None,
+        router=object.__new__(router_cls),
         apply_router_weight_on_input=weight_on_input,
     )
+    layer._select_experts = partial(AscendRoutedExperts._select_experts, layer)
+    ctx = SimpleNamespace(in_profile_run=False, moe_comm_type=None, max_tokens_across_pcp=1)
     comm = MagicMock(spec=AllGatherCommImpl)
-    # Check the prepare policy before routing or expert kernels run.
-    comm.prepare.side_effect = RuntimeError("prepare boundary")
     monkeypatch.setattr(routed_experts_module, "get_forward_context", lambda: SimpleNamespace())
     monkeypatch.setattr(routed_experts_module, "get_moe_comm_method", lambda *args: comm)
+    monkeypatch.setattr(routed_experts_module, "_EXTRA_CTX", ctx)
+    monkeypatch.setattr(prepare_module, "_EXTRA_CTX", ctx)
+    monkeypatch.setattr(prepare_module, "get_dynamic_mx_quant_scale_alg", lambda: 0)
     monkeypatch.setattr(
-        routed_experts_module,
-        "_EXTRA_CTX",
-        SimpleNamespace(in_profile_run=False, moe_comm_type=None),
+        prepare_module, "get_pcp_group", lambda: SimpleNamespace(all_gather=lambda x, dim: x.repeat_interleave(2, dim))
     )
-    with pytest.raises(RuntimeError, match="prepare boundary"):
-        AscendRoutedExperts.forward_impl(layer, hidden_states=torch.randn(3, 4), router_logits=torch.randn(3, 8))
-    expected = QuantType.NONE if weight_on_input or custom_router else QuantType.W8A8
-    assert comm.prepare.call_args.kwargs["quant_type"] == expected
+    monkeypatch.setattr(
+        prepare_module.torch_npu, "npu_dynamic_quant", lambda x: (x.to(torch.int8), x[:, 0].float()), raising=False
+    )
+    comm.prepare.side_effect = prepare_module.PrepareAndFinalizeWithAllGather(config).prepare
+
+    inputs = torch.tensor([[0.5, 0.75]], dtype=torch.bfloat16)
+
+    def select_experts(self, hidden_states, router_logits, input_ids):
+        torch.testing.assert_close(hidden_states, inputs.to(expected_dtype).repeat(2, 1))
+        raise RuntimeError("expert selection complete")
+
+    monkeypatch.setattr(router_cls, "_select_experts", select_experts)
+    with pytest.raises(RuntimeError, match="expert selection complete"):
+        AscendRoutedExperts.forward_impl(layer, hidden_states=inputs, router_logits=torch.ones(1, 2))
 
 
 class _FakeNpuTensor:

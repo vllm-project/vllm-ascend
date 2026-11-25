@@ -388,61 +388,57 @@ class TestPrepareAndFinalize(unittest.TestCase):
 
 class TestSequenceParallelPCP(unittest.TestCase):
     def test_w8a8_pcp_preserves_token_and_scale_alignment(self):
-        # Include an empty owner and DP padding before PCP padding. Each rank
-        # has distinct rows/scales, so reordering scales independently fails.
-        for tokens in (0, 1, 3, 4):
-            for dp_size in (1, 2):
-                with self.subTest(tokens=tokens, dp_size=dp_size):
-                    config = MagicMock()
-                    config.is_sequence_parallel = False
-                    config.dp_size = dp_size
-                    config.pcp_size = 2
-                    inputs = torch.arange(tokens * 4).reshape(tokens, 4).float()
-                    logits = inputs[:, :2].clone()
-                    dp_rows = 4 * dp_size if dp_size > 1 else tokens
-                    pcp_rows = dp_rows + 1
-                    config.dp_group.all_gather.side_effect = lambda x, dim: torch.cat((x, x + 16), dim)
+        def rows(values):
+            return torch.tensor(values, dtype=torch.float32).reshape(-1, 1)
 
-                    def quantize(x):
-                        return x.to(torch.int8), x.sum(dim=1) + 1
+        def quantize(x):
+            return x.to(torch.int8), x.flatten() + 0.5
 
-                    def gather(x, dim):
-                        return torch.cat((x, x.flip(0)), dim)
+        def gather_with_peer(*tensors):
+            peer = iter(tensors)
+            return lambda x, dim: torch.cat((x, next(peer)), dim)
 
-                    with (
-                        patch(
-                            "vllm_ascend.ops.fused_moe.prepare_finalize.get_dynamic_mx_quant_scale_alg", return_value=0
-                        ),
-                        patch("vllm_ascend.ops.fused_moe.prepare_finalize.get_pcp_group") as pcp,
-                        patch(
-                            "vllm_ascend.ops.fused_moe.prepare_finalize._EXTRA_CTX",
-                            max_tokens_across_dp=4,
-                            max_tokens_across_pcp=pcp_rows,
-                        ),
-                        patch("torch_npu.npu_dynamic_quant", side_effect=quantize, create=True) as quant,
-                    ):
-                        pcp.return_value.all_gather.side_effect = gather
-                        pcp.return_value.reduce_scatter.side_effect = lambda x, dim: x.chunk(2, dim)[0]
-                        layer = PrepareAndFinalizeWithAllGather(config)
-                        result = layer.prepare(inputs, logits, quant_type=QuantType.W8A8)
+        # Expected local rows include DP and PCP padding, in that order.
+        for local, dp_peer, padded, pcp_peer in (
+            ([1], [2, 3], [1, 0, 2, 3, 0], [4, 5, 6, 7, 8]),
+            ([], None, [0, 0], [4, 5]),
+            ([], None, [], []),
+        ):
+            with self.subTest(local=local, pcp_peer=pcp_peer):
+                config = MagicMock(is_sequence_parallel=False, dp_size=1 if dp_peer is None else 2, pcp_size=2)
+                if dp_peer is not None:
+                    config.dp_group.all_gather.side_effect = gather_with_peer(rows(dp_peer), -rows(dp_peer))
 
-                    expected = inputs
-                    expected_logits = logits
-                    if dp_size > 1:
-                        expected = torch.nn.functional.pad(expected, (0, 0, 0, 4 - tokens))
-                        expected = torch.cat((expected, expected + 16))
-                        expected_logits = torch.nn.functional.pad(expected_logits, (0, 0, 0, 4 - tokens))
-                        expected_logits = torch.cat((expected_logits, expected_logits + 16))
-                    expected = torch.nn.functional.pad(expected, (0, 0, 0, pcp_rows - dp_rows))
-                    expected_logits = torch.nn.functional.pad(expected_logits, (0, 0, 0, pcp_rows - dp_rows))
-                    q, scale = quantize(expected)
-                    torch.testing.assert_close(result.hidden_states, gather(q, 0))
-                    torch.testing.assert_close(result.pertoken_scale, gather(scale, 0))
-                    torch.testing.assert_close(result.router_logits, gather(expected_logits, 0))
-                    self.assertEqual(layer.num_tokens_pcp, dp_rows)
+                peer = rows(pcp_peer)
+                peer_q, peer_scale = quantize(peer)
+                with (
+                    patch("vllm_ascend.ops.fused_moe.prepare_finalize.get_dynamic_mx_quant_scale_alg", return_value=0),
+                    patch("vllm_ascend.ops.fused_moe.prepare_finalize.get_pcp_group") as pcp,
+                    patch(
+                        "vllm_ascend.ops.fused_moe.prepare_finalize._EXTRA_CTX",
+                        max_tokens_across_dp=len(dp_peer or ()),
+                        max_tokens_across_pcp=len(pcp_peer),
+                    ),
+                    patch("torch_npu.npu_dynamic_quant", side_effect=quantize, create=True) as quant,
+                ):
+                    gather = pcp.return_value.all_gather
+                    gather.side_effect = gather_with_peer(peer_q if pcp_peer else peer, -peer, peer_scale)
+                    layer = PrepareAndFinalizeWithAllGather(config)
+                    result = layer.prepare(rows(local), -rows(local), quant_type=QuantType.W8A8)
+
+                expected = rows(padded + pcp_peer)
+                torch.testing.assert_close(result.router_logits, -expected)
+                if pcp_peer:
                     quant.assert_called_once()
-                    torch.testing.assert_close(quant.call_args.args[0], expected)
-                    self.assertEqual(pcp.return_value.all_gather.call_args_list[0].args[0].dtype, torch.int8)
+                    torch.testing.assert_close(quant.call_args.args[0], rows(padded))
+                    expected_q, expected_scale = quantize(expected)
+                    torch.testing.assert_close(result.hidden_states, expected_q)
+                    torch.testing.assert_close(result.pertoken_scale, expected_scale)
+                else:
+                    quant.assert_not_called()
+                    self.assertIsNone(result.pertoken_scale)
+                    torch.testing.assert_close(result.hidden_states, expected)
+                    self.assertEqual(gather.call_count, 2)
 
     def test_pcp_prequantization_keeps_floating_point_fallbacks(self):
         for quant_type, pcp_size, lora_context in (

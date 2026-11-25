@@ -25,10 +25,10 @@ from vllm.forward_context import get_forward_context
 from vllm.logger import logger
 from vllm.model_executor.layers.fused_moe import FusedMoERouter, RoutedExperts
 from vllm.model_executor.layers.fused_moe.config import FusedMoEConfig
-from vllm.model_executor.layers.fused_moe.router.custom_routing_router import CustomRoutingRouter
 from vllm.model_executor.layers.fused_moe.unquantized_fused_moe_method import UnquantizedFusedMoEMethod
 from vllm.model_executor.utils import replace_parameter
 
+from vllm_ascend._310p.fused_moe.grouped_topk_router import AscendGroupedTopKRouter310
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX, use_cann_megamoe
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
@@ -46,6 +46,8 @@ from vllm_ascend.ops.fused_moe.moe_comm_method import (
 )
 from vllm_ascend.ops.fused_moe.moe_utils import get_moe_num_logical_experts
 from vllm_ascend.ops.fused_moe.prepare_finalize import PrepareAndFinalizeWithAllGather
+from vllm_ascend.ops.fused_moe.router.fused_topk_router import AscendFusedTopKRouter
+from vllm_ascend.ops.fused_moe.router.grouped_topk_router import AscendGroupedTopKRouter
 from vllm_ascend.quantization.nz import NzCastSpec
 from vllm_ascend.quantization.quant_type import QuantType
 from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ, maybe_trans_nz
@@ -621,9 +623,12 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
             and isinstance(moe_comm_method, AllGatherCommImpl)
             and self.moe_config.pcp_size > 1
             and not self.moe_config.is_sequence_parallel
-            and (self.apply_router_weight_on_input or isinstance(self.router, CustomRoutingRouter))
+            and (
+                self.apply_router_weight_on_input
+                # Subclasses can override expert selection and read activation values.
+                or type(self.router) not in (AscendFusedTopKRouter, AscendGroupedTopKRouter, AscendGroupedTopKRouter310)
+            )
         ):
-            # Custom routing and input-side weighting consume floating-point activations.
             prepare_quant_type = QuantType.NONE
         prepare_output = moe_comm_method.prepare(
             hidden_states=hidden_states,
