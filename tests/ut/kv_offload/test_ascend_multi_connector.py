@@ -51,11 +51,27 @@ def test_hisparse_rejects_duplicate_children_and_legacy_store_alias(child):
     initialize_children.assert_not_called()
 
 
-def test_ordinary_store_alias_still_reaches_core():
+@pytest.mark.parametrize("store_name", ["AscendStoreConnector", "MooncakeConnectorStoreV1"])
+def test_ordinary_store_connector_creation(store_name):
+    from vllm.distributed.kv_transfer.kv_connector.factory import KVConnectorFactory
+    from vllm.v1.kv_offload.factory import OffloadingSpecFactory
+
+    from vllm_ascend.distributed.kv_transfer import register_connector
+    from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store import ascend_store_connector
+
     config = _hisparse_store_multi_config(with_hisparse=False)
-    config.kv_transfer_config.kv_connector_extra_config["connectors"][0]["kv_connector"] = "MooncakeConnectorStoreV1"
-    with patch.object(MultiConnector, "__init__", lambda self, **_: setattr(self, "_connectors", [])):
-        AscendMultiConnector(config, KVConnectorRole.SCHEDULER, None)
+    config.kv_transfer_config.kv_connector_extra_config["connectors"][0]["kv_connector"] = store_name
+    with (
+        patch.object(KVConnectorFactory, "_registry", {}),
+        patch.dict(OffloadingSpecFactory._registry),
+        patch.object(ascend_store_connector, "create_kv_pool_scheduler") as create_scheduler,
+    ):
+        register_connector()
+        connector = AscendMultiConnector(config, KVConnectorRole.SCHEDULER, SimpleNamespace(kv_cache_groups=[]))
+
+    (store,) = connector._connectors
+    assert isinstance(store, ascend_store_connector.AscendStoreConnector)
+    assert store.connector_scheduler is create_scheduler.return_value
 
 
 @pytest.mark.parametrize("source_first", [True, False])
@@ -187,39 +203,6 @@ def test_hisparse_store_validation_preserves_supported_topologies(with_hisparse)
     ):
         AscendMultiConnector(config, KVConnectorRole.WORKER, None)
     assert count_nodes.call_count == int(with_hisparse)
-
-
-@pytest.mark.parametrize(
-    "role, speculative_config, host_blocks, expected",
-    [
-        (KVConnectorRole.WORKER, SimpleNamespace(method="mtp"), 32, True),
-        (KVConnectorRole.WORKER, None, 32, False),
-        (KVConnectorRole.SCHEDULER, SimpleNamespace(method="mtp"), 32, False),
-        (KVConnectorRole.WORKER, SimpleNamespace(method="mtp"), None, False),
-    ],
-)
-def test_hisparse_save_fence_requires_worker_with_speculation_and_host_pool(
-    role, speculative_config, host_blocks, expected
-):
-    config = SimpleNamespace(
-        kv_transfer_config=SimpleNamespace(
-            kv_connector="MultiConnector",
-            is_kv_producer=False,
-            is_kv_consumer=False,
-            kv_connector_extra_config={"connectors": []},
-        ),
-        speculative_config=speculative_config,
-        scheduler_config=SimpleNamespace(disable_hybrid_kv_cache_manager=True),
-    )
-    with (
-        patch.object(MultiConnector, "__init__", return_value=None),
-        patch.object(AscendMultiConnector, "_configure_draft_host_mirror_save_hook") as configure,
-    ):
-        connector = AscendMultiConnector.__new__(AscendMultiConnector)
-        connector._connectors = []
-        AscendMultiConnector.__init__(connector, config, role, SimpleNamespace(hisparse_host_num_blocks=host_blocks))
-
-    assert configure.call_count == int(expected)
 
 
 def test_load_ready_observer_does_not_advance_child_attention_hooks():

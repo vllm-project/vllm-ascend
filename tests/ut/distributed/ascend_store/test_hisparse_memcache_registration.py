@@ -27,7 +27,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.memcache_b
     MmcDirect,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.buffer import BufferDescriptor, MemoryLocation
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.hisparse import (
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.hisparse.layout import (
     aligned_hisparse_allocation_config,
     build_pool_key_namespace,
 )

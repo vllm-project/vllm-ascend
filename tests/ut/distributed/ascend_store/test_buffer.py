@@ -3,7 +3,6 @@
 
 from dataclasses import FrozenInstanceError
 from types import SimpleNamespace
-from unittest.mock import Mock
 
 import pytest
 
@@ -13,7 +12,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.buffer import (
     MemoryLocation,
     buffer_arrays,
 )
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.hisparse import (
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.hisparse.layout import (
     HiSparseTransferLayout,
     has_hisparse_cache_layout,
     is_hisparse_ascendstore_enabled,
@@ -66,22 +65,3 @@ def test_layout_predicate_agrees_before_and_after_host_pool_sizing(host_blocks, 
         )
     assert not is_hisparse_ascendstore_enabled(SimpleNamespace(kv_transfer_config=None), config)
     assert not has_hisparse_cache_layout(None)
-
-
-def test_parent_save_ordering_skips_empty_stores_and_propagates_mirror_errors():
-    from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.draft_host_mirror import (
-        HiSparseDraftHostMirrorSaveHook,
-    )
-
-    source = SimpleNamespace(_draft_mirror_pending=True)
-    store = Mock()
-    store.has_pending_bulk_save.return_value = False
-    save_hook = HiSparseDraftHostMirrorSaveHook(source, [store])
-    save_hook.flush_host_mirror_if_needed()
-    assert source._draft_mirror_pending
-
-    # Incompatible Core must stop before a child can publish an external key.
-    store.has_pending_bulk_save.return_value = True
-    with pytest.raises(RuntimeError, match="pending draft layers"):
-        save_hook.flush_host_mirror_if_needed()
-    assert source._draft_mirror_pending

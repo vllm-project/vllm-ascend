@@ -90,7 +90,7 @@ from vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.dspark_kv import (
     apply_dspark_resident_kv_specs,
     get_resident_dspark_layer_names,
 )
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.hisparse import (
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.hisparse.layout import (
     aligned_hisparse_allocation_config,
     is_hisparse_ascendstore_enabled,
 )

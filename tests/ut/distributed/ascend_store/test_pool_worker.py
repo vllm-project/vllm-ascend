@@ -18,6 +18,8 @@
 import queue
 import threading
 import unittest
+from copy import copy
+from ctypes import addressof, c_ubyte, string_at
 from dataclasses import replace
 from itertools import product
 from types import SimpleNamespace
@@ -40,8 +42,8 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_conne
     AscendStoreConnector,
     create_kv_pool_worker,
 )
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.buffer import BufferDescriptor
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.draft_host_mirror import (
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.buffer import BufferDescriptor, MemoryLocation
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.hisparse.draft_host_mirror import (
     HiSparseDraftHostMirrorSaveHook,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.kv_transfer import (
@@ -58,6 +60,8 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.metadata
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.pool_worker import LayerwiseKVPoolWorker
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     AscendConnectorMetadata,
+    ChunkedTokenDatabase,
+    KeyMetadata,
     LoadSpec,
     ReqMeta,
     StoreLookupResult,
@@ -1958,16 +1962,20 @@ class TestKVPoolWorkerRegisterAndTransfer(unittest.TestCase):
         self.assertIs(worker._previous_save_batch, save_batch)
 
     def test_hisparse_waits_for_draft_host_bytes_before_bulk_save(self):
+        from vllm.config import KVTransferConfig
+        from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorRole
         from vllm.distributed.kv_transfer.kv_connector.v1.hisparse.connector import HiSparseConnector
 
         from vllm_ascend.distributed.kv_transfer.ascend_multi_connector import AscendMultiConnector
-        from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store import draft_host_mirror as host_mirror
-
-        source = HiSparseConnector.__new__(HiSparseConnector)
+        from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store import ascend_store_connector
+        from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.memcache_backend import MemcacheBackend
+        from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.hisparse import draft_host_mirror
 
         trace: list[str | bytes] = []
-        host_bytes = bytearray([37, 0])
-        draft_resident_bytes = bytes([91])
+        # Block 0 is the null block. PUT reads the two bytes in block 1.
+        host_pages = (c_ubyte * 4)(0, 0, 37, 0)
+        page_size = 2
+        draft_byte = 91
         page_transfer = object()
         draft_ready_event = MagicMock()
         host_ready_event = object()
@@ -1991,94 +1999,123 @@ class TestKVPoolWorkerRegisterAndTransfer(unittest.TestCase):
             self.assertIs(event, host_ready_event)
             trace.append("wait for draft copy")
 
-        def record_save_event():
-            trace.append("record save event")
-
-        def publish(requests):
-            self.assertIs(requests[0].current_event, send_event)
-            # The background sender synchronizes the save event before PUT.
-            requests[0].current_event.synchronize()
-            trace.append(bytes(host_bytes))
-
         def synchronize_save_event():
             if "wait for draft copy" in trace:
-                host_bytes[1:] = draft_resident_bytes
+                host_pages[3] = draft_byte
+
+        def put(keys, addrs, sizes, *, memory_location):
+            self.assertEqual(len(keys), 1)
+            self.assertIs(memory_location, MemoryLocation.HOST)
+            self.assertEqual(addrs, [[addressof(host_pages) + page_size]])
+            self.assertEqual(sizes, [[page_size]])
+            trace.append(string_at(addrs[0][0], sizes[0][0]))
+            return [True]
+
+        def initialize_hisparse(child, vllm_config, role, kv_cache_config):
+            child.connector_worker = mirror
 
         draft_ready_event.record.side_effect = lambda stream: trace.append("record draft event")
         compute_stream.wait_event.side_effect = wait_for_host
-        send_event.record.side_effect = record_save_event
+        send_event.record.side_effect = lambda: trace.append("record save event")
         send_event.synchronize.side_effect = synchronize_save_event
         mirror._enqueue_row_dma = enqueue_mirror
-        source.connector_worker = mirror
 
-        stores = []
-        send_threads = []
-        for _ in range(2):
-            worker = self._make_worker()
-            send = MagicMock(spec=KVCacheStoreSendingThread)
-            send.request_queue = MagicMock()
-            send.add_save_batch.side_effect = publish
-            worker.kv_send_thread = send
-            send_threads.append(send)
-            store = AscendStoreConnector.__new__(AscendStoreConnector)
-            store.can_put = True
-            store.use_layerwise = False
-            store.connector_worker = worker
-            meta = AscendConnectorMetadata(set(), set())
-            meta.add_request(
-                ReqMeta(req_id="r1", token_len_chunk=16, block_ids=[1], block_hashes=["h0"], can_save=True)
-            )
-            store._connector_metadata = meta
-            stores.append(store)
+        worker = self._make_worker()
+        backend = MagicMock(spec=MemcacheBackend)
+        backend.requires_exists_before_put = False
+        backend.put.side_effect = put
+        database = ChunkedTokenDatabase([KeyMetadata("model", 0, 0, 0, 0)], [16], None)
+        database.set_group_buffers({0: [addressof(host_pages)]}, {0: [page_size]})
+        sender = KVCacheStoreSendingThread(backend, database, 16, tp_rank=0, host_memory_group_ids=frozenset({0}))
+        worker.kv_send_thread = sender
 
-        connector = AscendMultiConnector.__new__(AscendMultiConnector)
-        # The parent prepares the shared Host mirror once before either Store saves.
-        connector._connectors = [stores[0], source, stores[1]]
-        connector._configure_draft_host_mirror_save_hook()
+        def drain_sender():
+            # Run the real sender jobs inline without starting an NPU thread.
+            while not sender.request_queue.empty():
+                sender._handle_request(sender.request_queue.get_nowait())
 
+        mtp = SimpleNamespace(method="mtp")
+        config = SimpleNamespace(
+            kv_transfer_config=KVTransferConfig(
+                kv_connector="MultiConnector",
+                kv_role="kv_both",
+                kv_connector_extra_config={
+                    "connectors": [
+                        {
+                            "kv_connector": "HiSparseConnector",
+                            "kv_role": "kv_both",
+                            "kv_connector_module_path": HiSparseConnector.__module__,
+                        },
+                        {
+                            "kv_connector": "AscendStoreConnector",
+                            "kv_role": "kv_both",
+                            "kv_connector_module_path": AscendStoreConnector.__module__,
+                            "kv_connector_extra_config": {"backend": "memcache", "load_async": True},
+                        },
+                    ]
+                },
+            ),
+            parallel_config=SimpleNamespace(nnodes=1, prefill_context_parallel_size=1, rank=1),
+            scheduler_config=SimpleNamespace(disable_hybrid_kv_cache_manager=True),
+            speculative_config=mtp,
+            attention_config=SimpleNamespace(hisparse_config=SimpleNamespace(eager_host_mirror=True)),
+        )
         with (
-            patch.object(host_mirror.torch.accelerator, "current_stream", return_value=compute_stream),
-            patch.object(host_mirror.torch, "Event", return_value=draft_ready_event),
-            patch.object(host_mirror.torch, "npu", create=True) as npu,
+            patch.object(HiSparseConnector, "__init__", initialize_hisparse),
+            patch.object(MemcacheBackend, "validate_hisparse_colocated_config"),
+            patch.object(ascend_store_connector, "create_kv_pool_worker", return_value=worker),
+            patch.object(ascend_store_connector, "create_kv_pool_scheduler"),
+            patch("vllm.distributed.parallel_state.get_node_count", return_value=1),
+        ):
+            connector = AscendMultiConnector(
+                config, KVConnectorRole.WORKER, SimpleNamespace(hisparse_host_num_blocks=32)
+            )
+            for role, speculative_config, host_blocks in (
+                (KVConnectorRole.WORKER, None, 32),
+                (KVConnectorRole.SCHEDULER, mtp, 32),
+                (KVConnectorRole.WORKER, mtp, None),
+            ):
+                with self.subTest(role=role, speculative_config=speculative_config, host_blocks=host_blocks):
+                    inactive_config = copy(config)
+                    inactive_config.speculative_config = speculative_config
+                    inactive = AscendMultiConnector(
+                        inactive_config, role, SimpleNamespace(hisparse_host_num_blocks=host_blocks)
+                    )
+                    self.assertIsNone(inactive._draft_host_mirror_save_hook)
+
+        _, store = connector._connectors
+        mirror_trace = ["record draft event", "enqueue draft copy", "wait for draft copy"]
+        with (
+            patch.object(draft_host_mirror.torch.accelerator, "current_stream", return_value=compute_stream),
+            patch.object(draft_host_mirror.torch, "Event", return_value=draft_ready_event),
+            patch.object(draft_host_mirror.torch, "npu", create=True) as npu,
+            patch.object(sender.request_queue, "join", side_effect=drain_sender) as join,
         ):
             npu.Event.return_value = send_event
-            connector.wait_for_save()
-            first_step_trace = trace.copy()
-            # A step without draft tokens must still allow the same two Stores
-            # to PUT, with no duplicate wait or draft DMA.
-            trace.clear()
-            connector.wait_for_save()
-            empty_step_trace = trace.copy()
-            # A later step must mirror its new bytes before either Store reads.
-            trace.clear()
-            draft_resident_bytes = bytes([113])
-            mirror._draft_mirror_pending = True
-            connector.wait_for_save()
+            # An empty draft step can save without another DMA. A later step must mirror fresh bytes.
+            for step, new_draft_byte in enumerate((91, None, 113)):
+                trace.clear()
+                if new_draft_byte is not None:
+                    draft_byte = new_draft_byte
+                    mirror._draft_mirror_pending = True
+                metadata = AscendConnectorMetadata(set(), set())
+                metadata.add_request(
+                    ReqMeta(f"r{step}", token_len_chunk=16, block_ids=[1], block_hashes=[f"h{step}"], can_save=True)
+                )
+                store.bind_connector_metadata(metadata)
+                connector.wait_for_save()
+                store.clear_connector_metadata()
+                expected_mirror = mirror_trace if new_draft_byte is not None else []
+                self.assertEqual(trace, [*expected_mirror, "record save event", bytes([37, draft_byte])])
 
+        self.assertEqual(join.call_count, 3)
         self.assertEqual(draft_ready_event.record.call_args_list, [call(compute_stream), call(compute_stream)])
-        for send in send_threads:
-            self.assertEqual(send.request_queue.join.call_count, 3)
-            self.assertEqual(send.raise_if_failed.call_count, 3)
-        self.assertEqual(
-            first_step_trace,
-            [
-                "record draft event",
-                "enqueue draft copy",
-                "wait for draft copy",
-                "record save event",
-                bytes([37, 91]),
-                "record save event",
-                bytes([37, 91]),
-            ],
-        )
-        self.assertEqual(empty_step_trace, ["record save event", bytes([37, 91])] * 2)
-        self.assertEqual(trace, first_step_trace[:3] + ["record save event", bytes([37, 113])] * 2)
         self.assertFalse(mirror._draft_mirror_pending)
         self.assertFalse(mirror._dma_submitted)
         self.assertEqual(mirror._post_forward_transfers, [page_transfer])
 
     def test_hisparse_bulk_save_records_event_without_draft_dma(self):
-        from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store import draft_host_mirror as host_mirror
+        from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.hisparse import draft_host_mirror as host_mirror
 
         worker = self._make_worker()
         worker.kv_send_thread = MagicMock(spec=KVCacheStoreSendingThread)
@@ -2117,14 +2154,16 @@ class TestKVPoolWorkerRegisterAndTransfer(unittest.TestCase):
                 self.assertFalse(mirror._draft_mirror_pending)
 
     def test_hisparse_bulk_save_rejects_incompatible_core_worker(self):
-        from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.draft_host_mirror import (
+        from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.hisparse.draft_host_mirror import (
             finish_draft_host_mirror_for_save,
         )
 
         with self.assertRaisesRegex(RuntimeError, "requires Core's _draft_mirror_pending flag"):
             finish_draft_host_mirror_for_save(SimpleNamespace())
+        missing_dma = SimpleNamespace(_draft_mirror_pending=True, _draft_layers=(1,))
         with self.assertRaisesRegex(RuntimeError, "requires Core's pending draft layers and row DMA hook"):
-            finish_draft_host_mirror_for_save(SimpleNamespace(_draft_mirror_pending=True, _draft_layers=(1,)))
+            finish_draft_host_mirror_for_save(missing_dma)
+        self.assertTrue(missing_dma._draft_mirror_pending)
         enqueue = MagicMock()
         with self.assertRaisesRegex(RuntimeError, "requires Core's DMA submission flag and Host write event"):
             finish_draft_host_mirror_for_save(

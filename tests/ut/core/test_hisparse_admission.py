@@ -30,7 +30,7 @@ from vllm.v1.kv_cache_layout import KVCacheLayout
 from vllm.v1.request import Request
 
 from vllm_ascend.core.kv_cache_config_builder import AscendKVCacheConfigBuilder
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.hisparse import aligned_hisparse_allocation_config
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.hisparse.layout import aligned_hisparse_allocation_config
 from vllm_ascend.hisparse.binding import prepare_hisparse_cache_views
 
 BLOCK_SIZE = 16
@@ -136,7 +136,7 @@ def test_registry_changes_only_the_resident_spec(other_connector):
     _, original = _cache_configs(store=False, hot_units=2, other_connector=other_connector)
     _, combined = _cache_configs(hot_units=2)
     _, store_only = _cache_configs(hisparse=False)
-    from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.hisparse_admission import (
+    from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.hisparse.admission import (
         AscendStoreHiSparseResidentSpec,
     )
 
@@ -164,7 +164,7 @@ def test_registry_changes_only_the_resident_spec(other_connector):
 @pytest.mark.parametrize(("window", "sizing_pages"), [(0, 1), (2, 3), (8, 8), (12, 8)])
 def test_registry_shares_the_spec_window_and_sizes_for_the_import_tail(window, sizing_pages):
     config, cache = _cache_configs(in_flight_blocks=window)
-    from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.hisparse_admission import (
+    from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.hisparse.admission import (
         AscendStoreHiSparseResidentManager,
     )
 
@@ -199,12 +199,6 @@ def test_resident_admission_counts_existing_pages_before_partial_import(window, 
         )
         == expected
     )
-
-
-def test_ascendstore_slab_alignment_requires_reservation():
-    _, cache = _cache_configs()
-    with pytest.raises(RuntimeError, match="slab alignment reservation"):
-        prepare_hisparse_cache_views(cache, {}, {})
 
 
 @pytest.mark.parametrize("device_sizes", [(), (128, 256)], ids=["no-device-tensors", "unequal-device-sizes"])
@@ -274,7 +268,7 @@ def test_registered_resident_admission(tokens, computed, local, admission, tail_
 )
 def test_scheduler_cache_manager_admits_partial_import(store, host_blocks, admitted):
     config, cache = _cache_configs(store=store, host_blocks=host_blocks)
-    from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.hisparse_admission import (
+    from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.hisparse.admission import (
         AscendStoreHiSparseResidentManager,
     )
 

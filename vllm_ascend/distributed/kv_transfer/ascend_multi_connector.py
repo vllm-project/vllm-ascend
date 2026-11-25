@@ -8,7 +8,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
 from vllm.distributed.kv_transfer.kv_connector.v1.multi_connector import MultiConnector
 
 from vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.dspark_context import uses_sfa_dspark_kv_transfer
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.hisparse import has_hisparse_cache_layout
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.hisparse.layout import has_hisparse_cache_layout
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
@@ -17,7 +17,7 @@ if TYPE_CHECKING:
     from vllm.v1.kv_cache_interface import KVCacheConfig
     from vllm.v1.request import Request
 
-    from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.draft_host_mirror import (
+    from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.hisparse.draft_host_mirror import (
         HiSparseDraftHostMirrorSaveHook,
     )
 
@@ -110,7 +110,7 @@ class AscendMultiConnector(MultiConnector, SupportsHMA):
         from vllm.distributed.kv_transfer.kv_connector.v1.hisparse.connector import HiSparseConnector
 
         from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector import AscendStoreConnector
-        from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.draft_host_mirror import (
+        from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.hisparse.draft_host_mirror import (
             HiSparseDraftHostMirrorSaveHook,
         )
 

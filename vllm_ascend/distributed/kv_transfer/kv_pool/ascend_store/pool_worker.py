@@ -35,7 +35,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend import (
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.buffer import DEVICE_BUFFER_ALIGNMENT, BufferDescriptor
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.coordinator import AscendStoreCoordinator
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.hisparse import (
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.hisparse.layout import (
     HiSparseTransferLayout,
     build_pool_key_namespace,
     has_hisparse_cache_layout,
