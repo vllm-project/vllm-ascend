@@ -96,6 +96,64 @@ def test_flash_bounded_view_keeps_storage_on_rebind(block_stride, attention_page
             assert view.attention_block_stride == attention_stride
 
 
+def test_legacy_mirror_only_skips_current_rows_for_resident_q6():
+    from vllm_ascend.hisparse.host_mirror import HostMirrorConnector, _LegacyDecodeRowMirror
+
+    stage, submit, finish, previous_step = Mock(), Mock(), Mock(), Mock()
+    handle = SimpleNamespace(draft_layer=False, submit_layer_mirror=submit)
+    worker = SimpleNamespace(
+        _stage_row_mirror_mapping=stage,
+        _enqueue_host_mirror=finish,
+        cache_handles=[handle],
+        _group_leaders=[("target", handle)],
+    )
+    legacy = _LegacyDecodeRowMirror.bind(worker)
+    assert _LegacyDecodeRowMirror.bind(worker) is legacy
+
+    def pre_forward(scheduler_output, input_batch, *, attn_metadata):
+        worker._stage_row_mirror_mapping(input_batch.num_tokens)
+        previous_step()
+
+    connector = HostMirrorConnector(
+        SimpleNamespace(_disabled=False, pre_forward=pre_forward),
+        worker,
+        None,
+        None,
+        defer_resident_decode_row_mirror=True,
+        legacy_decode_row_mirror=legacy,
+    )
+    scheduled = SimpleNamespace(
+        has_sync_kv_loads=True,
+        kv_connector_metadata=SimpleNamespace(all_context_pages_resident=True),
+    )
+    batch = SimpleNamespace(
+        has_prefill=False,
+        num_tokens=12,
+        num_tokens_after_padding=12,
+        num_scheduled_tokens=torch.tensor([6, 6]),
+    )
+    metadata = {"target": SimpleNamespace(num_decode_tokens=12, num_actual_tokens=12)}
+
+    connector.begin_execution(True)
+    connector.pre_forward(scheduled, batch, metadata)
+    handle.submit_layer_mirror()
+    worker._enqueue_host_mirror()
+    previous_step.assert_called_once()
+    stage.assert_not_called()
+    submit.assert_not_called()
+    finish.assert_not_called()
+
+    scheduled.kv_connector_metadata.all_context_pages_resident = False
+    connector.begin_execution(True)
+    connector.pre_forward(scheduled, batch, metadata)
+    handle.submit_layer_mirror()
+    worker._enqueue_host_mirror()
+    assert previous_step.call_count == 2
+    stage.assert_called_once_with(12)
+    submit.assert_called_once()
+    finish.assert_called_once()
+
+
 @pytest.mark.parametrize("prefix_gap", [False, True])
 def test_terminal_spill_retains_device_pages_until_host_publication(prefix_gap):
     from vllm.v1.core.block_pool import BlockPool
