@@ -46,6 +46,7 @@ from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.utils import (
     ensure_zmq_recv,
     ensure_zmq_send,
     group_concurrent_contiguous,
+    worker_rank_to_dcp_rank,
     zmq_ctx,
 )
 
@@ -620,8 +621,9 @@ class MooncakePullRecvingThread(threading.Thread, MooncakeTransferAddressMixin):
             head_end = min(local_head_interval[1], remote_head_interval[1])
             if head_start >= head_end:
                 continue
+            group_workers = range(remote_rank_start, remote_rank_start + remote_dcp_size)
             ranks_by_head_piece.setdefault((head_start, head_end), []).extend(
-                range(remote_rank_start, remote_rank_start + remote_dcp_size)
+                sorted(group_workers, key=lambda rank: worker_rank_to_dcp_rank(rank, remote_pcp_size, remote_dcp_size))
             )
 
         if not ranks_by_head_piece:

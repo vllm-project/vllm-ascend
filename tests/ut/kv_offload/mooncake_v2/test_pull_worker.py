@@ -40,6 +40,7 @@ from .helpers import (
     make_sfa_indexer_spec,
     make_sliding_spec,
     make_transfer_metadata,
+    vllm_dcp_ranks_by_worker,
 )
 
 
@@ -170,6 +171,8 @@ def test_pcp2_tp8_remote_groups_cover_mla_and_gqa(
 ) -> None:
     local_tp_size = total_heads
     thread = make_thread(tp_size=local_tp_size, tp_rank=0)
+    dcp_ranks = vllm_dcp_ranks_by_worker(8, 2, remote_dcp_size)
+    expected_group = sorted(expected_group, key=lambda worker: (worker // remote_dcp_size, dcp_ranks[worker]))
 
     assert thread._get_attention_remote_tp_rank_groups(
         remote_tp_size=8,
@@ -207,17 +210,19 @@ def test_pcp_dcp_selects_one_complete_replica_group() -> None:
 
 
 def test_pcp2_tp4_full_dcp_block_order_matches_vllm_rank_order() -> None:
-    physical_ranks: list[int] = []
-    for dcp_rank in range(8):
+    for worker_rank, dcp_rank in enumerate(vllm_dcp_ranks_by_worker(4, 2, 8)):
+        tp_rank, pcp_rank = divmod(worker_rank, 2)
         thread = make_thread(
             tp_size=4,
+            tp_rank=tp_rank,
             pcp_size=2,
+            pcp_rank=pcp_rank,
             dcp_size=8,
             dcp_rank=dcp_rank,
         )
         result = thread._compute_group_block_ids(
             request_id="request",
-            remote_tp_rank_groups=[list(range(8))],
+            remote_tp_rank_groups=thread._get_attention_remote_tp_rank_groups(4, 2, 8, 8, 1),
             remote_dcp_size=8,
             spec_index=0,
             local_block_size=16,
@@ -235,11 +240,7 @@ def test_pcp2_tp4_full_dcp_block_order_matches_vllm_rank_order() -> None:
             remote_interleave_size=16,
         )
 
-        assert result == [(dcp_rank, [10], [20])]
-        tp_rank, pcp_rank = divmod(dcp_rank, 2)
-        physical_ranks.append(pcp_rank * 4 + tp_rank)
-
-    assert physical_ranks == [0, 4, 1, 5, 2, 6, 3, 7]
+        assert result == [(worker_rank, [10], [20])]
 
 
 @pytest.mark.parametrize("local_pcp", [False, True])

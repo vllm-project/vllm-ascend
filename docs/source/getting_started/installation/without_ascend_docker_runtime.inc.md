@@ -102,14 +102,13 @@ Everything else stays as the tutorial you are adapting writes it: the weight and
 
 === "Atlas 200I Pro"
 
-    Atlas 200I Pro needs a privileged container plus the device nodes and host files below.
+    Atlas 200I Pro needs the device nodes and host files below. Make sure the container user can access the mapped devices.
 
     ```bash
     export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}-310p
     export MODEL_CACHE="${HOME}/.cache"
 
     docker run --rm \
-        --privileged \
         --name vllm-ascend \
         --shm-size=10g \
         --device=/dev/davinci0:/dev/davinci0 \
