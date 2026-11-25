@@ -322,6 +322,46 @@ def test_select_moe_comm_method_uses_allgather_without_effective_expert_parallel
     assert afc.select_moe_comm_method(16, vllm_config) == MoECommType.ALLGATHER
 
 
+@pytest.mark.parametrize("enable_expert_parallel,ep_world_size", [(False, 8), (True, 1)])
+def test_select_moe_comm_method_fast_path_skips_policy_and_capacity(monkeypatch, enable_expert_parallel, ep_world_size):
+    _patch_select_moe_comm_method_deps(
+        monkeypatch,
+        device_type=AscendDeviceType.A3,
+        ep_world_size=ep_world_size,
+    )
+    monkeypatch.setattr(afc, "get_mc2_tokens_capacity", lambda: pytest.fail("capacity should not be queried"))
+    monkeypatch.setattr(
+        afc,
+        "get_current_hardware_profile",
+        lambda: pytest.fail("hardware policy should not be queried"),
+    )
+    vllm_config = _make_vllm_config(enable_expert_parallel=enable_expert_parallel)
+
+    assert afc.select_moe_comm_method(16, vllm_config) == MoECommType.ALLGATHER
+
+
+@pytest.mark.parametrize("legacy_value", ["0", "1", "2", "3"])
+@pytest.mark.parametrize("num_tokens,expected", [(128, MoECommType.MC2), (129, MoECommType.ALLTOALL)])
+def test_a3_legacy_fused_environment_does_not_override_typed_config(monkeypatch, legacy_value, num_tokens, expected):
+    monkeypatch.setenv("VLLM_ASCEND_ENABLE_FUSED_MC2", legacy_value)
+    _patch_select_moe_comm_method_deps(monkeypatch, device_type=AscendDeviceType.A3, capacity=128, enable_fused_mc2=0)
+    monkeypatch.setattr(afc, "use_cann_megamoe", lambda _: False)
+    assert afc.select_moe_comm_method(num_tokens, _make_vllm_config()) == expected
+
+
+@pytest.mark.parametrize("kv_role", [None, "kv_producer", "kv_consumer"])
+@pytest.mark.parametrize("has_draft", [False, True])
+@pytest.mark.parametrize("is_draft_model", [False, True])
+def test_a3_fused_policy_is_independent_of_node_role_and_draft_presence(
+    monkeypatch, kv_role, has_draft, is_draft_model
+):
+    _patch_select_moe_comm_method_deps(monkeypatch, device_type=AscendDeviceType.A3, enable_fused_mc2=1)
+    monkeypatch.setattr(afc, "use_cann_megamoe", lambda _: False)
+    config = _make_vllm_config(kv_role=kv_role)
+    config.speculative_config = SimpleNamespace(draft_model_config=SimpleNamespace()) if has_draft else None
+    assert afc.select_moe_comm_method(4097, config, is_draft_model=is_draft_model) == MoECommType.FUSED_MC2
+
+
 @pytest.mark.parametrize(
     ("num_tokens", "expected"),
     [

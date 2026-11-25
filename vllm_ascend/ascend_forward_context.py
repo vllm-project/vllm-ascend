@@ -431,18 +431,20 @@ def select_moe_comm_method(
     if not is_moe_model(vllm_config):
         return None
 
-    mc2_tokens_capacity = get_mc2_tokens_capacity()
-    moe_comm_policy = get_current_hardware_profile().moe_comm_policy
+    parallel_config = vllm_config.parallel_config
     lora_config = getattr(vllm_config, "lora_config", None)
-    if not vllm_config.parallel_config.enable_expert_parallel or get_ep_group().world_size == 1:
-        moe_comm_type = MoECommType.ALLGATHER
-    elif lora_config is not None and vllm_config.parallel_config.enable_expert_parallel:
+    if not parallel_config.enable_expert_parallel or get_ep_group().world_size == 1:
+        return MoECommType.ALLGATHER
+    if lora_config is not None:
         # LoRA + EP requires AlltoAll because the MC2/FusedMC2 paths
         # Ascend MoE LoRA cannot patch FusedMC2 path for dispatch_ffn_combine/mega_moe
         # is a single fused C++ op. This covers both normal model
         # forward and _dummy_run during profile_run.
-        moe_comm_type = MoECommType.ALLTOALL
-    elif moe_comm_policy is MoECommPolicy.ALLGATHER:
+        return MoECommType.ALLTOALL
+
+    mc2_tokens_capacity = get_mc2_tokens_capacity()
+    moe_comm_policy = get_current_hardware_profile().moe_comm_policy
+    if moe_comm_policy is MoECommPolicy.ALLGATHER:
         moe_comm_type = MoECommType.ALLGATHER
     else:
         moe_comm_type = _MOE_COMM_SELECTORS[moe_comm_policy](
