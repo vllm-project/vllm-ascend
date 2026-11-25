@@ -23,7 +23,7 @@ from vllm.v1.attention.backend import (
 )
 from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheSpec
 
-from vllm_ascend.ascend_config import get_ascend_config
+from vllm_ascend.ascend_config import get_ascend_config, selected_kv_enabled
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.attention.attention_mask import AttentionMaskBuilder
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
@@ -479,6 +479,12 @@ class AscendSFABackend(AttentionBackend):
 
     @staticmethod
     def get_impl_cls() -> type["AscendSFAImpl"]:
+        if selected_kv_enabled(getter=get_ascend_config):
+            from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.selected_kv_runtime import (
+                AscendSFASelectedKVImpl,
+            )
+
+            return AscendSFASelectedKVImpl
         if get_current_vllm_config().attention_config.hisparse_config is not None:
             from vllm_ascend.attention.sfa_hisparse import AscendHiSparseImpl
 

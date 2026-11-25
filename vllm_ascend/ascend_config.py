@@ -26,7 +26,16 @@ from contextvars import ContextVar
 from statistics import NormalDist
 from typing import TYPE_CHECKING, Any, ClassVar, Literal
 
-from pydantic import ConfigDict, Field, TypeAdapter, field_validator, model_validator
+from pydantic import (
+    ConfigDict,
+    Field,
+    StrictBool,
+    StrictFloat,
+    StrictInt,
+    TypeAdapter,
+    field_validator,
+    model_validator,
+)
 from pydantic_core import ArgsKwargs
 from vllm.logger import logger
 from vllm.utils.math_utils import cdiv
@@ -533,6 +542,95 @@ class ExpertOffloadConfig:
         return self
 
 
+SELECTED_KV_MAX_BATCHED_TOKENS = 8192
+SELECTED_KV_MAX_REQUESTS = 256
+SELECTED_KV_DEFAULT_MIN_HISTORY_TOKENS = 32768
+SELECTED_KV_MAX_HISTORY_TOKENS = 1048576
+SELECTED_KV_DEFAULT_MAX_QUERY_RATIO = 0.015
+
+
+def valid_selected_kv_max_query_ratio(val: Any) -> bool:
+    return type(val) in (int, float) and 0 <= val <= 1 and math.isfinite(val)
+
+
+def valid_selected_kv_min_history_tokens(val: Any) -> bool:
+    return type(val) is int and 0 <= val <= SELECTED_KV_MAX_HISTORY_TOKENS
+
+
+@config
+@dataclasses.dataclass
+class SelectedKVConfig:
+    """Configuration for opt-in selected Main-KV prefill on layerwise AscendStore."""
+
+    max_query_ratio: StrictFloat | StrictInt | None = None
+    min_history_tokens: StrictInt | None = None
+    enabled: StrictBool | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def _coerce_input(cls, v: Any) -> Any:
+        return {} if v is None else {"max_query_ratio": v} if type(v) in (int, float) else v
+
+    @model_validator(mode="after")
+    def _normalize(self) -> SelectedKVConfig:
+        has_mr, has_mh = self.max_query_ratio is not None, self.min_history_tokens is not None
+        if has_mr and (not valid_selected_kv_max_query_ratio(self.max_query_ratio) or self.enabled is False):
+            raise ValueError("selected_kv_config max_query_ratio must be in [0, 1] without enabled=False")
+        if has_mh and (not valid_selected_kv_min_history_tokens(self.min_history_tokens) or self.enabled is False):
+            raise ValueError("selected_kv_config min_history_tokens must be in [0, 1048576] without enabled=False")
+        if self.enabled is True or has_mr or has_mh:
+            self.enabled = True
+            mr = SELECTED_KV_DEFAULT_MAX_QUERY_RATIO if self.max_query_ratio is None else self.max_query_ratio
+            mh = SELECTED_KV_DEFAULT_MIN_HISTORY_TOKENS if self.min_history_tokens is None else self.min_history_tokens
+            self.max_query_ratio, self.min_history_tokens = float(mr), int(mh)
+        else:
+            self.enabled = False
+        return self
+
+    def validate_deployment(self, vllm_config: Any, ascend_config: Any = None) -> None:
+        if not self.enabled:
+            return
+        g, ac, cc = getattr, getattr(vllm_config, "attention_config", None), vllm_config.cache_config
+        if g(ac, "hisparse_config", None) is not None:
+            raise ValueError("selected_kv_config.enabled cannot be combined with hisparse_config")
+        if ascend_config is not None:
+            if g(g(ascend_config, "sparse_kv_offload_config", None), "enabled", False):
+                raise ValueError("selected_kv_config.enabled cannot be combined with sparse_kv_offload_config.enabled")
+            if g(g(ascend_config, "kvpp_config", None), "size", 1) != 1:
+                raise ValueError("selected_kv_config.enabled cannot be combined with KVPP")
+            if g(g(ascend_config, "xlite_graph_config", None), "enabled", False):
+                raise ValueError("selected_kv_config.enabled cannot be combined with xlite_graph_config.enabled")
+        tx = g(vllm_config, "kv_transfer_config", None)
+        ex, rc = g(tx, "kv_connector_extra_config", None), (g(tx, "kv_role", None), g(tx, "kv_connector", None))
+        if not isinstance(ex, dict) or rc != ("kv_producer", "AscendStoreConnector"):
+            raise ValueError("selected_kv_config.enabled requires synchronous memcache layerwise AscendStoreConnector")
+        if (ex.get("backend"), ex.get("use_layerwise"), ex.get("load_async", False)) != ("memcache", True, False):
+            raise ValueError("selected_kv_config.enabled requires synchronous memcache layerwise AscendStoreConnector")
+        # Prefetch >= 3 would release slot (cur + pf - 2) after cur's main copy already completed,
+        # allowing 16-core li_gather to overlap 32-core union/copy on 48-AIV Atlas A3.
+        nb = ex.get("layerwise_num_shared_buffers")
+        pf = 2 if (raw_pf := ex.get("layerwise_prefetch_layers")) is None else raw_pf
+        if type(nb) is not int or nb != 2 or type(pf) is not int or pf not in (1, 2):
+            raise ValueError("selected_kv_config.enabled requires layerwise_num_shared_buffers == 2 and prefetch 1..2")
+        if ex.get("layerwise_independent_layers") != []:
+            raise ValueError("selected_kv_config.enabled requires layerwise_independent_layers == []")
+        from vllm_ascend.mrv2_utils import use_v2_model_runner
+
+        m, s, p = vllm_config.model_config, vllm_config.scheduler_config, vllm_config.parallel_config
+        par = (p.pipeline_parallel_size, p.prefill_context_parallel_size, p.decode_context_parallel_size)
+        bad = g(p, "enable_dbo", False) or vllm_config.speculative_config is not None
+        bad = bad or g(m, "is_encoder_decoder", False) or g(vllm_config, "is_mm_encoder_only", False)
+        async_ok = type(g(s, "async_scheduling", False)) is bool and not g(m, "enable_sleep_mode", False)
+        if not (use_v2_model_runner(vllm_config) and async_ok and m.enforce_eager and par == (1, 1, 1)) or bad:
+            raise ValueError("selected_kv_config requires eager MRV2 decoder-only PP/PCP/DCP=1 without DBO/spec/sleep")
+        toks, reqs = s.max_num_batched_tokens, min(s.max_num_seqs, s.max_num_batched_tokens)
+        if g(cc, "cache_dtype", None) != "int8" or g(ac, "indexer_kv_dtype", None) != "int8":
+            raise ValueError("selected_kv_config.enabled requires cache_dtype='int8' and indexer_kv_dtype='int8'")
+        budget_ok = g(cc, "kv_cache_memory_bytes", None) is None and m.max_model_len > 0
+        if not (budget_ok and 0 < toks <= SELECTED_KV_MAX_BATCHED_TOKENS and 0 < reqs <= SELECTED_KV_MAX_REQUESTS):
+            raise ValueError("selected_kv_config requires automatic KV budget and <= 8192 tokens / 256 requests")
+
+
 @config
 class AscendConfig:
     """Configuration Object for additional_config from vllm.configs.
@@ -626,6 +724,11 @@ class AscendConfig:
                 "sleep_mode_extra_cleanup": false,
                 "enable_training_consistency": false,
                 "enable_batch_invariant": false
+            },
+            "selected_kv_config": {
+                "enabled": false,
+                "max_query_ratio": null,
+                "min_history_tokens": null
             },
             "quantized_all_reduce_config": {
                 "enable": false,
@@ -770,6 +873,7 @@ class AscendConfig:
     eplb_config: EplbConfig = dataclasses.field(default_factory=EplbConfig)
     rejection_sampler_config: RejectionSamplerConfig = dataclasses.field(default_factory=RejectionSamplerConfig)
     rl_config: RlConfig = dataclasses.field(default_factory=RlConfig)
+    selected_kv_config: SelectedKVConfig = dataclasses.field(default_factory=SelectedKVConfig)
     quantized_all_reduce_config: QuantizedAllReduceConfig = dataclasses.field(default_factory=QuantizedAllReduceConfig)
 
     # ---- sub-configs declared later in this module ----
@@ -2160,6 +2264,7 @@ def init_ascend_config(vllm_config: VllmConfig) -> AscendConfig:
     # the single legitimate entry point — bypassing the factory leaves derived
     # fields at their sentinel defaults.
     new_config.derive_and_validate(vllm_config)
+    new_config.selected_kv_config.validate_deployment(vllm_config, new_config)
     new_config.quantized_all_reduce_config._validate_preconditions(vllm_config)
     new_config.rl_config.apply(new_config)
     new_config.finegrained_tp_config._validate_preconditions(vllm_config)
@@ -2195,3 +2300,36 @@ def get_ascend_config():
     if _ASCEND_CONFIG is None or not _is_ascend_config_initialized(_ASCEND_CONFIG):
         raise RuntimeError("Ascend config is not initialized. Please call init_ascend_config first.")
     return _ASCEND_CONFIG
+
+
+def resolve_ascend_config(owner: Any = None, getter: Any = None) -> Any:
+    if (acfg := getattr(owner, "ascend_config", None)) is not None:
+        return acfg
+    try:
+        return getter() if callable(getter) else None
+    except RuntimeError:
+        return None
+
+
+def selected_kv_enabled(ascend_config: Any = None, getter: Any = None) -> bool:
+    acfg = ascend_config if ascend_config is not None or getter is None else resolve_ascend_config(None, getter)
+    return getattr(getattr(acfg, "selected_kv_config", None), "enabled", None) is True
+
+
+def selected_kv_requested(vllm_config: Any) -> bool:
+    add = getattr(vllm_config, "additional_config", None)
+    r = add.get("selected_kv_config") if isinstance(add, dict) else None
+    if isinstance(r, SelectedKVConfig):
+        return r.enabled is True
+    if valid_selected_kv_max_query_ratio(r):
+        return True
+    if not isinstance(r, dict) or not (r.keys() <= {"max_query_ratio", "min_history_tokens", "enabled"}):
+        return False
+    en, mr, mh = r.get("enabled"), r.get("max_query_ratio"), r.get("min_history_tokens")
+    if (en is not None and type(en) is not bool) or en is False:
+        return False
+    if (mr is not None and not valid_selected_kv_max_query_ratio(mr)) or (
+        mh is not None and not valid_selected_kv_min_history_tokens(mh)
+    ):
+        return False
+    return en is True or mr is not None or mh is not None

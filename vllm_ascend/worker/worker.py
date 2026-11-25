@@ -83,7 +83,7 @@ from vllm.v1.worker.workspace import init_workspace_manager
 
 import vllm_ascend.device_allocator.sleep_mode_backend  # noqa: F401  (registers camem)
 import vllm_ascend.envs as envs_ascend
-from vllm_ascend.ascend_config import KVPPConfig, get_ascend_config, init_ascend_config
+from vllm_ascend.ascend_config import KVPPConfig, get_ascend_config, init_ascend_config, selected_kv_enabled
 from vllm_ascend.batch_invariant import init_batch_invariance
 from vllm_ascend.compilation.static_kernel import initialize_static_kernel_runtime, release_static_kernels
 from vllm_ascend.core import kv_cache_dtype_handlers  # noqa: F401
@@ -767,7 +767,8 @@ class NPUWorker(GPUWorker):
         """
         GiB = lambda b: b / GiB_bytes
 
-        maybe_apply_startup_plan(self)
+        if not selected_kv_enabled(getattr(self, "ascend_config", None), get_ascend_config):
+            maybe_apply_startup_plan(self)
 
         if self.vllm_config.attention_config.hisparse_config is not None:
             from vllm_ascend.hisparse.backend import prepare_hisparse_workspaces
@@ -845,6 +846,10 @@ class NPUWorker(GPUWorker):
             "isolate vLLM in its own container."
         )
         self.available_kv_cache_memory_bytes = self.requested_memory - profile_result.non_kv_cache_memory
+        if selected_kv_enabled(getattr(self, "ascend_config", None), get_ascend_config):
+            from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise import selected_kv_plan as skv_plan
+
+            self.available_kv_cache_memory_bytes = skv_plan.reserve_selected_kv_workspace(self)
         self.available_kv_cache_memory_bytes = self._scale_kv_cache_memory_for_multi_group(
             self.available_kv_cache_memory_bytes,
         )
@@ -1159,7 +1164,9 @@ class NPUWorker(GPUWorker):
             )
             logger.info(msg)
 
-            if suggested_to_requested > 0:
+            if suggested_to_requested > 0 and not selected_kv_enabled(
+                getattr(self, "ascend_config", None), get_ascend_config
+            ):
                 maybe_save_startup_plan(self, suggested_to_requested)
 
         # Call ATB matmul to warm up; otherwise, the first operation (ReshapeAndCache)
