@@ -134,7 +134,6 @@ class TestAttentionGraphHelpers(TestBase):
 @pytest.mark.parametrize("boundaries", [[0, 1, 2, 3], [0, 8, 16, 24], [0, 8, 16, 16]])
 def test_dense_query_boundaries_reuse_current_device_view(monkeypatch, boundaries):
     builder = AscendAttentionMetadataBuilder.__new__(AscendAttentionMetadataBuilder)
-    builder.supports_update_block_table = True
     builder.use_pcp = False
     builder.device = torch.device("cpu")
     builder.kv_cache_spec = None

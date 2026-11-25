@@ -15,7 +15,7 @@
 # This file is a part of the vllm-ascend project.
 #
 
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any
 
@@ -39,7 +39,7 @@ from vllm.v1.attention.backends.registry import (  # type: ignore
     register_backend,
 )
 from vllm.v1.attention.ops.pcp import _gather_prefill_cache_inputs  # type: ignore[import-not-found]
-from vllm.v1.kv_cache_interface import AttentionSpec, CrossAttentionSpec, FullAttentionSpec, SlidingWindowSpec
+from vllm.v1.kv_cache_interface import AttentionSpec, CrossAttentionSpec
 
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.attention.attention_mask import AttentionMaskBuilder
@@ -240,16 +240,6 @@ class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
     reorder_batch_threshold: int = 1
     metadata_cls: type[AscendMetadata] = AscendMetadata
 
-    def get_metadata_reuse_key(self, batch_global: bool, for_capture: bool, causal: bool) -> tuple | None:
-        if (
-            batch_global
-            and not for_capture
-            and type(self) is AscendAttentionMetadataBuilder
-            and self.supports_update_block_table
-        ):
-            return self.kv_cache_spec, self.decode_threshold, causal
-        return None
-
     def __init__(
         self,
         kv_cache_spec: AttentionSpec,
@@ -261,14 +251,6 @@ class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
         self.vllm_config = vllm_config
         self.pcp_size = vllm_config.parallel_config.prefill_context_parallel_size
         self.use_pcp = self.pcp_size > 1
-        # Only the plain dense builder has no group-local derived metadata.
-        # DCP/310P and other subclasses must opt in with their own update path.
-        self.supports_update_block_table = (
-            type(self) is AscendAttentionMetadataBuilder
-            and vllm_config.use_v2_model_runner
-            and not self.use_pcp
-            and type(kv_cache_spec) in (FullAttentionSpec, SlidingWindowSpec)
-        )
         self.model_config = vllm_config.model_config
         self.compilation_config = vllm_config.compilation_config
         self.device = device
@@ -409,7 +391,13 @@ class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
             seq_lens_list = seq_lens_list + [1] * padding_len
             seq_lens = torch.cat([seq_lens, seq_lens.new_ones(padding_len)])
         if block_table is not None and block_table.shape[0] < num_reqs_fia:
-            block_table = self._pad_block_table(block_table, num_reqs_fia)
+            block_table = torch.cat(
+                [
+                    block_table,
+                    block_table.new_zeros((num_reqs_fia - block_table.shape[0], block_table.shape[1])),
+                ],
+                dim=0,
+            )
 
         attn_metadata = self.metadata_cls(
             num_actual_tokens=num_actual_tokens,
@@ -434,33 +422,6 @@ class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
         if pcp_shard_slot_mapping is not None:
             self._finalize_pcp_metadata(attn_metadata, pcp_shard_slot_mapping)
         return attn_metadata
-
-    @staticmethod
-    def _pad_block_table(block_table: torch.Tensor | None, num_reqs: int) -> torch.Tensor | None:
-        if block_table is not None and block_table.shape[0] < num_reqs:
-            block_table = torch.cat(
-                [block_table, block_table.new_zeros((num_reqs - block_table.shape[0], block_table.shape[1]))],
-                dim=0,
-            )
-        return block_table
-
-    def update_block_table(
-        self,
-        metadata: AscendMetadata,
-        blk_table: torch.Tensor,
-        slot_mapping: torch.Tensor,
-    ) -> AscendMetadata:
-        # Keep the cached template and all physical cache addresses independent.
-        # The lists, masks and query/sequence tensors are batch-local read-only
-        # inputs; mutable per-group scratch must not be shared.
-        assert self.supports_update_block_table
-        return replace(
-            metadata,
-            block_tables=self._pad_block_table(blk_table, len(metadata.actual_seq_lengths_q)),
-            slot_mapping=slot_mapping[: metadata.num_actual_tokens],
-            reshape_cache_event=None,
-            qfa_metadata_cache={},
-        )
 
     def _finalize_pcp_metadata(
         self,

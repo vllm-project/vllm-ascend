@@ -406,7 +406,7 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
     build_device_chunk_metadata = True
     _gdn_reuse_at_capture: bool | None = None
 
-    def get_metadata_reuse_key(self, batch_global: bool, for_capture: bool, _causal: bool) -> tuple | None:
+    def get_metadata_reuse_key(self, batch_global: bool, for_capture: bool) -> tuple | None:
         eligible = batch_global and self.supports_update_block_table and isinstance(self.kv_cache_spec, MambaSpec)
         # Replay must refresh the same buffers that capture recorded.
         if for_capture:

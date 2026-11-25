@@ -68,7 +68,7 @@ from vllm_ascend.attention.attention_c8_mxfp import (
     mxfp_cache_spec,
     mxfp_cache_views_for_spec,
 )
-from vllm_ascend.attention.attention_v1 import AscendAttentionMetadataBuilder, AscendAttentionState
+from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.dsa_attn_kv_plan import get_dsa_attn_kv_plan
 from vllm_ascend.attention.dsa_v1 import AscendDSAMetadataBuilder
 from vllm_ascend.attention.dsa_v41 import AscendDSAV41MetadataBuilder, DeepseekV41CacheBackend
@@ -550,13 +550,11 @@ def build_attn_metadata(
                         (draft_names, draft_common)
                     ]
             reuse_key = None
-            if isinstance(attn_metadata_builder, (AscendGDNAttentionMetadataBuilder, AscendAttentionMetadataBuilder)):
+            if isinstance(attn_metadata_builder, AscendGDNAttentionMetadataBuilder):
                 can_share = (
                     batch_global and common_attn_metadata.pcp_context is None and not common_attn_metadata_extra_kwargs
                 )
-                reuse_key = attn_metadata_builder.get_metadata_reuse_key(
-                    can_share, for_cudagraph_capture, common_attn_metadata.causal
-                )
+                reuse_key = attn_metadata_builder.get_metadata_reuse_key(can_share, for_cudagraph_capture)
             template = cached_metadata.get(reuse_key) if reuse_key is not None else None
             attn_metadata_extra_kwargs = (
                 provider.get_extra_attn_kwargs(attn_metadata_builder, num_reqs)
