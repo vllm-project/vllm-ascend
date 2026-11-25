@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 
+from typing import Any
+
 from tilelang import tvm
 from tilelang.engine.lower import (
     device_codegen,
@@ -201,7 +203,7 @@ def build(
                             )
                         ]
                     )
-                phases = [
+                phases: list[list[tuple[str, Any, str, dict[str, str]]]] = [
                     [
                         (
                             "pad_hidden",

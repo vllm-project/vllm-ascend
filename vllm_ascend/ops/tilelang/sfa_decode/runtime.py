@@ -237,7 +237,7 @@ class DecodeLayer:
                     workspace=self.scratch,
                     head_panel=self.panels[head_panel_layout(requests)],
                 )
-            args = (
+            args: tuple[torch.Tensor, ...] = (
                 hidden,
                 cache.view(torch.int32).view(-1, 128, 132),
                 md.block_table,

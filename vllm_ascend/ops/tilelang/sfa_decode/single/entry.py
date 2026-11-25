@@ -1,9 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from functools import lru_cache
 from math import isfinite
+from typing import Any
 
 from tilelang import tvm
 from tilelang.engine.lower import (
@@ -57,6 +59,8 @@ from .tile_head_chunk_pack import pack
 from .tile_index_weights_local import local_head
 from .tile_mx_interleaved import quant_program as quant_output
 from .value_projection import project_and_quantize
+
+_Stage = tuple[Any, str, dict[str, str]]
 
 CUBE = "CUBE"
 
@@ -136,7 +140,10 @@ def _phases(
             length_offset=length_offset,
             physical_table_columns=table_columns[0] if translate_pools else None,
         )
-    output = interleaved_output if small else nested_output
+    if small:
+        output: Callable[..., Any] = interleaved_output
+    else:
+        output = nested_output
     head_rows = 32 if small else 16
     bf16_rows = 16 if batch <= 16 else b
     bf16_tile = min(m, bf16_rows)
@@ -194,7 +201,7 @@ def _phases(
         split_descriptors=split_descriptors,
     )
     # The index query projection only needs Cube while Vector inspects the page table.
-    parallel_descriptors = ()
+    parallel_descriptors: tuple[_Stage, ...] = ()
     if split_descriptors:
         cache_stages, descriptors = cache_stages
         parallel_descriptors = ((descriptors, VECTOR, dict(ITable="IT", Len=length_buffer, Runs="C3")),)
@@ -225,7 +232,7 @@ def _phases(
         MIXED,
         dict(Panel="Value", HeadPanel=weight_buffer),
     )
-    head_reduce = ()
+    head_reduce: tuple[_Stage, ...] = ()
     if native_rows <= 448:
         parts, head_width, aligned = head_panel_layout(batch)
         rows = b if prepacked_heads else b + 32
@@ -238,7 +245,7 @@ def _phases(
             dict(Panel="Latent", Parts="Latent", HeadPanel="IWeight" if prepacked_heads else "Latent"),
         )
         head_reduce = ((reduce_head, VECTOR, dict(Parts="Latent")),)
-    iq_quant = (quant_index(*shape), VECTOR, {})
+    iq_quant: _Stage = (quant_index(*shape), VECTOR, {})
     score_inputs = dict(
         Q="IQ",
         QS="IQS",
@@ -253,7 +260,7 @@ def _phases(
         Length=length_buffer,
     )
     score_modes = (False, True) if use_segmented_index_scan(batch, context) else (False,)
-    score_phase = tuple(
+    score_stages = tuple(
         (
             score_program(
                 batch,
@@ -268,8 +275,9 @@ def _phases(
         )
         for fragmented_only in score_modes
     )
-    reset_count = ()
-    head_phase = (head_weights,)
+    score_phase: tuple[_Stage, ...] | _IndexScoreDispatch = score_stages
+    reset_count: tuple[_Stage, ...] = ()
+    head_phase: tuple[_Stage, ...] = (head_weights,)
     if use_segmented_index_scan(batch, context):
         # The count uses the existing grid barrier between cache updates and index scoring.
         count_offset = batch * (context // 512 + context // 16384)
@@ -310,7 +318,7 @@ def _phases(
                 shared_only=True,
             )
             paired = (pair_program, MIXED, score_inputs)
-        ordinary, fragmented = score_phase
+        ordinary, fragmented = score_stages
         partial_rows = None
         if four_requests:
             partial_rows = (
@@ -368,7 +376,7 @@ def _phases(
         # All QK tiles finish before the resident stage reuses the padded query arena for FP32 PV partials.
         intermediates = dict(Partial="QA", TailValue="Value", Stats="C1")
         resident = attend_short_tail(*shape, **layout, resident_cores=CORES)
-        attention_phase = _ResidentAttention(
+        attention_phase: _ResidentAttention | tuple[_Stage, ...] = _ResidentAttention(
             attn,
             (resident, MIXED, dict(**attn_inputs, **intermediates, Maxima="C3")),
             (merge_value_tiles(batch, length_offset), VECTOR, dict(**intermediates, Length=length_buffer, Y="Latent3")),
@@ -376,11 +384,11 @@ def _phases(
     else:
         attention_phase = (attn,)
     if batch <= 16:
-        value_stages = [((project_and_quantize(b, b, balanced=True), MIXED, {}),)]
+        value_stages: list[tuple[_Stage, ...]] = [((project_and_quantize(b, b, balanced=True), MIXED, {}),)]
     elif b >= 2 * m and tail_rows == m:
         value_stages = [((project_and_quantize(b, m), MIXED, {}),)]
     else:
-        uv = (
+        uv: _Stage = (
             head_gemm(
                 bf16_rows, 64, 512, 256, bf16_tile, 256, 64, 2, l1_k=512 if full_k_panel else 64, tail_rows=tail_rows
             ),
@@ -389,7 +397,7 @@ def _phases(
         )
         oq = quant_output(b, 16384, 32, 512, 6) if small else quant_output(b, 16384, 16, 1024, 6)
         value_stages = [(uv,), ((oq, VECTOR, {}),)]
-    epilogue = ()
+    epilogue: tuple[_Stage, ...] = ()
     if batch >= m:
         if batch == 32:
             o = panel_mx(b, 16384, 4096, m, 128, 2, 4096, 1024, uniform_n=True)
@@ -416,8 +424,10 @@ def _phases(
             ),
         )
     if batch <= 4 or (batch <= 16 and context == 16384):
-        (score,) = score_phase
-        index_and_query = (_ScoreAndQueryProjection(score, uk, select),)
+        (score,) = score_stages
+        index_and_query: tuple[_ScoreAndQueryProjection | _IndexScoreDispatch | tuple[_Stage, ...], ...] = (
+            _ScoreAndQueryProjection(score, uk, select),
+        )
     else:
         index_and_query = (score_phase, (uk, select))
     # state consumes the KeyPool partials before head_pack reuses the same buffer.
