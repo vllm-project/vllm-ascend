@@ -101,6 +101,10 @@ def run_prefill_fused_kda(
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Fuse KDA prefill preprocessing and recurrent attention."""
     hidden_states = hidden_states.contiguous()
+    # vLLM keeps Conv history in the first three rows; later rows belong to
+    # speculative decoding. Preserve the paged cache stride and storage alias.
+    # Prolog uses tail-aligned history within the supplied view.
+    conv_state = conv_state[:, :3, :]
     cache_indices = cache_indices.to(dtype=torch.int32).contiguous()
     cu_seqlens = cu_seqlens.to(dtype=torch.int32).contiguous()
     if initial_state_mode is not None:
