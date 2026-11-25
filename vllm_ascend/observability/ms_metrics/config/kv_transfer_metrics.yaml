@@ -13,19 +13,6 @@
 - symbol: vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector:AscendStoreConnector.get_transfer_results
   handler: vllm_ascend.observability.ms_metrics.handlers:kv_transfer_finished_handler
 
-# Finished receives from connectors that only expose get_finished.
-- symbol: vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.connector:SfaRemoteD2HConnector.get_finished
-  handler: vllm_ascend.observability.ms_metrics.handlers:kv_transfer_finished_pair_handler
-
-- symbol: vllm_ascend.distributed.kv_transfer.kv_pool.ucm_connector.connector:UCMConnectorV1.get_finished
-  handler: vllm_ascend.observability.ms_metrics.handlers:kv_transfer_finished_pair_handler
-
-- symbol: vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_layerwise_connector:MooncakeLayerwiseConnector.get_finished
-  handler: vllm_ascend.observability.ms_metrics.handlers:kv_transfer_finished_pair_handler
-
-- symbol: vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_hybrid_connector:MooncakeConnector.get_finished
-  handler: vllm_ascend.observability.ms_metrics.handlers:kv_transfer_finished_pair_handler
-
 # Blocks that failed to load. AscendStore is excluded: kvpool:load_error_blocks_total
 # already covers it and both series would grow together.
 - symbol: vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.connector:MooncakeBaseConnector.get_block_ids_with_load_errors

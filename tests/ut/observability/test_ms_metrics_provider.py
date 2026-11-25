@@ -335,32 +335,6 @@ def test_kv_transfer_finished_handler_counts_finished_recving(monkeypatch):
     metrics.record_metric.assert_not_called()
 
 
-def test_kv_transfer_finished_pair_handler_counts_finished_recving(monkeypatch):
-    metric_type = type("MetricType", (), {"GAUGE": "gauge", "HISTOGRAM": "histogram", "COUNTER": "counter"})
-    metrics = Mock()
-    _install_provider_api(
-        monkeypatch,
-        MetricType=metric_type,
-        get_metric_recorder=lambda: metrics,
-    )
-    handlers = _load_feature_handlers(monkeypatch, "test_kv_transfer_finished_pair", "kv_transfer")
-    connector = type("MooncakeLayerwiseConnector", (), {})()
-
-    assert handlers.kv_transfer_finished_pair_handler(lambda current: ({"a"}, {"b", "c"}), connector) == (
-        {"a"},
-        {"b", "c"},
-    )
-    metrics.record_metric.assert_called_once_with(
-        "kv:xfer_finished_total",
-        value=2.0,
-        labels={"connector": "mooncake_layerwise"},
-    )
-
-    metrics.reset_mock()
-    handlers.kv_transfer_finished_pair_handler(lambda current: ({"a"}, set()), connector)
-    metrics.record_metric.assert_not_called()
-
-
 def test_kv_transfer_invalid_blocks_handler_counts_blocks(monkeypatch):
     metric_type = type("MetricType", (), {"GAUGE": "gauge", "HISTOGRAM": "histogram", "COUNTER": "counter"})
     metrics = Mock()

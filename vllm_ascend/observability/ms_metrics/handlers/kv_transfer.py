@@ -122,18 +122,6 @@ def kv_transfer_finished_handler(original_func, connector, *args, **kwargs):
     return result
 
 
-def kv_transfer_finished_pair_handler(original_func, connector, *args, **kwargs):
-    """Count finished receives from a ``(finished_sending, finished_recving)`` pair.
-
-    Used by connectors that only expose ``get_finished``.
-    """
-    result = original_func(connector, *args, **kwargs)
-
-    finished_recving = result[1] if result else None
-    _record_finished(len(finished_recving) if finished_recving else 0, connector)
-    return result
-
-
 def kv_transfer_invalid_blocks_handler(original_func, connector, *args, **kwargs):
     """Count blocks that failed to load from the remote KV cache.
 
