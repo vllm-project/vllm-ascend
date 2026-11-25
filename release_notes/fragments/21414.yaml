@@ -1,0 +1,9 @@
+pr: 21414
+entries:
+  - category: performance
+    text: >-
+      PCP prefill now overlaps the local Q projection with global cache
+      preparation for nonempty local query shards, controlled by the existing
+      `multistream_dsv4_dsa_overlap` option (enabled by default). To run the
+      two steps serially, launch with
+      `--additional-config '{"multistream_dsv4_dsa_overlap": false}'`.

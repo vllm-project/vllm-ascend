@@ -214,7 +214,7 @@ def dsa_env(monkeypatch):
 
     def fake_qkv_indexer_linear(*args, **kwargs):
         built["qkv_indexer"] = dict(args=args, kwargs=kwargs)
-        return SimpleNamespace(params_dtype=torch.float32)
+        return SimpleNamespace(params_dtype=torch.float32, qkv_size=192, indexer_size=192, local_gate_size=192)
 
     def fake_indexer_w(*args, **kwargs):
         built["indexer_w"] = dict(args=args, kwargs=kwargs)

@@ -246,14 +246,25 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
                 for layer_name in group_spec.layer_names
                 if layer_name not in draft_names
             }
+            incoming_mirrors = set()
             if getattr(self, "has_shared_kv", False):
-                # Execution layers include holes; group ordinals stay dense.
-                physical_layers.update(range(getattr(self.hf_config, "num_hidden_layers", self.num_layers)))
-                self.num_layers = max(physical_layers) + 1
+                if self.pp_size > 1 and self.pp_layer_end is not None:
+                    start = self.pp_layer_offset
+                    incoming_mirrors = {layer for layer in physical_layers if layer < start}
+                    physical_layers.difference_update(incoming_mirrors)
+                    physical_layers.update(range(start, self.pp_layer_end))
+                    self.num_layers = len(physical_layers)
+                else:
+                    # Execution layers include holes; group ordinals stay dense.
+                    physical_layers.update(range(getattr(self.hf_config, "num_hidden_layers", self.num_layers)))
+                    self.num_layers = max(physical_layers) + 1
             if physical_layers:
                 self._global_to_local_layer = {
                     global_layer: local_layer for local_layer, global_layer in enumerate(sorted(physical_layers))
                 }
+                # PP receive writes incoming mirrors before the first local forward.
+                # Service their prefix transfers there without inventing a callback.
+                self._global_to_local_layer.update(dict.fromkeys(incoming_mirrors, 0))
                 if getattr(self, "use_layerwise", False) or self.use_layerwise_transfer:
                     self._recurrent_layers = {
                         self._global_to_local_layer[self._extract_physical_layer_index(name)]
@@ -380,8 +391,7 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
         # spec-decode draft layers) are present, num_layers is updated in
         # register_kv_caches to include them; the key layer count must follow
         # or those extra layers are skipped during the save/load lifecycle. A
-        # block-key store owns a stage-local object, so its count stays local
-        # under PP. A GVA store retains the global PP layout and offset below.
+        # pool object owns a stage-local payload; hook counts stay local under PP.
         if (
             self.use_block_key_layerwise
             or (self.num_kv_cache_groups == 1 and getattr(self, "pp_size", 1) == 1)
@@ -395,25 +405,22 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
                 if self.use_block_key_layerwise
                 else self._global_group_alloc_size(group_id)
             )
-            # Global byte offsets for the shared GVA region:
-            #   PP: each stage writes its local layers at
-            #       (pp_layer_offset + local_layer) * per_layer_bytes.
+            # Byte offsets within each GVA object:
+            #   PP: stages have distinct keys, so no PP byte offset is added.
             #   DCP (shard-major): ranks sharing head_or_tp_rank (put_step>1)
             #       hold different context shards of the same logical block
-            #       and share ONE region; shard d occupies the byte range
-            #       [d * shard_stride, (d+1) * shard_stride) where the stride
+            #       and share ONE region; shard d's payload starts at d * shard_stride
+            #       within [d * shard_stride, (d+1) * shard_stride), where the stride
             #       is the group byte total aligned up to the GVA hugepage
             #       size (unaligned strides yield misaligned GVA addresses).
             #       With put_step == 1 every rank owns a distinct region key
             #       and no shard separation is needed.
-            layer_byte_offset = self._group_pp_byte_offset(group_id)
+            layer_byte_offset = 0
             gbl = self.group_block_len.get(group_id) or []
             if not self.use_block_key_layerwise and gbl and group_num_layers > 0:
                 if self.dcp_size > 1 and self.put_step > 1:
-                    # Use the GLOBAL region size (PP-aware) as the basis for
-                    # the per-shard stride; under PP>1 the local sum(gbl) only
-                    # covers this stage's layers and would under-allocate.
-                    shard_stride = self._global_group_alloc_size(group_id) // self.dcp_size
+                    # Derive shard origins from the same aligned allocation size.
+                    shard_stride = group_page_size // self.dcp_size
                     shard_idx = self.dcp_rank
                     layer_byte_offset += shard_idx * shard_stride
             builders.append(
@@ -489,11 +496,6 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
             self.kv_recv_thread.external_slot_release_waiter = waiter
         return True
 
-    def _global_group_alloc_size(self, group_id: int) -> int:
-        if getattr(self, "has_shared_kv", False) and self.group_block_len.get(group_id):
-            return sum(self.group_block_len[group_id])
-        return super()._global_group_alloc_size(group_id)
-
     def _start_kv_transfer_threads(self) -> None:
         if self.use_layerwise_transfer:
             self.m_store.ensure_initialized()
@@ -507,7 +509,7 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
         self.layer_load_finished_events = [threading.Event() for i in range(self.num_layers)]
         self.layer_save_finished_events = [threading.Event() for i in range(self.num_layers)]
         self.sync_save_events = [torch.npu.Event() for i in range(self.num_layers)]
-        can_save = is_kv_save_role(self.kv_role, self.consumer_is_to_put)
+        can_save = is_kv_save_role(self.kv_role, self.save_decode_cache)
         if (self.use_block_key_layerwise or self.use_layerwise_transfer) and can_save:
             ready_event_sending = threading.Event()
             self.kv_send_thread = KVCacheStoreLayerSendingThread(
@@ -697,7 +699,7 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
         return self.tp_rank == min(peers)
 
     def _is_layerwise_save_owner(self, group_id: int = 0) -> bool:
-        if not is_kv_save_role(self.kv_role, self.consumer_is_to_put):
+        if not is_kv_save_role(self.kv_role, self.save_decode_cache):
             return False
 
         # Each rank must save its own Mamba state shard.
@@ -1484,7 +1486,7 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
 
     def _submit_attention_save(self, layer_id: int) -> None:
         """Start current-layer put only once KV is ready at attention entry."""
-        if not is_kv_save_role(self.kv_role, self.consumer_is_to_put):
+        if not is_kv_save_role(self.kv_role, self.save_decode_cache):
             return
         assert self.sync_save_events is not None
         assert self.layer_save_finished_events is not None
@@ -1716,7 +1718,7 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
             self._layer_load_aborted.is_set() or self.current_layer == self.num_layers - 1
         ):
             self._data_plane.finish_sessions()
-        if hasattr(self, "kv_role") and not is_kv_save_role(self.kv_role, getattr(self, "consumer_is_to_put", False)):
+        if hasattr(self, "kv_role") and not is_kv_save_role(self.kv_role, getattr(self, "save_decode_cache", False)):
             self.current_layer += 1
 
     def save_kv_layer(self, connector_metadata: AscendConnectorMetadata) -> None:

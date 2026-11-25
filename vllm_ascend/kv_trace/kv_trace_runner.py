@@ -21,7 +21,13 @@ class _V2RunnerAdapter:
     def configure(self) -> None:
         tables = self.runner.block_tables
         sizes = [group.kv_cache_spec.block_size for group in self.runner.kv_cache_config.kv_cache_groups]
-        if list(tables.block_sizes) != sizes or list(tables.kernel_block_sizes) != sizes:
+        # Public V2 tables use manager blocks. Metadata tables are expanded
+        # by each AttentionGroup; the trace auditor requires matching units.
+        if list(tables.block_sizes) != sizes or any(
+            (group.kernel_block_size or group.kv_cache_spec.block_size) != sizes[group_id]
+            for group_id, groups in enumerate(self.runner.attn_groups)
+            for group in groups
+        ):
             raise ValueError("KV Trace: unadapted MRV2 allocator/kernel block coordinates")
         prepare = self.runner.model_state.prepare_attn
         if getattr(prepare, "_ascend_kv_trace", False):
@@ -103,9 +109,7 @@ class _V2RunnerAdapter:
 
 
 def install_trace(runner: Any) -> KVTraceRuntime | None:
-    """Install the MRV2 observer; MRV1 is left unchanged."""
-    if not getattr(runner.vllm_config, "use_v2_model_runner", False):
-        return None
+    """Install the Model Runner V2 observer."""
     runtime = get_trace(runner.vllm_config)
     if runtime is None:
         return None

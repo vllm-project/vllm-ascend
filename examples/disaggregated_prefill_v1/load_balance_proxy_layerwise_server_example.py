@@ -105,6 +105,13 @@ from vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.protocol import (
     BATCH_KV_TRANSFER_PARAMS,
 )
 
+try:
+    # Imported as a package module (tests).
+    from examples.disaggregated_prefill_v1.sse_frame_parser import SSEFrameParser
+except ImportError:
+    # Run as a standalone script: the script's own directory is on sys.path.
+    from sse_frame_parser import SSEFrameParser
+
 logger = init_logger(__name__)
 
 # Add uvloop for faster event loop if available
@@ -531,10 +538,14 @@ async def _handle_completions(api: str, request: Request):
             retry_count = 0
             retry = True
             completion_tokens = 0
+            frame_parser = SSEFrameParser()
             # Only one await per chunk, minimal logic in loop
             try:
                 while retry:
                     retry = False
+                    # Each decoder attempt emits a self-contained stream, so the
+                    # frame buffer must be reset at every attempt boundary.
+                    frame_parser = SSEFrameParser()
                     async for chunk in stream_service_response_with_retry(
                         decoder.client,
                         api,
@@ -543,62 +554,62 @@ async def _handle_completions(api: str, request: Request):
                         max_retries=global_args.max_retries,
                         base_delay=global_args.retry_delay,
                     ):
-                        try:
-                            chunk_str = chunk.decode("utf-8").strip()
-                        except UnicodeDecodeError:
-                            logger.debug("Skipping chunk: %s", chunk)
-                            yield chunk
+                        # The decode backend speaks SSE, but the network does
+                        # not respect frame boundaries: one frame can arrive
+                        # split across two chunks, and two frames can be
+                        # coalesced into one chunk. Reassemble frames before
+                        # decoding them, so no frame is dropped.
+                        frames = frame_parser.feed(chunk)
+                        if not frames:
+                            # No complete frame yet; forward the raw bytes so
+                            # the client still sees them, and wait for the
+                            # rest of the frame.
+                            if chunk:
+                                yield chunk
                             continue
-                        if not chunk_str:
-                            continue
-                        if chunk_str.startswith("data: "):
-                            chunk_str = chunk_str[len("data: ") :]
-                        try:
-                            chunk_json = json.loads(chunk_str)
-                        except json.JSONDecodeError:
-                            # if chunk is [done], skip it.
-                            logger.debug("Skipping chunk: %s", chunk_str)
-                            yield chunk
-                            continue
-                        choices = chunk_json.get("choices", [])
-                        if not choices:
-                            yield chunk
-                            continue
+                        for frame in frames:
+                            chunk_json = frame.payload
+                            choices = chunk_json.get("choices", [])
+                            if not choices:
+                                yield chunk
+                                continue
 
-                        choice = choices[0]
-                        delta = choice.get("delta") or {}
-                        message = choice.get("message") or {}
-                        content = delta.get("content") or message.get("content") or choice.get("text") or ""
-                        generated_token += content
+                            choice = choices[0]
+                            delta = choice.get("delta") or {}
+                            message = choice.get("message") or {}
+                            content = delta.get("content") or message.get("content") or choice.get("text") or ""
+                            generated_token += content
 
-                        stop_reason = choice.get("stop_reason")
-                        usage = chunk_json.get("usage", {})
-                        completion_tokens = (
-                            (completion_tokens + 1)
-                            if stream_flag
-                            else (completion_tokens + usage.get("completion_tokens"))
-                        )
-                        if stop_reason == "recomputed":
-                            retry = True
-                            retry_count += 1
-                            if chat_flag:
-                                messages[0]["content"] = (
-                                    origin_prompt
-                                    + ([{"type": "text", "text": generated_token}] if generated_token else [])
-                                    if isinstance(origin_prompt, list)
-                                    else (origin_prompt or "") + generated_token
-                                )
-                            else:
-                                req_data["prompt"] = origin_prompt + generated_token
-                            req_data["max_tokens"] = origin_max_tokens - completion_tokens + retry_count
+                            stop_reason = choice.get("stop_reason")
+                            usage = chunk_json.get("usage", {})
+                            completion_tokens = (
+                                (completion_tokens + 1)
+                                if stream_flag
+                                else (completion_tokens + usage.get("completion_tokens"))
+                            )
+                            if stop_reason == "recomputed":
+                                retry = True
+                                retry_count += 1
+                                if chat_flag:
+                                    messages[0]["content"] = (
+                                        origin_prompt
+                                        + ([{"type": "text", "text": generated_token}] if generated_token else [])
+                                        if isinstance(origin_prompt, list)
+                                        else (origin_prompt or "") + generated_token
+                                    )
+                                else:
+                                    req_data["prompt"] = origin_prompt + generated_token
+                                req_data["max_tokens"] = origin_max_tokens - completion_tokens + retry_count
+                                break
+                            if retry_count > 0 and not stream_flag:
+                                if chat_flag:
+                                    choice["message"]["content"] = generated_token
+                                else:
+                                    choice["text"] = generated_token
+                                chunk = json.dumps(chunk_json).encode("utf-8")
+                            yield chunk
+                        if retry:
                             break
-                        if retry_count > 0 and not stream_flag:
-                            if chat_flag:
-                                choice["message"]["content"] = generated_token
-                            else:
-                                choice["text"] = generated_token
-                            chunk = json.dumps(chunk_json).encode("utf-8")
-                        yield chunk
             except Exception as e:
                 logger.error(
                     "Error during streaming from decoder %s: %s the aborted request %s "
