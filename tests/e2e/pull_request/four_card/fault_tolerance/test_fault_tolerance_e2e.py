@@ -223,6 +223,8 @@ class FTServerManager:
                         env_dict={
                             "ASCEND_RT_VISIBLE_DEVICES": str(r),
                             "VLLM_USE_V2_MODEL_RUNNER": "1",
+                            # EPLB expert re-hosting outgrows the ~200 MB HCCL default.
+                            "HCCL_BUFFSIZE": "1024",
                         },
                     )
                     self.servers.append((server, sargs))
