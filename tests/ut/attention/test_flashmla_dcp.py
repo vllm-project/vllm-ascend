@@ -17,6 +17,7 @@ from pathlib import Path
 from types import MethodType, ModuleType, SimpleNamespace
 from unittest.mock import Mock
 
+import numpy as np
 import pytest
 import torch
 
@@ -144,7 +145,13 @@ def runtime(monkeypatch):
         return install(name, **runpy.run_path(str(ROOT / relative)))
 
     install("vllm_ascend")
-    utils = install("vllm_ascend.attention.utils", get_flashmla_ops=lambda: None, get_quant_flashmla_ops=lambda: None)
+    utils = install(
+        "vllm_ascend.attention.utils",
+        get_flashmla_ops=lambda: None,
+        get_quant_flashmla_ops=lambda: None,
+        np=np,
+        torch=torch,
+    )
     tree = ast.parse((ROOT / "vllm_ascend/attention/utils.py").read_text(encoding="utf-8"))
     constant = next(
         node
@@ -152,7 +159,13 @@ def runtime(monkeypatch):
         if isinstance(node, ast.Assign)
         and any(isinstance(target, ast.Name) and target.id == "MLA_FLASH_SUPPORTED_Q_HEADS" for target in node.targets)
     )
-    exec(compile(ast.Module(body=[constant], type_ignores=[]), "<heads>", "exec"), utils.__dict__)
+    prefill_flags = next(
+        node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "apply_prefill_as_decode_mask"
+    )
+    exec(
+        compile(ast.Module(body=[constant, prefill_flags], type_ignores=[]), "<attention-utils>", "exec"),
+        utils.__dict__,
+    )
     install("vllm.v1.attention.backends.utils", get_dcp_local_seq_lens=local_lengths)
     install(
         "vllm.forward_context", BatchDescriptor=object, get_forward_context=Mock(), is_forward_context_available=Mock()
@@ -668,19 +681,12 @@ def test_forward_matches_dense_with_strided_history_and_empty_ranks(
     runtime.scope["torch_npu"]._npu_fused_infer_attention_score_get_max_workspace.assert_not_called()
 
 
-@pytest.mark.parametrize("draft", [False, True])
-def test_external_dcp_graph_skips_fia_parameter_updates(draft):
-    metadata = {"flash": SimpleNamespace(decode=object(), external_flashmla=object())}
-    scope = {
-        "_EXTRA_CTX": SimpleNamespace(is_draft_model=draft, is_draft_model_prefill=False),
-        "get_graph_params": lambda: object(),
-        "get_draft_graph_params": lambda: object(),
-    }
+def test_dcp_rejects_legacy_graph_parameter_updates():
     update = load_method(
-        "vllm_ascend/attention/context_parallel/mla_cp.py", "AscendMlaDCPImpl", "update_graph_params", scope
+        "vllm_ascend/attention/context_parallel/mla_cp.py", "AscendMlaDCPImpl", "update_graph_params", {}
     )
-    # No torch.npu stream or FIA graph registry access is possible in this scope.
-    update(None, SimpleNamespace(attn_metadata=metadata), 4, draft_attn_metadatas=[metadata])
+    with pytest.raises(NotImplementedError, match="UpdatableGraph"):
+        update(None, None, 4)
 
 
 @pytest.mark.parametrize("bad_lse", ["layout", "dtype"])

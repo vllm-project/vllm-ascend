@@ -1047,11 +1047,7 @@ def requires_lmhead_dp_sync(vllm_config: VllmConfig) -> bool:
     """V2 reduced LMHead padding requires real, synchronized DP token buckets."""
     # TODO: Merge the requires_lmhead_dp_sync interface into
     # should_skip_allreduce_across_dp_group in a future refactor.
-    return (
-        vllm_config.use_v2_model_runner
-        and vllm_config.parallel_config.decode_context_parallel_size == 1
-        and lmhead_tp_enable()
-    )
+    return vllm_config.parallel_config.decode_context_parallel_size == 1 and lmhead_tp_enable()
 
 
 def lmhead_tp_max_num_logits(max_num_reqs: int, logits_rows_per_req: int) -> int:
@@ -1512,6 +1508,20 @@ def is_c8_mxfp_kv_quant(vllm_config: VllmConfig) -> bool:
     # a missing cache_config means the mxfp8 KV cache dtype is not enabled.
     cache_config = getattr(vllm_config, "cache_config", None)
     return cache_config is not None and cache_config.cache_dtype == C8_MXFP_KV_CACHE_DTYPE
+
+
+# HIF8 C8 for sparse-attention MLA models (e.g. GLM-5.3-Flash): both the latent
+# KV cache and the absorbed query are quantized to HIF8 with per-tensor scales (Ascend
+# 950PR/950DT). Enabled with ``--kv-cache-dtype hif8``; the ModelSlim
+# ``QK_HIF8_PER_TENSOR`` recipe (fa_q/fa_k scale) must be present.
+HIF8_C8_KV_CACHE_DTYPE = "hif8"
+
+
+def is_hif8_c8_kv_quant(vllm_config: VllmConfig) -> bool:
+    # Tolerate partially constructed configs (e.g. SimpleNamespace in tests):
+    # a missing cache_config means the hif8 KV cache dtype is not enabled.
+    cache_config = getattr(vllm_config, "cache_config", None)
+    return cache_config is not None and cache_config.cache_dtype == HIF8_C8_KV_CACHE_DTYPE
 
 
 def refresh_block_size(vllm_config):
@@ -2011,15 +2021,9 @@ def use_updatable_graph(
 
     if issubclass(attn_backend, AscendAttentionBackend):
         return True
-
-    from vllm.distributed import get_dcp_group
-
     from vllm_ascend.attention.mla_v1 import AscendMLABackend
 
-    # Non-DCP MLA now registers decode FIA tasks during capture. Keep DCP MLA
-    # on its specialized graph-parameter path until its grouped update logic is
-    # migrated separately.
-    return issubclass(attn_backend, AscendMLABackend) and get_dcp_group().world_size == 1
+    return issubclass(attn_backend, AscendMLABackend)
 
 
 def _is_glm_model(model_config) -> bool:

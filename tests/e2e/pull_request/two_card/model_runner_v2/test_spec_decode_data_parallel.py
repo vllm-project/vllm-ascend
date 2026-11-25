@@ -50,7 +50,6 @@ PROMPTS = [
 @patch.dict(
     os.environ,
     {
-        "VLLM_USE_V2_MODEL_RUNNER": "1",
         "HCCL_BUFFSIZE": "1024",
     },
 )

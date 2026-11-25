@@ -69,7 +69,7 @@ def test_qwen3_6_27b_multimodel_fia_eager():
 
 @patch.dict(
     os.environ,
-    {"HCCL_BUFFSIZE": "1024", "VLLM_USE_V2_MODEL_RUNNER": "1"},
+    {"HCCL_BUFFSIZE": "1024"},
 )
 @wait_until_npu_memory_free()
 def test_qwen3_6_27b_multimodel_encoder_acl_graph_mrv2():

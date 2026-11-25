@@ -18,7 +18,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Hashable
 from typing import Any
 
 import torch
@@ -42,10 +42,12 @@ class BreakableACLGraphWrapper(BreakableCUDAGraphWrapper):
         vllm_config: VllmConfig,
         use_eagle: bool = False,
         enable_enpu: bool = False,
+        key_fn: Callable[..., Hashable] | None = None,
     ) -> None:
         super().__init__(
             runnable=runnable,
             vllm_config=vllm_config,
+            key_fn=key_fn,
         )
 
         self.use_eagle = use_eagle

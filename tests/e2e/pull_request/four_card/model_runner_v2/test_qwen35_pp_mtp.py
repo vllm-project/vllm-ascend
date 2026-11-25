@@ -67,7 +67,6 @@ def test_qwen35_pp_mtp_full_decode_only() -> None:
             server_port=port,
             auto_port=False,
             max_wait_seconds=600,
-            env_dict={"VLLM_USE_V2_MODEL_RUNNER": "1"},
         ) as server,
         server.get_client(timeout=180) as client,
     ):

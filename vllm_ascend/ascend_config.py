@@ -123,7 +123,7 @@ class AscendCompilationConfig:
 
     Migrated to ``@config`` (pydantic dataclass). Hardware-profile runtime
     downgrades (disable npugraph_ex / static_kernel / super_kernel) and the
-    super_kernel→static_kernel→npugraph_ex dependency checks are applied in
+    super_kernel→static_kernel dependency checks are applied in
     an ``after`` model_validator.
     """
 
@@ -154,24 +154,17 @@ class AscendCompilationConfig:
     def _apply_unsupported_hardware_downgrade_and_static_kernel_check(self):
         from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 
+        # TODO: Validate static kernel compilation during graph warmup on profiles without npugraph_ex support.
         if not get_current_hardware_profile().supports(HardwareCapability.NPUGRAPH_EX):
             if self.enable_npugraph_ex:
-                logger.warning("npugraph_ex is not supported by the current hardware profile. Disabling it.")
+                logger.warning("Disabling npugraph_ex for the current hardware profile.")
             if self.enable_static_kernel:
-                logger.warning(
-                    "static kernel requires npugraph_ex, which is not supported by the current hardware profile. "
-                    "Disabling it."
-                )
+                logger.warning("Disabling static kernel compilation for the current hardware profile.")
             if self.enable_super_kernel:
-                logger.warning(
-                    "super kernel requires static kernel, which is not supported by the current hardware profile. "
-                    "Disabling it."
-                )
+                logger.warning("Disabling SuperKernel for the current hardware profile.")
             self.enable_npugraph_ex = False
             self.enable_static_kernel = False
             self.enable_super_kernel = False
-        if self.enable_static_kernel:
-            assert self.enable_npugraph_ex, "Static kernel generation requires npugraph_ex to be enabled."
         if self.enable_super_kernel:
             assert self.enable_static_kernel, "Super kernel generation requires static kernel to be enabled."
         return self
@@ -420,9 +413,16 @@ class QuantizedAllReduceConfig:
     value overrides the hardware default. Both select calls by group size,
     dtype, shape and payload rather than forward phase.
     A collective takes the selected path only when its payload reaches
-    ``min_numel`` elements, i.e. ``min_numel * 2`` bytes of bf16 data. The
-    default is 16,777,216 elements (32 MiB), retained from the INT8 crossover
-    measurements. Benchmark MXFP8 independently on the intended A5 workload.
+    ``min_numel`` elements, i.e. ``min_numel * 2`` bytes of bf16 data. Left at
+    ``None`` (the default) the int8 gate is picked per tensor-parallel degree
+    from the A2 measurements: 8,388,608 (16 MiB) at TP=2, 16,777,216 (32 MiB)
+    at TP=4 and 31,457,280 (60 MiB) at TP=8. The first two are 1.5x above their
+    measured break-even; the TP=8 gate is 1.6-1.9x above its 31-38 MiB
+    collective crossing and is the lowest payload that is strictly profitable
+    end to end. These gates are A2-only: A5 has no int8 payload calibration,
+    so forcing the int8 backend there requires an explicit ``min_numel``.
+    MXFP8 has no per-TP calibration yet and keeps 16,777,216 (32 MiB);
+    benchmark it on the intended A5 workload before lowering it.
 
     The wrapper is built for every parallel group; unsupported group sizes
     keep bf16. MXFP8 supports groups of 2/4/8 ranks, while INT8 supports up to
@@ -430,13 +430,16 @@ class QuantizedAllReduceConfig:
     """
 
     enable: bool = False
-    min_numel: int = 16777216
+    # None selects the per-TP int8 default measured on A2. A5 int8 has no
+    # calibration, so it requires an explicit value; MXFP8 falls back to its
+    # own 32 MiB default. See vllm_ascend.distributed.device_communicators.
+    min_numel: int | None = None
     quant_dtype: Literal["int8", "mxfp8"] = dataclasses.field(default_factory=lambda: "mxfp8" if is_950() else "int8")
 
     @field_validator("min_numel")
     @classmethod
-    def _check_min_numel(cls, value: int) -> int:
-        if value < 1:
+    def _check_min_numel(cls, value: int | None) -> int | None:
+        if value is not None and value < 1:
             raise ValueError("additional_config.quantized_all_reduce_config.min_numel must be >= 1")
         return value
 
@@ -445,11 +448,22 @@ class QuantizedAllReduceConfig:
             return
         # Imported lazily: the wrapper module imports torch_npu, which should not
         # be pulled in from the config factory at module import time.
-        from vllm_ascend.distributed.device_communicators.quantized_all_reduce import (
+        from vllm_ascend.distributed.device_communicators.int8_all_reduce import (
             _MAX_VALID_WORLD_SIZE,
         )
 
         tp_size = vllm_config.parallel_config.tensor_parallel_size
+        # TODO: the per-TP int8 payload gates and their end-to-end gain have not
+        # been measured on A5, so A5 must not inherit the A2 defaults. Remove
+        # this guard once the A5 per-TP min_numel values are measured and added
+        # to default_min_numel() in the int8 wrapper.
+        if self.quant_dtype == "int8" and self.min_numel is None and is_950():
+            raise ValueError(
+                "the per-TP min_numel defaults are measured on Atlas A2 only, and "
+                "A5 has no int8 payload calibration. Set "
+                "additional_config.quantized_all_reduce_config.min_numel explicitly, "
+                "or leave quant_dtype as mxfp8."
+            )
         if self.quant_dtype == "int8" and tp_size > _MAX_VALID_WORLD_SIZE:
             raise ValueError(
                 "additional_config.quantized_all_reduce_config supports "
@@ -615,7 +629,7 @@ class AscendConfig:
             },
             "quantized_all_reduce_config": {
                 "enable": false,
-                "min_numel": 16777216
+                "min_numel": null
             },
             "xlite_graph_config": {
                 "enabled": false,
@@ -826,6 +840,8 @@ class AscendConfig:
     # Business validation: invoked explicitly by init_ascend_config (NOT a
     # pydantic after-validator). Preserves the original __init__ ordering —
     def derive_and_validate(self, vllm_config: VllmConfig) -> AscendConfig:
+        from vllm.compilation.breakable_cudagraph import is_breakable_cudagraph_enabled
+
         vc = vllm_config
         validate_expert_offload_config(self.expert_offload_config, vc, self)
         if self.shared_engram is not None and self.shared_engram.backend in ("a2", "a5"):
@@ -834,8 +850,6 @@ class AscendConfig:
             os.environ.setdefault("VLLM_WORKER_SHUTDOWN_TIMEOUT_SECONDS", "120")
         engram_config = getattr(vc, "engram_config", None)
         if self.shared_engram is not None and self.shared_engram.backend == "a3":
-            if not vc.use_v2_model_runner:
-                raise ValueError("shared_engram requires Model Runner V2")
             if not engram_config or not engram_config.cpu_offload:
                 raise ValueError("shared_engram requires Engram cpu_offload")
             if vc.load_config.load_format == "dummy" or vc.model_config.enable_sleep_mode:
@@ -844,7 +858,6 @@ class AscendConfig:
             engram_config is not None
             and getattr(engram_config, "cpu_offload", False)
             and not engram_config.dp_shared_memory
-            and vc.use_v2_model_runner
             and (vc.parallel_config.data_parallel_size > 1 or vc.parallel_config.prefill_context_parallel_size > 1)
         ):
             # DP-dummy ranks have no hash work in MRV2. Share host tables
@@ -1023,7 +1036,11 @@ class AscendConfig:
         # Sparse C8 derivation. StoreKVBlock can be disabled by users, and is
         # otherwise enabled only for SFA + Lightning Indexer C8 on PD prefill
         # nodes.
-        from vllm_ascend.utils import model_uses_kpool_indexer, model_uses_sfa_sparse
+        from vllm_ascend.utils import (
+            is_hif8_c8_kv_quant,
+            model_uses_kpool_indexer,
+            model_uses_sfa_sparse,
+        )
 
         use_sparse = model_uses_sfa_sparse(vc.model_config)
         # The SFA C8 packed KV cache path is indexer-agnostic; kpool-indexer
@@ -1059,7 +1076,7 @@ class AscendConfig:
         ) = self._parse_sparse_li_layers_from_quant_config(quant_config, ("W8A8_MXFP8",))
         self._sparse_li_layer_filter_enabled = self._has_sparse_li_layer_config(quant_config)
         # vLLM #60517 removed the torch.compile-based sequence-parallelism pass
-        # (and `PassConfig.enable_sp`) in both v0.33.0 and verified main.
+        # (and `PassConfig.enable_sp`).
 
         enable_sp_by_pass = False
         self.enable_sp_by_pass = vc.model_config is not None and not vc.model_config.enforce_eager and enable_sp_by_pass
@@ -1095,11 +1112,15 @@ class AscendConfig:
         self._check_mix_placement()
 
         # sparse KV offload vs packed SFA main cache mutex
-        self._validate_sparse_packed_kv_offload_compatibility()
+        self._validate_sparse_packed_kv_offload_compatibility(is_hif8_c8_kv_quant(vllm_config))
         if fallback_for_swiglu_limits:
             # Keep the derived flags until the mode-3 hardware and model checks have run.
             self._megamoe_supported = False
             self.megamoe_shared_expert_fusion = False
+        if is_breakable_cudagraph_enabled(vc.compilation_config):
+            # Breakable skips model compilation. The worker only compiles static kernels
+            # during graph warmup when enable_npugraph_ex is False.
+            self.ascend_compilation_config.enable_npugraph_ex = False
         return self
 
     @property
@@ -1173,10 +1194,10 @@ class AscendConfig:
                 "such as Kimi K3. Set additional_config.enable_fused_mc2 to 0, 1, or 2."
             )
 
-    def _validate_sparse_packed_kv_offload_compatibility(self) -> None:
-        if self.sparse_kv_offload_config.enabled and self.uses_packed_sfa_main_cache:
+    def _validate_sparse_packed_kv_offload_compatibility(self, is_hif8_c8_kv_quant) -> None:
+        if self.sparse_kv_offload_config.enabled and (self.uses_packed_sfa_main_cache or is_hif8_c8_kv_quant):
             raise NotImplementedError(
-                "Sparse KV offload does not support packed SFA main caches (C8 or TQ4). "
+                "Sparse KV offload does not support SFA main-cache quantization (C8, TQ4 or HIF8). "
                 "Sparse LI C8 is supported because the indexer cache remains device-resident."
             )
 
@@ -1907,14 +1928,6 @@ class SparseKVOffloadConfig:
                     "you can enable keep_device_kv_cache."
                 )
         self.topk = vllm_config.model_config.hf_text_config.index_topk
-        speculative = getattr(vllm_config, "speculative_config", None)
-        if (
-            speculative is not None
-            and speculative.method == "dspark"
-            and not getattr(vllm_config, "use_v2_model_runner", False)
-        ):
-            # Only V2 initializes the resident draft KV from remote prompt context.
-            raise ValueError("Sparse KV offload with DSpark requires V2 remote prompt-context initialization")
         if self.topk_buffer_size < self.topk:
             raise ValueError(
                 "sparse_kv_offload_config.topk_buffer_size must be >= topk, "

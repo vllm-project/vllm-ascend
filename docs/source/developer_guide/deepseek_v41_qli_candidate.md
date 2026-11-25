@@ -14,8 +14,8 @@ updates remain unchanged.
 
 The operator consumes `TND` Q and `PA_BBND` index K directly. DeepSeek V4.1's
 four-slot layer-outermost allocator packs index K and FP16 scales after KV
-inside each shared page. C2 uses 64-row views with a 131072-byte block stride;
-C1 uses 128-row views with a 147712-byte block stride. The Torch adapter passes
+inside each shared page. C2 uses 64-row views with a 128KB block stride;
+C1 uses 128-row views with a 144.25KB block stride. The PyTorch adapter passes
 their actual leading strides to ACLNN.
 Neither layout requires gathering the whole context into a dense tensor.
 
@@ -86,14 +86,14 @@ The checkpoint-provided `encoding.encode_messages(..., thinking_mode="chat")`
 was used with `/v1/completions`; the checkpoint does not provide a standard
 chat template. Repeated output agreement validates these fixed functional
 cases, not a baseline-versus-candidate dataset accuracy comparison. Graph,
-64K/128K requests, multi-node execution, Engram and DSpark remain unvalidated.
+64k/128k requests, multi-node execution, Engram and DSpark remain unvalidated.
 
 ## Compilation scope
 
 DeepSeek V4.1's A2/A3 path uses INT8 Q/K, FP16 weights/scales and quant mode 2. Its
 compiled QLI V2 template matrix has one key, down from 4. A5 retains the full
 16-key matrix, including paged BSND/TND queries and matching nonpaged BSND/TND
-layouts. A5 dtype registration, host validation and kernel dispatch retain
+layouts. A5 dtype registration, host validation, and kernel dispatch retain
 FP8, MXFP8, HiFloat8, MXFP4 and INT8 (quant modes 1/3/4/5/2 respectively).
 The DeepSeek V4.1 INT8 call sites do not establish that other A5 paths are unused.
 Both architectures retain their original template argument encodings.
@@ -126,7 +126,7 @@ sources are selected separately for arch32 (A2/A3) and arch35 (A5).
 Compressor dtype registration now matches those existing selections: one
 signature per architecture, down from four on A2/A3 and two on A5. Norm weights
 remain BF16 on A2/A3 and FP32 on A5. Host validation likewise rejects uncompiled
-layouts, dtypes and modes. The empty-input entry uses a discarded `else` branch
+layouts, dtypes, and modes. The empty-input entry uses a discarded `else` branch
 so the compiler does not instantiate a computation kernel after an unconditional
 return. The four keys themselves and their encodings remain unchanged.
 

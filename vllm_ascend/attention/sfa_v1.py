@@ -10,10 +10,10 @@ from vllm.config.compilation import CUDAGraphMode
 from vllm.distributed import get_pcp_group, get_tensor_model_parallel_world_size, get_tp_group
 from vllm.forward_context import get_forward_context
 from vllm.logger import logger
-from vllm.model_executor.layers.attention.mla_attention import MLACommonMetadataBuilder
+from vllm.model_executor.layers.attention.mla_attention import MLAAttention, MLACommonMetadataBuilder
 from vllm.model_executor.utils import replace_parameter
 from vllm.utils.math_utils import cdiv
-from vllm.utils.torch_utils import kv_cache_dtype_str_to_dtype
+from vllm.utils.torch_utils import get_dtype_size, kv_cache_dtype_str_to_dtype
 from vllm.v1.attention.backend import (
     AttentionBackend,  # type: ignore
     AttentionCGSupport,
@@ -21,7 +21,7 @@ from vllm.v1.attention.backend import (
     MLAAttentionImpl,
     max_decode_query_len,
 )
-from vllm.v1.kv_cache_interface import AttentionSpec
+from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheSpec
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.attention.attention_mask import AttentionMaskBuilder
@@ -29,8 +29,16 @@ from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.context_parallel.common_cp import (
     get_pcp_num_replicated_tokens,
 )
+from vllm_ascend.attention.dsa_attn_kv_plan import write_dsa_cache
 from vllm_ascend.attention.indexer import AscendSFAIndexerCache
-from vllm_ascend.attention.sparse_flash_mla import sparse_flash_mla, sparse_flash_mla_metadata
+from vllm_ascend.attention.sparse_flash_mla import (
+    HIF8_QUANT_MODE,
+    SMLA_QUANT_METADATA_SIZE,
+    _get_sparse_flash_mla_ops,
+    quant_sparse_flash_mla,
+    quant_sparse_flash_mla_metadata,
+    sparse_flash_mla_metadata,
+)
 from vllm_ascend.attention.utils import (
     MLAPO_MAX_SUPPORTED_TOKENS,
     SFA_QSFA_TILE_SIZE,
@@ -41,6 +49,7 @@ from vllm_ascend.attention.utils import (
     get_sfa_qsfa_packed_head_dim,
     get_tq_fused_slot_bytes,
     get_tq_packed_bytes,
+    has_requests_to_run_as_prefill,
     maybe_save_kv_layer_to_connector,
     notify_kv_cache_written,
     split_decodes_and_prefills,
@@ -81,12 +90,12 @@ from vllm_ascend.utils import (
     is_mtp_layer,
     is_rl_weight_update_enabled,
     maybe_trans_nz,
-    vllm_version_is,
 )
 from vllm_ascend.weight_switch import ParallelOProjection, WeightSwitchConfig
 
 # NoPE sparse MLA operator helpers.
-SMLA_METADATA_SIZE = 1024
+SMLA_METADATA_SIZE = 2048
+SMLA_LEGACY_METADATA_SIZE = 1024
 # GLM5Next's SFA path carries no learnable attention sink, but SparseFlashMla
 # still requires a per-head float32 sinks tensor. This is the placeholder value
 # the path has always used; whether -inf is the correct "no sink" value is a
@@ -99,7 +108,7 @@ TQ_TILE_SIZE = 128
 SFA_NOPE_PROLOG_SUPPORTED_DIMS = ((256, 512, 1536), (256, 512, 2048))
 
 
-def generate_smla_plan(metadata, num_heads, head_dim, topk, cu_seqlens_q, topk_length):
+def generate_smla_plan(metadata, num_heads, head_dim, topk, cu_seqlens_q, topk_length, *, hif8=False):
     """Derive the operator's core-split plan for one specific set of inputs.
 
     ``cu_seqlens_q`` and ``topk_length`` have to be the very tensors the
@@ -109,7 +118,7 @@ def generate_smla_plan(metadata, num_heads, head_dim, topk, cu_seqlens_q, topk_l
     interface enforces the second half of that itself - with ori_mask_mode 0 and
     a non-zero ori_topk it rejects an absent ori_topk_length.
     """
-    return sparse_flash_mla_metadata(
+    kwargs = dict(
         num_heads_q=num_heads,
         num_heads_kv=1,
         head_dim=head_dim,
@@ -142,20 +151,21 @@ def generate_smla_plan(metadata, num_heads, head_dim, topk, cu_seqlens_q, topk_l
         layout_kv="PA_BBND",
         has_ori_kv=True,
         has_cmp_kv=False,
-        device=str(metadata.seq_lens.device),
     )
+    if hif8:
+        return quant_sparse_flash_mla_metadata(quant_mode=HIF8_QUANT_MODE, **kwargs)
+    return sparse_flash_mla_metadata(device=str(metadata.seq_lens.device), **kwargs)
 
 
-def build_smla_metadata(metadata, buffer, num_heads, head_dim, topk, cu_seqlens_q, topk_length):
-    generated = generate_smla_plan(metadata, num_heads, head_dim, topk, cu_seqlens_q, topk_length)
-    if generated.numel() != buffer.numel():
-        # The persistent buffer is sized by the operator's fixed [1024] contract.
-        # A generated plan of any other size means this build does not match the
-        # operator this buffer was allocated for; say so here rather than letting
-        # copy_ decide.
-        raise ValueError(f"Sparse MLA plan must contain {buffer.numel()} int32 values, got {generated.numel()}.")
-    buffer.copy_(generated)
-    metadata.smla_metadata = buffer
+def build_smla_metadata(metadata, buffer, num_heads, head_dim, topk, cu_seqlens_q, topk_length, *, hif8=False):
+    generated = generate_smla_plan(metadata, num_heads, head_dim, topk, cu_seqlens_q, topk_length, hif8=hif8)
+    size = generated.numel()
+    if size not in (SMLA_LEGACY_METADATA_SIZE, SMLA_METADATA_SIZE):
+        raise ValueError(f"Sparse MLA plan has an unsupported size of {size} int32 values.")
+    # Match the native plan shape and keep its address stable across ACL Graph replays.
+    plan = buffer if size == buffer.numel() else buffer[:size]
+    plan.copy_(generated)
+    return plan
 
 
 def _view_cache_as_operator_pages(cache: torch.Tensor, block_size: int) -> torch.Tensor:
@@ -173,9 +183,12 @@ def _view_cache_as_operator_pages(cache: torch.Tensor, block_size: int) -> torch
         raise ValueError("Sparse MLA oversized storage pages must support a zero-copy operator-page view.") from err
 
 
-def sparse_mla(query, cache, indices, metadata, scale):
+def sparse_mla(query, cache, indices, metadata, scale, *, hif8_scales=None):
     """Attend to original latent KV, using the platform's NoPE operator."""
     cache = _view_cache_as_operator_pages(cache, metadata.block_size)
+    hif8 = hif8_scales is not None
+    if hif8 and metadata.smla_metadata is None:
+        raise RuntimeError("HIF8 sparse MLA requires a QuantSparseFlashMla metadata buffer.")
     if metadata.smla_metadata is not None:
         # The A5 DMA merges adjacent columns. Preserve the selected set while
         # sorting token positions and moving invalid padding to the end.
@@ -197,7 +210,7 @@ def sparse_mla(query, cache, indices, metadata, scale):
         if query.shape[0] != metadata.smla_topk_length.shape[0]:
             # Eager and piecewise execution trim graph-padding query rows.
             cu_seqlens_q = cu_seqlens_q.clamp(max=query.shape[0])
-        build_smla_metadata(
+        plan = build_smla_metadata(
             metadata,
             metadata.smla_metadata,
             query.shape[1],
@@ -205,8 +218,17 @@ def sparse_mla(query, cache, indices, metadata, scale):
             sorted_indices.shape[-1],
             cu_seqlens_q,
             topk_length,
+            hif8=hif8,
         )
-        result = sparse_flash_mla(
+        # SFA supplies its own sparse mask. The DSA adapter strips decode indices.
+        attention_op, _ = _get_sparse_flash_mla_ops()
+        quant_kwargs = {}
+        if hif8:
+            q_scale_reciprocal, q_descale, kv_descale = hif8_scales
+            query = _hif8_quantize(query, q_scale_reciprocal)
+            attention_op = quant_sparse_flash_mla
+            quant_kwargs = {"q_descale": q_descale, "ori_kv_descale": kv_descale}
+        result = attention_op(
             query.contiguous(),
             ori_kv=cache,
             ori_sparse_indices=sorted_indices,
@@ -215,7 +237,7 @@ def sparse_mla(query, cache, indices, metadata, scale):
             seqused_ori_kv=metadata.seq_lens,
             ori_topk_length=topk_length,
             sinks=metadata.smla_sinks,
-            metadata=metadata.smla_metadata,
+            metadata=plan,
             softmax_scale=scale,
             cmp_ratio=1,
             # Must match the mode the plan above was generated with.
@@ -227,6 +249,7 @@ def sparse_mla(query, cache, indices, metadata, scale):
             layout_kv="PA_BBND",
             topk_value_mode=1,
             return_softmax_lse=False,
+            **quant_kwargs,
         )
     else:
         result = torch.ops._C_ascend.npu_sparse_flash_attention(
@@ -248,6 +271,14 @@ def sparse_mla(query, cache, indices, metadata, scale):
             return_softmax_lse=False,
         )
     return result[0]
+
+
+def _hif8_quantize(x: torch.Tensor, scale_reciprocal: torch.Tensor) -> torch.Tensor:
+    # Multiply by the reciprocal of the ModelSlim descale. TorchNPU returns
+    # HIFLOAT8 as raw uint8 bytes, which are also the cache storage format.
+    # aclnnAscendQuantV3 requires the scale dtype to match x for HIFLOAT8
+    # output (bf16 x + fp32 scale is rejected with EZ0021), so cast here.
+    return torch_npu.npu_quantize(x.contiguous(), scale_reciprocal.to(x.dtype), None, torch_npu.hifloat8, -1, False)
 
 
 class SparseMLAMetadataState:
@@ -285,7 +316,12 @@ class SparseMLAMetadataState:
                 if num_heads is None
                 else num_heads
             )
-            self.metadata_buffer = torch.empty(SMLA_METADATA_SIZE, dtype=torch.int32, device=device)
+            hif8 = getattr(kv_cache_spec, "cache_sparse_sfa_hif8", False)
+            self.metadata_buffer = torch.empty(
+                SMLA_QUANT_METADATA_SIZE if hif8 else SMLA_METADATA_SIZE,
+                dtype=torch.int32,
+                device=device,
+            )
             self.length_buffer = torch.empty(
                 vllm_config.scheduler_config.max_num_batched_tokens,
                 1,
@@ -434,6 +470,40 @@ class AscendSFABackend(AttentionBackend):
         return tuple(components)
 
     @staticmethod
+    def prepare_layerwise_cache_view(
+        raw_cache: torch.Tensor,
+        spec: KVCacheSpec,
+        layer: MLAAttention,
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+        """Expose the native NoPE and RoPE layout from a shared offload slot.
+
+        Without offload, allocation already provides separate NoPE and RoPE
+        tensors. Before the first KV write, slice the shared slot into two
+        contiguous views, each holding all N blocks of one component.
+
+            | NoPE B0 ... NoPE B(N-1) | RoPE B0 ... RoPE B(N-1) |
+            ^                         ^
+            0                         nope_bytes
+
+        Both views share the slot's storage. Packed and compressed MLA keep
+        the raw slot as a single view.
+        """
+        if (
+            not isinstance(spec, AscendMLAAttentionSpec)
+            or spec.uses_packed_sfa_main_cache
+            or spec.tokens_per_state != 1
+        ):
+            return raw_cache
+        num_blocks = raw_cache.numel() // spec.page_size_bytes
+        num_rows = num_blocks * spec.block_size * spec.num_kv_heads
+        elem_size = get_dtype_size(spec.dtype)
+        nope_bytes = num_rows * layer.kv_lora_rank * elem_size
+        rope_bytes = num_rows * layer.qk_rope_head_dim * elem_size
+        # Both parts use the same dtype, so RoPE starts at an aligned offset.
+        nope, rope = raw_cache.split((nope_bytes, rope_bytes))
+        return nope, rope
+
+    @staticmethod
     def get_impl_cls() -> type["AscendSFAImpl"]:
         if get_current_vllm_config().attention_config.hisparse_config is not None:
             from vllm_ascend.attention.sfa_hisparse import AscendHiSparseImpl
@@ -565,22 +635,12 @@ class AscendSFAMetadataBuilder(MLACommonMetadataBuilder[AscendSFAMetadata]):
         metadata_cls: type[AscendSFAMetadata] | None = None,
         supports_dcp_with_varlen: bool = False,
     ):
-        if vllm_version_is("0.33.0"):
-            super().__init__(
-                kv_cache_spec,
-                layer_names,
-                vllm_config,
-                device,
-                metadata_cls if metadata_cls is not None else AscendSFAMetadata,
-                supports_dcp_with_varlen,
-            )
-        else:
-            # SFA builds its own sparse metadata and never uses the dense MLA
-            # prefill workspace/backend. Native sparse attention has no dense
-            # backend to clone in MLACommonMetadataBuilder.__init__.
-            AttentionMetadataBuilder.__init__(self, kv_cache_spec, layer_names, vllm_config, device)
-            self.metadata_cls = metadata_cls if metadata_cls is not None else AscendSFAMetadata
-            self.model_config = vllm_config.model_config
+        # SFA builds its own sparse metadata and never uses the dense MLA
+        # prefill workspace/backend. Native sparse attention has no dense
+        # backend to clone in MLACommonMetadataBuilder.__init__.
+        AttentionMetadataBuilder.__init__(self, kv_cache_spec, layer_names, vllm_config, device)
+        self.metadata_cls = metadata_cls if metadata_cls is not None else AscendSFAMetadata
+        self.model_config = vllm_config.model_config
 
         # AttentionGroup.create_metadata_builders() passes a copied spec whose
         # block_size is the final per-group kernel block size.
@@ -735,7 +795,9 @@ class AscendSFAMetadataBuilder(MLACommonMetadataBuilder[AscendSFAMetadata]):
             uses_pcp_sharded_layout=(
                 pcp_context is not None and uses_pcp_sharded_layout(common_attn_metadata, self.use_pcp)
             ),
-            pcp_has_global_prefill=bool(pcp_context is not None and pcp_context.global_batch.is_prefilling_np.any()),
+            pcp_has_global_prefill=bool(
+                pcp_context is not None and has_requests_to_run_as_prefill(pcp_context.global_batch)
+            ),
             head_dim=self.model_config.get_head_size(),
             attn_mask=self.attn_mask_builder.get_attention_mask(common_attn_metadata.causal, self.model_config),
             attn_state=common_attn_metadata.attn_state,
@@ -803,10 +865,9 @@ class AscendSFAImpl(MLAAttentionImpl):
     understand this class
     """
 
-    # Main validates the sparse contract before our custom forward() runs.
     # SFA consumes top-k indices itself and has no native dense-MHA entrypoint.
-    is_sparse: ClassVar[bool] = not vllm_version_is("0.33.0")
-    supports_dense_mha_prefill: bool = vllm_version_is("0.33.0")
+    is_sparse: ClassVar[bool] = True
+    supports_dense_mha_prefill: bool = False
 
     # ``W_UV``/``W_UK_T`` are injected during ``process_weights_after_loading``
     # through ``replace_parameter``, which is ``setattr``-based and therefore
@@ -820,6 +881,10 @@ class AscendSFAImpl(MLAAttentionImpl):
     # A replicated MTP draft may inherit a PCP target's non-trivial interleave
     # value. With DCP disabled it does not change the draft KV-cache layout.
     supports_mtp_with_cp_non_trivial_interleave_size: bool = True
+
+    # HIF8 C8 is per-layer (ModelSlim QK_HIF8_PER_TENSOR recipe): the flag is
+    # flipped on in process_weights_after_loading once the weights are loaded.
+    enable_sparse_sfa_hif8: bool = False
 
     supports_pcp: ClassVar[bool] = True
     o_proj_full_pools: ClassVar[dict[Any, torch.Tensor]] = {}
@@ -955,6 +1020,14 @@ class AscendSFAImpl(MLAAttentionImpl):
         self.turboquant = TurboQuantLatent() if self.enable_sparse_sfa_turboquant else None
         self.preprocess_type = PreprocessType.NATIVE
 
+        # HIF8 C8 is per-layer (ModelSlim QK_HIF8_PER_TENSOR recipe): the
+        # static per-tensor scales are picked up from the attention layer in
+        # process_weights_after_loading, once the weights are loaded.
+        self.hif8_q_descale: torch.Tensor | None = None
+        self.hif8_kv_descale: torch.Tensor | None = None
+        self.hif8_q_scale_reciprocal: torch.Tensor | None = None
+        self.hif8_kv_scale_reciprocal: torch.Tensor | None = None
+
         self.enable_mlapo = bool(get_ascend_config().enable_mlapo)
 
         self.enable_sp = enable_sp()
@@ -1081,6 +1154,29 @@ class AscendSFAImpl(MLAAttentionImpl):
 
         if self._parallel_o_proj is not None:
             self._parallel_o_proj.enable()
+
+        self._load_hif8_quant_scales()
+
+    def _load_hif8_quant_scales(self) -> None:
+        """Pick up the HIF8 C8 flag and the static per-tensor scales.
+
+        The quantization scheme stores the processed scales on the attention
+        layer (registered in the static forward context); the impl reads them
+        once the weights are loaded. Layers without the recipe keep the
+        disabled defaults from ``__init__``.
+        """
+        if self.layer_name is None:
+            return
+        layer = self.vllm_config.compilation_config.static_forward_context.get(self.layer_name)
+        if layer is None or getattr(layer, "hif8_quant_layer", False) is not True:
+            return
+        if self.qk_rope_head_dim != 0 or self.kv_lora_rank != 512:
+            raise ValueError(f"{self.layer_name}: HIF8 sparse MLA requires NoPE and a 512-wide latent cache.")
+        self.enable_sparse_sfa_hif8 = True
+        self.hif8_q_descale = layer.hif8_q_descale
+        self.hif8_kv_descale = layer.hif8_kv_descale
+        self.hif8_q_scale_reciprocal = layer.hif8_q_scale_reciprocal
+        self.hif8_kv_scale_reciprocal = layer.hif8_kv_scale_reciprocal
 
     @staticmethod
     def _get_layer_quant_method(layer: torch.nn.Module | None):
@@ -1451,13 +1547,27 @@ class AscendSFAImpl(MLAAttentionImpl):
         if self.qk_rope_head_dim == 0 and not self.enable_sparse_sfa_c8:
             assert self.kv_a_layernorm is not None
             values = self.kv_a_layernorm(kv_no_split.reshape(-1, self.kv_lora_rank))
+            if self.enable_sparse_sfa_hif8:
+                # Per-tensor-quantize the latent KV to HIF8 with the layer's
+                # static scale; the cache holds the raw HIFLOAT8 bytes.
+                values = _hif8_quantize(values, self.hif8_kv_scale_reciprocal)
             cache = kv_cache[0]
-            # The hybrid cache configuration keeps NoPE main KV pages packed.
-            torch_npu.npu_scatter_nd_update_(
-                cache.view(-1, self.kv_lora_rank),
-                slots[: values.shape[0]].view(-1, 1),
-                values.to(cache.dtype),
-            )
+            write_slots = slots[: values.shape[0]]
+            values = values.to(cache.dtype)
+            if cache.is_contiguous() or not self.enable_sparse_sfa_hif8:
+                # Upstream keeps NoPE main KV pages packed; anything that is
+                # not the HIF8 layout must merge into one flat view, and
+                # view() rejects unmergeable pages.
+                torch_npu.npu_scatter_nd_update_(
+                    cache.view(-1, self.kv_lora_rank),
+                    write_slots.view(-1, 1),
+                    values,
+                )
+            else:
+                # HIF8 stores half the bytes of the bf16 latent inside the
+                # same shared physical page, so the MLA block stride is
+                # larger than the HIF8 payload.
+                write_dsa_cache(cache, values, write_slots)
             return None, None
         B = kv_no_split.shape[0]
         N = self.num_kv_heads
@@ -1855,7 +1965,10 @@ class AscendSFAImpl(MLAAttentionImpl):
             assert self.turboquant is not None
             return self.turboquant.inverse(attn_out)
         if self.qk_rope_head_dim == 0 and not self.enable_sparse_sfa_c8:
-            return sparse_mla(ql_nope, kv_cache[0], topk_indices, attn_metadata, self.scale)
+            hif8_scales = None
+            if self.enable_sparse_sfa_hif8:
+                hif8_scales = (self.hif8_q_scale_reciprocal, self.hif8_q_descale, self.hif8_kv_descale)
+            return sparse_mla(ql_nope, kv_cache[0], topk_indices, attn_metadata, self.scale, hif8_scales=hif8_scales)
         if self.qk_rope_head_dim == 0:
             # Present packed NoPE cache with the logical page size used by its metadata.
             cache = kv_cache[0]
