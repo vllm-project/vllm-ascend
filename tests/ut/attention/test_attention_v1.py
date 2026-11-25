@@ -1272,17 +1272,20 @@ class TestBnsdPaReadGather(unittest.TestCase):
 
     @patch("vllm_ascend.ascend_forward_context.get_forward_context")
     def test_gather_feeds_kernel_contract_and_remaps_table(self, mock_ctx):
-        """Full-table-width gather: every cell maps to its own gathered slot.
+        """Full-table-width gather over one mixed table: repeated,
+        nonconsecutive, and negative ids.
 
         The gather is intentionally not deduplicated (torch.unique has a
         data-dependent output shape, forcing the host sync AsyncScheduler
         must avoid); duplicates read the same content from their own slots.
+        Unfilled table entries can hold negative ids; the gather clamps
+        them to physical block 0, matching how the kernel treats padding.
         """
         mock_ctx.return_value = MagicMock(capturing=False)
         impl = self._make_impl()
         impl.key_cache = self._make_bnsd_cache()
         impl.value_cache = self._make_bnsd_cache() + 100
-        block_table = torch.tensor([[0, 3, 5], [3, 0, 1]])
+        block_table = torch.tensor([[0, 3, 5], [3, -1, 1]])
 
         key, value, remapped = impl._materialize_bnsd_pa_read(block_table, capturing=False)
 
@@ -1293,48 +1296,22 @@ class TestBnsdPaReadGather(unittest.TestCase):
             self.assertEqual(row.unique().numel(), 1)
         # The remap is the identity over the flattened table.
         self.assertEqual(remapped.tolist(), [[0, 1, 2], [3, 4, 5]])
-        # Every cell reads its own physical block.
+        # Every cell reads its own physical block -- negative ids clamped
+        # to block 0 -- with each cache carrying its own distinguishable
+        # payload (K holds the block id, V holds the block id + 100).
         for row_idx, row in enumerate(block_table):
             for col_idx, block_id in enumerate(row.tolist()):
-                self.assertEqual(key[remapped[row_idx, col_idx], 0, 0].item(), block_id)
+                slot = remapped[row_idx, col_idx]
+                physical = max(block_id, 0)
+                self.assertEqual(key[slot, 0, 0].item(), physical)
+                self.assertEqual(value[slot, 0, 0].item(), physical + 100)
         # Duplicate cells (block 3 at (0, 1) and (1, 0)) gather identical
-        # content into distinct slots.
+        # content into distinct slots, in both caches.
         self.assertEqual(key[remapped[0, 1]].tolist(), key[remapped[1, 0]].tolist())
-        for row_idx, row in enumerate(block_table):
-            self.assertEqual(value[remapped[row_idx, 0], 0, 0].item(), row[0].item() + 100)
-
-    @patch("vllm_ascend.ascend_forward_context.get_forward_context")
-    def test_repeated_block_ids_gather_full_width_with_identical_content(self, mock_ctx):
-        """A table of one repeated id gathers one slot per cell, all equal."""
-        mock_ctx.return_value = MagicMock(capturing=False)
-        impl = self._make_impl()
-        impl.key_cache = self._make_bnsd_cache()
-        impl.value_cache = self._make_bnsd_cache()
-        block_table = torch.tensor([[2, 2], [2, 2]])
-
-        key, _, remapped = impl._materialize_bnsd_pa_read(block_table, capturing=False)
-
-        self.assertEqual(key.shape[0], block_table.numel())
-        self.assertEqual(remapped.tolist(), [[0, 1], [2, 3]])
-        for row_idx, row in enumerate(block_table):
-            for col_idx in range(row.numel()):
-                self.assertEqual(key[remapped[row_idx, col_idx], 0, 0].item(), 2)
-        # Every gathered row is block 2's content: all slots agree.
-        for row in key:
-            self.assertTrue(torch.equal(row, key[0]))
-
-    @patch("vllm_ascend.ascend_forward_context.get_forward_context")
-    def test_negative_table_entries_clamp_to_block_zero(self, mock_ctx):
-        mock_ctx.return_value = MagicMock(capturing=False)
-        impl = self._make_impl()
-        impl.key_cache = self._make_bnsd_cache()
-        impl.value_cache = self._make_bnsd_cache()
-        block_table = torch.tensor([[0, -1], [-1, 2]])
-
-        key, _, remapped = impl._materialize_bnsd_pa_read(block_table, capturing=True)
-
-        self.assertEqual(remapped.max().item(), key.shape[0] - 1)
-        self.assertEqual(key[remapped[0, 1], 0, 0].item(), 0)
+        self.assertEqual(value[remapped[0, 1]].tolist(), value[remapped[1, 0]].tolist())
+        # The negative id at (1, 1) clamps to physical block 0's content.
+        self.assertEqual(key[remapped[1, 1], 0, 0].item(), 0)
+        self.assertEqual(value[remapped[1, 1], 0, 0].item(), 100)
 
     @patch("vllm_ascend.ascend_forward_context.get_forward_context")
     def test_capture_mode_gathers_full_table(self, mock_ctx):
