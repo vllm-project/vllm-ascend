@@ -110,10 +110,10 @@ estimated_times:
   tests/e2e/pull_request/one_card/test_batch_job_aware_scheduler_e2e.py: 820
   tests/e2e/pull_request/one_card/test_all2allv_dispatch_host_sync.py: 60
   tests/e2e/pull_request/two_card/aclgraph/test_aclgraph_capture_replay.py: 20
-  # Measured on an A2 single-card runner (TP1, gate mode, three executed
-  # scenarios + one TP-gated skip in one pytest run: ~700s per two-scenario
-  # pair, so ~1500s for the file) plus headroom for cold weight loads;
-  # recalibrate with CI medians once available.
+  # Measured on an A2 single-card runner (TP1, gate mode): each mooncake pair
+  # runs ~700s, and the file currently executes the two mooncake scenarios
+  # (the two memcache scenarios are parked until the runner reserves
+  # hugepages), so ~1500s with headroom for cold weight loads.
   tests/e2e/pull_request/one_card/kv_pool/test_qwen38_kv_pool_ab_a2.py: 1800
   tests/e2e/pull_request/two_card/lora/test_ilama_lora_tp2.py: 180
   tests/e2e/pull_request/two_card/lora/test_llama32_lora_tp2.py: 430

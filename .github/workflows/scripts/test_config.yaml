@@ -174,14 +174,6 @@ partition:
   a2-1:
     runner_label: linux-aarch64-a2b1b3-1-hk-001
     count: 7
-  # Dedicated bucket for the KV-pool A/B case: it measures TTFT/throughput
-  # ratios against a local-cache control leg, so it needs a host whose CPU and
-  # NPU are not shared with six sibling jobs (the shared a2-1 slice moved the
-  # pooled leg by up to 0.5x between runs). loop-1 is a single-card A2 host
-  # whose cores are not partitioned into seven concurrent CI slots.
-  a2-loop-1:
-    runner_label: linux-aarch64-a2b3-loop-1
-    count: 1
   a3-2:
     runner_label: linux-aarch64-a3-800i-2
     count: 5
