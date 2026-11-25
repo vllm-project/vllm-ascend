@@ -304,6 +304,7 @@ class TestAscendStoreConnector(unittest.TestCase):
         # start_load_kv
         connector._get_connector_metadata = MagicMock(return_value=MagicMock())
         connector.start_load_kv(MagicMock())
+        mock_worker.prepare_save.assert_called_once()
         mock_worker.start_load_kv.assert_called_once()
 
         # wait_for_save (non-consumer)
