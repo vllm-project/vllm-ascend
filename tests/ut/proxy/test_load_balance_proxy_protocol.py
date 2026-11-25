@@ -369,7 +369,7 @@ def test_recompute_failure_releases_load(exchange, stage, error):
 def test_unsupported_response_state_never_reaches_backends(exchange, streaming, options, parameter):
     response, calls = exchange("/responses", {"stream": streaming, **options}, [])
     assert response.status_code == 400
-    assert response.json()["error"]["param"] == parameter
+    assert f"does not support {parameter}" in response.json()["detail"]
     assert calls == {"prefill": [], "decode": []}
 
 

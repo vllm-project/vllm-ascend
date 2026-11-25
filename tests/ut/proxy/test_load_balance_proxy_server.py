@@ -696,7 +696,7 @@ def test_responses_validation_and_passthrough_over_http(proxy_server, streaming)
                 json={"model": MODEL, "input": "hi", "stream": streaming, option: value},
             )
             assert rejected.status_code == 400
-            assert rejected.json()["error"]["param"] == option
+            assert f"does not support {option}" in rejected.json()["detail"]
         accepted = client.post(
             f"{proxy_server}/v1/responses",
             json={"model": MODEL, "input": "hi", "stream": streaming, "background": False},

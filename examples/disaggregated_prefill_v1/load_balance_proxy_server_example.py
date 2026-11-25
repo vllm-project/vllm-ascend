@@ -13,11 +13,7 @@
 # - Load balances requests to multiple prefiller and decoder servers.
 # - Supports OpenAI-compatible /v1/completions and /v1/chat/completions endpoints.
 # - Forwards native Anthropic /v1/messages and OpenAI /v1/responses APIs.
-# - Responses requests must be synchronous and supply their own conversation
-#   history; background and previous_response_id are not supported.
-# - Native recompute handling uses the proxy's existing P/D reassignment.
-#   Native SSE is buffered per attempt so whole-request retries do not duplicate
-#   output; it is delivered only after decoding finishes.
+#   Native output is buffered per attempt for whole-request recompute retries.
 # - Streams responses from backend servers to clients.
 #
 # Prerequisites:
@@ -134,7 +130,7 @@ import tempfile
 import threading
 import time
 import uuid
-from contextlib import aclosing, asynccontextmanager
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from enum import Enum
 from multiprocessing.managers import BaseManager
@@ -142,7 +138,6 @@ from pathlib import Path
 from typing import Any, cast
 
 import httpx
-from anyio import CancelScope
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 
@@ -957,11 +952,21 @@ async def stream_service_response(
                 raise
             logger.warning("Attempt %s failed for streaming %s: %s", attempt, endpoint, exc)
         except httpx.RequestError as exc:
-            if first_chunk_sent or attempt == max_attempts:
+            if first_chunk_sent:
+                if buffered_body is not None:
+                    raise
+                logger.error("Streaming to client interrupted after response started: %s", exc)
+                return
+            if attempt == max_attempts:
                 raise
             logger.warning("Attempt %s failed for streaming %s: %s", attempt, endpoint, exc)
         except Exception as exc:
-            if first_chunk_sent or attempt == max_attempts:
+            if first_chunk_sent:
+                if buffered_body is not None:
+                    raise
+                logger.error("Streaming to client interrupted after response started: %s", exc)
+                return
+            if attempt == max_attempts:
                 raise
             logger.warning("Attempt %s failed for streaming %s: %s", attempt, endpoint, exc)
         await asyncio.sleep(base_delay * (2 ** (attempt - 1)))
@@ -1085,11 +1090,10 @@ async def _replay_first_chunk(first_chunk: bytes, gen: Any):
     returned with the real HTTP status; this replays that chunk so the client
     still receives the full stream.
     """
-    async with aclosing(gen):
-        if first_chunk:
-            yield first_chunk
-        async for chunk in gen:
-            yield chunk
+    if first_chunk:
+        yield first_chunk
+    async for chunk in gen:
+        yield chunk
 
 
 async def handle_completions_impl(api: str, request: Request):
@@ -1101,26 +1105,15 @@ async def handle_completions_impl(api: str, request: Request):
         if api == "/responses":
             # Reject before scheduling: P must finish before D starts, and
             # response history is local to each backend instance.
-            unsupported = None
-            if req_data.get("background"):
-                unsupported = "background"
-            elif req_data.get("previous_response_id") is not None:
-                unsupported = "previous_response_id"
-            if unsupported is not None:
-                return JSONResponse(
-                    {
-                        "error": {
-                            "message": (
-                                f"The PD proxy does not support {unsupported}. "
-                                "Use synchronous requests with explicit input history."
-                            ),
-                            "type": "invalid_request_error",
-                            "param": unsupported,
-                            "code": "unsupported_parameter",
-                        }
-                    },
-                    status_code=400,
-                )
+            for param, unsupported in (
+                ("background", req_data.get("background")),
+                ("previous_response_id", req_data.get("previous_response_id") is not None),
+            ):
+                if unsupported:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"PD proxy does not support {param}. Use explicit input history and background=false.",
+                    )
         if args.enable_prefill_affinity and (session_id := request.headers.get("X-Session-Id")):
             req_data["user"] = session_id
         if request_id := request.headers.get("X-Request-Id"):
@@ -1331,7 +1324,6 @@ async def handle_completions_impl(api: str, request: Request):
                                     req_data["prompt"] = origin_prompt + generated_token
                                 if not native_api:
                                     req_data["max_tokens"] = origin_max_tokens - completion_tokens + retry_count
-                                await gen.aclose()
                                 tmp_request_length = len(json.dumps(req_data).encode("utf-8"))
                                 instance_info = await reassign_instances(
                                     api,
@@ -1372,16 +1364,13 @@ async def handle_completions_impl(api: str, request: Request):
                     instance_info.request_id,
                 )
             finally:
-                with CancelScope(shield=True):
-                    await gen.aclose()
-                    await _finish_instance(runtime, instance_info, release_prefill_kv=not released_kv)
-                    released_kv = True
-                    request_released = True
+                await _finish_instance(runtime, instance_info, release_prefill_kv=not released_kv)
+                released_kv = True
+                request_released = True
 
         media_type = "text/event-stream; charset=utf-8" if stream_flag else "application/json"
         if native_api:
-            async with aclosing(generate_stream()) as output:
-                return Response(b"".join([chunk async for chunk in output]), media_type=media_type)
+            return Response(b"".join([chunk async for chunk in generate_stream()]), media_type=media_type)
         return StreamingResponse(generate_stream(), media_type=media_type)
     except Exception as e:
         import traceback
@@ -1398,7 +1387,9 @@ async def handle_completions_impl(api: str, request: Request):
             except Exception:
                 err_body = {"error": {"message": e.response.text or "upstream error"}}
             return JSONResponse(err_body, status_code=e.response.status_code)
-        if isinstance(e, (httpx.RequestError, json.JSONDecodeError, UnicodeDecodeError)):
+        if api in ("/messages", "/responses") and isinstance(
+            e, (httpx.RequestError, json.JSONDecodeError, UnicodeDecodeError)
+        ):
             return JSONResponse(
                 {"error": {"message": "The decode backend did not complete the request."}}, status_code=502
             )
