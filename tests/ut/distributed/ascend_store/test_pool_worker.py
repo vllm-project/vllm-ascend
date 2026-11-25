@@ -948,6 +948,42 @@ class TestKVPPPoolWorker(unittest.TestCase):
             self.assertTrue(all(f"@pp_rank:{shard // 4}@" in key for key in shard_keys))
             self.assertTrue(all(f"@head_or_tp_rank:{shard % 4}@" in key for key in shard_keys))
 
+    def test_lookup_uses_projected_group_pp_owners(self):
+        worker = make_worker(self, pp_size=4, pp_partition=[1, 1, 1, 1])
+        worker.kv_cache_config = SimpleNamespace(
+            kv_cache_groups=[
+                SimpleNamespace(layer_names=["group.0"]),
+                SimpleNamespace(layer_names=[]),
+                SimpleNamespace(layer_names=[]),
+            ]
+        )
+        worker.group_uses_align_state = [False, False, False]
+
+        cpu_group = object()
+
+        def gather(gathered, local_groups, *, group):
+            self.assertEqual(local_groups, (True, False, False))
+            self.assertIs(group, cpu_group)
+            gathered[:] = [
+                (True, False, False),
+                (True, False, False),
+                (True, True, True),
+                (True, False, True),
+            ]
+
+        module = "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker"
+        with (
+            patch(f"{module}.get_pp_group", return_value=SimpleNamespace(cpu_group=cpu_group)),
+            patch.object(torch.distributed, "all_gather_object", side_effect=gather),
+        ):
+            worker._group_pp_ranks = worker._collect_group_pp_ranks()
+
+        key = "model@pp_rank:0@group:0@"
+        keys_by_group = [worker._expand_lookup_keys_by_rank([key], group_id) for group_id in range(3)]
+        self.assertEqual([len(keys) for keys in keys_by_group], [4, 1, 2])
+        self.assertIn("@pp_rank:2@", keys_by_group[1][0])
+        self.assertEqual({key.split("@pp_rank:")[1].split("@")[0] for key in keys_by_group[2]}, {"2", "3"})
+
     @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker.threading.Event")
     @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker.KVCacheStoreRecvingThread")
     @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker.KVCacheStoreSendingThread")
@@ -1727,6 +1763,30 @@ class TestKVPoolWorkerRegisterAndTransfer(unittest.TestCase):
         stats = worker.get_stats()
         self.assertEqual(stats.data["load_get_keys"], 1)
         self.assertEqual(len(stats.data["load_get_duration_seconds"]), 1)
+
+    def test_start_load_kv_sync_uses_only_locally_projected_groups(self):
+        worker = self._make_worker(extra_config={"load_async": False})
+        worker.grouped_block_size = [16, 16]
+        worker.m_store.get = MagicMock(return_value=[0])
+        worker.token_database.set_group_buffers(
+            {0: [1000], 1: []},
+            {0: [160], 1: []},
+        )
+        req = ReqMeta(
+            req_id="projected-empty-group",
+            token_len_chunk=16,
+            block_ids_by_group=[[0], [0]],
+            block_hashes=["h0"],
+            kv_cache_group_ids=[0, 1],
+            load_spec=LoadSpec(0, 16, can_load=True, token_len=16),
+        )
+        meta = AscendConnectorMetadata(set())
+        meta.add_request(req)
+
+        worker.start_load_kv(meta)
+
+        keys, addrs, sizes = worker.m_store.get.call_args.args
+        self.assertEqual((len(keys), addrs, sizes), (1, [[1000]], [[160]]))
 
     @patch(
         "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker.KVCacheStoreRecvingThread.start",

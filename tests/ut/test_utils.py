@@ -251,6 +251,18 @@ class TestUtils(TestBase):
         )
         self.assertFalse(utils.enable_sp(no_sequence_parallel_config))
 
+    def test_pad_num_tokens_aligns_tp_shared_rows(self):
+        config = SimpleNamespace(parallel_config=SimpleNamespace(tensor_parallel_size=4))
+        with mock.patch("vllm_ascend.utils.enable_sp", return_value=True):
+            self.assertEqual(utils.pad_num_tokens(5, config), 8)
+            self.assertEqual(utils.pad_num_tokens(8, config), 8)
+        with mock.patch("vllm_ascend.utils.enable_sp", return_value=False):
+            self.assertEqual(utils.pad_num_tokens(5, config), 5)
+            self.assertEqual(utils.pad_num_tokens(5, config, True), 8)
+        config.parallel_config.tensor_parallel_size = 1
+        with mock.patch("vllm_ascend.utils.enable_sp", return_value=True):
+            self.assertEqual(utils.pad_num_tokens(5, config), 5)
+
     def test_pad_sequence_parallel_tokens_pads_unconditionally(self):
         with mock.patch("vllm.distributed.get_tensor_model_parallel_world_size", return_value=4):
             padded = utils.pad_sequence_parallel_tokens(torch.zeros(6, 3))

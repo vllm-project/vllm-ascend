@@ -43,7 +43,7 @@ def test_qsa_gbsa_uses_kernel_paged_cache(dtype, tail_tokens, storage_page_size,
         assert kwargs["seqused_kv"].tolist() == [sequence_length]
         return torch.empty(0)
 
-    def attention(query, keys, values, indices, counts, block_shape, out, **kwargs):
+    def attention(query, keys, values, indices, counts, block_shape, **kwargs):
         calls.append((keys.data_ptr(), values.data_ptr(), kwargs["block_table"].clone()))
         results = []
         for row in range(query.shape[0]):
@@ -60,14 +60,13 @@ def test_qsa_gbsa_uses_kernel_paged_cache(dtype, tail_tokens, storage_page_size,
             scores = torch.einsum("hd,shd->hs", query[row].float(), selected_keys)
             probabilities = (scores / 128**0.5).softmax(-1)
             results.append(torch.einsum("hs,shd->hd", probabilities, selected_values))
-        out.copy_(torch.stack(results).to(query.dtype))
-        return out, torch.empty(0)
+        return torch.stack(results).to(query.dtype), torch.empty(0)
 
     namespace = {
         "torch": torch,
         "prepare_qsa_gbsa_inputs": load_cpu_preparation(),
         "generic_block_sparse_attention_metadata": metadata,
-        "generic_block_sparse_attention_out": attention,
+        "generic_block_sparse_attention": attention,
     }
     exec(compile(module, str(source), "exec"), namespace)
 
@@ -148,15 +147,14 @@ def test_qsa_gbsa_uses_per_row_mtp_visible_lengths():
         calls.append((indices.clone(), counts.clone(), kwargs["seqused_kv"].clone()))
         return torch.empty(0)
 
-    def attention(query, keys, values, indices, counts, block_shape, out, **kwargs):
-        out.zero_()
-        return out, torch.empty(0)
+    def attention(query, keys, values, indices, counts, block_shape, **kwargs):
+        return torch.zeros_like(query), torch.empty(0)
 
     namespace = {
         "torch": torch,
         "prepare_qsa_gbsa_inputs": load_cpu_preparation(),
         "generic_block_sparse_attention_metadata": metadata,
-        "generic_block_sparse_attention_out": attention,
+        "generic_block_sparse_attention": attention,
     }
     exec(compile(module, str(source), "exec"), namespace)
 
@@ -208,15 +206,14 @@ def test_qsa_gbsa_reserves_tail_within_512_entry_limit():
         calls.append((indices.clone(), counts.clone(), kwargs["seqused_kv"].clone()))
         return torch.empty(0)
 
-    def attention(query, keys, values, indices, counts, block_shape, out, **kwargs):
-        out.zero_()
-        return out, torch.empty(0)
+    def attention(query, keys, values, indices, counts, block_shape, **kwargs):
+        return torch.zeros_like(query), torch.empty(0)
 
     namespace = {
         "torch": torch,
         "prepare_qsa_gbsa_inputs": load_cpu_preparation(),
         "generic_block_sparse_attention_metadata": metadata,
-        "generic_block_sparse_attention_out": attention,
+        "generic_block_sparse_attention": attention,
     }
     exec(compile(module, str(source), "exec"), namespace)
 
@@ -253,17 +250,12 @@ def test_qsa_gbsa_reserves_tail_within_512_entry_limit():
 def test_gbsa_uses_cann_transformer_op_api_without_bundled_sources():
     root = Path(__file__).resolve().parents[4]
     bundled_source = root / "csrc/attention/generic_block_sparse_attention"
-    adapter = (root / "csrc/aclnn_torch_adapter/gbsa_torch_adpt.h").read_text()
     binding = (root / "csrc/torch_binding.cpp").read_text()
     loader = (root / "csrc/aclnn_torch_adapter/op_api_common.h").read_text()
 
     assert not bundled_source.exists()
-    assert "EXEC_NPU_CMD(aclnnGenericBlockSparseAttentionMetadata" in adapter
-    assert "EXEC_NPU_CMD(aclnnGenericBlockSparseAttention" in adapter
-    assert '#include "aclnn_torch_adapter/gbsa_torch_adpt.h"' in binding
+    assert "EXEC_NPU_CMD(aclnnGenericBlockSparseAttentionMetadata," in binding
     assert '"npu_generic_block_sparse_attention_metadata(' in binding
-    assert '"npu_generic_block_sparse_attention(' in binding
-    assert '"npu_generic_block_sparse_attention_out(' in binding
     assert 'return "libopapi_transformer.so";' in loader
 
 
