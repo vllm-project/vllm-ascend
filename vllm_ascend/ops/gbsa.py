@@ -16,6 +16,17 @@ def _gbsa_metadata_op():
         return generic_block_sparse_attention_metadata
 
 
+def _gbsa_op():
+    try:
+        return torch.ops._C_ascend.npu_generic_block_sparse_attention
+    except AttributeError:
+        from cann_ops_transformer.ops.attention.generic_block_sparse_attention import (
+            generic_block_sparse_attention,
+        )
+
+        return generic_block_sparse_attention
+
+
 class GBSAMaskMode(IntEnum):
     NO_MASK = 0
     CAUSAL = 1
@@ -83,14 +94,13 @@ def generic_block_sparse_attention_metadata(
     )
 
 
-def generic_block_sparse_attention_out(
+def generic_block_sparse_attention(
     q: torch.Tensor,
     k: torch.Tensor,
     v: torch.Tensor,
     sparse_block_idx: torch.Tensor,
     sparse_block_count: torch.Tensor,
     block_shape: list[int],
-    out: torch.Tensor,
     *,
     metadata: torch.Tensor,
     attn_mask: torch.Tensor | None = None,
@@ -118,15 +128,14 @@ def generic_block_sparse_attention_out(
     is_consistent_topk: bool = False,
     attention_out_dtype: torch.dtype | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Run GBSA directly into a caller-owned output tensor."""
-    softmax_lse = torch.ops._C_ascend.npu_generic_block_sparse_attention_out(
+    """Run GBSA using metadata generated for the same inputs and attributes."""
+    return _gbsa_op()(
         q,
         k,
         v,
         sparse_block_idx,
         sparse_block_count,
         block_shape,
-        out,
         metadata=metadata,
         attn_mask=attn_mask,
         q_dequant_scale=q_dequant_scale,
@@ -153,12 +162,11 @@ def generic_block_sparse_attention_out(
         is_consistent_topk=is_consistent_topk,
         attention_out_dtype=attention_out_dtype,
     )
-    return out, softmax_lse
 
 
 __all__ = [
     "GBSAMaskMode",
     "GBSAQuantMode",
-    "generic_block_sparse_attention_out",
+    "generic_block_sparse_attention",
     "generic_block_sparse_attention_metadata",
 ]
