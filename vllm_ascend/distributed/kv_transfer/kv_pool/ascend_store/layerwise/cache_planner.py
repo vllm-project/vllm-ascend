@@ -125,10 +125,10 @@ class LayerwiseCachePlanner:
         *,
         spec_reuse_rules: SpecReuseRules,
     ) -> None:
+        self.config = config
         self.extra_config = extra_config
         self.spec_reuse_rules = spec_reuse_rules
         self.spec_by_entry = get_layerwise_kv_cache_specs(config)
-        self.config = config
         self.group_id_by_entry = {
             entry_name: group_id
             for group_id, group in enumerate(config.kv_cache_groups)
@@ -306,10 +306,9 @@ def plan_layerwise_cache_reuse(
     # An empty device pool has no byte views to reuse.
     if not kv_cache_config.kv_cache_tensors or kv_cache_config.num_blocks == 0 or not kv_cache_config.kv_cache_groups:
         return None
-    mooncake = _is_mooncake(extra_config)
     rules = get_spec_reuse_rules(vllm_config)
     if rules is None:
-        if mooncake:
+        if _is_mooncake(extra_config):
             raise ValueError("Mooncake shared KV buffers require a model with registered reuse rules")
         return None
     planner = LayerwiseCachePlanner(
@@ -334,16 +333,15 @@ def plan_layerwise_cache_reuse(
         getattr(spec, "store_on_host", False) for spec in planner.spec_by_entry.values()
     ):
         raise ValueError("Layerwise offload requires device-resident cache tensors.")
-    if mooncake:
+    if _is_mooncake(extra_config):
         windows = {}
         for group_id, group in enumerate(kv_cache_config.kv_cache_groups):
             if layout.reused_cache_names.isdisjoint(group.layer_names):
                 continue
-            specs = [planner.spec_by_entry[name] for name in group.layer_names]
-            if specs and all(getattr(spec, "sliding_window", None) is not None for spec in specs):
-                windows[group_id] = max(
-                    spec.sliding_window + (getattr(spec, "extra_retained_tokens", 0) or 0) for spec in specs
-                )
+            spec = planner.spec_by_entry[group.layer_names[0]]
+            window = getattr(spec, "sliding_window", None)
+            if window is not None:
+                windows[group_id] = window + (getattr(spec, "extra_retained_tokens", 0) or 0)
         kv_cache_config.block_key_prefill_windows = windows
         kv_cache_config.block_key_continuation_windows = (
             windows if vllm_config.speculative_config is None else {}
