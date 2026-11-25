@@ -20,12 +20,13 @@ from __future__ import annotations
 
 import math
 import os
-from importlib import import_module, util
+from importlib import import_module, metadata, util
 from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
 import torch
 import vllm.envs as envs_vllm
+from packaging.version import Version
 from vllm.logger import logger
 from vllm.platforms import Platform, PlatformEnum
 
@@ -101,6 +102,11 @@ _MINIMAX_M3_ARCHITECTURES = frozenset(
         "MiniMaxM3SparseForConditionalGeneration",
     }
 )
+QWEN_MTP_DRAFTS = {
+    "Qwen3_5ForConditionalGeneration": "Qwen3_5MTP",
+    "Qwen3_5MoeForConditionalGeneration": "Qwen3_5MoeMTP",
+}
+FA3_BACKEND = ("vllm_ascend.attention.flash_attention_v3", "AscendFlashAttentionBackend")
 QWEN_FA3_TARGETS = frozenset(
     {
         "Qwen3NextForCausalLM",
@@ -2126,13 +2132,34 @@ def _uses_qwen_fa3(config: VllmConfig) -> bool:
     from vllm.compilation import backends
 
     architectures = config.model_config.hf_config.architectures or ()
-    if (
-        FlashAttentionNpu3Model.QWEN not in get_current_hardware_profile().flash_attn_npu_3_models
-        or QWEN_FA3_TARGETS.isdisjoint(architectures)
-    ):
-        return False
-    # DFlash keeps the target model config while loading the draft.
+    supported = get_current_hardware_profile().flash_attn_npu_3_models
     spec = config.speculative_config
+    if spec.method == "mtp":
+        if FlashAttentionNpu3Model.QWEN3_5_MTP not in supported:
+            return False
+        # With one draft token MTP reuses the target metadata for its only forward.
+        target = getattr(spec.target_model_config, "architecture", None)
+        draft = spec.draft_model_config.architecture
+        if not (
+            spec.num_speculative_tokens == 1
+            and config.kv_transfer_config is None
+            and spec.target_parallel_config is not None
+            and spec.target_parallel_config.pipeline_parallel_size == 1
+            and spec.target_parallel_config.prefill_context_parallel_size == 1
+            and spec.target_parallel_config.decode_context_parallel_size == 1
+            and QWEN_MTP_DRAFTS.get(target) == draft
+            and backends.model_tag in ("backbone", "eagle_head")
+            and bool({target, draft}.intersection(architectures))
+        ):
+            return False
+        # The 0.5.0 paged forward copies device lengths to the host during graph capture.
+        try:
+            return Version(metadata.version("flash-attn-npu")) >= Version("0.5.1")
+        except metadata.PackageNotFoundError:
+            return False
+    # DFlash keeps the target model config while loading the draft.
+    if FlashAttentionNpu3Model.QWEN not in supported or QWEN_FA3_TARGETS.isdisjoint(architectures):
+        return False
     return (
         backends.model_tag in ("backbone", "dflash_head")
         and spec.method == "dflash"

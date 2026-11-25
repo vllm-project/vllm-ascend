@@ -254,6 +254,7 @@ class FlashAttentionNpu3Model(Enum):
     MINIMAX = auto()
     STEP5 = auto()
     QWEN = auto()
+    QWEN3_5_MTP = auto()
 
 
 class CPUBindingMode(Enum):
@@ -454,7 +455,9 @@ _HARDWARE_PROFILES: Mapping[AscendDeviceType, HardwareProfile] = MappingProxyTyp
         ),
         AscendDeviceType.A3: HardwareProfile(
             _device_type=AscendDeviceType.A3,
-            flash_attn_npu_3_models=frozenset({FlashAttentionNpu3Model.MINIMAX, FlashAttentionNpu3Model.QWEN}),
+            flash_attn_npu_3_models=frozenset(
+                {FlashAttentionNpu3Model.MINIMAX, FlashAttentionNpu3Model.QWEN, FlashAttentionNpu3Model.QWEN3_5_MTP}
+            ),
             attention_backend_family=AttentionBackendFamily.STANDARD,
             cpu_binding_mode=CPUBindingMode.GLOBAL_SLICE,
             default_worker_cls=_DEFAULT_WORKER_CLS,

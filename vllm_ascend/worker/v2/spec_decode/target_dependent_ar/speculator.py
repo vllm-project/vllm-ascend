@@ -48,6 +48,7 @@ from vllm_ascend.attention.indexer import AscendSFAIndexerBackend
 from vllm_ascend.attention.mla_v1 import AscendMLABackend, AscendMLAMetadata
 from vllm_ascend.attention.sfa_v1 import AscendSFABackend
 from vllm_ascend.compilation.updatable_graph import ContextSource, SharedSource
+from vllm_ascend.platform import FA3_BACKEND
 from vllm_ascend.utils import model_supports_dcp
 from vllm_ascend.worker.dcp_utils import DCPManager
 from vllm_ascend.worker.v2.aclgraph_utils import _get_graph_update_backend
@@ -389,6 +390,8 @@ class AscendTargetDependentARSpeculator(LmheadTPDraftSamplingMixin, TargetDepend
             self.attn_architecture = "QSA"
         elif issubclass(self.attn_backend, AscendAttentionBackend):
             self.attn_architecture = "GQA"
+        elif self.num_speculative_steps == 1 and self.attn_backend.full_cls_name() == FA3_BACKEND:
+            self.attn_architecture = "FA3"
         else:
             raise ValueError(f"Unsupported attention backend: {self.attn_backend}")
 
