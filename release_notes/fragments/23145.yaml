@@ -1,0 +1,4 @@
+pr: 23145
+entries:
+  - category: feature
+    text: Added an experimental, opt-in fused SFA decode operator for GLM-5.3-Flash on Ascend 950. It requires a separately supplied Ascend TileLang toolchain and is unsupported by the current official vLLM Ascend software stack.
