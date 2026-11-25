@@ -1,0 +1,4 @@
+pr: 22646
+entries:
+  - category: bugfix
+    text: Fixed unsafe DP coordination skipping on MoE decode nodes with recompute_scheduler_enable enabled, which could hang requests requiring local prefill when prefill and decode use different communication methods or graph modes.
