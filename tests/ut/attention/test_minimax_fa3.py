@@ -277,6 +277,7 @@ def fa3(monkeypatch):
         "CUDAGraphMode": NS(FULL_DECODE_ONLY="full_decode_only"),
         "logger": NS(info_once=lambda *args, **kwargs: None),
         "get_scheduler_metadata": Mock(),
+        "get_graph_params": lambda: None,
         "get_current_vllm_config_or_none": lambda: None,
         "_FA3_WARMUP_KEYS": set(),
         "flash_attn_with_kvcache": Mock(),
