@@ -354,6 +354,7 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
         cls,
         spec: AscendSFAIndexerCacheSpec,
         num_blocks: int,
+        layout: Any,
         kernel_block_size: int | None = None,
     ) -> KVCacheRuntimeShapesAndDtypes:
         """Describe indexer keys and optional scales for each kernel block replica."""

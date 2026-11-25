@@ -117,6 +117,7 @@ class AscendAttentionBackend(AttentionBackend):
         cls,
         spec: AttentionSpec,
         num_blocks: int,
+        layout: Any,
         kernel_block_size: int | None = None,
     ) -> KVCacheRuntimeShapesAndDtypes:
         """Return the final dense K and V view shapes and storage dtypes."""

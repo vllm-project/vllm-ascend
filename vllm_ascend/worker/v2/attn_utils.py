@@ -1480,6 +1480,7 @@ def create_kv_cache_runtime_views(
     attn_groups: Sequence[AttentionGroup],
     kernel_block_sizes: Sequence[int],
     shared_layers: Mapping[str, str],
+    layout: Any = None,
 ) -> dict[str, Any]:
     """Delegate component views to backends using the descriptor block strides."""
     placements = {
@@ -1509,6 +1510,7 @@ def create_kv_cache_runtime_views(
             cache_shapes, dtypes = group.backend.get_runtime_shapes_and_dtypes(
                 spec,
                 num_blocks,
+                layout,
                 kernel_block_size=(
                     group.kernel_block_size
                     if group.kernel_block_size is not None
@@ -1565,6 +1567,7 @@ def unified_allocate_kv_cache(
         _get_cache_attention_groups(kv_cache_config, attn_layers, shared_layers, kernel_block_sizes),
         kernel_block_sizes,
         shared_layers,
+        layout,
     )
 
 

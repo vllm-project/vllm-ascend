@@ -147,6 +147,7 @@ class AscendMLABackend(AttentionBackend):
         cls,
         spec: AscendMLAAttentionSpec,
         num_blocks: int,
+        layout: Any,
         kernel_block_size: int | None = None,
     ) -> KVCacheRuntimeShapesAndDtypes:
         """Return NHD Tensor shapes and storage dtypes for FIA and FlashMLA."""
