@@ -24,14 +24,16 @@ def _copy_conv_state_tile(
     mask,
     boundary_valid,
     ALIGN_MODE: tl.constexpr,
+    read_offsets,
+    read_token_stride,
 ):
     final_values = tl.load(
-        source_ptr + channel_offsets + (commit_len - 1 + history_offsets) * token_stride,
+        source_ptr + read_offsets + (commit_len - 1 + history_offsets) * read_token_stride,
         mask=mask,
     )
     if ALIGN_MODE:
         boundary_values = tl.load(
-            source_ptr + channel_offsets + (boundary_recovery_len - 1 + history_offsets) * token_stride,
+            source_ptr + read_offsets + (boundary_recovery_len - 1 + history_offsets) * read_token_stride,
             mask=mask & boundary_valid,
         )
         tl.store(
@@ -67,6 +69,9 @@ def _compact_conv_state_kernel(
     ALIGN_MODE: tl.constexpr,
     DIM_STRIDE: tl.constexpr = None,
     USE_1D_CHANNEL_GATHER: tl.constexpr = False,
+    MEGA_TABLE=None,
+    HAS_MEGA: tl.constexpr = False,
+    MEGA_ROWS: tl.constexpr = 0,
 ):
     pid_d = tl.program_id(0)
     pid_b = tl.program_id(1)
@@ -96,6 +101,15 @@ def _compact_conv_state_kernel(
     source_ptr = conv_state_ptr + source_state_idx * block_stride
     final_ptr = conv_state_ptr + final_state_idx * block_stride
 
+    read_dim_stride = tl.full((), 0, tl.int64) + dim_stride
+    read_token_stride = tl.full((), 0, tl.int64) + token_stride
+    if HAS_MEGA:
+        table = MEGA_TABLE + pid_l * 4
+        if tl.load(tl.load(table + 2).to(tl.pointer_type(tl.int32))) != 0:
+            pending = tl.load(table + 3).to(tl.pointer_type(conv_state_ref_ptr.dtype.element_ty))
+            source_ptr = pending + pid_b * MEGA_ROWS * conv_dim
+            read_dim_stride = tl.full((), 1, tl.int64)
+            read_token_stride = tl.full((), 0, tl.int64) + conv_dim
     boundary_ptr = None
     if ALIGN_MODE:
         boundary_ptr = conv_state_ptr + boundary_state_idx * block_stride
@@ -117,6 +131,8 @@ def _compact_conv_state_kernel(
                 mask,
                 boundary_state_idx > null_block_id,
                 ALIGN_MODE,
+                offs_d * read_dim_stride,
+                read_token_stride,
             )
         return
     offs_d = (pid_d * BLOCK_D + tl.arange(0, BLOCK_D))[None, :]
@@ -134,6 +150,8 @@ def _compact_conv_state_kernel(
         mask,
         boundary_state_idx > null_block_id,
         ALIGN_MODE,
+        offs_d * read_dim_stride,
+        read_token_stride,
     )
 
 
@@ -153,6 +171,8 @@ def compact_conv_state(
     align_mode: bool,
     dim_stride: int | None,
     null_block_id: int,
+    mega_table: torch.Tensor | None = None,
+    mega_rows: int = 0,
 ) -> None:
     """Copy accepted convolution histories into the planned cache pages."""
     batch = state_indices.numel()
@@ -182,5 +202,8 @@ def compact_conv_state(
         ALIGN_MODE=align_mode,
         DIM_STRIDE=dim_stride,
         USE_1D_CHANNEL_GATHER=not is_a5,
+        MEGA_TABLE=mega_table,
+        HAS_MEGA=mega_table is not None,
+        MEGA_ROWS=mega_rows,
         num_warps=4,
     )

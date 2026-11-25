@@ -865,7 +865,14 @@ class AscendConfig:
             if self.gdn_internal_prefill_checkpoints:
                 raise ValueError("The MegaKDA backend requires internal GDN checkpoints to be disabled")
             if vc.cache_config.use_replayssm:
-                raise ValueError("MegaRecurrentKda requires ReplaySSM to be disabled")
+                from vllm_ascend.device.device_config import get_ascend_device_type
+                from vllm_ascend.device.hardware import AscendDeviceType
+
+                if (
+                    self.kda_backend_config.backend != "mega_recurrent_kda_int8"
+                    or get_ascend_device_type() != AscendDeviceType.A3
+                ):
+                    raise ValueError("MegaKDA with ReplaySSM requires the A3 INT8 verify backend")
         if self.shared_engram is not None and self.shared_engram.backend in ("a2", "a5"):
             if getattr(vc, "shutdown_timeout", 0) <= 0:
                 raise ValueError("shared_engram requires --shutdown-timeout > 0 to retire reader leases")

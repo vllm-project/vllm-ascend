@@ -46,6 +46,7 @@ from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence import (
     record_attention_compute_start,
 )
+from vllm_ascend.ops import megakda_full
 from vllm_ascend.ops.head_parallel import (
     HeadParallelColumnLinear,
     HeadParallelMergedColumnLinear,
@@ -316,6 +317,8 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
     _requires_kda_state_copy = True
     use_contiguous_conv_indices = True
     _mega_kda_op = None
+    mega_records = None
+    enable_full_mega = False
 
     def __init__(self, config, vllm_config, prefix: str = "") -> None:
         quant_config = getattr(vllm_config, "quant_config", None)
@@ -354,7 +357,22 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
                 raise ValueError("MegaRecurrentKda requires H=7168 and bias-free output norm and projection")
             if self.o_proj.custom_op is not None and not isinstance(self.o_proj.custom_op, KimiOProjMMReduceScatterOp):
                 raise ValueError("MegaRecurrentKda requires the original TP group for the output projection")
-            self._mega_kda_op = load_upstream_mega_kda(mega_config.operator_package_dir)
+            if self.use_recoverssm:
+                # The A3 verifier shares the active wheel with the ordinary FLA operators.
+                from pathlib import Path
+
+                import fla_npu
+
+                if not -5 <= self.gate_lower_bound <= 0 or self.num_spec + 1 != 4:
+                    raise ValueError("A3 MegaKDA ReplaySSM requires verify width 4 and gate lower bound in [-5, 0]")
+                if (
+                    Path(mega_config.operator_package_dir).resolve()
+                    != Path(fla_npu._WHEEL_LAYER_PLAN["layer"]).resolve()
+                ):
+                    raise ValueError("The configured MegaKDA package must match the active FLA wheel layer")
+                self.enable_full_mega = True
+            else:
+                self._mega_kda_op = load_upstream_mega_kda(mega_config.operator_package_dir)
         if uses_mixed_projection:
             # vLLM 0.27 packs all KDA input projections into one linear.  A
             # QuaRot checkpoint instead stores q/k/v as W8A8 and keeps B/F/G
@@ -367,7 +385,7 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
                 quant_config=quant_config,
                 prefix=f"{prefix}.in_proj_qkv",
             )
-            if self._mega_kda_op is not None:
+            if mega_config.backend != "native":
                 self._mega_kda_scale_alg = _configure_mega_qkv(self.in_proj_qkvgfab, mega_config.backend)
             del self.f_b_proj
             self.fused_bfg_proj = _KDAFusedBFGLinear(
@@ -519,6 +537,26 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
             if self.o_proj.tp_size > 1 and self.o_proj.reduce_results:
                 return tensor_model_parallel_all_reduce(output)
             return output
+        if getattr(self, "mega_records", None) is not None:
+            ctx = get_forward_context()
+            meta = ctx.attn_metadata.get(self.prefix) if isinstance(ctx.attn_metadata, dict) else None
+            custom = getattr(self.o_proj, "custom_op", None)
+            if (
+                meta is not None
+                and meta.num_spec_decodes
+                and not meta.num_prefills
+                and not meta.num_decodes
+                and meta.spec_decode_metadata is not None
+                and hidden_states.size(0) > 0
+                and (custom is None or isinstance(custom, KimiOProjMMReduceScatterOp))
+            ):
+                out = torch.empty_like(hidden_states)
+                self._full_mega_verify(hidden_states, out)
+                if isinstance(custom, KimiOProjMMReduceScatterOp):
+                    return sp_reduce_scatter(out)
+                if self.o_proj.reduce_results and self.o_proj.tp_size > 1:
+                    return tensor_model_parallel_all_reduce(out)
+                return out
         if self.uses_mixed_projection:
             num_tokens = hidden_states.size(0)
             mixed_qkv, beta, g1, g2 = self._run_overlapped_qkv_bfg(hidden_states)
@@ -538,6 +576,15 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
             core_attn_out = rearrange(core_attn_out, "1 n h d -> n (h d)")
             return self.o_proj(core_attn_out)[0]
         return super().forward(hidden_states, positions)
+
+    @eager_break_during_capture
+    def _full_mega_verify(self, hidden_states, out):
+        meta = get_forward_context().attn_metadata[self.prefix]
+        wait_for_kv_layer_from_connector(self.prefix)
+        record_attention_compute_start()
+        cache = get_forward_context().additional_kwargs.setdefault("a3_mega_verify", {})
+        megakda_full.verify(self, hidden_states, meta, output=out, cache=cache)
+        maybe_save_kv_layer_to_connector("", [])
 
     @eager_break_during_capture
     def _forward_upstream_mega_kda(self, hidden_states: torch.Tensor, out: torch.Tensor) -> None:
@@ -980,6 +1027,8 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
             assert attn_metadata.spec_query_start_loc is not None
             assert attn_metadata.spec_state_indices_tensor is not None
             if use_recoverssm:
+                if self.mega_records is not None:
+                    self.mega_records[2].zero_()
                 records = self.recoverssm_records
                 if records is None:
                     raise RuntimeError("Kimi RecoverSSM verify records are not initialized")

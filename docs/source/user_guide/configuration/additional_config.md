@@ -422,7 +422,7 @@ Kimi K3.1 disaggregated decode workers can select a KDA backend with
 | Ascend 950 | `mega_recurrent_kda_mx` | E4M3FN NZ and block E8M0 scales | `ascend950` |
 
 Use Model Runner V2, prefill context parallel size 1 and BF16 hidden states.
-Set the option on the KV consumer and leave `--use-replayssm` disabled.
+Set the backend on the KV consumer. Atlas A3 also supports `--use-replayssm` with the INT8 backend for Kimi speculative verification with three draft tokens. Use an active FLA wheel overlay providing `aclnnMegaRecurrentKdaVerifyA3` and set `operator_package_dir` to its layer directory (available as `fla_npu._WHEEL_LAYER_PLAN["layer"]`). The fixed-width graph path reads physical convolution pages and writes request-indexed replay records in the same operator. The sampler commits the accepted prefix. Other MegaKDA device/backend combinations require ReplaySSM to be disabled.
 The default is `native`.
 
 Build the device-specific wheel from the pinned revision of
