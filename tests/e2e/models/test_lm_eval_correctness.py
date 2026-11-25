@@ -55,6 +55,10 @@ def build_model_args(eval_config, tp_size):
         "enforce_eager",
         "enable_thinking",
         "quantization",
+        "max_num_seqs",
+        "max_num_batched_tokens",
+        "kv_cache_memory_bytes",
+        "limit_mm_per_prompt",
     ]:
         val = serve_cfg.get(s, None)
         if val is not None:
@@ -64,6 +68,23 @@ def build_model_args(eval_config, tp_size):
     print(model_args)
 
     return model_args
+
+
+@pytest.mark.parametrize("with_limits", [False, True])
+def test_build_model_args_multimodal_limits(with_limits):
+    limits = {
+        "max_num_seqs": 8,
+        "max_num_batched_tokens": 1024,
+        "kv_cache_memory_bytes": 2 * 1024**3,
+        "limit_mm_per_prompt": {"image": 1, "audio": 1},
+    }
+    config = {"model_name": "google/gemma-4-E2B-it", "serve": limits if with_limits else {}}
+    args = build_model_args(config, 1)
+    for key, value in limits.items():
+        if with_limits:
+            assert args[key] == value
+        else:
+            assert key not in args
 
 
 def generate_report(tp_size, eval_config, report_data, report_dir, env_config):

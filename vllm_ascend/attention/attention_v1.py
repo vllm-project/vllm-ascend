@@ -872,9 +872,13 @@ class AscendAttentionBackendImpl(AttentionImpl):
         return key, value, block_size
 
     def _get_fia_params(self, key: torch.Tensor, value: torch.Tensor, attn_metadata: AscendMetadata, kv_cache=None):
-        # PrefillNoCache doesn't need key_cache, but other modes do
-        # Only initialize/require cache for modes that actually use it
-        if attn_metadata.attn_state != AscendAttentionState.PrefillNoCache:
+        # Shared-KV readers have no current-token K/V, even on the first
+        # prefill. Their producer has already populated the aliased cache.
+        use_current_kv = (
+            attn_metadata.attn_state == AscendAttentionState.PrefillNoCache
+            and getattr(self, "kv_sharing_target_layer_name", None) is None
+        )
+        if not use_current_kv:
             # Initialize cache from kv_cache if not already set (for DecodeOnly mode)
             if self.key_cache is None and kv_cache is not None:
                 if (
@@ -892,13 +896,16 @@ class AscendAttentionBackendImpl(AttentionImpl):
                     f"mode {attn_metadata.attn_state}. kv_cache={kv_cache}"
                 )
 
-        if attn_metadata.attn_state == AscendAttentionState.PrefillNoCache:
+        if use_current_kv:
             block_size = 128
             block_table = None
             actual_seq_lengths_kv = attn_metadata.actual_seq_lengths_q
             if self.attn_type == AttentionType.ENCODER_DECODER:
                 actual_seq_lengths_kv = torch.cumsum(attn_metadata.seq_lens, dim=0).tolist()
-        elif attn_metadata.attn_state == AscendAttentionState.PrefillCacheHit:
+        elif attn_metadata.attn_state in (
+            AscendAttentionState.PrefillNoCache,
+            AscendAttentionState.PrefillCacheHit,
+        ):
             batch_size = attn_metadata.seq_lens.shape[0]
             block_table = attn_metadata.block_tables[:batch_size, :]
             key, value, block_size = self._get_kv_cache_view(self.key_cache, self.value_cache)
@@ -941,10 +948,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
         )
         num_tokens = attn_metadata.actual_seq_lengths_q[-1]
         query = query[:num_tokens]
-        if (
-            attn_metadata.attn_state == AscendAttentionState.PrefillNoCache
-            and self.attn_type != AttentionType.ENCODER_DECODER
-        ):
+        if block_table is None and self.attn_type != AttentionType.ENCODER_DECODER:
             key = key[:num_tokens]
             value = value[:num_tokens]
         if block_table is None:
@@ -1081,7 +1085,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
                     current_key=key,
                     current_value=passed_value,
                     attn_metadata=attn_metadata,
-                    is_prefill_no_cache=attn_metadata.attn_state == AscendAttentionState.PrefillNoCache,
+                    is_prefill_no_cache=block_table is None,
                     sparse_mode=0 if is_decode else 3,
                 )
 

@@ -275,6 +275,87 @@ def test_pcp_metadata_keeps_expanded_slot_mapping() -> None:
     assert metadata.attn_state == AscendAttentionState.ChunkedPrefill
 
 
+@pytest.mark.parametrize("head_size", [256, 512])
+@pytest.mark.parametrize("use_bnsd", [False, True])
+@pytest.mark.parametrize(
+    "state",
+    [
+        AscendAttentionState.PrefillNoCache,
+        AscendAttentionState.PrefillCacheHit,
+        AscendAttentionState.ChunkedPrefill,
+        AscendAttentionState.DecodeOnly,
+    ],
+)
+def test_shared_kv_reader_uses_producer_cache(head_size, use_bnsd, state):
+    impl = AscendAttentionBackendImpl.__new__(AscendAttentionBackendImpl)
+    impl.kv_sharing_target_layer_name = "model.layers.14.self_attn.attn"
+    impl.key_cache = None
+    impl.value_cache = None
+    impl.use_bnsd_kv_cache = use_bnsd
+    impl.attn_type = attn_module.AttentionType.DECODER
+    impl.sinks = None
+    impl.sliding_window = None
+    impl.num_heads = 8
+    impl.num_kv_heads = 1
+    impl.head_size = head_size
+    impl.scale = head_size**-0.5
+    # Distinct physical blocks catch use of a dense current-token tensor.
+    cache_shape = (3, 1, 128, head_size) if use_bnsd else (3, 128, 1, head_size)
+    cache = (torch.randn(cache_shape), torch.randn(cache_shape))
+    metadata = AscendMetadata(
+        attn_state=state,
+        num_actual_tokens=5,
+        actual_seq_lengths_q=[2, 5],
+        seq_lens_list=[2, 3],
+        seq_lens=torch.tensor([2, 3]),
+        block_tables=torch.tensor([[2], [0]], dtype=torch.int32),
+        max_query_len=3,
+    )
+    query = torch.randn(5, 8, head_size)
+    with (
+        patch.object(attn_module, "_EXTRA_CTX", MagicMock(capturing=False)),
+        patch.object(
+            attn_module.DeviceOperator,
+            "npu_fused_infer_attention_score",
+            return_value=(torch.ones_like(query), None),
+        ) as fia,
+    ):
+        output = torch.empty_like(query)
+        result = impl.forward_fused_infer_attention(query, None, None, metadata, output, cache)
+    assert result is output
+    torch.testing.assert_close(output, torch.ones_like(query))
+    kwargs = fia.call_args.kwargs
+    assert kwargs["key"].data_ptr() == cache[0].data_ptr()
+    assert kwargs["value"].data_ptr() == cache[1].data_ptr()
+    torch.testing.assert_close(kwargs["block_table"], metadata.block_tables)
+    assert kwargs["actual_seq_lengths_kv"] == [2, 3]
+    assert kwargs["block_size"] == 128
+    assert not kwargs["is_prefill_no_cache"]
+    # Metadata is shared with the producer and must not be changed per layer.
+    assert metadata.attn_state == state
+
+
+def test_unshared_prefill_still_uses_current_kv():
+    impl = AscendAttentionBackendImpl.__new__(AscendAttentionBackendImpl)
+    impl.kv_sharing_target_layer_name = None
+    impl.attn_type = attn_module.AttentionType.DECODER
+    metadata = AscendMetadata(attn_state=AscendAttentionState.PrefillNoCache, actual_seq_lengths_q=[2, 5])
+    key, value = torch.randn(5, 1, 256), torch.randn(5, 1, 256)
+    actual_key, actual_value, _, block_table, lengths = impl._get_fia_params(key, value, metadata)
+    assert actual_key is key and actual_value is value
+    assert block_table is None
+    assert lengths == [2, 5]
+
+
+def test_shared_kv_prefill_requires_producer_cache():
+    impl = AscendAttentionBackendImpl.__new__(AscendAttentionBackendImpl)
+    impl.kv_sharing_target_layer_name = "producer"
+    impl.key_cache = impl.value_cache = None
+    metadata = AscendMetadata(attn_state=AscendAttentionState.PrefillNoCache)
+    with pytest.raises(RuntimeError, match="key_cache or value_cache is None"):
+        impl._get_fia_params(None, None, metadata)
+
+
 @pytest.mark.parametrize("cache_write_error", [False, True], ids=["success", "cache-write-error"])
 def test_pcp_cache_write_uses_gathered_inputs_and_restores_metadata(cache_write_error) -> None:
     impl = AscendAttentionBackendImpl.__new__(AscendAttentionBackendImpl)

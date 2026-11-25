@@ -106,6 +106,12 @@
 
 ## Multimodal Language Models
 
+Gemma4 E2B/E4B has scoped Atlas A3 BF16 validation for text, image, audio,
+and mixed inputs in eager and `FULL_DECODE_ONLY` modes at TP1/TP2. See
+[the lightweight-model tutorial](../../tutorials/models/Gemma4-E2B-E4B.md)
+for the validation limits. This does not extend the family-level status to
+other hardware, quantization, graph modes, or full-length 128K workloads.
+
 === "950PR&950DT Products"
 
     | Model | Support | Hardware | [Graph Mode](../../user_guide/feature_guide/graph_mode.md) |||| [Npugraph_ex](../../user_guide/feature_guide/graph_mode.md#using-npugraph_ex) || [CP](../../user_guide/feature_guide/context_parallel.md) || [KVPP(only D node)](../../user_guide/feature_guide/kvpp.md) | TP | EP | DP | MLAPO | [EPLB](../../user_guide/feature_guide/expert_parallelism_load_balancer.md) | Multistream MoE(only D node) | Shared Expert DP | Fused MC2 | [Speculative Decoding](../../user_guide/feature_guide/speculative_decoding.md) |||| [Mooncake Backend Pool](../../user_guide/feature_guide/kv_cache_pool_ascend_store.md) ||| [Memcache Backend Pool](../../user_guide/feature_guide/kv_cache_pool_ascend_store.md) ||| [KV Cache Offloading](../../user_guide/feature_guide/layerwise_and_sparse_kv_cache_offloading.md) || Prefix Cache | Weight nz | Async Scheduling | [CPU Binding](../../user_guide/feature_guide/cpu_binding.md) | flashcomm1(only P node) | [Fine-grained TP](../../user_guide/feature_guide/Fine_grained_TP.md) ||||

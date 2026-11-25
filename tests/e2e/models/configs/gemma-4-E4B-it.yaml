@@ -1,0 +1,33 @@
+# Fixed 100-sample regression baseline, not a full GSM8K benchmark result.
+model_name: "google/gemma-4-E4B-it"
+model_type: "vllm"
+hardware: "Atlas A3 Series"
+
+serve:
+  tensor_parallel_size: 1
+  dtype: auto
+  max_model_len: 4096
+  max_num_seqs: 8
+  max_num_batched_tokens: 1024
+  kv_cache_memory_bytes: 2147483648
+  gpu_memory_utilization: 0.6
+  trust_remote_code: false
+  enforce_eager: true
+  enable_thinking: false
+  limit_mm_per_prompt:
+    image: 1
+    audio: 1
+
+tasks:
+  - name: "gsm8k"
+    metrics:
+      - name: "exact_match,strict-match"
+        value: 0.73
+      - name: "exact_match,flexible-extract"
+        value: 0.8
+
+num_fewshot: 5
+apply_chat_template: true
+fewshot_as_multiturn: true
+batch_size: 8
+limit: 100

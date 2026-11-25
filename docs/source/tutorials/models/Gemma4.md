@@ -1,5 +1,9 @@
 # Gemma4
 
+For the lightweight E2B/E4B text, image, and audio variants on Atlas A3, see
+[Gemma4 E2B / E4B](Gemma4-E2B-E4B.md). The deployment examples below describe
+the 26B MoE and 31B dense variants.
+
 ## 1 Introduction
 
 Gemma4 is a Gemma-family multimodal model that includes dense and Mixture-of-Experts (MoE) variants, and is suitable for text generation, image understanding, reasoning, and instruction-following scenarios.

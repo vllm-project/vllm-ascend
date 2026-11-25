@@ -244,6 +244,7 @@ nav:
         - tutorials/models/DeepSeek-R1.md
         - tutorials/models/DeepSeekOCR2.md
         - tutorials/models/Gemma4.md
+        - tutorials/models/Gemma4-E2B-E4B.md
         - tutorials/models/GLM4.x.md
         - tutorials/models/GLM5.md
         - "GLM-5.2 & GLM-5.3": tutorials/models/GLM5.2.md
