@@ -1532,3 +1532,34 @@
 #       Remove the verifier override once native Kimi defaults dispatch through
 #       the platform's attention/cache configuration interface.
 #
+# ** File: platform/patch_tokenizer_cache.py **
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.renderers.base.BaseRenderer.__init__`
+#      `vllm.renderers.hf.HfRenderer.__init__` (v0.34.0 legacy-cache lane only via `vllm_version_is("0.34.0")`)
+#      `vllm.renderers.base.BaseRenderer._tokenize_prompt`
+#      `vllm.renderers.hf.safe_apply_chat_template`
+#      `vllm.renderers.deepseek_v4.DeepseekV4Renderer._apply_chat_template`
+#      `vllm.renderers.deepseek_v32.DeepseekV32Renderer._apply_chat_template`
+#    Why:
+#       Prefix caching removes the compute for a repeated conversation prefix,
+#       but tokenization still runs over the full prompt on every turn, so at a
+#       high prefix-cache hit rate the tokenizer becomes the dominant frontend
+#       cost of agent workloads on vLLM cores without tokenizer caching.
+#    How:
+#       Reuse a native vLLM tokenizer cache when its configuration field is
+#       available, preserving a positive native budget and forwarding the
+#       legacy budget through a renderer-local config copy otherwise. In that
+#       mode only BaseRenderer initialization is adapted. On legacy cores,
+#       use `vllm_version_is("0.34.0")` to register the `HfRenderer.__init__`
+#       post-pool hook only on v0.34.0 while attaching uniformly in
+#       `BaseRenderer.__init__` on newer vLLM main, restrict the segment cache
+#       to standard stateless HF ByteLevel BPE tokenizers with startup identity
+#       probes, and fall back to ordinary encoding for unsupported tokenizers
+#       or option-bearing requests. Opt in via
+#       `additional_config.tokenizer_cache_gb` (0 = off).
+#    Related PR (if no, explain why):
+#       https://github.com/vllm-project/vllm-ascend/pull/16298
+#    Future Plan:
+#       Remove the legacy cache when all supported vLLM cores provide native
+#       caching, then deprecate the additional-config alias separately.
+#
