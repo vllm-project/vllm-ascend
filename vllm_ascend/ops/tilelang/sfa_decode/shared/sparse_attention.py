@@ -35,13 +35,15 @@ def paged_attention(
     table_width,
     *,
     heads=64,
-    query_count=1,
-    index_width=512,
+    query_count,
+    index_width,
     length_offset=0,
     score_rows_per_query=0,
     causal_bits=None,
     indexed_prefill=False,
 ):
+    if query_count <= 1 or indexed_prefill or causal_bits is not None:
+        raise ValueError("Expected MTP target verification queries")
     causal = causal_bits is not None
     prefill = causal or indexed_prefill
     mtp = query_count > 1
@@ -290,53 +292,19 @@ def paged_attention(
                         S.vsts(out[row, col], result, mask, "PK_B32")
             T.dual_copy(out[:half_rows, :], Y[bx, head : head + query_rows, :])
 
-    if mtp:
-
-        @T.prim_func
-        def main(
-            Q: T.Tensor((batch, 64, DIM), dtype),
-            Cache: T.Tensor((pages, page_size, PACKED_WORDS), T.int32),
-            Table: T.Tensor((requests, table_width), T.int32),
-            Indices: T.Tensor((batch, index_width), T.int32),
-            Positions: T.Tensor((batch,), T.int64),
-            Starts: T.Tensor((requests + 1,), T.int32),
-            Ends: T.Tensor((requests,), T.int64),
-            Y: T.Tensor((batch, 64, DIM), dtype),
-            Length: T.Tensor((requests,), T.int32),
-            PreparedKV: T.Tensor((max(1, batch * score_rows_per_query), DIM), dtype),
-        ):
-            attend(Q, Cache, Table, Indices, Length, Positions, Starts, Ends, PreparedKV, Y)
-
-        return main
-
-    metadata_dtype = T.int64 if prefill else T.int32
-    index_shape = (requests, 1) if prefill else (batch, index_width)
-    if indexed_prefill:
-        index_stride = T.dynamic("index_stride")
-
-        @T.prim_func
-        def indexed(
-            Q: T.Tensor((batch, heads, DIM), dtype),
-            Cache: T.Tensor((pages, page_size, PACKED_WORDS), T.int32),
-            Table: T.Tensor((requests, table_width), T.int32),
-            Indices: T.StridedTensor((batch, max_visible), (index_stride, 1), T.int32),
-            Ends: T.Tensor((requests,), T.int64),
-            Positions: T.Tensor((batch,), T.int64),
-            Y: T.Tensor((batch, heads, DIM), dtype),
-        ):
-            attend(Q, Cache, Table, Indices, Positions, Positions, Ends, Ends, Cache, Y)
-
-        return indexed
-
     @T.prim_func
     def main(
-        Q: T.Tensor((batch, heads, DIM), dtype),
+        Q: T.Tensor((batch, 64, DIM), dtype),
         Cache: T.Tensor((pages, page_size, PACKED_WORDS), T.int32),
         Table: T.Tensor((requests, table_width), T.int32),
-        Indices: T.Tensor(index_shape, metadata_dtype),
-        Length: T.Tensor((length_offset + batch,), metadata_dtype),
-        Y: T.Tensor((batch, heads, DIM), dtype),
+        Indices: T.Tensor((batch, index_width), T.int32),
+        Positions: T.Tensor((batch,), T.int64),
+        Starts: T.Tensor((requests + 1,), T.int32),
+        Ends: T.Tensor((requests,), T.int64),
+        Y: T.Tensor((batch, 64, DIM), dtype),
+        Length: T.Tensor((requests,), T.int32),
+        PreparedKV: T.Tensor((max(1, batch * score_rows_per_query), DIM), dtype),
     ):
-        attend(Q, Cache, Table, Indices, Length, Length, Indices, Indices, Cache, Y)
+        attend(Q, Cache, Table, Indices, Length, Positions, Starts, Ends, PreparedKV, Y)
 
     return main
