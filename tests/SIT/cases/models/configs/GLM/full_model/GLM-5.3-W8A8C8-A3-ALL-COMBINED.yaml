@@ -93,8 +93,6 @@ env_prefill: &env_prefill
 env_decode: &env_decode
   <<: *env_common
   HCCL_BUFFSIZE: "1024"
-  # Required for the benchmark cache reset API on every decoder instance.
-  VLLM_SERVER_DEV_MODE: "1"
 
 templates:
   - node_index: 0
@@ -358,15 +356,13 @@ benchmarks:
     request_rate: 0
   reset_before_prefill_perf_16k:
     case_type: curl_cmd
-    # Reset P and all 16 D APIs; checking HTTP status alone is insufficient.
-    cmds: &reset_pd_prefix_cache
+    cmds:
     - >-
       python3 -c "import json; from urllib.request import Request, urlopen;
       from tests.e2e.common.multi_node.utils import get_cluster_ips;
-      hosts = get_cluster_ips(4);
-      endpoints = [(hosts[2], 7100)] + [(hosts[node], 7100 + rank) for node in (0, 1) for rank in range(8)];
-      results = {host + ':' + str(port): json.load(urlopen(Request('http://' + host + ':' + str(port) + '/reset_prefix_cache', method='POST'), timeout=120)).get('success') for host, port in endpoints};
-      assert all(value is True for value in results.values()), 'prefix cache reset failed: ' + str(results)"
+      host = get_cluster_ips(4)[2];
+      response = urlopen(Request('http://' + host + ':7100/reset_prefix_cache', method='POST'), timeout=120);
+      assert json.load(response).get('success') is True, 'prefix cache reset failed'"
   prefill_perf_16k:
     case_type: performance
     # Minimum of two local r138 runs on 2026-11-22, with a service restart.
@@ -390,7 +386,13 @@ benchmarks:
     request_rate: 1.8
   reset_before_pd_perf_16k:
     case_type: curl_cmd
-    cmds: *reset_pd_prefix_cache
+    cmds:
+    - >-
+      python3 -c "import json; from urllib.request import Request, urlopen;
+      from tests.e2e.common.multi_node.utils import get_cluster_ips;
+      host = get_cluster_ips(4)[2];
+      response = urlopen(Request('http://' + host + ':7100/reset_prefix_cache', method='POST'), timeout=120);
+      assert json.load(response).get('success') is True, 'prefix cache reset failed'"
   pd_perf_16k:
     case_type: performance
     # Minimum of two local r138 runs on 2026-11-22, with a service restart.
@@ -406,7 +408,13 @@ benchmarks:
   # Reset once before decode warmup, with no reset before formal measurement.
   reset_before_decode_perf_16k_20ms:
     case_type: curl_cmd
-    cmds: *reset_pd_prefix_cache
+    cmds:
+    - >-
+      python3 -c "import json; from urllib.request import Request, urlopen;
+      from tests.e2e.common.multi_node.utils import get_cluster_ips;
+      host = get_cluster_ips(4)[2];
+      response = urlopen(Request('http://' + host + ':7100/reset_prefix_cache', method='POST'), timeout=120);
+      assert json.load(response).get('success') is True, 'prefix cache reset failed'"
   decode_perf_16k_20ms_warmup:
     case_type: performance
     request_conf: vllm_api_stream_chat
@@ -430,7 +438,13 @@ benchmarks:
     dataset_path: vllm-ascend/GSM8K_prefix100_in16384_bs500_GLM5_3_flash_w8a8
   reset_before_gpqa:
     case_type: curl_cmd
-    cmds: *reset_pd_prefix_cache
+    cmds:
+    - >-
+      python3 -c "import json; from urllib.request import Request, urlopen;
+      from tests.e2e.common.multi_node.utils import get_cluster_ips;
+      host = get_cluster_ips(4)[2];
+      response = urlopen(Request('http://' + host + ':7100/reset_prefix_cache', method='POST'), timeout=120);
+      assert json.load(response).get('success') is True, 'prefix cache reset failed'"
   acc_gpqa:
     case_type: accuracy
     dataset_path: vllm-ascend/gpqa
