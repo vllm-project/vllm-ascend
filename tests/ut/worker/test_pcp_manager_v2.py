@@ -1145,20 +1145,31 @@ def test_engram_refresh_preserves_parent_slot_layout(pcp_size, rank, route, slot
     updated[0, 1:3] = -1
     expected = _expected_gathered_slots(updated, tokens_by_rank, stride)
 
-    def pad_replayed_slots(global_mapping, group_stride, groups, query, positions, replay, window, pad, **kwargs):
-        assert global_mapping.data_ptr() == global_ptr
+    def pad_replayed_slots(
+        *,
+        slot_mappings_ptr,
+        group_stride,
+        cacheable_groups_ptr,
+        query_start_loc_ptr,
+        positions_ptr,
+        replay_start_ptr,
+        replay_window,
+        pad_slot_id,
+        **kwargs,
+    ):
+        assert slot_mappings_ptr.data_ptr() == global_ptr
         assert group_stride == manager._global_batch_slot_mappings.stride(0)
-        assert query is batch.query_start_loc and positions is batch.positions
+        assert query_start_loc_ptr is batch.query_start_loc and positions_ptr is batch.positions
         assert kwargs == {"NUM_GROUPS": 1, "BLOCK": 1024}
         # CPU equivalent of the replay kernel, the only attention-kernel
         # boundary replaced here. Its writes must reach the existing slots.
         for req in range(batch.num_reqs):
-            start = int(replay[req])
+            start = int(replay_start_ptr[req])
             if start <= 0:
                 continue
-            for token in range(int(query[req]), int(query[req + 1])):
-                if start <= int(positions[token]) < start + window:
-                    global_mapping[groups.long(), token] = pad
+            for token in range(int(query_start_loc_ptr[req]), int(query_start_loc_ptr[req + 1])):
+                if start <= int(positions_ptr[token]) < start + replay_window:
+                    slot_mappings_ptr[cacheable_groups_ptr.long(), token] = pad_slot_id
 
     kernel = MagicMock()
     kernel.__getitem__.return_value.side_effect = pad_replayed_slots

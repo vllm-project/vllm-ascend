@@ -155,6 +155,38 @@ def test_dspark_walker_skips_eager_builders(mock_register):
     mock_register.assert_not_called()
 
 
+@patch.object(kw, "HAS_TRITON", True)
+def test_engram_replayed_slots_registration_activates_window():
+    worker, registry = _make_worker()
+    slot_mappings = torch.zeros((2, 64), dtype=torch.int32)
+    positions = torch.zeros(64, dtype=torch.int64)
+    kv_cache_config = SimpleNamespace(kv_cache_groups=[])
+    recorded = {}
+
+    def register(cfg, *, slot_mappings, positions):
+        # Must execute inside an active JitWarmupRegistry window.
+        rms_norm._TRITON_Q_RMS_KERNEL.register_warmup(worker.vllm_config)
+        recorded["cfg"] = cfg
+        recorded["slot_mappings"] = slot_mappings
+        recorded["positions"] = positions
+        return True
+
+    worker.model_runner.kv_cache_config = kv_cache_config
+    worker.model_runner.block_tables = SimpleNamespace(slot_mappings=slot_mappings)
+    worker.model_runner.input_buffers = SimpleNamespace(positions=positions)
+    worker.model_runner.model_state = SimpleNamespace(register_replayed_slots_warmup=register)
+
+    assert kw._register_engram_replayed_slots_warmup(worker) is True
+    assert recorded["cfg"] is kv_cache_config
+    assert recorded["slot_mappings"] is slot_mappings
+    assert recorded["positions"] is positions
+    assert rms_norm._TRITON_Q_RMS_KERNEL in registry._registrations
+
+    # Runners without an Engram model_state cleanly no-op.
+    plain_worker, _ = _make_worker()
+    assert kw._register_engram_replayed_slots_warmup(plain_worker) is False
+
+
 def test_v2_initialize_kv_cache_upstream_holds_registry_window():
     """Builder construction inside upstream initialize_kv_cache registers
     into the registry; a runner without one (tests, partial mocks) still
