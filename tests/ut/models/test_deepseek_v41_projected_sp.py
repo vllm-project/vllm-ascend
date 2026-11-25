@@ -61,12 +61,14 @@ def test_tp_projection_equivalence(tokens, ratio, index_source):
             torch.testing.assert_close(value, expected[name][:tokens])
 
 
-@pytest.mark.parametrize("pcp", [1, 2])
-@pytest.mark.parametrize("draft", [False, True])
-def test_dspark_target_only(pcp, draft):
+@pytest.mark.parametrize(
+    "tp,pcp,draft,expected",
+    [(8, 1, False, True), (8, 1, True, False), (4, 1, False, False), (4, 2, False, False), (8, 2, False, False)],
+)
+def test_dspark_projected_sp_eligibility(tp, pcp, draft, expected):
     config = SimpleNamespace(
         parallel_config=SimpleNamespace(
-            tensor_parallel_size=4,
+            tensor_parallel_size=tp,
             prefill_context_parallel_size=pcp,
             decode_context_parallel_size=1,
             use_ubatching=False,
@@ -74,6 +76,4 @@ def test_dspark_target_only(pcp, draft):
         speculative_config=SimpleNamespace(use_dspark=lambda: True),
         lora_config=None,
     )
-    assert projected_sp_supported(
-        config, SimpleNamespace(dsv41_projected_sp=True), is_draft_layer=draft, batch_invariant=False
-    ) is (not draft)
+    assert projected_sp_supported(config, is_draft_layer=draft, batch_invariant=False) is expected

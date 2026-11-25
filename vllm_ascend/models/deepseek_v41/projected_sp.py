@@ -6,16 +6,20 @@ from collections.abc import Callable
 
 import torch
 
+# TP8, PCP=1 prefill sweep. Count rows before TP token sharding, including padding.
+PROJECTED_SP_TP_SIZE = 8
+PROJECTED_SP_MIN_TOKENS = 768
 
-def projected_sp_supported(config, ascend_config, *, is_draft_layer: bool, batch_invariant: bool) -> bool:
+
+def projected_sp_supported(config, *, is_draft_layer: bool, batch_invariant: bool) -> bool:
     """Static eligibility; the decoder additionally checks SP and bucket size."""
     parallel = config.parallel_config
     speculative = config.speculative_config
     dspark = speculative is not None and speculative.use_dspark()
     return (
-        ascend_config.dsv41_projected_sp
-        and not is_draft_layer
-        and parallel.tensor_parallel_size > 1
+        not is_draft_layer
+        and parallel.tensor_parallel_size == PROJECTED_SP_TP_SIZE
+        and parallel.prefill_context_parallel_size == 1
         and parallel.decode_context_parallel_size == 1
         and not parallel.use_ubatching
         and (speculative is None or dspark)

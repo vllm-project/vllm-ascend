@@ -132,7 +132,7 @@ from .engram.parallel import gather_engram_hashes, resolve_dp_shared_memory
 from .engram.shared_pool import rollback_shared_engram
 from .engram_lifecycle import close_engram_on_init_failure
 from .indexer import DeepseekV41Indexer
-from .projected_sp import projected_sp_supported
+from .projected_sp import PROJECTED_SP_MIN_TOKENS, projected_sp_supported
 
 
 def _retain_local_engram_tables(model):
@@ -1015,11 +1015,8 @@ class DeepseekV41DecoderLayer(nn.Module):
         self.layer_idx = layer_idx
         self.norm_eps = config.rms_norm_eps
         self.use_sequence_parallel_moe = parallel_config.use_sequence_parallel_moe
-        ascend_config = get_ascend_config()
-        self.projected_sp_min_tokens = ascend_config.dsv41_projected_sp_min_tokens
         self.projected_sp_enabled = projected_sp_supported(
             vllm_config,
-            ascend_config,
             is_draft_layer=is_draft_layer,
             batch_invariant=envs.VLLM_BATCH_INVARIANT,
         )
@@ -1130,7 +1127,7 @@ class DeepseekV41DecoderLayer(nn.Module):
         if (
             use_sequence_parallel
             and getattr(self, "projected_sp_enabled", False)
-            and positions.shape[0] >= self.projected_sp_min_tokens
+            and positions.shape[0] >= PROJECTED_SP_MIN_TOKENS
         ):
             x = self.self_attn.forward_sp(positions, x)
         else:
