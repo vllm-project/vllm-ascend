@@ -440,3 +440,55 @@ def test_add_lora_logits_without_custom_ops_uses_bgmv_when_out_smaller_than_rank
     wrapper.add_lora_logits(y, x, a, b, 0.5)
     assert torch.equal(wrapper.bgmv_shrink.call_args.args[3], torch.tensor([1, 0]))
     wrapper.bgmv_expand.assert_called_once()
+
+
+def test_apply_expand_keeps_custom_ops_for_aligned_bf16_slices_on_a3() -> None:
+    wrapper = _make_wrapper(is_prefill=False, no_lora=False, device_type=AscendDeviceType.A3)
+    wrapper._use_custom_lora_ops = True
+    y = torch.zeros(2, 336, dtype=torch.bfloat16)
+    x = torch.ones(2, 16, dtype=torch.float32)
+    w = torch.ones(2, 1, 320, 16, dtype=torch.bfloat16)
+    # 336 % 16 == 0, offset=0 % 16 == 0, size=320 % 16 == 0, 320 >= 16 -> custom path
+    wrapper._apply_expand(y, x, w, y_offset=0, y_slice_size=320, add_inputs=True)
+    wrapper.bgmv_expand_slice.assert_called_once()
+
+
+@pytest.mark.parametrize(
+    ("rank", "total_dim", "offset", "slice_size"),
+    [
+        (16, 336, 320, 4),  # slice_size < rank & non-16-aligned size
+        (8, 336, 324, 12),  # slice_size >= rank, non-16-aligned offset & size
+        (16, 1, 0, 1),  # shared_expert_gate [1] < rank
+    ],
+)
+def test_apply_expand_falls_back_to_torch_for_small_or_unaligned_bf16_slices(
+    rank: int, total_dim: int, offset: int, slice_size: int
+) -> None:
+    wrapper = _make_wrapper(is_prefill=False, no_lora=False, device_type=AscendDeviceType.A3)
+    wrapper._use_custom_lora_ops = True
+    wrapper._token_lora_indices = torch.tensor([0, -1])
+    y = torch.full((2, total_dim), 3.0, dtype=torch.bfloat16)
+    x = torch.full((2, rank), 2.0, dtype=torch.float32)
+    w = torch.full((2, 1, slice_size, rank), 0.5, dtype=torch.bfloat16)
+
+    wrapper._apply_expand(y, x, w, y_offset=offset, y_slice_size=slice_size, add_inputs=True)
+    wrapper.bgmv_expand_slice.assert_not_called()
+    wrapper.sgmv_expand_slice.assert_not_called()
+    expected_row0 = 3.0 + 2.0 * 0.5 * rank
+    torch.testing.assert_close(
+        y[0, offset : offset + slice_size], torch.full((slice_size,), expected_row0, dtype=torch.bfloat16)
+    )
+    torch.testing.assert_close(y[1], torch.full((total_dim,), 3.0, dtype=torch.bfloat16))
+
+
+def test_apply_expand_fallback_skips_when_prefill_no_lora() -> None:
+    wrapper = _make_wrapper(is_prefill=True, no_lora=True, device_type=AscendDeviceType.A3)
+    wrapper._use_custom_lora_ops = True
+    wrapper._token_lora_indices = torch.tensor([0, 0])
+    y = torch.ones(2, 1, dtype=torch.bfloat16)
+    x = torch.ones(2, 16, dtype=torch.float32)
+    w = torch.ones(2, 1, 1, 16, dtype=torch.bfloat16)
+
+    wrapper._apply_expand(y, x, w, y_offset=0, y_slice_size=1, add_inputs=True)
+    wrapper.sgmv_expand_slice.assert_not_called()
+    torch.testing.assert_close(y, torch.ones(2, 1, dtype=torch.bfloat16))

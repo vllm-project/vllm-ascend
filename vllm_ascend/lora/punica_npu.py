@@ -236,6 +236,16 @@ class PunicaWrapperNPU(PunicaWrapperBase):
             return False
         return not (self.ascend_device_type == AscendDeviceType._310P and self._in_graph_mode())
 
+    def _can_use_custom_expand(self, y: torch.Tensor, x: torch.Tensor, y_offset: int, y_slice_size: int) -> bool:
+        rank = x.shape[-1]
+        if y_slice_size < rank:
+            return False
+        if y.dtype in (torch.float16, torch.bfloat16):
+            # AscendC bgmv_expand/sgmv_expand only supports ranks {8, 16, 32, 64}
+            # and 32-byte (16-element) aligned output stride/offset/slice_size.
+            return rank in (8, 16, 32, 64) and y_offset % 16 == 0 and y_slice_size % 16 == 0 and y.shape[-1] % 16 == 0
+        return y.device.type == "cpu"
+
     def _apply_expand(
         self,
         y: torch.Tensor,
@@ -250,6 +260,21 @@ class PunicaWrapperNPU(PunicaWrapperBase):
         computation, which is suitable for the
         GEMM of lora'b.
         """
+        if self._use_custom_lora_ops and not self._can_use_custom_expand(y, x, y_offset, y_slice_size):
+            if self._use_sgmv() and self.no_lora:
+                return
+            from vllm_ascend.lora.lora_ops import bgmv_expand_slice_torch
+
+            bgmv_expand_slice_torch(
+                x,
+                w_t_all,
+                y,
+                self._get_token_lora_indices(x),
+                y_offset,
+                y_slice_size,
+                add_inputs=add_inputs,
+            )
+            return
 
         expand_slice_fun: Callable = self._expand_slice_prefill if self._use_sgmv() else self._expand_slice_decode
         expand_slice_fun(y, x, w_t_all, y_offset, y_slice_size, add_inputs)
