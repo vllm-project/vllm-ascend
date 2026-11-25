@@ -299,21 +299,29 @@ class AscendMMEncoderAttention(MMEncoderAttention):
 
         q_quant, q_scale = torch_npu.npu_dynamic_mx_quant(q.contiguous(), dst_type=torch.float8_e4m3fn)
         k_quant, k_scale = torch_npu.npu_dynamic_mx_quant(k.contiguous(), dst_type=torch.float8_e4m3fn)
-        v_quant_parts = []
-        v_scale_parts = []
+        # Every image starts a new 64-token V-scale group. Pack the images at
+        # aligned offsets so the whole V tensor can be quantized in one call.
+        v_positions = torch.arange(v.shape[0], dtype=torch.int64)
+        padded_v_tokens = 0
         for start, end in zip(boundaries, boundaries[1:]):
-            if start == end:
-                continue
-            # Make the token dimension the last axis for DynamicMxQuant.
-            part = v[start:end].permute(1, 2, 0).contiguous()
-            pad = (-part.shape[-1]) % QFA_V_GROUP_SIZE
-            if pad:
-                part = F.pad(part, (0, pad))
-            quant, scale = torch_npu.npu_dynamic_mx_quant(part, dst_type=torch.float8_e4m3fn)
-            v_quant_parts.append(quant.permute(2, 0, 1)[: end - start].contiguous())
-            v_scale_parts.append(scale.permute(2, 0, 1, 3).contiguous())
-        v_quant = torch.cat(v_quant_parts, dim=0)
-        v_scale = torch.cat(v_scale_parts, dim=0)
+            v_positions[start:end] += padded_v_tokens - start
+            length = end - start
+            padded_v_tokens += (length + QFA_V_GROUP_SIZE - 1) // QFA_V_GROUP_SIZE * QFA_V_GROUP_SIZE
+        if padded_v_tokens == v.shape[0]:
+            v_padded = v
+        else:
+            v_positions = v_positions.to(device=v.device, non_blocking=True)
+            v_padded = v.new_zeros((padded_v_tokens, *v.shape[1:]))
+            v_padded.index_copy_(0, v_positions, v)
+        v_quant_padded, v_scale_padded = torch_npu.npu_dynamic_mx_quant(
+            v_padded.permute(1, 2, 0).contiguous(), dst_type=torch.float8_e4m3fn
+        )
+        v_quant = v_quant_padded.permute(2, 0, 1).contiguous()
+        if padded_v_tokens != v.shape[0]:
+            # aclnnIndexSelect does not accept float8; preserve the quantized
+            # bytes across the gather rather than converting them numerically.
+            v_quant = v_quant.view(torch.uint8).index_select(0, v_positions).view(v_quant.dtype)
+        v_scale = v_scale_padded.permute(2, 0, 1, 3).contiguous()
         cu_device = cu_cpu.to(device=q.device, non_blocking=True)
         max_seqlen = max(end - start for start, end in zip(boundaries, boundaries[1:]))
         common = dict(

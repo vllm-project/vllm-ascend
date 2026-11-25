@@ -313,14 +313,15 @@ class TestAscendMMEncoderAttentionQFA(FIAMockMixin):
         query = torch.randn(1, 128, 4 * 128, dtype=torch.bfloat16)
         key = torch.randn(1, 128, 2 * 128, dtype=torch.bfloat16)
         value = torch.randn_like(key)
-        cu_seqlens = torch.tensor([0, 67, 128], dtype=torch.int32)
+        cu_seqlens = torch.tensor([0, 0, 67, 128], dtype=torch.int32)
         seen = {}
 
         def fake_quant(x, *, dst_type):
             seen.setdefault("quant_input_shapes", []).append(tuple(x.shape))
+            seen.setdefault("quant_inputs", []).append(x.clone())
             groups = x.shape[-1] // 64
             scale = torch.full((*x.shape[:-1], groups, 2), 127, dtype=torch.uint8)
-            return torch.zeros_like(x, dtype=dst_type), scale
+            return x, scale
 
         def fake_metadata(num_heads, num_kv_heads, head_dim, quant_mode, **kwargs):
             seen["metadata"] = (num_heads, num_kv_heads, head_dim, quant_mode, kwargs)
@@ -328,6 +329,7 @@ class TestAscendMMEncoderAttentionQFA(FIAMockMixin):
 
         def fake_qfa(q, k, v, q_scale, k_scale, v_scale, quant_mode, **kwargs):
             seen["qfa"] = (q.shape, k.shape, v.shape, q_scale.shape, k_scale.shape, v_scale.shape, kwargs)
+            seen["quant_v"] = v
             return torch.zeros(q.shape, dtype=torch.bfloat16), torch.empty(0)
 
         ops = ModuleType("cann_ops_transformer.ops")
@@ -342,7 +344,14 @@ class TestAscendMMEncoderAttentionQFA(FIAMockMixin):
             output = layer.forward_oot(query, key, value, cu_seqlens=cu_seqlens)
 
         self.assertEqual(output.shape, query.shape)
-        self.assertEqual(seen["quant_input_shapes"], [(128, 4, 128), (128, 2, 128), (2, 128, 128), (2, 128, 64)])
+        self.assertEqual(seen["quant_input_shapes"], [(128, 4, 128), (128, 2, 128), (2, 128, 192)])
+        packed_v = seen["quant_inputs"][2].permute(2, 0, 1)
+        original_v = value.reshape(128, 2, 128)
+        torch.testing.assert_close(packed_v[:67], original_v[:67])
+        torch.testing.assert_close(packed_v[67:128], torch.zeros_like(packed_v[67:128]))
+        torch.testing.assert_close(packed_v[128:189], original_v[67:])
+        torch.testing.assert_close(packed_v[189:], torch.zeros_like(packed_v[189:]))
+        torch.testing.assert_close(seen["quant_v"], original_v)
         self.assertEqual(seen["qfa"][5], (3, 2, 128, 2))
         self.assertEqual(seen["metadata"][:4], (4, 2, 128, 1))
         self.assertEqual(seen["qfa"][6]["mask_mode"], 0)

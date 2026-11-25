@@ -9,10 +9,11 @@ from vllm_ascend.ops.mm_encoder_attention import AscendMMEncoderAttention
 
 
 @pytest.mark.parametrize("lengths", [(67, 61), (128,)])
-def test_mm_encoder_qfa_matches_bf16_attention(lengths):
+@pytest.mark.parametrize("dim", [72, 128])
+def test_mm_encoder_qfa_matches_bf16_attention(lengths, dim):
     device = torch.device("npu")
     torch.manual_seed(42)
-    heads, dim = 4, 128
+    heads = 4
     total = sum(lengths)
     query = torch.randn(total, heads, dim, device=device, dtype=torch.bfloat16)
     key = torch.randn_like(query)
@@ -25,7 +26,7 @@ def test_mm_encoder_qfa_matches_bf16_attention(lengths):
     layer.num_kv_heads = heads
     layer.head_size = dim
     layer.scale = dim**-0.5
-    layer.enable_pad = False
+    layer.enable_pad = 64 < dim < 128
     actual = layer._forward_eager_qfa(
         query,
         key,
