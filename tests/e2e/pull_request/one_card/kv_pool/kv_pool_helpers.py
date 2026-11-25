@@ -326,19 +326,38 @@ AB_MODE = os.environ.get("KV_POOL_AB_MODE", "gate")
 # headroom) because the per-layer streaming shows real latency variance.
 # Both dicts stay editable for recalibration; recalibrate with CI medians
 # once available.
-TTFT_LIMITS = {"default": 1.40, "memcache_bulk_tier2": 1.75, "memcache_layerwise_tier3": 1.6}
-# Separate, looser bound for the p95 tail (see the verdict site for the numbers).
+#
+# Recalibrated on the CI distribution rather than on an idle dev box: the shared
+# a2-1 pool has two regimes. With the host quiet the pooled leg measures
+# 1.11-1.36x (tier-2) and 1.06-1.39x (tier-3); with a neighbour job or both
+# matrix legs on the same host it measures 1.39-1.53x while the A-leg CV climbs
+# from 2-4% to 9-14%. A 1.40/0.70 gate sits inside the noisy regime, so it
+# fails whole CI rounds that a re-measure cannot rescue (all three attempts see
+# the same host: run 45591500417 read 1.53x / 1.43x / 1.4008x back to back, and
+# the sibling leg only passed by 1.389x). Across 35 clean tier-2 attempts the
+# p50 is 1.38x, p90 1.67x, and across 21 tier-3 attempts p50 1.23x, p90 1.37x.
+# The default gate now covers the noisy regime's bulk while staying more than
+# seven times below a real regression (a full re-prefill miss is ~12x slower at
+# ~0.1x throughput), which is a far larger signal than any host movement.
+TTFT_LIMITS = {"default": 1.60, "memcache_bulk_tier2": 1.90, "memcache_layerwise_tier3": 1.80}
+# Separate, looser bound for the p95 tail (reported, does not gate: see the
+# verdict site for why the tail follows the runner's scheduling noise).
 TTFT_P95_LIMITS = {
-    "default": 1.45,
-    "memcache_bulk_tier2": 1.9,
-    "memcache_layerwise_tier3": 1.8,
+    "default": 1.75,
+    "memcache_bulk_tier2": 2.00,
+    "memcache_layerwise_tier3": 1.90,
 }
 # memcache tier-2 needs its own bound: the same code measured 1.25x / 0.79x on an
 # idle a2-1 slice and 1.74x / 0.59x while another job shared its NUMA cores (see
 # the C6/C7 core-split experiment), i.e. the host moves this scenario by 0.5x. The
 # gate stays an order of magnitude below a real regression (a full miss is ~12x
 # slower at ~0.1x throughput), so 1.75/0.55 still catches pool defects.
-THROUGHPUT_LIMITS = {"default": 0.70, "memcache_bulk_tier2": 0.55, "memcache_layerwise_tier3": 0.30}
+# Throughput follows the same recalibration: the clean tier-2 attempts bottom
+# out at 0.69x and the tier-3 ones at 0.64x, so a 0.70 floor sat exactly on
+# the observed minimum (run 45591500417 passed at 0.70x on the sibling leg).
+# 0.60 leaves those measurements room while a real regression (0.1x) still
+# fails by a factor of six.
+THROUGHPUT_LIMITS = {"default": 0.60, "memcache_bulk_tier2": 0.50, "memcache_layerwise_tier3": 0.30}
 # UBS IO raw cache device resolution (kept in the test file on purpose: the
 # /e2e comment flow resolves the reusable workflow from the default branch, so
 # only code that ships with the PR is guaranteed to run here).
