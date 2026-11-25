@@ -522,6 +522,10 @@ async def _handle_completions(api: str, request: Request):
         # Record request info for recompute
         stream_flag = bool(req_data.get("stream", False))
         chat_flag = "messages" in req_data
+        # A streaming frame may carry several tokens (--stream-interval > 1),
+        # while the non-streaming count comes from usage.completion_tokens, so
+        # the unit is spelled out in the log field name.
+        completion_count = "completion_frames" if stream_flag else "completion_tokens"
         if "prompt" in req_data:
             origin_prompt = req_data["prompt"]
         elif chat_flag:
@@ -607,12 +611,12 @@ async def _handle_completions(api: str, request: Request):
                                 # prefiller named below is the one that just failed.
                                 logger.info(
                                     "[PD-RECOMPUTE] request goes back to P: request_id=%s, prefiller=%s, "
-                                    "retry_count=%d, generated_tokens=%d, completion_events=%d, "
-                                    "max_tokens=%s->%s",
+                                    "retry_count=%d, generated_chars=%d, %s=%d, max_tokens=%s->%s",
                                     request_id,
                                     proxy_state.req_to_prefiller.get(request_id, "-"),
                                     retry_count,
                                     len(generated_token),
+                                    completion_count,
                                     completion_tokens,
                                     previous_max_tokens,
                                     req_data["max_tokens"],
@@ -631,11 +635,12 @@ async def _handle_completions(api: str, request: Request):
                 logger.error(
                     "Error during streaming from decoder %s: %s the aborted request %s "
                     "will be routing to the target prefiller when new request is ready to dispatch to it "
-                    "(retry_count=%d, completion_tokens=%d, recomputed=%s)",
+                    "(retry_count=%d, %s=%d, recomputed=%s)",
                     decoder.url,
                     e,
                     request_id,
                     retry_count,
+                    completion_count,
                     completion_tokens,
                     retry_count > 0,
                 )

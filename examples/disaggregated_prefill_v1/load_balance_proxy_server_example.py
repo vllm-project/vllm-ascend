@@ -1093,6 +1093,10 @@ async def handle_completions_impl(api: str, request: Request):
         instance_info = await assign_instances(api, req_data, request_length, is_initial_request=True)
         stream_flag = bool(req_data.get("stream", False))
         chat_flag = "messages" in req_data
+        # A streaming frame may carry several tokens (--stream-interval > 1),
+        # while the non-streaming count comes from usage.completion_tokens, so
+        # the unit is spelled out in the log field name.
+        completion_count = "completion_frames" if stream_flag else "completion_tokens"
 
         if "prompt" in req_data:
             origin_prompt = req_data["prompt"]
@@ -1259,12 +1263,13 @@ async def handle_completions_impl(api: str, request: Request):
                                 released_kv = False
                                 logger.info(
                                     "[PD-RECOMPUTE] request goes back to P: request_id=%s->%s, prefiller=%s, "
-                                    "retry_count=%d, generated_tokens=%d, completion_events=%d, max_tokens=%s->%s",
+                                    "retry_count=%d, generated_chars=%d, %s=%d, max_tokens=%s->%s",
                                     previous_request_id,
                                     instance_info.request_id,
                                     instance_info.prefiller_key,
                                     retry_count,
                                     len(generated_token),
+                                    completion_count,
                                     completion_tokens,
                                     previous_max_tokens,
                                     req_data["max_tokens"],
