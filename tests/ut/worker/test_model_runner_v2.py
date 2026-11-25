@@ -2266,7 +2266,7 @@ def test_pull_admission_rejects_out_of_range_page():
 
 
 def test_c8_connector_restores_after_delegate_pre_forward():
-    calls = []
+    calls: list[object] = []
     delegate = MagicMock()
     delegate.pre_forward.side_effect = lambda *args, **kwargs: calls.append("delegate")
     output = object()
