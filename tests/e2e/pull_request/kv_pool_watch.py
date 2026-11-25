@@ -10,17 +10,66 @@ from __future__ import annotations
 import contextlib
 import json
 import os
+import shutil
+import subprocess
 import time
 from collections.abc import Callable, Sequence
 from dataclasses import asdict, dataclass, field
 from typing import Any
 
+import pytest
 import regex as re
 
 HITS_METRIC = "vllm:external_prefix_cache_hits"
 QUERIES_METRIC = "vllm:external_prefix_cache_queries"
 LOAD_KEYS_METRIC = "vllm:ascend_store_load_get_keys"
 DELAYED_BLOCKS_METRIC = "vllm:ascend_store_delayed_release_blocks"
+MEMCACHE_TRANSFER_GATE_TIMEOUT_S = 120
+
+
+def ensure_memcache_transfer(protocol: str, local_rank_size: int) -> None:
+    """Skip when the A5 data plane cannot carry a plain memfabric transfer.
+
+    Follows the memfabric troubleshooting flow: run the transport benchmark
+    before the pool leg so a broken UB path skips in two minutes with a
+    signature instead of hanging the DP workers. A5 targets ``device_urma``;
+    ``device_sdma`` has no cross-rank data plane there and is not a fallback.
+    """
+    if shutil.which("mfcli") is None:
+        pytest.skip("memcache transfer gate: mfcli is not installed in the image")
+    env = dict(os.environ)
+    env.setdefault("MF_HYBM_ENABLE_4K_PAGE", "1")
+    command = [
+        "mfcli",
+        "benchmark",
+        "--protocol",
+        protocol,
+        "--device",
+        "0",
+        "--local-rank-size",
+        str(local_rank_size),
+        "--copysize",
+        "2097152",
+        "--copy-count",
+        "10",
+        "read",
+    ]
+    try:
+        completed = subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            timeout=MEMCACHE_TRANSFER_GATE_TIMEOUT_S,
+            env=env,
+        )
+    except subprocess.TimeoutExpired:
+        pytest.skip(
+            f"memcache transfer gate: {protocol} did not finish in "
+            f"{MEMCACHE_TRANSFER_GATE_TIMEOUT_S}s; blocked in HYBM init or the first copy"
+        )
+    if completed.returncode != 0:
+        tail = (completed.stdout + completed.stderr).strip().splitlines()[-6:]
+        pytest.skip(f"memcache transfer gate failed rc={completed.returncode}: " + " / ".join(tail))
 
 
 @dataclass(frozen=True)
