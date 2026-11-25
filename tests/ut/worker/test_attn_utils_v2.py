@@ -1679,7 +1679,7 @@ def test_qsa_tiling_uses_capture_rows_and_maps_only_live_tokens(monkeypatch, ful
         full_graph_mode=full_graph,
     )
     assert md["indexer"].common.num_actual_tokens == md["main"].common.num_actual_tokens == expected_rows
-    assert md["indexer"].qsa_num_live_tokens == md["indexer"].common.query_start_loc_cpu[-1].item() == 52
+    torch.testing.assert_close(md["indexer"].common.query_start_loc_cpu, boundaries[:14])
     assert md["other"].common.num_actual_tokens == 52
 
 
