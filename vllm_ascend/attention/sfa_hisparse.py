@@ -660,7 +660,7 @@ class AscendHiSparseImpl(AscendSFAImpl):
         page_stride, remainder = divmod(view.attention_block_stride, view.block_size)
         storage = view.attention_cache
         if (
-            remainder != 0
+            remainder
             or page_stride < 1
             or not storage.is_contiguous()
             or view.cache.stride(0) != view.attention_block_stride * view.cache.stride(1)
@@ -668,7 +668,7 @@ class AscendHiSparseImpl(AscendSFAImpl):
         ):
             return None
         table = cache.block_table.index_select(0, state_indices[num_decodes : metadata.num_reqs].to(torch.long))
-        table = table.clamp_min(0).mul(page_stride)
+        table.clamp_min_(0).mul_(page_stride)
         if num_decodes:
             query_ends = query_ends[num_decodes:] - num_decode_tokens
             key_lengths = key_lengths[num_decodes:]
@@ -682,11 +682,7 @@ class AscendHiSparseImpl(AscendSFAImpl):
             key_lengths,
             block_table=table,
         )
-        logger.info_once(
-            "[hisparse] Resident paged Prefill active (PA_BSND): mixed=%s",
-            bool(num_decodes),
-            scope="process",
-        )
+        logger.info_once("[hisparse] Resident paged Prefill active: mixed=%s", bool(num_decodes), scope="process")
         return output
 
     def _execute_sparse_flash_attention_process(
