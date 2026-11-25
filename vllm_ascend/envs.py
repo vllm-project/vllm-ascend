@@ -80,6 +80,9 @@ env_variables: dict[str, Callable[[], Any]] = {
     # The path for HCCL library, it's used by pyhccl communicator backend. If
     # not set, the default value is libhccl.so.
     "HCCL_SO_PATH": lambda: os.getenv("HCCL_SO_PATH", None),
+    # Existing HCCL runtime setting, not a vLLM-Ascend configuration knob.
+    # None leaves the HCCL default unchanged; AIV selects vector-core expansion.
+    "HCCL_OP_EXPANSION_MODE": lambda: os.getenv("HCCL_OP_EXPANSION_MODE"),
     # The version of vllm is installed. This value is used for developers who
     # installed vllm from source locally. In this case, the version of vllm is
     # usually changed. For example, if the version of vllm is "0.9.0", but when
