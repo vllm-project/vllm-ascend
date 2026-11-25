@@ -198,12 +198,7 @@ class NPUIPCWeightTransferEngine(IPCWeightTransferEngine):
                 weight = rebuild_npu_tensor(*list_args)
                 weights.append((name, weight))
 
-        from vllm.model_executor.model_loader.mtp_validation import (
-            disable_mtp_completeness_check,
-        )
-
-        with disable_mtp_completeness_check():
-            self.model.load_weights(weights)
+        self.model.load_weights(weights)
 
 
 class NPUIPCTrainerWeightTransferEngine(IPCTrainerWeightTransferEngine):

@@ -189,6 +189,40 @@ class TestShouldReshapeWoATo3d(unittest.TestCase):
             self._reshape_decision("model.layers.0.self_attn.o_proj", torch.bfloat16, mx_quant_fusion=True)
         )
 
+    def test_nz_conversion_receives_final_grouped_layout(self):
+        """Both checkpoint and dummy weights reach NZ conversion after reshape."""
+        from vllm_ascend.device.hardware_profile import WeightLayoutPolicy
+
+        original = torch.arange(32 * 64, dtype=torch.float32).reshape(32, 64).to(torch.bfloat16)
+        expected = original.view(2, 16, 64).transpose(2, 1).contiguous()
+        profile = SimpleNamespace(
+            supports=lambda capability: False, weight_layout_policy=WeightLayoutPolicy.CONFIGURABLE
+        )
+        for weight in (original, expected):
+            with self.subTest(shape=tuple(weight.shape)):
+                layer = SimpleNamespace(
+                    prefix="model.layers.0.self_attn.wo_a",
+                    weight=torch.nn.Parameter(weight.clone(), requires_grad=False),
+                    n_local_groups=2,
+                    o_lora_rank=16,
+                )
+
+                def convert(final_weight, fmt):
+                    self.assertEqual(tuple(final_weight.shape), (2, 64, 16))
+                    self.assertTrue(final_weight.is_contiguous())
+                    torch.testing.assert_close(final_weight, expected)
+                    return final_weight.clone()
+
+                with (
+                    patch.object(linear, "get_current_hardware_profile", return_value=profile),
+                    patch("vllm_ascend.utils.get_current_hardware_profile", return_value=profile),
+                    patch("vllm_ascend.utils.get_ascend_config", return_value=SimpleNamespace(weight_nz_mode=2)),
+                    patch("torch_npu.npu_format_cast", side_effect=convert) as cast,
+                ):
+                    AscendUnquantizedLinearMethod().process_weights_after_loading(layer)
+                cast.assert_called_once()
+                torch.testing.assert_close(layer.weight, expected)
+
 
 class TestAscendRowParallelLinear(BaseLinearTest):
     @patch("vllm_ascend.ops.linear.get_current_vllm_config", return_value=MagicMock())
@@ -235,7 +269,37 @@ class TestAscendRowParallelLinear(BaseLinearTest):
 
 
 class TestAscendMergedColumnParallelLinear(BaseLinearTest):
-    @unittest.skipIf(vllm_version_is("0.33.0"), "Stacked shard tracking was added after v0.33")
+    def test_merged_checkpoint_reload_keeps_output_padding_zero(self):
+        for padding_size in (0, 3):
+            kwargs: dict[str, Any] = dict(
+                input_size=8, output_sizes=[4, 6], bias=True, disable_tp=True, padding_size=padding_size
+            )
+            if vllm_version_is("0.34.0") and padding_size:
+                # v0.34.0 lacks the upstream pad-fill helpers, so the layer
+                # refuses padded allocations instead of mismatching weights.
+                with self.assertRaisesRegex(ValueError, "requires the verified"):
+                    AscendMergedColumnParallelLinear(**kwargs)
+                continue
+            layer = AscendMergedColumnParallelLinear(**kwargs)
+            self.assertEqual(tuple(layer.weight.shape), (10 + padding_size, 8))
+            for value in (1.0, 2.0):
+                # Dirty the complete allocation to verify reload clears only
+                # padding while loading every real checkpoint row and bias.
+                layer.weight.data.fill_(-7)
+                layer.bias.data.fill_(-7)
+                for shard, size in enumerate((4, 6)):
+                    layer.weight_loader(layer.weight, torch.full((size, 8), value), shard)
+                    layer.weight_loader(layer.bias, torch.full((size,), value), shard)
+                torch.testing.assert_close(layer.weight[:10], torch.full_like(layer.weight[:10], value))
+                torch.testing.assert_close(layer.bias[:10], torch.full_like(layer.bias[:10], value))
+                if padding_size:
+                    torch.testing.assert_close(layer.weight[10:], torch.zeros_like(layer.weight[10:]))
+                    torch.testing.assert_close(layer.bias[10:], torch.zeros_like(layer.bias[10:]))
+                    self.assertEqual(layer.weight.weight_loader_numel, 80)
+                    self.assertEqual(layer.bias.weight_loader_numel, 10)
+                    self.assertEqual(layer._checkpoint_output_sizes, [4, 6])
+                    self.assertEqual(layer.shard_ids, (0, 1))
+
     def test_custom_allocations_preserve_missing_shard_validation(self):
         layers: tuple[Any, ...] = (
             AscendMergedColumnParallelLinear(input_size=8, output_sizes=[4, 4], bias=False, disable_tp=True),

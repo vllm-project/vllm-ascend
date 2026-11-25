@@ -31,7 +31,7 @@ Choose one of the following methods to install `vllm` and `vllm-ascend`. PyTorch
 
 === "pip installation"
 
-    This installation method currently supports only **A2** builds and does not automatically support A3, Atlas 300I DUO, Atlas 200I Pro, or 950DT Products. For other hardware, use a prebuilt image, WheelNext, or a source installation.
+    This installation method currently supports only **A2** builds and does not automatically support A3, Atlas 300I Duo, Atlas 200I Pro, or 950DT Products. For other hardware, use a prebuilt image, the uv installation, or a source installation.
 
     <!-- doctest: installation-pip-install -->
     ```bash
@@ -42,15 +42,15 @@ Choose one of the following methods to install `vllm` and `vllm-ascend`. PyTorch
 
     pip install \
         --extra-index-url https://download.pytorch.org/whl/cpu/ \
-        --extra-index-url https://mirrors.huaweicloud.com/ascend/repos/pypi \
+        --extra-index-url https://repo.huaweicloud.com/ascend/repos/pypi \
         "vllm-ascend=={{ release_vllm_ascend_version }}"
     ```
 
     ??? tip "If pip cannot verify the Huawei Cloud mirror certificate"
 
-        The Huawei Cloud package index uses HTTPS, so `--trusted-host` is not normally required. If pip reports an SSL certificate verification or untrusted-host error for `mirrors.huaweicloud.com`, first update pip and the operating system CA certificates, or configure the CA bundle required by your network.
+        The Huawei Cloud package index uses HTTPS, so `--trusted-host` is not normally required. If pip reports an SSL certificate verification or untrusted-host error for `repo.huaweicloud.com`, first update pip and the operating system CA certificates, or configure the CA bundle required by your network.
 
-        As a temporary workaround on a trusted network, retry the vLLM Ascend installation command with `--trusted-host mirrors.huaweicloud.com`.
+        As a temporary workaround on a trusted network, retry the vLLM Ascend installation command with `--trusted-host repo.huaweicloud.com`.
 
         This option tells pip to trust the host even when HTTPS validation fails, which weakens protection against man-in-the-middle attacks. Use it only when you trust the network and cannot fix the certificate configuration.
 
@@ -72,21 +72,24 @@ Choose one of the following methods to install `vllm` and `vllm-ascend`. PyTorch
 
     <!-- doctest: installation-uv-bootstrap -->
     ```bash
-    # install uv-wheelnext
+    # Install the WheelNext build of uv. This command patches the installer to skip its checksum verification, so run it only on a trusted network.
     curl -LsSf https://astral.sh/uv/install.sh | sed 's/verify_checksum "$_file"/true/' | INSTALLER_DOWNLOAD_URL=https://wheelnext.astral.sh sh
     source $HOME/.local/bin/env
     ```
 
     <!-- doctest: installation-uv-install -->
     ```bash
-    # Install vllm-project/vllm. The newest supported version is {{ vllm_version }}.
-    pip install "vllm=={{ release_vllm_version }}"
+    # Install vllm-project/vllm. The installed version is {{ release_vllm_version }}.
+    VLLM_TARGET_DEVICE=empty \
+    VLLM_VERSION_OVERRIDE={{ release_vllm_version }} \
+    pip install -v --no-binary vllm "vllm=={{ release_vllm_version }}" \
+        --extra-index-url https://download.pytorch.org/whl/cpu/
 
     # Install vllm-project/vllm-ascend from wheelnext index.
     uv pip install --system \
-        --extra-index-url https://mirrors.huaweicloud.com/ascend/repos/pypi/variant \
+        --extra-index-url https://repo.huaweicloud.com/ascend/repos/pypi/variant \
         --index-url https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple \
-        --find-links https://mirrors.huaweicloud.com/ascend/repos/pypi/triton-ascend/ \
+        --find-links https://repo.huaweicloud.com/ascend/repos/pypi/triton-ascend/ \
         "vllm-ascend=={{ release_vllm_ascend_version }}"
     ```
 
@@ -129,8 +132,8 @@ Choose one of the following methods to install `vllm` and `vllm-ascend`. PyTorch
     # git submodule update --init --recursive
     pip install -e . \
         --extra-index-url https://download.pytorch.org/whl/cpu/ \
-        --extra-index-url https://mirrors.huaweicloud.com/ascend/repos/pypi \
-        --extra-index-url https://mirrors.huaweicloud.com/ascend/repos/pypi/nightly
+        --extra-index-url https://repo.huaweicloud.com/ascend/repos/pypi \
+        --extra-index-url https://repo.huaweicloud.com/ascend/repos/pypi/nightly
     cd ..
     ```
 
@@ -150,8 +153,8 @@ Choose one of the following methods to install `vllm` and `vllm-ascend`. PyTorch
         # Rebuild custom kernels and reinstall vLLM Ascend.
         pip install -e . \
             --extra-index-url https://download.pytorch.org/whl/cpu/ \
-            --extra-index-url https://mirrors.huaweicloud.com/ascend/repos/pypi \
-            --extra-index-url https://mirrors.huaweicloud.com/ascend/repos/pypi/nightly
+            --extra-index-url https://repo.huaweicloud.com/ascend/repos/pypi \
+            --extra-index-url https://repo.huaweicloud.com/ascend/repos/pypi/nightly
         ```
 
         **Note:** If `VLLM_ASCEND_BUILD_CACHE_DIR` is set, the build cache
@@ -172,11 +175,11 @@ After completing any of the three installation methods, install the kernel packa
     pip uninstall -y triton triton-ascend
 
     pip install \
-        --extra-index-url https://mirrors.huaweicloud.com/ascend/repos/pypi \
+        --extra-index-url https://repo.huaweicloud.com/ascend/repos/pypi \
         "triton-ascend==={{ release_triton_ascend_version }}"
 
     pip install --no-deps \
-        --extra-index-url https://mirrors.huaweicloud.com/ascend/repos/pypi \
+        --extra-index-url https://repo.huaweicloud.com/ascend/repos/pypi \
         "flash-linear-attention-npu-a2=={{ release_fla_npu_version }}"
     ```
 
@@ -196,11 +199,11 @@ After completing any of the three installation methods, install the kernel packa
 
     When installing another version of `vllm-ascend`, check the repository's `requirements.txt` for the corresponding `triton-ascend` version.
 
-=== "Atlas 300I DUO / Atlas 200I Pro"
+=== "Atlas 300I Duo / Atlas 200I Pro"
 
     FLA NPU is not required for these devices.
 
-    Atlas 300I DUO and Atlas 200I Pro do not support `triton` or `triton-ascend`. If either package is already installed in the environment, uninstall it and do not reinstall `triton-ascend`:
+    Atlas 300I Duo and Atlas 200I Pro do not support `triton` or `triton-ascend`. If either package is already installed in the environment, uninstall it and do not reinstall `triton-ascend`:
 
     ```bash
     pip uninstall -y triton triton-ascend

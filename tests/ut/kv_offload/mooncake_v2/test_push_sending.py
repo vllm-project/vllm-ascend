@@ -167,6 +167,7 @@ def worker(monkeypatch, request):
         self.kv_transfer_config = SimpleNamespace(
             is_kv_producer=True, get_from_extra_config=lambda name, default: default
         )
+        self.vllm_config.kv_transfer_config = self.kv_transfer_config
         self.ascend_config = SimpleNamespace(kvpp_config=SimpleNamespace(size=1))
         self.kvpp_layer_owners = {}
         self.transfer_metadata = descriptor()
@@ -259,6 +260,21 @@ def test_proxy_destinations_and_two_chunks(worker, monkeypatch, dcp):
     worker.start_load_kv(terminal)
     results = worker.get_transfer_results()
     assert results.finished_sending == {"p-request"}
+
+
+def test_shared_layer_hook_does_not_schedule_a_transfer(worker, monkeypatch):
+    worker.vllm_config.compilation_config.static_forward_context["model.layers.4.attn"] = SimpleNamespace(
+        kv_sharing_target_layer_name="model.layers.0.attn"
+    )
+    worker.start_load_kv(source_meta())
+    record_event = Mock()
+    monkeypatch.setattr(push_worker.torch.npu, "Event", record_event)
+
+    worker.save_kv_layer("model.layers.4.attn")
+
+    assert not worker._reqs_send_state["d-request"].available_layers
+    record_event.assert_not_called()
+    worker.engine.batch_transfer_sync_write.assert_not_called()
 
 
 def test_partial_block_waits_for_later_chunk(worker):
@@ -593,7 +609,10 @@ def test_kvpp_push_writes_every_decode_replica_and_deduplicates_mtp(monkeypatch)
         self.dcp_size = config.parallel_config.decode_context_parallel_size
         self.dcp_rank = 0
         self.ascend_config = SimpleNamespace(kvpp_config=KVPPConfig.from_vllm_config(config))
-        self.kv_transfer_config = SimpleNamespace(is_kv_producer=engine_id == "p")
+        self.kv_transfer_config = SimpleNamespace(
+            is_kv_producer=engine_id == "p", get_from_extra_config=lambda name, default: default
+        )
+        self.vllm_config.kv_transfer_config = self.kv_transfer_config
         self.block_size, self.side_channel_host, self.handshake_port = 2, "127.0.0.1", 0
         self.te_rpc_port = 1
 

@@ -1,0 +1,281 @@
+# Source: https://github.com/vllm-project/vllm/blob/601066c91ca20f07975c344af5b4e63bf7e4b026/recipes/models/deepseek-ai/DeepSeek-V4-Pro.yaml
+# Extracted with vllm-project/recipes@cb7c0e949bcb2bf580fcbd0d1d4e2e69ebf502ee.
+
+meta:
+  hardware:
+    # verified: the four-node DP4/TP8 pool came up completely, /health returned
+    # 200, and both a single request and 8 concurrent requests returned 200.
+    ascend_910b: verified
+
+hardware_notes:
+  ascend_910b:
+    title: W4A8 multi-node co-located deployment on Atlas 800I A2 (910B4)
+    body: |
+      Four Atlas 800I A2 nodes, 8x Ascend 910B4 (64 GB) each, DP4 / TP8 / EP32.
+      Each node runs one local DP rank over all eight devices.
+
+      **Node 0 (DP master)** — serves the API:
+
+      - `--data-parallel-size 4 --data-parallel-size-local 1`
+      - No `--data-parallel-start-rank` (implicitly 0)
+      - **`--api-server-count 1`** — required. Without it vLLM defaults
+        `api_server_count` to `data_parallel_size` (4) and starts four API
+        servers on node 0 that try to bind four DP ranks; but ranks 1-3 live on
+        other hosts in headless mode, so `/health` and `/v1/models` still return
+        200 while **every real completion request hangs until timeout**, after
+        which the API server exits.
+
+      **Nodes 1-3 (DP workers)** — headless:
+
+      - `--data-parallel-start-rank <N>` with N = 1, 2, 3 respectively
+      - **`--headless`** — required by vLLM; otherwise node 0 aborts with
+        `RuntimeError: Remote engine N must use --headless unless in external or
+        hybrid dp lb mode`
+
+      **All nodes**
+
+      - add `--ipc=host`
+      - mount the weight directory read-only
+    link:
+      label: vLLM Ascend DeepSeek-V4-Pro tutorial
+      href: https://docs.vllm.ai/projects/ascend/en/latest/tutorials/models/DeepSeek-V4-Pro.html
+
+strategy_hardware:
+  single_node_tp:
+    npu: unsupported
+  single_node_tep:
+    npu: unsupported
+  single_node_dep:
+    npu: unsupported
+  single_node_dpa_tp:
+    npu: unsupported
+  multi_node_tp:
+    npu: unsupported
+  multi_node_tp_dp:
+    npu: unsupported
+  multi_node_tp_pp:
+    npu: unsupported
+  multi_node_tep:
+    npu: unsupported
+  pd_cluster:
+    npu: unsupported
+  # Validated topology is a co-located multi-node pool, not prefill/decode
+  # disaggregation: all four nodes form one DP group with one local DP rank
+  # each, so this declares the cross-node DEP combination.
+  multi_node_dep:
+    npu: unsupported
+    ascend_910b: supported
+
+variants:
+  # Variants inherited from the base recipe (default / fp8 / dspark) are also
+  # visible on Ascend and must pin an Ascend installation explicitly. Adding
+  # only ascend_w4a8 leaves them inheriting model.docker_image and the generic
+  # pip default, which the Ascend configuration check reports as ASC001
+  # (NVIDIA image) and ASC002 (generic pip fallback).
+  default:
+    hardware_overrides:
+      ascend_910b:
+        docker_image: quay.io/ascend/vllm-ascend:v0.32.0rc1
+        install:
+          pip: false
+  fp8:
+    hardware_overrides:
+      ascend_910b:
+        docker_image: quay.io/ascend/vllm-ascend:v0.32.0rc1
+        install:
+          pip: false
+  dspark:
+    hardware_overrides:
+      ascend_910b:
+        docker_image: quay.io/ascend/vllm-ascend:v0.32.0rc1
+        install:
+          pip: false
+  ascend_w4a8:
+    model_id: Eco-Tech/DeepSeek-V4-Pro-0813-w4a8
+    label: W4A8 (Ascend A2)
+    precision: int4
+    # Measured checkpoint footprint 811.48 GiB = 871 GB; the template asks for
+    # a 1.2x headroom, so 871 x 1.2 ~= 1045 GB. This is a capacity hint, not a
+    # hardware gate.
+    vram_minimum_gb: 1045
+    description: >-
+      ModelSlim INT4 W4A8 (4-bit weights, 8-bit activations) for a four-node
+      Atlas 800I A2 pool, 8x Ascend 910B4 (64 GB) each, running DP4 x TP8 with
+      expert parallelism (EP32). Model has 61 layers x 384 routed experts
+      (23,424 experts); routed-expert weights are sharded across all 32 devices
+      while attention/embed/mtp weights are replicated per DP rank and sharded
+      by TP. Requires --quantization ascend.
+    supported_hardware:
+      - ascend_910b
+    # supported_features is declared without spec_decoding on purpose: the
+    # base recipe gates spec_decoding.modes.mtp / dspark behind a variant
+    # allowlist (mtp: fp8/nvfp4/redhat_nvfp4, dspark: default/dspark) that an
+    # overlay may not modify. Declaring the list makes
+    # isFeatureAllowedForVariant return false for this variant, so the feature
+    # is not validated here and the flags travel in extra_args instead.
+    supported_features:
+      - tool_calling
+      - reasoning
+    # No `tp:` here. A multi_node_dep command gets its TP from the preset args;
+    # a variant-level tp map only feeds the single-node TP resolver. Keeping it
+    # would document a number the renderer ignores.
+    min_vllm_version: '0.32.0'
+    extra_args:
+      - '--quantization'
+      - ascend
+      # DSpark speculative decoding: the 0813 checkpoint ships its own draft
+      # layer and drafts 7 tokens. Carried in extra_args rather than
+      # features.spec_decoding because the base recipe's modes.mtp /
+      # modes.dspark allowlists name the checkpoints they accept and an overlay
+      # may not change them (OVERLAY_RULES only opens modes.*.hardware_overrides
+      # and modes.*.hardware). The tested command also passes enforce_eager.
+      - '--speculative-config'
+      - '{"num_speculative_tokens":7,"method":"dspark","enforce_eager":true}'
+      - '--trust-remote-code'
+      - '--block-size'
+      - '128'
+      - '--max-model-len'
+      - '135000'
+      - '--gpu-memory-utilization'
+      - '0.9'
+      - '--enable-expert-parallel'
+      - '--seed'
+      - '1024'
+      - '--host'
+      - 0.0.0.0
+      - '--served-model-name'
+      - dsv4
+      - '--tokenizer-mode'
+      - deepseek_v4
+      - '--reasoning-parser'
+      - deepseek_v4
+      - '--tool-call-parser'
+      - deepseek_v4
+      - '--enable-auto-tool-choice'
+      - '--attention_config.indexer_kv_dtype'
+      - int8
+      - '--model-loader-extra-config'
+      - '{"enable_multithread_load": true, "num_threads": 128}'
+    extra_env:
+      HCCL_BUFFSIZE: '512'
+      HCCL_OP_EXPANSION_MODE: AIV
+      HCCL_CONNECT_TIMEOUT: '7200'
+      ASCEND_CONNECT_TIMEOUT: '10000'
+      ASCEND_TRANSFER_TIMEOUT: '10000'
+      VLLM_ENGINE_READY_TIMEOUT_S: '3600'
+      ACL_OP_INIT_MODE: '1'
+      TASK_QUEUE_ENABLE: '1'
+      # Quoted on purpose: unquoted `expandable_segments: True` parses as a
+      # nested mapping, and even the space-free form relies on the parser
+      # treating the colon and True as plain text. The value is a string.
+      PYTORCH_NPU_ALLOC_CONF: 'expandable_segments:True'
+      # Pinned in the validated commands, matching the renderer's own
+      # guidance for any block-addressed cache: NONE_HASH reseeds per
+      # process and stored block filenames change on every restart.
+      PYTHONHASHSEED: '0'
+      OMP_PROC_BIND: 'false'
+      OMP_NUM_THREADS: '10'
+    hardware_overrides:
+      ascend_910b:
+        docker_image: quay.io/ascend/vllm-ascend:v0.32.0rc1
+        docker_shm_size: "512g"
+        docker_serve_command: "vllm serve"
+        install:
+          pip: false
+
+presets:
+  ascend_a2_w4a8_multinode_dep:
+    label: Ascend A2 W4A8 multi-node DP4/TP8 (4 nodes)
+    hardware: ascend_910b
+    strategy: multi_node_dep
+    variants: [ascend_w4a8]
+    default: false
+    select:
+      # Co-located multi-node pool, not PD disaggregation: the node count is
+      # set by select.nodes, and pd_router / pd_connector are omitted because
+      # they only apply to pd_cluster.
+      nodes: 4
+      frontend: python
+      kv_offload: false
+      features:
+        # spec_decoding is carried by the variant's extra_args; enabling the
+        # base feature as well would emit a second --speculative-config.
+        spec_decoding: false
+    source:
+      label: vLLM Ascend DeepSeek-V4-Pro tutorial
+      href: https://docs.vllm.ai/projects/ascend/en/latest/tutorials/models/DeepSeek-V4-Pro.html
+      key: dsv4pro-a2-w4a8-multinode-dep
+      revision: '2026-11-19'
+    runbook: |
+      ## Topology
+
+      Four Atlas 800I A2 nodes, eight Ascend 910B4 (64 GB) each, 32 devices in
+      total. Global parallelism is **DP4 / TP8**, and with
+      `--enable-expert-parallel` the expert-parallel size is **EP32**
+      (DP4 x TP8). Every node carries exactly one local DP rank spanning all
+      eight devices; node 0 is the DP master and the only API endpoint.
+
+      Expert weights (733 GiB, 90% of the checkpoint) are sharded across all 32
+      devices — about 22.9 GiB of routed-expert weights per device. Attention,
+      embedding, lm_head and the DSpark/MTP draft layers are replicated once per
+      DP rank and sharded by TP inside the rank. Measured per-device footprint:
+      **37.72 GiB weights + 12.88 GiB KV cache**, i.e. 90% of 64 GB as set by
+      `--gpu-memory-utilization 0.9`.
+
+      ## Environment
+
+      Set the node IP and NIC per host. All four nodes must use the **same**
+      `--data-parallel-address` (node 0's service IP). The DP RPC port defaults
+      to 12321 and must be reachable between nodes.
+
+      Start node 0 first so the DP coordinator is listening, then nodes 1-3.
+
+      ## Launch order and flags
+
+      1. Node 0: no `--headless`, no `--data-parallel-start-rank`, **plus
+         `--api-server-count 1`**.
+      2. Nodes 1-3: `--headless` and `--data-parallel-start-rank 1|2|3`.
+
+      Omitting `--api-server-count 1` on node 0 is the most damaging mistake:
+      health checks pass while inference hangs. Always verify with a real
+      completion request, not just `/health`.
+    # No roles: schema roles only carry prefill / decode (pd_cluster
+    # semantics), while these four nodes form one group with no P/D split.
+    # Per-node differences are described in hardware_notes. The args and env
+    # below are the ones every node carries, matching the tested commands.
+    args:
+      # Topology is stated explicitly rather than left to the renderer. The
+      # multi_node_dep strategy defaults local DP to the whole node (8), which
+      # rendered DP32 / local8 with no TP for this recipe; the validated
+      # commands run DP4 / local1 / TP8 with one DP rank per node.
+      #
+      # Both flags have to live here rather than in `tp:` fields: a preset-level
+      # `tp` is only valid for single_node_tp (recipe-presets.js rejects any
+      # other strategy), and `variants.<key>.tp` does not reach a multi_node
+      # command at all. Global DP follows from node count x local DP.
+      - '--data-parallel-size-local'
+      - '1'
+      - '--tensor-parallel-size'
+      - '8'
+      - '--max-num-batched-tokens'
+      - '4096'
+      - '--max-num-seqs'
+      - '16'
+      - '--no-enable-prefix-caching'
+      - '--compilation-config'
+      - '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
+      - '--additional-config'
+      - '{"ascend_compilation_config":{"enable_npugraph_ex":true,"enable_static_kernel":false},"enable_cpu_binding":true,"enable_shared_expert_dp":true,"enable_flashcomm1":true,"multistream_overlap_shared_expert":true}'
+    # The base recipe's base_args carry --kv-cache-dtype fp8 and the strategy
+    # adds --data-parallel-hybrid-lb; the validated W4A8 commands pass neither.
+    # Boolean flags like the hybrid-lb one can only be dropped, not negated by
+    # writing an opposite value.
+    remove_args:
+      - '--kv-cache-dtype'
+      - '--data-parallel-hybrid-lb'
+    env:
+      HCCL_IF_IP: $NODE_IP
+      VLLM_HOST_IP: $NODE_IP
+      HCCL_SOCKET_IFNAME: $IFACE_NAME
+      GLOO_SOCKET_IFNAME: $IFACE_NAME
+      TP_SOCKET_IFNAME: $IFACE_NAME

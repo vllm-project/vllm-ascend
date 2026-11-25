@@ -22,7 +22,6 @@ from vllm.v1.worker.gpu.sample.sampler import Sampler
 from vllm.v1.worker.gpu.spec_decode.rejection_sampler import RejectionSampler
 from vllm.v1.worker.gpu.structured_outputs import StructuredOutputsWorker
 
-from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2.model_runner import NPUModelRunner
 from vllm_ascend.worker.v2.spec_decode.lmhead_tp_utils import LmheadTPDraftSamplingMixin
 from vllm_ascend.worker.v2.spec_decode.target_dependent_ar.speculator import AscendTargetDependentARSpeculator
@@ -225,11 +224,6 @@ def test_dispatch_tail_canary_matches_upstream_sample(with_grammar, with_draft, 
     expected_calls = 2 if with_grammar else 1
     assert len(upstream_calls) == expected_calls
     assert override_calls == upstream_calls
-    if with_grammar and with_draft and vllm_version_is("0.33.0"):
-        # 0.33.0 exposes the permissive-row mask as the fourth sampler argument;
-        # main feeds it through the scheduler/draft-token handler instead.
-        invalid_drafts = runner.rejection_sampler.call_args.args[3]
-        assert invalid_drafts.tolist() == [False, False, True]
 
 
 @pytest.mark.parametrize(
@@ -386,14 +380,14 @@ def test_sample_draft_alignment_and_guards(max_num_reqs, num_rows, lmhead_enable
         ("greedy", False, False, False, None),  # default stays supported
         ("greedy", True, False, False, "sample_draft"),  # DFlash2/LiLiCorr opt-out
         ("greedy", False, True, False, "use_local_argmax_reduction"),
-        ("greedy", False, False, True, "enable_adaptive_verification"),
+        ("greedy", False, False, True, None),
     ],
 )
 def test_speculator_init_validates(draft_method, bypass, argmax, adaptive, match):
     """Unsupported combinations must fail at construction, not at the first
-    sampling step in a running engine. Probabilistic sampling is now
-    supported; bypassing paths, local argmax and adaptive verification retain
-    their independent restrictions."""
+    sampling step in a running engine. Probabilistic sampling and adaptive
+    verification are supported; bypassing paths and local argmax retain their
+    independent restrictions."""
     spec = _make_speculator()
     spec.speculative_config = SimpleNamespace(draft_sample_method=draft_method)
     spec._lmhead_tp_sample_draft_supported = not bypass
@@ -408,13 +402,15 @@ def test_speculator_init_validates(draft_method, bypass, argmax, adaptive, match
 
 
 def test_production_speculators_carry_lmhead_sampling_mixin():
-    """Every family must keep the mixin (a re-parent silently drops the row
-    alignment and hangs the collectives); bypassing families must keep their
-    opt-out flag (upstream keeps adding them: DSpark, DFlash2)."""
+    """Keep row-alignment support on each family and LiLiCorr opted out.
+
+    DFlash2 aligns candidates itself; LiLiCorr still bypasses that path.
+    """
     from vllm_ascend.worker.v2.spec_decode.dflash.speculator import AscendDFlashSpeculator
     from vllm_ascend.worker.v2.spec_decode.dflash2.speculator import AscendDFlash2Speculator
     from vllm_ascend.worker.v2.spec_decode.dspark.speculator import AscendDSparkSpeculator
     from vllm_ascend.worker.v2.spec_decode.eagle.speculator import AscendEagleSpeculator
+    from vllm_ascend.worker.v2.spec_decode.lilicorr.speculator import AscendLiLiCorrSpeculator
     from vllm_ascend.worker.v2.spec_decode.mtp.speculator import AscendMTPSpeculator
 
     for cls in (
@@ -423,7 +419,9 @@ def test_production_speculators_carry_lmhead_sampling_mixin():
         AscendDFlashSpeculator,
         AscendDSparkSpeculator,
         AscendDFlash2Speculator,
+        AscendLiLiCorrSpeculator,
     ):
         assert issubclass(cls, LmheadTPDraftSamplingMixin)
     assert AscendDSparkSpeculator._lmhead_tp_sample_draft_supported is True
-    assert AscendDFlash2Speculator._lmhead_tp_sample_draft_supported is False
+    assert AscendDFlash2Speculator._lmhead_tp_sample_draft_supported is True
+    assert AscendLiLiCorrSpeculator._lmhead_tp_sample_draft_supported is False

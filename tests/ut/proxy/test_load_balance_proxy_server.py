@@ -568,3 +568,93 @@ def test_usage_cached_tokens(proxy_server):
     assert st == 200
     # The proxy should have added cached_tokens to the usage chunk
     assert b"cached_tokens" in body
+
+
+def test_stream_frame_split_across_chunks(proxy_server):
+    """A SSE frame split across two network chunks is still parsed.
+
+    The decode backend's JSON can be split across TCP segments. Parsing each
+    network chunk on its own drops the frame, so the proxy misses the
+    stop_reason it needs to drive its retry logic.
+    """
+    frame = _sse("split-token")
+    cut = len(frame) // 2
+    _set_script(
+        MOCK_DECODE_PORT,
+        [{"kind": "stream", "status": 200, "chunks": [frame[:cut], frame[cut:], DONE]}],
+    )
+    st, body = _post(proxy_server, _chat_req(stream=True), stream=True)
+    assert st == 200
+    assert b"split-token" in body
+
+
+def test_stream_frames_coalesced_in_one_chunk(proxy_server):
+    """Two SSE frames delivered in one network chunk are both parsed.
+
+    The network can coalesce a frame and the [DONE] sentinel into a single
+    read. Parsing the whole chunk at once fails, so the proxy loses the frame
+    it needs to drive its retry logic.
+    """
+    frame = _sse("coalesced", stop_reason="recomputed")
+    _set_script(
+        MOCK_DECODE_PORT,
+        [
+            {"kind": "stream", "status": 200, "chunks": [frame + DONE]},
+            {"kind": "stream", "status": 200, "chunks": [_sse("done"), DONE]},
+        ],
+    )
+    st, body = _post(proxy_server, _chat_req(stream=True), stream=True)
+    assert st == 200
+    # The recompute signal survived the coalesced read, so the proxy retried.
+    assert b"done" in body
+    assert b"recomputed" not in body
+
+
+def test_nonstream_frames_coalesced_in_one_chunk(proxy_server):
+    """A non-streaming reply coalesced with [DONE] still returns the content."""
+    _set_script(
+        MOCK_DECODE_PORT,
+        [{"kind": "stream", "status": 200, "chunks": [_sse("coalesced-json") + DONE]}],
+    )
+    st, body = _post(proxy_server, _chat_req(stream=False))
+    assert st == 200
+    assert b"coalesced-json" in body
+
+
+def test_stream_byte_at_a_time(proxy_server):
+    """A SSE frame delivered one byte per chunk is reassembled correctly."""
+    frame = _sse("dripped")
+    _set_script(
+        MOCK_DECODE_PORT,
+        [{"kind": "stream", "status": 200, "chunks": [bytes([b]) for b in frame] + [DONE]}],
+    )
+    st, body = _post(proxy_server, _chat_req(stream=True), stream=True)
+    assert st == 200
+    assert b"dripped" in body
+
+
+def test_recompute_detected_when_frame_split_across_chunks(proxy_server):
+    """A split frame still triggers the recompute retry.
+
+    The recompute signal travels in the frame's stop_reason. When the frame is
+    split across network chunks, a per-chunk parse misses it, so the proxy
+    never retries and the client receives the aborted generation.
+    """
+    frame = _sse("gen", stop_reason="recomputed")
+    cut = len(frame) // 2
+    _set_script(
+        MOCK_DECODE_PORT,
+        [
+            {
+                "kind": "stream",
+                "status": 200,
+                "chunks": [frame[:cut], frame[cut:]],
+            },
+            {"kind": "stream", "status": 200, "chunks": [_sse("done"), DONE]},
+        ],
+    )
+    st, body = _post(proxy_server, _chat_req(stream=True), stream=True)
+    assert st == 200
+    # The retry happened, so the retried content is what the client sees.
+    assert b"done" in body
+    assert b"recomputed" not in body

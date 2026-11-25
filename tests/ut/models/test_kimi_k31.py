@@ -9,15 +9,17 @@ from torch import nn
 from transformers import LlamaConfig
 from vllm.config import ModelConfig, VllmConfig, get_current_vllm_config, set_current_vllm_config
 from vllm.model_executor.model_loader import utils as loader_utils
+from vllm.model_executor.models.config import MODELS_CONFIG_MAP, VerifyAndUpdateConfig
 from vllm.model_executor.models.utils import init_vllm_registered_model
 from vllm.transformers_utils.configs.kimi_linear import KimiLinearConfig
+from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 from vllm_ascend.attention.indexer import AscendSFAIndexerBackend
 from vllm_ascend.attention.sfa_v1 import AscendSFAImpl, PreprocessType
 from vllm_ascend.models import register_model
 from vllm_ascend.models.kimi_k3.kimi_k3 import AscendKimiMLAAttention
 from vllm_ascend.ops import rotary_embedding
-from vllm_ascend.patch.platform.patch_kimi_k31_config import KimiK31Config, KimiK31TextConfig
+from vllm_ascend.patch.platform.patch_kimi_k31_config import AscendKimiModelConfig, KimiK31Config, KimiK31TextConfig
 from vllm_ascend.quantization.methods import AscendW8A8MXFP8DynamicLinearMethod
 
 
@@ -54,6 +56,46 @@ def test_nested_dsa_config_roundtrip_and_layer_numbering():
     assert restored.text_config.is_dsa_layer(4)
 
 
+@pytest.mark.parametrize("method", ["dspark", "eagle3", "mtp"])
+@pytest.mark.parametrize(
+    "target_dtype,draft_dtype,backend",
+    [
+        ("auto", None, None),
+        ("bfloat16", "auto", AttentionBackendEnum.CUSTOM),
+        ("fp8", "fp8", AttentionBackendEnum.CUSTOM),
+    ],
+)
+def test_kimi_dsa_config_preserves_ascend_cache_and_draft_selection(method, target_dtype, draft_dtype, backend):
+    spec = SimpleNamespace(
+        method=method,
+        attention_backend=backend,
+        kv_cache_dtype=draft_dtype,
+        draft_model_config=SimpleNamespace(hf_text_config=SimpleNamespace(kv_lora_rank=512)),
+    )
+    config = SimpleNamespace(
+        model_config=SimpleNamespace(hf_config=KimiK31Config(text_config=text_config())),
+        cache_config=SimpleNamespace(cache_dtype=target_dtype),
+        attention_config=SimpleNamespace(backend=backend),
+        speculative_config=spec,
+    )
+    verifier = MODELS_CONFIG_MAP.get("KimiK31ForConditionalGeneration", VerifyAndUpdateConfig)
+    verifier.verify_and_update_config(config)
+    assert config.cache_config.cache_dtype == target_dtype
+    assert config.attention_config.backend is backend
+    assert spec.kv_cache_dtype == draft_dtype
+    assert spec.attention_backend is backend
+
+
+def test_kimi_dsa_config_retains_native_model_quantization_resolution():
+    configs = [
+        SimpleNamespace(quantization_config={"quant_method": "compressed-tensors", "format": "mxfp4-pack-quantized"})
+        for _ in range(3)
+    ]
+    model = SimpleNamespace(hf_config=configs[0], hf_text_config=configs[1], model_arch_config=configs[2])
+    AscendKimiModelConfig.verify_and_update_model_config(model)
+    assert all(config.quantization_config["quant_method"] == "mxfp4" for config in configs)
+
+
 @pytest.mark.parametrize("inner_kind", ["k31_nope", "k31_rope", "kimi_linear", "llama"])
 def test_sfa_k31_identity_in_registered_inner_model_context(tmp_path, monkeypatch, inner_kind):
     # Exercise the real multimodal -> text handoff. Only the allocated model
@@ -83,7 +125,6 @@ def test_sfa_k31_identity_in_registered_inner_model_context(tmp_path, monkeypatc
     )
     monkeypatch.setattr("vllm_ascend.attention.sfa_v1.get_ascend_config", lambda: ascend_config)
     monkeypatch.setattr("vllm_ascend.attention.sfa_v1.get_tensor_model_parallel_world_size", lambda: 8)
-    monkeypatch.setattr("vllm_ascend.attention.sfa_v1.is_pcp_decode_sharding_enabled", lambda _: False)
     monkeypatch.setattr("vllm_ascend.attention.sfa_v1.is_rl_weight_update_enabled", lambda _: False)
     monkeypatch.setattr("vllm_ascend.attention.sfa_v1.enable_sp", lambda: False)
 

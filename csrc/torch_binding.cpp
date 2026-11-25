@@ -49,13 +49,14 @@
 #include "attention/fused_lightning_indexer_manage/fused_lightning_indexer_manage_torch_adpt.h"
 #include "attention/fused_scatter_copy_sparse_flash_attention/fused_scatter_copy_sparse_flash_attention_torch_adpt.h"
 #include "attention/fused_quant_lightning_indexer_manage/fused_quant_lightning_indexer_manage_torch_adpt.h"
+#include "attention/indexer_region_score/indexer_region_score_torch_adpt.h"
 #include "moe/causal_conv1d_v310/causal_conv1d_310_torch_adpt.h"
 #include "attention/attn_res_fwd/attn_res_fwd_torch_adpt.h"
 #include "attention/kda_gate_cumsum_vllm/kda_gate_cumsum_vllm_torch_adpt.h"
 #include "attention/kda_layout_swap12/kda_layout_swap12_torch_adpt.h"
 #include "attention/recurrent_gated_delta_rule_v310/recurrent_gated_delta_rule_310_torch_adpt.h"
 #include "attention/k2q_csr/k2q_csr_torch_adpt.h"
-#include "attention/hi_sparse_resolve_residency/hi_sparse_resolve_residency_torch_adpt.h"
+#include "attention/hisparse_resolve_residency/hisparse_resolve_residency_torch_adpt.h"
 #include "moe/dequant_situ_quant/dequant_situ_quant_torch_adpt.h"
 #include "moe/situ_mx_quant/situ_mx_quant_torch_adpt.h"
 #include "moe/grouped_matmul_situ_quant/grouped_matmul_situ_quant_torch_adpt.h"
@@ -941,7 +942,8 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> moe_gating_top_k_hash(
     bool out_flag,
     const c10::optional<at::Tensor>& bias_vl_opt,
     int64_t image_sentinel_lo,
-    int64_t image_sentinel_count)
+    int64_t image_sentinel_count,
+    const c10::optional<at::Tensor>& expert_replica_routing_table_opt)
 {
 
     TORCH_CHECK(x.dim() == 2, "x must be 2D, but got dim=", x.dim());
@@ -959,6 +961,17 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> moe_gating_top_k_hash(
                 "renorm can only be 0 currently, but got ", renorm);
     TORCH_CHECK(norm_type == 0 || norm_type == 1 || norm_type ==2,
                 "norm_type must be 0 (softmax) or 1 (sigmoid) or 2 (softplus), but got ", norm_type);
+
+    if (expert_replica_routing_table_opt.has_value() && expert_replica_routing_table_opt->defined()) {
+        const auto& table = *expert_replica_routing_table_opt;
+        TORCH_CHECK(group_count == 1 && norm_type == 2,
+                    "Fused EPLB mapping requires ungrouped sqrtsoftplus routing");
+        TORCH_CHECK(table.dim() == 2 && table.size(0) > 0 && table.size(1) == x.size(1),
+                    "EPLB table must have shape [period, logical_experts]");
+        TORCH_CHECK(table.scalar_type() == at::kInt && table.is_contiguous(),
+                    "EPLB table must be contiguous int32");
+        TORCH_CHECK(table.device() == x.device(), "EPLB table must be on the logits device");
+    }
 
     TORCH_CHECK(eps > 0.0, "eps must be > 0, but got ", eps);
     TORCH_CHECK(routed_scaling_factor > 0.0,
@@ -1023,12 +1036,16 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> moe_gating_top_k_hash(
     at::Tensor expert_idx = at::empty({rows, k}, x.options().dtype(at::kInt));
     at::Tensor out = at::empty({rows, expert_num}, x.options().dtype(at::kFloat));
 
+    const at::Tensor& routing_table = c10::value_or_else(
+        expert_replica_routing_table_opt, [] { return at::Tensor(); });
+
     EXEC_NPU_CMD(aclnnMoeGatingTopKHash,
                  x,
                  bias,
                  input_ids,
                  tid2eid,
                  bias_vl,
+                 routing_table,
                  k,
                  k_group,
                  group_count,
@@ -1349,7 +1366,7 @@ std::tuple<at::Tensor, at::Tensor> npu_quant_lightning_indexer_v2_compat_npu(
         c10::nullopt, cu_seqlens_q, cu_seqlens_k, seqused_q, seqused_k, cmp_residual_k,
         block_table, output_idx_offset, metadata, max_seqlen_q, layout_q, layout_k,
         mask_mode, cmp_ratio, 3, 2048, 8, enable_dcp, cp_world, cp_rank, cp_interleave,
-        causal_seqlens_kv_global, return_value);
+        causal_seqlens_kv_global, c10::nullopt, return_value);
     return {std::get<0>(outputs), std::get<1>(outputs)};
 }
 
@@ -1473,6 +1490,45 @@ at::Tensor npu_sparse_attn_sharedkv_metadata_npu(
     return output;
 }
 
+// QSLI metadata uses candidate-tile units; ordinary QLI metadata is not interchangeable.
+at::Tensor npu_quant_sparse_lightning_indexer_metadata_npu(
+    int64_t num_heads_q, int64_t num_heads_k, int64_t head_dim, int64_t topk, int64_t quant_mode,
+    const at::Tensor &candidate_block_length,
+    const c10::optional<at::Tensor> &cu_seqlens_q, const c10::optional<at::Tensor> &cu_seqlens_k,
+    const c10::optional<at::Tensor> &seqused_q, const c10::optional<at::Tensor> &seqused_k,
+    const c10::optional<at::Tensor> &cmp_residual_k, int64_t batch_size,
+    int64_t max_seqlen_q, int64_t max_seqlen_k,
+    const c10::string_view layout_q, const c10::string_view layout_k, int64_t mask_mode, int64_t cmp_ratio)
+{
+    TORCH_CHECK(candidate_block_length.scalar_type() == at::kInt,
+                "QSLI candidate_block_length must be int32");
+    TORCH_CHECK(candidate_block_length.dim() == 2 && candidate_block_length.size(1) == 1,
+                "QSLI candidate_block_length must have shape [T, 1]");
+    TORCH_CHECK(candidate_block_length.is_contiguous(), "QSLI candidate lengths must be contiguous");
+    at::Tensor output = torch::empty({1024}, candidate_block_length.options().dtype(torch::kInt32));
+    const auto output_device = candidate_block_length.device();
+    TORCH_CHECK(output_device.type() == c10::DeviceType::PrivateUse1, "QSLI lengths must be on NPU");
+    for (const auto* tensor : {&cu_seqlens_q, &cu_seqlens_k, &seqused_q, &seqused_k, &cmp_residual_k}) {
+        TORCH_CHECK(!tensor->has_value() || tensor->value().device() == output_device,
+                    "QSLI metadata inputs must be on the same device");
+    }
+    const c10::OptionalDeviceGuard device_guard(output_device);
+    auto cu_seqlens_q_val = get_valid_tensor(cu_seqlens_q, output_device);
+    auto cu_seqlens_k_val = get_valid_tensor(cu_seqlens_k, output_device);
+    auto seqused_q_val = get_valid_tensor(seqused_q, output_device);
+    auto seqused_k_val = get_valid_tensor(seqused_k, output_device);
+    auto cmp_residual_k_val = get_valid_tensor(cmp_residual_k, output_device);
+    std::string layout_q_str(layout_q);
+    std::string layout_k_str(layout_k);
+    char *layout_q_ptr = const_cast<char *>(layout_q_str.c_str());
+    char *layout_k_ptr = const_cast<char *>(layout_k_str.c_str());
+    EXEC_NPU_CMD(aclnnVllmAscendQuantSparseLightningIndexerMetadata,
+                 cu_seqlens_q_val, cu_seqlens_k_val, seqused_q_val, seqused_k_val,
+                 cmp_residual_k_val, candidate_block_length, num_heads_q, num_heads_k, head_dim, topk, quant_mode,
+                 batch_size, max_seqlen_q, max_seqlen_k, layout_q_ptr, layout_k_ptr, mask_mode, cmp_ratio, output);
+    return output;
+}
+
 at::Tensor npu_quant_lightning_indexer_v2_metadata_npu(
     int64_t num_heads_q, int64_t num_heads_k, int64_t head_dim, int64_t topk, int64_t quant_mode,
     const c10::optional<at::Tensor> &cu_seqlens_q, const c10::optional<at::Tensor> &cu_seqlens_k,
@@ -1505,6 +1561,7 @@ at::Tensor npu_quant_lightning_indexer_v2_metadata_npu(
     auto seqused_q_val = get_valid_tensor(seqused_q, output_device);
     auto seqused_k_val = get_valid_tensor(seqused_k, output_device);
     auto cmp_residual_k_val = get_valid_tensor(cmp_residual_k, output_device);
+    auto candidate_block_length_val = get_valid_tensor(c10::nullopt, output_device);
     auto causal_seqlens_kv_global_val = get_valid_tensor(causal_seqlens_kv_global, output_device);
 
     std::string layout_q_str = std::string(layout_q);
@@ -1514,7 +1571,8 @@ at::Tensor npu_quant_lightning_indexer_v2_metadata_npu(
 
     EXEC_NPU_CMD(aclnnVllmAscendQuantLightningIndexerV2Metadata,
                  cu_seqlens_q_val, cu_seqlens_k_val, seqused_q_val, seqused_k_val, cmp_residual_k_val,
-                 causal_seqlens_kv_global_val, num_heads_q, num_heads_k, head_dim, topk, quant_mode, batch_size,
+                 candidate_block_length_val, causal_seqlens_kv_global_val, num_heads_q, num_heads_k, head_dim, topk,
+                 quant_mode, batch_size,
                  max_seqlen_q, max_seqlen_k, layout_q_ptr, layout_k_ptr, mask_mode, cmp_ratio, enable_dcp, cp_world,
                  cp_rank, cp_kv_cache_interleave_size, output);
 
@@ -3152,6 +3210,16 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
              &vllm_ascend::npu_generic_block_sparse_attention);
 
     ops.def(
+        "npu_quant_sparse_lightning_indexer_metadata(int num_heads_q, int num_heads_k, int head_dim, int topk, "
+        "int quant_mode, *, Tensor candidate_block_length, Tensor? cu_seqlens_q=None, Tensor? cu_seqlens_k=None, "
+        "Tensor? seqused_q=None, Tensor? seqused_k=None, Tensor? cmp_residual_k=None, int batch_size=0, "
+        "int max_seqlen_q=0, int max_seqlen_k=0, str layout_q='TND', str layout_k='PA_BBND', "
+        "int mask_mode=3, int cmp_ratio=1) -> Tensor"
+    );
+    ops.impl("npu_quant_sparse_lightning_indexer_metadata", torch::kPrivateUse1,
+             &vllm_ascend::npu_quant_sparse_lightning_indexer_metadata_npu);
+
+    ops.def(
         "npu_quant_lightning_indexer_v2_metadata(int num_heads_q, int num_heads_k, int head_dim, int topk, "
         "int quant_mode, *, Tensor? cu_seqlens_q=None, Tensor? cu_seqlens_k=None, Tensor? seqused_q=None, "
         "Tensor? seqused_k=None, Tensor? cmp_residual_k=None, Tensor? causal_seqlens_kv_global=None, "
@@ -3180,8 +3248,9 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
         "int max_seqlen_q=-1, str layout_q='TND', str layout_k='PA_BBND', int mask_mode=3, "
         "int cmp_ratio=1, int candidate_mode=3, int candidate_topk_blocks=2048, "
         "int candidate_block_size=8, bool enable_dcp=False, int cp_world=1, int cp_rank=0, "
-        "int cp_kv_cache_interleave_size=1, Tensor? causal_seqlens_kv_global=None, int return_value=0)"
-        " -> (Tensor, Tensor, Tensor)"
+        "int cp_kv_cache_interleave_size=1, Tensor? causal_seqlens_kv_global=None, "
+        "Tensor? candidate_block_length=None, int return_value=0)"
+        " -> (Tensor, Tensor, Tensor, Tensor)"
     );
     ops.impl("npu_quant_lightning_indexer_v3", torch::kPrivateUse1,
              &vllm_ascend::qli_v2::QuantLightningIndexerCandidate);
@@ -3305,7 +3374,8 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
         "bool out_flag=False, "
         "Tensor? bias_vl=None, "
         "int image_sentinel_lo=129257, "
-        "int image_sentinel_count=5"
+        "int image_sentinel_count=5, "
+        "Tensor? expert_replica_routing_table=None"
         ") -> (Tensor y, Tensor expert_idx, Tensor out)"
         );
     ops.impl("moe_gating_top_k_hash", torch::kPrivateUse1,&vllm_ascend::moe_gating_top_k_hash);
@@ -3652,5 +3722,14 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
     );
     ops.impl("npu_fused_sparse_attention_overlap", torch::kPrivateUse1,
              &vllm_ascend::npu_fused_sparse_attention_overlap);
+
+    // Write logical region IDs into the caller-owned buffer without a dense score output.
+    ops.def(
+        "npu_indexer_region_score.ids_out(Tensor query, Tensor weights, Tensor key_summary, "
+        "Tensor actual_kv_lengths, Tensor block_table, Tensor cu_seq_lens, "
+        "int max_region_len, int top_k=512, int region_size=8, float head_scale=1.0, "
+        "int cache_mode=1, int mask_mode=3, int sort_mode=1, *, Tensor(a!) selected_region_ids) -> ()"
+    );
+    ops.impl("npu_indexer_region_score.ids_out", torch::kPrivateUse1, &vllm_ascend::npu_indexer_region_score_ids_out);
 }
 #endif

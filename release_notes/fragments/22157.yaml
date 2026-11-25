@@ -1,0 +1,7 @@
+pr: 22157
+entries:
+  - category: feature
+    text: >-
+      MooncakeConnectorV2 now supports models whose attention layers share another
+      layer's KV cache. Shared-cache layers reuse the owner's transferred data;
+      combining KV sharing with KV parallelism remains unsupported.

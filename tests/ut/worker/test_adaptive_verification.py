@@ -1,6 +1,6 @@
-import importlib
 from contextlib import nullcontext
 from functools import partial
+from inspect import signature
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
@@ -15,8 +15,8 @@ from vllm.v1.worker.gpu.model_runner import GPUModelRunner
 from vllm.v1.worker.gpu.spec_decode import acceptance_estimator as estimator_module
 from vllm.v1.worker.gpu.spec_decode import adaptive_verification as adaptive
 from vllm.v1.worker.gpu.spec_decode import speculator as upstream_speculator
+from vllm.v1.worker.gpu.spec_decode.dflash import speculator as upstream_dflash
 
-import vllm_ascend.worker.v2.spec_decode.dflash.speculator as dflash_module
 import vllm_ascend.worker.v2.spec_decode.dspark.speculator as dspark_module
 from vllm_ascend.ascend_forward_context import get_mrv2_in_profile_run
 from vllm_ascend.attention.dsa_v1 import AscendDSABackend, AscendDSAMetadataBuilder
@@ -25,6 +25,7 @@ from vllm_ascend.attention.sfa_v1 import AscendSFABackend, AscendSFAMetadataBuil
 from vllm_ascend.patch.worker import patch_model_runner
 from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2.model_runner import NPUModelRunner
+from vllm_ascend.worker.v2.spec_decode.dflash import speculator as dflash_module
 from vllm_ascend.worker.v2.spec_decode.dflash2.speculator import AscendDFlash2Speculator
 from vllm_ascend.worker.v2.spec_decode.dspark.speculator import AscendDSparkSpeculator
 from vllm_ascend.worker.v2.spec_decode.mtp.speculator import AscendMTPSpeculator
@@ -57,6 +58,7 @@ def test_adaptive_verification_backend_capabilities(
             enable_adaptive_verification=adaptive,
             num_speculative_tokens=num_speculative_tokens,
             parallel_drafting=method in ("dflash2", "dspark"),
+            max_num_new_slots_for_drafting=0,
         )
     )
     config = SimpleNamespace(speculative_config=speculative_config, use_v2_model_runner=True)
@@ -98,18 +100,6 @@ def test_adaptive_tail_dummy_run_balances_moe_routing(adaptive_verification, con
     assert get_mrv2_in_profile_run() is False
 
 
-def test_adaptive_verification_patch_uses_uncompiled_budget_assignment(monkeypatch):
-    import vllm.v1.worker.gpu.spec_decode.adaptive_verification as adaptive
-
-    allocator = Mock()
-    monkeypatch.setattr(adaptive, "_assign_draft_token_budget", allocator, raising=False)
-    monkeypatch.setattr(adaptive, "_assign_draft_token_budget_compiled", object(), raising=False)
-    module = importlib.import_module("vllm_ascend.patch.worker.patch_adaptive_verification")
-    importlib.reload(module)
-
-    assert adaptive._assign_draft_token_budget_compiled is allocator
-
-
 @pytest.mark.parametrize(
     "local_reqs,dp_reqs,target_capacity,expected_reqs",
     [(1, 3, 16, 1), (0, 3, 16, 3), (0, 1, 8, 1)],
@@ -125,6 +115,8 @@ def test_adaptive_draft_uses_its_own_request_count(monkeypatch, local_reqs, dp_r
         seq_lens_cpu_upper_bound=torch.ones(batch_reqs, dtype=torch.int32),
     )
     spec = AscendDSparkSpeculator.__new__(AscendDSparkSpeculator)
+    spec.context_kv_only = False
+    spec.attn_groups = [[SimpleNamespace(kernel_block_stride=0, kernel_block_size=32)]]
     spec.pcp_manager = None
     spec.use_dcp = False
     spec.enable_adaptive_verification = True
@@ -147,10 +139,14 @@ def test_adaptive_draft_uses_its_own_request_count(monkeypatch, local_reqs, dp_r
     monkeypatch.setattr(AscendDSparkSpeculator, "attn_vllm_config", property(lambda self: self.vllm_config))
     monkeypatch.setattr(dspark_module, "build_attn_metadata_wrapper", nullcontext)
     monkeypatch.setattr(dspark_module, "build_attn_metadata_factory", lambda *args, **kwargs: nullcontext())
-    kernel = Mock()
-    monkeypatch.setattr(dflash_module, "prepare_dflash_inputs_triton", kernel)
-    upstream = dspark_module.dflash_speculator
-    monkeypatch.setattr(upstream, "prepare_dflash_inputs", dflash_module.prepare_dflash_inputs_factory(32))
+    # Inspect final launcher arguments after the main-only block_stride adapter.
+    prepare_inputs_signature = signature(dflash_module.prepare_dflash_inputs_triton)
+    prepare_inputs = Mock()
+    monkeypatch.setattr(dflash_module, "prepare_dflash_inputs_triton", prepare_inputs)
+    prepare_entry = (
+        prepare_inputs if vllm_version_is("0.34.0") else dflash_module._prepare_dflash_inputs_with_block_stride
+    )
+    monkeypatch.setattr(upstream_dflash, "prepare_dflash_inputs", prepare_entry)
 
     class InputsPrepared(Exception):
         pass
@@ -158,14 +154,13 @@ def test_adaptive_draft_uses_its_own_request_count(monkeypatch, local_reqs, dp_r
     # Stop after real propose() prepares inputs and constructs the draft DP
     # agreement, before dispatch can enter graph/device/collective execution.
     dispatch = Mock(side_effect=InputsPrepared)
-    monkeypatch.setattr(upstream, "dispatch_cg_and_sync_dp", dispatch)
-    sync_kwargs = {} if vllm_version_is("0.33.0") else {"max_query_len": None}
+    monkeypatch.setattr(upstream_dflash, "dispatch_cg_and_sync_dp", dispatch)
     target_sync = DPSyncState(
         num_tokens_across_dp=torch.full((3,), target_capacity),
         uniform_token_count=None,
         eager=False,
         num_reqs=dp_reqs,
-        **sync_kwargs,
+        max_query_len=None,
     )
     with pytest.raises(InputsPrepared):
         spec.propose(
@@ -179,9 +174,11 @@ def test_adaptive_draft_uses_its_own_request_count(monkeypatch, local_reqs, dp_r
             dummy_run=dummy,
         )
 
-    kernel.assert_called_once()
-    assert kernel.call_args.kwargs["num_reqs_override"] == expected_reqs
-    assert kernel.call_args.args[22] == 5  # Query tokens per draft request.
+    prepare_inputs.assert_called_once()
+    args = prepare_inputs_signature.bind(*prepare_inputs.call_args.args, **prepare_inputs.call_args.kwargs).arguments
+    assert args["block_size"] == 32
+    assert args["num_query_per_req"] == 5
+    assert args["num_reqs_override"] == expected_reqs
     assert dispatch.call_args.args[1:3] == (expected_reqs, dp_reqs * 5)
     draft_sync = dispatch.call_args.kwargs["dp_sync_state"]
     assert draft_sync is not None
@@ -220,7 +217,9 @@ def _adaptive_manager_kwargs(groups, enabled=True, steps=3):
     )
     config = SimpleNamespace(
         use_v2_model_runner=True,
-        speculative_config=SimpleNamespace(num_speculative_tokens=3, parallel_drafting=False),
+        speculative_config=SimpleNamespace(
+            method="mtp", num_speculative_tokens=3, parallel_drafting=False, max_num_new_slots_for_drafting=0
+        ),
     )
     return dict(
         enable_adaptive_verification=enabled,
@@ -299,6 +298,7 @@ def test_adaptive_verification_manager_initialization(cpu_manager_resources, mon
         max_num_tokens=16,
         dcp_size=1,
         dcp_rank=0,
+        batch_sharder=None,
     )
     upstream = patch_model_runner.upstream
     monkeypatch.setattr(
@@ -321,6 +321,7 @@ def test_adaptive_verification_manager_initialization(cpu_manager_resources, mon
         patch_model_runner.initialize_kv_cache(runner, cache_config)
     manager_call.assert_called_once()
     assert manager_call.call_args.kwargs["enable_adaptive_verification"] is enabled
+    assert manager_call.call_args.kwargs["copy_admitted_drafts_to_host"] is False
     assert manager_call.call_args.kwargs["target_layer_names"] == {"target"}
     assert (runner.adaptive_verification is not None) is enabled
     if enabled:
@@ -342,6 +343,7 @@ def test_adaptive_verification_estimator_lifecycle(monkeypatch, speculator_cls, 
             enable_adaptive_verification=enabled,
             num_speculative_tokens=3,
             draft_model_config=draft_config,
+            draft_decode_context_parallel_size=1,
             use_local_argmax_reduction=False,
             draft_sample_method="greedy",
         ),

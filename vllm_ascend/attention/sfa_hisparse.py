@@ -9,6 +9,7 @@ from typing import cast
 import torch
 from torch.overrides import TorchFunctionMode
 from vllm.config.compilation import CUDAGraphMode
+from vllm.distributed import get_pcp_group
 from vllm.forward_context import get_forward_context
 from vllm.logger import logger
 from vllm.v1.attention.backends.mla.index_group import HiSparseMLAIndexGroup, SparseMLAIndexGroupBuilder
@@ -17,7 +18,18 @@ from vllm.v1.hisparse.runtime import HiSparsePrefillStagingPlan
 from vllm.v1.hisparse.runtime import build_hisparse_prefill_staging_plan as build_core_prefill_plan
 from vllm.v1.worker.workspace import current_workspace_manager
 
-from vllm_ascend.attention.sfa_v1 import AscendSFAImpl, AscendSFAMetadata, AscendSFAMetadataBuilder
+from vllm_ascend.attention.context_parallel.common_cp import get_cp_max_num_reqs
+from vllm_ascend.attention.sfa_v1 import (
+    AscendSFAImpl,
+    AscendSFAMetadata,
+    AscendSFAMetadataBuilder,
+    needs_pcp_kv_gather,
+)
+from vllm_ascend.distributed.utils import all_gather_async
+from vllm_ascend.hisparse import cache_ops
+from vllm_ascend.hisparse.c8 import C8_ROW_BYTES
+from vllm_ascend.hisparse.pcp import hisparse_write_target, prepare_pcp_query_metadata, prepare_pcp_query_states
+from vllm_ascend.ops.triton.hisparse import _TRITON_SCATTER_MIN_REPRESENTATIVES, scatter_min_representatives
 
 # Bound the temporary D2D packing workspace independently of prefill length.
 _ATTENTION_CHUNK_ROWS = 32
@@ -30,19 +42,44 @@ def finish_hisparse_kv_update(cache, metadata) -> None:
     Preserve the device KV writes in those forwards, but leave Host mirror
     submission to the real connector step after graph replay.
     """
-    if not getattr(metadata, "hisparse_for_capture", False):
+    if getattr(metadata, "hisparse_for_capture", False):
+        return
+    # Core finish_kv_update uses local query metadata; PCP mirror submission
+    # must use gathered writes, which can include prefill from another rank.
+    # Core exposes no backend hook to override this submission policy.
+    has_prefill = getattr(metadata, "hisparse_write_has_prefill", None)
+    if has_prefill is None:
         cache.finish_kv_update()
+    elif (
+        not cache.dummy_batch
+        and has_prefill
+        and cache.submit_layer_mirror is not None
+        and get_forward_context().cudagraph_runtime_mode != CUDAGraphMode.FULL
+    ):
+        cache.submit_layer_mirror()
 
 
-class _PrefillColumnSelection(TorchFunctionMode):
-    """Keep a local workaround for the NPU singleton-column indexing defect.
+class _PrefillSourceSelection(TorchFunctionMode):
+    """Keep Core's prefill source selection on NPU with its original semantics.
 
     torch-npu 2.10.0.post7 / CANN 9.2.1 can interleave rows for ``x[:, ids]``
     when x has one column. index_select has the same semantics and returns
-    correct rows. Remove this scope when the supported device stack is fixed.
+    correct rows. Its int64 scatter amin also falls back to CPU; use a scoped
+    device atomic min for the representative-page reduction. Remove these
+    workarounds when the supported device stack handles both operations.
     """
 
     def __torch_function__(self, func, types, args=(), kwargs=None):
+        options = kwargs or {}
+        if func is torch.Tensor.scatter_reduce_ and len(args) == 4:
+            tensor, dim, index, source = args
+            if (
+                tensor.device.type == "npu"
+                and dim == 0
+                and options.get("reduce") == "amin"
+                and options.get("include_self", True)
+            ):
+                return scatter_min_representatives(tensor, index, source)
         if func is torch.Tensor.__getitem__:
             tensor, index = args
             if (
@@ -63,7 +100,7 @@ class AscendHiSparsePrefillStagingPlan(HiSparsePrefillStagingPlan):
     def ensure_gpu_sources(self, resident_state_rows, state_indices, resident_block_size) -> None:
         # Core retains source-key caching, representative-page selection and
         # current Resident/Host masks. The override affects only this call.
-        with _PrefillColumnSelection():
+        with _PrefillSourceSelection():
             super().ensure_gpu_sources(resident_state_rows, state_indices, resident_block_size)
 
 
@@ -93,6 +130,7 @@ class AscendHiSparseMetadata(AscendSFAMetadata):
     req_id_per_token: torch.Tensor | None = None
     num_reqs: int = 0
     prefill: AscendHiSparsePrefillMetadata | None = None
+    prefill_valid_token_mask: torch.Tensor | None = None
     hisparse_for_capture: bool = False
 
 
@@ -104,7 +142,14 @@ class AscendHiSparseMetadataBuilder(AscendSFAMetadataBuilder):
 
     def __init__(self, kv_cache_spec, layer_names, vllm_config, device, **kwargs):
         super().__init__(kv_cache_spec, layer_names, vllm_config, device, metadata_cls=AscendHiSparseMetadata, **kwargs)
+        _TRITON_SCATTER_MIN_REPRESENTATIVES.register_warmup(vllm_config)
         self._request_row_buffers: dict[int | None, torch.Tensor] = {}
+        if self.use_pcp:
+            # Core PCP creates a new int64 idx_mapping per batch; the resolver
+            # needs a fixed int32 input. Later draft decode uses Core's global map.
+            self._pcp_request_state_indices = torch.empty(
+                get_cp_max_num_reqs(vllm_config), dtype=torch.int32, device=device
+            )
         self._row_capacity = max(
             vllm_config.scheduler_config.max_num_batched_tokens,
             vllm_config.compilation_config.max_cudagraph_capture_size or 0,
@@ -124,13 +169,26 @@ class AscendHiSparseMetadataBuilder(AscendSFAMetadataBuilder):
             )
         # Use Core's device-boundary mapping with Ascend's padded input extent.
         # Keep separate backing storage for each captured MTP graph owner.
+        # Map padding to the last request so prefill staging stays in bounds
+        # after subtracting num_decodes. Actual query boundaries stay unchanged.
         metadata.req_id_per_token = compute_token_to_req_indices(
             metadata.query_start_loc,
             self._request_row_buffers[draft_index],
-            int(common_attn_metadata.query_start_loc_cpu[-1]),
+            metadata.num_input_tokens,
             metadata.num_input_tokens,
         )
+        if pcp_context is not None:
+            local_states = pcp_context.local_request_state_indices
+            assert local_states is not None
+            write_world_size = (
+                get_pcp_group().world_size if needs_pcp_kv_gather(metadata, self.is_pcp_decode_sharded) else 1
+            )
+            prepare_pcp_query_metadata(metadata, self._pcp_request_state_indices, local_states, write_world_size)
         if metadata.num_prefills:
+            # All layers in this metadata batch share the same token extent.
+            rows = torch.arange(metadata.num_input_tokens, dtype=torch.int32, device=self.device)
+            assert metadata.query_start_loc is not None
+            metadata.prefill_valid_token_mask = rows[:, None] < metadata.query_start_loc[-1]
             seq_lens_cpu = metadata.seq_lens_cpu
             if seq_lens_cpu is None:
                 # Capacity may use an upper bound; the staging plan receives
@@ -160,22 +218,20 @@ class AscendHiSparseImpl(AscendSFAImpl):
             raise ValueError("Ascend HiSparse does not support TurboQuant")
         if self.enable_sparse_sfa_c8:
             if (
-                self.c8_cache_dtype != torch.float8_e4m3fn
+                self.c8_cache_dtype not in (torch.int8, torch.float8_e4m3fn)
                 or (self.kv_lora_rank, self.qk_rope_head_dim) != (512, 64)
                 or self.sfa_qsfa_tile_size != 128
             ):
-                raise ValueError("HiSparse C8 requires native E4M3FN NoPE512/RoPE64 with FP32 scales")
+                raise ValueError("HiSparse C8 requires native INT8/E4M3FN NoPE512/RoPE64 with FP32 scales")
         parallel = self.vllm_config.parallel_config
-        if parallel.prefill_context_parallel_size > 1 or parallel.decode_context_parallel_size > 1:
-            raise ValueError("Ascend HiSparse does not support context parallelism")
+        if parallel.decode_context_parallel_size > 1:
+            raise ValueError("Ascend HiSparse does not support DCP")
         builder = kwargs.get("index_group_builder")
         if builder is None:
             if self.topk_indices_buffer is None:
                 raise ValueError("Ascend HiSparse requires a model sparse-index group")
             builder = SparseMLAIndexGroupBuilder(self.topk_indices_buffer)
         if self.enable_sparse_sfa_c8:
-            from vllm_ascend.hisparse.c8 import C8_ROW_BYTES
-
             row_width = C8_ROW_BYTES
         else:
             row_width = self.kv_lora_rank + self.qk_rope_head_dim
@@ -201,13 +257,18 @@ class AscendHiSparseImpl(AscendSFAImpl):
         # Reuse SFA's supported quantization/weight preparation. The HiSparse
         # handle supplies the final Resident cache and current write mapping.
         if self.enable_sparse_sfa_c8:
-            from vllm_ascend.quantization.methods import AscendW8A8MXFP8DynamicLinearMethod
+            from vllm_ascend.quantization.methods import (
+                AscendW8A8DynamicLinearMethod,
+                AscendW8A8MXFP8DynamicLinearMethod,
+            )
 
             # Native Prolog ties its C8 payload dtype to the weight scheme.
-            # INT8 weights cannot write this bridge's E4M3FN cache; retain the
-            # existing native projection/quantizer path for that combination.
+            # Match the native INT8 or FP8 cache to its projection
+            # scheme; other combinations retain SFA's separate quantizer.
             method = self._get_layer_quant_method(self.fused_qkv_a_proj)
-            if type(method) is AscendW8A8MXFP8DynamicLinearMethod:
+            if (self.c8_cache_dtype == torch.int8 and type(method) is AscendW8A8DynamicLinearMethod) or (
+                self.c8_cache_dtype == torch.float8_e4m3fn and type(method) is AscendW8A8MXFP8DynamicLinearMethod
+            ):
                 return super()._fused_preprocess_type()
         return None
 
@@ -233,9 +294,11 @@ class AscendHiSparseImpl(AscendSFAImpl):
         return current_workspace_manager().get_persistent_resource(key, allocate)
 
     def _kv_workspace(self, dtype):
+        # Non-C8 preprocessing consumes all gathered rank rows.
+        capacity = self._kv_staging_capacity * self.vllm_config.parallel_config.prefill_context_parallel_size
         key = (
             "ascend_hisparse_kv_preprocess",
-            self._kv_staging_capacity,
+            capacity,
             self.kv_lora_rank,
             self.qk_rope_head_dim,
             dtype,
@@ -243,11 +306,11 @@ class AscendHiSparseImpl(AscendSFAImpl):
 
         def allocate():
             device = self.index_group.logical_topk_indices.device
-            shape = (self._kv_staging_capacity // 128, 128, 1)
+            shape = (capacity // 128, 128, 1)
             return (
                 torch.empty((*shape, self.kv_lora_rank), dtype=dtype, device=device),
                 torch.empty((*shape, self.qk_rope_head_dim), dtype=dtype, device=device),
-                torch.arange(self._kv_staging_capacity, dtype=torch.int64, device=device),
+                torch.arange(capacity, dtype=torch.int64, device=device),
             )
 
         return current_workspace_manager().get_persistent_resource(key, allocate)
@@ -258,6 +321,23 @@ class AscendHiSparseImpl(AscendSFAImpl):
             return tuple(torch.empty(1, dtype=torch.int32, device=device) for _ in range(2))
 
         return current_workspace_manager().get_persistent_resource(("ascend_hisparse_c8_lengths",), allocate)
+
+    def _pcp_prolog_workspace(self):
+        def allocate():
+            device = self.index_group.logical_topk_indices.device
+            return (
+                torch.empty(
+                    (self._kv_staging_capacity // 128, 128, 1, C8_ROW_BYTES),
+                    dtype=self.c8_cache_dtype,
+                    device=device,
+                ),
+                torch.arange(self._kv_staging_capacity, dtype=torch.int64, device=device),
+            )
+
+        # Layers execute sequentially on the same stream. Share scratch across
+        # layers while keeping its address fixed for graph capture/replay.
+        key = ("ascend_hisparse_pcp_prolog", self._kv_staging_capacity, self.c8_cache_dtype)
+        return current_workspace_manager().get_persistent_resource(key, allocate)
 
     def _prolog_slot_mapping(self, mapping, num_input_rows):
         context = get_forward_context()
@@ -289,8 +369,20 @@ class AscendHiSparseImpl(AscendSFAImpl):
         if attn_metadata is None:
             raise ValueError("HiSparse Prolog requires current row-validity metadata")
         rows = hidden_states.shape[0]
+        if self.pcp_enabled and needs_pcp_kv_gather(attn_metadata, self.is_pcp_decode_sharded):
+            # Prolog writes local rows before the collective. Its cache indices
+            # cannot use the rank-major global Resident write mapping yet.
+            scratch, local_slots = self._pcp_prolog_workspace()
+            return super()._sfa_preprocess_prolog_v3(
+                hidden_states,
+                (scratch,),
+                cos,
+                sin,
+                local_slots[:rows],
+                attn_metadata=attn_metadata,
+            )
         cache = self.hisparse_cache
-        destination, mapping, _ = cache.write_target(rows, slot_mapping.numel())
+        destination, mapping, _ = hisparse_write_target(cache, attn_metadata, rows, slot_mapping.numel())
         result = super()._sfa_preprocess_prolog_v3(
             hidden_states,
             (destination.unsqueeze(2),),
@@ -302,9 +394,33 @@ class AscendHiSparseImpl(AscendSFAImpl):
         finish_hisparse_kv_update(cache, attn_metadata)
         return result
 
+    def _sync_pcp_kv_cache(self, kv_cache, attn_metadata):
+        scratch, _ = self._pcp_prolog_workspace()
+        rows = attn_metadata.num_input_tokens
+        packed = scratch.view(torch.int8).view(-1, scratch.shape[-1])[:rows]
+        # Preserve C8 latent, BF16 RoPE and FP32 scales byte-for-byte. The
+        # collective has the same rank-major ordering as gathered slot mapping.
+        gathered = get_pcp_group().all_gather(packed, dim=0)
+        self._scatter_c8_kv(gathered.view(torch.uint8), gathered.shape[0], attn_metadata)
+
+    def _scatter_c8_kv(self, packed, num_slot_rows, attn_metadata):
+        cache = self.hisparse_cache
+        destination, mapping, count = hisparse_write_target(cache, attn_metadata, packed.shape[0], num_slot_rows)
+        payload = packed[:count]
+        cache_ops.scatter_packed_kv(
+            payload,
+            payload[:, :0],
+            destination.view(torch.uint8),
+            mapping,
+            getattr(attn_metadata, "hisparse_num_valid_write_rows", attn_metadata.query_start_loc[-1:]),
+        )
+        finish_hisparse_kv_update(cache, attn_metadata)
+
     def forward(self, layer_name, hidden_states, kv_cache, attn_metadata, output=None):
         if self.enable_sparse_sfa_c8:
             self._c8_length_workspace()
+            if self.pcp_enabled:
+                self._pcp_prolog_workspace()
         else:
             self._workspace(hidden_states.dtype)
         if self.qk_rope_head_dim and not self.enable_sparse_sfa_c8:
@@ -312,7 +428,41 @@ class AscendHiSparseImpl(AscendSFAImpl):
             # graph capture, including dummy forwards without attention metadata.
             self._kv_workspace(hidden_states.dtype)
         self.index_group.prepare_for_batch(self.index_group_index, attn_metadata)
+        if self.index_group_index == 0:
+            prepare_pcp_query_states(self.hisparse_cache, attn_metadata)
         return super().forward(layer_name, hidden_states, kv_cache, attn_metadata, output)
+
+    def exec_kv(self, kv_no_split, cos, sin, kv_cache, slots, attn_metadata, *, defer_wait=False):
+        if not self.pcp_enabled or not needs_pcp_kv_gather(attn_metadata, self.is_pcp_decode_sharded):
+            return super().exec_kv(kv_no_split, cos, sin, kv_cache, slots, attn_metadata, defer_wait=defer_wait)
+
+        # HiSparse PCP retains rank-major rows, including invalid duplicate
+        # decode slots, to match the Resident and Host-mirror write layout.
+        if not self.qk_rope_head_dim:
+            # The NoPE projection omits padding, while slots retain the rank stride.
+            pad = attn_metadata.num_input_tokens - kv_no_split.shape[0]
+            if pad < 0:
+                raise ValueError("SFA PCP KV exceeds the rank-local padded token count.")
+            if pad:
+                kv_no_split = torch.nn.functional.pad(kv_no_split, (0, 0, 0, pad))
+        inputs = (kv_no_split, cos, sin) if self.qk_rope_head_dim else (kv_no_split,)
+        group = get_pcp_group()
+        sends = tuple(value.contiguous() for value in inputs)
+        pending = tuple(all_gather_async(value, group) for value in sends)
+        slots = slots[: group.world_size * kv_no_split.shape[0]]
+
+        def finish():
+            # Keep the communication inputs alive until every gather completes.
+            _ = sends
+            for _, work in pending:
+                if work is not None:
+                    work.wait()
+            if not self.qk_rope_head_dim:
+                return self._exec_kv_local(pending[0][0], cos, sin, kv_cache, slots, attn_metadata)
+            gathered_kv, gathered_cos, gathered_sin = (value for value, _ in pending)
+            return self._exec_kv_local(gathered_kv, gathered_cos, gathered_sin, kv_cache, slots, attn_metadata)
+
+        return finish if defer_wait else finish()
 
     def _exec_kv_local(self, kv_no_split, cos, sin, kv_cache, slots, attn_metadata):
         from vllm_ascend.hisparse.cache_ops import scatter_packed_kv
@@ -322,24 +472,15 @@ class AscendHiSparseImpl(AscendSFAImpl):
             from vllm_ascend.hisparse.c8 import pack_c8_components
 
             rope, latent, scales = super()._exec_kv_local(kv_no_split, cos, sin, kv_cache, slots, attn_metadata)
-            rows = latent.numel() // self.kv_lora_rank
             packed = pack_c8_components(latent.contiguous(), rope.contiguous(), scales.contiguous())
-            cache = self.hisparse_cache
-            destination, mapping, count = cache.write_target(rows, slots.numel())
-            packed = packed[:count]
-            # Reuse the existing byte-capable scatter; no fused C8 kernel or
-            # payload conversion is needed for the baseline data path.
-            scatter_packed_kv(
-                packed, packed[:, :0], destination.view(torch.uint8), mapping, attn_metadata.query_start_loc[-1:]
-            )
-            finish_hisparse_kv_update(cache, attn_metadata)
+            self._scatter_c8_kv(packed, slots.numel(), attn_metadata)
             return rope, latent, scales
         values = kv_no_split.reshape(-1, self.kv_lora_rank + self.qk_rope_head_dim)
         num_tokens = values.shape[0]
         if self.qk_rope_head_dim:
-            if num_tokens > self._kv_staging_capacity:
-                raise ValueError("HiSparse KV preprocessing exceeds its profiled token capacity")
             latent_cache, rope_cache, local_slots = self._kv_workspace(values.dtype)
+            if num_tokens > local_slots.numel():
+                raise ValueError("HiSparse KV preprocessing exceeds its profiled token capacity")
             # Match ordinary SFA's fused RMSNorm/RoPE rounding. Separate RMSNorm
             # can differ by a BF16 ULP near a rounding midpoint. Local slots
             # isolate padding from the real resident/hot destination below.
@@ -353,8 +494,8 @@ class AscendHiSparseImpl(AscendSFAImpl):
             latent = self.kv_a_layernorm(values)
             rope = values[:, self.kv_lora_rank :]
         cache = self.hisparse_cache
-        destination, mapping, num_rows = cache.write_target(values.shape[0], slots.numel())
-        num_valid_rows = attn_metadata.query_start_loc[-1:]
+        destination, mapping, num_rows = hisparse_write_target(cache, attn_metadata, num_tokens, slots.numel())
+        num_valid_rows = getattr(attn_metadata, "hisparse_num_valid_write_rows", attn_metadata.query_start_loc[-1:])
         scatter_packed_kv(latent[:num_rows], rope[:num_rows], destination, mapping, num_valid_rows)
         # The common connector mirrors resident rows after this write. Draft
         # rows are deferred until the next step, and FULL graphs are mirrored
@@ -573,8 +714,8 @@ class AscendHiSparseImpl(AscendSFAImpl):
         assert metadata.req_id_per_token is not None
         assert metadata.query_start_loc is not None
         if metadata.num_prefills:
-            rows = torch.arange(logical.shape[0], dtype=torch.int32, device=logical.device)
-            logical = torch.where(rows[:, None] < metadata.query_start_loc[-1], logical, -1)
+            assert metadata.prefill_valid_token_mask is not None
+            logical = torch.where(metadata.prefill_valid_token_mask[: logical.shape[0]], logical, -1)
         # Decode's resolver already masks graph padding from this same device
         # scalar. Keep that validation at the producer of physical indices.
         self.index_group.set_logical_topk_ready(self.index_group_index)

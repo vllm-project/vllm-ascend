@@ -246,7 +246,9 @@ class AscendW4A8MXFPDynamicFusedMoEMethod(AscendMoEScheme):
     def get_fused_mc2_weights(self, layer: torch.nn.Module) -> MoEWeights:
         if self.use_expert_weight_list:
             if _EXTRA_CTX.use_mega_moe:
-                w1 = layer.w13_weight_list
+                # SiTU keeps semantic FP4 on w13; MegaMoe needs packed bytes.
+                # The views preserve EPLB updates. w2 is already packed uint8.
+                w1 = [weight.view(torch.uint8) for weight in layer.w13_weight_list]
                 w2 = layer.w2_weight_list
                 # Reinterpret checkpoint bytes without copying: EPLB updates
                 # the same scale storage that MegaMoe consumes.
@@ -326,6 +328,15 @@ class AscendW4A8MXFPDynamicFusedMoEMethod(AscendMoEScheme):
         g, n, k = layer.w13_weight_scale.shape
         layer.w13_weight_scale.data = layer.w13_weight_scale.data.reshape(g, n, k // 2, 2)
         g, n, k = layer.w2_weight_scale.shape
+        if k % 2 != 0:
+            # A TP shard can leave intermediate_size_per_partition // group_size odd
+            # (e.g. moe_intermediate_size=2304, group_size=32, tp_size=8 -> 9 groups).
+            # The runtime consumes scale groups in pairs, so append one zero group;
+            # the weight columns it would correspond to are already out of range.
+            layer.w2_weight_scale.data = torch.nn.functional.pad(
+                layer.w2_weight_scale.data, (0, 1), mode="constant", value=0
+            )
+            k += 1
         layer.w2_weight_scale.data = layer.w2_weight_scale.data.reshape(g, n, k // 2, 2)
 
         if self.use_expert_weight_list:
@@ -392,9 +403,12 @@ class AscendW4A8MXFPDynamicFusedMoEMethod(AscendMoEScheme):
         layer.w13_weight_scale.data = layer.w13_weight_scale.data.transpose(-3, -2).reshape(
             orig_shapes["w13_weight_scale"]
         )
-        layer.w2_weight_scale.data = layer.w2_weight_scale.data.transpose(-3, -2).reshape(
-            orig_shapes["w2_weight_scale"]
-        )
+        orig_w2_scale_shape = orig_shapes["w2_weight_scale"]
+        w2_scale = layer.w2_weight_scale.data.transpose(-3, -2).reshape(*orig_w2_scale_shape[:-1], -1)
+        # process_weights_after_loading may have appended one zero scale group to
+        # reach an even count (see the k % 2 != 0 branch above); drop it here so
+        # the reloaded weight matches the checkpoint's real, possibly-odd shape.
+        layer.w2_weight_scale.data = w2_scale[..., : orig_w2_scale_shape[-1]].contiguous()
         layer._mxfp4_transformed = False
 
     def _get_mlp_weights(self, layer):

@@ -11,7 +11,7 @@ Take the DeepSeek-r1-w8a8 model as an example, use 4 Atlas 800T A3 servers to de
 ### Physical Layer Requirements
 
 - The physical machines must be located on the same LAN, with network connectivity.
-- All NPUs must be interconnected. On A2/A3, intra-node connectivity is via HCCS, and inter-node connectivity is via RDMA. For Atlas 850/850E/950 SuperPod (950PR/950DT), see [Atlas 850/850E/950 SuperPod Communication Configuration](#atlas-850850e950-superpod-communication-configuration).
+- All NPUs must be interconnected. On A2/A3, intra-node connectivity is via HCCS, and inter-node connectivity is via RDMA. For 950PR&950DT Products, see [950PR&950DT Products Communication Configuration](#950pr950dt-products-communication-configuration).
 
 ### Verification Process
 
@@ -120,9 +120,9 @@ Execute the following commands on each node in sequence. The results must all be
         for i in {0..7}; do hccn_tool -i $i -tls -g ; done | grep switch
         ```
 
-### Atlas 850/850E/950 SuperPod Communication Configuration
+### 950PR&950DT Products Communication Configuration {: #950pr950dt-products-communication-configuration}
 
-For Atlas 850/850E/950 SuperPod (950PR/950DT), PD disaggregation uses the super plane (based on UB port and UBC protocol) by default. No additional network configuration is required for this default path.
+For 950PR&950DT Products, PD disaggregation uses the super plane (based on UB port and UBC protocol) by default. No additional network configuration is required for this default path.
 
 Automatic UB configuration requires HIXL 9.1.0 or later. Upgrade HIXL before using the configuration below. Set the following environment variable in both the prefiller and decoder serving environments to generate the communication configuration automatically:
 
@@ -148,7 +148,7 @@ For UBG or UBoE network protocols, keep the automatic configuration setting abov
 
 === "RoCE"
 
-    Host RoCE parameter-plane configuration for Atlas 850/850E/950 SuperPod (950PR/950DT) currently requires manual endpoint files and checking the mapping between physical NPUs and host RoCE IP addresses. Prepare the endpoint configuration files under `/etc/hixlep` and set `ascend_local_comm_res_path` in `kv_connector_extra_config` on both sides. The directory is configurable; `/etc/hixlep` is only an example. For example, with `DP=4` and `TP=1` on each side:
+    Host RoCE parameter-plane configuration for 950PR&950DT Products currently requires manual endpoint files and checking the mapping between physical NPUs and host RoCE IP addresses. Prepare the endpoint configuration files under `/etc/hixlep` and set `ascend_local_comm_res_path` in `kv_connector_extra_config` on both sides. The directory is configurable; `/etc/hixlep` is only an example. For example, with `DP=4` and `TP=1` on each side:
 
     ```json
     {
@@ -203,7 +203,7 @@ For UBG or UBoE network protocols, keep the automatic configuration setting abov
 
 ## Run with Docker
 
-Start a Docker container on each node. The following example maps the 16 device nodes used by the A3 deployment above. For Atlas 850/850E/950 SuperPod (950PR/950DT), use the complete container command below.
+Start a Docker container on each node. The commands need [Ascend Docker Runtime](../../getting_started/installation.md#installation-ascend-docker-runtime) on the host: it selects the NPUs, so the A3 example below asks for the 16 devices of the deployment above with `ASCEND_VISIBLE_DEVICES=0-15`. For 950PR&950DT Products, use the complete container command below.
 
 ```bash
 # Update the vllm-ascend image
@@ -216,39 +216,16 @@ docker run --rm \
 --name $NAME \
 --net=host \
 --shm-size=1g \
---device /dev/davinci0 \
---device /dev/davinci1 \
---device /dev/davinci2 \
---device /dev/davinci3 \
---device /dev/davinci4 \
---device /dev/davinci5 \
---device /dev/davinci6 \
---device /dev/davinci7 \
---device /dev/davinci8 \
---device /dev/davinci9 \
---device /dev/davinci10 \
---device /dev/davinci11 \
---device /dev/davinci12 \
---device /dev/davinci13 \
---device /dev/davinci14 \
---device /dev/davinci15 \
---device /dev/davinci_manager \
---device /dev/devmm_svm \
---device /dev/hisi_hdc \
--v /usr/local/dcmi:/usr/local/dcmi \
+-e ASCEND_VISIBLE_DEVICES=0-15 \
 -v /usr/local/Ascend/driver/tools/hccn_tool:/usr/local/Ascend/driver/tools/hccn_tool \
--v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
--v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
--v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
--v /etc/ascend_install.info:/etc/ascend_install.info \
 -v /etc/hccn.conf:/etc/hccn.conf \
 -v /mnt/sfs_turbo/.cache:/root/.cache \
 -it $IMAGE bash
 ```
 
-### Atlas 850/850E/950 SuperPod (950PR/950DT) Container Requirements
+### 950PR&950DT Products Container Requirements {: #950pr950dt-products-container-requirements}
 
-For an eight-device 950PR/950DT host, use the following command. Choose an image compatible with the host driver; for openEuler, use the `{{ vllm_ascend_version }}-a5-openeuler` tag.
+For an eight-device 950PR/950DT host, use the following command with `ASCEND_VISIBLE_DEVICES=0-7`; the runtime also mounts the UB devices that earlier commands listed as `--device`. Choose an image compatible with the host driver; for openEuler, use the `{{ vllm_ascend_version }}-a5-openeuler` tag.
 
 ```bash
 export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}-a5
@@ -257,24 +234,10 @@ export NAME=vllm-ascend-950
 docker run --rm \
     --name "$NAME" \
     --net=host \
-    --privileged \
     --shm-size=1g \
+    -e ASCEND_VISIBLE_DEVICES=0-7 \
     --ulimit memlock=-1:-1 \
-    --device /dev/davinci0 \
-    --device /dev/davinci1 \
-    --device /dev/davinci2 \
-    --device /dev/davinci3 \
-    --device /dev/davinci4 \
-    --device /dev/davinci5 \
-    --device /dev/davinci6 \
-    --device /dev/davinci7 \
-    --device /dev/davinci_manager \
-    --device /dev/hisi_hdc \
-    --device /dev/ummu \
-    --device /dev/uburma \
     -v /usr/local/Ascend/driver:/usr/local/Ascend/driver:ro \
-    -v /usr/local/dcmi:/usr/local/dcmi:ro \
-    -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi:ro \
     -v /usr/bin/urma_admin:/usr/bin/urma_admin:ro \
     -it "$IMAGE" bash
 ```
@@ -292,6 +255,7 @@ For Host RoCE, insert the following options before `-it "$IMAGE" bash` to expose
 
 ```bash
 --device /dev/infiniband \
+--cap-add=NET_ADMIN \
 -v /usr/lib64/libhrn5-rdmav34.so:/usr/lib64/libhrn5-rdmav34.so:ro \
 -v /etc/hixlep:/etc/hixlep:ro \
 ```
@@ -299,7 +263,7 @@ For Host RoCE, insert the following options before `-it "$IMAGE" bash` to expose
 Both paths in the endpoint-directory mount are configurable: the left side is the host directory containing the endpoint JSON files, and the right side is their directory inside the container. Set `ascend_local_comm_res_path` to the **container-side** directory. For example, `-v /srv/mooncake/endpoints:/opt/mooncake/endpoints:ro` requires `"ascend_local_comm_res_path": "/opt/mooncake/endpoints"`. Keep the `ub_endpoint_npu_<physical_npu_id>.json` filenames unchanged.
 
 - Use the provider library path/version matching the host driver and container RDMA userspace. Mount `/etc/libibverbs.d/hrn5.driver` with `-v /etc/libibverbs.d/hrn5.driver:/etc/libibverbs.d/hrn5.driver:ro` if required by that userspace; this configuration file does not replace the shared library.
-- `--privileged` exposes host devices. A non-privileged Host RoCE configuration must explicitly map the devices and provide `--cap-add=NET_ADMIN`; validate it for your driver and workload.
+- The Host RoCE options above explicitly map `/dev/infiniband` and add `NET_ADMIN` without granting privileged mode. Validate the device and permission requirements for your driver and workload.
 - Mounting the `hiroce5` diagnostic tool is **optional**, for example `-v /usr/local/bin/hiroce5:/usr/local/bin/hiroce5:ro` if that is its host path.
 
 ## Install Mooncake
@@ -360,13 +324,13 @@ export LD_LIBRARY_PATH=/usr/local/lib64/python3.12/site-packages/mooncake:$LD_LI
     The fixed timeout below applies to `MooncakeConnectorV1`. For
     `MooncakeConnectorV2`, use the renewable KV leases described below.
 
-    For long sequences or high concurrency, the default KV-cache release timeout of 480 seconds may be insufficient. Increase it as needed in the prefiller startup script. For versions that use `VLLM_MOONCAKE_CONNECTOR_TIMEOUT` for this timeout, add:
+    For long sequences or high concurrency, the default KV-cache release timeout of 480 seconds may be insufficient. Increase it as needed by setting `VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT` in the prefiller startup script:
 
     ```shell
-    export VLLM_MOONCAKE_CONNECTOR_TIMEOUT=1800
+    export VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT=1800
     ```
 
-    The value is in seconds: `1800` allows 30 minutes before timeout. In current versions, this setting is named `VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT`; use `export VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT=1800` instead. Check the variable name supported by your installed version.
+    The value is in seconds: `1800` allows 30 minutes before timeout.
 
     Increasing this timeout generally does not affect inference accuracy or performance during normal operation. If a decoder (D) node fails while requests still have KV caches on the prefiller (P) node that the decoder has not received, a longer timeout delays releasing those caches. They continue to occupy HBM, reducing the memory available for other requests on the P node until they are released.
 
@@ -430,6 +394,26 @@ An aborted request with an in-flight read keeps its lease until worker
 completion is reported. If the entire D process stops running or the control
 network is disconnected, heartbeats stop and the lease expires. Heartbeats
 do not replace transport completion or cancellation synchronization.
+
+### Mooncake V2 Transfer Configuration
+
+Set these options in `kv_connector_extra_config`. Pull uses the decoder's
+transfer pool; Push uses the prefiller's sending pool.
+
+| Option | Default | Behavior |
+| --- | --- | --- |
+| `pull_transfer_mode` | `"request"` | Pull only: submit and complete each request independently. Use `"batch"` to aggregate READs and wait for the whole producer-engine batch. |
+| `transfer_max_workers` | `32` | Positive integer controlling the transfer pool size per worker: D-side READs for Pull, P-side sends for Push. Booleans and strings are rejected. |
+
+```json
+{"kv_connector_extra_config": {"pull_transfer_mode": "request", "transfer_max_workers": 32}}
+```
+
+For Push, set only `transfer_max_workers` on the producer. The peer requires no
+matching setting. Both Pull modes prepare addresses and
+execute READs in the transfer pool, and wait for submitted READs to finish before
+reporting a failed receive. Request mode avoids the batch completion barrier but
+can increase READ call overhead; compare both modes under the same workload.
 
 ### QoS Configuration
 
@@ -966,9 +950,9 @@ python launch_online_dp.py --dp-size 32 --tp-size 1 --dp-size-local 16 --dp-rank
 python launch_online_dp.py --dp-size 32 --tp-size 1 --dp-size-local 16 --dp-rank-start 16 --dp-address 192.0.0.3 --dp-rpc-port 12321 --vllm-start-port 7100
 ```
 
-## D2RH Deployment on Atlas 850E (UBoE)
+## D2RH Deployment on Atlas 850E SuperPoD (Air-Cooled) (UBoE) {: #d2rh-deployment-on-atlas-850e-superpod-air-cooled-uboe}
 
-**Validation scope:** D2RH has only been validated with the Atlas 850E
+**Validation scope:** D2RH has only been validated with the Atlas 850E SuperPoD (Air-Cooled)
 UBoE configuration shown below, using DeepSeek-V4-Flash. Other hardware,
 network types, and deployment configurations have not been validated.
 
@@ -1159,7 +1143,7 @@ vllm serve /path/to/DeepSeek-V4-Flash-0731-w4a4c8 \
 The scripts enable prefix caching on both sides, keep the hybrid KV cache
 manager enabled, and set
 `ASCEND_GLOBAL_RESOURCE_CONFIG='{"comm_resource_config.protocol_desc":["uboe:device"]}'`.
-They use FP8 indexer cache on Atlas 850E, not the INT8 indexer setting from the
+They use FP8 indexer cache on Atlas 850E SuperPoD (Air-Cooled), not the INT8 indexer setting from the
 A2/A3 examples; see the [W4A4C8 FAQ](../models/DeepSeek-V4-Flash.md#q-how-do-the-w4a4c8-ultra-low-bit-quantized-weights-preserve-accuracy).
 P uses eager execution and D uses `FULL_DECODE_ONLY` graphs.
 
@@ -1378,7 +1362,7 @@ models = [
         type=VLLMCustomAPIChatStream,
         abbr='vllm-api-stream-chat',
         path="/root/.cache/ds_r1",
-        model="dsr1",
+        model="ds_r1",
         request_rate = 14,
         retry = 2,
         host_ip = "192.0.0.1", # Proxy service host IP
@@ -1414,7 +1398,7 @@ Since the computation of some NPU operators requires several rounds of warm-up t
 Check service health using the proxy server endpoint.
 
 ```shell
-curl http://192.0.0.1:8080/v1/completions \
+curl http://192.0.0.1:1999/v1/completions \
     -H "Content-Type: application/json" \
     -d '{
         "model": "ds_r1",

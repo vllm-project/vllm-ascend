@@ -22,6 +22,9 @@ def runtime_fixture(monkeypatch):
         package.__path__ = []
         monkeypatch.setitem(sys.modules, name, package)
 
+    utils = ModuleType("vllm_ascend.utils")
+    monkeypatch.setitem(sys.modules, "vllm_ascend.utils", utils)
+
     def load(name, path):
         spec = importlib.util.spec_from_file_location(name, ROOT / path)
         assert spec is not None and spec.loader is not None
@@ -48,6 +51,7 @@ def runtime_fixture(monkeypatch):
     )
     runtime = modules["runtime"].get_trace(config)
     runtime.subject = modules["runtime"]
+    runtime.state_subject = modules["state"]
     runtime.runner_subject = modules["runner"]
     runtime.plan_subject = modules["plan"]
     runtime.connector_subject = modules["connector"]
@@ -64,7 +68,7 @@ def runtime_fixture(monkeypatch):
     return runtime
 
 
-def message(bindings=None, computed=None, counts=None, cached=None, finished=(), preempted=(), resumed=()):
+def message(bindings=None, computed=None, counts=None, cached=None, finished=(), preempted=()):
     bindings = {"r": [[1]]} if bindings is None else bindings
     computed = computed or {}
     counts = {request: 1 for request in bindings} if counts is None else counts
@@ -78,7 +82,6 @@ def message(bindings=None, computed=None, counts=None, cached=None, finished=(),
             req_ids=list(cached),
             new_block_ids=[value[0] for value in cached.values()],
             num_computed_tokens=[value[1] for value in cached.values()],
-            resumed_req_ids=set(resumed),
         ),
         num_scheduled_tokens=counts,
         total_num_scheduled_tokens=sum(counts.values()),

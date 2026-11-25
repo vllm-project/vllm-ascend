@@ -7,8 +7,12 @@ from dataclasses import dataclass, field
 from enum import Enum
 
 import torch
-from flash_attn_npu_3 import flash_attn_with_kvcache, get_scheduler_metadata  # type: ignore[import-not-found]
-from vllm.config import CUDAGraphMode, VllmConfig
+import vllm.envs as envs_vllm
+from flash_attn_npu_3 import (  # type: ignore[import-not-found,import-untyped]
+    flash_attn_with_kvcache,
+    get_scheduler_metadata,
+)
+from vllm.config import CUDAGraphMode, VllmConfig, get_current_vllm_config_or_none
 from vllm.logger import logger
 from vllm.v1.attention.backend import (
     AttentionBackend,
@@ -33,6 +37,18 @@ def _get_window_size(sliding_window: int | None, causal: bool) -> tuple[int, int
     return (sliding_window - 1, 0 if causal else sliding_window - 1)
 
 
+def _uses_hnd_kv_cache(config: VllmConfig | None = None) -> bool:
+    # The engine resolves the connector preference and sends it to workers
+    # after model construction, before cache allocation. Do not freeze the
+    # layout in the attention implementation's constructor.
+    if config is None:
+        config = get_current_vllm_config_or_none()
+    if config is not None and getattr(config.cache_config, "kv_cache_layout", None) is not None:
+        return config.cache_config.get_resolved_kv_cache_layout().name in ("LBHNC", "HND", "BLHNC")
+    # Legacy runners and standalone callers may not have a resolved config.
+    return envs_vllm.VLLM_KV_CACHE_LAYOUT in ("LBHNC", "HND", "BLHNC")
+
+
 class AscendFlashAttentionBackend(AttentionBackend):
     accept_output_buffer = True
     # Both model runners use the attention layer's cache-update contract.
@@ -53,6 +69,8 @@ class AscendFlashAttentionBackend(AttentionBackend):
         head_size: int,
         cache_dtype_str: str = "",
     ) -> tuple[int, ...]:
+        if _uses_hnd_kv_cache():
+            return (2, num_blocks, num_kv_heads, block_size, head_size)
         return (2, num_blocks, block_size, num_kv_heads, head_size)
 
     @staticmethod
@@ -84,6 +102,50 @@ class AscendFlashAttentionMetadata(AttentionMetadata):
     scheduler_metadata: dict[tuple, torch.Tensor] = field(default_factory=dict)
 
 
+_FA3_WARMUP_KEYS: set[tuple] = set()
+
+
+def _initialize_fa3_scheduler(device: torch.device, scheduler_specs: set[tuple], block_size: int) -> None:
+    """Initialize generic FA3 registration on the caller-validated NPU device.
+
+    Registration belongs to the FA3 backend, irrespective of the model or
+    speculative method. The constructor owns config and device eligibility.
+    """
+    key = (device.index, frozenset(scheduler_specs), block_size)
+    if key in _FA3_WARMUP_KEYS:
+        return
+    # Complete native AICPU registration before model profiling. Deferring
+    # registration until metadata-builder initialization can leave its load
+    # task pending and block later synchronization during target warmup.
+    torch.npu.synchronize(device)
+    offsets = torch.arange(2, dtype=torch.int32, device=device)
+    lengths = torch.ones(1, dtype=torch.int32, device=device)
+    warmup_metadata = []
+    for num_heads, num_kv_heads, head_size, dtype, _scale, softcap, sliding_window in scheduler_specs:
+        warmup_metadata.append(
+            get_scheduler_metadata(
+                batch_size=1,
+                max_seqlen_q=1,
+                max_seqlen_k=block_size,
+                num_heads_q=num_heads,
+                num_heads_kv=num_kv_heads,
+                headdim=head_size,
+                cache_seqlens=lengths,
+                qkv_dtype=dtype,
+                cu_seqlens_q=offsets,
+                page_size=block_size,
+                causal=False,
+                window_size=_get_window_size(sliding_window, False),
+                has_softcap=softcap != 0.0,
+                num_splits=0,
+            )
+        )
+    # Retain all inputs/results until the asynchronous scheduler is done.
+    torch.npu.synchronize(device)
+    _FA3_WARMUP_KEYS.add(key)
+    logger.info("FA3 scheduler initialization completed before model profiling.")
+
+
 class AscendFlashAttentionMetadataBuilder(AttentionMetadataBuilder[AscendFlashAttentionMetadata]):
     # Per-request query offsets let one paged call handle mixed prefill/decode
     # and multi-token verification in the existing request order.
@@ -109,6 +171,10 @@ class AscendFlashAttentionMetadataBuilder(AttentionMetadataBuilder[AscendFlashAt
         self.scheduler_specs = set()
         for name in layer_names:
             impl = vllm_config.compilation_config.static_forward_context[name].impl
+            # Builders receive the worker allocation config after layout RPC.
+            # Draft loaders may have copied CacheConfig (including dtype="auto");
+            # bind the actual consumer to the same layout owner as allocation.
+            impl.vllm_config = vllm_config
             self.scheduler_specs.add(
                 (
                     impl.num_heads,
@@ -148,7 +214,12 @@ class AscendFlashAttentionMetadataBuilder(AttentionMetadataBuilder[AscendFlashAt
         # Keep one empty request for dummy forwards: the operator requires B > 0.
         active_reqs = max(
             1,
-            int(torch.searchsorted(common.query_start_loc_cpu[: num_reqs + 1], common.num_actual_tokens)),
+            # With MTP graph padding, num_actual_tokens can exceed the last
+            # CPU query offset, so searchsorted returns num_reqs + 1.
+            # Clamp to num_reqs to match the available per-request metadata.
+            min(
+                num_reqs, int(torch.searchsorted(common.query_start_loc_cpu[: num_reqs + 1], common.num_actual_tokens))
+            ),
         )
         # The runner owns graph-stable buffers. Device tiling limits reads to
         # active_reqs, so padding rows need neither copying nor sanitizing.
@@ -266,6 +337,34 @@ class AscendFlashAttentionImpl(AttentionImpl[AscendFlashAttentionMetadata]):
         # FA3 uses softcap=0.0 to disable logit capping. Explicit None from
         # vLLM must be normalized for both scheduler tiling and execution.
         self.logits_soft_cap = 0.0 if logits_soft_cap is None else logits_soft_cap
+        config = get_current_vllm_config_or_none()
+        # Keep the config reference, not the pre-negotiation layout value. The
+        # worker records the resolved layout after model construction, and
+        # DFlash context-KV writes need it outside set_current_vllm_config().
+        self.vllm_config = config
+        if config is not None and hasattr(torch, "npu") and torch.npu.is_available():
+            # Every selected FA3 implementation completes native registration
+            # before profiling, including non-speculative and DSpark users.
+            # Keep availability checks here, before querying the current NPU.
+            spec = (
+                self.num_heads,
+                self.num_kv_heads,
+                self.head_size,
+                config.model_config.dtype,
+                self.scale,
+                self.logits_soft_cap,
+                self.sliding_window,
+            )
+            _initialize_fa3_scheduler(
+                torch.device("npu", torch.npu.current_device()),
+                {spec},
+                config.cache_config.block_size or 128,
+            )
+
+    @property
+    def use_hnd_kv_cache(self) -> bool:
+        # Paged HND/BNBD storage: [num_blocks, num_kv_heads, block_size, head_dim].
+        return _uses_hnd_kv_cache(self.vllm_config)
 
     @staticmethod
     def update_graph_params(
@@ -297,6 +396,8 @@ class AscendFlashAttentionImpl(AttentionImpl[AscendFlashAttentionMetadata]):
             key_cache=kv_cache[0],
             value_cache=kv_cache[1],
             slot_mapping=slot_mapping,
+            # The cache-write operator calls paged BNBD/HND storage "bnsd".
+            use_bnsd=self.use_hnd_kv_cache,
         )
         notify_kv_cache_written(layer.layer_name)
 
@@ -336,11 +437,19 @@ class AscendFlashAttentionImpl(AttentionImpl[AscendFlashAttentionMetadata]):
             self.logits_soft_cap,
             self.sliding_window,
         )
+        # The A3 ABI expects a logical BBND view:
+        # [num_blocks, block_size, num_kv_heads, head_dim]. For HND caches,
+        # transpose exposes that view over physical BNBD storage without a
+        # copy; the strides and connector-visible storage remain unchanged.
+        k_cache, v_cache = kv_cache[0], kv_cache[1]
+        if self.use_hnd_kv_cache:
+            k_cache = k_cache.transpose(1, 2)
+            v_cache = v_cache.transpose(1, 2)
         with attention_transfer_window():
             result = flash_attn_with_kvcache(
                 query,
-                kv_cache[0],
-                kv_cache[1],
+                k_cache,
+                v_cache,
                 cache_seqlens=attn_metadata.seq_lens,
                 page_table=attn_metadata.block_tables,
                 cu_seqlens_q=attn_metadata.query_start_loc,

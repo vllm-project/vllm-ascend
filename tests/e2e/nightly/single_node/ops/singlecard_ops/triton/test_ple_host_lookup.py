@@ -58,6 +58,8 @@ def test_embedding_close_after_graph_releases_host_owner():
     torch.nn.Module.__init__(embedding)
     table = HostUvaBuffer((32, 160), torch.bfloat16, "npu:0", "_host_table", torch.nn.Module())
     embedding._host_table = table
+    embedding._host_scale = None
+    embedding._quantized = False
     embedding.weight = torch.nn.Parameter(table.tensor, requires_grad=False)
     embedding.embedding_dim = 160
     embedding.etp_data_parallel_size = embedding.tp_size = 1

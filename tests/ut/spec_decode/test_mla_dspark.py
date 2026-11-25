@@ -4,7 +4,7 @@
 from contextlib import contextmanager, nullcontext
 from types import SimpleNamespace
 from typing import Any
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import numpy as np
 import pytest
@@ -19,7 +19,6 @@ from vllm_ascend.attention.mla_v1 import AscendMLABackend
 from vllm_ascend.attention.sfa_v1 import AscendSFABackend, AscendSFAMetadata
 from vllm_ascend.models.kimi_k3 import kimi_k3_dspark
 from vllm_ascend.models.kimi_k3.kimi_k3 import AscendKimiLinearModel
-from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2 import attn_utils
 from vllm_ascend.worker.v2.spec_decode import init_speculator
 from vllm_ascend.worker.v2.spec_decode.dflash import aclgraph as graph
@@ -27,11 +26,24 @@ from vllm_ascend.worker.v2.spec_decode.dspark import speculator as shared
 from vllm_ascend.worker.v2.spec_decode.dspark.speculator import AscendDSparkSpeculator
 
 
+def make_query_metadata(query_lengths):
+    count = len(query_lengths)
+    return SimpleNamespace(
+        actual_seq_lengths_q=query_lengths,
+        seq_lens_list=[5] * count,
+        seq_lens=torch.full((count,), 5, dtype=torch.int32),
+        seq_lens_cpu=torch.full((count,), 5, dtype=torch.int32),
+        block_tables=torch.zeros(count, 1, dtype=torch.int32),
+        block_table=torch.zeros(count, 1, dtype=torch.int32),
+    )
+
+
 def make_speculator():
     spec = AscendDSparkSpeculator.__new__(AscendDSparkSpeculator)
     spec.pcp_manager = None
     spec.enable_adaptive_verification = False
     spec.attn_architecture = "MLA"
+    spec.attn_backends = {name: AscendMLABackend for name in ("draft.0", "draft")}
     spec.use_flashmla = False
     spec.use_dcp = False
     spec.requires_non_causal = True
@@ -63,19 +75,14 @@ def test_dspark_without_pcp_reuses_target_sync(monkeypatch):
     monkeypatch.setattr(shared, "build_attn_metadata_wrapper", nullcontext)
     monkeypatch.setattr(shared, "build_attn_metadata_factory", lambda *a, **kw: nullcontext())
     # Without PCP, both models use the same request layout.
-    if vllm_version_is("0.33.0"):
-        target_sync = DPSyncState(  # type: ignore[call-arg]
-            num_tokens_across_dp=torch.tensor([4, 4]), uniform_token_count=1, eager=False, num_reqs=4
-        )
-    else:
-        # Main adds the agreed query-length bound for varlen decode graphs.
-        target_sync = DPSyncState(  # type: ignore[call-arg]
-            num_tokens_across_dp=torch.tensor([4, 4]),
-            uniform_token_count=1,
-            max_query_len=None,
-            eager=False,
-            num_reqs=4,
-        )
+    # Main adds the agreed query-length bound for varlen decode graphs.
+    target_sync = DPSyncState(  # type: ignore[call-arg]
+        num_tokens_across_dp=torch.tensor([4, 4]),
+        uniform_token_count=1,
+        max_query_len=None,
+        eager=False,
+        num_reqs=4,
+    )
 
     def parent_propose(self, *args, **kwargs):
         sync = args[11]
@@ -190,15 +197,25 @@ def initialize_attention(monkeypatch, draft_backend, target_backend=AscendMLABac
 @pytest.mark.parametrize(
     "backend,metadata_cls", [(AscendDSABackend, AscendDSAMetadata), (AscendSFABackend, AscendSFAMetadata)]
 )
-def test_sparse_mla_metadata_keeps_shared_update(monkeypatch, backend, metadata_cls):
+def test_sparse_mla_metadata_bypasses_fia_update(monkeypatch, backend, metadata_cls):
     spec = initialize_attention(monkeypatch, backend)
     assert spec.attn_architecture is None
-    spec.num_query_per_req = 5
     metadata = metadata_cls.__new__(metadata_cls)
-    assert not hasattr(metadata, "decode")
     layers = {"draft": metadata}
-    assert spec._update_draft_attn_metadata(layers, 2) is layers
-    assert metadata.actual_seq_lengths_q == [5, 10]
+    parent = MagicMock(return_value=layers)
+    update = MagicMock(side_effect=AssertionError("sparse metadata must bypass FIA updates"))
+    monkeypatch.setattr(DSparkSpeculator, "_build_attn_metadata", parent)
+    monkeypatch.setattr(spec, "_update_draft_attn_metadata", update)
+    result = spec._build_attn_metadata(
+        num_reqs=1,
+        batch_desc=SimpleNamespace(cg_mode=object()),
+        query_start_loc_np=np.array([0, 5], dtype=np.int32),
+        seq_lens_cpu_upper_bound=torch.tensor([5]),
+        step=5,
+    )
+    assert result is layers
+    parent.assert_called_once()
+    update.assert_not_called()
 
 
 @pytest.mark.parametrize("wrapped", [False, True])
@@ -247,7 +264,10 @@ def test_raw_prefix_capture_does_not_add_attnres_bank(layer_idx, has_residual):
     target.config = SimpleNamespace(attn_res_block_size=2)
     target.aux_hidden_state_layers = (1, 3)
 
-    captured = target._maybe_add_hidden_state([], layer_idx, state, residual)
+    # Isolate allocation while retaining the original raw-prefix/bank checks.
+    # Native snapshot ownership is exercised without this fixture below.
+    with patch.object(torch.Tensor, "clone", new=lambda value: value):
+        captured = target._maybe_add_hidden_state([], layer_idx, state, residual)
     if layer_idx in target.aux_hidden_state_layers:
         assert len(captured) == 1
         assert captured[0] is state
@@ -258,9 +278,24 @@ def test_raw_prefix_capture_does_not_add_attnres_bank(layer_idx, has_residual):
         torch.testing.assert_close(residual, torch.ones(2, 3, 4))
 
 
+def test_raw_prefix_capture_preserves_the_native_snapshot():
+    target = AscendKimiLinearModel.__new__(AscendKimiLinearModel)
+    torch.nn.Module.__init__(target)
+    target.config = SimpleNamespace(attn_res_block_size=2)
+    target.aux_hidden_state_layers = (1,)
+    state = torch.arange(8).view(2, 4)
+    expected = state.clone()
+    captured = target._maybe_add_hidden_state([], 1, state, torch.ones(2, 3, 4))
+    assert len(captured) == 1
+    torch.testing.assert_close(captured[0], expected, rtol=0, atol=0)
+    assert captured[0] is not state
+    state.add_(100)
+    torch.testing.assert_close(captured[0], expected, rtol=0, atol=0)
+
+
 def test_padded_mla_query_lengths_are_nested():
     spec = make_speculator()
-    metadata = {"draft.0": SimpleNamespace(decode=SimpleNamespace(actual_seq_lengths_q=[5, 5]))}
+    metadata = {"draft.0": SimpleNamespace(decode=make_query_metadata([5, 5]))}
     assert spec._update_draft_attn_metadata(metadata, 2) is metadata
     assert metadata["draft.0"].decode.actual_seq_lengths_q == [5, 10]
     assert not hasattr(metadata["draft.0"], "actual_seq_lengths_q")
@@ -331,7 +366,7 @@ def test_capture_delegates_and_restores_contexts(monkeypatch, architecture, fail
 
 
 @pytest.mark.parametrize("use_dcp", [False, True])
-def test_propose_uses_draft_decode_flags_for_dcp(monkeypatch, use_dcp):
+def test_propose_defers_dcp_host_lengths_until_inputs_are_prepared(monkeypatch, use_dcp):
     spec = make_speculator()
     spec.use_dcp = use_dcp
     spec.max_num_reqs = 4
@@ -354,14 +389,9 @@ def test_propose_uses_draft_decode_flags_for_dcp(monkeypatch, use_dcp):
     result = spec.propose(input_batch, None, None, None, None, None, None, None, None, None, None)
 
     assert result == "draft"
-    if use_dcp:
-        prepare.assert_called_once_with(1, 4, 5)
-        assert captured["seq_lens_cpu"] is prepared_lengths
-        assert captured["is_prefilling"] is prepared_flags
-    else:
-        prepare.assert_not_called()
-        assert captured["seq_lens_cpu"] is None
-        assert captured["is_prefilling"].tolist() == [True] * 4
+    prepare.assert_not_called()
+    assert captured["seq_lens_cpu"] is None
+    assert captured["is_prefilling"].tolist() == [True] * 4
 
 
 @pytest.mark.parametrize("architecture", [None, "GQA", "MLA"])
@@ -371,7 +401,7 @@ def test_replay_metadata_preserves_architecture_behavior(monkeypatch, architectu
     spec.attn_architecture = architecture
     spec.input_batch = SimpleNamespace(num_reqs=1, is_prefilling_np=np.array([True, True]))
     spec._group_causal = {0: False}
-    query_metadata = SimpleNamespace(actual_seq_lengths_q=[5, 5])
+    query_metadata = make_query_metadata([5, 5])
     metadata = {"draft": SimpleNamespace(decode=query_metadata) if architecture == "MLA" else query_metadata}
     builder = MagicMock(return_value=metadata)
     # Keep the real uniform builder so it dispatches to Ascend's new hook.
@@ -382,7 +412,7 @@ def test_replay_metadata_preserves_architecture_behavior(monkeypatch, architectu
 
     @contextmanager
     def factory(positions, pad, is_prefilling, seq_lens_cpu=None, *, attn_state=None, parallel_config=None):
-        if architecture == "MLA":
+        if architecture == "MLA" and seq_lens_cpu is not None:
             assert seq_lens_cpu.tolist() == [5, 0]
         else:
             assert seq_lens_cpu is None
@@ -462,7 +492,7 @@ def test_query_builder_overrides_and_restores_target_context(monkeypatch, archit
         captured.append(kwargs)
         if fail and kwargs["attn_state"] == AscendAttentionState.ChunkedPrefill:
             raise RuntimeError("query failed")
-        query = SimpleNamespace(actual_seq_lengths_q=[5, 5])
+        query = make_query_metadata([5, 5])
         metadata = SimpleNamespace(decode=query) if architecture == "MLA" else query
         metadata.attn_state = kwargs["attn_state"]
         return {"draft": metadata}

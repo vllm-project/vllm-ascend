@@ -89,6 +89,16 @@ def test_qwen4_exp_mtp_position_cache_ignores_other_architectures() -> None:
     assert draft_model_config.max_model_len == 262144
 
 
+def _rope_model_config(uses_mrope: bool) -> SimpleNamespace:
+    rope_parameters = {"mrope_section": [24, 20, 20], "mrope_interleaved": True} if uses_mrope else {}
+    hf_config = SimpleNamespace(rope_parameters=rope_parameters)
+    return SimpleNamespace(
+        uses_mrope=uses_mrope,
+        hf_config=hf_config,
+        hf_text_config=hf_config,
+    )
+
+
 def test_modelslim_mtp_layer_ids_are_remapped_by_qwen_model_adapter() -> None:
     quant_config = SimpleNamespace(
         quant_description={
@@ -160,7 +170,8 @@ def test_position_cache_is_aligned_before_upstream_draft_config(monkeypatch) -> 
     draft_model_config.hf_text_config.mtp_num_hidden_layers = 1
     draft_config = SimpleNamespace(quant_config=None)
 
-    def make_draft_config(_config, _start):
+    def make_draft_config(_config, _start, num_mtp_layers):
+        assert num_mtp_layers == 1
         assert draft_model_config.hf_text_config.max_position_embeddings == 1010000
         assert draft_model_config.max_model_len == 1010000
         return draft_config
@@ -171,6 +182,45 @@ def test_position_cache_is_aligned_before_upstream_draft_config(monkeypatch) -> 
         make_draft_config,
     )
 
-    actual = mtp._make_draft_vllm_config(vllm_config, mtp_start_layer_idx=48)
+    actual = mtp._make_draft_vllm_config(
+        vllm_config,
+        mtp_start_layer_idx=48,
+        num_mtp_layers=1,
+    )
 
     assert actual is draft_config
+
+
+def test_text_target_strips_mrope_from_mtp_draft() -> None:
+    target_model_config = _rope_model_config(uses_mrope=False)
+    draft_model_config = _rope_model_config(uses_mrope=True)
+    config = SimpleNamespace(
+        model_config=target_model_config,
+        speculative_config=SimpleNamespace(
+            target_model_config=target_model_config,
+            draft_model_config=draft_model_config,
+        ),
+    )
+
+    mtp._align_draft_rope_with_target(config)
+
+    assert draft_model_config.hf_text_config.rope_parameters == {}
+
+
+def test_mrope_target_preserves_mrope_on_mtp_draft() -> None:
+    target_model_config = _rope_model_config(uses_mrope=True)
+    draft_model_config = _rope_model_config(uses_mrope=True)
+    config = SimpleNamespace(
+        model_config=target_model_config,
+        speculative_config=SimpleNamespace(
+            target_model_config=target_model_config,
+            draft_model_config=draft_model_config,
+        ),
+    )
+
+    mtp._align_draft_rope_with_target(config)
+
+    assert draft_model_config.hf_text_config.rope_parameters == {
+        "mrope_section": [24, 20, 20],
+        "mrope_interleaved": True,
+    }

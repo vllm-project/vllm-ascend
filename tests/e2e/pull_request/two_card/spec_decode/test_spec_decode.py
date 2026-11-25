@@ -119,7 +119,8 @@ def test_eagle3_sp_acceptance(
         "enforce_eager": True,
         "method": method,
         "num_speculative_tokens": num_speculative_tokens,
-        "disable_padded_drafter_batch": disable_padded_drafter_batch,
+        # Main removed this MRv1 option; the parameter now only drives the
+        # async-combination skip below.
         "model": spec_model_name,
     }
 

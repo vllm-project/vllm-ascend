@@ -100,6 +100,9 @@ class MooncakePushConnectorScheduler(MooncakeBaseConnectorScheduler):
                     num_external_tokens,
                 )
             params["do_remote_prefill"] = False
+            if params.get("do_virtual", False):
+                # Health probes complete locally without dispatching P through the proxy.
+                return
             # The proxy matches external IDs; workers retain the full D ID.
             external_request_id = request.request_id[:-9]
             message = dict(
@@ -144,10 +147,7 @@ class MooncakePushConnectorScheduler(MooncakeBaseConnectorScheduler):
                     continue
                 request, block_ids, num_external_tokens = self._reqs_need_send_layerwise[req_id]
                 if new_blocks is not None:
-                    if req_id in cached_reqs.resumed_req_ids:
-                        block_ids = tuple(list(group) for group in new_blocks)
-                    else:
-                        block_ids = tuple(old + new for old, new in zip(block_ids, new_blocks, strict=True))
+                    block_ids = tuple(old + new for old, new in zip(block_ids, new_blocks, strict=True))
                     self._reqs_need_send_layerwise[req_id] = request, block_ids, num_external_tokens
             for req_id, num_scheduled_tokens in scheduler_output.num_scheduled_tokens.items():
                 if req_id not in self._reqs_need_send_layerwise or req_id in self._reqs_need_send:
@@ -198,6 +198,10 @@ class MooncakePushConnectorScheduler(MooncakeBaseConnectorScheduler):
 
     def request_finished(self, request: "Request", block_ids: BlockIds) -> tuple[bool, dict[str, Any] | None]:
         if not self.kv_transfer_config.is_kv_producer:
+            params = request.kv_transfer_params
+            if params is not None and params.get("do_virtual", False):
+                self._reqs_pending_recv.pop(request.request_id, None)
+                params["do_remote_prefill"] = False
             # Core pins cancelled D receives until finished_recving.
             return False, None
         req_id = request.request_id

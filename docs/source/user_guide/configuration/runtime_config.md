@@ -38,9 +38,9 @@ Valid action names: `report`, `dump_kv`. ActionQueue capacity is a fixed interna
 | `manual_dump` | bool \| int | `false` | Manual dump watermark: `false`, positive int N (catch-up: dump once per armed wave while process `done < N`; **prefer bump 1→2→3**), or `true` (continuous; **not recommended**). Never rewritten by the process. If disk value ≤ `done`, skip. Setting N=5 with `done=0` fires about five dumps across subsequent waves. Reports / `.pt` carry `manual_dump_count` (1-based seq). Multi-DP: each replica tracks its own `done`. **Ops:** start the server first, then raise N in the live JSON (hot-reload required). |
 | `dump_dir` | str \| null | derived | KV dump root (default `<report_dir>/kv_cache`). Layout: `<dump_root>/<incident_type>/<req_id>/dp*_tp*_pp*_cp*/*.pt`. Coverage is last PP × all TP (not other PP). |
 
-Free-space headroom for `dump_kv` (`estimated payload + headroom`) is a fixed internal constant (5 GiB), not a JSON field.
+Free-space headroom for `dump_kv` (`estimated payload + headroom`) is a fixed internal constant (5GB), not a JSON field.
 
-Manual dump / manual trigger skip auto quota and cooldown. Requires `runtime_config_hot_reload=true`.
+Manual dump skips the auto quota and cooldown. Requires `runtime_config_hot_reload=true`.
 
 ## report
 
@@ -51,7 +51,7 @@ Manual dump / manual trigger skip auto quota and cooldown. Requires `runtime_con
 | `max_output_token_ids` | int | `100000` | Truncate persisted output ids |
 | `max_per_req` | int | `1` | Max report files per `(incident_type, req_id)`; at cap, stop detecting that request. Wave backoff (64×2ⁿ) between writes when cap &gt; 1 |
 
-GPU `block_ids` are always included in report detail. Decoding token ids to text follows `save_sensitive_info` (no separate toggle).
+NPU `block_ids` are always included in report detail. Decoding token ids to text follows `save_sensitive_info` (no separate toggle).
 
 `[SamplingMeta]` is emitted at DEBUG on the after-sample path (TP0 + last PP). Enable with `ascend_log` / logger level for `vllm_ascend.observability.runtime_guard` — there is no JSON toggle.
 
@@ -73,11 +73,11 @@ Handlers record a metric when its declared level is less than or equal to this v
 
 ## detector (shared)
 
-Stop-detect is controlled by ``report.max_per_req`` (write-full), not a shared detector flag.
-Default ``actions.defaults.on_trigger`` includes ``report``.
+Stop-detect is controlled by `report.max_per_req` (write-full), not a shared detector flag.
+Default `actions.defaults.on_trigger` includes ``report``.
 
-Detector JSON sections are declared on each detector class (``schema``) and
-registered in ``runtime_config.detector_catalog`` — add/remove a detector there
+Detector JSON sections are declared on each detector class (`schema`) and
+registered in `runtime_config.detector_catalog` — add/remove a detector there
 to refresh defaults, validation, and control-panel field lists.
 
 Each nested detector section supports:
@@ -86,7 +86,7 @@ Each nested detector section supports:
 |-----|------|-------------|
 | `enabled` | bool | Master switch (default `false`) |
 | `on_trigger` | list[str] | Override actions for this incident type |
-| `dump_kv` | object | Per-type dump options: `scope` (`request` \| `all_requests`). Finish-wave arms still dump; artifacts may set `request_finished_at_dump: true` (KV may already be freed/reused — treat as suspect). |
+| `dump_kv` | object | Per-type dump options: `scope` (`request` \| `all_requests`). Finish-wave arms still dump; artifacts may set `request_finished_at_dump: true` (KV may already be freed/reused — treat as suspect). Dump dirs use `dp*_tp*_pp*_cp*` (`cp` from PCP×DCP ranks). Per-layer block tables follow `kv_cache_groups` (hybrid / draft). See [Runtime Guard — Feature compatibility](../feature_guide/runtime_guard.md#feature-compatibility). |
 
 ### spec_acceptance
 
@@ -119,12 +119,12 @@ Per-req INFO short-log throttle is a fixed internal interval (2s), not a JSON fi
 
 Deferred alert-batch queue cap is a fixed internal constant, not a JSON field.
 
-Each step runs a device ``isfinite`` reduction and one all-finite gate. Default
+Each step runs a device `isfinite` reduction and one all-finite gate. Default
 path launches a non-blocking host copy of that gate and waits in
-``check_deferred``. On a hit only, bad rows / ``logits_indices`` / ``finite_kind``
+`check_deferred`. On a hit only, bad rows / `logits_indices` / `finite_kind`
 are resolved (indices are snapshotted at pre-sample when needed). Set
-``item_sync: true`` when you need kind/attribution against pristine pre-sample
-logits. Retired: ``check_every_tokens`` (multi-step window) — ignored if present.
+`item_sync: true` when you need kind/attribution against pristine pre-sample
+logits. Retired: `check_every_tokens` (multi-step window) — ignored if present.
 
 ### manual_trigger
 

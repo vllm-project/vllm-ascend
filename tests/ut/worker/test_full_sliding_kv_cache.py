@@ -155,7 +155,6 @@ def test_memory_budget_sources_preserve_physical_capacity(
     monkeypatch.setattr(worker_module.envs, "VLLM_RANDOMIZE_DP_DUMMY_INPUTS", False)
     monkeypatch.setattr(worker_module.torch.npu, "memory_stats", lambda _: {"allocated_bytes.all.peak": 1})
     monkeypatch.setattr(worker_module, "get_kv_cache_groups", lambda *_: cache.kv_cache_groups)
-    monkeypatch.setattr(worker_module, "get_layerwise_reuse_config", lambda _, *, vllm_config: None)
 
     result = worker.determine_available_memory()
 
@@ -178,6 +177,7 @@ def test_v2_shares_storage_and_keeps_distinct_blocks_isolated(monkeypatch, dtype
     )
     groups = [
         SimpleNamespace(
+            kernel_block_size=None,
             kv_cache_group_id=index,
             kv_cache_spec=group.kv_cache_spec,
             layer_names=group.layer_names,
@@ -189,7 +189,6 @@ def test_v2_shares_storage_and_keeps_distinct_blocks_isolated(monkeypatch, dtype
     allocate = Mock(side_effect=lambda size: torch.zeros(size, dtype=torch.int8))
     monkeypatch.setattr(attn_utils, "get_current_vllm_config", lambda: config)
     monkeypatch.setattr(attn_utils.KVPPConfig, "from_vllm_config", lambda _: SimpleNamespace(size=1))
-    monkeypatch.setattr(attn_utils, "_is_dsv4_model", lambda _: False)
     monkeypatch.setattr(attn_utils, "enable_sfa", lambda _: False)
     monkeypatch.setattr(attn_utils, "_allocate_int8_cache_tensor", lambda size, *_: allocate(size))
     raw = attn_utils._allocate_kv_cache(cache, {}, torch.device("cpu"))
