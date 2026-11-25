@@ -175,10 +175,10 @@ def test_fla_ops_reexport_is_identity_sweepable():
 
 # Reviewed deviations from the signature contract below. Everything
 # else must mirror the original's signature: the dispatcher forwards
-# plain calls verbatim, so a caller's keyword must name a parameter the
-# impl has (or vanish into its **kwargs), and common parameters must
-# keep their relative order so a keyword-only [grid] relaunch binds
-# them to the right slots.
+# plain calls verbatim, so a caller's keyword must name an explicit
+# parameter of the impl (an impl-side **kwargs would swallow it
+# silently), and common parameters must keep their relative order so
+# a keyword-only [grid] relaunch binds them to the right slots.
 _KNOWN_SIGNATURE_DEVIATIONS = {
     # bailing passes lower_bound; the Ascend impl lacks it (known-broken
     # entry, follow-up).
@@ -197,39 +197,53 @@ def _kernel_arg_names(kernel):
     return tuple(names)
 
 
+def _explicit_arg_names(kernel):
+    """The extraction minus the ``**kwargs`` catch-all.
+
+    The catch-all's own name is never a caller-side keyword, and the
+    open names behind it cannot be enumerated statically; the impl
+    covers those with its own ``**kwargs`` or by absorbing the known
+    ones explicitly.
+    """
+    return tuple(n for n in _kernel_arg_names(kernel) if n != "kwargs")
+
+
 @pytest.mark.parametrize("key", sorted(TRITON_KERNEL_OVERRIDES))
 def test_impl_signature_mirrors_the_original(key):
     """Plain-call forwarding makes the impl's signature a contract.
 
-    The dispatcher forwards plain calls verbatim, so every argument name
-    an upstream caller passes must exist on the impl (explicitly or via
-    **kwargs); common parameters must keep their relative order so a
-    keyword-only ``[grid]`` relaunch binds them to the right slots; and
-    an impl-only parameter must be optional or upstream call sites
-    would fail on it. Triton-kernel impls only expose names (no default
-    metadata), so the optionality check covers plain callables.
+    The dispatcher forwards plain calls verbatim, so every explicit
+    argument name of the original must exist on the impl explicitly --
+    an impl-side ``**kwargs`` would swallow a renamed or dropped name
+    silently, which is exactly the failure to catch; it only
+    legitimately absorbs caller-only extras that the original's own
+    ``**kwargs`` accepts. Common parameters must keep their relative
+    order so a keyword-only ``[grid]`` relaunch binds them to the right
+    slots; and an impl-only parameter must be optional or upstream
+    call sites would fail on it. Triton-kernel impls only expose names
+    (no default metadata), so the optionality check covers plain
+    callables.
     """
     if key in _KNOWN_SIGNATURE_DEVIATIONS:
         pytest.skip(_KNOWN_SIGNATURE_DEVIATIONS[key])
     host, attr, _ = _resolve(key)
-    original_names = _kernel_arg_names(getattr(host, attr))
+    original_names = _explicit_arg_names(getattr(host, attr))
     impl = TRITON_KERNEL_OVERRIDES[key]
     impl_params = None
     if hasattr(impl, "arg_names"):
-        impl_names = _kernel_arg_names(impl)
-        accepts_kwargs = False
+        # A Triton kernel has no **kwargs; every name is explicit.
+        impl_explicit = _kernel_arg_names(impl)
     else:
         impl_params = inspect.signature(impl).parameters
-        impl_names = tuple(impl_params)
-        accepts_kwargs = any(p.kind is inspect.Parameter.VAR_KEYWORD for p in impl_params.values())
-    if not accepts_kwargs:
-        missing = [n for n in original_names if n not in impl_names]
-        assert not missing, (
-            f"{key!r}: impl lacks the original parameters {missing}; "
-            "verbatim call sites pass them by name and would raise."
-        )
-    common_original = [n for n in original_names if n in impl_names]
-    common_impl = [n for n in impl_names if n in original_names]
+        impl_explicit = tuple(n for n, p in impl_params.items() if p.kind is not inspect.Parameter.VAR_KEYWORD)
+    missing = [n for n in original_names if n not in impl_explicit]
+    assert not missing, (
+        f"{key!r}: impl lacks the original parameters {missing}; verbatim "
+        "call sites pass them by name and an impl-side **kwargs would "
+        "swallow them silently."
+    )
+    common_original = [n for n in original_names if n in impl_explicit]
+    common_impl = [n for n in impl_explicit if n in original_names]
     assert common_original == common_impl, (
         f"{key!r}: common parameters changed relative order "
         f"(original: {common_original}, impl: {common_impl}); a "
@@ -237,7 +251,11 @@ def test_impl_signature_mirrors_the_original(key):
     )
     if impl_params is not None:
         extra_required = [
-            n for n, p in impl_params.items() if n not in original_names and p.default is inspect.Parameter.empty
+            n
+            for n, p in impl_params.items()
+            if p.kind is not inspect.Parameter.VAR_KEYWORD
+            and n not in original_names
+            and p.default is inspect.Parameter.empty
         ]
         assert not extra_required, (
             f"{key!r}: impl-only parameters {extra_required} lack defaults; upstream call sites would fail on them."

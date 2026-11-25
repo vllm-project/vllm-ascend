@@ -1546,10 +1546,12 @@ def chunk_kda_with_fused_gate(
     scale: float | None = None,
     initial_state: torch.Tensor | None = None,
     output_final_state: bool = False,
+    lower_bound: float = -5.0,
     use_qk_l2norm_in_kernel: bool = False,
     cu_seqlens: torch.Tensor | None = None,
+    # NPU-only parameter in the tail; **kwargs keeps upstream-only
+    # extras harmless.
     safe_gate: bool = False,
-    lower_bound: float = -5.0,
     **kwargs,
 ):
     """Prefill KDA from a raw gate projection, matching upstream FLA's API.

@@ -342,12 +342,15 @@ def chunk_gated_delta_rule(
     initial_state: torch.Tensor = None,
     output_final_state: bool = False,
     cu_seqlens: torch.LongTensor | None = None,
-    prebuilt_meta=None,
-    head_first: bool = False,
-    use_qk_l2norm_in_kernel: bool = False,
     chunk_indices: torch.Tensor | None = None,
     chunk_offsets: torch.Tensor | None = None,
+    use_qk_l2norm_in_kernel: bool = False,
     core_attn_out: torch.Tensor | None = None,
+    # NPU-only parameters stay in the tail with defaults so a
+    # keyword-only [grid] relaunch binds every upstream argument to
+    # its slot (plain callers pass both by name).
+    prebuilt_meta=None,
+    head_first: bool = False,
 ):
     r"""
     Args:
