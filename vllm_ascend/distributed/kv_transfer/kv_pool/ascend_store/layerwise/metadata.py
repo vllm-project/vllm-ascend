@@ -9,6 +9,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence im
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     PoolKey,
     ReqMeta,
+    apply_cache_prefix,
 )
 
 
@@ -21,6 +22,7 @@ class LayerPoolKey(PoolKey):
     def __hash__(self):
         return hash(
             (
+                self.key_metadata.cache_prefix,
                 self.key_metadata.model_name,
                 self.key_metadata.head_or_tp_rank,
                 self.key_metadata.dcp_rank,
@@ -33,7 +35,7 @@ class LayerPoolKey(PoolKey):
         )
 
     def to_string(self):
-        return (
+        key = (
             f"{self.key_metadata.model_name}"
             f"@dcp:{self.key_metadata.dcp_rank}"
             f"@head_or_tp_rank:{self.key_metadata.head_or_tp_rank}"
@@ -43,6 +45,7 @@ class LayerPoolKey(PoolKey):
             f"@layer_id:{self.layer_id}"
             f"@{self.chunk_hash}"
         )
+        return apply_cache_prefix(key, self.key_metadata.cache_prefix)
 
 
 def get_partial_block_index(
