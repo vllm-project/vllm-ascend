@@ -17,8 +17,7 @@ from vllm_ascend.worker.v2.model_states.mamba_hybrid import _compute_aligned_sta
 
 @pytest.mark.parametrize("width", [1, 3, 8, 17])
 @pytest.mark.parametrize("reset_spec", [False, True])
-@pytest.mark.parametrize("full_source", [False, True])
-def test_batched_graph_state_replay_reads_current_group_ids(width, reset_spec, full_source):
+def test_batched_graph_state_replay_reads_current_group_ids(width, reset_spec):
     torch.npu.set_device(0)
     groups, capacity = 23, 8
     tables = (
@@ -26,6 +25,9 @@ def test_batched_graph_state_replay_reads_current_group_ids(width, reset_spec, f
         + 2**24
         + 1
     )
+    # Exercise a prefix view alongside full source tables in the same launch.
+    sources = list(tables.unbind())
+    sources[-1] = sources[-1][:, :width]
     outputs = [torch.full((capacity, width), -99, dtype=torch.int32, device="npu") for _ in range(groups)]
     resets = [
         torch.full((capacity, 4), 99, dtype=torch.int32, device="npu") if reset_spec else None for _ in range(groups)
@@ -34,12 +36,7 @@ def test_batched_graph_state_replay_reads_current_group_ids(width, reset_spec, f
     updater = GDNGraphStateUpdater()
 
     def prepare(count):
-        updater.apply(
-            [
-                (src if full_source else src[:, :width], dst, count, capacity, 0, reset)
-                for src, dst, reset in zip(tables, outputs, resets)
-            ]
-        )
+        updater.apply([(src, dst, count, capacity, 0, reset) for src, dst, reset in zip(sources, outputs, resets)])
 
     main_stream = torch.npu.current_stream()
     stream, graph = torch.npu.Stream(), torch.npu.NPUGraph()

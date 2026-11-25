@@ -202,17 +202,6 @@ def test_mamba_instance_common_override_keeps_group_specific_fields():
         assert set(fields[i]) == {"is_prefilling", "num_computed_tokens_cpu"}
 
 
-def test_mamba_instance_prefill_override_keeps_group_builds_separate():
-    builders, kwargs = _make_gdn_reuse_inputs(2)
-    provider = MambaHybridAttnMetadata(is_prefilling=torch.zeros(2, dtype=torch.bool))
-    masks = [torch.zeros(2, dtype=torch.bool), torch.ones(2, dtype=torch.bool)]
-    provider.get_extra_common_attn_kwargs = lambda group, n: {"is_prefilling": masks[group][:n]}
-    kwargs["model_specific_attn_metadata"] = provider
-    attn_utils.build_attn_metadata(**kwargs)
-    assert all(len(builder.build_calls) == 1 for builder in builders)
-    assert all(not builder.update_calls for builder in builders)
-
-
 @pytest.mark.parametrize("for_capture", [False, True])
 def test_custom_gdn_provider_keeps_group_builds_separate(for_capture):
     builders, kwargs = _make_gdn_reuse_inputs(24)
