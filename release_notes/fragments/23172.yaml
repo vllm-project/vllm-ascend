@@ -1,0 +1,7 @@
+pr: 23172
+entries:
+  - category: bugfix
+    text: >-
+      Added an opt-in Memcache layerwise KV read limit for workloads that encounter long GVA read stalls
+      over UBoE. Set `kv_pool_memcache_g2l_max_transfer_addrs` in `--additional-config` to enable it.
+      The default of 0 leaves the address count unrestricted by this setting.
