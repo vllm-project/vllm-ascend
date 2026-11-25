@@ -194,7 +194,7 @@ def _suffix_local_scan_kernel(
 
 
 @triton.jit
-def _finalize_and_corpus_a_kernel(
+def _suffix_local_finalize_kernel(
     token_ids_ptr,  # *int32  [max_num_reqs, Lp1]
     token_ids_stride,  # int64
     idx_mapping_ptr,  # *int32  [B]
@@ -205,9 +205,6 @@ def _finalize_and_corpus_a_kernel(
     scratch_stride,  # int64
     num_blocks,  # int32
     Lp1,  # int64 (max_model_len + 1)
-    corpus_ptr,  # *int32  [corpus_len]
-    corpus_len,  # int32
-    table_ptr,  # *int64  [2, NUM_BUCKETS, SLOTS]
     drafts_ptr,  # *int64  [B, K]  (output)
     req_drafts_ptr,  # *int64  [max_num_reqs, K]  (output)
     num_valid_ptr,  # *int32  [B]  (output)
@@ -215,25 +212,21 @@ def _finalize_and_corpus_a_kernel(
     last_bucket_ptr,  # *int32  [max_num_reqs]  (output)
     last_valid_ptr,  # *int32  [max_num_reqs]  (output)
     conf_ptr,  # *fp32  [B, K]  (output)
-    seeded_ptr,  # *bool  [B]  seeded request sampled at temperature > 0
-    out_clen_ptr,  # *int32  [B, 2 * SLOTS]
-    out_vals_ptr,  # *int64  [B, 2 * SLOTS]
-    out_cont_t_ptr,  # *int32  [B, K_PO2, 2 * SLOTS]
-    out_llen_ptr,  # *int32  [B] (-1 means skip corpus stage B)
+    out_llen_ptr,  # *int32  [B]
     req_drafts_stride: tl.constexpr,
-    HAS_CORPUS: tl.constexpr,
+    WRITE_LLEN: tl.constexpr,
     ADAPTIVE: tl.constexpr,
     WRITE_REQ_DRAFTS: tl.constexpr,
-    HASH_MUL: tl.constexpr,
-    NUM_BUCKETS: tl.constexpr,
-    SLOTS: tl.constexpr,
-    MAX_DEPTH: tl.constexpr,
-    DEPTH_PO2: tl.constexpr,
     K: tl.constexpr,
     K_PO2: tl.constexpr,
     NB_PO2: tl.constexpr,
 ):
-    """Finalize local suffix draft and prepare transposed corpus candidates."""
+    """Finalize local suffix draft independently from 2D corpus lookup.
+
+    Keeping the 1D block-reduction finalize separate from the 2D corpus stage A
+    kernel avoids a triton-ascend 3.6 UB-allocation miscompile when
+    ``NB_PO2 >= 64`` and corpus lookup are fused in the same kernel.
+    """
     b = tl.program_id(0)
     req = tl.load(idx_mapping_ptr + b)
     seq_len = tl.load(total_len_ptr + req)
@@ -267,6 +260,8 @@ def _finalize_and_corpus_a_kernel(
     if WRITE_REQ_DRAFTS:
         tl.store(req_drafts_ptr + req.to(tl.int64) * req_drafts_stride + k_iota, out, mask=k_mask)
     tl.store(num_valid_ptr + b, num_valid)
+    if WRITE_LLEN:
+        tl.store(out_llen_ptr + b, l_len)
 
     if ADAPTIVE:
         # Per-position confidence for adaptive verification: the observed
@@ -281,20 +276,50 @@ def _finalize_and_corpus_a_kernel(
         tl.store(last_bucket_ptr + req, tl.where(num_valid > 0, bucket, -1).to(tl.int32))
         tl.store(last_valid_ptr + req, num_valid)
 
-    if not HAS_CORPUS:
-        return
+
+@triton.jit
+def _suffix_corpus_a_kernel(
+    token_ids_ptr,  # *int32  [max_num_reqs, Lp1]
+    token_ids_stride,  # int64
+    idx_mapping_ptr,  # *int32  [B]
+    total_len_ptr,  # *int32  [max_num_reqs]
+    num_sampled_ptr,  # *int32  [B]
+    corpus_ptr,  # *int32  [corpus_len]
+    corpus_len,  # int32
+    table_ptr,  # *int64  [2, NUM_BUCKETS, SLOTS]
+    seeded_ptr,  # *bool  [B]  seeded request sampled at temperature > 0
+    out_clen_ptr,  # *int32  [B, 2 * SLOTS]
+    out_vals_ptr,  # *int64  [B, 2 * SLOTS]
+    out_cont_t_ptr,  # *int32  [B, K_PO2, 2 * SLOTS]
+    inout_llen_ptr,  # *int32  [B] (in: l_len, out: -1 means skip corpus stage B)
+    HASH_MUL: tl.constexpr,
+    NUM_BUCKETS: tl.constexpr,
+    SLOTS: tl.constexpr,
+    MAX_DEPTH: tl.constexpr,
+    DEPTH_PO2: tl.constexpr,
+    K: tl.constexpr,
+    K_PO2: tl.constexpr,
+):
+    """Prepare transposed corpus continuation candidates."""
+    b = tl.program_id(0)
+    req = tl.load(idx_mapping_ptr + b)
+    seq_len = tl.load(total_len_ptr + req)
+    num_sampled = tl.load(num_sampled_ptr + b)
+    l_len = tl.load(inout_llen_ptr + b)
 
     # Corpus drafts change as other requests finish, and the rejection
     # sampler's draws depend on the drafts, so seeded sampled requests
     # draft only from their own history to stay reproducible.
     seeded = tl.load(seeded_ptr + b).to(tl.int32)
     if (num_sampled <= 0) | (seeded != 0) | (l_len >= MAX_DEPTH):
-        tl.store(out_llen_ptr + b, -1)
+        tl.store(inout_llen_ptr + b, -1)
         return
 
+    row = token_ids_ptr + req.to(tl.int64) * token_ids_stride
     C: tl.constexpr = 2 * SLOTS
     c_iota = tl.arange(0, C)
     d_iota = tl.arange(0, DEPTH_PO2)
+    k_iota = tl.arange(0, K_PO2)
 
     # Hash the trailing tokens newest-first, as ingestion does.
     hv = tl.zeros((), tl.int64)
@@ -316,7 +341,7 @@ def _finalize_and_corpus_a_kernel(
     )
     vals = tl.load(table_ptr + slot)
     if tl.max((vals >= 0).to(tl.int32), axis=0) == 0:
-        tl.store(out_llen_ptr + b, -1)
+        tl.store(inout_llen_ptr + b, -1)
         return
 
     tail_pos = seq_len - 1 - d_iota
@@ -341,7 +366,7 @@ def _finalize_and_corpus_a_kernel(
     nxt = tl.load(corpus_ptr + _cpos, mask=(vals >= 0) & (cpos >= 0) & (cpos < corpus_len), other=-1)
     ok = (vals >= 0) & (nxt >= 0) & (c_len >= key_len) & (seq_len >= key_len)
     if tl.max(ok.to(tl.int32), axis=0) == 0:
-        tl.store(out_llen_ptr + b, -1)
+        tl.store(inout_llen_ptr + b, -1)
         return
 
     # Both buckets often hold the same position; count it once.
@@ -349,7 +374,7 @@ def _finalize_and_corpus_a_kernel(
     ok = ok & (tl.max(dup.to(tl.int32), axis=0) == 0)
     c_len_ok = tl.where(ok, c_len, 0)
     if tl.max(c_len_ok, axis=0) <= l_len:
-        tl.store(out_llen_ptr + b, -1)
+        tl.store(inout_llen_ptr + b, -1)
         return
 
     # Continuations, cut at the first document separator.
@@ -362,7 +387,6 @@ def _finalize_and_corpus_a_kernel(
     )
     cont = tl.where(tl.cumsum((cont < 0).to(tl.int32), axis=1) == 0, cont, -1)
 
-    tl.store(out_llen_ptr + b, l_len)
     tl.store(out_clen_ptr + b * C + c_iota, c_len_ok)
     tl.store(out_vals_ptr + b * C + c_iota, vals)
     d_k = tl.arange(0, K_PO2)
@@ -1058,7 +1082,7 @@ class SuffixSpeculator(BaseSpeculator):
                 BLOCK=self.block_l,
                 num_warps=4,
             )
-            _finalize_and_corpus_a_kernel[(num_reqs,)](
+            _suffix_local_finalize_kernel[(num_reqs,)](
                 token_ids,
                 tid_stride,
                 idx_mapping,
@@ -1069,9 +1093,6 @@ class SuffixSpeculator(BaseSpeculator):
                 scr_stride,
                 active_n_blocks,
                 lp1,
-                self.corpus,
-                self.corpus.shape[0],
-                self.table,
                 self.drafts,
                 req_drafts_buf,
                 self.num_valid,
@@ -1079,26 +1100,40 @@ class SuffixSpeculator(BaseSpeculator):
                 self.last_bucket,
                 self.last_valid,
                 self.draft_token_confidence_probs,
-                seeded,
-                self._corpus_clen,
-                self._corpus_vals,
-                self._corpus_cont_t,
                 self._corpus_llen,
                 req_drafts_stride=req_drafts_stride,
-                HAS_CORPUS=self.has_corpus,
+                WRITE_LLEN=self.has_corpus,
                 ADAPTIVE=self.enable_adaptive_verification,
                 WRITE_REQ_DRAFTS=write_req_drafts,
-                HASH_MUL=_HASH_MUL,
-                NUM_BUCKETS=self.num_buckets,
-                SLOTS=_BUCKET_SLOTS,
-                MAX_DEPTH=self.max_depth,
-                DEPTH_PO2=depth_po2,
                 K=self.num_speculative_steps,
                 K_PO2=k_po2,
                 NB_PO2=active_nb_po2,
                 num_warps=4,
             )
             if self.has_corpus:
+                _suffix_corpus_a_kernel[(num_reqs,)](
+                    token_ids,
+                    tid_stride,
+                    idx_mapping,
+                    total_len,
+                    num_sampled,
+                    self.corpus,
+                    self.corpus.shape[0],
+                    self.table,
+                    seeded,
+                    self._corpus_clen,
+                    self._corpus_vals,
+                    self._corpus_cont_t,
+                    self._corpus_llen,
+                    HASH_MUL=_HASH_MUL,
+                    NUM_BUCKETS=self.num_buckets,
+                    SLOTS=_BUCKET_SLOTS,
+                    MAX_DEPTH=self.max_depth,
+                    DEPTH_PO2=depth_po2,
+                    K=self.num_speculative_steps,
+                    K_PO2=k_po2,
+                    num_warps=4,
+                )
                 _corpus_b_1d_kernel[(num_reqs,)](
                     idx_mapping,
                     last_sampled_flat,
@@ -1168,11 +1203,10 @@ class SuffixSpeculator(BaseSpeculator):
                     lp1,
                 )
 
-            fa_key = ("fa", dev_idx, active_n_blocks == 1, active_nb_po2, write_req_drafts, p_align)
-            k_fa = self._triton_kcache.get(fa_key)
-            corpus_len = self.corpus.shape[0]
-            if k_fa is None:
-                k_fa = _finalize_and_corpus_a_kernel[(num_reqs,)](
+            lf_key = ("lf", dev_idx, active_n_blocks == 1, active_nb_po2, write_req_drafts, p_align & 7)
+            k_lf = self._triton_kcache.get(lf_key)
+            if k_lf is None:
+                k_lf = _suffix_local_finalize_kernel[(num_reqs,)](
                     token_ids,
                     tid_stride,
                     idx_mapping,
@@ -1183,9 +1217,6 @@ class SuffixSpeculator(BaseSpeculator):
                     scr_stride,
                     active_n_blocks,
                     lp1,
-                    self.corpus,
-                    corpus_len,
-                    self.table,
                     self.drafts,
                     req_drafts_buf,
                     self.num_valid,
@@ -1193,35 +1224,26 @@ class SuffixSpeculator(BaseSpeculator):
                     self.last_bucket,
                     self.last_valid,
                     self.draft_token_confidence_probs,
-                    seeded,
-                    self._corpus_clen,
-                    self._corpus_vals,
-                    self._corpus_cont_t,
                     self._corpus_llen,
                     req_drafts_stride=req_drafts_stride,
-                    HAS_CORPUS=self.has_corpus,
+                    WRITE_LLEN=self.has_corpus,
                     ADAPTIVE=self.enable_adaptive_verification,
                     WRITE_REQ_DRAFTS=write_req_drafts,
-                    HASH_MUL=_HASH_MUL,
-                    NUM_BUCKETS=self.num_buckets,
-                    SLOTS=_BUCKET_SLOTS,
-                    MAX_DEPTH=self.max_depth,
-                    DEPTH_PO2=depth_po2,
                     K=self.num_speculative_steps,
                     K_PO2=k_po2,
                     NB_PO2=active_nb_po2,
                     num_warps=4,
                 )
-                self._triton_kcache[fa_key] = k_fa
+                self._triton_kcache[lf_key] = k_lf
             else:
                 st = get_raw_stream(dev_idx)
-                k_fa.run(
+                k_lf.run(
                     num_reqs,
                     1,
                     1,
                     st,
-                    k_fa.function,
-                    k_fa.packed_metadata,
+                    k_lf.function,
+                    k_lf.packed_metadata,
                     None,
                     None,
                     None,
@@ -1235,9 +1257,6 @@ class SuffixSpeculator(BaseSpeculator):
                     scr_stride,
                     active_n_blocks,
                     lp1,
-                    self.corpus,
-                    corpus_len,
-                    self.table,
                     self.drafts,
                     req_drafts_buf,
                     self.num_valid,
@@ -1245,14 +1264,64 @@ class SuffixSpeculator(BaseSpeculator):
                     self.last_bucket,
                     self.last_valid,
                     self.draft_token_confidence_probs,
-                    seeded,
-                    self._corpus_clen,
-                    self._corpus_vals,
-                    self._corpus_cont_t,
                     self._corpus_llen,
                 )
 
             if self.has_corpus:
+                corpus_len = self.corpus.shape[0]
+                ca_key = ("ca", dev_idx, p_align & 11)
+                k_ca = self._triton_kcache.get(ca_key)
+                if k_ca is None:
+                    k_ca = _suffix_corpus_a_kernel[(num_reqs,)](
+                        token_ids,
+                        tid_stride,
+                        idx_mapping,
+                        total_len,
+                        num_sampled,
+                        self.corpus,
+                        corpus_len,
+                        self.table,
+                        seeded,
+                        self._corpus_clen,
+                        self._corpus_vals,
+                        self._corpus_cont_t,
+                        self._corpus_llen,
+                        HASH_MUL=_HASH_MUL,
+                        NUM_BUCKETS=self.num_buckets,
+                        SLOTS=_BUCKET_SLOTS,
+                        MAX_DEPTH=self.max_depth,
+                        DEPTH_PO2=depth_po2,
+                        K=self.num_speculative_steps,
+                        K_PO2=k_po2,
+                        num_warps=4,
+                    )
+                    self._triton_kcache[ca_key] = k_ca
+                else:
+                    st = get_raw_stream(dev_idx)
+                    k_ca.run(
+                        num_reqs,
+                        1,
+                        1,
+                        st,
+                        k_ca.function,
+                        k_ca.packed_metadata,
+                        None,
+                        None,
+                        None,
+                        token_ids,
+                        tid_stride,
+                        idx_mapping,
+                        total_len,
+                        num_sampled,
+                        self.corpus,
+                        corpus_len,
+                        self.table,
+                        seeded,
+                        self._corpus_clen,
+                        self._corpus_vals,
+                        self._corpus_cont_t,
+                        self._corpus_llen,
+                    )
                 cb_key = ("cb", dev_idx, write_req_drafts, p_align & 5)
                 k_cb = self._triton_kcache.get(cb_key)
                 if k_cb is None:
