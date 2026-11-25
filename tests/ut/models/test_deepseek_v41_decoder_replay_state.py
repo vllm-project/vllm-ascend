@@ -188,6 +188,43 @@ def test_pcp_decoder_replay_keeps_only_original_tail_owners(state, local_end, ex
     assert replay_start.tolist() == [6]
 
 
+def test_pcp_short_cold_prefill_keeps_ordinary_replay(state):
+    # A cold 129-token query on PCP8 leaves each rank an 18-row slice. Compacting
+    # would pad every rank to the 128-row global window, so keep the ordinary
+    # replay, which already covers the window when no context is cached.
+    state.layers.window = 128
+    state.config.parallel_config.prefill_context_parallel_size = 8
+    local_batch = SimpleNamespace(
+        num_reqs=1,
+        is_dummy=False,
+        num_tokens_after_padding=18,
+        query_start_loc_np=np.array([0, 18], dtype=np.int32),
+        seq_lens_np=np.array([129], dtype=np.int32),
+        is_prefilling_np=np.array([True]),
+        idx_mapping_np=np.array([0], dtype=np.int32),
+    )
+    global_batch = SimpleNamespace(
+        num_reqs=1,
+        query_start_loc_np=np.array([0, 129], dtype=np.int32),
+        seq_lens_np=np.array([129], dtype=np.int32),
+        is_prefilling_np=np.array([True]),
+        idx_mapping_np=np.array([0], dtype=np.int32),
+    )
+    replay_inputs = replay_mod.DecoderReplayInputs(
+        local_batch,
+        (),
+        torch.empty(1, 18),
+        [],
+        torch.zeros(1, dtype=torch.int32),
+        SimpleNamespace(global_batch=global_batch),
+    )
+    assert state._pcp_kept_lengths(replay_inputs) is None
+
+    state.prepare(replay_inputs, CUDAGraphMode.NONE)
+    assert state.layers.rows is None
+    assert state.layers.num_padded_rows is None
+
+
 def pcp_prefix_hit_inputs(world, rank, *, seq_len=16):
     # A prefix hit schedules the hit's last replay window plus the uncached tail.
     # PCP splits that query into 2 * world chunks (one token each here); each rank
