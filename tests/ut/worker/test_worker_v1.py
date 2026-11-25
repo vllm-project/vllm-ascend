@@ -1658,7 +1658,8 @@ class TestNPUWorker(TestBase):
             self.assertEqual(result, mock_model_output)
 
     @patch("vllm_ascend.worker.worker.CaMemAllocator")
-    def test_load_model_with_sleep_mode(self, mock_allocator_class):
+    @patch("vllm_ascend.worker.worker.shared_expert_tp_enable", return_value=False)
+    def test_load_model_with_sleep_mode(self, _mock_shared_tp, mock_allocator_class):
         """Test load_model method - with sleep mode enabled"""
         from vllm_ascend.worker.worker import NPUWorker
 
@@ -1688,7 +1689,8 @@ class TestNPUWorker(TestBase):
             mock_allocator.use_memory_pool.assert_called_once_with(tag="weights")
             worker.model_runner.load_model.assert_called_once()
 
-    def test_load_model_without_sleep_mode(self):
+    @patch("vllm_ascend.worker.worker.shared_expert_tp_enable", return_value=False)
+    def test_load_model_without_sleep_mode(self, _mock_shared_tp):
         """Test load_model method - without sleep mode enabled"""
         from vllm_ascend.worker.worker import NPUWorker
 
@@ -1707,7 +1709,8 @@ class TestNPUWorker(TestBase):
             # Verify calls
             worker.model_runner.load_model.assert_called_once()
 
-    def test_load_model_leaves_prewarm_join_to_model_runner(self):
+    @patch("vllm_ascend.worker.worker.shared_expert_tp_enable", return_value=False)
+    def test_load_model_leaves_prewarm_join_to_model_runner(self, _mock_shared_tp):
         """Joining prewarm threads belongs to the shared model load, not the worker."""
         from vllm_ascend.worker.worker import NPUWorker
 

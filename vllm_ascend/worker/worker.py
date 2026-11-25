@@ -119,6 +119,7 @@ from vllm_ascend.utils import (
     register_ascend_fla_customop,
     register_device_print,
     setup_ascend_local_comm_res,
+    shared_expert_tp_enable,
 )
 
 if TYPE_CHECKING:
@@ -1007,6 +1008,17 @@ class NPUWorker(GPUWorker):
 
         with context, empty_cache_context, set_current_vllm_config(self.vllm_config):
             self.model_runner.load_model()
+
+        if shared_expert_tp_enable():
+            from vllm_ascend.ops.fused_moe.fused_moe import AscendMoERunner
+
+            if not any(
+                isinstance(module, AscendMoERunner)
+                and module.ascend_shared_experts is not None
+                and module.ascend_shared_experts.finegrained_tp_group is not None
+                for module in self.get_model().modules()
+            ):
+                raise ValueError("shared_expert_tensor_parallel_size > 1 requires a layer using shared-expert TP.")
 
         if has_ec_transfer():
             get_ec_transfer().start_worker_services()

@@ -1489,6 +1489,7 @@ class TestSubconfigPydanticTypeValidation(TestBase):
             vc = self._oproj_tp_vllm_config()
             vc.parallel_config.pipeline_parallel_size = 1
             vc.model_config.hf_text_config = SimpleNamespace(model_type="glm5_next_text", linear_num_heads=64)
+            vc.model_config.hf_config = vc.model_config.hf_text_config
             return vc
 
         for size in (2, 4, 8):
@@ -1506,8 +1507,10 @@ class TestSubconfigPydanticTypeValidation(TestBase):
             FinegrainedTPConfig(qkv_iproj_tensor_parallel_size=2)._validate_preconditions(vc)
         vc = deployment()
         vc.model_config.hf_text_config.model_type = "other"
-        with self.assertRaisesRegex(ValueError, "GLM-5.3-Flash only"):
+        with self.assertRaisesRegex(ValueError, "supports GLM-5.3-Flash and Kimi-K3.1 only"):
             FinegrainedTPConfig(qkv_iproj_tensor_parallel_size=2)._validate_preconditions(vc)
+        for size in (0, 1):
+            FinegrainedTPConfig(qkv_iproj_tensor_parallel_size=size)._validate_preconditions(vc)
         with self.assertRaisesRegex(ValueError, "divide the KDA head count"):
             FinegrainedTPConfig(qkv_iproj_tensor_parallel_size=3)._validate_preconditions(deployment())
         vc = deployment()
@@ -1516,6 +1519,16 @@ class TestSubconfigPydanticTypeValidation(TestBase):
             FinegrainedTPConfig(qkv_iproj_tensor_parallel_size=4)._validate_preconditions(vc)
         with self.assertRaisesRegex(ValueError, "qkv_iproj_tensor_parallel_size must be non-negative"):
             FinegrainedTPConfig(qkv_iproj_tensor_parallel_size=-1)
+
+    def test_gproj_tp_rejects_models_without_gate_sharding(self):
+        vc = self._oproj_tp_vllm_config()
+        for model_type in ("glm5_next", "kimi_linear", "other"):
+            with self.subTest(model_type=model_type):
+                vc.model_config.hf_config = SimpleNamespace(model_type=model_type)
+                with self.assertRaisesRegex(ValueError, "supported only on Kimi K3.1 Pro"):
+                    FinegrainedTPConfig(gproj_tensor_parallel_size=2)._validate_preconditions(vc)
+                for size in (0, 1):
+                    FinegrainedTPConfig(gproj_tensor_parallel_size=size)._validate_preconditions(vc)
 
     def test_oproj_tp_rejects_pcp(self):
         config = FinegrainedTPConfig(oproj_tensor_parallel_size=2)
