@@ -1013,6 +1013,7 @@ vLLM Ascend revision.
     export VLLM_ENGINE_READY_TIMEOUT_S=36000
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
     export HCCL_BUFFSIZE=1024
+    export HCCL_EXEC_TIMEOUT=2048
     export HCCL_OP_EXPANSION_MODE="AIV"
     export ASCEND_RT_VISIBLE_DEVICES="$1"
 
@@ -1113,6 +1114,7 @@ vLLM Ascend revision.
     export TP_SOCKET_IFNAME="$NIC_NAME"
     export HCCL_SOCKET_IFNAME="$NIC_NAME"
     export HCCL_BUFFSIZE=4096
+    export HCCL_EXEC_TIMEOUT=2048
     export ASCEND_RT_VISIBLE_DEVICES="$1"
 
     # Ensure the model path matches the directory recorded during download
@@ -2148,6 +2150,7 @@ Select the tab for the target hardware.
     export VLLM_ENGINE_READY_TIMEOUT_S=36000
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
     export HCCL_BUFFSIZE=1024
+    export HCCL_EXEC_TIMEOUT=2048
     export HCCL_OP_EXPANSION_MODE="AIV"
     export ASCEND_RT_VISIBLE_DEVICES="$1"
 
@@ -2259,6 +2262,7 @@ Select the tab for the target hardware.
     export TP_SOCKET_IFNAME="$NIC_NAME"
     export HCCL_SOCKET_IFNAME="$NIC_NAME"
     export HCCL_BUFFSIZE=4096
+    export HCCL_EXEC_TIMEOUT=2048
     export ASCEND_RT_VISIBLE_DEVICES="$1"
 
     # Parameters required by the Memcache KV Cache Pool.
@@ -2551,6 +2555,7 @@ for the required software and networking versions.
     export VLLM_ENGINE_READY_TIMEOUT_S=36000
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
     export HCCL_BUFFSIZE=1024
+    export HCCL_EXEC_TIMEOUT=2048
     export HCCL_OP_EXPANSION_MODE="AIV"
     export ASCEND_RT_VISIBLE_DEVICES="$1"
 
@@ -2680,6 +2685,7 @@ for the required software and networking versions.
         exit 1
     fi
     export HCCL_BUFFSIZE=4096
+    export HCCL_EXEC_TIMEOUT=2048
     export ASCEND_RT_VISIBLE_DEVICES="$1"
 
     # Parameters required by the Mooncake KV Cache Pool.
