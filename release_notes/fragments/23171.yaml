@@ -1,0 +1,6 @@
+pr: 23171
+entries:
+  - category: performance
+    text: Reduced PCP activation transfer before routed MoE experts during DeepSeek V4 W4A8MXFP prefill on Ascend A5.
+    model: deepseek-v4
+    hardware: [A5]
