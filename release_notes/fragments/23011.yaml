@@ -1,0 +1,7 @@
+pr: 23011
+entries:
+  - category: bugfix
+    text: >-
+      Fixed a MegaMoE communication context issue during speculative decoding on
+      Atlas A5. Target and draft MoE layers can share a compatible communication
+      window, and layers with incompatible layouts use ordinary MoE communication.
