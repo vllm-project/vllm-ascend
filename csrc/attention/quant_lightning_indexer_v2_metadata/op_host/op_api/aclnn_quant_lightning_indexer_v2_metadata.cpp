@@ -37,10 +37,11 @@ extern "C" {
 aclnnStatus aclnnVllmAscendQuantLightningIndexerV2MetadataGetWorkspaceSize(
     const aclTensor *cuSeqlensQOptional, const aclTensor *cuSeqlensKOptional, const aclTensor *sequsedQOptional,
     const aclTensor *sequsedKOptional, const aclTensor *cmpResidualKOptional,
-    const aclTensor *causalSeqlensKvGlobalOptional, int64_t numHeadsQ, int64_t numHeadsK, int64_t headDim,
-    int64_t topk, int64_t quantMode, int64_t batchSize, int64_t maxSeqlenQ, int64_t maxSeqlenK, char *layoutQOptional,
-    char *layoutKOptional, int64_t maskMode, int64_t cmpRatio, int64_t enableDcp, int64_t cpWorld, int64_t cpRank,
-    int64_t cpInterleaveSize, const aclTensor *metadata, uint64_t *workspaceSize, aclOpExecutor **executor)
+    const aclTensor *candidateBlockLengthOptional, const aclTensor *causalSeqlensKvGlobalOptional, int64_t numHeadsQ,
+    int64_t numHeadsK, int64_t headDim, int64_t topk, int64_t quantMode, int64_t batchSize, int64_t maxSeqlenQ,
+    int64_t maxSeqlenK, char *layoutQOptional, char *layoutKOptional, int64_t maskMode, int64_t cmpRatio,
+    int64_t enableDcp, int64_t cpWorld, int64_t cpRank, int64_t cpInterleaveSize, const aclTensor *metadata,
+    uint64_t *workspaceSize, aclOpExecutor **executor)
 {
     if (workspaceSize == nullptr) {
         OP_LOGE(ACLNN_ERR_INNER_NULLPTR, "workspaceSize is nullptr");
@@ -52,9 +53,10 @@ aclnnStatus aclnnVllmAscendQuantLightningIndexerV2MetadataGetWorkspaceSize(
     }
     L2_DFX_PHASE_1(aclnnVllmAscendQuantLightningIndexerV2Metadata,
                    DFX_IN(cuSeqlensQOptional, cuSeqlensKOptional, sequsedQOptional, sequsedKOptional,
-                          cmpResidualKOptional, causalSeqlensKvGlobalOptional, numHeadsQ, numHeadsK, headDim, topk,
-                          quantMode, batchSize, maxSeqlenQ, maxSeqlenK, layoutQOptional, layoutKOptional, maskMode,
-                          cmpRatio, enableDcp, cpWorld, cpRank, cpInterleaveSize),
+                          cmpResidualKOptional, candidateBlockLengthOptional, causalSeqlensKvGlobalOptional,
+                          numHeadsQ, numHeadsK, headDim, topk, quantMode, batchSize, maxSeqlenQ, maxSeqlenK,
+                          layoutQOptional, layoutKOptional, maskMode, cmpRatio, enableDcp, cpWorld, cpRank,
+                          cpInterleaveSize),
                    DFX_OUT(metadata));
 
     auto uniqueExecutor = CREATE_EXECUTOR();
@@ -113,6 +115,13 @@ aclnnStatus aclnnVllmAscendQuantLightningIndexerV2MetadataGetWorkspaceSize(
         }
     }
 
+    const aclTensor *candidateBlockLengthOptionalContiguous = nullptr;
+    if (candidateBlockLengthOptional != nullptr) {
+        candidateBlockLengthOptionalContiguous = l0op::Contiguous(candidateBlockLengthOptional, uniqueExecutor.get());
+        if (candidateBlockLengthOptionalContiguous == nullptr) {
+            OP_LOGE(ACLNN_ERR_INNER_NULLPTR, "candidate_block_length contiguous is null");
+        }
+    }
     const aclTensor *causalSeqlensKvGlobalOptionalContiguous = nullptr;
     if (causalSeqlensKvGlobalOptional != nullptr) {
         causalSeqlensKvGlobalOptionalContiguous = l0op::Contiguous(causalSeqlensKvGlobalOptional, uniqueExecutor.get());
@@ -124,10 +133,10 @@ aclnnStatus aclnnVllmAscendQuantLightningIndexerV2MetadataGetWorkspaceSize(
 
     auto output = l0op::QuantLightningIndexerV2Metadata(
         cuSeqlensQOptionalContiguous, cuSeqlensKOptionalContiguous, sequsedQOptionalContiguous,
-        sequsedKOptionalContiguous, cmpResidualLKOptionalContiguous, causalSeqlensKvGlobalOptionalContiguous, numHeadsQ,
-        numHeadsK, headDim, topk, quantMode, batchSize, maxSeqlenQ, maxSeqlenK, layoutQOptional, layoutKOptional,
-        maskMode, cmpRatio, enableDcp, cpWorld, cpRank, cpInterleaveSize, aicCoreNum, aivCoreNum, socVersion.c_str(),
-        metadata, uniqueExecutor.get());
+        sequsedKOptionalContiguous, cmpResidualLKOptionalContiguous, candidateBlockLengthOptionalContiguous,
+        causalSeqlensKvGlobalOptionalContiguous, numHeadsQ, numHeadsK, headDim, topk, quantMode, batchSize,
+        maxSeqlenQ, maxSeqlenK, layoutQOptional, layoutKOptional, maskMode, cmpRatio, enableDcp, cpWorld, cpRank,
+        cpInterleaveSize, aicCoreNum, aivCoreNum, socVersion.c_str(), metadata, uniqueExecutor.get());
     CHECK_RET(output != nullptr, ACLNN_ERR_INNER_NULLPTR);
 
     *workspaceSize = uniqueExecutor->GetWorkspaceSize();
