@@ -4027,7 +4027,7 @@ def test_unified_runtime_views_use_attention_group_block_size(group_block_size):
     )
     backing = torch.zeros(num_blocks * spec.page_size_bytes, dtype=torch.int8)
     caches = attn_utils.create_kv_cache_runtime_views(config, backing, [group], [256], {"alias": name})
-    get_components.assert_called_once_with(spec, num_blocks, kernel_block_size=expected_block_size)
+    get_components.assert_called_once_with(spec, num_blocks, None, kernel_block_size=expected_block_size)
     view = caches[name][0]
     assert view.shape == (num_blocks * 256 // expected_block_size, expected_block_size, 1, 4)
     assert view.stride(0) * view.element_size() == spec.page_size_bytes * expected_block_size // 256

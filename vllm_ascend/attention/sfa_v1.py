@@ -411,6 +411,7 @@ class AscendSFABackend(AttentionBackend):
         cls,
         spec: AscendMLAAttentionSpec,
         num_blocks: int,
+        layout: Any,
         kernel_block_size: int | None = None,
     ) -> KVCacheRuntimeShapesAndDtypes:
         """Describe the packed or split SFA main cache in storage elements."""

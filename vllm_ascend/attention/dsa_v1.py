@@ -326,6 +326,7 @@ class AscendDSABackend(AttentionBackend):
         cls,
         spec: AttentionSpec,
         num_blocks: int,
+        layout: Any,
         kernel_block_size: int | None = None,
     ) -> KVCacheRuntimeShapesAndDtypes:
         """Return the final component view shapes in NHD order and their storage dtypes."""

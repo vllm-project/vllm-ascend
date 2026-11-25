@@ -14,6 +14,7 @@
 # limitations under the License.
 
 from dataclasses import dataclass
+from typing import Any
 
 import torch
 from vllm.config import VllmConfig, get_current_vllm_config_or_none
@@ -1118,6 +1119,7 @@ class AscendGDNAttentionBackend(GDNAttentionBackend):
     def get_runtime_shapes_and_dtypes(
         spec: MambaSpec,
         num_blocks: int,
+        layout: Any,
         kernel_block_size: int | None = None,
     ) -> KVCacheRuntimeShapesAndDtypes:
         # The leading state dimension indexes manager blocks.
