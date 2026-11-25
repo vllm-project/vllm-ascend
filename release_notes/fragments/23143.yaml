@@ -1,0 +1,8 @@
+pr: 23143
+entries:
+  - category: documentation
+    text: >-
+      Added a FAQ entry for host pinned memory allocation failures
+      (`207001` / `EL0018`) on hosts whose memory is fragmented, with the
+      commands to inspect the free 2 MB blocks and to recover them, plus a
+      warning in the DeepSeek-V4.1-Flash deployment guide.
