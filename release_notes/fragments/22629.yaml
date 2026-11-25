@@ -1,4 +1,0 @@
-pr: 22629
-entries:
-  - category: feature
-    text: Level-2 sleep now discards only weights allocations that contain parameter data rewritten by the weight update; mixed and non-parameter weights allocations are kept in CPU backup and restored on wake-up. sleep_preserve_parameter_names still keeps selected parameters, and draft parameters (draft.*) must be preserved or restored through the draft weight-update path.
