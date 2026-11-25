@@ -25,6 +25,9 @@ if TYPE_CHECKING:
     from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.pool_worker import LayerwiseKVPoolWorker
 
 
+_OBJECT_ALREADY_EXISTS = -705
+
+
 def snapshot_key(worker: LayerwiseKVPoolWorker, request: ReqMeta, group: int, index: int, endpoint: int) -> str:
     incarnation = request.layerwise_request_id
     if not incarnation:
@@ -172,26 +175,48 @@ def _open_puts(worker, slots):
         if key in sizes and sizes[key] != size:
             raise ValueError("Mooncake offload key has inconsistent object sizes")
         sizes[key] = size
-    missing = worker._filter_pool_existing_keys(list(sizes))
     started = set()
-    try:
+
+    def open_missing(target_sizes, *, allow_fallback):
+        conflicts = set()
+        missing = worker._filter_pool_existing_keys(list(target_sizes))
         for batch in worker._layerwise_key_batches(missing):
             codes = require_aligned_batch_results(
-                "batch_put_start", batch, worker.m_store.batch_put_start(batch, [sizes[key] for key in batch])
+                "batch_put_start", batch, worker.m_store.batch_put_start(batch, [target_sizes[key] for key in batch])
             )
             opened = {key for key, code in zip(batch, codes, strict=True) if code == 0}
             started.update(opened)
             with worker._put_started_keys_lock:
                 worker._put_started_keys.update(opened)
-            rejected = [key for key, code in zip(batch, codes, strict=True) if code != 0]
-            # A competing writer may have committed since the existence probe.
-            # An unfinished competing PUT is not a safe offload destination.
-            if rejected and worker._filter_pool_existing_keys(rejected):
-                raise RuntimeError("Mooncake offload could not open a required PUT session")
+            rejected = {key: code for key, code in zip(batch, codes, strict=True) if code != 0}
+            for key in worker._filter_pool_existing_keys(list(rejected)):
+                if not allow_fallback or rejected[key] != _OBJECT_ALREADY_EXISTS or "offload_v1:" in key:
+                    raise RuntimeError("Mooncake offload could not open a required PUT session")
+                conflicts.add(key)
+        return conflicts
+
+    fallbacks = []
+    resolved_slots = []
+    fallback_sizes = {}
+    try:
+        conflicts = open_missing(sizes, allow_fallback=True)
+        for view, key, slot, size in slots:
+            if key in conflicts:
+                incarnation = view.layerwise_request_id
+                if not incarnation:
+                    raise ValueError("Offload PUT conflict requires a request incarnation")
+                # Do not wait here: the public writer may need this rank to
+                # enter an EP collective before it can finish the write.
+                key = f"{key}@offload_v1:fallback:{incarnation}"
+                fallback_sizes[key] = size
+                fallbacks.append((view, slot, key))
+            resolved_slots.append((view, key, slot, size))
+        if fallback_sizes:
+            open_missing(fallback_sizes, allow_fallback=False)
     except Exception:
         worker._queue_layerwise_revoke_keys(list(started))
         raise
-    for view, key, slot, _ in slots:
+    for view, key, slot, _ in resolved_slots:
         if key in started:
             # Use one request's source pages for a deduplicated public write.
             started.remove(key)
@@ -199,6 +224,7 @@ def _open_puts(worker, slots):
                 view.save_last_block_key = key
             else:
                 view.save_block_keys[slot] = key
+    return fallbacks
 
 
 def prepare_offload_sessions(worker: LayerwiseKVPoolWorker, requests: list[ReqMeta]) -> dict[int, list[ReqMeta]]:
@@ -210,6 +236,7 @@ def prepare_offload_sessions(worker: LayerwiseKVPoolWorker, requests: list[ReqMe
     get_slots = []
     put_slots: list[tuple[ReqMeta, str, int | None, int]] = []
     pending = {}
+    save_records = {}
     config = getattr(worker, "kv_cache_config", None)
     window_groups = getattr(config, "block_key_prefill_windows", {})
     next_snapshots: dict[str, dict[int, dict[int, str]]] = {}
@@ -242,6 +269,7 @@ def prepare_offload_sessions(worker: LayerwiseKVPoolWorker, requests: list[ReqMe
                 get_slots.append((view, key, request.block_ids_by_group[group][index], index))
             group_snapshots = snapshots.setdefault(group, previous.get(group, {}).copy())
             saves = _save_entries(worker, request, view, group, hashes, group_snapshots)
+            checkpoint_pages = None
             if (
                 group in window_groups
                 and not worker.group_uses_align_state[group]
@@ -258,16 +286,25 @@ def prepare_offload_sessions(worker: LayerwiseKVPoolWorker, requests: list[ReqMe
                 first = _continuation_window_start(
                     worker, group, request.target_token_len, worker.grouped_block_size[group], request
                 )
+                checkpoint_pages = {
+                    index: key for index, key in pages.items() if (first or 0) <= index < len(ids) and ids[index]
+                }
                 pending[(request.req_id, request.layerwise_request_id, group)] = (
-                    request.target_token_len,
-                    {index: key for index, key in pages.items() if (first or 0) <= index < len(ids) and ids[index]},
+                    request.target_token_len, checkpoint_pages
                 )
+            if saves:
+                save_records[id(view)] = (group_snapshots, checkpoint_pages)
             put_slots.extend((view, key, slot, sum(worker.group_block_len[group])) for key, slot in saves)
             groups[group].append(view)
     try:
         worker._open_layerwise_get_sessions(get_slots)
         worker._check_hybrid_load_errors()
-        _open_puts(worker, put_slots)
+        for view, slot, key in _open_puts(worker, put_slots):
+            index = view.partial_block_index if slot is None else view.save_key_block_offset + slot
+            group_snapshots, checkpoint_pages = save_records[id(view)]
+            group_snapshots[index] = key
+            if checkpoint_pages is not None and index in checkpoint_pages:
+                checkpoint_pages[index] = key
         worker._offload_pending_pages = pending
         for views in groups.values():
             for view in views:
