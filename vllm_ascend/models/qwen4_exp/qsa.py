@@ -14,8 +14,10 @@
 
 """Ascend QSA owner for Qwen3.8-Flash-Next."""
 
-from copy import copy
+from __future__ import annotations
+
 import math
+from copy import copy
 from dataclasses import replace
 from typing import TYPE_CHECKING, Any, Protocol, TypeAlias, cast
 
@@ -74,7 +76,6 @@ if TYPE_CHECKING:
     import vllm.models.qwen4_exp.amd.qsa_indexer as upstream_indexer
     import vllm.models.qwen4_exp.common.qsa_indexer as qsa_indexer
     from vllm.models.qwen4_exp.common.qsa_indexer import (
-        QSAIndexerBackend,
         QSAIndexerMetadataBuilder,
         QSARawKeyCache,
     )
@@ -102,7 +103,7 @@ UpstreamQSABackend = upstream_qsa.Qwen4ExpQSABackend  # type: ignore[attr-define
 QSAKVCache: TypeAlias = tuple[torch.Tensor, torch.Tensor]
 
 
-def _resolve_qsa_layer(layer_name: Any) -> "AscendQwen4ExpQSAAttention":
+def _resolve_qsa_layer(layer_name: Any) -> AscendQwen4ExpQSAAttention:
     resolved = upstream_qsa._resolve_layer_name(layer_name)
     layer = get_forward_context().no_compile_layers[resolved]
     if not isinstance(layer, AscendQwen4ExpQSAAttention):
@@ -111,7 +112,7 @@ def _resolve_qsa_layer(layer_name: Any) -> "AscendQwen4ExpQSAAttention":
 
 
 def _gather_pcp_cache_rows(
-    rows: torch.Tensor, pcp_context: "AscendPCPAttentionContext", num_write_tokens: int
+    rows: torch.Tensor, pcp_context: AscendPCPAttentionContext, num_write_tokens: int
 ) -> torch.Tensor:
     if rows.shape[0] != pcp_context.local_num_tokens:
         raise ValueError("QSA PCP cache input must include the rank-local padding")
@@ -786,8 +787,9 @@ class AscendQSAIndexerMetadataBuilder(QSAIndexerMetadataBuilderBase):  # type: i
         # FULL graphs may pad the request dimension up to the token capacity.
         max_requests = max(max_requests, max_tokens, requests)
         index_heads = int(layer.indexer.index_n_heads)
-        table_columns = int(common_attn_metadata.block_table_tensor.shape[1])
-        table_dtype = common_attn_metadata.block_table_tensor.dtype
+        block_table = common_attn_metadata.block_table_tensor
+        table_columns = int(block_table.shape[1]) if block_table is not None else 1
+        table_dtype = block_table.dtype if block_table is not None else torch.int32
         signature = (device, max_requests, max_tokens, index_heads, table_columns, table_dtype)
         buffer_cache = getattr(self, "_qsa_prepared_buffers", None)
         if buffer_cache is None:
@@ -831,11 +833,14 @@ class AscendQSAIndexerMetadataBuilder(QSAIndexerMetadataBuilderBase):  # type: i
         if getattr(metadata, "num_prefills", 0):
             return metadata
 
+        if block_table is None:
+            raise RuntimeError("QSA decode metadata requires a scheduler block table")
+
         prepare_qsa_gbsa_shared(
             metadata.logical_positions,
             metadata.seq_lens,
             metadata.token_to_req,
-            common_attn_metadata.block_table_tensor,
+            block_table,
             buffers["visible_lengths"],
             buffers["row_block_table"],
             rows,
@@ -915,7 +920,7 @@ QSAIndexerBackend.get_builder_cls = staticmethod(lambda: AscendQSAIndexerMetadat
 qsa_indexer.build_qsa_metadata = qsa_indexer._build_qsa_metadata_torch
 
 
-class AscendPCPQSAIndexerMetadataBuilder(QSAIndexerMetadataBuilder):
+class AscendPCPQSAIndexerMetadataBuilder(AscendQSAIndexerMetadataBuilder):
     def __init__(self, kv_cache_spec, layer_names, vllm_config, device):
         # Read metadata addresses the local prefill segments. Write
         # metadata needs separate buffers and the original requests.
@@ -1006,11 +1011,24 @@ class AscendQwen4ExpQSAAttention(upstream_qsa.Qwen4ExpQSAAttention):
         # stay at the sentinel value for the lifetime of this persistent buffer.
         self.topk_indices_buffer.fill_(-1)
         self._indexer_stream = None
+        self._gate_buffers: dict[tuple[torch.device, torch.dtype, tuple[int, ...]], torch.Tensor] = {}
 
     def _qsa_indexer_stream(self):
         if self._indexer_stream is None:
             self._indexer_stream = torch.npu.Stream()
         return self._indexer_stream
+
+    def _gate_buffer_for(self, attn_output: torch.Tensor) -> torch.Tensor:
+        gate_buffers = getattr(self, "_gate_buffers", None)
+        if gate_buffers is None:
+            gate_buffers = {}
+            self._gate_buffers = gate_buffers
+        gate_key = (attn_output.device, attn_output.dtype, tuple(attn_output.shape))
+        gate = gate_buffers.get(gate_key)
+        if gate is None:
+            gate = torch.empty_like(attn_output)
+            gate_buffers[gate_key] = gate
+        return gate
 
     def _num_actual_tokens(self) -> int:
         metadata = get_forward_context().attn_metadata
@@ -1018,7 +1036,33 @@ class AscendQwen4ExpQSAAttention(upstream_qsa.Qwen4ExpQSAAttention):
             metadata = metadata[0]
         if not isinstance(metadata, dict):
             return 0
-        return cast(Any, metadata[self.layer_name]).num_actual_tokens
+        raw_prefix = self.indexer.raw_key_cache.prefix
+        raw_metadata = metadata.get(raw_prefix)
+        return int(raw_metadata.num_actual_tokens) if raw_metadata is not None else 0
+
+    def _fused_qkv_prepare_eligible(
+        self,
+        qkv: torch.Tensor,
+        positions: torch.Tensor,
+    ) -> bool:
+        mrope_section = getattr(self.rotary_emb, "mrope_section", None)
+        return bool(
+            qkv.ndim == 2
+            and qkv.is_contiguous()
+            and qkv.dtype == torch.bfloat16
+            and positions.ndim in (1, 2)
+            and positions.shape[-1] == qkv.shape[0]
+            and positions.dtype in (torch.int32, torch.int64)
+            and positions.device == qkv.device
+            and mrope_section
+            and len(mrope_section) == 3
+            and hasattr(self.rotary_emb, "mrope_interleaved")
+            and getattr(self.rotary_emb, "rotary_dim", None) is not None
+            and self.q_norm.weight.shape == (self.head_dim,)
+            and self.k_norm.weight.shape == (self.head_dim,)
+            and self.q_norm.weight.device == qkv.device
+            and self.k_norm.weight.device == qkv.device
+        )
 
     def _start_indexer_projection(
         self,
@@ -1111,7 +1155,7 @@ class AscendQwen4ExpQSAAttention(upstream_qsa.Qwen4ExpQSAAttention):
         num_actual_tokens = self._num_actual_tokens()
         encoded_layer_name = upstream_qsa._encode_layer_name(self.layer_name)
         if self.use_fused_qsa_prepare:
-            gate = torch.empty_like(attn_output)
+            gate = self._gate_buffer_for(attn_output)
             if index_query is not None and index_token_k is not None and current_platform.opaque_attention_op():
                 torch.ops.vllm.qwen4_exp_ascend_qsa_prepare_with_output(
                     hidden_states,
@@ -1244,6 +1288,9 @@ class AscendQwen4ExpQSAAttention(upstream_qsa.Qwen4ExpQSAAttention):
         side_metadata = metadata[self.indexer.raw_key_cache.prefix]
         if side_metadata.num_actual_tokens != num_tokens:
             raise RuntimeError("QSA main and side metadata token counts disagree")
+        compressed_side_metadata = metadata[self.indexer.compressed_key_cache.prefix]
+        if compressed_side_metadata.num_actual_tokens != num_tokens:
+            raise RuntimeError("QSA main and compressed metadata token counts disagree")
 
         # Newer vLLM revisions call the owner with the packed projection when
         # ``use_fused_qsa_prepare`` is enabled. The upstream indexer consumes
@@ -1253,35 +1300,44 @@ class AscendQwen4ExpQSAAttention(upstream_qsa.Qwen4ExpQSAAttention):
         if qkv is not None:
             if gate is None:
                 raise RuntimeError("Fused QSA preparation requires an output gate")
-            prepared_cos_sin = getattr(self.rotary_emb, "_prepared_cos_sin", None)
-            if prepared_cos_sin is None:
-                prepared_cos_sin = getattr(self, "_qsa_prepared_cos_sin", None)
-            # A prepared MRoPE table has one row group per position axis. For
-            # ordinary one-axis RoPE, gather the full cache in-kernel instead.
-            if prepared_cos_sin is not None and prepared_cos_sin.ndim == 3:
-                cos_sin = prepared_cos_sin
-                rope_positions = None
+            if not self._fused_qkv_prepare_eligible(qkv, positions):
+                q, k, v, projected_gate = self._project_qkv_gate(qkv, positions)
+                if projected_gate is None:
+                    raise RuntimeError("QSA fallback preparation did not produce a gate")
+                gate.copy_(projected_gate.view_as(gate))
+                query = q.view(-1, self.num_heads, self.head_dim)
+                key = k.view(-1, self.num_kv_heads, self.head_dim)
+                value = v.view(-1, self.num_kv_heads, self.head_dim)
             else:
-                cos_sin = self.rotary_emb._match_cos_sin_cache_dtype(qkv)  # noqa: SLF001
-                rope_positions = positions
-            q, k, v = qwen4_exp_split_qkv_rmsnorm_mrope_out(
-                qkv,
-                self.q_norm.weight,
-                self.k_norm.weight,
-                cos_sin,
-                gate.view(qkv.shape[0], -1),
-                self.num_heads,
-                self.num_kv_heads,
-                self.head_dim,
-                self.q_norm.variance_epsilon,
-                list(self.rotary_emb.mrope_section),
-                self.rotary_emb.mrope_interleaved,
-                self.rotary_emb.rotary_dim,
-                rope_positions,
-            )
-            query = q.view(-1, self.num_heads, self.head_dim)
-            key = k.view(-1, self.num_kv_heads, self.head_dim)
-            value = v.view(-1, self.num_kv_heads, self.head_dim)
+                prepared_cos_sin = getattr(self.rotary_emb, "_prepared_cos_sin", None)
+                if prepared_cos_sin is None:
+                    prepared_cos_sin = getattr(self, "_qsa_prepared_cos_sin", None)
+                # A prepared MRoPE table has one row group per position axis. For
+                # ordinary one-axis RoPE, gather the full cache in-kernel instead.
+                if prepared_cos_sin is not None and prepared_cos_sin.ndim == 3:
+                    cos_sin = prepared_cos_sin
+                    rope_positions = None
+                else:
+                    cos_sin = self.rotary_emb._match_cos_sin_cache_dtype(qkv)  # noqa: SLF001
+                    rope_positions = positions
+                q, k, v = qwen4_exp_split_qkv_rmsnorm_mrope_out(
+                    qkv,
+                    self.q_norm.weight,
+                    self.k_norm.weight,
+                    cos_sin,
+                    gate.view(qkv.shape[0], -1),
+                    self.num_heads,
+                    self.num_kv_heads,
+                    self.head_dim,
+                    self.q_norm.variance_epsilon,
+                    list(self.rotary_emb.mrope_section),
+                    self.rotary_emb.mrope_interleaved,
+                    self.rotary_emb.rotary_dim,
+                    rope_positions,
+                )
+                query = q.view(-1, self.num_heads, self.head_dim)
+                key = k.view(-1, self.num_kv_heads, self.head_dim)
+                value = v.view(-1, self.num_kv_heads, self.head_dim)
 
         if (index_query is None) != (index_token_k is None):
             raise RuntimeError("QSA pipelined Indexer projections must be paired")
@@ -1359,7 +1415,7 @@ class AscendQwen4ExpQSAAttention(upstream_qsa.Qwen4ExpQSAAttention):
                     token_to_req=side_metadata.token_to_req,
                     logical_positions=side_metadata.logical_positions,
                     seq_lens=side_metadata.seq_lens,
-                    qsa_step_metadata=side_metadata,
+                    qsa_step_metadata=compressed_side_metadata,
                 )
             else:
                 # main's ABI drops K/V from the signature; pass them back so
@@ -1375,7 +1431,7 @@ class AscendQwen4ExpQSAAttention(upstream_qsa.Qwen4ExpQSAAttention):
                     seq_lens=side_metadata.seq_lens,
                     key=key,
                     value=value,
-                    qsa_step_metadata=side_metadata,
+                    qsa_step_metadata=compressed_side_metadata,
                 )
         maybe_save_kv_layer_to_connector(self.layer_name, list(self.kv_cache))
 

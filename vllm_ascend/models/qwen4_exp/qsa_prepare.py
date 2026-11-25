@@ -22,8 +22,8 @@ def _prepare_qsa_rope_cache_kernel(
     cache_stride_row,
     cache_stride_col,
     output_stride_row,
-    num_tokens: tl.constexpr,
-    cache_rows: tl.constexpr,
+    num_tokens,
+    cache_rows,
     cache_width: tl.constexpr,
     BLOCK: tl.constexpr,
 ):

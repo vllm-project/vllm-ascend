@@ -89,3 +89,39 @@ def test_compressed_builder_owns_decode_step_preparation():
     torch.testing.assert_close(metadata.qsa_gbsa_row_block_table[:3], table[[0, 1, 0]])
     assert metadata.qsa_score_weights.shape == (8, 3)
     assert metadata.qsa_gbsa_cu_query.tolist() == list(range(9))
+
+
+def test_prefill_builder_accepts_missing_block_table():
+    calls = []
+
+    def prepare_lengths(lengths, compressed, residual, requests, ratio):
+        calls.append("lengths")
+
+    def prepare_gbsa(*args):
+        calls.append("gbsa")
+
+    builder_cls = _load_builder(prepare_lengths, prepare_gbsa)
+    main_layer = SimpleNamespace(indexer=SimpleNamespace(index_n_heads=3, index_head_dim=128))
+    config = SimpleNamespace(
+        compilation_config=SimpleNamespace(static_forward_context={"model.layers.0.self_attn.attn": main_layer}),
+        scheduler_config=SimpleNamespace(max_num_seqs=4, max_num_batched_tokens=8),
+    )
+    builder = builder_cls(
+        SimpleNamespace(compress_ratio=4),
+        ["model.layers.0.self_attn.indexer.compressed_key_cache"],
+        config,
+        torch.device("cpu"),
+    )
+    metadata = SimpleNamespace(
+        num_prefills=1,
+        num_actual_tokens=3,
+        seq_lens=torch.tensor([5], dtype=torch.int32),
+    )
+
+    result = builder.build(
+        0,
+        SimpleNamespace(result=metadata, block_table_tensor=None),
+    )
+
+    assert result is metadata
+    assert calls == ["lengths"]

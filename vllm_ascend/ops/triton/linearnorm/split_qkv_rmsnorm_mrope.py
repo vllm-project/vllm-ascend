@@ -79,10 +79,10 @@ def split_qkv_rmsnorm_mrope_kernel(
     gate_size: tl.constexpr,
     weight_offset: tl.constexpr,
     positions_ptr=None,
-    position_stride_axis: tl.constexpr = 0,
-    position_stride_token: tl.constexpr = 0,
-    cache_stride: tl.constexpr = 0,
-    cache_rows: tl.constexpr = 0,
+    position_stride_axis=0,
+    position_stride_token=0,
+    cache_stride=0,
+    cache_rows=0,
     GATHER_CACHE: tl.constexpr = False,
 ):
     block_idx = tl.program_id(0)

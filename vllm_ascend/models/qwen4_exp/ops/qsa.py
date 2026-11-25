@@ -387,9 +387,12 @@ def pack_qsa_group_indices_npu(
         assert key is not None and value is not None
         assert key_cache is not None and value_cache is not None and slot_mapping is not None
         if key.ndim == 3:
-            if key.shape[1] != 1 or value.shape[1] != 1:
+            if key.shape[1] != 1:
                 raise ValueError("QSA fused K/V rows require one local KV head")
             key = key[:, 0]
+        if value.ndim == 3:
+            if value.shape[1] != 1:
+                raise ValueError("QSA fused K/V rows require one local KV head")
             value = value[:, 0]
         if key.ndim != 2 or value.shape != key.shape:
             raise ValueError("QSA fused K/V rows must have matching two-dimensional shapes")
@@ -630,9 +633,12 @@ def qsa_store_kv_rows(
 ) -> None:
     """Store main QSA key and value rows in one launch."""
     if key_rows.ndim == 3:
-        if key_rows.shape[1] != 1 or value_rows.shape[1] != 1:
+        if key_rows.shape[1] != 1:
             raise ValueError("QSA combined K/V store requires one local KV head")
         key_rows = key_rows[:, 0]
+    if value_rows.ndim == 3:
+        if value_rows.shape[1] != 1:
+            raise ValueError("QSA combined K/V store requires one local KV head")
         value_rows = value_rows[:, 0]
     if key_cache.ndim != 4 or key_cache.shape[2] != 1:
         raise ValueError("QSA combined K/V cache requires a singleton-head layout")

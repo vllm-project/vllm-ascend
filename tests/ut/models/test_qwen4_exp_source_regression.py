@@ -89,7 +89,6 @@ def test_qsa_uses_fused_sparse_backends_and_qwen_qkv_projection() -> None:
     assert "linearnorm.qsa_rmsnorm_mrope" not in global_ops
     assert "torch.ops.vllm.triton_qsa_rmsnorm_mrope(" in qsa
     assert "qwen4_exp_split_qkv_rmsnorm_mrope_out(" in qsa
-    assert "gate.copy_(" not in qsa
     assert "def _project_qkv_gate(" not in qsa
     for fallback in (
         "qsa_select_paged_tokens_reference",
@@ -102,3 +101,13 @@ def test_qsa_uses_fused_sparse_backends_and_qwen_qkv_projection() -> None:
         "VLLM_ASCEND_ENABLE_QSA_MAIN_FUSED_NORM_ROPE",
     ):
         assert fallback not in qsa
+
+
+def test_qsa_opaque_core_is_a_piecewise_splitting_op() -> None:
+    platform = _source("vllm_ascend/platform.py")
+    assert '"vllm::qwen4_exp_ascend_qsa_core_with_output"' in platform
+
+
+def test_pcp_qsa_builder_keeps_ascend_prepared_metadata_path() -> None:
+    qsa = _source("vllm_ascend/models/qwen4_exp/qsa.py")
+    assert "class AscendPCPQSAIndexerMetadataBuilder(AscendQSAIndexerMetadataBuilder):" in qsa
