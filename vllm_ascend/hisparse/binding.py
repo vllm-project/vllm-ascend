@@ -7,6 +7,7 @@ from dataclasses import replace
 from typing import Any
 
 import torch
+from vllm.utils.torch_utils import get_dtype_size
 from vllm.v1.kv_cache_interface import (
     HiSparseHotSpec,
     HiSparseResidentSpec,
@@ -15,7 +16,13 @@ from vllm.v1.kv_cache_interface import (
     UniformTypeKVCacheSpecs,
 )
 
-from vllm_ascend.core.kv_cache_interface import AscendSFAIndexerCacheSpec
+from vllm_ascend.core.kv_cache_interface import (
+    AscendIndexerKPoolTailSpec,
+    AscendMLAAttentionSpec,
+    AscendSFAIndexerCacheSpec,
+    get_storage_block_size,
+    is_pooled_hisparse_indexer,
+)
 
 
 def align_hisparse_indexer_specs(
@@ -43,6 +50,9 @@ def align_hisparse_indexer_specs(
                 alignment = math.lcm(alignment, spec.head_size, torch.float32.itemsize)
             else:
                 alignment = math.lcm(alignment, spec.page_size_bytes)
+        elif isinstance(spec, AscendIndexerKPoolTailSpec):
+            row_bytes = spec.unpadded_page_size_bytes // spec.ring_capacity
+            alignment = math.lcm(alignment, row_bytes)
         elif packed_row_bytes is not None and isinstance(spec, (HiSparseResidentSpec, HiSparseHotSpec)):
             # Core derives these synthetic specs without the source row alignment.
             # Declare it before shared-slab sizing, never round runtime addresses.
@@ -180,3 +190,56 @@ def _bind_indexer_views(
         )
         forward_context[name].hisparse_block_stride = block_stride
         kv_caches[name] = (indexer_cache,)
+
+
+def view_hisparse_kpool_cache(cache: torch.Tensor, spec: AscendMLAAttentionSpec) -> tuple[torch.Tensor, ...]:
+    """Expose HiSparse pooled keys and scales in PA_BBND layout."""
+    width = spec.head_size
+    rows = get_storage_block_size(spec)
+    row_elements = spec.state_content_size_bytes // cache.element_size()
+    if (
+        cache.ndim != 4
+        or cache.shape[1:] != (1, rows, row_elements)
+        or cache.stride()[2:] != (row_elements, 1)
+        or cache.dtype != spec.dtype
+        or cache.stride(0) < rows * row_elements
+    ):
+        raise ValueError("Invalid HiSparse KPool cache geometry.")
+    if not spec.scale_dim:
+        return (cache.transpose(1, 2),)
+
+    # K followed by scales in each manager page, the same component
+    # order as the ordinary Indexer. Page IDs and write slots need no rebase.
+    pages = cache.shape[0]
+    stride = cache.stride(0)
+    key_bytes = rows * width
+    scale_size = get_dtype_size(spec.scale_dtype)
+    scale_offset = cache.storage_offset() + key_bytes
+    if (
+        cache.element_size() != 1
+        or spec.scale_dim != 1
+        or row_elements != width + scale_size
+        or stride % scale_size
+        or scale_offset % scale_size
+    ):
+        raise ValueError("Invalid HiSparse KPool scale alignment.")
+    keys = cache.as_strided((pages, rows, 1, width), (stride, width, width, 1))
+    scale_base = cache.as_strided((0,), (1,), storage_offset=0).view(spec.scale_dtype)
+    scales = scale_base.as_strided(
+        (pages, rows, 1, 1), (stride // scale_size, 1, 1, 1), storage_offset=scale_offset // scale_size
+    )
+    return keys, scales
+
+
+def _bind_pooled_indexer_views(kv_cache_config: KVCacheConfig, kv_caches: dict[str, Any]) -> None:
+    """Bind device-only pooled keys and request-private tails by cache spec."""
+    for group in kv_cache_config.kv_cache_groups:
+        for name in group.layer_names:
+            spec = group.kv_cache_spec
+            if isinstance(spec, UniformTypeKVCacheSpecs):
+                spec = spec.kv_cache_specs[name]
+            if isinstance(spec, AscendIndexerKPoolTailSpec):
+                # Core's shape is [blocks, 1, ring_capacity, 2 * head_dim].
+                kv_caches[name] = (kv_caches[name].squeeze(1),)
+            elif is_pooled_hisparse_indexer(spec):
+                kv_caches[name] = view_hisparse_kpool_cache(kv_caches[name], spec)
