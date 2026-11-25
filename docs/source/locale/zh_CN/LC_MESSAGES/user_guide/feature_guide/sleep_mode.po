@@ -138,9 +138,6 @@ msgid ""
 msgstr ""
 "启用额外清理后，仅当`tags`为`None`或包含`\"kv_cache\"`时才会重新捕获ACL图。这避免了在外部重新加载的权重和KV缓存状态准备好之前重新捕获图。"
 
-msgid "## Prepare Model Weights"
-msgstr "## 准备模型权重"
-
 msgid ""
 "Use the `Qwen2.5-0.5B-Instruct` model weights. With "
 "`VLLM_USE_MODELSCOPE=True`, the model will be downloaded automatically from "
@@ -185,3 +182,6 @@ msgstr ""
 
 msgid "- Online serving:"
 msgstr "- 在线服务："
+
+msgid "## Prepare model weights"
+msgstr "## 准备模型权重"

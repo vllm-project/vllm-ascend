@@ -657,3 +657,8 @@ msgid ""
 msgstr ""
 "**注意：**\n"
 "`max-model-len` 和 `max-num-seqs` 需要根据实际使用场景进行设置。其他设置请参阅**[第 5 节](#5-online-service-deployment)**章节。"
+
+msgid ""
+"{% include \"getting_started/installation/ascend_docker_runtime.inc.md\" %}"
+msgstr ""
+"{% include \"getting_started/installation/ascend_docker_runtime.inc.md\" %}"
