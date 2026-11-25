@@ -311,7 +311,7 @@ class TestCaMem(PytestBase):
             return original_torch_empty(*args, **kwargs)
 
         with patch("vllm_ascend.device_allocator.camem.torch.empty", side_effect=mock_torch_empty):
-            allocator.sleep(offload_tags=("weights",), discardable={1000})
+            allocator.sleep(offload_tags=("weights",), discardable={1000, 2000})
 
         # 1000 is a pure parameter allocation: discard without CPU backup.
         assert allocator.pointer_to_data[1000].cpu_backup_tensor is None
