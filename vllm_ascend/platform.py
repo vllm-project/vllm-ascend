@@ -67,7 +67,6 @@ from vllm_ascend.utils import (
     refresh_block_size,
     update_cudagraph_capture_sizes,
     enable_sp,
-    vllm_version_is,
 )
 
 if TYPE_CHECKING:
@@ -103,6 +102,123 @@ _MINIMAX_M3_ARCHITECTURES = frozenset(
 )
 _V2_EPLB_CONFIG_FIELDS = frozenset({"load_collection_phase", "stair_config"})
 _V2_STAIR_CONFIG_FIELDS = frozenset(StairConfig.__dataclass_fields__)
+
+_DEVICE_VISIBILITY_ENV_VAR = "ASCEND_RT_VISIBLE_DEVICES"
+
+
+def _split_visible_devices(value: str) -> list[str]:
+    return [item.strip() for item in value.split(",") if item.strip()]
+
+
+def _is_ray_backend(value: Any) -> bool:
+    if value is None:
+        return False
+    return value == "ray" or getattr(value, "value", None) == "ray"
+
+
+def _is_ray_deployment(engine_args) -> bool:
+    """Whether this launch will resolve to the Ray executor.
+
+    ``--distributed-executor-backend`` is the explicit switch, but vLLM also
+    selects Ray when ``--data-parallel-backend ray`` is set without an explicit
+    executor: ``ParallelConfig.__post_init__`` applies that default *after*
+    ``parse_args``. This parse-time hook must therefore inspect both fields,
+    otherwise it rewrites ``ASCEND_RT_VISIBLE_DEVICES`` for a launch that ends up
+    on Ray even though vLLM ignores ``device_ids`` there.
+    """
+    if _is_ray_backend(getattr(engine_args, "distributed_executor_backend", None)):
+        return True
+    return getattr(engine_args, "data_parallel_backend", None) == "ray"
+
+
+def _narrow_visible_devices_to_device_ids(engine_args) -> None:
+    """Restrict ``ASCEND_RT_VISIBLE_DEVICES`` to the chips named by ``device_ids``.
+
+    ``--device-ids`` only renumbers the device a worker eventually binds; it never
+    restricts what the process can see. vLLM resolves the model architecture while
+    it builds the engine config, and that import path reaches
+    ``vllm.third_party.flash_linear_attention.ops.utils.get_all_max_shared_mem()``,
+    which queries every device in ``device_count()``. torch_npu creates an ACL
+    context per query, so ``ASCEND_RT_VISIBLE_DEVICES=4,5 --device-ids 1``
+    initializes chip 4 as well and npu-smi reports a process on both cards.
+
+    Narrowing the environment before that import keeps every other chip untouched.
+    The ids are renumbered to ``0..N-1`` so the worker-side two-stage mapping
+    (local_rank -> assigned id -> visible ordinal) resolves the same physical
+    chips, and child processes inherit the narrowed set.
+    """
+    device_ids = getattr(engine_args, "device_ids", None)
+    if not device_ids:
+        return
+
+    # Ray selects devices through placement groups; --device-ids is ignored and
+    # vLLM already warns about it. ``--data-parallel-backend ray`` selects Ray
+    # implicitly (ParallelConfig.__post_init__), so check that path too.
+    if _is_ray_deployment(engine_args):
+        return
+
+    # UUIDs need the CANN-side translation, which already resolves them to the
+    # physical chip; rewriting the environment would break that mapping.
+    if any(not isinstance(device_id, int) for device_id in device_ids):
+        return
+
+    current_env = os.environ.get(_DEVICE_VISIBILITY_ENV_VAR, "")
+    visible = _split_visible_devices(current_env)
+    if not visible:
+        # Nothing restricts us today: the ids are already physical chip ids.
+        physical = [str(device_id) for device_id in device_ids]
+    else:
+        # Integer ids are zero-based indices into the visible list. Leave an
+        # out-of-range value alone so vLLM reports it with its own message.
+        if any(device_id < 0 or device_id >= len(visible) for device_id in device_ids):
+            return
+        physical = [visible[device_id] for device_id in device_ids]
+
+    if len(set(physical)) != len(physical):
+        # vLLM rejects duplicate ids later; keep the error path untouched.
+        return
+
+    new_env = ",".join(physical)
+    if new_env == current_env:
+        return
+
+    os.environ[_DEVICE_VISIBILITY_ENV_VAR] = new_env
+    engine_args.device_ids = list(range(len(physical)))
+    logger.info(
+        "Narrowed %s from %s to %s for device ids %s; no other NPU will be initialized.",
+        _DEVICE_VISIBILITY_ENV_VAR,
+        current_env or "<unset>",
+        new_env,
+        engine_args.device_ids,
+    )
+
+
+def _install_device_id_narrowing(parser) -> None:
+    """Narrow the visible NPU set as soon as the CLI arguments are parsed.
+
+    ``pre_register_and_update`` runs while vLLM assembles the argument parser,
+    which is before ``parse_args`` and long before ``EngineArgs`` resolves the
+    model architecture. Wrapping the parser keeps the hook inside the public
+    platform API: no vLLM object is replaced, and the wrapper only affects the
+    parser instance handed to the platform.
+    """
+
+    if getattr(parser, "_ascend_device_id_narrowing_installed", False):
+        return
+    parser._ascend_device_id_narrowing_installed = True
+
+    for name in ("parse_args", "parse_known_args"):
+        original = getattr(parser, name, None)
+        if original is None:
+            continue
+
+        def wrapper(*args, _original=original, **kwargs):
+            result = _original(*args, **kwargs)
+            namespace = result[0] if isinstance(result, tuple) else result
+            _narrow_visible_devices_to_device_ids(namespace)
+            return result
+
+        setattr(parser, name, wrapper)
 
 
 class NPUPlatform(Platform):
@@ -413,6 +529,11 @@ class NPUPlatform(Platform):
         # so we need to add "ascend" quantization method to quantization methods list
         # and the user can enable quantization using "vllm serve --quantization ascend".
         if parser is not None:
+            # Resolve ``--device-ids`` before vLLM imports the model: that
+            # import path probes every visible NPU and would initialize the
+            # chips the user did not select.
+            _install_device_id_narrowing(parser)
+
             quant_action = parser._option_string_actions.get("--quantization")
             if quant_action and hasattr(quant_action, "choices") and quant_action.choices:
                 if ASCEND_QUANTIZATION_METHOD not in quant_action.choices:
@@ -649,6 +770,8 @@ class NPUPlatform(Platform):
         if vllm_config.model_config is None:
             logger.warning("Model config is missing. Skipping Ascend-specific config updates.")
             return
+
+        _normalize_sleep_backend(vllm_config.model_config)
 
         # vLLM #61392 folds `compress_ratios` into `layer_types`/`compress_rates`.
         # Restore the legacy field before any runner/model/cache component reads
@@ -897,6 +1020,19 @@ def _configure_minimax_m3_a5_mixed_kv_cache(vllm_config: VllmConfig) -> None:
         ", ".join(gqa_layer_ids),
         cache_config.cache_dtype,
     )
+
+
+def _normalize_sleep_backend(model_config) -> None:
+    if not model_config.enable_sleep_mode:
+        return
+
+    if model_config.sleep_mode_backend == "cumem":
+        model_config.sleep_mode_backend = "camem"
+        logger.info_once("Using Ascend sleep-mode backend 'camem' for the default 'cumem' name.")
+    elif model_config.sleep_mode_backend != "camem":
+        raise ValueError(
+            "Only the in-tree camem backend is supported on Ascend; third-party backends are not supported yet."
+        )
 
 
 def _fix_incompatible_config(vllm_config: VllmConfig) -> None:
@@ -1472,18 +1608,18 @@ def _setup_compile_backend(
             set(compilation_config.cudagraph_capture_sizes or []) | {reduced_cg_cap}
         )
         compilation_config.max_cudagraph_capture_size = None
-        # Main resolves separate prefill/decode sizes on the first pass. They
-        # were derived from the truncated grid, so regenerate them alongside
-        # the restored off-stride default rather than mixing two size sets.
-        # Explicit split sizes never receive reduced_cg_cap (see below).
-        if not vllm_version_is("0.33.0"):
-            for name in (
-                "prefill_cudagraph_capture_token_sizes",
-                "max_prefill_cudagraph_capture_tokens",
-                "decode_cudagraph_capture_request_sizes",
-                "max_decode_cudagraph_capture_requests",
-            ):
-                setattr(compilation_config, name, None)
+        # Upstream resolves separate prefill/decode sizes on the first pass.
+        # They were derived from the truncated grid, so regenerate them
+        # alongside the restored off-stride default rather than mixing two
+        # size sets. Explicit split sizes never receive reduced_cg_cap (see
+        # below).
+        for name in (
+            "prefill_cudagraph_capture_token_sizes",
+            "max_prefill_cudagraph_capture_tokens",
+            "decode_cudagraph_capture_request_sizes",
+            "max_decode_cudagraph_capture_requests",
+        ):
+            setattr(compilation_config, name, None)
         delattr(compilation_config, "reduced_cg_cap")
 
     # Recompute cudagraph sizes before extending splitting_ops (honors the
@@ -1498,12 +1634,10 @@ def _setup_compile_backend(
         and not vllm_config.model_config.enforce_eager
         and requires_tp_aligned_capture_sizes
     ):
-        # Main V2 resolves prefill tokens and decode requests separately.
+        # Upstream resolves prefill tokens and decode requests separately.
         # The TP token-layout restriction applies to the prefill grid; keep
         # the resolved decode request grid used by the graph managers intact.
-        prefill_sizes = None
-        if not vllm_version_is("0.33.0"):
-            prefill_sizes = compilation_config.prefill_cudagraph_capture_token_sizes
+        prefill_sizes = compilation_config.prefill_cudagraph_capture_token_sizes
         original_sizes = prefill_sizes if prefill_sizes is not None else compilation_config.cudagraph_capture_sizes
         tp_size = vllm_config.parallel_config.tensor_parallel_size
         sp_aclgraph_sizes = [size for size in original_sizes if size % tp_size == 0]
@@ -1792,12 +1926,11 @@ def _is_supported_flash_attn_draft(spec: SpeculativeConfig, model_tag: str | Non
     # loader tag so the target and other auxiliary models retain their backend.
     target = spec.target_model_config
     if spec.method == "dflash":
-        # Keep automatic FA3 selection within the validated eager-draft scope.
-        # The target may still use graph execution.
+        target_text_config = getattr(target, "hf_text_config", None)
         return (
-            bool(spec.enforce_eager)
-            and model_tag == "dflash_head"
-            and target.hf_text_config.model_type == "glm_moe_dsa"
+            model_tag == "dflash_head"
+            and target_text_config is not None
+            and target_text_config.model_type in ("glm_moe_dsa", "glm5_next_text")
             and "DFlash2DraftModel" in (spec.draft_model_config.architectures or ())
         )
     if spec.method == "dspark":
@@ -1825,11 +1958,13 @@ def _validate_flash_attn_backend(backend_key, selector) -> bool:
     spec = config.speculative_config if config is not None else None
     if spec is None or spec.draft_model_config is None:
         return False
-    if backends.model_tag == "dspark_head" and {"MiniMaxM31FlashA3DSparkModel", "DSparkMiniMaxDraftModel"}.intersection(
-        spec.draft_model_config.architectures or ()
-    ):
+    model_tag = getattr(backends, "model_tag", None)
+    if model_tag == "dspark_head" and {
+        "MiniMaxM31FlashA3DSparkModel",
+        "DSparkMiniMaxDraftModel",
+    }.intersection(spec.draft_model_config.architectures or ()):
         return _validate_minimax_dspark_flash_attn(config, selector)
-    if not _is_supported_flash_attn_draft(spec, backends.model_tag):
+    if not _is_supported_flash_attn_draft(spec, model_tag):
         return False
 
     from vllm_ascend.attention.fa_v1 import AscendFlashAttentionBackend
@@ -1880,33 +2015,13 @@ def _validate_minimax_dspark_flash_attn(config, selector) -> bool:
     )
 
 
-def _validate_flash_attn_npu_3(backend_key, selector) -> bool:
-    """Select optional FA3 for compatible MiniMax, Step5 and local GLM DFlash2 drafts."""
-    if backend_key != (False, False, False) or not get_current_hardware_profile().supports(
-        HardwareCapability.FLASH_ATTN_NPU_3
-    ):
-        return False
-
-    # Model configuration imports platforms during initialization.
-    from vllm.config import get_current_vllm_config_or_none
-    from vllm.v1.attention.backend import AttentionType
-
-    config = get_current_vllm_config_or_none()
-    spec = config.speculative_config if config is not None else None
-    if spec is None or spec.draft_model_config is None:
-        return False
+def _validate_fa3_common_constraints(config, selector) -> bool:
+    """Validate attention properties shared by every FA3 model family."""
     if config is None or config.model_config is None:
         return False
-    from vllm.compilation import backends
 
-    local_glm_dflash = (
-        spec.method == "dflash"
-        and _is_supported_flash_attn_draft(spec, getattr(backends, "model_tag", None))
-        and not getattr(selector, "use_pcp", False)
-    )
-    if not (local_glm_dflash or _uses_minimax_fa3(config) or _uses_step5_fa3(config)):
-        return False
-    parallel = config.parallel_config
+    from vllm.v1.attention.backend import AttentionType
+
     return (
         selector.attn_type == AttentionType.DECODER
         and selector.dtype in (torch.float16, torch.bfloat16)
@@ -1924,18 +2039,53 @@ def _validate_flash_attn_npu_3(backend_key, selector) -> bool:
                 "use_rswa",
             )
         )
-        and (
-            local_glm_dflash
-            or (
-                parallel.pipeline_parallel_size == 1
-                and parallel.prefill_context_parallel_size == 1
-                and parallel.decode_context_parallel_size == 1
-            )
-        )
         and config.cache_config.cache_dtype in ("auto", "float16", "bfloat16")
-        and (local_glm_dflash or not getattr(config.quant_config, "enable_c8_quant", False))
-        and not getattr(spec, "enable_adaptive_verification", False)
+        and not getattr(config.speculative_config, "enable_adaptive_verification", False)
         and util.find_spec("flash_attn_npu_3") is not None
+    )
+
+
+def _validate_fa3_global_constraints(config, *, allow_local_draft: bool) -> bool:
+    """Validate target-global constraints unless a local draft explicitly owns FA3."""
+    if allow_local_draft:
+        return True
+    parallel = config.parallel_config
+    return (
+        parallel.pipeline_parallel_size == 1
+        and parallel.prefill_context_parallel_size == 1
+        and parallel.decode_context_parallel_size == 1
+        and not getattr(config.quant_config, "enable_c8_quant", False)
+    )
+
+
+def _validate_flash_attn_npu_3(backend_key, selector) -> bool:
+    """Select optional FA3 for compatible MiniMax, Step5, or local GLM DFlash2 attention."""
+    if backend_key != (False, False, False) or not get_current_hardware_profile().supports(
+        HardwareCapability.FLASH_ATTN_NPU_3
+    ):
+        return False
+
+    # Model configuration imports platforms during initialization.
+    from vllm.config import get_current_vllm_config_or_none
+
+    config = get_current_vllm_config_or_none()
+    spec = config.speculative_config if config is not None else None
+    if spec is None or spec.draft_model_config is None:
+        return False
+    from vllm.compilation import backends
+
+    local_glm_dflash = (
+        spec.method == "dflash"
+        and _is_supported_flash_attn_draft(spec, getattr(backends, "model_tag", None))
+        and not getattr(selector, "use_pcp", False)
+    )
+    if config is None or config.model_config is None:
+        return False
+    if not (local_glm_dflash or _uses_minimax_fa3(config) or _uses_step5_fa3(config)):
+        return False
+    return _validate_fa3_common_constraints(config, selector) and _validate_fa3_global_constraints(
+        config,
+        allow_local_draft=local_glm_dflash,
     )
 
 
@@ -2018,7 +2168,7 @@ def _get_reduced_cg_cap(vllm_config: VllmConfig) -> int | None:
         return None
     if compilation_config.cudagraph_capture_sizes is not None:
         return None
-    if not vllm_version_is("0.33.0") and any(
+    if any(
         getattr(compilation_config, name) is not None
         for name in (
             "prefill_cudagraph_capture_token_sizes",

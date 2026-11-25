@@ -1,26 +1,25 @@
 # SPDX-License-Identifier: Apache-2.0
 
 from types import SimpleNamespace
+from typing import cast
 from unittest.mock import Mock
 
 import pytest
 import torch
-from vllm.v1.attention.backend import AttentionType
 from vllm.v1.attention.ops import metadata as upstream_metadata_ops
 from vllm.v1.kv_cache_interface import MLAAttentionSpec
 from vllm.v1.worker import cp_utils
+from vllm.v1.worker.utils import AttentionGroup
 
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
 from vllm_ascend.models.qwen4_exp import qsa
-from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2.attn_utils import build_attn_metadata
+from vllm_ascend.worker.v2.input_batch import AscendInputBatch
+from vllm_ascend.worker.v2.pcp_manager import AscendPCPAttentionContext
 
 
 def test_replicated_qsa_draft_passes_pcp_compatibility(monkeypatch) -> None:
-    if vllm_version_is("0.33.0"):
-        impl = qsa.AscendQSAImpl(2, 256, 0.0625, 1, None, None, "auto", None, AttentionType.DECODER)
-    else:
-        impl = qsa.AscendQSAImpl(2, 256, 0.0625, 1, "auto")
+    impl = qsa.AscendQSAImpl(2, 256, 0.0625, 1, "auto")
     layers = {"mtp.layers.0.self_attn": SimpleNamespace(impl=impl)}
     monkeypatch.setattr(cp_utils, "get_layers_from_vllm_config", lambda *_: layers)
     config = SimpleNamespace(
@@ -38,7 +37,6 @@ def test_main_and_draft_qkv_projection_use_upstream_path() -> None:
     assert qsa.AscendQwen4ExpQSAAttention._project_qkv_gate is qsa.upstream_qsa.Qwen4ExpQSAAttention._project_qkv_gate
 
 
-@pytest.mark.skipif(vllm_version_is("0.33.0"), reason="Packed Indexer arguments are part of the main ABI")
 def test_indexer_accepts_main_packed_inputs_without_fused_preparation() -> None:
     layer = qsa.AscendQSAIndexer.__new__(qsa.AscendQSAIndexer)
     torch.nn.Module.__init__(layer)
@@ -51,7 +49,9 @@ def test_indexer_accepts_main_packed_inputs_without_fused_preparation() -> None:
     layer._update_and_compress = Mock()
     selected = torch.zeros((2, 3), dtype=torch.int32)
     layer._select = Mock(return_value=selected)
-    hidden_states = torch.empty((4, 8))
+    # Deterministic input: assert_close treats NaN as unequal to itself, so
+    # uninitialized memory would make the slice comparison below flaky.
+    hidden_states = torch.arange(32, dtype=torch.float32).reshape(4, 8)
     positions = torch.arange(4)
     gate = torch.full((2, 2, 4), 7.0)
 
@@ -232,7 +232,7 @@ def test_fused_prepare_upstream_abi_materializes_qkv_and_gate(monkeypatch, pcp) 
 
     selected = torch.zeros((2, 3), dtype=torch.int32)
     # Main's indexer returns (selection, prepared main outputs).
-    indexer = Mock(return_value=selected if vllm_version_is("0.33.0") else (selected, None))
+    indexer = Mock(return_value=(selected, None))
     indexer.output_width = 3
     indexer.raw_key_cache = SimpleNamespace(prefix=side_prefix)
     layer.indexer = indexer
@@ -275,7 +275,7 @@ def test_fused_prepare_upstream_abi_materializes_qkv_and_gate(monkeypatch, pcp) 
     torch.testing.assert_close(update_args[2], expected_value)
     torch.testing.assert_close(update_args[4], main_metadata.slot_mapping)
     assert layer.impl.forward_qsa.call_count + layer.impl.forward.call_count == 1
-    forward_call = layer.impl.forward_qsa if vllm_version_is("0.33.0") else layer.impl.forward
+    forward_call = layer.impl.forward
     forward_args = forward_call.call_args.args
     torch.testing.assert_close(forward_args[1], projected_q.view(2, 2, 4))
 
@@ -432,8 +432,11 @@ def test_pcp_qsa_full_graph_keeps_capture_and_replay_extents(monkeypatch, local_
     global_slots = torch.full((1, 4), -1, dtype=torch.long)
     restore = torch.arange(4)
     main_builder = object.__new__(qsa.AscendQSAMetadataBuilder)
+    kv_cache_spec = MLAAttentionSpec(
+        block_size=16, num_kv_heads=1, head_size=128, dtype=torch.bfloat16, tokens_per_state=4
+    )
     indexer_builder = qsa.AscendPCPQSAIndexerMetadataBuilder(
-        MLAAttentionSpec(block_size=16, num_kv_heads=1, head_size=128, dtype=torch.bfloat16, tokens_per_state=4),
+        kv_cache_spec,
         ["indexer"],
         SimpleNamespace(
             scheduler_config=SimpleNamespace(max_num_seqs=4, max_num_batched_tokens=4),
@@ -458,10 +461,17 @@ def test_pcp_qsa_full_graph_keeps_capture_and_replay_extents(monkeypatch, local_
     monkeypatch.setattr(qsa, "get_pcp_group", lambda: object())
     monkeypatch.setattr(qsa, "all_gather_async", lambda rows, *_args, **_kwargs: (torch.cat((rows, rows + 2)), None))
     groups = [
-        SimpleNamespace(
-            layer_names=["main"], backend=qsa.AscendQSABackend, get_metadata_builder=lambda _: main_builder
-        ),
-        SimpleNamespace(layer_names=["indexer"], get_metadata_builder=lambda _: indexer_builder),
+        AttentionGroup(
+            backend=backend,
+            layer_names=[name],
+            kv_cache_spec=kv_cache_spec,
+            kv_cache_group_id=0,
+            metadata_builders=[builder],
+        )
+        for name, backend, builder in (
+            ("main", qsa.AscendQSABackend, main_builder),
+            ("indexer", qsa.AscendPCPQSAIndexerBackend, indexer_builder),
+        )
     ]
     cache_config = SimpleNamespace(kv_cache_groups=[SimpleNamespace(kv_cache_spec=None)])
 
@@ -474,21 +484,22 @@ def test_pcp_qsa_full_graph_keeps_capture_and_replay_extents(monkeypatch, local_
             global_slots[0, :global_live_tokens] = torch.arange(10, 10 + global_live_tokens)
             restore[:global_live_tokens] = torch.arange(2, 2 + global_live_tokens)
             restore[global_live_tokens:] = 0
-        context = SimpleNamespace(
+        global_batch = SimpleNamespace(
+            num_reqs=global_live_tokens,
+            num_reqs_after_padding=4,
+            num_tokens=global_live_tokens,
+            num_tokens_after_padding=4,
+            query_start_loc=global_starts,
+            query_start_loc_np=global_starts.numpy(),
+            seq_lens=(torch.arange(4) < global_live_tokens).to(torch.int32) * 8,
+            positions=torch.arange(4),
+            num_scheduled_tokens=torch.ones(global_live_tokens, dtype=torch.int32).numpy(),
+        )
+        context = AscendPCPAttentionContext(
             local_num_tokens=2,
             local_token_indices=None if capture else torch.arange(local_live),
             hidden_restore_idx=restore,
-            global_batch=SimpleNamespace(
-                num_reqs=global_live_tokens,
-                num_reqs_after_padding=4,
-                num_tokens=global_live_tokens,
-                num_tokens_after_padding=4,
-                query_start_loc=global_starts,
-                query_start_loc_np=global_starts.numpy(),
-                seq_lens=(torch.arange(4) < global_live_tokens).to(torch.int32) * 8,
-                positions=torch.arange(4),
-                num_scheduled_tokens=torch.ones(global_live_tokens, dtype=torch.int32).numpy(),
-            ),
+            global_batch=cast(AscendInputBatch, global_batch),
             global_block_tables=(global_table,),
             global_slot_mappings=global_slots,
         )
@@ -550,10 +561,7 @@ def test_pcp_indexer_projects_padding_for_collective_but_selects_only_live_queri
     hidden = torch.arange(3).view(3, 1)
     positions = torch.arange(3)
 
-    if vllm_version_is("0.33.0"):
-        selected = indexer(hidden, positions)
-    else:
-        selected, _ = indexer(hidden, positions, attn=object())
+    selected, _ = indexer(hidden, positions, attn=object())
 
     key_rows, write_positions = indexer._update_and_compress.call_args.args[:2]
     torch.testing.assert_close(key_rows, hidden)

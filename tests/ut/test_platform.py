@@ -1,5 +1,7 @@
+import argparse
 import importlib
 import logging
+import os
 from functools import partial
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -21,6 +23,9 @@ from vllm_ascend.ascend_forward_context import MoECommType, override_mrv2_in_pro
 from vllm_ascend.device.hardware_profile import get_hardware_profile
 from vllm_ascend.platform import (
     NPUPlatform,
+    _install_device_id_narrowing,
+    _narrow_visible_devices_to_device_ids,
+    _normalize_sleep_backend,
     _setup_compile_backend,
     _validate_deepseek_v4_tp_config,
     _validate_deepseek_v41_adaptive_config,
@@ -35,7 +40,6 @@ from vllm_ascend.utils import (
     COMPRESSED_TENSORS_METHOD,
     AscendDeviceType,
     dsv4_skips_indexer_topk,
-    vllm_version_is,
 )
 
 
@@ -478,6 +482,8 @@ class TestNPUPlatform(TestBase):
         mock_vllm_config.model_config = MagicMock()
         mock_vllm_config.model_config.is_hybrid = False
         mock_vllm_config.model_config.is_encoder_decoder = False
+        mock_vllm_config.model_config.enable_sleep_mode = False
+        mock_vllm_config.model_config.sleep_mode_backend = "cumem"
         mock_vllm_config.device_config = MagicMock()
         mock_vllm_config.device_config.device_type = "npu"
         mock_vllm_config.parallel_config = MagicMock()
@@ -1043,8 +1049,7 @@ class TestNPUPlatform(TestBase):
         self.assertIsNone(vllm_config.compilation_config.max_cudagraph_capture_size)
         self.assertEqual(vllm_config.compilation_config.cudagraph_capture_sizes, [1, 2, 4])
 
-    @patch("vllm_ascend.platform.vllm_version_is", return_value=False)
-    def test_apply_config_platform_defaults_respects_explicit_split_sizes(self, _mock_version):
+    def test_apply_config_platform_defaults_respects_explicit_split_sizes(self):
         for name, value in (
             ("prefill_cudagraph_capture_token_sizes", [1, 3, 7]),
             ("max_prefill_cudagraph_capture_tokens", 7),
@@ -1080,10 +1085,7 @@ class TestNPUPlatform(TestBase):
                     config.additional_config = {"ascend_compilation_config": {}}
                     config.get_decode_cudagraph_query_lens = lambda q, count=max_num_seqs: {q: count}
                     config.get_draft_decode_cudagraph_request_sizes = lambda: []
-                    if not vllm_version_is("0.33.0"):
-                        config._split_cudagraph_capture_sizes = partial(
-                            VllmConfig._split_cudagraph_capture_sizes, config
-                        )
+                    config._split_cudagraph_capture_sizes = partial(VllmConfig._split_cudagraph_capture_sizes, config)
                     config._set_cudagraph_sizes = partial(VllmConfig._set_cudagraph_sizes, config)
                     self.platform.apply_config_platform_defaults(config)
                     config._set_cudagraph_sizes()
@@ -1117,15 +1119,12 @@ class TestNPUPlatform(TestBase):
                         config.additional_config = {"ascend_compilation_config": {}}
                         config.get_decode_cudagraph_query_lens = lambda q, count=max_num_seqs: {q: count}
                         config.get_draft_decode_cudagraph_request_sizes = lambda: []
-                        if not vllm_version_is("0.33.0"):
-                            config._split_cudagraph_capture_sizes = partial(
-                                VllmConfig._split_cudagraph_capture_sizes, config
-                            )
+                        config._split_cudagraph_capture_sizes = partial(
+                            VllmConfig._split_cudagraph_capture_sizes, config
+                        )
                         config._set_cudagraph_sizes = partial(VllmConfig._set_cudagraph_sizes, config)
                         config._set_cudagraph_sizes()
-                        decode_sizes = None
-                        if not vllm_version_is("0.33.0"):
-                            decode_sizes = config.compilation_config.decode_cudagraph_capture_request_sizes
+                        decode_sizes = config.compilation_config.decode_cudagraph_capture_request_sizes
                         if decode_sizes is not None:
                             decode_sizes = list(decode_sizes)
                         with patch("vllm_ascend.platform.enable_sp", return_value=sequence_parallel):
@@ -1135,21 +1134,14 @@ class TestNPUPlatform(TestBase):
                         # Engine handshakes re-enter the native config resolver.
                         config._set_cudagraph_sizes()
                         config._set_cudagraph_sizes()
-                        if not vllm_version_is("0.33.0"):
-                            self.assertEqual(
-                                config.compilation_config.decode_cudagraph_capture_request_sizes, decode_sizes
-                            )
-                            prefill_sizes = config.compilation_config.prefill_cudagraph_capture_token_sizes
-                            self.assertTrue(all(size % 4 == 0 for size in prefill_sizes))
-                            if max_num_seqs == 1:
-                                self.assertEqual(prefill_sizes, [4])
-                                self.assertEqual(decode_sizes, [1])
-                                if mode == CUDAGraphMode.FULL_DECODE_ONLY:
-                                    self.assertEqual(config.compilation_config.cudagraph_capture_sizes, [1])
-                        else:
-                            self.assertTrue(
-                                all(size % 4 == 0 for size in config.compilation_config.cudagraph_capture_sizes)
-                            )
+                        self.assertEqual(config.compilation_config.decode_cudagraph_capture_request_sizes, decode_sizes)
+                        prefill_sizes = config.compilation_config.prefill_cudagraph_capture_token_sizes
+                        self.assertTrue(all(size % 4 == 0 for size in prefill_sizes))
+                        if max_num_seqs == 1:
+                            self.assertEqual(prefill_sizes, [4])
+                            self.assertEqual(decode_sizes, [1])
+                            if mode == CUDAGraphMode.FULL_DECODE_ONLY:
+                                self.assertEqual(config.compilation_config.cudagraph_capture_sizes, [1])
                         self.assertEqual(config.compilation_config.cudagraph_mode, mode)
 
     def test_apply_config_platform_defaults_sets_sp_threshold(self):
@@ -2890,3 +2882,137 @@ class TestNPUPlatform(TestBase):
             self.platform.get_static_graph_wrapper_cls(),
             "vllm_ascend.compilation.acl_graph.ACLGraphWrapper",
         )
+
+
+@pytest.mark.parametrize(
+    "enable_sleep_mode, backend, expected",
+    [
+        (True, "cumem", "camem"),
+        (True, "camem", "camem"),
+        (False, "cumem", "cumem"),
+        (False, "third_party", "third_party"),
+    ],
+)
+def test_normalize_sleep_backend(enable_sleep_mode, backend, expected):
+    model_config = SimpleNamespace(
+        enable_sleep_mode=enable_sleep_mode,
+        sleep_mode_backend=backend,
+    )
+
+    _normalize_sleep_backend(model_config)
+
+    assert model_config.sleep_mode_backend == expected
+
+
+def test_normalize_sleep_backend_rejects_third_party():
+    model_config = SimpleNamespace(
+        enable_sleep_mode=True,
+        sleep_mode_backend="third_party",
+    )
+
+    with pytest.raises(ValueError, match="Only the in-tree camem backend"):
+        _normalize_sleep_backend(model_config)
+
+
+class TestNarrowVisibleDevices(TestBase):
+    def _namespace(self, device_ids, backend=None, data_parallel_backend="mp"):
+        return SimpleNamespace(
+            device_ids=device_ids,
+            distributed_executor_backend=backend,
+            data_parallel_backend=data_parallel_backend,
+        )
+
+    def _visible_devices_env(self, value):
+        if value is None:
+            env = {key: val for key, val in os.environ.items() if key != "ASCEND_RT_VISIBLE_DEVICES"}
+            return patch.dict(os.environ, env, clear=True)
+        return patch.dict(os.environ, {"ASCEND_RT_VISIBLE_DEVICES": value}, clear=False)
+
+    def test_narrows_and_renumbers_device_ids(self):
+        args = self._namespace([1])
+        with self._visible_devices_env("4,5"):
+            _narrow_visible_devices_to_device_ids(args)
+            self.assertEqual(os.environ["ASCEND_RT_VISIBLE_DEVICES"], "5")
+        self.assertEqual(args.device_ids, [0])
+
+    def test_treats_ids_as_physical_when_visibility_is_unset(self):
+        args = self._namespace([1, 3])
+        with self._visible_devices_env(None):
+            _narrow_visible_devices_to_device_ids(args)
+            self.assertEqual(os.environ["ASCEND_RT_VISIBLE_DEVICES"], "1,3")
+            self.assertEqual(args.device_ids, [0, 1])
+
+    def test_leaves_out_of_range_ids_for_vllm_to_reject(self):
+        args = self._namespace([2])
+        with self._visible_devices_env("4,5"):
+            _narrow_visible_devices_to_device_ids(args)
+            self.assertEqual(os.environ["ASCEND_RT_VISIBLE_DEVICES"], "4,5")
+        self.assertEqual(args.device_ids, [2])
+
+    def test_leaves_duplicate_ids_for_vllm_to_reject(self):
+        args = self._namespace([1, 1])
+        with self._visible_devices_env("4,5"):
+            _narrow_visible_devices_to_device_ids(args)
+            self.assertEqual(os.environ["ASCEND_RT_VISIBLE_DEVICES"], "4,5")
+        self.assertEqual(args.device_ids, [1, 1])
+
+    def test_skips_ray_backend(self):
+        args = self._namespace([1], backend="ray")
+        with self._visible_devices_env("4,5"):
+            _narrow_visible_devices_to_device_ids(args)
+            self.assertEqual(os.environ["ASCEND_RT_VISIBLE_DEVICES"], "4,5")
+        self.assertEqual(args.device_ids, [1])
+
+    def test_skips_implicit_ray_without_explicit_executor(self):
+        # --data-parallel-backend ray with --distributed-executor-backend left
+        # unset: vLLM only resolves the Ray default inside
+        # ParallelConfig.__post_init__, which runs after this parse-time hook, so
+        # the hook must not narrow.
+        args = self._namespace([1], data_parallel_backend="ray")
+        with self._visible_devices_env("4,5"):
+            _narrow_visible_devices_to_device_ids(args)
+            self.assertEqual(os.environ["ASCEND_RT_VISIBLE_DEVICES"], "4,5")
+        self.assertEqual(args.device_ids, [1])
+
+    def test_skips_uuid_device_ids(self):
+        args = self._namespace(["0000:00:00.0"])
+        with self._visible_devices_env("4,5"):
+            _narrow_visible_devices_to_device_ids(args)
+            self.assertEqual(os.environ["ASCEND_RT_VISIBLE_DEVICES"], "4,5")
+        self.assertEqual(args.device_ids, ["0000:00:00.0"])
+
+    def test_keeps_already_narrowed_visibility(self):
+        args = self._namespace([0])
+        with self._visible_devices_env("5"):
+            _narrow_visible_devices_to_device_ids(args)
+            self.assertEqual(os.environ["ASCEND_RT_VISIBLE_DEVICES"], "5")
+        self.assertEqual(args.device_ids, [0])
+
+    def test_parser_wrapper_narrows_after_parse(self):
+        parser = argparse.ArgumentParser()
+        parser.add_argument("--device-ids", type=lambda value: [int(item) for item in value.split(",")])
+        _install_device_id_narrowing(parser)
+        with self._visible_devices_env("4,5"):
+            args = parser.parse_args(["--device-ids", "1"])
+            self.assertEqual(os.environ["ASCEND_RT_VISIBLE_DEVICES"], "5")
+        self.assertEqual(args.device_ids, [0])
+
+    def test_parser_wrapper_handles_parse_known_args(self):
+        parser = argparse.ArgumentParser()
+        parser.add_argument("--device-ids", type=lambda value: [int(item) for item in value.split(",")])
+        _install_device_id_narrowing(parser)
+        with self._visible_devices_env("4,5"):
+            args, extras = parser.parse_known_args(["--device-ids", "0"])
+            self.assertEqual(os.environ["ASCEND_RT_VISIBLE_DEVICES"], "4")
+            self.assertEqual(extras, [])
+        self.assertEqual(args.device_ids, [0])
+
+    def test_parser_wrapper_skips_implicit_ray(self):
+        parser = argparse.ArgumentParser()
+        parser.add_argument("--device-ids", type=lambda value: [int(item) for item in value.split(",")])
+        parser.add_argument("--data-parallel-backend", default="mp")
+        _install_device_id_narrowing(parser)
+        with self._visible_devices_env("4,5"):
+            args = parser.parse_args(["--device-ids", "1", "--data-parallel-backend", "ray"])
+            self.assertEqual(os.environ["ASCEND_RT_VISIBLE_DEVICES"], "4,5")
+        self.assertEqual(args.device_ids, [1])

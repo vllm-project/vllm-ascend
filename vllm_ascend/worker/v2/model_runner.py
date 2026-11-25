@@ -122,13 +122,13 @@ from vllm_ascend.utils import (
     requires_lmhead_dp_sync,
     set_potential_max_tokens,
     should_skip_allreduce_across_dp_group,
-    vllm_version_is,
 )
 from vllm_ascend.worker.device_metadata import TargetDeviceMetadata
 from vllm_ascend.worker.utils import disable_compilation
 from vllm_ascend.worker.v2.aclgraph_utils import ModelAclGraphManager
 from vllm_ascend.worker.v2.attn_utils import (
     build_attn_state,
+    initialize_kernel_block_table_buffers,
     skip_ring_state_update,
 )
 from vllm_ascend.worker.v2.eplb import AscendEPLBController
@@ -229,11 +229,7 @@ class NPUModelRunner(GPUModelRunner):
             self.compilation_config.cudagraph_mode != CUDAGraphMode.NONE
             and (
                 self.compilation_config.mode == CompilationMode.VLLM_COMPILE
-                or (
-                    breakable_cudagraph.is_breakable_cudagraph_enabled()
-                    if vllm_version_is("0.33.0")
-                    else breakable_cudagraph.is_breakable_cudagraph_enabled(self.compilation_config)
-                )
+                or breakable_cudagraph.is_breakable_cudagraph_enabled(self.compilation_config)
             )
             and not self.model_config.enforce_eager
         )
@@ -521,6 +517,17 @@ class NPUModelRunner(GPUModelRunner):
             )
         with graph_manager_wrapper(self):
             self._initialize_kv_cache_upstream(kv_cache_config, kv_cache_allocation_context)
+            # PCP owns the local-row capacity; FIA may append one padding
+            # request for either target or draft metadata.
+            max_metadata_reqs = (
+                self.pcp_manager.max_num_local_reqs if self.pcp_manager is not None else self.max_num_reqs
+            ) + 1
+            metadata_groups = [*self.attn_groups, *getattr(self.speculator, "attn_groups", [])]
+            initialize_kernel_block_table_buffers(
+                (group for groups in metadata_groups for group in groups),
+                max_metadata_reqs,
+                [table.gpu.shape[1] for table in self.block_tables.block_tables],
+            )
             self._target_uses_flashmla = self._has_target_flashmla_attention()
             if self.pcp_manager is not None:
                 assert isinstance(self.pcp_manager, AscendPCPManager)
@@ -1219,8 +1226,7 @@ class NPUModelRunner(GPUModelRunner):
     def _get_lmhead_pad_size(self, execute_model_state) -> int:
         pad_size = self._lmhead_tp_max_num_logits()
         if self.dcp_size == 1 and execute_model_state is not None:
-            # vLLM #60754 renamed the stored DP-sync state on main.
-            dp_sync = execute_model_state.dp_sync if vllm_version_is("0.31.0") else execute_model_state.dp_sync_state
+            dp_sync = execute_model_state.dp_sync_state
             if dp_sync is not None:
                 pad_size = min(pad_size, int(dp_sync.num_tokens_across_dp.max().item()))
         return pad_size
@@ -1245,8 +1251,6 @@ class NPUModelRunner(GPUModelRunner):
         logits = self.model.compute_logits(hidden_states[sample_indices])
         logits = logits[:num_logits]
 
-        # Dispatch tail mirrors GPUModelRunner.sample; refresh it on main bumps.
-        invalid_drafts = None
         # A diffusion prefill has no logit rows even when a bitmask row arrived.
         if grammar_output is not None and logits.shape[0] > 0:
             # Apply grammar bitmask to the logits in-place.
@@ -1257,17 +1261,6 @@ class NPUModelRunner(GPUModelRunner):
                 grammar_output.structured_output_request_ids,
                 grammar_output.grammar_bitmask,
             )
-            if vllm_version_is("0.33.0"):
-                # 0.33.0 rejects drafts verified against a permissive grammar
-                # row; main moved that bookkeeping into the scheduler and the
-                # draft-token handler.
-                import vllm.v1.worker.gpu.structured_outputs as structured_outputs  # type: ignore[import-not-found]
-
-                invalid_drafts = structured_outputs.grammar_invalid_drafts(  # type: ignore[attr-defined]
-                    input_batch,
-                    grammar_output.structured_output_request_ids,
-                    grammar_output.num_acceptable_drafts,  # type: ignore[attr-defined]
-                )
 
         if input_batch.num_draft_tokens == 0 or self.rejection_sampler is None:
             assert self.sampler is not None
@@ -1276,20 +1269,12 @@ class NPUModelRunner(GPUModelRunner):
             # Rejection sampling for spec decoding.
             assert self.rejection_sampler is not None
             assert self.speculator is not None
-            if vllm_version_is("0.33.0"):
-                sampler_output = self.rejection_sampler(
-                    logits,
-                    input_batch,
-                    # Draft logits are needed for probabilistic rejection sampling.
-                    self.speculator.draft_logits,
-                    invalid_drafts,
-                )
-            else:
-                sampler_output = self.rejection_sampler(
-                    logits,
-                    input_batch,
-                    self.speculator.draft_logits,
-                )
+            sampler_output = self.rejection_sampler(
+                logits,
+                input_batch,
+                # Draft logits are needed for probabilistic rejection sampling.
+                self.speculator.draft_logits,
+            )
 
         return sampler_output, sampler_output.num_sampled, sampler_output.num_rejected
 
@@ -1704,20 +1689,18 @@ def graph_manager_wrapper(model_runner):
         vllm_config: VllmConfig,
         device: torch.device,
         cudagraph_mode: CUDAGraphMode,
-        decode_query_len: int | None = None,
         lora_capture_cases: list[int] | None = None,
         varlen_decode: bool = False,
         ubatch_runner: Any = None,
         *,
         decode_query_lens: Mapping[int, int] | None = None,
     ):
-        query_shapes = decode_query_len if vllm_version_is("0.33.0") else decode_query_lens
-        assert query_shapes is not None
+        assert decode_query_lens is not None
         return ModelAclGraphManager(
             vllm_config,
             device,
             cudagraph_mode,
-            query_shapes,
+            decode_query_lens,
             model_runner,
             lora_capture_cases=lora_capture_cases,
             varlen_decode=varlen_decode,

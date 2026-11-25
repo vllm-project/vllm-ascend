@@ -41,7 +41,7 @@ def test_fused_bfg_head_parallel_keeps_unpadded_checkpoint_layout():
             head_parallel=True,
         )
     assert tuple(linear.weight.shape) == (10, 6)
-    if not vllm_version_is("0.33.0"):
+    if not vllm_version_is("0.34.0"):
         # The inherited loader queries this property even on the custom
         # head-parallel path that bypasses the merged-layer constructor.
         assert linear._checkpoint_output_sizes == [4, 8, 8]

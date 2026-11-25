@@ -5,23 +5,18 @@ import importlib
 import inspect
 import sys
 from types import ModuleType, SimpleNamespace
-from unittest.mock import Mock
+from unittest.mock import Mock, call
 
 import pytest
-
-from vllm_ascend.utils import vllm_version_is
 
 # Remove an entry and its NPUWorker stub together only after validating the
 # inherited contract.
 UNVERIFIED_GPU_WORKER_METHODS = (
-    "sleep_mode_backend",
     "_get_sleep_parameters",
     "discard",
     "checkpoint_prepare",
     "checkpoint_restore",
     "_scoped_allocator_max_split",
-    "_init_workspace_and_model_runner",
-    "_make_model_runner",
     "handle_ft_command",
     "_compile_or_warm_up_model",
     "_maybe_activate_jit_monitor",
@@ -34,9 +29,7 @@ UNVERIFIED_GPU_WORKER_METHODS = (
     "randomize_dummy_inputs",
     "save_sharded_state",
     "save_tensorized_model",
-    "shutdown_weight_transfer_engine",
     "start_draft_weight_update",
-    "_start_weight_update",
     "elastic_ep_execute",
 )
 
@@ -60,6 +53,52 @@ def test_unverified_interface_rejects_calls_without_worker_state(name):
     kwargs = {p.name: object() for p in required if p.kind is p.KEYWORD_ONLY}
     with pytest.raises(NotImplementedError, match=name):
         method(*args, **kwargs)
+
+
+def test_weight_update_hook_rejects_draft_without_worker_state():
+    from vllm_ascend.worker.worker import NPUWorker
+
+    worker = object.__new__(NPUWorker)
+    with pytest.raises(NotImplementedError, match="Draft weight updates"):
+        worker._start_weight_update(is_draft=True)
+
+
+def test_shutdown_weight_transfer_engine_is_inherited():
+    from vllm.v1.worker.gpu_worker import Worker as GPUWorker
+
+    from vllm_ascend.worker.worker import NPUWorker
+
+    # Releasing the trainer connection needs no NPU state, so it is inherited.
+    assert NPUWorker.shutdown_weight_transfer_engine is GPUWorker.shutdown_weight_transfer_engine
+
+
+@pytest.mark.parametrize("configured", [False, True])
+def test_shutdown_weight_transfer_engine_releases_trainer_connection(configured):
+    from vllm_ascend.worker.worker import NPUWorker
+
+    # Keep the engine in a local so the optional type narrows for mypy.
+    engine = Mock() if configured else None
+    worker = object.__new__(NPUWorker)
+    worker._weight_update_active = False
+    worker.weight_transfer_engine = engine
+
+    worker.shutdown_weight_transfer_engine()
+
+    if engine is not None:
+        engine.shutdown.assert_called_once_with()
+
+
+def test_shutdown_weight_transfer_engine_rejects_active_update():
+    from vllm_ascend.worker.worker import NPUWorker
+
+    worker = object.__new__(NPUWorker)
+    worker._weight_update_active = True
+    worker.weight_transfer_engine = Mock()
+
+    with pytest.raises(RuntimeError, match="during a weight update"):
+        worker.shutdown_weight_transfer_engine()
+
+    worker.weight_transfer_engine.shutdown.assert_not_called()
 
 
 @pytest.mark.parametrize("reset", [None, "absent", "callable"])
@@ -200,8 +239,6 @@ def construct_worker(setup, worker_class=None, cache_dtype="auto"):
     assert worker.is_driver_worker is True
     assert worker._sleep_saved_buffers == {}
     assert worker._sleep_saved_parameters == {}
-    if vllm_version_is("0.33.0"):
-        assert worker._sleep_saved_draft_buffers == {}
     assert worker.weight_transfer_engine is None
     assert worker._weight_update_active is False
     assert worker._weight_update_is_draft is False
@@ -320,22 +357,49 @@ def xlite_worker_module(monkeypatch):
                     package.xlite_worker = previous_attribute
 
 
-def test_xlite_constructor_and_device_runner(worker_constructor, monkeypatch, xlite_worker_module):
+@pytest.mark.parametrize("xlite", [False, True], ids=["default", "xlite"])
+def test_init_device_selects_runner_and_orders_registration(
+    worker_constructor, monkeypatch, xlite_worker_module, xlite
+):
     xlite_worker = xlite_worker_module
-
-    worker = construct_worker(worker_constructor, xlite_worker.XliteWorker)
-    assert xlite_worker.XliteWorker.__bases__ == (worker_constructor.module.NPUWorker,)
     device, runner = object(), object()
+    worker = construct_worker(worker_constructor, xlite_worker.XliteWorker if xlite else None)
+    worker.vllm_config.is_mm_encoder_only = False
+    if xlite:
+        assert xlite_worker.XliteWorker.__bases__ == (worker_constructor.module.NPUWorker,)
+        # Runner selection is the hook's job; the init_device skeleton stays inherited.
+        assert "init_device" not in vars(xlite_worker.XliteWorker)
+        assert "_make_model_runner" in vars(xlite_worker.XliteWorker)
+        factory = Mock(return_value=runner, __name__="XliteModelRunnerV2")
+        monkeypatch.setattr(xlite_worker, "XliteModelRunnerV2", factory)
+    else:
+        factory = Mock(return_value=runner, __name__="NPUModelRunner")
+        runner_module = ModuleType("vllm_ascend.worker.v2.model_runner")
+        runner_module.NPUModelRunner = factory  # type: ignore[attr-defined]
+        monkeypatch.setitem(sys.modules, runner_module.__name__, runner_module)
     init_device = Mock(return_value=device)
+    fla, workspace, usage = Mock(), Mock(), Mock()
+    ordered = Mock()
+    for name, mock in (
+        ("init_device", init_device),
+        ("register_fla", fla),
+        ("init_workspace", workspace),
+        ("make_runner", factory),
+        ("report_usage", usage),
+    ):
+        ordered.attach_mock(mock, name)
     monkeypatch.setattr(worker, "_init_device", init_device)
-    factory = Mock(return_value=runner, __name__="XliteModelRunnerV2")
-    monkeypatch.setattr(xlite_worker, "XliteModelRunnerV2", factory)
-    workspace, usage = Mock(), Mock()
-    monkeypatch.setattr(xlite_worker, "init_workspace_manager", workspace)
-    monkeypatch.setattr(xlite_worker, "report_usage_stats", usage)
+    monkeypatch.setattr(worker_constructor.module, "register_ascend_fla_customop", fla)
+    monkeypatch.setattr(worker_constructor.module, "init_workspace_manager", workspace)
+    monkeypatch.setattr(worker_constructor.module, "report_usage_stats", usage)
     worker.init_device()
-    init_device.assert_called_once_with()
-    workspace.assert_called_once_with(device, 1)
-    factory.assert_called_once_with(worker.vllm_config, device)
-    assert worker.model_runner is worker.xlite_runner is runner
-    usage.assert_called_once_with(worker.vllm_config)
+    assert ordered.mock_calls == [
+        call.init_device(),
+        call.register_fla(),
+        call.init_workspace(device, 1),
+        call.make_runner(worker.vllm_config, device),
+        call.report_usage(worker.vllm_config),
+    ]
+    assert worker.model_runner is runner
+    if xlite:
+        assert worker.xlite_runner is runner

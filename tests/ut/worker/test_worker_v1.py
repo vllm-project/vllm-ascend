@@ -1,5 +1,6 @@
 import importlib
 import unittest
+from contextlib import ExitStack
 from types import SimpleNamespace
 from unittest.mock import ANY, MagicMock, patch
 
@@ -19,6 +20,7 @@ from tests.ut.base import TestBase
 from vllm_ascend.device.hardware import AscendDeviceType
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_hardware_profile
 from vllm_ascend.distributed.eplb.eplb_state import AscendEplbState
+from vllm_ascend.utils import vllm_version_is
 
 init_cached_hf_modules_path = "vllm.utils.import_utils.init_cached_hf_modules"
 kw_module = importlib.import_module("vllm_ascend.model_executor.warmup.kernel_warmup")
@@ -67,6 +69,21 @@ class TestPPSequenceParallelTransport(unittest.TestCase):
                     pp_group.return_value.isend_tensor_dict.assert_called_once_with(
                         output.tensors, all_gather_group=group
                     )
+
+
+def _attach_sleep_backend(worker) -> None:
+    """Wire the Ascend backend into a worker created via __new__."""
+    worker.model_config = SimpleNamespace(
+        sleep_mode_backend="camem",
+        sleep_preserve_parameter_names=[],
+    )
+    if not hasattr(worker, "vllm_config"):
+        worker.vllm_config = SimpleNamespace(model_config=worker.model_config)
+    else:
+        worker.vllm_config.model_config = worker.model_config
+    if not hasattr(worker, "sleep_wakeup_manager"):
+        worker.sleep_wakeup_manager = MagicMock()
+    worker._sleep_mode_backend = None
 
 
 class TestNPUWorker(TestBase):
@@ -458,7 +475,7 @@ class TestNPUWorker(TestBase):
 
     @patch("vllm_ascend.worker.worker.NPUWorker.synchronize_device")
     @patch("vllm_ascend.worker.worker.torch.npu.mem_get_info", side_effect=[(100, 200), (150, 200)])
-    @patch("vllm_ascend.worker.worker.CaMemAllocator")
+    @patch("vllm_ascend.device_allocator.sleep_mode_backend.CaMemAllocator")
     @patch("vllm_ascend.worker.worker.get_ascend_config")
     def test_sleep_uses_rl_extra_cleanup(
         self, mock_get_config, mock_allocator_class, mock_mem_get_info, mock_synchronize_device
@@ -473,18 +490,19 @@ class TestNPUWorker(TestBase):
         worker.model_runner = MagicMock()
         worker.model_runner.model.named_buffers.return_value = []
         worker.sleep_wakeup_manager = MagicMock()
+        _attach_sleep_backend(worker)
 
         worker.sleep()
 
         worker.sleep_wakeup_manager.sleep.assert_called_once_with()
-        mock_allocator_class.get_instance.return_value.sleep.assert_called_once_with(offload_tags=("weights",))
+        mock_allocator_class.get_instance.return_value.sleep.assert_called_once_with(("weights",))
         self.assertEqual(mock_mem_get_info.call_count, 2)
         # sleep() brackets the transition: one barrier before the baseline memory
         # snapshot, one after the optional RL extra cleanup and before the unmap.
         self.assertEqual(mock_synchronize_device.call_count, 2)
 
     @patch("vllm_ascend.worker.worker.NPUWorker.synchronize_device")
-    @patch("vllm_ascend.worker.worker.CaMemAllocator")
+    @patch("vllm_ascend.device_allocator.sleep_mode_backend.CaMemAllocator")
     @patch("vllm_ascend.worker.worker.get_ascend_config")
     def test_wake_up_mode_enabled(self, mock_get_config, mock_allocator_class, mock_synchronize_device):
         mock_config = MagicMock()
@@ -516,11 +534,13 @@ class TestNPUWorker(TestBase):
             worker.model_runner = mock_model_runner
             worker.vllm_config = mock_vllm_config
             worker._sleep_saved_buffers = {}
+            worker._sleep_saved_parameters = {}
             worker.sleep_wakeup_manager = MagicMock()
+            _attach_sleep_backend(worker)
             # Test wake_up method
             worker.wake_up(tags=["test_tag"])
 
-            mock_allocator.wake_up.assert_called_once_with(tags=["test_tag"])
+            mock_allocator.wake_up.assert_called_once_with(["test_tag"])
             worker.sleep_wakeup_manager.wakeup.assert_called_once_with(["test_tag"])
             mock_model_runner.post_kv_cache_wake_up.assert_not_called()
 
@@ -531,7 +551,7 @@ class TestNPUWorker(TestBase):
             self.assertEqual(mock_synchronize_device.call_count, 2)
 
     @patch("vllm_ascend.worker.worker.NPUWorker.synchronize_device")
-    @patch("vllm_ascend.worker.worker.CaMemAllocator")
+    @patch("vllm_ascend.device_allocator.sleep_mode_backend.CaMemAllocator")
     @patch("vllm_ascend.worker.worker.get_ascend_config")
     def test_wake_up_without_post_kv_cache_hook(self, mock_get_config, mock_allocator_class, mock_synchronize_device):
         from vllm_ascend.worker.worker import NPUWorker
@@ -550,10 +570,12 @@ class TestNPUWorker(TestBase):
             worker = NPUWorker()
         worker.model_runner = SimpleNamespace(model=MagicMock())
         worker._sleep_saved_buffers = {}
+        worker._sleep_saved_parameters = {}
+        _attach_sleep_backend(worker)
 
         worker.wake_up(tags=["kv_cache"])
 
-        mock_allocator.wake_up.assert_called_once_with(tags=["kv_cache"])
+        mock_allocator.wake_up.assert_called_once_with(["kv_cache"])
         mock_synchronize_device.assert_called_once_with()
 
     def test_synchronize_device_waits_for_npu_work(self):
@@ -601,7 +623,7 @@ class TestNPUWorker(TestBase):
         return model
 
     @patch("vllm_ascend.worker.worker.NPUWorker.synchronize_device")
-    @patch("vllm_ascend.worker.worker.CaMemAllocator")
+    @patch("vllm_ascend.device_allocator.sleep_mode_backend.CaMemAllocator")
     @patch("vllm_ascend.worker.worker.get_ascend_config")
     def test_wake_up_does_not_transpose_moe_weights(
         self, mock_get_config, mock_allocator_class, mock_synchronize_device
@@ -637,6 +659,7 @@ class TestNPUWorker(TestBase):
         )
         worker._sleep_saved_buffers = {}
         worker._sleep_saved_parameters = {}
+        _attach_sleep_backend(worker)
 
         worker.wake_up(tags=["weights"])
 
@@ -647,7 +670,7 @@ class TestNPUWorker(TestBase):
             self.assertEqual(routed_experts.w2_weight.shape, (2, 3, 4))
             self.assertIs(routed_experts.w13_weight.weight_loader, w13_loader)
             self.assertIs(routed_experts.w2_weight.weight_loader, w2_loader)
-        mock_allocator_class.get_instance.return_value.wake_up.assert_called_once_with(tags=["weights"])
+        mock_allocator_class.get_instance.return_value.wake_up.assert_called_once_with(["weights"])
         mock_synchronize_device.assert_called_once_with()
 
     @patch("vllm_ascend.worker.worker.current_platform")
@@ -2154,15 +2177,33 @@ class TestNPUWorkerWeightUpdate(TestBase):
     def _make_worker(self, engine=None):
         from vllm_ascend.worker.worker import NPUWorker
 
-        with patch.object(NPUWorker, "__init__", lambda x, **kwargs: None):
-            worker = NPUWorker()
+        worker = object.__new__(NPUWorker)
         worker.weight_transfer_engine = engine
         worker._weight_update_active = False
+        worker._weight_update_is_draft = False
+        worker._incomplete_weight_updates = set()
+        worker._kv_cache_reclaimable = False
+        worker._weight_update_kv_cache_loan = ExitStack()
+        worker.vllm_config = SimpleNamespace(
+            parallel_config=SimpleNamespace(data_parallel_index=0, world_size=1),
+            # The inherited start hook reads this to gate draft updates.
+            speculative_config=None,
+        )
+        worker.rank = 0
         worker.device = torch.device("cpu")
         worker.model_runner = MagicMock()
+        worker.model_runner.extensible_kv_cache = None
         worker.model_runner.model = MagicMock()
         worker.model_config = MagicMock()
         return worker
+
+    def _model_refresh_hook(self, worker):
+        # The inherited finish hook refreshes the model runner after the base
+        # weights land: the release install resets LoRA state, vLLM main
+        # notifies the runner that the target weights were replaced.
+        if vllm_version_is("0.34.0"):
+            return worker.model_runner.reset_lora_state
+        return worker.model_runner.on_target_weights_replaced
 
     def test_check_engine_raises_when_unconfigured(self):
         worker = self._make_worker(engine=None)
@@ -2202,10 +2243,12 @@ class TestNPUWorkerWeightUpdate(TestBase):
         mock_get_ascend_config.return_value.weight_nz_mode = 0
         engine = MagicMock()
         worker = self._make_worker(engine=engine)
-        worker._weight_update_active = True
+        worker.start_weight_update()
 
-        with self.assertRaises(RuntimeError):
+        with self.assertRaisesRegex(RuntimeError, "already active"):
             worker.start_weight_update()
+
+        engine.start_weight_update.assert_called_once_with()
 
     @patch("vllm_ascend.worker.worker.get_ascend_config")
     def test_start_weight_update_rejects_nz(self, mock_get_ascend_config):
@@ -2216,44 +2259,137 @@ class TestNPUWorkerWeightUpdate(TestBase):
         with self.assertRaises(ValueError):
             worker.start_weight_update()
 
+        engine.start_weight_update.assert_not_called()
+        self.assertFalse(worker._weight_update_active)
+
+    @patch("vllm_ascend.worker.worker.get_ascend_config")
+    def test_failed_start_can_be_restarted(self, mock_get_ascend_config):
+        mock_get_ascend_config.return_value.weight_nz_mode = 0
+        engine = MagicMock()
+        engine.start_weight_update.side_effect = [RuntimeError("start failed"), None]
+        worker = self._make_worker(engine=engine)
+        has_incomplete_update = getattr(worker, "has_incomplete_weight_update", None)
+
+        with self.assertRaisesRegex(RuntimeError, "start failed"):
+            worker.start_weight_update()
+
+        engine.reset_weight_update_target.assert_called_once_with()
+        self.assertFalse(worker._weight_update_active)
+        if has_incomplete_update is not None:
+            self.assertTrue(has_incomplete_update())
+        worker.start_weight_update()
+        worker.finish_weight_update()
+        if has_incomplete_update is not None:
+            self.assertFalse(has_incomplete_update())
+
     def test_update_weights_requires_start(self):
         engine = MagicMock()
         worker = self._make_worker(engine=engine)
         with self.assertRaises(RuntimeError):
             worker.update_weights({"names": [], "dtype_names": [], "shapes": []})
 
-    def test_update_weights_dispatches_to_engine(self):
+    @patch("vllm_ascend.worker.worker.get_ascend_config")
+    def test_update_weights_dispatches_to_engine(self, mock_get_ascend_config):
+        from vllm.config import get_current_vllm_config
+
+        mock_get_ascend_config.return_value.weight_nz_mode = 0
         engine = MagicMock()
         worker = self._make_worker(engine=engine)
 
-        worker._weight_update_active = True
+        def check_config(_update_info):
+            self.assertIs(get_current_vllm_config(), worker.vllm_config)
 
+        engine.update_weights.side_effect = check_config
+        worker.start_weight_update()
         worker.update_weights({"foo": "bar"})
+        worker.finish_weight_update()
 
         engine.update_weights.assert_called_once_with({"foo": "bar"})
+        engine.finish_weight_update.assert_called_once_with()
+        self.assertFalse(worker._weight_update_active)
 
-    def test_update_weights_resets_active_on_error(self):
+    @patch("vllm_ascend.worker.worker.get_ascend_config")
+    def test_update_weights_selects_payload_by_global_rank(self, mock_get_ascend_config):
+        mock_get_ascend_config.return_value.weight_nz_mode = 0
         engine = MagicMock()
-        engine.update_weights.side_effect = ValueError("boom")
         worker = self._make_worker(engine=engine)
-        worker._weight_update_active = True
+        worker.vllm_config.parallel_config.data_parallel_index = 1
+        worker.vllm_config.parallel_config.world_size = 2
+        worker.rank = 1
+        payloads = [{"worker_rank": rank} for rank in range(4)]
+
+        worker.start_weight_update()
+        worker.update_weights(payloads)
+        worker.finish_weight_update()
+
+        engine.update_weights.assert_called_once_with(payloads[3])
+
+    @patch("vllm_ascend.worker.worker.get_ascend_config")
+    def test_update_weights_resets_active_on_error(self, mock_get_ascend_config):
+        mock_get_ascend_config.return_value.weight_nz_mode = 0
+        engine = MagicMock()
+        engine.update_weights.side_effect = [ValueError("boom"), None]
+        worker = self._make_worker(engine=engine)
+        worker.start_weight_update()
 
         with self.assertRaisesRegex(ValueError, "boom"):
             worker.update_weights({"foo": "bar"})
 
         self.assertFalse(worker._weight_update_active)
+        engine.reset_weight_update_target.assert_called_once_with()
+        worker.start_weight_update()
+        worker.update_weights({"foo": "bar"})
+        worker.finish_weight_update()
+        engine.finish_weight_update.assert_called_once_with()
 
-    def test_finish_weight_update_resets_lora_state_after_base_weights(self):
+    @patch("vllm_ascend.worker.worker.get_ascend_config")
+    def test_finish_weight_update_refreshes_model_after_base_weights(self, mock_get_ascend_config):
+        from vllm.config import get_current_vllm_config
+
+        mock_get_ascend_config.return_value.weight_nz_mode = 0
         engine = MagicMock()
         worker = self._make_worker(engine=engine)
-        worker._weight_update_active = True
+        worker.start_weight_update()
+        refresh = self._model_refresh_hook(worker)
 
-        with patch("vllm_ascend.worker.worker.vllm_version_is", return_value=True):
-            worker.finish_weight_update()
+        def check_finish_config():
+            self.assertIs(get_current_vllm_config(), worker.vllm_config)
+            refresh.assert_not_called()
+
+        engine.finish_weight_update.side_effect = check_finish_config
+        worker.finish_weight_update()
 
         engine.finish_weight_update.assert_called_once_with()
-        worker.model_runner.reset_lora_state.assert_called_once_with()
+        engine.reset_weight_update_target.assert_called_once_with()
+        refresh.assert_called_once_with()
         self.assertFalse(worker._weight_update_active)
+
+    @patch("vllm_ascend.worker.worker.get_ascend_config")
+    def test_failed_finish_can_recover(self, mock_get_ascend_config):
+        from vllm.v1.worker import gpu_worker
+
+        mock_get_ascend_config.return_value.weight_nz_mode = 0
+        for mode in ("layerwise", "direct"):
+            with self.subTest(mode=mode), patch.dict("os.environ", {"VLLM_RELOAD_MODE": mode}):
+                engine = MagicMock()
+                engine.finish_weight_update.side_effect = [RuntimeError("finish failed"), None]
+                worker = self._make_worker(engine=engine)
+                worker.start_weight_update()
+                refresh = self._model_refresh_hook(worker)
+
+                with self.assertRaisesRegex(RuntimeError, "finish failed"):
+                    worker.finish_weight_update()
+
+                refresh.assert_not_called()
+                if mode == "direct" and hasattr(gpu_worker, "direct_reload_enabled"):
+                    self.assertFalse(worker._weight_update_active)
+                    self.assertTrue(worker.has_incomplete_weight_update())
+                    worker.start_weight_update()
+                else:
+                    self.assertTrue(worker._weight_update_active)
+                worker.finish_weight_update()
+                self.assertFalse(worker._weight_update_active)
+                refresh.assert_called_once_with()
 
     def test_finish_without_start_raises(self):
         engine = MagicMock()

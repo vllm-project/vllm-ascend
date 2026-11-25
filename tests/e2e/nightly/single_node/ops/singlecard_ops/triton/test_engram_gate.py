@@ -1,99 +1,190 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Gate parity, including distinct scoring/residual bases and strided inputs."""
+"""Numerical and replay coverage for post-wkv Engram fusion on Ascend.
+
+TRITON_INTERPRET=1 runs arithmetic coverage on CPU; NPU runs also exercise
+the Ascend compiler, device execution and ACL graph replay.
+"""
+
+import os
+import statistics
 
 import pytest
 import torch
+import torch_npu  # noqa: F401
 
-from vllm_ascend.device.device_config import get_ascend_device_type
-from vllm_ascend.device.hardware import AscendDeviceType
-from vllm_ascend.models.deepseek_v41.engram.common import restore_engram_hidden
-from vllm_ascend.models.deepseek_v41.engram.layer import AscendEngram
 from vllm_ascend.ops.triton.engram_gate import fused_engram_gate
+from vllm_ascend.ops.triton.engram_gate_a3 import fused_engram_gate_a3
 
-HC = 4
-ROTATION_BLOCK = 32
-EPS = 1e-6
+INTERPRET = os.environ.get("TRITON_INTERPRET") == "1"
 
 
-def reference(hidden, kv, qw, kw, mask, rotation):
-    # Independently express the reference; residual must stay in its original basis.
-    dim = hidden.shape[-1]
-    h = hidden.float()
-    if rotation is not None:
-        blocks = h.reshape(*h.shape[:-1], dim // ROTATION_BLOCK, ROTATION_BLOCK)
-        if rotation.ndim == 2:
-            h = (blocks @ rotation.T).reshape_as(h)
-        else:
-            h = (blocks.unsqueeze(-2) @ rotation.transpose(-1, -2)).squeeze(-2).reshape_as(h)
-    key = kv[:, : HC * dim].reshape(hidden.shape).float()
-    value = kv[:, HC * dim :].float()
-    scale = torch.rsqrt(h.square().mean(-1) + EPS) * torch.rsqrt(key.square().mean(-1) + EPS)
-    dot = (h * (qw.float() * kw.float()) * key).sum(-1) * scale * dim**-0.5
+def _inputs(tokens, dim, dtype, strided, device):
+    generator = torch.Generator().manual_seed(17)
+    step = 2 if strided else 1
+    hidden = torch.randn(tokens * step, 4, dim, generator=generator).to(dtype=dtype, device=device)[::step]
+    kv = torch.randn(tokens * step, 5 * dim, generator=generator).to(dtype=dtype, device=device)[::step]
+    q = torch.randn(4, dim, generator=generator).to(dtype=dtype, device=device)
+    k = torch.randn(4, dim, generator=generator).to(dtype=dtype, device=device)
+    mask = (torch.arange(tokens * step, device=device) % 3 != 1)[::step]
+    # Non-identity orthogonal block makes a wrong-basis gate observable.
+    rotation = torch.linalg.qr(torch.randn(32, 32, generator=generator)).Q.to(device)
+    return hidden, kv, q, k, mask, rotation
+
+
+def _inverse_rotate(hidden, rotation):
+    return (hidden.float().unflatten(-1, (-1, 32)) @ rotation.T).flatten(-2)
+
+
+def _reference(hidden, kv, q, k, mask, original):
+    tokens, branches, dim = hidden.shape
+    key, value = kv.split([branches * dim, dim], -1)
+    key = key.view(tokens, branches, dim).float()
+    rstd = torch.rsqrt(original.square().mean(-1) + 1e-6)
+    rstd *= torch.rsqrt(key.square().mean(-1) + 1e-6)
+    dot = (original * (q.float() * k.float()) * key).sum(-1) * rstd * dim**-0.5
     magnitude = dot.abs().clamp_min(1e-6).sqrt()
     gate = torch.sigmoid(torch.where(torch.signbit(dot), -magnitude, magnitude))
-    gate = gate.masked_fill(~mask[:, None], 0)
-    return (hidden.float() + gate[..., None] * value[:, None, :]).to(hidden.dtype)
+    gate = gate.masked_fill(~mask.unsqueeze(-1), 0)
+    return (hidden.float() + gate.unsqueeze(-1) * value.float().unsqueeze(-2)).to(hidden.dtype)
 
 
-@pytest.mark.skipif(
-    get_ascend_device_type() not in (AscendDeviceType.A3, AscendDeviceType.A5),
-    reason="Engram gate routes on A3 (rotated) and A5 (unrotated)",
+@pytest.mark.parametrize(
+    "tokens,dim,strided,rotated",
+    [
+        (1, 96, False, True),
+        (132, 5120, False, True),
+        (432, 5120, True, True),
+        (7, 96, True, False),
+    ],
 )
-@pytest.mark.parametrize("tokens,dim", [(0, 5120), (1, 96), (7, 5120), (132, 5120)])
-@pytest.mark.parametrize("rotation_kind", ["none", "shared", "per_block"])
-@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float32])
-def test_engram_gate(tokens, dim, rotation_kind, dtype):
-    torch.manual_seed(42)
-    # Token and branch strides are deliberately non-contiguous, channels are contiguous.
-    hidden = torch.randn(tokens * 2, HC * 2, dim, device="npu", dtype=dtype)[::2, ::2]
-    kv = torch.randn(tokens * 2, (HC + 1) * dim, device="npu", dtype=dtype)[::2]
-    qw = torch.randn(HC, dim * 2, device="npu", dtype=dtype)[:, ::2]
-    kw = torch.randn_like(qw)
-    mask = (torch.arange(tokens * 2, device="npu") % 3 != 0)[::2]
-    rotation = None
-    if rotation_kind != "none":
-        shape: tuple[int, ...] = (ROTATION_BLOCK, ROTATION_BLOCK)
-        if rotation_kind == "per_block":
-            shape = (dim // ROTATION_BLOCK, *shape)
-        rotation = torch.randn(shape, device="npu", dtype=torch.float32) / ROTATION_BLOCK**0.5
-    gate_hidden = None if rotation is None else restore_engram_hidden(hidden, rotation)
-    expected = reference(hidden, kv, qw, kw, mask, rotation)
-    actual = fused_engram_gate(hidden, kv, qw, kw, mask, EPS, gate_hidden=gate_hidden)
-    torch.npu.synchronize()
-    tolerance = 1e-2 if dtype == torch.bfloat16 else 1e-4
-    torch.testing.assert_close(actual, expected, atol=tolerance, rtol=tolerance)
-    torch.testing.assert_close(actual[~mask], hidden[~mask], atol=0, rtol=0)
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
+@torch.inference_mode()
+def test_engram_gate_matches_unfused(tokens, dim, strided, rotated, dtype):
+    device = "cpu" if INTERPRET else "npu"
+    hidden, kv, q, k, mask, rotation = _inputs(tokens, dim, dtype, strided, device)
+    original = _inverse_rotate(hidden, rotation) if rotated else hidden.float()
+    if rotated:
+        actual = fused_engram_gate_a3(hidden, kv, q, k, rotation, mask, 1e-6)
+    else:
+        actual = fused_engram_gate(hidden, kv, q, k, mask, 1e-6)
+    # CPU FP32 reference is independent of the device's reduction implementation.
+    expected = _reference(*(x.cpu() for x in (hidden, kv, q, k, mask, original)))
+    tolerance = 1e-2 if dtype == torch.bfloat16 else 1e-3
+    actual_cpu = actual.cpu()
+    torch.testing.assert_close(actual_cpu, expected, rtol=tolerance, atol=tolerance)
+    error = (actual_cpu.float() - expected.float()).abs()
+    print(
+        f"tokens={tokens} dim={dim} dtype={dtype} rotated={rotated} strided={strided}: "
+        f"max_abs={error.max().item():.8f} mean_abs={error.mean().item():.8f}"
+    )
+    torch.testing.assert_close(actual[~mask], hidden[~mask], rtol=0, atol=0)
+    if rotated:
+        wrong_basis = _reference(hidden, kv, q, k, mask, hidden.float())
+        assert (actual[mask].float() - wrong_basis[mask].float()).abs().max() > 0.05
 
 
-@pytest.mark.skipif(get_ascend_device_type() != AscendDeviceType.A3, reason="Rotated model gate routes on A3")
-def test_rotated_engram_model_graph_replay():
-    torch.manual_seed(7)
-    tokens, dim = 7, 5120
-    hidden = torch.randn(tokens, HC, dim, device="npu", dtype=torch.bfloat16)
-    kv = torch.randn(tokens, (HC + 1) * dim, device="npu", dtype=torch.bfloat16)
-    mask = torch.ones(tokens, device="npu", dtype=torch.bool)
-    rotation = torch.randn(ROTATION_BLOCK, ROTATION_BLOCK, device="npu") / ROTATION_BLOCK**0.5
-    # Exercise real model dispatch without constructing a checkpoint linear layer.
-    layer = AscendEngram.__new__(AscendEngram)
+@pytest.mark.skipif(INTERPRET, reason="ACL graphs require NPU execution")
+@torch.inference_mode()
+def test_engram_gate_replay_reads_updated_inputs():
+    hidden, kv, q, k, mask, rotation = _inputs(132, 5120, torch.bfloat16, False, "npu")
+
+    def operation():
+        return fused_engram_gate_a3(hidden, kv, q, k, rotation, mask, 1e-6)
+
+    for _ in range(3):
+        operation()
+    graph = torch.npu.NPUGraph()
+    with torch.npu.graph(graph):
+        actual = operation()
+    for scale in (0.25, -0.5):
+        hidden.mul_(scale)
+        kv.add_(0.125)
+        mask.logical_not_()
+        graph.replay()
+        original = _inverse_rotate(hidden, rotation)
+        expected = _reference(*(x.cpu() for x in (hidden, kv, q, k, mask, original)))
+        torch.testing.assert_close(actual.cpu(), expected, rtol=1e-2, atol=1e-2)
+
+
+@pytest.mark.skipif(INTERPRET, reason="Dispatch coverage requires real NPU tensors")
+@pytest.mark.parametrize(
+    "hardware,rotated,expected_call",
+    [
+        ("A3", True, "fused_engram_gate_a3"),
+        ("A5", False, "fused_engram_gate"),
+        ("A3", False, "engram_gate"),
+        ("A5", True, "engram_gate"),
+        ("A2", True, "engram_gate"),
+        ("A2", False, "engram_gate"),
+    ],
+)
+@torch.inference_mode()
+def test_engram_gate_dispatch_preserves_hardware_paths(monkeypatch, hardware, rotated, expected_call):
+    from vllm_ascend.device.hardware import AscendDeviceType
+    from vllm_ascend.device.hardware_profile import get_hardware_profile
+    from vllm_ascend.models.deepseek_v41.engram import layer as layer_module
+
+    hidden, kv, q, k, mask, rotation = _inputs(2, 96, torch.bfloat16, False, "npu")
+    layer = object.__new__(layer_module.AscendEngram)
     torch.nn.Module.__init__(layer)
-    layer.dim, layer.hc_mult, layer.eps = dim, HC, EPS
+    # Supply an already projected tensor so this test exercises gate dispatch
+    # and arithmetic without loading a checkpoint or allocating a GEMM weight.
     layer.wkv = torch.nn.Identity()
-    layer.q_weight = torch.nn.Parameter(torch.randn(HC, dim, device="npu", dtype=torch.bfloat16))
-    layer.k_weight = torch.nn.Parameter(torch.randn(HC, dim, device="npu", dtype=torch.bfloat16))
-    with torch.inference_mode():
-        for _ in range(3):
-            layer(hidden, kv, mask, rotation)
-        torch.npu.synchronize()
+    layer.hc_mult, layer.dim, layer.eps = 4, 96, 1e-6
+    layer.q_weight = torch.nn.Parameter(q, requires_grad=False)
+    layer.k_weight = torch.nn.Parameter(k, requires_grad=False)
+    profile = get_hardware_profile(getattr(AscendDeviceType, hardware))
+    monkeypatch.setattr(layer_module, "get_current_hardware_profile", lambda: profile)
+    calls = []
+    for name in ("fused_engram_gate", "fused_engram_gate_a3", "engram_gate"):
+        function = getattr(layer_module, name)
+
+        def record_call(*args, _name=name, _function=function, **kwargs):
+            calls.append(_name)
+            return _function(*args, **kwargs)
+
+        monkeypatch.setattr(layer_module, name, record_call)
+    actual = layer(hidden, kv, mask, rotation if rotated else None)
+    original = _inverse_rotate(hidden, rotation) if rotated else hidden.float()
+    expected = _reference(*(x.cpu() for x in (hidden, kv, q, k, mask, original)))
+    assert calls == [expected_call]
+    torch.testing.assert_close(actual.cpu(), expected, rtol=1e-2, atol=1e-2)
+
+
+@pytest.mark.skipif(INTERPRET, reason="Device timing requires NPU execution")
+@torch.inference_mode()
+def test_engram_gate_profile_shape_latency():
+    """Time post-wkv ACL replays so Python launch gaps do not skew decode."""
+    hidden, kv, q, k, mask, rotation = _inputs(132, 5120, torch.bfloat16, False, "npu")
+
+    def unfused():
+        return _reference(hidden, kv, q, k, mask, _inverse_rotate(hidden, rotation))
+
+    def fused():
+        return fused_engram_gate_a3(hidden, kv, q, k, rotation, mask, 1e-6)
+
+    timings = {}
+    for name, operation in (
+        ("unfused_post_wkv", unfused),
+        ("fused_post_wkv", fused),
+    ):
+        for _ in range(10):
+            operation()
         graph = torch.npu.NPUGraph()
         with torch.npu.graph(graph):
-            actual = layer(hidden, kv, mask, rotation)
-        for scale in (0.0, -0.5, 2.0):
-            hidden.normal_().mul_(scale)
-            kv.normal_()
-            mask.copy_(torch.arange(tokens, device="npu") % 2 == 0)
+            _output = operation()
+        for _ in range(10):
             graph.replay()
-            torch.npu.synchronize()
-            expected = reference(hidden, kv, layer.q_weight, layer.k_weight, mask, rotation)
-            torch.testing.assert_close(actual, expected, atol=1e-2, rtol=1e-2)
-            torch.testing.assert_close(actual[~mask], hidden[~mask], atol=0, rtol=0)
+        samples = []
+        for _ in range(5):
+            start, end = torch.npu.Event(enable_timing=True), torch.npu.Event(enable_timing=True)
+            start.record()
+            for _ in range(30):
+                graph.replay()
+            end.record()
+            end.synchronize()
+            samples.append(start.elapsed_time(end) * 1000 / 30)
+        timings[name] = statistics.median(samples)
+        print(f"{name}_acl_replay: median={timings[name]:.3f} us samples={samples}")
+    assert timings["fused_post_wkv"] < timings["unfused_post_wkv"]

@@ -26,7 +26,6 @@ from vllm.v1.worker.gpu.model_states.mamba_hybrid import MambaHybridModelState
 from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec
 from vllm_ascend.device.hardware import AscendDeviceType
 from vllm_ascend.device.hardware_profile import get_hardware_profile
-from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.device_metadata import DeviceMetadataStage, DeviceMetadataTask, TargetDeviceMetadata
 from vllm_ascend.worker.v2 import attn_utils
 from vllm_ascend.worker.v2.attn_utils import (
@@ -119,6 +118,7 @@ def _kv_cache_config(
 
 def _group(spec: MambaSpec):
     return SimpleNamespace(
+        kernel_block_size=None,
         kv_cache_group_id=0,
         kv_cache_spec=spec,
         layer_names=["linear_attn"],
@@ -204,7 +204,7 @@ def test_layerwise_connector_defers_mamba_pre_copy(mock_has_group, mock_get_grou
     spec = _mamba_spec()
     kv_cache_config = _kv_cache_config(spec)
     state = _make_defer_state(kv_cache_config)
-    ctx = MagicMock()
+    ctx = MagicMock(is_initialized=True)
     # vLLM main removed `MambaHybridModelState._ensure_align_ctx`; the
     # Ascend override must resolve the context built in initialize_kv_cache.
     state._mamba_ctx = ctx
@@ -231,16 +231,28 @@ def test_layerwise_connector_defers_mamba_pre_copy(mock_has_group, mock_get_grou
     connector.finish_mamba_state_copy.assert_called_once()
 
 
-def test_ensure_align_ctx_falls_back_to_mamba_ctx():
-    # vLLM main removed `MambaHybridModelState._ensure_align_ctx`; the Ascend
-    # override must return the context built in initialize_kv_cache instead of
-    # calling the (now absent) inherited helper.
+def test_ensure_align_ctx_preserves_initialized_persistent_tables():
     spec = _mamba_spec()
     kv_cache_config = _kv_cache_config(spec)
     state = _make_defer_state(kv_cache_config)
-    ctx = MagicMock()
+    persistent_tables = torch.tensor([11, 22], dtype=torch.int64)
+    aligned_index_tables = torch.tensor([33, 44], dtype=torch.int64)
+    ctx = SimpleNamespace(
+        is_initialized=True,
+        block_table_ptrs=persistent_tables,
+        aligned_index_block_table_ptrs=aligned_index_tables,
+        initialize_from_forward_context=MagicMock(),
+    )
     state._mamba_ctx = ctx
-    assert state._ensure_align_ctx(kv_cache_config, [0], ()) is ctx
+    batch_tables = (torch.tensor([[7], [2]], dtype=torch.int32),)
+
+    assert state._ensure_align_ctx(kv_cache_config, [0], batch_tables) is ctx
+
+    # Incoming attention tables are batch ordered. They must not replace the
+    # persistent request-slot pointers installed by initialize_kv_cache.
+    assert ctx.block_table_ptrs is persistent_tables
+    assert ctx.aligned_index_block_table_ptrs is aligned_index_tables
+    ctx.initialize_from_forward_context.assert_not_called()
 
 
 def test_ensure_align_ctx_lazily_recreates_mamba_ctx():
@@ -282,13 +294,9 @@ def test_ensure_align_ctx_lazily_recreates_mamba_ctx():
     mock_create.assert_called_once()
     # Enforce the installed upstream signature, rather than accepting any
     # keyword/omitted argument through an unconstrained MagicMock.
-    if not vllm_version_is("0.33.0"):
-        assert (
-            mock_create.call_args.kwargs["forward_context"]
-            is state.vllm_config.compilation_config.static_forward_context
-        )
-    else:
-        assert "forward_context" not in mock_create.call_args.kwargs
+    assert (
+        mock_create.call_args.kwargs["forward_context"] is state.vllm_config.compilation_config.static_forward_context
+    )
     ctx.initialize_from_forward_context.assert_called_once_with(
         kv_cache_config,
         state.vllm_config.compilation_config.static_forward_context,
@@ -916,12 +924,14 @@ def test_hybrid_cache_exposes_attention_views_and_mamba_states(_mock_config):
     backend = MagicMock()
     backend.get_kv_cache_shape.return_value = (2, 2, 4, 1, 1)
     attention_group = SimpleNamespace(
+        kernel_block_size=None,
         kv_cache_group_id=0,
         kv_cache_spec=attention_spec,
         layer_names=["full_attn", "mtp_attn"],
         backend=backend,
     )
     mamba_group = SimpleNamespace(
+        kernel_block_size=None,
         kv_cache_group_id=1,
         kv_cache_spec=mamba_spec,
         layer_names=["linear_attn"],
@@ -997,6 +1007,7 @@ def test_attention_cache_reshape_uses_virtual_kernel_block_count(
         )
     )
     group = SimpleNamespace(
+        kernel_block_size=None,
         kv_cache_group_id=0,
         kv_cache_spec=spec,
         layer_names=["mla_attn"],
@@ -1217,7 +1228,9 @@ def test_hybrid_dflash_writes_preserve_other_request_blocks(
     )
     backend = SimpleNamespace(get_kv_cache_shape=lambda n, b, h, d, _dtype: (2, n, b, h, d))
     groups = [
-        SimpleNamespace(kv_cache_group_id=i, kv_cache_spec=spec, layer_names=[name], backend=backend)
+        SimpleNamespace(
+            kernel_block_size=None, kv_cache_group_id=i, kv_cache_spec=spec, layer_names=[name], backend=backend
+        )
         for i, (name, spec) in enumerate(specs.items())
     ]
     raw_caches = _allocate_kv_cache(kv_cache_config, {}, torch.device("cpu"))

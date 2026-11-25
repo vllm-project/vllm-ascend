@@ -113,7 +113,7 @@ def test_dummy_embedding_reuses_ids_and_output_buffer(monkeypatch, supports_mm_i
     state = _make_state(supports_mm_inputs, layer)
     first = state.dummy_inputs_embeds(num_tokens)
     _, token_ids = state._embedding_tp_dummy_join
-    second = state.dummy_inputs_embeds(num_tokens)
+    second = state.dummy_inputs_embeds(num_tokens, None)
     assert state._embedding_tp_dummy_join[1] is token_ids
     assert token_ids.dtype == torch.int32
     torch.testing.assert_close(token_ids, torch.zeros(8, dtype=torch.int32))
@@ -171,6 +171,20 @@ def test_dummy_input_ids_use_upstream_lookup_once(monkeypatch, supports_mm_input
     assert not hasattr(state, "_embedding_tp_dummy_join")
 
 
+def test_dummy_embedding_with_input_ids_uses_only_upstream_lookup(monkeypatch):
+    monkeypatch.setattr(default, "embedding_tp_enable", lambda: True)
+    state = _make_state(True, torch.nn.Identity())
+    input_ids = torch.tensor([1, 2, 3], dtype=torch.int32)
+    expected = state.inputs_embeds[:3]
+
+    with patch.object(default.DefaultModelState, "dummy_inputs_embeds", return_value=expected) as upstream:
+        result = state.dummy_inputs_embeds(3, input_ids)
+
+    upstream.assert_called_once_with(3, input_ids)
+    state.model.modules.assert_not_called()
+    assert result is expected
+
+
 @pytest.mark.parametrize("supports_mm_inputs", [False, True])
 def test_embedding_tp_disabled_preserves_dummy_buffer(monkeypatch, supports_mm_inputs):
     monkeypatch.setattr(default, "embedding_tp_enable", lambda: False)
@@ -181,7 +195,7 @@ def test_embedding_tp_disabled_preserves_dummy_buffer(monkeypatch, supports_mm_i
     state.model.modules.assert_not_called()
 
 
-@pytest.mark.skipif(vllm_version_is("0.33.0"), reason="Profile input_ids are only passed by vLLM main")
+@pytest.mark.skipif(vllm_version_is("0.34.0"), reason="Profile input_ids are only passed by vLLM main")
 def test_dummy_embedding_uses_profile_input_ids(monkeypatch):
     monkeypatch.setattr(default, "embedding_tp_enable", lambda: True)
     embedding = torch.nn.Embedding(8, 4)

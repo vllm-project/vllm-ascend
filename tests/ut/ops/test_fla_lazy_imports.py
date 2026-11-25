@@ -126,8 +126,9 @@ class TestFLALazyImports(unittest.TestCase):
             events.append("device")
             return object()
 
-        # `init_device` imports the runner inside the function, so the module it
-        # resolves through has to be faked instead of the bound class.
+        # `init_device` builds the runner through the
+        # `_init_workspace_and_model_runner` / `_make_model_runner` hooks; the
+        # runner module they import through has to be faked instead of the bound class.
         runner_module = ModuleType("vllm_ascend.worker.v2.model_runner")
         runner_module.__dict__.update(NPUModelRunner=lambda *args: events.append("model_runner"))
         namespace = {
@@ -135,8 +136,12 @@ class TestFLALazyImports(unittest.TestCase):
             "init_workspace_manager": Mock(),
         }
         init_device = _load_function("vllm_ascend/worker/worker.py", "init_device", namespace)
-        worker = SimpleNamespace(
+        init_wam = _load_function("vllm_ascend/worker/worker.py", "_init_workspace_and_model_runner", namespace)
+        make_model_runner = _load_function("vllm_ascend/worker/worker.py", "_make_model_runner", namespace)
+        worker: SimpleNamespace = SimpleNamespace(
             _init_device=select_device,
+            _init_workspace_and_model_runner=lambda: init_wam(worker),
+            _make_model_runner=lambda: make_model_runner(worker),
             vllm_config=SimpleNamespace(is_mm_encoder_only=False),
             rank=1,
         )

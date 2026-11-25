@@ -115,7 +115,7 @@ jobs:
         VLLM_USE_MODELSCOPE: True
         HF_HUB_OFFLINE: 1
         MAX_JOBS: 4
-        UV_EXTRA_INDEX_URL: "https://mirrors.huaweicloud.com/ascend/repos/pypi https://mirrors.huaweicloud.com/ascend/repos/pypi/nightly https://download.pytorch.org/whl/cpu/"
+        UV_EXTRA_INDEX_URL: "https://repo.huaweicloud.com/ascend/repos/pypi https://repo.huaweicloud.com/ascend/repos/pypi/nightly https://download.pytorch.org/whl/cpu/"
         UV_INDEX_STRATEGY: unsafe-best-match
         UV_HTTP_TIMEOUT: 120
         UV_NO_CACHE: 1
@@ -500,6 +500,11 @@ jobs:
       if: ${{ !cancelled() && inputs.enable-coverage }}
       needs: selected-tests
       runs-on: linux-amd64-cpu-2-hk
+      # Host python on linux-amd64-cpu-2-hk has no pip. Use the repo-built
+      # lint image (Dockerfile.lint) instead of get-pip.py on the shared
+      # runner (L2-ci#container-contract).
+      container:
+        image: quay.io/ascend-ci/vllm-ascend:lint
       continue-on-error: true
       env:
         OBS_ACCESS_KEY: ${{ secrets.OBS_ACCESS_KEY_PRECISION }}
@@ -637,7 +642,9 @@ jobs:
             find "${TASK_DIR}" -type f | wc -l
 
             echo "=== building test_case_map.json ==="
-            pip install regex
+            if ! python3 -c "import regex" >/dev/null 2>&1; then
+              python3 -m pip install regex
+            fi
             python3 .github/workflows/scripts/test_selector.py \
               --build-map \
               --coverage-dir "${TASK_DIR}" \
@@ -686,7 +693,10 @@ jobs:
 
         - name: Upload coverage to OBS
           run: |
-            pip install esdk-obs-python --quiet
+            set -euo pipefail
+            if ! python3 -c "from obs import ObsClient" >/dev/null 2>&1; then
+              python3 -m pip install esdk-obs-python --quiet
+            fi
             python3 - <<'EOF'
             import os
             from obs import ObsClient
@@ -723,9 +733,11 @@ jobs:
             set +e
             echo "pruned=false" >> "$GITHUB_OUTPUT"
             OBS_URL="https://vllm-ascend.obs.cn-north-4.myhuaweicloud.com/${COVERAGE_OBJECT_EXTRA}"
-            if ! pip install pyyaml --quiet; then
-              echo "::warning::Failed to install pyyaml; skip prune"
-              exit 0
+            if ! python3 -c "import yaml" >/dev/null 2>&1; then
+              if ! python3 -m pip install pyyaml --quiet; then
+                echo "::warning::Failed to install pyyaml; skip prune"
+                exit 0
+              fi
             fi
             http_code=$(curl -sSL --retry 3 -o extra_recommended_tests.yaml -w "%{http_code}" "${OBS_URL}" || echo "000")
             if [ "${http_code}" != "200" ] || [ ! -s extra_recommended_tests.yaml ]; then
@@ -764,7 +776,9 @@ jobs:
               echo "No pruned extra_recommended_tests.yaml to upload"
               exit 0
             fi
-            pip install esdk-obs-python --quiet
+            if ! python3 -c "from obs import ObsClient" >/dev/null 2>&1; then
+              python3 -m pip install esdk-obs-python --quiet
+            fi
             python3 - <<'EOF'
             import os
             from obs import ObsClient

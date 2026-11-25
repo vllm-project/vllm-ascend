@@ -35,7 +35,6 @@ from vllm_ascend.attention.attention_v1 import AscendAttentionBackend
 from vllm_ascend.attention.fa_v1 import AscendFlashAttentionBackend
 from vllm_ascend.attention.mla_v1 import AscendMLABackend, AscendMLAImpl
 from vllm_ascend.model_executor.offloader import AscendPrefetchOffloader
-from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch, AscendInputBuffers
 from vllm_ascend.worker.v2.model_runner import NPUModelRunner
 from vllm_ascend.worker.v2.pcp_manager import AscendPCPManager
@@ -524,7 +523,7 @@ def test_prepare_inputs_preserves_pcp_tokens_and_forwards_graph_padding():
 
     # prepare_inputs keeps the real global PCP batch when it is larger than the
     # graph descriptor, and forwards the whole descriptor through the retained
-    # PCPManager API (vLLM #57980), also retained in v0.33.0.
+    # PCPManager API (vLLM #57980).
     assert len(padding_assignments) == 2
     assert ast.unparse(padding_assignments[0].value) == "max(num_tokens, batch_desc.num_tokens)"
     assert ast.unparse(padding_assignments[1].value) == "global_graph_num_reqs * batch_desc.uniform_token_count"
@@ -1530,6 +1529,7 @@ def test_initialize_kv_cache_installs_aclgraph_factory_and_pcp(a5, architecture)
     )
     runner.max_num_reqs = runner.vllm_config.scheduler_config.max_num_seqs
     runner.pcp_manager = MagicMock(spec=AscendPCPManager)
+    runner.pcp_manager.max_num_local_reqs = 16
     runner.model_state = SimpleNamespace(pcp_manager=None, kvpp_runtime=None)
     runner.speculator = SimpleNamespace()
     runner.model_config = SimpleNamespace(architecture=architecture, hf_config=SimpleNamespace())
@@ -1546,6 +1546,7 @@ def test_initialize_kv_cache_installs_aclgraph_factory_and_pcp(a5, architecture)
     def _super(self, kv_cache_config, kv_cache_allocation_context=None):
         self.kv_cache_config = kv_cache_config
         self.attn_groups = []
+        self.block_tables = SimpleNamespace(block_tables=[])
         seen["factory"] = vllm_model_runner.ModelCudaGraphManager
         seen["cfg"] = kv_cache_config
 
@@ -1568,9 +1569,7 @@ def test_initialize_kv_cache_installs_aclgraph_factory_and_pcp(a5, architecture)
         ) as create_kvpp,
     ):
         runner.initialize_kv_cache(kv_cache_config)
-        query_kwargs: dict[str, Any] = (
-            {"decode_query_len": 1} if vllm_version_is("0.33.0") else {"decode_query_lens": {1: 8}}
-        )
+        query_kwargs: dict[str, Any] = {"decode_query_lens": {1: 8}}
         seen["factory"](runner.vllm_config, torch.device("cpu"), CUDAGraphMode.FULL, **query_kwargs)
 
     prepare_kda.assert_called_once_with(runner.compilation_config.static_forward_context, 8)
@@ -1621,6 +1620,7 @@ def test_initialize_kv_cache_forwards_allocation_context():
         captured_kwargs.update(kwargs)
         self.kv_cache_config = kv_cache_config
         self.attn_groups = []
+        self.block_tables = SimpleNamespace(block_tables=[])
 
     def _prepare_kda(context, maximum):
         """Check cache binding and configuration at the startup boundary."""
@@ -2776,20 +2776,17 @@ def test_adaptive_cost_diagnostics_reads_only_cpu_budget_inputs():
     np.testing.assert_allclose(args[7], [0.7, 0.8])
 
 
-@pytest.mark.parametrize("release_lane", [False, True])
 @pytest.mark.parametrize("dcp_size", [1, 2])
 @pytest.mark.parametrize("tokens,expected", [(None, 16), ([4, 8], 8), ([32, 64], 16)])
-def test_lmhead_padding_reads_versioned_dp_sync_state(release_lane, dcp_size, tokens, expected):
+def test_lmhead_padding_reads_versioned_dp_sync_state(dcp_size, tokens, expected):
     runner = NPUModelRunner.__new__(NPUModelRunner)
     runner.max_num_reqs = 16
     runner.decode_query_len = 1
     runner.dcp_size = dcp_size
     dp_sync = None if tokens is None else SimpleNamespace(num_tokens_across_dp=torch.tensor(tokens))
-    field = "dp_sync" if release_lane else "dp_sync_state"
-    state = SimpleNamespace(**{field: dp_sync})
-    with patch("vllm_ascend.worker.v2.model_runner.vllm_version_is", return_value=release_lane):
-        assert runner._get_lmhead_pad_size(state) == (expected if dcp_size == 1 else 16)
-        assert runner._get_lmhead_pad_size(None) == 16
+    state = SimpleNamespace(dp_sync_state=dp_sync)
+    assert runner._get_lmhead_pad_size(state) == (expected if dcp_size == 1 else 16)
+    assert runner._get_lmhead_pad_size(None) == 16
 
 
 @pytest.mark.parametrize("lmhead_tp", [False, True])
@@ -2814,12 +2811,11 @@ def test_sample_tokens_refreshes_lmhead_padding_each_step(monkeypatch, lmhead_tp
 
     module = "vllm_ascend.worker.v2.model_runner."
     monkeypatch.setattr(module + "lmhead_tp_enable", lambda: lmhead_tp)
-    monkeypatch.setattr(module + "vllm_version_is", lambda _version: True)
     monkeypatch.setattr(GPUModelRunner, "sample_tokens", parent_sample_tokens)
 
     for step, tokens in enumerate(([2, 4], [8, 6], None)):
         runner.execute_model_state = (
-            SimpleNamespace(dp_sync=SimpleNamespace(num_tokens_across_dp=torch.tensor(tokens)))
+            SimpleNamespace(dp_sync_state=SimpleNamespace(num_tokens_across_dp=torch.tensor(tokens)))
             if tokens is not None
             else None
         )
