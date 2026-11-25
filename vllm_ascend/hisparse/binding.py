@@ -12,10 +12,16 @@ from vllm.v1.kv_cache_interface import (
     HiSparseResidentSpec,
     KVCacheConfig,
     KVCacheSpec,
+    SparseCacheRole,
     UniformTypeKVCacheSpecs,
 )
 
-from vllm_ascend.core.kv_cache_interface import AscendSFAIndexerCacheSpec
+from vllm_ascend.core.kv_cache_interface import (
+    AscendIndexerKPoolTailSpec,
+    AscendMLAAttentionSpec,
+    AscendSFAIndexerCacheSpec,
+)
+from vllm_ascend.models.glm5next.cache_views import view_hisparse_kpool_cache
 
 
 def align_hisparse_indexer_specs(
@@ -43,6 +49,9 @@ def align_hisparse_indexer_specs(
                 alignment = math.lcm(alignment, spec.head_size, torch.float32.itemsize)
             else:
                 alignment = math.lcm(alignment, spec.page_size_bytes)
+        elif isinstance(spec, AscendIndexerKPoolTailSpec):
+            row_bytes = spec.unpadded_page_size_bytes // spec.ring_capacity
+            alignment = math.lcm(alignment, row_bytes)
         elif packed_row_bytes is not None and isinstance(spec, (HiSparseResidentSpec, HiSparseHotSpec)):
             # Core derives these synthetic specs without the source row alignment.
             # Declare it before shared-slab sizing, never round runtime addresses.
@@ -180,3 +189,21 @@ def _bind_indexer_views(
         )
         forward_context[name].hisparse_block_stride = block_stride
         kv_caches[name] = (indexer_cache,)
+
+
+def _bind_glm5_next_indexer_views(kv_cache_config: KVCacheConfig, kv_caches: dict[str, Any]) -> None:
+    """Bind Flash's device-only compressed keys and request-private tail."""
+    for group in kv_cache_config.kv_cache_groups:
+        for name in group.layer_names:
+            spec = group.kv_cache_spec
+            if isinstance(spec, UniformTypeKVCacheSpecs):
+                spec = spec.kv_cache_specs[name]
+            if isinstance(spec, AscendIndexerKPoolTailSpec):
+                # Core's shape is [blocks, 1, ring_capacity, 2 * head_dim].
+                kv_caches[name] = (kv_caches[name].squeeze(1),)
+            elif (
+                isinstance(spec, AscendMLAAttentionSpec)
+                and spec.model_version == "glm5_next"
+                and spec.cache_role is SparseCacheRole.INDEXER
+            ):
+                kv_caches[name] = view_hisparse_kpool_cache(kv_caches[name], spec)
