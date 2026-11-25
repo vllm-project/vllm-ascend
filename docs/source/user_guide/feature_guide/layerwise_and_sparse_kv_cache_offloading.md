@@ -166,6 +166,32 @@ Add the following options to the Decode launch command:
 | `topk_buffer_size` | Device hot-buffer size. It must be at least `index_topk` and divisible by `block_size`. Twice `index_topk` is a practical starting point. |
 | `dram_size_per_dp_GB` | Host memory reserved per DP rank. It must hold the full KV cache. TP ranks share this pool. |
 | `keep_device_kv_cache` | Debug-only option that retains the full device KV cache. Keep it `false` in production. |
+| `eviction_policy` | CPU eviction policy: `lru` (default) or `reuse_prioritized_lru`. |
+| `probation_age` | Initial age of a cache miss under `reuse_prioritized_lru`. Integer in `[0, 2147483646]`, default `4`. A resident hit resets its age to zero. |
+
+### Reuse-prioritized LRU
+
+To test reuse-prioritized eviction, add the following fields inside
+`sparse_kv_offload_config`:
+
+```json
+{
+    "eviction_policy": "reuse_prioritized_lru",
+    "probation_age": 4
+}
+```
+
+The CPU C++ planner protects all current hits, resets their ages to zero, and
+assigns newly loaded entries the configured probation age. It uses free slots
+first, then evicts the oldest non-hit entries. Resident ages increase with each
+planner update and saturate instead of wrapping. Logical slot/age pairs are
+merged in linear time; physical KV is not moved to reorder the cache.
+
+`lru` keeps the existing behavior and does not allocate age buffers. Both
+policies use the same miss-only H2D and resident attention path. Graph execution
+continues to call the CPU planner through a host callback. Layers with
+`skip_topk` reuse the source layer's slots and misses without a second age update.
+A probation age of zero is valid but does not guarantee equivalence to `lru`.
 
 ## 4. Use Them Together
 
