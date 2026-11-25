@@ -57,6 +57,7 @@ presets:
     description: >-
       Eight hosts with eight NPUs per host. Each pool uses DP4 / TP8 / PP1
       with one external DP rank per host. Decode also uses DCP8.
+      The context limit is 140,000 tokens.
     source:
       label: vLLM Ascend Kimi-K3.1-Pro PD deployment tutorial
       href: https://docs.vllm.ai/projects/ascend/en/latest/tutorials/models/Kimi-K3.1-Pro.html#51-pd-deployment
@@ -174,13 +175,6 @@ presets:
           '--kv-transfer-config':
             MooncakeConnectorV2:
               kv_port: 30300
-    points:
-      basic:
-        label: 140K
-        default: true
-      long_context:
-        label: 1M
-        args: ['--max-model-len', '1048576']
     runbook: |
       Set `PREFILL_NODE_1` through `PREFILL_NODE_4` and `DECODE_NODE_1`
       through `DECODE_NODE_4` to the corresponding data-network IPs.
@@ -199,7 +193,3 @@ presets:
       DP RPC port 12320. Decode uses API port 8001 and DP RPC port 12321.
       Once all eight APIs are healthy, start the Ascend Router and send a
       request with model `kimi-k3.1-pro`.
-
-      This recipe uses an external DP Prefill pool. See the
-      [tutorial's long-context verification steps](https://docs.vllm.ai/projects/ascend/en/latest/tutorials/models/Kimi-K3.1-Pro.html#52-long-context)
-      to check KV-cache capacity and test 1M requests on the selected topology.
