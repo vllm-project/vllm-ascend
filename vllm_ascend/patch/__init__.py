@@ -1671,3 +1671,13 @@
 #       Remove the verifier override once native Kimi defaults dispatch through
 #       the platform's attention/cache configuration interface.
 #
+
+# ** Files: platform/patch_qwen3_reasoning_parser.py and platform/patch_qwen3_tool_parser.py **
+# Target: built-in qwen3 reasoning and qwen3_xml/qwen3_coder tool parsers for complete responses.
+# Why: examples in reasoning and undeclared functions in content can become OpenAI tool calls.
+# How: when an explicit thinking end follows a tool opener, use Qwen3's
+# grammar with the implicit transition disabled for this response. For auto
+# tool choice, publish only calls to functions in the request's tool schema.
+# Related: https://github.com/vllm-project/vllm/pull/59821
+# Remove the overrides when supported vLLM versions handle quoted examples,
+# implicit tool calls, reasoning-token accounting and tool name validation.

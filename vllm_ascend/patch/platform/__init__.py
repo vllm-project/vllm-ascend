@@ -15,6 +15,10 @@
 # limitations under the License.
 
 import os
+from importlib import import_module
+
+from vllm.reasoning import ReasoningParserManager
+from vllm.tool_parsers import ToolParserManager
 
 import vllm_ascend.patch.platform.patch_distributed  # noqa
 import vllm_ascend.patch.platform.patch_kimi_k31_config  # noqa
@@ -52,6 +56,37 @@ import vllm_ascend.patch.platform.patch_fused_moe  # noqa
 import vllm_ascend.patch.platform.patch_engram_config  # noqa
 
 import vllm_ascend.patch.platform.patch_example_connector  # noqa
+
+
+def _replace_builtin_parser(manager, cached, name, upstream, replacement):
+    if manager.lazy_parsers.get(name) != upstream:
+        return
+    if cached is None:
+        manager.register_lazy_module(name, *replacement)
+    elif cached is getattr(import_module(upstream[0]), upstream[1]):
+        # Clients may resolve a built-in parser before platform initialization.
+        manager.register_module(name=name, module=getattr(import_module(replacement[0]), replacement[1]))
+
+
+def _register_qwen3_parsers():
+    _replace_builtin_parser(
+        ReasoningParserManager,
+        ReasoningParserManager.reasoning_parsers.get("qwen3"),
+        "qwen3",
+        ("vllm.reasoning.qwen3_engine_reasoning_parser", "Qwen3ParserReasoningAdapter"),
+        ("vllm_ascend.patch.platform.patch_qwen3_reasoning_parser", "AscendQwen3ReasoningParser"),
+    )
+    for name in ("qwen3_xml", "qwen3_coder"):
+        _replace_builtin_parser(
+            ToolParserManager,
+            ToolParserManager.tool_parsers.get(name),
+            name,
+            ("vllm.tool_parsers.qwen3_engine_tool_parser", "Qwen3EngineToolParser"),
+            ("vllm_ascend.patch.platform.patch_qwen3_tool_parser", "AscendQwen3ToolParser"),
+        )
+
+
+_register_qwen3_parsers()
 
 # ** File: platform/patch_example_connector.py **
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
