@@ -77,17 +77,6 @@ class AscendW8A8DynamicLinearMethod(AscendLinearScheme):
     def __init__(self):
         pass
 
-    def input_quant_key(self):
-        """Advertise only the pre-quantized format accepted by this scheme."""
-        # Subclasses can override apply and need to opt in independently.
-        if type(self) is not AscendW8A8DynamicLinearMethod or self.act_quant_type != torch.int8:
-            return None
-        try:
-            from vllm.model_executor.layers.quantization.utils.quant_utils import kInt8DynamicTokenSym
-        except ImportError:
-            return None
-        return kInt8DynamicTokenSym
-
     def get_weight(self, input_size: int, output_size: int, params_dtype: torch.dtype) -> dict[str, Any]:
         params_dict = {"weight": torch.empty(output_size, input_size, dtype=torch.int8)}
         return params_dict

@@ -14,6 +14,7 @@ from vllm.distributed import (
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
+    MergedColumnParallelLinear,
     ReplicatedLinear,
     RowParallelLinear,
 )
@@ -50,7 +51,10 @@ from vllm.v1.attention.backends.mla.index_group import SparseMLAIndexGroupBuilde
 from vllm_ascend.attention.context_parallel.common_cp import use_dcp_q_replicate
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.ops.layernorm import AscendRMSNorm
-from vllm_ascend.ops.linear import AscendDCPGroupColumnParallelLinear
+from vllm_ascend.ops.linear import AscendDCPGroupColumnParallelLinear, AscendMergedColumnParallelLinear
+from vllm_ascend.quantization.method_adapters import AscendLinearMethod
+from vllm_ascend.quantization.methods.base import PreparedLinearInput
+from vllm_ascend.quantization.methods.w8a8.w8a8_dynamic import AscendW8A8DynamicLinearMethod
 from vllm_ascend.utils import enable_custom_op, is_mtp_layer, should_reuse_topk, vllm_version_is
 from vllm_ascend.worker.v2 import pp_transport
 from vllm_ascend.worker.v2.pp_transport import (
@@ -470,20 +474,29 @@ def _patched_forward(
 _ORIGINAL_DECODER_FORWARD = DeepseekV2DecoderLayer.forward
 
 
-def _supports_dense_norm_quant(layer, hidden_states, get_input_quant_key, quant_key):
+def _supports_dense_norm_quant(layer, hidden_states):
     """Select the decoder path before running attention or mutating residuals."""
+    if not isinstance(layer.mlp, DeepseekV2MLP):
+        return False
+    projection = layer.mlp.gate_up_proj
+    adapter = getattr(projection, "quant_method", None)
+    scheme = getattr(adapter, "quant_method", None)
     return (
-        isinstance(layer.mlp, DeepseekV2MLP)
+        type(projection) in (MergedColumnParallelLinear, AscendMergedColumnParallelLinear)
+        and type(adapter) is AscendLinearMethod
+        and type(scheme) is AscendW8A8DynamicLinearMethod
+        and scheme.act_quant_type == torch.int8
+        and not getattr(projection, "requires_unquantized_input", False)
+        and getattr(projection, "custom_op", None) is None
         and not layer.use_sequence_parallel_moe
         and hidden_states.dtype == torch.bfloat16
         and isinstance(layer.post_attention_layernorm, AscendRMSNorm)
-        and get_input_quant_key(layer.mlp.gate_up_proj) == quant_key
         and enable_custom_op()
         and get_current_hardware_profile().supports(HardwareCapability.GRAPH_NORM_QUANT_FUSION)
     )
 
 
-def _maybe_fused_add_rms_norm_quant(norm, hidden_states, residual, quantized_activation_cls, quant_key):
+def _maybe_fused_add_rms_norm_quant(norm, hidden_states, residual):
     """Prepare the dense MLP input with fused add/norm/quant when supported."""
     if (
         hidden_states.ndim != 2
@@ -503,28 +516,20 @@ def _maybe_fused_add_rms_norm_quant(norm, hidden_states, residual, quantized_act
         epsilon=norm.variance_epsilon,
         output_mask=[True, False],
     )
-    prepared = quantized_activation_cls(
-        data=output[0],
+    prepared = PreparedLinearInput(
+        quantized=output[0],
         scale=output[3],
-        orig_dtype=hidden_states.dtype,
-        orig_shape=hidden_states.shape,
-        quant_key=quant_key,
+        output_dtype=hidden_states.dtype,
     )
     return prepared, output[2]
 
 
 def _decoder_forward_with_norm_quant(self, positions, hidden_states, residual, llama_4_scaling=None):
     """Explicit dense-MLP norm/quant fusion; remove when upstream owns it."""
-    try:
-        from vllm.model_executor.layers.fusion.quant_activation import QuantizedActivation, get_input_quant_key
-        from vllm.model_executor.layers.quantization.utils.quant_utils import kInt8DynamicTokenSym
-    except ImportError:
-        return _ORIGINAL_DECODER_FORWARD(self, positions, hidden_states, residual, llama_4_scaling)
-
     # Restrict the model-level override to the observed dense W8A8 path. Other
     # layers, sequence-parallel boundaries and unsupported consumers retain
     # upstream's complete forward, including its FP16 overflow handling.
-    if not _supports_dense_norm_quant(self, hidden_states, get_input_quant_key, kInt8DynamicTokenSym):
+    if not _supports_dense_norm_quant(self, hidden_states):
         return _ORIGINAL_DECODER_FORWARD(self, positions, hidden_states, residual, llama_4_scaling)
 
     # Keep this forward aligned with DeepseekV2DecoderLayer.forward. Only the
@@ -569,8 +574,6 @@ def _decoder_forward_with_norm_quant(self, positions, hidden_states, residual, l
         self.post_attention_layernorm,
         hidden_states,
         residual,
-        QuantizedActivation,
-        kInt8DynamicTokenSym,
     )
     if self.use_sequence_parallel_moe:
         hidden_states = self.mlp(hidden_states, already_sequence_parallel=True)
