@@ -1,0 +1,8 @@
+pr: 23214
+entries:
+  - category: performance
+    text: >-
+      A3 Kimi K3.1 DSpark decode can skip the per-step device-to-host token
+      count copy and the following host wait when both the native MLA draft
+      and all target consumers support device lengths, including native
+      RecoverSSM with prefill context parallel size one.
