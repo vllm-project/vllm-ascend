@@ -58,8 +58,6 @@ class HardwareCapability(Enum):
     ATB_EXTENSIONS = auto()
     # Run the ATB matmul warmup that avoids first-request cache-write latency.
     ATB_WARMUP = auto()
-    # Allow a plain 2D BF16 linear matmul to write into a supplied ND buffer.
-    BF16_LINEAR_MATMUL_OUT = auto()
     # Register fake/meta implementations for the custom BGMV and SGMV LoRA ops.
     BGMV_SGMV_META_REGISTRATION = auto()
     # SK scatter kernel for paged cache writes (A2/A3/A5 ABI).
@@ -406,7 +404,6 @@ _STANDARD_CAPABILITIES = frozenset(
     }
 )
 _A3_CAPABILITIES = _STANDARD_CAPABILITIES | {
-    HardwareCapability.BF16_LINEAR_MATMUL_OUT,
     HardwareCapability.ENGRAM_LOCAL_HOST_VMM,
     HardwareCapability.KDA_INT8_QUANT_OVERLAP,
     HardwareCapability.NATIVE_INT8_SPARSE,

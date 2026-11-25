@@ -417,7 +417,8 @@ class AscendRowParallelLinear(RowParallelLinear):
         """Try to write a plain BF16 projection into a separate output buffer.
 
         Return False without writing if the caller needs the regular forward path.
-        The caller must supply an output buffer that does not alias x or weight.
+        The caller selects a supported hardware path and supplies an output
+        buffer that does not alias x or weight.
         """
         if (
             type(self) is not AscendRowParallelLinear
@@ -428,7 +429,6 @@ class AscendRowParallelLinear(RowParallelLinear):
             or self.bias is not None
             or not self.return_bias
             or self.out_dtype is not None
-            or not get_current_hardware_profile().supports(HardwareCapability.BF16_LINEAR_MATMUL_OUT)
         ):
             return False
 

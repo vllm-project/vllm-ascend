@@ -10,8 +10,6 @@ from vllm.model_executor.model_loader.utils import process_weights_after_loading
 
 from tests.ut.base import TestBase
 from vllm_ascend import ascend_config
-from vllm_ascend.device.hardware import AscendDeviceType
-from vllm_ascend.device.hardware_profile import get_hardware_profile
 from vllm_ascend.distributed import parallel_state
 from vllm_ascend.ops import linear
 from vllm_ascend.ops.head_parallel import HeadParallelMergedColumnLinear
@@ -244,9 +242,6 @@ class TestAscendRowParallelLinear(BaseLinearTest):
             tensor.is_contiguous.return_value = True
         with (
             patch.object(layer, "_parameters", {"weight": weight, "bias": None}),
-            patch.object(
-                linear, "get_current_hardware_profile", return_value=get_hardware_profile(AscendDeviceType.A3)
-            ) as profile,
             patch.object(linear, "is_internal_npu_format", return_value=False),
             patch.object(torch, "is_autocast_enabled", return_value=False),
             patch.object(torch, "matmul") as matmul,
@@ -262,9 +257,6 @@ class TestAscendRowParallelLinear(BaseLinearTest):
             with patch.object(layer, "reduce_results", True), patch.object(layer, "tp_size", 2):
                 self.assertFalse(layer.try_forward_into(x, out))
             out.shape = (2, 7)
-            self.assertFalse(layer.try_forward_into(x, out))
-            out.shape = (2, 8)
-            profile.return_value = get_hardware_profile(AscendDeviceType.A2)
             self.assertFalse(layer.try_forward_into(x, out))
             matmul.assert_not_called()
 

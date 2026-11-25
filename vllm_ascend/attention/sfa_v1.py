@@ -941,7 +941,12 @@ class AscendSFAImpl(MLAAttentionImpl):
         hf_config = self.vllm_config.model_config.hf_config
         hf_text_config = getattr(self.vllm_config.model_config, "hf_text_config", None)
         self.is_kimi_k31 = hf_config.model_type == "kimi_k31" or getattr(type(hf_config), "is_kimi_k31", False)
-        self._decode_o_proj_out = self.is_kimi_k31 and not self.pcp_enabled and self.vllm_config.lora_config is None
+        self._decode_o_proj_out = (
+            self.is_kimi_k31
+            and not self.pcp_enabled
+            and self.vllm_config.lora_config is None
+            and get_current_hardware_profile().supports(HardwareCapability.NATIVE_INT8_SPARSE)
+        )
         self.use_rope = not (self.is_kimi_k31 and getattr(hf_text_config, "mla_use_nope", False))
         config_candidates = (hf_config, hf_text_config)
         index_cache_enabled = _get_config_bool(

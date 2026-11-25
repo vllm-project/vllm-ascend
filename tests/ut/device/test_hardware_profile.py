@@ -67,7 +67,6 @@ _EXPECTED_CAPABILITIES = {
     },
     AscendDeviceType.A3: _STANDARD_CAPABILITIES
     | {
-        HardwareCapability.BF16_LINEAR_MATMUL_OUT,
         HardwareCapability.ENGRAM_LOCAL_HOST_VMM,
         HardwareCapability.ENGRAM_ROTATED_GATE,
         HardwareCapability.KDA_INT8_QUANT_OVERLAP,
