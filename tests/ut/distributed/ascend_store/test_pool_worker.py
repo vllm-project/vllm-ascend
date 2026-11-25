@@ -588,7 +588,7 @@ class TestLayerwiseAttentionSave(unittest.TestCase):
         worker = make_worker(self, num_layers=1, use_layerwise=True, kv_cache_config=plan)
         worker.kv_recv_thread = MagicMock()
         worker.layer_load_finished_events = [threading.Event()]
-        save_gate = SimpleNamespace(event=None, on_start=None, on_finish=None)
+        save_gate = SimpleNamespace(event=None, on_start=None, on_finish=None, cancel=MagicMock())
         with patch(
             "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.pool_worker.reset_attention_gates",
             return_value=(MagicMock(), save_gate),
@@ -625,12 +625,13 @@ class TestLayerwiseAttentionSave(unittest.TestCase):
                 )
                 worker.kv_recv_thread = MagicMock()
                 worker.layer_load_finished_events = [threading.Event(), threading.Event()]
+                worker.sync_save_events = [MagicMock(), MagicMock()]
 
                 self.assertEqual(worker.pp_rank, 1)
                 self.assertEqual(worker._global_to_local_layer, {2: 0, 3: 1})
                 self.assertEqual(worker._recurrent_layers, {1})
 
-                full_attention_gate = SimpleNamespace(event=None, on_start=None, on_finish=None)
+                full_attention_gate = SimpleNamespace(event=None, on_start=None, on_finish=None, cancel=MagicMock())
                 with patch(
                     "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.pool_worker."
                     "reset_attention_gates",
@@ -640,7 +641,7 @@ class TestLayerwiseAttentionSave(unittest.TestCase):
                 self.assertIsNotNone(full_attention_gate.on_start)
 
                 worker.current_layer = 1
-                mamba_gate = SimpleNamespace(event=None, on_start=None, on_finish=None)
+                mamba_gate = SimpleNamespace(event=None, on_start=None, on_finish=None, cancel=MagicMock())
                 with patch(
                     "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.pool_worker."
                     "reset_attention_gates",
