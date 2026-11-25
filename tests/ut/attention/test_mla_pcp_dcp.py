@@ -2,13 +2,14 @@
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
+import numpy as np
 import pytest
 import torch
 from vllm.config import ParallelConfig
 from vllm.v1.worker import cp_utils
 
 from vllm_ascend.attention import mla_v1
-from vllm_ascend.attention.context_parallel.mla_cp import AscendMlaDCPImpl
+from vllm_ascend.attention.context_parallel.mla_cp import AscendMlaDCPImpl, AscendMlaDCPMetadataBuilder
 from vllm_ascend.attention.mla_v1 import AscendMLAImpl
 
 
@@ -365,10 +366,37 @@ def test_pcp_dcp_chunk_plan_packs_requests_within_budget(workspace_size):
     assert builder.num_chunks > 1
 
 
-def test_pcp_global_plan_keeps_local_fragment_mapping():
-    import numpy as np
+@pytest.mark.parametrize("has_prefill", [False, True])
+def test_pcp_dcp_prefill_plan_excludes_cached_tail(has_prefill):
+    builder = AscendMlaDCPMetadataBuilder.__new__(AscendMlaDCPMetadataBuilder)
+    builder.use_pcp = True
+    builder._pcp_cache_group_idx = 0
+    builder.num_decodes = 1
+    builder.num_prefills = 2 if has_prefill else 0
+    table = torch.tensor([[7, 8], [9, 10]], dtype=torch.int32)
+    builder._pcp_context = SimpleNamespace(
+        global_batch=SimpleNamespace(
+            num_reqs=2,
+            is_prefilling_np=np.array([has_prefill, True]),
+            prefill_runs_as_decode_np=np.array([False, True]),
+            seq_lens_np=np.array([24, 1024]),
+        ),
+        local_to_global_req_indices=(1, 0, 0) if has_prefill else None,
+        global_block_tables=(table,),
+    )
 
-    from vllm_ascend.attention.context_parallel.mla_cp import AscendMlaDCPMetadataBuilder, DCPChunkedContextMetadata
+    lengths, local_rows, block_table = builder._get_pcp_prefill_kv_inputs()
+
+    if has_prefill:
+        assert lengths.tolist() == [24, 0]
+        assert local_rows == [0, 0]
+        torch.testing.assert_close(block_table, table)
+    else:
+        assert lengths is local_rows is block_table is None
+
+
+def test_pcp_global_plan_keeps_local_fragment_mapping():
+    from vllm_ascend.attention.context_parallel.mla_cp import DCPChunkedContextMetadata
     from vllm_ascend.attention.mla_v1 import AscendMLAMetadataBuilder, ChunkedContextMetadata
 
     builder = AscendMlaDCPMetadataBuilder.__new__(AscendMlaDCPMetadataBuilder)

@@ -318,22 +318,22 @@ def test_gather_batch_preserves_pd_tail_and_flashmla_request_order(uses_flashmla
 
 
 @pytest.mark.parametrize(
-    "computed_prefill,draft_tokens,expected_mask,expected_graph_eligible,expected_dispatch_tokens",
+    "computed_prefill,draft_tokens,expected_dispatch_tokens",
     [
-        (127, 0, [True, False], True, 1),
-        (127, 3, [True, False], True, 4),
-        (0, 0, None, False, 2),
-        (0, 3, None, False, 6),
+        (127, 0, {1: 1, 2: 2}),
+        (127, 3, {1: 4, 2: 8}),
+        (0, 0, {1: 2, 2: 2}),
+        (0, 3, {1: 6, 2: 6}),
     ],
 )
+@pytest.mark.parametrize("dcp_size", [1, 2])
 @pytest.mark.parametrize("backend", ["mla", "flashmla", "other"])
 def test_gather_pcp_classifies_only_cached_one_token_prefill_as_decode(
     computed_prefill,
-    expected_mask,
-    expected_graph_eligible,
-    expected_dispatch_tokens,
-    backend,
     draft_tokens,
+    expected_dispatch_tokens,
+    dcp_size,
+    backend,
 ):
     runner = _make_runner()
     runner.model_config.use_mla = backend != "other"
@@ -342,14 +342,15 @@ def test_gather_pcp_classifies_only_cached_one_token_prefill_as_decode(
         model_config=runner.model_config,
         parallel_config=ParallelConfig(
             prefill_context_parallel_size=2,
-            decode_context_parallel_size=1,
+            decode_context_parallel_size=dcp_size,
         ),
     )
     runner.pcp_manager = AscendPCPManager(
         2,
         0,
         torch.device("cpu"),
-        shard_decode_requests=True,
+        shard_decode_requests=dcp_size == 1,
+        dcp_world_size=dcp_size,
     )
     runner.pcp_manager.bind_config(runner.vllm_config)
     batch_state = _make_batch_state(
@@ -367,20 +368,20 @@ def test_gather_pcp_classifies_only_cached_one_token_prefill_as_decode(
 
     order = [1, 0] if backend == "flashmla" and computed_prefill == 0 else [0, 1]
     np.testing.assert_array_equal(gathered.is_prefilling_np, batch_state.is_prefilling_np[order])
-    if expected_mask is None:
+    if computed_prefill:
+        np.testing.assert_array_equal(gathered.prefill_runs_as_decode_np, np.array([True, False])[order])
+    else:
         assert gathered.prefill_runs_as_decode_np is None
         if backend != "flashmla":
             assert gathered is batch_state
-    else:
-        np.testing.assert_array_equal(gathered.prefill_runs_as_decode_np, np.array(expected_mask)[order])
-    assert gathered.decode_graph_eligible is expected_graph_eligible
-    assert uniform == (1 + draft_tokens if expected_graph_eligible else None)
+    assert gathered.decode_graph_eligible is bool(computed_prefill)
+    assert uniform == (1 + draft_tokens if computed_prefill else None)
     assert (
         runner.pcp_manager.get_num_tokens_for_dispatch(
             gathered.num_scheduled_tokens,
             gathered.is_prefilling_np,
         )
-        == expected_dispatch_tokens
+        == expected_dispatch_tokens[dcp_size]
     )
 
 
