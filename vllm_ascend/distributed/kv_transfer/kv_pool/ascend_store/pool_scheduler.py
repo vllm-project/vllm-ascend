@@ -714,7 +714,7 @@ class BaseKVPoolScheduler(ABC):
         return meta
 
     def retain_blocks_for_save(self, req_meta: ReqMeta) -> None:
-        """Retain in-flight Mamba blocks according to the transfer mode. It is only used in Blockwise."""
+        """Bulk transfers override this hook to retain their save sources."""
         return None
 
     def has_pending_push_work(self) -> bool:

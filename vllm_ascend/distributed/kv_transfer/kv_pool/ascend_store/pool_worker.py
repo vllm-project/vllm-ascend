@@ -1645,7 +1645,7 @@ class KVPoolWorker(BaseKVPoolWorker):
             shard_rank=shard_rank,
             shard_size=shard_size,
         ):
-            if end <= save_start_token:
+            if block_id <= 0 or end <= save_start_token:
                 continue
             token_count = end - start
             for sub_idx in range(self.num_sub_keys):
@@ -1810,7 +1810,7 @@ class KVPoolWorker(BaseKVPoolWorker):
                 shard_size=self.pcp_size,
             )
             for relative_idx, (start, end, _base_key, _hash, _block_id) in enumerate(
-                chunk for chunk in store_chunks if chunk[1] > save_start_token
+                chunk for chunk in store_chunks if chunk[1] > save_start_token and chunk[4] > 0
             ):
                 if relative_idx not in completed_block_indices:
                     continue

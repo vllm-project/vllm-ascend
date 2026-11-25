@@ -24,13 +24,21 @@ class InFlightSaveBlockTracker:
             return
 
         block_ids: list[int] = []
-        for group_id, num_speculative_blocks in speculative_blocks_by_group.items():
-            group_block_ids = req_meta.block_ids_by_group[group_id]
+        # Running requests can refresh their block table before the sender reads it.
+        req_meta.block_ids_by_group = req_meta.block_ids_by_group.copy()
+        for group_id, group_block_ids in enumerate(req_meta.block_ids_by_group):
+            num_speculative_blocks = speculative_blocks_by_group.get(group_id)
+            if num_speculative_blocks is None:
+                continue
+            req_meta.block_ids_by_group[group_id] = group_block_ids.copy()
             # Speculative scratch slots must remain exclusively owned for relocation.
             non_spec_block_ids = (
                 group_block_ids[:-num_speculative_blocks] if num_speculative_blocks > 0 else group_block_ids
             )
             block_ids.extend(block_id for block_id in non_spec_block_ids if block_id > 0)
+
+        if not block_ids:
+            return
 
         assert block_pool is not None
         event_id = uuid.uuid4().int
