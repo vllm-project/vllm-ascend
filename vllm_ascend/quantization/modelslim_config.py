@@ -716,6 +716,15 @@ class AscendModelSlimConfig(QuantizationConfig):
                 logger.debug("Select AscendUnquantizedLinearMethod for %s (layer=%s)", prefix, "LinearBase")
                 return AscendUnquantizedLinearMethod()
             scheme = create_scheme_for_layer(self.quant_description, prefix, "linear", self.packed_modules_mapping)
+            prefix_parts = prefix.split(".")
+            is_shared_expert = any(part in {"shared_expert", "shared_experts"} for part in prefix_parts)
+            if is_shared_expert:
+                # Select the single-expert GMM ABI from quantization
+                # capabilities and the layer role, not from a model name.
+                from .methods.w4a8 import AscendW4A8DynamicLinearMethod
+
+                if isinstance(scheme, AscendW4A8DynamicLinearMethod) and scheme.is_per_channel_weight:
+                    scheme.enable_shared_expert_grouped_matmul()
             logger.debug("Select AscendLinearMethod for %s (layer=%s)", prefix, "LinearBase")
             return AscendLinearMethod(scheme)
         elif isinstance(layer, AttentionLayerBase) and (
