@@ -21,6 +21,21 @@ from vllm_ascend.worker.v2.spec_decode.dflash import speculator as dflash_worker
 
 ACCURACY_CASES = [
     {
+        # A terminal DMTP round still runs eight query rows. Past the limit
+        # those rows must not overwrite any KV in the final physical block.
+        "name": "terminal_dmtp_block",
+        "req_lens": [1],
+        "position_starts": [60],
+        "idx_mapping": [0],
+        "max_num_reqs": 2,
+        "max_num_tokens": 16,
+        "max_model_len": 64,
+        "block_size": 8,
+        "num_query_per_req": 8,
+        "num_speculative_steps": 7,
+        "parallel_drafting_token_id": 248070,
+    },
+    {
         "name": "business_b8_t1626",
         "req_lens": [192, 197, 201, 205, 209, 211, 215, 196],
         "position_starts": [0, 256, 512, 768, 1024, 1280, 1536, 1792],
@@ -478,8 +493,10 @@ def _build_reference(data, case):
             query_pos = last_valid_pos + 1 + query_off
             ref.input_ids[query_idx] = bonus_token if query_off == 0 else case["parallel_drafting_token_id"]
             ref.query_positions[query_idx] = min(query_pos, max_model_len - 1)
-            ref.query_slot_mapping[query_idx] = _local_slot(
-                query_pos, block_table[req_idx], block_size, block_stride, cp_rank, cp_size, cp_interleave
+            ref.query_slot_mapping[query_idx] = (
+                _local_slot(query_pos, block_table[req_idx], block_size, block_stride, cp_rank, cp_size, cp_interleave)
+                if query_pos < max_model_len
+                else PAD_SLOT_ID
             )
 
         for sample_local in range(num_speculative_steps):

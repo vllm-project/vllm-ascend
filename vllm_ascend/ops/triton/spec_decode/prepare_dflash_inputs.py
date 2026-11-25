@@ -209,7 +209,7 @@ def _prepare_dflash_inputs_kernel(
         block_table_ptr,
         block_table_stride,
         req_idx,
-        query_mask,
+        query_mask & (query_pos < max_model_len),
         block_size,
         block_stride,
         cp_rank,

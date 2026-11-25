@@ -385,6 +385,32 @@ A few important things to consider when using DFlash2 draft models:
 5. The selector parameters (`selector_top_k`, `selector_rank`, ...) come from
    the draft checkpoint's `dflash_config` and need no user configuration.
 
+## Speculating using DMTP (experimental)
+
+The BF16 [Qwen3.6-27B DMTP draft](https://huggingface.co/Piggy12/Qwen3.6-27B-DMTP)
+uses the target's native MTP layer to predict the first candidate. DFlash2 receives
+the last emitted token, the MTP candidate and six masks. It scores six more
+candidates and the target verifies all seven together.
+
+The initial path targets Ascend A3 with TP2 and greedy text generation. Use
+standard tensor parallelism, eager execution, synchronous scheduling, disabled
+prefix caching and a context of at most 3,072 tokens. Set `temperature=0` in
+each generation request. The native predictor and its private KV cache are
+replicated on each rank. Its KV storage is allocated for the configured request
+slots and context length, so bound `max-num-seqs` when sizing the engine.
+
+The target verifies each proposed token. On A3 with BF16, the target can rank
+near-tied tokens differently when it processes the same prefix incrementally or
+in a single prefill. Greedy output can therefore diverge from a target-only run.
+
+```bash
+vllm serve Qwen/Qwen3.6-27B \
+  --tensor-parallel-size 2 --dtype bfloat16 --language-model-only \
+  --enforce-eager --no-async-scheduling --no-enable-prefix-caching \
+  --max-model-len 3072 --max-num-seqs 4 \
+  --speculative-config '{"method":"dmtp","model":"Piggy12/Qwen3.6-27B-DMTP","num_speculative_tokens":7}'
+```
+
 ## Speculating using LiLiCorr
 
 LiLiCorr is a DFlash variant that reranks the per-position top-k candidate
