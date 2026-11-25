@@ -48,6 +48,8 @@ def megamoe_target(tmp_path, monkeypatch):
     for module in (spec_utils, eagle_utils):
         if hasattr(module, "get_pp_group"):
             monkeypatch.setattr(module, "get_pp_group", lambda: SimpleNamespace(world_size=2))
+    if hasattr(eagle_utils, "in_single_pp_stage"):
+        monkeypatch.setattr(eagle_utils, "in_single_pp_stage", lambda: False)
 
     # On CPU, wire the real factory into the platform hook used by VllmConfig.
     # Keep each returned config so the test can inspect the draft's own derivation.
