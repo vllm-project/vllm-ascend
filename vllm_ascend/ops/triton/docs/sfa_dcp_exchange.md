@@ -14,7 +14,6 @@
 | `output` | Input | Partial output, `[T, H, D]` | BF16 | ND |
 | `lse` | Input | Matching LSE, `[T, H, 1]` | FP32 | ND, strided |
 | `softmax_sum` | Optional input | FP32 sums matching `lse`; when supplied, `lse` contains maxima and packing computes `max + log(sum)` | FP32 | ND, strided |
-| `valid_rows` | Optional input | Device query endpoint. The pack writes zero output words and zero LSE for rows beyond the live prefix | INT32 | ND, one element |
 | `group` | Attribute | Actual head-scatter process group | HCCL process group | N/A |
 | merged output | Output | This rank's slice, `[T, H / R, D]` | FP32 internally, BF16 at registered operator | ND, contiguous |
 
@@ -23,7 +22,6 @@
 - Group size must divide `H`. The local merge's reduction vector requires a power-of-two rank dimension.
 - Feature width and local head count are derived from the input and group, without D512 or32-head routing limits. BF16 features must form complete INT32 words, and both `D / 2` and the local head count must be powers of two for the full-vector copies. Other layouts retain upstream packing.
 - `LOCAL_HEADS` is static vector configuration because it determines `tl.arange` widths, including the T1 pack. Token counts and ordinary strides remain runtime values, not exact-value constexpr keys.
-- Masked packing reads the endpoint at runtime. Warmup covers both aligned and unaligned endpoint views. The peer payload shape is fixed for the captured batch.
 - Empty inputs are excluded. There is no fixed token cap or dependency on scheduler configuration.
 - The existing full-vector pack is retained when both `T * (H / R)` and `(H / R) * (D / 2)` fit within16384 32-bit elements. Larger payloads use native head/feature tiles of at most4096 elements and bounded LSE chunks, with tokens distributed across Vector Cores. The payload layout and single All2All are unchanged; this threshold selects tiling rather than rejecting larger shapes.
 - Statistics use tiles of at most4096 FP32 elements, including inside the full-output-vector kernel. This bounds row-index and optional `max + log(sum)` temporaries within UB on A3 and A5 without another kernel or collective.

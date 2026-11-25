@@ -20,7 +20,6 @@ def _pack_t1_peer(
     lse_ptr,
     sum_ptr,
     send_ptr,
-    valid_rows_ptr,
     LOCAL_HEADS: tl.constexpr,
     HEAD_WORDS: tl.constexpr,
     FROM_STATS: tl.constexpr,
@@ -29,19 +28,16 @@ def _pack_t1_peer(
     OUTPUT_WORDS: tl.constexpr = LOCAL_HEADS * HEAD_WORDS
     PEER_WORDS: tl.constexpr = OUTPUT_WORDS + LOCAL_HEADS
     word = tl.arange(0, OUTPUT_WORDS)
-    active = True
-    if valid_rows_ptr is not None:
-        active = tl.load(valid_rows_ptr) > 0
-    values = tl.load(output_words_ptr + peer * OUTPUT_WORDS + word, mask=(word < OUTPUT_WORDS) & active, other=0)
+    values = tl.load(output_words_ptr + peer * OUTPUT_WORDS + word, mask=word < OUTPUT_WORDS, other=0)
     tl.store(send_ptr + peer * PEER_WORDS + word, values, mask=word < OUTPUT_WORDS)
     local_head = tl.arange(0, LOCAL_HEADS)
     stats = tl.load(
         lse_ptr + peer * LOCAL_HEADS + local_head,
-        mask=(local_head < LOCAL_HEADS) & active,
+        mask=local_head < LOCAL_HEADS,
         other=0.0,
     )
     if FROM_STATS:
-        stats += tl.log(tl.load(sum_ptr + peer * LOCAL_HEADS + local_head, active, 1.0))
+        stats += tl.log(tl.load(sum_ptr + peer * LOCAL_HEADS + local_head))
     tl.store(
         send_ptr + peer * PEER_WORDS + OUTPUT_WORDS + local_head,
         stats.to(tl.int32, bitcast=True),
@@ -55,7 +51,6 @@ def _pack_token_peer(
     lse_ptr,
     sum_ptr,
     send_ptr,
-    valid_rows_ptr,
     output_stride_token_words,
     output_stride_head_words,
     lse_stride_token,
@@ -75,36 +70,26 @@ def _pack_token_peer(
     local_head = word // HEAD_WORDS
     dim_word = word % HEAD_WORDS
     peer_base = peer * peer_words
-    if valid_rows_ptr is not None:
-        valid_rows = tl.load(valid_rows_ptr)
     for token in range(tokens):
-        active = True
-        if valid_rows_ptr is not None:
-            active = token < valid_rows
         values = tl.load(
             output_words_ptr
             + token * output_stride_token_words
             + (peer * LOCAL_HEADS + local_head) * output_stride_head_words
-            + dim_word,
-            mask=active,
-            other=0,
+            + dim_word
         )
         tl.store(send_ptr + peer_base + token * OUTPUT_WORDS + word, values)
     for start in range(0, tokens * LOCAL_HEADS, STATS_TILE):
         index = start + tl.arange(0, STATS_TILE)
         stats_token, head = index // LOCAL_HEADS, index % LOCAL_HEADS
-        active = index < tokens * LOCAL_HEADS
-        if valid_rows_ptr is not None:
-            active = active & (stats_token < valid_rows)
         stats = tl.load(
             lse_ptr + stats_token * lse_stride_token + (peer * LOCAL_HEADS + head) * lse_stride_head,
-            mask=active,
+            mask=index < tokens * LOCAL_HEADS,
             other=0.0,
         )
         if FROM_STATS:
             totals = tl.load(
                 sum_ptr + stats_token * sum_stride_token + (peer * LOCAL_HEADS + head) * sum_stride_head,
-                mask=active,
+                mask=index < tokens * LOCAL_HEADS,
                 other=1.0,
             )
             stats += tl.log(totals)
@@ -121,7 +106,6 @@ def _pack_token_peer_tiled(
     lse_ptr,
     sum_ptr,
     send_ptr,
-    valid_rows_ptr,
     output_stride_token_words,
     output_stride_head_words,
     lse_stride_token,
@@ -144,12 +128,7 @@ def _pack_token_peer_tiled(
     # runtime index can lower to scalar GM gathers on this backend.
     heads = tl.arange(0, BLOCK_H)
     dims = tl.arange(0, BLOCK_D)
-    if valid_rows_ptr is not None:
-        valid_rows = tl.load(valid_rows_ptr)
     for token in range(tl.program_id(1), tokens, tl.num_programs(1)):
-        active = True
-        if valid_rows_ptr is not None:
-            active = token < valid_rows
         for head_start in range(0, LOCAL_HEADS, BLOCK_H):
             head = head_start + heads
             for dim_start in range(0, HEAD_WORDS, BLOCK_D):
@@ -158,9 +137,7 @@ def _pack_token_peer_tiled(
                     output_words_ptr
                     + tl.cast(token, tl.int64) * output_stride_token_words
                     + (peer * LOCAL_HEADS + head[:, None]) * output_stride_head_words
-                    + dim[None, :],
-                    mask=active,
-                    other=0,
+                    + dim[None, :]
                 )
                 tl.store(
                     send_ptr
@@ -170,16 +147,10 @@ def _pack_token_peer_tiled(
                     + dim[None, :],
                     values,
                 )
-            stats = tl.load(
-                lse_ptr + token * lse_stride_token + (peer * LOCAL_HEADS + head) * lse_stride_head, active, 0.0
-            )
+            stats = tl.load(lse_ptr + token * lse_stride_token + (peer * LOCAL_HEADS + head) * lse_stride_head)
             if FROM_STATS:
                 stats += tl.log(
-                    tl.load(
-                        sum_ptr + token * sum_stride_token + (peer * LOCAL_HEADS + head) * sum_stride_head,
-                        active,
-                        1.0,
-                    )
+                    tl.load(sum_ptr + token * sum_stride_token + (peer * LOCAL_HEADS + head) * sum_stride_head)
                 )
             tl.store(
                 send_ptr + peer_base + output_size + tl.cast(token, tl.int64) * LOCAL_HEADS + head,
@@ -212,9 +183,7 @@ def can_exchange(output: torch.Tensor, lse: torch.Tensor, ranks: int) -> bool:
     )
 
 
-def _exchange_tokens(
-    output: torch.Tensor, lse: torch.Tensor, group, ranks: int, softmax_sum=None, valid_rows=None
-) -> torch.Tensor:
+def _exchange_tokens(output: torch.Tensor, lse: torch.Tensor, group, ranks: int, softmax_sum=None) -> torch.Tensor:
     tokens = output.shape[0]
     head_dim = output.shape[-1]
     local_heads = output.shape[1] // ranks
@@ -229,7 +198,7 @@ def _exchange_tokens(
     peer_words = tokens * (output_words + local_heads)
     send = torch.empty((ranks, peer_words), dtype=torch.int32, device=output.device)
     _launch_exchange_tokens_pack(
-        words, lse, softmax_sum, send, tokens, local_heads, head_words, ranks, _vector_cores, _launch_kernel, valid_rows
+        words, lse, softmax_sum, send, tokens, local_heads, head_words, ranks, _vector_cores, _launch_kernel
     )
     recv = torch.empty_like(send)
     dist.all_to_all_single(recv, send, group=group)
@@ -246,7 +215,7 @@ def _exchange_tokens(
     return fused_merge(parts, stats, token_dim=1)
 
 
-def exchange(output: torch.Tensor, lse: torch.Tensor, group, softmax_sum=None, valid_rows=None) -> torch.Tensor:
+def exchange(output: torch.Tensor, lse: torch.Tensor, group, softmax_sum=None) -> torch.Tensor:
     """Exchange head shards, retaining FP32 LSE bits and merge math."""
     if softmax_sum is not None and (
         softmax_sum.shape != lse.shape or softmax_sum.dtype != torch.float32 or softmax_sum.device != lse.device
@@ -254,7 +223,7 @@ def exchange(output: torch.Tensor, lse: torch.Tensor, group, softmax_sum=None, v
         raise ValueError("softmax_sum must match the FP32 softmax_max shape and device")
     ranks = dist.get_world_size(group)
     if output.shape[0] != 1:
-        return _exchange_tokens(output, lse, group, ranks, softmax_sum, valid_rows)
+        return _exchange_tokens(output, lse, group, ranks, softmax_sum)
     head_dim = output.shape[-1]
     local_heads = output.shape[1] // ranks
     head_words = head_dim // 2  # Two BF16 values per INT32 word.
@@ -270,7 +239,7 @@ def exchange(output: torch.Tensor, lse: torch.Tensor, group, softmax_sum=None, v
     # metadata-only and removes that stride before widening BF16 to INT32.
     words = output.view(-1).view(torch.int32)
     send = torch.empty((ranks, peer_words), dtype=torch.int32, device=output.device)
-    _launch_exchange_t1_pack(words, lse, softmax_sum, send, local_heads, head_words, ranks, _launch_kernel, valid_rows)
+    _launch_exchange_t1_pack(words, lse, softmax_sum, send, local_heads, head_words, ranks, _launch_kernel)
     recv = torch.empty_like(send)
     dist.all_to_all_single(recv, send, group=group)
     parts = recv.view(output.dtype).as_strided(
@@ -291,7 +260,7 @@ def _vector_cores():
 
 
 def _launch_exchange_tokens_pack(
-    words, lse, softmax_sum, send, tokens, local_heads, head_words, ranks, vector_cores, launch, valid_rows=None
+    words, lse, softmax_sum, send, tokens, local_heads, head_words, ranks, vector_cores, launch
 ):
     """Build the runtime full-vector or tiled launch without communicating."""
     output_words = local_heads * head_words
@@ -310,7 +279,6 @@ def _launch_exchange_tokens_pack(
         lse,
         lse if softmax_sum is None else softmax_sum,
         send,
-        valid_rows,
         words.stride(0),
         words.stride(1),
         lse.stride(0),
@@ -324,7 +292,7 @@ def _launch_exchange_tokens_pack(
     )
 
 
-def _launch_exchange_t1_pack(words, lse, softmax_sum, send, local_heads, head_words, ranks, launch, valid_rows=None):
+def _launch_exchange_t1_pack(words, lse, softmax_sum, send, local_heads, head_words, ranks, launch):
     """Build the runtime singleton-token launch after layout normalization."""
     output_words = local_heads * head_words
     # T1 normalizes LSE to contiguous [1, heads, 1], so the head stride is one.
@@ -336,7 +304,6 @@ def _launch_exchange_t1_pack(words, lse, softmax_sum, send, local_heads, head_wo
             lse,
             lse if softmax_sum is None else softmax_sum,
             send,
-            valid_rows,
             local_heads,
             head_words,
             FROM_STATS=softmax_sum is not None,
@@ -349,7 +316,6 @@ def _launch_exchange_t1_pack(words, lse, softmax_sum, send, local_heads, head_wo
             lse,
             lse if softmax_sum is None else softmax_sum,
             send,
-            valid_rows,
             ranks * local_heads * head_words,
             head_words,
             lse.stride(0),

@@ -190,7 +190,7 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
         through the OOT PluggableLayer dispatch of ``MoERunner``).
 
         Upstream inlines the shared+routed output combine, which is not
-        exposed as an overridable hook. Kimi K3.1 on A5 adds its single
+        exposed as an overridable hook. Kimi K3.1 on 950dt adds its single
         shared/routed tensor pair directly. Other combinations use the fused
         multi-tensor add kernel. The runtime-aware reduction hooks (#16550)
         still apply.

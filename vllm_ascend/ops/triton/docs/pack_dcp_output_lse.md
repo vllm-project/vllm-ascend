@@ -21,7 +21,6 @@
 | `partial_output` | Input | Partial attention output `[T, H, D]`; positive non-contiguous strides are accepted | BF16 / FP16 / FP32 | ND |
 | `softmax_lse` | Input | LSE (or softmax maximum when `softmax_sum` is supplied) `[T, H, 1]`, on the same NPU | FP32 | ND |
 | `softmax_sum` | Optional input | FP32 softmax sum with the same shape and device as the maximum; compute `maximum + log(sum)` during encoding | FP32 | ND |
-| `valid_rows` | Optional input | One live query endpoint on the input device. Packing writes zero output and zero LSE for rows beyond the live prefix | INT32 | ND |
 | `dcp_size` | Input (attribute) | Number of destination ranks, `P` | positive int | scalar |
 | `scatter_dim` | Input (attribute) | `0` scatters tokens; `1` scatters heads | int | scalar |
 | `send` | Output | Contiguous All-to-All payload `[P, local_scatter_size, replicated_size, D + lse_pack_dim]` | same as `partial_output` | ND |
@@ -31,7 +30,6 @@
 - `T`, `H`, and `D` must be positive. The selected scatter dimension must be divisible by `dcp_size`. `lse_pack_dim` is one for FP32 output and four for BF16/FP16 output.
 - The BF16/FP16 encoding uses integer fields exactly representable in both dtypes. The combine operator reconstructs finite LSE values; NaN and infinities are marked invalid rather than preserved as payload values.
 - The shared batched path requires BF16, `scatter_dim=1`, `D <= 2048`, `T * H >= 8 * get_vectorcore_num()`, and unit feature stride or `D=512, T>=128`. Other valid shapes use the scalar-row Triton kernel. `BLOCK_D = next_power_of_2(D)` and `BLOCK_ROWS` (32 for contiguous-feature `D=512, T>=128`, eight otherwise) are compile-time tile sizes. `OUTPUT_HEAD_MAJOR` selects destination-order traversal for `D=512`.
-- A5 Kimi K3.1 quantized NoPE DCP decode supplies the endpoint through the registered combine. Warmup covers the mask's presence and both endpoint pointer alignments. Graph replay reads the updated value from device memory.
 - The operator is for inference on NPU. The wrapper is called before the HCCL exchange; it does not execute a collective itself.
 
 ## Origin and Differences
@@ -47,6 +45,5 @@ The single-card nightly test compares packed output bit-exactly with the expecte
 
 ```bash
 pytest -sv tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_dcp_a2a.py
-pytest -sv tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_dcp_pre_post.py -k skips_padded_rows
 pytest -sv tests/e2e/nightly/single_node/ops/multicard_ops_a3/test_dcp_a2a.py
 ```

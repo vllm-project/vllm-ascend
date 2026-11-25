@@ -33,7 +33,6 @@ def test_tiled_pack_preserves_raw_bits(tokens, local_heads, head_dim, head_major
         lse,
         lse,
         send,
-        None,  # No padding mask: preserve every input bit.
         words.stride(0),
         words.stride(1),
         lse.stride(0),
