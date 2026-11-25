@@ -4205,22 +4205,35 @@ class TestLazyInitGate(unittest.TestCase):
 
     PW = "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker"
 
-    def _run_init_backend(self, use_compress: bool, use_sparse: bool, cache_dtype: str) -> MagicMock:
+    def _run_init_backend(
+        self, use_compress: bool, use_sparse: bool, cache_dtype: str, backend: str = "mooncake"
+    ) -> MagicMock:
         from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker import KVPoolWorker
 
         worker = KVPoolWorker.__new__(KVPoolWorker)
-        worker.backend = "mooncake"
+        worker.backend = backend
         worker.use_compress = use_compress
         worker.use_sparse = use_sparse
         worker.vllm_config = SimpleNamespace(cache_config=SimpleNamespace(cache_dtype=cache_dtype))
         backend_cls = MagicMock()
         fake_module = SimpleNamespace(Backend=backend_cls)
         with (
-            patch(self.PW + ".backend_map", {"mooncake": {"path": "fake_backend", "name": "Backend"}}),
+            patch(self.PW + ".backend_map", {backend: {"path": "fake_backend", "name": "Backend"}}),
             patch(self.PW + ".importlib", SimpleNamespace(import_module=lambda _path: fake_module)),
         ):
             worker._init_backend(parallel_config=object(), extra_config={})
         return backend_cls
+
+    def test_memcache_uses_uniform_initialization(self):
+        for compress, sparse, dtype in (
+            (False, False, "auto"),
+            (True, False, "auto"),
+            (False, True, "int8"),
+            (False, True, "fp8"),
+        ):
+            with self.subTest(compress=compress, sparse=sparse, dtype=dtype):
+                backend_cls = self._run_init_backend(compress, sparse, dtype, backend="memcache")
+                self.assertEqual(backend_cls.call_args.kwargs, {"extra_config": {}})
 
     def test_dense_model_requests_eager_init(self):
         backend_cls = self._run_init_backend(use_compress=False, use_sparse=False, cache_dtype="auto")

@@ -78,8 +78,9 @@ def make_backend(backend_name, store):
     backend_type = MooncakeBackend if backend_name == "mooncake" else MemcacheBackend
     backend = backend_type.__new__(backend_type)
     backend.store = store
-    backend._lazy_init = False
-    backend._store_initialized = True
+    if backend_name == "mooncake":
+        backend._lazy_init = False
+        backend._store_initialized = True
     backend.config = SimpleNamespace(preferred_segment=False, prefer_alloc_in_same_node=True)
     return backend
 

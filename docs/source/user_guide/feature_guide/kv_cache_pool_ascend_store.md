@@ -1720,11 +1720,13 @@ For the v0.23.0 AscendStore KV Pool known issues, see [vllm-ascend issue #12390]
 
 ### Issue 8: Lazy Init for KV Pool with Fabric Memory and Specific Models
 
-On HDK versions earlier than 26.1, when fabric memory is enabled (`ASCEND_ENABLE_USE_FABRIC_MEM=1`) and running one of the affected model families below, the vLLM service hangs during startup with the KV Pool enabled. Lazy store initialization defers the store setup so the service starts normally.
+The Memcache backend initializes the store during startup for all models.
+
+On HDK versions earlier than 26.1, when Mooncake fabric memory is enabled (`ASCEND_ENABLE_USE_FABRIC_MEM=1`) and running one of the affected model families below, the vLLM service hangs during startup with the KV Pool enabled. Lazy store initialization defers the store setup so the service starts normally.
 
 When lazy init is enabled, the store is not created during backend construction. Instead, it is set up on the first `put()` call and guarded by a lock, so later `put()` calls reuse the same store. Before the first `put()`, `exists()` treats keys as missing so the first store request can reach `put()`; pool lookups that happen before initialization therefore report a miss and the affected requests fall back to recompute once — a safe degradation, not an error.
 
-Lazy initialization is requested automatically — no configuration is needed — for the following model families when the Mooncake/Memcache backend runs under fabric memory:
+Lazy initialization is requested automatically — no configuration is needed — for the following model families when the Mooncake backend runs under fabric memory:
 
 | Model family | When lazy init is requested |
 | :--- | :--- |

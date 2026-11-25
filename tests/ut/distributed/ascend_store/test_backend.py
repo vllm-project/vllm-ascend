@@ -1565,15 +1565,23 @@ class TestMemcacheBackendMethods(unittest.TestCase):
     def _make_backend(self):
         from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.memcache_backend import MemcacheBackend
 
-        with patch.object(MemcacheBackend, "__init__", lambda self, pc: None):
-            backend = MemcacheBackend.__new__(MemcacheBackend)
-            backend.store = MagicMock()
-            backend.device_id = 0
-            # Set internal state to avoid lazy init logic during tests
-            backend._lazy_init = False
-            backend._store_initialized = True
-            backend._pending_buffers = None
-            return backend
+        with patch.object(MemcacheBackend, "_setup_store"):
+            return MemcacheBackend(MagicMock(), device_id=0)
+
+    def test_store_ready_before_first_put(self):
+        cls = memcache_module.MemcacheBackend
+        with patch.object(cls, "_setup_store") as setup:
+            store = setup.return_value
+            store.batch_is_exist.return_value = [1]
+            store.batch_put_from_layers.return_value = [0]
+            backend = cls(MagicMock(), device_id=0)
+            setup.assert_called_once_with()
+            self.assertEqual(backend.exists(["cached"]), [1])
+            store.batch_is_exist.assert_called_once_with(["cached"])
+            backend.register_buffer([100], [200])
+            store.register_buffer.assert_called_once_with(100, 200)
+            self.assertEqual(backend.put(["key"], [[100]], [[200]]), [True])
+            setup.assert_called_once_with()
 
     def test_ssd_load_rewarms_via_registered_full_sized_npu_read(self):
         b = self._make_backend()
@@ -1737,13 +1745,13 @@ class TestMemcacheBackendMethods(unittest.TestCase):
 
         b.store.unregister_buffer.assert_not_called()
 
-    def test_unregister_buffer_before_store_initialization_is_noop(self):
-        b = self._make_backend()
-        b._store_initialized = False
-
-        b.unregister_buffer([100], [200])
-
-        b.store.unregister_buffer.assert_not_called()
+    def test_unregister_buffer_after_close_is_noop(self):
+        backend = self._make_backend()
+        store = backend.store
+        backend.close()
+        backend.unregister_buffer([100], [200])
+        store.close.assert_called_once_with()
+        store.unregister_buffer.assert_not_called()
 
     def test_batch_write_finish(self):
         b = self._make_backend()

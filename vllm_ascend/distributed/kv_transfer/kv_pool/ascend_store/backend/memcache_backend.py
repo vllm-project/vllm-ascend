@@ -1,6 +1,5 @@
 # Standard
 import os
-import threading
 import time
 from enum import Enum
 from typing import Any
@@ -19,22 +18,6 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.base impor
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.layerwise_keys import LayerwiseKeyBuilder
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import get_sharded_mamba_group_ids
-
-
-def _is_device_sdma() -> bool:
-    config_path = os.getenv("MMC_LOCAL_CONFIG_PATH")
-    if not config_path:
-        raise ValueError("The environment variable 'MMC_LOCAL_CONFIG_PATH' is not set.")
-    with open(config_path, encoding="utf-8") as config_file:
-        for line in config_file:
-            line = line.strip()
-            if not line or line.startswith(("#", ";")):
-                continue
-            key, separator, value = line.partition("=")
-            if separator and key.strip() == "ock.mmc.local_service.protocol":
-                return value.strip() == "device_sdma"
-    return False
-
 
 MEMCACHE_THREAD_START_WAIT_S = 0.1
 MEMCACHE_SSD_MEDIA_TYPE = 2
@@ -151,42 +134,18 @@ class MemcacheBackend(Backend):
         parallel_config: ParallelConfig,
         device_id: int | None = None,
         init_bm: bool = True,
-        lazy_init: bool = False,
         extra_config: dict[str, Any] | None = None,
     ):
         _inject_device_ub_qos(extra_config)
         _validate_device_ub_qos()
         self.device_id = torch.npu.current_device() if device_id is None else device_id
         self._init_bm = init_bm
-        self._lazy_init = lazy_init and _is_device_sdma()
-
-        self.store: Any | None = None
-        self._store_initialized = False
-        self._store_init_lock = threading.Lock()
-        self._pending_buffers: tuple[list[int], list[int]] | None = None
-
-        if not self._lazy_init:
-            self.store = self._setup_store()
-            self._store_initialized = True
+        self.store: Any | None = self._setup_store()
 
     def close(self) -> None:
         if self.store is not None:
             self.store.close()
             self.store = None
-            self._store_initialized = False
-
-    def ensure_initialized(self):
-        if self._store_initialized:
-            return
-
-        with self._store_init_lock:
-            if self._store_initialized:
-                return
-
-            logger.info("Initializing Memcache store. device_id=%d", self.device_id)
-            self.store = self._setup_store()
-            self._store_initialized = True
-            self._register_buffers_if_needed()
 
     def _setup_store(self):
         try:
@@ -230,52 +189,28 @@ class MemcacheBackend(Backend):
             return
         self._init_bm = init_bm
         self.store = self._setup_store()
-        self._store_initialized = True
-        self._register_buffers_if_needed()
 
     def set_device(self):
         torch.npu.set_device(self.device_id)
 
     def register_buffer(self, ptrs: list[int], sizes: list[int]):
-        self._pending_buffers = (list(ptrs), list(sizes))
-        self._register_buffers_if_needed()
+        assert self.store is not None
+        for ptr, size in zip(ptrs, sizes):
+            self.store.register_buffer(ptr, size)
 
     def unregister_buffer(self, ptrs: list[int], sizes: list[int]):
         if len(ptrs) != len(sizes):
             raise ValueError(f"ptrs and sizes must have the same length: {len(ptrs)} != {len(sizes)}")
-        if not self._store_initialized:
+        if self.store is None:
             return
-        assert self.store is not None
         for ptr, size in zip(ptrs, sizes):
             self.store.unregister_buffer(ptr, size)
 
-    def _register_buffers_if_needed(self):
-        if self._pending_buffers is None or not self._store_initialized:
-            return
-        assert self.store is not None
-        ptrs, sizes = self._pending_buffers
-        for ptr, size in zip(ptrs, sizes):
-            self.store.register_buffer(ptr, size)
-        self._pending_buffers = None
-
     def exists(self, keys: list[str]) -> list[int]:
-        if self._lazy_init and not self._store_initialized:
-            logger.debug(
-                "MemcacheBackend.exists called before store initialization; treating %d keys as missing.",
-                len(keys),
-            )
-            return [0] * len(keys)
         assert self.store is not None
         return self.store.batch_is_exist(keys)
 
     def batch_get_key_info(self, keys: list[str], *, for_load: bool = False) -> list[Any]:
-        if self._lazy_init and not self._store_initialized:
-            logger.debug(
-                "MemcacheBackend.batch_get_key_info called before store initialization; "
-                "returning empty list for %d keys.",
-                len(keys),
-            )
-            return []
         assert self.store is not None
         infos = self.store.batch_get_key_info(keys)
         if not for_load:
@@ -325,15 +260,6 @@ class MemcacheBackend(Backend):
         sizes: list[int],
         direction: int = MmcDirect.COPY_G2L.value,
     ) -> list[int] | None:
-        if self._lazy_init and not self._store_initialized:
-            logger.error(
-                "Failed to get %d keys out of %d. Store is not initialized; "
-                "call put() first to trigger initialization.",
-                len(keys),
-                len(keys),
-            )
-            logger.debug("Failed to get key details. keys=%s", keys)
-            return None
         assert self.store is not None
         try:
             res = self.store.batch_get_into(keys, addrs, sizes, direction)
@@ -362,8 +288,6 @@ class MemcacheBackend(Backend):
 
     def batch_is_readable(self, keys: list[str]) -> list[bool]:
         """Map valid MemCache GVA metadata to the common readability contract."""
-        if self._lazy_init and not self._store_initialized:
-            return [False] * len(keys)
         key_infos = self.batch_get_key_info(keys)
         if key_infos is None or len(key_infos) != len(keys):
             logger.error(
@@ -387,7 +311,6 @@ class MemcacheBackend(Backend):
 
     def batch_alloc(self, keys: list[str], sizes: list[int], lease_ttl_ms: int = 0) -> list[int]:
         """Return GVAs, 0 for allocation failures, and UINT64_MAX for SSD hits."""
-        self.ensure_initialized()
         assert self.store is not None
         return self.store.batch_alloc(keys, sizes, 1, lease_ttl_ms)
 
@@ -409,15 +332,6 @@ class MemcacheBackend(Backend):
         addr: list[list[int]],
         size: list[list[int]],
     ):
-        if self._lazy_init and not self._store_initialized:
-            logger.error(
-                "Failed to get %d keys out of %d. Store is not initialized; "
-                "call put() first to trigger initialization.",
-                len(key),
-                len(key),
-            )
-            logger.debug("Failed to get key details. keys=%s", key)
-            return
         assert self.store is not None
         try:
             res = self.store.batch_get_into_layers(key, addr, size, MmcDirect.COPY_G2L.value)
@@ -450,7 +364,6 @@ class MemcacheBackend(Backend):
         addr: list[list[int]],
         size: list[list[int]],
     ) -> list[bool] | bool:
-        self.ensure_initialized()
         assert self.store is not None
         try:
             res = self.store.batch_put_from_layers(key, addr, size, MmcDirect.COPY_L2G.value)
@@ -465,8 +378,6 @@ class MemcacheBackend(Backend):
                     error_codes,
                 )
                 logger.debug("Failed to put key details. keys=%s, result=%s", key, res)
-                if self._lazy_init:
-                    logger.warning("First DSV4(compress) request failure is expected. This is normal behavior.")
             return [int(value) == 0 for value in res]
         except Exception as e:
             logger.error(
@@ -477,8 +388,6 @@ class MemcacheBackend(Backend):
                 e,
             )
             logger.debug("Failed to put key details. keys=%s", key)
-            if self._lazy_init:
-                logger.warning("First DSV4(compress) request failure is expected. This is normal behavior.")
             return False
 
     def put_from(
@@ -488,7 +397,6 @@ class MemcacheBackend(Backend):
         size: int,
         direction: int = MmcDirect.COPY_L2G.value,
     ) -> int | None:
-        self.ensure_initialized()
         assert self.store is not None
         try:
             res = self.store.put_from(key, addr, size, direction)
