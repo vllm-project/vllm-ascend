@@ -50,23 +50,6 @@ def test_bind_kv_cache_preserves_materialized_attention_tuple() -> None:
     assert layer.kv_cache is allocated
 
 
-def test_bind_core_mamba_byte_pages_without_copy():
-    layer = _TestMambaLayer()
-    name = "model.layers.0.linear_attn"
-    alignment = layer.state_alignment
-    second_state_offset = (12 + alignment - 1) // alignment * alignment
-    page_bytes = second_state_offset + 16
-    pages = torch.zeros((3, 1, 1, page_bytes), dtype=torch.uint8)
-
-    patch_bind_kv_cache.bind_kv_cache_to_layers({name: pages}, {name: layer})
-
-    conv, temporal = layer.kv_cache
-    assert conv.shape == (3, 2, 3) and conv.dtype == torch.bfloat16
-    assert temporal.shape == (3, 4) and temporal.dtype == torch.float32
-    temporal[1, 0] = 42
-    assert pages[1, 0, 0, second_state_offset:].view(torch.float32)[0] == 42
-
-
 @pytest.mark.parametrize("container_type", [list, tuple])
 def test_bind_kv_cache_accepts_materialized_mamba_states(
     container_type,

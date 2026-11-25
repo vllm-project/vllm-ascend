@@ -188,6 +188,9 @@ def test_qwen4_exp_resident_gbsa_matches_paged_attention() -> None:
     compact = compact.npu()
     request_ids = torch.arange(rows, dtype=torch.int32, device="npu")
     positions = (lengths - 1).long()
+    state_indices = torch.tensor([5, 1, 7, 3], dtype=torch.int32, device="npu")
+    state_table = torch.full((8, pages_per_request), -1, dtype=table.dtype, device=table.device)
+    state_table[state_indices.long()] = table
 
     expected = qsa_gbsa_attention(
         query,
@@ -204,10 +207,11 @@ def test_qwen4_exp_resident_gbsa_matches_paged_attention() -> None:
         query,
         resident,
         compact,
-        table,
+        state_table,
         request_ids,
         positions,
         lengths,
         torch.empty_like(query),
+        request_state_indices=state_indices,
     )
     torch.testing.assert_close(actual.float(), expected.float(), rtol=0.025, atol=5e-4)

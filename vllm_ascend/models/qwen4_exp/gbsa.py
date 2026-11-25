@@ -121,11 +121,20 @@ def qsa_resident_gbsa_attention(
     logical_positions: torch.Tensor,
     seq_lens: torch.Tensor,
     output: torch.Tensor,
+    *,
+    request_state_indices: torch.Tensor,
 ) -> torch.Tensor:
+    """Read selected K/V from the connector's device-resident pages."""
     head_dim = query.shape[-1]
     num_kv_heads = resident.shape[-1] // (2 * head_dim)
     selected, counts, visible, cu_q, row_table = prepare_qsa_gbsa_inputs(
-        compact_indices, logical_positions, seq_lens, token_to_req, block_table, num_kv_heads
+        compact_indices,
+        logical_positions,
+        seq_lens,
+        token_to_req,
+        block_table,
+        num_kv_heads,
+        request_state_indices=request_state_indices,
     )
     keys, values, indices, lengths, pages = pack_resident_gbsa_inputs(
         resident, selected, counts, visible, row_table, head_dim

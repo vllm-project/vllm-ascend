@@ -16,6 +16,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from typing import Any
 
 import torch
@@ -55,6 +56,8 @@ class AscendQwen4ExpModelState(Qwen4ExpModelState, AscendMambaHybridModelState):
         device: torch.device,
     ) -> None:
         super().__init__(vllm_config, model, encoder_cache, device)
+        self._use_hisparse = getattr(vllm_config.attention_config, "hisparse_config", None) is not None
+        self._use_hisparse_eager = self._use_hisparse and vllm_config.model_config.enforce_eager
         self.qsa_prepared_input_adapter = Qwen4ExpPreparedInputAdapter(model)
         if self.uses_ngram_embedding and vllm_config.parallel_config.prefill_context_parallel_size > 1:
             # DualChunkSwap can put two segments of each request on one rank.
@@ -81,8 +84,23 @@ class AscendQwen4ExpModelState(Qwen4ExpModelState, AscendMambaHybridModelState):
             self.qsa_prepared_input_adapter.prepare_positions(positions, num_tokens)
         return model_inputs
 
+    def bind_hisparse_kv_caches(self, layer_names: Iterable[str]) -> None:
+        """Adapt Core's unified KV pages to Qwen's indexer and recurrent state views."""
+        if not self._use_hisparse:
+            return
+
+        from .hisparse import bind_qsa_hisparse_kv_caches
+
+        bind_qsa_hisparse_kv_caches(self.vllm_config.compilation_config.static_forward_context, layer_names)
+
     def prepare_attn(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
-        metadata = super().prepare_attn(*args, **kwargs)
+        if self._use_hisparse_eager:
+            from .qsa import use_hisparse_qsa_metadata
+
+            with use_hisparse_qsa_metadata():
+                metadata = super().prepare_attn(*args, **kwargs)
+        else:
+            metadata = super().prepare_attn(*args, **kwargs)
         cudagraph_mode = kwargs.get("cudagraph_mode")
         if cudagraph_mode is None and len(args) > 1:
             cudagraph_mode = args[1]

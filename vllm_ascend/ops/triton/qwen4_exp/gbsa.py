@@ -12,6 +12,7 @@ def _prepare_qsa_gbsa_rows_kernel(
     lengths,
     requests,
     table,
+    request_state_indices,
     packed_indices,
     counts,
     visible_lengths,
@@ -24,6 +25,7 @@ def _prepare_qsa_gbsa_rows_kernel(
     position_stride,
     length_stride,
     request_stride,
+    request_state_stride,
     requests_count,
     rows,
     table_columns,
@@ -32,6 +34,7 @@ def _prepare_qsa_gbsa_rows_kernel(
     GROUP_BLOCK: tl.constexpr,
     KV_HEADS: tl.constexpr,
     TABLE_BLOCK: tl.constexpr,
+    USE_REQUEST_STATE_INDICES: tl.constexpr,
 ):
     row = tl.program_id(0)
     columns = tl.arange(0, GROUP_BLOCK)
@@ -73,8 +76,11 @@ def _prepare_qsa_gbsa_rows_kernel(
     if row == 0:
         tl.store(cu_query + rows, rows)
     page_columns = tl.arange(0, TABLE_BLOCK)
+    table_row = request
+    if USE_REQUEST_STATE_INDICES:
+        table_row = tl.load(request_state_indices + request * request_state_stride).to(tl.int64)
     stored_page = tl.load(
-        table + request * table_row_stride + page_columns * table_column_stride,
+        table + table_row * table_row_stride + page_columns * table_column_stride,
         page_columns < table_columns,
         other=-1,
     )
@@ -88,13 +94,15 @@ def prepare_qsa_gbsa_inputs(
     token_to_req: torch.Tensor,
     block_table: torch.Tensor,
     num_kv_heads: int,
+    *,
+    request_state_indices: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """Produce the same integer tensors as the original GBSA torch pipeline.
 
     The block table already addresses 128-token kernel pages. Residual blocks
     remain explicit (residual_block_mode=0), including the 512-entry limit.
-    Every output element is written before use. No device-to-host reads or
-    process-global tensor cache are introduced; inputs can change every call.
+    With request state indices, lengths follow batch order and the block table
+    follows the connector's persistent request slots.
     """
     rows = compact_indices.shape[0]
     groups = compact_indices.shape[1] - 3
@@ -115,6 +123,7 @@ def prepare_qsa_gbsa_inputs(
         seq_lens,
         token_to_req,
         block_table,
+        request_state_indices if request_state_indices is not None else block_table,
         sparse_idx,
         sparse_count,
         visible,
@@ -127,7 +136,8 @@ def prepare_qsa_gbsa_inputs(
         logical_positions.stride(0),
         seq_lens.stride(0),
         token_to_req.stride(0),
-        block_table.shape[0],
+        request_state_indices.stride(0) if request_state_indices is not None else 0,
+        seq_lens.shape[0],
         rows,
         columns,
         GROUPS=groups,
@@ -135,6 +145,7 @@ def prepare_qsa_gbsa_inputs(
         GROUP_BLOCK=group_block,
         KV_HEADS=num_kv_heads,
         TABLE_BLOCK=triton.next_power_of_2(columns),
+        USE_REQUEST_STATE_INDICES=request_state_indices is not None,
         num_warps=1,
     )
     return sparse_idx, sparse_count, visible, cu_query, row_table

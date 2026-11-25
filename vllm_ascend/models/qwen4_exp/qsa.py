@@ -14,6 +14,9 @@
 
 """Ascend QSA owner for Qwen3.8-Flash-Next."""
 
+from collections.abc import Iterator
+from contextlib import contextmanager
+from contextvars import ContextVar
 from copy import copy
 from dataclasses import replace
 from typing import TYPE_CHECKING, Any, Protocol, TypeAlias, cast
@@ -831,9 +834,37 @@ else:
 # required before LightningIndexer or the Triton QSA selector consumes them.
 QSAIndexerBackend.uses_descriptor_cache_view = True
 
-# The indexer module selects its Triton metadata builder at import time. The
-# upstream kernel uses CUDA PDL intrinsics, so Ascend uses the Torch path.
-qsa_indexer.build_qsa_metadata = qsa_indexer._build_qsa_metadata_torch
+_USE_HISPARSE_QSA_METADATA: ContextVar[bool] = ContextVar("_USE_HISPARSE_QSA_METADATA", default=False)
+
+
+@contextmanager
+def use_hisparse_qsa_metadata() -> Iterator[None]:
+    """Select fused indexer metadata for one eager HiSparse build."""
+    token = _USE_HISPARSE_QSA_METADATA.set(True)
+    try:
+        yield
+    finally:
+        _USE_HISPARSE_QSA_METADATA.reset(token)
+
+
+def _build_qsa_indexer_metadata(common_attn_metadata, *buffers, **kwargs):
+    if (
+        _USE_HISPARSE_QSA_METADATA.get()
+        and hasattr(qsa_indexer, "build_qsa_metadata_triton")
+        and common_attn_metadata.num_reqs > 0
+        and common_attn_metadata.num_actual_tokens > 0
+        and common_attn_metadata.query_start_loc.device.type == "npu"
+        and getattr(common_attn_metadata, "pcp_context", None) is None
+        and getattr(common_attn_metadata, "graph_pad_size", -1) < 0
+    ):
+        # Core's newer Triton kernel disables CUDA PDL on Ascend.
+        return qsa_indexer.build_qsa_metadata_triton(common_attn_metadata, *buffers, **kwargs)
+    return qsa_indexer._build_qsa_metadata_torch(common_attn_metadata, *buffers, **kwargs)
+
+
+# Core selects a module-level builder. Keep the Ascend Torch default for other
+# models and graph modes, and scope the fused path to the model state's build.
+qsa_indexer.build_qsa_metadata = _build_qsa_indexer_metadata
 
 
 class AscendPCPQSAIndexerMetadataBuilder(QSAIndexerMetadataBuilder):
@@ -916,8 +947,6 @@ class AscendQwen4ExpQSAAttention(upstream_qsa.Qwen4ExpQSAAttention):
                 raise NotImplementedError("QSA HiSparse requires vLLM Core with GQA HiSparse cache planning")
             from .hisparse import init_qsa_hisparse
 
-            if vllm_config.parallel_config.prefill_context_parallel_size != 1:
-                raise NotImplementedError("QSA HiSparse requires PCP=1")
             super().__init__(vllm_config=vllm_config, **kwargs)
             init_qsa_hisparse(self, vllm_config)
             return
@@ -939,9 +968,9 @@ class AscendQwen4ExpQSAAttention(upstream_qsa.Qwen4ExpQSAAttention):
     def get_kv_cache_config(self, vllm_config):
         config = super().get_kv_cache_config(vllm_config)
         if getattr(self, "hisparse_cache", None) is not None:
-            from .hisparse import sparse_layer_config
+            from .hisparse import get_qsa_hisparse_cache_config
 
-            return sparse_layer_config(config, self.indexer.token_topk)
+            return get_qsa_hisparse_cache_config(config, self.indexer.token_topk)
         return config
 
     def _run_qsa(

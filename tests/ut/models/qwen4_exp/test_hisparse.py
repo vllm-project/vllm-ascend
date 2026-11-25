@@ -17,9 +17,43 @@ def ops():
     for filename in ("gbsa.py", "hisparse.py"):
         source = MODEL_DIR / filename
         module = ast.parse(source.read_text())
-        module.body = [node for node in module.body if isinstance(node, (ast.FunctionDef, ast.Assign))]
+        module.body = [
+            node
+            for node in module.body
+            if isinstance(node, (ast.FunctionDef, ast.Assign))
+            or (isinstance(node, ast.ImportFrom) and node.module == "__future__")
+        ]
         exec(compile(module, str(source), "exec"), scope)
     return scope
+
+
+def test_bind_hisparse_uses_kernel_block_views_only_for_side_caches(ops):
+    class CacheLayer:
+        bind_kv_cache = None
+
+    class Mamba(CacheLayer):
+        pass
+
+    class RawKeyCache(CacheLayer):
+        pass
+
+    class CompressedKeyCache(CacheLayer):
+        pass
+
+    ops["MambaBase"] = Mamba
+    ops["qsa_indexer"] = SimpleNamespace(QSARawKeyCache=RawKeyCache, QSACompressedKeyCache=CompressedKeyCache)
+    recurrent = Mock(spec=Mamba, kv_cache=torch.empty(3, 1, 1, 64, dtype=torch.int8))
+    indexer = Mock(spec=RawKeyCache, kv_cache=torch.empty(3, 1, 32, 64))
+    already_bound = Mock(spec=CompressedKeyCache, kv_cache=torch.empty(3, 32, 1, 64))
+    token_cache = Mock(kv_cache=torch.empty(3, 128, 128))
+    layers = {"gdn": recurrent, "raw": indexer, "compressed": already_bound, "token": token_cache}
+
+    ops["bind_qsa_hisparse_kv_caches"](layers, [*layers, "token.hisparse_resident"])
+
+    recurrent.bind_kv_cache.assert_called_once_with(recurrent.kv_cache)
+    indexer.bind_kv_cache.assert_called_once_with(indexer.kv_cache)
+    already_bound.bind_kv_cache.assert_not_called()
+    token_cache.bind_kv_cache.assert_not_called()
 
 
 @pytest.mark.parametrize("length_dtype", [torch.int32, torch.int64])
@@ -116,9 +150,11 @@ def test_mixed_resident_batch_uses_decode_fast_path_and_stages_prefill(ops):
 
     cache.swap_in.assert_not_called()
     group.stage_prefill_rows.assert_called_once()
-    fast_args = ops["qsa_resident_gbsa_attention"].call_args.args
+    fast_call = ops["qsa_resident_gbsa_attention"].call_args
+    fast_args = fast_call.args
     assert fast_args[0].shape[0] == 2
-    assert fast_args[3].tolist() == [[31], [11], [21]]
+    assert fast_args[3] is cache.block_table
+    assert fast_call.kwargs["request_state_indices"] is cache.runtime.request_state_indices
     assert fast_args[4].tolist() == [0, 1]
     prefill_args = ops["dispatch_qsa_attention"].call_args.args
     assert prefill_args[0].shape[0] == 3

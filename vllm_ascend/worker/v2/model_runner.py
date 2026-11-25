@@ -690,7 +690,11 @@ class NPUModelRunner(GPUModelRunner):
                 raise EngramSharedReleaseError("; ".join(errors))
 
     def _register_sparse_kv_caches(self, kv_caches: dict[str, Any]) -> None:
-        """Bind host pools before the V2 KV connector registers its destinations."""
+        """Finish layer binding before the V2 KV connector registers its destinations."""
+        bind_hisparse_kv_caches = getattr(self.model_state, "bind_hisparse_kv_caches", None)
+        if bind_hisparse_kv_caches is not None:
+            bind_hisparse_kv_caches(kv_caches)
+
         manager = self.sparse_kv_offload_manager
         if manager is None:
             return
