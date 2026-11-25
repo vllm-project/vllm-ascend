@@ -348,6 +348,12 @@ def test_select_moe_comm_method_a2_uses_mc2_within_capacity(monkeypatch, num_tok
     [
         (128, 8, MoECommType.FUSED_MC2),
         (4097, 8, MoECommType.FUSED_MC2),
+        # A2 dispatch_ffn_combine has no cross-server transport yet, so an EP
+        # group larger than one A2 server (8 NPUs) stays on the non-fused
+        # policy even with enable_fused_mc2=1.
+        (128, 16, MoECommType.MC2),
+        (4097, 16, MoECommType.ALLGATHER),
+        (128, 32, MoECommType.MC2),
         (128, 128, MoECommType.MC2),
         (4097, 128, MoECommType.ALLGATHER),
     ],
