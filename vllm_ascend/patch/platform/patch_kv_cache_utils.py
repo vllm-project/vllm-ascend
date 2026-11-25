@@ -53,10 +53,9 @@ def _ascend_resolve_kv_cache_block_sizes(
         # multiplied by the CP factors for proper alignment.
         group_block_sizes = [g.kv_cache_spec.block_size for g in groups]
         scheduler_block_size = math.lcm(*group_block_sizes) * dcp
-        if not cache_config.enable_prefix_caching:
+        if not (cache_config.enable_prefix_caching or getattr(vllm_config, "kv_transfer_config", None) is not None):
             return scheduler_block_size, scheduler_block_size
-        hash_block_size = math.gcd(*group_block_sizes)
-        return scheduler_block_size, hash_block_size
+        return scheduler_block_size, math.gcd(*group_block_sizes)
 
     return _orig_resolve_kv_cache_block_sizes(kv_cache_config, vllm_config)
 
