@@ -157,7 +157,8 @@ def initialize_attention(monkeypatch, draft_backend, target_backend=AscendMLABac
 
     monkeypatch.setattr(shared, "get_layers_from_vllm_config", get_layers)
     cache_config = SimpleNamespace(kv_cache_groups=[SimpleNamespace(layer_names=["target", "draft"])])
-    spec.set_attn(None, cache_config, None, None, target_groups)
+    block_tables = SimpleNamespace(cp_size=config.parallel_config.decode_context_parallel_size)
+    spec.set_attn(None, cache_config, block_tables, None, target_groups)
     assert spec._context_slot_mappings.dtype == torch.int32
     return spec
 

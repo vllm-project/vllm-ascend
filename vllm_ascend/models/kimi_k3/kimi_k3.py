@@ -92,6 +92,7 @@ from vllm_ascend import envs as ascend_envs
 from vllm_ascend.ascend_config import get_ascend_config, is_kimi_c8_config
 from vllm_ascend.ascend_forward_context import register_kimi_moe_quant_type
 from vllm_ascend.attention.utils import mark_fused_preprocess_weights
+from vllm_ascend.core.kv_cache_interface import uses_kimi_k31_gqa_draft
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.models.common.ops.sequence_parallel import (
     sp_all_gather,
@@ -112,6 +113,7 @@ from vllm_ascend.ops.kimi_kda import (
 )
 from vllm_ascend.ops.kimi_situ import initialize_kimi_situ_ops
 from vllm_ascend.ops.linear_op import KimiOProjMMReduceScatterOp
+from vllm_ascend.ops.rotary_embedding import kimi_k31_rope_cache_length
 from vllm_ascend.ops.triton.flash_attention_output import register_flash_attention_gate_warmup
 from vllm_ascend.quantization.methods.base import PreparedLinearInput
 from vllm_ascend.quantization.methods.w8a8.w8a8_dynamic import AscendW8A8DynamicLinearMethod
@@ -675,6 +677,11 @@ class AscendKimiDSAAttention(AscendKimiMLAAttention):
     def __init__(self, config, vllm_config: VllmConfig, prefix: str, topk_indices_buffer) -> None:
         # This constructor is patched by Ascend: it builds the same indexer,
         # cache layers, MLA wrapper, and sparse backend used by GLM DSA.
+        rope_length = (
+            kimi_k31_rope_cache_length(config, vllm_config)
+            if uses_kimi_k31_gqa_draft(vllm_config)
+            else config.max_position_embeddings
+        )
         DeepseekV2MLAAttention.__init__(
             self,
             vllm_config=vllm_config,
@@ -686,7 +693,7 @@ class AscendKimiDSAAttention(AscendKimiMLAAttention):
             v_head_dim=config.v_head_dim,
             q_lora_rank=config.q_lora_rank,
             kv_lora_rank=config.kv_lora_rank,
-            max_position_embeddings=config.max_position_embeddings,
+            max_position_embeddings=rope_length,
             cache_config=vllm_config.cache_config,
             quant_config=vllm_config.quant_config,
             prefix=prefix,

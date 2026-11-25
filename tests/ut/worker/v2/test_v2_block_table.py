@@ -80,6 +80,26 @@ def test_init_keeps_explicit_kernel_block_sizes():
     assert tables.kernel_block_sizes == [4]
 
 
+def test_append_packed_draft_pages_preserves_evicted_prefix():
+    # A fresh request has a real first page. A SWA prefix hit can carry a
+    # null page at the same absolute position when reusing the request row.
+    tables = AscendBlockTables.__new__(AscendBlockTables)
+    tables.num_kv_cache_groups = 1
+    tables.blocks_per_kv_block = [6]  # 768-token pages, 128-token FIA blocks
+    tables.num_blocks = SimpleNamespace(np=torch.zeros(1, 1, dtype=torch.int32).numpy())
+    table = MagicMock()
+    table.gpu = torch.zeros(1, 18, dtype=torch.int32)
+    tables.block_tables = [table]
+
+    tables.append_block_ids(0, ([4, 9],), overwrite=True)
+    table.stage_write.assert_called_with(0, 0, [*range(24, 30), *range(54, 60)])
+    tables.append_block_ids(0, ([0, 9],), overwrite=True)
+    table.stage_write.assert_called_with(0, 0, [0] * 6 + list(range(54, 60)))
+    tables.append_block_ids(0, ([7],), overwrite=False)
+    table.stage_write.assert_called_with(0, 12, list(range(42, 48)))
+    assert tables.num_blocks.np[0, 0] == 18
+
+
 def test_init_forwards_slot_mapping_enabled_on_newer_vllm():
     seen: dict[str, Any] = {}
 

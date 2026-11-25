@@ -18,6 +18,7 @@ import zmq
 from vllm.logger import logger
 from vllm.utils.network_utils import make_zmq_socket
 
+from vllm_ascend.core.kv_cache_interface import uses_kimi_k31_bf16_cache as uses_kimi_k31_bf16_cache
 from vllm_ascend.distributed.kv_transfer.utils.utils import (
     RegisterRegions,
     tensor_storage_key,
@@ -29,21 +30,6 @@ if TYPE_CHECKING:
 
 
 KV_CACHE_BUFFER_ALIGNMENT = 2 * 1024 * 1024
-
-
-def uses_kimi_k31_bf16_cache(vllm_config: Any) -> bool:
-    """Select the native BF16 K3.1 handoff contract."""
-    model = getattr(vllm_config, "model_config", None)
-    cache = getattr(vllm_config, "cache_config", None)
-    attention = getattr(vllm_config, "attention_config", None)
-    additional = getattr(vllm_config, "additional_config", None) or {}
-    return (
-        getattr(getattr(model, "hf_config", None), "model_type", None) == "kimi_k31"
-        and getattr(model, "dtype", None) == torch.bfloat16
-        and getattr(cache, "cache_dtype", None) in ("auto", "bfloat16")
-        and getattr(attention, "indexer_kv_dtype", "auto") in ("auto", "bfloat16", "bf16")
-        and (not isinstance(additional, dict) or str(additional.get("mla_cache_mode", "C16")).strip().upper() != "C8")
-    )
 
 
 @contextlib.contextmanager

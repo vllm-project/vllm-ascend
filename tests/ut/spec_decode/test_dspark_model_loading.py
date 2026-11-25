@@ -7,6 +7,8 @@ from unittest.mock import MagicMock
 
 import pytest
 import torch
+from vllm.config import VllmConfig, set_current_vllm_config
+from vllm.model_executor.layers import rotary_embedding
 from vllm.model_executor.models.qwen3_dflash import _get_dflash_fc_input_size
 from vllm.v1.worker.gpu.spec_decode.dspark.speculator import DSparkSpeculator
 
@@ -14,6 +16,7 @@ from vllm_ascend.models import qwen3_dflash2, qwen3_dspark
 from vllm_ascend.models.kimi_k3.kimi_k3_dspark import AscendK3DSparkForCausalLM
 from vllm_ascend.models.qwen3_dflash2 import DFlash2Qwen3ForCausalLM
 from vllm_ascend.models.qwen3_dspark import AscendQwen3DSparkForCausalLM
+from vllm_ascend.ops import rotary_embedding as ascend_rope
 from vllm_ascend.worker.v2.spec_decode.dspark import speculator as shared
 
 
@@ -189,7 +192,9 @@ def test_kimi_k31_validates_gqa_draft_inputs(monkeypatch, target_type, causal_by
 
 @pytest.mark.parametrize("saved_input_width", [8, 12])
 def test_kimi_k31_legacy_draft_projection_uses_target_width(monkeypatch, saved_input_width):
-    draft_hf_config = SimpleNamespace(target_hidden_size=None, hidden_size=6, target_layer_ids=[23, 47])
+    draft_hf_config = SimpleNamespace(
+        target_hidden_size=None, hidden_size=6, target_layer_ids=[23, 47], max_position_embeddings=64
+    )
     config = SimpleNamespace(
         model_config=SimpleNamespace(
             hf_config=SimpleNamespace(model_type="kimi_k31"),
@@ -220,6 +225,39 @@ def test_kimi_k31_legacy_draft_projection_uses_target_width(monkeypatch, saved_i
     else:
         with pytest.raises(ValueError, match=r"fc.weight has shape \(6, 12\), expected \(6, 8\)"):
             draft.load_weights(weights)
+
+
+@pytest.mark.parametrize(
+    ("use_v2", "service_length", "rope_params", "expected_length"),
+    [
+        (True, 32, {"rope_type": "default", "rope_theta": 10000}, 32),
+        (True, 128, {"rope_type": "default"}, 64),
+        (True, 32, {"rope_type": "yarn", "factor": 2.0}, 64),
+        (True, 32, {"rope_type": "default", "mrope_section": [1, 1, 2]}, 64),
+        (False, 32, {"rope_type": "default"}, 64),
+    ],
+)
+def test_kimi_draft_rope_table_bounds(monkeypatch, use_v2, service_length, rope_params, expected_length):
+    draft = SimpleNamespace(hidden_size=8, max_position_embeddings=64, rope_parameters=rope_params)
+    config = SimpleNamespace(
+        use_v2_model_runner=use_v2,
+        model_config=SimpleNamespace(hf_text_config=SimpleNamespace(hidden_size=8), max_model_len=service_length),
+        speculative_config=SimpleNamespace(draft_model_config=SimpleNamespace(hf_config=draft)),
+    )
+    runtime = AscendQwen3DSparkForCausalLM._kimi_draft_runtime_config(config)
+    local = runtime.speculative_config.draft_model_config.hf_config
+    assert local.max_position_embeddings == expected_length
+    assert draft.max_position_embeddings == 64
+    if expected_length < 64:
+        # Every draft layer reuses this table, including the last valid row.
+        monkeypatch.setattr(rotary_embedding, "_ROPE_DICT", {})
+        for name in ("_cos_sin_cache", "_cos_cache", "_sin_cache"):
+            monkeypatch.setattr(ascend_rope, name, None)
+        with set_current_vllm_config(VllmConfig()), torch.device("cpu"):
+            full = rotary_embedding.get_rope(8, 64, rope_parameters=rope_params, dtype=torch.bfloat16)
+            short = rotary_embedding.get_rope(8, expected_length, rope_parameters=rope_params, dtype=torch.bfloat16)
+        assert short.cos_sin_cache.numel() == expected_length * 8
+        torch.testing.assert_close(short.cos_sin_cache, full.cos_sin_cache[:expected_length], rtol=0, atol=0)
 
 
 @pytest.mark.parametrize("rotated", [False, True])

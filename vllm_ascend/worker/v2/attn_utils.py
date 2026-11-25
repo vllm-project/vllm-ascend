@@ -87,6 +87,7 @@ from vllm_ascend.core.kv_cache_interface import (
     get_kv_cache_compression_ratio,
     get_storage_block_size,
     supports_component_major_mla_pd,
+    uses_kimi_k31_bf16_cache,
 )
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise_cache_layout import (
@@ -443,6 +444,10 @@ def mark_kimi_k31_gqa_draft_specs(
         raise ValueError("Kimi K3.1 GQA DSpark must publish a cache spec for every draft attention layer.")
 
     marked = dict(kv_cache_specs)
+    transfer = vllm_config.kv_transfer_config
+    pack_swa = (
+        transfer is not None and supports_component_major_mla_pd(vllm_config) and uses_kimi_k31_bf16_cache(vllm_config)
+    )
     for name in draft_layer_names:
         spec = kv_cache_specs[name]
         if type(spec) is FullAttentionSpec:
@@ -459,6 +464,13 @@ def mark_kimi_k31_gqa_draft_specs(
             or spec.tokens_per_state != 1
         ):
             raise ValueError(f"Kimi K3.1 GQA DSpark requires unpadded BF16 K/V pages for {name}.")
+        if pack_swa and draft_spec_type is AscendGQADraftSlidingWindowSpec:
+            # A draft page consumes a whole ID in the much wider target/KDA
+            # pool. Group several native FIA pages under one scheduler ID.
+            manager_block = transfer.get_from_extra_config("dspark_swa_block_size", vllm_config.cache_config.block_size)
+            if type(manager_block) is not int or manager_block <= 0 or manager_block % spec.block_size:
+                raise ValueError(f"dspark_swa_block_size must be a positive multiple of {spec.block_size}.")
+            spec = replace(spec, block_size=manager_block, page_size_padded=None)
         marked[name] = draft_spec_type(
             **{field.name: getattr(spec, field.name) for field in fields(spec) if field.init}
         )

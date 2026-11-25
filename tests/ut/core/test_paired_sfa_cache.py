@@ -8,7 +8,11 @@ from unittest.mock import Mock
 import pytest
 import torch
 from vllm.config import VllmConfig
-from vllm.v1.core.kv_cache_utils import generate_scheduler_kv_cache_config, get_kv_cache_configs
+from vllm.v1.core.kv_cache_utils import (
+    generate_scheduler_kv_cache_config,
+    get_kv_cache_configs,
+    get_max_concurrency_for_kv_cache_config,
+)
 from vllm.v1.core.single_type_kv_cache_manager import (
     FullAttentionManager,
     SlidingWindowManager,
@@ -32,6 +36,7 @@ from vllm_ascend.models.kimi_k3.paired_sfa_cache import (
 )
 from vllm_ascend.patch.platform import patch_kv_cache_utils
 from vllm_ascend.patch.platform.patch_kv_cache_coordinator import get_kv_cache_coordinator
+from vllm_ascend.worker.v2.attn_utils import mark_kimi_k31_gqa_draft_specs
 
 
 def make_specs(block_size=1536):
@@ -81,6 +86,18 @@ def make_config():
     )
 
 
+def make_bf16_specs(block_size):
+    specs = make_specs(block_size)
+    for name, spec in specs.items():
+        if isinstance(spec, AscendMLAAttentionSpec):
+            specs[name] = replace(spec, dtype=torch.bfloat16, head_size=576, cache_sparse_sfa_c8=False)
+        elif isinstance(spec, AscendSFAIndexerCacheSpec):
+            specs[name] = replace(spec, dtype=torch.bfloat16, scale_dim=0, cache_sparse_li_c8=False)
+        else:
+            specs[name] = replace(spec, page_size_padded=block_size * 576 * 2, num_speculative_blocks=3)
+    return specs
+
+
 def test_gqa_dspark_groups_keep_target_ownership_and_native_swa():
     register_ascend_kv_cache_specs()
     config, target = make_config(), make_specs()
@@ -125,8 +142,11 @@ def test_paired_sfa_rejects_unknown_untagged_gqa_layer():
         paired_sfa_cache_groups(make_config(), {**make_specs(), "model.layers.93.attn": spec})
 
 
-@pytest.mark.parametrize(("dcp_size", "target_block_size"), [(1, 1664), (8, 768)])
-def test_gqa_dspark_engine_cache_admission_and_scheduler_alignment(dcp_size, target_block_size):
+@pytest.mark.parametrize(
+    ("dcp_size", "target_block_size", "swa_block_size"),
+    [(1, 1664, 128), (8, 768, 128), (1, 768, 768), (8, 768, 768), (8, 896, 896)],
+)
+def test_gqa_dspark_engine_cache_admission_and_scheduler_alignment(dcp_size, target_block_size, swa_block_size):
     register_all_kvcache_specs(None)
     register_ascend_kv_cache_specs()
     config = make_config()
@@ -144,20 +164,12 @@ def test_gqa_dspark_engine_cache_admission_and_scheduler_alignment(dcp_size, tar
     config.cache_config.block_size = target_block_size
     config.max_in_flight_tokens = 16384
     native = dict(num_kv_heads=2, head_size=64, dtype=torch.bfloat16)
-    target = make_specs(block_size=target_block_size)
-    if dcp_size > 1:
-        for name, spec in target.items():
-            if isinstance(spec, AscendMLAAttentionSpec):
-                target[name] = replace(spec, dtype=torch.bfloat16, head_size=576, cache_sparse_sfa_c8=False)
-            elif isinstance(spec, AscendSFAIndexerCacheSpec):
-                target[name] = replace(spec, dtype=torch.bfloat16, scale_dim=0, cache_sparse_li_c8=False)
-            else:
-                target[name] = replace(spec, page_size_padded=target_block_size * 576 * 2)
+    target = make_specs(target_block_size) if target_block_size == 1664 else make_bf16_specs(target_block_size)
     specs = {
         **target,
         "model.layers.93.self_attn.attn": AscendGQADraftFullAttentionSpec(block_size=target_block_size, **native),
         "model.layers.94.self_attn.attn": AscendGQADraftSlidingWindowSpec(
-            block_size=128, sliding_window=2048, **native
+            block_size=swa_block_size, sliding_window=2048, **native
         ),
     }
     groups = paired_sfa_cache_groups(config, specs)
@@ -168,12 +180,12 @@ def test_gqa_dspark_engine_cache_admission_and_scheduler_alignment(dcp_size, tar
     assert plans[0].num_blocks == usable_memory // pool_bytes + 1
     scheduler = generate_scheduler_kv_cache_config(plans)
     config.cache_config.block_size = min(group.kv_cache_spec.block_size for group in scheduler.kv_cache_groups)
-    assert config.cache_config.block_size == 128
+    assert config.cache_config.block_size == swa_block_size
     patch_kv_cache_utils._update_engine_kv_cache_capacity(config, scheduler)
     VllmConfig.validate_block_size(config)
-    assert config.cache_config.block_size == (target_block_size if dcp_size > 1 else 128)
+    assert config.cache_config.block_size == (target_block_size if dcp_size > 1 else swa_block_size)
     scheduler_block_size, hash_block_size = patch_kv_cache_utils._ascend_resolve_kv_cache_block_sizes(scheduler, config)
-    assert (scheduler_block_size, hash_block_size) == (target_block_size * dcp_size, 128)
+    assert (scheduler_block_size, hash_block_size) == (target_block_size * dcp_size, swa_block_size)
     assert scheduler.dspark_draft_only_group_ids == (len(groups) - 2, len(groups) - 1)
     coordinator = get_kv_cache_coordinator(
         scheduler,
@@ -188,8 +200,44 @@ def test_gqa_dspark_engine_cache_admission_and_scheduler_alignment(dcp_size, tar
     )
     assert coordinator.single_type_managers[0].block_size == target_block_size * dcp_size
     assert coordinator.single_type_managers[-2].block_size == target_block_size
-    assert coordinator.single_type_managers[-1].block_size == 128
+    assert coordinator.single_type_managers[-1].block_size == swa_block_size
     assert coordinator.find_longest_cache_hit_per_group([], 0)[1] == (0,) * len(groups)
+
+
+@pytest.mark.parametrize(
+    ("dcp_size", "target_block_size", "override", "expected_ids", "ids_per_request"),
+    [
+        (8, 768, 128, 860, 118),
+        (8, 768, None, 809, 52),
+        (8, 896, 128, 738, 115),
+        (8, 896, None, 693, 47),
+        (1, 768, 128, 733, 459),
+        (1, 768, None, 689, 233),
+    ],
+)
+def test_bf16_dspark_capacity_at_logged_budget(dcp_size, target_block_size, override, expected_ids, ids_per_request):
+    # Reproduce the TP8 prefill and decode pools with five local 2048-token SWA layers.
+    config = make_config()
+    config.model_config.dtype = torch.bfloat16
+    config.cache_config.cache_dtype = "auto"
+    config.cache_config.block_size = target_block_size
+    config.parallel_config = SimpleNamespace(decode_context_parallel_size=dcp_size, prefill_context_parallel_size=1)
+    config.max_in_flight_tokens = 8192 if dcp_size == 8 else 32768
+    options = {} if override is None else {"dspark_swa_block_size": override}
+    config.kv_transfer_config = SimpleNamespace(kv_connector="MooncakeConnectorV2", get_from_extra_config=options.get)
+    specs = make_bf16_specs(target_block_size)
+    draft_names = [f"model.layers.{layer}.self_attn.attn" for layer in range(93, 98)]
+    specs.update(
+        dict.fromkeys(
+            draft_names,
+            SlidingWindowSpec(block_size=128, num_kv_heads=2, head_size=64, dtype=torch.bfloat16, sliding_window=2048),
+        )
+    )
+    marked = mark_kimi_k31_gqa_draft_specs(config, specs, draft_names)
+    groups = paired_sfa_cache_groups(config, marked)
+    plan = paired_sfa_cache_config(config, groups, 22_600_744_960 if dcp_size == 8 else 19_263_193_088)
+    assert plan.num_blocks == expected_ids
+    assert get_max_concurrency_for_kv_cache_config(config, plan) == pytest.approx(expected_ids / ids_per_request)
 
 
 def test_token_blocks_unchanged_and_components_share_ids():

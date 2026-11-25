@@ -64,6 +64,25 @@ _cos_slice: torch.Tensor = None
 _sin_slice: torch.Tensor = None
 
 
+def kimi_k31_rope_cache_length(config, vllm_config):
+    """Size standard target and DSpark RoPE tables for a V2 serving run."""
+    length = config.max_position_embeddings
+    if not getattr(vllm_config, "use_v2_model_runner", False):
+        return length
+    # V2 schedules target/context positions within max_model_len and clamps
+    # DSpark query positions, including speculative lookahead, to its last row.
+    # Only the standard rotation is independent of the configured table length.
+    rope = getattr(config, "rope_parameters", None) or {}
+    limit = vllm_config.model_config.max_model_len
+    if (
+        0 < limit < length
+        and rope.get("rope_type", "default") == "default"
+        and rope.keys() <= {"rope_type", "rope_theta", "partial_rotary_factor", "rope_dim"}
+    ):
+        return limit
+    return length
+
+
 def set_cos_and_sin(vllm_config, max_num_reqs, decode_token_per_req, dtype, device):
     global _cos_mla
     global _sin_mla

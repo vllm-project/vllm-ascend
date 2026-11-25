@@ -1011,6 +1011,67 @@ def test_gqa_draft_pull_selects_pages_and_copies_both_hnd_planes(sliding: bool, 
     assert lengths == [count * block_bytes] * 2
 
 
+@pytest.mark.parametrize("producer_page,consumer_page", [(128, 768), (768, 128)])
+def test_gqa_draft_rejects_mixed_swa_manager_pages_at_handshake(producer_page, consumer_page):
+    spec = AscendGQADraftSlidingWindowSpec(
+        block_size=consumer_page, sliding_window=2048, num_kv_heads=1, head_size=8, dtype=torch.bfloat16
+    )
+    thread = make_thread(layer_block_sizes=[consumer_page], kv_cache_specs=[spec])
+    remote = make_metadata_groups(pp_metadata=make_pp_metadata(layer_block_sizes=[producer_page]))
+    with pytest.raises(ValueError, match=f"producer={producer_page}, consumer={consumer_page}"):
+        thread._build_remote_transfer_layout(remote)
+
+
+@pytest.mark.parametrize("cached_tokens", [0, 1536])
+def test_gqa_draft_coarse_swa_read_fills_cacheable_pages(cached_tokens):
+    page, kernel, heads, dim = 768, 128, 2, 8
+    spec = AscendGQADraftSlidingWindowSpec(
+        block_size=page, sliding_window=2048, num_kv_heads=heads, head_size=dim, dtype=torch.bfloat16
+    )
+    scale = page // kernel
+    # HND planes, fragmented manager IDs, and a partial final kernel block.
+    local_table = [0, 5, 2, 3, 7]
+    remote_table = [0, 3, 1, 4, 2]
+    shape = (2, 8 * scale, heads, kernel, dim)
+    producer = torch.arange(2 * 8 * scale * heads * kernel * dim, dtype=torch.int32).to(torch.int16).view(shape)
+    consumer = torch.full_like(producer, -1)
+    expected = consumer.clone()
+    kernel_bytes = producer[0, 0].nbytes
+    metadata = dict(
+        layer_block_sizes=[page],
+        block_lens=[[kernel_bytes] * 2],
+        block_strides=[[kernel_bytes] * 2],
+        block_shapes=[[(heads, kernel, dim)] * 2],
+        block_size_scales=[[scale] * 2],
+    )
+    thread = make_thread(
+        _kimi_k31_bf16=True,
+        kv_cache_specs=[spec],
+        kv_caches_base_addr=[[plane.data_ptr() for plane in consumer]],
+        **metadata,
+    )
+    remote = make_pp_metadata(tp_base_addrs={0: [[plane.data_ptr() for plane in producer]]}, **metadata)
+    request = make_req_meta(local=(local_table,), remote=(remote_table,))
+    end = 3201
+    request.num_computed_tokens = cached_tokens
+    request.num_external_tokens = end - cached_tokens
+    request.remote_num_prompt_tokens = end
+    request.local_num_prompt_tokens = end + 1
+    buckets, _ = thread._build_transfer_block_buckets(remote, [(0, 0)], {(0, 0): [[0]]}, 1, 1, {"req": request}, {})
+    local, peer, lengths = [], [], []
+    thread._append_spec_transfer_addresses(0, 0, 0, 1, 1, 1, buckets[0, 0][0], remote, local, peer, lengths)
+    for dst, src, length in zip(local, peer, lengths, strict=True):
+        ctypes.memmove(dst, src, length)
+    # At 3201 tokens the live window starts at 1154. The page starting at
+    # 768 can be hashed and reused by a shorter request needing its prefix.
+    for start in range(max(page, cached_tokens), end, kernel):
+        page_idx, within = divmod(start, page)
+        dst = local_table[page_idx] * scale + within // kernel
+        src = remote_table[page_idx] * scale + within // kernel
+        expected[:, dst] = producer[:, src]
+    assert torch.equal(consumer, expected)
+
+
 @pytest.mark.parametrize("spec", [make_circular_spec(), make_kpool_tail_spec()])
 def test_compute_circular_blocks_transfers_the_single_complete_page(spec: KVCacheSpec) -> None:
     thread = make_thread(num_speculative_tokens=3)

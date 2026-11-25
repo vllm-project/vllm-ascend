@@ -28,6 +28,7 @@ from vllm.v1.kv_cache_interface import (
 
 from vllm_ascend.ascend_config import is_kimi_c8_config
 from vllm_ascend.core.kv_cache_interface import (
+    AscendGQADraftSlidingWindowSpec,
     AscendSFAIndexerCacheSpec,
     get_kv_cache_dcp_size,
     is_circular_kv_cache_spec,
@@ -288,6 +289,14 @@ class MooncakePullRecvingThread(threading.Thread):
                 layer_index_pairs.append(layer_pair)
                 matched_local_layer_indices.add(local_layer_index)
                 local_spec_index = self.spec_indices[local_layer_index]
+                if isinstance(self.kv_cache_specs[local_spec_index], AscendGQADraftSlidingWindowSpec):
+                    local_page = self.layer_block_sizes[local_layer_index]
+                    remote_page = pp_metadata.layer_block_sizes[remote_layer_index]
+                    if local_page != remote_page:
+                        raise ValueError(
+                            f"Mooncake Kimi DSpark sliding-window manager page mismatch for {layer_name!r}: "
+                            f"producer={remote_page}, consumer={local_page}. Configure the same draft page on P and D."
+                        )
                 raw_tp_rank_groups = raw_tp_rank_groups_by_spec.get(local_spec_index)
                 if raw_tp_rank_groups is None:
                     raw_tp_rank_groups = self._get_layer_remote_tp_rank_groups(
@@ -707,11 +716,11 @@ class MooncakePullRecvingThread(threading.Thread):
                         if getattr(spec, "static_fp8_pa_nz", False):
                             # Physical scale includes page padding, not tokens.
                             local_kernel_block_size = remote_kernel_block_size = 128
-                        assert local_kernel_block_size == remote_kernel_block_size, (
-                            "MooncakeConnector does not support different local and remote kernel block size %s | %s.",
-                            local_kernel_block_size,
-                            remote_kernel_block_size,
-                        )
+                        if local_kernel_block_size != remote_kernel_block_size:
+                            raise ValueError(
+                                "Mooncake requires equal P/D kernel block sizes, "
+                                f"got local={local_kernel_block_size}, remote={remote_kernel_block_size}"
+                            )
                     transfer_block_ids = self._compute_group_block_ids(
                         request_id,
                         remote_tp_rank_groups,
@@ -827,7 +836,8 @@ class MooncakePullRecvingThread(threading.Thread):
                     f"remote={len(remote_kernel_block_ids)}"
                 )
         elif isinstance(spec, SlidingWindowSpec):
-            assert local_block_size == remote_block_size, "Mooncake SWA requires the same P/D logical block size."
+            if local_block_size != remote_block_size:
+                raise ValueError("Mooncake SWA requires the same P/D logical block size.")
             if transfer_end is None:
                 local_unhashed_start_idx = len(local_full_group_block_ids) - len(local_group_block_ids)
                 local_kernel_block_ids = self._expand_block_ids(local_group_block_ids, local_block_size_scale)
@@ -838,6 +848,11 @@ class MooncakePullRecvingThread(threading.Thread):
                 # Transfer only the live suffix needed for the next query.
                 # Both full tables preserve absolute positions and null IDs.
                 first_live_token = max(0, transfer_end - spec.sliding_window + 1 - spec.extra_retained_tokens)
+                # D can publish this whole manager page to its prefix cache.
+                # Fill its leading kernel blocks even if the current window
+                # has moved past them. A shorter prefix can still need them.
+                if isinstance(spec, AscendGQADraftSlidingWindowSpec):
+                    first_live_token = first_live_token // local_block_size * local_block_size
                 num_computed_tokens = max(num_computed_tokens, first_live_token)
                 local_kernel_block_ids, remote_kernel_block_ids = self._get_kimi_k31_attention_blocks(
                     local_block_size,

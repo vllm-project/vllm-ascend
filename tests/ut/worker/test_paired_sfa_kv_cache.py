@@ -219,11 +219,14 @@ def test_draft_fia_reshape_uses_draft_cache_dtype_in_packed_target_group(monkeyp
             AscendGQADraftFullAttentionSpec,
         ),
     ],
-    ids=["native-swa", "split-full"],
+    ids=["packed-swa", "split-full"],
 )
 def test_gqa_dspark_uses_private_contiguous_kv_planes(vllm_config, monkeypatch, layout, spec, draft_spec_type):
     vllm_config.parallel_config.prefill_context_parallel_size = 1
-    vllm_config.kv_transfer_config = SimpleNamespace(kv_connector="MooncakeConnectorV2")
+    vllm_config.kv_transfer_config = SimpleNamespace(kv_connector="MooncakeConnectorV2", get_from_extra_config={}.get)
+    vllm_config.model_config.dtype = torch.bfloat16
+    vllm_config.cache_config.cache_dtype = "auto"
+    vllm_config.cache_config.block_size = 768
     monkeypatch.setenv("VLLM_KV_CACHE_LAYOUT", layout)
     _, specs = make_paired_cache(vllm_config, torch.float16, with_draft=False)
     target_specs = dict(specs)
@@ -250,7 +253,9 @@ def test_gqa_dspark_uses_private_contiguous_kv_planes(vllm_config, monkeypatch, 
 
     key, value = reshaped[draft_name]
     assert key.is_contiguous() and value.is_contiguous()
-    num_kernel_blocks = NUM_BLOCKS * (spec.block_size // BLOCK_SIZE)
+    manager_block_size = 768 if draft_spec_type is AscendGQADraftSlidingWindowSpec else spec.block_size
+    assert marked[draft_name].block_size == manager_block_size
+    num_kernel_blocks = NUM_BLOCKS * (manager_block_size // BLOCK_SIZE)
     shape = (num_kernel_blocks, 2, BLOCK_SIZE, 64) if layout == "HND" else (num_kernel_blocks, BLOCK_SIZE, 2, 64)
     assert key.shape == value.shape == shape
     assert key.dtype == value.dtype == torch.bfloat16
@@ -271,6 +276,36 @@ def test_kimi_k31_gqa_draft_spec_rejects_context_parallelism(vllm_config):
     )
     with pytest.raises(ValueError, match="requires PCP=1"):
         attn_utils.mark_kimi_k31_gqa_draft_specs(vllm_config, {"draft": spec}, ["draft"])
+
+
+@pytest.mark.parametrize(
+    ("connector", "cache_dtype", "override", "expected"),
+    [
+        (None, "auto", None, 128),
+        ("OtherConnector", "auto", None, 128),
+        ("MooncakeConnectorV2", "int8", None, 128),
+        ("MooncakePullConnector", "auto", 384, 384),
+        ("MooncakeConnectorV2", "auto", 0, None),
+        ("MooncakeConnectorV2", "auto", 129, None),
+        ("MooncakeConnectorV2", "auto", "768", None),
+    ],
+)
+def test_gqa_dspark_swa_page_selection(vllm_config, connector, cache_dtype, override, expected):
+    vllm_config.parallel_config.prefill_context_parallel_size = 1
+    options = {"dspark_swa_block_size": override}
+    vllm_config.kv_transfer_config = (
+        SimpleNamespace(kv_connector=connector, get_from_extra_config=options.get) if connector else None
+    )
+    vllm_config.model_config.dtype = torch.bfloat16
+    vllm_config.cache_config.cache_dtype = cache_dtype
+    vllm_config.cache_config.block_size = 768
+    spec = SlidingWindowSpec(block_size=128, num_kv_heads=2, head_size=64, dtype=torch.bfloat16, sliding_window=2048)
+    if expected is None:
+        with pytest.raises(ValueError, match="positive multiple of 128"):
+            attn_utils.mark_kimi_k31_gqa_draft_specs(vllm_config, {"draft": spec}, ["draft"])
+    else:
+        marked = attn_utils.mark_kimi_k31_gqa_draft_specs(vllm_config, {"draft": spec}, ["draft"])
+        assert marked["draft"].block_size == expected
 
 
 @pytest.mark.parametrize("scale_dtype", [torch.float16, torch.float32])

@@ -10,6 +10,7 @@ from vllm.v1.worker.gpu.spec_decode.eagle.eagle3_utils import get_eagle3_aux_lay
 
 from vllm_ascend.core.kv_cache_interface import is_kimi_k31_model_config
 from vllm_ascend.models.llama_eagle3 import load_quarot_target_layer
+from vllm_ascend.ops.rotary_embedding import kimi_k31_rope_cache_length
 from vllm_ascend.utils import (
     get_rotation_matrix,
     get_rotation_path,
@@ -82,14 +83,14 @@ class AscendQwen3DSparkForCausalLM(Qwen3DSparkForCausalLM):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
         self._is_kimi_k31_target = is_kimi_k31_model_config(vllm_config.model_config)
         if self._is_kimi_k31_target:
-            vllm_config = self._with_target_hidden_size(vllm_config)
+            vllm_config = self._kimi_draft_runtime_config(vllm_config)
         super().__init__(vllm_config=vllm_config, prefix=prefix)
 
         config = self.config
         self.enable_confidence_head = bool(getattr(config, "enable_confidence_head", False))
 
     @staticmethod
-    def _with_target_hidden_size(vllm_config: VllmConfig) -> VllmConfig:
+    def _kimi_draft_runtime_config(vllm_config: VllmConfig) -> VllmConfig:
         speculative = vllm_config.speculative_config
         draft_model = speculative.draft_model_config
         draft = draft_model.hf_config
@@ -100,7 +101,9 @@ class AscendQwen3DSparkForCausalLM(Qwen3DSparkForCausalLM):
                 f"Kimi K3.1 GQA DSpark declares target_hidden_size={declared_width}, "
                 f"but the target hidden size is {target_width}. Use a draft trained for this target."
             )
-        if declared_width is not None or draft.hidden_size == target_width:
+        infer_width = declared_width is None and draft.hidden_size != target_width
+        rope_length = kimi_k31_rope_cache_length(draft, vllm_config)
+        if not infer_width and rope_length == draft.max_position_embeddings:
             return vllm_config
 
         # Legacy speculator configs can omit the verifier width. Allocate the
@@ -110,7 +113,9 @@ class AscendQwen3DSparkForCausalLM(Qwen3DSparkForCausalLM):
         runtime.speculative_config = copy(speculative)
         runtime.speculative_config.draft_model_config = copy(draft_model)
         draft_config = copy(draft)
-        draft_config.target_hidden_size = target_width
+        if infer_width:
+            draft_config.target_hidden_size = target_width
+        draft_config.max_position_embeddings = rope_length
         runtime.speculative_config.draft_model_config.hf_config = draft_config
         return runtime
 

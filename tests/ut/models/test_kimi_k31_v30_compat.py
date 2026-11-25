@@ -23,10 +23,12 @@ from vllm_ascend.utils import vllm_version_is
 ROOT = Path(__file__).resolve().parents[3]
 
 
-def test_dsa_gate_registers_warmup_after_backend_construction(monkeypatch):
+@pytest.mark.parametrize(("gqa_draft", "expected_length"), [(True, 64), (False, 128)])
+def test_dsa_gate_registers_warmup_after_backend_construction(monkeypatch, gqa_draft, expected_length):
     impl = SimpleNamespace(g_proj=None, local_num_heads=2)
 
     def construct_backend(self, **kwargs):
+        assert kwargs["max_position_embeddings"] == expected_length
         nn.Module.__init__(self)
         self.mla_attn = SimpleNamespace(mla_attn=SimpleNamespace(impl=impl))
 
@@ -45,7 +47,19 @@ def test_dsa_gate_registers_warmup_after_backend_construction(monkeypatch):
         max_position_embeddings=128,
         mla_use_output_gate=True,
     )
-    runtime = SimpleNamespace(cache_config=None, quant_config=None, model_config=SimpleNamespace(dtype=torch.bfloat16))
+    runtime = SimpleNamespace(
+        cache_config=None,
+        quant_config=None,
+        model_config=SimpleNamespace(
+            dtype=torch.bfloat16, hf_config=SimpleNamespace(model_type="kimi_k31"), max_model_len=64
+        ),
+        use_v2_model_runner=True,
+        speculative_config=SimpleNamespace(
+            method="dspark", draft_model_config=SimpleNamespace(architectures=["Qwen3DSparkModel"])
+        )
+        if gqa_draft
+        else None,
+    )
     attention = kimi_k3.AscendKimiDSAAttention(config, runtime, "model.layers.0.self_attn", None)
     assert attention.impl.g_proj is attention.g_proj
     register.assert_called_once_with(torch.bfloat16, 8)
