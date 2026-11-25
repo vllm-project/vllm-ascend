@@ -277,6 +277,28 @@ class TestAscendStoreCoordinator(unittest.TestCase):
 
         self.assertEqual(masks, ([False, False, False, True],))
 
+    def test_whole_page_eagle_save_matches_external_lookup(self):
+        # DeepSeek V4 layerwise: sparse retention, 128-token SWA and
+        # 16K compressed pages. The scheduler, not the mask, drops the tail.
+        coord = AscendStoreCoordinator(
+            [KVCacheGroupSpec(["layer.0"], _sliding_spec(128, 256))],
+            scheduler_block_size=16384,
+            hash_block_size=128,
+            group_block_sizes=[128],
+            group_cache_families=["c1"],
+            use_eagle=True,
+            retention_interval=0,
+        )
+        hashes = _hashes(128)
+        mask = coord.store_mask(16384, num_prompt_tokens=16393)[0]
+        self.assertTrue(mask[-1])
+        self.assertEqual(
+            coord.find_reachable_hit_tokens(
+                hashes, 16384, lambda group, values, allowed: [h for h, keep in zip(values, mask) if keep]
+            ),
+            16384,
+        )
+
     def test_lookup_mask_preserves_retention_and_lcm_boundaries(self):
         coord = AscendStoreCoordinator(
             [KVCacheGroupSpec(["layer.0"], _sliding_spec(block_size=128, sliding_window=256))],
