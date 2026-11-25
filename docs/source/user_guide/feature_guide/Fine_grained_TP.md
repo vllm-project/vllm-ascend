@@ -52,21 +52,6 @@ Fine-grained TP is designed for the **decode instance** of PD separation, where 
 | Feature Mutual Exclusion | Pipeline parallelism (`pipeline_parallel_size > 1`) cannot be combined with fine-grained TP. o_proj, MLP and QKV IProj TP require `prefill_context_parallel_size == 1`. PCP embedding and LM head weight sharding (`enable_pcp_embedding_lmhead_weight_sharding`, on by default when PCP > 1) cannot be combined with embedding or LM head TP. |
 | Hardware | No config-enforced hardware restriction; the performance data in this guide was measured on Atlas A2 (see [Experimental Results](#experimental-results)) |
 
-#### Batch-Size-Based Dynamic MTP
-
-Fine-grained TP uses multiple DP ranks. With `data_parallel_size > 1`, vLLM
-logs a warning and clears `num_speculative_tokens_per_batch_size` during
-startup. MTP uses the fixed `num_speculative_tokens` budget. This keeps ranks
-with different batch sizes from independently selecting different draft
-lengths and disagreeing on graph dispatch and collective shapes.
-
-For example, `max_num_seqs=4`, `num_speculative_tokens=1`, and the schedule
-`[[1, 2, 0], [3, 4, 1]]` use a fixed budget of one draft token for both batch
-ranges when shared-expert TP is enabled. `max_cudagraph_capture_size=8`
-covers the static decode token bound of `4 * (1 + 1)` for this example.
-Configure fixed MTP by omitting `num_speculative_tokens_per_batch_size`.
-`enable_adaptive_verification` controls a separate verification feature.
-
 #### Models
 
 Fine-grained TP currently supports **MoE models only**. The constraint is enforced at configuration load: a non-MoE model fails at startup with `The finegrained tp sizes can be enabled only for MOE models.`
