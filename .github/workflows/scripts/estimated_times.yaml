@@ -40,6 +40,8 @@ estimated_times:
   tests/e2e/pull_request/one_card/_310p/test_sampling_temp_310p.py: 190
   tests/e2e/pull_request/one_card/_310p/test_vl_model_310p.py: 330
   tests/e2e/pull_request/one_card/aclgraph/test_device_metadata.py: 30
+  # Initial scheduling estimate for the relocated A5 QLI selection/replay cases.
+  tests/e2e/pull_request/one_card/aclgraph/test_qli_metadata_a5.py: 30
   tests/e2e/pull_request/one_card/compile/test_graphex_norm_quant_fusion.py: 150
   tests/e2e/pull_request/one_card/compile/test_graphex_qknorm_rope_fusion.py: 180
   tests/e2e/pull_request/one_card/compile/test_graphex_qkvnorm_rope_fusion.py: 240
