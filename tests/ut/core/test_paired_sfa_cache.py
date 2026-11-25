@@ -8,7 +8,6 @@ from unittest.mock import Mock
 import pytest
 import torch
 from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheGroupSpec, MambaSpec
-from vllm_ascend.ops.kda_pcp import KimiKDAHostMetadataBackend
 
 from vllm_ascend.attention import attention_v1
 from vllm_ascend.attention.indexer import AscendSFAIndexerBackend
@@ -21,6 +20,7 @@ from vllm_ascend.models.kimi_k3.paired_sfa_cache import (
     paired_sfa_cache_groups,
     paired_sfa_pool_bytes,
 )
+from vllm_ascend.ops.kimi_kda import KimiKDAHostMetadataBackend
 from vllm_ascend.worker.v2 import attn_utils
 
 

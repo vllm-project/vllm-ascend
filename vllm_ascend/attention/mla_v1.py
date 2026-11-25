@@ -157,17 +157,25 @@ class AscendMLABackend(AttentionBackend):
         if block_size <= 0 or spec.block_size % block_size:
             raise ValueError("MLA kernel block size must divide the manager block size.")
         kernel_blocks_per_manager = spec.block_size // block_size
-        itemsize = spec.dtype.itemsize
-        if spec.page_size_bytes % (kernel_blocks_per_manager * itemsize):
-            raise ValueError("MLA physical pages must split into dtype-aligned kernel slots.")
-        slot_bytes = spec.page_size_bytes // kernel_blocks_per_manager
         prefix = (num_blocks * kernel_blocks_per_manager, block_size, spec.num_kv_heads)
         widths = (spec.kv_lora_rank, spec.qk_rope_head_dim)
-        if spec.num_kv_heads * block_size * sum(widths) * itemsize > slot_bytes:
-            raise ValueError("MLA kernel slot is smaller than its cache components.")
+        dtypes = (spec.dtype, spec.dtype)
         if spec.mla_cache_layout == "token_interleaved":
             widths = (sum(widths),)
-        return tuple((*prefix, width) for width in widths), (spec.dtype,) * len(widths)
+            dtypes = (spec.dtype,)
+        elif spec.fa_quant_layer:
+            config = get_current_vllm_config()
+            model_config = config.model_config
+            if spec.is_draft and config.speculative_config is not None:
+                model_config = config.speculative_config.draft_model_config
+            dtypes = (spec.dtype, model_config.dtype)
+        if any(spec.page_size_bytes % (kernel_blocks_per_manager * dtype.itemsize) for dtype in dtypes):
+            raise ValueError("MLA physical pages must split into dtype-aligned kernel slots.")
+        slot_bytes = spec.page_size_bytes // kernel_blocks_per_manager
+        row_bytes = sum(width * dtype.itemsize for width, dtype in zip(widths, dtypes, strict=True))
+        if spec.num_kv_heads * block_size * row_bytes > slot_bytes:
+            raise ValueError("MLA kernel slot is smaller than its cache components.")
+        return tuple((*prefix, width) for width in widths), dtypes
 
     @staticmethod
     def format_runtime_views(
@@ -238,6 +246,7 @@ class AscendMLAAttention(MLAAttention):
             kv_lora_rank=self.kv_lora_rank,
             qk_rope_head_dim=self.qk_rope_head_dim,
             mla_cache_layout="token_interleaved" if getattr(self.impl, "use_flashmla", False) else "component_major",
+            fa_quant_layer=getattr(self.impl, "fa_quant_layer", False),
             model_version=spec.model_version or getattr(self, "model_version", None),
             indexes_kv_by_block_stride=bool(
                 getattr(spec, "indexes_kv_by_block_stride", False) or getattr(self, "indexes_kv_by_block_stride", False)
