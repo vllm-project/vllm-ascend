@@ -235,7 +235,6 @@ class ExpertOffloadAuditWorker:
 
 @pytest.fixture(autouse=True)
 def use_mrv2(monkeypatch):
-    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
     monkeypatch.setenv("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
 
 

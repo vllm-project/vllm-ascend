@@ -5,7 +5,6 @@ test_cases:
   - name: "DS-V4-Flash-W8A8-A3-Mooncake"
     model: "Eco-Tech/DeepSeek-V4-Flash-0731-w8a8"
     envs:
-      VLLM_USE_V2_MODEL_RUNNER: "1"
       VLLM_USE_MODELSCOPE: "true"
       OMP_PROC_BIND: "false"
       OMP_NUM_THREADS: "1"
