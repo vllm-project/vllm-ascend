@@ -20,6 +20,7 @@ from tests.e2e.conftest import DPVllmRunner, wait_until_npu_memory_free
 from tests.e2e.pull_request.kv_pool_watch import (
     POOL_SECRET,
     build_pool_accuracy_prompt,
+    ensure_hixl_topology,
     run_pool_ab,
     run_pool_hit_sequence,
 )
@@ -167,6 +168,7 @@ def _leg(use_pool: bool, case_name: str):
 )
 @wait_until_npu_memory_free(target_free_percentage=0.8)
 def test_deepseek_v4_1_flash_dp8_tp1_dspark_pool_watch() -> None:
+    ensure_hixl_topology()
     tokenizer = AutoTokenizer.from_pretrained(MODEL, trust_remote_code=True)
     prompt_ids = build_pool_accuracy_prompt(tokenizer, POOL_PROMPT_TOKENS, POOL_MAX_MODEL_LEN)
 
