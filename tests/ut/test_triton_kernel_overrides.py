@@ -21,6 +21,7 @@ must not trigger ``adapt_patch`` so the table is validated in isolation.
 """
 
 import importlib
+import inspect
 from typing import Any
 
 import pytest
@@ -170,3 +171,74 @@ def test_fla_ops_reexport_is_identity_sweepable():
     assert fla_ops.chunk_gated_delta_rule is shared
     if isinstance(shared, KernelOverride):
         assert shared.func is chunk_gated_delta_rule
+
+
+# Reviewed deviations from the signature contract below. Everything
+# else must mirror the original's signature: the dispatcher forwards
+# plain calls verbatim, so a caller's keyword must name a parameter the
+# impl has (or vanish into its **kwargs), and common parameters must
+# keep their relative order so a keyword-only [grid] relaunch binds
+# them to the right slots.
+_KNOWN_SIGNATURE_DEVIATIONS = {
+    # bailing passes lower_bound; the Ascend impl lacks it (known-broken
+    # entry, follow-up).
+    "vllm.third_party.flash_linear_attention.ops.kda.fused_kda_gate": ("missing lower_bound (known-broken, follow-up)"),
+    # upstream's mask_value has no Ascend parameter; no caller passes it.
+    "vllm.v1.sample.ops.topk_topp_triton.apply_top_k_top_p_triton": ("mask_value not implemented (latent, follow-up)"),
+}
+
+
+def _kernel_arg_names(kernel):
+    """The dispatcher's own extraction, mirrored for the contract test."""
+    names = getattr(kernel, "arg_names", None)
+    if names is None:
+        fn = getattr(kernel, "func", kernel)
+        names = tuple(inspect.signature(fn).parameters)
+    return tuple(names)
+
+
+@pytest.mark.parametrize("key", sorted(TRITON_KERNEL_OVERRIDES))
+def test_impl_signature_mirrors_the_original(key):
+    """Plain-call forwarding makes the impl's signature a contract.
+
+    The dispatcher forwards plain calls verbatim, so every argument name
+    an upstream caller passes must exist on the impl (explicitly or via
+    **kwargs); common parameters must keep their relative order so a
+    keyword-only ``[grid]`` relaunch binds them to the right slots; and
+    an impl-only parameter must be optional or upstream call sites
+    would fail on it. Triton-kernel impls only expose names (no default
+    metadata), so the optionality check covers plain callables.
+    """
+    if key in _KNOWN_SIGNATURE_DEVIATIONS:
+        pytest.skip(_KNOWN_SIGNATURE_DEVIATIONS[key])
+    host, attr, _ = _resolve(key)
+    original_names = _kernel_arg_names(getattr(host, attr))
+    impl = TRITON_KERNEL_OVERRIDES[key]
+    impl_params = None
+    if hasattr(impl, "arg_names"):
+        impl_names = _kernel_arg_names(impl)
+        accepts_kwargs = False
+    else:
+        impl_params = inspect.signature(impl).parameters
+        impl_names = tuple(impl_params)
+        accepts_kwargs = any(p.kind is inspect.Parameter.VAR_KEYWORD for p in impl_params.values())
+    if not accepts_kwargs:
+        missing = [n for n in original_names if n not in impl_names]
+        assert not missing, (
+            f"{key!r}: impl lacks the original parameters {missing}; "
+            "verbatim call sites pass them by name and would raise."
+        )
+    common_original = [n for n in original_names if n in impl_names]
+    common_impl = [n for n in impl_names if n in original_names]
+    assert common_original == common_impl, (
+        f"{key!r}: common parameters changed relative order "
+        f"(original: {common_original}, impl: {common_impl}); a "
+        "keyword-only [grid] relaunch would bind them to wrong slots."
+    )
+    if impl_params is not None:
+        extra_required = [
+            n for n, p in impl_params.items() if n not in original_names and p.default is inspect.Parameter.empty
+        ]
+        assert not extra_required, (
+            f"{key!r}: impl-only parameters {extra_required} lack defaults; upstream call sites would fail on them."
+        )
