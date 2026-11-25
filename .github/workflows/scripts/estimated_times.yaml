@@ -110,8 +110,9 @@ estimated_times:
   tests/e2e/pull_request/one_card/test_batch_job_aware_scheduler_e2e.py: 820
   tests/e2e/pull_request/one_card/test_all2allv_dispatch_host_sync.py: 60
   tests/e2e/pull_request/two_card/aclgraph/test_aclgraph_capture_replay.py: 20
-  # Mooncake pair: ~700s per scenario pair on the a2-1 pool (TP1, gate mode).
-  tests/e2e/pull_request/one_card/kv_pool/test_qwen38_mooncake_pool_ab_a2.py: 1500
+  # Mooncake pair: ~700s per scenario pair on the a2-1 pool (TP1, gate mode),
+  # plus the concurrent throughput waves.
+  tests/e2e/pull_request/one_card/kv_pool/test_qwen38_mooncake_pool_ab_a2.py: 1800
   tests/e2e/pull_request/two_card/lora/test_ilama_lora_tp2.py: 180
   tests/e2e/pull_request/two_card/lora/test_llama32_lora_tp2.py: 430
   tests/e2e/pull_request/two_card/lora/test_qwen3moe_lora.py: 470

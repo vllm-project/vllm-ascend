@@ -54,6 +54,10 @@ Environment knobs:
   default;
 - ``QWEN38_POOL_STALL_TIMEOUT_SECONDS`` / ``QWEN38_POOL_TOTAL_TIMEOUT_SECONDS``:
   watchdog ceilings (default ``900`` / ``5400``);
+- ``QWEN38_POOL_PERF_CONCURRENCY`` / ``QWEN38_POOL_PERF_WAVES`` /
+  ``QWEN38_POOL_PERF_HIT_FLOOR``: shape of the concurrent throughput waves
+  (default ``16`` requests per wave, ``2`` measured waves, ``0.90`` of the
+  theoretical full prefix hit required on every measured wave);
 - ``KV_POOL_DRIVER_VERSION_INFO``: path probed by the memcache driver check
   (default ``/usr/local/Ascend/driver/version.info``).
 """
@@ -88,11 +92,14 @@ from tests.e2e.common.single_node.kv_pool_runtime import (
 )
 from tests.e2e.conftest import VllmRunner
 from tests.e2e.pull_request.kv_pool_watch import (
+    POOL_SECRET,
     PREFIX_HITS_METRIC,
     assert_hit_tokens,
     assert_no_hit,
     assert_output_identical,
+    build_pool_accuracy_prompt,
     expected_hit_token_count,
+    extract_pool_answer,
     snapshot_metrics,
 )
 
@@ -106,6 +113,16 @@ MODEL = os.environ.get("QWEN38_POOL_MODEL", "Eco-Tech/Qwen3.8-27B-w8a8")
 # locally instead of importing them).
 PERF_SAMPLES = 20
 PERF_WARMUP = 2
+# Throughput is measured the way a serving workload meets the pool: a wave of
+# concurrent requests on the same hot prefix, so the per-request KV fetch
+# overlaps instead of being serialized. One warmup wave fills the scheduler, then
+# PERF_WAVES measured waves are timed and their pool hits are accounted for.
+PERF_CONCURRENCY = int(os.environ.get("QWEN38_POOL_PERF_CONCURRENCY", "16"))
+PERF_WAVES = int(os.environ.get("QWEN38_POOL_PERF_WAVES", "2"))
+# Every measured concurrent request must still find its prefix in the pool. The
+# floor is a ratio of the theoretical full hit (16128 of 16388 tokens), so 0.90
+# tolerates a partially cold wave without hiding a real read-path regression.
+PERF_HIT_FLOOR = float(os.environ.get("QWEN38_POOL_PERF_HIT_FLOOR", "0.90"))
 # These cases run on a single A2 card by default. The pool moves KV between
 # ranks, and the two-card A2 slice this file used to be routed to has no working
 # cross-NPU channel: pinning device RoCE fails with "Device roce endpoint is
@@ -727,6 +744,49 @@ def _generate(runner: VllmRunner, prompt_ids: list[int], max_tokens: int) -> lis
     return list(out.outputs[0].token_ids)
 
 
+def _generate_batch(
+    runner: VllmRunner, prompt_ids: list[int], count: int, max_tokens: int
+) -> tuple[list[list[int]], float]:
+    """Issue ``count`` identical requests at once; return their tokens + elapsed s."""
+    began = time.perf_counter()
+    outputs = runner.model.generate(
+        [{"prompt_token_ids": prompt_ids} for _ in range(count)],
+        SamplingParams(temperature=0, max_tokens=max_tokens, ignore_eos=True, detokenize=False),
+        use_tqdm=False,
+    )
+    elapsed = time.perf_counter() - began
+    assert len(outputs) == count
+    for out in outputs:
+        assert out.finished
+    return [list(out.outputs[0].token_ids) for out in outputs], elapsed
+
+
+def _semantic_answer(runner: VllmRunner, token_ids: list[int]) -> str:
+    """Decode a greedy answer and extract the number the prefix was asked about."""
+    text = runner.model.get_tokenizer().decode(token_ids, skip_special_tokens=True)
+    return extract_pool_answer(text)
+
+
+def _assert_semantic_answer(runner: VllmRunner, token_ids: list[int], tag: str) -> str:
+    """The fact embedded in the long prefix must survive the KV path semantically.
+
+    Token identity against the cold run only proves the two legs agree; this
+    proves the outputs still *answer* the question planted in the prefix, which
+    is what a silently truncated or mis-loaded KV block destroys.
+    """
+    answer = _semantic_answer(runner, token_ids)
+    assert answer.strip() == str(POOL_SECRET), (
+        f"[{tag}] semantic check failed: the prompt asks for the secret number "
+        f"planted in the prefix ({POOL_SECRET}) but the model answered {answer!r} "
+        f"(tokens={token_ids[:8]})"
+    )
+    print(
+        f"[kv_pool_a2] {tag} semantic: answer={answer!r} expected={POOL_SECRET} ok=yes",
+        flush=True,
+    )
+    return answer
+
+
 def _engine_pool_shapes(runner: VllmRunner) -> tuple[int, int]:
     """Return ``(block_size, lcm of KV-group block sizes)`` from the engine.
 
@@ -771,7 +831,16 @@ def _phase_accuracy(runner: VllmRunner, state: dict[str, Any], tag: str) -> None
     """Phase 1: cold greedy output of the shared prefix (also the pool's R1 write)."""
     _touch_progress()
     started = time.perf_counter()
-    state["prompt_a"] = _natural_tokens(runner, SENTENCE_A, POOL_PROMPT_TOKENS)
+    # Semantic prompt (same shape as the A3 pool cases): the cached 16K prefix
+    # repeats "The secret number is 8." and ends with a question, so the answer
+    # is a correctness check on the KV that travels, not just a token comparison.
+    state["prompt_a"] = build_pool_accuracy_prompt(
+        runner.model.get_tokenizer(),
+        POOL_PROMPT_TOKENS,
+        POOL_MAX_MODEL_LEN,
+        str(POOL_SECRET),
+    )
+    # R4 must miss: a disjoint prompt built from an unrelated sentence.
     state["prompt_b"] = _natural_tokens(runner, SENTENCE_B, POOL_PROMPT_TOKENS)
     state["cold"] = _generate(runner, state["prompt_a"], POOL_MAX_TOKENS)
     print(
@@ -780,6 +849,7 @@ def _phase_accuracy(runner: VllmRunner, state: dict[str, Any], tag: str) -> None
         f"cold_latency={(time.perf_counter() - started):.1f}s",
         flush=True,
     )
+    state["cold_answer"] = _assert_semantic_answer(runner, state["cold"], f"{tag} cold")
 
 
 def _print_round_hit(
@@ -941,6 +1011,8 @@ def _phase_control(runner: VllmRunner, state: dict[str, Any], tag: str) -> None:
     assert_output_identical(cold, hit, tag=f"{tag} control")
     state["cold"] = cold
     state["hit"] = hit
+    state["cold_answer"] = _assert_semantic_answer(runner, cold, f"{tag} control-cold")
+    state["hit_answer"] = _assert_semantic_answer(runner, hit, f"{tag} control-hit")
     print(
         f"[kv_pool_a2] {tag} control_round=1(priming) prefix_cache_hits_delta=0 "
         f"note=the first request populates the local prefix cache",
@@ -970,16 +1042,25 @@ def _phase_perf(
     tag: str,
     expected_hit_tokens: int | None = None,
 ) -> tuple[float, float, float]:
-    """Phase 3: end-to-end latency of the repeatedly-hit prefix (TTFT proxy).
+    """Phase 3: TTFT per request, then throughput under a concurrent wave.
 
-    Every request re-issues the same prompt, so the pool has to return the same
-    number of cached tokens each time. When ``expected_hit_tokens`` is given (the
-    pool leg), each request is followed by a metrics snapshot taken *outside* the
-    timing window, one line is printed per round, and the aggregate is checked:
-    because ``expected_hit_tokens`` is also the per-round maximum, a total equal
-    to ``PERF_SAMPLES * expected_hit_tokens`` proves that no measured round
-    under-hit. ``expected_hit_tokens=None`` (control leg, no pool) skips all of
-    this and only times the requests.
+    The latency half re-issues the prompt one request at a time, so the pool has
+    to return the same number of cached tokens each time. When
+    ``expected_hit_tokens`` is given (the pool leg), each request is followed by a
+    metrics snapshot taken *outside* the timing window, one line is printed per
+    round, and the aggregate is checked: because ``expected_hit_tokens`` is also
+    the per-round maximum, a total equal to ``PERF_SAMPLES * expected_hit_tokens``
+    proves that no measured round under-hit.
+
+    The throughput half then issues ``PERF_CONCURRENCY`` identical requests per
+    wave (one warmup wave, ``PERF_WAVES`` measured waves), which is how a serving
+    workload actually meets the pool: the per-request KV fetches overlap instead
+    of serializing. Each measured wave also accounts for its own pool hits and
+    must keep at least ``PERF_HIT_FLOOR`` of the theoretical full hit, so a
+    throughput number can never be earned by silently missing the prefix.
+
+    ``expected_hit_tokens=None`` (control leg, no pool) skips the hit accounting
+    and only measures latency and throughput.
     """
     _touch_progress()
     ttft: list[float] = []
@@ -1032,12 +1113,12 @@ def _phase_perf(
     p50 = _percentile(ttft, 0.50)
     p80 = _percentile(ttft, 0.80)
     p95 = _percentile(ttft, 0.95)
-    throughput = produced / measured_seconds
+    sequential_throughput = produced / measured_seconds
     head = _percentile(ttft[: max(3, len(ttft) // 4)], 0.50)
     tail = _percentile(ttft[-max(3, len(ttft) // 4) :], 0.50)
     print(
         f"[kv_pool_a2] {tag} perf: ttft_p50={p50:.1f}ms ttft_p80={p80:.1f}ms "
-        f"ttft_p95={p95:.1f}ms input_throughput={throughput:.0f}tok/s "
+        f"ttft_p95={p95:.1f}ms sequential_input_throughput={sequential_throughput:.0f}tok/s "
         f"drift={tail / head if head else 1.0:.2f} samples={PERF_SAMPLES} warmup={PERF_WARMUP}",
         flush=True,
     )
@@ -1069,8 +1150,72 @@ def _phase_perf(
             f"tokens over {PERF_SAMPLES} rounds: the repeatedly measured prefix stopped hitting "
             "at full block granularity even though the hit phase passed"
         )
+    # ---- concurrent throughput waves -------------------------------------
+    wave_seconds = 0.0
+    wave_requests = 0
+    wave_hits = 0.0
+    wave_queries = 0.0
+    for wave in range(PERF_WAVES + 1):
+        before_wave = snapshot_metrics(runner) if expected_hit_tokens is not None else None
+        outputs, elapsed = _generate_batch(runner, prompt_ids, PERF_CONCURRENCY, 1)
+        if wave == 0:
+            # Warmup wave: fills the scheduler so the timed waves are steady state.
+            print(
+                f"[kv_pool_a2] {tag} perf_concurrency_warmup: requests={PERF_CONCURRENCY} elapsed={elapsed:.2f}s",
+                flush=True,
+            )
+            continue
+        wave_seconds += elapsed
+        wave_requests += len(outputs)
+        wave_hit_round = wave_query_round = 0.0
+        if expected_hit_tokens is not None and before_wave is not None:
+            after_wave = snapshot_metrics(runner)
+            wave_hit_round = after_wave.hits - before_wave.hits
+            wave_query_round = after_wave.queries - before_wave.queries
+            wave_hits += wave_hit_round
+            wave_queries += wave_query_round
+        wave_tokens = len(outputs) * len(prompt_ids)
+        print(
+            f"[kv_pool_a2] {tag} perf_concurrency wave={wave}/{PERF_WAVES} "
+            f"requests={len(outputs)} tokens={wave_tokens} "
+            f"elapsed={elapsed:.2f}s tok_s={wave_tokens / elapsed:.0f} "
+            f"hits_delta={wave_hit_round:.0f} queries_delta={wave_query_round:.0f} "
+            f"query_hit_rate={(wave_hit_round / wave_query_round if wave_query_round else 0.0):.2%}",
+            flush=True,
+        )
+    throughput = wave_requests * len(prompt_ids) / wave_seconds
+    print(
+        f"[kv_pool_a2] {tag} perf_concurrent_throughput: requests={wave_requests} "
+        f"waves={PERF_WAVES} concurrency={PERF_CONCURRENCY} "
+        f"input_throughput={throughput:.0f}tok/s sequential={sequential_throughput:.0f}tok/s",
+        flush=True,
+    )
+    if expected_hit_tokens is not None and wave_requests:
+        floor_hits = PERF_HIT_FLOOR * wave_requests * expected_hit_tokens
+        wave_ratio = wave_hits / (wave_requests * expected_hit_tokens)
+        print(
+            f"[kv_pool_a2] {tag} perf_concurrency_hits: hits_delta={wave_hits:.0f} "
+            f"floor={floor_hits:.0f} ({PERF_HIT_FLOOR:.0%} of full hit) "
+            f"token_hit_rate={wave_ratio:.2%} "
+            f"above_floor={'yes' if wave_hits >= floor_hits else 'NO'} "
+            f"concurrent_queries={wave_queries:.0f}",
+            flush=True,
+        )
+        assert wave_hits >= floor_hits, (
+            f"[{tag}] concurrent perf wave only hit {wave_hits:.0f} of "
+            f"{wave_requests * expected_hit_tokens:.0f} possible hit tokens "
+            f"({wave_ratio:.2%}, floor {PERF_HIT_FLOOR:.0%}): the throughput "
+            f"measurement is not a cache-hit measurement under "
+            f"concurrency={PERF_CONCURRENCY}"
+        )
     if PERF_SAMPLE_OUT is not None:
-        PERF_SAMPLE_OUT[tag] = {"p50": p50, "p80": p80, "p95": p95, "throughput": throughput}
+        PERF_SAMPLE_OUT[tag] = {
+            "p50": p50,
+            "p80": p80,
+            "p95": p95,
+            "throughput": throughput,
+            "sequential_throughput": sequential_throughput,
+        }
     return p50, p95, throughput
 
 
