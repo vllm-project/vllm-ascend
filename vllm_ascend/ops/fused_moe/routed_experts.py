@@ -48,6 +48,7 @@ from vllm_ascend.ops.fused_moe.moe_comm_method import (
 )
 from vllm_ascend.ops.fused_moe.moe_utils import get_moe_num_logical_experts
 from vllm_ascend.ops.fused_moe.prepare_finalize import PrepareAndFinalizeWithAllGather
+from vllm_ascend.ops.fused_moe.router import AscendFusedMoERouter
 from vllm_ascend.quantization.nz import NzCastSpec
 from vllm_ascend.quantization.quant_type import QuantType
 from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ, maybe_trans_nz
@@ -727,12 +728,27 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
             sync_lora_context(self.quant_method, lora_context)
 
         num_source_tokens = hidden_states.shape[0]
+        prepare_quant_type = self.quant_type
+        if (
+            prepare_quant_type == QuantType.W4A8MXFP
+            and isinstance(moe_comm_method, AllGatherCommImpl)
+            and not self.moe_config.is_sequence_parallel
+            and self.moe_config.pcp_size > 1
+            and (
+                not isinstance(self.router, AscendFusedMoERouter)
+                or self.router.scoring_func != "sqrtsoftplus"
+                or self.apply_router_weight_on_input
+                or lora_context is not None
+            )
+        ):
+            # The PCP gather may quantize before routing only on the DeepSeek V4 routing path.
+            prepare_quant_type = QuantType.NONE
         prepare_output = moe_comm_method.prepare(
             hidden_states=hidden_states,
             router_logits=router_logits,
             # The SP model wrapper already shards and gathers the MoE sequence.
             replace_allreduce=self.moe_config.is_sequence_parallel,
-            quant_type=self.quant_type,
+            quant_type=prepare_quant_type,
         )
         hidden_states = prepare_output.hidden_states
         router_logits = prepare_output.router_logits

@@ -456,7 +456,7 @@ class PrepareAndFinalizeWithAllGather(PrepareAndFinalize):
         if self._use_ep_sequence_parallel():
             return self._prepare_with_ep_group(hidden_states, router_logits, quant_type)
 
-        return self._prepare_with_dp_group(hidden_states, router_logits, replace_allreduce)
+        return self._prepare_with_dp_group(hidden_states, router_logits, replace_allreduce, quant_type)
 
     def _prepare_with_ep_group(
         self, hidden_states: torch.Tensor, router_logits: torch.Tensor, quant_type=QuantType.NONE
@@ -509,6 +509,7 @@ class PrepareAndFinalizeWithAllGather(PrepareAndFinalize):
         Returns:
             MoEPrepareOutput with global tensors.
         """
+        pertoken_scale = None
         if self.moe_config.dp_size > 1:
             max_tokens_across_dp = _EXTRA_CTX.max_tokens_across_dp
 
@@ -531,21 +532,28 @@ class PrepareAndFinalizeWithAllGather(PrepareAndFinalize):
                 hidden_states = nn.functional.pad(hidden_states, (0, 0, 0, pad_size))
                 router_logits = nn.functional.pad(router_logits, (0, 0, 0, pad_size))
 
-            hidden_states = get_pcp_group().all_gather(
-                hidden_states,
-                dim=0,
-            )
-            router_logits = get_pcp_group().all_gather(
-                router_logits,
-                dim=0,
-            )
+            pcp_group = get_pcp_group()
+            if quant_type == QuantType.W4A8MXFP and hidden_states.dtype == torch.bfloat16 and hidden_states.numel():
+                values, scales = torch_npu.npu_dynamic_mx_quant(
+                    hidden_states, dst_type=torch.float8_e4m3fn, scale_alg=self.dynamic_mx_quant_scale_alg
+                )
+                # Send values and their E8M0 scales in one collective, preserving their byte encodings.
+                payload = torch.cat((values.view(torch.uint8), scales.view(torch.uint8).flatten(1)), dim=-1)
+                gathered = pcp_group.all_gather(payload, dim=0)
+                hidden_size = values.shape[-1]
+                hidden_states = gathered[:, :hidden_size].contiguous().view(values.dtype)
+                pertoken_scale = gathered[:, hidden_size:].contiguous().view(scales.dtype)
+                pertoken_scale = pertoken_scale.reshape(gathered.shape[0], *scales.shape[1:])
+            else:
+                hidden_states = pcp_group.all_gather(hidden_states, dim=0)
+            router_logits = pcp_group.all_gather(router_logits, dim=0)
 
         return MoEPrepareOutput(
             hidden_states=hidden_states,
             router_logits=router_logits,
             mc2_mask=None,
             padded_hidden_states_shape=None,
-            pertoken_scale=None,
+            pertoken_scale=pertoken_scale,
         )
 
     def all_gather_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
