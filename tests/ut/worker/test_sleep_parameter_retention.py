@@ -156,3 +156,13 @@ def test_preserved_draft_parameters_are_not_discardable(worker):
 
     assert draft.weight.untyped_storage().data_ptr() not in discardable
     assert draft.bias.untyped_storage().data_ptr() not in discardable
+
+
+def test_empty_draft_pattern_is_allowed_but_target_typo_is_rejected(worker):
+    worker.model_config.sleep_preserve_parameter_names = ["draft.*"]
+    discardable = worker._discardable_parameters(worker.model_runner.model)
+    assert worker.model_runner.model.weight.untyped_storage().data_ptr() in discardable
+
+    worker.model_config.sleep_preserve_parameter_names = ["missing.*"]
+    with pytest.raises(ValueError, match="No parameter matches sleep retention"):
+        worker._discardable_parameters(worker.model_runner.model)
