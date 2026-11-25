@@ -649,7 +649,6 @@ def test_sfa_oproj_tp_aligns_uneven_and_idle_owners(monkeypatch, graph_mode, gat
     thread = local()
     monkeypatch.setattr(sparse_mla, "get_forward_context", lambda: thread.context)
     monkeypatch.setattr(ascend_forward_context, "get_forward_context", lambda: thread.context)
-    monkeypatch.setattr(ascend_forward_context, "_USE_V2_EXTRA_KWARGS", True)
     monkeypatch.setattr(
         "vllm.distributed.parallel_state.get_tp_group", lambda: SimpleNamespace(world_size=1, rank_in_group=0)
     )
