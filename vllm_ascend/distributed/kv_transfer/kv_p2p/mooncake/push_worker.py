@@ -628,7 +628,6 @@ class MooncakePushConnectorWorker(MooncakeBaseConnectorWorker):
                 local_ids.append(local_block * local_scale + local_kernel_index % local_scale)
                 remote_ids.append(remote_block * remote_scale + remote_kernel_index % remote_scale)
         # An empty DCP stripe still advances this destination's processed range.
-        # Keep its event/future so completion follows the same WRITE ordering.
         return LayerTransferRequest(request_id, tuple(local_ids), tuple(remote_ids), start, end), event
 
     def _execute_layer_transfer(self, batch: LayerTransferBatch) -> str | None:
@@ -786,6 +785,11 @@ class MooncakePushConnectorWorker(MooncakeBaseConnectorWorker):
                         task = self._build_layer_transfer_request(request_id, state, destination, layer_name)
                         if task is not None:
                             request, event = task
+                            if not request.local_block_ids:
+                                # No device memory is read, so no event wait or WRITE
+                                # task is needed. DONE still waits for actual WRITEs.
+                                destination.sent_tokens[layer_name] = request.end_token
+                                continue
                             key = (state.consumer_engine_id, rank, layer_name, id(event))
                             entry = batches.setdefault(key, (remote, event, []))
                             entry[2].append(request)
@@ -940,12 +944,8 @@ class MooncakePushConnectorWorker(MooncakeBaseConnectorWorker):
         while self._pending_sends:
             self._process_sending_requests(wait=True)
         self._send_completions()
-        wait_futures(
-            dest.completion
-            for state in self._reqs_send_state.values()
-            for dest in state.destinations.values()
-            if dest.completion is not None
-        )
+        # DONE/ACK only uses host metadata. Leave it in the sender pool and
+        # retire its request state through get_transfer_results() when done.
         self._prefilling_request_ids = ()
 
     def maybe_raise_thread_error(self) -> None:

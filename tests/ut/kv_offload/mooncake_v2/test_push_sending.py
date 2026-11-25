@@ -146,6 +146,13 @@ def drive(worker, predicate):
     pytest.fail("Push worker did not make progress")
 
 
+def wait_for_completions(worker):
+    for state in worker._reqs_send_state.values():
+        for destination in state.destinations.values():
+            if destination.completion is not None:
+                destination.completion.result(timeout=3)
+
+
 @pytest.fixture
 def worker(monkeypatch, request):
     spec = Mock(spec=push_worker.FullAttentionSpec)
@@ -245,12 +252,14 @@ def test_proxy_destinations_and_two_chunks(worker, monkeypatch, dcp):
     drive(worker, lambda: worker.engine.batch_transfer_sync_write.call_count == 1)
     worker.wait_for_save()
     # This P rank can finish D workers whose TP head slices it does not own.
+    wait_for_completions(worker)
     assert worker._send_done.call_count == dcp - 1
     assert worker.engine.batch_transfer_sync_write.call_args.args[1:] == ([1032], [10320], [32])
     worker.start_load_kv(chunk(4))
     worker.save_kv_layer("model.layers.0.attn")
     worker.wait_for_save()
     drive(worker, lambda: worker._send_done.call_count == dcp)
+    wait_for_completions(worker)
     assert worker.engine.batch_transfer_sync_write.call_count == 2
     assert worker.engine.batch_transfer_sync_write.call_args.args[1:] == ([1064], [10352], [32])
     # Sending DONE does not retire a request until scheduler reports its end.
@@ -275,6 +284,87 @@ def test_shared_layer_hook_does_not_schedule_a_transfer(worker, monkeypatch):
     assert not worker._reqs_send_state["d-request"].available_layers
     record_event.assert_not_called()
     worker.engine.batch_transfer_sync_write.assert_not_called()
+
+
+def test_empty_dcp_chunk_advances_without_write_task(worker, monkeypatch):
+    worker.dcp_size = worker.tp_size = 2
+    worker.dcp_rank = worker.tp_rank = 1
+    worker.kv_cache_specs[0] = Mock(spec=push_worker.MLAAttentionSpec, dcp_sharded=True, sliding_window=None)
+    event = Mock()
+    monkeypatch.setattr(push_worker.torch.npu, "Event", lambda: event)
+    worker.start_load_kv(source_meta())
+    destination = worker._reqs_send_state["d-request"].destinations[(0, 0, 0)]
+    destination.metadata_future.result(timeout=3)
+    submit = Mock(wraps=worker._sender_executor.submit)
+    monkeypatch.setattr(worker._sender_executor, "submit", submit)
+
+    # Rank 1 owns no blocks in [0, 4), but must advance past that range.
+    worker.save_kv_layer("model.layers.0.attn")
+    worker.wait_for_save()
+    worker.wait_for_save()
+    assert destination.sent_tokens == {"model.layers.0.attn": 4}
+    assert not destination.pending_layers
+    submit.assert_not_called()
+    event.synchronize.assert_not_called()
+    worker._send_done.assert_not_called()
+
+    # The next stripe belongs to rank 1 and must still WRITE before DONE.
+    worker.start_load_kv(source_meta(4, 4))
+    worker.save_kv_layer("model.layers.0.attn")
+    worker.wait_for_save()
+    assert destination.sent_tokens == {"model.layers.0.attn": 8}
+    worker.engine.batch_transfer_sync_write.assert_called_once_with("127.0.0.1:2", [1032], [10352], [32])
+    event.synchronize.assert_called_once()
+    wait_for_completions(worker)
+    worker._send_done.assert_called_once()
+
+
+@pytest.mark.parametrize("worker", ["three_layers"], indirect=True)
+@pytest.mark.parametrize("write_result", [0, -1])
+def test_empty_stripes_preserve_pending_write_completion(worker, monkeypatch, write_result):
+    worker.dcp_size = worker.tp_size = 2
+    worker.kv_cache_specs = [
+        Mock(spec=push_worker.MLAAttentionSpec, dcp_sharded=False, sliding_window=None),
+        Mock(spec=push_worker.MLAAttentionSpec, dcp_sharded=True, sliding_window=None),
+    ]
+    first, second, last = worker.transfer_metadata.layer_names
+    worker.layer_name_to_spec_index = {first: 0, second: 1, last: 1}
+    # Rank 0 owns the replicated first layer but no sharded blocks in [4, 8).
+    monkeypatch.setattr(worker, "_get_remote_metadata", lambda _: multi_cache_remote(worker))
+    message = dict(destination_message(), block_ids=[[20, 21], [10, 11]], num_computed_tokens=4, num_external_tokens=4)
+    meta = MooncakeConnectorMetadata()
+    meta.add_new_push_send_req("p-request", ([1, 2], [3, 4]), 8, 4, 4, target_params(message), num_external_tokens=4)
+    worker.start_load_kv(meta)
+    destination = worker._reqs_send_state["d-request"].destinations[(0, 0, 0)]
+    destination.metadata_future.result(timeout=3)
+    entered, release = threading.Event(), threading.Event()
+
+    def write(*args):
+        entered.set()
+        assert release.wait(3)
+        return write_result
+
+    worker.engine.batch_transfer_sync_write.side_effect = write
+    submit = Mock(wraps=worker._sender_executor.submit)
+    monkeypatch.setattr(worker._sender_executor, "submit", submit)
+    try:
+        worker.save_kv_layer(first)
+        assert entered.wait(3)
+        worker.save_kv_layer(second)
+        worker.save_kv_layer(last)
+        assert destination.sent_tokens == {second: 8, last: 8}
+        assert destination.pending_layers == {first}
+        assert sum(call.args[0] == worker._execute_layer_transfer for call in submit.call_args_list) == 1
+        assert destination.completion is not None
+        assert not destination.completion.done()
+        worker._send_done.assert_not_called()
+    finally:
+        release.set()
+    worker.wait_for_save()
+    worker.engine.batch_transfer_sync_write.assert_called_once()
+    wait_for_completions(worker)
+    worker._send_done.assert_called_once()
+    assert bool(worker._send_done.call_args.args[1]) == (write_result < 0)
 
 
 def test_partial_block_waits_for_later_chunk(worker):
@@ -349,6 +439,7 @@ def test_callback_failure_after_success_does_not_pin_p(worker):
     worker.start_load_kv(source_meta(0, 8))
     worker.wait_for_save()
     drive(worker, lambda: worker._send_done.called)
+    wait_for_completions(worker)
     assert worker._send_done.call_args.args[1] is None
     terminal = MooncakeConnectorMetadata()
     terminal.requests_to_send = {"p-request": time.monotonic()}
@@ -374,6 +465,7 @@ def test_write_failure_notifies_d_and_keeps_p_running(worker, monkeypatch, failu
     worker.wait_for_save()
     drive(worker, lambda: worker._send_done.called)
     assert worker._send_done.call_args.args[1]
+    wait_for_completions(worker)
     assert not worker._pending_sends
     assert not worker._stop_event.is_set()
     terminal = MooncakeConnectorMetadata()
@@ -393,6 +485,7 @@ def test_write_failure_notifies_d_and_keeps_p_running(worker, monkeypatch, failu
     next_target = dict(destination_message(), request_id="next-d")
     worker.start_load_kv(source_meta(0, 8, target=next_target))
     worker.wait_for_save()
+    wait_for_completions(worker)
     assert worker._send_done.call_args.args[0]["request_id"] == "next-d"
     assert worker._send_done.call_args.args[1] is None
 
@@ -406,6 +499,7 @@ def test_abort_before_dispatch_notifies_every_d_rank(worker, monkeypatch):
     meta.push_aborted_requests = {"p-request": params}
     worker.start_load_kv(meta)
     worker.wait_for_save()
+    wait_for_completions(worker)
     assert worker._send_done.call_count == 2
     assert {
         (tuple(call.args[0]["consumer_rank"]), call.args[0]["completion_address"])
@@ -448,6 +542,7 @@ def test_abort_waits_for_submitted_write(worker):
         finally:
             release.set()
         future.result(timeout=3)
+    wait_for_completions(worker)
     worker._send_done.assert_called_once()
     assert worker._send_done.call_args.args[1] == "P request aborted"
     assert worker.get_transfer_results().finished_sending == {"p-request"}
@@ -508,10 +603,94 @@ def test_metadata_query_and_done_real_sockets(worker, monkeypatch, write_fails):
         drive(worker, lambda: not result_queue.empty())
         kind, request_id, payload = result_queue.get_nowait()
         assert (kind, request_id, payload["status"]) == ("done", "d-request", "error" if write_fails else "ok")
+        wait_for_completions(worker)
     finally:
         completion.shutdown()
         thread.join(4)
         assert not thread.is_alive()
+
+
+@pytest.mark.parametrize("early_done", [False, True])
+@pytest.mark.parametrize("write_fails", [False, True])
+def test_empty_rank_done_ack_waits_for_other_rank_write(worker, monkeypatch, early_done, write_fails):
+    """Real TCP DONE/ACK and D aggregation, with a gated host-memory WRITE."""
+    decoder = push_worker.MooncakePushConnectorWorker(None, "d", None)
+    decoder.engine_id = "d"
+    decoder.kv_transfer_config = SimpleNamespace(is_kv_producer=False)
+    decoder.register_kv_caches({})
+    writer = push_worker.MooncakePushConnectorWorker(None, "p", None)
+    writer.register_kv_caches({})
+    entered, release = threading.Event(), threading.Event()
+    source, target = ctypes.create_string_buffer(3200), ctypes.create_string_buffer(3200)
+    payload = bytes(range(32))
+    ctypes.memmove(ctypes.addressof(source) + 32, payload, len(payload))
+    remote = remote_metadata()
+    remote.metadata_by_pp_rank[0].metadata_by_pcp_rank[0].metadata_by_tp_rank[0].kv_caches_base_addr[0][0] = (
+        ctypes.addressof(target)
+    )
+    writer.transfer_metadata.kv_caches_base_addr[0][0] = ctypes.addressof(source)
+    for producer, rank in ((writer, 0), (worker, 1)):
+        producer.tp_size = producer.dcp_size = 2
+        producer.tp_rank = producer.dcp_rank = rank
+        producer.kv_cache_specs = [Mock(spec=push_worker.MLAAttentionSpec, dcp_sharded=True, sliding_window=None)]
+        monkeypatch.setattr(producer, "_get_remote_metadata", lambda _: remote)
+        monkeypatch.setattr(
+            producer, "_send_done", push_worker.MooncakePushConnectorWorker._send_done.__get__(producer)
+        )
+    empty_submit = Mock(wraps=worker._sender_executor.submit)
+    monkeypatch.setattr(worker._sender_executor, "submit", empty_submit)
+    message = dict(
+        destination_message(), completion_address=decoder._decode_listener_thread.address, num_external_tokens=4
+    )
+    receive = MooncakeConnectorMetadata()
+    receive.add_new_push_req("d-request", ([10, 11],), 4, {"num_computed_tokens": 0})
+
+    def write(session, src, dst, lengths):
+        entered.set()
+        assert release.wait(3)
+        if write_fails:
+            return -1
+        for source_addr, target_addr, length in zip(src, dst, lengths, strict=True):
+            ctypes.memmove(target_addr, source_addr, length)
+        return 0
+
+    writer.engine.batch_transfer_sync_write.side_effect = write
+    try:
+        if not early_done:
+            decoder.start_load_kv(receive)
+        worker.start_load_kv(source_meta(0, 4, prompt=4, target=message))
+        worker.wait_for_save()
+        destination = worker._reqs_send_state["d-request"].destinations[(0, 0, 0)]
+        assert destination.completion.result(timeout=3) is True  # Real done_ack received.
+        assert len(empty_submit.call_args_list) == 2  # Metadata discovery and DONE only.
+        assert all(call.args[0] != worker._execute_layer_transfer for call in empty_submit.call_args_list)
+        worker.engine.batch_transfer_sync_write.assert_not_called()
+        drive(worker, lambda: not decoder._result_queue.empty())
+        assert not decoder.get_transfer_results().finished_recving
+        if early_done:
+            decoder.start_load_kv(receive)
+            assert not decoder.get_transfer_results().finished_recving
+        assert decoder._reqs_recv_state["d-request"].finished_ranks == {(0, 0, 1)}
+
+        writer.start_load_kv(source_meta(0, 4, prompt=4, target=message))
+        writer.save_kv_layer("model.layers.0.attn")
+        drive(writer, entered.is_set)
+        assert not decoder.get_transfer_results().finished_recving
+        assert target.raw[320:352] == bytes(32)
+        release.set()
+        writer.wait_for_save()
+        destination = writer._reqs_send_state["d-request"].destinations[(0, 0, 0)]
+        assert destination.completion.result(timeout=3) is True
+        drive(writer, lambda: not decoder._result_queue.empty())
+        result = decoder.get_transfer_results()
+        assert result.finished_recving == {"d-request"}
+        assert result.failed_recving == ({"d-request"} if write_fails else set())
+        assert target.raw[320:352] == (bytes(32) if write_fails else payload)
+        assert not decoder.get_transfer_results().finished_recving
+    finally:
+        release.set()
+        writer.shutdown()
+        decoder.shutdown()
 
 
 def test_circular_waits_for_final_chunk(worker):
@@ -544,6 +723,7 @@ def test_discovery_failure_reports_failure_and_next_request_retries(worker, monk
     target = dict(destination_message(), request_id="next-d")
     worker.start_load_kv(source_meta(0, 8, target=target))
     worker.wait_for_save()
+    wait_for_completions(worker)
     assert query.call_count == 2
     assert worker.engine.batch_transfer_sync_write.call_count == 1
     assert worker._send_done.call_args.args[0]["request_id"] == "next-d"
@@ -674,6 +854,7 @@ def test_kvpp_push_writes_every_decode_replica_and_deduplicates_mtp(monkeypatch)
                 for name in (*target_layers, mtp):
                     p.save_kv_layer(name)
                 p.wait_for_save()
+                wait_for_completions(p)
                 assert p._send_done.call_count == len(d_caches)
                 assert all(call.args[1] is None for call in p._send_done.call_args_list)
             finally:
@@ -749,6 +930,7 @@ def test_layer_batch_groups_valid_requests_and_isolates_invalid_blocks(worker, i
         expected_dst,
         [32] * len(expected_src),
     )
+    wait_for_completions(worker)
     outcomes = {call.args[0]["request_id"]: call.args[1] for call in worker._send_done.call_args_list}
     assert outcomes == {
         "d-request": None,
@@ -815,6 +997,7 @@ def test_failed_layer_waits_for_other_submitted_writes_before_done(worker, monke
         finally:
             release.set()
         future.result(timeout=3)
+    wait_for_completions(worker)
     worker._send_done.assert_called_once()
     assert worker._send_done.call_args.args[1] == "first layer failed"
     assert not worker._pending_sends
@@ -887,6 +1070,7 @@ def test_draft_namespace_does_not_share_target_readiness(worker, monkeypatch, dr
     worker.wait_for_save()
     assert set(destination.sent_tokens) == {attention, indexer, draft}
     assert worker.engine.batch_transfer_sync_write.call_count == 3
+    wait_for_completions(worker)
     worker._send_done.assert_called_once()
     assert worker._send_done.call_args.args[1] is None
 
@@ -970,10 +1154,12 @@ def test_layers_ready_before_metadata_query_finishes_are_backfilled(worker, monk
             release.set()
         future.result(timeout=3)
     assert worker.engine.batch_transfer_sync_write.call_count == 1
+    wait_for_completions(worker)
     assert worker._send_done.called
 
 
-def test_no_release_until_every_d_rank_is_terminal(worker, monkeypatch):
+@pytest.mark.parametrize("ack_ok", [False, True])
+def test_wait_for_save_leaves_done_in_background_until_every_d_rank_is_terminal(worker, monkeypatch, ack_ok):
     monkeypatch.setattr(worker, "_get_remote_metadata", lambda message: remote_metadata(pcp_size=2))
     entered, release = threading.Event(), threading.Event()
 
@@ -981,7 +1167,7 @@ def test_no_release_until_every_d_rank_is_terminal(worker, monkeypatch):
         if params["consumer_rank"] == [0, 1, 0]:
             entered.set()
             assert release.wait(3)
-        return True
+        return ack_ok
 
     monkeypatch.setattr(worker, "_send_done", done)
     meta = source_meta(0, 8)
@@ -994,15 +1180,22 @@ def test_no_release_until_every_d_rank_is_terminal(worker, monkeypatch):
         future = executor.submit(worker.wait_for_save)
         try:
             assert entered.wait(3)
-            with pytest.raises(TimeoutError):
-                future.result(timeout=0.05)
+            future.result(timeout=1)
+            assert not worker._pending_sends
+            assert worker._prefilling_request_ids == ()
+            destination = worker._reqs_send_state["d-request"].destinations[(0, 1, 0)]
+            assert not destination.completion.done()
+            terminal = MooncakeConnectorMetadata()
+            terminal.requests_to_send = {"p-request": time.monotonic()}
+            worker.start_load_kv(terminal)
+            assert not worker.get_transfer_results().finished_sending
+            # A subsequent connector step must not wait for the old ACK either.
+            executor.submit(worker.wait_for_save).result(timeout=1)
         finally:
             release.set()
-        future.result(timeout=3)
-    terminal = MooncakeConnectorMetadata()
-    terminal.requests_to_send = {"p-request": time.monotonic()}
-    worker.start_load_kv(terminal)
-    drive(worker, lambda: "d-request" not in worker._reqs_send_state)
+    wait_for_completions(worker)
+    assert worker.get_transfer_results().finished_sending == {"p-request"}
+    assert "d-request" not in worker._reqs_send_state
 
 
 @pytest.mark.parametrize("worker", ["multi_cache"], indirect=True)
@@ -1069,6 +1262,7 @@ def test_cancel_only_step_finishes_without_waiting_for_metadata(worker, monkeypa
                 release.set()
         events.assert_not_called()
         assert not worker.engine.batch_transfer_sync_write.called
+        wait_for_completions(worker)
         worker._send_done.assert_called_once()
         assert worker._send_done.call_args.args[1] == "P request aborted"
         assert worker.get_transfer_results().finished_sending == {"p-request"}
@@ -1085,6 +1279,7 @@ def test_send_timeout_is_processed_in_a_no_forward_step(worker):
     assert not worker.engine.batch_transfer_sync_write.called
     worker._send_done.assert_not_called()
     worker.wait_for_save()
+    wait_for_completions(worker)
     worker._send_done.assert_called_once()
     assert worker._send_done.call_args.args[1] == "Push transfer timed out"
 
@@ -1109,6 +1304,7 @@ def test_metadata_wait_crossing_deadline_does_not_start_write(worker, monkeypatc
         worker.start_load_kv(source_meta(0, 8))
         worker.wait_for_save()
         worker.engine.batch_transfer_sync_write.assert_not_called()
+        wait_for_completions(worker)
         worker._send_done.assert_called_once()
         assert worker._send_done.call_args.args[1] == "Push transfer timed out"
     finally:
@@ -1202,4 +1398,5 @@ def test_busy_engine_does_not_block_another_engine(worker, monkeypatch):
     finally:
         release.set()
     worker.wait_for_save()
+    wait_for_completions(worker)
     assert worker._send_done.call_count == 2

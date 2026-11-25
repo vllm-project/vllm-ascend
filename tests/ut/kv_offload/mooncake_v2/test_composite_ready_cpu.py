@@ -169,7 +169,9 @@ def test_last_shared_hook_submits_writes_once():
     obj._sending_futures = {"d": [Future()]}
     obj._sender_executor = SimpleNamespace(submit=Mock(side_effect=[resident_write, shared_write]))
     obj._execute_layer_transfer = Mock()
-    obj._build_layer_transfer_request = Mock(return_value=(SimpleNamespace(request_id="r"), event))
+    obj._build_layer_transfer_request = Mock(
+        return_value=(SimpleNamespace(request_id="r", local_block_ids=(1,)), event)
+    )
     process = load(
         PUSH,
         "_process_sending_requests",

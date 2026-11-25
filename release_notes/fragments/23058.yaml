@@ -1,0 +1,7 @@
+pr: 23058
+entries:
+  - category: performance
+    text: >-
+      MooncakeConnectorV2 layerwise push skips transfer tasks for empty DCP
+      stripes and removes the model-step wait for DONE acknowledgements after
+      KV writes complete. No configuration changes are required.

@@ -9,7 +9,13 @@ import msgspec
 import pytest
 
 from tests.ut.kv_offload.mooncake_v2 import test_push_sending
-from tests.ut.kv_offload.mooncake_v2.test_push_sending import drive, multi_cache_remote, remote_metadata, target_params
+from tests.ut.kv_offload.mooncake_v2.test_push_sending import (
+    drive,
+    multi_cache_remote,
+    remote_metadata,
+    target_params,
+    wait_for_completions,
+)
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake import push_worker
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.metadata import MooncakeConnectorMetadata
 
@@ -115,7 +121,8 @@ def test_chunked_write_matches_token_oracle(
         if end < 29:
             worker._send_done.assert_not_called()
         previous = end
-    assert worker._send_done.call_count == tp
+    wait_for_completions(worker)
+    assert len(worker._send_done.call_args_list) == tp
     assert all(call.args[1] is None for call in worker._send_done.call_args_list)
     assert len(copies) == len(set(copies)), "A later chunk must not resend a completed block"
 
@@ -125,7 +132,8 @@ def test_empty_final_stripe_completes_without_write(worker, monkeypatch):
     worker.start_load_kv(metadata(0, 3, prompt=3, tp=4))
     worker.wait_for_save()
     assert worker.engine.batch_transfer_sync_write.call_count == 1
-    assert worker._send_done.call_count == 4
+    wait_for_completions(worker)
+    assert len(worker._send_done.call_args_list) == 4
     assert all(call.args[1] is None for call in worker._send_done.call_args_list)
 
 
@@ -148,7 +156,8 @@ def test_invalid_interleave_fails_request(worker, monkeypatch, interleave):
     worker.start_load_kv(metadata(0, 8, prompt=8))
     worker.wait_for_save()
     worker.engine.batch_transfer_sync_write.assert_not_called()
-    assert worker._send_done.call_count == 2
+    wait_for_completions(worker)
+    assert len(worker._send_done.call_args_list) == 2
     assert all("interleave" in call.args[1] for call in worker._send_done.call_args_list)
 
 
@@ -157,6 +166,8 @@ def test_short_destination_table_fails_without_writing(worker, monkeypatch):
     worker.start_load_kv(metadata(0, 29, remote_blocks=()))
     worker.wait_for_save()
     worker.engine.batch_transfer_sync_write.assert_not_called()
+    wait_for_completions(worker)
+    assert len(worker._send_done.call_args_list) == 2
     assert all("block tables" in call.args[1] for call in worker._send_done.call_args_list)
 
 
@@ -169,7 +180,8 @@ def test_mamba_dcp_rejects_noninteger_tp_ratio_before_write(worker, monkeypatch,
     worker.start_load_kv(metadata(0, 8, prompt=8, tp=d_tp))
     worker.wait_for_save()
     worker.engine.batch_transfer_sync_write.assert_not_called()
-    assert worker._send_done.call_count == d_tp
+    wait_for_completions(worker)
+    assert len(worker._send_done.call_args_list) == d_tp
     assert all("integer ratio" in call.args[1] for call in worker._send_done.call_args_list)
 
 
@@ -292,7 +304,8 @@ def test_dcp_draft_waits_for_its_own_hook(worker, monkeypatch, p_dcp):
     worker._send_done.assert_not_called()
     worker.save_kv_layer(draft)
     worker.wait_for_save()
-    assert worker._send_done.call_count == 2
+    wait_for_completions(worker)
+    assert len(worker._send_done.call_args_list) == 2
     assert all(call.args[1] is None for call in worker._send_done.call_args_list)
 
 
