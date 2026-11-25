@@ -1,0 +1,10 @@
+pr: 23208
+entries:
+  - category: bugfix
+    text: >-
+      Fixed a startup failure of the NoPE sparse attention path on Ascend 950
+      installations that ship CANN 9.3, which affected models such as
+      GLM-5.3-Flash: the first attention step failed with `Sparse MLA plan must
+      contain 1024 int32 values, got 2048`. The plan buffer now follows the
+      plan size of the installed CANN operator, so CANN 9.2 and CANN 9.3 both
+      work without a configuration change.
