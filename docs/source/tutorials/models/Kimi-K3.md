@@ -33,7 +33,7 @@ Refer to [feature guide](../../user_guide/feature_guide/index.md) to get the fea
 | Weight Version | Hardware Requirements | Download Links | Notes |
 | --- | --- | --- | --- |
 | `Kimi-K3-w4a8` (W4A8) | Atlas 800I A3 only (64 GB × 16 per node).<br>• Mixed deployment: 4 nodes.<br>• PD deployment: 8 nodes. | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/Kimi-K3-w4a8) | Target model quantized with ModelSlim W4A8. See [Section 5](#5-online-service-deployment) for deployment topologies and configurations. |
-| `Kimi-K3-w4a8-mxfp-quarot` (MXFP4) | 950DT products (A5 only, 8 devices per node).<br>• Mixed deployment: 4 nodes.<br>• PD deployment: 8 nodes. | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/Kimi-K3-w4a8-mxfp-quarot) | Target model with W4A8 MXFP4 quantization and QuaRot. Access to the ModelScope repository is required. |
+| `Kimi-K3-w4a8-mxfp-QuaRot` (MXFP4) | 950DT products (A5 only, 8 devices per node).<br>• Mixed deployment: 4 nodes.<br>• PD deployment: 8 nodes. | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/Kimi-K3-w4a8-mxfp-QuaRot) | Target model with W4A8 MXFP4 quantization and QuaRot. |
 | `Kimi-K3-DSpark-MLA-NPU` | Atlas 800I A3 | [ModelScope](https://modelscope.cn/models/Eco-Tech/Kimi-K3-DSpark-MLA-NPU) | Draft model for DSpark speculative decoding; further trained by Ant Group. Download in addition to the target model. |
 | `Kimi-K3-DSpark-Block5` | 950DT products | [ModelScope](https://modelscope.cn/models/Inferact/Kimi-K3-DSpark-Block5) | Draft model for DSpark speculative decoding. Download in addition to the target model. |
 
