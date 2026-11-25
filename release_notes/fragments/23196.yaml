@@ -1,0 +1,4 @@
+pr: 23196
+entries:
+  - category: performance
+    text: Pre-warm `_pad_v2_replayed_slots_kernel` via `AscendTritonJitKernel` during `kernel_warmup()` so the first SWA bounded prefix-cache replay does not incur cold Triton JIT compilation latency.
