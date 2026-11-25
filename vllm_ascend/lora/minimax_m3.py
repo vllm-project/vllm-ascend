@@ -2,7 +2,6 @@
 # Copyright (c) 2026 Huawei Technologies Co., Ltd. All Rights Reserved.
 """M3 adapter packing on the paired upstream LoRA manager."""
 
-import torch
 import torch.distributed as dist
 from vllm.distributed import get_dp_group
 from vllm.lora.layers.fused_moe import FusedMoE3DWithLoRA, FusedMoEWithLoRA
@@ -49,12 +48,7 @@ class MiniMaxM3LoRAModelManager(LRUCacheLoRAModelManager):
                     if projection == "w2":
                         inputs, outputs = outputs, inputs
                     lora_model.loras[child] = LoRALayerWeights(
-                        child,
-                        rank,
-                        rank,
-                        torch.zeros(rank, inputs, dtype=template.dtype, device=template.device),
-                        torch.zeros(outputs, rank, dtype=template.dtype, device=template.device),
-                        scaling=1.0,
+                        child, rank, rank, template.new_zeros((rank, inputs)), template.new_zeros((outputs, rank))
                     )
         super()._create_merged_loras_inplace(lora_model)
 
@@ -62,14 +56,9 @@ class MiniMaxM3LoRAModelManager(LRUCacheLoRAModelManager):
 class MiniMaxM3WorkerLoRAManager(LRUCacheWorkerLoRAManager):
     _manager_cls = MiniMaxM3LoRAModelManager
 
-    def __init__(self, vllm_config, device, embedding_modules, **kwargs):
-        super().__init__(vllm_config, device, embedding_modules, **kwargs)
-        parallel = vllm_config.parallel_config
-        self.requires_dp_sync = parallel.data_parallel_size > 1
-
     def create_lora_manager(self, model, vllm_config):
         result = super().create_lora_manager(model, vllm_config)
-        self.requires_dp_sync = self.requires_dp_sync and any(
+        self.requires_dp_sync = vllm_config.parallel_config.data_parallel_size > 1 and any(
             isinstance(module, FusedMoEWithLoRA) for module in self._adapter_manager.modules.values()
         )
         return result

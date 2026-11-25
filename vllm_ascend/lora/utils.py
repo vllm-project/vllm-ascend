@@ -143,37 +143,6 @@ class AscendMergedQKVParallelLinearWithLoRA(_PackedLoRAAWeightsMixin, MergedQKVP
         )
 
 
-def _is_minimax_m3_qkv_layer(source_layer: nn.Module) -> bool:
-    if getattr(source_layer, "shard_ids", ()) != ("q", "k", "v", "index_q", "index_k"):
-        return False
-    # Keep unrelated model selection independent of M3 imports.
-    from vllm_ascend.models.minimax_m3.msa_m3 import AscendMiniMaxM3QKVParallelLinearWithIndexer
-
-    return type(source_layer) is AscendMiniMaxM3QKVParallelLinearWithIndexer
-
-
-class MiniMaxM3QKVParallelLinearWithLoRA(AscendMergedQKVParallelLinearWithLoRA):
-    """Apply Q/K/V adapters while preserving the fused M3 indexer tail."""
-
-    def __init__(self, base_layer):
-        super().__init__(base_layer)
-        # The last two physical slices belong to the indexer, not Q/K/V LoRA.
-        self.n_slices = len(self.output_slices)
-        self.output_sizes = self.output_sizes[: self.n_slices]
-
-    @classmethod
-    @_not_fully_sharded_can_replace
-    def can_replace_layer(cls, source_layer, lora_config, packed_modules_list, model_config=None):
-        return len(packed_modules_list) == 3 and _is_minimax_m3_qkv_layer(source_layer)
-
-    def _apply_lora_to_output(self, x: torch.Tensor, output: torch.Tensor) -> torch.Tensor:
-        width = sum(self.output_slices)
-        # Punica treats rows as contiguous; a view of the five-slice output is not.
-        prefix = output[..., :width].contiguous()
-        output[..., :width] = super()._apply_lora_to_output(x, prefix)
-        return output
-
-
 class MiniMaxM3QKVIndexerWithLoRA(AscendMergedQKVParallelLinearWithLoRA):
     """Five M3 slices with index_q sharded like KV and index_k replicated."""
 
@@ -186,7 +155,18 @@ class MiniMaxM3QKVIndexerWithLoRA(AscendMergedQKVParallelLinearWithLoRA):
     @classmethod
     @_not_fully_sharded_can_replace
     def can_replace_layer(cls, source_layer, lora_config, packed_modules_list, model_config=None):
-        return tuple(packed_modules_list) == _MINIMAX_M3_QKV_PROJECTIONS and _is_minimax_m3_qkv_layer(source_layer)
+        if tuple(packed_modules_list) != _MINIMAX_M3_QKV_PROJECTIONS or getattr(source_layer, "shard_ids", ()) != (
+            "q",
+            "k",
+            "v",
+            "index_q",
+            "index_k",
+        ):
+            return False
+        # Keep unrelated model selection independent of M3 imports.
+        from vllm_ascend.models.minimax_m3.msa_m3 import AscendMiniMaxM3QKVParallelLinearWithIndexer
+
+        return type(source_layer) is AscendMiniMaxM3QKVParallelLinearWithIndexer
 
 
 class MiniMaxM3DenseQKVWithLoRA(AscendMergedQKVParallelLinearWithLoRA):
@@ -276,7 +256,6 @@ def refresh_all_lora_classes():
         AscendMergedQKVParallelLinearWithLoRA,
         AscendFusedMoEWithLoRA,
         AscendFusedMoE3DWithLoRA,
-        MiniMaxM3QKVParallelLinearWithLoRA,
         MiniMaxM3QKVIndexerWithLoRA,
         MiniMaxM3DenseQKVWithLoRA,
     )

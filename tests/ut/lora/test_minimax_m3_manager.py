@@ -105,13 +105,38 @@ def test_dp_inplace_reload_flag_is_kept_from_any_rank(monkeypatch):
     assert worker.add_adapter.call_args.args[0].load_inplace
 
 
-def test_dp_expert_pin_is_rejected_before_mutating_local_cache():
-    worker = MiniMaxM3WorkerLoRAManager.__new__(MiniMaxM3WorkerLoRAManager)
-    worker.requires_dp_sync = True
-    worker._adapter_manager = SimpleNamespace(pin_adapter=Mock())
-    with pytest.raises(ValueError, match="pinning across DP"):
-        worker.pin_adapter(1)
-    worker._adapter_manager.pin_adapter.assert_not_called()
+@pytest.mark.parametrize(
+    "dp,expert_lora,blocked", [(1, False, False), (1, True, False), (2, False, False), (2, True, True)]
+)
+def test_pin_policy_uses_wrapped_experts_after_manager_creation(monkeypatch, dp, expert_lora, blocked):
+    config = SimpleNamespace(
+        parallel_config=SimpleNamespace(data_parallel_size=dp),
+        scheduler_config=SimpleNamespace(max_num_seqs=1, max_num_batched_tokens=8),
+        model_config=SimpleNamespace(
+            get_vocab_size=lambda: 8,
+            hf_config=SimpleNamespace(get_text_config=lambda: SimpleNamespace()),
+            is_encoder_decoder=False,
+        ),
+        lora_config=object(),
+    )
+    worker = MiniMaxM3WorkerLoRAManager(config, torch.device("cpu"), {})
+    modules = make_manager().modules if expert_lora else {"qkv": torch.nn.Linear(4, 4)}
+    manager = SimpleNamespace(modules=modules, pin_adapter=Mock(return_value=True))
+
+    def create(instance, model, vllm_config):
+        instance._adapter_manager = manager
+        return model
+
+    monkeypatch.setattr("vllm.lora.worker_manager.LRUCacheWorkerLoRAManager.create_lora_manager", create)
+    model = torch.nn.Module()
+    assert worker.create_lora_manager(model, config) is model
+    if blocked:
+        with pytest.raises(ValueError, match="pinning across DP"):
+            worker.pin_adapter(1)
+        manager.pin_adapter.assert_not_called()
+    else:
+        assert worker.pin_adapter(1)
+        manager.pin_adapter.assert_called_once_with(1)
 
 
 @pytest.mark.parametrize(
