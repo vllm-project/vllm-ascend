@@ -1,0 +1,18 @@
+pr: 23177
+entries:
+  - category: bugfix
+    text: >-
+      Fixed Kimi K3.1 GQA DSpark startup failures when a sliding-window draft
+      shares the target's DCP sharding. Corrected draft KV-cache layout handling
+      when using BLHNC.
+    model: kimi-k3.1
+  - category: performance
+    text: >-
+      Eligible Kimi K3.1 GQA DSpark decoding with Model Runner V2 on 950DT
+      products now automatically uses CANN FlashAttn with device-resident
+      sequence lengths, avoiding draft attention length readback. The
+      speculative CPU-count copy and wait are also skipped when the target
+      device-metadata path is active, the draft uses DCP=1, PP=1 and PCP=1,
+      and sparse offload and adaptive verification are disabled.
+    model: kimi-k3.1
+    hardware: [A5]

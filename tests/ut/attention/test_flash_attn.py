@@ -3,7 +3,8 @@
 
 import sys
 from types import SimpleNamespace
-from unittest.mock import Mock
+from unittest import TestCase
+from unittest.mock import Mock, patch
 
 import pytest
 import torch
@@ -13,8 +14,10 @@ from vllm.v1.attention.backend import AttentionType
 from vllm.v1.attention.selector import AttentionSelectorConfig
 from vllm.v1.kv_cache_interface import FullAttentionSpec
 
+from vllm_ascend import platform
 from vllm_ascend.attention.attention_v1 import AscendAttentionBackend
 from vllm_ascend.attention.fa_v1 import AscendFlashAttentionBackend, AscendFlashAttentionImpl
+from vllm_ascend.device.hardware_profile import AttentionBackendFamily
 from vllm_ascend.models.minimax_m3 import msa_m3
 from vllm_ascend.worker.v2 import attn_utils
 
@@ -156,8 +159,7 @@ def test_flash_attn_preserves_m3_fp8_target_kernel_pages(monkeypatch):
     assert AscendFlashAttentionBackend.get_supported_kernel_block_sizes() == [128]
 
 
-@pytest.fixture
-def dflash2_config():
+def _make_dflash2_config():
     return SimpleNamespace(
         cache_config=SimpleNamespace(cache_dtype="auto"),
         quant_config=None,
@@ -173,6 +175,11 @@ def dflash2_config():
             enforce_eager=False,
         ),
     )
+
+
+@pytest.fixture
+def dflash2_config():
+    return _make_dflash2_config()
 
 
 def make_impl(query, *, num_kv_heads=1, window=None, layout="PA_BBND", sinks=None):
@@ -233,6 +240,57 @@ def test_dspark_selects_flash_attn_for_eager_and_graph_drafts(
     spec.draft_model_config.architectures = ["Qwen3DSparkModel"]
     spec.target_model_config.hf_config.architectures = ["OtherModel"]
     assert not select(config, selector, "dspark_head")
+
+
+class TestKimiDSparkFlashAttentionSelection(TestCase):
+    def setUp(self):
+        self.config = _make_dflash2_config()
+        self.config.parallel_config.decode_context_parallel_size = 8
+        spec = self.config.speculative_config
+        spec.method = "dspark"
+        spec.target_model_config = SimpleNamespace(
+            hf_config=SimpleNamespace(architectures=["KimiK31ForConditionalGeneration"])
+        )
+        spec.draft_model_config.architectures = ["Qwen3DSparkModel"]
+        # The target is sharded across DCP8; the GQA draft has replicated KV.
+        self.selector = AttentionSelectorConfig(
+            head_size=64, block_size=128, dtype=torch.bfloat16, kv_cache_dtype="auto", use_dcp=False
+        )
+        self.profile = SimpleNamespace(
+            supports=lambda _: True,
+            attention_backend_family=AttentionBackendFamily.STANDARD,
+            flash_attn_npu_3_models=frozenset(),
+        )
+
+    def _select(self, selector, tag="dspark_head"):
+        with (
+            patch.object(platform, "get_current_hardware_profile", return_value=self.profile),
+            patch.object(platform, "_validate_fa3_backend", return_value=False),
+            patch("vllm.config.get_current_vllm_config_or_none", return_value=self.config),
+            patch("vllm.compilation.backends.model_tag", tag),
+        ):
+            return platform.NPUPlatform.get_attn_backend_cls(None, selector)
+
+    def test_replicated_gqa_draft_uses_flash_attn_with_target_dcp(self):
+        for eager in (False, True):
+            with self.subTest(enforce_eager=eager):
+                self.config.speculative_config.enforce_eager = eager
+                self.assertEqual(self._select(self.selector), "vllm_ascend.attention.fa_v1.AscendFlashAttentionBackend")
+
+    def test_other_loader_tags_keep_their_backend(self):
+        for tag in ("backbone", "dflash_head"):
+            with self.subTest(tag=tag):
+                self.assertNotEqual(
+                    self._select(self.selector, tag), "vllm_ascend.attention.fa_v1.AscendFlashAttentionBackend"
+                )
+
+    def test_unsupported_draft_features_keep_their_backend(self):
+        for field, value in (("use_dcp", True), ("use_pcp", True), ("kv_cache_dtype", "fp8")):
+            with self.subTest(field=field):
+                self.assertNotEqual(
+                    self._select(self.selector._replace(**{field: value})),
+                    "vllm_ascend.attention.fa_v1.AscendFlashAttentionBackend",
+                )
 
 
 @pytest.mark.parametrize("model_type", ["glm_moe_dsa", "glm5_next_text"])

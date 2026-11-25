@@ -107,7 +107,7 @@ class AscendAttentionBackend(AttentionBackend):
         head_size: int,
         cache_dtype_str: str = "",
     ) -> tuple[int, ...]:
-        if envs_vllm.VLLM_KV_CACHE_LAYOUT in ("LBHNC", "HND"):
+        if envs_vllm.VLLM_KV_CACHE_LAYOUT in ("LBHNC", "BLHNC", "HND"):
             return (2, num_blocks, num_kv_heads, block_size, head_size)
         return (2, num_blocks, block_size, num_kv_heads, head_size)
 
@@ -576,7 +576,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
         self.attn_type = attn_type
         self.kv_sharing_target_layer_name = kv_sharing_target_layer_name
         self.kv_cache_layout = envs_vllm.VLLM_KV_CACHE_LAYOUT
-        self.use_bnsd_kv_cache = self.kv_cache_layout in ("LBHNC", "HND")
+        self.use_bnsd_kv_cache = self.kv_cache_layout in ("LBHNC", "BLHNC", "HND")
 
         assert self.num_heads % self.num_kv_heads == 0
         self.num_queries_per_kv = self.num_heads // self.num_kv_heads

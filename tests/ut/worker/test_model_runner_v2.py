@@ -4,6 +4,7 @@ from datetime import timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
+from unittest import TestCase
 from unittest.mock import MagicMock, Mock, patch
 
 import numpy as np
@@ -2620,6 +2621,94 @@ def _kimi_k31_device_length_runner():
     return runner, output, batch
 
 
+def _kimi_k31_gqa_device_length_runner():
+    runner, output, batch = _m3_device_length_runner()
+    runner.model_config.architecture = "KimiK31ForConditionalGeneration"
+    runner.parallel_config.decode_context_parallel_size = 8
+    # set_attn has initialized every draft layer to FlashAttn, with DCP1 KV.
+    runner.speculator.use_dcp = False
+    runner.model_state.device_metadata = object()
+    return runner, output, batch
+
+
+class TestKimiGQADSparkDeviceLengths(TestCase):
+    def test_target_dcp_with_replicated_flash_attn_draft_skips_cpu_sync(self):
+        for eager in (False, True):
+            for kv_role in (None, "kv_producer", "kv_consumer"):
+                with self.subTest(enforce_eager=eager, kv_role=kv_role):
+                    runner, _, _ = _kimi_k31_gqa_device_length_runner()
+                    runner.speculative_config.enforce_eager = eager
+                    runner.vllm_config.kv_transfer_config = (
+                        None if kv_role is None else SimpleNamespace(kv_role=kv_role)
+                    )
+                    self.assertTrue(runner._can_skip_spec_cpu_length_sync())
+
+    def test_unsupported_consumers_keep_exact_cpu_lengths(self):
+        for unsupported in (
+            "draft_arch",
+            "no_backends",
+            "empty_backends",
+            "draft_fia",
+            "mixed_backends",
+            "draft_dcp",
+            "unknown_draft_dcp",
+            "no_device_metadata",
+            "missing_device_metadata",
+            "pipeline_parallel_size",
+            "prefill_context_parallel_size",
+            "sparse_offload",
+            "adaptive",
+            "pp_exact_counts",
+        ):
+            with self.subTest(unsupported=unsupported):
+                runner, _, _ = _kimi_k31_gqa_device_length_runner()
+                runner.vllm_config.kv_transfer_config = SimpleNamespace(kv_role="kv_consumer")
+                if unsupported == "draft_arch":
+                    runner.speculative_config.draft_model_config.architectures = ["K3DSparkModel"]
+                elif unsupported == "no_backends":
+                    del runner.speculator.attn_backends
+                elif unsupported == "empty_backends":
+                    runner.speculator.attn_backends = {}
+                elif unsupported == "draft_fia":
+                    runner.speculator.attn_backends = {"draft.0": AscendAttentionBackend}
+                elif unsupported == "mixed_backends":
+                    runner.speculator.attn_backends["draft.1"] = AscendAttentionBackend
+                elif unsupported == "draft_dcp":
+                    runner.speculator.use_dcp = True
+                elif unsupported == "unknown_draft_dcp":
+                    del runner.speculator.use_dcp
+                elif unsupported == "no_device_metadata":
+                    runner.model_state.device_metadata = None
+                elif unsupported == "missing_device_metadata":
+                    del runner.model_state.device_metadata
+                elif unsupported.endswith("parallel_size"):
+                    setattr(runner.parallel_config, unsupported, 2)
+                elif unsupported == "sparse_offload":
+                    runner.ascend_config.sparse_kv_offload_config.enabled = True
+                elif unsupported == "adaptive":
+                    runner.speculative_config.enable_adaptive_verification = True
+                elif unsupported == "pp_exact_counts":
+                    runner.sync_spec_pp_cpu_counts = True
+                self.assertFalse(runner._can_skip_spec_cpu_length_sync())
+
+    def test_missing_target_device_metadata_copies_and_waits(self):
+        runner, output, batch = _kimi_k31_gqa_device_length_runner()
+        runner.model_state.device_metadata = None
+        runner.req_states.num_computed_tokens.gpu[:] = torch.tensor([98, 195, 0, 0])
+        runner.num_computed_tokens_stream = Mock()
+        with (
+            patch.object(GPUModelRunner, "postprocess_sampled"),
+            patch("torch.cuda.current_stream"),
+            patch("torch.npu.stream", return_value=nullcontext()),
+        ):
+            runner.postprocess_sampled(None, None, 2, 1)
+        runner._update_seq_lens_cpu(output, batch.req_ids)
+        runner.num_computed_tokens_event.record.assert_called_once_with()
+        runner.num_computed_tokens_event.synchronize.assert_called_once_with()
+        self.assertEqual(runner.req_states.num_computed_tokens_cpu[0], 98)
+        self.assertEqual(runner.input_buffers.seq_lens_cpu[0], 100)
+
+
 @pytest.mark.parametrize("eager", [False, True])
 @pytest.mark.parametrize("kv_role", [None, "kv_producer", "kv_consumer"])
 def test_kimi_k31_dspark_flashmla_dcp_device_lengths(eager, kv_role):
@@ -2686,7 +2775,9 @@ def test_mla_dspark_fallback_copies_and_waits(target):
 
 
 @pytest.mark.parametrize("rejected", [0, 1, 5])
-@pytest.mark.parametrize("draft", ["dflash", "m3_dspark", "glm_dspark", "glm_mla_dspark", "kimi_k31_dspark"])
+@pytest.mark.parametrize(
+    "draft", ["dflash", "m3_dspark", "glm_dspark", "glm_mla_dspark", "kimi_k31_dspark", "kimi_k31_gqa_dspark"]
+)
 @pytest.mark.parametrize("kv_role", [None, "kv_producer", "kv_consumer"])
 def test_rejection_reorder_and_padding_keep_device_lengths_without_d2h(rejected, draft, kv_role):
     runner, output, _ = _device_length_runner() if draft == "dflash" else _m3_device_length_runner()
@@ -2696,6 +2787,8 @@ def test_rejection_reorder_and_padding_keep_device_lengths_without_d2h(rejected,
         runner, output, _ = _glm_mla_device_length_runner()
     elif draft == "kimi_k31_dspark":
         runner, output, _ = _kimi_k31_device_length_runner()
+    elif draft == "kimi_k31_gqa_dspark":
+        runner, output, _ = _kimi_k31_gqa_device_length_runner()
     runner.vllm_config.kv_transfer_config = None if kv_role is None else SimpleNamespace(kv_role=kv_role)
     runner.num_computed_tokens_cpu.fill_(-99)  # An old staging snapshot must never be read.
     runner.input_buffers.seq_lens_cpu.fill_(777)
