@@ -192,7 +192,13 @@ def worker_constructor(monkeypatch):
     monkeypatch.setattr(
         worker_module,
         "get_ascend_config",
-        Mock(return_value=SimpleNamespace(ascend_compilation_config=SimpleNamespace(enable_npugraph_ex=False))),
+        Mock(
+            return_value=SimpleNamespace(
+                ascend_compilation_config=SimpleNamespace(
+                    enable_npugraph_ex=False, enable_static_kernel=False, enable_super_kernel=False
+                )
+            )
+        ),
     )
     sleep_manager = SimpleNamespace()
 
