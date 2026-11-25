@@ -19,6 +19,7 @@
 
 import inspect
 import logging
+import time
 from collections.abc import Mapping
 from contextlib import AbstractContextManager, contextmanager, nullcontext
 from copy import deepcopy
@@ -110,6 +111,15 @@ from vllm_ascend.kv_trace.kv_trace_runner import install_trace
 from vllm_ascend.model_executor.offloader import create_offloader
 from vllm_ascend.models.deepseek_v41.cache_config import uses_a5_packed_cache
 from vllm_ascend.models.host_offload import track_host_offload_owners
+
+try:
+    from vllm_ascend.observability.ms_metrics.handlers.async_scheduling import (
+        d2h_sync_enabled,
+        record_d2h_sync_ms,
+    )
+except ImportError:  # ms_service_metric is an optional dependency
+    d2h_sync_enabled = None  # type: ignore[assignment]
+    record_d2h_sync_ms = None  # type: ignore[assignment]
 from vllm_ascend.observability.runtime_guard.hooks import (
     runtime_guard_sample_tokens,
     runtime_guard_step,
@@ -1591,7 +1601,15 @@ class NPUModelRunner(GPUModelRunner):
         # req_states.num_computed_tokens_cpu also backs the NumPy view used by PCP.
         if (self.speculator is not None or self.sync_spec_pp_cpu_counts) and not self._can_skip_spec_cpu_length_sync():
             # Blocks CPU submission until D2H completes; may stall the async pipeline.
+            # Sample the clock only at the detail level; the wait itself must
+            # happen regardless of whether the metric is enabled. Timing is
+            # skipped when the optional metric framework is absent.
+            d2h_timed = d2h_sync_enabled is not None and d2h_sync_enabled()
+            d2h_start = time.perf_counter() if d2h_timed else None
             self.num_computed_tokens_event.synchronize()
+            if d2h_start is not None:
+                assert record_d2h_sync_ms is not None
+                record_d2h_sync_ms((time.perf_counter() - d2h_start) * 1000.0)
             for req_id in scheduler_output.scheduled_cached_reqs.req_ids:
                 req_index = self.req_states.req_id_to_index[req_id]
                 self.req_states.num_computed_tokens_cpu[req_index] = self.num_computed_tokens_cpu[req_index]
