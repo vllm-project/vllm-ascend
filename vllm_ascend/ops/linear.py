@@ -116,9 +116,12 @@ class AscendUnquantizedLinearMethod(WeightSwitchMixin, UnquantizedLinearMethod):
         # a subsequent contiguous() would otherwise materialize ND again.
         # This also covers dummy loading, where weight_loader never runs.
         if _should_reshape_wo_a_to_3d(layer.prefix, layer.weight.data.dtype) and layer.weight.data.ndim == 2:
-            layer.weight.data = (
-                layer.weight.data.view(layer.n_local_groups, layer.o_lora_rank, -1).transpose(2, 1).contiguous()
-            )
+            weight = layer.weight.data.view(layer.n_local_groups, layer.o_lora_rank, -1).transpose(2, 1).contiguous()
+            if vllm_version_is("0.34.0"):
+                layer.weight.data = weight
+            else:
+                # Direct reload restores the 2D view on the storage captured by ACLGraph.
+                replace_parameter(layer, "weight", weight)
 
         keep_nd_weight = _should_keep_nd_for_compatibility_weight(layer.weight.data)
         skip_weight_nz_conversion = getattr(layer, "skip_weight_nz_conversion", False)
