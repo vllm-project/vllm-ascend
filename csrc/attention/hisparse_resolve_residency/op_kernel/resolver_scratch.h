@@ -6,7 +6,7 @@
 namespace vllm_ascend::hisparse {
 // SIMT kernels must reserve DCache space out of the UB capacity reported by
 // GetCoreMemSize before declaring local memory via SetLocalMemorySize (the
-// same pattern as k2q_csr / scatter_nd_update_sk on this target).
+// same pattern as scatter_nd_update_sk on this target).
 inline constexpr uint64_t kResolverDcacheReserveBytes = 32 * 1024;
 // Host-side static upper bound: A5 reports 256 KiB of UB per AIV, minus the
 // DCache reservation. Used only where the platform API is unavailable.
