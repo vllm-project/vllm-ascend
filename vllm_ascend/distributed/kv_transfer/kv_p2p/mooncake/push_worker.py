@@ -46,6 +46,10 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.layerwis
     get_layerwise_reuse_layout,
 )
 
+_DONE_ACK_MAX_ATTEMPTS = 5
+_DONE_ACK_ATTEMPT_TIMEOUT_MS = 3000
+
+
 # Rank tuples are (PP, PCP, TP), matching scheduler handshake keys.
 WorkerRank = tuple[int, int, int]
 
@@ -370,14 +374,10 @@ class MooncakePushConnectorWorker(MooncakeBaseConnectorWorker):
         return metadata
 
     def _send_done(self, params: dict[str, Any], error: str | None) -> bool:
-        """A failed callback never retries the request or retains P source blocks."""
+        """Retry the completion notification after the KV writes have finished."""
         path = params["completion_address"]
-        sock = None
+        request_id = params["request_id"]
         try:
-            sock = make_zmq_socket(self._zmq_context, path, SocketType.REQ, bind=False)
-            timeout = max(1, int(envs.VLLM_MOONCAKE_CONNECTOR_TIMEOUT * 1000))
-            sock.setsockopt(SocketOption.SNDTIMEO, timeout)
-            sock.setsockopt(SocketOption.RCVTIMEO, timeout)
             message = {
                 key: params[key]
                 for key in (
@@ -395,18 +395,38 @@ class MooncakePushConnectorWorker(MooncakeBaseConnectorWorker):
             )
             if error:
                 message["error"] = error
-            ensure_zmq_send(sock, msgspec.msgpack.encode(message), path)
-            reply = msgspec.msgpack.decode(ensure_zmq_recv(sock, path))
-            if reply != {"kind": "done_ack", "request_id": params["request_id"]}:
-                raise ValueError("Invalid DONE ACK")
-            return True
+            payload = msgspec.msgpack.encode(message)
+            expected_ack = {"kind": "done_ack", "request_id": request_id}
+            timeout_ms = min(
+                _DONE_ACK_ATTEMPT_TIMEOUT_MS,
+                max(1, int(envs.VLLM_MOONCAKE_CONNECTOR_TIMEOUT * 1000)),
+            )
+            for attempt in range(1, _DONE_ACK_MAX_ATTEMPTS + 1):
+                # A REQ socket waiting for a reply cannot send another request.
+                # D deduplicates repeated DONEs by request and producer rank.
+                sock = make_zmq_socket(self._zmq_context, path, SocketType.REQ, bind=False)
+                try:
+                    sock.setsockopt(SocketOption.SNDTIMEO, timeout_ms)
+                    sock.setsockopt(SocketOption.RCVTIMEO, timeout_ms)
+                    sock.send(payload)
+                    if msgspec.msgpack.decode(sock.recv()) != expected_ack:
+                        raise ValueError("Invalid DONE ACK")
+                    return True
+                except Again:
+                    if attempt == _DONE_ACK_MAX_ATTEMPTS:
+                        raise
+                    logger.warning(
+                        "Retrying Push completion for %s at %s after attempt %d/%d",
+                        request_id,
+                        path,
+                        attempt,
+                        _DONE_ACK_MAX_ATTEMPTS,
+                    )
+                finally:
+                    sock.close(linger=0)
         except Exception:
-            # D may have died. Its receive timeout handles a missing DONE.
-            logger.exception("Failed to notify Push completion for %s at %s", params["request_id"], path)
-            return False
-        finally:
-            if sock is not None:
-                sock.close(linger=0)
+            logger.exception("Failed to notify Push completion for %s at %s", request_id, path)
+        return False
 
     def _prepare_destinations(self, state: SendReqInfo, request: PushSendReqMeta) -> None:
         path = make_zmq_path("tcp", request.remote_host, request.remote_port)
