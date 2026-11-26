@@ -39,6 +39,7 @@ def _spec(lengths, *, mla_draft=True):
         positions=torch.zeros(64),
     )
     spec.input_batch = SimpleNamespace(num_reqs=2)
+    spec.draft_is_prefilling = torch.zeros(8, dtype=torch.bool)
     spec.num_query_per_req = 8
     spec.arange_np = np.arange(65, dtype=np.int32)
     spec._group_causal = True
@@ -99,6 +100,7 @@ class TestBuildDraftAttnMetadatasFactory:
                     kwargs = supplied[0]
                     assert kwargs["attn_state"] == AscendAttentionState.ChunkedPrefill
                     assert kwargs["is_prefilling"].tolist() == [False] * 4
+                    assert kwargs["is_prefilling"].data_ptr() == spec.draft_is_prefilling.data_ptr()
                     lengths.append(kwargs["seq_lens_cpu"])
                 assert lengths[0] is lengths[1]
                 assert lengths[0].dtype == torch.int32 and lengths[0].device.type == "cpu"

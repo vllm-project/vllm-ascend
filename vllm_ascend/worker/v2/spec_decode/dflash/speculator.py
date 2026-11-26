@@ -285,7 +285,7 @@ class AscendDFlashSpeculator(LmheadTPDraftSamplingMixin, DFlashSpeculator):
             metadata_context = build_attn_metadata_factory(
                 self.input_buffers.positions,
                 num_tokens,
-                is_prefilling=torch.zeros(num_reqs_padded, dtype=torch.bool, device="cpu"),
+                is_prefilling=self.draft_is_prefilling[:num_reqs_padded],
                 seq_lens_cpu=seq_lens_cpu,
                 attn_state=AscendAttentionState.ChunkedPrefill,
                 parallel_config=self.attn_vllm_config.parallel_config,
