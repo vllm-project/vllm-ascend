@@ -91,6 +91,31 @@ update the launcher paths and export that machine's transport descriptors.
 
 ## Further validation
 
+### Use the model's chat template for instruction tests
+
+HY4 Flash is a chat model. For instruction-following checks, use
+`/v1/chat/completions` with `messages` so the server applies the model directory's
+`chat_template.jinja`. Its bundled model README uses
+`chat_template_kwargs.reasoning_effort=no_think` for a non-reasoning reply.
+A plain `prompt` sent to `/v1/completions` is raw continuation and does not apply
+that conversation template.
+
+For example, run on the host of a PD proxy listening on port 19385:
+
+```bash
+curl --noproxy '*' --max-time 180 \
+  http://127.0.0.1:19385/v1/chat/completions \
+  -H 'Content-Type: application/json' \
+  -d '{"model":"hy4-flash","messages":[{"role":"user","content":"Introduce three major attractions in Hangzhou."}],"max_tokens":256,"temperature":0,"chat_template_kwargs":{"reasoning_effort":"no_think"}}'
+```
+
+On the same running service, a Chinese three-attraction question repeated under
+raw completion but returned a coherent three-item response with `finish_reason=stop`
+under the official chat template. A second chat question, asking for 17 + 25,
+returned 42 and stopped. No fusion, graph, DFly, weights or runtime source setting
+was changed for this comparison. These samples diagnose the request-format issue;
+they do not establish full numerical accuracy of the optimized model.
+
 `examples/hy4flash/serve_decode_external_dp.sh` follows the supplied eight
 positional arguments and adds only the Draft graph boolean. Use TP1/PCP1 for
 the intended DP4 local Draft layout. Check actual source imports, all four
