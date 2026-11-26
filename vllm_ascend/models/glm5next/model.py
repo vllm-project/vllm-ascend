@@ -9,7 +9,7 @@ import torch_npu
 from torch import nn
 from transformers import Glm5NextTextConfig
 from vllm.compilation.decorators import support_torch_compile
-from vllm.config import ParallelConfig, VllmConfig
+from vllm.config import ParallelConfig, VllmConfig, get_current_vllm_config
 from vllm.distributed import (
     get_ep_group,
     get_pp_group,
@@ -81,6 +81,10 @@ from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 
+from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
+from vllm_ascend.quantization.method_adapters import AscendLinearMethod
+from vllm_ascend.quantization.methods.base import PreparedLinearInput
+from vllm_ascend.quantization.methods.w8a8.w8a8_mxfp8 import AscendW8A8MXFP8DynamicLinearMethod
 from vllm_ascend.utils import pad_sequence_parallel_tokens
 
 from .attention import Glm5NextMLAAttention
@@ -159,12 +163,42 @@ class Glm5NextMLP(nn.Module):
             self.act_fn = SiluAndMulWithClamp(swiglu_limit=self.swiglu_limit)
         else:
             self.act_fn = SiluAndMul()
+        self._mx_norm_quant_scheme = self._find_mx_norm_quant_scheme()
 
     def forward(self, x):
-        gate_up, _ = self.gate_up_proj(x)
+        if isinstance(x, PreparedLinearInput):
+            # The input is already quantized by the FFN input norm.  The
+            # eligibility check excludes custom communication, bias and LoRA.
+            gate_up = self.gate_up_proj.quant_method.apply(self.gate_up_proj, x)
+        else:
+            gate_up, _ = self.gate_up_proj(x)
         x = self.act_fn(gate_up)
         x, _ = self.down_proj(x)
         return x
+
+    def _find_mx_norm_quant_scheme(self) -> AscendW8A8MXFP8DynamicLinearMethod | None:
+        projection = self.gate_up_proj
+        adapter = projection.quant_method
+        scheme = getattr(adapter, "quant_method", None)
+        if (
+            isinstance(adapter, AscendLinearMethod)
+            and isinstance(scheme, AscendW8A8MXFP8DynamicLinearMethod)
+            and scheme.group_size == 32
+            and get_current_hardware_profile().supports(HardwareCapability.DYNAMIC_MX_QUANT_FUSION)
+            and hasattr(torch.ops.npu, "npu_rms_norm_dynamic_mx_quant")
+            and get_current_vllm_config().lora_config is None
+            and getattr(projection, "custom_op", None) is None
+            and not projection.gather_output
+            and projection.bias is None
+        ):
+            return scheme
+        return None
+
+    def mx_norm_quant_scheme(self) -> AscendW8A8MXFP8DynamicLinearMethod | None:
+        # Padding can be populated during weight loading, after construction.
+        if any(vars(self.gate_up_proj).get("mxfp8_tp_padding", (0, 0))):
+            return None
+        return self._mx_norm_quant_scheme
 
 
 class Glm5NextMoE(nn.Module):
@@ -505,6 +539,7 @@ class Glm5NextDecoderLayer(nn.Module):
             x = sp_reduce_scatter(pad_sequence_parallel_tokens(x))
 
         # Apply post-attention mixing, pre-FFN mixing, then input RMSNorm.
+        mx_scheme = None if self._mlp_is_moe else self.mlp.mx_norm_quant_scheme()
         residual, post, comb, x = self.hc_post_pre(
             x,
             residual,
@@ -515,6 +550,7 @@ class Glm5NextDecoderLayer(nn.Module):
             self.hc_ffn_base,
             norm_weight=self.post_attention_layernorm.weight.data,
             norm_eps=self.post_attention_layernorm.variance_epsilon,
+            mx_norm_quant_scheme=mx_scheme,
         )
 
         # Fully Connected
@@ -541,6 +577,7 @@ class Glm5NextDecoderLayer(nn.Module):
         hc_base: torch.Tensor,
         norm_weight: torch.Tensor | None = None,
         norm_eps: float = 0.0,
+        mx_norm_quant_scheme: AscendW8A8MXFP8DynamicLinearMethod | None = None,
     ):
         layer_input, post_mix, res_mix = torch.ops._C_ascend.npu_hc_pre_v2(
             x,
@@ -556,7 +593,24 @@ class Glm5NextDecoderLayer(nn.Module):
         if self.mhc_post_mult_value != 2.0:
             post_mix = post_mix * (self.mhc_post_mult_value / 2.0)
         if norm_weight is not None:
-            layer_input = torch_npu.npu_rms_norm(layer_input, norm_weight, epsilon=norm_eps)[0]
+            if (
+                mx_norm_quant_scheme is not None
+                and layer_input.dtype == torch.bfloat16
+                and layer_input.ndim == 2
+                and layer_input.numel() > 0
+                and layer_input.shape[-1] % 64 == 0
+                and layer_input.is_contiguous()
+            ):
+                quantized, scale, _ = torch.ops.npu.npu_rms_norm_dynamic_mx_quant(
+                    layer_input,
+                    norm_weight,
+                    epsilon=norm_eps,
+                    scale_alg=mx_norm_quant_scheme.dynamic_mx_quant_scale_alg,
+                    dst_type=torch.float8_e4m3fn,
+                )
+                layer_input = PreparedLinearInput(quantized, scale, layer_input.dtype)
+            else:
+                layer_input = torch_npu.npu_rms_norm(layer_input, norm_weight, epsilon=norm_eps)[0]
         return post_mix.unsqueeze(-1), res_mix, layer_input
 
     def hc_post(
@@ -581,6 +635,7 @@ class Glm5NextDecoderLayer(nn.Module):
         hc_base: torch.Tensor,
         norm_weight: torch.Tensor | None = None,
         norm_eps: float = 0.0,
+        mx_norm_quant_scheme: AscendW8A8MXFP8DynamicLinearMethod | None = None,
     ):
         residual = self.hc_post(x, residual, post, comb)
         post, comb, layer_input = self.hc_pre(
@@ -590,6 +645,7 @@ class Glm5NextDecoderLayer(nn.Module):
             hc_base,
             norm_weight=norm_weight,
             norm_eps=norm_eps,
+            mx_norm_quant_scheme=mx_norm_quant_scheme,
         )
         return residual, post, comb, layer_input
 

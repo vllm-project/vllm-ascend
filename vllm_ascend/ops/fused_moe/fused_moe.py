@@ -30,6 +30,7 @@ from vllm.model_executor.layers.fused_moe.runner.moe_runner import _moe_forward_
 from vllm.utils.torch_utils import direct_register_custom_op
 
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX, MoECommType
+from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.distributed.parallel_state import get_mc2_group
 from vllm_ascend.ops.fused_moe.dataclass.shared_experts import PreparedSharedExpertInput, RoutedMoEMilestones
 from vllm_ascend.ops.fused_moe.moe_comm_method import get_moe_comm_method, setup_moe_comm_method
@@ -126,6 +127,7 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
         )
         self._gate = gate
         self.hidden_size = moe_config.hidden_dim
+        self._explicit_muls_add = get_current_hardware_profile().supports(HardwareCapability.GRAPH_MULS_ADD_FUSION)
 
         self.quant_type = routed_experts.quant_type
         self.routed_experts.router = router
@@ -270,6 +272,37 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
         # See note above re: the two all-reduce points.
         shared_output = self._maybe_reduce_shared_expert_output(shared_output, fused_output_is_reduced)
 
+        result = self._maybe_fused_muls_add(shared_output, fused_output)
+
+        result = self._maybe_reduce_final_output(result, og_hidden_dim_post_xform, fused_output_is_reduced)
+
+        return self._maybe_add_zero_expert_output(result)
+
+    def _maybe_fused_muls_add(
+        self, shared_output: torch.Tensor | None, fused_output: torch.Tensor
+    ) -> torch.Tensor:
+        """Combine expert outputs, using fused scale/add where supported."""
+        # Match only the ordinary scale/add case; preserve FP16 overflow
+        # handling and any latent output transform on their original paths.
+        if (
+            self._explicit_muls_add
+            and not self._megamoe_shared_expert_fused
+            and shared_output is not None
+            and self.routed_output_transform is None
+            and self.routed_scaling_factor != 1.0
+            and fused_output.dtype in (torch.bfloat16, torch.float32)
+            and fused_output.dtype == shared_output.dtype
+            and fused_output.device.type == "npu"
+            and fused_output.device == shared_output.device
+            and fused_output.ndim > 0
+            and fused_output.shape == shared_output.shape
+            and fused_output.numel() > 0
+            and fused_output.is_contiguous()
+            and shared_output.is_contiguous()
+        ):
+            fused_output = self.apply_routed_output_transform(fused_output)
+            return torch.ops.vllm.muls_add(fused_output, shared_output, self.routed_scaling_factor)
+
         if self._megamoe_shared_expert_fused:
             # MegaMoe folded routed_scaling_factor into the topk weights for
             # the fused shared-expert call (see FusedMC2CommImpl), so its
@@ -283,13 +316,8 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
         fused_output = self.apply_routed_output_transform(fused_output)
 
         if shared_output is not None:
-            result = torch._foreach_add([shared_output], [fused_output])[0]
-        else:
-            result = fused_output
-
-        result = self._maybe_reduce_final_output(result, og_hidden_dim_post_xform, fused_output_is_reduced)
-
-        return self._maybe_add_zero_expert_output(result)
+            return torch._foreach_add([shared_output], [fused_output])[0]
+        return fused_output
 
     @property
     def is_internal_router(self) -> bool:

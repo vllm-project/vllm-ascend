@@ -9,10 +9,12 @@ from vllm.distributed import (
     get_pp_group,
     get_tensor_model_parallel_world_size,
     tensor_model_parallel_all_gather,
+    tensor_model_parallel_reduce_scatter,
 )
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
+    MergedColumnParallelLinear,
     ReplicatedLinear,
     RowParallelLinear,
 )
@@ -25,6 +27,9 @@ from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmbedding
 from vllm.model_executor.models import deepseek_v2 as deepseek_v2_module
 from vllm.model_executor.models.deepseek_v2 import (
+    DeepseekV2DecoderLayer,
+    DeepseekAttention,
+    DeepseekV2MLP,
     DeepseekV2ForCausalLM,
     DeepSeekV2FusedQkvAProjLinear,
     DeepseekV2MLAAttention,
@@ -34,13 +39,23 @@ from vllm.model_executor.models.deepseek_v2 import (
     yarn_get_mscale,
 )
 from vllm.model_executor.models.interfaces import EagleModelMixin
-from vllm.model_executor.models.utils import PPMissingLayer, extract_layer_index, spec_decode_needs_target_embed
+from vllm.model_executor.models.utils import (
+    PPMissingLayer,
+    extract_layer_index,
+    sequence_parallel_chunk,
+    spec_decode_needs_target_embed,
+)
 from vllm.sequence import IntermediateTensors
 from vllm.v1.attention.backends.mla.index_group import SparseMLAIndexGroupBuilder
 
 from vllm_ascend.attention.context_parallel.common_cp import use_dcp_q_replicate
-from vllm_ascend.ops.linear import AscendDCPGroupColumnParallelLinear
-from vllm_ascend.utils import is_mtp_layer, should_reuse_topk, vllm_version_is
+from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
+from vllm_ascend.ops.layernorm import AscendRMSNorm
+from vllm_ascend.ops.linear import AscendDCPGroupColumnParallelLinear, AscendMergedColumnParallelLinear
+from vllm_ascend.quantization.method_adapters import AscendLinearMethod
+from vllm_ascend.quantization.methods.base import PreparedLinearInput
+from vllm_ascend.quantization.methods.w8a8.w8a8_dynamic import AscendW8A8DynamicLinearMethod
+from vllm_ascend.utils import enable_custom_op, is_mtp_layer, should_reuse_topk, vllm_version_is
 from vllm_ascend.worker.v2 import pp_transport
 from vllm_ascend.worker.v2.pp_transport import (
     PPTransportDataType,
@@ -456,4 +471,121 @@ def _patched_forward(
     return hidden_states
 
 
+_ORIGINAL_DECODER_FORWARD = DeepseekV2DecoderLayer.forward
+
+
+def _supports_dense_norm_quant(layer, hidden_states):
+    """Select the decoder path before running attention or mutating residuals."""
+    if not isinstance(layer.mlp, DeepseekV2MLP):
+        return False
+    projection = layer.mlp.gate_up_proj
+    adapter = getattr(projection, "quant_method", None)
+    scheme = getattr(adapter, "quant_method", None)
+    return (
+        type(projection) in (MergedColumnParallelLinear, AscendMergedColumnParallelLinear)
+        and type(adapter) is AscendLinearMethod
+        and type(scheme) is AscendW8A8DynamicLinearMethod
+        and scheme.act_quant_type == torch.int8
+        and not getattr(projection, "requires_unquantized_input", False)
+        and getattr(projection, "custom_op", None) is None
+        and not layer.use_sequence_parallel_moe
+        and hidden_states.dtype == torch.bfloat16
+        and isinstance(layer.post_attention_layernorm, AscendRMSNorm)
+        and enable_custom_op()
+        and get_current_hardware_profile().supports(HardwareCapability.GRAPH_NORM_QUANT_FUSION)
+    )
+
+
+def _maybe_fused_add_rms_norm_quant(norm, hidden_states, residual):
+    """Prepare the dense MLP input with fused add/norm/quant when supported."""
+    if (
+        hidden_states.ndim != 2
+        or hidden_states.dtype != torch.bfloat16
+        or residual.dtype != hidden_states.dtype
+        or hidden_states.shape != residual.shape
+        or not hidden_states.is_contiguous()
+        or not residual.is_contiguous()
+    ):
+        return norm(hidden_states, residual)
+
+    output = torch.ops.npu.npu_add_rms_norm_dynamic_quant(
+        hidden_states,
+        residual,
+        norm.weight,
+        beta=norm.bias,
+        epsilon=norm.variance_epsilon,
+        output_mask=[True, False],
+    )
+    prepared = PreparedLinearInput(
+        quantized=output[0],
+        scale=output[3],
+        output_dtype=hidden_states.dtype,
+    )
+    return prepared, output[2]
+
+
+def _decoder_forward_with_norm_quant(self, positions, hidden_states, residual, llama_4_scaling=None):
+    """Explicit dense-MLP norm/quant fusion; remove when upstream owns it."""
+    # Restrict the model-level override to the observed dense W8A8 path. Other
+    # layers, sequence-parallel boundaries and unsupported consumers retain
+    # upstream's complete forward, including its FP16 overflow handling.
+    if not _supports_dense_norm_quant(self, hidden_states):
+        return _ORIGINAL_DECODER_FORWARD(self, positions, hidden_states, residual, llama_4_scaling)
+
+    # Keep this forward aligned with DeepseekV2DecoderLayer.forward. Only the
+    # post-attention norm/quant call below intentionally changes its behavior.
+    full_num_tokens = positions.shape[0]
+    input_is_sequence_parallel = (
+        self.use_sequence_parallel_moe and residual is not None and hidden_states.shape[0] != full_num_tokens
+    )
+
+    # Self Attention
+    if residual is None:
+        residual = hidden_states
+        hidden_states = self.input_layernorm(hidden_states)
+    else:
+        hidden_states, residual = self.input_layernorm(hidden_states, residual)
+
+    if input_is_sequence_parallel:
+        hidden_states = tensor_model_parallel_all_gather(hidden_states, 0)
+        hidden_states = hidden_states[:full_num_tokens]
+
+    if self.use_mha:
+        hidden_states = self.self_attn(positions, hidden_states)
+    else:
+        hidden_states = self.self_attn(positions, hidden_states, llama_4_scaling)
+
+    if not isinstance(self.self_attn, DeepseekAttention) and hidden_states.dtype == torch.float16:
+        # Match the upstream FP16 overflow handling after attention.
+        hidden_states *= 1.0 / self.routed_scaling_factor
+        if self.layer_idx == 0:
+            residual *= 1.0 / self.routed_scaling_factor
+
+    if self.use_sequence_parallel_moe:
+        tp_world_size = get_tensor_model_parallel_world_size()
+        sp_pad = (-hidden_states.shape[0]) % tp_world_size
+        hidden_states = torch.nn.functional.pad(hidden_states, (0, 0, 0, sp_pad))
+        hidden_states = tensor_model_parallel_reduce_scatter(hidden_states, 0)
+        if not input_is_sequence_parallel:
+            residual = sequence_parallel_chunk(residual)
+
+    # Fully Connected
+    hidden_states, residual = _maybe_fused_add_rms_norm_quant(
+        self.post_attention_layernorm,
+        hidden_states,
+        residual,
+    )
+    if self.use_sequence_parallel_moe:
+        hidden_states = self.mlp(hidden_states, already_sequence_parallel=True)
+    else:
+        hidden_states = self.mlp(hidden_states)
+
+    if isinstance(self.mlp, DeepseekV2MLP) and hidden_states.dtype == torch.float16:
+        # Match the upstream FP16 overflow handling after the dense MLP.
+        hidden_states *= 1.0 / self.routed_scaling_factor
+
+    return hidden_states, residual
+
+
+DeepseekV2DecoderLayer.forward = _decoder_forward_with_norm_quant
 DeepseekV2Model.forward = _patched_forward

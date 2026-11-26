@@ -172,6 +172,22 @@ class TestAscendLinearMethod(TestBase):
         self.mock_scheme.apply.assert_called_once()
         self.assertEqual(output.shape, (4, 128))
 
+    def test_prepared_input_delegates_to_scheme(self):
+        from vllm_ascend.quantization.methods.base import PreparedLinearInput
+
+        layer = MagicMock(spec=ColumnParallelLinear)
+        data = torch.ones((2, 4), dtype=torch.int8)
+        scale = torch.ones(2)
+        x = PreparedLinearInput(data, scale, torch.bfloat16)
+
+        self.method.apply(layer, x)
+
+        prepared = self.mock_scheme.apply.call_args.args[1]
+        self.assertIsInstance(prepared, PreparedLinearInput)
+        self.assertIs(prepared.quantized, data)
+        self.assertIs(prepared.scale, scale)
+        self.assertEqual(prepared.output_dtype, torch.bfloat16)
+
 
 class TestAscendKVCacheMethod(TestBase):
     def setUp(self):
