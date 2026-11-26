@@ -1,0 +1,8 @@
+pr: 23435
+entries:
+  - category: bugfix
+    text: >-
+      Fixed unexpected runtime out-of-memory errors when ACLGraph capture is
+      enabled by estimating and reserving ACLGraph pool memory before sizing
+      the KV cache during startup. Set `VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS=0`
+      to skip pre-KV graph memory estimation if faster startup is preferred.
