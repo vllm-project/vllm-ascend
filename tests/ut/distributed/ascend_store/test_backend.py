@@ -1742,12 +1742,12 @@ class TestMemcacheBackendMethods(unittest.TestCase):
             patch(f"{module_path}.torch.npu.set_device"),
             patch(f"{module_path}.time.sleep"),
             patch(f"{module_path}._read_driver_innerversion", return_value=None),
-        ):
-            with self.assertRaisesRegex(
+            self.assertRaisesRegex(
                 RuntimeError,
                 r"return code -1.*missing/empty driver version file",
-            ):
-                b._setup_store()
+            ),
+        ):
+            b._setup_store()
 
     def test_read_driver_innerversion_missing_file(self):
         with patch.object(memcache_module.os.path, "isfile", return_value=False):
