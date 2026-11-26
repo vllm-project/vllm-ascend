@@ -2195,7 +2195,7 @@ class SparseKVOffloadManager:
                     raise RuntimeError("Native selective experiment does not support multi-ubatch capture")
                 self._selective_native_ordered_handles(graph)
                 descriptor = self._selective_native_descriptor_key(desc)
-                signature.append((descriptor, tuple(sorted(self._selective_native_graph_keys[graph]))))
+                signature.append((descriptor, tuple(self._selective_native_graph_keys[graph])))
             signature.sort()
             if len({item[0] for item in signature}) != len(signature):
                 raise RuntimeError("Native selective graph descriptors are ambiguous")
@@ -2212,9 +2212,9 @@ class SparseKVOffloadManager:
         self._selective_native_started = True
         start_error = None
         try:
-            for graph in graph_set:
-                for handle in self._selective_native_ordered_handles(graph):
-                    ops.selective_native_start(handle)
+            ops.selective_native_start(
+                [handle for handles in self._selective_native_graphs.values() for handle in handles]
+            )
         except Exception as error:
             start_error = error
         if self.tp_size > 1:
@@ -2231,12 +2231,11 @@ class SparseKVOffloadManager:
     def begin_selective_native_graph(self, graph, anchor):
         if self._selective_native_failed or self._selective_native_inflight or self._selective_native_stopping:
             raise RuntimeError("Native selective graph is unavailable or already in flight")
-        handles = self._selective_native_ordered_handles(graph)
+        handles = self._selective_native_graphs[graph]
         self._selective_native_epoch += 1
         epoch = self._selective_native_epoch
         self._selective_native_inflight = True
-        for handle in handles:
-            torch.ops._C_ascend.selective_native_begin(handle, epoch, anchor)
+        torch.ops._C_ascend.selective_native_begin(handles, epoch, anchor)
         return epoch
 
     def finish_selective_native_graph(self, graph, epoch, anchor) -> None:

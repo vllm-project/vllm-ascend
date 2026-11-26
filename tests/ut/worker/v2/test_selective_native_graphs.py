@@ -243,8 +243,11 @@ def test_missing_graph_binding_fails_before_start():
 def test_handle_lifecycle_uses_graph_object_and_orders_completion():
     manager = make_manager()
     graph = MagicMock()
+    other = MagicMock()
     manager._selective_native_graphs[graph] = [11, 12]
     manager._selective_native_graph_keys[graph] = [(2,), (1,)]
+    manager._selective_native_graphs[other] = [21]
+    manager._selective_native_graph_keys[other] = [(1,)]
     anchor = object()
     trace = MagicMock()
     with (
@@ -255,15 +258,15 @@ def test_handle_lifecycle_uses_graph_object_and_orders_completion():
         patch.object(torch.ops._C_ascend, "selective_native_stop", trace.stop, create=True),
         patch.object(torch.ops._C_ascend, "selective_native_release", trace.release, create=True),
     ):
-        manager.start_selective_native_graphs({"a": graph})
+        desc = MagicMock(num_tokens=1, num_ubatches=1)
+        other_desc = MagicMock(num_tokens=4, num_ubatches=1)
+        manager.start_selective_native_graphs({desc: graph, other_desc: other})
         epoch = manager.begin_selective_native_graph(graph, anchor)
         manager.finish_selective_native_graph(graph, epoch, anchor)
         manager.stop_selective_native_graphs()
         manager.release_selective_native_graphs()
     assert [call[0] for call in trace.mock_calls] == [
         "start",
-        "start",
-        "begin",
         "begin",
         "record",
         "record",
@@ -271,15 +274,20 @@ def test_handle_lifecycle_uses_graph_object_and_orders_completion():
         "retire",
         "stop",
         "stop",
+        "stop",
+        "release",
         "release",
         "release",
     ]
+    trace.start.assert_called_once_with([11, 12, 21])
+    trace.begin.assert_called_once_with([11, 12], epoch, anchor)
     assert [call.args[0] for call in trace.retire.call_args_list] == [12, 11]
     graph.reset.assert_called_once()
     assert manager._selective_native_graphs == {}
 
 
-def test_tp_missing_group_fails_before_worker_start():
+@pytest.mark.parametrize("peer_keys", [((1,),), ((1,), (2,))])
+def test_tp_group_binding_mismatch_fails_before_worker_start(peer_keys):
     manager = make_manager()
     manager.tp_size = 2
     manager.tp_group = SimpleNamespace(cpu_group=object())
@@ -288,7 +296,7 @@ def test_tp_missing_group_fails_before_worker_start():
     manager._selective_native_graph_keys[graph] = [(2,), (1,)]
 
     def gather(output, local, group):
-        output[:] = [local, (None, [(local[1][0][0], ((1,),))])]
+        output[:] = [local, (None, [(local[1][0][0], peer_keys)])]
 
     with (
         patch.object(torch.distributed, "all_gather_object", side_effect=gather),
