@@ -106,7 +106,9 @@ def test_request_records_recover_permuted_pages_and_sampler_rows(capacity, heads
     conv_storage = conv if is_conv_state_dim_first() else conv.transpose(-1, -2).contiguous()
     layer = SimpleNamespace(
         kv_cache=(conv_storage, state),
-        recoverssm_records=SimpleNamespace(correction=correction, key_gate=kg),
+        recoverssm_records=SimpleNamespace(
+            correction=correction, key_gate=kg, decay_cache=None, normalized_key_cache=None
+        ),
         A_log=a_log,
         dt_bias=bias,
         gate_lower_bound=-5.0,
@@ -209,7 +211,9 @@ def kda_recoverssm_commit(state, correction, kg, a_log, bias, bound, starts, ind
         conv = conv.transpose(-1, -2).contiguous()
     layer = SimpleNamespace(
         kv_cache=(conv, state),
-        recoverssm_records=SimpleNamespace(correction=correction, key_gate=kg),
+        recoverssm_records=SimpleNamespace(
+            correction=correction, key_gate=kg, decay_cache=None, normalized_key_cache=None
+        ),
         A_log=a_log,
         dt_bias=bias,
         gate_lower_bound=bound,
@@ -298,7 +302,9 @@ def test_multilayer_paged_commit_maps_sampler_rows_and_compacts_conv(
             destination[block, :, :3] = source[block, :, count - 1 : count + 2]
         layer = SimpleNamespace(
             kv_cache=(conv, state),
-            recoverssm_records=SimpleNamespace(correction=correction, key_gate=kg),
+            recoverssm_records=SimpleNamespace(
+                correction=correction, key_gate=kg, decay_cache=None, normalized_key_cache=None
+            ),
             A_log=a_log,
             dt_bias=bias,
             gate_lower_bound=-5.0,
@@ -694,7 +700,9 @@ def test_kimi_request_records_match_fp64_kda(capacity, heads, record_property):
         conv = conv.transpose(-1, -2).contiguous()
     layer = SimpleNamespace(
         kv_cache=(conv, state),
-        recoverssm_records=SimpleNamespace(correction=correction, key_gate=key_gate),
+        recoverssm_records=SimpleNamespace(
+            correction=correction, key_gate=key_gate, decay_cache=None, normalized_key_cache=None
+        ),
         A_log=a_log,
         dt_bias=bias,
         gate_lower_bound=-5.0,
@@ -728,6 +736,8 @@ def test_kimi_conv_compaction_matches_native_across_windows(accepted):
     records = SimpleNamespace(
         correction=torch.zeros(2, heads, capacity, dim, device=device),
         key_gate=torch.zeros(2, heads, capacity, 2 * dim, dtype=conv.dtype, device=device),
+        decay_cache=None,
+        normalized_key_cache=None,
     )
     layer = SimpleNamespace(
         kv_cache=(conv, state),
@@ -781,6 +791,8 @@ def test_kimi_recoverssm_matches_fp64_over_multiple_windows(heads, record_proper
     records = SimpleNamespace(
         correction=torch.empty(rows, heads, capacity, dim, device=device),
         key_gate=torch.empty(rows, heads, capacity, 2 * dim, dtype=conv.dtype, device=device),
+        decay_cache=None,
+        normalized_key_cache=None,
     )
     layer = SimpleNamespace(
         kv_cache=(conv, state),
@@ -1150,7 +1162,9 @@ def test_model_commit_context(batch, graph_mode, num_layers, record_property):
         entries.append(
             SimpleNamespace(
                 kv_cache=(conv, state),
-                recoverssm_records=SimpleNamespace(correction=correction, key_gate=kg),
+                recoverssm_records=SimpleNamespace(
+                    correction=correction, key_gate=kg, decay_cache=None, normalized_key_cache=None
+                ),
                 A_log=torch.zeros(heads, device="npu"),
                 dt_bias=torch.zeros(heads * dim, device="npu"),
                 gate_lower_bound=-5.0,

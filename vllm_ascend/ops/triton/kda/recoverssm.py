@@ -871,13 +871,12 @@ class KDARecoverSSMCommitContext:
         for index, (layer, caches) in enumerate(zip(layers, self.cache_bindings)):
             if len(layer.kv_cache) != len(caches) or any(a is not b for a, b in zip(layer.kv_cache, caches)):
                 return False
-            records = getattr(layer, "recoverssm_records", None)
+            records = layer.recoverssm_records
             if (
-                records is None
-                or records.correction is not self.correction_caches[index]
+                records.correction is not self.correction_caches[index]
                 or records.key_gate is not self.kg_caches[index]
-                or getattr(records, "decay_cache", None) is not self.decay_caches[index]
-                or getattr(records, "normalized_key_cache", None) is not self.normalized_key_caches[index]
+                or records.decay_cache is not self.decay_caches[index]
+                or records.normalized_key_cache is not self.normalized_key_caches[index]
             ):
                 return False
         return True
@@ -903,8 +902,6 @@ class KDARecoverSSMCommitContext:
             raise ValueError("KDA RecoverSSM commit requires at least one layer")
         if any(len(layer.kv_cache) != 2 for layer in layers):
             raise ValueError("KDA RecoverSSM requires convolution and checkpoint caches")
-        if any(getattr(layer, "recoverssm_records", None) is None for layer in layers):
-            raise ValueError("KDA RecoverSSM layers require request-indexed verify records")
         init_device_properties_triton()
 
         conv_states = [layer.kv_cache[0] for layer in layers]
@@ -996,25 +993,18 @@ class KDARecoverSSMCommitContext:
                 device=device,
             )
 
-        decay_caches = tuple(getattr(layer.recoverssm_records, "decay_cache", None) for layer in layers)
-        normalized_key_caches = tuple(
-            getattr(layer.recoverssm_records, "normalized_key_cache", None) for layer in layers
-        )
-
-        if any(key is not None and decay is None for key, decay in zip(normalized_key_caches, decay_caches)):
-            raise ValueError("RecoverSSM normalized keys require the decay record")
-
-        def vector_record_addrs(caches: Sequence[torch.Tensor | None]) -> torch.Tensor | None:
-            present = [cache for cache in caches if cache is not None]
-            for cache in present:
-                _validate_vector_cache(cache, (record_capacity, num_heads, spec_query_len, key_dim), device)
-            return _base_addrs(present) if len(present) == len(layers) else None
+        decay_caches = tuple(layer.recoverssm_records.decay_cache for layer in layers)
+        normalized_key_caches = tuple(layer.recoverssm_records.normalized_key_cache for layer in layers)
+        decay_base_addrs = normalized_key_base_addrs = None
+        if decay_caches[0] is not None:
+            decay_base_addrs = _base_addrs(decay_caches)
+            normalized_key_base_addrs = _base_addrs(normalized_key_caches)
 
         return cls(
             decay_caches=decay_caches,
-            decay_base_addrs=vector_record_addrs(decay_caches),
+            decay_base_addrs=decay_base_addrs,
             normalized_key_caches=normalized_key_caches,
-            normalized_key_base_addrs=vector_record_addrs(normalized_key_caches),
+            normalized_key_base_addrs=normalized_key_base_addrs,
             conv_states=tuple(conv_states),
             conv_state_base_addrs=_base_addrs(conv_states),
             conv_state_block_strides=_block_strides(conv_states),
