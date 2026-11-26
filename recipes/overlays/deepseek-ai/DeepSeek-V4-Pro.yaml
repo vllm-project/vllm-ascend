@@ -59,6 +59,7 @@ strategy_hardware:
     npu: unsupported
   pd_cluster:
     npu: unsupported
+    ascend_910c: supported
   # Validated topology is a co-located multi-node pool, not prefill/decode
   # disaggregation: all four nodes form one DP group with one local DP rank
   # each, so this declares the cross-node DEP combination.
@@ -182,6 +183,38 @@ variants:
         docker_serve_command: "vllm serve"
         install:
           pip: false
+  ascend_w4a8_0813_a3:
+    model_id: Eco-Tech/DeepSeek-V4-Pro-0813-w4a8
+    label: W4A8 0813 (Ascend A3 PD)
+    precision: int4
+    vram_minimum_gb: 1045
+    supported_hardware: [ascend_910c]
+    supported_frontends: [python]
+    supported_features: [tool_calling, reasoning]
+    min_vllm_version: '0.32.0'
+    hardware_overrides:
+      ascend_910c:
+        docker_shm_size: "512g"
+        install:
+          pip: false
+    extra_args:
+      - --quantization ascend
+      - --served-model-name dsv4
+      - --max-model-len 150000
+      - --block-size 32
+      - --no-disable-hybrid-kv-cache-manager
+      - --attention_config.indexer_kv_dtype int8
+      - --tokenizer-mode deepseek_v4
+      - --tool-call-parser deepseek_v4
+      - --reasoning-parser deepseek_v4
+      - --enable-auto-tool-choice
+      - --trust-remote-code
+      - --seed 1024
+      - >-
+        --model-loader-extra-config '{"enable_multithread_load":true,"num_threads":128}'
+      - >-
+        --speculative-config '{"method":"dspark","num_speculative_tokens":5}'
+      - --enable-chunked-prefill
 
 presets:
   ascend_a2_w4a8_multinode_dep:
@@ -279,3 +312,91 @@ presets:
       HCCL_SOCKET_IFNAME: $IFACE_NAME
       GLOO_SOCKET_IFNAME: $IFACE_NAME
       TP_SOCKET_IFNAME: $IFACE_NAME
+  ascend_a3_pd:
+    label: "A3 W4A8 0813 PD"
+    hardware: ascend_910c
+    strategy: pd_cluster
+    variants: [ascend_w4a8_0813_a3]
+    default: false
+    description: "Two A3 Prefill nodes (DP1/TP2/PCP8/PP2) and two A3 Decode nodes (DP16/TP2)."
+    source:
+      label: "vLLM Ascend v0.32.0rc tutorial"
+      href: "https://docs.vllm.ai/projects/ascend/en/v0.32.0rc/tutorials/models/DeepSeek-V4-Pro.html#dsv4pro-5-2-a3"
+    image:
+      vllm: quay.io/ascend/vllm-ascend:v0.32.0rc1-a3
+    select:
+      pd_router: ascend
+      pd_connector: mooncake_ascend
+      frontend: python
+      kv_offload: "off"
+    runbook: |
+      On the second Prefill node, set the Mooncake KV port to 30200. The first
+      Prefill node uses 30000 and the Decode nodes use 30100.
+    env:
+      VLLM_USE_V2_MODEL_RUNNER: "1"
+      HCCL_OP_EXPANSION_MODE: AIV
+      HCCL_CONNECT_TIMEOUT: "1200"
+      HCCL_EXEC_TIMEOUT: "2040"
+      VLLM_RPC_TIMEOUT: "3600000"
+      VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS: "3000"
+      PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
+    roles:
+      prefill:
+        nodes: 2
+        parallelism: tep
+        tp: 2
+        pp: 2
+        pcp: 8
+        env:
+          HCCL_BUFFSIZE: "1024"
+          VLLM_PP_LAYER_PARTITION: "32,29"
+        args:
+          - --max-num-batched-tokens 4096
+          - --max-num-seqs 16
+          - --gpu-memory-utilization 0.92
+          - --enable-prefix-caching
+          - --enforce-eager
+        json_args:
+          '--speculative-config':
+            enforce_eager: true
+          '--additional-config':
+            enable_cpu_binding: true
+            enable_flashcomm1: true
+            enable_fused_mc2: 1
+          '--kv-transfer-config':
+            MooncakeConnectorV2:
+              kv_port: '30000'
+              kv_connector_extra_config:
+                prefill: {dp_size: 1, tp_size: 2, pp_size: 2, pcp_size: 8}
+                decode: {dp_size: 16, tp_size: 2, pp_size: 1, pcp_size: 1}
+      decode:
+        nodes: 2
+        parallelism: dep
+        tp: 2
+        pp: 1
+        data_parallel_lb: external
+        env:
+          HCCL_BUFFSIZE: "1800"
+        args:
+          - --max-num-batched-tokens 180
+          - --max-num-seqs 30
+          - --gpu-memory-utilization 0.95
+          - --async-scheduling
+          - --no-enable-prefix-caching
+        json_args:
+          '--compilation-config':
+            cudagraph_mode: FULL_DECODE_ONLY
+          '--additional-config':
+            ascend_compilation_config:
+              enable_npugraph_ex: true
+              enable_static_kernel: false
+            enable_cpu_binding: true
+            multistream_overlap_shared_expert: true
+            scheduler_config:
+              recompute_scheduler_enable: true
+          '--kv-transfer-config':
+            MooncakeConnectorV2:
+              kv_port: '30100'
+              kv_connector_extra_config:
+                prefill: {dp_size: 1, tp_size: 2, pp_size: 2, pcp_size: 8}
+                decode: {dp_size: 16, tp_size: 2, pp_size: 1, pcp_size: 1}
