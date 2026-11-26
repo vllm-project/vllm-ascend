@@ -120,10 +120,13 @@ strategy_hardware:
     # 910C.
     ascend_910c: unsupported
   pd_cluster:
-    # Offered on ascend_910c only through the opt-in `ascend_a3_w4a8_pd`
+    # The supported PD route on ascend_910c is the opt-in `ascend_a3_w4a8_pd`
     # preset below (tutorial §5.2: 2P1D on four Atlas 800 A3 nodes with
-    # Mooncake); the default pd_cluster pools render one full node per role
-    # and are not offered.
+    # Mooncake). Schema caveat: without the preset, the plain pd_cluster
+    # pool is still selectable — strategy_min_gpus gates only the GPU floor,
+    # and marking the strategy unsupported would disable the preset as well —
+    # so it renders the base recipe's generic reference topology rather than
+    # a validated Ascend deployment. The notes ask users to pick the preset.
     ascend_910c: supported
 
 strategy_min_gpus:
@@ -173,7 +176,13 @@ presets:
     roles:
       prefill:
         nodes: 2
-        parallelism: tp
+        # DEP renders one merged prefill pool: DP8 total at TP4 (four TP4
+        # replicas per node, pool starting at DP rank 0, no --nnodes),
+        # matching the tutorial lane (2 nodes x DP4, 8 prefiller hosts). The
+        # TP emitter instead keeps the variant's static --data-parallel-size
+        # 4 as a bare flag while the pool bookkeeping (kv dp_size, router
+        # prefiller hosts) computes DP as 1, contradicting both.
+        parallelism: dep
         tp: 4
         args:
           - '--max-model-len'
@@ -260,9 +269,12 @@ presets:
           - '{"method": "eagle3", "model":"lightseekorg/kimi-k2.6-eagle3", "num_speculative_tokens": 3}'
         remove_args:
           # The tutorial decode lane runs without the multimodal encoder TP
-          # mode (prefill-only in the tutorial); the variant's flag is
+          # mode (prefill-only in the tutorial), and the base recipe's
+          # pd_cluster decode override carries --all2all-backend
+          # flashinfer_nvlink_one_sided, which has no NPU backend. Both are
           # dropped in this role only.
           - '--mm-encoder-tp-mode'
+          - '--all2all-backend'
         env:
           VLLM_RPC_TIMEOUT: '3600000'
           VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS: '30000'
@@ -306,9 +318,14 @@ notes:
       PD separation is offered as the opt-in **W4A8 PD (2P1D)** preset:
       four Atlas 800 A3 nodes (2 prefill + 1 decode instance spanning 2
       nodes) with Mooncake, per tutorial §5.2 — 2P1D is recommended over
-      1P1D there. The preset is a transcription of the tutorial lane, which
-      additionally uses per-node launcher scripts (launch_online_dp.py /
-      run_dp_template.sh) and a request proxy on the prefill master.
+      1P1D there. **Select the preset when deploying PD**: without it, the
+      plain `pd_cluster` pool renders the base recipe's generic topology
+      (NixlConnector KV transfer, the flashinfer all-to-all backend, and
+      DFlash speculative decoding on a DP16 pool), which is not the
+      validated Ascend route. The preset is a transcription of the tutorial
+      lane, which additionally uses per-node launcher scripts
+      (launch_online_dp.py / run_dp_template.sh) and a request proxy on the
+      prefill master.
 
 meta:
   hardware:
