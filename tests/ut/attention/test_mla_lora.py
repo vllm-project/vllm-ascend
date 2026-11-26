@@ -80,6 +80,8 @@ def make_lora_projection(a, b):
     nn.Module.__init__(projection)
     projection.lora_a_stacked = (a,)
     projection.lora_b_stacked = (b,)
+    projection.lora_config = SimpleNamespace(fully_sharded_loras=False)
+    projection.tp_size = 1
     projection.punica_wrapper = SimpleNamespace()
     return projection
 
@@ -159,3 +161,36 @@ def test_unwrapped_kv_projection_leaves_absorbed_output_unchanged(backend_type):
     backend._add_mla_lora(torch.randn(2, 3, 5), output, is_query=False)
     torch.testing.assert_close(output, expected, atol=0, rtol=0)
     assert backend._fused_preprocess_type() is None
+
+
+@pytest.mark.parametrize("is_query", [False, True])
+def test_absorbed_fully_sharded_factors_gather_rank_before_projection(is_query):
+    a, b = torch.ones(2, 1, 4, 5), torch.ones(2, 1, 14, 4)
+    projection = make_lora_projection(a[:, :, :2], b)
+    projection.lora_config.fully_sharded_loras = True
+    projection.tp_size = 2
+    projection.punica_wrapper.token_lora_indices = torch.tensor([0])
+    backend = make_backend(AscendMLAImpl, {"kv_b_proj": projection}, qk_nope_head_dim=4)
+    inputs = torch.ones(2, 1, 4 if is_query else 5)
+    output = torch.zeros(1, 2, 5 if is_query else 3)
+    with patch("vllm_ascend.attention.mla_projections.tensor_model_parallel_all_gather", return_value=a) as gather:
+        backend._add_mla_lora(inputs, output, is_query=is_query)
+    gather.assert_called_once_with(projection.lora_a_stacked[0], dim=2)
+    torch.testing.assert_close(output, torch.full_like(output, (4 if is_query else 5) * 4))
+
+
+def test_replicated_dcp_query_gathers_key_heads_without_gathering_value_heads():
+    a, local_b = torch.ones(2, 1, 2, 5), torch.ones(2, 1, 7, 2)
+    projection = make_lora_projection(a, local_b)
+    projection.punica_wrapper.token_lora_indices = torch.tensor([0])
+    backend = make_backend(AscendMLAImpl, {"kv_b_proj": projection}, qk_nope_head_dim=4, dcp_q_replicate_enabled=True)
+    group = SimpleNamespace(all_gather=Mock(return_value=local_b.repeat(1, 1, 2, 1)))
+    with patch("vllm_ascend.attention.mla_projections.get_dcp_group", return_value=group):
+        query = torch.zeros(1, 2, 5)
+        backend._add_mla_lora(torch.ones(2, 1, 4), query, is_query=True)
+        group.all_gather.assert_called_once_with(local_b, dim=2)
+        value = torch.zeros(1, 1, 3)
+        backend._add_mla_lora(torch.ones(1, 1, 5), value, is_query=False)
+    torch.testing.assert_close(query, torch.full_like(query, 8))
+    torch.testing.assert_close(value, torch.full_like(value, 10))
+    assert group.all_gather.call_count == 1

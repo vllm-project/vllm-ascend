@@ -4,6 +4,8 @@
 
 import torch
 from torch import nn
+from vllm.distributed import tensor_model_parallel_all_gather
+from vllm.distributed.parallel_state import get_dcp_group
 from vllm.lora.layers.base_linear import BaseLinearLayerWithLoRA
 
 MLA_PROJECTION_NAMES = (
@@ -39,19 +41,17 @@ def add_mla_lora(
     """
     heads = inputs.shape[0]
     indices = indices[: inputs.shape[1]]
-    slots = indices.clamp_min(0)
-    a = lora_a[:, 0].index_select(0, slots)
-    b = lora_b[:, 0].view(lora_b.shape[0], heads, -1, lora_b.shape[-1])
-    b = b[:, :, :qk_nope_head_dim] if is_query else b[:, :, qk_nope_head_dim:]
-    b = b.index_select(0, slots)
-    x = inputs.transpose(0, 1)
-    if is_query:
-        low_rank = torch.matmul(x.unsqueeze(-2), b).squeeze(-2)
-        delta = torch.bmm(low_rank, a)
-    else:
-        low_rank = torch.bmm(x, a.transpose(1, 2))
-        delta = torch.matmul(b, low_rank.unsqueeze(-1)).squeeze(-1)
-    output.add_(torch.where(indices[:, None, None] >= 0, delta, 0))
+    # Keep factors per adapter: gathering A/B for every token makes workspace
+    # grow as tokens * heads * head_dim * rank during a long prefill.
+    for slot in range(lora_a.shape[0]):
+        a = lora_a[slot, 0]
+        b = lora_b[slot, 0].view(heads, -1, lora_b.shape[-1])
+        b = b[:, :qk_nope_head_dim] if is_query else b[:, qk_nope_head_dim:]
+        if is_query:
+            delta = torch.bmm(inputs, b) @ a
+        else:
+            delta = torch.bmm(inputs @ a.T, b.transpose(1, 2))
+        output.add_(torch.where((indices == slot)[:, None, None], delta.transpose(0, 1), 0))
 
 
 class MLAProjectionMixin:
@@ -137,11 +137,16 @@ class MLAProjectionMixin:
             return
         projection = self.kv_b_proj
         if isinstance(projection, BaseLinearLayerWithLoRA):
+            a, b = projection.lora_a_stacked[0], projection.lora_b_stacked[0]
+            if projection.lora_config.fully_sharded_loras and projection.tp_size > 1:
+                a = tensor_model_parallel_all_gather(a, dim=2)
+            if is_query and getattr(self, "dcp_q_replicate_enabled", False):
+                b = get_dcp_group().all_gather(b, dim=2)
             add_mla_lora(
                 inputs,
                 output,
-                projection.lora_a_stacked[0],
-                projection.lora_b_stacked[0],
+                a,
+                b,
                 projection.punica_wrapper.token_lora_indices,
                 self.qk_nope_head_dim,
                 is_query=is_query,

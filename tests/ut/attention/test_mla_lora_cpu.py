@@ -4,6 +4,7 @@
 
 import pytest
 import torch
+from torch.overrides import TorchFunctionMode
 
 from vllm_ascend.attention.mla_projections import add_mla_lora
 
@@ -45,3 +46,27 @@ def test_unselected_adapter_nan_does_not_contaminate_absorbed_output():
     output = torch.zeros(1, 2, 3)
     add_mla_lora(inputs, output, a, b, torch.tensor([-1]), 4, is_query=False)
     assert torch.equal(output, torch.zeros_like(output))
+
+
+@pytest.mark.parametrize("is_query", [False, True])
+def test_long_prefill_workspace_does_not_repeat_adapter_factors_per_token(is_query):
+    class TrackTensorSize(TorchFunctionMode):
+        largest = 0
+
+        def __torch_function__(self, function, types, args=(), kwargs=None):
+            result = function(*args, **(kwargs or {}))
+            if isinstance(result, torch.Tensor):
+                self.largest = max(self.largest, result.numel())
+            return result
+
+    heads, tokens, qdim, vdim, latent, rank = 2, 257, 16, 8, 32, 8
+    a = torch.ones(2, 1, rank, latent)
+    b = torch.ones(2, 1, heads * (qdim + vdim), rank)
+    inputs = torch.ones(heads, tokens, qdim if is_query else latent)
+    output = torch.zeros(tokens, heads, latent if is_query else vdim)
+    indices = torch.zeros(tokens, dtype=torch.long)
+    budget = 2 * max(inputs.numel(), output.numel(), a.numel(), b.numel())
+    with TrackTensorSize() as workspace:
+        add_mla_lora(inputs, output, a, b, indices, qdim, is_query=is_query)
+    assert workspace.largest <= budget
+    torch.testing.assert_close(output, torch.full_like(output, (qdim if is_query else latent) * rank))
