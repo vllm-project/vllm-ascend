@@ -103,7 +103,8 @@ option and add the local HiSparse connector:
 ```
 
 The host pool stores target DSA pages. The KeyPool index and KDA state stay
-on device and keep the existing MTP5 cache lifecycle.
+on device. With MTP5, the resident verifier can defer host copies while
+preserving the original copy path for batches that require cold rows.
 
 ### Combining HiSparse with AscendStore
 
@@ -173,7 +174,7 @@ A request served from the local prefix cache may leave both counters unchanged.
 | Parameter | Description |
 | --- | --- |
 | `hisparse_config` | Enables Core HiSparse for the supported sparse Attention backend. |
-| `eager_host_mirror` | Defaults to `true` for eager Host mirroring. Set it to `false` for lazy Host mirroring. |
+| `eager_host_mirror` | Defaults to `true` for eager Host mirroring. Set it to `false` for lazy Host mirroring. The GLM-5.3-Flash 950DT recipe defers copies on eligible resident MTP5 steps. |
 | `host_pool_gib` | Host pool size in GiB per tensor-parallel rank. Size it for the planned context lengths and concurrency; the example reserves 4 GiB per rank. |
 | `device_buffer_size` | Per-request Hot capacity in KV rows. It must hold the deduplicated union of rows selected during speculative verification and fit the resolver's on-chip UB budget. |
 | `kv_cache_dtype` / `indexer_kv_dtype` | Select main and Indexer KV formats independently from model-weight quantization. |

@@ -72,6 +72,7 @@ from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.dsa_attn_kv_plan import get_dsa_attn_kv_plan
 from vllm_ascend.attention.dsa_v1 import AscendDSAMetadataBuilder
 from vllm_ascend.attention.dsa_v41 import AscendDSAV41MetadataBuilder, DeepseekV41CacheBackend
+from vllm_ascend.attention.gdn_attn_builder import AscendGDNHostMetadataBuilder
 from vllm_ascend.attention.sfa_v1 import AscendSFAMetadataBuilder
 from vllm_ascend.attention.utils import (
     SFA_QSFA_TILE_SIZE,
@@ -97,6 +98,7 @@ from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_man
     reshape_kv_cache_tensors_for_sparse_kv_offload,
 )
 from vllm_ascend.hisparse import (
+    HISPARSE_GROUPED_QUERY_LEN,
     require_hybrid_hisparse_core,
     supports_pooled_hisparse,
     uses_pooled_hisparse,
@@ -540,6 +542,16 @@ def build_attn_metadata(
                 dsa_builder.tq_group_block_sizes = block_sizes
             plan = get_dsa_attn_kv_plan(dsa_builder.vllm_config, dsa_builder.compressor_ratio)
             formatted_slot_mappings = plan.format_dsa_slot_mapping(slot_mappings[:, :num_input_tokens], block_sizes)
+    can_group_spec_gdn = (
+        not for_cudagraph_capture
+        and full_graph_mode
+        and pcp_context is None
+        and 0 < num_actual_reqs == num_reqs
+        and num_actual_tokens == num_input_tokens
+        and max_query_len == HISPARSE_GROUPED_QUERY_LEN
+        and num_actual_tokens == num_reqs * max_query_len
+    )
+    grouped_spec_gdn = None
     for i, kv_cache_spec in enumerate(kv_cache_groups):
         # Resident/hot storage groups have no Attention metadata consumer.
         if not attn_groups[i]:
@@ -685,17 +697,51 @@ def build_attn_metadata(
                 else:
                     if isinstance(attn_metadata_builder, GDNAttentionMetadataBuilder):
                         attn_metadata_extra_kwargs["num_actual_reqs"] = num_actual_reqs
-                    metadata = attn_group.build_metadata(
-                        common_prefix_len=0,
-                        common_attn_metadata=variant_common,
-                        **attn_metadata_extra_kwargs,
-                    )
+                    metadata = None
+                    if can_group_spec_gdn and isinstance(attn_metadata_builder, AscendGDNHostMetadataBuilder):
+                        accepted = attn_metadata_extra_kwargs.get("num_accepted_tokens")
+                        if grouped_spec_gdn is None:
+                            from vllm_ascend.attention.sfa_hisparse import supports_hisparse_resident_decode_graph
+
+                            drafts = attn_metadata_extra_kwargs.get("num_decode_draft_tokens_cpu")
+                            prefill = variant_common.is_prefilling
+                            can_group_spec_gdn = (
+                                accepted is not None
+                                and attn_metadata_builder.num_spec + 1 == max_query_len
+                                and not getattr(
+                                    attn_metadata_builder.speculative_config, "enable_adaptive_verification", False
+                                )
+                                and supports_hisparse_resident_decode_graph(attn_metadata_builder.vllm_config)
+                                and drafts is not None
+                                and drafts.device.type == "cpu"
+                                and drafts.shape == (num_reqs,)
+                                and bool((drafts == max_query_len - 1).all())
+                                and prefill is not None
+                                and prefill.device.type == "cpu"
+                                and not bool(prefill.any())
+                                and query_start_loc_cpu.device.type == "cpu"
+                                and bool((query_start_loc_cpu[: num_reqs + 1].diff() == max_query_len).all())
+                            )
+                            if can_group_spec_gdn:
+                                grouped_spec_gdn = attn_metadata_builder.begin_grouped_spec_gdn()
+                        if grouped_spec_gdn is not None and accepted is not None:
+                            metadata = attn_metadata_builder.build_grouped_spec_gdn(
+                                attn_group._with_kernel_block_table(variant_common), accepted, grouped_spec_gdn
+                            )
+                    if metadata is None:
+                        metadata = attn_group.build_metadata(
+                            common_prefix_len=0,
+                            common_attn_metadata=variant_common,
+                            **attn_metadata_extra_kwargs,
+                        )
                 if is_dsa_builder:
                     # Preserve sharing even if a builder replaces one of the
                     # dictionaries while constructing its metadata.
                     common_ratio_to_sas_metadata = attn_metadata_builder.common_ratio_to_sas_metadata  # type: ignore[assignment]
                 for layer_name in variant_names:
                     attn_metadata[layer_name] = metadata
+    if grouped_spec_gdn is not None:
+        grouped_spec_gdn.launch(clear_conv_tokens=num_actual_tokens)
     if step_metadata_builders:
         rows = min(num_actual_tokens, int(query_start_loc_cpu[num_actual_reqs]))
         prepared_metadata_ids: set[int] = set()

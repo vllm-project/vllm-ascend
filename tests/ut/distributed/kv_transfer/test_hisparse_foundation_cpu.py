@@ -7,7 +7,9 @@ import mmap
 import sys
 from dataclasses import replace
 from types import SimpleNamespace as NS
+from unittest.mock import Mock
 
+import numpy as np
 import pytest
 import torch
 
@@ -30,6 +32,7 @@ from vllm_ascend.attention.sfa_hisparse import (
     AscendHiSparseImpl,
     AscendHiSparseMetadataBuilder,
     finish_hisparse_kv_update,
+    resident_decode_page_table,
 )
 from vllm_ascend.attention.sfa_v1 import AscendSFAMetadataBuilder
 from vllm_ascend.core.kv_cache_interface import AscendSFAIndexerCacheSpec
@@ -47,6 +50,42 @@ from vllm_ascend.hisparse.c8 import (
     pack_c8_components,
 )
 from vllm_ascend.ops.triton import sfa_indexer_store
+
+
+def test_resident_decode_pages_reorder_requests_and_mask_padding():
+    block_ids = torch.tensor([[2, 7, 0], [5, 4, 0], [12, 13, -1]], dtype=torch.int32)
+    states = torch.tensor([2, -1, 0], dtype=torch.int32)
+    pages = resident_decode_page_table(block_ids, states, 9)
+
+    assert pages.tolist() == [[108, 117, 0], [0, 0, 0], [18, 63, 0]]
+    assert block_ids.tolist() == [[2, 7, 0], [5, 4, 0], [12, 13, -1]]
+
+
+@pytest.mark.parametrize(
+    ("widths", "resident", "defer"),
+    [([6, 6], True, True), ([1, 1], True, False), ([5, 7], True, False), ([6, 6], False, False)],
+)
+def test_deferred_mirror_only_on_uniform_resident_q6(widths, resident, defer):
+    from vllm_ascend.hisparse.host_mirror import HostMirrorConnector
+
+    num_tokens = sum(widths)
+    connector = Mock()
+    worker = NS(_group_leaders=[("target", NS(draft_layer=False))])
+    wrapper = HostMirrorConnector(connector, worker, None, None, defer_resident_decode_row_mirror=True)
+    scheduler_output = NS(has_sync_kv_loads=True, kv_connector_metadata=NS(all_context_pages_resident=resident))
+    input_batch = NS(
+        has_prefill=False,
+        num_tokens=num_tokens,
+        num_tokens_after_padding=num_tokens,
+        num_scheduled_tokens=np.array(widths),
+    )
+    metadata = {"target": NS(num_decode_tokens=num_tokens, num_actual_tokens=num_tokens)}
+
+    wrapper.begin_execution(True)
+    wrapper.pre_forward(scheduler_output, input_batch, attn_metadata=metadata)
+
+    extra = {"defer_decode_row_mirror": True} if defer else {}
+    connector.pre_forward.assert_called_once_with(scheduler_output, input_batch, attn_metadata=metadata, **extra)
 
 
 @pytest.mark.parametrize(
@@ -96,6 +135,149 @@ def test_pooled_hisparse_scope(
         ),
     )
     assert hisparse.supports_pooled_hisparse(config) is expected
+
+
+@pytest.mark.parametrize(
+    ("resident", "padded"),
+    [(True, False), (False, False), (True, True)],
+    ids=["resident", "cold", "padded"],
+)
+def test_resident_mixed_attention_preserves_native_paged_metadata(monkeypatch, resident, padded):
+    from vllm.config.compilation import CUDAGraphMode
+    from vllm.v1.hisparse.runtime import HiSparseCacheHandle, HiSparseRuntime
+
+    from vllm_ascend import hisparse
+    from vllm_ascend.attention import sfa_hisparse
+    from vllm_ascend.device.hardware_profile import DeviceAdaptorFamily
+    from vllm_ascend.hisparse.flash_compat import install_flash_layer_view_bounds
+
+    num_decode, num_live = 6, 15
+    query = torch.arange(num_live, dtype=torch.bfloat16).view(num_live, 1, 1)
+    logical_topk = torch.full((num_live, 1, 2176), -1, dtype=torch.int32)
+    logical_topk[:, 0, 0] = torch.arange(num_live)
+    logical_topk[:, 0, 2050] = 9
+    query_ends = torch.tensor([num_decode, num_live], dtype=torch.int32)
+    key_lengths = torch.tensor([130, 255], dtype=torch.int32)
+    resident_table = torch.tensor([[1, 3, 0], [4, 3 if resident else 0, 2]], dtype=torch.int32)
+    source_table = torch.tensor([[1, 2, 3], [4, 5, 6]], dtype=torch.int32)
+    metadata = NS(
+        num_reqs=2,
+        num_decodes=1,
+        num_prefills=1,
+        num_decode_tokens=num_decode,
+        num_actual_tokens=num_live,
+        num_input_tokens=num_live + int(padded),
+        block_size=128,
+        hisparse_for_capture=False,
+        req_id_per_token=torch.tensor([0] * num_decode + [1] * (num_live - num_decode), dtype=torch.int32),
+        query_start_loc=torch.cat((query_ends.new_zeros(1), query_ends)),
+        prefill_valid_token_mask=(torch.arange(num_live + int(padded)) < query_ends[-1])[:, None],
+    )
+    raw = torch.empty(5 * 9 * 128 * 528, dtype=torch.int8)
+    layer_runtime = object.__new__(HiSparseRuntime)
+    layer_runtime.kv_dtype = torch.float8_e4m3fn
+    layer_runtime.row_width = 528
+    handle = HiSparseCacheHandle(layer_runtime)
+    install_flash_layer_view_bounds(handle)
+    handle.bind_cache(
+        raw,
+        byte_offset=0,
+        block_stride=9 * 128 * 528,
+        num_blocks=5,
+        block_size=128,
+        block_table=resident_table,
+        slot_mapping=torch.empty(0, dtype=torch.int64),
+    )
+    view = handle.view
+    calls = []
+    impl = AscendHiSparseImpl.__new__(AscendHiSparseImpl)
+    impl.enable_sparse_sfa_c8 = True
+    impl.c8_cache_dtype = torch.float8_e4m3fn
+    impl.qk_rope_head_dim = 0
+    impl.vllm_config = NS(
+        attention_config=NS(hisparse_config=NS(), indexer_kv_dtype="fp8"),
+        compilation_config=NS(cudagraph_mode=CUDAGraphMode.FULL_DECODE_ONLY),
+        cache_config=NS(cache_dtype="fp8"),
+        model_config=NS(
+            hf_text_config=NS(model_type="glm5_next_text", index_topk=2048, index_kpool=4, qk_rope_head_dim=0)
+        ),
+        parallel_config=NS(
+            data_parallel_size=1,
+            pipeline_parallel_size=1,
+            prefill_context_parallel_size=1,
+            decode_context_parallel_size=1,
+        ),
+    )
+    impl.index_group_index = 0
+    impl.index_group = NS(
+        set_logical_topk_ready=lambda _: calls.append("ready"),
+        physical_kv_cache=lambda _: view.cache,
+    )
+
+    def resolve(rows, *, block_table, logical_topk_indices, block_size, num_valid_rows):
+        calls.append("resolve")
+        assert block_table is source_table and block_size == 128
+        assert rows.tolist() == [0] * num_decode
+        assert num_valid_rows.tolist() == [num_live]
+        torch.testing.assert_close(logical_topk_indices, logical_topk[:num_decode, 0])
+        return logical_topk_indices
+
+    impl.hisparse_cache = NS(
+        view=view,
+        block_table=resident_table,
+        runtime=NS(
+            request_state_indices=torch.tensor([1, 0], dtype=torch.int32),
+            cache_ops=NS(attention_lengths=(torch.arange(num_live), torch.ones(1)), attention_capacity=1),
+        ),
+        all_context_pages_resident=resident,
+        dummy_batch=False,
+        draft_layer=False,
+        source_block_table=source_table,
+        swap_in=resolve,
+    )
+    monkeypatch.setattr(
+        hisparse, "get_current_hardware_profile", lambda: NS(device_adaptor_family=DeviceAdaptorFamily.FP8_OPTIMIZED)
+    )
+    monkeypatch.setattr(sfa_hisparse, "get_forward_context", lambda: NS(cudagraph_runtime_mode=CUDAGraphMode.NONE))
+    monkeypatch.setattr(torch.npu, "is_current_stream_capturing", lambda: False)
+
+    def paged(_self, q, q_rope, kv, indices, meta, ends, lengths, *, block_table):
+        calls.append("paged")
+        assert q is query and q_rope is None and meta is metadata
+        assert ends is query_ends and lengths is key_lengths
+        assert kv[0].data_ptr() == raw.data_ptr()
+        assert kv[0].shape == (37, 128, 1, 528)
+        assert block_table.tolist() == [[36, 27, 18], [9, 27, 0]]
+        assert indices.shape == (num_live, 1, 2051) and indices.is_contiguous()
+        torch.testing.assert_close(indices, logical_topk[:, :, :2051])
+        return query + 1
+
+    def physical(q, *args, **kwargs):
+        calls.append("physical")
+        torch.testing.assert_close(q, query[:num_decode])
+        return q - 1
+
+    def prefill(q, q_rope, indices, meta, ends, lengths):
+        calls.append("prefill")
+        assert q_rope is None and meta is metadata
+        assert ends is query_ends and lengths is key_lengths
+        torch.testing.assert_close(q, query[num_decode:])
+        torch.testing.assert_close(indices, logical_topk[num_decode:, 0])
+        return q - 2
+
+    monkeypatch.setattr(sfa_hisparse.AscendSFAImpl, "_execute_sparse_flash_attention_process", paged)
+    monkeypatch.setattr(impl, "_attention_physical", physical)
+    monkeypatch.setattr(impl, "_try_c8_resident_prefill", prefill)
+    actual = impl._execute_sparse_flash_attention_process(
+        query, None, (view.cache,), logical_topk, metadata, query_ends, key_lengths
+    )
+
+    if resident and not padded:
+        assert calls == ["ready", "paged"]
+        torch.testing.assert_close(actual, query + 1)
+    else:
+        assert calls == ["ready", "resolve", "physical", "prefill"]
+        torch.testing.assert_close(actual, torch.cat((query[:num_decode] - 1, query[num_decode:] - 2)))
 
 
 @pytest.fixture(params=[False, True], ids=["standalone", "profiled"])
@@ -560,6 +742,7 @@ def prefill_mask_builder(monkeypatch):
             seq_lens=torch.diff(query),
             block_table=torch.ones((num_reqs, 1), dtype=torch.int32),
             block_size=128,
+            hisparse_for_capture=False,
             prefill_valid_token_mask=None,
         )
         common = NS(num_reqs=num_reqs, query_start_loc_cpu=query, metadata=metadata)
@@ -586,7 +769,7 @@ def test_prefill_mask_is_reused_without_mutating_layer_topk(
     impl.hisparse_cache = NS(
         source_block_table=metadata.block_table,
         swap_in=lambda *args, **kwargs: None,
-        runtime=NS(cache_ops=NS(attention_capacity=0)),
+        runtime=NS(request_state_indices=None, cache_ops=NS(attention_capacity=0)),
     )
 
     def resident_prefill(query, query_rope, logical, *args):

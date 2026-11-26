@@ -8,6 +8,8 @@ from vllm.config import VllmConfig
 
 from vllm_ascend.device.hardware_profile import DeviceAdaptorFamily, HardwareCapability, get_current_hardware_profile
 
+HISPARSE_GROUPED_QUERY_LEN = 6
+
 
 def supports_hybrid_hisparse_core() -> bool:
     """Require Core support for separate indexer pages and fitted recurrent state."""
