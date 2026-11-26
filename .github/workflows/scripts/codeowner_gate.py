@@ -280,22 +280,31 @@ def is_write_plus(user: str) -> bool:
       ``maintain`` maps to "write" and a custom role granting push also maps
       to "write".
 
-    This endpoint only requires "Metadata" repository read (per GitHub's
-    fine-grained permission table), so the ci-gate job's ``GITHUB_TOKEN``
-    suffices - including the read-only token fork PRs get. Anyone can comment
-    on a public repo, so a non-collaborator is a 404, not an error: an unknown
-    role means "not write+", never a gate crash.
+    This endpoint requires read access to repository metadata, so the ci-gate
+    job's ``GITHUB_TOKEN`` needs ``contents: read`` (set in ``pr_test.yaml``);
+    the token of a fork PR is read-only but still requests that scope. Anyone
+    can comment on a public repo, so a non-collaborator is a 404, not an error:
+    an unknown role means "not write+", never a gate crash.
+
+    A 403 means the permission could not be read at all (missing scope or a
+    token without push access), which would silently turn a legitimate
+    ``/ignore-owner`` into a no-op. It is reported as a workflow warning so the
+    failure is diagnosable instead of looking like a plain missing permission.
     """
     try:
         data = gh_api("repos/{owner}/{repo}/collaborators/{user}/permission", user=user)
     except urllib.error.HTTPError as error:
-        if error.code in (403, 404):
+        if error.code == 404:
+            return False
+        if error.code == 403:
+            print(
+                f"::warning::cannot read the permission of {user} (HTTP 403); "
+                f"treating /ignore-owner from this user as unauthorized",
+                file=sys.stderr,
+            )
             return False
         raise
-    return (
-        data.get("role_name") in IGNORE_ALLOWED_ROLES
-        or data.get("permission") in IGNORE_ALLOWED_PERMISSIONS
-    )
+    return data.get("role_name") in IGNORE_ALLOWED_ROLES or data.get("permission") in IGNORE_ALLOWED_PERMISSIONS
 
 
 def get_ignore_spec(pr_number: int) -> tuple[str, list[str], str]:
@@ -326,10 +335,7 @@ def get_ignore_spec(pr_number: int) -> tuple[str, list[str], str]:
             continue
         body = (comment.get("body") or "").strip()
         first_line = body.splitlines()[0].strip() if body else ""
-        if not (
-            first_line in (IGNORE_COMMAND, IGNORE_CLEAR_COMMAND)
-            or first_line.startswith(IGNORE_COMMAND + " ")
-        ):
+        if not (first_line in (IGNORE_COMMAND, IGNORE_CLEAR_COMMAND) or first_line.startswith(IGNORE_COMMAND + " ")):
             continue
         user = (comment.get("user") or {}).get("login") or ""
         # A deleted account (empty login) or a non-write+ commenter must never
@@ -412,31 +418,21 @@ def check_approvals(
         # A pending "changes requested" from any owner of the file (excluding
         # the PR author) blocks it even when another owner approved; the
         # author must address the feedback and get the owner to re-review.
-        blocking = [
-            o.lstrip("@")
-            for o in eligible
-            if reviews.get(o.lstrip("@")) == "CHANGES_REQUESTED"
-        ]
+        blocking = [o.lstrip("@") for o in eligible if reviews.get(o.lstrip("@")) == "CHANGES_REQUESTED"]
         if blocking:
             failures.append(
                 f"{path}: changes requested by {', '.join('@' + b for b in blocking)}; "
                 "address the feedback, then ask them to re-review (approve or dismiss)"
             )
             continue
-        approved = [
-            o.lstrip("@") for o in eligible if reviews.get(o.lstrip("@")) == "APPROVED"
-        ]
+        approved = [o.lstrip("@") for o in eligible if reviews.get(o.lstrip("@")) == "APPROVED"]
         if not approved:
-            failures.append(
-                f"{path}: waiting for approval from one of: {', '.join(eligible)}"
-            )
+            failures.append(f"{path}: waiting for approval from one of: {', '.join(eligible)}")
     return failures, unclaimed, self_owned, ignored
 
 
 def list_tracked_files(repo_root: str) -> list[str]:
-    out = subprocess.run(
-        ["git", "ls-files"], capture_output=True, text=True, check=True, cwd=repo_root
-    )
+    out = subprocess.run(["git", "ls-files"], capture_output=True, text=True, check=True, cwd=repo_root)
     return out.stdout.splitlines()
 
 
@@ -454,9 +450,7 @@ def is_contentless_file(path: str) -> bool:
         return False
 
 
-def check_coverage(
-    rules: list[Rule], tracked: list[str]
-) -> tuple[list[str], list[str]]:
+def check_coverage(rules: list[Rule], tracked: list[str]) -> tuple[list[str], list[str]]:
     """CODEOWNERS health: ownership of tracked files + stale entries.
 
     Returns ``(errors, warnings)``:
@@ -486,15 +480,11 @@ def check_coverage(
         if rule.status != "active":
             continue
         if not rule.owners:
-            errors.append(
-                f"CODEOWNERS entry has no owner and is ignored by GitHub (line {rule.line}): /{rule.pattern}"
-            )
+            errors.append(f"CODEOWNERS entry has no owner and is ignored by GitHub (line {rule.line}): /{rule.pattern}")
             continue
         hit = any(pattern_matches(rule.pattern, path) for path in tracked_set)
         if not hit:
-            errors.append(
-                f"stale CODEOWNERS entry (line {rule.line}): /{rule.pattern} matches no tracked file"
-            )
+            errors.append(f"stale CODEOWNERS entry (line {rule.line}): /{rule.pattern} matches no tracked file")
     return errors, warnings
 
 
@@ -517,9 +507,7 @@ def main() -> int:
     p_approvals.add_argument("--author", default="", help="PR author login")
     p_approvals.add_argument("--files-json", help="local fixture: changed files JSON")
     p_approvals.add_argument("--reviews-json", help="local fixture: reviews JSON")
-    p_approvals.add_argument(
-        "--ignore-json", help="local fixture: ignore spec [kind, paths] JSON"
-    )
+    p_approvals.add_argument("--ignore-json", help="local fixture: ignore spec [kind, paths] JSON")
 
     p_cov = sub.add_parser("check-coverage", help="CODEOWNERS health check")
     p_cov.add_argument("--files-json", help="local fixture: tracked files JSON")
@@ -544,9 +532,7 @@ def main() -> int:
         if args.ignore_json:
             with open(args.ignore_json) as f:
                 loaded = json.load(f)
-            ignore_spec = (
-                tuple(loaded) if len(loaded) == 3 else (loaded[0], loaded[1], "")
-            )
+            ignore_spec = tuple(loaded) if len(loaded) == 3 else (loaded[0], loaded[1], "")
         elif args.pr:
             ignore_spec = get_ignore_spec(args.pr)
         else:
@@ -573,9 +559,7 @@ def main() -> int:
         for path in unclaimed:
             print(f"  ::warning::{path}: no CODEOWNERS owner yet; no approval required")
         for path in self_owned:
-            print(
-                f"  ::warning::{path}: sole owner is the PR author; no additional approval required"
-            )
+            print(f"  ::warning::{path}: sole owner is the PR author; no additional approval required")
         ignore_by = ignore_spec[2] if len(ignore_spec) > 2 else ""
         for path in ignored:
             who = f" by @{ignore_by}" if ignore_by else ""
@@ -607,9 +591,7 @@ def main() -> int:
             for failure in errors:
                 print(f"  ::error::{failure}")
             return 1
-        print(
-            f"codeowner coverage check PASSED ({len(tracked)} files, {len(warnings)} unclaimed-file warnings)"
-        )
+        print(f"codeowner coverage check PASSED ({len(tracked)} files, {len(warnings)} unclaimed-file warnings)")
         return 0
 
     return 2

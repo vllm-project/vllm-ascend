@@ -888,6 +888,10 @@ jobs:
       # the PR's reviews and changed files for the CODEOWNERS gate.
       issues: write
       pull-requests: write
+      # /ignore-owner re-validates the command author with
+      # GET /collaborators/{user}/permission, which requires read access to
+      # repository metadata that unspecified scopes do not grant.
+      contents: read
     env:
       HEAD_SHA: ${{ github.event.pull_request.head.sha }}
     steps:

@@ -101,9 +101,7 @@ class TestApprovals:
     def test_unowned_file_fails(self, rules):
         # Policy: unclaimed files are not gate failures; they are surfaced
         # as a notice (PR comment / warnings) instead.
-        failures, unclaimed, _self, _ignored = gate.check_approvals(
-            1, "author", rules, ["unknown/x.py"], {}
-        )
+        failures, unclaimed, _self, _ignored = gate.check_approvals(1, "author", rules, ["unknown/x.py"], {})
         assert failures == []
         assert unclaimed == ["unknown/x.py"]
 
@@ -118,9 +116,7 @@ class TestApprovals:
 
 class TestCoverage:
     def test_uncovered_file(self, rules):
-        errors, warnings = gate.check_coverage(
-            rules, ["vllm_ascend/device/a.py", "orphan/x.py"]
-        )
+        errors, warnings = gate.check_coverage(rules, ["vllm_ascend/device/a.py", "orphan/x.py"])
         assert any("orphan/x.py" in w for w in warnings)
         assert not any("vllm_ascend/device/a.py" in f for f in errors + warnings)
 
@@ -137,25 +133,19 @@ class TestCoverage:
         # TODO entries are inactive; they must not trigger stale errors.
         rules = gate.parse_codeowners("# TODO(owner): /some_dir\n# /some_dir @a\n")
         errors, warnings = gate.check_coverage(rules, ["other/file.py"])
-        assert errors == [] and warnings == [
-            "file has no CODEOWNERS owner: other/file.py"
-        ]
+        assert errors == [] and warnings == ["file has no CODEOWNERS owner: other/file.py"]
 
     def test_ownerless_todo_does_not_count_as_coverage(self):
         # Strict mode: a file covered only by an ownerless TODO entry is
         # reported as unowned - nobody is accountable for it.
         rules = gate.parse_codeowners("# TODO(owner): /some_dir\n# /some_dir\n")
         errors, warnings = gate.check_coverage(rules, ["some_dir/file.py"])
-        assert errors == [] and warnings == [
-            "file has no CODEOWNERS owner: some_dir/file.py"
-        ]
+        assert errors == [] and warnings == ["file has no CODEOWNERS owner: some_dir/file.py"]
 
     def test_todo_with_owner_counts_as_owned(self):
         # A TODO entry that already names owners counts as owned (it becomes
         # real the moment it is uncommented).
-        rules = gate.parse_codeowners(
-            "# TODO(owner): /some_dir @pending\n# /some_dir @pending\n"
-        )
+        rules = gate.parse_codeowners("# TODO(owner): /some_dir @pending\n# /some_dir @pending\n")
         assert gate.check_coverage(rules, ["some_dir/file.py"]) == ([], [])
 
     def test_coverage_passes(self, rules):
@@ -194,9 +184,7 @@ class TestOwnerlessActiveRule:
         # unowned, because GitHub ignores ownerless entries.
         rules = gate.parse_codeowners("/orphan_dir\n/real @a\n")
         errors, warnings = gate.check_coverage(rules, ["orphan_dir/f.py"])
-        assert any(
-            "orphan_dir/f.py" in w and "no CODEOWNERS owner" in w for w in warnings
-        )
+        assert any("orphan_dir/f.py" in w and "no CODEOWNERS owner" in w for w in warnings)
 
 
 class TestNestedOwners:
@@ -356,26 +344,18 @@ class TestSkipInApprovals:
     def test_skip_overrides_active_rule(self):
         # /tests is actively owned, but the later SKIP(owner) /tests/ut/
         # carves out a deliberately-unowned subtree.
-        rules = gate.parse_codeowners(
-            "/tests @wenjun91\n# SKIP(owner): /tests/ut/\n# SKIP(owner): /tests/ut/\n"
-        )
-        failures, _unclaimed, _self_owned, _ignored = gate.check_approvals(
-            1, "author", rules, ["tests/ut/foo.py"], {}
-        )
+        rules = gate.parse_codeowners("/tests @wenjun91\n# SKIP(owner): /tests/ut/\n# SKIP(owner): /tests/ut/\n")
+        failures, _unclaimed, _self_owned, _ignored = gate.check_approvals(1, "author", rules, ["tests/ut/foo.py"], {})
         assert failures == []
 
     def test_active_outside_skip_still_gated(self):
         rules = gate.parse_codeowners("/tests @wenjun91\n# SKIP(owner): /tests/ut/\n")
-        failures, _unclaimed, _self_owned, _ignored = gate.check_approvals(
-            1, "author", rules, ["tests/e2e/foo.py"], {}
-        )
+        failures, _unclaimed, _self_owned, _ignored = gate.check_approvals(1, "author", rules, ["tests/e2e/foo.py"], {})
         assert any("wenjun91" in f for f in failures)
 
     def test_skip_before_active_does_not_win(self):
         # An active rule after the SKIP re-owns the subtree.
-        rules = gate.parse_codeowners(
-            "# SKIP(owner): /tests/ut/\n# /tests/ut/\n/tests @wenjun91\n"
-        )
+        rules = gate.parse_codeowners("# SKIP(owner): /tests/ut/\n# /tests/ut/\n/tests @wenjun91\n")
         owners, skipped = gate.resolve_owners(rules, "tests/ut/foo.py")
         assert not skipped and owners == ["@wenjun91"]
 
@@ -602,15 +582,11 @@ class TestIgnoreOwner:
         assert failures == [] and unclaimed == ["vllm_ascend/ops/sub/b.py"]
 
     def test_none_spec_does_not_ignore(self, rules):
-        failures, _un, _self, ignored = self._approvals(
-            rules, ["vllm_ascend/device/a.py"], {}, ("none", [], "")
-        )
+        failures, _un, _self, ignored = self._approvals(rules, ["vllm_ascend/device/a.py"], {}, ("none", [], ""))
         assert failures and ignored == []
 
     def test_clear_spec_does_not_ignore(self, rules):
-        failures, _un, _self, ignored = self._approvals(
-            rules, ["vllm_ascend/device/a.py"], {}, ("clear", [], "")
-        )
+        failures, _un, _self, ignored = self._approvals(rules, ["vllm_ascend/device/a.py"], {}, ("clear", [], ""))
         assert failures and ignored == []
 
     def test_ignore_does_not_affect_coverage(self, rules):
@@ -652,9 +628,7 @@ class TestGetIgnoreSpec:
         assert self._run(monkeypatch, [self._comment("looks good")]) == ("none", [], "")
 
     def test_paths_command(self, monkeypatch):
-        kind, paths, by = self._run(
-            monkeypatch, [self._comment("/ignore-owner docs/a.md docs/b.md")]
-        )
+        kind, paths, by = self._run(monkeypatch, [self._comment("/ignore-owner docs/a.md docs/b.md")])
         assert (kind, paths, by) == ("paths", ["docs/a.md", "docs/b.md"], "alice")
 
     def test_bare_command_ignores_all(self, monkeypatch):
@@ -672,9 +646,7 @@ class TestGetIgnoreSpec:
         )
 
     def test_command_with_prose_below(self, monkeypatch):
-        kind, paths, _by = self._run(
-            monkeypatch, [self._comment("/ignore-owner docs/a.md\nsmall docs fix")]
-        )
+        kind, paths, _by = self._run(monkeypatch, [self._comment("/ignore-owner docs/a.md\nsmall docs fix")])
         assert kind == "paths" and paths == ["docs/a.md"]
 
     def test_bot_comment_skipped(self, monkeypatch):
@@ -705,23 +677,19 @@ class TestGetIgnoreSpec:
             self._comment("/ignore-owner docs/a.md", login="alice"),
             self._comment("/ignore-owner", login="bob"),
         ]
-        assert self._run(
-            monkeypatch, comments, roles={"alice": "write", "bob": "triage"}
-        ) == ("paths", ["docs/a.md"], "alice")
+        assert self._run(monkeypatch, comments, roles={"alice": "write", "bob": "triage"}) == (
+            "paths",
+            ["docs/a.md"],
+            "alice",
+        )
 
     def test_write_permission_required(self, monkeypatch):
         for role in ("read", "triage"):
-            assert (
-                self._run(monkeypatch, [self._comment("/ignore-owner")], role=role)[0]
-                == "none"
-            )
+            assert self._run(monkeypatch, [self._comment("/ignore-owner")], role=role)[0] == "none"
 
     def test_write_maintain_admin_allowed(self, monkeypatch):
         for role in ("write", "maintain", "admin"):
-            assert (
-                self._run(monkeypatch, [self._comment("/ignore-owner")], role=role)[0]
-                == "all"
-            )
+            assert self._run(monkeypatch, [self._comment("/ignore-owner")], role=role)[0] == "all"
 
     def test_legacy_permission_field_counts(self, monkeypatch):
         # A custom role whose `role_name` is not a standard name but whose
@@ -757,6 +725,53 @@ class TestGetIgnoreSpec:
     def test_path_is_ignored_normalizes_leading_slash(self):
         assert gate.path_is_ignored("docs/a.md", "paths", ["/docs/a.md"])
         assert gate.path_is_ignored("docs/sub/b.md", "paths", ["docs/"])
+
+
+class TestIsWritePlus:
+    """is_write_plus reads the collaborators permission endpoint: write+ only,
+    404 (non-collaborator) is False, 403 warns instead of failing silently."""
+
+    def _run(self, monkeypatch, payload=None, error=None):
+        def fake_api(endpoint, **kw):
+            assert "permission" in endpoint
+            if error is not None:
+                raise error
+            return payload
+
+        monkeypatch.setattr(gate, "gh_api", fake_api)
+        return gate.is_write_plus("alice")
+
+    def test_write_maintain_admin_allowed(self, monkeypatch):
+        for role in ("write", "maintain", "admin"):
+            assert self._run(monkeypatch, {"role_name": role}) is True
+
+    def test_read_and_triage_denied(self, monkeypatch):
+        for role in ("read", "triage", "none"):
+            assert self._run(monkeypatch, {"role_name": role}) is False
+
+    def test_legacy_permission_field_counts(self, monkeypatch):
+        assert self._run(monkeypatch, {"role_name": "custom", "permission": "write"})
+        assert self._run(monkeypatch, {"role_name": "custom", "permission": "admin"})
+
+    def test_non_collaborator_404_is_false(self, monkeypatch):
+        import urllib.error
+
+        error = urllib.error.HTTPError("url", 404, "not found", {}, None)
+        assert self._run(monkeypatch, error=error) is False
+
+    def test_forbidden_403_warns_and_is_false(self, monkeypatch, capsys):
+        import urllib.error
+
+        error = urllib.error.HTTPError("url", 403, "forbidden", {}, None)
+        assert self._run(monkeypatch, error=error) is False
+        assert "::warning::" in capsys.readouterr().err
+
+    def test_other_http_errors_raise(self, monkeypatch):
+        import urllib.error
+
+        error = urllib.error.HTTPError("url", 500, "boom", {}, None)
+        with pytest.raises(urllib.error.HTTPError):
+            self._run(monkeypatch, error=error)
 
 
 class TestIgnoreOwnerIntegration:

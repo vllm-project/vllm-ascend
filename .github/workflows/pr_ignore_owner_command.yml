@@ -25,8 +25,12 @@ name: Handle /ignore-owner Command
 # made inside ci-gate by codeowner_gate.py, which re-reads the PR comments
 # and re-validates the commenter's permission on every run from the BASE
 # branch checkout - a PR cannot forge or weaken it. What this handler adds:
-# a confirmation reply and a re-run of the failed jobs so an already-finished
-# red gate turns green without waiting for the next CI trigger.
+# a confirmation reply and a re-run of the ci-gate job so a finished run
+# re-judges the latest command in BOTH directions: a waiver turns a red gate
+# green, and /ignore-owner-clear (or a narrower command) turns a stale green
+# gate red again without waiting for the next CI trigger or a new commit.
+# Only ci-gate is re-run (never the NPU UT/E2E jobs); this is the same
+# base-context, per-job re-run mechanism as refresh_ci_gate.py.
 #
 # Permission: write and above only (no triage, unlike /run). Overriding
 # ownership is a maintainer decision, and the PR-author exemption of /run
@@ -119,7 +123,7 @@ jobs:
         if: steps.auth.outputs.authorized == 'false'
         run: exit 1
 
-      - name: Re-run failed jobs if the CI run already finished red
+      - name: Re-run the ci-gate job so the latest command is judged
         id: rerun
         if: steps.auth.outputs.authorized == 'true'
         env:
@@ -128,9 +132,14 @@ jobs:
           PR_NUMBER: ${{ github.event.client_payload.pull_request.number }}
           REPO: ${{ github.event.client_payload.github.payload.repository.full_name }}
         run: |
-          # The gate re-reads comments on every run, so only a finished red run
-          # needs help: an in-flight run judges with the command already in
-          # place, and a green run has nothing to prove.
+          # The gate re-reads comments on every run, so only a run that already
+          # finished needs a nudge: an in-flight run's ci-gate job runs last and
+          # will judge with the command in place. A finished run needs a re-run
+          # for BOTH directions: a waiver turns a red gate green, and
+          # /ignore-owner-clear (or a narrower command) must re-arm a stale
+          # green check - otherwise the PR could merge with the waiver still in
+          # effect. Re-running only the ci-gate job re-judges the gate without
+          # churning the NPU UT/E2E jobs (the review-retrigger bot's approach).
           RUNS=$(curl -sS --compressed -H "Authorization: Bearer $GITHUB_TOKEN" \
             "https://api.github.com/repos/$REPO/actions/runs?head_sha=$PR_SHA&per_page=100")
 
@@ -167,22 +176,43 @@ jobs:
               exit 0 ;;
           esac
 
-          if [ "$CONCLUSION" = "success" ]; then
-            echo "state=already_passed" >> "$GITHUB_OUTPUT"
-            exit 0
+          rerun() {
+            curl -s -o /dev/null -w "%{http_code}" -X POST \
+              -H "Authorization: Bearer $GITHUB_TOKEN" \
+              -H "Accept: application/vnd.github+json" "$1"
+          }
+
+          # Prefer re-running the single ci-gate job: it contains the CODEOWNERS
+          # gate, and a per-job re-run works for a completed run whether that job
+          # passed or failed, so the required check flips in place. 201 means
+          # accepted, 409 means the same re-run is already in flight.
+          JOBS=$(curl -sS -H "Authorization: Bearer $GITHUB_TOKEN" \
+            "https://api.github.com/repos/$REPO/actions/runs/$RUN_ID/jobs?per_page=100")
+          GATE_JOB_ID=$(printf '%s' "$JOBS" | jq -r '[.jobs[] | select(.name == "ci-gate")][0].id // empty')
+
+          CODE=""
+          if [ -n "$GATE_JOB_ID" ]; then
+            CODE=$(rerun "https://api.github.com/repos/$REPO/actions/jobs/$GATE_JOB_ID/rerun")
           fi
 
-          # Finished red: re-run the failed jobs. The gate re-judges with the
-          # command in place; failures caused by code or tests stay red.
-          CODE=$(curl -s -o /dev/null -w "%{http_code}" -X POST \
-            -H "Authorization: Bearer $GITHUB_TOKEN" \
-            -H "Accept: application/vnd.github+json" \
-            "https://api.github.com/repos/$REPO/actions/runs/$RUN_ID/rerun-failed-jobs")
-          if [ "$CODE" = "200" ] || [ "$CODE" = "409" ]; then
-            # 409: a re-run is already in flight, same effect.
+          # Fall back when the job cannot be re-run individually or is missing
+          # from the listing: retry the failed jobs on a red run, else the whole
+          # run (a green run has no failed jobs to retry).
+          if [ "$CODE" != "201" ] && [ "$CODE" != "409" ]; then
+            if [ "$CONCLUSION" = "success" ]; then
+              CODE=$(rerun "https://api.github.com/repos/$REPO/actions/runs/$RUN_ID/rerun")
+            else
+              CODE=$(rerun "https://api.github.com/repos/$REPO/actions/runs/$RUN_ID/rerun-failed-jobs")
+              if [ "$CODE" != "201" ] && [ "$CODE" != "409" ]; then
+                CODE=$(rerun "https://api.github.com/repos/$REPO/actions/runs/$RUN_ID/rerun")
+              fi
+            fi
+          fi
+
+          if [ "$CODE" = "201" ] || [ "$CODE" = "409" ]; then
             echo "state=rerun_started" >> "$GITHUB_OUTPUT"
           else
-            echo "::error::rerun-failed-jobs returned HTTP $CODE"
+            echo "::error::re-running the ci-gate job returned HTTP $CODE"
             echo "state=rerun_failed" >> "$GITHUB_OUTPUT"
             echo "http_code=$CODE" >> "$GITHUB_OUTPUT"
           fi
@@ -197,7 +227,7 @@ jobs:
           body: |
             [Bot]: ${{ steps.cmd.outputs.accepted }}. ${{ steps.cmd.outputs.effect }} The CODEOWNERS coverage health check is never waived.
 
-            The finished CI run is being re-run so the gate re-judges with the latest command; failures caused by code or tests stay red.
+            The `ci-gate` job is being re-run so it re-judges the latest command. Only the gate is re-run, not the NPU UT/E2E jobs; failures caused by code or tests stay red.
           reactions: rocket
 
       - name: Comment in-flight notice on PR
@@ -211,19 +241,6 @@ jobs:
             [Bot]: ${{ steps.cmd.outputs.accepted }}. ${{ steps.cmd.outputs.effect }} The CODEOWNERS coverage health check is never waived.
 
             A CI run is already in flight; its ci-gate job runs last and will judge with the latest command.
-          reactions: rocket
-
-      - name: Comment already-passed notice on PR
-        if: steps.rerun.outputs.state == 'already_passed'
-        uses: peter-evans/create-or-update-comment@v5
-        with:
-          token: ${{ secrets.PAT_TOKEN }}
-          repository: ${{ github.event.client_payload.github.payload.repository.full_name }}
-          comment-id: ${{ github.event.client_payload.github.payload.comment.id }}
-          body: |
-            [Bot]: ${{ steps.cmd.outputs.accepted }}. ${{ steps.cmd.outputs.effect }} The CODEOWNERS coverage health check is never waived.
-
-            The CI run for this commit already passed; nothing to re-run.
           reactions: rocket
 
       - name: Comment stale-head notice on PR
@@ -256,7 +273,7 @@ jobs:
           repository: ${{ github.event.client_payload.github.payload.repository.full_name }}
           comment-id: ${{ github.event.client_payload.github.payload.comment.id }}
           body: |
-            [Bot]: ${{ steps.cmd.outputs.accepted }}, but re-running the finished CI run failed (HTTP ${{ steps.rerun.outputs.http_code }}). Trigger it manually from the Actions page; the gate will judge with the latest command on the next run either way.
+            [Bot]: ${{ steps.cmd.outputs.accepted }}, but re-running the `ci-gate` job failed (HTTP ${{ steps.rerun.outputs.http_code }}). Trigger it manually from the Actions page; the gate will judge with the latest command on the next run either way.
           reactions: confused
 
       - name: Fail if the rerun API call failed
