@@ -100,9 +100,9 @@ curl http://localhost:8000/v1/chat/completions \
 
 ## 6 Accuracy Evaluation
 
-### 6.1 lm_eval (nightly harness)
+### 6.1 lm_eval
 
-The model is registered in the accuracy nightly under `pr-accuracy-group-1` (single card). Run locally with:
+Accuracy is tracked through the e2e harness on a single card. Run with:
 
 ```shell
 pytest -sv tests/e2e/models/test_lm_eval_correctness.py \
@@ -122,7 +122,7 @@ pytest -sv tests/e2e/models/test_lm_eval_correctness.py \
 
 Thresholds are calibrated on a single Atlas A2 card with 3 runs (median, RTOL 0.05).
 
-ceval-valid was evaluated during calibration (acc 0.476 at limit 200) and dropped from the nightly config: as an English-centric model this score reflects real capability rather than an engine issue, and a bonus threshold within RTOL 0.05 could not be sustained. Chinese coverage is provided by the one-card e2e cases instead.
+ceval-valid was evaluated during calibration (acc 0.476 at limit 200) and dropped from the accuracy config: as an English-centric model this score reflects real capability rather than an engine issue, and a bonus threshold within RTOL 0.05 could not be sustained. Chinese coverage is provided by the one-card e2e cases instead.
 
 ## 7 FAQ
 
