@@ -425,3 +425,13 @@ def test_lora_linear_raises_runtime_error_for_stale_wrapper_id() -> None:
     b = [torch.zeros(1, 1, 4, 2, dtype=torch.bfloat16)]
     with pytest.raises(RuntimeError, match=rf"wrapper id {wrapper_id} is no longer registered"):
         lora_ops.lora_linear(wrapper_id, y, x, a, b, 1.0, [4], None, None, True)
+
+
+@pytest.mark.parametrize("adapter_id,expected_slots", [(0, frozenset()), (11, frozenset({0})), (22, frozenset({1}))])
+def test_active_slot_metadata_tracks_one_request_without_reading_device_tensors(adapter_id, expected_slots):
+    wrapper = _make_wrapper()
+    mapping = SimpleNamespace(index_mapping=(adapter_id,) * 3)
+    with patch("vllm_ascend.lora.punica_npu.PunicaWrapperBase.update_metadata"):
+        wrapper.update_metadata(mapping, [11, 22, None], 4, 128)
+    assert wrapper.active_lora_slots == expected_slots
+    assert wrapper.no_lora == (adapter_id == 0)

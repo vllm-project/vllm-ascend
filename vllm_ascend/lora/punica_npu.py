@@ -7,6 +7,7 @@ from vllm.lora.punica_wrapper.punica_base import PunicaWrapperBase
 
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.lora.lora_ops import _LORA_WRAPPER_IDS, _LORA_WRAPPERS, lora_linear
+from vllm_ascend.lora.torch_ops import expand_slice
 from vllm_ascend.lora.utils import refresh_all_lora_classes
 from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
 
@@ -27,6 +28,7 @@ class PunicaWrapperNPU(PunicaWrapperBase):
         self._lora_shrink_buffers: dict[tuple[int, int], torch.Tensor] = {}
         self._lora_triton_workspaces: dict[int, torch.Tensor] = {}
         self.lora_config = kwargs.get("lora_config")
+        self.active_lora_slots: frozenset[int] = frozenset()
         ascend_device_type = get_ascend_device_type()
         self.ascend_device_type = ascend_device_type
         if not get_current_hardware_profile().supports(HardwareCapability.LORA_CUSTOM_OPS) or (
@@ -107,7 +109,11 @@ class PunicaWrapperNPU(PunicaWrapperBase):
         )
         # PunicaWrapperBase computes this only for prefill. Decode must also
         # choose between the active-LoRA and base-only quantized MoE paths.
-        self.no_lora = not any(lora_id > 0 for lora_id in mapping.index_mapping)
+        active_ids = {lora_id for lora_id in mapping.index_mapping if lora_id > 0}
+        self.no_lora = not active_ids
+        self.active_lora_slots = frozenset(
+            slot for slot, lora_id in enumerate(lora_index_to_id) if lora_id in active_ids
+        )
 
     def _shrink_prefill(
         self,
@@ -233,6 +239,10 @@ class PunicaWrapperNPU(PunicaWrapperBase):
         GEMM of lora'b.
         """
 
+        if y_slice_size < x.shape[-1]:
+            # AscendC expand requires output width >= rank.
+            expand_slice(y, x, w_t_all, self._get_token_lora_indices(x), y_offset, y_slice_size, add_inputs)
+            return
         expand_slice_fun: Callable = self._expand_slice_prefill if self._use_sgmv() else self._expand_slice_decode
         expand_slice_fun(y, x, w_t_all, y_offset, y_slice_size, add_inputs)
 

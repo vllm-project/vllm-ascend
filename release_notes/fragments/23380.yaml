@@ -1,0 +1,7 @@
+pr: 23380
+entries:
+  - category: bugfix
+    text: >-
+      Fixed incorrect LoRA outputs for projections with strided inputs, outputs
+      narrower than the adapter rank, or replicated tensor-parallel shards on Ascend.
+      Merged projections now preserve per-slice target selection across multiple adapter slots.

@@ -36,6 +36,8 @@ def bgmv_shrink(
     lora_indices_tensor: torch.Tensor,
     scaling: float = 1.0,
 ):
+    # Native kernels derive row addresses from the width and do not accept strides.
+    inputs = inputs.contiguous()
     return torch.ops._C_ascend.bgmv_shrink(
         inputs,
         lora_a_weights,
@@ -88,6 +90,8 @@ def sgmv_shrink(
     token_nums: int,
     scaling: float,
 ):
+    # Fused projection splits can retain the parent tensor's larger row stride.
+    inputs = inputs.contiguous()
     return torch.ops._C_ascend.sgmv_shrink(
         inputs, lora_a_weights, lora_indices_tensor, seq_len_tensor, output_tensor, scaling
     )
