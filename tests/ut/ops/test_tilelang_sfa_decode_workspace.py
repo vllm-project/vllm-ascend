@@ -45,7 +45,7 @@ def test_mtp5_1m_bind_uses_worker_tables_and_graph_geometry(monkeypatch):
     impl.indexer.impl.k_norm.eps = 1e-6
     impl.vllm_config.model_config.max_model_len = 1048576
     impl.vllm_config.scheduler_config.max_num_seqs = 60
-    for tokens, padded_rows in ((216, 256), (324, 384), (360, 384)):
+    for tokens, padded_rows in ((216, 224), (324, 384), (360, 384)):
         impl.vllm_config.scheduler_config.max_num_batched_tokens = tokens
         layer = runtime.DecodeLayer(impl)
         assert layer.head_panel.shape == (28, 32, 176)

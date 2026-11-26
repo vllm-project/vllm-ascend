@@ -43,6 +43,7 @@ def test_fused_decode_publishes_indices_and_preserves_connector_order(monkeypatc
     binding = MagicMock(return_value=(kernel, (), indices))
     impl = SimpleNamespace(
         _parallel_o_proj=None,
+        o_proj=None,
         enable_sparse_sfa_turboquant=False,
         qk_rope_head_dim=0,
         g_proj=None,
