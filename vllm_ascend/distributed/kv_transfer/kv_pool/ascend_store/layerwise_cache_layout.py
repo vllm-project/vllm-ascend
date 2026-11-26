@@ -116,6 +116,8 @@ def has_shared_kv_sources(vllm_config: Any) -> bool:
     """Identify execution layers that share a smaller set of KV sources."""
     model = getattr(vllm_config, "model_config", None)
     config = getattr(model, "hf_text_config", None) or getattr(model, "hf_config", None)
+    if config is None:
+        return False
     sources = getattr(config, "kv_source_layer_ids", None)
     return isinstance(sources, (list, tuple)) and bool(sources) and len(sources) < config.num_hidden_layers
 
