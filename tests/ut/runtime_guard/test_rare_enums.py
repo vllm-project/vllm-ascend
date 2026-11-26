@@ -66,3 +66,13 @@ def test_parse_rejects_unmapped_c_enumerator(tmp_path: Path):
     stub.write_text(patched, encoding="utf-8")
     with pytest.raises(KeyError, match="name map missing"):
         rare_enums.build_feat_input(c_path=stub)
+
+
+def test_load_feat_input_falls_back_on_bad_sidecar(tmp_path: Path, monkeypatch):
+    """Truncated/stale .c must not break worker import (frozen fallback)."""
+    bad = tmp_path / "rare_feed_native.c"
+    bad.write_text("enum { FT_LP1 = 0 };\n", encoding="utf-8")
+    monkeypatch.setattr(rare_enums, "_C_PATH", bad)
+    feat, inp = rare_enums._load_feat_input()
+    assert feat == rare_enums._FALLBACK_FEAT
+    assert inp == rare_enums._FALLBACK_INPUT

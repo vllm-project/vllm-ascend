@@ -73,6 +73,9 @@ class SamplePhaseResult:
     valid_sampled_token_ids: Any
     req_ids_output_copy: Any
     finished_req_ids: Any
+    # Per-request accepted count from postprocess_sampled; 0 marks chunked-prefill
+    # phantom rows that must not enter rare_chars (vLLM zeroes num_sampled there).
+    num_sampled: Any = None
 
 
 class RuntimeGuardProcessor(RuntimeGuardBusMixin, RuntimeGuardDumpMixin, RuntimeGuardReportMixin):
@@ -223,6 +226,16 @@ class RuntimeGuardProcessor(RuntimeGuardBusMixin, RuntimeGuardDumpMixin, Runtime
             self.action_executor.stop()
         except Exception:
             logger.debug("[runtime_guard] action worker stop failed", exc_info=True)
+        try:
+            from vllm_ascend.observability.runtime_guard.rare_logprob_feed import (
+                reset_rare_logprob_feed_queue_for_tests,
+            )
+
+            # Production teardown: stop the singleton feed worker (same helper
+            # the UTs use to drop it). Avoid leaving a daemon thread after exit.
+            reset_rare_logprob_feed_queue_for_tests()
+        except Exception:
+            logger.debug("[runtime_guard] rare feed queue stop failed", exc_info=True)
 
     def warmup_detectors(self) -> None:
         """Build detector artifacts that must exist before the first real step.
@@ -560,6 +573,7 @@ class RuntimeGuardProcessor(RuntimeGuardBusMixin, RuntimeGuardDumpMixin, Runtime
             "check_rare_chars",
             lambda: self.check_rare_chars_from_stash(
                 sampled_token_ids=getattr(result.sampler_output, "sampled_token_ids", None),
+                num_sampled=getattr(result, "num_sampled", None),
             ),
         )
         # Hook 3: mark_finished (once; after rare collect stash)
@@ -625,6 +639,7 @@ class RuntimeGuardProcessor(RuntimeGuardBusMixin, RuntimeGuardDumpMixin, Runtime
         self,
         *,
         sampled_token_ids: Any,
+        num_sampled: Any = None,
     ) -> None:
         """After-sample rare_chars collect from stashed pre-sample logits."""
         from vllm_ascend.observability.runtime_guard.hooks import take_pre_sample_logits
@@ -636,9 +651,51 @@ class RuntimeGuardProcessor(RuntimeGuardBusMixin, RuntimeGuardDumpMixin, Runtime
         logits = take_pre_sample_logits(self.runner)
         if logits is None:
             return
-        self._schedule_rare_collect(logits, sampled_token_ids)
+        self._schedule_rare_collect(logits, sampled_token_ids, num_sampled=num_sampled)
 
-    def _schedule_rare_collect(self, logits: Any, sampled_token_ids: Any) -> None:
+    @staticmethod
+    def _mask_chunked_prefill_tokens(sampled_token_ids: Any, num_sampled: Any) -> Any:
+        """Force ``-1`` on rows with ``num_sampled==0`` (chunked-prefill phantoms)."""
+        import torch
+
+        if num_sampled is None or not isinstance(sampled_token_ids, torch.Tensor):
+            return sampled_token_ids
+        if isinstance(num_sampled, torch.Tensor):
+            ns = num_sampled.detach().reshape(-1)
+        else:
+            try:
+                ns = torch.as_tensor(num_sampled, device=sampled_token_ids.device).reshape(-1)
+            except Exception:
+                return sampled_token_ids
+        if ns.numel() != sampled_token_ids.shape[0]:
+            return sampled_token_ids
+        dead = ns <= 0
+        if not bool(dead.any().item() if hasattr(dead, "any") else any(dead)):
+            return sampled_token_ids
+        out = sampled_token_ids.clone()
+        out[dead] = -1
+        return out
+
+    def _note_rare_stream_gap(self, req_ids: list[str] | None = None) -> None:
+        """Reset rare_chars UTF-8 decoder state after a skipped feed step."""
+        detector = self.detectors.get("rare_chars")
+        note = getattr(detector, "note_stream_gap", None) if detector is not None else None
+        if not callable(note):
+            return
+        ids = req_ids
+        if not ids:
+            batch = getattr(self, "_last_input_batch", None)
+            ids = list(getattr(batch, "req_ids", None) or []) if batch is not None else []
+        if ids:
+            note(ids)
+
+    def _schedule_rare_collect(
+        self,
+        logits: Any,
+        sampled_token_ids: Any,
+        *,
+        num_sampled: Any = None,
+    ) -> None:
         """Launch (top1, sampled) on main; D2H+feed deferred to RareLogprobFeedQueue."""
         from vllm_ascend.observability.runtime_guard.hooks import is_async_output_rank
 
@@ -660,7 +717,8 @@ class RuntimeGuardProcessor(RuntimeGuardBusMixin, RuntimeGuardDumpMixin, Runtime
         if logits.numel() == 0 or logits.dim() != 2:
             return
         try:
-            cu_num_logits = self._rare_cu_num_logits()
+            sampled_token_ids = self._mask_chunked_prefill_tokens(sampled_token_ids, num_sampled)
+            cu_num_logits = self._rare_cu_num_logits(num_logit_rows=int(logits.shape[0]))
             num_logit_rows = int(logits.shape[0])
             aligned = align_sampled_token_ids_to_logits(
                 sampled_token_ids,
@@ -686,6 +744,8 @@ class RuntimeGuardProcessor(RuntimeGuardBusMixin, RuntimeGuardDumpMixin, Runtime
                     samp_shape,
                     cu_tail,
                 )
+                # Skipped feed creates a UTF-8 stream hole; reset decoder state.
+                self._note_rare_stream_gap()
                 return
             token_ids, slots_per_req, cu_aligned = aligned
             from vllm_ascend.worker.v2.sample.logprob import compute_top1_and_chosen_logprobs
@@ -704,17 +764,33 @@ class RuntimeGuardProcessor(RuntimeGuardBusMixin, RuntimeGuardDumpMixin, Runtime
         except Exception:
             logger.exception("[runtime_guard: rare_chars] collect failed")
 
-    def _rare_cu_num_logits(self) -> Any | None:
-        """Best-effort ``cu_num_logits`` from the current sample-phase batch."""
+    def _rare_cu_num_logits(self, *, num_logit_rows: int | None = None) -> Any | None:
+        """Best-effort ``cu_num_logits`` from the current sample-phase batch.
+
+        Prefer the device tensor when the host ``cu_num_logits_np`` is stale
+        (adaptive verification keeps true boundaries on device only).
+        """
         batch = getattr(self, "_last_input_batch", None)
         if batch is None:
             batch = getattr(self.runner, "input_batch", None)
         if batch is None:
             return None
-        cu = getattr(batch, "cu_num_logits_np", None)
-        if cu is not None:
-            return cu
-        return getattr(batch, "cu_num_logits", None)
+        cu_np = getattr(batch, "cu_num_logits_np", None)
+        cu_dev = getattr(batch, "cu_num_logits", None)
+        if cu_np is not None and num_logit_rows is not None:
+            try:
+                tail = int(cu_np[-1]) if len(cu_np) else -1
+            except Exception:
+                tail = -1
+            if tail != int(num_logit_rows):
+                # Stale host mirror under adaptive verification — use device.
+                if cu_dev is not None:
+                    return cu_dev
+                return None
+            return cu_np
+        if cu_np is not None:
+            return cu_np
+        return cu_dev
 
     def _stash_rare_batch(
         self,
@@ -809,60 +885,81 @@ class RuntimeGuardProcessor(RuntimeGuardBusMixin, RuntimeGuardDumpMixin, Runtime
 
         pinned = tuple(rid for rid in req_ids[:n_req] if rid)
         store = RequestGuardStore.get()
-        if pinned:
-            store.add_rare_feed_jobs(pinned)
-
-        def _finish_feed(
-            rare_batch=batch,
-            req_ids=req_ids,
-            n_req=n_req,
-            sampled=sampled,
-            pinned_ids=pinned,
-            slots_per_req=slots_per_req,
-            cu_num_logits=cu_num_logits,
-        ) -> None:
-            try:
-                copied = self._copy_rare_batch_to_host(rare_batch)
-                del rare_batch
-                if copied is not None and n_req > 0:
-                    cpu, cpu_tok = copied
-                    self._pack_and_feed_rare(
-                        cpu,
-                        sampled,
-                        req_ids,
-                        n_req,
-                        host_token_ids=cpu_tok,
-                        slots_per_req=slots_per_req,
-                        cu_num_logits=cu_num_logits,
-                    )
-            except Exception:
-                logger.exception("[runtime_guard: rare_chars] async feed finish failed")
-            finally:
-                if pinned_ids:
-                    RequestGuardStore.get().finish_rare_feed_jobs(pinned_ids)
-
-        from vllm_ascend.observability.runtime_guard.rare_logprob_feed import (
-            get_rare_logprob_feed_queue,
-            rare_sync_feed_enabled,
-        )
-
-        # Debug short path: D2H+feed on this thread (no async hide). Default stays queue.
-        if rare_sync_feed_enabled():
-            logger.info_once("[runtime_guard: rare_chars] sync feed (VLLM_ASCEND_RG_RARE_SYNC_FEED=1; debug only)")
-            _finish_feed()
-            return
-
-        ok = bool(get_rare_logprob_feed_queue().submit(_finish_feed))
-        if not ok:
+        pinned_live = False
+        try:
             if pinned:
-                store.finish_rare_feed_jobs(pinned)
-            if batch.ready_event is not None:
-                batch.ready_event.synchronize()
-            del batch
-            logger.warning(
-                "[runtime_guard: rare_chars] feed queue full; dropped sync+feed req_ids=%s",
-                req_ids,
+                store.add_rare_feed_jobs(pinned)
+                pinned_live = True
+
+            def _finish_feed(
+                rare_batch=batch,
+                req_ids=req_ids,
+                n_req=n_req,
+                sampled=sampled,
+                pinned_ids=pinned,
+                slots_per_req=slots_per_req,
+                cu_num_logits=cu_num_logits,
+            ) -> None:
+                try:
+                    copied = self._copy_rare_batch_to_host(rare_batch)
+                    del rare_batch
+                    if copied is not None and n_req > 0:
+                        cpu, cpu_tok = copied
+                        self._pack_and_feed_rare(
+                            cpu,
+                            sampled,
+                            req_ids,
+                            n_req,
+                            host_token_ids=cpu_tok,
+                            slots_per_req=slots_per_req,
+                            cu_num_logits=cu_num_logits,
+                        )
+                except Exception:
+                    logger.exception("[runtime_guard: rare_chars] async feed finish failed")
+                finally:
+                    if pinned_ids:
+                        RequestGuardStore.get().finish_rare_feed_jobs(pinned_ids)
+                    # Idle servers: last pin drop must still flush finish/look-ahead.
+                    with contextlib.suppress(Exception):
+                        self._reap_finished_requests()
+
+            from vllm_ascend.observability.runtime_guard.rare_logprob_feed import (
+                get_rare_logprob_feed_queue,
+                rare_sync_feed_enabled,
             )
+
+            # Debug short path: D2H+feed on this thread (no async hide). Default stays queue.
+            if rare_sync_feed_enabled():
+                logger.info_once("[runtime_guard: rare_chars] sync feed (VLLM_ASCEND_RG_RARE_SYNC_FEED=1; debug only)")
+                _finish_feed()
+                pinned_live = False
+                return
+
+            ok = bool(get_rare_logprob_feed_queue().submit(_finish_feed))
+            if not ok:
+                if pinned_live:
+                    store.finish_rare_feed_jobs(pinned)
+                    pinned_live = False
+                if batch.ready_event is not None:
+                    batch.ready_event.synchronize()
+                del batch
+                self._note_rare_stream_gap(req_ids)
+                logger.warning(
+                    "[runtime_guard: rare_chars] feed queue full; dropped sync+feed req_ids=%s",
+                    req_ids,
+                )
+                return
+            pinned_live = False  # ownership transferred to the feed job
+        except Exception:
+            if pinned_live:
+                with contextlib.suppress(Exception):
+                    store.finish_rare_feed_jobs(pinned)
+            if batch.ready_event is not None:
+                with contextlib.suppress(Exception):
+                    batch.ready_event.synchronize()
+            del batch
+            self._note_rare_stream_gap(req_ids)
+            logger.exception("[runtime_guard: rare_chars] feed submit failed")
 
     def _pack_and_feed_rare(
         self,

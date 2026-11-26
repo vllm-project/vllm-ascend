@@ -429,7 +429,8 @@ static int lowbit(int64_t mask) {
     if (mask == 0) {
         return 0;
     }
-    u = (uint64_t)(mask & -mask);
+    /* Unsigned lowest-set-bit: signed ``mask & -mask`` is UB on INT64_MIN. */
+    u = (uint64_t)mask & -(uint64_t)mask;
     while (u > 1ull) {
         u >>= 1;
         idx++;
@@ -447,9 +448,14 @@ static double quantize(double v, double q) {
 static double score_gb(const Ctx *c, const double *x) {
     double sum = 0.0;
     int t;
+    Py_ssize_t n_leaves = c->qleaf_nbytes / (Py_ssize_t)sizeof(double);
     for (t = 0; t < c->n_trees; t++) {
         int64_t mask = -1;
         int j;
+        int idx;
+        int32_t base = c->qleaf0[t];
+        int32_t end = (t + 1 < c->n_trees) ? c->qleaf0[t + 1] : (int32_t)n_leaves;
+        int nleaf = (int)(end - base);
         for (j = c->qstart[t]; j < c->qstart[t + 1]; j++) {
             int feat = c->qfeat[j];
             int right;
@@ -469,7 +475,11 @@ static double score_gb(const Ctx *c, const double *x) {
                 mask &= c->qrule[j];
             }
         }
-        sum += c->qleaf[c->qleaf0[t] + lowbit(mask)];
+        idx = lowbit(mask);
+        if (nleaf < 1 || idx < 0 || idx >= nleaf) {
+            idx = 0;
+        }
+        sum += c->qleaf[base + idx];
     }
     return c->gb_base + sum;
 }
@@ -1191,6 +1201,7 @@ static PyObject *map_lookup(PyObject *self, PyObject *args) {
 
 typedef struct {
     Ctx *ctx;
+    PyObject *ctx_capsule; /* owned ref; keeps Ctx alive for feed_bound */
     int cap;
     Tmp tmp[21];
     State st;
@@ -1229,6 +1240,9 @@ static void bound_destroy(PyObject *capsule) {
         return;
     }
     drop_all(b->tmp, 21);
+    Py_XDECREF(b->ctx_capsule);
+    b->ctx_capsule = NULL;
+    b->ctx = NULL;
     PyMem_Free(b);
 }
 
@@ -1263,11 +1277,15 @@ static PyObject *bind_state(PyObject *self, PyObject *args) {
     if (b == NULL) {
         return PyErr_NoMemory();
     }
+    Py_INCREF(cap_obj);
+    b->ctx_capsule = cap_obj;
     b->ctx = c;
     b->cap = cap;
 #define BGRAB(i, obj, nbytes)                                                                \
     if (grab(&b->tmp[i], (obj), (nbytes)) < 0) {                                             \
         drop_all(b->tmp, 21);                                                                \
+        Py_DECREF(cap_obj);                                                                  \
+        b->ctx_capsule = NULL;                                                               \
         PyMem_Free(b);                                                                       \
         return NULL;                                                                         \
     }
@@ -1297,6 +1315,8 @@ static PyObject *bind_state(PyObject *self, PyObject *args) {
     capsule = PyCapsule_New(b, "rare_feed_bound", bound_destroy);
     if (capsule == NULL) {
         drop_all(b->tmp, 21);
+        Py_DECREF(cap_obj);
+        b->ctx_capsule = NULL;
         PyMem_Free(b);
         return NULL;
     }

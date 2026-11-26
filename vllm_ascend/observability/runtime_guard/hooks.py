@@ -122,7 +122,7 @@ def _peek_sample_pre_state(runner: Any) -> tuple[Any, Any]:
 def _build_sample_phase_result(runner: Any, output: Any, input_batch: Any, finished_req_ids: Any) -> SamplePhaseResult:
     """Assemble SamplePhaseResult inside the guard layer (not on the runner)."""
     req_ids = list(getattr(input_batch, "req_ids", None) or [])
-    sampled, _num = get_postprocess_sampled(runner)
+    sampled, num_sampled = get_postprocess_sampled(runner)
     # AsyncOutput.sampled_token_ids is padded until get_output() trims; defer
     # after-sample for AsyncModelRunnerOutput (W2-3 / D-11).
     return SamplePhaseResult(
@@ -133,6 +133,7 @@ def _build_sample_phase_result(runner: Any, output: Any, input_batch: Any, finis
         valid_sampled_token_ids=getattr(output, "sampled_token_ids", None),
         req_ids_output_copy=req_ids,
         finished_req_ids=finished_req_ids,
+        num_sampled=num_sampled,
     )
 
 
@@ -324,9 +325,10 @@ def wrap_compute_logits_for_pre_sample(runner: Any, input_batch: Any) -> Iterato
 
     Covers both sample paths:
     - Normal: wrap ``model.compute_logits`` (parent has no mid-hook before grammar).
-    - Batch-sharded: patch ``all_to_all_logits`` in ``GPUModelRunner.sample``'s
-      globals so we see request-mapped full-vocab logits (wrapping
-      ``compute_logits_local`` alone would stash a vocab shard).
+    - Batch-sharded: patch ``all_to_all_vocab_shards`` (or legacy
+      ``all_to_all_logits``) in ``GPUModelRunner.sample``'s globals so we see
+      request-mapped full-vocab logits (wrapping ``compute_logits_local`` alone
+      would stash a vocab shard).
 
     Fires once per context (v2 may call ``compute_logits`` twice per step).
     Restored in ``finally``.
@@ -339,9 +341,14 @@ def wrap_compute_logits_for_pre_sample(runner: Any, input_batch: Any) -> Iterato
     fired = False
 
     # Patch the name ``GPUModelRunner.sample`` closes over (import-bound global).
+    # Pinned vLLM uses ``all_to_all_vocab_shards``; older trees used ``all_to_all_logits``.
     sample_globals = getattr(GPUModelRunner.sample, "__globals__", None)
-    patch_all_to_all = isinstance(sample_globals, dict) and "all_to_all_logits" in sample_globals
-    orig_all_to_all = sample_globals["all_to_all_logits"] if patch_all_to_all else None
+    all_to_all_names = ("all_to_all_vocab_shards", "all_to_all_logits")
+    patch_targets: list[tuple[str, Any]] = []
+    if isinstance(sample_globals, dict):
+        for name in all_to_all_names:
+            if name in sample_globals and callable(sample_globals[name]):
+                patch_targets.append((name, sample_globals[name]))
 
     def _fire(logits: Any) -> None:
         nonlocal fired
@@ -356,20 +363,22 @@ def wrap_compute_logits_for_pre_sample(runner: Any, input_batch: Any) -> Iterato
         _fire(logits)
         return logits
 
-    def wrapped_all_to_all(logits_shard, metadata):
-        assert orig_all_to_all is not None
-        logits = orig_all_to_all(logits_shard, metadata)
-        _fire(logits)
-        return logits
+    def _make_wrapped_all_to_all(orig_fn: Any):
+        def wrapped_all_to_all(*args: Any, **kwargs: Any):
+            logits = orig_fn(*args, **kwargs)
+            _fire(logits)
+            return logits
+
+        return wrapped_all_to_all
 
     model.compute_logits = wrapped
-    if patch_all_to_all:
-        sample_globals["all_to_all_logits"] = wrapped_all_to_all
+    for name, orig_fn in patch_targets:
+        sample_globals[name] = _make_wrapped_all_to_all(orig_fn)
     try:
         yield
     finally:
-        if patch_all_to_all:
-            sample_globals["all_to_all_logits"] = orig_all_to_all
+        for name, orig_fn in patch_targets:
+            sample_globals[name] = orig_fn
         _restore_bound_override(model, "compute_logits", orig, had_instance_attr=had_instance_attr)
 
 
@@ -451,7 +460,10 @@ class AscendAsyncOutput(AsyncModelRunnerOutput):
         if guard is not None:
             batch = self._rare_batch
             self._rare_batch = None
-            guard.feed_rare_logprobs(output, batch=batch)
+            try:
+                guard.feed_rare_logprobs(output, batch=batch)
+            except Exception:
+                logger.exception("[runtime_guard soft-fail] async feed_rare_logprobs raised")
         _safe_check_after_sample(self._runner, output)
         return output
 

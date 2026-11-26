@@ -21,7 +21,6 @@ jobs and a short ActionQueue cannot drop rare_chars feeds under high concurrency
 
 from __future__ import annotations
 
-import contextlib
 import os
 import queue
 import threading
@@ -96,19 +95,29 @@ class RareLogprobFeedQueue:
                 name="rare-logprob-feed",
                 daemon=True,
             )
+            try:
+                self._thread.start()
+            except Exception:
+                self._thread = None
+                raise
             self._started = True
-            self._thread.start()
 
     def stop(self) -> None:
+        thread = None
         with self._lock:
             if not self._started:
                 return
-            with contextlib.suppress(queue.Full):
-                self._jobs.put_nowait(None)
+            # Block until the sentinel is accepted so stop() cannot leave the
+            # worker running with ``_started`` already cleared.
+            try:
+                self._jobs.put(None, timeout=5.0)
+            except queue.Full:
+                logger.warning("[rare_logprob_feed] stop sentinel blocked; joining anyway")
             self._started = False
-        if self._thread is not None:
-            self._thread.join(timeout=5.0)
+            thread = self._thread
             self._thread = None
+        if thread is not None:
+            thread.join(timeout=5.0)
 
     def qsize(self) -> int:
         return int(self._jobs.qsize())
@@ -124,16 +133,20 @@ class RareLogprobFeedQueue:
             return False
 
     def _worker_loop(self) -> None:
-        while True:
-            item = self._jobs.get()
-            try:
-                if item is None:
-                    return
-                item()
-            except Exception:
-                logger.exception("[rare_logprob_feed] job failed")
-            finally:
-                self._jobs.task_done()
+        try:
+            while True:
+                item = self._jobs.get()
+                try:
+                    if item is None:
+                        return
+                    item()
+                except Exception:
+                    logger.exception("[rare_logprob_feed] job failed")
+                finally:
+                    self._jobs.task_done()
+        finally:
+            with self._lock:
+                self._started = False
 
 
 _FEED_QUEUE: RareLogprobFeedQueue | None = None

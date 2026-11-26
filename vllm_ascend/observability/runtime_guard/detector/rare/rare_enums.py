@@ -23,8 +23,12 @@ is absent from an older install layout.
 
 from __future__ import annotations
 
-import regex as re
+import logging
 from pathlib import Path
+
+import regex as re
+
+logger = logging.getLogger(__name__)
 
 # Python rule-feature names → C FT_* enumerator.
 FT_PY_TO_C: dict[str, str] = {
@@ -152,10 +156,22 @@ def assert_enums_match_c(
 
 
 def _load_feat_input() -> tuple[dict[str, int], dict[str, int]]:
-    """Prefer ``.c`` sidecar; fall back to frozen ids if the file is absent."""
-    if _C_PATH.is_file():
+    """Prefer ``.c`` sidecar; fall back to frozen ids if absent or unreadable.
+
+    Worker import must not fail on a truncated / stale sidecar — CI still
+    asserts drift via :func:`assert_enums_match_c`.
+    """
+    if not _C_PATH.is_file():
+        return dict(_FALLBACK_FEAT), dict(_FALLBACK_INPUT)
+    try:
         return build_feat_input()
-    return dict(_FALLBACK_FEAT), dict(_FALLBACK_INPUT)
+    except Exception as exc:
+        logger.warning(
+            "rare_enums: failed to parse %s (%s); using frozen FT_*/IN_* fallback",
+            _C_PATH.name,
+            exc,
+        )
+        return dict(_FALLBACK_FEAT), dict(_FALLBACK_INPUT)
 
 
 # Import-time tables used by ``rare_native``.

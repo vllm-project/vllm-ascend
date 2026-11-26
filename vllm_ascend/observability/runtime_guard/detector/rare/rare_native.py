@@ -108,6 +108,12 @@ class NativeFeed:
         gb_model = detector.gbm
         if gb_model is None:
             raise RuntimeError("native feed requires the rare gb model")
+        gate = getattr(detector, "gate", "fs")
+        if gate != "fs":
+            raise RuntimeError(
+                f"NativeFeed only implements gate='fs' (got {gate!r}); "
+                "use gate='fs' or the numpy reference path"
+            )
         table = detector.T
         ref = detector.ref
         if ref is None or "lcat_s" not in ref:
@@ -129,6 +135,12 @@ class NativeFeed:
         from .rare import _LET
 
         is_letter[np.asarray(_LET, bool)] = 1
+        unsupported = [name for name in gb_model.inputs if name not in _INPUT]
+        if unsupported:
+            raise RuntimeError(
+                f"NativeFeed does not implement GB inputs {unsupported}; "
+                f"supported={sorted(_INPUT)}"
+            )
         in_kind = np.array([_INPUT[name] for name in gb_model.inputs], np.int8)
         atoms_f: list[int] = []
         atoms_k: list[int] = []

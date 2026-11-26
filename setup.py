@@ -330,11 +330,19 @@ class cmake_build_ext(build_ext):
         plain_exts = [ext for ext in self.extensions if not isinstance(ext, CMakeExtension)]
 
         # rare_feed_native (and any future plain Extension) when kernels are off.
+        # Soft-fail without a compiler: runtime already latches rare_chars off
+        # when the extension is missing (warmup fail-closed).
         if plain_exts:
             saved = self.extensions
             self.extensions = plain_exts
             try:
                 build_ext.build_extensions(self)
+            except Exception as exc:
+                logging.warning(
+                    "rare_feed_native Extension build failed (%s); "
+                    "continuing without it (rare_chars will latch off at warmup)",
+                    exc,
+                )
             finally:
                 self.extensions = saved
 

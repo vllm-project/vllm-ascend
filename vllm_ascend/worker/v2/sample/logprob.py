@@ -19,10 +19,12 @@
 
 import torch
 from vllm.logger import logger
-from vllm.triton_utils import tl, triton
+from vllm.triton_utils import HAS_TRITON, tl, triton
 from vllm.v1.outputs import LogprobsTensors
 
 from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num
+
+_NARROW_COLLECT_UNAVAILABLE_LOGGED = False
 
 
 @triton.jit
@@ -118,7 +120,7 @@ def _narrow_collect_finish(
     tok = tl.load(Sampled + row).to(tl.int64)
     ok = (tok >= 0) & (tok < N)
     xc = tl.load(X + row.to(tl.int64) * stride + tok, mask=ok, other=float("nan")).to(tl.float32)
-    bad = (m == -float("inf")) | (m == float("inf"))
+    bad = (m != m) | (m == -float("inf")) | (m == float("inf"))  # NaN or ±inf
     tl.store(Out + row * 2, tl.where(bad, float("nan"), -log_s))
     tl.store(Out + row * 2 + 1, tl.where(bad, float("nan"), (xc - m) - log_s))
 
@@ -130,6 +132,12 @@ def compute_top1_and_chosen_logprobs(
     packed: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor] | torch.Tensor:
     """Return per-row (top1, chosen) logprobs; ``packed=True`` → ``[rows, 2]``."""
+    global _NARROW_COLLECT_UNAVAILABLE_LOGGED
+    if not HAS_TRITON:
+        if not _NARROW_COLLECT_UNAVAILABLE_LOGGED:
+            logger.warning("compute_top1_and_chosen_logprobs requires Triton (HAS_TRITON=False); fail closed")
+            _NARROW_COLLECT_UNAVAILABLE_LOGGED = True
+        raise RuntimeError("compute_top1_and_chosen_logprobs requires Triton")
     if logits.dim() != 2:
         raise ValueError(f"logits must be 2-D [rows, vocab], got shape={tuple(logits.shape)}")
     batch_size, vocab_size = logits.shape

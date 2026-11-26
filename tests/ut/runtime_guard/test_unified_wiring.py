@@ -79,26 +79,34 @@ def test_stash_clones_tensor_before_grammar_rewrite():
 def test_wrap_fires_once_on_batch_sharded_all_to_all_path():
     """batch-sharded sample uses compute_logits_local + all_to_all, not compute_logits."""
     sample_globals = getattr(GPUModelRunner.sample, "__globals__", None)
-    if not isinstance(sample_globals, dict) or "all_to_all_logits" not in sample_globals:
+    patch_name = None
+    if isinstance(sample_globals, dict):
+        for name in ("all_to_all_vocab_shards", "all_to_all_logits"):
+            if name in sample_globals:
+                patch_name = name
+                break
+    if patch_name is None:
         import pytest
 
-        pytest.skip("installed vLLM GPUModelRunner.sample has no batch-sharded all_to_all_logits")
+        pytest.skip(
+            "installed vLLM GPUModelRunner.sample has no batch-sharded all_to_all_vocab_shards / all_to_all_logits"
+        )
 
     dfx = _FakeDfx()
     runner = SimpleNamespace(model=_FakeModel("unused"), runtime_guard=dfx, vocab_size=2, input_batch="batch")
-    orig = sample_globals["all_to_all_logits"]
+    orig = sample_globals[patch_name]
 
-    def fake_all_to_all(logits_shard, metadata):
+    def fake_all_to_all(*_args, **_kwargs):
         # Wider than vocab_size — sample trims after all-to-all.
         return torch.tensor([[1.0, 2.0, 9.0], [3.0, 4.0, 9.0]])
 
-    sample_globals["all_to_all_logits"] = fake_all_to_all
+    sample_globals[patch_name] = fake_all_to_all
     try:
         with wrap_compute_logits_for_pre_sample(runner, "batch"):
-            out = sample_globals["all_to_all_logits"](torch.zeros(1, 1), None)
-            out2 = sample_globals["all_to_all_logits"](torch.zeros(1, 1), None)
+            out = sample_globals[patch_name](torch.zeros(1, 1), None)
+            out2 = sample_globals[patch_name](torch.zeros(1, 1), None)
     finally:
-        sample_globals["all_to_all_logits"] = orig
+        sample_globals[patch_name] = orig
 
     assert out.shape[-1] == 3
     assert out2.shape[-1] == 3

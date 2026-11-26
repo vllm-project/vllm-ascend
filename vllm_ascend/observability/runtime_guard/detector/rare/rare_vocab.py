@@ -38,6 +38,73 @@ def _byte_decoder():
     return {chr(c): b for b, c in zip(bs, cs)}
 
 
+def _meta_has_byte_level(node: Any) -> bool:
+    """True when a tokenizer.json subtree includes a ByteLevel pretokenizer/decoder."""
+    if isinstance(node, dict):
+        if node.get("type") == "ByteLevel":
+            return True
+        return any(_meta_has_byte_level(v) for v in node.values())
+    if isinstance(node, list):
+        return any(_meta_has_byte_level(v) for v in node)
+    return False
+
+
+def _obj_has_byte_level(obj: Any) -> bool:
+    """Inspect a live tokenizer / backend for a ByteLevel pretokenizer."""
+    if obj is None:
+        return False
+    for attr in ("pre_tokenizer", "decoder"):
+        node = getattr(obj, attr, None)
+        if node is None:
+            continue
+        name = type(node).__name__
+        if "ByteLevel" in name:
+            return True
+        # tokenizers.Sequence exposes nested pre_tokenizers / decoders.
+        for nested_attr in ("pre_tokenizers", "decoders"):
+            nested = getattr(node, nested_attr, None)
+            if nested is None:
+                continue
+            try:
+                items = list(nested)
+            except TypeError:
+                continue
+            for item in items:
+                if "ByteLevel" in type(item).__name__:
+                    return True
+    return False
+
+
+def _is_byte_level_bpe(tokenizer: Any = None, *, tokenizer_json_meta: dict[str, Any] | None = None) -> bool:
+    """GPT-2 ``bytes_to_unicode`` is only valid for byte-level BPE backends."""
+    if tokenizer_json_meta is not None:
+        if _meta_has_byte_level(tokenizer_json_meta.get("pre_tokenizer")):
+            return True
+        if _meta_has_byte_level(tokenizer_json_meta.get("decoder")):
+            return True
+    if tokenizer is not None:
+        if _obj_has_byte_level(tokenizer):
+            return True
+        backend = getattr(tokenizer, "backend_tokenizer", None)
+        if _obj_has_byte_level(backend):
+            return True
+    return False
+
+
+def _piece_to_bytes(piece: str, *, byte_level: bool, bd: dict[str, int]) -> bytes:
+    """Map a vocab piece string to the UTF-8 byte sequence the model emits."""
+    if not piece:
+        return b""
+    if byte_level:
+        try:
+            return bytes(bd[c] for c in piece)
+        except KeyError:
+            return piece.encode("utf-8")
+    # SentencePiece / Unigram: pieces are already Unicode; ▁ is whitespace.
+    text = piece.replace("\u2581", " ")
+    return text.encode("utf-8")
+
+
 CLASSES = [
     "space_punct",
     "latin",
@@ -195,17 +262,15 @@ def build(tokenizer_json: str) -> dict[str, Any]:
 
     tk = Tokenizer.from_file(tokenizer_json)
     with open(tokenizer_json, encoding="utf-8") as f:
-        special = {a["id"] for a in json.load(f).get("added_tokens", []) if a.get("special")}
-    bd = _byte_decoder()
+        meta = json.load(f)
+    special = {a["id"] for a in meta.get("added_tokens", []) if a.get("special")}
+    byte_level = _is_byte_level_bpe(tk, tokenizer_json_meta=meta)
+    bd = _byte_decoder() if byte_level else {}
     V = tk.get_vocab_size()
     chunks: list[bytes] = []
     for i in range(V):
         p = tk.id_to_token(i) or ""
-        try:
-            b = bytes(bd[c] for c in p)
-        except KeyError:
-            b = p.encode("utf-8")
-        chunks.append(b)
+        chunks.append(_piece_to_bytes(p, byte_level=byte_level, bd=bd))
     return _assemble(chunks, special)
 
 
@@ -245,26 +310,38 @@ def _special_ids(tokenizer: Any) -> set[int]:
         for tid, tok in added.items():
             if getattr(tok, "special", False):
                 out.add(int(tid))
+    # rust ``tokenizers.Tokenizer`` uses a method, not the HF property.
+    getter = getattr(tokenizer, "get_added_tokens_decoder", None)
+    if callable(getter):
+        try:
+            added2 = getter()
+        except Exception:
+            added2 = None
+        if isinstance(added2, dict):
+            for tid, tok in added2.items():
+                if getattr(tok, "special", False):
+                    out.add(int(tid))
     return out
 
 
 def build_from_tokenizer(tokenizer: Any) -> dict[str, Any]:
     """Build a rare table from a loaded HF / tokenizers / vLLM tokenizer."""
+    # Capture specials from the HF wrapper before swapping to the rust backend
+    # (``all_special_ids`` / ``added_tokens_decoder`` live on the wrapper).
+    special = _special_ids(tokenizer)
+    byte_level = _is_byte_level_bpe(tokenizer)
     # Prefer the rust backend when present (same path as offline tokenizer.json).
     backend = getattr(tokenizer, "backend_tokenizer", None)
     if backend is not None and hasattr(backend, "id_to_token") and hasattr(backend, "get_vocab_size"):
+        special |= _special_ids(backend)
         tokenizer = backend
-    bd = _byte_decoder()
+        byte_level = byte_level or _is_byte_level_bpe(tokenizer)
+    bd = _byte_decoder() if byte_level else {}
     V = _vocab_size(tokenizer)
-    special = _special_ids(tokenizer)
     chunks: list[bytes] = []
     for i in range(V):
         p = _token_piece(tokenizer, i)
-        try:
-            b = bytes(bd[c] for c in p)
-        except KeyError:
-            b = p.encode("utf-8")
-        chunks.append(b)
+        chunks.append(_piece_to_bytes(p, byte_level=byte_level, bd=bd))
     return _assemble(chunks, special)
 
 

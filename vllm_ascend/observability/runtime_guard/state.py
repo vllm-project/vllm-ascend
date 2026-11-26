@@ -481,7 +481,11 @@ class RequestGuardStore:
                     state.dump_jobs -= 1
 
     def add_rare_feed_jobs(self, req_ids: Iterable[str] | None) -> None:
-        """Pin reqs until async rare_chars D2H+feed completes."""
+        """Pin reqs until async rare_chars D2H+feed completes.
+
+        Never resurrects a reaped or force-cleared request: a late feed after
+        reap must not recreate Store state.
+        """
         if not req_ids:
             return
         with self._lock:
@@ -489,12 +493,32 @@ class RequestGuardStore:
                 if not raw:
                     continue
                 rid = str(raw)
+                if rid in self._reaped_set:
+                    continue
                 state = self._by_req.get(rid)
                 if state is None:
                     self._discard_reaped_locked(rid)
                     state = RequestGuardState(req_id=rid)
                     self._by_req[rid] = state
+                if state.rare_feed_force_cleared:
+                    continue
                 state.rare_feed_jobs += 1
+
+    def accept_rare_feed(self, req_id: str) -> bool:
+        """True when a late/async rare feed may still update detector state.
+
+        Unknown ids are allowed (first feed of a live request). Reaped or
+        force-cleared ids are rejected so a delayed FeedQueue job cannot
+        resurrect rows after reap.
+        """
+        if not req_id:
+            return False
+        rid = str(req_id)
+        with self._lock:
+            if rid in self._reaped_set:
+                return False
+            state = self._by_req.get(rid)
+            return not (state is not None and state.rare_feed_force_cleared)
 
     def finish_rare_feed_jobs(self, req_ids: Iterable[str] | None) -> None:
         if not req_ids:

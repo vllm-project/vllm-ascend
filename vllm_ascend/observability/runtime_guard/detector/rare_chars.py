@@ -444,6 +444,34 @@ class RareCharsDetector(ConfigBackedDetector):
         """Clear the warmup-fail latch when JSON ``enabled`` is false."""
         self._session.clear_fail_latch()
 
+    def note_stream_gap(self, req_ids: Sequence[str]) -> None:
+        """Reset UTF-8 decoder state after a skipped feed step (align-miss / drop).
+
+        Incremental UTF-8 assumes a contiguous byte stream. A missed step can
+        leave a partial sequence that later fires a false strict ``bad_utf8``.
+        """
+        if not req_ids:
+            return
+        with self._lock:
+            batch = self._row_batch
+            if batch is None:
+                return
+            for raw in req_ids:
+                if not raw:
+                    continue
+                rid = str(raw)
+                row = self._row_by_req.get(rid)
+                if row is None:
+                    continue
+                # Clear only the decoder + look-ahead hold; keep class counts so
+                # a single skipped step does not wipe long-running fs/fsw state.
+                batch._dec_n[row] = 0
+                batch._dec_b[row] = 0
+                batch._has_hold[row] = False
+                batch._hold_id[row] = -1
+                batch._hold_lp1[row] = 0.0
+                batch._hold_lpc[row] = 0.0
+
     def _apply_detector_section(self, section: dict[str, Any]) -> None:
         self._enabled = bool(section.get("enabled", self._enabled))
         if not self._enabled:
@@ -531,15 +559,16 @@ class RareCharsDetector(ConfigBackedDetector):
         n = min(len(req_ids), len(token_ids), len(top1_logprobs), len(chosen_logprobs))
         if n <= 0:
             return []
-        with self._lock:
-            if not self._session.can_feed():
+        # Hot-enable: tokenizer load + table build must not run under the feed
+        # lock (would stall clear_finished / finish on the output path).
+        if not self._session.warmed and self._session.can_feed():
+            try:
+                self.warmup(None)
+            except Exception:
                 return []
-            if not self._session.warmed:
-                try:
-                    self._warmup_locked(None)
-                except Exception as exc:
-                    self._mark_warmup_failed(exc)
-                    return []
+        with self._lock:
+            if not self._session.can_feed() or not self._session.warmed:
+                return []
             try:
                 self._ensure_engine_locked()
             except Exception as exc:
@@ -554,9 +583,16 @@ class RareCharsDetector(ConfigBackedDetector):
             if not keep_idx:
                 return []
             keep_ids = [req_ids[i] for i in keep_idx]
+            batch_req_ids = list(getattr(getattr(self._runner, "input_batch", None), "req_ids", None) or [])
+            if not batch_req_ids:
+                last = getattr(getattr(self._runner, "runtime_guard", None), "_last_input_batch", None)
+                batch_req_ids = list(getattr(last, "req_ids", None) or [])
+            batch_pos = {rid: i for i, rid in enumerate(batch_req_ids)}
+            # Map to batch positions (not expanded logit-row indices) for dump_kv.
+            req_idxs = [batch_pos.get(rid, -1) for rid in keep_ids]
             return self._feed_native_locked(
                 req_ids=keep_ids,
-                req_idxs=keep_idx,
+                req_idxs=req_idxs,
                 token_ids=tok[keep_idx],
                 top1=top1_a[keep_idx],
                 chosen=chosen_a[keep_idx],
@@ -599,12 +635,30 @@ class RareCharsDetector(ConfigBackedDetector):
             return []
         if int(rows.shape[0]) != n:
             rows = rows[:n]
+        from vllm_ascend.observability.runtime_guard.state import RequestGuardStore
+
+        store = RequestGuardStore.get()
         missing = np.flatnonzero(rows == -1)
+        allocated: dict[str, int] = {}
         for raw_i in missing.tolist():
             i = int(raw_i)
             req_id = req_ids[i]
             if not req_id:
                 rows[i] = np.int32(-2)
+                continue
+            # Late feed after force-clear / reap must not resurrect rows.
+            if not store.accept_rare_feed(req_id):
+                rows[i] = np.int32(-2)
+                continue
+            # MTP: same req_id may appear multiple times in one feed — one row.
+            if req_id in allocated:
+                rows[i] = np.int32(allocated[req_id])
+                continue
+            existing = self._row_by_req.get(req_id)
+            if existing is not None:
+                allocated[req_id] = existing
+                native.map_put(batch._id_map, req_id, existing)
+                rows[i] = np.int32(existing)
                 continue
             row = batch.add()
             self._row_by_req[req_id] = row
@@ -612,6 +666,7 @@ class RareCharsDetector(ConfigBackedDetector):
                 batch._req_at.append(None)
             batch._req_at[row] = req_id
             native.map_put(batch._id_map, req_id, row)
+            allocated[req_id] = row
             rows[i] = np.int32(row)
             if req_id not in self._states:
                 self._states[req_id] = RareCharsReqState()
@@ -644,12 +699,13 @@ class RareCharsDetector(ConfigBackedDetector):
                 continue
             self._copy_recent(req_state, batch, row)
             last = req_state.recent[-1] if req_state.recent else None
+            req_idx = idx_of.get(req_id, -1)
             alert = self._incident_from_row(
                 req_state,
                 strict_result=batch.strict_at(row),
                 monitor_result=batch.monitor_at(row),
                 req_id=req_id,
-                req_idx=idx_of.get(req_id, 0),
+                req_idx=req_idx if req_idx >= 0 else None,
                 token_id=None if last is None else int(last["token_id"]),
                 top1=None if last is None else float(last["top1"]),
                 chosen=None if last is None else float(last["chosen"]),
@@ -668,7 +724,7 @@ class RareCharsDetector(ConfigBackedDetector):
         strict_result,
         monitor_result,
         req_id: str,
-        req_idx: int,
+        req_idx: int | None,
         token_id: int | None,
         top1: float | None,
         chosen: float | None,
@@ -676,6 +732,7 @@ class RareCharsDetector(ConfigBackedDetector):
         source: str,
     ) -> Incident | None:
         result = strict_result
+        tier = "strict"
         fired = result is not None and bool(getattr(result, "is_ill", False))
         if (
             not fired
@@ -684,6 +741,7 @@ class RareCharsDetector(ConfigBackedDetector):
             and bool(getattr(monitor_result, "is_ill", False))
         ):
             result = monitor_result
+            tier = "monitor"
             fired = True
         if not fired:
             return None
@@ -698,7 +756,7 @@ class RareCharsDetector(ConfigBackedDetector):
             "recent": list(req_state.recent),
             "source": source,
             "api_logprobs_required": False,
-            "tier": ("monitor" if self._alert_monitor and "gb>" in req_state.last_reason.lower() else "strict"),
+            "tier": tier,
         }
         if token_id is not None:
             detail["token_id"] = int(token_id)
