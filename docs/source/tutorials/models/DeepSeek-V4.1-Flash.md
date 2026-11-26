@@ -1709,9 +1709,8 @@ Select the tab for the target hardware.
 
     On Decode, save the following as `~/dsv41-memcache/run_dp_template.sh`,
     beside `launch_online_dp.py`. Set `LOCAL_IP`, `NIC_NAME`, and `MODEL_PATH`
-    for this node. Set `MEMCACHE_INSTALL_PATH` to the `Location` reported by
-    `pip show memcache_hybrid`, and `MEMCACHE_CONFIG_DIR` to the directory
-    containing this node's `mmc-local.conf`.
+    for this node. Set `MEMCACHE_CONFIG_DIR` to the directory containing
+    this node's `mmc-local.conf`.
 
     ```shell
     #!/usr/bin/env bash
@@ -1719,7 +1718,6 @@ Select the tab for the target hardware.
     NIC_NAME="<NETWORK_INTERFACE>"
     LOCAL_IP="<DECODE_NODE_IP>"
     MODEL_PATH="<YOUR_MODEL_PATH>"
-    MEMCACHE_INSTALL_PATH="<MEMCACHE_INSTALL_PATH>"
     MEMCACHE_CONFIG_DIR="<MEMCACHE_CONFIG_DIR>"
 
     export VLLM_USE_V2_MODEL_RUNNER=1
@@ -1742,7 +1740,6 @@ Select the tab for the target hardware.
 
     # Parameters required by the Memcache KV Cache Pool.
     export MMC_LOCAL_CONFIG_PATH="$MEMCACHE_CONFIG_DIR/mmc-local.conf"
-    export LD_LIBRARY_PATH="$MEMCACHE_INSTALL_PATH/memcache_hybrid/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 
     vllm serve "$MODEL_PATH" \
         --host "$LOCAL_IP" \
@@ -1825,7 +1822,6 @@ Select the tab for the target hardware.
     NIC_NAME="<NETWORK_INTERFACE>"
     LOCAL_IP="<PREFILL_NODE_IP>"
     MODEL_PATH="<YOUR_MODEL_PATH>"
-    MEMCACHE_INSTALL_PATH="<MEMCACHE_INSTALL_PATH>"
     MEMCACHE_CONFIG_DIR="<MEMCACHE_CONFIG_DIR>"
 
     export VLLM_USE_V2_MODEL_RUNNER=1
@@ -1848,7 +1844,6 @@ Select the tab for the target hardware.
 
     # Parameters required by the Memcache KV Cache Pool.
     export MMC_LOCAL_CONFIG_PATH="$MEMCACHE_CONFIG_DIR/mmc-local.conf"
-    export LD_LIBRARY_PATH="$MEMCACHE_INSTALL_PATH/memcache_hybrid/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 
     vllm serve "$MODEL_PATH" \
         --host "$LOCAL_IP" \
