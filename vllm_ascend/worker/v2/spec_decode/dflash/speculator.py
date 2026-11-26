@@ -143,36 +143,6 @@ def _prepare_dflash_inputs_with_block_stride(
     )
 
 
-def _get_windowed_mla_layers(model: Any, attn_layers: Mapping[str, Any]) -> tuple[str, ...]:
-    """Collect windowed MLA draft layers supported by the causal, non-DCP decode path."""
-    get_layer_names = getattr(model, "get_draft_kv_cache_layer_names", None)
-    get_causal = getattr(model, "get_draft_attn_causal", None)
-    if get_layer_names is None or get_causal is None:
-        return ()
-    windowed_layers = []
-    for layer_name, causal in zip(get_layer_names(), get_causal()):
-        impl = getattr(attn_layers.get(layer_name), "impl", None)
-        if not isinstance(impl, AscendMLAImpl) or getattr(impl, "sliding_window", None) is None:
-            continue
-        if not causal:
-            raise ValueError(
-                f"Windowed MLA draft layers must be causal (layer {layer_name}). "
-                "The Ascend MLA draft applies a left window with no lookahead. "
-                "Use a non-windowed draft for bidirectional attention."
-            )
-        if isinstance(impl, AscendMlaDCPImpl):
-            raise ValueError(
-                "DFlash draft layers carry a sliding window, but decode context "
-                "parallelism routes MLA draft attention through AscendMlaDCPImpl, "
-                "which applies no pre_tokens band and would silently drop the "
-                "window onto the full DCP-local KV. Run the draft without DCP "
-                "(or use a non-windowed draft); this matches upstream vLLM "
-                "#68214 refusing DCP for windowed DFlash2 drafts."
-            )
-        windowed_layers.append(layer_name)
-    return tuple(windowed_layers)
-
-
 class AscendDFlashSpeculator(LmheadTPDraftSamplingMixin, DFlashSpeculator):
     _windowed_fia_layers: tuple[str, ...] = ()
     _has_windowed_flashmla = False
@@ -384,7 +354,12 @@ class AscendDFlashSpeculator(LmheadTPDraftSamplingMixin, DFlashSpeculator):
         )
         # npu needs attn_backends to update full graph params in run_fullgraph.
         attn_backends: dict[str, type[AttentionBackend]] = {}
-        resolved_layers: dict[str, Any] = {}
+        get_layer_names = getattr(self.model, "get_draft_kv_cache_layer_names", None)
+        get_causal = getattr(self.model, "get_draft_attn_causal", None)
+        # Causality belongs to the model layer even when several layers share a KV group.
+        draft_causal = dict(zip(get_layer_names(), get_causal())) if get_layer_names and get_causal else {}
+        windowed_fia_layers: list[str] = []
+        has_windowed_flashmla = False
         active_layer_names = self.draft_attn_layer_names
         for kv_cache_group_spec in kv_cache_config.kv_cache_groups:
             layer_names = kv_cache_group_spec.layer_names
@@ -395,17 +370,25 @@ class AscendDFlashSpeculator(LmheadTPDraftSamplingMixin, DFlashSpeculator):
             attn_layers = get_layers_from_vllm_config(self.vllm_config, layer_type, layer_names)
 
             for layer_name in layer_names:
-                resolved_layers[layer_name] = attn_layers[layer_name]
-                attn_backends[layer_name] = attn_layers[layer_name].get_attn_backend()
+                layer = attn_layers[layer_name]
+                attn_backends[layer_name] = layer.get_attn_backend()
+                impl = getattr(layer, "impl", None)
+                if layer_name not in draft_causal or not isinstance(impl, AscendMLAImpl) or impl.sliding_window is None:
+                    continue
+                if not draft_causal[layer_name]:
+                    raise ValueError(f"Windowed MLA draft layers must be causal (layer {layer_name}).")
+                if isinstance(impl, AscendMlaDCPImpl):
+                    raise ValueError(f"Windowed MLA draft layer {layer_name} cannot use decode context parallelism.")
+                if impl.use_flashmla:
+                    has_windowed_flashmla = True
+                else:
+                    windowed_fia_layers.append(layer_name)
 
         self.attn_backends = attn_backends
+        self._windowed_fia_layers = tuple(windowed_fia_layers)
+        self._has_windowed_flashmla = has_windowed_flashmla
         install_ascend_dflash_input_preparation()
         self.attn_architecture, self.use_flashmla = detect_draft_attn_architecture(self.attn_groups)
-        windowed_layers = _get_windowed_mla_layers(self.model, resolved_layers)
-        self._windowed_fia_layers = tuple(
-            name for name in windowed_layers if not resolved_layers[name].impl.use_flashmla
-        )
-        self._has_windowed_flashmla = len(self._windowed_fia_layers) < len(windowed_layers)
 
     def propose(
         self,

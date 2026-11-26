@@ -30,34 +30,45 @@ from vllm_ascend.worker.v2.spec_decode.dflash.speculator import AscendDFlashSpec
 
 
 @pytest.mark.parametrize(
-    ("impl_cls", "causal", "error"),
+    ("impl_cls", "causal", "band", "error"),
     [
-        (AscendMLAImpl, True, None),
-        (AscendMLAImpl, False, "must be causal"),
-        (AscendMlaDCPImpl, True, "decode context parallelism"),
+        (AscendMLAImpl, True, False, None),
+        (AscendMLAImpl, True, True, None),
+        (AscendMLAImpl, False, False, "must be causal"),
+        (AscendMlaDCPImpl, True, False, "decode context parallelism"),
     ],
 )
-def test_windowed_mla_draft_layers(impl_cls, causal, error):
+def test_windowed_mla_draft_layers(monkeypatch, impl_cls, causal, band, error):
     window = impl_cls.__new__(impl_cls)
-    window.sliding_window = 1024
-    full = AscendMlaDCPImpl.__new__(AscendMlaDCPImpl)
-    full.sliding_window = None
-    layers = {
-        name: SimpleNamespace(impl=impl)
-        for name, impl in (
-            ("full", full),
-            ("window", window),
-            ("gqa", SimpleNamespace(sliding_window=1024)),
-        )
-    }
-    model = SimpleNamespace(
-        get_draft_kv_cache_layer_names=lambda: list(layers), get_draft_attn_causal=lambda: [True, causal, False]
+    window.sliding_window, window.use_flashmla = 1024, band
+    layers = {"window": SimpleNamespace(impl=window, get_attn_backend=lambda: AscendMLABackend)}
+    if not band:
+        full = AscendMLAImpl.__new__(AscendMLAImpl)
+        full.sliding_window = None
+        layers["full"] = SimpleNamespace(impl=full, get_attn_backend=lambda: AscendMLABackend)
+
+    spec = _spec([0])
+    spec.device = torch.device("cpu")
+    spec.max_num_tokens = 8
+    spec.draft_kv_cache_group_ids = [0]
+    spec.draft_attn_layer_names = set(layers)
+    spec.model = SimpleNamespace(
+        get_draft_kv_cache_layer_names=lambda: list(layers),
+        get_draft_attn_causal=lambda: [causal] if band else [causal, True],
     )
+    spec.attn_groups = []
+    monkeypatch.setattr(dflash_speculator_module, "detect_draft_attn_architecture", lambda _: ("MLA", band))
+    cache = SimpleNamespace(kv_cache_groups=[SimpleNamespace(layer_names=[*layers, "target"])])
+    monkeypatch.setattr(DFlashSpeculator, "set_attn", lambda *args: None)
+    monkeypatch.setattr(dflash_speculator_module, "get_layers_from_vllm_config", lambda *args: layers)
+
     if error:
         with pytest.raises(ValueError, match=error):
-            dflash_speculator_module._get_windowed_mla_layers(model, layers)
+            spec.set_attn(None, cache, None, None, None)
     else:
-        assert dflash_speculator_module._get_windowed_mla_layers(model, layers) == ("window",)
+        spec.set_attn(None, cache, None, None, None)
+        assert spec._windowed_fia_layers == (() if band else ("window",))
+        assert spec._has_windowed_flashmla is band
 
 
 def _spec(lengths):
