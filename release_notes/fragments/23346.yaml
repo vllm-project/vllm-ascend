@@ -1,0 +1,18 @@
+pr: 23346
+entries:
+  - category: performance
+    text: >-
+      Improved DeepSeek V4.1 eager prefill performance by automatically
+      disabling multistream overlap during small-token bounded decoder
+      replay tails, increasing steady-state QPS by +4.47% and reducing
+      replay-tail latency by 18.1% on Atlas A5 8-card DP8/EP8 pure-prefill
+      with zero memory overhead and no configuration changes required.
+    model: deepseek-v4.1
+    hardware: [A3, A5]
+  - category: bugfix
+    text: >-
+      Fixed DeepSeek V4.1 sparse-attention indexer preparation and query
+      quantization ignoring `multistream_dsv4_dsa_overlap=False` and still
+      dispatching work to the auxiliary overlap stream.
+    model: deepseek-v4.1
+    hardware: [A3, A5]
