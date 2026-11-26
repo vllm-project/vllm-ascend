@@ -149,6 +149,11 @@ class ModelAclGraphManager(ModelCudaGraphManager):
                     prepare_engram()
             if native_enabled:
                 native.check_selective_native_graph_step(desc)
+                if getattr(self.model_runner.model_state, "kvpp_is_dummy_run", False):
+                    # Dummy ranks join EP replay without owning any KV requests.
+                    request_ids = self.model_runner.model_state._offload_req_ids
+                    request_ids.gpu.zero_()
+                    request_ids._sparse_identity_key = None
                 graph = self.graphs[desc]
                 anchor = native.topk_buffers_k[0]
                 epoch = native.begin_selective_native_graph(graph, anchor)

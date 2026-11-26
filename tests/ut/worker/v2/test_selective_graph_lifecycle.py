@@ -255,17 +255,28 @@ def test_incomplete_worker_contract_fails_before_capture(monkeypatch):
 
 
 @pytest.mark.parametrize("updatable", [False, True])
-def test_native_replay_retires_only_after_existing_graph_update(monkeypatch, updatable):
+@pytest.mark.parametrize("dummy", [False, True])
+def test_native_replay_retires_only_after_existing_graph_update(monkeypatch, updatable, dummy):
     calls = []
     offload = worker(calls)
     offload.topk_buffers_k = [object()]
-    offload.begin_selective_native_graph = lambda graph, anchor: calls.append("begin") or 7
+    request_ids = SimpleNamespace(gpu=torch.tensor([123, 456]), _sparse_identity_key=("previous batch",))
+
+    def begin(graph, anchor):
+        assert request_ids.gpu.tolist() == ([0, 0] if dummy else [123, 456])
+        assert request_ids._sparse_identity_key == (None if dummy else ("previous batch",))
+        calls.append("begin")
+        return 7
+
+    offload.begin_selective_native_graph = begin
     offload.finish_selective_native_graph = lambda graph, epoch, anchor: calls.append("finish")
     manager = graph_manager(offload)
     manager.vllm_config = object()
     manager.update_stream = object()
     manager.model_runner.attn_groups = []
-    manager.model_runner.model_state = SimpleNamespace(attn_metadata={}, device_metadata=None)
+    manager.model_runner.model_state = SimpleNamespace(
+        attn_metadata={}, device_metadata=None, kvpp_is_dummy_run=dummy, _offload_req_ids=request_ids
+    )
     # A real BatchExecutionDescriptor is hashable; use its identity here.
     class Descriptor:
         num_tokens = 1
