@@ -13,9 +13,7 @@ from vllm.config.speculative import SpeculativeConfig
 from vllm.transformers_utils.configs.speculators import SpeculatorsConfig
 
 from vllm_ascend.patch.platform import patch_speculative_config
-from vllm_ascend.patch.platform.patch_speculative_config import (
-    _normalize_deepseek_dspark_draft,
-)
+from vllm_ascend.patch.platform.patch_speculative_config import _normalize_deepseek_dspark_draft
 
 
 def test_legacy_qwen3_dspark_config_uses_qwen3_loader():
