@@ -19,6 +19,9 @@ Explore the design documents covering patch architecture, CPU binding, model run
 
 - **[Triton JIT warmup on Ascend](Design_Documents/triton_jit_warmup.md)** — Kernel registration, startup compilation and validation
 
+- [Shared similarity index](shared_similarity_index.md) — Share perceptual encoder-cache metadata across DP schedulers.
+- [L2 pHash optimization](l2_phash_optimization.md) — pHash/SSIM similarity cache design and tuning.
+
 ## Evaluation
 
 - **[Using EvalScope](evaluation/using_evalscope.md)** — Model evaluation with EvalScope

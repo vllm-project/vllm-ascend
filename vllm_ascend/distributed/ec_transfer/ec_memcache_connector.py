@@ -7,21 +7,42 @@ Integrate with vLLM through the ec_connector framework without modifying vLLM:
             "vllm_ascend.distributed.ec_transfer.ec_memcache_connector",
         "ec_role": "ec_both",
         "ec_connector_extra_config": {
-            "recv_buffer_tokens": 8192
+            "recv_buffer_tokens": 8192,
+            "similarity_cache": {
+                "enabled": true,
+                "matcher": "phash_ssim",
+                "max_hamming": 3,
+                "ssim_threshold": 0.99,
+                "resized_image_recv_buffer_size": 16384,
+                "max_capacity": 1000000,
+                "eviction_threshold": 0.95,
+                "lower_watermark": 0.9,
+                # Optional: share the index across DP schedulers (embedded
+                # mode starts the server thread in the DP0 scheduler).
+                "shared_index_endpoint": "tcp://127.0.0.1:5558",
+                "shared_index_namespace": "qwen-vl-deployment",
+                "shared_index_timeout_ms": 1000
+            }
         }
     }'
 
 Cache hit rules, adapted from MultiLevelEncoderCacheManager:
   - key = mm_hash (request.mm_features[i].identifier); a hit skips ViT;
+  - when similarity_cache is enabled, an L1 miss may reuse an existing
+    embedding recalled by pHash and verified against the SSIM threshold;
   - only a miss runs ViT, then stores the result in memcache under the image's
     mm_hash.
 
-Memcache manages eviction; this connector does not implement an eviction policy.
+Memcache manages data eviction. Similarity metadata (local or shared)
+is bounded separately: once it reaches ``max_capacity * eviction_threshold``
+entries, randomly selected entries are evicted down to
+``max_capacity * lower_watermark``.
 """
 
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
+from uuid import uuid4
 
 import torch
 from vllm.distributed.ec_transfer.ec_connector.base import (
@@ -35,11 +56,23 @@ from vllm.distributed.parallel_state import (
 )
 from vllm.logger import logger
 
+from vllm_ascend.distributed.ec_transfer.cache_statistics import CacheStatistics
+from vllm_ascend.distributed.ec_transfer.perceptual_ssim_cache_matcher import (
+    PhashSSIMCacheMatcher,
+)
+from vllm_ascend.distributed.ec_transfer.similarity_cache_config import (
+    SimilarityCacheConfig,
+)
+from vllm_ascend.distributed.ec_transfer.similarity_index import SimilarityIndex
+from vllm_ascend.distributed.ec_transfer.similarity_index_service import (
+    SimilarityIndexConfigurationError,
+    SimilarityIndexUnavailable,
+    create_similarity_index,
+)
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.memcache_backend import (
     MemcacheBackend,
     MmcDirect,
 )
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.buffer import BufferDescriptor
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
@@ -71,26 +104,13 @@ def _get_recv_buffer_tokens(vllm_config: "VllmConfig") -> int:
     return recv_buffer_tokens
 
 
-def _recv_buffer_width_hint(model_config: Any) -> int:
-    """Per-token width used only to size the persistent receive buffer.
-
-    The layout of each loaded value comes from the request (see
-    ``_build_get_request_params``), so an underestimate here only routes more
-    values through the oversized path; it never reshapes data incorrectly.
-    """
-    vision_config = getattr(getattr(model_config, "hf_config", None), "vision_config", None)
-    out_hidden_size = getattr(vision_config, "out_hidden_size", None)
-    deepstack_indexes = getattr(vision_config, "deepstack_visual_indexes", None)
-    if out_hidden_size is not None and deepstack_indexes:
-        return out_hidden_size * (1 + len(deepstack_indexes))
-    return model_config.get_inputs_embeds_size()
-
-
 @dataclass
 class ECMemcacheConnectorMetadata(ECConnectorMetadata):
-    # mm_hash -> number of encoder embeddings (rows) of the stored value.
-    mm_hashes_need_loads: dict[str, int] = field(default_factory=dict)
+    mm_hashes_need_loads: list[str] = field(default_factory=list)
     mm_hashes_need_saves: set[str] = field(default_factory=set)
+    # Only similarity hits need an alternate lookup key. Exact hits omit an
+    # entry and load from Memcache with the request mm_hash itself.
+    mm_hash_to_store_key: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass
@@ -99,7 +119,6 @@ class _GetRequestParam:
     key: str
     size: int
     num_tokens: int
-    width: int
 
 
 class ECMemcacheConnector(ECConnectorBase):
@@ -110,25 +129,73 @@ class ECMemcacheConnector(ECConnectorBase):
         model_config = vllm_config.model_config
 
         self._model_id: str = model_config.model
+        self._similarity_config = SimilarityCacheConfig.from_vllm_config(vllm_config)
+        self._cache_matcher: PhashSSIMCacheMatcher | None = None
 
         if role == ECConnectorRole.SCHEDULER:
-            # This is a metadata-only client of memcache
-            self._backend = MemcacheBackend.create_scheduler_client(vllm_config.parallel_config)
-            # for statistics
+            # A new connector instance gets a new ID; RPC retries keep this ID.
+            self._statistics_id = uuid4().hex
+            self._statistics_index: SimilarityIndex | None = None
+            # Similarity matching persists and reloads resized tensors. Select
+            # the scheduler's final backend capability before the process's
+            # first Memcache initialization; a metadata-only native client
+            # cannot be upgraded by constructing a second backend object.
+            if self._similarity_config.enabled:
+                hf_config = getattr(model_config, "hf_config", None)
+                vision_config = getattr(hf_config, "vision_config", None)
+                merge_size = int(getattr(vision_config, "spatial_merge_size", 2) or 2)
+                index = create_similarity_index(
+                    self._similarity_config,
+                    vllm_config.parallel_config,
+                    model_id=self._model_id,
+                    merge_size=merge_size,
+                )
+                if self._similarity_config.shared_index_endpoint is not None:
+                    # Non-owning reference: matcher shutdown owns index cleanup.
+                    self._statistics_index = index
+                if self._similarity_config.shared_index_endpoint is None:
+                    dp_size = vllm_config.parallel_config.data_parallel_size
+                    if isinstance(dp_size, int) and dp_size > 1:
+                        logger.warning(
+                            "EC similarity metadata is local to each DP; configure "
+                            "similarity_cache.shared_index_endpoint to share the index"
+                        )
+                try:
+                    self._backend = MemcacheBackend.create_scheduler_data_client(vllm_config.parallel_config)
+                    self._cache_matcher = PhashSSIMCacheMatcher(
+                        self._backend,
+                        self._similarity_config,
+                        merge_size=merge_size,
+                        model_id=self._model_id,
+                        index=index,
+                    )
+                except Exception:
+                    index.close()
+                    raise
+            else:
+                self._backend = MemcacheBackend.create_scheduler_client(vllm_config.parallel_config)
+            # Exact hits contain only the current request's original mm_hash.
             self._mm_hash_hits: set[str] = set()
             self._mm_hash_hit_count = 0
+            self._similarity_hit_count = 0
             self._miss_count = 0
             # for worker
-            self._mm_hashes_need_loads: dict[str, int] = {}
+            self._mm_hashes_need_loads: set[str] = set()
+            self._mm_hash_to_store_key: dict[str, str] = {}
             self._mm_hashes_need_saves: set[str] = set()
         elif role == ECConnectorRole.WORKER:
             # Data-plane client for reading and writing embeddings.
             self._backend = MemcacheBackend(vllm_config.parallel_config)
-            # Encoder output widths vary by model and modality (vLLM #57904:
-            # Qwen3-Omni image 8192 vs audio 2048), and the worker connector is
-            # built before the producer measures them. Size the buffer from a
-            # hint; each load takes its shape from the request instead.
-            self._hidden_dim = _recv_buffer_width_hint(model_config)
+            # vLLM #57904 measures the encoder output width at startup; size
+            # the receive buffer the same way, DeepStack-aware for Qwen3-VL
+            # (``out_hidden_size * (1 + N)``).
+            vision_config = getattr(getattr(model_config, "hf_config", None), "vision_config", None)
+            out_hidden_size = getattr(vision_config, "out_hidden_size", None)
+            deepstack_indexes = getattr(vision_config, "deepstack_visual_indexes", None)
+            if out_hidden_size is not None and deepstack_indexes:
+                self._hidden_dim = out_hidden_size * (1 + len(deepstack_indexes))
+            else:
+                self._hidden_dim = model_config.get_inputs_embeds_size()
             self._dtype = model_config.dtype
             self._elem_size = torch.empty(0, dtype=self._dtype).element_size()
             self._recv_buffer_tokens = _get_recv_buffer_tokens(vllm_config)
@@ -141,7 +208,8 @@ class ECMemcacheConnector(ECConnectorBase):
             self._recv_buffer_reuse_event = None
             self._recv_buffer_registered = False
             self._backend.register_buffer(
-                [BufferDescriptor(address=self._recv_buffer.data_ptr(), size_bytes=self._recv_buffer.nbytes)]
+                [self._recv_buffer.data_ptr()],
+                [self._recv_buffer.nbytes],
             )
             self._recv_buffer_registered = True
             logger.info(
@@ -164,43 +232,50 @@ class ECMemcacheConnector(ECConnectorBase):
             raise ValueError(f"Unknown ECConnectorRole: {role}")
 
         logger.info(
-            "ECMemcacheConnector init: role=%s model=%s",
+            "ECMemcacheConnector init: role=%s model=%s similarity_cache_enabled=%s matcher=%s",
             role,
             self._model_id,
+            self._similarity_config.enabled,
+            self._similarity_config.matcher,
         )
 
     # ==============================
     # Scheduler-side methods
     # ==============================
 
+    # Scheduler-side phase 1: prewarm cache availability for all multimodal
+    # features in the request. This method deliberately does not make the final
+    # load-or-save decision for an individual feature. It first probes the exact
+    # cache in a batch and records only original-image mm_hash hits in
+    # ``_mm_hash_hits``. When similarity matching is enabled, exact misses are
+    # then passed to the matcher to reuse cached pHash state, compute missing
+    # pHash metadata, and prewarm keys for already-persisted candidates. A query
+    # with no pHash is not persisted here; final persistence is deferred to
+    # ``update_state_after_alloc``.
+    #
+    # A cache miss is a normal prewarm result rather than an availability error,
+    # so this method always returns True. ``num_computed_tokens`` is the
+    # scheduler's computed position after subtracting speculative/output
+    # placeholders. Once it reaches the end of the prompt, the request is in
+    # decode and its multimodal encoder cache has already been handled; avoid
+    # repeated Memcache probes on every decode step.
     def ensure_cache_available(self, request: "Request", num_computed_tokens: int) -> bool:
-        seen_mm_hashes_in_current_request: list[str] = []
-        for feature in request.mm_features:
-            position = feature.mm_position
-            # Inputs before num_computed_tokens are already in the KV cache.
-            if position.offset + position.length <= num_computed_tokens:
-                continue
-            current_image_mm_hash = feature.identifier
-            if (
-                current_image_mm_hash in self._mm_hash_hits
-                or current_image_mm_hash in seen_mm_hashes_in_current_request
-            ):
-                continue
-            seen_mm_hashes_in_current_request.append(current_image_mm_hash)
+        if num_computed_tokens >= request.num_prompt_tokens:
+            logger.debug(
+                "Skip EC cache check: request=%s is in decode stage (computed_prompt_tokens=%d, prompt_tokens=%d)",
+                request.request_id,
+                num_computed_tokens,
+                request.num_prompt_tokens,
+            )
+            return True
 
-        exists_res = (
-            self._backend.exists(seen_mm_hashes_in_current_request) if seen_mm_hashes_in_current_request else []
+        similarity_enabled = self._similarity_config.enabled
+        exact_match_missing_features = self._ensure_exact_cache_available(
+            request,
+            collect_missing=similarity_enabled,
         )
-        if seen_mm_hashes_in_current_request:
-            if not exists_res:
-                logger.debug("EC memcache exists failed: keys=%r", seen_mm_hashes_in_current_request)
-                # If no exists_res returned, fill exists_res with zeros, which means all keys are not exist
-                exists_res = [0] * len(seen_mm_hashes_in_current_request)
-        for current_image_mm_hash, existed in zip(seen_mm_hashes_in_current_request, exists_res):
-            if existed == 1:
-                self._mm_hash_hits.add(current_image_mm_hash)
-                self._mm_hash_hit_count += 1
-                logger.debug("Current mm_hash=%s is available in memcache", current_image_mm_hash)
+        if exact_match_missing_features and similarity_enabled:
+            self._ensure_similarity_cache_available(exact_match_missing_features)
         return True
 
     def has_cache_item(self, identifier: str) -> bool:
@@ -210,55 +285,324 @@ class ECMemcacheConnector(ECConnectorBase):
         # ensure_cache_available, such as continued chunk scheduling.
         if self._backend.exists([identifier]) == [1]:
             self._mm_hash_hits.add(identifier)
-            self._mm_hash_hit_count += 1
             logger.debug("Current mm_hash=%s hits in memcache", identifier)
             return True
         return False
 
+    # Scheduler-side phase 2: resolve the final cache action for one allocated
+    # multimodal feature. Resolution is ordered from cheapest/strongest evidence
+    # to the more expensive similarity path:
+    #   1. An exact hit loads the embedding by the current image's mm_hash.
+    #   2. A cached SSIM match reuses its already selected similar-image mm_hash.
+    #   3. Otherwise, use the precomputed pHash to recall candidates, load their
+    #      resized tensors, run SSIM, and verify that the winning candidate's
+    #      embedding still exists in memcache.
+    #   4. Any missing prerequisite, threshold miss, or backend failure falls
+    #      back to saving the current feature after it has been computed. Before
+    #      queueing that save, persist and index its resized tensor so the image
+    #      can become a candidate only for future requests, not for itself.
+    #
+    # The result is accumulated in ``_mm_hashes_need_loads`` or
+    # ``_mm_hashes_need_saves`` and later transferred to the worker by
+    # ``build_connector_meta``. For a similarity hit, the logical load key stays
+    # the current mm_hash while ``_mm_hash_to_store_key`` records the matched
+    # candidate's physical memcache key; similarity hits must not be inserted
+    # into ``_mm_hash_hits``, which is reserved for exact original-hash hits.
     def update_state_after_alloc(self, request: "Request", index: int) -> None:
         feature = request.mm_features[index]
         current_image_mm_hash = feature.identifier
 
+        # If there is an exact hit for current_image_mm_hash, it will certainly be loaded.
         if current_image_mm_hash in self._mm_hash_hits:
-            self._mm_hashes_need_loads[current_image_mm_hash] = request.get_num_encoder_embeds(index)
+            self._mm_hashes_need_loads.add(current_image_mm_hash)
+            self._mm_hash_hit_count += 1
             return
 
+        similarity_enabled = self._similarity_config.enabled
+        if not similarity_enabled:
+            self._miss_count += 1
+            self._mm_hashes_need_saves.add(current_image_mm_hash)
+
+        # If there is a similarity hit for current_image_mm_hash in current batch, it will certainly be loaded.
+        cache_matcher = self._cache_matcher
+        if cache_matcher is None:
+            return
+
+        try:
+            self._match_similarity(current_image_mm_hash, feature.data)
+        except SimilarityIndexConfigurationError:
+            # Configuration disagreement must not silently look like a miss.
+            raise
+        except SimilarityIndexUnavailable:
+            logger.debug("EC shared similarity index unavailable; computing image=%s", current_image_mm_hash)
+            self._record_similarity_miss(current_image_mm_hash, reason="similarity_index_unavailable")
+        except Exception:
+            logger.exception("EC similarity lookup failed: mm_hash=%s", current_image_mm_hash)
+            self._record_similarity_miss(
+                current_image_mm_hash, reason="similarity_match_exception", feature=feature.data
+            )
+
+    def _match_similarity(self, current_image_mm_hash: str, feature: Any) -> None:
+        cache_matcher = self._cache_matcher
+        assert cache_matcher is not None
+        similar_mm_hash = cache_matcher.get_cached_similarity_match(current_image_mm_hash)
+        if similar_mm_hash is not None:
+            self._record_similarity_hit(current_image_mm_hash, similar_mm_hash)
+            return
+
+        image_phash = cache_matcher.get_cached_phash(current_image_mm_hash)
+        if image_phash is None:
+            self._record_similarity_miss(
+                current_image_mm_hash,
+                reason="phash_unavailable",
+                feature=feature,
+            )
+            return
+        candidate_mm_hashes_by_hamming = cache_matcher.find_resized_mm_hashes_by_hamming(
+            image_phash,
+        )
+        if candidate_mm_hashes_by_hamming is None:
+            self._record_similarity_miss(
+                current_image_mm_hash,
+                reason="no_hamming_candidate",
+                feature=feature,
+            )
+            return
+
+        try:
+            ssim_matched_mm_hash = cache_matcher.find_and_cache_matched_ssim(
+                current_image_mm_hash,
+                feature,
+                candidate_mm_hashes_by_hamming,
+            )
+        except SimilarityIndexConfigurationError:
+            raise
+        except Exception:
+            logger.exception(
+                "EC similarity match failed: mm_hash=%s",
+                current_image_mm_hash,
+            )
+            self._record_similarity_miss(
+                current_image_mm_hash,
+                reason="similarity_match_exception",
+                feature=feature,
+            )
+            return
+        if ssim_matched_mm_hash is None:
+            self._record_similarity_miss(
+                current_image_mm_hash,
+                reason="ssim_threshold_not_met",
+                feature=feature,
+            )
+            return
+        try:
+            similar_embedding_exists = self._backend.exists([ssim_matched_mm_hash])
+        except Exception:
+            logger.exception(
+                "EC similarity embedding exists failed: mm_hash=%s similar_mm_hash=%s, ssim_matched_mm_hash=%s",
+                current_image_mm_hash,
+                similar_mm_hash,
+                ssim_matched_mm_hash,
+            )
+            similar_embedding_exists = []
+        if similar_embedding_exists != [1]:
+            self._record_similarity_miss(
+                current_image_mm_hash,
+                reason="similar_embedding_unavailable",
+                feature=feature,
+            )
+            return
+        self._record_similarity_hit(current_image_mm_hash, ssim_matched_mm_hash)
+
+    def _record_similarity_hit(
+        self,
+        current_image_mm_hash: str,
+        similar_mm_hash: str,
+    ) -> None:
+        self._similarity_hit_count += 1
+        self._mm_hashes_need_loads.add(current_image_mm_hash)
+        self._mm_hash_to_store_key[current_image_mm_hash] = similar_mm_hash
+        logger.debug(
+            "EC similarity match success: mm_hash=%s similar_mm_hash=%s",
+            current_image_mm_hash,
+            similar_mm_hash,
+        )
+
+    def _record_similarity_miss(
+        self,
+        mm_hash: str,
+        *,
+        reason: str,
+        feature: Any | None = None,
+    ) -> None:
+        # Persist before the image enters the save set. Matching is already
+        # complete at this point, so the newly indexed tensor cannot become a
+        # candidate for this same matching attempt.
+        cache_matcher = self._cache_matcher
+        if feature is not None and cache_matcher is not None:
+            try:
+                cache_matcher.persist_missed_resized_tensor(mm_hash, feature)
+            except SimilarityIndexConfigurationError:
+                raise
+            except SimilarityIndexUnavailable:
+                # Embedding computation/save still proceeds without metadata.
+                pass
+            except Exception:
+                logger.exception(
+                    "EC missed resized tensor persistence failed: mm_hash=%s",
+                    mm_hash,
+                )
         self._miss_count += 1
-        self._mm_hashes_need_saves.add(current_image_mm_hash)
+        self._mm_hashes_need_saves.add(mm_hash)
+        logger.debug("EC similarity match miss: mm_hash=%s reason=%s", mm_hash, reason)
 
     @property
     def hit_rate(self) -> float:
-        """Return the cumulative hit rate: L1 hits / total lookups."""
-        hits = self._mm_hash_hit_count
-        total = hits + self._miss_count
-        if total == 0:
-            return 0.0
-        return hits / total
+        """Return the cumulative exact and similarity cache hit rate."""
+        return self.cache_statistics.hit_rate
+
+    @property
+    def cache_statistics(self) -> CacheStatistics:
+        """Cumulative local scheduler decisions, not successful worker loads."""
+        return CacheStatistics(self._mm_hash_hit_count, self._similarity_hit_count, self._miss_count)
+
+    def _report_cache_statistics(self, *, final: bool = False) -> None:
+        index = self._statistics_index
+        if index is None:
+            return
+        try:
+            snapshot = index.report_cache_statistics(self._statistics_id, self.cache_statistics)
+        except Exception:
+            # Telemetry is best effort: a later batch or shutdown sends the
+            # full counters again, even if this write applied but its reply was lost.
+            logger.debug("EC shared statistics report failed; local counters retained", exc_info=True)
+            return
+        counts = snapshot.counts
+        log = logger.info if final else logger.debug
+        log(
+            "EC cache stats: scope=global epoch=%s reporting_instances=%d "
+            "exact_hits=%d similarity_hits=%d misses=%d total=%d "
+            "hit_rate=%.2f%% similarity_hit_rate=%.2f%% similarity_lookup_hit_rate=%.2f%%",
+            snapshot.epoch,
+            snapshot.reporting_schedulers,
+            counts.exact_hits,
+            counts.similarity_hits,
+            counts.misses,
+            counts.total,
+            counts.hit_rate * 100,
+            counts.similarity_hit_rate * 100,
+            counts.similarity_lookup_hit_rate * 100,
+        )
 
     def build_connector_meta(self, scheduler_output: "SchedulerOutput") -> ECMemcacheConnectorMetadata:
         meta = ECMemcacheConnectorMetadata(
-            mm_hashes_need_loads=self._mm_hashes_need_loads,
+            mm_hashes_need_loads=list(self._mm_hashes_need_loads),
             mm_hashes_need_saves=self._mm_hashes_need_saves,
+            mm_hash_to_store_key=self._mm_hash_to_store_key,
         )
         if meta.mm_hashes_need_loads or meta.mm_hashes_need_saves:
             logger.debug(
                 "EC meta: %d loads, %d saves this step | "
-                "EC meta mm_hashes_need_loads: %r, EC meta mm_hashes_need_saves: %r this step | "
-                "full_pixel_hits=%d misses=%d hit_rate=%.2f%%",
+                "EC meta loads: %r, EC meta saves: %r this step | "
+                "scope=local exact_hits=%d similarity_hits=%d misses=%d hit_rate=%.2f%% "
+                "similarity_hit_rate=%.2f%% similarity_lookup_hit_rate=%.2f%%",
                 len(meta.mm_hashes_need_loads),
                 len(meta.mm_hashes_need_saves),
                 meta.mm_hashes_need_loads,
                 meta.mm_hashes_need_saves,
                 self._mm_hash_hit_count,
+                self._similarity_hit_count,
                 self._miss_count,
                 self.hit_rate * 100,
+                self.cache_statistics.similarity_hit_rate * 100,
+                self.cache_statistics.similarity_lookup_hit_rate * 100,
             )
+            # Publish once per active batch, not once per image. No RPC is
+            # introduced on empty/decode-only steps, and actions stay local.
+            self._report_cache_statistics()
         # ECMemcacheConnectorMetadata will be passed to worker, so states must be cleared before next batch coming
         # and the statistics fields keep remaining
-        self._mm_hashes_need_loads = {}
+        self._mm_hashes_need_loads = set()
+        self._mm_hash_to_store_key = {}
         self._mm_hashes_need_saves = set()
         self._mm_hash_hits.clear()
         return meta
+
+    # ==============================
+    # Scheduler-side memcache helpers
+    # ==============================
+
+    def _ensure_exact_cache_available(
+        self,
+        request: "Request",
+        *,
+        collect_missing: bool,
+    ) -> list[Any]:
+        seen_mm_hashes_in_current_request: list[str] = []
+        feature_by_mm_hash: dict[str, Any] = {}
+        for feature in request.mm_features:
+            current_image_mm_hash = feature.identifier
+            if (
+                current_image_mm_hash in self._mm_hash_hits
+                or current_image_mm_hash in seen_mm_hashes_in_current_request
+            ):
+                continue
+            seen_mm_hashes_in_current_request.append(current_image_mm_hash)
+            if collect_missing:
+                feature_by_mm_hash[current_image_mm_hash] = feature
+
+        exists_res = (
+            self._backend.exists(seen_mm_hashes_in_current_request) if seen_mm_hashes_in_current_request else []
+        )
+        if seen_mm_hashes_in_current_request:
+            if not exists_res:
+                logger.debug("EC memcache exists failed: keys=%r", seen_mm_hashes_in_current_request)
+                # If no exists_res returned, fill exists_res with zeros, which means all keys are not exist
+                exists_res = [0] * len(seen_mm_hashes_in_current_request)
+            elif len(exists_res) != len(seen_mm_hashes_in_current_request):
+                logger.debug(
+                    "EC memcache exists returned %d results for %d keys: keys=%r",
+                    len(exists_res),
+                    len(seen_mm_hashes_in_current_request),
+                    seen_mm_hashes_in_current_request,
+                )
+                exists_res = [0] * len(seen_mm_hashes_in_current_request)
+
+        missing_features: list[Any] = []
+        for current_image_mm_hash, existed in zip(
+            seen_mm_hashes_in_current_request,
+            exists_res,
+        ):
+            if existed == 1:
+                self._mm_hash_hits.add(current_image_mm_hash)
+                logger.debug("Current mm_hash=%s is available in memcache", current_image_mm_hash)
+            elif collect_missing:
+                missing_features.append(feature_by_mm_hash[current_image_mm_hash])
+        return missing_features
+
+    def _ensure_similarity_cache_available(
+        self,
+        exact_match_missing_features: list[Any],
+    ) -> None:
+        matcher = self._cache_matcher
+        if matcher is None or not exact_match_missing_features:
+            return
+        exact_match_missing_mm_hashes = [feature.identifier for feature in exact_match_missing_features]
+        try:
+            matcher.batch_ensure_similarity_cache_available(
+                exact_match_missing_mm_hashes,
+                exact_match_missing_features,
+            )
+        except SimilarityIndexConfigurationError:
+            raise
+        except SimilarityIndexUnavailable:
+            logger.debug("EC shared similarity prewarm unavailable; falling back to cache misses")
+        except Exception:
+            logger.exception(
+                "EC similarity batch prewarm failed: exact_match_missing_mm_hashes=%r",
+                exact_match_missing_mm_hashes,
+            )
+            return
 
     # ==============================
     # Worker-side methods
@@ -267,26 +611,30 @@ class ECMemcacheConnector(ECConnectorBase):
     def start_load_caches(self, encoder_cache: dict[str, torch.Tensor], **kwargs) -> None:
         metadata = self._get_connector_metadata()
         assert isinstance(metadata, ECMemcacheConnectorMetadata)
-        loads_in_current_step = {
-            mm_hash: rows for mm_hash, rows in metadata.mm_hashes_need_loads.items() if mm_hash not in encoder_cache
-        }
-        if not loads_in_current_step:
+        loading_hashes_in_current_step = [
+            mm_hash for mm_hash in metadata.mm_hashes_need_loads if mm_hash not in encoder_cache
+        ]
+        if not loading_hashes_in_current_step:
             return
 
-        embeddings = self._ec_get_batch(list(loads_in_current_step), list(loads_in_current_step.values()))
+        store_keys = [metadata.mm_hash_to_store_key.get(mm_hash, mm_hash) for mm_hash in loading_hashes_in_current_step]
+        embeddings = self._ec_get_batch(store_keys)
         if not embeddings:
             return
-        for current_image_mm_hash, embedding in zip(loads_in_current_step, embeddings):
+        for mm_hash, store_key, embedding in zip(loading_hashes_in_current_step, store_keys, embeddings):
             if embedding is None:
                 logger.warning(
-                    "EC LOAD miss: current_image_mm_hash=%s (may be evicted by memcache?)",
-                    current_image_mm_hash,
+                    "EC LOAD miss: request_key=%s store_key=%s (may be evicted by memcache?)",
+                    mm_hash,
+                    store_key,
                 )
                 continue
-            encoder_cache[current_image_mm_hash] = embedding
+            encoder_cache[mm_hash] = embedding
             logger.debug(
-                "EC LOAD: current_image_mm_hash=%s embedding shape=%r",
-                current_image_mm_hash,
+                "EC LOAD: request_key=%s store_key=%s hit_kind=%s embedding shape=%r",
+                mm_hash,
+                store_key,
+                "exact" if mm_hash == store_key else self._similarity_config.matcher,
                 embedding.shape,
             )
 
@@ -303,18 +651,13 @@ class ECMemcacheConnector(ECConnectorBase):
     # ==============================
 
     def _wait_recv_buffer_reusable(self) -> None:
-        event = self._recv_buffer_reuse_event
+        event = getattr(self, "_recv_buffer_reuse_event", None)
         if event is None:
             return
         event.synchronize()
         self._recv_buffer_reuse_event = None
 
-    def _ec_get_batch(self, keys: list[str], num_tokens: list[int]) -> list[torch.Tensor | None] | None:
-        """Load values whose row counts come from the scheduler.
-
-        Capacity, offsets and sizes are in bytes: values of different
-        modalities can have different widths and share one receive buffer.
-        """
+    def _ec_get_batch(self, keys: list[str]) -> list[torch.Tensor | None] | None:
         if not keys:
             return None
         embeddings: list[torch.Tensor | None] = [None] * len(keys)
@@ -330,18 +673,17 @@ class ECMemcacheConnector(ECConnectorBase):
             )
             return None
 
-        request_params = self._build_get_request_params(keys, key_infos, num_tokens)
-        capacity_bytes = self._recv_buffer_capacity_bytes()
+        request_params = self._build_get_request_params(keys, key_infos)
         regular_requests: list[_GetRequestParam] = []
         oversized_requests: list[_GetRequestParam] = []
         for req in request_params:
-            if req.size > capacity_bytes:
+            if req.num_tokens > self._recv_buffer_tokens:
                 oversized_requests.append(req)
             else:
                 regular_requests.append(req)
 
         # First, use the persistent, user-sized buffer for ordinary requests.
-        for regular_batch in self._build_capacity_batches(regular_requests, capacity_bytes):
+        for regular_batch in self._build_capacity_batches(regular_requests, self._recv_buffer_tokens):
             self._load_regular_requests(regular_batch, embeddings)
 
         # Second, Oversized requests are deferred. so one temporary registration can be
@@ -349,35 +691,31 @@ class ECMemcacheConnector(ECConnectorBase):
         self._load_oversized_requests(oversized_requests, embeddings)
         return embeddings
 
-    def _recv_buffer_capacity_bytes(self) -> int:
-        return self._recv_buffer_tokens * self._hidden_dim * self._elem_size
-
-    def _build_get_request_params(
-        self, keys: list[str], key_infos: list[Any], num_tokens: list[int]
-    ) -> list[_GetRequestParam]:
-        # The value is a contiguous (rows, width) tensor. Rows come from the
-        # request, so the width is derived per value rather than assumed from
-        # the model config, which differs per modality (vLLM #57904).
+    def _build_get_request_params(self, keys: list[str], key_infos: list[Any]) -> list[_GetRequestParam]:
+        bytes_per_token = self._elem_size * self._hidden_dim
         request_params: list[_GetRequestParam] = []
-        for i, (key, key_info, rows) in enumerate(zip(keys, key_infos, num_tokens)):
-            if key_info is None:
-                # Evicted after the scheduler's lookup; the caller logs the miss.
-                continue
+        for i, (key, key_info) in enumerate(zip(keys, key_infos)):
             nbytes = int(key_info.size())
             if nbytes == 0:
                 continue
-            bytes_per_column = rows * self._elem_size
-            if rows <= 0 or nbytes % bytes_per_column != 0:
+            if nbytes % bytes_per_token != 0:
                 logger.warning(
-                    "EC memcache value size does not match the request's encoder "
-                    "embedding count: key=%s nbytes=%d rows=%d element_size=%d",
+                    "EC memcache value size is not aligned with the encoder "
+                    "hidden dimension: key=%s nbytes=%d bytes_per_token=%d",
                     key,
                     nbytes,
-                    rows,
-                    self._elem_size,
+                    bytes_per_token,
                 )
                 continue
-            request_params.append(_GetRequestParam(i, key, nbytes, rows, nbytes // bytes_per_column))
+            num_tokens = nbytes // bytes_per_token
+            request_params.append(
+                _GetRequestParam(
+                    i,
+                    key,
+                    nbytes,
+                    num_tokens,
+                )
+            )
         return request_params
 
     def _load_regular_requests(
@@ -407,17 +745,17 @@ class ECMemcacheConnector(ECConnectorBase):
         *,
         should_sync_copy_out_event_immediately: bool,
     ) -> None:
+        bytes_per_token = self._elem_size * self._hidden_dim
         base_addr = recv_buffer.data_ptr()
-        flat_buffer = recv_buffer.view(-1)
         offsets: list[int] = []
-        offset_bytes = 0
+        offset_tokens = 0
         for req in request_params:
-            offsets.append(offset_bytes)
-            offset_bytes += req.size
+            offsets.append(offset_tokens)
+            offset_tokens += req.num_tokens
 
         group_res = self._backend.batch_get_into_buffers(
             [req.key for req in request_params],
-            [base_addr + offset for offset in offsets],
+            [base_addr + offset * bytes_per_token for offset in offsets],
             [req.size for req in request_params],
             MmcDirect.COPY_G2L.value,
         )
@@ -448,11 +786,10 @@ class ECMemcacheConnector(ECConnectorBase):
                 if code != 0:
                     logger.warning("EC memcache get failed: key=%s res=%s", req.key, code)
                     continue
-                start = offset // self._elem_size
-                staging_view = flat_buffer[start : start + req.num_tokens * req.width].view(req.num_tokens, req.width)
+                staging_view = recv_buffer[offset : offset + req.num_tokens]
                 output = torch.empty(
                     req.num_tokens,
-                    req.width,
+                    self._hidden_dim,
                     dtype=self._dtype,
                     device="npu",
                 )
@@ -484,25 +821,25 @@ class ECMemcacheConnector(ECConnectorBase):
 
     @staticmethod
     def _build_capacity_batches(
-        request_params: list[_GetRequestParam], capacity_bytes: int
+        request_params: list[_GetRequestParam], capacity_tokens: int
     ) -> list[list[_GetRequestParam]]:
         """Greedily group requests without changing their relative order."""
         batches: list[list[_GetRequestParam]] = []
         current_batch: list[_GetRequestParam] = []
-        current_batch_bytes = 0
+        current_batch_tokens = 0
         for req in request_params:
-            if req.size > capacity_bytes:
+            if req.num_tokens > capacity_tokens:
                 raise ValueError(
                     "Request exceeds receive buffer capacity: "
-                    f"key={req.key} request_bytes={req.size} "
-                    f"capacity_bytes={capacity_bytes}"
+                    f"key={req.key} request_tokens={req.num_tokens} "
+                    f"capacity_tokens={capacity_tokens}"
                 )
-            if current_batch_bytes + req.size > capacity_bytes:
+            if current_batch_tokens + req.num_tokens > capacity_tokens:
                 batches.append(current_batch)
                 current_batch = []
-                current_batch_bytes = 0
+                current_batch_tokens = 0
             current_batch.append(req)
-            current_batch_bytes += req.size
+            current_batch_tokens += req.num_tokens
         if current_batch:
             batches.append(current_batch)
         return batches
@@ -515,18 +852,19 @@ class ECMemcacheConnector(ECConnectorBase):
         if not request_params:
             return
         self._wait_recv_buffer_reusable()
-        temporary_buffer_bytes = max(req.size for req in request_params)
+        temporary_buffer_tokens = max(req.num_tokens for req in request_params)
         logger.warning(
             "EC memcache values exceed the configured persistent receive "
             "buffer; using one temporary buffer for this batch: "
-            "num_requests=%d temporary_buffer_bytes=%d "
-            "persistent_capacity_bytes=%d",
+            "num_requests=%d temporary_buffer_tokens=%d "
+            "persistent_capacity_tokens=%d",
             len(request_params),
-            temporary_buffer_bytes,
-            self._recv_buffer_capacity_bytes(),
+            temporary_buffer_tokens,
+            self._recv_buffer_tokens,
         )
         temporary_buffer = torch.empty(
-            temporary_buffer_bytes // self._elem_size,
+            temporary_buffer_tokens,
+            self._hidden_dim,
             dtype=self._dtype,
             device="npu",
         )
@@ -536,11 +874,9 @@ class ECMemcacheConnector(ECConnectorBase):
             # recv_buffer_tokens limits persistent NPU memory only. Oversized
             # values share this per-call staging buffer, which is registered
             # once and released after all second-pass batches finish.
-            self._backend.register_buffer(
-                [BufferDescriptor(address=temporary_buffer_ptr, size_bytes=temporary_buffer.nbytes)]
-            )
+            self._backend.register_buffer([temporary_buffer_ptr], [temporary_buffer.nbytes])
             registered = True
-            for batch in self._build_capacity_batches(request_params, temporary_buffer_bytes):
+            for batch in self._build_capacity_batches(request_params, temporary_buffer_tokens):
                 self._load_batch_into_buffer(
                     batch,
                     embeddings,
@@ -590,6 +926,14 @@ class ECMemcacheConnector(ECConnectorBase):
             logger.exception("EC PUT failed: mm_hash=%s", mm_hash)
 
     def shutdown(self) -> None:
+        # Flush before DP0 closes the server owned by its matcher. This is a
+        # snapshot, not a barrier waiting for every scheduler to shut down.
+        if getattr(self, "_statistics_index", None) is not None:
+            self._report_cache_statistics(final=True)
+        matcher = getattr(self, "_cache_matcher", None)
+        if matcher is not None:
+            matcher.shutdown()
+
         executor = getattr(self, "_put_executor", None)
         if executor is not None:
             executor.shutdown(wait=True)
