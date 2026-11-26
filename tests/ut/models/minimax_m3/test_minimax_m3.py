@@ -134,7 +134,7 @@ class TestMiniMaxM3Modeling(unittest.TestCase):
     def test_mmrs_token_limits(self):
         self.assertEqual(_MMRS_MIN_TOKENS, 256)
         self.assertEqual(_MMRS_MAX_TOKENS, 16384)
-        self.assertEqual(_MMRS_INT8_MIN_TOKENS, 4096)
+        self.assertEqual(_MMRS_INT8_MIN_TOKENS, 10240)
 
     def test_pp_auxiliary_states_match_unsplit_target(self):
         from vllm.v1.worker.gpu.pp_utils import PPHandler

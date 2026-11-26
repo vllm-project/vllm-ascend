@@ -138,7 +138,7 @@ _MMRS_MIN_TOKENS = 256
 _MMRS_MAX_TOKENS = 16384
 # The INT8 W8A8 variant only pays off on long prefill batches; there is no
 # upper bound (the kernel limit is the GEMM inner dimension).
-_MMRS_INT8_MIN_TOKENS = 4096
+_MMRS_INT8_MIN_TOKENS = 10240
 
 
 def _resolve_layer_kv_cache_dtype(
