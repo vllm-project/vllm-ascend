@@ -21,7 +21,6 @@ jobs and a short ActionQueue cannot drop rare_chars feeds under high concurrency
 
 from __future__ import annotations
 
-import os
 import queue
 import threading
 from collections.abc import Callable
@@ -35,22 +34,6 @@ from vllm_ascend.logger import init_logger_ascend
 logger = init_logger_ascend(__name__)
 
 _MAXSIZE = 512
-
-
-def rare_sync_feed_enabled() -> bool:
-    """Debug: run rare D2H+feed on the caller thread (skip RareLogprobFeedQueue).
-
-    Default is async hide via the feed queue. Prefer
-    ``vllm_ascend.envs.VLLM_ASCEND_RG_RARE_SYNC_FEED`` when present.
-    """
-    try:
-        from vllm_ascend import envs as _envs
-
-        if hasattr(_envs, "VLLM_ASCEND_RG_RARE_SYNC_FEED"):
-            return bool(_envs.VLLM_ASCEND_RG_RARE_SYNC_FEED)
-    except Exception:
-        pass
-    return os.getenv("VLLM_ASCEND_RG_RARE_SYNC_FEED", "0").strip() == "1"
 
 
 @dataclass

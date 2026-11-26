@@ -395,9 +395,6 @@ def test_feed_submit_failure_unpins_and_notes_gap():
         batch = RareLogprobBatch(device_logprobs=object(), ready_event=ready_event)
         output = SimpleNamespace(req_ids=["a"], sampled_token_ids=None)
 
-        def _boom():
-            raise RuntimeError("submit boom")
-
         # Force the queue path to raise after pins are taken.
         import vllm_ascend.observability.runtime_guard.rare_logprob_feed as feed_mod
 
@@ -408,7 +405,6 @@ def test_feed_submit_failure_unpins_and_notes_gap():
                 raise RuntimeError("submit boom")
 
         feed_mod.get_rare_logprob_feed_queue = lambda: BoomQ()  # type: ignore
-        feed_mod.rare_sync_feed_enabled = lambda: False  # type: ignore
         try:
             p.feed_rare_logprobs(output, batch=batch)
         finally:

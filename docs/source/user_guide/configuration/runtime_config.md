@@ -144,8 +144,7 @@ rate can exceed 0.1% on some corpora.
 If warmup/native bind fails, a process-local ``RareCharsSession.warmup_failed`` latch
 skips further stash/collect until ``enabled`` is set false then true again (hot-reload).
 Feature / GB-input numeric ids are owned by ``rare_feed_native.c`` and loaded through
-``rare_enums`` (CI asserts agreement). Debug: ``VLLM_ASCEND_RG_RARE_SYNC_FEED=1`` runs
-D2H+feed inline. Pipeline and state details:
+``rare_enums`` (CI asserts agreement). Pipeline and state details:
 [Runtime Guard feature guide — rare_chars pipeline](../feature_guide/runtime_guard.md#rare_chars-pipeline).
 
 ### manual_trigger

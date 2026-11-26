@@ -158,35 +158,6 @@ def test_feed_rare_logprobs_async_submits_and_releases_pin():
         RequestGuardStore.reset_for_tests()
 
 
-def test_feed_rare_logprobs_sync_runs_inline(monkeypatch):
-    """VLLM_ASCEND_RG_RARE_SYNC_FEED=1 skips the queue (debug short path)."""
-    RequestGuardStore.reset_for_tests()
-    shutdown_rare_logprob_feed_queue()
-    monkeypatch.setenv("VLLM_ASCEND_RG_RARE_SYNC_FEED", "1")
-    try:
-        p, fed, materialized = _make_feed_processor()
-        store = RequestGuardStore.get()
-        store.get_or_create("a")
-
-        ready_event = MagicMock()
-        batch = RareLogprobBatch(device_logprobs=object(), ready_event=ready_event)
-        output = SimpleNamespace(req_ids=["a"], sampled_token_ids=None)
-        p.feed_rare_logprobs(output, batch=batch)
-
-        # Inline: no worker drain needed; queue must stay empty / unstarted.
-        q = get_rare_logprob_feed_queue()
-        assert q.submitted == 0
-        assert q.qsize() == 0
-        ready_event.synchronize.assert_called_once()
-        assert len(materialized) == 1
-        assert fed == [(["a"], 1, 1, None)]
-        assert store.get_state("a").rare_feed_jobs == 0
-    finally:
-        monkeypatch.delenv("VLLM_ASCEND_RG_RARE_SYNC_FEED", raising=False)
-        shutdown_rare_logprob_feed_queue()
-        RequestGuardStore.reset_for_tests()
-
-
 def test_per_step_rare_batch_survives_overlapping_sample():
     """Two steps' batches must not share a single processor slot."""
     RequestGuardStore.reset_for_tests()

@@ -923,15 +923,7 @@ class RuntimeGuardProcessor(RuntimeGuardBusMixin, RuntimeGuardDumpMixin, Runtime
 
             from vllm_ascend.observability.runtime_guard.rare_logprob_feed import (
                 get_rare_logprob_feed_queue,
-                rare_sync_feed_enabled,
             )
-
-            # Debug short path: D2H+feed on this thread (no async hide). Default stays queue.
-            if rare_sync_feed_enabled():
-                logger.info_once("[runtime_guard: rare_chars] sync feed (VLLM_ASCEND_RG_RARE_SYNC_FEED=1; debug only)")
-                _finish_feed()
-                pinned_live = False
-                return
 
             ok = bool(get_rare_logprob_feed_queue().submit(_finish_feed))
             if not ok:

@@ -31,7 +31,6 @@ Guard-local state lives on ``RareCharsSession`` (do not grow without documenting
     states          per-req Python alert bookkeeping
     _lock           feed / finish / clear across FeedQueue + ActionQueue
 
-Debug: ``VLLM_ASCEND_RG_RARE_SYNC_FEED=1`` runs D2H+feed inline (no FeedQueue).
 Numeric FT_*/IN_* ids: ``detector/rare/rare_enums.py`` parses ``rare_feed_native.c``.
 """
 
