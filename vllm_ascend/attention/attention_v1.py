@@ -485,7 +485,9 @@ class FIAParamProvider:
     def resolve(self, attn_metadata) -> dict[str, Any]:
         metadata = attn_metadata[self.layer_name]
 
-        if self.is_draft_model or not self.sliding_window:
+        # A padded DiffusionGemma FULL replay can add a synthetic request,
+        # so its sliding-window tasks must update the block table with the lengths.
+        if self.is_draft_model or not self.sliding_window or self.diffusion_causal is not None:
             params = {
                 "actual_seq_lengths": metadata.actual_seq_lengths_q,
                 "actual_seq_lengths_kv": metadata.seq_lens_list,

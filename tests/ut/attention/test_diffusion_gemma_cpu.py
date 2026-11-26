@@ -9,6 +9,7 @@ from types import SimpleNamespace
 from typing import Any
 
 import numpy as np
+import pytest
 import torch
 
 SOURCE = Path(__file__).resolve().parents[3] / "vllm_ascend"
@@ -84,7 +85,16 @@ def test_diffusion_fia_tasks_have_distinct_replay_providers():
     assert causal.resolve(context) == bidirectional.resolve(context)
 
 
-def test_diffusion_full_replay_pads_fia_without_changing_upstream_offsets():
+@pytest.mark.parametrize(
+    ("offsets", "num_tokens", "seq_lens", "expected_q", "expected_kv"),
+    [
+        ([0, 64, 128, 192, 192], 256, [80, 96, 112, 0], [64, 128, 192, 256], [80, 96, 112, 0]),
+        ([0, 2, 4, 6, 7], 8, [4, 5, 6, 7], [2, 4, 6, 7, 8], [4, 5, 6, 7, 1]),
+    ],
+)
+def test_diffusion_full_replay_pads_fia_without_changing_upstream_offsets(
+    offsets, num_tokens, seq_lens, expected_q, expected_kv
+):
     class GraphMode(Enum):
         FULL = "FULL"
 
@@ -108,31 +118,38 @@ def test_diffusion_full_replay_pads_fia_without_changing_upstream_offsets():
         torch=torch,
     )
     state = state_cls.__new__(state_cls)
-    state._token_positions = torch.arange(256, dtype=torch.int32)
-    state._token_causal = torch.empty(256, dtype=torch.bool)
+    state._token_positions = torch.arange(num_tokens, dtype=torch.int32)
+    state._token_causal = torch.empty(num_tokens, dtype=torch.bool)
     state.max_model_len = 1024
-    state.diffusion_states = SimpleNamespace(is_encoder_phase=torch.tensor([False, True, False]))
-    offsets = [0, 64, 128, 192, 192]
+    state.diffusion_states = SimpleNamespace(is_encoder_phase=torch.tensor([False, True, False, True]))
+    num_actual_tokens = offsets[-1]
+    actual_reqs = sum(end > start for start, end in zip(offsets, offsets[1:]))
     batch = SimpleNamespace(
-        num_reqs=3,
+        num_reqs=actual_reqs,
         num_reqs_after_padding=4,
-        num_tokens=192,
-        num_tokens_after_padding=256,
+        num_tokens=num_actual_tokens,
+        num_tokens_after_padding=num_tokens,
         query_start_loc=torch.tensor(offsets, dtype=torch.int32),
         query_start_loc_np=np.array(offsets, dtype=np.int32),
-        idx_mapping=torch.tensor([1, 2, 0]),
-        seq_lens=torch.tensor([80, 96, 112, 0], dtype=torch.int32),
-        num_scheduled_tokens=np.array([64, 64, 64]),
+        idx_mapping=torch.arange(actual_reqs),
+        seq_lens=torch.tensor(seq_lens, dtype=torch.int32),
+        num_scheduled_tokens=np.diff(offsets[: actual_reqs + 1]),
     )
     table = torch.arange(4, dtype=torch.int32).view(4, 1)
     metadata = state.prepare_attn(batch, GraphMode.FULL, [table], None, [], None)
     provider = _load_class("attention/attention_v1.py", "FIAParamProvider", dataclass=dataclass, Any=Any)
-    for causal in (True, False):
-        params = provider("layer", None, diffusion_causal=causal).resolve(metadata)
-        assert params["actual_seq_lengths"] == [64, 128, 192, 256]
-        assert params["actual_seq_lengths_kv"] == [80, 96, 112, 0]
-        assert params["block_table"] is table
-    assert metadata["layer"].num_actual_tokens == 192
+    for sliding_window in (None, 1024):
+        for causal in (True, False):
+            params = provider("layer", sliding_window, diffusion_causal=causal).resolve(metadata)
+            assert params["actual_seq_lengths"] == expected_q
+            assert params["actual_seq_lengths_kv"] == expected_kv
+            replay_table = params["block_table"]
+            assert replay_table.shape[0] == len(expected_q)
+            assert torch.equal(replay_table[:4], table)
+            if len(expected_q) > 4:
+                assert replay_table[4].tolist() == [0]
+    assert "block_table" not in provider("layer", 1024).resolve(metadata)
+    assert metadata["layer"].num_actual_tokens == num_actual_tokens
     assert batch.query_start_loc.tolist() == batch.query_start_loc_np.tolist() == offsets
 
 
