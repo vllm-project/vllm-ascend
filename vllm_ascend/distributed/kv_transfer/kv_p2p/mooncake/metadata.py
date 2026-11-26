@@ -45,10 +45,20 @@ class MooncakeTransferMetadata(KVConnectorHandshakeMetadata):
     handshake_port: int = 0
     kimi_c8_contracts: list[tuple[str, float] | None] = field(default_factory=list)
     kimi_k31_bf16_geometry: list[tuple[CacheTensorGeometry, ...]] = field(default_factory=list)
+    # Empty for the original shared pool. Counts are local to this engine.
+    block_pool_ids: tuple[int, ...] = ()
+    num_blocks_per_group: tuple[int, ...] = ()
 
     def __post_init__(self) -> None:
         if self.cp_kv_cache_interleave_size <= 0:
             raise ValueError("Mooncake CP interleave size must be positive.")
+        if self.block_pool_ids or self.num_blocks_per_group:
+            if (
+                len(self.block_pool_ids) != len(self.num_blocks_per_group)
+                or any(g < 0 or g >= len(self.block_pool_ids) for g in self.group_indices)
+                or any(n <= 0 for n in self.num_blocks_per_group)
+            ):
+                raise ValueError("Invalid Mooncake block pool layout")
         num_layers = len(self.layer_names)
         if len(self.indexer_replication_sizes) != num_layers or any(
             size < 0 for size in self.indexer_replication_sizes
@@ -130,6 +140,9 @@ class MooncakePPTransferMetadata:
     indexer_replication_sizes: list[int]
     kimi_c8_contracts: list[tuple[str, float] | None] = field(default_factory=list)
     kimi_k31_bf16_geometry: list[tuple[CacheTensorGeometry, ...]] = field(default_factory=list)
+    # Empty for the original shared pool. Counts are local to this engine.
+    block_pool_ids: tuple[int, ...] = ()
+    num_blocks_per_group: tuple[int, ...] = ()
 
 
 @dataclass(frozen=True)

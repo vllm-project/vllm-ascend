@@ -294,8 +294,11 @@ class MooncakePullConnector(MooncakeBaseConnector):
         # bias, so even if it trails AsyncOutput it never reads a scratch
         # column. The Qwen3 drafter only touches its own attention groups.
         managers = self._kv_cache_manager.coordinator.single_type_managers
-        published = {block_id for group in transfer_ids for block_id in group}
-        for manager, group_ids in zip(managers, transfer_ids, strict=True):
+        pool_ids = getattr(self.kv_cache_config, "block_pool_ids", None) or (0,) * len(transfer_ids)
+        published = {
+            (pool_id, block_id) for pool_id, group in zip(pool_ids, transfer_ids, strict=True) for block_id in group
+        }
+        for manager, group_ids, pool_id in zip(managers, transfer_ids, pool_ids, strict=True):
             if not isinstance(manager, MambaManager) or manager.mamba_cache_mode != "align":
                 continue
             state_end = cdiv(request.num_prompt_tokens, manager.block_size)
@@ -310,7 +313,8 @@ class MooncakePullConnector(MooncakeBaseConnector):
                 continue
             scratch = blocks[state_end:]
             if all(
-                block.block_id not in published and manager.block_pool.is_block_writable(block) for block in scratch
+                (pool_id, block.block_id) not in published and manager.block_pool.is_block_writable(block)
+                for block in scratch
             ):
                 # Detach first. The normal ACK/timeout can safely free the
                 # retained prefix even after another request reuses these IDs.

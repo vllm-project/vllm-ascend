@@ -248,6 +248,67 @@ def test_bf16_dspark_capacity_at_logged_budget(dcp_size, target_block_size, over
     assert get_max_concurrency_for_kv_cache_config(config, plan) == pytest.approx(expected_ids / ids_per_request)
 
 
+@pytest.mark.parametrize(
+    ("dcp", "budget", "counts", "per_request"),
+    [(8, 22_600_744_960, (844, 354), (37, 15)), (1, 19_263_193_088, (728, 188), (186, 47))],
+)
+def test_bf16_dspark_split_engine_admission_and_pp_replan(dcp, budget, counts, per_request):
+    register_all_kvcache_specs(None)
+    register_ascend_kv_cache_specs()
+    config = make_config()
+    config.use_v2_model_runner = True
+    config.model_config.dtype = torch.bfloat16
+    config.model_config.original_max_model_len = config.model_config.max_model_len
+    config.cache_config.cache_dtype = "auto"
+    config.cache_config.block_size = 768
+    config.cache_config.enable_prefix_caching = True
+    config.scheduler_config.disable_chunked_mm_input = False
+    config.device_config = SimpleNamespace(device_type="cpu")
+    config.attention_config = SimpleNamespace(hisparse_config=None)
+    config.parallel_config = SimpleNamespace(decode_context_parallel_size=dcp, prefill_context_parallel_size=1)
+    config.speculative_config = SimpleNamespace(method="dspark", use_multi_module_mtp=lambda: False)
+    config.max_in_flight_tokens = 8192 if dcp == 8 else 32768
+    options = {"k31_draft_separate_pool": True}
+    config.kv_transfer_config = SimpleNamespace(
+        kv_connector="MooncakeConnectorV2", kv_connector_extra_config=options, get_from_extra_config=options.get
+    )
+    specs = make_bf16_specs(768)
+    names = [f"model.layers.{layer}.self_attn.attn" for layer in range(93, 98)]
+    specs.update(
+        dict.fromkeys(
+            names,
+            SlidingWindowSpec(block_size=128, num_kv_heads=2, head_size=64, dtype=torch.bfloat16, sliding_window=2048),
+        )
+    )
+    specs = mark_kimi_k31_gqa_draft_specs(config, specs, names)
+
+    # Second rank has fewer draft layers and no target layer. A shrink must
+    # recalculate layer strides in its own layout using both agreed capacities.
+    local = {name: specs[name] for name in names[:2]}
+    plan, projected = get_kv_cache_configs(config, [specs, local], [budget, budget // 4])
+    assert plan.block_pool_ids == (0, 0, 0, 0, 1)
+    assert plan.num_blocks_per_group == (counts[0],) * 4 + (counts[1],)
+    assert projected.num_blocks_per_group == plan.num_blocks_per_group
+    assert projected.kv_cache_tensors[-1].offset == projected.kv_cache_tensors[-2].layer_stride
+    draft_page = specs[names[0]].page_size_bytes
+    assert projected.kv_cache_tensors[-1].size == 2 * draft_page * counts[1]
+    assert plan.kv_cache_tensors[-5].offset == counts[0] * (24 * 768 * (576 + 128) * 2)
+    assert plan.kv_cache_tensors[-1].offset + counts[1] * draft_page == plan.kv_cache_tensors[-1].size <= budget
+    scheduler = generate_scheduler_kv_cache_config([plan, projected])
+    assert get_max_concurrency_for_kv_cache_config(config, scheduler) == pytest.approx(
+        min((count - 1) / demand for count, demand in zip(counts, per_request))
+    )
+    groups = paired_sfa_cache_groups(config, specs)
+    minimum = paired_sfa_max_memory(config, groups) + paired_sfa_pool_bytes(groups)
+    (exact,) = get_kv_cache_configs(config, [specs], [minimum])
+    assert exact.num_blocks_per_group == (per_request[0] + 1,) * 4 + (per_request[1] + 1,)
+    with pytest.raises(ValueError, match="KV cache"):
+        get_kv_cache_configs(config, [specs], [minimum - 1])
+    config.cache_config.num_gpu_blocks_override = max(per_request)
+    with pytest.raises(ValueError, match="KV cache"):
+        get_kv_cache_configs(config, [specs], [budget])
+
+
 @pytest.mark.parametrize("local_sparse_layers", [0, 1, 3, 4])
 def test_bf16_draft_slot_assignment_after_worker_projection(local_sparse_layers):
     config = make_config()

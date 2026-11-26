@@ -273,6 +273,17 @@ class MooncakePullRecvingThread(threading.Thread):
                 if remote_layer_index is None:
                     continue
 
+                local_layout = self.local_metadata.block_pool_ids
+                remote_layout = pp_metadata.block_pool_ids
+                if local_layout or remote_layout:
+                    if (
+                        not local_layout
+                        or not remote_layout
+                        or local_layout[self.group_indices[local_layer_index]]
+                        != remote_layout[pp_metadata.group_indices[remote_layer_index]]
+                    ):
+                        raise ValueError(f"Mooncake P/D block pool layout mismatch for layer {layer_name!r}")
+
                 local_geometry = self.local_metadata.kimi_k31_bf16_geometry
                 remote_geometry = pp_metadata.kimi_k31_bf16_geometry
                 if local_geometry or remote_geometry:
@@ -675,6 +686,15 @@ class MooncakePullRecvingThread(threading.Thread):
             transfer_end = None
             if getattr(self, "_kimi_k31_bf16", False):
                 transfer_end = request_metadata.num_computed_tokens + request_metadata.num_external_tokens
+            if remote_metadata.num_blocks_per_group:
+                for ids_by_group, counts in (
+                    (request_metadata.remote_block_ids, remote_metadata.num_blocks_per_group),
+                    (request_metadata.local_block_ids, self.local_metadata.num_blocks_per_group),
+                    (request_metadata.local_full_block_ids, self.local_metadata.num_blocks_per_group),
+                ):
+                    for ids, capacity in zip(ids_by_group, counts, strict=True):
+                        if ids and (min(ids) < 0 or max(ids) >= capacity):
+                            raise ValueError(f"Mooncake block ID outside its pool for request {request_id!r}")
             request_block_ids_by_spec = transfer_block_ids_by_spec.setdefault(request_id, {})
             for local_layer_index, remote_layer_index in layer_pairs:
                 spec_index = self.spec_indices[local_layer_index]

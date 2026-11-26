@@ -17,11 +17,53 @@ from vllm_ascend.models.qwen3_dspark import (
     AscendQwen3DSparkForCausalLM,
     process_weight,
 )
+from vllm_ascend.worker.v2.aclgraph_utils import ModelAclGraphManager
 from vllm_ascend.worker.v2.spec_decode.dspark.speculator import (
     AscendDSparkSpeculator,
 )
 
 _HIDDEN = 8
+
+
+@pytest.mark.parametrize("layout", ["packed", "independent", "gapped", "reversed", "other-model"])
+def test_aux_projection_reads_dense_columns_in_original_order(layout):
+    config = SimpleNamespace(
+        model_config=SimpleNamespace(
+            hf_config=SimpleNamespace(model_type="kimi_k31" if layout != "other-model" else "other")
+        ),
+        speculative_config=SimpleNamespace(
+            method="dspark", draft_model_config=SimpleNamespace(architectures=["Qwen3DSparkModel"])
+        ),
+    )
+    spec = AscendDSparkSpeculator.__new__(AscendDSparkSpeculator)
+    spec.vllm_config = config
+    seen = []
+    weight = torch.arange(36).reshape(3, 12).float()
+
+    def project(x):
+        assert x.is_contiguous()
+        seen.append(x)
+        return x @ weight.T
+
+    spec.model = SimpleNamespace(combine_hidden_states=project)
+    manager = ModelAclGraphManager.__new__(ModelAclGraphManager)
+    manager.vllm_config = config
+    src = torch.arange(60).reshape(5, 12).float()
+    sources = src.split(4, dim=1)
+    views = manager._allocate_aux_hidden_states(list(sources))
+    for dst, col in zip(views, sources):
+        dst.copy_(col)
+    states = [x[1:4] for x in views]  # Replay can consume fewer rows than capture.
+    if layout == "independent":
+        states = [x.clone() for x in states]
+    elif layout == "gapped":
+        states = list(torch.cat([src, src], dim=1)[1:4, :12].split(4, dim=1))
+    elif layout == "reversed":
+        states.reverse()
+    expected = torch.cat(states, dim=-1) @ weight.T
+    result = spec._combine_aux_hidden_states(states)
+    torch.testing.assert_close(result, expected, rtol=0, atol=0)
+    assert (seen[0].data_ptr() == states[0].data_ptr()) == (layout == "packed")
 
 
 def _spec(vllm_config, draft_hf_config) -> AscendDSparkSpeculator:

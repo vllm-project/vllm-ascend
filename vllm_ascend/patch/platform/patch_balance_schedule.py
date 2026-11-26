@@ -674,6 +674,10 @@ class BalanceScheduler(Scheduler):
                     # only the successfully loaded tokens.
                     request.num_computed_tokens = num_computed_tokens
                     self._inflight_prefills.add(request)
+                    if self.needs_kv_cache_zeroing and getattr(self.kv_cache_config, "block_pool_ids", None):
+                        self._skip_zeroing_for_remote_load(
+                            request.request_id, num_new_local_computed_tokens, num_computed_tokens
+                        )
                     continue
 
                 self.running.append(request)
@@ -791,9 +795,14 @@ class BalanceScheduler(Scheduler):
                 boundary_state_offloads=boundary_state_offloads,
             )
 
-        new_block_ids_to_zero = (
-            (self.kv_cache_manager.take_new_block_ids() or None) if self.needs_kv_cache_zeroing else None
-        )
+        if getattr(self.kv_cache_config, "block_pool_ids", None):
+            kv_operations = self._take_kv_cache_operations()
+        else:
+            kv_operations = {
+                "new_block_ids_to_zero": (self.kv_cache_manager.take_new_block_ids() or None)
+                if self.needs_kv_cache_zeroing
+                else None
+            }
 
         # Dynamic speculative decoding: compute optimal K
         num_spec_tokens_to_schedule = self.num_spec_tokens
@@ -815,7 +824,7 @@ class BalanceScheduler(Scheduler):
             # the previous and the current steps.
             finished_req_ids=self.finished_req_ids,
             free_encoder_mm_hashes=self.encoder_cache_manager.get_freed_mm_hashes(),
-            new_block_ids_to_zero=new_block_ids_to_zero,
+            **kv_operations,
             num_spec_tokens_to_schedule=num_spec_tokens_to_schedule,
             has_sync_kv_loads=has_sync_kv_loads,
         )

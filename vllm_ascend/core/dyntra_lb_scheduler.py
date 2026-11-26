@@ -998,13 +998,18 @@ class DyntraLBScheduler(DyntraLBPolicyMixin, Scheduler):
                     if self.needs_kv_cache_zeroing:
                         # Skip zeroing of the blocks the async load will
                         # overwrite; the zeroing could race the write.
-                        self._skip_zero_block_ids.update(
-                            self.kv_cache_manager.get_zeroing_block_ids_in_range(
-                                request.request_id,
-                                num_new_local_computed_tokens,
-                                num_computed_tokens,
+                        if hasattr(self, "_skip_zeroing_for_remote_load"):
+                            self._skip_zeroing_for_remote_load(
+                                request.request_id, num_new_local_computed_tokens, num_computed_tokens
                             )
-                        )
+                        else:
+                            self._skip_zero_block_ids.update(
+                                self.kv_cache_manager.get_zeroing_block_ids_in_range(
+                                    request.request_id,
+                                    num_new_local_computed_tokens,
+                                    num_computed_tokens,
+                                )
+                            )
                     continue
 
                 self.running.append(request)
@@ -1124,17 +1129,24 @@ class DyntraLBScheduler(DyntraLBPolicyMixin, Scheduler):
                 boundary_state_offloads=boundary_state_offloads,
             )
 
-        pending_kv_cache_block_copies = None
-        take_kv_cache_block_copies = getattr(self.kv_cache_manager, "take_kv_cache_block_copies", None)
-        if callable(take_kv_cache_block_copies):
-            kv_cache_block_copies, cow_retained_blocks = take_kv_cache_block_copies()
-            if kv_cache_block_copies:
-                # The copies run with this step's execution; the first non-empty
-                # step at or after it gets seq `sched_step_seq + 1` (0-token steps
-                # do not advance the seq), and its completion implies the copies
-                # have run.
-                self._free_cow_retained_blocks(cow_retained_blocks, self.sched_step_seq + 1)
-            pending_kv_cache_block_copies = kv_cache_block_copies or None
+        if hasattr(self, "_take_kv_cache_operations"):
+            kv_operations = self._take_kv_cache_operations()
+        else:
+            pending_kv_cache_block_copies = None
+            take_kv_cache_block_copies = getattr(self.kv_cache_manager, "take_kv_cache_block_copies", None)
+            if callable(take_kv_cache_block_copies):
+                kv_cache_block_copies, cow_retained_blocks = take_kv_cache_block_copies()
+                if kv_cache_block_copies:
+                    # The copies run with this step's execution; the first non-empty
+                    # step at or after it gets seq `sched_step_seq + 1` (0-token steps
+                    # do not advance the seq), and its completion implies the copies
+                    # have run.
+                    self._free_cow_retained_blocks(cow_retained_blocks, self.sched_step_seq + 1)
+                pending_kv_cache_block_copies = kv_cache_block_copies or None
+            kv_operations = dict(
+                new_block_ids_to_zero=self._get_new_block_ids_to_zero(),
+                kv_cache_block_copies=pending_kv_cache_block_copies,
+            )
 
         # Dynamic speculative decoding: compute optimal K
         num_spec_tokens_to_schedule = self.num_spec_tokens
@@ -1161,11 +1173,11 @@ class DyntraLBScheduler(DyntraLBPolicyMixin, Scheduler):
             # the previous and the current steps.
             finished_req_ids=self.finished_req_ids,
             free_encoder_mm_hashes=self.encoder_cache_manager.get_freed_mm_hashes(),
-            new_block_ids_to_zero=self._get_new_block_ids_to_zero(),
+            **kv_operations,
             num_spec_tokens_to_schedule=num_spec_tokens_to_schedule,
         )
-        if self._scheduler_output_supports("kv_cache_block_copies"):
-            scheduler_output_kwargs["kv_cache_block_copies"] = pending_kv_cache_block_copies
+        if not self._scheduler_output_supports("kv_cache_block_copies"):
+            scheduler_output_kwargs.pop("kv_cache_block_copies", None)
         if self._scheduler_output_supports("kv_connector_block_state"):
             scheduler_output_kwargs["kv_connector_block_state"] = kv_connector_block_state
         if self._scheduler_output_supports("has_sync_kv_loads"):

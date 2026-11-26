@@ -92,7 +92,7 @@ from vllm_ascend import envs as ascend_envs
 from vllm_ascend.ascend_config import get_ascend_config, is_kimi_c8_config
 from vllm_ascend.ascend_forward_context import register_kimi_moe_quant_type
 from vllm_ascend.attention.utils import mark_fused_preprocess_weights
-from vllm_ascend.core.kv_cache_interface import uses_kimi_k31_gqa_draft
+from vllm_ascend.core.kv_cache_interface import uses_kimi_k31_bf16_cache, uses_kimi_k31_gqa_draft
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.models.common.ops.sequence_parallel import (
     sp_all_gather,
@@ -118,7 +118,7 @@ from vllm_ascend.ops.triton.flash_attention_output import register_flash_attenti
 from vllm_ascend.quantization.methods.base import PreparedLinearInput
 from vllm_ascend.quantization.methods.w8a8.w8a8_dynamic import AscendW8A8DynamicLinearMethod
 from vllm_ascend.quantization.methods.w8a8.w8a8_mxfp8 import AscendW8A8MXFP8DynamicLinearMethod
-from vllm_ascend.utils import get_rotation_path, is_950
+from vllm_ascend.utils import get_rotation_path, is_950, model_uses_kpool_indexer, should_reuse_topk
 from vllm_ascend.worker.v2.pp_transport import (
     PPTransportDataType,
     add_pp_transport_tensors,
@@ -671,6 +671,29 @@ class AscendKimiMLAAttention(UpstreamKimiMLAAttention):
         return self.mla_attn(positions, hidden_states)
 
 
+def _needs_topk_indices_buffer(config, vllm_config) -> bool:
+    if getattr(config, "dsa_config", None) is None:
+        return False
+    if not (
+        vllm_config.use_v2_model_runner
+        and uses_kimi_k31_gqa_draft(vllm_config)
+        and uses_kimi_k31_bf16_cache(vllm_config)
+        and vllm_config.parallel_config.pipeline_parallel_size == 1
+        and vllm_config.attention_config.backend is None
+        and not getattr(vllm_config.attention_config, "backend_per_kind", None)
+        and not model_uses_kpool_indexer(vllm_config.model_config)
+        and not get_ascend_config().sparse_kv_offload_config.enabled
+    ):
+        return True
+    from vllm_ascend.attention.sfa_v1 import sfa_index_cache_enabled
+
+    # In this backend each indexer returns its own top-k to attention. The
+    # model-wide buffer is only needed to pass those results between layers.
+    return sfa_index_cache_enabled(vllm_config.model_config) or any(
+        config.is_dsa_layer(i) and should_reuse_topk(config, i) for i in range(config.num_hidden_layers)
+    )
+
+
 class AscendKimiDSAAttention(AscendKimiMLAAttention):
     """Kimi projections and output gate on the shared GLM/DeepSeek SFA stack."""
 
@@ -1074,9 +1097,16 @@ class AscendKimiLinearModel(UpstreamKimiLinearModel):
                 dtype=torch.int32,
                 device=current_platform.device_type,
             )
-            if getattr(config, "dsa_config", None) is not None
+            if _needs_topk_indices_buffer(config, vllm_config)
             else None
         )
+        if getattr(config, "dsa_config", None) is not None:
+            logger.info(
+                "Kimi shared top-k buffer: index_topk=%d, max_batched_tokens=%d, allocated_bytes=%d",
+                config.index_topk,
+                vllm_config.scheduler_config.max_num_batched_tokens,
+                topk_indices_buffer.nbytes if topk_indices_buffer is not None else 0,
+            )
 
         def get_layer(prefix: str):
             return AscendKimiDecoderLayer(
@@ -1371,21 +1401,25 @@ class AscendKimiLinearModel(UpstreamKimiLinearModel):
         )
         if not materialized_aux and pending_mlp_output is not None:
             self._maybe_add_hidden_state(aux_hidden_states, self.end_layer, final_prefix, None)
-        if materialized_aux and self.end_layer in self.aux_hidden_state_layers:
+        capture_final = materialized_aux and self.end_layer in self.aux_hidden_state_layers
+        if capture_final:
             aux_hidden_states.append(hidden_states)
         if self.use_sequence_parallel:
             if aux_hidden_states:
                 hidden_size = hidden_states.shape[-1]
+                # When the last boundary is captured, the final hidden state
+                # is already the last aux column. Gather it only once.
                 packed_hidden_states = torch.cat(
-                    [hidden_states, *aux_hidden_states],
-                    dim=-1,
+                    aux_hidden_states if capture_final else [hidden_states, *aux_hidden_states], dim=-1
                 )
                 packed_hidden_states = sp_all_gather(packed_hidden_states)
                 packed_hidden_states = packed_hidden_states[:full_num_tokens]
-                hidden_states, *aux_hidden_states = packed_hidden_states.split(
-                    hidden_size,
-                    dim=-1,
-                )
+                gathered = list(packed_hidden_states.split(hidden_size, dim=-1))
+                if capture_final:
+                    aux_hidden_states = gathered
+                    hidden_states = gathered[-1]
+                else:
+                    hidden_states, *aux_hidden_states = gathered
             else:
                 hidden_states = sp_all_gather(hidden_states)
                 hidden_states = hidden_states[:full_num_tokens]

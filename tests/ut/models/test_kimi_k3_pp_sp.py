@@ -285,7 +285,7 @@ def runtime(monkeypatch):
     monkeypatch.setattr(torch.ops._C_ascend, "attn_res_fwd", attn_res_fwd_cpu, raising=False)
     load_definitions(
         "vllm_ascend/models/kimi_k3/kimi_k3.py",
-        {"AscendKimiLinearModel", "AscendKimiDecoderLayer", "AscendKimiMLP"},
+        {"AscendKimiLinearModel", "AscendKimiDecoderLayer", "AscendKimiMLP", "_needs_topk_indices_buffer"},
         namespace,
         bases={
             "AscendKimiLinearModel": "BaseModel",
@@ -350,6 +350,65 @@ def make_model(namespace, context, start, end, block_size, sp, materialized):
     model.output_attn_res_proj = SimpleNamespace(weight=torch.ones(1, 3) * 0.1)
     model.output_attn_res_norm = SimpleNamespace(weight=torch.ones(3), variance_epsilon=1e-5)
     return model
+
+
+@pytest.mark.parametrize(
+    "case,needs_buffer",
+    [
+        ("ordinary", False),
+        ("index_cache", True),
+        ("shared", True),
+        ("skip_layer", True),
+        ("pp", True),
+        ("backend", True),
+        ("backend_per_kind", True),
+        ("offload", True),
+        ("mla_draft", True),
+        ("c8", True),
+        ("kpool", True),
+    ],
+)
+def test_k31_topk_allocation_requires_a_consumer(runtime, case, needs_buffer):
+    from vllm_ascend.core.kv_cache_interface import uses_kimi_k31_bf16_cache, uses_kimi_k31_gqa_draft
+    from vllm_ascend.utils import model_uses_kpool_indexer, should_reuse_topk
+
+    namespace, _ = runtime
+    text = SimpleNamespace(dsa_config={}, is_dsa_layer=lambda i: i == 3, num_hidden_layers=8)
+    if case == "skip_layer":
+        text.index_topk_pattern = "FFFSFFFF"
+    elif case == "shared":
+        text.indexer_types = ["shared"]
+    elif case == "index_cache":
+        text.use_index_cache = True
+    elif case == "kpool":
+        text.index_kpool = 128
+    config = SimpleNamespace(
+        model_config=SimpleNamespace(
+            hf_config=SimpleNamespace(model_type="kimi_k31"), hf_text_config=text, dtype=torch.bfloat16
+        ),
+        cache_config=SimpleNamespace(cache_dtype="auto"),
+        additional_config={"mla_cache_mode": "C8"} if case == "c8" else {},
+        parallel_config=SimpleNamespace(pipeline_parallel_size=2 if case == "pp" else 1),
+        attention_config=SimpleNamespace(
+            backend="custom" if case == "backend" else None,
+            backend_per_kind={"mla": "custom"} if case == "backend_per_kind" else {},
+        ),
+        speculative_config=SimpleNamespace(
+            method="dspark",
+            draft_model_config=SimpleNamespace(
+                architectures=["K3DSparkModel" if case == "mla_draft" else "Qwen3DSparkModel"]
+            ),
+        ),
+        use_v2_model_runner=True,
+    )
+    namespace.update(
+        uses_kimi_k31_gqa_draft=uses_kimi_k31_gqa_draft,
+        uses_kimi_k31_bf16_cache=uses_kimi_k31_bf16_cache,
+        should_reuse_topk=should_reuse_topk,
+        model_uses_kpool_indexer=model_uses_kpool_indexer,
+        get_ascend_config=lambda: SimpleNamespace(sparse_kv_offload_config=SimpleNamespace(enabled=case == "offload")),
+    )
+    assert namespace["_needs_topk_indices_buffer"](text, config) is needs_buffer
 
 
 @pytest.mark.parametrize("materialized", [False, True])

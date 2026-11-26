@@ -1297,6 +1297,13 @@ def _allocate_kv_cache(
     # K3.1 PP ranks with only recurrent or draft layers still use paired backing.
     hf_config = getattr(getattr(vllm_config, "model_config", None), "hf_config", None)
     is_paired_sfa = getattr(hf_config, "model_type", None) == "kimi_k31"
+    layer_block_counts = {
+        layer: count
+        for group, count in zip(
+            kv_cache_config.kv_cache_groups, getattr(kv_cache_config, "num_blocks_per_group", None) or ()
+        )
+        for layer in group.layer_names
+    }
     if (use_hybrid_layout or is_paired_sfa) and not is_dsv4_model and not is_glm5_next:
         hybrid_backing = _allocate_int8_cache_tensor(kv_cache_config.kv_cache_tensors[0].size, alignment, device)
 
@@ -1384,8 +1391,10 @@ def _allocate_kv_cache(
         if hybrid_backing is not None:
             for layer_idx, layer_name in enumerate(shared_names):
                 layer_spec = layer_kv_cache_spec[layer_name]
-                layer_size = kv_cache_config.num_blocks * layer_spec.page_size_bytes
+                layer_size = layer_block_counts.get(layer_name, kv_cache_config.num_blocks) * layer_spec.page_size_bytes
                 start = kv_cache_tensor.offset + layer_idx * kv_cache_tensor.layer_stride
+                if start < 0 or start + layer_size > hybrid_backing.numel():
+                    raise ValueError(f"Hybrid KV cache view for {layer_name} exceeds the backing allocation.")
                 kv_cache_raw_tensors[layer_name] = hybrid_backing[start : start + layer_size]
             continue
 
@@ -1696,8 +1705,10 @@ def _reshape_kv_cache_v2(
                 num_kernel_blocks, remainder = divmod(kv_cache_spec.block_size, kernel_block_size)
                 if remainder or not isinstance(raw_cache, torch.Tensor):
                     raise ValueError(f"Invalid Kimi K3.1 GQA DSpark cache allocation for {layer_name}.")
+                counts = getattr(kv_cache_config, "num_blocks_per_group", None)
+                num_blocks = kv_cache_config.num_blocks if counts is None else counts[group.kv_cache_group_id]
                 shape = group.backend.get_kv_cache_shape(
-                    kv_cache_config.num_blocks * num_kernel_blocks,
+                    num_blocks * num_kernel_blocks,
                     kernel_block_size,
                     kv_cache_spec.num_kv_heads,
                     kv_cache_spec.head_size,

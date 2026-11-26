@@ -146,9 +146,20 @@ def paired_sfa_cache_groups(config, specs):
         for name, spec in sorted(gqa.items(), key=lambda item: (extract_layer_index(item[0]), item[0])):
             by_spec.setdefault(spec, []).append(name)
         use_indexer_slots = uses_kimi_k31_bf16_cache(config) and supports_component_major_mla_pd(config)
+        transfer = config.kv_transfer_config
+        options = getattr(transfer, "kv_connector_extra_config", {}) or {}
+        separate_pool = options.get("k31_draft_separate_pool", False)
+        if type(separate_pool) is not bool:
+            raise ValueError("k31_draft_separate_pool must be a boolean")
+        if separate_pool and not (use_indexer_slots and config.use_v2_model_runner):
+            raise ValueError("Separate K3.1 draft pages require BF16, the V2 runner and the Mooncake pull connector")
         for spec, names in by_spec.items():
+            spec = replace(spec, separate_block_pool=separate_pool)
             if isinstance(spec, AscendGQADraftSlidingWindowSpec):
-                spec = replace(spec, can_overlay_indexer=use_indexer_slots and _can_overlay_indexer(spec, target))
+                spec = replace(
+                    spec,
+                    can_overlay_indexer=not separate_pool and use_indexer_slots and _can_overlay_indexer(spec, target),
+                )
             logger.info_once(
                 "K3.1 DSpark GQA KV group %d: %d %s layers, block=%d, window=%s, dtype=%s, bytes/page/layer=%d",
                 len(groups),
@@ -252,18 +263,67 @@ def paired_sfa_pool_bytes(groups):
     return slots * main_page + region_size
 
 
+def _pool_demand(config, groups):
+    return sum(
+        (g.kv_cache_spec.max_memory_usage_bytes(config) + g.kv_cache_spec.page_size_bytes - 1)
+        // g.kv_cache_spec.page_size_bytes
+        for g in groups
+    )
+
+
+def _split_pool_counts(config, groups, pool_ids, available_memory, target_page, draft_page):
+    override = config.cache_config.num_gpu_blocks_override
+    if override is not None:
+        return override, override
+    target_required, draft_required = (
+        _pool_demand(config, [g for g, pid in zip(groups, pool_ids) if pid == pool]) for pool in (0, 1)
+    )
+    usable = available_memory - target_page - draft_page  # One reserved null ID per pool.
+    request_bytes = target_page * target_required + draft_page * draft_required
+    if usable < 0:
+        raise ValueError("K3.1 KV budget cannot allocate both pools' null pages")
+    if not request_bytes:
+        # A PP rank without any cache layers adopts the other ranks' counts.
+        return 1, 1
+    target_blocks = 1 + usable * target_required // request_bytes
+    draft_blocks = 1 + usable * draft_required // request_bytes
+    if draft_page:
+        # Fill the rounding remainder with whole draft pages.
+        draft_blocks += (available_memory - target_blocks * target_page - draft_blocks * draft_page) // draft_page
+    return target_blocks, draft_blocks
+
+
 def paired_sfa_cache_config(
     vllm_config: VllmConfig,
     kv_cache_groups: list[KVCacheGroupSpec],
     available_memory: int,
+    *,
+    num_blocks_per_group: tuple[int, ...] | None = None,
 ) -> KVCacheConfig:
     _, main_mla_names, indexer_names, kda_groups, main_page_size, indexer_page_size, num_main_slots = _layout(
         kv_cache_groups
     )
     draft_layers, region_size = _draft_layout(kv_cache_groups, len(indexer_names), indexer_page_size)
     pool_bytes = num_main_slots * main_page_size + region_size
-    num_blocks = may_override_num_blocks(vllm_config, available_memory // pool_bytes)
-    backing_size = pool_bytes * num_blocks
+    pool_ids = tuple(int(getattr(g.kv_cache_spec, "separate_block_pool", False)) for g in kv_cache_groups)
+    split = 1 in pool_ids
+    if split:
+        # Separate all draft layers from the target/indexer span. Within the
+        # draft pool, the layers have private planes even when their IDs match.
+        draft_layers, draft_page = _draft_layout(kv_cache_groups, 0, indexer_page_size)
+        target_page = num_main_slots * main_page_size + len(indexer_names) * indexer_page_size
+        if num_blocks_per_group is not None:
+            num_blocks = num_blocks_per_group[pool_ids.index(0)]
+            draft_blocks = num_blocks_per_group[pool_ids.index(1)]
+        else:
+            num_blocks, draft_blocks = _split_pool_counts(
+                vllm_config, kv_cache_groups, pool_ids, available_memory, target_page, draft_page
+            )
+        backing_size = num_blocks * target_page + draft_blocks * draft_page
+    else:
+        num_blocks = may_override_num_blocks(vllm_config, available_memory // pool_bytes)
+        draft_blocks = num_blocks
+        backing_size = pool_bytes * num_blocks
     main_layer_size = main_page_size * num_blocks
     # Recurrent groups overlay the target MLA region. Their block IDs are
     # disjoint. The indexer/draft region follows these main-page slots.
@@ -297,13 +357,15 @@ def paired_sfa_cache_config(
             block_stride=indexer_page_size,
         )
     )
+    if split:
+        offset += len(indexer_names) * indexer_layer_size
     for name, page_bytes, draft_offset in draft_layers:
         tensors.append(
             KVCacheTensor(
                 size=backing_size,
                 layers=[name],
-                offset=offset + draft_offset * num_blocks,
-                layer_stride=page_bytes * num_blocks,
+                offset=offset + draft_offset * draft_blocks,
+                layer_stride=page_bytes * draft_blocks,
                 block_stride=page_bytes,
             )
         )
@@ -312,13 +374,20 @@ def paired_sfa_cache_config(
         kv_cache_tensors=tensors,
         kv_cache_groups=kv_cache_groups,
         prefix_cache_retention_interval=vllm_config.cache_config.prefix_cache_retention_interval,
+        block_pool_ids=pool_ids if split else None,
+        num_blocks_per_group=tuple(draft_blocks if pid else num_blocks for pid in pool_ids) if split else None,
     )
 
 
 def paired_sfa_max_memory(config, groups):
-    blocks = sum(
-        (g.kv_cache_spec.max_memory_usage_bytes(config) + g.kv_cache_spec.page_size_bytes - 1)
-        // g.kv_cache_spec.page_size_bytes
-        for g in groups
-    )
-    return blocks * paired_sfa_pool_bytes(groups)
+    draft = [g for g in groups if getattr(g.kv_cache_spec, "separate_block_pool", False)]
+    if draft:
+        target = [g for g in groups if not getattr(g.kv_cache_spec, "separate_block_pool", False)]
+        draft_page = sum(len(g.layer_names) * g.kv_cache_spec.page_size_bytes for g in draft)
+        target_page = paired_sfa_pool_bytes(target)
+        target_required, draft_required = _pool_demand(config, target), _pool_demand(config, draft)
+        if config.cache_config.num_gpu_blocks_override is not None:
+            # The override sets an identical ID count in both pools.
+            return max(target_required, draft_required) * (target_page + draft_page)
+        return target_required * target_page + draft_required * draft_page
+    return _pool_demand(config, groups) * paired_sfa_pool_bytes(groups)

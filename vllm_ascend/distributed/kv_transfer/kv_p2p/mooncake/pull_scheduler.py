@@ -192,7 +192,13 @@ class MooncakeSchedulerSendingThread(threading.Thread):
                 for tp_rank, worker_metadata in workers_by_tp_rank.items():
                     mismatched_fields = [
                         field_name
-                        for field_name in ("block_size", "num_blocks", "cp_kv_cache_interleave_size")
+                        for field_name in (
+                            "block_size",
+                            "num_blocks",
+                            "cp_kv_cache_interleave_size",
+                            "block_pool_ids",
+                            "num_blocks_per_group",
+                        )
                         if getattr(worker_metadata, field_name) != getattr(reference, field_name)
                     ]
                     if mismatched_fields:
@@ -323,6 +329,8 @@ class MooncakeSchedulerSendingThread(threading.Thread):
                 block_size=reference.block_size,
                 cp_kv_cache_interleave_size=reference.cp_kv_cache_interleave_size,
                 num_blocks=reference.num_blocks,
+                block_pool_ids=reference.block_pool_ids,
+                num_blocks_per_group=reference.num_blocks_per_group,
                 layer_names=layer_names,
                 layer_block_sizes=layer_block_sizes,
                 group_indices=group_indices,

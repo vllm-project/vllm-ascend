@@ -441,6 +441,7 @@ def test_sparse_mla_full_forward_uses_real_rows_and_latent_values(graph_mode, em
             create=True,
         ) as quantized_sparse_attention,
         patch.object(sparse_mla, "attention_transfer_window"),
+        patch.object(sparse_mla, "oproj_tp_enable", return_value=False),
         patch.object(sparse_mla, "flash_attention_gate", side_effect=lambda x, gate: x.mul_(torch.sigmoid(gate))),
         patch.object(sparse_mla, "wait_for_kv_layer_from_connector"),
         patch.object(sparse_mla, "notify_kv_cache_written"),

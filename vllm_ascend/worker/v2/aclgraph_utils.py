@@ -49,6 +49,7 @@ from vllm_ascend.compilation.updatable_graph import (
     ContextSource,
     UpdatableGraph,
 )
+from vllm_ascend.core.kv_cache_interface import uses_kimi_k31_gqa_draft
 from vllm_ascend.utils import use_updatable_graph
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch
 from vllm_ascend.worker.v2.utils import communicator_switch
@@ -170,6 +171,18 @@ class ModelAclGraphManager(ModelCudaGraphManager):
     def init_breakable_cg_runner(self, model: nn.Module) -> None:
         if self.breakable_cg_runner is None:
             self.breakable_cg_runner = BreakableACLGraphWrapper(model, self.vllm_config)
+
+    def _allocate_aux_hidden_states(self, states: list[torch.Tensor]) -> list[torch.Tensor]:
+        if states and uses_kimi_k31_gqa_draft(self.vllm_config):
+            first = states[0]
+            if first.ndim == 2 and all(
+                x.shape == first.shape and x.dtype == first.dtype and x.device == first.device for x in states
+            ):
+                # Capture copies each layer into its own columns. The eager
+                # draft projection then reads all columns as one dense matrix.
+                rows, width = first.shape
+                return list(first.new_empty((rows, width * len(states))).split(width, dim=1))
+        return super()._allocate_aux_hidden_states(states)
 
     def run_fullgraph(self, desc: BatchExecutionDescriptor) -> torch.Tensor | tuple[torch.Tensor, list[torch.Tensor]]:
         """Override run_fullgraph to update full graph params in run_fullgraph."""

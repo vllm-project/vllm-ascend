@@ -203,6 +203,7 @@ class MooncakeBaseConnectorWorker:
     def _get_shared_page_metadata(
         self,
         caches: tuple[torch.Tensor, ...],
+        num_blocks: int | None = None,
     ) -> tuple[int, int, tuple[int, ...], int] | None:
         """Describe views packed into one physical page allocation.
 
@@ -220,9 +221,10 @@ class MooncakeBaseConnectorWorker:
         if len(tensor_num_blocks) != 1 or len(page_strides) != 1:
             return None
 
+        num_blocks = self.num_blocks if num_blocks is None else num_blocks
         num_tensor_blocks = next(iter(tensor_num_blocks))
         page_stride = next(iter(page_strides))
-        if num_tensor_blocks <= 0 or page_stride <= 0 or num_tensor_blocks % self.num_blocks:
+        if num_tensor_blocks <= 0 or page_stride <= 0 or num_tensor_blocks % num_blocks:
             return None
 
         page_base_addr = min(cache.data_ptr() for cache in caches)
@@ -259,7 +261,7 @@ class MooncakeBaseConnectorWorker:
             page_base_addr,
             page_stride,
             tuple(selected_cache.shape[1:]),
-            num_tensor_blocks // self.num_blocks,
+            num_tensor_blocks // num_blocks,
         )
 
     def register_kv_caches(
@@ -291,6 +293,8 @@ class MooncakeBaseConnectorWorker:
         kimi_k31_bf16_geometry: list[tuple[CacheTensorGeometry, ...]] = []
         kimi_k31_bf16 = uses_kimi_k31_bf16_cache(self.vllm_config)
 
+        pool_ids = getattr(self.kv_cache_config, "block_pool_ids", None) or ()
+        capacities = getattr(self.kv_cache_config, "num_blocks_per_group", None) or ()
         for tensor_config in self.kv_cache_config.kv_cache_tensors:
             for layer_name in get_kv_cache_tensor_layers(tensor_config):
                 if layer_name in configured_layer_names:
@@ -315,6 +319,8 @@ class MooncakeBaseConnectorWorker:
                 block_shapes: list[tuple[int, ...]] = []
                 block_size_scales: list[int] = []
 
+                group_index = self.layer_name_to_group_index[layer_name]
+                num_blocks = capacities[group_index] if capacities else self.num_blocks
                 spec_index = self.layer_name_to_spec_index[layer_name]
                 spec = self.kv_cache_specs[spec_index]
                 caches = as_kv_cache_tensors(cache_or_caches)
@@ -323,7 +329,7 @@ class MooncakeBaseConnectorWorker:
                         tuple((str(cache.dtype), tuple(cache.shape[1:]), cache.stride()[1:]) for cache in caches)
                     )
                 if isinstance(spec, (AscendGQADraftFullAttentionSpec, AscendGQADraftSlidingWindowSpec)):
-                    self._validate_gqa_draft_cache(layer_name, spec, caches)
+                    self._validate_gqa_draft_cache(layer_name, spec, caches, num_blocks)
                 contract = None
                 draft_prefixes = getattr(getattr(self, "vllm_config", None), "_kimi_c8_draft_layer_prefixes", ())
                 is_draft_layer = any(
@@ -351,7 +357,7 @@ class MooncakeBaseConnectorWorker:
                     contract = ("kimi_e4m3_pa_nz_native_v2", scalar)
                 kimi_c8_contracts.append(contract)
                 shared_page_metadata = (
-                    self._get_shared_page_metadata(caches)
+                    self._get_shared_page_metadata(caches, num_blocks)
                     if isinstance(spec, (MLAAttentionSpec, SlidingWindowMLASpec))
                     else None
                 )
@@ -384,7 +390,9 @@ class MooncakeBaseConnectorWorker:
                         block_strides.append(cache.stride(0) * element_size)
                         block_lens.append(math.prod(block_shape) * element_size)
                         block_shapes.append(block_shape)
-                        block_size_scales.append(tensor_num_blocks // self.num_blocks)
+                        if capacities and (tensor_num_blocks < num_blocks or tensor_num_blocks % num_blocks):
+                            raise ValueError(f"Invalid physical page count for Mooncake layer {layer_name!r}")
+                        block_size_scales.append(tensor_num_blocks // num_blocks)
 
                 layer_names.append(layer_name)
                 layer_block_size = spec.block_size
@@ -395,7 +403,7 @@ class MooncakeBaseConnectorWorker:
                     # remains an ordinary DCP-sharded FA block.
                     layer_block_size *= spec.sfa_dcp_replicated_indexer_size
                 layer_block_sizes.append(layer_block_size)
-                group_indices.append(self.layer_name_to_group_index[layer_name])
+                group_indices.append(group_index)
                 kv_caches_base_addr.append(base_addrs)
                 block_strides_per_layer.append(block_strides)
                 block_lens_per_layer.append(block_lens)
@@ -419,6 +427,8 @@ class MooncakeBaseConnectorWorker:
             block_size=self.block_size,
             cp_kv_cache_interleave_size=self.vllm_config.parallel_config.cp_kv_cache_interleave_size,
             num_blocks=self.num_blocks,
+            block_pool_ids=tuple(pool_ids),
+            num_blocks_per_group=tuple(capacities),
             layer_names=layer_names,
             layer_block_sizes=layer_block_sizes,
             group_indices=group_indices,
@@ -435,6 +445,8 @@ class MooncakeBaseConnectorWorker:
         )
         self.transfer_metadata = transfer_metadata
         self.xfer_handshake_metadata = transfer_metadata
+        if pool_ids:
+            logger.info("Mooncake KV pools (group order): pool_ids=%s, logical_blocks=%s", pool_ids, capacities)
 
         logger.info(
             "Registered Mooncake KV caches: engine_id=%s, num_layers=%d, "
@@ -458,13 +470,14 @@ class MooncakeBaseConnectorWorker:
         layer_name: str,
         spec: AscendGQADraftFullAttentionSpec | AscendGQADraftSlidingWindowSpec,
         caches: tuple[torch.Tensor, ...],
+        num_blocks: int,
     ) -> None:
         """Require a contiguous head per physical block for byte-range pulls."""
         if len(caches) != 2:
             raise ValueError(f"Mooncake GQA draft cache {layer_name!r} requires separate K and V views.")
         for cache, head_dim in zip(caches, (spec.head_size, spec.head_size_v)):
-            if cache.ndim == 4 and cache.shape[0] > 0 and cache.shape[0] % self.num_blocks == 0:
-                blocks_per_page = cache.shape[0] // self.num_blocks
+            if cache.ndim == 4 and cache.shape[0] > 0 and cache.shape[0] % num_blocks == 0:
+                blocks_per_page = cache.shape[0] // num_blocks
                 tokens_per_block, remainder = divmod(spec.block_size, blocks_per_page)
                 if (
                     not remainder

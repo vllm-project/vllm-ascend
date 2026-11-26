@@ -5,9 +5,11 @@ import numpy as np
 import pytest
 import torch
 from vllm.config import CUDAGraphMode
+from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheConfig, KVCacheGroupSpec
 from vllm.v1.worker.gpu.dp_utils import dispatch_cg_and_sync_dp
 from vllm.v1.worker.gpu.input_batch import set_dummy_context
 from vllm.v1.worker.gpu.model_runner import GPUModelRunner
+from vllm.v1.worker.gpu.warmup import run_mixed_prefill_decode_warmup, warmup_kernels
 from vllm.v1.worker.utils import get_uniform_decode_token_count
 
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
@@ -351,6 +353,84 @@ def test_dummy_slot_mapping_uses_padded_persistent_buffer(buffers, runner):
     assert actual_slots.data_ptr() == slots.data_ptr()
     assert torch.all(actual_slots == -1)
     runner.block_tables.get_dummy_slot_mappings.assert_called_once_with(2)
+
+
+@pytest.mark.parametrize("mixed", [False, True])
+def test_split_pool_warmup_assigns_real_ids_and_respects_tighter_pool(mixed, monkeypatch):
+    spec = FullAttentionSpec(block_size=16, num_kv_heads=1, head_size=1, dtype=torch.float32)
+    groups = [KVCacheGroupSpec([name], spec) for name in ("main", "target2", "draft")]
+    config = KVCacheConfig(
+        num_blocks=19,
+        kv_cache_groups=groups,
+        kv_cache_tensors=[],
+        block_pool_ids=(0, 0, 1),
+        num_blocks_per_group=(19, 19, 4),
+    )
+    zeroers = {0: Mock(), 1: Mock()}
+    runner = SimpleNamespace(
+        num_speculative_steps=3,
+        adaptive_verification=None,
+        rejection_sampler=None,
+        decode_query_len=4,
+        is_pooling_model=False,
+        is_encoder_decoder=False,
+        is_last_pp_rank=False,
+        max_num_reqs=4,
+        max_model_len=256,
+        model_state=SimpleNamespace(max_encoder_len=0),
+        scheduler_config=SimpleNamespace(max_num_seqs=4, max_num_batched_tokens=256),
+        kv_cache_config=config,
+        vllm_config=SimpleNamespace(num_lookahead_tokens=3, is_mm_encoder_only=False),
+        kv_block_zeroer=zeroers[0],
+        _pool_zeroers=zeroers,
+        kv_connector=Mock(),
+    )
+    monkeypatch.setattr(torch.accelerator, "synchronize", lambda: None)
+    outputs = []
+    if mixed:
+        assert not run_mixed_prefill_decode_warmup(runner, outputs.append, lambda _: None, 128)
+        assert not outputs
+        assert run_mixed_prefill_decode_warmup(runner, outputs.append, lambda _: None, 30)
+    else:
+        warmup_kernels(runner, outputs.append, lambda _: None)
+        assert len(outputs[0].scheduled_new_reqs) == 1
+        zeroers[0].warmup.assert_called_once_with(19)
+        zeroers[1].warmup.assert_called_once_with(4)
+    seen = {0: set(), 1: set()}
+    for output in outputs:
+        rows = [r.block_ids for r in output.scheduled_new_reqs] + output.scheduled_cached_reqs.new_block_ids
+        for row in filter(None, rows):
+            for pool, ids in zip(config.block_pool_ids, row):
+                assert seen[pool].isdisjoint(ids)
+                seen[pool].update(ids)
+    assert min(seen[0]) == min(seen[1]) == 1
+    assert max(seen[0]) < 19 and max(seen[1]) < 4
+
+
+def test_dummy_context_split_pool_bounds_exclude_null_subpages(buffers):
+    with patch("vllm_ascend.worker.v2.input_batch.update_cos_sin"):
+        batch = AscendInputBatch.make_dummy(2, 4, buffers)
+    tables = [torch.zeros((2, 10), dtype=torch.int32) for _ in range(2)]
+    blocks = SimpleNamespace(input_block_tables=tables, kernel_block_sizes=[16, 16], blocks_per_kv_block=[1, 6])
+    set_dummy_context(batch, blocks, 126, (3, 2), 128)
+    assert set(tables[0][:, :8].flatten().tolist()) == {1, 2}
+    assert set(tables[1][:, :8].flatten().tolist()) == set(range(6, 12))
+
+
+def test_split_dummy_state_slots_use_each_groups_manager_capacity(runner):
+    runner.device = torch.device("cpu")
+    runner.kv_cache_config = SimpleNamespace(
+        num_blocks_per_group=(4, 2), kv_cache_groups=[SimpleNamespace(kv_cache_spec=None)] * 2
+    )
+    tables = tuple(torch.zeros((3, 1), dtype=torch.int32) for _ in range(2))
+    runner.block_tables = SimpleNamespace(
+        get_dummy_block_tables=lambda n: tables,
+        get_dummy_slot_mappings=lambda n: torch.full((2, n), -1),
+        blocks_per_kv_block=[1, 6],
+    )
+    GPUModelRunner.prepare_dummy_attn(runner, SimpleNamespace(num_reqs=3, num_tokens=3), valid_state_slots=True)
+    assert tables[0].flatten().tolist() == [1, 2, 3]
+    assert tables[1].flatten().tolist() == [6, 6, 6]
 
 
 @pytest.mark.parametrize(

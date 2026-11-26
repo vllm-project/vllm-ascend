@@ -107,7 +107,7 @@ from vllm_ascend.utils import (
     should_skip_allreduce_across_dp_group,
 )
 from vllm_ascend.worker.device_metadata import TargetDeviceMetadata
-from vllm_ascend.worker.utils import disable_compilation
+from vllm_ascend.worker.utils import copy_kv_cache_blocks_inplace, disable_compilation
 from vllm_ascend.worker.v2.aclgraph_utils import ModelAclGraphManager
 from vllm_ascend.worker.v2.attn_utils import (
     build_attn_state,
@@ -417,6 +417,25 @@ class NPUModelRunner(GPUModelRunner):
 
     def _init_kv_zero_meta(self) -> None:
         """Use a tuple-aware zeroer for Ascend V1-compatible cache protocols."""
+        if getattr(self.kv_cache_config, "block_pool_ids", None):
+            self._pool_zeroers = {
+                pool: AscendV2KVBlockZeroer(
+                    self.device,
+                    attn_groups_iter=(
+                        g
+                        for group_index, groups in enumerate(self.attn_groups)
+                        if self.kv_cache_config.block_pool_ids[group_index] == pool
+                        for g in groups
+                    ),
+                    kernel_block_sizes=self.kernel_block_sizes,
+                    static_forward_context=self.compilation_config.static_forward_context,
+                    num_blocks=capacity,
+                    cache_dtype=self.cache_config.cache_dtype,
+                )
+                for pool, (capacity, _) in self._pool_cache_views.items()
+            }
+            self.kv_block_zeroer = self._pool_zeroers[0]
+            return
         self.kv_block_zeroer = AscendV2KVBlockZeroer(
             self.device,
             attn_groups_iter=(g for groups in self.attn_groups for g in groups),
@@ -431,6 +450,23 @@ class NPUModelRunner(GPUModelRunner):
             self.kv_block_zeroer = C8KVBlockZeroer(  # type: ignore[assignment]
                 self.kv_block_zeroer, self._c8_mxfp_v_scale_caches, fill_mxfp_v_scale_cache
             )
+
+    def update_requests(self, scheduler_output: SchedulerOutput) -> None:
+        if not getattr(self, "_pool_cache_views", None):
+            return super().update_requests(scheduler_output)
+
+        # The base method updates block tables and zeros pool 0. Its legacy
+        # copy routine walks every cache, including those owned by other pools.
+        copies = scheduler_output.kv_cache_block_copies
+        super().update_requests(replace(scheduler_output, kv_cache_block_copies=None) if copies else scheduler_output)
+        for pool, ids in (scheduler_output.new_block_ids_to_zero_by_pool or {}).items():
+            self._pool_zeroers[pool].zero_block_ids(ids)
+        if copies:
+            capacity, views = self._pool_cache_views[0]
+            copy_kv_cache_blocks_inplace(views, capacity, copies)
+        for pool, pool_copies in (scheduler_output.kv_cache_block_copies_by_pool or {}).items():
+            capacity, views = self._pool_cache_views[pool]
+            copy_kv_cache_blocks_inplace(views, capacity, pool_copies)
 
     def initialize_kv_cache(
         self,
@@ -472,6 +508,17 @@ class NPUModelRunner(GPUModelRunner):
                 kv_cache_config,
                 kv_cache_allocation_context=kv_cache_allocation_context,
             )
+            self._pool_cache_views = {}
+            if getattr(kv_cache_config, "block_pool_ids", None):
+                context = self.compilation_config.static_forward_context
+                for pool, capacity, group in zip(
+                    kv_cache_config.block_pool_ids,
+                    kv_cache_config.num_blocks_per_group,
+                    kv_cache_config.kv_cache_groups,
+                    strict=True,
+                ):
+                    _, views = self._pool_cache_views.setdefault(pool, (capacity, []))
+                    views.extend(context[name].kv_cache for name in group.layer_names)
             self._uses_flashmla = any(
                 getattr(group.get_metadata_builder(0), "flashmla_state", None) is not None
                 for groups in self.attn_groups
@@ -578,6 +625,10 @@ class NPUModelRunner(GPUModelRunner):
                 fill_mxfp_v_scale_cache(layer.v_cache_scale, value_scale_cache)
 
     def shutdown(self) -> None:
+        if getattr(self, "_pool_cache_views", None):
+            self._pool_cache_views.clear()
+            if hasattr(self, "_pool_zeroers"):
+                self._pool_zeroers.clear()
         # Drop C8 packet views before the parent collects tensors and
         # empties the allocator cache.
         entries = getattr(self, "_c8_mxfp_v_scale_caches", None)

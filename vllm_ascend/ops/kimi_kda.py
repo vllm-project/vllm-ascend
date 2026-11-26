@@ -881,7 +881,7 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
         num_tokens = hidden_states.shape[0] if num_tokens is None else num_tokens
         if batch <= 0 or hidden_states.ndim != 2 or num_tokens % batch:
             return None
-        if batch % self.tp_size != 0 or batch > self.tp_size * _MEGA_KDA_MAX_BATCH_MULTIPLIER:
+        if batch > self.tp_size * _MEGA_KDA_MAX_BATCH_MULTIPLIER:
             return None
         spec_len = num_tokens // batch
         if spec_len != self.num_spec + 1:
@@ -1186,6 +1186,7 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
             gate_lower_bound=float(self.gate_lower_bound if self.gate_lower_bound is not None else -5.0),
             o_norm_variance_epsilon=float(self.o_norm.eps),
             operator=self._mega_operator,
+            batch_alignment=self.tp_size,
             replay_u=replay_plan.replay_u,
             replay_k=replay_plan.replay_k,
             replay_decay=replay_plan.replay_decay,

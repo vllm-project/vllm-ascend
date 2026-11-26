@@ -94,6 +94,29 @@ class AscendDSparkSpeculator(LmheadTPDraftSamplingMixin, DSparkSpeculator):
     def attn_vllm_config(self) -> VllmConfig:
         return with_kimi_k31_gqa_draft_dcp_config(super().attn_vllm_config)
 
+    def _combine_aux_hidden_states(self, states: list[torch.Tensor]) -> torch.Tensor:
+        if uses_kimi_k31_gqa_draft(self.vllm_config):
+            first = states[0]
+            if first.ndim == 2 and first.numel():
+                rows, width = first.shape
+                packed_width = width * len(states)
+                storage = first.untyped_storage()
+                offset = first.storage_offset()
+                if all(
+                    state.dtype == first.dtype
+                    and state.device == first.device
+                    and state.shape == first.shape
+                    and state.stride() == (packed_width, 1)
+                    and state.untyped_storage().data_ptr() == storage.data_ptr()
+                    and state.storage_offset() == offset + i * width
+                    for i, state in enumerate(states)
+                ):
+                    # These are the ordered column views of one dense matrix
+                    # returned by SP or the graph's persistent output buffers.
+                    packed = first.as_strided((rows, packed_width), (packed_width, 1))
+                    return self.model.combine_hidden_states(packed)
+        return super()._combine_aux_hidden_states(states)
+
     def load_draft_model(
         self,
         target_model: torch.nn.Module,

@@ -47,7 +47,7 @@ from vllm_ascend.attention.utils import split_decodes_and_prefills, uses_pcp_sha
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.distributed.utils import all_gather_async
-from vllm_ascend.ops.bf16_sharded_indexer import bf16_paged_indexer_candidates
+from vllm_ascend.ops.bf16_sharded_indexer import DEFAULT_QUERY_ROWS_PER_TILE, bf16_paged_indexer_candidates
 from vllm_ascend.ops.rotary_embedding import get_cos_and_sin_mla
 from vllm_ascend.ops.triton.rope import rope_forward_triton_siso
 from vllm_ascend.ops.triton.sfa_indexer_store import store_indexer_key_scale
@@ -284,6 +284,12 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
         self._pcp_active = self.use_pcp
         self._sharded_dcp = enable_sfa_dcp_sharded_indexer()
         self._sharded_bf16 = self._sharded_dcp and _uses_kimi_k31_bf16_indexer(get_current_vllm_config())
+        if self._sharded_bf16:
+            options = get_current_vllm_config().additional_config or {}
+            rows = options.get("bf16_indexer_query_rows_per_tile", DEFAULT_QUERY_ROWS_PER_TILE)
+            if type(rows) is not int or rows not in (16, 32):
+                raise ValueError("bf16_indexer_query_rows_per_tile must be 16 or 32.")
+            self._query_rows_per_tile = rows
         self._local_topk = False
         self._dcp_interleave = parallel_config.cp_kv_cache_interleave_size
         if self._sharded_dcp:
@@ -892,6 +898,7 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
                     self.topk_tokens,
                     first_valid_page=indexer_metadata.first_valid_indexer_page,
                     full_graph=indexer_metadata.full_graph_mode,
+                    query_rows_per_tile=self._query_rows_per_tile,
                 )
                 return distributed_topk(
                     indices,

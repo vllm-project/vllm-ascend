@@ -354,6 +354,11 @@ def _get_config_bool(configs: tuple[Any, ...], attr: str) -> bool:
     return False
 
 
+def sfa_index_cache_enabled(model_config) -> bool:
+    configs = (model_config.hf_config, getattr(model_config, "hf_text_config", None))
+    return _get_config_bool(configs, "use_index_cache") or _has_shared_indexer_layers(configs)
+
+
 class AscendSFABackend(AttentionBackend):
     accept_output_buffer: bool = True
     # SFA reads its runtime metadata from buffers bound during capture.
@@ -863,12 +868,7 @@ class AscendSFAImpl(MLAAttentionImpl):
         hf_text_config = getattr(self.vllm_config.model_config, "hf_text_config", None)
         self.is_kimi_k31 = hf_config.model_type == "kimi_k31" or getattr(type(hf_config), "is_kimi_k31", False)
         self.use_rope = not (self.is_kimi_k31 and getattr(hf_text_config, "mla_use_nope", False))
-        config_candidates = (hf_config, hf_text_config)
-        index_cache_enabled = _get_config_bool(
-            config_candidates,
-            "use_index_cache",
-        ) or _has_shared_indexer_layers(config_candidates)
-        self.use_index_cache = self.skip_topk or index_cache_enabled
+        self.use_index_cache = self.skip_topk or sfa_index_cache_enabled(self.vllm_config.model_config)
         self._is_mtp_layer = is_mtp_layer(hf_config, self.layer_name)
         self.skip_indexer_pre_process = self.skip_topk and not self._is_mtp_layer
         self.has_indexer = self.indexer is not None

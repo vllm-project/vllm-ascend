@@ -682,6 +682,8 @@ def _ascend_get_kv_cache_config_from_groups(
     vllm_config: VllmConfig,
     kv_cache_groups: list[KVCacheGroupSpec],
     available_memory: int,
+    *,
+    num_blocks_per_group: tuple[int, ...] | None = None,
 ) -> KVCacheConfig:
     """Restore Ascend's DSV4 shared-tuple planner removed by vLLM #51718.
 
@@ -694,7 +696,9 @@ def _ascend_get_kv_cache_config_from_groups(
     dropped by worker pickle IPC, which never reads it.
     """
     if getattr(vllm_config.model_config.hf_config, "model_type", None) == "kimi_k31":
-        kv_cache_config = paired_sfa_cache_config(vllm_config, kv_cache_groups, available_memory)
+        kv_cache_config = paired_sfa_cache_config(
+            vllm_config, kv_cache_groups, available_memory, num_blocks_per_group=num_blocks_per_group
+        )
     elif is_deepseek_v41_cache(kv_cache_groups):
         kv_cache_config = get_deepseek_v41_kv_cache_config(vllm_config, kv_cache_groups, available_memory)
     elif _get_glm5_next_cache_layout(kv_cache_groups) is not None:
@@ -762,6 +766,12 @@ _orig_update_engine_kv_cache_capacity = vllm.v1.engine.core.update_kv_cache_capa
 def _update_engine_kv_cache_capacity(vllm_config: VllmConfig, kv_cache_config: KVCacheConfig) -> None:
     dcp = vllm_config.parallel_config.decode_context_parallel_size
     groups = kv_cache_config.kv_cache_groups
+    if kv_cache_config.block_pool_ids is not None:
+        logger.info(
+            "K3.1 KV pool capacities including one reserved null block each: target=%d, draft=%d",
+            kv_cache_config.num_blocks,
+            kv_cache_config.num_blocks_for_group(kv_cache_config.block_pool_ids.index(1)),
+        )
     if any(get_kv_cache_dcp_size(group.kv_cache_spec, dcp) != dcp for group in groups):
         # EngineCore picks the smallest physical block across all groups.
         # Its subsequent interleave validation must use the sharded target

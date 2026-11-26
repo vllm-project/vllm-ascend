@@ -599,6 +599,79 @@ def test_pd_decode_worker_releases_nd_projections(runtime):
     assert layer.o_norm.weight.numel() > 0
 
 
+def _check_sequence_parallel_verify(runtime, layer, hidden, positions, monkeypatch):
+    # The last TP rank owns some real tokens and the SP padding suffix.
+    tp = layer.tp_size
+    sp_padding = (-len(positions)) % tp
+    gathered = torch.nn.functional.pad(hidden, (0, 0, 0, sp_padding))
+    shard = gathered.chunk(tp)[-1]
+    runtime["sp_all_gather"] = MagicMock(return_value=gathered)
+    runtime["_mega_kda_commit_stream"] = MagicMock()
+    monkeypatch.setattr(torch, "npu", MagicMock(), raising=False)
+    runtime["get_tensor_model_parallel_world_size"] = lambda: tp
+    scatter = MagicMock(side_effect=lambda name, tensor: tensor.chunk(tp)[-1])
+    runtime["_custom_collective"] = scatter
+    _definitions("vllm_ascend/models/common/ops/sequence_parallel.py", {"_ascend_sp_reduce_scatter_impl"}, runtime)
+    layer.o_proj.custom_op = _OutputOp()
+    reduce_projected = layer.o_proj.custom_op.reduce_projected_output
+    reduce_projected.side_effect = runtime["_ascend_sp_reduce_scatter_impl"]
+
+    _definitions("vllm_ascend/ops/kimi_kda.py", {"_kimi_kda"}, runtime)
+    result = runtime["_kimi_kda"](shard, positions, layer.prefix, len(shard), gather_input=True)
+
+    runtime["sp_all_gather"].assert_called_once_with(shard)
+    reduce_projected.assert_called_once()
+    torch.testing.assert_close(reduce_projected.call_args.args[0], hidden + 1)
+    scatter.assert_called_once()
+    expected = torch.nn.functional.pad(hidden + 1, (0, 0, 0, sp_padding))
+    torch.testing.assert_close(scatter.call_args.args[1], expected)
+    torch.testing.assert_close(result, expected.chunk(tp)[-1])
+
+
+@pytest.mark.parametrize(("batch", "kernel_batch", "sp"), [(16, 16, False), (17, 24, False), (17, 24, True)])
+def test_eager_pd_verify_after_nd_release(runtime, monkeypatch, batch, kernel_batch, sp):
+    spec_len = 4
+    layer = _attention(runtime, batch=batch, spec_len=spec_len)
+    layer.tp_size = 8
+    layer._mega_pd_decode_worker = True
+    assert layer._release_default_kda_weights() > 0
+    del layer._forward_default  # Exercise the real released-weight guard on fallback.
+
+    metadata = _metadata(batch=batch, spec_len=spec_len)
+    slots = list(range(1, batch + 1))
+    metadata.spec_state_indices_tensor = torch.tensor(slots, dtype=torch.int32).unsqueeze(1)
+    metadata.mega_first_verify[1:] = 0
+    runtime["get_forward_context"].return_value = SimpleNamespace(
+        attn_metadata={layer.prefix: metadata}, no_compile_layers={layer.prefix: layer}, cudagraph_runtime_mode="none"
+    )
+    rows = batch * spec_len
+    positions = torch.arange(rows)
+    hidden = positions.remainder(13).to(torch.bfloat16).unsqueeze(1).repeat(1, layer.hidden_size)
+    layer._mega_operator.side_effect = lambda **inputs: inputs["hidden_states"] + 1
+    if sp:
+        _check_sequence_parallel_verify(runtime, layer, hidden, positions, monkeypatch)
+    else:
+        result = layer(hidden, positions)
+        collective = runtime["tensor_model_parallel_all_reduce"]
+        collective.assert_called_once()
+        torch.testing.assert_close(collective.call_args.args[0], hidden + 1)
+        torch.testing.assert_close(result, hidden + 2)
+
+    layer._commit_operator.assert_called_once()
+    commit = layer._commit_operator.call_args.kwargs
+    assert commit["state_indices"].tolist() == slots
+    assert commit["num_accepted_tokens"].tolist() == [0] + [2] * (batch - 1)
+    layer._mega_operator.assert_called_once()
+    mega = layer._mega_operator.call_args.kwargs
+    padding = kernel_batch - batch
+    assert mega["state_indices"].tolist() == slots + [runtime["NULL_BLOCK_ID"]] * padding
+    assert mega["conv_num_accepted_tokens"].tolist() == [1] + [2] * (batch - 1) + [1] * padding
+    kernel_input = mega["hidden_states"]
+    assert kernel_input.shape == (kernel_batch, spec_len, layer.hidden_size)
+    torch.testing.assert_close(kernel_input[:batch].flatten(0, 1), hidden)
+    assert torch.count_nonzero(kernel_input[batch:]) == 0
+
+
 def test_released_default_path_fails_loudly(runtime):
     layer = _attention(runtime)
     layer._mega_nd_released = True

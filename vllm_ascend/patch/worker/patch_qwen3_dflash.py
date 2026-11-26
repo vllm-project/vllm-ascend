@@ -45,10 +45,12 @@ def precompute_and_store_context_kv(
     # --- Fused KV projection (one GEMM for all layers) ---
     normed_context_states = self.hidden_norm(context_states)
     all_kv_flat = F.linear(normed_context_states, self._fused_kv_weight, self._fused_kv_bias)
+    del normed_context_states
     # Single contiguous copy that separates K/V and transposes to
     # layer-major layout.  Result: [2, L, num_ctx, nkv, hd] contiguous.
     # Indexing dim-0 gives contiguous [L, num_ctx, nkv, hd] for K and V.
     all_kv = all_kv_flat.view(num_ctx, L, 2, nkv, hd).permute(2, 1, 0, 3, 4).contiguous()
+    del all_kv_flat
     all_k = all_kv[0]  # [L, num_ctx, nkv, hd], contiguous
     all_v = all_kv[1]  # [L, num_ctx, nkv, hd], contiguous
 

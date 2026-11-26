@@ -453,10 +453,15 @@ def test_generic_sfa_mixed_group_keeps_private_caches(monkeypatch, vllm_config, 
             part.zero_()
 
 
-def make_bf16_swa_cache(config, monkeypatch, page, *, private=False):
+def make_bf16_swa_cache(config, monkeypatch, page, *, private=False, split_budget=None):
     config.model_config.dtype = torch.bfloat16
     config.cache_config.cache_dtype = "auto"
     config.kv_transfer_config = SimpleNamespace(kv_connector="MooncakeConnectorV2")
+    if split_budget is not None:
+        config.use_v2_model_runner = True
+        config.max_in_flight_tokens = 128
+        config.cache_config.num_gpu_blocks_override = None
+        config.kv_transfer_config.kv_connector_extra_config = {"k31_draft_separate_pool": True}
     config.parallel_config.cp_kv_cache_interleave_size = BLOCK_SIZE
     main = [f"model.layers.{4 * i + 3}.attn" for i in range(10)]
     indexers = [name.removesuffix("attn") + "indexer.k_cache" for name in main]
@@ -476,7 +481,7 @@ def make_bf16_swa_cache(config, monkeypatch, page, *, private=False):
     groups = paired_sfa_cache_groups(config, specs)
     if private:
         groups[1] = replace(groups[1], kv_cache_spec=replace(groups[1].kv_cache_spec, can_overlay_indexer=False))
-    plan = paired_sfa_cache_config(config, groups, 0)
+    plan = paired_sfa_cache_config(config, groups, split_budget or 0)
     raw = attn_utils._allocate_kv_cache(plan, shared_layers={}, device=torch.device("cpu"))
     attn_groups = [
         AttentionGroup(AscendSFABackend, main, specs[main[0]], 0),
@@ -486,6 +491,75 @@ def make_bf16_swa_cache(config, monkeypatch, page, *, private=False):
     monkeypatch.setattr(attn_utils, "_get_attention_kv_cache_dims", lambda *_: (512, 64))
     caches = attn_utils._reshape_kv_cache_v2(attn_groups, raw, "auto", [BLOCK_SIZE] * len(groups), {}, plan)
     return plan, attn_groups, caches, indexers, drafts
+
+
+def test_worker_zero_and_cow_use_independent_pool_ids(monkeypatch, vllm_config):
+    from vllm.v1.core.sched.output import SchedulerOutput
+    from vllm.v1.worker.gpu.model_runner import GPUModelRunner
+
+    from vllm_ascend.worker.v2.model_runner import NPUModelRunner
+
+    monkeypatch.setenv("VLLM_KV_CACHE_LAYOUT", "HND")
+    plan, groups, caches, _, _ = make_bf16_swa_cache(vllm_config, monkeypatch, 768, split_budget=92 * 2**20)
+    runner = object.__new__(NPUModelRunner)
+    runner.device = torch.device("cpu")
+    runner.kv_cache_config = plan
+    runner.cache_config = SimpleNamespace(cache_dtype="auto")
+    runner.attn_groups = [[g for g in groups if g.kv_cache_group_id == i] for i in range(2)]
+    runner.kernel_block_sizes = [BLOCK_SIZE] * 2
+    runner.compilation_config = SimpleNamespace(
+        static_forward_context={name: SimpleNamespace(kv_cache=cache) for name, cache in caches.items()}
+    )
+    runner._pool_cache_views = {
+        pid: (plan.num_blocks_per_group[pid], [caches[name] for name in group.layer_names])
+        for pid, group in enumerate(plan.kv_cache_groups)
+    }
+    runner._init_kv_zero_meta()
+    first = next(iter(caches.values()))[0]
+    backing = first.view(torch.uint8).as_strided((plan.kv_cache_tensors[0].size,), (1,), first.storage_offset() * 2)
+
+    def cpu_zero(addrs, strides, pages, ids, BLOCK_SIZE):
+        for address, stride, size in zip(addrs.tolist(), strides.tolist(), pages.tolist(), strict=True):
+            for block in ids.tolist():
+                start = address - backing.data_ptr() + 4 * block * stride
+                assert 0 <= start < start + size * 4 <= backing.numel()
+                backing[start : start + size * 4].zero_()
+
+    kernel = Mock()
+    kernel.__getitem__ = Mock(return_value=cpu_zero)
+    monkeypatch.setattr("vllm.v1.worker.utils._zero_kv_blocks_kernel", kernel)
+
+    def update_tables_and_zero_primary(self, output):
+        assert not output.kv_cache_block_copies
+        self.kv_block_zeroer.zero_block_ids(output.new_block_ids_to_zero or [])
+
+    monkeypatch.setattr(GPUModelRunner, "update_requests", update_tables_and_zero_primary)
+    # Same numerical IDs have unrelated contents and operations in the two pools.
+    expected = {}
+    for pid, (capacity, views) in runner._pool_cache_views.items():
+        for layer, entry in enumerate(views):
+            for i, tensor in enumerate(entry):
+                blocks = tensor.unflatten(0, (capacity, -1))
+                for block_id in range(capacity):
+                    blocks[block_id].fill_(1 + 20 * pid + 2 * layer + i + block_id)
+                before = blocks.clone()
+                if pid == 0:
+                    before[1].zero_()
+                    before[3].copy_(before[2])
+                else:
+                    before[2].zero_()
+                    before[3].copy_(before[1])
+                expected[pid, layer, i] = before
+    output = SchedulerOutput.make_empty()
+    output.new_block_ids_to_zero = [1]
+    output.new_block_ids_to_zero_by_pool = {1: [2]}
+    output.kv_cache_block_copies = [KVCacheBlockCopy(2, 3)]
+    output.kv_cache_block_copies_by_pool = {1: [KVCacheBlockCopy(1, 3)]}
+    runner.update_requests(output)
+    for pid, (capacity, views) in runner._pool_cache_views.items():
+        for layer, entry in enumerate(views):
+            for i, tensor in enumerate(entry):
+                assert torch.equal(tensor.unflatten(0, (capacity, -1)), expected[pid, layer, i])
 
 
 @pytest.mark.parametrize("layout", ["HND", "NHD"])
@@ -561,8 +635,8 @@ def test_bf16_swa_indexer_alias_recycling_and_cow(monkeypatch, vllm_config, layo
         assert torch.equal(caches[index_name][0].view(torch.uint8).view_as(reference), reference)
 
 
-@pytest.mark.parametrize("private_producer", [False, True], ids=["overlaid-P", "private-P"])
-def test_mooncake_pulls_target_and_draft_into_disjoint_ids(monkeypatch, vllm_config, private_producer):
+@pytest.mark.parametrize("layout", ["overlaid", "private-producer", "split"])
+def test_mooncake_pulls_target_and_draft_into_disjoint_ids(monkeypatch, vllm_config, layout):
     from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake import base_worker
     from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.metadata import ReqMeta
     from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.pull_scheduler import MooncakeSchedulerSendingThread
@@ -577,7 +651,10 @@ def test_mooncake_pulls_target_and_draft_into_disjoint_ids(monkeypatch, vllm_con
     page = 768
 
     def register(engine_id, private=False):
-        plan, _, caches, indexers, drafts = make_bf16_swa_cache(vllm_config, monkeypatch, page, private=private)
+        budget = (75 if engine_id == "P" else 92) * 2**20 if layout == "split" else None
+        plan, _, caches, indexers, drafts = make_bf16_swa_cache(
+            vllm_config, monkeypatch, page, private=private, split_budget=budget
+        )
         worker = base_worker.MooncakeBaseConnectorWorker.__new__(base_worker.MooncakeBaseConnectorWorker)
         worker.vllm_config = vllm_config
         worker.ascend_config = SimpleNamespace(kvpp_config=SimpleNamespace(size=1))
@@ -590,7 +667,7 @@ def test_mooncake_pulls_target_and_draft_into_disjoint_ids(monkeypatch, vllm_con
         assert length == plan.kv_cache_tensors[0].size
         return worker, caches, indexers, drafts, (base, length)
 
-    p, producer, indexers, drafts, p_range = register("P", private_producer)
+    p, producer, indexers, drafts, p_range = register("P", layout == "private-producer")
     d, consumer, _, _, d_range = register("D")
     sender = MooncakeSchedulerSendingThread(
         "127.0.0.1", 6000, "P", {0: p.transfer_metadata}, 1, 1, 1, 1, False, Event()
@@ -618,6 +695,13 @@ def test_mooncake_pulls_target_and_draft_into_disjoint_ids(monkeypatch, vllm_con
     )
     remote = receiver.decoder.decode(sender.encoded_metadata)
     receiver._validate_remote_metadata(remote, "P")
+    if layout == "split":
+        # Pools may have different capacities on each host. Mixing local-ID
+        # and global-ID layouts must fail before a transfer is submitted.
+        pp = remote.metadata_by_pp_rank[0]
+        mixed = replace(remote, metadata_by_pp_rank={0: replace(pp, block_pool_ids=(), num_blocks_per_group=())})
+        with pytest.raises(ValueError, match="block pool layout mismatch"):
+            receiver._build_remote_transfer_layout(mixed)
     receiver.remote_metadata["P"] = remote
     receiver.remote_tp_rank_groups["P"], receiver.remote_layer_index_pairs["P"] = (
         receiver._build_remote_transfer_layout(remote)
@@ -633,11 +717,18 @@ def test_mooncake_pulls_target_and_draft_into_disjoint_ids(monkeypatch, vllm_con
     engine.batch_transfer_sync_read.side_effect = cpu_read
     # P target/draft IDs 1/2, D target/draft IDs 3/1. Transfer two kernel
     # blocks of a six-block manager page, including one partial final block.
-    local_ids, remote_ids = ([3], [1]), ([1], [2])
+    split = layout == "split"
+    if split:
+        assert p.transfer_metadata.block_pool_ids == d.transfer_metadata.block_pool_ids == (0, 1)
+        assert p.transfer_metadata.num_blocks_per_group != d.transfer_metadata.num_blocks_per_group
+        assert len(set(d.transfer_metadata.num_blocks_per_group)) == 2
+    dst_draft = 3 if split else 1
+    src_draft = 1 if split else 2
+    local_ids, remote_ids = ([3], [dst_draft]), ([1], [src_draft])
     req = ReqMeta(local_ids, 194, 193, 0, remote_ids, "127.0.0.1", 6000, "P", "req-p", 193, local_ids)
     parts = page // BLOCK_SIZE
     for i, name in enumerate(producer):
-        src_id = 2 if name in drafts else 1
+        src_id = src_draft if name in drafts else 1
         for component, tensor in enumerate(producer[name]):
             block = tensor[src_id * parts : (src_id + 1) * parts]
             offsets = torch.arange(block.numel(), dtype=torch.int32).reshape(block.shape)
@@ -657,6 +748,12 @@ def test_mooncake_pulls_target_and_draft_into_disjoint_ids(monkeypatch, vllm_con
         result = consumer[index_name][0].view(torch.uint8)
         expected = torch.zeros_like(result)
         expected[3 * parts : 3 * parts + 2].copy_(producer[index_name][0][parts : parts + 2].view(torch.uint8))
-        draft_part = producer[draft_name][i % 2][2 * parts : 2 * parts + 2].view(torch.uint8)
-        expected[parts : parts + 2].copy_(draft_part.reshape_as(expected[parts : parts + 2]))
+        draft_part = producer[draft_name][i % 2][src_draft * parts : src_draft * parts + 2].view(torch.uint8)
+        if split:
+            observed_draft = consumer[draft_name][i % 2].view(torch.uint8)
+            expected_draft = torch.zeros_like(observed_draft)
+            expected_draft[dst_draft * parts : dst_draft * parts + 2].copy_(draft_part)
+            assert torch.equal(observed_draft, expected_draft)
+        else:
+            expected[parts : parts + 2].copy_(draft_part.reshape_as(expected[parts : parts + 2]))
         assert torch.equal(result, expected)

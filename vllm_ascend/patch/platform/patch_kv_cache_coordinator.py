@@ -147,13 +147,20 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
                 self.scheduler_block_size,
                 kv_cache_config,
             )
-        self.block_pool = BlockPool(
-            num_gpu_blocks=kv_cache_config.num_blocks,
-            enable_caching=enable_caching,
-            hash_block_size=hash_block_size,
-            enable_kv_cache_events=enable_kv_cache_events,
-            metrics_collector=metrics_collector,
-        )
+        pool_ids = getattr(kv_cache_config, "block_pool_ids", None)
+        if pool_ids:
+            self._init_block_pools(
+                kv_cache_config, enable_caching, enable_kv_cache_events, hash_block_size, metrics_collector
+            )
+        else:
+            self.block_pool = BlockPool(
+                num_gpu_blocks=kv_cache_config.num_blocks,
+                enable_caching=enable_caching,
+                hash_block_size=hash_block_size,
+                enable_kv_cache_events=enable_kv_cache_events,
+                metrics_collector=metrics_collector,
+            )
+            self.block_pools = {0: self.block_pool}
 
         # KV cache group indices that get the EAGLE last-block drop.
         self.eagle_group_ids: set[int] = {  # type: ignore[no-redef]
@@ -175,7 +182,7 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
         self.single_type_managers = tuple(
             get_manager_for_kv_cache_spec(
                 kv_cache_spec=_manager_spec(kv_cache_group.kv_cache_spec),
-                block_pool=self.block_pool,
+                block_pool=self.block_pools[pool_ids[i] if pool_ids else 0],
                 enable_caching=enable_caching,
                 kv_cache_group_id=i,
                 dcp_world_size=(
@@ -277,6 +284,7 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
         """
         self.attention_groups: list[SpecGroup] = []
         self.tail_pool_alignment = 1
+        pool_ids = getattr(self.kv_cache_config, "block_pool_ids", None)
         for i, g in enumerate(self.kv_cache_config.kv_cache_groups):
             if not is_prefix_cacheable(g.kv_cache_spec):
                 specs = (
@@ -295,7 +303,7 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
 
             # Try to find an existing group with the same spec
             for idx, group in enumerate(self.attention_groups):
-                if group.spec == spec:
+                if group.spec == spec and (not pool_ids or pool_ids[i] == pool_ids[group.group_ids[0]]):
                     assert manager_cls is group.manager_cls, "Expected same manager class for identical KV cache specs."
                     group.group_ids.append(i)
                     if use_eagle and not group.use_eagle:
@@ -429,7 +437,9 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
                     block_hashes=_get_block_hashes(spec),
                     max_length=_max_length,
                     kv_cache_group_ids=group_ids,
-                    block_pool=self.block_pool,
+                    block_pool=self.single_type_managers[group_ids[0]].block_pool
+                    if getattr(self.kv_cache_config, "block_pool_ids", None)
+                    else self.block_pool,
                     kv_cache_spec=spec,
                     drop_eagle_block=drop_eagle_block,
                     alignment_tokens=self._cache_hit_alignment_tokens,
@@ -491,7 +501,9 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
                 block_hashes=block_hashes,
                 max_length=max_cache_hit_length,
                 kv_cache_group_ids=group_ids,
-                block_pool=self.block_pool,
+                block_pool=self.single_type_managers[group_ids[0]].block_pool
+                if getattr(self.kv_cache_config, "block_pool_ids", None)
+                else self.block_pool,
                 kv_cache_spec=spec,
                 drop_eagle_block=use_eagle and not self.skips_eagle_block_drop,
                 alignment_tokens=self._cache_hit_alignment_tokens,

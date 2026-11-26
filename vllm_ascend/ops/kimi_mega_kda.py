@@ -193,6 +193,7 @@ def run_mega_recurrent_kda(
     replay_u: torch.Tensor,
     replay_k: torch.Tensor,
     replay_decay: torch.Tensor,
+    batch_alignment: int = 1,
 ) -> torch.Tensor:
     """Run the fused Mega-KDA decode operator for one KDA layer.
 
@@ -200,6 +201,14 @@ def run_mega_recurrent_kda(
     the partial (pre-TP-reduction) ``[batch * spec_len, hidden]`` output with
     the output projection already applied.
     """
+    batch, spec_len, hidden_size = hidden_states.shape
+    pad_requests = (-batch) % batch_alignment
+    if pad_requests:
+        # Outside a captured graph, the caller can supply an unaligned batch.
+        # Use the same null state page and one-based Conv count as graph padding.
+        hidden_states = torch.nn.functional.pad(hidden_states, (0, 0, 0, 0, 0, pad_requests))
+        conv_state_block_ids = torch.nn.functional.pad(conv_state_block_ids, (0, pad_requests), value=NULL_BLOCK_ID)
+        conv_num_accepted_tokens = torch.nn.functional.pad(conv_num_accepted_tokens, (0, pad_requests), value=1)
     output = operator(
         hidden_states=hidden_states,
         qkv_projection_weight=weights.qkv,
@@ -228,7 +237,8 @@ def run_mega_recurrent_kda(
         output = output[0]
     if output.numel() != hidden_states.numel():
         raise RuntimeError("MegaKDA returned an unexpected token count; the state cache may already be mutated")
-    return output.reshape(-1, hidden_states.shape[-1])
+    output = output.reshape(-1, hidden_size)
+    return output[: batch * spec_len] if pad_requests else output
 
 
 def run_commit_recurrent_kda(

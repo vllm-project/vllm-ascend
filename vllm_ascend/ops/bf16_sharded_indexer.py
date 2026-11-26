@@ -4,7 +4,7 @@
 import torch
 
 # Bound the FP32 gathered key and score tiles independently of context length.
-_QUERY_ROWS_PER_TILE = 32
+DEFAULT_QUERY_ROWS_PER_TILE = 32
 _KEY_TOKENS_PER_TILE = 2048
 
 
@@ -19,6 +19,7 @@ def bf16_paged_indexer_candidates(
     *,
     first_valid_page: int = 1,
     full_graph: bool = False,
+    query_rows_per_tile: int = DEFAULT_QUERY_ROWS_PER_TILE,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Select paged, rank-local Lightning Indexer candidates with FP32 scores.
 
@@ -55,8 +56,8 @@ def bf16_paged_indexer_candidates(
     token_offsets = torch.arange(page_size, dtype=torch.int32, device=query.device)
     pages_per_tile = max(1, _KEY_TOKENS_PER_TILE // page_size)
 
-    for row_start in range(0, rows, _QUERY_ROWS_PER_TILE):
-        row_end = min(row_start + _QUERY_ROWS_PER_TILE, rows)
+    for row_start in range(0, rows, query_rows_per_tile):
+        row_end = min(row_start + query_rows_per_tile, rows)
         row_slice = slice(row_start, row_end)
         query_tile = query[row_slice].float()
         weights_tile = weights[row_slice].float().unsqueeze(-1)

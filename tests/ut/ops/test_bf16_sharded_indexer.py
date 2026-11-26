@@ -10,7 +10,6 @@ from vllm_ascend.ops import bf16_sharded_indexer
 @pytest.mark.parametrize("topk", [2, 20])
 @pytest.mark.parametrize("full_graph", [False, True])
 def test_bf16_paged_candidates_match_independent_causal_reference(monkeypatch, topk, full_graph):
-    monkeypatch.setattr(bf16_sharded_indexer, "_QUERY_ROWS_PER_TILE", 2)
     monkeypatch.setattr(bf16_sharded_indexer, "_KEY_TOKENS_PER_TILE", 4)
     generator = torch.Generator().manual_seed(23)
     query = torch.randn((8, 3, 6), generator=generator).bfloat16()
@@ -24,7 +23,16 @@ def test_bf16_paged_candidates_match_independent_causal_reference(monkeypatch, t
     visible = torch.tensor([[1], [7], [5], [6], [9], [0], [10], [12]], dtype=torch.int32)
     with torch.autocast(device_type="cpu", dtype=torch.bfloat16):
         actual_ids, actual_scores = bf16_sharded_indexer.bf16_paged_indexer_candidates(
-            query, weights, key, table, ends, visible, topk, first_valid_page=2, full_graph=full_graph
+            query,
+            weights,
+            key,
+            table,
+            ends,
+            visible,
+            topk,
+            first_valid_page=2,
+            full_graph=full_graph,
+            query_rows_per_tile=2,
         )
 
     expected_ids = torch.full_like(actual_ids, -1)
@@ -48,6 +56,24 @@ def test_bf16_paged_candidates_match_independent_causal_reference(monkeypatch, t
 
     torch.testing.assert_close(actual_ids, expected_ids)
     torch.testing.assert_close(actual_scores, expected_scores)
+
+
+@pytest.mark.parametrize("full_graph", [False, True])
+def test_16_row_tile_preserves_exact_scores_and_ties_across_tiles(monkeypatch, full_graph):
+    monkeypatch.setattr(bf16_sharded_indexer, "_KEY_TOKENS_PER_TILE", 4)
+    generator = torch.Generator().manual_seed(51)
+    query = torch.randint(-2, 3, (37, 3, 8), generator=generator).bfloat16()
+    query[15:18].zero_()
+    weights = torch.ones((37, 3), dtype=torch.bfloat16)
+    key = torch.randint(-2, 3, (5, 4, 1, 8), generator=generator).bfloat16()
+    args = (query, weights, key, torch.tensor([[4, 2, 3]]), torch.tensor([37]), torch.full((37,), 12), 7)
+    reference = bf16_sharded_indexer.bf16_paged_indexer_candidates(*args, full_graph=full_graph)
+    ids, scores = bf16_sharded_indexer.bf16_paged_indexer_candidates(
+        *args, full_graph=full_graph, query_rows_per_tile=16
+    )
+    torch.testing.assert_close(ids, reference[0], rtol=0, atol=0)
+    torch.testing.assert_close(scores, reference[1], rtol=0, atol=0)
+    assert ids[15:18, 0].tolist() == [list(range(7))] * 3
 
 
 def test_bf16_paged_candidates_handle_ranks_with_no_visible_pages():
