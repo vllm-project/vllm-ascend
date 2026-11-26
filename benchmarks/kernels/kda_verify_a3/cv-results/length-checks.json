@@ -1,0 +1,763 @@
+{
+  "batch": 2,
+  "cases": [
+    {
+      "candidates": {
+        "fused-prep": {
+          "checkpoint_unchanged": true,
+          "history_input_unchanged": true,
+          "validation": {
+            "full": {
+              "eager": {
+                "history_exact": true,
+                "passed": true
+              },
+              "graph": {
+                "history_exact": true,
+                "passed": true
+              }
+            },
+            "mixed": {
+              "eager": {
+                "history_exact": true,
+                "passed": true
+              },
+              "graph": {
+                "history_exact": true,
+                "passed": true
+              }
+            },
+            "one": {
+              "eager": {
+                "history_exact": true,
+                "passed": true
+              },
+              "graph": {
+                "history_exact": true,
+                "passed": true
+              }
+            },
+            "two": {
+              "eager": {
+                "history_exact": true,
+                "passed": true
+              },
+              "graph": {
+                "history_exact": true,
+                "passed": true
+              }
+            }
+          }
+        },
+        "fused-prep-cv1": {
+          "checkpoint_unchanged": true,
+          "history_input_unchanged": true,
+          "validation": {
+            "full": {
+              "eager": {
+                "history_exact": true,
+                "passed": true
+              },
+              "graph": {
+                "history_exact": true,
+                "passed": true
+              }
+            },
+            "mixed": {
+              "eager": {
+                "history_exact": true,
+                "passed": true
+              },
+              "graph": {
+                "history_exact": true,
+                "passed": true
+              }
+            },
+            "one": {
+              "eager": {
+                "history_exact": true,
+                "passed": true
+              },
+              "graph": {
+                "history_exact": true,
+                "passed": true
+              }
+            },
+            "two": {
+              "eager": {
+                "history_exact": true,
+                "passed": true
+              },
+              "graph": {
+                "history_exact": true,
+                "passed": true
+              }
+            }
+          }
+        },
+        "fused-prep-cv2": {
+          "checkpoint_unchanged": true,
+          "history_input_unchanged": true,
+          "validation": {
+            "full": {
+              "eager": {
+                "history_exact": true,
+                "passed": true
+              },
+              "graph": {
+                "history_exact": true,
+                "passed": true
+              }
+            },
+            "mixed": {
+              "eager": {
+                "history_exact": true,
+                "passed": true
+              },
+              "graph": {
+                "history_exact": true,
+                "passed": true
+              }
+            },
+            "one": {
+              "eager": {
+                "history_exact": true,
+                "passed": true
+              },
+              "graph": {
+                "history_exact": true,
+                "passed": true
+              }
+            },
+            "two": {
+              "eager": {
+                "history_exact": true,
+                "passed": true
+              },
+              "graph": {
+                "history_exact": true,
+                "passed": true
+              }
+            }
+          }
+        }
+      },
+      "native": {
+        "checkpoint_unchanged": true,
+        "history_input_unchanged": true,
+        "validation": {
+          "full": {
+            "eager": {
+              "history_exact": true,
+              "passed": true
+            },
+            "graph": {
+              "history_exact": true,
+              "passed": true
+            }
+          },
+          "mixed": {
+            "eager": {
+              "history_exact": true,
+              "passed": true
+            },
+            "graph": {
+              "history_exact": true,
+              "passed": true
+            }
+          },
+          "one": {
+            "eager": {
+              "history_exact": true,
+              "passed": true
+            },
+            "graph": {
+              "history_exact": true,
+              "passed": true
+            }
+          },
+          "two": {
+            "eager": {
+              "history_exact": true,
+              "passed": true
+            },
+            "graph": {
+              "history_exact": true,
+              "passed": true
+            }
+          }
+        }
+      },
+      "tokens": 1
+    },
+    {
+      "candidates": {
+        "fused-prep": {
+          "checkpoint_unchanged": true,
+          "history_input_unchanged": true,
+          "validation": {
+            "full": {
+              "eager": {
+                "history_exact": true,
+                "passed": true
+              },
+              "graph": {
+                "history_exact": true,
+                "passed": true
+              }
+            },
+            "mixed": {
+              "eager": {
+                "history_exact": true,
+                "passed": true
+              },
+              "graph": {
+                "history_exact": true,
+                "passed": true
+              }
+            },
+            "one": {
+              "eager": {
+                "history_exact": true,
+                "passed": true
+              },
+              "graph": {
+                "history_exact": true,
+                "passed": true
+              }
+            },
+            "two": {
+              "eager": {
+                "history_exact": true,
+                "passed": true
+              },
+              "graph": {
+                "history_exact": true,
+                "passed": true
+              }
+            }
+          }
+        },
+        "fused-prep-cv1": {
+          "checkpoint_unchanged": true,
+          "history_input_unchanged": true,
+          "validation": {
+            "full": {
+              "eager": {
+                "history_exact": true,
+                "passed": true
+              },
+              "graph": {
+                "history_exact": true,
+                "passed": true
+              }
+            },
+            "mixed": {
+              "eager": {
+                "history_exact": true,
+                "passed": true
+              },
+              "graph": {
+                "history_exact": true,
+                "passed": true
+              }
+            },
+            "one": {
+              "eager": {
+                "history_exact": true,
+                "passed": true
+              },
+              "graph": {
+                "history_exact": true,
+                "passed": true
+              }
+            },
+            "two": {
+              "eager": {
+                "history_exact": true,
+                "passed": true
+              },
+              "graph": {
+                "history_exact": true,
+                "passed": true
+              }
+            }
+          }
+        },
+        "fused-prep-cv2": {
+          "checkpoint_unchanged": true,
+          "history_input_unchanged": true,
+          "validation": {
+            "full": {
+              "eager": {
+                "history_exact": true,
+                "passed": true
+              },
+              "graph": {
+                "history_exact": true,
+                "passed": true
+              }
+            },
+            "mixed": {
+              "eager": {
+                "history_exact": true,
+                "passed": true
+              },
+              "graph": {
+                "history_exact": true,
+                "passed": true
+              }
+            },
+            "one": {
+              "eager": {
+                "history_exact": true,
+                "passed": true
+              },
+              "graph": {
+                "history_exact": true,
+                "passed": true
+              }
+            },
+            "two": {
+              "eager": {
+                "history_exact": true,
+                "passed": true
+              },
+              "graph": {
+                "history_exact": true,
+                "passed": true
+              }
+            }
+          }
+        }
+      },
+      "native": {
+        "checkpoint_unchanged": true,
+        "history_input_unchanged": true,
+        "validation": {
+          "full": {
+            "eager": {
+              "history_exact": true,
+              "passed": true
+            },
+            "graph": {
+              "history_exact": true,
+              "passed": true
+            }
+          },
+          "mixed": {
+            "eager": {
+              "history_exact": true,
+              "passed": true
+            },
+            "graph": {
+              "history_exact": true,
+              "passed": true
+            }
+          },
+          "one": {
+            "eager": {
+              "history_exact": true,
+              "passed": true
+            },
+            "graph": {
+              "history_exact": true,
+              "passed": true
+            }
+          },
+          "two": {
+            "eager": {
+              "history_exact": true,
+              "passed": true
+            },
+            "graph": {
+              "history_exact": true,
+              "passed": true
+            }
+          }
+        }
+      },
+      "tokens": 8
+    },
+    {
+      "candidates": {
+        "fused-prep": {
+          "checkpoint_unchanged": true,
+          "history_input_unchanged": true,
+          "validation": {
+            "full": {
+              "eager": {
+                "history_exact": true,
+                "passed": true
+              },
+              "graph": {
+                "history_exact": true,
+                "passed": true
+              }
+            },
+            "mixed": {
+              "eager": {
+                "history_exact": true,
+                "passed": true
+              },
+              "graph": {
+                "history_exact": true,
+                "passed": true
+              }
+            },
+            "one": {
+              "eager": {
+                "history_exact": true,
+                "passed": true
+              },
+              "graph": {
+                "history_exact": true,
+                "passed": true
+              }
+            },
+            "two": {
+              "eager": {
+                "history_exact": true,
+                "passed": true
+              },
+              "graph": {
+                "history_exact": true,
+                "passed": true
+              }
+            }
+          }
+        },
+        "fused-prep-cv1": {
+          "checkpoint_unchanged": true,
+          "history_input_unchanged": true,
+          "validation": {
+            "full": {
+              "eager": {
+                "history_exact": true,
+                "passed": true
+              },
+              "graph": {
+                "history_exact": true,
+                "passed": true
+              }
+            },
+            "mixed": {
+              "eager": {
+                "history_exact": true,
+                "passed": true
+              },
+              "graph": {
+                "history_exact": true,
+                "passed": true
+              }
+            },
+            "one": {
+              "eager": {
+                "history_exact": true,
+                "passed": true
+              },
+              "graph": {
+                "history_exact": true,
+                "passed": true
+              }
+            },
+            "two": {
+              "eager": {
+                "history_exact": true,
+                "passed": true
+              },
+              "graph": {
+                "history_exact": true,
+                "passed": true
+              }
+            }
+          }
+        },
+        "fused-prep-cv2": {
+          "checkpoint_unchanged": true,
+          "history_input_unchanged": true,
+          "validation": {
+            "full": {
+              "eager": {
+                "history_exact": true,
+                "passed": true
+              },
+              "graph": {
+                "history_exact": true,
+                "passed": true
+              }
+            },
+            "mixed": {
+              "eager": {
+                "history_exact": true,
+                "passed": true
+              },
+              "graph": {
+                "history_exact": true,
+                "passed": true
+              }
+            },
+            "one": {
+              "eager": {
+                "history_exact": true,
+                "passed": true
+              },
+              "graph": {
+                "history_exact": true,
+                "passed": true
+              }
+            },
+            "two": {
+              "eager": {
+                "history_exact": true,
+                "passed": true
+              },
+              "graph": {
+                "history_exact": true,
+                "passed": true
+              }
+            }
+          }
+        }
+      },
+      "native": {
+        "checkpoint_unchanged": true,
+        "history_input_unchanged": true,
+        "validation": {
+          "full": {
+            "eager": {
+              "history_exact": true,
+              "passed": true
+            },
+            "graph": {
+              "history_exact": true,
+              "passed": true
+            }
+          },
+          "mixed": {
+            "eager": {
+              "history_exact": true,
+              "passed": true
+            },
+            "graph": {
+              "history_exact": true,
+              "passed": true
+            }
+          },
+          "one": {
+            "eager": {
+              "history_exact": true,
+              "passed": true
+            },
+            "graph": {
+              "history_exact": true,
+              "passed": true
+            }
+          },
+          "two": {
+            "eager": {
+              "history_exact": true,
+              "passed": true
+            },
+            "graph": {
+              "history_exact": true,
+              "passed": true
+            }
+          }
+        }
+      },
+      "tokens": 9
+    },
+    {
+      "candidates": {
+        "fused-prep": {
+          "checkpoint_unchanged": true,
+          "history_input_unchanged": true,
+          "validation": {
+            "full": {
+              "eager": {
+                "history_exact": true,
+                "passed": true
+              },
+              "graph": {
+                "history_exact": true,
+                "passed": true
+              }
+            },
+            "mixed": {
+              "eager": {
+                "history_exact": true,
+                "passed": true
+              },
+              "graph": {
+                "history_exact": true,
+                "passed": true
+              }
+            },
+            "one": {
+              "eager": {
+                "history_exact": true,
+                "passed": true
+              },
+              "graph": {
+                "history_exact": true,
+                "passed": true
+              }
+            },
+            "two": {
+              "eager": {
+                "history_exact": true,
+                "passed": true
+              },
+              "graph": {
+                "history_exact": true,
+                "passed": true
+              }
+            }
+          }
+        },
+        "fused-prep-cv1": {
+          "checkpoint_unchanged": true,
+          "history_input_unchanged": true,
+          "validation": {
+            "full": {
+              "eager": {
+                "history_exact": true,
+                "passed": true
+              },
+              "graph": {
+                "history_exact": true,
+                "passed": true
+              }
+            },
+            "mixed": {
+              "eager": {
+                "history_exact": true,
+                "passed": true
+              },
+              "graph": {
+                "history_exact": true,
+                "passed": true
+              }
+            },
+            "one": {
+              "eager": {
+                "history_exact": true,
+                "passed": true
+              },
+              "graph": {
+                "history_exact": true,
+                "passed": true
+              }
+            },
+            "two": {
+              "eager": {
+                "history_exact": true,
+                "passed": true
+              },
+              "graph": {
+                "history_exact": true,
+                "passed": true
+              }
+            }
+          }
+        },
+        "fused-prep-cv2": {
+          "checkpoint_unchanged": true,
+          "history_input_unchanged": true,
+          "validation": {
+            "full": {
+              "eager": {
+                "history_exact": true,
+                "passed": true
+              },
+              "graph": {
+                "history_exact": true,
+                "passed": true
+              }
+            },
+            "mixed": {
+              "eager": {
+                "history_exact": true,
+                "passed": true
+              },
+              "graph": {
+                "history_exact": true,
+                "passed": true
+              }
+            },
+            "one": {
+              "eager": {
+                "history_exact": true,
+                "passed": true
+              },
+              "graph": {
+                "history_exact": true,
+                "passed": true
+              }
+            },
+            "two": {
+              "eager": {
+                "history_exact": true,
+                "passed": true
+              },
+              "graph": {
+                "history_exact": true,
+                "passed": true
+              }
+            }
+          }
+        }
+      },
+      "native": {
+        "checkpoint_unchanged": true,
+        "history_input_unchanged": true,
+        "validation": {
+          "full": {
+            "eager": {
+              "history_exact": true,
+              "passed": true
+            },
+            "graph": {
+              "history_exact": true,
+              "passed": true
+            }
+          },
+          "mixed": {
+            "eager": {
+              "history_exact": true,
+              "passed": true
+            },
+            "graph": {
+              "history_exact": true,
+              "passed": true
+            }
+          },
+          "one": {
+            "eager": {
+              "history_exact": true,
+              "passed": true
+            },
+            "graph": {
+              "history_exact": true,
+              "passed": true
+            }
+          },
+          "two": {
+            "eager": {
+              "history_exact": true,
+              "passed": true
+            },
+            "graph": {
+              "history_exact": true,
+              "passed": true
+            }
+          }
+        }
+      },
+      "tokens": 16
+    }
+  ],
+  "graph_repeat": 3,
+  "protocol": "relative-l2"
+}

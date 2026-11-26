@@ -1,0 +1,126 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1160" height="714" viewBox="0 0 1160 714" role="img" aria-labelledby="title desc">
+  <title id="title">Ascend A3 KDA single-slot and double-slot Cube/Vector schedules</title>
+  <desc id="desc">Source-level schedule for successive request-head jobs in the same Cube/Vector group. With one slot, Cube waits until Vector finishes job 0 before projecting job 1. With two slots, Cube projects job 1 into slot 1 while Vector runs job 0 from slot 0. Cube reuses slot 0 for job 2 after Vector releases it. Each job waits for its own projection, and the token recurrence remains ordered. The lanes are schematic. Separate measured B16 medians show the mixed task falling from 457.629 to 369.187 microseconds and full-layer graph latency falling from 3.141 to 3.027 milliseconds.</desc>
+  <defs>
+    <pattern id="wait-hatch" width="7" height="7" patternUnits="userSpaceOnUse">
+      <rect width="7" height="7" fill="#f4f6f9"/>
+      <path d="M-2 2L2-2M0 7L7 0M5 9L9 5" stroke="#dce3ec" stroke-width="1"/>
+    </pattern>
+    <marker id="flag-arrow" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="6" markerHeight="6" orient="auto">
+      <path d="M0 0L8 4L0 8Z" fill="#586987"/>
+    </marker>
+    <style>
+      text { font-family: Arial, Helvetica, sans-serif; fill: #142740; }
+      .hero { font-size: 32px; font-weight: 700; }
+      .subtitle { font-size: 16px; fill: #475973; }
+      .panel-title { font-size: 21px; font-weight: 700; }
+      .panel-note { font-size: 15px; fill: #475973; }
+      .lane-label { font-size: 17px; font-weight: 700; }
+      .lane-bg { fill: #f4f6f9; }
+      .cube { fill: #24529a; }
+      .vector { fill: #1b7161; }
+      .prefetch { fill: #b4c3d6; }
+      .waiting { fill: url(#wait-hatch); stroke: #dce3ec; }
+      .task-label { font-size: 14px; font-weight: 700; text-anchor: middle; fill: #ffffff; }
+      .wait-label { font-size: 14px; text-anchor: middle; fill: #475973; }
+      .flag { fill: none; stroke: #586987; stroke-width: 1.5; marker-end: url(#flag-arrow); }
+      .flag-label { font-size: 12px; fill: #475973; }
+      .overlap { fill: #e7f4ec; stroke: #88bca2; stroke-width: 1; stroke-dasharray: 4 3; }
+      .overlap-label { font-size: 13px; font-weight: 700; text-anchor: middle; fill: #166249; }
+      .legend { font-size: 13px; fill: #475973; }
+      .measure-label { font-size: 15px; font-weight: 700; }
+      .measure-value { font-size: 26px; font-weight: 700; }
+      .measure-change { font-size: 17px; font-weight: 700; fill: #166249; }
+    </style>
+  </defs>
+
+  <rect width="1160" height="714" fill="#f5f7fb"/>
+  <text class="hero" x="32" y="48">Ascend A3 KDA · Cube/Vector overlap across jobs</text>
+  <text class="subtitle" x="32" y="76">One C/V group · J0–J2 are successive (request, head) jobs · Schedule schematic, time flows left to right</text>
+
+  <rect x="32" y="98" width="1096" height="209" rx="12" fill="#ffffff" stroke="#d7e0eb"/>
+  <text class="panel-title" x="52" y="130">Single slot</text>
+  <text class="panel-note" x="176" y="130">Cube waits for the slot to become free before starting the next job.</text>
+
+  <text class="lane-label" x="52" y="179">Cube (AIC)</text>
+  <text class="lane-label" x="52" y="251">Vector (AIV0)</text>
+  <rect class="lane-bg" x="193" y="155" width="906" height="36" rx="5"/>
+  <rect class="lane-bg" x="193" y="227" width="906" height="36" rx="5"/>
+
+  <rect class="cube" x="193" y="155" width="126" height="36" rx="5"/>
+  <text class="task-label" x="256" y="178">J0 · project</text>
+  <rect class="waiting" x="319" y="155" width="176" height="36" rx="5"/>
+  <text class="wait-label" x="407" y="178">Wait for slot 0</text>
+  <rect class="cube" x="495" y="155" width="126" height="36" rx="5"/>
+  <text class="task-label" x="558" y="178">J1 · project</text>
+  <rect class="waiting" x="621" y="155" width="176" height="36" rx="5"/>
+  <text class="wait-label" x="709" y="178">Wait for slot 0</text>
+  <rect class="cube" x="797" y="155" width="126" height="36" rx="5"/>
+  <text class="task-label" x="860" y="178">J2 · project</text>
+
+  <rect class="prefetch" x="193" y="233" width="24" height="24" rx="4"/>
+  <rect class="vector" x="319" y="227" width="176" height="36" rx="5"/>
+  <text class="task-label" x="407" y="250">J0 · recurrence + norm</text>
+  <rect class="prefetch" x="495" y="233" width="24" height="24" rx="4"/>
+  <rect class="vector" x="621" y="227" width="176" height="36" rx="5"/>
+  <text class="task-label" x="709" y="250">J1 · recurrence + norm</text>
+  <rect class="prefetch" x="797" y="233" width="24" height="24" rx="4"/>
+  <rect class="vector" x="923" y="227" width="176" height="36" rx="5"/>
+  <text class="task-label" x="1011" y="250">J2 · recurrence + norm</text>
+
+  <path class="flag" d="M319 192V225"/>
+  <text class="flag-label" x="328" y="213">ready[0]</text>
+  <path class="flag" d="M495 226V193"/>
+  <text class="flag-label" x="504" y="213">free[0]</text>
+  <rect class="prefetch" x="52" y="278" width="18" height="12" rx="3"/>
+  <text class="legend" x="79" y="289">Vector prefetch can overlap Cube in both schedules.</text>
+
+  <rect x="32" y="321" width="1096" height="228" rx="12" fill="#ffffff" stroke="#b1d3c3"/>
+  <text class="panel-title" x="52" y="352">Double slot</text>
+  <text class="panel-note" x="176" y="352">Cube projects J1 into slot 1 while Vector consumes J0 from slot 0.</text>
+
+  <text class="lane-label" x="52" y="413">Cube (AIC)</text>
+  <text class="lane-label" x="52" y="485">Vector (AIV0)</text>
+  <rect class="lane-bg" x="193" y="389" width="906" height="36" rx="5"/>
+  <rect class="lane-bg" x="193" y="461" width="906" height="36" rx="5"/>
+  <rect class="overlap" x="319" y="382" width="126" height="122" rx="4"/>
+  <text class="overlap-label" x="382" y="376">J1 overlaps J0</text>
+  <rect class="overlap" x="519" y="382" width="102" height="122" rx="4"/>
+  <text class="overlap-label" x="570" y="376">J2 overlaps J1</text>
+
+  <rect class="cube" x="193" y="389" width="126" height="36" rx="5"/>
+  <text class="task-label" x="256" y="412">J0 · slot 0</text>
+  <rect class="cube" x="319" y="389" width="126" height="36" rx="5"/>
+  <text class="task-label" x="382" y="412">J1 · slot 1</text>
+  <rect class="waiting" x="445" y="389" width="50" height="36" rx="5"/>
+  <text class="wait-label" x="470" y="412">wait</text>
+  <rect class="cube" x="495" y="389" width="126" height="36" rx="5"/>
+  <text class="task-label" x="558" y="412">J2 · slot 0</text>
+
+  <rect class="prefetch" x="193" y="467" width="24" height="24" rx="4"/>
+  <rect class="vector" x="319" y="461" width="176" height="36" rx="5"/>
+  <text class="task-label" x="407" y="484">J0 · recurrence + norm</text>
+  <rect class="prefetch" x="495" y="467" width="24" height="24" rx="4"/>
+  <rect class="vector" x="519" y="461" width="176" height="36" rx="5"/>
+  <text class="task-label" x="607" y="484">J1 · recurrence + norm</text>
+  <rect class="prefetch" x="695" y="467" width="24" height="24" rx="4"/>
+  <rect class="vector" x="719" y="461" width="176" height="36" rx="5"/>
+  <text class="task-label" x="807" y="484">J2 · recurrence + norm</text>
+
+  <path class="flag" d="M319 426V459"/>
+  <text class="flag-label" x="328" y="447">ready[0]</text>
+  <path class="flag" d="M495 460V427"/>
+  <text class="flag-label" x="504" y="447">free[0]</text>
+  <text class="panel-note" x="52" y="529">Vector waits for each job’s GM tile to be ready, then runs that job’s token recurrence in order.</text>
+
+  <rect x="32" y="563" width="1096" height="123" rx="12" fill="#ffffff" stroke="#d7e0eb"/>
+  <text class="panel-title" x="52" y="593">Measured on Ascend910_9362 · B16 · 6 tokens · single slot to double slot</text>
+  <text class="measure-label" x="52" y="623">Mixed kernel device-task median</text>
+  <text class="measure-value" x="52" y="656">457.6 → 369.2 µs</text>
+  <text class="measure-change" x="296" y="655">−19.3%</text>
+  <path d="M518 609V665" stroke="#d7e0eb"/>
+  <text class="measure-label" x="552" y="623">Full-layer graph median · direct pairs</text>
+  <text class="measure-value" x="552" y="656">3.141 → 3.027 ms</text>
+  <text class="measure-change" x="813" y="655">−3.6%</text>
+  <text class="legend" x="32" y="707">The timing samples measure whole tasks and graph forwards. The overlapped regions above show the source schedule.</text>
+</svg>
