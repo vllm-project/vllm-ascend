@@ -31,7 +31,7 @@ from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX, use_cann_megamoe
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.distributed.expert_transfer.expert_offload_utils import expert_offload_weights
-from vllm_ascend.lora.fused_moe import sync_lora_context
+from vllm_ascend.lora.fused_moe import has_moe_lora, reset_lora_indices, sync_lora_context
 from vllm_ascend.ops.fused_moe.dataclass.fused_experts import MoEWeights, build_fused_experts_input
 from vllm_ascend.ops.fused_moe.dataclass.moe_mlp import MoEMlpComputeInput
 from vllm_ascend.ops.fused_moe.dataclass.shared_experts import RoutedMoEMilestones
@@ -238,11 +238,11 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
             group_list=mlp_compute_input.group_list,
         )[0]
 
-        # MoE LoRA: only attempt injection when an adapter wraps this layer and
-        # the comm method provided routing metadata in lora_context.
+        # MoE LoRA: only attempt injection when an adapter applies to this layer
+        # and batch and the comm method provided routing metadata in lora_context.
         self._lora_routing = None
         lora_context = mlp_compute_input.lora_context
-        if lora_context is not None:  # LoRA applied
+        if has_moe_lora(lora_context):  # LoRA applied
             from vllm_ascend.lora.fused_moe import (
                 _recover_moe_lora_routing_all2all,
                 _recover_moe_lora_routing_allgather,
@@ -570,6 +570,40 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
         if lora_context is not None:
             sync_lora_context(self.quant_method, lora_context)
 
+        try:
+            routed_out, fused_experts_results = self._forward_impl_body(
+                hidden_states=hidden_states,
+                router_logits=router_logits,
+                moe_comm_method=moe_comm_method,
+                enable_force_load_balance=enable_force_load_balance,
+                input_ids=input_ids,
+            )
+        finally:
+            # Clear per-forward LoRA state from long-lived singletons even on
+            # early exits or non-MoE-LoRA batches so indices cannot leak.
+            if lora_context is not None:
+                reset_lora_indices(lora_context)
+                sync_lora_context(self.quant_method, None)
+
+        if self.return_with_event:
+            return routed_out, RoutedMoEMilestones(
+                routed_dispatch_start=fused_experts_results.before_dispatch_evt,
+                shared_activation_overlap_start=fused_experts_results.shared_activation_overlap_start_evt,
+                routed_combine_start=fused_experts_results.before_combine_evt,
+            )
+
+        # The vLLM FusedMoE forward_impl does not return events.
+        return routed_out
+
+    def _forward_impl_body(
+        self,
+        *,
+        hidden_states: torch.Tensor,
+        router_logits: torch.Tensor,
+        moe_comm_method,
+        enable_force_load_balance: bool,
+        input_ids: torch.Tensor | None = None,
+    ):
         num_source_tokens = hidden_states.shape[0]
         prepare_quant_type = self.quant_type
         if (
@@ -645,17 +679,4 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
             reduce_results=isinstance(_EXTRA_CTX.moe_comm_method, AllGatherCommImpl),
             padded_hidden_states_shape=padded_hidden_states_shape,
         )
-
-        # Clear per-forward LoRA state from long-lived singletons.
-        if lora_context is not None:
-            sync_lora_context(self.quant_method, None)
-
-        if self.return_with_event:
-            return routed_out, RoutedMoEMilestones(
-                routed_dispatch_start=fused_experts_results.before_dispatch_evt,
-                shared_activation_overlap_start=fused_experts_results.shared_activation_overlap_start_evt,
-                routed_combine_start=fused_experts_results.before_combine_evt,
-            )
-
-        # The vLLM FusedMoE forward_impl does not return events.
-        return routed_out
+        return routed_out, fused_experts_results

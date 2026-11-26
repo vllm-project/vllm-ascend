@@ -115,8 +115,10 @@ def test_prefill_shrink_and_expand_skip_when_no_lora() -> None:
     weights = torch.ones(2, 8, 4)
     wrapper._apply_shrink(y, x, weights, 1.0)
     wrapper._apply_expand(y, x, weights, 0, 8, True)
+    wrapper.add_lora_embedding(y, x, weights)
     wrapper.sgmv_shrink.assert_not_called()
     wrapper.sgmv_expand_slice.assert_not_called()
+    wrapper.sgmv_expand.assert_not_called()
 
 
 def test_decode_always_invokes_bgmv() -> None:
@@ -328,6 +330,62 @@ def test_add_lora_fused_moe_scales_shrink_buffer_by_routed_weight() -> None:
     torch.testing.assert_close(delta, torch.tensor([[1.0, 1.0], [3.0, 3.0]]))
 
 
+def test_add_lora_fused_moe_shared_lora_w13_and_w2_math_matches_dense_reference() -> None:
+    from vllm.lora.ops.torch_ops import bgmv_expand_slice, bgmv_shrink
+
+    wrapper = _make_wrapper(is_prefill=False, no_lora=False)
+    wrapper.bgmv_shrink, wrapper.bgmv_expand_slice = bgmv_shrink, bgmv_expand_slice
+    torch.manual_seed(0)
+    max_loras, num_experts, rank, hidden, inter, num_tokens, offset = 2, 4, 3, 6, 4, 6, 2
+    slots = torch.tensor([0, 1, -1, 1, 0, 1], dtype=torch.long)
+    exp_ids = torch.tensor([2, 0, 1, 3, 4, 1], dtype=torch.long)
+    enabled = torch.tensor([0, 1], dtype=torch.int32)
+
+    a_g, a_u = [torch.randn(max_loras, 1, rank, hidden) for _ in range(2)]
+    b_g, b_u = [torch.randn(max_loras, num_experts, inter, rank) for _ in range(2)]
+    x_w13 = torch.randn(num_tokens, hidden)
+    y_w13_base = torch.randn(num_tokens, offset + 2 * inter)
+    y_w13 = y_w13_base.clone()
+    wrapper.add_lora_fused_moe(
+        y_w13,
+        x_w13,
+        (a_g, a_u),
+        (b_g, b_u),
+        expert_ids=exp_ids,
+        adapter_enabled=enabled,
+        token_lora_mapping=slots,
+        offset=offset,
+    )
+
+    a_d = torch.randn(max_loras, num_experts, rank, inter)
+    b_d = torch.randn(max_loras, 1, hidden, rank)
+    x_w2 = torch.randn(num_tokens, inter)
+    weights = torch.tensor([0.25, 0.5, 0.75, 1.25, 0.4, 0.9])
+    y_w2_base = torch.randn(num_tokens, hidden)
+    y_w2 = y_w2_base.clone()
+    wrapper.add_lora_fused_moe(
+        y_w2,
+        x_w2,
+        (a_d,),
+        (b_d,),
+        expert_ids=exp_ids,
+        adapter_enabled=enabled,
+        token_lora_mapping=slots,
+        mul_routed_weight=True,
+        topk_weights=weights,
+    )
+
+    y_w13_ref, y_w2_ref = y_w13_base.clone(), y_w2_base.clone()
+    for row in range(num_tokens):
+        lid, eid = int(slots[row]), int(exp_ids[row])
+        if lid >= 0 and eid < num_experts and enabled[lid]:
+            y_w13_ref[row, offset : offset + inter] += (x_w13[row] @ a_g[lid, 0].T) @ b_g[lid, eid].T
+            y_w13_ref[row, offset + inter : offset + 2 * inter] += (x_w13[row] @ a_u[lid, 0].T) @ b_u[lid, eid].T
+            y_w2_ref[row] += ((x_w2[row] @ a_d[lid, eid].T) * weights[row]) @ b_d[lid, 0].T
+    torch.testing.assert_close(y_w13, y_w13_ref, atol=1e-5, rtol=1e-5)
+    torch.testing.assert_close(y_w2, y_w2_ref, atol=1e-5, rtol=1e-5)
+
+
 def test_add_lora_logits_uses_sampler_indices() -> None:
     wrapper = _make_wrapper()
     y = torch.zeros(2, 8)
@@ -425,3 +483,220 @@ def test_lora_linear_raises_runtime_error_for_stale_wrapper_id() -> None:
     b = [torch.zeros(1, 1, 4, 2, dtype=torch.bfloat16)]
     with pytest.raises(RuntimeError, match=rf"wrapper id {wrapper_id} is no longer registered"):
         lora_ops.lora_linear(wrapper_id, y, x, a, b, 1.0, [4], None, None, True)
+
+
+@pytest.mark.parametrize("is_prefill", [False, True])
+@pytest.mark.parametrize("add_inputs", [True, False])
+def test_apply_expand_and_shrink_fp32_uses_weight_dtype_workspace(is_prefill: bool, add_inputs: bool) -> None:
+    wrapper, seen = _make_wrapper(is_prefill=is_prefill, no_lora=False, device_type=AscendDeviceType.A3), {}
+
+    def strict_shrink(inp, _w, out, *args) -> None:
+        assert inp.dtype in (torch.half, torch.bfloat16)
+        seen["shrink_x_dtype"] = inp.dtype
+        out.fill_(2.0)
+
+    def strict_expand_slice(_inp, _w, out, *args) -> None:
+        assert out.dtype in (torch.half, torch.bfloat16)
+        off, size, add_in = args[-3:]
+        seen.update(out_dtype=out.dtype, off=off, size=size, add_in=add_in)
+        out[:, off : off + size] += 1.5
+
+    setattr(wrapper, "sgmv_shrink" if is_prefill else "bgmv_shrink", Mock(side_effect=strict_shrink))
+    setattr(wrapper, "sgmv_expand_slice" if is_prefill else "bgmv_expand_slice", Mock(side_effect=strict_expand_slice))
+
+    shrink_buf = torch.zeros(2, 4, dtype=torch.float32)
+    wrapper._apply_shrink(
+        shrink_buf, torch.ones(2, 8, dtype=torch.float32), torch.ones(2, 4, 8, dtype=torch.bfloat16), 0.5
+    )
+    y_base = torch.arange(1, 13, dtype=torch.float32).view(2, 6)
+    y = y_base.clone()
+    wrapper._apply_expand(
+        y, shrink_buf, torch.ones(2, 4, 4, dtype=torch.bfloat16), y_offset=2, y_slice_size=4, add_inputs=add_inputs
+    )
+    expected = y_base.clone()
+    expected[:, 2:6] = expected[:, 2:6] + 1.5 if add_inputs else 1.5
+    assert y.dtype == torch.float32 and seen == {
+        "shrink_x_dtype": torch.bfloat16,
+        "out_dtype": torch.bfloat16,
+        "off": 0,
+        "size": 4,
+        "add_in": True,
+    }
+    torch.testing.assert_close(y, expected)
+
+
+@pytest.mark.parametrize("is_prefill", [False, True])
+def test_add_lora_linear_max_loras_gt1_supports_fp32_gating_output(is_prefill: bool) -> None:
+    from vllm.lora.ops import torch_ops
+
+    wrapper = _make_wrapper(is_prefill=is_prefill, no_lora=False, device_type=AscendDeviceType.A3)
+    (
+        wrapper._single_lora_slot,
+        wrapper._single_lora_mask,
+        wrapper._lora_shrink_buffers,
+        wrapper._lora_triton_workspaces,
+        wrapper._max_num_batched_tokens,
+    ) = False, None, {}, {}, 8
+    wrapper.batch_size, wrapper.max_length, wrapper.token_nums, wrapper.indices_len = 3, 2, 4, [4, 4, 3, 3]
+    wrapper._seq_start_locs = torch.tensor([0, 2, 3, 4], dtype=torch.int32)
+    wrapper._seq_lengths = torch.tensor([2, 1, 1], dtype=torch.int32)
+    wrapper._lora_indices_per_batch = torch.tensor([0, -1, 1], dtype=torch.int32)
+    wrapper._token_lora_indices = torch.tensor([0, 0, -1, 1], dtype=torch.int64)
+
+    def _checked(fn, idx: int):
+        return lambda *args, **kwargs: (assert_dtype(args[idx]), fn(*args, **kwargs))[1]
+
+    def assert_dtype(t):
+        assert t.dtype in (torch.half, torch.bfloat16)
+
+    for name, fn, idx in (
+        ("bgmv_shrink", torch_ops.bgmv_shrink, 0),
+        ("bgmv_expand_slice", torch_ops.bgmv_expand_slice, 2),
+        ("sgmv_shrink", torch_ops.sgmv_shrink, 0),
+        ("sgmv_expand_slice", torch_ops.sgmv_expand_slice, 2),
+    ):
+        setattr(wrapper, name, _checked(fn, idx))
+
+    torch.manual_seed(42)
+    x, lora_a, lora_b, y_base = (
+        torch.randn(4, 8, dtype=torch.bfloat16),
+        torch.randn(2, 1, 4, 8, dtype=torch.bfloat16),
+        torch.randn(2, 1, 6, 4, dtype=torch.bfloat16),
+        torch.randn(4, 6, dtype=torch.float32),
+    )
+    y = y_base.clone()
+    wrapper._lora_linear_kernel(y, x, (lora_a,), (lora_b,), 0.5, (6,))
+    y_ref = y_base.clone()
+    for row, slot in enumerate(wrapper._token_lora_indices.tolist()):
+        if slot >= 0:
+            y_ref[row] += (
+                (((x[row].float() @ lora_a[slot, 0].float().T) * 0.5) @ lora_b[slot, 0].float().T)
+                .to(torch.bfloat16)
+                .float()
+            )
+    assert y.dtype == torch.float32
+    torch.testing.assert_close(y, y_ref, atol=2e-2, rtol=2e-2)
+
+
+@pytest.mark.parametrize(
+    ("act_dtype", "weight_dtype"),
+    [(torch.float16, torch.bfloat16), (torch.bfloat16, torch.float16)],
+)
+def test_add_lora_fused_moe_aligns_cross_dtype_inputs_and_outputs(
+    act_dtype: torch.dtype,
+    weight_dtype: torch.dtype,
+) -> None:
+    from vllm.lora.ops import torch_ops
+
+    wrapper = _make_wrapper(is_prefill=False, no_lora=False, device_type=AscendDeviceType.A3)
+    seen_shrink: list[tuple[torch.dtype, torch.dtype, torch.dtype]] = []
+    seen_expand: list[tuple[torch.dtype, torch.dtype, torch.dtype]] = []
+
+    def strict_shrink(x, w, y, indices, scale):
+        seen_shrink.append((x.dtype, w.dtype, y.dtype))
+        assert x.dtype == w.dtype and y.dtype == torch.float32
+        return torch_ops.bgmv_shrink(x, w, y, indices, scale)
+
+    def strict_expand_slice(x, w, y, indices, y_offset, y_slice_size, add_inputs=True):
+        seen_expand.append((x.dtype, w.dtype, y.dtype))
+        assert x.dtype == torch.float32 and y.dtype == w.dtype
+        return torch_ops.bgmv_expand_slice(x, w, y, indices, y_offset, y_slice_size, add_inputs=add_inputs)
+
+    wrapper.bgmv_shrink, wrapper.bgmv_expand_slice = strict_shrink, strict_expand_slice
+    torch.manual_seed(7)
+    a_down = torch.randn(2, 2, 4, 4, dtype=weight_dtype)
+    b_down = torch.randn(2, 2, 6, 4, dtype=weight_dtype)
+    x = torch.randn(4, 4, dtype=act_dtype)
+    y_base = torch.randn(4, 6, dtype=act_dtype)
+    y = y_base.clone()
+    expert_ids = torch.tensor([0, 1, 0, 1], dtype=torch.long)
+    mapping = torch.tensor([0, 1, -1, 0], dtype=torch.long)
+
+    wrapper.add_lora_fused_moe(
+        y,
+        x,
+        (a_down,),
+        (b_down,),
+        expert_ids=expert_ids,
+        adapter_enabled=torch.tensor([1, 1], dtype=torch.int32),
+        token_lora_mapping=mapping,
+    )
+    assert y.dtype == act_dtype
+    assert seen_shrink == [(weight_dtype, weight_dtype, torch.float32)]
+    assert seen_expand == [(torch.float32, weight_dtype, weight_dtype)]
+    y_ref = y_base.float()
+    for row in range(4):
+        slot, exp = int(mapping[row]), int(expert_ids[row])
+        if slot >= 0:
+            y_ref[row] += (x[row].to(weight_dtype).float() @ a_down[slot, exp].float().T) @ b_down[slot, exp].float().T
+    torch.testing.assert_close(y.float(), y_ref, atol=2e-2, rtol=2e-2)
+
+
+@pytest.mark.parametrize("is_prefill", [False, True])
+@pytest.mark.parametrize(
+    ("act_dtype", "weight_dtype"),
+    [(torch.float16, torch.bfloat16), (torch.bfloat16, torch.float16)],
+)
+def test_apply_shrink_expand_and_logits_align_cross_half_bf16_weights(
+    is_prefill: bool,
+    act_dtype: torch.dtype,
+    weight_dtype: torch.dtype,
+) -> None:
+    wrapper = _make_wrapper(is_prefill=is_prefill, no_lora=False, device_type=AscendDeviceType.A3)
+    seen: list[tuple[str, torch.dtype, torch.dtype]] = []
+
+    def strict_shrink(inp, weight, out, *args, **kwargs) -> None:
+        assert inp.dtype == weight.dtype and out.dtype == torch.float32
+        seen.append(("sgmv_shrink" if len(args) > 2 else "bgmv_shrink", inp.dtype, weight.dtype))
+        out.fill_(2.0)
+
+    def strict_expand(inp, weight, out, *args, **kwargs) -> None:
+        assert inp.dtype == torch.float32 and out.dtype == weight.dtype
+        seen.append(("sgmv_expand" if len(args) >= 3 else "bgmv_expand", out.dtype, weight.dtype))
+        out += 1.5
+
+    def strict_expand_slice(inp, weight, out, *args, **kwargs) -> None:
+        assert inp.dtype == torch.float32 and out.dtype == weight.dtype
+        off, size = args[-3], args[-2]
+        seen.append(("sgmv_expand_slice" if len(args) >= 6 else "bgmv_expand_slice", out.dtype, weight.dtype))
+        out[:, off : off + size] += 1.5
+
+    for attr, fn in (
+        ("sgmv_shrink", strict_shrink),
+        ("sgmv_expand", strict_expand),
+        ("sgmv_expand_slice", strict_expand_slice),
+        ("bgmv_shrink", strict_shrink),
+        ("bgmv_expand", strict_expand),
+        ("bgmv_expand_slice", strict_expand_slice),
+    ):
+        setattr(wrapper, attr, Mock(side_effect=fn))
+
+    shrink_buf = torch.zeros(2, 4, dtype=torch.float32)
+    x_act = torch.ones(2, 8, dtype=act_dtype)
+    w_a = torch.ones(2, 4, 8, dtype=weight_dtype)
+    wrapper._apply_shrink(shrink_buf, x_act, w_a, 0.5)
+
+    y_base = torch.ones(2, 6, dtype=act_dtype) * 2.0
+    y = y_base.clone()
+    wrapper._apply_expand(y, shrink_buf, torch.ones(2, 4, 4, dtype=weight_dtype), 1, 4, add_inputs=True)
+    expected = y_base.clone()
+    expected[:, 1:5] += 1.5
+    assert y.dtype == act_dtype
+    torch.testing.assert_close(y, expected)
+
+    emb_y = torch.ones(2, 8, dtype=act_dtype)
+    wrapper.add_lora_embedding(emb_y, torch.ones(2, 4, dtype=act_dtype), torch.ones(2, 8, 4, dtype=weight_dtype))
+    torch.testing.assert_close(emb_y, torch.full((2, 8), 2.5, dtype=act_dtype))
+
+    logits_y = torch.ones(2, 8, dtype=act_dtype)
+    wrapper.add_lora_logits(logits_y, x_act, w_a, torch.ones(2, 8, 4, dtype=weight_dtype), 0.5)
+    torch.testing.assert_close(logits_y, torch.full((2, 8), 2.5, dtype=act_dtype))
+
+    prefix = "sgmv" if is_prefill else "bgmv"
+    assert seen == [
+        (f"{prefix}_shrink", weight_dtype, weight_dtype),
+        (f"{prefix}_expand_slice", weight_dtype, weight_dtype),
+        (f"{prefix}_expand", weight_dtype, weight_dtype),
+        ("bgmv_shrink", weight_dtype, weight_dtype),
+        ("bgmv_expand", weight_dtype, weight_dtype),
+    ]

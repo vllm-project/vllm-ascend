@@ -439,6 +439,28 @@ class TestUnquantizedFusedMoEMethod(unittest.TestCase):
         self.assertEqual(out, "final_out")
         self.assertEqual(mock_gmm.call_args.kwargs["weight"][0].shape, torch.Size([2, 16, 8]))
 
+    def test_apply_gmm1_skips_lora_when_inactive(self):
+        method = self._make_method()
+        layer = SimpleNamespace(
+            w13_weight=torch.randn(2, 8, 16), w2_weight=torch.randn(2, 16, 8), w13_bias=None, w2_bias=None
+        )
+        ctx = SimpleNamespace(
+            punica_wrapper=SimpleNamespace(no_lora=True, active_lora_slots=set()),
+            layer_lora_slots={0},
+            use_ep=True,
+            replicated_batch=True,
+        )
+        with (
+            patch(
+                "vllm_ascend.ops.fused_moe.routed_experts._EXTRA_CTX",
+                SimpleNamespace(moe_comm_type=MoECommType.ALLTOALL),
+            ),
+            patch("torch_npu.npu_grouped_matmul", return_value=["gate_up_out"], create=True),
+        ):
+            out = method.apply_gmm1(_mlp_compute_input(layer=layer, lora_context=ctx))
+        self.assertEqual(out, "gate_up_out")
+        self.assertIsNone(method._lora_routing)
+
 
 class TestApplyMoeMlp(unittest.TestCase):
     def _quant_method(self, fused: bool):
@@ -569,6 +591,155 @@ class TestApplyMoeMlp(unittest.TestCase):
 
         self.assertEqual(out, "final_out")
         mock_lora.assert_not_called()
+
+    def _lctx(self, *, no_lora=True, active=None, loaded=None, ep_slots=None, **kw):
+        pw = SimpleNamespace(no_lora=no_lora, active_lora_slots=set() if active is None else active)
+        return SimpleNamespace(
+            punica_wrapper=pw,
+            layer_lora_slots=set() if loaded is None else loaded,
+            ep_lora_slots=ep_slots,
+            use_ep=True,
+            replicated_batch=True,
+            **kw,
+        )
+
+    def test_lora_unfused_boundary_and_empty_rows(self):
+        base_ctx, peer_ctx = self._lctx(loaded={0}), self._lctx(no_lora=False, active={0}, ep_slots={0})
+        for ctx, quant_type, exp_dtype in (
+            (base_ctx, QuantType.W4A8, torch.bfloat16),
+            (base_ctx, QuantType.W8A8, torch.float16),
+            (peer_ctx, QuantType.W4A8, torch.bfloat16),
+            (peer_ctx, QuantType.W8A8, torch.float16),
+        ):
+            qm = self._quant_method(fused=True)
+            qm.apply_gmm1.return_value = torch.randn(4, 16, dtype=torch.bfloat16)
+            qm.apply_act_quant.return_value = (torch.ones(4, 8, dtype=torch.int8), torch.ones(4))
+            qp = MoEQuantParams(quant_type=quant_type, is_per_channel_weight=(quant_type == QuantType.W4A8))
+            non_empty = _mlp_compute_input(
+                hidden_states=torch.randn(4, 8, dtype=torch.bfloat16), quant=qp, lora_context=ctx
+            )
+            with (
+                patch("vllm_ascend.lora.quant_moe.quant_apply_mlp_with_moe_lora") as mock_lora,
+                patch(f"{MOE_MLP}.maybe_record_event", return_value="evt"),
+                patch(
+                    f"{MOE_MLP}.torch_npu.npu_swiglu", return_value=torch.randn(4, 8, dtype=torch.bfloat16), create=True
+                ),
+            ):
+                self.assertEqual(apply_moe_mlp(non_empty, qm), ("final_out", "evt"))
+            mock_lora.assert_not_called()
+            qm.apply_gmm1_act_quant.assert_not_called()
+            qm.apply_gmm1.assert_called_once_with(non_empty)
+
+            for hidden in (torch.empty(0, 8, dtype=torch.bfloat16), torch.empty(0, 8, dtype=torch.int8)):
+                eqm = self._quant_method(fused=True)
+                eqm.get_mlp_weights.return_value = MoEWeights(
+                    w1=None, w2=None, w2_scale=[torch.ones(1, dtype=exp_dtype)]
+                )
+                with patch(f"{MOE_MLP}.maybe_record_event", return_value="evt"):
+                    e_out, e_evt = apply_moe_mlp(
+                        _mlp_compute_input(hidden_states=hidden, quant=qp, lora_context=ctx), eqm
+                    )
+                self.assertEqual((e_evt, e_out.shape, e_out.dtype), ("evt", (0, 8), exp_dtype))
+                if hidden.dtype == exp_dtype:
+                    self.assertIs(e_out, hidden)
+                eqm.apply_gmm1.assert_not_called()
+                eqm.apply_gmm2.assert_not_called()
+
+    def _run_fp16_moe_mlp(self, mlp_compute_input, quant_method):
+        stream = MagicMock(record_event=MagicMock(return_value="evt"))
+        with (
+            patch("vllm_ascend.lora.quant_moe._EXTRA_CTX", SimpleNamespace(moe_comm_type=MoECommType.ALLTOALL)),
+            patch(
+                "torch_npu.npu_dynamic_quant",
+                side_effect=lambda x, dst_type=torch.int8: (
+                    torch.ones(x.shape, dtype=dst_type),
+                    torch.ones(x.shape[0]),
+                ),
+                create=True,
+            ),
+            patch(
+                "torch_npu.npu_grouped_matmul",
+                side_effect=lambda *, x, weight, output_dtype, **_: [
+                    torch.zeros(x[0].shape[0], weight[0].shape[-1], dtype=output_dtype)
+                ],
+                create=True,
+            ),
+            patch("torch_npu.npu_swiglu", side_effect=lambda x: x[..., : x.shape[-1] // 2].contiguous(), create=True),
+            patch("torch.npu.current_stream", return_value=stream),
+            patch(f"{MOE_MLP}.maybe_record_event", return_value="evt"),
+        ):
+            return apply_moe_mlp(mlp_compute_input, quant_method)
+
+    def test_fp16_w4a8_and_w8a8_ranks_match_bfloat16_across_base_and_partial_lora(self):
+        w4a8 = AscendW4A8DynamicFusedMoEMethod.__new__(AscendW4A8DynamicFusedMoEMethod)
+        w4a8.use_expert_weight_list, w4a8.is_per_channel_weight = False, True
+        w4a8_layer = SimpleNamespace(
+            w13_weight=torch.ones(1, 4, 8, dtype=torch.int8),
+            w13_weight_scale=torch.ones(1, 8),
+            w13_scale_bias=torch.ones(1, 8),
+            w2_weight=torch.ones(1, 4, 4, dtype=torch.int8),
+            w2_weight_scale=torch.ones(1, 1, 4),
+            w2_scale_bias=torch.ones(1, 4),
+            activation="silu",
+        )
+        w8a8 = AscendW8A8DynamicFusedMoEMethod.__new__(AscendW8A8DynamicFusedMoEMethod)
+        w8a8.use_expert_weight_list = False
+        w8a8_layer = SimpleNamespace(
+            w13_weight=torch.ones(1, 4, 8, dtype=torch.int8),
+            w13_weight_scale_fp32=torch.ones(1, 8),
+            w2_weight=torch.ones(1, 4, 4, dtype=torch.int8),
+            w2_weight_scale=torch.ones(1, 4, dtype=torch.bfloat16),
+            activation="silu",
+        )
+        recorded = []
+        base_ctx = self._lctx(loaded={0}, ep_slots={0})
+        peer_ctx = self._lctx(no_lora=False, active={0}, ep_slots={0})
+
+        def _local_ctx(empty):
+            return self._lctx(
+                no_lora=False,
+                active={0},
+                loaded={0},
+                ep_slots={0},
+                local_num_experts=1,
+                exchanged_lora_indices=torch.empty((0,) if empty else (2,), dtype=torch.long),
+                w13_lora_a_stacked=object(),
+                w13_lora_b_stacked=object(),
+                w2_lora_a_stacked=object(),
+                w2_lora_b_stacked=object(),
+                adapter_enabled=object(),
+            )
+
+        base_pw = _local_ctx(False).punica_wrapper
+
+        def _add(*, y, x, **_):
+            recorded.append((y.dtype, x.dtype))
+
+        base_pw.add_lora_fused_moe = _add
+
+        for method, layer, qp in (
+            (w4a8, w4a8_layer, MoEQuantParams(quant_type=QuantType.W4A8, is_per_channel_weight=True)),
+            (w8a8, w8a8_layer, MoEQuantParams(quant_type=QuantType.W8A8)),
+        ):
+            l_ctx, e_ctx = _local_ctx(False), _local_ctx(True)
+            l_ctx.punica_wrapper.add_lora_fused_moe = _add
+            ctxs, rows = (base_ctx, base_ctx, l_ctx, e_ctx, peer_ctx, peer_ctx), (2, 0, 2, 0, 2, 0)
+            outs = [
+                self._run_fp16_moe_mlp(
+                    _mlp_compute_input(
+                        hidden_states=torch.zeros(n, 4, dtype=torch.float16),
+                        group_list=torch.tensor([n], dtype=torch.int64),
+                        quant=qp,
+                        layer=layer,
+                        lora_context=c,
+                    ),
+                    method,
+                )[0]
+                for c, n in zip(ctxs, rows)
+            ]
+            self.assertEqual(([o.dtype for o in outs], [o.shape[0] for o in outs]), ([torch.bfloat16] * 6, list(rows)))
+            self.assertFalse(hasattr(e_ctx, "exchanged_lora_indices"))
+        self.assertEqual(recorded, [(torch.float16, torch.float16)] * 4)
 
 
 class TestUnifiedApplyActivation(unittest.TestCase):

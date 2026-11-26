@@ -25,6 +25,7 @@ import torch
 from tests.ut.base import TestBase
 from vllm_ascend.device.hardware import AscendDeviceType
 from vllm_ascend.device.hardware_profile import get_hardware_profile
+from vllm_ascend.lora.fused_moe import has_collective_moe_lora, should_disable_all2all_quant_for_lora
 from vllm_ascend.ops.fused_moe.dataclass.router_input import MoeRouterInput
 from vllm_ascend.ops.fused_moe.dataclass.token_dispatcher import (
     MoEAllGatherCombineMetadata,
@@ -775,6 +776,33 @@ def test_allgather_w8a8_lora_controls_dispatch_quantization(
     assert (output.dynamic_scale is not None) == expect_dynamic_scale
 
 
+def test_allgather_w4a8_base_batch_disables_quant_when_layer_has_loaded_adapter():
+    dispatcher = TokenDispatcherWithAllGather(top_k=1, num_experts=2)
+    dispatcher.set_lora_context(
+        SimpleNamespace(
+            punica_wrapper=SimpleNamespace(no_lora=True, active_lora_slots=set()), layer_lora_slots={0}, use_ep=False
+        )
+    )
+    hidden_states = torch.randn(2, 4, dtype=torch.bfloat16)
+    td_in = build_token_dispatch_input_fixture(
+        hidden_states=hidden_states,
+        topk_weights=torch.ones(2, 1),
+        topk_ids=torch.tensor([[0], [1]], dtype=torch.int32),
+        quant_type=QuantType.W4A8,
+    )
+    init_out = (
+        hidden_states,
+        torch.tensor([0, 1], dtype=torch.int32),
+        torch.tensor([1, 1], dtype=torch.int32),
+        torch.randn(2),
+    )
+    with patch(
+        "vllm_ascend.ops.fused_moe.token_dispatcher.DeviceOperator.npu_moe_init_routing", return_value=init_out
+    ) as mock_init:
+        output = dispatcher.token_dispatch(td_in)
+    assert mock_init.call_args.kwargs["quant_mode"] == -1 and output.dynamic_scale is None
+
+
 def test_allgather_bf16_lora_skips_quant_backend_validation():
     dispatcher = TokenDispatcherWithAllGather(top_k=1, num_experts=2)
     dispatcher.set_lora_context(MagicMock(punica_wrapper=MagicMock(no_lora=False)))
@@ -1267,6 +1295,244 @@ class TestTokenDispatcherWithAll2AllV(TestBase):
         np.testing.assert_array_equal(input_splits, [4])
         np.testing.assert_array_equal(output_splits, [4])
         self.mock_repeat_interleave.assert_not_called()
+
+    def _td_lctx(self, *, no_lora=True, active=None, loaded=None, ep_slots=None, rep=True, **kw):
+        pw = SimpleNamespace(no_lora=no_lora, active_lora_slots=active or set())
+        if "token_lora_indices" in kw:
+            pw.token_lora_indices = kw.pop("token_lora_indices")
+        return SimpleNamespace(
+            punica_wrapper=pw, layer_lora_slots=loaded or set(), ep_lora_slots=ep_slots, replicated_batch=rep, **kw
+        )
+
+    def _setup_a2a_lora(self, lora_ctx, *, expert_ids=(0, 1)):
+        self.dispatcher.expert_ids_per_ep_rank = torch.tensor(expert_ids, dtype=torch.int32)
+        self.dispatcher.local_expert_indices = list(expert_ids)
+        self.dispatcher.set_lora_context(lora_ctx)
+
+    def _run_a2a_lora(self, quant_type: QuantType, *, topk_ids=None, is_per_channel=False):
+        td = "vllm_ascend.ops.fused_moe.token_dispatcher"
+        td_in = build_token_dispatch_input_fixture(
+            hidden_states=torch.randn(8, 16, dtype=torch.bfloat16),
+            topk_weights=torch.rand(8, 2, dtype=torch.float32),
+            topk_ids=topk_ids if topk_ids is not None else torch.randint(0, 4, (8, 2)).long(),
+            expert_map=torch.tensor([0, 1, 2, 3]),
+            quant_type=quant_type,
+            is_per_channel_weight=is_per_channel,
+        )
+        with (
+            self._mock_split_copy_state(self.dispatcher),
+            patch(f"{td}.preprocess_lora_indices") as m_pre,
+            patch(f"{td}.all2all_lora_indices") as m_a2a,
+            patch(f"{td}.postprocess_lora_indices") as m_post,
+        ):
+            res = self.dispatcher.token_dispatch(token_dispatch_input=td_in)
+        return res, m_pre, m_a2a, m_post
+
+    def test_all2all_lora_quant_and_index_exchange_policies(self):
+        self._setup_a2a_lora(self._td_lctx(loaded={0}, rep=False, split_lora_indices=None))
+        for qt in (QuantType.W8A8, QuantType.W4A8MXFP):
+            self.mock_npu_dynamic_quant.reset_mock()
+            self.mock_async_all_to_all.reset_mock()
+            with pytest.raises(NotImplementedError, match="data_parallel_size > 1"):
+                self._run_a2a_lora(qt)
+            self.mock_npu_dynamic_quant.assert_not_called()
+            self.mock_async_all_to_all.assert_not_called()
+
+        self.mock_npu_moe_token_permute.side_effect = lambda tokens, *a, **k: (
+            torch.zeros(16, 16, dtype=tokens.dtype),
+            torch.arange(16),
+        )
+        self.mock_async_all_to_all.side_effect = lambda x, *a, **k: (None, torch.zeros_like(x), MagicMock())
+        unloaded_act = self._td_lctx(no_lora=False, active={0}, split_lora_indices=None)
+        base_loaded = self._td_lctx(loaded={0}, split_lora_indices=None)
+        active_loaded = self._td_lctx(no_lora=False, active={0}, loaded={0}, split_lora_indices=None)
+        for ctx, qt, exp_q, exp_ex in (
+            (unloaded_act, QuantType.W8A8, True, False),
+            (unloaded_act, QuantType.W4A8MXFP, True, False),
+            (base_loaded, QuantType.W4A8, False, False),
+            (base_loaded, QuantType.W8A8, False, False),
+            (base_loaded, QuantType.W4A8MXFP, True, False),
+            (active_loaded, QuantType.W8A8, False, True),
+        ):
+            self.mock_npu_dynamic_quant.reset_mock()
+            self.mock_async_all_to_all.reset_mock()
+            self._setup_a2a_lora(ctx)
+            res, m_pre, m_a2a, m_post = self._run_a2a_lora(qt)
+            self.assertEqual(
+                (
+                    self.mock_npu_dynamic_quant.call_count,
+                    res.dynamic_scale is not None,
+                    self.mock_async_all_to_all.call_count,
+                ),
+                (1 if exp_q else 0, exp_q, 2 if exp_q else 1),
+            )
+            self.assertEqual((m_pre.call_count, m_a2a.call_count, m_post.call_count), (1 if exp_ex else 0,) * 3)
+            if not exp_q:
+                self.assertEqual(res.hidden_states.dtype, torch.bfloat16)
+
+    def test_all2all_empty_ep_rank_combines_float_and_partial_expert_rank_exchanges_indices(self):
+        """Verify AlltoAll empty EP rank float combine and partial-expert rank index exchange."""
+        from vllm_ascend.ops.fused_moe.dataclass.fused_experts import MoEWeights
+        from vllm_ascend.ops.fused_moe.dataclass.moe_mlp import build_mlp_compute_input
+        from vllm_ascend.ops.fused_moe.moe_mlp import apply_moe_mlp
+
+        hidden, topk_weights = torch.randn(8, 16, dtype=torch.bfloat16), torch.rand(8, 2, dtype=torch.bfloat16)
+        topk_ids, expert_map = torch.randint(2, 4, (8, 2)).long(), torch.tensor([0, 1, 2, 3])
+        self.mock_histc.return_value = torch.tensor([0, 0, 8, 8], dtype=torch.int64)
+        self.mock_gather_from_sequence_parallel_region.return_value = torch.tensor(
+            [[0, 0, 8, 8]] * 2, dtype=torch.int64
+        )
+        self.mock_repeat_interleave.return_value = torch.empty((0,), dtype=torch.int32)
+        self.mock_npu_moe_token_permute.side_effect = lambda tokens, *a, **k: (
+            tokens.new_zeros((tokens.shape[0], 16) if a else (16, 16)),
+            torch.arange(tokens.shape[0] if a else 16),
+        )
+        self.mock_async_all_to_all.side_effect = lambda x, out_s, *a, **k: (
+            None,
+            x.new_zeros((int(sum(out_s)), x.shape[-1])),
+            MagicMock(),
+        )
+        self.mock_npu_moe_token_unpermute.side_effect = (
+            lambda permuted_tokens, sorted_indices, probs, restore_shape: permuted_tokens.new_zeros(restore_shape)
+        )
+
+        lora_ctx = self._td_lctx(loaded={0}, use_ep=True, split_lora_indices=None)
+        self._setup_a2a_lora(lora_ctx)
+        td_in = build_token_dispatch_input_fixture(
+            hidden_states=hidden,
+            topk_weights=topk_weights,
+            topk_ids=topk_ids,
+            expert_map=expert_map,
+            quant_type=QuantType.W4A8,
+            is_per_channel_weight=True,
+        )
+        with self._mock_split_copy_state(self.dispatcher):
+            d_out = self.dispatcher.token_dispatch(token_dispatch_input=td_in)
+        fused_in = SimpleNamespace(
+            hidden_states=hidden,
+            topk_weights=topk_weights,
+            topk_ids=topk_ids,
+            weights=MoEWeights(w1=None, w2=None),
+            quant=td_in.quant,
+            layer=SimpleNamespace(),
+            activation="silu",
+            need_trans=False,
+            lora_context=lora_ctx,
+        )
+        mlp_in = build_mlp_compute_input(
+            fused_experts_input=fused_in, token_dispatch_output=d_out, use_fusion_ops=False
+        )
+        with patch("vllm_ascend.ops.fused_moe.moe_mlp.maybe_record_event", return_value=None):
+            mlp_out, _ = apply_moe_mlp(mlp_in, MagicMock())
+        combined = self.dispatcher.token_combine(mlp_out, d_out.combine_metadata)
+        unpermute_kw = self.mock_npu_moe_token_unpermute.call_args.kwargs
+        self.assertEqual(
+            (
+                d_out.hidden_states.shape,
+                d_out.hidden_states.dtype,
+                mlp_out.shape,
+                combined.shape,
+                unpermute_kw["permuted_tokens"].dtype,
+                unpermute_kw["probs"].dtype,
+            ),
+            ((0, 16), torch.bfloat16, (0, 16), (8, 16), torch.bfloat16, torch.bfloat16),
+        )
+
+        combine_meta = MoEAllToAllCombineMetadata(
+            input_splits=np.array([4, 4]),
+            output_splits=np.array([4, 4]),
+            topk_weights=torch.rand(8, 2),
+            reversed_local_input_permutation_mapping=torch.arange(16),
+            reversed_global_input_permutation_mapping=torch.arange(16),
+            hidden_shape=torch.Size([8, 16]),
+            hidden_shape_before_permute=torch.Size([8, 16]),
+        )
+        with pytest.raises(AssertionError, match="floating-point"):
+            self.dispatcher._combine_postprocess(torch.zeros(16, 16, dtype=torch.int8), combine_meta)
+
+        self.mock_histc.return_value = torch.tensor([4, 4, 4, 4], dtype=torch.int64)
+        self.mock_gather_from_sequence_parallel_region.return_value = torch.tensor(
+            [[4, 4, 4, 4]] * 2, dtype=torch.int64
+        )
+        tok_idx = torch.tensor([0, -1] * 4, dtype=torch.long)
+        peer_ctx = self._td_lctx(
+            no_lora=False, active={0}, ep_slots={0}, use_ep=True, token_lora_indices=tok_idx, split_lora_indices=tok_idx
+        )
+        self._setup_a2a_lora(peer_ctx, expert_ids=(2, 3))
+        self.mock_npu_moe_token_permute.side_effect = lambda tokens, *a, **k: (
+            torch.zeros(k.get("num_out_tokens", tokens.shape[0]), 16, dtype=tokens.dtype),
+            torch.arange(k.get("num_out_tokens", tokens.shape[0])),
+        )
+        self.mock_async_all_to_all.side_effect = lambda x, out_s, *a, **k: (
+            None,
+            x[: int(sum(out_s))].clone(),
+            MagicMock(),
+        )
+        for qt in (QuantType.W4A8, QuantType.W8A8):
+            self.mock_npu_dynamic_quant.reset_mock()
+            self.mock_async_all_to_all.reset_mock()
+            p_in = build_token_dispatch_input_fixture(
+                hidden_states=hidden,
+                topk_weights=topk_weights.float(),
+                topk_ids=torch.randint(0, 4, (8, 2)).long(),
+                expert_map=expert_map,
+                quant_type=qt,
+                is_per_channel_weight=True,
+            )
+            with (
+                self._mock_split_copy_state(self.dispatcher),
+                patch(
+                    "vllm_ascend.lora.fused_moe.async_all_to_all",
+                    side_effect=lambda x, out_s, *a, **k: (None, x[: int(sum(out_s))].clone(), MagicMock()),
+                ) as mock_l_a2a,
+            ):
+                res = self.dispatcher.token_dispatch(token_dispatch_input=p_in)
+            self.mock_npu_dynamic_quant.assert_not_called()
+            self.mock_async_all_to_all.assert_called_once()
+            mock_l_a2a.assert_called_once()
+            self.assertEqual(
+                (
+                    res.dynamic_scale,
+                    res.hidden_states.dtype,
+                    mock_l_a2a.call_args.args[0].tolist()[:4],
+                    peer_ctx.exchanged_lora_indices.tolist()[:4],
+                ),
+                (None, torch.bfloat16, [0, 0, -1, -1], [0, 0, -1, -1]),
+            )
+
+    def test_all2all_partial_expert_active_lora_fails_fast_uniformly_on_unsupported_quant_type(self):
+        hidden_states = torch.randn(8, 16, dtype=torch.bfloat16)
+        topk_weights = torch.rand(8, 2, dtype=torch.float32)
+        topk_ids = torch.randint(0, 4, (8, 2)).long()
+        expert_map = torch.tensor([0, 1, 2, 3])
+        self.dispatcher.expert_ids_per_ep_rank = torch.tensor([0, 1], dtype=torch.int32)
+        self.dispatcher.local_expert_indices = [0, 1]
+
+        for quant_type in (QuantType.W4A8MXFP, QuantType.W8A8MXFP, QuantType.W4A4MXFP):
+            for rank_name, layer_slots in (("rank0_with_adapter", {0}), ("rank1_without_adapter", set())):
+                with self.subTest(quant_type=quant_type, rank=rank_name):
+                    self.mock_npu_dynamic_quant.reset_mock()
+                    self.mock_gather_from_sequence_parallel_region.reset_mock()
+                    self.mock_async_all_to_all.reset_mock()
+                    lora_ctx = self._td_lctx(no_lora=False, active={0}, loaded=layer_slots, ep_slots={0})
+                    self.assertTrue(has_collective_moe_lora(lora_ctx))
+                    self.assertFalse(should_disable_all2all_quant_for_lora(lora_ctx, quant_type=quant_type))
+                    self.dispatcher.set_lora_context(lora_ctx)
+                    token_dispatch_input = build_token_dispatch_input_fixture(
+                        hidden_states=hidden_states,
+                        topk_weights=topk_weights,
+                        topk_ids=topk_ids,
+                        expert_map=expert_map,
+                        quant_type=quant_type,
+                    )
+                    with (
+                        self._mock_split_copy_state(self.dispatcher),
+                        pytest.raises(NotImplementedError, match="no implementation registered"),
+                    ):
+                        self.dispatcher.token_dispatch(token_dispatch_input=token_dispatch_input)
+                    self.mock_npu_dynamic_quant.assert_not_called()
+                    self.mock_gather_from_sequence_parallel_region.assert_not_called()
+                    self.mock_async_all_to_all.assert_not_called()
 
     @pytest.mark.skip("Skip as register_kernels has NPU SocName checking in CANN 8.5.0.")
     def test_token_combine(self):
