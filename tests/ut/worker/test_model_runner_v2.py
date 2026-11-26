@@ -34,6 +34,7 @@ from vllm_ascend.attention.attention_c8_mxfp import (
 from vllm_ascend.attention.attention_v1 import AscendAttentionBackend
 from vllm_ascend.attention.fa_v1 import AscendFlashAttentionBackend
 from vllm_ascend.attention.mla_v1 import AscendMLABackend, AscendMLAImpl
+from vllm_ascend.attention.utils import apply_prefill_as_decode_mask, split_decodes_and_prefills
 from vllm_ascend.model_executor.offloader import AscendPrefetchOffloader
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch, AscendInputBuffers
 from vllm_ascend.worker.v2.model_runner import NPUModelRunner
@@ -315,6 +316,62 @@ def test_gather_batch_preserves_pd_tail_and_flashmla_request_order(uses_flashmla
     np.testing.assert_array_equal(batch_state.is_prefilling_np, [True, False])
     if not uses_flashmla:
         assert gathered is batch_state
+
+
+@pytest.mark.parametrize("dcp_size", [2, 4])
+@pytest.mark.parametrize("draft_tokens", [0, 3, 5])
+@pytest.mark.parametrize("mixed_batch", [False, True])
+def test_gather_standalone_dcp_orders_effective_decodes_before_prefill(dcp_size, draft_tokens, mixed_batch):
+    runner = _make_runner()
+    runner.dcp_size = dcp_size
+    runner.vllm_config.parallel_config.decode_context_parallel_size = dcp_size
+    query_len = runner.decode_query_len = 1 + draft_tokens
+    runner.req_states = SimpleNamespace(
+        req_id_to_index={"fresh": 0, "tail": 1},
+        prefill_len=SimpleNamespace(np=np.array([query_len, 129], dtype=np.int32)),
+        num_computed_prefill_tokens=np.array([0, 128], dtype=np.int32),
+    )
+    # Without drafts, these two requests tie in the upstream query-length sort.
+    # The cached tail must precede the fresh prefill at the attention boundary.
+    num_scheduled_tokens = {"fresh": query_len, "tail": query_len} if mixed_batch else {"tail": query_len}
+    scheduler_output = SimpleNamespace(
+        num_scheduled_tokens=num_scheduled_tokens,
+        total_num_scheduled_tokens=sum(num_scheduled_tokens.values()),
+        scheduled_spec_decode_tokens={"tail": [-1] * draft_tokens} if draft_tokens else {},
+    )
+
+    gathered, uniform = runner.gather_batch_req_state(scheduler_output, False)
+
+    num_reqs = len(num_scheduled_tokens)
+    assert gathered.req_ids == (["tail", "fresh"] if mixed_batch else ["tail"])
+    assert gathered.idx_mapping_np.tolist() == ([1, 0] if mixed_batch else [1])
+    assert gathered.prefill_len_np.tolist() == ([129, query_len] if mixed_batch else [129])
+    assert gathered.num_computed_prefill_tokens_np.tolist() == ([128, 0] if mixed_batch else [128])
+    assert gathered.num_scheduled_tokens.tolist() == [query_len] * num_reqs
+    if draft_tokens:
+        assert gathered.num_draft_tokens_np.tolist() == ([draft_tokens, 0] if mixed_batch else [draft_tokens])
+    else:
+        assert gathered.num_draft_tokens_np is None
+    assert gathered.has_prefill
+    assert gathered.is_prefilling_np.tolist() == [True] * num_reqs
+    assert gathered.prefill_runs_as_decode_np.tolist() == ([True, False] if mixed_batch else [True])
+    assert gathered.decode_graph_eligible is not mixed_batch
+    assert uniform == (None if mixed_batch else query_len)
+
+    effective_prefill = apply_prefill_as_decode_mask(gathered.is_prefilling_np, gathered.prefill_runs_as_decode_np)
+    metadata = SimpleNamespace(
+        num_reqs=num_reqs,
+        max_query_len=query_len,
+        num_actual_tokens=gathered.num_tokens,
+        query_start_loc_cpu=torch.arange(num_reqs + 1, dtype=torch.int32) * query_len,
+        is_prefilling=torch.from_numpy(effective_prefill),
+    )
+    assert split_decodes_and_prefills(metadata, decode_threshold=query_len, treat_short_extends_as_decodes=False) == (
+        1,
+        int(mixed_batch),
+        query_len,
+        query_len if mixed_batch else 0,
+    )
 
 
 @pytest.mark.parametrize(

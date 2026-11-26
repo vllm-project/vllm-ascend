@@ -418,6 +418,7 @@ def test_pcp_global_plan_keeps_local_fragment_mapping():
         global_batch=SimpleNamespace(
             num_reqs=2,
             is_prefilling_np=np.array([True, True]),
+            prefill_runs_as_decode_np=None,
             seq_lens_np=np.array([12, 24]),
         ),
         local_to_global_req_indices=(0, 0, 1),

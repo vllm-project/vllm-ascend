@@ -205,9 +205,9 @@ class AscendMlaDCPMetadataBuilder(
         if not self.use_pcp or context is None:
             return None, None, None
         batch = context.global_batch
-        is_prefilling = apply_prefill_as_decode_mask(
-            batch.is_prefilling_np, getattr(batch, "prefill_runs_as_decode_np", None)
-        )[: batch.num_reqs]
+        is_prefilling = apply_prefill_as_decode_mask(batch.is_prefilling_np, batch.prefill_runs_as_decode_np)[
+            : batch.num_reqs
+        ]
         if not is_prefilling.any():
             return None, None, None
         if self._pcp_cache_group_idx is None or context.local_to_global_req_indices is None:

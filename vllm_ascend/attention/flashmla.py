@@ -42,12 +42,12 @@ FLASHMLA_MAX_BATCH_SIZE = 65535
 def prepare_flashmla_batch_req_state(
     batch_state: "BatchReqState", uniform_token_count: int | None
 ) -> tuple["BatchReqState", int | None]:
-    """Order real decode before FIA prefill before inputs and graph dispatch.
+    """Order effective decodes first for FlashMLA and standalone DCP builders.
 
     Reorder the release request-state fields together so positions, KV slots
     and sampling indices inherit the same order. Cached one-token prompt tails
-    use the PCP decode classification, while fresh one-token prompts remain
-    FIA prefills.
+    use the runner's decode classification. Fresh one-token prompts use
+    prefill. Apply the order before preparing inputs and dispatching graphs.
     """
     effective_is_prefilling = apply_prefill_as_decode_mask(
         batch_state.is_prefilling_np, getattr(batch_state, "prefill_runs_as_decode_np", None)
