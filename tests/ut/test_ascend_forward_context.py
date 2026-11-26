@@ -213,7 +213,7 @@ def _fused_mc2_config(**kwargs):
 
 def test_fused_mc2_window_guard_rejects_batch_beyond_hccl_buffsize(monkeypatch):
     _patch_fused_mc2_window_deps(monkeypatch)
-    monkeypatch.setattr(afc.envs, "HCCL_BUFFSIZE", "1024")
+    monkeypatch.setenv("HCCL_BUFFSIZE", "1024")
 
     with pytest.raises(ValueError, match="needs about 1090 MiB per TP rank"):
         afc._validate_fused_mc2_hccl_window(_fused_mc2_config())
@@ -221,14 +221,14 @@ def test_fused_mc2_window_guard_rejects_batch_beyond_hccl_buffsize(monkeypatch):
 
 def test_fused_mc2_window_guard_accepts_larger_hccl_buffsize(monkeypatch):
     _patch_fused_mc2_window_deps(monkeypatch)
-    monkeypatch.setattr(afc.envs, "HCCL_BUFFSIZE", "2048")
+    monkeypatch.setenv("HCCL_BUFFSIZE", "2048")
 
     afc._validate_fused_mc2_hccl_window(_fused_mc2_config())
 
 
 def test_fused_mc2_window_guard_divides_batch_across_tp_ranks(monkeypatch):
     _patch_fused_mc2_window_deps(monkeypatch)
-    monkeypatch.setattr(afc.envs, "HCCL_BUFFSIZE", "1024")
+    monkeypatch.setenv("HCCL_BUFFSIZE", "1024")
 
     afc._validate_fused_mc2_hccl_window(_fused_mc2_config(tensor_parallel_size=4))
 
@@ -237,14 +237,14 @@ def test_fused_mc2_window_guard_skips_policies_with_capacity_fallback(monkeypatc
     # A2 keeps CAPACITY_AND_EXPERT_DENSITY and falls back to ALLGATHER above
     # the MC2 budget, so the same batch must not be rejected.
     _patch_fused_mc2_window_deps(monkeypatch, device_type=AscendDeviceType.A2)
-    monkeypatch.setattr(afc.envs, "HCCL_BUFFSIZE", "1024")
+    monkeypatch.setenv("HCCL_BUFFSIZE", "1024")
 
     afc._validate_fused_mc2_hccl_window(_fused_mc2_config())
 
 
 def test_fused_mc2_window_guard_skips_kv_consumer_only_node(monkeypatch):
     _patch_fused_mc2_window_deps(monkeypatch)
-    monkeypatch.setattr(afc.envs, "HCCL_BUFFSIZE", "1024")
+    monkeypatch.setenv("HCCL_BUFFSIZE", "1024")
 
     afc._validate_fused_mc2_hccl_window(_fused_mc2_config(kv_role="kv_consumer"))
 
