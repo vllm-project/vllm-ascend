@@ -87,9 +87,7 @@ PCP rank 2:         [2]      [5]
 PCP rank 3:            [3][4]
 ```
 
-Each fragment keeps its original positions and computed-prefix length, so tail queries can attend to earlier chunks. Local buffers are padded for collectives. With PCP-only decode request sharding, a cached one-token prompt tail uses decode request ownership instead of prefill splitting across attention backends; its original prefill lifecycle state is retained. Speculative draft tokens do not count toward this one-token check. Fresh prompts still use prefill splitting. Short requests can leave PCP-only ranks without queries.
-
-With PCP and DCP enabled, if fixed-width slicing would leave an empty tail, each rank keeps a full-width head and the remaining tokens are divided as evenly as possible among the tails. If there are too few tokens for one tail per rank, the request is replicated. For example, with eight PCP ranks a 225-token prefill has eight 15-token heads, one 14-token tail and seven 13-token tails. Each rank processes 28 or 29 tokens and uses the same 15-token maximum segment length for Indexer chunk planning.
+Each fragment keeps its original positions and computed-prefix length, so tail queries can attend to earlier chunks. Local buffers are padded for collectives. With PCP-only decode request sharding, a cached one-token prompt tail uses decode request ownership instead of prefill splitting across attention backends; its original prefill lifecycle state is retained. Speculative draft tokens do not count toward this one-token check. Fresh prompts still use prefill splitting, and PCP+DCP replicates short prefills when splitting would leave an empty chunk.
 
 #### Decode: request ownership and cache shards
 

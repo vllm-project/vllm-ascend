@@ -275,6 +275,8 @@ class AscendPCPManager(PCPManager):
         """
         self._dispatch_prefill_runs_as_decode_np = getattr(batch_state, "prefill_runs_as_decode_np", None)
 
+    # TODO: Move PCP+DCP short-prefill replication and tail balancing into upstream
+    # vLLM's PCPManager. Remove both overrides once all supported versions include it.
     def replicated_requests(self, num_scheduled_tokens: np.ndarray, is_prefilling: np.ndarray) -> np.ndarray:
         if self.dcp_world_size <= 1:
             return super().replicated_requests(num_scheduled_tokens, is_prefilling)
