@@ -44,16 +44,31 @@
   Inputs do not alias out/state. State mutation follows the ordering above.
 - Loaded normalization bias is handled by the model's original separate norm
   path. The BF16 pooling boundary before RMSNorm must not be removed.
-- HEAD_DIM and algorithm/branch flags remain constexpr. Pooling epsilon and
-  cache block bounds become runtime values; scheduler scalars suppress value
-  specialization. Epsilon is passed as a float and does not need integer
-  specialization controls. FUSE_TOKEN_NORM/HAS_PREV_ROWS and weight pointer dtypes still
+- HEAD_DIM and algorithm/branch flags remain constexpr. The fused C2
+  `rms_eps` and cache block bounds are runtime values; scheduler scalars
+  suppress value specialization. `rms_eps` is passed as a float and does not
+  need integer specialization controls. The legacy non-token-aligned path
+  retains constexpr `EPS`; this C2 launcher fixes it to 0.0 and uses
+  `rms_eps` for fused normalization. FUSE_TOKEN_NORM/HAS_PREV_ROWS and weight pointer dtypes still
   distinguish required variants. This patch does not change the separate
   `_cache_update_kernel` specialization policy.
-- Graph capture/replay and remaining variants must be checked on the target
-  runtime. New warmup integration is not included; register actual required
-  variants using the existing shared registry if measurement shows uncovered
-  serving-time compilation.
+- `DeepseekV41Compressor.__init__` registers `_C2_POOL_KERNEL` for ratio-2
+  production owners, inside the runner's active model-construction window.
+  `C2PoolKernel` derives from `AscendTritonJitKernel`. Its decorated launcher
+  is shared by compile-only warmup and `compressor_from_projected` runtime
+  calls; registration and warmup do not execute pooling or mutate state.
+- Warmup covers the model width, both `HAS_PREV_ROWS` branches and both
+  `FUSE_TOKEN_NORM` branches. Fused normalization covers BF16/FP32 weights;
+  the non-fused dummy norm pointer is BF16. Predecessor pointers are `None`
+  for the non-PCP signature. All tensor metadata represents aligned production
+  buffers. Request/group counts and cache bounds remain dynamic, so they
+  do not expand the compile-key domain. Grid size is supplied to both paths.
+- This registration covers token-aligned ratio-2 pooling only. The legacy
+  projection/pooling entry points and separate `_cache_update_kernel` keep
+  their existing launch policies. Unaligned input views can still compile
+  lazily. Validate actual specialization metadata and graph capture/replay on
+  hardware; record compilation separately for dummy runs, explicit warmup,
+  capture and serving. CPU tests do not establish device compilation coverage.
 
 ## Origin and Differences
 
@@ -71,6 +86,7 @@
 ```bash
 python -m pytest -sv tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_indexer_k_fusion.py -k c2
 python -m pytest tests/ut/ops/test_indexer_k_fusion.py tests/ut/models/test_deepseek_v41_cache.py tests/ut/attention/test_dsa_v41_cp.py -q
+python -m pytest tests/ut/model_executor/warmup/test_jit_warmup_c2_pool.py -q
 ```
 
 Set the test module's MODEL_DIMENSIONS table to the deployed model's actual

@@ -9,8 +9,15 @@ are handled by the production caller's existing path. See docs/indexer_k_fusion.
 Hardware acceptance remains required; this module alone is not validation.
 """
 
+from dataclasses import dataclass
+from typing import Any
+
 import torch
+from vllm.model_executor.warmup.jit_warmup import kernel_launcher
+from vllm.model_executor.warmup.jit_warmup_triton_helper import LaunchSpec, TritonWarmupTensor
 from vllm.triton_utils import tl, triton
+
+from vllm_ascend.ops.triton.ascend_jit_warmup import AscendTritonJitKernel
 
 INT8_QUANT_MAX = 127.0  # Symmetric INT8 dynamic quantization uses [-127, 127].
 
@@ -118,6 +125,128 @@ def _indexer_k_norm_rope_int8_store_kernel(
         )
 
 
+class IndexerKFusionKernel(AscendTritonJitKernel["IndexerKFusionKernel.CompileKey"]):
+    kernel = _indexer_k_norm_rope_int8_store_kernel
+
+    @dataclass(frozen=True)
+    class CompileKey:
+        head_dim: int
+        rotary_dim: int
+        weight_dtype: torch.dtype
+        slots_dtype: torch.dtype
+        weight_stride: int
+        cos_col_stride: int
+        sin_col_stride: int
+
+    def dispatch(
+        self,
+        *,
+        head_dim: int,
+        rotary_dim: int,
+        weight_dtype: torch.dtype,
+        slots_dtype: torch.dtype,
+        weight_stride: int,
+        cos_col_stride: int,
+        sin_col_stride: int,
+    ) -> "IndexerKFusionKernel.CompileKey":
+        return self.CompileKey(
+            head_dim=head_dim,
+            rotary_dim=rotary_dim,
+            weight_dtype=weight_dtype,
+            slots_dtype=slots_dtype,
+            weight_stride=weight_stride,
+            cos_col_stride=cos_col_stride,
+            sin_col_stride=sin_col_stride,
+        )
+
+    def get_warmup_keys(
+        self,
+        *,
+        head_dim: int,
+        rotary_dim: int,
+        vector_strides: tuple[int, int, int] = (1, 1, 1),
+    ) -> list["IndexerKFusionKernel.CompileKey"]:
+        # Production weights and source-selected RoPE rows have unit column
+        # strides. Other supported views can register their own vector strides.
+        # Row strides/bounds are do_not_specialize; batch size only sets grid.
+        return [
+            self.dispatch(
+                head_dim=head_dim,
+                rotary_dim=rotary_dim,
+                weight_dtype=weight_dtype,
+                slots_dtype=slots_dtype,
+                weight_stride=vector_strides[0],
+                cos_col_stride=vector_strides[1],
+                sin_col_stride=vector_strides[2],
+            )
+            for weight_dtype in (torch.bfloat16, torch.float32)
+            for slots_dtype in (torch.int32, torch.int64)
+        ]
+
+    def warmup_inputs(self, key: "IndexerKFusionKernel.CompileKey") -> dict[str, Any]:
+        return dict(
+            input=TritonWarmupTensor(torch.bfloat16, shape=(1, key.head_dim)),
+            weight=TritonWarmupTensor(
+                key.weight_dtype,
+                shape=(key.head_dim,),
+                strides=(key.weight_stride,),
+            ),
+            cos=TritonWarmupTensor(
+                torch.float32,
+                shape=(1, key.rotary_dim),
+                strides=(key.rotary_dim * key.cos_col_stride, key.cos_col_stride),
+            ),
+            sin=TritonWarmupTensor(
+                torch.float32,
+                shape=(1, key.rotary_dim),
+                strides=(key.rotary_dim * key.sin_col_stride, key.sin_col_stride),
+            ),
+            slots=TritonWarmupTensor(key.slots_dtype, shape=(1, 2)),
+            key_cache=TritonWarmupTensor(torch.int8, shape=(1, 1, 1, key.head_dim)),
+            scale_cache=TritonWarmupTensor(torch.float16, shape=(1, 1, 1, 1)),
+            rms_eps=1e-6,
+        )
+
+    @kernel_launcher
+    def __call__(
+        self,
+        input: torch.Tensor,
+        weight: torch.Tensor,
+        cos: torch.Tensor,
+        sin: torch.Tensor,
+        slots: torch.Tensor,
+        key_cache: torch.Tensor,
+        scale_cache: torch.Tensor,
+        *,
+        rms_eps: float,
+    ) -> LaunchSpec:
+        return (input.shape[0],), dict(
+            input_row_stride=input.stride(0),
+            cos_row_stride=cos.stride(0),
+            sin_row_stride=sin.stride(0),
+            slots_row_stride=slots.stride(0),
+            slots_col_stride=slots.stride(1),
+            key_block_stride=key_cache.stride(0),
+            key_row_stride=key_cache.stride(1),
+            scale_block_stride=scale_cache.stride(0),
+            scale_row_stride=scale_cache.stride(1),
+            num_blocks=key_cache.shape[0],
+            page_size=key_cache.shape[1],
+            WEIGHT_STRIDE=weight.stride(0),
+            COS_COL_STRIDE=cos.stride(1),
+            SIN_COL_STRIDE=sin.stride(1),
+            HEAD_DIM=input.shape[1],
+            ROTARY_DIM=cos.shape[1],
+            QUANT_MAX=INT8_QUANT_MAX,
+            enable_fp_fusion=False,
+        )
+
+
+# Shared by model registration and runtime; only the warmup framework owns
+# transient compilation state. No request tensors are retained here.
+_INDEXER_K_FUSION_KERNEL = IndexerKFusionKernel()
+
+
 def indexer_k_norm_rope_int8_store(
     k_pre: torch.Tensor,
     weight: torch.Tensor,
@@ -184,31 +313,13 @@ def indexer_k_norm_rope_int8_store(
         raise ValueError("All tensors must share one NPU")
     if num_tokens == 0:
         return
-    _indexer_k_norm_rope_int8_store_kernel[(num_tokens,)](
-        k_pre,
-        weight,
-        cos,
-        sin,
-        slots,
-        k_cache,
-        scale_cache,
-        k_pre.stride(0),
-        cos.stride(0),
-        sin.stride(0),
-        slots.stride(0),
-        slots.stride(1),
-        k_cache.stride(0),
-        k_cache.stride(1),
-        scale_cache.stride(0),
-        scale_cache.stride(1),
-        num_blocks,
-        page_size,
-        float(eps),
-        WEIGHT_STRIDE=weight.stride(0),
-        COS_COL_STRIDE=cos.stride(1),
-        SIN_COL_STRIDE=sin.stride(1),
-        HEAD_DIM=head_dim,
-        ROTARY_DIM=rotary_dim,
-        QUANT_MAX=INT8_QUANT_MAX,
-        enable_fp_fusion=False,
+    _INDEXER_K_FUSION_KERNEL(
+        input=k_pre,
+        weight=weight,
+        cos=cos,
+        sin=sin,
+        slots=slots,
+        key_cache=k_cache,
+        scale_cache=scale_cache,
+        rms_eps=float(eps),
     )

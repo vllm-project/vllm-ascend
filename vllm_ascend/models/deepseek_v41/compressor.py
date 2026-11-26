@@ -24,6 +24,13 @@ class DeepseekV41Compressor(nn.Module):
         self.norm = RMSNorm(self.width, eps=config.rms_norm_eps, dtype=torch.bfloat16)
         if ratio == 2:
             self.wgate = nn.Linear(dim, self.width, bias=False, dtype=torch.float32)
+            if vllm_config is not None:
+                # Keep Triton loading scoped to the worker's ratio-2 owner.
+                from vllm_ascend.ops.triton.compressor.compressor_triton import _C2_POOL_KERNEL
+
+                # Registration only records keys inside the runner's active
+                # model-construction window; the worker owns compile timing.
+                _C2_POOL_KERNEL.register_warmup(head_dim=self.width)
             # Allocate persistent output before memory profiling, so its footprint
             # is included in the cache budget rather than added after allocation.
             if vllm_config is not None:

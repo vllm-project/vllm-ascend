@@ -22,6 +22,7 @@ from vllm_ascend.models.deepseek_v41.cache_config import (
     uses_a5_packed_cache,
 )
 from vllm_ascend.ops.triton.fold_indexer_cache import fold_indexer_cache_rows
+from vllm_ascend.ops.triton.indexer_k_fusion import _INDEXER_K_FUSION_KERNEL
 from vllm_ascend.ops.triton.prepare_indexer_indices import (
     prepare_indexer_indices,
     register_indexer_warmup,
@@ -109,6 +110,10 @@ class DeepseekV41Indexer(nn.Module):
                 dtype=torch.bfloat16,
             )
             self.k_norm = RMSNorm(self.width, eps=config.rms_norm_eps, dtype=torch.bfloat16)
+            if self.packed_cache_ops is None:
+                # The runner holds its registry active while constructing the
+                # model. Loaded-bias checkpoints keep the existing runtime path.
+                _INDEXER_K_FUSION_KERNEL.register_warmup(head_dim=self.width, rotary_dim=self.rope_width)
             self.k_cache = DeepseekV41CacheLayer(
                 vllm_config,
                 f"{prefix}.k_cache",

@@ -71,10 +71,23 @@
   the wrapper performs no contiguous copies. This policy is a tuning candidate,
   not evidence of lower latency or fewer variants than the all-runtime
   implementation. Validate both on the deployed Triton version.
-- Warmup: no new warmup registration is included in this proposal. First measure
-  remaining runtime variants, then, if required, use the shared Ascend wrapper
-  and active registration window described in `triton_jit_warmup.md`. Preserve
-  a common launch specification between compile-only warmup and runtime.
+- Warmup: `IndexerKFusionKernel` derives from `AscendTritonJitKernel`.
+  `DeepseekV41Indexer.__init__` registers `_INDEXER_K_FUSION_KERNEL` for
+  K-owning ordinary-cache layers inside the runner's model-construction
+  registry window. The public operator calls that same instance at runtime.
+  `warmup_inputs` supplies compile-only `TritonWarmupTensor` metadata;
+  precompilation does not execute cache writes or allocate device tensors.
+- The warmup domain uses the model's D/R, BF16 input, FP32 angles,
+  INT8/FP16 caches, BF16/FP32 weight and INT32/INT64 slots. Production
+  buffers are represented as 16-byte-aligned, with unit vector strides.
+  Other vector-stride triples can be registered with `vector_strides`.
+  Unregistered column strides or unaligned views may still compile lazily;
+  the wrapper continues to accept the original documented layouts.
+  Row/page strides, bounds and token counts do not expand the warmup key
+  space. `enable_fp_fusion=False` is shared by warmup and runtime.
+- Hardware validation must compare actual compilation metadata against this
+  domain. Record compilation during dummy runs, explicit warmup, capture and
+  serving separately. No device compilation coverage is claimed by CPU tests.
 
 ## Origin and Differences
 
@@ -93,6 +106,7 @@
 
 ```bash
 python -m pytest tests/ut/ops/test_indexer_k_fusion.py tests/ut/models/test_deepseek_v41_indexer_k_fusion.py -q
+python -m pytest tests/ut/model_executor/warmup/test_jit_warmup_indexer_k_fusion.py -q
 python -m pytest -sv tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_indexer_k_fusion.py
 ```
 

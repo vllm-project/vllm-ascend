@@ -17,16 +17,25 @@ REPO_ROOT = Path(__file__).resolve().parents[3]
 def _load_launcher(relative_path):
     # Only stub the compiler boundary, leaving the production Python launcher
     # and its real PyTorch shape/dtype/stride validation intact.
+    def jit(fn=None, **kwargs):
+        def decorate(kernel):
+            # The shared warmup helper binds pointers using JIT arg_names.
+            kernel.arg_names = tuple(inspect.signature(kernel).parameters)
+            return kernel
+
+        return decorate(fn) if fn is not None else decorate
+
     triton_utils = ModuleType("vllm.triton_utils")
+    triton_utils.HAS_TRITON = False
     triton_utils.triton = SimpleNamespace(
-        jit=lambda fn=None, **kwargs: fn if fn is not None else (lambda kernel: kernel),
+        jit=jit,
         autotune=lambda **kwargs: lambda fn: fn,
         Config=MagicMock(),
     )
     triton_utils.tl = SimpleNamespace(constexpr=object())
     spec = importlib.util.spec_from_file_location("_fusion_launcher_under_test", REPO_ROOT / relative_path)
     module = importlib.util.module_from_spec(spec)
-    with patch.dict("sys.modules", {"vllm.triton_utils": triton_utils}):
+    with patch.dict("sys.modules", {"vllm.triton_utils": triton_utils, spec.name: module}):
         spec.loader.exec_module(module)
     return module
 
@@ -137,7 +146,8 @@ class TestIndexerKFusionValidation(unittest.TestCase):
                         k_cache=tensor((blocks, page, 1, 128), (key_block, key_row, key_row, 1), torch.int8),
                         scale_cache=tensor((blocks, page, 1, 1), (scale_block, scale_row, scale_row, 1), torch.float16),
                     )
-                    with patch.object(self.module, "_indexer_k_norm_rope_int8_store_kernel") as launcher:
+                    owner = self.module._INDEXER_K_FUSION_KERNEL
+                    with patch.object(owner, "kernel", MagicMock(arg_names=kernel.arg_names)) as launcher:
                         self.module.indexer_k_norm_rope_int8_store(**args)
                     if tokens == 0:
                         launcher.__getitem__.assert_not_called()

@@ -2,8 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Device acceptance tests; CPU mocks do not cover these checks.
 
-MODEL_DIMENSIONS lists the model cases explicitly in this file. The initial
-case is an interface example; add dimensions from the deployed model config
+The initial case is an interface example; add dimensions from the deployed model config
 before claiming real-model coverage.
 """
 
@@ -22,7 +21,6 @@ pytestmark = pytest.mark.skipif(
 )
 
 # (index_head_dim, qk_rope_head_dim, head_dim, rms_norm_eps).
-# Replace or extend this immutable table with the actual deployment cases.
 MODEL_DIMENSIONS = (pytest.param((128, 64, 512, 1e-6), id="interface-example"),)
 
 
