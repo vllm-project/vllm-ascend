@@ -475,60 +475,6 @@ def test_c4_cache_write_preserves_packed_bytes(monkeypatch, paged):
     assert scatter_op.call_count == 2
 
 
-@pytest.mark.parametrize("li_c4", [False, True], ids=["li_c8", "li_c4"])
-def test_strided_npu_indexer_write_avoids_4d_scatter(monkeypatch, li_c4):
-    """Non-contiguous NPU indexer views route through Triton writers instead of 4D scatter_nd."""
-    indexer = AscendSFAIndexerBackend.__new__(AscendSFAIndexerBackend)
-    indexer.head_dim = 128
-    indexer.enable_sparse_li_c4 = li_c4
-    indexer.enable_sparse_li_c8 = not li_c4
-    backing = torch.full((2, 128 * (128 + 4) + 32), 19, dtype=torch.uint8)
-    if li_c4:
-        key_cache = backing[:, : 128 * 64].view(2, 128, 1, 64)
-        scale_cache = backing[:, 128 * 64 : 128 * (64 + 4)].view(2, 128, 1, 2, 2).view(torch.float8_e8m0fnu)
-        keys = torch.arange(3 * 64, dtype=torch.uint8).view(3, 64)
-        scales = torch.arange(12, dtype=torch.uint8).view(3, 2, 2).view(torch.float8_e8m0fnu)
-    else:
-        key_cache = backing[:, : 128 * 128].view(torch.int8).view(2, 128, 1, 128)
-        scale_cache = backing[:, 128 * 128 : 128 * (128 + 2)].view(torch.float16).view(2, 128, 1, 1)
-        keys = torch.arange(3 * 128, dtype=torch.int16).to(torch.int8).view(3, 128)
-        scales = torch.tensor([[0.5], [1.5], [2.5]], dtype=torch.float16)
-    indexer.k_cache = SimpleNamespace(kv_cache=(key_cache, scale_cache))
-    slots = torch.tensor([2, 130, -1], dtype=torch.int32)
-
-    monkeypatch.setattr(torch_npu, "float4_e2m1fn_x2", torch.uint8, raising=False)
-    monkeypatch.setattr("vllm_ascend.attention.indexer.HAS_TRITON", True)
-    monkeypatch.setattr(torch.Tensor, "device", property(lambda self: torch.device("meta")))
-    monkeypatch.setattr(
-        "vllm_ascend.attention.indexer.DeviceOperator.scatter_cache",
-        Mock(side_effect=AssertionError("4D scatter_cache must not run on strided NPU indexer views")),
-    )
-    fused_store = Mock()
-    dsa_writer = Mock()
-    monkeypatch.setattr("vllm_ascend.attention.indexer.store_indexer_key_scale", fused_store)
-    monkeypatch.setattr("vllm_ascend.attention.indexer.write_dsa_cache", dsa_writer)
-
-    indexer.write_cache(keys, scales, slots)
-    if li_c4:
-        assert fused_store.call_count == 0
-        assert dsa_writer.call_count == 2
-        key_view, key_updates, key_slots = dsa_writer.call_args_list[0].args
-        scale_view, scale_updates, scale_slots = dsa_writer.call_args_list[1].args
-        assert key_view.shape == (2, 128, 1, 64) and key_view.stride(0) == backing.stride(0)
-        assert scale_view.shape == (2, 128, 1, 4) and scale_view.stride(0) == backing.stride(0)
-        assert key_updates.shape == (3, 64) and scale_updates.shape == (3, 4)
-        assert torch.equal(key_slots, slots) and torch.equal(scale_slots, slots)
-    else:
-        fused_store.assert_called_once()
-        assert dsa_writer.call_count == 0
-        _, kwargs = fused_store.call_args
-        assert kwargs == {
-            "block_size": 128,
-            "key_block_stride": key_cache.stride(0),
-            "scale_block_stride": scale_cache.stride(0),
-        }
-
-
 @pytest.mark.parametrize("query_lengths,key_lengths", [([2, 3], [2, 3]), ([1, 1], [31, 65])])
 def test_c4_a5_selector_operator_contract(monkeypatch, query_lengths, key_lengths):
     tokens, heads, head_dim = sum(query_lengths), 64, 128

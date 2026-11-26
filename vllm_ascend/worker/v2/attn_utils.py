@@ -1591,52 +1591,41 @@ def unified_allocate_kv_cache(
     )
 
 
+def _uses_specialized_kv_allocator(
+    vllm_config: VllmConfig,
+    kv_cache_config: KVCacheConfig,
+    attn_groups: Sequence[AttentionGroup],
+) -> bool:
+    """KVPP, layerwise reuse, and host offload own dedicated buffer layouts."""
+    return (
+        (bool(getattr(vllm_config, "additional_config", None)) and KVPPConfig.from_vllm_config(vllm_config).size > 1)
+        or get_layerwise_reuse_layout(kv_cache_config) is not None
+        or bool(getattr(kv_cache_config, "host_group_ids", ()))
+        or any(getattr(d, "host_resident", False) for d in kv_cache_config.kv_cache_tensors)
+        or any(getattr(g.kv_cache_spec, "store_on_host", False) for g in attn_groups)
+    )
+
+
 def _can_use_unified_kv_cache(
     vllm_config: VllmConfig,
     kv_cache_config: KVCacheConfig,
     attn_groups: Sequence[AttentionGroup],
     kernel_block_sizes: Sequence[int],
-    layout: Any,
 ) -> bool:
-    """Return whether all runtime groups satisfy the single-backing view contract."""
-    if len({descriptor.size for descriptor in kv_cache_config.kv_cache_tensors}) != 1:
-        return False
-    if getattr(vllm_config, "additional_config", None) and KVPPConfig.from_vllm_config(vllm_config).size > 1:
-        return False
-    if (
-        get_layerwise_reuse_layout(kv_cache_config) is not None
-        or bool(getattr(kv_cache_config, "host_group_ids", ()))
-        or any(getattr(d, "host_resident", False) for d in kv_cache_config.kv_cache_tensors)
-        or any(getattr(g.kv_cache_spec, "store_on_host", False) for g in attn_groups)
+    """Return whether all runtime groups share one device pool and implement runtime views."""
+    if len({d.size for d in kv_cache_config.kv_cache_tensors}) != 1 or _uses_specialized_kv_allocator(
+        vllm_config, kv_cache_config, attn_groups
     ):
         return False
-
-    strides = {
-        name: descriptor.block_stride
-        for descriptor in kv_cache_config.kv_cache_tensors
-        for name in descriptor.layers
-    }
-    for group, kernel_size in _runtime_cache_groups(attn_groups, kernel_block_sizes):
-        if not hasattr(group.backend, "get_runtime_shapes"):
-            return False
-        spec = group.kv_cache_spec
-        uses_contiguous = getattr(group.backend, "uses_contiguous_cache_components", False)
-        if (
-            uses_contiguous
-            and isinstance(spec, AscendMLAAttentionSpec)
-            and not spec.uses_packed_sfa_main_cache
-            and spec.qk_rope_head_dim is None
-        ):
-            return False
-        shapes = group.backend.get_runtime_shapes(spec, 1, layout, kernel_block_size=kernel_size)
-        pages_per_block = shapes[0][0]
-        for name in group.layer_names:
-            block_stride = strides.get(name)
-            if block_stride is None or block_stride < spec.page_size_bytes:
-                return False
-            if (uses_contiguous or pages_per_block > 1) and block_stride != spec.page_size_bytes:
-                return False
-    return True
+    strides = {name: d.block_stride for d in kv_cache_config.kv_cache_tensors for name in d.layers}
+    return all(
+        hasattr(g.backend, "get_runtime_shapes")
+        and (
+            not getattr(g.backend, "uses_contiguous_cache_components", False)
+            or all(strides.get(name) == g.kv_cache_spec.page_size_bytes for name in g.layer_names)
+        )
+        for g, _ in _runtime_cache_groups(attn_groups, kernel_block_sizes)
+    )
 
 
 def allocate_kv_cache_main(
@@ -1671,7 +1660,7 @@ def allocate_kv_cache_main(
     attn_groups = _get_cache_attention_groups(kv_cache_config, attn_layers, shared_layers, kernel_block_sizes)
 
     if model_type in _UNIFIED_KV_CACHE_MODELS and _can_use_unified_kv_cache(
-        vllm_config, kv_cache_config, attn_groups, kernel_block_sizes, layout
+        vllm_config, kv_cache_config, attn_groups, kernel_block_sizes
     ):
         return unified_allocate_kv_cache(
             kv_cache_config,
