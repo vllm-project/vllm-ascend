@@ -268,16 +268,21 @@ def _insert(values, source, offsets, sizes, strides):
 class SplitQKVMRoPEBodyTests(unittest.TestCase):
     def _check_body(self, hq, hkv, *, tokens=1, cores=None, block_m=1, grouped=False, launch=None, source_text=None):
         tree = ast.parse(OP_PATH.read_text() if source_text is None else source_text)
-        body = next(
+        functions = [
             node
             for node in tree.body
-            if isinstance(node, ast.FunctionDef) and node.name == "split_qkv_rmsnorm_mrope_kernel"
-        )
-        body.decorator_list = []
+            if isinstance(node, ast.FunctionDef)
+            and node.name in ("_process_single_row", "split_qkv_rmsnorm_mrope_kernel")
+        ]
+        for function in functions:
+            function.decorator_list = []
         tl = _Language()
         namespace = {"tl": tl, "extract_slice": _slice, "insert_slice": _insert}
         module = ast.Module(
-            body=[ast.ImportFrom(module="__future__", names=[ast.alias(name="annotations")], level=0), body],
+            body=[
+                ast.ImportFrom(module="__future__", names=[ast.alias(name="annotations")], level=0),
+                *functions,
+            ],
             type_ignores=[],
         )
         exec(compile(ast.fix_missing_locations(module), str(OP_PATH), "exec"), namespace)
