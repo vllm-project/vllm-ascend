@@ -12,12 +12,22 @@
   is its sum of prefix-support counts divided by the initial candidate count.
   Adaptive confidence is `(accepted + 1) / (observed + 2)` for valid slots
   and zero for filler slots.
-- **Algorithm flow**: The upstream speculator calls `launch_suffix_observe`
-  (adaptive only), `launch_suffix_local_scan`, and `launch_suffix_finalize`.
+- **Algorithm flow**: The upstream speculator calls its original kernel entry
+  points. The Triton dispatcher forwards them to the registered Ascend launch
+  adapters: `launch_suffix_observe` (adaptive only),
+  `launch_suffix_local_scan`, and `launch_suffix_finalize`.
   A corpus match must be strictly longer to beat the local match.
   `launch_suffix_ingest` appends completed documents before their request
-  slots are released. Finalize selects one draft per request; ingest and
-  observe also update shared state.
+  slots are released, through the same dispatch mechanism. Finalize emits one
+  draft sequence with up to `K` retrieved tokens per request, padding unused
+  output slots with the last sampled token. Ingest and observe also update
+  shared state.
+- **Adaptive verification responsibilities**: The Ascend suffix kernels
+  update acceptance statistics and compute per-slot confidence. Verification
+  budget selection and per-request draft allocation reuse the upstream
+  adaptive verification logic, including its device-side budget assignment
+  kernel. The Ascend runner, ACL graph execution and attention backends adapt
+  the resulting variable-length verification batches for NPU execution.
 - **Supported modes**: Kernel compilation and execution have been validated
   on Ascend A3 and A5/950. Eager mode and full decode graphs have been
   exercised on A3. Adaptive verification requires full decode graphs and an
@@ -120,11 +130,39 @@ voting and wraparound, and checks observer counts and confidence. Integer
 outputs require exact equality; floating-point confidence uses approximate
 comparison.
 
+The tests cover three levels:
+
+- `test_suffix_local_scan.py` launches the Ascend kernel directly and compares
+  its packed match scores with a CPU reference.
+- The other nightly suffix files construct the real upstream
+  `SuffixSpeculator` and exercise its proposal and request lifecycle methods
+  through the registered Ascend launch adapters. They check operator results,
+  mutable state and cross-operator behavior without starting a model worker.
+- The unit tests under `tests/ut/ops/triton/spec_decode/` replace device kernels
+  with recording mocks to check launcher metadata, argument forwarding,
+  dispatcher binding and registration behavior. They do not validate device
+  execution. The suffix factory unit tests in
+  `tests/ut/worker/v2/test_spec_decode.py` mock the speculator class and check
+  request-state forwarding and configuration handling.
+
 The feature matrix includes `K=1` with corpus lookup enabled at match depth
 two, with adaptive verification both enabled and disabled. Corpus voting,
 document-boundary and short-history cases cover the narrow-row truncation
 path. The 54-case suite passed on A3 and A5 with CANN 9.3.0 and
 Triton-Ascend 3.6.0.post2, using vLLM `ba15685ab7`.
+
+On November 26, 2026, the complete 54-case NPU suite was rerun on A3 at
+vLLM Ascend `7acecd567ac292d67e3e3ec0be2b3a54dd5c7a05` with vLLM
+`c410543d9ffff03f5f6c4a8c0ae1d3ad082c4a15`, CANN 9.2.1 and
+Triton-Ascend 3.6.0.post2: **54 passed, 0 skipped**. The Suffix
+launcher/dispatcher and worker unit suite also passed **64 tests**. Separate
+Qwen2.5-7B-Instruct BF16 TP4 smoke checks completed **30/30 requests** across
+sync/async eager and graph modes, plus async graph with adaptive verification.
+These runs reused the container's existing native Ascend libraries and had
+documented dependency differences; they validate the updated Python and
+Triton paths, not a fresh native build. The preceding A5 result retains its
+original validation revision. See [PR #20854](https://github.com/vllm-project/vllm-ascend/pull/20854)
+for the validation environment, limitations and evidence archive locations.
 
 ```bash
 pytest -sv tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_suffix_*.py
@@ -133,5 +171,6 @@ python -m pytest -q tests/ut/ops/triton/spec_decode/test_suffix_*.py
 
 ## Example
 
-N/A for a standalone user call. The speculator invokes the launchers.
+N/A for a standalone user call. The speculator's kernel calls reach the
+Ascend launch adapters through the Triton dispatcher.
 See the tests above for examples of caller-owned inputs and outputs.
