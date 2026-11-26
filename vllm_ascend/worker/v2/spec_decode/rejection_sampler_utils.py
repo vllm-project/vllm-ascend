@@ -312,7 +312,7 @@ def rejection_sample(
     target_logits: torch.Tensor,
     # [max_num_reqs, num_speculative_steps, V] raw tensor, or the
     # upstream DraftLogitsCache in the same positional slot.
-    draft_logits_cache: torch.Tensor | DraftLogitsCache | None,
+    draft_logits_cache: "torch.Tensor | DraftLogitsCache | None",
     # [num_logits]
     draft_sampled: torch.Tensor,
     # [num_reqs + 1]
