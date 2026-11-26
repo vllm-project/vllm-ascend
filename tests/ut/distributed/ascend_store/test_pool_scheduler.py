@@ -1299,6 +1299,7 @@ class TestKVPoolSchedulerBuildMeta(unittest.TestCase):
         self.assertFalse(scheduler.layerwise_offload)
         self.assertEqual(len(meta.requests), 1)
         self.assertIsNone(meta.requests[0].load_spec)
+        self.assertEqual(meta.requests[0].computed_prefix_tokens, 16)
 
     @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.LookupKeyClient")
     def test_build_connector_meta_finished_req(self, mock_client_cls):

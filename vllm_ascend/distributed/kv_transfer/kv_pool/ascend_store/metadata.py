@@ -1028,6 +1028,9 @@ class ReqMeta:
     # First token that has not been saved before this metadata was built.
     save_start_token: int = 0
 
+    # Tokens computed before this step of an uninterrupted running request.
+    computed_prefix_tokens: int = 0
+
     can_save: bool | None = None
     # load_spec
     load_spec: LoadSpec | None = None
@@ -1097,6 +1100,7 @@ class ReqMeta:
         boundary_puts: list[BoundaryPut] | None = None,
         completed_token_len: int | None = None,
         publish_partial_tail: bool = False,
+        computed_prefix_tokens: int = 0,
     ) -> None:
         if token_len_chunk is None:
             token_len_chunk = 0 if save_end_token is None else save_end_token
@@ -1105,6 +1109,7 @@ class ReqMeta:
         self.save_end_token = token_len_chunk if save_end_token is None else save_end_token
         self.target_token_len = token_len_chunk if target_token_len is None else target_token_len
         self.save_start_token = save_start_token
+        self.computed_prefix_tokens = computed_prefix_tokens
         if block_ids_by_group is None:
             block_ids_by_group = normalize_block_ids_by_group(block_ids or [])
         self.block_ids_by_group = block_ids_by_group

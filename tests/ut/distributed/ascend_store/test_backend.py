@@ -507,6 +507,24 @@ class TestMooncakeBackendSetup(unittest.TestCase):
             mock_global_te.get_transfer_engine.return_value = transfer_engine
             return backend._setup_store()
 
+    def test_independent_store_preference_uses_registered_segment(self):
+        for hostname, expected in (("10.0.0.7:50053", "10.0.0.7:50053"), ("", "10.0.0.7"), (None, "10.0.0.7")):
+            with self.subTest(hostname=hostname):
+                backend = self._make_backend(
+                    config=_make_mooncake_store_config(preferred_segment=True), use_fabric_mem=False
+                )
+                backend._use_store_independent_te = True
+                store = MagicMock()
+                store.setup.return_value = 0
+                if hostname is None:
+                    del store.get_hostname
+                else:
+                    store.get_hostname.return_value = hostname
+
+                self._setup_store(backend, store)
+
+                self.assertEqual(backend.local_seg, expected)
+
     def test_dp_clients_use_distinct_ssd_paths_and_log_actual_directories(self):
         for use_fabric_mem, use_store_independent_te in ((False, False), (True, False), (False, True)):
             with (
@@ -1040,6 +1058,7 @@ class TestMooncakeBackendMethods(unittest.TestCase):
             master_server_address="127.0.0.1:50088",
             enable_ssd_offload=False,
             tenant_id="default",
+            preferred_segment=False,
         )
         with (
             patch.object(sys.modules["mooncake.store"], "MooncakeDistributedStore", create=True) as mock_store_cls,

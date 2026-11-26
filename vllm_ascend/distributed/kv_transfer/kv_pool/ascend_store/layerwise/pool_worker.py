@@ -111,7 +111,7 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
         )
         self.use_block_key_layerwise = self.layerwise_data_plane == "block_key"
         self.use_layerwise_transfer = self.layerwise_data_plane == "gva"
-        self.has_shared_kv = self.use_layerwise_transfer and has_shared_kv_sources(vllm_config)
+        self.has_shared_kv = has_shared_kv_sources(vllm_config)
         self._step_load_keys: set[str] = set()
         # Request ID -> cache group ID -> request block index -> private pool key.
         self._snapshot_keys: dict[str, dict[int, dict[int, str]]] = {}
@@ -720,7 +720,7 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
                 return [(0, local_layer)]
             groups = self.physical_layer_to_group_layers.get(local_layer)
             if groups is None:
-                if getattr(self, "use_kvpp", False):
+                if getattr(self, "use_kvpp", False) or getattr(self, "has_shared_kv", False):
                     return []
                 raise RuntimeError(f"Mooncake layerwise: no KV cache group for local layer {local_layer}")
             return [(group_id, layer_idx) for group_id, layer_idx in groups if group_id in self.cacheable_group_ids]
@@ -1206,14 +1206,16 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
                 # chunked-prefill steps.  A later chunk can therefore have no
                 # new load_spec while still needing to restore the previously
                 # committed prefix into its newly allocated local blocks.
-                populated_slots = [index for index, key in enumerate(request.load_block_keys) if key is not None]
-                if not populated_slots:
+                keys = request.load_block_keys
+                start_block = next((index for index, key in enumerate(keys) if key is not None), None)
+                if start_block is None:
                     continue
+                trailing_empty = next(index for index, key in enumerate(reversed(keys)) if key is not None)
                 request_block_ranges.append(
                     LayerBlockRange(
                         request=request,
-                        start_block=min(populated_slots),
-                        end_block=max(populated_slots) + 1,
+                        start_block=start_block,
+                        end_block=len(keys) - trailing_empty,
                     )
                 )
                 continue
@@ -1562,11 +1564,11 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
             # Errors are still surfaced per layer by wait_for_layer_load.
             self._check_hybrid_load_errors()
 
-    def _submit_ready_layer_loads(self) -> None:
+    def _submit_ready_layer_loads(self, compute_boundary: torch.npu.Event | None = None) -> None:
         assert self.kv_recv_thread is not None
         recv_thread = self.kv_recv_thread
 
-        def submit_layer_load(layer_id: int) -> bool:
+        def submit_layer_load(layer_id: int, boundary: torch.npu.Event | None) -> bool:
             reuse_sources = self.prefetch_layer_map.get(layer_id, ())
             if not self.layer_load_tasks[layer_id] and not reuse_sources:
                 return False
@@ -1583,6 +1585,7 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
                     transfer_tasks=self.layer_load_tasks[layer_id],
                     layer_id=layer_id,
                     load_gate=load_gate,
+                    compute_boundary=boundary,
                 )
             )
             return True
@@ -1595,8 +1598,10 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
                 # Keep tail SWA and draft loads one layer ahead.
                 window_end += 1
             elif self.current_layer == 0 or self.current_layer in source_layers:
-                # Submit the intervening SWA before the next shared source.
-                window_end = next(layer for layer in source_layers if layer > self.current_layer)
+                # Submit intervening SWA along with the shared sources in the window.
+                future_sources = [layer for layer in source_layers if layer > self.current_layer]
+                sources_ahead = 2 if self._shared_read_ahead_enabled() else 1
+                window_end = future_sources[min(sources_ahead, len(future_sources)) - 1]
         else:
             window_end = self.current_layer + self.num_prefetch_layers
         window_end = min(window_end, self.num_layers - 1)
@@ -1610,7 +1615,8 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
         while self.next_layer_to_submit <= window_end:
             layer_id = self.next_layer_to_submit
             self.next_layer_to_submit += 1
-            submit_layer_load(layer_id)
+            if submit_layer_load(layer_id, compute_boundary):
+                compute_boundary = None
 
     def wait_for_layer_load_ready(self, layer_name: str) -> None:
         physical_layer = self._extract_physical_layer_index(layer_name)
@@ -1659,6 +1665,14 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
             self.save_kv_layer(metadata)
         self._drain_deferred_last_save()
 
+    def _shared_read_ahead_enabled(self) -> bool:
+        # Only extend the window for the persistent full-attention pages.
+        return (
+            self.has_shared_kv
+            and getattr(self._data_plane, "_retain_running_prefix", False)
+            and not self.prefetch_layer_map
+        )
+
     def wait_for_layer_load(self) -> None:
         if self.current_layer >= self.num_layers:
             return
@@ -1676,15 +1690,27 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
                     save_gate.event = self.sync_save_events[layer_id]
                     save_gate.on_start = lambda: self._submit_attention_save(layer_id)
                 save_gate.on_finish = self._finish_attention_window
-            if getattr(self, "block_key_hybrid", False) and self.next_layer_to_submit <= self.current_layer:
-                # An unprefetched demand load must not race earlier collectives.
-                boundary = torch.npu.Event()
-                boundary.record()
-                boundary.synchronize()
-            self._submit_ready_layer_loads()
             should_wait = (
                 bool(self.layer_load_tasks[self.current_layer]) or self.current_layer in self.prefetch_layer_map
             )
+            compute_boundary = None
+            # A shared-source segment can start with an empty layer. Fence
+            # upcoming reads, including lookahead, only when there is work.
+            if (
+                getattr(self, "block_key_hybrid", False)
+                and self.next_layer_to_submit <= self.current_layer
+                and (not getattr(self, "has_shared_kv", False) or any(self.layer_load_tasks))
+            ):
+                # Fence earlier collectives before a new read window starts.
+                boundary = torch.npu.Event()
+                boundary.record()
+                if self._shared_read_ahead_enabled() and not should_wait:
+                    # The first queued read waits on this event. The receiver
+                    # preserves submission order for all reads in the window.
+                    compute_boundary = boundary
+                else:
+                    boundary.synchronize()
+            self._submit_ready_layer_loads(compute_boundary)
             if should_wait:
                 while not self.layer_load_finished_events[self.current_layer].wait(timeout=10):
                     self.kv_recv_thread.raise_if_failed()
