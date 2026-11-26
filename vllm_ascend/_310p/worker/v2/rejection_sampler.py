@@ -158,14 +158,10 @@ class RejectionSampler310V2(RejectionSampler):
 
         any_random = bool(np.any(temperature_np[idx_mapping_np] >= _SAMPLING_EPS))
         if any_random:
-            if input_ids is not None:
-                # Read the exact token IDs fed into the model so probabilistic
-                # verification never observes stale/zeroed host staging buffers.
-                draft_sampled_cpu = input_ids.detach().to("cpu")
-            else:
-                assert input_batch.input_ids_cpu is not None
-                assert input_batch.logits_indices_np is not None
-                draft_sampled_cpu = input_batch.input_ids_cpu[torch.from_numpy(input_batch.logits_indices_np)]
+            assert input_ids is not None and logits_indices is not None
+            # Read the exact token IDs fed into the model so probabilistic
+            # verification never observes stale/zeroed host staging buffers.
+            draft_sampled_cpu = input_ids.detach().to("cpu")
             source_generators = getattr(self.sampler, "_source_generators", {})
             # Persistent InputBatch arrays; slice to this step's request count.
             cu_num_logits_np = input_batch.cu_num_logits_np[: num_reqs + 1]
