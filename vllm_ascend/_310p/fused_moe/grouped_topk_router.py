@@ -43,9 +43,12 @@ class AscendGroupedTopKRouter310(AscendGroupedTopKRouter):
         # 310P: npu_moe_gating_top_k_softmax aicoreUB overflow when
         # num_experts > 64 (MTE out-of-bounds). Use plain softmax+topk,
         # which the 310P handles fine at any expert count.
+        # Keep the router dtype consistent with the parent class (softmax
+        # preserves router_logits dtype); downstream apply() casts to x.dtype.
+        orig_dtype = router_logits.dtype
         probs = torch.softmax(router_logits.float(), dim=-1)
         topk_weights, topk_ids = torch.topk(probs, self.top_k, dim=-1)
-        topk_weights = topk_weights.to(torch.float16)
+        topk_weights = topk_weights.to(orig_dtype)
 
         topk_weights = self._renormalize_topk_weights(topk_weights)
         topk_weights = topk_weights * self.routed_scaling_factor
