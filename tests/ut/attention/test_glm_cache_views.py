@@ -377,9 +377,9 @@ def test_glm_with_full_attention_draft_uses_unified_pool(head_size_v, kernel_blo
     config = _build_glm_plan(runtime, specs, num_blocks=3)
     raw, caches = _allocate_unified(config, runtime, kernel_block_sizes=[kernel_block_size])
 
-    assert {
-        part.untyped_storage().data_ptr() for components in caches.values() for part in components
-    } == {raw.untyped_storage().data_ptr()}
+    assert {part.untyped_storage().data_ptr() for components in caches.values() for part in components} == {
+        raw.untyped_storage().data_ptr()
+    }
 
     draft_k, draft_v = caches["draft.layers.0.self_attn.attn"]
     expected_blocks = 3 * (4 // kernel_block_size)
