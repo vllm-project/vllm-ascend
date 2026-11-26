@@ -38,7 +38,7 @@ variants:
   ascend_w4a8:
     model_id: Eco-Tech/Kimi-K2.6-W4A8
     precision: int4
-    label: W4A8 (Ascend)
+    label: W4A8 (ASCEND)
     vram_minimum_gb: 600
     supported_hardware:
       - ascend_910c
@@ -89,7 +89,7 @@ variants:
         install:
           pip: false
           docker: true
-    description: "ModelSlim W4A8 (weights on ModelScope: Eco-Tech/Kimi-K2.6-W4A8) — 1 Atlas 800 A3 (64G x 16), TP4xDP4 + DFlash; first-party verified 2026-10-28 on a nightly build (release-tag re-verify pending). System-level tuning (cpufreq governor, sysctl) from the companion Ascend recipe is host-side and skipped in unprivileged environments."
+    description: "ModelSlim W4A8 (weights on ModelScope: Eco-Tech/Kimi-K2.6-W4A8) — 1 Atlas 800 A3 (64G x 16), TP4xDP4 + DFlash; first-party verified 2026-10-28 on a nightly build (release-tag re-verify pending). System-level tuning (cpufreq governor, sysctl) from the companion Ascend recipe is host-side and skipped in unprivileged environments. Single-node values document the first-party verified configuration from the merged companion recipe (vllm-ascend/vllm-ascend-recipes#100); the current tutorial §5.1 example differs (max-model-len 15000, no --async-scheduling)."
 strategy_hardware:
   single_node_tep:
     # TEP pins TP to the full node (16 NPUs on one Atlas 800 A3); combined
@@ -156,10 +156,30 @@ presets:
       # the pd_cluster pool emits it from the role topology, and a preset-
       # level drop would strip the pool's own flag and fail the check.
       - '--async-scheduling'
+      # Guard: drop --data-parallel-hybrid-lb; the builder emits it on
+      # multi-node DEP pools, and the tutorial lane does not use it.
+      - '--data-parallel-hybrid-lb'
     workload: 'Prefill/decode separation (2P1D), 4 nodes x 16-die Atlas 800 A3, Mooncake'
+    source:
+      label: "Kimi-K2.6 tutorial, section 5.2"
+      href: https://docs.vllm.ai/projects/ascend/en/latest/tutorials/models/Kimi-K2.6.html
+      key: k26-a3-w4a8-pd-2p1d
+      revision: "2026-11-26"
     image:
       vllm: quay.io/ascend/vllm-ascend:v0.30.0rc1-a3
+      model_revision: master
     runbook: |
+      ## Evidence and versions
+
+      - Source: tutorial §5.2 (Multi-Node PD Separation Deployment),
+        transcribed value-by-value
+      - Image: quay.io/ascend/vllm-ascend:v0.30.0rc1-a3
+      - Checkpoint: Eco-Tech/Kimi-K2.6-W4A8 (ModelScope, master)
+      - Validation status: not validated end-to-end; rendering verified
+        against the official builder (DP8 prefill pool / DP8 decode pool)
+
+      ## Transcription notes
+
       Transcribed from tutorial §5.2 (Multi-Node PD Separation Deployment):
       2P1D on four Atlas 800 A3 (64GB x 16) nodes — 2 prefill nodes and one
       decode instance spanning 2 nodes. 2P1D is recommended over 1P1D (2
@@ -304,13 +324,13 @@ presets:
                 tp_size: 4
 
 notes:
-  - title: "Ascend 910C: use the W4A8 (Ascend) variant"
+  - title: "Ascend 910C: use the W4A8 (ASCEND) variant"
     when: { hardware: [ascend_910c] }
     body: |
       The `default` / `fp8` / `nvfp4` / `redhat_nvfp4` checkpoints above are
       pinned to an Ascend image so the commands are runnable, but these
       checkpoints are not validated on Ascend 910C. The first-party verified
-      deployment on one Atlas 800 A3 is the **W4A8 (Ascend)** variant
+      deployment on one Atlas 800 A3 is the **W4A8 (ASCEND)** variant
       (TP4×DP4 + DFlash).
   - title: "Prefill/decode separation on Ascend 910C"
     when: { hardware: [ascend_910c] }
@@ -328,6 +348,7 @@ notes:
       prefill master.
 
 meta:
+  date_updated: "2026-11-26"
   hardware:
     # First-party verification 2026-10-28 plus official runner-CI end-to-end
     # verification passed (companion Ascend recipe merged as
