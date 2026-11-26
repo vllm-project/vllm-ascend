@@ -52,11 +52,11 @@ hardware_notes:
       pre-release image: DP2xTP16 + MTP with a FULL_DECODE_ONLY compilation
       config (390 tok/s). On ascend_910c the builder offers the W4A8-MTP
       variant through `multi_node_tp_dp` (two 16-NPU nodes, per
-      `strategy_min_gpus`); the verified deployment additionally passed
-      per-node orchestration args (`--data-parallel-address` /
-      `--data-parallel-rpc-port` / `--data-parallel-start-rank`) that the
-      builder does not emit — see the companion Ascend recipe for the
-      launcher. The pinned v0.23.0.post1 stable tag has not been re-run yet;
+      `strategy_min_gpus`). The builder emits `--data-parallel-address` and
+      `--data-parallel-start-rank` per node; the verified launcher
+      additionally sets `--data-parallel-rpc-port` (default 12321, must be
+      reachable between nodes) and appends `--headless` on the follower —
+      see the companion Ascend recipe for the launcher. The pinned v0.23.0.post1 stable tag has not been re-run yet;
       single-node and multi-node TEP/DEP renderings remain builder defaults
       not run on NPU.
 
@@ -160,6 +160,11 @@ variants:
     supported_features:
       - tool_calling
       - reasoning
+    # The verified lane runs the Python frontend (the preset's select pins
+    # it); the rust default renders commands this checkpoint was not
+    # validated with.
+    supported_frontends:
+      - python
     # No `tp:` here. A multi_node_dep command gets its TP from the preset args;
     # a variant-level tp map only feeds the single-node TP resolver. Keeping it
     # would document a number the renderer ignores.
@@ -187,8 +192,6 @@ variants:
       - '1024'
       - '--host'
       - 0.0.0.0
-      - '--served-model-name'
-      - dsv4
       - '--tokenizer-mode'
       - deepseek_v4
       - '--reasoning-parser'
@@ -299,7 +302,10 @@ presets:
     hardware: ascend_910b
     strategy: multi_node_dep
     variants: [ascend_w4a8]
-    default: false
+    # default: true — this preset IS the verified deployment on this
+    # hardware; the bare multi_node_dep baseline (rust frontend, local DP 8,
+    # fp8 KV cache, hybrid LB) is not the validated topology.
+    default: true
     select:
       # Co-located multi-node pool, not PD disaggregation: the node count is
       # set by select.nodes, and pd_router / pd_connector are omitted because
@@ -342,9 +348,12 @@ presets:
 
       ## Launch order and flags
 
-      1. Node 0: no `--headless`, no `--data-parallel-start-rank`, **plus
-         `--api-server-count 1`**.
-      2. Nodes 1-3: `--headless` and `--data-parallel-start-rank 1|2|3`.
+      1. Node 0: no `--headless`, no `--data-parallel-start-rank`;
+         `--api-server-count 1` travels with the preset args.
+      2. Nodes 1-3: append `--headless` and set
+         `--data-parallel-start-rank 1|2|3` manually — the builder emits the
+         same command skeleton for every node and cannot carry these
+         per-node follower flags yet.
 
       Omitting `--api-server-count 1` on node 0 is the most damaging mistake:
       health checks pass while inference hangs. Always verify with a real
@@ -367,6 +376,12 @@ presets:
       - '1'
       - '--tensor-parallel-size'
       - '8'
+      # --api-server-count 1 keeps a single API server on the DP master;
+      # without it vLLM defaults the count to the DP size (4) and node 0
+      # answers /health while every completion hangs (see the 910B hardware
+      # note).
+      - '--api-server-count'
+      - '1'
       - '--max-num-batched-tokens'
       - '4096'
       - '--max-num-seqs'
@@ -398,3 +413,22 @@ notes:
       that are not validated on Ascend 910C; the Ascend image and pip pins
       only make the commands runnable. The first-party verified deployment on
       2x Atlas 800 A3 is the **W4A8-MTP (Ascend)** variant (DP2xTP16 + MTP).
+
+  - title: "Atlas 800 A2 (910B): use the A2 W4A8 preset"
+    when: { hardware: [ascend_910b] }
+    body: |
+      The **Ascend A2 W4A8 multi-node DP4/TP8 (4 nodes)** preset is the
+      verified configuration on this hardware and is selected by default; it
+      renders the DP4 x local1 x TP8 (EP32) pool with `--api-server-count 1`
+      on the DP master. The baseline without it carries the base recipe's
+      NVIDIA FP8 checkpoint with strategy defaults (local DP 8, fp8 KV cache,
+      hybrid LB) that are not the validated topology — and the three follower
+      nodes still need `--headless` appended by hand (see the hardware note).
+  - title: "Prefill/decode separation is not offered here yet"
+    when: { hardware: [ascend_910b, ascend_910c] }
+    body: |
+      This overlay disables `pd_cluster` and carries no PD preset. The
+      Ascend tutorial documents two validated PD lanes for this model in
+      §5.2 (Multi-Node PD Separation Deployment) — A3 (2P+2D, PP2+PCP8,
+      Mooncake) and A2 (4P+4D) — follow the tutorial's commands there for
+      now: https://docs.vllm.ai/projects/ascend/en/latest/tutorials/models/DeepSeek-V4-Pro.html
