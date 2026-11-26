@@ -41,6 +41,9 @@ def _parse_map(npu_smi_map):
     """Parse the fixture the same way the production helper does."""
     lines = [ln.strip() for ln in npu_smi_map.splitlines() if ln.strip()]
     header = [c.strip() for c in lines[0].split("  ") if c.strip()]
+    if "NPU ID" not in header or "Chip Phy-ID" not in header:
+        # Legacy npu-smi output without the Chip Phy-ID column: no mapping.
+        return {}
     npu_idx, phy_idx = header.index("NPU ID"), header.index("Chip Phy-ID")
     out = {}
     for ln in lines[1:]:
