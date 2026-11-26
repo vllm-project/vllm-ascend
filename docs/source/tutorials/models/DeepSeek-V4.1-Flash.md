@@ -173,6 +173,18 @@ separate images.
     Inside the container, run `npu-smi info` and confirm that all eight NPUs
     are visible. Run `vllm --version` to check the installed vLLM version.
 
+    If the host exposes RoCE through the `hrn5` provider, the driver libraries
+    for it are not covered by the driver mount above, and multi-node
+    communication fails with `hcclGetRootInfo` error 19 (network API call
+    failed). Mount the provider description and its user-space library as well,
+    adding both options before `"$IMAGE"`:
+
+    - `-v /etc/libibverbs.d/hrn5.driver:/etc/libibverbs.d/hrn5.driver:ro`
+    - `-v /usr/lib64/libhrn5-rdmav34.so:/usr/lib64/libhrn5-rdmav34.so:ro`
+
+    Confirm on the host that both files exist before adding the options; hosts
+    that do not ship this provider do not need them.
+
     Reserve enough host memory and shared memory for Engram CPU offload and
     local DP sharing. Use the same image and absolute checkpoint path on
     every participating node. For [Memcache pooling](#531-memcache-kv-cache-pool),
