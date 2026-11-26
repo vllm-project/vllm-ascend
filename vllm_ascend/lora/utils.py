@@ -23,7 +23,6 @@ from vllm_ascend.lora.fused_moe import (
     AscendFusedMoE3DWithLoRA,
     AscendFusedMoEWithLoRA,
 )
-from vllm_ascend.ops.linear import AscendQKVParallelLinear
 
 
 def _apply_packed_lora(layer, x: torch.Tensor, output: torch.Tensor) -> torch.Tensor:
@@ -129,6 +128,8 @@ class AscendMergedQKVParallelLinearWithLoRA(_PackedLoRAAWeightsMixin, MergedQKVP
         packed_modules_list: list,
         model_config: PretrainedConfig | None,
     ) -> bool:
+        from vllm_ascend.ops.linear import AscendQKVParallelLinear
+
         return (
             lora_config.max_loras == 1
             and type(source_layer) is AscendQKVParallelLinear

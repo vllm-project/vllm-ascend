@@ -1,3 +1,7 @@
+import os
+import subprocess
+import sys
+import textwrap
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
@@ -257,7 +261,7 @@ def test_all2all_lora_indices_restores_dtype_after_exchange() -> None:
     exchanged = torch.tensor([7, 8], dtype=torch.int64)
     handle = Mock()
     with patch(
-        "vllm_ascend.lora.fused_moe.async_all_to_all",
+        "vllm_ascend.ops.fused_moe.moe_utils.async_all_to_all",
         return_value=(None, exchanged, handle),
     ) as all_to_all:
         all2all_lora_indices(context, output_splits="out", input_splits="in", ep_group="ep")
@@ -380,3 +384,40 @@ def test_packed_single_lora_matmul(add_inputs: bool) -> None:
     if add_inputs:
         expected.add_(original)
     torch.testing.assert_close(y, expected)
+
+
+@pytest.mark.parametrize(
+    "module_name",
+    [
+        "vllm_ascend.lora.lora_ops",
+        "vllm_ascend.lora.fused_moe",
+        "vllm_ascend.lora.utils",
+        "vllm_ascend.lora.punica_npu",
+        "vllm_ascend.lora.quant_moe",
+    ],
+)
+def test_lora_modules_import_without_preloading_ops(module_name: str) -> None:
+    """Importing LoRA modules in a fresh process must not cycle through vllm_ascend.ops."""
+    code = textwrap.dedent(
+        """
+        import importlib, importlib.util, sys, types
+        if importlib.util.find_spec("torch_npu") is None:
+            stub = types.ModuleType("torch_npu")
+            stub.__spec__ = importlib.util.spec_from_loader("torch_npu", loader=None)
+            stub.__path__ = []
+            sys.modules["torch_npu"] = stub
+        assert "vllm_ascend.ops" not in sys.modules
+        importlib.import_module(sys.argv[1])
+        assert "vllm_ascend.ops" not in sys.modules
+        """
+    )
+    env = os.environ.copy()
+    env["TORCH_DEVICE_BACKEND_AUTOLOAD"] = "0"
+    result = subprocess.run(
+        [sys.executable, "-c", code, module_name],
+        capture_output=True,
+        text=True,
+        env=env,
+        timeout=60,
+    )
+    assert result.returncode == 0, f"Failed importing {module_name}:\n{result.stderr}"
