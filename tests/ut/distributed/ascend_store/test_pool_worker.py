@@ -48,7 +48,6 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_conne
     create_kv_pool_worker,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.buffer import BufferDescriptor, MemoryLocation
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.cache_layout import GroupBufferLayout
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.hisparse.draft_host_mirror import (
     HiSparseDraftHostMirrorSaveHook,
 )
@@ -2967,10 +2966,10 @@ class TestKVPoolWorkerProcessLayerData(unittest.TestCase):
                 )
                 worker.layer_load_tasks = [[first], [second], [third]]
                 database = SimpleNamespace(
-                    group_layouts={
-                        0: GroupBufferLayout.from_buffers([1000, 2000, 3000], [8, 8, 8]),
-                        1: GroupBufferLayout.from_buffers([4000, 5000, 6000], [8, 8, 8]),
-                    },
+                    group_block_len={0: [8, 8, 8], 1: [8, 8, 8]},
+                    group_kv_caches_base_addr={0: [1000, 2000, 3000], 1: [4000, 5000, 6000]},
+                    group_block_stride={},
+                    group_layer_cache_entry_offsets={},
                 )
                 receiver = object.__new__(KVCacheStoreLayerRecvingThread)
                 receiver.group_builders = {
@@ -3126,7 +3125,10 @@ class TestKVPoolWorkerProcessLayerData(unittest.TestCase):
                         self.assertTrue(all(r.partial_block_index is None for r in ranges))
                         self.assertEqual(request.transfer.block_gvas_by_group_np[0].shape, (8,))
                         database = SimpleNamespace(
-                            group_layouts={0: GroupBufferLayout.from_buffers([1024], [64], [64], layer_offsets=[0, 1])},
+                            group_block_len={0: [64]},
+                            group_kv_caches_base_addr={0: [1024]},
+                            group_block_stride={0: [64]},
+                            group_layer_cache_entry_offsets={0: [0, 1]},
                         )
                         builder = LayerBatchBuilder(database, page_size_bytes=64, num_layers=1)
                         task = worker.layer_save_tasks[0][0]
@@ -3281,7 +3283,7 @@ class TestKVPoolWorkerProcessLayerData(unittest.TestCase):
         first = self._make_multi_block_gva_request(["h0"])
         second = self._make_multi_block_gva_request(["h0"])
         second.req_id = "second"
-        second.block_ids_by_group_np[0] = np.asarray([20])
+        second.transfer.block_ids_by_group_np[0] = np.asarray([20])
         missing = self._make_multi_block_gva_request(["missing"])
         missing.req_id = "missing"
         before = SimpleNamespace(size=lambda: 64, gva_list=lambda: [201])
@@ -3298,10 +3300,10 @@ class TestKVPoolWorkerProcessLayerData(unittest.TestCase):
             [[shared_key, missing_key], [shared_key]],
         )
         worker.m_store.batch_add_lease.assert_called_once_with([shared_key], LAYERWISE_READ_LEASE_TTL_MS)
-        self.assertEqual(first.load_block_gvas_np.tolist(), [301])
-        self.assertEqual(second.load_block_gvas_np.tolist(), [301])
+        self.assertEqual(first.transfer.load_block_gvas_np.tolist(), [301])
+        self.assertEqual(second.transfer.load_block_gvas_np.tolist(), [301])
         self.assertFalse(missing.load_spec.can_load)
-        self.assertIsNone(missing.load_block_gvas_by_group_np)
+        self.assertIsNone(missing.transfer.load_block_gvas_by_group_np)
         self.assertEqual(worker._step_load_keys, {shared_key})
 
     def test_layerwise_lease_refresh_has_linear_key_lookup_work(self):
@@ -3769,10 +3771,10 @@ class TestKVPoolWorkerProcessLayerData(unittest.TestCase):
                 worker._data_plane._alloc_gvas_for_save(requests)
                 self.assertEqual(convert.call_count, 3 * (step + 1))
                 self.assertEqual(
-                    requests[0].save_keys, [f"llama-7b@{value.hex()}@0" for value in (b"prefix", b"first")]
+                    requests[0].transfer.save_keys, [f"llama-7b@{value.hex()}@0" for value in (b"prefix", b"first")]
                 )
-                self.assertEqual(requests[1].save_keys, ["llama-7b@second@0"])
-                self.assertEqual(requests[1].block_gvas_np.tolist(), [0, 101])
+                self.assertEqual(requests[1].transfer.save_keys, ["llama-7b@second@0"])
+                self.assertEqual(requests[1].transfer.block_gvas_np.tolist(), [0, 101])
         # Each step rechecks both requests and allocates their missing keys.
         self.assertEqual(worker.m_store.batch_is_exist.call_count, 4)
         self.assertEqual(worker.m_store.batch_alloc.call_count, 4)
@@ -3826,9 +3828,9 @@ class TestKVPoolWorkerProcessLayerData(unittest.TestCase):
             worker._data_plane._alloc_gvas_for_save(requests)
         self.assertEqual(convert.call_count, 3)
         self.assertEqual(worker.m_store.batch_is_exist.call_count, 2)
-        self.assertEqual(requests[0].block_gvas_np.tolist(), [101, 102])
-        self.assertEqual(requests[1].block_gvas_np.tolist(), [0, 103])
-        self.assertEqual(requests[1].save_keys, ["llama-7b@7365636f6e64@0"])
+        self.assertEqual(requests[0].transfer.block_gvas_np.tolist(), [101, 102])
+        self.assertEqual(requests[1].transfer.block_gvas_np.tolist(), [0, 103])
+        self.assertEqual(requests[1].transfer.save_keys, ["llama-7b@7365636f6e64@0"])
 
     def test_save_hash_conversion_allocation_failure_stops_remaining_requests(self):
         for allocation in (None, [], [0, 102]):
@@ -4640,11 +4642,11 @@ class TestKVPoolWorkerReachableMasks(unittest.TestCase):
         first, second = requests
         public, first_snapshot, second_snapshot = [call.args[0] for call in worker.m_store.batch_alloc.call_args_list]
         self.assertEqual(public, [f"llama-7b@h{index}@0" for index in range(4)])
-        self.assertEqual(first.save_keys, public + first_snapshot)
-        self.assertEqual(second.save_keys, second_snapshot)
+        self.assertEqual(first.transfer.save_keys, public + first_snapshot)
+        self.assertEqual(second.transfer.save_keys, second_snapshot)
         self.assertNotEqual(first_snapshot, second_snapshot)
-        self.assertEqual(first.partial_save_gva_per_group, [105])
-        self.assertEqual(second.partial_save_gva_per_group, [106])
+        self.assertEqual(first.transfer.partial_save_gva_per_group, [105])
+        self.assertEqual(second.transfer.partial_save_gva_per_group, [106])
 
     def test_process_save_for_layer_batch_splits_masked_runs(self):
         worker = self._make_worker()
