@@ -66,6 +66,23 @@ variants:
         docker_serve_command: vllm serve
         install:
           pip: false
+presets:
+  ascend_910b_measured:
+    label: "Measured (BF16, TP8, MTP)"
+    hardware: ascend_910b
+    variants: [default]
+    default: true
+    image: quay.io/ascend/vllm-ascend:v0.32.0rc1
+    tp: 8
+    source:
+      label: "vLLM-Ascend measured deployment (2026-11-04)"
+      href: "https://github.com/vllm-project/vllm-ascend/pull/22690"
+      key: "ascend-recipe"
+      revision: "v0.32.0rc1"
+    runbook: |-
+      End-to-end measured on an 8-NPU Atlas 800I A2 (Ascend 910B) deployment:
+      TP8, MTP speculative decoding (qwen3_5_mtp x3), async scheduling,
+      FULL_DECODE_ONLY cudagraphs. Full launch command in the guide section above.
 guide_sections:
   ascend: |-
     ### Huawei Atlas 800I A2 (Ascend 910B)  (vLLM Ascend)
