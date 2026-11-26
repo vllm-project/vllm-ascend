@@ -34,9 +34,9 @@ from vllm_ascend.worker.v2 import attn_utils
 def register_specs_and_small_blocks(monkeypatch):
     register_all_kvcache_specs(None)
     register_ascend_kv_cache_specs()
-    for backend in (AscendSFABackend, AscendSFAIndexerBackend):
+    for backend in (AscendSFABackend, AscendSFAIndexerBackend, AscendAttentionBackend):
         sizes = backend.get_supported_kernel_block_sizes()
-        monkeypatch.setattr(backend, "get_supported_kernel_block_sizes", lambda spec=None, sizes=sizes: [4, *sizes])
+        monkeypatch.setattr(backend, "get_supported_kernel_block_sizes", lambda spec=None, sizes=sizes: [2, 4, *sizes])
 
 
 def _make_glm_runtime(
@@ -334,6 +334,68 @@ def test_kernel_block_splitting_and_replicated_indexer_pages(replicas):
     assert scale.data_ptr() == key.data_ptr() + key.nbytes
 
 
+@pytest.mark.parametrize("head_size_v", [8, 12], ids=["symmetric_kv", "asymmetric_kv"])
+@pytest.mark.parametrize("kernel_block_size", [4, 2], ids=["unsplit", "split_kernel_blocks"])
+def test_glm_with_full_attention_draft_uses_unified_pool(head_size_v, kernel_block_size):
+    runtime = _make_glm_runtime()
+    main = AscendMLAAttentionSpec(
+        block_size=4,
+        num_kv_heads=1,
+        head_size=12,
+        num_query_heads=16,
+        dtype=torch.float16,
+        kv_lora_rank=8,
+        qk_rope_head_dim=4,
+    )
+    indexer = AscendSFAIndexerCacheSpec(
+        block_size=4,
+        num_kv_heads=1,
+        head_size=8,
+        dtype=torch.int8,
+        scale_dim=1,
+        scale_dtype=torch.float16,
+        cache_sparse_li_c8=True,
+    )
+    draft = FullAttentionSpec(
+        block_size=4,
+        num_kv_heads=2,
+        head_size=8,
+        head_size_v=head_size_v,
+        dtype=torch.float16,
+        is_draft=True,
+    )
+    specs = {
+        "model.layers.0.self_attn.attn": main,
+        "model.layers.0.self_attn.indexer.k_cache": indexer,
+        "draft.layers.0.self_attn.attn": draft,
+    }
+    config = _build_glm_plan(runtime, specs, num_blocks=3)
+    raw, caches = _allocate_unified(config, runtime, kernel_block_sizes=[kernel_block_size])
+
+    assert {
+        part.untyped_storage().data_ptr() for components in caches.values() for part in components
+    } == {raw.untyped_storage().data_ptr()}
+
+    draft_k, draft_v = caches["draft.layers.0.self_attn.attn"]
+    expected_blocks = 3 * (4 // kernel_block_size)
+    assert draft_k.shape == (expected_blocks, kernel_block_size, 2, 8)
+    assert draft_v.shape == (expected_blocks, kernel_block_size, 2, head_size_v)
+    assert draft_k.is_contiguous() and draft_v.is_contiguous()
+    assert draft_v.data_ptr() == draft_k.data_ptr() + draft_k.nbytes
+
+    snapshot = raw.clone()
+    for name, parts in caches.items():
+        for part in parts:
+            part.view(torch.uint8).fill_(77)
+            for other_name, other_parts in caches.items():
+                for other_part in other_parts:
+                    if other_part.data_ptr() != part.data_ptr():
+                        assert bool((other_part.view(torch.uint8) == 33).all()), (
+                            f"Write into {name} bled into {other_name}"
+                        )
+            raw.copy_(snapshot)
+
+
 @pytest.mark.parametrize(
     "scenario",
     [
@@ -342,10 +404,13 @@ def test_kernel_block_splitting_and_replicated_indexer_pages(replicas):
         "store_on_host",
         "kvpp",
         "blhnc_non_dense_main",
-        "non_sfa_draft_backend",
+        "unmigrated_draft_backend",
+        "padded_overlay_draft",
     ],
 )
 def test_specialized_or_incompatible_layouts_route_to_legacy_allocator(monkeypatch, scenario):
+    from vllm.model_executor.models.extract_hidden_states import CacheOnlyAttentionBackend
+
     model_type = scenario if scenario in ("kimi_linear", "glm5_next_text") else "glm_moe_dsa"
     layout = KVCacheLayout.BLHNC if scenario == "blhnc_non_dense_main" else KVCacheLayout.LBNHC
     runtime = _make_glm_runtime(model_type=model_type, layout=layout, enable_kvpp=(scenario == "kvpp"))
@@ -363,13 +428,23 @@ def test_specialized_or_incompatible_layouts_route_to_legacy_allocator(monkeypat
         "main.0": main,
         "main.1": main,
     }
-    if scenario == "non_sfa_draft_backend":
+    if scenario == "unmigrated_draft_backend":
         specs["draft.0"] = FullAttentionSpec(block_size=4, num_kv_heads=1, head_size=8, dtype=torch.float16)
+    elif scenario == "padded_overlay_draft":
+        specs["draft.0"] = FullAttentionSpec(
+            block_size=4,
+            num_kv_heads=1,
+            head_size=8,
+            dtype=torch.float16,
+            page_size_padded=256,
+        )
     config = _build_glm_plan(runtime, specs, num_blocks=3)
     layers = {
         name: SimpleNamespace(
-            get_attn_backend=lambda spec=spec: (
-                AscendAttentionBackend if isinstance(spec, FullAttentionSpec) else AscendSFABackend
+            get_attn_backend=lambda name=name, spec=spec: (
+                CacheOnlyAttentionBackend
+                if scenario == "unmigrated_draft_backend" and name == "draft.0"
+                else (AscendAttentionBackend if isinstance(spec, FullAttentionSpec) else AscendSFABackend)
             ),
             num_heads=1,
         )
@@ -552,6 +627,20 @@ def test_mooncake_asymmetric_kvpp_prefill_to_unified_decode(monkeypatch, li_c4, 
     if dst_block > 0:
         assert torch.all(key[:dst_block] == 33)
         assert torch.all(scale[:dst_block].view(torch.uint8) == 33)
+
+
+def test_ascend_attention_runtime_shapes_rejects_subclasses_and_hnd(monkeypatch):
+    import vllm.envs as envs_vllm
+
+    class _DerivedAttentionBackend(AscendAttentionBackend):
+        pass
+
+    spec = FullAttentionSpec(block_size=4, num_kv_heads=2, head_size=8, dtype=torch.float16)
+    with pytest.raises(NotImplementedError, match="does not implement unified runtime shapes"):
+        _DerivedAttentionBackend.get_runtime_shapes(spec, 3, None)
+    monkeypatch.setattr(envs_vllm, "VLLM_KV_CACHE_LAYOUT", "LBHNC")
+    with pytest.raises(ValueError, match="HND layout"):
+        AscendAttentionBackend.get_runtime_shapes(spec, 3, None)
 
 
 def test_ascend_store_asymmetric_kvpp_prefill_matches_unified_decode_segments():
