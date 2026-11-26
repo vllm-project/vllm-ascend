@@ -244,6 +244,9 @@ jobs:
               - '.github/workflows/scripts/test_config.yaml'
               - '.github/workflows/scripts/runner_label.json'
               - '.github/workflows/scripts/coverage.py'
+              - 'requirements.txt'
+              - 'requirements-dev.txt'
+              - 'pyproject.toml'
             # Files that can affect CPU UT execution but are covered by neither
             # src nor ci_pipeline: everything tests/ut reads from disk, not only
             # what it imports from under tests/. That includes shared tests/
@@ -367,7 +370,7 @@ jobs:
       ref: ${{ github.event.pull_request.head.sha }}
       base_ref: ${{ github.base_ref }}
       test_groups: >-
-        [{"partition_name":"cpu-ut","runner":"linux-amd64-cpu-8-hk","image_tag":"9.2.1-910b-ubuntu22.04-py3.12","npu_type":"cpu","num_npus":0,"tests":"tests/ut"}]
+        [{"partition_name":"cpu-ut","runner":"linux-amd64-cpu-8-hk","image_tag":"9.3.0_20261113161300-910b-ubuntu22.04-py3.12","npu_type":"cpu","num_npus":0,"tests":"tests/ut"}]
       enable-coverage: false
 
   recommend-tests:

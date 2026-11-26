@@ -488,7 +488,7 @@ class KVCacheRecvingThread(threading.Thread):
         self.remote_kv_group2layeridx: dict[str, dict[int, dict[int, tuple[dict[str, Any], list[int]]]]] = SizedDict()
         self.remote_metadata_lock = threading.Lock()
         # Reformat metadata keyed by request_id then CP shard index. Populated by the
-        # last TP-offset pull task for each shard; applied once all pull tasks finish.
+        # last TP-offset pull task for each PP segment within a shard; applied once all pull tasks finish.
         self.pending_reformat: defaultdict[str, dict[int, list[tuple[int, list[list[int]], int, list[int]]]]] = (
             defaultdict(dict)
         )
@@ -1101,7 +1101,7 @@ class KVCacheRecvingThread(threading.Thread):
         ready_attention_group_reformat_block_ids: list[tuple[int, list[list[int]], int, list[int]]],
     ) -> None:
         with self.pending_reformat_lock:
-            self.pending_reformat[request_id][shard_idx] = ready_attention_group_reformat_block_ids
+            self.pending_reformat[request_id].setdefault(shard_idx, []).extend(ready_attention_group_reformat_block_ids)
 
     def _reformat_pending_kv_caches(self, request_id: str) -> None:
         with self.pending_reformat_lock:
@@ -1310,20 +1310,17 @@ class KVCacheRecvingThread(threading.Thread):
         length_list.append(remote_ssm_len)
 
     def _get_group_kv_caches(self, group_idx: int, layer_indices: list[int] | None = None) -> dict[str, Any]:
+        group_spec, group_layer_indices = self.kv_group2layeridx[group_idx]
         if layer_indices is None:
-            _, layer_indices = self.kv_group2layeridx[group_idx]
+            layer_indices = group_layer_indices
         layer_index_set = set(layer_indices)
-        model_type = self.vllm_config.model_config.hf_text_config.model_type
-        num_attn_module = 2 if model_type in ("longcat_flash", "longcat_flash_ngram") else 1
-        from vllm.v1.worker.utils import extract_layer_index
-
-        def layer_in_group(layer_name: str) -> bool:
-            if "mtp" in layer_name:
-                return any(layer_idx >= self.num_layers for layer_idx in layer_index_set)
-            return extract_layer_index(layer_name, num_attn_module) in layer_index_set
-
+        # Transfer indices can differ from model layer numbers (index caches
+        # and speculative layers), and several cache groups can share a layer.
+        # Reuse the exact name/index mapping built when caches were registered.
         return {
-            layer_name: layer_cache for layer_name, layer_cache in self.kv_caches.items() if layer_in_group(layer_name)
+            layer_name: self.kv_caches[layer_name]
+            for layer_name, layer_idx in zip(group_spec["layer_names"], group_layer_indices)
+            if layer_idx in layer_index_set and layer_name in self.kv_caches
         }
 
     @staticmethod

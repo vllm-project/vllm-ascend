@@ -15,8 +15,6 @@
 # limitations under the License.
 #
 
-import os
-from unittest.mock import patch
 
 import pytest
 from vllm import SamplingParams
@@ -35,7 +33,6 @@ MODELS = ["vllm-ascend/DeepSeek-V2-Lite-W8A8"]
         pytest.param({}, id="default_full_and_piecewise"),
     ],
 )
-@patch.dict(os.environ, {"VLLM_USE_V2_MODEL_RUNNER": "1"})
 @wait_until_npu_memory_free(target_free_percentage=0.8)
 def test_deepseek_v2_lite_graph_mode(
     model: str,

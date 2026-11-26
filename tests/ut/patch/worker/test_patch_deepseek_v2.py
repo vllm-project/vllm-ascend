@@ -291,7 +291,7 @@ def test_model_init_adds_pp_topk_receive_buffer(monkeypatch):
 
     _patched_deepseek_v2_model_init(
         model,
-        vllm_config=SimpleNamespace(use_v2_model_runner=True),
+        vllm_config=SimpleNamespace(),
         prefix="",
     )
     intermediate_tensors = model.make_empty_intermediate_tensors(

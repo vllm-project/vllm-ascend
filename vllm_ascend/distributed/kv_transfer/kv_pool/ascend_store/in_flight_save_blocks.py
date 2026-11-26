@@ -9,7 +9,8 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import Re
 class InFlightSaveBlockTracker:
     """Keep bulk-save source blocks alive until every worker reports completion."""
 
-    def __init__(self, expected_worker_count: int) -> None:
+    def __init__(self, expected_worker_count: int, swa_group_ids: set[int] | None = None) -> None:
+        self.swa_group_ids = swa_group_ids or set()
         self.expected_worker_count = expected_worker_count
         self.sending_blocks: dict[int, list[int]] = {}
         self.sending_events: dict[int, int] = {}
@@ -17,26 +18,24 @@ class InFlightSaveBlockTracker:
     def retain(
         self,
         req_meta: ReqMeta,
-        speculative_blocks_by_group: dict[int, int],
         block_pool: BlockPool | None,
     ) -> None:
-        if not req_meta.can_save or not speculative_blocks_by_group:
+        if not req_meta.can_save:
+            return
+        if req_meta.event_id is not None:
+            # Finish-time handoffs are pinned before request teardown and then
+            # emitted on the next scheduler step. Never take a second pin.
+            assert req_meta.event_id in self.sending_events
             return
 
-        block_ids: list[int] = []
-        # Running requests can refresh their block table before the sender reads it.
-        req_meta.block_ids_by_group = req_meta.block_ids_by_group.copy()
-        for group_id, group_block_ids in enumerate(req_meta.block_ids_by_group):
-            num_speculative_blocks = speculative_blocks_by_group.get(group_id)
-            if num_speculative_blocks is None:
-                continue
-            req_meta.block_ids_by_group[group_id] = group_block_ids.copy()
-            # Speculative scratch slots must remain exclusively owned for relocation.
-            non_spec_block_ids = (
-                group_block_ids[:-num_speculative_blocks] if num_speculative_blocks > 0 else group_block_ids
-            )
-            block_ids.extend(block_id for block_id in non_spec_block_ids if block_id > 0)
-
+        block_ids = [put.block_id for put in req_meta.boundary_puts or []]
+        assert all(block_id > 0 for block_id in block_ids), "Null block cannot back a boundary save"
+        # A boundary-only job reads its explicit sources, not the ordinary table.
+        if req_meta.token_len_chunk > 0:
+            for group_id in self.swa_group_ids:
+                if group_id < len(req_meta.block_ids_by_group):
+                    block_ids.extend(block for block in req_meta.block_ids_by_group[group_id] if block > 0)
+        block_ids = list(dict.fromkeys(block_ids))
         if not block_ids:
             return
 

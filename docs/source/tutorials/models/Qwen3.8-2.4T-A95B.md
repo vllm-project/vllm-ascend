@@ -327,7 +327,7 @@ Before starting the service:
         export HCCL_BUFFSIZE=1024
         export HCCL_BUFFSIZE_EP=2048
         export HCCL_CONNECT_TIMEOUT=1800
-        export HCCL_EXEC_TIMEOUT=1800
+        export HCCL_EXEC_TIMEOUT=3600
         export HCCL_IF_IP=$LOCAL_IP
         export HCCL_INTRA_PCIE_ENABLE=1
         export HCCL_INTRA_ROCE_ENABLE=0
@@ -391,7 +391,7 @@ Before starting the service:
         export HCCL_BUFFSIZE=1024
         export HCCL_BUFFSIZE_EP=2048
         export HCCL_CONNECT_TIMEOUT=1800
-        export HCCL_EXEC_TIMEOUT=1800
+        export HCCL_EXEC_TIMEOUT=3600
         export HCCL_IF_IP=$LOCAL_IP
         export HCCL_INTRA_PCIE_ENABLE=1
         export HCCL_INTRA_ROCE_ENABLE=0

@@ -328,6 +328,9 @@ class Glm5NextMTP(nn.Module, DeepseekV2MixtureOfExperts):
         self.has_own_lm_head = own_head_weight in loaded_weights
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
+        if (quant_config := getattr(self, "quant_config", None)) is not None:
+            weights = quant_config.get_cache_scale_mapper().apply(weights)
+
         stacked_params_mapping = [
             ("gate_up_proj", "gate_proj", 0),
             ("gate_up_proj", "up_proj", 1),

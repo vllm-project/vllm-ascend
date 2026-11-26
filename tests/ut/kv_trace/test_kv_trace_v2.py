@@ -129,15 +129,12 @@ def test_dummy_without_scheduler_context_forwards_original_arguments(adapter):
     assert not reasons(adapter.runtime)
 
 
-def test_disabled_or_v1_install_does_not_wrap_methods(runtime):
-    config = NS(use_v2_model_runner=False, additional_config={"kv_trace": {"enabled": True}})
+def test_disabled_install_does_not_wrap_methods(runtime):
+    config = NS(additional_config={"kv_trace": {"enabled": False}})
     runner = NS(vllm_config=config, execute_model=lambda: None)
     original = runner.execute_model
     assert runtime.runner_subject.install_trace(runner) is None
     assert runner.execute_model is original and not hasattr(config, "_ascend_kv_trace")
-    config.use_v2_model_runner = True
-    config.additional_config["kv_trace"]["enabled"] = False
-    assert runtime.runner_subject.install_trace(runner) is None
 
 
 def test_zero_and_copy_are_records_without_lifecycle_side_effects(adapter):
