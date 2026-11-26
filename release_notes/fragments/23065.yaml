@@ -4,9 +4,13 @@ entries:
   - category: bugfix
     text: >-
       vLLM Ascend now refuses to start when cudagraph_mode=FULL is combined
-      with a head-major KV cache layout (VLLM_KV_CACHE_LAYOUT=HND, LBHNC
-      or BLHNC). Previously the engine started and then crashed the NPU stream
-      with device error 507011 at the first replayed prefill graph. Users
-      hitting the new startup error should switch to
-      cudagraph_mode=FULL_DECODE_ONLY (the supported graph mode for this
-      layout) or unset VLLM_KV_CACHE_LAYOUT to keep the default layout.
+      with the KV cache layout VLLM_KV_CACHE_LAYOUT=HND or LBHNC instead of
+      failing later, with device error 507011 on a build that includes the
+      head-major KV cache read fix of vllm-ascend #22649, or with attention
+      error 561002 in every graph mode without it. Keep the default layout
+      (unset VLLM_KV_CACHE_LAYOUT; LBNHC or NHD) to use cudagraph_mode=FULL;
+      the head-major layout works only together with that fix, and then with
+      cudagraph_mode=FULL_DECODE_ONLY. BLHNC is refused with
+      cudagraph_mode=FULL as a validation restriction because its storage
+      layout depends on the attention backend and the combination is
+      unvalidated, not because it was shown to crash.

@@ -110,18 +110,25 @@ This is why the effective graph mode on Ascend may differ from the mode requeste
 
 ### KV cache layout compatibility
 
-The head-major KV cache layouts restrict the graph modes. `HND` is the legacy alias of `LBHNC`; `BLHNC` is the block-outer member of the same family:
+On Ascend, `cudagraph_mode=FULL` is refused at startup for two KV cache layouts, for different reasons. `HND` is the legacy alias of `LBHNC`; `BLHNC` is the block-outer variant, whose storage family depends on the attention backend. `NHD` is the legacy alias of the default `LBNHC` layout.
 
-| `cudagraph_mode` | Head-major layout (`HND`/`LBHNC`, `BLHNC`) | Default layout (`LBNHC`) |
-|---|---|---|
-| `FULL` | **Refused at startup** | Supported |
-| `FULL_DECODE_ONLY` | Supported (the validated mode for `HND`/`LBHNC`) | Supported |
-| `FULL_AND_PIECEWISE` | Not affected by this restriction: full decode graphs, piecewise mixed | Not affected by this restriction |
-| `NONE` / `PIECEWISE` | Not affected by this restriction | Not affected by this restriction |
+| `cudagraph_mode` | `HND`/`LBHNC` (head-major) | `BLHNC` | Default layout (`LBNHC`/`NHD`) |
+|---|---|---|---|
+| `FULL` | **Refused at startup** | **Refused at startup** (validation restriction) | Supported |
+| `FULL_DECODE_ONLY` | Not refused; works only together with #22649 | Not refused; not validated | Supported |
+| `FULL_AND_PIECEWISE` | Not refused; not validated with this layout | Not refused; not validated | Not affected by this restriction |
+| `NONE` / `PIECEWISE` | Not affected by this restriction | Not affected by this restriction | Not affected by this restriction |
 
-`FULL_AND_PIECEWISE` is `(FULL, PIECEWISE)`: its decode routine replays full decode graphs, the same decode path as `FULL_DECODE_ONLY`, and only its mixed prefill/decode routine runs piecewise graphs. It therefore never replays a token-keyed graph captured for a prefill/mixed batch.
+With the `HND`/`LBHNC` layout, what happens without the gate depends on the build, and neither observation is universal:
 
-With the `HND`/`LBHNC` layout, captured full-graph `npu_fused_infer_attention_score` tasks read the gathered (HND) KV cache, and replaying a token-keyed graph captured for a prefill/mixed batch crashes the NPU stream at the first replay — device error 507011 ("model stream execute failed"), reproduced consistently on Ascend 910C. `BLHNC` is refused for the same combination as a precaution (fail closed): FA3 stores it in the same head-major shape as `HND`, and that path has not been validated with `FULL` graphs. `FULL_DECODE_ONLY` never replays graphs for prefill/mixed batches (they run eager), and its decode replays were validated as exact against eager outputs, so it is the supported graph mode for the head-major layout. The combination is refused at engine startup with an error naming both knobs; unset `VLLM_KV_CACHE_LAYOUT` to use the default `LBNHC` layout, or switch to `cudagraph_mode=FULL_DECODE_ONLY`.
+- **With the head-major KV cache read of vllm-ascend #22649**, replaying a token-keyed graph captured for a prefill/mixed batch crashes the NPU stream at the first replay: device error 507011 ("model stream execute failed"), observed 3/3 on Ascend 910C (tiny Qwen3, TP=1), while a default-layout control of identical batch geometry completes. On this build `FULL_DECODE_ONLY` (decode-only graphs; prefill/mixed batches run eager) is the validated graph mode for the head-major layout: its graph replays equal eager outputs on 910C.
+- **Without #22649**, the head-major layout does not work in any graph mode: the Attention V1 backend rejects it at the first cached read with `aclnnFusedInferAttentionScoreV3` error 561002 / EZ0037 ("key tensor must be contiguous"), at graph capture with `FULL`, `FULL_DECODE_ONLY` and `FULL_AND_PIECEWISE`, and at the first forward with `enforce_eager`. Here the gate only turns the `FULL` failure into an immediate, explicit error; unset `VLLM_KV_CACHE_LAYOUT` instead of switching the graph mode.
+
+The default layout (`LBNHC`, alias `NHD`) is the supported path for `cudagraph_mode=FULL`.
+
+`BLHNC` is refused with `FULL` as a validation restriction, not because a crash was demonstrated under it. `BLHNC` has no single storage family on Ascend: the FA3 backend stores it in the same head-major shape as `HND` (where `FULL` graphs are refused) and that path has not been validated with `FULL` graphs, while the Attention V1 backend keeps the token-major shape for it, so the resolved layout and the physical storage disagree (measured on one Ascend 910C die: the per-layer cache equals the default layout's, and the run completes with outputs identical to the default layout). For that token-major storage with `FULL` graphs, set `VLLM_KV_CACHE_LAYOUT=LBNHC` (or `NHD`) instead.
+
+`FULL_AND_PIECEWISE` is `(FULL, PIECEWISE)`: its decode routine replays full decode graphs, the same decode path as `FULL_DECODE_ONLY`, and only its mixed prefill/decode routine runs piecewise graphs. It therefore never replays a token-keyed graph captured for a prefill/mixed batch, so the gate does not refuse it.
 
 The check runs twice: once when the engine configuration is validated, for the layout you requested, and again in the worker once the engine core has adopted the final layout. A KV connector can select that final layout after the first check (for example, the Mooncake connector requests `HND` for direct D2D transfer), so the second check is what makes the refusal hold for a connector-selected head-major layout.
 
