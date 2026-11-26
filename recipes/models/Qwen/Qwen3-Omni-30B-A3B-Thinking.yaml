@@ -5,7 +5,7 @@ meta:
   provider: "Qwen"
   description: "Omni-modal Qwen3 Mixture-of-Experts model (30.5B total / 3.3B active) served with vLLM Ascend on Atlas 800I A3, with validated BF16 presets for high throughput, low latency, and 128K long context (W8A8 remains an optional path)."
   date_added: "2026-11-19"
-  date_updated: "2026-11-20"
+  date_updated: "2026-11-26"
   tasks:
     - multimodal
   performance_headline: "Atlas 800I A3 BF16: 961 tok/s output at concurrency 32 (TP2), 15.92 ms TPOT in the TP4 low-latency preset"
@@ -16,8 +16,6 @@ meta:
 model:
   model_id: "Qwen/Qwen3-Omni-30B-A3B-Thinking"
   min_vllm_version: "0.30.0"
-  docker_image:
-    ascend_910c: "quay.io/ascend/vllm-ascend:v0.30.0-a3-openeuler"
   install:
     docker:
       command: "docker pull quay.io/ascend/vllm-ascend:v0.30.0-a3-openeuler"
@@ -48,9 +46,10 @@ variants:
         docker_serve_command: "vllm serve"
     description: "Official BF16 checkpoint; the default, CI-verifiable configuration. No quantization flag is added."
   w8a8:
+    model_id: "./Qwen3-Omni-30B-A3B-Thinking-w8a8"
     precision: int8
-    label: "W8A8 (optional)"
-    vram_minimum_gb: 32
+    label: "W8A8 (local dir required)"
+    vram_minimum_gb: 37
     supported_hardware: [ascend_910c]
     hardware_overrides:
       ascend_910c:
@@ -59,12 +58,10 @@ variants:
     extra_args:
       - "--quantization"
       - "ascend"
-    description: "Optional W8A8 weights produced locally from the official BF16 checkpoint with msmodelslim; point the model id at the quantized directory."
+    description: "Optional W8A8 weights produced locally from the official BF16 checkpoint with msmodelslim; replace the placeholder model_id with the local quantized directory."
 
 compatible_strategies:
   - single_node_tp
-
-hardware_overrides: {}
 
 strategy_overrides:
   single_node_tp:
@@ -208,7 +205,9 @@ guide: |
   format and re-validates it end to end on the v0.30.0 A3 image. All results below were
   collected on one Atlas 800I A3 node with
   `quay.io/ascend/vllm-ascend:v0.30.0-a3-openeuler`. The node exposes 16 chips; the
-  presets use two chips (TP2) or four chips (TP4).
+  presets use two chips (TP2) or four chips (TP4). The combined image/audio/video
+  functional request used the TP4 + expert-parallel topology; an image-only smoke
+  check also passed on the TP2 High Throughput topology.
 
   ## Validated presets
 
@@ -243,8 +242,10 @@ guide: |
   gates, static W8A8 attention projections, and dynamic W8A8 expert projections.
 
   All presets therefore load the public official BF16 checkpoint by default and run as
-  generated. The optional W8A8 variant requires a local quantized directory; point its
-  model id at that directory, and keep the canonical Hugging Face id as the BF16 download.
+  generated. The optional W8A8 variant uses the placeholder model id
+  `./Qwen3-Omni-30B-A3B-Thinking-w8a8`; replace it with the local quantized directory
+  before rendering or serving it, and keep the canonical Hugging Face id as the BF16
+  download.
 
   The optional Eagle3 draft model is not part of the default weights. Download it with
   `modelscope download --model AngelSlim/Qwen3-a3B_eagle3` and enable the opt-in
