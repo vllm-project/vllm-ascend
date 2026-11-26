@@ -1,22 +1,10 @@
 # Speculative Decoding Guide
 
-## Overview
-
-Speculative decoding can reduce inter-token latency in memory-bound inference.
+<span id="overview"></span>Speculative decoding can reduce inter-token latency in memory-bound inference.
 A proposer drafts tokens, and the target model verifies them in one decode step.
 This guide covers Model Runner V2 on Ascend.
 
-| `method` | Draft source |
-| --- | --- |
-| [`ngram_gpu`](#speculating-by-matching-n-grams-in-the-prompt) | Prompt n-gram matches on the NPU |
-| [`eagle`, `eagle3`](#speculating-using-eagle-based-draft-models) | A matching EAGLE or EAGLE-3 checkpoint |
-| [`mtp`](#speculating-using-mtp) | Multi-Token Prediction weights built into the target or supplied by a matching assistant checkpoint |
-| [`dflash`](#speculating-using-dflash) | A DFlash, [DFlash2](#speculating-using-dflash2), or [LiLiCorr](#speculating-using-lilicorr) checkpoint |
-| [`dspark`](#speculating-using-dspark) | A matching DSpark checkpoint |
-| [`draft_model`](#speculating-using-a-draft-model) | A compatible standalone draft LLM with the same vocabulary size |
-| [`extract_hidden_states`](#extracting-hidden-states) | Hidden-state collection for draft training |
-
-## Common Configuration {: #common-configuration }
+## Quickstart {: #common-configuration }
 
 Use `LLM(speculative_config=...)` for offline inference or pass the same settings
 as JSON to `vllm serve --speculative-config` (`-sc`) for online serving. The
@@ -56,12 +44,23 @@ vllm serve Qwen/Qwen3-1.7B \
     hybrid Mamba models. Use the model tutorial for role-specific serving and
     parallelism settings. See the [model tutorials](../../tutorials/models/index.md).
 
-## Speculating by matching n-grams in the prompt {: #speculating-by-matching-n-grams-in-the-prompt }
+## Speculative Decoding Methods
+
+| `method` | Draft source |
+| --- | --- |
+| [`ngram_gpu`](#speculating-by-matching-n-grams-in-the-prompt) | Prompt n-gram matches on the NPU |
+| [`eagle`, `eagle3`](#speculating-using-eagle-based-draft-models) | A matching EAGLE or EAGLE-3 checkpoint |
+| [`mtp`](#speculating-using-mtp) | Multi-Token Prediction weights built into the target or supplied by a matching assistant checkpoint |
+| [`dflash`](#speculating-using-dflash) | A DFlash, [DFlash2](#speculating-using-dflash2), or [LiLiCorr](#speculating-using-lilicorr) checkpoint |
+| [`dspark`](#speculating-using-dspark) | A matching DSpark checkpoint |
+| [`draft_model`](#speculating-using-a-draft-model) | A compatible standalone draft LLM with the same vocabulary size |
+
+### N-gram {: #speculating-by-matching-n-grams-in-the-prompt }
 
 With `ngram_gpu`, set `prompt_lookup_min` and `prompt_lookup_max` to bound the
 n-gram lengths to search. See the [offline and online examples](#common-configuration).
 
-## Speculating using EAGLE based draft models {: #speculating-using-eagle-based-draft-models }
+### EAGLE and EAGLE-3 {: #speculating-using-eagle-based-draft-models }
 
 Set `method` to `eagle` or `eagle3` according to the draft checkpoint. Set
 `model` to the matching draft and use `draft_tensor_parallel_size=1` for EAGLE.
@@ -86,7 +85,7 @@ vllm serve Qwen/Qwen3-8B \
   --speculative-config '{"method":"eagle3","model":"RedHatAI/Qwen3-8B-speculator.eagle3","num_speculative_tokens":3}'
 ```
 
-## Speculating using MTP {: #speculating-using-mtp }
+### MTP {: #speculating-using-mtp }
 
 Set `method` to `mtp`. For a target with built-in MTP weights, omit `model`
 from the speculative config. Start with `K=1` and measure acceptance and
@@ -111,7 +110,7 @@ vllm serve google/gemma-4-31B-it \
   --speculative-config '{"method":"mtp","model":"google/gemma-4-31B-it-assistant","num_speculative_tokens":3}'
 ```
 
-## Speculating using DFlash {: #speculating-using-dflash }
+### DFlash {: #speculating-using-dflash }
 
 Set `method` to `dflash` and `model` to a checkpoint trained for the target.
 The checkpoint's architecture selects the DFlash variant.
@@ -121,14 +120,13 @@ vllm serve Qwen/Qwen3-8B \
   --speculative-config '{"method":"dflash","model":"z-lab/Qwen3-8B-DFlash-b16","num_speculative_tokens":7}'
 ```
 
-### Speculating using DFlash2 {: #speculating-using-dflash2 }
+#### DFlash2 {: #speculating-using-dflash2 }
 
 <span id="how-it-works"></span>Use a `DFlash2DraftModel` checkpoint and the
 target's unquantized, full-vocabulary LM head. The checkpoint supplies the
 candidate selector settings and supported draft lengths.
 
-Draft sampling is greedy by default. Set `draft_sample_method` to
-`probabilistic` to sample at the request temperature. Full draft ACLGraph
+Full draft ACLGraph
 capture requires target `FULL_DECODE_ONLY` or `FULL_AND_PIECEWISE` and draft
 `enforce_eager` unset or false.
 
@@ -141,7 +139,7 @@ vllm serve Qwen/Qwen3.8-27B \
   --speculative-config '{"method":"dflash","model":"z-lab/Qwen3.8-27B-DFlash2","num_speculative_tokens":7}'
 ```
 
-### Speculating using LiLiCorr {: #speculating-using-lilicorr }
+#### LiLiCorr {: #speculating-using-lilicorr }
 
 Use a matching `LiLiCorrDraftModel` checkpoint and set `"enforce_eager":true`
 inside `speculative_config`. Set `K` at or below the trained block size minus
@@ -165,7 +163,7 @@ VLLM_USE_MODELSCOPE=True vllm serve Qwen/Qwen3.8-27B \
   }'
 ```
 
-## Speculating using DSpark {: #speculating-using-dspark }
+### DSpark {: #speculating-using-dspark }
 
 Set `method` to `dspark`, `model` to a matching draft checkpoint, and `K` to
 a length supported by that checkpoint. If an MLA draft uses BF16 while the
@@ -178,31 +176,9 @@ vllm serve Qwen/Qwen3-8B \
   --speculative-config '{"method":"dspark","model":"deepseek-ai/dspark_qwen3_8b_block7","num_speculative_tokens":7}'
 ```
 
-### Adaptive verification
+For per-request verification lengths, see [Adaptive Verification](#adaptive-verification).
 
-With a DSpark checkpoint that has a confidence head, set
-`"enable_adaptive_verification":true` to select a verification length per
-request. Enable full decode graphs on the target. PP, PCP, DCP, and LoRA
-are unsupported, and commercial use is restricted.
-
-```shell
-vllm serve Qwen/Qwen3-8B \
-  --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
-  --speculative-config '{
-    "method":"dspark",
-    "model":"deepseek-ai/dspark_qwen3_8b_block7",
-    "num_speculative_tokens":7,
-    "enable_adaptive_verification":true
-  }'
-```
-
-#### Hybrid Gated DeltaNet targets
-
-Adaptive verification on hybrid GDN targets requires triton-ascend and is
-unsupported on 310P. Compare fixed and adaptive DSpark at the same workload
-and concurrency. See the [upstream adaptive verification guide](https://docs.vllm.ai/en/latest/features/speculative_decoding/adaptive_verification/).
-
-## Speculating using a draft model {: #speculating-using-a-draft-model }
+### Standalone Draft Model {: #speculating-using-a-draft-model }
 
 Set `method` to `draft_model` and `model` to a compatible standalone draft.
 
@@ -213,61 +189,22 @@ vllm serve Qwen/Qwen3-8B \
   --speculative-config '{"method":"draft_model","model":"Qwen/Qwen3-0.6B","num_speculative_tokens":3}'
 ```
 
-## Extracting Hidden States {: #extracting-hidden-states }
+## Sampling Configuration
 
-Use `extract_hidden_states` with `num_speculative_tokens=1` to collect training
-data for EAGLE-style drafts. Select layers with
-`draft_model_config.hf_config.eagle_aux_hidden_state_layer_ids` and use
-`ExampleHiddenStatesConnector` with `kv_role="kv_producer"`. The connector
-writes one `.safetensors` file per request to `shared_storage_path`. See the
-[upstream offline example](https://docs.vllm.ai/en/latest/features/speculative_decoding/extract_hidden_states/#offline-example).
+### Draft Sampling
 
-```shell
-vllm serve Qwen/Qwen3-8B \
-  --speculative-config '{
-    "method":"extract_hidden_states",
-    "num_speculative_tokens":1,
-    "draft_model_config":{"hf_config":{"eagle_aux_hidden_state_layer_ids":[2,18,34]}}
-  }' \
-  --kv-transfer-config '{
-    "kv_connector":"ExampleHiddenStatesConnector",
-    "kv_role":"kv_producer",
-    "kv_connector_extra_config":{"shared_storage_path":"/dev/shm/hidden_states"}
-  }'
-```
+Draft sampling is greedy by default. For drafters that support probabilistic
+sampling, set `draft_sample_method` to `probabilistic` to sample at the request
+temperature.
 
-## Dynamic Speculative Decoding {: #dynamic-speculative-decoding }
-
-### Batch-size based (Autoregressive) {: #batch-size-based-autoregressive }
-
-<span id="why-is-it-needed"></span><span id="use-cases"></span><span id="-speculative-config-schema"></span>Add `num_speculative_tokens_per_batch_size` to the existing proposer config.
-Each entry is an inclusive `[min_batch_size, max_batch_size, draft_length]`
-range. A draft length of 0 disables drafting for that range.
-
-<span id="online-examples"></span><span id="dynamic-sd-eagle-drafter"></span><span id="dynamic-sd-eagle3-drafter"></span>The following settings use three, one, or zero draft tokens as the batch grows.
-
-```shell
-vllm serve Qwen/Qwen3-8B \
-  --enforce-eager \
-  --speculative-config '{
-    "method":"eagle3",
-    "model":"RedHatAI/Qwen3-8B-speculator.eagle3",
-    "num_speculative_tokens":3,
-    "num_speculative_tokens_per_batch_size":[[1,64,3],[65,128,1],[129,512,0]]
-  }'
-```
-
-Use DP=1 and DCP=1. With DP enabled, the engine falls back to a fixed draft
-length. Ascend rejects DCP when the dynamic schedule is active.
-
-## Block Verification
+### Block Verification {: #block-verification }
 
 Set `"rejection_sample_method":"block"` to verify a block of draft tokens
 jointly while preserving the target sampling distribution. Greedy requests
 retain greedy verification. Use Block Verification separately from Entropy
 Verify and synthetic rejection sampling.
 
-## Entropy Verify {: #entropy-verify }
+### Entropy Verify {: #entropy-verify }
 
 <span id="usage"></span>Entropy Verify changes the acceptance threshold for
 non-greedy requests. It can improve throughput and change the output. Evaluate
@@ -288,7 +225,7 @@ vllm serve Qwen/Qwen3-8B \
 The threshold per position is `min(exp(-entropy * posterior_alpha), posterior_threshold)`,
 using entropy computed after request sampling settings.
 
-## Synthetic Rejection Sampling
+### Synthetic Rejection Sampling {: #synthetic-rejection-sampling }
 
 <span id="why-use-it"></span>Set `"rejection_sample_method":"synthetic"` for
 controlled benchmarks and validation only. It can change generated text.
@@ -312,7 +249,78 @@ For `K=3`, add these fields to your existing `speculative_config`.
 
 <span id="ascend-specific-notes"></span>
 
-## RecoverSSM compatibility
+## Other Speculative Decoding Settings
+
+### Dynamic Speculative Decoding {: #dynamic-speculative-decoding }
+
+<span id="batch-size-based-autoregressive"></span><span id="why-is-it-needed"></span><span id="use-cases"></span><span id="-speculative-config-schema"></span>Add `num_speculative_tokens_per_batch_size` to the existing proposer config.
+Each entry is an inclusive `[min_batch_size, max_batch_size, draft_length]`
+range. A draft length of 0 disables drafting for that range.
+
+<span id="online-examples"></span><span id="dynamic-sd-eagle-drafter"></span><span id="dynamic-sd-eagle3-drafter"></span>The following settings use three, one, or zero draft tokens as the batch grows.
+
+```shell
+vllm serve Qwen/Qwen3-8B \
+  --enforce-eager \
+  --speculative-config '{
+    "method":"eagle3",
+    "model":"RedHatAI/Qwen3-8B-speculator.eagle3",
+    "num_speculative_tokens":3,
+    "num_speculative_tokens_per_batch_size":[[1,64,3],[65,128,1],[129,512,0]]
+  }'
+```
+
+Use DP=1 and DCP=1. With DP enabled, the engine falls back to a fixed draft
+length. Ascend rejects DCP when the dynamic schedule is active.
+
+### Adaptive Verification {: #adaptive-verification }
+
+With a DSpark checkpoint that has a confidence head, set
+`"enable_adaptive_verification":true` to select a verification length per
+request. Enable full decode graphs on the target. PP, PCP, DCP, and LoRA
+are unsupported, and commercial use is restricted.
+
+```shell
+vllm serve Qwen/Qwen3-8B \
+  --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
+  --speculative-config '{
+    "method":"dspark",
+    "model":"deepseek-ai/dspark_qwen3_8b_block7",
+    "num_speculative_tokens":7,
+    "enable_adaptive_verification":true
+  }'
+```
+
+#### Hybrid Gated DeltaNet Targets {: #hybrid-gated-deltanet-targets }
+
+Adaptive verification on hybrid GDN targets requires triton-ascend and is
+unsupported on 310P. Compare fixed and adaptive DSpark at the same workload
+and concurrency. See the [upstream adaptive verification guide](https://docs.vllm.ai/en/latest/features/speculative_decoding/adaptive_verification/).
+
+### Hidden State Extraction {: #extracting-hidden-states }
+
+Use `extract_hidden_states` with `num_speculative_tokens=1` to collect training
+data for EAGLE-style drafts. Select layers with
+`draft_model_config.hf_config.eagle_aux_hidden_state_layer_ids` and use
+`ExampleHiddenStatesConnector` with `kv_role="kv_producer"`. The connector
+writes one `.safetensors` file per request to `shared_storage_path`. See the
+[upstream offline example](https://docs.vllm.ai/en/latest/features/speculative_decoding/extract_hidden_states/#offline-example).
+
+```shell
+vllm serve Qwen/Qwen3-8B \
+  --speculative-config '{
+    "method":"extract_hidden_states",
+    "num_speculative_tokens":1,
+    "draft_model_config":{"hf_config":{"eagle_aux_hidden_state_layer_ids":[2,18,34]}}
+  }' \
+  --kv-transfer-config '{
+    "kv_connector":"ExampleHiddenStatesConnector",
+    "kv_role":"kv_producer",
+    "kv_connector_extra_config":{"shared_storage_path":"/dev/shm/hidden_states"}
+  }'
+```
+
+### RecoverSSM on Qwen3.x {: #recoverssm-compatibility }
 
 <span id="experimental-qwen-gdn-recoverssm"></span>On A3 and A5, enable
 experimental recurrent-state reconstruction for Qwen3.x Gated DeltaNet (GDN)
