@@ -1,7 +1,3 @@
-# Release note fragment for the FULL-cudagraph-mode x head-major-KV-layout
-# init refusal. Rename this file to release_notes/fragments/<PR number>.yaml
-# (and set the pr: field below) when the PR is opened; the number is not yet
-# known because this branch is local-only and unpublished.
 pr: 23065
 entries:
   # category: feature | hardware | performance | dependency | breaking | config | documentation | bugfix | other
