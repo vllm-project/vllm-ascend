@@ -2,11 +2,15 @@
 from typing import Any
 
 import torch
+from vllm.config.compilation import CUDAGraphMode
 from vllm.forward_context import BatchDescriptor, set_forward_context
+from vllm.v1.worker.gpu.cudagraph_utils import CudaGraphManager
 from vllm.v1.worker.gpu.input_batch import InputBatch
 
 from vllm_ascend.worker.v2.spec_decode.dflash.speculator import AscendDFlashSpeculator
+from vllm_ascend.worker.v2.spec_decode.dmtp.batch import NativeMTPBatch
 from vllm_ascend.worker.v2.spec_decode.dmtp.native_mtp import NativeMTP, NativeMTPCache
+from vllm_ascend.worker.v2.utils import communicator_switch
 
 
 def _greedy_suffix(candidate_ids: torch.Tensor, scores: torch.Tensor) -> torch.Tensor:
@@ -30,10 +34,69 @@ class AscendDMTPSpeculator(AscendDFlashSpeculator):
 
     def load_model(self, target_model: torch.nn.Module) -> None:
         super().load_model(target_model)
-        self.native_mtp = NativeMTP.from_target(self.vllm_config, target_model)
+        self._batched_native = not self.vllm_config.model_config.enforce_eager
+        self.native_mtp = NativeMTP.from_target(self.vllm_config, target_model, paged=self._batched_native)
         self._native_caches: dict[int, NativeMTPCache] = {}
         self._t1_hidden = self.hidden_states.new_zeros(self.max_num_reqs, self.hidden_size)
         self._t1 = torch.zeros(self.max_num_reqs, dtype=torch.long, device=self.device)
+        if self._batched_native:
+            self.native_batch = NativeMTPBatch(
+                self.native_mtp, self.max_num_reqs, max(self.max_num_tokens, self.max_num_reqs * self.num_query_per_req)
+            )
+
+    def init_cudagraph_manager(self, cudagraph_mode: CUDAGraphMode) -> None:
+        super().init_cudagraph_manager(cudagraph_mode)
+        if self._batched_native:
+            # Keep this manager directly on the speculator so upstream's graph
+            # memory profiling also releases/recreates it with the draft graphs.
+            self.native_cudagraph_manager = CudaGraphManager(
+                self.vllm_config,
+                self.device,
+                self.query_cudagraph_manager.cudagraph_mode,
+                decode_query_lens={self.num_query_per_req: self.max_num_reqs},
+            )
+
+    def capture(self) -> None:
+        if self._batched_native:
+
+            def create_forward(desc, warmup):
+                self.native_batch.prepare_dummy(desc.num_reqs, desc.num_tokens)
+                metadata = self.native_batch.attention_metadata(
+                    desc.num_reqs, desc.num_tokens, self.num_query_per_req, persistent=True
+                )
+
+                def forward(mode):
+                    self.native_batch.forward(
+                        desc.num_reqs, desc.num_tokens, metadata, self.model, self._t1_hidden, self._t1
+                    )
+
+                return forward
+
+            with communicator_switch():
+                self.native_cudagraph_manager.capture(create_forward, "Capturing DMTP native ACL graphs")
+        super().capture()
+
+    def _advance_native_batch(self, batch, hidden, num_sampled, num_rejected, last_sampled, next_prefill_tokens):
+        # Query boundaries already have a CPU scheduler mirror. Rejection counts
+        # and exact context lengths remain on device throughout native drafting.
+        query_lens = batch.query_start_loc_np[1:] - batch.query_start_loc_np[:-1]
+        uniform = self.num_query_per_req if (query_lens == self.num_query_per_req).all() else None
+        desc = self.native_cudagraph_manager.dispatch(
+            batch.num_reqs, batch.num_tokens, uniform_token_count=uniform, num_active_loras=0
+        )
+        n = desc.num_reqs if desc.cg_mode == CUDAGraphMode.FULL else batch.num_reqs
+        t = desc.num_tokens
+        self.native_batch.prepare(batch, hidden, num_sampled, num_rejected, last_sampled, next_prefill_tokens, n)
+        metadata = self.native_batch.attention_metadata(
+            n,
+            t,
+            self.num_query_per_req if uniform else int(query_lens.max()),
+            persistent=desc.cg_mode == CUDAGraphMode.FULL,
+        )
+        if desc.cg_mode == CUDAGraphMode.FULL:
+            self.native_cudagraph_manager.run_fullgraph(desc)
+        else:
+            self.native_batch.forward(n, t, metadata, self.model, self._t1_hidden, self._t1)
 
     def add_request(self, req_index: int) -> None:
         # MRV2 calls this on admission, preemption/recomputation and slot reuse.
@@ -51,6 +114,11 @@ class AscendDMTPSpeculator(AscendDFlashSpeculator):
         last_sampled: torch.Tensor,
         next_prefill_tokens: torch.Tensor,
     ) -> None:
+        if getattr(self, "_batched_native", False):
+            self._advance_native_batch(
+                batch, last_hidden_states, num_sampled, num_rejected, last_sampled, next_prefill_tokens
+            )
+            return
         n = batch.num_reqs
         starts = batch.query_start_loc[:n].long()
         anchors = torch.where(
@@ -114,7 +182,12 @@ class AscendDMTPSpeculator(AscendDFlashSpeculator):
             count = min(self.max_model_len, last_hidden_states.shape[0])
             ids = torch.zeros(count, dtype=torch.long, device=self.device)
             positions = torch.arange(1, count + 1, device=self.device)
-            self.native_mtp.append(self.native_mtp.empty_cache(0), ids, last_hidden_states[:count], positions)
+            if self._batched_native:
+                self.native_batch.prepare_dummy(1, count)
+                metadata = self.native_batch.attention_metadata(1, count, count)
+                self.native_batch.forward(1, count, metadata, self.model, self._t1_hidden, self._t1)
+            else:
+                self.native_mtp.append(self.native_mtp.empty_cache(0), ids, last_hidden_states[:count], positions)
         return super().propose(
             input_batch,
             attn_metadata,

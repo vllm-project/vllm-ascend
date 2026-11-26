@@ -1,8 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
+from importlib.util import find_spec
 from typing import TYPE_CHECKING
 
 import torch
 from vllm.v1.worker.gpu.spec_decode.dflash.config import DFlashSpeculatorConfig
+
+from vllm_ascend.device.hardware_profile import FlashAttentionNpu3Model, get_current_hardware_profile
 
 if TYPE_CHECKING:
     from vllm.config import SpeculativeConfig, VllmConfig
@@ -69,8 +72,15 @@ def validate_dmtp_engine_config(config: "VllmConfig") -> None:
         ):
             raise ValueError("Use method='dmtp' with a DMTP draft checkpoint.")
         return
-    if not config.model_config.enforce_eager or config.scheduler_config.async_scheduling:
-        raise ValueError("DMTP requires --enforce-eager and --no-async-scheduling.")
+    if config.scheduler_config.async_scheduling:
+        raise ValueError("DMTP requires --no-async-scheduling.")
+    if not config.model_config.enforce_eager and find_spec("flash_attn_npu_3") is None:
+        raise ValueError("DMTP without --enforce-eager requires flash_attn_npu_3 for batched native MTP attention.")
+    if (
+        not config.model_config.enforce_eager
+        and FlashAttentionNpu3Model.QWEN not in get_current_hardware_profile().flash_attn_npu_3_models
+    ):
+        raise ValueError("DMTP without --enforce-eager requires hardware supported by the Qwen FA3 backend.")
     if config.cache_config.cache_dtype not in ("auto", "bfloat16"):
         raise ValueError("DMTP currently requires a BF16 KV cache.")
     if config.cache_config.enable_prefix_caching:

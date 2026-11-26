@@ -39,3 +39,40 @@ def test_rejects_mismatched_proposal_count(count):
     )
     with pytest.raises(ValueError, match="num_speculative_tokens=7"):
         AscendDMTPSpeculatorConfig.apply_options(spec)
+
+
+def test_non_eager_requires_fa3_and_keeps_scheduling_guards(monkeypatch):
+    from vllm_ascend.worker.v2.spec_decode.dmtp import config as module
+
+    parallel = SimpleNamespace(
+        tensor_parallel_size=2,
+        pipeline_parallel_size=1,
+        data_parallel_size=1,
+        prefill_context_parallel_size=1,
+        decode_context_parallel_size=1,
+    )
+    config = SimpleNamespace(
+        speculative_config=SimpleNamespace(custom_method="dmtp", draft_parallel_config=parallel),
+        model_config=SimpleNamespace(enforce_eager=False, max_model_len=3072, multimodal_config=None),
+        scheduler_config=SimpleNamespace(async_scheduling=False),
+        cache_config=SimpleNamespace(cache_dtype="auto", enable_prefix_caching=False),
+        parallel_config=parallel,
+        kv_transfer_config=None,
+        lora_config=None,
+    )
+    monkeypatch.setattr(module, "find_spec", lambda _: None)
+    with pytest.raises(ValueError, match="requires flash_attn_npu_3"):
+        validate_dmtp_engine_config(config)
+    config.model_config.enforce_eager = True
+    validate_dmtp_engine_config(config)
+    config.model_config.enforce_eager = False
+    monkeypatch.setattr(module, "find_spec", lambda _: object())
+    monkeypatch.setattr(
+        module,
+        "get_current_hardware_profile",
+        lambda: SimpleNamespace(flash_attn_npu_3_models={module.FlashAttentionNpu3Model.QWEN}),
+    )
+    validate_dmtp_engine_config(config)
+    config.scheduler_config.async_scheduling = True
+    with pytest.raises(ValueError, match="--no-async-scheduling"):
+        validate_dmtp_engine_config(config)

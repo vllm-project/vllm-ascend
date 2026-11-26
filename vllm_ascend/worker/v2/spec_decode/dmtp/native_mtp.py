@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM-Ascend project
-"""Eager Qwen3.6 native predictor with private, token-aligned causal KV."""
+"""Qwen3.6 native predictor with private, token-aligned causal KV."""
 
 import copy
 import json
@@ -18,6 +18,7 @@ from transformers.models.qwen3_5.modeling_qwen3_5 import (
     Qwen3_5DecoderLayer,
     Qwen3_5RMSNorm,
     Qwen3_5TextRotaryEmbedding,
+    apply_rotary_pos_emb,
 )
 
 if TYPE_CHECKING:
@@ -26,6 +27,7 @@ if TYPE_CHECKING:
 
 # Bound the temporary eager scores (num_heads × query rows × context length).
 PREFILL_CHUNK_SIZE = 128
+NATIVE_BLOCK_SIZE = 128
 
 
 @dataclass(frozen=True)
@@ -115,21 +117,30 @@ class NativeMTP:
         embed: Callable[[torch.Tensor], torch.Tensor],
         max_reqs: int,
         max_tokens: int,
+        paged: bool = False,
     ):
         self.weights = weights.eval()
         self.embed = embed
         device = weights.fc.weight.device
         # RoPE's nonpersistent inverse frequencies must remain FP32.
         self.rope = Qwen3_5TextRotaryEmbedding(config).to(device=device)
-        shape = (2, max_reqs, config.num_key_value_heads, max_tokens, config.head_dim)
+        self.paged = paged
+        self.num_kv_heads = config.num_key_value_heads
+        if paged:
+            # Reserve a page beyond the model limit for rejected verify rows.
+            # The final slot is private scratch space for graph padding.
+            self.blocks_per_req = (max_tokens + NATIVE_BLOCK_SIZE - 1) // NATIVE_BLOCK_SIZE + 1
+            shape = (2, (max_reqs + 1) * self.blocks_per_req, NATIVE_BLOCK_SIZE, self.num_kv_heads, config.head_dim)
+        else:
+            shape = (2, max_reqs, self.num_kv_heads, max_tokens, config.head_dim)
         self.kv_pool = torch.empty(shape, dtype=weights.fc.weight.dtype, device=device)
 
     @property
     def cache_bytes_per_token(self) -> int:
-        return 2 * self.kv_pool.shape[2] * self.kv_pool.shape[4] * self.kv_pool.element_size()
+        return 2 * self.num_kv_heads * self.kv_pool.shape[4] * self.kv_pool.element_size()
 
     @classmethod
-    def from_target(cls, vllm_config: "VllmConfig", target_model: nn.Module) -> "NativeMTP":
+    def from_target(cls, vllm_config: "VllmConfig", target_model: nn.Module, paged: bool = False) -> "NativeMTP":
         model_config = vllm_config.model_config
         config = model_config.hf_text_config
         if (
@@ -160,7 +171,53 @@ class NativeMTP:
             language_model.embed_input_ids,
             vllm_config.scheduler_config.max_num_seqs,
             model_config.max_model_len,
+            paged=paged,
         )
+
+    def forward_paged(self, input_ids, previous_hidden, positions, metadata):
+        """Batched native layer; the FA3 plan is refreshed outside graph replay."""
+        # Optional worker-only backend. Eager-only deployments do not need FA3.
+        from flash_attn_npu_3 import flash_attn_with_kvcache
+
+        from vllm_ascend.device.device_op import DeviceOperator
+
+        weights = self.weights
+        layer = weights.layers[0]
+        attn = layer.self_attn
+        embeds = self.embed(input_ids)
+        hidden = weights.fc(
+            torch.cat((weights.pre_fc_norm_embedding(embeds), weights.pre_fc_norm_hidden(previous_hidden)), -1)
+        )
+        normed = layer.input_layernorm(hidden)
+        query, gate = attn.q_proj(normed).view(len(input_ids), -1, 2 * attn.head_dim).chunk(2, dim=-1)
+        query = attn.q_norm(query).unsqueeze(0)
+        key = attn.k_norm(attn.k_proj(normed).view(len(input_ids), -1, attn.head_dim)).unsqueeze(0)
+        value = attn.v_proj(normed).view(len(input_ids), -1, attn.head_dim)
+        cos, sin = self.rope(embeds, positions.view(1, 1, -1))
+        query, key = apply_rotary_pos_emb(query, key, cos, sin, unsqueeze_dim=2)
+        DeviceOperator.reshape_and_cache(
+            key=key.squeeze(0).contiguous(),
+            value=value.contiguous(),
+            key_cache=self.kv_pool[0],
+            value_cache=self.kv_pool[1],
+            slot_mapping=metadata.slot_mapping,
+            use_bnsd=False,
+        )
+        output = flash_attn_with_kvcache(
+            query.squeeze(0).contiguous(),
+            self.kv_pool[0],
+            self.kv_pool[1],
+            cache_seqlens=metadata.seq_lens,
+            page_table=metadata.block_table,
+            cu_seqlens_q=metadata.query_start_loc,
+            max_seqlen_q=metadata.max_query_len,
+            softmax_scale=attn.scaling,
+            causal=True,
+            scheduler_metadata=metadata.scheduler_metadata,
+            num_splits=0,
+        )
+        hidden = hidden + attn.o_proj(output.flatten(1) * gate.flatten(1).sigmoid())
+        return weights.norm(hidden + layer.mlp(layer.post_attention_layernorm(hidden)))
 
     def empty_cache(self, slot: int) -> NativeMTPCache:
         if not 0 <= slot < self.kv_pool.size(1):
