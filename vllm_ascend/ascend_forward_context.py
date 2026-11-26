@@ -10,6 +10,7 @@ from vllm.distributed import get_dp_group, get_ep_group, get_tensor_model_parall
 from vllm.forward_context import BatchDescriptor, get_forward_context, set_forward_context
 from vllm.logger import logger
 
+from vllm_ascend import envs
 from vllm_ascend.ascend_config import get_ascend_config, is_mega_moe_supported
 from vllm_ascend.device.hardware_profile import (
     HardwareCapability,
@@ -37,6 +38,102 @@ _MRV2_IN_PROFILE_RUN: ContextVar[bool] = ContextVar("_MRV2_IN_PROFILE_RUN", defa
 _MEGA_MOE_TOKENS_PER_RANK_LIMIT = 16384
 _DISPATCH_FFN_COMBINE_TOKENS_PER_RANK_LIMIT = 512
 _MC2_TOKENS_PER_RANK_LIMIT = 512
+
+# dispatch_ffn_combine keeps three int8 copies of the token block (dispatch
+# staging, permuted tokens, combine staging) plus a protocol reserve inside the
+# HCCL AllToAll window. Keep in sync with the tiling in
+# csrc/mc2/dispatch_ffn_combine/op_host/dispatch_ffn_combine_tiling.cpp.
+_FUSED_MC2_WINDOW_TOKEN_COPIES = 3
+_FUSED_MC2_WINDOW_RESERVE_BYTES = 10 * 1024 * 1024
+_HCCL_DEFAULT_BUFFSIZE_MIB = 200
+_MIB_BYTES = 1024 * 1024
+# FUSED_OR_CAPACITY routes every batch to FUSED_MC2 only up to this EP world
+# size; larger EP groups fall back by capacity.
+_FUSED_MC2_MAX_EP_WORLD_SIZE = 32
+
+
+def _is_kv_consumer_only_node(vllm_config: VllmConfig) -> bool:
+    kv_transfer_config = getattr(vllm_config, "kv_transfer_config", None)
+    if kv_transfer_config is None:
+        return False
+    kv_role = getattr(kv_transfer_config, "kv_role", None)
+    if kv_role is not None:
+        return kv_role == "kv_consumer"
+    return bool(
+        getattr(kv_transfer_config, "is_kv_consumer", False)
+        and not getattr(kv_transfer_config, "is_kv_producer", False)
+    )
+
+
+def _configured_hccl_buffsize_mib() -> int:
+    value = envs.HCCL_BUFFSIZE
+    if not value:
+        return _HCCL_DEFAULT_BUFFSIZE_MIB
+    try:
+        return int(value)
+    except ValueError:
+        logger.warning(
+            "Ignoring non-numeric HCCL_BUFFSIZE=%r, assuming the CANN default of %d MiB.",
+            value,
+            _HCCL_DEFAULT_BUFFSIZE_MIB,
+        )
+        return _HCCL_DEFAULT_BUFFSIZE_MIB
+
+
+def _validate_fused_mc2_hccl_window(vllm_config: VllmConfig) -> None:
+    """Reject a prefill batch that cannot fit the fused-MC2 AllToAll window.
+
+    The generic dispatch_ffn_combine tiling checks ``HCCL_BUFFSIZE`` against
+    ``M * topK * K * 3 + 10 MiB``; the W4A8 tiling used by quantized
+    checkpoints omits that check. Without it an oversized batch only fails
+    later as an AI Core MTE fault during ``profile_run``.
+    """
+    # Only the A3 FUSED_OR_CAPACITY policy sends an arbitrary batch to
+    # dispatch_ffn_combine. A2 (CAPACITY_AND_EXPERT_DENSITY) and A5
+    # (CAPACITY_AND_WORLD_SIZE) fall back to MC2/ALLGATHER/ALLTOALL above the
+    # capacity budget, so they must not be rejected here.
+    if not get_ascend_config().enable_fused_mc2:
+        return
+    if get_current_hardware_profile().moe_comm_policy != MoECommPolicy.FUSED_OR_CAPACITY:
+        return
+    if use_cann_megamoe(vllm_config):
+        return
+    if not is_moe_model(vllm_config) or not vllm_config.parallel_config.enable_expert_parallel:
+        return
+    if get_ep_group().world_size > _FUSED_MC2_MAX_EP_WORLD_SIZE:
+        return
+    if _is_kv_consumer_only_node(vllm_config):
+        # Decode nodes never run a prefill-sized batch.
+        return
+
+    hf_text_config = vllm_config.model_config.hf_text_config
+    topk = getattr(hf_text_config, "num_experts_per_tok", getattr(hf_text_config, "top_k_experts", 1))
+    hidden_size = vllm_config.model_config.get_hidden_size()
+    max_num_batched_tokens = vllm_config.scheduler_config.max_num_batched_tokens
+    if not topk or not hidden_size or not max_num_batched_tokens:
+        return
+
+    tp_size = vllm_config.parallel_config.tensor_parallel_size
+    tokens_per_tp_rank = (max_num_batched_tokens + tp_size - 1) // tp_size
+    bytes_per_token = int(topk) * int(hidden_size) * _FUSED_MC2_WINDOW_TOKEN_COPIES
+    required_mib = (
+        tokens_per_tp_rank * bytes_per_token + _FUSED_MC2_WINDOW_RESERVE_BYTES + _MIB_BYTES - 1
+    ) // _MIB_BYTES
+    configured_mib = _configured_hccl_buffsize_mib()
+    if required_mib <= configured_mib:
+        return
+
+    max_tokens_per_tp_rank = max(
+        (configured_mib * _MIB_BYTES - _FUSED_MC2_WINDOW_RESERVE_BYTES) // bytes_per_token,
+        0,
+    )
+    raise ValueError(
+        "enable_fused_mc2=1 (dispatch_ffn_combine) needs a larger HCCL window: "
+        f"--max-num-batched-tokens {max_num_batched_tokens} with topk={topk}, "
+        f"hidden_size={hidden_size}, tp={tp_size} needs about {required_mib} MiB per TP rank, "
+        f"but HCCL_BUFFSIZE is {configured_mib} MiB. Set HCCL_BUFFSIZE={required_mib} (MiB) or "
+        f"lower --max-num-batched-tokens to at most {max_tokens_per_tp_rank * tp_size}."
+    )
 
 
 def _is_decode_only_node(vllm_config: VllmConfig) -> bool:
@@ -286,6 +383,7 @@ def set_mc2_tokens_capacity(vllm_config, max_num_reqs, uniform_decode_query_len)
     else:
         max_num_tokens = max_num_reqs * uniform_decode_query_len
     tp_size = vllm_config.parallel_config.tensor_parallel_size
+    _validate_fused_mc2_hccl_window(vllm_config)
 
     # Use integer arithmetic for ceiling division.
     num_tokens_per_tp_rank = (max_num_tokens + tp_size - 1) // tp_size

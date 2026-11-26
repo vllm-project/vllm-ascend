@@ -53,6 +53,7 @@ def _make_vllm_config(
         enforce_eager=True,
         hf_text_config=SimpleNamespace(**hf_text_config_attrs),
         get_num_experts=lambda: num_experts,
+        get_hidden_size=lambda: hidden_size,
     )
     parallel_config = SimpleNamespace(
         enable_expert_parallel=enable_expert_parallel,
@@ -196,6 +197,56 @@ def test_set_mc2_tokens_capacity_prefill_mc2_uses_max_num_batched_tokens(monkeyp
     afc.set_mc2_tokens_capacity(vllm_config, max_num_reqs=16, uniform_decode_query_len=1)
 
     assert afc.get_mc2_tokens_capacity() == 520
+
+
+def _patch_fused_mc2_window_deps(monkeypatch, *, device_type=AscendDeviceType.A3, ep_world_size=16):
+    monkeypatch.setattr(afc, "get_ascend_config", lambda: SimpleNamespace(enable_fused_mc2=1))
+    monkeypatch.setattr(afc, "get_current_hardware_profile", lambda: get_hardware_profile(device_type))
+    monkeypatch.setattr(afc, "use_cann_megamoe", lambda _: False)
+    monkeypatch.setattr(afc, "is_moe_model", lambda _: True)
+    monkeypatch.setattr(afc, "get_ep_group", lambda: SimpleNamespace(world_size=ep_world_size))
+
+
+def _fused_mc2_config(**kwargs):
+    return _make_vllm_config(max_num_batched_tokens=12288, top_k_experts=6, hidden_size=5120, **kwargs)
+
+
+def test_fused_mc2_window_guard_rejects_batch_beyond_hccl_buffsize(monkeypatch):
+    _patch_fused_mc2_window_deps(monkeypatch)
+    monkeypatch.setattr(afc.envs, "HCCL_BUFFSIZE", "1024")
+
+    with pytest.raises(ValueError, match="needs about 1090 MiB per TP rank"):
+        afc._validate_fused_mc2_hccl_window(_fused_mc2_config())
+
+
+def test_fused_mc2_window_guard_accepts_larger_hccl_buffsize(monkeypatch):
+    _patch_fused_mc2_window_deps(monkeypatch)
+    monkeypatch.setattr(afc.envs, "HCCL_BUFFSIZE", "2048")
+
+    afc._validate_fused_mc2_hccl_window(_fused_mc2_config())
+
+
+def test_fused_mc2_window_guard_divides_batch_across_tp_ranks(monkeypatch):
+    _patch_fused_mc2_window_deps(monkeypatch)
+    monkeypatch.setattr(afc.envs, "HCCL_BUFFSIZE", "1024")
+
+    afc._validate_fused_mc2_hccl_window(_fused_mc2_config(tensor_parallel_size=4))
+
+
+def test_fused_mc2_window_guard_skips_policies_with_capacity_fallback(monkeypatch):
+    # A2 keeps CAPACITY_AND_EXPERT_DENSITY and falls back to ALLGATHER above
+    # the MC2 budget, so the same batch must not be rejected.
+    _patch_fused_mc2_window_deps(monkeypatch, device_type=AscendDeviceType.A2)
+    monkeypatch.setattr(afc.envs, "HCCL_BUFFSIZE", "1024")
+
+    afc._validate_fused_mc2_hccl_window(_fused_mc2_config())
+
+
+def test_fused_mc2_window_guard_skips_kv_consumer_only_node(monkeypatch):
+    _patch_fused_mc2_window_deps(monkeypatch)
+    monkeypatch.setattr(afc.envs, "HCCL_BUFFSIZE", "1024")
+
+    afc._validate_fused_mc2_hccl_window(_fused_mc2_config(kv_role="kv_consumer"))
 
 
 @pytest.mark.parametrize(
