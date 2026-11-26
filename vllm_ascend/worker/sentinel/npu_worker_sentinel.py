@@ -60,7 +60,9 @@ def fault_barrier_wrapper(method: Callable):
     because a peer died), mark the worker as faulted, stop and restart its
     device, then re-raise the error. While the flag is set, wrapped calls fail
     immediately instead of touching the broken device; ``retry`` clears it once
-    the process groups have been rebuilt.
+    the process groups have been rebuilt. Only the first handler quarantines the
+    device; concurrent handlers wait for that quarantine and re-raise their own
+    error.
     """
 
     def wrapped(self, *args, **kwargs):
@@ -74,26 +76,22 @@ def fault_barrier_wrapper(method: Callable):
         except Exception as exc:
             rank = getattr(self, "rank", None)
             rank_desc = f"rank {rank}" if isinstance(rank, int) else "worker"
-            # Async scheduling runs execute_model and get_output on different
-            # threads; both can reach this handler for the same device fault.
-            # Only the first one quarantines the device, the other propagates.
+            # The lock is held through the quarantine; concurrent handlers
+            # block here and propagate only after the reset completes.
             with sentinel._fault_lock:
-                first_fault = not sentinel.worker_faulted
-                if first_fault:
-                    sentinel.worker_faulted = True
-                    sentinel.fault_info = f"{type(exc).__name__}: {exc}"
-            if not first_fault:
+                if sentinel.worker_faulted:
+                    exc.__traceback__ = None
+                    raise exc
+                sentinel.worker_faulted = True
+                sentinel.fault_info = f"{type(exc).__name__}: {exc}"
+                logger.warning("[FT] Marking %s faulted after: %s", rank_desc, exc)
+                try:
+                    sentinel.reset_device()
+                except Exception:
+                    logger.exception("[FT] device reset failed on %s.", rank_desc)
                 # Drop the frames that pin device tensors of the broken stream.
                 exc.__traceback__ = None
                 raise RuntimeError(f"[FT] worker faulted: {sentinel.fault_info}")
-            logger.warning("[FT] Marking %s faulted after: %s", rank_desc, exc)
-            try:
-                sentinel.reset_device()
-            except Exception:
-                logger.exception("[FT] device reset failed on %s.", rank_desc)
-            # Drop the frames that pin device tensors of the broken stream.
-            exc.__traceback__ = None
-            raise RuntimeError(f"[FT] worker faulted: {sentinel.fault_info}")
 
     return wrapped
 
@@ -107,12 +105,9 @@ class WorkerSentinel(GPUWorkerSentinel):
     """
 
     def __init__(self, worker: "Worker", device: torch.device):
-        # Two constraints: PCP is not supported yet, and fault tolerance needs
-        # the v2 model runner.
+        # PCP is not supported yet.
         if worker.parallel_config.prefill_context_parallel_size > 1:
             raise ValueError("[FT] fault tolerance on Ascend NPU does not support PCP yet.")
-        if not worker.vllm_config.use_v2_model_runner:
-            raise ValueError("[FT] fault tolerance on Ascend NPU requires the v2 model runner.")
         global _sentinel
         self.device = device
         self.worker = worker

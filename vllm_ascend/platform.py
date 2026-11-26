@@ -582,15 +582,14 @@ class NPUPlatform(Platform):
             vllm_config.compilation_config.reduced_cg_cap = reduced_cg_cap
 
     @classmethod
-    def apply_fault_tolerance_comm_settings(cls, parallel_config, *, use_v2_model_runner: bool) -> None:
+    def apply_fault_tolerance_comm_settings(cls, parallel_config) -> None:
         """Apply the HCCL environment overrides fault tolerance requires."""
-        if use_v2_model_runner:
-            # Model Runner V2 hangs with the task queue under FT; force it off.
-            os.environ["TASK_QUEUE_ENABLE"] = "0"
-            logger.warning(
-                "Fault tolerance with Model Runner V2 does not support the "
-                "task queue (TASK_QUEUE_ENABLE); forcing TASK_QUEUE_ENABLE=0."
-            )
+        # Model Runner V2 hangs with the task queue under FT; force it off.
+        os.environ["TASK_QUEUE_ENABLE"] = "0"
+        logger.warning(
+            "Fault tolerance with Model Runner V2 does not support the "
+            "task queue (TASK_QUEUE_ENABLE); forcing TASK_QUEUE_ENABLE=0."
+        )
 
         if parallel_config.tensor_parallel_size > 1:
             # TP>1 uses collective HCCL; disable async error handling so HCCL

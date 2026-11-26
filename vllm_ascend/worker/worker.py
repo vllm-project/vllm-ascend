@@ -520,9 +520,7 @@ class NPUWorker(GPUWorker):
         # that each DP group binds to a distinct set of NPUs.
         parallel_config = self.parallel_config
         if self.parallel_config.enable_fault_tolerance:
-            NPUPlatform.apply_fault_tolerance_comm_settings(
-                parallel_config, use_v2_model_runner=self.use_v2_model_runner
-            )
+            NPUPlatform.apply_fault_tolerance_comm_settings(parallel_config)
         if (
             parallel_config.distributed_executor_backend not in ("ray", "external_launcher")
             and parallel_config.data_parallel_backend != "ray"
