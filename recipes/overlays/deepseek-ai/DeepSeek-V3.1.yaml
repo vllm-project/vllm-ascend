@@ -1,11 +1,31 @@
 # Source: https://github.com/vllm-project/vllm/blob/9e6c6b007ae698bd8604620b17d5720a89169da8/recipes/models/deepseek-ai/DeepSeek-V3.1.yaml
 # Extracted with vllm-project/recipes@8509229176ba2d1837339ffc4cbb4f34c1bf5e66.
 variants:
+  # The base recipe's default / nvfp4 variants carry no Ascend image; without
+  # these blocks the renderer falls back to the NVIDIA default image and
+  # emits an unrunnable `vllm serve` for ascend_910c. They are pinned for
+  # installability only — these are GPU-only checkpoints that do not run on
+  # Ascend; the verified Ascend deployment is the ascend_w8a8 variant below
+  # (see notes).
+  default:
+    hardware_overrides:
+      ascend_910c:
+        docker_image: quay.io/ascend/vllm-ascend:v0.30.0-a3
+        docker_serve_command: "vllm serve"
+        install:
+          pip: false
+  nvfp4:
+    hardware_overrides:
+      ascend_910c:
+        docker_image: quay.io/ascend/vllm-ascend:v0.30.0-a3
+        docker_serve_command: "vllm serve"
+        install:
+          pip: false
   ascend_w8a8:
     model_id: Eco-Tech/DeepSeek-V3.1-w8a8-mtp-QuaRot
     precision: int8
     label: W8A8 MTP QuaRot (Ascend)
-    vram_minimum_gb: 822
+    vram_minimum_gb: 833
     supported_hardware:
       - ascend_910c
     tp: 4
@@ -77,10 +97,13 @@ strategy_hardware:
     # supported route (see notes).
     ascend_910c: unsupported
   pd_cluster:
-    # Offered on ascend_910c only through the opt-in `ascend_a3_w8a8_pd`
+    # The supported PD route on ascend_910c is the opt-in `ascend_a3_w8a8_pd`
     # preset below (tutorial §5.3: 2P1D Layerwise on four Atlas 800 A3 nodes
-    # with Mooncake); the default pd_cluster pools render one full node per
-    # role and are not offered.
+    # with Mooncake). Schema caveat: without the preset, the plain pd_cluster
+    # pool is still selectable — strategy_min_gpus gates only the GPU floor,
+    # and marking the strategy unsupported would disable the preset as well —
+    # so it renders the base recipe's generic reference topology rather than
+    # a validated Ascend deployment. The notes ask users to pick the preset.
     ascend_910c: supported
 
 strategy_min_gpus:
@@ -120,7 +143,12 @@ presets:
     roles:
       prefill:
         nodes: 2
-        parallelism: tp
+        # DEP renders one merged prefill pool: DP4 total at TP8 (two TP8
+        # replicas per node, pool starting at DP rank 0, no --nnodes). The
+        # TP emitter would stack the variant's static --data-parallel-size 4
+        # on top of per-node TP8 (DP4xTP8 per node = 32 die), which does not
+        # match the tutorial lane.
+        parallelism: dep
         tp: 8
         args:
           - '--max-model-len'
@@ -229,15 +257,25 @@ notes:
       For two-node data-parallel deployments the tutorial §5.2 carries
       handwritten per-node commands (DP4×TP4, documented on Atlas 800 A2);
       the PD preset below covers the disaggregated route.
+  - title: "Ascend 910C: use the W8A8 MTP QuaRot (Ascend) variant"
+    when: { hardware: [ascend_910c] }
+    body: |
+      The `default` / `nvfp4` checkpoints above are pinned to an Ascend image
+      so the commands are runnable, but these are GPU-only checkpoints that
+      do not run on Ascend 910C. The verified deployment on one Atlas 800 A3
+      is the **W8A8 MTP QuaRot (Ascend)** variant (TP4×DP4 + MTP).
   - title: "Prefill/decode separation on Ascend 910C"
     when: { hardware: [ascend_910c] }
     body: |
       PD separation is offered as the opt-in **W8A8 PD (2P1D Layerwise)**
       preset: four Atlas 800 A3 nodes (2 prefill nodes + one DP32×TP1
       decode pool spanning 2 nodes) with Mooncake, per tutorial §5.3 —
-      2P1D is recommended over 1P1D there. The tutorial additionally uses
-      per-node launcher scripts (launch_online_dp.py / run_dp_template.sh)
-      and a request proxy on the prefill master node.
+      2P1D is recommended over 1P1D there. **Select the preset when
+      deploying PD**: without it, the plain `pd_cluster` pool renders the
+      base recipe's generic topology (NixlConnector KV transfer behind a
+      vLLM router), which is not the validated Ascend route. The tutorial
+      additionally uses per-node launcher scripts (launch_online_dp.py /
+      run_dp_template.sh) and a request proxy on the prefill master node.
 
 meta:
   hardware:
