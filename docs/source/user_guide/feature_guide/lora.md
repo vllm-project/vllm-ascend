@@ -19,6 +19,28 @@ LoRA applies to both dense models and mixture-of-experts (MoE) models. The base 
 
 Other MoE quantization methods, Fused MC2, and dynamic EPLB are not supported with LoRA.
 
+### Data parallelism with MoE adapters
+
+MoE workers can receive tokens from other data-parallel ranks. Before each
+forward, the workers synchronize the requested adapters and load their own
+expert shards. Tokens carry global adapter IDs across expert communication;
+each receiver translates those IDs to its local device slots. Idle ranks
+participate in this coordination as well.
+
+For MoE with DP greater than one, set `--max-loras` to cover the union of
+adapters scheduled across the MoE communication group in a step. For example,
+two DP ranks selecting different adapters require at least two slots on each
+worker. Exceeding that capacity fails before model communication. Adapter IDs
+and checkpoint metadata must agree across workers, and the checkpoint paths
+must be readable by each worker that loads the corresponding expert shard.
+Dense models with independent DP replicas retain their existing slot capacity.
+
+Quantized MoE with cross-DP LoRA keeps floating-point activations during
+dispatch on every participating rank, including ranks with only base-model
+requests. W8A8 dynamic quantization occurs before the local expert matmuls.
+This adds CPU control collectives once per forward; device performance and
+supported topology evidence must be reported for the deployed revision.
+
 ## LoRA Parameters
 
 | Parameter | Type | Default | Description |

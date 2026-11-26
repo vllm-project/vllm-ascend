@@ -39,9 +39,11 @@ from vllm.lora.layers.utils import _get_lora_device
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
+from vllm_ascend.lora.moe_dp import lora_ids_to_slots, lora_slots_to_ids
 from vllm_ascend.ops.fused_moe.moe_utils import async_all_to_all
 
 _MOE_LORA_INDEX_FIELDS = (
+    "gathered_lora_indices",
     "split_lora_indices",
     "permuted_lora_indices",
     "exchanged_lora_indices",
@@ -51,6 +53,24 @@ _MOE_LORA_INDEX_FIELDS = (
 def has_lora(lora_context) -> bool:
     """Return whether the current batch contains at least one LoRA token."""
     return lora_context is not None and not lora_context.punica_wrapper.no_lora
+
+
+def has_moe_lora(lora_context) -> bool:
+    """Use one expert execution/communication protocol on every MoE rank.
+
+    A base-only DP rank can receive LoRA tokens from a peer. Keep the floating
+    activation path when cross-DP expert LoRA is configured, including graph
+    capture with an otherwise empty local adapter mapping.
+    """
+    return lora_context is not None and (
+        getattr(lora_context.punica_wrapper, "moe_lora_slot_ids", None) is not None or has_lora(lora_context)
+    )
+
+
+def get_lora_indices(lora_context, num_tokens: int) -> torch.Tensor:
+    """Include graph-padding rows as base-only tokens, never the last adapter."""
+    indices = lora_context.punica_wrapper.token_lora_indices[:num_tokens]
+    return torch.nn.functional.pad(indices, (0, num_tokens - indices.numel()), value=-1)
 
 
 def reset_lora_indices(lora_context) -> None:
@@ -72,8 +92,7 @@ def prepare_lora_indices(
 
     Caller must ensure ``lora_context`` is not ``None``.
     """
-    token_indices = lora_context.punica_wrapper.token_lora_indices
-    token_indices = token_indices[:num_tokens]
+    token_indices = get_lora_indices(lora_context, num_tokens)
     if pad_size > 0:
         token_indices = torch.nn.functional.pad(token_indices, (0, pad_size), value=-1)
     if tp_size > 1:
@@ -149,9 +168,11 @@ def all2all_lora_indices(
     if permuted is None:
         return
     lora_dtype = permuted.dtype
-    _, exchanged, handle = async_all_to_all(permuted, output_splits, input_splits, ep_group)
+    slot_ids = getattr(lora_context.punica_wrapper, "moe_lora_slot_ids", None)
+    wire_indices = lora_slots_to_ids(permuted, slot_ids)
+    _, exchanged, handle = async_all_to_all(wire_indices, output_splits, input_splits, ep_group)
     handle.wait()
-    lora_context.exchanged_lora_indices = exchanged.to(lora_dtype)
+    lora_context.exchanged_lora_indices = lora_ids_to_slots(exchanged, slot_ids).to(lora_dtype)
 
 
 def sync_lora_context(quant_method, lora_context):
@@ -203,12 +224,12 @@ def _recover_moe_lora_routing_allgather(lora_context, expanded_row_idx, topk_ids
     inv_perm = torch.argsort(expanded)
     expert_per_row = topk_ids.reshape(-1)[inv_perm].to(torch.long)
 
-    # token_lora_indices is a 1D LongTensor sized to max_num_batched_tokens
-    # (host-known constant). Clamping defensively to the last index is a no-op
-    # in normal operation but keeps the gather graph-safe.
     orig_token = inv_perm // top_k
-    token_lora_indices = lora_context.punica_wrapper.token_lora_indices
-    orig_token = orig_token.clamp_(max=token_lora_indices.numel() - 1)
+    token_lora_indices = getattr(lora_context, "gathered_lora_indices", None)
+    if token_lora_indices is None:
+        token_lora_indices = get_lora_indices(lora_context, topk_ids.shape[0])
+    if token_lora_indices.numel() != topk_ids.shape[0]:
+        raise AssertionError("AllGather MoE LoRA token metadata does not match the gathered hidden-state rows.")
     lora_per_row = token_lora_indices[orig_token]
     return expert_per_row, lora_per_row
 

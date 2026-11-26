@@ -253,7 +253,10 @@ def test_all2all_lora_indices_skips_missing_permuted() -> None:
 
 
 def test_all2all_lora_indices_restores_dtype_after_exchange() -> None:
-    context = SimpleNamespace(permuted_lora_indices=torch.tensor([1, 2], dtype=torch.int32))
+    context = SimpleNamespace(
+        punica_wrapper=SimpleNamespace(moe_lora_slot_ids=None),
+        permuted_lora_indices=torch.tensor([1, 2], dtype=torch.int32),
+    )
     exchanged = torch.tensor([7, 8], dtype=torch.int64)
     handle = Mock()
     with patch(
