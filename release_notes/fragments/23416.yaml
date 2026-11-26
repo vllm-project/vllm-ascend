@@ -1,0 +1,12 @@
+pr: 23416
+entries:
+  - category: feature
+    text: >-
+      Integrated two companion operators into Ascend950 HiSparse: the
+      order-preserving quant_lightning_indexer variant and a
+      SparseKvPlan resolver that plans HBM hot KV buffer reuse and slot
+      allocation for host-to-device KV transfer. HiSparse now uses the
+      device-side plan resolver automatically when both companion operators
+      are installed, the C8 decode path uses fixed-width MTP query groups, and
+      the HiSparse hot-buffer geometry matches the operator contract; other
+      configurations fall back to the existing resolver.
