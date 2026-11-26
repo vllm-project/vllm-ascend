@@ -172,6 +172,8 @@ def test_glm53flash_pcp2_dp2(eager, prefix_caching):
             "VLLM_SERVER_DEV_MODE": "1",
             "HCCL_OP_EXPANSION_MODE": "AIV",
             "HCCL_BUFFSIZE": "400",
+            # Enable A5 HIXL endpoint discovery in both P and D subprocesses.
+            "ASCEND_LOCAL_COMM_RES": '{"version":"1.3"}',
         },
         max_wait_seconds=900,
     ):
