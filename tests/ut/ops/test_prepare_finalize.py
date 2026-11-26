@@ -1,5 +1,6 @@
 import unittest
 from contextlib import AbstractContextManager
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import MagicMock, patch
 
@@ -386,6 +387,29 @@ class TestPrepareAndFinalize(unittest.TestCase):
 
 
 class TestSequenceParallelPCP(unittest.TestCase):
+    def test_lora_dp_gather_keeps_remote_and_padding_rows_aligned(self):
+        def gather(value, dim):
+            if value.ndim == 1:
+                return torch.cat((value, torch.tensor([2, 0, 1, 0])))
+            return torch.cat((value, value), dim=dim)
+
+        config = SimpleNamespace(
+            dp_size=2,
+            pcp_size=1,
+            is_sequence_parallel=False,
+            dp_group=SimpleNamespace(all_gather=gather),
+        )
+        context = SimpleNamespace(punica_wrapper=SimpleNamespace(token_lora_indices=torch.tensor([0, -1, 1])))
+        with (
+            patch("vllm_ascend.ops.fused_moe.prepare_finalize.get_dynamic_mx_quant_scale_alg", return_value=0),
+            patch("vllm_ascend.ops.fused_moe.prepare_finalize._EXTRA_CTX", max_tokens_across_dp=4),
+        ):
+            layer = PrepareAndFinalizeWithAllGather(config)
+            layer.set_lora_context(context)
+            prepared = layer.prepare(torch.ones(3, 4), torch.ones(3, 2))
+        assert prepared.hidden_states.shape[0] == context.gathered_lora_indices.numel() == 8
+        torch.testing.assert_close(context.gathered_lora_indices, torch.tensor([0, -1, 1, -1, 1, -1, 0, -1]))
+
     def test_ep_path_gathers_inputs_once_without_dp_pcp_collectives(self):
         config = MagicMock()
         config.is_sequence_parallel = True

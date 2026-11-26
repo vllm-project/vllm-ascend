@@ -162,6 +162,13 @@ class NPUModelRunner(GPUModelRunner):
     max_num_reqs: int
     max_num_tokens: int
 
+    def load_lora_model(self, model: torch.nn.Module, vllm_config: VllmConfig, device: torch.device):
+        manager_cls = getattr(model, "lora_worker_manager_cls", None)
+        if manager_cls is None:
+            return super().load_lora_model(model, vllm_config, device)
+        self.lora_manager = manager_cls(vllm_config, device, model.embedding_modules)
+        return self.lora_manager.create_lora_manager(model, vllm_config)
+
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
         # Ascend-specific configurations
         self.ascend_config = get_ascend_config()
@@ -881,6 +888,10 @@ class NPUModelRunner(GPUModelRunner):
 
     def gather_batch_req_state(self, scheduler_output: SchedulerOutput, dummy_run: bool):
         batch_state, uniform_token_count = super().gather_batch_req_state(scheduler_output, dummy_run)
+        lora_manager = getattr(self, "lora_manager", None)
+        if getattr(lora_manager, "requires_dp_sync", False):
+            requests = self.lora_state.get_activate_loras(batch_state.req_ids) if batch_state is not None else set()
+            lora_manager.synchronize_requests(requests)
         if self._target_uses_flashmla and batch_state is not None:
             # The backend order must precede derived inputs and graph dispatch.
             batch_state, uniform_token_count = prepare_flashmla_batch_req_state(batch_state, uniform_token_count)
@@ -1329,6 +1340,14 @@ class NPUModelRunner(GPUModelRunner):
         steps via ``step_eplb_after`` (#17233). The lmhead TP join lives in the
         ``execute_model`` tail — joining after ``super()._dummy_run`` deadlocks."""
         skip_ring = bool(kwargs.pop("skip_gdn_state_update", False))
+        if (
+            getattr(getattr(self, "lora_manager", None), "requires_dp_sync", False)
+            and not is_profile
+            and kwargs.get("num_active_loras") is None
+        ):
+            # Idle DP ranks receive real expert tokens. Preserve their real
+            # adapter cache instead of installing/removing warmup adapters.
+            kwargs["num_active_loras"] = 0
         # Adaptive verification profiles eager tail sizes after graph capture.
         # Use balanced dummy routing, as the initial memory profile does, so a
         # synthetic router hotspot cannot exhaust one EP rank during startup.
