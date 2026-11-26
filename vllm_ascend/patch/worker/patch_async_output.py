@@ -7,14 +7,10 @@ from vllm_ascend.worker.sentinel.npu_worker_sentinel import fault_barrier_wrappe
 
 
 class AscendAsyncOutput(AsyncOutput):
-    """AsyncOutput whose ``get_output`` runs behind the FT fault barrier.
+    """Async output with Ascend fault-tolerance support."""
 
-    HCCL faults (e.g. after a peer faults) escaping ``get_output`` can make
-    the destructor/teardown that follows abort at the C level and kill the
-    process; with FT the worker must survive to recover, so the barrier
-    quarantines it (stop_device) before any teardown executes.
-    """
-
+    # Device errors can also surface in get_output. Use the fault barrier
+    # to keep the worker alive for recovery.
     @fault_barrier_wrapper
     def get_output(self) -> ModelRunnerOutput:
         return super().get_output()
