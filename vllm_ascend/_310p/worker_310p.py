@@ -18,9 +18,11 @@ import gc
 
 import psutil
 import torch
+import torch.distributed as dist
 import torch_npu
 from vllm.distributed.parallel_state import Handle, get_pp_group
 from vllm.logger import logger
+from vllm.sequence import IntermediateTensors
 from vllm.utils.mem_constants import GiB_bytes
 from vllm.utils.mem_utils import MemorySnapshot, memory_profiling
 from vllm.utils.torch_utils import set_random_seed  # noqa: E402
@@ -35,13 +37,42 @@ from vllm_ascend.worker.worker import NPUWorker, init_workspace_manager
 
 class NPUWorker310(NPUWorker):
     def _pp_all_gather_group(self) -> None:
-        # Send complete CPU tensors to the next stage. Its runner copies them
-        # directly into the persistent NPU inputs (also used by ACLGraph).
         return None
 
     def _pp_send_tensor_dict(self, tensors: dict[str, torch.Tensor]) -> list[Handle]:
-        host_tensors = {name: tensor.to("cpu").contiguous() for name, tensor in tensors.items()}
-        return get_pp_group().isend_tensor_dict(host_tensors)
+        # Single-op HcclSend/HcclRecv fails with ERR00100 on 310P, while
+        # batch_isend_irecv supports device P2P directly without host staging
+        # or Gloo metadata handshakes (both stages share sorted template keys
+        # and scheduler_output.total_num_scheduled_tokens).
+        group = get_pp_group()
+        dst_rank = group.ranks[(group.rank_in_group + 1) % group.world_size]
+        send_tensors = tuple(
+            tensors[name].contiguous()
+            for name in sorted(tensors)
+            if isinstance(tensors[name], torch.Tensor) and tensors[name].numel() > 0
+        )
+        self._pp_send_buffers = send_tensors
+        if not send_tensors:
+            return []
+        ops = [dist.P2POp(dist.isend, tensor, dst_rank, group.device_group) for tensor in send_tensors]
+        return list(dist.batch_isend_irecv(ops))
+
+    def _pp_recv_tensor_dict(self, num_tokens: int):
+        template = getattr(self.model_runner, "intermediate_tensors", None)
+        if not isinstance(template, IntermediateTensors):
+            return super()._pp_recv_tensor_dict(num_tokens)
+        group = get_pp_group()
+        src_rank = group.ranks[(group.rank_in_group - 1) % group.world_size]
+        tensors: dict[str, torch.Tensor] = {}
+        ops: list[dist.P2POp] = []
+        for name in sorted(template.tensors):
+            ref = template.tensors[name]
+            buf = torch.empty((num_tokens, *ref.shape[1:]), dtype=ref.dtype, device=self.device)
+            tensors[name] = buf
+            if buf.numel() > 0:
+                ops.append(dist.P2POp(dist.irecv, buf, src_rank, group.device_group))
+        handles = list(dist.batch_isend_irecv(ops)) if ops else []
+        return tensors, handles, []
 
     def _scale_kv_cache_memory_for_multi_group(self, available_memory: int) -> int:
         kv_cache_spec = self.get_kv_cache_spec()
@@ -70,7 +101,15 @@ class NPUWorker310(NPUWorker):
         torch_npu.npu.set_compile_mode(jit_compile=False)
 
         init_workspace_manager(self.device, num_ubatches=1)
+        self._pp_send_buffers: tuple[torch.Tensor, ...] = ()
         self.model_runner = self._create_model_runner()
+
+    def shutdown(self) -> None:
+        handler = getattr(getattr(self, "model_runner", None), "pp_handler", None)
+        close_handler = getattr(handler, "close", None)
+        if callable(close_handler):
+            close_handler()
+        super().shutdown()
 
     def save_sharded_state(
         self,

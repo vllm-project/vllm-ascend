@@ -984,6 +984,10 @@ class NPUWorker(GPUWorker):
     def _pp_send_tensor_dict(self, tensors: dict[str, torch.Tensor]) -> "list[Handle]":
         return get_pp_group().isend_tensor_dict(tensors, all_gather_group=self._pp_all_gather_group())
 
+    def _pp_recv_tensor_dict(self, num_tokens: int):
+        del num_tokens
+        return get_pp_group().irecv_tensor_dict(all_gather_group=self._pp_all_gather_group())
+
     def execute_model(
         self,
         scheduler_output: "SchedulerOutput",
@@ -1001,8 +1005,8 @@ class NPUWorker(GPUWorker):
         intermediate_tensors = None
         forward_pass = scheduler_output.total_num_scheduled_tokens > 0
         if forward_pass and not get_pp_group().is_first_rank:
-            tensor_dict, comm_handles, comm_postprocess = get_pp_group().irecv_tensor_dict(
-                all_gather_group=self._pp_all_gather_group()
+            tensor_dict, comm_handles, comm_postprocess = self._pp_recv_tensor_dict(
+                scheduler_output.total_num_scheduled_tokens
             )
             assert tensor_dict is not None
             intermediate_tensors = AsyncIntermediateTensors(

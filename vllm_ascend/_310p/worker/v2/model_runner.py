@@ -172,6 +172,16 @@ class NPUModelRunner310V2(NPUModelRunner):
         torch.distributed.destroy_process_group(self.pp_handler.broadcast_group)
         self.pp_handler = PPHandler310(self.max_num_reqs)
 
+    @torch.inference_mode()
+    def sample_tokens(self, grammar_output: Any) -> Any:
+        handler = self.pp_handler
+        if isinstance(handler, PPHandler310):
+            handler.begin_sample_step()
+        output = super().sample_tokens(grammar_output)
+        if isinstance(handler, PPHandler310):
+            handler.submit_sample_output(output)
+        return output
+
     def load_model(self, load_dummy_weights: bool = False, *args, **kwargs) -> None:
         super().load_model(load_dummy_weights, *args, **kwargs)
         if self.ascend_config.multistream_overlap_shared_expert:

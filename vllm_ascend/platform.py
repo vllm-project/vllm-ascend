@@ -2217,6 +2217,14 @@ def _get_reduced_cg_cap(vllm_config: VllmConfig) -> int | None:
     if max_num_seqs is None:
         return None
 
+    parallel_config = getattr(vllm_config, "parallel_config", None)
+    pp_size = getattr(parallel_config, "pipeline_parallel_size", 1)
+    if pp_size > 1 and get_current_hardware_profile().device_adaptor_family is DeviceAdaptorFamily.COMPATIBILITY:
+        # 310P PP splits active requests across pp_size microbatches; cap default
+        # graph sizes to the microbatch size to avoid padding every replay to
+        # total concurrency.
+        max_num_seqs = max(1, (max_num_seqs + pp_size - 1) // pp_size)
+
     decode_query_len = 1
     speculative_config = getattr(vllm_config, "speculative_config", None)
     if speculative_config and speculative_config.num_speculative_tokens:
