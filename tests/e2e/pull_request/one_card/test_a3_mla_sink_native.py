@@ -33,6 +33,7 @@ def sink():
     root = Path(__file__).resolve().parents[4]
     path = root / "vllm_ascend/attention/a3_mla_sink.py"
     spec = importlib.util.spec_from_file_location("a3_native_test_adapter", path)
+    assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
     sys.modules[spec.name] = module
     spec.loader.exec_module(module)
@@ -141,6 +142,7 @@ def test_native_explicit_scale_and_dcp_head_count(sink, causal):
 @pytest.mark.parametrize("causal", [False, True])
 def test_native_graph_refresh_lengths_and_reorder(sink, causal):
     adapter, data, oracle = make_case(sink, torch.bfloat16, (2, 1), (257, 33), causal, padded=True)
+    q_cpu, cache_cpu, table_cpu, _, _, _, scale = oracle
     metadata = adapter.build_metadata(data["cache_seqlens"], data["cu_seqlens_q"], data["seqused_q"])
     output_mask = adapter.build_output_mask(data["cache_seqlens"], data["cu_seqlens_q"], data["q"].shape[0])
     for _ in range(3):
@@ -161,7 +163,7 @@ def test_native_graph_refresh_lengths_and_reorder(sink, causal):
         torch.npu.synchronize()
         assert metadata.data_ptr() == pointer
         assert output_mask.data_ptr() == mask_pointer
-        compare(output, reference(*oracle[:3], qlens, klens, causal, oracle[-1]))
+        compare(output, reference(q_cpu, cache_cpu, table_cpu, qlens, klens, causal, scale))
 
 
 @pytest.mark.parametrize("tokens", [3, 129])
@@ -282,6 +284,7 @@ def test_native_production_builder_refreshes_padded_batch(sink):
     )
     exec(compile(ast.Module(nodes, type_ignores=[]), str(path), "exec"), scope)
     adapter, data, oracle = make_case(sink, torch.bfloat16, (2, 1), (257, 33), False, padded=True)
+    q_cpu, cache_cpu, table_cpu, _, _, _, scale = oracle
     impl = SimpleNamespace(
         a3_mla_adapter=adapter,
         num_heads=8,
@@ -323,6 +326,6 @@ def test_native_production_builder_refreshes_padded_batch(sink):
             metadata=batch.schedule,
             output_mask=batch.output_mask,
         )
-        compare((out[:, :3], lse[:, :3]), reference(*oracle[:3], qlens, klens, False, oracle[-1]))
+        compare((out[:, :3], lse[:, :3]), reference(q_cpu, cache_cpu, table_cpu, qlens, klens, False, scale))
         assert torch.all(out[:, 3:] == 0).item()
         assert torch.isneginf(lse[:, 3:]).all().item()

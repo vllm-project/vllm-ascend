@@ -392,6 +392,8 @@ def test_dspark_full_graph_refreshes_schedules_once_per_round(runtime, monkeypat
     assert filtered == [[target], []] and groups == [[target], [draft]]
 
     class Parent:
+        arange_np: np.ndarray
+
         def _build_uniform_attn_metadata(self, batch_desc, num_reqs, num_query_per_req, **kwargs):
             return self._build_attn_metadata(
                 num_reqs=num_reqs,

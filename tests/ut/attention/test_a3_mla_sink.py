@@ -24,6 +24,7 @@ ROOT = Path(__file__).resolve().parents[3]
 
 def load_source(path, name):
     spec = importlib.util.spec_from_file_location(name, ROOT / path)
+    assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
     sys.modules[name] = module
     spec.loader.exec_module(module)
@@ -286,7 +287,7 @@ def test_two_operator_boundary_reuses_lengths_and_normalizes_empty_rows(monkeypa
     cu = torch.tensor([0, 2, 4], dtype=torch.int32)
     used = torch.tensor([2, 0], dtype=torch.int32)
     calls = []
-    provider_outputs = []
+    provider_outputs: list[tuple[torch.Tensor, torch.Tensor]] = []
 
     def metadata_op(*args, **kwargs):
         assert args[6] is lengths
