@@ -14,7 +14,7 @@ from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
 from functools import partial
 from itertools import islice
-from typing import Any
+from typing import Any, NamedTuple
 
 import torch
 import vllm.envs as envs
@@ -83,10 +83,7 @@ from vllm_ascend.ops.dsa import AscendDeepseekSparseAttention, DSAModules
 from vllm_ascend.ops.rope_dsv4 import ComplexExpRotaryEmbedding
 from vllm_ascend.ops.triton.fold_indexer_cache import fold_indexer_cache_rows
 from vllm_ascend.ops.triton.mul_add import muls_add_triton
-from vllm_ascend.utils import (
-    get_rotation_path,
-    normalize_deepseek_v41_config,
-)
+from vllm_ascend.utils import enable_custom_op, get_rotation_path, normalize_deepseek_v41_config
 from vllm_ascend.worker.v2.pp_transport import (
     PPDependencyTransport,
     PPTransportDataType,
@@ -336,18 +333,28 @@ class DeepseekV41MoE(nn.Module):
         hidden_states: torch.Tensor,
         input_ids: torch.Tensor | None = None,
         already_sequence_parallel: bool = False,
+        *,
+        hidden_states_fp32: torch.Tensor | None = None,
     ) -> torch.Tensor:
         num_tokens, hidden_dim = hidden_states.shape
         hidden_states = hidden_states.view(-1, hidden_dim)
+        # GateLinear uses the BF16 activation for BF16 weights.
+        if hidden_states_fp32 is not None and self.gate.weight.dtype == torch.float32:
+            hidden_states_fp32 = hidden_states_fp32.view(-1, hidden_dim)
+        else:
+            hidden_states_fp32 = None
         # Chunk the hidden states so they aren't replicated across TP ranks.
         # This avoids duplicate computation in self.experts.
         # TODO: We can replace the all_reduce at the end of attn with a
         # reduce_scatter instead of chunking here.
         if self.is_sequence_parallel and not already_sequence_parallel:
             hidden_states = sp_shard(hidden_states)
+            if hidden_states_fp32 is not None:
+                hidden_states_fp32 = sp_shard(hidden_states_fp32)
 
         # An internal router applies the gate inside the MoE runner.
-        router_logits = hidden_states if self.experts.is_internal_router else self.gate(hidden_states)
+        router_input = hidden_states if hidden_states_fp32 is None else hidden_states_fp32
+        router_logits = router_input if self.experts.is_internal_router else self.gate(router_input)
         fused_moe_out = self.experts(
             hidden_states=hidden_states,
             router_logits=router_logits,
@@ -980,10 +987,21 @@ class DeepseekV41Attention(DeepseekV41SWAAttention):
         torch.ops.vllm.dsa_v41_write_kv(hidden_states, output, self.v41_layer_name)
 
 
+class _PendingHcPost(NamedTuple):
+    """A sublayer output whose post update is owned by the next layer"""
+
+    output: torch.Tensor
+    residual: torch.Tensor
+    post: torch.Tensor
+    comb: torch.Tensor
+
+
 class DeepseekV41DecoderLayer(nn.Module):
     """V4.1 block with the checkpoint's delayed mHC coefficient handoff."""
 
+    _DSPARK_CROSS_LAYER_MAX_ROWS = 36
     attention_cls = DeepseekV41Attention
+    _supports_draft_hc_post_pre_norm = False
 
     def __init__(
         self,
@@ -1037,6 +1055,15 @@ class DeepseekV41DecoderLayer(nn.Module):
         self.hc_mult = hc_mult = config.hc_mult
         self.hc_sinkhorn_iters = config.hc_sinkhorn_iters
         self.hc_eps = config.hc_eps
+        self.use_hc_post_pre_norm = (
+            (not is_draft_layer or self._supports_draft_hc_post_pre_norm)
+            and get_ascend_config().ascend_compilation_config.fuse_hc_post_pre_norm
+            and get_current_hardware_profile().supports(HardwareCapability.HC_POST_PRE_NORM)
+            and enable_custom_op()
+            and hasattr(torch.ops._C_ascend, "npu_hc_post_pre_norm")
+        )
+        speculative_config = vllm_config.speculative_config
+        self._uses_dspark = speculative_config is not None and speculative_config.use_dspark()
         mix_hc = (2 + hc_mult) * hc_mult
         hc_dim = hc_mult * config.hidden_size
         self.hc_attn_fn = nn.Parameter(torch.empty(mix_hc, hc_dim, dtype=torch.float32))
@@ -1056,6 +1083,67 @@ class DeepseekV41DecoderLayer(nn.Module):
             self.engram = AscendEngram(config, quant_config, f"{prefix}.engram")
         else:
             self.engram = None
+
+    def _prepare_attention(
+        self, hidden_states: torch.Tensor | _PendingHcPost, pre_mix: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        norm = self.input_layernorm
+
+        if isinstance(hidden_states, _PendingHcPost):
+            x, residual, post, comb = hidden_states
+            can_fuse = x.dtype == residual.dtype == norm.weight.dtype == torch.bfloat16
+            if can_fuse and x.shape[0] > self._DSPARK_CROSS_LAYER_MAX_ROWS:
+                if self._supports_draft_hc_post_pre_norm:
+                    can_fuse = False
+                elif getattr(self, "_uses_dspark", False) and is_forward_context_available():
+                    context = get_forward_context()
+                    # A captured graph can serve different requests at the same padded shape.
+                    if context.cudagraph_runtime_mode != CUDAGraphMode.NONE:
+                        can_fuse = False
+                    elif isinstance(context.attn_metadata, dict):
+                        swa = context.attn_metadata.get(self.self_attn.v41_impl.swa_prefix)
+                        can_fuse = swa is None or swa.num_decode_tokens <= swa.num_decodes
+
+            if can_fuse:
+                x, _, residual, attn_post, attn_comb, attn_pre = torch.ops._C_ascend.npu_hc_post_pre_norm(
+                    x,
+                    residual,
+                    post,
+                    comb,
+                    pre_mix,
+                    self.hc_attn_fn,
+                    self.hc_attn_scale,
+                    self.hc_attn_base,
+                    norm.weight,
+                    hc_sinkhorn_iters=self.hc_sinkhorn_iters,
+                    hc_eps=self.hc_eps,
+                    hc_norm_eps=self.norm_eps,
+                    ffn_norm_eps=norm.variance_epsilon,
+                    return_fp32=False,
+                )
+                if getattr(norm, "bias_loaded", False):
+                    x.add_(norm.bias)
+                return x, residual, attn_post, attn_comb, attn_pre
+            hidden_states = self.hc_post(x, residual, post, comb)
+
+        x, attn_post, attn_comb, attn_pre = self.hc_pre(
+            hidden_states,
+            self.hc_attn_fn,
+            self.hc_attn_scale,
+            self.hc_attn_base,
+            pre_mix,
+        )
+        return norm(x), hidden_states, attn_post, attn_comb, attn_pre
+
+    def rms_norm_cast(self, hidden_states: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        """Normalize once and provide the exact FP32 routing input."""
+        outputs = DeviceOperator.rms_norm_cast(
+            hidden_states, self.post_attention_layernorm.weight, self.post_attention_layernorm.variance_epsilon
+        )
+        if outputs is not None:
+            return outputs
+        normalized = self.post_attention_layernorm(hidden_states)
+        return normalized, normalized.float()
 
     @staticmethod
     def hc_collapse(x, pre_mix):
@@ -1103,38 +1191,58 @@ class DeepseekV41DecoderLayer(nn.Module):
         pre_mix,
         llama_4_scaling=None,
         input_ids=None,
+        *,
+        defer_ffn_post: bool = False,
     ):
         use_sequence_parallel = getattr(self, "use_sequence_parallel", False)
-        residual = hidden_states
-        x, attn_post, attn_comb, attn_pre = self.hc_pre(
-            hidden_states,
-            self.hc_attn_fn,
-            self.hc_attn_scale,
-            self.hc_attn_base,
-            pre_mix,
-        )
-        x = self.input_layernorm(x)
+        x, residual, attn_post, attn_comb, attn_pre = self._prepare_attention(hidden_states, pre_mix)
+
         if use_sequence_parallel:
             x = sp_all_gather(x)[: positions.shape[0]]
         x = self.self_attn(positions, x, llama_4_scaling)
         if use_sequence_parallel:
             x = sp_reduce_scatter(x)
-        hidden_states = self.hc_post(x, residual, attn_post, attn_comb)
 
-        residual = hidden_states
-        x, ffn_post, ffn_comb, ffn_pre = self.hc_pre(
-            hidden_states,
-            self.hc_ffn_fn,
-            self.hc_ffn_scale,
-            self.hc_ffn_base,
-            attn_pre,
-        )
-        x = self.post_attention_layernorm(x)
+        if (
+            getattr(self, "use_hc_post_pre_norm", False)
+            and x.dtype == residual.dtype == self.post_attention_layernorm.weight.dtype == torch.bfloat16
+        ):
+            x, x_fp32, residual, ffn_post, ffn_comb, ffn_pre = torch.ops._C_ascend.npu_hc_post_pre_norm(
+                x,
+                residual,
+                attn_post,
+                attn_comb,
+                attn_pre,
+                self.hc_ffn_fn,
+                self.hc_ffn_scale,
+                self.hc_ffn_base,
+                self.post_attention_layernorm.weight,
+                hc_sinkhorn_iters=self.hc_sinkhorn_iters,
+                hc_eps=self.hc_eps,
+                hc_norm_eps=self.norm_eps,
+                ffn_norm_eps=self.post_attention_layernorm.variance_epsilon,
+            )
+        else:
+            residual = self.hc_post(x, residual, attn_post, attn_comb)
+            x, ffn_post, ffn_comb, ffn_pre = self.hc_pre(
+                residual,
+                self.hc_ffn_fn,
+                self.hc_ffn_scale,
+                self.hc_ffn_base,
+                attn_pre,
+            )
+            x, x_fp32 = self.rms_norm_cast(x)
+
         x = self.mlp(
             x,
             input_ids=input_ids,
             already_sequence_parallel=use_sequence_parallel,
+            hidden_states_fp32=x_fp32,
         )
+
+        if defer_ffn_post:
+            return _PendingHcPost(x, residual, ffn_post, ffn_comb), ffn_pre
+
         hidden_states = self.hc_post(x, residual, ffn_post, ffn_comb)
         return hidden_states, ffn_pre
 
@@ -1205,6 +1313,12 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
             self.norm = PPMissingLayer()
 
         self.hc_mult = config.hc_mult
+        self.use_cross_layer_hc_post_pre_norm = (
+            get_ascend_config().ascend_compilation_config.fuse_hc_post_pre_norm_cross_layer
+            and get_current_hardware_profile().supports(HardwareCapability.HC_POST_PRE_NORM)
+            and enable_custom_op()
+            and hasattr(torch.ops._C_ascend, "npu_hc_post_pre_norm")
+        )
         spec_config = vllm_config.speculative_config
         # DSpark consumes auxiliary hidden states, not the full HC residual.
         needs_mtp_hidden_states = (
@@ -1448,6 +1562,19 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
                     self.register_buffer(f"routing_input_ids_{start}", buffer, persistent=False)
                     router.is_routing_input_ids_producer = True
                 router.routing_input_ids_buffer = buffer
+
+    def _can_defer_ffn_post(self, next_layer_idx: int) -> bool:
+        if not getattr(self, "use_cross_layer_hc_post_pre_norm", False):
+            return False
+
+        if (
+            not self.start_layer <= next_layer_idx < self.end_layer
+            or next_layer_idx in self.aux_hidden_state_layers
+            or (self.decoder_replay_layers is not None and next_layer_idx == self.decoder_replay_start)
+        ):
+            return False
+
+        return self.layers[next_layer_idx].engram is None
 
     def _make_empty_intermediate_tensors(self, batch_size, dtype, device):
         # Profiling executes receiving stages before real PP activations exist.
@@ -2021,7 +2148,12 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
                     active_mask,
                     self.engram_rotation if self.engram_rotated else None,
                 )
-            hidden_states, pre_mix = layer(positions, hidden_states, pre_mix, None, input_ids=input_ids)
+            if self._can_defer_ffn_post(layer.layer_idx + 1):
+                hidden_states, pre_mix = layer(
+                    positions, hidden_states, pre_mix, None, input_ids=input_ids, defer_ffn_post=True
+                )
+            else:
+                hidden_states, pre_mix = layer(positions, hidden_states, pre_mix, None, input_ids=input_ids)
         if not pp_group.is_last_rank:
             if use_sequence_parallel:
                 hidden_states = sp_all_gather(hidden_states)[:full_num_tokens]
@@ -2060,7 +2192,12 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
                 if self.use_sequence_parallel:
                     residual = sp_all_gather(residual)[: positions.shape[0]]
                 aux.append(residual)
-            hidden_states, pre_mix = layer(positions, hidden_states, pre_mix, None, input_ids=input_ids)
+            if self._can_defer_ffn_post(layer_idx + 1):
+                hidden_states, pre_mix = layer(
+                    positions, hidden_states, pre_mix, None, input_ids=input_ids, defer_ffn_post=True
+                )
+            else:
+                hidden_states, pre_mix = layer(positions, hidden_states, pre_mix, None, input_ids=input_ids)
         return hidden_states, pre_mix, *aux
 
 

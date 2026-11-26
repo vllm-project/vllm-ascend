@@ -191,6 +191,8 @@ class HardwareCapability(Enum):
     RC_DEVICE_DISCOVERY = auto()
     # Fused RMSNorm+cast is available for the A2/A3 (CANN 9.1) path.
     RMS_NORM_CAST = auto()
+    # Fused shifted mHC boundary from Attention to FFN.
+    HC_POST_PRE_NORM = auto()
     # Fused RMSNorm and dynamic per-token INT8 quantization on A3.
     RMS_NORM_DYNAMIC_QUANT = auto()
     # Import and register the compiled vLLM-Ascend custom-op library at runtime.
@@ -414,6 +416,7 @@ _A3_CAPABILITIES = _STANDARD_CAPABILITIES | {
     HardwareCapability.MM_REDUCE_SCATTER_BF16,
     HardwareCapability.QWEN4EXP_HC_GATE_MIX_ROW_BLOCK,
     HardwareCapability.RMS_NORM_CAST,
+    HardwareCapability.HC_POST_PRE_NORM,
 }
 _DEFAULT_WORKER_CLS = "vllm_ascend.worker.worker.NPUWorker"
 _HARDWARE_PROFILES: Mapping[AscendDeviceType, HardwareProfile] = MappingProxyType(
@@ -441,6 +444,7 @@ _HARDWARE_PROFILES: Mapping[AscendDeviceType, HardwareProfile] = MappingProxyTyp
                 HardwareCapability.MM_REDUCE_SCATTER_BF16,
                 HardwareCapability.QWEN4EXP_HC_GATE_MIX_ROW_BLOCK,
                 HardwareCapability.RMS_NORM_CAST,
+                HardwareCapability.HC_POST_PRE_NORM,
                 HardwareCapability.NPU_TOP_K_TOP_P,
                 # Atlas A2 provides the CANN MegaMoe operator for the INT
                 # quant paths (arch22 kernel, e.g.

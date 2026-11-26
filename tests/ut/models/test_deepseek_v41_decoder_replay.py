@@ -10,7 +10,7 @@ from vllm.config import CUDAGraphMode
 
 from vllm_ascend.models.deepseek_v41 import decoder_replay_layers as replay_mod
 from vllm_ascend.models.deepseek_v41 import model as model_mod
-from vllm_ascend.models.deepseek_v41.model import DeepseekV41Model
+from vllm_ascend.models.deepseek_v41.model import DeepseekV41Model, _PendingHcPost
 
 
 @pytest.mark.parametrize(("pcp_size", "prefix_caching"), [(1, True), (2, True), (2, False)])
@@ -240,9 +240,13 @@ def test_untrimmed_replica_enters_decoder_context_without_gathering():
     + [(40, start, (37, 38, 39)) for start in (37, 38, 39)],
 )
 @pytest.mark.parametrize("compacted", [False, True])
-def test_model_replays_only_layers_after_kv_sources(monkeypatch, num_layers, replay_start, selected, compacted):
+@pytest.mark.parametrize("cross_layer_fusion", [False, True])
+def test_model_replays_only_layers_after_kv_sources(
+    monkeypatch, num_layers, replay_start, selected, compacted, cross_layer_fusion
+):
     monkeypatch.setattr(model_mod, "get_pp_group", lambda: SimpleNamespace(is_first_rank=True, is_last_rank=True))
     seen = []
+    fused_layers = []
 
     class Layer:
         engram = None
@@ -250,8 +254,13 @@ def test_model_replays_only_layers_after_kv_sources(monkeypatch, num_layers, rep
         def __init__(self, index):
             self.layer_idx = index
 
-        def __call__(self, positions, hidden, mix, unused, input_ids, image_mask=None):
+        def __call__(self, positions, hidden, mix, unused, input_ids, image_mask=None, *, defer_ffn_post=False):
             seen.append((self.layer_idx, positions.tolist()))
+            if isinstance(hidden, _PendingHcPost):
+                fused_layers.append(self.layer_idx)
+                hidden = hidden.residual + hidden.output
+            if defer_ffn_post:
+                return _PendingHcPost(torch.ones_like(hidden), hidden, mix, mix), mix
             return hidden + 1, mix
 
         def write_kv(self, hidden, mix, positions, input_ids):
@@ -266,6 +275,7 @@ def test_model_replays_only_layers_after_kv_sources(monkeypatch, num_layers, rep
     model.config = SimpleNamespace()
     model.hc_mult = 1
     model.use_sequence_parallel = False
+    model.use_cross_layer_hc_post_pre_norm = cross_layer_fusion
     model._mtp_hidden_buffer = None
     model.shared_attention_state = SimpleNamespace(reset=lambda: None)
     model.layers = [Layer(i) for i in range(num_layers)]
@@ -307,6 +317,9 @@ def test_model_replays_only_layers_after_kv_sources(monkeypatch, num_layers, rep
     else:
         expected = [(i, all_rows) for i in range(num_layers)]
     assert seen == expected
+    assert fused_layers == [
+        i for i in range(1, num_layers) if cross_layer_fusion and i != replay_start and i not in selected
+    ]
     assert output[:, 0].tolist() == ([0, 0, num_layers + 1, num_layers + 1] if compacted else [num_layers + 1] * 4)
     assert len(aux) == len(selected)
     for actual, index in zip(aux, selected):
@@ -316,8 +329,9 @@ def test_model_replays_only_layers_after_kv_sources(monkeypatch, num_layers, rep
         assert actual[:, 0].tolist() == values
 
     # In particular, an ID equal to replay_start belongs to the replay suffix.
-    # Compare its active rows directly with regular forward on the same input.
+    # Compare its active rows directly with the unfused forward on the same input.
     model.decoder_replay_layers = None
+    model.use_cross_layer_hc_post_pre_norm = False
     regular = model.forward(
         torch.arange(4),
         torch.arange(4),
