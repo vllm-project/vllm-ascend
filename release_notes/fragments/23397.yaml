@@ -1,0 +1,8 @@
+pr: 23397
+entries:
+  - category: performance
+    text: >-
+      With VLLM_KV_CACHE_LAYOUT=BLHNC, DeepSeek V4.1 Flash on Ascend A2/A3
+      model runner V2 can use less KV memory for long histories. With BF16 KV
+      and 128-token blocks, a history block uses 360.625 KiB instead of
+      528.25 KiB.
