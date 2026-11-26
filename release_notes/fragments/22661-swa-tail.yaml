@@ -1,4 +1,0 @@
-pr: 22661
-entries:
-  - category: performance
-    text: Reduced Mooncake V2 pull metadata size for long prompts using sliding-window attention.

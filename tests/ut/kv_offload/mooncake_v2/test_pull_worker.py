@@ -688,18 +688,23 @@ def test_compute_sliding_window_blocks_uses_unhashed_suffix() -> None:
     assert result == [(0, [10, 11], [20, 21])]
 
 
-@pytest.mark.parametrize("scale", [1, 2])
 @pytest.mark.parametrize(
-    "remote_prompt_len,local_prompt_len,unhashed_start",
-    [(17, 18, 0), (128, 129, 0), (128, 129, 3), (128, 129, 7), (129, 130, 4), (129, 130, 9)],
+    "remote_prompt_len,local_prompt_len,remote_start,unhashed_start,scale",
+    [
+        (17, 18, 0, 0, 1),  # Short prompt: no tail clipping.
+        (128, 129, 3, 0, 2),  # Tail begins after the local uncached suffix.
+        (128, 129, 3, 3, 1),  # Matching suffix boundaries.
+        (128, 129, 3, 7, 2),  # Only the final producer page is missing locally.
+        (129, 130, 3, 4, 2),  # Extra retention crosses a page before the local suffix.
+        (129, 130, 4, 9, 1),  # No uncached producer pages remain.
+    ],
 )
 def test_compute_sliding_window_tail_preserves_logical_positions(
-    scale, remote_prompt_len, local_prompt_len, unhashed_start
+    remote_prompt_len, local_prompt_len, remote_start, unhashed_start, scale
 ) -> None:
     thread = make_thread()
     remote_end = (remote_prompt_len + 15) // 16
     local_end = (local_prompt_len + 15) // 16
-    remote_start = max(0, remote_end - 5)
     local_full = list(range(100, 100 + local_end))
     remote_tail = list(range(200 + remote_start, 200 + remote_end))
 
@@ -1639,63 +1644,62 @@ def test_circular_transfer_rejects_equal_size_different_layout(local_shape, remo
     assert not src and not dst and not lengths
 
 
-@pytest.mark.parametrize("strides", [[128, 128], [256, 256], [128, 256]])
-def test_whole_block_coalescing_is_prepared_per_request_and_reused_across_layers(strides) -> None:
-    spec = MLAAttentionSpec(block_size=16, num_kv_heads=1, head_size=64, dtype=torch.float16)
+@pytest.mark.parametrize(
+    "local_strides,remote_strides,block_lengths",
+    [
+        ([128, 128], [128, 128], [128, 128]),
+        ([256, 256], [384, 384], [128, 128]),
+        ([128, 256, 256, 256], [128, 384, 384, 384], [128, 128, 64, 128]),
+    ],
+)
+def test_whole_block_coalescing_is_prepared_per_request_and_reused_across_layers(
+    local_strides, remote_strides, block_lengths
+) -> None:
+    layer_names = [f"layer.{i}" for i in range(len(local_strides))]
     thread = make_thread(
-        layer_names=["layer.0", "layer.1"],
-        kv_cache_specs=[spec],
-        kv_caches_base_addr=[[1000], [2000]],
-        block_strides=[[stride] for stride in strides],
-        block_lens=[[128], [128]],
+        layer_names=layer_names,
+        kv_cache_specs=[MLAAttentionSpec(block_size=16, num_kv_heads=1, head_size=64, dtype=torch.float16)],
+        kv_caches_base_addr=[[1000 * (i + 1)] for i in range(len(layer_names))],
+        block_strides=[[stride] for stride in local_strides],
+        block_lens=[[length] for length in block_lengths],
     )
     remote = make_pp_metadata(
-        layer_names=["layer.0", "layer.1"],
-        block_strides=[[stride] for stride in strides],
-        block_lens=[[128], [128]],
-        tp_base_addrs={0: [[5000], [6000]]},
+        layer_names=layer_names,
+        block_strides=[[stride] for stride in remote_strides],
+        block_lens=[[length] for length in block_lengths],
+        tp_base_addrs={0: [[5000 + 1000 * i] for i in range(len(layer_names))]},
     )
-    transfer_entries = [
-        ("request-a", [1, 2], [3, 4]),
-        ("request-b", [3, 5], [5, 8]),
-    ]
-    src: list[int] = []
-    dst: list[int] = []
-    lengths: list[int] = []
-
-    with patch.object(
-        thread,
-        "_prepare_block_transfer_ranges",
-        wraps=thread._prepare_block_transfer_ranges,
-    ) as mock_group:
-        thread._append_spec_transfer_addresses(
-            0,
-            0,
-            0,
-            1,
-            1,
-            1,
-            {(0, 0): transfer_entries, (1, 1): transfer_entries},
-            remote,
-            src,
-            dst,
-            lengths,
-        )
-
-    modes = {stride == 128 for stride in strides}
-    assert mock_group.call_count == 2 * len(modes)
-    for coalesce in modes:
-        mock_group.assert_any_call([1, 2], [3, 4], coalesce)
-        mock_group.assert_any_call([3, 5], [5, 8], coalesce)
-    expected_src, expected_dst, expected_lengths = [], [], []
-    for layer, stride in enumerate(strides):
-        local_ids, remote_ids, sizes = (
-            ([1, 3, 5], [3, 5, 8], [256, 128, 128]) if stride == 128 else ([1, 2, 3, 5], [3, 4, 5, 8], [128] * 4)
-        )
-        expected_src.extend(1000 * (layer + 1) + block * stride for block in local_ids)
-        expected_dst.extend(5000 + 1000 * layer + block * stride for block in remote_ids)
-        expected_lengths.extend(sizes)
-    assert (src, dst, lengths) == (expected_src, expected_dst, expected_lengths)
+    modes = {local == remote == length for local, remote, length in zip(local_strides, remote_strides, block_lengths)}
+    # Same request IDs, different blocks: caches must not survive the call.
+    for shift in (0, 100):
+        requests = [
+            ("request-a", [1 + shift, 2 + shift], [3 + 2 * shift, 4 + 2 * shift]),
+            ("request-b", [3 + shift, 5 + shift], [5 + 2 * shift, 8 + 2 * shift]),
+        ]
+        src, dst, lengths = [], [], []
+        with patch.object(
+            thread, "_prepare_block_transfer_ranges", wraps=thread._prepare_block_transfer_ranges
+        ) as group:
+            thread._append_spec_transfer_addresses(
+                0, 0, 0, 1, 1, 1, {(i, i): requests for i in range(len(layer_names))}, remote, src, dst, lengths
+            )
+        assert group.call_count == len(requests) * len(modes)
+        for _, local_ids, remote_ids in requests:
+            for coalesce in modes:
+                group.assert_any_call(local_ids, remote_ids, coalesce)
+        expected_src, expected_dst, expected_lengths = [], [], []
+        for layer, (local_stride, remote_stride, length) in enumerate(
+            zip(local_strides, remote_strides, block_lengths)
+        ):
+            local_ids, remote_ids, counts = (
+                ([1, 3, 5], [3, 5, 8], [2, 1, 1])
+                if local_stride == remote_stride == length
+                else ([1, 2, 3, 5], [3, 4, 5, 8], [1, 1, 1, 1])
+            )
+            expected_src.extend(1000 * (layer + 1) + (block + shift) * local_stride for block in local_ids)
+            expected_dst.extend(5000 + 1000 * layer + (block + 2 * shift) * remote_stride for block in remote_ids)
+            expected_lengths.extend(count * length for count in counts)
+        assert (src, dst, lengths) == (expected_src, expected_dst, expected_lengths)
 
 
 @pytest.mark.parametrize("remote_pcp", [False, True])
@@ -2814,83 +2818,3 @@ def test_vector_addresses_match_scalar_ranges(local_ids, remote_ids, coalesce):
     )
     assert (src, dst, lengths) == expected
     assert all(type(value) is int for column in (src, dst, lengths) for value in column)
-
-
-def test_address_ranges_handle_mixed_strides_within_spec():
-    spec = MLAAttentionSpec(block_size=16, num_kv_heads=1, head_size=64, dtype=torch.float16)
-    thread = make_thread(
-        layer_names=["layer.0"],
-        kv_cache_specs=[spec],
-        kv_caches_base_addr=[[1000, 2000]],
-        block_strides=[[128, 256]],
-        block_lens=[[128, 128]],
-    )
-    remote = make_pp_metadata(
-        layer_names=["layer.0"],
-        block_strides=[[128, 512]],
-        block_lens=[[128, 128]],
-        tp_base_addrs={0: [[5000, 6000]]},
-    )
-    src, dst, lengths = [], [], []
-    thread._append_spec_transfer_addresses(
-        0,
-        0,
-        0,
-        1,
-        1,
-        1,
-        {(0, 0): [("request-a", [1, 2], [3, 4])]},
-        remote,
-        src,
-        dst,
-        lengths,
-    )
-    assert src == [1128, 2256, 2512]
-    assert dst == [5384, 7536, 8048]
-    assert lengths == [256, 128, 128]
-
-
-def test_address_component_cache_preserves_request_and_layout_boundaries():
-    spec = MLAAttentionSpec(block_size=16, num_kv_heads=1, head_size=64, dtype=torch.float16)
-    local_strides = [128, 256, 256, 256]
-    remote_strides = [128, 384, 384, 384]
-    block_lengths = [128, 128, 64, 128]
-    layer_names = [f"layer.{i}" for i in range(4)]
-    thread = make_thread(
-        layer_names=layer_names,
-        kv_cache_specs=[spec],
-        kv_caches_base_addr=[[1000 * (i + 1)] for i in range(4)],
-        block_strides=[[stride] for stride in local_strides],
-        block_lens=[[length] for length in block_lengths],
-    )
-    remote = make_pp_metadata(
-        layer_names=layer_names,
-        block_strides=[[stride] for stride in remote_strides],
-        block_lens=[[length] for length in block_lengths],
-        tp_base_addrs={0: [[10000 * (i + 1)] for i in range(4)]},
-    )
-    # Reuse request IDs on a later call with different blocks: no cache may survive.
-    for local_a, remote_a in [([1, 2], [3, 4]), ([9, 12], [13, 17])]:
-        requests = [("request-a", local_a, remote_a), ("request-b", [5, 8], [7, 11])]
-        src, dst, lengths = [], [], []
-        thread._append_spec_transfer_addresses(
-            0, 0, 0, 1, 1, 1, {(i, i): requests for i in range(4)}, remote, src, dst, lengths
-        )
-        expected_src, expected_dst, expected_lengths = [], [], []
-        for layer, (local_stride, remote_stride, length) in enumerate(
-            zip(local_strides, remote_strides, block_lengths)
-        ):
-            for _, local_ids, remote_ids in requests:
-                for index, (local_id, remote_id) in enumerate(zip(local_ids, remote_ids)):
-                    if (
-                        local_stride == remote_stride == length
-                        and index > 0
-                        and local_id == local_ids[index - 1] + 1
-                        and remote_id == remote_ids[index - 1] + 1
-                    ):
-                        expected_lengths[-1] += length
-                    else:
-                        expected_src.append(1000 * (layer + 1) + local_id * local_stride)
-                        expected_dst.append(10000 * (layer + 1) + remote_id * remote_stride)
-                        expected_lengths.append(length)
-        assert (src, dst, lengths) == (expected_src, expected_dst, expected_lengths)

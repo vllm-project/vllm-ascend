@@ -1,4 +1,0 @@
-pr: 22661
-entries:
-  - category: performance
-    text: Reduced CPU address-preparation overhead for Mooncake V2 pulls and pushes with many transfer ranges.
