@@ -71,7 +71,9 @@ def _make_glm_runtime(
         ),
         scheduler_config=SimpleNamespace(disable_hybrid_kv_cache_manager=False),
         attention_config=SimpleNamespace(hisparse_config=None),
-        kv_transfer_config=SimpleNamespace(kv_connector=connector) if connector else None,
+        kv_transfer_config=(
+            SimpleNamespace(kv_connector=connector, kv_connector_extra_config={}) if connector else None
+        ),
         compilation_config=SimpleNamespace(static_forward_context={}),
     )
 
@@ -101,6 +103,8 @@ def _allocate_unified(
             spec = group_spec.kv_cache_specs[name] if hasattr(group_spec, "kv_cache_specs") else group_spec
             if isinstance(spec, AscendSFAIndexerCacheSpec):
                 backend = AscendSFAIndexerBackend
+            elif isinstance(spec, AscendMLAAttentionSpec):
+                backend = AscendSFABackend
             elif isinstance(spec, FullAttentionSpec):
                 backend = AscendAttentionBackend
             else:
@@ -642,7 +646,7 @@ def test_ascend_attention_runtime_shapes_rejects_subclasses_and_hnd(monkeypatch)
 
 
 def test_ascend_store_asymmetric_kvpp_prefill_matches_unified_decode_segments():
-    from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker import KVPoolConnectorWorker
+    from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker import KVPoolWorker
 
     runtime = _make_glm_runtime(connector="AscendStoreConnector")
     indexer = AscendSFAIndexerCacheSpec(
@@ -663,7 +667,7 @@ def test_ascend_store_asymmetric_kvpp_prefill_matches_unified_decode_segments():
     prefill_key = torch.empty_like(decode_key)
     prefill_scale = torch.empty_like(decode_scale)
 
-    worker = KVPoolConnectorWorker.__new__(KVPoolConnectorWorker)
+    worker = KVPoolWorker.__new__(KVPoolWorker)
     worker.num_blocks = 3
     for prefill_part, decode_part in ((prefill_key, decode_key), (prefill_scale, decode_scale)):
         prefill_segments = worker._get_cache_transfer_segments(prefill_part)

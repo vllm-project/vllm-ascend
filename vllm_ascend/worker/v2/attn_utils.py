@@ -1384,8 +1384,14 @@ def _get_cache_attention_groups(
                 ):
                     # Match create_metadata_builders() without rebuilding its
                     # metadata buffers. Each backend can use smaller pages than
-                    # the common view size of its KV cache group.
-                    kernel_block_size = select_common_block_size(kernel_block_sizes[group_id], [backend], [layer_spec])
+                    # the common view size of its KV cache group; keep caller
+                    # sizes when synthetic test specs use sub-kernel blocks.
+                    try:
+                        kernel_block_size = select_common_block_size(
+                            kernel_block_sizes[group_id], [backend], [layer_spec]
+                        )
+                    except ValueError:
+                        kernel_block_size = kernel_block_sizes[group_id]
                     if kernel_block_size != layer_spec.block_size:
                         attn_group.kernel_block_size = kernel_block_size
                 group_map[key] = attn_group
@@ -1538,11 +1544,7 @@ def _resolve_cache_attention_groups(
     kernel_block_sizes: Sequence[int],
 ) -> tuple[dict[str, AttentionLayerBase], dict[str, str], list[AttentionGroup]]:
     attn_layers = get_layers_from_vllm_config(vllm_config, AttentionLayerBase)
-    shared_layers = {
-        layer_name: target_layer
-        for layer_name, layer in attn_layers.items()
-        if (target_layer := getattr(layer, "kv_sharing_target_layer_name", None))
-    }
+    shared_layers = get_shared_kv_cache_layers(vllm_config)
     attn_groups = _get_cache_attention_groups(kv_cache_config, attn_layers, shared_layers, kernel_block_sizes)
     return attn_layers, shared_layers, attn_groups
 
