@@ -21,3 +21,24 @@ class RecordingKernel:
 @pytest.fixture
 def recording_kernel():
     return RecordingKernel
+
+
+@pytest.fixture
+def suffix_options():
+    return {
+        "local_scan": {"MAX_DEPTH": 3, "BLOCK": 256},
+        "finalize": {
+            "HAS_CORPUS": True,
+            "ADAPTIVE": True,
+            "HASH_MUL": -7046029254386353131,
+            "NUM_BUCKETS": 64,
+            "SLOTS": 8,
+            "MAX_DEPTH": 3,
+            "DEPTH_PO2": 4,
+            "K": 1,
+            "K_PO2": 1,
+            "NB_PO2": 8,
+        },
+        "ingest": {"HASH_MUL": -7046029254386353131, "NUM_BUCKETS": 64, "SLOTS": 8, "BLOCK": 1024},
+        "observe": {"K": 3, "K_PO2": 4},
+    }

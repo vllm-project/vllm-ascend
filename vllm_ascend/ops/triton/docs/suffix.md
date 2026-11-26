@@ -36,6 +36,14 @@ Each operator has a matching `test_suffix_<operator>.py` in the unit and
 nightly operator test directories. `test_suffix_speculator.py` retains
 cross-operator feature combinations and lifecycle checks.
 
+`NPUPlatform.register_triton_kernel_overrides()` registers the four entry
+points through `vllm_ascend/triton_kernel_overrides.py`, following
+[PR #19153](https://github.com/vllm-project/vllm-ascend/pull/19153).
+The table targets kernels in their defining upstream `suffix.speculator`
+module. The dispatcher also rebinds existing imports. Registration runs once
+per process; 310P retains its separate sampler registration. Bare NPU tests
+call the same platform hook before constructing a speculator.
+
 ## Parameters
 
 `B` is the active batch size, `R` the request capacity, `L` the history
@@ -66,6 +74,11 @@ full request capacity; shapes with `B` describe their active rows.
   positional ABI compatibility. Active request counts come from
   `idx_mapping.shape[0]`, not the capacity of persistent buffers. The plain
   launch functions reconstruct their NPU grids without a grid argument.
+  Adapter parameters mirror upstream kernel names and order, including
+  compile-time constants. Production calls pass tensors positionally and
+  constants and compiler options by keyword. All-keyword dispatcher launches
+  support the original kernel arguments; the dispatcher's positional fallback
+  rejects extra compiler-option names on that path.
 - Draft width, block width and match depth are positive. Internal power-of-two
   padding does not add output slots. Corpus lookup needs a match depth of at
   least two. The two hash tables index 4-token and 2-token keys and keep

@@ -6,7 +6,7 @@ from types import SimpleNamespace
 from vllm_ascend.ops.triton.spec_decode import suffix_observe as ops
 
 
-def test_observer_launcher_consumes_previous_drafts_for_active_requests(monkeypatch, recording_kernel):
+def test_observer_launcher_consumes_previous_drafts_for_active_requests(monkeypatch, recording_kernel, suffix_options):
     calls = []
     monkeypatch.setattr(ops, "_suffix_observe_kernel", recording_kernel("observe", calls))
     monkeypatch.setattr(ops, "_suffix_clear_observed_kernel", recording_kernel("clear", calls))
@@ -18,7 +18,7 @@ def test_observer_launcher_consumes_previous_drafts_for_active_requests(monkeypa
         SimpleNamespace(shape=(128,)),
         SimpleNamespace(shape=(128,)),
     ]
-    ops.launch_suffix_observe(*states, K=3, K_PO2=4, num_warps=1)
+    ops.launch_suffix_observe(*states, **suffix_options["observe"], num_warps=1)
     assert [call[0] for call in calls] == ["observe", "clear"]
     _, grid, args, options = calls[0]
     assert grid == (18,)

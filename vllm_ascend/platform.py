@@ -274,6 +274,16 @@ class NPUPlatform(Platform):
             from vllm_ascend._310p.worker.v2.sample.dispatch import register_sampling_kernel_overrides
 
             register_sampling_kernel_overrides()
+            return
+
+        from vllm.triton_utils import HAS_TRITON
+
+        if not HAS_TRITON:
+            return
+
+        from vllm_ascend.triton_kernel_overrides import register_triton_kernels
+
+        register_triton_kernels()
 
     @classmethod
     def visible_device_id_to_physical_device_id(cls, device_id: int) -> int:

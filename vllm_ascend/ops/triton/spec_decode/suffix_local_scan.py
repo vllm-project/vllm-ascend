@@ -65,14 +65,16 @@ def _suffix_local_scan_kernel(
 
 
 def launch_suffix_local_scan(
-    token_ids: torch.Tensor,
-    _token_ids_stride: int,
-    idx_mapping: torch.Tensor,
-    total_len: torch.Tensor,
-    num_sampled: torch.Tensor,
-    scratch: torch.Tensor,
-    _scratch_stride: int,
-    position_radix: int,
+    token_ids_ptr: torch.Tensor,
+    token_ids_stride: int,
+    idx_mapping_ptr: torch.Tensor,
+    total_len_ptr: torch.Tensor,
+    num_sampled_ptr: torch.Tensor,
+    scratch_ptr: torch.Tensor,
+    scratch_stride: int,
+    Lp1: int,
+    MAX_DEPTH: int,
+    BLOCK: int,
     **launch_options,
 ) -> None:
     """Launch the NPU history scan using the upstream positional launch ABI.
@@ -81,15 +83,19 @@ def launch_suffix_local_scan(
     from idx_mapping, not the capacity of the history or scratch buffers.
     Reading tensor metadata requires no device-to-host transfer.
     """
-    num_reqs = idx_mapping.shape[0]
-    _suffix_local_scan_kernel[(num_reqs, scratch.shape[1])](
-        token_ids,
-        token_ids.stride(0),
-        idx_mapping,
-        total_len,
-        num_sampled,
-        scratch,
-        scratch.stride(0),
-        position_radix,
+    launch_options.update(
+        MAX_DEPTH=MAX_DEPTH,
+        BLOCK=BLOCK,
+    )
+    num_reqs = idx_mapping_ptr.shape[0]
+    _suffix_local_scan_kernel[(num_reqs, scratch_ptr.shape[1])](
+        token_ids_ptr,
+        token_ids_ptr.stride(0),
+        idx_mapping_ptr,
+        total_len_ptr,
+        num_sampled_ptr,
+        scratch_ptr,
+        scratch_ptr.stride(0),
+        Lp1,
         **launch_options,
     )

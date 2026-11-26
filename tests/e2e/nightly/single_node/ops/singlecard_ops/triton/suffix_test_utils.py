@@ -16,6 +16,9 @@ if current_platform.device_type != "npu":
 from vllm.v1.worker.gpu.spec_decode.suffix.speculator import SuffixSpeculator  # noqa: E402
 
 from vllm_ascend.patch.worker import patch_triton  # noqa: E402, F401
+from vllm_ascend.platform import NPUPlatform  # noqa: E402
+
+NPUPlatform.register_triton_kernel_overrides()
 
 DEVICE = torch.device("npu")
 

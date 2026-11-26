@@ -112,12 +112,14 @@ def _suffix_clear_observed_kernel(
 
 
 def launch_suffix_observe(
-    idx_mapping: torch.Tensor,
-    num_sampled: torch.Tensor,
-    num_rejected: torch.Tensor,
-    accept_stats: torch.Tensor,
-    last_bucket: torch.Tensor,
-    last_valid: torch.Tensor,
+    idx_mapping_ptr: torch.Tensor,
+    num_sampled_ptr: torch.Tensor,
+    num_rejected_ptr: torch.Tensor,
+    stats_ptr: torch.Tensor,
+    last_bucket_ptr: torch.Tensor,
+    last_valid_ptr: torch.Tensor,
+    K: int,
+    K_PO2: int,
     **launch_options,
 ) -> None:
     """Reduce active requests into NPU statistics buckets.
@@ -126,24 +128,28 @@ def launch_suffix_observe(
     buckets inside the reduction kernel would race the other bucket programs,
     so it runs as a second launch on the same stream after all reductions.
     """
-    num_reqs = idx_mapping.shape[0]
+    launch_options.update(
+        K=K,
+        K_PO2=K_PO2,
+    )
+    num_reqs = idx_mapping_ptr.shape[0]
     launch_options["K_PO2"] = triton.next_power_of_2(launch_options["K"])
     launch_options["REQS_PO2"] = triton.next_power_of_2(num_reqs)
     launch_options["num_warps"] = 4
-    _suffix_observe_kernel[(accept_stats.shape[0],)](
-        idx_mapping,
-        num_sampled,
-        num_rejected,
-        accept_stats,
-        last_bucket,
-        last_valid,
+    _suffix_observe_kernel[(stats_ptr.shape[0],)](
+        idx_mapping_ptr,
+        num_sampled_ptr,
+        num_rejected_ptr,
+        stats_ptr,
+        last_bucket_ptr,
+        last_valid_ptr,
         num_reqs,
         **launch_options,
     )
     _suffix_clear_observed_kernel[(triton.cdiv(num_reqs, _OBSERVE_RESET_BLOCK),)](
-        idx_mapping,
-        num_sampled,
-        last_bucket,
+        idx_mapping_ptr,
+        num_sampled_ptr,
+        last_bucket_ptr,
         num_reqs,
         BLOCK=_OBSERVE_RESET_BLOCK,
         num_warps=4,
