@@ -76,11 +76,6 @@ def _uniform_bounds_np(num_reqs: int, width: int) -> np.ndarray:
     return np.arange(0, (num_reqs + 1) * width, width, dtype=np.int32)
 
 
-@lru_cache(maxsize=64)
-def _arange_int64_np(count: int) -> np.ndarray:
-    return np.arange(count, dtype=np.int64)
-
-
 _ATTENTION_BLOCK_SIZE_LIMIT = 128 * 128
 
 
@@ -405,16 +400,13 @@ class NPUModelRunner310V2(NPUModelRunner):
         self.input_buffers.seq_lens_np[num_reqs_padded:] = 0
         total_num_logits = num_reqs if not draft_tokens_map else int(cu_num_logits_np[-1])
         logits_indices_np = self._logits_indices.np[:total_num_logits]
-        if np.array_equal(cu_num_logits_np, query_start_loc_np[: num_reqs + 1]):
-            logits_indices_np[:] = _arange_int64_np(total_num_logits)
-        else:
-            for batch_idx in range(num_reqs):
-                logits_start = int(query_start_loc_np[batch_idx + 1]) - int(
-                    cu_num_logits_np[batch_idx + 1] - cu_num_logits_np[batch_idx]
-                )
-                cu_start = int(cu_num_logits_np[batch_idx])
-                cu_end = int(cu_num_logits_np[batch_idx + 1])
-                logits_indices_np[cu_start:cu_end] = range(logits_start, logits_start + cu_end - cu_start)
+        for batch_idx in range(num_reqs):
+            logits_start = int(query_start_loc_np[batch_idx + 1]) - int(
+                cu_num_logits_np[batch_idx + 1] - cu_num_logits_np[batch_idx]
+            )
+            cu_start = int(cu_num_logits_np[batch_idx])
+            cu_end = int(cu_num_logits_np[batch_idx + 1])
+            logits_indices_np[cu_start:cu_end] = range(logits_start, logits_start + cu_end - cu_start)
         logits_indices = self._logits_indices.gpu[:total_num_logits]
         self._logits_indices.copy_to_gpu(total_num_logits)
 

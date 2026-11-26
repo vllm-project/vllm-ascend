@@ -521,25 +521,6 @@ def prepare_decode_inputs_cpu(
     ``sample_src_positions``) so patched call sites stay compatible.
     """
     del max_num_reqs
-    if _ASYNC_MTP_STATE.get() is not None:
-        n = draft_tokens.shape[0]
-        device = input_buffers.input_ids.device
-        indices = cached_offsets(device, input_buffers.input_ids.numel())
-        qsl, _ = cached_layout(device, n, 1, input_buffers.query_start_loc.dtype)
-        copy_prefix_310p(input_buffers.input_ids, draft_tokens.to(input_buffers.input_ids.dtype), indices)
-        sample_src_positions[:n].add_(1)
-        seq_lens = target_seq_lens[:n] - num_rejected[:n]
-        if advance_draft_positions:
-            pos = input_buffers.positions[:n]
-            pos.add_(1)
-            pos.clamp_max_(max_model_len - 1)
-            seq_lens = (seq_lens + 1).clamp_max(max_model_len)
-        input_buffers.query_start_loc.fill_(n)
-        copy_prefix_310p(input_buffers.query_start_loc, qsl, indices)
-        input_buffers.seq_lens.zero_()
-        copy_prefix_310p(input_buffers.seq_lens, seq_lens.to(input_buffers.seq_lens.dtype), indices)
-        return
-
     num_reqs = draft_tokens.shape[0]
     device = input_buffers.input_ids.device
     draft_np = draft_tokens[:num_reqs].detach().cpu().numpy()
