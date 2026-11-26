@@ -46,7 +46,7 @@ vllm serve Qwen/Qwen3-1.7B \
 
 ## Speculative Decoding Methods
 
-| `method` | Draft source |
+| `method` | Draft source or purpose |
 | --- | --- |
 | [`ngram_gpu`](#speculating-by-matching-n-grams-in-the-prompt) | Prompt n-gram matches on the NPU |
 | [`eagle`, `eagle3`](#speculating-using-eagle-based-draft-models) | A matching EAGLE or EAGLE-3 checkpoint |
@@ -54,6 +54,7 @@ vllm serve Qwen/Qwen3-1.7B \
 | [`dflash`](#speculating-using-dflash) | A DFlash, [DFlash2](#speculating-using-dflash2), or [LiLiCorr](#speculating-using-lilicorr) checkpoint |
 | [`dspark`](#speculating-using-dspark) | A matching DSpark checkpoint |
 | [`draft_model`](#speculating-using-a-draft-model) | A compatible standalone draft LLM with the same vocabulary size |
+| [`extract_hidden_states`](#extracting-hidden-states) | Target hidden states for draft-model training |
 
 ### N-gram {: #speculating-by-matching-n-grams-in-the-prompt }
 
@@ -187,6 +188,29 @@ vllm serve Qwen/Qwen3-8B \
   --enforce-eager \
   --no-enable-prefix-caching \
   --speculative-config '{"method":"draft_model","model":"Qwen/Qwen3-0.6B","num_speculative_tokens":3}'
+```
+
+### Hidden State Extraction {: #extracting-hidden-states }
+
+Use `extract_hidden_states` with `num_speculative_tokens=1` to collect training
+data for EAGLE-style drafts. Select layers with
+`draft_model_config.hf_config.eagle_aux_hidden_state_layer_ids` and use
+`ExampleHiddenStatesConnector` with `kv_role="kv_producer"`. The connector
+writes one `.safetensors` file per request to `shared_storage_path`. See the
+[upstream offline example](https://docs.vllm.ai/en/latest/features/speculative_decoding/extract_hidden_states/#offline-example).
+
+```shell
+vllm serve Qwen/Qwen3-8B \
+  --speculative-config '{
+    "method":"extract_hidden_states",
+    "num_speculative_tokens":1,
+    "draft_model_config":{"hf_config":{"eagle_aux_hidden_state_layer_ids":[2,18,34]}}
+  }' \
+  --kv-transfer-config '{
+    "kv_connector":"ExampleHiddenStatesConnector",
+    "kv_role":"kv_producer",
+    "kv_connector_extra_config":{"shared_storage_path":"/dev/shm/hidden_states"}
+  }'
 ```
 
 ## Sampling Configuration
@@ -365,29 +389,6 @@ vllm serve Qwen/Qwen3-8B \
 Adaptive verification on hybrid GDN targets requires triton-ascend and is
 unsupported on 310P. Compare fixed and adaptive DSpark at the same workload
 and concurrency. See the [upstream adaptive verification guide](https://docs.vllm.ai/en/latest/features/speculative_decoding/adaptive_verification/).
-
-### Hidden State Extraction {: #extracting-hidden-states }
-
-Use `extract_hidden_states` with `num_speculative_tokens=1` to collect training
-data for EAGLE-style drafts. Select layers with
-`draft_model_config.hf_config.eagle_aux_hidden_state_layer_ids` and use
-`ExampleHiddenStatesConnector` with `kv_role="kv_producer"`. The connector
-writes one `.safetensors` file per request to `shared_storage_path`. See the
-[upstream offline example](https://docs.vllm.ai/en/latest/features/speculative_decoding/extract_hidden_states/#offline-example).
-
-```shell
-vllm serve Qwen/Qwen3-8B \
-  --speculative-config '{
-    "method":"extract_hidden_states",
-    "num_speculative_tokens":1,
-    "draft_model_config":{"hf_config":{"eagle_aux_hidden_state_layer_ids":[2,18,34]}}
-  }' \
-  --kv-transfer-config '{
-    "kv_connector":"ExampleHiddenStatesConnector",
-    "kv_role":"kv_producer",
-    "kv_connector_extra_config":{"shared_storage_path":"/dev/shm/hidden_states"}
-  }'
-```
 
 ### RecoverSSM on Qwen3.x {: #recoverssm-compatibility }
 
