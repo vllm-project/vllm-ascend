@@ -2,6 +2,7 @@
 # Extracted with vllm-project/recipes@cb7c0e949bcb2bf580fcbd0d1d4e2e69ebf502ee.
 
 meta:
+  date_updated: "2026-11-26"
   hardware:
     # verified: the four-node DP4/TP8 pool came up completely, /health returned
     # 200, and both a single request and 8 concurrent requests returned 200.
@@ -81,7 +82,21 @@ strategy_hardware:
   multi_node_tep:
     npu: unsupported
   pd_cluster:
+    # npu: unsupported keeps the brand-level default off (the base lists
+    # pd_cluster, so absence would fail open); the specific ascend_910b key
+    # overrides it for the A2 preset lane.
     npu: unsupported
+    # The A2 4P+4D lane is offered through the `ascend_pd_a2` preset below
+    # (tutorial §5.2 "A2 series" tab); the plain pools stay selectable on
+    # ascend_910b without a preset (schema caveat: the floor does not gate
+    # connector choice and `unsupported` would disable the preset too), so
+    # the notes direct users to the preset.
+    # ascend_910c stays unavailable: the tutorial's A3 PD lane is a
+    # PP2+PCP8 engine, and native PCP inside a pd_cluster preset requires
+    # the vLLM Router with NIXL (validator: "PD prefill: native PCP
+    # requires vLLM Router with the NIXL connector") — not expressible as
+    # an Ascend-Router/Mooncake preset today.
+    ascend_910b: supported
   # Validated topology is a co-located multi-node pool, not prefill/decode
   # disaggregation: all four nodes form one DP group with one local DP rank
   # each, so this declares the cross-node DEP combination.
@@ -91,8 +106,12 @@ strategy_hardware:
 
 strategy_min_gpus:
   # On ascend_910c the verified deployment needs two 16-NPU nodes; single-node
-  # strategies cannot clear this floor and drop out on that hardware.
-  ascend_910c: 32
+  # strategies cannot clear this floor and drop out on that hardware. The
+  # A2 PD lane (ascend_910b) needs four nodes per pool.
+  ascend_910c:
+    multi_node_tp_dp: 32
+  ascend_910b:
+    pd_cluster: 64
 
 variants:
   # Variants inherited from the base recipe (default / fp8 / dspark) are also
@@ -136,11 +155,10 @@ variants:
           pip: false
   ascend_w4a8:
     model_id: Eco-Tech/DeepSeek-V4-Pro-0813-w4a8
-    label: W4A8 (Ascend A2)
+    label: W4A8 (ASCEND A2)
     precision: int4
-    # Measured checkpoint footprint 811.48 GiB = 871 GB; the template asks for
-    # a 1.2x headroom, so 871 x 1.2 ~= 1045 GB. This is a capacity hint, not a
-    # hardware gate.
+    # Measured checkpoint footprint 811.48 GiB = 871 GB; with a 1.2x headroom,
+    # 871 x 1.2 ~= 1045 GB. This is a capacity hint, not a hardware gate.
     vram_minimum_gb: 1045
     description: >-
       ModelSlim INT4 W4A8 (4-bit weights, 8-bit activations) for a four-node
@@ -151,6 +169,9 @@ variants:
       by TP. Requires --quantization ascend.
     supported_hardware:
       - ascend_910b
+      # tutorial §3.1 lists the 0813-w4a8 checkpoint for 2x A3 (128GB x 8)
+      # as well.
+      - ascend_910c
     # supported_features is declared without spec_decoding on purpose: the
     # base recipe gates spec_decoding.modes.mtp / dspark behind a variant
     # allowlist (mtp: fp8/nvfp4/redhat_nvfp4, dspark: default/dspark) that an
@@ -229,11 +250,16 @@ variants:
         docker_serve_command: "vllm serve"
         install:
           pip: false
+      ascend_910c:
+        docker_image: quay.io/ascend/vllm-ascend:v0.32.0rc1-a3
+        docker_serve_command: "vllm serve"
+        install:
+          pip: false
 
   ascend_w4a8_mtp:
     model_id: Eco-Tech/DeepSeek-V4-Pro-w4a8-mtp
     precision: int4
-    label: W4A8-MTP (Ascend)
+    label: W4A8-MTP (ASCEND)
     vram_minimum_gb: 790
     supported_hardware:
       - ascend_910c
@@ -405,14 +431,208 @@ presets:
       GLOO_SOCKET_IFNAME: $IFACE_NAME
       TP_SOCKET_IFNAME: $IFACE_NAME
 
+  ascend_pd_a2:
+    label: "0813-W4A8 PD (A2, 4P+4D)"
+    hardware: ascend_910b
+    strategy: pd_cluster
+    variants: [ascend_w4a8]
+    default: false
+    select:
+      pd_router: ascend
+      pd_connector: mooncake_ascend
+      frontend: python
+    remove_args:
+      # Guard: drop --data-parallel-hybrid-lb; the builder emits it on
+      # multi-node DEP pools and the tutorial PD commands do not carry it
+      # (MooncakeHybridConnector here is the KV connector, unrelated).
+      - '--data-parallel-hybrid-lb'
+      # The base_args carry --kv-cache-dtype fp8; the validated W4A8 PD
+      # commands pass no kv-cache-dtype flag.
+      - '--kv-cache-dtype'
+    workload: 'Prefill/decode separation (4P+4D), 4+4 Atlas 800I A2 (64GB x 8) nodes, Mooncake'
+    source:
+      label: "DeepSeek-V4-Pro tutorial, section 5.2 (A2 series tab)"
+      href: https://docs.vllm.ai/projects/ascend/en/latest/tutorials/models/DeepSeek-V4-Pro.html
+      key: dsv4pro-a2-w4a8-pd-4p4d
+      revision: "2026-11-26"
+    image:
+      vllm: quay.io/ascend/vllm-ascend:v0.32.0rc1
+      model_revision: master
+    runbook: |
+      ## Evidence and versions
+
+      - Source: tutorial §5.2 "A2 series" tab, transcribed value-by-value
+        (4 Prefill nodes + 4 Decode nodes, each pool DP4/TP8 with one DP
+        rank per node; weights DeepSeek-V4-Pro-0813-w4a8, DSpark draft
+        included in the checkpoint, 7 speculative tokens)
+      - Image: quay.io/ascend/vllm-ascend:v0.32.0rc1 (the 0813-w4a8 + DSpark
+        lane is first-party verified on this image on Atlas 800I A2 for the
+        co-located lane; the PD lane end-to-end run is pending)
+      - Checkpoint: Eco-Tech/DeepSeek-V4-Pro-0813-w4a8 (ModelScope, master)
+      - Validation status: not validated end-to-end; rendering verified
+        against the official builder
+
+      ## Transcription notes
+
+      Flags and env injected by the builder's strategy/base layers (and the
+      variant's own extra_env) are builder defaults, not part of the
+      transcription.
+
+      Transcribed from tutorial §5.2 (Multi-Node PD Separation Deployment,
+      A2 series tab). Differences against the tutorial commands: the
+      --served-model-name dsv4 rename is omitted (page curls use the
+      variant model_id), matching the recipe family treatment. The tutorial
+      deploys Mooncake and the PD proxy outside the engine commands. This
+      lane uses MooncakeHybridConnector per the tutorial. Note that the
+      tutorial §5.1 A2 tab currently shows the w4a8-mtp checkpoint for the
+      co-located lane, while this PD lane (and the co-located preset above)
+      documents the 0813-w4a8 checkpoint. The 950DT PD lane of §5.2 and the
+      §5.3 KV-Cache-Pool variants are outside this overlay's hardware scope
+      and are not preset-rendered here.
+
+      ## Startup order
+
+      Fill the rendered $PREFILL_NODE_n / $DECODE_NODE_n / $IFACE_NAME /
+      $ROUTER_PORT addresses, start the four Prefill ranks and then the four
+      Decode ranks, and finally run the Ascend Router proxy command on the
+      proxy host; verify /health on every rank before sending requests.
+    roles:
+      prefill:
+        nodes: 4
+        parallelism: dep
+        tp: 8
+        args:
+          - '--enable-expert-parallel'
+          - '--max-model-len'
+          - '150000'
+          - '--max-num-batched-tokens'
+          - '4096'
+          - '--max-num-seqs'
+          - '16'
+          - '--gpu-memory-utilization'
+          - '0.92'
+          - '--block-size'
+          - '32'
+          - '--no-enable-prefix-caching'
+          - '--no-disable-hybrid-kv-cache-manager'
+          - '--tokenizer-mode'
+          - deepseek_v4
+          - '--tool-call-parser'
+          - deepseek_v4
+          - '--enable-auto-tool-choice'
+          - '--reasoning-parser'
+          - deepseek_v4
+          - '--trust-remote-code'
+          - '--seed'
+          - '1024'
+          - '--enforce-eager'
+          - '--model-loader-extra-config'
+          - '{"enable_multithread_load": true, "num_threads": 128}'
+          - '--speculative-config'
+          - '{"num_speculative_tokens": 7, "method":"dspark", "enforce_eager": true}'
+          - '--additional-config'
+          - '{"enable_cpu_binding":true,"enable_shared_expert_dp":true,"enable_flashcomm1":true,"enable_fused_mc2":1}'
+        env:
+          VLLM_USE_V2_MODEL_RUNNER: '1'
+          HCCL_OP_EXPANSION_MODE: AIV
+          TASK_QUEUE_ENABLE: '1'
+          VLLM_RPC_TIMEOUT: '3600000'
+          VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS: '30000'
+          HCCL_EXEC_TIMEOUT: '3600'
+          HCCL_CONNECT_TIMEOUT: '6000'
+          OMP_PROC_BIND: 'false'
+          OMP_NUM_THREADS: '10'
+          PYTORCH_NPU_ALLOC_CONF: expandable_segments:True
+          HCCL_BUFFSIZE: '1024'
+          HCCL_IF_IP: $PREFILL_NODE_1
+          GLOO_SOCKET_IFNAME: $IFACE_NAME
+          HCCL_SOCKET_IFNAME: $IFACE_NAME
+          TP_SOCKET_IFNAME: $IFACE_NAME
+        json_args:
+          --kv-transfer-config:
+            kv_connector: MooncakeHybridConnector
+            kv_role: kv_producer
+            kv_port: '30000'
+            kv_connector_extra_config:
+              prefill:
+                dp_size: '{prefill_dp_size}'
+                tp_size: 8
+              decode:
+                dp_size: '{decode_dp_size}'
+                tp_size: 8
+      decode:
+        nodes: 4
+        parallelism: dep
+        tp: 8
+        args:
+          - '--enable-expert-parallel'
+          - '--max-model-len'
+          - '150000'
+          - '--max-num-batched-tokens'
+          - '256'
+          - '--max-num-seqs'
+          - '32'
+          - '--async-scheduling'
+          - '--gpu-memory-utilization'
+          - '0.92'
+          - '--block-size'
+          - '32'
+          - '--no-enable-prefix-caching'
+          - '--compilation-config'
+          - '{"cudagraph_mode": "FULL_DECODE_ONLY"}'
+          - '--tokenizer-mode'
+          - deepseek_v4
+          - '--tool-call-parser'
+          - deepseek_v4
+          - '--enable-auto-tool-choice'
+          - '--reasoning-parser'
+          - deepseek_v4
+          - '--trust-remote-code'
+          - '--seed'
+          - '1024'
+          - '--model-loader-extra-config'
+          - '{"enable_multithread_load": true, "num_threads": 128}'
+          - '--speculative-config'
+          - '{"num_speculative_tokens": 7, "method":"dspark", "enforce_eager": true}'
+          - '--additional-config'
+          - '{"ascend_compilation_config":{"enable_npugraph_ex":true,"enable_static_kernel":false}, "enable_cpu_binding":true, "multistream_overlap_shared_expert":true, "scheduler_config":{"recompute_scheduler_enable":true}}'
+        env:
+          VLLM_USE_V2_MODEL_RUNNER: '1'
+          HCCL_OP_EXPANSION_MODE: AIV
+          TASK_QUEUE_ENABLE: '1'
+          VLLM_RPC_TIMEOUT: '3600000'
+          VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS: '30000'
+          HCCL_EXEC_TIMEOUT: '3600'
+          HCCL_CONNECT_TIMEOUT: '1200'
+          OMP_PROC_BIND: 'false'
+          OMP_NUM_THREADS: '10'
+          PYTORCH_NPU_ALLOC_CONF: expandable_segments:True
+          HCCL_BUFFSIZE: '1800'
+          HCCL_IF_IP: $DECODE_NODE_1
+          GLOO_SOCKET_IFNAME: $IFACE_NAME
+          HCCL_SOCKET_IFNAME: $IFACE_NAME
+          TP_SOCKET_IFNAME: $IFACE_NAME
+        json_args:
+          --kv-transfer-config:
+            kv_connector: MooncakeHybridConnector
+            kv_role: kv_consumer
+            kv_port: '30100'
+            kv_connector_extra_config:
+              prefill:
+                dp_size: '{prefill_dp_size}'
+                tp_size: 8
+              decode:
+                dp_size: '{decode_dp_size}'
+                tp_size: 8
+
 notes:
-  - title: "Ascend 910C: use the W4A8-MTP (Ascend) variant"
+  - title: "Ascend 910C: use the W4A8-MTP (ASCEND) variant"
     when: { hardware: [ascend_910c] }
     body: |
       The `default` / `fp8` / `dspark` checkpoints are NVIDIA FP8/FP4 builds
       that are not validated on Ascend 910C; the Ascend image and pip pins
       only make the commands runnable. The first-party verified deployment on
-      2x Atlas 800 A3 is the **W4A8-MTP (Ascend)** variant (DP2xTP16 + MTP).
+      2x Atlas 800 A3 is the **W4A8-MTP (ASCEND)** variant (DP2xTP16 + MTP).
 
   - title: "Atlas 800 A2 (910B): use the A2 W4A8 preset"
     when: { hardware: [ascend_910b] }
@@ -424,11 +644,18 @@ notes:
       NVIDIA FP8 checkpoint with strategy defaults (local DP 8, fp8 KV cache,
       hybrid LB) that are not the validated topology — and the three follower
       nodes still need `--headless` appended by hand (see the hardware note).
-  - title: "Prefill/decode separation is not offered here yet"
+  - title: "Prefill/decode separation on Ascend"
     when: { hardware: [ascend_910b, ascend_910c] }
     body: |
-      This overlay disables `pd_cluster` and carries no PD preset. The
-      Ascend tutorial documents two validated PD lanes for this model in
-      §5.2 (Multi-Node PD Separation Deployment) — A3 (2P+2D, PP2+PCP8,
-      Mooncake) and A2 (4P+4D) — follow the tutorial's commands there for
-      now: https://docs.vllm.ai/projects/ascend/en/latest/tutorials/models/DeepSeek-V4-Pro.html
+      PD separation on Atlas 800I A2 is offered as the opt-in
+      **0813-W4A8 PD (A2, 4P+4D)** preset transcribed from tutorial §5.2.
+      Select the preset when deploying PD — the plain `pd_cluster` pool
+      renders the base recipe's generic topology, which is not the
+      validated Ascend route. The tutorial's A3 PD lane (2P+2D, one PP2
+      engine with PCP8 spread over two nodes) cannot be preset-rendered
+      today: native PCP inside a preset requires the vLLM Router with the
+      NIXL connector rather than the Ascend Router with Mooncake — follow
+      the tutorial's §5.2 "A3 series" commands there for now. The tutorial
+      also documents a 950DT PD lane (outside this overlay's hardware
+      scope) and §5.3 KV-cache-pool variants; an upstream schema request
+      for preset-expressible PCP is planned.
