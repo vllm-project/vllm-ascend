@@ -7,7 +7,6 @@ from __future__ import annotations
 from collections.abc import Sequence
 from contextlib import AbstractContextManager, nullcontext
 from copy import deepcopy
-from functools import lru_cache
 from typing import Any
 
 import numpy as np
@@ -48,10 +47,8 @@ from vllm_ascend._310p.worker.v2.block_table import Ascend310PBlockTables
 from vllm_ascend._310p.worker.v2.input_batch import Ascend310PInputBatch
 from vllm_ascend._310p.worker.v2.kv_block_zeroer import AscendKVBlockZeroer310V2
 from vllm_ascend._310p.worker.v2.spec_utils import (
-    cached_offsets,
     clear_prefill_host_meta,
     combine_sampled_and_draft_tokens_cpu,
-    copy_prefix_310p,
     expand_idx_mapping_cpu,
     get_async_mtp_commit,
     reset_async_mtp_commit,
@@ -69,12 +66,6 @@ from vllm_ascend.utils import (
 )
 from vllm_ascend.worker.v2.attn_utils import build_attn_state
 from vllm_ascend.worker.v2.model_runner import NPUModelRunner
-
-
-@lru_cache(maxsize=64)
-def _uniform_bounds_np(num_reqs: int, width: int) -> np.ndarray:
-    return np.arange(0, (num_reqs + 1) * width, width, dtype=np.int32)
-
 
 _ATTENTION_BLOCK_SIZE_LIMIT = 128 * 128
 
@@ -1158,45 +1149,6 @@ class NPUModelRunner310V2(NPUModelRunner):
     ) -> None:
         """Build host-owned inputs, then patch decode tokens from NPU state."""
         draft_tokens_map = draft_tokens_map or {}
-        num_reqs = idx_mapping_np.size
-        # Fast path for uniform greedy MTP pure-decode batches: assemble
-        # [last_sampled_tokens, draft_tokens[:, :k]] directly on device,
-        # avoiding 5 H2D index/zero copies and 2 ScatterUpdate kernels per step.
-        temp_np = getattr(getattr(self, "sampler", None), "_temperature_np", None)
-        greedy_only = temp_np is None or not bool(np.any(temp_np[idx_mapping_np] >= 1e-5))
-        if (
-            draft_tokens_map
-            and num_reqs > 0
-            and greedy_only
-            and not np.any(self.req_states.num_computed_tokens_np[idx_mapping_np] < prefill_len_np)
-        ):
-            first_drafts = draft_tokens_map.get(req_ids[0], ())
-            k = len(first_drafts)
-            width = k + 1
-            if (
-                k > 0
-                and k <= self.req_states.draft_tokens.shape[1]
-                and all(len(draft_tokens_map.get(req_id, ())) == k for req_id in req_ids)
-                and np.array_equal(query_start_loc_np[: num_reqs + 1], _uniform_bounds_np(num_reqs, width))
-            ):
-                num_active_tokens = num_reqs * width
-                req_idx_dev = idx_mapping[:num_reqs].to(torch.int64)
-                last_toks = self.req_states.last_sampled_tokens.index_select(0, req_idx_dev)
-                draft_toks = self.req_states.draft_tokens.index_select(0, req_idx_dev)[:, :k]
-                combined = (
-                    torch.cat((last_toks, draft_toks.to(last_toks.dtype)), dim=1)
-                    .reshape(-1)
-                    .to(self.input_buffers.input_ids.dtype)
-                )
-                offsets = cached_offsets(
-                    self.input_buffers.input_ids.device,
-                    self.input_buffers.input_ids.numel(),
-                )
-                copy_prefix_310p(self.input_buffers.input_ids, combined, offsets)
-                if num_active_tokens < num_tokens_after_padding:
-                    self.input_buffers.input_ids[num_active_tokens:num_tokens_after_padding].zero_()
-                return
-
         self.input_ids_cpu[:num_tokens_after_padding].zero_()
         self.next_prefill_tokens_cpu.zero_()
         decode_req_indices: list[int] = []
