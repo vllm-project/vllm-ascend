@@ -1,0 +1,7 @@
+pr: 23381
+entries:
+  - category: bugfix
+    text: >-
+      Fixed MLA LoRA adapters being bypassed by cached projection references or
+      absorbed KV-B weights in Ascend MLA and sparse-attention backends.
+      Adapter increments now reach both query absorption and value expansion.

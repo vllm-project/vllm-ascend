@@ -199,6 +199,7 @@ def test_mxfp8_mla_fused_preprocess_owns_nz_conversion(
     original_weights = [layer.weight.float().clone() for layer in projections]
     original_scales = [layer.weight_scale.clone() for layer in projections]
     config = SimpleNamespace(
+        lora_config=None,
         model_config=SimpleNamespace(
             runner_type="draft" if is_draft else "generate",
             dtype=torch.bfloat16,
@@ -1789,6 +1790,7 @@ class TestAscendMLAImpl(TestBase):
         mock_tp.rank_in_group = MagicMock()
         mock_tp.device_group = MagicMock()
         vllm_config = MagicMock()
+        vllm_config.lora_config = None
         speculative_config = MagicMock()
         model_config = MagicMock()
         parallel_config = MagicMock()

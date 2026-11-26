@@ -1088,6 +1088,7 @@ class TestAscendSFAImpl(TestBase):
         vllm_config.kv_transfer_config = None
         # Pin both live-weight-update switches off: a bare MagicMock attribute
         # is truthy and would silently enable the RL keep-alive paths.
+        vllm_config.lora_config = None
         vllm_config.weight_transfer_config = None
         vllm_config.speculative_config = MagicMock()
         vllm_config.speculative_config.num_speculative_tokens = 0
