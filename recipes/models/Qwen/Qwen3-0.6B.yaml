@@ -4,12 +4,12 @@ meta:
   provider: Qwen
   description: Run the 0.6B dense Qwen3 text model on Ascend NPUs.
   date_added: '2026-11-19'
-  date_updated: '2026-11-19'
+  date_updated: '2026-11-26'
   tasks:
     - text
   hardware:
     ascend_910b: supported
-    ascend_910c: supported
+    ascend_910c: verified
 model:
   model_id: Qwen/Qwen3-0.6B
   architecture: dense
@@ -29,24 +29,24 @@ variants:
       ascend_910b:
         docker_image: quay.io/ascend/vllm-ascend:nightly-main
         docker_serve_command: vllm serve
+        extra_args: [--dtype, bfloat16]
         install:
           pip: false
       ascend_910c:
         docker_image: quay.io/ascend/vllm-ascend:nightly-main-a3
         docker_serve_command: vllm serve
+        extra_args: [--dtype, bfloat16]
         install:
           pip: false
-hardware_overrides:
-  ascend_910b:
-    extra_args:
-      - --dtype
-      - bfloat16
-  ascend_910c:
-    extra_args:
-      - --dtype
-      - bfloat16
 compatible_strategies:
   - single_node_tp
+features:
+  tool_calling:
+    description: Enable automatic tool choice with the Hermes parser
+    args: [--enable-auto-tool-choice, --tool-call-parser, hermes]
+  reasoning:
+    description: Enable Qwen3 thinking mode with the Qwen3 reasoning parser
+    args: [--reasoning-parser, qwen3]
 guide: |
   ## Ascend deployment
 
