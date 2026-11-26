@@ -251,10 +251,8 @@ vllm serve Qwen/Qwen3-8B \
 target's unquantized, full-vocabulary LM head. The checkpoint supplies the
 candidate selector settings and supported draft lengths.
 
-!!! note "Draft ACLGraph"
-
-    Full draft ACLGraph capture requires target `FULL_DECODE_ONLY` or
-    `FULL_AND_PIECEWISE` and draft `enforce_eager` unset or false.
+Full draft ACLGraph capture requires target `FULL_DECODE_ONLY` or
+`FULL_AND_PIECEWISE` and draft `enforce_eager` unset or false.
 
 **Offline inference**
 
@@ -299,11 +297,9 @@ trained block size minus one. Both plain and convolutional checkpoints support
 greedy and probabilistic drafting with standard TP. The example uses a draft
 checkpoint from ModelScope.
 
-!!! warning "LiLiCorr on Ascend"
-
-    Set `"enforce_eager":true` inside `speculative_config` for the draft.
-    Fine-grained embedding or LM-head TP and PCP vocabulary sharding are
-    unsupported. Quantized draft weights require an Ascend-supported format.
+Set `"enforce_eager":true` inside `speculative_config` for the draft.
+Fine-grained embedding or LM-head TP and PCP vocabulary sharding are
+unsupported. Quantized draft weights require an Ascend-supported format.
 
 **Offline inference**
 
@@ -356,13 +352,11 @@ a length supported by that checkpoint. If an MLA draft uses BF16 while the
 target uses FP8 KV cache, set `"kv_cache_dtype":"bfloat16"` in
 `speculative_config`.
 
-!!! note "GLM draft attention on 950DT"
-
-    GLM with a compatible GQA draft can use CANN FlashAttn. Compatible MLA
-    drafts can use FlashMLA. Both paths require FP16 or BF16 queries and an
-    unquantized draft KV cache. FlashAttn pads 192-wide GQA heads to 256,
-    using one third more draft KV cache memory for those heads. MLA drafts
-    fall back to FIA if the FlashMLA query-head layout is unsupported.
+On 950DT, GLM with a compatible GQA draft can use CANN FlashAttn.
+Compatible MLA drafts can use FlashMLA. Both paths require FP16 or BF16
+queries and an unquantized draft KV cache. FlashAttn pads 192-wide GQA heads
+to 256, using one third more draft KV cache memory for those heads. MLA
+drafts fall back to FIA if the FlashMLA query-head layout is unsupported.
 
 **Offline inference**
 
@@ -721,14 +715,12 @@ vllm serve Qwen/Qwen3-8B \
   }'
 ```
 
-<span id="ascend-specific-notes"></span>
+#### Ascend-specific Notes {: #ascend-specific-notes }
 
-!!! note "Ascend-specific notes"
-
-    Ascend supports synthetic acceptance for both greedy and non-greedy
-    requests. The NPU rejection kernel draws uniform values with FP32 Triton
-    `tl.rand` and clamps them away from zero. The configuration fields match
-    upstream vLLM.
+Ascend supports synthetic acceptance for both greedy and non-greedy
+requests. The NPU rejection kernel draws uniform values with FP32 Triton
+`tl.rand` and clamps them away from zero. The configuration fields match
+upstream vLLM.
 
 ## Other Speculative Decoding Settings
 
@@ -777,11 +769,9 @@ vllm serve Qwen/Qwen3-8B \
   }'
 ```
 
-!!! warning "Parallelism"
-
-    Use DP=1 and DCP=1. With DP greater than 1, the engine falls back to a
-    fixed draft length. Ascend rejects DCP greater than 1 when the dynamic
-    schedule is active.
+Use DP=1 and DCP=1. With DP greater than 1, the engine falls back to a fixed
+draft length. Ascend rejects DCP greater than 1 when the dynamic schedule is
+active.
 
 ### Adaptive Verification {: #adaptive-verification }
 
@@ -795,13 +785,11 @@ request.
     `PIECEWISE` modes are unsupported, as are PP, PCP, DCP, and LoRA.
     Commercial use is restricted.
 
-!!! note "Performance on Ascend"
-
-    Compare fixed and adaptive verification at your serving concurrency.
-    Adaptive verification can add latency in latency-sensitive or host-bound
-    workloads. Gains can be limited when draft acceptance is already high.
-    Check scheduled and admitted draft counts in DEBUG logs when diagnosing
-    performance.
+Compare fixed and adaptive verification at your serving concurrency.
+Adaptive verification can add latency in latency-sensitive or host-bound
+workloads. Gains can be limited when draft acceptance is already high.
+Check scheduled and admitted draft counts in DEBUG logs when diagnosing
+performance.
 
 **Offline inference**
 
@@ -840,11 +828,9 @@ vllm serve Qwen/Qwen3-8B \
 
 #### Hybrid Gated DeltaNet Targets {: #hybrid-gated-deltanet-targets }
 
-!!! note "Ascend backend"
-
-    Adaptive verification on hybrid GDN targets requires triton-ascend and is
-    unsupported on 310P. See the
-    [upstream adaptive verification guide](https://docs.vllm.ai/en/latest/features/speculative_decoding/adaptive_verification/).
+Adaptive verification on hybrid GDN targets requires triton-ascend and is
+unsupported on 310P. See the
+[upstream adaptive verification guide](https://docs.vllm.ai/en/latest/features/speculative_decoding/adaptive_verification/).
 
 ### RecoverSSM on Qwen3.x {: #recoverssm-compatibility }
 
