@@ -19,7 +19,7 @@
 | --- | --- | --- | --- |
 | compact group indices | input | `[query_rows, groups + 3]` | int32, strided 2-D |
 | query positions | input | `[query_rows]` | int64 |
-| sequence lengths | input | `[requests]` | int32 |
+| sequence lengths | input | `[requests]` | int32/int64; packing honors the element stride |
 | token-to-request map | input | `[query_rows]` | int32 |
 | block table | input | `[requests, pages]` | int32, arbitrary positive row/column stride |
 | GBSA sparse indices | output | `[kv_heads, query_rows, output_groups]` | int32, `-1` padding |
@@ -29,7 +29,7 @@ The Qwen3.8 LightningIndexer ABI fixes `token_topk=2048`, `compress_ratio=4`, an
 ## Tiling, specialization, and graph constraints
 
 - `GROUPS`, `OUTPUT_GROUPS`, `GROUP_BLOCK`, `KV_HEADS`, `TABLE_BLOCK`, and QSA packing widths affect vector/tile shape and remain `tl.constexpr`. Their serving variant sets are model-static or bounded powers of two.
-- KV length, visible length, row count, tensor strides, and request IDs are runtime values and do not create per-request JIT variants.
+- KV length, visible length, row count, tensor strides, and request IDs are runtime values. Backend type/alignment specialization still applies; packing sequence-length stride 1 versus a strided view can select distinct bounded variants.
 - `TABLE_BLOCK` is the bounded power-of-two capacity of the configured block table.
 - Triton-Ascend 3.6.0.post2 only requires power-of-two `tl.arange` ranges in SIMT mode. The A3 HACC lowering used here accepts and emits the fixed 515-lane QSA packing range; a real-NPU compile/run test and TTIR are retained with validation evidence.
 

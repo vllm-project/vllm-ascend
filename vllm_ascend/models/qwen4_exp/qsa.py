@@ -121,7 +121,7 @@ def _compress_qsa_groups(
     rope_cache: torch.Tensor | None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Pool completed groups with the fused QSA compression kernel."""
-    return qsa_compress_groups_with_ratio_fused(
+    result = qsa_compress_groups_with_ratio_fused(
         raw_keys,
         raw_positions,
         compressor_state_cache,
@@ -133,6 +133,8 @@ def _compress_qsa_groups(
         compress_ratio,
         rope_cache,
     )
+    assert result is not None
+    return result
 
 
 def _qsa_cache_is_bound(kv_cache: QSAKVCache) -> bool:
@@ -282,12 +284,11 @@ class AscendQSAIndexer(upstream_indexer.QSAIndexer):
     ) -> torch.Tensor:
         logger.info_once("QSA indexer is using fused RMSNorm + MRoPE.")
         cache = self.rotary_emb._match_cos_sin_cache_dtype(tensor)  # noqa: SLF001
-        safe_positions = positions.clamp(0, cache.shape[0] - 1).contiguous()
-        cos_sin = cache[safe_positions]
         return torch.ops.vllm.triton_qsa_rmsnorm_mrope(
             tensor=tensor,
             weight=norm.weight,
-            cos_sin=cos_sin,
+            cos_sin=cache,
+            positions=positions,
             eps=norm.variance_epsilon,
             mrope_section=list(self.rotary_emb.mrope_section) if positions.ndim == 2 else [],
             rope_dim=self.rotary_emb.rotary_dim,
@@ -415,24 +416,58 @@ class AscendQSAIndexer(upstream_indexer.QSAIndexer):
             position_rows = qsa_indexer.canonical_qsa_rope_positions(positions)[:num_tokens].to(
                 device=raw_key_cache.device
             )
-        pooled, first_positions = _compress_qsa_groups(
-            token_k[:num_tokens],
-            position_rows,
-            raw_key_cache,
-            raw_metadata.block_table,
-            raw_metadata.token_to_req,
-            raw_metadata.query_start_loc,
-            raw_metadata.logical_positions,
-            compressed_metadata.slot_mapping,
-            self.compress_ratio,
-            rope_position_cache,
-        )
-        normalized = self.normalize_compressed_keys(pooled, first_positions)
-        _store_qsa_cache_rows(
-            self.compressed_key_cache.kv_cache,
-            compressed_metadata.slot_mapping,
-            normalized,
-        )
+        compressed_cache = self.compressed_key_cache.kv_cache
+        if (
+            self._fused_norm_rope_eligible(token_k, positions)
+            and self.compress_ratio == 4
+            and self.k_layernorm.weight.is_contiguous()
+            and compressed_cache.dtype == token_k.dtype
+            and compressed_cache.device == token_k.device
+            and compressed_cache.ndim == 4
+            and compressed_cache.shape[2:] == (1, self.index_head_dim)
+            and all(compressed_cache.shape)
+        ):
+            rotary_cache = self.rotary_emb._match_cos_sin_cache_dtype(token_k)  # noqa: SLF001
+            qsa_compress_groups_with_ratio_fused(
+                token_k[:num_tokens],
+                position_rows,
+                raw_key_cache,
+                raw_metadata.block_table,
+                raw_metadata.token_to_req,
+                raw_metadata.query_start_loc,
+                raw_metadata.logical_positions,
+                compressed_metadata.slot_mapping,
+                self.compress_ratio,
+                rope_position_cache,
+                norm_weight=self.k_layernorm.weight,
+                rotary_cache=rotary_cache,
+                compressed_cache=compressed_cache,
+                norm_eps=self.k_layernorm.variance_epsilon,
+            )
+        else:
+            pooled, first_positions = _compress_qsa_groups(
+                token_k[:num_tokens],
+                position_rows,
+                raw_key_cache,
+                raw_metadata.block_table,
+                raw_metadata.token_to_req,
+                raw_metadata.query_start_loc,
+                raw_metadata.logical_positions,
+                compressed_metadata.slot_mapping,
+                self.compress_ratio,
+                rope_position_cache,
+            )
+            normalized = self.normalize_compressed_keys(
+                pooled,
+                first_positions,
+            )
+            _store_qsa_cache_rows(
+                self.compressed_key_cache.kv_cache,
+                compressed_metadata.slot_mapping,
+                normalized,
+            )
+        # Keep ring writes after the fused launch: other rows can still read
+        # the previous ring contents while producing compressed groups.
         _store_qsa_cache_rows(raw_key_cache, raw_metadata.slot_mapping, token_k[:num_tokens])
         if rope_position_cache is not None:
             _store_qsa_cache_rows(
@@ -848,6 +883,67 @@ class AscendQwen4ExpQSAAttention(upstream_qsa.Qwen4ExpQSAAttention):
         # The raw/compressed cache owners were built by the same local constructor.
         self.indexer.configure_pcp_cache_backends(vllm_config)
 
+    def _main_fused_norm_rope_eligible(
+        self,
+        qkv: torch.Tensor,
+        positions: torch.Tensor,
+    ) -> bool:
+        section = getattr(self.rotary_emb, "mrope_section", None)
+        return bool(
+            self.attn_output_gate
+            and qkv.is_contiguous()
+            and qkv.dtype == torch.bfloat16
+            and qkv.ndim == 2
+            and qkv.shape[1] == 2 * self.q_size + 2 * self.kv_size
+            and self.num_heads > 0
+            and self.num_kv_heads > 0
+            and self.head_dim == 256
+            and getattr(self.rotary_emb, "rotary_dim", None) == 64
+            and getattr(self.rotary_emb, "is_neox_style", False)
+            and getattr(self.rotary_emb, "mrope_interleaved", False)
+            and section is not None
+            and list(section) == [11, 11, 10]
+            and positions.ndim in (1, 2)
+            and (positions.ndim == 1 or positions.shape[0] == 3)
+        )
+
+    def _project_qkv_gate(
+        self,
+        qkv: torch.Tensor,
+        positions: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor | None]:
+        # Preserve the MTP fallback until draft FULL-graph replay is validated
+        # separately. Removing the gathered temporary alone does not establish
+        # draft-model state parity.
+        # ForwardContext has no draft-model flag. The layer name is fixed when
+        # the target or MTP model is built and remains stable during graph replay.
+        if self.layer_name.startswith("mtp."):
+            return super()._project_qkv_gate(qkv, positions)
+        if not self._main_fused_norm_rope_eligible(qkv, positions):
+            # Graph warmup and high-TP execution can use padded or locally
+            # sharded projection geometry outside the fused kernel ABI.
+            # Preserve correctness through the portable upstream path.
+            return super()._project_qkv_gate(qkv, positions)
+
+        # Gather directly from the stable rotary cache using the current graph
+        # inputs; padded rows are clamped inside the kernel.
+        cache = self.rotary_emb._match_cos_sin_cache_dtype(qkv)  # noqa: SLF001
+        return torch.ops.vllm.triton_split_qkv_rmsnorm_mrope(
+            qkv=qkv,
+            q_weight=self.q_norm.weight,
+            k_weight=self.k_norm.weight,
+            cos_sin=cache,
+            positions=positions,
+            num_q_heads=self.num_heads,
+            num_kv_heads=self.num_kv_heads,
+            head_size=self.head_dim,
+            eps=self.q_norm.variance_epsilon,
+            mrope_section=list(self.rotary_emb.mrope_section),
+            is_interleaved=self.rotary_emb.mrope_interleaved,
+            rope_dim=self.rotary_emb.rotary_dim,
+            has_gate=True,
+        )
+
     def bind_kv_cache(self, kv_cache: QSAKVCache) -> None:
         self.kv_cache = kv_cache
 
@@ -882,9 +978,9 @@ class AscendQwen4ExpQSAAttention(upstream_qsa.Qwen4ExpQSAAttention):
 
         # Newer vLLM revisions call the owner with the packed projection when
         # ``use_fused_qsa_prepare`` is enabled. The upstream indexer consumes
-        # that projection itself; Ascend materializes Q/K/V and gate through
-        # the inherited projection before its separate indexer preparation
-        # and the existing cache/update transaction.
+        # that projection itself; Ascend keeps its independently fused main
+        # Q/K/V preparation and indexer paths, so materialize the same outputs
+        # here before entering the existing cache/update transaction.
         if qkv is not None:
             q, k, v, projected_gate = self._project_qkv_gate(qkv, positions)
             query = q.view(-1, self.num_heads, self.head_dim)

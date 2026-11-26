@@ -34,11 +34,6 @@ def test_replicated_qsa_draft_passes_pcp_compatibility(monkeypatch) -> None:
     cp_utils.check_attention_cp_compatibility(config, target_layer_names=set())
 
 
-def test_main_and_draft_qkv_projection_use_upstream_path() -> None:
-    assert "_project_qkv_gate" not in qsa.AscendQwen4ExpQSAAttention.__dict__
-    assert qsa.AscendQwen4ExpQSAAttention._project_qkv_gate is qsa.upstream_qsa.Qwen4ExpQSAAttention._project_qkv_gate
-
-
 def test_indexer_accepts_main_packed_inputs_without_fused_preparation() -> None:
     layer = qsa.AscendQSAIndexer.__new__(qsa.AscendQSAIndexer)
     torch.nn.Module.__init__(layer)
@@ -77,7 +72,7 @@ def test_indexer_accepts_main_packed_inputs_without_fused_preparation() -> None:
 
 
 @pytest.mark.parametrize("axes", [1, 3])
-def test_indexer_rotary_gathers_clamped_cache_before_kernel(monkeypatch, axes) -> None:
+def test_indexer_rotary_passes_full_cache_and_strided_positions(monkeypatch, axes) -> None:
     layer = qsa.AscendQSAIndexer.__new__(qsa.AscendQSAIndexer)
     torch.nn.Module.__init__(layer)
     cache = torch.arange(5 * 64, dtype=torch.float32).reshape(5, 64)
@@ -86,21 +81,19 @@ def test_indexer_rotary_gathers_clamped_cache_before_kernel(monkeypatch, axes) -
         mrope_section=[11, 11, 10],
         rotary_dim=64,
     )
-    positions = torch.tensor([-1, 2, 8])
-    if axes == 3:
-        positions = torch.stack((positions, positions + 1, positions - 1))
+    storage = torch.tensor([[-1, 0, 2, 0, 8, 0]]).expand(3, -1).clone()
+    positions = storage[:, ::2] if axes == 3 else storage[0, ::2]
     tensor = torch.empty((3, 4, 128), dtype=torch.bfloat16)
     norm = SimpleNamespace(weight=torch.ones(128), variance_epsilon=1e-6)
     kernel = Mock(return_value=tensor)
     monkeypatch.setattr(torch.ops.vllm, "triton_qsa_rmsnorm_mrope", kernel)
 
     assert layer._fused_norm_rope(tensor, norm, positions) is tensor
-
     arguments = kernel.call_args.kwargs
-    torch.testing.assert_close(arguments["cos_sin"], cache[positions.clamp(0, 4)])
+    assert arguments["cos_sin"] is cache
+    assert arguments["positions"] is positions
     assert arguments["tensor"] is tensor
     assert arguments["weight"] is norm.weight
-    assert "positions" not in arguments
 
 
 def test_main_falls_back_when_fused_projection_abi_is_not_satisfied(monkeypatch) -> None:
@@ -186,7 +179,8 @@ def test_text_only_indexer_uses_fused_rope_without_mrope_sections(monkeypatch) -
     assert fused.call_count == 2
     for call in fused.call_args_list:
         assert call.kwargs["mrope_section"] == []
-        torch.testing.assert_close(call.kwargs["cos_sin"], cache[positions])
+        assert call.kwargs["cos_sin"] is cache
+        torch.testing.assert_close(call.kwargs["positions"], positions)
 
 
 @pytest.mark.parametrize("pcp", [False, True])
@@ -714,3 +708,61 @@ def test_target_topk_sharing_respects_parallel_modes(monkeypatch, enable_dbo, ub
     )
     assert draft[0].topk_indices_buffer is not draft[1].topk_indices_buffer
     assert not parent.state_dict()
+
+
+def test_main_qkv_projection_falls_back_when_fused_abi_is_ineligible(
+    monkeypatch,
+) -> None:
+    layer = qsa.AscendQwen4ExpQSAAttention.__new__(qsa.AscendQwen4ExpQSAAttention)
+    torch.nn.Module.__init__(layer)
+    layer.layer_name = "model.layers.0.self_attn.attn"
+    monkeypatch.setattr(
+        layer,
+        "_main_fused_norm_rope_eligible",
+        Mock(return_value=False),
+    )
+    expected = (
+        torch.empty(1),
+        torch.empty(1),
+        torch.empty(1),
+        torch.empty(1),
+    )
+    fallback = Mock(return_value=expected)
+    monkeypatch.setattr(
+        qsa.upstream_qsa.Qwen4ExpQSAAttention,
+        "_project_qkv_gate",
+        fallback,
+    )
+    qkv = torch.empty((2, 8))
+    positions = torch.arange(2)
+
+    assert layer._project_qkv_gate(qkv, positions) is expected
+    fallback.assert_called_once_with(qkv, positions)
+
+
+@pytest.mark.parametrize("layout", ["contiguous", "row_stride", "column_stride"])
+def test_main_fused_norm_rope_requires_contiguous_qkv(layout) -> None:
+    layer = SimpleNamespace(
+        attn_output_gate=True,
+        q_size=512,
+        kv_size=256,
+        num_heads=2,
+        num_kv_heads=1,
+        head_dim=256,
+        rotary_emb=SimpleNamespace(
+            mrope_section=[11, 11, 10],
+            rotary_dim=64,
+            is_neox_style=True,
+            mrope_interleaved=True,
+        ),
+    )
+    width = 2 * layer.q_size + 2 * layer.kv_size
+    if layout == "row_stride":
+        qkv = torch.empty((4, width), dtype=torch.bfloat16)[::2]
+    elif layout == "column_stride":
+        qkv = torch.empty((2, 2 * width), dtype=torch.bfloat16)[:, ::2]
+    else:
+        qkv = torch.empty((2, width), dtype=torch.bfloat16)
+
+    eligible = qsa.AscendQwen4ExpQSAAttention._main_fused_norm_rope_eligible(layer, qkv, torch.arange(2))
+    assert eligible == (layout == "contiguous")

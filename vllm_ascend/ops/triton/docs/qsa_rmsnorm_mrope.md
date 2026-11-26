@@ -9,28 +9,29 @@
   ```text
   r[t,h] = rsqrt(mean(x[t,h,:]^2) + eps)
   n[t,h,d] = bf16(x[t,h,d] * r[t,h] * (weight[d] + 1))
-  y_first  = bf16(n_first * cos - n_second * sin)
-  y_second = bf16(n_second * cos + n_first * sin)
+  y_first  = bf16(bf16(n_first * cos) - bf16(n_second * sin))
+  y_second = bf16(bf16(n_second * cos) + bf16(n_first * sin))
   ```
 
   Channels outside `rope_dim` retain their normalized values. For MRoPE, temporal, height, and width cache rows are selected lane by lane according to `mrope_section`.
 - **Algorithm flow** (processed independently for each token and head):
-  1. Launch one Triton program for every `(token, head)` pair.
-  2. Load one head row, compute its fp32 RMS reduction, apply `weight + 1`, and convert the normalized values to BF16.
+  1. Launch one Triton program for each token and a tile of up to four heads; mask padded heads.
+  2. Load the head rows, compute an independent fp32 RMS reduction per head, apply `weight + 1`, and convert the normalized values to BF16.
   3. Load the temporal, height, and width cosine/sine cache rows contiguously.
   4. Select the required MRoPE axis in registers with `tl.where`.
-  5. Apply rotary embedding to the first `rope_dim` channels and store the fused result.
+  5. Slice both rotary halves from the normalized BF16 tile, preserving the BF16 rounding of each product and sum/difference. Insert the rotated halves and store the completed tile once; non-rotary lanes retain the normalized values.
 - **Supported modes**: Atlas A3 and 950DT (A5) Qwen3.8-Next inference, covering the model-shaped prefill and decode inputs below.
 
 ## Parameters
 
-All parameters are required.
+`positions` is optional; other parameters are required.
 
 | Parameter | Input/Output/Attribute | Description | Data type | Data format |
 | --- | --- | --- | --- | --- |
 | `tensor` | Input | QSA projection, shape `[num_tokens, num_heads, head_dim]` | BF16 | Contiguous head rows |
-| `weight` | Input | RMSNorm weight, shape `[head_dim]`; the kernel applies `weight + 1` | BF16 | Contiguous 1D |
+| `weight` | Input | RMSNorm weight, shape `[head_dim]`; the kernel applies `weight + 1` | BF16 | Strided 1D |
 | `cos_sin` | Input | MRoPE cache `[3, num_tokens, rope_dim]` or RoPE cache `[num_tokens, rope_dim]` | BF16 | Strided ND with contiguous rotary width |
+| `positions` | Input, optional | With positions, `cos_sin` is instead the full `[cache_rows, rope_dim]` table; positions are `[num_tokens]` or `[3, num_tokens]` | int32/int64 | Strided, same device as input |
 | `eps` | Attribute | RMS normalization epsilon | float | Scalar |
 | `mrope_section` | Attribute | Temporal, height, and width MRoPE section sizes | `list[int]` | Three elements for MRoPE |
 | `rope_dim` | Attribute | Even rotary width, no greater than `head_dim` | int | Scalar |
@@ -40,19 +41,50 @@ All parameters are required.
 
 - `tensor` and `weight` must be BF16. The last dimension of `tensor` and `weight` must match.
 - `tensor` must have three dimensions and contiguous head rows.
-- `cos_sin` must have two dimensions for RoPE or three dimensions for MRoPE. MRoPE requires exactly three cache axes and three section values.
-- The token count in `cos_sin` must equal `tensor.shape[0]`.
+- `weight` is one-dimensional; its element stride is passed as a compile-time kernel parameter, including strided views and views with a storage offset. Each weight layout reuses its compiled variant across token counts.
+- Without `positions`, `cos_sin` must have two dimensions for RoPE or three dimensions for MRoPE. Gathered MRoPE requires exactly three cache axes.
+- With `positions`, `cos_sin` is always a two-dimensional full table. MRoPE uses three position axes instead of three cache axes. Both MRoPE modes require three section values.
+- Without `positions`, the token count in `cos_sin` must equal `tensor.shape[0]`.
+- With `positions`, the full cache must be nonempty, BF16, on the input device, and contiguous along rotary width. Position values are clamped to `[0, cache_rows - 1]` inside the kernel. Position token count must match the input.
 - `rope_dim` must be positive, even, and no greater than `head_dim`.
 - An empty token dimension returns an empty output without launching the kernel.
 - Forward inference only; no autograd backward implementation is provided.
 - The custom op provides a fake implementation for compilation and shape propagation. The single-operator tests below validate eager device execution.
+
+### Direct-position mode
+
+The QSA model passes the full rotary table and original positions. Each token/head
+program reads positions using their actual strides, chooses the MRoPE axis for
+each rotary lane, clamps the position and loads only the required cosine/sine.
+This replaces external clamp/contiguous/gather preparation; it does not change
+the normalization or BF16 rotary arithmetic. The contiguous three-axis reads
+described above remain the legacy mode when `positions=None`.
+
+This mode also serves the decomposed compressed-key reference. It returns a new
+tensor, without mutating positions, weights or the rotary table. Graph replay
+reads current position contents, not captured Python values.
+
+The wrapper uses one Triton entry point for gathered-cache and full-cache
+inputs, selected by the compile-time `GATHER_CACHE` flag. The unused lookup
+branch is eliminated during compilation. The current QSA production caller
+supplies positions; gathered-cache mode remains available for reference tests
+and interface compatibility.
+
+Position strides and cache row count are runtime parameters listed in
+`do_not_specialize`, including the changing axis stride of contiguous `[3, T]`
+positions. Gathered-cache calls pass a `None` position pointer and zero position
+strides; the cache row count is unused in this mode.
+The head tile is capped at four heads. Weight stride is a compile-time layout
+parameter so Ascend can lower strided weight loads correctly. Changes to weight
+stride or head-tile size select distinct variants; position contents and token
+counts remain runtime inputs or launch-grid dimensions.
 
 ## Origin and Differences
 
 - **Origin**: Developed for the Qwen3.8-Next QSA projection path in `vllm_ascend/models/qwen4_exp/qsa.py`.
 - **Differences**:
     - Fuses RMSNorm and MRoPE into one Triton operator instead of materializing an intermediate normalized tensor.
-    - Uses a two-dimensional `(token, head)` launch grid.
+    - Uses a two-dimensional `(token, head tile)` launch grid, with up to four heads sharing position and rotary-cache reads.
     - Loads all three MRoPE cosine/sine rows contiguously and selects the axis in registers, replacing scalar lane-dependent cache addressing.
     - Preserves the existing BF16 arithmetic order, rotary layout, wrapper signature, and model semantics.
 - **Reason**: Performance optimization for Qwen3.8-Next QSA prefill and decode on Ascend. The contiguous cache-row loads remove the scalar lane-dependent addressing bottleneck without introducing a new configuration switch.
@@ -60,16 +92,16 @@ All parameters are required.
 
 ## Test Cases
 
-The device test compares the Triton output with an independent CPU fp32 PyTorch reference and uses `rtol=2e-2`, `atol=2e-2`.
-
-| Device | Case | Shape | Maximum absolute difference |
-| --- | --- | --- | ---: |
-| Ascend A3 | Prefill | `(4096, 4, 128)` | 0.03125 |
-| Ascend A3 | Decode | `(4096, 1, 128)` | 0.0078125 |
-| Ascend950DT (A5) | Prefill | `(4096, 4, 128)` | 0.015625 |
-| Ascend950DT (A5) | Decode | `(4096, 1, 128)` | 0.0078125 |
-
-Both cases passed on A3 and A5 using the Qwen3.8-Next 2026-11-02 validation images.
+[test_qsa_rmsnorm_mrope.py](../../../../tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_qsa_rmsnorm_mrope.py)
+compares direct-position lookup with legacy gathered-cache inputs using
+`rtol=0, atol=0`. Cases cover 0/1/32/129 tokens, 1/3 position axes,
+non-contiguous query rows, strided positions and Norm weights, position clamping
+and NPUGraph replay after updating positions. The compressed-key fallback test
+compares the published cache against a PyTorch reference using the same logical
+strided weights, and against the contiguous fused-compression path, with and
+without the position ring. The A3 device regressions cover strided weights, cache publication and graph
+replay. The reference test also covers padded head tiles (three heads) and
+multiple head tiles (eight heads).
 
 ```bash
 pytest -sv tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_qsa_rmsnorm_mrope.py

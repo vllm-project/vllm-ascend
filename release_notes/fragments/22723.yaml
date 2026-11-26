@@ -1,0 +1,12 @@
+pr: 22723
+entries:
+  - category: performance
+    text: >-
+      Fused Qwen3.8-Flash-Next QSA preparation, combining the
+      attention preparation paths (Q/K RMSNorm+MRoPE and compressed-key preparation) into single Triton kernels, cutting kernel
+      launches and intermediate tensor traffic. Eligible shapes use the fused paths
+      automatically; unsupported layouts keep the previous fallback, so no configuration
+      change is needed. Native LightningIndexerV2 input preparation also combines
+      length calculations, query-boundary clamping and score-weight initialization
+      into one launch.
+    model: Qwen3.8-Flash-Next
