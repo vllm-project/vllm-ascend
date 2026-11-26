@@ -823,6 +823,27 @@ class AscendIndexerKPoolTailBackend(AttentionBackend):
         return (num_blocks, block_size, 2 * head_size)
 
 
+def _hisparse_kpool_scoring_table(block_table: torch.Tensor, page_ratio: int) -> torch.Tensor:
+    # KPool layers in one attention group share a table. Keep the expansion
+    # inside the forward so graphs recompute it from the current table on replay.
+    tables = get_forward_context().additional_kwargs.setdefault("hisparse_kpool_scoring_tables", {})
+    key = (
+        block_table.data_ptr(),
+        block_table.size(),
+        block_table.stride(),
+        block_table.device,
+        page_ratio,
+        torch.npu.current_stream().npu_stream,
+    )
+    cached = tables.get(key)
+    if cached is None:
+        subpages = torch.arange(page_ratio, dtype=block_table.dtype, device=block_table.device)
+        expanded = torch.add(subpages, block_table.unsqueeze(-1), alpha=page_ratio).flatten(1)
+        cached = (block_table, expanded)
+        tables[key] = cached
+    return cached[1]
+
+
 class Glm5NextKPoolIndexerBackend(nn.Module):
     """Model-side implementation of the unified seven-argument indexer API.
 
@@ -1215,8 +1236,7 @@ class Glm5NextKPoolIndexerBackend(nn.Module):
             if remainder or page_ratio < 1:
                 raise ValueError("HiSparse KPool subpages must exactly divide the manager page.")
             if page_ratio > 1:
-                subpages = torch.arange(page_ratio, dtype=block_table.dtype, device=block_table.device)
-                block_table = (block_table.unsqueeze(-1) * page_ratio + subpages).flatten(1)
+                block_table = _hisparse_kpool_scoring_table(block_table, page_ratio)
         indices, _ = select(
             query,
             indexer_cache,
