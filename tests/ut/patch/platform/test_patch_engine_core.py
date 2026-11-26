@@ -20,10 +20,9 @@ re-wrapping ``run_engine_core`` in import order). What is guarded here
 * ``_run_engine_core_patch_func`` initializes the ascend config and
   delegates to the upstream entry point with ``dp_rank`` / ``local_dp_rank``
   passed through;
-* ``_apply_patch`` is idempotent and also installs the pp-mtp ``post_step``
-  patch that previously ran from ``patch_pp_mtp``'s own ``_apply_patch``;
-  child process re-applies the profiling patch exactly through this import
-  chain when unpickling the ``run_engine_core`` wrapper).
+* ``_apply_patch`` is idempotent; child process re-applies the profiling
+  patch exactly through this import chain when unpickling the
+  ``run_engine_core`` wrapper).
 """
 
 import inspect
@@ -32,7 +31,6 @@ from unittest.mock import MagicMock
 
 import vllm.v1.engine.core as _engine_core_mod
 from vllm.v1.engine.core import DPEngineCoreProc as _UpstreamDPEngineCoreProc
-from vllm.v1.engine.core import EngineCore
 from vllm.v1.engine.core import EngineCoreProc as _UpstreamEngineCoreProc
 
 import vllm_ascend.patch.platform.patch_engine_core as _engine_core_patch
@@ -75,19 +73,9 @@ def test_original_run_engine_core_stashes_pristine_upstream():
     )
 
 
-def test_apply_patch_installs_pp_mtp_post_step_patch():
-    """The pp-mtp post_step patch previously ran from patch_pp_mtp's own
-    _apply_patch; the refactor moved the call into patch_engine_core."""
-    assert getattr(EngineCore.post_step, "_vllm_ascend_pp_mtp_patched", False) is True
-
-
-def test_apply_patch_is_idempotent(monkeypatch):
-    post_step_patch = MagicMock()
-    monkeypatch.setattr(_engine_core_patch, "pp_mtp_patch_post_step", post_step_patch)
-
+def test_apply_patch_is_idempotent():
     _engine_core_patch._apply_patch()
 
-    post_step_patch.assert_not_called()
     assert _UpstreamEngineCoreProc.run_engine_core is _engine_core_patch._run_engine_core_patch_func
 
 

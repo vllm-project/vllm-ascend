@@ -19,9 +19,11 @@ from vllm_ascend.ops import linear_op
 @pytest.mark.parametrize("explicit_group", [False, True])
 @pytest.mark.parametrize("direction", ["column", "row"])
 def test_projection_selects_explicit_group_without_forwarding_it(monkeypatch, size, explicit_group, direction):
-    pcp_group = SimpleNamespace(world_size=1, rank_in_group=0)
+    pcp_group = SimpleNamespace(world_size=2, rank_in_group=1)
+    tp_group = SimpleNamespace(world_size=2, rank_in_group=1)
     kda_group = SimpleNamespace(world_size=size, rank_in_group=size - 1)
-    selected = kda_group if explicit_group else pcp_group
+    expected_size = size if explicit_group else 4
+    expected_rank = size - 1 if explicit_group else 3
     seen: dict[str, int | bool] = {}
 
     def linear_init(self, input_size, output_size, **kwargs):
@@ -30,21 +32,23 @@ def test_projection_selects_explicit_group_without_forwarding_it(monkeypatch, si
         seen.update(input_size=input_size, output_size=output_size, **kwargs)
 
     monkeypatch.setattr(model_kda, "get_pcp_group", lambda: pcp_group)
+    monkeypatch.setattr(model_kda, "get_tp_group", lambda: tp_group)
     base = model_kda.ColumnParallelLinear if direction == "column" else model_kda.RowParallelLinear
     cls = model_kda.PCPColumnParallelLinear if direction == "column" else model_kda.PCPRowParallelLinear
     monkeypatch.setattr(base, "__init__", linear_init)
     layer = cls(4 * size, 8 * size, tp_group=kda_group if explicit_group else None)
-    assert layer.tp_group is selected
+    assert layer.tp_group is (kda_group if explicit_group else tp_group)
+    assert layer.pcp_group is (None if explicit_group else pcp_group)
     if direction == "column":
         assert seen == {
             "input_size": 4 * size,
             "output_size": 8 * size,
-            "tp_rank": selected.rank_in_group,
-            "tp_size": selected.world_size,
+            "tp_rank": expected_rank,
+            "tp_size": expected_size,
         }
     else:
-        assert seen == {"input_size": 4 * size // selected.world_size, "output_size": 8 * size, "disable_tp": True}
-        assert layer.tp_rank == selected.rank_in_group and layer.tp_size == selected.world_size
+        assert seen == {"input_size": 4 * size // expected_size, "output_size": 8 * size, "disable_tp": True}
+        assert layer.tp_rank == expected_rank and layer.tp_size == expected_size
 
 
 class CollectiveReference:
@@ -75,8 +79,7 @@ class CollectiveReference:
 
 @pytest.mark.parametrize("size", [2, 4, 8])
 @pytest.mark.parametrize("output_size", [1, 2, 4, 8])
-@pytest.mark.parametrize("runner_v2", [False, True])
-def test_projection_tp_matches_dense_weights_with_ragged_and_idle_owners(monkeypatch, size, output_size, runner_v2):
+def test_projection_tp_matches_dense_weights_with_ragged_and_idle_owners(monkeypatch, size, output_size):
     """Different KDA and output groups must preserve each DP owner's recurrent state."""
     generator = torch.Generator().manual_seed(91)
     hidden_dim, heads, dim = 7, 8, 2
@@ -103,7 +106,6 @@ def test_projection_tp_matches_dense_weights_with_ragged_and_idle_owners(monkeyp
         output[0, :count].copy_(state[:count])
 
     monkeypatch.setattr(ascend_forward_context, "get_forward_context", lambda: thread.context)
-    monkeypatch.setattr(ascend_forward_context, "_USE_V2_EXTRA_KWARGS", runner_v2)
     monkeypatch.setattr(model_kda, "get_forward_context", lambda: thread.context)
     monkeypatch.setattr(linear_op, "oproj_tp_enable", lambda: output_size > 1)
     monkeypatch.setattr(linear_op, "get_otp_group", lambda: thread.output_group)
@@ -172,11 +174,7 @@ def test_projection_tp_matches_dense_weights_with_ragged_and_idle_owners(monkeyp
         for step, batches in enumerate(inputs):
             hidden = batches[rank]
             extras = {"max_tokens_across_dp": max(counts[step])}
-            thread.context = (
-                SimpleNamespace(attn_metadata={}, additional_kwargs=extras)
-                if runner_v2
-                else SimpleNamespace(attn_metadata={}, **extras)
-            )
+            thread.context = SimpleNamespace(attn_metadata={}, additional_kwargs=extras)
             thread.count, thread.state = hidden.shape[0], states[rank]
             output = torch.empty_like(hidden)
             assert model_kda.Glm5NextLinearAttention._forward(layer, hidden, output) is None

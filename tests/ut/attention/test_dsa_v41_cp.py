@@ -9,7 +9,9 @@ tests check persistent addresses and state controls, not NPU graph replay.
 """
 
 import importlib
+from contextlib import nullcontext
 from dataclasses import fields, replace
+from itertools import permutations
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import Mock
@@ -36,6 +38,7 @@ from vllm_ascend.quantization.methods import AscendW8A8DynamicLinearMethod
 from vllm_ascend.quantization.methods.w4a8.w4a8 import AscendW4A8DynamicLinearMethod
 from vllm_ascend.quantization.methods.w8a8.w8a8_mxfp8 import AscendW8A8MXFP8DSDynamicLinearMethod
 from vllm_ascend.weight_switch import ParallelOProjection, WeightSwitchConfig
+from vllm_ascend.worker.device_metadata import DeviceMetadataExecutor
 from vllm_ascend.worker.v2.pcp_manager import AscendPCPAttentionContext
 
 
@@ -156,6 +159,52 @@ def test_local_compressor_boundaries_preserve_request_tails_and_predecessors(wor
                 assert int(gathered[predecessor]) == row - 1
             else:
                 assert predecessor == -1
+
+
+@pytest.mark.parametrize("world", [2, 4, 8])
+@pytest.mark.parametrize("query_len", [1, 4])
+def test_c2_metadata_uses_cached_short_prefill_decode_ownership(world, query_len):
+    """Gather cached prompt tails from their decode owner, including draft tokens."""
+    batch = SimpleNamespace(
+        num_reqs=2,
+        num_tokens=1 + query_len,
+        num_scheduled_tokens=np.array([1, query_len], dtype=np.int32),
+        query_start_loc_np=np.array([0, 1, 1 + query_len], dtype=np.int32),
+        is_prefilling_np=np.array([False, True]),
+        prefill_runs_as_decode_np=np.array([False, True]),
+    )
+    # Decode requests are owned round-robin. Each rank's local rows start at zero.
+    rank_rows = [[0], list(range(1, batch.num_tokens))] + [[] for _ in range(world - 2)]
+    rank_metadata, gathered_rows = [], []
+    for rank, rows in enumerate(rank_rows):
+        metadata = dsa_v41_cp.build_v41_pcp_c2_metadata(
+            batch,
+            world,
+            rank,
+            torch.device("cpu"),
+            decode_sharded=True,
+            min_send_rows=0,
+            num_local_reqs=int(bool(rows)),
+            num_ring_rows=0,
+            buffers=None,
+            buffer_capacity=0,
+        )
+        assert int(metadata.send_valid_mask.sum()) == len(rows)
+        assert metadata.prev_token_row_indices.tolist() == ([-1] if rows else [])
+        sent_rows = torch.full_like(metadata.send_token_indices, -1)
+        if rows:
+            sent_rows[metadata.send_valid_mask] = torch.tensor(rows)[
+                metadata.send_token_indices[metadata.send_valid_mask]
+            ]
+        rank_metadata.append(metadata)
+        gathered_rows.append(sent_rows)
+
+    gathered = torch.cat(gathered_rows)
+    for metadata in rank_metadata:
+        assert gathered[metadata.ring_source_row_indices].tolist() == list(range(batch.num_tokens))
+        assert metadata.ring_request_indices.tolist() == [0] + [1] * query_len
+        assert metadata.ring_token_offsets.tolist() == [0] + list(range(query_len))
+    np.testing.assert_array_equal(batch.is_prefilling_np, [False, True])
 
 
 # Scheduler token IDs owned by each rank, in DualChunkSwap order. Repeated
@@ -294,6 +343,7 @@ def _projector(
 def _query_indexer(select):
     # Keep the real prepared-query/quantization orchestration; emulate kernels.
     return SimpleNamespace(
+        fused_prologue_qw=None,
         project_query=lambda qr: qr.clone(),
         project_weights=lambda hidden: hidden.clone(),
         apply_query_rope=lambda *args: None,
@@ -316,12 +366,12 @@ def builders(monkeypatch):
         monkeypatch.setattr(module, "get_full_cos_and_sin_dsa_for_layer", lambda name: (full_cos, full_sin))
 
     def make(world=2, rank=0, *, max_seqs=2, graph_sizes=(12, 24), dcp=1, decode_sharded=False):
-        monkeypatch.setattr(dsa_v41_cp, "is_pcp_decode_sharding_enabled", lambda config: decode_sharded)
         config = SimpleNamespace(
             parallel_config=SimpleNamespace(
                 tensor_parallel_size=1,
                 prefill_context_parallel_size=world,
                 decode_context_parallel_size=dcp,
+                pcp_shard_decode_requests=decode_sharded,
             ),
             scheduler_config=SimpleNamespace(max_num_seqs=max_seqs, max_num_batched_tokens=64),
             speculative_config=None if decode_sharded else SimpleNamespace(num_speculative_tokens=5),
@@ -818,6 +868,7 @@ def runtime(builders, monkeypatch):
         owners = builders(2, rank, decode_sharded=decode_sharded)
         projector = _projector(monkeypatch, 2, rank, events, sharding=sharding, decode_sharded=decode_sharded)
         attn = SimpleNamespace(
+            v41_layer_name=LAYER,
             rotary_emb=SimpleNamespace(layername=LAYER),
             n_heads=2,
             n_local_heads=2,
@@ -831,7 +882,7 @@ def runtime(builders, monkeypatch):
             q_norm=torch.nn.Identity(),
             kv_norm=torch.nn.Identity(),
             dsa_attn=SimpleNamespace(
-                swa_cache_layer=SimpleNamespace(kv_cache=[torch.zeros(256, 2)]),
+                swa_cache_layer=SimpleNamespace(kv_cache=torch.zeros(256, 2)),
                 dsa_attn=SimpleNamespace(impl=projector),
             ),
         )
@@ -840,7 +891,7 @@ def runtime(builders, monkeypatch):
         monkeypatch.setattr(dsa_v41, "oproj_tp_enable", lambda: False)
         impl = dsa_v41_cp.AscendDSAV41PCPImpl(
             "model.layers.0",
-            SimpleNamespace(is_kv_source=False, has_long_context=False, compress_ratio=0),
+            SimpleNamespace(is_kv_source=False, is_index_source=False, has_long_context=False, compress_ratio=0),
             None,
             None,
             None,
@@ -892,7 +943,7 @@ def runtime(builders, monkeypatch):
             projector.reference_input = torch.zeros_like(peers[rank])
             projector.reference_input[: len(batch.local_ids)] = canonical[batch.local_ids]
             projector.peer_inputs = [peer.masked_fill((peer == 9999.0), 0) for peer in peers]
-            cache = attn.dsa_attn.swa_cache_layer.kv_cache[0]
+            cache = attn.dsa_attn.swa_cache_layer.kv_cache
             expected_cache = cache.clone()
             if scenario != "dummy":
                 expected_cache[batch.slots] = canonical[:, :2]
@@ -988,7 +1039,7 @@ class TestPCPBatchLifecycle:
             compressor=torch.nn.Identity(),
             rotary_emb=SimpleNamespace(layername=LAYER),
             indexer=SimpleNamespace(update_keys=lambda value, slots, cos, sin: check_rope(value, cos, sin)),
-            long_kv_cache=SimpleNamespace(kv_cache=[object()]),
+            long_kv_cache=SimpleNamespace(kv_cache=object()),
             head_dim=8,
         )
         monkeypatch.setattr(dsa_v41.AscendDSAV41Impl, "_apply_rotary", lambda attn, *args: check_rope(*args))
@@ -1107,21 +1158,21 @@ class TestPCPBatchLifecycle:
         impl.compressor_state_prefix = PREFIXES["compressor_state"]
         impl.topology = SimpleNamespace(index_topk=3)
         attn.shared_state = SimpleNamespace(topk_indices=torch.zeros(64, 3, dtype=torch.int32), topk_lengths=None)
-        attn.long_kv_cache = SimpleNamespace(kv_cache=[torch.zeros(256, 2)])
+        attn.long_kv_cache = SimpleNamespace(kv_cache=torch.zeros(256, 2))
         k_cache, scale_cache = torch.zeros(256, 2), torch.zeros(256, 1)
         indexer = DeepseekV41Indexer.__new__(DeepseekV41Indexer)
         torch.nn.Module.__init__(indexer)
         indexer.owns_k, indexer.width, indexer.rope_width = True, 2, 2
         indexer.packed_cache_ops = None
         indexer.wk, indexer.k_norm = _linear(2, 2).to(torch.bfloat16), torch.nn.Identity()
-        indexer.k_cache = SimpleNamespace(kv_cache=[(k_cache, scale_cache)])
+        indexer.k_cache = SimpleNamespace(kv_cache=(k_cache, scale_cache))
         attn.indexer = indexer
         compressor = DeepseekV41Compressor.__new__(DeepseekV41Compressor)
         torch.nn.Module.__init__(compressor)
         compressor.width = 2
         compressor.wkv, compressor.wgate, compressor.norm = _linear(4, 2), _linear(4, 2), torch.nn.Identity()
         monkeypatch.setattr(
-            compressor, "state_cache", SimpleNamespace(kv_cache=[torch.zeros(256, 32, 1, 4)]), raising=False
+            compressor, "state_cache", SimpleNamespace(kv_cache=torch.zeros(256, 32, 1, 4)), raising=False
         )
         compressor._ring_pooled, compressor._ring_num_cores = torch.empty(64, 2, dtype=torch.bfloat16), 1
         attn.compressor = compressor
@@ -1144,7 +1195,7 @@ class TestPCPBatchLifecycle:
                     ring_state[ring_metadata[4, req_idx], ring_slot].copy_(gathered_kv_scores[source_row_idx])
 
         def scatter(cache, slots, values):
-            block_size = 8 if cache.data_ptr() == attn.dsa_attn.swa_cache_layer.kv_cache[0].data_ptr() else 4
+            block_size = 8 if cache.data_ptr() == attn.dsa_attn.swa_cache_layer.kv_cache.data_ptr() else 4
             valid = slots[:, 0] >= 0
             stores.append(int(valid.sum()))
             indices = slots[valid, 0].long() * block_size + slots[valid, 1]
@@ -1446,9 +1497,9 @@ class TestSparseLayerReuse:
         addresses = (topk.data_ptr(), candidates.data_ptr())
         index_cache, folded_cache, long_cache = (object(), object()), object(), torch.zeros(256, 2)
         state.context.no_compile_layers = {
-            PREFIXES["index_k"]: SimpleNamespace(kv_cache=[index_cache]),
-            PREFIXES["index_k"] + "_folded": SimpleNamespace(kv_cache=[folded_cache]),
-            PREFIXES["long_kv"]: SimpleNamespace(kv_cache=[long_cache]),
+            PREFIXES["index_k"]: SimpleNamespace(kv_cache=index_cache),
+            PREFIXES["index_k"] + "_folded": SimpleNamespace(kv_cache=folded_cache),
+            PREFIXES["long_kv"]: SimpleNamespace(kv_cache=long_cache),
         }
 
         def select(query, values, positions, source_cache, cache_metadata, **kwargs):
@@ -1489,7 +1540,7 @@ class TestSparseLayerReuse:
 
             @staticmethod
             def qsmla(query, swa_cache, cmp_cache, metadata, indices, **kwargs):
-                assert swa_cache is attn.dsa_attn.swa_cache_layer.kv_cache[0]
+                assert swa_cache is attn.dsa_attn.swa_cache_layer.kv_cache
                 assert cmp_cache is long_cache
                 return attention(query, indices)
 
@@ -1543,3 +1594,136 @@ class TestProjectionLayout:
         expected = torch.zeros_like(output)
         expected[:live] = values.flatten(1)
         torch.testing.assert_close(output, expected)
+
+
+@pytest.mark.parametrize("rank", [0, 1])
+@pytest.mark.parametrize("order", list(permutations((0, 2, 1))))
+@pytest.mark.parametrize("use_executor", [False, True])
+def test_a5_async_plans_use_real_lengths_and_first_consumption_order(builders, monkeypatch, rank, order, use_executor):
+    stream = SimpleNamespace(wait_event=lambda event: None)
+    monkeypatch.setattr(torch.npu, "Stream", lambda: stream)
+    monkeypatch.setattr(torch.npu, "Event", lambda: SimpleNamespace(record=lambda stream: None))
+    monkeypatch.setattr(torch.npu, "current_stream", lambda: stream)
+    monkeypatch.setattr(torch.npu, "stream", lambda stream: nullcontext())
+    executor = DeviceMetadataExecutor(capture_producers=True)
+    owners = builders(rank=rank)
+    builder = owners["swa"]
+    builder.vllm_config.model_config.hf_text_config.compress_ratios = [0, 0, 2, 2, 1, 1]
+    builder._uses_a5_packed_cache = True
+    builder._global_builder._uses_a5_packed_cache = True
+    builder._a5_smla_metadata = torch.empty(dsa_v41.V41_METADATA_BUFFER_SIZE, dtype=torch.int32)
+    builder._a5_smla_length_rows = torch.empty(64, 1, dtype=torch.int32)
+    calls = []
+
+    def plan(ori, cmp, **kwargs):
+        calls.append((ori.clone(), cmp.clone(), kwargs))
+        return torch.ones(dsa_v41.V41_METADATA_BUFFER_SIZE, dtype=torch.int32)
+
+    builder._device_backend = SimpleNamespace(mixed_quant_sparse_flash_mla_metadata=plan)
+    minimum = torch.minimum
+    visibility_calls: list[None] = []
+
+    def track_visibility(*args, **kwargs):
+        visibility_calls.append(None)
+        return minimum(*args, **kwargs)
+
+    monkeypatch.setattr(torch, "minimum", track_visibility)
+    addresses = None
+    for scenario in ["prefill", "decode", "mixed", "prefill"]:
+        batch = _batch(2, rank, scenario)
+        with builder.defer_device_metadata(in_graph=batch.graph):
+            result = _build_planes(owners, batch)[PREFIXES["swa"]]
+        tasks = builder.take_device_metadata_tasks()
+        assert len(tasks) == 3
+        assert list(result.a5_smla_plans) == [0, 2, 1]
+        by_ratio = dict(zip((0, 2, 1), tasks))
+        executor._attention_order = {by_ratio[ratio].group_id: index for index, ratio in enumerate(order)}
+        before = len(calls)
+        # Run the same deferred tasks again after the request lengths change.
+        for _ in range(2):
+            start = len(calls)
+            visibility_before = len(visibility_calls)
+            if use_executor:
+                executor.submit(tasks)
+                executor.release()
+            else:
+                for ratio in order:
+                    by_ratio[ratio].run()
+            assert len(visibility_calls) - visibility_before == (1 if use_executor else 2)
+            for ratio, (ori, cmp, kw) in zip(order, calls[start:]):
+                task = by_ratio[ratio]
+                assert task.group_id == id(result.a5_smla_plans[ratio])
+                rows = ori.shape[0]
+                torch.testing.assert_close(ori[:, 0], (result.positions[:rows] + 1).clamp(0, 4).int())
+                expected = torch.zeros(rows, dtype=torch.int32)
+                if ratio:
+                    for req in range(result.num_reqs):
+                        lo, hi = result.query_start_loc[req : req + 2].tolist()
+                        for row in range(lo, min(hi, rows)):
+                            visible = max(0, min(int(result.positions[row]) + 1, int(result.seq_lens[req])))
+                            expected[row] = min(3, visible // ratio)
+                torch.testing.assert_close(cmp[:, 0], expected.int())
+                assert kw["has_cmp_kv"] == bool(ratio)
+            result.seq_lens.zero_()
+        assert len(calls) == before + 6
+        current = [result.a5_smla_plans[r].data_ptr() for r in [0, 2, 1]]
+        if addresses is not None:
+            assert current == addresses
+        addresses = current
+
+
+@pytest.mark.parametrize("in_graph", [False, True])
+def test_a5_noncausal_draft_plan_keeps_actual_window_lengths(builders, monkeypatch, in_graph):
+    builder = builders()["swa"]
+    builder._uses_a5_packed_cache = True
+    builder._a5_smla_metadata = torch.empty(dsa_v41.V41_METADATA_BUFFER_SIZE, dtype=torch.int32)
+    builder._a5_smla_length_rows = torch.empty(64, 1, dtype=torch.int32)
+    builder.vllm_config.model_config.hf_text_config.compress_ratios = [0, 0, 2, 1]
+    calls = []
+
+    def make_indices(*args, **kwargs):
+        n = args[6]
+        return torch.zeros((n, 1, 8), dtype=torch.int32), torch.full((n, 1), 6, dtype=torch.int32)
+
+    monkeypatch.setattr(dsa_v41, "build_dspark_swa_indices", make_indices)
+
+    def plan(ori, cmp, **kwargs):
+        calls.append((ori.clone(), cmp.clone(), kwargs))
+        return torch.ones(dsa_v41.V41_METADATA_BUFFER_SIZE, dtype=torch.int32)
+
+    builder._device_backend = SimpleNamespace(mixed_quant_sparse_flash_mla_metadata=plan)
+    common = _batch(2, 0, "decode").local.replace(causal=False, pcp_context=None)
+    with dsa_v41.AscendDSAV41MetadataBuilder.defer_device_metadata(builder, in_graph=in_graph):
+        result = dsa_v41.AscendDSAV41MetadataBuilder.build(builder, 0, common)
+    tasks = builder.take_device_metadata_tasks()
+    assert len(tasks) == 1 and list(result.a5_smla_plans) == [0]
+    assert not calls
+    tasks[0].run()
+    ori, cmp, kw = calls[0]
+    assert ori.shape[0] == (common.num_input_tokens if in_graph else common.num_actual_tokens)
+    assert torch.all(ori[: common.num_actual_tokens] == 6)
+    assert torch.count_nonzero(ori[common.num_actual_tokens :]) == 0
+    assert torch.count_nonzero(cmp) == 0
+    assert not kw["has_cmp_kv"]
+
+
+@pytest.mark.parametrize(
+    "ratios,candidate_blocks,candidate_width,error",
+    [([0, 3], 0, 0, "ratios"), ([0, 2, 1], 1, 2, "coverage")],
+)
+def test_a5_async_plans_reject_unsupported_visibility_contract(
+    builders, ratios, candidate_blocks, candidate_width, error
+):
+    builder = builders()["swa"]
+    builder._uses_a5_packed_cache = True
+    builder._a5_smla_metadata = torch.empty(dsa_v41.V41_METADATA_BUFFER_SIZE, dtype=torch.int32)
+    builder._a5_smla_length_rows = torch.empty(64, 1, dtype=torch.int32)
+    text = builder.vllm_config.model_config.hf_text_config
+    text.compress_ratios = ratios
+    text.candidate_topk_blocks = candidate_blocks
+    text.candidate_block_size = candidate_width
+    builder._device_backend = Mock()
+    common = _batch(2, 0, "decode").local.replace(pcp_context=None)
+    with pytest.raises(ValueError, match=error):
+        dsa_v41.AscendDSAV41MetadataBuilder.build(builder, 0, common)
+    builder._device_backend.mixed_quant_sparse_flash_mla_metadata.assert_not_called()

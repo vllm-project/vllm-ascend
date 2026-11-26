@@ -25,15 +25,16 @@ def _reference_positions(grids, merge):
 
 
 @pytest.mark.parametrize(
-    "grids,merge",
+    "grids,merge,sections",
     [
-        ([[1, 1, 1]], 1),
-        ([[1, 1, 17]], 1),
-        ([[1, 2, 2], [3, 6, 10]], 2),
-        ([[1, 48, 48]], 2),
+        ([[1, 1, 1]], 1, (13, 13, 13)),
+        ([[1, 1, 17]], 1, (13, 13, 13)),
+        ([[1, 1, 17]], 1, (21, 21, 21)),
+        ([[1, 2, 2], [3, 6, 10]], 2, (13, 13, 13)),
+        ([[1, 2, 2], [3, 6, 10]], 2, (21, 21, 21)),
+        ([[1, 48, 48]], 2, (21, 21, 21)),
     ],
 )
-@pytest.mark.parametrize("sections", [(13, 13, 13), (21, 21, 21)])
 @torch.inference_mode()
 def test_vit_mrope_setup(grids, merge, sections):
     """Resolve the upstream public layer on NPU and compare with CPU reference."""

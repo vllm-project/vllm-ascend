@@ -6,7 +6,6 @@ test_cases:
   - name: "Kimi-K2.6-W4A8-PCP-DCP"
     model: "Eco-Tech/Kimi-K2.6-w4a8"
     envs:
-      VLLM_USE_V2_MODEL_RUNNER: "1"
       VLLM_WORKER_MULTIPROC_METHOD: "spawn"
       OMP_NUM_THREADS: "10"
       OMP_PROC_BIND: "false"
@@ -51,7 +50,7 @@ test_cases:
         dataset_path: vllm-ascend/aime2025
         request_conf: vllm_api_general_chat
         dataset_conf: aime2025/aime2025_gen_0_shot_chat_prompt
-        max_out_len: 65536
+        max_out_len: 81920
         batch_size: 8
         baseline: 96.67
         threshold: 10

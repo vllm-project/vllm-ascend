@@ -1,11 +1,13 @@
 import enum
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
 from functools import lru_cache
 from importlib import import_module
 from importlib.util import find_spec
+from math import prod
 from typing import TYPE_CHECKING, Any
 
+import numpy as np
 import torch
 import torch.nn.functional as F
 import torch_npu
@@ -30,6 +32,7 @@ from vllm.v1.kv_cache_interface import (
 from vllm_ascend.core.kv_cache_interface import get_kv_cache_compression_ratio, supports_component_major_mla_pd
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.device.utils import FIA_TND_LARGE_HEAD_FALLBACK_HEAD_SIZE
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence import record_attention_prefetch_start
 from vllm_ascend.ops.triton.attention_update import prepare_attention_update
 from vllm_ascend.utils import (
     _is_glm_model,
@@ -38,7 +41,32 @@ from vllm_ascend.utils import (
 )
 
 if TYPE_CHECKING:
+    from vllm.v1.worker.gpu.input_batch import InputBatch
+
     from vllm_ascend.worker.v2.pcp_manager import AscendPCPAttentionContext
+
+
+def apply_prefill_as_decode_mask(
+    is_prefilling: np.ndarray | torch.Tensor,
+    prefill_runs_as_decode: np.ndarray | torch.Tensor | None = None,
+) -> np.ndarray:
+    """Return effective request phases from host masks without modifying the inputs."""
+    flags = np.asarray(is_prefilling, dtype=np.bool_)
+    if prefill_runs_as_decode is None:
+        return flags
+    override = np.asarray(prefill_runs_as_decode, dtype=np.bool_)
+    if override.shape != flags.shape:
+        raise RuntimeError(
+            f"Prefill-as-decode mask must match the request phase mask: {override.shape} != {flags.shape}."
+        )
+    return flags & ~override
+
+
+def has_requests_to_run_as_prefill(batch: "InputBatch") -> bool:
+    """Whether an input batch still contains requests computed by the prefill path."""
+    flags = apply_prefill_as_decode_mask(batch.is_prefilling_np, getattr(batch, "prefill_runs_as_decode_np", None))
+    return bool(flags.any())
+
 
 # Native npu_attention_update accepts at most 16 output/LSE pairs.
 ATTENTION_UPDATE_MAX_INPUTS = 16
@@ -48,6 +76,27 @@ MLAPO_MAX_SUPPORTED_TOKENS = 1024
 # MLA models keep the FIA-compatible component-major cache layout on A5.
 # N1 is the post-TP local head count, not the global model configuration.
 MLA_FLASH_SUPPORTED_Q_HEADS = frozenset((8, 12, 64, 96))
+
+
+RuntimeComponentShape = tuple[int, int, int, int]
+KVCacheRuntimeShapes = tuple[RuntimeComponentShape, ...]
+
+
+def combine_cache_components(data: torch.Tensor, scales: torch.Tensor) -> torch.Tensor:
+    """Recover a packed-page alias from adjacent data and scale components.
+
+    The alias preserves [all data | all scales] packing; its logical rows do
+    not imply token-interleaved metadata. Both inputs must share this page ABI.
+    """
+    if (
+        data.untyped_storage().data_ptr() != scales.untyped_storage().data_ptr()
+        or scales.data_ptr() - data.data_ptr() != prod(data.shape[1:]) * data.element_size()
+        or data.stride(0) * data.element_size() != scales.stride(0) * scales.element_size()
+    ):
+        raise ValueError("Combined cache views require adjacent components in the same physical pages.")
+    shape = (*data.shape[:-1], data.shape[-1] + scales.shape[-1] * scales.element_size() // data.element_size())
+    inner = tuple(prod(shape[dim + 1 :]) for dim in range(1, len(shape)))
+    return torch.as_strided(data, shape, (data.stride(0), *inner), storage_offset=data.storage_offset())
 
 
 def supports_strided_mla_cache(
@@ -116,6 +165,31 @@ def get_flashmla_ops() -> tuple[Callable, Callable] | None:
 
     attention_op = getattr(ops, "flash_mla", None)
     metadata_op = getattr(ops, "flash_mla_metadata", None)
+    if callable(attention_op) and callable(metadata_op):
+        return attention_op, metadata_op
+    return None
+
+
+def get_quant_flashmla_ops() -> tuple[Callable, Callable] | None:
+    """Find the two full-quant FlashMLA APIs in ops-transformer.
+
+    QuantFlashMLA is delivered independently from the floating-point operator,
+    so backend selection must test its own attention and device-metadata APIs.
+    Keep import failures from an installed package visible for the same reason
+    as :func:`get_flashmla_ops`.
+    """
+    if not _has_flashmla_module():
+        return None
+
+    try:
+        ops = import_module("cann_ops_transformer.ops")
+    except ModuleNotFoundError as exc:
+        if exc.name in ("cann_ops_transformer", "cann_ops_transformer.ops"):
+            return None
+        raise
+
+    attention_op = getattr(ops, "quant_flash_mla", None)
+    metadata_op = getattr(ops, "quant_flash_mla_metadata", None)
     if callable(attention_op) and callable(metadata_op):
         return attention_op, metadata_op
     return None
@@ -372,6 +446,7 @@ class AscendCommonAttentionMetadata(CommonAttentionMetadata):
     # CPU views of runner-owned CpuGpuBuffers; never exact sequence lengths.
     req_topk_buffer_slots: torch.Tensor | None = None
     req_topk_buffer_active: torch.Tensor | None = None
+    req_topk_buffer_stable_prefixes: torch.Tensor | None = None
     copy_sfa_draft_index: int | None = None
     copy_sfa_restore_tails: bool = False
     offload_dummy: bool = False
@@ -450,6 +525,7 @@ class AscendCommonAttentionMetadata(CommonAttentionMetadata):
             num_logits_indices=self.num_logits_indices,
             req_topk_buffer_slots=_slice_reqs(self.req_topk_buffer_slots),
             req_topk_buffer_active=_slice_reqs(self.req_topk_buffer_active),
+            req_topk_buffer_stable_prefixes=_slice_reqs(self.req_topk_buffer_stable_prefixes),
             copy_sfa_draft_index=self.copy_sfa_draft_index,
             offload_dummy=self.offload_dummy,
             replay_start=_slice_reqs(self.replay_start),
@@ -568,6 +644,33 @@ def split_decodes_and_prefills(
     return (num_decodes, num_prefills, num_decode_tokens, num_prefill_tokens)
 
 
+def _kv_layer_transfer_connectors(
+    connector: Any,
+    layer: Any,
+    *,
+    for_save: bool = False,
+) -> Iterator[Any]:
+    """Route model boundaries only to children that understand their layout."""
+    if getattr(layer, "kv_transfer_cache_names", None) is None:
+        yield connector
+        return
+    accepts_boundary = (not for_save and getattr(connector, "supports_composite_kv_loads", False) is True) or (
+        for_save and getattr(connector, "supports_composite_kv_saves", False) is True
+    )
+    if accepts_boundary:
+        if connector.has_connector_metadata():
+            yield connector
+        return
+    for child in getattr(connector, "sub_connectors", ()):
+        yield from _kv_layer_transfer_connectors(child, layer, for_save=for_save)
+
+
+def _supports_attention_prefetch_gate(connector: Any) -> bool:
+    return getattr(connector, "supports_attention_prefetch_gate", False) is True or any(
+        _supports_attention_prefetch_gate(child) for child in getattr(connector, "sub_connectors", ())
+    )
+
+
 def wait_for_kv_layer_from_connector(layer_name: str):
     if not has_kv_transfer_group() or not is_v1_kv_transfer_group():
         return
@@ -579,7 +682,12 @@ def wait_for_kv_layer_from_connector(layer_name: str):
     if attn_metadata is None or not connector.has_connector_metadata():
         return
     # TODO: assert ascendMetadata
-    connector.wait_for_layer_load(layer_name)
+    prefetch_gate_ready = False
+    for layer_connector in _kv_layer_transfer_connectors(connector, forward_context.no_compile_layers.get(layer_name)):
+        layer_connector.wait_for_layer_load(layer_name)
+        prefetch_gate_ready |= _supports_attention_prefetch_gate(layer_connector)
+    if prefetch_gate_ready:
+        record_attention_prefetch_start()
 
 
 def maybe_save_kv_layer_to_connector(
@@ -596,7 +704,10 @@ def maybe_save_kv_layer_to_connector(
     if attn_metadata is None or not connector.has_connector_metadata():
         return
     # TODO: assert ascendMetadata
-    connector.save_kv_layer(layer_name, kv_cache_layer, attn_metadata)
+    for layer_connector in _kv_layer_transfer_connectors(
+        connector, forward_context.no_compile_layers.get(layer_name), for_save=True
+    ):
+        layer_connector.save_kv_layer(layer_name, kv_cache_layer, attn_metadata)
 
 
 def notify_kv_cache_written(layer_name: str = ""):
@@ -693,10 +804,12 @@ def _select_seq_lens(
 
     if isinstance(kv_cache_spec, CrossAttentionSpec):
         seq_lens = common_attn_metadata.seq_lens
-    if speculative_config is not None and speculative_config.parallel_drafting:
+    if speculative_config is not None:
+        # vLLM #63373 moved this capability off the deprecated legacy field.
+        parallel_drafting = speculative_config.speculator_config.parallel_drafting
         # PARD / DFlash (and DSpark on other models) keep the NPU seq_lens;
         # only DSpark on the GLM5.2 family keeps the CPU mirror above.
-        if not (speculative_config.use_dspark() and _is_glm_model(model_config)):
+        if parallel_drafting and not (speculative_config.use_dspark() and _is_glm_model(model_config)):
             seq_lens = common_attn_metadata.seq_lens
     return seq_lens
 

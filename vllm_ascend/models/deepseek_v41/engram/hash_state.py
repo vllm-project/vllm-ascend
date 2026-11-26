@@ -23,7 +23,6 @@ from vllm.models.deepseek_v41.common.engram import (
     DEAD_ID,
     EngramLayout,
     NgramHashState,
-    _write_hash_cache_kernel,
 )
 from vllm.triton_utils import triton
 
@@ -76,6 +75,13 @@ class AscendNgramHashState(NgramHashState):
     Keep that compiler workaround in this subclass, without changing vLLM.
     """
 
+    # Ascend callers share the slotless and legacy launch adapter.
+    use_slot_cache = False
+
+    @property
+    def block_size(self) -> int:
+        return self.swa_cache_module.block_size
+
     def forward(
         self,
         input_ids: torch.Tensor,
@@ -84,8 +90,8 @@ class AscendNgramHashState(NgramHashState):
         dead_mask: torch.Tensor,
         lookback_token_ids: torch.Tensor,
         lookback_dead_mask: torch.Tensor,
-        slot_mapping: torch.Tensor | None,
-        block_table: torch.Tensor | None,
+        slot_mapping: torch.Tensor | None = None,
+        block_table: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """Compute [tokens, layers, hash columns] int32 n-gram hashes.
 
@@ -112,23 +118,6 @@ class AscendNgramHashState(NgramHashState):
             query_start_loc.stride(0),
             BLOCK_T=32,
         )
-        if self.use_slot_cache:
-            assert cache is not None and slot_mapping is not None
-            assert block_table is not None
-            # Finish writes before other thread blocks read fallback history.
-            _write_hash_cache_kernel[(triton.cdiv(num_tokens, 256),)](
-                input_ids,
-                self.token_map,
-                dead_mask,
-                slot_mapping,
-                cache,
-                num_tokens,
-                input_ids.stride(0),
-                dead_mask.stride(0),
-                slot_mapping.stride(0),
-                256,
-                DEAD_ID,
-            )
         from vllm_ascend.ops.triton.engram_hash import _hash_ids_kernel
 
         _hash_ids_kernel[(triton.cdiv(num_tokens, 32), num_layers)](

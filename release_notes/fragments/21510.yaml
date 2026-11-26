@@ -1,0 +1,14 @@
+pr: 21510
+entries:
+  - category: feature
+    text: >-
+      GLM-5.3-Flash now reduces per-device KDA weight and recurrent-state memory
+      automatically when `--tensor-parallel-size` (TP) and
+      `--prefill-context-parallel-size` (PCP) are both greater than 1; the KDA head
+      count must be divisible by TP x PCP.
+      Experimental RecoverSSM also supports this topology on prefill producers
+      via `--use-replayssm` (off by default) with speculative decoding.
+      RecoverSSM requires `--pipeline-parallel-size` and
+      `--decode-context-parallel-size` to remain 1, and does not support PCP decode
+      consumers or colocated PCP execution.
+    model: glm-5.3-flash

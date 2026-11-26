@@ -16,7 +16,6 @@ MAX_NUM_SEQS = 256
 @pytest.mark.parametrize("method", MODELS.keys())
 @pytest.mark.parametrize("num_speculative_tokens", [3])
 @pytest.mark.parametrize("draft_tensor_parallel_size", [1])
-@pytest.mark.parametrize("disable_padded_drafter_batch", [False])
 @pytest.mark.parametrize("async_scheduling", [True])
 @pytest.mark.parametrize(
     "dynamic_num_speculative_tokens",
@@ -29,7 +28,6 @@ def test_qwen_eagle3_acceptance(
     method: str,
     num_speculative_tokens: int,
     draft_tensor_parallel_size: None | int,
-    disable_padded_drafter_batch: bool,
     async_scheduling: bool,
     dynamic_num_speculative_tokens: int | None,
 ):
@@ -67,7 +65,6 @@ def test_qwen_eagle3_acceptance(
         "method": method,
         "num_speculative_tokens": num_speculative_tokens,
         "draft_tensor_parallel_size": draft_tensor_parallel_size,
-        "disable_padded_drafter_batch": disable_padded_drafter_batch,
         "model": spec_model_name,
     }
     if dynamic_num_speculative_tokens is not None:

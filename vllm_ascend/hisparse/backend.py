@@ -69,7 +69,7 @@ def _allocate_resolver_workspace(runtime: HiSparseRuntime):
 
 
 def _allocate_attention_lengths(runtime: HiSparseRuntime) -> tuple[torch.Tensor, torch.Tensor] | None:
-    if runtime.kv_dtype != torch.float8_e4m3fn:
+    if runtime.kv_dtype not in (torch.int8, torch.float8_e4m3fn):
         return None
     return (
         torch.arange(runtime.max_swap_rows + 1, dtype=torch.int32, device=runtime.device),
@@ -162,7 +162,7 @@ class AscendHiSparseBackend(HiSparseBackend):
         attention_capacity = 0
         attention_block_stride = None
         attention_lengths = None
-        if runtime.kv_dtype == torch.float8_e4m3fn:
+        if runtime.kv_dtype in (torch.int8, torch.float8_e4m3fn):
             from vllm_ascend.hisparse.c8 import c8_storage_view
 
             # The resolver consumes virtual page rows. Attention consumes dense
@@ -208,9 +208,9 @@ class AscendHiSparseBackend(HiSparseBackend):
         kv_caches: dict[str, Any],
         forward_context: dict[str, Any],
     ) -> None:
-        from .binding import _bind_indexer_views, get_hisparse_indexer_specs
+        from .binding import prepare_hisparse_cache_views
 
-        _bind_indexer_views(kv_caches, get_hisparse_indexer_specs(kv_cache_config), forward_context)
+        prepare_hisparse_cache_views(kv_cache_config, kv_caches, forward_context)
 
     def is_current_stream_capturing(self) -> bool:
         return torch.npu.is_current_stream_capturing()

@@ -51,7 +51,7 @@ from vllm_ascend.attention.utils import (
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence import (
     record_attention_compute_start,
 )
-from vllm_ascend.utils import uses_mooncake_connector
+from vllm_ascend.utils import uses_ascend_store_memcache, uses_mooncake_connector
 
 if TYPE_CHECKING:
     from vllm.v1.kv_cache_interface import FullAttentionSpec
@@ -466,17 +466,6 @@ QFA_LAYOUT_PA_NZ = "PA_NZ"
 QFA_QSCALE_N2TGD_MAX_G_TIMES_QS = 80
 
 
-def _build_qfa_cu_seqlens(cumulative_seq_lengths: list[int], device: torch.device) -> torch.Tensor:
-    """Build QFA ``cu_seqlens``: int32 (B+1,) with a leading 0.
-
-    FIA-style ``actual_seq_lengths`` are B cumulative entries; QFA expects the
-    cumulative sums prefixed with 0 so batch i spans
-    ``[cu_seqlens[i], cu_seqlens[i + 1])`` (QFA requirement doc, sequence
-    length conversion rules).
-    """
-    return torch.tensor([0, *cumulative_seq_lengths], dtype=torch.int32, device=device)
-
-
 class AscendC8MXFPAttentionBackendImpl(AscendAttentionBackendImpl):
     """MXFP8 KV cache backend computed by the QFA dual-operator interface.
 
@@ -880,17 +869,18 @@ class AscendC8MXFPAttentionBackendImpl(AscendAttentionBackendImpl):
             return output.fill_(0)
         if getattr(self, "enable_hamming_sparse", False):
             raise NotImplementedError("C8_MXFP attention does not support hamming sparse KV compression yet.")
-        if self.vllm_config.kv_transfer_config is not None and not uses_mooncake_connector(
-            self.vllm_config.kv_transfer_config
-        ):
-            # Other connectors move only the K/V pair and would silently drop
-            # the scale caches.
-            raise NotImplementedError(
-                "C8_MXFP v1 PD disaggregation (kv_transfer) is only supported with "
-                "MooncakeConnectorV1, whose block-level transfer registers and moves "
-                "every per-layer cache tensor (FP8 K/V plus both E8M0 scale caches) "
-                "as raw blocks."
+        kv_transfer_config = self.vllm_config.kv_transfer_config
+        if kv_transfer_config is not None:
+            supports_c8_transfer = uses_mooncake_connector(kv_transfer_config) or uses_ascend_store_memcache(
+                kv_transfer_config
             )
+            if not supports_c8_transfer:
+                # Unsupported connectors may move only K/V and drop the scale caches.
+                raise NotImplementedError(
+                    "C8_MXFP v1 PD disaggregation (kv_transfer) requires MooncakeConnectorV1 "
+                    "or AscendStoreConnector with Memcache backend to transfer every per-layer "
+                    "cache tensor (K/V and both scale caches)."
+                )
         if kv_cache is None or len(kv_cache) < 4:
             raise RuntimeError(
                 "C8_MXFP attention requires a (k, v, k_scale, v_scale) KV cache "

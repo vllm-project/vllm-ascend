@@ -4,10 +4,12 @@
 
 from __future__ import annotations
 
+import os
 import time
 from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass
+from threading import Lock
 from typing import TYPE_CHECKING
 
 import torch
@@ -26,14 +28,58 @@ from vllm.v1.kv_offload.base import (
 from vllm.v1.kv_offload.cpu.gpu_worker import compute_sub_block_ptrs
 from vllm.v1.kv_offload.cpu.shared_offload_region import SharedOffloadRegion
 
-from vllm_ascend.utils import vllm_version_is
-
 if TYPE_CHECKING:
     from vllm.v1.kv_offload.base import DevicePointers
 
 # Direction codes shared with csrc/torch_binding.cpp::swap_blocks_batch.
 DIRECTION_H2D = 0
 DIRECTION_D2H = 1
+
+
+def _unlink_created_region_files(mmap_region: SharedOffloadRegion | None) -> None:
+    """Detach creator-owned names on abort/shutdown without unmapping pins."""
+    if mmap_region is None or not getattr(mmap_region, "_creator", False):
+        return
+    segments = getattr(mmap_region, "_segments", None)
+    paths = [entry[0] for entry in segments] if segments is not None else [mmap_region.mmap_path]
+    unlinked = True
+    for path in paths:
+        try:
+            os.unlink(path)
+        except FileNotFoundError:
+            pass
+        except OSError:
+            unlinked = False
+            logger.warning("Failed to unlink shared offload file %s", path, exc_info=True)
+    if unlinked:
+        # A later cleanup must not unlink a replacement using the same name.
+        mmap_region._creator = False
+
+
+@dataclass(eq=False)
+class _PinnedMmapRegistration:
+    """Own the mapping even when its worker never finishes construction."""
+
+    mmap_region: SharedOffloadRegion
+    tensors: list[torch.Tensor]
+
+    def unregister(self) -> None:
+        if self.tensors:
+            # A failed sync/unregister must leave both ownership and the
+            # remaining range list intact so a later attempt can retry.
+            torch.npu.synchronize()
+            while self.tensors:
+                torch.ops._C_ascend.unregister_pinned_host_mmap(self.tensors[-1])
+                self.tensors.pop()
+        with _PINNED_MMAP_REGISTRATIONS_LOCK:
+            _PINNED_MMAP_REGISTRATIONS.discard(self)
+
+
+# A native registration outlives Python worker ownership on failed rollback.
+# Keep a process-scoped root until successful unregister, or process exit.
+# The lock protects registry membership; ACL calls run outside the lock.
+_PINNED_MMAP_REGISTRATIONS: set[_PinnedMmapRegistration] = set()
+_PINNED_MMAP_REGISTRATIONS_LOCK = Lock()
 
 
 @dataclass
@@ -113,16 +159,11 @@ class SingleDirectionNPUOffloadingHandler:
         src_spec: LoadStoreSpec,
         dst_spec: LoadStoreSpec,
     ) -> bool:
-        if vllm_version_is("0.33.0"):
-            batch_src, batch_dst, batch_sizes, num_copy_ops, num_transfer_bytes = self._legacy_descriptors(
-                src_spec, dst_spec
-            )
-        else:
-            device_ptrs = src_spec if self.npu_to_cpu else dst_spec
-            cpu_spec = dst_spec if self.npu_to_cpu else src_spec
-            batch_src, batch_dst, batch_sizes, num_copy_ops, num_transfer_bytes = self._pointer_descriptors(
-                device_ptrs, cpu_spec
-            )
+        device_ptrs = src_spec if self.npu_to_cpu else dst_spec
+        cpu_spec = dst_spec if self.npu_to_cpu else src_spec
+        batch_src, batch_dst, batch_sizes, num_copy_ops, num_transfer_bytes = self._pointer_descriptors(
+            device_ptrs, cpu_spec
+        )
         src = batch_src[:num_copy_ops]
         dst = batch_dst[:num_copy_ops]
         sizes = batch_sizes[:num_copy_ops]
@@ -163,95 +204,6 @@ class SingleDirectionNPUOffloadingHandler:
             )
         )
         return True
-
-    def _legacy_descriptors(self, src_spec: LoadStoreSpec, dst_spec: LoadStoreSpec):
-        assert isinstance(src_spec, BlockIDsLoadStoreSpec)
-        assert isinstance(dst_spec, BlockIDsLoadStoreSpec)
-
-        src_blocks = src_spec.block_ids
-        dst_blocks = dst_spec.block_ids
-        assert src_blocks.ndim == 1
-        assert dst_blocks.ndim == 1
-
-        npu_spec = src_spec if self.npu_to_cpu else dst_spec
-        assert isinstance(npu_spec, GPULoadStoreSpec)
-        group_sizes = npu_spec.group_sizes
-        block_indices = npu_spec.block_indices
-        assert len(group_sizes) == len(self.kv_cache_groups_data_refs)
-        assert len(block_indices) == len(self.kv_cache_groups_data_refs)
-
-        num_copy_ops = sum(
-            group_size * len(group_data_refs)
-            for group_size, group_data_refs in zip(group_sizes, self.kv_cache_groups_data_refs)
-        )
-        batch_src, batch_dst, batch_sizes = (
-            self._buffer_pool.pop() if self._buffer_pool else _new_descriptor_buffers(num_copy_ops)
-        )
-        if batch_src.numel() < num_copy_ops:
-            batch_src, batch_dst, batch_sizes = _new_descriptor_buffers(num_copy_ops)
-
-        src = batch_src[:num_copy_ops]
-        dst = batch_dst[:num_copy_ops]
-        sizes = batch_sizes[:num_copy_ops]
-        all_src = src.numpy()
-        all_dst = dst.numpy()
-        all_sizes = sizes.numpy()
-
-        src_offset = 0
-        dst_offset = 0
-        op_idx = 0
-        num_transfer_bytes = 0
-        for group_size, block_idx, group_data_refs in zip(
-            group_sizes,
-            block_indices,
-            self.kv_cache_groups_data_refs,
-        ):
-            if group_size == 0:
-                continue
-
-            src_blocks_to_skip = block_idx % self.src_blocks_per_chunk
-            dst_blocks_to_skip = block_idx % self.dst_blocks_per_chunk
-            src_logical_block_count = group_size + src_blocks_to_skip
-            dst_logical_block_count = group_size + dst_blocks_to_skip
-
-            src_block_count = cdiv(src_logical_block_count, self.src_blocks_per_chunk)
-            dst_block_count = cdiv(dst_logical_block_count, self.dst_blocks_per_chunk)
-            src_end_offset = src_offset + src_block_count
-            dst_end_offset = dst_offset + dst_block_count
-            assert src_end_offset <= len(src_blocks)
-            assert dst_end_offset <= len(dst_blocks)
-
-            group_src = src_blocks[src_offset:src_end_offset]
-            group_dst = dst_blocks[dst_offset:dst_end_offset]
-            for data_ref in group_data_refs:
-                tensor_idx = data_ref.tensor_idx
-                end_idx = op_idx + group_size
-                compute_sub_block_ptrs(
-                    group_src,
-                    self.src_blocks_per_chunk,
-                    all_src[op_idx:end_idx],
-                    self.src_tensors[tensor_idx],
-                    skip_count=src_blocks_to_skip,
-                )
-                compute_sub_block_ptrs(
-                    group_dst,
-                    self.dst_blocks_per_chunk,
-                    all_dst[op_idx:end_idx],
-                    self.dst_tensors[tensor_idx],
-                    skip_count=dst_blocks_to_skip,
-                )
-                all_sizes[op_idx:end_idx] = data_ref.page_size_bytes
-                num_transfer_bytes += group_size * data_ref.page_size_bytes
-                op_idx = end_idx
-
-            src_offset = src_end_offset
-            dst_offset = dst_end_offset
-
-        assert src_offset == len(src_blocks)
-        assert dst_offset == len(dst_blocks)
-        assert op_idx == num_copy_ops
-
-        return batch_src, batch_dst, batch_sizes, num_copy_ops, num_transfer_bytes
 
     def _pointer_descriptors(self, device_ptrs: DevicePointers, cpu_spec: LoadStoreSpec):
         """Translate #56076's resolved device addresses into NPU DMA descriptors.
@@ -356,8 +308,13 @@ class NPUOffloadingWorker(OffloadingWorker):
         blocks_per_chunk: int,
         num_cpu_blocks: int,
         mmap_region: SharedOffloadRegion | None = None,
+        pin_shared_mmap: bool = False,
+        worker_slot_only: bool = False,
     ) -> None:
         self._mmap_region = mmap_region
+        self._mmap_pinned = False
+        self._pinned_tensors: list[torch.Tensor] = []
+        self._pinned_registration: _PinnedMmapRegistration | None = None
         pin_memory = is_pin_memory_available()
         logger.info("Allocating %d CPU tensors...", len(kv_caches.tensors))
 
@@ -403,6 +360,8 @@ class NPUOffloadingWorker(OffloadingWorker):
                 npu_tensors.append(npu_tensor)
                 cpu_tensors.append(cpu_tensor)
 
+            self._pin_shared_region(pin_shared_mmap, worker_slot_only)
+
             self._store_handler = SingleDirectionNPUOffloadingHandler(
                 npu_tensors=npu_tensors,
                 cpu_tensors=cpu_tensors,
@@ -418,6 +377,10 @@ class NPUOffloadingWorker(OffloadingWorker):
                 npu_to_cpu=False,
             )
         except Exception:
+            # Initialization has aborted, so no scheduler should attach later.
+            # Unlink separately: failed handler/unpin cleanup must not leak
+            # named shm files, while native registrations still need the mmap.
+            _unlink_created_region_files(mmap_region)
             # Construction failed before worker ownership became visible to
             # the connector. Drop any handler-owned tensor views before
             # closing the mapping, otherwise mmap.close() can fail with an
@@ -426,10 +389,82 @@ class NPUOffloadingWorker(OffloadingWorker):
                 handler = getattr(self, handler_name, None)
                 if handler is not None:
                     handler.shutdown()
+            # Failed sync/unregister must skip mmap cleanup: native registrations
+            # still need the mapping, retained by the process-scoped owner.
+            self._unpin_shared_region()
             if mmap_region is not None:
                 mmap_region.cleanup()
                 self._mmap_region = None
             raise
+
+    def _pin_shared_region(self, pin_shared_mmap: bool, worker_slot_only: bool) -> None:
+        if self._mmap_region is None or not pin_shared_mmap:
+            return
+        try:
+            supported = torch.ops._C_ascend.supports_eccpu_offload()
+        except Exception:
+            logger.warning(
+                "KV offload shared mmap pinning is unavailable; using pageable mmap",
+                exc_info=True,
+            )
+            return
+        if not supported:
+            logger.warning(
+                "KV offload shared mmap pinning requires aclrtMemcpyBatchAsync "
+                "and aclrtHostRegisterV2; using pageable mmap"
+            )
+            return
+
+        slot_ranges = getattr(self._mmap_region, "iter_worker_slot_ranges", None)
+        use_worker_slots = bool(worker_slot_only and self._mmap_region.rank is not None and slot_ranges is not None)
+        if use_worker_slots and slot_ranges is not None:
+            try:
+                tensors = [self._mmap_region.base_tensor[offset : offset + length] for offset, length in slot_ranges()]
+            except Exception:
+                logger.warning(
+                    "Failed to build worker slot ranges; pinning the whole region",
+                    exc_info=True,
+                )
+                use_worker_slots = False
+                tensors = [self._mmap_region.base_tensor]
+        else:
+            tensors = [self._mmap_region.base_tensor]
+
+        if self._pinned_registration is None:
+            registration = _PinnedMmapRegistration(self._mmap_region, self._pinned_tensors)
+            with _PINNED_MMAP_REGISTRATIONS_LOCK:
+                _PINNED_MMAP_REGISTRATIONS.add(registration)
+            self._pinned_registration = registration
+
+        try:
+            for tensor in tensors:
+                torch.ops._C_ascend.register_pinned_host_mmap(tensor)
+                # Retain each registered view until unregister succeeds.
+                self._pinned_tensors.append(tensor)
+                self._mmap_pinned = True
+        except Exception:
+            logger.warning(
+                "Failed to pin shared offload mmap; rolling back registrations",
+                exc_info=True,
+            )
+            self._unpin_shared_region()
+            return
+
+        pinned_bytes = sum(tensor.numel() * tensor.element_size() for tensor in self._pinned_tensors)
+        logger.info(
+            "Pinned shared offload mmap %s %.2f GB in %d range(s)",
+            "worker slots" if use_worker_slots else "whole region",
+            pinned_bytes / 1e9,
+            len(self._pinned_tensors),
+        )
+
+    def _unpin_shared_region(self) -> None:
+        if self._pinned_registration is None:
+            return
+        self._pinned_registration.unregister()
+        self._pinned_registration = None
+        self._mmap_pinned = False
+        logger.info("Unpinned shared offload mmap")
 
     def submit_store(
         self,
@@ -458,12 +493,18 @@ class NPUOffloadingWorker(OffloadingWorker):
         self._load_handler.wait(job_ids)
 
     def shutdown(self) -> None:
+        # No new scheduler/worker attachment is needed during shutdown.
+        # Existing mappings remain valid even if releasing a pin fails below.
+        _unlink_created_region_files(self._mmap_region)
         try:
             self._store_handler.shutdown()
         finally:
             try:
                 self._load_handler.shutdown()
             finally:
+                # Failed sync/unregister intentionally skips cleanup below.
+                # The registration owner keeps the mmap alive for retry or exit.
+                self._unpin_shared_region()
                 # Drop all mmap-backed tensor views before closing the mapping.
                 if self._mmap_region is not None:
                     self._mmap_region.cleanup()

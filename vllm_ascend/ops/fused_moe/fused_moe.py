@@ -41,6 +41,7 @@ from vllm_ascend.ops.fused_moe.shared_experts import (
     SharedExpertParallelMode,
     SubmittedSharedExpertGateUp,
 )
+from vllm_ascend.utils import vllm_version_is
 
 
 def _ascend_moe_forward_shared_sp_fake(
@@ -59,7 +60,8 @@ def _ascend_moe_forward_shared_sp_fake(
     which is only correct before the early all-gather optimization.
     """
     del router_logits, input_ids, layer_name
-    assert shared_experts_input is not None
+    if shared_experts_input is None:
+        shared_experts_input = hidden_states
     shared_out = shared_experts_input.new_empty(
         (*hidden_states.shape[:-1], shared_experts_input.shape[-1]),
     )
@@ -96,7 +98,18 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
         routed_input_transform=None,
         routed_output_transform=None,
         routed_scaling_factor=1,
+        divide_shared_output_in_fp16=False,
+        routed_scale_mode=None,
     ):
+        scaling_kwargs = {}
+        if not vllm_version_is("0.34.0"):
+            from vllm.model_executor.layers.fused_moe.config import RoutedScaleMode
+
+            if routed_scale_mode is None:
+                routed_scale_mode = (
+                    RoutedScaleMode.OUTPUT_FP16_GUARD if divide_shared_output_in_fp16 else RoutedScaleMode.ROUTER
+                )
+            scaling_kwargs["routed_scale_mode"] = routed_scale_mode
         super().__init__(
             layer_name,
             moe_config,
@@ -109,6 +122,7 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
             routed_input_transform,
             routed_output_transform,
             routed_scaling_factor,
+            **scaling_kwargs,
         )
         self._gate = gate
         self.hidden_size = moe_config.hidden_dim
@@ -137,7 +151,10 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
             # layer is the only module the quant methods
             # (``get_fused_mc2_weights``) and the MegaMoe communicator see.
             self.routed_experts.ascend_megamoe_shared_fusion = self.ascend_shared_experts.megamoe_shared_fusion()
-            if self._can_overlap_sp_shared_with(self.routed_input_transform):
+            if (
+                self._can_overlap_sp_shared_with(self.routed_input_transform)
+                or self.ascend_shared_experts.parallel_mode() is SharedExpertParallelMode.FINE_GRAINED_TENSOR_PARALLEL
+            ):
                 self._forward_entry = torch.ops.vllm.ascend_moe_forward_shared_sp
 
         setup_moe_comm_method(self.moe_config)
@@ -299,7 +316,8 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
             routed_transform is not None
             and shared_experts is not None
             and shared_experts.multistream_overlap
-            and shared_experts.parallel_mode() is SharedExpertParallelMode.SEQUENCE_PARALLEL_ONLY
+            and shared_experts.parallel_mode()
+            in (SharedExpertParallelMode.SEQUENCE_PARALLEL_ONLY, SharedExpertParallelMode.FINE_GRAINED_TENSOR_PARALLEL)
         )
 
     @property

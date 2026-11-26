@@ -1,0 +1,9 @@
+pr: 22902
+entries:
+  - category: feature
+    text: >-
+      Added CANN MegaMoe support on Atlas A2: with `enable_fused_mc2=2/3`,
+      eligible MoE layers on A2 now run the MegaMoe operator instead of
+      silently falling back to MC2/AllGather.
+  - category: feature
+    text: On Atlas A2, `enable_fused_mc2=1` now uses the fused MC2 communication path when expert parallelism is 32 or less.

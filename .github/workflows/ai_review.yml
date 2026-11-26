@@ -1,0 +1,121 @@
+name: AI Review
+on:
+  pull_request_target:
+    types: [labeled, unlabeled, synchronize]
+  issue_comment:
+    types: [created]
+
+permissions:
+  contents: read
+
+jobs:
+  authorize:
+    if: >-
+      (
+        github.event_name == 'pull_request_target' &&
+        (
+          (github.event.action == 'synchronize' &&
+            contains(github.event.pull_request.labels.*.name, 'ai-review')) ||
+          ((github.event.action == 'labeled' || github.event.action == 'unlabeled') &&
+            github.event.label.name == 'ai-review')
+        )
+      ) ||
+      (
+        github.event_name == 'issue_comment' &&
+        github.event.issue.pull_request != null &&
+        startsWith(github.event.comment.body, '/ai-review')
+      )
+    runs-on: linux-amd64-cpu-2-hk
+    timeout-minutes: 20
+    container:
+      image: quay.io/ascend-ci/vllm-ascend:ai-review
+    outputs:
+      authorized: ${{ steps.authorize.outputs.authorized }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.workflow_sha }}
+          persist-credentials: false
+          sparse-checkout: |
+            .github/workflows/scripts
+            .github/agent-review/allowlist.txt
+          sparse-checkout-cone-mode: false
+
+      - name: Authorize the event before it can affect a running review
+        id: authorize
+        env:
+          GH_TOKEN: ${{ secrets.PAT_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+        run: python3 .github/workflows/scripts/ai_review.py authorize
+
+  review:
+    needs: authorize
+    if: needs.authorize.outputs.authorized == 'true'
+    runs-on: linux-amd64-cpu-2-hk
+    timeout-minutes: 20
+    container:
+      image: quay.io/ascend-ci/vllm-ascend:ai-review
+    # Push only revokes the pass label in authorize; it never queues this job.
+    # Review requests and state changes run one at a time per PR.
+    # Keep one pending job; a later queued job replaces it without canceling the running job.
+    concurrency:
+      group: ai-review-${{ github.event.pull_request.number || github.event.issue.number }}
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.workflow_sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Prepare the review
+        id: prepare
+        env:
+          GH_TOKEN: ${{ secrets.PAT_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          python3 .github/workflows/scripts/ai_review.py prepare
+
+      - name: Fetch doc-quality rules
+        if: steps.prepare.outputs.doc_quality == 'true'
+        env:
+          DOC_QUALITY_USERNAME: ${{ vars.DOC_QUALITY_USERNAME }}
+          DOC_QUALITY_TOKEN: ${{ secrets.DOC_QUALITY_TOKEN }}
+        run: |
+          revision=9b97d74bb8b35746de34f752973ea834478f532f
+          repo=/tmp/doc-quality
+          trap 'rm -rf "$repo"' EXIT
+          git init -q --bare "$repo"
+          basic_auth=$(printf '%s:%s' "$DOC_QUALITY_USERNAME" "$DOC_QUALITY_TOKEN" | base64 -w0)
+          GITCODE_AUTH="Authorization: Basic $basic_auth" git -C "$repo" --config-env=http.extraHeader=GITCODE_AUTH \
+            fetch --depth=1 https://gitcode.com/ascend-ci/doc-quality.git "$revision"
+          destination="$GITHUB_WORKSPACE/.github/agent-review/L2/doc-quality/upstream"
+          mkdir -p "$destination"
+          git -C "$repo" --work-tree="$destination" checkout 'FETCH_HEAD:skills/01.评估标准' -- .
+
+      - uses: actions/checkout@v7
+        if: steps.prepare.outputs.review == 'true'
+        with:
+          ref: ${{ steps.prepare.outputs.head }}
+          path: head
+          persist-credentials: false
+          allow-unsafe-pr-checkout: true
+
+      - uses: actions/checkout@v7
+        if: steps.prepare.outputs.review == 'true'
+        with:
+          ref: ${{ steps.prepare.outputs.base }}
+          path: base
+          persist-credentials: false
+
+      - name: Review and publish
+        if: steps.prepare.outputs.review == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.PAT_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          AI_REVIEW_KEY: ${{ secrets.AI_REVIEW_KEY }}
+          AI_REVIEW_API: ${{ secrets.AI_REVIEW_API }}
+          AI_REVIEW_MODEL: deepseek-v4.1-flash
+          AI_REVIEW_DSH_CMD: ${{ vars.AI_REVIEW_DSH_CMD || 'dsh --profile headless' }}
+        run: python3 .github/workflows/scripts/ai_review.py review
