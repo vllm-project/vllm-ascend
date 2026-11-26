@@ -664,6 +664,7 @@ def test_recoverssm_dispatches_without_spec_mask_and_sigmoids_beta_once(mixed):
     )
     metadata = SimpleNamespace(
         num_actual_tokens=num_tokens,
+        recoverssm_context=SimpleNamespace(decay_base_addrs=None),
         num_prefills=0,
         num_decodes=int(mixed),
         num_decode_tokens=2 if mixed else 0,
@@ -680,9 +681,12 @@ def test_recoverssm_dispatches_without_spec_mask_and_sigmoids_beta_once(mixed):
     )
     qkv = torch.arange(num_tokens * dim * 3, dtype=torch.float32).reshape(num_tokens, dim * 3)
     raw_beta = torch.linspace(-2, 2, num_tokens).reshape(1, num_tokens, 1)
-    records = SimpleNamespace(correction=torch.empty(1), key_gate=torch.empty(1))
+    records = SimpleNamespace(
+        correction=torch.empty(1), key_gate=torch.empty(1), decay_cache=None, normalized_key_cache=None
+    )
 
     def verify(*args, **kwargs):
+        assert kwargs["store_raw_gate"] is True
         expected_beta = raw_beta if spec_tokens is None else raw_beta.index_select(1, spec_tokens)
         torch.testing.assert_close(args[4], expected_beta)
         torch.testing.assert_close(args[12], torch.tensor([7], dtype=torch.int32))
@@ -897,7 +901,8 @@ def test_local_tp_projection_stream_order(monkeypatch, groups, mode, comm_mode, 
         mark("recurrent")
         return v.contiguous()
 
-    def verify(q, k, v, *args):
+    def verify(q, k, v, *args, **kwargs):
+        assert kwargs["store_raw_gate"] is False
         mark("verify")
         return v.contiguous()
 
@@ -913,6 +918,7 @@ def test_local_tp_projection_stream_order(monkeypatch, groups, mode, comm_mode, 
     ids = torch.tensor([0]) if mode == "mixed" else torch.tensor([0, 1])
     metadata = SimpleNamespace(
         num_actual_tokens=0 if mode == "idle" else 2,
+        recoverssm_context=SimpleNamespace(decay_base_addrs=torch.empty(1, dtype=torch.int64)) if speculative else None,
         num_prefills=0,
         num_decodes=int(mode in ("decode", "mixed")),
         num_decode_tokens=int(mode == "mixed") or 2,
@@ -953,7 +959,9 @@ def test_local_tp_projection_stream_order(monkeypatch, groups, mode, comm_mode, 
         A_log=torch.zeros(2),
         dt_bias=None,
         gate_lower_bound=-5.0,
-        recoverssm_records=SimpleNamespace(correction=None, key_gate=None),
+        recoverssm_records=SimpleNamespace(
+            correction=None, key_gate=None, decay_cache=torch.empty(1), normalized_key_cache=torch.empty(1)
+        ),
         get_parameter=lambda name: None,
         _run_causal_conv1d=conv,
         _run_recurrent=recurrent,

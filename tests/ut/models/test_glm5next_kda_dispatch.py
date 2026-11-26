@@ -312,7 +312,12 @@ def test_decode_and_prefill_use_their_own_metadata_and_merge_outputs(
     state_shape = (8, 384, 6) if dim_first else (8, 6, 384)
     layer.kv_cache = (torch.zeros(state_shape, dtype=torch.bfloat16), torch.zeros(8, 1, 128, 128))
     layer.recoverssm_records = (
-        SimpleNamespace(correction=torch.zeros(1, 1, 2, 128), key_gate=torch.zeros(1, 1, 2, 256, dtype=torch.bfloat16))
+        SimpleNamespace(
+            correction=torch.zeros(1, 1, 2, 128),
+            key_gate=torch.zeros(1, 1, 2, 256, dtype=torch.bfloat16),
+            decay_cache=None,
+            normalized_key_cache=None,
+        )
         if recover
         else None
     )
@@ -366,6 +371,8 @@ def test_decode_and_prefill_use_their_own_metadata_and_merge_outputs(
         values.update(num_prefills=0, non_spec_token_indx=None)
         if recover:
             values.update(spec_sequence_masks=None, spec_token_indx=None)
+    if recover:
+        values["recoverssm_context"] = SimpleNamespace(decay_base_addrs=None)
     for name, value in values.items():
         setattr(metadata, name, value)
     prefill_conv = SimpleNamespace(
@@ -488,7 +495,8 @@ def test_decode_and_prefill_use_their_own_metadata_and_merge_outputs(
 
     monkeypatch.setattr(model_kda, "recurrent_kda", recurrent)
 
-    def verify(q, k, v, gate, beta, a_log, bias, bound, state, correction, kg, starts, indices, capacity):
+    def verify(q, k, v, gate, beta, a_log, bias, bound, state, correction, kg, starts, indices, capacity, **kwargs):
+        assert kwargs["store_raw_gate"] is True
         assert correction is layer.recoverssm_records.correction and kg is layer.recoverssm_records.key_gate
         assert capacity == 2 and a_log.shape == (1,)
         torch.testing.assert_close(indices, metadata.spec_state_indices_tensor[:, 0])

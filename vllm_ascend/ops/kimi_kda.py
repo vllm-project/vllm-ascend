@@ -960,7 +960,6 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
                 records = self.recoverssm_records
                 if records is None:
                     raise RuntimeError("Kimi RecoverSSM verify records are not initialized")
-                commit_context = getattr(attn_metadata, "recoverssm_context", None)
                 core_spec = kda_recoverssm_verify(
                     q_spec,
                     k_spec,
@@ -978,7 +977,7 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
                     self.num_spec + 1,
                     decay_cache=records.decay_cache,
                     normalized_key_cache=records.normalized_key_cache,
-                    store_raw_gate=getattr(commit_context, "decay_base_addrs", None) is None,
+                    store_raw_gate=attn_metadata.recoverssm_context.decay_base_addrs is None,
                 )
             else:
                 core_spec = self._run_recurrent(
