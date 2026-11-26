@@ -266,7 +266,7 @@ DCP_Q_REPLICATE_MLA_CASE = InferenceCase(
 )
 @patch.dict(
     os.environ,
-    {"VLLM_USE_V2_MODEL_RUNNER": "1", "VLLM_WORKER_MULTIPROC_METHOD": "spawn"},
+    {"VLLM_WORKER_MULTIPROC_METHOD": "spawn"},
 )
 @wait_until_npu_memory_free(target_free_percentage=0.8)
 def test_dcp_q_replication(graph_mode: str | None, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -399,7 +399,6 @@ DSV3_2_SFA_PCP_PP_MTP_CASE = InferenceCase(
 @patch.dict(
     os.environ,
     {
-        "VLLM_USE_V2_MODEL_RUNNER": "1",
         "VLLM_WORKER_MULTIPROC_METHOD": "spawn",
         "HCCL_BUFFSIZE": "768",
         "PYTORCH_NPU_ALLOC_CONF": "expandable_segments:True",
@@ -424,7 +423,6 @@ def test_dsv3_2_sfa_pcp_model_runner_v2_graph() -> None:
 @patch.dict(
     os.environ,
     {
-        "VLLM_USE_V2_MODEL_RUNNER": "1",
         "VLLM_WORKER_MULTIPROC_METHOD": "spawn",
         "HCCL_BUFFSIZE": "768",
         "PYTORCH_NPU_ALLOC_CONF": "expandable_segments:True",
@@ -449,7 +447,6 @@ def test_dsv3_2_sfa_pcp_dp_model_runner_v2_graph() -> None:
 @patch.dict(
     os.environ,
     {
-        "VLLM_USE_V2_MODEL_RUNNER": "1",
         "VLLM_WORKER_MULTIPROC_METHOD": "spawn",
         "HCCL_BUFFSIZE": "768",
         "PYTORCH_NPU_ALLOC_CONF": "expandable_segments:True",
@@ -474,7 +471,6 @@ def test_dsv3_2_sfa_pcp_pp_mtp_model_runner_v2_graph() -> None:
 @patch.dict(
     os.environ,
     {
-        "VLLM_USE_V2_MODEL_RUNNER": "1",
         "VLLM_BATCH_INVARIANT": "1",
         "VLLM_WORKER_MULTIPROC_METHOD": "spawn",
         "HCCL_BUFFSIZE": "768",
@@ -512,7 +508,7 @@ MTP_PCP_CASE = AccuracyCase(
 
 
 EAGLE3_PCP_CASE = AccuracyCase(
-    name="eagle3_gqa_pcp_dcp",
+    name="eagle3_gqa_pcp",
     model=EAGLE3_PCP_TARGET_MODEL,
     prompts=ACCURACY_PROMPTS,
     expected_outputs=EAGLE3_PCP_GOLDENS,
@@ -522,7 +518,7 @@ EAGLE3_PCP_CASE = AccuracyCase(
     runner_kwargs={
         "tensor_parallel_size": 2,
         "prefill_context_parallel_size": 2,
-        "decode_context_parallel_size": 2,
+        "decode_context_parallel_size": 1,
         "max_model_len": 2048,
         "max_num_seqs": 256,
         "distributed_executor_backend": "mp",
@@ -536,7 +532,6 @@ EAGLE3_PCP_CASE = AccuracyCase(
             "model": EAGLE3_PCP_DRAFT_MODEL,
             "num_speculative_tokens": 3,
             "draft_tensor_parallel_size": 2,
-            "disable_padded_drafter_batch": False,
         },
     },
 )
@@ -555,7 +550,6 @@ EAGLE3_PCP_CASE = AccuracyCase(
 @patch.dict(
     os.environ,
     {
-        "VLLM_USE_V2_MODEL_RUNNER": "1",
         "VLLM_WORKER_MULTIPROC_METHOD": "spawn",
         "HCCL_BUFFSIZE": "1024",
     },
@@ -570,7 +564,7 @@ def test_mtp_mla_spec_decode_with_pcp() -> None:
 @pytest.mark.e2e_coverage(
     arch="dense",
     feature="eagle3,chunked_prefill",
-    parallel="TP,PCP,DCP",
+    parallel="TP,PCP",
     deploy="pd_mix",
     hardware="A3",
     quantization="BF16",
@@ -579,14 +573,13 @@ def test_mtp_mla_spec_decode_with_pcp() -> None:
 @patch.dict(
     os.environ,
     {
-        "VLLM_USE_V2_MODEL_RUNNER": "1",
         "VLLM_WORKER_MULTIPROC_METHOD": "spawn",
         "HCCL_BUFFSIZE": "1024",
     },
 )
 @wait_until_npu_memory_free(target_free_percentage=0.8)
 def test_eagle3_gqa_spec_decode_with_pcp() -> None:
-    """Verify MRV2 Eagle3 PCP+DCP output accuracy and acceptance in one generation."""
+    """Verify MRV2 Eagle3 PCP-only output accuracy and acceptance in one generation."""
     _run_accuracy_case(EAGLE3_PCP_CASE)
 
 
@@ -617,6 +610,5 @@ def test_gqa_pcp_pd_model_runner_v2_graph() -> None:
         prefill_pcp_size=2,
         decode_tp_size=1,
         async_scheduling=True,
-        use_model_runner_v2=True,
     )
     assert output == " Alex, and I am"

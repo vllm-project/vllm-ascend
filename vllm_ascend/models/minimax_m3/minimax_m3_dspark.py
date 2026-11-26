@@ -256,7 +256,7 @@ def draft_hf_override(hf_config):
     # loading the real checkpoint. Preserve its source config class selection.
     if hf_config.model_type.startswith("dummy_"):
         return hf_config
-    from vllm.transformers_utils.configs.minimax_m3 import MiniMaxM3TextConfig
+    from transformers import MiniMaxM3VLTextConfig as MiniMaxM3TextConfig
 
     model_root = Path(hf_config._name_or_path).parent
     config = draft_config_from_file(hf_config.to_dict(), read_draft_header(model_root))

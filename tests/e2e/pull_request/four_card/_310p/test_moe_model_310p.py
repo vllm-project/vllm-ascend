@@ -19,7 +19,6 @@ from tests.e2e.conftest import VllmRunner
 
 
 def test_qwen3_5_moe_tp4_fp16(monkeypatch):
-    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
     example_prompts = [
         "Hello, my name is",
     ]

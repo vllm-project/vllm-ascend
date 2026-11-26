@@ -40,14 +40,31 @@ serving, and the operator's consistent-count fast path does not apply.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+from functools import lru_cache
+
 import torch
 
 from vllm_ascend.ops.triton.step5.summary_update import append_current_region
 
 _SPARSE_PATTERN_PER_GROUP_PER_TOKEN = 4
 _MASK_CAUSAL = 1
+_MASK_UNION = 3
 _QUANT_NONE = 0
 _SOFTMAX_PRECISION_FP32 = 1
+_SOFTMAX_PRECISION_BF16 = 0
+_WINDOW_DISABLED = -1
+_RESIDUAL_BLOCK_MODE_DISABLED = 0
+
+
+@lru_cache
+def _can_use_union_attention() -> bool:
+    try:
+        import cann_ops_nn
+    except (ImportError, OSError, RuntimeError):
+        return False
+
+    return hasattr(cann_ops_nn, "union_sparse_gen_launch")
 
 
 def gbsa_expected_counts(
@@ -189,6 +206,229 @@ def gbsa_sparse_attention(
         [1, region_size],
         metadata=metadata,
         block_table=block_table,
+        softmax_scale=softmax_scale,
+        return_softmax_lse=False,
+        **common,
+    )
+    return out
+
+
+@dataclass(frozen=True)
+class _UnionStepGeometry:
+    max_query_len: int
+    max_kv_seqlen: int
+    num_union_groups: int
+    union_capacity: int
+    max_kv_blocks: int
+
+
+@dataclass(frozen=True)
+class GBSAPrefillMetadata:
+    schedule: torch.Tensor
+    union_geometry: _UnionStepGeometry | None = None
+
+
+def _union_step_geometry(
+    seq_lens_host: list,
+    context_lens_host: list,
+    *,
+    region_size: int,
+    topk: int,
+) -> _UnionStepGeometry:
+    """Compute the union geometry once from the step's host sequence lengths."""
+    query_lens = [s - c for s, c in zip(seq_lens_host, context_lens_host)]
+    max_query_len = max(query_lens)
+    max_kv_seqlen = max(seq_lens_host)
+    max_kv_blocks = max(1, -(-max_kv_seqlen // region_size))
+    num_union_groups = sum(-(-q // region_size) for q in query_lens)
+    union_capacity = min(region_size * (topk + 1), max_kv_blocks)
+    return _UnionStepGeometry(max_query_len, max_kv_seqlen, num_union_groups, union_capacity, max_kv_blocks)
+
+
+def gbsa_prefill_metadata(
+    positions: torch.Tensor,
+    *,
+    num_heads: int,
+    num_kv_groups: int,
+    head_dim: int,
+    region_size: int,
+    topk: int,
+    cu_seqlens_q: torch.Tensor,
+    seqused_kv: torch.Tensor,
+    max_query_len: int,
+    seq_lens_host: list,
+    context_lens_host: list,
+    max_pages: int,
+    page_size: int,
+) -> GBSAPrefillMetadata:
+    """Build the GBSA schedule and any union geometry for one prefill step."""
+    if not _can_use_union_attention():
+        counts = gbsa_expected_counts(positions, groups=num_kv_groups, region_size=region_size, topk=topk)
+        schedule = gbsa_sparse_attention_metadata(
+            counts,
+            num_heads=num_heads,
+            num_kv_groups=num_kv_groups,
+            head_dim=head_dim,
+            region_size=region_size,
+            topk=topk,
+            cu_seqlens_q=cu_seqlens_q,
+            seqused_kv=seqused_kv,
+            max_query_len=max_query_len,
+            max_pages=max_pages,
+            page_size=page_size,
+        )
+        return GBSAPrefillMetadata(schedule)
+
+    from cann_ops_transformer.ops.attention.generic_block_sparse_attention import (
+        generic_block_sparse_attention_metadata,
+    )
+
+    geometry = _union_step_geometry(
+        seq_lens_host,
+        context_lens_host,
+        region_size=region_size,
+        topk=topk,
+    )
+    idx_shape = torch.zeros(
+        (num_kv_groups, geometry.num_union_groups, geometry.union_capacity),
+        dtype=torch.int32,
+        device=seqused_kv.device,
+    )
+    counts = torch.full(
+        (num_kv_groups, geometry.num_union_groups),
+        geometry.union_capacity,
+        dtype=torch.int32,
+        device=seqused_kv.device,
+    )
+    schedule = generic_block_sparse_attention_metadata(
+        idx_shape,
+        counts,
+        num_heads,
+        num_kv_groups,
+        head_dim,
+        [region_size, region_size],
+        cu_seqlens_q=cu_seqlens_q.to(torch.int64),
+        seqused_kv=seqused_kv.to(torch.int32),
+        max_seqlen_q=geometry.max_query_len,
+        max_seqlen_kv=max_pages * page_size,
+        layout_q="TND",
+        layout_kv="PA_BBND",
+        layout_sparse_pattern=_SPARSE_PATTERN_PER_GROUP_PER_TOKEN,
+        mask_mode=_MASK_UNION,
+        quant_mode=_QUANT_NONE,
+        softmax_precision=_SOFTMAX_PRECISION_BF16,
+        win_left=_WINDOW_DISABLED,
+        win_right=_WINDOW_DISABLED,
+        residual_block_mode=_RESIDUAL_BLOCK_MODE_DISABLED,
+        is_consistent_topk=False,
+    )
+    return GBSAPrefillMetadata(schedule, geometry)
+
+
+def gbsa_prefill_attention(
+    query: torch.Tensor,
+    key_cache: torch.Tensor,
+    value_cache: torch.Tensor,
+    ids: torch.Tensor,
+    positions: torch.Tensor,
+    block_table: torch.Tensor,
+    cu_seqlens_q: torch.Tensor,
+    seqused_kv: torch.Tensor,
+    *,
+    num_kv_groups: int,
+    region_size: int,
+    softmax_scale: float,
+    metadata: GBSAPrefillMetadata,
+) -> torch.Tensor:
+    """Run prefill attention with union mode when available.
+
+    The aclnn ``UnionSparseGen`` operator (ops-nn, imported from the
+    CANN-shipped ``cann_ops_nn`` package) merges the appended per-token
+    selections of each ``region_size``-token region into one deduplicated
+    union; GenericBlockSparseAttention then gathers and computes the union
+    once and restores every token's exact selection through the union
+    ``exactMask`` bitmasks.
+
+    ``metadata`` holds the step's schedule and union geometry from :func:`gbsa_prefill_metadata`.
+
+    Returns ``out`` shaped ``[total_q, num_heads, head_dim]``.
+    """
+    geometry = metadata.union_geometry
+    if geometry is None:
+        return gbsa_sparse_attention(
+            query,
+            key_cache,
+            value_cache,
+            ids,
+            positions,
+            block_table,
+            cu_seqlens_q.to(torch.int64),
+            seqused_kv,
+            metadata.schedule,
+            num_kv_groups=num_kv_groups,
+            region_size=region_size,
+            softmax_scale=softmax_scale,
+        )
+
+    if num_kv_groups != 1:
+        raise NotImplementedError(
+            f"The union sparse path currently requires a single KV group (MQA), got num_kv_groups={num_kv_groups}."
+        )
+    if region_size != 8:
+        raise NotImplementedError(
+            "The union sparse path currently requires region_size=8 "
+            f"(UnionSparseGen block/union granularity), got {region_size}."
+        )
+    from cann_ops_nn import union_sparse_gen_launch
+    from cann_ops_transformer.ops.attention.generic_block_sparse_attention import generic_block_sparse_attention
+
+    idx, counts = append_current_region(ids, positions, groups=num_kv_groups, region_size=region_size)
+
+    cu_seqlens_q_i64 = cu_seqlens_q.to(torch.int64)
+    union_idx, union_counts, exact_mask = union_sparse_gen_launch(
+        idx,
+        counts,
+        cu_seqlens_q_i64,
+        None,  # cu_sqlen_kv: per-request KV lengths come from seq_used_kv
+        None,  # seq_used_q
+        seqused_kv,
+        block_shape=[1, region_size],
+        union_size=region_size,
+        mask_type=1,
+        max_q_seqlen=geometry.max_query_len,
+        max_kv_seqlen=geometry.max_kv_seqlen,
+        layout_sparse_pattern=_SPARSE_PATTERN_PER_GROUP_PER_TOKEN,
+        is_input_idx_sorted=True,
+        residual_block_mode=_RESIDUAL_BLOCK_MODE_DISABLED,
+        totalq_union_num=geometry.num_union_groups,
+        max_logical_blocks=geometry.max_kv_blocks,
+    )
+    common = dict(
+        cu_seqlens_q=cu_seqlens_q_i64,
+        cu_seqlens_kv=None,
+        seqused_kv=seqused_kv,
+        layout_q="TND",
+        layout_kv="PA_BBND",
+        layout_sparse_pattern=_SPARSE_PATTERN_PER_GROUP_PER_TOKEN,
+        mask_mode=_MASK_UNION,
+        quant_mode=_QUANT_NONE,
+        softmax_precision=_SOFTMAX_PRECISION_BF16,
+        win_left=_WINDOW_DISABLED,
+        win_right=_WINDOW_DISABLED,
+        residual_block_mode=_RESIDUAL_BLOCK_MODE_DISABLED,
+        is_consistent_topk=False,
+    )
+
+    out, _lse = generic_block_sparse_attention(
+        query,
+        key_cache,
+        value_cache,
+        union_idx,
+        union_counts,
+        [region_size, region_size],
+        metadata=metadata.schedule,
+        block_table=block_table,
+        attn_mask=exact_mask,
         softmax_scale=softmax_scale,
         return_softmax_lse=False,
         **common,

@@ -26,7 +26,7 @@ from vllm.v1.worker.gpu.spec_decode.multi_module_mtp.speculator import (
 )
 
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
-from vllm_ascend.utils import vllm_version_is
+from vllm_ascend.compilation.updatable_graph import SharedSource
 from vllm_ascend.worker.v2.aclgraph_utils import _get_graph_update_backend
 from vllm_ascend.worker.v2.attn_utils import (
     build_attn_metadata_factory,
@@ -51,11 +51,9 @@ class AscendMultiModuleMTPSpeculator(MultiModuleMTPSpeculator):
     UpdatableGraph attention-parameter updates on replay).
     """
 
-    if not vllm_version_is("0.33.0"):
-
-        def supports_batch_sharded_draft_logits(self) -> bool:
-            # NPU draft-logits kernels index the cache by request state.
-            return False
+    def supports_batch_sharded_draft_logits(self) -> bool:
+        # NPU draft-logits kernels index the cache by request state.
+        return False
 
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
         super().__init__(vllm_config, device)
@@ -73,8 +71,7 @@ class AscendMultiModuleMTPSpeculator(MultiModuleMTPSpeculator):
         # Transformers validates Step3.5 layer_types against num_hidden_layers
         # and may leave only the base-layer entries. The MTP draft model builds
         # layers at num_hidden_layers + k, so make the draft config cover those
-        # layer indices before the model is constructed. This can be removed when
-        # v0.33.0 is supported.
+        # layer indices before the model is constructed.
         hf_config = self.draft_model_config.hf_config
         layer_types = getattr(hf_config, "layer_types", None)
         num_hidden_layers = getattr(hf_config, "num_hidden_layers", None)
@@ -123,11 +120,7 @@ class AscendMultiModuleMTPSpeculator(MultiModuleMTPSpeculator):
             cudagraph_mode = (
                 CUDAGraphMode.FULL_DECODE_ONLY if cudagraph_mode.has_full_cudagraphs() else CUDAGraphMode.NONE
             )
-        decode_query_lens = (
-            self.num_speculative_steps + 1
-            if vllm_version_is("0.33.0")
-            else self.vllm_config.get_decode_cudagraph_query_lens(self.num_speculative_steps + 1)
-        )
+        decode_query_lens = self.vllm_config.get_decode_cudagraph_query_lens(self.num_speculative_steps + 1)
         self.cudagraph_manager = AutoRegressiveAclGraphManager(
             self.vllm_config,
             self.device,
@@ -199,13 +192,27 @@ class AscendMultiModuleMTPSpeculator(MultiModuleMTPSpeculator):
         assert attn_metadata is not None
         return [{name: metadata for name, metadata in attn_metadata.items() if name in self.draft_attn_layer_names}]
 
-    def build_fia_params(
+    def build_param_source(
         self,
         num_reqs_padded: int,
         draft_attn_metadata: dict,
         is_draft_model_prefill: bool,
+        *,
+        num_tokens: int | None = None,
+    ) -> SharedSource:
+        return SharedSource(
+            self.build_fia_params(num_reqs_padded, draft_attn_metadata, is_draft_model_prefill, num_tokens=num_tokens)
+        )
+
+    def build_fia_params(
+        self,
+        num_reqs_padded: int,
+        draft_attn_metadata: dict | list[dict],
+        is_draft_model_prefill: bool,
+        *,
+        num_tokens: int | None = None,
     ) -> list[dict]:
-        """Per-layer FIA parameters for the UpdatableGraph task update.
+        """Per-layer attention parameters for the UpdatableGraph task update.
 
         Every attention task registered at capture time matches its update
         parameters by layer name and requires exactly one entry (see
@@ -213,14 +220,27 @@ class AscendMultiModuleMTPSpeculator(MultiModuleMTPSpeculator):
         layer. All layers share the same batch-level values because the
         three module forwards reuse one metadata.
         """
+        # AutoRegressiveAclGraphManager passes every draft step's metadata,
+        # while the 310P replay override passes only the first step's dict.
+        # All modules reuse one metadata, so either way the first step works.
+        if isinstance(draft_attn_metadata, list):
+            draft_attn_metadata = draft_attn_metadata[0]
         fia_params = []
         for layer_name, metadata in draft_attn_metadata.items():
+            decode_metadata = getattr(metadata, "decode", None)
+            if decode_metadata is not None:
+                block_table = decode_metadata.block_table
+            else:
+                decode_metadata = metadata
+                block_table = metadata.block_tables
             fia_params.append(
                 {
                     "layer_name": layer_name,
-                    "actual_seq_lengths": metadata.actual_seq_lengths_q,
-                    "actual_seq_lengths_kv": metadata.seq_lens_list,
-                    "block_table": metadata.block_tables,
+                    "actual_seq_lengths": decode_metadata.actual_seq_lengths_q,
+                    "actual_seq_lengths_kv": decode_metadata.seq_lens_list,
+                    "actual_seq_qlen": decode_metadata.actual_seq_lengths_q,
+                    "actual_seq_kvlen": decode_metadata.seq_lens_list,
+                    "block_table": block_table,
                 }
             )
         return fia_params

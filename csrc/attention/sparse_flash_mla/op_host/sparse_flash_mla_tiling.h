@@ -253,6 +253,7 @@ public:
     uint64_t cmpMaskMode = 0;
     uint64_t oriKvStride0 = 0; // A2/A3
     uint64_t cmpKvStride0 = 0; // A2/A3
+    uint64_t cmpKvPhysicalBlockCount = 0; // Host-only bound; not serialized tiling data.
     int64_t oriWinLeft = 0;
     int64_t oriWinRight = 0;
     int64_t sparseBlockSize = 0;

@@ -15,115 +15,65 @@ routing:
 
 config:
   - node_index: 0
-    port_start: 7100
-    dp_rpc_port: 12321
+    port_start: 9081
+    dp_rpc_port: 12325
     dp_size: 2
     dp_size_local: 2
     dp_rank_start: 0
-    tp_size: 8
+    tp_size: 1
+    cp_size: 8
     dp_address: "${NODE_0_IP}"
 
   - node_index: 1
-    port_start: 7100
-    dp_rpc_port: 12321
-    dp_size: 4
-    dp_size_local: 4
+    port_start: 9900
+    dp_rpc_port: 12325
+    dp_size: 8
+    dp_size_local: 8
     dp_rank_start: 0
-    tp_size: 4
+    tp_size: 2
     dp_address: "${NODE_1_IP}"
 
 env_common: &env_common
+  # Keep CANN/Torch JIT builds off the shared /root/.cache PVC.
+  TORCH_EXTENSIONS_DIR: "/tmp/torch_extensions/glm53"
   VLLM_USE_MODELSCOPE: "true"
   SERVER_PORT: "${PORT}"
   ASCEND_RT_VISIBLE_DEVICES: "${VISIBLE_DEVICES}"
   PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
   HCCL_OP_EXPANSION_MODE: "AIV"
   HCCL_BUFFSIZE: "1024"
-  ASCEND_GLOBAL_RESOURCE_CONFIG: '{"comm_resourceesc":["hccs:device"]}'
+  ASCEND_GLOBAL_RESOURCE_CONFIG: '{"comm_resource_config.protocol_desc":["hccs:device"]}'
   ASCEND_LOCAL_COMM_RES: '{"version":"1.2"}'
-  TORCH_EXTENSIONS_DIR: "/tmp/minimax_m3_torch_extensions/node-${NODE_INDEX}/dp-${DP_RANK}"
-
-env_prefill: &env_prefill
-  <<: *env_common
-
-env_decode: &env_decode
-  <<: *env_common
 
 templates:
   - node_index: 0
     envs:
-      <<: *env_prefill
+      <<: *env_common
     server_cmd_template:
       - --host
       - "0.0.0.0"
       - --port
-      - "$SERVER_PORT"
+      - $SERVER_PORT
       - --data-parallel-size
-      - "${DP_SIZE}"
+      - ${DP_SIZE}
       - --data-parallel-rank
-      - "${DP_RANK}"
+      - ${DP_RANK}
       - --data-parallel-address
-      - "${DP_ADDRESS}"
+      - ${DP_ADDRESS}
       - --data-parallel-rpc-port
-      - "${DP_RPC_PORT}"
+      - ${DP_RPC_PORT}
       - --tensor-parallel-size
-      - "${TP_SIZE}"
+      - ${TP_SIZE}
+      - --prefill-context-parallel-size
+      - ${CP_SIZE}
       - --enable-expert-parallel
+      - --enable-eplb
+      - --eplb-config
+      - '{"window_size": 3000, "step_interval": 3000, "num_redundant_experts": 0, "use_async": true, "policy": "stair", "communicator": "hixl"}'
       - --seed
       - "1024"
-      - --safetensors-load-strategy
-      - "prefetch"
-      - --max-num-seqs
-      - "64"
-      - --max-model-len
-      - "1048576"
-      - --max-num-batched-tokens
-      - "4096"
-      - --trust-remote-code
-      - --quantization
-      - "ascend"
-      - --limit-mm-per-prompt
-      - '{"image": 7, "video": 0}'
-      - --gpu-memory-utilization
-      - "0.92"
-      - --tool-call-parser
-      - "glm47"
-      - --reasoning-parser
-      - "glm45"
-      - --enable-auto-tool-choice
-      - --enable-prefix-caching
-      - --kv-cache-dtype
-      - "int8"
-      - --prefix_cache_retention_interval
-      - "None"
-      - --speculative-config
-      - '{"num_speculative_tokens": 3, "method": "deepseek_mtp", "enforce_eager": true}'
-      - --additional_config
-      - '{"enable_flashcomm1": true,"enable_prefill_mc2": true,"enable_fused_mc2": 1,"enable_shared_expert_dp": true,"multistream_overlap_shared_expert": false}'
-      - --kv-transfer-config
-      - '{"kv_connector": "MooncakeConnectorV2", "kv_role": "kv_producer", "kv_port": "36680","kv_connector_extra_config": {"prefill": {"dp_size": 2, "tp_size": 8},"decode": {"dp_size": 4, "tp_size": 4}}}'
-
-  - node_index: 1
-    envs:
-      <<: *env_decode
-    server_cmd_template:
-      - --host
-      - "0.0.0.0"
-      - --port
-      - "$SERVER_PORT"
-      - --data-parallel-size
-      - "${DP_SIZE}"
-      - --data-parallel-rank
-      - "${DP_RANK}"
-      - --data-parallel-address
-      - "${DP_ADDRESS}"
-      - --data-parallel-rpc-port
-      - "${DP_RPC_PORT}"
-      - --tensor-parallel-size
-      - "${TP_SIZE}"
-      - --enable-expert-parallel
-      - --seed
-      - "1024"
+      - --served-model-name
+      - ${MODEL}
       - --safetensors-load-strategy
       - "prefetch"
       - --max-num-seqs
@@ -131,30 +81,90 @@ templates:
       - --max-model-len
       - "1048576"
       - --max-num-batched-tokens
-      - "192"
+      - "16384"
       - --trust-remote-code
       - --quantization
       - "ascend"
       - --limit-mm-per-prompt
-      - '{"image": 7, "video": 0}'
+      - '{"image": 1}'
       - --gpu-memory-utilization
       - "0.92"
       - --tool-call-parser
       - "glm47"
       - --reasoning-parser
-      - "glm45"
+      - "glm47"
       - --enable-auto-tool-choice
-      - --enable-prefix-caching
       - --kv-cache-dtype
       - "int8"
+      - --prefix-cache-retention-interval
+      - "None"
+      - --enforce-eager
+      - --use-replayssm
+      - --mamba-ssm-cache-dtype
+      - "bfloat16"
+      - --speculative-config
+      - '{"num_speculative_tokens": 3, "method": "deepseek_mtp", "enforce_eager": false}'
+      - --additional-config
+      - '{"enable_shared_expert_dp": true, "enable_fused_mc2": 2}'
+      - --kv-transfer-config
+      - '{"kv_connector": "MooncakeConnectorV2", "kv_role": "kv_producer", "engine_id": "0", "kv_port": "36680"}'
+
+  - node_index: 1
+    envs:
+      <<: *env_common
+    server_cmd_template:
+      - --host
+      - "0.0.0.0"
+      - --port
+      - $SERVER_PORT
+      - --data-parallel-size
+      - ${DP_SIZE}
+      - --data-parallel-rank
+      - ${DP_RANK}
+      - --data-parallel-address
+      - ${DP_ADDRESS}
+      - --data-parallel-rpc-port
+      - ${DP_RPC_PORT}
+      - --tensor-parallel-size
+      - ${TP_SIZE}
+      - --enable-expert-parallel
+      - --seed
+      - "1024"
+      - --served-model-name
+      - ${MODEL}
+      - --safetensors-load-strategy
+      - "prefetch"
+      - --max-num-seqs
+      - "40"
+      - --max-model-len
+      - "1048576"
+      - --max-num-batched-tokens
+      - "240"
+      - --trust-remote-code
+      - --quantization
+      - "ascend"
+      - --limit-mm-per-prompt
+      - '{"image": 1}'
+      - --gpu-memory-utilization
+      - "0.92"
+      - --tool-call-parser
+      - "glm47"
+      - --reasoning-parser
+      - "glm47"
+      - --enable-auto-tool-choice
+      - --kv-cache-dtype
+      - "int8"
+      - --use-replayssm
+      - --mamba-ssm-cache-dtype
+      - "bfloat16"
       - --compilation-config
       - '{"cudagraph_mode": "FULL_DECODE_ONLY"}'
       - --speculative-config
       - '{"num_speculative_tokens": 3, "method": "deepseek_mtp", "enforce_eager": false}'
-      - --additional_config
-      - '{"multistream_overlap_shared_expert": true, "enable_shared_expert_dp": true,"recompute_scheduler_enable": true, "enable_flashcomm1": true}'
+      - --additional-config
+      - '{"multistream_overlap_shared_expert": true, "scheduler_config": {"recompute_scheduler_enable": true}, "enable_shared_expert_dp": true, "enable_flashcomm1": true}'
       - --kv-transfer-config
-      - '{"kv_connector": "MooncakeConnectorV2", "kv_role": "kv_consumer", "kv_port": "36580","kv_connector_extra_config": {"prefill": {"dp_size": 2, "tp_size": 8},"decode": {"dp_size": 4, "tp_size": 4}}}'
+      - '{"kv_connector": "MooncakeConnectorV2", "kv_role": "kv_consumer", "engine_id": "1", "kv_port": "36580"}'
 
 benchmarks:
   perf:

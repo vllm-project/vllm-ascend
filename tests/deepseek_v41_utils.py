@@ -51,8 +51,6 @@ def build_v41_cache_specs(config: Any, vllm_config: Any, prefix: str = "model"):
             dtype=torch.bfloat16,
             tokens_per_state=role.compress_ratio,
             model_version="deepseek_v41",
-            # Both supported vLLM lanes (#57169) omit MLA `storage_block_size`.
-            **{},
         )
         specs[f"{attn_prefix}.indexer.k_cache"] = AscendMLAAttentionSpec(
             block_size=block_size,
@@ -61,8 +59,6 @@ def build_v41_cache_specs(config: Any, vllm_config: Any, prefix: str = "model"):
             dtype=torch.int8,
             tokens_per_state=role.compress_ratio,
             model_version="deepseek_v41",
-            # Both supported vLLM lanes (#57169) omit MLA `storage_block_size`.
-            **{},
             scale_dim=1,
             scale_dtype=torch.float16,
         )
@@ -319,7 +315,7 @@ def allocate_cache_views(config, device="cpu"):
         create_kv_cache_runtime_views,
     )
 
-    specs = {n: s for g in config.kv_cache_groups for n, s in g.kv_cache_spec.kv_cache_specs.items()}
+    specs = {n: g.kv_cache_spec.kv_cache_specs[n] for g in config.kv_cache_groups for n in g.layer_names}
     context = SimpleNamespace(compilation_config=SimpleNamespace(static_forward_context={}))
     layers = {name: DeepseekV41CacheLayer(context, name, spec) for name, spec in specs.items()}
     raw = torch.zeros(config.kv_cache_tensors[0].size, dtype=torch.int8, device=device)

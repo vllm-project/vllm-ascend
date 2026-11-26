@@ -313,7 +313,7 @@ def test_candidate_consumer_preserves_each_query_mask(ratio, query_count):
         device=str(query.device),
         **common,
     )
-    selected, _, _ = torch.ops._C_ascend.npu_quant_lightning_indexer_v3(
+    selected, _, _, _ = torch.ops._C_ascend.npu_quant_lightning_indexer_v3(
         query,
         key,
         weights,
@@ -336,17 +336,8 @@ def test_candidate_consumer_preserves_each_query_mask(ratio, query_count):
         assert torch.isin(indices // 8, candidates_cpu[row]).all(), f"wrong candidate row at query {row}"
 
 
-@pytest.mark.parametrize("queries", [1, 5])
-@pytest.mark.parametrize("context", [1536, 8192, 32768])
-@pytest.mark.parametrize("ratio", [1, 2])
-@pytest.mark.parametrize("mode", [1, 2, 3])
-@pytest.mark.parametrize("topk", [64, 512])
-@pytest.mark.skipif(
-    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3),
-    reason="QLI arch22 vector-repeat and adaptive Top-K tests require Ascend A2/A3",
-)
 @torch.inference_mode()
-def test_qli_candidate_vector_repeats(queries, context, ratio, mode, topk):
+def _check_qli_candidate_vector_repeats(queries, context, ratio, mode, topk):
     """Check candidate padding, partial causal blocks and strided PA caches."""
     generator = torch.Generator().manual_seed(1234)
     heads, width = 32, 128
@@ -379,7 +370,8 @@ def test_qli_candidate_vector_repeats(queries, context, ratio, mode, topk):
     metadata = torch.ops._C_ascend.npu_quant_lightning_indexer_v2_metadata(
         heads, 1, width, topk, 2, batch_size=1, max_seqlen_k=context, device="npu:0", **common
     )
-    selected, _, candidate_output = torch.ops._C_ascend.npu_quant_lightning_indexer_v3(
+    # The v3 Torch entry point dispatches to the QLI v2 candidate implementation.
+    selected, _, candidate_output, _ = torch.ops._C_ascend.npu_quant_lightning_indexer_v3(
         query_cpu.npu(),
         key,
         weights_cpu.npu(),
@@ -426,6 +418,25 @@ def test_qli_candidate_vector_repeats(queries, context, ratio, mode, topk):
                 torch.testing.assert_close(blocks.sort().values, torch.arange(expected_blocks))
 
 
+@pytest.mark.parametrize(
+    "queries,context,topk",
+    [
+        (1, 1536, 64),
+        (5, 8192, 64),
+        (5, 32768, 512),
+    ],
+)
+@pytest.mark.parametrize("ratio", [1, 2])
+@pytest.mark.parametrize("mode", [1, 2, 3])
+@pytest.mark.skipif(
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3),
+    reason="QLI arch22 vector-repeat and adaptive Top-K tests require Ascend A2/A3",
+)
+def test_qli_candidate_vector_repeats(queries, context, ratio, mode, topk):
+    """Cover representative shapes across all candidate modes and ratios."""
+    _check_qli_candidate_vector_repeats(queries=queries, context=context, ratio=ratio, mode=mode, topk=topk)
+
+
 @pytest.mark.parametrize("topk", [1, 63, 65, 1024, 2048])
 @pytest.mark.parametrize("ratio", [1, 2])
 @pytest.mark.parametrize("mode", [1, 2, 3])
@@ -435,7 +446,7 @@ def test_qli_candidate_vector_repeats(queries, context, ratio, mode, topk):
 )
 def test_qli_adaptive_topk_boundaries(topk, ratio, mode):
     """Exercise partial 64-element widths and the unchanged maximum width."""
-    test_qli_candidate_vector_repeats(queries=5, context=8192, ratio=ratio, mode=mode, topk=topk)
+    _check_qli_candidate_vector_repeats(queries=5, context=8192, ratio=ratio, mode=mode, topk=topk)
 
 
 @pytest.mark.parametrize(

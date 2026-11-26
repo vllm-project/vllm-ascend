@@ -330,6 +330,21 @@ def test_k3_dspark_context_writer_splits_fused_mla_cache(monkeypatch):
     torch.testing.assert_close(cache[1], fused_cache[..., 4:])
 
 
+def test_k3_dspark_profiles_context_projection_before_kv_allocation(monkeypatch):
+    projection = MagicMock(return_value=(torch.zeros(32, 8),))
+    attn = SimpleNamespace(
+        fused_qkv_a_proj=projection,
+        q_lora_rank=2,
+        impl=SimpleNamespace(kv_lora_rank=4, exec_kv_prefill=MagicMock()),
+    )
+    model = SimpleNamespace(layers=[SimpleNamespace(self_attn=attn)])
+    context = torch.ones(32, 4)
+    monkeypatch.setattr(kimi_k3_dspark, "get_cos_and_sin_mla", lambda positions: (None, None))
+    AscendK3DSparkModel.precompute_and_store_context_kv(model, context, torch.arange(32))
+    projection.assert_called_once_with(context)
+    attn.impl.exec_kv_prefill.assert_not_called()
+
+
 def _make_component_major_strided_cache() -> tuple[torch.Tensor, torch.Tensor]:
     backing = torch.empty(14, dtype=torch.float32)
     nope = torch.as_strided(backing, size=(2, 2, 1, 2), stride=(6, 2, 2, 1), storage_offset=0)
@@ -481,6 +496,7 @@ def test_kimi_mixed_kda_gate_weights_use_upstream_packed_loader(monkeypatch):
     model.config = SimpleNamespace(
         is_moe=False,
         is_linear_attn=True,
+        dsa_config=None,
         linear_attn_config={},
         q_lora_rank=None,
         num_hidden_layers=1,

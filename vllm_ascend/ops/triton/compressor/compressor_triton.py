@@ -214,10 +214,7 @@ def _pooled_blocked(
     return pooled
 
 
-# Runtime request bounds vary across batches; specialize only the vector/tile
-# dimensions and algorithm branches below. eps is a runtime float, whose value
-# does not trigger the integer value/alignment specialization handled here.
-@triton.jit(do_not_specialize=["total_group_slots", "groups_per_batch", "num_batches", "num_cache_blocks"])
+@triton.jit(do_not_specialize=["total_group_slots", "group_slots_per_batch", "num_batch", "num_cache_blocks"])
 def _pool_kernel(
     out_ptr,
     kv_ptr,
@@ -229,30 +226,31 @@ def _pool_kernel(
     meta_ptr,  # Packed [start_pos | used_len | out_row_offset | seg_row_base]
     block_table_ptr,
     total_group_slots,
-    groups_per_batch,  # Group slots per batch: ceil(max_used_len / RATIO)
-    num_batches,
+    group_slots_per_batch,  # Group slots per batch: ceil(max_used_len / RATIO)
+    num_batch,
+    num_cache_blocks,
     CACHE_SIZE: tl.constexpr,
     HEAD_DIM: tl.constexpr,
     RATIO: tl.constexpr,
     RATIO_PAD: tl.constexpr,
     CHUNK_ROWS: tl.constexpr,
-    eps,
+    EPS: tl.constexpr,
     SINGLE_BLOCK: tl.constexpr,
     NO_PAD: tl.constexpr,
     HAS_PREV_ROWS: tl.constexpr,
     TOKEN_ALIGNED: tl.constexpr = False,
     FUSE_TOKEN_NORM: tl.constexpr = False,
-    num_cache_blocks=0,
+    rms_eps=0.0,
 ):
     pid = tl.program_id(0)
     offs_h = tl.arange(0, HEAD_DIM)
     if not TOKEN_ALIGNED or FUSE_TOKEN_NORM:
         norm_w = tl.load(norm_w_ptr + offs_h).to(tl.float32)
     for task_id in range(pid, total_group_slots, tl.num_programs(0)):
-        batch = task_id // groups_per_batch
-        local_group = task_id - batch * groups_per_batch
-        start_pos = tl.load(meta_ptr + batch)  # [0, num_batches)
-        used_len = tl.load(meta_ptr + num_batches + batch)  # [num_batches, 2*num_batches)
+        batch = task_id // group_slots_per_batch
+        local_group = task_id - batch * group_slots_per_batch
+        start_pos = tl.load(meta_ptr + batch)  # [0, num_batch)
+        used_len = tl.load(meta_ptr + num_batch + batch)  # [num_batch, 2*num_batch)
         groups_in_batch = (start_pos + used_len) // RATIO - start_pos // RATIO
         # A ring page is 32 * 2 * HEAD_DIM FP32 elements. At page 65536 the
         # element offset exceeds INT32_MAX; widen before pointer arithmetic.
@@ -262,7 +260,7 @@ def _pool_kernel(
             valid = valid & (cache_row > 0) & (cache_row < num_cache_blocks)
         if valid:
             group_idx = start_pos // RATIO + local_group
-            seg_row_base = tl.load(meta_ptr + 3 * num_batches + batch)  # [3*num_batches, 4*num_batches)
+            seg_row_base = tl.load(meta_ptr + 3 * num_batch + batch)  # [3*num_batch, 4*num_batch)
             rows = tl.arange(0, CHUNK_ROWS)
             token_pos = group_idx * RATIO + rows
             seg_off = token_pos - start_pos
@@ -354,8 +352,8 @@ def _pool_kernel(
             else:
                 pooled_bf16 = pooled.to(tl.bfloat16).to(tl.float32)
                 var = tl.sum(pooled_bf16 * pooled_bf16, axis=0) / HEAD_DIM
-                norm_out = pooled_bf16 * (1.0 / tl.sqrt(var + eps)) * norm_w
-                out_row = tl.load(meta_ptr + 2 * num_batches + batch) + local_group
+                norm_out = pooled_bf16 * (1.0 / tl.sqrt(var + EPS)) * norm_w
+                out_row = tl.load(meta_ptr + 2 * num_batch + batch) + local_group
                 tl.store(out_ptr + out_row * HEAD_DIM + offs_h, norm_out.to(tl.bfloat16))
 
 
@@ -364,7 +362,7 @@ def _pool_kernel(
 # ============================================================================
 
 
-@triton.jit
+@triton.jit(do_not_specialize=["total_write_slots", "write_slots_per_batch", "num_batch", "num_cache_blocks"])
 def _cache_update_kernel(
     kv_ptr,
     score_ptr,
@@ -372,28 +370,28 @@ def _cache_update_kernel(
     meta_ptr,
     block_table_ptr,
     total_write_slots,
-    WRITE_SLOTS_PER_BATCH,  # Write slots per batch: min(max_used_len, CACHE_SIZE)
-    NUM_BATCH,
+    write_slots_per_batch,  # Write slots per batch: min(max_used_len, CACHE_SIZE)
+    num_batch,
+    num_cache_blocks,
     CACHE_SIZE: tl.constexpr,
     HEAD_DIM: tl.constexpr,
     PROTECT_NULL: tl.constexpr = False,
-    NUM_CACHE_BLOCKS: tl.constexpr = 0,
 ):
     pid = tl.program_id(0)
     offs_h = tl.arange(0, HEAD_DIM)
     for task_id in range(pid, total_write_slots, tl.num_programs(0)):
-        batch = task_id // WRITE_SLOTS_PER_BATCH
-        write_idx = task_id - batch * WRITE_SLOTS_PER_BATCH
-        used_len = tl.load(meta_ptr + NUM_BATCH + batch)
+        batch = task_id // write_slots_per_batch
+        write_idx = task_id - batch * write_slots_per_batch
+        used_len = tl.load(meta_ptr + num_batch + batch)
         tail_count = used_len if used_len < CACHE_SIZE else CACHE_SIZE
         # Keep the cache element offset 64-bit for high physical page IDs.
         cache_row = tl.load(block_table_ptr + batch).to(tl.int64)
         valid = write_idx < tail_count
         if PROTECT_NULL:
-            valid = valid & (cache_row > 0) & (cache_row < NUM_CACHE_BLOCKS)
+            valid = valid & (cache_row > 0) & (cache_row < num_cache_blocks)
         if valid:
             token_in_seg = used_len - tail_count + write_idx  # write_idx-th token in the segment tail
-            proj_row = tl.load(meta_ptr + 3 * NUM_BATCH + batch) + token_in_seg
+            proj_row = tl.load(meta_ptr + 3 * num_batch + batch) + token_in_seg
             token_pos = tl.load(meta_ptr + batch) + token_in_seg
             slot = token_pos % CACHE_SIZE
             cache_row = tl.load(block_table_ptr + batch).to(tl.int64)
@@ -582,12 +580,13 @@ def compressor(
             total_group_slots,
             group_slots_per_batch,
             num_batch,
+            num_cache_blocks=0,
             CACHE_SIZE=cache_size,
             HEAD_DIM=head_dim,
             RATIO=ratio,
             RATIO_PAD=padded_ratio,
             CHUNK_ROWS=min(padded_ratio, MAX_CHUNK_ROWS),
-            eps=1e-20,
+            EPS=1e-20,
             SINGLE_BLOCK=(padded_ratio <= MAX_CHUNK_ROWS),
             NO_PAD=(padded_ratio == ratio),
             HAS_PREV_ROWS=False,
@@ -603,6 +602,7 @@ def compressor(
             total_write_slots,
             write_slots_per_batch,
             num_batch,
+            num_cache_blocks=0,
             CACHE_SIZE=cache_size,
             HEAD_DIM=head_dim,
         )
@@ -828,18 +828,20 @@ def compressor_from_projected(
         batches * groups,
         groups,
         batches,
+        num_cache_blocks=state_cache.shape[0],
         CACHE_SIZE=STATE_RING_ROWS,
         HEAD_DIM=width,
         RATIO=2,
         RATIO_PAD=2,
         CHUNK_ROWS=2,
-        eps=float(rms_eps),
+        EPS=0.0,
         SINGLE_BLOCK=True,
         NO_PAD=True,
         TOKEN_ALIGNED=True,
         FUSE_TOKEN_NORM=norm_w is not None,
-        num_cache_blocks=state_cache.shape[0],
+        TOKEN_ALIGNED=True,
         HAS_PREV_ROWS=prev_rows is not None,
+        rms_eps=float(rms_eps),
     )
     if prev_rows is not None:
         return out
@@ -852,9 +854,9 @@ def compressor_from_projected(
         batches * writes,
         writes,
         batches,
+        num_cache_blocks=state_cache.shape[0],
         CACHE_SIZE=STATE_RING_ROWS,
         HEAD_DIM=width,
         PROTECT_NULL=True,
-        NUM_CACHE_BLOCKS=state_cache.shape[0],
     )
     return out

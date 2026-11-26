@@ -62,6 +62,15 @@ def runtime(monkeypatch, local_weights):
     types = load("types")
     config = load("config")
     load("manifest")
+    # tensor_layout imports the shared weight_state enumeration module. Mirror
+    # the fresh instance onto the parent package attribute as well: the
+    # module-handle import in tensor_layout (from vllm_ascend.model_loader
+    # import weight_state) resolves the parent getattr first, which otherwise
+    # still references the process-wide weight_state imported at vllm_ascend
+    # package init (via bigtensorloader), and monkeypatches on the fixture
+    # instance would be invisible to it.
+    weight_state = _load_module(monkeypatch, "vllm_ascend.model_loader.weight_state", "../weight_state.py")
+    monkeypatch.setattr(sys.modules["vllm_ascend.model_loader"], "weight_state", weight_state, raising=False)
     load("tensor_layout")
     load("seed_client")
     client = load("planner_client")
@@ -106,11 +115,18 @@ def tensor_runtime(monkeypatch, local_weights):
 
     _stub(monkeypatch, "vllm_ascend.model_loader.rfork.types", SeedTransferInfo=_SeedTransferInfo)
     _load_module(monkeypatch, "vllm_ascend.model_loader.rfork.manifest", "manifest.py")
+    # tensor_layout imports the shared weight_state enumeration module; the
+    # walker (collect_transferable_tensors) resolves its predicates in the
+    # weight_state namespace, so tests monkeypatch them there. The parent-attr
+    # mirror keeps the module-handle resolution consistent with sys.modules.
+    weight_state = _load_module(monkeypatch, "vllm_ascend.model_loader.weight_state", "../weight_state.py")
+    monkeypatch.setattr(sys.modules["vllm_ascend.model_loader"], "weight_state", weight_state, raising=False)
     tensor_layout = _load_module(monkeypatch, "vllm_ascend.model_loader.rfork.tensor_layout", "tensor_layout.py")
     transfer_backend = _load_module(
         monkeypatch, "vllm_ascend.model_loader.rfork.transfer_backend", "transfer_backend.py"
     )
     return SimpleNamespace(
+        weight_state=weight_state,
         tensor_layout=tensor_layout,
         transfer_backend=transfer_backend,
         RForkTransferBackend=transfer_backend.RForkTransferBackend,

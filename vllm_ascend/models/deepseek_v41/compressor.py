@@ -58,8 +58,8 @@ class DeepseekV41Compressor(nn.Module):
         from vllm_ascend.ops.triton.compressor.compressor_triton import compressor_from_projected
 
         ring_state = cast(torch.Tensor, self.state_cache.kv_cache)
-        # The fused epilogue implements RMSNorm only. Quantized checkpoints
-        # with a loaded Norm bias still need the original normalization path.
+        # Fuse RMSNorm only when the loaded Norm has no bias.
+        # Keep the original path for checkpoints with a loaded bias.
         fuse_norm = not getattr(self.norm, "bias_loaded", False)
         pooled = compressor_from_projected(
             kv,
@@ -67,8 +67,6 @@ class DeepseekV41Compressor(nn.Module):
             ring_state.squeeze(-2),
             metadata.c2_ring_metadata,
             self._ring_pooled[: kv.shape[0]],
-            # Metadata keeps the graph descriptor bound. A C2 launch cannot
-            # consume more rows than its physical projection carrier.
             max_query_len=min(metadata.max_query_len, kv.shape[0]),
             num_cores=self._ring_num_cores,
             prev_rows=prev_rows,

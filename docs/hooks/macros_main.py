@@ -69,6 +69,13 @@ def define_env(env):
                 return match.group(1)
         return "unknown"
 
+    # MkDocs does not evaluate Jinja expressions nested inside a variable's value.
+    env.variables["main_pytorch_version"] = req_version("torch")
+    env.variables["main_torch_npu_version"] = req_version("torch-npu")
+    env.variables["main_torchvision_version"] = req_version("torchvision")
+    env.variables["main_torchaudio_version"] = req_version("torchaudio")
+    env.variables["main_triton_ascend_version"] = req_version("triton-ascend")
+
     # Expose UI translations to override templates by attaching the dict
     # to config.extra. See module docstring for the rationale.
     config = env.variables.get("config")

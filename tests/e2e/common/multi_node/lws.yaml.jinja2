@@ -37,6 +37,10 @@ spec:
                 value: {{ config_file_path | default("DeepSeek-V3.yaml") }}
               - name: CONFIG_BASE_PATH
                 value: "{{ config_base_path | default("") }}"
+{% if tests | default('') %}
+              - name: MULTI_NODE_TEST_PATH
+                value: {{ tests | tojson }}
+{% endif %}
               - name: LOG_PREFIX
                 value: {{ log_prefix | default("/root/.cache/ascend-logs") }}
               - name: DOWNLOAD_SPEC
@@ -177,6 +181,10 @@ spec:
                 value: {{ config_file_path | default("DeepSeek-V3.yaml") }}
               - name: CONFIG_BASE_PATH
                 value: "{{ config_base_path | default("") }}"
+{% if tests | default('') %}
+              - name: MULTI_NODE_TEST_PATH
+                value: {{ tests | tojson }}
+{% endif %}
               - name: TEST_FREQUENCY
                 value: "{{ test_frequency | default("nightly") }}"
               - name: LOG_PREFIX

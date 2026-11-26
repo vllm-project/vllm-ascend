@@ -11,17 +11,18 @@ import numpy as np
 import pytest
 import torch
 from vllm.config.compilation import CUDAGraphMode
+from vllm.config.utils import hash_config_cached
 from vllm.v1.worker.gpu.dp_utils import DPSyncState
 from vllm.v1.worker.gpu.spec_decode.target_dependent_ar.speculator import (
     TargetDependentARSpeculator,
 )
 
 from vllm_ascend.attention.attention_v1 import AscendAttentionBackend, AscendAttentionState
+from vllm_ascend.attention.context_parallel.common_cp import CPKVScope
 from vllm_ascend.attention.dsa_v1 import AscendDSABackend
 from vllm_ascend.attention.mla_v1 import AscendMLABackend, AscendMLAMetadata
 from vllm_ascend.attention.sfa_v1 import AscendSFABackend
 from vllm_ascend.distributed.eplb.tensor_ops import make_allgather_mask
-from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2.input_batch import AscendInputBuffers
 from vllm_ascend.worker.v2.spec_decode.target_dependent_ar.speculator import (
     AscendTargetDependentARSpeculator,
@@ -129,13 +130,23 @@ def test_load_draft_model_calls_remove_d2t():
     draft_model = MagicMock()
     target_attn_layer_names = {"layer.0"}
     speculator._maybe_remove_d2t = MagicMock()
+    target_config = SimpleNamespace(parallel_config=SimpleNamespace(decode_context_parallel_size=2))
+    speculator.vllm_config = target_config
+    speculator.draft_vllm_config = SimpleNamespace(parallel_config=SimpleNamespace(decode_context_parallel_size=1))
+
+    def load_with_draft_topology(*args):
+        assert speculator.vllm_config.parallel_config.decode_context_parallel_size == 1
+        return draft_model
+
     with patch.object(
-        TargetDependentARSpeculator, "load_draft_model", return_value=draft_model
+        TargetDependentARSpeculator, "load_draft_model", side_effect=load_with_draft_topology
     ) as parent_load_draft_model:
         result = speculator.load_draft_model(target_model, target_attn_layer_names)
     parent_load_draft_model.assert_called_once_with(target_model, target_attn_layer_names)
     speculator._maybe_remove_d2t.assert_called_once_with(draft_model)
     assert result is draft_model
+    assert speculator.vllm_config is target_config
+    assert target_config.parallel_config.decode_context_parallel_size == 2
 
 
 def test_init_cudagraph_manager_enforce_eager():
@@ -166,17 +177,15 @@ def test_init_cudagraph_manager_keeps_graph_mode():
     parent_init.assert_called_once_with(CUDAGraphMode.FULL)
 
 
-def test_generate_draft_updates_attn_metadata():
-    """Test updating attention metadata during draft generation."""
+def test_decode_updates_attn_metadata():
+    """Test updating attention metadata during draft decoding."""
     speculator = AscendTargetDependentARSpeculator.__new__(AscendTargetDependentARSpeculator)
     attn_metadata = {"layer.0": MagicMock()}
     speculator._update_decode_attn_metadata = MagicMock()
-    with patch.object(
-        TargetDependentARSpeculator, "_generate_draft" if vllm_version_is("0.33.0") else "_decode"
-    ) as parent_generate:
+    with patch.object(TargetDependentARSpeculator, "_decode") as parent_generate:
         # main always passes the per-batch step count; there is no fallback to
         # the configured count.
-        speculator._generate_draft(2, 4, attn_metadata, None, None, num_speculative_steps=3)
+        speculator._decode(2, 4, attn_metadata, None, None, num_speculative_steps=3)
     expected_args: tuple[Any, ...] = (2, 4, attn_metadata, None, None, CUDAGraphMode.NONE)
     # vLLM #60335 added `num_speculative_steps` on main.
     expected_args = (*expected_args, 3)
@@ -184,13 +193,13 @@ def test_generate_draft_updates_attn_metadata():
     speculator._update_decode_attn_metadata.assert_called_once_with(attn_metadata, 1, 2)
 
 
-def test_generate_draft_skips_update_without_attn_metadata():
+def test_decode_skips_update_without_attn_metadata():
     """Test skipping metadata updates when attention metadata is absent."""
     speculator = AscendTargetDependentARSpeculator.__new__(AscendTargetDependentARSpeculator)
     speculator.num_speculative_steps = 3
     speculator._update_decode_attn_metadata = MagicMock()
-    with patch.object(TargetDependentARSpeculator, "_generate_draft" if vllm_version_is("0.33.0") else "_decode"):
-        speculator._generate_draft(2, 4, None, None, None)
+    with patch.object(TargetDependentARSpeculator, "_decode"):
+        speculator._decode(2, 4, None, None, None)
     speculator._update_decode_attn_metadata.assert_not_called()
 
 
@@ -524,7 +533,12 @@ def test_build_fia_params_prefill():
     """Test building FIA parameters for prefill."""
     speculator = AscendTargetDependentARSpeculator.__new__(AscendTargetDependentARSpeculator)
     block_table = torch.arange(12).reshape(4, 3)
-    metadata = SimpleNamespace(block_tables=block_table, actual_seq_lengths_q=[1, 2], seq_lens_list=[10, 20])
+    metadata = SimpleNamespace(
+        block_tables=block_table,
+        actual_seq_lengths_q=[1, 2],
+        seq_lens_list=[10, 20],
+        decode=SimpleNamespace(actual_seq_lengths_q=[1, 2], seq_lens_list=[10, 20]),
+    )
     speculator.use_dcp = False
     speculator.model_state = SimpleNamespace(attn_metadata={"draft": metadata})
     speculator.draft_attn_layer_names = {"draft"}
@@ -533,6 +547,8 @@ def test_build_fia_params_prefill():
     assert result[0]["layer_name"] == "draft"
     assert result[0]["actual_seq_lengths"] == [1, 2]
     assert result[0]["actual_seq_lengths_kv"] == [10, 20]
+    assert result[0]["actual_seq_qlen"] == [1, 2]
+    assert result[0]["actual_seq_kvlen"] == [10, 20]
     assert result[0]["block_table"].shape == (4, 3)
 
 
@@ -540,7 +556,10 @@ def test_build_fia_params_decode():
     """Test building FIA parameters for decode."""
     speculator = AscendTargetDependentARSpeculator.__new__(AscendTargetDependentARSpeculator)
     speculator.use_dcp = False
-    metadata = SimpleNamespace(block_tables=torch.arange(12).reshape(4, 3))
+    metadata = SimpleNamespace(
+        block_tables=torch.arange(12).reshape(4, 3),
+        decode=SimpleNamespace(actual_seq_lengths_q=[1, 2, 3], seq_lens_list=[10, 29]),
+    )
     speculator.model_state = SimpleNamespace(attn_metadata={"draft": metadata})
     speculator.draft_attn_layer_names = {"draft"}
     speculator.input_batch = SimpleNamespace(num_reqs=2, seq_lens_np=np.array([10, 29]))
@@ -550,7 +569,39 @@ def test_build_fia_params_decode():
     assert len(result) == 2
     assert result[0]["actual_seq_lengths"] == [1, 2, 3]
     assert result[0]["actual_seq_lengths_kv"] == [11, 30, 0]
+    assert result[0]["actual_seq_qlen"] == [1, 2, 3]
+    assert result[0]["actual_seq_kvlen"] == [11, 30, 0]
     assert result[1]["actual_seq_lengths_kv"] == [12, 30, 0]
+
+
+def test_build_fia_params_mla_dcp_decode_uses_local_lengths():
+    speculator = AscendTargetDependentARSpeculator.__new__(AscendTargetDependentARSpeculator)
+    speculator.use_dcp = True
+    speculator.attn_architecture = "MLA"
+    speculator.dcp_manager = SimpleNamespace(dcp_world_rank=1)
+    speculator.draft_vllm_config = SimpleNamespace(
+        parallel_config=SimpleNamespace(decode_context_parallel_size=2, cp_kv_cache_interleave_size=1)
+    )
+    speculator.input_batch = SimpleNamespace(num_reqs=2, seq_lens_np=np.array([10, 20]))
+    speculator.num_speculative_steps = 3
+    speculator.vllm_config = SimpleNamespace(model_config=SimpleNamespace(max_model_len=32))
+    speculator.draft_attn_layer_names = {"draft"}
+    metadata = SimpleNamespace(decode=object(), external_flashmla=None)
+    with patch(
+        "vllm_ascend.worker.v2.spec_decode.target_dependent_ar.speculator.get_dcp_local_seq_lens",
+        side_effect=[torch.tensor([5, 10, 0]), torch.tensor([6, 11, 0])],
+    ) as local_lengths:
+        result = speculator.build_fia_params(3, {"draft": metadata}, False)
+
+    assert result == [
+        {"layer_name": ("draft", CPKVScope.FULL), "actual_seq_kvlen": [5, 10, 0]},
+        {"layer_name": ("draft", CPKVScope.FULL), "actual_seq_kvlen": [6, 11, 0]},
+    ]
+    assert local_lengths.call_count == 2
+    assert local_lengths.call_args_list[0].args[0].tolist() == [11, 21, 0]
+    assert local_lengths.call_args_list[1].args[0].tolist() == [12, 22, 0]
+    for call in local_lengths.call_args_list:
+        assert call.kwargs == {"dcp_size": 2, "dcp_rank": 1, "cp_kv_cache_interleave_size": 1}
 
 
 def test_set_attn_detects_architecture():
@@ -563,7 +614,8 @@ def test_set_attn_detects_architecture():
     ]
     for backend, expected in cases:
         speculator = AscendTargetDependentARSpeculator.__new__(AscendTargetDependentARSpeculator)
-        speculator.vllm_config = object()
+        speculator.vllm_config = SimpleNamespace()
+        speculator.draft_vllm_config = SimpleNamespace(parallel_config=SimpleNamespace(decode_context_parallel_size=1))
         speculator.attn_groups = object()
         speculator.speculative_config = SimpleNamespace(  # type: ignore[assignment]
             moe_backend=None, attention_backend=None, kv_cache_dtype=None
@@ -667,9 +719,8 @@ def test_propose_accepts_main_dp_sync_state_and_num_speculative_tokens(adaptive,
         eager=False,
         num_reqs=1,
         skip_drafts=True,
+        max_query_len=6,
     )
-    if not vllm_version_is("0.33.0"):
-        sync_kwargs["max_query_len"] = 6
     dp_sync = DPSyncState(**sync_kwargs)
     expected = object()
     with (
@@ -694,8 +745,7 @@ def test_propose_accepts_main_dp_sync_state_and_num_speculative_tokens(adaptive,
     assert dp_sync.uniform_token_count == sync_uniform
     assert forwarded.num_tokens_across_dp is dp_sync.num_tokens_across_dp
     assert (forwarded.num_reqs, forwarded.eager, forwarded.skip_drafts) == (1, False, True)
-    if not vllm_version_is("0.33.0"):
-        assert forwarded.max_query_len == 6
+    assert forwarded.max_query_len == 6
     assert parent_propose.call_args.kwargs.get("num_speculative_tokens") == 2
 
 
@@ -707,6 +757,7 @@ def test_init_dcp_disabled():
     speculator._init_dcp()
 
     assert speculator.use_dcp is False
+    assert speculator.dcp_size == 1
     assert speculator.dcp_manager is None
 
 
@@ -730,6 +781,7 @@ def test_init_dcp_enabled():
         speculator._init_dcp()
 
     assert speculator.use_dcp is True
+    assert speculator.dcp_size == 2
     assert speculator.dcp_manager is dcp_manager_cls.return_value
     dcp_manager_cls.assert_called_once_with(
         dcp_world_size=2,
@@ -800,7 +852,9 @@ def test_eplb_draft_mask_tracks_prefill_decode_and_dummy_replay():
     speculator.input_buffers = SimpleNamespace(is_padding=torch.zeros(8, dtype=torch.bool))
     speculator._eplb_source_is_padding = None
     speculator._eplb_dummy_run = False
-    speculator.speculative_config = SimpleNamespace(draft_model_config=SimpleNamespace(compute_hash=lambda: "draft"))
+    speculator.speculative_config = SimpleNamespace(
+        draft_model_config=SimpleNamespace(compute_hash=lambda: "draft", compile_factors=lambda: {"identity": "draft"})
+    )
     layer_state = SimpleNamespace()
     state = SimpleNamespace(
         allgather_record_tensor=torch.tensor(-1),
@@ -808,6 +862,9 @@ def test_eplb_draft_mask_tracks_prefill_decode_and_dummy_replay():
             "draft": SimpleNamespace(model=SimpleNamespace(moe_layers=[SimpleNamespace(eplb_state=layer_state)]))
         },
     )
+    state.model_states[hash_config_cached(speculator.speculative_config.draft_model_config)] = state.model_states[
+        "draft"
+    ]
     speculator.set_eplb_state(state)
     mask = layer_state.allgather_source_is_padding
     speculator.set_eplb_state(state)
@@ -840,7 +897,7 @@ def test_eplb_draft_mask_tracks_prefill_decode_and_dummy_replay():
 
 
 @pytest.mark.parametrize("num_reqs,num_tokens", [(1, 4), (2, 8), (4, 16)])
-def test_generate_draft_capture_uses_request_rows(num_reqs, num_tokens):
+def test_decode_capture_uses_request_rows(num_reqs, num_tokens):
     speculator = AscendTargetDependentARSpeculator.__new__(AscendTargetDependentARSpeculator)
     speculator.method = "mtp"
     speculator.max_num_reqs = 8
@@ -852,12 +909,11 @@ def test_generate_draft_capture_uses_request_rows(num_reqs, num_tokens):
 
     module = "vllm_ascend.worker.v2.spec_decode."
     # #60989 renamed the native single-step draft entry point on main.
-    parent_method = "_generate_draft" if vllm_version_is("0.33.0") else "_decode"
     with (
         patch(module + "lmhead_tp_utils.lmhead_tp_enable", return_value=True),
-        patch.object(TargetDependentARSpeculator, parent_method, side_effect=parent) as generate,
+        patch.object(TargetDependentARSpeculator, "_decode", side_effect=parent) as generate,
     ):
-        speculator._generate_draft(num_reqs, num_tokens, None, None, None)
+        speculator._decode(num_reqs, num_tokens, None, None, None)
     expected = [num_reqs, num_tokens, None, None, None, CUDAGraphMode.NONE]
     expected.append(None)
     generate.assert_called_once_with(*expected)

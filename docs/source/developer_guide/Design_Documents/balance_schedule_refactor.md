@@ -81,7 +81,7 @@ three large upstream units verbatim:
 |------------------------------------|-------|---------------------------------------------------|
 | `Scheduler.schedule()`             | ~520  | Insert the 3-line `balance_flag` gate mid-loop    |
 | `DPEngineCoreProc.run_busy_loop()` | ~40   | Call `balance_gather` after every step            |
-| `EngineCoreProc.run_engine_core()` | ~55   | Replace with `BalanceDPEngineCoreProc` when DP>1  |
+| `EngineCoreProc.run_engine_core()` | ~55   | Replace with `BalanceDPEngineCoreProc` when DP > 1  |
 
 This "copy whole units" approach has three concrete harms:
 
@@ -118,7 +118,7 @@ This "copy whole units" approach has three concrete harms:
    revisions — release tag v0.24.0 and main-verified commit e5588e49 — expose
    `schedule(self, throttle_prefills=False)`, so the override matches that
    shared signature and the disabled path forwards `throttle_prefills`
-   directly to `super()`. I.e.: **body aligned to the release tag; signature
+   directly to `super()`. I.e. **body aligned to the release tag; signature
    matches both supported revisions; disabled path delegates directly.**
 
 2. **It violates the `AGENTS.md` patch policy.** The policy requires patches to
@@ -173,14 +173,14 @@ direct environment-variable read**. Balance scheduling is now configured only
 through `additional_config`; `_balance_scheduling_enabled` no longer bypasses
 `AscendConfig`. Details in [Phased rollout](#phased-rollout).
 
-### Step 1 — Hook gather onto `_has_global_unfinished_reqs` and delete the EngineCore copies
+### Step 1 — Hook gather onto _has_global_unfinished_reqs and delete the EngineCore copies
 
 The old `BalanceDPEngineCoreProc.run_busy_loop()` and `run_engine_core()` were
 verbatim copies of upstream methods and **already stale-drifted**: upstream
 `run_busy_loop` switched to `while self._handle_shutdown()`, added
 `eep_scaling_state` / `is_sleeping` guards and a trailing `raise SystemExit`,
 while the patch still had `while True` + a hand-written signal handler;
-`run_engine_core` similarly gained `SignalCallback`, numa, tracer logic. The
+`run_engine_core` similarly gained `SignalCallback`, NUMA, tracer logic. The
 goal is to delete both copies.
 
 Three constraints surfaced during implementation:
@@ -221,7 +221,7 @@ The final landing is therefore:
   module-level `DPEngineCoreProc` to `BalanceDPEngineCoreProc` or restore the
   upstream original, then calls the original `run_engine_core`. This is
   **conditional activation** — with balance off, upstream's implementation is
-  used verbatim; signal handling, `SignalCallback`, numa, and tracer all stay
+  used verbatim; signal handling, `SignalCallback`, NUMA, and tracer all stay
   upstream-correct.
 
 > **Lesson A — deadlock (gather must not live in `schedule()`).** An earlier
@@ -273,7 +273,7 @@ of `_has_global_unfinished_reqs`, i.e. after `schedule()` + execute +
 where the pre-refactor engine-core-driven gather sat. The gate consumes that
 value in the next step's `schedule()`; behavior is unchanged.
 
-### Step 2 — Replace the `schedule()` copy with a minimal seam
+### Step 2 — Replace the schedule() copy with a minimal seam
 
 The `balance_flag` gate is inlined mid-`schedule()` by upstream; there is
 currently no overridable seam. This is solved in two phases.
@@ -400,7 +400,7 @@ deviation is a bug.
 
 ## Post-refactor file shape
 
-After this round (Phase 1 + 2A + 3), the key structure is as follows. The
+After this round (Phase 1 + 2A + 3), the key structure is as follows: The
 `schedule()` body is a verbatim copy of release tag `v0.24.0` (cannot be
 deleted before Phase 2B), with three documented deltas (disabled-path early return + the `balance_flag` gate in the WAITING loop + `if request_queue is None: break`):
 

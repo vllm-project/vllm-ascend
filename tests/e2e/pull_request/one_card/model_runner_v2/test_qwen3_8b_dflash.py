@@ -15,8 +15,6 @@
 # limitations under the License.
 #
 
-import os
-from unittest.mock import patch
 
 import pytest
 from vllm import SamplingParams
@@ -43,7 +41,6 @@ DFLASH_MODELS = ["z-lab/Qwen3-8B-DFlash-b16"]
         pytest.param({}, id="default_full_and_piecewise"),
     ],
 )
-@patch.dict(os.environ, {"VLLM_USE_V2_MODEL_RUNNER": "1"})
 def test_dflash_spec_decoding(
     model: str,
     dflash_model: str,
