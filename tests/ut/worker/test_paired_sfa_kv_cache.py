@@ -35,7 +35,11 @@ from vllm_ascend.core.kv_cache_interface import (
     AscendMLAAttentionSpec,
     AscendSFAIndexerCacheSpec,
 )
-from vllm_ascend.models.kimi_k3.paired_sfa_cache import paired_sfa_cache_config, paired_sfa_cache_groups
+from vllm_ascend.models.kimi_k3.paired_sfa_cache import (
+    paired_sfa_cache_config,
+    paired_sfa_cache_groups,
+    supports_k31_draft_separate_pool,
+)
 from vllm_ascend.worker.utils import copy_kv_cache_blocks_inplace
 from vllm_ascend.worker.v2 import attn_utils
 from vllm_ascend.worker.v2.utils import AscendV2KVBlockZeroer
@@ -493,6 +497,7 @@ def make_bf16_swa_cache(config, monkeypatch, page, *, private=False, split_budge
     return plan, attn_groups, caches, indexers, drafts
 
 
+@pytest.mark.skipif(not supports_k31_draft_separate_pool(), reason="Installed vLLM has a single KV block pool")
 def test_worker_zero_and_cow_use_independent_pool_ids(monkeypatch, vllm_config):
     from vllm.v1.core.sched.output import SchedulerOutput
     from vllm.v1.worker.gpu.model_runner import GPUModelRunner
@@ -550,6 +555,11 @@ def test_worker_zero_and_cow_use_independent_pool_ids(monkeypatch, vllm_config):
                     before[2].zero_()
                     before[3].copy_(before[1])
                 expected[pid, layer, i] = before
+    # A partially upgraded scheduler can send only legacy pool-0 operations.
+    # Reject before the base runner changes block tables or clears live pages.
+    with pytest.raises(ValueError, match="pool-aware SchedulerOutput"):
+        runner.update_requests(SimpleNamespace(new_block_ids_to_zero=[1], kv_cache_block_copies=None))
+
     output = SchedulerOutput.make_empty()
     output.new_block_ids_to_zero = [1]
     output.new_block_ids_to_zero_by_pool = {1: [2]}
@@ -695,7 +705,9 @@ def test_mooncake_pulls_target_and_draft_into_disjoint_ids(monkeypatch, vllm_con
     )
     remote = receiver.decoder.decode(sender.encoded_metadata)
     receiver._validate_remote_metadata(remote, "P")
-    if layout == "split":
+    split = bool(d.transfer_metadata.block_pool_ids)
+    assert split == (layout == "split" and supports_k31_draft_separate_pool())
+    if split:
         # Pools may have different capacities on each host. Mixing local-ID
         # and global-ID layouts must fail before a transfer is submitted.
         pp = remote.metadata_by_pp_rank[0]
@@ -717,7 +729,6 @@ def test_mooncake_pulls_target_and_draft_into_disjoint_ids(monkeypatch, vllm_con
     engine.batch_transfer_sync_read.side_effect = cpu_read
     # P target/draft IDs 1/2, D target/draft IDs 3/1. Transfer two kernel
     # blocks of a six-block manager page, including one partial final block.
-    split = layout == "split"
     if split:
         assert p.transfer_metadata.block_pool_ids == d.transfer_metadata.block_pool_ids == (0, 1)
         assert p.transfer_metadata.num_blocks_per_group != d.transfer_metadata.num_blocks_per_group

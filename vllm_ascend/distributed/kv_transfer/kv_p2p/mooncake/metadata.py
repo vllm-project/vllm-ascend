@@ -12,6 +12,11 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorMetadata,
 )
 
+# Legacy consumers ignore unknown msgpack fields and treat every ID as global.
+# A producer using local IDs must verify support before publishing addresses.
+POOL_LOCAL_IDS_V1 = b"pool_local_ids_v1"
+POOL_LAYOUT_MISMATCH = b"Mooncake producer requires a consumer with pool-local block IDs"
+
 # Dtype, physical block dimensions, and within-block strides in elements.
 CacheTensorGeometry = tuple[str, tuple[int, ...], tuple[int, ...]]
 

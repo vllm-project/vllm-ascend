@@ -37,6 +37,8 @@ from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.base_worker import (
     MooncakeBaseConnectorWorker,
 )
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.metadata import (
+    POOL_LAYOUT_MISMATCH,
+    POOL_LOCAL_IDS_V1,
     MooncakeConnectorMetadata,
     MooncakePPTransferMetadata,
     MooncakeTransferMetadata,
@@ -1742,7 +1744,9 @@ class MooncakePullRecvingThread(threading.Thread):
             sock.setsockopt(zmq.RCVTIMEO, 1000)  # type: ignore[attr-defined]
             ensure_zmq_send(
                 sock,
-                self.encoder.encode((b"get_meta_msg",)),
+                self.encoder.encode(
+                    (b"get_meta_msg", POOL_LOCAL_IDS_V1) if self.local_metadata.block_pool_ids else (b"get_meta_msg",)
+                ),
                 path,
             )
             metadata_bytes = ensure_zmq_recv(sock, path)
@@ -1752,6 +1756,8 @@ class MooncakePullRecvingThread(threading.Thread):
                 f"Mooncake producer scheduler returned no transfer metadata for engine {remote_engine_id!r} from {path}"
             )
 
+        if metadata_bytes == POOL_LAYOUT_MISMATCH:
+            raise ValueError(POOL_LAYOUT_MISMATCH.decode())
         transfer_metadata = self.decoder.decode(metadata_bytes)
         self._validate_remote_metadata(transfer_metadata, remote_engine_id)
         remote_tp_rank_groups, remote_layer_index_pairs = self._build_remote_transfer_layout(transfer_metadata)

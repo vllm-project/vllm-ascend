@@ -13,10 +13,18 @@ from vllm.v1.worker.gpu.warmup import run_mixed_prefill_decode_warmup, warmup_ke
 from vllm.v1.worker.utils import get_uniform_decode_token_count
 
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
+from vllm_ascend.models.kimi_k3.paired_sfa_cache import supports_k31_draft_separate_pool
 from vllm_ascend.worker.v2.aclgraph_utils import ModelAclGraphManager
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch, AscendInputBuffers
 from vllm_ascend.worker.v2.model_runner import NPUModelRunner
 from vllm_ascend.worker.v2.model_states.default import AscendModelState
+
+# The legacy core has no pool-local warmup or dummy block-table ABI.
+# Configuration fallback is separately exercised against that core.
+requires_split_pool = pytest.mark.skipif(
+    not supports_k31_draft_separate_pool(),
+    reason="Installed vLLM does not support pool-local K3.1 draft blocks",
+)
 
 
 @pytest.fixture
@@ -355,7 +363,19 @@ def test_dummy_slot_mapping_uses_padded_persistent_buffer(buffers, runner):
     runner.block_tables.get_dummy_slot_mappings.assert_called_once_with(2)
 
 
+@pytest.mark.parametrize("missing", ["worker", "warmup"])
+def test_split_plan_rejects_partially_updated_worker(monkeypatch, missing):
+    from vllm.v1.worker.gpu import warmup
+
+    monkeypatch.setattr(warmup, "SUPPORTS_INDEPENDENT_KV_BLOCK_POOLS", missing != "warmup", raising=False)
+    monkeypatch.setattr(GPUModelRunner, "supports_independent_kv_block_pools", missing != "worker", raising=False)
+    runner = object.__new__(NPUModelRunner)
+    with pytest.raises(ValueError, match="pool-aware vLLM worker and warmup"):
+        runner.initialize_kv_cache(SimpleNamespace(block_pool_ids=(0, 1)))
+
+
 @pytest.mark.parametrize("mixed", [False, True])
+@requires_split_pool
 def test_split_pool_warmup_assigns_real_ids_and_respects_tighter_pool(mixed, monkeypatch):
     spec = FullAttentionSpec(block_size=16, num_kv_heads=1, head_size=1, dtype=torch.float32)
     groups = [KVCacheGroupSpec([name], spec) for name in ("main", "target2", "draft")]
@@ -407,6 +427,7 @@ def test_split_pool_warmup_assigns_real_ids_and_respects_tighter_pool(mixed, mon
     assert max(seen[0]) < 19 and max(seen[1]) < 4
 
 
+@requires_split_pool
 def test_dummy_context_split_pool_bounds_exclude_null_subpages(buffers):
     with patch("vllm_ascend.worker.v2.input_batch.update_cos_sin"):
         batch = AscendInputBatch.make_dummy(2, 4, buffers)
@@ -417,6 +438,7 @@ def test_dummy_context_split_pool_bounds_exclude_null_subpages(buffers):
     assert set(tables[1][:, :8].flatten().tolist()) == set(range(6, 12))
 
 
+@requires_split_pool
 def test_split_dummy_state_slots_use_each_groups_manager_capacity(runner):
     runner.device = torch.device("cpu")
     runner.kv_cache_config = SimpleNamespace(

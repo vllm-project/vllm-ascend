@@ -955,6 +955,28 @@ def test_truncate_request_for_prefill_supports_prompt_embeddings() -> None:
     assert request.num_prompt_tokens == 2
 
 
+def test_split_producer_withholds_addresses_from_old_consumer() -> None:
+    from dataclasses import replace
+
+    from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.metadata import POOL_LAYOUT_MISMATCH, POOL_LOCAL_IDS_V1
+
+    metadata = replace(make_transfer_metadata(), block_pool_ids=(0, 1), num_blocks_per_group=(32, 8))
+    thread = make_sending_thread({0: metadata})
+    sock = MagicMock()
+    encode = msgspec.msgpack.encode
+    sock.recv_multipart.side_effect = [
+        [b"old", b"", encode((b"get_meta_msg",))],
+        [b"new", b"", encode((b"get_meta_msg", POOL_LOCAL_IDS_V1))],
+        _StopLoop(),
+    ]
+    with pytest.raises(_StopLoop):
+        thread._run_busy_loop(sock)
+    assert sock.send_multipart.call_args_list == [
+        call((b"old", b"", POOL_LAYOUT_MISMATCH)),
+        call((b"new", b"", thread.encoded_metadata)),
+    ]
+
+
 def test_sending_busy_loop_serves_metadata_and_completion_ack() -> None:
     thread = make_sending_thread()
     thread._handle_finished_request = MagicMock()  # type: ignore[method-assign]

@@ -766,11 +766,12 @@ _orig_update_engine_kv_cache_capacity = vllm.v1.engine.core.update_kv_cache_capa
 def _update_engine_kv_cache_capacity(vllm_config: VllmConfig, kv_cache_config: KVCacheConfig) -> None:
     dcp = vllm_config.parallel_config.decode_context_parallel_size
     groups = kv_cache_config.kv_cache_groups
-    if kv_cache_config.block_pool_ids is not None:
+    pool_ids = getattr(kv_cache_config, "block_pool_ids", None)
+    if pool_ids is not None:
         logger.info(
             "K3.1 KV pool capacities including one reserved null block each: target=%d, draft=%d",
             kv_cache_config.num_blocks,
-            kv_cache_config.num_blocks_for_group(kv_cache_config.block_pool_ids.index(1)),
+            kv_cache_config.num_blocks_for_group(pool_ids.index(1)),
         )
     if any(get_kv_cache_dcp_size(group.kv_cache_spec, dcp) != dcp for group in groups):
         # EngineCore picks the smallest physical block across all groups.

@@ -27,6 +27,8 @@ from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.base_scheduler import (
     MooncakeBaseConnectorScheduler,
 )
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.metadata import (
+    POOL_LAYOUT_MISMATCH,
+    POOL_LOCAL_IDS_V1,
     CacheTensorGeometry,
     MooncakeConnectorMetadata,
     MooncakePCPTransferMetadata,
@@ -82,6 +84,7 @@ class MooncakeSchedulerSendingThread(threading.Thread):
         if self.use_kv_pp and self.dcp_size != 1:
             raise ValueError(f"Mooncake KVPP cannot be combined with DCP, got dcp_size={self.dcp_size}")
         metadata_by_pp_rank = self._merge_metadata_by_pp_rank(metadata)
+        self.uses_pool_local_ids = any(pp.block_pool_ids for pp in metadata_by_pp_rank.values())
         self.encoded_metadata = encoder.encode(
             MooncakeTransferMetadataGroups(
                 engine_id=engine_id,
@@ -398,7 +401,11 @@ class MooncakeSchedulerSendingThread(threading.Thread):
             try:
                 msg = decoder.decode(payload[0])
                 if msg and msg[0] == GET_META_MSG:
-                    sock.send_multipart((identity, b"", self.encoded_metadata))
+                    if self.uses_pool_local_ids and msg[1:] != (POOL_LOCAL_IDS_V1,):
+                        logger.warning("Rejecting Mooncake metadata request from a shared-pool consumer")
+                        sock.send_multipart((identity, b"", POOL_LAYOUT_MISMATCH))
+                    else:
+                        sock.send_multipart((identity, b"", self.encoded_metadata))
                 elif msg[0] == DONE_RECVING_MSG and len(msg) == 2:
                     self._handle_finished_request(str(msg[1]))
                     sock.send_multipart((identity, b"", ACK_MSG))

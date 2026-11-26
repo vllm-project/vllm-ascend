@@ -115,7 +115,9 @@ class AscendDSparkSpeculator(LmheadTPDraftSamplingMixin, DSparkSpeculator):
                     # returned by SP or the graph's persistent output buffers.
                     packed = first.as_strided((rows, packed_width), (packed_width, 1))
                     return self.model.combine_hidden_states(packed)
-        return super()._combine_aux_hidden_states(states)
+        # Stock v0.30 projects the concatenation directly in propose().
+        # Independent or reordered columns need that same operation.
+        return self.model.combine_hidden_states(torch.cat(states, dim=-1))
 
     def load_draft_model(
         self,

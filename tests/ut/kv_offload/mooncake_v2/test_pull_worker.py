@@ -19,6 +19,8 @@ from vllm.v1.kv_cache_interface import KVCacheSpec, MLAAttentionSpec
 from vllm_ascend.core.kv_cache_interface import AscendGQADraftFullAttentionSpec, AscendGQADraftSlidingWindowSpec
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake import base_worker, pull_worker
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.metadata import (
+    POOL_LAYOUT_MISMATCH,
+    POOL_LOCAL_IDS_V1,
     MooncakeConnectorMetadata,
     MooncakeTransferMetadataGroups,
     ReqMeta,
@@ -1609,10 +1611,14 @@ class _StopWorkerLoop(BaseException):
     """Stop the worker's unbounded queue loop after one test iteration."""
 
 
+@pytest.mark.parametrize("split", [False, True])
 def test_get_remote_metadata_fetches_once_and_populates_layout_cache(
     monkeypatch: pytest.MonkeyPatch,
+    split: bool,
 ) -> None:
     thread = make_thread()
+    if split:
+        thread.local_metadata = replace(thread.local_metadata, block_pool_ids=(0, 1), num_blocks_per_group=(32, 8))
     thread.encoder = msgspec.msgpack.Encoder()
     thread.decoder = msgspec.msgpack.Decoder(MooncakeTransferMetadataGroups)
     thread.remote_metadata = SizedDict()
@@ -1648,13 +1654,19 @@ def test_get_remote_metadata_fetches_once_and_populates_layout_cache(
 
     assert first is second
     send.assert_called_once()
+    request = msgspec.msgpack.decode(send.call_args.args[1])
+    assert request == ([b"get_meta_msg", POOL_LOCAL_IDS_V1] if split else [b"get_meta_msg"])
     recv.assert_called_once()
     thread._build_remote_transfer_layout.assert_called_once_with(expected)
     assert thread.remote_tp_rank_groups["engine-p"] == {0: {(0, 0): [[0]]}}
     assert thread.remote_layer_index_pairs["engine-p"] == {0: [(0, 0)]}
 
 
-def test_get_remote_metadata_rejects_empty_response(monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize(
+    ("response", "error", "message"),
+    [(b"", RuntimeError, "returned no transfer metadata"), (POOL_LAYOUT_MISMATCH, ValueError, "pool-local block IDs")],
+)
+def test_get_remote_metadata_rejects_invalid_response(monkeypatch, response, error, message) -> None:
     thread = make_thread()
     thread.encoder = msgspec.msgpack.Encoder()
     thread.decoder = msgspec.msgpack.Decoder(MooncakeTransferMetadataGroups)
@@ -1675,11 +1687,12 @@ def test_get_remote_metadata_rejects_empty_response(monkeypatch: pytest.MonkeyPa
     monkeypatch.setattr(
         pull_worker,
         "ensure_zmq_recv",
-        MagicMock(return_value=b""),
+        MagicMock(return_value=response),
     )
 
-    with pytest.raises(RuntimeError, match="returned no transfer metadata"):
+    with pytest.raises(error, match=message):
         thread._get_remote_metadata("engine-p", "10.0.0.1", 6000)
+    assert "engine-p" not in thread.remote_metadata
 
 
 @pytest.mark.parametrize(

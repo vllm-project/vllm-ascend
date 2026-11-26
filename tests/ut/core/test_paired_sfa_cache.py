@@ -33,6 +33,7 @@ from vllm_ascend.models.kimi_k3.paired_sfa_cache import (
     paired_sfa_cache_groups,
     paired_sfa_max_memory,
     paired_sfa_pool_bytes,
+    supports_k31_draft_separate_pool,
 )
 from vllm_ascend.patch.platform import patch_kv_cache_utils
 from vllm_ascend.patch.platform.patch_kv_cache_coordinator import get_kv_cache_coordinator
@@ -248,11 +249,7 @@ def test_bf16_dspark_capacity_at_logged_budget(dcp_size, target_block_size, over
     assert get_max_concurrency_for_kv_cache_config(config, plan) == pytest.approx(expected_ids / ids_per_request)
 
 
-@pytest.mark.parametrize(
-    ("dcp", "budget", "counts", "per_request"),
-    [(8, 22_600_744_960, (844, 354), (37, 15)), (1, 19_263_193_088, (728, 188), (186, 47))],
-)
-def test_bf16_dspark_split_engine_admission_and_pp_replan(dcp, budget, counts, per_request):
+def _bf16_dspark_engine_case(dcp, block_size, max_in_flight, options):
     register_all_kvcache_specs(None)
     register_ascend_kv_cache_specs()
     config = make_config()
@@ -260,19 +257,20 @@ def test_bf16_dspark_split_engine_admission_and_pp_replan(dcp, budget, counts, p
     config.model_config.dtype = torch.bfloat16
     config.model_config.original_max_model_len = config.model_config.max_model_len
     config.cache_config.cache_dtype = "auto"
-    config.cache_config.block_size = 768
+    config.cache_config.block_size = block_size
     config.cache_config.enable_prefix_caching = True
     config.scheduler_config.disable_chunked_mm_input = False
     config.device_config = SimpleNamespace(device_type="cpu")
     config.attention_config = SimpleNamespace(hisparse_config=None)
-    config.parallel_config = SimpleNamespace(decode_context_parallel_size=dcp, prefill_context_parallel_size=1)
+    config.parallel_config = SimpleNamespace(
+        decode_context_parallel_size=dcp, prefill_context_parallel_size=1, cp_kv_cache_interleave_size=block_size
+    )
     config.speculative_config = SimpleNamespace(method="dspark", use_multi_module_mtp=lambda: False)
-    config.max_in_flight_tokens = 8192 if dcp == 8 else 32768
-    options = {"k31_draft_separate_pool": True}
+    config.max_in_flight_tokens = max_in_flight
     config.kv_transfer_config = SimpleNamespace(
         kv_connector="MooncakeConnectorV2", kv_connector_extra_config=options, get_from_extra_config=options.get
     )
-    specs = make_bf16_specs(768)
+    specs = make_bf16_specs(block_size)
     names = [f"model.layers.{layer}.self_attn.attn" for layer in range(93, 98)]
     specs.update(
         dict.fromkeys(
@@ -281,6 +279,19 @@ def test_bf16_dspark_split_engine_admission_and_pp_replan(dcp, budget, counts, p
         )
     )
     specs = mark_kimi_k31_gqa_draft_specs(config, specs, names)
+    return config, specs, names
+
+
+@pytest.mark.parametrize(
+    ("dcp", "budget", "counts", "per_request"),
+    [(8, 22_600_744_960, (844, 354), (37, 15)), (1, 19_263_193_088, (728, 188), (186, 47))],
+)
+def test_bf16_dspark_split_engine_admission_and_pp_replan(dcp, budget, counts, per_request):
+    if not supports_k31_draft_separate_pool():
+        pytest.skip("requires a core with independent KV pools")
+    config, specs, names = _bf16_dspark_engine_case(
+        dcp, 768, 8192 if dcp == 8 else 32768, {"k31_draft_separate_pool": True}
+    )
 
     # Second rank has fewer draft layers and no target layer. A shrink must
     # recalculate layer strides in its own layout using both agreed capacities.
@@ -307,6 +318,57 @@ def test_bf16_dspark_split_engine_admission_and_pp_replan(dcp, budget, counts, p
     config.cache_config.num_gpu_blocks_override = max(per_request)
     with pytest.raises(ValueError, match="KV cache"):
         get_kv_cache_configs(config, [specs], [budget])
+
+
+@pytest.mark.parametrize("requested", [None, False, True])
+@pytest.mark.parametrize(
+    "dcp,block_size,batch,budget",
+    [
+        (8, 896, 512, int(20.99 * 2**30)),
+        (1, 896, 16384, int(17.95 * 2**30)),
+        (1, 768, 16384, int(17.95 * 2**30)),
+    ],
+)
+def test_legacy_shared_pool_engine_plan(monkeypatch, dcp, block_size, batch, budget, requested):
+    from vllm.v1.core import kv_cache_utils
+
+    # In current-core CI emulate a partially upgraded planner. Also run this
+    # test against the original v0.30 schema, which rejects even None kwargs.
+    monkeypatch.delattr(kv_cache_utils, "SUPPORTS_INDEPENDENT_KV_BLOCK_POOLS", raising=False)
+    options = {} if requested is None else {"k31_draft_separate_pool": requested}
+    config, specs, names = _bf16_dspark_engine_case(dcp, block_size, 2 * batch, options)
+    plans = get_kv_cache_configs(config, [specs] * 8, [budget] * 8)
+    scheduler = generate_scheduler_kv_cache_config(plans)
+    patch_kv_cache_utils._update_engine_kv_cache_capacity(config, scheduler)
+    for plan in plans:
+        assert getattr(plan, "block_pool_ids", None) is None
+        spec = plan.kv_cache_groups[-1].kv_cache_spec
+        assert not spec.separate_block_pool and spec.can_overlay_indexer
+        indexer = plan.kv_cache_tensors[-len(names) - 1]
+        assert plan.kv_cache_tensors[-len(names)].offset == indexer.offset
+        page = 24 * block_size * (576 + 128) * 2
+        assert plan.num_blocks == budget // page
+        assert {tensor.size for tensor in plan.kv_cache_tensors} == {plan.num_blocks * page}
+    assert config.cache_config.kv_cache_max_concurrency >= 1
+
+
+def test_shared_plan_uses_original_kv_cache_config_constructor(monkeypatch):
+    from vllm_ascend.models.kimi_k3 import paired_sfa_cache
+
+    constructor = paired_sfa_cache.KVCacheConfig
+
+    def legacy_config(*, num_blocks, kv_cache_tensors, kv_cache_groups, prefix_cache_retention_interval):
+        return constructor(
+            num_blocks=num_blocks,
+            kv_cache_tensors=kv_cache_tensors,
+            kv_cache_groups=kv_cache_groups,
+            prefix_cache_retention_interval=prefix_cache_retention_interval,
+        )
+
+    monkeypatch.setattr(paired_sfa_cache, "KVCacheConfig", legacy_config)
+    config, specs, _ = _bf16_dspark_engine_case(8, 896, 1024, {})
+    (plan,) = get_kv_cache_configs(config, [specs], [int(20.99 * 2**30)])
+    assert plan.num_blocks == 744
 
 
 @pytest.mark.parametrize("local_sparse_layers", [0, 1, 3, 4])

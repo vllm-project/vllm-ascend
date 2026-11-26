@@ -122,6 +122,31 @@ def _validate_paired_sfa_pages(specs) -> None:
         raise ValueError("Paired SFA recurrent pages must match the main MLA page size.")
 
 
+def supports_k31_draft_separate_pool() -> bool:
+    """Check the installed core before selecting a layout with overlapping numeric IDs."""
+    fields = KVCacheConfig.__dataclass_fields__
+    if not all(name in fields and fields[name].init for name in ("block_pool_ids", "num_blocks_per_group")):
+        return False
+
+    from vllm.v1.core import kv_cache_utils
+    from vllm.v1.core.kv_cache_coordinator import KVCacheCoordinator
+    from vllm.v1.core.kv_cache_manager import KVCacheManager
+    from vllm.v1.core.sched.output import SchedulerOutput
+    from vllm.v1.core.sched.scheduler import Scheduler
+
+    return (
+        getattr(kv_cache_utils, "SUPPORTS_INDEPENDENT_KV_BLOCK_POOLS", False)
+        and {"new_block_ids_to_zero_by_pool", "kv_cache_block_copies_by_pool"}
+        <= SchedulerOutput.__dataclass_fields__.keys()
+        and hasattr(KVCacheConfig, "pool_id_for_group")
+        and hasattr(KVCacheConfig, "num_blocks_for_group")
+        and hasattr(KVCacheCoordinator, "get_num_blocks_to_allocate_by_pool")
+        and hasattr(KVCacheManager, "get_pool_block_counts")
+        and hasattr(Scheduler, "_take_kv_cache_operations")
+        and hasattr(Scheduler, "_skip_zeroing_for_remote_load")
+    )
+
+
 def paired_sfa_cache_groups(config, specs):
     specs = {
         name: replace(spec, is_paired_sfa=True) if isinstance(spec, AscendSFAIndexerCacheSpec) else spec
@@ -153,6 +178,12 @@ def paired_sfa_cache_groups(config, specs):
             raise ValueError("k31_draft_separate_pool must be a boolean")
         if separate_pool and not (use_indexer_slots and config.use_v2_model_runner):
             raise ValueError("Separate K3.1 draft pages require BF16, the V2 runner and the Mooncake pull connector")
+        if separate_pool and not supports_k31_draft_separate_pool():
+            logger.warning_once(
+                "K3.1 k31_draft_separate_pool requested=true, effective=false. "
+                "The installed vLLM core lacks independent KV pool support. Using the shared target/draft pool."
+            )
+            separate_pool = False
         for spec, names in by_spec.items():
             spec = replace(spec, separate_block_pool=separate_pool)
             if isinstance(spec, AscendGQADraftSlidingWindowSpec):
@@ -369,13 +400,20 @@ def paired_sfa_cache_config(
                 block_stride=page_bytes,
             )
         )
+    pool_kwargs = (
+        {
+            "block_pool_ids": pool_ids,
+            "num_blocks_per_group": tuple(draft_blocks if pid else num_blocks for pid in pool_ids),
+        }
+        if split
+        else {}
+    )
     return KVCacheConfig(
         num_blocks=num_blocks,
         kv_cache_tensors=tensors,
         kv_cache_groups=kv_cache_groups,
         prefix_cache_retention_interval=vllm_config.cache_config.prefix_cache_retention_interval,
-        block_pool_ids=pool_ids if split else None,
-        num_blocks_per_group=tuple(draft_blocks if pid else num_blocks for pid in pool_ids) if split else None,
+        **pool_kwargs,
     )
 
 

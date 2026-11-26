@@ -252,15 +252,23 @@ def test_replay_installs_forward_context_before_accessing_extra_ctx(monkeypatch)
     assert proxy.active is False
 
 
-@pytest.mark.parametrize("query_count", [7, 8])
-def test_dispatcher_pads_uniform_draft_descriptors(query_count):
+@pytest.mark.parametrize(
+    "query_count,max_reqs,buckets,expected_mode",
+    [
+        (7, 16, list(range(16, 129, 16)), CUDAGraphMode.FULL),
+        (8, 16, list(range(16, 129, 16)), CUDAGraphMode.FULL),
+        (3, 32, [128], CUDAGraphMode.NONE),
+        (4, 32, [128], CUDAGraphMode.FULL),
+    ],
+)
+def test_dispatcher_pads_uniform_draft_descriptors(query_count, max_reqs, buckets, expected_mode):
     manager = DFlashCudaGraphManager.__new__(DFlashCudaGraphManager)
     manager.compilation_config = SimpleNamespace(
-        cudagraph_capture_sizes=[16, 32, 48, 64, 80, 96, 112, 128],
+        cudagraph_capture_sizes=buckets,
         max_cudagraph_capture_size=128,
     )
     manager.vllm_config = SimpleNamespace(speculative_config=None)
-    manager.max_num_reqs = 16
+    manager.max_num_reqs = max_reqs
     manager.decode_query_len = query_count
     manager.cudagraph_mode = CUDAGraphMode.FULL_DECODE_ONLY
     manager.varlen_decode = False
@@ -273,9 +281,10 @@ def test_dispatcher_pads_uniform_draft_descriptors(query_count):
     manager.ubatch_runner = None
     manager._init_candidates()
 
-    for num_reqs in (1, 2, 3, 4, 8, 16):
+    for num_reqs in (1, 2, 3, 4, 8, max_reqs):
         desc = manager.dispatch(num_reqs, num_reqs * query_count, query_count, 0)
-        assert desc.cg_mode == CUDAGraphMode.FULL
+        assert desc.cg_mode == expected_mode
         assert desc.num_reqs >= num_reqs
         assert desc.num_tokens == desc.num_reqs * query_count
-        assert desc.uniform_token_count == query_count
+        if expected_mode == CUDAGraphMode.FULL:
+            assert desc.uniform_token_count == query_count

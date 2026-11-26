@@ -455,6 +455,11 @@ class NPUModelRunner(GPUModelRunner):
         if not getattr(self, "_pool_cache_views", None):
             return super().update_requests(scheduler_output)
 
+        if not hasattr(scheduler_output, "new_block_ids_to_zero_by_pool") or not hasattr(
+            scheduler_output, "kv_cache_block_copies_by_pool"
+        ):
+            raise ValueError("Kimi K3.1 split-pool worker requires a pool-aware SchedulerOutput")
+
         # The base method updates block tables and zeros pool 0. Its legacy
         # copy routine walks every cache, including those owned by other pools.
         copies = scheduler_output.kv_cache_block_copies
@@ -473,6 +478,13 @@ class NPUModelRunner(GPUModelRunner):
         kv_cache_config: KVCacheConfig,
         kv_cache_allocation_context: AbstractContextManager | None = None,
     ) -> None:
+        if getattr(kv_cache_config, "block_pool_ids", None):
+            from vllm.v1.worker.gpu import warmup
+
+            if not getattr(warmup, "SUPPORTS_INDEPENDENT_KV_BLOCK_POOLS", False) or not getattr(
+                vllm_model_runner.GPUModelRunner, "supports_independent_kv_block_pools", False
+            ):
+                raise ValueError("Kimi K3.1 split-pool plan requires a pool-aware vLLM worker and warmup on every rank")
         # Reinitialization can change the active attention backends.
         self._skip_spec_cpu_length_sync = False
         # Match V1's physical buffer plan without mutating the scheduler's

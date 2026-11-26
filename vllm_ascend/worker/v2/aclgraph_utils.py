@@ -182,7 +182,9 @@ class ModelAclGraphManager(ModelCudaGraphManager):
                 # draft projection then reads all columns as one dense matrix.
                 rows, width = first.shape
                 return list(first.new_empty((rows, width * len(states))).split(width, dim=1))
-        return super()._allocate_aux_hidden_states(states)
+        # Stock v0.30 allocates these buffers inline in capture(). Its
+        # manager has no allocation hook to delegate to.
+        return [torch.empty_like(state) for state in states]
 
     def run_fullgraph(self, desc: BatchExecutionDescriptor) -> torch.Tensor | tuple[torch.Tensor, list[torch.Tensor]]:
         """Override run_fullgraph to update full graph params in run_fullgraph."""

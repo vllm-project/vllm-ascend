@@ -10,6 +10,8 @@ import pytest
 import torch
 from vllm.model_executor.model_loader.utils import get_model_cls
 from vllm.model_executor.models import ModelRegistry
+from vllm.v1.worker.gpu.cudagraph_utils import ModelCudaGraphManager
+from vllm.v1.worker.gpu.spec_decode.dflash.speculator import DFlashSpeculator
 from vllm.v1.worker.gpu.spec_decode.dspark.speculator import DSparkSpeculator
 
 from vllm_ascend.models import register_model
@@ -26,7 +28,12 @@ _HIDDEN = 8
 
 
 @pytest.mark.parametrize("layout", ["packed", "independent", "gapped", "reversed", "other-model"])
-def test_aux_projection_reads_dense_columns_in_original_order(layout):
+@pytest.mark.parametrize("stock_hooks", [False, True])
+def test_aux_projection_reads_dense_columns_in_original_order(layout, stock_hooks, monkeypatch):
+    if stock_hooks:
+        # Stock v0.30 performs both fallback operations inline.
+        monkeypatch.delattr(ModelCudaGraphManager, "_allocate_aux_hidden_states", raising=False)
+        monkeypatch.delattr(DFlashSpeculator, "_combine_aux_hidden_states", raising=False)
     config = SimpleNamespace(
         model_config=SimpleNamespace(
             hf_config=SimpleNamespace(model_type="kimi_k31" if layout != "other-model" else "other")
