@@ -256,14 +256,14 @@ features:
           - '{"method":"dflash","model":"z-lab/Kimi-K2.5-DFlash","num_speculative_tokens":15}'
 
 # Native external DP replaces the tutorial's launch_online_dp.py process launcher.
-# This preset is opt-in and restricted to the documented A3 W4A8 checkpoint.
+# This preset is restricted to the documented A3 W4A8 checkpoint.
 presets:
   ascend_pd:
     label: A3 W4A8 PD (native DP)
     hardware: ascend_910c
     strategy: pd_cluster
     variants: [w4a8_ascend]
-    default: false
+    default: true
     description: >-
       Tutorial-derived 1P1D TP8/DP2 baseline plus internal-DP and distributed-pool
       adaptations. Command generation is checked; native DP on Kimi-K2.6 has
