@@ -29,7 +29,7 @@ on:
   workflow_dispatch:
     inputs:
       docker_ref:
-        description: 'Branch to build (main or releases/*).'
+        description: 'Branch to build (main or releases/*). Ignored when pr_number is set, where the PR base branch is used.'
         default: "main"
         required: false
         type: choice
@@ -47,11 +47,25 @@ on:
           - 'releases/v0.21.0rc'
           - 'releases/v0.20.2rc'
           - 'releases/v0.18.0'
+      pr_number:
+        description: 'Build a pull request instead of a branch. The PR base branch supplies the tag; when set, this is a verification build and nothing is published.'
+        required: false
+        default: ''
+        type: string
+      pr_ref_mode:
+        description: 'Which PR ref to build: merge = the PR merged into its base branch (recommended); head = the PR head commit only.'
+        required: false
+        default: 'merge'
+        type: choice
+        options:
+          - merge
+          - head
 
 permissions:
   actions: read
   packages: write
   contents: read
+  pull-requests: read
 
 jobs:
   setup-matrix:
@@ -59,7 +73,26 @@ jobs:
     if: ${{ github.event_name != 'pull_request' || github.event.label.name == 'image-build' }}
     outputs:
       build_meta: ${{ steps.matrix.outputs.build_meta }}
+      pr_source_ref: ${{ steps.resolve_pr.outputs.source_ref }}
+      pr_base_ref: ${{ steps.resolve_pr.outputs.base_ref }}
     steps:
+      # Needed only to run resolve_pr_ref.sh; always check out the ref this
+      # workflow file came from, never the PR under review.
+      - uses: actions/checkout@v7
+        if: ${{ inputs.pr_number != '' }}
+        with:
+          fetch-depth: 1
+
+      - name: Resolve PR ref
+        id: resolve_pr
+        if: ${{ inputs.pr_number != '' }}
+        env:
+          PR_NUMBER: ${{ inputs.pr_number }}
+          PR_REF_MODE: ${{ inputs.pr_ref_mode }}
+          GH_REPO: ${{ github.repository }}
+          GH_TOKEN: ${{ github.token }}
+        run: bash .github/workflows/scripts/resolve_pr_ref.sh
+
       - name: Build image matrix
         id: matrix
         run: |
@@ -89,8 +122,12 @@ jobs:
       dockerfile: ${{ matrix.build_meta.dockerfile }}
       suffix: ${{ matrix.build_meta.suffix }}
       soc: ${{ matrix.build_meta.soc }}
-      should_push: ${{ github.repository == 'vllm-project/vllm-ascend' && github.event_name != 'pull_request' }}
-      branch_ref: ${{ inputs.docker_ref }}
+      # A PR-number dispatch is a verification build of pre-merge code: it may
+      # not publish to the standard nightly/release tags, so should_push stays
+      # off even on the upstream repository.
+      should_push: ${{ github.repository == 'vllm-project/vllm-ascend' && github.event_name != 'pull_request' && (github.event_name != 'workflow_dispatch' || inputs.pr_number == '') }}
+      branch_ref: ${{ needs.setup-matrix.outputs.pr_base_ref || inputs.docker_ref }}
+      source_ref: ${{ needs.setup-matrix.outputs.pr_source_ref }}
       schedule_tag_pattern: 'main'
     secrets:
       SWR_USERNAME: ${{ secrets.SWR_USERNAME }}
@@ -104,7 +141,7 @@ jobs:
       contents: read
     # Check the reports even if a matrix leg failed or was skipped. The
     # collector fails until every image expected from this run is published.
-    if: ${{ always() && needs.setup-matrix.result == 'success' && github.repository == 'vllm-project/vllm-ascend' && github.event_name != 'pull_request' }}
+    if: ${{ always() && needs.setup-matrix.result == 'success' && github.repository == 'vllm-project/vllm-ascend' && github.event_name != 'pull_request' && (github.event_name != 'workflow_dispatch' || inputs.pr_number == '') }}
     uses: ./.github/workflows/_collect_build_info.yaml
     with:
       branch: ${{ github.event_name == 'workflow_dispatch' && inputs.docker_ref || github.ref_name }}

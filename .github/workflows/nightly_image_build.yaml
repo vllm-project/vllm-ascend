@@ -52,55 +52,106 @@ on:
           - releases/v0.21.0rc
           - releases/v0.20.2rc
           - releases/v0.18.0
+      pr_number:
+        description: 'Build a pull request instead of a branch. The PR base branch supplies the base image and tag; when set, this is a verification build and nothing is published.'
+        required: false
+        default: ''
+        type: string
+      pr_ref_mode:
+        description: 'Which PR ref to build: merge = the PR merged into its base branch (recommended); head = the PR head commit only.'
+        required: false
+        default: 'merge'
+        type: choice
+        options:
+          - merge
+          - head
+
+permissions:
+  actions: read
+  packages: write
+  contents: read
+  pull-requests: read
 
 jobs:
+  resolve-pr:
+    name: Resolve PR ref
+    runs-on: linux-amd64-cpu-1-hk
+    outputs:
+      source_ref: ${{ steps.resolve_pr.outputs.source_ref }}
+      base_ref: ${{ steps.resolve_pr.outputs.base_ref }}
+    steps:
+      # Needed only to run resolve_pr_ref.sh; always check out the ref this
+      # workflow file came from, never the PR under review.
+      - uses: actions/checkout@v7
+        if: ${{ inputs.pr_number != '' }}
+        with:
+          fetch-depth: 1
+
+      - name: Resolve PR ref
+        id: resolve_pr
+        if: ${{ inputs.pr_number != '' }}
+        env:
+          PR_NUMBER: ${{ inputs.pr_number }}
+          PR_REF_MODE: ${{ inputs.pr_ref_mode }}
+          GH_REPO: ${{ github.repository }}
+          GH_TOKEN: ${{ github.token }}
+        run: bash .github/workflows/scripts/resolve_pr_ref.sh
+
   build-a2:
+    needs: resolve-pr
     if: ${{ github.event_name != 'pull_request' || github.event.label.name == 'nightly-image-build' }}
     uses: ./.github/workflows/_nightly_image_build.yaml
     with:
       target: a2
-      vllm_ascend_branch: ${{ github.event.pull_request.head.sha || inputs.vllm_ascend_branch || 'main' }}
-      base_image_branch: ${{ github.event.pull_request.base.ref || inputs.vllm_ascend_branch || 'main' }}
-      should_push: ${{ github.repository == 'vllm-project/vllm-ascend' && github.event_name != 'pull_request' }}
+      vllm_ascend_branch: ${{ needs.resolve-pr.outputs.base_ref || github.event.pull_request.head.sha || inputs.vllm_ascend_branch || 'main' }}
+      base_image_branch: ${{ needs.resolve-pr.outputs.base_ref || github.event.pull_request.base.ref || inputs.vllm_ascend_branch || 'main' }}
+      source_ref: ${{ needs.resolve-pr.outputs.source_ref }}
+      should_push: ${{ github.repository == 'vllm-project/vllm-ascend' && github.event_name != 'pull_request' && (github.event_name != 'workflow_dispatch' || inputs.pr_number == '') }}
       soc: '910b'
     secrets:
       SWR_USERNAME: ${{ secrets.SWR_USERNAME }}
       SWR_PASSWORD: ${{ secrets.SWR_PASSWORD }}
 
   build-a3:
+    needs: resolve-pr
     if: ${{ github.event_name != 'pull_request' || github.event.label.name == 'nightly-image-build' }}
     uses: ./.github/workflows/_nightly_image_build.yaml
     with:
       target: a3
-      vllm_ascend_branch: ${{ github.event.pull_request.head.sha || inputs.vllm_ascend_branch || 'main' }}
-      base_image_branch: ${{ github.event.pull_request.base.ref || inputs.vllm_ascend_branch || 'main' }}
-      should_push: ${{ github.repository == 'vllm-project/vllm-ascend' && github.event_name != 'pull_request' }}
+      vllm_ascend_branch: ${{ needs.resolve-pr.outputs.base_ref || github.event.pull_request.head.sha || inputs.vllm_ascend_branch || 'main' }}
+      base_image_branch: ${{ needs.resolve-pr.outputs.base_ref || github.event.pull_request.base.ref || inputs.vllm_ascend_branch || 'main' }}
+      source_ref: ${{ needs.resolve-pr.outputs.source_ref }}
+      should_push: ${{ github.repository == 'vllm-project/vllm-ascend' && github.event_name != 'pull_request' && (github.event_name != 'workflow_dispatch' || inputs.pr_number == '') }}
       soc: 'a3'
     secrets:
       SWR_USERNAME: ${{ secrets.SWR_USERNAME }}
       SWR_PASSWORD: ${{ secrets.SWR_PASSWORD }}
 
   build-310p:
+    needs: resolve-pr
     if: ${{ github.event_name != 'pull_request' || github.event.label.name == 'nightly-image-build' }}
     uses: ./.github/workflows/_nightly_image_build.yaml
     with:
       target: 310p
-      vllm_ascend_branch: ${{ github.event.pull_request.head.sha || inputs.vllm_ascend_branch || 'main' }}
-      base_image_branch: ${{ github.event.pull_request.base.ref || inputs.vllm_ascend_branch || 'main' }}
-      should_push: ${{ github.repository == 'vllm-project/vllm-ascend' && github.event_name != 'pull_request' }}
+      vllm_ascend_branch: ${{ needs.resolve-pr.outputs.base_ref || github.event.pull_request.head.sha || inputs.vllm_ascend_branch || 'main' }}
+      base_image_branch: ${{ needs.resolve-pr.outputs.base_ref || github.event.pull_request.base.ref || inputs.vllm_ascend_branch || 'main' }}
+      source_ref: ${{ needs.resolve-pr.outputs.source_ref }}
+      should_push: ${{ github.repository == 'vllm-project/vllm-ascend' && github.event_name != 'pull_request' && (github.event_name != 'workflow_dispatch' || inputs.pr_number == '') }}
       soc: '310p'
     secrets:
       SWR_USERNAME: ${{ secrets.SWR_USERNAME }}
       SWR_PASSWORD: ${{ secrets.SWR_PASSWORD }}
 
   build-a5:
+    needs: resolve-pr
     if: ${{ github.event_name != 'pull_request' || github.event.label.name == 'nightly-image-build' }}
     uses: ./.github/workflows/_nightly_image_build.yaml
     with:
       target: a5
-      vllm_ascend_branch: ${{ github.event.pull_request.head.sha || inputs.vllm_ascend_branch || 'main' }}
-      base_image_branch: ${{ github.event.pull_request.base.ref || inputs.vllm_ascend_branch || 'main' }}
-      should_push: ${{ github.repository == 'vllm-project/vllm-ascend' && github.event_name != 'pull_request' }}
+      vllm_ascend_branch: ${{ needs.resolve-pr.outputs.base_ref || github.event.pull_request.head.sha || inputs.vllm_ascend_branch || 'main' }}
+      base_image_branch: ${{ needs.resolve-pr.outputs.base_ref || github.event.pull_request.base.ref || inputs.vllm_ascend_branch || 'main' }}
+      source_ref: ${{ needs.resolve-pr.outputs.source_ref }}
+      should_push: ${{ github.repository == 'vllm-project/vllm-ascend' && github.event_name != 'pull_request' && (github.event_name != 'workflow_dispatch' || inputs.pr_number == '') }}
       soc: '950'
     secrets:
       SWR_USERNAME: ${{ secrets.SWR_USERNAME }}

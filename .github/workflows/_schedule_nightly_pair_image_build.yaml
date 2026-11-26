@@ -47,7 +47,12 @@ on:
       suffix:
         required: true
         type: string
-        description: "Base image tag suffix (e.g. '', 'a3', 'openeuler', 'a3-openeuler')"
+        description: "Base image tag suffix (e.g. '', 'a3', 'openeuler', 'a3-openeuler'). PR builds append their own -pr<N> suffix."
+      tag_suffix:
+        required: false
+        type: string
+        default: ''
+        description: "Extra suffix for the nightly image tag and its base-image FROM reference (e.g. '-pr123'). Must match the suffix appended to the base image by the caller, otherwise the nightly image pulls the wrong base."
       vllm_ascend_branch:
         required: false
         type: string
@@ -134,6 +139,7 @@ jobs:
       soc: ${{ inputs.soc }}
       isolated_build: ${{ inputs.isolated_build }}
       source_ref: ${{ inputs.source_ref }}
+      tag_suffix: ${{ inputs.tag_suffix }}
     secrets:
       SWR_USERNAME: ${{ secrets.SWR_USERNAME }}
       SWR_PASSWORD: ${{ secrets.SWR_PASSWORD }}

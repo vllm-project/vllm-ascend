@@ -71,11 +71,25 @@ on:
         required: false
         default: ''
         type: string
+      pr_number:
+        description: "Build a pull request instead of a branch. The PR is merged into its base branch (or checked out as head when pr_ref_mode=head) and both image layers are built from it. PR builds are published only to the isolated '-presmoke' repositories with a per-PR tag suffix, so they never overwrite the standard nightly artifacts. Takes precedence over source_ref and vllm_ascend_branch."
+        required: false
+        default: ''
+        type: string
+      pr_ref_mode:
+        description: "Which PR ref to build: merge = the PR merged into its base branch (recommended); head = the PR head commit only."
+        required: false
+        default: 'merge'
+        type: choice
+        options:
+          - merge
+          - head
 
 permissions:
   actions: read
   packages: write
   contents: read
+  pull-requests: read
 
 jobs:
   setup-matrix:
@@ -83,7 +97,34 @@ jobs:
     outputs:
       matrix: ${{ steps.matrix.outputs.matrix }}
       has_matrix: ${{ steps.matrix.outputs.has_matrix }}
+      pr_source_ref: ${{ steps.resolve_pr.outputs.source_ref }}
+      pr_base_ref: ${{ steps.resolve_pr.outputs.base_ref }}
     steps:
+      # Needed only to run resolve_pr_ref.sh; always check out the ref this
+      # workflow file came from, never the PR under review.
+      - uses: actions/checkout@v7
+        if: ${{ inputs.pr_number != '' }}
+        with:
+          fetch-depth: 1
+
+      - name: Resolve PR ref
+        id: resolve_pr
+        if: ${{ inputs.pr_number != '' }}
+        env:
+          PR_NUMBER: ${{ inputs.pr_number }}
+          PR_REF_MODE: ${{ inputs.pr_ref_mode }}
+          GH_REPO: ${{ github.repository }}
+          GH_TOKEN: ${{ github.token }}
+        run: bash .github/workflows/scripts/resolve_pr_ref.sh
+
+      - name: Validate PR build options
+        if: ${{ inputs.pr_number != '' }}
+        run: |
+          if [ "${{ inputs.skip_base }}" = "true" ]; then
+            echo "::error::skip_base cannot be combined with pr_number: the base image carries a per-PR tag and must be built in the same run"
+            exit 1
+          fi
+
       - name: Filter build matrix by chips
         id: matrix
         run: |
@@ -120,13 +161,20 @@ jobs:
       os: ${{ matrix.os }}
       soc: ${{ matrix.soc }}
       dockerfile: ${{ matrix.dockerfile }}
-      suffix: ${{ matrix.suffix }}
-      vllm_ascend_branch: ${{ inputs.vllm_ascend_branch || 'main' }}
-      base_image_branch: ${{ inputs.vllm_ascend_branch || 'main' }}
-      source_ref: ${{ inputs.source_ref }}
+      # A PR build appends a per-PR suffix so its images never overwrite a
+      # concurrent PR build or the standard nightly tags. The suffix input has
+      # no leading '-' (it joins '-a3' + '-pr7' into 'a3-pr7'), while
+      # tag_suffix is used verbatim after the Dockerfile OS mark ('-pr7').
+      suffix: ${{ matrix.suffix }}${{ inputs.pr_number != '' && matrix.suffix != '' && format('-pr{0}', inputs.pr_number) || inputs.pr_number != '' && format('pr{0}', inputs.pr_number) || '' }}
+      tag_suffix: ${{ inputs.pr_number != '' && format('-pr{0}', inputs.pr_number) || '' }}
+      vllm_ascend_branch: ${{ needs.setup-matrix.outputs.pr_base_ref || inputs.vllm_ascend_branch || 'main' }}
+      base_image_branch: ${{ needs.setup-matrix.outputs.pr_base_ref || inputs.vllm_ascend_branch || 'main' }}
+      source_ref: ${{ needs.setup-matrix.outputs.pr_source_ref || inputs.source_ref }}
       # The standard nightly pipeline builds both architectures for every OS,
       # keeping the fixed runner mapping (and therefore the build cache).
-      isolated_build: ${{ inputs.isolated_build }}
+      # PR builds reuse the isolated repositories so they cannot touch the
+      # standard nightly images (see the per-PR suffix above for tag isolation).
+      isolated_build: ${{ inputs.isolated_build || inputs.pr_number != '' }}
       should_push: ${{ github.repository == 'vllm-project/vllm-ascend' }}
       skip_base: ${{ inputs.skip_base || false }}
       swr_registry: 'swr.cn-north-12.myhuaweicloud.com'
@@ -144,7 +192,7 @@ jobs:
     # missing nightly reports still make the collector fail.
     # Isolated builds (published to the '-presmoke' repositories) are not part of
     # the standard nightly artifacts and must not be collected.
-    if: ${{ always() && needs.setup-matrix.result == 'success' && needs.setup-matrix.outputs.has_matrix == 'true' && github.repository == 'vllm-project/vllm-ascend' && !inputs.isolated_build }}
+    if: ${{ always() && needs.setup-matrix.result == 'success' && needs.setup-matrix.outputs.has_matrix == 'true' && github.repository == 'vllm-project/vllm-ascend' && !inputs.isolated_build && inputs.pr_number == '' }}
     uses: ./.github/workflows/_collect_build_info.yaml
     with:
       branch: ${{ inputs.vllm_ascend_branch }}

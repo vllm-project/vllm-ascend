@@ -41,6 +41,32 @@ The comment itself triggers the workflow — no label is required.
     [CODEOWNERS](https://github.com/vllm-project/vllm-ascend/blob/main/.github/CODEOWNERS)
     file.
 
+### Build an image for a pull request
+
+Besides building a branch, the image-build dispatch workflows accept a pull request
+number, so a PR whose merge is delayed can still be built and inspected in isolation:
+
+| Workflow | Purpose |
+|----------|---------|
+| `Image Build and Push` | Runtime (base) image only. With `pr_number` set it is a verification build and publishes nothing. |
+| `Nightly Image Build (with base)` | Full chain (runtime + nightly test image). PR builds publish only to the isolated `*-presmoke` repositories with a `-pr<N>` tag suffix. |
+| `Nightly Image Build Schedule` | Nightly test image only, on top of the standard base image of the PR base branch. Verification only. |
+
+Fill in `pr_number` and optionally `pr_ref_mode`:
+
+- `merge` (default) builds `refs/pull/<n>/merge`, i.e. the PR already merged into its
+  base branch. If the PR has conflicts the run fails with an explicit error.
+- `head` builds only the PR head commit, for a PR that cannot be merged yet.
+
+The PR base branch decides the tag and the base image, so a PR targeting `main` is
+built as `main`. PR builds never overwrite the standard nightly tags and are excluded
+from build-info collection.
+
+!!! note
+
+    The dispatch entry is restricted to users with write access, which is what makes
+    it safe to build pre-merge code on the self-hosted runners.
+
 ### Maintenance window
 
 Maintainers can pause PR-triggered commands during a maintenance window by setting
