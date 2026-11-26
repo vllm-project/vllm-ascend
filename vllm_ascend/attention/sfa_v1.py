@@ -407,6 +407,10 @@ class AscendSFABackend(AttentionBackend):
     uses_contiguous_cache_components: ClassVar[bool] = True
 
     @staticmethod
+    def wrap_kv_cache_views(components: list[torch.Tensor]) -> tuple[torch.Tensor, ...]:
+        return tuple(components)
+
+    @staticmethod
     def get_runtime_shapes(
         spec: AscendMLAAttentionSpec,
         num_blocks: int,

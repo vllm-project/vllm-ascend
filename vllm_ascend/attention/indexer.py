@@ -2,7 +2,7 @@ from collections.abc import Callable, Hashable
 from contextlib import contextmanager
 from dataclasses import dataclass, fields, replace
 from importlib.util import find_spec
-from typing import Any
+from typing import Any, ClassVar
 
 import numpy as np
 import scipy.linalg  # type: ignore
@@ -304,6 +304,13 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
     """
 
     accept_output_buffer: bool = True
+    # Keep K and scale as contiguous component planes within each layer slice so
+    # A3/A5 indexer ops and all symmetric/asymmetric PD connectors share one layout.
+    uses_contiguous_cache_components: ClassVar[bool] = True
+
+    @staticmethod
+    def wrap_kv_cache_views(components: list[torch.Tensor]) -> tuple[torch.Tensor, ...]:
+        return tuple(components)
 
     @staticmethod
     def get_runtime_shapes(
@@ -1067,17 +1074,12 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
             )
         elif fuse_store:
             assert k_li_scale is not None
-            key_cache = self.k_cache.kv_cache[INDEXER_K_CACHE_SLOT]
-            scale_cache = self.k_cache.kv_cache[INDEXER_SCALE_CACHE_SLOT]
             store_indexer_key_scale(
                 k_li,
                 k_li_scale,
                 slot_mapping,
-                key_cache,
-                scale_cache,
-                block_size=key_cache.shape[1],
-                key_block_stride=key_cache.stride(0),
-                scale_block_stride=scale_cache.stride(0),
+                self.k_cache.kv_cache[INDEXER_K_CACHE_SLOT],
+                self.k_cache.kv_cache[INDEXER_SCALE_CACHE_SLOT],
             )
         else:
             self.write_cache(k_li, k_li_scale, slot_mapping, indexer_metadata.cache_scatter_indices)

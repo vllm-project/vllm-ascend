@@ -58,7 +58,6 @@ from vllm.v1.kv_cache_interface import (
     UniformTypeKVCacheSpecs,
     compute_layer_kv_cache_shape_bytes,
 )
-from vllm.v1.worker.gpu.attn_utils import get_shared_kv_cache_layers
 from vllm.v1.worker.gpu.model_states.interface import ModelSpecificAttnMetadata
 from vllm.v1.worker.utils import AttentionGroup, customize_attention_spec, select_common_block_size
 
@@ -70,9 +69,8 @@ from vllm_ascend.attention.attention_c8_mxfp import (
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.dsa_attn_kv_plan import get_dsa_attn_kv_plan
 from vllm_ascend.attention.dsa_v1 import AscendDSAMetadataBuilder
-from vllm_ascend.attention.dsa_v41 import AscendDSAV41MetadataBuilder, DeepseekV41CacheBackend
-from vllm_ascend.attention.indexer import AscendSFAIndexerBackend
-from vllm_ascend.attention.sfa_v1 import AscendSFABackend, AscendSFAMetadataBuilder
+from vllm_ascend.attention.dsa_v41 import AscendDSAV41MetadataBuilder
+from vllm_ascend.attention.sfa_v1 import AscendSFAMetadataBuilder
 from vllm_ascend.attention.utils import (
     AscendCommonAttentionMetadata,
     requires_contiguous_pa_kv_cache,
@@ -1531,15 +1529,26 @@ def create_kv_cache_runtime_views(
                     dtypes,
                     descriptor.block_stride // pages_per_block,
                 )
-            if issubclass(group.backend, DeepseekV41CacheBackend):
-                caches[name] = components[0] if len(components) == 1 else tuple(components)
-            elif issubclass(group.backend, (AscendSFABackend, AscendSFAIndexerBackend)):
-                caches[name] = tuple(components)
-            else:
-                caches[name] = components
+            wrap_views = getattr(group.backend, "wrap_kv_cache_views", None)
+            caches[name] = wrap_views(components) if wrap_views is not None else components
     for name, target in shared_layers.items():
         caches[name] = caches[target]
     return caches
+
+
+def _resolve_cache_attention_groups(
+    vllm_config: VllmConfig,
+    kv_cache_config: KVCacheConfig,
+    kernel_block_sizes: Sequence[int],
+) -> tuple[dict[str, AttentionLayerBase], dict[str, str], list[AttentionGroup]]:
+    attn_layers = get_layers_from_vllm_config(vllm_config, AttentionLayerBase)
+    shared_layers = {
+        layer_name: target_layer
+        for layer_name, layer in attn_layers.items()
+        if (target_layer := getattr(layer, "kv_sharing_target_layer_name", None))
+    }
+    attn_groups = _get_cache_attention_groups(kv_cache_config, attn_layers, shared_layers, kernel_block_sizes)
+    return attn_layers, shared_layers, attn_groups
 
 
 def unified_allocate_kv_cache(
@@ -1562,12 +1571,11 @@ def unified_allocate_kv_cache(
     if len(sizes) != 1:
         raise ValueError("Unified KV cache descriptors must share one backing allocation.")
     if attn_groups is None or shared_layers is None:
-        vllm_config = get_current_vllm_config()
-        attn_layers = get_layers_from_vllm_config(vllm_config, AttentionLayerBase)
-        if shared_layers is None:
-            shared_layers = get_shared_kv_cache_layers(vllm_config)
-        if attn_groups is None:
-            attn_groups = _get_cache_attention_groups(kv_cache_config, attn_layers, shared_layers)
+        _, resolved_shared, resolved_groups = _resolve_cache_attention_groups(
+            get_current_vllm_config(), kv_cache_config, kernel_block_sizes
+        )
+        shared_layers = resolved_shared if shared_layers is None else shared_layers
+        attn_groups = resolved_groups if attn_groups is None else attn_groups
     backing_size = sizes.pop()
 
     # Preserve the existing 2 MiB base-address alignment for KV transfer.
@@ -1588,12 +1596,10 @@ def _uses_specialized_kv_allocator(
     kv_cache_config: KVCacheConfig,
     attn_groups: Sequence[AttentionGroup],
 ) -> bool:
-    """KVPP, layerwise reuse, and host offload own dedicated buffer layouts."""
+    """KVPP, layerwise reuse, and sparse KV offload own dedicated buffer layouts."""
     return (
-        (bool(getattr(vllm_config, "additional_config", None)) and KVPPConfig.from_vllm_config(vllm_config).size > 1)
+        KVPPConfig.from_vllm_config(vllm_config).size > 1
         or get_layerwise_reuse_layout(kv_cache_config) is not None
-        or bool(getattr(kv_cache_config, "host_group_ids", ()))
-        or any(getattr(d, "host_resident", False) for d in kv_cache_config.kv_cache_tensors)
         or any(getattr(g.kv_cache_spec, "store_on_host", False) for g in attn_groups)
     )
 
@@ -1605,9 +1611,7 @@ def _can_use_glm_unified_kv_cache(
     kernel_block_sizes: Sequence[int],
 ) -> bool:
     """Gate GLM's unified-pool path while legacy specialized modes remain active."""
-    if len({d.size for d in kv_cache_config.kv_cache_tensors}) != 1 or _uses_specialized_kv_allocator(
-        vllm_config, kv_cache_config, attn_groups
-    ):
+    if _uses_specialized_kv_allocator(vllm_config, kv_cache_config, attn_groups):
         return False
     strides = {name: d.block_stride for d in kv_cache_config.kv_cache_tensors for name in d.layers}
     return all(
@@ -1642,13 +1646,9 @@ def allocate_kv_cache_main(
     if model_type in ("deepseek_v4", "deepseek_v41", "deepseek_v41_text"):
         return unified_allocate_kv_cache(kv_cache_config, device, layout, kernel_block_sizes)
 
-    attn_layers = get_layers_from_vllm_config(vllm_config, AttentionLayerBase)
-    shared_layers = {
-        layer_name: target_layer
-        for layer_name, layer in attn_layers.items()
-        if (target_layer := getattr(layer, "kv_sharing_target_layer_name", None))
-    }
-    attn_groups = _get_cache_attention_groups(kv_cache_config, attn_layers, shared_layers, kernel_block_sizes)
+    attn_layers, shared_layers, attn_groups = _resolve_cache_attention_groups(
+        vllm_config, kv_cache_config, kernel_block_sizes
+    )
 
     if model_type == "glm_moe_dsa" and _can_use_glm_unified_kv_cache(
         vllm_config, kv_cache_config, attn_groups, kernel_block_sizes

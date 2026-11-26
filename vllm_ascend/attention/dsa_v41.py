@@ -1889,6 +1889,12 @@ class DeepseekV41CacheBackend(AttentionBackend):
         """Expose NHD data/scale pages, including packed A5 byte widths."""
         return AscendDSABackend.get_runtime_shapes(spec, num_blocks, layout, kernel_block_size)
 
+    @staticmethod
+    def wrap_kv_cache_views(
+        components: list[torch.Tensor],
+    ) -> torch.Tensor | tuple[torch.Tensor, ...]:
+        return components[0] if len(components) == 1 else tuple(components)
+
 
 class _DeepseekV41RoleBackend(DeepseekV41CacheBackend):
     metadata_role = ""

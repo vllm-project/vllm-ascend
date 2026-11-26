@@ -214,9 +214,9 @@ def test_glm52_53_unified_pool_supports_all_sfa_and_indexer_formats(
     for idx_name in ("model.layers.0.self_attn.indexer.k_cache", "model.layers.1.self_attn.indexer.k_cache"):
         idx_parts = caches[idx_name]
         assert isinstance(idx_parts, tuple)
+        assert all(part.is_contiguous() for part in idx_parts)
         if scale_dim == 0:
             (key_view,) = idx_parts
-            assert key_view.is_contiguous()
             assert key_view.shape == (3, 4, 1, idx_width)
         else:
             key_view, scale_view = idx_parts
@@ -224,14 +224,7 @@ def test_glm52_53_unified_pool_supports_all_sfa_and_indexer_formats(
             expected_scale_shape = (3, 4, 1, scale_dim // 2, 2) if li_c4 else (3, 4, 1, scale_dim)
             assert scale_view.shape == expected_scale_shape
             assert scale_view.dtype == scale_dtype
-            assert not key_view.is_contiguous()
-            assert not scale_view.is_contiguous()
-            assert scale_view.data_ptr() - key_view.data_ptr() == key_view[0].nbytes
-            assert (
-                key_view.stride(0) * key_view.element_size()
-                == scale_view.stride(0) * scale_view.element_size()
-                == indexer_spec.page_size_bytes
-            )
+            assert scale_view.data_ptr() == key_view.data_ptr() + key_view.nbytes
 
     # Byte-oracle write isolation across every layer and component.
     snapshot = raw.clone()
@@ -249,7 +242,7 @@ def test_glm52_53_unified_pool_supports_all_sfa_and_indexer_formats(
             raw.copy_(snapshot)
 
 
-def test_split_main_and_strided_indexer_exact_byte_oracle():
+def test_split_main_and_contiguous_indexer_exact_byte_oracle():
     runtime = _make_glm_runtime()
     main = AscendMLAAttentionSpec(
         block_size=4,
@@ -273,7 +266,7 @@ def test_split_main_and_strided_indexer_exact_byte_oracle():
         num_blocks=3,
         kv_cache_tensors=[
             KVCacheTensor(size=1024, layers=["main.0"], offset=32, layer_stride=288, block_stride=96),
-            KVCacheTensor(size=1024, layers=["indexer.0"], offset=352, layer_stride=120, block_stride=160),
+            KVCacheTensor(size=1024, layers=["indexer.0"], offset=352, layer_stride=120, block_stride=40),
         ],
         kv_cache_groups=[
             KVCacheGroupSpec(layer_names=["main.0"], kv_cache_spec=main),
@@ -287,8 +280,7 @@ def test_split_main_and_strided_indexer_exact_byte_oracle():
     # Main layer slice [32 : 320]: NoPE [32 : 224] (3*4*8*2 = 192B), RoPE [224 : 320] (3*4*4*2 = 96B).
     nope[2, 1].fill_(2.0)
     rope[1, 3].fill_(-1.0)
-    # Indexer slice starts at 352 with block_stride=160; block 1 starts at 512,
-    # token 2 key at 528..536, scale at 548..550.
+    # Indexer slice [352 : 472]: K plane [352 : 448] (3*4*8*1 = 96B), scale plane [448 : 472] (3*4*1*2 = 24B).
     key[1, 2].fill_(7)
     scale[1, 2].fill_(0.5)
 
@@ -297,8 +289,10 @@ def test_split_main_and_strided_indexer_exact_byte_oracle():
     expected[nope_start : nope_start + 16] = torch.full((8,), 2.0, dtype=torch.float16).view(torch.int8)
     rope_start = 224 + (1 * 4 + 3) * 4 * 2
     expected[rope_start : rope_start + 8] = torch.full((4,), -1.0, dtype=torch.float16).view(torch.int8)
-    expected[528:536] = 7
-    expected[548:550] = torch.tensor([0.5], dtype=torch.float16).view(torch.int8)
+    key_start = 352 + (1 * 4 + 2) * 8
+    expected[key_start : key_start + 8] = 7
+    scale_start = 448 + (1 * 4 + 2) * 2
+    expected[scale_start : scale_start + 2] = torch.tensor([0.5], dtype=torch.float16).view(torch.int8)
     assert torch.equal(raw, expected)
 
 
@@ -336,8 +330,8 @@ def test_kernel_block_splitting_and_replicated_indexer_pages(replicas):
     expected_pages = 3 * 2 * replicas
     assert key.shape == (expected_pages, 128, 1, 128)
     assert scale.shape == (expected_pages, 128, 1, 1)
-    assert key.stride(0) * key.element_size() == indexer.page_size_bytes // (2 * replicas)
-    assert scale.stride(0) * scale.element_size() == indexer.page_size_bytes // (2 * replicas)
+    assert key.is_contiguous() and scale.is_contiguous()
+    assert scale.data_ptr() == key.data_ptr() + key.nbytes
 
 
 @pytest.mark.parametrize(
@@ -393,10 +387,22 @@ def test_specialized_or_incompatible_layouts_route_to_legacy_allocator(monkeypat
     legacy.assert_called_once()
 
 
-def test_deepseek_retains_fail_fast_unified_contract(monkeypatch):
-    """DeepSeek V4/V4.1 must never silently fall back to legacy allocation on invalid descriptors."""
-    runtime = _make_glm_runtime(model_type="deepseek_v41")
-    spec = AscendMLAAttentionSpec(block_size=4, num_kv_heads=1, head_size=8, dtype=torch.float16)
+@pytest.mark.parametrize("model_type", ["deepseek_v41", "glm_moe_dsa"])
+def test_unified_models_fail_fast_on_mismatched_descriptor_sizes(monkeypatch, model_type):
+    """Unified models must never silently fall back to legacy allocation on invalid descriptors."""
+    runtime = _make_glm_runtime(model_type=model_type)
+    spec = AscendMLAAttentionSpec(
+        block_size=4,
+        num_kv_heads=1,
+        head_size=8,
+        dtype=torch.float16,
+        kv_lora_rank=4,
+        qk_rope_head_dim=4,
+    )
+    layers = {
+        name: SimpleNamespace(get_attn_backend=lambda: AscendSFABackend, num_heads=1) for name in ("l0", "l1")
+    }
+    runtime.compilation_config = SimpleNamespace(static_forward_context=layers)
     bad_config = KVCacheConfig(
         num_blocks=2,
         kv_cache_tensors=[
@@ -406,6 +412,7 @@ def test_deepseek_retains_fail_fast_unified_contract(monkeypatch):
         kv_cache_groups=[KVCacheGroupSpec(layer_names=["l0", "l1"], kv_cache_spec=spec)],
     )
     monkeypatch.setattr(attn_utils, "get_current_vllm_config", lambda: runtime)
+    monkeypatch.setattr(attn_utils, "get_layers_from_vllm_config", lambda *_: layers)
     monkeypatch.setattr(attn_utils, "_allocate_kv_cache", MagicMock(side_effect=AssertionError("unexpected fallback")))
     with pytest.raises(ValueError, match="share one backing allocation"):
         attn_utils.allocate_kv_cache_main(bad_config, torch.device("cpu"), None, [4])
@@ -487,7 +494,8 @@ def test_mooncake_exports_per_component_addresses_for_glm(connector, monkeypatch
 
 
 @pytest.mark.parametrize("li_c4", [False, True], ids=["li_c8", "li_c4"])
-def test_mooncake_pull_indexer_from_separate_kvpp_components_into_packed_pages(monkeypatch, li_c4):
+@pytest.mark.parametrize("decode_blocks", [1, 3], ids=["single_block_decode", "multi_block_decode"])
+def test_mooncake_asymmetric_kvpp_prefill_to_unified_decode(monkeypatch, li_c4, decode_blocks):
     from tests.ut.kv_offload.mooncake_v2.helpers import make_pp_metadata
     from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake import base_worker
     from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.pull_worker import MooncakePullRecvingThread
@@ -503,15 +511,20 @@ def test_mooncake_pull_indexer_from_separate_kvpp_components_into_packed_pages(m
         cache_sparse_li_c8=not li_c4,
         cache_sparse_li_c4=li_c4,
     )
-    config = _build_glm_plan(runtime, {"indexer.0": spec}, num_blocks=3)
-    raw, caches = _allocate_unified(config, runtime)
-    decode = _register_mooncake_worker(config, caches, monkeypatch)
+    decode_config = _build_glm_plan(runtime, {"indexer.0": spec}, num_blocks=decode_blocks)
+    raw, caches = _allocate_unified(decode_config, runtime)
+    decode = _register_mooncake_worker(decode_config, caches, monkeypatch)
     key, scale = caches["indexer.0"]
-    prefill_key = torch.full(key.shape, 7, dtype=key.dtype)
-    prefill_scale = torch.arange(scale.numel(), dtype=torch.uint8).reshape(scale.shape).view(scale.dtype)
-    monkeypatch.setattr(base_worker, "map_kvpp_layers_to_owners", lambda *_: {"indexer.0": 0})
-    prefill = _register_mooncake_worker(config, {"indexer.0": (prefill_key, prefill_scale)}, monkeypatch, kvpp_size=2)
 
+    prefill_config = _build_glm_plan(runtime, {"indexer.0": spec}, num_blocks=3)
+    prefill_key = torch.full((3, *key.shape[1:]), 7, dtype=key.dtype)
+    prefill_scale = torch.arange(3 * scale[0].numel(), dtype=torch.uint8).reshape(3, *scale.shape[1:]).view(scale.dtype)
+    monkeypatch.setattr(base_worker, "map_kvpp_layers_to_owners", lambda *_: {"indexer.0": 0})
+    prefill = _register_mooncake_worker(
+        prefill_config, {"indexer.0": (prefill_key, prefill_scale)}, monkeypatch, kvpp_size=2
+    )
+
+    dst_block = decode_blocks - 1
     thread = MooncakePullRecvingThread.__new__(MooncakePullRecvingThread)
     thread.kv_cache_specs = [spec]
     thread.layer_names = decode.layer_names
@@ -527,13 +540,46 @@ def test_mooncake_pull_indexer_from_separate_kvpp_components_into_packed_pages(m
     remote_addrs: list[int] = []
     lengths: list[int] = []
     thread._append_spec_transfer_addresses(
-        0, 0, 0, 1, 1, 1, {(0, 0): [("request", [2], [1])]}, remote, local_addrs, remote_addrs, lengths
+        0, 0, 0, 1, 1, 1, {(0, 0): [("request", [dst_block], [1])]}, remote, local_addrs, remote_addrs, lengths
     )
-    assert local_addrs == [key[2].data_ptr(), scale[2].data_ptr()]
+    assert local_addrs == [key[dst_block].data_ptr(), scale[dst_block].data_ptr()]
     assert remote_addrs == [prefill_key[1].data_ptr(), prefill_scale[1].data_ptr()]
-    assert lengths == [key[2].nbytes, scale[2].nbytes]
+    assert lengths == [key[dst_block].nbytes, scale[dst_block].nbytes]
     for local, source, length in zip(local_addrs, remote_addrs, lengths, strict=True):
         ctypes.memmove(local, source, length)
-    assert torch.equal(key[2], prefill_key[1])
-    assert torch.equal(scale[2].view(torch.uint8), prefill_scale[1].view(torch.uint8))
-    assert torch.all(raw[: 2 * spec.page_size_bytes] == 33)
+    assert torch.equal(key[dst_block], prefill_key[1])
+    assert torch.equal(scale[dst_block].view(torch.uint8), prefill_scale[1].view(torch.uint8))
+    if dst_block > 0:
+        assert torch.all(key[:dst_block] == 33)
+        assert torch.all(scale[:dst_block].view(torch.uint8) == 33)
+
+
+def test_ascend_store_asymmetric_kvpp_prefill_matches_unified_decode_segments():
+    from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker import KVPoolConnectorWorker
+
+    runtime = _make_glm_runtime(connector="AscendStoreConnector")
+    indexer = AscendSFAIndexerCacheSpec(
+        block_size=8,
+        num_kv_heads=1,
+        head_size=8,
+        dtype=torch.int8,
+        scale_dim=1,
+        scale_dtype=torch.float16,
+        cache_sparse_li_c8=True,
+        sfa_dcp_replicated_indexer_size=4,
+    )
+    config = _build_glm_plan(runtime, {"indexer.0": indexer}, num_blocks=3)
+    _, decode_caches = _allocate_unified(config, runtime, kernel_block_sizes=[4])
+    decode_key, decode_scale = decode_caches["indexer.0"]
+
+    # KVPP prefill allocates separate contiguous component buffers.
+    prefill_key = torch.empty_like(decode_key)
+    prefill_scale = torch.empty_like(decode_scale)
+
+    worker = KVPoolConnectorWorker.__new__(KVPoolConnectorWorker)
+    worker.num_blocks = 3
+    for prefill_part, decode_part in ((prefill_key, decode_key), (prefill_scale, decode_scale)):
+        prefill_segments = worker._get_cache_transfer_segments(prefill_part)
+        decode_segments = worker._get_cache_transfer_segments(decode_part)
+        assert len(prefill_segments) == len(decode_segments) == 1
+        assert prefill_segments[0][1:] == decode_segments[0][1:]
