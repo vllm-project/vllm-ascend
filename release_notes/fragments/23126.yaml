@@ -1,7 +1,0 @@
-pr: 23126
-entries:
-  - category: bugfix
-    text: >-
-      Fixed an unsupported HCCL data type error during prefill when using
-      prefill context parallelism with `--attention_config.indexer_kv_dtype mxfp4`
-      on Ascend A5, including configurations with `--kv-cache-dtype fp8`.
