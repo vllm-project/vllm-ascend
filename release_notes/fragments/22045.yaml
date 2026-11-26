@@ -1,0 +1,11 @@
+pr: 22045
+entries:
+  - category: feature
+    text: >-
+      Added experimental RecoverSSM for Qwen GDN hybrid models using MTP,
+      DSpark, or DFlash on Ascend Model Runner V2.
+      Enable it with `--use-replayssm` (off by default) on supported Ascend
+      devices other than 310P, with BF16 activations and PP, PCP, and DCP set to 1.
+      Prefix caching uses Mamba cache mode `align`, including on both peers
+      in Mooncake prefill/decode deployments.
+    hardware: [A3, A5]

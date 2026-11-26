@@ -292,6 +292,7 @@ nav:
     - Configuration:
         - user_guide/configuration/index.md
         - user_guide/configuration/device_selection.md
+        - user_guide/configuration/unified_output_directory.md
         - user_guide/configuration/env_vars.md
         - user_guide/configuration/additional_config.md
         - user_guide/configuration/runtime_config.md
@@ -382,6 +383,7 @@ nav:
     - community/contributors.md
     - community/issue-workflow-guidelines.md
     - community/slash-commands.md
+    - community/ai-review.md
     - community/versioning_policy.md
     - User Stories:
         - community/user_stories/index.md

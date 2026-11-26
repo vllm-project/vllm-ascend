@@ -22,7 +22,6 @@ def a5_hardware(monkeypatch):
 
 def make_configs():
     vc = SimpleNamespace(
-        use_v2_model_runner=True,
         model_config=SimpleNamespace(
             model="/models/target",
             enforce_eager=True,

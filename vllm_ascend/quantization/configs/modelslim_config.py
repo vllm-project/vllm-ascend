@@ -47,6 +47,7 @@ from vllm_ascend.utils import (
     ASCEND_QUANTIZATION_METHOD,
     C8_MXFP_KV_CACHE_DTYPE,
     calc_split_factor,
+    is_hif8_c8_kv_quant,
 )
 
 from ..methods import get_scheme_class
@@ -75,6 +76,7 @@ _MXFP_C8_UNUSED_FA_SUFFIXES = (
     ".fa_q.offset",
     ".fa_k.offset",
 )
+_HIF8_C8_LAYER_QUANT_TYPE = "QK_HIF8_PER_TENSOR"
 
 
 def _map_modelslim_moe_weight_name(weight_name: str) -> str:
@@ -599,7 +601,7 @@ class AscendModelSlimConfig(QuantizationConfig):
     def get_cache_scale_mapper(self) -> "WeightsMapper":
         """Upstream use staticmethod, but we need to use instance attribute"""
         suffix_map: dict[str, str | None] = {}
-        regex_map = {}
+        regex_map: dict[re.Pattern[str], str | None] = {}
         if self._has_mxfp_c8_recipe and not self.enable_mxfp_c8_quant:
             logger.warning_once(
                 "[quantization] The checkpoint carries an MXFP8 KV recipe, but "
@@ -633,7 +635,22 @@ class AscendModelSlimConfig(QuantizationConfig):
             # The remaining FAKQuant legacy tensors have no MXFP8 consumer.
             suffix_map[".fa_v.offset"] = None
             suffix_map.update(dict.fromkeys(_MXFP_C8_UNUSED_FA_SUFFIXES, None))
-        if self.enable_fa_quant:
+        if self.hif8_quant_layers:
+            # The HIF8 recipe's symmetric per-tensor fa scales only have a
+            # consumer (the HIF8 scheme) when hif8 is the selected cache
+            # dtype. Under hif8, keep fa_q/fa_k.scale for the scheme and drop
+            # the FAKQuant leftovers the export does not carry anyway
+            # (offsets, fa_v.scale); under any other dtype the full-attention
+            # layers stay unquantized, so the whole fa_* family is dropped.
+            hif8_layer_ids = "|".join(sorted(str(i) for i in self.hif8_quant_layers))
+            fa_drop = r"[qkv]\.offset|v\.scale" if self.enable_hif8_c8_quant else r"[qkv]\.(?:scale|offset)"
+            regex_map[
+                re.compile(
+                    rf"\.layers\.(?:{hif8_layer_ids})\.(?:mtp_block\.)?self_attn"
+                    rf"(?:\.mla_attn\.mla_attn)?\.fa_(?:{fa_drop})$"
+                )
+            ] = None
+        if self.enable_fa_quant or self.hif8_quant_layers:
             # Some models (e.g., Kimi-K2.6) have a nested module and call AutoWeightsLoader twice, to avoid double
             # mapping, we use regex mapping.
             regex_map.update(
@@ -884,19 +901,16 @@ class AscendModelSlimConfig(QuantizationConfig):
             if self.is_fa_quant_layer(prefix):
                 fa_quant_type = self.quant_description["fa_quant_type"]
                 scheme = create_scheme_for_layer(fa_quant_type, prefix, "attention")
-                logger.debug("Select AscendKVCacheMethod for %s (layer=%s)", prefix, "AttentionLayerBase[fa]")
             elif self.is_indexer_quant_layer(prefix):
                 # This is a support for revert quantization layers from int8 to float.
                 quant_type = self.quant_description.get(f"{prefix}.indexer.quant_type")
                 if quant_type is None:
                     quant_type = self.quant_description["indexer_quant_type"]
                 scheme = create_scheme_for_layer(quant_type, prefix, "attention")
-                logger.debug("Select AscendKVCacheMethod for %s (layer=%s)", prefix, "AttentionLayerBase[indexer]")
             elif self.is_c8_quant_layer(prefix):
                 from ..methods.kv_cache.kv_c8 import AscendC8KVCacheAttentionMethod
 
                 scheme = AscendC8KVCacheAttentionMethod(self.quant_description, prefix)
-                logger.debug("Select AscendKVCacheMethod(C8) for %s (layer=%s)", prefix, "AttentionLayerBase[C8]")
             elif self.enable_mxfp_c8_quant and self._is_full_attention_layer(layer):
                 if self._has_mxfp_c8_recipe is False:
                     logger.warning_once(
@@ -908,12 +922,12 @@ class AscendModelSlimConfig(QuantizationConfig):
                 from ..methods.kv_cache.mxfp_c8 import AscendC8MXFPKVCacheAttentionMethod
 
                 scheme = AscendC8MXFPKVCacheAttentionMethod(self.quant_description, prefix)
-                logger.debug(
-                    "Select AscendKVCacheMethod(C8-MXFP) for %s (layer=%s)", prefix, "AttentionLayerBase[C8-MXFP]"
-                )
+            elif self.is_hif8_quant_layer(runtime_prefix):
+                scheme = create_scheme_for_layer(_HIF8_C8_LAYER_QUANT_TYPE, prefix, "attention")
             else:
                 # Unquantized attention layer
                 return None
+            logger.debug("Select AscendKVCacheMethod for %s (layer=%s)", prefix, type(scheme).__name__)
             return AscendKVCacheMethod(scheme)
 
         elif is_fused_moe_layer(layer):
@@ -944,6 +958,13 @@ class AscendModelSlimConfig(QuantizationConfig):
         if self.enable_fa_quant:
             layer_id_str = "".join(re.findall(r"\.(\d+)\.", prefix))
             if layer_id_str.isdigit() and int(layer_id_str) in self.kvcache_quant_layers:
+                return True
+        return False
+
+    def is_hif8_quant_layer(self, prefix) -> bool:
+        if self.enable_hif8_c8_quant:
+            layer_id_str = "".join(re.findall(r"\.(\d+)\.", prefix))
+            if layer_id_str.isdigit() and int(layer_id_str) in self.hif8_quant_layers:
                 return True
         return False
 
@@ -1228,7 +1249,14 @@ class AscendModelSlimConfig(QuantizationConfig):
         kv_quant_type = self.quant_description.get("kv_cache_type", "")
         self.enable_c8_quant = kv_quant_type == "C8"
         self.c8_quant_layers = []
-        if self.enable_fa_quant or self.enable_indexer_quant or self.enable_c8_quant:
+        # Construction can happen outside a set_current_vllm_config context
+        # is_hif8_c8_kv_quant tolerates the None config, and the validation
+        # below only runs once the dtype has actually selected hif8.
+        vllm_config = get_current_vllm_config_or_none()
+        self.enable_hif8_c8_quant = is_hif8_c8_kv_quant(vllm_config)
+        self.hif8_quant_layers = []
+
+        if self.enable_fa_quant or self.enable_indexer_quant or self.enable_c8_quant or self.enable_hif8_c8_quant:
             for key in self.quant_description:
                 _id = "".join(re.findall(r"\.(\d+)\.", key))
                 if "fa_k.scale" in key:
@@ -1237,3 +1265,18 @@ class AscendModelSlimConfig(QuantizationConfig):
                     self.indexer_quant_layers.append(int(_id))
                 if "k_proj.kv_cache_scale" in key:
                     self.c8_quant_layers.append(int(_id))
+                if key.endswith(".quant_type") and self.quant_description[key] == _HIF8_C8_LAYER_QUANT_TYPE:
+                    self.hif8_quant_layers.append(int(_id))
+
+        if self.enable_hif8_c8_quant and self.quant_description:
+            from ..methods.kv_cache.hif8_c8 import validate_sparse_sfa_hif8
+
+            validate_sparse_sfa_hif8(vllm_config, self.hif8_quant_layers)
+        # TODO: enable_fa_quant is currently tied to MLA C8. Refactor later so that
+        #  C8 quantization is determined uniformly from `quant_type`.
+        if self.hif8_quant_layers and self.enable_fa_quant:
+            logger.info_once(
+                "[quantization] fa_quant_type=%s is declared alongside HIF8 layer recipes; ignoring FAKQuant.",
+                fa_quant_type,
+            )
+            self.enable_fa_quant = False

@@ -16,11 +16,11 @@ The server runs alongside normal inference tasks via sub-threads and via `statel
 
 ### Flowchart
 
-![netloader flowchart](./images/netloader_flowchart.png)
+![Netloader weight-loading flow: server preloads the model, client validates model and partition match, then receives weights via HCCL](./images/netloader_flowchart.png)
 
 ### Timing Diagram
 
-![netloader timing diagram](./images/netloader_timing_diagram.png)
+![Netloader timing: client connects and requests weights, then weights stream over HCCL before inference starts](./images/netloader_timing_diagram.png)
 
 ### Application Scenarios
 
@@ -58,7 +58,7 @@ VLLM_SLEEP_WHEN_IDLE=1 vllm serve <model_file> \
   --tensor-parallel-size 1 \
   --served-model-name <model_name> \
   --enforce-eager \
-  --port `<port>` \
+  --port <port> \
   --load-format netloader
 ```
 
@@ -93,6 +93,6 @@ After startup, you can test consistency by issuing inference requests with tempe
 ## Note & Caveats
 
 - If Netloader is used, **each worker process** must bind a listening port. That port may be user-specified or assigned randomly. If user-specified, ensure it is available.
-- Netloader requires extra on-chip memory to establish HCCL connections (i.e. `HCCL_BUFFERSIZE`, default ~200 MB). Users should reserve sufficient capacity (e.g. via `--gpu-memory-utilization`).
+- Netloader requires extra on-chip memory to establish HCCL connections (i.e. `HCCL_BUFFSIZE`, default ~200 MB). Users should reserve sufficient capacity (e.g. via `--gpu-memory-utilization`).
 - It is recommended to set `VLLM_SLEEP_WHEN_IDLE=1` to mitigate unstable or slow connections/transmissions. Related info: [vLLM Issue #16660](https://github.com/vllm-project/vllm/issues/16660), [vLLM PR #16226](https://github.com/vllm-project/vllm/pull/16226).
-- Tested models: DeepSeek-V3.1-w8a8-mtp, Deepseekv4-flash-w8a8-mtp, DeepSeek-V4-Pro-w4a8, GLM-5.1-w4a8, GLM-5.1-w8a8.
+- Tested models: DeepSeek-V3.1-w8a8-mtp, Deepseek-V4-Flash-w8a8-mtp, DeepSeek-V4-Pro-w4a8, GLM-5.1-w4a8, GLM-5.1-w8a8.
