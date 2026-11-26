@@ -785,16 +785,10 @@ and concurrency. See the [upstream adaptive verification guide](https://docs.vll
 
 ### RecoverSSM on Qwen3.x {: #recoverssm-compatibility }
 
-<span id="experimental-qwen-gdn-recoverssm"></span>On A3 and A5, enable
-experimental recurrent-state reconstruction for Qwen3.x Gated DeltaNet (GDN)
-models with `--use-replayssm`. Use MTP, DSpark, or DFlash with PP=PCP=DCP=1,
-BF16 activations and convolution state, and BF16 or FP32 SSM state.
-Disable stochastic rounding.
-
-Use Mamba cache mode `align` with prefix caching and `none` without it.
-In `align` mode, use a Mamba block size of at least `K + 1`.
-
-This example runs on four NPUs with prefix caching disabled.
+<span id="experimental-qwen-gdn-recoverssm"></span>RecoverSSM reconstructs
+recurrent states during speculative decoding for Qwen3.x Gated DeltaNet (GDN)
+models. This substantially reduces NPU memory use and can slightly speed up
+Mamba layers in compute-bound workloads.
 
 **Offline inference**
 
@@ -835,8 +829,3 @@ vllm serve Qwen/Qwen3.6-35B-A3B \
   --enforce-eager \
   --speculative-config '{"method":"mtp","num_speculative_tokens":4}'
 ```
-
-For P/D, enable RecoverSSM on both roles and match the speculative window,
-state dtypes, convolution layout, and prefix-caching settings. Use
-`MooncakePullConnector` or `MooncakeConnectorV2` in pull mode
-(`use_layerwise=false`).
