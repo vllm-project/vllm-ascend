@@ -10,7 +10,7 @@ no longer needs a monkey patch for these decisions.
 """
 
 from collections import defaultdict
-from dataclasses import replace
+from dataclasses import fields, replace
 
 from vllm.config import VllmConfig
 from vllm.utils.math_utils import cdiv, round_up
@@ -124,7 +124,27 @@ class AscendKVCacheConfigBuilder(DefaultKVCacheConfigBuilder):
         if kimi_k3_groups is not None:
             return kimi_k3_groups
 
-        return super().get_kv_cache_groups(vllm_config, kv_cache_spec)
+        groups = super().get_kv_cache_groups(vllm_config, kv_cache_spec)
+        if vllm_config.attention_config.hisparse_config is None:
+            return groups
+        transfer_config = vllm_config.kv_transfer_config
+        if transfer_config is None or not transfer_config.has_connector("AscendStoreConnector"):
+            return groups
+
+        from vllm.v1.kv_cache_interface import HiSparseResidentSpec
+
+        from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.hisparse.admission import (
+            AscendStoreHiSparseResidentSpec,
+        )
+
+        for i, group in enumerate(groups):
+            spec = group.kv_cache_spec
+            if isinstance(spec, HiSparseResidentSpec):
+                resident_spec = AscendStoreHiSparseResidentSpec(
+                    **{field.name: getattr(spec, field.name) for field in fields(spec) if field.init}
+                )
+                groups[i] = replace(group, kv_cache_spec=resident_spec)
+        return groups
 
     def get_kv_cache_config_from_groups(
         self,

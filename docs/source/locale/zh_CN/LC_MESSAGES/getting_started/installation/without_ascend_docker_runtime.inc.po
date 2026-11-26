@@ -1,0 +1,92 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2026, vllm-ascend team
+# This file is distributed under the same license as the vllm-ascend package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+msgid ""
+msgstr ""
+"Project-Id-Version: vllm-ascend\n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-11-25 08:12+0000\n"
+"PO-Revision-Date: 2026-11-25 08:12+0000\n"
+"Last-Translator: \n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Language: zh_CN\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"Generated-By: detect_po_changes.py\n"
+
+msgid ""
+"These are the `docker run` commands the tutorials used before Ascend Docker "
+"Runtime, kept for hosts that cannot install it or choose not to. The runtime"
+" reads `ASCEND_VISIBLE_DEVICES` and binds the NPU nodes and driver paths at "
+"container start; these commands pass the same nodes with `--device` and the "
+"same paths with `-v`, so they also start on a host without the runtime."
+msgstr ""
+"以下是教程在 Ascend Docker Runtime 之前使用的 `docker run` "
+"命令，保留给无法安装该运行时或选择不安装的主机。该运行时会读取 `ASCEND_VISIBLE_DEVICES`，并在容器启动时绑定 NPU "
+"节点和驱动路径；而这些命令则通过 `--device` 传入相同的节点、通过 `-v` 传入相同的路径，因此它们也能在没有该运行时的主机上启动。"
+
+msgid ""
+"For example, [Quick Start](quick_start.md#quick-start-installation) starts "
+"its container with one device: `/dev/davinci0`, or `/dev/davinci0` and "
+"`/dev/davinci1` on Atlas A3, where an NPU is two DIE devices. The tabs below"
+" do the same, and add one `--device /dev/davinciN` line for each further "
+"device."
+msgstr ""
+"例如，[快速开始](quick_start.md#quick-start-installation) "
+"启动容器时使用一个设备：`/dev/davinci0`；在 Atlas A3 上则是 `/dev/davinci0` 和 "
+"`/dev/davinci1`，因为在那里一个 NPU 由两个 DIE 设备组成。下面的标签页做了同样的事情，并为每个额外的设备增加一行 "
+"`--device /dev/davinciN`。"
+
+msgid ""
+"Everything else stays as the tutorial you are adapting writes it: the weight"
+" and cache mounts, the ports, the HCCL and network settings, and any extra "
+"devices."
+msgstr "其余部分保持你所改编的教程中的写法不变：权重与缓存挂载、端口、HCCL 与网络设置，以及任何额外的设备。"
+
+msgid "=== \"Atlas A2 inference products\""
+msgstr "=== \"Atlas A2 推理产品\""
+
+msgid "=== \"Atlas A3 inference products\""
+msgstr "=== \"Atlas A3 推理产品\""
+
+msgid "=== \"950DT products\""
+msgstr "=== \"Ascend 950DT系列产品\""
+
+msgid ""
+"The UB device nodes `/dev/ummu` and `/dev/uburma` are not part of the driver"
+" library set, so pass them explicitly as well."
+msgstr "UB 设备节点 `/dev/ummu` 和 `/dev/uburma` 不属于驱动库集合的一部分，因此也需要显式传入。"
+
+msgid "=== \"Atlas 300I Duo\""
+msgstr "=== \"Atlas 300I Duo\""
+
+msgid "=== \"Atlas 200I Pro\""
+msgstr "=== \"Atlas 200I Pro\""
+
+msgid ""
+"Atlas 200I Pro needs the device nodes and host files below. Make sure the "
+"container user can access the mapped devices."
+msgstr "Atlas 200I Pro 需要下面这些设备节点和主机文件。请确保容器用户能够访问映射的设备。"
+
+msgid ""
+"On an openEuler host, use the `-310p-openeuler` image, mount `-v "
+"/usr/lib64/libsemanage.so.2:/usr/lib64/libsemanage.so.2`, and replace the "
+"`libyaml` source with `-v "
+"/usr/lib64/libyaml-0.so.2.0.9:/usr/lib64/libyaml-0.so.2`."
+msgstr ""
+"在 openEuler 主机上，请使用 `-310p-openeuler` 镜像，挂载 `-v "
+"/usr/lib64/libsemanage.so.2:/usr/lib64/libsemanage.so.2`，并将 `libyaml` 的源替换为 "
+"`-v /usr/lib64/libyaml-0.so.2.0.9:/usr/lib64/libyaml-0.so.2`。"
+
+msgid ""
+"Every `--device` line needs its node to exist on the host: `docker run` "
+"fails with `no such file or directory` when a device is missing, so drop "
+"that line rather than keeping a node the machine does not have. The same "
+"applies to the driver and host-file mounts listed above."
+msgstr ""
+"每一行 `--device` 都要求其节点在主机上存在：当某个设备缺失时，`docker run` 会以 `no such file or "
+"directory` 报错退出，因此应删除该行，而不是保留一个机器上并不存在的节点。上面列出的驱动和主机文件挂载也是如此。"

@@ -57,6 +57,7 @@ jobs:
       download_path: ${{ steps.resolve.outputs.download_path }}
       blocked: ${{ steps.block_window.outputs.blocked }}
       vllm_ref: ${{ steps.resolve.outputs.vllm_ref }}
+      dispatch_matrix: ${{ steps.dispatch_targets.outputs.matrix }}
     steps:
       - name: Install system dependencies
         run: |
@@ -537,542 +538,236 @@ jobs:
 
           python3 .github/workflows/scripts/resolve_nightly_tests.py --mode=dispatch
 
-  dispatch-presmoke:
-    name: Build presmoke images
-    needs: [authorize]
-    if: needs.authorize.outputs.is_authorized == 'true' && needs.authorize.outputs.blocked != 'true' && needs.authorize.outputs.command == 'presmoke'
-    runs-on: linux-amd64-cpu-4-hk
-    container:
-      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend/act-environments-ubuntu:act-22.04
-    outputs:
-      presmoke_run_id: ${{ steps.dispatch_presmoke.outputs.presmoke_run_id }}
-    steps:
-      - name: Install system dependencies
-        run: |
-          sudo mkdir -p -m 755 /etc/apt/keyrings
-          curl -sL https://cli.github.com/packages/githubcli-archive-keyring.gpg | sudo tee /etc/apt/keyrings/githubcli-archive-keyring.gpg > /dev/null
-          sudo chmod go+r /etc/apt/keyrings/githubcli-archive-keyring.gpg
-          echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" | sudo tee /etc/apt/sources.list.d/github-cli.list > /dev/null
-          sudo apt-get update -y
-          sudo apt-get install gh -y
-
-      - name: Dispatch presmoke image build
-        id: dispatch_presmoke
+      - name: Resolve dispatch targets
+        id: dispatch_targets
         env:
-          GH_TOKEN: ${{ secrets.PAT_TOKEN }}
+          COMMAND: ${{ steps.resolve.outputs.command }}
+          DISPATCH_A2: ${{ steps.resolve.outputs.dispatch_a2 }}
+          DISPATCH_A3: ${{ steps.resolve.outputs.dispatch_a3 }}
+          DISPATCH_A3_560T: ${{ steps.resolve.outputs.dispatch_a3_560t }}
+          DISPATCH_310P: ${{ steps.resolve.outputs.dispatch_310p }}
+          DISPATCH_A5: ${{ steps.resolve.outputs.dispatch_a5 }}
         run: |
-          REPO='${{ github.event.client_payload.github.payload.repository.full_name }}'
-          # The /presmoke command lists the chips to build directly; the resolved
-          # dispatch_<chip> outputs are the single source of truth. isolated_build
-          # makes the build full-scale (ubuntu+openEuler on amd64+arm64), keeps
-          # the images in the isolated '-presmoke' CI repositories (never
-          # atlas_inference) and skips the quay.io and cn-north-4 syncs.
-          # source_ref makes both layers build from the triggering PR head
-          # ('pre-merge'), so the code and Dockerfiles under review are the ones
-          # built.
-          CHIPS='[]'
-          for CHIP in a2 a3 310p a5; do
-            case "$CHIP" in
-              a2) SELECTED='${{ needs.authorize.outputs.dispatch_a2 }}' ;;
-              a3) SELECTED='${{ needs.authorize.outputs.dispatch_a3 }}' ;;
-              310p) SELECTED='${{ needs.authorize.outputs.dispatch_310p }}' ;;
-              a5) SELECTED='${{ needs.authorize.outputs.dispatch_a5 }}' ;;
-            esac
-            if [ "$SELECTED" = "true" ]; then
-              CHIPS=$(jq -c --arg chip "$CHIP" '. + [$chip]' <<< "$CHIPS")
-            fi
-          done
-          if [ "$CHIPS" = '[]' ]; then
-            echo "::error::No chip selected for /presmoke"
-            exit 1
+          # Compose the matrix for the dispatch job: one leg per selected
+          # target. An empty matrix would fail the job, so emit a noop leg
+          # instead; it matches the all-skip behavior of the former per-target
+          # dispatch jobs and lets post-links still report the command result.
+          INCLUDE='[]'
+          add_leg() {
+            # The value lands under the "label" matrix key, but the jq
+            # variable must not be called $label: jq 1.6 (Ubuntu 22.04)
+            # treats label as a reserved keyword and rejects keyword
+            # $variable names.
+            INCLUDE=$(jq -c --arg target "$1" --arg chip "$2" --arg workflow "$3" --arg text "$4" \
+              '. + [{"target": $target, "chip": $chip, "workflow": $workflow, "label": $text}]' <<< "$INCLUDE")
+          }
+          case "$COMMAND" in
+            presmoke)
+              # Chip gating happens inside the leg: it fails when no chip was
+              # selected (same as the former dispatch-presmoke job).
+              add_leg presmoke none schedule_nightly_image_build_with_base.yaml 'Presmoke image build'
+              ;;
+            nightly)
+              if [ "$DISPATCH_A2" = "true" ]; then add_leg a2 a2 schedule_nightly_test_a2.yaml 'Nightly-A2'; fi
+              if [ "$DISPATCH_A3" = "true" ]; then add_leg a3 a3 schedule_nightly_test_a3.yaml 'Nightly-A3'; fi
+              if [ "$DISPATCH_A3_560T" = "true" ]; then add_leg a3-560t a3_560t schedule_nightly_test_a3_560t.yaml 'Nightly-A3-560T'; fi
+              if [ "$DISPATCH_A5" = "true" ]; then add_leg a5 a5 schedule_nightly_test_a5.yaml 'Nightly-A5'; fi
+              if [ "$DISPATCH_310P" = "true" ]; then add_leg 310p 310p schedule_nightly_test_310p.yaml 'Nightly-310P'; fi
+              ;;
+            weekly)
+              if [ "$DISPATCH_A2" = "true" ]; then add_leg weekly-a2 a2 schedule_weekly_test_a2.yaml 'Weekly-A2'; fi
+              if [ "$DISPATCH_A3" = "true" ]; then add_leg weekly-a3 a3 schedule_weekly_test_a3.yaml 'Weekly-A3'; fi
+              if [ "$DISPATCH_A3_560T" = "true" ]; then add_leg weekly-a3-560t a3_560t schedule_weekly_test_a3_560t.yaml 'Weekly-A3-560T'; fi
+              if [ "$DISPATCH_310P" = "true" ]; then add_leg weekly-310p 310p schedule_weekly_test_310p.yaml 'Weekly-310P'; fi
+              ;;
+          esac
+          if [ "$INCLUDE" = "[]" ]; then
+            INCLUDE='[{"target": "none", "chip": "none", "workflow": "none", "label": "No targets"}]'
           fi
-          # Only forward source_ref when set: gh would turn an empty -f value
-          # into 'true', which is not a valid ref.
-          SOURCE_REF='${{ needs.authorize.outputs.source_ref }}'
-          SOURCE_REF_ARGS=()
-          if [ -n "$SOURCE_REF" ]; then
-            SOURCE_REF_ARGS=(-f "source_ref=$SOURCE_REF")
+          echo "matrix=$INCLUDE" >> "$GITHUB_OUTPUT"
+
+  dispatch:
+    name: Dispatch ${{ matrix.label }}
+    # One matrix job replaces the former per-target dispatch-* jobs. authorize
+    # composes the matrix so only selected targets become legs, instead of
+    # starting ten 4-core runners for every /nightly, /weekly or /presmoke
+    # command. Each leg publishes the dispatched run URL as a link artifact
+    # consumed by post-links (matrix job outputs are not reliable across legs).
+    needs: [authorize]
+    if: needs.authorize.outputs.is_authorized == 'true' && needs.authorize.outputs.blocked != 'true'
+    runs-on: linux-amd64-cpu-2-hk
+    container:
+      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend/act-environments-ubuntu:act-22.04
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      # Built by the 'resolve dispatch targets' step in authorize: one leg per
+      # selected target, or a single noop leg when nothing was selected.
+      matrix:
+        include: ${{ fromJSON(needs.authorize.outputs.dispatch_matrix) }}
+    env:
+      GH_TOKEN: ${{ secrets.PAT_TOKEN }}
+      BISECT_ARGS_JSON: ${{ needs.authorize.outputs.bisect_args_json }}
+      DOWNLOAD_PATH: ${{ needs.authorize.outputs.download_path }}
+      PROFILE_OPTIONS_JSON: ${{ needs.authorize.outputs.profile_options_json }}
+      VLLM_REF: ${{ needs.authorize.outputs.vllm_ref }}
+    steps:
+      - name: Install system dependencies
+        run: |
+          sudo mkdir -p -m 755 /etc/apt/keyrings
+          curl -sL https://cli.github.com/packages/githubcli-archive-keyring.gpg | sudo tee /etc/apt/keyrings/githubcli-archive-keyring.gpg > /dev/null
+          sudo chmod go+r /etc/apt/keyrings/githubcli-archive-keyring.gpg
+          echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" | sudo tee /etc/apt/sources.list.d/github-cli.list > /dev/null
+          sudo apt-get update -y
+          sudo apt-get install gh -y
+
+      - name: Dispatch target workflow
+        run: |
+          REPO='${{ github.event.client_payload.github.payload.repository.full_name }}'
+          TARGET='${{ matrix.target }}'
+          WORKFLOW='${{ matrix.workflow }}'
+          if [ "$TARGET" = "none" ]; then
+            echo "No dispatch target selected for this command; nothing to do."
+            exit 0
           fi
-          gh workflow run schedule_nightly_image_build_with_base.yaml \
+
+          case "$TARGET" in
+            presmoke)
+              # The /presmoke command lists the chips to build directly; the resolved
+              # dispatch_<chip> outputs are the single source of truth. isolated_build
+              # makes the build full-scale (ubuntu+openEuler on amd64+arm64), keeps
+              # the images in the isolated '-presmoke' CI repositories (never
+              # atlas_inference) and skips the quay.io and cn-north-4 syncs.
+              # source_ref makes both layers build from the triggering PR head
+              # ('pre-merge'), so the code and Dockerfiles under review are the ones
+              # built.
+              CHIPS='[]'
+              for CHIP in a2 a3 310p a5; do
+                case "$CHIP" in
+                  a2) SELECTED='${{ needs.authorize.outputs.dispatch_a2 }}' ;;
+                  a3) SELECTED='${{ needs.authorize.outputs.dispatch_a3 }}' ;;
+                  310p) SELECTED='${{ needs.authorize.outputs.dispatch_310p }}' ;;
+                  a5) SELECTED='${{ needs.authorize.outputs.dispatch_a5 }}' ;;
+                esac
+                if [ "$SELECTED" = "true" ]; then
+                  CHIPS=$(jq -c --arg chip "$CHIP" '. + [$chip]' <<< "$CHIPS")
+                fi
+              done
+              if [ "$CHIPS" = '[]' ]; then
+                echo "::error::No chip selected for /presmoke"
+                exit 1
+              fi
+              # Only forward source_ref when set: gh would turn an empty -f value
+              # into 'true', which is not a valid ref.
+              SOURCE_REF='${{ needs.authorize.outputs.source_ref }}'
+              ARGS=(-f vllm_ascend_branch='${{ needs.authorize.outputs.branch }}' -f chips="$CHIPS" -f isolated_build='true')
+              if [ -n "$SOURCE_REF" ]; then
+                ARGS+=(-f "source_ref=$SOURCE_REF")
+              fi
+              ;;
+            a2|a3|a3-560t|a5)
+              ARGS=(
+                -f test_cases='${{ needs.authorize.outputs.test_cases }}'
+                -f vllm_ascend_branch='${{ needs.authorize.outputs.branch }}'
+                -f request_id='${{ needs.authorize.outputs.pr_number }}'
+                -f skip_build_image='true'
+                -f image_repo_suffix='${{ needs.authorize.outputs.presmoke_image == 'true' && '-presmoke' || '' }}'
+                -f vllm_ascend_ref='${{ needs.authorize.outputs.vllm_ascend_ref }}'
+                -f aop_enabled='${{ needs.authorize.outputs.aop_enabled }}'
+                -f download_path="$DOWNLOAD_PATH"
+                -f profile_options_json="$PROFILE_OPTIONS_JSON"
+                -f vllm_ref="$VLLM_REF"
+                -f bisect_args_json="$BISECT_ARGS_JSON"
+              )
+              ;;
+            310p)
+              ARGS=(
+                -f test_cases='${{ needs.authorize.outputs.test_cases }}'
+                -f vllm_ascend_branch='${{ needs.authorize.outputs.branch }}'
+                -f request_id='${{ needs.authorize.outputs.pr_number }}'
+                -f download_path="$DOWNLOAD_PATH"
+                -f skip_build_image='true'
+                -f image_repo_suffix='${{ needs.authorize.outputs.presmoke_image == 'true' && '-presmoke' || '' }}'
+                -f vllm_ascend_ref='${{ needs.authorize.outputs.vllm_ascend_ref }}'
+                -f aop_enabled='${{ needs.authorize.outputs.aop_enabled }}'
+                -f profile_options_json="$PROFILE_OPTIONS_JSON"
+                -f vllm_ref="$VLLM_REF"
+              )
+              ;;
+            weekly-a2)
+              ARGS=(
+                -f test_cases='${{ needs.authorize.outputs.test_cases }}'
+                -f vllm_ascend_branch='${{ needs.authorize.outputs.branch }}'
+                -f request_id='${{ needs.authorize.outputs.pr_number }}'
+                -f skip_build_image=true
+                -f vllm_ascend_ref='${{ needs.authorize.outputs.vllm_ascend_ref }}'
+                -f aop_enabled='${{ needs.authorize.outputs.aop_enabled }}'
+                -f vllm_ref="$VLLM_REF"
+              )
+              ;;
+            weekly-a3|weekly-a3-560t|weekly-310p)
+              ARGS=(
+                -f test_cases='${{ needs.authorize.outputs.test_cases }}'
+                -f vllm_ascend_branch='${{ needs.authorize.outputs.branch }}'
+                -f request_id='${{ needs.authorize.outputs.pr_number }}'
+                -f skip_build_image=true
+                -f vllm_ascend_ref='${{ needs.authorize.outputs.vllm_ascend_ref }}'
+                -f aop_enabled='${{ needs.authorize.outputs.aop_enabled }}'
+                -f vllm_ref="$VLLM_REF"
+                -f bisect_args_json="$BISECT_ARGS_JSON"
+              )
+              ;;
+          esac
+
+          gh workflow run "$WORKFLOW" \
             --repo "$REPO" \
             --ref main \
-            -f vllm_ascend_branch='${{ needs.authorize.outputs.branch }}' \
-            "${SOURCE_REF_ARGS[@]}" \
-            -f chips="$CHIPS" \
-            -f isolated_build='true'
+            "${ARGS[@]}"
           sleep 8
-          PRESMOKE_RUN_ID=$(gh api "repos/$REPO/actions/workflows/schedule_nightly_image_build_with_base.yaml/runs?per_page=1" \
+          RUN_ID=$(gh api "repos/$REPO/actions/workflows/$WORKFLOW/runs?per_page=1" \
             --jq '.workflow_runs[0].id')
-          echo "presmoke_run_id=$PRESMOKE_RUN_ID" >> "$GITHUB_OUTPUT"
-          echo "Dispatched presmoke image build for chips=$CHIPS, branch='${{ needs.authorize.outputs.branch }}', source_ref='${{ needs.authorize.outputs.source_ref }}'"
+          mkdir -p /tmp/dispatch-link
+          echo "- ${{ matrix.label }}: [workflow run](${{ github.server_url }}/${REPO}/actions/runs/${RUN_ID})" \
+            > "/tmp/dispatch-link/link-${TARGET}.md"
+          echo "Dispatched ${{ matrix.label }} ($WORKFLOW), run_id=$RUN_ID"
 
-  dispatch-a2:
-    name: Trigger Nightly-A2
-    needs: [authorize]
-    if: needs.authorize.outputs.is_authorized == 'true' && needs.authorize.outputs.blocked != 'true' && needs.authorize.outputs.command == 'nightly' && needs.authorize.outputs.dispatch_a2 == 'true'
-    runs-on: linux-amd64-cpu-4-hk
-    container:
-      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend/act-environments-ubuntu:act-22.04
-    outputs:
-      a2_run_id: ${{ steps.dispatch_a2.outputs.a2_run_id }}
-    steps:
-      - name: Install system dependencies
-        run: |
-          sudo mkdir -p -m 755 /etc/apt/keyrings
-          curl -sL https://cli.github.com/packages/githubcli-archive-keyring.gpg | sudo tee /etc/apt/keyrings/githubcli-archive-keyring.gpg > /dev/null
-          sudo chmod go+r /etc/apt/keyrings/githubcli-archive-keyring.gpg
-          echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" | sudo tee /etc/apt/sources.list.d/github-cli.list > /dev/null
-          sudo apt-get update -y
-          sudo apt-get install gh -y
-
-      - name: Dispatch nightly-a2 workflow
-        id: dispatch_a2
-        env:
-          GH_TOKEN: ${{ secrets.PAT_TOKEN }}
-          BISECT_ARGS_JSON: ${{ needs.authorize.outputs.bisect_args_json }}
-          DOWNLOAD_PATH: ${{ needs.authorize.outputs.download_path }}
-          PROFILE_OPTIONS_JSON: ${{ needs.authorize.outputs.profile_options_json }}
-          VLLM_REF: ${{ needs.authorize.outputs.vllm_ref }}
-        run: |
-          REPO='${{ github.event.client_payload.github.payload.repository.full_name }}'
-          gh workflow run schedule_nightly_test_a2.yaml \
-            --repo "$REPO" \
-            --ref main \
-            -f test_cases='${{ needs.authorize.outputs.test_cases }}' \
-            -f vllm_ascend_branch='${{ needs.authorize.outputs.branch }}' \
-            -f request_id='${{ needs.authorize.outputs.pr_number }}' \
-            -f skip_build_image='true' \
-            -f image_repo_suffix='${{ needs.authorize.outputs.presmoke_image == 'true' && '-presmoke' || '' }}' \
-            -f vllm_ascend_ref='${{ needs.authorize.outputs.vllm_ascend_ref }}' \
-            -f aop_enabled='${{ needs.authorize.outputs.aop_enabled }}' \
-            -f download_path="$DOWNLOAD_PATH" \
-            -f profile_options_json="$PROFILE_OPTIONS_JSON" \
-            -f vllm_ref="$VLLM_REF" \
-            -f bisect_args_json="$BISECT_ARGS_JSON"
-          sleep 8
-          A2_RUN_ID=$(gh api "repos/$REPO/actions/workflows/schedule_nightly_test_a2.yaml/runs?per_page=1" \
-            --jq '.workflow_runs[0].id')
-          echo "a2_run_id=$A2_RUN_ID" >> "$GITHUB_OUTPUT"
-          echo "Dispatched Nightly-A2 with test_cases='${{ needs.authorize.outputs.test_cases }}', branch='${{ needs.authorize.outputs.branch }}', vllm_ref='${{ needs.authorize.outputs.vllm_ref }}'"
-
-  dispatch-a3:
-    name: Trigger Nightly-A3
-    needs: [authorize]
-    if: needs.authorize.outputs.is_authorized == 'true' && needs.authorize.outputs.blocked != 'true' && needs.authorize.outputs.command == 'nightly' && needs.authorize.outputs.dispatch_a3 == 'true'
-    runs-on: linux-amd64-cpu-4-hk
-    container:
-      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend/act-environments-ubuntu:act-22.04
-    outputs:
-      a3_run_id: ${{ steps.dispatch_a3.outputs.a3_run_id }}
-    steps:
-      - name: Install system dependencies
-        run: |
-          sudo mkdir -p -m 755 /etc/apt/keyrings
-          curl -sL https://cli.github.com/packages/githubcli-archive-keyring.gpg | sudo tee /etc/apt/keyrings/githubcli-archive-keyring.gpg > /dev/null
-          sudo chmod go+r /etc/apt/keyrings/githubcli-archive-keyring.gpg
-          echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" | sudo tee /etc/apt/sources.list.d/github-cli.list > /dev/null
-          sudo apt-get update -y
-          sudo apt-get install gh -y
-
-      - name: Dispatch nightly-a3 workflow
-        id: dispatch_a3
-        env:
-          GH_TOKEN: ${{ secrets.PAT_TOKEN }}
-          BISECT_ARGS_JSON: ${{ needs.authorize.outputs.bisect_args_json }}
-          DOWNLOAD_PATH: ${{ needs.authorize.outputs.download_path }}
-          PROFILE_OPTIONS_JSON: ${{ needs.authorize.outputs.profile_options_json }}
-          VLLM_REF: ${{ needs.authorize.outputs.vllm_ref }}
-        run: |
-          REPO='${{ github.event.client_payload.github.payload.repository.full_name }}'
-          gh workflow run schedule_nightly_test_a3.yaml \
-            --repo "$REPO" \
-            --ref main \
-            -f test_cases='${{ needs.authorize.outputs.test_cases }}' \
-            -f vllm_ascend_branch='${{ needs.authorize.outputs.branch }}' \
-            -f request_id='${{ needs.authorize.outputs.pr_number }}' \
-            -f skip_build_image='true' \
-            -f image_repo_suffix='${{ needs.authorize.outputs.presmoke_image == 'true' && '-presmoke' || '' }}' \
-            -f vllm_ascend_ref='${{ needs.authorize.outputs.vllm_ascend_ref }}' \
-            -f aop_enabled='${{ needs.authorize.outputs.aop_enabled }}' \
-            -f download_path="$DOWNLOAD_PATH" \
-            -f profile_options_json="$PROFILE_OPTIONS_JSON" \
-            -f vllm_ref="$VLLM_REF" \
-            -f bisect_args_json="$BISECT_ARGS_JSON"
-          sleep 8
-          A3_RUN_ID=$(gh api "repos/$REPO/actions/workflows/schedule_nightly_test_a3.yaml/runs?per_page=1" \
-            --jq '.workflow_runs[0].id')
-          echo "a3_run_id=$A3_RUN_ID" >> "$GITHUB_OUTPUT"
-          echo "Dispatched Nightly-A3 with test_cases='${{ needs.authorize.outputs.test_cases }}', branch='${{ needs.authorize.outputs.branch }}', vllm_ref='${{ needs.authorize.outputs.vllm_ref }}'"
-
-  dispatch-a3-560t:
-    name: Trigger Nightly-A3-560T
-    needs: [authorize]
-    if: needs.authorize.outputs.is_authorized == 'true' && needs.authorize.outputs.blocked != 'true' && needs.authorize.outputs.command == 'nightly' && needs.authorize.outputs.dispatch_a3_560t == 'true'
-    runs-on: linux-amd64-cpu-4-hk
-    container:
-      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend/act-environments-ubuntu:act-22.04
-    outputs:
-      a3_560t_run_id: ${{ steps.dispatch_a3_560t.outputs.a3_560t_run_id }}
-    steps:
-      - name: Install system dependencies
-        run: |
-          sudo mkdir -p -m 755 /etc/apt/keyrings
-          curl -sL https://cli.github.com/packages/githubcli-archive-keyring.gpg | sudo tee /etc/apt/keyrings/githubcli-archive-keyring.gpg > /dev/null
-          sudo chmod go+r /etc/apt/keyrings/githubcli-archive-keyring.gpg
-          echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" | sudo tee /etc/apt/sources.list.d/github-cli.list > /dev/null
-          sudo apt-get update -y
-          sudo apt-get install gh -y
-
-      - name: Dispatch nightly-a3-560t workflow
-        id: dispatch_a3_560t
-        env:
-          GH_TOKEN: ${{ secrets.PAT_TOKEN }}
-          BISECT_ARGS_JSON: ${{ needs.authorize.outputs.bisect_args_json }}
-          DOWNLOAD_PATH: ${{ needs.authorize.outputs.download_path }}
-          PROFILE_OPTIONS_JSON: ${{ needs.authorize.outputs.profile_options_json }}
-          VLLM_REF: ${{ needs.authorize.outputs.vllm_ref }}
-        run: |
-          REPO='${{ github.event.client_payload.github.payload.repository.full_name }}'
-          gh workflow run schedule_nightly_test_a3_560t.yaml \
-            --repo "$REPO" \
-            --ref main \
-            -f test_cases='${{ needs.authorize.outputs.test_cases }}' \
-            -f vllm_ascend_branch='${{ needs.authorize.outputs.branch }}' \
-            -f request_id='${{ needs.authorize.outputs.pr_number }}' \
-            -f skip_build_image='true' \
-            -f image_repo_suffix='${{ needs.authorize.outputs.presmoke_image == 'true' && '-presmoke' || '' }}' \
-            -f vllm_ascend_ref='${{ needs.authorize.outputs.vllm_ascend_ref }}' \
-            -f aop_enabled='${{ needs.authorize.outputs.aop_enabled }}' \
-            -f download_path="$DOWNLOAD_PATH" \
-            -f profile_options_json="$PROFILE_OPTIONS_JSON" \
-            -f vllm_ref="$VLLM_REF" \
-            -f bisect_args_json="$BISECT_ARGS_JSON"
-          sleep 8
-          A3_560T_RUN_ID=$(gh api "repos/$REPO/actions/workflows/schedule_nightly_test_a3_560t.yaml/runs?per_page=1" \
-            --jq '.workflow_runs[0].id')
-          echo "a3_560t_run_id=$A3_560T_RUN_ID" >> "$GITHUB_OUTPUT"
-          echo "Dispatched Nightly-A3-560T with test_cases='${{ needs.authorize.outputs.test_cases }}', branch='${{ needs.authorize.outputs.branch }}', vllm_ref='${{ needs.authorize.outputs.vllm_ref }}'"
-
-  dispatch-a5:
-    name: Trigger Nightly-A5
-    needs: [authorize]
-    if: needs.authorize.outputs.is_authorized == 'true' && needs.authorize.outputs.blocked != 'true' && needs.authorize.outputs.command == 'nightly' && needs.authorize.outputs.dispatch_a5 == 'true'
-    runs-on: linux-amd64-cpu-4-hk
-    container:
-      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend/act-environments-ubuntu:act-22.04
-    outputs:
-      a5_run_id: ${{ steps.dispatch_a5.outputs.a5_run_id }}
-    steps:
-      - name: Install system dependencies
-        run: |
-          sudo mkdir -p -m 755 /etc/apt/keyrings
-          curl -sL https://cli.github.com/packages/githubcli-archive-keyring.gpg | sudo tee /etc/apt/keyrings/githubcli-archive-keyring.gpg > /dev/null
-          sudo chmod go+r /etc/apt/keyrings/githubcli-archive-keyring.gpg
-          echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" | sudo tee /etc/apt/sources.list.d/github-cli.list > /dev/null
-          sudo apt-get update -y
-          sudo apt-get install gh -y
-
-      - name: Dispatch nightly-a5 workflow
-        id: dispatch_a5
-        env:
-          GH_TOKEN: ${{ secrets.PAT_TOKEN }}
-          BISECT_ARGS_JSON: ${{ needs.authorize.outputs.bisect_args_json }}
-          DOWNLOAD_PATH: ${{ needs.authorize.outputs.download_path }}
-          PROFILE_OPTIONS_JSON: ${{ needs.authorize.outputs.profile_options_json }}
-          VLLM_REF: ${{ needs.authorize.outputs.vllm_ref }}
-        run: |
-          REPO='${{ github.event.client_payload.github.payload.repository.full_name }}'
-          gh workflow run schedule_nightly_test_a5.yaml \
-            --repo "$REPO" \
-            --ref main \
-            -f test_cases='${{ needs.authorize.outputs.test_cases }}' \
-            -f vllm_ascend_branch='${{ needs.authorize.outputs.branch }}' \
-            -f request_id='${{ needs.authorize.outputs.pr_number }}' \
-            -f skip_build_image='true' \
-            -f image_repo_suffix='${{ needs.authorize.outputs.presmoke_image == 'true' && '-presmoke' || '' }}' \
-            -f vllm_ascend_ref='${{ needs.authorize.outputs.vllm_ascend_ref }}' \
-            -f aop_enabled='${{ needs.authorize.outputs.aop_enabled }}' \
-            -f download_path="$DOWNLOAD_PATH" \
-            -f profile_options_json="$PROFILE_OPTIONS_JSON" \
-            -f bisect_args_json="$BISECT_ARGS_JSON" \
-            -f vllm_ref="$VLLM_REF"
-          sleep 8
-          A5_RUN_ID=$(gh api "repos/$REPO/actions/workflows/schedule_nightly_test_a5.yaml/runs?per_page=1" \
-            --jq '.workflow_runs[0].id')
-          echo "a5_run_id=$A5_RUN_ID" >> "$GITHUB_OUTPUT"
-          echo "Dispatched Nightly-A5 with test_cases='${{ needs.authorize.outputs.test_cases }}', branch='${{ needs.authorize.outputs.branch }}', vllm_ref='${{ needs.authorize.outputs.vllm_ref }}'"
-
-  dispatch-310p:
-    name: Trigger Nightly-310P
-    needs: [authorize]
-    if: needs.authorize.outputs.is_authorized == 'true' && needs.authorize.outputs.blocked != 'true' && needs.authorize.outputs.command == 'nightly' && needs.authorize.outputs.dispatch_310p == 'true'
-    runs-on: linux-amd64-cpu-4-hk
-    container:
-      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend/act-environments-ubuntu:act-22.04
-    outputs:
-      _310p_run_id: ${{ steps.dispatch_310p.outputs._310p_run_id }}
-    steps:
-      - name: Install system dependencies
-        run: |
-          sudo mkdir -p -m 755 /etc/apt/keyrings
-          curl -sL https://cli.github.com/packages/githubcli-archive-keyring.gpg | sudo tee /etc/apt/keyrings/githubcli-archive-keyring.gpg > /dev/null
-          sudo chmod go+r /etc/apt/keyrings/githubcli-archive-keyring.gpg
-          echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" | sudo tee /etc/apt/sources.list.d/github-cli.list > /dev/null
-          sudo apt-get update -y
-          sudo apt-get install gh -y
-
-      - name: Dispatch nightly-310p workflow
-        id: dispatch_310p
-        env:
-          GH_TOKEN: ${{ secrets.PAT_TOKEN }}
-          DOWNLOAD_PATH: ${{ needs.authorize.outputs.download_path }}
-          PROFILE_OPTIONS_JSON: ${{ needs.authorize.outputs.profile_options_json }}
-          VLLM_REF: ${{ needs.authorize.outputs.vllm_ref }}
-        run: |
-          REPO='${{ github.event.client_payload.github.payload.repository.full_name }}'
-          gh workflow run schedule_nightly_test_310p.yaml \
-            --repo "$REPO" \
-            --ref main \
-            -f test_cases='${{ needs.authorize.outputs.test_cases }}' \
-            -f vllm_ascend_branch='${{ needs.authorize.outputs.branch }}' \
-            -f request_id='${{ needs.authorize.outputs.pr_number }}' \
-            -f download_path="$DOWNLOAD_PATH" \
-            -f skip_build_image='true' \
-            -f image_repo_suffix='${{ needs.authorize.outputs.presmoke_image == 'true' && '-presmoke' || '' }}' \
-            -f vllm_ascend_ref='${{ needs.authorize.outputs.vllm_ascend_ref }}' \
-            -f aop_enabled='${{ needs.authorize.outputs.aop_enabled }}' \
-            -f profile_options_json="$PROFILE_OPTIONS_JSON" \
-            -f vllm_ref="$VLLM_REF"
-          sleep 8
-          _310P_RUN_ID=$(gh api "repos/$REPO/actions/workflows/schedule_nightly_test_310p.yaml/runs?per_page=1" \
-            --jq '.workflow_runs[0].id')
-          echo "_310p_run_id=$_310P_RUN_ID" >> "$GITHUB_OUTPUT"
-          echo "Dispatched Nightly-310P with test_cases='${{ needs.authorize.outputs.test_cases }}', branch='${{ needs.authorize.outputs.branch }}', vllm_ref='${{ needs.authorize.outputs.vllm_ref }}'"
-
-  dispatch-weekly-a2:
-    name: Trigger Weekly-A2
-    needs: [authorize]
-    if: needs.authorize.outputs.is_authorized == 'true' && needs.authorize.outputs.blocked != 'true' && needs.authorize.outputs.command == 'weekly' && needs.authorize.outputs.dispatch_a2 == 'true'
-    runs-on: linux-amd64-cpu-4-hk
-    container:
-      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend/act-environments-ubuntu:act-22.04
-    outputs:
-      weekly_a2_run_id: ${{ steps.dispatch_weekly_a2.outputs.weekly_a2_run_id }}
-    steps:
-      - name: Install system dependencies
-        run: |
-          sudo mkdir -p -m 755 /etc/apt/keyrings
-          curl -sL https://cli.github.com/packages/githubcli-archive-keyring.gpg | sudo tee /etc/apt/keyrings/githubcli-archive-keyring.gpg > /dev/null
-          sudo chmod go+r /etc/apt/keyrings/githubcli-archive-keyring.gpg
-          echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" | sudo tee /etc/apt/sources.list.d/github-cli.list > /dev/null
-          sudo apt-get update -y
-          sudo apt-get install gh -y
-
-      - name: Dispatch weekly-a2 workflow
-        id: dispatch_weekly_a2
-        env:
-          GH_TOKEN: ${{ secrets.PAT_TOKEN }}
-          VLLM_REF: ${{ needs.authorize.outputs.vllm_ref }}
-        run: |
-          REPO='${{ github.event.client_payload.github.payload.repository.full_name }}'
-          gh workflow run schedule_weekly_test_a2.yaml \
-            --repo "$REPO" \
-            --ref main \
-            -f test_cases='${{ needs.authorize.outputs.test_cases }}' \
-            -f vllm_ascend_branch='${{ needs.authorize.outputs.branch }}' \
-            -f request_id='${{ needs.authorize.outputs.pr_number }}' \
-            -f skip_build_image=true \
-            -f vllm_ascend_ref='${{ needs.authorize.outputs.vllm_ascend_ref }}' \
-            -f aop_enabled='${{ needs.authorize.outputs.aop_enabled }}' \
-            -f vllm_ref="$VLLM_REF"
-          sleep 8
-          A2_RUN_ID=$(gh api "repos/$REPO/actions/workflows/schedule_weekly_test_a2.yaml/runs?per_page=1" \
-            --jq '.workflow_runs[0].id')
-          echo "weekly_a2_run_id=$A2_RUN_ID" >> "$GITHUB_OUTPUT"
-          echo "Dispatched Weekly-A2 with test_cases='${{ needs.authorize.outputs.test_cases }}', branch='${{ needs.authorize.outputs.branch }}', vllm_ref='${{ needs.authorize.outputs.vllm_ref }}'"
-
-  dispatch-weekly-a3:
-    name: Trigger Weekly-A3
-    needs: [authorize]
-    if: needs.authorize.outputs.is_authorized == 'true' && needs.authorize.outputs.blocked != 'true' && needs.authorize.outputs.command == 'weekly' && needs.authorize.outputs.dispatch_a3 == 'true'
-    runs-on: linux-amd64-cpu-4-hk
-    container:
-      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend/act-environments-ubuntu:act-22.04
-    outputs:
-      weekly_a3_run_id: ${{ steps.dispatch_weekly_a3.outputs.weekly_a3_run_id }}
-    steps:
-      - name: Install system dependencies
-        run: |
-          sudo mkdir -p -m 755 /etc/apt/keyrings
-          curl -sL https://cli.github.com/packages/githubcli-archive-keyring.gpg | sudo tee /etc/apt/keyrings/githubcli-archive-keyring.gpg > /dev/null
-          sudo chmod go+r /etc/apt/keyrings/githubcli-archive-keyring.gpg
-          echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" | sudo tee /etc/apt/sources.list.d/github-cli.list > /dev/null
-          sudo apt-get update -y
-          sudo apt-get install gh -y
-
-      - name: Dispatch weekly-a3 workflow
-        id: dispatch_weekly_a3
-        env:
-          GH_TOKEN: ${{ secrets.PAT_TOKEN }}
-          BISECT_ARGS_JSON: ${{ needs.authorize.outputs.bisect_args_json }}
-          VLLM_REF: ${{ needs.authorize.outputs.vllm_ref }}
-        run: |
-          REPO='${{ github.event.client_payload.github.payload.repository.full_name }}'
-          gh workflow run schedule_weekly_test_a3.yaml \
-            --repo "$REPO" \
-            --ref main \
-            -f test_cases='${{ needs.authorize.outputs.test_cases }}' \
-            -f vllm_ascend_branch='${{ needs.authorize.outputs.branch }}' \
-            -f request_id='${{ needs.authorize.outputs.pr_number }}' \
-            -f skip_build_image=true \
-            -f vllm_ascend_ref='${{ needs.authorize.outputs.vllm_ascend_ref }}' \
-            -f aop_enabled='${{ needs.authorize.outputs.aop_enabled }}' \
-            -f vllm_ref="$VLLM_REF" \
-            -f bisect_args_json="$BISECT_ARGS_JSON"
-          sleep 8
-          A3_RUN_ID=$(gh api "repos/$REPO/actions/workflows/schedule_weekly_test_a3.yaml/runs?per_page=1" \
-            --jq '.workflow_runs[0].id')
-          echo "weekly_a3_run_id=$A3_RUN_ID" >> "$GITHUB_OUTPUT"
-          echo "Dispatched Weekly-A3 with test_cases='${{ needs.authorize.outputs.test_cases }}', branch='${{ needs.authorize.outputs.branch }}', vllm_ref='${{ needs.authorize.outputs.vllm_ref }}'"
-
-  dispatch-weekly-a3-560t:
-    name: Trigger Weekly-A3-560T
-    needs: [authorize]
-    if: needs.authorize.outputs.is_authorized == 'true' && needs.authorize.outputs.blocked != 'true' && needs.authorize.outputs.command == 'weekly' && needs.authorize.outputs.dispatch_a3_560t == 'true'
-    runs-on: linux-amd64-cpu-4-hk
-    container:
-      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend/act-environments-ubuntu:act-22.04
-    outputs:
-      weekly_a3_560t_run_id: ${{ steps.dispatch_weekly_a3_560t.outputs.weekly_a3_560t_run_id }}
-    steps:
-      - name: Install system dependencies
-        run: |
-          sudo mkdir -p -m 755 /etc/apt/keyrings
-          curl -sL https://cli.github.com/packages/githubcli-archive-keyring.gpg | sudo tee /etc/apt/keyrings/githubcli-archive-keyring.gpg > /dev/null
-          sudo chmod go+r /etc/apt/keyrings/githubcli-archive-keyring.gpg
-          echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" | sudo tee /etc/apt/sources.list.d/github-cli.list > /dev/null
-          sudo apt-get update -y
-          sudo apt-get install gh -y
-
-      - name: Dispatch weekly-a3-560t workflow
-        id: dispatch_weekly_a3_560t
-        env:
-          GH_TOKEN: ${{ secrets.PAT_TOKEN }}
-          BISECT_ARGS_JSON: ${{ needs.authorize.outputs.bisect_args_json }}
-          VLLM_REF: ${{ needs.authorize.outputs.vllm_ref }}
-        run: |
-          REPO='${{ github.event.client_payload.github.payload.repository.full_name }}'
-          gh workflow run schedule_weekly_test_a3_560t.yaml \
-            --repo "$REPO" \
-            --ref main \
-            -f test_cases='${{ needs.authorize.outputs.test_cases }}' \
-            -f vllm_ascend_branch='${{ needs.authorize.outputs.branch }}' \
-            -f request_id='${{ needs.authorize.outputs.pr_number }}' \
-            -f skip_build_image=true \
-            -f vllm_ascend_ref='${{ needs.authorize.outputs.vllm_ascend_ref }}' \
-            -f aop_enabled='${{ needs.authorize.outputs.aop_enabled }}' \
-            -f vllm_ref="$VLLM_REF" \
-            -f bisect_args_json="$BISECT_ARGS_JSON"
-          sleep 8
-          A3_560T_RUN_ID=$(gh api "repos/$REPO/actions/workflows/schedule_weekly_test_a3_560t.yaml/runs?per_page=1" \
-            --jq '.workflow_runs[0].id')
-          echo "weekly_a3_560t_run_id=$A3_560T_RUN_ID" >> "$GITHUB_OUTPUT"
-          echo "Dispatched Weekly-A3-560T with test_cases='${{ needs.authorize.outputs.test_cases }}', branch='${{ needs.authorize.outputs.branch }}', vllm_ref='${{ needs.authorize.outputs.vllm_ref }}'"
-
-  dispatch-weekly-310p:
-    name: Trigger Weekly-310P
-    needs: [authorize]
-    if: needs.authorize.outputs.is_authorized == 'true' && needs.authorize.outputs.blocked != 'true' && needs.authorize.outputs.command == 'weekly' && needs.authorize.outputs.dispatch_310p == 'true'
-    runs-on: linux-amd64-cpu-4-hk
-    container:
-      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend/act-environments-ubuntu:act-22.04
-    outputs:
-      weekly_310p_run_id: ${{ steps.dispatch_weekly_310p.outputs.weekly_310p_run_id }}
-    steps:
-      - name: Install system dependencies
-        run: |
-          sudo mkdir -p -m 755 /etc/apt/keyrings
-          curl -sL https://cli.github.com/packages/githubcli-archive-keyring.gpg | sudo tee /etc/apt/keyrings/githubcli-archive-keyring.gpg > /dev/null
-          sudo chmod go+r /etc/apt/keyrings/githubcli-archive-keyring.gpg
-          echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" | sudo tee /etc/apt/sources.list.d/github-cli.list > /dev/null
-          sudo apt-get update -y
-          sudo apt-get install gh -y
-
-      - name: Dispatch weekly-310p workflow
-        id: dispatch_weekly_310p
-        env:
-          GH_TOKEN: ${{ secrets.PAT_TOKEN }}
-          BISECT_ARGS_JSON: ${{ needs.authorize.outputs.bisect_args_json }}
-          VLLM_REF: ${{ needs.authorize.outputs.vllm_ref }}
-        run: |
-          REPO='${{ github.event.client_payload.github.payload.repository.full_name }}'
-          gh workflow run schedule_weekly_test_310p.yaml \
-            --repo "$REPO" \
-            --ref main \
-            -f test_cases='${{ needs.authorize.outputs.test_cases }}' \
-            -f vllm_ascend_branch='${{ needs.authorize.outputs.branch }}' \
-            -f request_id='${{ needs.authorize.outputs.pr_number }}' \
-            -f skip_build_image=true \
-            -f vllm_ascend_ref='${{ needs.authorize.outputs.vllm_ascend_ref }}' \
-            -f aop_enabled='${{ needs.authorize.outputs.aop_enabled }}' \
-            -f vllm_ref="$VLLM_REF" \
-            -f bisect_args_json="$BISECT_ARGS_JSON"
-          sleep 8
-          _310P_RUN_ID=$(gh api "repos/$REPO/actions/workflows/schedule_weekly_test_310p.yaml/runs?per_page=1" \
-            --jq '.workflow_runs[0].id')
-          echo "weekly_310p_run_id=$_310P_RUN_ID" >> "$GITHUB_OUTPUT"
-          echo "Dispatched Weekly-310P with test_cases='${{ needs.authorize.outputs.test_cases }}', branch='${{ needs.authorize.outputs.branch }}', vllm_ref='${{ needs.authorize.outputs.vllm_ref }}'"
+      - name: Upload dispatch link for post-links
+        if: matrix.target != 'none'
+        uses: actions/upload-artifact@v7
+        with:
+          name: dispatch-link-${{ matrix.target }}
+          path: /tmp/dispatch-link/link-${{ matrix.target }}.md
+          retention-days: 1
+          if-no-files-found: error
 
   post-links:
     name: Post workflow links
-    needs: [authorize, dispatch-presmoke, dispatch-a2, dispatch-a3, dispatch-a3-560t, dispatch-a5, dispatch-310p, dispatch-weekly-a2, dispatch-weekly-a3, dispatch-weekly-a3-560t, dispatch-weekly-310p]
+    needs: [authorize, dispatch]
     if: always() && needs.authorize.outputs.is_authorized == 'true' && needs.authorize.outputs.blocked != 'true'
-    runs-on: linux-amd64-cpu-2-hk
+    runs-on: linux-amd64-cpu-1-hk
     steps:
+      # Legs publish link-<target>.md artifacts. Tolerate download errors so
+      # the comment is still posted when no target was dispatched at all.
+      - name: Download dispatch links
+        uses: actions/download-artifact@v8
+        continue-on-error: true
+        with:
+          pattern: dispatch-link-*
+          path: /tmp/dispatch-links
+          merge-multiple: true
+
       - name: Build comment body
         id: body
         run: |
           BODY="${{ needs.authorize.outputs.command }} command triggered."
-          if [[ "${{ needs.dispatch-presmoke.result }}" == "success" ]]; then
-            BODY="$BODY
-          - Presmoke image build: [workflow run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ needs.dispatch-presmoke.outputs.presmoke_run_id }})"
-          fi
-          if [[ "${{ needs.dispatch-a2.result }}" == "success" ]]; then
-            BODY="$BODY
-          - Nightly-A2: [workflow run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ needs.dispatch-a2.outputs.a2_run_id }})"
-          fi
-          if [[ "${{ needs.dispatch-a3.result }}" == "success" ]]; then
-            BODY="$BODY
-          - Nightly-A3: [workflow run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ needs.dispatch-a3.outputs.a3_run_id }})"
-          fi
-          if [[ "${{ needs.dispatch-a3-560t.result }}" == "success" ]]; then
-            BODY="$BODY
-          - Nightly-A3-560T: [workflow run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ needs.dispatch-a3-560t.outputs.a3_560t_run_id }})"
-          fi
-          if [[ "${{ needs.dispatch-a5.result }}" == "success" ]]; then
-            BODY="$BODY
-          - Nightly-A5: [workflow run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ needs.dispatch-a5.outputs.a5_run_id }})"
-          fi
-          if [[ "${{ needs.dispatch-310p.result }}" == "success" ]]; then
-            BODY="$BODY
-          - Nightly-310P: [workflow run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ needs.dispatch-310p.outputs._310p_run_id }})"
-          fi
-          if [[ "${{ needs.dispatch-weekly-a2.result }}" == "success" ]]; then
-            BODY="$BODY
-          - Weekly-A2: [workflow run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ needs.dispatch-weekly-a2.outputs.weekly_a2_run_id }})"
-          fi
-          if [[ "${{ needs.dispatch-weekly-a3.result }}" == "success" ]]; then
-            BODY="$BODY
-          - Weekly-A3: [workflow run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ needs.dispatch-weekly-a3.outputs.weekly_a3_run_id }})"
-          fi
-          if [[ "${{ needs.dispatch-weekly-a3-560t.result }}" == "success" ]]; then
-            BODY="$BODY
-          - Weekly-A3-560T: [workflow run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ needs.dispatch-weekly-a3-560t.outputs.weekly_a3_560t_run_id }})"
-          fi
-          if [[ "${{ needs.dispatch-weekly-310p.result }}" == "success" ]]; then
-            BODY="$BODY
-          - Weekly-310P: [workflow run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ needs.dispatch-weekly-310p.outputs.weekly_310p_run_id }})"
-          fi
+          # Fixed display order regardless of matrix completion order.
+          for target in presmoke a2 a3 a3-560t a5 310p weekly-a2 weekly-a3 weekly-a3-560t weekly-310p; do
+            file="/tmp/dispatch-links/link-${target}.md"
+            if [ -f "$file" ]; then
+              BODY="$BODY
+          $(cat "$file")"
+            fi
+          done
           {
             echo "body<<EOF"
             echo "$BODY"

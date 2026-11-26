@@ -66,7 +66,11 @@ def runner_cls(mamba_state_cls):
             self.num_computed_tokens_cpu[0] = self.device_count
             self.events.append("copy")
 
-    namespace = {"Parent": Parent, "MambaHybridModelState": mamba_state_cls}
+    namespace = {
+        "Parent": Parent,
+        "MambaHybridModelState": mamba_state_cls,
+        "QWEN_FA3_TARGETS": {"Qwen3_5ForConditionalGeneration"},
+    }
     utils = ast.parse((source.parents[2] / "utils.py").read_text())
     predicate = next(
         node for node in utils.body if isinstance(node, ast.FunctionDef) and node.name == "is_deepseek_v41"
