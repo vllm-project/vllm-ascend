@@ -33,9 +33,9 @@ from vllm.v1.worker.gpu.spec_decode.target_dependent_ar.speculator import (
 
 from vllm_ascend._310p.ops.rotary_embedding import AscendRotaryEmbedding310
 from vllm_ascend._310p.worker.v2.spec_utils import (
-    get_async_mtp_state,
+    get_async_mtp_commit,
     prepare_decode_inputs_cpu,
-    set_async_mtp_state,
+    set_async_mtp_commit,
     set_draft_step_host,
 )
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
@@ -275,7 +275,7 @@ class AscendMTPSpeculator310(AscendTargetDependentARSpeculator, MTPSpeculator):
 
     @torch.inference_mode()
     def propose(self, *args, **kwargs):  # type: ignore[no-untyped-def]
-        if get_async_mtp_state() is not None:
+        if get_async_mtp_commit() is not None:
             # Async MTP step 0 prepares inputs on device; skip pre-step0 host D2H.
             return super().propose(*args, **kwargs)
         num_rejected = kwargs.get("num_rejected")
@@ -335,12 +335,10 @@ class AscendMTPSpeculator310(AscendTargetDependentARSpeculator, MTPSpeculator):
         num_speculative_steps: int | None = None,
     ) -> None:
         """K>1 draft decode: per-step FULL replay or eager CPU slot mappings."""
-        state = get_async_mtp_state()
-        if state is not None:
-            commit, _ = state
-            if commit is not None:
-                commit()
-                set_async_mtp_state(None)
+        commit = get_async_mtp_commit()
+        if commit is not None:
+            commit()
+            set_async_mtp_commit(None)
 
         assert seq_lens_cpu_upper_bound is not None
         positions = self.input_buffers.positions[:num_reqs]

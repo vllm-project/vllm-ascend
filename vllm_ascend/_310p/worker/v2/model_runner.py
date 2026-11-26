@@ -53,9 +53,9 @@ from vllm_ascend._310p.worker.v2.spec_utils import (
     combine_sampled_and_draft_tokens_cpu,
     copy_prefix_310p,
     expand_idx_mapping_cpu,
-    get_async_mtp_state,
-    reset_async_mtp_state,
-    set_async_mtp_state,
+    get_async_mtp_commit,
+    reset_async_mtp_commit,
+    set_async_mtp_commit,
     set_prefill_host_meta,
 )
 from vllm_ascend._310p.worker.v2.states import Ascend310PRequestState
@@ -1470,25 +1470,17 @@ class NPUModelRunner310V2(NPUModelRunner):
         spec = getattr(self, "speculator", None)
         n = batch.num_reqs if batch is not None else 0
         k = getattr(self, "num_speculative_steps", 0)
-        width = k + 1
-        uniform_bounds = _uniform_bounds_np(n, width) if n > 0 and k > 0 else None
         eligible = (
             batch is not None
-            and uniform_bounds is not None
+            and n > 0
+            and k > 0
+            and batch.num_tokens > 0
             and grammar_output is None
-            and state.num_spec_tokens_to_schedule == k
-            and batch.num_draft_tokens == n * k
-            and batch.num_tokens == n * width
-            and batch.decode_graph_eligible
-            and not np.any(batch.is_prefilling_np[:n])
-            and np.all(batch.seq_lens_np[:n] >= batch.prefill_len_np[:n])
+            and state.num_spec_tokens_to_schedule > 0
             and np.all(batch.idx_mapping_np[:n] >= 0)
-            and np.array_equal(batch.query_start_loc_np[: n + 1], uniform_bounds)
-            and np.array_equal(batch.cu_num_logits_np[: n + 1], uniform_bounds)
             and spec is not None
             and type(spec).__name__ == "AscendMTPSpeculator310"
             and not spec.use_dcp
-            and spec.dp_size == 1
             and self.pp_handler is None
             and self.pcp_manager is None
             and getattr(self.model_state, "recoverssm", None) is None
@@ -1496,17 +1488,17 @@ class NPUModelRunner310V2(NPUModelRunner):
         if not eligible:
             return super().sample_tokens(grammar_output)
 
-        token = set_async_mtp_state(None)
+        token = set_async_mtp_commit(None)
         self._async_mtp_eligible = True
         try:
             result = super().sample_tokens(grammar_output)
-            async_state = get_async_mtp_state()
-            if async_state is not None and async_state[0] is not None:
-                async_state[0]()
+            commit = get_async_mtp_commit()
+            if commit is not None:
+                commit()
             return result
         finally:
             self._async_mtp_eligible = False
-            reset_async_mtp_state(token)
+            reset_async_mtp_commit(token)
 
     def postprocess_sampled(
         self,
@@ -1526,9 +1518,14 @@ class NPUModelRunner310V2(NPUModelRunner):
             and self.rejection_sampler is not None
             and self.rejection_sampler._copy_pending
         ):
-            last = sampled_tokens.gather(1, (num_sampled.long() - 1).reshape(-1, 1))
+            n = int(idx_mapping.shape[0])
+            req_idx = idx_mapping[:n].to(dtype=torch.long)
+            safe_col = (num_sampled[:n].to(dtype=torch.long) - 1).clamp_min(0).reshape(-1, 1)
             dest = self.req_states.last_sampled_tokens
-            dest.index_copy_(0, idx_mapping.long(), last.to(dest.dtype))
+            cand_last = sampled_tokens[:n].gather(1, safe_col).to(dest.dtype)
+            prev_last = dest.index_select(0, req_idx)
+            updated = torch.where((num_sampled[:n] > 0).reshape(-1, 1), cand_last, prev_last)
+            dest.index_copy_(0, req_idx, updated)
 
             commit_args = (
                 idx_mapping,
@@ -1543,7 +1540,7 @@ class NPUModelRunner310V2(NPUModelRunner):
                 with torch.inference_mode():
                     self.postprocess_sampled(*commit_args, device_last_sampled_ready=True)
 
-            set_async_mtp_state((_commit, last))
+            set_async_mtp_commit(_commit)
             return
 
         # Device arguments remain for upstream API compatibility.
