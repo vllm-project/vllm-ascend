@@ -134,6 +134,9 @@ def _leg(use_pool: bool, case_name: str):
         "OMP_PROC_BIND": "false",
         "OMP_NUM_THREADS": "10",
         "PYTORCH_NPU_ALLOC_CONF": "expandable_segments:True",
+        # HYBM full mesh over the eight on-board dies instead of the
+        # PEER2NET/CLOS plane, which the A5 CI hosts do not expose.
+        "TEST_MF_TRANSPORT_FULL_MESH": "1",
     },
 )
 @wait_until_npu_memory_free(target_free_percentage=0.8)
