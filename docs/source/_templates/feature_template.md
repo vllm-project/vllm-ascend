@@ -92,7 +92,7 @@ This feature applies to the following scenarios:
 | Model | Verified Qwen3-8B, Qwen3-30B-A3B, DeepSeek-V3.1-W8A8 |
 | Feature Mutual Exclusion | Does not support simultaneous use with xx feature |
 | Software Dependencies | CANN >= 8.5.0, HDK >= 25.5, Mooncake >= 0.3.11.post1 |
-| Other Limitations | Requires privileged container; inter-node network requires 10Gbps+ |
+| Other Limitations | Requires explicit device mapping; inter-node network requires 10Gbps+ |
 | Solution Constraints | RFC-001: xxx function is limited, refer to `http://xxx/rfc/001` |
 
 ## Feature Usage

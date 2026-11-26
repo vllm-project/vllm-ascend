@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 
-from types import SimpleNamespace
+import sys
+from contextlib import ExitStack
+from types import ModuleType, SimpleNamespace
 from unittest.mock import Mock, patch
 
 import pytest
@@ -9,18 +11,144 @@ from torch import nn
 from vllm.forward_context import ForwardContext, override_forward_context
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
 
-from vllm_ascend.ops.gdn import (
+from vllm_ascend.attention.gdn import (
     AscendGatedDeltaNetAttention,
+    _get_fla_gdn_prefill_op,
     _pack_conv_weights,
     initialize_packed_conv_weight,
 )
-from vllm_ascend.ops.gdn_attn_builder import (
+from vllm_ascend.attention.gdn_attn_builder import (
     GDNCausalConv1dMetadata,
     GDNDecodeMetadata,
     GDNPrefillMetadata,
     GDNSpecCausalConv1dMetadata,
     GDNSpecDecodeMetadata,
 )
+from vllm_ascend.device.hardware import AscendDeviceType
+from vllm_ascend.device.hardware_profile import get_hardware_profile
+
+
+@pytest.mark.parametrize("batch_kind", ["prefill", "mixed", "spec"])
+@pytest.mark.parametrize("backend", ["a5", "a2", "a3", "missing_fla", "other_device", "fp16"])
+def test_chunk32_raw_beta_routing(batch_kind, backend):
+    """A5 FLA uses raw beta; other paths keep processed beta, including mixed/spec tokens."""
+    layer = _make_layer()
+    layer.dt_bias.fill_(1.75)
+    layer.A_log.fill_(0.5)
+    metadata = _make_mixed_metadata()
+    total = 5 if batch_kind == "spec" else 3
+    prefill_tokens = torch.tensor([1, 2] if batch_kind == "mixed" else list(range(total)))
+    decode_tokens = torch.tensor([0]) if batch_kind == "mixed" else None
+    if batch_kind != "mixed":
+        metadata.num_decodes = metadata.num_decode_tokens = 0
+        if batch_kind == "spec":
+            decode_tokens = torch.tensor([0, 2])
+            prefill_tokens = torch.tensor([1, 3, 4])
+            metadata.spec_sequence_masks = torch.tensor([True, False])
+            metadata.spec_token_indx = decode_tokens
+            metadata.non_spec_token_indx = prefill_tokens
+            metadata.spec_state_indices_tensor = torch.tensor([0, 0], dtype=torch.int32)
+            metadata.num_spec_decodes = 1
+            metadata.num_spec_decode_tokens = 2
+            metadata.spec_decode_metadata = GDNSpecDecodeMetadata(
+                spec_causal_conv1d=GDNSpecCausalConv1dMetadata(
+                    query_start_loc=torch.tensor([0, 2], dtype=torch.int32),
+                    cache_indices=torch.tensor([0], dtype=torch.int32),
+                    num_accepted_tokens=torch.tensor([1], dtype=torch.int32),
+                ),
+                actual_seq_lengths=torch.tensor([0, 2], dtype=torch.int32),
+            )
+        metadata.prefill_query_start_loc = torch.tensor([0, 3], dtype=torch.int32)
+        conv_meta = metadata.non_spec_prefill_metadata.causal_conv1d
+        conv_meta.query_start_loc = metadata.prefill_query_start_loc
+        conv_meta.cache_indices = torch.tensor([1], dtype=torch.int32)
+        conv_meta.initial_state_mode = torch.tensor([1], dtype=torch.int32)
+    metadata.num_actual_tokens = total
+    metadata.num_prefill_tokens = len(prefill_tokens)
+    dtype = torch.float16 if backend == "fp16" else torch.bfloat16
+    # Include a padding row and distinct logits to expose wrong slices,
+    # double sigmoid and the review's proposed (incorrect) b + dt_bias.
+    packed = torch.arange((total + 1) * 6, dtype=dtype).reshape(total + 1, 6)
+    b = torch.linspace(-2, 2, total + 1, dtype=dtype).unsqueeze(1)
+    a = torch.linspace(0.25, 1.5, total + 1, dtype=dtype).unsqueeze(1)
+    output = torch.full((total + 1, 1, 2), -99, dtype=dtype)
+    expected_g = -layer.A_log.exp() * torch.nn.functional.softplus(a[:total].float() + layer.dt_bias)
+    expected_beta = b[:total].float().sigmoid().to(dtype)
+
+    def gating(A_log, gate_a, gate_b, dt_bias):
+        torch.testing.assert_close(gate_a, a[:total])
+        torch.testing.assert_close(gate_b, b[:total])
+        assert dt_bias is layer.dt_bias
+        return expected_g.unsqueeze(0), expected_beta.unsqueeze(0)
+
+    def prefill(**kwargs):
+        return kwargs["v"].clone(), kwargs["initial_state"].clone()
+
+    context = ForwardContext(
+        no_compile_layers={layer.prefix: layer},
+        attn_metadata={layer.prefix: metadata},
+        slot_mapping={},
+    )
+    device_type = {
+        "a2": AscendDeviceType.A2,
+        "a3": AscendDeviceType.A3,
+        "other_device": AscendDeviceType._310P,
+    }.get(backend, AscendDeviceType.A5)
+    with ExitStack() as stack:
+        stack.enter_context(
+            patch(
+                "vllm_ascend.attention.gdn.get_current_hardware_profile",
+                return_value=get_hardware_profile(device_type),
+            )
+        )
+        _get_fla_gdn_prefill_op.cache_clear()
+        stack.callback(_get_fla_gdn_prefill_op.cache_clear)
+        fla_module = ModuleType("fla_npu.ops.ascendc")
+        if backend != "missing_fla":
+            fla_module.__dict__["chunk_gated_delta_rule_fwd"] = Mock()
+        stack.enter_context(patch.dict(sys.modules, {fla_module.__name__: fla_module}))
+        stack.enter_context(patch("importlib.metadata.version", side_effect=AssertionError("FLA version queried")))
+        stack.enter_context(override_forward_context(context))
+        mocks = {}
+        replacements = {
+            "get_pcp_group": {"return_value": SimpleNamespace(world_size=1)},
+            "get_current_hardware_profile": {"return_value": get_hardware_profile(device_type)},
+            "DeviceOperator.fused_gdn_gating": {"side_effect": gating},
+            "DeviceOperator.fla_gdn_prefill": {"side_effect": prefill},
+            "chunk_gated_delta_rule": {"side_effect": prefill},
+            "recurrent_gated_delta_rule": {"side_effect": lambda q, k, v, state, **kw: v.clone()},
+            "causal_conv1d_fn": {"side_effect": lambda x, *args, **kw: x.clone()},
+            "causal_conv1d_update": {"side_effect": lambda x, *args, **kw: x.clone()},
+            "l2norm_fwd": {"side_effect": lambda x: x},
+            "gather_ssm_states": {"side_effect": lambda state, indices, *args: state[indices].clone()},
+            "scatter_ssm_states_": {},
+            "clear_ssm_states": {},
+            "wait_for_kv_layer_from_connector": {},
+            "record_attention_compute_start": {},
+            "maybe_save_kv_layer_to_connector": {},
+        }
+        for name, kwargs in replacements.items():
+            mocks[name] = stack.enter_context(patch(f"vllm_ascend.attention.gdn.{name}", **kwargs))
+        AscendGatedDeltaNetAttention._forward_core(layer, packed, b, a, output)
+
+    use_fla = backend in ("a5", "a2", "a3")
+    selected = "DeviceOperator.fla_gdn_prefill" if use_fla else "chunk_gated_delta_rule"
+    unused = "chunk_gated_delta_rule" if use_fla else "DeviceOperator.fla_gdn_prefill"
+    mocks[selected].assert_called_once()
+    mocks[unused].assert_not_called()
+    call = mocks[selected].call_args.kwargs
+    beta = b[:total] if backend == "a5" else expected_beta
+    torch.testing.assert_close(call["beta"], beta[prefill_tokens].unsqueeze(0))
+    torch.testing.assert_close(call["g"], expected_g[prefill_tokens].unsqueeze(0))
+    if decode_tokens is None:
+        mocks["recurrent_gated_delta_rule"].assert_not_called()
+    else:
+        mocks["recurrent_gated_delta_rule"].assert_called_once()
+        decode = mocks["recurrent_gated_delta_rule"].call_args.kwargs
+        torch.testing.assert_close(decode["beta"], expected_beta[decode_tokens])
+        torch.testing.assert_close(decode["g"], expected_g[decode_tokens])
+    torch.testing.assert_close(output[:total], packed[:total, 4:].reshape(total, 1, 2))
+    torch.testing.assert_close(output[total], torch.full((1, 2), -99, dtype=dtype))
 
 
 def _make_mixed_metadata() -> GDNAttentionMetadata:
@@ -174,41 +302,41 @@ def test_mixed_non_spec_splits_conv_per_slice(initial_state) -> None:
     with (
         override_forward_context(forward_context),
         patch(
-            "vllm_ascend.ops.gdn.get_pcp_group",
+            "vllm_ascend.attention.gdn.get_pcp_group",
             return_value=SimpleNamespace(world_size=1),
         ),
         patch(
-            "vllm_ascend.ops.gdn.get_current_hardware_profile",
+            "vllm_ascend.attention.gdn.get_current_hardware_profile",
             return_value=SimpleNamespace(supports=lambda _: False),
         ),
         patch(
-            "vllm_ascend.ops.gdn.DeviceOperator.fused_gdn_gating",
+            "vllm_ascend.attention.gdn.DeviceOperator.fused_gdn_gating",
             return_value=gating,
         ),
-        patch("vllm_ascend.ops.gdn.l2norm_fwd", side_effect=lambda x: x),
+        patch("vllm_ascend.attention.gdn.l2norm_fwd", side_effect=lambda x: x),
         patch.object(AscendGatedDeltaNetAttention, "_probe_fused_chunk", return_value=True),
         patch.object(AscendGatedDeltaNetAttention, "_chunk_gated_delta_rule_fused") as fused_chunk_mock,
-        patch("vllm_ascend.ops.gdn.clear_ssm_states"),
+        patch("vllm_ascend.attention.gdn.clear_ssm_states"),
         patch(
-            "vllm_ascend.ops.gdn.gather_ssm_states",
+            "vllm_ascend.attention.gdn.gather_ssm_states",
             side_effect=lambda state, indices, has_initial_state, **kwargs: state.index_select(
                 0, indices.to(torch.long)
             ),
         ),
         patch(
-            "vllm_ascend.ops.gdn.chunk_gated_delta_rule",
+            "vllm_ascend.attention.gdn.chunk_gated_delta_rule",
             side_effect=chunk_gated_delta_rule,
         ) as chunk_mock,
-        patch("vllm_ascend.ops.gdn.maybe_save_kv_layer_to_connector"),
+        patch("vllm_ascend.attention.gdn.maybe_save_kv_layer_to_connector"),
         patch(
-            "vllm_ascend.ops.gdn.causal_conv1d_fn",
+            "vllm_ascend.attention.gdn.causal_conv1d_fn",
             side_effect=lambda x, *a, **k: causal_conv1d(x, *a, **k),
         ) as prefill_conv,
         patch(
-            "vllm_ascend.ops.gdn.causal_conv1d_update",
+            "vllm_ascend.attention.gdn.causal_conv1d_update",
             side_effect=lambda x, *a, **k: causal_conv1d(x, *a, **k),
         ) as decode_conv,
-        patch("vllm_ascend.ops.gdn.recurrent_gated_delta_rule", side_effect=recurrent_gated_delta_rule),
+        patch("vllm_ascend.attention.gdn.recurrent_gated_delta_rule", side_effect=recurrent_gated_delta_rule),
     ):
         AscendGatedDeltaNetAttention._forward_core(
             layer,
@@ -281,8 +409,12 @@ def test_mixed_non_spec_splits_conv_per_slice(initial_state) -> None:
 
 
 @pytest.mark.parametrize("speculative,adaptive", [(False, False), (True, False), (True, True)])
-def test_decode_forward_does_not_reconcat_qkv(speculative, adaptive):
+@pytest.mark.parametrize("recover", [False, True])
+def test_decode_forward_does_not_reconcat_qkv(speculative, adaptive, recover):
     layer = _make_layer()
+    layer.use_gdn_recoverssm = recover
+    if recover:
+        layer.kv_cache += (torch.empty(2, 1, 4, 5),)
     packed = torch.arange(24, dtype=torch.float32).reshape(4, 6)
     metadata = _make_mixed_metadata()
     metadata.num_prefills = 0
@@ -292,8 +424,10 @@ def test_decode_forward_does_not_reconcat_qkv(speculative, adaptive):
     metadata.num_decode_tokens = 0 if speculative else 4
     metadata.num_spec_decodes = 2 if speculative else 0
     metadata.num_spec_decode_tokens = 4 if speculative else 0
-    metadata.spec_sequence_masks = torch.tensor([True, True]) if speculative else None
+    metadata.spec_sequence_masks = torch.tensor([True, True]) if speculative and not recover else None
     metadata.spec_state_indices_tensor = torch.tensor([0, 1], dtype=torch.int32)
+    if recover:
+        metadata.spec_state_indices_tensor = metadata.spec_state_indices_tensor[:, None]
     metadata.non_spec_state_indices_tensor = torch.tensor([0, 1, 0, 1], dtype=torch.int32)
     metadata.spec_decode_metadata = GDNSpecDecodeMetadata(
         spec_causal_conv1d=GDNSpecCausalConv1dMetadata(
@@ -335,6 +469,33 @@ def test_decode_forward_does_not_reconcat_qkv(speculative, adaptive):
         assert kwargs["num_accepted_tokens"].tolist() == [3, 2]
         return v.clone(), kwargs["initial_state"]
 
+    def verify(
+        A_log,
+        a,
+        b,
+        dt_bias,
+        q,
+        k,
+        v,
+        *,
+        checkpoint_state,
+        replay_cache,
+        query_start_loc,
+        state_indices,
+        spec_query_len,
+        **kwargs,
+    ):
+        assert A_log is layer.A_log
+        assert dt_bias is layer.dt_bias
+        torch.testing.assert_close(a, torch.zeros(4, 1))
+        torch.testing.assert_close(b, torch.zeros(4, 1))
+        assert checkpoint_state is layer.kv_cache[1]
+        assert replay_cache is layer.kv_cache[2]
+        assert state_indices.shape == (2,) and spec_query_len == layer.num_spec + 1
+        torch.testing.assert_close(q, packed[:, :2].reshape(1, 4, 1, 2))
+        torch.testing.assert_close(k, packed[:, 2:4].reshape(1, 4, 1, 2))
+        return v.clone()
+
     # Reject the inherited concat helper for all real decode inputs.
     original = layer.rearrange_mixed_qkv.side_effect
     layer.rearrange_mixed_qkv.side_effect = lambda x: (
@@ -343,22 +504,26 @@ def test_decode_forward_does_not_reconcat_qkv(speculative, adaptive):
     with (
         override_forward_context(context),
         patch("torch.cat", side_effect=AssertionError("unexpected decode cat")),
-        patch("vllm_ascend.ops.gdn.get_pcp_group", return_value=SimpleNamespace(world_size=1)),
+        patch("vllm_ascend.attention.gdn.get_pcp_group", return_value=SimpleNamespace(world_size=1)),
         patch(
-            "vllm_ascend.ops.gdn.DeviceOperator.fused_gdn_gating",
+            "vllm_ascend.attention.gdn.DeviceOperator.fused_gdn_gating",
             return_value=(torch.zeros(1, 4, 1), torch.ones(1, 4, 1)),
         ),
-        patch("vllm_ascend.ops.gdn.l2norm_fwd", side_effect=lambda x: x),
-        patch("vllm_ascend.ops.gdn.causal_conv1d_update", side_effect=lambda x, *a, **k: x.clone()) as conv,
+        patch("vllm_ascend.attention.gdn.l2norm_fwd", side_effect=lambda x: x),
+        patch("vllm_ascend.attention.gdn.causal_conv1d_update", side_effect=lambda x, *a, **k: x.clone()) as conv,
         patch(
-            "vllm_ascend.ops.gdn.causal_conv1d_update_varlen", side_effect=lambda x, *a, **k: x.clone()
+            "vllm_ascend.attention.gdn.causal_conv1d_update_varlen", side_effect=lambda x, *a, **k: x.clone()
         ) as varlen_conv,
-        patch("vllm_ascend.ops.gdn.recurrent_gated_delta_rule", side_effect=recurrent),
-        patch("vllm_ascend.ops.gdn.fused_recurrent_gated_delta_rule", side_effect=upstream_recurrent),
-        patch("vllm_ascend.ops.gdn.maybe_save_kv_layer_to_connector"),
+        patch("vllm_ascend.attention.gdn.recurrent_gated_delta_rule", side_effect=recurrent) as native,
+        patch("vllm_ascend.attention.gdn.fused_recurrent_gated_delta_rule", side_effect=upstream_recurrent) as upstream,
+        patch("vllm_ascend.attention.gdn.gdn_recoverssm_verify", side_effect=verify) as recovery,
+        patch("vllm_ascend.attention.gdn.maybe_save_kv_layer_to_connector"),
     ):
         AscendGatedDeltaNetAttention._forward_core(layer, packed, torch.zeros(4, 1), torch.zeros(4, 1), output)
     torch.testing.assert_close(output, packed[:, 4:].reshape(4, 1, 2))
+    assert recovery.call_count == int(speculative and recover)
+    assert native.call_count == int(not speculative or (not recover and not adaptive))
+    assert upstream.call_count == int(speculative and adaptive and not recover)
     if speculative:
         selected_conv = varlen_conv if adaptive else conv
         torch.testing.assert_close(
@@ -412,28 +577,28 @@ def test_prefill_conv_layout_for_pure_and_mixed_batches(mixed, head_dim):
     output = torch.empty(3, 1, head_dim)
     with (
         override_forward_context(context),
-        patch("vllm_ascend.ops.gdn.get_pcp_group", return_value=SimpleNamespace(world_size=1)),
-        patch("vllm_ascend.ops.gdn._get_fla_gdn_prefill_op", return_value=None),
+        patch("vllm_ascend.attention.gdn.get_pcp_group", return_value=SimpleNamespace(world_size=1)),
+        patch("vllm_ascend.attention.gdn._get_fla_gdn_prefill_op", return_value=None),
         patch(
-            "vllm_ascend.ops.gdn.DeviceOperator.fused_gdn_gating",
+            "vllm_ascend.attention.gdn.DeviceOperator.fused_gdn_gating",
             return_value=(torch.zeros(1, 3, 1), torch.ones(1, 3, 1)),
         ),
-        patch("vllm_ascend.ops.gdn.causal_conv1d_fn", side_effect=conv) as conv_mock,
+        patch("vllm_ascend.attention.gdn.causal_conv1d_fn", side_effect=conv) as conv_mock,
         patch(
-            "vllm_ascend.ops.gdn.causal_conv1d_update",
+            "vllm_ascend.attention.gdn.causal_conv1d_update",
             side_effect=lambda x, *args, **kwargs: x.clone(),
         ) as update_mock,
-        patch("vllm_ascend.ops.gdn.l2norm_fwd", side_effect=lambda x: x),
-        patch("vllm_ascend.ops.gdn.clear_ssm_states"),
+        patch("vllm_ascend.attention.gdn.l2norm_fwd", side_effect=lambda x: x),
+        patch("vllm_ascend.attention.gdn.clear_ssm_states"),
         patch(
-            "vllm_ascend.ops.gdn.chunk_gated_delta_rule",
+            "vllm_ascend.attention.gdn.chunk_gated_delta_rule",
             side_effect=lambda **kw: (kw["v"].clone(), kw["initial_state"]),
         ),
         patch(
-            "vllm_ascend.ops.gdn.recurrent_gated_delta_rule",
+            "vllm_ascend.attention.gdn.recurrent_gated_delta_rule",
             side_effect=lambda q, k, v, *args, **kw: v.clone(),
         ),
-        patch("vllm_ascend.ops.gdn.maybe_save_kv_layer_to_connector"),
+        patch("vllm_ascend.attention.gdn.maybe_save_kv_layer_to_connector"),
     ):
         AscendGatedDeltaNetAttention._forward_core(layer, packed, torch.zeros(3, 1), torch.zeros(3, 1), output)
     conv_mock.assert_called_once()
@@ -491,25 +656,25 @@ def test_prefill_gathers_only_selected_rows_from_padded_state(padded_state) -> N
 
     with (
         override_forward_context(context),
-        patch("vllm_ascend.ops.gdn.get_pcp_group", return_value=SimpleNamespace(world_size=1)),
-        patch("vllm_ascend.ops.gdn._get_fla_gdn_prefill_op", return_value=None),
+        patch("vllm_ascend.attention.gdn.get_pcp_group", return_value=SimpleNamespace(world_size=1)),
+        patch("vllm_ascend.attention.gdn._get_fla_gdn_prefill_op", return_value=None),
         patch(
-            "vllm_ascend.ops.gdn.DeviceOperator.fused_gdn_gating",
+            "vllm_ascend.attention.gdn.DeviceOperator.fused_gdn_gating",
             return_value=(torch.zeros(1, 3, 1), torch.ones(1, 3, 1)),
         ),
-        patch("vllm_ascend.ops.gdn.causal_conv1d_fn", side_effect=conv),
-        patch("vllm_ascend.ops.gdn.l2norm_fwd", side_effect=lambda x: x),
-        patch("vllm_ascend.ops.gdn.clear_ssm_states") as clear_mock,
-        patch("vllm_ascend.ops.gdn.gather_ssm_states", side_effect=gather_state) as gather_mock,
-        patch("vllm_ascend.ops.gdn.scatter_ssm_states_", side_effect=scatter_state) as scatter_mock,
+        patch("vllm_ascend.attention.gdn.causal_conv1d_fn", side_effect=conv),
+        patch("vllm_ascend.attention.gdn.l2norm_fwd", side_effect=lambda x: x),
+        patch("vllm_ascend.attention.gdn.clear_ssm_states") as clear_mock,
+        patch("vllm_ascend.attention.gdn.gather_ssm_states", side_effect=gather_state) as gather_mock,
+        patch("vllm_ascend.attention.gdn.scatter_ssm_states_", side_effect=scatter_state) as scatter_mock,
         patch(
-            "vllm_ascend.ops.gdn.chunk_gated_delta_rule",
+            "vllm_ascend.attention.gdn.chunk_gated_delta_rule",
             side_effect=lambda **kw: (
                 kw["v"].clone(),
                 torch.full_like(kw["initial_state"], 7.0),
             ),
         ),
-        patch("vllm_ascend.ops.gdn.maybe_save_kv_layer_to_connector"),
+        patch("vllm_ascend.attention.gdn.maybe_save_kv_layer_to_connector"),
     ):
         AscendGatedDeltaNetAttention._forward_core(layer, packed, torch.zeros(3, 1), torch.zeros(3, 1), output)
 

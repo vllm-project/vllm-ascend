@@ -48,7 +48,6 @@ examples and links together.
 | [spec_decode/prepare_dflash_inputs.py](spec_decode/prepare_dflash_inputs.py) | `worker/v2/spec_decode/dflash/speculator.py` | [prepare_dflash_inputs.md](docs/prepare_dflash_inputs.md) |
 | [spec_decode/resample.py](spec_decode/resample.py) | `worker/v2/spec_decode/rejection_sampler_utils.py` | [resample.md](docs/resample.md) |
 | [mamba/gdn_prepare.py](mamba/gdn_prepare.py) | `attention/gdn_attn_builder.py` | [gdn_prepare.md](docs/gdn_prepare.md) |
-| [mamba/align_block_table.py](mamba/align_block_table.py) | `ops/gdn_attn_builder.py`, `models/glm5next/recoverssm_metadata.py` | [mamba_align_block_table.md](docs/mamba_align_block_table.md) |
 | [spec_decode/entropy_verify.py](spec_decode/entropy_verify.py) | `worker/v2/spec_decode/rejection_sampler_utils.py` | [entropy_verify.md](docs/entropy_verify.md) |
 
 ## Shared runner support
@@ -154,7 +153,7 @@ configuration rather than the runner input or sampling interface.
 | [query_gather_prep.py](query_gather_prep.py) | Model/attention primitive or shared utility |
 | [qwen4_exp/fia.py](qwen4_exp/fia.py) | Model/attention primitive or shared utility |
 | [qwen4_exp/gbsa.py](qwen4_exp/gbsa.py) | Model/attention primitive or shared utility |
-| [qwen4_exp/hc.py](qwen4_exp/hc.py) | HyperConnection glue operators; row-block `gate_mix` is documented in [qwen4_exp_hc_gate_mix.md](docs/qwen4_exp_hc_gate_mix.md). |
+| [qwen4_exp/hc.py](qwen4_exp/hc.py) | HyperConnection glue operators; row-block `gate_mix` and final-injection `combine_final` are documented in [qwen4_exp_hc_gate_mix.md](docs/qwen4_exp_hc_gate_mix.md) and [qwen4_exp_hc_combine_final.md](docs/qwen4_exp_hc_combine_final.md). |
 | [qwen4_exp/qsa.py](qwen4_exp/qsa.py) | Model/attention primitive or shared utility |
 | [rms_norm.py](rms_norm.py) | Model/attention primitive or shared utility |
 | [rope.py](rope.py) | Model/attention primitive or shared utility |

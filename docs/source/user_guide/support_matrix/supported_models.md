@@ -2,7 +2,8 @@
 
 !!! note
 
-    This list is based on the vLLM main community model list and categorizes the support status of vllm-ascend with labels such as Supported, Experimental, and Unmaintained. Models not listed may be verified independently.
+    - This list is based on the vLLM main community model list and categorizes the support status of vllm-ascend with labels such as Supported, Experimental, and Unmaintained. Models not listed may be verified independently.
+    - **Coming soon**: Step-5-preview -- planned for the next RC version. Actual support is subject to the final release.
 
 **Legend Description**:
 
@@ -121,7 +122,7 @@
     | [Qwen3.6-27B](../../tutorials/models/Qwen3.5-27B-Qwen3.6-27B.md) | ✅ | 950DT Products | 🟡 | ✅ | 🟡 | 🟡 | ✅ | ❌ | ❌ | ❌ | ❌ | ✅ | ❌ | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | 3 | 🟡 | 🟡 | 🟡 | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ |
     | [Qwen3.6-35B-A3B](../../tutorials/models/Qwen3.6-35B-A3B.md) | ✅ | 950DT Products | 🟡 | ✅ | 🟡 | 🟡 | ✅ | ❌ | ❌ | ❌ | ❌ | ✅ | ✅ | ✅ | ❌ | ❌ | ✅ | 🟡 | 🟡 | 3 | 🟡 | 🟡 | 🟡 | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ | ✅ | ✅ | ✅ | 🟡 | ❌ | ❌ | ❌ | ❌ |
     | [Qwen3.8-Flash-Next](../../tutorials/models/Qwen3.8-Flash-Next.md) | ✅ | 950DT Products | ❌ | ✅ | ❌ | ❌ | ✅ | ✅ | 🟡 | ❌ | ❌ | ✅ | ✅ | ✅ | / | ❌ | ✅ | ✅ | 🟡 | 3 | ❌ | ❌ | ❌ | 🟡 | 🟡 | ❌ | 🟡 | ✅ | 🟡 | ❌ | ❌ | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ |
-    | [Step-5-Preview](../../tutorials/models/Step-5-Preview.md) | 🔵 | 950DT Products | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 |
+    | [Step-5-Preview](../../tutorials/models/Step-5-Preview.md) | ✅ | 950DT Products | ✅ | ✅ | ❌ | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | ✅ | ❌ | 3 | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ | ✅ | ❌ | ❌ | ❌ | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ |
 
 === "A2/A3"
 

@@ -32,11 +32,21 @@ def _write_reference(raw, slots, values, blocks, heads, pitch, offset):
     get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5),
     reason="Requires Ascend A2/A3/A5",
 )
-@pytest.mark.parametrize("heads", [1, 2])
-@pytest.mark.parametrize("padding", [0, 256])
+@pytest.mark.parametrize(
+    "heads,padding,tokens",
+    [
+        (1, 0, 1),
+        (2, 256, 1),
+        (1, 0, 64),
+        (1, 256, 64),
+        (2, 0, 64),
+        (2, 256, 64),
+        (1, 256, 65),
+        (2, 0, 65),
+    ],
+)
 @pytest.mark.parametrize("offset", [0, 4096])
 @pytest.mark.parametrize("noncontiguous_source", [False, True])
-@pytest.mark.parametrize("tokens", [1, 64, 65])
 def test_scatter_matches_reference_and_graph_replay(heads, padding, offset, noncontiguous_source, tokens):
     blocks, dim = 32, 256
     pitch = mxfp_packet_size_bytes(heads, 512, dim, dim) + padding

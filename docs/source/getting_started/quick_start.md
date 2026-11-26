@@ -23,6 +23,18 @@ This guide uses [Qwen3-0.6B](../tutorials/models/Qwen3-Dense.md) as an example t
 
 Before using containers, make sure Docker is installed on your system. If Docker is not installed, please refer to the [Docker installation guide](https://docs.docker.com/get-started/get-docker/) for installation instructions.
 
+The container commands below need [Ascend Docker Runtime](installation.md#installation-ascend-docker-runtime) on the **host**: it is the container engine's runtime, it reads `ASCEND_VISIBLE_DEVICES` and binds the selected devices into the container. Install it once on every node that runs containers, then confirm that it is active:
+
+{% raw %}
+
+```bash
+docker info --format 'default={{.DefaultRuntime}}'
+```
+
+{% endraw %}
+
+The output must be `default=ascend`. If it prints `runc`, install or repair the runtime as described in [Use Ascend Docker Runtime](installation.md#installation-ascend-docker-runtime); a container started without it has no NPU inside. If the host cannot install it, use the device and driver flags in [Manual device mapping without Ascend Docker Runtime](installation.md#installation-container-without-runtime).
+
 {% include "getting_started/quick_start/ascend_image/atlas-a2.inc.md" %}
 
 {% filter indent(4, true) %}{% include "getting_started/quick_start/ascend_image/verify_container.inc.md" %}{% endfilter %}
