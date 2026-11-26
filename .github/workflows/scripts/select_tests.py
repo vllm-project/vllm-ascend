@@ -126,7 +126,7 @@ _A3_560T_LABEL_MAP = {
 
 # Operator tests stay on the generic A3 2-card pool. They do not need the
 # 560T machines used by accuracy runs, and a full-suite run must not move them.
-_A3_OPS_PARTITION = "a3-2-card-ops"
+_A3_OPS_PARTITION = "a3-2-ops"
 _OPS_TEST_PREFIX = "tests/e2e/pull_request/two_card/ops/"
 # Used only if the operator partition is given more than one group. The
 # configured count is 1, so scheduling does not split these files. The run

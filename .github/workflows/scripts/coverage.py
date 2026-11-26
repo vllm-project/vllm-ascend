@@ -111,7 +111,7 @@ for key, val in sorted(_part.items()):
     if "-" not in key:
         part_errors.append(f"Key {key!r}: missing '-' separator")
         continue
-    # "{chip}-{num_npus}" or "{chip}-{num_npus}-{suffix}", e.g. a3-2-card-ops.
+    # "{chip}-{num_npus}" or "{chip}-{num_npus}-{suffix}", e.g. a3-2-ops.
     # The card count is the single numeric segment; a suffix names the bucket.
     npu_segments = [seg for seg in key.split("-") if seg.isdigit()]
     if len(npu_segments) != 1:

@@ -140,7 +140,7 @@ runner_mapping:
   # Single-card operator tests. Longer than the two_card pattern so it
   # wins, and pinned to the generic A3 2-card pool rather than 800i.
   tests/e2e/pull_request/two_card/ops:
-    default: a3-2-card-ops
+    default: a3-2-ops
   tests/e2e/pull_request/two_card:
     default: a3-2
     310p: 310p-2
@@ -171,7 +171,7 @@ partition:
     runner_label: linux-aarch64-a3-800i-2
     count: 5
   # One A3 2-card runner. The run script pins one pytest process to each card.
-  a3-2-card-ops:
+  a3-2-ops:
     runner_label: linux-aarch64-a3-2
     count: 1
   a3-4:
