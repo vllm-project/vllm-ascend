@@ -1533,7 +1533,7 @@ def test_k31_dspark_mla_cache_spec_uses_layer_dtype(
     vllm_config = SimpleNamespace(
         speculative_config=SimpleNamespace(
             method=method,
-            draft_model_config=SimpleNamespace(hf_config=SimpleNamespace(model_type=model_type)),
+            draft_model_config=SimpleNamespace(dtype=torch.float16, hf_config=SimpleNamespace(model_type=model_type)),
         ),
         model_config=SimpleNamespace(
             dtype=torch.bfloat16,
@@ -1568,6 +1568,7 @@ def test_k31_dspark_mla_cache_spec_uses_layer_dtype(
     assert spec.num_heads == 1
     assert spec.head_size == 576
     assert spec.dtype == expected_dtype
+    assert spec.rope_dtype == ((torch.float16 if is_draft else torch.bfloat16) if quantized else None)
     if quantized or expected_dtype == torch.bfloat16:
         assert spec.cache_dtype_str is None
         assert spec.kv_quant_mode == KVQuantMode.NONE
