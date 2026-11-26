@@ -1,0 +1,11 @@
+pr: 20
+entries:
+  - category: bugfix
+    text: >-
+      Fixed BF16 numerical discrepancies with upstream Mistral Large 4
+      attention when rotary embeddings and SSMax are enabled.
+  - category: bugfix
+    text: >-
+      Windowed DSpARK drafts now fail early when effective draft DCP exceeds 1,
+      preventing fallback to attention without window masking. Set
+      draft_decode_context_parallel_size=1 for windowed drafts.
