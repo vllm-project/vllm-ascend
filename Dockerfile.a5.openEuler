@@ -92,7 +92,7 @@ RUN case "$(uname -m)" in \
 esac
 
 # ===== Install FLA =====
-ARG FLA_VERSION="26.10.0+feature"
+ARG FLA_VERSION="26.11.0.dev20261126"
 ARG FLA_PACKAGE="flash-linear-attention-npu-a5"
 ARG FLASH_ATTN_NPU_VERSION="0.5.1.post1"
 RUN export PIP_EXTRA_INDEX_URL="${ASCEND_INDEX_URL}" && \
