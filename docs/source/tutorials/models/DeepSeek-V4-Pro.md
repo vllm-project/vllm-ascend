@@ -58,6 +58,10 @@ If you want to deploy a multi-node environment, you need to verify multi-node co
 
 Select an image based on your machine type and start the docker image on your node, refer to [using docker](../../getting_started/installation.md#installation-prebuilt-image-selection).
 
+!!! note "Docker version"
+
+    Docker Engine 20.10 or later is recommended. Docker versions before 20.10 may not configure the device cgroup correctly on hosts using cgroup v2. When using manual device mapping instead of Ascend Docker Runtime, devices passed with `--device` may then be inaccessible inside the container and NPU initialization may fail.
+
 === "950DT products"
 
     Start the docker image on each node.

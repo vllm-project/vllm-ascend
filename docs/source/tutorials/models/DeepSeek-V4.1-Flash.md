@@ -101,6 +101,10 @@ interfaces, and the service ports must not be blocked.
 Select the tab for the target hardware. A2, A3, and 950DT products use
 separate images.
 
+!!! note "Docker version"
+
+    Docker Engine 20.10 or later is recommended. Docker versions before 20.10 may not configure the device cgroup correctly on hosts using cgroup v2. When using manual device mapping instead of Ascend Docker Runtime, devices passed with `--device` may then be inaccessible inside the container and NPU initialization may fail.
+
 === "A3 series"
 
     An A3 server exposes 16 logical devices. Run this command on every A3
