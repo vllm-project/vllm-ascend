@@ -3,15 +3,20 @@ meta:
     ascend_910c: supported
 variants:
   ascend_w8a8:
-    label: Ascend W8A8 QuaRot
+    label: W8A8 (ASCEND)
     model_id: vllm-ascend/MiniMax-M2.7-w8a8-QuaRot
     precision: int8
-    description: W8A8-QuaRot with EAGLE3 on Atlas 800I A3. The automatic Docker and Serve cards cover single-node short context.
+    description: W8A8-QuaRot with EAGLE3 on Atlas 800I A3. The automatic Docker and Serve cards cover single-node short context. The MiniMax-M2 model family (M2.5 and M2.7) is outside upstream maintenance as of vLLM Ascend v0.30.0. See the historical tutorial for deployment details.
     vram_minimum_gb: 276
     nightly_required: false
+    min_vllm_version: "0.30.0"
+    tp: 4
     supported_frontends: [python]
     supported_hardware:
       - ascend_910c
+    install:
+      docker:
+        command: docker pull quay.io/ascend/vllm-ascend:v0.30.0-a3-openeuler
     extra_args:
       - --quantization
       - ascend
@@ -32,16 +37,13 @@ variants:
       - '{"method":"eagle3","model":"Eco-Tech/MiniMax-M2.7-eagle-model-short","num_speculative_tokens":3,"enforce_eager":true}'
       - --served-model-name
       - MiniMax-M2.7
-      - vllm-ascend/MiniMax-M2.7-w8a8-QuaRot
-      - --host
-      - 127.0.0.1
     extra_env:
       HCCL_OP_EXPANSION_MODE: AIV
       HCCL_BUFFSIZE: "1024"
       OMP_NUM_THREADS: "1"
       TASK_QUEUE_ENABLE: "1"
       PYTORCH_NPU_ALLOC_CONF: expandable_segments:True
-      VLLM_USE_MODELSCOPE: "true"
+      VLLM_USE_MODELSCOPE: 'True'
       MODELSCOPE_CACHE: /root/.cache/huggingface/modelscope
     hardware_overrides:
       ascend_910c:
@@ -49,7 +51,6 @@ variants:
         docker_serve_command: env --chdir=/root/.cache/huggingface/modelscope/models vllm serve
         install:
           pip: false
-          docker: true
 features:
   reasoning:
     hardware_overrides:
@@ -57,32 +58,94 @@ features:
         args:
           - --reasoning-parser
           - minimax_m2_append_think
+# The single-node DEP renderer derives DP16 from variant tp alone on A3.
+# Keep this hardware-scoped override for the tested TP4 x DP4 topology.
 strategy_overrides:
   single_node_dep:
     hardware_overrides:
       ascend_910c:
         extra_args:
+          - --host
+          - 127.0.0.1
           - --tensor-parallel-size
           - "4"
           - --data-parallel-size
           - "4"
 strategy_hardware:
-  single_node_tp:
-    ascend_910c: unsupported
-  single_node_tep:
-    ascend_910c: unsupported
   single_node_dep:
     ascend_910c: supported
-  multi_node_tp:
-    ascend_910c: unsupported
-  multi_node_tp_pp:
-    ascend_910c: unsupported
-  multi_node_tep:
-    ascend_910c: unsupported
-  multi_node_dep:
-    ascend_910c: unsupported
   pd_cluster:
-    ascend_910c: unsupported
+    ascend_910c: supported
+presets:
+  ascend_pd:
+    label: "Ascend PD 1P1D (DP2 x TP8 + EP)"
+    hardware: ascend_910c
+    strategy: pd_cluster
+    variants: [ascend_w8a8]
+    default: false
+    description: Generated Ascend Router and MooncakeConnectorV2 deployment. This path has not been tested on A3.
+    select: {pd_router: ascend, pd_connector: mooncake_ascend, frontend: python}
+    remove_args: ["--data-parallel-hybrid-lb"]
+    source:
+      href: https://github.com/vllm-project/vllm-ascend/pull/22801
+      key: a3-w8a8-pd
+    image:
+      vllm: quay.io/ascend/vllm-ascend:v0.30.0-a3-openeuler
+    runbook: |
+      The manual Guide flow was tested on two Atlas A3 nodes with vLLM Ascend
+      v0.30.0, MooncakeConnectorV1 and a Python gateway. Its 160/160 result
+      applies to that flow. The generated Ascend Router, MooncakeConnectorV2
+      and native external DP path has not been tested. The v0.30.0 A3 release
+      image contains the Python proxy script used by the generated Router card.
+      Confirm the Router is
+      available before launch, then verify both pools, a request through the
+      Router, and Decode-side KV transfer before using this path.
+    roles:
+      prefill:
+        nodes: 1
+        parallelism: dep
+        tp: 8
+        pp: 1
+        remove_args: ["--async-scheduling", "--compilation-config"]
+        args:
+          - --host
+          - 0.0.0.0
+          - --max-model-len
+          - "200000"
+          - --max-num-seqs
+          - "64"
+          - --gpu-memory-utilization
+          - "0.75"
+          - --enforce-eager
+          - --enable-request-id-headers
+          - --additional-config
+          - '{"enable_cpu_binding":true,"enable_fused_mc2":1,"enable_flashcomm1":true}'
+          - --speculative-config
+          - '{"method":"eagle3","model":"Eco-Tech/MiniMax-M2.7-eagle-model-short","num_speculative_tokens":1}'
+        env:
+          HCCL_BUFFSIZE: "1024"
+      decode:
+        nodes: 1
+        parallelism: dep
+        tp: 8
+        pp: 1
+        args:
+          - --host
+          - 0.0.0.0
+          - --max-model-len
+          - "200000"
+          - --max-num-seqs
+          - "16"
+          - --gpu-memory-utilization
+          - "0.75"
+          - --no-enable-prefix-caching
+          - --enable-request-id-headers
+          - --additional-config
+          - '{"enable_cpu_binding":true,"enable_fused_mc2":1,"enable_flashcomm1":false}'
+          - --speculative-config
+          - '{"method":"eagle3","model":"Eco-Tech/MiniMax-M2.7-eagle-model-short","num_speculative_tokens":3}'
+        env:
+          HCCL_BUFFSIZE: "2048"
 guide_sections:
   ascend: |-
     ## A3 W8A8 deployment choices
@@ -278,11 +341,13 @@ guide_sections:
 
     ## Two-node A3 release review
 
+    This is the tested manual 1P1D path. The separate Ascend PD preset uses Ascend Router and MooncakeConnectorV2. See the preset runbook for its verification status.
+
     MiniMax-M2.7 W8A8 on two Ascend A3 hosts with vLLM Ascend v0.30.0, using separate Prefill and Decode nodes.
 
     Follow this section for two-node Prefill/Decode disaggregation. [Historical section 5.2](https://docs.vllm.ai/projects/ascend/en/v0.23.0/tutorials/models/MiniMax-M2.html#multi-node-pd-separation-deployment).
 
-    Use the routable host IPv4 addresses on the interface selected by `ip route get "$peer" from "$self"`. The route interface is used by Gloo, TP and HCCL. Check the A3 device-side fabric and peer NPU vNIC connectivity separately. Allow the gateway to reach backend HTTP ports 7000–7001 on Prefill and 7100–7101 on Decode. Clients must reach TCP 8009 on the Prefill gateway. Reserve 12321 for the DP RPC on each host. Allow peer TCP traffic to the required Mooncake control endpoints (Prefill base 55880 and Decode base 56900) and the rank-specific AscendDirect/HIXL listeners. After startup, match the role container PIDs and logs against `ss -lntp` to identify the actual listeners, then check both directions from the peer. Scope any temporary rules to those ports and the peer address. After the HTTP checks, use the gateway request and Decode counters to verify cross-host KV transfer.
+    Use the routable host IPv4 addresses on the interface selected by `ip route get "$peer" from "$self"`. The route interface is used by Gloo, TP and HCCL. Check the A3 device-side fabric and peer NPU vNIC connectivity separately. Allow the gateway to reach backend HTTP ports 7000–7001 on Prefill and 7100–7101 on Decode. Clients must reach TCP 8009 on the Prefill gateway. Reserve 12321 for the DP RPC on each host. Allow peer TCP traffic to the required Mooncake control endpoints (Prefill base 55880 and Decode base 56900) and any additional rank-specific listeners reported by the manual MooncakeConnectorV1 deployment. After startup, match the role container PIDs and logs against `ss -lntp` to identify the actual listeners, then check both directions from the peer. Scope any temporary rules to those ports and the peer address. After the HTTP checks, use the gateway request and Decode counters to verify cross-host KV transfer.
 
     ### 1. Configure and start the containers
 
