@@ -59,6 +59,7 @@ import subprocess
 import sys
 import tempfile
 import time
+from contextlib import suppress
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
@@ -317,7 +318,7 @@ class Orchestrator:
                     "Permission denied. Only the PR author or a maintainer with write access can request a review.",
                 )
                 return False
-        elif command != "push" and not self.can_write(actor):
+        elif command in ("/ai-review-stop", "/ai-review-waive") and not self.can_write(actor):
             self.feedback(event, "Permission denied. This action requires repository write access.")
             return False
 
@@ -327,7 +328,7 @@ class Orchestrator:
         if command not in ("stop", "/ai-review-stop") and not enabled:
             if command != "push":
                 self.feedback(
-                    event, "AI review is not enabled. Ask an allowlisted maintainer to add the `ai-review` label."
+                    event, "AI review is not enabled. Ask an allowlisted reviewer to add the `ai-review` label."
                 )
             return False
 
@@ -351,7 +352,7 @@ class Orchestrator:
             self.remove_labels(pull, AI_REVIEW_LABEL, AI_REVIEW_PASSED_LABEL)
             message = (
                 "Review labels removed. The bot will update the summary. To restart, wait for this run to finish, "
-                "then ask an allowlisted maintainer to reapply the `ai-review` label."
+                "then ask an allowlisted reviewer to reapply the `ai-review` label."
             )
         elif command == "/ai-review-waive":
             message = "Waiver request accepted. The bot will check the findings and commit before applying it."
@@ -400,9 +401,7 @@ class Orchestrator:
         if command == "stop" and enabled:
             return None  # The label has already been reapplied to restart.
         if not stopping and not enabled:
-            self.feedback(
-                event, "AI review is not enabled. Ask an allowlisted maintainer to add the `ai-review` label."
-            )
+            self.feedback(event, "AI review is not enabled. Ask an allowlisted reviewer to add the `ai-review` label.")
             return None
 
         # Read the published summary to handle stops, session restarts and waivers.
@@ -425,9 +424,7 @@ class Orchestrator:
                 self.state.round = self.state.total = 0
                 self.state.session_run_id = run_id
         elif self.state.status == "stopped":
-            self.feedback(
-                event, "AI review is stopped. Ask an allowlisted maintainer to reapply the `ai-review` label."
-            )
+            self.feedback(event, "AI review is stopped. Ask an allowlisted reviewer to reapply the `ai-review` label.")
             return None
 
         if command == "/ai-review-waive":
@@ -447,7 +444,7 @@ class Orchestrator:
             self.feedback(
                 event,
                 f"Reached the {MAX_TOTAL_ROUNDS}-round limit for this session. "
-                "Ask an allowlisted maintainer to reapply the `ai-review` label to reset the counts. "
+                "Ask an allowlisted reviewer to reapply the `ai-review` label to reset the counts. "
                 "Pushing new commits does not reset the session count.",
             )
             return None
@@ -455,17 +452,15 @@ class Orchestrator:
             self.feedback(
                 event,
                 f"Reached the {MAX_ROUNDS_PER_HEAD}-round limit for this commit. Push changes and comment `/ai-review` "
-                "again, or ask an allowlisted maintainer to reapply the `ai-review` label to reset the counts.",
+                "again, or ask an allowlisted reviewer to reapply the `ai-review` label to reset the counts.",
             )
             return None
 
-        # Mark the review pending and build its diff. Publishing the summary will count the round.
+        # Build the review inputs. Publishing the summary will count the round.
         self.remove_labels(pull, AI_REVIEW_PASSED_LABEL)
         self.state.status = "reviewing"
         self.state.coverage_complete = False
         self.state.requires_human = False
-
-        self.commit_status("pending")
 
         for attempt in range(1, GIT_FETCH_MAX_ATTEMPTS + 1):
             try:
@@ -538,10 +533,11 @@ class Orchestrator:
         pull = self.pull()
         if pull["state"] != "open" or AI_REVIEW_LABEL not in {label["name"] for label in pull["labels"]}:
             print("Review stopped or PR closed; no result published.")
+            self.state.status = "stopped"
+            self.commit_status("error")
             return
 
         self.summary_comment_id = request["comment_id"]
-        self.state = State.from_dict(request["state"])
         self.state.round += 1
         self.state.total += 1
 
@@ -597,6 +593,9 @@ class Orchestrator:
             or AI_REVIEW_LABEL not in {label["name"] for label in pull["labels"]}
             or (pull["base"]["sha"], pull["head"]["sha"]) != (self.state.base, self.state.head)
         ):
+            # Finish the status on the reviewed commit without changing the PR's labels.
+            self.state.status = "discarded"
+            self.commit_status("error")
             return
 
         if self.state.status == "passed":
@@ -788,8 +787,17 @@ def main() -> int:
     if args.phase == "review":
         request = json.loads(args.request.read_text())
         orchestrator = Orchestrator(workspace, request["pr"])
-        output = run_agent(workspace, request)
-        orchestrator.publish(request, output)
+        orchestrator.state = State.from_dict(request["state"])
+        orchestrator.commit_status("pending")
+        try:
+            output = run_agent(workspace, request)
+            orchestrator.publish(request, output)
+        except Exception:
+            orchestrator.state.status = "error"
+            # gh already logs API errors. Keep the original review exception if reporting also fails.
+            with suppress(subprocess.CalledProcessError):
+                orchestrator.commit_status("error")
+            raise
         return 0
 
     event = json.loads(Path(os.environ["GITHUB_EVENT_PATH"]).read_text())

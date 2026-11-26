@@ -84,8 +84,9 @@ Each MoE layer then follows one routing path:
    the layer's device lookup.
 3. The quantization method receives the routing weights and physical IDs and
    runs fused MoE. It does not select experts again.
-4. The same device operation records selected physical experts in the upstream
-   load buffer when its collection phase is enabled, then fused MoE executes.
+4. After the fused MoE call returns, the EPLB load recorder accumulates token
+   counts for each physical expert in the upstream load buffer when load
+   collection is enabled for the batch.
 
 Phase selection filters only the load submitted by a rank. Every rank still
 advances the upstream EPLB state machine and participates in its collectives in

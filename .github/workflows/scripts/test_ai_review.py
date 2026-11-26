@@ -52,7 +52,7 @@ def history(tmp_path_factory):
 
     kb = repo / ".github/agent-review"
     shutil.copytree(Path(__file__).resolve().parents[2] / "agent-review", kb)
-    (kb / "allowlist.txt").write_text("maintainer  # pilot reviewer\n")
+    (kb / "allowlist.txt").write_text("maintainer  # pilot reviewer\npilot-triager\n")
     return SimpleNamespace(repo=repo, common=common, base=base, head=head, next_head=next_head)
 
 
@@ -99,7 +99,10 @@ class PullRequest:
         if path == "pulls/7":
             return self.pull | {"labels": [{"name": name} for name in self.labels]}
         if path.startswith("collaborators/"):
-            return {"permission": "write" if path.split("/")[1] in {"maintainer", "writer"} else "read"}
+            actor = path.split("/")[1]
+            if actor in {"pilot-triager", "unlisted-triager"}:
+                return {"permission": "read", "role_name": "triage"}
+            return {"permission": "write" if actor in {"maintainer", "writer"} else "read"}
         if path == "issues/7/comments?per_page=100":
             assert args == ("--paginate", "--slurp")
             comments = list(self.comments.values())
@@ -179,8 +182,11 @@ def phase(tmp_path, history, pr, agent, monkeypatch):
         ("/ai-review F001 fixed", "author", True, "Review request accepted"),
         ("/ai-review", "writer", True, "Review request accepted"),
         ("/ai-review", "reader", False, "Permission denied"),
+        ("/ai-review", "pilot-triager", False, "Permission denied"),
         ("/ai-review-stop", "author", False, "Permission denied"),
+        ("/ai-review-stop", "pilot-triager", False, "Permission denied"),
         ("/ai-review-waive all intentional", "author", False, "Permission denied"),
+        ("/ai-review-waive all intentional", "pilot-triager", False, "Permission denied"),
         ("/ai-reviewer", "author", False, None),
     ],
 )
@@ -197,11 +203,23 @@ def test_command_permissions(pr, phase, body, actor, allowed, feedback):
         assert "[View Actions run](https://github.com/example/project/actions/runs/101)" in comment["body"]
 
 
-def test_label_checks_the_reviewer_and_removes_it_when_denied(pr, phase):
-    assert phase("authorize", pr.label_event(actor="writer")) == {}
+@pytest.mark.parametrize("actor", ["writer", "unlisted-triager"])
+def test_label_checks_the_reviewer_and_removes_it_when_denied(pr, phase, actor):
+    assert phase("authorize", pr.label_event(actor=actor)) == {}
     [notice] = pr.comments.values()
-    assert "@writer" in notice["body"] and "RFC #21451" in notice["body"]
+    assert f"@{actor}" in notice["body"] and "RFC #21451" in notice["body"]
     assert not pr.labels
+
+
+def test_triage_label_removal_stops_the_session(pr, phase, history):
+    pr.seed(status="passed", round=1, total=1)
+    pr.labels = {"ai-review-passed"}  # GitHub already removed ai-review.
+    stop = pr.label_event("unlabeled", actor="unlisted-triager")
+    assert phase("authorize", stop) == {"authorized": "true"}
+    assert not pr.labels
+    assert phase("prepare", stop) == {}
+    assert pr.state()["status"] == "stopped" and pr.state()["total"] == 1
+    assert pr.statuses == [(history.head, "error")]
 
 
 def test_bot_command_is_ignored_even_with_write_access(pr, phase):
@@ -232,16 +250,17 @@ def test_request_rechecks_live_pr_after_queue(pr, phase, agent, change, notice):
 
 
 def test_label_then_manual_review_of_all_changes(pr, phase, agent, history):
-    start = pr.label_event()
+    start = pr.label_event(actor="pilot-triager")
     assert phase("authorize", start) == {"authorized": "true"}
     assert phase("prepare", start) == {"review": "true", "base": history.common, "head": history.head}
+    assert not pr.statuses
     agent.return_value = result(findings=[finding(), finding(line=2), finding(line=None, severity="NIT")])
     phase("review")
     [summary] = pr.summaries()
     assert "DeepSeek Harness headless · POC pilot" in summary["body"]
     assert [comment["line"] for comment in pr.inline.values()] == [1, 2]
     assert pr.state()["status"] == "reviewing" and pr.state()["total"] == 1
-    assert pr.statuses[-1] == (history.head, "failure")
+    assert pr.statuses == [(history.head, "pending"), (history.head, "failure")]
 
     reply = "/ai-review\nF001 fixed in the first commit.\nF002 fixed in the second."
     command = pr.command(reply)
@@ -286,13 +305,14 @@ def test_no_pass_when_review_is_blocked(pr, phase, agent, monkeypatch, history, 
         assert "truncated" in pr.state()["message"] and len(agent.call_args.args[1]["diff"]) == 12
 
 
-def test_stop_blocks_inflight_publication(pr, phase, agent):
+def test_stop_blocks_inflight_publication(pr, phase, agent, history):
     phase("prepare", pr.command())
     stop = pr.command("/ai-review-stop", "maintainer")
     assert phase("authorize", stop) == {"authorized": "true"}
     assert not pr.labels
     phase("review")
     assert not pr.summaries()
+    assert pr.statuses == [(history.head, "pending"), (history.head, "error")]
     assert phase("prepare", stop) == {}
     assert pr.state()["status"] == "stopped" and pr.state()["total"] == 0
     assert agent.call_count == 1
@@ -410,6 +430,7 @@ def test_new_commit_during_review_discards_the_result(pr, phase, agent, history,
         1,
     )
     assert not state["findings"] and not pr.inline and "ai-review-passed" not in pr.labels
+    assert pr.statuses == [(history.head, "pending"), (history.head, "error")]
 
 
 @pytest.mark.parametrize(
@@ -420,13 +441,14 @@ def test_new_commit_during_review_discards_the_result(pr, phase, agent, history,
         (result(updates=[dict(id="F999", status="resolved", evidence="Fixed.")]), ValueError),
     ],
 )
-def test_unsuccessful_analysis_can_be_rerun_without_losing_a_round(pr, phase, agent, bad_result, error):
+def test_unsuccessful_analysis_can_be_rerun_without_losing_a_round(pr, phase, agent, history, bad_result, error):
     previous = pr.seed(round=2, total=3)["body"]
     event = pr.command()
     agent.side_effect = [bad_result, result()]
     phase("prepare", event)
     with pytest.raises(error):
         phase("review")
+    assert pr.statuses == [(history.head, "pending"), (history.head, "error")]
     assert pr.summaries()[0]["body"] == previous
     phase("prepare", event)
     phase("review")
@@ -437,13 +459,16 @@ def test_unsuccessful_analysis_can_be_rerun_without_losing_a_round(pr, phase, ag
 @pytest.mark.parametrize("write,expected_total", [("summary", 3), ("status", 4)])
 def test_only_a_saved_summary_spends_the_round(pr, phase, monkeypatch, write, expected_total):
     summary = pr.seed(round=2, total=3)
-    target = f"issues/comments/{summary['id']}" if write == "summary" else "statuses/"
     phase("prepare", pr.command())
 
-    def fail_write(endpoint, *args, **kwargs):
-        if target in endpoint:
+    def fail_write(endpoint, *args, payload=None, **kwargs):
+        if write == "summary" and endpoint.endswith(f"issues/comments/{summary['id']}"):
             raise RuntimeError("write failed")
-        return pr.api(endpoint, *args, **kwargs)
+        if write == "status" and "/statuses/" in endpoint and payload["state"] == "success":
+            raise RuntimeError("write failed")
+        if "/statuses/" in endpoint and payload["state"] == "error":
+            raise subprocess.CalledProcessError(1, ["gh", "api", endpoint])
+        return pr.api(endpoint, *args, payload=payload, **kwargs)
 
     monkeypatch.setattr(ai, "gh", fail_write)
     with pytest.raises(RuntimeError, match="write failed"):
@@ -463,7 +488,8 @@ def test_head_changed_after_summary_write_gets_no_pass(pr, phase, monkeypatch, h
     monkeypatch.setattr(ai, "gh", push_after_summary)
     phase("review")
     assert pr.state()["total"] == 1 and pr.state()["head"] == history.head
-    assert "ai-review-passed" not in pr.labels and pr.statuses == [(history.head, "pending")]
+    assert "ai-review-passed" not in pr.labels
+    assert pr.statuses == [(history.head, "pending"), (history.head, "error")]
 
 
 def test_restore_latest_bot_summary_across_comment_pages(pr, phase, agent, history):
@@ -531,6 +557,7 @@ def test_only_git_fetch_is_retried(pr, phase, monkeypatch, operation, failures, 
         with pytest.raises(subprocess.CalledProcessError) as caught:
             phase("prepare", pr.command())
         assert caught.value is error
+        assert not pr.statuses
     assert len(calls) == attempts and len(set(calls)) == 1
     assert [item.args for item in sleep.call_args_list] == [(ai.GIT_FETCH_RETRY_DELAY_SECONDS,)] * (attempts - 1)
     assert not pr.summaries()

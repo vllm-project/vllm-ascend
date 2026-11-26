@@ -9,6 +9,9 @@ from vllm.distributed.kv_transfer.kv_connector.v1.multi_connector import MultiCo
 
 from vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.dspark_context import uses_sfa_dspark_kv_transfer
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.hisparse.layout import has_hisparse_cache_layout
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.layerwise_cache_layout import (
+    get_layerwise_reuse_layout,
+)
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
@@ -83,6 +86,11 @@ class AscendMultiConnector(MultiConnector, SupportsHMA):
             "HMA should not be enabled unless all sub-connectors support it"
         )
         self._configure_layerwise_reuse_completion()
+        uses_shared_buffers = role == KVConnectorRole.WORKER and get_layerwise_reuse_layout(kv_cache_config) is not None
+        if uses_shared_buffers and len(self._connectors) > 1:
+            all_pd_fenced = len(self._non_slot_release_connectors) == 1
+            if not (all_pd_fenced and self._external_slot_release_sink_configured):
+                raise ValueError("Layerwise offload requires a slot-release fence for every PD connector.")
         self._draft_host_mirror_save_hook: HiSparseDraftHostMirrorSaveHook | None = None
         if (
             role == KVConnectorRole.WORKER
