@@ -632,6 +632,22 @@ class TestNPUPlatform(TestBase):
             mock_warning.call_args.args[0],
         )
 
+    @patch("vllm_ascend.platform.enable_sp", return_value=False)
+    def test_glm_kpool_dcp_aligns_interleave_to_cache_page(self, _mock_enable_sp):
+        config = SimpleNamespace(
+            cache_config=SimpleNamespace(block_size=2176),
+            model_config=SimpleNamespace(
+                architecture="Glm5NextForConditionalGeneration",
+                hf_text_config=SimpleNamespace(index_kpool=4, index_topk=2048),
+            ),
+            parallel_config=SimpleNamespace(decode_context_parallel_size=4, cp_kv_cache_interleave_size=1),
+            kv_transfer_config=None,
+        )
+
+        _validate_sfa_dcp_kv_sp(config)
+
+        assert config.parallel_config.cp_kv_cache_interleave_size == 2176
+
     def test_validate_eplb_config_rejects_weight_offload(self):
         for cpu_gb, group_size in ((1, 0), (0, 2)):
             with self.subTest(cpu_gb=cpu_gb, group_size=group_size):
