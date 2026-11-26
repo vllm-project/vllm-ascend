@@ -131,7 +131,18 @@ class _DirectMirrorSources:
 class HostMirrorConnector:
     """Join one worker's Host mirror at the existing Core draft finalizer."""
 
-    def __init__(self, connector, worker, output_copy_stream, sources, logger=None, rank=None, *, pd_connector=None):
+    def __init__(
+        self,
+        connector,
+        worker,
+        output_copy_stream,
+        sources,
+        logger=None,
+        rank=None,
+        *,
+        pd_connector=None,
+        finish_order=(None,),
+    ):
         self._connector = connector
         self._worker = worker
         self._output_copy_stream = output_copy_stream
@@ -139,6 +150,7 @@ class HostMirrorConnector:
         self._logger = logger
         self._rank = rank
         self._pd_connector = pd_connector
+        self._finish_order = finish_order
         self._logged_draft_defer = False
         self._logged_finalize = False
         self._overlap_draft = False
@@ -184,27 +196,28 @@ class HostMirrorConnector:
         if isinstance(self._connector, PCPHiSparseConnector):
             self._connector.prepare_host_mirror()
 
-        compute_stream = torch.accelerator.current_stream()
-        worker._forward_ready_event.record(compute_stream)
-        pending_before = len(worker._pending_dma_descriptors)
         try:
-            worker._finish_mirror_phase(worker._forward_ready_event)
-            worker._in_step = False
-            if worker._dma_submitted:
-                self._pending_event = worker.host_write_event
-                worker._dma_submitted = False
-                self._overlap_draft = len(worker._pending_dma_descriptors) == pending_before + 1
-                if self._overlap_draft:
-                    # AsyncOutput must not report completion before Host KV is durable.
-                    self._output_copy_stream.wait_event(self._pending_event)
+            for child in self._finish_order:
+                if child is not None:
+                    child.finish_forward()
+                    continue
+                compute_stream = torch.accelerator.current_stream()
+                worker._forward_ready_event.record(compute_stream)
+                pending_before = len(worker._pending_dma_descriptors)
+                worker._finish_mirror_phase(worker._forward_ready_event)
+                worker._in_step = False
+                if worker._dma_submitted:
+                    self._pending_event = worker.host_write_event
+                    worker._dma_submitted = False
+                    self._overlap_draft = len(worker._pending_dma_descriptors) == pending_before + 1
+                    if self._overlap_draft:
+                        # AsyncOutput must not report completion before Host KV is durable.
+                        self._output_copy_stream.wait_event(self._pending_event)
+                    else:
+                        self.join_pending()
                 else:
-                    self.join_pending()
-            else:
-                worker.host_write_event.record(compute_stream)
-            worker._release_completed_dma_descriptors()
-            # The supported MultiConnector calls HiSparse first and Mooncake second.
-            if self._pd_connector is not None:
-                self._pd_connector.finish_forward()
+                    worker.host_write_event.record(compute_stream)
+                worker._release_completed_dma_descriptors()
         except BaseException:
             # The mirror phase may fail after recording a submitted copy.
             if worker._dma_submitted:
@@ -264,21 +277,27 @@ def overlap_target_host_mirror(runner):
         return connector
     hisparse_connector = connector.kv_connector
     pd_connector = None
+    finish_order = (None,)
     if type(hisparse_connector) is AscendMultiConnector:
         from vllm_ascend.distributed.kv_transfer.kv_p2p.hisparse_pd import (
             _HiSparseMooncakePullConnector,
             _HiSparsePDWorker,
         )
 
-        if len(hisparse_connector._connectors) != 2:
+        children = hisparse_connector._connectors
+        host_children = [child for child in children if type(child) is HiSparseConnector]
+        pd_children = [child for child in children if type(child) is _HiSparseMooncakePullConnector]
+        if len(host_children) != 1 or len(pd_children) != 1:
             return connector
-        hisparse_connector, pd_connector = hisparse_connector._connectors
+        hisparse_connector, pd_connector = host_children[0], pd_children[0]
         if (
-            type(pd_connector) is not _HiSparseMooncakePullConnector
+            children.index(hisparse_connector) > children.index(pd_connector)
             or type(pd_connector.connector_worker) is not _HiSparsePDWorker
             or not pd_connector.connector_worker.kv_transfer_config.is_kv_consumer
         ):
             return connector
+        # None replaces HiSparse's finish_forward at its original position.
+        finish_order = tuple(None if child is hisparse_connector else child for child in children)
     if type(hisparse_connector) is not HiSparseConnector:
         return connector
     worker = hisparse_connector.connector_worker
@@ -307,4 +326,6 @@ def overlap_target_host_mirror(runner):
         return connector
     rank = get_tensor_model_parallel_rank()
     logger.info("HiSparse direct Target Host mirror overlap enabled: rank=%d", rank)
-    return HostMirrorConnector(connector, worker, output_stream, sources, logger, rank, pd_connector=pd_connector)
+    return HostMirrorConnector(
+        connector, worker, output_stream, sources, logger, rank, pd_connector=pd_connector, finish_order=finish_order
+    )

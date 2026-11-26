@@ -12,7 +12,8 @@ pytest.importorskip("vllm.v1.hisparse.backend")
 from vllm_ascend.hisparse.backend import AscendHiSparseBackend  # noqa: E402
 
 
-def test_pd_host_mirror_defers_only_shared_consumer_writer(monkeypatch):
+@pytest.mark.parametrize("extra_position", [None, "before", "between", "after"])
+def test_pd_host_mirror_defers_only_shared_consumer_writer(monkeypatch, extra_position):
     from vllm.distributed import parallel_state
     from vllm.v1.worker.gpu.kv_connector import ActiveKVConnector
 
@@ -56,8 +57,13 @@ def test_pd_host_mirror_defers_only_shared_consumer_writer(monkeypatch):
     mooncake.connector_worker = _HiSparsePDWorker.__new__(_HiSparsePDWorker)
     mooncake.connector_worker.kv_transfer_config = NS(is_kv_consumer=True)
     mooncake.finish_forward = lambda: calls.append("Mooncake")
+    extra = NS(finish_forward=lambda: calls.append("extra"))
+    order = ["hisparse", "Mooncake"]
+    if extra_position is not None:
+        order.insert({"before": 0, "between": 1, "after": 2}[extra_position], "extra")
+    children = {"hisparse": hisparse, "Mooncake": mooncake, "extra": extra}
     multi = AscendMultiConnector.__new__(AscendMultiConnector)
-    multi._connectors = [hisparse, mooncake]
+    multi._connectors = [children[name] for name in order]
     inner = ActiveKVConnector.__new__(ActiveKVConnector)
     inner.kv_connector, inner._disabled = multi, False
     inner.pre_forward = Mock()
@@ -74,16 +80,17 @@ def test_pd_host_mirror_defers_only_shared_consumer_writer(monkeypatch):
     proxy.finish_forward()
     assert not worker._in_step
     proxy.post_forward(set(), defer_finalize=True)
-    assert calls == ["target DMA", "output wait", "Mooncake"]
+    expected = [step for name in order for step in (["target DMA", "output wait"] if name == "hisparse" else [name])]
+    assert calls == expected
     proxy.finalize_step()
-    assert calls == ["target DMA", "output wait", "Mooncake", "compute wait", "finalize"]
+    assert calls == [*expected, "compute wait", "finalize"]
 
     calls.clear()
     scheduler_output.skip_drafts = True
     proxy.begin_execution(True)
     proxy.pre_forward(scheduler_output, batch, attn_metadata={})
     proxy.finish_forward()
-    assert calls == ["regular HiSparse", "Mooncake"]
+    assert calls == ["regular HiSparse" if name == "hisparse" else name for name in order]
     worker.is_host_writer = False
     assert host_mirror.overlap_target_host_mirror(runner) is inner
     worker.is_host_writer = True
