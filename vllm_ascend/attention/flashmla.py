@@ -9,7 +9,8 @@ Callers own stream ordering and persistent KV writes. Tensor-content checks belo
 in preflight tests: the decode hot path must not copy lengths or tables to the CPU.
 """
 
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from math import ceil
 from typing import TYPE_CHECKING, Any, ClassVar
@@ -532,6 +533,7 @@ class FlashMLAMetadataBuilder:
                     sliding_window=window,
                 )
             )
+        self._query_position_limit: tuple[torch.Tensor, int] | None = None
         self.current_adapter = adapter
         self.adapters = {True: adapter}
         if adapter.config.mask_mode == FLASHMLA_BAND_MASK_MODE:
@@ -564,6 +566,16 @@ class FlashMLAMetadataBuilder:
             raise ValueError("QuantFlashMLA requires a positive per-request decode query capacity")
         self.buffers: dict[tuple, FlashMLADecode] = {}
         self.attn_mask = attn_mask
+
+    @contextmanager
+    def limit_query_positions(self, first_positions: torch.Tensor, max_model_len: int) -> Iterator[None]:
+        """Limit this build to query positions strictly below the model length."""
+        previous = self._query_position_limit
+        self._query_position_limit = (first_positions, max_model_len)
+        try:
+            yield
+        finally:
+            self._query_position_limit = previous
 
     def _metadata_bounds(self, *, current: bool = False) -> dict[str, int]:
         max_cache_len = self.quant_max_cache_len
@@ -709,10 +721,10 @@ class FlashMLAMetadataBuilder:
                 )
             flash.used_q.zero_()
             used_q = flash.cu[1 : num_decodes + 1] - flash.cu[:num_decodes]
-            if flash.adapter.config.mask_mode == FLASHMLA_BAND_MASK_MODE:
-                draft_query_lens = getattr(common, "draft_query_lens", None)
-                if draft_query_lens is not None:
-                    used_q = torch.minimum(used_q, draft_query_lens[:num_decodes])
+            if flash.adapter.config.mask_mode == FLASHMLA_BAND_MASK_MODE and self._query_position_limit is not None:
+                first_positions, limit = self._query_position_limit
+                available = (limit - first_positions[:num_decodes]).clamp_min_(0)
+                used_q = torch.minimum(used_q, available)
             flash.used_q[:num_decodes].copy_(used_q)
             flash.used_q[:num_decodes].masked_fill_(common.seq_lens[:num_decodes] <= 0, 0)
             flash.cache_lens.zero_()

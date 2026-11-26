@@ -3,7 +3,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from collections.abc import Iterator, Mapping
-from contextlib import contextmanager, nullcontext
+from contextlib import ExitStack, contextmanager
 from dataclasses import replace
 from typing import Any, cast
 
@@ -21,6 +21,7 @@ from vllm.v1.worker.gpu.spec_decode.dflash.speculator import DFlashSpeculator
 from vllm_ascend.ascend_config import draft_config_context
 from vllm_ascend.attention.attention_v1 import AscendAttentionBackend, AscendAttentionState
 from vllm_ascend.attention.context_parallel.mla_cp import AscendMlaDCPImpl
+from vllm_ascend.attention.flashmla import FlashMLAMetadataBuilder
 from vllm_ascend.attention.mla_v1 import AscendMLABackend, AscendMLAImpl
 from vllm_ascend.ops.triton.spec_decode.prepare_dflash_inputs import prepare_dflash_inputs_triton
 from vllm_ascend.utils import vllm_version_is
@@ -145,7 +146,7 @@ def _prepare_dflash_inputs_with_block_stride(
 
 class AscendDFlashSpeculator(LmheadTPDraftSamplingMixin, DFlashSpeculator):
     _windowed_fia_layers: tuple[str, ...] = ()
-    _has_windowed_flashmla = False
+    _windowed_flashmla_builders: tuple[FlashMLAMetadataBuilder, ...] = ()
 
     if not vllm_version_is("0.33.0"):
 
@@ -210,32 +211,33 @@ class AscendDFlashSpeculator(LmheadTPDraftSamplingMixin, DFlashSpeculator):
         # The draft forward may process padded inputs outside FULL graphs, but
         # attention only consumes the tokens owned by real requests there.
         num_tokens = batch_desc.num_tokens if batch_desc.cg_mode == CUDAGraphMode.FULL else int(query_start_loc_np[-1])
-        metadata_context = nullcontext()
+        use_fia = self.attn_architecture == "MLA" and not self.use_flashmla
+        use_band = self.attn_architecture == "MLA" and bool(self._windowed_flashmla_builders)
         valid_queries = None
-        if self.attn_architecture == "MLA" and (not self.use_flashmla or self._has_windowed_flashmla):
-            seq_lens_cpu = None
-            draft_query_lens = None
-            if not self.use_flashmla:
+        seq_lens_cpu = None
+        with build_attn_metadata_wrapper(), ExitStack() as stack:
+            if use_fia:
                 capped_fia = self._windowed_fia_layers and self.draft_max_seq_len == self.max_model_len
                 seq_lens_cpu, valid_queries = prepare_draft_fia_lengths(
                     self, num_reqs, num_reqs_padded, window_step=step if capped_fia else None
                 )
-            if self._has_windowed_flashmla and self.draft_max_seq_len == self.max_model_len:
-                # First sample position is the (unclipped) first Q position + 1.
-                # KV lengths are already clipped by prepare_dflash_inputs.
+            if use_band and self.draft_max_seq_len == self.max_model_len:
+                # Both DFlash sampling layouts store first Q position + 1 in the first sample slot.
                 stride = self.num_speculative_steps
-                first_sample = self.sample_pos[: num_reqs * stride : stride]
-                draft_query_lens = (self.max_model_len + 1 - first_sample).clamp_(0, step).to(torch.int32)
-            metadata_context = build_attn_metadata_factory(
-                self.input_buffers.positions,
-                num_tokens,
-                is_prefilling=self.draft_is_prefilling[:num_reqs_padded],
-                seq_lens_cpu=seq_lens_cpu,
-                attn_state=AscendAttentionState.ChunkedPrefill,
-                parallel_config=self.attn_vllm_config.parallel_config,
-                draft_query_lens=draft_query_lens,
-            )
-        with build_attn_metadata_wrapper(), metadata_context:
+                first_positions = self.sample_pos[: num_reqs * stride : stride] - 1
+                for builder in self._windowed_flashmla_builders:
+                    stack.enter_context(builder.limit_query_positions(first_positions, self.max_model_len))
+            if use_fia or use_band:
+                stack.enter_context(
+                    build_attn_metadata_factory(
+                        self.input_buffers.positions,
+                        num_tokens,
+                        is_prefilling=self.draft_is_prefilling[:num_reqs_padded],
+                        seq_lens_cpu=seq_lens_cpu,
+                        attn_state=AscendAttentionState.ChunkedPrefill,
+                        parallel_config=self.attn_vllm_config.parallel_config,
+                    )
+                )
             attn_metadata = super()._build_attn_metadata(
                 num_reqs=num_reqs,
                 batch_desc=batch_desc,
@@ -250,7 +252,7 @@ class AscendDFlashSpeculator(LmheadTPDraftSamplingMixin, DFlashSpeculator):
             # query lengths through every padded request slot. This covers
             # FIA-backed GQA and MLA drafts alike, as in DSpark.
             self._update_draft_attn_metadata(attn_metadata, num_reqs_padded)
-        if attn_metadata and valid_queries is not None and any(count < step for count in valid_queries):
+        if use_fia and attn_metadata and valid_queries is not None and any(count < step for count in valid_queries):
             self._split_window_query_padding(attn_metadata, valid_queries)
         return attn_metadata
 
@@ -359,7 +361,7 @@ class AscendDFlashSpeculator(LmheadTPDraftSamplingMixin, DFlashSpeculator):
         # Causality belongs to the model layer even when several layers share a KV group.
         draft_causal = dict(zip(get_layer_names(), get_causal())) if get_layer_names and get_causal else {}
         windowed_fia_layers: list[str] = []
-        has_windowed_flashmla = False
+        windowed_flashmla_layers: set[str] = set()
         active_layer_names = self.draft_attn_layer_names
         for kv_cache_group_spec in kv_cache_config.kv_cache_groups:
             layer_names = kv_cache_group_spec.layer_names
@@ -380,13 +382,18 @@ class AscendDFlashSpeculator(LmheadTPDraftSamplingMixin, DFlashSpeculator):
                 if isinstance(impl, AscendMlaDCPImpl):
                     raise ValueError(f"Windowed MLA draft layer {layer_name} cannot use decode context parallelism.")
                 if impl.use_flashmla:
-                    has_windowed_flashmla = True
+                    windowed_flashmla_layers.add(layer_name)
                 else:
                     windowed_fia_layers.append(layer_name)
 
         self.attn_backends = attn_backends
         self._windowed_fia_layers = tuple(windowed_fia_layers)
-        self._has_windowed_flashmla = has_windowed_flashmla
+        self._windowed_flashmla_builders = tuple(
+            group.get_metadata_builder(0).flashmla_state
+            for groups in self.attn_groups
+            for group in groups
+            if not windowed_flashmla_layers.isdisjoint(group.layer_names)
+        )
         install_ascend_dflash_input_preparation()
         self.attn_architecture, self.use_flashmla = detect_draft_attn_architecture(self.attn_groups)
 

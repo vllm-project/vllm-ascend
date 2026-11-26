@@ -491,10 +491,6 @@ class AscendCommonAttentionMetadata(CommonAttentionMetadata):
     pcp_context: "AscendPCPAttentionContext | None" = None
     pcp_cache_group_idx: int | None = None
 
-    # Device-side valid Q prefix for each windowed draft request. Physical
-    # query_start_loc still includes the rows padded at the model length limit.
-    draft_query_lens: torch.Tensor | None = None
-
     # TODO: Remove it when vLLM no longer uses this function.
     def unpadded(self, num_actual_tokens: int, num_actual_reqs: int) -> "AscendCommonAttentionMetadata":
         # This only use to eagle now. It will be use to enforce_eager in future.
@@ -551,7 +547,6 @@ class AscendCommonAttentionMetadata(CommonAttentionMetadata):
             copy_sfa_draft_index=self.copy_sfa_draft_index,
             offload_dummy=self.offload_dummy,
             replay_start=_slice_reqs(self.replay_start),
-            draft_query_lens=_slice_reqs(self.draft_query_lens),
             req_ids_tensor=_slice_reqs(self.req_ids_tensor),
             token_to_req=(self.token_to_req[:num_actual_tokens] if self.token_to_req is not None else None),
         )

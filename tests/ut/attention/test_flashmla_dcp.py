@@ -1065,8 +1065,8 @@ def test_band_replay_refreshes_valid_query_prefix_and_write_slots(runtime):
     assert flash.used_q[0] == 8
 
     # Same captured rows, but only four queries now belong to the draft.
-    inputs.draft_query_lens = torch.tensor([4], dtype=torch.int32)
-    replay = builder.build(inputs, 1, 8, False)
+    with builder.limit_query_positions(torch.tensor([1024]), 1028):
+        replay = builder.build(inputs, 1, 8, False)
     assert replay is flash and addresses(replay) == original_addresses
     assert replay.cu[:2].tolist() == [0, 8]
     assert replay.used_q[0] == 4 and replay.cache_lens[0] == 1028
@@ -1074,6 +1074,13 @@ def test_band_replay_refreshes_valid_query_prefix_and_write_slots(runtime):
     assert replay.attn_mask is builder.attn_mask
     metadata_kwargs = runtime.metadata_op.call_args.kwargs
     assert (metadata_kwargs["mask_mode"], metadata_kwargs["win_left"], metadata_kwargs["win_right"]) == (4, 1023, 0)
+
+    # A fully clipped request keeps its physical rows; the next ordinary build recovers all eight.
+    with builder.limit_query_positions(torch.tensor([1029]), 1028):
+        empty = builder.build(inputs, 1, 8, False)
+        assert empty.cu[:2].tolist() == [0, 8] and not empty.used_q.any()
+        assert not empty.cache_lens.any() and (empty.slots == -1).all()
+    assert builder.build(inputs, 1, 8, False).used_q[0] == 8
 
 
 @pytest.mark.parametrize("causal", [False, True])

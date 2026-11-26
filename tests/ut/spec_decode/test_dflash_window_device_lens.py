@@ -42,10 +42,9 @@ def test_windowed_mla_draft_layers(monkeypatch, impl_cls, causal, band, error):
     window = impl_cls.__new__(impl_cls)
     window.sliding_window, window.use_flashmla = 1024, band
     layers = {"window": SimpleNamespace(impl=window, get_attn_backend=lambda: AscendMLABackend)}
-    if not band:
-        full = AscendMLAImpl.__new__(AscendMLAImpl)
-        full.sliding_window = None
-        layers["full"] = SimpleNamespace(impl=full, get_attn_backend=lambda: AscendMLABackend)
+    full = AscendMLAImpl.__new__(AscendMLAImpl)
+    full.sliding_window = None
+    layers["full"] = SimpleNamespace(impl=full, get_attn_backend=lambda: AscendMLABackend)
 
     spec = _spec([0])
     spec.device = torch.device("cpu")
@@ -54,9 +53,17 @@ def test_windowed_mla_draft_layers(monkeypatch, impl_cls, causal, band, error):
     spec.draft_attn_layer_names = set(layers)
     spec.model = SimpleNamespace(
         get_draft_kv_cache_layer_names=lambda: list(layers),
-        get_draft_attn_causal=lambda: [causal] if band else [causal, True],
+        get_draft_attn_causal=lambda: [causal, True],
     )
-    spec.attn_groups = []
+    states = {name: object() for name in layers}
+    spec.attn_groups = [
+        [
+            SimpleNamespace(
+                layer_names=[name], get_metadata_builder=lambda _, state=state: SimpleNamespace(flashmla_state=state)
+            )
+        ]
+        for name, state in states.items()
+    ]
     monkeypatch.setattr(dflash_speculator_module, "detect_draft_attn_architecture", lambda _: ("MLA", band))
     cache = SimpleNamespace(kv_cache_groups=[SimpleNamespace(layer_names=[*layers, "target"])])
     monkeypatch.setattr(DFlashSpeculator, "set_attn", lambda *args: None)
@@ -68,7 +75,7 @@ def test_windowed_mla_draft_layers(monkeypatch, impl_cls, causal, band, error):
     else:
         spec.set_attn(None, cache, None, None, None)
         assert spec._windowed_fia_layers == (() if band else ("window",))
-        assert spec._has_windowed_flashmla is band
+        assert spec._windowed_flashmla_builders == ((states["window"],) if band else ())
 
 
 def _spec(lengths):
@@ -221,9 +228,17 @@ def test_window_at_model_limit_preserves_valid_draft_rows(monkeypatch, mode):
         assert sample_pos_copies == 2
 
 
-def test_flashmla_window_supplies_live_device_query_prefix(monkeypatch):
+def test_flashmla_window_supplies_unclipped_first_positions(monkeypatch):
     spec = _spec([4096, 4096, 2048, 0])
-    spec._has_windowed_flashmla = spec.use_flashmla = True
+    spec.use_flashmla = True
+    bounds = []
+
+    @contextmanager
+    def limit_query_positions(positions, limit):
+        bounds.append((positions.tolist(), limit))
+        yield
+
+    spec._windowed_flashmla_builders = (SimpleNamespace(limit_query_positions=limit_query_positions),)
     spec.num_speculative_steps = 7
     spec.sample_pos = torch.zeros(28, dtype=torch.int64)
     spec.sample_pos[::7] = torch.tensor([4093, 4097, 2041, 0])
@@ -234,15 +249,13 @@ def test_flashmla_window_supplies_live_device_query_prefix(monkeypatch):
     monkeypatch.setattr(DFlashSpeculator, "_build_attn_metadata", lambda *args, **kwargs: {})
     monkeypatch.setattr(dflash_speculator_module, "prepare_draft_fia_lengths", lambda *_a, **_kw: pytest.fail("D2H"))
 
-    for max_len, expected in [(4095, None), (4096, [4, 0, 8]), (4096, [6, 0, 8])]:
+    for max_len, expected in [(4095, []), (4096, [([4092, 4096, 2040], 4096)]), (4096, [([4090, 4096, 2040], 4096)])]:
+        bounds.clear()
         spec.draft_max_seq_len = max_len
         with draft_metadata_request_count(spec, 3):
             spec.build_draft_attn_metadatas(4, spec.input_buffers.seq_lens)
         inputs = supplied[-1]
         assert not inputs["is_prefilling"].any() and inputs["seq_lens_cpu"] is None
-        used_q = inputs["draft_query_lens"]
-        if expected is None:
-            assert used_q is None
-        else:
-            assert used_q.dtype == torch.int32 and used_q.tolist() == expected
+        assert bounds == expected
+        if bounds:
             spec.sample_pos[0] -= 2
