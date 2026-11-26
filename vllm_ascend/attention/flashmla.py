@@ -632,6 +632,7 @@ class FlashMLAMetadataBuilder:
             flash.slots.fill_(-1)
             slots = common.slot_mapping[:num_decode_tokens]
             flash.slots[: slots.numel()].copy_(slots)
+            assert flash.live_boundaries is not None and flash.token_live is not None
             flash.live_boundaries.zero_()
             live = (flash.used_q > 0).to(torch.int32)
             flash.live_boundaries.scatter_add_(0, flash.cu[:-1].long(), live)
