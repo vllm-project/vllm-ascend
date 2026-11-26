@@ -84,7 +84,7 @@ def create_dyntra_lb_scheduler(
     scheduler_cls: type[SchedulerT],
     num_blocks: int = 10000,
 ) -> SchedulerT:
-    """Create a V1 scheduler subclass for DyntraLB unit tests."""
+    """Create a scheduler subclass for DyntraLB unit tests."""
     block_size = vllm_config.cache_config.block_size
     kv_cache_config = KVCacheConfig(
         num_blocks=num_blocks,
@@ -110,9 +110,6 @@ def create_dyntra_lb_scheduler(
         block_size=block_size,
         structured_output_manager=StructuredOutputManager(vllm_config),
     )
-    # These fixtures assert legacy V1 scheduler output structures. Tests that
-    # exercise V2 opt in explicitly after construction.
-    scheduler.use_v2_model_runner = False
     return scheduler
 
 
@@ -678,6 +675,10 @@ def test_dyntra_lb_forwards_block_state_and_encoder_cache_metadata(monkeypatch):
 
     scheduler_output = scheduler.schedule()
 
+    # Main removed encoder metadata from its wire payload. Observe the
+    # manager's real extension payload separately for the original checks.
+    scheduler_output.ec_manager_metadata = scheduler.encoder_cache_manager.get_manager_metadata()
+
     assert len(block_states) == 1
     assert block_states[0].boundary_state_offloads is boundary_state_offloads
     assert block_states[0].req_ids == set()
@@ -1013,7 +1014,6 @@ def test_dyntra_lb_async_v2_sets_pp_decode_cadence():
         vllm_config,
         scheduler_cls=AsyncDyntraLBScheduler,
     )
-    scheduler.use_v2_model_runner = True
     request = create_request(
         request_id=1,
         block_size=vllm_config.cache_config.block_size,
@@ -1071,7 +1071,7 @@ def test_dyntra_lb_async_reclaims_placeholder_for_lb_paused_request():
     assert request.num_output_tokens == 1
 
 
-def test_dyntra_lb_paused_request_resumes_as_cached():
+def test_dyntra_lb_paused_request_resumes_into_scheduled_new_reqs():
     vllm_config, scheduler = _create_dyntra_lb_scheduler(async_scheduling=False)
     request = create_request(
         request_id=1,
@@ -1099,10 +1099,37 @@ def test_dyntra_lb_paused_request_resumes_as_cached():
 
     resumed_output = scheduler.schedule()
 
+    # Model Runner V2 transports readmitted requests as new payloads, including
+    # the full token list and block table.
+    assert [data.req_id for data in resumed_output.scheduled_new_reqs] == [request.request_id]
+    assert resumed_output.scheduled_new_reqs[0].block_ids == block_ids
+    assert resumed_output.scheduled_cached_reqs.req_ids == []
+
     assert request.status == RequestStatus.RUNNING
     assert request.request_id not in scheduler._lb_paused_req_ids
-    assert request.request_id in resumed_output.scheduled_cached_reqs.resumed_req_ids
-    assert not resumed_output.scheduled_new_reqs
+
+
+def test_dyntra_lb_paused_request_resumes_with_replay_start():
+    vllm_config, scheduler = _create_dyntra_lb_scheduler(async_scheduling=False)
+    request = create_request(
+        request_id=1,
+        block_size=vllm_config.cache_config.block_size,
+    )
+    scheduler.add_request(request)
+    first_output = scheduler.schedule()
+    scheduler.update_from_output(
+        first_output,
+        create_model_runner_output([request]),
+    )
+    scheduler.running.remove(request)
+
+    replay_start = 64
+    request.replay_start = replay_start
+    scheduler._lb_pause_request(request, 0.0)
+
+    resumed_output = scheduler.schedule()
+    new_req = next(data for data in resumed_output.scheduled_new_reqs if data.req_id == request.request_id)
+    assert new_req.replay_start == replay_start
 
 
 def test_dyntra_lb_paused_request_keeps_watermark_enabled(monkeypatch):

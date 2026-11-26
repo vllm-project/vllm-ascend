@@ -137,7 +137,7 @@ def test_cache_respects_disable_and_sequence_parallel(isolated_cache, disable_ca
         "passes/utils/npugraph_ex_utils_check.py",
     ],
 )
-def test_fusion_dependency_changes_invalidate_compiler_hash(tmp_path, monkeypatch, relative):
+def test_fusion_dependency_changes_invalidate_compile_factors(tmp_path, monkeypatch, relative):
     import shutil
     from pathlib import Path
     from types import SimpleNamespace
@@ -167,15 +167,15 @@ def test_fusion_dependency_changes_invalidate_compiler_hash(tmp_path, monkeypatc
     monkeypatch.setattr(interface, "get_current_hardware_profile", lambda: SimpleNamespace(capabilities=[]))
     monkeypatch.setattr(torch_npu, "__version__", "test-version", raising=False)
     compiler = interface.AscendCompiler()
-    before = compiler.compute_hash(None)
+    before = compiler.compile_factors(None)
     (copied / "unrelated.py").write_text("UNRELATED = True\n")
-    assert compiler.compute_hash(None) == before
+    assert compiler.compile_factors(None) == before
     path = copied / relative
     path.write_text(path.read_text() + "\n# Changed fusion implementation\n")
-    assert compiler.compute_hash(None) != before
+    assert compiler.compile_factors(None) != before
 
 
-def test_npugraph_hash_does_not_read_fusion_sources(monkeypatch):
+def test_npugraph_compile_factors_does_not_read_fusion_sources(monkeypatch):
     from types import SimpleNamespace
 
     import torch_npu
@@ -186,4 +186,4 @@ def test_npugraph_hash_does_not_read_fusion_sources(monkeypatch):
     config = SimpleNamespace(enable_npugraph_ex=True, enable_static_kernel=False, enable_super_kernel=False)
     monkeypatch.setattr(interface, "get_ascend_config", lambda: SimpleNamespace(ascend_compilation_config=config))
     with patch.object(interface.Path, "read_bytes", side_effect=AssertionError("unrelated fusion source")):
-        assert interface.AscendCompiler().compute_hash(None)
+        assert interface.AscendCompiler().compile_factors(None)

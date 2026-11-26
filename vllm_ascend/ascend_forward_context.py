@@ -16,27 +16,12 @@ from vllm_ascend.device.hardware_profile import (
     MoECommPolicy,
     get_current_hardware_profile,
 )
-from vllm_ascend.mrv2_utils import use_v2_model_runner
 from vllm_ascend.quantization.quant_type import A5_SUPPORT_MEGA_MOE_QUANT_TYPES, QuantType
 from vllm_ascend.utils import (
+    get_pcp_profile_num_tokens,
     has_layer_idx,
     is_moe_model,
-    vllm_version_is,
 )
-
-# Dynamo constant-folds this like VLLM_USE_V2_MODEL_RUNNER. Sync from eager
-# setup so compiled FIA/MoE never traces use_v2_model_runner (warning_once).
-_USE_V2_EXTRA_KWARGS = False
-
-
-def sync_v2_extra_kwargs(vllm_config: VllmConfig) -> None:
-    """Cache whether Ascend extras belong in ``additional_kwargs``.
-
-    Call this from eager config / forward-context setup, not from compiled
-    attention. Require an actual bool: MagicMock configs can be truthy.
-    """
-    global _USE_V2_EXTRA_KWARGS
-    _USE_V2_EXTRA_KWARGS = use_v2_model_runner(vllm_config) is True
 
 
 class MoECommType(Enum):
@@ -142,7 +127,6 @@ def set_ascend_forward_context(
     exit, so wrapping only ``load_model`` is not enough; pin it here instead of
     in the Worker.
     """
-    sync_v2_extra_kwargs(vllm_config)
     forward_context_kwargs = {
         "attn_metadata": attn_metadata,
         "vllm_config": vllm_config,
@@ -264,17 +248,19 @@ def set_mc2_tokens_capacity(vllm_config, max_num_reqs, uniform_decode_query_len)
     ascend_config = get_ascend_config()
     use_mega_moe = use_cann_megamoe(vllm_config)
 
-    # Cap for fused MC2 / MegaMoe: regular MC2 (gated by enable_prefill_mc2) uses
-    # HCCL comm buffer (HCCL_BUFFSIZE); MegaMoe (use_mega_moe, non-decode-only)
-    # uses the symm buffer (separate torch alloc, not HCCL_BUFFSIZE).
-    if ascend_config.enable_prefill_mc2 or (use_mega_moe and not _is_decode_only_node(vllm_config)):
-        max_num_tokens = vllm_config.scheduler_config.max_num_batched_tokens
+    # Shared-expert MegaMoe also handles scheduler-sized profile runs on
+    # decode-only nodes, so its symmetric buffer must cover the profile batch.
+    use_scheduler_capacity = ascend_config.enable_prefill_mc2 or (
+        use_mega_moe and (not _is_decode_only_node(vllm_config) or ascend_config.megamoe_shared_expert_fusion)
+    )
+    if use_scheduler_capacity:
+        max_num_tokens = get_pcp_profile_num_tokens(
+            vllm_config, vllm_config.scheduler_config.max_num_batched_tokens, max_num_reqs
+        )
     elif vllm_config.compilation_config.cudagraph_capture_sizes:
         max_num_tokens = vllm_config.compilation_config.max_cudagraph_capture_size
         compilation_config = vllm_config.compilation_config
-        decode_sizes = None
-        if not vllm_version_is("0.33.0"):
-            decode_sizes = compilation_config.decode_cudagraph_capture_request_sizes
+        decode_sizes = compilation_config.decode_cudagraph_capture_request_sizes
         if decode_sizes is not None:
             # Main's shared token union also includes independent one-token
             # draft graphs up to max_num_seqs (#63406). Keep the communication
@@ -343,6 +329,13 @@ def _select_capacity_and_expert_density_moe_comm_method(
     is_draft_model: bool = False,
     draft_moe_quant_type: QuantType = QuantType.NONE,
 ) -> MoECommType:
+    # Prefer FUSED_MC2 whenever the mega_moe operator is available and the
+    # profile grants CANN_MEGAMOE; a plain enable_fused_mc2=1 keeps the
+    # dispatch_ffn_combine path.
+    if use_cann_megamoe(vllm_config):
+        return MoECommType.FUSED_MC2
+    if get_ascend_config().enable_fused_mc2 == 1 and get_ep_group().world_size <= 32:
+        return MoECommType.FUSED_MC2
     num_experts = vllm_config.model_config.get_num_experts()
     ep_world_size = (
         vllm_config.parallel_config.world_size_across_dp // vllm_config.parallel_config.pipeline_parallel_size
@@ -473,7 +466,7 @@ def select_moe_comm_method(
 
 
 class _ExtraForwardContextProxy:
-    """Unified forward-context access for v1/v2 model runners."""
+    """Unified forward-context access for the Model Runner V2 pipeline."""
 
     extra_attrs = (
         "capturing",
@@ -516,19 +509,14 @@ class _ExtraForwardContextProxy:
     def __getattr__(self, name: str) -> Any:
         self.check_extra_attr(name)
         ctx = self._ctx()
-        if _USE_V2_EXTRA_KWARGS:
-            # Unset known extras default to None so optional flags (e.g. `sinks`)
-            # can be read with truthiness checks before the V2 path populates them.
-            return ctx.additional_kwargs.get(name)
-        return getattr(ctx, name, None)
+        # Unset known extras default to None so optional flags (e.g. `sinks`)
+        # can be read with truthiness checks before the V2 path populates them.
+        return ctx.additional_kwargs.get(name)
 
     def __setattr__(self, name: str, value: Any) -> None:
         self.check_extra_attr(name)
         ctx = self._ctx()
-        if _USE_V2_EXTRA_KWARGS:
-            ctx.additional_kwargs[name] = value
-        else:
-            setattr(ctx, name, value)
+        ctx.additional_kwargs[name] = value
 
 
 # usage: from vllm_ascend.ascend_forward_context import _EXTRA_CTX

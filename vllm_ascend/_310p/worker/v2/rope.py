@@ -7,7 +7,6 @@ import numpy as np
 import torch
 import torch.nn as nn
 from vllm.config import ModelConfig
-from vllm.model_executor.layers.rotary_embedding import MRotaryEmbedding
 from vllm.model_executor.models.interfaces import SupportsMRoPE
 from vllm.utils.platform_utils import is_pin_memory_available
 from vllm.v1.worker.gpu.buffer_utils import UvaBackedTensor
@@ -96,12 +95,10 @@ class Ascend310PRopeState:
                 # Write directly into persistent host storage.
                 # Writes directly into persistent output; no per-request
                 # torch.arange allocation or intermediate CPU copy.
-                MRotaryEmbedding.get_next_input_positions_tensor(
-                    out=self.positions_np,
-                    out_offset=query_start,
-                    mrope_position_delta=delta,
-                    context_len=num_computed,
-                    num_new_tokens=query_len,
+                # Native #63373 removed the NumPy output-buffer helper.
+                # Keep its row broadcast and persistent host destination.
+                self.positions_np[:, query_start:query_end] = np.arange(
+                    delta + num_computed, delta + num_computed + query_len, dtype=self.positions_np.dtype
                 )
 
         # Copy only the active columns: the staging buffer is sized for the full

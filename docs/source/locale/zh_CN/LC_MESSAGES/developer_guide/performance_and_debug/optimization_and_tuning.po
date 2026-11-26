@@ -44,9 +44,6 @@ msgstr "## 优化措施"
 msgid "### 1. Memory Allocator Optimization"
 msgstr "### 1. 内存分配器优化"
 
-msgid "### 2. `torch_npu` Optimization"
-msgstr "### 2. `torch_npu` 优化"
-
 msgid ""
 "Some performance tuning features in `torch_npu` are controlled by "
 "environment variables. Some features and their related environment variables"
@@ -74,15 +71,6 @@ msgid ""
 msgstr "HCCL 中存在部分性能调优功能，由环境变量控制。"
 
 msgid ""
-"You can configure HCCL to use \"AIV\" mode to optimize performance by "
-"setting the environment variable shown below. In \"AIV\" mode, the "
-"communication is scheduled by AI vector core directly with RoCE, instead of "
-"being scheduled by AI CPU."
-msgstr ""
-"您可以通过设置如下环境变量，将 HCCL 配置为使用 \"AIV\" 模式以优化性能。在 \"AIV\" 模式下，通信由 AI 向量核心直接通过 "
-"RoCE 调度，而非由 AI CPU 调度。"
-
-msgid ""
 "Plus, there are more features for performance optimization in specific "
 "scenarios, which are shown below."
 msgstr "此外，在特定场景下还有更多性能优化功能，如下所示。"
@@ -100,12 +88,6 @@ msgstr ""
 
 msgid "### 4. Kernel Optimization"
 msgstr "### 4. 内核优化"
-
-msgid ""
-"This section describes operating system–level optimizations applied on the "
-"host machine (bare metal or Kubernetes node) to improve performance "
-"stability, latency, and throughput for inference workloads."
-msgstr "本节描述在宿主机（裸机或 Kubernetes 节点）上应用的操作系统级优化，以提升推理工作负载的性能稳定性、延迟和吞吐量。"
 
 msgid ""
 "These settings must be applied on the host OS and with root privileges. Not "
@@ -212,12 +194,6 @@ msgstr "目的"
 msgid "Benefits"
 msgstr "优势"
 
-msgid "#### 4.1 Set CPU Frequency Governor to `performance`"
-msgstr "#### 4.1 将CPU频率调节器设置为`performance`"
-
-msgid "### 1.Run the container"
-msgstr "### 1.运行容器"
-
 msgid "### 2.Configure your environment"
 msgstr "### 2.配置环境"
 
@@ -246,3 +222,36 @@ msgstr ""
 
 msgid "#### 1.1. TCMalloc"
 msgstr "#### 1.1. TCMalloc"
+
+msgid "### 1. Run the container"
+msgstr "### 1. 运行容器"
+
+msgid ""
+"The container needs [Ascend Docker "
+"Runtime](../../getting_started/installation.md#installation-ascend-docker-"
+"runtime) on the host; it selects the NPUs with `ASCEND_VISIBLE_DEVICES`."
+msgstr ""
+"容器需要宿主机上安装 [昇腾 Docker "
+"Runtime](../../getting_started/installation.md#installation-ascend-docker-"
+"runtime)；它通过 `ASCEND_VISIBLE_DEVICES` 选择 NPU。"
+
+msgid "### 2. torch_npu Optimization"
+msgstr "### 2. torch_npu 优化"
+
+msgid ""
+"You can configure HCCL to use \"AIV\" mode to optimize performance by "
+"setting the environment variable shown below. In \"AIV\" mode, the "
+"communication is scheduled by AI Vector Core directly with RoCE, instead of "
+"being scheduled by AI CPU."
+msgstr ""
+"你可以通过设置下方所示的环境变量，将 HCCL 配置为使用“AIV”模式来优化性能。在“AIV”模式下，通信由 AI Vector Core 直接通过 "
+"RoCE 调度，而不是由 AI CPU 调度。"
+
+msgid ""
+"This section describes operating system-level optimizations applied on the "
+"host machine (bare metal or Kubernetes node) to improve performance "
+"stability, latency, and throughput for inference workloads."
+msgstr "本节介绍在宿主机（裸金属或 Kubernetes 节点）上应用的操作系统级优化，用于提升推理工作负载的性能稳定性、降低时延并提高吞吐量。"
+
+msgid "#### 4.1 Set CPU Frequency Governor to performance"
+msgstr "#### 4.1 将 CPU 频率调节器设置为 performance"

@@ -8,6 +8,7 @@ import json
 import os
 import subprocess
 import sys
+from hashlib import sha256
 from pathlib import Path
 
 
@@ -74,7 +75,8 @@ def fusion_worker(mode, root):
         interface.__file__ = str(copied / "compiler_interface.py")
 
     compiler = interface.AscendCompiler()
-    fingerprint = compiler.compute_hash(config)
+    factors = compiler.compile_factors(config)
+    fingerprint = sha256(json.dumps(factors, sort_keys=True).encode()).hexdigest()
     compiler.initialize_cache(str(root / fingerprint), disable_cache=False)
     manager = GraphFusionPassManager()
     fusion = MulsAddFusionPass(config)

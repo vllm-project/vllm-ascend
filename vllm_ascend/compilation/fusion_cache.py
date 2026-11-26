@@ -24,6 +24,7 @@ class FusionCacheSerializationError(Exception):
 class AscendFusionOutputCode(RegionalOutputCode):
     # AOT runtime wrappers pass one list of tensors and symbolic scalars.
     _boxed_call = True
+    _graph_module: torch.fx.GraphModule | None
 
     def prepare_for_serialization(self) -> None:
         if self._graph_module is not None:

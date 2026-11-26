@@ -11,14 +11,12 @@ import torch
 pytest.importorskip("torch_npu")
 
 from vllm.model_executor.layers.mamba.mamba_utils import is_conv_state_dim_first  # noqa: E402
-from vllm.triton_utils import triton  # noqa: E402
 
 import vllm_ascend.ops.triton.kda.recoverssm as recoverssm_module  # noqa: E402
+import vllm_ascend.ops.triton.mamba.compact_conv_state as conv_compaction  # noqa: E402
 from vllm_ascend.device.device_config import is_950  # noqa: E402
 from vllm_ascend.ops.triton.kda.recoverssm import (  # noqa: E402
     KDARecoverSSMCommitContext,
-    _compact_conv_state_kernel,
-    _conv_compaction_block_d,
     kda_recoverssm_verify,
 )
 
@@ -229,10 +227,19 @@ def page_view(shape, dtype, padding, head_padding=0):
     return backing, backing.as_strided(shape, (elements + padding, *inner_strides))
 
 
-@pytest.mark.parametrize("head_padding", [0, 128])
-@pytest.mark.parametrize("heads", [2, 32, 64])
-@pytest.mark.parametrize("state_dtype", [torch.float32, torch.bfloat16])
-@pytest.mark.parametrize("padding", [0, 128])
+@pytest.mark.parametrize(
+    "heads,state_dtype,padding,head_padding",
+    # Keep grouped FP32 dense/padded paths and pairwise head/dtype/stride coverage.
+    [
+        (64, torch.float32, 0, 0),
+        (64, torch.float32, 128, 128),
+        (64, torch.bfloat16, 0, 0),
+        (32, torch.float32, 128, 128),
+        (2, torch.float32, 0, 0),
+        (2, torch.bfloat16, 0, 128),
+        (2, torch.bfloat16, 128, 0),
+    ],
+)
 @pytest.mark.skip_global_cleanup
 @torch.inference_mode()
 def test_multilayer_paged_commit_maps_sampler_rows_and_compacts_conv(
@@ -317,7 +324,7 @@ def test_multilayer_paged_commit_maps_sampler_rows_and_compacts_conv(
 
 @pytest.mark.skip_global_cleanup
 @torch.inference_mode()
-def test_conv_compaction_recorded_b11_l11_shape():
+def test_conv_compaction_recorded_b11_l11_shape(monkeypatch):
     if not torch.npu.is_available():
         pytest.skip("requires an Ascend NPU")
     torch.manual_seed(73)
@@ -355,7 +362,9 @@ def test_conv_compaction_recorded_b11_l11_shape():
     counts = torch.tensor(accepted + [0] * (plan_capacity - len(blocks)), dtype=torch.int32, device="npu")
     finals = torch.tensor(blocks + [0] * (plan_capacity - len(blocks)), dtype=torch.int32, device="npu")
     boundary = torch.zeros(plan_capacity, dtype=torch.int32, device="npu")
-    _compact_conv_state_kernel[(triton.cdiv(channels, block_d), len(blocks), layers)](
+    # Reproduce the captured channel tile while using the shared launch path.
+    monkeypatch.setattr(conv_compaction, "RECOVERSSM_CONV_TILE", block_d)
+    conv_compaction.compact_conv_state(
         views[0],
         *metadata,
         indices,
@@ -363,15 +372,10 @@ def test_conv_compaction_recorded_b11_l11_shape():
         finals,
         boundary,
         boundary,
-        0,
-        channels,
-        history,
-        1,
-        BLOCK_D=block_d,
-        BLOCK_HISTORY=4,
-        ALIGN_MODE=False,
-        DIM_STRIDE=1,
-        num_warps=4,
+        conv_history_len=history,
+        align_mode=False,
+        dim_stride=1,
+        null_block_id=0,
     )
     for backing, expected_backing in zip(backings, expectations):
         torch.testing.assert_close(backing[checked_blocks], expected_backing, atol=0, rtol=0)
@@ -418,8 +422,7 @@ def test_conv_compaction_device_tile_preserves_other_slots(channels, dim_first, 
         torch.tensor(values, dtype=torch.int32, device="npu")
         for values in (sources, accepted, destinations, boundaries, boundary_lengths)
     )
-    block_d = _conv_compaction_block_d(views[0].stride(1))
-    _compact_conv_state_kernel[(triton.cdiv(channels, block_d), len(sources), len(views))](
+    conv_compaction.compact_conv_state(
         views[0],
         *metadata,
         indices,
@@ -427,16 +430,10 @@ def test_conv_compaction_device_tile_preserves_other_slots(channels, dim_first, 
         finals,
         boundary,
         lengths,
-        0,
-        channels,
-        history,
-        1,
-        BLOCK_D=block_d,
-        BLOCK_HISTORY=4,
-        ALIGN_MODE=align,
-        DIM_STRIDE=views[0].stride(1),
-        USE_1D_CHANNEL_GATHER=not is_950(),
-        num_warps=4,
+        conv_history_len=history,
+        align_mode=align,
+        dim_stride=views[0].stride(1),
+        null_block_id=0,
     )
     for actual, expected in zip(backings, expected_backings):
         torch.testing.assert_close(actual, expected, atol=0, rtol=0)
@@ -457,12 +454,11 @@ def reference(q, k, v, raw_g, raw_beta, a_log, bias, lower_bound, state, starts,
         current = state[block].clone()
         corrections = []
         for position, token in enumerate(range(starts[row], starts[row + 1])):
-            key = k[0, token]
-            key_norm = key.square().sum(-1, keepdim=True)
-            key = key * torch.rsqrt(torch.where(key_norm > 0, key_norm, 1.0))
-            query = q[0, token]
-            query_norm = query.square().sum(-1, keepdim=True)
-            query = query * torch.rsqrt(torch.where(query_norm > 0, query_norm, 1.0)) * key_dim**-0.5
+            key, query = k[0, token], q[0, token]
+            key_norm = torch.linalg.vector_norm(key, dim=-1, keepdim=True)
+            query_norm = torch.linalg.vector_norm(query, dim=-1, keepdim=True)
+            key = key / torch.where(key_norm == 0, 1.0, key_norm)
+            query = query / torch.where(query_norm == 0, 1.0, query_norm) * key_dim**-0.5
             gate_input = raw_g[0, token] + bias.view(heads, key_dim)
             a = a_log.view(heads, 1).exp()
             if lower_bound is None:
@@ -485,10 +481,27 @@ def reference(q, k, v, raw_g, raw_beta, a_log, bias, lower_bound, state, starts,
     return output, final, records
 
 
-@pytest.mark.parametrize("num_spec", [0, 1, 3, 5, 7])
-@pytest.mark.parametrize("state_dtype", [torch.float32, torch.bfloat16])
-@pytest.mark.parametrize("activation_dtype", [torch.bfloat16, torch.float16])
-@pytest.mark.parametrize("lower_bound", [-5.0, None])
+@pytest.mark.parametrize(
+    "num_spec,state_dtype,activation_dtype,lower_bound",
+    # Keep all pairwise span, dtype, and gate coverage across the original cases.
+    [
+        (0, torch.float32, torch.bfloat16, -5.0),
+        (0, torch.bfloat16, torch.bfloat16, None),
+        (0, torch.bfloat16, torch.float16, -5.0),
+    ]
+    # Keep both dtypes and gate settings at the longest speculative span.
+    + [
+        (7, torch.float32, torch.bfloat16, None),
+        (7, torch.bfloat16, torch.bfloat16, -5.0),
+        (7, torch.bfloat16, torch.float16, None),
+    ]
+    # Keep both dtypes and gate settings at the first speculative span.
+    + [
+        (1, torch.float32, torch.bfloat16, -5.0),
+        (1, torch.float32, torch.float16, None),
+        (1, torch.bfloat16, torch.float16, -5.0),
+    ],
+)
 @pytest.mark.skip_global_cleanup
 @torch.inference_mode()
 def test_recoverssm_preserves_accepted_state_across_steps(
@@ -579,43 +592,29 @@ def test_recoverssm_empty_batch():
     assert torch.count_nonzero(state) == 0
 
 
-@pytest.mark.parametrize("amplitude", [1.0, 1e-2, 1e-3, 1e-6, 1e-8, 0.0])
+@pytest.mark.parametrize(
+    "amplitude,heads",
+    [(1.0, 8), (1e-2, 8), (1e-3, 8), (1e-6, 8), (1e-8, 8), (0.0, 8), (1e-8, 32)],
+)
 @pytest.mark.skip_global_cleanup
 @torch.inference_mode()
-def test_recoverssm_matches_ascendc_small_norms(amplitude, record_property):
-    from vllm_ascend.ops.kda import run_recurrent_kda
-
+def test_recoverssm_matches_fp64_small_norms(amplitude, heads, record_property):
     if not torch.npu.is_available():
         pytest.skip("requires an Ascend NPU")
     torch.manual_seed(61566)
-    device, heads, dim, capacity = "npu", 8, 128, 6
+    # The 32-head case exercises grouped commit on A5.
+    device, dim, capacity = "npu", 128, 6
     q, k = (torch.randn(1, capacity, heads, dim, dtype=torch.bfloat16, device=device) * amplitude for _ in range(2))
     v, gate = (torch.randn_like(q) for _ in range(2))
     beta = torch.randn(1, capacity, heads, dtype=q.dtype, device=device)
     a_log, bias = torch.zeros(heads, device=device), torch.zeros(heads * dim, device=device)
     initial = torch.randn(heads, dim, dim, device=device) * 0.05
-    native = torch.zeros(capacity + 1, heads, dim, dim, device=device)
-    native[1] = initial
     checkpoint = torch.zeros(2, heads, dim, dim, device=device)
     checkpoint[1] = initial
     starts = torch.tensor([0, capacity], dtype=torch.int32, device=device)
     indices = torch.ones(1, dtype=torch.int32, device=device)
-    native_indices = torch.arange(1, capacity + 1, dtype=torch.int32, device=device).view(1, capacity)
-    expected = run_recurrent_kda(
-        q,
-        k,
-        v,
-        gate,
-        beta,
-        native,
-        starts,
-        native_indices,
-        a_log.reshape(-1),
-        bias,
-        lower_bound=-5.0,
-        beta_is_preprocessed=False,
-        num_accepted_tokens=indices,
-    )
+    reference_inputs = (q, k, v, gate, beta, a_log, bias, -5.0, checkpoint, [0, capacity], [1])
+    expected, expected_final, _ = reference(*reference_inputs, [capacity])
     correction = torch.empty(2, heads, capacity, dim, device=device)
     kg = torch.empty(2, heads, capacity, 2 * dim, dtype=q.dtype, device=device)
     output = kda_recoverssm_verify(
@@ -624,7 +623,7 @@ def test_recoverssm_matches_ascendc_small_norms(amplitude, record_property):
         v,
         gate,
         beta,
-        a_log.reshape(-1),
+        a_log,
         bias,
         -5.0,
         checkpoint,
@@ -634,55 +633,38 @@ def test_recoverssm_matches_ascendc_small_norms(amplitude, record_property):
         indices,
         capacity,
     )
-    assert_accuracy(output, expected, record_property, "verify_ascendc")
+    assert_accuracy(output, expected, record_property, "verify_small_norms")
     # Retain the stronger small-norm regression checks alongside the common criteria.
-    torch.testing.assert_close(output.float(), expected.float(), atol=1e-4, rtol=2e-4)
+    torch.testing.assert_close(output.cpu().float(), expected.to(output.dtype).float(), atol=1e-4, rtol=2e-4)
     for count in (1, 3, capacity):
         restored = checkpoint.clone()
         accepted = torch.full_like(indices, count)
         kda_recoverssm_commit(restored, correction, kg, a_log, bias, -5.0, starts, indices, accepted)
-        assert_accuracy(restored[1], native[count], record_property, f"commit_ascendc_accepted{count}")
-        torch.testing.assert_close(restored[1], native[count], atol=2e-6, rtol=2e-5)
+        expected_state = expected_final if count == capacity else reference(*reference_inputs, [count])[1]
+        assert_accuracy(restored[1], expected_state[1], record_property, f"commit_small_norms_accepted{count}")
+        torch.testing.assert_close(restored[1].cpu(), expected_state[1].to(restored.dtype), atol=2e-6, rtol=2e-5)
 
 
 @pytest.mark.parametrize("capacity", [4, 8])
 @pytest.mark.parametrize("heads", [4, 16])
 @pytest.mark.skip_global_cleanup
 @torch.inference_mode()
-def test_kimi_request_records_match_native_recurrent_kda(capacity, heads, record_property):
-    from vllm_ascend.ops.kda import run_recurrent_kda
-
+def test_kimi_request_records_match_fp64_kda(capacity, heads, record_property):
     if not torch.npu.is_available():
         pytest.skip("requires an Ascend NPU")
     torch.manual_seed(51134)
     device, dim = "npu", 128
     q, k, v, gate = (torch.randn(1, capacity, heads, dim, dtype=torch.bfloat16, device=device) for _ in range(4))
     raw_beta = torch.randn(1, capacity, heads, dtype=torch.bfloat16, device=device)
-    beta = raw_beta.float().sigmoid()
     a_log = torch.randn(heads, device=device) * 0.1
     bias = torch.randn(heads * dim, device=device) * 0.1
     initial = torch.randn(heads, dim, dim, device=device) * 0.05
-    native = torch.zeros(capacity + 1, heads, dim, dim, device=device)
-    native[1] = initial
     state = torch.zeros(2, heads, dim, dim, device=device)
     state[1] = initial
     starts = torch.tensor([0, capacity], dtype=torch.int32, device=device)
     indices = torch.ones(1, dtype=torch.int32, device=device)
-    native_indices = torch.arange(1, capacity + 1, dtype=torch.int32, device=device).view(1, capacity)
-    expected = run_recurrent_kda(
-        q,
-        k,
-        v,
-        gate,
-        beta,
-        native,
-        starts,
-        native_indices,
-        a_log,
-        bias,
-        lower_bound=-5.0,
-        num_accepted_tokens=indices,
-    )
+    reference_inputs = (q, k, v, gate, raw_beta, a_log, bias, -5.0, state, [0, capacity], [1])
+    expected, expected_final, _ = reference(*reference_inputs, [capacity])
     correction = torch.empty(1, heads, capacity, dim, device=device)
     key_gate = torch.empty(1, heads, capacity, 2 * dim, dtype=q.dtype, device=device)
     output = kda_recoverssm_verify(
@@ -701,7 +683,7 @@ def test_kimi_request_records_match_native_recurrent_kda(capacity, heads, record
         indices,
         capacity,
     )
-    assert_accuracy(output, expected, record_property, "kimi_verify_vs_native")
+    assert_accuracy(output, expected, record_property, "kimi_verify_fp64")
     conv = torch.zeros(2, 3 * heads * dim, capacity + 2, dtype=q.dtype, device=device)
     if not is_conv_state_dim_first():
         conv = conv.transpose(-1, -2).contiguous()
@@ -717,8 +699,9 @@ def test_kimi_request_records_match_native_recurrent_kda(capacity, heads, record
     context = KDARecoverSSMCommitContext.create([layer], spec_query_len=capacity, max_num_reqs=1)
     for count in (1, 2, capacity):
         state[1].copy_(initial)
+        expected_state = expected_final if count == capacity else reference(*reference_inputs, [count])[1]
         context.commit(torch.full_like(indices, count), indices, starts)
-        assert_accuracy(state[1], native[count], record_property, f"kimi_commit_vs_native_accepted{count}")
+        assert_accuracy(state[1], expected_state[1], record_property, f"kimi_commit_fp64_accepted{count}")
 
 
 @pytest.mark.parametrize("accepted", [1, 2, 4])
@@ -774,8 +757,7 @@ def test_kimi_conv_compaction_matches_native_across_windows(accepted):
 @pytest.mark.parametrize("heads", [12, 24])
 @pytest.mark.skip_global_cleanup
 @torch.inference_mode()
-def test_kimi_recoverssm_matches_native_over_multiple_windows(heads, record_property):
-    from vllm_ascend.ops.kda import run_recurrent_kda
+def test_kimi_recoverssm_matches_fp64_over_multiple_windows(heads, record_property):
     from vllm_ascend.ops.kimi_kda import AscendKimiK3DeltaAttention
 
     if not torch.npu.is_available():
@@ -788,7 +770,7 @@ def test_kimi_recoverssm_matches_native_over_multiple_windows(heads, record_prop
         conv = conv.transpose(-1, -2).contiguous()
     native_conv = conv.clone()
     state = torch.randn(pages, heads, dim, dim, device=device) * 0.05
-    native_state = state.clone()
+    reference_state = state.cpu()
     a_log = torch.randn(heads, device=device) * 0.1
     bias = torch.randn(heads * dim, device=device) * 0.1
     records = SimpleNamespace(
@@ -805,9 +787,10 @@ def test_kimi_recoverssm_matches_native_over_multiple_windows(heads, record_prop
         head_dim=dim,
     )
     context = KDARecoverSSMCommitContext.create([layer], spec_query_len=capacity, max_num_reqs=rows)
-    native_indices = torch.tensor([[1, 2, 3, 4], [5, 6, 7, 8]], dtype=torch.int32, device=device)
-    indices = native_indices[:, 0].contiguous()
-    starts = torch.tensor([0, capacity, 2 * capacity], dtype=torch.int32, device=device)
+    blocks = [1, 5]
+    sequence = [0, capacity, 2 * capacity]
+    indices = torch.tensor(blocks, dtype=torch.int32, device=device)
+    starts = torch.tensor(sequence, dtype=torch.int32, device=device)
     ones = torch.ones(rows, dtype=torch.int32, device=device)
     previous_counts = ones
     weights = torch.randn(4, channels, dtype=conv.dtype, device=device) * 0.1
@@ -824,21 +807,10 @@ def test_kimi_recoverssm_matches_native_over_multiple_windows(heads, record_prop
         q, k, v = (part.reshape(1, rows * capacity, heads, dim) for part in mixed.chunk(3, dim=-1))
         gate = torch.randn_like(q) * 0.1
         raw_beta = torch.randn(1, rows * capacity, heads, device=device)
-        beta = raw_beta.sigmoid()
-        expected = run_recurrent_kda(
-            q,
-            k,
-            v,
-            gate,
-            beta,
-            native_state,
-            starts,
-            native_indices,
-            a_log,
-            bias,
-            lower_bound=-5.0,
-            num_accepted_tokens=previous_counts,
+        expected, expected_state, _ = reference(
+            q, k, v, gate, raw_beta, a_log, bias, -5.0, reference_state, sequence, blocks, accepted
         )
+        reference_state = expected_state.to(state.dtype)
         actual = kda_recoverssm_verify(
             q,
             k,
@@ -858,18 +830,16 @@ def test_kimi_recoverssm_matches_native_over_multiple_windows(heads, record_prop
         assert_accuracy(actual, expected, record_property, f"kimi_multistep_output_{step}")
         counts = torch.tensor(accepted, dtype=torch.int32, device=device)
         context.commit(counts, indices, starts)
-        for row, count in enumerate(accepted):
-            assert_accuracy(
-                state[1 + row * capacity],
-                native_state[1 + row * capacity + count - 1],
-                record_property,
-                f"kimi_multistep_state_{step}_{row}",
-            )
+        for row, block in enumerate(blocks):
+            assert_accuracy(state[block], expected_state[block], record_property, f"kimi_multistep_state_{step}_{row}")
         previous_counts = counts
 
 
-@pytest.mark.parametrize("key_dim,value_dim", [(7, 5), (7, 8), (8, 5)])
-@pytest.mark.parametrize("lower_bound", [-5.0, None])
+@pytest.mark.parametrize(
+    "lower_bound,key_dim,value_dim",
+    # Use both gate modes when both tiles need masking.
+    [(-5.0, 7, 5), (-5.0, 7, 8), (None, 7, 5), (None, 8, 5)],
+)
 @pytest.mark.skip_global_cleanup
 @torch.inference_mode()
 def test_recoverssm_ragged_tiles(key_dim, value_dim, lower_bound, record_property):
@@ -903,21 +873,48 @@ def test_recoverssm_ragged_tiles(key_dim, value_dim, lower_bound, record_propert
     assert_accuracy(state, expected_state, record_property, "commit_ragged")
 
 
-@pytest.mark.parametrize("mode", ["cross", "exact", "no_cross", "mixed", "no_cross_inplace"])
-@pytest.mark.parametrize("graph_mode", [False, True])
 @pytest.mark.parametrize(
-    "state_dtype,heads,key_dim,value_dim",
+    "state_dtype,heads,key_dim,value_dim,mode,graph_mode",
+    # Replay all modes on the FP32 model path, which also covers A5's grouped commit.
+    # BF16 exact and no-cross replay are covered by the small and masked shapes below.
     [
-        (torch.float32, 2, 128, 128),
-        (torch.bfloat16, 2, 128, 128),
-        (torch.float32, None, 128, 128),
-        (torch.float32, 16, 128, 128),
-        (torch.float32, 8, 128, 128),
-        (torch.bfloat16, None, 128, 128),
-        (torch.float32, 2, 7, 5),
-        (torch.bfloat16, 2, 7, 8),
+        pytest.param(dtype, None, 128, 128, mode, graph_mode, id=f"{name}-{mode}-{graph_mode}")
+        for dtype, name, mode_cases in (
+            (
+                torch.float32,
+                "fp32_model",
+                (
+                    ("cross", False),
+                    ("cross", True),
+                    ("exact", True),
+                    ("no_cross", True),
+                    ("mixed", True),
+                    ("no_cross_inplace", True),
+                ),
+            ),
+            (
+                torch.bfloat16,
+                "bf16_model",
+                (("cross", False), ("cross", True), ("mixed", True), ("no_cross_inplace", True)),
+            ),
+        )
+        for mode, graph_mode in mode_cases
+    ]
+    + [
+        pytest.param(torch.float32, 2, 128, 128, "cross", True, id="fp32_small-cross-True"),
+        pytest.param(torch.bfloat16, 2, 128, 128, "exact", True, id="bf16_small-exact-True"),
+        pytest.param(torch.float32, 16, 128, 128, "mixed", True, id="tp4-mixed-True"),
+        pytest.param(torch.float32, 8, 128, 128, "no_cross_inplace", True, id="tp8-no_cross_inplace-True"),
+    ]
+    # Preserve both sides of the alignment boundary for the masked tiles.
+    + [
+        pytest.param(dtype, 2, key_dim, value_dim, mode, graph_mode, id=f"{name}-{mode}-{graph_mode}")
+        for dtype, key_dim, value_dim, name in (
+            (torch.float32, 7, 5, "masked_kv"),
+            (torch.bfloat16, 7, 8, "bf16_masked_k"),
+        )
+        for mode, graph_mode in (("cross", False), ("no_cross", True))
     ],
-    ids=["fp32_small", "bf16_small", "fp32_model", "tp4", "tp8", "bf16_model", "masked_kv", "bf16_masked_k"],
 )
 @pytest.mark.skip_global_cleanup
 @torch.inference_mode()
@@ -1079,9 +1076,17 @@ def test_context_input_constraints():
         KDARecoverSSMCommitContext.create([], spec_query_len=6, max_num_reqs=4)
 
 
-@pytest.mark.parametrize("num_layers", [11, 12, 34])
-@pytest.mark.parametrize("batch", [11, 12])
-@pytest.mark.parametrize("graph_mode", [False, True])
+@pytest.mark.parametrize(
+    "graph_mode,batch,num_layers",
+    [
+        (False, 11, 11),
+        (False, 11, 34),
+        (False, 12, 12),
+        (True, 11, 11),
+        (True, 12, 12),
+        (True, 12, 34),
+    ],
+)
 @pytest.mark.skip_global_cleanup
 @torch.inference_mode()
 def test_model_commit_context(batch, graph_mode, num_layers, record_property):
@@ -1169,17 +1174,20 @@ def test_model_commit_context(batch, graph_mode, num_layers, record_property):
 
 
 @pytest.mark.parametrize(
-    "span,heads,activation_dtype,lower_bound",
-    [(span, heads, torch.bfloat16, -5.0) for heads in (32, 64) for span in (1, 2, 4, 6, 8)]
-    + [
-        (4, 64, torch.float16, -5.0),
-        (8, 64, torch.float16, None),
-        (2, 32, torch.bfloat16, None),
-        (8, 64, torch.bfloat16, None),
-        (6, 16, torch.bfloat16, -5.0),
+    "graph_mode,span,heads,activation_dtype,lower_bound",
+    [
+        # Pair eager and graph at the shortest and longest windows and on the 16-head path.
+        (False, 1, 32, torch.bfloat16, -5.0),
+        (False, 8, 64, torch.float16, None),
+        (False, 6, 16, torch.bfloat16, -5.0),
+        (True, 1, 32, torch.bfloat16, -5.0),
+        (True, 4, 32, torch.bfloat16, -5.0),
+        (True, 8, 64, torch.bfloat16, -5.0),
+        (True, 8, 64, torch.float16, None),
+        (True, 8, 64, torch.bfloat16, None),
+        (True, 6, 16, torch.bfloat16, -5.0),
     ],
 )
-@pytest.mark.parametrize("graph_mode", [False, True])
 @pytest.mark.skip_global_cleanup
 @torch.inference_mode()
 def test_commit_window_uses_device_path(

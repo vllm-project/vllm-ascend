@@ -118,7 +118,6 @@ config:
 
 env_common: &env_common
   VLLM_USE_MODELSCOPE: "true"
-  VLLM_USE_V2_MODEL_RUNNER: "1"
   VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS: "30000"
   HCCL_BUFFSIZE: "1024"
   PYTORCH_NPU_ALLOC_CONF: expandable_segments:True

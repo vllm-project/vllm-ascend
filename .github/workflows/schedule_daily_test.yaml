@@ -67,7 +67,7 @@ concurrency:
 
 jobs:
   select-all-tests:
-    runs-on: linux-amd64-cpu-8-hk
+    runs-on: linux-amd64-cpu-2-hk
     container:
       image: quay.io/ascend-ci/vllm-ascend:lint
     outputs:
@@ -149,7 +149,10 @@ jobs:
           - ${{ needs.select-all-tests.outputs.main_commit }}
           - ${{ needs.select-all-tests.outputs.release_tag }}
     uses: ./.github/workflows/_selected_tests.yaml
+    secrets:
+      PAT_TOKEN: ${{ secrets.PAT_TOKEN }}
     with:
+      request_id: daily-${{ github.run_id }}-${{ github.run_attempt }}
       vllm: ${{ matrix.vllm_version }}
       ref: ${{ needs.select-all-tests.outputs.vllm_ascend_ref }}
       base_ref: ${{ needs.select-all-tests.outputs.base_ref }}
@@ -239,7 +242,7 @@ jobs:
             -f test_cases='${{ needs.daily-select-tests.outputs.daily_a2_tests }}' \
             -f vllm_ascend_branch='main' \
             -f skip_build_image='true' \
-            -f request_id='daily' \
+            -f request_id='daily-${{ github.run_id }}-${{ github.run_attempt }}' \
             -f vllm_ascend_ref='main'
 
   daily-dispatch-a3:
@@ -269,7 +272,7 @@ jobs:
             -f test_cases='${{ needs.daily-select-tests.outputs.daily_a3_tests }}' \
             -f vllm_ascend_branch='main' \
             -f skip_build_image='true' \
-            -f request_id='daily' \
+            -f request_id='daily-${{ github.run_id }}-${{ github.run_attempt }}' \
             -f vllm_ascend_ref='main'
 
   daily-dispatch-a3-560t:
@@ -299,7 +302,7 @@ jobs:
             -f test_cases='${{ needs.daily-select-tests.outputs.daily_a3_560t_tests }}' \
             -f vllm_ascend_branch='main' \
             -f skip_build_image='true' \
-            -f request_id='daily' \
+            -f request_id='daily-${{ github.run_id }}-${{ github.run_attempt }}' \
             -f vllm_ascend_ref='main'
 
   daily-dispatch-a5:
@@ -329,13 +332,13 @@ jobs:
             -f test_cases='${{ needs.daily-select-tests.outputs.daily_a5_tests }}' \
             -f vllm_ascend_branch='main' \
             -f skip_build_image='true' \
-            -f request_id='daily' \
+            -f request_id='daily-${{ github.run_id }}-${{ github.run_attempt }}' \
             -f vllm_ascend_ref='main'
 
   update-estimated-times:
     needs: [run-all-tests]
     if: ${{ !cancelled() && inputs.update_est_times }}
-    runs-on: ubuntu-latest
+    runs-on: linux-amd64-cpu-2-hk
     steps:
       - uses: actions/checkout@v7
         with:

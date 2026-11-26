@@ -18,11 +18,6 @@ msgstr ""
 "Plural-Forms: nplurals=1; plural=0;\n"
 "Generated-By: detect_po_changes.py\n"
 
-msgid ""
-"The following Qwen3-0.6B example has been validated on Atlas 300I DUO and "
-"Atlas 200I Pro."
-msgstr "以下 Qwen3-0.6B 示例已在 Atlas 300I DUO 和 Atlas 200I Pro 上验证通过。"
-
 msgid "???+ important \"Runtime requirements for this hardware path\""
 msgstr "???+ important \"此硬件路径的运行时要求\""
 
@@ -54,3 +49,8 @@ msgid ""
 "The following messages show the process exiting after offline inference and "
 "do not affect the inference results:"
 msgstr "以下消息显示离线推理后进程退出，不影响推理结果："
+
+msgid ""
+"The following Qwen3-0.6B example has been validated on Atlas 300I Duo and "
+"Atlas 200I Pro."
+msgstr "以下 Qwen3-0.6B 示例已在 Atlas 300I Duo 和 Atlas 200I Pro 上验证通过。"

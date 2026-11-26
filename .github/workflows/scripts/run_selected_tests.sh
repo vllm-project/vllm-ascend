@@ -188,7 +188,11 @@ run_pytest_target() {
     run_logged_command "${log_file}" python -m coverage run --rcfile="${project_root}/tests/coveragerc" -m pytest -sv --color=yes "${target}"
   else
     set +e
-    run_logged_command "${log_file}" pytest -sv --color=yes "${target}"
+    if [ "${npu_type}" = "cpu" ]; then
+      run_logged_command "${log_file}" python -m slipcover --source="${project_root}/vllm_ascend" --omit="*/tests/*,*/ops/triton/*" --json --out "${project_root}/tests/coverage.json" -m pytest -n 8 -sv --color=yes "${target}"
+    else
+      run_logged_command "${log_file}" pytest -sv --color=yes "${target}"
+    fi
   fi
   local status=$?
   set -e
@@ -206,6 +210,9 @@ run_pytest_target() {
   echo "::endgroup::"
   if [ "${status}" -eq 0 ]; then
     test_results+=("${target}|PASSED|${log_file}")
+  elif [ "${status}" -eq 5 ] && grep -Eq 'collected 0 items / [1-9][0-9]* skipped[[:space:]]*$' "${log_file}"; then
+    # A collection skip can yield exit 5 even when the target is valid.
+    test_results+=("${target}|SKIPPED|${log_file}")
   else
     test_results+=("${target}|FAILED|${log_file}")
     failed_logs+=("${target}|${log_file}")
@@ -238,7 +245,11 @@ run_pytest_batch() {
     run_logged_command "${log_file}" python -m coverage run --rcfile="${project_root}/tests/coveragerc" -m pytest -sv --color=yes "${batch_targets[@]}"
   else
     set +e
-    run_logged_command "${log_file}" pytest -sv --color=yes "${batch_targets[@]}"
+    if [ "${npu_type}" = "cpu" ]; then
+      run_logged_command "${log_file}" python -m slipcover --source="${project_root}/vllm_ascend" --omit="*/tests/*,*/ops/triton/*" --json --out "${project_root}/tests/coverage.json" -m pytest -n 8 -sv --color=yes "${batch_targets[@]}"
+    else
+      run_logged_command "${log_file}" pytest -sv --color=yes "${batch_targets[@]}"
+    fi
   fi
   local status=$?
   set -e

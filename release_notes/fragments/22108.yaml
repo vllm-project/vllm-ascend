@@ -1,0 +1,4 @@
+pr: 22108
+entries:
+  - category: bugfix
+    text: Fixed a startup failure when DFlash draft loading disabled MegaMoE for the target model on Ascend.
