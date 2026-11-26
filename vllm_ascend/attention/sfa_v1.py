@@ -32,6 +32,7 @@ from vllm_ascend.attention.context_parallel.common_cp import (
 )
 from vllm_ascend.attention.dsa_attn_kv_plan import write_dsa_cache
 from vllm_ascend.attention.indexer import AscendSFAIndexerCache
+from vllm_ascend.attention.mla_projections import MLAProjectionMixin
 from vllm_ascend.attention.sparse_flash_mla import (
     HIF8_QUANT_MODE,
     SMLA_QUANT_METADATA_SIZE,
@@ -833,7 +834,7 @@ class AscendSFAMetadataBuilder(MLACommonMetadataBuilder[AscendSFAMetadata]):
         return attn_metadata
 
 
-class AscendSFAImpl(MLAAttentionImpl):
+class AscendSFAImpl(MLAProjectionMixin, MLAAttentionImpl):
     """
     NOTE: Please read the comment at the top of the file before trying to
     understand this class
@@ -890,17 +891,13 @@ class AscendSFAImpl(MLAAttentionImpl):
         self.qk_rope_head_dim = kwargs["qk_rope_head_dim"]
         self.qk_head_dim = kwargs["qk_head_dim"]
         self.v_head_dim = kwargs["v_head_dim"]
-        self.q_proj = kwargs["q_proj"] if self.q_lora_rank is None else kwargs["q_b_proj"]
-        self.fused_qkv_a_proj = kwargs.get("fused_qkv_a_proj")
+        self._init_projections(kwargs)
         self.kv_b_proj = kwargs["kv_b_proj"]
-        self.o_proj = kwargs["o_proj"]
         self.indexer = kwargs["indexer"]
-        self.g_proj = kwargs.get("g_proj")
         # NoPE sparse layers use the same SFA template and native prefill;
         # they do not need an upstream dense-MHA prefill backend.
         if self.qk_rope_head_dim == 0:
             self.supports_dense_mha_prefill = False
-        self.kv_a_proj_with_mqa = kwargs.get("kv_a_proj_with_mqa")
         self.kv_a_layernorm = kwargs.get("kv_a_layernorm")
         self.q_a_layernorm = kwargs.get("q_a_layernorm")
         self.tp_size = get_tensor_model_parallel_world_size()

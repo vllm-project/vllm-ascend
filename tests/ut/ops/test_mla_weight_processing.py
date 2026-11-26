@@ -42,6 +42,7 @@ def make_attention(impl):
     modules = MagicMock()
     modules.indexer = None
     config = SimpleNamespace(
+        lora_config=None,
         model_config=SimpleNamespace(hf_text_config=SimpleNamespace(num_hidden_layers=1)),
         compilation_config=SimpleNamespace(static_forward_context={}),
     )
