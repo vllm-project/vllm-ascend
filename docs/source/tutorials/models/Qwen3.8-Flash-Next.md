@@ -798,7 +798,7 @@ For 950DT products, basic PD, the image-and-text 10K case, and the long-context 
 
     Run Prefill and Decode in separate terminals. Start the proxy after both APIs are ready. Port 8087 is also used by the colocated example, so stop that service before starting this proxy.
 
-    Initialize CANN/ATB as described in Section 4.1. Use the vLLM version matching the selected vLLM-Ascend runtime.
+    These commands retain `VLLM_VERSION=0.32.0` from the validated runtime. This variable overrides vLLM version detection; it does not install or upgrade vLLM. Initialize CANN/ATB as described in Section 4.1.
 
     **Prefill:**
 
@@ -814,6 +814,7 @@ For 950DT products, basic PD, the image-and-text 10K case, and the long-context 
     export GLOO_SOCKET_IFNAME="${nic_name}"
     export TP_SOCKET_IFNAME="${nic_name}"
     export HCCL_SOCKET_IFNAME="${nic_name}"
+    export VLLM_VERSION=0.32.0
     export VLLM_RPC_TIMEOUT=3600000
     export HCCL_EXEC_TIMEOUT=204
     export HCCL_CONNECT_TIMEOUT=120
@@ -879,6 +880,7 @@ For 950DT products, basic PD, the image-and-text 10K case, and the long-context 
     export GLOO_SOCKET_IFNAME="${nic_name}"
     export TP_SOCKET_IFNAME="${nic_name}"
     export HCCL_SOCKET_IFNAME="${nic_name}"
+    export VLLM_VERSION=0.32.0
     export VLLM_RPC_TIMEOUT=3600000
     export HCCL_EXEC_TIMEOUT=204
     export HCCL_CONNECT_TIMEOUT=120
@@ -2758,10 +2760,10 @@ Use the configuration for your hardware and deployment mode. The table summarize
 | A3 series | Colocated | 0–7 | 8 × 1 × 1 | 131072 | 8 | 4096 |
 | 950DT products | Colocated | 0–3 | 4 × 1 × 1 | 141312 | 32 | 4096 |
 | A2 series | Prefill | 0–7 on prefill host | 4 × 2 × 1 | 141312 | 32 | 8192 |
-| A3 series | Prefill (basic PD) | 0–7 | 2 × 4 × 1 (EP2) | 143360 | 32 | 8192 |
+| A3 series | Prefill (basic PD) | 0–7 | 2 × 4 × 1 (EP2) | 262144 | 32 | 8192 |
 | 950DT products | Prefill (basic PD) | 0–3 | 2 × 1 × 2 (EP4) | 143360 | 64 | 4096 |
 | A2 series | Decode | 0–7 on decode host | 2 × 1 × 4 | 141312 | 32 | 8192 |
-| A3 series | Decode (basic PD) | 8–15 | 2 × 1 × 4 (EP8) | 143360 | 32 | 8192 |
+| A3 series | Decode (basic PD) | 8–15 | 2 × 1 × 4 (EP8) | 262144 | 32 | 8192 |
 | 950DT products | Decode (basic PD) | 4–7 | 2 × 1 × 2 (EP4) | 143360 | 64 | 4096 |
 | A2 series | Prefill (image-and-text 10K) | 0–7 on prefill host | 4 × 2 × 1 (EP4) | 262144 | 32 | 8192 |
 | A3 series | Prefill (image-and-text 10K) | 0–7 | 4 × 2 × 1 (EP4) | 262144 | 32 | 8192 |
