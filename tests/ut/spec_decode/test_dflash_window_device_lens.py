@@ -14,7 +14,6 @@ branch.
 
 from contextlib import contextmanager, nullcontext
 from types import SimpleNamespace
-from unittest.mock import MagicMock
 
 import numpy as np
 import pytest
@@ -24,16 +23,48 @@ from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
 from vllm.v1.worker.gpu.spec_decode.dflash.speculator import DFlashSpeculator
 
 import vllm_ascend.worker.v2.spec_decode.dflash.speculator as dflash_speculator_module
-from vllm_ascend.attention.attention_v1 import AscendAttentionBackend, AscendAttentionState
-from vllm_ascend.attention.mla_v1 import AscendMLABackend, AscendMLADecodeMetadata, AscendMLAMetadata
+from vllm_ascend.attention.attention_v1 import AscendAttentionState
+from vllm_ascend.attention.context_parallel.mla_cp import AscendMlaDCPImpl
+from vllm_ascend.attention.mla_v1 import AscendMLABackend, AscendMLADecodeMetadata, AscendMLAImpl, AscendMLAMetadata
 from vllm_ascend.worker.v2.spec_decode.dflash.speculator import AscendDFlashSpeculator, draft_metadata_request_count
 
 
-def _spec(lengths, *, mla_draft=True):
+@pytest.mark.parametrize(
+    ("impl_cls", "causal", "error"),
+    [
+        (AscendMLAImpl, True, None),
+        (AscendMLAImpl, False, "must be causal"),
+        (AscendMlaDCPImpl, True, "decode context parallelism"),
+    ],
+)
+def test_windowed_mla_draft_layers(impl_cls, causal, error):
+    window = impl_cls.__new__(impl_cls)
+    window.sliding_window = 1024
+    full = AscendMlaDCPImpl.__new__(AscendMlaDCPImpl)
+    full.sliding_window = None
+    layers = {
+        name: SimpleNamespace(impl=impl)
+        for name, impl in (
+            ("full", full),
+            ("window", window),
+            ("gqa", SimpleNamespace(sliding_window=1024)),
+        )
+    }
+    model = SimpleNamespace(
+        get_draft_kv_cache_layer_names=lambda: list(layers), get_draft_attn_causal=lambda: [True, causal, False]
+    )
+    if error:
+        with pytest.raises(ValueError, match=error):
+            dflash_speculator_module._get_windowed_mla_layers(model, layers)
+    else:
+        assert dflash_speculator_module._get_windowed_mla_layers(model, layers) == ("window",)
+
+
+def _spec(lengths):
     spec = AscendDFlashSpeculator.__new__(AscendDFlashSpeculator)
-    spec.attn_architecture = "MLA" if mla_draft else "GQA"
+    spec.attn_architecture = "MLA"
     spec.use_flashmla = False
-    spec.attn_backends = {"draft.0": AscendMLABackend if mla_draft else AscendAttentionBackend}
+    spec.attn_backends = {"draft.0": AscendMLABackend}
     spec.input_buffers = SimpleNamespace(
         seq_lens=torch.tensor(lengths, dtype=torch.int32),
         positions=torch.zeros(64),
@@ -57,81 +88,41 @@ def _capture_factory(monkeypatch, supplied):
     monkeypatch.setattr(dflash_speculator_module, "build_attn_metadata_wrapper", nullcontext)
 
 
-class TestBuildDraftAttnMetadatasFactory:
-    """Both the eager hook and the ACL replay entry must supply the exact
-    rejection-adjusted host lengths and pin ChunkedPrefill, following the
-    DSpark regression coverage in test_dspark_valid_kv_lengths."""
+def test_mla_draft_eager_and_acl_get_exact_lengths(monkeypatch):
+    monkeypatch.setattr(AscendDFlashSpeculator, "attn_vllm_config", property(lambda self: self.vllm_config))
+    spec = _spec([1034, 1040, 7, 9])
+    supplied = []
+    _capture_factory(monkeypatch, supplied)
+    upper_bound = torch.tensor([1040, 1048], dtype=torch.int32)
 
-    @staticmethod
-    def _run_entrypoint(monkeypatch, spec, entrypoint):
-        supplied = []
-        _capture_factory(monkeypatch, supplied)
-        decode = SimpleNamespace(
-            actual_seq_lengths_q=[8],
-            seq_lens_list=[1034, 1040, 0, 0],
-        )
-        metadata = {"draft.0": SimpleNamespace(decode=decode)}
-        monkeypatch.setattr(DFlashSpeculator, "_build_attn_metadata", MagicMock(return_value=metadata))
-        upper_bound = torch.tensor([1040], dtype=torch.int32)
-        if entrypoint == "ACL_update":
-            result = spec.build_draft_attn_metadatas(4, upper_bound)[0]
-        else:
-            result = spec._build_uniform_attn_metadata(
+    def upstream_build(*args, query_start_loc_np, **kwargs):
+        decode = SimpleNamespace(actual_seq_lengths_q=query_start_loc_np[1:].tolist())
+        return {"draft.0": SimpleNamespace(decode=decode)}
+
+    monkeypatch.setattr(DFlashSpeculator, "_build_attn_metadata", upstream_build)
+    for expected in ([1034, 1040], [1035, 1047]):
+        spec.input_buffers.seq_lens[:2] = torch.tensor(expected)
+        with draft_metadata_request_count(spec, 2):
+            eager = spec._build_uniform_attn_metadata(
                 num_reqs=2,
-                batch_desc=BatchExecutionDescriptor(cg_mode=CUDAGraphMode.FULL, num_tokens=32, num_reqs=4),
+                batch_desc=BatchExecutionDescriptor(cg_mode=CUDAGraphMode.NONE, num_tokens=16, num_reqs=2),
                 num_query_per_req=8,
                 seq_lens_cpu_upper_bound=upper_bound,
                 step=8,
                 causal=True,
             )
-        return result, metadata, supplied, decode
-
-    def test_mla_draft_eager_and_acl_get_exact_lengths(self, monkeypatch):
-        monkeypatch.setattr(AscendDFlashSpeculator, "attn_vllm_config", property(lambda self: self.vllm_config))
-        spec = _spec([1034, 1040, 7, 9])
-        for expected in ([1034, 1040], [1035, 1047]):
-            spec.input_buffers.seq_lens[:2] = torch.tensor(expected)
-            with draft_metadata_request_count(spec, 2):
-                lengths = []
-                for entrypoint in ("eager", "ACL_update"):
-                    result, metadata, supplied, decode = self._run_entrypoint(monkeypatch, spec, entrypoint)
-                    assert result is metadata
-                    assert decode.actual_seq_lengths_q == [8, 16, 24, 32]
-                    kwargs = supplied[0]
-                    assert kwargs["attn_state"] == AscendAttentionState.ChunkedPrefill
-                    assert kwargs["is_prefilling"].tolist() == [False] * 4
-                    assert kwargs["is_prefilling"].data_ptr() == spec.draft_is_prefilling.data_ptr()
-                    lengths.append(kwargs["seq_lens_cpu"])
-                assert lengths[0] is lengths[1]
-                assert lengths[0].dtype == torch.int32 and lengths[0].device.type == "cpu"
-                assert lengths[0].tolist() == [*expected, 0, 0]
-
-    def test_non_mla_draft_keeps_upstream_path(self, monkeypatch):
-        def forbidden_factory(*args, **kwargs):
-            raise AssertionError("build_attn_metadata_factory must not be used for non-MLA drafts")
-
-        monkeypatch.setattr(dflash_speculator_module, "build_attn_metadata_factory", forbidden_factory)
-        spec = _spec([1034, 1040, 7, 9], mla_draft=False)
-        upstream = MagicMock(
-            return_value={
-                "draft.0": SimpleNamespace(
-                    seq_lens_list=[1034, 1040],
-                    seq_lens=spec.input_buffers.seq_lens,
-                    seq_lens_cpu=spec.input_buffers.seq_lens.cpu(),
-                    block_tables=None,
-                )
-            }
-        )
-        monkeypatch.setattr(DFlashSpeculator, "_build_attn_metadata", upstream)
-        spec._build_uniform_attn_metadata(
-            num_reqs=2,
-            batch_desc=BatchExecutionDescriptor(cg_mode=CUDAGraphMode.FULL, num_tokens=16, num_reqs=2),
-            num_query_per_req=8,
-            seq_lens_cpu_upper_bound=torch.tensor([1040], dtype=torch.int32),
-            step=8,
-            causal=True,
-        )
-        assert upstream.call_count == 1
+            replay = spec.build_draft_attn_metadatas(4, upper_bound)[0]
+        assert eager["draft.0"].decode.actual_seq_lengths_q == [8, 16]
+        assert replay["draft.0"].decode.actual_seq_lengths_q == [8, 16, 24, 32]
+        for inputs, kv_lens in zip(supplied, (expected, [*expected, 0, 0]), strict=True):
+            assert inputs["attn_state"] == AscendAttentionState.ChunkedPrefill
+            flags = inputs["is_prefilling"]
+            assert flags.tolist() == [False] * len(kv_lens)
+            assert flags.data_ptr() == spec.draft_is_prefilling.data_ptr()
+            lengths = inputs["seq_lens_cpu"]
+            assert lengths.device.type == "cpu" and lengths.dtype == torch.int32
+            assert lengths.tolist() == kv_lens
+        supplied.clear()
 
 
 @pytest.mark.parametrize("mode", [CUDAGraphMode.NONE, CUDAGraphMode.FULL])

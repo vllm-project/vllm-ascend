@@ -549,7 +549,6 @@ class AscendKimiMLAAttention(UpstreamKimiMLAAttention):
         prefix: str = "",
         non_causal_multi_token_decode: bool = False,
         disable_mlapo: bool = False,
-        sliding_window: int | None = None,
     ) -> None:
         upstream_config = copy(config)
         split_output_gate = (
@@ -591,12 +590,6 @@ class AscendKimiMLAAttention(UpstreamKimiMLAAttention):
         if disable_mlapo:
             attention_layer.impl.enable_mlapo = False
             mark_fused_preprocess_weights(attention_layer.impl)
-        if sliding_window is not None:
-            # Upstream constructs the MLA layer without the window. Drop its
-            # full-attention selection until the draft resolves all its layers.
-            attention_layer.sliding_window = sliding_window
-            attention_layer.impl.sliding_window = sliding_window
-            attention_layer.impl.use_flashmla = False
         if not use_rope and not non_causal_multi_token_decode:
             return
 

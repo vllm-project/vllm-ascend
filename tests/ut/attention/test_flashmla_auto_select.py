@@ -302,39 +302,6 @@ def test_flashmla_window_requires_a5_and_flashmla_ops(monkeypatch):
     assert not impl._can_use_flashmla(dflash_draft_window=True)
 
 
-def test_sliding_window_patch_clears_stale_flashmla_flag(monkeypatch):
-    import vllm_ascend.models.kimi_k3.kimi_k3 as kimi_k3_mod
-    from vllm_ascend.models.kimi_k3.kimi_k3 import AscendKimiMLAAttention
-
-    fake_impl = SimpleNamespace(sliding_window=None, use_flashmla=True)
-    fake_layer = SimpleNamespace(impl=fake_impl, sliding_window=None)
-
-    def fake_upstream_init(self, **_kwargs):
-        # _attention_layer is a read-only property on the upstream wrapper;
-        # set the attribute it reads (self.mla_attn.mla_attn) instead.
-        self.mla_attn = SimpleNamespace(mla_attn=fake_layer)
-
-    monkeypatch.setattr(kimi_k3_mod.UpstreamKimiMLAAttention, "__init__", fake_upstream_init)
-
-    AscendKimiMLAAttention(
-        config=SimpleNamespace(mla_use_output_gate=False),
-        hidden_size=16,
-        num_heads=4,
-        qk_nope_head_dim=16,
-        qk_rope_head_dim=8,
-        v_head_dim=16,
-        q_lora_rank=32,
-        kv_lora_rank=16,
-        use_output_gate=False,
-        use_rope=False,
-        sliding_window=1024,
-    )
-
-    assert fake_layer.sliding_window == 1024
-    assert fake_impl.sliding_window == 1024
-    assert fake_impl.use_flashmla is False
-
-
 @pytest.mark.parametrize("prefilling", [[True, False, True], [False, False, False]])
 @pytest.mark.parametrize("graph_eligible", [None, True, False])
 @pytest.mark.parametrize("override", [False, True])

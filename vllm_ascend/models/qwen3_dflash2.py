@@ -19,13 +19,13 @@ from vllm.model_executor.models.qwen3_dflash import (
     DFlashQwen3ForCausalLM,
     DFlashQwen3Model,
     _resolve_layer_attention,
-    dflash_has_any_non_causal,
 )
 from vllm.model_executor.models.qwen3_dflash2 import DFlashGroupedConv as UpstreamDFlashGroupedConv
 from vllm.model_executor.models.utils import maybe_prefix
 
 from vllm_ascend.models.kimi_k3.kimi_k3 import AscendKimiMLAAttention, store_mla_draft_context_kv
 from vllm_ascend.models.quarot_utils import align_draft_weights
+from vllm_ascend.ops.kimi_mla import kimi_mla_draft_window
 from vllm_ascend.ops.rotary_embedding import get_cos_and_sin_mla
 from vllm_ascend.ops.vocab_parallel_embedding import (
     VocabParallelMode,
@@ -323,25 +323,28 @@ class DFlash2Qwen3MLADecoderLayer(DFlash2Qwen3DecoderLayer):
         self.hidden_size = config.hidden_size
         if getattr(config, "q_lora_rank", None) is None:
             raise ValueError("DFlash2 MLA draft requires q_lora_rank in the draft config.")
-        sliding_window, causal = _resolve_layer_attention(config, layer_idx)
-        self.self_attn = AscendKimiMLAAttention(
-            config=config,
-            hidden_size=config.hidden_size,
-            num_heads=config.num_attention_heads,
-            qk_nope_head_dim=config.qk_nope_head_dim,
-            qk_rope_head_dim=config.qk_rope_head_dim,
-            v_head_dim=config.v_head_dim,
-            q_lora_rank=config.q_lora_rank,
-            kv_lora_rank=config.kv_lora_rank,
-            use_output_gate=False,
-            use_rope=True,
-            cache_config=cache_config,
-            quant_config=quant_config,
-            prefix=f"{prefix}.self_attn",
-            non_causal_multi_token_decode=dflash_has_any_non_causal(config),
-            disable_mlapo=True,
-            sliding_window=sliding_window,
-        )
+        modes = [_resolve_layer_attention(config, i) for i in range(config.num_hidden_layers)]
+        sliding_window, causal = modes[layer_idx]
+        # One FlashMLA schedule is shared by all draft layers.
+        uniform_causal = sliding_window is not None and sliding_window > 0 and causal and len(set(modes)) == 1
+        with kimi_mla_draft_window(sliding_window, uniform_causal=uniform_causal):
+            self.self_attn = AscendKimiMLAAttention(
+                config=config,
+                hidden_size=config.hidden_size,
+                num_heads=config.num_attention_heads,
+                qk_nope_head_dim=config.qk_nope_head_dim,
+                qk_rope_head_dim=config.qk_rope_head_dim,
+                v_head_dim=config.v_head_dim,
+                q_lora_rank=config.q_lora_rank,
+                kv_lora_rank=config.kv_lora_rank,
+                use_output_gate=False,
+                use_rope=True,
+                cache_config=cache_config,
+                quant_config=quant_config,
+                prefix=f"{prefix}.self_attn",
+                non_causal_multi_token_decode=any(not layer_causal for _, layer_causal in modes),
+                disable_mlapo=True,
+            )
         self.self_attn.causal = causal
         self.mlp = Qwen2MLP(
             hidden_size=config.hidden_size,
@@ -371,19 +374,6 @@ class DFlash2Qwen3MLAModel(DFlash2Qwen3Model):
             ".kv_a_proj_with_mqa": (".fused_qkv_a_proj", 1),
         },
     )
-
-    def __init__(self, *, vllm_config: VllmConfig, start_layer_id: int = 0, prefix: str = "") -> None:
-        super().__init__(vllm_config=vllm_config, start_layer_id=start_layer_id, prefix=prefix)
-        # A shared FlashMLA schedule encodes one window. Keep heterogeneous
-        # drafts on their original per-layer paths before cache allocation.
-        attns = [layer.self_attn for layer in self.layers]
-        modes = {(attn._attention_layer.impl.sliding_window, attn.causal) for attn in attns}
-        if len(modes) == 1:
-            window, causal = modes.pop()
-            if window is not None and causal:
-                for attn in attns:
-                    impl = attn._attention_layer.impl
-                    impl.use_flashmla = impl._can_use_flashmla(dflash_draft_window=True)
 
     def _build_fused_kv_buffers(self) -> None:
         """The MLA writer uses the loaded per-layer projections directly."""

@@ -143,40 +143,14 @@ def _prepare_dflash_inputs_with_block_stride(
     )
 
 
-def validate_grouped_draft_attn(model: Any, kv_cache_config: Any, attn_layers: Mapping[str, Any]) -> tuple[str, ...]:
-    """Validate per-group attention and return the layers using windowed MLA.
-
-    The pinned upstream DFlash speculator stores draft causality per KV cache
-    group (``_group_causal``), so the last layer's flag wins for the whole
-    group; fail fast on mixed causality instead of silently corrupting draft
-    attention. Windowed MLA drafts use a causal band and must not use
-    ``AscendMlaDCPImpl``, which passes no band to FIA; it is the same
-    restriction upstream vLLM #68214 encodes by refusing DCP for windowed
-    DFlash2 drafts. Models without the per-layer hooks keep the upstream
-    per-group fallback unchanged.
-    """
+def _get_windowed_mla_layers(model: Any, attn_layers: Mapping[str, Any]) -> tuple[str, ...]:
+    """Collect windowed MLA draft layers supported by the causal, non-DCP decode path."""
     get_layer_names = getattr(model, "get_draft_kv_cache_layer_names", None)
     get_causal = getattr(model, "get_draft_attn_causal", None)
     if get_layer_names is None or get_causal is None:
         return ()
-    name_to_gid = {
-        layer_name: gid for gid, group in enumerate(kv_cache_config.kv_cache_groups) for layer_name in group.layer_names
-    }
-    causal_by_gid: dict[int, bool] = {}
     windowed_layers = []
     for layer_name, causal in zip(get_layer_names(), get_causal()):
-        gid = name_to_gid.get(layer_name)
-        if gid is not None:
-            causal = bool(causal)
-            if gid in causal_by_gid and causal_by_gid[gid] != causal:
-                raise ValueError(
-                    "DFlash draft layers with mixed attention causality share one "
-                    f"KV cache group (group {gid}); the per-group causal flag "
-                    "would keep only the last layer's mode and corrupt draft "
-                    "attention. Split the causal modes into separate KV cache "
-                    "groups or use a checkpoint with homogeneous draft causality."
-                )
-            causal_by_gid[gid] = causal
         impl = getattr(attn_layers.get(layer_name), "impl", None)
         if not isinstance(impl, AscendMLAImpl) or getattr(impl, "sliding_window", None) is None:
             continue
@@ -312,6 +286,9 @@ class AscendDFlashSpeculator(LmheadTPDraftSamplingMixin, DFlashSpeculator):
 
     def _split_window_query_padding(self, attn_metadata, valid_queries: list[int]) -> None:
         """Give FIA the valid query prefix and a separate zero-KV sequence for its padding."""
+        # TODO: Remove this split and _windowed_fia_layers once FIA device tiling
+        # right-aligns the causal window to the valid Q prefix at max_model_len,
+        # including fixed-width padded queries during FULL graph replay.
         width = self.num_query_per_req
         by_group = {}
         for name in self._windowed_fia_layers:
@@ -424,7 +401,7 @@ class AscendDFlashSpeculator(LmheadTPDraftSamplingMixin, DFlashSpeculator):
         self.attn_backends = attn_backends
         install_ascend_dflash_input_preparation()
         self.attn_architecture, self.use_flashmla = detect_draft_attn_architecture(self.attn_groups)
-        windowed_layers = validate_grouped_draft_attn(self.model, kv_cache_config, resolved_layers)
+        windowed_layers = _get_windowed_mla_layers(self.model, resolved_layers)
         self._windowed_fia_layers = tuple(
             name for name in windowed_layers if not resolved_layers[name].impl.use_flashmla
         )

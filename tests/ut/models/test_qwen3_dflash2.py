@@ -4,7 +4,7 @@
 """Check the Ascend DFlash2 MLA draft's attention settings and context KV path."""
 
 from types import SimpleNamespace
-from unittest.mock import Mock, patch
+from unittest.mock import patch
 
 import pytest
 import torch
@@ -12,9 +12,12 @@ from torch import nn
 
 upstream_dflash = pytest.importorskip("vllm.model_executor.models.qwen3_dflash")
 
+from vllm.models.kimi_k3.amd import linear as upstream_kimi
 from vllm.v1.worker.gpu.spec_decode.dflash.speculator import DFlashSpeculator
 
 from vllm_ascend.models import qwen3_dflash2 as dflash2
+from vllm_ascend.models.kimi_k3 import kimi_k3
+from vllm_ascend.ops import mla
 
 
 def test_grouped_conv_keeps_nonfinite_taps_inside_each_request():
@@ -29,17 +32,34 @@ def test_grouped_conv_keeps_nonfinite_taps_inside_each_request():
 def build_mla_layer(monkeypatch):
     vllm_config = SimpleNamespace(
         use_v2_model_runner=True,
-        model_config=SimpleNamespace(dtype=torch.bfloat16),
+        model_config=SimpleNamespace(dtype=torch.bfloat16, hf_text_config=SimpleNamespace(num_hidden_layers=2)),
+        compilation_config=SimpleNamespace(static_forward_context={}),
         speculative_config=SimpleNamespace(num_speculative_tokens=7),
     )
     monkeypatch.setattr(upstream_dflash, "get_current_vllm_config", lambda: vllm_config)
-    attention = Mock(side_effect=lambda **kwargs: nn.Identity())
-    monkeypatch.setattr(dflash2, "AscendKimiMLAAttention", attention)
+    monkeypatch.setattr(mla, "get_current_vllm_config", lambda: vllm_config)
+    monkeypatch.setattr(mla, "get_tensor_model_parallel_world_size", lambda: 1)
+    monkeypatch.setattr(upstream_kimi, "get_tensor_model_parallel_world_size", lambda: 1)
+    for module in ("MergedColumnParallelLinear", "ColumnParallelLinear", "RowParallelLinear", "RMSNorm"):
+        monkeypatch.setattr(upstream_kimi, module, nn.Identity)
+    monkeypatch.setattr(kimi_k3, "get_rope", lambda *args, **kwargs: nn.Identity())
+
+    # Capture what the registered Kimi wrapper supplies at backend construction.
+    def attention_layer(*, sliding_window, dflash_draft_window, **kwargs):
+        return SimpleNamespace(
+            sliding_window=sliding_window,
+            impl=SimpleNamespace(dflash_draft_window=dflash_draft_window),
+            process_weights_after_loading=lambda: None,
+        )
+
+    monkeypatch.setattr(mla, "AscendMLAAttention", attention_layer)
     for module in ("Qwen2MLP", "RMSNorm", "DFlashGroupedConv"):
         monkeypatch.setattr(dflash2, module, nn.Identity)
 
     def build(layer_idx=0, dflash_config=None, **fields):
         config = SimpleNamespace(
+            rope_parameters={"rope_type": "default"},
+            max_position_embeddings=4096,
             hidden_size=8,
             intermediate_size=16,
             hidden_act="silu",
@@ -54,8 +74,7 @@ def build_mla_layer(monkeypatch):
             dflash_config={"conv_kernel_size": 2, "conv_group_size": 2, **(dflash_config or {})},
             **fields,
         )
-        layer = dflash2.DFlash2Qwen3MLADecoderLayer(vllm_config, config=config, layer_idx=layer_idx)
-        return layer, attention.call_args.kwargs
+        return dflash2.DFlash2Qwen3MLADecoderLayer(vllm_config, config=config, layer_idx=layer_idx)
 
     return build
 
@@ -65,20 +84,31 @@ _FULL = "full_attention"
 
 
 @pytest.mark.parametrize(
-    ("fields", "layer_idx", "window", "causal", "needs_non_causal"),
+    ("fields", "layer_idx", "window", "causal", "needs_non_causal", "uniform_causal"),
     [
-        ({"sliding_window": 1024}, 0, None, False, True),
-        ({"layer_types": [_SLIDING] * 2, "sliding_window": 1024, "max_window_layers": 1}, 1, 1024, True, False),
-        ({"layer_types": [_SLIDING, _FULL], "sliding_window": 1024}, 0, 1024, True, True),
-        ({"layer_types": [_SLIDING, _FULL], "sliding_window": 1024}, 1, None, False, True),
-        ({"layer_types": [_FULL] * 2, "dflash_config": {"use_swa": True, "swa_window_size": 512}}, 0, 512, False, True),
-        ({"layer_types": [_SLIDING] * 2, "sliding_window": 0}, 0, 0, True, False),
+        ({"sliding_window": 1024}, 0, None, False, True, False),
+        ({"layer_types": [_SLIDING] * 2, "sliding_window": 1024, "max_window_layers": 1}, 1, 1024, True, False, True),
+        ({"layer_types": [_SLIDING, _FULL], "sliding_window": 1024}, 0, 1024, True, True, False),
+        ({"layer_types": [_SLIDING, _FULL], "sliding_window": 1024}, 1, None, False, True, False),
+        (
+            {"layer_types": [_FULL] * 2, "dflash_config": {"use_swa": True, "swa_window_size": 512}},
+            0,
+            512,
+            False,
+            True,
+            False,
+        ),
+        ({"layer_types": [_SLIDING] * 2, "sliding_window": 0}, 0, 0, True, False, False),
     ],
 )
-def test_mla_layer_attention_settings(build_mla_layer, fields, layer_idx, window, causal, needs_non_causal):
-    layer, kwargs = build_mla_layer(layer_idx, **fields)
-    assert kwargs["sliding_window"] == window
-    assert kwargs["non_causal_multi_token_decode"] is needs_non_causal
+def test_mla_layer_attention_settings(
+    build_mla_layer, fields, layer_idx, window, causal, needs_non_causal, uniform_causal
+):
+    layer = build_mla_layer(layer_idx, **fields)
+    attention = layer.self_attn._attention_layer
+    assert attention.sliding_window == window
+    assert attention.impl.dflash_draft_window is uniform_causal
+    assert attention.non_causal_multi_token_decode is needs_non_causal
     draft = SimpleNamespace(model=SimpleNamespace(layers=[layer]))
     assert dflash2.DFlash2Qwen3ForCausalLM.get_draft_attn_causal(draft) == [causal]
 
@@ -86,28 +116,6 @@ def test_mla_layer_attention_settings(build_mla_layer, fields, layer_idx, window
 def test_mla_layer_requires_a_window_size(build_mla_layer):
     with pytest.raises(ValueError, match="requires a window size"):
         build_mla_layer(dflash_config={"use_swa": True})
-
-
-@pytest.mark.parametrize(
-    "windows, expected", [([1024, 1024], [True, True]), ([1024, None], [False, True]), ([1024, 512], [False, False])]
-)
-def test_flashmla_selects_a_uniform_draft_window(monkeypatch, windows, expected):
-    def init_draft(self, **_kwargs):
-        nn.Module.__init__(self)
-        self.layers = []
-        for window in windows:
-            impl = SimpleNamespace(
-                sliding_window=window,
-                use_flashmla=window is None,
-                _can_use_flashmla=lambda *, dflash_draft_window: dflash_draft_window,
-            )
-            self.layers.append(
-                SimpleNamespace(self_attn=SimpleNamespace(_attention_layer=SimpleNamespace(impl=impl), causal=True))
-            )
-
-    monkeypatch.setattr(dflash2.DFlash2Qwen3Model, "__init__", init_draft)
-    model = dflash2.DFlash2Qwen3MLAModel(vllm_config=None)
-    assert [layer.self_attn._attention_layer.impl.use_flashmla for layer in model.layers] == expected
 
 
 @pytest.fixture

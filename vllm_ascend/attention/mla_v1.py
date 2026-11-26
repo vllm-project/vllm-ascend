@@ -1183,7 +1183,9 @@ class AscendMLAImpl(MLAAttentionImpl):
         self.mlapo_weight_quant_mode = 3
         self._mlapo_uses_native_weights = False
         self.use_quant_flashmla: bool = self._can_use_quant_flashmla()
-        self.use_flashmla: bool = self.use_quant_flashmla or self._can_use_flashmla()
+        self.use_flashmla: bool = self.use_quant_flashmla or self._can_use_flashmla(
+            dflash_draft_window=kwargs.get("dflash_draft_window", False)
+        )
         self.a3_mla_adapter = None
         if supports_a3_mla(
             self,
