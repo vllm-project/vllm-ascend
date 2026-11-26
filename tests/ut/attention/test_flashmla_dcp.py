@@ -789,6 +789,20 @@ def test_causal_target_and_noncausal_draft_do_not_share_schedules(runtime):
     assert target.cache_lens[0] == 1 and draft.cache_lens[0] == 2
 
 
+def test_a_windowed_dspark_draft_is_refused_under_dcp(runtime):
+    """Dropping the window instead would cost acceptance without raising."""
+    with pytest.raises(NotImplementedError, match="decode context parallelism"):
+        runtime.builder(size=8, window=512)
+
+
+def test_a_windowed_dspark_draft_is_kept_without_dcp(runtime):
+    assert runtime.builder(size=1, window=512).window_size == 512
+
+
+def test_dcp_still_ignores_a_window_outside_dspark(runtime):
+    assert runtime.builder(size=8, window=512, speculative=False).window_size is None
+
+
 def test_draft_window_and_local_rope_refresh_reuse_graph_buffers(runtime):
     cache = torch.arange(32 * 64, dtype=torch.float32).reshape(32, 64)
     builder = runtime.builder(

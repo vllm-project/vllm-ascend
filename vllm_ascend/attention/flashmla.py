@@ -504,11 +504,27 @@ class FlashMLAMetadataBuilder:
         # speculative causal queries need the replicated current chunk.
         self.use_spec_decode = impl.vllm_config.speculative_config is not None
         spec_config = impl.vllm_config.speculative_config
-        self.window_size = (
-            getattr(impl, "sliding_window", None)
-            if self.dcp_size == 1 and spec_config is not None and getattr(spec_config, "method", None) == "dspark"
-            else None
-        )
+        is_dspark = spec_config is not None and getattr(spec_config, "method", None) == "dspark"
+        sliding_window = getattr(impl, "sliding_window", None) if is_dspark else None
+        if sliding_window is not None and self.dcp_size > 1:
+            # Refuse rather than drop the window, which is what reading it only
+            # at dcp_size == 1 used to do: the draft then attends over the whole
+            # cache instead of the band it was trained on, which costs
+            # acceptance without raising anything.
+            #
+            # FlashMLADraftWindow.refresh takes the band as a contiguous run of
+            # block-table columns from (length - window) // block_size. Under
+            # DCP the table and the lengths are the rank's own, and the sequence
+            # is interleaved across ranks by cp_kv_cache_interleave_size, so a
+            # band that is contiguous in global positions is not a contiguous
+            # run of local columns. Masking it would need a different layout.
+            raise NotImplementedError(
+                "A windowed DSpark draft does not support decode context parallelism "
+                f"(effective draft DCP is {self.dcp_size}): the sliding window cannot "
+                "be masked across interleaved DCP shards. Run the draft with "
+                "decode_context_parallel_size=1, or use an unwindowed draft."
+            )
+        self.window_size = sliding_window
         self.cp_interleave = impl.vllm_config.parallel_config.cp_kv_cache_interleave_size if self.dcp_size > 1 else 1
         if adapter is None:
             adapter = FlashMLAImpl.load(
