@@ -208,6 +208,7 @@ def test_receiver_initialization_binds_layer_cache_identities():
     thread = MooncakeSFAPullRecvingThread(
         engine=reader.engine,
         vllm_config=SimpleNamespace(
+            kv_transfer_config=SimpleNamespace(get_from_extra_config=lambda _key, default: default),
             model_config=SimpleNamespace(is_deepseek_mla=False, hf_text_config=SimpleNamespace()),
             speculative_config=None,
         ),
