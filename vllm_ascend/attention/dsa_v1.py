@@ -55,6 +55,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence im
     record_attention_compute_start,
 )
 from vllm_ascend.distributed.parallel_state import get_otp_group
+from vllm_ascend.models.deepseek_v4.cache_reuse import get_swa_save_layer_name
 from vllm_ascend.models.deepseek_v4.compressor import AscendCompressorMetadata
 from vllm_ascend.models.deepseek_v4.indexer import AscendIndexerMetadata, IndexerOverlapPlan
 from vllm_ascend.ops.cv_linear import CVLinearWrapper
@@ -2429,8 +2430,13 @@ class AscendDSAImpl(AttentionImplBase[Any]):
             return output
         layer_metadata = self._get_layer_metadata(layer_name, attn_metadata)
         common_attn_metadata = layer_metadata.attention
+        save_layer_name = layer_name
         if common_attn_metadata is None:
             common_attn_metadata = layer_metadata.swa
+            if self.swa_cache_layer is not None:
+                # Push needs the registered SWA cache name to submit the write
+                # before a rotating slot is reused.
+                save_layer_name = get_swa_save_layer_name(layer_name, self.swa_cache_layer.prefix)
         actual_tokens = common_attn_metadata.num_actual_tokens
 
         o_proj_input = hidden_states.new_zeros(o_proj_input_shape)
@@ -2453,7 +2459,7 @@ class AscendDSAImpl(AttentionImplBase[Any]):
             notify_kv_cache_written(layer_name)
             with attention_transfer_window():
                 pass
-            maybe_save_kv_layer_to_connector(layer_name, list(kv_cache))
+            maybe_save_kv_layer_to_connector(save_layer_name, list(kv_cache))
             return output
 
         req_metadata = _require_req_metadata(common_attn_metadata)
@@ -2481,7 +2487,7 @@ class AscendDSAImpl(AttentionImplBase[Any]):
 
         # o
         self._forward_o_proj(o_proj_input, output)
-        maybe_save_kv_layer_to_connector(layer_name, list(kv_cache))
+        maybe_save_kv_layer_to_connector(save_layer_name, list(kv_cache))
 
         return output_padded
 
