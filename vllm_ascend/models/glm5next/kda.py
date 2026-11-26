@@ -20,7 +20,7 @@ from vllm.model_executor.layers.mamba.mamba_utils import (
     MambaStateShapeCalculator,
     is_conv_state_dim_first,
 )
-from vllm.model_executor.model_loader.weight_utils import sharded_weight_loader
+from vllm.model_executor.model_loader.weight_utils import default_weight_loader, sharded_weight_loader
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
 

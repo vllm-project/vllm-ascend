@@ -93,7 +93,7 @@ class Indexer(nn.Module):
             disable_tp=True,
             prefix=f"{prefix}.wk_weights_proj",
         )
-        self.k_norm = LayerNorm(self.head_dim, eps=1e-6, dtype=torch.float32)
+        self.k_norm = LayerNorm(self.head_dim, eps=1e-6).float()
         self.softmax_scale = self.head_dim**-0.5
         self.scale_fmt = None
         self.quant_block_size = self.head_dim
