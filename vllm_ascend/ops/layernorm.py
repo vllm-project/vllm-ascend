@@ -149,9 +149,7 @@ class AscendGemmaRMSNorm(GemmaRMSNorm):
         residual: torch.Tensor,
         linear: AscendQKVParallelLinear,
         use_sp: bool,
-    ) -> tuple[QuantizedActivation, torch.Tensor] | tuple[torch.Tensor, torch.Tensor]:
-
-
+    ) -> tuple[QuantizedActivation | None, torch.Tensor, torch.Tensor]:
         key = get_input_quant_key(linear)
         if(
             get_ascend_config().ascend_compilation_config.fuse_norm_quant

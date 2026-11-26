@@ -60,7 +60,7 @@ def _add_gemma_rms_norm_dynamic_quant(
         orig_dtype=hidden_states.dtype,
         orig_shape=hidden_states.shape,
         quant_key=kInt8DynamicTokenSym,
-    ), output[2]
+    ), output[0], output[2]
     
 
 
@@ -83,7 +83,7 @@ def fused_norm_quant(
     hidden_states: torch.Tensor,
     residual: torch.Tensor,
     linear: LinearBase,
-) -> tuple[QuantizedActivation, torch.Tensor] | tuple[torch.Tensor, torch.Tensor]:
+) -> tuple[QuantizedActivation | None, QuantizedActivation | torch.Tensor, torch.Tensor]:
     registry_key = ((type(norm).__name__), key)
     producer = _FUSED_NORM_QUANT.get(registry_key)
     if producer is not None:
