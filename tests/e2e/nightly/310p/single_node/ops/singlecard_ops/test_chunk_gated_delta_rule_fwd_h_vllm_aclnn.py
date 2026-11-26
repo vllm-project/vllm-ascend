@@ -182,6 +182,48 @@ class TestChunkGatedDeltaRuleFwdHVllm310:
                 f"nonfinite_heads={(~finite_by_head[0]).nonzero().flatten().tolist()}"
             )
 
+    @pytest.mark.parametrize(
+        "batch,key_heads,value_heads,key_dim,value_dim,chunk_size,state_dtype",
+        [
+            (1, 1, 1, 128, 256, 64, torch.float16),
+            (2, 2, 4, 192, 256, 64, torch.float32),
+            (2, 1, 3, 128, 144, 64, torch.float32),
+            (1, 1, 2, 128, 256, 32, torch.float32),
+        ],
+    )
+    def test_value_tiles_match_cpu_reference(
+        self, batch, key_heads, value_heads, key_dim, value_dim, chunk_size, state_dtype
+    ):
+        torch.manual_seed(312)
+        tokens = 3 * chunk_size
+        k = (torch.randn(batch, key_heads, tokens, key_dim) * 0.08).half()
+        w = (torch.randn(batch, value_heads, tokens, key_dim) * 0.06).half()
+        u = (torch.randn(batch, value_heads, tokens, value_dim) * 0.1).half()
+        g = (-torch.rand(batch, value_heads, 3, chunk_size) * 0.015).cumsum(-1).flatten(2)
+        state = (torch.randn(batch, value_heads, key_dim, value_dim) * 0.03).to(state_dtype)
+
+        h, v_new, final = npu_chunk_gdr_fwd_h(
+            k.npu(),
+            w.npu(),
+            u.npu(),
+            g.npu(),
+            initial_state=state.npu(),
+            chunk_size=chunk_size,
+            output_final_state=True,
+        )
+        expected_h, expected_v = cpu_reference(k, w, u, g, state, chunk_size)
+        # h is stored as zN panels, while final_state is row major.
+        actual_h = (
+            h.cpu()
+            .reshape(batch, value_heads, 3, value_dim // 16, key_dim // 16, 16, 16)
+            .permute(0, 1, 2, 4, 5, 3, 6)
+            .reshape(batch, value_heads, 3, key_dim, value_dim)
+            .float()
+        )
+        torch.testing.assert_close(actual_h, torch.stack(expected_h[:-1], dim=2), atol=0.001, rtol=0.01)
+        torch.testing.assert_close(v_new.cpu().float(), expected_v, atol=0.001, rtol=0.01)
+        torch.testing.assert_close(final.cpu().float(), expected_h[-1], atol=0.001, rtol=0.01)
+
     def test_no_nan(self):
         torch.manual_seed(42)
         B, Hg, HV, T, K, V = 1, 1, 1, 128, 128, 128
@@ -205,3 +247,31 @@ class TestChunkGatedDeltaRuleFwdHVllm310:
         assert torch.isnan(vn_out.cpu()).sum() == 0, "vn_out has NaN"
         assert torch.isinf(h_out.cpu()).sum() == 0, "h_out has Inf"
         assert torch.isinf(vn_out.cpu()).sum() == 0, "vn_out has Inf"
+
+
+@pytest.mark.parametrize("packed", [False, True])
+def test_gdn_prefill_with_wide_values(packed):
+    from vllm_ascend._310p.ops.fla.chunk_gated_delta_rule import (
+        chunk_gated_delta_rule_310,
+        chunk_gated_delta_rule_pytorch,
+    )
+
+    torch.manual_seed(313)
+    tokens, key_heads, value_heads, key_dim, value_dim = 128, 1, 2, 128, 256
+    q = torch.nn.functional.normalize(torch.randn(1, tokens, key_heads, key_dim), dim=-1).half()
+    k = torch.nn.functional.normalize(torch.randn_like(q).float(), dim=-1).half()
+    v = (torch.randn(1, tokens, value_heads, value_dim) * 0.2).half()
+    g = -torch.rand(1, tokens, value_heads) * 0.025
+    beta = (0.1 + torch.rand_like(g) * 0.8).half()
+    cu_seqlens = torch.tensor([0, 65, tokens], dtype=torch.int64) if packed else None
+    state = torch.randn(2 if packed else 1, value_heads, value_dim, key_dim) * 0.02
+    npu_inputs = [x.npu() for x in (q, k, v, g, beta)]
+    output, final = chunk_gated_delta_rule_310(
+        *npu_inputs, initial_state=state.npu(), output_final_state=True, cu_seqlens=cu_seqlens
+    )
+    expected, expected_final = chunk_gated_delta_rule_pytorch(
+        q, k, v, g, beta, initial_state=state, output_final_state=True, cu_seqlens=cu_seqlens
+    )
+    assert final is not None and expected_final is not None
+    torch.testing.assert_close(output.cpu().float(), expected.float(), atol=0.001, rtol=0.01)
+    torch.testing.assert_close(final.cpu().float(), expected_final, atol=0.001, rtol=0.01)

@@ -12,6 +12,7 @@
  * \brief
  */
 
+#include <algorithm>
 #include "chunk_gated_delta_rule_fwd_h_vllm_tiling.h"
 #include <register/op_impl_registry.h>
 #include "tiling_base/data_copy_transpose_tiling.h"
@@ -99,7 +100,8 @@ ge::graphStatus Tiling4ChunkGatedDeltaRuleFwdHVllm(gert::TilingContext *context)
     int64_t chunkSize = *(attrPtr->GetAttrPointer<int64_t>(ATTR_CHUNK_SIZE_IDX));
 
     const auto ascendcPlatform = platform_ascendc::PlatformAscendC(context->GetPlatformInfo());
-    OP_CHECK_IF(ascendcPlatform.GetSocVersion() == platform_ascendc::SocVersion::ASCEND310P && useGk,
+    const bool is310P = ascendcPlatform.GetSocVersion() == platform_ascendc::SocVersion::ASCEND310P;
+    OP_CHECK_IF(is310P && useGk,
                 OP_LOGE(context->GetNodeName(), "Key-wise gating (gk) is not supported on Ascend310P."),
                 return ge::GRAPH_FAILED);
 
@@ -124,7 +126,8 @@ ge::graphStatus Tiling4ChunkGatedDeltaRuleFwdHVllm(gert::TilingContext *context)
     tilingCtx.aicCoreNum = ascendcPlatform.GetCoreNumAic();
     tilingCtx.libApiWorkSpaceSize = ascendcPlatform.GetLibApiWorkSpaceSize();
 
-    if (tilingCtx.vNumHead % tilingCtx.kNumHead != 0) {
+    if (tilingCtx.kNumHead <= 0 || tilingCtx.vNumHead <= 0 ||
+        tilingCtx.vNumHead % tilingCtx.kNumHead != 0) {
         OP_LOGE(context->GetNodeName(), "Check head num failed, vNumHead should be divisible by kNumHead.");
         return ge::GRAPH_FAILED;
     }
@@ -132,6 +135,31 @@ ge::graphStatus Tiling4ChunkGatedDeltaRuleFwdHVllm(gert::TilingContext *context)
         OP_LOGE(context->GetNodeName(), "Check u shape failed, vHeadDim should be <= %ld, but get %ld.",
                 V_DIM_256, tilingCtx.vHeadDim);
         return ge::GRAPH_FAILED;
+    }
+
+    int64_t vTileDim = tilingCtx.vHeadDim;
+    if (is310P) {
+        constexpr int64_t alignment = 16;
+        constexpr int64_t maxChunkSize = 64;
+        constexpr int64_t halfBytes = sizeof(uint16_t);
+        constexpr int64_t floatBytes = sizeof(float);
+        // Match the fixed 310P kernel scratch layout. K is never tiled.
+        constexpr int64_t prefetchSlot = 24 * 1024;
+        constexpr int64_t residentStateSlot = 48 * 1024;
+        constexpr int64_t valueWorkSlot = 32 * 1024;
+        constexpr int64_t updateWorkSlot = 96 * 1024;
+        const int64_t kDim = tilingCtx.kHeadDim;
+        if (chunkSize <= 0 || chunkSize > maxChunkSize || chunkSize % alignment != 0 ||
+            kDim <= 0 || kDim > prefetchSlot / (maxChunkSize * halfBytes) ||
+            kDim % alignment != 0 || vTileDim <= 0 || vTileDim % alignment != 0) {
+            OP_LOGE(context->GetNodeName(), "Unsupported 310P FwdH shape: chunk=%ld K=%ld V=%ld.",
+                    chunkSize, kDim, vTileDim);
+            return ge::GRAPH_FAILED;
+        }
+        vTileDim = std::min({vTileDim, prefetchSlot / (chunkSize * halfBytes),
+                            residentStateSlot / (kDim * halfBytes), valueWorkSlot / (chunkSize * floatBytes),
+                            updateWorkSlot / (kDim * floatBytes)});
+        vTileDim = vTileDim / alignment * alignment;
     }
 
     ::ChunkGatedDeltaRuleFwdHVllmTilingData plainTiling{};
@@ -143,7 +171,7 @@ ge::graphStatus Tiling4ChunkGatedDeltaRuleFwdHVllm(gert::TilingContext *context)
     // 310P only ships KERNEL_TASK_TYPE_DEFAULT; keep key 0 so BinaryGetFunctionByEntry succeeds.
     // Newer arches use keys 1/2 to select TileShapes128/256.
     uint32_t tilingKey = TILING_KEY_DEFAULT;
-    if (ascendcPlatform.GetSocVersion() != platform_ascendc::SocVersion::ASCEND310P) {
+    if (!is310P) {
         tilingKey = plainTiling.vHeadDim > V_DIM_128 ? TILING_KEY_V256 : TILING_KEY_V128;  // gitleaks:allow
     }
     context->SetTilingKey(tilingKey);
@@ -175,6 +203,7 @@ ge::graphStatus Tiling4ChunkGatedDeltaRuleFwdHVllm(gert::TilingContext *context)
     tiling.set_hWorkspaceOffset(plainTiling.hWorkspaceOffset);
     tiling.set_numSeqWorkspaceOffset(plainTiling.numSeqWorkspaceOffset);
     tiling.set_numChunksWorkspaceOffset(plainTiling.numChunksWorkspaceOffset);
+    tiling.set_vTileDim(vTileDim);
 
     tiling.SaveToBuffer(context->GetRawTilingData()->GetData(), context->GetRawTilingData()->GetCapacity());
     context->GetRawTilingData()->SetDataSize(tiling.GetDataSize());

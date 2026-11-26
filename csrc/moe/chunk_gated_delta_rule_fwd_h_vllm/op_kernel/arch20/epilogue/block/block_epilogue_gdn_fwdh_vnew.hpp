@@ -83,14 +83,13 @@ public:
         AscendC::GlobalTensor<UElementInput> uInput,
         uint32_t wsUbOffset,
         uint32_t chunkSize,
-        uint32_t kHeadDim,
+        uint32_t vTileDim,
         uint32_t vHeadDim,
         Arch::CrossCoreFlag cube1Done
     )
     {
         uint32_t mActual = chunkSize;
-        uint32_t nkActual = kHeadDim;
-        uint32_t nvActual = vHeadDim;
+        uint32_t nvActual = vTileDim;
 
         // Single working instance (the kernel gates subblock 1 out): full m.
         uint32_t subBlockIdx = 0;
@@ -99,13 +98,10 @@ public:
         uint32_t mActualThisSubBlock = (subBlockIdx == 0) ? mActualPerSubBlock : (mActual - mActualPerSubBlock);
         uint32_t mOffset = subBlockIdx * mActualPerSubBlock;
         uint32_t nOffset = 0;
-        // 当前场景内部一定连续
-        // k [B, H, T, D]
-        // g [B, H, T]
-        // 在外部offset的基础上进一步offset
-        // 当前asset kdim == vHeadDim
-        int64_t offsetK = mOffset * nvActual + nOffset;
-        int64_t offsetD = 0; // 因为要用最后一个数减去之前所有，所以全部读入
+        // U and v_new use the full V stride. The decay workspace stores a
+        // contiguous tile for the next stage.
+        uint32_t valueOffset = mOffset * vHeadDim + nOffset;
+        uint32_t workspaceOffset = mOffset * nvActual + nOffset;
 
         uint32_t gbrcStart, gbrcRealStart, gbrcReptime, gbrcEffStart, gbrcEffEnd;
         if(subBlockIdx==0)
@@ -126,10 +122,10 @@ public:
 
         AscendC::ResetMask();
 
-        AscendC::GlobalTensor<VElementOutput> vnewOutputThisSubBlock = vnewOutput[offsetK];
-        AscendC::GlobalTensor<VElementOutput> vnewdecayOutputThisSubBlock = vnewdecayOutput[offsetK];
+        AscendC::GlobalTensor<VElementOutput> vnewOutputThisSubBlock = vnewOutput[valueOffset];
+        AscendC::GlobalTensor<VElementOutput> vnewdecayOutputThisSubBlock = vnewdecayOutput[workspaceOffset];
         AscendC::GlobalTensor<GElementInput> gInputThisSubBlock = gInput;
-        AscendC::GlobalTensor<UElementInput> uInputThisSubBlock = uInput[offsetK];
+        AscendC::GlobalTensor<UElementInput> uInputThisSubBlock = uInput[valueOffset];
 
 
         // (V_MTE2 pairs dropped: reduce_flags fwd_h_v3 -- the g/u loads land in
@@ -169,7 +165,16 @@ public:
 
 
         
-        AscendC::DataCopy(uUbTensor, uInputThisSubBlock, mActualThisSubBlock * nvActual);
+        if (nvActual == vHeadDim) {
+            AscendC::DataCopy(uUbTensor, uInputThisSubBlock, mActualThisSubBlock * nvActual);
+        } else {
+            AscendC::DataCopyParams rows;
+            rows.blockCount = static_cast<uint16_t>(mActualThisSubBlock);
+            rows.blockLen = static_cast<uint16_t>(nvActual * sizeof(UElementInput) / 32);
+            rows.srcStride = static_cast<uint16_t>((vHeadDim - nvActual) * sizeof(UElementInput) / 32);
+            rows.dstStride = 0;
+            AscendC::DataCopy(uUbTensor, uInputThisSubBlock, rows);
+        }
         AscendC::SetFlag<AscendC::HardEvent::MTE2_V>(EVENT_ID4);
         AscendC::WaitFlag<AscendC::HardEvent::MTE2_V>(EVENT_ID4);
         AscendC::Cast(uUbFloatTensor, uUbTensor, AscendC::RoundMode::CAST_NONE, mActualThisSubBlock * nvActual);
@@ -186,7 +191,16 @@ public:
         // V write -> MTE3 read of vNewOutputUbTensor.
         AscendC::SetFlag<AscendC::HardEvent::V_MTE3>(EVENT_ID6);
         AscendC::WaitFlag<AscendC::HardEvent::V_MTE3>(EVENT_ID6);
-        AscendC::DataCopy(vnewOutputThisSubBlock, vNewOutputUbTensor, mActualThisSubBlock * nvActual);
+        if (nvActual == vHeadDim) {
+            AscendC::DataCopy(vnewOutputThisSubBlock, vNewOutputUbTensor, mActualThisSubBlock * nvActual);
+        } else {
+            AscendC::DataCopyParams rows;
+            rows.blockCount = static_cast<uint16_t>(mActualThisSubBlock);
+            rows.blockLen = static_cast<uint16_t>(nvActual * sizeof(VElementOutput) / 32);
+            rows.srcStride = 0;
+            rows.dstStride = static_cast<uint16_t>((vHeadDim - nvActual) * sizeof(VElementOutput) / 32);
+            AscendC::DataCopy(vnewOutputThisSubBlock, vNewOutputUbTensor, rows);
+        }
         // Drain the GM store before any later V op rewrites this parity's buffer.
         AscendC::SetFlag<AscendC::HardEvent::MTE3_V>(EVENT_ID6);
         AscendC::WaitFlag<AscendC::HardEvent::MTE3_V>(EVENT_ID6);

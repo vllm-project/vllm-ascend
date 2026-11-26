@@ -48,6 +48,7 @@ struct ChunkGatedDeltaRuleFwdHVllmTilingData {
     int64_t hWorkspaceOffset;
     int64_t numSeqWorkspaceOffset;
     int64_t numChunksWorkspaceOffset;
+    int64_t vTileDim;
 };
 
 #endif // CHUNK_GATED_DELTA_RULE_FWD_H_VLLM_STRUCT_H

@@ -44,6 +44,7 @@ TILING_DATA_FIELD_DEF(int64_t, kDecayWorkspaceOffset);
 TILING_DATA_FIELD_DEF(int64_t, hWorkspaceOffset);
 TILING_DATA_FIELD_DEF(int64_t, numSeqWorkspaceOffset);
 TILING_DATA_FIELD_DEF(int64_t, numChunksWorkspaceOffset);
+TILING_DATA_FIELD_DEF(int64_t, vTileDim);
 END_TILING_DATA_DEF;
 
 REGISTER_TILING_DATA_CLASS(ChunkGatedDeltaRuleFwdHVllm, ChunkGatedDeltaRuleFwdHVllmTilingData)
