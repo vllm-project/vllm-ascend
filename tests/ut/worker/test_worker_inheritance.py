@@ -4,6 +4,7 @@
 import importlib
 import inspect
 import sys
+import threading
 from types import MethodType, ModuleType, SimpleNamespace
 from unittest.mock import MagicMock, Mock, call
 
@@ -23,7 +24,6 @@ UNVERIFIED_GPU_WORKER_METHODS = (
     "_get_cudagraph_capture_context",
     "_set_draft_weight_update_target",
     "get_compilation_match_table",
-    "get_encoder_timing_stats",
     "annotate_profile",
     "randomize_dummy_inputs",
     "save_sharded_state",
@@ -120,6 +120,64 @@ def test_get_draft_model_reports_the_runner_drafter(drafter):
     worker.model_runner = runner
 
     assert worker.get_draft_model() is draft_model
+
+
+@pytest.mark.parametrize("has_encoder_runner", [False, True], ids=["text-only", "multimodal"])
+def test_get_encoder_timing_stats_delegates_to_runner_and_drains_stats(monkeypatch, has_encoder_runner):
+    """This RPC used to raise on Ascend; it now inherits GPUWorker's runner delegation.
+
+    Exercise the real GPUWorker -> GPUModelRunner -> EncoderRunner chain so both
+    branches run: a runner without an encoder_runner yields an empty dict, while
+    a multimodal EncoderRunner records timing via timed_encoder_operation(),
+    returns the collected per-request stats, and clears its registry on read.
+    """
+    from vllm.v1.worker.gpu.mm import encoder_runner as encoder_runner_module
+    from vllm.v1.worker.gpu.mm.encoder_runner import EncoderRunner
+    from vllm.v1.worker.gpu.model_runner import GPUModelRunner
+    from vllm.v1.worker.gpu_worker import Worker as GPUWorker
+
+    from vllm_ascend._310p.worker_310p import NPUWorker310
+    from vllm_ascend.worker.worker import NPUWorker
+
+    encoder_runner: EncoderRunner | None = None
+    if has_encoder_runner:
+        encoder_runner = object.__new__(EncoderRunner)
+        encoder_runner.enable_timing = True
+        encoder_runner.encoder_timing_registry = {}
+        encoder_runner._timing_lock = threading.Lock()
+
+    runner = SimpleNamespace(
+        model_state=SimpleNamespace(encoder_runner=encoder_runner) if has_encoder_runner else SimpleNamespace()
+    )
+    runner.get_encoder_timing_stats = MethodType(GPUModelRunner.get_encoder_timing_stats, runner)
+
+    worker = object.__new__(NPUWorker)
+    worker.model_runner = runner
+
+    if not has_encoder_runner:
+        assert worker.get_encoder_timing_stats() == {}
+        assert NPUWorker.get_encoder_timing_stats is GPUWorker.get_encoder_timing_stats
+        assert NPUWorker310.get_encoder_timing_stats is GPUWorker.get_encoder_timing_stats
+        return
+
+    assert encoder_runner is not None
+    sync = Mock()
+    monkeypatch.setattr(encoder_runner_module.torch.accelerator, "synchronize", sync)
+    monkeypatch.setattr(encoder_runner_module.time, "perf_counter", Mock(side_effect=[10.0, 10.6]))
+
+    with encoder_runner.timed_encoder_operation(["req-1", "req-2"]):
+        pass
+
+    stats = worker.get_encoder_timing_stats()
+    assert NPUWorker.get_encoder_timing_stats is GPUWorker.get_encoder_timing_stats
+    assert NPUWorker310.get_encoder_timing_stats is GPUWorker.get_encoder_timing_stats
+    assert sync.call_count == 2
+    assert set(stats.keys()) == {"req-1", "req-2"}
+    for req_stats in stats.values():
+        assert req_stats["encoder_forward_secs"] == pytest.approx(0.3)
+        assert req_stats["num_encoder_calls"] == 1
+    # Reading timing stats drains the registry so subsequent polls return empty.
+    assert worker.get_encoder_timing_stats() == {}
 
 
 @pytest.mark.parametrize("configured", [False, True])
