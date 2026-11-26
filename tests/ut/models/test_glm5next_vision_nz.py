@@ -6,12 +6,14 @@ from unittest.mock import Mock
 
 import pytest
 import torch
+import vllm.config
 from torch import nn
 from vllm.model_executor.layers.linear import UnquantizedLinearMethod
 
 from vllm_ascend.device.hardware import AscendDeviceType
 from vllm_ascend.device.hardware_profile import get_hardware_profile
 from vllm_ascend.models.glm5next import multimodal as vision
+from vllm_ascend.ops import linear_op
 from vllm_ascend.ops.linear import unquantized_gemm
 
 
@@ -82,6 +84,46 @@ def test_vision_mlp_keeps_activation_layout(monkeypatch, use_2d):
     assert [v.ndim for v in inputs] == ([2, 2] if use_2d else [3, 3])
     assert model.act_fn.call_args.args[0].shape == x.shape
     assert projection.call_count == (2 if use_2d else 0)
+
+
+@pytest.mark.parametrize(
+    ("mlp_prefix", "enable_mlp_tp", "uses_mlp_tp"),
+    [
+        ("visual.blocks.0.mlp", True, False),
+        ("model.visual.blocks.0.mlp", True, False),
+        ("language_model.model.layers.0.mlp", True, True),
+        ("language_model.model.layers.3.mlp", True, False),
+        ("language_model.model.layers.0.mlp", False, False),
+    ],
+)
+@pytest.mark.parametrize(
+    ("projection", "direction", "op_type"),
+    [
+        ("gate_up_proj", "column", linear_op.MLPColumnParallelOp),
+        ("down_proj", "row", linear_op.MLPRowParallelOp),
+    ],
+)
+def test_mlp_tp_dispatch_respects_vision_scope(
+    monkeypatch, mlp_prefix, enable_mlp_tp, uses_mlp_tp, projection, direction, op_type
+):
+    standard_group = SimpleNamespace(rank_in_group=0, world_size=1)
+    mlp_group = SimpleNamespace(rank_in_group=3, world_size=8)
+    text_config = SimpleNamespace(n_routed_experts=288, first_k_dense_replace=3, moe_layer_freq=1)
+    config = SimpleNamespace(model_config=SimpleNamespace(hf_text_config=text_config))
+    monkeypatch.setattr(vllm.config, "get_current_vllm_config", lambda: config)
+    monkeypatch.setattr(linear_op, "get_tp_group", lambda: standard_group)
+    monkeypatch.setattr(linear_op, "get_mlp_tp_group", lambda: mlp_group)
+    monkeypatch.setattr(linear_op, "mlp_tp_enable", lambda: enable_mlp_tp)
+    monkeypatch.setattr(linear_op, "oproj_tp_enable", lambda: False)
+
+    op, rank, size = linear_op.get_parallel_op(False, f"{mlp_prefix}.{projection}", nn.Module(), direction)
+
+    if uses_mlp_tp:
+        assert isinstance(op, op_type)
+        assert (rank, size) == (mlp_group.rank_in_group, mlp_group.world_size)
+    else:
+        assert op is None
+        assert (rank, size) == (standard_group.rank_in_group, standard_group.world_size)
 
 
 @pytest.mark.parametrize("use_2d", [False, True])
