@@ -928,6 +928,18 @@ class AscendMistralLarge4DSparkForCausalLM(MistralLarge4DSparkForCausalLM):
     """
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
+        speculative_config = vllm_config.speculative_config
+        assert speculative_config is not None
+        draft_config = speculative_config.draft_model_config.hf_config
+        # Validate before backend selection: a windowed DCP draft can fall
+        # back to FIA and bypass the FlashMLA metadata builder's check.
+        if vllm_config.parallel_config.decode_context_parallel_size > 1 and "sliding_attention" in (
+            getattr(draft_config, "layer_types", None) or []
+        ):
+            raise ValueError(
+                "Mistral Large 4 windowed DSpARK attention requires effective draft "
+                "decode_context_parallel_size=1 on Ascend. Draft DCP window masking is not supported."
+            )
         from vllm.models.mistral.mistral_large4.amd import model as upstream_model
 
         original_attention_cls = upstream_model.MistralMLAAttention

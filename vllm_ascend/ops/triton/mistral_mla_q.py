@@ -43,13 +43,15 @@ def _ssmax_split_rope(
     tl.store(nope + row * 64 + lane, content)
 
     pair = tl.arange(0, 32)
-    even = _round_bf16(tl.load(source + 64 + 2 * pair).to(tl.float32) * scale)
-    odd = _round_bf16(tl.load(source + 65 + 2 * pair).to(tl.float32) * scale)
+    even = tl.load(source + 64 + 2 * pair).to(tl.float32)
+    odd = tl.load(source + 65 + 2 * pair).to(tl.float32)
     c = tl.load(cos + token * COS_STRIDE + pair).to(tl.float32)
     s = tl.load(sin + token * SIN_STRIDE + pair).to(tl.float32)
     # npu_interleave_rope consumes adjacent pairs and writes split halves.
-    tl.store(pe + row * 64 + pair, _round_bf16(even * c - odd * s))
-    tl.store(pe + row * 64 + 32 + pair, _round_bf16(odd * c + even * s))
+    rotated_even = _round_bf16(even * c - odd * s)
+    rotated_odd = _round_bf16(odd * c + even * s)
+    tl.store(pe + row * 64 + pair, _round_bf16(rotated_even * scale))
+    tl.store(pe + row * 64 + 32 + pair, _round_bf16(rotated_odd * scale))
 
 
 def try_ssmax_split_rope(query, log_positions, weight, bias, cos, sin):

@@ -736,6 +736,71 @@ def test_a_model_without_ssmax_needs_no_log_positions():
     assert backend.mistral_q(torch.zeros(3, 16)).shape == (3, 2, 4)
 
 
+@pytest.mark.parametrize("use_rope,scaled", [(True, True), (True, False), (False, True), (False, False)])
+def test_target_query_preserves_upstream_rope_then_ssmax_rounding(monkeypatch, use_rope, scaled):
+    from vllm.models.mistral.amd.ssmax import SSMaxScaling
+
+    from vllm_ascend.attention import sfa_v1
+
+    tokens, heads, rank = 3, 8, 512
+    content_dim = 64 if use_rope else 128
+    generator = torch.Generator().manual_seed(1024)
+    query = torch.randn(tokens, heads, 128, generator=generator).bfloat16()
+    query[..., 64:66] = torch.tensor([-0.10107421875, -1.875]).bfloat16()
+    cos = torch.full((tokens, 1, 1, 64), 0.474609375, dtype=torch.bfloat16)
+    sin = torch.full_like(cos, 0.87890625)
+    log_positions = torch.tensor([0.0, 7.0, 11.0, 0.0])  # one graph-padding row
+    scaling = SSMaxScaling(heads, tp_sharded=False).bfloat16() if scaled else None
+    if scaling is not None:
+        scaling.fused = False
+        with torch.no_grad():
+            scaling.s.zero_()
+            scaling.b.fill_(1.3828125)
+
+    def rotate(value, cos, sin):
+        value = value.float()
+        even, odd = value[..., ::2], value[..., 1::2]
+        c, s = cos[:, 0, 0, :32, None].transpose(1, 2).float(), sin[:, 0, 0, :32, None].transpose(1, 2).float()
+        return torch.cat((even * c - odd * s, odd * c + even * s), dim=-1).to(query.dtype)
+
+    weights = torch.zeros(heads, content_dim, rank, dtype=query.dtype)
+    weights[..., :content_dim] = torch.eye(content_dim, dtype=query.dtype)
+    impl = SimpleNamespace(
+        mistral_use_rope=use_rope,
+        qk_head_dim=content_dim + 64,
+        qk_nope_head_dim=content_dim,
+        qk_rope_head_dim=64,
+        local_num_heads=heads,
+        q_proj=lambda _: (query.flatten(1).clone(), None),
+        mistral_ssmax=scaling,
+        mistral_log_positions=log_positions,
+        W_UK_T=weights,
+        rope_single=rotate,
+    )
+    monkeypatch.setattr(
+        sfa_v1.torch_npu,
+        "npu_transpose_batchmatmul",
+        lambda q, w, **_: torch.bmm(q.transpose(0, 1), w).transpose(0, 1),
+    )
+    actual_content, actual_rope = sfa_v1.AscendSFAImpl._mistral_q_proj_and_k_up_proj(
+        impl, torch.zeros(tokens, 6144), cos, sin
+    )
+    # Independent upstream sequence: rotate the raw query, then scale, then
+    # absorb the content lane. The indexer deliberately has the other order.
+    expected = query.clone()
+    if use_rope:
+        expected[..., 64:] = rotate(query[..., 64:], cos, sin)
+    else:
+        expected = torch.nn.functional.pad(expected, (0, 64))
+    if scaling is not None:
+        expected = scaling(expected, log_positions[:tokens])
+    expected_content = torch.bmm(expected[..., :content_dim].transpose(0, 1), weights).transpose(0, 1)
+    torch.testing.assert_close(actual_content, expected_content, rtol=0, atol=0)
+    torch.testing.assert_close(actual_rope, expected[..., content_dim:], rtol=0, atol=0)
+    if use_rope:
+        assert actual_rope.is_contiguous()
+
+
 @pytest.mark.parametrize("use_rope", [True, False])
 def test_indexer_uses_interleaved_rope_or_bypasses_it_for_both_q_and_k(monkeypatch, use_rope):
     from vllm_ascend.attention import indexer
@@ -801,11 +866,52 @@ def test_dspark_constructor_enables_local_rope(monkeypatch):
         self.model = SimpleNamespace(rotary_emb=rotary_emb, layers=layers)
 
     monkeypatch.setattr(ml4.MistralLarge4DSparkForCausalLM, "__init__", init_draft)
-    ml4.AscendMistralLarge4DSparkForCausalLM(vllm_config=SimpleNamespace())
+    config = SimpleNamespace(
+        parallel_config=SimpleNamespace(decode_context_parallel_size=1),
+        speculative_config=SimpleNamespace(draft_model_config=SimpleNamespace(hf_config=SimpleNamespace())),
+    )
+    ml4.AscendMistralLarge4DSparkForCausalLM(vllm_config=config)
 
     for impl in impls:
         assert impl.use_mla_rope
         assert impl.rope_metadata_source is rotary_emb
+
+
+@pytest.mark.parametrize("draft_dcp", [2, 4])
+def test_dspark_rejects_windowed_draft_dcp_before_constructing_the_model(monkeypatch, draft_dcp):
+    def unexpected_construction(*args, **kwargs):
+        pytest.fail("an unsupported draft must be rejected before model construction")
+
+    monkeypatch.setattr(ml4.MistralLarge4DSparkForCausalLM, "__init__", unexpected_construction)
+    config = SimpleNamespace(
+        parallel_config=SimpleNamespace(decode_context_parallel_size=draft_dcp),
+        speculative_config=SimpleNamespace(
+            draft_model_config=SimpleNamespace(
+                hf_config=SimpleNamespace(layer_types=["full_attention", "sliding_attention"])
+            )
+        ),
+    )
+    with pytest.raises(ValueError, match="effective draft decode_context_parallel_size=1"):
+        ml4.AscendMistralLarge4DSparkForCausalLM(vllm_config=config)
+
+
+@pytest.mark.parametrize("draft_dcp,windowed", [(1, True), (2, False), (4, False)])
+def test_dspark_keeps_supported_window_and_dcp_combinations(monkeypatch, draft_dcp, windowed):
+    def init_draft(self, *, vllm_config, prefix):
+        torch.nn.Module.__init__(self)
+        self.model = SimpleNamespace(rotary_emb=object(), layers=[])
+
+    monkeypatch.setattr(ml4.MistralLarge4DSparkForCausalLM, "__init__", init_draft)
+    config = SimpleNamespace(
+        parallel_config=SimpleNamespace(decode_context_parallel_size=draft_dcp),
+        speculative_config=SimpleNamespace(
+            target_parallel_config=SimpleNamespace(decode_context_parallel_size=4),
+            draft_model_config=SimpleNamespace(
+                hf_config=SimpleNamespace(layer_types=["sliding_attention" if windowed else "full_attention"])
+            ),
+        ),
+    )
+    ml4.AscendMistralLarge4DSparkForCausalLM(vllm_config=config)
 
 
 def test_dspark_draft_uses_local_rope_and_stable_metadata_buffers(monkeypatch):
