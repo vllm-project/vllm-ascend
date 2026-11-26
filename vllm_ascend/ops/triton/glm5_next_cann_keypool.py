@@ -10,6 +10,157 @@ from vllm.triton_utils import tl, triton
 FP8_E4M3_MAX = tl.constexpr(448.0)
 
 
+@triton.jit(do_not_specialize=["num_reqs", "pooled_rows", "pooled_stride", "tail_stride"])
+def _apply_keypool_lora_kernel(
+    pooled,
+    state,
+    delta,
+    gates,
+    ape,
+    cumulative,
+    lengths,
+    tail_writes,
+    tail_sources,
+    num_reqs,
+    pooled_rows,
+    pooled_stride,
+    tail_stride,
+    HEAD_DIM: tl.constexpr,
+    POOL: tl.constexpr,
+    REQUESTS: tl.constexpr,
+    COLS: tl.constexpr,
+):
+    row = tl.program_id(0)
+    cols = tl.arange(0, COLS)
+    if row < pooled_rows:
+        requests = tl.arange(0, REQUESTS)
+        # These normalized boundaries share CANN's int32 range. Keep the
+        # vectors narrow: Ascend scalarizes wide int64 address arithmetic.
+        ends = tl.load(cumulative + requests, requests < num_reqs, other=0).to(tl.int32)
+        begins = tl.load(cumulative + requests - 1, (requests > 0) & (requests < num_reqs), other=0).to(tl.int32)
+        totals = tl.load(lengths + requests, requests < num_reqs, other=0).to(tl.int32)
+        starts = totals - (ends - begins)
+        counts = tl.where(requests < num_reqs, totals // POOL - starts // POOL, 0)
+        inclusive = tl.cumsum(counts, 0)
+        prior = inclusive - counts
+        match = (requests < num_reqs) & (row >= prior) & (row < inclusive)
+        if tl.sum(match.to(tl.int32), 0) > 0:
+            request = tl.sum(tl.where(match, requests, 0), 0)
+            begin = tl.sum(tl.where(match, begins, 0), 0)
+            start = tl.sum(tl.where(match, starts, 0), 0)
+            prefix = tl.sum(tl.where(match, prior, 0), 0)
+            offsets = tl.arange(0, POOL)
+            positions = (start // POOL + row - prefix) * POOL + offsets
+            current = positions >= start
+            tokens = begin + positions - start
+            change = tl.load(
+                delta + tokens[:, None] * HEAD_DIM + cols[None, :],
+                current[:, None] & (cols[None, :] < HEAD_DIM),
+                other=0.0,
+            )
+            gate = tl.load(
+                gates + tokens[:, None] * HEAD_DIM + cols[None, :],
+                current[:, None] & (cols[None, :] < HEAD_DIM),
+                other=0.0,
+            )
+            # CANN keeps the old request history separate from its output
+            # state. Only its unchanged gate plane is needed for this delta.
+            history = tl.load(
+                state + ((request + 1) * POOL + positions[:, None] % POOL) * (2 * HEAD_DIM) + HEAD_DIM + cols[None, :],
+                (~current[:, None]) & (cols[None, :] < HEAD_DIM),
+                other=0.0,
+            )
+            gate = tl.where(current[:, None], gate, history)
+            bias = tl.load(ape + offsets[:, None] * HEAD_DIM + cols[None, :], cols[None, :] < HEAD_DIM, other=0.0)
+            scores = gate + bias
+            weights = tl.exp(scores - tl.max(scores, 0)[None, :])
+            weights = (weights / tl.sum(weights, 0)[None, :]).to(tl.bfloat16).to(tl.float32)
+            increment = tl.sum(weights * change, 0)
+            value = tl.load(pooled + row * pooled_stride + cols, cols < HEAD_DIM, other=0.0)
+            updated = (value.to(tl.float32) + increment).to(value.dtype)
+            # Select the original bits for zero increments. Keep the store
+            # contiguous: a data-dependent lane mask scalarizes on Ascend.
+            tl.store(pooled + row * pooled_stride + cols, tl.where(increment != 0, updated, value), cols < HEAD_DIM)
+    else:
+        tail_row = row - pooled_rows
+        request = tail_row // POOL
+        offset = tail_row % POOL
+        end = tl.load(cumulative + request).to(tl.int32)
+        begin = tl.load(cumulative + request - 1, request > 0, other=0).to(tl.int32)
+        total = tl.load(lengths + request).to(tl.int32)
+        start = total - (end - begin)
+        position = total - total % POOL + offset
+        tail_index = request * tail_stride + offset
+        valid = (tl.load(tail_writes + tail_index) >= 0) & (position >= start)
+        source = tl.load(tail_sources + tail_index).to(tl.int64)
+        increment = tl.load(delta + (begin + position - start) * HEAD_DIM + cols, valid & (cols < HEAD_DIM), other=0.0)
+        address = state + source * (2 * HEAD_DIM) + cols
+        value = tl.load(address, valid & (cols < HEAD_DIM), other=0.0)
+        tl.store(address, tl.where(increment != 0, value + increment, value), valid & (cols < HEAD_DIM))
+
+
+def apply_keypool_lora(pooled, state, key_delta, gates, ape, metadata, tail_metadata):
+    """Add the current tokens' LoRA increment to native pools and live tail.
+
+    ``key_delta`` is LayerNorm(BF16(base + LoRA)) - LayerNorm(base), in FP32.
+    Historical keys already contain their adapter increment. Their native gate
+    values remain unchanged, so pool and tail programs do not race on history.
+    Quantization and cache writes run afterward through the original writer.
+    """
+    inputs = tail_metadata.cann_inputs
+    pool = metadata.compress_ratio
+    num_reqs = metadata.cum_query_lens.numel()
+    if not num_reqs:
+        return
+    dim = key_delta.shape[-1]
+    if (
+        key_delta.ndim != 2
+        or gates.shape != key_delta.shape
+        or key_delta.dtype != torch.float32
+        or gates.dtype != torch.float32
+        or not key_delta.is_contiguous()
+        or not gates.is_contiguous()
+        or pooled.ndim != 2
+        or pooled.shape[1] != dim
+        or pooled.dtype != torch.bfloat16
+        or pooled.stride(1) != 1
+        or state.shape != (1 + 2 * num_reqs, pool, 2 * dim)
+        or state.dtype != torch.float32
+        or not state.is_contiguous()
+        or ape.shape != (pool, dim)
+        or ape.dtype != torch.float32
+        or not ape.is_contiguous()
+    ):
+        raise ValueError("KeyPool LoRA requires FP32 contiguous deltas/gates/state/APE and BF16 pooled rows.")
+    if (
+        inputs.write_indices.shape != inputs.state_indices.shape
+        or inputs.write_indices.stride() != inputs.state_indices.stride()
+        or inputs.write_indices.stride(1) != 1
+        or (inputs.retained_indices is None and inputs.write_indices.shape != (num_reqs, pool))
+    ):
+        raise ValueError("KeyPool LoRA tail addresses must share request rows and contiguous pool columns.")
+    tail_rows = inputs.write_indices.numel() if inputs.retained_indices is None else 0
+    _apply_keypool_lora_kernel[(pooled.shape[0] + tail_rows,)](
+        pooled,
+        state,
+        key_delta,
+        gates,
+        ape,
+        metadata.cum_query_lens,
+        metadata.raw_seq_lens,
+        inputs.write_indices,
+        inputs.state_indices,
+        num_reqs,
+        pooled.shape[0],
+        pooled.stride(0),
+        inputs.write_indices.stride(0),
+        key_delta.shape[1],
+        pool,
+        triton.next_power_of_2(num_reqs),
+        triton.next_power_of_2(key_delta.shape[1]),
+    )
+
+
 @triton.jit(do_not_specialize=["tail_rows", "tail_blocks", "cache_blocks", "INPUT_STRIDE", "INPUT_WIDTH"])
 def _write_keypool_caches_kernel(
     tail,

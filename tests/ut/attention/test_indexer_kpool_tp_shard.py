@@ -354,3 +354,10 @@ def test_build_indexer_row_shard_declines_below_floor():
     untouched."""
     short = _common_metadata([16], [16])
     assert _builder()._build_indexer_row_shard(short, graph_capture=False) is None
+
+
+def test_lora_configuration_does_not_disable_tp_row_sharding():
+    builder = _builder(tp_size=4)
+    builder.vllm_config.lora_config = SimpleNamespace(max_loras=2)
+    rows = MIN_GLM53_INDEXER_TP_SHARD_ROWS_PER_RANK * builder.tp_size
+    assert builder._indexer_row_sharding_supported(rows, graph_capture=False)
