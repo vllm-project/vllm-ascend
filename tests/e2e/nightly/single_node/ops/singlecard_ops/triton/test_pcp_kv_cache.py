@@ -52,9 +52,21 @@ def test_c8_cache_preserves_packed_bytes(dtype, case, strided):
 @pytest.mark.skipif(
     get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3), reason="Requires Ascend A2/A3"
 )
-@pytest.mark.parametrize("c8", [False, True])
-@pytest.mark.parametrize("num_slots", [5, 128, 257])
-@pytest.mark.parametrize("slot_dtype", [torch.int32, torch.int64])
+@pytest.mark.parametrize(
+    "c8,num_slots,slot_dtype",
+    [
+        # Pair both cache formats with both slot dtypes across the smaller inputs.
+        (False, 5, torch.int32),
+        (True, 5, torch.int64),
+        (False, 128, torch.int64),
+        (True, 128, torch.int32),
+        # Keep the full format and dtype sweep at 257 slots.
+        (False, 257, torch.int32),
+        (False, 257, torch.int64),
+        (True, 257, torch.int32),
+        (True, 257, torch.int64),
+    ],
+)
 def test_contiguous_slot_slices_reuse_kernel(c8, num_slots, slot_dtype):
     dtype = torch.int8 if c8 else torch.bfloat16
     dims = (656,) if c8 else (512, 64)

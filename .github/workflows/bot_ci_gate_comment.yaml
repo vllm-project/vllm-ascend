@@ -58,7 +58,7 @@ jobs:
     # Only runs that actually produced a verdict are interesting; cancelled
     # / timed_out / skipped runs have no gate result worth commenting on.
     if: ${{ contains(fromJSON('["success", "failure"]'), github.event.workflow_run.conclusion) }}
-    runs-on: linux-amd64-cpu-2-hk
+    runs-on: linux-amd64-cpu-1-hk
     steps:
       - name: Download gate result artifact
         # May legitimately not exist: a "CI Gate Refresh" run that concluded
@@ -287,6 +287,17 @@ jobs:
                   f"({len(unclaimed)} file{plural}).** These files have no "
                   "CODEOWNERS owner yet, so no approval is required for "
                   "them; maintainers will handle claiming:\n"
+                  f"{listing}"
+              )
+          ignored = read_detail("ignored_files.txt")
+          if ignored:
+              listing = "\n".join(f"- `{path}`" for path in ignored)
+              plural = "s" if len(ignored) != 1 else ""
+              body += (
+                  f"\n\n**Codeowner approval ignored "
+                  f"({len(ignored)} file{plural}).** A maintainer waived "
+                  "these files from the approval gate with /ignore-owner; "
+                  "the waiver stays until /ignore-owner-clear replaces it:\n"
                   f"{listing}"
               )
 

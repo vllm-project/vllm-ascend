@@ -49,6 +49,8 @@ If you want to deploy a multi-node environment, you need to verify multi-node co
 
 ### 4.1 Docker Image Installation
 
+{% include "getting_started/installation/ascend_docker_runtime.inc.md" %}
+
 Select an image based on your machine type and start the docker image on your node, refer to [using docker](../../getting_started/installation.md#installation-prebuilt-image).
 
 === "950DT products"
@@ -59,27 +61,13 @@ Select an image based on your machine type and start the docker image on your no
     export IMAGE=quay.io/ascend/vllm-ascend:v0.30.0rc2-a5
     export NAME=vllm-ascend
     docker run --rm \
+        -e ASCEND_VISIBLE_DEVICES=0-7 \
         --name $NAME \
         --net=host \
         --shm-size=512g \
-        --device /dev/davinci0 \
-        --device /dev/davinci1 \
-        --device /dev/davinci2 \
-        --device /dev/davinci3 \
-        --device /dev/davinci4 \
-        --device /dev/davinci5 \
-        --device /dev/davinci6 \
-        --device /dev/davinci7 \
-        --device /dev/davinci_manager \
-        --device /dev/hisi_hdc \
-        --device /dev/ummu \
-        --device /dev/uburma \
         -v /usr/local/Ascend/driver:/usr/local/Ascend/driver \
-        -v /etc/ascend_install.info:/etc/ascend_install.info \
         -v /root/.cache:/root/.cache \
         -v /usr/local/sbin:/usr/local/sbin \
-        -v /usr/local/dcmi:/usr/local/dcmi \
-        -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
         -v /usr/local/sbin/npu-smi:/usr/local/sbin/npu-smi \
         -itd $IMAGE bash
     ```
@@ -92,35 +80,11 @@ Select an image based on your machine type and start the docker image on your no
 
     export IMAGE=quay.io/ascend/vllm-ascend:v0.30.0rc2-a3
     docker run --rm \
+        -e ASCEND_VISIBLE_DEVICES=0-15 \
         --name vllm-ascend \
         --shm-size=512g \
         --net=host \
-        --privileged=true \
-        --device /dev/davinci0 \
-        --device /dev/davinci1 \
-        --device /dev/davinci2 \
-        --device /dev/davinci3 \
-        --device /dev/davinci4 \
-        --device /dev/davinci5 \
-        --device /dev/davinci6 \
-        --device /dev/davinci7 \
-        --device /dev/davinci8 \
-        --device /dev/davinci9 \
-        --device /dev/davinci10 \
-        --device /dev/davinci11 \
-        --device /dev/davinci12 \
-        --device /dev/davinci13 \
-        --device /dev/davinci14 \
-        --device /dev/davinci15 \
-        --device /dev/davinci_manager \
-        --device /dev/devmm_svm \
-        --device /dev/hisi_hdc \
-        -v /usr/local/dcmi:/usr/local/dcmi \
         -v /usr/local/Ascend/driver/tools/hccn_tool:/usr/local/Ascend/driver/tools/hccn_tool \
-        -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
-        -v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
-        -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
-        -v /etc/ascend_install.info:/etc/ascend_install.info \
         -v /etc/hccn.conf:/etc/hccn.conf \
         -v /root/.cache:/root/.cache \
         -it $IMAGE bash
@@ -135,27 +99,11 @@ Select an image based on your machine type and start the docker image on your no
     export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}
 
     docker run --rm \
+        -e ASCEND_VISIBLE_DEVICES=0-7 \
         --name vllm-ascend \
         --shm-size=512g \
         --net=host \
-        --privileged=true \
-        --device /dev/davinci0 \
-        --device /dev/davinci1 \
-        --device /dev/davinci2 \
-        --device /dev/davinci3 \
-        --device /dev/davinci4 \
-        --device /dev/davinci5 \
-        --device /dev/davinci6 \
-        --device /dev/davinci7 \
-        --device /dev/davinci_manager \
-        --device /dev/devmm_svm \
-        --device /dev/hisi_hdc \
-        -v /usr/local/dcmi:/usr/local/dcmi \
         -v /usr/local/Ascend/driver/tools/hccn_tool:/usr/local/Ascend/driver/tools/hccn_tool \
-        -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
-        -v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
-        -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
-        -v /etc/ascend_install.info:/etc/ascend_install.info \
         -v /etc/hccn.conf:/etc/hccn.conf \
         -v /root/.cache:/root/.cache \
         -it $IMAGE bash
@@ -484,7 +432,7 @@ The following sections describe multi-node PD separation deployment on Atlas 800
 
             export VLLM_USE_V2_MODEL_RUNNER=1
             export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=3000
-            export HCCL_EXEC_TIMEOUT=204
+            export HCCL_EXEC_TIMEOUT=3600
             export HCCL_CONNECT_TIMEOUT=120
             export OMP_PROC_BIND=false
             export OMP_NUM_THREADS=10
@@ -557,7 +505,7 @@ The following sections describe multi-node PD separation deployment on Atlas 800
 
             export VLLM_USE_V2_MODEL_RUNNER=1
             export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=3000
-            export HCCL_EXEC_TIMEOUT=204
+            export HCCL_EXEC_TIMEOUT=3600
             export HCCL_CONNECT_TIMEOUT=120
             export OMP_PROC_BIND=false
             export OMP_NUM_THREADS=10
@@ -820,7 +768,7 @@ The following sections describe multi-node PD separation deployment on Atlas 800
             export HCCL_SOCKET_IFNAME=$nic_name
             export VLLM_RPC_TIMEOUT=3600000
             export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=30000
-            export HCCL_EXEC_TIMEOUT=204
+            export HCCL_EXEC_TIMEOUT=3600
             export HCCL_CONNECT_TIMEOUT=120
             export OMP_PROC_BIND=false
             export OMP_NUM_THREADS=10
@@ -887,7 +835,7 @@ The following sections describe multi-node PD separation deployment on Atlas 800
             export TASK_QUEUE_ENABLE=1
             export VLLM_RPC_TIMEOUT=3600000
             export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=30000
-            export HCCL_EXEC_TIMEOUT=204
+            export HCCL_EXEC_TIMEOUT=3600
             export HCCL_CONNECT_TIMEOUT=120
             export HCCL_IF_IP=$local_ip
             export GLOO_SOCKET_IFNAME=$nic_name
@@ -997,10 +945,10 @@ The following sections describe multi-node PD separation deployment on Atlas 800
 
     | Configuration | Workload / native window | P token budget / prefix cache | D draft / max-num-seqs | Proxy workers |
     |---|---|---|---|---:|
-    | `decode-4k-total` | 4K input / 2K output, pure D, total | 8192 / on | 5 / 42 | 4 |
-    | `decode-4k-stable` | 4K / 2K, pure D, native stable | 8192 / on | 5 / 42 | 4 |
-    | `decode-16k` | 16K / 1K, pure D | 8192 / on | 5 / 42 | 4 |
-    | `decode-long` | 64K / 1K or 128K / 1K, pure D | 8192 / on | 5 / 42 | 1 |
+    | `decode-4k-total` | 4k input / 2k output, pure D, total | 8192 / on | 5 / 42 | 4 |
+    | `decode-4k-stable` | 4k / 2k, pure D, native stable | 8192 / on | 5 / 42 | 4 |
+    | `decode-16k` | 16k / 1k, pure D | 8192 / on | 5 / 42 | 4 |
+    | `decode-long` | 64k / 1k or 128k / 1k, pure D | 8192 / on | 5 / 42 | 1 |
     | `cold-pd` | PC0 pure P or full PD | 8192 / off | 5 / 42 | 4 |
     | `pc90` | Distinct-suffix, multiple-prefix pooling; see [A2 KV Pooling](#526-a2-kv-pooling-mooncake-ssd-profile-and-memcache-integration) | 8192 / on | 5 / 42 | 4 |
 
@@ -1012,9 +960,9 @@ The following sections describe multi-node PD separation deployment on Atlas 800
     | `decode-4k-stable` / native stable | 4180 / 2048 | 8192 / 2304 / 0; stable subset chosen by AISBench |
     | `decode-16k` / total, TTFT trial | 16468 / 1024 | 8192 / 2048 / 0 |
     | `decode-16k` / recorded native stable | 16468 / 1024 | 8192 / 2304 / 0; do not substitute the CC2048 total result |
-    | `decode-long` / 64K total or native stable | 65620 / 1024 | 3840 / 576 / 0 |
-    | `decode-long` / 128K total | 131156 / 1024 | 3920 / 960 / 0 |
-    | `decode-long` / 128K native stable | 131156 / 1024 | 2960 / 960 / 0 |
+    | `decode-long` / 64k total or native stable | 65620 / 1024 | 3840 / 576 / 0 |
+    | `decode-long` / 128k total | 131156 / 1024 | 3920 / 960 / 0 |
+    | `decode-long` / 128k native stable | 131156 / 1024 | 2960 / 960 / 0 |
     | `cold-pd` / full PD total | 16468 / 1024 | 240 / 60 / 0 |
 
     The standard runs at `--max-model-len 262144` on both roles, which covers every ordinary-length workload in this section.
@@ -1042,7 +990,7 @@ The following sections describe multi-node PD separation deployment on Atlas 800
     export ASCEND_LOCAL_COMM_RES='{"version":"1.3"}'
     export VLLM_RPC_TIMEOUT=3600000
     export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=30000
-    export HCCL_EXEC_TIMEOUT=204
+    export HCCL_EXEC_TIMEOUT=3600
     export HCCL_CONNECT_TIMEOUT=120
     export HCCL_BUFFSIZE=1200
     export HCCL_OP_EXPANSION_MODE="AIV"
@@ -1123,7 +1071,7 @@ The following sections describe multi-node PD separation deployment on Atlas 800
     export VLLM_USE_V2_MODEL_RUNNER=1
     export VLLM_RPC_TIMEOUT=3600000
     export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=30000
-    export HCCL_EXEC_TIMEOUT=204
+    export HCCL_EXEC_TIMEOUT=3600
     export HCCL_CONNECT_TIMEOUT=120
     export HCCL_BUFFSIZE=1800
     export GLOO_SOCKET_IFNAME="$nic_name"
@@ -1296,7 +1244,7 @@ This section provides PD separation deployment examples with a KV Cache Pool for
 
         export VLLM_USE_V2_MODEL_RUNNER=1
         export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=3000
-        export HCCL_EXEC_TIMEOUT=204
+        export HCCL_EXEC_TIMEOUT=3600
         export HCCL_CONNECT_TIMEOUT=120
         export PYTHONHASHSEED=0
         export OMP_PROC_BIND=false
@@ -1394,7 +1342,7 @@ This section provides PD separation deployment examples with a KV Cache Pool for
 
         export VLLM_USE_V2_MODEL_RUNNER=1
         export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=3000
-        export HCCL_EXEC_TIMEOUT=204
+        export HCCL_EXEC_TIMEOUT=3600
         export HCCL_CONNECT_TIMEOUT=120
         export PYTHONHASHSEED=0
         export OMP_PROC_BIND=false
@@ -1657,7 +1605,7 @@ This section provides PD separation deployment examples with a KV Cache Pool for
         ubsio.standalone.force_new_disk = true
         ```
 
-        Use a dedicated, unmounted block device without a filesystem signature. `force_new_disk=true` reinitializes the SSD cache layout at startup and invalidates previous cache contents; do not point it at a device containing data to keep. The 20 GiB DRAM contribution and 50 GiB UBS IO allocation are separate per-process host-memory budgets. Size both for the actual prefix working set and available host memory. With one standalone process per host, use `device_count=1`; it is not the number of model ranks.
+        Use a dedicated, unmounted block device without a filesystem signature. `force_new_disk=true` reinitializes the SSD cache layout at startup and invalidates previous cache contents; do not point it at a device containing data to keep. The 20GB DRAM contribution and 50GB UBS IO allocation are separate per-process host-memory budgets. Size both for the actual prefix working set and available host memory. With one standalone process per host, use `device_count=1`; it is not the number of model ranks.
 
         After MetaService is ready, start one standalone process on each node with the selected SSD configuration, then all Decode ranks, both Prefill ranks and the proxy:
 
@@ -1689,7 +1637,7 @@ This section provides PD separation deployment examples with a KV Cache Pool for
         export HCCL_SOCKET_IFNAME=$nic_name
         export VLLM_RPC_TIMEOUT=3600000
         export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=30000
-        export HCCL_EXEC_TIMEOUT=204
+        export HCCL_EXEC_TIMEOUT=3600
         export HCCL_CONNECT_TIMEOUT=120
         export OMP_PROC_BIND=false
         export OMP_NUM_THREADS=10
@@ -1793,7 +1741,7 @@ This section provides PD separation deployment examples with a KV Cache Pool for
         export TASK_QUEUE_ENABLE=1
         export VLLM_RPC_TIMEOUT=3600000
         export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=30000
-        export HCCL_EXEC_TIMEOUT=204
+        export HCCL_EXEC_TIMEOUT=3600
         export HCCL_CONNECT_TIMEOUT=120
         export HCCL_IF_IP=$local_ip
         export GLOO_SOCKET_IFNAME=$nic_name
@@ -1935,7 +1883,7 @@ This section provides PD separation deployment examples with a KV Cache Pool for
             --decoder-ports {7100..7115}
         ```
 
-        Send requests to the proxy at ``http://<PREFILL_NODE_IP>:1999``, using the
+        Send requests to the proxy at `http://<PREFILL_NODE_IP>:1999`, using the
         `dsv4` served model name from Section 6. Verify both the response and the
         P-to-D transfer in engine logs. To check pool reuse, send the same long prompt
         (at least 4096 tokens for this example) twice, allowing the first request's
@@ -1950,9 +1898,10 @@ This section provides PD separation deployment examples with a KV Cache Pool for
         - `MultiConnector` combines live P-to-D transfer through
           `MooncakeHybridConnector` with reusable prefix storage through
           `AscendStoreConnector`. In this example, both children and the parent use
-          `kv_producer` on Prefill and `kv_consumer` on Decode. Decode does not put or
-          load pool entries unless `consumer_is_to_put` or `consumer_is_to_load` is
-          explicitly enabled.
+          `kv_producer` on Prefill and `kv_consumer` on Decode. Decode neither saves
+          to nor loads from the pool by default. `save_decode_cache` enables saving
+          complete Decode blocks and missing Prefill ancestors at the first Decode
+          save; `enable_lookup` separately enables loading from the pool.
         - `PYTHONHASHSEED=0` must match across all engines. Prefill enables prefix
           caching; Decode disables it.
         - Keep `--no-disable-hybrid-kv-cache-manager` on both roles and the top-level
@@ -2077,7 +2026,7 @@ This section provides PD separation deployment examples with a KV Cache Pool for
         export VLLM_USE_V2_MODEL_RUNNER=1
         export HCCL_INTRA_ROCE_ENABLE=1
         export HCCL_CONNECT_TIMEOUT=6000
-        export HCCL_EXEC_TIMEOUT=204
+        export HCCL_EXEC_TIMEOUT=3600
         export HCCL_BUFFSIZE=1200
         export GLOO_SOCKET_IFNAME="$nic_name"
         export HCCL_SOCKET_IFNAME="$nic_name"
@@ -2191,7 +2140,7 @@ This section provides PD separation deployment examples with a KV Cache Pool for
         export VLLM_USE_V2_MODEL_RUNNER=1
         export HCCL_INTRA_ROCE_ENABLE=1
         export HCCL_CONNECT_TIMEOUT=6000
-        export HCCL_EXEC_TIMEOUT=204
+        export HCCL_EXEC_TIMEOUT=3600
         export HCCL_BUFFSIZE=1200
         export GLOO_SOCKET_IFNAME="$nic_name"
         export HCCL_SOCKET_IFNAME="$nic_name"
@@ -2301,7 +2250,7 @@ This section provides PD separation deployment examples with a KV Cache Pool for
         export VLLM_USE_V2_MODEL_RUNNER=1
         export HCCL_INTRA_ROCE_ENABLE=1
         export HCCL_CONNECT_TIMEOUT=120
-        export HCCL_EXEC_TIMEOUT=204
+        export HCCL_EXEC_TIMEOUT=3600
         export HCCL_BUFFSIZE=1800
         export GLOO_SOCKET_IFNAME="$nic_name"
         export HCCL_SOCKET_IFNAME="$nic_name"
@@ -2357,7 +2306,7 @@ This section provides PD separation deployment examples with a KV Cache Pool for
                     "backend": "mooncake",
                     "lookup_rpc_port": "'"$((global_rank + 2))"'",
                     "use_layerwise": false,
-                    "consumer_is_to_load": true
+                    "enable_lookup": true
                   }
                 }
               ]
@@ -2399,7 +2348,7 @@ This section provides PD separation deployment examples with a KV Cache Pool for
         wait
         ```
 
-        The two disk limits are 32 GiB per participating client/rank and the offload buffer is 1 GiB; budget their sum across the node. Clearing `ASCEND_GLOBAL_RESOURCE_CONFIG` belongs to this measured Mooncake Store path, not to pooling in general. The environment variables alone do not enable SSD: the JSON switch and master offload settings are also required. In this profile P **and D** use `--enable-prefix-caching`; the pooled scripts replace the ordinary D `--no-enable-prefix-caching` flag. D's Store child sets `consumer_is_to_load=true`.
+        The two disk limits are 32 GiB per participating client/rank and the offload buffer is 1 GiB; budget their sum across the node. Clearing `ASCEND_GLOBAL_RESOURCE_CONFIG` belongs to this measured Mooncake Store path, not to pooling in general. The environment variables alone do not enable SSD: the JSON switch and master offload settings are also required. In this profile P **and D** use `--enable-prefix-caching`; the pooled scripts replace the ordinary D `--no-enable-prefix-caching` flag. D's Store child sets `enable_lookup=true`.
 
         **Memcache backend**
 
@@ -2421,7 +2370,7 @@ This section provides PD separation deployment examples with a KV Cache Pool for
         export VLLM_USE_V2_MODEL_RUNNER=1
         export HCCL_INTRA_ROCE_ENABLE=1
         export HCCL_CONNECT_TIMEOUT=120
-        export HCCL_EXEC_TIMEOUT=204
+        export HCCL_EXEC_TIMEOUT=3600
         export HCCL_BUFFSIZE=1800
         export GLOO_SOCKET_IFNAME="$nic_name"
         export HCCL_SOCKET_IFNAME="$nic_name"
@@ -2472,7 +2421,7 @@ This section provides PD separation deployment examples with a KV Cache Pool for
                     "backend": "memcache",
                     "lookup_rpc_port": "'"$((global_rank + 2))"'",
                     "use_layerwise": false,
-                    "consumer_is_to_load": true
+                    "enable_lookup": true
                   }
                 }
               ]
@@ -2577,7 +2526,7 @@ Refer to [Using AISBench for performance evaluation](../../developer_guide/evalu
 
 ### 8.2 Using vLLM Benchmark
 
-Refer to [vllm benchmark](https://docs.vllm.ai/en/latest/benchmarking/) for more details.
+Refer to [vLLM benchmark](https://docs.vllm.ai/en/latest/benchmarking/) for more details.
 
 ## 9 Performance Tuning
 

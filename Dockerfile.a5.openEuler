@@ -32,7 +32,7 @@ RUN python3 -m pip install 'modelscope<1.38' 'ray>=2.47.1,<=2.48.0' 'protobuf>3.
 
 # Install vLLM
 ARG VLLM_REPO=https://github.com/vllm-project/vllm.git
-ARG VLLM_TAG=v0.33.0
+ARG VLLM_TAG=v0.34.0
 ARG VLLM_COMMIT=""
 ARG PYTORCH_INDEX_URL="https://download.pytorch.org/whl/cpu/"
 ARG CARGO_BUILD_JOBS
@@ -72,8 +72,8 @@ ENV SOC_VERSION=$SOC_VERSION \
     OMP_NUM_THREADS=1
 COPY . /vllm-workspace/vllm-ascend/
 
-ARG ASCEND_INDEX_URL="https://mirrors.huaweicloud.com/ascend/repos/pypi \
-    https://mirrors.huaweicloud.com/ascend/repos/pypi/nightly"
+ARG ASCEND_INDEX_URL="https://repo.huaweicloud.com/ascend/repos/pypi \
+    https://repo.huaweicloud.com/ascend/repos/pypi/nightly"
 ARG COMPILE_CUSTOM_KERNELS=1
 RUN export PIP_EXTRA_INDEX_URL="${ASCEND_INDEX_URL}" && \
     export VLLM_BATCH_INVARIANT=1 && \
@@ -82,15 +82,14 @@ RUN export PIP_EXTRA_INDEX_URL="${ASCEND_INDEX_URL}" && \
     python3 -m pip install -e /vllm-workspace/vllm-ascend/ --extra-index-url ${PYTORCH_INDEX_URL} && \
     python3 -m pip cache purge
 
-# Install cannbot wheels from the Ascend mirror (only aarch64)
-RUN ARCH=$(uname -m); \
-    if [ "$ARCH" = "aarch64" ]; then \
-        PIP_EXTRA_INDEX_URL="${ASCEND_INDEX_URL}" \
-        python3 -m pip install "dsv41-cannbot-dsl===0.8.2+ns1" "cannbot-arena-net===0.3.0+ns1" && \
-        python3 -m pip cache purge; \
-    else \
-        echo "x86_64, skip cannbot wheels"; \
-    fi
+# Install cannbot wheels from the Ascend mirror
+RUN case "$(uname -m)" in \
+  aarch64|x86_64) \
+    PIP_EXTRA_INDEX_URL="${ASCEND_INDEX_URL}" \
+    python3 -m pip install "cannbotdsl===0.8.2" "cannbot-arena-net-ops===0.3.0" && \
+    python3 -m pip cache purge ;; \
+  *) echo "Unsupported architecture: $(uname -m)" && exit 1 ;; \
+esac
 
 # ===== Install FLA =====
 ARG FLA_VERSION="26.10.0+feature"
@@ -107,7 +106,7 @@ RUN export PIP_EXTRA_INDEX_URL="${ASCEND_INDEX_URL}" && \
     FLASH_ATTN_BUILD_NPU=950 python3 -m pip install --no-build-isolation --no-deps \
         "flash-attn-npu==${FLASH_ATTN_NPU_VERSION}" && \
     # Install mooncake-transfer-engine-npu from the Ascend nightly mirror
-    python3 -m pip install "mooncake-transfer-engine-npu===0.3.14" && \
+    python3 -m pip install "mooncake-transfer-engine-npu===0.3.14.post1" && \
     python3 -m pip cache purge
 
 # Append `libascend_hal.so` path (devlib) to LD_LIBRARY_PATH

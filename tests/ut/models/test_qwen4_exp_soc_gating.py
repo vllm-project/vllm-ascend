@@ -7,7 +7,6 @@ from typing import Any
 import torch
 
 from vllm_ascend.models.qwen4_exp import qsa as ascend_qsa
-from vllm_ascend.utils import vllm_version_is
 
 
 def _make_indexer() -> ascend_qsa.AscendQSAIndexer:
@@ -76,30 +75,16 @@ def test_impl_always_uses_cann_gbsa(monkeypatch) -> None:
 
     monkeypatch.setattr(ascend_qsa, "qsa_gbsa_attention", gbsa)
     impl: Any = _make_impl()
-    if vllm_version_is("0.33.0"):
-        result = impl.forward_qsa(
-            layer=layer,
-            query=torch.zeros(1, 2, 2),
-            key=torch.zeros(0),
-            value=torch.zeros(0),
-            kv_cache=kv_cache,
-            attn_metadata=attn_metadata,
-            output=output,
-            token_to_req=torch.zeros(1, dtype=torch.int64),
-            logical_positions=logical_positions,
-            seq_lens=seq_lens,
-        )
-    else:
-        result = impl.forward(
-            layer=layer,
-            query=torch.zeros(1, 2, 2),
-            kv_cache=kv_cache,
-            attn_metadata=attn_metadata,
-            output=output,
-            token_to_req=torch.zeros(1, dtype=torch.int64),
-            logical_positions=logical_positions,
-            seq_lens=seq_lens,
-        )
+    result = impl.forward(
+        layer=layer,
+        query=torch.zeros(1, 2, 2),
+        kv_cache=kv_cache,
+        attn_metadata=attn_metadata,
+        output=output,
+        token_to_req=torch.zeros(1, dtype=torch.int64),
+        logical_positions=logical_positions,
+        seq_lens=seq_lens,
+    )
 
     assert result is sentinel
     assert len(calls) == 1

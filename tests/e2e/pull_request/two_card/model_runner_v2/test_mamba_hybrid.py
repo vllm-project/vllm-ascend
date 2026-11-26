@@ -21,7 +21,6 @@ Run `pytest -sv tests/e2e/pull_request/two_card/model_runner_v2/test_mamba_hybri
 """
 
 import os
-from unittest.mock import patch
 
 import pytest
 
@@ -30,7 +29,6 @@ from tests.e2e.conftest import VllmRunner, wait_until_npu_memory_free
 QWEN35_DENSE_MODEL = os.environ.get("QWEN35_DENSE_MODEL", "Qwen/Qwen3.5-27B")
 
 
-@patch.dict(os.environ, {"VLLM_USE_V2_MODEL_RUNNER": "1"})
 @wait_until_npu_memory_free(0.8)
 def test_qwen35_27b_eager_mode():
     example_prompts = [
@@ -51,7 +49,6 @@ def test_qwen35_27b_eager_mode():
         assert outputs[0][1]
 
 
-@patch.dict(os.environ, {"VLLM_USE_V2_MODEL_RUNNER": "1"})
 @wait_until_npu_memory_free(0.8)
 @pytest.mark.parametrize("enable_batch_sharded_sampling", [True, False])
 def test_qwen35_27b_acl_graph(enable_batch_sharded_sampling):

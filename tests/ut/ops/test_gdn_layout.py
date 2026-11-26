@@ -1,16 +1,20 @@
 # SPDX-License-Identifier: Apache-2.0
+from dataclasses import replace
 from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
 import torch
 
+from vllm_ascend.attention.gdn import AscendGatedDeltaNetAttention
 from vllm_ascend.device.device_op import A5DeviceAdaptor, BaseDeviceAdaptor
-from vllm_ascend.ops.gdn import AscendGatedDeltaNetAttention
+from vllm_ascend.device.hardware import AscendDeviceType
+from vllm_ascend.device.hardware_profile import HardwareCapability, get_hardware_profile
 
 
 @pytest.mark.parametrize("kind", ["head_first", "sequence_first", "mixed_slice"])
-def test_a5_prefill_layout_preserves_values_and_output(kind):
+@pytest.mark.parametrize("chunk32_enabled", [False, True])
+def test_a5_prefill_layout_preserves_values_and_output(kind, chunk32_enabled):
     tokens, nk, nv, dim = 7, 2, 4, 16
     qkv = [torch.randn(1, h, tokens, dim).transpose(1, 2) for h in (nk, nk, nv)]
     if kind == "sequence_first":
@@ -21,11 +25,19 @@ def test_a5_prefill_layout_preserves_values_and_output(kind):
     state = torch.randn(1, nv, dim, dim)
     output = torch.randn(1, count, nv, dim)
     gate = torch.randn(1, count, nv)
-    meta = SimpleNamespace(cu_seqlens_host=None, chunk_indices_chunk64_host=None, keep_meta=None)
+    meta = SimpleNamespace(
+        cu_seqlens_host=(0, count),
+        chunk_indices_chunk64_host=(0, 0),
+        chunk_indices_chunk32_host=(0, 0) if chunk32_enabled else None,
+        keep_meta=None,
+    )
 
     def fused(q, k, v, g, beta, **kwargs):
         expected_layout = "BNSD" if kind == "head_first" else "BSND"
         assert kwargs["layout"] == expected_layout
+        assert kwargs["chunk_size"] == (32 if chunk32_enabled else 64)
+        expected_indices = meta.chunk_indices_chunk32_host if chunk32_enabled else meta.chunk_indices_chunk64_host
+        assert kwargs["chunk_indices"] is expected_indices
         for actual, original in zip((q, k, v), qkv):
             assert actual.is_contiguous()
             expected = original.transpose(1, 2) if kind == "head_first" else original
@@ -36,7 +48,11 @@ def test_a5_prefill_layout_preserves_values_and_output(kind):
         torch.testing.assert_close(beta, gate)
         return output, state
 
-    result, final_state = A5DeviceAdaptor.fla_gdn_prefill(*qkv, gate, gate, state, dim**-0.5, meta, fused)
+    profile = get_hardware_profile(AscendDeviceType.A5)
+    if not chunk32_enabled:
+        profile = replace(profile, capabilities=profile.capabilities - {HardwareCapability.FLA_GDN_PREFILL_CHUNK32})
+    with patch("vllm_ascend.device.device_op.get_current_hardware_profile", return_value=profile):
+        result, final_state = A5DeviceAdaptor.fla_gdn_prefill(*qkv, gate, gate, state, dim**-0.5, meta, fused)
     assert result is output
     assert final_state is state
 
@@ -47,7 +63,7 @@ def test_head_first_l2norm_fallback_accepts_multiple_heads(backend, sliced):
     tokens, nk, nv, dim = 7, 2, 4, 128
     qkv = [torch.randn(1, heads, tokens, dim).transpose(1, 2) for heads in (nk, nk, nv)]
     if sliced:
-        qkv = [x[:, 2:] for x in qkv]
+        qkv = [x[:, :2] for x in qkv]
     count = qkv[0].shape[1]
     state = torch.randn(1, nv, dim, dim)
     gate = torch.zeros(1, count, nv)
@@ -63,24 +79,22 @@ def test_head_first_l2norm_fallback_accepts_multiple_heads(backend, sliced):
         meta = SimpleNamespace(cu_seqlens_host=(0, count), chunk_indices_chunk64_host=((0, 0),), keep_meta=None)
 
         def fused(q, k, v, *args, **kwargs):
-            assert kwargs["layout"] == "BNSD"
-            assert all(x.is_contiguous() for x in (q, k, v))
-            if not sliced:
-                assert v.data_ptr() == qkv[2].data_ptr()
-            for got, original in zip((q, k), qkv[:2]):
-                expected = torch.nn.functional.normalize(original, dim=-1).transpose(1, 2)
-                torch.testing.assert_close(got, expected)
-            torch.testing.assert_close(v, qkv[2].transpose(1, 2))
-            return output, state.transpose(-1, -2).contiguous()
+            # q/k normalization happens inside the fused kernel, so the adaptor
+            # forwards the tensors untouched and only picks the layout by
+            # contiguity: a sliced head-first view cannot stay contiguous.
+            assert kwargs["use_qk_l2norm_in_kernel"] is True
+            if sliced:
+                assert kwargs["layout"] == "BSND"
+                expected = [x.contiguous() for x in qkv]
+            else:
+                assert kwargs["layout"] == "BNSD"
+                expected = [x.transpose(1, 2) for x in qkv]
+            for got, want in zip((q, k, v), expected):
+                assert got.is_contiguous()
+                torch.testing.assert_close(got, want)
+            return output, state
 
-        with patch("vllm.third_party.flash_linear_attention.ops.l2norm.l2norm_fwd", side_effect=norm) as normalize:
-            actual, _ = BaseDeviceAdaptor.fla_gdn_prefill(*qkv, gate, gate, state, dim**-0.5, meta, fused)
-        for call, original in zip(normalize.call_args_list, qkv[:2], strict=True):
-            norm_input = call.args[0]
-            assert norm_input.shape == original.transpose(1, 2).shape
-            assert norm_input.is_contiguous()
-            if not sliced:
-                assert norm_input.data_ptr() == original.data_ptr()
+        actual, _ = BaseDeviceAdaptor.fla_gdn_prefill(*qkv, gate, gate, state, dim**-0.5, meta, fused)
     else:
 
         def fused(q, k, v, *args, **kwargs):
@@ -90,8 +104,8 @@ def test_head_first_l2norm_fallback_accepts_multiple_heads(backend, sliced):
             return output.squeeze(0), kwargs["initial_state"]
 
         with (
-            patch("vllm_ascend.ops.gdn.l2norm_fwd", side_effect=norm),
-            patch("vllm_ascend.ops.gdn.torch_npu.npu_chunk_gated_delta_rule", side_effect=fused, create=True),
+            patch("vllm_ascend.attention.gdn.l2norm_fwd", side_effect=norm),
+            patch("vllm_ascend.attention.gdn.torch_npu.npu_chunk_gated_delta_rule", side_effect=fused, create=True),
         ):
             actual, _ = AscendGatedDeltaNetAttention._chunk_gated_delta_rule_fused(
                 *qkv, gate, gate, state, torch.tensor([0, count], dtype=torch.int32), dim**-0.5
