@@ -54,12 +54,14 @@ The native test is discovered by the existing `singlecard-ops-a3` nightly matrix
 The production QSA-to-CANN GBSA integration path is covered by:
 
 ```bash
-pytest -q tests/e2e/nightly/single_node/ops/singlecard_ops/test_qwen4_exp_gbsa.py
+pytest -q \
+  tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_qwen4_exp_qsa.py::test_qwen4_exp_gbsa_matches_dense_reference \
+  tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_qwen4_exp_qsa.py::test_qwen4_exp_gbsa_npugraph_replays_updated_input
 ```
 
-This supplemental test passes compact LI-v2 indices through
-`qsa_gbsa_attention`, compares the BF16 output with an independent dense FP32
-attention reference, and covers eager execution, `torch.compile`, and NPUGraph
+These tests pass compact LI-v2 indices through
+`qsa_gbsa_attention`, compare the BF16 output with an independent dense FP32
+attention reference, and cover eager execution, `torch.compile`, and NPUGraph
 replay after updating an input. Triton packing and metadata outputs remain
 exactly compared in `test_qwen4_exp_qsa.py`, as required for integer and index
 results.
