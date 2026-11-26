@@ -4,10 +4,13 @@
 import torch
 
 from vllm_ascend.ops.gbsa import (
-    generic_block_sparse_attention,
     generic_block_sparse_attention_metadata,
+    generic_block_sparse_attention_out,
 )
-from vllm_ascend.ops.triton.qwen4_exp.gbsa import prepare_qsa_gbsa_inputs
+from vllm_ascend.ops.triton.qwen4_exp.gbsa import (
+    pack_qsa_gbsa_indices,
+    prepare_qsa_gbsa_inputs,
+)
 
 GBSA_COMPRESS_RATIO = 4
 GBSA_RESIDUAL_TOKENS = GBSA_COMPRESS_RATIO - 1
@@ -24,6 +27,10 @@ def qsa_gbsa_attention(
     logical_positions: torch.Tensor,
     seq_lens: torch.Tensor,
     output: torch.Tensor,
+    *,
+    prepared_visible_lengths: torch.Tensor | None = None,
+    prepared_cu_query: torch.Tensor | None = None,
+    prepared_row_block_table: torch.Tensor | None = None,
 ) -> torch.Tensor:
     if key_cache.ndim != 4 or value_cache.ndim != 4:
         raise ValueError("QSA GBSA requires 4-D K/V caches")
@@ -54,9 +61,20 @@ def qsa_gbsa_attention(
     if logical_positions.shape != (query.shape[0],):
         raise ValueError("QSA GBSA logical positions must match query rows")
 
-    sparse_idx, sparse_count, row_visible_lens, cu_q, row_block_table = prepare_qsa_gbsa_inputs(
-        compact_indices, logical_positions, seq_lens, token_to_req, block_table, num_kv_heads
-    )
+    if prepared_visible_lengths is not None and prepared_cu_query is not None and prepared_row_block_table is not None:
+        rows = query.shape[0]
+        row_visible_lens = prepared_visible_lengths[:rows]
+        cu_q = prepared_cu_query[: rows + 1]
+        row_block_table = prepared_row_block_table[:rows]
+        sparse_idx, sparse_count = pack_qsa_gbsa_indices(
+            compact_indices,
+            row_visible_lens,
+            num_kv_heads,
+        )
+    else:
+        sparse_idx, sparse_count, row_visible_lens, cu_q, row_block_table = prepare_qsa_gbsa_inputs(
+            compact_indices, logical_positions, seq_lens, token_to_req, block_table, num_kv_heads
+        )
     common = dict(
         cu_seqlens_q=cu_q,
         seqused_kv=row_visible_lens,
@@ -80,19 +98,19 @@ def qsa_gbsa_attention(
         max_seqlen_kv=int(logical_max_seqlen_kv),
         **common,
     )
-    result, _ = generic_block_sparse_attention(
+    generic_block_sparse_attention_out(
         query.contiguous(),
         key_cache,
         value_cache,
         sparse_idx,
         sparse_count,
         [1, GBSA_COMPRESS_RATIO],
+        output,
         metadata=metadata,
         block_table=row_block_table,
         softmax_scale=query.shape[-1] ** -0.5,
         **common,
     )
-    output.copy_(result)
     return output
 
 
