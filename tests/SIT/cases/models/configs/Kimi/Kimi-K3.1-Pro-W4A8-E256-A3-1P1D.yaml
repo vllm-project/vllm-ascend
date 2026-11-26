@@ -30,7 +30,7 @@ config:
   dp_rank_start: 0
   tp_size: 16
   dp_address: ${NODE_1_IP}
-env_common:
+env_common: &env_common
   VLLM_USE_MODELSCOPE: 'true'
   VLLM_USE_V2_MODEL_RUNNER: '1'
   VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS: '30000'
@@ -47,39 +47,11 @@ env_common:
   FLA_STABLE_DEBUG_DESC: '0'
   TORCH_EXTENSIONS_DIR: /tmp/kimi_k31_torch_extensions/node-${NODE_INDEX}/dp-${DP_RANK}
 env_prefill: &id001
-  VLLM_USE_MODELSCOPE: 'true'
-  VLLM_USE_V2_MODEL_RUNNER: '1'
-  VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS: '30000'
-  VLLM_HOST_IP: ${LOCAL_IP}
-  HCCL_BUFFSIZE: '1024'
-  HCCL_CONNECT_TIMEOUT: '1200'
-  HCCL_NPU_SOCKET_PORT_RANGE: auto
-  ASCEND_RT_VISIBLE_DEVICES: ${VISIBLE_DEVICES}
-  LD_LIBRARY_PATH: /usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake:$LD_LIBRARY_PATH
-  PYTORCH_NPU_ALLOC_CONF: expandable_segments:True
-  PYTHONHASHSEED: '0'
-  OMP_NUM_THREADS: '1'
-  OMP_PROC_BIND: 'false'
-  FLA_STABLE_DEBUG_DESC: '0'
-  TORCH_EXTENSIONS_DIR: /tmp/kimi_k31_torch_extensions/node-${NODE_INDEX}/dp-${DP_RANK}
+  <<: *env_common
   HCCL_IF_BASE_PORT: '51000'
   HCCL_HOST_SOCKET_PORT_RANGE: 51000-51063
 env_decode: &id002
-  VLLM_USE_MODELSCOPE: 'true'
-  VLLM_USE_V2_MODEL_RUNNER: '1'
-  VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS: '30000'
-  VLLM_HOST_IP: ${LOCAL_IP}
-  HCCL_BUFFSIZE: '1024'
-  HCCL_CONNECT_TIMEOUT: '1200'
-  HCCL_NPU_SOCKET_PORT_RANGE: auto
-  ASCEND_RT_VISIBLE_DEVICES: ${VISIBLE_DEVICES}
-  LD_LIBRARY_PATH: /usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake:$LD_LIBRARY_PATH
-  PYTORCH_NPU_ALLOC_CONF: expandable_segments:True
-  PYTHONHASHSEED: '0'
-  OMP_NUM_THREADS: '1'
-  OMP_PROC_BIND: 'false'
-  FLA_STABLE_DEBUG_DESC: '0'
-  TORCH_EXTENSIONS_DIR: /tmp/kimi_k31_torch_extensions/node-${NODE_INDEX}/dp-${DP_RANK}
+  <<: *env_common
   HCCL_IF_BASE_PORT: '50000'
   HCCL_HOST_SOCKET_PORT_RANGE: 50000-50063
   HCCL_OP_EXPANSION_MODE: AIV
@@ -223,8 +195,6 @@ benchmarks:
     top_p: 0.95
     baseline: 60
     threshold: 10
-    test_range: '[0:300]'
+    num_prompts: 300
   acc_gsm8k_r02: *gsm8k_accuracy
   acc_gsm8k_r03: *gsm8k_accuracy
-  acc_gsm8k_r04: *gsm8k_accuracy
-  acc_gsm8k_r05: *gsm8k_accuracy
