@@ -236,6 +236,8 @@ class AscendMLAAttention(MLAAttention):
             dtype, cache_dtype_str = self.impl.dtype, None
             values["kv_quant_mode"] = KVQuantMode.NONE
 
+        # FA-quantized split FIA stores NoPE in the quantized dtype and keeps
+        # RoPE in the owning model's original dtype.
         rope_dtype = None
         if (
             getattr(self.impl, "fa_quant_layer", False)
