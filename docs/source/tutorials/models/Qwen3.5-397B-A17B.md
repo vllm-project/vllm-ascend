@@ -196,7 +196,7 @@ Single-node deployment runs both Prefill and Decode on the same node. It is suit
     export HCCL_INTRA_ROCE_ENABLE=0
     export HCCL_OP_EXPANSION_MODE="AIV"
     export VLLM_ASCEND_ENABLE_PREFETCH_MLP=1
-    export VLLM_USE_V2_MODEL_RUNNER=0
+    export VLLM_USE_V2_MODEL_RUNNER=1
 
     # Ensure the model path matches the directory recorded during download
     MODEL_PATH="Eco-Tech/Qwen3.5-397B-A17B-w4a4-mxfp4"
@@ -233,7 +233,7 @@ Single-node deployment runs both Prefill and Decode on the same node. It is suit
     export VLLM_USE_MODELSCOPE=True
     export HCCL_BUFFSIZE=1024
     export HCCL_OP_EXPANSION_MODE="AIV"
-    export VLLM_USE_V2_MODEL_RUNNER=0
+    export VLLM_USE_V2_MODEL_RUNNER=1
 
     # Ensure the model path matches the directory recorded during download
     MODEL_PATH="Eco-Tech/Qwen3.5-397B-A17B-w8a8-mtp"
@@ -275,7 +275,7 @@ Common Issues Tip: If the service fails to start, HBM is insufficient, or reques
 - `--quantization ascend` enables Ascend quantization for the quantized weights used above. Remove this option when deploying the BF16 model.
 - `--speculative-config` enables Qwen3.5 MTP speculative decoding. Reduce `num_speculative_tokens` or remove this option if the workload is sensitive to first-token latency or if MTP is unstable in your environment.
 - `--compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}'` enables full decode ACLGraph replay to reduce dispatch overhead.
-- `VLLM_USE_V2_MODEL_RUNNER=0` selects Model Runner V1 for the single-node examples above.
+- `VLLM_USE_V2_MODEL_RUNNER=1` selects Model Runner V2 for the single-node examples above.
 - `--additional-config` configures Ascend-specific optimizations: `enable_cpu_binding=true` enables Ascend-native CPU binding; `enable_fused_mc2=1` selects dispatch-FFN-combine and is used by the single-node 950DT and A3 examples for compatibility with the documented MTP and batching configurations; `2` selects CANN MegaMoe and should only be enabled with a matching CANN/operator stack and supported token-shape limits; `0` disables the fused path. `enable_flashcomm1=true` enables MoE sequence parallelism across TP ranks and requires `--enable-expert-parallel` with a TP size greater than 1.
 
 ### 5.2 Multi-Node Deployment with MP (Recommended)
@@ -451,7 +451,7 @@ export HCCL_SOCKET_IFNAME="${nic_name}"
 
 export HCCL_BUFFSIZE=1024
 export HCCL_OP_EXPANSION_MODE=AIV
-export VLLM_USE_V2_MODEL_RUNNER=0
+export VLLM_USE_V2_MODEL_RUNNER=1
 export VLLM_USE_FASTOKENS=1
 export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
 export LD_LIBRARY_PATH="/usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake:${LD_LIBRARY_PATH:-}"
@@ -558,7 +558,7 @@ export HCCL_SOCKET_IFNAME="${nic_name}"
 
 export HCCL_BUFFSIZE=1024
 export HCCL_OP_EXPANSION_MODE=AIV
-export VLLM_USE_V2_MODEL_RUNNER=0
+export VLLM_USE_V2_MODEL_RUNNER=1
 export VLLM_USE_FASTOKENS=1
 export VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS=0
 export ASCEND_RT_VISIBLE_DEVICES=8,9,10,11,12,13,14,15
@@ -670,7 +670,7 @@ Send client requests to `http://<LOCAL_SERVICE_IP>:8000`.
 - Prefill uses TP8/DP1 on devices 0-7. Decode uses TP4/DP2 on devices 8-15. With expert parallelism enabled, both service groups have an EP world size of 8.
 - The P and D device lists must not overlap. P and D can share the same service IP on a single host, but their HTTP and Mooncake ports must be different.
 - The Decode command starts both local DP ranks. Do not launch one Decode command per DP rank.
-- `VLLM_USE_V2_MODEL_RUNNER=0` selects Model Runner V1 on both service groups.
+- `VLLM_USE_V2_MODEL_RUNNER=1` selects Model Runner V2 on both service groups.
 - Use the same MTP method and `num_speculative_tokens` on P and D. To disable MTP for a comparison, remove `--speculative-config` from both commands.
 - `kv_connector_extra_config.prefill` must remain DP1/TP8, and `decode` must remain DP2/TP4 for this topology.
 - `enable_flashcomm1=true`, `enable_fused_mc2=2`, and `enable_shared_expert_dp=true` reproduce the performance-case MoE configuration. They require the matching CANN operators and software stack.
@@ -717,7 +717,7 @@ export HCCL_SOCKET_IFNAME="${nic_name}"
 
 export HCCL_BUFFSIZE=1024
 export HCCL_OP_EXPANSION_MODE=AIV
-export VLLM_USE_V2_MODEL_RUNNER=0
+export VLLM_USE_V2_MODEL_RUNNER=1
 export VLLM_USE_FASTOKENS=1
 export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
 export LD_LIBRARY_PATH="/usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake:${LD_LIBRARY_PATH:-}"
@@ -825,7 +825,7 @@ export HCCL_SOCKET_IFNAME="${nic_name}"
 
 export HCCL_BUFFSIZE=1024
 export HCCL_OP_EXPANSION_MODE=AIV
-export VLLM_USE_V2_MODEL_RUNNER=0
+export VLLM_USE_V2_MODEL_RUNNER=1
 export VLLM_USE_FASTOKENS=1
 export VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS=0
 export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
@@ -942,8 +942,8 @@ C8 KV cache is part of this performance recipe, not just a model-name convention
 
 - Use the same compatible W4A8C8 checkpoint revision, tokenizer, chat template, quantization metadata, and `--kv-cache-dtype mxfp8` on P and D.
 - Use `MooncakeConnectorV2` and the standard Pull proxy in [Section 5.7](#57-request-forwarding).
-- Use a v0.30.0 MRv1 build containing the MXFP8 KV-scale fix in [#19017](https://github.com/vllm-project/vllm-ascend/pull/19017), merged into `releases/v0.30.0` as `14c6c3f43`, or a build with an equivalent verified fix.
-- Keep `VLLM_USE_V2_MODEL_RUNNER=0`, the P DP1/TP8 and D DP2/TP4 topology, and the connector topology consistent.
+- Use a build containing the MXFP8 KV-scale fix in [#19017](https://github.com/vllm-project/vllm-ascend/pull/19017), merged into `releases/v0.30.0` as `14c6c3f43`, or a build with an equivalent verified fix.
+- Keep `VLLM_USE_V2_MODEL_RUNNER=1`, the P DP1/TP8 and D DP2/TP4 topology, and the connector topology consistent.
 - Keep MTP settings identical on P and D. To run an MTP-off comparison, remove `--speculative-config` from both commands.
 - Prefix caching and asynchronous scheduling are enabled on both nodes for this performance case.
 - Prefill uses eager execution. Decode uses `FULL_DECODE_ONLY` and enables NPU graph extensions.
@@ -993,7 +993,7 @@ export HCCL_SOCKET_IFNAME="${nic_name}"
 
 export HCCL_BUFFSIZE=1024
 export HCCL_OP_EXPANSION_MODE=AIV
-export VLLM_USE_V2_MODEL_RUNNER=0
+export VLLM_USE_V2_MODEL_RUNNER=1
 export VLLM_USE_FASTOKENS=1
 export ASCEND_RT_VISIBLE_DEVICES="$1"
 
@@ -1052,7 +1052,7 @@ export HCCL_SOCKET_IFNAME="${nic_name}"
 export HCCL_BUFFSIZE=1024
 export HCCL_OP_EXPANSION_MODE=AIV
 
-export VLLM_USE_V2_MODEL_RUNNER=0
+export VLLM_USE_V2_MODEL_RUNNER=1
 export VLLM_USE_FASTOKENS=1
 export VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS=0
 export ASCEND_RT_VISIBLE_DEVICES="$1"
@@ -1092,7 +1092,7 @@ Common Issues Tip: If the decode node fails to initialize, check that `--tensor-
 
 **Key parameters for PD disaggregation:**
 
-- `VLLM_USE_V2_MODEL_RUNNER=0` selects Model Runner V1 on both nodes.
+- `VLLM_USE_V2_MODEL_RUNNER=1` selects Model Runner V2 on both nodes.
 - `--distributed-executor-backend mp` uses multiprocessing on each node for the local workers.
 - Prefill uses `--data-parallel-size 1` and `--tensor-parallel-size 8`. This creates 1 DP group with TP8.
 - Decode uses `--data-parallel-size 1` and `--tensor-parallel-size 8`. This creates 1 DP group with TP8.
