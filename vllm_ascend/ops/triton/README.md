@@ -99,6 +99,7 @@ configuration rather than the runner input or sampling interface.
 | [fla/chunk_scaled_dot_kkt.py](fla/chunk_scaled_dot_kkt.py) | Linear attention |
 | [fla/cumsum.py](fla/cumsum.py) | Linear attention |
 | [fla/fused_qkvzba_split_reshape.py](fla/fused_qkvzba_split_reshape.py) | Linear attention |
+| [fla/fused_gdn_prepare.py](fla/fused_gdn_prepare.py) | Packed GDN preparation; [operator documentation](docs/fused_gdn_prepare.md) |
 | [fla/l2norm.py](fla/l2norm.py) | Linear attention |
 | [fla/layernorm_guard.py](fla/layernorm_guard.py) | Linear attention |
 | [fla/solve_tril.py](fla/solve_tril.py) | Linear attention |
