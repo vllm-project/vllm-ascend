@@ -172,8 +172,11 @@ def run_resolver(
     host_rows=64,
     attention_capacity=0,
     attention_block_stride=0,
+    valid_rows=None,
 ):
     device = torch.device("npu:0")
+    if isinstance(valid_rows, int):
+        valid_rows = torch.tensor([valid_rows], dtype=torch.int32, device=device)
     tensors = [t.npu() for t in (logical_cpu, hot_table_cpu, requests_cpu, states_cpu, source_cpu, resident_cpu)]
     logical, hot_table, requests, states, source, resident = tensors
     dgi = dgi_cpu.npu()
@@ -201,7 +204,7 @@ def run_resolver(
         states,
         source,
         resident,
-        None,
+        valid_rows,
         dgi,
         lru,
         output,
@@ -1168,14 +1171,25 @@ def test_hisparse_resolve_residency_union_overflow_preserves_state(capture, comp
         # the same pass as the slot assignment.
         ("vector_union", 480, 10240, 8, 512, 2, False),
         ("vector_union_all_cold", 480, 10240, 8, 512, 0, False),
-        # cols > 512 no longer fits the scratch: per-token scalar translation.
-        ("scalar_union", 768, 10240, 8, 512, 0, False),
-        # hot below the union scratch (kPageBase + 2 * 512 words) also falls back.
+        # A wider table no longer falls back to the scalar walk: the union loads
+        # it in windows. At this Hot a window holds 3072 columns, so 4096 takes
+        # two and 8192 (a 1M-token context) takes three. 3073 leaves a single
+        # column in the last window, and 4099 over a 1024-column budget leaves
+        # three, which also covers the width rounding.
+        ("vector_union_wide_two_windows", 4096, 10240, 8, 512, 0, False),
+        ("vector_union_wide_partial_window", 3073, 10240, 8, 512, 0, False),
+        ("vector_union_wide_1m_context", 8192, 10240, 8, 512, 0, False),
+        ("vector_union_wide_eight_windows", 8192, 6144, 8, 512, 0, False),
+        ("vector_union_wide_odd_tail", 4099, 6144, 8, 512, 0, False),
+        # The Python glue passes None for the miss mask, so the kwarg no longer
+        # selects the Publish pass; this row only proves it is still accepted.
+        ("vector_union_wide_mask_kwarg", 4096, 10240, 8, 512, 0, True),
+        # A Hot that leaves no room for even one eight-column window falls back.
         ("small_hot", 480, 4096, 4, 512, 0, False),
         # hot too small for the emit tiles: the separate Publish pass runs.
         ("tiny_hot", 480, 512, 2, 128, 0, False),
-        # miss_mask needs the finished hash, so it always keeps the Publish pass.
-        ("miss_mask", 480, 10240, 8, 512, 0, True),
+        # The kwarg is accepted but ignored by the glue, which always passes None.
+        ("mask_kwarg", 480, 10240, 8, 512, 0, True),
         # The vector union needs whole 64-lane mask repeats: SFA top-k is a
         # multiple of 128, so 128 keeps the vector path and 17 must fall back.
         ("vector_topk128", 480, 10240, 8, 128, 0, False),
@@ -1188,11 +1202,12 @@ def test_hisparse_resolve_residency_union_overflow_preserves_state(capture, comp
 def test_hisparse_resolve_residency_union_tiles_and_fallbacks(
     label, cols, hot, rows, topk, resident_pages, miss_mask, mapped_host_allocator
 ):
-    """Check the vector union against the oracle, and every scalar fallback.
+    """Check the vector union, its page windows, and every scalar fallback.
 
     The production geometry (block 128, a 480-page request row) is what the
-    vector union is tuned for; the other rows of the matrix disable one guard at
-    a time so the fallbacks stay bit-identical to the vector path.
+    vector union is tuned for. The wide rows load the page table in several
+    masked windows; the rest disable one guard at a time so the fallbacks stay
+    bit-identical to the vector path.
     """
     block, width, requests_count = 128, 16, 2
     rows_per_request = rows // requests_count
