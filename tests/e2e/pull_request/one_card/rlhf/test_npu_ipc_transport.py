@@ -18,7 +18,7 @@
 
 The real trainer, worker, reducer and reload lifecycle exchange exact tensors.
 This is transport coverage; it does not claim model-inference or LoRA coverage.
-Both the current shared chunk protocol and the released compatibility path run.
+Only the matching upstream device-hook protocol is supported.
 """
 
 import gc
@@ -32,7 +32,6 @@ import torch_npu  # noqa: F401
 from vllm.config import DeviceConfig, VllmConfig
 from vllm.config.weight_transfer import WeightTransferConfig
 from vllm.distributed.weight_transfer import ModuleSource
-from vllm.distributed.weight_transfer.ipc_engine import IPCWeightTransferEngine
 
 from vllm_ascend.distributed.weight_transfer.npu_ipc_engine import (
     NPUIPCTrainerInitInfo,
@@ -41,7 +40,6 @@ from vllm_ascend.distributed.weight_transfer.npu_ipc_engine import (
 )
 
 _TIMEOUT_SECONDS = 120
-_SHARED_IPC = hasattr(IPCWeightTransferEngine, "_get_device_key")
 
 
 class _TensorSink(torch.nn.Module):
@@ -191,8 +189,7 @@ def test_native_npu_ipc_inherits_transport_across_processes(packed):
             NPUIPCTrainerInitInfo(
                 rank=0,
                 packed=packed,
-                # Modern IPC splits the wide tensor; legacy IPC needs it whole.
-                packed_buffer_size_bytes=32 if _SHARED_IPC else 256,
+                packed_buffer_size_bytes=32,
             ),
             client=client,
             source=ModuleSource(module),
@@ -210,7 +207,7 @@ def test_native_npu_ipc_inherits_transport_across_processes(packed):
                 with torch.no_grad():
                     for tensor in module.parameters():
                         tensor.add_(17)
-        if packed and _SHARED_IPC:
+        if packed:
             for updates in client.rounds:
                 assert len(updates) > 1
                 assert updates[0]["ipc_handles"]

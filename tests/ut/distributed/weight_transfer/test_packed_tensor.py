@@ -14,34 +14,28 @@
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 #
-"""Unit tests for packed tensor utilities (HCCL broadcast + NPU IPC).
+"""Unit tests for packed HCCL broadcast utilities.
 
 These tests run on CPU hosts by stubbing out the NPU-specific primitives
 (``torch.npu.Stream``, ``torch.npu.current_stream``, ``torch.npu.synchronize``)
-and ``reduce_tensor``/``rebuild_npu_tensor``. The packing/unpacking logic
+The packing/unpacking logic
 itself (``torch.cat``/``torch.split``/``view``) runs on real CPU tensors so
 data correctness is verified end-to-end.
 """
 
 from __future__ import annotations
 
-import sys
 import types
 import weakref
 from contextlib import contextmanager
-from typing import Any
 from unittest.mock import MagicMock, patch
 
 import pytest
 import torch
-from vllm.distributed.weight_transfer.packed_tensor import PackedIpcChunk
 
 from vllm_ascend.distributed.weight_transfer.packed_tensor import (
-    DEFAULT_PACKED_BUFFER_SIZE_BYTES,
     packed_broadcast_consumer,
     packed_broadcast_producer,
-    packed_npu_ipc_consumer,
-    packed_npu_ipc_producer,
 )
 
 _MODULE = "vllm_ascend.distributed.weight_transfer.packed_tensor"
@@ -357,249 +351,11 @@ def test_packed_broadcast_consumer_handles_multiple_dtypes():
 
 
 # ---------------------------------------------------------------------------
-# packed_npu_ipc_producer
 # ---------------------------------------------------------------------------
 
 
-def _install_fake_reduce_tensor():
-    """Patch ``reduce_tensor`` to return a sentinel func + fake args tuple.
-
-    Returns ``(patcher, args_sentinel)`` so tests can assert what got stored.
-    """
-    args_sentinel = ("uuid", "size", 0, 0, 0, 0, 7, None)
-    fake_reduce = MagicMock(return_value=("rebuild_func", args_sentinel))
-    patcher = patch(f"{_MODULE}.reduce_tensor", fake_reduce)
-    return patcher, args_sentinel
-
-
-def test_packed_npu_ipc_producer_single_chunk():
-    """A small tensor fits in one chunk; one dict is yielded."""
-    patcher, args_sentinel = _install_fake_reduce_tensor()
-    with patcher:
-        tensor = torch.full((4,), 1.5, dtype=torch.float32)
-        chunks = list(
-            packed_npu_ipc_producer(
-                iterator=iter([("w", tensor)]),
-                npu_uuid="node-0",
-                post_iter_func=lambda item: item[1],
-                buffer_size_bytes=DEFAULT_PACKED_BUFFER_SIZE_BYTES,
-            )
-        )
-
-    assert len(chunks) == 1
-    chunk = chunks[0]
-    assert chunk.names == ["w"]
-    assert chunk.shapes == [[4]]
-    assert chunk.dtype_names == ["float32"]
-    assert chunk.tensor_sizes == [16]  # 4 float32 = 16 bytes
-    assert chunk.ipc_handle == {"node-0": args_sentinel}
-
-
-def test_packed_npu_ipc_producer_empty_iterator():
-    """An empty iterator yields no chunks."""
-    patcher, _ = _install_fake_reduce_tensor()
-    with patcher:
-        chunks = list(
-            packed_npu_ipc_producer(
-                iterator=iter([]),
-                npu_uuid="node-0",
-                post_iter_func=lambda item: item[1],
-                buffer_size_bytes=DEFAULT_PACKED_BUFFER_SIZE_BYTES,
-            )
-        )
-    assert chunks == []
-
-
-def test_packed_npu_ipc_producer_splits_when_exceeding_buffer():
-    """Tensors that don't fit together are split across multiple chunks."""
-    patcher, args_sentinel = _install_fake_reduce_tensor()
-    with patcher:
-        tensors = [
-            ("a", torch.full((4,), 1.0, dtype=torch.float32)),  # 16 bytes
-            ("b", torch.full((4,), 2.0, dtype=torch.float32)),  # 16 bytes
-        ]
-        chunks = list(
-            packed_npu_ipc_producer(
-                iterator=iter(tensors),
-                npu_uuid="node-0",
-                post_iter_func=lambda item: item[1],
-                buffer_size_bytes=20,  # Only one 16-byte tensor fits per chunk
-            )
-        )
-
-    assert len(chunks) == 2
-    # First chunk holds the first tensor only.
-    assert chunks[0].names == ["a"]
-    assert chunks[0].tensor_sizes == [16]
-    # Second chunk holds the second tensor.
-    assert chunks[1].names == ["b"]
-    assert chunks[1].tensor_sizes == [16]
-    # Every chunk carries the same IPC handle (reusable single buffer).
-    assert all(c.ipc_handle == {"node-0": args_sentinel} for c in chunks)
-
-
-def test_packed_npu_ipc_producer_raises_when_single_tensor_exceeds_buffer():
-    """A single tensor larger than the buffer raises ``ValueError``."""
-    patcher, _ = _install_fake_reduce_tensor()
-    with patcher:
-        big = torch.zeros(64, dtype=torch.float32)  # 256 bytes
-        with pytest.raises(ValueError, match="exceeds buffer_size_bytes"):
-            list(
-                packed_npu_ipc_producer(
-                    iterator=iter([("big", big)]),
-                    npu_uuid="node-0",
-                    post_iter_func=lambda item: item[1],
-                    buffer_size_bytes=128,
-                )
-            )
-
-
-def test_packed_npu_ipc_producer_dtype_name_extraction():
-    """``dtype_names`` strips the ``torch.`` prefix from ``str(dtype)``."""
-    patcher, _ = _install_fake_reduce_tensor()
-    with patcher:
-        tensors = [
-            ("f16", torch.zeros(1, dtype=torch.float16)),
-            ("bf16", torch.zeros(1, dtype=torch.bfloat16)),
-            ("i64", torch.zeros(1, dtype=torch.int64)),
-        ]
-        chunks = list(
-            packed_npu_ipc_producer(
-                iterator=iter(tensors),
-                npu_uuid="node-0",
-                post_iter_func=lambda item: item[1],
-                buffer_size_bytes=DEFAULT_PACKED_BUFFER_SIZE_BYTES,
-            )
-        )
-    assert len(chunks) == 1
-    assert chunks[0].dtype_names == ["float16", "bfloat16", "int64"]
-
-
 # ---------------------------------------------------------------------------
-# packed_npu_ipc_consumer
 # ---------------------------------------------------------------------------
-
-
-def _install_fake_rebuild_npu_tensor(rebuilt: torch.Tensor):
-    """Install a fake ``torch_npu.multiprocessing.reductions`` module."""
-    fake_mod = types.ModuleType("torch_npu.multiprocessing.reductions")
-    fake_mod.rebuild_npu_tensor = MagicMock(return_value=rebuilt)  # type: ignore[attr-defined]
-    return patch.dict(
-        "sys.modules",
-        {
-            "torch_npu.multiprocessing": types.ModuleType("torch_npu.multiprocessing"),
-            "torch_npu.multiprocessing.reductions": fake_mod,
-        },
-    )
-
-
-def test_packed_npu_ipc_consumer_roundtrip():
-    """Consumer rebuilds the buffer and slices it into the named tensors."""
-    # Two float32 tensors of size 2 and 3 → 8 + 12 = 20 bytes
-    a = torch.tensor([1.0, 2.0], dtype=torch.float32)
-    b = torch.tensor([3.0, 4.0, 5.0], dtype=torch.float32)
-    packed = torch.cat([a.view(torch.uint8).view(-1), b.view(torch.uint8).view(-1)])
-    # ``rebuild_npu_tensor`` returns the packed buffer; consumer slices it.
-    patcher = _install_fake_rebuild_npu_tensor(packed)
-    fake_args = ("uuid", 20, 0, 0, 0, 0, 7, None)
-
-    with patcher:
-        weights = packed_npu_ipc_consumer(
-            ipc_handle={"node-0": fake_args},
-            physical_npu_id="node-0",
-            names=["a", "b"],
-            shapes=[[2], [3]],
-            dtype_names=["float32", "float32"],
-            tensor_sizes=[8, 12],
-            device_index=2,
-        )
-
-    assert len(weights) == 2
-    assert weights[0][0] == "a"
-    assert torch.equal(weights[0][1], a)
-    assert weights[1][0] == "b"
-    assert torch.equal(weights[1][1], b)
-
-
-def test_packed_npu_ipc_consumer_missing_uuid_raises():
-    """An unknown NPU UUID raises ``ValueError``."""
-    packed = torch.zeros(4, dtype=torch.uint8)
-    patcher = _install_fake_rebuild_npu_tensor(packed)
-    with patcher, pytest.raises(ValueError, match="IPC handle not found for NPU UUID"):
-        packed_npu_ipc_consumer(
-            ipc_handle={"other-node": ("x",)},
-            physical_npu_id="node-0",
-            names=["w"],
-            shapes=[[1]],
-            dtype_names=["float32"],
-            tensor_sizes=[4],
-            device_index=0,
-        )
-
-
-def test_packed_npu_ipc_consumer_overwrites_device_index():
-    """The receiver's ``device_index`` is written into ``args[6]`` before rebuild."""
-    packed = torch.zeros(4, dtype=torch.uint8)
-    patcher = _install_fake_rebuild_npu_tensor(packed)
-
-    sender_args = ("uuid", 4, 0, 0, 0, 0, 7, None)
-    with patcher:
-        packed_npu_ipc_consumer(
-            ipc_handle={"node-0": sender_args},
-            physical_npu_id="node-0",
-            names=["w"],
-            shapes=[[1]],
-            dtype_names=["float32"],
-            tensor_sizes=[4],
-            device_index=5,
-        )
-        # Capture the args passed to rebuild_npu_tensor while patch is active.
-        fake_mod = sys.modules["torch_npu.multiprocessing.reductions"]
-        fake_rebuild = fake_mod.rebuild_npu_tensor  # type: ignore[attr-defined]
-        rebuilt_args = fake_rebuild.call_args.args
-    # Index 6 must be overwritten from 7 → 5.
-    assert rebuilt_args[6] == 5
-
-
-def test_packed_npu_ipc_consumer_clones_slices():
-    """Consumer returns independent storage so producer reuse is safe."""
-    packed = torch.zeros(8, dtype=torch.uint8)
-    patcher = _install_fake_rebuild_npu_tensor(packed)
-    # Args tuple must have at least 7 elements (index 6 = device_index).
-    fake_args = ("uuid", 8, 0, 0, 0, 0, 0)
-    with patcher:
-        weights = packed_npu_ipc_consumer(
-            ipc_handle={"node-0": fake_args},
-            physical_npu_id="node-0",
-            names=["a", "b"],
-            shapes=[[1], [1]],
-            dtype_names=["float32", "float32"],
-            tensor_sizes=[4, 4],
-            device_index=0,
-        )
-    # Each returned tensor must have its own storage (not a view into ``packed``).
-    assert weights[0][1].storage().data_ptr() != weights[1][1].storage().data_ptr()
-
-
-def test_packed_npu_ipc_consumer_truncates_to_content_size():
-    """Consumer slices the rebuilt buffer to ``sum(tensor_sizes)``."""
-    # Packed buffer has 16 bytes, but only 4 are meaningful.
-    packed = torch.zeros(16, dtype=torch.uint8)
-    packed[:4].copy_(torch.tensor([1.0], dtype=torch.float32).view(torch.uint8).view(-1))
-    patcher = _install_fake_rebuild_npu_tensor(packed)
-    # Args tuple must have at least 7 elements (index 6 = device_index).
-    fake_args = ("uuid", 16, 0, 0, 0, 0, 0)
-    with patcher:
-        weights = packed_npu_ipc_consumer(
-            ipc_handle={"node-0": fake_args},
-            physical_npu_id="node-0",
-            names=["w"],
-            shapes=[[1]],
-            dtype_names=["float32"],
-            tensor_sizes=[4],
-            device_index=0,
-        )
-    assert torch.equal(weights[0][1].cpu(), torch.tensor([1.0], dtype=torch.float32))
 
 
 # ---------------------------------------------------------------------------
@@ -777,191 +533,33 @@ def test_packed_broadcast_roundtrip_single_tensor():
 
 
 # ---------------------------------------------------------------------------
-# packed_npu_ipc_producer — additional coverage
 # ---------------------------------------------------------------------------
 
 
-def test_packed_npu_ipc_producer_post_iter_func_transforms_tensor():
-    """``post_iter_func`` may transform the tensor before packing in IPC mode."""
-    patcher, _ = _install_fake_reduce_tensor()
-    with patcher as reduce_mock:
-        original = torch.full((4,), 1.0, dtype=torch.float32)
-        chunks = list(
-            packed_npu_ipc_producer(
-                iterator=iter([("w", original)]),
-                npu_uuid="node-0",
-                post_iter_func=lambda item: item[1] * 3,
-                buffer_size_bytes=DEFAULT_PACKED_BUFFER_SIZE_BYTES,
-            )
-        )
-
-    assert len(chunks) == 1
-    # Chunk metadata records the original shape/dtype, not the transformed one.
-    assert chunks[0].shapes == [[4]]
-    assert chunks[0].dtype_names == ["float32"]
-    packed = reduce_mock.call_args.args[0][:16].view(torch.float32)
-    assert torch.equal(packed, original * 3)
-
-
-def test_packed_npu_ipc_producer_handles_multiple_tensors_one_chunk():
-    """Multiple small tensors fit in one IPC chunk and are yielded together."""
-    patcher, _ = _install_fake_reduce_tensor()
-    with patcher:
-        a = torch.full((2,), 1.0, dtype=torch.float32)
-        b = torch.full((3,), 2.0, dtype=torch.float32)
-        chunks = list(
-            packed_npu_ipc_producer(
-                iterator=iter([("a", a), ("b", b)]),
-                npu_uuid="node-0",
-                post_iter_func=lambda item: item[1],
-                buffer_size_bytes=DEFAULT_PACKED_BUFFER_SIZE_BYTES,
-            )
-        )
-
-    assert len(chunks) == 1
-    assert chunks[0].names == ["a", "b"]
-    assert chunks[0].shapes == [[2], [3]]
-    assert chunks[0].tensor_sizes == [8, 12]
-
-
-def test_packed_npu_ipc_producer_ipc_handle_key_matches_npu_uuid():
-    """The ``ipc_handle`` dict key equals the ``npu_uuid`` argument.
-
-    The consumer looks up the handle by its own UUID, so the producer must
-    store it under the UUID it was given.
-    """
-    patcher, args_sentinel = _install_fake_reduce_tensor()
-    with patcher:
-        chunks = list(
-            packed_npu_ipc_producer(
-                iterator=iter([("w", torch.zeros(4, dtype=torch.float32))]),
-                npu_uuid="physical-npu-7",
-                post_iter_func=lambda item: item[1],
-                buffer_size_bytes=DEFAULT_PACKED_BUFFER_SIZE_BYTES,
-            )
-        )
-
-    assert "physical-npu-7" in chunks[0].ipc_handle
-    assert chunks[0].ipc_handle["physical-npu-7"] == args_sentinel
-
-
 # ---------------------------------------------------------------------------
-# packed_npu_ipc_consumer — additional coverage
 # ---------------------------------------------------------------------------
 
 
-def test_packed_npu_ipc_consumer_restores_multi_dim_shape():
-    """Consumer restores a 2-D tensor from the packed IPC buffer."""
-    original = torch.arange(6, dtype=torch.float32).reshape(2, 3)
-    packed = original.view(torch.uint8).view(-1).clone()
-    patcher = _install_fake_rebuild_npu_tensor(packed)
-    fake_args = ("uuid", 24, 0, 0, 0, 0, 0)
-
-    with patcher:
-        weights = packed_npu_ipc_consumer(
-            ipc_handle={"node-0": fake_args},
-            physical_npu_id="node-0",
-            names=["w"],
-            shapes=[[2, 3]],
-            dtype_names=["float32"],
-            tensor_sizes=[24],
-            device_index=0,
-        )
-
-    assert weights[0][1].shape == (2, 3)
-    assert torch.equal(weights[0][1].cpu(), original)
-
-
-def test_packed_npu_ipc_consumer_handles_bfloat16():
-    """Consumer correctly restores bfloat16 tensors via ``getattr(torch, dn)``."""
-    original = torch.tensor([1.5, -0.5, 2.25], dtype=torch.bfloat16)
-    packed = original.view(torch.uint8).view(-1).clone()
-    patcher = _install_fake_rebuild_npu_tensor(packed)
-    fake_args = ("uuid", 6, 0, 0, 0, 0, 0)
-
-    with patcher:
-        weights = packed_npu_ipc_consumer(
-            ipc_handle={"node-0": fake_args},
-            physical_npu_id="node-0",
-            names=["w"],
-            shapes=[[3]],
-            dtype_names=["bfloat16"],
-            tensor_sizes=[6],
-            device_index=0,
-        )
-
-    assert weights[0][1].dtype == torch.bfloat16
-    assert torch.equal(weights[0][1].cpu(), original)
-
-
-def test_packed_npu_ipc_consumer_clones_each_slice_independently():
-    """Every returned tensor has distinct storage, even sharing one buffer.
-
-    The producer reuses one IPC buffer across chunks, so the consumer must
-    ``.clone()`` each slice to give it independent storage.
-    """
-    packed = torch.zeros(12, dtype=torch.uint8)
-    patcher = _install_fake_rebuild_npu_tensor(packed)
-    fake_args = ("uuid", 12, 0, 0, 0, 0, 0)
-
-    with patcher:
-        weights = packed_npu_ipc_consumer(
-            ipc_handle={"node-0": fake_args},
-            physical_npu_id="node-0",
-            names=["a", "b", "c"],
-            shapes=[[1], [1], [1]],
-            dtype_names=["float32", "float32", "float32"],
-            tensor_sizes=[4, 4, 4],
-            device_index=0,
-        )
-
-    ptrs = [w[1].storage().data_ptr() for w in weights]
-    assert len(set(ptrs)) == 3, f"expected 3 distinct storage ptrs, got {ptrs}"
-
-
-def _assert_packed_roundtrip(backend, tensors, buffer_size):
+def _assert_packed_roundtrip(tensors, buffer_size):
     """Check values and ownership after overwriting the transport storage."""
     buffers: list[torch.Tensor] = []
     received: list[tuple[str, torch.Tensor]] = []
-    if backend == "hccl":
-        group = _make_group_mock()
-        packed_broadcast_producer(iter(tensors), group, 0, lambda item: item[1], buffer_size)
-        payloads = iter(call.args[0].clone() for call in group.broadcast.call_args_list)
-        chunk_count = group.broadcast.call_count
+    group = _make_group_mock()
+    packed_broadcast_producer(iter(tensors), group, 0, lambda item: item[1], buffer_size)
+    payloads = iter(call.args[0].clone() for call in group.broadcast.call_args_list)
+    chunk_count = group.broadcast.call_count
 
-        def receive(packed, **kwargs):
-            packed.copy_(next(payloads))
-            buffers.append(packed)
+    def receive(packed, **kwargs):
+        packed.copy_(next(payloads))
+        buffers.append(packed)
 
-        packed_broadcast_consumer(
-            iter((name, (list(tensor.shape), tensor.dtype)) for name, tensor in tensors),
-            types.SimpleNamespace(broadcast=receive),
-            0,
-            received.extend,
-            buffer_size,
-        )
-    else:
-
-        def export(tensor):
-            buffers.append(tensor)
-            return None, (0,) * 7
-
-        with patch(f"{_MODULE}.reduce_tensor", side_effect=export):
-            chunks = list(packed_npu_ipc_producer(iter(tensors), "node-0", lambda item: item[1], buffer_size))
-        assert len(chunks) == 1  # IPC callers here deliberately fit in one chunk.
-        chunk_count = len(chunks)
-        chunk = chunks[0]
-        assert isinstance(chunk, PackedIpcChunk)
-        with _install_fake_rebuild_npu_tensor(buffers[0]):
-            received = packed_npu_ipc_consumer(
-                chunk.ipc_handle,
-                "node-0",
-                chunk.names,
-                chunk.shapes,
-                chunk.dtype_names,
-                chunk.tensor_sizes,
-                0,
-            )
+    packed_broadcast_consumer(
+        iter(((name, (list(tensor.shape), tensor.dtype)) for name, tensor in tensors)),
+        types.SimpleNamespace(broadcast=receive),
+        0,
+        received.extend,
+        buffer_size,
+    )
     for buffer in buffers:
         buffer.zero_()
     assert [name for name, _ in received] == [name for name, _ in tensors]
@@ -980,15 +578,7 @@ def test_packed_broadcast_roundtrip_mixed_scalar_empty_and_unaligned(buffer_size
         ("empty", torch.empty(0, 3, dtype=torch.float16)),
         ("matrix", torch.arange(6, dtype=torch.bfloat16).reshape(2, 3).t()),
     ]
-    _assert_packed_roundtrip("hccl", tensors, buffer_size)
-
-
-@pytest.mark.parametrize("empty_only", [False, True])
-def test_packed_ipc_roundtrip_scalar_empty_and_unaligned(empty_only):
-    tensors = [("empty", torch.empty(0, 3, dtype=torch.float16))]
-    if not empty_only:
-        tensors = [("byte", torch.tensor([7], dtype=torch.uint8)), ("scalar", torch.tensor(2.5)), *tensors]
-    _assert_packed_roundtrip("ipc", tensors, 128)
+    _assert_packed_roundtrip(tensors, buffer_size)
 
 
 @pytest.mark.parametrize("producer", [False, True])
@@ -1077,69 +667,15 @@ def test_packed_consumer_waits_for_receive_before_unpacking():
     assert events == ["receive", "ready", "load"]
 
 
-@pytest.mark.parametrize("backend", ["hccl", "ipc"])
 @pytest.mark.parametrize("change", ["dtype", "numel", "none"])
-def test_packed_producer_rejects_invalid_callback_result(backend, change):
+def test_packed_producer_rejects_invalid_callback_result(change):
     original = torch.ones(2)
     returned = {"dtype": original.to(torch.int32), "numel": original[:1], "none": None}[change]
     message = " returned.*expected dtype=.*numel=2" if change in ("dtype", "numel") else ".*must return a torch.Tensor"
     group = _make_group_mock()
-    patcher, _ = _install_fake_reduce_tensor()
-    with patcher, pytest.raises(ValueError, match=f"post_iter_func{message}"):
-        if backend == "hccl":
-            packed_broadcast_producer(iter([("w", original)]), group, 0, lambda _: returned, 16)
-        else:
-            list(packed_npu_ipc_producer(iter([("w", original)]), "node-0", lambda _: returned, 16))
+    with pytest.raises(ValueError, match=f"post_iter_func{message}"):
+        packed_broadcast_producer(iter([("w", original)]), group, 0, lambda _: returned, 16)
     group.broadcast.assert_not_called()
-
-
-@pytest.mark.parametrize(
-    "changes",
-    [
-        {"device_index": -1},
-        {"device_index": None},
-        {"device_index": "0"},
-        {"device_index": 0.0},
-        {"device_index": True},
-        {"ipc_handle": {"node-0": (0,)}},
-        {"dtype_names": ["not_a_dtype"]},
-        {"dtype_names": ["Tensor"]},
-        {"names": ["w", "extra"]},
-        {"shapes": [[-1]]},
-        {"tensor_sizes": [-4]},
-        {"tensor_sizes": [8]},
-    ],
-    ids=[
-        "device",
-        "none-device",
-        "string-device",
-        "float-device",
-        "bool-device",
-        "handle",
-        "unknown-dtype",
-        "non-dtype",
-        "lengths",
-        "shape",
-        "negative-size",
-        "byte-count",
-    ],
-)
-def test_packed_ipc_consumer_rejects_invalid_metadata_before_rebuild(changes):
-    kwargs: dict[str, Any] = dict(
-        ipc_handle={"node-0": (0,) * 7},
-        physical_npu_id="node-0",
-        names=["w"],
-        shapes=[[1]],
-        dtype_names=["float32"],
-        tensor_sizes=[4],
-        device_index=0,
-    )
-    kwargs.update(changes)
-    with _install_fake_rebuild_npu_tensor(torch.zeros(8, dtype=torch.uint8)):
-        rebuild = sys.modules["torch_npu.multiprocessing.reductions"].rebuild_npu_tensor
-        with pytest.raises(ValueError):
-            packed_npu_ipc_consumer(**kwargs)
-        rebuild.assert_not_called()
 
 
 def test_packed_hccl_consumer_rejects_negative_shape_before_broadcast():
@@ -1204,15 +740,7 @@ def test_packed_drain_failure_keeps_storage_and_original_error(producer, logging
     assert not log_error.call_args.kwargs
 
 
-def test_packed_ipc_consumer_rejects_payload_larger_than_rebuilt_buffer():
-    with (
-        _install_fake_rebuild_npu_tensor(torch.zeros(3, dtype=torch.uint8)),
-        pytest.raises(ValueError, match="metadata declares 4 bytes, buffer has 3"),
-    ):
-        packed_npu_ipc_consumer({"node-0": (0,) * 7}, "node-0", ["w"], [[1]], ["float32"], [4], 0)
-
-
-@pytest.mark.parametrize("backend", ["hccl-producer", "hccl-consumer", "ipc-producer"])
+@pytest.mark.parametrize("backend", ["hccl-producer", "hccl-consumer"])
 @pytest.mark.parametrize("capacity", [0, -1])
 def test_packed_transfer_rejects_nonpositive_capacity(backend, capacity):
     with pytest.raises(ValueError, match="positive"):
@@ -1220,8 +748,6 @@ def test_packed_transfer_rejects_nonpositive_capacity(backend, capacity):
             packed_broadcast_producer(iter([]), _make_group_mock(), 0, lambda item: item[1], capacity)
         elif backend == "hccl-consumer":
             packed_broadcast_consumer(iter([]), _make_group_mock(), 0, MagicMock(), capacity)
-        else:
-            list(packed_npu_ipc_producer(iter([]), "node-0", lambda item: item[1], capacity))
 
 
 @pytest.mark.parametrize("producer", [False, True])
@@ -1368,12 +894,10 @@ def test_packed_drain_failure_does_not_retain_unused_empty_slots(producer):
     assert pinned == []
 
 
-@pytest.mark.parametrize("backend", ["hccl", "ipc"])
-def test_packed_roundtrip_odd_bf16_followed_by_unaligned_int64(backend):
+def test_packed_roundtrip_odd_bf16_followed_by_unaligned_int64():
     tensors = [("bf16", torch.tensor([1, 2, 3], dtype=torch.bfloat16)), ("i64", torch.tensor([7], dtype=torch.int64))]
-    # Three BF16 elements put int64 at byte offset 6, not divisible by 8.
     assert tensors[0][1].numel() * tensors[0][1].element_size() == 6
-    assert _assert_packed_roundtrip(backend, tensors, 32) == 1
+    assert _assert_packed_roundtrip(tensors, 32) == 1
 
 
 @pytest.mark.parametrize("buffer_size", [4, 32], ids=["full-chunk", "final-chunk"])
