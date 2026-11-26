@@ -3,13 +3,10 @@
 
 """Tests for the Ascend draft LM head quantization formats.
 
-The formats are declared through NPUPlatform.get_draft_lm_head_quantization_methods
-(the upstream platform hook); the factories live in
-vllm_ascend.quantization.draft_lm_head. These tests exercise the Ascend
-side only, so they pass on any vLLM version with or without the hook.
+The Ascend configuration declares the formats for the shared-head copy.
+Its format selection and factories can be tested on older vLLM pairings.
 """
 
-from importlib import import_module
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -18,7 +15,11 @@ import torch
 
 from vllm_ascend.device.hardware_profile import DeviceAdaptorFamily
 from vllm_ascend.ops.vocab_parallel_embedding import AscendParallelLMHead, VocabParallelMode, VocabParallelPlan
-from vllm_ascend.platform import NPUPlatform
+from vllm_ascend.quantization.draft_lm_head import (
+    AscendDraftLMHeadQuantizationConfig,
+    create_int8_lm_head_method,
+    create_mxfp8_lm_head_method,
+)
 from vllm_ascend.quantization.method_adapters import AscendEmbeddingMethod
 from vllm_ascend.quantization.methods.registry import get_scheme_class
 from vllm_ascend.quantization.methods.w8a8.w8a8_dynamic import AscendW8A8DynamicLmHeadMethod
@@ -36,36 +37,23 @@ def _profile(family):
     return SimpleNamespace(device_adaptor_family=family)
 
 
-def _resolve(qualname: str):
-    module_name, attr_name = qualname.rsplit(".", 1)
-    return getattr(import_module(module_name), attr_name)
-
-
 @pytest.mark.parametrize(
-    "family,expected_formats",
+    "family,expected_factories",
     [
-        (DeviceAdaptorFamily.FP8_OPTIMIZED, {"fp8", "nvfp4", "mxfp8"}),
-        (DeviceAdaptorFamily.STANDARD, {"fp8", "nvfp4", "int8"}),
-        (DeviceAdaptorFamily.COMPATIBILITY, {"fp8", "nvfp4"}),
+        (DeviceAdaptorFamily.FP8_OPTIMIZED, {"mxfp8": create_mxfp8_lm_head_method}),
+        (DeviceAdaptorFamily.STANDARD, {"int8": create_int8_lm_head_method}),
+        (DeviceAdaptorFamily.COMPATIBILITY, {}),
     ],
 )
-def test_platform_formats_follow_hardware_family(family, expected_formats):
-    """The hook declares the Ascend format of the device family and claims
-    the core formats with None; every non-None qualifier resolves to a
-    callable factory."""
-    with patch("vllm_ascend.platform.get_current_hardware_profile", return_value=_profile(family)):
-        methods = NPUPlatform.get_draft_lm_head_quantization_methods()
-    assert set(methods) == expected_formats
-    for format_name, qualname in methods.items():
-        if qualname is None:
-            continue
-        factory = _resolve(qualname)
-        assert callable(factory), format_name
+def test_config_formats_follow_hardware_family(family, expected_factories):
+    with patch("vllm_ascend.quantization.draft_lm_head.get_current_hardware_profile", return_value=_profile(family)):
+        methods = AscendDraftLMHeadQuantizationConfig._draft_lm_head_methods()
+    assert methods == {"fp8": None, "nvfp4": None} | {
+        name: f"{factory.__module__}.{factory.__name__}" for name, factory in expected_factories.items()
+    }
 
 
 def test_mxfp8_factory_builds_lm_head_method():
-    from vllm_ascend.quantization.draft_lm_head import create_mxfp8_lm_head_method
-
     with (
         patch(
             "vllm_ascend.quantization.methods.w8a8.w8a8_mxfp8.get_current_vllm_config",
@@ -84,28 +72,9 @@ def test_mxfp8_factory_builds_lm_head_method():
 
 
 def test_int8_factory_builds_lm_head_method():
-    from vllm_ascend.quantization.draft_lm_head import create_int8_lm_head_method
-
     method = create_int8_lm_head_method()
     assert type(method) is AscendEmbeddingMethod
     assert type(method.quant_method) is AscendW8A8DynamicLmHeadMethod
-
-
-@pytest.mark.parametrize("format_name", ["fp8", "nvfp4"])
-def test_core_formats_are_claimed_with_none(format_name):
-    """The core formats are claimed with None in every family: recognized
-    names with no Ascend execution path, rejected by the core factory."""
-    for family in (
-        DeviceAdaptorFamily.FP8_OPTIMIZED,
-        DeviceAdaptorFamily.STANDARD,
-        DeviceAdaptorFamily.COMPATIBILITY,
-    ):
-        with patch(
-            "vllm_ascend.platform.get_current_hardware_profile",
-            return_value=_profile(family),
-        ):
-            methods = NPUPlatform.get_draft_lm_head_quantization_methods()
-        assert methods[format_name] is None
 
 
 @pytest.mark.parametrize(

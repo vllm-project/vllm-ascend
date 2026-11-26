@@ -362,24 +362,6 @@ class NPUPlatform(Platform):
         return "vllm_ascend.compilation.compiler_interface.AscendCompiler"
 
     @classmethod
-    def get_draft_lm_head_quantization_methods(cls) -> dict[str, str | None]:
-        """Ascend formats for the drafter's quantized LM head copy.
-
-        Maps each `draft_lm_head_quantization` format to the qualified name
-        of a zero-argument factory in vllm_ascend.quantization.draft_lm_head,
-        or None for a recognized name with no Ascend execution path; the
-        core "fp8"/"nvfp4" formats are claimed with None. 310P (COMPATIBILITY
-        family) has no online LM head quantization support yet.
-        """
-        family = get_current_hardware_profile().device_adaptor_family
-        methods: dict[str, str | None] = {"fp8": None, "nvfp4": None}
-        if family is DeviceAdaptorFamily.FP8_OPTIMIZED:
-            methods["mxfp8"] = "vllm_ascend.quantization.draft_lm_head.create_mxfp8_lm_head_method"
-        elif family is DeviceAdaptorFamily.STANDARD:
-            methods["int8"] = "vllm_ascend.quantization.draft_lm_head.create_int8_lm_head_method"
-        return methods
-
-    @classmethod
     def get_punica_wrapper(cls) -> str:
         return "vllm_ascend.lora.punica_npu.PunicaWrapperNPU"
 
@@ -795,6 +777,14 @@ class NPUPlatform(Platform):
         if vllm_config.model_config is None:
             logger.warning("Model config is missing. Skipping Ascend-specific config updates.")
             return
+
+        spec_config = vllm_config.speculative_config
+        if getattr(spec_config, "draft_lm_head_quantization", None) is not None and hasattr(
+            vllm_config, "draft_lm_head_quantization_config"
+        ):
+            vllm_config.draft_lm_head_quantization_config = (
+                "vllm_ascend.quantization.draft_lm_head.AscendDraftLMHeadQuantizationConfig"
+            )
 
         _normalize_sleep_backend(vllm_config.model_config)
 
