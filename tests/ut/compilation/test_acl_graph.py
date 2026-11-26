@@ -1118,3 +1118,30 @@ def test_mla_dcp_provider_rejects_missing_decode_metadata(scope):
     provider = MLADCPParamProvider("layer", scope, 2)
     with pytest.raises(AssertionError):
         provider.resolve({"layer": SimpleNamespace(decode=None)})
+
+
+def test_graph_update_task_bind_preserves_fields_and_does_not_mutate_template():
+    op = MagicMock()
+    provider = MagicMock()
+    handle = object()
+    event = object()
+    captured_kwargs = {"seq_lens": [1, 2], "static_arg": 42}
+    task = GraphUpdateTask(
+        operation=op,
+        kwargs=captured_kwargs,
+        provider=provider,
+        provider_index=3,
+        handle=handle,
+        event=event,
+    )
+
+    bound = task.bind({"seq_lens": [5, 6], "unused_key": 99})
+
+    assert bound is not task
+    assert bound.operation is op
+    assert bound.provider is provider
+    assert bound.provider_index == 3
+    assert bound.handle is handle
+    assert bound.event is event
+    assert bound.kwargs == {"seq_lens": [5, 6], "static_arg": 42}
+    assert task.kwargs == {"seq_lens": [1, 2], "static_arg": 42}

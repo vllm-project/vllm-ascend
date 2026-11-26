@@ -65,6 +65,25 @@ class AscendInputBuffers(InputBuffers):
         # None keeps the default layout for other dummy/capture paths.
         self.dummy_num_tokens: int | None = None
 
+        # Pre-allocated read-only defaults for common non-draft steps so
+        # _prepare_inputs_impl avoids per-step host/device allocations.
+        self.default_cu_num_logits_np: np.ndarray = np.arange(max_num_reqs + 1, dtype=np.int32)
+        self.default_cu_num_logits_np.flags.writeable = False
+        self.default_cu_num_logits: torch.Tensor = torch.arange(
+            max_num_reqs + 1,
+            dtype=torch.int32,
+            device=device,
+        )
+        self.default_expanded_local_pos: torch.Tensor = torch.zeros(
+            max_num_reqs,
+            dtype=torch.int32,
+            device=device,
+        )
+        # Cached immutable idx_mapping device tensor reused across consecutive
+        # decode steps with identical active request slots.
+        self._cached_idx_mapping_np: np.ndarray | None = None
+        self._cached_idx_mapping_gpu: torch.Tensor | None = None
+
 
 @dataclass
 class AscendInputBatch(InputBatch):

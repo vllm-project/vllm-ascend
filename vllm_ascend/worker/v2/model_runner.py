@@ -969,7 +969,20 @@ class NPUModelRunner(GPUModelRunner):
 
         num_scheduled_tokens_np = batch_req_state.num_scheduled_tokens
         idx_mapping_np = batch_req_state.idx_mapping_np
-        idx_mapping = async_copy_to_gpu(idx_mapping_np, device=self.device)
+        cached_idx_np = self.input_buffers._cached_idx_mapping_np
+        cached_idx_gpu = self.input_buffers._cached_idx_mapping_gpu
+        if (
+            cached_idx_np is not None
+            and cached_idx_gpu is not None
+            and cached_idx_np.shape == idx_mapping_np.shape
+            and cached_idx_np.dtype == idx_mapping_np.dtype
+            and np.array_equal(cached_idx_np, idx_mapping_np)
+        ):
+            idx_mapping = cached_idx_gpu
+        else:
+            idx_mapping = async_copy_to_gpu(idx_mapping_np, device=self.device)
+            self.input_buffers._cached_idx_mapping_np = idx_mapping_np.copy()
+            self.input_buffers._cached_idx_mapping_gpu = idx_mapping
         num_reqs = len(req_ids)
 
         num_valid_tokens = num_scheduled_tokens_np
@@ -997,10 +1010,10 @@ class NPUModelRunner(GPUModelRunner):
             # No draft token scheduled (common case).
             total_num_draft_tokens = 0
             total_num_logits = num_reqs
-            cu_num_logits_np = np.arange(num_reqs + 1, dtype=np.int32)
-            cu_num_logits = torch.arange(num_reqs + 1, device=self.device, dtype=torch.int32)
+            cu_num_logits_np = self.input_buffers.default_cu_num_logits_np[: num_reqs + 1]
+            cu_num_logits = self.input_buffers.default_cu_num_logits[: num_reqs + 1]
             expanded_idx_mapping = idx_mapping
-            expanded_local_pos = torch.zeros(num_reqs, dtype=torch.int32, device=self.device)
+            expanded_local_pos = self.input_buffers.default_expanded_local_pos[:num_reqs]
         else:
             num_draft_tokens_per_req = np.fromiter(
                 (len(draft_tokens.get(req_id, ())) for req_id in req_ids),
@@ -1590,10 +1603,18 @@ class NPUModelRunner(GPUModelRunner):
 
         # Without a CPU consumer, retain the upstream optimistic upper bound.
         # prepare_pos_seq_lens still reads exact rejection-corrected NPU state.
-        for i, req_id in enumerate(req_ids):  # type: ignore
-            req_index = self.req_states.req_id_to_index[req_id]
-            num_computed_tokens = self.req_states.num_computed_tokens_cpu[req_index]
-            self.input_buffers.seq_lens_cpu[i] = num_computed_tokens + num_scheduled_tokens[req_id]
+        num_reqs = len(req_ids)
+        if num_reqs == 0:
+            return
+        req_id_to_index = self.req_states.req_id_to_index
+        req_indices = np.fromiter((req_id_to_index[req_id] for req_id in req_ids), dtype=np.intp, count=num_reqs)
+        scheduled_tokens = np.fromiter(
+            (num_scheduled_tokens[req_id] for req_id in req_ids),
+            dtype=np.int32,
+            count=num_reqs,
+        )
+        num_computed_np = self.req_states.num_computed_tokens_cpu.numpy()
+        np.add(num_computed_np[req_indices], scheduled_tokens, out=self.input_buffers.seq_lens_np[:num_reqs])
 
     def _pad_query_start_loc_for_fia(
         self,

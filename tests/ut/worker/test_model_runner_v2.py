@@ -3053,3 +3053,57 @@ def test_load_failure_closes_unpublished_host_owners(published_model, cleanup_fa
             runner.shutdown()
         assert first.close_host_offload.call_count == 2
         assert runner._shared_engram_shutdown_pending == []
+
+
+def test_prepare_inputs_caches_idx_mapping_and_reuses_default_non_draft_views():
+    runner, scheduler_output, batch_req_state, batch_desc = _prepare_inputs_runner()
+    copy_calls = []
+
+    def tracking_copy(src, device=None, out=None):
+        copy_calls.append((src.shape, out is not None))
+        return _fake_async_copy(src, device=device, out=out)
+
+    with (
+        patch("vllm_ascend.worker.v2.model_runner.async_copy_to_gpu", side_effect=tracking_copy),
+        patch("vllm_ascend.worker.v2.model_runner.build_attn_state", return_value="attn"),
+        patch("vllm_ascend.worker.v2.model_runner.prepare_prefill_inputs"),
+        patch("vllm_ascend.worker.v2.model_runner.prepare_pos_seq_lens"),
+        patch(
+            "vllm_ascend.worker.v2.model_runner.combine_sampled_and_draft_tokens",
+            return_value=torch.tensor([0, 1], dtype=torch.int32),
+        ),
+        patch("vllm_ascend.worker.v2.model_runner.update_cos_sin"),
+    ):
+        batch1 = runner._prepare_inputs_impl(scheduler_output, batch_req_state, batch_desc)
+        first_copy_count = len(copy_calls)
+        batch2 = runner._prepare_inputs_impl(scheduler_output, batch_req_state, batch_desc)
+        second_copy_count = len(copy_calls)
+
+        # Mutate idx_mapping_np: must invalidate cache and allocate a fresh GPU tensor.
+        batch_req_state.idx_mapping_np = np.array([1, 0], dtype=np.int32)
+        batch3 = runner._prepare_inputs_impl(scheduler_output, batch_req_state, batch_desc)
+        third_copy_count = len(copy_calls)
+
+    assert batch2.idx_mapping is batch1.idx_mapping
+    # Step 2 only copies query_start_loc (out is not None), not idx_mapping.
+    assert second_copy_count - first_copy_count == 1
+    assert copy_calls[-3][1] is True
+    # Step 3 copies both idx_mapping and query_start_loc without overwriting batch1's tensor.
+    assert third_copy_count - second_copy_count == 2
+    assert batch3.idx_mapping is not batch1.idx_mapping
+    assert batch1.idx_mapping.tolist() == [0, 1]
+    assert batch3.idx_mapping.tolist() == [1, 0]
+    # Non-draft views come from pre-allocated buffers.
+    assert batch1.cu_num_logits.data_ptr() == runner.input_buffers.default_cu_num_logits.data_ptr()
+    assert batch1.expanded_local_pos.data_ptr() == runner.input_buffers.default_expanded_local_pos.data_ptr()
+    assert not batch1.cu_num_logits_np.flags.writeable
+
+
+def test_update_seq_lens_cpu_vectorized_handles_empty_and_permuted_reqs():
+    runner, scheduler_output, _batch_req_state, _batch_desc = _prepare_inputs_runner()
+    runner._update_seq_lens_cpu(scheduler_output, [])
+    np.testing.assert_array_equal(runner.input_buffers.seq_lens_np[:2], np.array([0, 0], dtype=np.int32))
+
+    scheduler_output.num_scheduled_tokens = {"r0": 5, "r1": 7}
+    runner._update_seq_lens_cpu(scheduler_output, ["r1", "r0"])
+    np.testing.assert_array_equal(runner.input_buffers.seq_lens_cpu[:2].numpy(), np.array([9, 6], dtype=np.int32))
