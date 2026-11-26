@@ -491,6 +491,14 @@ class NPUWorker(GPUWorker):
         # and refreshes the model runner once the target weights are in place.
         super()._start_weight_update()
 
+    def export_eplb_placement(self, path: str, workload: str) -> dict[str, Any]:
+        """Export a committed MRv2 deployment via an all-worker offline RPC."""
+        if not self.vllm_config.use_v2_model_runner or not self.vllm_config.parallel_config.enable_eplb:
+            raise ValueError("Deployment export requires Model Runner V2 and --enable-eplb")
+        if self.vllm_config.parallel_config.pipeline_parallel_size != 1:
+            raise ValueError("Deployment export currently requires PP=1")
+        return self.model_runner.eplb.export_placement(path, workload)
+
     def shutdown(self) -> None:
         model = getattr(getattr(self, "model_runner", None), "model", None)
         close_engram = getattr(model, "close_shared_engram", None)

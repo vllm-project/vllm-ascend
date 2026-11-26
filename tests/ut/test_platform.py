@@ -670,6 +670,33 @@ class TestNPUPlatform(TestBase):
         with patch.dict("os.environ", {}, clear=True):
             _validate_eplb_config(vllm_config)
 
+    def test_validate_eplb_config_resolves_auto_placement_scope(self):
+        for kv_role, expected in (
+            ("kv_producer", "prefill"),
+            ("kv_consumer", "decode"),
+            ("kv_both", "mixed"),
+        ):
+            with self.subTest(kv_role=kv_role):
+                vllm_config = self.mock_vllm_config()
+                vllm_config.parallel_config.enable_eplb = True
+                vllm_config.kv_transfer_config = SimpleNamespace(kv_role=kv_role)
+                vllm_config.additional_config = {"eplb_config": {"placement_scope": "auto"}}
+
+                _validate_eplb_config(vllm_config)
+
+                self.assertEqual(
+                    vllm_config.additional_config["eplb_config"]["placement_scope"],
+                    expected,
+                )
+
+    def test_validate_eplb_config_rejects_invalid_placement_scope(self):
+        vllm_config = self.mock_vllm_config()
+        vllm_config.parallel_config.enable_eplb = True
+        vllm_config.additional_config = {"eplb_config": {"placement_scope": "invalid"}}
+
+        with self.assertRaisesRegex(ValueError, "placement_scope"):
+            _validate_eplb_config(vllm_config)
+
     def test_validate_eplb_config_warns_and_forces_async_mode(self):
         vllm_config = self.mock_vllm_config()
         vllm_config.parallel_config.enable_eplb = True

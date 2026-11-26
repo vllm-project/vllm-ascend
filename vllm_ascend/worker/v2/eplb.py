@@ -5,6 +5,10 @@ from typing import Any
 
 import torch
 import torch.nn as nn
+from vllm.config import get_current_vllm_config
+from vllm.config.utils import hash_config_cached
+from vllm.distributed import get_ep_group
+from vllm.logger import logger
 from vllm.model_executor.models.interfaces import (
     SupportsMultiModal,
     is_mixture_of_experts,
@@ -14,8 +18,22 @@ from vllm.v1.worker.gpu.eplb_utils import EPLBController
 from vllm_ascend.ascend_config import EplbConfig
 from vllm_ascend.device.hardware_profile import MoECommPolicy, get_current_hardware_profile
 from vllm_ascend.distributed.eplb.eplb_state import AscendEplbState
+from vllm_ascend.distributed.eplb.placement import build_placement_metadata
+from vllm_ascend.distributed.eplb.placement_runtime import (
+    collective_call,
+    export_committed_placement,
+    install_placement,
+    read_placement_collectively,
+)
 from vllm_ascend.distributed.eplb.policy.factory import create_eplb_policy
 from vllm_ascend.patch.platform.patch_eplb import resolve_ascend_eplb_communicator
+
+
+def _config_hash(config: Any) -> str:
+    try:
+        return hash_config_cached(config)
+    except AttributeError:
+        return config.compute_hash()
 
 
 def is_eplb_load_collection_phase_matched(
@@ -46,7 +64,25 @@ class AscendEPLBController(EPLBController):
     ) -> None:
         super().__init__(parallel_config, device)
         ascend_eplb_config = ascend_eplb_config or EplbConfig()
+        self.mode = ascend_eplb_config.mode
+        self.placement_scope = ascend_eplb_config.placement_scope
+        eplb_config = getattr(parallel_config, "eplb_config", None)
+        self._static_observability_enabled = self.mode == "static" and bool(
+            getattr(eplb_config, "log_balancedness", False)
+        )
+        self.placement_path = ascend_eplb_config.placement_path
+        self.export_path = ascend_eplb_config.export_path
+        self.export_workload = ascend_eplb_config.export_workload
+        self._placement_model_config: Any | None = None
+        self._draft_placement_model_config: Any | None = None
+        self._draft_parallel_config: Any | None = None
         self.load_collection_phase = ascend_eplb_config.load_collection_phase
+        try:
+            current_vllm_config = get_current_vllm_config()
+            kv_transfer_config = getattr(current_vllm_config, "kv_transfer_config", None)
+            self._kv_role = getattr(kv_transfer_config, "kv_role", None)
+        except Exception:
+            self._kv_role = None
         # The communicator choice needs one binding class on every EPLB rank,
         # so reach a group consensus before the policy or state is built.
         stair_config = (
@@ -63,8 +99,156 @@ class AscendEPLBController(EPLBController):
     def prepare_load(self) -> None:
         self.state = None
         self._has_registered_models = False
+        self._placement_model_config = None
+        self._draft_placement_model_config = None
+        self._draft_parallel_config = None
         if self.parallel_config.enable_eplb:
             self.state = AscendEplbState(self.parallel_config, self.device, self.eplb_policy)
+            self.state.static_mode = self.mode == "static"
+            self.state.load_collection_phase = self.load_collection_phase
+
+    def maybe_register_model(self, model: nn.Module, model_config: Any, *args, **kwargs) -> bool:
+        added = super().maybe_register_model(model, model_config, *args, **kwargs)
+        if added:
+            self._placement_model_config = model_config
+            if self.state is not None:
+                if self.mode == "static":
+                    self.state.set_static_recording_enabled(False, force=True)
+                    if self.state.should_record_tensor is not None:
+                        self.state.should_record_tensor.fill_(False)
+                model_state = self.state.model_states.get(_config_hash(model_config))
+                if model_state is not None:
+                    first_layer = model_state.physical_to_logical_map[0][:8].tolist()
+                    logger.info(
+                        "EPLB target model registered: model=%s moe_layers=%d physical_to_logical(layer0, first8)=%s",
+                        model_config.model,
+                        len(model_state.physical_to_logical_map),
+                        first_layer,
+                    )
+        return added
+
+    def _placement_metadata(self) -> dict[str, Any]:
+        model_state = self._target_placement_model_state()
+        if self.state is None or self._placement_model_config is None:
+            raise ValueError("EPLB deployments require exactly one registered target MoE model")
+        return build_placement_metadata(
+            model_state.model,
+            self._placement_model_config,
+            self.parallel_config,
+            get_ep_group().world_size,
+            self.placement_scope,
+        )
+
+    def _target_placement_model_state(self) -> Any:
+        if self.state is None or self._placement_model_config is None:
+            raise ValueError("EPLB deployments require exactly one registered target MoE model")
+        model_hash = _config_hash(self._placement_model_config)
+        model_state = self.state.model_states.get(model_hash)
+        if model_state is None:
+            raise ValueError("EPLB deployment export could not locate the registered target model state")
+        return model_state
+
+    def _draft_placement_model_state(self) -> Any:
+        if self.state is None or self._draft_placement_model_config is None:
+            raise ValueError("EPLB deployment export could not locate the registered draft model state")
+        model_hash = _config_hash(self._draft_placement_model_config)
+        model_state = self.state.model_states.get(model_hash)
+        if model_state is None:
+            raise ValueError("EPLB deployment export could not locate the registered draft model state")
+        return model_state
+
+    def _optional_draft_placement_metadata(self) -> dict[str, Any] | None:
+        if self._draft_placement_model_config is None:
+            return None
+        model_state = self._draft_placement_model_state()
+        parallel_config = self._draft_parallel_config or self.parallel_config
+        return build_placement_metadata(
+            model_state.model,
+            self._draft_placement_model_config,
+            parallel_config,
+            get_ep_group().world_size,
+            self.placement_scope,
+        )
+
+    def _placement_model_states(self) -> dict[str, Any]:
+        model_states = {"target": self._target_placement_model_state()}
+        if self._draft_placement_model_config is not None:
+            model_states["draft"] = self._draft_placement_model_state()
+        return model_states
+
+    def export_placement(
+        self,
+        path: str | None = None,
+        workload: str | None = None,
+    ) -> dict[str, Any]:
+        """Offline collective RPC: finish the active cycle and export its result."""
+        group = get_ep_group().cpu_group
+        metadata = collective_call(self._placement_metadata, group, "export metadata")
+        assert self.state is not None
+        path = path or self.export_path
+        workload = workload or self.export_workload
+        if path is None or not workload:
+            raise ValueError("EPLB export requires a path and non-empty workload description")
+        model_state = self._target_placement_model_state()
+        draft_metadata = collective_call(
+            self._optional_draft_placement_metadata,
+            group,
+            "draft export metadata",
+        )
+        draft_model_state = self._draft_placement_model_state() if draft_metadata is not None else None
+        return export_committed_placement(
+            self.state,
+            metadata,
+            path,
+            workload,
+            group,
+            model_state,
+            draft_metadata=draft_metadata,
+            draft_model_state=draft_model_state,
+        )
+
+    def maybe_start_async_loop(self, eplb_models_added: bool, load_dummy_weights: bool = False) -> None:
+        if self.mode != "static":
+            return super().maybe_start_async_loop(eplb_models_added, load_dummy_weights=load_dummy_weights)
+        if not eplb_models_added or load_dummy_weights:
+            return
+        group = get_ep_group().cpu_group
+        metadata = collective_call(self._placement_metadata, group, "static metadata")
+        draft_metadata = collective_call(
+            self._optional_draft_placement_metadata,
+            group,
+            "static draft metadata",
+        )
+        assert self.placement_path is not None and self.state is not None
+        placement = read_placement_collectively(
+            self.placement_path,
+            metadata,
+            group,
+            draft_metadata=draft_metadata,
+        )
+        install_placement(
+            self.state,
+            placement,
+            group,
+            torch.accelerator.current_stream(self.device),
+            model_states=self._placement_model_states(),
+        )
+        logger.info(
+            "Ascend static EPLB deployment installed: scope=%s sha256=%s layers=%d",
+            self.placement_scope,
+            placement.digest(),
+            len(placement.physical_to_logical),
+        )
+
+    def step(self, is_dummy: bool = False, is_profile: bool = False) -> None:
+        if self.mode == "static":
+            if self.state is not None and self._static_observability_enabled:
+                self.state.step_static_observability(
+                    is_dummy=is_dummy,
+                    is_profile=is_profile,
+                )
+            return
+        super().step(is_dummy=is_dummy, is_profile=is_profile)
 
     def set_batch_phase(self, batch_has_prefill: bool) -> None:
         self._load_collection_phase_matched = is_eplb_load_collection_phase_matched(
@@ -80,9 +264,65 @@ class AscendEPLBController(EPLBController):
     ) -> bool:
         # The upstream controller checks target EPLB, which can differ from
         # the replicated draft's setting.
-        if speculator is not None and not speculator.vllm_config.parallel_config.enable_eplb:
+        draft_vllm_config = getattr(speculator, "draft_vllm_config", None)
+        draft_parallel_config = getattr(draft_vllm_config, "parallel_config", None)
+        draft_enable_eplb = getattr(draft_parallel_config, "enable_eplb", None) if speculator is not None else None
+        if draft_enable_eplb is None and speculator is not None:
+            draft_enable_eplb = speculator.vllm_config.parallel_config.enable_eplb
+        if speculator is not None and not draft_enable_eplb:
+            logger.info(
+                "EPLB speculator registration skipped: draft enable_eplb=%s kv_role=%s",
+                bool(draft_enable_eplb),
+                self._kv_role,
+            )
             return False
-        return super().maybe_register_speculator(speculator, speculative_config, load_dummy_weights)
+        spec_method = getattr(speculative_config, "method", None)
+        logger.info(
+            "EPLB speculator candidate: mode=%s kv_role=%s spec_method=%s draft_enable_eplb=%s",
+            self.mode,
+            self._kv_role,
+            spec_method,
+            bool(draft_enable_eplb),
+        )
+        skip_draft_in_pd = (
+            self.mode == "dynamic" and self._kv_role == "kv_producer" and spec_method in ("mtp", "deepseek_mtp")
+        )
+        added = super().maybe_register_speculator(speculator, speculative_config, load_dummy_weights)
+        if added:
+            self._draft_placement_model_config = getattr(
+                speculative_config,
+                "draft_model_config",
+                None,
+            )
+            self._draft_parallel_config = draft_parallel_config
+        if added and self.state is not None:
+            if self.mode == "static":
+                self.state.set_static_recording_enabled(False, force=True)
+                if self.state.should_record_tensor is not None:
+                    self.state.should_record_tensor.fill_(False)
+            draft_model_config = getattr(speculative_config, "draft_model_config", None)
+            if draft_model_config is not None:
+                model_state = self.state.model_states.get(_config_hash(draft_model_config))
+                if model_state is not None:
+                    first_layer = model_state.physical_to_logical_map[0][:8].tolist()
+                    logger.info(
+                        "EPLB draft model registered: model=%s moe_layers=%d physical_to_logical(layer0, first8)=%s",
+                        draft_model_config.model,
+                        len(model_state.physical_to_logical_map),
+                        first_layer,
+                    )
+            if skip_draft_in_pd and draft_model_config is not None:
+                model_state = self.state.model_states.get(_config_hash(draft_model_config))
+                if model_state is not None:
+                    model_state.skip_dynamic_rebalance = True
+                    logger.info(
+                        "EPLB draft model marked static for PD producer: "
+                        "mode=%s kv_role=%s spec_method=%s; draft rebalance disabled.",
+                        self.mode,
+                        self._kv_role,
+                        spec_method,
+                    )
+        return added
 
     def prepare_forward(
         self,
@@ -91,7 +331,29 @@ class AscendEPLBController(EPLBController):
         ubatch_slices: list | None = None,
     ) -> None:
         state = self.state
-        if state is None or not self.parallel_config.enable_eplb:
+        if state is None:
+            return
+        if not self.parallel_config.enable_eplb:
+            return
+        if self.mode == "static":
+            if not self._static_observability_enabled:
+                state.set_static_recording_enabled(False)
+                if state.should_record_tensor is not None:
+                    state.should_record_tensor.fill_(False)
+                state._static_observation_due = False
+                state._is_load_sampling_step = False
+                state._should_collect_local_load = False
+                return
+            if state._static_observation_due and state._static_recording_enabled:
+                state.step_static_observability()
+            should_record = state.update_static_observation_schedule() and state.should_record_tensor is not None
+            state.set_static_recording_enabled(should_record)
+            if state.should_record_tensor is not None:
+                state.should_record_tensor.fill_(should_record)
+            if should_record and state.allgather_record_tensor is not None:
+                state.allgather_record_tensor.fill_(-1)
+            state._is_load_sampling_step = should_record
+            state._should_collect_local_load = should_record
             return
         supports_allgather = get_current_hardware_profile().moe_comm_policy is MoECommPolicy.CAPACITY_AND_WORLD_SIZE
         if not state.uses_custom_load_stats or supports_allgather:

@@ -286,11 +286,29 @@ class EplbConfig:
     # as prefill.
     load_collection_phase: str = "all"
     stair_config: StairConfig = dataclasses.field(default_factory=StairConfig)
+    # MRv2 only. Static retains EPLB routing but installs a deployment once,
+    # before profiling/capture, without runtime collection or rearrangement.
+    mode: Literal["dynamic", "static"] = "dynamic"
+    placement_scope: Literal["auto", "prefill", "decode", "mixed"] = "mixed"
+    placement_path: str | None = None
+    export_path: str | None = None
+    export_workload: str = "MRv2 dynamic EPLB deployment"
+    export_api_ports: list[int] = dataclasses.field(default_factory=list)
 
     @model_validator(mode="after")
     def _validate_config(self):
         if self.load_collection_phase not in ["all", "prefill", "decode"]:
             raise ValueError('load_collection_phase must be one of ["all", "prefill", "decode"]')
+        if self.mode == "static" and not self.placement_path:
+            raise ValueError("Static MRv2 EPLB requires eplb_config.placement_path")
+        if self.mode != "static" and self.placement_path is not None:
+            raise ValueError("eplb_config.placement_path requires mode='static'")
+        if self.export_path is not None:
+            if self.mode != "dynamic":
+                raise ValueError("eplb_config.export_path requires mode='dynamic'")
+            if not self.export_path:
+                raise ValueError("eplb_config.export_path must be a non-empty path")
+            os.makedirs(os.path.dirname(os.path.abspath(self.export_path)), exist_ok=True)
 
         return self
 

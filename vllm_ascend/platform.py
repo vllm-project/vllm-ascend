@@ -110,7 +110,16 @@ QWEN_FA3_TARGETS = frozenset(
         "Qwen3_5MoeForConditionalGeneration",
     }
 )
-_V2_EPLB_CONFIG_FIELDS = frozenset({"load_collection_phase", "stair_config"})
+_V2_EPLB_CONFIG_FIELDS = frozenset(
+    {
+        "load_collection_phase",
+        "stair_config",
+        "placement_scope",
+        "export_path",
+        "export_workload",
+        "export_api_ports",
+    }
+)
 _V2_STAIR_CONFIG_FIELDS = frozenset(StairConfig.__dataclass_fields__)
 
 _DEVICE_VISIBILITY_ENV_VAR = "ASCEND_RT_VISIBLE_DEVICES"
@@ -1280,6 +1289,24 @@ def _validate_eplb_config(vllm_config: VllmConfig) -> None:
     if not isinstance(eplb_config, dict):
         raise TypeError("additional_config.eplb_config must be a dictionary.")
 
+    if "placement_scope" in eplb_config:
+        placement_scope = eplb_config["placement_scope"]
+        if placement_scope == "auto":
+            kv_transfer_config = getattr(vllm_config, "kv_transfer_config", None)
+            kv_role = getattr(kv_transfer_config, "kv_role", None)
+            placement_scope = {
+                "kv_producer": "prefill",
+                "kv_consumer": "decode",
+                "kv_both": "mixed",
+            }.get(str(kv_role), "mixed")
+        if placement_scope not in ("prefill", "decode", "mixed"):
+            raise ValueError("eplb_config.placement_scope must be one of 'auto', 'prefill', 'decode' or 'mixed'")
+        eplb_config = dict(eplb_config)
+        eplb_config["placement_scope"] = placement_scope
+        additional_config = dict(additional_config)
+        additional_config["eplb_config"] = eplb_config
+        vllm_config.additional_config = additional_config
+
     unsupported_eplb_fields = sorted(set(eplb_config) - _V2_EPLB_CONFIG_FIELDS)
     stair_config = eplb_config.get("stair_config")
     unsupported_stair_fields = (
@@ -1325,6 +1352,11 @@ def _validate_eplb_config(vllm_config: VllmConfig) -> None:
             upstream_eplb_config.use_async = True
         if vllm_config.parallel_config.enable_elastic_ep:
             raise ValueError("Async EPLB is not supported with elastic EP on Ascend.")
+    elif {"placement_scope", "export_path", "export_workload", "export_api_ports"} & eplb_config.keys():
+        raise ValueError(
+            "placement_scope and EPLB export fields are only supported by Model Runner V2; "
+            "use eplb_heat_collection_stage with Model Runner V1."
+        )
 
 
 def _check_ascend_config(vllm_config: VllmConfig, ascend_config) -> None:

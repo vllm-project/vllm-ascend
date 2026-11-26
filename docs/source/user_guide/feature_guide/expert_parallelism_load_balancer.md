@@ -123,9 +123,10 @@ above deviate from them, and when to do the same:
   increase rearrangement frequency and trade stability for faster response.
 
 These fields may also be passed together as JSON through `--eplb-config`.
-They must not be placed in `--additional-config` for MRv2: the only MRv2 EPLB
-fields under `additional_config.eplb_config` are `load_collection_phase` and
-`stair_config`; any other field is rejected at startup.
+They must not be placed in `--additional-config` for MRv2: MRv2 fields under
+`additional_config.eplb_config` are `load_collection_phase`, `stair_config`,
+`mode`, `placement_scope`, `placement_path`, `export_path`, `export_workload`, and
+`export_api_ports`. Unsupported legacy fields are warned about and ignored.
 
 Ascend extends the upstream `policy` field without adding a second selector.
 For example, use `--eplb-config.policy default` to run the upstream policy;
@@ -191,6 +192,96 @@ vllm serve Qwen/Qwen3-30B-A3B \
   --enable-eplb \
   --additional-config '{"eplb_config":{"load_collection_phase":"prefill"}}'
 ```
+
+#### MRv2 Deployment Export and Static EPLB
+
+Dynamic EPLB remains the default. For a workload whose expert distribution is
+stable, calibrate dynamically and reuse the installed deployment at startup.
+The exported file contains placements and validation metadata, not weights.
+
+Run the offline calibration example with representative prompts (one prompt
+per line); adjust the window, rounds and traffic to obtain a useful deployment:
+
+```bash
+VLLM_USE_V2_MODEL_RUNNER=1 python examples/eplb/export_placement.py \
+  --model Qwen/Qwen3-30B-A3B \
+  --tensor-parallel-size 4 \
+  --num-redundant-experts 4 \
+  --prompts /data/calibration-prompts.txt \
+  --rounds 10 \
+  --output /shared/eplb/deployment.json \
+  --workload 'dataset=v1; input/output lengths and request concurrency; rounds=10'
+```
+
+Export finishes an active migration through the normal weight/map commit
+boundary before taking a cross-rank consistent snapshot. It does not force a
+new plan or guarantee calibration convergence. A short calibration may export
+the unchanged initial deployment. An existing offline `LLM` can use
+`llm.collective_rpc("export_eplb_placement", args=(path, workload_description))`
+after generation returns and before submitting more work. All EP ranks must
+enter together; externally managed DP engines must issue this concurrently.
+
+Restart with the same model/checkpoint, quantization, dtype, EP/TP/DP
+configuration and redundant-expert count:
+
+```bash
+VLLM_USE_V2_MODEL_RUNNER=1 vllm serve Qwen/Qwen3-30B-A3B \
+  --tensor-parallel-size 4 \
+  --enable-expert-parallel \
+  --enable-eplb \
+  --eplb-config '{"num_redundant_experts":4}' \
+  --additional-config '{"eplb_config":{"mode":"static","placement_path":"/shared/eplb/deployment.json"}}'
+```
+
+| Ascend field | Default | Meaning |
+| --- | --- | --- |
+| `mode` | `dynamic` | `dynamic` runs ordinary MRv2 EPLB; `static` installs a saved deployment once. |
+| `placement_scope` | `mixed` | `prefill`, `decode`, `mixed`, or `auto`. `auto` resolves from `kv_role`. |
+| `placement_path` | unset | Required for `static`; every participating rank must be able to read the file. |
+
+For separated P/D deployment, use `placement_scope=prefill` on the P node and
+`placement_scope=decode` on the D node. Each role exports and imports its own
+deployment file:
+
+```text
+P node:
+  placement_scope=prefill
+  prefill_deployment.json
+
+D node:
+  placement_scope=decode
+  decode_deployment.json
+```
+
+For PD mixed deployment, keep `placement_scope=mixed` and use one shared
+deployment file.
+
+Static mode keeps expert-replica routing enabled. It loads existing checkpoint
+weights, performs one exact initialization-time installation before profiling
+and graph capture, and does not start the dynamic migration worker or record
+runtime load. It retains compatibility buffers in this version. Setting
+`--eplb-config.use_async false` does not select static mode.
+
+Static-mode load observability is disabled by default. Temporarily enabling
+`--eplb-config.log_balancedness true` records a local per-EP-rank snapshot at
+the configured `step_interval`; it does not enter a cross-EP device collective
+from the serving forward path, so data-parallel prefill engines can advance
+independently.
+
+Initial export/static support requires PP=1 and one target MoE model. When a
+registered MoE draft enables EPLB, the version 3 deployment file also stores
+the draft placement, and static startup installs the target and draft
+placements together. MTP remains supported when the draft disables EPLB and
+redundant draft experts. Files are validated against the runtime; MRv1
+expert-map JSON files cannot be used here. The same model identifier and
+revision are required; a structural fingerprint does not detect overwritten
+checkpoint contents under an unchanged name. Static installation retains the
+existing hardware, weight-layout and communicator constraints. Benchmark
+disabled, static and dynamic modes with the same traffic and record which
+workload generated the deployment.
+
+See the [deployment design](../../developer_guide/Design_Documents/mrv2_eplb_placement.md)
+for transaction ordering, invariants and testing requirements.
 
 #### MRv2 Constraints
 

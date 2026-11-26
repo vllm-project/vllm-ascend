@@ -105,7 +105,10 @@ class TestAscendEPLBController(unittest.TestCase):
                     model=nn.Linear(2, 2),
                     set_eplb_state=MagicMock(),
                 )
-                draft_config = SimpleNamespace(model="draft")
+                draft_config = SimpleNamespace(
+                    model="draft",
+                    compute_hash=MagicMock(return_value="draft"),
+                )
                 with patch("vllm.v1.worker.gpu.eplb_utils.get_mixture_of_experts_model", return_value=speculator.model):
                     added = controller.maybe_register_speculator(
                         speculator, SimpleNamespace(draft_model_config=draft_config), False
@@ -123,7 +126,10 @@ class TestAscendEPLBController(unittest.TestCase):
                     speculator.set_eplb_state.assert_not_called()
 
                     target = nn.Linear(2, 2)
-                    model_config = SimpleNamespace(model="target")
+                    model_config = SimpleNamespace(
+                        model="target",
+                        compute_hash=MagicMock(return_value="target"),
+                    )
                     with patch("vllm.v1.worker.gpu.eplb_utils.get_mixture_of_experts_model", return_value=target):
                         added = controller.maybe_register_model(target, model_config)
                     controller.state.add_model.assert_called_once_with(target, model_config)

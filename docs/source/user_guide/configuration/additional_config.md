@@ -148,7 +148,8 @@ Both warmups run on a background thread during weight loading. The worker waits 
 
 **eplb_config**
 
-Accepts `load_collection_phase` and `stair_config`. Configure upstream EPLB
+Accepts `load_collection_phase`, `stair_config`, and MRv2 deployment export
+fields. Configure upstream EPLB
 through `--enable-eplb` and `--eplb-config`. Ascend uses the STAIR policy by
 default and moves expert weights asynchronously over HIXL when it is available
 on every EPLB rank, falling back to Gloo CPU staging otherwise. Select
@@ -161,6 +162,9 @@ for the advanced STAIR fields and their defaults.
 | ---- | ---- | ------- | ----------- |
 | `load_collection_phase` | str | `"all"` | Select `"all"`, `"prefill"`, or `"decode"` load submission. Only effective with the STAIR policy; a value other than `"all"` requires `--enable-eplb`. Any batch containing a prefill request is classified entirely as prefill. |
 | `stair_config` | dict | `{}` | Advanced STAIR policy tuning. See the [EPLB tuning suggestions table](../feature_guide/expert_parallelism_load_balancer.md#tuning-suggestions) for all fields, defaults, and ranges. |
+| `export_path` | str | unset | Optional committed-deployment output path. Enables dynamic EPLB deployment export on shutdown and via the HTTP endpoint. |
+| `export_workload` | str | `"MRv2 dynamic EPLB deployment"` | Calibration workload description stored in the deployment file. |
+| `export_api_ports` | list[int] | `[]` | API-server ports used for concurrent DP-aware export on shutdown. |
 
 **scheduler_config**
 

@@ -1,0 +1,4 @@
+pr: 22893
+entries:
+  - category: feature
+    text: Added collective offline export of committed Model Runner V2 EPLB deployments, including model and parallel-configuration validation and calibration workload metadata.
