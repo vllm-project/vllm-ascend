@@ -449,9 +449,7 @@ class AscendDSAV41Impl:
             else (None, None)
         )
         if hidden_states.shape[0] and self.multistream_dsv4_dsa_overlap:
-            torch.npu.super_kernel_scope_begin(None)
             q, qr = self._multistream_qkv(attn, hidden_states, cos, sin, local_metadata.swa)
-            torch.npu.super_kernel_scope_end(None)
         else:
             if hidden_states.shape[0]:
                 qr = attn.q_norm(attn.wq_a(hidden_states))
@@ -552,6 +550,7 @@ class AscendDSAV41Impl:
         share_quant = type(q_scheme) is type(kv_scheme) and wq_a._has_communication == wkv._has_communication
         # Part 1: Q_a matmul (Cube) overlaps independent KV quantization (Vector).
         q_quant, q_scale = wq_a.quantize(hidden_states)
+        torch.npu.super_kernel_scope_begin(None)
         kv_quant_done = None
         if share_quant:
             kv_quant, kv_scale = q_quant, q_scale
@@ -587,6 +586,7 @@ class AscendDSAV41Impl:
                 self._write_swa_cache(attn, swa_metadata, kv.squeeze(1))
         q = wq_b.matmul(q_b_quant, q_b_scale, bias=attn.wq_b.bias).unflatten(-1, (-1, attn.head_dim))
         main_stream.wait_stream(aux_stream)
+        torch.npu.super_kernel_scope_end(None)
         if write_cache_on_main:
             self._write_swa_cache(attn, swa_metadata, kv.squeeze(1))
         return q, qr

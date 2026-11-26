@@ -2771,9 +2771,7 @@ class AscendDSAImpl(AttentionImplBase[Any]):
                 scatter_attention_compressed_kv=scatter_attention_compressed_kv,
                 aux_stream=dsv4_dsa_overlap_stream() if self.multistream_dsv4_dsa_overlap else None,
             )
-            if self.multistream_dsv4_dsa_overlap:
-                torch.npu.super_kernel_scope_begin(None)
-            indexer_output = self.indexer(
+            return self.indexer(
                 hidden_states=hidden_states,
                 qr=qr,
                 kv_cache=kv_cache,
@@ -2783,9 +2781,6 @@ class AscendDSAImpl(AttentionImplBase[Any]):
                 qr_pertoken_scale=qr_pertoken_scale,
                 write_cache=write_cache,
             )
-            if self.multistream_dsv4_dsa_overlap:
-                torch.npu.super_kernel_scope_end(None)
-            return indexer_output
 
         if not write_cache:
             return None

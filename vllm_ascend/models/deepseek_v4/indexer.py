@@ -447,6 +447,7 @@ class DeepseekV4Indexer(nn.Module):
         if self.skip_topk:
             topk_indices = self._get_cached_topk_indices(num_tokens)
         elif aux_stream is not None:
+            torch.npu.super_kernel_scope_begin(None)
             indexer_q = self._cv_compute_query_and_update_cache_multistream(
                 hidden_states,
                 qr,
@@ -469,6 +470,7 @@ class DeepseekV4Indexer(nn.Module):
                     compress_slot_mapping,
                 ),
             )
+            torch.npu.super_kernel_scope_end(None)
         else:
             topk_indices = self._select_topk_serial(
                 hidden_states,
