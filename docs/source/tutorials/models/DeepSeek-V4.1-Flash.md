@@ -878,78 +878,11 @@ vLLM Ascend revision.
 
     #### 5.2.1.1 Prepare the DP Launcher
 
-    Save the following script as `launch_online_dp.py` on both nodes. It divides
-    the node's visible devices among local DP ranks and starts one vLLM process per
-    rank.
-
-    ```python
-    import argparse
-    import multiprocessing
-    import os
-    import subprocess
-    import sys
-
-
-    def parse_args():
-        parser = argparse.ArgumentParser()
-        parser.add_argument("--dp-size", type=int, required=True)
-        parser.add_argument("--tp-size", type=int, default=1)
-        parser.add_argument("--pcp-size", type=int, default=1)
-        parser.add_argument("--dp-size-local", type=int, default=-1)
-        parser.add_argument("--dp-rank-start", type=int, default=0)
-        parser.add_argument("--dp-address", type=str, required=True)
-        parser.add_argument("--dp-rpc-port", type=str, default="12345")
-        parser.add_argument("--vllm-start-port", type=int, default=9000)
-        return parser.parse_args()
-
-
-    args = parse_args()
-    dp_size = args.dp_size
-    tp_size = args.tp_size
-    pcp_size = args.pcp_size
-    dp_size_local = args.dp_size if args.dp_size_local == -1 else args.dp_size_local
-
-
-    def run_command(visible_devices, dp_rank, vllm_engine_port):
-        command = [
-            "bash",
-            "./run_dp_template.sh",
-            visible_devices,
-            str(vllm_engine_port),
-            str(dp_size),
-            str(dp_rank),
-            args.dp_address,
-            args.dp_rpc_port,
-            str(tp_size),
-            str(pcp_size),
-        ]
-        subprocess.run(command, check=True)
-
-
-    if __name__ == "__main__":
-        if not os.path.exists("./run_dp_template.sh"):
-            print("Template file ./run_dp_template.sh does not exist.")
-            sys.exit(1)
-
-        devices_per_rank = tp_size * pcp_size
-        processes = []
-        for i in range(dp_size_local):
-            dp_rank = args.dp_rank_start + i
-            vllm_engine_port = args.vllm_start_port + i
-            visible_devices = ",".join(
-                str(device)
-                for device in range(i * devices_per_rank, (i + 1) * devices_per_rank)
-            )
-            process = multiprocessing.Process(
-                target=run_command,
-                args=(visible_devices, dp_rank, vllm_engine_port),
-            )
-            processes.append(process)
-            process.start()
-
-        for process in processes:
-            process.join()
-    ```
+    Download the official example [`launch_online_dp.py`](https://github.com/vllm-project/vllm-ascend/blob/main/examples/external_online_dp/launch_online_dp.py)
+    on both nodes. Save it beside the node's role-specific `run_dp_template.sh`
+    and run the launcher from that directory. It supports DP, TP, PCP, and PP,
+    assigning `tp-size * pcp-size * pp-size` devices to each local DP rank.
+    The templates below use PP=1; leave `--pp-size` at its default of `1`.
 
     The launcher arguments are:
 
@@ -957,25 +890,27 @@ vLLM Ascend revision.
     |-----------|-------------|
     | `--dp-size` | Global DP size within the Prefill or Decode node group. |
     | `--tp-size` | Tensor-parallel size within each DP rank. |
-    | `--pcp-size` | Prefill context-parallel size; each DP rank uses `tp-size * pcp-size` logical devices. Defaults to `1`. |
+    | `--pcp-size` | Prefill context-parallel size. Defaults to `1`. |
+    | `--pp-size` | Pipeline-parallel size. Leave at the default of `1` for the templates below. |
     | `--dp-size-local` | Number of DP ranks started on the current node. |
     | `--dp-rank-start` | First DP rank assigned to this node. It is `0` for both single-node groups in this 1P1D example. |
     | `--dp-address` | IP address of the node that coordinates the corresponding DP group. Use the Prefill IP on the Prefill node and the Decode IP on the Decode node. |
     | `--dp-rpc-port` | DP coordination port. It must be unused and reachable within the node group. |
     | `--vllm-start-port` | First API port; the launcher increments it for each local DP rank. |
 
-    The launcher passes eight positional arguments to `run_dp_template.sh`:
+    The launcher passes nine positional arguments to `run_dp_template.sh`:
 
     | Position | Value | Used by the template |
     |----------|-------|----------------------|
-    | `$1` | `visible_devices` | `ASCEND_RT_VISIBLE_DEVICES` |
-    | `$2` | `vllm_engine_port` | `--port` |
-    | `$3` | `dp_size` | `--data-parallel-size` |
+    | `$1` | Visible device IDs | `ASCEND_RT_VISIBLE_DEVICES` |
+    | `$2` | API port | `--port` |
+    | `$3` | `args.dp_size` | `--data-parallel-size` |
     | `$4` | `dp_rank` | `--data-parallel-rank` |
     | `$5` | `args.dp_address` | `--data-parallel-address` |
     | `$6` | `args.dp_rpc_port` | `--data-parallel-rpc-port` |
-    | `$7` | `tp_size` | `--tensor-parallel-size` |
-    | `$8` | `pcp_size` | `--prefill-context-parallel-size` |
+    | `$7` | `args.tp_size` | `--tensor-parallel-size` |
+    | `$8` | `args.pcp_size` | `--prefill-context-parallel-size` |
+    | `$9` | `args.pp_size` | Unused; PP remains `1`. |
 
     #### 5.2.1.2 Start the Prefill Node
 
