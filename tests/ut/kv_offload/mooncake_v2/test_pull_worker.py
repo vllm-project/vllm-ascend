@@ -1624,8 +1624,8 @@ def test_whole_block_coalescing_is_prepared_per_request_and_reused_across_layers
 
     with patch.object(
         thread,
-        "_prepare_block_transfer_runs",
-        wraps=thread._prepare_block_transfer_runs,
+        "_prepare_block_transfer_ranges",
+        wraps=thread._prepare_block_transfer_ranges,
     ) as mock_group:
         thread._append_spec_transfer_addresses(
             0,
@@ -2759,7 +2759,7 @@ def test_vector_addresses_match_scalar_ranges(local_ids, remote_ids, coalesce):
     )
     src, dst, lengths = [], [], []
     thread._append_block_transfer_addresses(
-        thread._prepare_block_transfer_runs(local_ids, remote_ids, coalesce),
+        thread._prepare_block_transfer_ranges(local_ids, remote_ids, coalesce),
         local_base,
         remote_base,
         local_stride,
@@ -2773,3 +2773,83 @@ def test_vector_addresses_match_scalar_ranges(local_ids, remote_ids, coalesce):
     )
     assert (src, dst, lengths) == expected
     assert all(type(value) is int for column in (src, dst, lengths) for value in column)
+
+
+def test_address_ranges_handle_mixed_strides_within_spec():
+    spec = MLAAttentionSpec(block_size=16, num_kv_heads=1, head_size=64, dtype=torch.float16)
+    thread = make_thread(
+        layer_names=["layer.0"],
+        kv_cache_specs=[spec],
+        kv_caches_base_addr=[[1000, 2000]],
+        block_strides=[[128, 256]],
+        block_lens=[[128, 128]],
+    )
+    remote = make_pp_metadata(
+        layer_names=["layer.0"],
+        block_strides=[[128, 512]],
+        block_lens=[[128, 128]],
+        tp_base_addrs={0: [[5000, 6000]]},
+    )
+    src, dst, lengths = [], [], []
+    thread._append_spec_transfer_addresses(
+        0,
+        0,
+        0,
+        1,
+        1,
+        1,
+        {(0, 0): [("request-a", [1, 2], [3, 4])]},
+        remote,
+        src,
+        dst,
+        lengths,
+    )
+    assert src == [1128, 2256, 2512]
+    assert dst == [5384, 7536, 8048]
+    assert lengths == [256, 128, 128]
+
+
+def test_address_component_cache_preserves_request_and_layout_boundaries():
+    spec = MLAAttentionSpec(block_size=16, num_kv_heads=1, head_size=64, dtype=torch.float16)
+    local_strides = [128, 256, 256, 256]
+    remote_strides = [128, 384, 384, 384]
+    block_lengths = [128, 128, 64, 128]
+    layer_names = [f"layer.{i}" for i in range(4)]
+    thread = make_thread(
+        layer_names=layer_names,
+        kv_cache_specs=[spec],
+        kv_caches_base_addr=[[1000 * (i + 1)] for i in range(4)],
+        block_strides=[[stride] for stride in local_strides],
+        block_lens=[[length] for length in block_lengths],
+    )
+    remote = make_pp_metadata(
+        layer_names=layer_names,
+        block_strides=[[stride] for stride in remote_strides],
+        block_lens=[[length] for length in block_lengths],
+        tp_base_addrs={0: [[10000 * (i + 1)] for i in range(4)]},
+    )
+    # Reuse request IDs on a later call with different blocks: no cache may survive.
+    for local_a, remote_a in [([1, 2], [3, 4]), ([9, 12], [13, 17])]:
+        requests = [("request-a", local_a, remote_a), ("request-b", [5, 8], [7, 11])]
+        src, dst, lengths = [], [], []
+        thread._append_spec_transfer_addresses(
+            0, 0, 0, 1, 1, 1, {(i, i): requests for i in range(4)}, remote, src, dst, lengths
+        )
+        expected_src, expected_dst, expected_lengths = [], [], []
+        for layer, (local_stride, remote_stride, length) in enumerate(
+            zip(local_strides, remote_strides, block_lengths)
+        ):
+            for _, local_ids, remote_ids in requests:
+                for index, (local_id, remote_id) in enumerate(zip(local_ids, remote_ids)):
+                    if (
+                        local_stride == remote_stride == length
+                        and index > 0
+                        and local_id == local_ids[index - 1] + 1
+                        and remote_id == remote_ids[index - 1] + 1
+                    ):
+                        expected_lengths[-1] += length
+                    else:
+                        expected_src.append(1000 * (layer + 1) + local_id * local_stride)
+                        expected_dst.append(10000 * (layer + 1) + remote_id * remote_stride)
+                        expected_lengths.append(length)
+        assert (src, dst, lengths) == (expected_src, expected_dst, expected_lengths)

@@ -1203,3 +1203,62 @@ def test_busy_engine_does_not_block_another_engine(worker, monkeypatch):
         release.set()
     worker.wait_for_save()
     assert worker._send_done.call_count == 2
+
+
+@pytest.mark.parametrize("mode", ["heads", "whole", "empty", "mismatch"])
+def test_layer_transfer_vector_addresses(mode):
+    worker = push_worker.MooncakePushConnectorWorker.__new__(push_worker.MooncakePushConnectorWorker)
+    name = "model.layers.0.attn"
+    worker._layer_indices = {name: 0}
+    worker.layer_name_to_spec_index = {name: 0}
+    spec_type = push_worker.MLAAttentionSpec if mode == "whole" else push_worker.FullAttentionSpec
+    worker.kv_cache_specs = [Mock(spec=spec_type, is_circular=False)]
+    worker.transfer_metadata = replace(
+        descriptor(),
+        kv_caches_base_addr=[[2**63 + 1000, 2**63 + 2000]],
+        block_strides=[[128, 256]],
+        block_lens=[[64, 128]],
+        block_shapes=[[(4, 4, 2), (4, 4, 4)]],
+        block_size_scales=[[1, 1]],
+    )
+    remote = remote_metadata()
+    pp = remote.metadata_by_pp_rank[0]
+    pp.block_strides[:] = [[96, 192]]
+    pp.block_lens[:] = [[32, 64]] if mode != "whole" else [[64, 128]]
+    pp.block_shapes[:] = [[(2, 4, 2), (2, 4, 4)]]
+    pp.metadata_by_pcp_rank[0].metadata_by_tp_rank[0].kv_caches_base_addr[:] = [[2**63 + 3000, 2**63 + 4000]]
+    offsets = (0, 0, 1) if mode == "whole" else (1, 1, 1)
+    worker._get_transfer_partition = Mock(return_value=offsets)
+    event = Mock()
+    write = Mock(side_effect=lambda *args: event.synchronize.assert_called_once_with() or 0)
+    worker.engine = SimpleNamespace(batch_transfer_sync_write=write)
+    requests = (
+        push_worker.LayerTransferRequest("a", (3, 1), (7, 4), 0, 8),
+        push_worker.LayerTransferRequest("b", (8,), (2,), 0, 4),
+    )
+    if mode == "empty":
+        requests = ()
+    elif mode == "mismatch":
+        # Equal total counts must not hide mismatched per-request pairs.
+        requests = (replace(requests[0], remote_block_ids=(7,)), replace(requests[1], remote_block_ids=(4, 2)))
+    batch = push_worker.LayerTransferBatch(name, (0, 0, 0), remote, requests, event)
+    error = worker._execute_layer_transfer(batch)
+    if mode == "mismatch":
+        assert error is not None
+        event.synchronize.assert_not_called()
+        write.assert_not_called()
+        return
+    assert error is None
+    event.synchronize.assert_called_once_with()
+    if mode == "empty":
+        write.assert_not_called()
+        return
+    src, dst, lengths = [], [], []
+    for cache, size in enumerate((64, 128) if mode == "whole" else (16, 32)):
+        for req in requests:
+            for local_block, remote_block in zip(req.local_block_ids, req.remote_block_ids, strict=True):
+                src.append(2**63 + 1000 * (cache + 1) + local_block * (128, 256)[cache] + offsets[0] * size)
+                dst.append(2**63 + 1000 * (cache + 3) + remote_block * (96, 192)[cache] + offsets[1] * size)
+                lengths.append(size)
+    write.assert_called_once_with("127.0.0.1:2", src, dst, lengths)
+    assert all(type(value) is int for values in write.call_args.args[1:] for value in values)
