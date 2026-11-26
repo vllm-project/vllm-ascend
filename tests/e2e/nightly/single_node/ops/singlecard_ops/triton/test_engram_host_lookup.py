@@ -5,8 +5,16 @@
 import pytest
 import torch
 
+from vllm_ascend.device.device_config import is_950
 from vllm_ascend.ops.triton.engram_lookup import _engram_host_uva_gather_dequant_kernel
 from vllm_ascend.ops.triton.triton_utils import init_device_properties_triton
+
+pytestmark = [
+    pytest.mark.skipif(
+        is_950(),
+        reason="Engram shared-pool host lookup has not been validated on Ascend 950 (A5)",
+    ),
+]
 
 
 @pytest.mark.parametrize("row_offset", [0, 3])
