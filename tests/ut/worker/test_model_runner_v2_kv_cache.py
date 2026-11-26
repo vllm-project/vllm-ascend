@@ -30,8 +30,25 @@ def test_initialize_preserves_connector_containers_and_flattens_runner_cache(is_
     runner.vllm_config.aux_output_config.enabled = False
     runner.jit_warmup_registry.activate.side_effect = nullcontext
     config = KVCacheConfig(num_blocks=3, kv_cache_tensors=[], kv_cache_groups=[])
+    persistent_tables = MagicMock(name="persistent_block_tables")
     registration_order = []
     runner._register_sparse_kv_caches.side_effect = lambda _: registration_order.append("offload")
+
+    def allocate_caches(*_args, **_kwargs):
+        registration_order.append("allocate")
+        return caches
+
+    def initialize_model_state(resolved_config, block_tables):
+        # Align-mode Mamba copies index persistent request slots. Passing the
+        # batch-ordered input tables here would silently corrupt reordered
+        # requests, while skipping this hook leaves the first request unready.
+        assert resolved_config is runner.kv_cache_config
+        assert block_tables is persistent_tables
+        assert block_tables is not persistent_tables.input_block_tables
+        assert [id(tensor) for tensor in runner.kv_caches] == [id(tensor) for tensor in (k, v, conv, ssm, single)]
+        registration_order.append("model_state")
+
+    runner.model_state.initialize_kv_cache.side_effect = initialize_model_state
 
     def register_connector(*_args):
         registration_order.append("connector")
@@ -39,26 +56,27 @@ def test_initialize_preserves_connector_containers_and_flattens_runner_cache(is_
     with (
         patch.object(upstream, "init_attn_backend", return_value=([], MagicMock(), [])),
         patch.object(upstream, "maybe_create_adaptive_verification_manager", return_value=None),
-        patch.object(upstream, "BlockTables"),
+        patch.object(upstream, "BlockTables", return_value=persistent_tables),
         patch.object(upstream.pcp, "maybe_build_pcp_manager", return_value=None),
         patch.object(upstream, "maybe_build_ubatch_runner", return_value=None),
         patch.object(upstream, "initialize_mamba_ssu_backend"),
         patch.object(upstream, "has_compiled_submodule", return_value=False),
         patch.object(upstream, "ModelCudaGraphManager"),
         patch.object(upstream, "check_attention_cp_compatibility"),
-        patch.object(upstream, "init_kv_cache", return_value=caches),
+        patch.object(upstream, "init_kv_cache", side_effect=allocate_caches),
         patch.object(upstream, "get_kv_connector", side_effect=register_connector) as connector,
     ):
         upstream.GPUModelRunner.initialize_kv_cache(runner, config, is_profiling=is_profiling)
 
     assert [id(tensor) for tensor in runner.kv_caches] == [id(tensor) for tensor in (k, v, conv, ssm, single)]
     runner._register_sparse_kv_caches.assert_called_once_with(caches)
+    runner.model_state.initialize_kv_cache.assert_called_once_with(runner.kv_cache_config, persistent_tables)
     if is_profiling:
-        assert registration_order == ["offload"]
+        assert registration_order == ["allocate", "offload", "model_state"]
         connector.assert_not_called()
         assert runner.kv_connector is upstream.NO_OP_KV_CONNECTOR
     else:
-        assert registration_order == ["offload", "connector"]
+        assert registration_order == ["allocate", "offload", "model_state", "connector"]
         assert connector.call_args.args[1] is caches
         assert type(caches["attention"]) is tuple
         assert type(caches["mamba"]) is list
