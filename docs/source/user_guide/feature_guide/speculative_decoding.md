@@ -832,12 +832,13 @@ Adaptive verification on hybrid GDN targets requires triton-ascend and is
 unsupported on 310P. See the
 [upstream adaptive verification guide](https://docs.vllm.ai/en/latest/features/speculative_decoding/adaptive_verification/).
 
-### RecoverSSM on Qwen3.x {: #recoverssm-compatibility }
+### RecoverSSM {: #recoverssm-compatibility }
 
 <span id="experimental-qwen-gdn-recoverssm"></span>RecoverSSM reconstructs
-recurrent states during speculative decoding for Qwen3.x Gated DeltaNet (GDN)
-models. This substantially reduces NPU memory use and can slightly speed up
-Mamba layers in compute-bound workloads.
+the accepted recurrent state from compact replay records during speculative
+decoding. This substantially reduces NPU memory use and can slightly speed up
+Mamba layers in compute-bound workloads. The examples below use
+Qwen3.6-35B-A3B with MTP.
 
 **Offline inference**
 
