@@ -1796,7 +1796,7 @@ def get_rope_dim(vllm_config):
 
 
 def calc_split_factor(num_list: list[int]):
-    if not num_list or any(num <= 0 for num in num_list):
+    if not num_list or any(isinstance(num, bool) or not isinstance(num, int) or num <= 0 for num in num_list):
         raise ValueError(f"calc_split_factor requires a non-empty list of positive integers, got {num_list}.")
     total = sum(num_list)
     return [total / num for num in num_list]

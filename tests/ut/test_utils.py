@@ -995,3 +995,26 @@ def test_requires_lmhead_dp_sync_is_scoped_to_v2_reduced_padding(monkeypatch, v2
     )
     monkeypatch.setattr(utils, "lmhead_tp_enable", lambda: lmhead)
     assert utils.requires_lmhead_dp_sync(config) is (v2 and lmhead and dcp == 1)
+
+
+def test_calc_split_factor_with_valid_positive_integers():
+    assert utils.calc_split_factor([64, 64]) == [2.0, 2.0]
+    assert utils.calc_split_factor([64, 128]) == [3.0, 1.5]
+    assert utils.calc_split_factor([64]) == [1.0]
+
+
+@pytest.mark.parametrize(
+    "num_list",
+    [
+        [],
+        [0, 64],
+        [-1, 64],
+        [True, 2],
+        [1.5, 3],
+        [2.0, 3],
+        ["64", 64],
+    ],
+)
+def test_calc_split_factor_rejects_invalid_inputs(num_list):
+    with pytest.raises(ValueError, match="positive integers"):
+        utils.calc_split_factor(num_list)
