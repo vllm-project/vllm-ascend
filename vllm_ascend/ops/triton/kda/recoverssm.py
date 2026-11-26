@@ -652,6 +652,7 @@ def _commit_kda_state_kernel(
 
 
 def allocate_kda_decay_cache(key_gate: torch.Tensor) -> torch.Tensor | None:
+    # TODO: This would be deleted once we support other devices apart from A5.
     if not is_950():
         return None
     return torch.empty((*key_gate.shape[:-1], key_gate.size(-1) // 2), device=key_gate.device, dtype=torch.bfloat16)
