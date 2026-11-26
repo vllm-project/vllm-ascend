@@ -51,7 +51,6 @@ from vllm_ascend.ops.rope_dsv4 import (
 from vllm_ascend.ops.triton.c2_ring_metadata import build_c2_ring_metadata
 from vllm_ascend.utils import (
     get_potential_max_tokens,
-    no_super_kernel_for_multistream,
     npu_stream_switch,
     oproj_tp_enable,
 )
@@ -450,8 +449,11 @@ class AscendDSAV41Impl:
             else (None, None)
         )
         if hidden_states.shape[0] and self.multistream_dsv4_dsa_overlap:
-            with no_super_kernel_for_multistream(True):
+            torch.npu.super_kernel_scope_begin(None)
+            try:
                 q, qr = self._multistream_qkv(attn, hidden_states, cos, sin, local_metadata.swa)
+            finally:
+                torch.npu.super_kernel_scope_end(None)
         else:
             if hidden_states.shape[0]:
                 qr = attn.q_norm(attn.wq_a(hidden_states))
