@@ -5,8 +5,7 @@
 import tilelang.ascend.language as T  # type: ignore[import-not-found]
 
 from ..mtp.native_output import MXFP8_NZ_C0, make_native_weight_loader
-
-OUTPUT_PANEL_CHANNELS = 1024
+from ..single import OUTPUT_PANEL_CHANNELS
 
 
 def mx_projection(
@@ -44,6 +43,7 @@ def mx_projection(
     granularity = MXFP8_NZ_C0 if native_weight else 16
     span = min(4096, out_width)
     units, extra = divmod(span // granularity, 28)
+    rotation = extra if native_weight else 0
     narrow = units * granularity
     wide = narrow + granularity
     if balance_columns:
@@ -117,7 +117,7 @@ def mx_projection(
             col = task // (parts * tiles_m) * bn if pipeline_k else lane * bn
             part = task % parts
             if balance_columns:
-                shard = lane % 28
+                shard = (lane + (gr - first) * rotation) % 28
                 begin = lane // 28 * span + shard * narrow + T.min(shard, extra) * granularity
                 if shard < extra:
                     tile(gr, begin, wide, tail if row_region == "tail" else bm, part, split, C3, S3, WO, OS, Y)

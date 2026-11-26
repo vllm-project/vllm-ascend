@@ -6,9 +6,10 @@ import tilelang.ascend.language as T  # type: ignore[import-not-found]
 from tilelang.ascend.language import simd as S  # type: ignore[import-not-found]
 
 from .compiler import phase, vector
-from .pool_rank import make_pool_ranker
+from .pool_rank import rank_pools
 
 CHUNK_POOLS = 32768
+CHUNKED_CONTEXT = 4 * (1 << 16)
 TOP_K = 512
 
 
@@ -54,15 +55,16 @@ def pack_dense_indices(batch, requests, width):
     return dense
 
 
-def _selection_stages(batch, requests, context, width, *, mtp=True, length_offset=0):
+def selection_programs(
+    batch, requests, context, width, *, mtp=True, length_offset=0, bounded_positions=False, one_chunk=False
+):
     pools = context // 4
     # Histogram counts and output indices are uint16 inside one vector tile.
-    chunked = pools >= 1 << 16
+    chunked = context >= CHUNKED_CONTEXT and not one_chunk
     chunks = pools // CHUNK_POOLS if chunked else 1
     assert not chunked or pools % CHUNK_POOLS == 0
     candidates = chunks * TOP_K
-    capacity = CHUNK_POOLS if chunked else pools
-    rank = make_pool_ranker(capacity, TOP_K, True, preloaded=True)
+    capacity = CHUNK_POOLS if chunked or one_chunk else pools
     metadata_type = T.int64 if mtp else T.int32
 
     @T.macro
@@ -71,7 +73,7 @@ def _selection_stages(batch, requests, context, width, *, mtp=True, length_offse
             value = T.if_then_else(row < Ends[requests - 1], T.cast(Pos[row] + 1, T.int32), 0)
         else:
             value = Pos[length_offset + row]
-        return T.min(T.max(value, 0), context)
+        return value if bounded_positions else T.min(T.max(value, 0), context)
 
     @T.macro
     def publish(top, n, Y, row):
@@ -88,12 +90,10 @@ def _selection_stages(batch, requests, context, width, *, mtp=True, length_offse
 
     @T.macro
     def select(X, row, begin, count, raw, words, top):
-        hist = T.alloc_shared((256,), T.uint16)
-        bounds = T.alloc_shared((8,), T.int32)
         if count >= TOP_K:
             span = T.ceildiv(count, 256) * 256
             T.copy(X[row, begin : begin + span], raw[:span])
-        rank(X, row, count, raw, words, hist, bounds, top)
+        rank_pools(count, words, top, TOP_K)
 
     if not chunked:
 
@@ -123,8 +123,9 @@ def _selection_stages(batch, requests, context, width, *, mtp=True, length_offse
         LocalIds: T.Tensor((batch, candidates), T.uint16),
     ):
         with T.Kernel(batch * chunks) as task:
-            row = task // chunks
-            chunk = task % chunks
+            # Chunk zero holds most decode rows. Assign adjacent rows to different vector cores.
+            row = task % batch if mtp else task // chunks
+            chunk = task // batch if mtp else task % chunks
             begin = chunk * capacity
             visible = length(row, Pos, Ends) // 4
             count = T.min(visible - begin, capacity)
@@ -150,8 +151,6 @@ def _selection_stages(batch, requests, context, width, *, mtp=True, length_offse
                 T.copy(scores, Scores[row, start : start + TOP_K])
                 T.copy(ids, LocalIds[row, start : start + TOP_K])
 
-    merge_rank = make_pool_ranker(candidates, TOP_K, True, preloaded=True)
-
     @T.prim_func
     def merge(
         Scores: T.Tensor((batch, candidates), T.bfloat16),
@@ -168,14 +167,12 @@ def _selection_stages(batch, requests, context, width, *, mtp=True, length_offse
             scores = T.alloc_shared((candidates,), T.bfloat16)
             words = T.view(scores, (candidates,), dtype=T.uint16)
             by_chunk = T.alloc_shared((candidates,), T.uint16)
-            hist = T.alloc_shared((256,), T.uint16)
-            bounds = T.alloc_shared((8,), T.int32)
             live = visible // capacity * TOP_K + T.min(visible % capacity, TOP_K)
             if visible >= TOP_K:
                 span = T.ceildiv(visible, capacity) * TOP_K
                 T.copy(Scores[row, :span], scores[:span])
                 T.copy(LocalIds[row, :span], by_chunk[:span])
-            merge_rank(Scores, row, live, scores, words, hist, bounds, ids)
+            rank_pools(live, words, ids, TOP_K)
             with T.SimtVF(threads=256):
                 for half in T.serial(2):
                     for lane in T.Parallel(256):
@@ -190,10 +187,27 @@ def _selection_stages(batch, requests, context, width, *, mtp=True, length_offse
     return partial, merge
 
 
-def selection_phases(batch, requests, context, width, *, inputs, output, scratch, guard=None, concurrent=(), **mode):
-    partial, select = _selection_stages(batch, requests, context, width, **mode)
+def selection_phases(
+    batch,
+    requests,
+    context,
+    width,
+    *,
+    inputs,
+    output,
+    scratch,
+    guard=None,
+    concurrent=(),
+    chunk_guards=(),
+    **mode,
+):
+    partial, select = selection_programs(batch, requests, context, width, **mode)
     if partial is None:
         return [phase(*concurrent, vector(select, X="Score", Y=output, guard=guard, **inputs))]
+    if chunk_guards:
+        direct_guard, guard = chunk_guards
+        _, direct = selection_programs(batch, requests, context, width, one_chunk=True, **mode)
+        concurrent = (*concurrent, vector(direct, X="Score", Y=output, guard=direct_guard, **inputs))
     return [
         phase(*concurrent, vector(partial, X="Score", guard=guard, **inputs, **scratch), barrier=guard),
         phase(vector(select, Y=output, guard=guard, **inputs, **scratch)),

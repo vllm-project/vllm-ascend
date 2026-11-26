@@ -8,6 +8,18 @@ import pytest
 import torch
 
 from vllm_ascend.ops.tilelang.sfa_decode import runtime, weights
+from vllm_ascend.ops.tilelang.sfa_decode.mtp import mtp_projection_rows, mtp_projection_tile
+
+
+@pytest.mark.parametrize("requests", range(1, 61))
+def test_mtp_projection_tiles_cover_target_verification_rows(requests):
+    tokens = requests * 6
+    rows = mtp_projection_rows(tokens)
+    tile = mtp_projection_tile(rows)
+    assert rows >= tokens and rows % tile == 0
+    assert 32 <= tile <= 128
+    if 128 <= rows <= 256:
+        assert rows == 2 * tile
 
 
 @pytest.mark.parametrize(

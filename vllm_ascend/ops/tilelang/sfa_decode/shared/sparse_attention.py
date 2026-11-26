@@ -3,6 +3,7 @@
 # mypy: disable-error-code="valid-type"
 
 import tilelang.ascend.language as T  # type: ignore[import-not-found]
+from tilelang import tvm  # type: ignore[import-not-found]
 from tilelang.ascend.language import simd as S  # type: ignore[import-not-found]
 from tilelang.layout import make_ascend_compact_nz_layout  # type: ignore[import-not-found]
 
@@ -16,6 +17,7 @@ SCALE_GROUP = 128
 PACKED_WORDS = DIM // 4 + DIM // SCALE_GROUP
 
 SCORE_SCALE = 256**-0.5
+L2_LAST_VICTIM = 1
 
 
 @T.macro
@@ -53,14 +55,17 @@ def paged_attention(
     page_size = tile = dim_tile = 128
     max_visible = DENSE_PREFIX_TOKENS
     half_rows = query_rows // 2
+    pools_per_half = tile // 8
     stride_words = (PACKED_WORDS + 7) // 8 * 8
+    row_bytes = PACKED_WORDS * 4
+    pool_dma = (0, 4, row_bytes, 0, 0, 0, L2_LAST_VICTIM, row_bytes, stride_words * 4)
     dtype, f32 = T.bfloat16, T.float32
     neg = -1.0e30
 
     @T.macro
     def fetch(kv, k_l1, request, cache):
         bx, owner, sid, live, raw_len = request
-        Cache, Table, Indices, k_ub, packed = cache
+        Cache, Table, Indices, k_ub, packed, locations = cache
         pos = kv * tile
         row = sid * (tile // 2)
         first = pos + row
@@ -69,8 +74,23 @@ def paged_attention(
             if remaining > 0:
                 page = T.cast(Table[owner, kv], T.int64)
                 T.copy(Cache[page, row : row + remaining, :], packed[:remaining, :PACKED_WORDS])
+        elif mtp and pos < max_visible:
+            for group in T.serial(pools_per_half):
+                address = locations[kv, group]
+                page = address // page_size
+                offset = T.cast(address % page_size, T.int32)
+                # Selected pools start on a four-token boundary within a single physical page.
+                T.evaluate(
+                    T.call_intrin(
+                        "void",
+                        tvm.ir.Op.get("tl.ascend_copy_gm_to_ubuf"),
+                        T.access_ptr(packed[group * 4, 0], "w", 4, stride_words),
+                        T.access_ptr(Cache[page, offset, 0], "r", 4, PACKED_WORDS),
+                        *pool_dma,
+                    )
+                )
         else:
-            for group in T.serial(tile // 8):
+            for group in T.serial(pools_per_half):
                 i = first + 4 * group
                 if i < live:
                     logical = T.alloc_var(T.int32, init=raw_len // 4 * 4)
@@ -81,17 +101,20 @@ def paged_attention(
                     page = T.cast(Table[owner, logical // page_size], T.int64)
                     offset = logical % page_size
                     T.copy(Cache[page, offset : offset + 4, :], packed[group * 4 : group * 4 + 4, :PACKED_WORDS])
-        if first + tile // 2 > live:
+        if not mtp and first + tile // 2 > live:
             with T.SimtVF(threads=256):
                 for r, c in T.Parallel(tile // 2, PACKED_WORDS):
                     if first + r >= live:
                         packed[r, c] = 0
+        valid_rows = T.min(T.max(live - first, 0), tile // 2) if mtp else tile // 2
         fp8_bytes = T.view(packed, (tile // 2, stride_words * 4), dtype=T.float8_e4m3fn)
         fp32_scales = T.view(packed, (tile // 2, stride_words), dtype=T.float32)
         with T.SimdVF():
             full = S.pset(32, "PAT_ALL")
             bfmask = S.pset(16, "PAT_ALL")
             bytes_mask = S.pset(8, "PAT_ALL")
+            if mtp:
+                zeros = T.reinterpret(S.vdup(T.uint16(0), "uint16", bfmask), "bfloat16x128")
             nz_stride = T.int32(((tile // 2 + 1) << 16) | 1)
             for channel in range(DIM // SCALE_GROUP):
                 offset = channel * SCALE_GROUP
@@ -99,17 +122,25 @@ def paged_attention(
                     T.access_ptr(k_ub[0, offset], "w", tile // 2 + 1, SCALE_GROUP),
                     "bfloat16",
                 )
-                for pair in range(tile // 4):
+                for pair in range(valid_rows // 2):
                     for lane in (0, 1):
                         row_index = pair * 2 + lane
                         packed_row = dequantize_group(
                             fp32_scales, fp8_bytes, row_index, channel, full, bytes_mask, bfmask
                         )
                         dst = S.vsstb(packed_row, dst, nz_stride, bfmask, update=True)
+                if mtp:
+                    if valid_rows % 2 != 0:
+                        value = dequantize_group(
+                            fp32_scales, fp8_bytes, valid_rows - 1, channel, full, bytes_mask, bfmask
+                        )
+                        dst = S.vsstb(value, dst, nz_stride, bfmask, update=True)
+                    for pad in range(tile // 2 - valid_rows):
+                        dst = S.vsstb(zeros, dst, nz_stride, bfmask, update=True)
 
         T.dual_copy(k_ub[: tile // 2, :], k_l1)
 
-    dot, apply = attention_mma(half_rows)
+    dot, apply = attention_mma(half_rows, overlap_value_load=mtp)
 
     @T.macro
     def normalize_block(kv, scores, limits, row_max, row_sum, alpha, prob, short, masked):
@@ -159,7 +190,7 @@ def paged_attention(
                 d0 = S.vsstb(dense, d0, T.int32(((half_rows + 1) << 16) | 1), bf, update=True)
 
     @T.macro
-    def consume_tile(kv, live, k_l1, scores_l0, softmax, value_tile):
+    def consume_tile(kv, live, k_l1, scores_l0, softmax, value_tile, prepared=False):
         score0, limits, row_max, row_sum, alpha, prob = softmax
         T.dual_copy(scores_l0, score0[0, :, :])
         if live - kv * tile >= tile:
@@ -168,7 +199,7 @@ def paged_attention(
             normalize_block(kv, score0, limits, row_max, row_sum, alpha, prob, True, True)
         else:
             normalize_block(kv, score0, limits, row_max, row_sum, alpha, prob, False, True)
-        apply(prob, k_l1, alpha, value_tile)
+        apply(prob, k_l1, alpha, value_tile, prepared)
 
     @T.macro
     def row_end(ends, row):
@@ -237,15 +268,34 @@ def paged_attention(
             with T.SimtVF(threads=32):
                 for r in T.Parallel(half_rows):
                     limits[0, r] = live
-            with T.SimtVF(threads=256):
-                for r in T.Parallel(half_rows):
-                    row_max[r] = neg
-                    row_sum[r] = 0
-                for r, c in T.Parallel(half_rows, DIM):
-                    running[r, c] = 0
+            if not mtp:
+                with T.SimtVF(threads=256):
+                    for r in T.Parallel(half_rows):
+                        row_max[r] = neg
+                        row_sum[r] = 0
+                    for r, c in T.Parallel(half_rows, DIM):
+                        running[r, c] = 0
+            else:
+                with T.SimdVF():
+                    mask = S.pset(32, "PAT_ALL")
+                    zeros = S.vdup(T.float32(0), "float32", mask)
+                    heads_mask = S.vcmps(S.vci(T.int32(0), "int32"), T.int32(half_rows), mask, op="lt")
+                    minus_inf = S.vdup(T.float32(neg), "float32", mask)
+                    S.vsts(row_max[0], minus_inf, heads_mask, "NORM_B32")
+                    S.vsts(row_sum[0], zeros, heads_mask, "NORM_B32")
+                    for r in range(half_rows):
+                        for c in range(0, DIM, 64):
+                            S.vsts(running[r, c], zeros, mask, "NORM_B32")
 
             softmax = (score0, limits, row_max, row_sum, alpha, prob)
             value_tile = (p_l1, q_l0, pv_b, out_l0, partial, running, other_l0, other_ub, k_l0)
+            locations = T.alloc_shared((max_visible // tile, pools_per_half), T.int64) if mtp else packed
+            if mtp and raw_len >= max_visible:
+                with T.SimtVF(threads=256):
+                    for block, group in T.Parallel(max_visible // tile, pools_per_half):
+                        logical = Indices[bx, block * tile + sid * (tile // 2) + group * 4]
+                        page = T.cast(Table[owner, logical // page_size], T.int64)
+                        locations[block, group] = page * page_size + logical % page_size
             fits = (
                 (
                     active
@@ -256,28 +306,14 @@ def paged_attention(
                 if score_rows_per_query
                 else False
             )
-            if score_rows_per_query and fits:
-                score_start = Starts[owner] * score_rows_per_query
-                k1_l1 = T.alloc_l1((tile, DIM), dtype)
-                if selected_tiles > 0:
-                    T.copy(PreparedKV[score_start : score_start + tile, :], k0_l1)
-                for pair in T.serial(selected_tiles // 2):
-                    left = 2 * pair
-                    dot(q_l1, k0_l1, q_pin0, q_pin1, q_pin2, q_l0, k_l0, pv_b, scores_l0)
-                    T.copy(PreparedKV[score_start + (left + 1) * tile : score_start + (left + 2) * tile, :], k1_l1)
-                    consume_tile(left, live, k0_l1, scores_l0, softmax, value_tile)
-                    dot(q_l1, k1_l1, q_pin0, q_pin1, q_pin2, q_l0, k_l0, pv_b, scores_l0)
-                    if left + 2 < selected_tiles:
-                        T.copy(PreparedKV[score_start + (left + 2) * tile : score_start + (left + 3) * tile, :], k0_l1)
-                    consume_tile(left + 1, live, k1_l1, scores_l0, softmax, value_tile)
-                if selected_tiles % 2 == 1:
-                    dot(q_l1, k0_l1, q_pin0, q_pin1, q_pin2, q_l0, k_l0, pv_b, scores_l0)
-                    consume_tile(selected_tiles - 1, live, k0_l1, scores_l0, softmax, value_tile)
-            else:
-                for kv in T.serial(selected_tiles):
-                    fetch(kv, k0_l1, (bx, owner, sid, live, raw_len), (Cache, Table, Indices, k_ub, packed))
-                    dot(q_l1, k0_l1, q_pin0, q_pin1, q_pin2, q_l0, k_l0, pv_b, scores_l0)
-                    consume_tile(kv, live, k0_l1, scores_l0, softmax, value_tile)
+            for kv in T.serial(selected_tiles):
+                if score_rows_per_query and fits:
+                    start = Starts[owner] * score_rows_per_query + kv * tile
+                    T.copy(PreparedKV[start : start + tile, :], k0_l1)
+                else:
+                    fetch(kv, k0_l1, (bx, owner, sid, live, raw_len), (Cache, Table, Indices, k_ub, packed, locations))
+                dot(q_l1, k0_l1, q_pin0, q_pin1, q_pin2, q_l0, k_l0, pv_b, scores_l0)
+                consume_tile(kv, live, k0_l1, scores_l0, softmax, value_tile, fits)
             with T.SimdVF():
                 mask = S.pset(32)
                 for row in range(half_rows):

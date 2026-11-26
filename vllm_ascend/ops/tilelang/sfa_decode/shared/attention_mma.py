@@ -6,7 +6,7 @@ from tilelang import tvm  # type: ignore[import-not-found]
 from tilelang.ascend.language import simd as S  # type: ignore[import-not-found]
 
 
-def attention_mma(half_rows):
+def attention_mma(half_rows, *, overlap_value_load=False):
     query_rows = 2 * half_rows
     tile = dim_tile = 128
 
@@ -74,30 +74,32 @@ def attention_mma(half_rows):
                     S.vsts(running[r, col], value, full, "NORM_B32")
 
     @T.macro
-    def apply(
-        prob,
-        k_l1,
-        alpha,
-        value_tile,
-    ):
+    def apply(prob, k_l1, alpha, value_tile, prepared=False):
         p_l1, pv_a, pv_b, out_l0, partial, running, other_l0, other_ub, spare_b = value_tile
         T.dual_copy(prob[:half_rows, :], p_l1)
         T.copy(p_l1, pv_a)
-        load_bank(k_l1, 128, spare_b, 1)
-        T.copy(k_l1[:, :128], pv_b)
-        T.gemm(pv_a, pv_b, out_l0, clear_accum=True)
-        T.dual_copy(out_l0, partial)
-        multiply(pv_a, spare_b, other_l0, True)
-        accumulate_value(0, partial, running, alpha)
-        T.dual_copy(other_l0, other_ub)
-        load_bank(k_l1, 384, spare_b, 1)
-        T.copy(k_l1[:, 256:384], pv_b)
-        T.gemm(pv_a, pv_b, out_l0, clear_accum=True)
-        accumulate_value(128, other_ub, running, alpha)
-        T.dual_copy(out_l0, partial)
-        multiply(pv_a, spare_b, other_l0, True)
-        accumulate_value(256, partial, running, alpha)
-        T.dual_copy(other_l0, other_ub)
-        accumulate_value(384, other_ub, running, alpha)
+        if prepared:
+            for panel in range(k_l1.shape[1] // partial.shape[1]):
+                col = panel * partial.shape[1]
+                T.copy(k_l1[:, col : col + partial.shape[1]], pv_b)
+                T.gemm(pv_a, pv_b, out_l0, clear_accum=True)
+                T.dual_copy(out_l0, partial)
+                accumulate_value(col, partial, running, alpha)
+        else:
+            for pair in (0, 1):
+                col = pair * 2 * dim_tile
+                if not overlap_value_load:
+                    load_bank(k_l1, col + dim_tile, spare_b, 1)
+                T.copy(k_l1[:, col : col + dim_tile], pv_b)
+                T.gemm(pv_a, pv_b, out_l0, clear_accum=True)
+                if overlap_value_load:
+                    load_bank(k_l1, col + dim_tile, spare_b, 1)
+                if pair:
+                    accumulate_value(col - dim_tile, other_ub, running, alpha)
+                T.dual_copy(out_l0, partial)
+                multiply(pv_a, spare_b, other_l0, True)
+                accumulate_value(col, partial, running, alpha)
+                T.dual_copy(other_l0, other_ub)
+            accumulate_value(3 * dim_tile, other_ub, running, alpha)
 
     return dot, apply

@@ -6,12 +6,13 @@ import tilelang.ascend.language as T  # type: ignore[import-not-found]
 from tilelang.ascend.language import simd as S  # type: ignore[import-not-found]
 
 from ..shared.sparse_attention import DIM, PACKED_WORDS, SCALE_GROUP, dequantize_group
-from . import DENSE_PREFIX_TOKENS, PAGE_SIZE
+from . import DENSE_PREFIX_TOKENS, PAGE_SIZE, TOKENS_PER_REQUEST
 
 
 def prepare_dense_cache(requests, pages, columns, tokens, score_rows_per_query):
     half_page = PAGE_SIZE // 2
-    half_pages = DENSE_PREFIX_TOKENS // half_page
+    max_pages = min(DENSE_PREFIX_TOKENS, score_rows_per_query * TOKENS_PER_REQUEST) // PAGE_SIZE
+    half_pages = max_pages * 2
     stride_words = (PACKED_WORDS + 7) // 8 * 8
 
     @T.prim_func

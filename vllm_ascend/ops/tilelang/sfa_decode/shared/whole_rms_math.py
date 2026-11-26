@@ -6,7 +6,7 @@ from tilelang.ascend.language import simd as S  # type: ignore[import-not-found]
 
 
 @T.macro
-def normalize_qkv(QKV, gamma, row, out, eps, width, offset):
+def _rms_norm(QKV, gamma, row, out, width, offset):
     partial = T.alloc_shared((64,), T.float32)
     with T.SimtVF(threads=64):
         for lane in T.Parallel(64):
@@ -14,24 +14,21 @@ def normalize_qkv(QKV, gamma, row, out, eps, width, offset):
     with T.SimdVF():
         mask = S.pset(32, "PAT_ALL")
         scalar = S.pset(32, "PAT_VL1")
+        pairs = 8 if width == 1536 else 4
+        for j in range(pairs):
+            first = offset + j * 64
+            second = first + width - pairs * 64
+            x = S.vcvt(S.vld(QKV[row, first], "UNPK_B16"), "float32", mask, part=0)
+            y = S.vcvt(S.vld(QKV[row, second], "UNPK_B16"), "float32", mask, part=0)
+            pair = S.vadd(S.vmul(x, x, mask), S.vmul(y, y, mask), mask)
+            S.vsts(partial[j], S.vcadd(pair, mask), scalar, "ONEPT_B32")
         if width == 1536:
-            for j in range(8):
-                x = S.vcvt(S.vld(QKV[row, j * 64], "UNPK_B16"), "float32", mask, part=0)
-                t = S.vcvt(S.vld(QKV[row, (16 + j) * 64], "UNPK_B16"), "float32", mask, part=0)
-                merged = S.vadd(S.vmul(x, x, mask), S.vmul(t, t, mask), mask)
-                S.vsts(partial[j], S.vcadd(merged, mask), scalar, "ONEPT_B32")
             for j in range(8):
                 x = S.vcvt(S.vld(QKV[row, (8 + j) * 64], "UNPK_B16"), "float32", mask, part=0)
                 S.vsts(partial[8 + j], S.vcadd(S.vmul(x, x, mask), mask), scalar, "ONEPT_B32")
-        else:
-            for j in range(4):
-                x = S.vcvt(S.vld(QKV[row, offset + j * 64], "UNPK_B16"), "float32", mask, part=0)
-                y = S.vcvt(S.vld(QKV[row, offset + (4 + j) * 64], "UNPK_B16"), "float32", mask, part=0)
-                pair = S.vadd(S.vmul(x, x, mask), S.vmul(y, y, mask), mask)
-                S.vsts(partial[j], S.vcadd(pair, mask), scalar, "ONEPT_B32")
         S.mem_bar("VST_VLD")
         total = S.vdupv(S.vcadd(S.vld(partial[0], "NORM"), mask), mask)
-        mean = S.vadds(S.vmuls(total, T.float32(1.0 / width), mask), T.float32(eps), mask)
+        mean = S.vadds(S.vmuls(total, T.float32(1.0 / width), mask), T.float32(1e-5), mask)
         one = S.vdup(T.float32(1.0), "float32", mask)
         recip = S.alloc_var("float32")
         recip = S.vdiv(one, mean, mask)

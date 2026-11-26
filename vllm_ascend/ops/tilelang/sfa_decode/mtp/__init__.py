@@ -3,7 +3,6 @@
 
 
 DENSE_PREFIX_TOKENS = 2048
-MIN_BULK_QUERY_TOKENS = 120
 Q6_MAX_REQUESTS = 60
 Q6_MAX_CONTEXT = 1 << 20
 TOKENS_PER_REQUEST = 6
@@ -18,10 +17,16 @@ def score_context(max_model_len):
     return (max_model_len + alignment - 1) // alignment * alignment
 
 
+def mtp_projection_tile(rows):
+    if 128 <= rows <= 256:
+        return rows // 2
+    return next(size for size in (112, 96, 80, 64, 48, 32) if rows % size == 0)
+
+
 def mtp_projection_rows(tokens):
     rows = (tokens + 31) // 32 * 32
     # One extra 32-row block enables a wider Cube tile for the large odd extents.
-    if rows >= 192 and all(rows % tile for tile in (96, 80, 64)):
+    if rows >= 192 and mtp_projection_tile(rows) < 64:
         return rows + 32
     return rows
 
