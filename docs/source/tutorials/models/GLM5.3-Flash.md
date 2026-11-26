@@ -1566,24 +1566,29 @@ and tenant options, refer to the [KV Cache Pool Deployment Guide](../../user_gui
 
     #### A3 series {: #glm53-flash-5-4-a3 }
 
-    This KV Cache Pool example uses DP1/TP1/PCP16 Prefill and DP16/TP1 Decode
-    with Model Runner V2 and native KDA. Copy `run_p.sh` and `run_d.sh`
-    from the [A3 series PD example](#glm53-flash-5-3-a3) and apply these
-    pool-specific settings:
+    This KV Cache Pool example uses DP1/TP1/PCP16 Prefill and DP16/TP1 Decode,
+    using Model Runner V2 and native KDA. Prepare separate `run_p.sh` and
+    `run_d.sh` files for this scenario from the [A3 series PD example](#glm53-flash-5-3-a3).
+    Before adding the pool connectors, restore these pool-specific settings:
 
+    - Use Prefill DP1/TP1/PCP16 and Decode DP16/TP1 with the startup commands below.
     - Set `num_speculative_tokens` to `3` on both roles, remove `--use-replayssm`,
       and set `--limit-mm-per-prompt` to `'{"image":1}'`.
     - On Prefill, set EPLB `window_size` and `step_interval` to `3000`,
-      keep `num_redundant_experts` at `0`, and remove `--api-server-count 1`.
-    - On Decode, set `multistream_overlap_shared_expert` to `true` and
-      keep `enable_flashcomm1` at `false` for TP1.
+      and `num_redundant_experts` to `0`; remove `--api-server-count 1`.
+    - On Decode, set `HCCL_BUFFSIZE=1024`; set `multistream_overlap_shared_expert`
+      to `true` and keep `enable_flashcomm1` at `false` for TP1.
       Remove `enable_fused_mc2`, `finegrained_tp_config`, and
       `ascend_compilation_config` from `--additional-config`.
 
-    Keep `ASCEND_RT_VISIBLE_DEVICES="$1"`, INT8 main KV cache, BF16 SSM state,
-    and prefix caching. Prefill uses 64 sequences and 16384 batched tokens.
-    Decode uses 40 sequences and 240 batched tokens. Add the Memcache
-    environment settings and replace the connectors as described below.
+    Keep `ASCEND_RT_VISIBLE_DEVICES="$1"`, INT8 main KV cache,
+    BF16 SSM state, and the role-specific scheduling limits.
+    Prefill uses 64 sequences and 16384 batched tokens; Decode uses 40
+    sequences and 240 batched tokens. Both roles limit image input to one image.
+    Add `--enable-prefix-caching` for this pooling example.
+    Add the Memcache environment settings and replace the connectors as
+    described below. Use the pool launch commands below and override the proxy
+    engine counts for this topology.
 
     ##### Prepare the Memcache Backend
 
@@ -1673,7 +1678,7 @@ and tenant options, refer to the [KV Cache Pool Deployment Guide](../../user_gui
 
     ##### Update the Prefill and Decode Connectors
 
-    For A3 series KV Cache Pool deployment, keep `--enable-prefix-caching` on both
+    For A3 series KV Cache Pool deployment, add `--enable-prefix-caching` to both
     `run_p.sh` and `run_d.sh` prepared above, and keep
     chunked prefill enabled (the model default). GLM-5.3-Flash has
     linear-attention state, and `AscendStoreConnector`
@@ -1682,7 +1687,9 @@ and tenant options, refer to the [KV Cache Pool Deployment Guide](../../user_gui
     and `use_layerwise` disabled for this configuration.
 
     Replace the final `--kv-transfer-config` argument in `run_p.sh` with the
-    following fragment. Apply the pool-specific overrides above.
+    following fragment. Keep the pool-specific overrides above and
+    the remaining A3 series Prefill flags, including
+    `--max-num-seqs 64`.
 
     ```shell
       --kv-transfer-config \
@@ -1703,7 +1710,7 @@ and tenant options, refer to the [KV Cache Pool Deployment Guide](../../user_gui
               "kv_connector_extra_config": {
                 "backend": "memcache",
                 "use_layerwise": false,
-                "lookup_rpc_port": 37000
+                "lookup_rpc_port": '"$((37000 + $4))"'
               }
             }
           ]
@@ -1743,10 +1750,11 @@ and tenant options, refer to the [KV Cache Pool Deployment Guide](../../user_gui
       }'
     ```
 
-    The single Prefill engine uses `lookup_rpc_port=37000`. On Decode, `$4`
-    is the DP rank passed by `launch_online_dp.py` and the configured lookup
-    values range from `37100` to `37115`. Keep the role-specific Mooncake KV
-    base ports from the [A3 series PD example](#glm53-flash-5-3-a3).
+    `$4` is the DP rank passed by `launch_online_dp.py`. Each engine must have a
+    unique `lookup_rpc_port`. The Prefill lookup value is `37000`, and the
+    Decode lookup values are `37100-37115`. Keep the role-specific Mooncake KV
+    base ports from [A3 series PD example](#glm53-flash-5-3-a3); its workers and schedulers derive their own
+    ports from the topology.
 
     ##### Start the Services
 
@@ -1785,9 +1793,9 @@ and tenant options, refer to the [KV Cache Pool Deployment Guide](../../user_gui
          --vllm-start-port 9081
        ```
 
-    4. Run the [A3 series proxy script](#glm53-flash-a3-proxy) with
-       `P_N=1` and `D_N=16`. It uses Prefill port `9081` and Decode ports
-       `9900-9915`.
+    4. In a separate terminal, set `export P_N=1 D_N=16`, then run the
+       [A3 series proxy script](#glm53-flash-a3-proxy). It uses Prefill port
+       `9081` and Decode ports `9900-9915` for this pooling scenario.
        Send requests to `<PREFILL_NODE_IP>:8081` using
        [Functional Verification](#6-functional-verification).
 
@@ -1795,22 +1803,20 @@ and tenant options, refer to the [KV Cache Pool Deployment Guide](../../user_gui
 
     ##### Verify KV Cache Reuse
 
-    For this check, start Prefill with `VLLM_SERVER_DEV_MODE=1` in an isolated
-    validation deployment. Warm up the pool through the proxy with a prompt
-    longer than one cache block and wait for the pool save to complete.
+    Warm up the pool through the proxy with a prompt longer than one cache
+    block, then repeat requests with the same prefix. Check Prefill output for
+    successful pool saves, lookups, loads, and cache hits, and check Decode
+    output for successful P→D transfers.
 
-    Reset the local prefix cache on the single Prefill engine while preserving
-    the Memcache entries:
+    Capture the Prefill launcher's standard output and standard error when starting the service. Compare `vllm:ascend_store_load_get_keys_total` at the Prefill API's `/metrics` endpoint before and after repeating the prefix: an increase records pool GET keys, unlike a local prefix-cache hit alone. Also verify that requests complete successfully; a GET counter alone does not prove a successful transfer or an accuracy result.
 
-    ```shell
-    curl --fail -X POST "http://<PREFILL_NODE_IP>:9081/reset_prefix_cache?reset_external=false"
-    ```
-
-    After the reset succeeds, record `vllm:ascend_store_load_get_keys_total`
-    from the Prefill API's `/metrics` endpoint and replay the same prefix
-    through the proxy. Verify that the GET counter rises, Prefill reports a
-    successful pool load, and Decode completes the request using the P→D
-    transfer. Only complete, cacheable blocks are reused.
+    With one Prefill engine, a repeated request can hit its local prefix cache.
+    In an isolated validation deployment, start Prefill with
+    `VLLM_SERVER_DEV_MODE=1`. After the warm-up save completes, send
+    `POST /reset_prefix_cache?reset_external=false` to Prefill port `9081`.
+    Repeat the prefix after the local reset succeeds. Only
+    complete, cacheable blocks are reused, so a partial trailing block can
+    still require computation.
 
 === "A2 series"
 
