@@ -656,7 +656,7 @@ For 950DT products, basic PD, the image-and-text 10K case, and the long-context 
     export VLLM_USE_MODELSCOPE=True
     export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
     export HCCL_NPU_SOCKET_PORT_RANGE=61400-61499
-    export HCCL_BUFFSIZE=4096
+    export HCCL_BUFFSIZE=8192
     export HCCL_BUFFSIZE_EP=4096
 
     vllm serve Eco-Tech/Qwen3.8-Flash-Next-w4a8 \
