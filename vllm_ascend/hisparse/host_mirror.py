@@ -277,7 +277,7 @@ def overlap_target_host_mirror(runner):
         return connector
     hisparse_connector = connector.kv_connector
     pd_connector = None
-    finish_order = (None,)
+    finish_order: tuple[object, ...] = (None,)
     if type(hisparse_connector) is AscendMultiConnector:
         from vllm_ascend.distributed.kv_transfer.kv_p2p.hisparse_pd import (
             _HiSparseMooncakePullConnector,

@@ -40,8 +40,6 @@ class _HiSparsePullThread(MooncakePullRecvingThread):
         dst_list,
         length_list,
     ) -> Callable[[], None] | None:
-        if remote_tp_size != self.tp_size or self.pcp_size != 1 or remote_dcp_size != 1:
-            raise ValueError("HiSparse Pull requires equal P/D TP, D PCP=1, and P DCP=1")
         host_layers = {
             pair: entries
             for pair, entries in transfer_entries_by_layer.items()
