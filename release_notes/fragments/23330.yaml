@@ -1,0 +1,7 @@
+pr: 23330
+entries:
+  - category: feature
+    text: >-
+      Added support for chunked packed NPU IPC weight updates with a matching
+      vLLM build that provides IPC device extension hooks. Tensors can span
+      transfer buffers; existing `npu_ipc` configuration is unchanged.
