@@ -1,0 +1,10 @@
+# Rename this file to the PR number once the PR is opened.
+pr: 0
+entries:
+  - category: performance
+    text: >-
+      Added the opt-in `VLLM_ASCEND_SPEC_DECODE_DRAFT_GRAPH_MODE=piecewise` switch, which captures
+      the multi-step draft decode loop of speculative decoding as ACL graphs. Previously the draft
+      decode stayed eager whenever the target model ran PIECEWISE decode graphs, which is the default
+      on Ascend; enabling the switch lowers median inter-token latency by roughly 6% with bit-identical
+      output.
