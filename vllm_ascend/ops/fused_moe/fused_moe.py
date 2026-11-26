@@ -41,7 +41,7 @@ from vllm_ascend.ops.fused_moe.shared_experts import (
     SharedExpertParallelMode,
     SubmittedSharedExpertGateUp,
 )
-from vllm_ascend.utils import vllm_version_is
+from vllm_ascend.utils import no_super_kernel_for_multistream, vllm_version_is
 
 
 def _ascend_moe_forward_shared_sp_fake(
@@ -558,7 +558,10 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
         shared_experts_input: torch.Tensor | None,
         input_ids: torch.Tensor | None = None,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        with self._sequence_parallel_context():
+        with (
+            self._sequence_parallel_context(),
+            no_super_kernel_for_multistream(getattr(self.ascend_shared_experts, "multistream_overlap", False)),
+        ):
             shared_hidden_states = shared_experts_input if shared_experts_input is not None else hidden_states
             if self.ascend_shared_experts is None:
                 if self.is_internal_router:

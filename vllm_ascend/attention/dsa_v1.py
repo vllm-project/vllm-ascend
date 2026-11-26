@@ -65,6 +65,7 @@ from vllm_ascend.quantization.methods.kv_cache.turboquant import is_turboquant
 from vllm_ascend.quantization.methods.kv_cache.turboquant.latent import TurboQuantLatent
 from vllm_ascend.utils import (
     get_potential_max_tokens,
+    no_super_kernel_for_multistream,
     npu_stream_switch,
     oproj_tp_enable,
 )
@@ -2771,16 +2772,17 @@ class AscendDSAImpl(AttentionImplBase[Any]):
                 scatter_attention_compressed_kv=scatter_attention_compressed_kv,
                 aux_stream=dsv4_dsa_overlap_stream() if self.multistream_dsv4_dsa_overlap else None,
             )
-            return self.indexer(
-                hidden_states=hidden_states,
-                qr=qr,
-                kv_cache=kv_cache,
-                metadata=layer_metadata.indexer,
-                overlap_plan=overlap_plan,
-                layer_name=layer_name,
-                qr_pertoken_scale=qr_pertoken_scale,
-                write_cache=write_cache,
-            )
+            with no_super_kernel_for_multistream(self.multistream_dsv4_dsa_overlap):
+                return self.indexer(
+                    hidden_states=hidden_states,
+                    qr=qr,
+                    kv_cache=kv_cache,
+                    metadata=layer_metadata.indexer,
+                    overlap_plan=overlap_plan,
+                    layer_name=layer_name,
+                    qr_pertoken_scale=qr_pertoken_scale,
+                    write_cache=write_cache,
+                )
 
         if not write_cache:
             return None
@@ -2855,15 +2857,16 @@ class AscendDSAImpl(AttentionImplBase[Any]):
                 )
 
         if self.multistream_dsv4_dsa_overlap:
-            q, qr, qr_pertoken_scale, compressor_overlap_output = self._mla_prolog_multistream(
-                hidden_states,
-                cos,
-                sin,
-                swa_kv_cache,
-                swa_req_metadata.slot_mapping,
-                is_prefill=has_prefill,
-                tail_overlap_fn=compressor_tail_fn,
-            )
+            with no_super_kernel_for_multistream(True):
+                q, qr, qr_pertoken_scale, compressor_overlap_output = self._mla_prolog_multistream(
+                    hidden_states,
+                    cos,
+                    sin,
+                    swa_kv_cache,
+                    swa_req_metadata.slot_mapping,
+                    is_prefill=has_prefill,
+                    tail_overlap_fn=compressor_tail_fn,
+                )
         else:
             compressor_overlap_output = None
             q, qr, qr_pertoken_scale = self._mla_prolog_single_stream(

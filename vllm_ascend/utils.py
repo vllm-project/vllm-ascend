@@ -24,6 +24,7 @@ import json
 import math
 import os
 from contextlib import contextmanager, nullcontext
+from contextvars import ContextVar
 from functools import lru_cache
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -1230,17 +1231,32 @@ def has_rope(vllm_config: VllmConfig):
     return _HAS_ROPE
 
 
+_SUPER_KERNEL_SCOPE_ACTIVE: ContextVar[bool] = ContextVar("super_kernel_scope_active", default=False)
+
+
 @contextmanager
-def super_kernel_scope(scope: str, enabled: bool):
+def super_kernel_scope(scope: str | None, enabled: bool):
     if not enabled:
         yield
         return
 
     torch.npu.super_kernel_scope_begin(scope)
+    token = _SUPER_KERNEL_SCOPE_ACTIVE.set(True) if scope is not None else None
     try:
         yield
     finally:
-        torch.npu.super_kernel_scope_end(scope)
+        try:
+            torch.npu.super_kernel_scope_end(scope)
+        finally:
+            if token is not None:
+                _SUPER_KERNEL_SCOPE_ACTIVE.reset(token)
+
+
+@contextmanager
+def no_super_kernel_for_multistream(enabled: bool):
+    """Exclude an enabled multistream region only during SK capture."""
+    with super_kernel_scope(None, enabled and _SUPER_KERNEL_SCOPE_ACTIVE.get()):
+        yield
 
 
 def weak_ref_tensor(tensor: Any) -> Any:
