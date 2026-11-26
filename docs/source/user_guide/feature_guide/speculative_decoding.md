@@ -144,11 +144,6 @@ vllm serve Qwen/Qwen3-8B \
 Set `method` to `mtp`. For a target with built-in MTP weights, omit `model`
 from the speculative config.
 
-!!! note "Single-layer MTP"
-
-    DeepSeek checkpoints with one MTP prediction layer reuse it for longer
-    drafts. Start with `K=1` and check accuracy and throughput before increasing it.
-
 **Offline inference**
 
 ```python
@@ -215,6 +210,11 @@ vllm serve google/gemma-4-31B-it \
   --speculative-config '{"method":"mtp","model":"google/gemma-4-31B-it-assistant","num_speculative_tokens":3}'
 ```
 
+!!! note "Single-layer MTP"
+
+    DeepSeek checkpoints with one MTP prediction layer reuse it for longer
+    drafts. Start with `K=1` and check accuracy and throughput before increasing it.
+
 ### DFlash {: #speculating-using-dflash }
 
 Set `method` to `dflash` and `model` to a checkpoint trained for the target.
@@ -250,9 +250,6 @@ vllm serve Qwen/Qwen3-8B \
 <span id="how-it-works"></span>Use a `DFlash2DraftModel` checkpoint and the
 target's unquantized, full-vocabulary LM head. The checkpoint supplies the
 candidate selector settings and supported draft lengths.
-
-Full draft ACLGraph capture requires target `FULL_DECODE_ONLY` or
-`FULL_AND_PIECEWISE` and draft `enforce_eager` unset or false.
 
 **Offline inference**
 
@@ -290,16 +287,15 @@ vllm serve Qwen/Qwen3.8-27B \
   --speculative-config '{"method":"dflash","model":"z-lab/Qwen3.8-27B-DFlash2","num_speculative_tokens":7}'
 ```
 
+Full draft ACLGraph capture requires target `FULL_DECODE_ONLY` or
+`FULL_AND_PIECEWISE` and draft `enforce_eager` unset or false.
+
 #### LiLiCorr {: #speculating-using-lilicorr }
 
 Use a matching `LiLiCorrDraftModel` checkpoint and set `K` at or below the
 trained block size minus one. Both plain and convolutional checkpoints support
 greedy and probabilistic drafting with standard TP. The example uses a draft
 checkpoint from ModelScope.
-
-Set `"enforce_eager":true` inside `speculative_config` for the draft.
-Fine-grained embedding or LM-head TP and PCP vocabulary sharding are
-unsupported. Quantized draft weights require an Ascend-supported format.
 
 **Offline inference**
 
@@ -345,18 +341,16 @@ VLLM_USE_MODELSCOPE=True vllm serve Qwen/Qwen3.8-27B \
   }'
 ```
 
+Set `"enforce_eager":true` inside `speculative_config` for the draft.
+Fine-grained embedding or LM-head TP and PCP vocabulary sharding are
+unsupported. Quantized draft weights require an Ascend-supported format.
+
 ### DSpark {: #speculating-using-dspark }
 
 Set `method` to `dspark`, `model` to a matching draft checkpoint, and `K` to
 a length supported by that checkpoint. If an MLA draft uses BF16 while the
 target uses FP8 KV cache, set `"kv_cache_dtype":"bfloat16"` in
 `speculative_config`.
-
-On 950DT, GLM with a compatible GQA draft can use CANN FlashAttn.
-Compatible MLA drafts can use FlashMLA. Both paths require FP16 or BF16
-queries and an unquantized draft KV cache. FlashAttn pads 192-wide GQA heads
-to 256, using one third more draft KV cache memory for those heads. MLA
-drafts fall back to FIA if the FlashMLA query-head layout is unsupported.
 
 **Offline inference**
 
@@ -386,6 +380,12 @@ vllm serve Qwen/Qwen3-8B \
   --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
   --speculative-config '{"method":"dspark","model":"deepseek-ai/dspark_qwen3_8b_block7","num_speculative_tokens":7}'
 ```
+
+On 950DT, GLM with a compatible GQA draft can use CANN FlashAttn.
+Compatible MLA drafts can use FlashMLA. Both paths require FP16 or BF16
+queries and an unquantized draft KV cache. FlashAttn pads 192-wide GQA heads
+to 256, using one third more draft KV cache memory for those heads. MLA
+drafts fall back to FIA if the FlashMLA query-head layout is unsupported.
 
 For per-request verification lengths, see [Adaptive Verification](#adaptive-verification).
 
@@ -431,13 +431,6 @@ data for EAGLE-style drafts. Select layers with
 writes one `.safetensors` file per request to `shared_storage_path`. See the
 [upstream offline example](https://docs.vllm.ai/en/latest/features/speculative_decoding/extract_hidden_states/#offline-example).
 
-!!! note
-
-    For prompt-only collection, request one output token with `max_tokens=1`.
-    The connector saves prompt hidden states by default. Set
-    `include_output_tokens` in the request's `kv_transfer_params` to collect
-    generated-token hidden states as well.
-
 **Offline inference**
 
 ```python
@@ -482,6 +475,13 @@ vllm serve Qwen/Qwen3-8B \
     "kv_connector_extra_config":{"shared_storage_path":"/dev/shm/hidden_states"}
   }'
 ```
+
+!!! note
+
+    For prompt-only collection, request one output token with `max_tokens=1`.
+    The connector saves prompt hidden states by default. Set
+    `include_output_tokens` in the request's `kv_transfer_params` to collect
+    generated-token hidden states as well.
 
 ## Sampling Configuration
 
@@ -581,11 +581,6 @@ from Entropy Verify and synthetic rejection sampling.
 <span id="usage"></span>Entropy Verify changes the acceptance threshold for
 non-greedy requests to improve throughput.
 
-!!! warning
-
-    Changing the acceptance threshold can change generated tokens. Evaluate
-    output quality on your workload before using Entropy Verify in production.
-
 Keep `rejection_sample_method` at its default, `"standard"`, and add this to
 `additional_config` (`--additional-config` for online serving).
 
@@ -648,16 +643,15 @@ vllm serve Qwen/Qwen3-8B \
 The threshold per position is `min(exp(-entropy * posterior_alpha), posterior_threshold)`,
 using entropy computed after request sampling settings.
 
+!!! warning
+
+    Changing the acceptance threshold can change generated tokens. Evaluate
+    output quality on your workload before using Entropy Verify in production.
+
 ### Synthetic Rejection Sampling {: #synthetic-rejection-sampling }
 
 <span id="why-use-it"></span>Set `"rejection_sample_method":"synthetic"` to
 benchmark the verifier at controlled acceptance rates.
-
-!!! warning
-
-    Synthetic mode accepts draft tokens according to configured rates,
-    independently of the target distribution. Use it only for benchmarks and
-    validation.
 
 <span id="how-to-use"></span>Set exactly one of these fields alongside the proposer settings.
 
@@ -714,6 +708,12 @@ vllm serve Qwen/Qwen3-8B \
     ]
   }'
 ```
+
+!!! warning
+
+    Synthetic mode accepts draft tokens according to configured rates,
+    independently of the target distribution. Use it only for benchmarks and
+    validation.
 
 #### Ascend-specific Notes {: #ascend-specific-notes }
 
@@ -779,18 +779,6 @@ With a DSpark checkpoint that has a confidence head, set
 `"enable_adaptive_verification":true` to select a verification length per
 request.
 
-!!! warning
-
-    Enable full decode ACLGraphs on the target. Fully eager and pure
-    `PIECEWISE` modes are unsupported, as are PP, PCP, DCP, and LoRA.
-    Commercial use is restricted.
-
-Compare fixed and adaptive verification at your serving concurrency.
-Adaptive verification can add latency in latency-sensitive or host-bound
-workloads. Gains can be limited when draft acceptance is already high.
-Check scheduled and admitted draft counts in DEBUG logs when diagnosing
-performance.
-
 **Offline inference**
 
 ```python
@@ -826,6 +814,18 @@ vllm serve Qwen/Qwen3-8B \
   }'
 ```
 
+!!! warning
+
+    Enable full decode ACLGraphs on the target. Fully eager and pure
+    `PIECEWISE` modes are unsupported, as are PP, PCP, DCP, and LoRA.
+    Commercial use is restricted.
+
+Compare fixed and adaptive verification at your serving concurrency.
+Adaptive verification can add latency in latency-sensitive or host-bound
+workloads. Gains can be limited when draft acceptance is already high.
+Check scheduled and admitted draft counts in DEBUG logs when diagnosing
+performance.
+
 #### Hybrid Gated DeltaNet Targets {: #hybrid-gated-deltanet-targets }
 
 Adaptive verification on hybrid GDN targets requires triton-ascend and is
@@ -838,11 +838,6 @@ unsupported on 310P. See the
 recurrent states during speculative decoding for Qwen3.x Gated DeltaNet (GDN)
 models. This substantially reduces NPU memory use and can slightly speed up
 Mamba layers in compute-bound workloads.
-
-!!! warning
-
-    RecoverSSM is experimental. Validate accuracy and performance on your
-    workload before deployment.
 
 **Offline inference**
 
@@ -883,3 +878,8 @@ vllm serve Qwen/Qwen3.6-35B-A3B \
   --enforce-eager \
   --speculative-config '{"method":"mtp","num_speculative_tokens":4}'
 ```
+
+!!! warning
+
+    RecoverSSM is experimental. Validate accuracy and performance on your
+    workload before deployment.
