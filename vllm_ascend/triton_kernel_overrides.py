@@ -31,9 +31,10 @@ Three rules when editing the table:
 
   * Plain calls (``kernel(...)``) and positional ``kernel[grid]``
     calls reach the impl untouched. Plain calls bind by name, so the
-    impl must carry every argument name its callers pass, via an
-    explicit parameter or ``**kwargs``; positional calls bind by
-    slot, so only the arity matters.
+    impl must carry every original parameter name explicitly -- an
+    impl-side ``**kwargs`` would swallow a renamed or dropped name
+    silently, it only legitimately absorbs caller-only extras;
+    positional calls bind by slot, so only the arity matters.
   * Keyword-only ``kernel[grid]`` calls are adapted: when the impl's
     parameter tuple equals the original's -- names *and* order -- the
     dispatcher forwards by name; otherwise it forwards positionally
@@ -207,6 +208,12 @@ TRITON_KERNEL_OVERRIDES: dict[str, Callable[..., Any]] = {
     # stays for parity with the retired patch so a future
     # vllm.third_party consumer lands on the NPU impl.
     "vllm.third_party.flash_linear_attention.ops.kda.chunk_kda": chunk_kda,
+    # chunk_kda_with_fused_gate's lower_bound defaults to -5.0 here
+    # (GLM's architecture requires a bounded gate in [-5, 0) and the
+    # NPU gate mirrors fla's internal kernel default), while
+    # upstream's None turns the bound off. No caller today, so the
+    # gap is latent; aligning means teaching the impl an "off"
+    # branch -- the fused_kda_gate follow-up's family.
     "vllm.third_party.flash_linear_attention.ops.kda.chunk_kda_with_fused_gate": (  # noqa: E501
         chunk_kda_with_fused_gate
     ),
