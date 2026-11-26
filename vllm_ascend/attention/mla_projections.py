@@ -17,6 +17,10 @@ MLA_PROJECTION_NAMES = (
 )
 
 
+# TODO: Once the vLLM pin includes MLAKVBProjWithLoRA in
+# vllm/lora/layers/custom_layer.py, delegate to its
+# apply_mla_absorbed_kv_b_lora method and remove this helper.
+# The current c410543d pin does not expose that API.
 def add_mla_lora(
     inputs: torch.Tensor,
     output: torch.Tensor,
@@ -125,6 +129,10 @@ class MLAProjectionMixin:
         self._set_projection("g_proj", layer)
 
     def _add_mla_lora(self, inputs: torch.Tensor, output: torch.Tensor, *, is_query: bool) -> None:
+        # On the vLLM upgrade, select the upstream MLA KV-B LoRA wrapper during
+        # layer replacement, then delegate absorbed increments to its API.
+        # Retain the shared projection container so Ascend MLA/SFA backends
+        # continue to see module replacements made by the LoRA manager.
         if not self.lora_enabled:
             return
         projection = self.kv_b_proj
