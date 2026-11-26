@@ -1726,27 +1726,29 @@ class SparseKVOffloadManager:
 
     def dense_fill_copy_sfa_rows(
         self,
-        dense_fills: dict[int, tuple[int, int]],
+        dense_fills: dict[int, tuple[int, int, int]],
         *,
         block_size: int,
         block_table: np.ndarray | torch.Tensor,
     ) -> None:
-        """Restore whole short rows from the host pool after prefix rollback.
+        """Restore row prefixes from the host pool after rollback or rebind.
 
         A rollback across the hot boundary leaves a sparse-layout row under a
         dense (-3) reader. Restore it using the input batch's block table
         (a CPU mirror in V1 or a device tensor in V2) and block size, outside
-        graph capture at metadata-build time. Host and device bases are bound
-        during cache registration.
+        graph capture at metadata-build time. Each fill copies ``tokens``
+        tokens starting at host-pool block ``src_block`` (0 for short rows;
+        the sliding-window start for rebuilt rows). Host and device bases
+        are bound during cache registration.
         """
         if self._uses_mooncake_host_pool():
             sources, destinations, lengths = [], [], []
             stride_tokens = self.topk_buffers_k[0].shape[1]
-            for slot, (row, computed) in dense_fills.items():
-                for block in range(cdiv(computed, block_size)):
-                    sources.append(int(block_table[row, block]) * block_size)
+            for slot, (row, tokens, src_block) in dense_fills.items():
+                for block in range(cdiv(tokens, block_size)):
+                    sources.append(int(block_table[row, src_block + block]) * block_size)
                     destinations.append(slot * stride_tokens + block * block_size)
-                    lengths.append(min(block_size, computed - block * block_size))
+                    lengths.append(min(block_size, tokens - block * block_size))
             if sources:
                 device = self.topk_buffers_k[0].device
                 descriptors = torch.tensor([sources, destinations, lengths], dtype=torch.int64, device=device)
@@ -1763,23 +1765,24 @@ class SparseKVOffloadManager:
             device=topk_k.device,
         )
         block_bytes = token_bytes * block_size
-        for slot, (row, computed) in dense_fills.items():
-            if computed <= 0:
+        for slot, (row, tokens, src_block) in dense_fills.items():
+            if tokens <= 0:
                 continue
-            nblocks = (computed + block_size - 1) // block_size
+            nblocks = (tokens + block_size - 1) // block_size
             if isinstance(block_table, torch.Tensor):
                 if block_table.device != topk_k.device:
                     raise ValueError("Tensor block table must be on the same device as the top-k buffers")
                 # block_bytes is a dimensioned int64 tensor, not a Python scalar.
                 # The product is int64 before adding the host base, including offsets above 2 GiB.
-                src_offsets = block_table[row, :nblocks].view(1, -1) * block_bytes
+                src_offsets = block_table[row, src_block : src_block + nblocks].view(1, -1) * block_bytes
             else:
                 src_tokens = torch.tensor(
-                    [int(block_table[row, b]) * block_size for b in range(nblocks)], dtype=torch.int64
+                    [int(block_table[row, src_block + b]) * block_size for b in range(nblocks)],
+                    dtype=torch.int64,
                 ).to(topk_k.device)
                 src_offsets = src_tokens.view(1, -1).expand(2, -1) * token_bytes
             lengths = torch.clamp(
-                torch.arange(nblocks, dtype=torch.int64, device=topk_k.device) * (-block_size) + computed,
+                torch.arange(nblocks, dtype=torch.int64, device=topk_k.device) * (-block_size) + tokens,
                 min=0,
                 max=block_size,
             )

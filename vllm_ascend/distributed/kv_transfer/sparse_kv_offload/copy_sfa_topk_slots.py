@@ -105,7 +105,7 @@ class CopySfaRequestStates:
         dummy: bool,
         lim_cache_histories: Sequence[Tensor],
         generations: np.ndarray | None = None,
-    ) -> tuple[bool, dict[int, tuple[int, int]], tuple[int, ...]]:
+    ) -> tuple[bool, dict[int, tuple[int, int, int]], tuple[int, ...]]:
         """Return tail restoration, dense fills, and slots needing LIM reset."""
         capacity = len(slots)
         if not 0 <= len(req_ids) <= padded_reqs <= capacity or len(active) != capacity:
@@ -172,7 +172,7 @@ class CopySfaRequestStates:
         retained.update(pending)
         self._requests = retained
         restore_tails = False
-        dense_fills: dict[int, tuple[int, int]] = {}
+        dense_fills: dict[int, tuple[int, int, int]] = {}
         for row, req in enumerate(req_ids):
             state = retained[req]
             slots[row] = state.slot
@@ -181,12 +181,29 @@ class CopySfaRequestStates:
                 generations[row] = self._slot_generations.get(state.slot, -1)
             if computed_tokens is None:
                 continue
-            prefix = (int(computed_tokens[row]) // block_size) * block_size
+            computed = int(computed_tokens[row])
+            prefix = (computed // block_size) * block_size
             if state.last_prefix is not None and prefix < state.last_prefix:
                 if prebound_slots:
                     restore_tails = True
                 if hot_tokens and state.last_prefix >= hot_tokens > prefix:
-                    dense_fills[state.slot] = (row, int(computed_tokens[row]))
+                    dense_fills[state.slot] = (row, computed, 0)
+            elif state.last_prefix is None and computed > 0:
+                # A freshly bound row starts empty: the PD connector delivers
+                # the full prompt into the Host pool, so Decode needs one
+                # eager restore when it first owns the row (see
+                # prepare_copy_sfa_request_slots). Rebuild the whole row:
+                # dense-fill the sliding-window hot region from the
+                # host-pool blocks ending at the computed prefix; the
+                # circular ring keeps the tail restore.
+                assert hot_tokens % block_size == 0, "copy_sfa_hot_tokens must be block-aligned"
+                if computed <= hot_tokens:
+                    dense_fills[state.slot] = (row, computed, 0)
+                else:
+                    window = min(computed, hot_tokens)
+                    if window > 0:
+                        dense_fills[state.slot] = (row, window, (prefix - window) // block_size)
+                    restore_tails = True
             state.last_prefix = prefix
         return restore_tails, dense_fills, invalidated_slots
 

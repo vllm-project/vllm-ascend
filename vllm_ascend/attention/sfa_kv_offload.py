@@ -370,13 +370,14 @@ class AscendSFAKVOffloadMetadataBuilder(AscendSFAMetadataBuilder):
         # Compute row geometry once; LIM state and attention consume the same
         # values. CPU seq_lens may still be optimistic after MTP rejection.
         seq_lens = torch.where(active, common_attn_metadata.seq_lens[:count], widths)
-        # The resident working table lags computed tokens by up to two
-        # blocks; only retired full blocks may leave the resident tail,
-        # so geometry follows the runner-owned stable prefixes.
-        stable_prefixes = common_attn_metadata.req_topk_buffer_stable_prefixes
-        if stable_prefixes is None:
-            raise RuntimeError("delayed D2H requires runner-owned stable prefixes")
-        prefix = torch.where(active, stable_prefixes[:count], 0)
+        # Geometry follows the live computed frontier; stable prefixes are
+        # only used by the D2H copy planner, not by row geometry. Without
+        # this, lagged stable prefixes inflate reuse logical lenses and
+        # break MAL acceptance when D2H falls behind under load.
+        prefix = (
+            torch.div((seq_lens - widths).clamp_min(0), LIM_CACHE_BLOCK_SIZE, rounding_mode="floor")
+            * LIM_CACHE_BLOCK_SIZE
+        )
         is_short = prefix < self.copy_sfa_hot_tokens
         cache = torch.where(active, torch.where(is_short, 0, prefix.clamp_max(self.copy_sfa_hot_tokens)), LIM_TOPK)
         logical = torch.where(active, torch.where(is_short, seq_lens, cache + seq_lens - prefix), 0)
