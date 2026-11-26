@@ -25,6 +25,33 @@ class AscendMambaManager(MambaManager):
     MAX_CHECKPOINT_CANDIDATES = 4096
     _checkpoint_candidates: OrderedDict[BlockHash, str] | None = None
 
+    def checkpoint_candidate_key(self, request: Request, position: int) -> BlockHash | None:
+        unit = self.block_pool.hash_block_size
+        if (
+            self.kv_cache_spec.mamba_type != MambaAttentionBackendEnum.GDN_ATTN
+            or not 0 < position < request.num_prompt_tokens
+            or position % unit
+            or position % self.block_size == 0
+        ):
+            return None
+        index = position // unit - 1
+        return request.block_hashes[index] if index < len(request.block_hashes) else None
+
+    def should_elide_first_checkpoint(self, request: Request, position: int) -> bool:
+        key = self.checkpoint_candidate_key(request, position)
+        if key is None:
+            return False
+        first_request = self._checkpoint_candidates.get(key) if self._checkpoint_candidates is not None else None
+        return first_request is None or first_request == request.request_id
+
+    def _remember_checkpoint_candidate(self, key: BlockHash, request_id: str) -> None:
+        if self._checkpoint_candidates is None:
+            self._checkpoint_candidates = OrderedDict()
+        candidates = self._checkpoint_candidates
+        candidates.setdefault(key, request_id)
+        if len(candidates) > self.MAX_CHECKPOINT_CANDIDATES:
+            candidates.popitem(last=False)
+
     def _cache_partial_tail_block(
         self, request: Request, num_tokens: int, retention_interval: int | None
     ) -> BlockHashWithGroupId | None:
@@ -32,9 +59,6 @@ class AscendMambaManager(MambaManager):
         if (
             self.kv_cache_spec.mamba_type != MambaAttentionBackendEnum.GDN_ATTN
             or request.request_id in self._checkpoints
-            or not 0 < num_tokens < request.num_prompt_tokens
-            or num_tokens % unit
-            or num_tokens % self.block_size == 0
         ):
             return super()._cache_partial_tail_block(request, num_tokens, retention_interval)
 
@@ -44,6 +68,20 @@ class AscendMambaManager(MambaManager):
             self.drop_eagle_checkpoint_block,
             num_hash_lookahead_tokens=self.block_pool.num_hash_lookahead_tokens,
         )
+        if num_tokens == request.num_prompt_tokens and num_tokens != tail:
+            key = self.checkpoint_candidate_key(request, tail)
+            # Allocation has succeeded. A scheduler probe alone must never
+            # count as a sighting, and the terminal state cannot publish tail.
+            if (
+                key is not None
+                and request.num_computed_tokens < tail
+                and self.block_pool.get_cached_block(key, [self.kv_cache_group_id]) is None
+            ):
+                self._remember_checkpoint_candidate(key, request.request_id)
+            return None
+        key = self.checkpoint_candidate_key(request, num_tokens)
+        if key is None:
+            return super()._cache_partial_tail_block(request, num_tokens, retention_interval)
         is_junction = (
             self.shared_prefix_checkpoint
             and num_tokens == request.shared_prefix_boundary
@@ -59,24 +97,17 @@ class AscendMambaManager(MambaManager):
         if blocks[block_index].block_hash_num_tokens == num_tokens:
             return None
 
-        hash_index = num_tokens // unit - 1
-        if hash_index >= len(request.block_hashes):
-            return None
-        key = request.block_hashes[hash_index]
-        if self._checkpoint_candidates is None:
-            self._checkpoint_candidates = OrderedDict()
         candidates = self._checkpoint_candidates
-        first_request = candidates.get(key)
+        first_request = candidates.get(key) if candidates is not None else None
         if first_request is None:
-            candidates[key] = request.request_id
-            if len(candidates) > self.MAX_CHECKPOINT_CANDIDATES:
-                candidates.popitem(last=False)
+            self._remember_checkpoint_candidate(key, request.request_id)
             return None
         if first_request == request.request_id:
             return None
 
         published = super()._cache_partial_tail_block(request, num_tokens, retention_interval)
         if published is not None:
+            assert candidates is not None
             del candidates[key]
         return published
 

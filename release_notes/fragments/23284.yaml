@@ -3,4 +3,5 @@ entries:
   - category: performance
     text: >-
       Admit in-page GDN state checkpoints to the prefix cache on a repeat
-      sighting. Track first sightings in a bounded candidate table.
+      sighting. Track first sightings in a bounded candidate table and skip
+      an otherwise unnecessary first-sighting prefill split within a page.

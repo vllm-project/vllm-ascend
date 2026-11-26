@@ -11,6 +11,7 @@ from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheConfig, KVCache
 
 from vllm_ascend.core.kv_cache_interface import register_ascend_kv_cache_specs
 from vllm_ascend.patch.platform.patch_kv_cache_coordinator import AscendHybridKVCacheCoordinator
+from vllm_ascend.patch.platform.patch_mamba_block_aligned_split import _elide_first_tail_checkpoint
 from vllm_ascend.patch.platform.patch_mamba_manager import AscendMambaManager
 
 
@@ -84,6 +85,45 @@ def test_gdn_partial_checkpoint_candidate_tracking_is_bounded(monkeypatch):
     assert list(manager._checkpoint_candidates) == keys[1:]
     assert _observe_checkpoint(manager, "evicted", keys[0]) is None
     assert _observe_checkpoint(manager, "retained", keys[2]) is not None
+
+
+def test_gdn_first_tail_split_is_elided_until_a_distinct_admitted_request():
+    manager = make_coordinator(MambaAttentionBackendEnum.GDN_ATTN).single_type_managers[2]
+    scheduler = SimpleNamespace(
+        mamba_partial_cache_hit=True,
+        mamba_has_prefill_checkpoint_blocks=False,
+        mamba_shared_prefix_checkpoint=False,
+        vllm_config=SimpleNamespace(kv_transfer_config=None, speculative_config=None),
+        cache_config=SimpleNamespace(block_size=1536),
+        hash_block_size=768,
+        num_hash_lookahead_tokens=0,
+        kv_cache_manager=SimpleNamespace(coordinator=SimpleNamespace(single_type_managers=[manager])),
+    )
+    request = SimpleNamespace(
+        request_id="first",
+        block_hashes=[b"x" * 32],
+        num_prompt_tokens=1024,
+        num_tokens=1024,
+        num_computed_tokens=0,
+        shared_prefix_boundary=0,
+    )
+    assert _elide_first_tail_checkpoint(scheduler, request, 0, 960, 768) == 768
+    scheduler.mamba_shared_prefix_checkpoint = True
+    request.shared_prefix_boundary = 768
+    assert _elide_first_tail_checkpoint(scheduler, request, 0, 1024, 768) == 768
+    request.shared_prefix_boundary = 0
+    assert _elide_first_tail_checkpoint(scheduler, request, 0, 1024, 768) == 1024
+    assert manager._checkpoint_candidates is None
+
+    manager.allocate_new_blocks("first", 1024, 1024)
+    assert manager._cache_partial_tail_block(request, 1024, None) is None
+    assert manager.block_pool.get_cached_block(request.block_hashes[0], [manager.kv_cache_group_id]) is None
+    assert _elide_first_tail_checkpoint(scheduler, request, 0, 1024, 768) == 1024
+    repeated = SimpleNamespace(**vars(request))
+    repeated.request_id = "repeated"
+    assert _elide_first_tail_checkpoint(scheduler, repeated, 0, 1024, 768) == 768
+    manager.allocate_new_blocks("repeated", 768, 768)
+    assert manager._cache_partial_tail_block(repeated, 768, None) is not None
 
 
 def test_partial_boundary_decode_fits_available_blocks():
