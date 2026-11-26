@@ -1,0 +1,7 @@
+pr: 23406
+entries:
+  - category: bugfix
+    text: >-
+      Fixed `vllm bench mm-processor` failing on Ascend with `NotImplementedError`
+      when collecting multimodal encoder timing statistics (`enable_mm_processor_stats=True`).
+      Encoder timing stats are now reported normally.
