@@ -3181,6 +3181,20 @@ def test_update_compilation_modes_allows_full_decode_only_with_hnd_layout(layout
     assert vllm_config.compilation_config.cudagraph_mode == CUDAGraphMode.FULL_DECODE_ONLY
 
 
+@pytest.mark.parametrize("layout", ["HND", "LBHNC", "BLHNC"])
+def test_update_compilation_modes_allows_full_and_piecewise_with_head_major_layout(layout, pin_kv_layout):
+    """FULL_AND_PIECEWISE is (FULL, PIECEWISE): its decode routine replays the
+    full decode graphs FULL_DECODE_ONLY was validated with and only its mixed
+    routine runs piecewise, so no prefill graph is replayed. The gate compares
+    the mode with FULL exactly and must not refuse it."""
+    from vllm_ascend.platform import _update_compilation_modes
+
+    pin_kv_layout(layout)
+    vllm_config = _gate_vllm_config(CUDAGraphMode.FULL_AND_PIECEWISE)
+    _update_compilation_modes(vllm_config, _gate_ascend_config())
+    assert vllm_config.compilation_config.cudagraph_mode == CUDAGraphMode.FULL_AND_PIECEWISE
+
+
 def test_update_compilation_modes_allows_full_mode_hnd_enforce_eager(pin_kv_layout):
     """enforce_eager runs no graphs at all, so the combination is harmless:
     the gate must not over-reject it."""

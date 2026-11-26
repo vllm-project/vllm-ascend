@@ -116,7 +116,10 @@ The head-major KV cache layouts restrict the graph modes. `HND` is the legacy al
 |---|---|---|
 | `FULL` | **Refused at startup** | Supported |
 | `FULL_DECODE_ONLY` | Supported (the validated mode for `HND`/`LBHNC`) | Supported |
-| `NONE` / `PIECEWISE` / `FULL_AND_PIECEWISE` | Not affected by this restriction | Not affected by this restriction |
+| `FULL_AND_PIECEWISE` | Not affected by this restriction: full decode graphs, piecewise mixed | Not affected by this restriction |
+| `NONE` / `PIECEWISE` | Not affected by this restriction | Not affected by this restriction |
+
+`FULL_AND_PIECEWISE` is `(FULL, PIECEWISE)`: its decode routine replays full decode graphs, the same decode path as `FULL_DECODE_ONLY`, and only its mixed prefill/decode routine runs piecewise graphs. It therefore never replays a token-keyed graph captured for a prefill/mixed batch.
 
 With the `HND`/`LBHNC` layout, captured full-graph `npu_fused_infer_attention_score` tasks read the gathered (HND) KV cache, and replaying a token-keyed graph captured for a prefill/mixed batch crashes the NPU stream at the first replay — device error 507011 ("model stream execute failed"), reproduced consistently on Ascend 910C. `BLHNC` is refused for the same combination as a precaution (fail closed): FA3 stores it in the same head-major shape as `HND`, and that path has not been validated with `FULL` graphs. `FULL_DECODE_ONLY` never replays graphs for prefill/mixed batches (they run eager), and its decode replays were validated as exact against eager outputs, so it is the supported graph mode for the head-major layout. The combination is refused at engine startup with an error naming both knobs; unset `VLLM_KV_CACHE_LAYOUT` to use the default `LBNHC` layout, or switch to `cudagraph_mode=FULL_DECODE_ONLY`.
 
