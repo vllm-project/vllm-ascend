@@ -1,7 +1,0 @@
-pr: 23365
-entries:
-  - category: documentation
-    text: >-
-      Expanded the DeepSeek V4.1 Flash 950DT deployment guide with MegaMoE
-      shared-expert fusion, Prefill layerwise Memcache access, and optional
-      SSD caching. The guide includes separate checks for external-pool reuse.
