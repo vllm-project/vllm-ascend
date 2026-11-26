@@ -503,6 +503,8 @@ class AscendMLAMetadataBuilder(MLACommonMetadataBuilder[AscendMLAMetadata]):
                 adapter=adapter,
                 max_query_len=self.decode_threshold,
             )
+            if impl.use_quant_flashmla:
+                self.configure_draft_graph_capture = self.flashmla_state.configure_graph_rows
 
     def _build_external_flashmla(self, common_prefix_len, common, *, retain_for_graph: bool = False):
         """Keep FIA prefill metadata, but build decode inputs from device state."""

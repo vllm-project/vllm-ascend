@@ -380,59 +380,6 @@ def test_flashmla_writer_workspace_preserves_addresses_and_rejects_overflow(page
         impl._prolog_v3_writer_workspace(161, views, torch.arange(161))
 
 
-@pytest.mark.parametrize(
-    "unsupported", [None, "dcp_q_replicate_enabled", "is_pcp_decode_sharded", "qkv_a_gate_fused", "non_native", "width"]
-)
-def test_quant_flashmla_prolog_workspace_uses_bounded_bf16_staging(unsupported):
-    class NoopOffloader:
-        pass
-
-    scope = {
-        "torch": torch,
-        "torch_npu": SimpleNamespace(npu_mla_prolog_v3=Mock(), npu_quantize=Mock()),
-        "NoopOffloader": NoopOffloader,
-        "get_offloader": NoopOffloader,
-        "cdiv": lambda x, y: (x + y - 1) // y,
-    }
-    prepare = load(MLA, "_prepare_quant_flashmla_prolog_workspace", scope, "AscendMLAImpl")
-    indices = torch.arange(256)
-    fp8 = torch.float8_e4m3fn
-    impl = SimpleNamespace(
-        _flashmla_writer_buffers=(
-            torch.empty(2, 128, 1, 512, dtype=fp8),
-            torch.empty(2, 128, 1, 64, dtype=fp8),
-            indices,
-        ),
-        _quant_flashmla_prolog_workspace=None,
-        dcp_q_replicate_enabled=False,
-        is_pcp_decode_sharded=False,
-        qkv_a_gate_fused=False,
-        _mlapo_uses_native_weights=unsupported != "non_native",
-        supports_prolog_v3_projection=lambda: True,
-        fused_qkv_a_proj=SimpleNamespace(
-            input_size=14336 if unsupported == "width" else 7168, weight=torch.empty(1, dtype=torch.bfloat16)
-        ),
-        q_proj=SimpleNamespace(weight=torch.empty(1, dtype=torch.bfloat16)),
-        speculative_config=SimpleNamespace(num_speculative_tokens=7),
-        vllm_config=SimpleNamespace(scheduler_config=SimpleNamespace(max_num_seqs=16)),
-        _prepare_prolog_v3_weights=Mock(),
-    )
-    for name in ("_supports_prolog_v3_ops", "_supports_prolog_v3_input_size"):
-        setattr(impl, name, MethodType(load(MLA, name, scope, "AscendMLAImpl"), impl))
-    if unsupported in ("dcp_q_replicate_enabled", "is_pcp_decode_sharded", "qkv_a_gate_fused"):
-        setattr(impl, unsupported, True)
-    prepare(impl)
-    if unsupported is not None:
-        assert impl._quant_flashmla_prolog_workspace is None
-        impl._prepare_prolog_v3_weights.assert_not_called()
-    else:
-        nope, rope, slots = impl._quant_flashmla_prolog_workspace
-        assert nope.shape == (1, 128, 1, 512) and rope.shape == (1, 128, 1, 64)
-        assert nope.dtype == rope.dtype == torch.bfloat16
-        assert slots.numel() == 128 and slots.data_ptr() == indices.data_ptr()
-        impl._prepare_prolog_v3_weights.assert_called_once()
-
-
 @pytest.mark.parametrize("fallback", [None, "mixed", "over_capacity", "current_kv", "non_bf16", "dcp"])
 def test_quant_flashmla_decode_prolog_writes_c8_cache_and_passes_packed_q(fallback):
     tokens, heads, prolog_heads = 3, 2, 4

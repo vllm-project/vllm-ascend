@@ -10,6 +10,7 @@ import numpy as np
 import pytest
 import torch
 from vllm.config import AttentionConfig
+from vllm.config.compilation import CUDAGraphMode
 from vllm.v1.worker.gpu.dp_utils import DPSyncState
 from vllm.v1.worker.gpu.spec_decode.dspark.speculator import DSparkSpeculator
 
@@ -314,6 +315,11 @@ def test_empty_metadata_is_a_noop(architecture):
 def test_capture_delegates_and_restores_contexts(monkeypatch, architecture, fail):
     manager = graph.DFlashAclGraphManager.__new__(graph.DFlashAclGraphManager)
     manager.speculator = SimpleNamespace(attn_architecture=architecture)
+    descriptors = (object(), object())
+    manager._capture_descs = {CUDAGraphMode.FULL: descriptors}
+    configure = MagicMock()
+    builder = SimpleNamespace(configure_draft_graph_capture=configure) if architecture == "MLA" else SimpleNamespace()
+    group = SimpleNamespace(get_metadata_builder=lambda _: builder)
     events = []
 
     @contextmanager
@@ -336,7 +342,7 @@ def test_capture_delegates_and_restores_contexts(monkeypatch, architecture, fail
         MagicMock(),
         SimpleNamespace(positions=torch.arange(20)),
         object(),
-        [],
+        [[group]],
         object(),
         128,
     )
@@ -352,6 +358,10 @@ def test_capture_delegates_and_restores_contexts(monkeypatch, architecture, fail
     def capture(self, *received, **kwargs):
         assert self is manager
         assert received == forward_args
+        if architecture == "MLA":
+            configure.assert_called_once_with(descriptors)
+        else:
+            configure.assert_not_called()
         # The Ascend wrapper forwards the trailing options as keywords.
         assert kwargs == expected_kwargs
         assert events == ["enter communicator", "enter model"]
