@@ -39,7 +39,11 @@ from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.utils import (
     SizedDict,
     ensure_zmq_recv,
     ensure_zmq_send,
+    worker_rank_to_dcp_rank,
     zmq_ctx,
+)
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.layerwise_cache_layout import (
+    get_layerwise_reuse_layout,
 )
 
 # Rank tuples are (PP, PCP, TP), matching scheduler handshake keys.
@@ -211,9 +215,21 @@ class MooncakePushConnectorWorker(MooncakeBaseConnectorWorker):
         self._prefilling_request_ids: tuple[str, ...] = ()
         self._pending_sends: list[tuple[LayerTransferBatch, Future]] = []
         self._sending_futures: dict[str, list[Future]] = {}
+        # Rotating cache entry name -> stage-local layer index.
+        self._shared_layer_indices: dict[str, int] = {}
+        layout = get_layerwise_reuse_layout(kv_cache_config) if self.kv_transfer_config.is_kv_producer else None
+        if layout is not None:
+            stage_indices = {layer: index for index, layer in enumerate(layout.layers)}
+            self._shared_layer_indices = {
+                name: stage_indices[layout.cache_layer_indices[name]] for name in layout.reused_cache_names
+            }
         self._remote_metadata: SizedDict = SizedDict(max_size=128)
         self._sender_executor: ThreadPoolExecutor | None = None
         self._zmq_context: Context | None = None
+
+    @property
+    def supports_layerwise_buffer_reuse(self) -> bool:
+        return bool(self._shared_layer_indices)
 
     def register_kv_caches(self, kv_caches: dict[str, "torch.Tensor | list[torch.Tensor]"]) -> None:
         super().register_kv_caches(kv_caches)
@@ -242,7 +258,7 @@ class MooncakePushConnectorWorker(MooncakeBaseConnectorWorker):
                 setattr(self, name, getattr(self.transfer_metadata, name))
             self._zmq_context = Context()
             self._sender_executor = ThreadPoolExecutor(
-                max_workers=32,
+                max_workers=self._get_transfer_max_workers(self.vllm_config),
                 initializer=torch.npu.set_device,
                 initargs=(self._device,),
                 thread_name_prefix="MooncakePushSending",
@@ -265,14 +281,18 @@ class MooncakePushConnectorWorker(MooncakeBaseConnectorWorker):
 
     def start_load_kv(self, metadata: MooncakeConnectorMetadata) -> None:
         if self.kv_transfer_config.is_kv_producer:
-            # The previous step's wait_for_save has joined its WRITE tasks.
             for local_request_id, request in metadata.push_send_requests.items():
                 state = self._reqs_send_state.setdefault(request.request_id, SendReqInfo(local_request_id))
                 state.metadata = request
                 if not state.destinations:
                     self._prepare_destinations(state, request)
-                # External hits still need loading on P; HBM hits are ready now.
-                if not request.num_external_tokens and not state.available_layers and request.num_computed_tokens:
+                # External hits and offloaded prefixes become ready during forward.
+                if (
+                    not self._shared_layer_indices
+                    and not request.num_external_tokens
+                    and not state.available_layers
+                    and request.num_computed_tokens
+                ):
                     event = torch.npu.Event()
                     event.record()
                     state.available_layers = {
@@ -315,6 +335,10 @@ class MooncakePushConnectorWorker(MooncakeBaseConnectorWorker):
                 ):
                     continue
                 self._reqs_recv_state[recv_request.request_id] = _ReceiveState(request_id, time.monotonic())
+                if recv_request.do_virtual:
+                    self._pending_completions.pop(recv_request.request_id, None)
+                    self._result_queue.put(("virtual", recv_request.request_id, None))
+                    continue
                 for completion in self._pending_completions.pop(recv_request.request_id, {}).values():
                     self._result_queue.put(("done", recv_request.request_id, completion))
             for request_id, not_dispatched in metadata.push_failed_requests.items():
@@ -557,10 +581,9 @@ class MooncakePushConnectorWorker(MooncakeBaseConnectorWorker):
                 layer_name, remote, tuple(params["consumer_rank"])
             )
             local_dcp_rank = self.dcp_rank if local_dcp_size > 1 else 0
-            # Pull uses the same TP-major/PCP-minor ordering: DCP=PCP
-            # shards within each TP rank; DCP=TP*PCP spans all workers.
-            remote_rank = params["consumer_rank"][2] * remote.pcp_size + params["consumer_rank"][1]
-            remote_dcp_rank = remote_rank % remote_dcp_size
+            _, remote_pcp_rank, remote_tp_rank = params["consumer_rank"]
+            remote_worker_rank = remote_tp_rank * remote.pcp_size + remote_pcp_rank
+            remote_dcp_rank = worker_rank_to_dcp_rank(remote_worker_rank, remote.pcp_size, remote_dcp_size)
             local_interleave = self.transfer_metadata.cp_kv_cache_interleave_size
             remote_interleave = pp.cp_kv_cache_interleave_size
             for side, size, interleave, page_size in (
@@ -678,7 +701,14 @@ class MooncakePushConnectorWorker(MooncakeBaseConnectorWorker):
             return str(exc) or type(exc).__name__
         return None
 
-    def _process_sending_requests(self, wait: bool = False, *, layer_hook: bool = False, force: bool = False) -> None:
+    def _process_sending_requests(
+        self,
+        wait: bool = False,
+        *,
+        layer_hook: bool = False,
+        force: bool = False,
+        wait_for_metadata: bool = False,
+    ) -> None:
         """Collect WRITE results and submit ready layers; never send DONE here."""
         pending = []
         for batch, future in self._pending_sends:
@@ -729,7 +759,8 @@ class MooncakePushConnectorWorker(MooncakeBaseConnectorWorker):
                 if state.error or destination.completion is not None:
                     continue
                 assert destination.metadata_future is not None
-                if not destination.metadata_future.done():
+                # Shared sources wait for discovery while their slot is valid.
+                if not wait_for_metadata and not destination.metadata_future.done():
                     continue
                 try:
                     remote = destination.metadata_future.result()
@@ -819,6 +850,24 @@ class MooncakePushConnectorWorker(MooncakeBaseConnectorWorker):
                         self._send_done_after_transfers, destination.transfer_params, state.error, transfers
                     )
 
+    def _submit_shared_layer_writes(self, shared_names: list[str]) -> None:
+        # Wait for D metadata and submit WRITEs while this layer still owns the slot.
+        self._process_sending_requests(layer_hook=True, force=True, wait_for_metadata=True)
+        # Remove shared entries so later hooks cannot send from a reused slot.
+        for request_id in self._prefilling_request_ids:
+            available_layers = self._reqs_send_state[request_id].available_layers
+            for name in shared_names:
+                available_layers.pop(name, None)
+
+    def wait_for_layer_reuse(self, layer_idx: int) -> None:
+        # The source layer submits its WRITEs before the store's save completion.
+        # Push removes them from the pending list only after they finish.
+        wait_futures(
+            future
+            for batch, future in self._pending_sends
+            if self._shared_layer_indices.get(batch.layer_name) == layer_idx
+        )
+
     def save_kv_layer(self, layer_name: str) -> None:
         if not self.kv_transfer_config.is_kv_producer or not self._prefilling_request_ids:
             return
@@ -826,8 +875,8 @@ class MooncakePushConnectorWorker(MooncakeBaseConnectorWorker):
         if layer_index is None:
             return
         # Share one fence across the physical layer's caches and requests.
-        # Duplicate hooks with no new tokens do not record another device event.
         layer_names = self._layer_names_by_index[layer_index]
+        shared_names = [name for name in layer_names if name in self._shared_layer_indices]
         event = None
         for request_id in self._prefilling_request_ids:
             state = self._reqs_send_state[request_id]
@@ -842,7 +891,9 @@ class MooncakePushConnectorWorker(MooncakeBaseConnectorWorker):
                         event.record()
                     state.available_layers[cache_name] = end, event
         last_layer = layer_index == self._last_layer_index
-        if event is not None or last_layer:
+        if shared_names and event is not None:
+            self._submit_shared_layer_writes(shared_names)
+        elif last_layer or event is not None:
             self._process_sending_requests(layer_hook=True, force=last_layer)
         if last_layer:
             self._send_completions()
@@ -865,6 +916,8 @@ class MooncakePushConnectorWorker(MooncakeBaseConnectorWorker):
             assert state.metadata is not None
             end = state.metadata.num_computed_tokens + state.metadata.num_scheduled_tokens
             for layer_name in self._layer_indices:
+                if layer_name in self._shared_layer_indices:
+                    continue
                 if state.available_layers.get(layer_name, (-1, None))[0] < end:
                     if event is None:
                         event = torch.npu.Event()
@@ -932,9 +985,10 @@ class MooncakePushConnectorWorker(MooncakeBaseConnectorWorker):
                     )
                     pending[source_key] = payload
                     continue
-                if kind == "failed":
+                if kind in ("failed", "virtual"):
                     results.finished_recving.add(state.request_id)
-                    results.failed_recving.add(state.request_id)
+                    if kind == "failed":
+                        results.failed_recving.add(state.request_id)
                     self._finished_requests[request_id] = True
                     del self._reqs_recv_state[request_id]
                     continue

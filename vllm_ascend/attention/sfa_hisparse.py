@@ -29,6 +29,7 @@ from vllm_ascend.distributed.utils import all_gather_async
 from vllm_ascend.hisparse import cache_ops
 from vllm_ascend.hisparse.c8 import C8_ROW_BYTES
 from vllm_ascend.hisparse.pcp import hisparse_write_target, prepare_pcp_query_metadata, prepare_pcp_query_states
+from vllm_ascend.ops.triton.hisparse import _TRITON_SCATTER_MIN_REPRESENTATIVES, scatter_min_representatives
 
 # Bound the temporary D2D packing workspace independently of prefill length.
 _ATTENTION_CHUNK_ROWS = 32
@@ -58,15 +59,27 @@ def finish_hisparse_kv_update(cache, metadata) -> None:
         cache.submit_layer_mirror()
 
 
-class _PrefillColumnSelection(TorchFunctionMode):
-    """Keep a local workaround for the NPU singleton-column indexing defect.
+class _PrefillSourceSelection(TorchFunctionMode):
+    """Keep Core's prefill source selection on NPU with its original semantics.
 
     torch-npu 2.10.0.post7 / CANN 9.2.1 can interleave rows for ``x[:, ids]``
     when x has one column. index_select has the same semantics and returns
-    correct rows. Remove this scope when the supported device stack is fixed.
+    correct rows. Its int64 scatter amin also falls back to CPU; use a scoped
+    device atomic min for the representative-page reduction. Remove these
+    workarounds when the supported device stack handles both operations.
     """
 
     def __torch_function__(self, func, types, args=(), kwargs=None):
+        options = kwargs or {}
+        if func is torch.Tensor.scatter_reduce_ and len(args) == 4:
+            tensor, dim, index, source = args
+            if (
+                tensor.device.type == "npu"
+                and dim == 0
+                and options.get("reduce") == "amin"
+                and options.get("include_self", True)
+            ):
+                return scatter_min_representatives(tensor, index, source)
         if func is torch.Tensor.__getitem__:
             tensor, index = args
             if (
@@ -87,7 +100,7 @@ class AscendHiSparsePrefillStagingPlan(HiSparsePrefillStagingPlan):
     def ensure_gpu_sources(self, resident_state_rows, state_indices, resident_block_size) -> None:
         # Core retains source-key caching, representative-page selection and
         # current Resident/Host masks. The override affects only this call.
-        with _PrefillColumnSelection():
+        with _PrefillSourceSelection():
             super().ensure_gpu_sources(resident_state_rows, state_indices, resident_block_size)
 
 
@@ -117,6 +130,7 @@ class AscendHiSparseMetadata(AscendSFAMetadata):
     req_id_per_token: torch.Tensor | None = None
     num_reqs: int = 0
     prefill: AscendHiSparsePrefillMetadata | None = None
+    prefill_valid_token_mask: torch.Tensor | None = None
     hisparse_for_capture: bool = False
 
 
@@ -128,6 +142,7 @@ class AscendHiSparseMetadataBuilder(AscendSFAMetadataBuilder):
 
     def __init__(self, kv_cache_spec, layer_names, vllm_config, device, **kwargs):
         super().__init__(kv_cache_spec, layer_names, vllm_config, device, metadata_cls=AscendHiSparseMetadata, **kwargs)
+        _TRITON_SCATTER_MIN_REPRESENTATIVES.register_warmup(vllm_config)
         self._request_row_buffers: dict[int | None, torch.Tensor] = {}
         if self.use_pcp:
             # Core PCP creates a new int64 idx_mapping per batch; the resolver
@@ -170,6 +185,10 @@ class AscendHiSparseMetadataBuilder(AscendSFAMetadataBuilder):
             )
             prepare_pcp_query_metadata(metadata, self._pcp_request_state_indices, local_states, write_world_size)
         if metadata.num_prefills:
+            # All layers in this metadata batch share the same token extent.
+            rows = torch.arange(metadata.num_input_tokens, dtype=torch.int32, device=self.device)
+            assert metadata.query_start_loc is not None
+            metadata.prefill_valid_token_mask = rows[:, None] < metadata.query_start_loc[-1]
             seq_lens_cpu = metadata.seq_lens_cpu
             if seq_lens_cpu is None:
                 # Capacity may use an upper bound; the staging plan receives
@@ -695,8 +714,8 @@ class AscendHiSparseImpl(AscendSFAImpl):
         assert metadata.req_id_per_token is not None
         assert metadata.query_start_loc is not None
         if metadata.num_prefills:
-            rows = torch.arange(logical.shape[0], dtype=torch.int32, device=logical.device)
-            logical = torch.where(rows[:, None] < metadata.query_start_loc[-1], logical, -1)
+            assert metadata.prefill_valid_token_mask is not None
+            logical = torch.where(metadata.prefill_valid_token_mask[: logical.shape[0]], logical, -1)
         # Decode's resolver already masks graph padding from this same device
         # scalar. Keep that validation at the producer of physical indices.
         self.index_group.set_logical_topk_ready(self.index_group_index)

@@ -62,16 +62,17 @@ bash format.sh ci
 
 #### Submit the commit
 
+Use `-s` to add the DCO sign-off and write the [commit message](#commit-message-content) in your editor.
+
 ```bash
-# Commit changed files using `-s`
-git commit -sm "your commit info"
+git commit -s
 ```
 
 🎉 Congratulations! You have completed the development environment setup.
 
 ### Testing locally
 
-You can refer to [Testing](./testing.md)  to set up a testing environment and running tests locally.
+You can refer to [Testing](./testing.md) to set up a testing environment and running tests locally.
 
 ### Local native build cache
 
@@ -93,6 +94,18 @@ When contributing changes to this project, you must agree to the DCO. Commits mu
 
 Using `-s` with `git commit` will automatically add this header.
 
+## Commit message content
+
+Keep the commit body brief.
+
+- **Problem** — Describe when the issue occurs and how it affects users or developers.
+  For a feature, explain which capability is missing.
+- **Fix** — Explain what this commit changes and why it addresses the problem.
+- **Validation** — Summarize what you checked and the outcome in one sentence. Mention any relevant check still pending.
+
+Put detailed accuracy and performance results under **How was this patch tested?** in the
+[PR template](https://github.com/vllm-project/vllm-ascend/blob/main/.github/PULL_REQUEST_TEMPLATE.md#how-was-this-patch-tested).
+
 ## PR Title and Classification
 
 Only specific types of PRs will be reviewed. The PR title is prefixed appropriately to indicate the type of change. Please use one of the following:
@@ -102,7 +115,7 @@ Only specific types of PRs will be reviewed. The PR title is prefixed appropriat
 - `[ModelRunner]` for new features or optimization in model runner.
 - `[Platform]` for new features or optimization in platform.
 - `[Worker]` for new features or optimization in worker.
-- `[Core]` for new features or optimization  in the core vllm-ascend logic (such as platform, attention, communicators, model runner)
+- `[Core]` for new features or optimization in the core vllm-ascend logic (such as platform, attention, communicators, model runner).
 - `[Kernel]` for changes affecting compute kernels and ops.
 - `[BugFix]` for bug fixes.
 - `[Doc]` for documentation fixes and improvements.

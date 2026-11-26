@@ -6,6 +6,7 @@
 #include <torch_npu/csrc/npu/Module.h>
 #include "acl/acl_base_rt.h"
 #include "utils.h"
+#include "attention/qsa_union_inputs/qsa_union_inputs_torch_adpt.h"
 
 /*
  * How to write a meta implementation for a custom operator (meta kernel):
@@ -318,56 +319,6 @@ at::Tensor npu_generic_block_sparse_attention_metadata_meta(
         sparse_block_idx.options().dtype(at::kInt).device(c10::kMeta));
 }
 
-std::tuple<at::Tensor, at::Tensor> npu_generic_block_sparse_attention_meta(
-    const at::Tensor &q, const at::Tensor &k, const at::Tensor &v,
-    const at::Tensor &sparse_block_idx, const at::Tensor &sparse_block_count,
-    at::IntArrayRef block_shape,
-    const c10::optional<at::Tensor> &metadata,
-    const c10::optional<at::Tensor> &attn_mask,
-    const c10::optional<at::Tensor> &q_dequant_scale,
-    const c10::optional<at::Tensor> &k_dequant_scale,
-    const c10::optional<at::Tensor> &v_dequant_scale,
-    const c10::optional<at::Tensor> &p_quant_scale,
-    const c10::optional<at::Tensor> &cu_seqlens_q,
-    const c10::optional<at::Tensor> &cu_seqlens_kv,
-    const c10::optional<at::Tensor> &seqused_q,
-    const c10::optional<at::Tensor> &seqused_kv,
-    const c10::optional<at::Tensor> &block_table,
-    c10::string_view layout_q, c10::string_view layout_kv,
-    int64_t layout_sparse_pattern, double softmax_scale,
-    int64_t mask_mode, int64_t quant_mode, double dst_type_max,
-    int64_t softmax_precision, int64_t win_left, int64_t win_right,
-    bool return_softmax_lse, int64_t residual_block_mode,
-    bool is_consistent_topk,
-    c10::optional<at::ScalarType> attention_out_dtype)
-{
-    at::ScalarType output_dtype;
-    if (attention_out_dtype.has_value()) {
-        output_dtype = attention_out_dtype.value();
-    } else {
-        TORCH_CHECK(quant_mode == 0,
-                    "attention_out_dtype must be specified when quant_mode != 0");
-        output_dtype = q.scalar_type();
-    }
-    auto output = at::empty_symint(
-        q.sym_sizes(), q.options().dtype(output_dtype).device(c10::kMeta));
-
-    c10::SymDimVector lse_shape{c10::SymInt(0)};
-    if (return_softmax_lse) {
-        const auto layout_q_str = std::string(layout_q);
-        if (layout_q_str == "TND") {
-            lse_shape = {q.sym_size(0), q.sym_size(1), c10::SymInt(1)};
-        } else if (layout_q_str == "BNSD") {
-            lse_shape = {q.sym_size(0), q.sym_size(1), q.sym_size(2), c10::SymInt(1)};
-        } else {
-            lse_shape = {q.sym_size(0), q.sym_size(2), q.sym_size(1), c10::SymInt(1)};
-        }
-    }
-    auto softmax_lse = at::empty_symint(
-        lse_shape, q.options().dtype(at::kFloat).device(c10::kMeta));
-    return {output, softmax_lse};
-}
-
 at::Tensor npu_sparse_flash_mla_metadata_meta(
     int64_t num_heads_q, int64_t num_heads_kv, int64_t head_dim,
     const c10::optional<at::Tensor> &cu_seqlens_q,
@@ -602,6 +553,26 @@ std::tuple<at::Tensor, at::Tensor> npu_rms_norm_cast_meta(
     return {y, y_fp32};
 }
 
+std::tuple<at::Tensor, at::Tensor, at::Tensor> qsa_union_inputs_meta(
+    const at::Tensor& compact_indices,
+    const at::Tensor& visible_lengths,
+    const at::Tensor& group_row_map)
+{
+    // dynamic union group count is preserved with sym_size(0).
+    // symbolic-meta-ok: candidate width is fixed by the model's top-k configuration.
+    const int64_t width = checked_qsa_union_width(compact_indices, visible_lengths, group_row_map);
+    const c10::SymInt groups = group_row_map.sym_size(0);
+    at::Tensor union_idx = at::empty_symint(
+        {c10::SymInt(1), groups, c10::SymInt(width)},
+        compact_indices.options());
+    at::Tensor union_count = at::empty_symint(
+        {c10::SymInt(1), groups}, compact_indices.options());
+    at::Tensor exact_mask = at::empty_symint(
+        {c10::SymInt(1), groups, c10::SymInt(width * 4)},
+        compact_indices.options());
+    return {union_idx, union_count, exact_mask};
+}
+
 at::Tensor npu_sign_bits_pack_meta(const at::Tensor& input,
                                    const int64_t size) {
     auto ySize = ceil_div(input.sym_size(0), 8);
@@ -738,7 +709,8 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> moe_gating_top_k_hash_meta(
     bool out_flag,
     const c10::optional<at::Tensor>& bias_vl_opt,
     int64_t image_sentinel_lo,
-    int64_t image_sentinel_count)
+    int64_t image_sentinel_count,
+    const c10::optional<at::Tensor>& expert_replica_routing_table_opt)
 {
     TORCH_CHECK(x.dim() == 2, "x must be 2D, but got dim=", x.dim());
     TORCH_CHECK(
@@ -755,6 +727,17 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> moe_gating_top_k_hash_meta(
                 "renorm can only be 0 currently, but got ", renorm);
     TORCH_CHECK(norm_type == 0 || norm_type == 1 || norm_type ==2,
                 "norm_type must be 0 (softmax) or 1 (sigmoid) or 2 (softplus), but got ", norm_type);
+
+    if (expert_replica_routing_table_opt.has_value() && expert_replica_routing_table_opt->defined()) {
+        const auto& table = *expert_replica_routing_table_opt;
+        TORCH_CHECK(group_count == 1 && norm_type == 2,
+                    "Fused EPLB mapping requires ungrouped sqrtsoftplus routing");
+        TORCH_CHECK(table.dim() == 2 && table.sym_size(0) > 0 && table.sym_size(1) == x.sym_size(1),
+                    "EPLB table must have shape [period, logical_experts]");
+        TORCH_CHECK(table.scalar_type() == at::kInt && table.is_contiguous(),
+                    "EPLB table must be contiguous int32");
+        TORCH_CHECK(table.device() == x.device(), "EPLB table must be on the logits device");
+    }
 
     TORCH_CHECK(eps > 0.0, "eps must be > 0, but got ", eps);
     TORCH_CHECK(routed_scaling_factor > 0.0,
@@ -1023,6 +1006,26 @@ at::Tensor npu_sparse_attn_sharedkv_metadata_meta(
             torch::dtype(torch::kInt32).device(at::Device(device_str)));
     }
     return output;
+}
+
+at::Tensor npu_quant_sparse_lightning_indexer_metadata_meta(
+    int64_t num_heads_q, int64_t num_heads_k, int64_t head_dim, int64_t topk, int64_t quant_mode,
+    const at::Tensor &candidate_block_length,
+    const c10::optional<at::Tensor> &cu_seqlens_q, const c10::optional<at::Tensor> &cu_seqlens_k,
+    const c10::optional<at::Tensor> &seqused_q, const c10::optional<at::Tensor> &seqused_k,
+    const c10::optional<at::Tensor> &cmp_residual_k, int64_t batch_size,
+    int64_t max_seqlen_q, int64_t max_seqlen_k,
+    const c10::string_view layout_q, const c10::string_view layout_k, int64_t mask_mode, int64_t cmp_ratio)
+{
+    TORCH_CHECK(candidate_block_length.scalar_type() == at::kInt,
+                "QSLI candidate_block_length must be int32");
+    TORCH_CHECK(candidate_block_length.dim() == 2 && candidate_block_length.sym_size(1) == 1,
+                "QSLI candidate_block_length must have shape [T, 1]");
+    TORCH_CHECK(candidate_block_length.is_contiguous(), "QSLI candidate lengths must be contiguous");
+    constexpr int64_t OUTPUT_SIZE = 1024;
+    return at::empty_symint(
+        c10::SymDimVector{c10::SymInt(OUTPUT_SIZE)},
+        candidate_block_length.options().dtype(torch::kInt32));
 }
 
 at::Tensor npu_quant_lightning_indexer_v2_metadata_meta(
@@ -1866,8 +1869,6 @@ TORCH_LIBRARY_IMPL_EXPAND(CONCAT(_C, _ascend), Meta, ops) {
     ops.impl("npu_sparse_flash_attention", &vllm_ascend::meta::npu_sparse_flash_attention_meta);
     ops.impl("npu_generic_block_sparse_attention_metadata",
              &vllm_ascend::meta::npu_generic_block_sparse_attention_metadata_meta);
-    ops.impl("npu_generic_block_sparse_attention",
-             &vllm_ascend::meta::npu_generic_block_sparse_attention_meta);
     ops.impl("npu_sparse_flash_mla_metadata", &vllm_ascend::meta::npu_sparse_flash_mla_metadata_meta);
     ops.impl("npu_sparse_flash_mla", &vllm_ascend::meta::npu_sparse_flash_mla_meta);
     ops.impl("npu_k2q_csr", &vllm_ascend::meta::npu_k2q_csr_meta);
@@ -1888,6 +1889,7 @@ TORCH_LIBRARY_IMPL_EXPAND(CONCAT(_C, _ascend), Meta, ops) {
     // Add_Rms_Norm_Bias
     ops.impl("npu_add_rms_norm_bias", &vllm_ascend::meta::npu_add_rms_norm_bias_meta);
     ops.impl("npu_rms_norm_cast", &vllm_ascend::meta::npu_rms_norm_cast_meta);
+    ops.impl("qsa_union_inputs", &vllm_ascend::meta::qsa_union_inputs_meta);
     // transpose_kv_cache_by_block
     ops.impl("transpose_kv_cache_by_block", &vllm_ascend::meta::transpose_kv_cache_by_block_meta);
     // npu_sign_bits_pack
@@ -1899,6 +1901,8 @@ TORCH_LIBRARY_IMPL_EXPAND(CONCAT(_C, _ascend), Meta, ops) {
     ops.impl("compressor_metadata", &vllm_ascend::meta::compressor_metadata_meta);
     ops.impl("npu_quant_lightning_indexer_v2", &vllm_ascend::meta::npu_quant_lightning_indexer_v2_meta);
     ops.impl("npu_quant_lightning_indexer_v2_metadata", &vllm_ascend::meta::npu_quant_lightning_indexer_v2_metadata_meta);
+    ops.impl("npu_quant_sparse_lightning_indexer_metadata",
+             &vllm_ascend::meta::npu_quant_sparse_lightning_indexer_metadata_meta);
     ops.impl("npu_sparse_attn_sharedkv", &vllm_ascend::meta::npu_sparse_attn_sharedkv_meta);
     ops.impl("npu_sparse_attn_sharedkv_metadata", &vllm_ascend::meta::npu_sparse_attn_sharedkv_metadata_meta);
     ops.impl("npu_hc_post", &vllm_ascend::meta::npu_hc_post_meta);

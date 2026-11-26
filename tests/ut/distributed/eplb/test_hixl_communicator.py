@@ -73,7 +73,7 @@ class _Engine:
         self.pending.remove(request)
         return 0, 1
 
-    def disconnect(self, _remote_engine):
+    def disconnect(self, _remote_engine, _timeout_in_millis=1000):
         return 0
 
     def deregister_mem(self, handle):

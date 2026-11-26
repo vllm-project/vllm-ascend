@@ -6,6 +6,7 @@ from types import SimpleNamespace as NS
 from unittest.mock import Mock
 
 import pytest
+import torch
 
 from vllm_ascend.models.qwen4_exp import cpu_length_sync as policy
 
@@ -43,6 +44,26 @@ def runner():
 def test_incomplete_runtime_keeps_exact_lengths():
     for runtime in (NS(), NS(ascend_config=NS())):
         assert policy.can_skip_qwen_cpu_length_sync(runtime) is False
+
+
+def test_ple_context_uses_each_pcp_segment_start(runner):
+    state = runner.model_state
+    state.ngram_context = torch.empty((3, 2), dtype=torch.int32)
+    state.ngram_context_offsets = torch.tensor([-2, -1])
+    state.ngram_eos_token_id = 99
+    batch = NS(
+        pcp=object(),
+        num_reqs=2,
+        num_reqs_after_padding=3,
+        seq_lens=torch.tensor([2, 8]),
+        query_start_loc=torch.tensor([0, 2, 4]),
+        idx_mapping=torch.tensor([0, 0]),
+    )
+    req_states = NS(all_token_ids=NS(gpu=torch.arange(10, 18, dtype=torch.int32).view(1, -1)))
+
+    context = state._prepare_ngram_context(batch, req_states)
+
+    torch.testing.assert_close(context, torch.tensor([[99, 99], [14, 15], [99, 99]], dtype=torch.int32))
 
 
 def test_supported_model_enables_policy_by_default(runner):

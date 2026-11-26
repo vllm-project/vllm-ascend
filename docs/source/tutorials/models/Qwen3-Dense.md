@@ -6,7 +6,7 @@ Qwen3 is the latest generation of large language models in Qwen series, offering
 
 This document will demonstrate the main validation steps for Qwen3 Dense models in the vLLM-Ascend environment, including supported features, environment preparation, model quantization, single-node and multi-node deployment, as well as accuracy and performance evaluation. By tailoring service-level configurations to fit different use cases, you can ensure optimal performance across various scenarios.
 
-The Qwen3 Dense models are first supported in v0.8.4rc2. W8A8 quantization was first supported in v0.8.4rc2, and W4A4 is supported since v0.11.0rc1. Atlas 300I DUO uses the W8A8SC-310 quantized weights listed in this tutorial. This document is validated and written based on **vLLM-Ascend v0.21.0**. All **v0.21.0 and later versions** can run stably. To use the latest features, it is recommended to use the latest release candidate or official version.
+The Qwen3 Dense models are first supported in v0.8.4rc2. W8A8 quantization was first supported in v0.8.4rc2, and W4A4 is supported since v0.11.0rc1. Atlas 300I Duo uses the W8A8SC-310 quantized weights listed in this tutorial. This document is validated and written based on **vLLM-Ascend v0.21.0**. All **v0.21.0 and later versions** can run stably. To use the latest features, it is recommended to use the latest release candidate or official version.
 
 ## 2 Supported Features
 
@@ -38,13 +38,13 @@ The following model variants are available. It is recommended to download the mo
 | Qwen3-32B-W4A4 | W4A4 | 1 Atlas A3 inference products (64GB × 16) or 1 Atlas A2 inference products (64GB × 8) | [ModelScope](https://www.modelscope.cn/models/vllm-ascend/Qwen3-32B-W4A4) |
 | Qwen3-32B-W8A8 | W8A8 | 1 Atlas A3 inference products (64GB × 16) or 1 Atlas A2 inference products (64GB × 8) | [ModelScope](https://www.modelscope.cn/models/vllm-ascend/Qwen3-32B-W8A8) |
 
-**Quantized Versions for Atlas 300I DUO:**
+**Quantized Versions for Atlas 300I Duo:**
 
 | Model | Quantization | Hardware Requirement | Download |
 |-------|-------------|---------------------|----------|
-| Qwen3-8B-W8A8SC | W8A8SC | Atlas 300I DUO (TP1) | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/Qwen3-8B-w8a8sc-310-vllm) |
-| Qwen3-14B-W8A8SC | W8A8SC | Atlas 300I DUO (TP1) | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/Qwen3-14B-w8a8sc-310-vllm) |
-| Qwen3-32B-W8A8SC | W8A8SC | Atlas 300I DUO (TP4) | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/Qwen3-32B-w8a8sc-310-vllm) |
+| Qwen3-8B-W8A8SC | W8A8SC | Atlas 300I Duo (TP1) | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/Qwen3-8B-w8a8sc-310-vllm) |
+| Qwen3-14B-W8A8SC | W8A8SC | Atlas 300I Duo (TP1) | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/Qwen3-14B-w8a8sc-310-vllm) |
+| Qwen3-32B-W8A8SC | W8A8SC | Atlas 300I Duo (TP4) | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/Qwen3-32B-w8a8sc-310-vllm) |
 
 These are the recommended numbers of cards, which can be adjusted according to the actual situation.
 
@@ -52,11 +52,13 @@ These are the recommended numbers of cards, which can be adjusted according to t
 
     The W4A4, W8A8, and W8A8SC-310 quantized weights listed above are currently published on ModelScope only, so no Hugging Face link is provided for them.
 
->**Path description**: Download the model weights to a directory of your choice and record it, for example `/mnt/weight/Qwen3-32B-W8A8`. In the deployment commands below, `your_model_path` is a placeholder: replace it with the directory recorded here.
+> **Path description**: Download the model weights to a directory of your choice and record it, for example `/mnt/weight/Qwen3-32B-W8A8`. In the deployment commands below, `your_model_path` is a placeholder: replace it with the directory recorded here.
 
 ## 4 Installation
 
 ### 4.1 Docker Image Installation
+
+{% include "getting_started/installation/ascend_docker_runtime.inc.md" %}
 
 You can use the official all-in-one Docker image for Qwen3 Dense models.
 
@@ -78,42 +80,19 @@ Start the docker image on each node.
     export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}-a3
 
     docker run --rm \
+        -e ASCEND_VISIBLE_DEVICES=0-15 \
         --name vllm-ascend-env \
         --shm-size=1g \
         --net=host \
-        --device /dev/davinci0 \
-        --device /dev/davinci1 \
-        --device /dev/davinci2 \
-        --device /dev/davinci3 \
-        --device /dev/davinci4 \
-        --device /dev/davinci5 \
-        --device /dev/davinci6 \
-        --device /dev/davinci7 \
-        --device /dev/davinci8 \
-        --device /dev/davinci9 \
-        --device /dev/davinci10 \
-        --device /dev/davinci11 \
-        --device /dev/davinci12 \
-        --device /dev/davinci13 \
-        --device /dev/davinci14 \
-        --device /dev/davinci15 \
-        --device /dev/davinci_manager \
-        --device /dev/devmm_svm \
-        --device /dev/hisi_hdc \
-        -v /usr/local/dcmi:/usr/local/dcmi \
         -v /usr/local/Ascend/driver/tools/hccn_tool:/usr/local/Ascend/driver/tools/hccn_tool \
-        -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
-        -v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
-        -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
-        -v /etc/ascend_install.info:/etc/ascend_install.info \
         -v /root/.cache:/root/.cache \
         -it $IMAGE bash
     ```
 
     !!! note
 
-        Atlas A3 inference products have 8 NPUs with dual-die design (16 chips total: `/dev/davinci[0-15]`).
-        If you are on a shared machine, map only the chips you need (e.g., `/dev/davinci[0-7]` for NPU 0-3).
+        Atlas A3 inference products have 8 NPUs with a dual-die design, so `ASCEND_VISIBLE_DEVICES=0-15` selects all 16 DIE devices.
+        If you are on a shared machine, select only the devices you need, for example `ASCEND_VISIBLE_DEVICES=0-7` for NPU 0-3.
 
 === "Atlas A2 inference products"
 
@@ -122,31 +101,16 @@ Start the docker image on each node.
     export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}
 
     docker run --rm \
+        -e ASCEND_VISIBLE_DEVICES=0-7 \
         --name vllm-ascend-env \
         --shm-size=1g \
         --net=host \
-        --device /dev/davinci0 \
-        --device /dev/davinci1 \
-        --device /dev/davinci2 \
-        --device /dev/davinci3 \
-        --device /dev/davinci4 \
-        --device /dev/davinci5 \
-        --device /dev/davinci6 \
-        --device /dev/davinci7 \
-        --device /dev/davinci_manager \
-        --device /dev/devmm_svm \
-        --device /dev/hisi_hdc \
-        -v /usr/local/dcmi:/usr/local/dcmi \
         -v /usr/local/Ascend/driver/tools/hccn_tool:/usr/local/Ascend/driver/tools/hccn_tool \
-        -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
-        -v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
-        -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
-        -v /etc/ascend_install.info:/etc/ascend_install.info \
         -v /root/.cache:/root/.cache \
         -it $IMAGE bash
     ```
 
-=== "Atlas 300I DUO"
+=== "Atlas 300I Duo"
 
     ```bash
 
@@ -154,24 +118,9 @@ Start the docker image on each node.
     export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}-310p
 
     docker run --rm \
+    -e ASCEND_VISIBLE_DEVICES=0-7 \
     --name vllm-ascend \
     --shm-size=10g \
-    --device /dev/davinci0 \
-    --device /dev/davinci1 \
-    --device /dev/davinci2 \
-    --device /dev/davinci3 \
-    --device /dev/davinci4 \
-    --device /dev/davinci5 \
-    --device /dev/davinci6 \
-    --device /dev/davinci7 \
-    --device /dev/davinci_manager \
-    --device /dev/devmm_svm \
-    --device /dev/hisi_hdc \
-    -v /usr/local/dcmi:/usr/local/dcmi \
-    -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
-    -v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
-    -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
-    -v /etc/ascend_install.info:/etc/ascend_install.info \
     -v /root/.cache:/root/.cache \
     -p 8080:8080 \
     -it $IMAGE bash
@@ -183,7 +132,7 @@ Installation Verification:
 After starting the container, run the following command to verify the installation:
 
 ```bash
-# The A2/A3 tabs name the container vllm-ascend-env; the Atlas 300I DUO tab names it vllm-ascend.
+# The A2/A3 tabs name the container vllm-ascend-env; the Atlas 300I Duo tab names it vllm-ascend.
 docker ps | grep vllm-ascend
 ```
 
@@ -201,7 +150,7 @@ If you prefer to build from source instead of using the Docker image, install vL
 
 !!! note
 
-    For Atlas 300I DUO, source installation may pull in `triton` and `triton-ascend`. Uninstall them before running vLLM-Ascend on Atlas 300I DUO:
+    For Atlas 300I Duo, source installation may pull in `triton` and `triton-ascend`. Uninstall them before running vLLM-Ascend on Atlas 300I Duo:
 
     ```bash
     pip uninstall -y triton-ascend triton
@@ -272,7 +221,7 @@ Single-node deployment completes both Prefill and Decode within the same node, s
         --additional-config '{"ascend_compilation_config": {"fuse_norm_quant": false}}'
     ```
 
-=== "Atlas 300I DUO"
+=== "Atlas 300I Duo"
 
     !!! note
 
@@ -415,7 +364,7 @@ The following is an example configuration for the accuracy evaluation config fil
 
 **Accuracy Evaluation Config File:**
 
-```bash
+```python
 # Example configuration: benchmarks/ais_bench/benchmark/configs/models/vllm_api/vllm_api_general_chat.py
 from ais_bench.benchmark.models import VLLMCustomAPIChat
 from ais_bench.benchmark.utils.postprocess.model_postprocessors import extract_non_reasoning_content
@@ -460,7 +409,7 @@ For setup details, including installation, dataset download, and configuration, 
 
 The following is an example configuration for the performance evaluation config file:
 
-```bash
+```python
 # Example configuration: benchmarks/ais_bench/benchmark/configs/models/vllm_api/vllm_api_stream_chat.py
 from ais_bench.benchmark.models import VLLMCustomAPIChat
 from ais_bench.benchmark.utils.postprocess.model_postprocessors import extract_non_reasoning_content
@@ -524,7 +473,7 @@ vllm bench serve \
     --served-model-name qwen3 \
     --port <port> \
     --dataset-name random \
-    --random-input 200 \
+    --random-input-len 200 \
     --num-prompts 200 \
     --request-rate 1 \
     --save-result \

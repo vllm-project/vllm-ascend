@@ -68,7 +68,6 @@ from vllm_ascend.models.minimax_m3.ops.msa_m3_union import (
 )
 from vllm_ascend.ops.linear import AscendColumnParallelLinear
 from vllm_ascend.ops.linear_op import get_parallel_op
-from vllm_ascend.utils import vllm_version_is
 
 # Minimum used by heterogeneous-KV alignment; the final FP8 cache block is 128.
 _MINIMAX_M3_FP8_KV_CACHE_BLOCK_SIZE = 64
@@ -1321,19 +1320,6 @@ class AscendMiniMaxM3QKVParallelLinearWithIndexer(QKVParallelLinear):
         if self.custom_op is not None:
             return self.custom_op.apply(input_)
         return super().forward(input_)
-
-    def validate_shard_id(self, shard_id: Any, param: Parameter | None = None) -> bool:
-        if not vllm_version_is("0.33.0"):
-            return super().validate_shard_id(shard_id, param)
-        if shard_id is None:
-            return True
-        if shard_id not in self.shard_ids:
-            raise ValueError(
-                "Shard id for AscendMiniMaxM3QKVParallelLinearWithIndexer must be "
-                "one of 'q', 'k', 'v', 'index_q', 'index_k'; got "
-                f"{shard_id}."
-            )
-        return True
 
     def _get_shard_offset_mapping(self, loaded_shard_id: str) -> int | None:
         h = self.head_size
