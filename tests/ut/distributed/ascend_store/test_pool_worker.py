@@ -1852,9 +1852,9 @@ class TestKVPoolWorkerRegisterAndTransfer(unittest.TestCase):
         )
         meta = AscendConnectorMetadata(set(), set())
         meta.add_request(req)
-        for role in ("kv_producer", "kv_both"):
-            with self.subTest(role=role):
-                worker = self._make_worker(kv_role=role, extra_config={"backend": "mooncake", "load_async": False})
+        for backend, role in product(("mooncake", "memcache"), ("kv_producer", "kv_both")):
+            with self.subTest(backend=backend, role=role):
+                worker = self._make_worker(kv_role=role, extra_config={"backend": backend, "load_async": False})
                 operations = MagicMock()
                 operations.get.return_value = [0]
                 worker.m_store.get = operations.get
@@ -4393,18 +4393,22 @@ class TestKVPoolWorkerTpMismatch(unittest.TestCase):
         self.assertEqual(len(stats.data["load_get_duration_seconds"]), 1)
 
     def test_tp_mismatch_get_orders_only_synchronous_prefill_reads(self):
-        for role, load_async, expected_sync in (
-            ("kv_producer", False, True),
-            ("kv_both", False, True),
-            ("kv_consumer", False, False),
-            ("kv_producer", True, False),
+        for backend, (role, load_async, expected_sync) in product(
+            ("mooncake", "memcache"),
+            (
+                ("kv_producer", False, True),
+                ("kv_both", False, True),
+                ("kv_consumer", False, False),
+                ("kv_producer", True, False),
+            ),
         ):
-            with self.subTest(role=role, load_async=load_async):
+            with self.subTest(backend=backend, role=role, load_async=load_async):
                 worker = self._make_strided_worker()
+                worker.backend_name = backend
                 worker.kv_role = role
                 worker.load_async = load_async
                 operations = MagicMock()
-                operations.get.return_value = [0]
+                operations.get.side_effect = lambda keys, *_: [0] * len(keys)
                 worker.m_store.get = operations.get
 
                 with patch.object(torch.npu, "current_stream", return_value=operations):
