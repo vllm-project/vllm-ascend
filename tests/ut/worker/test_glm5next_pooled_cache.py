@@ -307,6 +307,36 @@ def test_hisparse_fp8_indexer_views_preserve_slab_offset_and_gap(model_version):
     assert not torch.count_nonzero(raw[12480:])
 
 
+def test_hisparse_bf16_indexer_views_split_contiguous_manager_pages():
+    spec = replace(
+        _make_specs()[INDEXER],
+        model_version="glm5_next",
+        cache_role=SparseCacheRole.INDEXER,
+        block_size=384,
+        tokens_per_state=4,
+        head_size=128,
+        dtype=torch.bfloat16,
+        scale_dim=0,
+        state_content_bytes=256,
+    )
+    page, offset = 96 * 128, 64
+    raw = torch.zeros(offset + 4 * page, dtype=torch.bfloat16)
+    core_view = raw[offset : offset + 2 * page].view(2, 1, 96, 128)
+    caches = {INDEXER: core_view}
+    group = KVCacheGroupSpec(layer_names=[INDEXER], kv_cache_spec=spec, role=KVCacheGroupRole.HISPARSE_INDEXER)
+    _bind_pooled_indexer_views(SimpleNamespace(kv_cache_groups=[group]), caches)
+    (keys,) = caches[INDEXER]
+    assert keys.shape == (6, 32, 1, 128)
+    assert keys.data_ptr() == core_view.data_ptr()
+    keys[3].fill_(7)
+    assert torch.all(core_view[1, 0, :32] == 7)
+    assert not torch.count_nonzero(raw[: offset + page])
+    assert not torch.count_nonzero(raw[offset + page + 32 * 128 :])
+    with pytest.raises(ValueError, match="contiguous whole kernel pages"):
+        strided = raw.as_strided((2, 1, 96, 128), (2 * page, page, 128, 1), storage_offset=offset)
+        _bind_pooled_indexer_views(SimpleNamespace(kv_cache_groups=[group]), {INDEXER: strided})
+
+
 def test_cann_tail_views_keep_interleaved_rows_and_shared_page_stride(monkeypatch):
     config, _, plan = _make_plan()
     config.model_config.get_num_layers = lambda _: 2

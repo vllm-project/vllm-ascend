@@ -17,11 +17,13 @@ from vllm.v1.kv_cache_interface import (
     UniformTypeKVCacheSpecs,
 )
 
+from vllm_ascend.attention.utils import SFA_QSFA_TILE_SIZE
 from vllm_ascend.core.kv_cache_interface import (
     AlignedKVCacheTensor,
     AscendIndexerKPoolTailSpec,
     AscendMLAAttentionSpec,
     AscendSFAIndexerCacheSpec,
+    get_kv_cache_compression_ratio,
     is_pooled_hisparse_indexer,
 )
 
@@ -277,6 +279,11 @@ def view_hisparse_kpool_cache(cache: torch.Tensor, spec: AscendMLAAttentionSpec)
     ):
         raise ValueError("Invalid HiSparse KPool cache geometry.")
     if not spec.scale_dim:
+        if spec.dtype == torch.bfloat16:
+            kernel_rows = SFA_QSFA_TILE_SIZE // get_kv_cache_compression_ratio(spec)
+            if kernel_rows <= 0 or rows % kernel_rows or cache.stride(0) != rows * width:
+                raise ValueError("HiSparse BF16 KPool requires contiguous whole kernel pages.")
+            return (cache.view(-1, kernel_rows, 1, width),)
         return (cache.transpose(1, 2),)
 
     # K followed by scales in each manager page, the same component

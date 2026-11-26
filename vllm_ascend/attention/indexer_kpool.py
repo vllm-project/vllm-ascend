@@ -1209,6 +1209,14 @@ class Glm5NextKPoolIndexerBackend(nn.Module):
             query = q_values.to(indexer_cache.dtype)
             select = partial(self._pool_key_indexer, self._cann_pool_key_indexer)
             extra = {}
+        block_table = row_shard.block_table if row_shard is not None else indexer_metadata.block_table
+        if self.use_hisparse_topk and indexer_cache.dtype == torch.bfloat16:
+            page_ratio, remainder = divmod(indexer_metadata.block_size, indexer_cache.size(1))
+            if remainder or page_ratio < 1:
+                raise ValueError("HiSparse KPool subpages must exactly divide the manager page.")
+            if page_ratio > 1:
+                subpages = torch.arange(page_ratio, dtype=block_table.dtype, device=block_table.device)
+                block_table = (block_table.unsqueeze(-1) * page_ratio + subpages).flatten(1)
         indices, _ = select(
             query,
             indexer_cache,
@@ -1216,7 +1224,7 @@ class Glm5NextKPoolIndexerBackend(nn.Module):
             scoring.pool_tail,
             actual_seq_q=scoring.cum_query_lens,
             actual_seq_k=scoring.seq_lens,
-            block_table=row_shard.block_table if row_shard is not None else indexer_metadata.block_table,
+            block_table=block_table,
             layout_q="TND",
             layout_k="PA_BBND",
             topk=self.topk_tokens,

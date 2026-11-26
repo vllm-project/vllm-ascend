@@ -50,29 +50,44 @@ from vllm_ascend.ops.triton import sfa_indexer_store
 
 
 @pytest.mark.parametrize(
-    ("model_type", "pool_size", "hisparse_enabled", "indexer_dtype", "pcp", "a5", "expected"),
+    ("model_type", "pool_size", "hisparse_enabled", "indexer_dtype", "pcp", "cache_dtype", "a5", "expected"),
     [
-        ("glm5_next_text", 4, True, "fp8", 1, True, True),
-        ("other_pooled_model", 4, True, "fp8", 1, True, True),
-        ("glm5_next_text", None, True, "fp8", 1, True, False),
-        ("kimi_k31", None, True, "fp8", 1, True, False),
-        ("glm5_next_text", 4, False, "fp8", 1, True, False),
-        ("glm5_next_text", 8, True, "fp8", 1, True, False),
-        ("glm5_next_text", 4, True, "int8", 1, True, False),
-        ("glm5_next_text", 4, True, "fp8", 2, True, False),
-        ("glm5_next_text", 4, True, "fp8", 1, False, False),
+        ("glm5_next_text", 4, True, "fp8", 1, "fp8", True, True),
+        ("other_pooled_model", 4, True, "fp8", 1, "fp8", True, True),
+        ("glm5_next_text", None, True, "fp8", 1, "fp8", True, False),
+        ("kimi_k31", None, True, "fp8", 1, "fp8", True, False),
+        ("glm5_next_text", 4, False, "fp8", 1, "fp8", True, False),
+        ("glm5_next_text", 8, True, "fp8", 1, "fp8", True, False),
+        ("glm5_next_text", 4, True, "int8", 1, "fp8", True, False),
+        ("glm5_next_text", 4, True, "fp8", 2, "fp8", True, False),
+        ("glm5_next_text", 4, True, "fp8", 1, "fp8", False, False),
+        ("glm5_next_text", 4, True, "auto", 1, "int8", False, True),
+        ("glm5_next_text", 4, True, "bf16", 1, "int8", False, True),
+        ("glm5_next_text", 4, True, "bf16", 1, "int8", True, False),
+        ("glm5_next_text", 4, True, "int8", 1, "int8", False, False),
+        ("other_pooled_model", 4, True, "bf16", 1, "int8", False, False),
+        ("glm5_next_text", 4, True, "bf16", 2, "int8", False, False),
     ],
 )
-def test_pooled_hisparse_scope(monkeypatch, model_type, pool_size, hisparse_enabled, indexer_dtype, pcp, a5, expected):
+def test_pooled_hisparse_scope(
+    monkeypatch, model_type, pool_size, hisparse_enabled, indexer_dtype, pcp, cache_dtype, a5, expected
+):
     from vllm_ascend import hisparse
-    from vllm_ascend.device.hardware_profile import DeviceAdaptorFamily
+    from vllm_ascend.device.hardware_profile import DeviceAdaptorFamily, HardwareCapability
 
     family = DeviceAdaptorFamily.FP8_OPTIMIZED if a5 else None
-    monkeypatch.setattr(hisparse, "get_current_hardware_profile", lambda: NS(device_adaptor_family=family))
+    monkeypatch.setattr(
+        hisparse,
+        "get_current_hardware_profile",
+        lambda: NS(
+            device_adaptor_family=family,
+            supports=lambda capability: not a5 and capability is HardwareCapability.NATIVE_INT8_SPARSE,
+        ),
+    )
     config = NS(
         model_config=NS(hf_text_config=NS(model_type=model_type, index_kpool=pool_size, qk_rope_head_dim=0)),
         attention_config=NS(hisparse_config=NS() if hisparse_enabled else None, indexer_kv_dtype=indexer_dtype),
-        cache_config=NS(cache_dtype="fp8"),
+        cache_config=NS(cache_dtype=cache_dtype),
         parallel_config=NS(
             data_parallel_size=1,
             pipeline_parallel_size=1,

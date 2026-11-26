@@ -94,20 +94,23 @@ from vllm_ascend.utils import vllm_version_is
 
 
 def _compact_hisparse_kpool_pages(groups: list[KVCacheGroupSpec]) -> dict[str, int]:
-    """Return the unpadded FP8 KPool bytes per layer and global block ID."""
+    """Return the unpadded KPool bytes per layer and global block ID."""
     return {
         name: spec.real_page_size_bytes
         for group in groups
         if group.role == KVCacheGroupRole.HISPARSE_INDEXER and isinstance(group.kv_cache_spec, UniformTypeKVCacheSpecs)
         for name, spec in group.kv_cache_spec.kv_cache_specs.items()
         if is_pooled_hisparse_indexer(spec)
-        and spec.dtype == torch.float8_e4m3fn
-        and spec.scale_dim == 1
-        and spec.scale_dtype == torch.float32
+        and (
+            (spec.dtype == torch.bfloat16 and spec.scale_dim == 0)
+            or (spec.dtype == torch.float8_e4m3fn and spec.scale_dim == 1 and spec.scale_dtype == torch.float32)
+        )
     }
 
 
-def _place_compact_hisparse_kpool(config: KVCacheConfig, pages: dict[str, int]) -> None:
+def _place_compact_hisparse_kpool(
+    config: KVCacheConfig, pages: dict[str, int], *, layer_contiguous: bool = False
+) -> None:
     if not pages:
         return
     (shared_size,) = {tensor.size for tensor in config.kv_cache_tensors if not tensor.host_resident}
@@ -127,6 +130,9 @@ def _place_compact_hisparse_kpool(config: KVCacheConfig, pages: dict[str, int]) 
     layers_per_bundle = (1 << 32) // (max(1, count) * page_size)
     if not layers_per_bundle:
         raise ValueError("A HiSparse KPool layer exceeds the 4 GiB indexer address range.")
+    if layer_contiguous:
+        # A3 BF16 PoolKeyIndexer splits each manager page into dense 32-row pages.
+        layers_per_bundle = 1
     offset = shared_size
     layers = list(pages)
     for start in range(0, len(layers), layers_per_bundle):
@@ -144,7 +150,7 @@ def _place_compact_hisparse_kpool(config: KVCacheConfig, pages: dict[str, int]) 
         offset += count * block_stride
     config.kv_cache_tensors = tensors
     logger.info_once(
-        "HiSparse block-outer KPool: %d layers, %d blocks; shared %.2f GiB, KPool %.2f GiB",
+        "HiSparse compact KPool: %d layers, %d blocks; shared %.2f GiB, KPool %.2f GiB",
         len(pages),
         count,
         shared_size / 2**30,
@@ -180,8 +186,8 @@ class AscendKVCacheConfigBuilder(DefaultKVCacheConfigBuilder):
             require_hybrid_hisparse_core()
             if not supports_pooled_hisparse(vllm_config):
                 raise ValueError(
-                    "Pooled HiSparse requires A5 FP8 NoPE main KV, FP8 indexer KV, "
-                    "pool size 4 and DP, PP, PCP and DCP set to 1."
+                    "Pooled HiSparse requires A5 FP8 NoPE with FP8 indexer KV or "
+                    "GLM-5.3-Flash A3 INT8 NoPE with BF16 indexer KV, pool size 4 and DP, PP, PCP and DCP set to 1."
                 )
             if not any(is_pooled_hisparse_indexer(spec) for spec in kv_cache_spec.values()):
                 raise ValueError("Pooled HiSparse requires a declared pooled indexer cache spec.")
@@ -296,9 +302,11 @@ class AscendKVCacheConfigBuilder(DefaultKVCacheConfigBuilder):
             if vllm_config.cache_config.enable_extensible_kv_cache:
                 # These layer offsets depend on block count. The extensible
                 # cache shrinks storage after capture without moving views.
-                raise ValueError("FP8 HiSparse compact KPool requires a fixed-size KV allocation.")
+                raise ValueError("HiSparse compact KPool requires a fixed-size KV allocation.")
             config = super().get_kv_cache_config_from_groups(vllm_config, kv_cache_groups, num_blocks)
-            _place_compact_hisparse_kpool(config, pages)
+            _place_compact_hisparse_kpool(
+                config, pages, layer_contiguous=vllm_config.cache_config.cache_dtype == "int8"
+            )
             return _attach_transfer_and_speculation_metadata(vllm_config, config)
         if has_hybrid_sfa_hisparse_groups(kv_cache_groups):
             return _attach_transfer_and_speculation_metadata(

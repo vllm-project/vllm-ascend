@@ -204,8 +204,8 @@ def get_kv_cache_spec(vllm_config: VllmConfig) -> dict[str, KVCacheSpec]:
         require_hybrid_hisparse_core()
         if not supports_pooled_hisparse(vllm_config):
             raise ValueError(
-                "Pooled HiSparse requires A5 FP8 NoPE main KV, FP8 indexer KV, "
-                "pool size 4 and DP, PP, PCP and DCP set to 1."
+                "Pooled HiSparse requires A5 FP8 NoPE with FP8 indexer KV or "
+                "GLM-5.3-Flash A3 INT8 NoPE with BF16 indexer KV, pool size 4 and DP, PP, PCP and DCP set to 1."
             )
     packed_sources: dict[str, int] = {}
     layer_type = AttentionLayerBase
