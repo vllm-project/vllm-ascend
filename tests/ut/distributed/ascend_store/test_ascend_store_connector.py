@@ -319,6 +319,23 @@ class TestAscendStoreConnector(unittest.TestCase):
         config.parallel_config.tensor_parallel_size = 1
         return config
 
+    def test_mooncake_composite_callbacks_require_shared_source_layerwise(self):
+        module = "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector"
+        for use_layerwise, sources, expected in (
+            (True, [2, 8, 14, 20], True),
+            (False, [2, 8, 14, 20], False),
+            (True, list(range(40)), False),
+        ):
+            with self.subTest(use_layerwise=use_layerwise, sources=sources):
+                config = self._make_vllm_config(extra_config={"backend": "mooncake", "use_layerwise": use_layerwise})
+                config.model_config.hf_text_config = types.SimpleNamespace(
+                    num_hidden_layers=40, kv_source_layer_ids=sources
+                )
+                with patch(f"{module}.create_kv_pool_worker"), patch(f"{module}.LookupKeyServer"):
+                    connector = AscendStoreConnector(config, KVConnectorRole.WORKER, None)
+                self.assertEqual(connector.supports_composite_kv_loads, expected)
+                self.assertEqual(connector.supports_composite_kv_saves, expected)
+
     def test_parallel_validation_allows_replicas_and_state_shards(self):
         attention = FullAttentionSpec(block_size=16, num_kv_heads=1, head_size=1, dtype=torch.float32)
         sharded = MambaSpec(block_size=16, shapes=((4,),), dtypes=(torch.float32,))

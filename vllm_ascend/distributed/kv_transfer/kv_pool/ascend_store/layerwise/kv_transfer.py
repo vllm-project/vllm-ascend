@@ -462,9 +462,9 @@ class LayerBatchBuilder:
             layer_object_offset = int(self._block_len_np[:base_offset].sum())
             offsets = (layer_object_offset + layer_inner_offsets).tolist()
             sizes = layer_block_len.tolist()
-            all_buffers = [
-                (layer_base_addrs + block_id * layer_block_stride).tolist() for block_id in shared.block_ids_arr
-            ]
+            # Build the whole layer's address table in one NumPy operation.
+            # A prefix read may carry hundreds of block IDs in this hot path.
+            all_buffers = (layer_base_addrs + shared.block_ids_arr[:, None] * layer_block_stride).tolist()
             return LayerRangeReqMeta(
                 req_ids=shared.req_ids,
                 layer_id=layer_id,
@@ -930,16 +930,26 @@ class KVCacheStoreLayerRecvingThread(KVTransferThread):
         assert self._active_load_indices is not None
         # Read the abort flag once: this comprehension covers every key of the
         # layer, so an is_set() per key is pure overhead in the receive thread.
-        aborted = self._load_abort_event.is_set()
-        active_indices = [
-            index for index in range(len(req_meta.keys)) if not aborted and index in self._active_load_indices
-        ]
-        active_keys = [req_meta.keys[index] for index in active_indices]
-        if active_keys:
-            self._stagger_h2d_submit(layer_id)
+        active_indices: range | list[int]
+        if self._load_abort_event.is_set():
+            active_indices = []
+            active_keys = []
+        elif len(self._active_load_indices) == len(req_meta.keys):
+            # The shared row ordering is fixed for the group in this step.
+            # Keep all rows together until a failed read removes an index.
+            active_indices = range(len(req_meta.keys))
+            active_keys = req_meta.keys
+            active_buffers = req_meta.all_buffers
+            active_sizes = req_meta.all_sizes
+            active_offsets = req_meta.all_offsets
+        else:
+            active_indices = [index for index in range(len(req_meta.keys)) if index in self._active_load_indices]
+            active_keys = [req_meta.keys[index] for index in active_indices]
             active_buffers = [req_meta.all_buffers[index] for index in active_indices]
             active_sizes = [req_meta.all_sizes[index] for index in active_indices]
             active_offsets = [req_meta.all_offsets[index] for index in active_indices]
+        if active_keys:
+            self._stagger_h2d_submit(layer_id)
             results: list[int] = []
             for keys, buffers, sizes, offsets in self._range_transfer_batches(
                 active_keys,
@@ -983,6 +993,8 @@ class KVCacheStoreLayerRecvingThread(KVTransferThread):
     def _handle_range_layer_task(self, data: LayerLoadTask) -> None:
         layer_id = data.layer_id
         try:
+            if data.compute_boundary is not None:
+                data.compute_boundary.synchronize()
             if not self._wait_for_reuse_saves(data):
                 return
 
