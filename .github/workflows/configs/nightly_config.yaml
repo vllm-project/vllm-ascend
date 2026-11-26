@@ -244,6 +244,13 @@ a3-560t:
         os: linux-aarch64-a3-800i-16
         config_file_path: DeepSeek-V4-Flash-w8a8-sleep-wakeup.yaml
         config_base_path: tests/SIT/cases/models/configs/DeepSeek
+      # Single-node PD disaggregation runs the external DP harness directly on the
+      # bare-metal runner: no LWS pods, one prefiller and one decoder instance.
+      - name: DeepSeek-V4-Flash-W8A8-A3-PD-Single
+        os: linux-aarch64-a3-800i-16
+        tests: tests/e2e/common/multi_node/external_dp/test_external_dp.py
+        config_file_path: DeepSeek-V4-Flash-W8A8-A3-PD-Single.yaml
+        config_base_path: tests/SIT/cases/models/configs/DeepSeek
   multi_card:
     test_config:
       # pytest-driven tests

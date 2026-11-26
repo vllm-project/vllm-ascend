@@ -384,17 +384,21 @@ jobs:
           VLLM_WORKER_MULTIPROC_METHOD: spawn
           VLLM_USE_MODELSCOPE: True
           VLLM_CI_RUNNER: ${{ inputs.runner }}
+          CONFIG_YAML_PATH: ${{ inputs.config_file_path }}
+          CONFIG_BASE_PATH: ${{ inputs.config_base_path }}
+          LOG_PREFIX: /tmp/test-logs/external-dp
+          LWS_WORKER_INDEX: '0'
         working-directory: /vllm-workspace/vllm-ascend
         run: |
           export LD_LIBRARY_PATH=/usr/local/lib:$LD_LIBRARY_PATH
           echo "Running pytest with tests path: ${{ inputs.tests }}"
-          mkdir -p /tmp/test-logs
+          mkdir -p /tmp/test-logs "$LOG_PREFIX"
           set -o pipefail
           pytest -sv "${{ inputs.tests }}" 2>&1 | tee /tmp/test-logs/pytest-driven.log
 
       - name: Run Pytest (YAML-driven)
         id: yaml-test
-        if: ${{ !cancelled() && inputs.config_file_path != '' }}
+        if: ${{ !cancelled() && inputs.tests == '' && inputs.config_file_path != '' }}
         env:
           VLLM_WORKER_MULTIPROC_METHOD: spawn
           VLLM_USE_MODELSCOPE: True
