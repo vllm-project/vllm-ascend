@@ -1,8 +1,0 @@
-pr: 22064
-entries:
-  - category: bugfix
-    text: >-
-      Fixed startup failures and incorrect outputs after live weight updates for
-      Kimi-K3 BF16 text serving on A3.
-    model: Kimi-K3
-    hardware: [A3]
