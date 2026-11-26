@@ -148,7 +148,6 @@ def test_diffusion_full_replay_pads_fia_without_changing_upstream_offsets(
             assert torch.equal(replay_table[:4], table)
             if len(expected_q) > 4:
                 assert replay_table[4].tolist() == [0]
-    assert "block_table" not in provider("layer", 1024).resolve(metadata)
     assert metadata["layer"].num_actual_tokens == num_actual_tokens
     assert batch.query_start_loc.tolist() == batch.query_start_loc_np.tolist() == offsets
 

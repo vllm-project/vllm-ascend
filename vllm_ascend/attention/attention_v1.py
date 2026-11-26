@@ -482,19 +482,12 @@ class FIAParamProvider:
     def resolve(self, attn_metadata) -> dict[str, Any]:
         metadata = attn_metadata[self.layer_name]
 
-        # A padded DiffusionGemma FULL replay can add a synthetic request,
-        # so its sliding-window tasks must update the block table with the lengths.
-        if self.is_draft_model or not self.sliding_window or self.diffusion_causal is not None:
-            params = {
-                "actual_seq_lengths": metadata.actual_seq_lengths_q,
-                "actual_seq_lengths_kv": metadata.seq_lens_list,
-                "block_table": None if self.is_non_pa else metadata.block_tables,
-            }
-        else:
-            params = {
-                "actual_seq_lengths": metadata.actual_seq_lengths_q,
-                "actual_seq_lengths_kv": metadata.seq_lens_list,
-            }
+        # Padding can add a request, so bind the current block table with the sequence lengths.
+        params = {
+            "actual_seq_lengths": metadata.actual_seq_lengths_q,
+            "actual_seq_lengths_kv": metadata.seq_lens_list,
+            "block_table": None if self.is_non_pa else metadata.block_tables,
+        }
         # Replay-time mask choice (cf. PR #17682 review, issue #16889):
         # FULL graphs are captured with the right-aligned causal mask +
         # sparse_mode=3, which must stay valid for every replay shape.
