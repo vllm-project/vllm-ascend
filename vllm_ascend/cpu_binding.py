@@ -125,6 +125,10 @@ class DeviceInfo:
             if len(parts) <= max_column_idx:
                 continue
             npu_id = parts[npu_id_idx]
+            if not npu_id.isdecimal():
+                # A row whose NPU ID is not numeric cannot produce a valid
+                # mapping; skip it like other malformed rows.
+                continue
 
             chip_id = "0"
             if chip_id_idx is not None:
@@ -139,6 +143,13 @@ class DeviceInfo:
             if npu_id not in npu_map_info:
                 npu_map_info[npu_id] = {}
             npu_map_info[npu_id][chip_id] = chip_logic_id
+        if not npu_map_info:
+            raise RuntimeError(
+                "Failed to parse 'npu-smi info -m' output: header "
+                f"{header!r} was recognized but none of the {len(npu_map) - 1} "
+                "data rows produced a valid NPU mapping. "
+                "The npu-smi output format may have changed."
+            )
         return npu_map_info
 
     def resolve_logic_id(self, npu_id: str, chip_id: str | None) -> int:
