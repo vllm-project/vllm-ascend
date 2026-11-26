@@ -385,6 +385,41 @@ def _patch_gdn_model_state_classmethods(target):
     target._gdn_recoverssm_state_patched = True
 
 
+_QWEN3_NEXT_MOE_ORIGINAL_INIT = Qwen3NextSparseMoeBlock.__init__
+
+
+@wraps(_QWEN3_NEXT_MOE_ORIGINAL_INIT)
+def _qwen3_next_moe_init_with_quantized_gate(self, vllm_config, prefix: str = "", reduce_results: bool = True):
+    """Build ``Qwen3NextSparseMoeBlock`` with a quantized shared-expert gate.
+
+    Upstream wires ``shared_expert_gate`` with ``quant_config=None``, so a
+    checkpoint that does quantize that tensor (msmodelslim W8A8 exports carry
+    ``shared_expert_gate.weight_scale`` / ``weight_offset``) fails to load with
+    ``ValueError: There is no module or parameter named ...
+    shared_expert_gate.weight_offset``.  The gate instance is captured by the
+    shared experts, so it has to be *built* through the block's ``quant_config``
+    instead of being replaced afterwards; the shim below only redirects that one
+    prefix, leaving every other linear untouched.
+    """
+    import vllm.model_executor.models.qwen3_next as qwen3_next_module
+
+    original_replicated_linear = qwen3_next_module.ReplicatedLinear
+    quant_config = vllm_config.quant_config
+
+    def _replicated_linear_with_quantized_gate(*args, **kwargs):
+        if str(kwargs.get("prefix", "")).endswith(".shared_expert_gate"):
+            kwargs["quant_config"] = quant_config
+        return original_replicated_linear(*args, **kwargs)
+
+    qwen3_next_module.ReplicatedLinear = _replicated_linear_with_quantized_gate
+    try:
+        _QWEN3_NEXT_MOE_ORIGINAL_INIT(
+            self, vllm_config, prefix=prefix, reduce_results=reduce_results
+        )
+    finally:
+        qwen3_next_module.ReplicatedLinear = original_replicated_linear
+
+
 # Apply this module's patches only where the standard worker patches load:
 # patch/worker/__init__.py imports this module exclusively under
 # STANDARD_WORKER_PATCHES, and utils.enable_sp reaches enable_dense_sp
@@ -396,6 +431,7 @@ if get_current_hardware_profile().supports(HardwareCapability.STANDARD_WORKER_PA
         Qwen3_5MultiTokenPredictor.forward = qwen3_5_mtp_forward
 
     Qwen3NextAttention.forward = AscendQwen3NextAttention.forward
+    Qwen3NextSparseMoeBlock.__init__ = _qwen3_next_moe_init_with_quantized_gate
     # Sequence-parallel decoder layout (upstream SP-MoE contract plus the dense
     # Qwen3.5-family FlashComm SP extension) and the dense-SP layer wiring.
     Qwen3_5DecoderLayer.__init__ = _qwen3_5_decoder_layer_init_with_dense_sp
