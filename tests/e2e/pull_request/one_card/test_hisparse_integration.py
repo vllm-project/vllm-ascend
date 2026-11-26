@@ -109,6 +109,32 @@ def test_private_host_pool_retains_pinned_storage_for_dma_writeback(descriptor_c
         backend.unpin_tensor(registered)
 
 
+@pytest.mark.parametrize("count", [1, 2048])
+def test_restore_mirrored_host_pages_in_both_dma_batch_paths(count):
+    backend = AscendHiSparseBackend()
+    host = allocate_mapped_host((count, 576), torch.bfloat16)
+    source = (torch.arange(count, device="npu") % 97).to(torch.bfloat16)[:, None].expand(count, 576).contiguous()
+    restored = torch.empty_like(source)
+    row_bytes = source.size(1) * source.element_size()
+    offsets = torch.arange(count, dtype=torch.int64) * row_bytes
+    source_ptrs = offsets + source.data_ptr()
+    host_ptrs = offsets + host.data_ptr()
+    restored_ptrs = offsets + restored.data_ptr()
+    sizes = torch.full((count,), row_bytes, dtype=torch.int64)
+    stream = torch.npu.Stream()
+    stream.wait_stream(torch.npu.current_stream())
+    try:
+        with torch.npu.stream(stream):
+            backend.swap_blocks_batch(source_ptrs, host_ptrs, sizes)
+            backend.swap_blocks_batch(host_ptrs, restored_ptrs, sizes)
+        stream.synchronize()
+        torch.testing.assert_close(host, source.cpu(), rtol=0, atol=0)
+        torch.testing.assert_close(restored, source, rtol=0, atol=0)
+    finally:
+        torch.npu.synchronize()
+        backend.unpin_tensor(host)
+
+
 def reference(topk, requests, states, source, resident, hot_table, dgi, lru, block):
     dgi = dgi.clone()
     lru = lru.clone()

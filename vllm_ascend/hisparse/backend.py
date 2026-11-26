@@ -17,6 +17,34 @@ if TYPE_CHECKING:
     from vllm.v1.kv_cache_interface import KVCacheConfig
 
 
+# aclrtMemLocationType and the Ascend swap_blocks_batch operator use
+# different enums.
+_ACL_HOST_MEMORY = 0
+_ACL_DEVICE_MEMORY = 1
+_HOST_TO_DEVICE = 0
+_DEVICE_TO_HOST = 1
+
+
+def _dma_copy_direction(source_address: int, destination_address: int) -> int:
+    import acl  # type: ignore[import-not-found]  # Provided by the CANN runtime.
+
+    source, source_status = acl.rt.pointer_get_attributes(source_address)
+    destination, destination_status = acl.rt.pointer_get_attributes(destination_address)
+    if source_status or destination_status:
+        raise RuntimeError(
+            f"Failed to query HiSparse DMA memory locations: source={source_status}, destination={destination_status}."
+        )
+    source_type = source["location"]["type"]
+    destination_type = destination["location"]["type"]
+    if (source_type, destination_type) == (_ACL_HOST_MEMORY, _ACL_DEVICE_MEMORY):
+        return _HOST_TO_DEVICE
+    if (source_type, destination_type) == (_ACL_DEVICE_MEMORY, _ACL_HOST_MEMORY):
+        return _DEVICE_TO_HOST
+    raise ValueError(
+        f"HiSparse DMA requires Host and device endpoints, got source={source_type}, destination={destination_type}."
+    )
+
+
 def _install_worker_dma_hooks() -> None:
     """Adapt Core until it exposes backend hooks for staging and invalidation."""
     from vllm.distributed.kv_transfer.kv_connector.v1.hisparse.worker import HiSparseConnectorWorker
@@ -111,7 +139,7 @@ class AscendHiSparseBackend(HiSparseBackend):
     stats_dtype = torch.int64
     # Verified for row and page D2H on the installed A5 runtime. Use this
     # conservative bound so the driver never receives an oversized batch.
-    _D2H_BATCH_LIMIT = 2047
+    _DMA_BATCH_LIMIT = 2047
 
     def __init__(self) -> None:
         self._failed_dma_batches: list[tuple[torch.Tensor, torch.Tensor, torch.Tensor]] = []
@@ -223,20 +251,32 @@ class AscendHiSparseBackend(HiSparseBackend):
     def swap_blocks_batch(self, src: torch.Tensor, dst: torch.Tensor, sizes: torch.Tensor) -> None:
         if self._failed_dma_batches:
             raise RuntimeError("HiSparse DMA submission previously failed; restart this worker.")
-        limit = self._D2H_BATCH_LIMIT
+        limit = self._DMA_BATCH_LIMIT
         count = src.size(0)
-        if count > limit and any(t.ndim != 1 or t.size(0) != count or not t.is_contiguous() for t in (src, dst, sizes)):
-            raise ValueError("HiSparse D2H split requires equal-length contiguous descriptor arrays.")
+        if any(
+            t.ndim != 1
+            or t.size(0) != count
+            or not t.is_contiguous()
+            or t.dtype != torch.int64
+            or t.device.type != "cpu"
+            for t in (src, dst, sizes)
+        ):
+            raise ValueError("HiSparse DMA requires equal-length contiguous CPU int64 descriptor arrays.")
+        if not count:
+            return
+        # Core builds one homogeneous batch per mirror or restore. Query the
+        # original Host/Device addresses, not the Host pool's device alias.
+        direction = _dma_copy_direction(src[0].item(), dst[0].item())
         submit = torch.ops._C_ascend.swap_blocks_batch
         try:
             if count <= limit:
-                submit(src, dst, sizes, 1, prefer_small_async=True)
+                submit(src, dst, sizes, direction, prefer_small_async=True)
                 return
             for start in range(0, count, limit):
                 end = min(start + limit, count)
                 # Keep every chunk on Core's current DMA stream and on the batch API.
-                submit(src[start:end], dst[start:end], sizes[start:end], 1, prefer_small_async=False)
-            logger.info_once("[hisparse] Oversized D2H descriptor batch submitted in bounded chunks.", scope="process")
+                submit(src[start:end], dst[start:end], sizes[start:end], direction, prefer_small_async=False)
+            logger.info_once("[hisparse] Oversized DMA descriptor batch submitted in bounded chunks.", scope="process")
         except BaseException:
             # Core publishes its completion only after this method returns. Retain
             # the original storage in the process-cached backend on an uncertain

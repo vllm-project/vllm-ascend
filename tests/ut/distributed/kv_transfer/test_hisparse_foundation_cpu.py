@@ -49,6 +49,43 @@ from vllm_ascend.hisparse.c8 import (
 from vllm_ascend.ops.triton import sfa_indexer_store
 
 
+@pytest.mark.parametrize(("source_location", "destination_location", "direction"), [(0, 1, 0), (1, 0, 1)])
+@pytest.mark.parametrize("count", [1, 2048])
+def test_batch_dma_uses_runtime_memory_locations(monkeypatch, source_location, destination_location, direction, count):
+    src = torch.arange(count, dtype=torch.int64) + 1024
+    dst = torch.arange(count, dtype=torch.int64) + 4096
+    sizes = torch.full_like(src, 1024)
+    locations = {src[0].item(): source_location, dst[0].item(): destination_location}
+    queries = []
+    submissions = []
+
+    def pointer_get_attributes(address):
+        queries.append(address)
+        return {"location": {"type": locations[address]}}, 0
+
+    def swap_blocks_batch(src, dst, sizes, direction, *, prefer_small_async):
+        submissions.append((src.numel(), dst[0].item(), direction, prefer_small_async))
+
+    monkeypatch.setitem(sys.modules, "acl", NS(rt=NS(pointer_get_attributes=pointer_get_attributes)))
+    monkeypatch.setattr(torch.ops._C_ascend, "swap_blocks_batch", swap_blocks_batch, raising=False)
+    AscendHiSparseBackend().swap_blocks_batch(src, dst, sizes)
+
+    assert queries == [1024, 4096]
+    expected = [(1, 4096, direction, True)]
+    if count == 2048:
+        expected = [(2047, 4096, direction, False), (1, 6143, direction, False)]
+    assert submissions == expected
+
+
+def test_batch_dma_rejects_failed_memory_query(monkeypatch):
+    src = torch.tensor([1024], dtype=torch.int64)
+    dst = torch.tensor([4096], dtype=torch.int64)
+    sizes = torch.tensor([128], dtype=torch.int64)
+    monkeypatch.setitem(sys.modules, "acl", NS(rt=NS(pointer_get_attributes=lambda _: (None, 42))))
+    with pytest.raises(RuntimeError, match="source=42, destination=42"):
+        AscendHiSparseBackend().swap_blocks_batch(src, dst, sizes)
+
+
 @pytest.fixture(params=[False, True], ids=["standalone", "profiled"])
 def prepare_workspaces(request):
     from vllm.v1.worker.workspace import init_workspace_manager, reset_workspace_manager
