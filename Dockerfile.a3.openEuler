@@ -417,7 +417,12 @@ RUN printf '%s\n' \
     '  echo MOONCAKE_BUILD_OK' \
     'else' \
     '  echo MOONCAKE_BUILD_FAILED' \
-    '  grep -m2 -nE "error:|undefined reference|Error [0-9]+|No such file" "$LOG" | cut -c1-400 || tail -n 3 "$LOG" | cut -c1-400' \
+    '  c=$(grep -n "collect2" "$LOG" | head -1 | cut -d: -f1);' \
+    '  if [ -n "${c:-}" ]; then' \
+    '    sed -n "$(( c>10 ? c-10 : 1 )),$((c))p" "$LOG" | cut -c1-300;' \
+    '  else' \
+    '    tail -n 12 "$LOG" | cut -c1-300;' \
+    '  fi' \
     '  exit 1' \
     'fi' \
     > /opt/build_mooncake.sh && chmod +x /opt/build_mooncake.sh && \
