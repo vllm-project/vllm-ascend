@@ -142,19 +142,6 @@ guide_sections:
       requires appropriate permissions. Generated commands were not rerun on NPUs
       for this update.
 
-    #### Installation requirements (910C / Atlas 800 A3)
-
-    Use vLLM/vLLM-Ascend 0.30.0 with compatible host drivers and firmware:
-
-    ```bash
-    npu-smi info
-    docker pull quay.io/ascend/vllm-ascend:v0.30.0-a3
-    ```
-
-    The image includes user-space dependencies. For source installation, use
-    the top **INSTALL** block or the [official installation guide](https://docs.vllm.ai/projects/ascend/en/latest/getting_started/installation.html).
-    This A3 environment is the 910C reference, not a validated 950DT configuration.
-
     When using the shared Client Usage example, set `model` to
     `Eco-Tech/Kimi-K2.6-w4a8` to match this recipe's served model name.
 
