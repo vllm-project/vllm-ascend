@@ -114,7 +114,11 @@ class DeepGemmExperts:
         self.max_tokens = config.scheduler_config.max_num_batched_tokens
         deep_gemm = load_deepgemm()
         self.kernel = deep_gemm.fp8_fp4_mega_moe
-        shared = self._prepare_shared_weights(layer, text, deep_gemm.transform_weights_for_mega_moe)
+        packed_shared = self._prepare_shared_weights(layer, text, deep_gemm.transform_weights_for_mega_moe)
+        self.shared_l1_weights: tuple[torch.Tensor, torch.Tensor] | None = None
+        self.shared_l2_weights: tuple[torch.Tensor, torch.Tensor] | None = None
+        if packed_shared is not None:
+            _, self.shared_l1_weights, self.shared_l2_weights = packed_shared
 
         # Byte-paired UE8M0 is packed along K, not the NZ-transposed layout
         # used by the existing CANN grouped matmul backend.
@@ -167,10 +171,11 @@ class DeepGemmExperts:
         # Publish only after the kernel and all packed weights are usable.
         layer.w13_weight.data, layer.w13_weight_scale.data = w13
         layer.w2_weight.data, layer.w2_weight_scale.data = w2
-        if shared is not None:
+        if packed_shared is not None:
+            shared, packed_l1, packed_l2 = packed_shared
             gate_up, down = shared.layer.gate_up_proj, shared.layer.down_proj
-            gate_up.weight.data, gate_up.weight_scale.data = self.shared_l1_weights
-            down.weight.data, down.weight_scale.data = self.shared_l2_weights
+            gate_up.weight.data, gate_up.weight_scale.data = packed_l1
+            down.weight.data, down.weight_scale.data = packed_l2
             self.shared_l1_weights = (gate_up.weight, gate_up.weight_scale)
             self.shared_l2_weights = (down.weight, down.weight_scale)
             shared.megamoe_shared_weights_ready = True
@@ -221,8 +226,6 @@ class DeepGemmExperts:
 
     def _prepare_shared_weights(self, layer, text, transform):
         self.num_shared_experts = 0
-        self.shared_l1_weights = None
-        self.shared_l2_weights = None
         expected = text.n_shared_experts
         reference = getattr(layer, "_deepgemm_mega_moe_shared_experts", None)
         shared = reference() if reference is not None else None
@@ -243,11 +246,9 @@ class DeepGemmExperts:
             raise ValueError("Shared expert width must match n_shared_experts times the routed intermediate width")
         if gate_up.weight.shape != (2 * shared_intermediate, self.hidden) or down.weight.shape[0] != self.hidden:
             raise ValueError("Shared expert gate/up and down weight shapes are inconsistent")
-        self.shared_l1_weights, self.shared_l2_weights = transform(
-            self._shared_weight_pair(gate_up), self._shared_weight_pair(down)
-        )
+        packed_l1, packed_l2 = transform(self._shared_weight_pair(gate_up), self._shared_weight_pair(down))
         self.num_shared_experts = count
-        return shared
+        return shared, packed_l1, packed_l2
 
     def apply(self, layer, x, topk_weights, topk_ids):
         from vllm_ascend.ops.fused_moe.moe_comm_method import FusedExpertsResult
