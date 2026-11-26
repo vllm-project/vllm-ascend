@@ -24,7 +24,7 @@ variants:
   ascend_w8a8:
     model_id: Eco-Tech/DeepSeek-V3.1-w8a8-mtp-QuaRot
     precision: int8
-    label: W8A8 MTP QuaRot (Ascend)
+    label: W8A8 MTP QuaRot (ASCEND)
     vram_minimum_gb: 833
     supported_hardware:
       - ascend_910c
@@ -119,14 +119,34 @@ presets:
     strategy: pd_cluster
     variants: [ascend_w8a8]
     default: false
+    remove_args:
+      # Guard: drop --data-parallel-hybrid-lb; the builder emits it on
+      # multi-node DEP pools, and the tutorial lane does not use it.
+      - '--data-parallel-hybrid-lb'
     select:
       pd_router: ascend
       pd_connector: mooncake_ascend
       frontend: python
     workload: 'Prefill/decode separation (2P1D Layerwise), 4 nodes x 16-die Atlas 800 A3, Mooncake'
+    source:
+      label: "DeepSeek-V3.1 tutorial, section 5.3 (v0.23.0 docs)"
+      href: https://docs.vllm.ai/projects/ascend/en/v0.23.0/tutorials/models/DeepSeek-V3.1.html
+      key: dsv31-a3-w8a8-pd-2p1d
+      revision: "2026-11-26"
     image:
       vllm: quay.io/ascend/vllm-ascend:v0.30.0rc1-a3
+      model_revision: master
     runbook: |
+      ## Evidence and versions
+
+      - Source: tutorial §5.3 (v0.23.0 docs), transcribed value-by-value
+      - Image: quay.io/ascend/vllm-ascend:v0.30.0rc1-a3
+      - Checkpoint: Eco-Tech/DeepSeek-V3.1-w8a8-mtp-QuaRot (ModelScope, master)
+      - Validation status: not validated end-to-end; rendering verified
+        against the official builder (DP4 prefill pool / DP32 decode pool)
+
+      ## Transcription notes
+
       Transcribed from tutorial §5.3 (Multi-Node PD Separation Deployment):
       2P1D Layerwise on four Atlas 800 A3 (64GB x 16) nodes — 2 prefill
       nodes (DP2 x TP8 each) and one decode pool of DP32 x TP1 spanning 2
@@ -257,13 +277,13 @@ notes:
       For two-node data-parallel deployments the tutorial §5.2 carries
       handwritten per-node commands (DP4×TP4, documented on Atlas 800 A2);
       the PD preset below covers the disaggregated route.
-  - title: "Ascend 910C: use the W8A8 MTP QuaRot (Ascend) variant"
+  - title: "Ascend 910C: use the W8A8 MTP QuaRot (ASCEND) variant"
     when: { hardware: [ascend_910c] }
     body: |
       The `default` / `nvfp4` checkpoints above are pinned to an Ascend image
       so the commands are runnable, but these are GPU-only checkpoints that
       do not run on Ascend 910C. The verified deployment on one Atlas 800 A3
-      is the **W8A8 MTP QuaRot (Ascend)** variant (TP4×DP4 + MTP).
+      is the **W8A8 MTP QuaRot (ASCEND)** variant (TP4×DP4 + MTP).
   - title: "Prefill/decode separation on Ascend 910C"
     when: { hardware: [ascend_910c] }
     body: |
@@ -278,6 +298,7 @@ notes:
       run_dp_template.sh) and a request proxy on the prefill master node.
 
 meta:
+  date_updated: "2026-11-26"
   hardware:
     # First-party bring-up 2026-10-28 (single-node TP4/DP4 + MTP, benchmarked
     # repeatedly without engine errors); official runner-CI end-to-end
