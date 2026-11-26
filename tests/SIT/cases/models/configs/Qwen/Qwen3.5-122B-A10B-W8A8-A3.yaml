@@ -50,7 +50,7 @@ test_cases:
       - spec_decode_acceptance
     acceptance_rate:
       benchmark: acc_aime2025
-      baseline: [0.833890, 0.698162, 0.585633]
+      baseline: [0.83, 0.70, 0.59]
     benchmarks:
       acc_aime2025:
         case_type: accuracy
