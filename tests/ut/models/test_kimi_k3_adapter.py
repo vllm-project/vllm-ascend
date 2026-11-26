@@ -252,7 +252,7 @@ def test_kimi_disabling_mlapo_refreshes_projection_nz_management():
         assert impl.fused_qkv_a_proj._fused_preprocess_managed == fa_quant_layer
         assert impl.q_proj._fused_preprocess_managed == fa_quant_layer
         with (
-            patch("vllm_ascend.utils._should_trans_nz", return_value=True),
+            patch("vllm_ascend.utils.should_trans_nz", return_value=True),
             patch("torch_npu.npu_format_cast", side_effect=lambda weight, fmt, **kwargs: weight.clone()) as cast,
         ):
             for layer in projections:

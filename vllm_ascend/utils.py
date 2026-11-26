@@ -407,7 +407,7 @@ MIN_MATMUL_WEIGHT_NDIMS = 2
 SINGLETON_DIM_SIZE = 1
 
 
-def _should_trans_nz(weight: torch.Tensor) -> bool:
+def should_trans_nz(weight: torch.Tensor) -> bool:
     # FP32 cannot use NZ.
     if weight.dtype == torch.float32:
         return False
@@ -466,7 +466,7 @@ def maybe_trans_nz(
     customize_dtype: torch.dtype | None = None,
     input_dtype: torch.dtype | None = None,
 ) -> torch.Tensor:
-    if not _should_trans_nz(weight):
+    if not should_trans_nz(weight):
         return weight
     kwargs = {}
     if customize_dtype is not None:
@@ -490,7 +490,7 @@ def maybe_trans_nz_with_scale(
     """
     weight = weight.transpose(*transpose_dims)
     weight_scale = weight_scale.transpose(*transpose_dims)
-    if not _should_trans_nz(weight):
+    if not should_trans_nz(weight):
         return weight, weight_scale
     weight = weight.contiguous()
     weight_scale = weight_scale.contiguous()

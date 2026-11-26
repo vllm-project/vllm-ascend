@@ -62,7 +62,7 @@ class TestAscendW4A4MXFP4LinearMethod(TestBase):
         self.assertEqual(layer.weight.shape, (128, 128))
         self.assertEqual(layer.weight_scale.shape[0], 4)
 
-    @patch("vllm_ascend.utils._should_trans_nz", return_value=True)
+    @patch("vllm_ascend.utils.should_trans_nz", return_value=True)
     @patch("torch_npu.npu_format_cast", side_effect=lambda weight, fmt, **kwargs: weight.clone())
     def test_process_weights_preserves_unaligned_tp_group_phase(self, mock_cast, mock_should_trans_nz):
         layer = RowParallelLinear.__new__(RowParallelLinear)
@@ -84,7 +84,7 @@ class TestAscendW4A4MXFP4LinearMethod(TestBase):
         self.assertFalse(layer.weight.data.is_contiguous())
         self.assertFalse(layer.weight_scale.data.is_contiguous())
 
-    @patch("vllm_ascend.utils._should_trans_nz", return_value=False)
+    @patch("vllm_ascend.utils.should_trans_nz", return_value=False)
     def test_process_weights_nz_disabled_keeps_pre_nz_layout(self, mock_should_trans_nz):
         layer = nn.Module()
         layer.weight = nn.Parameter(torch.randint(0, 255, (128, 128), dtype=torch.uint8), requires_grad=False)

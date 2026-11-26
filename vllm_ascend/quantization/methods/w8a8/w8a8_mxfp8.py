@@ -36,10 +36,10 @@ from vllm_ascend.quantization.nz import mxfp8_nz
 from vllm_ascend.quantization.utils import DynamicMXQuantScaleAlg, get_dynamic_mx_quant_scale_alg
 from vllm_ascend.utils import (
     FP8_METHOD,
-    _should_trans_nz,
     dispose_tensor,
     maybe_trans_nz,
     maybe_trans_nz_with_scale,
+    should_trans_nz,
 )
 
 from ..base import (
@@ -278,7 +278,7 @@ class AscendW8A8MXFP8DynamicLinearMethod(AscendLinearScheme):
         layer._mxfp8_gmm_nz_layout = (
             getattr(layer, "_single_group_gmm_nz", False)
             and not getattr(layer, "_fused_preprocess_managed", False)
-            and _should_trans_nz(transposed_weight)
+            and should_trans_nz(transposed_weight)
         )
         if layer._mxfp8_gmm_nz_layout:
             # Add the group dimension before casting: WeightNz GMM needs
