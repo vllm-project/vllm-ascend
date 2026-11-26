@@ -10,6 +10,7 @@ copy nor a host-side gather.
 """
 
 import ctypes
+import logging
 import mmap
 from functools import cache
 from multiprocessing import shared_memory
@@ -341,18 +342,19 @@ class SharedUvaBuffer:
             address_of_mapping = ctypes.c_void_p(ctypes.addressof(ctypes.c_char.from_buffer(self.shm.buf)))
             _madvise_hugepage(self.shm, size)
             flags = DeviceOperator.host_register_flags()
-            if checkpoint_layer_id is not None:
+            log_registration = checkpoint_layer_id is not None and logger.isEnabledFor(logging.INFO)
+            if log_registration:
                 rank = dist.get_global_rank(cpu_group, group.rank_in_group)
                 table = buffer_name.removeprefix("_").removesuffix("_uva")
                 registration = f"rank={rank} layer={checkpoint_layer_id} table={table} bytes={size} shm={name}"
                 logger.info("Shared Engram registration start %s", registration)
-            started = monotonic()
+                started = monotonic()
             rc = self.lib.aclrtHostRegisterV2(address_of_mapping, size, flags)
             if not rc:
                 # Let close() unregister the range even if the end clock or logger raises.
                 self.pointer = address_of_mapping
-            elapsed = monotonic() - started
-            if checkpoint_layer_id is not None:
+            if log_registration:
+                elapsed = monotonic() - started
                 logger.info("Shared Engram registration end %s elapsed=%.6fs rc=%d", registration, elapsed, rc)
             if rc:
                 raise RuntimeError(f"aclrtHostRegisterV2 failed: rc={rc} size={size}")

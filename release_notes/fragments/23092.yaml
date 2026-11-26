@@ -2,6 +2,7 @@ pr: 23092
 entries:
   - category: feature
     text: >-
-      DeepSeek-V4.1-Flash startup logs now identify the checkpoint layer, table
-      and rank as each shared host Engram registration begins. When the call
-      returns, the same worker reports its duration and CANN return code.
+      With default INFO logging, operators can locate a stalled shared host
+      Engram registration during DeepSeek-V4.1-Flash startup. The start message
+      identifies the checkpoint layer, table and global rank. When registration
+      returns, the same worker logs the elapsed seconds and raw CANN return code.

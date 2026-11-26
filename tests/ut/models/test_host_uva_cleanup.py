@@ -2,6 +2,7 @@
 """Real shared mappings with simulated CANN initialization/cleanup failures."""
 
 import gc
+import logging
 import weakref
 from multiprocessing import shared_memory
 from types import SimpleNamespace
@@ -74,8 +75,9 @@ def shared_buffer_factory(monkeypatch):
 
 
 @pytest.mark.parametrize(("layer", "table", "rc"), [(1, "codes", 0), (14, "scales", 0), (14, "codes", 207001)])
-def test_shared_engram_registration_events(shared_buffer_factory, monkeypatch, layer, table, rc):
+def test_shared_engram_registration_events(shared_buffer_factory, monkeypatch, caplog, layer, table, rc):
     construct, lib, names, real_shm = shared_buffer_factory
+    caplog.set_level(logging.INFO, logger=npu.logger.name)
     events = []
     clock = Mock(side_effect=[10.0, 11.25])
     monkeypatch.setattr(npu, "monotonic", clock)
@@ -109,8 +111,30 @@ def test_shared_engram_registration_events(shared_buffer_factory, monkeypatch, l
         real_shm(name=names[0])
 
 
-def test_completion_log_failure_releases_registered_range(shared_buffer_factory, monkeypatch):
+@pytest.mark.parametrize(("layer", "level"), [(None, logging.INFO), (14, logging.WARNING)])
+def test_shared_registration_skips_disabled_diagnostics(shared_buffer_factory, monkeypatch, caplog, layer, level):
+    construct, lib, _, _ = shared_buffer_factory
+    caplog.set_level(level, logger=npu.logger.name)
+    clock = Mock(side_effect=AssertionError("registration clock should only run for INFO diagnostics"))
+    info = Mock()
+    rank_lookup = Mock(return_value=0)
+    monkeypatch.setattr(npu, "monotonic", clock)
+    monkeypatch.setattr(npu.logger, "info", info)
+    monkeypatch.setattr(npu.dist, "get_global_rank", rank_lookup)
+
+    construct("_codes_uva", layer).close()
+
+    clock.assert_not_called()
+    info.assert_not_called()
+    rank_lookup.assert_called_once_with(None, 0)  # Broadcast leader only.
+    lib.aclrtHostRegisterV2.assert_called_once()
+    lib.aclrtHostGetDevicePointer.assert_called_once()
+    lib.aclrtHostUnregister.assert_called_once_with(lib.aclrtHostRegisterV2.call_args.args[0])
+
+
+def test_completion_log_failure_releases_registered_range(shared_buffer_factory, monkeypatch, caplog):
     construct, lib, names, real_shm = shared_buffer_factory
+    caplog.set_level(logging.INFO, logger=npu.logger.name)
     monkeypatch.setattr(npu.logger, "info", Mock(side_effect=[None, RuntimeError("log failed")]))
     with pytest.raises(RuntimeError, match="log failed"):
         construct("_codes_uva", 14)
@@ -120,8 +144,9 @@ def test_completion_log_failure_releases_registered_range(shared_buffer_factory,
         real_shm(name=names[0])
 
 
-def test_end_clock_failure_releases_registered_range(shared_buffer_factory, monkeypatch):
+def test_end_clock_failure_releases_registered_range(shared_buffer_factory, monkeypatch, caplog):
     construct, lib, names, real_shm = shared_buffer_factory
+    caplog.set_level(logging.INFO, logger=npu.logger.name)
     monkeypatch.setattr(npu, "monotonic", Mock(side_effect=[10.0, OSError("end clock failed")]))
 
     with pytest.raises(RuntimeError, match="OSError: end clock failed"):
