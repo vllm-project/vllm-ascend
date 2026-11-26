@@ -9,7 +9,7 @@ from math import lcm
 import vllm
 import vllm.v1.core.kv_cache_coordinator as vllm_kv_cache_coordinator
 from vllm.utils.math_utils import cdiv
-from vllm.v1.core.block_pool import BlockPool
+from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
 from vllm.v1.core.kv_cache_coordinator import (
     HybridKVCacheCoordinator,
     KVCacheCoordinator,
@@ -20,6 +20,7 @@ from vllm.v1.core.kv_cache_utils import (
     BlockHash,
     BlockHashList,
     KVCacheBlock,
+    make_block_hash_with_group_id,
 )
 from vllm.v1.core.single_type_kv_cache_manager import (
     MambaManager,
@@ -32,6 +33,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheSpec,
     MambaSpec,
     UniformTypeKVCacheSpecs,
+    get_mamba_prefill_checkpoint_position,
 )
 from vllm.v1.request import Request
 
@@ -151,7 +153,13 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
                 self.scheduler_block_size,
                 kv_cache_config,
             )
-        self.block_pool = BlockPool(
+        from vllm_ascend.patch.platform.patch_mamba_manager import (
+            AscendCheckpointBlockPool,
+            AscendMambaManager,
+            GDNCheckpointCandidates,
+        )
+
+        self.block_pool = AscendCheckpointBlockPool(
             num_gpu_blocks=kv_cache_config.num_blocks,
             enable_caching=enable_caching,
             hash_block_size=hash_block_size,
@@ -256,15 +264,25 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
         # mamba-align pages (1536 tokens) it erases the whole shared prefix
         # of typical ~2K prompts, pinning P-side prefix hits to 0.
         kv_transfer_config = getattr(kv_cache_config, "kv_transfer_config", None)
-        from vllm_ascend.patch.platform.patch_mamba_manager import AscendMambaManager, GDNCheckpointCandidates
-
+        self._checkpoint_anchor_groups = tuple(
+            manager.kv_cache_group_id
+            for manager in self.single_type_managers
+            if isinstance(manager.kv_cache_spec, FullAttentionSpec) and manager.enable_caching
+        )
         repeat_admission = (
             self.enable_partial_hash_hits
+            and bool(self._checkpoint_anchor_groups)
+            and any(
+                isinstance(manager, AscendMambaManager)
+                and manager.kv_cache_spec.mamba_type == MambaAttentionBackendEnum.GDN_ATTN
+                for manager in self.single_type_managers
+            )
             and kv_transfer_config is None
             and not use_eagle
             and not getattr(kv_cache_config, "has_speculative_decoding", False)
         )
         self.gdn_checkpoint_candidates = GDNCheckpointCandidates() if repeat_admission else None
+        self.block_pool.checkpoint_candidates = self.gdn_checkpoint_candidates
         for manager in self.single_type_managers:
             if isinstance(manager, AscendMambaManager):
                 manager.enable_checkpoint_repeat_admission = repeat_admission
@@ -295,6 +313,8 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
 
     def cache_blocks(self, request: Request, num_computed_tokens: int) -> None:
         super().cache_blocks(request, num_computed_tokens)
+        if self.gdn_checkpoint_candidates is not None and num_computed_tokens == request.num_prompt_tokens:
+            self._remember_gdn_chain(request)
         position = getattr(request, "_ascend_gdn_promotion", 0)
         if position:
             request._ascend_gdn_promotion = 0
@@ -321,6 +341,27 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
                 manager.block_pool.cache_partial_block(
                     request, blocks[index], position, manager.kv_cache_group_id, manager.block_size
                 )
+
+    def _remember_gdn_chain(self, request: Request) -> None:
+        candidates = self.gdn_checkpoint_candidates
+        assert candidates is not None
+        tail = get_mamba_prefill_checkpoint_position(
+            request.num_prompt_tokens,
+            self.hash_block_size,
+            False,
+            num_hash_lookahead_tokens=self.block_pool.num_hash_lookahead_tokens,
+        )
+        length = min(tail // self.hash_block_size, len(request.block_hashes))
+        if length <= 0:
+            return
+        key = request.block_hashes[length - 1]
+        # One live FA entry owns each sighting, even if several groups cache it.
+        for group_id in self._checkpoint_anchor_groups:
+            if self.block_pool.get_cached_block(key, [group_id]) is not None:
+                candidates.remember(
+                    make_block_hash_with_group_id(key, group_id), request.request_id, request.block_hashes, length
+                )
+                break
 
     @property
     def _cache_hit_alignment_tokens(self) -> int:

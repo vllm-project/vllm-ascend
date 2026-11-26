@@ -28,26 +28,34 @@ class GDNCheckpointCandidates:
     MAX_HASHES = 262144
 
     def __init__(self) -> None:
-        self.chains: OrderedDict[str, tuple[BlockHash, ...]] = OrderedDict()
+        self.chains: OrderedDict[BlockHashWithGroupId, tuple[str, tuple[BlockHash, ...]]] = OrderedDict()
+        self.anchors_by_request: dict[str, BlockHashWithGroupId] = {}
         self.counts: Counter[BlockHash] = Counter()
         self.num_hashes = 0
 
-    def remember(self, request_id: str, hashes: Sequence[BlockHash], length: int) -> None:
+    def remember(self, anchor: BlockHashWithGroupId, request_id: str, hashes: Sequence[BlockHash], length: int) -> None:
         length = min(length, len(hashes))
-        old = self.chains.get(request_id, ())
-        if not len(old) < length <= self.MAX_HASHES:
+        if anchor in self.chains or not 0 < length <= self.MAX_HASHES:
             return
+        previous = self.anchors_by_request.get(request_id)
+        if previous is not None:
+            if len(self.chains[previous][1]) >= length:
+                return
+            self.discard(previous)
         chain = tuple(hashes[:length])
-        if old:
-            self._discard(request_id)
-        self.chains[request_id] = chain
+        self.chains[anchor] = (request_id, chain)
+        self.anchors_by_request[request_id] = anchor
         self.counts.update(chain)
         self.num_hashes += len(chain)
         while len(self.chains) > self.MAX_CHAINS or self.num_hashes > self.MAX_HASHES:
-            self._discard(next(iter(self.chains)))
+            self.discard(next(iter(self.chains)))
 
-    def _discard(self, request_id: str) -> None:
-        chain = self.chains.pop(request_id)
+    def discard(self, anchor: BlockHashWithGroupId) -> None:
+        record = self.chains.pop(anchor, None)
+        if record is None:
+            return
+        request_id, chain = record
+        del self.anchors_by_request[request_id]
         self.num_hashes -= len(chain)
         for key in chain:
             self.counts[key] -= 1
@@ -55,13 +63,29 @@ class GDNCheckpointCandidates:
                 del self.counts[key]
 
     def repeated(self, request_id: str, key: BlockHash, index: int) -> bool:
-        own = self.chains.get(request_id, ())
+        anchor = self.anchors_by_request.get(request_id)
+        own = self.chains[anchor][1] if anchor is not None else ()
         return self.counts[key] > (index < len(own) and own[index] == key)
 
     def clear(self) -> None:
         self.chains.clear()
+        self.anchors_by_request.clear()
         self.counts.clear()
         self.num_hashes = 0
+
+
+class AscendCheckpointBlockPool(BlockPool):
+    checkpoint_candidates: GDNCheckpointCandidates | None = None
+
+    def _emit_block_removed_events(self, block_hashes: list[BlockHashWithGroupId]) -> None:
+        # This path observes logical removals even when KV events are disabled.
+        # Physical hash migration does not call it.
+        candidates = self.checkpoint_candidates
+        if candidates is not None:
+            for key in block_hashes:
+                if key in candidates.chains and self.cached_block_hash_to_block.get_one_block(key) is None:
+                    candidates.discard(key)
+        super()._emit_block_removed_events(block_hashes)
 
 
 class AscendMambaManager(MambaManager):
@@ -115,9 +139,7 @@ class AscendMambaManager(MambaManager):
         candidates = self.checkpoint_candidates
         assert candidates is not None
         if num_tokens == request.num_prompt_tokens:
-            # Record only after allocation, including hash boundaries earlier
-            # than the request's own tail.
-            candidates.remember(request.request_id, request.block_hashes, tail // unit)
+            # The coordinator records the chain after FA publishes its key.
             return None
         key = self.checkpoint_candidate_key(request, num_tokens)
         if key is None:

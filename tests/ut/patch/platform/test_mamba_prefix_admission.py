@@ -6,6 +6,7 @@ from types import SimpleNamespace
 import pytest
 import torch
 from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
+from vllm.v1.core.kv_cache_utils import make_block_hash_with_group_id
 from vllm.v1.core.single_type_kv_cache_manager import register_all_kvcache_specs
 from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheConfig, KVCacheGroupSpec, MambaSpec
 
@@ -52,7 +53,7 @@ def make_coordinator(mamba_type=MambaAttentionBackendEnum.MAMBA2, *, transfer=No
     )
 
 
-def _observe_checkpoint(manager, request_id, key, *, prompt_length=1024, junction=0, finish=False):
+def _observe_checkpoint(manager, request_id, key, *, prompt_length=1024, junction=0, coordinator=None):
     boundary = 768
     request = SimpleNamespace(
         request_id=request_id,
@@ -61,17 +62,21 @@ def _observe_checkpoint(manager, request_id, key, *, prompt_length=1024, junctio
         num_computed_tokens=0,
         shared_prefix_boundary=junction,
     )
-    end = prompt_length if finish else boundary
+    if coordinator is not None:
+        coordinator.allocate_new_blocks(request_id, prompt_length, prompt_length)
+        coordinator.cache_blocks(request, prompt_length)
+        return
     if not manager.req_to_blocks[request_id]:
-        manager.allocate_new_blocks(request_id, end, end)
-    return manager._cache_partial_tail_block(request, end, None)
+        manager.allocate_new_blocks(request_id, boundary, boundary)
+    return manager._cache_partial_tail_block(request, boundary, None)
 
 
 def test_gdn_partial_checkpoint_is_cached_on_second_request():
-    manager = make_coordinator(MambaAttentionBackendEnum.GDN_ATTN).single_type_managers[2]
+    coordinator = make_coordinator(MambaAttentionBackendEnum.GDN_ATTN)
+    manager = coordinator.single_type_managers[2]
     key = b"x" * 32
     group_ids = [manager.kv_cache_group_id]
-    assert _observe_checkpoint(manager, "first", key, finish=True) is None
+    assert _observe_checkpoint(manager, "first", key, coordinator=coordinator) is None
     assert _observe_checkpoint(manager, "first", key) is None
     assert manager.block_pool.get_cached_block(key, group_ids) is None
 
@@ -104,28 +109,58 @@ def test_gdn_candidate_reset_follows_successful_prefix_cache_reset():
     coordinator = make_coordinator(MambaAttentionBackendEnum.GDN_ATTN)
     manager = coordinator.single_type_managers[2]
     key = b"x" * 32
-    assert _observe_checkpoint(manager, "before", key, finish=True) is None
+    assert _observe_checkpoint(manager, "before", key, coordinator=coordinator) is None
     assert not coordinator.reset_prefix_cache()
-    assert manager.checkpoint_candidates.chains["before"] == (key,)
+    anchor = make_block_hash_with_group_id(key, 0)
+    assert manager.checkpoint_candidates.chains[anchor] == ("before", (key,))
     coordinator.free("before")
     assert coordinator.reset_prefix_cache()
     assert not manager.checkpoint_candidates.chains
-    assert _observe_checkpoint(manager, "after", key, finish=True) is None
+    assert _observe_checkpoint(manager, "after", key, coordinator=coordinator) is None
 
 
-def test_gdn_partial_checkpoint_candidate_tracking_is_bounded(monkeypatch):
-    monkeypatch.setattr(GDNCheckpointCandidates, "MAX_CHAINS", 2)
-    manager = make_coordinator(MambaAttentionBackendEnum.GDN_ATTN).single_type_managers[2]
+def test_gdn_candidate_follows_fa_key_through_migration_and_eviction():
+    coordinator = make_coordinator(MambaAttentionBackendEnum.GDN_ATTN)
+    manager = coordinator.single_type_managers[2]
+    pool = coordinator.block_pool
+    key = b"x" * 32
+    anchor = make_block_hash_with_group_id(key, 0)
+    _observe_checkpoint(manager, "first", key, coordinator=coordinator)
+    source = pool.get_cached_block(key, [0])[0]
+    other_group = pool.get_cached_block(key, [1])[0]
+    target = pool.get_new_blocks(1)[0]
+
+    pool.move_block_hashes(source, target)
+    pool.evict_blocks({source.block_id, other_group.block_id})
+    assert pool.get_cached_block(key, [0]) == [target]
+    assert manager.checkpoint_candidates.chains[anchor] == ("first", (key,))
+    assert manager.checkpoint_candidates.repeated("second", key, 0)
+
+    pool.evict_blocks({target.block_id})
+    assert pool.get_cached_block(key, [0]) is None
+    assert anchor not in manager.checkpoint_candidates.chains
+    assert not manager.checkpoint_candidates.repeated("second", key, 0)
+    assert _observe_checkpoint(manager, "second", key) is None
+
+
+@pytest.mark.parametrize("limit", ["MAX_CHAINS", "MAX_HASHES"])
+def test_gdn_partial_checkpoint_candidate_tracking_is_bounded(monkeypatch, limit):
+    monkeypatch.setattr(GDNCheckpointCandidates, limit, 2)
+    coordinator = make_coordinator(MambaAttentionBackendEnum.GDN_ATTN)
+    manager = coordinator.single_type_managers[2]
     keys = [bytes([index]) * 32 for index in range(3)]
     for index, key in enumerate(keys):
-        assert _observe_checkpoint(manager, str(index), key, finish=True) is None
+        _observe_checkpoint(manager, str(index), key, coordinator=coordinator)
+        coordinator.free(str(index))
+        coordinator.new_step_starts()
     assert list(manager.checkpoint_candidates.counts) == keys[1:]
-    assert _observe_checkpoint(manager, "evicted", keys[0], finish=True) is None
+    assert _observe_checkpoint(manager, "evicted", keys[0], coordinator=coordinator) is None
     assert _observe_checkpoint(manager, "retained", keys[2]) is not None
 
 
 def test_gdn_first_tail_split_is_elided_until_a_distinct_admitted_request():
-    manager = make_coordinator(MambaAttentionBackendEnum.GDN_ATTN).single_type_managers[2]
+    coordinator = make_coordinator(MambaAttentionBackendEnum.GDN_ATTN)
+    manager = coordinator.single_type_managers[2]
     scheduler = SimpleNamespace(
         mamba_partial_cache_hit=True,
         mamba_has_prefill_checkpoint_blocks=False,
@@ -152,8 +187,8 @@ def test_gdn_first_tail_split_is_elided_until_a_distinct_admitted_request():
     assert _elide_first_tail_checkpoint(scheduler, request, 0, 1024, 768) == 1024
     assert not manager.checkpoint_candidates.chains
 
-    manager.allocate_new_blocks("first", 1024, 1024)
-    assert manager._cache_partial_tail_block(request, 1024, None) is None
+    coordinator.allocate_new_blocks("first", 1024, 1024)
+    coordinator.cache_blocks(request, 1024)
     assert manager.block_pool.get_cached_block(request.block_hashes[0], [manager.kv_cache_group_id]) is None
     assert _elide_first_tail_checkpoint(scheduler, request, 0, 1024, 768) == 1024
     repeated = SimpleNamespace(**vars(request))
@@ -189,7 +224,8 @@ def test_gdn_hash_chain_promotes_an_earlier_prefix_of_a_short_request():
     assert _elide_first_tail_checkpoint(scheduler, first, 0, 1000, 896) == 1000
     coordinator.allocate_new_blocks("first", 1000, 1000)
     coordinator.cache_blocks(first, 1000)
-    assert coordinator.gdn_checkpoint_candidates.chains["first"] == tuple(first.block_hashes)
+    anchor = make_block_hash_with_group_id(first.block_hashes[-1], 0)
+    assert coordinator.gdn_checkpoint_candidates.chains[anchor] == ("first", tuple(first.block_hashes))
     coordinator.free("first")
     coordinator.new_step_starts()
 
