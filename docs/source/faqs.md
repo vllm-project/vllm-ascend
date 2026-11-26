@@ -405,3 +405,67 @@ from storage again.
 Steps 2 and 3 are most effective right before a (re)start, because weight
 loading fills the page cache again and compaction recovers the blocks only for a
 short while.
+
+### 27. Why does `npu-smi info` hang inside an Atlas 950DT container while the host reports every device healthy? {: #faq-atlas-950dt-urma-provider-mount }
+
+On some 950DT hosts the Ascend driver places its URMA provider libraries outside
+the driver tree and links to them with an absolute symlink:
+
+```text
+/usr/local/Ascend/driver/lib64/driver/urma -> /usr/lib64/urma
+```
+
+Mounting only the driver directory or only individual device nodes keeps the
+symlink, but the absolute target does not exist inside the container. Because
+`npu-smi` needs that provider during device discovery, it blocks instead of
+failing fast: the host finishes in under a second, while the container produces
+no output at all. The Ascend logs usually contain `urma_get_device_by_eid
+failed`, `dms_get_ub_dev_info failed`, and `Init UB context failed`.
+
+**Step 1: confirm the host layout.**
+
+```bash
+readlink /usr/local/Ascend/driver/lib64/driver/urma
+ls -l /usr/lib64/urma/
+```
+
+If `readlink` prints an absolute path such as `/usr/lib64/urma`, the extra mount
+below is required. Providers that resolve inside
+`/usr/local/Ascend/driver/lib64/` do not need it.
+
+**Step 2: compare against the running container.**
+
+```bash
+docker exec vllm-ascend readlink /usr/local/Ascend/driver/lib64/driver/urma
+docker exec vllm-ascend ls -l /usr/lib64/urma/
+```
+
+A dangling link or a missing directory confirms the cause.
+
+**Step 3: add the read-only mount and restart.**
+
+```bash
+docker run --rm \
+    --name vllm-ascend \
+    --net=host \
+    --shm-size=1g \
+    -e ASCEND_VISIBLE_DEVICES=0 \
+    -v /usr/lib64/urma:/usr/lib64/urma:ro \
+    -v /usr/local/Ascend/driver/tools/hccn_tool:/usr/local/Ascend/driver/tools/hccn_tool \
+    -v "$MODEL_CACHE:/root/.cache" \
+    -it "$IMAGE" bash
+```
+
+An existing `/usr/lib64:/usr/lib64` mount already covers the directory, so do
+not add both.
+
+**Step 4: verify with a bounded query** so a remaining problem cannot block your
+shell:
+
+```bash
+timeout -k 3s 25s npu-smi info
+```
+
+All devices should report `Health: OK`. Note that raising `LD_LIBRARY_PATH`
+alone does not fix this; the files have to be present at the absolute path the
+symlink points to.
