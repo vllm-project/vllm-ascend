@@ -29,6 +29,34 @@ def test_plan_requires_a_checkpoint_with_a_nonempty_tail(offsets, lengths):
         plan_native_checkpoint(offsets, lengths)
 
 
+def test_native_fla_uses_chunk64_with_processed_beta_on_a5(monkeypatch):
+    from vllm_ascend.device import device_op
+    from vllm_ascend.device.hardware import AscendDeviceType
+    from vllm_ascend.device.hardware_profile import get_hardware_profile
+
+    monkeypatch.setattr(device_op, "get_current_hardware_profile", lambda: get_hardware_profile(AscendDeviceType.A5))
+    monkeypatch.setattr(device_op, "DeviceOperator", device_op.A5DeviceAdaptor)
+    qkv = torch.zeros(1, 65, 1, 4, dtype=torch.bfloat16)
+    state = torch.zeros(1, 1, 4, 4)
+    gate = torch.zeros(1, 65, 1)
+    beta = torch.full_like(gate, 0.75, dtype=qkv.dtype)
+    partition = native_gdn_checkpoint.NativeFlaPartition((0, 65), (0, 0, 0, 1))
+    fla_fwd = Mock(return_value=(qkv, state))
+
+    native_gdn_checkpoint._apply_recurrence(
+        (qkv, qkv, qkv, gate, beta), state, partition, 0.5, None, fla_fwd, save_training_intermediates=False
+    )
+
+    fla_fwd.assert_called_once()
+    args, kwargs = fla_fwd.call_args
+    assert kwargs["chunk_size"] == 64
+    assert kwargs["chunk_indices"] is partition.chunk_indices_chunk64_host
+    assert kwargs["use_beta_sigmoid_in_kernel"] is False
+    assert kwargs["disable_recompute"] is False
+    assert kwargs["state_v_first"] is True
+    torch.testing.assert_close(args[4], beta)
+
+
 @pytest.mark.parametrize("joint_pack", [False, True])
 def test_contiguous_checkpoint_keeps_token_order_and_packs_heads_once(monkeypatch, joint_pack):
     head_first = torch.arange(56).reshape(4, 7, 2)
