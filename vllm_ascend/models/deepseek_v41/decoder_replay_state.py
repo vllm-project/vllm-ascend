@@ -25,7 +25,7 @@ from vllm_ascend.core.kv_cache_interface import is_circular_kv_cache_spec
 from vllm_ascend.ops.rope_dsv4 import get_cos_and_sin_dsa
 from vllm_ascend.ops.triton.decoder_replay import gather_replay_batch
 from vllm_ascend.utils import should_skip_allreduce_across_dp_group
-from vllm_ascend.worker.device_metadata import DeviceMetadataTask
+from vllm_ascend.worker.device_metadata import DeviceMetadataStage, DeviceMetadataTask
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch
 
 from .decoder_replay_layers import AscendDecoderReplayLayers
@@ -92,6 +92,7 @@ class DecoderReplayState:
         self.first_swa_builder: tuple[int, list[str], AscendDSAV41MetadataBuilder] | None = None
         self.metadata: dict[str, AscendDSAV41Metadata] = {}
         self.metadata_ready: torch.npu.Event | None = None
+        self._pending_pcp_metadata_tasks: list[DeviceMetadataTask] = []
         self.num_tokens = 0
         self.num_actual_tokens = 0
         self.dp_tokens: torch.Tensor | None = None
@@ -383,14 +384,11 @@ class DecoderReplayState:
             self.replay_pcp_context = self._build_replay_pcp_context(inputs, global_kept)
             self.layers.num_padded_rows = plan.num_tokens
 
-        producer = None if plan.uses_pcp_replay else inputs.metadata_producer_stream
-        if producer is None:
-            wait_for_producer = (
-                inputs.metadata_producer_stream if plan.uses_pcp_replay and inputs.defer_pcp_metadata_wait else None
-            )
-            self.metadata = self._build_metadata(plan.replay_inputs, offsets, wait_for_producer=wait_for_producer)
+        producer = inputs.metadata_producer_stream
+        if producer is not None and (not plan.uses_pcp_replay or inputs.defer_pcp_metadata_wait):
+            self._submit_compact_metadata(plan.replay_inputs, offsets, producer, pcp=plan.uses_pcp_replay)
         else:
-            self._submit_compact_metadata(plan.replay_inputs, offsets, producer)
+            self.metadata = self._build_metadata(plan.replay_inputs, offsets)
         # PCP selects valid rows and pads downstream; other paths may include padding row indices.
         num_selected_rows = self.num_actual_tokens if plan.uses_pcp_replay else plan.num_tokens
         self.layers.rows = self.rows[:num_selected_rows]
@@ -398,7 +396,7 @@ class DecoderReplayState:
         self.layers.context_factory = self.forward_context
 
     def _submit_compact_metadata(
-        self, inputs: DecoderReplayInputs, offsets: np.ndarray, producer: torch.npu.Stream
+        self, inputs: DecoderReplayInputs, offsets: np.ndarray, producer: torch.npu.Stream, *, pcp: bool = False
     ) -> None:
         tasks: list[DeviceMetadataTask] = []
         builders = [builder for _, _, builder in self.builders]
@@ -413,6 +411,14 @@ class DecoderReplayState:
                 for builder in builders:
                     builder.take_device_metadata_tasks()
                 raise
+        if pcp:
+            async_tasks = []
+            for task in tasks:
+                if task.stage in (DeviceMetadataStage.ATTENTION, DeviceMetadataStage.INDEXER):
+                    async_tasks.append(task)
+                else:
+                    task.run()
+            tasks = async_tasks
         if tasks:
             main = torch.npu.current_stream()
             # Target planners are already on this stream. The wait orders
@@ -423,6 +429,10 @@ class DecoderReplayState:
                     for task in tasks:
                         task.run()
                 self.metadata_ready = producer.record_event()
+                if pcp:
+                    # Keep compact inputs captured by the tasks alive until
+                    # the owning main stream has enqueued its completion wait.
+                    self._pending_pcp_metadata_tasks = tasks
             except BaseException:
                 main.wait_stream(producer)
                 raise
@@ -431,6 +441,7 @@ class DecoderReplayState:
         if self.metadata_ready is not None:
             torch.npu.current_stream().wait_event(self.metadata_ready)
             self.metadata_ready = None
+            self._pending_pcp_metadata_tasks.clear()
 
     def _build_metadata(
         self,
@@ -438,7 +449,6 @@ class DecoderReplayState:
         offsets: np.ndarray,
         *,
         tasks: list[DeviceMetadataTask] | None = None,
-        wait_for_producer: torch.npu.Stream | None = None,
     ) -> dict[str, AscendDSAV41Metadata]:
         batch = inputs.batch
         num_reqs = batch.num_reqs
@@ -455,10 +465,6 @@ class DecoderReplayState:
         seq_lens_cpu = torch.from_numpy(batch.seq_lens_np[:num_reqs])
         is_prefilling = torch.from_numpy(batch.is_prefilling_np[:num_reqs])
         max_query_len = max(int(np.diff(offsets).max(initial=0)), batch.max_query_len or 0)
-        if wait_for_producer is not None:
-            # Compaction can overlap batch metadata. Serialize the planners
-            # before compact builders can use the same operator scratch.
-            torch.npu.current_stream().wait_stream(wait_for_producer)
         for group_id, layer_names, builder in self.builders:
             common = AscendCommonAttentionMetadata(
                 query_start_loc=self.offsets[: num_reqs + 1],

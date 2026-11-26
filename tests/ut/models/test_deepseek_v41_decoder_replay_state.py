@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from dataclasses import replace
 from types import SimpleNamespace
 from unittest.mock import Mock
@@ -100,9 +100,10 @@ def test_only_pcp_compaction_waits_for_batch_producer(state, monkeypatch, uses_p
         calls.stream.wait_stream.assert_not_called()
 
 
-def test_deferred_pcp_wait_follows_compact_inputs_and_precedes_replay_builder(state, monkeypatch):
+@pytest.mark.parametrize("async_pcp", [False, True])
+def test_pcp_replay_metadata_orders_collectives_and_planners(state, monkeypatch, async_pcp):
     calls = Mock()
-    producer = object()
+    producer = calls.producer
     replay_inputs = inputs()
     batch = replay_inputs.batch
     batch.seq_lens = torch.from_numpy(batch.seq_lens_np)
@@ -110,13 +111,20 @@ def test_deferred_pcp_wait_follows_compact_inputs_and_precedes_replay_builder(st
     batch.attn_state = None
     state.config.model_config = SimpleNamespace(max_model_len=32)
     state.builders = [(0, ["decoder.swa_cache"], calls.builder)]
-    calls.builder.take_device_metadata_tasks.return_value = ()
+    calls.builder.defer_device_metadata.side_effect = nullcontext
+    stage = replay_mod.DeviceMetadataStage
+    task = replay_mod.DeviceMetadataTask
+    calls.builder.take_device_metadata_tasks.return_value = (
+        task(stage.ATTENTION, calls.sas, 0),
+        task(stage.COMPRESSOR, calls.c2, 1),
+        task(stage.INDEXER, calls.qli, 2),
+    )
     replay_inputs = replace(
         replay_inputs,
         block_tables=(torch.zeros(3, 1),),
         pcp_context=SimpleNamespace(global_batch=batch),
         metadata_producer_stream=producer,
-        defer_pcp_metadata_wait=True,
+        defer_pcp_metadata_wait=async_pcp,
     )
     plan = replay_mod._DecoderReplayPlan(
         kept_lens=np.array([1, 2, 2], dtype=np.int32),
@@ -136,9 +144,16 @@ def test_deferred_pcp_wait_follows_compact_inputs_and_precedes_replay_builder(st
         pcp_group.all_gather(torch.arange(5), dim=0)
         return inputs.pcp_context
 
+    @contextmanager
+    def producer_scope(stream):
+        assert stream is producer
+        calls.enter_producer()
+        yield
+
     monkeypatch.setattr(replay_mod, "get_pcp_group", lambda: pcp_group)
     monkeypatch.setattr(replay_mod, "get_cos_and_sin_dsa", lambda *args, **kwargs: None)
     monkeypatch.setattr(torch.npu, "current_stream", lambda: calls.stream)
+    monkeypatch.setattr(torch.npu, "stream", producer_scope)
     monkeypatch.setattr(state, "_gather", calls.gather)
     monkeypatch.setattr(state, "_build_replay_plan", lambda _: plan)
     monkeypatch.setattr(state, "_build_replay_pcp_context", build_replay_pcp_context)
@@ -146,23 +161,41 @@ def test_deferred_pcp_wait_follows_compact_inputs_and_precedes_replay_builder(st
 
     state.prepare(replay_inputs, CUDAGraphMode.NONE)
 
-    assert [call[0] for call in calls.mock_calls] == [
-        "gather",
-        "all_gather",
-        "all_gather",
-        "stream.wait_stream",
-        "builder.build",
-        "builder.take_device_metadata_tasks",
-    ]
+    assert state.metadata["decoder.swa_cache"] is calls.builder.build.return_value
     assert calls.all_gather.call_args_list[0].args == (0,)
     assert calls.all_gather.call_args_list[1].args == (1,)
-    calls.stream.wait_stream.assert_called_once_with(producer)
-    assert state.metadata["decoder.swa_cache"] is calls.builder.build.return_value
+    if async_pcp:
+        assert [call[0] for call in calls.mock_calls] == [
+            "gather",
+            "all_gather",
+            "builder.defer_device_metadata",
+            "all_gather",
+            "builder.build",
+            "builder.take_device_metadata_tasks",
+            "c2",
+            "producer.wait_stream",
+            "enter_producer",
+            "sas",
+            "qli",
+            "producer.record_event",
+        ]
+        calls.producer.wait_stream.assert_called_once_with(calls.stream)
+        assert [task.stage for task in state._pending_pcp_metadata_tasks] == [stage.ATTENTION, stage.INDEXER]
+        state.wait_for_metadata()
+        state.wait_for_metadata()
+        calls.stream.wait_event.assert_called_once_with(calls.producer.record_event.return_value)
+        assert not state._pending_pcp_metadata_tasks
+    else:
+        calls.stream.wait_stream.assert_called_once_with(producer)
+        assert calls.mock_calls[0][0] == "stream.wait_stream"
+        calls.producer.wait_stream.assert_not_called()
+        assert state.metadata_ready is None
 
 
 @pytest.mark.parametrize("has_tasks", [False, True])
 @pytest.mark.parametrize("task_fails", [False, True])
-def test_compact_metadata_orders_production_and_first_consumption(state, monkeypatch, has_tasks, task_fails):
+@pytest.mark.parametrize("pcp", [False, True])
+def test_compact_metadata_orders_production_and_first_consumption(state, monkeypatch, has_tasks, task_fails, pcp):
     calls = Mock()
     monkeypatch.setattr(torch.npu, "current_stream", lambda: calls.main)
 
@@ -182,19 +215,19 @@ def test_compact_metadata_orders_production_and_first_consumption(state, monkeyp
 
     def build(*args, tasks):
         if has_tasks:
-            tasks.append(SimpleNamespace(run=run))
+            tasks.append(replay_mod.DeviceMetadataTask(replay_mod.DeviceMetadataStage.ATTENTION, run, 0))
         return metadata
 
     monkeypatch.setattr(state, "_build_metadata", build)
     if has_tasks and task_fails:
         with pytest.raises(RuntimeError, match="planner failed"):
-            state._submit_compact_metadata(inputs(), np.array([0, 1]), calls.producer)
+            state._submit_compact_metadata(inputs(), np.array([0, 1]), calls.producer, pcp=pcp)
         calls.main.wait_stream.assert_called_once_with(calls.producer)
         calls.producer.record_event.assert_not_called()
         assert state.metadata_ready is None
         return
 
-    state._submit_compact_metadata(inputs(), np.array([0, 1]), calls.producer)
+    state._submit_compact_metadata(inputs(), np.array([0, 1]), calls.producer, pcp=pcp)
     assert state.metadata is metadata
     if has_tasks:
         assert [call[0] for call in calls.mock_calls] == [

@@ -7,8 +7,8 @@ entries:
       experimental option with
       --additional-config '{"dsv41_metadata_overlap_A3_config":{"enabled":true}}';
       it is disabled by default and supports eager and FULL graph execution.
-      For eager SWA bounded replay, SAS and QLI metadata preparation can
-      overlap with prefill context parallel compaction and CPU data parallel
-      coordination.
+      During eager SWA bounded replay, batch metadata can overlap CPU data
+      parallel coordination and compact PCP metadata can run alongside
+      earlier model layers.
     model: deepseek-v4.1
     hardware: [A3]
