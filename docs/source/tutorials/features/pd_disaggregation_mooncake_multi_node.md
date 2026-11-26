@@ -520,8 +520,9 @@ Modify `run_dp_template.sh` on each node.
 
 !!! note
 
-    When manually launching multiple external DP ranks on the same node, follow
-    the [upstream vLLM guidance](https://docs.vllm.ai/en/stable/serving/data_parallel_deployment/#external-load-balancing).
+    If you skip the launcher and template above, run one `vllm serve` command
+    per external DP rank. For ranks on the same node, follow the
+    [upstream vLLM guidance](https://docs.vllm.ai/en/stable/serving/data_parallel_deployment/#external-load-balancing).
 
     > assign each process a disjoint device set with `CUDA_VISIBLE_DEVICES` or
     > `--device-ids`; devices are not partitioned automatically between processes.
