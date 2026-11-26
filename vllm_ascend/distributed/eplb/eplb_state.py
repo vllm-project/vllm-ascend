@@ -409,6 +409,14 @@ class AscendEplbState(_eplb_state.EplbState):
             )
         model_state._load_mapping_generation = 0
         model_state._observed_load_mapping_generation = 0
+        # Row sums of the sliding window, kept on device. Computing them per
+        # sampling step avoids reading the whole window back at rearrangement
+        # time, which would transiently allocate a window-sized tensor.
+        model_state._window_row_sums = torch.zeros(
+            self.expert_load_window_size,
+            dtype=torch.int64,
+            device=self.device,
+        )
         if hasattr(self, "_slot_active"):
             return
         self._slot_active = torch.zeros(
@@ -472,6 +480,9 @@ class AscendEplbState(_eplb_state.EplbState):
         self._load_stats_window_write_index = 0
         for state in self.model_states.values():
             state._observed_load_mapping_generation = state._load_mapping_generation
+            sums = getattr(state, "_window_row_sums", None)
+            if sums is not None:
+                sums.zero_()
 
     def _ordered_load_step_indices(self) -> torch.Tensor:
         indices = torch.arange(self.expert_load_window_size, dtype=torch.long)
@@ -531,17 +542,26 @@ class AscendEplbState(_eplb_state.EplbState):
             _raise_if_async_worker_stopped(self)
         is_sampling = self._is_load_sampling_step and not is_profile
         self._is_load_sampling_step = False
+        row = slot = None
         if is_sampling:
             # Expert counts come from the rank that executes the tokens, so an
             # idle DP rank holds load sent by the other ranks. Every rank writes
             # its window slot, which keeps the window position equal across
             # ranks. Which slots hold complete load is decided when rearranging.
+            row = self.expert_load_window_step
+            slot = self._load_stats_window_write_index
             self._record_load_slot(is_dummy)
         super().step(
             is_dummy=False if is_sampling else is_dummy,
             is_profile=is_profile,
             log_stats=log_stats,
         )
+        if is_sampling:
+            # The upstream step has just copied the pass into window row ``row``;
+            # record its sum per slot so that rearrangement never reads the
+            # whole window back on the device.
+            for model_state in self.model_states.values():
+                model_state._window_row_sums[slot] = model_state.expert_load_window[row].sum(dtype=torch.int64)
 
     def _sync_load_pass(self, *args: Any, **kwargs: Any) -> list[torch.Tensor]:
         """Observability hook point; upstream owns the behaviour.
@@ -554,17 +574,18 @@ class AscendEplbState(_eplb_state.EplbState):
         return super()._sync_load_pass(*args, **kwargs)
 
     def _local_load_per_slot(self) -> torch.Tensor:
-        """Sum the load recorded behind each window slot, oldest first."""
-        physical_slots = self._physical_load_sample_slots[self._ordered_load_step_indices()]
+        """Sum the load recorded behind each window slot, oldest first.
+
+        The sums are maintained per sampling step in ``_window_row_sums``, so
+        this only moves one small vector to the CPU instead of gathering the
+        whole window on the device.
+        """
         local_load = torch.zeros(self.expert_load_window_size, dtype=torch.int64)
-        written = physical_slots >= 0
-        if written.any():
-            device_slots = physical_slots[written].to(self.device)
-            for model_state in self.model_states.values():
-                window = model_state.expert_load_window
-                local_load[written] += (
-                    window.index_select(0, device_slots).reshape(device_slots.numel(), -1).sum(dim=1).cpu()
-                )
+        ordered = self._ordered_load_step_indices()
+        for model_state in self.model_states.values():
+            sums = getattr(model_state, "_window_row_sums", None)
+            if sums is not None:
+                local_load += sums.cpu()[ordered]
         return local_load
 
     def _all_reduce_sum(self, value: torch.Tensor) -> None:
@@ -640,6 +661,9 @@ class AscendEplbState(_eplb_state.EplbState):
         device_rows = excluded.to(self.device)
         for model_state in self.model_states.values():
             model_state.expert_load_window.index_fill_(0, device_rows, 0)
+            sums = getattr(model_state, "_window_row_sums", None)
+            if sums is not None:
+                sums.index_fill_(0, device_rows, 0)
 
     def collect_global_load_stats(
         self,
