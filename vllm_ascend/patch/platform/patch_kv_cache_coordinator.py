@@ -37,6 +37,7 @@ from vllm.v1.kv_cache_interface import (
     UniformTypeKVCacheSpecs,
 )
 from vllm.v1.request import Request
+
 from vllm_ascend.core.kv_cache_interface import is_prefix_cacheable
 
 logger = logging.getLogger(__name__)
