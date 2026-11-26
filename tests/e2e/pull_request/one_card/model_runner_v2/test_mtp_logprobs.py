@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM-Ascend project
 
 import os
+from typing import TypedDict
 from unittest.mock import patch
 
 import pytest
@@ -16,6 +17,17 @@ MAX_TOKENS = 16
 NUM_SPECULATIVE_TOKENS = 2
 
 
+class _RunnerKwargs(TypedDict):
+    dtype: str
+    max_model_len: int
+    max_num_seqs: int
+    gpu_memory_utilization: float
+    language_model_only: bool
+    enable_prefix_caching: bool
+    generation_config: str
+    logprobs_mode: str
+
+
 def _spec_decode_count(runner, metric_name):
     counters = [metric for metric in runner.model.get_metrics() if metric.name == metric_name]
     assert all(isinstance(metric, Counter) for metric in counters)
@@ -27,7 +39,7 @@ def _spec_decode_count(runner, metric_name):
 @patch.dict(os.environ, {"VLLM_USE_V2_MODEL_RUNNER": "1"})
 @wait_until_npu_memory_free(target_free_percentage=0.8)
 def test_mtp_logprobs_match_greedy_reference(enforce_eager: bool) -> None:
-    runner_kwargs = {
+    runner_kwargs: _RunnerKwargs = {
         "dtype": "bfloat16",
         "max_model_len": 256,
         "max_num_seqs": len(PROMPTS),
