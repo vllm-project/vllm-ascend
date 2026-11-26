@@ -364,7 +364,7 @@ class ServerCommandBuilder:
         return ServerCommand(cmd=cmd, env=env, display_cmd=display_cmd)
 
     def build_all(self, ranks: list[RankInfo]) -> list[ServerCommand]:
-        return [self.build(rank, self.config.launch_templates[rank.node_index]) for rank in ranks]
+        return [self.build(rank, self.config.launch_templates[rank.config_index]) for rank in ranks]
 
     def _build_variables(self, rank: RankInfo) -> dict[str, str]:
         return {
@@ -384,7 +384,7 @@ class ServerCommandBuilder:
             "DP_RPC_PORT": str(rank.dp_rpc_port),
             "VISIBLE_DEVICES": rank.visible_devices,
             "NODE_INDEX": str(rank.node_index),
-            "CONFIG_INDEX": str(rank.node_index),
+            "CONFIG_INDEX": str(rank.config_index),
             "PP_LAYER_PARTITION": rank.pp_layer_partition,
             "NNODES": str(rank.nnodes),
             "NODE_RANK": str(rank.node_rank),
@@ -488,7 +488,7 @@ class ExternalDPServerManager:
         logger.info("Starting %d external DP ranks on node %d", len(local_ranks), self.current_node_index)
         try:
             for rank in local_ranks:
-                template = self.config.launch_templates[rank.node_index]
+                template = self.config.launch_templates[rank.config_index]
                 template = type(template)(
                     envs={**template.envs, **self.dist_envs, **self.extra_envs},
                     server_cmd_template=template.server_cmd_template,
@@ -526,7 +526,7 @@ class ExternalDPServerManager:
         self.rank_processes.clear()
 
     def _rank_log_file(self, rank: RankInfo) -> Path:
-        return self.log_root / f"node-{rank.node_index}" / f"rank-{rank.local_rank}.log"
+        return self.log_root / f"node-{rank.node_index}" / f"cfg-{rank.config_index}" / f"rank-{rank.local_rank}.log"
 
 
 class ExternalDPProxyLauncher:
@@ -621,13 +621,16 @@ def rank_health_url(rank: RankInfo) -> str:
 
 def master_rank_health_url(ranks: list[RankInfo]) -> str:
     for rank in ranks:
-        if rank.node_index == 0 and rank.local_rank == 0:
+        if rank.config_index == 0 and rank.local_rank == 0:
             return rank_health_url(rank)
     raise RuntimeError("External DP master rank was not found")
 
 
 def rank_label(rank: RankInfo) -> str:
-    return f"node={rank.node_index} rank={rank.local_rank} role={rank.role} url={rank_health_url(rank)}"
+    return (
+        f"node={rank.node_index} cfg={rank.config_index} rank={rank.local_rank} "
+        f"role={rank.role} url={rank_health_url(rank)}"
+    )
 
 
 def format_http_status(label: str, url: str) -> str:
