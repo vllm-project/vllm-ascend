@@ -13,6 +13,9 @@ The production caller is `GDNCommitGraph.update`. `source` and `target` expose
 indices, query offsets, an optional sampler mapping, and optional align block
 tables/computed lengths. The other inputs are the sampler's accepted-count
 vector and a persistent output vector. All tensors are on the same device.
+`copy_accepted` defaults to true. The first group copies/pads that shared vector;
+later groups pass false and leave it untouched. Each group still stages its own
+page IDs, offsets and optional align metadata.
 
 Sources may use non-unit positive strides. Destinations are contiguous,
 separate allocations. Input/output aliasing is not supported. Integer inputs
@@ -24,7 +27,7 @@ One program processes 256 elements. Query offsets are extended with the last
 real offset; unused indices, mappings, accepted counts and table rows become
 zero. Each group's page IDs are copied separately. `batch` and `sampled_rows`
 are runtime scalars excluded from JIT specialization; bucket/capacity, integer
-types, align/mapping modes and source strides determine compiled variants.
+types, align/mapping/copy modes and source strides determine compiled variants.
 
 ## Correctness and tests
 
@@ -36,7 +39,8 @@ pytest tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_stage_gdn_co
 ```
 
 Coverage includes int32/int64, B1/B3/B125/B192, mapped and direct rows,
-normal/align, non-contiguous sources and padded table rows. The same test
+normal/align, non-contiguous sources, padded table rows and preserving accepted
+counts when copying is disabled. The same test
 helper can run the actual Triton source through the CPU interpreter without
 initializing NPU. CPU interpretation and offline binary compilation do not
 prove device execution, latency or model accuracy.

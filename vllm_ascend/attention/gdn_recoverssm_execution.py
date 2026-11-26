@@ -306,6 +306,10 @@ class GDNCommitExecutor:
         self._runtime()
         capacity = min(self.capacity, *(job.context.commit_plan.capacity for job in jobs))
         device = jobs[0].indices.device
+
+        def null_buffer(reference, shape):
+            return torch.empty_strided(shape, reference.stride(), dtype=reference.dtype, device=device).zero_()
+
         with torch.npu.stream(self.stream):
             for dtype in (torch.int32, torch.int64):
                 accepted = torch.zeros(capacity, dtype=dtype, device=device)
@@ -314,28 +318,27 @@ class GDNCommitExecutor:
                     if key in self.graphs:
                         continue
                     graph = GDNCommitGraph(jobs, accepted, bucket)
-                    # The sources are graph-owned NULL metadata, never live
-                    # cache indices. Warm both sampler-mapping launch variants.
-                    graph.update(graph.jobs, accepted)
-                    graph.update(tuple(replace(job, mapping=None) for job in graph.jobs), accepted)
-                    # Match source strides without reading or staging any
-                    # caller-owned page IDs or offsets during warmup.
+                    # Match source strides using separate NULL allocations,
+                    # never caller-owned records or aliased graph destinations.
                     bound = tuple(
                         replace(
                             target,
-                            indices=torch.empty_strided(
-                                (bucket,), source.indices.stride(), dtype=source.indices.dtype, device=device
-                            ).zero_(),
-                            offsets=torch.empty_strided(
-                                (bucket + 1,), source.offsets.stride(), dtype=source.offsets.dtype, device=device
-                            ).zero_(),
+                            indices=null_buffer(source.indices, (bucket,)),
+                            offsets=null_buffer(source.offsets, (bucket + 1,)),
                             mapping=None,
+                            table=null_buffer(source.table, target.table.shape) if source.table is not None else None,
+                            computed=null_buffer(source.computed, target.computed.shape)
+                            if source.computed is not None
+                            else None,
                         )
                         for source, target in zip(jobs, graph.jobs)
                     )
                     graph.update(bound, accepted)
                     graph.update(
-                        tuple(replace(job, mapping=graph_job.mapping) for job, graph_job in zip(bound, graph.jobs)),
+                        tuple(
+                            replace(job, mapping=torch.zeros_like(target.mapping))
+                            for job, target in zip(bound, graph.jobs)
+                        ),
                         accepted,
                     )
                     graph.capture(self.stream)

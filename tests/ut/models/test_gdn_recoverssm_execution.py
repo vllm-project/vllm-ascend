@@ -345,12 +345,17 @@ def test_graph_miss_never_captures_during_a_request(monkeypatch):
     assert not runner.graphs
 
 
-def test_startup_capture_uses_null_metadata_then_runtime_only_replays(monkeypatch):
+@pytest.mark.parametrize("align", [False, True])
+def test_startup_capture_uses_null_metadata_then_runtime_only_replays(monkeypatch, align):
     fake_npu(monkeypatch, [])
     captures = []
 
     def stage(source, target, accepted, out_accepted, **kwargs):
         assert not source.indices.count_nonzero() and not source.offsets.count_nonzero()
+        assert source.indices.data_ptr() != target.indices.data_ptr()
+        assert source.offsets.data_ptr() != target.offsets.data_ptr()
+        if source.table is not None:
+            assert source.table.data_ptr() != target.table.data_ptr()
 
     monkeypatch.setattr(execution, "stage_gdn_commit", stage)
 
@@ -362,7 +367,7 @@ def test_startup_capture_uses_null_metadata_then_runtime_only_replays(monkeypatc
 
     monkeypatch.setattr(execution.GDNCommitGraph, "capture", capture)
     runner = execution.GDNCommitExecutor(config(capture_commit=True, merge_groups=False), 8)
-    source = job()
+    source = job(align=align)
     runner.prepare((source,))
     assert len(captures) == 2 * len(execution.commit_buckets(8))
     monkeypatch.setattr(execution, "stage_gdn_commit", Mock())
