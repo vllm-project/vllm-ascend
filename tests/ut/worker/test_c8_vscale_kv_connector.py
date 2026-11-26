@@ -22,17 +22,13 @@ def _packet(ratio: int = 3):
     heads, dim, block, num_blocks = 2, 64, 512, 2
     pitch = heads * block * (2 * dim + 2 * dim // 32) + 256
     raw = torch.full((128 + num_blocks * ratio * pitch + 128,), 37, dtype=torch.int8)
-    views = mxfp_paged_cache_views(
-        raw[128:-128], num_blocks * ratio, heads, dim, dim, block, page_stride_bytes=pitch
-    )
+    views = mxfp_paged_cache_views(raw[128:-128], num_blocks * ratio, heads, dim, dim, block, page_stride_bytes=pitch)
     scale = torch.arange(heads * dim, dtype=torch.int32).remainder(251).to(torch.uint8)
-    layer = SimpleNamespace(
-        impl=object.__new__(AscendC8MXFPAttentionBackendImpl), kv_cache=views, v_cache_scale=scale
-    )
+    impl = object.__new__(AscendC8MXFPAttentionBackendImpl)
+    layer = SimpleNamespace(impl=impl, kv_cache=views, v_cache_scale=scale)
     runner = NPUModelRunner.__new__(NPUModelRunner)
-    runner.kv_cache_config = SimpleNamespace(
-        num_blocks=num_blocks, kv_cache_groups=[SimpleNamespace(layer_names=["attn"])]
-    )
+    group = SimpleNamespace(layer_names=["attn"])
+    runner.kv_cache_config = SimpleNamespace(num_blocks=num_blocks, kv_cache_groups=[group])
     runner.compilation_config = SimpleNamespace(static_forward_context={"attn": layer})
     runner.vllm_config = SimpleNamespace(
         cache_config=SimpleNamespace(cache_dtype="mxfp8"), compilation_config=runner.compilation_config
@@ -59,6 +55,7 @@ def test_worker_wraps_nested_pull_consumer_after_cache_initialization(is_consume
     _, _, _, runner, _ = _packet()
     delegate = MagicMock()
     runner.kv_connector = delegate
+
     def initialize(*_args, **_kwargs):
         assert runner.kv_connector is delegate
 
