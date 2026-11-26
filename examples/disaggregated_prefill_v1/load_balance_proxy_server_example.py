@@ -1148,8 +1148,6 @@ async def handle_completions_impl(api: str, request: Request):
             origin_prompt = ""
         token_limit = "max_output_tokens" if api == "/responses" else "max_tokens"
         origin_max_tokens = req_data.get(token_limit)
-        # Preserve the pre-existing Chat/Completions recompute policy.
-        recompute_limit = {"/messages": args.max_retries, "/responses": args.max_retries}.get(api)
         end_events = {
             "/messages": ("message_stop", "error"),
             "/responses": ("response.completed", "response.incomplete", "error"),
@@ -1302,11 +1300,6 @@ async def handle_completions_impl(api: str, request: Request):
                                     stop_reason = "recomputed"
                                 usage = chunk_json.get("usage") or result.get("usage") or {}
                                 used_tokens = usage.get("output_tokens", 0)
-                                if retry_count and "output_tokens" in usage:
-                                    usage["output_tokens"] += completion_tokens
-                                    if "total_tokens" in usage:
-                                        usage["total_tokens"] += completion_tokens
-                                    rewrite = True
 
                         elif api == "/responses":
                             result = chunk_json.get("response", chunk_json)
@@ -1341,10 +1334,6 @@ async def handle_completions_impl(api: str, request: Request):
                                     result["output"] = previous_items + attempt_items
                                     if response_id:
                                         result["id"] = response_id
-                                    if "output_tokens" in usage:
-                                        usage["output_tokens"] += completion_tokens
-                                    if "total_tokens" in usage:
-                                        usage["total_tokens"] += completion_tokens
                                     rewrite = True
 
                         else:
@@ -1373,8 +1362,6 @@ async def handle_completions_impl(api: str, request: Request):
                                 raise HTTPException(
                                     status_code=409, detail="Recompute continuation requires text-only output."
                                 )
-                            if recompute_limit is not None and retry_count >= max(1, recompute_limit):
-                                raise HTTPException(status_code=503, detail="Decode recompute retry limit reached.")
                             if api == "/responses":
                                 if isinstance(response_input, str) or not response_input:
                                     req_data["input"] = (response_input or "") + generated_token
@@ -1399,10 +1386,7 @@ async def handle_completions_impl(api: str, request: Request):
                             else:
                                 req_data["prompt"] = origin_prompt + generated_token
                             if origin_max_tokens is not None:
-                                remaining = origin_max_tokens - completion_tokens + token_credit
-                                if recompute_limit is not None and remaining <= 0:
-                                    raise HTTPException(status_code=503, detail="Recompute token budget exhausted.")
-                                req_data[token_limit] = remaining
+                                req_data[token_limit] = origin_max_tokens - completion_tokens + token_credit
                             req_data.pop("kv_transfer_params", None)
                             previous_items.extend(attempt_items)
                             # The stream is no longer fully consumed before a retry:

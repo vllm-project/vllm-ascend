@@ -20,12 +20,14 @@ using the existing Chat/Completions approach: the first Messages message's conte
 or Responses' string input / first input message's content. It preserves the other
 history entries, reassigns P/D instances, and deducts reported output tokens from
 an explicit `max_tokens` / `max_output_tokens` budget. The final response combines
-the earlier text with the continuation and accumulates output-token usage.
+the earlier text with the continuation; returned usage is forwarded from the final
+backend attempt without aggregation, following the existing Chat/Completions behavior.
 For Responses list input, continuation requires the first item to be a message
 with `content`; a tool-result item cannot be used as the text prompt.
-`--max-retries` bounds the attempts. For non-streaming requests, exhausted attempts
-or token budgets return HTTP 503; unsupported tool/reasoning continuation returns
-HTTP 409 instead of silently losing that content. Once streaming headers have been
+`--max-retries` controls transport retries; recompute continuation follows the
+existing Chat/Completions loop without a separate attempt limit. The backend
+validates the remaining token budget. Unsupported tool/reasoning continuation
+returns HTTP 409 for non-streaming requests. Once streaming headers have been
 sent, failures are reported as protocol error events instead of changing HTTP status.
 
 All four APIs share the transport, frame-reading, reassignment, and response path.

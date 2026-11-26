@@ -449,15 +449,14 @@ def test_native_passthrough_and_prefill_payload(exchange, api, streaming):
 
 @pytest.mark.parametrize("api", ["/messages", "/responses"])
 @pytest.mark.parametrize("streaming", [False, True])
-@pytest.mark.parametrize("exhausted", [False, True])
-def test_recompute_appends_text_and_reduces_budget(exchange, api, streaming, exhausted):
+def test_recompute_appends_text_and_reduces_budget(exchange, api, streaming):
     # Responses needs a backend extension to expose this marker; upstream omits it.
     stopped = {"stop_reason": "recomputed", "text": "prefix", "usage": {"output_tokens": 7}}
     if api == "/messages":
         stopped.update(stop_reason="stop_sequence", stop_sequence="recomputed")
     final = {"stop_reason": "end_turn", "text": "done"}
     first = Body(wire(api, stopped, streaming))
-    last = Body(wire(api, stopped if exhausted else final, streaming))
+    last = Body(wire(api, final, streaming))
     payload = {
         "model": "m",
         "stream": streaming,
@@ -467,13 +466,8 @@ def test_recompute_appends_text_and_reduces_budget(exchange, api, streaming, exh
         "max_output_tokens": 80,
     }
     response, calls = exchange(api, payload, [httpx.Response(200, stream=first), httpx.Response(200, stream=last)])
-    assert response.status_code == (503 if exhausted and not streaming else 200)
-    if exhausted:
-        assert b"retry limit" in response.content
-        if streaming:
-            assert b"event: error" in response.content
-    else:
-        assert response_text(api, response, streaming) == "prefixdone"
+    assert response.status_code == 200
+    assert response_text(api, response, streaming) == "prefixdone"
     assert first.closed and last.closed
     assert len(calls["prefill"]) == len(calls["decode"]) == 2
     for index, attempt in enumerate(calls["decode"], 1):
@@ -517,7 +511,11 @@ def test_multiple_recomputes_preserve_history_and_accumulate_text(exchange, api,
         },
     ]
     response, calls = exchange(
-        api, payload, [httpx.Response(200, stream=Body(wire(api, obj, streaming))) for obj in results], max_retries=3
+        # Transport retry configuration does not limit recompute continuation.
+        api,
+        payload,
+        [httpx.Response(200, stream=Body(wire(api, obj, streaming))) for obj in results],
+        max_retries=1,
     )
     assert response.status_code == 200
     assert response_text(api, response, streaming) == "你好！"
@@ -531,14 +529,21 @@ def test_multiple_recomputes_preserve_history_and_accumulate_text(exchange, api,
             expected += prefix
         assert attempt["body"][field] == [{"role": "user", "content": expected}, history[1]]
         assert attempt["body"][limit] == budget
-    if not streaming:
-        assert response.json()["usage"]["output_tokens"] == 6
-        assert response.json()["usage"]["total_tokens"] == 16
+    if streaming:
+        events = [
+            json.loads(b"\n".join(line[5:].lstrip() for line in frame.splitlines() if line.startswith(b"data:")))
+            for frame in response.content.replace(b"\r\n", b"\n").split(b"\n\n")
+            if b"data:" in frame
+        ]
+        final = events[-2] if api == "/messages" else events[-1]["response"]
+    else:
+        final = response.json()
+    assert final["usage"] == results[-1]["usage"]
 
 
 @pytest.mark.parametrize("api", ["/messages", "/responses"])
 @pytest.mark.parametrize("streaming", [False, True])
-def test_recompute_does_not_exceed_token_budget(exchange, api, streaming):
+def test_recompute_leaves_budget_validation_to_backend(exchange, api, streaming):
     limit = "max_tokens" if api == "/messages" else "max_output_tokens"
     response, calls = exchange(
         api,
@@ -549,14 +554,17 @@ def test_recompute_does_not_exceed_token_budget(exchange, api, streaming):
                 content=wire(
                     api, {"text": "done", "stop_reason": "recomputed", "usage": {"output_tokens": 2}}, streaming
                 ),
-            )
+            ),
+            httpx.Response(400, json={"error": {"message": "output token limit must be positive"}}),
         ],
     )
-    assert response.status_code == (200 if streaming else 503)
-    assert b"budget" in response.content
+    assert response.status_code == (200 if streaming else 400)
     if streaming:
         assert b"event: error" in response.content
-    assert len(calls["decode"]) == len(calls["prefill"]) == 1
+    else:
+        assert response.json()["error"]["message"] == "output token limit must be positive"
+    assert len(calls["decode"]) == len(calls["prefill"]) == 2
+    assert calls["decode"][1]["body"][limit] == 0
 
 
 @pytest.mark.parametrize("streaming", [False, True])
