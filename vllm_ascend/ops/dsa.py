@@ -98,6 +98,9 @@ class AscendDeepseekSparseAttention(MultiHeadLatentAttentionWrapper):
         self.wkv = dsa_modules.wkv
         self.kv_norm = dsa_modules.kv_norm
         self.wo_a = dsa_modules.wo_a
+        # Annotate wo_a with its local group count so LoRA wrapping can skip
+        # multi-group / fine-grained-TP topologies before dummy warmup runs.
+        self.wo_a._ascend_dsa_n_local_groups = self.n_local_groups
         self.wo_b = dsa_modules.wo_b
         self.attn_sink = dsa_modules.attn_sink
         self.indexer = dsa_modules.indexer
@@ -174,6 +177,9 @@ def dsa_forward(
     forward_context: ForwardContext = get_forward_context()
     self = forward_context.no_compile_layers[layer_name]
     attn_metadata = forward_context.attn_metadata
+    # LoRA activation replaces the linear modules in the model tree after the
+    # impl was built; keep the impl's cached projections pointing at them.
+    self.dsa_attn.impl.sync_projection_layers(self)
 
     if attn_metadata is None:
         # Profiling run: forward() handles OTP by running _forward_o_proj on a

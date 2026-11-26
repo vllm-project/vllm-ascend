@@ -1,5 +1,6 @@
 import unittest
 from contextlib import AbstractContextManager
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import MagicMock, patch
 
@@ -14,6 +15,7 @@ from vllm_ascend.ops.fused_moe.prepare_finalize import (
     PrepareAndFinalizeWithAllGather,
     PrepareAndFinalizeWithMC2,
 )
+from vllm_ascend.quantization.quant_type import QuantType
 
 
 class TestPrepareAndFinalize(unittest.TestCase):
@@ -384,6 +386,87 @@ class TestPrepareAndFinalize(unittest.TestCase):
                 self.assertEqual(mock_pcp_group.all_gather.call_count, 3 if pcp_size > 1 else 0)
                 self.assertEqual(mock_pcp_group.reduce_scatter.call_count, 1 if pcp_size > 1 else 0)
 
+    @patch("vllm_ascend.ascend_forward_context.get_forward_context")
+    def test_allgather_lora_rejects_dp_gt1_and_gathers_pcp_indices(self, mock_get_forward_context):
+        mock_context = MagicMock()
+        mock_context.additional_kwargs = {
+            "max_tokens_across_dp": 3,
+            "max_tokens_across_pcp": 3,
+            "capturing": False,
+        }
+        mock_context.capturing = False
+        mock_get_forward_context.return_value = mock_context
+
+        hidden_states = torch.randn(2, 4)
+        router_logits = torch.randn(2, 2)
+        mock_dp_group = MagicMock()
+
+        self.moe_config.dp_size = 2
+        self.moe_config.pcp_size = 1
+        self.moe_config.is_sequence_parallel = False
+        self.moe_config.dp_group = mock_dp_group
+        lora_context = SimpleNamespace(
+            punica_wrapper=SimpleNamespace(
+                no_lora=False,
+                active_lora_slots={0},
+                token_lora_indices=torch.tensor([-1, 0], dtype=torch.long),
+            ),
+            layer_lora_slots={0},
+            replicated_batch=True,
+        )
+
+        layer = PrepareAndFinalizeWithAllGather(self.moe_config)
+        layer.set_lora_context(lora_context)
+        with self.assertRaisesRegex(NotImplementedError, "data_parallel_size > 1"):
+            layer.prepare(hidden_states, router_logits)
+        mock_dp_group.all_gather.assert_not_called()
+
+        with (
+            patch("vllm_ascend.ops.fused_moe.prepare_finalize.get_tensor_model_parallel_world_size", return_value=1),
+            patch("vllm_ascend.ops.fused_moe.prepare_finalize.get_tensor_model_parallel_rank", return_value=0),
+        ):
+            all2all_layer = PrepareAndFinalizeWithAll2All(self.moe_config)
+        all2all_layer.set_lora_context(lora_context)
+        with self.assertRaisesRegex(NotImplementedError, "data_parallel_size > 1"):
+            all2all_layer.prepare(hidden_states, router_logits)
+
+        mock_pcp_group = MagicMock()
+        mock_pcp_group.all_gather.side_effect = lambda tensor, dim: torch.cat([tensor, tensor], dim=dim)
+        self.moe_config.dp_size = 1
+        self.moe_config.pcp_size = 2
+
+        pcp_layer = PrepareAndFinalizeWithAllGather(self.moe_config)
+        pcp_layer.set_lora_context(lora_context)
+        with (
+            patch("vllm_ascend.ops.fused_moe.prepare_finalize.get_pcp_group", return_value=mock_pcp_group),
+            patch("vllm_ascend.ops.fused_moe.prepare_finalize._EXTRA_CTX", SimpleNamespace(max_tokens_across_pcp=3)),
+        ):
+            pcp_layer.prepare(hidden_states, router_logits)
+
+        self.assertEqual(mock_pcp_group.all_gather.call_count, 3)
+        self.assertEqual(mock_pcp_group.all_gather.call_args_list[2].args[0].tolist(), [-1, 0, -1])
+        self.assertEqual(lora_context.gathered_lora_indices.tolist(), [-1, 0, -1, -1, 0, -1])
+
+        mock_pcp_group.reset_mock()
+        replicated_empty_ctx = SimpleNamespace(
+            punica_wrapper=SimpleNamespace(
+                no_lora=True,
+                active_lora_slots=set(),
+                token_lora_indices=torch.tensor([-1, -1], dtype=torch.long),
+            ),
+            layer_lora_slots=set(),
+            replicated_batch=True,
+        )
+        pcp_layer.set_lora_context(replicated_empty_ctx)
+        with (
+            patch("vllm_ascend.ops.fused_moe.prepare_finalize.get_pcp_group", return_value=mock_pcp_group),
+            patch("vllm_ascend.ops.fused_moe.prepare_finalize._EXTRA_CTX", SimpleNamespace(max_tokens_across_pcp=3)),
+        ):
+            pcp_layer.prepare(hidden_states, router_logits)
+
+        self.assertEqual(mock_pcp_group.all_gather.call_count, 2)
+        self.assertFalse(hasattr(replicated_empty_ctx, "gathered_lora_indices"))
+
 
 class TestSequenceParallelPCP(unittest.TestCase):
     def test_ep_path_gathers_inputs_once_without_dp_pcp_collectives(self):
@@ -423,3 +506,230 @@ class TestSequenceParallelPCP(unittest.TestCase):
             reduce.assert_called_once_with(gathered_inputs)
             config.dp_group.all_gather.assert_not_called()
             pcp_group.assert_not_called()
+
+    def test_ep_path_gathers_lora_indices_and_skips_quant_for_w8a8_lora(self):
+        config = MagicMock()
+        config.is_sequence_parallel = True
+        config.pcp_size = 1
+        config.dp_size = 1
+        inputs = torch.randn(2, 4, dtype=torch.bfloat16)
+        logits = torch.randn(2, 2, dtype=torch.bfloat16)
+        gathered_inputs = inputs.repeat(2, 1)
+        gathered_logits = logits.repeat(2, 1)
+        gathered_scale = torch.ones(4, dtype=torch.float32)
+        gathered_lora = torch.tensor([-1, -1, 0, 0], dtype=torch.long)
+        lora_context = SimpleNamespace(
+            punica_wrapper=SimpleNamespace(
+                no_lora=False,
+                active_lora_slots={0},
+                token_lora_indices=torch.tensor([-1, -1, 0, 0], dtype=torch.long),
+            ),
+            layer_lora_slots={0},
+            use_ep=True,
+            replicated_batch=True,
+        )
+        with (
+            patch("vllm_ascend.ops.fused_moe.prepare_finalize.get_dynamic_mx_quant_scale_alg", return_value=0),
+            patch("vllm_ascend.ops.fused_moe.prepare_finalize.get_tensor_model_parallel_world_size", return_value=2),
+            patch("vllm_ascend.ops.fused_moe.prepare_finalize.get_tensor_model_parallel_rank", return_value=1),
+            patch("vllm_ascend.ops.fused_moe.prepare_finalize.torch_npu.npu_dynamic_quant", create=True) as mock_quant,
+            patch(
+                "torch.ops.vllm.maybe_all_gather_and_maybe_unpad",
+                side_effect=[gathered_inputs, gathered_logits, gathered_lora],
+            ) as gather,
+        ):
+            layer = PrepareAndFinalizeWithAllGather(config)
+            layer.set_lora_context(lora_context)
+            result = layer.prepare(inputs, logits, quant_type=QuantType.W8A8)
+
+        mock_quant.assert_not_called()
+        self.assertIsNone(result.pertoken_scale)
+        self.assertEqual(gather.call_count, 3)
+        self.assertEqual(gather.call_args_list[2].args[0].tolist(), [0, 0])
+        self.assertEqual(lora_context.gathered_lora_indices.tolist(), gathered_lora.tolist())
+
+        empty_slots_ctx = SimpleNamespace(
+            punica_wrapper=SimpleNamespace(
+                no_lora=True,
+                active_lora_slots=set(),
+                token_lora_indices=torch.tensor([-1, -1, -1, -1], dtype=torch.long),
+            ),
+            layer_lora_slots=set(),
+            use_ep=True,
+            replicated_batch=True,
+        )
+        with (
+            patch("vllm_ascend.ops.fused_moe.prepare_finalize.get_dynamic_mx_quant_scale_alg", return_value=0),
+            patch("vllm_ascend.ops.fused_moe.prepare_finalize.get_tensor_model_parallel_world_size", return_value=2),
+            patch("vllm_ascend.ops.fused_moe.prepare_finalize.get_tensor_model_parallel_rank", return_value=1),
+            patch(
+                "vllm_ascend.ops.fused_moe.prepare_finalize.torch_npu.npu_dynamic_quant",
+                return_value=(torch.ones(2, 4, dtype=torch.int8), torch.ones(2, dtype=torch.float32)),
+                create=True,
+            ) as mock_quant,
+            patch(
+                "torch.ops.vllm.maybe_all_gather_and_maybe_unpad",
+                side_effect=[gathered_inputs, gathered_logits, gathered_scale],
+            ) as gather,
+        ):
+            base_layer = PrepareAndFinalizeWithAllGather(config)
+            base_layer.set_lora_context(empty_slots_ctx)
+            base_result = base_layer.prepare(inputs, logits, quant_type=QuantType.W8A8)
+
+        mock_quant.assert_called_once()
+        self.assertIs(base_result.pertoken_scale, gathered_scale)
+        self.assertEqual(gather.call_count, 3)
+        self.assertFalse(hasattr(empty_slots_ctx, "gathered_lora_indices"))
+
+        config.dp_size = 2
+        with (
+            patch("vllm_ascend.ops.fused_moe.prepare_finalize.torch_npu.npu_dynamic_quant", create=True) as mock_quant,
+            patch("torch.ops.vllm.maybe_all_gather_and_maybe_unpad") as gather,
+        ):
+            dp2_layer = PrepareAndFinalizeWithAllGather(config)
+            dp2_layer.set_lora_context(lora_context)
+            with self.assertRaisesRegex(NotImplementedError, "data_parallel_size > 1"):
+                dp2_layer.prepare(inputs, logits, quant_type=QuantType.W8A8)
+
+        mock_quant.assert_not_called()
+        gather.assert_not_called()
+
+    def test_ep_path_partial_expert_lora_aligns_quant_and_gather_on_empty_rank(self):
+        config = MagicMock()
+        config.is_sequence_parallel = True
+        config.pcp_size = 1
+        config.dp_size = 1
+        inputs = torch.randn(2, 4, dtype=torch.bfloat16)
+        logits = torch.randn(2, 2, dtype=torch.bfloat16)
+        gathered_inputs = inputs.repeat(2, 1)
+        gathered_logits = logits.repeat(2, 1)
+        gathered_lora = torch.tensor([-1, -1, 0, 0], dtype=torch.long)
+        # EP rank 1 owns no adapted experts locally (layer_lora_slots=set()),
+        # while peer EP rank 0 holds slot 0 (ep_lora_slots={0}).
+        peer_empty_ctx = SimpleNamespace(
+            punica_wrapper=SimpleNamespace(
+                no_lora=False,
+                active_lora_slots={0},
+                token_lora_indices=torch.tensor([-1, -1, 0, 0], dtype=torch.long),
+            ),
+            layer_lora_slots=set(),
+            ep_lora_slots={0},
+            use_ep=True,
+            replicated_batch=True,
+        )
+        with (
+            patch("vllm_ascend.ops.fused_moe.prepare_finalize.get_dynamic_mx_quant_scale_alg", return_value=0),
+            patch("vllm_ascend.ops.fused_moe.prepare_finalize.get_tensor_model_parallel_world_size", return_value=2),
+            patch("vllm_ascend.ops.fused_moe.prepare_finalize.get_tensor_model_parallel_rank", return_value=1),
+            patch("vllm_ascend.ops.fused_moe.prepare_finalize.torch_npu.npu_dynamic_quant", create=True) as mock_quant,
+            patch(
+                "torch.ops.vllm.maybe_all_gather_and_maybe_unpad",
+                side_effect=[gathered_inputs, gathered_logits, gathered_lora],
+            ) as gather,
+        ):
+            layer = PrepareAndFinalizeWithAllGather(config)
+            layer.set_lora_context(peer_empty_ctx)
+            result = layer.prepare(inputs, logits, quant_type=QuantType.W8A8)
+
+        mock_quant.assert_not_called()
+        self.assertIsNone(result.pertoken_scale)
+        self.assertEqual(gather.call_count, 3)
+        self.assertEqual(gather.call_args_list[2].args[0].tolist(), [0, 0])
+        self.assertEqual(peer_empty_ctx.gathered_lora_indices.tolist(), gathered_lora.tolist())
+
+    def test_ep_path_slices_uneven_sp_lora_indices_via_ep_local_sizes(self):
+        global_token_indices = torch.tensor([10, -1, 20, 30, 40], dtype=torch.long)
+        gathered_global = global_token_indices.clone()
+
+        # DP=1, PCP=1, TP=2 with uneven chunks [3, 2]:
+        # rank 0 -> [0:3] ([10, -1, 20]), rank 1 -> [3:5] ([30, 40]).
+        for tp_rank, local_len, expected_slice in (
+            (0, 3, [10, -1, 20]),
+            (1, 2, [30, 40]),
+        ):
+            config = MagicMock()
+            config.is_sequence_parallel = True
+            config.pcp_size = 1
+            config.dp_size = 1
+            inputs = torch.randn(local_len, 4, dtype=torch.bfloat16)
+            logits = torch.randn(local_len, 2, dtype=torch.bfloat16)
+            lora_context = SimpleNamespace(
+                punica_wrapper=SimpleNamespace(
+                    no_lora=False,
+                    active_lora_slots={10, 20, 30, 40},
+                    token_lora_indices=global_token_indices,
+                ),
+                layer_lora_slots={10, 20, 30, 40},
+                ep_lora_slots={10, 20, 30, 40},
+                use_ep=True,
+                replicated_batch=True,
+            )
+            fake_fwd_ctx = SimpleNamespace(dp_metadata=SimpleNamespace(marker="uneven"))
+            fake_ep_group = SimpleNamespace(world_size=2, rank_in_group=tp_rank)
+            with (
+                patch("vllm_ascend.ops.fused_moe.prepare_finalize.get_dynamic_mx_quant_scale_alg", return_value=0),
+                patch(
+                    "vllm_ascend.ops.fused_moe.prepare_finalize.get_tensor_model_parallel_world_size",
+                    return_value=2,
+                ),
+                patch(
+                    "vllm_ascend.ops.fused_moe.prepare_finalize.get_tensor_model_parallel_rank",
+                    return_value=tp_rank,
+                ),
+                patch("vllm_ascend.ops.fused_moe.prepare_finalize.is_forward_context_available", return_value=True),
+                patch("vllm_ascend.ops.fused_moe.prepare_finalize.get_forward_context", return_value=fake_fwd_ctx),
+                patch("vllm_ascend.ops.fused_moe.prepare_finalize.get_ep_group", return_value=fake_ep_group),
+                patch("vllm_ascend.ops.register_custom_ops._get_ep_local_sizes", return_value=[3, 2]),
+                patch(
+                    "torch.ops.vllm.maybe_all_gather_and_maybe_unpad",
+                    side_effect=[torch.randn(5, 4), torch.randn(5, 2), gathered_global],
+                ) as gather,
+            ):
+                layer = PrepareAndFinalizeWithAllGather(config)
+                layer.set_lora_context(lora_context)
+                layer.prepare(inputs, logits, quant_type=QuantType.NONE)
+
+            self.assertEqual(gather.call_args_list[2].args[0].tolist(), expected_slice)
+            self.assertEqual(lora_context.gathered_lora_indices.tolist(), [10, -1, 20, 30, 40])
+
+        # DP=1, PCP=2, TP=2: local_sizes=[3, 2, 3, 2]; PCP1/TP1 (ep_rank=3) still
+        # indexes into its local PCP token_lora_indices of length 5 at offset 3.
+        pcp_config = MagicMock()
+        pcp_config.is_sequence_parallel = True
+        pcp_config.pcp_size = 2
+        pcp_config.dp_size = 1
+        pcp_ctx = SimpleNamespace(
+            punica_wrapper=SimpleNamespace(
+                no_lora=False,
+                active_lora_slots={10, 20, 30, 40},
+                token_lora_indices=global_token_indices,
+            ),
+            layer_lora_slots={10, 20, 30, 40},
+            ep_lora_slots={10, 20, 30, 40},
+            use_ep=True,
+            replicated_batch=True,
+        )
+        with (
+            patch("vllm_ascend.ops.fused_moe.prepare_finalize.get_dynamic_mx_quant_scale_alg", return_value=0),
+            patch("vllm_ascend.ops.fused_moe.prepare_finalize.get_tensor_model_parallel_world_size", return_value=2),
+            patch("vllm_ascend.ops.fused_moe.prepare_finalize.get_tensor_model_parallel_rank", return_value=1),
+            patch("vllm_ascend.ops.fused_moe.prepare_finalize.is_forward_context_available", return_value=True),
+            patch(
+                "vllm_ascend.ops.fused_moe.prepare_finalize.get_forward_context",
+                return_value=SimpleNamespace(dp_metadata=SimpleNamespace(marker="pcp_uneven")),
+            ),
+            patch(
+                "vllm_ascend.ops.fused_moe.prepare_finalize.get_ep_group",
+                return_value=SimpleNamespace(world_size=4, rank_in_group=3),
+            ),
+            patch("vllm_ascend.ops.register_custom_ops._get_ep_local_sizes", return_value=[3, 2, 3, 2]),
+            patch(
+                "torch.ops.vllm.maybe_all_gather_and_maybe_unpad",
+                side_effect=[torch.randn(10, 4), torch.randn(10, 2), gathered_global.repeat(2)],
+            ) as gather,
+        ):
+            layer = PrepareAndFinalizeWithAllGather(pcp_config)
+            layer.set_lora_context(pcp_ctx)
+            layer.prepare(torch.randn(2, 4, dtype=torch.bfloat16), torch.randn(2, 2, dtype=torch.bfloat16))
+
+        self.assertEqual(gather.call_args_list[2].args[0].tolist(), [30, 40])

@@ -35,6 +35,7 @@ from torch import nn
 # DeepseekV4Config is provided by Transformers on both supported versions.
 from transformers import DeepseekV2Config, DeepseekV3Config, DeepseekV4Config
 from vllm.config import CacheConfig, VllmConfig
+from vllm.lora.layers.base import BaseLayerWithLoRA
 from vllm.model_executor.layers.linear import ReplicatedLinear
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.models.deepseek_v4.attention import DeepseekV4IndexerCache
@@ -441,9 +442,11 @@ class DeepseekV4Indexer(nn.Module):
         cos = cache_metadata.cos[layer_name][:num_tokens]
         sin = cache_metadata.sin[layer_name][:num_tokens]
         aux_stream = overlap_plan.aux_stream
+        use_multistream = aux_stream is not None and not isinstance(getattr(self, "wq_b", None), BaseLayerWithLoRA)
         if self.skip_topk:
             topk_indices = self._get_cached_topk_indices(num_tokens)
-        elif aux_stream is not None:
+        elif use_multistream:
+            assert aux_stream is not None
             indexer_q = self._cv_compute_query_and_update_cache_multistream(
                 hidden_states,
                 qr,
@@ -478,7 +481,7 @@ class DeepseekV4Indexer(nn.Module):
                 write_cache=write_cache,
             )
 
-        if write_cache and (self.skip_topk or aux_stream is None):
+        if write_cache and (self.skip_topk or not use_multistream):
             compressed_kv, compress_slot_mapping = overlap_plan.compute_attention_compressed_kv()
             overlap_plan.scatter_attention_compressed_kv(compressed_kv, compress_slot_mapping)
 
@@ -665,6 +668,7 @@ class DeepseekV4Indexer(nn.Module):
         if (
             _is_w8a8_dynamic(self.wq_b)
             and qr_pertoken_scale is not None
+            and not isinstance(getattr(self, "wq_b", None), BaseLayerWithLoRA)
             and not get_current_hardware_profile().supports(HardwareCapability.FP8_ATTENTION)
         ):
             q = torch_npu.npu_quant_matmul(
