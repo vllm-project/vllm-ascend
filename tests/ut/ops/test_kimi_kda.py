@@ -542,7 +542,8 @@ def test_kda_conv_weight_is_packed_once_in_kernel_layout():
     original = attention.get_buffer(_PACKED_CONV_WEIGHT_NAME)
     original_ptr = original.data_ptr()
 
-    attention.process_weights_after_loading(torch.bfloat16)
+    attention.model_config = SimpleNamespace(dtype=torch.bfloat16)
+    attention.process_weights_after_loading()
 
     packed = attention.get_buffer(_PACKED_CONV_WEIGHT_NAME)
     assert packed.data_ptr() == original_ptr

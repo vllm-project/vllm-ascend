@@ -18,9 +18,9 @@ from tests.e2e.common.rlhf.weight_transfer.checkpoint_adapters import (
     deepseek_v4_vision_params,
     expand_fused_expert_params,
     expand_minimax_m3_params,
+    kimi_k3_meta_model,
     minimax_m3_checkpoint_name,
 )
-from tests.e2e.common.rlhf.weight_transfer.kimi_k3 import kimi_k3_meta_model
 
 if TYPE_CHECKING:
     import torch
@@ -274,7 +274,7 @@ KIMI_K3_CASE = WeightUpdateModelCase(
     },
     meta_config_attribute="text_config",
     meta_model_factory=kimi_k3_meta_model,
-    extra_server_args=("--no-enable-prefix-caching", "--max-num-seqs", "1"),
+    extra_server_args=("--enable-prefix-caching",),
 )
 
 
