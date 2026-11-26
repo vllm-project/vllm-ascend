@@ -1108,7 +1108,9 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
             cu_seqlens_q, seqused_k, qli_metadata = self._get_local_qli_inputs(indexer_metadata)
             pack_visible_lengths = indexer_metadata.local_visible_lengths
             if pack_visible_lengths is not None and (
-                pack_visible_lengths.numel() < q_li_shape_ori[0]
+                pack_visible_lengths.ndim not in (1, 2)
+                or (pack_visible_lengths.ndim == 2 and pack_visible_lengths.size(1) != 1)
+                or pack_visible_lengths.size(0) < q_li_shape_ori[0]
                 or pack_visible_lengths.dtype != torch.int32
                 or pack_visible_lengths.device != q_li.device
                 or not pack_visible_lengths.is_contiguous()

@@ -14,8 +14,8 @@
 | indices, scores | Input | Native local QLI candidates `[T,1,K_local]`, positive strides | INT32; FP32/BF16 | ND |
 | world_size, rank, interleave | Attribute | DCP group geometry and token stripe width | int | Scalar |
 | sort_candidates, fuse_sort | Attribute | Establish comparator order; permit workload-based fused preparation | bool | Scalar |
-| visible_lengths | Optional pack input | Per-query local causal prefix `[T]`; zero skips the entire candidate row before reading it | INT32 | Contiguous ND |
-| packed | Input/Output | Exact global ID and FP32 score-bit pairs `[P*T,K_local,2]` after gather | INT32 | Contiguous ND |
+| visible_lengths | Optional pack input | Per-query local causal prefix `[T]` or `[T,1]` on the candidate device. Zero masks the entire candidate row before reading it. Defaults to `None`. | INT32 | Contiguous ND |
+| packed | Pack output / merge input | Exact global ID and FP32 score-bit pairs `[T,K_local,2]` per rank and `[P*T,K_local,2]` after gather | INT32 | Contiguous ND |
 | rows, topk | Attribute | Query count and global winner count | int | Scalar |
 | local_rank | Optional attribute | Owner-local output; None selects global coordinates | int/None | Scalar |
 | presorted, owner_sharded | Attribute | Explicit sorted-order and per-source owner contracts | bool | Scalar |
@@ -30,8 +30,8 @@
 - K2048 has fused preparation/merge. Other supported K values retain native stable sorting. Fused preparation uses one inline stable radix algorithm for BF16 and FP32, with 16 and 32 score-key bits respectively. The public wrapper rejects other score dtypes before allocation or launch; the kernel receives `SCORE_BITS` as a compile-time parameter. BF16 values widen exactly to FP32 for transport; FP32 scores retain all their bits.
 - Owner-prefix merge requires `presorted=True`, `owner_sharded=True`, `K_local=topk=2048`, and a valid local rank. Other calls use full selection.
 - Non-power-of-two rank tiles clamp padded peer addresses before masked loads; this prevents A3 GM faults without changing any valid peer or selection result.
-- Invalid/nonfinite candidates do not enter the valid output prefix. By default the native DCP QLI entry pre-fills graph-padding rows with -1 IDs and -inf scores. A3 may skip this initialization only when packing receives reliable `visible_lengths`: zero-length rows are masked before any candidate loads, and packing writes -1 IDs and -inf scores for them. Positive-length rows still filter negative IDs and nonfinite BF16/FP32 scores without a separate normalization kernel. The optional lengths apply to plain packing, separate sorting and fused sorting alike; all paths preserve the collective shape.
-- ROWS is runtime and does not specialize transport/merge kernels. K, topology, strides and sorting tiles are fixed compilation/layout parameters. Length kernels keep row/request counts dynamic; power-of-two tiles and binary-search step counts select compilation buckets. Input values update on replay. Black-box compilation counts and hardware/model validation belong in the PR evidence.
+- Invalid/nonfinite candidates do not enter the valid output prefix. By default the native DCP QLI entry pre-fills graph-padding rows with -1 IDs and -inf scores. A3 may skip initialization when the pack wrapper receives valid `visible_lengths`. Zero-length rows are masked before candidate loads and packing writes -1 IDs and -inf scores for them. Positive lengths leave per-candidate filtering to the ID and score checks. With `None`, packing uses its existing row bounds and candidate validity checks. Plain packing, separate sorting and fused sorting read candidate inputs without modifying them and preserve the collective layout.
+- The three packing and sort-input kernels mark their runtime row count with `do_not_specialize`. K, topology, strides and sorting tiles are compile-time parameters. `None` and the INT32 pointer use separate specializations. Changing only length values on replay does not create another specialization, but row-slice pointer alignment can affect the cache key. Length-builder kernels keep row/request counts dynamic and specialize on power-of-two tiles and binary-search step counts. Black-box compilation counts and hardware/model validation belong in the PR evidence.
 
 ## Origin and Differences
 
