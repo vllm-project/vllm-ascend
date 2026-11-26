@@ -27,6 +27,7 @@ from vllm_ascend.attention.utils import (
     filter_chunked_req_indices,
     get_flashmla_ops,
     get_or_register_attention_buffer,
+    get_quant_flashmla_ops,
 )
 
 NUM_REQS = 2
@@ -89,6 +90,31 @@ def test_get_flashmla_ops_propagates_internal_import_failure(monkeypatch):
 
     with pytest.raises(ModuleNotFoundError, match="internal_dependency"):
         get_flashmla_ops()
+
+
+def test_get_quant_flashmla_ops_requires_both_callable_apis(monkeypatch):
+    attention_op = MagicMock()
+    metadata_op = MagicMock()
+    monkeypatch.setattr(attention_utils, "_has_flashmla_module", lambda: True)
+    monkeypatch.setattr(
+        attention_utils,
+        "import_module",
+        MagicMock(
+            return_value=SimpleNamespace(
+                quant_flash_mla=attention_op,
+                quant_flash_mla_metadata=metadata_op,
+            )
+        ),
+    )
+
+    assert get_quant_flashmla_ops() == (attention_op, metadata_op)
+
+    monkeypatch.setattr(
+        attention_utils,
+        "import_module",
+        MagicMock(return_value=SimpleNamespace(quant_flash_mla=attention_op)),
+    )
+    assert get_quant_flashmla_ops() is None
 
 
 def _common_attn_metadata() -> AscendCommonAttentionMetadata:
@@ -157,7 +183,6 @@ def test_select_seq_lens_spec_decode(
     torch.testing.assert_close(seq_lens, expected)
 
 
-@pytest.mark.parametrize("is_release", [False, True])
 @pytest.mark.parametrize(
     ("method", "model_type", "parallel_drafting", "expected"),
     [
@@ -167,22 +192,17 @@ def test_select_seq_lens_spec_decode(
         ("mtp", "qwen3", False, CPU_SEQ_LENS[:NUM_REQS]),
     ],
 )
-def test_select_seq_lens_versioned_parallel_capability(
-    monkeypatch,
-    is_release: bool,
+def test_select_seq_lens_reads_the_speculator_capability(
     method: str,
     model_type: str,
     parallel_drafting: bool,
     expected: torch.Tensor,
 ) -> None:
-    monkeypatch.setattr(attention_utils, "vllm_version_is", lambda version: is_release, raising=False)
-    # Main leaves the deprecated flag unset. Release has no capability object.
+    # Every supported pin exposes the capability on the speculator config.
     spec_config = SimpleNamespace(
-        parallel_drafting=parallel_drafting if is_release else None,
+        speculator_config=SimpleNamespace(parallel_drafting=parallel_drafting),
         use_dspark=lambda: method == "dspark",
     )
-    if not is_release:
-        spec_config.speculator_config = SimpleNamespace(parallel_drafting=parallel_drafting)
 
     seq_lens = _select_seq_lens(_common_attn_metadata(), None, spec_config, _vllm_config(model_type))
 

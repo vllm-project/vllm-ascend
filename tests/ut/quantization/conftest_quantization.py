@@ -125,9 +125,14 @@ def create_mock_vllm_config(
 
 def create_mock_ascend_config(
     dynamic_eplb=False,
+    fusion_ops_gmm_swiglu_oai_mx_quant=False,
 ):
     mock_config = Mock()
     mock_config.eplb_config = Mock(dynamic_eplb=dynamic_eplb)
+    mock_config.ascend_fusion_config = Mock(
+        fusion_ops_gmmswigluquant=True,
+        fusion_ops_gmm_swiglu_oai_mx_quant=fusion_ops_gmm_swiglu_oai_mx_quant,
+    )
     return mock_config
 
 

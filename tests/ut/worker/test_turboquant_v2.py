@@ -104,7 +104,7 @@ def test_dsv4_cache_view_validates_backing_size_in_bytes():
     assert views[0].nbytes == spec.page_size_bytes
 
 
-def test_non_turboquant_v2_rejects_noncontiguous_pages_before_allocation(monkeypatch):
+def test_unified_dsv4_rejects_undersized_block_stride(monkeypatch):
     spec = AscendMLAAttentionSpec(
         block_size=128,
         tokens_per_state=4,
@@ -115,28 +115,31 @@ def test_non_turboquant_v2_rejects_noncontiguous_pages_before_allocation(monkeyp
         cache_dtype_str="bfloat16",
     )
     descriptor = KVCacheTensor(
-        size=4 * spec.page_size_bytes,
+        size=2 * spec.page_size_bytes,
         layers=["attn"],
         offset=0,
         layer_stride=spec.page_size_bytes,
-        block_stride=2 * spec.page_size_bytes,
+        block_stride=spec.page_size_bytes // 2,
     )
     config = KVCacheConfig(
         num_blocks=2,
         kv_cache_tensors=[descriptor],
         kv_cache_groups=[KVCacheGroupSpec(layer_names=["attn"], kv_cache_spec=spec)],
     )
+    layers = {"attn": SimpleNamespace(get_attn_backend=lambda: AscendDSAC4Backend)}
     runtime = SimpleNamespace(
         additional_config={},
         kv_transfer_config=None,
-        model_config=SimpleNamespace(hf_config=SimpleNamespace(compress_ratios=[4])),
+        compilation_config=SimpleNamespace(static_forward_context=layers),
+        model_config=SimpleNamespace(
+            hf_config=SimpleNamespace(model_type="deepseek_v4"),
+            hf_text_config=SimpleNamespace(model_type="deepseek_v4"),
+        ),
     )
     monkeypatch.setattr(attn_utils, "get_current_vllm_config", lambda: runtime)
-    allocate = Mock(side_effect=AssertionError("Invalid pages must fail before allocation"))
-    monkeypatch.setattr(attn_utils, "_allocate_int8_cache_tensor", allocate)
-    with pytest.raises(ValueError, match="requires contiguous per-layer pages"):
-        attn_utils._allocate_kv_cache(config, shared_layers={}, device=torch.device("cpu"))
-    allocate.assert_not_called()
+    monkeypatch.setattr(attn_utils, "get_layers_from_vllm_config", lambda *_args: layers)
+    with pytest.raises(ValueError, match="exceeds its backing allocation"):
+        attn_utils.allocate_kv_cache_main(config, torch.device("cpu"), None, [128])
 
 
 def test_tq_v2_uses_one_backing_and_preserves_strided_pages(monkeypatch):
@@ -165,15 +168,21 @@ def test_tq_v2_uses_one_backing_and_preserves_strided_pages(monkeypatch):
         KVCacheGroupSpec(layer_names=list(specs), kv_cache_spec=UniformTypeKVCacheSpecs.from_specs(specs)),
         KVCacheGroupSpec(layer_names=["swa"], kv_cache_spec=UniformTypeKVCacheSpecs.from_specs({"swa": swa})),
     ]
+    layers = {name: SimpleNamespace(get_attn_backend=lambda: AscendDSAC4Backend) for name in (*specs, "swa")}
     runtime = SimpleNamespace(
         additional_config={},
         cache_config=SimpleNamespace(num_gpu_blocks_override=None),
         kv_transfer_config=None,
-        model_config=SimpleNamespace(hf_config=SimpleNamespace(compress_ratios=[4])),
+        compilation_config=SimpleNamespace(static_forward_context=layers),
+        model_config=SimpleNamespace(
+            hf_config=SimpleNamespace(model_type="deepseek_v4"),
+            hf_text_config=SimpleNamespace(model_type="deepseek_v4"),
+        ),
     )
     num_blocks, descriptors = cache.cache_config(runtime, groups, cache.pool_bytes_per_block(groups) * 3)
     config = KVCacheConfig(num_blocks=num_blocks, kv_cache_tensors=descriptors, kv_cache_groups=groups)
     monkeypatch.setattr(attn_utils, "get_current_vllm_config", lambda: runtime)
+    monkeypatch.setattr(attn_utils, "get_layers_from_vllm_config", lambda *_args: layers)
     allocations = []
 
     def allocate(size, alignment, device):
@@ -181,14 +190,14 @@ def test_tq_v2_uses_one_backing_and_preserves_strided_pages(monkeypatch):
         return torch.zeros(size, dtype=torch.int8)
 
     monkeypatch.setattr(attn_utils, "_allocate_int8_cache_tensor", allocate)
-    raw = attn_utils._allocate_kv_cache(config, shared_layers={}, device=torch.device("cpu"))
+    caches = attn_utils.allocate_kv_cache_main(config, torch.device("cpu"), None, [128, 32])
     assert allocations == [descriptors[0].size]
     views = {}
     for d in descriptors:
         name = d.layers[0]
         if name == "swa":
             continue
-        views[name] = _runtime_views(raw[name], specs[name], config.num_blocks, block_stride=d.block_stride)[0]
+        views[name] = caches[name][0]
         assert views[name].shape == (3, 32, 1, 258)
         assert views[name].stride(0) == d.block_stride
     assert len({v.untyped_storage().data_ptr() for v in views.values()}) == 1
@@ -201,7 +210,7 @@ def test_tq_v2_uses_one_backing_and_preserves_strided_pages(monkeypatch):
 
 @pytest.mark.parametrize("turboquant", [False, True])
 @pytest.mark.parametrize("kv_transfer", [False, True])
-def test_unified_dsv4_matches_existing_allocation_and_views(monkeypatch, turboquant, kv_transfer):
+def test_unified_dsv4_allocates_aligned_views_and_aliases(monkeypatch, turboquant, kv_transfer):
     """The MRV2 route preserves backing alignment, page packing and group aliases."""
     names = ["model.layers.0.attn", "model.layers.1.attn"]
     alias_name = "model.layers.2.attn"
@@ -218,6 +227,7 @@ def test_unified_dsv4_matches_existing_allocation_and_views(monkeypatch, turboqu
     stride = spec.page_size_bytes * (2 if turboquant else 1)
     layer_span = blocks * stride
     pool_size = 2 * layer_span
+    consumer_name = "model.layers.3.attn"
     config = KVCacheConfig(
         num_blocks=blocks,
         kv_cache_tensors=[
@@ -225,29 +235,28 @@ def test_unified_dsv4_matches_existing_allocation_and_views(monkeypatch, turboqu
             KVCacheTensor(size=pool_size, layers=[alias_name], offset=0, layer_stride=0, block_stride=stride),
         ],
         kv_cache_groups=[
-            KVCacheGroupSpec(names.copy(), UniformTypeKVCacheSpecs.from_specs(dict.fromkeys(names, spec))),
+            KVCacheGroupSpec(
+                [*names, consumer_name],
+                UniformTypeKVCacheSpecs.from_specs(dict.fromkeys([*names, consumer_name], spec)),
+            ),
             KVCacheGroupSpec([alias_name], UniformTypeKVCacheSpecs.from_specs({alias_name: spec})),
         ],
     )
+    layers = {name: SimpleNamespace(get_attn_backend=lambda: AscendDSAC4Backend) for name in (*names, alias_name)}
+    consumer = Mock(spec=attn_utils.Attention, kv_sharing_target_layer_name=names[1])
     runtime = SimpleNamespace(
         additional_config={},
         kv_transfer_config=object() if kv_transfer else None,
         cache_config=SimpleNamespace(cache_dtype=spec.cache_dtype_str),
+        compilation_config=SimpleNamespace(static_forward_context={**layers, consumer_name: consumer}),
         model_config=SimpleNamespace(
-            hf_config=SimpleNamespace(compress_ratios=[4]),
+            hf_config=SimpleNamespace(model_type="deepseek_v4"),
             hf_text_config=SimpleNamespace(model_type="deepseek_v4"),
         ),
     )
-    layers = {name: SimpleNamespace(get_attn_backend=lambda: AscendDSAC4Backend) for name in (*names, alias_name)}
     monkeypatch.setattr(attn_utils, "get_current_vllm_config", lambda: runtime)
     monkeypatch.setattr(attn_utils, "get_layers_from_vllm_config", lambda *_args: layers)
     monkeypatch.setattr(attn_utils, "enable_sfa", lambda *_args: False)
-    raw = attn_utils._allocate_kv_cache(config, {}, torch.device("cpu"))
-    expected = {name: _runtime_views(raw[name], spec, blocks, block_stride=stride) for name in raw}
-    consumer_name = "model.layers.3.attn"
-    consumer = Mock(spec=attn_utils.Attention, kv_sharing_target_layer_name=names[1])
-    runtime.compilation_config = SimpleNamespace(static_forward_context={**layers, consumer_name: consumer})
-    config.kv_cache_groups[0].layer_names.append(consumer_name)
     legacy_allocate = Mock(side_effect=AssertionError("Unified route must allocate its own backing"))
     monkeypatch.setattr(attn_utils, "_allocate_kv_cache", legacy_allocate)
     monkeypatch.setattr(
@@ -269,16 +278,16 @@ def test_unified_dsv4_matches_existing_allocation_and_views(monkeypatch, turboqu
     if kv_transfer:
         assert allocated[0].data_ptr() % (2 * 1024 * 1024) == 0
     assert actual[consumer_name] is actual[names[1]]
-    for name in expected:
-        raw_tensor = raw[name]
-        assert isinstance(raw_tensor, torch.Tensor)
-        for before, after in zip(expected[name], actual[name]):
-            assert before.shape == after.shape
-            assert before.stride() == after.stride()
-            assert before.dtype == after.dtype
-            assert before.data_ptr() - raw_tensor.data_ptr() == after.data_ptr() - allocated[0].data_ptr() - (
-                layer_span if name == names[1] else 0
-            )
+    itemsize = get_dtype_size(spec.dtype)
+    expected_shape = (blocks, spec.num_states, spec.num_kv_heads, spec.head_size)
+    expected_stride = (stride // itemsize, spec.head_size, spec.head_size, 1)
+    for name, expected_offset in ((names[0], 0), (names[1], layer_span), (alias_name, 0)):
+        assert len(actual[name]) == 1
+        view = actual[name][0]
+        assert view.shape == expected_shape
+        assert view.stride() == expected_stride
+        assert view.dtype == spec.dtype
+        assert view.data_ptr() - allocated[0].data_ptr() == expected_offset
     assert actual[names[0]][0].data_ptr() == actual[alias_name][0].data_ptr()
     assert actual[names[1]][0].data_ptr() - actual[names[0]][0].data_ptr() == layer_span
     actual[names[0]][0][1].fill_(3)

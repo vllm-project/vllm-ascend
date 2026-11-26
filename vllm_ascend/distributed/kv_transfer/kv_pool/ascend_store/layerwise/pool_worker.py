@@ -19,8 +19,8 @@ from vllm.v1.kv_cache_interface import (
 )
 
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence import (
-    get_attention_compute_start_gate,
-    reset_attention_compute_start_gate,
+    get_attention_load_gate,
+    reset_attention_gates,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend import (
     get_backend_class,
@@ -111,7 +111,7 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
         )
         self.use_block_key_layerwise = self.layerwise_data_plane == "block_key"
         self.use_layerwise_transfer = self.layerwise_data_plane == "gva"
-        self.has_shared_kv = self.use_layerwise_transfer and has_shared_kv_sources(vllm_config)
+        self.has_shared_kv = has_shared_kv_sources(vllm_config)
         self._step_load_keys: set[str] = set()
         # Request ID -> cache group ID -> request block index -> private pool key.
         self._snapshot_keys: dict[str, dict[int, dict[int, str]]] = {}
@@ -246,14 +246,25 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
                 for layer_name in group_spec.layer_names
                 if layer_name not in draft_names
             }
+            incoming_mirrors = set()
             if getattr(self, "has_shared_kv", False):
-                # Execution layers include holes; group ordinals stay dense.
-                physical_layers.update(range(getattr(self.hf_config, "num_hidden_layers", self.num_layers)))
-                self.num_layers = max(physical_layers) + 1
+                if self.pp_size > 1 and self.pp_layer_end is not None:
+                    start = self.pp_layer_offset
+                    incoming_mirrors = {layer for layer in physical_layers if layer < start}
+                    physical_layers.difference_update(incoming_mirrors)
+                    physical_layers.update(range(start, self.pp_layer_end))
+                    self.num_layers = len(physical_layers)
+                else:
+                    # Execution layers include holes; group ordinals stay dense.
+                    physical_layers.update(range(getattr(self.hf_config, "num_hidden_layers", self.num_layers)))
+                    self.num_layers = max(physical_layers) + 1
             if physical_layers:
                 self._global_to_local_layer = {
                     global_layer: local_layer for local_layer, global_layer in enumerate(sorted(physical_layers))
                 }
+                # PP receive writes incoming mirrors before the first local forward.
+                # Service their prefix transfers there without inventing a callback.
+                self._global_to_local_layer.update(dict.fromkeys(incoming_mirrors, 0))
                 if getattr(self, "use_layerwise", False) or self.use_layerwise_transfer:
                     self._recurrent_layers = {
                         self._global_to_local_layer[self._extract_physical_layer_index(name)]
@@ -380,8 +391,7 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
         # spec-decode draft layers) are present, num_layers is updated in
         # register_kv_caches to include them; the key layer count must follow
         # or those extra layers are skipped during the save/load lifecycle. A
-        # block-key store owns a stage-local object, so its count stays local
-        # under PP. A GVA store retains the global PP layout and offset below.
+        # pool object owns a stage-local payload; hook counts stay local under PP.
         if (
             self.use_block_key_layerwise
             or (self.num_kv_cache_groups == 1 and getattr(self, "pp_size", 1) == 1)
@@ -395,25 +405,22 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
                 if self.use_block_key_layerwise
                 else self._global_group_alloc_size(group_id)
             )
-            # Global byte offsets for the shared GVA region:
-            #   PP: each stage writes its local layers at
-            #       (pp_layer_offset + local_layer) * per_layer_bytes.
+            # Byte offsets within each GVA object:
+            #   PP: stages have distinct keys, so no PP byte offset is added.
             #   DCP (shard-major): ranks sharing head_or_tp_rank (put_step>1)
             #       hold different context shards of the same logical block
-            #       and share ONE region; shard d occupies the byte range
-            #       [d * shard_stride, (d+1) * shard_stride) where the stride
+            #       and share ONE region; shard d's payload starts at d * shard_stride
+            #       within [d * shard_stride, (d+1) * shard_stride), where the stride
             #       is the group byte total aligned up to the GVA hugepage
             #       size (unaligned strides yield misaligned GVA addresses).
             #       With put_step == 1 every rank owns a distinct region key
             #       and no shard separation is needed.
-            layer_byte_offset = self._group_pp_byte_offset(group_id)
+            layer_byte_offset = 0
             gbl = self.group_block_len.get(group_id) or []
             if not self.use_block_key_layerwise and gbl and group_num_layers > 0:
                 if self.dcp_size > 1 and self.put_step > 1:
-                    # Use the GLOBAL region size (PP-aware) as the basis for
-                    # the per-shard stride; under PP>1 the local sum(gbl) only
-                    # covers this stage's layers and would under-allocate.
-                    shard_stride = self._global_group_alloc_size(group_id) // self.dcp_size
+                    # Derive shard origins from the same aligned allocation size.
+                    shard_stride = group_page_size // self.dcp_size
                     shard_idx = self.dcp_rank
                     layer_byte_offset += shard_idx * shard_stride
             builders.append(
@@ -489,11 +496,6 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
             self.kv_recv_thread.external_slot_release_waiter = waiter
         return True
 
-    def _global_group_alloc_size(self, group_id: int) -> int:
-        if getattr(self, "has_shared_kv", False) and self.group_block_len.get(group_id):
-            return sum(self.group_block_len[group_id])
-        return super()._global_group_alloc_size(group_id)
-
     def _start_kv_transfer_threads(self) -> None:
         if self.use_layerwise_transfer:
             self.m_store.ensure_initialized()
@@ -507,7 +509,7 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
         self.layer_load_finished_events = [threading.Event() for i in range(self.num_layers)]
         self.layer_save_finished_events = [threading.Event() for i in range(self.num_layers)]
         self.sync_save_events = [torch.npu.Event() for i in range(self.num_layers)]
-        can_save = is_kv_save_role(self.kv_role, self.consumer_is_to_put)
+        can_save = is_kv_save_role(self.kv_role, self.save_decode_cache)
         if (self.use_block_key_layerwise or self.use_layerwise_transfer) and can_save:
             ready_event_sending = threading.Event()
             self.kv_send_thread = KVCacheStoreLayerSendingThread(
@@ -665,7 +667,7 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
         self._dflash_save_pending = False
         self.layerwise_retrievers: list[Any] = []
         self.next_layer_to_submit = 0
-        reset_attention_compute_start_gate()
+        reset_attention_gates()
         if self.use_kvpp:
             assert self.layer_load_finished_events is not None
             for event in self.layer_load_finished_events:
@@ -697,7 +699,7 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
         return self.tp_rank == min(peers)
 
     def _is_layerwise_save_owner(self, group_id: int = 0) -> bool:
-        if not is_kv_save_role(self.kv_role, self.consumer_is_to_put):
+        if not is_kv_save_role(self.kv_role, self.save_decode_cache):
             return False
 
         # Each rank must save its own Mamba state shard.
@@ -718,7 +720,7 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
                 return [(0, local_layer)]
             groups = self.physical_layer_to_group_layers.get(local_layer)
             if groups is None:
-                if getattr(self, "use_kvpp", False):
+                if getattr(self, "use_kvpp", False) or getattr(self, "has_shared_kv", False):
                     return []
                 raise RuntimeError(f"Mooncake layerwise: no KV cache group for local layer {local_layer}")
             return [(group_id, layer_idx) for group_id, layer_idx in groups if group_id in self.cacheable_group_ids]
@@ -1204,14 +1206,16 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
                 # chunked-prefill steps.  A later chunk can therefore have no
                 # new load_spec while still needing to restore the previously
                 # committed prefix into its newly allocated local blocks.
-                populated_slots = [index for index, key in enumerate(request.load_block_keys) if key is not None]
-                if not populated_slots:
+                keys = request.load_block_keys
+                start_block = next((index for index, key in enumerate(keys) if key is not None), None)
+                if start_block is None:
                     continue
+                trailing_empty = next(index for index, key in enumerate(reversed(keys)) if key is not None)
                 request_block_ranges.append(
                     LayerBlockRange(
                         request=request,
-                        start_block=min(populated_slots),
-                        end_block=max(populated_slots) + 1,
+                        start_block=start_block,
+                        end_block=len(keys) - trailing_empty,
                     )
                 )
                 continue
@@ -1484,16 +1488,14 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
 
     def _submit_attention_save(self, layer_id: int) -> None:
         """Start current-layer put only once KV is ready at attention entry."""
-        if not is_kv_save_role(self.kv_role, self.consumer_is_to_put):
+        if not is_kv_save_role(self.kv_role, self.save_decode_cache):
             return
         assert self.sync_save_events is not None
         assert self.layer_save_finished_events is not None
         assert self.kv_send_thread is not None
-        sync_save_events = self.sync_save_events
         save_finished_events = self.layer_save_finished_events
         send_thread = cast(KVCacheStoreLayerSendingThreadBase, self.kv_send_thread)
         self._attention_saved_layers.add(layer_id)
-        sync_save_events[layer_id].record()
         tasks = self.layer_save_tasks[layer_id]
         if not tasks:
             save_finished_events[layer_id].set()
@@ -1521,9 +1523,10 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
         flight. Draining it here therefore waited, on every single layer, for
         transfers that were scheduled early on purpose, which is what pinned the
         fence at ~900 ms per layer and made layerwise slower than the
-        non-layerwise bulk path. This matches the MemCache layerwise path, which
-        gates the *start* of transfers to the attention boundary and never
-        quiesces the load queue.
+        non-layerwise bulk path. MemCache layerwise loads start after the
+        current layer's connector wait, or at the attention boundary for
+        callers that use the upstream wait wrapper. Neither path quiesces the
+        load queue here.
 
         The SAVE queue is bounded rather than drained. A committed block-key
         object is unreadable until the put session ends, so a put that is
@@ -1561,27 +1564,28 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
             # Errors are still surfaced per layer by wait_for_layer_load.
             self._check_hybrid_load_errors()
 
-    def _submit_ready_layer_loads(self) -> None:
+    def _submit_ready_layer_loads(self, compute_boundary: torch.npu.Event | None = None) -> None:
         assert self.kv_recv_thread is not None
         recv_thread = self.kv_recv_thread
 
-        def submit_layer_load(layer_id: int) -> bool:
+        def submit_layer_load(layer_id: int, boundary: torch.npu.Event | None) -> bool:
             reuse_sources = self.prefetch_layer_map.get(layer_id, ())
             if not self.layer_load_tasks[layer_id] and not reuse_sources:
                 return False
-            attention_start_gate = None
+            load_gate = None
             if (
                 self.layer_load_tasks[layer_id]
                 and layer_id != self.current_layer
                 and not getattr(self, "has_shared_kv", False)
             ):
-                attention_start_gate = get_attention_compute_start_gate()
+                load_gate = get_attention_load_gate()
             recv_thread.add_request(
                 LayerLoadTask(  # type: ignore[arg-type]
                     wait_for_save_layers=reuse_sources,
                     transfer_tasks=self.layer_load_tasks[layer_id],
                     layer_id=layer_id,
-                    attention_start_gate=attention_start_gate,
+                    load_gate=load_gate,
+                    compute_boundary=boundary,
                 )
             )
             return True
@@ -1594,8 +1598,10 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
                 # Keep tail SWA and draft loads one layer ahead.
                 window_end += 1
             elif self.current_layer == 0 or self.current_layer in source_layers:
-                # Submit the intervening SWA before the next shared source.
-                window_end = next(layer for layer in source_layers if layer > self.current_layer)
+                # Submit intervening SWA along with the shared sources in the window.
+                future_sources = [layer for layer in source_layers if layer > self.current_layer]
+                sources_ahead = 2 if self._shared_read_ahead_enabled() else 1
+                window_end = future_sources[min(sources_ahead, len(future_sources)) - 1]
         else:
             window_end = self.current_layer + self.num_prefetch_layers
         window_end = min(window_end, self.num_layers - 1)
@@ -1609,7 +1615,8 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
         while self.next_layer_to_submit <= window_end:
             layer_id = self.next_layer_to_submit
             self.next_layer_to_submit += 1
-            submit_layer_load(layer_id)
+            if submit_layer_load(layer_id, compute_boundary):
+                compute_boundary = None
 
     def wait_for_layer_load_ready(self, layer_name: str) -> None:
         physical_layer = self._extract_physical_layer_index(layer_name)
@@ -1658,30 +1665,52 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
             self.save_kv_layer(metadata)
         self._drain_deferred_last_save()
 
+    def _shared_read_ahead_enabled(self) -> bool:
+        # Only extend the window for the persistent full-attention pages.
+        return (
+            self.has_shared_kv
+            and getattr(self._data_plane, "_retain_running_prefix", False)
+            and not self.prefetch_layer_map
+        )
+
     def wait_for_layer_load(self) -> None:
         if self.current_layer >= self.num_layers:
             return
         assert self.layer_load_finished_events is not None
         assert self.kv_recv_thread is not None
-        gate = reset_attention_compute_start_gate()
+        load_gate, save_gate = reset_attention_gates()
         try:
             self.kv_recv_thread.raise_if_failed()
             if getattr(self, "block_key_hybrid", False):
                 layer_id = self.current_layer
                 # Conv/recurrent state is updated inside attention, after this
                 # entry event. Preserve its post-compute save hook.
-                if layer_id not in self._recurrent_layers:
-                    gate.on_start = lambda: self._submit_attention_save(layer_id)
-                gate.on_finish = self._finish_attention_window
-            if getattr(self, "block_key_hybrid", False) and self.next_layer_to_submit <= self.current_layer:
-                # An unprefetched demand load must not race earlier collectives.
-                boundary = torch.npu.Event()
-                boundary.record()
-                boundary.synchronize()
-            self._submit_ready_layer_loads()
+                if layer_id not in self._recurrent_layers and is_kv_save_role(self.kv_role, self.save_decode_cache):
+                    assert self.sync_save_events is not None
+                    save_gate.event = self.sync_save_events[layer_id]
+                    save_gate.on_start = lambda: self._submit_attention_save(layer_id)
+                save_gate.on_finish = self._finish_attention_window
             should_wait = (
                 bool(self.layer_load_tasks[self.current_layer]) or self.current_layer in self.prefetch_layer_map
             )
+            compute_boundary = None
+            # A shared-source segment can start with an empty layer. Fence
+            # upcoming reads, including lookahead, only when there is work.
+            if (
+                getattr(self, "block_key_hybrid", False)
+                and self.next_layer_to_submit <= self.current_layer
+                and (not getattr(self, "has_shared_kv", False) or any(self.layer_load_tasks))
+            ):
+                # Fence earlier collectives before a new read window starts.
+                boundary = torch.npu.Event()
+                boundary.record()
+                if self._shared_read_ahead_enabled() and not should_wait:
+                    # The first queued read waits on this event. The receiver
+                    # preserves submission order for all reads in the window.
+                    compute_boundary = boundary
+                else:
+                    boundary.synchronize()
+            self._submit_ready_layer_loads(compute_boundary)
             if should_wait:
                 while not self.layer_load_finished_events[self.current_layer].wait(timeout=10):
                     self.kv_recv_thread.raise_if_failed()
@@ -1695,7 +1724,8 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
             if hasattr(self, "_layer_load_aborted"):
                 self._layer_load_aborted.set()
             if getattr(self, "block_key_hybrid", False):
-                gate.cancel()
+                load_gate.cancel()
+                save_gate.cancel()
                 # Range calls must finish before releasing their get sessions.
                 with suppress(Exception):
                     self._drain_attention_transfers(full=True)
@@ -1716,7 +1746,7 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
             self._layer_load_aborted.is_set() or self.current_layer == self.num_layers - 1
         ):
             self._data_plane.finish_sessions()
-        if hasattr(self, "kv_role") and not is_kv_save_role(self.kv_role, getattr(self, "consumer_is_to_put", False)):
+        if hasattr(self, "kv_role") and not is_kv_save_role(self.kv_role, getattr(self, "save_decode_cache", False)):
             self.current_layer += 1
 
     def save_kv_layer(self, connector_metadata: AscendConnectorMetadata) -> None:

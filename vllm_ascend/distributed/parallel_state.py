@@ -19,10 +19,12 @@ _MC2: GroupCoordinator | None = None
 
 # Module specific tensor parallel groups
 _MLP_TP: GroupCoordinator | None = None
+_SHARED_EXPERT_TP: GroupCoordinator | None = None
 _OTP: GroupCoordinator | None = None
 _LMTP: GroupCoordinator | None = None
 _EMBED_TP: GroupCoordinator | None = None
 _QKV_IPROJ_TP: GroupCoordinator | None = None
+_GPROJ_TP: GroupCoordinator | None = None
 
 _P_TP: GroupCoordinator | None = None
 
@@ -200,13 +202,7 @@ def init_ascend_model_parallel(
             group_ranks, get_world_group().local_rank, backend, group_name="dynamic_eplb"
         )
 
-    # Initialize fine-grained TP process groups on Ascend for five components:
-    # 1. LM Head: output logits projection (`lmhead_tensor_parallel_size`)
-    # 2. O Proj: attention output projection (`oproj_tensor_parallel_size`)
-    # 3. Embedding: The token embedding table at the input of the model (`embedding_tensor_parallel_size`)
-    # 4. MLP: feed-forward network in transformer blocks (`mlp_tensor_parallel_size`)
-    # 5. QKV input projections: request-local recurrent state
-    #    (`qkv_iproj_tensor_parallel_size`)
+    # Components with the same local TP size reuse the same group along the DP axis.
     _group_cache = {}
 
     def _create_or_get_group(group_size: int, group_name: str) -> GroupCoordinator:
@@ -231,9 +227,11 @@ def init_ascend_model_parallel(
     lmhead_tp_size = get_ascend_config().finegrained_tp_config.lmhead_tensor_parallel_size
     embedding_tp_size = get_ascend_config().finegrained_tp_config.embedding_tensor_parallel_size
     mlp_tp_size = get_ascend_config().finegrained_tp_config.mlp_tensor_parallel_size
+    shared_tp_size = get_ascend_config().finegrained_tp_config.shared_expert_tensor_parallel_size
     qkv_iproj_tp_size = get_ascend_config().finegrained_tp_config.qkv_iproj_tensor_parallel_size
+    gproj_tp_size = get_ascend_config().finegrained_tp_config.gproj_tensor_parallel_size
 
-    global _OTP, _LMTP, _EMBED_TP, _MLP_TP, _QKV_IPROJ_TP
+    global _OTP, _LMTP, _EMBED_TP, _MLP_TP, _QKV_IPROJ_TP, _GPROJ_TP, _SHARED_EXPERT_TP
 
     if otp_size > 1:
         _OTP = _create_or_get_group(otp_size, "otp")
@@ -243,8 +241,12 @@ def init_ascend_model_parallel(
         _EMBED_TP = _create_or_get_group(embedding_tp_size, "emtp")
     if mlp_tp_size > 1:
         _MLP_TP = _create_or_get_group(mlp_tp_size, "mlptp")
+    if shared_tp_size > 1:
+        _SHARED_EXPERT_TP = _create_or_get_group(shared_tp_size, "shared_expert_tp")
     if qkv_iproj_tp_size > 1:
         _QKV_IPROJ_TP = _create_or_get_group(qkv_iproj_tp_size, "qkv_iproj_tp")
+    if gproj_tp_size > 1:
+        _GPROJ_TP = _create_or_get_group(gproj_tp_size, "gproj_tp")
 
 
 def model_parallel_initialized():
@@ -259,6 +261,11 @@ def get_mc2_group() -> GroupCoordinator:
 def get_mlp_tp_group() -> GroupCoordinator:
     assert _MLP_TP is not None, "mlp group is not initialized"
     return _MLP_TP
+
+
+def get_shared_expert_tp_group() -> GroupCoordinator:
+    assert _SHARED_EXPERT_TP is not None, "shared-expert TP group is not initialized"
+    return _SHARED_EXPERT_TP
 
 
 def get_otp_group() -> GroupCoordinator:
@@ -281,6 +288,11 @@ def get_qkv_iproj_tp_group() -> GroupCoordinator:
     return _QKV_IPROJ_TP
 
 
+def get_gproj_tp_group() -> GroupCoordinator:
+    assert _GPROJ_TP is not None, "G projection TP group is not initialized"
+    return _GPROJ_TP
+
+
 def get_replicated_group() -> ReplicatedGroup:
     return _REPLICATED
 
@@ -301,11 +313,6 @@ def get_kvpp_group() -> GroupCoordinator:
 
 
 def destroy_ascend_model_parallel():
-    global _QKV_IPROJ_TP
-    if _QKV_IPROJ_TP:
-        _QKV_IPROJ_TP.destroy()
-    _QKV_IPROJ_TP = None
-
     global _KVPP
     if _KVPP:
         _KVPP.destroy()
@@ -316,25 +323,13 @@ def destroy_ascend_model_parallel():
         _MC2.destroy()
     _MC2 = None
 
-    global _MLP_TP
-    if _MLP_TP:
-        _MLP_TP.destroy()
-    _MLP_TP = None
-
-    global _LMTP
-    if _LMTP:
-        _LMTP.destroy()
-    _LMTP = None
-
-    global _EMBED_TP
-    if _EMBED_TP:
-        _EMBED_TP.destroy()
-    _EMBED_TP = None
-
-    global _OTP
-    if _OTP:
-        _OTP.destroy()
-    _OTP = None
+    global _MLP_TP, _LMTP, _EMBED_TP, _OTP, _QKV_IPROJ_TP, _GPROJ_TP, _SHARED_EXPERT_TP
+    seen = set()
+    for group in (_MLP_TP, _LMTP, _EMBED_TP, _OTP, _QKV_IPROJ_TP, _GPROJ_TP, _SHARED_EXPERT_TP):
+        if group is not None and id(group) not in seen:
+            group.destroy()
+            seen.add(id(group))
+    _MLP_TP = _LMTP = _EMBED_TP = _OTP = _QKV_IPROJ_TP = _GPROJ_TP = _SHARED_EXPERT_TP = None
 
     global _P_TP
     if _P_TP:

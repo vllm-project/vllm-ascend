@@ -6,6 +6,8 @@ This document explains how to write unit tests, E2E tests, and nightly tests to 
 
 The fastest way to set up a test environment is to use the main branch's container image:
 
+The container needs [Ascend Docker Runtime](../../getting_started/installation.md#installation-ascend-docker-runtime) 26.3.0 or later on the host; it selects the NPUs with `ASCEND_VISIBLE_DEVICES`. If the installed release is older, mount the two paths named in that section, or upgrade.
+
 === "Local (CPU)"
 
     You can run the unit tests on CPUs with the following steps:
@@ -33,7 +35,7 @@ The fastest way to set up a test environment is to use the main branch's contain
     pip config set global.index-url https://mirrors.huaweicloud.com/repository/pypi/simple/
 
     # For TorchNPU dev version or x86 machine
-    export PIP_EXTRA_INDEX_URL="https://download.pytorch.org/whl/cpu/ https://mirrors.huaweicloud.com/ascend/repos/pypi"
+    export PIP_EXTRA_INDEX_URL="https://download.pytorch.org/whl/cpu/ https://repo.huaweicloud.com/ascend/repos/pypi"
 
     # src path
     export SRC_WORKSPACE=/vllm-workspace
@@ -65,22 +67,14 @@ The fastest way to set up a test environment is to use the main branch's contain
 
     ```bash
 
-    # Update DEVICE according to your device (/dev/davinci[0-7])
-    export DEVICE=/dev/davinci0
+    # Update ASCEND_VISIBLE_DEVICES according to the NPU you want (/dev/davinci[0-7])
+    export ASCEND_VISIBLE_DEVICES=0
     # A2 Ubuntu image; use nightly-main-a3 for A3 and add -openeuler for openEuler.
     export IMAGE=quay.io/ascend/vllm-ascend:nightly-main
     docker run --rm \
         --name vllm-ascend \
         --shm-size=1g \
-        --device $DEVICE \
-        --device /dev/davinci_manager \
-        --device /dev/devmm_svm \
-        --device /dev/hisi_hdc \
-        -v /usr/local/dcmi:/usr/local/dcmi \
-        -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
-        -v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
-        -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
-        -v /etc/ascend_install.info:/etc/ascend_install.info \
+        -e ASCEND_VISIBLE_DEVICES \
         -v /root/.cache:/root/.cache \
         -p 8000:8000 \
         -it $IMAGE bash
@@ -99,7 +93,7 @@ The fastest way to set up a test environment is to use the main branch's contain
     pip install -r requirements-dev.txt
     ```
 
-=== "Multi-cards"
+=== "Multi-card"
 
     ```bash
     # A2 Ubuntu image; use nightly-main-a3 for A3 and add -openeuler for openEuler.
@@ -107,18 +101,7 @@ The fastest way to set up a test environment is to use the main branch's contain
     docker run --rm \
         --name vllm-ascend \
         --shm-size=1g \
-        --device /dev/davinci0 \
-        --device /dev/davinci1 \
-        --device /dev/davinci2 \
-        --device /dev/davinci3 \
-        --device /dev/davinci_manager \
-        --device /dev/devmm_svm \
-        --device /dev/hisi_hdc \
-        -v /usr/local/dcmi:/usr/local/dcmi \
-        -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
-        -v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
-        -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
-        -v /etc/ascend_install.info:/etc/ascend_install.info \
+        -e ASCEND_VISIBLE_DEVICES=0-3 \
         -v /root/.cache:/root/.cache \
         -p 8000:8000 \
         -it $IMAGE bash
@@ -286,7 +269,7 @@ How tests are selected:
 1. `test_selector.py` builds a mapping of test cases to the source lines they cover from historical CI coverage data, then recommends the tests affected by the PR's changed lines (line → function → file granularity fallback).
 2. `select_tests.py` routes each recommended test path to a runner by directory convention (`tests/ut/<module>/` → CPU, `tests/ut/<module>/a2/` → A2, `tests/e2e/pull_request/{one,two,four,eight}_card/` → A3, `_310p` → 310P), balances the load via estimated times, and emits the CI matrix.
 
-Adding a new test requires no configuration change: place the UT file under the
+Adding a new test requires no configuration change: place the unit test file under the
 matching `tests/ut/<module>[/<npu>]` directory or the E2E file under the matching
 `tests/e2e/pull_request/<card>` directory, and CI picks it up automatically from
 the test tree. Routing metadata (runner mapping, partitions) lives in
@@ -313,7 +296,7 @@ The CI resource is limited, and you might need to reduce the number of layers of
 
 1. Fork the original model repo in modelscope. All the files in the repo except for weights are required.
 2. Set `num_hidden_layers` to the expected number of layers, e.g., `{"num_hidden_layers": 2,}`
-3. Copy the following python script as `generate_random_weight.py`. Set the relevant parameters `MODEL_LOCAL_PATH`, `DIST_DTYPE` and `DIST_MODEL_PATH` as needed:
+3. Copy the following Python script as `generate_random_weight.py`. Set the relevant parameters `MODEL_LOCAL_PATH`, `DIST_DTYPE` and `DIST_MODEL_PATH` as needed:
 
     ```python
     import torch
@@ -331,7 +314,7 @@ The CI resource is limited, and you might need to reduce the number of layers of
     model.save_pretrained(DIST_MODEL_PATH)
     ```
 
-### CI workflow triggers and the `schedule_` prefix
+### CI workflow triggers and the schedule_ prefix
 
 Workflow files under `.github/workflows/` whose names start with `schedule_`
 belong to the recurring CI family (nightly, weekly, doc, coverage, and similar
@@ -375,7 +358,7 @@ Workflows without a cron trigger, dispatched externally via `workflow_dispatch`:
 
 ### Run doctest
 
-Doctests validate fixed, marked Quick Start and Installation code blocks, not every code block in the documentation. Quick Start covers A2 and 310P (Atlas 300I DUO), running offline and online examples sequentially. Installation covers `pip`, `uv`, and `source` on A2, followed by offline inference verification. Both support Ubuntu and openEuler.
+Doctests validate fixed, marked Quick Start and Installation code blocks, not every code block in the documentation. Quick Start covers A2 and 310P (Atlas 300I Duo), running offline and online examples sequentially. Installation covers `pip`, `uv`, and `source` on A2, followed by offline inference verification. Both support Ubuntu and openEuler.
 
 Run one of these commands from the repository root in a prepared NPU environment:
 
@@ -424,7 +407,7 @@ and uploaded as CI artifacts. Use `--report-dir` to change the local output dire
 
 Use this section when preparing or reviewing a pull request to decide which
 test coverage and validation evidence the change needs. See the preceding
-sections for environment setup and commands, and [E2E CI tests](e2e_ci_test.md)
+sections for environment setup and commands, and [E2E CI Test](./e2e_ci_test.md)
 for PR CI.
 
 ### CODEOWNERS approval gate

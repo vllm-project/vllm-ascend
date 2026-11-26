@@ -36,7 +36,6 @@ from typing import Any
 import torch
 import vllm.model_executor.layers.fused_moe as _fused_moe_pkg
 import vllm.model_executor.layers.fused_moe.layer as _fused_moe_layer
-from vllm.config import get_current_vllm_config
 from vllm.model_executor.layers.fused_moe.router.fused_moe_router import FusedMoERouter
 
 from vllm_ascend.ascend_config import get_ascend_config
@@ -74,6 +73,9 @@ def _adapt_routed_experts_cls(routed_experts_cls: Any | None) -> Any | None:
 
 
 def _ascend_apply_eplb_mapping(self, topk_ids: torch.Tensor) -> torch.Tensor:
+    # Preserve BaseRouter's selection flow when TopK already returned physical IDs.
+    if getattr(self, "_use_gating_top_k_with_map", False):
+        return topk_ids
     eplb_state = self.eplb_state
     if eplb_state is None:
         return topk_ids
@@ -141,7 +143,7 @@ def _ascend_FusedMoE(
     # callers pass the enum introduced by vLLM #66859. Normalize before
     # constructing either the router or the native factory to scale once.
     scaling_kwargs: dict[str, Any]
-    if vllm_version_is("0.33.0"):
+    if vllm_version_is("0.34.0"):
         scaling_kwargs = {"apply_routed_scale_to_output": apply_routed_scale_to_output}
     else:
         from vllm.model_executor.layers.fused_moe.config import RoutedScaleMode
@@ -169,7 +171,7 @@ def _ascend_FusedMoE(
             )
         enable_eplb = True
         num_redundant_experts = configured_redundancy or upstream_redundancy
-    enable_router_eplb = enable_eplb and get_current_vllm_config().use_v2_model_runner
+    enable_router_eplb = enable_eplb
     if router is None:
         router = create_ascend_fused_moe_router(
             top_k=top_k,

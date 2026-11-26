@@ -3,6 +3,7 @@
 """Ascend Kimi K3 delta attention with TP x PCP head-sharded state."""
 
 from functools import wraps
+from os import getenv
 
 import torch
 import torch_npu
@@ -21,12 +22,15 @@ from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.utils import replace_parameter
 from vllm.models.kimi_k3.nvidia.kda import (
     KimiK3DeltaAttention,
+    _KimiGDNMergedColumnParallelLinear,
     _make_decode_conv1d_weight_loader,
 )
 from vllm.v1.attention.backend import AttentionBackend
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID
 
+from vllm_ascend.ascend_forward_context import get_mrv2_in_profile_run
+from vllm_ascend.attention.gdn_attn_builder import AscendGDNHostMetadataBackend, AscendGDNHostMetadataBuilder
 from vllm_ascend.attention.utils import (
     maybe_save_kv_layer_to_connector,
     wait_for_kv_layer_from_connector,
@@ -35,16 +39,18 @@ from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence import (
     record_attention_compute_start,
 )
-from vllm_ascend.ops.kda import run_chunk_kda, run_recurrent_kda
-from vllm_ascend.ops.kda_parallel import (
-    KDAColumnParallelLinear,
-    KDAInputParallelLinear,
-    KDAMergedColumnParallelLinear,
-    KDARowParallelLinear,
-    get_kda_parallel_rank,
-    get_kda_parallel_size,
+from vllm_ascend.distributed.parallel_state import get_gproj_tp_group, get_qkv_iproj_tp_group
+from vllm_ascend.distributed.utils import all_gather_async
+from vllm_ascend.models.glm5next.kda_input_projection_tp import KDAInputProjectionTPLayout
+from vllm_ascend.ops.head_parallel import (
+    HeadParallelColumnLinear,
+    HeadParallelMergedColumnLinear,
+    HeadParallelRowLinear,
+    get_head_parallel_rank,
+    get_head_parallel_size,
 )
-from vllm_ascend.ops.kda_pcp import KimiKDAHostMetadataBackend, KimiKDARecoverSSMMetadataBackend
+from vllm_ascend.ops.kda import run_chunk_kda, run_recurrent_kda
+from vllm_ascend.ops.recurrent_pcp import PCPRecurrentMetadataBuilderMixin
 from vllm_ascend.ops.triton.kda.recoverssm import kda_recoverssm_verify
 from vllm_ascend.quantization.methods.w4a8.w4a8_mxfp4 import (
     AscendW4A8MXFPDynamicLinearMethod,
@@ -54,7 +60,7 @@ from vllm_ascend.quantization.methods.w8a8.w8a8_mxfp8 import (
     AscendW8A8MXFP8DynamicLinearMethod,
 )
 from vllm_ascend.quantization.prepared_linear_input import PreparedLinearInput
-from vllm_ascend.utils import npu_stream_switch, vllm_version_is
+from vllm_ascend.utils import npu_stream_switch
 
 _PACKED_CONV_WEIGHT_NAME = "ascend_conv1d_weight"
 _F_PROJ_SHARD_ID = 1
@@ -62,10 +68,18 @@ _KDA_BFG_STREAM: torch.npu.Stream | None = None
 
 
 def _kda_bfg_stream() -> torch.npu.Stream:
+    """Share one persistent auxiliary stream across KDA layers."""
     global _KDA_BFG_STREAM
     if _KDA_BFG_STREAM is None:
         _KDA_BFG_STREAM = torch_npu.npu.Stream()
     return _KDA_BFG_STREAM
+
+
+class KimiKDAInputParallelLinear(_KimiGDNMergedColumnParallelLinear, HeadParallelMergedColumnLinear):
+    def __init__(self, input_size: int, output_sizes: list[int], tp_size: int, **kwargs) -> None:
+        # Keep upstream replication/padding setup; the next MRO class allocates
+        # its merged projection using the combined TP/PCP rank.
+        super().__init__(input_size, output_sizes, replicated_shard_id=4, tp_size=tp_size, **kwargs)
 
 
 class _KDAFusedBFGLinear(MergedColumnParallelLinear):
@@ -91,7 +105,7 @@ class _KDAFusedBFGLinear(MergedColumnParallelLinear):
                 self,
                 hidden_size,
                 sum(self.output_sizes),
-                tp_rank=get_kda_parallel_rank(),
+                tp_rank=get_head_parallel_rank(),
                 tp_size=tp_size,
                 bias=False,
                 quant_config=quant_config,
@@ -205,6 +219,28 @@ def _prepare_beta(
     return beta if is_preprocessed else beta.float().sigmoid()
 
 
+class KimiKDAHostMetadataBuilder(PCPRecurrentMetadataBuilderMixin, AscendGDNHostMetadataBuilder):
+    pass
+
+
+class KimiKDAHostMetadataBackend(AscendGDNHostMetadataBackend):
+    @staticmethod
+    def get_builder_cls():
+        return KimiKDAHostMetadataBuilder
+
+    @classmethod
+    def supports_pcp(cls) -> bool:
+        return True
+
+
+class KimiKDARecoverSSMMetadataBackend(KimiKDAHostMetadataBackend):
+    @staticmethod
+    def get_builder_cls():
+        from vllm_ascend.models.kimi_k3.recoverssm_metadata import AscendKimiKDARecoverSSMMetadataBuilder
+
+        return AscendKimiKDARecoverSSMMetadataBuilder
+
+
 class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
     """Kimi K3 KDA using AscendC prefill and recurrent kernels."""
 
@@ -227,18 +263,79 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
         self.pcp_size = getattr(parallel_config, "prefill_context_parallel_size", 1)
         self.pcp_group = get_pcp_group() if self.pcp_size > 1 else None
         self.pcp_rank = self.pcp_group.rank_in_group if self.pcp_group is not None else 0
-        merged_linear = MergedColumnParallelLinear
         if self.pcp_size > 1:
             self._init_pcp_projections(vllm_config, prefix)
-            merged_linear = KDAMergedColumnParallelLinear
         self.uses_mixed_projection = uses_mixed_projection
         self._ascend_kda_state_copy = None
-        if uses_mixed_projection:
+        self.qkv_layout: KDAInputProjectionTPLayout | None = None
+        fine_tp = getattr(vllm_config, "additional_config", {}).get("finegrained_tp_config", {})
+        qkv_size = int(fine_tp.get("qkv_iproj_tensor_parallel_size", 1))
+        gate_size = int(fine_tp.get("gproj_tensor_parallel_size", 1))
+        if qkv_size > 1 or gate_size > 1:
+            if not uses_mixed_projection:
+                raise ValueError("Kimi projection TP requires the mixed QKV/BF16 gate checkpoint format.")
+            if not config.linear_attn_config.get("use_full_rank_gate", False):
+                raise ValueError("Kimi projection TP requires full-rank output gates.")
+            for name, size in (("qkv_iproj_tensor_parallel_size", qkv_size), ("gproj_tensor_parallel_size", gate_size)):
+                if size > 1 and self.num_heads % size:
+                    raise ValueError(f"{name} must divide the KDA head count ({self.num_heads}).")
+            qkv_group = get_qkv_iproj_tp_group() if qkv_size > 1 else None
+            gate_group = get_gproj_tp_group() if gate_size > 1 else None
+            self.in_proj_qkvgfab = HeadParallelMergedColumnLinear(
+                self.hidden_size,
+                [self.projection_size] * 3,
+                tp_group=qkv_group,
+                bias=False,
+                gather_output=False,
+                quant_config=quant_config,
+                prefix=f"{prefix}.in_proj_qkv",
+            )
+            self.in_proj_padding = 0
+            self.b_proj = HeadParallelColumnLinear(
+                self.hidden_size,
+                self.num_heads,
+                tp_group=qkv_group,
+                bias=False,
+                gather_output=False,
+                quant_config=None,
+                prefix=f"{prefix}.b_proj",
+            )
+            self.f_a_proj = HeadParallelColumnLinear(
+                self.hidden_size,
+                self.head_dim,
+                tp_group=None,
+                bias=False,
+                gather_output=False,
+                quant_config=None,
+                prefix=f"{prefix}.f_a_proj",
+            )
+            self.f_b_proj = HeadParallelColumnLinear(
+                self.head_dim,
+                self.projection_size,
+                tp_group=None,
+                bias=False,
+                gather_output=False,
+                quant_config=None,
+                prefix=f"{prefix}.f_b_proj",
+            )
+            self.g_proj = HeadParallelColumnLinear(
+                self.hidden_size,
+                self.projection_size,
+                tp_group=gate_group,
+                bias=False,
+                gather_output=False,
+                quant_config=None,
+                prefix=f"{prefix}.g_proj",
+            )
+            self.qkv_layout = KDAInputProjectionTPLayout(qkv_group, self.num_heads, self.head_dim)
+            self.gate_layout = KDAInputProjectionTPLayout(gate_group, self.num_heads, self.head_dim)
+        elif uses_mixed_projection:
             # vLLM 0.27 packs all KDA input projections into one linear.  A
             # QuaRot checkpoint instead stores q/k/v as W8A8 and keeps B/F/G
             # in floating point. Split those precision groups so DynamicQuant
             # can overlap the composed BFG projection.
-            self.in_proj_qkvgfab = merged_linear(
+            merged_linear_cls = HeadParallelMergedColumnLinear if self.pcp_size > 1 else MergedColumnParallelLinear
+            self.in_proj_qkvgfab = merged_linear_cls(
                 self.hidden_size,
                 [self.projection_size] * 3,
                 bias=False,
@@ -292,8 +389,8 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
 
     def _init_pcp_projections(self, vllm_config, prefix: str) -> None:
         """Bind every KDA head parameter and cache to the same TP x PCP shard."""
-        self.tp_size = get_kda_parallel_size(vllm_config.parallel_config)
-        self.tp_rank = get_kda_parallel_rank()
+        self.tp_size = get_head_parallel_size(vllm_config.parallel_config)
+        self.tp_rank = get_head_parallel_rank()
         self.local_num_heads = divide(self.num_heads, self.tp_size)
         self.local_projection_size = divide(self.projection_size, self.tp_size)
         local_output_size = 4 * self.local_projection_size + self.head_dim + self.local_num_heads
@@ -305,10 +402,7 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
         )
         self.in_proj_padding = -local_output_size % alignment
         output_sizes = [self.projection_size] * 4 + [self.head_dim, self.num_heads]
-        # Main's merged layer owns padding allocation after vLLM #66784.
-        if self.in_proj_padding and vllm_version_is("0.33.0"):
-            output_sizes.append(self.in_proj_padding * self.tp_size)
-        self.in_proj_qkvgfab = KDAInputParallelLinear(
+        self.in_proj_qkvgfab = KimiKDAInputParallelLinear(
             self.hidden_size,
             output_sizes,
             self.tp_size,
@@ -317,7 +411,7 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
             quant_config=self.quant_config,
             prefix=f"{prefix}.in_proj_qkvgfab",
         )
-        self.f_b_proj = KDAColumnParallelLinear(
+        self.f_b_proj = HeadParallelColumnLinear(
             self.head_dim,
             self.projection_size,
             bias=False,
@@ -328,7 +422,7 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
         self.dt_bias.weight_loader = self._head_weight_loader
         self.A_log = nn.Parameter(torch.empty(self.local_num_heads, dtype=torch.float32))
         self.A_log.weight_loader = self._head_weight_loader
-        self.conv1d = KDAColumnParallelLinear(
+        self.conv1d = HeadParallelColumnLinear(
             self.conv_size,
             3 * self.projection_size,
             bias=False,
@@ -342,7 +436,7 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
             self.tp_rank,
             None,
         )
-        self.o_proj = KDARowParallelLinear(
+        self.o_proj = HeadParallelRowLinear(
             self.projection_size,
             self.hidden_size,
             bias=False,
@@ -365,12 +459,102 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
         hidden_states: torch.Tensor,
         positions: torch.Tensor,
     ) -> torch.Tensor:
+        if self.qkv_layout is not None:
+            return self._forward_local_tp(hidden_states)
         if self.pcp_size > 1:
-            hidden_states = torch.ops.vllm.kda_pcp_gather(hidden_states, self.pcp_size, self.prefix)
+            hidden_states = torch.ops.vllm.pcp_gather_tokens(hidden_states, self.pcp_size, self.prefix)
         output = self._forward_projections(hidden_states, positions)
         if self.pcp_size > 1:
-            output = torch.ops.vllm.kda_pcp_scatter(output, self.pcp_size, self.prefix)
+            output = torch.ops.vllm.pcp_scatter_tokens(output, self.pcp_size, self.prefix)
         return output
+
+    def _forward_local_tp(self, hidden: torch.Tensor) -> torch.Tensor:
+        layout = self.qkv_layout
+        assert layout is not None
+        owner, capacity = layout.prepare_input(hidden)
+        if capacity == 0:
+            return torch.empty_like(hidden)
+
+        main = torch.npu.current_stream()
+        aux = _kda_bfg_stream()
+        q_hidden = owner
+        gather_work = None
+        if layout.group is not None:
+            if get_mrv2_in_profile_run():
+                # Use the coordinator's synchronous gather during memory profiling.
+                q_hidden = layout.group.all_gather(owner, dim=0)
+            else:
+                q_hidden, gather_work = all_gather_async(owner, layout.group)
+        forget = self.f_b_proj(self.f_a_proj(owner)[0])[0]
+        if gather_work is not None:
+            gather_work.wait()
+
+        quantized = self._quantize_fused_qkv(q_hidden)
+        qkv = self._matmul_fused_qkv(quantized)
+        beta = self.b_proj(q_hidden)[0]
+        core_out = hidden.new_zeros((1, capacity, self.local_num_heads, self.head_dim))
+
+        gate_layout = self.gate_layout
+        gate_hidden = owner
+        if gate_layout.group is layout.group:
+            gate_hidden = q_hidden
+        elif gate_layout.group is not None:
+            gate_hidden = gate_layout.group.all_gather(owner, dim=0)
+
+        packed_qkv_beta = None
+        qkv_beta_ready = None
+        if layout.group is not None:
+            if qkv.dtype != beta.dtype:
+                raise RuntimeError("Kimi QKV/beta exchange requires equal raw projection dtypes.")
+            packed_qkv_beta = torch.cat((qkv, beta), dim=-1)
+            if getenv("HCCL_OP_EXPANSION_MODE") not in ("AIV", "AIV_ONLY"):
+                # The exchange must wait for packing, and can start while G runs on main.
+                qkv_beta_ready = main.record_event()
+        gate = self.g_proj(gate_hidden)[0]
+        if gate_layout.group is not None:
+            gate = gate.contiguous()
+        if packed_qkv_beta is not None:
+            if qkv_beta_ready is not None:
+                with npu_stream_switch(aux):
+                    aux.wait_event(qkv_beta_ready)
+                    packed_qkv_beta.record_stream(aux)
+                    received = layout.all_to_all(packed_qkv_beta)
+                main.wait_stream(aux)
+                received.record_stream(main)
+            else:
+                received = layout.all_to_all(packed_qkv_beta)
+            qkv, beta = layout.restore_qkv_beta(received, capacity)
+        else:
+            beta = beta.unsqueeze(0)
+        forget = forget.view(1, capacity, self.num_heads, self.head_dim)
+
+        received_gate = gate if gate_layout.group is None else None
+
+        def launch_gate_exchange():
+            nonlocal received_gate
+            with npu_stream_switch(aux):
+                # Only the G exchange forks after convolution, alongside the recurrent kernel.
+                aux.wait_stream(main)
+                gate.record_stream(aux)
+                received_gate = gate_layout.all_to_all(gate)
+
+        norm_input = self._forward_core(
+            qkv, forget, beta, core_out, launch_gate=launch_gate_exchange if gate_layout.group is not None else None
+        )
+        if gate_layout.group is not None:
+            if received_gate is None:
+                # An idle owner still owes its peers their gate shards.
+                launch_gate_exchange()
+            main.wait_stream(aux)
+            assert received_gate is not None
+            received_gate.record_stream(main)
+        if norm_input is not None:
+            assert received_gate is not None
+            owner_gate = gate_layout.restore_gate(received_gate, capacity)
+            self.o_norm.forward_oot(norm_input, owner_gate[: norm_input.shape[1]], out=core_out)
+            maybe_save_kv_layer_to_connector("", [])
+        projected = self.o_proj(core_out.reshape(capacity, -1))[0]
+        return projected[: hidden.shape[0]]
 
     def _forward_projections(self, hidden_states: torch.Tensor, positions: torch.Tensor) -> torch.Tensor:
         if self.uses_mixed_projection:
@@ -660,6 +844,19 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
         beta_is_preprocessed: bool = False,
     ) -> None:
         """Dispatch speculative, prefill, and decode tokens through KDA kernels."""
+        norm_input = self._forward_core(
+            mixed_qkv,
+            g1,
+            beta,
+            core_attn_out,
+            beta_is_preprocessed=beta_is_preprocessed,
+        )
+        if norm_input is not None:
+            self.o_norm.forward_oot(norm_input, g2[: norm_input.shape[1]], out=core_attn_out)
+            maybe_save_kv_layer_to_connector("", [])
+
+    def _forward_core(self, mixed_qkv, g1, beta, core_attn_out, *, beta_is_preprocessed=False, launch_gate=None):
+        """Original conv/spec/recurrent dispatch, with no dependency on output G."""
         forward_context = get_forward_context()
         attn_metadata_raw = forward_context.attn_metadata
         if attn_metadata_raw is None:
@@ -681,7 +878,6 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
         num_actual_tokens = attn_metadata.num_actual_tokens
         mixed_qkv = mixed_qkv[:num_actual_tokens]
         g1 = g1[:, :num_actual_tokens]
-        g2 = g2[:num_actual_tokens]
         use_recoverssm = self.use_recoverssm
         if use_recoverssm:
             beta = beta[:, :num_actual_tokens]
@@ -746,6 +942,9 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
             assert raw_gate_spec is not None and beta_spec is not None
             assert attn_metadata.spec_query_start_loc is not None
             assert attn_metadata.spec_state_indices_tensor is not None
+            if launch_gate is not None:
+                launch_gate()
+                launch_gate = None  # A mixed batch shares the same gate for both token subsets.
             if use_recoverssm:
                 records = self.recoverssm_records
                 if records is None:
@@ -814,6 +1013,9 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
             assert beta_non_spec is not None
             if use_recoverssm:
                 beta_non_spec = beta_non_spec.float().sigmoid()
+
+            if launch_gate is not None:
+                launch_gate()
 
             split_non_spec = not use_spec and attn_metadata.num_prefills > 0 and attn_metadata.num_decodes > 0
             num_decode_tokens = attn_metadata.num_decode_tokens
@@ -907,6 +1109,4 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
                 norm_out.copy_(core_non_spec)
             norm_input = norm_out
 
-        # The norm writes valid rows and zeroes graph padding in one launch.
-        self.o_norm.forward_oot(norm_input, g2, out=core_attn_out)
-        maybe_save_kv_layer_to_connector("", [])
+        return norm_input

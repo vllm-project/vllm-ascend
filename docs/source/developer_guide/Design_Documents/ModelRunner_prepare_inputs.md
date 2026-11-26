@@ -46,7 +46,7 @@ A model requires these attention metadata during the forward pass:
 - `number of computed tokens`: number of computed tokens for each request.
 - `number of requests`: number of requests in this batch.
 - `number of tokens`: total number of scheduled tokens in this batch.
-- **`block table`**: translates the logical address (within its sequence) of each block to its global physical address in the device's memory.
+- `block table`: translates the logical address (within its sequence) of each block to its global physical address in the device's memory.
 - `max query len`: the longest scheduled tokens length in this request batch.
 - `slot mapping`: indices of each token that input token will be stored into.
 - `attention mask`: mask matrix applied to attention scores before softmax to control which tokens can attend to each other (usually a causal attention).
@@ -106,7 +106,7 @@ As the maximum number of tokens that can be scheduled is 10, the scheduled token
 
 First, determine which request each token belongs to: tokens 0–2 are assigned to **request_0**, tokens 3–4 to **request_1**, and tokens 5–9 to **request_2**. To represent this mapping, we use `request indices`, for example, `request indices`: `[0, 0, 0, 1, 1, 2, 2, 2, 2, 2]`.
 
-For each request, use **the number of computed tokens** + **the relative position of current scheduled tokens** (`request_0: [0 + 0, 0 + 1, 0 + 2]`, `request_1: [0 + 0, 0 + 1]`, `request_2: [0 + 0, 0 + 1,..., 0 + 4]`) and then concatenate them together (`[0, 1, 2, 0, 1, 0, 1, 2, 3, 4]`).
+For each request, use **the number of computed tokens** + **the relative position of current scheduled tokens** (`request_0: [0 + 0, 0 + 1, 0 + 2]`, `request_1: [0 + 0, 0 + 1]`, `request_2: [0 + 0, 0 + 1, ..., 0 + 4]`) and then concatenate them together (`[0, 1, 2, 0, 1, 0, 1, 2, 3, 4]`).
 
 Note: there is a more efficient way (using `request indices`) to create positions in actual code.
 
@@ -134,7 +134,7 @@ Note that `T_x_x` is an `int32`.
 
 Let's say `M = max model len`. Then we can use `token positions` together with `request indices` of each token to construct `token indices`.
 
-So `token indices` = `[0 + 0 * M, 1 + 0 * M, 2 + 0 * M, 0 + 1 * M, 1 + 1 * M, 0 + 2 * M, 1 + 2 * M, 2 + 2 * M, 3 + 2 * M, 4 + 2 * M]` = `[0, 1, 2, 12, 13, 24, 25, 26, 27, 28]`
+So `token indices` = `[0 + 0 * M, 1 + 0 * M, 2 + 0 * M, 0 + 1 * M, 1 + 1 * M, 0 + 2 * M, 1 + 2 * M, 2 + 2 * M, 3 + 2 * M, 4 + 2 * M]` = `[0, 1, 2, 12, 13, 24, 25, 26, 27, 28]`.
 
 ##### 3. Retrieve the Token IDs
 
@@ -191,9 +191,9 @@ The workflow of achieving slot mapping:
 Details:
 
 1. (**Token level**) Use a simple formula to calculate `block table indices`: `request indices * K + positions / block size`. So it equals `[0 * 6 + 0 / 2, 0 * 6 + 1 / 2, 0 * 6 + 2 / 2, 1 * 6 + 0 / 2, 1 * 6 + 1 / 2, 2 * 6 + 0 / 2, 2 * 6 + 1 / 2, 2 * 6 + 2 / 2, 2 * 6 + 3 / 2, 2 * 6 + 4 / 2] = [0, 0, 1, 6, 6, 12, 12, 13, 13, 14]`. This could be used to select `device block number` from `block table`.
-2. (**Token level**) Use `block table indices` to select out `device block number` for each scheduled token. The pseudocode is `block_numbers = block_table[block_table_indices]`. So `device block number=[1, 1, 2, 3, 3, 4, 4, 5, 5, 6]`
+2. (**Token level**) Use `block table indices` to select out `device block number` for each scheduled token. The pseudocode is `block_numbers = block_table[block_table_indices]`. So `device block number = [1, 1, 2, 3, 3, 4, 4, 5, 5, 6]`.
 3. (**Token level**) `block offsets` could be computed by `block offsets = positions % block size = [0, 1, 0, 0, 1, 0, 1, 0, 1, 0]`.
-4. Finally, use `block offsets` and `device block number` to create `slot mapping`: `device block number * block size + block_offsets = [2, 3, 4, 6, 7, 8, 9, 10, 11, 12]`
+4. Finally, use `block offsets` and `device block number` to create `slot mapping`: `device block number * block size + block_offsets = [2, 3, 4, 6, 7, 8, 9, 10, 11, 12]`.
 
 (**Request level**) As we know the scheduled token count is `[3, 2, 5]`:
 

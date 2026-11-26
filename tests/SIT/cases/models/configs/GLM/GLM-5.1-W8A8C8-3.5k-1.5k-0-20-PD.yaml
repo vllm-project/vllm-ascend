@@ -59,7 +59,6 @@ env_common: &env_common
   PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
   ACL_OP_INIT_MODE: "1"
   ASCEND_A3_ENABLE: "1"
-  VLLM_USE_V2_MODEL_RUNNER: "1"
 templates:
   - node_index: 0
     envs:
