@@ -10,6 +10,11 @@ from vllm.v1.core.sched.scheduler import Scheduler
 import vllm_ascend.patch.platform.patch_encoder_cache_free  # noqa: F401
 from vllm_ascend.utils import vllm_version_is
 
+pytestmark = pytest.mark.skipif(
+    not vllm_version_is("0.34.0"),
+    reason="the encoder-free patch is only installed on vLLM v0.34.0",
+)
+
 
 class _Request:
     """Minimal hashable stand-in for a scheduler ``Request``."""
@@ -112,9 +117,6 @@ def test_balance_scheduler_inherits_base_class_patch():
     """Guard the import order: the patch must wrap upstream Scheduler, not the
     BalanceScheduler subclass. Importing it after patch_balance_schedule would
     leave DyntraLB/Recompute schedulers on the unpatched base method."""
-    if not vllm_version_is("0.34.0"):
-        pytest.skip("upstream vLLM main already frees encoder inputs at schedule time")
-
     from vllm_ascend.patch.platform.patch_balance_schedule import BalanceScheduler
 
     defining_class = next(

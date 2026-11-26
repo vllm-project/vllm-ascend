@@ -28,6 +28,12 @@ from vllm_ascend.core.recompute_scheduler import (
 from vllm_ascend.distributed.ec_transfer.ec_connector.mooncake.connector import AscendECMooncakeConnector
 from vllm_ascend.distributed.ec_transfer.ec_connector.mooncake.scheduler import AscendECMooncakeScheduler
 from vllm_ascend.patch.platform.patch_balance_schedule import BalanceScheduler
+from vllm_ascend.utils import vllm_version_is
+
+# The encoder-free patch is installed only on vLLM v0.34.0. On the main lane
+# the scheduler still frees consumed encoder inputs in update_from_output, so
+# the intermediate cache-reference assertions differ by version.
+_SCHEDULE_FREE_ACTIVE = vllm_version_is("0.34.0")
 
 PROMPT_TOKENS = 32
 MAX_NUM_BATCHED_TOKENS = 64
@@ -163,7 +169,10 @@ def test_waiting_duplicate_encoder_input_keeps_cache_reference(scheduler_cls):
 
     assert output.scheduled_encoder_inputs == {request.request_id: [0]}
     manager = scheduler.encoder_cache_manager
-    assert manager.get_cached_input_ids(request) == {0, 1}
+    # v0.34.0 with the schedule-time free patch releases both occurrences
+    # immediately; without it the references stay until update_from_output.
+    expected_cached = set() if _SCHEDULE_FREE_ACTIVE else {0, 1}
+    assert manager.get_cached_input_ids(request) == expected_cached
     scheduler.finish_requests(request.request_id, RequestStatus.FINISHED_ABORTED)
     assert manager.get_cached_input_ids(request) == set()
 
@@ -185,7 +194,13 @@ def test_running_duplicate_encoder_input_keeps_cache_reference(scheduler_cls):
 
     assert output.scheduled_encoder_inputs == {request.request_id: [1]}
     allocate.assert_called_once_with(request, [1], [2])
-    assert {1, 2} <= scheduler.encoder_cache_manager.get_cached_input_ids(request)
+    cached_input_ids = scheduler.encoder_cache_manager.get_cached_input_ids(request)
+    if _SCHEDULE_FREE_ACTIVE:
+        # Both placeholder ranges were consumed by this step, so the patched
+        # scheduler releases them before the step is dispatched.
+        assert cached_input_ids == set()
+    else:
+        assert {1, 2} <= cached_input_ids
 
 
 @pytest.mark.parametrize("scheduler_cls", SCHEDULER_CLASSES)
