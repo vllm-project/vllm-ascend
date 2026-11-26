@@ -194,27 +194,42 @@ vllm serve Qwen/Qwen3-8B \
 ### Draft Sampling
 
 Draft sampling is greedy by default. For drafters that support probabilistic
-sampling, set `draft_sample_method` to `probabilistic` to sample at the request
-temperature.
+sampling, add this to `speculative_config` to sample at the request temperature.
+
+```json
+{
+  "draft_sample_method": "probabilistic"
+}
+```
 
 ### Block Verification {: #block-verification }
 
-Set `"rejection_sample_method":"block"` to verify a block of draft tokens
-jointly while preserving the target sampling distribution. Greedy requests
-retain greedy verification. Use Block Verification separately from Entropy
-Verify and synthetic rejection sampling.
+Add this to `speculative_config` to verify draft tokens as a block while
+preserving the target sampling distribution.
+
+```json
+{
+  "rejection_sample_method": "block"
+}
+```
+
+Greedy requests retain greedy verification. Use Block Verification separately
+from Entropy Verify and synthetic rejection sampling.
 
 ### Entropy Verify {: #entropy-verify }
 
 <span id="usage"></span>Entropy Verify changes the acceptance threshold for
 non-greedy requests. It can improve throughput and change the output. Evaluate
-output quality on your workload. Use `"rejection_sample_method":"standard"`
-and enable Entropy Verify through `--additional-config`.
+output quality on your workload. Keep `rejection_sample_method` at its
+default, `"standard"`, and add this to `additional_config`
+(`--additional-config` for online serving).
 
-```shell
-vllm serve Qwen/Qwen3-8B \
-  --speculative-config '{"method":"eagle3","model":"RedHatAI/Qwen3-8B-speculator.eagle3","num_speculative_tokens":3,"rejection_sample_method":"standard"}' \
-  --additional-config '{"rejection_sampler_config":{"enable_entropy_verify":true}}'
+```json
+{
+  "rejection_sampler_config": {
+    "enable_entropy_verify": true
+  }
+}
 ```
 
 | Option | Default | Effect |
