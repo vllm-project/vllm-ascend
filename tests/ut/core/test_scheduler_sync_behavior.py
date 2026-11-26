@@ -31,7 +31,7 @@ from tests.ut.kv_offload.utils import (
     create_model_runner_output,
     create_request,
 )
-from vllm_ascend.ascend_config import clear_ascend_config
+from vllm_ascend.ascend_config import FinegrainedTPConfig, clear_ascend_config
 from vllm_ascend.core.batch_job_aware_scheduler import BatchJobAwareScheduler
 from vllm_ascend.core.dyntra_lb_scheduler import (
     AsyncDyntraLBScheduler,
@@ -124,7 +124,6 @@ def _empty_runner_output(
     return ModelRunnerOutput(
         req_ids=[],
         sampled_token_ids=[],
-        spec_token_ids=None,
         logprobs=None,
         prompt_logprobs_dict={},
         pooler_output=[],
@@ -671,7 +670,10 @@ def test_dyntra_lb_post_plan_arrival_is_not_admitted():
 def _setup_recompute_preemption_pressure(monkeypatch, *, oproj_tp: int = 0, mlp_tp: int = 0):
     """Create a RecomputeScheduler where the next decode step forces preemption of req2."""
     block_size = 4
-    ftpc = SimpleNamespace(oproj_tensor_parallel_size=oproj_tp, mlp_tensor_parallel_size=mlp_tp)
+    ftpc = FinegrainedTPConfig(
+        oproj_tensor_parallel_size=oproj_tp,
+        mlp_tensor_parallel_size=mlp_tp,
+    )
     monkeypatch.setattr(
         "vllm_ascend.core.recompute_scheduler.get_ascend_config",
         lambda: SimpleNamespace(finegrained_tp_config=ftpc),
