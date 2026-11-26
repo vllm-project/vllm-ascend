@@ -139,3 +139,42 @@ def test_bf16_candidates_pack_and_global_topk_match_reference():
     result = merge_packed_candidates(torch.cat(packed, dim=0), rows, world, topk)
     expected = merge_topk_candidates(torch.cat(ids, dim=-1), torch.cat(values, dim=-1), topk)
     torch.testing.assert_close(result.cpu(), expected)
+
+
+def test_input_sorted_pack_preserves_bf16_scorer_order_and_score_bits_on_replay():
+    torch.npu.set_device(0)
+    k, world, rank, interleave = 2048, 8, 7, 896
+    token_ids = torch.arange(k, dtype=torch.int32).repeat(4, 1)
+    raw_scores = ((token_ids * 7) % 31 - 15).float()
+    raw_scores[:, 0] = -0.0
+    raw_scores[1, :3] = torch.tensor([torch.nan, torch.inf, -torch.inf])
+    raw_scores[2, :] = -torch.inf
+    raw_scores[3, k // 2 :] = -torch.inf
+    scores, order = raw_scores.sort(descending=True, stable=True)
+    ids = token_ids.gather(1, order)
+    ids[scores == -torch.inf] = -1
+    device_ids, device_scores = ids[:, None].npu(), scores[:, None].npu()
+
+    def pack():
+        return pack_local_candidates(
+            device_ids, device_scores, world, rank, interleave, sort_candidates=True, input_sorted=True
+        )
+
+    pack()
+    torch.npu.synchronize()
+    graph = torch.npu.NPUGraph()
+    with torch.npu.graph(graph, capture_error_mode="thread_local", auto_dispatch_capture=True):
+        packed = pack()
+    for offset in (0, 1):
+        local_ids, local_scores = ids.roll(offset, 0), scores.roll(offset, 0)
+        device_ids.copy_(local_ids[:, None])
+        device_scores.copy_(local_scores[:, None])
+        graph.replay()
+        expected = torch.full_like(packed.cpu(), -1)
+        expected[..., 1] = torch.tensor(-torch.inf).view(torch.int32)
+        for row, values in enumerate(local_scores):
+            valid = (local_ids[row] >= 0) & values.isfinite()
+            mapped = local_to_global(local_ids[row, valid], world, rank, interleave)
+            expected[row, : len(mapped), 0] = mapped
+            expected[row, : len(mapped), 1] = values[valid].view(torch.int32)
+        assert torch.equal(packed.cpu(), expected)

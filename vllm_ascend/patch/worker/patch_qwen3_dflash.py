@@ -7,9 +7,11 @@ from vllm.model_executor.models.qwen3_dflash import (
     DFlashQwen3ForCausalLM,
     DFlashQwen3Model,
 )
+from vllm.triton_utils import HAS_TRITON
 
 from vllm_ascend.attention.attention_v1 import AscendKimiK31GQADraftAttentionBackend
 from vllm_ascend.core.kv_cache_interface import uses_kimi_k31_gqa_draft
+from vllm_ascend.ops.rotary_embedding import AscendRotaryEmbedding
 
 _original_dflash_attention = qwen3_dflash.Attention
 
@@ -64,8 +66,15 @@ def precompute_and_store_context_kv(
     # View as [L * num_ctx, kv] so RoPE sees one big batch (no copy).
     all_k_flat = all_k_normed.view(L * num_ctx, kv)
     positions_repeated = context_positions.repeat(L)
-    # Some RoPE backends return newly allocated tensors.
-    all_k_flat, _ = self.layers[0].self_attn.rotary_emb(positions_repeated, all_k_flat, all_k_flat.clone())
+    rotary_emb = self.layers[0].self_attn.rotary_emb
+    # The Ascend Triton RoPE accepts zero K heads. Rotate the context keys
+    # in its Q operand and skip the clone and rotation of a discarded copy.
+    dummy_key = (
+        all_k_flat.new_empty((L * num_ctx, 0))
+        if HAS_TRITON and type(rotary_emb) is AscendRotaryEmbedding
+        else all_k_flat.clone()
+    )
+    all_k_flat, _ = rotary_emb(positions_repeated, all_k_flat, dummy_key)
 
     if context_slot_mapping is None:
         return

@@ -41,6 +41,19 @@ def test_candidate_memory_budget(world, expected):
     assert indexer.gathered_candidate_row_tile(4096, world, 2048) == expected
 
 
+@pytest.mark.parametrize("already_sorted,topk", [(True, 2048), (False, 2048), (True, 7)])
+def test_distributed_topk_preserves_producer_sort_contract(monkeypatch, already_sorted, topk):
+    ids = torch.zeros((1, 1, topk), dtype=torch.int32)
+    ops = Mock(MAX_FUSED_TOPK=2048)
+    ops.pack_local_candidates.return_value = ids
+    monkeypatch.setitem(sys.modules, "vllm_ascend.ops.triton.sharded_indexer", ops)
+    group = SimpleNamespace(world_size=8, rank_in_group=0, all_gather=Mock(return_value=ids))
+    indexer.distributed_topk(ids, ids.float(), group, topk, 896, return_local=True, input_sorted=already_sorted)
+    fused = topk == 2048
+    assert ops.pack_local_candidates.call_args.kwargs["input_sorted"] == (already_sorted and fused)
+    assert ops.merge_packed_candidates.call_args.kwargs["presorted"] == fused
+
+
 @pytest.mark.parametrize(
     "sharded,pcp,dsa_cp,turboquant,expected",
     [

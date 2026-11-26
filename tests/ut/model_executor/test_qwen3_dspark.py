@@ -31,10 +31,13 @@ from torch import nn
 import vllm_ascend.models.qwen3_dspark as qwen3_dspark
 from vllm_ascend.models import qwen3_dflash2
 from vllm_ascend.models.qwen3_dflash2 import DFlash2Qwen3ForCausalLM
+from vllm_ascend.ops.rotary_embedding import AscendRotaryEmbedding
+from vllm_ascend.patch.worker import patch_qwen3_dflash
 from vllm_ascend.patch.worker.patch_qwen3_dflash import precompute_and_store_context_kv
 
 
-def test_context_cache_uses_out_of_place_rope_result():
+@pytest.mark.parametrize("ascend_triton", [False, True])
+def test_context_cache_uses_out_of_place_rope_result(monkeypatch, ascend_triton):
     """Write rotated K and original V when RoPE leaves its inputs untouched."""
     writes = []
 
@@ -42,8 +45,16 @@ def test_context_cache_uses_out_of_place_rope_result():
         writes.append((key.clone(), value.clone(), slots))
 
     def rotary_emb(positions, query, key):
+        assert key.shape == ((len(query), 0) if ascend_triton else query.shape)
         return query + positions[:, None], key
 
+    if ascend_triton:
+        rotary = AscendRotaryEmbedding.__new__(AscendRotaryEmbedding)
+        nn.Module.__init__(rotary)
+        rotary._forward_method = rotary_emb
+    else:
+        rotary = rotary_emb
+    monkeypatch.setattr(patch_qwen3_dflash, "HAS_TRITON", True)
     attn = SimpleNamespace(impl=SimpleNamespace(do_kv_cache_update=cache_update), kv_cache=object())
     model = SimpleNamespace(
         _num_attn_layers=1,
@@ -53,7 +64,7 @@ def test_context_cache_uses_out_of_place_rope_result():
         hidden_norm=nn.Identity(),
         _fused_kv_weight=torch.tensor([[1.0, 0.0], [0.0, 1.0], [2.0, 0.0], [0.0, 2.0]]),
         _fused_kv_bias=None,
-        layers=[SimpleNamespace(self_attn=SimpleNamespace(k_norm=nn.Identity(), rotary_emb=rotary_emb))],
+        layers=[SimpleNamespace(self_attn=SimpleNamespace(k_norm=nn.Identity(), rotary_emb=rotary))],
         _attn_layers=[attn],
     )
     states = torch.tensor([[2.0, 3.0], [5.0, 7.0]])

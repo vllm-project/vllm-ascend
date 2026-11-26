@@ -183,6 +183,7 @@ def _pack_sorted_candidates(
     RANK: tl.constexpr,
     INTERLEAVE: tl.constexpr,
     LOG_BLOCK: tl.constexpr,
+    INPUT_SORTED: tl.constexpr,
 ):
     BLOCK: tl.constexpr = 1 << LOG_BLOCK
     col = tl.arange(0, BLOCK)
@@ -196,7 +197,19 @@ def _pack_sorted_candidates(
         # local keys preserves global-ID ties without rounding mapped IDs.
         keys = tl.where(valid, local.to(tl.float32), 0.0 if scores.dtype.element_ty == tl.bfloat16 else float("inf"))
         score = tl.where(valid, score, -float("inf"))
-        if scores.dtype.element_ty == tl.bfloat16:
+        if INPUT_SORTED:
+            # BF16 paged scoring returns ordered FP32 scores. Invalidating
+            # NaN/+inf after its local Top-K cutoff can leave holes before
+            # finite winners. Compact those rows in their existing order.
+            last_valid = tl.max(tl.where(valid, col + 1, 0), axis=0)
+            if last_valid != tl.sum(valid.to(tl.int32), axis=0):
+                # Invalid positions sort after all valid positions. The
+                # permutation is unique even for signed zeros or tied scores.
+                positions = tl.where(valid, col, col + BLOCK).to(tl.float32)
+                lookup = _sort(positions, descending=False).to(tl.int32) % BLOCK
+                score = tl.gather(score, lookup, 0)
+                keys = tl.gather(keys, lookup, 0)
+        elif scores.dtype.element_ty == tl.bfloat16:
             SCORE_BITS: tl.constexpr = 16
             DIGIT_BITS: tl.constexpr = 24 - LOG_BLOCK
             # Include the exact 2**24 boundary ID. An on-device range check
@@ -478,13 +491,21 @@ def _sort_local_candidates(indices, scores):
 
 
 def pack_local_candidates(
-    indices, scores, world_size: int, rank: int, interleave: int, *, sort_candidates=False, fuse_sort=False
+    indices,
+    scores,
+    world_size: int,
+    rank: int,
+    interleave: int,
+    *,
+    sort_candidates=False,
+    fuse_sort=False,
+    input_sorted=False,
 ):
-    """Transport exact pairs; fuse_sort permits fusion when its work amortizes."""
+    """Pack exact pairs. input_sorted promises finite entries in score-descending, ID-ascending order."""
     rows, _, topk = indices.shape
     packed = torch.empty((rows, topk, 2), dtype=torch.int32, device=indices.device)
     if rows:
-        if sort_candidates and fuse_sort and topk == MAX_FUSED_TOPK:
+        if sort_candidates and (input_sorted or fuse_sort) and topk == MAX_FUSED_TOPK:
             init_device_properties_triton()
             cores = get_vectorcore_num()
             log_block = MAX_FUSED_TOPK.bit_length() - 1
@@ -494,7 +515,9 @@ def pack_local_candidates(
             # occupancy and enough downstream merge work to pay off.
             # Small workloads retain native preparation but still use the
             # exact owner-prefix merge. No device-model whitelist is needed.
-            if rows * 100 >= cores * MIN_FUSED_SORT_ROW_PERCENT and serial_merge_levels >= local_sort_levels:
+            if input_sorted or (
+                rows * 100 >= cores * MIN_FUSED_SORT_ROW_PERCENT and serial_merge_levels >= local_sort_levels
+            ):
                 _pack_sorted_candidates[(min(rows, cores),)](
                     indices,
                     scores,
@@ -508,6 +531,7 @@ def pack_local_candidates(
                     rank,
                     interleave,
                     log_block,
+                    input_sorted,
                     multibuffer=False,
                 )
                 return packed

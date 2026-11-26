@@ -40,75 +40,82 @@ def bf16_paged_indexer_candidates(
         or block_table.shape[0] != query_ends.numel()
         or local_visible_lengths.numel() != rows
         or topk <= 0
+        or query_rows_per_tile <= 0
     ):
         raise ValueError("Invalid BF16 sharded indexer row metadata or candidate count.")
 
-    indices = torch.full((rows, 1, topk), -1, dtype=torch.int32, device=query.device)
-    scores = torch.full((rows, 1, topk), -torch.inf, dtype=torch.float32, device=query.device)
+    indices = torch.empty((rows, 1, topk), dtype=torch.int32, device=query.device)
+    scores = torch.empty((rows, 1, topk), dtype=torch.float32, device=query.device)
     if not rows or not query_ends.numel() or not block_table.shape[1] or not num_pages:
-        return indices, scores
+        return indices.fill_(-1), scores.fill_(-torch.inf)
 
-    local_visible_lengths = local_visible_lengths.reshape(-1)
     query_rows = torch.arange(rows, dtype=query_ends.dtype, device=query.device)
     request_rows = torch.searchsorted(query_ends.contiguous(), query_rows, right=True, out_int32=True)
-    valid_rows = request_rows < query_ends.numel()
+    visible_lengths = torch.where(request_rows < query_ends.numel(), local_visible_lengths.reshape(-1), 0)
     request_rows = request_rows.clamp_max(query_ends.numel() - 1)
-    token_offsets = torch.arange(page_size, dtype=torch.int32, device=query.device)
-    pages_per_tile = max(1, _KEY_TOKENS_PER_TILE // page_size)
+    num_columns = block_table.shape[1]
+    token_ids = torch.arange(num_columns * page_size, dtype=torch.int32, device=query.device)
+    width = min(topk, num_columns * page_size)
+    if width < topk:
+        indices[:, :, width:].fill_(-1)
+        scores[:, :, width:].fill_(-torch.inf)
+    pages_per_tile = min(num_columns, max(1, _KEY_TOKENS_PER_TILE // page_size))
+    page_padding = -num_columns % pages_per_tile
+    if page_padding:
+        block_table = torch.nn.functional.pad(block_table, (0, page_padding))
+    # Gather page IDs in tile-major order so a complete tile can be passed
+    # directly to index_select on the cache with a contiguous 1-D index.
+    table_tiles = block_table.view(block_table.shape[0], -1, pages_per_tile).transpose(0, 1)
 
     for row_start in range(0, rows, query_rows_per_tile):
         row_end = min(row_start + query_rows_per_tile, rows)
         row_slice = slice(row_start, row_end)
         query_tile = query[row_slice].float()
         weights_tile = weights[row_slice].float().unsqueeze(-1)
-        visible = local_visible_lengths[row_slice, None]
-        row_is_valid = valid_rows[row_slice, None]
-        requests = request_rows[row_slice]
-        best_ids = indices[row_slice, 0]
-        best_scores = scores[row_slice, 0]
+        visible = visible_lengths[row_slice, None]
+        # Resolve the small page table once for all key tiles in these rows.
+        # Only the paged K payload and scores need token-wise tiling.
+        pages = table_tiles.index_select(1, request_rows[row_slice])
+        valid_pages = (pages >= first_valid_page) & (pages < num_pages)
+        safe_pages = torch.where(valid_pages, pages, 0)
+        previous = None
         score_tiles = []
 
-        for page_start in range(0, block_table.shape[1], pages_per_tile):
-            page_end = min(page_start + pages_per_tile, block_table.shape[1])
-            pages = block_table[:, page_start:page_end].index_select(0, requests)
-            valid_pages = (pages >= first_valid_page) & (pages < num_pages)
-            safe_pages = torch.where(valid_pages, pages, 0).reshape(-1)
-            keys = key_cache.index_select(0, safe_pages)
+        for tile, page_start in enumerate(range(0, num_columns, pages_per_tile)):
+            page_end = min(page_start + pages_per_tile, num_columns)
+            page_count = page_end - page_start
+            keys = key_cache.index_select(0, safe_pages[tile, :, :page_count].reshape(-1))
             keys = keys.reshape(row_end - row_start, -1, head_dim).float()
-            page_starts = torch.arange(page_start, page_end, dtype=torch.int32, device=query.device) * page_size
-            page_tokens = page_starts[:, None] + token_offsets
-            valid_tokens = row_is_valid & ((page_tokens < visible.unsqueeze(-1)) & valid_pages.unsqueeze(-1)).flatten(1)
+            tile_ids = token_ids[page_start * page_size : page_end * page_size]
+            valid_tokens = (tile_ids < visible).view(row_end - row_start, -1, page_size)
+            valid_tokens &= valid_pages[tile, :, :page_count, None]
             # Preserve FP32 score accumulation under an outer BF16 autocast.
             with torch.autocast(device_type=query.device.type, enabled=False):
                 tile_scores = torch.bmm(query_tile, keys.transpose(1, 2)).relu_()
             tile_scores.mul_(weights_tile)
-            tile_scores = tile_scores.sum(dim=1).masked_fill_(~valid_tokens, -torch.inf)
+            tile_scores = tile_scores.sum(dim=1).masked_fill_(~valid_tokens.flatten(1), -torch.inf)
             if full_graph:
                 # Score tiles stay small, while a single stable sort over the
                 # static page extent avoids recording one sort per page tile.
                 score_tiles.append(tile_scores)
                 continue
-            tile_ids = page_tokens.flatten().expand_as(tile_scores).masked_fill(~valid_tokens, -1)
-
-            # All IDs in the old winners precede the new tile's IDs.
-            # Stable descending sort therefore preserves score/ID ordering.
-            merged_scores = torch.cat((best_scores, tile_scores), dim=-1)
-            merged_ids = torch.cat((best_ids, tile_ids), dim=-1)
-            sorted_scores, order = torch.sort(merged_scores, dim=-1, descending=True, stable=True)
+            if previous is not None:
+                # Earlier tiles precede new IDs when scores tie.
+                previous_ids, previous_scores = previous
+                tile_ids = torch.cat((previous_ids, tile_ids.expand_as(tile_scores)), dim=-1)
+                tile_scores = torch.cat((previous_scores, tile_scores), dim=-1)
+            sorted_scores, order = torch.sort(tile_scores, dim=-1, descending=True, stable=True)
             best_scores = sorted_scores[:, :topk]
-            best_ids = merged_ids.gather(-1, order[:, :topk])
+            best_ids = tile_ids.gather(-1, order[:, :topk]) if page_start else order[:, :topk].to(torch.int32)
+            previous = best_ids, best_scores
 
         if full_graph:
-            all_scores = torch.cat(score_tiles, dim=-1)
+            all_scores = score_tiles[0] if len(score_tiles) == 1 else torch.cat(score_tiles, dim=-1)
             sorted_scores, order = torch.sort(all_scores, dim=-1, descending=True, stable=True)
-            width = min(topk, all_scores.shape[-1])
-            best_scores = sorted_scores[:, :width]
-            best_ids = order[:, :width].to(torch.int32).masked_fill(best_scores == -torch.inf, -1)
-            indices[row_slice, 0, :width].copy_(best_ids)
-            scores[row_slice, 0, :width].copy_(best_scores)
-            continue
+            best_scores = sorted_scores[:, :topk]
+            best_ids = order[:, :topk].to(torch.int32)
 
-        indices[row_slice, 0].copy_(best_ids)
-        scores[row_slice, 0].copy_(best_scores)
+        indices[row_slice, 0, :width].copy_(best_ids.masked_fill_(best_scores == -torch.inf, -1))
+        scores[row_slice, 0, :width].copy_(best_scores)
 
     return indices, scores

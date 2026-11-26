@@ -261,6 +261,19 @@ def test_rotary_embedding_triton_kernel_with_cos_sin_cache(
     torch.npu.reset_peak_memory_stats()
 
 
+@pytest.mark.parametrize("is_neox_style", [False, True])
+def test_context_key_only_matches_two_operand_rope(is_neox_style):
+    # Five DSpark layers, three non-consecutive positions, two local BF16 KV heads.
+    positions = torch.tensor([19, 3, 8] * 5, device="npu")
+    cache = torch.randn(20, 64, dtype=torch.bfloat16, device="npu")
+    key = torch.randn(15, 2, 64, dtype=torch.bfloat16, device="npu")
+    kwargs = dict(positions=positions, cos_sin_cache=cache, rope_dim=64, is_neox_style=is_neox_style)
+    both, _ = rope_forward_triton(key.clone(), key.clone(), **kwargs)
+    actual, empty = rope_forward_triton(key.clone(), key.new_empty((15, 0, 64)), **kwargs)
+    assert empty.numel() == 0
+    torch.testing.assert_close(actual, both, rtol=0, atol=0)
+
+
 @pytest.mark.parametrize(
     "num_tokens,num_q_heads,num_k_heads,head_size,rotary_dim",
     FP8_ROPE_CASES,

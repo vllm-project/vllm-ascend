@@ -14,6 +14,7 @@
 | indices, scores | Input | Native local QLI candidates `[T,1,K_local]`, positive strides | INT32; FP32/BF16 | ND |
 | world_size, rank, interleave | Attribute | DCP group geometry and token stripe width | int | Scalar |
 | sort_candidates, fuse_sort | Attribute | Establish comparator order; permit workload-based fused preparation | bool | Scalar |
+| input_sorted | Optional attribute | The local producer already orders finite candidates by decreasing FP32 score and increasing token ID for ties | bool | Scalar |
 | packed | Input/Output | Exact global ID and FP32 score-bit pairs `[P*T,K_local,2]` after gather | INT32 | Contiguous ND |
 | rows, topk | Attribute | Query count and global winner count | int | Scalar |
 | local_rank | Optional attribute | Owner-local output; None selects global coordinates | int/None | Scalar |
@@ -27,6 +28,7 @@
 
 - DCP/stripe sizes are positive; all ranks use identical collective tile boundaries. The owning backend requires complete replicated indexer heads and `max_model_len <= 2**24` for exact FP32 ID comparison.
 - K2048 has fused preparation/merge. Other supported K values retain native stable sorting. BF16 digit sorting uses its 16 meaningful comparator bits; FP32 scores are never rounded into that path.
+- The paged BF16 indexer supplies sorted FP32 candidates. At K2048 the pack kernel maps their IDs and transports the score bits directly. If dropping a nonfinite score leaves a gap, it compacts the surviving positions in order after the producer's local Top-K cutoff.
 - Owner-prefix merge requires `presorted=True`, `owner_sharded=True`, `K_local=topk=2048`, and a valid local rank. Other calls use full selection.
 - Non-power-of-two rank tiles clamp padded peer addresses before masked loads; this prevents A3 GM faults without changing any valid peer or selection result.
 - Invalid/nonfinite candidates do not enter the valid output prefix. Empty requests and graph padding produce zero lengths or -1 IDs. Normalization writes only the native QLI-owned output buffers in place.

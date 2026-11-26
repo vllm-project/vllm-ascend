@@ -89,3 +89,54 @@ def test_bf16_paged_candidates_handle_ranks_with_no_visible_pages():
     )
     torch.testing.assert_close(ids, torch.full((2, 1, 3), -1, dtype=torch.int32))
     torch.testing.assert_close(scores, torch.full((2, 1, 3), -torch.inf))
+
+
+@pytest.mark.parametrize("full_graph", [False, True])
+@pytest.mark.parametrize("topk", [4, 6])
+def test_paged_candidates_preserve_nonfinite_cutoff_and_finite_ties(monkeypatch, full_graph, topk):
+    monkeypatch.setattr(bf16_sharded_indexer, "_KEY_TOKENS_PER_TILE", 2)
+    query = torch.ones((2, 1, 1), dtype=torch.bfloat16)
+    weights = torch.tensor([[1], [-1]], dtype=torch.bfloat16)
+    key = torch.tensor([0, 0, torch.nan, 2, 4, torch.inf, 4, 3], dtype=torch.bfloat16).view(4, 2, 1, 1)
+    ids, scores = bf16_sharded_indexer.bf16_paged_indexer_candidates(
+        query,
+        weights,
+        key,
+        torch.tensor([[1, 2, 3]]),
+        torch.tensor([2]),
+        torch.tensor([6, 6]),
+        topk,
+        full_graph=full_graph,
+    )
+    expected_ids = torch.tensor([[0, 3, 2, 4, 5, 1], [0, 1, 5, 2, 4, -1]], dtype=torch.int32)
+    expected_scores = torch.tensor([[torch.nan, torch.inf, 4, 4, 3, 2], [torch.nan, -2, -3, -4, -4, -torch.inf]])
+    torch.testing.assert_close(ids[:, 0], expected_ids[:, :topk])
+    torch.testing.assert_close(scores[:, 0], expected_scores[:, :topk], rtol=0, atol=0, equal_nan=True)
+
+
+@pytest.mark.parametrize("full_graph", [False, True])
+def test_paged_candidates_follow_replaced_table_and_shorter_causal_lengths(monkeypatch, full_graph):
+    # A captured step can change both its page mapping and active rows while
+    # keeping the input addresses and logical page-table extent fixed.
+    from torch.fx.experimental.proxy_tensor import make_fx
+
+    monkeypatch.setattr(bf16_sharded_indexer, "_KEY_TOKENS_PER_TILE", 4)
+    query = torch.ones((3, 1, 1), dtype=torch.bfloat16)
+    weights = query[..., 0]
+    key = torch.arange(8, dtype=torch.bfloat16).view(4, 2, 1, 1)
+    table = torch.tensor([[2, 1, 3], [3, 2, 1]], dtype=torch.int32)
+    ends = torch.tensor([2, 3], dtype=torch.int32)
+    visible = torch.full((3,), 6, dtype=torch.int32)
+
+    def select(table, ends, visible):
+        return bf16_sharded_indexer.bf16_paged_indexer_candidates(
+            query, weights, key, table, ends, visible, 8, full_graph=full_graph, query_rows_per_tile=2
+        )
+
+    captured = make_fx(select)(table, ends, visible)
+    table.copy_(torch.tensor([[0, 3, 1], [1, 2, 3]]))
+    ends.copy_(torch.tensor([1, 2]))
+    visible.copy_(torch.tensor([5, 3, 6]))
+    ids, scores = captured(table, ends, visible)
+    assert ids[:, 0].tolist() == [[3, 2, 4] + [-1] * 5, [2, 1, 0] + [-1] * 5, [-1] * 8]
+    assert scores[:, 0].tolist() == [[7, 6, 2] + [-torch.inf] * 5, [4, 3, 2] + [-torch.inf] * 5, [-torch.inf] * 8]

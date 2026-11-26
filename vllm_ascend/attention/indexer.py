@@ -907,6 +907,8 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
                     self.topk_tokens,
                     self._dcp_interleave,
                     return_local=self._local_topk,
+                    # The BF16 scorer already broke ties by ascending local ID.
+                    input_sorted=True,
                 )
             cu_seqlens_q, seqused_k, qli_metadata = self._get_local_qli_inputs(indexer_metadata)
             if indexer_metadata.qli_dcp_args is not None:
