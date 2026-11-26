@@ -151,9 +151,12 @@ class SingleNodeKVPoolManager:
 
 
 class SingleNodeMooncakeManager(SingleNodeKVPoolManager):
-    def __init__(self, config: MooncakeKVPoolConfig, case_name: str):
+    def __init__(
+        self, config: MooncakeKVPoolConfig, case_name: str, *, kv_lease_ttl_ms: int = MOONCAKE_DEFAULT_KV_LEASE_TTL
+    ):
         super().__init__(config, case_name)
         self.config = config
+        self.kv_lease_ttl_ms = kv_lease_ttl_ms
         self.config_path = self.runtime_dir / "mooncake.json"
 
     @property
@@ -190,7 +193,7 @@ class SingleNodeMooncakeManager(SingleNodeKVPoolManager):
             "--eviction_ratio",
             str(MOONCAKE_EVICTION_RATIO),
             "--default_kv_lease_ttl",
-            str(MOONCAKE_DEFAULT_KV_LEASE_TTL),
+            str(self.kv_lease_ttl_ms),
         ]
         inherited_library_path = os.environ.get("LD_LIBRARY_PATH", "")
         library_paths = [*MOONCAKE_LIBRARY_PATHS]

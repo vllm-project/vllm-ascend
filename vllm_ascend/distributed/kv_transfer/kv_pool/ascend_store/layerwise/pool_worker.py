@@ -955,10 +955,6 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
                     request.load_block_keys[slot] = None
             return
 
-        if failed := len(results) - results.count(0):
-            logger.error(
-                "Layerwise batch_get_start failed for %d/%d keys: %s", failed, len(keys), sorted(set(results) - {0})
-            )
         results_by_key = dict(zip(keys, results, strict=True))
         for key, result in results_by_key.items():
             self._layerwise_session_tracker.record_get_result(key, request_ids_by_key[key], succeeded=result == 0)

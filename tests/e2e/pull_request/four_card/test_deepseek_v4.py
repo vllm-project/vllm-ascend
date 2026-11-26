@@ -106,7 +106,10 @@ def _leg(use_pool: bool, case_name: str):
             speculative_config={"num_speculative_tokens": 1, "method": "mtp"},
         )
         if use_pool:
-            pool = stack.enter_context(SingleNodeMooncakeManager(_build_mooncake_pool_config(), case_name))
+            # The lease spans all layer reads for a 16K-token cache hit on four ranks.
+            pool = stack.enter_context(
+                SingleNodeMooncakeManager(_build_mooncake_pool_config(), case_name, kv_lease_ttl_ms=60_000)
+            )
             stack.enter_context(patch.dict(os.environ, pool.server_envs))
             kwargs["kv_transfer_config"] = POOL_KV_TRANSFER_CONFIG
         yield stack.enter_context(VllmRunner(POOL_MODEL, **kwargs))

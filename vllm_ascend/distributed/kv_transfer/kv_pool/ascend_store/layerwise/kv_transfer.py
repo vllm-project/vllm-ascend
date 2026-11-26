@@ -969,13 +969,6 @@ class KVCacheStoreLayerRecvingThread(KVTransferThread):
             _emit_range_debug_event("load", layer_id, active_sizes, active_offsets, results)
             failed_indices = [index for index, result in zip(active_indices, results, strict=True) if result < 0]
             if failed_indices:
-                logger.error(
-                    "Layerwise batch_copy_get failed on layer %d for %d/%d keys: %s",
-                    layer_id,
-                    len(failed_indices),
-                    len(results),
-                    sorted({result for result in results if result < 0}),
-                )
                 self._mark_invalid_range_indices(req_meta, failed_indices)
                 self._active_load_indices.difference_update(failed_indices)
 
