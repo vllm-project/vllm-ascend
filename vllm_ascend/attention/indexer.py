@@ -56,6 +56,7 @@ from vllm_ascend.core.kv_cache_interface import AscendSFAIndexerCacheSpec
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.distributed.utils import all_gather_async
+from vllm_ascend.models import glm_moe_dsa_dflash_hnd
 from vllm_ascend.ops.rotary_embedding import get_cos_and_sin_mla
 from vllm_ascend.ops.triton.rope import rope_forward_triton_siso
 from vllm_ascend.ops.triton.sfa_indexer_store import store_indexer_key_scale
@@ -529,6 +530,7 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
             scale_dtype=scale_dtype,
             cache_sparse_li_c4=self.enable_sparse_li_c4,
             cache_sparse_li_c8=self.enable_sparse_li_c8,
+            uses_packed_sfa_indexer_cache=(self.enable_sparse_li_c8 and glm_moe_dsa_dflash_hnd.applies_to(vllm_config)),
             sfa_dcp_replicated_indexer_size=indexer_replicas,
         )
 

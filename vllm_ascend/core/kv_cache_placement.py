@@ -14,7 +14,6 @@ from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheSpec
 
 from vllm_ascend.ascend_config import KVPPConfig
 from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec, AscendSFAIndexerCacheSpec
-from vllm_ascend.models import glm_moe_dsa_dflash_hnd
 from vllm_ascend.quantization.utils import enable_fa_quant
 from vllm_ascend.utils import calc_split_factor, enable_sfa, kv_cache_spec_uses_packed_sfa_main_cache
 
@@ -80,9 +79,8 @@ def build_kvpp_buffer_sizes(
     for name, spec in logical_spec.items():
         sizes = []
         if isinstance(spec, AscendSFAIndexerCacheSpec):
-            if spec.scale_dim and spec.cache_sparse_li_c8 and glm_moe_dsa_dflash_hnd.applies_to(vllm_config):
-                # Keep the producer's FP8 key and scale in the same physical
-                # page as the HND consumer, including owner and scratch layers.
+            if spec.uses_packed_sfa_indexer_cache:
+                # Preserve the owner's page format for resident and scratch caches.
                 result[name] = (spec.page_size_bytes,)
                 continue
             elements = spec.sfa_dcp_replicated_indexer_size * spec.block_size * spec.num_kv_heads
