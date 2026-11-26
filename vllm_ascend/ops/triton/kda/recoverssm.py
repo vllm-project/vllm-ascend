@@ -662,11 +662,6 @@ def allocate_kda_verify_caches(key_gate: torch.Tensor) -> tuple[torch.Tensor | N
     return decay, torch.empty_like(decay) if decay is not None else None
 
 
-def _validate_vector_cache(cache: torch.Tensor, shape: tuple[int, ...], device: torch.device) -> None:
-    if cache.shape != shape or cache.dtype != torch.bfloat16 or cache.device != device or not cache.is_contiguous():
-        raise ValueError(f"KDA RecoverSSM vector record needs contiguous BF16 shape {shape} on {device}")
-
-
 def kda_recoverssm_verify(
     q: torch.Tensor,
     k: torch.Tensor,
@@ -720,10 +715,6 @@ def kda_recoverssm_verify(
     if correction_cache.shape != expected_correction_shape:
         raise ValueError(f"KDA RecoverSSM correction buffer needs shape {expected_correction_shape}")
     expected_kg_shape = (record_capacity, num_heads, spec_query_len, 2 * key_dim)
-    if normalized_key_cache is not None:
-        _validate_vector_cache(normalized_key_cache, (record_capacity, num_heads, spec_query_len, key_dim), q.device)
-    if decay_cache is not None:
-        _validate_vector_cache(decay_cache, (record_capacity, num_heads, spec_query_len, key_dim), q.device)
     if kg_cache.shape != expected_kg_shape:
         raise ValueError(f"KDA RecoverSSM key/gate buffer needs shape {expected_kg_shape}")
     if correction_cache.dtype != torch.float32:
