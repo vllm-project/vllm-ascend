@@ -232,6 +232,21 @@ def _apply_segment_translations(
     cursor = 0
     for start, end, msgstr in selected:
         result.append(text[cursor:start])
+        # PO prose can omit the indentation that keeps wrapped lines inside
+        # a content tab or list item. Preserve that source continuation indent.
+        source_lines = [line for line in text[start:end].splitlines()[1:] if line.strip()]
+        translated_lines = msgstr.splitlines(keepends=True)
+        if source_lines and len(translated_lines) > 1:
+            source_indents = {len(line) - len(line.lstrip(" \t")) for line in source_lines}
+            continuation = [line for line in translated_lines[1:] if line.strip()]
+            if len(source_indents) == 1 and continuation:
+                indent = source_indents.pop()
+                translated_indent = min(len(line) - len(line.lstrip(" \t")) for line in continuation)
+                if indent > translated_indent:
+                    padding = " " * (indent - translated_indent)
+                    msgstr = translated_lines[0] + "".join(
+                        padding + line if line.strip() else line for line in translated_lines[1:]
+                    )
         result.append(msgstr)
         cursor = end
     result.append(text[cursor:])
