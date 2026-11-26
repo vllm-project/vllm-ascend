@@ -79,9 +79,11 @@ jobs:
             WORD=ignore-owner
             EFFECT="The CODEOWNERS approval gate will skip the ignored paths on every CI run of this PR from now on (a bare /ignore-owner ignores the whole PR; /ignore-owner-clear revokes)."
           fi
-          echo "word=${WORD}" >> "$GITHUB_OUTPUT"
-          echo "accepted=${WORD} command accepted" >> "$GITHUB_OUTPUT"
-          echo "effect=${EFFECT}" >> "$GITHUB_OUTPUT"
+          {
+            echo "word=${WORD}"
+            echo "accepted=${WORD} command accepted"
+            echo "effect=${EFFECT}"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Check user authorization
         id: auth
@@ -213,8 +215,10 @@ jobs:
             echo "state=rerun_started" >> "$GITHUB_OUTPUT"
           else
             echo "::error::re-running the ci-gate job returned HTTP $CODE"
-            echo "state=rerun_failed" >> "$GITHUB_OUTPUT"
-            echo "http_code=$CODE" >> "$GITHUB_OUTPUT"
+            {
+              echo "state=rerun_failed"
+              echo "http_code=$CODE"
+            } >> "$GITHUB_OUTPUT"
           fi
 
       - name: Comment re-run started on PR
