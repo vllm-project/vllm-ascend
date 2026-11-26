@@ -497,7 +497,6 @@ setup(
     packages=find_packages(exclude=("docs", "examples", "tests*", "csrc")),
     package_data={
         "vllm_ascend.observability.ms_metrics": ["config/*.yaml"],
-        "vllm_ascend.models.hy_v4_flash": ["engram_row_lookup_cpu.cpp", "engram_row_lookup_cpu.so"],
     },
     python_requires=">=3.10",
     install_requires=get_requirements(),

@@ -1,38 +1,5 @@
 import threading
 
-from vllm_ascend import envs
-
-
-def _configure_local_comm_res():
-    """Use an opt-in per-device descriptor when visibility hides remote peers."""
-    import json
-    import os
-    from pathlib import Path
-
-    resource_dir = envs.VLLM_ASCEND_HY4_MOONCAKE_LOCAL_COMM_RES_DIR
-    if not resource_dir:
-        return
-    import torch
-    from vllm.platforms import current_platform
-
-    physical_id = current_platform.visible_device_id_to_physical_device_id(torch.npu.current_device())
-    config_path = Path(resource_dir) / f"{physical_id}.json"
-    config = json.loads(config_path.read_text())
-    endpoints = config.get("endpoint_list")
-    if config.get("version") != "1.3" or not isinstance(endpoints, list) or not endpoints:
-        raise ValueError(f"Invalid per-device Mooncake resource descriptor: {config_path}")
-    if any(endpoint.get("protocol") != "ub_ctp" or endpoint.get("placement") != "device" for endpoint in endpoints):
-        raise ValueError(f"Expected original device ub_ctp endpoints: {config_path}")
-    os.environ["ASCEND_LOCAL_COMM_RES"] = json.dumps(config)
-    import logging
-
-    logging.getLogger(__name__).info(
-        "Using complete Mooncake device resources: physical_device=%s endpoints=%s path=%s",
-        physical_id,
-        len(endpoints),
-        config_path,
-    )
-
 
 class GlobalTE:
     def __init__(self):
@@ -67,7 +34,6 @@ class GlobalTE:
                     # retries once the minimum supported version includes that
                     # fix and repeated-failure resource cleanup is verified.
                     self._initialization_attempted = True
-                    _configure_local_comm_res()
                     engine = TransferEngine()
                     device_name = device_name if device_name is not None else ""
                     ret_value = engine.initialize(hostname, "P2PHANDSHAKE", "ascend", device_name)

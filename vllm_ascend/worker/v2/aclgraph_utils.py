@@ -46,9 +46,6 @@ from vllm_ascend.compilation.updatable_graph import (
     ContextSource,
     UpdatableGraph,
 )
-from vllm_ascend.target_prep_masks import (
-    mask_write_host_scope,
-)
 from vllm_ascend.utils import use_updatable_graph
 from vllm_ascend.worker.v2.utils import communicator_switch
 
@@ -119,7 +116,6 @@ class ModelAclGraphManager(ModelCudaGraphManager):
         if self.breakable_cg_runner is None:
             self.breakable_cg_runner = BreakableACLGraphWrapper(model, self.vllm_config)
 
-    @mask_write_host_scope()
     def run_fullgraph(self, desc: BatchExecutionDescriptor) -> torch.Tensor | tuple[torch.Tensor, list[torch.Tensor]]:
         """Override run_fullgraph to update full graph params in run_fullgraph."""
         num_tokens = desc.num_tokens

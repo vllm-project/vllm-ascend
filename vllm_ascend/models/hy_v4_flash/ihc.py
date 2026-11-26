@@ -14,7 +14,6 @@ from vllm.triton_utils import HAS_TRITON, tl, triton
 from vllm_ascend.device.device_config import is_950
 
 from .attention import get_flash_attention_metadata
-from .decode_fusions import is_decode_batch
 
 logger = init_logger(__name__)
 
@@ -463,33 +462,5 @@ class FlashHCLayer(HYV4HCLayer):
 
 
 class FlashHCHeadLayer(HYV4HCHeadLayer):
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        self.register_buffer("_native_head_phi", None, persistent=False)
-        self.register_buffer("_native_head_alpha", None, persistent=False)
-        self.register_buffer("_native_head_bias", None, persistent=False)
-
-    def forward(self, x):
-        if is_decode_batch(get_flash_attention_metadata()):
-            if self._native_head_phi is None:
-                weight = self.hc_head_fn.weight.detach().float()
-                alpha = self.hc_head_scale.detach().float()
-                bias = self.hc_head_base.detach().float()
-                # The head is exactly the pre half of iHC. Supply a zero post
-                # projection to reuse the native 2*n interface; post is unused.
-                self._native_head_phi = torch.cat((weight, torch.zeros_like(weight)), 0).contiguous()
-                self._native_head_alpha = torch.cat((alpha, torch.zeros_like(alpha)), 0).contiguous()
-                self._native_head_bias = torch.cat((bias, torch.zeros_like(bias)), 0).contiguous()
-            return torch_npu.npu_mhc_pre(
-                x,
-                self._native_head_phi,
-                self._native_head_alpha,
-                self._native_head_bias,
-                norm_eps=self.config.rms_norm_eps,
-                hc_eps=self.hc_eps,
-                inner_precise=0,
-            )[0]
-        return super().forward(x)
-
     def _inverse_rms(self, x: torch.Tensor) -> torch.Tensor:
         return _inverse_rms(x, self.config.rms_norm_eps)

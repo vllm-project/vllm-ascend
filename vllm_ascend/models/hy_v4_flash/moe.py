@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import torch
-import torch_npu
 from vllm import envs
 from vllm.config import get_current_vllm_config
 from vllm.model_executor.layers.fused_moe import GateLinear
@@ -13,7 +12,6 @@ from vllm_ascend.device.device_config import is_950
 from vllm_ascend.ops.linear import AscendUnquantizedLinearMethod
 
 from .attention import get_flash_attention_metadata
-from .decode_fusions import is_decode_batch
 from .pd_role import uses_prefill_ops
 
 ROUTER_TILE_ROWS = 64
@@ -93,24 +91,6 @@ class AscendFlashMoE(HYV4FlashMoE):
             prefix,
             is_sequence_parallel=parallel_config.use_sequence_parallel_moe,
         )
-        if self.combine_output_norm is not None:
-            self.experts.hy4_decode_return_pair = self.combine_output_norm.weight.numel()
-        if (
-            uses_prefill_ops(vllm_config)
-            and vllm_config.model_config.enforce_eager
-            and is_950()
-            and not envs.VLLM_BATCH_INVARIANT
-        ):
+        if (uses_prefill_ops(vllm_config) and vllm_config.model_config.enforce_eager
+                and is_950() and not envs.VLLM_BATCH_INVARIANT):
             self.gate.enable_prefill_router()
-
-    def forward(self, hidden_states):
-        if not is_decode_batch(get_flash_attention_metadata()):
-            return super().forward(hidden_states)
-        original_shape = hidden_states.shape
-        flat = hidden_states.reshape(-1, original_shape[-1])
-        router_logits, _ = self.gate(flat)
-        shared, routed = self.experts(hidden_states=flat, router_logits=router_logits)
-        result = torch_npu.npu_add_rms_norm(
-            shared, routed, self.combine_output_norm.weight, self.combine_output_norm.variance_epsilon
-        )[0]
-        return result.view(original_shape)

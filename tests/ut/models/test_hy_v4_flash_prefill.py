@@ -47,8 +47,6 @@ def test_prefill_history_reuse_preserves_candidates_and_outputs(
     model.scale = 576**-0.5
     model.learnable_sink_param = torch.randn(heads, generator=generator)
     model.indexer = None
-    model.use_pd_decode = False
-    model.bulk_c8_decode_reads = False
     if sparse:
         keys = torch.randn(20, 128, generator=generator)
         index_query = torch.randn(starts[-1], heads, 128, generator=generator)

@@ -9,11 +9,6 @@ from .index_pool_cache import pool_key_addresses
 
 _QUERIES = 6
 _GROUP_TILE = 128
-_GROUP_MAJOR_TILE = 64
-_GROUP_MAJOR_HEADS = 16
-_GROUP_MAJOR_INDEX_DIM = 128
-_GROUP_MAJOR_RATIO = 4
-_GROUP_MAJOR_BUDGET = 511
 
 
 @triton.jit
@@ -32,7 +27,6 @@ def _score_query_block(
     RATIO: tl.constexpr,
     BUDGET: tl.constexpr,
     GROUP_TILE: tl.constexpr,
-    GROUP_MAJOR: tl.constexpr,
 ):
     qid = QUERY_START + tl.arange(0, QUERY_BLOCK)
     q_head = QUERY_START * HEADS + tl.arange(0, QUERY_BLOCK * HEADS)
@@ -41,16 +35,9 @@ def _score_query_block(
     # reconstructed query values, like the pooled keys, fit in BF16.
     q = tl.load(query + q_head[:, None] * WIDTH + lane[None, :]).to(tl.bfloat16)
     weight = tl.load(head_weight + q_head)
-    if GROUP_MAJOR:
-        # Keep the head axis contiguous through the vector epilogue. Only the
-        # reduced [group, query] tensor is transposed for query-major stores.
-        qk = tl.dot(key, tl.trans(q), out_dtype=tl.float32)
-        weighted = tl.maximum(qk, 0.0) * weight[None, :]
-        score = tl.trans(tl.sum(weighted.reshape((GROUP_TILE, QUERY_BLOCK, HEADS)), axis=2))
-    else:
-        qk = tl.dot(q, tl.trans(key), out_dtype=tl.float32)
-        weighted = tl.maximum(qk, 0.0) * weight[:, None]
-        score = tl.sum(weighted.reshape((QUERY_BLOCK, HEADS, GROUP_TILE)), axis=1)
+    qk = tl.dot(q, tl.trans(key), out_dtype=tl.float32)
+    weighted = tl.maximum(qk, 0.0) * weight[:, None]
+    score = tl.sum(weighted.reshape((QUERY_BLOCK, HEADS, GROUP_TILE)), axis=1)
     end_group = tl.load(visible + qid) // RATIO
     recall = (end_group[:, None] > BUDGET) & (group[None, :] < end_group[:, None])
     tl.store(
@@ -78,7 +65,6 @@ def _score_paged_pool(
     GROUP_TILE: tl.constexpr,
     QUERIES: tl.constexpr,
     QUERY_TILE: tl.constexpr,
-    GROUP_MAJOR: tl.constexpr,
 ):
     start = tl.program_id(0) * GROUP_TILE
     group = start + tl.arange(0, GROUP_TILE)
@@ -91,40 +77,12 @@ def _score_paged_pool(
         live = (group < max_visible) & (group < MAX_GROUPS)
         address = pool_key_addresses(block_table, group, lane, live, ROW_WIDTH, PAGE_SIZE, RATIO, WIDTH // RATIO)
         key = tl.load(cache + address, live[:, None], 0)
-        # Both layouts share one key tile across the same 4+2 query split.
+        # Sharing one key tile and using 4+2 queries keeps a 128-group tile in UB.
         _score_query_block(
-            query,
-            head_weight,
-            visible,
-            scores,
-            key,
-            group,
-            0,
-            4,
-            MAX_GROUPS,
-            WIDTH,
-            HEADS,
-            RATIO,
-            BUDGET,
-            GROUP_TILE,
-            GROUP_MAJOR,
+            query, head_weight, visible, scores, key, group, 0, 4, MAX_GROUPS, WIDTH, HEADS, RATIO, BUDGET, GROUP_TILE
         )
         _score_query_block(
-            query,
-            head_weight,
-            visible,
-            scores,
-            key,
-            group,
-            4,
-            2,
-            MAX_GROUPS,
-            WIDTH,
-            HEADS,
-            RATIO,
-            BUDGET,
-            GROUP_TILE,
-            GROUP_MAJOR,
+            query, head_weight, visible, scores, key, group, 4, 2, MAX_GROUPS, WIDTH, HEADS, RATIO, BUDGET, GROUP_TILE
         )
     else:
         tl.store(
@@ -137,24 +95,7 @@ def _score_paged_pool(
 def write_pool_scores(query, weights, cache, table, visible, page_size, max_groups, ratio, budget, scores):
     """Write one request's scores into a contiguous FP32 destination."""
     cache = cache.view(torch.bfloat16)
-    # Specialize the measured six-query/16-head path. Other shapes retain the
-    # original query-major layout and 128-group tile. The smaller group-major
-    # tile limits live key/accumulator storage without padding extra queries.
-    group_major = (
-        query.device.type == "npu"
-        and query.shape == (_QUERIES, _GROUP_MAJOR_HEADS, INDEX_DIM)
-        and weights.shape == (_QUERIES, _GROUP_MAJOR_HEADS)
-        and visible.shape == (_QUERIES,)
-        and query.is_contiguous()
-        and weights.is_contiguous()
-        and visible.is_contiguous()
-        and scores.is_contiguous()
-        and INDEX_DIM == _GROUP_MAJOR_INDEX_DIM
-        and ratio == _GROUP_MAJOR_RATIO
-        and budget == _GROUP_MAJOR_BUDGET
-    )
-    group_tile = _GROUP_MAJOR_TILE if group_major else _GROUP_TILE
-    _score_paged_pool[(triton.cdiv(max_groups, group_tile),)](
+    _score_paged_pool[(triton.cdiv(max_groups, _GROUP_TILE),)](
         query,
         weights,
         cache,
@@ -168,10 +109,9 @@ def write_pool_scores(query, weights, cache, table, visible, page_size, max_grou
         page_size,
         ratio,
         budget,
-        group_tile,
+        _GROUP_TILE,
         _QUERIES,
         triton.next_power_of_2(_QUERIES),
-        group_major,
         num_warps=1,
         enable_fp_fusion=False,
         multibuffer=False,

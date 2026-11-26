@@ -8,35 +8,8 @@ from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
 
 from vllm_ascend.worker.v2.aclgraph_utils import ModelAclGraphManager
 
-from .decode_fusions import uses_decode_fusions
-
 
 class FlashAclGraphManager(ModelAclGraphManager):
-    def capture(self, model, model_state, *args, **kwargs):
-        super().capture(model, model_state, *args, **kwargs)
-        self._short_graphs = {}
-        if not uses_decode_fusions(self.vllm_config):
-            return
-        layers = [
-            module
-            for module in model.modules()
-            if getattr(module, "indexer", None) is not None and hasattr(module, "_short_indexpool_capture")
-        ]
-        if not layers:
-            return
-        self._short_limit = min((layer.indexer.budget + 1) * layer.indexer.ratio for layer in layers)
-        long_graphs = self.graphs
-        self.graphs = {}
-        try:
-            for layer in layers:
-                layer._short_indexpool_capture = True
-            super().capture(model, model_state, *args, **kwargs)
-            self._short_graphs = self.graphs
-        finally:
-            self.graphs = long_graphs
-            for layer in layers:
-                layer._short_indexpool_capture = False
-
     def _init_candidates(self):
         super()._init_candidates()
         decode_graphs = [
@@ -63,19 +36,7 @@ class FlashAclGraphManager(ModelAclGraphManager):
         )
 
     def run_fullgraph(self, desc):
-        metadata = self.model_runner.model_state.attn_metadata
-        batch = next(iter(metadata.values()), None) if isinstance(metadata, dict) else None
-        short_graph = getattr(self, "_short_graphs", {}).get(desc)
-        use_short = (
-            short_graph is not None and batch is not None and max(batch.seq_lens, default=0) <= self._short_limit
-        )
-        original = self.graphs[desc]
-        try:
-            if use_short:
-                self.graphs[desc] = short_graph
-            output = super().run_fullgraph(desc)
-        finally:
-            self.graphs[desc] = original
+        output = super().run_fullgraph(desc)
         logger.info_once(
             "FULL ACLGraph replay is active for HYV4 Flash target (%d requests, %d query tokens).",
             desc.num_reqs,

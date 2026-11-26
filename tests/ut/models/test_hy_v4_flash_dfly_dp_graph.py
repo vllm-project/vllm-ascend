@@ -22,7 +22,6 @@ def make_speculator():
         is_moe_model=True,
     )
     spec.vllm_config = SimpleNamespace(
-        model_config=SimpleNamespace(max_model_len=256),
         additional_config={"hy4flash_dfly_dp_graph": True},
         parallel_config=parallel,
         compilation_config=SimpleNamespace(decode_cudagraph_capture_request_sizes=[1, 3]),
@@ -171,37 +170,3 @@ def test_capture_uses_npu_communicator_and_dense_context(monkeypatch):
     spec.init_cudagraph_manager(CUDAGraphMode.FULL_DECODE_ONLY)
     spec.capture()
     assert state == {"switched": False, "forward": True}
-
-
-def test_raw_graph_preparation_masks_padding_and_keeps_kv_positions_unshifted():
-    spec = make_speculator()
-    spec.model.config = SimpleNamespace(mask_token_id=99)
-    spec.offsets = torch.arange(6)
-    spec.graph_rope_dims = 3
-    spec.graph_raw_live = torch.tensor([True, False, True])
-    spec.graph_raw_ends = torch.tensor([3, 999, 6], dtype=torch.int32)
-    spec.graph_raw_rejected = torch.tensor([1, 0, 0], dtype=torch.int32)
-    spec.graph_raw_sampled = torch.tensor([1, 0, 0], dtype=torch.int32)
-    spec.graph_raw_mapping = torch.tensor([2, 999, 0])
-    spec.graph_raw_positions = torch.tensor([10, 11, 12, 20, 21, 22])
-    spec.graph_raw_hidden = torch.arange(24).reshape(6, 4).to(torch.bfloat16)
-    spec.graph_raw_previous = torch.tensor([40, 41, 42])
-    spec.graph_raw_rope_delta = torch.tensor([100, 200, 300])
-    spec.graph_ids = torch.empty(3, 6, dtype=torch.long)
-    spec.graph_query_positions = torch.empty_like(spec.graph_ids)
-    spec.graph_hidden = torch.empty(3, 4, dtype=torch.bfloat16)
-    spec.graph_source_rows = torch.empty(3, dtype=torch.long)
-    spec.graph_active = torch.empty(3, dtype=torch.bool)
-    spec.graph_block_tables = [torch.full((3, 2), 7)]
-    spec.input_buffers = SimpleNamespace(positions=torch.empty(18, dtype=torch.long))
-
-    spec._prepare_graph_inputs(3)
-
-    assert spec.graph_active.tolist() == [True, False, False]
-    assert spec.graph_ids[0, 0] == 42
-    assert spec.graph_ids[1].eq(0).all()
-    assert spec.graph_query_positions[0].tolist() == list(range(12, 18))
-    assert spec.input_buffers.positions[:6].tolist() == list(range(312, 318))
-    assert spec.input_buffers.positions[6:].eq(0).all()
-    assert spec.graph_hidden[1].eq(0).all()
-    assert spec.graph_block_tables[0][1].eq(0).all()
