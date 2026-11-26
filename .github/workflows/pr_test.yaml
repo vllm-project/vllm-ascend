@@ -94,37 +94,61 @@ jobs:
           }
           echo "main_commit=${main_commit}" >> "$GITHUB_OUTPUT"
 
-      - name: Select the full a2 + a3 suite for the karc runners
+      - name: Select minimal hook-probe groups (fast direct-hook validation)
         id: scope
         run: |
-          pip install regex pyyaml
-          GITHUB_OUTPUT="$RUNNER_TEMP/all-test-groups.txt" \
-            python3 .github/workflows/scripts/select_tests.py --all-tests --skip-cpu-ut --skip-a5
           python3 - <<'PY'
           import json
           import os
-          from pathlib import Path
 
-          # Keep every a2/a3 group exactly as select_tests.py produced it. a5 and
-          # CPU UT are dropped by the flags above; 310p is dropped here because
-          # the offline karc pool has no 310p members. Card counts, partitions
-          # and per-partition sharding all come from the routing tables.
-          outputs = dict(
-              line.split("=", 1)
-              for line in Path(os.environ["RUNNER_TEMP"], "all-test-groups.txt").read_text().splitlines()
-          )
-          all_groups = json.loads(outputs["test_groups"])
-          groups = [group for group in all_groups if group.get("npu_type") in ("a2", "a3")]
-          if not groups:
-              raise SystemExit("No a2/a3 test groups selected")
-
-          for group in groups:
-              files = str(group["tests"]).split()
-              print(
-                  f"{group['runner']} ({group.get('num_npus')} card)"
-                  f" [part {group.get('partition')}] {len(files)} files"
-              )
-
+          # Hook-only fast validation, no business suite. Four probe jobs whose
+          # models are pre-cached on the offline pool (see prod-member-a2-cache /
+          # prod-member-a3-800i-cache comments): the federated karc-fed labels
+          # spread these jobs across the cloud members (ascend-hk-001 /
+          # wlcb-001 / cn12-001 / mind-third-ci) and the offline member (karc)
+          # automatically, which is exactly what we want to verify.
+          groups = [
+              {
+                  "num_npus": 1,
+                  "npu_type": "a2",
+                  "runner": "linux-aarch64-a2b3-karc-fed-1",
+                  "tests": "tests/e2e/pull_request/one_card/test_ec_cpu_offload.py",
+                  "partition_name": "a2-1",
+                  "partition": "1-2",
+                  "image_tag": "9.3.0_20261113161300-910b-ubuntu22.04-py3.12",
+                  "csrc_cache_target": "a2-arm64-ubuntu",
+              },
+              {
+                  "num_npus": 1,
+                  "npu_type": "a2",
+                  "runner": "linux-aarch64-a2b3-karc-fed-1",
+                  "tests": "tests/e2e/pull_request/one_card/test_sampler.py",
+                  "partition_name": "a2-1",
+                  "partition": "2-2",
+                  "image_tag": "9.3.0_20261113161300-910b-ubuntu22.04-py3.12",
+                  "csrc_cache_target": "a2-arm64-ubuntu",
+              },
+              {
+                  "num_npus": 2,
+                  "npu_type": "a3",
+                  "runner": "linux-aarch64-a3-800i-karc-fed-2",
+                  "tests": "tests/e2e/pull_request/two_card/test_prefix_caching.py",
+                  "partition_name": "a3-2",
+                  "partition": "1-2",
+                  "image_tag": "9.3.0_20261113161300-a3-ubuntu22.04-py3.12",
+                  "csrc_cache_target": "a3-arm64-ubuntu",
+              },
+              {
+                  "num_npus": 2,
+                  "npu_type": "a3",
+                  "runner": "linux-aarch64-a3-800i-karc-fed-2",
+                  "tests": "tests/e2e/pull_request/two_card/test_cpu_offloading.py",
+                  "partition_name": "a3-2",
+                  "partition": "2-2",
+                  "image_tag": "9.3.0_20261113161300-a3-ubuntu22.04-py3.12",
+                  "csrc_cache_target": "a3-arm64-ubuntu",
+              },
+          ]
           target_ids = sorted({group["csrc_cache_target"] for group in groups})
           with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
               print("test_groups=" + json.dumps(groups, separators=(",", ":")), file=output)
@@ -153,15 +177,6 @@ jobs:
       base_sha: ${{ needs.select-tests.outputs.base_sha }}
       test_groups: ${{ needs.select-tests.outputs.test_groups }}
 
-  # Upstream vllm suite (part of the PR blocking set). Its reusable workflow
-  # has been rebound to the karc a2 label so it runs offline too.
-  run-selected-tests-upstream:
-    needs: [select-tests]
-    name: run-selected-tests-upstream (vllm@${{ needs.select-tests.outputs.main_commit }})
-    uses: ./.github/workflows/_selected_tests_upstream.yaml
-    with:
-      vllm: ${{ needs.select-tests.outputs.main_commit }}
-      ref: ${{ github.event.pull_request.head.sha }}
-      base_ref: ${{ github.base_ref }}
-      base_sha: ${{ needs.select-tests.outputs.base_sha }}
-      test_groups: ${{ needs.select-tests.outputs.test_groups }}
+  # Upstream vllm suite intentionally omitted: this PR only probes the
+  # direct-sync hook quickly; the upstream suite needs HF datasets that the
+  # offline pool does not cache yet (see vllm-project/self_cognition_Alice).
