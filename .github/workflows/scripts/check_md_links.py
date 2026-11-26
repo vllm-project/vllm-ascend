@@ -56,9 +56,6 @@ SKIP_DOMAINS = {
 
 # Exact URLs only; other pages on these sites are still checked.
 SKIP_URLS = {
-    str(httpx.URL("https://gitcode.com/ascend-ci/doc-quality/tree/main/skills/01.评估标准")): (
-        "Private doc-quality standards require GitCode authentication."
-    ),
     "https://www.image-net.org/download.php": "ImageNet service is unstable (HTTP 503/504); verify manually.",
 }
 
