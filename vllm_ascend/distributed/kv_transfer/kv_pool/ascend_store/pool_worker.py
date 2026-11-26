@@ -413,7 +413,12 @@ class BaseKVPoolWorker(ABC):
         # device_sdma).
         cache_dtype = self.vllm_config.cache_config.cache_dtype
         packed_c8_path = self.use_sparse and cache_dtype in ("fp8", "int8")
-        backend_kwargs["lazy_init"] = self.use_compress or packed_c8_path
+        # Qwen3.8-Flash-Next also needs deferred setup without compress_ratios,
+        # including cache dtypes outside the packed C8 path.
+        architectures = getattr(self.hf_config, "architectures", None) or []
+        backend_kwargs["lazy_init"] = (
+            self.use_compress or packed_c8_path or "Qwen4ExpForConditionalGeneration" in architectures
+        )
         # The connector's extra_config (with MultiConnector the child's own
         # config, not the top-level one) carries the QoS the backends inject.
         backend_kwargs["extra_config"] = extra_config
