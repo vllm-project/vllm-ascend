@@ -532,7 +532,7 @@ The following values match the configurations in the Prefill and Decode scripts 
 | API port | 19100 | D1: 19200–19203; D2: 19300–19303 |
 | DP RPC port | 16920 | 16920, D1 is the DP master |
 | KV port | 24000 | 25000 + rank × 32 (D1); 26000 + local rank × 32 (D2) |
-| PP layer partition | 15,15,15,15 | — |
+| PP layer partition | 17,15,15,13 | — |
 | max-num-seqs | 16 | 128 per replica |
 | max-num-batched-tokens | 32768 | 2048 |
 | max-num-scheduled-tokens | 32768 | vLLM default |
@@ -556,6 +556,7 @@ The following values match the configurations in the Prefill and Decode scripts 
 | KV port | 30000 | 26900 |
 | max-num-seqs | 128 | 128 per DP engine |
 | max-num-batched-tokens | 8000 | 8000 |
+| long-prefill-token-threshold | 2048 | vLLM default |
 | gpu-memory-utilization | 0.85 | 0.92 |
 | HCCL_BUFFSIZE (MB) | 512 | 1024 |
 | Main-model execution | Eager | FULL_DECODE_ONLY with 1024-token graph capture |
@@ -577,7 +578,7 @@ The capture size is not cosmetic: with 128 sequences and seven draft tokens, one
 
     **Prefill Node (P)**
 
-    Save the following as `run_prefill.sh` on the Prefill node. The script selects CANN MegaMoE (`enable_fused_mc2=2`) and requires `cann_ops_transformer` in the Prefill environment.
+    Save the following as `run_prefill.sh` on the Prefill node. The script selects CANN MegaMoE with shared-expert fusion (`enable_fused_mc2=3`) and requires `cann_ops_transformer` in the Prefill environment.
 
     ```bash
     #!/usr/bin/env bash
@@ -597,7 +598,7 @@ The capture size is not cosmetic: with 128 sequences and seven draft tokens, one
     GPU_MEMORY_UTILIZATION=0.86
 
     # Fixed runtime configuration.
-    export VLLM_PP_LAYER_PARTITION=15,15,15,15
+    export VLLM_PP_LAYER_PARTITION=17,15,15,13
     export VLLM_USE_V2_MODEL_RUNNER=1
     export HCCL_BUFFSIZE=2048
     export HCCL_IF_IP="$LOCAL_IP"
@@ -645,7 +646,7 @@ The capture size is not cosmetic: with 128 sequences and seven draft tokens, one
             "enable_shared_expert_dp":true,
             "weight_nz_mode":1,
             "enable_flashcomm1":true,
-            "enable_fused_mc2":2
+            "enable_fused_mc2":3
         }' \
         --kv-transfer-config '{
             "kv_connector":"MooncakeConnectorV1",
@@ -654,7 +655,7 @@ The capture size is not cosmetic: with 128 sequences and seven draft tokens, one
             "engine_id":"m31flash-p-dp0",
             "kv_connector_extra_config":{
                 "use_ascend_direct":true,
-                "prefill":{"dp_size":1,"tp_size":4,"pp_size":4,"pp_layer_partition":"15,15,15,15"},
+                "prefill":{"dp_size":1,"tp_size":4,"pp_size":4,"pp_layer_partition":"17,15,15,13"},
                 "decode":{"dp_size":8,"tp_size":4,"pp_size":1}
             }
         }'
@@ -667,6 +668,10 @@ The capture size is not cosmetic: with 128 sequences and seven draft tokens, one
     ```bash
     --compilation-config '{"cudagraph_mode":"PIECEWISE","max_cudagraph_capture_size":2048}' \
     ```
+
+    **A3 Prefill with 16K inputs**
+
+    For 16K inputs, set `MAX_BATCHED_TOKENS`, `MAX_SCHEDULED_TOKENS`, and `LONG_PREFILL_TOKEN_THRESHOLD` to `8192` in `run_prefill.sh`. These variables configure `--max-num-batched-tokens`, `--max-num-scheduled-tokens`, and `--long-prefill-token-threshold`, respectively.
 
     Start the Prefill engine:
 
@@ -737,13 +742,14 @@ The capture size is not cosmetic: with 128 sequences and seven draft tokens, one
         --data-parallel-rank "$DP_RANK" \
         --data-parallel-address "$LOCAL_IP" \
         --data-parallel-rpc-port "$DP_RPC_PORT" \
-        --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
+        --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY","max_cudagraph_capture_size":1024}' \
         --additional-config '{
             "enable_cpu_binding":true,
-            "multistream_overlap_shared_expert":true,
+            "multistream_overlap_shared_expert":false,
             "enable_shared_expert_dp":true,
             "enable_flashcomm1":true,
-            "weight_nz_mode":1
+            "weight_nz_mode":1,
+            "enable_fused_mc2":3
         }' \
         --kv-transfer-config '{
             "kv_connector":"MooncakeConnectorV1",
@@ -752,7 +758,7 @@ The capture size is not cosmetic: with 128 sequences and seven draft tokens, one
             "engine_id":"m31flash-d-dp'"$DP_RANK"'",
             "kv_connector_extra_config":{
                 "use_ascend_direct":true,
-                "prefill":{"dp_size":1,"tp_size":4,"pp_size":4,"pp_layer_partition":"15,15,15,15"},
+                "prefill":{"dp_size":1,"tp_size":4,"pp_size":4,"pp_layer_partition":"17,15,15,13"},
                 "decode":{"dp_size":8,"tp_size":4,"pp_size":1}
             }
         }'
@@ -831,13 +837,14 @@ The capture size is not cosmetic: with 128 sequences and seven draft tokens, one
         --data-parallel-rank "$DP_RANK" \
         --data-parallel-address "$DECODE_HEAD_IP" \
         --data-parallel-rpc-port "$DP_RPC_PORT" \
-        --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
+        --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY","max_cudagraph_capture_size":1024}' \
         --additional-config '{
             "enable_cpu_binding":true,
-            "multistream_overlap_shared_expert":true,
+            "multistream_overlap_shared_expert":false,
             "enable_shared_expert_dp":true,
             "enable_flashcomm1":true,
-            "weight_nz_mode":1
+            "weight_nz_mode":1,
+            "enable_fused_mc2":3
         }' \
         --kv-transfer-config '{
             "kv_connector":"MooncakeConnectorV1",
@@ -846,7 +853,7 @@ The capture size is not cosmetic: with 128 sequences and seven draft tokens, one
             "engine_id":"m31flash-d-dp'"$DP_RANK"'",
             "kv_connector_extra_config":{
                 "use_ascend_direct":true,
-                "prefill":{"dp_size":1,"tp_size":4,"pp_size":4,"pp_layer_partition":"15,15,15,15"},
+                "prefill":{"dp_size":1,"tp_size":4,"pp_size":4,"pp_layer_partition":"17,15,15,13"},
                 "decode":{"dp_size":8,"tp_size":4,"pp_size":1}
             }
         }'
@@ -916,6 +923,7 @@ The capture size is not cosmetic: with 128 sequences and seven draft tokens, one
     MAX_NUM_SEQS=128
     MAX_MODEL_LEN=133000
     MAX_BATCHED_TOKENS=8000
+    LONG_PREFILL_TOKEN_THRESHOLD=2048
     GPU_MEMORY_UTILIZATION=0.85
 
     # Fixed runtime configuration.
@@ -941,9 +949,9 @@ The capture size is not cosmetic: with 128 sequences and seven draft tokens, one
         --pipeline-parallel-size 2 \
         --served-model-name minimax-m3.1-flash \
         --trust-remote-code \
-        --dtype bfloat16 \
         --max-num-seqs "$MAX_NUM_SEQS" \
         --max-num-batched-tokens "$MAX_BATCHED_TOKENS" \
+        --long-prefill-token-threshold "$LONG_PREFILL_TOKEN_THRESHOLD" \
         --max-model-len "$MAX_MODEL_LEN" \
         --disable-hybrid-kv-cache-manager \
         --enable-expert-parallel \
@@ -961,10 +969,10 @@ The capture size is not cosmetic: with 128 sequences and seven draft tokens, one
         --enable-prefix-caching \
         --additional-config '{
             "enable_cpu_binding": true,
-            "multistream_overlap_shared_expert": true,
+            "multistream_overlap_shared_expert": false,
             "enable_shared_expert_dp": true,
             "enable_flashcomm1": true,
-            "enable_fused_mc2": 0
+            "enable_fused_mc2": 3
         }' \
         --speculative-config '{
             "method":"dspark",
@@ -1043,7 +1051,6 @@ The capture size is not cosmetic: with 128 sequences and seven draft tokens, one
         --pipeline-parallel-size 1 \
         --served-model-name minimax-m3.1-flash \
         --trust-remote-code \
-        --dtype bfloat16 \
         --max-num-seqs "$MAX_NUM_SEQS" \
         --max-num-batched-tokens "$MAX_BATCHED_TOKENS" \
         --max-model-len "$MAX_MODEL_LEN" \
@@ -1067,9 +1074,10 @@ The capture size is not cosmetic: with 128 sequences and seven draft tokens, one
                 "fuse_norm_quant": false,
                 "fuse_qknorm_rope": true
             },
-            "multistream_overlap_shared_expert": true,
+            "multistream_overlap_shared_expert": false,
             "enable_shared_expert_dp": true,
-            "enable_flashcomm1": true
+            "enable_flashcomm1": true,
+            "enable_fused_mc2": 3
         }' \
         --speculative-config '{
             "method":"dspark",
@@ -1147,7 +1155,6 @@ The capture size is not cosmetic: with 128 sequences and seven draft tokens, one
         --pipeline-parallel-size 1 \
         --served-model-name minimax-m3.1-flash \
         --trust-remote-code \
-        --dtype bfloat16 \
         --max-num-seqs "$MAX_NUM_SEQS" \
         --max-num-batched-tokens "$MAX_BATCHED_TOKENS" \
         --max-model-len "$MAX_MODEL_LEN" \
@@ -1171,9 +1178,10 @@ The capture size is not cosmetic: with 128 sequences and seven draft tokens, one
                 "fuse_norm_quant": false,
                 "fuse_qknorm_rope": true
             },
-            "multistream_overlap_shared_expert": true,
+            "multistream_overlap_shared_expert": false,
             "enable_shared_expert_dp": true,
-            "enable_flashcomm1": true
+            "enable_flashcomm1": true,
+            "enable_fused_mc2": 3
         }' \
         --speculative-config '{
             "method":"dspark",
@@ -1372,7 +1380,7 @@ The 950DT examples use `64GB` per worker rank on Prefill and both Decode hosts. 
 
 #### 5.4.2 Environment Variables
 
-Start from the Section 5.3 environment block for your platform (`HCCL_IF_IP`, `HCCL`/`GLOO` socket IFNAME, `HCCL_BUFFSIZE`, `PYTORCH_NPU_ALLOC_CONF`, `ASCEND_RT_VISIBLE_DEVICES`, and, on A3 Prefill, `VLLM_PP_LAYER_PARTITION="15,15,15,15"`). Then add the pooling-required variables below. Choose the hardware/communication exports from the [Mooncake backend startup examples](../../user_guide/feature_guide/kv_cache_pool_ascend_store.md#step-4-start-vllm-inference-service) according to your machine and link type.
+Start from the Section 5.3 environment block for your platform (`HCCL_IF_IP`, `HCCL`/`GLOO` socket IFNAME, `HCCL_BUFFSIZE`, `PYTORCH_NPU_ALLOC_CONF`, `ASCEND_RT_VISIBLE_DEVICES`). For the A3 pooling profile in this section, set `VLLM_PP_LAYER_PARTITION="15,15,15,15"`. Then add the pooling-required variables below. Choose the hardware/communication exports from the [Mooncake backend startup examples](../../user_guide/feature_guide/kv_cache_pool_ascend_store.md#step-4-start-vllm-inference-service) according to your machine and link type.
 
 Common pooling exports on Prefill node and DP ranks:
 
@@ -1450,7 +1458,7 @@ The 1P1D topology uses one Prefill service with `DP1 × TP4 × PP2` on one host 
 
     **1. Prefill node**
 
-    Save as `run_prefill.sh` alongside `mooncake.json`. Like the A3 Prefill script in [Section 5.3](#53-pd-disaggregation-1p1d), this script selects CANN MegaMoE (`enable_fused_mc2=2`) and requires `cann_ops_transformer` in the Prefill environment. Apply the same 4K-input overrides from that section when serving 4K inputs.
+    Save as `run_prefill.sh` alongside `mooncake.json`. This pooling script selects CANN MegaMoE (`enable_fused_mc2=2`) and requires `cann_ops_transformer` in the Prefill environment. Apply the same 4K-input overrides from [Section 5.3](#53-pd-disaggregation-1p1d) when serving 4K inputs.
 
     ```bash
     #!/usr/bin/env bash
