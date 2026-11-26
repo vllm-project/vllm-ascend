@@ -597,6 +597,7 @@ def _attach_transfer_and_speculation_metadata(
     kv_transfer_config = getattr(vllm_config, "kv_transfer_config", None)
     kv_cache_config.kv_transfer_config = kv_transfer_config
     speculative_config = getattr(vllm_config, "speculative_config", None)
+    kv_cache_config.has_speculative_decoding = speculative_config is not None
     if speculative_config is not None and speculative_config.method == "dspark":
         from vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.dspark_context import resident_mla_context_group_ids
         from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.dspark_prefix_layout import draft_only_group_ids

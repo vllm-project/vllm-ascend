@@ -23,12 +23,14 @@ from vllm.v1.request import Request
 
 class AscendMambaManager(MambaManager):
     MAX_CHECKPOINT_CANDIDATES = 4096
+    enable_checkpoint_repeat_admission = False
     _checkpoint_candidates: OrderedDict[BlockHash, str] | None = None
 
     def checkpoint_candidate_key(self, request: Request, position: int) -> BlockHash | None:
         unit = self.block_pool.hash_block_size
         if (
-            self.kv_cache_spec.mamba_type != MambaAttentionBackendEnum.GDN_ATTN
+            not self.enable_checkpoint_repeat_admission
+            or self.kv_cache_spec.mamba_type != MambaAttentionBackendEnum.GDN_ATTN
             or not 0 < position < request.num_prompt_tokens
             or position % unit
             or position % self.block_size == 0
@@ -52,13 +54,22 @@ class AscendMambaManager(MambaManager):
         if len(candidates) > self.MAX_CHECKPOINT_CANDIDATES:
             candidates.popitem(last=False)
 
+    def clear_checkpoint_candidates(self) -> None:
+        self._checkpoint_candidates = None
+
     def _cache_partial_tail_block(
         self, request: Request, num_tokens: int, retention_interval: int | None
     ) -> BlockHashWithGroupId | None:
         unit = self.block_pool.hash_block_size
         if (
-            self.kv_cache_spec.mamba_type != MambaAttentionBackendEnum.GDN_ATTN
+            not self.enable_checkpoint_repeat_admission
+            or self.kv_cache_spec.mamba_type != MambaAttentionBackendEnum.GDN_ATTN
             or request.request_id in self._checkpoints
+            or (
+                self.shared_prefix_checkpoint
+                and num_tokens == request.shared_prefix_boundary
+                and request.num_computed_tokens < num_tokens <= request.num_prompt_tokens
+            )
         ):
             return super()._cache_partial_tail_block(request, num_tokens, retention_interval)
 
@@ -82,12 +93,7 @@ class AscendMambaManager(MambaManager):
         key = self.checkpoint_candidate_key(request, num_tokens)
         if key is None:
             return super()._cache_partial_tail_block(request, num_tokens, retention_interval)
-        is_junction = (
-            self.shared_prefix_checkpoint
-            and num_tokens == request.shared_prefix_boundary
-            and request.num_computed_tokens < num_tokens
-        )
-        if num_tokens != tail and not is_junction:
+        if num_tokens != tail:
             return None
 
         block_index = (num_tokens - 1) // self.block_size

@@ -15,7 +15,7 @@ from vllm_ascend.patch.platform.patch_mamba_block_aligned_split import _elide_fi
 from vllm_ascend.patch.platform.patch_mamba_manager import AscendMambaManager
 
 
-def make_coordinator(mamba_type=MambaAttentionBackendEnum.MAMBA2):
+def make_coordinator(mamba_type=MambaAttentionBackendEnum.MAMBA2, *, transfer=None, speculative=False):
     register_all_kvcache_specs(None)
     register_ascend_kv_cache_specs()
     specs = [
@@ -35,6 +35,8 @@ def make_coordinator(mamba_type=MambaAttentionBackendEnum.MAMBA2):
         kv_cache_tensors=[],
         kv_cache_groups=[KVCacheGroupSpec([str(i)], spec) for i, spec in enumerate(specs)],
     )
+    config.kv_transfer_config = transfer
+    config.has_speculative_decoding = speculative
     return AscendHybridKVCacheCoordinator(
         config,
         max_model_len=16384,
@@ -65,15 +67,48 @@ def _observe_checkpoint(manager, request_id, key, *, prompt_length=1024, junctio
 
 def test_gdn_partial_checkpoint_is_cached_on_second_request():
     manager = make_coordinator(MambaAttentionBackendEnum.GDN_ATTN).single_type_managers[2]
-    manager.shared_prefix_checkpoint = True
     key = b"x" * 32
     group_ids = [manager.kv_cache_group_id]
     assert _observe_checkpoint(manager, "first", key) is None
     assert _observe_checkpoint(manager, "first", key) is None
     assert manager.block_pool.get_cached_block(key, group_ids) is None
 
-    assert _observe_checkpoint(manager, "second", key, prompt_length=1792, junction=768) is not None
+    assert _observe_checkpoint(manager, "second", key) is not None
     assert manager.block_pool.get_cached_block(key, group_ids) == [manager.req_to_blocks["second"][0]]
+
+
+@pytest.mark.parametrize("role", ["kv_producer", "kv_consumer", "kv_both", "speculative", "junction"])
+def test_gdn_preserves_first_checkpoint_on_protected_paths(role):
+    transfer = (
+        SimpleNamespace(is_kv_producer=role != "kv_consumer", is_kv_consumer=role != "kv_producer")
+        if role.startswith("kv_")
+        else None
+    )
+    manager = make_coordinator(
+        MambaAttentionBackendEnum.GDN_ATTN, transfer=transfer, speculative=role == "speculative"
+    ).single_type_managers[2]
+    key = b"x" * 32
+    if role == "junction":
+        manager.shared_prefix_checkpoint = True
+        published = _observe_checkpoint(manager, "first", key, prompt_length=1792, junction=768)
+    else:
+        published = _observe_checkpoint(manager, "first", key)
+        assert "first" in manager._producer_partial_tail_reqs
+    assert published is not None
+    assert manager._checkpoint_candidates is None
+
+
+def test_gdn_candidate_reset_follows_successful_prefix_cache_reset():
+    coordinator = make_coordinator(MambaAttentionBackendEnum.GDN_ATTN)
+    manager = coordinator.single_type_managers[2]
+    key = b"x" * 32
+    assert _observe_checkpoint(manager, "before", key) is None
+    assert not coordinator.reset_prefix_cache()
+    assert manager._checkpoint_candidates[key] == "before"
+    coordinator.free("before")
+    assert coordinator.reset_prefix_cache()
+    assert manager._checkpoint_candidates is None
+    assert _observe_checkpoint(manager, "after", key) is None
 
 
 def test_gdn_partial_checkpoint_candidate_tracking_is_bounded(monkeypatch):

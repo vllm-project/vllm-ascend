@@ -65,8 +65,6 @@ def _elide_first_tail_checkpoint(
         aligned_tokens == num_new_tokens
         or not getattr(scheduler, "mamba_partial_cache_hit", False)
         or scheduler.mamba_has_prefill_checkpoint_blocks
-        or scheduler.vllm_config.kv_transfer_config is not None
-        or scheduler.vllm_config.speculative_config is not None
     ):
         return aligned_tokens
 

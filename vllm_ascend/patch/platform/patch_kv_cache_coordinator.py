@@ -255,6 +255,18 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
         # mamba-align pages (1536 tokens) it erases the whole shared prefix
         # of typical ~2K prompts, pinning P-side prefix hits to 0.
         kv_transfer_config = getattr(kv_cache_config, "kv_transfer_config", None)
+        from vllm_ascend.patch.platform.patch_mamba_manager import AscendMambaManager
+
+        repeat_admission = (
+            self.enable_partial_hash_hits
+            and kv_transfer_config is None
+            and not use_eagle
+            and not getattr(kv_cache_config, "has_speculative_decoding", False)
+        )
+        for manager in self.single_type_managers:
+            if isinstance(manager, AscendMambaManager):
+                manager.enable_checkpoint_repeat_admission = repeat_admission
+
         self.skips_eagle_block_drop = _skips_eagle_block_drop(kv_transfer_config)
         # Keep Mamba checkpoint writes on the same boundary as prefill split
         # and cache lookup. Only roles using EAGLE replay need the block drop.
@@ -264,6 +276,17 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
                 # boundary, including groups outside the draft model.
                 if isinstance(manager, MambaManager):
                     manager.drop_eagle_checkpoint_block = True
+
+    def reset_prefix_cache(self) -> bool:
+        if not super().reset_prefix_cache():
+            return False
+
+        from vllm_ascend.patch.platform.patch_mamba_manager import AscendMambaManager
+
+        for manager in self.single_type_managers:
+            if isinstance(manager, AscendMambaManager):
+                manager.clear_checkpoint_candidates()
+        return True
 
     @property
     def _cache_hit_alignment_tokens(self) -> int:
