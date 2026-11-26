@@ -74,6 +74,64 @@ def test_contiguous_checkpoint_keeps_token_order_and_packs_heads_once(monkeypatc
     torch.testing.assert_close(state, initial_state + 2)
 
 
+@pytest.mark.parametrize("shared_ops_available", [False, True])
+def test_aligned_a5_checkpoint_can_share_fla_preparation(monkeypatch, shared_ops_available):
+    length, offset = 65, 64
+    q = torch.zeros(1, length, 16, 128, dtype=torch.bfloat16)
+    v = torch.zeros(1, length, 32, 128, dtype=torch.bfloat16)
+    gate = torch.ones(1, length, 32)
+    initial = torch.zeros(1, 32, 128, 128)
+    metadata = SimpleNamespace(checkpoint=SimpleNamespace(query_lens=[length], offsets=[offset]))
+    prepare = Mock(side_effect=lambda q, k, v, g, *_args, **_kwargs: (q, k, None, None, None, g, v, v, None))
+    recurrence = Mock(
+        side_effect=lambda _k, _w, u, *, initial_state, **_kwargs: (torch.zeros(1, 1, 1), u, initial_state + 1)
+    )
+    attention = Mock(return_value=v)
+    ops = (prepare, recurrence, attention) if shared_ops_available else None
+    fallback = Mock(side_effect=lambda tensors, state, *_args, **_kwargs: (tensors[2], state + 1))
+    export = Mock()
+    monkeypatch.setattr(native_gdn_checkpoint, "_get_shared_fla_ops", lambda: ops)
+    monkeypatch.setattr(native_gdn_checkpoint, "_apply_recurrence", fallback)
+    monkeypatch.setattr(native_gdn_checkpoint, "_export_checkpoint", export)
+    log = Mock()
+    monkeypatch.setattr(native_gdn_checkpoint.logger, "info_once", log)
+
+    output, state = native_gdn_checkpoint.run_gdn_native_checkpoint_prefill(
+        SimpleNamespace(),
+        metadata,
+        None,
+        q,
+        q,
+        v,
+        gate,
+        gate,
+        initial,
+        fused=None,
+        fla_fwd=object(),
+        head_first_qkv=torch.zeros(64, length, 128, dtype=torch.bfloat16),
+    )
+
+    if shared_ops_available:
+        fallback.assert_not_called()
+        prepare.assert_called_once()
+        attention.assert_called_once()
+        log.assert_called_once()
+        assert prepare.call_args.kwargs["cu_seqlens"] == (0, length)
+        assert [call.kwargs["cu_seqlens"] for call in recurrence.call_args_list] == [(0, offset), (0, length - offset)]
+        assert recurrence.call_args.args[0].shape[2] == length - offset
+        torch.testing.assert_close(recurrence.call_args.kwargs["initial_state"], initial + 1)
+    else:
+        prepare.assert_not_called()
+        recurrence.assert_not_called()
+        attention.assert_not_called()
+        log.assert_not_called()
+        assert fallback.call_count == 2
+    export.assert_called_once()
+    torch.testing.assert_close(export.call_args.args[-1], initial + 1)
+    torch.testing.assert_close(output, v)
+    torch.testing.assert_close(state, initial + 2)
+
+
 def test_host_block_ids_match_device_null_mask():
     cache = SimpleNamespace(hash_block_size=64, cache_hit_alignment_tokens=64)
     config = SimpleNamespace(cache_config=cache, num_hash_lookahead_tokens=0)
