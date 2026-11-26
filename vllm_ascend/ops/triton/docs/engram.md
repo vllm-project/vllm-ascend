@@ -27,8 +27,9 @@ On A2, colocated serving without KV transfer and dedicated P/D prefill workers
 can cap the Host-UVA lookup grid for eager prefill-only batches via
 `engram_prefill_uva_core_percentage` and `multistream_engram_overlap`.
 Following [#21827](https://github.com/vllm-project/vllm-ascend/pull/21827),
-each program advances by the grid size to cover its remaining rows. The
-percentage changes only the launch grid, so it adds no constexpr specialization.
+each program in the capped kernel advances by the grid size to cover its
+remaining rows. The default launch uses the original single-row kernel body.
+The percentage sizes the capped grid without adding a constexpr parameter.
 The capped path and the default launch must produce exactly the same BF16
 output. Run the BF16 and INT8 checks with
 `pytest tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_engram_host_uva.py`.
