@@ -1401,11 +1401,9 @@ class AscendKimiLinearForCausalLM(UpstreamKimiLinearForCausalLM, KimiMixtureOfEx
         vLLM main lets the AMD Kimi class provide its own model state; that
         state builds upstream attention metadata, which is invalid on NPU.
         """
-        from vllm_ascend.worker.v2.model_states.mamba_hybrid import (
-            AscendMambaHybridModelState,
-        )
+        from vllm_ascend.models.kimi_k3.model_state import AscendKimiModelState
 
-        return AscendMambaHybridModelState
+        return AscendKimiModelState
 
 
 class AscendKimiK3MultiModalProjector(KimiK25MultiModalProjector):
