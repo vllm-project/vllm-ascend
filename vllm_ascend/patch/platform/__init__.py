@@ -26,10 +26,11 @@ import vllm_ascend.patch.platform.patch_use_v2_model_runner  # noqa
 from vllm_ascend.device.hardware_profile import DeviceAdaptorFamily, HardwareCapability, get_current_hardware_profile
 from vllm_ascend.hisparse import supports_hybrid_hisparse_core
 
+profile = get_current_hardware_profile()
 if (
-    get_current_hardware_profile().device_adaptor_family is DeviceAdaptorFamily.FP8_OPTIMIZED
-    and supports_hybrid_hisparse_core()
-):
+    profile.device_adaptor_family is DeviceAdaptorFamily.FP8_OPTIMIZED
+    or profile.supports(HardwareCapability.NATIVE_INT8_SPARSE)
+) and supports_hybrid_hisparse_core():
     import vllm_ascend.patch.platform.patch_flash_hisparse  # noqa
 
 if get_current_hardware_profile().supports(HardwareCapability.STANDARD_MAMBA_PATCH):
