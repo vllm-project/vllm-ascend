@@ -10,7 +10,7 @@
 
 /*!
  * \file gmm_swiglu_oai_mx_quant_tensor_api_kernel.h
- * \brief Shared TensorApi entry point for GroupedMatmulSwigluQuantV2 MXFP8 ND/NZ scenarios.
+ * \brief Shared TensorApi entry point for GmmSwigluOaiMxQuant MXFP4/MXFP8 scenarios.
  *        Assembles Blaze
  * BlockMmad + Blaze Epilogue + Blaze Scheduler + MIX Kernel.
  */
@@ -30,8 +30,8 @@
 #include "blaze/gemm/policy/dispatch_policy.h"
 #include "blaze/gemm/kernel/kernel_qgmm_swiglu_mx.h"
 #include "blaze/epilogue/block/block_epilogue_swiglu_mx_quant.h"
-#include "../grouped_matmul_swiglu_quant_v2_utils_kernel.h"
-#include "grouped_matmul_swiglu_quant_v2_tensor_api_tiling_data.h"
+#include "../gmm_swiglu_oai_mx_quant_utils_kernel.h"
+#include "gmm_swiglu_oai_mx_quant_tiling_data.h"
 
 template <typename layoutA, typename layoutB, bool EnableSwigluAttrs = false>
 __aicore__ inline void GmmSwigluOaiMxQuantTensorApiKernel(GM_ADDR x, GM_ADDR weight, GM_ADDR weightScale,
@@ -43,8 +43,7 @@ __aicore__ inline void GmmSwigluOaiMxQuantTensorApiKernel(GM_ADDR x, GM_ADDR wei
     (void)smoothScale;
     (void)workspace;
 
-    GET_TILING_DATA_WITH_STRUCT(GroupedMatmulSwigluQuantV2TensorApi::GMMSwigluQuantV2TensorApiTilingData, tilingData,
-                                tiling);
+    GET_TILING_DATA_WITH_STRUCT(GmmSwigluOaiMxQuantTensorApi::GmmSwigluOaiMxQuantTilingData, tilingData, tiling);
     const auto& gmmQuantParams_ = tilingData.gmmQuantParams;
     const auto& mmTilingData_ = tilingData.mmTilingData;
 
@@ -105,11 +104,11 @@ __aicore__ inline void GmmSwigluOaiMxQuantTensorApiKernel(GM_ADDR x, GM_ADDR wei
     GM_ADDR yScaleDataAddr = yScale;
 
     GM_ADDR bDataAddr =
-        singleW == 1 ? reinterpret_cast<GM_ADDR>(GroupedMatmulDequantSwigluQuant::GetTensorAddr<BType>(0, weight)) :
+        singleW == 1 ? reinterpret_cast<GM_ADDR>(GmmSwigluOaiMxQuantUtils::GetTensorAddr<BType>(0, weight)) :
                        weight;
     GM_ADDR scaleBDataAddr =
         singleW == 1 ? reinterpret_cast<GM_ADDR>(
-                           GroupedMatmulDequantSwigluQuant::GetTensorAddr<AscendC::fp8_e8m0_t>(0, weightScale)) :
+                           GmmSwigluOaiMxQuantUtils::GetTensorAddr<AscendC::fp8_e8m0_t>(0, weightScale)) :
                        weightScale;
 
     GM_ADDR groupListDataAddr = groupList;
@@ -129,8 +128,8 @@ __aicore__ inline void GmmSwigluOaiMxQuantTensorApiKernel(GM_ADDR x, GM_ADDR wei
         if constexpr (AscendC::IsSameType<CType, fp8_e4m3fn_t>::value ||
                       AscendC::IsSameType<CType, fp4x2_e2m1_t>::value) {
             if (!swigluParams_.mxScalePreinitialized) {
-                GroupedMatmulDequantSwigluQuant::ClearUnprocessedMxScaleRows(
-                    groupList, yScale, gmmParams.m, gmmParams.n / GroupedMatmulDequantSwigluQuant::SWIGLU_REDUCE_FACTOR,
+                GmmSwigluOaiMxQuantUtils::ClearUnprocessedMxScaleRows(
+                    groupList, yScale, gmmParams.m, gmmParams.n / GmmSwigluOaiMxQuantUtils::SWIGLU_REDUCE_FACTOR,
                     gmmParams.groupNum, gmmParams.groupListType, swigluParams_.swigluMode);
             }
         }

@@ -8,12 +8,12 @@
  * See LICENSE in the root of the software repository for the full text of the License.
  */
 
-#ifndef GMM_SWIGLU_OAI_MX_QUANT_UTILS_H
-#define GMM_SWIGLU_OAI_MX_QUANT_UTILS_H
+#ifndef VLLM_ASCEND_GMM_SWIGLU_OAI_MX_QUANT_UTILS_KERNEL_H
+#define VLLM_ASCEND_GMM_SWIGLU_OAI_MX_QUANT_UTILS_KERNEL_H
 
 #include "adv_api/utils/init_global_memory.h"
 
-namespace GroupedMatmulDequantSwigluQuant {
+namespace GmmSwigluOaiMxQuantUtils {
 using namespace AscendC;
 
 constexpr int64_t SWIGLU_REDUCE_FACTOR = 2;
@@ -67,6 +67,6 @@ __aicore__ inline __gm__ T* GetTensorAddr(uint16_t index, GM_ADDR tensorPtr)
     __gm__ uint64_t* retPtr = dataAddr + (tensorPtrOffset >> 3);
     return reinterpret_cast<__gm__ T*>(*(retPtr + index));
 }
-} // namespace GroupedMatmulDequantSwigluQuant
+} // namespace GmmSwigluOaiMxQuantUtils
 
-#endif
+#endif // VLLM_ASCEND_GMM_SWIGLU_OAI_MX_QUANT_UTILS_KERNEL_H

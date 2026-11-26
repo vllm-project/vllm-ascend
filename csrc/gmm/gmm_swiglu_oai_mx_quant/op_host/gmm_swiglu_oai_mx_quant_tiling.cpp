@@ -15,11 +15,11 @@
 #include <limits>
 #include "platform/platform_ascendc.h"
 #include "register/op_impl_registry.h"
-#include "../op_kernel/arch35/grouped_matmul_swiglu_quant_v2_tensor_api_tiling_data.h"
+#include "../op_kernel/arch35/gmm_swiglu_oai_mx_quant_tiling_data.h"
 
 namespace optiling {
 namespace {
-using GroupedMatmulSwigluQuantV2TensorApi::GMMSwigluQuantV2TensorApiTilingData;
+using GmmSwigluOaiMxQuantTensorApi::GmmSwigluOaiMxQuantTilingData;
 constexpr uint64_t kDb = 2;
 constexpr uint64_t kMxGroup = 32;
 constexpr uint64_t kBandwidthBytes = 64 * 1024;
@@ -142,7 +142,7 @@ bool SelectScales(const Input& input, const Memory& memory, const L1& t, uint64_
 }
 
 bool FillMatmul(const Input& input, const Memory& memory,
-                GroupedMatmulSwigluQuantV2TensorApi::GMMTensorApiMMTiling& mm) {
+                GmmSwigluOaiMxQuantTensorApi::GmmTensorApiMMTiling& mm) {
   L1 t{};
   const uint64_t packing = input.fp4 ? 2 : 1;
   // V3 caps M/N before sizing L1, and sizes L1 for both gate and up.
@@ -250,7 +250,7 @@ bool GetInput(gert::TilingContext* context, Input& input) {
   return true;
 }
 
-bool GetAttrs(const gert::TilingContext* context, const Input& input, GMMSwigluQuantV2TensorApiTilingData& data) {
+bool GetAttrs(const gert::TilingContext* context, const Input& input, GmmSwigluOaiMxQuantTilingData& data) {
   const auto* attrs = context->GetAttrs();
   if (!attrs) {
     return false;
@@ -286,7 +286,7 @@ bool GetAttrs(const gert::TilingContext* context, const Input& input, GMMSwigluQ
 
 ge::graphStatus Tiling(gert::TilingContext* context) {
   Input input{};
-  GMMSwigluQuantV2TensorApiTilingData data{};
+  GmmSwigluOaiMxQuantTilingData data{};
   auto* raw = context->GetRawTilingData();
   auto* workspace = context->GetWorkspaceSizes(1);
   if (!raw || raw->GetCapacity() < sizeof(data) || !workspace || !context->GetPlatformInfo() ||

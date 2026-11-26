@@ -9,22 +9,22 @@
  */
 
 /*!
- * \file grouped_matmul_swiglu_quant_v2_tensor_api_tiling_data.h
- * \brief Tiling data for the MX FP8 Tensor API kernel.
+ * \file gmm_swiglu_oai_mx_quant_tiling_data.h
+ * \brief Tiling data for the GmmSwigluOaiMxQuant Tensor API kernel.
  */
 
-#ifndef GROUPED_MATMUL_SWIGLU_QUANT_V2_TENSOR_API_TILING_DATA_H
-#define GROUPED_MATMUL_SWIGLU_QUANT_V2_TENSOR_API_TILING_DATA_H
+#ifndef VLLM_ASCEND_GMM_SWIGLU_OAI_MX_QUANT_TILING_DATA_H
+#define VLLM_ASCEND_GMM_SWIGLU_OAI_MX_QUANT_TILING_DATA_H
 
 #ifndef __CCE_AICORE__
 #include <cstdint>
 #endif
 
-#include "grouped_matmul_swiglu_quant_swiglu_params.h"
+#include "gmm_swiglu_oai_mx_quant_swiglu_params.h"
 
-namespace GroupedMatmulSwigluQuantV2TensorApi {
+namespace GmmSwigluOaiMxQuantTensorApi {
 #pragma pack(push, 8)
-struct GMMTensorApiQuantParams {
+struct GmmTensorApiQuantParams {
     uint32_t groupNum = 0;
     uint32_t activeType = 0;
     uint32_t aQuantMode = 0;
@@ -40,7 +40,7 @@ struct GMMTensorApiQuantParams {
 #pragma pack(pop)
 
 #pragma pack(push, 8)
-struct GMMTensorApiMMTiling {
+struct GmmTensorApiMMTiling {
     uint32_t m = 0;
     uint32_t n = 0;
     uint32_t k = 0;
@@ -59,12 +59,12 @@ struct GMMTensorApiMMTiling {
 #pragma pack(pop)
 
 #pragma pack(push, 8)
-struct GMMSwigluQuantV2TensorApiTilingData {
-    GMMTensorApiQuantParams gmmQuantParams;
-    GMMTensorApiMMTiling mmTilingData;
-    GMMSwigluQuantSwigluParams swigluParams;
+struct GmmSwigluOaiMxQuantTilingData {
+    GmmTensorApiQuantParams gmmQuantParams;
+    GmmTensorApiMMTiling mmTilingData;
+    GmmSwigluOaiMxQuantSwigluParams swigluParams;
 };
 #pragma pack(pop)
-} // namespace GroupedMatmulSwigluQuantV2TensorApi
+} // namespace GmmSwigluOaiMxQuantTensorApi
 
-#endif // GROUPED_MATMUL_SWIGLU_QUANT_V2_TENSOR_API_TILING_DATA_H
+#endif // VLLM_ASCEND_GMM_SWIGLU_OAI_MX_QUANT_TILING_DATA_H
