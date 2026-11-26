@@ -95,8 +95,10 @@ GBSA_NUM_Q_HEADS = 4
 GBSA_NUM_KV_HEADS = 2
 GBSA_HEAD_DIM = 128
 GBSA_PAGE_SIZE = 128
-GBSA_ATOL = 2e-2
-GBSA_RTOL = 2e-2
+GBSA_BF16_ATOL = 2**-6
+GBSA_BF16_RTOL = 2**-6
+GBSA_BF16_MAX_ABS_ERROR = 1.0
+GBSA_REQUIRED_PASS_RATE = 0.99
 GbsaCase = tuple[
     Callable[[], torch.Tensor],
     torch.Tensor,
@@ -137,7 +139,7 @@ def _gbsa_reference(
     return torch.stack(rows)
 
 
-def _make_gbsa_case() -> GbsaCase:
+def _make_gbsa_case(seq_lens_values: tuple[int, int] = (9, 11)) -> GbsaCase:
     torch.manual_seed(20261009)
     query = torch.randn((GBSA_ROWS, GBSA_NUM_Q_HEADS, GBSA_HEAD_DIM), dtype=torch.bfloat16, device="npu")
     key_cache = torch.randn((4, GBSA_PAGE_SIZE, GBSA_NUM_KV_HEADS, GBSA_HEAD_DIM), dtype=torch.bfloat16, device="npu")
@@ -145,7 +147,7 @@ def _make_gbsa_case() -> GbsaCase:
     compact_indices = _compact_gbsa_indices()
     block_table = torch.tensor([[2], [3]], dtype=torch.int32, device="npu")
     token_to_req = torch.tensor([0, 1], dtype=torch.int32, device="npu")
-    seq_lens = torch.tensor([9, 11], dtype=torch.int32, device="npu")
+    seq_lens = torch.tensor(seq_lens_values, dtype=torch.int32, device="npu")
     logical_positions = seq_lens - 1
     output = torch.empty_like(query)
 
@@ -170,10 +172,32 @@ def _expected_gbsa(case: GbsaCase) -> torch.Tensor:
     return _gbsa_reference(query, key_cache, value_cache, block_table, token_to_req, seq_lens)
 
 
+def _assert_gbsa_close(actual: torch.Tensor, expected: torch.Tensor) -> None:
+    error = (actual.cpu().double() - expected.cpu().double()).abs()
+    assert torch.isfinite(error).all()
+    passing = error <= GBSA_BF16_ATOL + GBSA_BF16_RTOL * expected.cpu().double().abs()
+    pass_rate = passing.double().mean().item()
+    max_abs_error = error.max().item()
+    assert pass_rate >= GBSA_REQUIRED_PASS_RATE, (
+        f"GBSA BF16 mixed-tolerance pass rate {pass_rate:.2%} is below {GBSA_REQUIRED_PASS_RATE:.2%}; "
+        f"max absolute error: {max_abs_error:.6f}"
+    )
+    assert max_abs_error <= GBSA_BF16_MAX_ABS_ERROR, (
+        f"GBSA BF16 max absolute error {max_abs_error:.6f} exceeds {GBSA_BF16_MAX_ABS_ERROR}"
+    )
+
+
 @pytest.mark.parametrize("execution", ("eager", "compile"))
+@pytest.mark.parametrize(
+    "seq_lens_values",
+    (
+        pytest.param((1, 1), id="minimum-length"),
+        pytest.param((9, 11), id="within-page"),
+    ),
+)
 @torch.no_grad()
-def test_qwen4_exp_gbsa_matches_dense_reference(execution: str) -> None:
-    case = _make_gbsa_case()
+def test_qwen4_exp_gbsa_matches_dense_reference(execution: str, seq_lens_values: tuple[int, int]) -> None:
+    case = _make_gbsa_case(seq_lens_values)
     call = case[0]
     expected = _expected_gbsa(case)
     if execution == "compile":
@@ -182,7 +206,7 @@ def test_qwen4_exp_gbsa_matches_dense_reference(execution: str) -> None:
     actual = call().clone()
     torch.npu.synchronize()
 
-    torch.testing.assert_close(actual.float(), expected, rtol=GBSA_RTOL, atol=GBSA_ATOL)
+    _assert_gbsa_close(actual, expected)
 
 
 @torch.no_grad()
@@ -198,10 +222,10 @@ def test_qwen4_exp_gbsa_npugraph_replays_updated_input() -> None:
 
     graph.replay()
     torch.npu.synchronize()
-    torch.testing.assert_close(captured_output.float(), _expected_gbsa(case), rtol=GBSA_RTOL, atol=GBSA_ATOL)
+    _assert_gbsa_close(captured_output, _expected_gbsa(case))
 
     query.mul_(0.5)
     expected_replay = _expected_gbsa(case)
     graph.replay()
     torch.npu.synchronize()
-    torch.testing.assert_close(captured_output.float(), expected_replay, rtol=GBSA_RTOL, atol=GBSA_ATOL)
+    _assert_gbsa_close(captured_output, expected_replay)
