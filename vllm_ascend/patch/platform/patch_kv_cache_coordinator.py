@@ -33,6 +33,7 @@ from vllm.v1.kv_cache_interface import (
     MambaSpec,
     UniformTypeKVCacheSpecs,
 )
+from vllm.v1.request import Request
 
 from vllm_ascend.core.kv_cache_interface import is_prefix_cacheable
 
@@ -255,7 +256,7 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
         # mamba-align pages (1536 tokens) it erases the whole shared prefix
         # of typical ~2K prompts, pinning P-side prefix hits to 0.
         kv_transfer_config = getattr(kv_cache_config, "kv_transfer_config", None)
-        from vllm_ascend.patch.platform.patch_mamba_manager import AscendMambaManager
+        from vllm_ascend.patch.platform.patch_mamba_manager import AscendMambaManager, GDNCheckpointCandidates
 
         repeat_admission = (
             self.enable_partial_hash_hits
@@ -263,9 +264,17 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
             and not use_eagle
             and not getattr(kv_cache_config, "has_speculative_decoding", False)
         )
+        self.gdn_checkpoint_candidates = GDNCheckpointCandidates() if repeat_admission else None
         for manager in self.single_type_managers:
             if isinstance(manager, AscendMambaManager):
                 manager.enable_checkpoint_repeat_admission = repeat_admission
+                manager.checkpoint_candidates = self.gdn_checkpoint_candidates
+        self.supports_gdn_interior_promotion = repeat_admission and all(
+            isinstance(group.kv_cache_spec, (FullAttentionSpec, MambaSpec))
+            and group.kv_cache_spec.block_size == self.scheduler_block_size
+            for group in kv_cache_config.kv_cache_groups
+            if is_prefix_cacheable(group.kv_cache_spec)
+        )
 
         self.skips_eagle_block_drop = _skips_eagle_block_drop(kv_transfer_config)
         # Keep Mamba checkpoint writes on the same boundary as prefill split
@@ -280,13 +289,38 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
     def reset_prefix_cache(self) -> bool:
         if not super().reset_prefix_cache():
             return False
-
-        from vllm_ascend.patch.platform.patch_mamba_manager import AscendMambaManager
-
-        for manager in self.single_type_managers:
-            if isinstance(manager, AscendMambaManager):
-                manager.clear_checkpoint_candidates()
+        if self.gdn_checkpoint_candidates is not None:
+            self.gdn_checkpoint_candidates.clear()
         return True
+
+    def cache_blocks(self, request: Request, num_computed_tokens: int) -> None:
+        super().cache_blocks(request, num_computed_tokens)
+        position = getattr(request, "_ascend_gdn_promotion", 0)
+        if position:
+            request._ascend_gdn_promotion = 0
+            key = request.block_hashes[position // self.hash_block_size - 1]
+            if position == num_computed_tokens and all(
+                manager.block_pool.get_cached_block(key, [manager.kv_cache_group_id]) is not None
+                for manager in self.single_type_managers
+                if isinstance(manager.kv_cache_spec, MambaSpec)
+            ):
+                request._ascend_gdn_attention_alias = position
+        position = getattr(request, "_ascend_gdn_attention_alias", 0)
+        if not 0 < position <= num_computed_tokens:
+            return
+        # Full attention can reuse an earlier slice of the append-only KV page.
+        # Restore the alias after the upstream prompt-tail write extends it.
+        for manager in self.single_type_managers:
+            if not isinstance(manager.kv_cache_spec, FullAttentionSpec):
+                continue
+            index = (position - 1) // manager.block_size
+            if request.num_computed_tokens >= (index + 1) * manager.block_size:
+                continue
+            blocks = manager.req_to_blocks[request.request_id]
+            if index < len(blocks) and not blocks[index].is_null:
+                manager.block_pool.cache_partial_block(
+                    request, blocks[index], position, manager.kv_cache_group_id, manager.block_size
+                )
 
     @property
     def _cache_hit_alignment_tokens(self) -> int:

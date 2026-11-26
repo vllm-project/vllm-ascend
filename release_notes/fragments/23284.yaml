@@ -7,3 +7,5 @@ entries:
       an otherwise unnecessary first-sighting prefill split within a page.
       Candidate tracking applies to local prefix caching without speculative
       decoding or KV transfer. A successful prefix-cache reset clears it.
+      Complete candidate hash chains can promote an earlier common PMU
+      boundary, including when the prompts fit within one scheduler block.

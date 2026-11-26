@@ -4,7 +4,7 @@
 # Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
 # This file is a part of the vllm-ascend project.
 #
-from collections import OrderedDict
+from collections import Counter, OrderedDict
 from collections.abc import Sequence
 
 import vllm.v1.core.single_type_kv_cache_manager as single_type_kv_cache_manager
@@ -21,10 +21,52 @@ from vllm.v1.kv_cache_interface import get_mamba_prefill_checkpoint_position
 from vllm.v1.request import Request
 
 
+class GDNCheckpointCandidates:
+    """Bound complete request hash chains and index their reusable prefixes."""
+
+    MAX_CHAINS = 4096
+    MAX_HASHES = 262144
+
+    def __init__(self) -> None:
+        self.chains: OrderedDict[str, tuple[BlockHash, ...]] = OrderedDict()
+        self.counts: Counter[BlockHash] = Counter()
+        self.num_hashes = 0
+
+    def remember(self, request_id: str, hashes: Sequence[BlockHash], length: int) -> None:
+        length = min(length, len(hashes))
+        old = self.chains.get(request_id, ())
+        if not len(old) < length <= self.MAX_HASHES:
+            return
+        chain = tuple(hashes[:length])
+        if old:
+            self._discard(request_id)
+        self.chains[request_id] = chain
+        self.counts.update(chain)
+        self.num_hashes += len(chain)
+        while len(self.chains) > self.MAX_CHAINS or self.num_hashes > self.MAX_HASHES:
+            self._discard(next(iter(self.chains)))
+
+    def _discard(self, request_id: str) -> None:
+        chain = self.chains.pop(request_id)
+        self.num_hashes -= len(chain)
+        for key in chain:
+            self.counts[key] -= 1
+            if not self.counts[key]:
+                del self.counts[key]
+
+    def repeated(self, request_id: str, key: BlockHash, index: int) -> bool:
+        own = self.chains.get(request_id, ())
+        return self.counts[key] > (index < len(own) and own[index] == key)
+
+    def clear(self) -> None:
+        self.chains.clear()
+        self.counts.clear()
+        self.num_hashes = 0
+
+
 class AscendMambaManager(MambaManager):
-    MAX_CHECKPOINT_CANDIDATES = 4096
     enable_checkpoint_repeat_admission = False
-    _checkpoint_candidates: OrderedDict[BlockHash, str] | None = None
+    checkpoint_candidates: GDNCheckpointCandidates | None = None
 
     def checkpoint_candidate_key(self, request: Request, position: int) -> BlockHash | None:
         unit = self.block_pool.hash_block_size
@@ -39,23 +81,14 @@ class AscendMambaManager(MambaManager):
         index = position // unit - 1
         return request.block_hashes[index] if index < len(request.block_hashes) else None
 
-    def should_elide_first_checkpoint(self, request: Request, position: int) -> bool:
+    def has_repeated_checkpoint(self, request: Request, position: int) -> bool:
         key = self.checkpoint_candidate_key(request, position)
-        if key is None:
-            return False
-        first_request = self._checkpoint_candidates.get(key) if self._checkpoint_candidates is not None else None
-        return first_request is None or first_request == request.request_id
-
-    def _remember_checkpoint_candidate(self, key: BlockHash, request_id: str) -> None:
-        if self._checkpoint_candidates is None:
-            self._checkpoint_candidates = OrderedDict()
-        candidates = self._checkpoint_candidates
-        candidates.setdefault(key, request_id)
-        if len(candidates) > self.MAX_CHECKPOINT_CANDIDATES:
-            candidates.popitem(last=False)
-
-    def clear_checkpoint_candidates(self) -> None:
-        self._checkpoint_candidates = None
+        candidates = self.checkpoint_candidates
+        return (
+            key is not None
+            and candidates is not None
+            and candidates.repeated(request.request_id, key, position // self.block_pool.hash_block_size - 1)
+        )
 
     def _cache_partial_tail_block(
         self, request: Request, num_tokens: int, retention_interval: int | None
@@ -79,21 +112,18 @@ class AscendMambaManager(MambaManager):
             self.drop_eagle_checkpoint_block,
             num_hash_lookahead_tokens=self.block_pool.num_hash_lookahead_tokens,
         )
-        if num_tokens == request.num_prompt_tokens and num_tokens != tail:
-            key = self.checkpoint_candidate_key(request, tail)
-            # Allocation has succeeded. A scheduler probe alone must never
-            # count as a sighting, and the terminal state cannot publish tail.
-            if (
-                key is not None
-                and request.num_computed_tokens < tail
-                and self.block_pool.get_cached_block(key, [self.kv_cache_group_id]) is None
-            ):
-                self._remember_checkpoint_candidate(key, request.request_id)
+        candidates = self.checkpoint_candidates
+        assert candidates is not None
+        if num_tokens == request.num_prompt_tokens:
+            # Record only after allocation, including hash boundaries earlier
+            # than the request's own tail.
+            candidates.remember(request.request_id, request.block_hashes, tail // unit)
             return None
         key = self.checkpoint_candidate_key(request, num_tokens)
         if key is None:
             return super()._cache_partial_tail_block(request, num_tokens, retention_interval)
-        if num_tokens != tail:
+        promoted = getattr(request, "_ascend_gdn_promotion", 0) == num_tokens
+        if num_tokens != tail and not promoted:
             return None
 
         block_index = (num_tokens - 1) // self.block_size
@@ -103,19 +133,22 @@ class AscendMambaManager(MambaManager):
         if blocks[block_index].block_hash_num_tokens == num_tokens:
             return None
 
-        candidates = self._checkpoint_candidates
-        first_request = candidates.get(key) if candidates is not None else None
-        if first_request is None:
-            self._remember_checkpoint_candidate(key, request.request_id)
-            return None
-        if first_request == request.request_id:
+        if not candidates.repeated(request.request_id, key, num_tokens // unit - 1):
             return None
 
-        published = super()._cache_partial_tail_block(request, num_tokens, retention_interval)
-        if published is not None:
-            assert candidates is not None
-            del candidates[key]
-        return published
+        if num_tokens == tail:
+            return super()._cache_partial_tail_block(request, num_tokens, retention_interval)
+        # Use upstream junction publication to preserve recurrent-state CoW
+        # bookkeeping at a boundary selected from the candidate hash chain.
+        old_boundary = request.shared_prefix_boundary
+        old_enabled = self.shared_prefix_checkpoint
+        request.shared_prefix_boundary = num_tokens
+        self.shared_prefix_checkpoint = True
+        try:
+            return super()._cache_partial_tail_block(request, num_tokens, retention_interval)
+        finally:
+            request.shared_prefix_boundary = old_boundary
+            self.shared_prefix_checkpoint = old_enabled
 
     @classmethod
     def find_longest_cache_hit(

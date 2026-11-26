@@ -61,11 +61,9 @@ _original_mamba_block_aligned_split = Scheduler._mamba_block_aligned_split
 def _elide_first_tail_checkpoint(
     scheduler: Scheduler, request: Request, start: int, num_new_tokens: int, aligned_tokens: int
 ) -> int:
-    if (
-        aligned_tokens == num_new_tokens
-        or not getattr(scheduler, "mamba_partial_cache_hit", False)
-        or scheduler.mamba_has_prefill_checkpoint_blocks
-    ):
+    if getattr(request, "_ascend_gdn_promotion", 0):
+        request._ascend_gdn_promotion = 0
+    if not getattr(scheduler, "mamba_partial_cache_hit", False) or scheduler.mamba_has_prefill_checkpoint_blocks:
         return aligned_tokens
 
     end = start + num_new_tokens
@@ -84,19 +82,28 @@ def _elide_first_tail_checkpoint(
         False,
         num_hash_lookahead_tokens=scheduler.num_hash_lookahead_tokens,
     )
-    if not start < tail < end or start + aligned_tokens != tail:
+    if not start < tail < end or aligned_tokens != num_new_tokens and start + aligned_tokens != tail:
         return aligned_tokens
 
     from vllm_ascend.patch.platform.patch_mamba_manager import AscendMambaManager, MambaManager
 
-    managers = [m for m in scheduler.kv_cache_manager.coordinator.single_type_managers if isinstance(m, MambaManager)]
+    coordinator = scheduler.kv_cache_manager.coordinator
+    managers = [m for m in coordinator.single_type_managers if isinstance(m, MambaManager)]
     if managers and all(
         isinstance(m, AscendMambaManager)
         and m.block_size == page_size
         and not m.has_prefill_checkpoint_blocks
-        and m.should_elide_first_checkpoint(request, tail)
+        and m.checkpoint_candidate_key(request, tail) is not None
         for m in managers
     ):
+        manager = managers[0]
+        step = scheduler.hash_block_size
+        lower_bound = start if getattr(coordinator, "supports_gdn_interior_promotion", False) else tail - step
+        for position in range(tail, lower_bound, -step):
+            if manager.has_repeated_checkpoint(request, position):
+                if position != tail:
+                    request._ascend_gdn_promotion = position
+                return position - start
         return num_new_tokens
     return aligned_tokens
 
