@@ -304,22 +304,6 @@ jobs:
           uv pip install --no-deps "flash-linear-attention-npu-${NPU_TYPE}===26.10.0+feature"
           python3 -c "import fla_npu.ops.ascendc"
 
-      - name: Install native A3 MLA provider for its operator tests
-        if: ${{ matrix.group.npu_type == 'a3' && contains(matrix.group.tests, 'test_a3_mla_sink_native.py') }}
-        env:
-          # Upstream includes the eager scalar-read fix and caller-stream metadata launch.
-          FLASH_ATTN_REV: f33498737fb78bacc297ca75804edb7379a34774
-          FLASH_ATTN_BUILD_NPU: '910'
-          FLASH_ATTN_BUILD_VERSION: v3
-          FLASH_ATTN_FORCE_BUILD: 'TRUE'
-          FLASH_ATTN_BUILD_JOBS: '4'
-        run: |
-          set -eo pipefail
-          source /usr/local/Ascend/ascend-toolkit/set_env.sh
-          python3 -m pip install --force-reinstall --no-deps --no-build-isolation \
-            "git+https://github.com/MinghuasLab/flash-attention-npu.git@${FLASH_ATTN_REV}"
-          python3 -c "from flash_attn_npu_3 import flash_attn_with_kvcache, get_scheduler_metadata"
-
       - name: Build MemFabric AccOffload for sparse KV lifecycle test
         if: ${{ matrix.group.npu_type == 'a3' && contains(matrix.group.tests, 'test_sparse_kv_offload_lifecycle.py') }}
         timeout-minutes: 15

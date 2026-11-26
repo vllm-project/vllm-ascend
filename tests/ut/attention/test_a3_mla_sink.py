@@ -3,7 +3,6 @@
 """CPU selection, cache layout and draft attention checks.
 
 These checks execute framework code without calling an attention kernel.
-Native numerical and graph coverage lives in test_a3_mla_sink_native.py.
 """
 
 import ast
