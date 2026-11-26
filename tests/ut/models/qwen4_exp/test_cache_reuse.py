@@ -188,6 +188,20 @@ def test_no_rotation_preserves_native_qwen_descriptors(independent, buffers):
     assert config.kv_cache_tensors == original
 
 
+@pytest.mark.parametrize("backend", [None, "mooncake"])
+def test_shared_buffers_require_memcache_backend(backend):
+    groups = _groups()
+    runtime = _runtime()
+    extra_config = runtime.kv_transfer_config.kv_connector_extra_config
+    if backend is None:
+        extra_config.pop("backend")
+    else:
+        extra_config["backend"] = backend
+    config = get_qwen4_exp_kv_cache_config(runtime, groups, 3 * get_qwen4_exp_pool_bytes_per_block(groups))
+    with pytest.raises(ValueError, match="Layerwise shared-buffer offload requires the memcache backend"):
+        plan_layerwise_cache_reuse(config, runtime)
+
+
 @pytest.mark.parametrize("unsupported", [{"mamba_cache_mode": "all"}, {"num_prefill_checkpoint_blocks": 1}])
 def test_common_planner_rejects_unsupported_qwen_state(unsupported):
     groups = _groups()

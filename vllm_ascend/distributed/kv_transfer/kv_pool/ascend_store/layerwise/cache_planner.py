@@ -296,6 +296,12 @@ def plan_layerwise_cache_reuse(
     layout = planner.build()
     if not layout.has_layer_reuse:
         return None
+    backend_name = str(extra_config.get("backend", "mooncake")).strip().lower()
+    if backend_name != "memcache":
+        raise ValueError(
+            "Layerwise shared-buffer offload requires the memcache backend. "
+            "Set backend to 'memcache' or remove layerwise_num_shared_buffers."
+        )
 
     for name in layout.reused_cache_names:
         spec = planner.spec_by_entry[name]
