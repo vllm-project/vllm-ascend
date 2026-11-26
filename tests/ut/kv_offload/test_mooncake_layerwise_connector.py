@@ -49,6 +49,8 @@ for _m in _to_remove:
     _saved_modules[_m] = sys.modules.pop(_m)
 
 
+from vllm.v1.core.single_type_kv_cache_manager import FullAttentionManager  # noqa: E402
+
 from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec  # noqa: E402
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_layerwise_connector import (  # noqa: E402
     KVCacheRecvingLayerThread,
@@ -64,7 +66,6 @@ from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_layerwise_connector imp
     ReqMeta,
     SendReqInfo,
     SendTask,
-    UniformTypeKVCacheSpecs,
     ensure_zmq_recv,
     ensure_zmq_send,
     group_concurrent_contiguous,
@@ -98,12 +99,21 @@ def _make_layer_metadata(**overrides):
     return LayerMetadata(**defaults)
 
 
+def _make_mock_group(layer_names, specs_by_layer=None, block_size=16, manager_cls=FullAttentionManager):
+    if specs_by_layer is None:
+        default_spec = MagicMock(block_size=block_size)
+        specs_by_layer = {name: default_spec for name in layer_names}
+    group = MagicMock()
+    group.layer_names = list(layer_names)
+    group.block_size = block_size
+    group.kv_cache_specs = dict(specs_by_layer)
+    group.distinct_specs = tuple(dict.fromkeys(specs_by_layer.values()))
+    group.manager_cls = manager_cls
+    return group
+
+
 def _make_mock_kv_cache_config(block_size=16):
-    kv_cache_spec = MagicMock()
-    kv_cache_spec.block_size = block_size
-    group_spec = MagicMock()
-    group_spec.kv_cache_spec = kv_cache_spec
-    group_spec.layer_names = ["layer0"]
+    group_spec = _make_mock_group(["layer0"], block_size=block_size)
     kv_cache_config = MagicMock()
     kv_cache_config.kv_cache_groups = [group_spec]
     return kv_cache_config
@@ -839,11 +849,7 @@ class MockVllmConfig:
 
 class MockKVCacheConfig:
     def __init__(self, block_size=16):
-        kv_cache_spec = MagicMock()
-        kv_cache_spec.block_size = block_size
-        group_spec = MagicMock()
-        group_spec.kv_cache_spec = kv_cache_spec
-        group_spec.layer_names = ["encoder.layer.0"]
+        group_spec = _make_mock_group(["encoder.layer.0"], block_size=block_size)
         self.kv_cache_groups = [group_spec]
         self.kv_cache_tensors = []
         self.num_blocks = 10
@@ -1672,21 +1678,15 @@ class TestMooncakeLayerwiseConnectorWorker(unittest.TestCase):
 
     def _make_packed_sfa_worker(self, *, c8=True):
         layer_name = "model.layers.0.self_attn.attn"
-        group = MagicMock()
-        group.kv_cache_spec = UniformTypeKVCacheSpecs(
+        spec = AscendMLAAttentionSpec(
             block_size=16,
-            kv_cache_specs={
-                layer_name: AscendMLAAttentionSpec(
-                    block_size=16,
-                    num_kv_heads=1,
-                    head_size=656,
-                    dtype=torch.float8_e4m3fn,
-                    cache_sparse_sfa_c8=c8,
-                    cache_sparse_sfa_turboquant=not c8,
-                )
-            },
+            num_kv_heads=1,
+            head_size=656,
+            dtype=torch.float8_e4m3fn,
+            cache_sparse_sfa_c8=c8,
+            cache_sparse_sfa_turboquant=not c8,
         )
-        group.layer_names = [layer_name]
+        group = _make_mock_group([layer_name], {layer_name: spec}, block_size=16)
         kv_cache_config = MagicMock()
         kv_cache_config.kv_cache_groups = [group]
         kv_cache_config.kv_cache_tensors = []
@@ -1704,7 +1704,7 @@ class TestMooncakeLayerwiseConnectorWorker(unittest.TestCase):
                 indexer_name = "model.layers.0.self_attn.indexer.k_cache"
                 group = worker.kv_cache_config.kv_cache_groups[0]
                 group.layer_names.append(indexer_name)
-                group.kv_cache_spec.kv_cache_specs[indexer_name] = MagicMock()
+                group.kv_cache_specs[indexer_name] = MagicMock()
                 caches: dict[str, tuple[MagicMock, ...]] = {}
                 # Register indexer first to check it never selects quant staging.
                 for name, count in ((indexer_name, 2), (layer_name, 1)):
@@ -1747,7 +1747,10 @@ class TestMooncakeLayerwiseConnectorWorker(unittest.TestCase):
         worker, layer_name = self._make_packed_sfa_worker()
         spec = C8Spec(block_size=16, num_kv_heads=1, head_size=656, dtype=torch.float8_e4m3fn)
         self.assertFalse(hasattr(spec, "uses_packed_sfa_main_cache"))
-        worker.kv_cache_specs[0].kv_cache_specs[layer_name] = spec
+        group = worker.kv_cache_config.kv_cache_groups[0]
+        group.kv_cache_specs[layer_name] = spec
+        group.distinct_specs = (spec,)
+        worker.kv_cache_specs[0] = spec
         cache = MagicMock()
         cache.shape = (10, 16, 1, 656)
         cache.data_ptr.return_value = 0x1000
@@ -1770,9 +1773,7 @@ class TestMooncakeLayerwiseConnectorWorker(unittest.TestCase):
         main_0 = "model.layers.0.self_attn.attn"
         indexer_0 = "model.layers.0.self_attn.indexer.k_cache"
         main_1 = "model.layers.1.self_attn.attn"
-        group = MagicMock()
-        group.kv_cache_spec = MagicMock(block_size=16)
-        group.layer_names = [main_0, indexer_0, main_1]
+        group = _make_mock_group([main_0, indexer_0, main_1], block_size=16)
         kv_cache_config = MagicMock()
         kv_cache_config.kv_cache_groups = [group]
         kv_cache_config.kv_cache_tensors = []
@@ -1804,9 +1805,7 @@ class TestMooncakeLayerwiseConnectorWorker(unittest.TestCase):
     def test_register_kv_caches_rejects_dcp_replicated_indexer_scale(self):
         main_name = "model.layers.0.self_attn.attn"
         indexer_name = "model.layers.0.self_attn.indexer.k_cache"
-        group = MagicMock()
-        group.kv_cache_spec = MagicMock(block_size=16)
-        group.layer_names = [main_name, indexer_name]
+        group = _make_mock_group([main_name, indexer_name], block_size=16)
         kv_cache_config = MagicMock()
         kv_cache_config.kv_cache_groups = [group]
         kv_cache_config.kv_cache_tensors = []
@@ -1840,12 +1839,8 @@ class TestMooncakeLayerwiseConnectorWorker(unittest.TestCase):
     def test_register_kv_caches_rejects_components_in_different_groups(self):
         main_name = "model.layers.0.self_attn.attn"
         indexer_name = "model.layers.0.self_attn.indexer.k_cache"
-        main_group = MagicMock()
-        main_group.kv_cache_spec = MagicMock(block_size=16)
-        main_group.layer_names = [main_name]
-        indexer_group = MagicMock()
-        indexer_group.kv_cache_spec = MagicMock(block_size=16)
-        indexer_group.layer_names = [indexer_name]
+        main_group = _make_mock_group([main_name], block_size=16)
+        indexer_group = _make_mock_group([indexer_name], block_size=16)
         kv_cache_config = MagicMock()
         kv_cache_config.kv_cache_groups = [main_group, indexer_group]
         kv_cache_config.kv_cache_tensors = []
@@ -1873,9 +1868,7 @@ class TestMooncakeLayerwiseConnectorWorker(unittest.TestCase):
     def test_register_kv_caches_uses_main_cache_for_quant_staging_buffer(self):
         main_name = "model.layers.0.self_attn.attn"
         indexer_name = "model.layers.0.self_attn.indexer.k_cache"
-        group = MagicMock()
-        group.kv_cache_spec = MagicMock(block_size=16)
-        group.layer_names = [indexer_name, main_name]
+        group = _make_mock_group([indexer_name, main_name], block_size=16)
         kv_cache_config = MagicMock()
         kv_cache_config.kv_cache_groups = [group]
         kv_cache_config.kv_cache_tensors = []

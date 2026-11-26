@@ -13,14 +13,8 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorMetadat
 from vllm.logger import logger
 from vllm.utils.math_utils import cdiv
 from vllm.v1.core.kv_cache_utils import BlockHash, BlockHashList
-from vllm.v1.kv_cache_interface import (
-    FullAttentionSpec,
-    KVCacheConfig,
-    MambaSpec,
-    UniformTypeKVCacheSpecs,
-)
-
-from vllm_ascend.core.kv_cache_interface import is_prefix_cacheable
+from vllm.v1.core.single_type_kv_cache_manager import FullAttentionManager
+from vllm.v1.kv_cache_interface import KVCacheConfig, MambaSpec
 
 if TYPE_CHECKING:
     from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.metadata import LayerPoolKey
@@ -213,6 +207,9 @@ def _get_layer_compress_ratio(
 
 
 def _get_group_spec_ratios(group: object) -> set[int | None]:
+    distinct_specs = getattr(group, "distinct_specs", None)
+    if distinct_specs is not None:
+        return {getattr(spec, "compress_ratio", None) for spec in distinct_specs}
     kv_cache_spec = getattr(group, "kv_cache_spec", None)
     if kv_cache_spec is None:
         return set()
@@ -263,7 +260,10 @@ def uses_hybrid_kv_cache(scheduler_config: Any, kv_cache_groups: Sequence[Any] |
         kv_cache_groups
         and not getattr(scheduler_config, "disable_hybrid_kv_cache_manager", False)
         and len(kv_cache_groups) > 1
-        and any(not isinstance(group.kv_cache_spec, FullAttentionSpec) for group in kv_cache_groups)
+        and any(
+            not (issubclass(group.manager_cls, FullAttentionManager) and group.prefix_cacheable)
+            for group in kv_cache_groups
+        )
     )
 
 
@@ -274,13 +274,7 @@ def infer_group_block_sizes(
     if not kv_cache_groups:
         return [cache_block_size]
 
-    block_sizes: list[int] = []
-    for group in kv_cache_groups:
-        spec = group.kv_cache_spec
-        if isinstance(spec, UniformTypeKVCacheSpecs):
-            spec = next(iter(spec.kv_cache_specs.values()))
-        block_sizes.append(spec.block_size)
-    return block_sizes
+    return [group.block_size for group in kv_cache_groups]
 
 
 def get_sharded_mamba_group_ids(kv_cache_config: KVCacheConfig | None) -> set[int]:
@@ -289,10 +283,7 @@ def get_sharded_mamba_group_ids(kv_cache_config: KVCacheConfig | None) -> set[in
         return set()
     group_ids: set[int] = set()
     for group_id, group in enumerate(kv_cache_config.kv_cache_groups):
-        for name in group.layer_names:
-            spec = group.kv_cache_spec
-            if isinstance(spec, UniformTypeKVCacheSpecs):
-                spec = spec.kv_cache_specs[name]
+        for spec in group.kv_cache_specs.values():
             if not isinstance(spec, MambaSpec):
                 continue
             tp_replicated = getattr(spec, "tp_replicated", False)
@@ -304,7 +295,7 @@ def get_sharded_mamba_group_ids(kv_cache_config: KVCacheConfig | None) -> set[in
 def infer_cacheable_group_ids(kv_cache_groups: Sequence[Any] | None) -> list[int]:
     if not kv_cache_groups:
         return [0]
-    group_ids = [i for i, group in enumerate(kv_cache_groups) if is_prefix_cacheable(group.kv_cache_spec)]
+    group_ids = [i for i, group in enumerate(kv_cache_groups) if group.prefix_cacheable]
     assert group_ids, "AscendStore requires at least one prefix-cacheable KV cache group"
     return group_ids
 

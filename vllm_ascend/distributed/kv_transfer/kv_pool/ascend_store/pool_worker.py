@@ -24,7 +24,6 @@ from vllm.v1.core.kv_cache_utils import BlockHash, maybe_convert_block_hash
 from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
     MambaSpec,
-    UniformTypeKVCacheSpecs,
 )
 from vllm.v1.worker.mamba_utils import get_mamba_groups
 
@@ -469,15 +468,10 @@ class BaseKVPoolWorker(ABC):
 
         group_uses_align_state: list[bool] = []
         for group in self.kv_cache_config.kv_cache_groups:
-            kv_cache_spec = group.kv_cache_spec
-            if isinstance(kv_cache_spec, UniformTypeKVCacheSpecs):
-                specs = [kv_cache_spec.kv_cache_specs[layer_name] for layer_name in group.layer_names]
-            else:
-                specs = [kv_cache_spec]
+            params = group.manager_config.params
             group_uses_align_state.append(
-                any(
-                    isinstance(spec, MambaSpec) and getattr(spec, "mamba_cache_mode", None) == "align" for spec in specs
-                )
+                any(isinstance(spec, MambaSpec) for spec in group.distinct_specs)
+                and getattr(params, "mamba_cache_mode", None) == "align"
             )
         return group_uses_align_state
 
@@ -486,11 +480,7 @@ class BaseKVPoolWorker(ABC):
         if not use_hybrid or kv_cache_config is None:
             return False
         for group in kv_cache_config.kv_cache_groups:
-            kv_cache_spec = group.kv_cache_spec
-            if isinstance(kv_cache_spec, UniformTypeKVCacheSpecs):
-                if any(isinstance(spec, MambaSpec) for spec in kv_cache_spec.kv_cache_specs.values()):
-                    return True
-            elif isinstance(kv_cache_spec, MambaSpec):
+            if any(isinstance(spec, MambaSpec) for spec in group.distinct_specs):
                 return True
         return False
 
@@ -708,12 +698,11 @@ class BaseKVPoolWorker(ABC):
         result = dict(kv_caches)
         copy_funcs = None
         for group in self.kv_cache_config.kv_cache_groups:
-            specs = group.kv_cache_spec
-            for name in group.layer_names:
-                spec = specs.kv_cache_specs[name] if isinstance(specs, UniformTypeKVCacheSpecs) else specs
+            params = group.manager_config.params
+            for name, spec in group.kv_cache_specs.items():
                 if not isinstance(spec, MambaSpec):
                     continue
-                if spec.num_speculative_blocks != 0:
+                if params.num_speculative_blocks != 0:
                     raise ValueError("RecoverSSM pooling requires zero speculative state blocks")
                 if copy_funcs is None:
                     mamba_groups = get_mamba_groups(self.kv_cache_config)

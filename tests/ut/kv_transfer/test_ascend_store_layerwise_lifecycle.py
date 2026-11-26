@@ -25,20 +25,22 @@ from vllm.utils.hashing import sha256
 from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
 from vllm.v1.core.kv_cache_utils import get_request_block_hasher, init_none_hash, resolve_kv_cache_block_sizes
 from vllm.v1.core.sched.scheduler import Scheduler
-from vllm.v1.core.single_type_kv_cache_manager import register_all_kvcache_specs
 from vllm.v1.kv_cache_interface import (
-    FullAttentionSpec,
     KVCacheConfig,
-    KVCacheGroupSpec,
     MambaSpec,
-    SlidingWindowSpec,
-    UniformTypeKVCacheSpecs,
 )
 from vllm.v1.outputs import KVConnectorOutput
 from vllm.v1.request import Request
 from vllm.v1.structured_output import StructuredOutputManager
 
 from tests.ut.distributed.ascend_store.cache_config_helpers import make_resolved_cache_config
+from tests.ut.kv_cache_test_utils import (
+    is_v034,
+    make_full_attention_layer_config,
+    make_kv_cache_group,
+    make_mamba_layer_config,
+    make_sliding_window_layer_config,
+)
 from tests.ut.kv_offload.utils import create_model_runner_output, create_vllm_config
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store import pool_worker
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence import (
@@ -168,7 +170,10 @@ def memory_store(monkeypatch, tmp_path):
     monkeypatch.setattr(pool_worker, "get_pcp_group", lambda: SimpleNamespace(world_size=1))
     monkeypatch.setattr(pool_worker, "get_decode_context_model_parallel_world_size", lambda: 1)
     monkeypatch.setattr(pool_worker, "get_decode_context_model_parallel_rank", lambda: 0)
-    register_all_kvcache_specs(None)
+    if is_v034():
+        from vllm.v1.core.single_type_kv_cache_manager import register_all_kvcache_specs
+
+        register_all_kvcache_specs(None)
     init_none_hash(sha256)
     return store
 
@@ -182,9 +187,9 @@ def test_raw_tokens_hybrid_roundtrip(memory_store, recurrent_type, wrapped):
     # The fixture installs the external client leaf before importing its backend.
     from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.mooncake_backend import MooncakeBackend
 
-    full = FullAttentionSpec(block_size=16, num_kv_heads=1, head_size=8, dtype=torch.float32)
+    full = make_full_attention_layer_config(block_size=16, num_kv_heads=1, head_size=8, dtype=torch.float32)
     recurrent = (
-        MambaSpec(
+        make_mamba_layer_config(
             block_size=32,
             shapes=((8,), (8,)),
             dtypes=(torch.float32, torch.float32),
@@ -192,31 +197,37 @@ def test_raw_tokens_hybrid_roundtrip(memory_store, recurrent_type, wrapped):
             mamba_cache_mode="align",
         )
         if recurrent_type is not None
-        else SlidingWindowSpec(block_size=32, num_kv_heads=1, head_size=8, dtype=torch.float32, sliding_window=32)
+        else make_sliding_window_layer_config(
+            block_size=32, num_kv_heads=1, head_size=8, dtype=torch.float32, sliding_window=32
+        )
     )
     groups = [
-        KVCacheGroupSpec(["model.layers.0.attn", "model.layers.2.attn"], full),
-        KVCacheGroupSpec(["model.layers.1.attn", "model.layers.3.attn"], recurrent),
+        make_kv_cache_group(["model.layers.0.attn", "model.layers.2.attn"], full),
+        make_kv_cache_group(["model.layers.1.attn", "model.layers.3.attn"], recurrent),
     ]
     plan = KVCacheConfig(
         num_blocks=128, kv_cache_tensors=[], kv_cache_groups=groups, prefix_cache_retention_interval=None
     )
     # Scheduler merged specs and worker per-layer specs must describe the same layout.
-    worker_plan = KVCacheConfig(
-        num_blocks=plan.num_blocks,
-        kv_cache_tensors=[],
-        kv_cache_groups=[
+    if is_v034() and wrapped:
+        from vllm.v1.kv_cache_interface import KVCacheGroupSpec, UniformTypeKVCacheSpecs
+
+        worker_groups = [
             KVCacheGroupSpec(
                 group.layer_names,
                 UniformTypeKVCacheSpecs(
                     block_size=group.kv_cache_spec.block_size,
                     kv_cache_specs={name: group.kv_cache_spec for name in group.layer_names},
-                )
-                if wrapped
-                else group.kv_cache_spec,
+                ),
             )
             for group in groups
-        ],
+        ]
+    else:
+        worker_groups = list(groups)
+    worker_plan = KVCacheConfig(
+        num_blocks=plan.num_blocks,
+        kv_cache_tensors=[],
+        kv_cache_groups=worker_groups,
         prefix_cache_retention_interval=None,
     )
     config = create_vllm_config(max_num_batched_tokens=32, block_size=16)

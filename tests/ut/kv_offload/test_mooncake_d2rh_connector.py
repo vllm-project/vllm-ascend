@@ -27,7 +27,11 @@ if "mooncake.engine" not in sys.modules:
         _fake_engine.__dict__["TransferEngine"] = MagicMock()
         sys.modules["mooncake.engine"] = _fake_engine
 
-from vllm_ascend.core.kv_cache_interface import AscendSlidingWindowMLASpec  # noqa: E402
+from tests.ut.kv_cache_test_utils import (  # noqa: E402
+    make_full_attention_layer_config,
+    make_kv_cache_group,
+    make_sliding_window_layer_config,
+)
 from vllm_ascend.distributed.kv_transfer.kv_p2p import mooncake_d2rh_connector as d2rh  # noqa: E402
 
 
@@ -99,10 +103,7 @@ class TestBuildStartPullParams:
         scheduler.use_sparse = False
         scheduler.tp_size = 2
         scheduler.kv_cache_groups = [
-            SimpleNamespace(
-                kv_cache_spec=SimpleNamespace(block_size=16, num_kv_heads=4),
-                layer_names=["layer.0"],
-            )
+            make_kv_cache_group(["layer.0"], make_full_attention_layer_config(block_size=16, num_kv_heads=4))
         ]
 
         params = scheduler._build_start_pull_params(
@@ -730,14 +731,19 @@ class TestSchedulerBlockSize:
     """
 
     @staticmethod
-    def _swa_spec(block_size: int, model_version: str | None) -> AscendSlidingWindowMLASpec:
-        return AscendSlidingWindowMLASpec(
-            block_size=block_size,
-            num_kv_heads=1,
-            head_size=16,
-            dtype=torch.float16,
-            sliding_window=128,
-            model_version=model_version,
+    def _swa_group(block_size: int, model_version: str | None):
+        return make_kv_cache_group(
+            ["swa"],
+            make_sliding_window_layer_config(
+                block_size=block_size,
+                num_kv_heads=1,
+                head_size=16,
+                dtype=torch.float16,
+                sliding_window=128,
+                mla=True,
+                ascend=True,
+                model_version=model_version,
+            ),
         )
 
     def test_dsv4_swa_spec_overrides_hybrid_cache_quantum(self):
@@ -745,11 +751,8 @@ class TestSchedulerBlockSize:
         scheduler.vllm_config = SimpleNamespace(cache_config=SimpleNamespace(block_size=2))
         scheduler.kv_cache_config = SimpleNamespace(
             kv_cache_groups=[
-                SimpleNamespace(kv_cache_spec=SimpleNamespace(block_size=4096), layer_names=["state"]),
-                SimpleNamespace(
-                    kv_cache_spec=self._swa_spec(32, "deepseek_v4"),
-                    layer_names=["swa"],
-                ),
+                make_kv_cache_group(["state"], make_full_attention_layer_config(block_size=4096)),
+                self._swa_group(32, "deepseek_v4"),
             ]
         )
         assert scheduler._get_scheduler_block_size() == 32
@@ -759,10 +762,7 @@ class TestSchedulerBlockSize:
         scheduler.vllm_config = SimpleNamespace(cache_config=SimpleNamespace(block_size=128))
         scheduler.kv_cache_config = SimpleNamespace(
             kv_cache_groups=[
-                SimpleNamespace(
-                    kv_cache_spec=self._swa_spec(32, None),
-                    layer_names=["swa"],
-                ),
+                self._swa_group(32, None),
             ]
         )
         # isinstance matches but model_version does not: the scheduler must

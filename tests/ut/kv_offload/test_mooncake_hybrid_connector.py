@@ -18,6 +18,13 @@ sys.modules["mooncake.engine"] = fake_engine
 from vllm.v1.kv_cache_interface import MambaSpec  # noqa: E402
 from vllm.v1.request import RequestStatus  # noqa: E402
 
+from tests.ut.kv_cache_test_utils import (  # noqa: E402
+    make_full_attention_layer_config,
+    make_kv_cache_group,
+    make_mamba_layer_config,
+    make_sliding_window_layer_config,
+)
+
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_hybrid_connector import (  # noqa: E402
     MAX_REQUESTS_PER_PEER_HANDLER,
     KVCacheRecvingThread,
@@ -371,15 +378,19 @@ class TestMooncakeHybridConnectorWorker(unittest.TestCase):
             cache_config=types.SimpleNamespace(block_size=128),
             scheduler_config=types.SimpleNamespace(disable_hybrid_kv_cache_manager=False),
         )
-        state_spec = (
-            MagicMock(spec=MambaSpec, block_size=128, shapes=((2, 2), (2, 2)), dtypes=(torch.float32, torch.float32))
+        state_layer_config = (
+            make_mamba_layer_config(
+                block_size=128,
+                shapes=((2, 2), (2, 2)),
+                dtypes=(torch.float32, torch.float32),
+            )
             if use_mamba
-            else types.SimpleNamespace(block_size=128)
+            else make_sliding_window_layer_config(block_size=128)
         )
         cache_config = types.SimpleNamespace(
             kv_cache_groups=[
-                types.SimpleNamespace(kv_cache_spec=types.SimpleNamespace(block_size=512), layer_names=["layer.0"]),
-                types.SimpleNamespace(kv_cache_spec=state_spec, layer_names=["layer.1"]),
+                make_kv_cache_group(["layer.0"], make_full_attention_layer_config(block_size=512)),
+                make_kv_cache_group(["layer.1"], state_layer_config),
             ]
         )
         host = f"192.0.2.{pcp_rank * tp_size + tp_rank + 1}"
@@ -937,10 +948,7 @@ class TestMooncakeHybridConnectorScheduler(unittest.TestCase):
 
     def test_compute_transfer_block_ids_preserves_circular_groups(self):
         scheduler = self._make_scheduler()
-        scheduler.kv_cache_specs = [
-            [types.SimpleNamespace(is_circular=True)],
-            [types.SimpleNamespace(is_circular=False)],
-        ]
+        scheduler._is_circular_group = [True, False]
         block_ids = (list(range(10)), [100, 101, 102, 103])
 
         transfer_block_ids = scheduler._compute_transfer_block_ids(block_ids, prompt_len=129)

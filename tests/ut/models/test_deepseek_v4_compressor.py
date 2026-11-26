@@ -13,6 +13,7 @@ from vllm_ascend.models.deepseek_v4.compressor import (
     AscendCompressorStateCache,
     Compressor,
 )
+from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.device_metadata import DeviceMetadataStage
 
 
@@ -180,9 +181,15 @@ class TestCompressorStateCache:
             cache_config=SimpleNamespace(block_size=128, cache_dtype="auto"),
         )
 
-        spec = cache.get_kv_cache_spec(vllm_config)
+        if vllm_version_is("0.34.0"):
+            spec = cache.get_kv_cache_spec(vllm_config)
+            sliding_window = spec.sliding_window
+        else:
+            layer_config = cache.get_kv_cache_config(vllm_config)
+            spec = layer_config.spec
+            sliding_window = layer_config.manager_config.params.sliding_window
 
         assert spec.block_size == 8
         assert spec.head_size == state_dim
-        assert spec.sliding_window == 64
+        assert sliding_window == 64
         assert spec.page_size_padded == DSV4_BLOCK_SIZES[128][1][padding_index]

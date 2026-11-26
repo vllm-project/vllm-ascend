@@ -8,8 +8,9 @@ import pytest
 import torch
 from vllm.config import CacheConfig, KVTransferConfig, ParallelConfig
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.config import build_offloading_config
-from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheConfig, KVCacheGroupSpec
+from vllm.v1.kv_cache_interface import KVCacheConfig
 
+from tests.ut.kv_cache_test_utils import make_full_attention_spec, make_kv_cache_group
 from vllm_ascend.utils import refresh_block_size
 
 UPSTREAM_BLOCK_SIZE = 16
@@ -44,7 +45,7 @@ def test_offloading_chunk_matches_effective_npu_block_size() -> None:
     refresh_block_size(vllm_config)
     assert cache_config.block_size == NPU_BLOCK_SIZE
 
-    spec = FullAttentionSpec(
+    spec = make_full_attention_spec(
         block_size=cache_config.block_size,
         num_kv_heads=1,
         head_size=3,
@@ -53,7 +54,7 @@ def test_offloading_chunk_matches_effective_npu_block_size() -> None:
     kv_cache_config = KVCacheConfig(
         num_blocks=4,
         kv_cache_tensors=[],
-        kv_cache_groups=[KVCacheGroupSpec(layer_names=["model.layers.0.self_attn"], kv_cache_spec=spec)],
+        kv_cache_groups=[make_kv_cache_group(["model.layers.0.self_attn"], spec)],
     )
     with pytest.raises(ValueError, match=rf"must be a multiple.*\({NPU_BLOCK_SIZE} tokens\)"):
         build_offloading_config(vllm_config, kv_cache_config)

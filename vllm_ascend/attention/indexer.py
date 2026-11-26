@@ -26,6 +26,7 @@ from vllm.v1.attention.backend import (
     max_decode_query_len,
 )
 from vllm.v1.attention.ops.pcp import _gather_prefill_cache_inputs  # type: ignore[import-not-found]
+from vllm.v1.core.single_type_kv_cache_manager import FullAttentionManager
 from vllm.v1.kv_cache_interface import AttentionSpec
 from vllm.v1.utils import CpuGpuBuffer
 from vllm.v1.worker.utils import select_common_block_size
@@ -65,6 +66,7 @@ from vllm_ascend.utils import (
     enable_sfa_dcp_replicated_indexer,
     enable_sfa_dcp_sharded_indexer,
     is_pd_decode_recompute_scheduler_enabled,
+    vllm_version_is,
 )
 from vllm_ascend.worker.device_metadata import DeviceMetadataStage, DeviceMetadataTask, wait_for_device_metadata
 
@@ -268,6 +270,12 @@ class AscendSFAIndexerCache(DeepseekV32IndexerCache):
         # mypy --follow-imports skip cannot see the upstream dataclass fields.
         return replace(self.cache_spec, block_size=vllm_config.cache_config.block_size)  # type: ignore[call-arg]
 
+    def get_kv_cache_config(self, vllm_config: VllmConfig):
+        spec = self.get_kv_cache_spec(vllm_config)
+        if spec is None:
+            return None
+        return FullAttentionManager.layer_config(spec)
+
     def get_attn_backend(self):
         return self.backend_cls
 
@@ -429,7 +437,12 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
             self.c4_k_op_dtype = torch_npu.float4_e2m1fn_x2
 
         vllm_config = get_current_vllm_config()
-        spec = self._build_cache_spec(self.k_cache.get_kv_cache_spec(vllm_config), vllm_config)
+        if vllm_version_is("0.34.0"):
+            raw_spec = self.k_cache.get_kv_cache_spec(vllm_config)
+        else:
+            layer_config = self.k_cache.get_kv_cache_config(vllm_config)
+            raw_spec = None if layer_config is None else layer_config.spec
+        spec = self._build_cache_spec(raw_spec, vllm_config)
         # TODO: Make upstream DeepseekV32IndexerCache a PluggableLayer so the
         # Ascend cache layer can be selected directly and create its backend,
         # instead of the backend replacing an already-created cache layer.

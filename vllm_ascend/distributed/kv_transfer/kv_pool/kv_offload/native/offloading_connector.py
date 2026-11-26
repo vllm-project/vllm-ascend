@@ -28,7 +28,6 @@ from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
     KVCacheGroupRole,
     MambaSpec,
-    UniformTypeKVCacheSpecs,
 )
 from vllm.v1.kv_offload.base import (
     CanonicalKVCacheRef,
@@ -176,10 +175,7 @@ class AscendOffloadingConnectorWorker(OffloadingConnectorWorker):
 
         requires_layout_adaptation = False
         for group in selected_groups:
-            group_spec = group.kv_cache_spec
-            per_layer_specs = group_spec.kv_cache_specs if isinstance(group_spec, UniformTypeKVCacheSpecs) else {}
-            for layer_name in group.layer_names:
-                layer_spec = per_layer_specs.get(layer_name, group_spec)
+            for layer_name, layer_spec in group.kv_cache_specs.items():
                 layer_cache = kv_caches[layer_name]
                 if (isinstance(layer_spec, AttentionSpec) and not isinstance(layer_cache, torch.Tensor)) or (
                     isinstance(layer_spec, MambaSpec) and isinstance(layer_cache, list)
@@ -237,12 +233,9 @@ class AscendOffloadingConnectorWorker(OffloadingConnectorWorker):
             )
 
         for group in selected_groups:
-            group_spec = group.kv_cache_spec
-            per_layer_specs = group_spec.kv_cache_specs if isinstance(group_spec, UniformTypeKVCacheSpecs) else {}
-            for layer_name in group.layer_names:
+            for layer_name, layer_spec in group.kv_cache_specs.items():
                 if layer_name in refs_by_layer:
                     continue
-                layer_spec = per_layer_specs.get(layer_name, group_spec)
                 layer_cache = kv_caches[layer_name]
 
                 if isinstance(layer_spec, AttentionSpec):

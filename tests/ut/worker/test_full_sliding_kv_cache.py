@@ -10,15 +10,18 @@ import pytest
 import torch
 from vllm.config import AttentionConfig
 from vllm.v1.kv_cache_interface import (
-    FullAttentionSpec,
     KVCacheConfig,
-    KVCacheGroupSpec,
     KVCacheTensor,
     KVQuantMode,
-    SlidingWindowSpec,
-    UniformTypeKVCacheSpecs,
 )
 
+from tests.ut.kv_cache_test_utils import (
+    get_group_spec,
+    make_full_attention_layer_config,
+    make_kv_cache_group,
+    make_sliding_window_layer_config,
+)
+from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker import worker as worker_module
 from vllm_ascend.worker.v2 import attn_utils
 from vllm_ascend.worker.v2.attn_utils import (
@@ -40,16 +43,19 @@ def _config():
 
 def _cache_config(sliding_groups=5, dtype=torch.bfloat16):
     # Different head dimensions and block sizes, but equal physical pages.
-    full = FullAttentionSpec(block_size=2, num_kv_heads=1, head_size=8, dtype=dtype)
-    sliding = SlidingWindowSpec(block_size=4, num_kv_heads=1, head_size=4, dtype=dtype, sliding_window=8)
-    assert full.page_size_bytes == sliding.page_size_bytes
+    full = make_full_attention_layer_config(block_size=2, num_kv_heads=1, head_size=8, dtype=dtype)
+    sliding = make_sliding_window_layer_config(block_size=4, num_kv_heads=1, head_size=4, dtype=dtype, sliding_window=8)
+    full_spec = getattr(full, "spec", full)
+    sliding_spec = getattr(sliding, "spec", sliding)
+    assert full_spec.page_size_bytes == sliding_spec.page_size_bytes
     num_blocks = 8
-    layer_size = num_blocks * full.page_size_bytes
+    layer_size = num_blocks * full_spec.page_size_bytes
     groups = []
     descriptors = []
-    for group_index, spec in enumerate([full, *[sliding] * sliding_groups]):
+    for group_index, entry in enumerate([full, *[sliding] * sliding_groups]):
+        spec = getattr(entry, "spec", entry)
         names = [f"model.layers.{2 * group_index + index}.self_attn.attn" for index in range(2)]
-        groups.append(KVCacheGroupSpec(layer_names=names, kv_cache_spec=spec))
+        groups.append(make_kv_cache_group(names, entry))
         # Split the descriptor to exercise a nonzero offset as well as aliasing.
         for index, name in enumerate(names):
             descriptors.append(
@@ -65,7 +71,19 @@ def _cache_config(sliding_groups=5, dtype=torch.bfloat16):
 
 
 def _specs(cache_config):
-    return {name: group.kv_cache_spec for group in cache_config.kv_cache_groups for name in group.layer_names}
+    return {name: get_group_spec(group, name) for group in cache_config.kv_cache_groups for name in group.layer_names}
+
+
+def _layer_requirements(cache_config):
+    if vllm_version_is("0.34.0"):
+        return _specs(cache_config)
+    from vllm.v1.kv_cache_interface import KVCacheLayerConfig
+
+    return {
+        name: KVCacheLayerConfig(group.manager_config, spec)
+        for group in cache_config.kv_cache_groups
+        for name, spec in group.kv_cache_specs.items()
+    }
 
 
 @pytest.mark.parametrize(
@@ -77,7 +95,8 @@ def _specs(cache_config):
     ],
 )
 def test_partial_model_configs_keep_existing_path(config):
-    assert not can_share_full_and_sliding_kv_cache(config, _specs(_cache_config()).values())
+    cache = _cache_config()
+    assert not can_share_full_and_sliding_kv_cache(config, _specs(cache).values(), cache.kv_cache_groups)
 
 
 @pytest.mark.parametrize("sliding_groups", [4, 5])
@@ -90,7 +109,10 @@ def test_budget_tracks_physical_shared_allocation(monkeypatch, sliding_groups, s
     worker = worker_module.NPUWorker.__new__(worker_module.NPUWorker)
     worker.vllm_config = config
     worker.model_config = config.model_config
-    worker.get_kv_cache_spec = lambda: _specs(cache)
+    if vllm_version_is("0.34.0"):
+        worker.get_kv_cache_spec = lambda: _layer_requirements(cache)
+    else:
+        worker.get_kv_cache_layer_configs = lambda: _layer_requirements(cache)
     worker.model_runner = SimpleNamespace(
         supports_standardized_shared_kv_backing=supports_shared, use_sparse=False, use_compress=False
     )
@@ -121,7 +143,10 @@ def test_memory_budget_sources_preserve_physical_capacity(monkeypatch, budget_so
     worker.device = torch.device("cpu")
     worker.init_snapshot = SimpleNamespace(free_memory=2 * available)
     worker.requested_memory = available + 3
-    worker.get_kv_cache_spec = lambda: _specs(cache)
+    if vllm_version_is("0.34.0"):
+        worker.get_kv_cache_spec = lambda: _layer_requirements(cache)
+    else:
+        worker.get_kv_cache_layer_configs = lambda: _layer_requirements(cache)
     worker.model_runner = SimpleNamespace(
         profile_run=Mock(),
         model_memory_usage=1,
@@ -173,7 +198,7 @@ def test_v2_shares_storage_and_keeps_distinct_blocks_isolated(monkeypatch, dtype
         SimpleNamespace(
             kernel_block_size=None,
             kv_cache_group_id=index,
-            kv_cache_spec=group.kv_cache_spec,
+            kv_cache_spec=get_group_spec(group),
             layer_names=group.layer_names,
             backend=backend,
         )
@@ -223,11 +248,14 @@ def test_v2_shares_storage_and_keeps_distinct_blocks_isolated(monkeypatch, dtype
 
 def test_uniform_group_wrappers_share_the_same_pool():
     cache = _cache_config()
-    for group in cache.kv_cache_groups:
-        group.kv_cache_spec = UniformTypeKVCacheSpecs(
-            block_size=group.kv_cache_spec.block_size,
-            kv_cache_specs={name: group.kv_cache_spec for name in group.layer_names},
-        )
+    if vllm_version_is("0.34.0"):
+        from vllm.v1.kv_cache_interface import UniformTypeKVCacheSpecs
+
+        for group in cache.kv_cache_groups:
+            group.kv_cache_spec = UniformTypeKVCacheSpecs(
+                block_size=group.kv_cache_spec.block_size,
+                kv_cache_specs={name: group.kv_cache_spec for name in group.layer_names},
+            )
     allocate = Mock(side_effect=lambda size: torch.zeros(size, dtype=torch.int8))
     raw = allocate_shared_attention_kv_cache(cache, allocate)
     allocate.assert_called_once_with(cache.kv_cache_tensors[0].size)
@@ -264,11 +292,15 @@ def test_group_descriptors_with_multiple_layers():
 )
 def test_unsupported_layouts_keep_private_allocation(unsupported):
     config = _config()
-    specs = list(_specs(_cache_config()).values())
+    cache = _cache_config()
+    groups = list(cache.kv_cache_groups)
+    specs = list(_specs(cache).values())
     if unsupported == "empty":
         specs = []
+        groups = []
     elif unsupported == "full_only":
         specs = specs[:2]
+        groups = groups[:1]
     elif unsupported == "transfer":
         config.kv_transfer_config = object()
     elif unsupported in ("dcp", "pcp"):
@@ -286,7 +318,7 @@ def test_unsupported_layouts_keep_private_allocation(unsupported):
         config.cache_config.cache_dtype = "mxfp8"
     else:
         specs[0] = replace(specs[0], head_size_v=4)
-    assert not can_share_full_and_sliding_kv_cache(config, specs)
+    assert not can_share_full_and_sliding_kv_cache(config, specs, groups)
 
 
 @pytest.mark.parametrize("invalid", ["size", "layer_stride", "block_stride", "zero"])

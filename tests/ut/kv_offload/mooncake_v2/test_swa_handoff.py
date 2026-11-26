@@ -1,27 +1,27 @@
 # SPDX-License-Identifier: Apache-2.0
 """Regression for SWA page retirement at the P/D handoff."""
 
-from dataclasses import replace
 from types import SimpleNamespace
 
 from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.single_type_kv_cache_manager import SlidingWindowManager
 
+from tests.ut.kv_cache_test_utils import get_group_spec, is_v034
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.base_scheduler import MooncakeBaseConnectorScheduler
 
-from .helpers import make_request, make_sliding_spec
+from .helpers import make_request, make_sliding_group, set_scheduler_groups
 
 
 def test_swa_handoff_retains_history_for_last_prompt_token() -> None:
     block_size, window_size, prompt_len = 128, 512, 1023
-    spec = replace(make_sliding_spec(block_size), sliding_window=window_size)
-    assert spec.extra_retained_tokens == 0
+    group = make_sliding_group(block_size=block_size, sliding_window=window_size)
+    assert group.manager_config.params.extra_retained_tokens == 0
     scheduler = MooncakeBaseConnectorScheduler.__new__(MooncakeBaseConnectorScheduler)
     scheduler.vllm_config = SimpleNamespace(
         model_config=SimpleNamespace(hf_config=SimpleNamespace()), num_hash_lookahead_tokens=0
     )
     scheduler.kv_cache_config = SimpleNamespace(hash_block_size=block_size)
-    scheduler.group_unique_specs = [[spec]]
+    set_scheduler_groups(scheduler, [group])
     scheduler.need_truncate = scheduler._needs_prefill_token_truncation()
     tokens = list(range(prompt_len))
     producer = make_request(
@@ -41,8 +41,9 @@ def test_swa_handoff_retains_history_for_last_prompt_token() -> None:
     assert consumer.num_prompt_tokens == prompt_len
     assert scheduler.get_num_new_matched_tokens(consumer, 0) == (producer.num_prompt_tokens, True)
 
+    manager_kwargs = {"kv_cache_spec": get_group_spec(group)} if is_v034() else {"kv_cache_group": group}
     manager = SlidingWindowManager(
-        kv_cache_spec=spec,
+        **manager_kwargs,
         block_pool=BlockPool(num_gpu_blocks=16, enable_caching=False, hash_block_size=block_size),
         enable_caching=False,
         kv_cache_group_id=0,

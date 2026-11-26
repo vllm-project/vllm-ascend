@@ -17,6 +17,7 @@ from vllm.platforms import current_platform
 from vllm.utils.torch_utils import kv_cache_dtype_str_to_dtype
 from vllm.v1.attention.backend import AttentionBackend
 from vllm.v1.attention.backends.mla.sparse_swa import DeepseekV4SWACache
+from vllm.v1.core.single_type_kv_cache_manager import FullAttentionManager
 from vllm.v1.kv_cache_interface import KVCacheSpec
 
 from vllm_ascend.attention.dsa_attn_kv_plan import is_a5_bf16_kv_enabled
@@ -234,3 +235,9 @@ class DSAAttention(nn.Module, AttentionLayerBase):
             cache_dtype_str=vllm_config.cache_config.cache_dtype,
             tokens_per_state=self.compress_ratio,
         )
+
+    def get_kv_cache_config(self, vllm_config: VllmConfig):
+        spec = self.get_kv_cache_spec(vllm_config)
+        if spec is None:
+            return None
+        return FullAttentionManager.layer_config(spec)

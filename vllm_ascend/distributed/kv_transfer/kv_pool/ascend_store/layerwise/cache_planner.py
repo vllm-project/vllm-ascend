@@ -12,7 +12,6 @@ from vllm.utils.import_utils import resolve_obj_by_qualname
 from vllm.utils.math_utils import round_up
 from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheSpec, KVCacheTensor, MambaSpec
 
-from vllm_ascend.core.kv_cache_interface import is_prefix_cacheable
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend import get_backend_class
 
 from .layerwise_cache_layout import (
@@ -116,10 +115,15 @@ class LayerwiseCachePlanner:
         self.layer_id_by_entry = {
             entry_name: get_physical_layer_index(entry_name, self.total_layers) for entry_name in self.spec_by_entry
         }
+        explicit_draft_names = set(getattr(config, "dspark_draft_layer_names", ()) or ())
+        explicit_draft_names.update(getattr(config, "dflash_draft_layer_names", ()) or ())
+        explicit_draft_names.update(getattr(vllm_config, "_ascend_draft_layer_names", ()) or ())
         self.draft_names = {
             name
             for name, spec in self.spec_by_entry.items()
-            if getattr(spec, "is_draft", False) or self.layer_id_by_entry[name] >= self.total_layers
+            if name in explicit_draft_names
+            or getattr(spec, "is_draft", False)
+            or self.layer_id_by_entry[name] >= self.total_layers
         }
         self.target_layer_ids = tuple(
             sorted({index for name, index in self.layer_id_by_entry.items() if name not in self.draft_names})
@@ -143,7 +147,7 @@ class LayerwiseCachePlanner:
             reusable_entry_names = {
                 entry_name
                 for group in self.config.kv_cache_groups
-                if is_prefix_cacheable(group.kv_cache_spec)
+                if group.prefix_cacheable
                 for entry_name in group.layer_names
                 if entry_name not in self.draft_names
                 and self.layer_id_by_entry[entry_name] not in independent
@@ -305,8 +309,10 @@ def plan_layerwise_cache_reuse(
 
     for name in layout.reused_cache_names:
         spec = planner.spec_by_entry[name]
+        group = kv_cache_config.kv_cache_groups[planner.group_id_by_entry[name]]
+        params = group.manager_config.params
         if isinstance(spec, MambaSpec) and (
-            spec.mamba_cache_mode != "align" or spec.num_prefill_checkpoint_blocks != 0
+            params.mamba_cache_mode != "align" or params.num_prefill_checkpoint_blocks != 0
         ):
             raise NotImplementedError(f"Reusable cache {name} has unsupported state semantics: {type(spec).__name__}")
     if vllm_config.cache_config.num_gpu_blocks_override is not None:

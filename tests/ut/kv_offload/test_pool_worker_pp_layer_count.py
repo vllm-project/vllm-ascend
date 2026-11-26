@@ -14,8 +14,9 @@ from unittest.mock import Mock
 import numpy as np
 import pytest
 import torch
-from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheConfig, KVCacheGroupSpec
+from vllm.v1.kv_cache_interface import KVCacheConfig
 
+from tests.ut.kv_cache_test_utils import make_full_attention_layer_config, make_kv_cache_group
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.planes import make_data_plane
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.pool_worker import (
     LayerwiseKVPoolWorker,
@@ -41,13 +42,11 @@ def _make_pp_layer_count_worker(pp_rank, pp_size=2, initial_num_layers=4, use_la
         for group_id in range(num_groups)
     ]
     worker = LayerwiseKVPoolWorker.__new__(LayerwiseKVPoolWorker)
-    attention_spec = FullAttentionSpec(block_size=16, num_kv_heads=1, head_size=1, dtype=torch.uint8)
+    attention_cfg = make_full_attention_layer_config(block_size=16, num_kv_heads=1, head_size=1, dtype=torch.uint8)
     worker.kv_cache_config = KVCacheConfig(
         num_blocks=2,
         kv_cache_tensors=[],
-        kv_cache_groups=[
-            KVCacheGroupSpec(layer_names=names, kv_cache_spec=attention_spec) for names in group_layer_names
-        ],
+        kv_cache_groups=[make_kv_cache_group(names, attention_cfg) for names in group_layer_names],
     )
     worker.hf_config = SimpleNamespace(num_hidden_layers=8)
     worker.pp_size = pp_size

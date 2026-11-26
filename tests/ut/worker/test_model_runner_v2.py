@@ -930,6 +930,7 @@ def test_load_model_original_profiler_counts_post_load_weights(monkeypatch, with
     profile_count = 0
     layers = runner.compilation_config.static_forward_context
     runner.get_kv_cache_spec = Mock(side_effect=AssertionError("Loading must not inspect cache allocation"))
+    runner.get_kv_cache_layer_configs = Mock(side_effect=AssertionError("Loading must not inspect cache allocation"))
 
     def load_attention(name):
         layer = MLAAttention.__new__(MLAAttention)
@@ -1020,6 +1021,7 @@ def test_load_model_original_profiler_counts_post_load_weights(monkeypatch, with
     assert profile_count == 1
     assert runner.model_memory_usage == 1024 + 32 * len(layers)
     runner.get_kv_cache_spec.assert_not_called()
+    runner.get_kv_cache_layer_configs.assert_not_called()
     for layer in layers.values():
         layer.impl._build_prolog_v3_weights.assert_called_once_with()
 
@@ -1836,10 +1838,15 @@ def test_profile_run_skips_mc2_dummy_without_capacity():
 
 
 def test_profile_run_reserves_sparse_offload_topk_buffers():
+    from vllm_ascend.utils import vllm_version_is
+
     runner = _make_runner()
     sparse_cfg = SimpleNamespace(enabled=True)
     runner.ascend_config.sparse_kv_offload_config = sparse_cfg
-    runner.get_kv_cache_spec = MagicMock(return_value={"layer.0": "host-spec"})
+    if vllm_version_is("0.34.0"):
+        runner.get_kv_cache_spec = MagicMock(return_value={"layer.0": "host-spec"})
+    else:
+        runner.get_kv_cache_layer_configs = MagicMock(return_value={"layer.0": SimpleNamespace(spec="host-spec")})
     with (
         patch("vllm_ascend.worker.v2.model_runner.allocate_kv_offload_topk_profile_buffers") as reserve,
         patch("vllm_ascend.worker.v2.model_runner.get_mc2_tokens_capacity", return_value=None),

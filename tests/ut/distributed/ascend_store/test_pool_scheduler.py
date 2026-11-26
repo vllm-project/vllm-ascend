@@ -26,19 +26,16 @@ from unittest.mock import MagicMock, patch
 from uuid import UUID, uuid4
 
 import pytest
+
+import tests.ut.distributed.ascend_store._mock_deps  # noqa: F401, E402
+
+# isort: split
 import torch
 from vllm.distributed.kv_transfer.kv_connector.utils import KVOutputAggregator
 from vllm.v1.core.sched.output import KVConnectorBlockState
 from vllm.v1.core.sched.scheduler import Scheduler
-from vllm.v1.kv_cache_interface import (
-    FullAttentionSpec,
-    KVCacheConfig,
-    KVCacheGroupSpec,
-    MambaSpec,
-    MLAAttentionSpec,
-    SlidingWindowSpec,
-    UniformTypeKVCacheSpecs,
-)
+from vllm.v1.core.single_type_kv_cache_manager import FullAttentionManager, SlidingWindowManager
+from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.outputs import KVConnectorOutput
 from vllm.v1.request import RequestStatus
 from vllm.v1.serial_utils import MsgpackEncoder
@@ -46,8 +43,16 @@ from zmq.constants import RCVTIMEO, REP
 from zmq.error import ZMQError
 from zmq.sugar.context import Context
 
-import tests.ut.distributed.ascend_store._mock_deps  # noqa: F401, E402
 from tests.ut.distributed.ascend_store.cache_config_helpers import make_resolved_cache_config
+from tests.ut.kv_cache_test_utils import (
+    is_v034,
+    make_full_attention_spec,
+    make_kv_cache_group,
+    make_mamba_layer_config,
+    make_mla_layer_config,
+    make_sliding_window_layer_config,
+    with_is_draft,
+)
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector import create_kv_pool_scheduler
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend import backend_map, get_backend_class
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.coordinator import AscendStoreCoordinator
@@ -244,29 +249,78 @@ def test_joint_prefix_group_ownership_survives_scheduler_conversion_and_empty_pp
 ):
     from vllm.v1.core.kv_cache_utils import generate_scheduler_kv_cache_config
 
-    from vllm_ascend.core import kv_cache_config_builder
-
-    target = MLAAttentionSpec(block_size=16, num_kv_heads=1, head_size=1, dtype=torch.float32)
-    # Ownership comes from is_draft, independently of the attention mask.
-    target = replace(target, non_causal_multi_token_decode=non_causal)
-    draft = replace(target, is_draft=True)
-    layer_specs = {"draft": draft, "target": target} if draft_first else {"target": target, "draft": draft}
-    mixed = UniformTypeKVCacheSpecs(block_size=16, kv_cache_specs=layer_specs)
     config = SimpleNamespace(
         model_config=SimpleNamespace(hf_config=SimpleNamespace(model_type="kimi_k3")),
         speculative_config=SimpleNamespace(method="dspark"),
         kv_transfer_config=None,
     )
-    kv_config = SimpleNamespace(
-        num_blocks=4,
-        hisparse_host_num_blocks=0,
-        kv_cache_groups=[
-            KVCacheGroupSpec([], draft, is_eagle_group=True),
-            KVCacheGroupSpec([] if empty_pp_layers else list(layer_specs), mixed, is_eagle_group=True),
-            KVCacheGroupSpec(["target-only"], target),
-            KVCacheGroupSpec([], UniformTypeKVCacheSpecs(block_size=16, kv_cache_specs={"draft": draft})),
-        ],
-    )
+    from vllm_ascend.core import kv_cache_config_builder
+
+    if is_v034():
+        from vllm.v1.kv_cache_interface import KVCacheGroupSpec, MLAAttentionSpec, UniformTypeKVCacheSpecs
+
+        target = MLAAttentionSpec(block_size=16, num_kv_heads=1, head_size=1, dtype=torch.float32)
+        # Ownership comes from is_draft, independently of the attention mask.
+        target = replace(target, non_causal_multi_token_decode=non_causal)
+        draft = replace(target, is_draft=True)
+        layer_specs = {"draft": draft, "target": target} if draft_first else {"target": target, "draft": draft}
+        mixed = UniformTypeKVCacheSpecs(block_size=16, kv_cache_specs=layer_specs)
+        kv_config = SimpleNamespace(
+            num_blocks=4,
+            hisparse_host_num_blocks=0,
+            kv_cache_groups=[
+                KVCacheGroupSpec([], draft, is_eagle_group=True),
+                KVCacheGroupSpec([] if empty_pp_layers else list(layer_specs), mixed, is_eagle_group=True),
+                KVCacheGroupSpec(["target-only"], target),
+                KVCacheGroupSpec([], UniformTypeKVCacheSpecs(block_size=16, kv_cache_specs={"draft": draft})),
+            ],
+        )
+    else:
+        target_lc = make_mla_layer_config(block_size=16, num_kv_heads=1, head_size=1, dtype=torch.float32)
+        draft_lc = with_is_draft(target_lc, True)
+        mixed_layers = {"draft": draft_lc, "target": target_lc} if draft_first else {"target": target_lc, "draft": draft_lc}
+        all_layer_configs = {
+            "draft0": draft_lc,
+            **mixed_layers,
+            "target-only": target_lc,
+            "draft3": draft_lc,
+        }
+        unprojected_groups = [
+            make_kv_cache_group({"draft0": draft_lc}, is_eagle_group=True),
+            make_kv_cache_group(mixed_layers, is_eagle_group=True),
+            make_kv_cache_group({"target-only": target_lc}),
+            make_kv_cache_group({"draft3": draft_lc}),
+        ]
+        builder = kv_cache_config_builder.AscendKVCacheConfigBuilder()
+        with patch.object(builder, "_build_kv_cache_groups", return_value=unprojected_groups):
+            builder.get_kv_cache_groups(config, all_layer_configs)
+        kv_config = SimpleNamespace(
+            num_blocks=4,
+            hisparse_host_num_blocks=0,
+            kv_cache_groups=[
+                replace(
+                    unprojected_groups[0],
+                    kv_cache_specs={},
+                    unprojected_specs=unprojected_groups[0].distinct_specs,
+                ),
+                (
+                    replace(
+                        unprojected_groups[1],
+                        kv_cache_specs={},
+                        unprojected_specs=unprojected_groups[1].distinct_specs,
+                    )
+                    if empty_pp_layers
+                    else unprojected_groups[1]
+                ),
+                unprojected_groups[2],
+                replace(
+                    unprojected_groups[3],
+                    kv_cache_specs={},
+                    unprojected_specs=unprojected_groups[3].distinct_specs,
+                ),
+            ],
+        )
+
     original_groups = copy.deepcopy(kv_config.kv_cache_groups)
     with (
         patch.object(kv_cache_config_builder, "is_deepseek_v41_cache", return_value=False),
@@ -279,7 +333,8 @@ def test_joint_prefix_group_ownership_survives_scheduler_conversion_and_empty_pp
     scheduler_config = generate_scheduler_kv_cache_config([result])
     assert scheduler_config.dspark_draft_only_group_ids == (0, 3)
     assert scheduler_config.kv_cache_groups[0].layer_names == []
-    assert scheduler_config.kv_cache_groups[1].kv_cache_spec == next(iter(layer_specs.values()))
+    if is_v034():
+        assert scheduler_config.kv_cache_groups[1].kv_cache_spec == next(iter(layer_specs.values()))
     assert result.kv_cache_groups == original_groups
 
     # Feed the preserved ownership to its real consumer. A mixed group must
@@ -338,15 +393,15 @@ def make_config(kv_role="kv_producer", extra_config=None, block_size=16):
 def test_mooncake_layerwise_accepts_aligned_recurrent_state(num_speculative_blocks):
     config = make_config(extra_config={"backend": "mooncake"})
     groups = [
-        KVCacheGroupSpec(
-            ["layer.0"], FullAttentionSpec(block_size=16, num_kv_heads=1, head_size=1, dtype=torch.float32)
+        make_kv_cache_group(
+            ["layer.0"], make_full_attention_spec(block_size=16, num_kv_heads=1, head_size=1, dtype=torch.float32)
         )
     ]
     if num_speculative_blocks is not None:
         groups.append(
-            KVCacheGroupSpec(
+            make_kv_cache_group(
                 ["layer.1"],
-                MambaSpec(
+                make_mamba_layer_config(
                     shapes=((4,),),
                     dtypes=(torch.float32,),
                     block_size=16,
@@ -509,27 +564,30 @@ class TestKVPoolScheduler(unittest.TestCase):
     @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.LookupKeyClient")
     def test_retain_mamba_blocks_for_save_excludes_speculative_tail(self, mock_client_cls):
         """Pin only explicit Mamba checkpoints, never positional scratch slots."""
-        # Cover the UniformType wrapper path handled by _infer_mamba_groups.
-        wrapped_mamba_spec = UniformTypeKVCacheSpecs.from_specs(
-            {
-                "layer.1": MambaSpec(
-                    shapes=((4,),),
-                    dtypes=(torch.float32,),
-                    block_size=16,
-                    mamba_cache_mode="align",
-                    num_speculative_blocks=3,
-                )
-            }
+        # Cover the per-layer spec map path handled by _infer_mamba_groups.
+        mamba_spec_with_spec_blocks = make_mamba_layer_config(
+            shapes=((4,),),
+            dtypes=(torch.float32,),
+            block_size=16,
+            mamba_cache_mode="align",
+            num_speculative_blocks=3,
         )
-        assert wrapped_mamba_spec is not None
+        if is_v034():
+            from vllm.v1.kv_cache_interface import KVCacheGroupSpec, UniformTypeKVCacheSpecs
+
+            wrapped_mamba_spec = UniformTypeKVCacheSpecs.from_specs({"layer.1": mamba_spec_with_spec_blocks})
+            assert wrapped_mamba_spec is not None
+            group1 = KVCacheGroupSpec(["layer.1"], wrapped_mamba_spec)
+        else:
+            group1 = make_kv_cache_group({"layer.1": mamba_spec_with_spec_blocks})
         hybrid_groups = [
-            KVCacheGroupSpec(
-                ["layer.0"], FullAttentionSpec(block_size=16, num_kv_heads=1, head_size=1, dtype=torch.float32)
+            make_kv_cache_group(
+                ["layer.0"], make_full_attention_spec(block_size=16, num_kv_heads=1, head_size=1, dtype=torch.float32)
             ),
-            KVCacheGroupSpec(["layer.1"], wrapped_mamba_spec),
-            KVCacheGroupSpec(
+            group1,
+            make_kv_cache_group(
                 ["layer.2"],
-                MambaSpec(shapes=((4,),), dtypes=(torch.float32,), block_size=16, mamba_cache_mode="align"),
+                make_mamba_layer_config(shapes=((4,),), dtypes=(torch.float32,), block_size=16, mamba_cache_mode="align"),
             ),
         ]
         config = self._make_config(extra_config={"backend": "memcache"})
@@ -560,9 +618,11 @@ class TestKVPoolScheduler(unittest.TestCase):
     @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.LookupKeyClient")
     def test_swa_group_selected_for_save_retention(self, mock_client_cls):
         groups = [
-            KVCacheGroupSpec(
+            make_kv_cache_group(
                 ["layer.0"],
-                SlidingWindowSpec(block_size=16, num_kv_heads=1, head_size=1, dtype=torch.float32, sliding_window=32),
+                make_sliding_window_layer_config(
+                    block_size=16, num_kv_heads=1, head_size=1, dtype=torch.float32, sliding_window=32
+                ),
             )
         ]
         scheduler = KVPoolScheduler(
@@ -577,12 +637,14 @@ class TestKVPoolScheduler(unittest.TestCase):
     def test_noncacheable_swa_group_is_not_retained(self, mock_cacheable_groups, mock_client_cls):
         mock_cacheable_groups.return_value = [0]
         groups = [
-            KVCacheGroupSpec(
-                ["layer.0"], FullAttentionSpec(block_size=16, num_kv_heads=1, head_size=1, dtype=torch.float32)
+            make_kv_cache_group(
+                ["layer.0"], make_full_attention_spec(block_size=16, num_kv_heads=1, head_size=1, dtype=torch.float32)
             ),
-            KVCacheGroupSpec(
+            make_kv_cache_group(
                 ["layer.1"],
-                SlidingWindowSpec(block_size=16, num_kv_heads=1, head_size=1, dtype=torch.float32, sliding_window=32),
+                make_sliding_window_layer_config(
+                    block_size=16, num_kv_heads=1, head_size=1, dtype=torch.float32, sliding_window=32
+                ),
             ),
         ]
         scheduler = KVPoolScheduler(
@@ -962,10 +1024,10 @@ class TestKVPoolSchedulerBuildMeta(unittest.TestCase):
 
     @staticmethod
     def _make_offload_scheduler(config):
-        spec = FullAttentionSpec(
+        spec = make_full_attention_spec(
             block_size=config.cache_config.block_size, num_kv_heads=1, head_size=4, dtype=torch.int8
         )
-        group = KVCacheGroupSpec(["model.layers.0.attn"], spec)
+        group = make_kv_cache_group(["model.layers.0.attn"], spec)
         cache_config = KVCacheConfig(num_blocks=4, kv_cache_tensors=[], kv_cache_groups=[group])
         cache_config.kv_transfer_config = SimpleNamespace(
             kv_connector_extra_config={LAYERWISE_REUSE_BACKING_BYTES: 4096}
@@ -2197,7 +2259,7 @@ class TestKVPoolSchedulerUpdateStateAfterAllocBranches(unittest.TestCase):
         self.assertTrue(load_spec.can_load)
 
 
-class _PrefixHitManager:
+class _PrefixHitManager(FullAttentionManager):
     """FA manager whose find_longest_cache_hit returns (blocks, hit_length)."""
 
     @classmethod
@@ -2207,23 +2269,26 @@ class _PrefixHitManager:
         max_length,
         kv_cache_group_ids,
         block_pool,
-        kv_cache_spec,
+        block_size=None,
+        manager_config=None,
+        kv_cache_spec=None,
         drop_eagle_block=False,
         alignment_tokens=16,
         **kwargs,
     ):
+        bs = block_size if block_size is not None else kv_cache_spec.block_size
         computed: tuple[list, ...] = tuple([] for _ in kv_cache_group_ids)
-        max_blocks = max_length // kv_cache_spec.block_size
+        max_blocks = max_length // bs
         for block_hash in list(block_hashes)[:max_blocks]:
             cached = block_pool.get_cached_block(block_hash, kv_cache_group_ids)
             if not cached:
                 break
             for blocks, block in zip(computed, cached):
                 blocks.append(block)
-        return computed, len(computed[0]) * kv_cache_spec.block_size
+        return computed, len(computed[0]) * bs
 
 
-class _SparseSWAHitManager(_PrefixHitManager):
+class _SparseSWAHitManager(SlidingWindowManager):
     """SWA manager: only segment-tail blocks are reachable/hit."""
 
     @classmethod
@@ -2232,14 +2297,17 @@ class _SparseSWAHitManager(_PrefixHitManager):
         start_block,
         end_block,
         alignment_tokens,
-        kv_cache_spec,
-        use_eagle,
+        block_size=None,
+        manager_config=None,
+        kv_cache_spec=None,
+        use_eagle=False,
         retention_interval=None,
         **kwargs,
     ):
         if alignment_tokens is None:
             return None
-        per_segment = max(alignment_tokens // kv_cache_spec.block_size, 1)
+        bs = block_size if block_size is not None else kv_cache_spec.block_size
+        per_segment = max(alignment_tokens // bs, 1)
         return [(idx + 1) % per_segment == 0 for idx in range(start_block, end_block)]
 
     @classmethod
@@ -2249,24 +2317,26 @@ class _SparseSWAHitManager(_PrefixHitManager):
         max_length,
         kv_cache_group_ids,
         block_pool,
-        kv_cache_spec,
+        block_size=None,
+        manager_config=None,
+        kv_cache_spec=None,
         drop_eagle_block=False,
         alignment_tokens=16,
         **kwargs,
     ):
         # Right-to-left search for a cached run ending on an aligned boundary.
-        block_size = kv_cache_spec.block_size
-        max_num_blocks = max_length // block_size
+        bs = block_size if block_size is not None else kv_cache_spec.block_size
+        max_num_blocks = max_length // bs
         computed: tuple[list, ...] = tuple([None] * max_num_blocks for _ in kv_cache_group_ids)
         for i in range(max_num_blocks - 1, -1, -1):
             cached = block_pool.get_cached_block(block_hashes[i], kv_cache_group_ids)
             if not cached:
                 continue
-            if (i + 1) * block_size % alignment_tokens != 0:
+            if (i + 1) * bs % alignment_tokens != 0:
                 continue
             for blocks, block in zip(computed, cached):
                 blocks[i] = block
-            return computed, (i + 1) * block_size
+            return computed, (i + 1) * bs
         return computed, 0
 
 
@@ -2277,32 +2347,41 @@ class TestKVPoolSchedulerLayerwiseReachableLookup(unittest.TestCase):
     group whose pooled blocks are stored sparsely (segment tails only).
     """
 
-    def setUp(self):
-        patcher = patch(
-            "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.coordinator._get_manager_class",
-            side_effect=self._manager_for_spec,
-        )
-        patcher.start()
-        self.addCleanup(patcher.stop)
-
-    @staticmethod
-    def _manager_for_spec(spec):
-        if getattr(spec, "sliding_window", None) is not None:
-            return _SparseSWAHitManager
-        return _PrefixHitManager
-
     def _make_coordinator(self):
+        full_spec = make_full_attention_spec(block_size=16, num_kv_heads=1, head_size=1, dtype=torch.float32)
+        swa_entry = make_sliding_window_layer_config(
+            block_size=16, num_kv_heads=1, head_size=1, dtype=torch.float32, sliding_window=16
+        )
+        swa_spec = swa_entry if is_v034() else swa_entry.spec
         return AscendStoreCoordinator(
             [
-                KVCacheGroupSpec(
-                    ["layer.0"],
-                    FullAttentionSpec(block_size=16, num_kv_heads=1, head_size=1, dtype=torch.float32),
+                SimpleNamespace(
+                    layer_names=["layer.0"],
+                    kv_cache_spec=full_spec,
+                    kv_cache_specs={"layer.0": full_spec},
+                    distinct_specs=(full_spec,),
+                    block_size=16,
+                    dcp_sharded=full_spec.dcp_sharded,
+                    manager_cls=_PrefixHitManager,
+                    manager_config=SimpleNamespace(manager_cls=_PrefixHitManager, params=SimpleNamespace()),
+                    prefix_cacheable=True,
+                    is_eagle_group=False,
+                    role=None,
                 ),
-                KVCacheGroupSpec(
-                    ["layer.1"],
-                    SlidingWindowSpec(
-                        block_size=16, num_kv_heads=1, head_size=1, dtype=torch.float32, sliding_window=16
+                SimpleNamespace(
+                    layer_names=["layer.1"],
+                    kv_cache_spec=swa_spec,
+                    kv_cache_specs={"layer.1": swa_spec},
+                    distinct_specs=(swa_spec,),
+                    block_size=16,
+                    dcp_sharded=swa_spec.dcp_sharded,
+                    manager_cls=_SparseSWAHitManager,
+                    manager_config=SimpleNamespace(
+                        manager_cls=_SparseSWAHitManager, params=SimpleNamespace(sliding_window=16)
                     ),
+                    prefix_cacheable=True,
+                    is_eagle_group=False,
+                    role=None,
                 ),
             ],
             scheduler_block_size=32,
@@ -2526,8 +2605,8 @@ def test_hash_hit_preserves_subpage_boundary_and_local_apc(local_start, pool_end
         extra_config["load_async"] = load_async
     config = make_config(block_size=640, extra_config=extra_config)
     config.cache_config.prefix_match_unit = 16
-    group = KVCacheGroupSpec(
-        ["attn"], FullAttentionSpec(block_size=640, num_kv_heads=1, head_size=1, dtype=torch.float32)
+    group = make_kv_cache_group(
+        ["attn"], make_full_attention_spec(block_size=640, num_kv_heads=1, head_size=1, dtype=torch.float32)
     )
     geometry = SimpleNamespace(
         kv_cache_groups=[group], hash_block_size=32, cache_hit_alignment_tokens=32, prefix_cache_retention_interval=None
@@ -2599,9 +2678,9 @@ def test_bulk_lookup_passes_result_directly_to_load_spec(mock_client_cls, partia
     if partial:
         config.scheduler_config.disable_hybrid_kv_cache_manager = False
         cache.kv_cache_groups.append(
-            KVCacheGroupSpec(
+            make_kv_cache_group(
                 ["model.layers.mamba"],
-                MambaSpec(shapes=((4,),), dtypes=(torch.float32,), block_size=16, mamba_cache_mode="align"),
+                make_mamba_layer_config(shapes=((4,),), dtypes=(torch.float32,), block_size=16, mamba_cache_mode="align"),
             )
         )
         cache.hash_block_size = cache.cache_hit_alignment_tokens = 4

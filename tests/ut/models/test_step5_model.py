@@ -13,7 +13,8 @@ from unittest.mock import MagicMock
 import pytest
 import torch
 from vllm.model_executor.models.utils import PPMissingLayer
-from vllm.v1.kv_cache_interface import FullAttentionSpec
+from vllm.v1.core.single_type_kv_cache_manager import FullAttentionManager
+from vllm.v1.kv_cache_interface import AttentionSpec
 
 import vllm_ascend.models.step5.model as step5_model
 from vllm_ascend.models.step5.model import (
@@ -25,6 +26,7 @@ from vllm_ascend.models.step5.model import (
     _kv_cache_torch_dtype,
     _reshape_step5_fused_expert_weights,
 )
+from vllm_ascend.utils import vllm_version_is
 
 # ---------------------------------------------------------------------------
 # _kv_cache_torch_dtype
@@ -367,15 +369,28 @@ def test_dsa_attention_get_kv_cache_spec(dsa_env):
     vllm_config = _vllm_config(cache_dtype="fp16")
     attn = _make_dsa(vllm_config, _sparse_config())
 
-    spec = attn.get_kv_cache_spec(vllm_config)
+    if vllm_version_is("0.34.0"):
+        from vllm.v1.kv_cache_interface import FullAttentionSpec
 
-    assert spec == FullAttentionSpec(
-        block_size=128,
-        num_kv_heads=1,
-        head_size=128,
-        head_size_v=128,
-        dtype=torch.float16,
-    )
+        spec = attn.get_kv_cache_spec(vllm_config)
+        assert spec == FullAttentionSpec(
+            block_size=128,
+            num_kv_heads=1,
+            head_size=128,
+            head_size_v=128,
+            dtype=torch.float16,
+        )
+    else:
+        layer_cfg = attn.get_kv_cache_config(vllm_config)
+        assert layer_cfg == FullAttentionManager.layer_config(
+            AttentionSpec(
+                block_size=128,
+                num_kv_heads=1,
+                head_size=128,
+                head_size_v=128,
+                dtype=torch.float16,
+            )
+        )
 
 
 # ---------------------------------------------------------------------------

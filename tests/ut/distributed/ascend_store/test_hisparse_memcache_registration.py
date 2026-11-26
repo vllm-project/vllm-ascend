@@ -8,18 +8,18 @@ from unittest.mock import Mock, call, patch
 import pytest
 import torch
 from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorRole
+from vllm.v1.core.single_type_kv_cache_manager import FullAttentionManager
 from vllm.v1.hisparse.layout import get_hisparse_kv_cache_groups
 from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
     KVCacheGroupRole,
-    KVCacheGroupSpec,
     KVCacheLayout,
     KVCacheTensor,
     SparseCacheRole,
-    UniformTypeKVCacheSpecs,
 )
 from vllm.v1.worker.utils import allocate_kv_cache
 
+from tests.ut.kv_cache_test_utils import is_v034, make_kv_cache_group
 from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec, AscendSFAIndexerCacheSpec
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector import AscendStoreConnector
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.memcache_backend import (
@@ -289,7 +289,15 @@ def test_hisparse_groups_register_with_independent_host_blocks(
         load_config=SimpleNamespace(load_format="auto"),
         speculative_config=None,
     )
-    groups = get_hisparse_kv_cache_groups(config, {source_name: source_spec, indexer_name: indexer_spec})
+    layer_inputs = (
+        {source_name: source_spec, indexer_name: indexer_spec}
+        if is_v034()
+        else {
+            source_name: FullAttentionManager.layer_config(source_spec),
+            indexer_name: FullAttentionManager.layer_config(indexer_spec),
+        }
+    )
+    groups = get_hisparse_kv_cache_groups(config, layer_inputs)
     assert groups is not None
     resident_name = groups[2].layer_names[0]
     hot_name = groups[3].layer_names[0]
@@ -414,13 +422,18 @@ def test_hisparse_groups_register_with_independent_host_blocks(
     worker.kv_cache_config.kv_cache_tensors[1].block_stride += 512
     assert pool_key() != original_key
     worker.kv_cache_config.kv_cache_tensors[1].block_stride -= 512
-    spec = groups[1].kv_cache_spec
     replacement = replace(indexer_spec, block_size=64)
-    groups[1].kv_cache_spec = (
-        replace(spec, block_size=64, kv_cache_specs={indexer_name: replacement})
-        if isinstance(spec, UniformTypeKVCacheSpecs)
-        else replacement
-    )
+    if is_v034():
+        from vllm.v1.kv_cache_interface import UniformTypeKVCacheSpecs
+
+        spec = groups[1].kv_cache_spec
+        groups[1].kv_cache_spec = (
+            replace(spec, block_size=64, kv_cache_specs={indexer_name: replacement})
+            if isinstance(spec, UniformTypeKVCacheSpecs)
+            else replacement
+        )
+    else:
+        groups[1] = replace(groups[1], block_size=64, kv_cache_specs={indexer_name: replacement})
     assert pool_key() != original_key
 
 
@@ -467,7 +480,14 @@ def test_buffer_descriptor_rejects_invalid_geometry(overrides, message):
 
 def test_register_hisparse_views_requires_sized_host_pool():
     spec = AscendMLAAttentionSpec(block_size=128, num_kv_heads=1, head_size=128, dtype=torch.bfloat16)
-    source = KVCacheGroupSpec(["source"], spec, host_resident=True, role=KVCacheGroupRole.HISPARSE_SOURCE)
+    if is_v034():
+        source = make_kv_cache_group(["source"], spec, host_resident=True, role=KVCacheGroupRole.HISPARSE_SOURCE)
+    else:
+        from vllm.v1.core.single_type_kv_cache_manager import HiSparseSourceManager
+
+        source = make_kv_cache_group(
+            ["source"], spec, manager_config=HiSparseSourceManager.config(), host_resident=True
+        )
     worker = KVPoolWorker.__new__(KVPoolWorker)
     worker.use_recoverssm = False
     worker.kv_cache_config = KVCacheConfig(1, [], [source])
@@ -487,7 +507,7 @@ def test_hisparse_late_view_failure_leaves_all_bindings_untouched(failure):
         block_size=128, num_kv_heads=1, head_size=128, dtype=torch.bfloat16, cache_role=SparseCacheRole.INDEXER
     )
     tensors = [KVCacheTensor(size, names[:2], 32768, size), KVCacheTensor(size, names[2:], 32768, size)]
-    config = KVCacheConfig(1, tensors, [KVCacheGroupSpec(names, spec)])
+    config = KVCacheConfig(1, tensors, [make_kv_cache_group(names, spec)])
     slab = torch.zeros(padded_size, dtype=torch.int8)
     typed = slab[:size].view(torch.bfloat16).view(3, 1, 1, 128, 128)
     original = dict(zip(names, typed.unbind(), strict=True))

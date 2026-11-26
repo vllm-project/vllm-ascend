@@ -43,9 +43,18 @@ def initialize_gdn_checkpoints(layer) -> None:
         )
         return
     from vllm.model_executor.layers.mamba.checkpoint import MambaPrefillCheckpointExporter
-    from vllm.v1.kv_cache_interface import MambaSpec
 
-    if "num_prefill_checkpoint_blocks" not in MambaSpec.__dataclass_fields__:
+    from vllm_ascend.utils import vllm_version_is
+
+    if vllm_version_is("0.34.0"):
+        from vllm.v1.kv_cache_interface import MambaSpec
+
+        checkpoint_fields = MambaSpec.__dataclass_fields__
+    else:
+        from vllm.v1.core.single_type_kv_cache_manager import MambaManager
+
+        checkpoint_fields = MambaManager.Params.__dataclass_fields__
+    if "num_prefill_checkpoint_blocks" not in checkpoint_fields:
         raise ValueError("GDN internal checkpoints require vLLM with PR #60050")
     layer._ascend_internal_checkpoint_enabled = True
     layer.register_buffer("_ascend_checkpoint_workspace", None, persistent=False)

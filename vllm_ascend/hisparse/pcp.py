@@ -9,7 +9,7 @@ Core retains residency scheduling, DMA and the Host write completion fence.
 import torch
 from vllm.distributed.kv_transfer.kv_connector.v1.hisparse.connector import HiSparseConnector
 from vllm.forward_context import get_forward_context, is_forward_context_available
-from vllm.v1.kv_cache_interface import HiSparseHotSpec, HiSparseResidentSpec
+from vllm.v1.core.single_type_kv_cache_manager import HiSparseHotManager, HiSparseResidentManager
 from vllm.v1.worker.gpu.kv_connector import ActiveKVConnector
 
 
@@ -76,11 +76,13 @@ class PCPHiSparseConnector(ActiveKVConnector):
         self._global_block_tables = block_tables
         worker = self.kv_connector.connector_worker
         groups = worker.kv_cache_config.kv_cache_groups
-        resident_groups = [i for i, group in enumerate(groups) if isinstance(group.kv_cache_spec, HiSparseResidentSpec)]
+        resident_groups = [
+            i for i, group in enumerate(groups) if issubclass(group.manager_cls, HiSparseResidentManager)
+        ]
         hot_groups = [
             i
             for i, group in enumerate(groups)
-            if isinstance(group.kv_cache_spec, HiSparseHotSpec)
+            if issubclass(group.manager_cls, HiSparseHotManager)
             for _ in group.layer_names
         ]
         self._pcp_bindings = []

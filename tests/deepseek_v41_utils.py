@@ -7,20 +7,24 @@ from typing import Any
 
 import torch
 import torch.nn.functional as F
-from vllm.v1.kv_cache_interface import CircularBufferSpec
-
-from vllm_ascend.core.kv_cache_interface import (
-    AscendMLAAttentionSpec,
-    AscendSlidingWindowMLASpec,
+from vllm.v1.core.single_type_kv_cache_manager import (
+    CircularBufferManager,
+    FullAttentionManager,
+    SlidingWindowManager,
 )
+from vllm.v1.kv_cache_interface import AttentionSpec
+
+from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec
 from vllm_ascend.models.deepseek_v41.cache_config import (
     STATE_RING_ROWS,
     get_deepseek_v41_kv_cache_config,
     get_deepseek_v41_pool_bytes_per_block,
     group_cache_specs,
+    group_layer_configs,
     make_cache_groups,
 )
 from vllm_ascend.models.deepseek_v41.model import build_layer_plan
+from vllm_ascend.utils import vllm_version_is
 
 
 def build_v41_cache_specs(config: Any, vllm_config: Any, prefix: str = "model"):
@@ -31,20 +35,38 @@ def build_v41_cache_specs(config: Any, vllm_config: Any, prefix: str = "model"):
     width = config.head_dim
     index_width = config.index_head_dim
     window = config.sliding_window
+    is_v034 = vllm_version_is("0.34.0")
+    if is_v034:
+        from vllm.v1.kv_cache_interface import CircularBufferSpec
+
+        from vllm_ascend.core.kv_cache_interface import AscendSlidingWindowMLASpec
+
     specs = {}
     for role in build_layer_plan(config).layers:
         attn_prefix = f"{prefix}.layers.{role.layer_idx}.self_attn"
-        specs[f"{attn_prefix}.swa_cache"] = AscendSlidingWindowMLASpec(
-            block_size=block_size,
-            num_kv_heads=1,
-            head_size=width,
-            dtype=torch.bfloat16,
-            sliding_window=window,
-            model_version="deepseek_v41",
-        )
+        if is_v034:
+            specs[f"{attn_prefix}.swa_cache"] = AscendSlidingWindowMLASpec(
+                block_size=block_size,
+                num_kv_heads=1,
+                head_size=width,
+                dtype=torch.bfloat16,
+                sliding_window=window,
+                model_version="deepseek_v41",
+            )
+        else:
+            specs[f"{attn_prefix}.swa_cache"] = SlidingWindowManager.layer_config(
+                AscendMLAAttentionSpec(
+                    block_size=block_size,
+                    num_kv_heads=1,
+                    head_size=width,
+                    dtype=torch.bfloat16,
+                    model_version="deepseek_v41",
+                ),
+                sliding_window=window,
+            )
         if not role.is_kv_source:
             continue
-        specs[f"{attn_prefix}.long_kv_cache"] = AscendMLAAttentionSpec(
+        long_kv_spec = AscendMLAAttentionSpec(
             block_size=block_size,
             num_kv_heads=1,
             head_size=width,
@@ -52,7 +74,7 @@ def build_v41_cache_specs(config: Any, vllm_config: Any, prefix: str = "model"):
             tokens_per_state=role.compress_ratio,
             model_version="deepseek_v41",
         )
-        specs[f"{attn_prefix}.indexer.k_cache"] = AscendMLAAttentionSpec(
+        index_spec = AscendMLAAttentionSpec(
             block_size=block_size,
             num_kv_heads=1,
             head_size=index_width,
@@ -62,14 +84,31 @@ def build_v41_cache_specs(config: Any, vllm_config: Any, prefix: str = "model"):
             scale_dim=1,
             scale_dtype=torch.float16,
         )
+        specs[f"{attn_prefix}.long_kv_cache"] = (
+            long_kv_spec if is_v034 else FullAttentionManager.layer_config(long_kv_spec)
+        )
+        specs[f"{attn_prefix}.indexer.k_cache"] = (
+            index_spec if is_v034 else FullAttentionManager.layer_config(index_spec)
+        )
         if role.compress_ratio == 2:
-            specs[f"{attn_prefix}.compressor.state_cache"] = CircularBufferSpec(
-                block_size=STATE_RING_ROWS,
-                num_kv_heads=1,
-                head_size=2 * width,
-                dtype=torch.float32,
-                head_size_v=0,
-            )
+            if is_v034:
+                specs[f"{attn_prefix}.compressor.state_cache"] = CircularBufferSpec(
+                    block_size=STATE_RING_ROWS,
+                    num_kv_heads=1,
+                    head_size=2 * width,
+                    dtype=torch.float32,
+                    head_size_v=0,
+                )
+            else:
+                specs[f"{attn_prefix}.compressor.state_cache"] = CircularBufferManager.layer_config(
+                    AttentionSpec(
+                        block_size=STATE_RING_ROWS,
+                        num_kv_heads=1,
+                        head_size=2 * width,
+                        dtype=torch.float32,
+                        head_size_v=0,
+                    )
+                )
     return specs
 
 
@@ -290,17 +329,33 @@ def make_cache_config(num_blocks, *, block_size=128, head_size=512, index_size=1
         )
     )
     specs = build_v41_cache_specs(config, runtime)
+    is_v034 = vllm_version_is("0.34.0")
     for stage in range(draft_layers):
-        specs[f"mtp.{stage}.self_attn.swa_cache"] = AscendSlidingWindowMLASpec(
-            block_size=block_size,
-            num_kv_heads=1,
-            head_size=head_size,
-            dtype=torch.bfloat16,
-            sliding_window=config.sliding_window,
-            cache_dtype_str="bfloat16",
-            model_version="deepseek_v41",
-        )
-    groups = make_cache_groups(group_cache_specs(specs))
+        if is_v034:
+            from vllm_ascend.core.kv_cache_interface import AscendSlidingWindowMLASpec
+
+            specs[f"mtp.{stage}.self_attn.swa_cache"] = AscendSlidingWindowMLASpec(
+                block_size=block_size,
+                num_kv_heads=1,
+                head_size=head_size,
+                dtype=torch.bfloat16,
+                sliding_window=config.sliding_window,
+                cache_dtype_str="bfloat16",
+                model_version="deepseek_v41",
+            )
+        else:
+            specs[f"mtp.{stage}.self_attn.swa_cache"] = SlidingWindowManager.layer_config(
+                AscendMLAAttentionSpec(
+                    block_size=block_size,
+                    num_kv_heads=1,
+                    head_size=head_size,
+                    dtype=torch.bfloat16,
+                    cache_dtype_str="bfloat16",
+                    model_version="deepseek_v41",
+                ),
+                sliding_window=config.sliding_window,
+            )
+    groups = make_cache_groups(group_cache_specs(specs)) if is_v034 else group_layer_configs(specs)
     return get_deepseek_v41_kv_cache_config(
         runtime,
         groups,
@@ -315,15 +370,27 @@ def allocate_cache_views(config, device="cpu"):
         create_kv_cache_runtime_views,
     )
 
-    specs = {n: g.kv_cache_spec.kv_cache_specs[n] for g in config.kv_cache_groups for n in g.layer_names}
     context = SimpleNamespace(compilation_config=SimpleNamespace(static_forward_context={}))
-    layers = {name: DeepseekV41CacheLayer(context, name, spec) for name, spec in specs.items()}
+    if vllm_version_is("0.34.0"):
+        specs = {n: g.kv_cache_spec.kv_cache_specs[n] for g in config.kv_cache_groups for n in g.layer_names}
+        layers = {name: DeepseekV41CacheLayer(context, name, spec) for name, spec in specs.items()}
+        block_sizes = [group.kv_cache_spec.block_size for group in config.kv_cache_groups]
+    else:
+        from vllm.v1.kv_cache_interface import KVCacheLayerConfig
+
+        layer_configs = {
+            n: KVCacheLayerConfig(g.manager_config, g.kv_cache_specs[n])
+            for g in config.kv_cache_groups
+            for n in g.layer_names
+        }
+        layers = {name: DeepseekV41CacheLayer(context, name, lc) for name, lc in layer_configs.items()}
+        block_sizes = [group.block_size for group in config.kv_cache_groups]
     raw = torch.zeros(config.kv_cache_tensors[0].size, dtype=torch.int8, device=device)
     caches = create_kv_cache_runtime_views(
         config,
         raw,
         _get_cache_attention_groups(config, layers, {}),
-        [group.kv_cache_spec.block_size for group in config.kv_cache_groups],
+        block_sizes,
         {},
     )
     for name, cache in caches.items():

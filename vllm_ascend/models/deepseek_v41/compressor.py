@@ -7,11 +7,13 @@ from typing import cast
 import torch
 from torch import nn
 from vllm.model_executor.layers.layernorm import RMSNorm
-from vllm.v1.kv_cache_interface import CircularBufferSpec
+from vllm.v1.core.single_type_kv_cache_manager import CircularBufferManager
+from vllm.v1.kv_cache_interface import AttentionSpec
 
 from vllm_ascend.attention.dsa_v41 import DeepseekV41CacheLayer
-from vllm_ascend.core.kv_cache_interface import AscendCircularBufferSpec
+from vllm_ascend.core.single_type_kv_cache_manager import AscendCircularBufferManager
 from vllm_ascend.models.deepseek_v41.cache_config import STATE_RING_ROWS, uses_a5_packed_cache
+from vllm_ascend.utils import vllm_version_is
 
 
 class DeepseekV41Compressor(nn.Module):
@@ -35,17 +37,34 @@ class DeepseekV41Compressor(nn.Module):
                 )
             # Standalone unfused-reference tests may supply pages explicitly.
             if vllm_config is not None:
-                state_spec = AscendCircularBufferSpec if uses_a5_packed_cache() else CircularBufferSpec
-                self.state_cache = DeepseekV41CacheLayer(
-                    vllm_config,
-                    f"{prefix}.state_cache",
-                    state_spec(
+                if vllm_version_is("0.34.0"):
+                    from vllm.v1.kv_cache_interface import CircularBufferSpec
+
+                    from vllm_ascend.core.kv_cache_interface import AscendCircularBufferSpec
+
+                    state_spec_cls = AscendCircularBufferSpec if uses_a5_packed_cache() else CircularBufferSpec
+                    state_target = state_spec_cls(
                         block_size=STATE_RING_ROWS,
                         num_kv_heads=1,
                         head_size=2 * self.width,
                         dtype=torch.float32,
                         head_size_v=0,
-                    ),
+                    )
+                else:
+                    manager_cls = AscendCircularBufferManager if uses_a5_packed_cache() else CircularBufferManager
+                    state_target = manager_cls.layer_config(
+                        AttentionSpec(
+                            block_size=STATE_RING_ROWS,
+                            num_kv_heads=1,
+                            head_size=2 * self.width,
+                            dtype=torch.float32,
+                            head_size_v=0,
+                        )
+                    )
+                self.state_cache = DeepseekV41CacheLayer(
+                    vllm_config,
+                    f"{prefix}.state_cache",
+                    state_target,
                 )
 
     def prepare_ring_compressor(self, max_tokens, device):

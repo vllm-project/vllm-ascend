@@ -8,16 +8,17 @@ from types import SimpleNamespace
 import pytest
 import torch
 from vllm.config import KVTransferConfig
-from vllm.v1.kv_cache_interface import (
-    CircularBufferSpec,
-    FullAttentionSpec,
-    HiddenStateCacheSpec,
-    KVCacheGroupSpec,
-    MambaSpec,
-    MLAAttentionSpec,
-    UniformTypeKVCacheSpecs,
-)
+from vllm.v1.kv_cache_interface import HiddenStateCacheSpec
 
+from tests.ut.kv_cache_test_utils import (
+    get_full_attention_spec_cls,
+    is_v034,
+    make_circular_buffer_layer_config,
+    make_full_attention_layer_config,
+    make_kv_cache_group,
+    make_mamba_layer_config,
+    make_mla_layer_config,
+)
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.cache_planner import (
     LayerwiseCachePlanner,
     get_spec_reuse_rules,
@@ -40,35 +41,37 @@ from vllm_ascend.models.qwen4_exp.cache_reuse import QWEN4_EXP_SPEC_REUSE_RULES
 
 def _groups():
     sources = [f"model.layers.{layer}.self_attn" for layer in range(3, 48, 4)]
-    main = FullAttentionSpec(block_size=256, num_kv_heads=1, head_size=64, head_size_v=64, dtype=torch.bfloat16)
-    raw = CircularBufferSpec(
+    main = make_full_attention_layer_config(
+        block_size=256, num_kv_heads=1, head_size=64, head_size_v=64, dtype=torch.bfloat16
+    )
+    raw = make_circular_buffer_layer_config(
         block_size=4, num_kv_heads=1, head_size=32, head_size_v=0, dtype=torch.bfloat16, page_size_padded=65536
     )
-    compressed = MLAAttentionSpec(
+    compressed = make_mla_layer_config(
         block_size=256, num_kv_heads=1, head_size=32, dtype=torch.bfloat16, tokens_per_state=4, page_size_padded=65536
     )
-    state = MambaSpec(
+    state = make_mamba_layer_config(
         block_size=256,
         shapes=((3, 64), (8, 32, 32)),
         dtypes=(torch.bfloat16, torch.float32),
         mamba_cache_mode="align",
         page_size_padded=65536,
     )
-    ple = MambaSpec(
+    ple = make_mamba_layer_config(
         block_size=256, shapes=((3, 64),), dtypes=(torch.bfloat16,), mamba_cache_mode="align", tp_replicated=True
     )
     composite = {f"{source}.attn": main for source in sources}
     composite.update({f"{source}.indexer.compressed_key_cache": compressed for source in sources})
     return [
-        KVCacheGroupSpec([f"{source}.indexer.raw_key_cache" for source in sources], raw),
-        KVCacheGroupSpec(list(composite), UniformTypeKVCacheSpecs.from_specs(composite)),
+        make_kv_cache_group([f"{source}.indexer.raw_key_cache" for source in sources], raw),
+        make_kv_cache_group(composite),
         *[
-            KVCacheGroupSpec([f"model.layers.{layer}.linear_attn" for layer in layers], state)
+            make_kv_cache_group([f"model.layers.{layer}.linear_attn" for layer in layers], state)
             for layers in (
                 tuple(layer for layer in range(start, start + 16) if layer % 4 != 3) for start in (0, 16, 32)
             )
         ],
-        KVCacheGroupSpec(["model.layers.1.ple"], ple),
+        make_kv_cache_group(["model.layers.1.ple"], ple),
     ]
 
 
@@ -111,7 +114,7 @@ def test_rules_keep_ple_raw_and_hidden_resident():
     hidden = HiddenStateCacheSpec(block_size=256, num_kv_heads=1, head_size=64, dtype=torch.bfloat16)
     assert not LayerwiseCachePlanner.can_reuse_spec(hidden, QWEN4_EXP_SPEC_REUSE_RULES)
     with pytest.raises(TypeError):
-        QWEN4_EXP_SPEC_REUSE_RULES[FullAttentionSpec] = False
+        QWEN4_EXP_SPEC_REUSE_RULES[get_full_attention_spec_cls()] = False
 
 
 @pytest.mark.parametrize("buffers", [2, 4, 8])
@@ -206,7 +209,15 @@ def test_shared_buffers_require_memcache_backend(backend):
 def test_common_planner_rejects_unsupported_qwen_state(unsupported):
     groups = _groups()
     runtime = _runtime()
-    groups[2] = replace(groups[2], kv_cache_spec=replace(groups[2].kv_cache_spec, **unsupported))
+    if is_v034():
+        groups[2] = replace(groups[2], kv_cache_spec=replace(groups[2].kv_cache_spec, **unsupported))
+    else:
+        groups[2] = replace(
+            groups[2],
+            manager_config=replace(
+                groups[2].manager_config, params=replace(groups[2].manager_config.params, **unsupported)
+            ),
+        )
     config = get_qwen4_exp_kv_cache_config(runtime, groups, 3 * get_qwen4_exp_pool_bytes_per_block(groups))
     with pytest.raises(NotImplementedError, match="unsupported state semantics"):
         plan_layerwise_cache_reuse(config, runtime)
@@ -215,7 +226,10 @@ def test_common_planner_rejects_unsupported_qwen_state(unsupported):
 def test_draft_state_stays_resident():
     groups = _groups()
     draft_name = "model.mtp.0.linear_attn"
-    groups.append(KVCacheGroupSpec([draft_name], groups[2].kv_cache_spec))
+    if is_v034():
+        groups.append(make_kv_cache_group([draft_name], groups[2].kv_cache_spec))
+    else:
+        groups.append(replace(groups[2], kv_cache_specs={draft_name: groups[2].distinct_specs[0]}))
     runtime = _runtime()
     cost = get_qwen4_exp_pool_bytes_per_block(groups)
     config = get_qwen4_exp_kv_cache_config(runtime, groups, 3 * cost)

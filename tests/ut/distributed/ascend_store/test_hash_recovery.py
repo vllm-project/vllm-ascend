@@ -10,9 +10,9 @@ import pytest
 import torch
 from vllm.v1.core.kv_cache_utils import BlockHash
 from vllm.v1.core.sched.output import KVConnectorBlockState
-from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheGroupSpec, MambaSpec
 
 import tests.ut.distributed.ascend_store._mock_deps  # noqa: F401
+from tests.ut.kv_cache_test_utils import make_full_attention_spec, make_kv_cache_group, make_mamba_layer_config
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store import coordinator, metadata
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.in_flight_save_blocks import InFlightSaveBlockTracker
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.kv_transfer import KVCacheStoreSendingThread
@@ -29,11 +29,12 @@ else:
 
 def groups():
     return [
-        KVCacheGroupSpec(
-            ["attention"], FullAttentionSpec(block_size=16, num_kv_heads=1, head_size=1, dtype=torch.float32)
+        make_kv_cache_group(
+            ["attention"], make_full_attention_spec(block_size=16, num_kv_heads=1, head_size=1, dtype=torch.float32)
         ),
-        KVCacheGroupSpec(
-            ["mamba"], MambaSpec(block_size=16, shapes=((2,),), dtypes=(torch.float32,), mamba_cache_mode="align")
+        make_kv_cache_group(
+            ["mamba"],
+            make_mamba_layer_config(block_size=16, shapes=((2,),), dtypes=(torch.float32,), mamba_cache_mode="align"),
         ),
     ]
 

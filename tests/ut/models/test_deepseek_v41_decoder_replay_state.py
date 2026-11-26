@@ -327,7 +327,6 @@ def test_lazy_decoder_replay_builder_uses_current_config(state, monkeypatch):
             assert get_current_vllm_config() is state.config
             return object
 
-    monkeypatch.setattr(replay_mod, "is_circular_kv_cache_spec", lambda spec: False)
     state.slots = None
     group = SimpleNamespace(kv_cache_spec=object(), backend=Backend())
     replay_inputs = inputs()
@@ -353,7 +352,6 @@ def test_decoder_replay_builder_prepares_pcp_rope(state, monkeypatch):
             prepared()
 
     monkeypatch.setattr(replay_mod, "AscendDSAV41MetadataBuilder", Builder)
-    monkeypatch.setattr(replay_mod, "is_circular_kv_cache_spec", lambda spec: False)
     state.slots = None
     group = SimpleNamespace(
         kv_cache_spec=object(),

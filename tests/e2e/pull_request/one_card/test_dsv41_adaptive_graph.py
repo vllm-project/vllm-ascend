@@ -10,12 +10,18 @@ import pytest
 import torch
 import torch_npu  # noqa: F401
 from vllm.config import CUDAGraphMode
-from vllm.v1.kv_cache_interface import CircularBufferSpec
+from vllm.v1.core.single_type_kv_cache_manager import CircularBufferManager
+from vllm.v1.kv_cache_interface import AttentionSpec
 from vllm.v1.worker.utils import AttentionGroup
 
-from vllm_ascend.attention.dsa_v41 import AscendDSAV41StateMetadataBuilder, DeepseekV41StateBackend
+from vllm_ascend.attention.dsa_v41 import (
+    AscendDSAV41StateMetadataBuilder,
+    DeepseekV41CacheLayer,
+    DeepseekV41StateBackend,
+)
 from vllm_ascend.models.deepseek_v41.cache_config import STATE_RING_ROWS
 from vllm_ascend.ops.triton.compressor.compressor_triton import _cube_core_num, compressor_from_projected
+from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2.model_states import default
 
 
@@ -37,9 +43,21 @@ def test_v41_runner_full_graph_replays_variable_budgets(monkeypatch, max_query_l
             hf_text_config=SimpleNamespace(head_dim=width, qk_rope_head_dim=64, sliding_window=128)
         ),
         parallel_config=SimpleNamespace(prefill_context_parallel_size=1, tensor_parallel_size=1),
+        compilation_config=SimpleNamespace(static_forward_context={}),
     )
-    spec = CircularBufferSpec(block_size=STATE_RING_ROWS, num_kv_heads=1, head_size=2 * width, dtype=torch.float32)
     name = "model.layers.2.self_attn.compressor.state_cache"
+    if vllm_version_is("0.34.0"):
+        from vllm.v1.kv_cache_interface import CircularBufferSpec
+
+        spec = CircularBufferSpec(block_size=STATE_RING_ROWS, num_kv_heads=1, head_size=2 * width, dtype=torch.float32)
+        group: Any = SimpleNamespace(kv_cache_spec=spec)
+    else:
+        from vllm.v1.kv_cache_interface import KVCacheGroup
+
+        spec = AttentionSpec(block_size=STATE_RING_ROWS, num_kv_heads=1, head_size=2 * width, dtype=torch.float32)
+        layer_config = CircularBufferManager.layer_config(spec)
+        DeepseekV41CacheLayer(config, name, layer_config)
+        group = KVCacheGroup.from_layers({name: layer_config})
     builder = AscendDSAV41StateMetadataBuilder(spec, [name], config, device)
     # Static source RoPE is a model-loading fixture; no model forward is mocked.
     rope = torch.ones(1024, 1, 1, 64, dtype=torch.float32, device=device)
@@ -56,7 +74,7 @@ def test_v41_runner_full_graph_replays_variable_budgets(monkeypatch, max_query_l
             )
         ]
     ]
-    cache_config: Any = SimpleNamespace(kv_cache_groups=[SimpleNamespace(kv_cache_spec=spec)])
+    cache_config: Any = SimpleNamespace(kv_cache_groups=[group])
     runner_state: Any = default.AscendModelState.__new__(default.AscendModelState)
     runner_state.vllm_config = config
     runner_state.model_config = SimpleNamespace(max_model_len=1024)

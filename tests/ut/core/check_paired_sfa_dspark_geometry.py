@@ -27,8 +27,8 @@ def main():
 
     import torch
     from vllm.model_executor.models.deepseek_v2 import DeepseekV32IndexerCache
-    from vllm.v1.kv_cache_interface import MambaSpec, MLAAttentionSpec
 
+    from tests.ut.kv_cache_test_utils import is_v034, make_mamba_layer_config, make_mla_layer_config
     from vllm_ascend.models.kimi_k3 import paired_sfa_cache
     from vllm_ascend.worker.v2 import attn_utils
 
@@ -81,14 +81,20 @@ def main():
     indexer = DeepseekV32IndexerCache.__new__(DeepseekV32IndexerCache)
     torch.nn.Module.__init__(indexer)
     indexer.is_draft_layer = False
-    indexer.get_kv_cache_spec = lambda cfg: MLAAttentionSpec(
-        block_size=cfg.cache_config.block_size,
-        num_kv_heads=1,
-        head_size=128,
-        dtype=torch.int8,
-        cache_dtype_str="int8",
-    )
-    mamba = MambaSpec(
+    def _indexer_entry(cfg):
+        return make_mla_layer_config(
+            block_size=cfg.cache_config.block_size,
+            num_kv_heads=1,
+            head_size=128,
+            dtype=torch.int8,
+            cache_dtype_str="int8",
+        )
+
+    if is_v034():
+        indexer.get_kv_cache_spec = _indexer_entry
+    else:
+        indexer.get_kv_cache_config = _indexer_entry
+    mamba = make_mamba_layer_config(
         block_size=args.block_size,
         shapes=((3, 2304), (6, 128, 128)),
         dtypes=(torch.bfloat16, torch.float32),
@@ -99,7 +105,9 @@ def main():
         target: make_mla(target, "int8", sparse=True),
         indexer_name: indexer,
         "language_model.model.layers.0.linear_attn": SimpleNamespace(
-            get_kv_cache_spec=lambda cfg: mamba, is_draft_layer=False
+            get_kv_cache_spec=lambda cfg: mamba,
+            get_kv_cache_config=lambda cfg: mamba,
+            is_draft_layer=False,
         ),
     }
     for index in range(5):
@@ -112,11 +120,13 @@ def main():
         patch.object(attn_utils, "enable_sfa", return_value=True),
         patch.object(attn_utils, "get_ascend_config", return_value=ascend_config),
     ):
-        captured = attn_utils.get_kv_cache_spec(config)
+        captured = attn_utils.get_kv_cache_spec(config) if is_v034() else attn_utils.get_kv_cache_layer_configs(config)
 
     assert captured, "Worker conversion did not produce cache specs"
-    summary = {
-        name: {
+    summary = {}
+    for name, entry in captured.items():
+        spec = getattr(entry, "spec", entry)
+        summary[name] = {
             "type": type(spec).__name__,
             "block_size": spec.block_size,
             "head_size": getattr(spec, "head_size", None),
@@ -126,8 +136,6 @@ def main():
             "packed_sfa": getattr(spec, "cache_sparse_sfa_c8", False),
             "non_causal": getattr(spec, "non_causal_multi_token_decode", False),
         }
-        for name, spec in captured.items()
-    }
     target_only = {name: spec for name, spec in captured.items() if not name.startswith("model.layers.")}
     groups = paired_sfa_cache.paired_sfa_cache_groups(config, target_only)
     print(

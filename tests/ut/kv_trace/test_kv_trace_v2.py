@@ -6,7 +6,9 @@ from collections import namedtuple
 from types import SimpleNamespace as NS
 
 import pytest
+import torch
 
+from tests.ut.kv_cache_test_utils import make_full_attention_spec, make_kv_cache_group
 from .test_kv_trace_runtime import message, metadata, reasons
 from .test_kv_trace_runtime import runtime_fixture as runtime_fixture
 
@@ -18,7 +20,13 @@ def adapter_fixture(runtime):
         block_tables=NS(block_sizes=[128], redirect_writes_to_null_block=False),
         attn_groups=[[NS(kernel_block_size=128, kv_cache_spec=NS(block_size=128))]],
         kv_cache_config=NS(
-            num_blocks=8, kv_cache_groups=[NS(layer_names=["layer0"], kv_cache_spec=NS(block_size=128, head_size=64))]
+            num_blocks=8,
+            kv_cache_groups=[
+                make_kv_cache_group(
+                    ["layer0"],
+                    make_full_attention_spec(block_size=128, num_kv_heads=1, head_size=64, dtype=torch.bfloat16),
+                )
+            ],
         ),
         next_metadata={},
         is_pooling_model=False,
@@ -83,7 +91,12 @@ def test_enabled_install_wraps_only_the_existing_mrv2_boundaries(runtime):
         attn_groups=[[NS(kernel_block_size=128, kv_cache_spec=NS(block_size=128))]],
         kv_cache_config=NS(
             num_blocks=8,
-            kv_cache_groups=[NS(layer_names=["layer0"], kv_cache_spec=NS(block_size=128, head_size=64))],
+            kv_cache_groups=[
+                make_kv_cache_group(
+                    ["layer0"],
+                    make_full_attention_spec(block_size=128, num_kv_heads=1, head_size=64, dtype=torch.bfloat16),
+                )
+            ],
         ),
         model_state=NS(prepare_attn=lambda batch, mode: {"layer0": metadata([128], [[1]], [1])}),
         update_requests=lambda output: "updated",

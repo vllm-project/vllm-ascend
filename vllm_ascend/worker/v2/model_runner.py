@@ -76,7 +76,7 @@ from vllm_ascend.attention.attention_v1 import AscendAttentionBackend
 from vllm_ascend.attention.fa_v1 import AscendFlashAttentionBackend
 from vllm_ascend.attention.flashmla import prepare_flashmla_batch_req_state
 from vllm_ascend.attention.mla_v1 import AscendMLABackend
-from vllm_ascend.core.kv_cache_interface import is_circular_kv_cache_spec
+from vllm_ascend.core.kv_cache_interface import is_circular_cache_group
 from vllm_ascend.distributed.expert_transfer import expert_offload_utils as expert_offload
 from vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.dspark_context import (
     bind_dspark_context_receiver,
@@ -129,6 +129,7 @@ from vllm_ascend.utils import (
     requires_lmhead_dp_sync,
     set_potential_max_tokens,
     should_skip_allreduce_across_dp_group,
+    vllm_version_is,
 )
 from vllm_ascend.worker.device_metadata import TargetDeviceMetadata
 from vllm_ascend.worker.utils import disable_compilation
@@ -420,17 +421,31 @@ class NPUModelRunner(GPUModelRunner):
         self._finalize_dump_data()
         return output
 
-    def get_kv_cache_spec(self) -> dict[str, KVCacheSpec]:
-        kv_cache_spec = super().get_kv_cache_spec()
+    if not vllm_version_is("0.34.0"):
 
-        return apply_dspark_resident_kv_specs(
-            kv_cache_spec,
-            self.vllm_config,
-            self.speculator,
-            sparse_offload_enabled=self.ascend_config.sparse_kv_offload_config.enabled,
-            is_last_pp_rank=self.is_last_pp_rank,
-            shared_kv_cache_layers=getattr(self, "shared_kv_cache_layers", None),
-        )
+        def get_kv_cache_layer_configs(self):
+            layer_configs = super().get_kv_cache_layer_configs()
+            return apply_dspark_resident_kv_specs(
+                layer_configs,
+                self.vllm_config,
+                self.speculator,
+                sparse_offload_enabled=self.ascend_config.sparse_kv_offload_config.enabled,
+                is_last_pp_rank=self.is_last_pp_rank,
+                shared_kv_cache_layers=getattr(self, "shared_kv_cache_layers", None),
+            )
+    else:
+
+        def get_kv_cache_spec(self) -> dict[str, KVCacheSpec]:
+            kv_cache_spec = super().get_kv_cache_spec()
+
+            return apply_dspark_resident_kv_specs(
+                kv_cache_spec,
+                self.vllm_config,
+                self.speculator,
+                sparse_offload_enabled=self.ascend_config.sparse_kv_offload_config.enabled,
+                is_last_pp_rank=self.is_last_pp_rank,
+                shared_kv_cache_layers=getattr(self, "shared_kv_cache_layers", None),
+            )
 
     def _init_kv_zero_meta(self) -> None:
         """Use a tuple-aware zeroer for Ascend V1-compatible cache protocols."""
@@ -557,7 +572,7 @@ class NPUModelRunner(GPUModelRunner):
             self.model_state._offload_draft_attn_groups = (
                 [] if resident_draft_names else getattr(self.speculator, "attn_groups", [])
             )
-        if any(is_circular_kv_cache_spec(group.kv_cache_spec) for group in self.kv_cache_config.kv_cache_groups):
+        if any(is_circular_cache_group(group) for group in self.kv_cache_config.kv_cache_groups):
             from vllm_ascend.models.deepseek_v41.compressor import DeepseekV41Compressor
 
             for module in self.model.modules():
@@ -875,7 +890,12 @@ class NPUModelRunner(GPUModelRunner):
         """
         sparse_cfg = self.ascend_config.sparse_kv_offload_config
         if sparse_cfg.enabled:
-            allocate_kv_offload_topk_profile_buffers(self.get_kv_cache_spec(), self.vllm_config, sparse_cfg)
+            profile_specs = (
+                self.get_kv_cache_spec()
+                if vllm_version_is("0.34.0")
+                else {name: cfg.spec for name, cfg in self.get_kv_cache_layer_configs().items()}
+            )
+            allocate_kv_offload_topk_profile_buffers(profile_specs, self.vllm_config, sparse_cfg)
         profile_kwargs = {"randomize_inputs": randomize_inputs}
         mc2_tokens_capacity = get_mc2_tokens_capacity()
         global_tokens = self.max_num_tokens

@@ -26,7 +26,8 @@ import tests.ut.distributed.ascend_store._mock_deps  # noqa: F401, E402
 import torch
 from vllm.distributed.kv_events import BlockStored
 from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorRole
-from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheGroupSpec, MambaSpec
+from vllm.v1.kv_cache_interface import MambaSpec
+from tests.ut.kv_cache_test_utils import make_full_attention_spec, make_kv_cache_group
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector import (
     AscendStoreConnector,
     AscendStoreKVEvents,
@@ -337,7 +338,7 @@ class TestAscendStoreConnector(unittest.TestCase):
                 self.assertEqual(connector.supports_composite_kv_saves, expected)
 
     def test_parallel_validation_allows_replicas_and_state_shards(self):
-        attention = FullAttentionSpec(block_size=16, num_kv_heads=1, head_size=1, dtype=torch.float32)
+        attention = make_full_attention_spec(block_size=16, num_kv_heads=1, head_size=1, dtype=torch.float32)
         sharded = MambaSpec(block_size=16, shapes=((4,),), dtypes=(torch.float32,))
         replicated = MambaSpec(block_size=16, shapes=((4,),), dtypes=(torch.float32,), tp_replicated=True)
         module = "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector"
@@ -352,7 +353,7 @@ class TestAscendStoreConnector(unittest.TestCase):
                 config = self._make_vllm_config()
                 config.parallel_config.tensor_parallel_size = tp_size
                 config.parallel_config.prefill_context_parallel_size = pcp_size
-                cache = types.SimpleNamespace(kv_cache_groups=[KVCacheGroupSpec(["layer"], spec)])
+                cache = types.SimpleNamespace(kv_cache_groups=[make_kv_cache_group(["layer"], spec)])
                 with patch(f"{module}.create_kv_pool_scheduler") as scheduler:
                     connector = AscendStoreConnector(config, KVConnectorRole.SCHEDULER, cache)
                     scheduler.assert_called_once_with(config, False, cache)

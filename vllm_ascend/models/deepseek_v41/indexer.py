@@ -7,6 +7,7 @@ import torch_npu
 from torch import nn
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import ReplicatedLinear
+from vllm.v1.core.single_type_kv_cache_manager import FullAttentionManager
 
 from vllm_ascend.attention.dsa_v41 import (
     DeepseekV41CacheLayer,
@@ -28,6 +29,7 @@ from vllm_ascend.ops.triton.quantize_indexer_query import (
     quantize_indexer_query,
 )
 from vllm_ascend.ops.triton.quantize_mxfp4_indexer import quantize_mxfp4_indexer
+from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.device_metadata import (
     DeviceMetadataStage,
     wait_for_device_metadata,
@@ -89,24 +91,26 @@ class DeepseekV41Indexer(nn.Module):
                 dtype=torch.bfloat16,
             )
             self.k_norm = RMSNorm(self.width, eps=config.rms_norm_eps, dtype=torch.bfloat16)
+            index_spec = make_index_cache_spec(
+                block_size=vllm_config.cache_config.block_size,
+                head_size=self.width,
+                compress_ratio=compress_ratio,
+            )
             self.k_cache = DeepseekV41CacheLayer(
                 vllm_config,
                 f"{prefix}.k_cache",
-                make_index_cache_spec(
-                    block_size=vllm_config.cache_config.block_size,
-                    head_size=self.width,
-                    compress_ratio=compress_ratio,
-                ),
+                index_spec if vllm_version_is("0.34.0") else FullAttentionManager.layer_config(index_spec),
             )
-            self.k_cache_folded = (
-                DeepseekV41CacheLayer(
+            self.k_cache_folded: DeepseekV41CacheLayer | None
+            if is_candidate_source and uses_a5_packed_cache():
+                folded_spec = make_folded_index_cache_spec(block_size=vllm_config.cache_config.block_size)
+                self.k_cache_folded = DeepseekV41CacheLayer(
                     vllm_config,
                     f"{prefix}.k_cache_folded",
-                    make_folded_index_cache_spec(block_size=vllm_config.cache_config.block_size),
+                    folded_spec if vllm_version_is("0.34.0") else FullAttentionManager.layer_config(folded_spec),
                 )
-                if is_candidate_source and uses_a5_packed_cache()
-                else None
-            )
+            else:
+                self.k_cache_folded = None
 
     @staticmethod
     def _output(linear, value):

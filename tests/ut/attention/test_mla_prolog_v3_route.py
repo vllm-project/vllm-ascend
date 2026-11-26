@@ -13,7 +13,8 @@ from vllm.model_executor.layers.attention import MLAAttention
 from vllm.model_executor.layers.linear import UnquantizedLinearMethod
 from vllm.model_executor.offloader.base import NoopOffloader
 from vllm.model_executor.offloader.prefetch import PrefetchOffloader
-from vllm.v1.kv_cache_interface import SlidingWindowMLASpec
+from vllm.v1.core.single_type_kv_cache_manager import SlidingWindowManager
+from vllm.v1.kv_cache_interface import MLAAttentionSpec
 
 import vllm_ascend.attention.mla_v1 as mla_v1
 from vllm_ascend.attention.context_parallel.mla_cp import AscendMlaDCPImpl
@@ -25,7 +26,7 @@ from vllm_ascend.quantization.methods import (
     AscendW8A8FP8DynamicLinearMethod,
     AscendW8A8LinearMethod,
 )
-from vllm_ascend.utils import enable_sfa
+from vllm_ascend.utils import enable_sfa, vllm_version_is
 
 NOPE_DIM = 512
 ROPE_DIM = 64
@@ -234,7 +235,14 @@ def test_post_load_prepares_sliding_window_prolog_weights(monkeypatch):
     config = impl.vllm_config
     owner = config.compilation_config.static_forward_context[impl.layer_name]
     owner.sliding_window = BLOCK_SIZE
-    assert isinstance(owner.get_kv_cache_spec(config), SlidingWindowMLASpec)
+    if vllm_version_is("0.34.0"):
+        from vllm.v1.kv_cache_interface import SlidingWindowMLASpec
+
+        assert isinstance(owner.get_kv_cache_spec(config), SlidingWindowMLASpec)
+    else:
+        layer_config = owner.get_kv_cache_config(config)
+        assert issubclass(layer_config.manager_cls, SlidingWindowManager)
+        assert isinstance(layer_config.spec, MLAAttentionSpec)
 
     impl.process_weights_after_loading(torch.bfloat16)
 
@@ -382,7 +390,7 @@ def test_post_load_generic_spec_uses_same_layout_exclusions(monkeypatch, field, 
     impl = _make_post_load_impl(monkeypatch)
     config = impl.vllm_config
     owner = config.compilation_config.static_forward_context[impl.layer_name]
-    cache_spec = owner.get_kv_cache_spec(config)
+    cache_spec = owner.get_kv_cache_spec(config) if vllm_version_is("0.34.0") else owner.get_kv_cache_config(config).spec
     assert supports_strided_mla_cache(config, owner, cache_spec)
     object.__setattr__(cache_spec, field, value)
 

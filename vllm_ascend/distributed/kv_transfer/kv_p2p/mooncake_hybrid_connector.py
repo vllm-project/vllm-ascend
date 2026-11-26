@@ -43,17 +43,18 @@ from vllm.logger import logger
 from vllm.utils.math_utils import cdiv
 from vllm.utils.network_utils import get_ip, make_zmq_path, make_zmq_socket
 from vllm.v1.core.sched.output import SchedulerOutput
+from vllm.v1.core.single_type_kv_cache_manager import (
+    FullAttentionManager,
+    SlidingWindowManager,
+)
 from vllm.v1.kv_cache_interface import (
-    FullAttentionSpec,
     KVCacheConfig,
     MambaSpec,
-    SlidingWindowSpec,
-    UniformTypeKVCacheSpecs,
 )
 from vllm.v1.request import RequestStatus
 
 from vllm_ascend.ascend_config import get_ascend_config, init_ascend_config
-from vllm_ascend.core.kv_cache_interface import is_circular_kv_cache_spec
+from vllm_ascend.core.kv_cache_interface import is_circular_cache_group
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.utils import (
     as_kv_cache_tensors,
     collect_configured_register_regions,
@@ -544,7 +545,7 @@ class KVCacheRecvingThread(threading.Thread):
         self.use_compress = hasattr(self.vllm_config.model_config.hf_config, "compress_ratios")
         self.use_hybrid = use_hybrid
         self.has_mamba = has_mamba
-        self.kv_cache_specs = [g.kv_cache_spec for g in kv_cache_config.kv_cache_groups]
+        self.kv_cache_specs = [g.distinct_specs[0] for g in kv_cache_config.kv_cache_groups]
         self.block_size = self.vllm_config.cache_config.block_size
         self.num_layers = self.model_config.hf_text_config.num_hidden_layers
         self.pp_layer_indices = {
@@ -1372,39 +1373,30 @@ class MooncakeConnectorScheduler:
         # hybrid model config
         self.use_hybrid = (
             not vllm_config.scheduler_config.disable_hybrid_kv_cache_manager
-            and any(not isinstance(g.kv_cache_spec, FullAttentionSpec) for g in kv_cache_config.kv_cache_groups)
+            and any(
+                not (issubclass(g.manager_cls, FullAttentionManager) and g.prefix_cacheable)
+                for g in kv_cache_config.kv_cache_groups
+            )
             and len(kv_cache_config.kv_cache_groups) > 1
         )
         self.use_compress = hasattr(self.vllm_config.model_config.hf_config, "compress_ratios")
 
         self.kv_cache_specs = []
+        self._is_circular_group: list[bool] = []
         self.need_truncate = self.use_compress
         sw_sizes_tokens: list[tuple[int, int]] = []
         self.group_block_size = []
         for g in kv_cache_config.kv_cache_groups:
-            if isinstance(g.kv_cache_spec, UniformTypeKVCacheSpecs):
-                group_spec_set = []
-                for layer_name in g.layer_names:
-                    layer_spec = g.kv_cache_spec.kv_cache_specs[layer_name]
-                    if layer_spec not in group_spec_set:
-                        group_spec_set.append(layer_spec)
-                self.kv_cache_specs.append(group_spec_set)
-                self.group_block_size.append(g.kv_cache_spec.block_size)
-                if isinstance(group_spec_set[0], SlidingWindowSpec):
-                    sw_sizes_tokens.append((group_spec_set[0].sliding_window, group_spec_set[0].block_size))
-                else:
-                    sw_sizes_tokens.append((0, layer_spec.block_size))
-                if isinstance(layer_spec, MambaSpec):
-                    self.need_truncate = True
+            group_spec_set = list(g.distinct_specs)
+            self.kv_cache_specs.append(group_spec_set)
+            self._is_circular_group.append(is_circular_cache_group(g))
+            self.group_block_size.append(g.block_size)
+            if issubclass(g.manager_cls, SlidingWindowManager):
+                sw_sizes_tokens.append((getattr(g.manager_config.params, "sliding_window", 0), g.block_size))
             else:
-                self.group_block_size.append(g.kv_cache_spec.block_size)
-                if isinstance(g.kv_cache_spec, SlidingWindowSpec):
-                    sw_sizes_tokens.append((g.kv_cache_spec.sliding_window, g.kv_cache_spec.block_size))
-                else:
-                    sw_sizes_tokens.append((0, g.kv_cache_spec.block_size))
-                if isinstance(g.kv_cache_spec, MambaSpec):
-                    self.need_truncate = True
-                self.kv_cache_specs.append([g.kv_cache_spec])
+                sw_sizes_tokens.append((0, g.block_size))
+            if any(isinstance(spec, MambaSpec) for spec in group_spec_set):
+                self.need_truncate = True
 
         self.num_swa_blocks = [
             cdiv(n_tokens, block_size) + 1 if n_tokens else 0 for n_tokens, block_size in sw_sizes_tokens
@@ -1473,9 +1465,9 @@ class MooncakeConnectorScheduler:
 
     def _compute_transfer_block_ids(self, block_ids: BlockIds, prompt_len: int) -> BlockIds:
         transfer_block_ids = []
-        kv_cache_specs = getattr(self, "kv_cache_specs", ())
+        is_circular_group = getattr(self, "_is_circular_group", ())
         for i, blocks in enumerate(block_ids):
-            if i < len(kv_cache_specs) and all(is_circular_kv_cache_spec(spec) for spec in kv_cache_specs[i]):
+            if i < len(is_circular_group) and is_circular_group[i]:
                 transfer_block_ids.append(blocks)
                 continue
             group_token_len = prompt_len
@@ -1711,13 +1703,18 @@ class MooncakeConnectorWorker:
         self.kv_cache_config = kv_cache_config
         self.use_hybrid = (
             not vllm_config.scheduler_config.disable_hybrid_kv_cache_manager
-            and any(not isinstance(g.kv_cache_spec, FullAttentionSpec) for g in kv_cache_config.kv_cache_groups)
+            and any(
+                not (issubclass(g.manager_cls, FullAttentionManager) and g.prefix_cacheable)
+                for g in kv_cache_config.kv_cache_groups
+            )
             and len(kv_cache_config.kv_cache_groups) > 1
         )
         self.hma_group_size = len(kv_cache_config.kv_cache_groups)
 
         # Mamba metadata
-        self._is_mamba_group = [isinstance(group.kv_cache_spec, MambaSpec) for group in kv_cache_config.kv_cache_groups]
+        self._is_mamba_group = [
+            isinstance(group.distinct_specs[0], MambaSpec) for group in kv_cache_config.kv_cache_groups
+        ]
         mamba_ssm_size = (0, 0)
         self.use_mamba = any(self._is_mamba_group)
         if self.use_mamba:
@@ -1726,7 +1723,7 @@ class MooncakeConnectorWorker:
                 "Mooncake connector does not support different TP size with Mamba."
             )
             self.layer_specs = {
-                layer: group.kv_cache_spec for group in kv_cache_config.kv_cache_groups for layer in group.layer_names
+                layer: spec for group in kv_cache_config.kv_cache_groups for layer, spec in group.kv_cache_specs.items()
             }
             mamba_spec = next(spec for spec in self.layer_specs.values() if isinstance(spec, MambaSpec))
             conv_nbytes, ssm_nbytes = (

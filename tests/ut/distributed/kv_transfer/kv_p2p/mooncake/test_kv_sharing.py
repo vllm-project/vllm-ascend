@@ -18,8 +18,9 @@ from unittest.mock import MagicMock
 
 import pytest
 import torch
-from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheConfig, KVCacheGroupSpec
+from vllm.v1.kv_cache_interface import KVCacheConfig
 
+from tests.ut.kv_cache_test_utils import make_full_attention_spec, make_kv_cache_group
 from tests.ut.kv_offload.mooncake_v2.helpers import make_kv_cache_tensor
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake import base_worker, pull_worker
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.base_worker import MooncakeBaseConnectorWorker
@@ -52,8 +53,8 @@ def owners_of(sharing_targets: Mapping[str, str]) -> list[str]:
     return [name for name in ALL_LAYERS if name not in sharing_targets]
 
 
-def gqa_spec() -> FullAttentionSpec:
-    return FullAttentionSpec(
+def gqa_spec():
+    return make_full_attention_spec(
         block_size=BLOCK_SIZE,
         num_kv_heads=NUM_KV_HEADS,
         head_size=HEAD_SIZE,
@@ -86,7 +87,7 @@ def make_kv_cache_config(num_blocks: int, spec, caches: Mapping[str, object]) ->
     return KVCacheConfig(
         num_blocks=num_blocks,
         kv_cache_tensors=tensors,
-        kv_cache_groups=[KVCacheGroupSpec(layer_names=list(caches), kv_cache_spec=spec)],
+        kv_cache_groups=[make_kv_cache_group(list(caches), spec)],
     )
 
 

@@ -20,7 +20,7 @@ class _V2RunnerAdapter:
 
     def configure(self) -> None:
         tables = self.runner.block_tables
-        sizes = [group.kv_cache_spec.block_size for group in self.runner.kv_cache_config.kv_cache_groups]
+        sizes = [group.block_size for group in self.runner.kv_cache_config.kv_cache_groups]
         # Public V2 tables use manager blocks. Metadata tables are expanded
         # by each AttentionGroup; the trace auditor requires matching units.
         if list(tables.block_sizes) != sizes or any(

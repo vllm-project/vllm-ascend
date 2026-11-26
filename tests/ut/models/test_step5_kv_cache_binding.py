@@ -9,13 +9,12 @@ reshape (attn_utils._reshape_kv_cache_v2) -> bind (patch_bind_kv_cache).
 from types import SimpleNamespace
 
 import torch
-from vllm.v1.kv_cache_interface import (
-    CircularBufferSpec,
-    FullAttentionSpec,
-    KVCacheGroupSpec,
-    SlidingWindowSpec,
-    UniformTypeKVCacheSpecs,
+from vllm.v1.core.single_type_kv_cache_manager import (
+    CircularBufferManager,
+    FullAttentionManager,
+    SlidingWindowManager,
 )
+from vllm.v1.kv_cache_interface import AttentionSpec
 
 import vllm_ascend.worker.v2.attn_utils as attn_utils_v2
 from vllm_ascend.models.step5.cache_config import (
@@ -23,6 +22,7 @@ from vllm_ascend.models.step5.cache_config import (
     get_step5_kv_cache_groups,
     get_step5_pool_bytes_per_block,
 )
+from vllm_ascend.utils import vllm_version_is
 
 BLOCK = 128
 MAIN_PAGE = 98304
@@ -39,24 +39,52 @@ SUMMARY2 = f"{L2}.sparse_summary_cache"
 
 
 def _specs():
-    main = FullAttentionSpec(block_size=BLOCK, num_kv_heads=4, head_size=48, head_size_v=48, dtype=torch.bfloat16)
-    sliding = SlidingWindowSpec(
-        block_size=BLOCK,
-        num_kv_heads=4,
-        head_size=48,
-        head_size_v=48,
-        dtype=torch.bfloat16,
-        sliding_window=4096,
-    )
-    summary = FullAttentionSpec(block_size=BLOCK, num_kv_heads=1, head_size=16, dtype=torch.float8_e4m3fn)
-    ring = CircularBufferSpec(
-        block_size=BLOCK,
-        num_kv_heads=1,
-        head_size=384,
-        head_size_v=0,
-        dtype=torch.bfloat16,
-        block_stride_alignment=1024,
-    )
+    if vllm_version_is("0.34.0"):
+        from vllm.v1.kv_cache_interface import (
+            CircularBufferSpec,
+            FullAttentionSpec,
+            SlidingWindowSpec,
+        )
+
+        main = FullAttentionSpec(block_size=BLOCK, num_kv_heads=4, head_size=48, head_size_v=48, dtype=torch.bfloat16)
+        sliding = SlidingWindowSpec(
+            block_size=BLOCK,
+            num_kv_heads=4,
+            head_size=48,
+            head_size_v=48,
+            dtype=torch.bfloat16,
+            sliding_window=4096,
+        )
+        summary = FullAttentionSpec(block_size=BLOCK, num_kv_heads=1, head_size=16, dtype=torch.float8_e4m3fn)
+        ring = CircularBufferSpec(
+            block_size=BLOCK,
+            num_kv_heads=1,
+            head_size=384,
+            head_size_v=0,
+            dtype=torch.bfloat16,
+            block_stride_alignment=1024,
+        )
+    else:
+        main = FullAttentionManager.layer_config(
+            AttentionSpec(block_size=BLOCK, num_kv_heads=4, head_size=48, head_size_v=48, dtype=torch.bfloat16)
+        )
+        sliding = SlidingWindowManager.layer_config(
+            AttentionSpec(block_size=BLOCK, num_kv_heads=4, head_size=48, head_size_v=48, dtype=torch.bfloat16),
+            sliding_window=4096,
+        )
+        summary = FullAttentionManager.layer_config(
+            AttentionSpec(block_size=BLOCK, num_kv_heads=1, head_size=16, dtype=torch.float8_e4m3fn)
+        )
+        ring = CircularBufferManager.layer_config(
+            AttentionSpec(
+                block_size=BLOCK,
+                num_kv_heads=1,
+                head_size=384,
+                head_size_v=0,
+                dtype=torch.bfloat16,
+                block_stride_alignment=1024,
+            )
+        )
     return {
         L0: main,
         L2: main,
@@ -68,11 +96,26 @@ def _specs():
 
 
 def _orig_groups(vllm_config, kv_cache_spec):
-    full = [name for name, spec in kv_cache_spec.items() if type(spec) is FullAttentionSpec]
-    sliding = [name for name, spec in kv_cache_spec.items() if isinstance(spec, SlidingWindowSpec)]
-    groups = [KVCacheGroupSpec(full, UniformTypeKVCacheSpecs.from_specs({n: kv_cache_spec[n] for n in full}))]
-    groups.append(KVCacheGroupSpec(sliding, UniformTypeKVCacheSpecs.from_specs({n: kv_cache_spec[n] for n in sliding})))
-    return groups
+    if vllm_version_is("0.34.0"):
+        from vllm.v1.kv_cache_interface import (
+            FullAttentionSpec,
+            KVCacheGroupSpec,
+            SlidingWindowSpec,
+            UniformTypeKVCacheSpecs,
+        )
+
+        full = [name for name, spec in kv_cache_spec.items() if type(spec) is FullAttentionSpec]
+        sliding = [name for name, spec in kv_cache_spec.items() if isinstance(spec, SlidingWindowSpec)]
+        groups = [KVCacheGroupSpec(full, UniformTypeKVCacheSpecs.from_specs({n: kv_cache_spec[n] for n in full}))]
+        groups.append(
+            KVCacheGroupSpec(sliding, UniformTypeKVCacheSpecs.from_specs({n: kv_cache_spec[n] for n in sliding}))
+        )
+        return groups
+    from vllm.v1.kv_cache_interface import KVCacheGroup
+
+    full_cfgs = {name: cfg for name, cfg in kv_cache_spec.items() if cfg.manager_cls is FullAttentionManager}
+    sliding_cfgs = {name: cfg for name, cfg in kv_cache_spec.items() if cfg.manager_cls is SlidingWindowManager}
+    return [KVCacheGroup.from_layers(full_cfgs), KVCacheGroup.from_layers(sliding_cfgs)]
 
 
 def _plan(num_blocks: int = 3):
@@ -134,7 +177,9 @@ def _reshape(config, raw, monkeypatch):
         SimpleNamespace(
             kernel_block_size=None,
             kv_cache_group_id=index,
-            kv_cache_spec=group.kv_cache_spec,
+            kv_cache_spec=group.kv_cache_spec
+            if vllm_version_is("0.34.0")
+            else next(iter(group.kv_cache_specs.values())),
             layer_names=group.layer_names,
             backend=backend,
         )

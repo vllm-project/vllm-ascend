@@ -42,11 +42,12 @@ from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.pull_scheduler import (
 
 from .helpers import (
     make_blocks,
-    make_circular_spec,
-    make_full_spec,
-    make_mamba_spec,
+    make_circular_group,
+    make_full_group,
+    make_mamba_group,
     make_request,
     make_transfer_metadata,
+    set_scheduler_groups,
 )
 
 
@@ -82,8 +83,7 @@ def make_pull_scheduler() -> MooncakePullConnectorScheduler:
     scheduler.pcp_size = 1
     scheduler.dcp_size = 1
     scheduler.ascend_config = SimpleNamespace(kvpp_config=SimpleNamespace(size=1))
-    scheduler.group_block_size = [16]
-    scheduler.group_unique_specs = [[make_full_spec()]]
+    set_scheduler_groups(scheduler, [make_full_group()])
     scheduler.engine_id = "engine-p"
     scheduler.side_channel_host = "10.0.0.10"
     scheduler.side_channel_port = 6000
@@ -561,8 +561,7 @@ def test_base_scheduler_clips_attention_and_keeps_mamba_state_blocks() -> None:
     scheduler.pcp_size = 1
     scheduler.dcp_size = 1
     scheduler.num_speculative_tokens = 2
-    scheduler.group_block_size = [16, 16]
-    scheduler.group_unique_specs = [[make_full_spec()], [replace(make_mamba_spec(), num_speculative_blocks=2)]]
+    set_scheduler_groups(scheduler, [make_full_group(), make_mamba_group(num_speculative_blocks=2)])
 
     result = scheduler._get_transfer_block_ids(
         ([10, 11, 12, 13], [20, 21, 22, 23]),
@@ -847,17 +846,17 @@ class _StopLoop(BaseException):
 def test_base_scheduler_detects_state_and_compressed_prefill_truncation() -> None:
     scheduler = MooncakeBaseConnectorScheduler.__new__(MooncakeBaseConnectorScheduler)
     scheduler.vllm_config = SimpleNamespace(model_config=SimpleNamespace(hf_config=SimpleNamespace()))
-    scheduler.group_unique_specs = [[make_full_spec()]]
+    set_scheduler_groups(scheduler, [make_full_group()])
     assert scheduler._needs_prefill_token_truncation() is False
 
     scheduler.vllm_config.model_config.hf_config.compress_ratios = [2]
     assert scheduler._needs_prefill_token_truncation() is True
 
     scheduler.vllm_config.model_config.hf_config.compress_ratios = None
-    scheduler.group_unique_specs = [[make_full_spec()], [make_mamba_spec()]]
+    set_scheduler_groups(scheduler, [make_full_group(), make_mamba_group()])
     assert scheduler._needs_prefill_token_truncation() is True
 
-    scheduler.group_unique_specs = [[make_full_spec()], [make_circular_spec()]]
+    set_scheduler_groups(scheduler, [make_full_group(), make_circular_group()])
     assert scheduler._needs_prefill_token_truncation() is False
 
 

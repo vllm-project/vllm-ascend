@@ -16,12 +16,12 @@ import numpy as np
 import torch
 from vllm.model_executor.layers.mamba.mamba_utils import MambaStateCopyFuncCalculator
 from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
-from vllm.v1.core.single_type_kv_cache_manager import register_all_kvcache_specs
-from vllm.v1.kv_cache_interface import MambaSpec, UniformTypeKVCacheSpecs
+from vllm.v1.kv_cache_interface import MambaSpec
 
 from tests.ut.distributed.ascend_store.cache_config_helpers import make_resolved_cache_config
 from tests.ut.distributed.ascend_store.test_mooncake_hybrid import MemoryRangeStore
 from tests.ut.distributed.ascend_store.test_pool_worker import make_worker, start_patch
+from tests.ut.kv_cache_test_utils import is_v034, make_mamba_layer_config
 from tests.ut.models.test_glm5next_cache_config import make_config, make_specs
 from vllm_ascend.core.kv_cache_interface import AscendIndexerKPoolTailSpec
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector import create_kv_pool_scheduler
@@ -42,20 +42,40 @@ from vllm_ascend.utils import get_kv_cache_tensor_layers
 
 
 def make_glm53_plan(layer_offset=0, *, use_recoverssm=False):
-    register_all_kvcache_specs(None)
+    if is_v034():
+        from vllm.v1.core.single_type_kv_cache_manager import register_all_kvcache_specs
+
+        register_all_kvcache_specs(None)
     specs = {}
-    for name, spec in make_specs(pool=4).items():
+    for name, entry in make_specs(pool=4).items():
         parts = name.split(".")
         parts[2] = str(int(parts[2]) + layer_offset)
+        spec = getattr(entry, "spec", entry)
         if isinstance(spec, MambaSpec):
-            spec = replace(spec, mamba_cache_mode="align", mamba_type=MambaAttentionBackendEnum.GDN_ATTN)
-            if use_recoverssm:
-                spec = replace(
-                    spec,
-                    shapes=(*spec.shapes, (1, 6, 16), (1, 6, 32)),
-                    dtypes=(*spec.dtypes, torch.float32, torch.bfloat16),
+            if is_v034():
+                entry = replace(spec, mamba_cache_mode="align", mamba_type=MambaAttentionBackendEnum.GDN_ATTN)
+                if use_recoverssm:
+                    entry = replace(
+                        entry,
+                        shapes=(*entry.shapes, (1, 6, 16), (1, 6, 32)),
+                        dtypes=(*entry.dtypes, torch.float32, torch.bfloat16),
+                    )
+            else:
+                spec = replace(spec, mamba_type=MambaAttentionBackendEnum.GDN_ATTN)
+                if use_recoverssm:
+                    spec = replace(
+                        spec,
+                        shapes=(*spec.shapes, (1, 6, 16), (1, 6, 32)),
+                        dtypes=(*spec.dtypes, torch.float32, torch.bfloat16),
+                    )
+                entry = make_mamba_layer_config(
+                    block_size=spec.block_size,
+                    shapes=spec.shapes,
+                    dtypes=spec.dtypes,
+                    mamba_cache_mode="align",
+                    mamba_type=spec.mamba_type,
                 )
-        specs[".".join(parts)] = spec
+        specs[".".join(parts)] = entry
     config = make_config()
     # Round-trip fixtures persist every recurrent checkpoint, not sparse tails.
     config.cache_config.prefix_cache_retention_interval = None
@@ -75,13 +95,7 @@ def make_glm53_caches(plan):
             storage[name] = raw
     caches = {}
     for group in plan.kv_cache_groups:
-        specs = group.kv_cache_spec
-        specs = (
-            specs.kv_cache_specs
-            if isinstance(specs, UniformTypeKVCacheSpecs)
-            else dict.fromkeys(group.layer_names, specs)
-        )
-        for name, spec in specs.items():
+        for name, spec in group.kv_cache_specs.items():
             raw = storage[name]
             if isinstance(spec, MambaSpec):
                 views = []
@@ -301,17 +315,23 @@ class TestGLM53Store(unittest.TestCase):
         }
         # One persistent state, two states with extra records, and two states
         # whose verification records live outside the KV cache.
-        for group, backend, components in zip(plan.kv_cache_groups[2:], (short_conv, gdn, gdn), (1, 5, 2)):
-            spec = group.kv_cache_spec
+        for idx, (backend, components) in enumerate(((short_conv, 1), (gdn, 5), (gdn, 2)), start=2):
+            group = plan.kv_cache_groups[idx]
+            spec = group.distinct_specs[0]
             spec = replace(
                 spec,
                 mamba_type=backend,
                 shapes=(*spec.shapes, (1, 6))[:components],
                 dtypes=(*spec.dtypes, torch.float32)[:components],
             )
-            group.kv_cache_spec = UniformTypeKVCacheSpecs(
-                block_size=spec.block_size, kv_cache_specs=dict.fromkeys(group.layer_names, spec)
-            )
+            if is_v034():
+                from vllm.v1.kv_cache_interface import UniformTypeKVCacheSpecs
+
+                group.kv_cache_spec = UniformTypeKVCacheSpecs(
+                    block_size=spec.block_size, kv_cache_specs=dict.fromkeys(group.layer_names, spec)
+                )
+            else:
+                plan.kv_cache_groups[idx] = replace(group, kv_cache_specs=dict.fromkeys(group.layer_names, spec))
         caches = make_glm53_caches(plan)
         worker = make_worker(
             self, kv_cache_config=plan, use_mla=True, num_layers=4, use_recoverssm=True, mamba_copy_funcs=copy_funcs

@@ -6,15 +6,15 @@ from vllm.utils.torch_utils import get_dtype_size
 from vllm.v1.core.kv_cache_utils import KVCacheBlockCopy
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
-    EncoderOnlyAttentionSpec,
     KVCacheConfig,
-    UniformTypeKVCacheSpecs,
 )
 from vllm.v1.worker.utils import (
     AttentionGroup,
     prepare_kernel_block_sizes,
     select_common_block_size,
 )
+
+from vllm_ascend.utils import vllm_version_is
 
 
 def copy_kv_cache_blocks_inplace(
@@ -151,17 +151,24 @@ def prepare_ascend_kernel_block_sizes(
     """
     kernel_block_sizes = prepare_kernel_block_sizes(kv_cache_config, attn_groups)
 
-    # Upstream drops only encoder-only groups, so this index tracks its output.
+    # Upstream v0.34.0 drops encoder-only groups, so this index tracks its output.
+    encoder_only_spec: type | None = None
+    if vllm_version_is("0.34.0"):
+        from vllm.v1.kv_cache_interface import EncoderOnlyAttentionSpec
+
+        encoder_only_spec = EncoderOnlyAttentionSpec
+
     index = 0
     for group_id, group in enumerate(kv_cache_config.kv_cache_groups):
-        spec = group.kv_cache_spec
-        if isinstance(spec, UniformTypeKVCacheSpecs):
-            spec = next(iter(spec.kv_cache_specs.values()))
-        if isinstance(spec, EncoderOnlyAttentionSpec):
+        if encoder_only_spec is not None and all(isinstance(s, encoder_only_spec) for s in group.distinct_specs):
             continue
         if index >= len(kernel_block_sizes):
             break
-        manager_block_size = group.kv_cache_spec.block_size
+        if not group.distinct_specs:
+            index += 1
+            continue
+        spec = group.distinct_specs[0]
+        manager_block_size = group.block_size
         strides = _group_tensor_strides(kv_cache_config, group.layer_names)
         block_outermost_packed = any(0 < layer_stride < block_stride for layer_stride, block_stride in strides)
         aliases_layers = any(layer_stride == 0 and block_stride > 0 for layer_stride, block_stride in strides)

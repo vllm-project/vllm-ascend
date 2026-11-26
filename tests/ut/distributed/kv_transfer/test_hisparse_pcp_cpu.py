@@ -12,8 +12,8 @@ import torch
 
 pytest.importorskip("vllm.v1.hisparse.backend")
 from vllm.distributed.kv_transfer.kv_connector.v1.hisparse.worker import HiSparseConnectorWorker
+from vllm.v1.core.single_type_kv_cache_manager import FullAttentionManager, HiSparseHotManager, HiSparseResidentManager
 from vllm.v1.hisparse.runtime import HiSparseCacheHandle
-from vllm.v1.kv_cache_interface import HiSparseHotSpec, HiSparseResidentSpec
 from vllm.v1.worker.gpu.kv_connector import ActiveKVConnector
 
 from vllm_ascend.hisparse.pcp import (
@@ -140,9 +140,9 @@ def make_connector(padded_tokens=3):
             request_state_indices=cache.runtime.request_state_indices,
             kv_cache_config=NS(
                 kv_cache_groups=[
-                    NS(kv_cache_spec=None, layer_names=[]),
-                    NS(kv_cache_spec=HiSparseResidentSpec.__new__(HiSparseResidentSpec), layer_names=["layer0"]),
-                    NS(kv_cache_spec=HiSparseHotSpec.__new__(HiSparseHotSpec), layer_names=["layer0"]),
+                    NS(manager_cls=FullAttentionManager, layer_names=[]),
+                    NS(manager_cls=HiSparseResidentManager, layer_names=["layer0"]),
+                    NS(manager_cls=HiSparseHotManager, layer_names=["layer0"]),
                 ]
             ),
         ),

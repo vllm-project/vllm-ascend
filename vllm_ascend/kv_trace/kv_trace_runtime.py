@@ -116,18 +116,20 @@ class KVTraceRuntime:
                 getattr(parallel, "enable_dbo", False),
             )
         )
+        from vllm_ascend.core.kv_cache_interface import is_circular_cache_group
+
         sizes = {}
         for group_id, group in enumerate(runner.kv_cache_config.kv_cache_groups):
-            spec = group.kv_cache_spec
-            sizes[group_id] = spec.block_size
-            for name in group.layer_names:
+            sizes[group_id] = group.block_size
+            is_circular = is_circular_cache_group(group)
+            is_sliding = group.sliding_window_reach > 0
+            for name, layer_spec in group.kv_cache_specs.items():
                 self.layer_groups[name] = group_id
-                layer_spec = getattr(spec, "kv_cache_specs", {}).get(name, spec)
                 append = (
                     hasattr(layer_spec, "head_size")
-                    and getattr(layer_spec, "sliding_window", None) is None
+                    and not is_sliding
                     and getattr(layer_spec, "compress_ratio", 1) == 1
-                    and type(layer_spec).__name__ != "CircularBufferSpec"
+                    and not is_circular
                 )
                 if not append:
                     raise ValueError(f"KV Trace: unadapted cache validity rules: {type(layer_spec).__name__}")

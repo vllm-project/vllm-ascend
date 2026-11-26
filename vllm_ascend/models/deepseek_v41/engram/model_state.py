@@ -150,14 +150,14 @@ class EngramModelState(AscendModelState):
         # this step is only known here; engram overlap dispatch keys off it.
         self._cg_mode = cudagraph_mode
         if self._replay_groups is None:
-            from vllm_ascend.core.kv_cache_interface import is_prefix_cacheable
-
-            specs = [group.kv_cache_spec for group in kv_cache_config.kv_cache_groups]
-            windows = [int(getattr(spec, "prefix_replay_tokens", getattr(spec, "sliding_window", 0))) for spec in specs]
+            windows = [
+                group.prefix_replay_tokens or int(getattr(group.manager_config.params, "sliding_window", 0))
+                for group in kv_cache_config.kv_cache_groups
+            ]
             self._replay_groups = (
                 max(windows, default=0),
                 torch.tensor(
-                    [i for i, spec in enumerate(specs) if is_prefix_cacheable(spec)],
+                    [i for i, group in enumerate(kv_cache_config.kv_cache_groups) if group.prefix_cacheable],
                     dtype=torch.int32,
                     device=self.device,
                 ),
@@ -248,6 +248,7 @@ class EngramModelState(AscendModelState):
                     metadata_producer_stream=(
                         self.device_metadata.executor.stream if self.device_metadata is not None else None
                     ),
+                    kv_cache_config=kv_cache_config,
                 ),
                 cudagraph_mode,
                 for_capture=for_capture,

@@ -63,14 +63,11 @@ from vllm.model_executor.models import ModelRegistry
 from vllm.v1.core.sched.request_queue import SchedulingPolicy, create_request_queue
 from vllm.v1.engine.core import DPEngineCoreProc as _UpstreamDPEngineCoreProc
 from vllm.v1.engine.core import EngineCoreProc as _UpstreamEngineCoreProc
-from vllm.v1.kv_cache_interface import (
-    FullAttentionSpec,
-    KVCacheConfig,
-    KVCacheGroupSpec,
-)
+from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.request import RequestStatus
 from vllm.v1.structured_output import StructuredOutputManager
 
+from tests.ut.kv_cache_test_utils import make_full_attention_layer_config, make_kv_cache_group
 from tests.ut.kv_offload.utils import create_request, create_vllm_config
 from vllm_ascend.core.short_request_first_scheduler import ShortRequestFirstRequestQueue
 from vllm_ascend.utils import vllm_version_is
@@ -293,9 +290,9 @@ def test_mamba_waiting_path_schedules_without_argument_mismatch():
         num_blocks=64,
         kv_cache_tensors=[],
         kv_cache_groups=[
-            KVCacheGroupSpec(
+            make_kv_cache_group(
                 ["layer"],
-                FullAttentionSpec(
+                make_full_attention_layer_config(
                     block_size=block_size,
                     num_kv_heads=1,
                     head_size=1,
@@ -689,7 +686,7 @@ def _make_balance_scheduler(*, dp_size=2, max_num_seqs=16, policy="fcfs", num_bl
 
     import torch
     from vllm.config import CacheConfig, ModelConfig, SchedulerConfig, VllmConfig
-    from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheConfig, KVCacheGroupSpec
+    from vllm.v1.kv_cache_interface import KVCacheConfig
     from vllm.v1.structured_output import StructuredOutputManager
 
     from vllm_ascend.patch.platform import patch_balance_schedule as pbs
@@ -754,9 +751,11 @@ def _make_balance_scheduler(*, dp_size=2, max_num_seqs=16, policy="fcfs", num_bl
             num_blocks=num_blocks,
             kv_cache_tensors=[],
             kv_cache_groups=[
-                KVCacheGroupSpec(
+                make_kv_cache_group(
                     ["layer"],
-                    FullAttentionSpec(block_size=_BLOCK_SIZE, num_kv_heads=1, head_size=1, dtype=torch.float32),
+                    make_full_attention_layer_config(
+                        block_size=_BLOCK_SIZE, num_kv_heads=1, head_size=1, dtype=torch.float32
+                    ),
                 )
             ],
         )

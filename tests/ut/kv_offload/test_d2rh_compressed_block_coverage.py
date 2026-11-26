@@ -7,6 +7,7 @@ from unittest.mock import patch
 import pytest
 import torch
 
+from tests.ut.kv_cache_test_utils import make_full_attention_layer_config, make_kv_cache_group
 from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_d2rh_connector import (
     BaseMooncakeConnectorScheduler,
@@ -26,9 +27,7 @@ def make_scheduler(compress_ratio):
     scheduler = object.__new__(MooncakeConnectorScheduler)
     scheduler.block_size = 32
     scheduler.pcp_size = scheduler.dcp_size = 1
-    scheduler.group_transfer_info = [
-        scheduler._get_group_transfer_info(SimpleNamespace(kv_cache_spec=spec, layer_names=["attention"]))
-    ]
+    scheduler.group_transfer_info = [scheduler._get_group_transfer_info(make_kv_cache_group(["attention"], spec))]
     scheduler.vllm_config = SimpleNamespace(cache_config=SimpleNamespace(hash_block_size=32))
     return scheduler
 
@@ -68,7 +67,7 @@ def test_context_parallelism_counts_logical_tokens_once():
 
 def test_other_cache_specs_keep_base_transfer_policy():
     scheduler = object.__new__(MooncakeConnectorScheduler)
-    group = SimpleNamespace(kv_cache_spec=SimpleNamespace(block_size=32), layer_names=["attention"])
+    group = make_kv_cache_group(["attention"], make_full_attention_layer_config(block_size=32))
     sentinel = object()
     with patch.object(BaseMooncakeConnectorScheduler, "_get_group_transfer_info", return_value=sentinel) as base:
         assert scheduler._get_group_transfer_info(group) is sentinel

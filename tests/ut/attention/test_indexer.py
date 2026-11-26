@@ -11,7 +11,7 @@ import torch
 import torch_npu
 from vllm.config import ParallelConfig
 from vllm.v1.attention.backend import AttentionCGSupport, MultipleOf
-from vllm.v1.kv_cache_interface import FullAttentionSpec, MLAAttentionSpec, SparseCacheRole
+from vllm.v1.kv_cache_interface import AttentionSpec, MLAAttentionSpec, SparseCacheRole
 
 from vllm_ascend.attention import indexer as indexer_module
 from vllm_ascend.attention.indexer import (
@@ -22,8 +22,9 @@ from vllm_ascend.attention.indexer import (
     QLIMetadataBuffers,
     QLIMetadataConfig,
 )
-from vllm_ascend.core.kv_cache_interface import AscendSFAIndexerCacheSpec
+from vllm_ascend.core.kv_cache_interface import AscendSFAIndexerCacheSpec, declared_kwarg
 from vllm_ascend.device.device_op import A5DeviceAdaptor
+from vllm_ascend.utils import vllm_version_is
 
 _KERNEL_BLOCK_SIZE = 128
 
@@ -37,7 +38,11 @@ def _make_builder(
     max_model_len: int = 512,
     interleave: int = 128,
 ) -> AscendSFAIndexerMetadataBuilder:
-    kv_cache_spec = FullAttentionSpec(
+    if vllm_version_is("0.34.0"):
+        from vllm.v1.kv_cache_interface import FullAttentionSpec as spec_cls
+    else:
+        spec_cls = AttentionSpec
+    kv_cache_spec = spec_cls(
         block_size=physical_block_size,
         num_kv_heads=1,
         head_size=160,
@@ -643,12 +648,14 @@ def test_indexer_owner_reports_data_scale_and_replication(monkeypatch, c4, c8, r
         head_size=132,
         dtype=torch.uint8,
         cache_role=SparseCacheRole.INDEXER,
-        is_draft=True,
+        **declared_kwarg(MLAAttentionSpec, "is_draft", True),
     )
     spec = backend._build_cache_spec(source, config)
     assert backend.customize_spec(spec) is spec
     assert isinstance(spec, AscendSFAIndexerCacheSpec)
-    assert spec.cache_role is source.cache_role and spec.is_draft
+    assert spec.cache_role is source.cache_role
+    if vllm_version_is("0.34.0"):
+        assert spec.is_draft
     assert spec.sfa_dcp_replicated_indexer_size == replicas
     assert spec.scale_dim == (4 if c4 else 1 if c8 else 0)
     assert spec.head_size == (64 if c4 else 128)
@@ -693,11 +700,20 @@ def test_indexer_owner_tracks_runtime_cache_requirement(monkeypatch, mtp):
         impl.skip_topk = skip_topk
         enabled = not skip_topk or mtp
         assert owner.cache_enabled is enabled
-        specs = attn_utils.get_kv_cache_spec(config)
-        assert ("cache_owner" in specs) is enabled
-        if enabled:
-            assert specs["cache_owner"] == replace(spec, block_stride_alignment=MultipleOf(_KERNEL_BLOCK_SIZE))
-            assert owner.cache_spec == spec
+        if vllm_version_is("0.34.0"):
+            specs = attn_utils.get_kv_cache_spec(config)
+            assert ("cache_owner" in specs) is enabled
+            if enabled:
+                assert specs["cache_owner"] == replace(spec, block_stride_alignment=MultipleOf(_KERNEL_BLOCK_SIZE))
+                assert owner.cache_spec == spec
+        else:
+            layer_configs = attn_utils.get_kv_cache_layer_configs(config)
+            assert ("cache_owner" in layer_configs) is enabled
+            if enabled:
+                assert layer_configs["cache_owner"].spec == replace(
+                    spec, block_stride_alignment=MultipleOf(_KERNEL_BLOCK_SIZE)
+                )
+                assert owner.cache_spec == spec
 
 
 def test_builder_prepares_qli_after_lengths_and_refreshes_each_step(monkeypatch):

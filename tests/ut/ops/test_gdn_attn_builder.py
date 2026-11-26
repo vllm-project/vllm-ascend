@@ -49,6 +49,7 @@ from vllm_ascend.ops.triton.fla.utils import (
 from vllm_ascend.ops.triton.fla.utils import (
     prepare_update_chunk_offsets as runtime_prepare_update_chunk_offsets,
 )
+from vllm_ascend.utils import vllm_version_is
 
 
 @pytest.mark.parametrize("builder_cls", [AscendGDNAttentionMetadataBuilder, AscendGDNHostMetadataBuilder])
@@ -211,12 +212,14 @@ def _make_vllm_config(
     model_config.get_num_attention_heads = lambda parallel_config: num_heads
 
     return SimpleNamespace(
-        cache_config=SimpleNamespace(mamba_cache_mode=mamba_cache_mode),
+        cache_config=SimpleNamespace(mamba_cache_mode=mamba_cache_mode, use_replayssm=False),
         compilation_config=SimpleNamespace(
             cudagraph_mode=cudagraph_mode,
             max_cudagraph_capture_size=None,
+            static_forward_context={},
         ),
         speculative_config=speculative_config,
+        num_speculative_tokens=num_speculative_tokens,
         num_hash_lookahead_tokens=0,
         use_v2_model_runner=False,
         scheduler_config=SimpleNamespace(
@@ -369,14 +372,23 @@ def _make_builder(
         mamba_cache_mode=mamba_cache_mode,
         cudagraph_mode=cudagraph_mode,
     )
+    if vllm_version_is("0.34.0"):
+        spec = MambaSpec(
+            block_size=block_size,
+            shapes=((1,), (1,)),
+            dtypes=(torch.float32,),
+            mamba_cache_mode=mamba_cache_mode,
+            num_speculative_blocks=num_speculative_blocks,
+        )
+        return builder_cls(spec, ["layer0"], vllm_config, device)
     spec = MambaSpec(
         block_size=block_size,
         shapes=((1,), (1,)),
         dtypes=(torch.float32,),
-        mamba_cache_mode=mamba_cache_mode,
-        num_speculative_blocks=num_speculative_blocks,
     )
-    return builder_cls(spec, ["layer0"], vllm_config, device)
+    builder = builder_cls(spec, ["layer0"], vllm_config, device)
+    builder.num_speculative_blocks = num_speculative_blocks
+    return builder
 
 
 def _build_attn_metadata(
@@ -1028,6 +1040,7 @@ def test_adaptive_mixed_batch_rejects_cpu_fused_layout():
     builder._spec_conv_indices = torch.empty(3, dtype=torch.int32)
     builder.vllm_config = SimpleNamespace(cache_config=SimpleNamespace(mamba_cache_mode="align"))
     builder.kv_cache_spec = SimpleNamespace(num_speculative_blocks=3)
+    builder.num_speculative_blocks = 3
     builder.num_spec = 3
     builder.speculative_config = SimpleNamespace(enable_adaptive_verification=True)
     with patch.object(ascend_gdn_attn_builder, "prepare_gdn", side_effect=AssertionError("CPU layout is unsafe")):

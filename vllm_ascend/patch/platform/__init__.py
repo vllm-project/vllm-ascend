@@ -16,6 +16,11 @@
 
 import os
 
+from vllm_ascend.utils import vllm_version_is
+
+if vllm_version_is("0.34.0"):
+    import vllm_ascend.patch.platform.patch_kv_cache_v034_compat  # noqa
+
 import vllm_ascend.patch.platform.patch_distributed  # noqa
 import vllm_ascend.patch.platform.patch_kimi_k31_config  # noqa
 import vllm_ascend.patch.platform.patch_kv_cache_admission  # noqa

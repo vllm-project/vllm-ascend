@@ -27,7 +27,11 @@ from vllm.v1.attention.backend import (
     AttentionMetadataBuilder,
     max_decode_query_len,
 )
-from vllm.v1.kv_cache_interface import AttentionSpec, CircularBufferSpec
+from vllm.v1.core.single_type_kv_cache_manager import (
+    CircularBufferManager,
+    SlidingWindowManager,
+)
+from vllm.v1.kv_cache_interface import AttentionSpec
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.attention.dsa_v1 import AscendDSABackend, build_dspark_swa_indices, dsv4_dsa_overlap_stream
@@ -38,7 +42,6 @@ from vllm_ascend.attention.utils import (
 )
 from vllm_ascend.core.kv_cache_interface import (
     AscendMLAAttentionSpec,
-    AscendSlidingWindowMLASpec,
     get_kv_cache_compression_ratio,
 )
 from vllm_ascend.device.device_op import DeviceOperator
@@ -52,6 +55,7 @@ from vllm_ascend.utils import (
     get_potential_max_tokens,
     npu_stream_switch,
     oproj_tp_enable,
+    vllm_version_is,
 )
 from vllm_ascend.worker.device_metadata import (
     DeviceMetadataStage,
@@ -851,8 +855,55 @@ class AscendDSAV41MetadataBuilder(AttentionMetadataBuilder[AscendDSAV41Metadata]
         build_query_metadata=True,
         build_compressor_metadata=True,
     ):
+        spec_window: int | None = None
+        if vllm_version_is("0.34.0"):
+            from vllm.v1.kv_cache_interface import CircularBufferSpec
+
+            from vllm_ascend.core.kv_cache_interface import AscendSlidingWindowMLASpec
+
+            if isinstance(kv_cache_spec, CircularBufferSpec):
+                cache_kind = "compressor_state"
+            elif isinstance(kv_cache_spec, AscendSlidingWindowMLASpec):
+                cache_kind = "swa"
+                spec_window = int(kv_cache_spec.sliding_window)
+            elif isinstance(kv_cache_spec, AscendMLAAttentionSpec):
+                # make_folded_index_cache_spec packs eight index rows into one:
+                # 8 * (128 / 2 FP4 bytes + 128 / 32 scale bytes) = 544 bytes.
+                # Its scales are inline (scale_dim=0), like long KV, so identify
+                # this layout first to avoid treating it as compressed long KV.
+                if kv_cache_spec.tokens_per_state == 8 and kv_cache_spec.head_size == 544:
+                    cache_kind = "index_k_folded"
+                else:
+                    cache_kind = "index_k" if kv_cache_spec.scale_dim else "long_kv"
+            else:
+                raise TypeError(f"Unsupported V4.1 cache spec: {type(kv_cache_spec).__name__}")
+        else:
+            static_ctx = getattr(vllm_config.compilation_config, "static_forward_context", None) or {}
+            first_layer = static_ctx.get(layer_names[0]) if layer_names else None
+            layer_config = (
+                first_layer.get_kv_cache_config(vllm_config)
+                if first_layer is not None and hasattr(first_layer, "get_kv_cache_config")
+                else None
+            )
+            if layer_config is not None and issubclass(layer_config.manager_cls, CircularBufferManager):
+                cache_kind = "compressor_state"
+            elif layer_config is not None and issubclass(layer_config.manager_cls, SlidingWindowManager):
+                cache_kind = "swa"
+                spec_window = int(layer_config.manager_config.params.sliding_window)
+            elif isinstance(kv_cache_spec, AscendMLAAttentionSpec):
+                if isinstance(self, AscendDSAV41SWAMetadataBuilder):
+                    cache_kind = "swa"
+                elif kv_cache_spec.tokens_per_state == 8 and kv_cache_spec.head_size == 544:
+                    cache_kind = "index_k_folded"
+                else:
+                    cache_kind = "index_k" if kv_cache_spec.scale_dim else "long_kv"
+            elif isinstance(kv_cache_spec, AttentionSpec):
+                cache_kind = "compressor_state"
+            else:
+                raise TypeError(f"Unsupported V4.1 cache spec: {type(kv_cache_spec).__name__}")
         if (
-            isinstance(kv_cache_spec, AscendMLAAttentionSpec)
+            cache_kind != "swa"
+            and isinstance(kv_cache_spec, AscendMLAAttentionSpec)
             and getattr(kv_cache_spec, "model_version", None) == "deepseek_v41"
         ):
             logical_block_size = vllm_config.cache_config.block_size
@@ -869,29 +920,14 @@ class AscendDSAV41MetadataBuilder(AttentionMetadataBuilder[AscendDSAV41Metadata]
         # Allocate both decode and prefill owners before graph capture.
         self._build_query_metadata = build_query_metadata
         self._build_compressor_metadata = build_compressor_metadata
-        if isinstance(kv_cache_spec, CircularBufferSpec):
-            self._cache_kind = "compressor_state"
-        elif isinstance(kv_cache_spec, AscendSlidingWindowMLASpec):
-            self._cache_kind = "swa"
-        elif isinstance(kv_cache_spec, AscendMLAAttentionSpec):
-            # make_folded_index_cache_spec packs eight index rows into one:
-            # 8 * (128 / 2 FP4 bytes + 128 / 32 scale bytes) = 544 bytes.
-            # Its scales are inline (scale_dim=0), like long KV, so identify
-            # this layout first to avoid treating it as compressed long KV.
-            if kv_cache_spec.tokens_per_state == 8 and kv_cache_spec.head_size == 544:
-                self._cache_kind = "index_k_folded"
-            else:
-                self._cache_kind = "index_k" if kv_cache_spec.scale_dim else "long_kv"
-        else:
-            raise TypeError(f"Unsupported V4.1 cache spec: {type(kv_cache_spec).__name__}")
+        self._cache_kind = cache_kind
         self._device_backend = DeviceOperator.get_dsv41_packed_cache_ops()
         self._uses_a5_packed_cache = self._device_backend is not None
         text_config = vllm_config.model_config.hf_text_config
         window_size = int(_config_value(text_config, "sliding_window", 0))
         self._window_size = window_size
-        if self._cache_kind == "swa":
+        if self._cache_kind == "swa" and spec_window is not None:
             # Replay padding and query masking must use the same fixed window.
-            spec_window = int(kv_cache_spec.sliding_window)
             assert spec_window == window_size, (
                 "SWA bounded replay pads the spec's sliding_window "
                 f"({spec_window}) while the mask floors on the text config's ({window_size})."
@@ -1925,10 +1961,15 @@ class DeepseekV41FoldedIndexBackend(_DeepseekV41RoleBackend):
 class DeepseekV41CacheLayer(nn.Module, AttentionLayerBase):
     supports_dcp = False
 
-    def __init__(self, vllm_config, prefix, spec):
+    def __init__(self, vllm_config, prefix, kv_cache_config):
         super().__init__()
         self.prefix = prefix
-        self.spec = spec
+        if vllm_version_is("0.34.0"):
+            self.spec = kv_cache_config
+            self.layer_config = None
+        else:
+            self.layer_config = kv_cache_config
+            self.spec = kv_cache_config.spec
         self.kv_cache: torch.Tensor | tuple[torch.Tensor, ...] = torch.empty(0)
         context = vllm_config.compilation_config.static_forward_context
         context[prefix] = self
@@ -1940,14 +1981,26 @@ class DeepseekV41CacheLayer(nn.Module, AttentionLayerBase):
     def get_kv_cache_spec(self, vllm_config):
         return self.spec
 
+    def get_kv_cache_config(self, vllm_config):
+        return self.layer_config
+
     def get_attn_backend(self):
         spec = self.spec
+        if vllm_version_is("0.34.0"):
+            from vllm.v1.kv_cache_interface import CircularBufferSpec
 
-        if isinstance(spec, CircularBufferSpec):
-            return DeepseekV41StateBackend
+            from vllm_ascend.core.kv_cache_interface import AscendSlidingWindowMLASpec
 
-        if isinstance(spec, AscendSlidingWindowMLASpec):
-            return DeepseekV41SWABackend
+            if isinstance(spec, CircularBufferSpec):
+                return DeepseekV41StateBackend
+            if isinstance(spec, AscendSlidingWindowMLASpec):
+                return DeepseekV41SWABackend
+        else:
+            assert self.layer_config is not None
+            if issubclass(self.layer_config.manager_cls, CircularBufferManager):
+                return DeepseekV41StateBackend
+            if issubclass(self.layer_config.manager_cls, SlidingWindowManager):
+                return DeepseekV41SWABackend
 
         if isinstance(spec, AscendMLAAttentionSpec):
             if spec.tokens_per_state == 8 and spec.head_size == 544:

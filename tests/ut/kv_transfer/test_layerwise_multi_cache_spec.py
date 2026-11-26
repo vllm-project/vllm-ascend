@@ -5,8 +5,9 @@ from types import SimpleNamespace
 
 import pytest
 import torch
-from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheConfig, KVCacheGroupSpec, KVCacheTensor
+from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheTensor
 
+from tests.ut.kv_cache_test_utils import get_group_spec, make_full_attention_layer_config, make_kv_cache_group
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.cache_planner import plan_layerwise_cache_reuse
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.layerwise_cache_layout import (
     get_layerwise_kv_cache_specs,
@@ -28,9 +29,13 @@ def test_deepseek_v4_native_groups_keep_every_cache_entry(components):
     tensors = []
     specs = {}
     for index, component in enumerate(components):
-        spec = FullAttentionSpec(block_size=16, num_kv_heads=1, head_size=8 * (index + 1), dtype=torch.int8)
+        layer_cfg = make_full_attention_layer_config(
+            block_size=16, num_kv_heads=1, head_size=8 * (index + 1), dtype=torch.int8
+        )
         names = [f"model.layers.{layer}.self_attn.{component}" for layer in range(4)]
-        groups.append(KVCacheGroupSpec(names, spec))
+        group = make_kv_cache_group(names, layer_cfg)
+        spec = get_group_spec(group)
+        groups.append(group)
         for name in names:
             specs[name] = spec
             tensors.append(

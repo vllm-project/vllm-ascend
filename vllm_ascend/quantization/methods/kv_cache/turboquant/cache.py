@@ -7,6 +7,7 @@ Block IDs can therefore never alias a different block ID in another group.
 """
 
 import math
+from dataclasses import replace
 
 from vllm.logger import logger
 from vllm.utils.math_utils import round_up
@@ -15,11 +16,11 @@ from vllm.utils.torch_utils import get_dtype_size
 # Both supported versions expose planning helpers in kv_cache_planning.
 from vllm.v1.core.kv_cache_planning import may_override_num_blocks
 from vllm.v1.kv_cache_interface import (
-    KVCacheGroupSpec,
     KVCacheSpec,
     KVCacheTensor,
-    UniformTypeKVCacheSpecs,
 )
+
+from vllm_ascend.core.kv_cache_interface import KVCacheGroup
 
 from . import SLOT_BYTES, TURBOQUANT_CACHE_DTYPE
 
@@ -37,18 +38,43 @@ def uses_turboquant_groups(groups):
     return any(
         getattr(spec, "cache_dtype_str", None) == TURBOQUANT_CACHE_DTYPE
         for group in groups
-        if group is not None and getattr(group, "kv_cache_spec", None) is not None
-        for spec in (
-            group.kv_cache_spec.kv_cache_specs.values()
-            if isinstance(group.kv_cache_spec, UniformTypeKVCacheSpecs)
-            else (group.kv_cache_spec,)
-        )
+        if group is not None and (specs := getattr(group, "distinct_specs", None))
+        for spec in specs
     )
 
 
-def group_specs(grouped_specs):
+def group_layers(grouped: list[KVCacheGroup]) -> list[KVCacheGroup]:
     # Keep C4 and its indexer in one metadata group. Preserve all per-layer
     # specs, including state padding; only C4 values are quantized.
+    largest_page = max(spec.page_size_bytes for group in grouped for spec in group.kv_cache_specs.values())
+    c4_group_bytes = [
+        sum(spec.page_size_bytes for spec in group.kv_cache_specs.values())
+        for group in grouped
+        if any(
+            getattr(spec, "cache_dtype_str", None) == TURBOQUANT_CACHE_DTYPE and spec.head_size == SLOT_BYTES
+            for spec in group.kv_cache_specs.values()
+        )
+    ]
+    budget = round_up(max(c4_group_bytes, default=largest_page), largest_page)
+    groups: list[KVCacheGroup] = []
+    for group in grouped:
+        chunk: dict[str, KVCacheSpec] = {}
+        used = 0
+        for name, spec in group.kv_cache_specs.items():
+            if chunk and used + spec.page_size_bytes > budget:
+                groups.append(replace(group, kv_cache_specs=chunk))
+                chunk, used = {}, 0
+            chunk[name] = spec
+            used += spec.page_size_bytes
+        if chunk:
+            groups.append(replace(group, kv_cache_specs=chunk))
+    return groups
+
+
+def group_specs(grouped_specs):
+    # Legacy vLLM v0.34.0 grouping helper (accepts UniformTypeKVCacheSpecs).
+    from vllm.v1.kv_cache_interface import KVCacheGroupSpec, UniformTypeKVCacheSpecs
+
     largest_page = max(spec.page_size_bytes for group in grouped_specs for spec in group.kv_cache_specs.values())
     c4_group_bytes = [
         group.page_size_bytes
@@ -91,7 +117,7 @@ def _alignment(spec):
 
 
 def packed_layout(groups):
-    specs = {name: spec for group in groups for name, spec in group.kv_cache_spec.kv_cache_specs.items()}
+    specs = {name: spec for group in groups for name, spec in group.kv_cache_specs.items()}
     page_alignment = math.lcm(PHYSICAL_STRIDE_ALIGNMENT, *(_alignment(spec) for spec in specs.values()))
     # A block ID belongs to one group at a time. Overlay complete groups
     # with a common stride to avoid fragmentation between small-page bins.

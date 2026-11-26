@@ -22,9 +22,11 @@ from vllm_ascend.models.deepseek_v41 import model as v41_model
 from vllm_ascend.models.deepseek_v41.cache_config import (
     get_deepseek_v41_kv_cache_config,
     group_cache_specs,
+    group_layer_configs,
     make_cache_groups,
 )
 from vllm_ascend.models.deepseek_v41.model import CANDIDATE_LENGTHS, CANDIDATES, TOPK, TOPK_LENGTHS, build_layer_plan
+from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2 import pp_transport
 
 
@@ -299,7 +301,17 @@ def test_all_dependencies_survive_multiple_stage_forwarding(runtime, monkeypatch
 @pytest.mark.parametrize("draft_layers", [0, 3])
 def test_mirrors_share_global_block_ids_without_local_page_aliases(runtime, monkeypatch, lengths, draft_layers):
     config = make_cache_config(17, head_size=8, index_size=4, draft_layers=draft_layers)
-    global_specs = {n: s for g in config.kv_cache_groups for n, s in g.kv_cache_spec.kv_cache_specs.items()}
+    is_v034 = vllm_version_is("0.34.0")
+    if is_v034:
+        global_specs = {n: s for g in config.kv_cache_groups for n, s in g.kv_cache_spec.kv_cache_specs.items()}
+    else:
+        from vllm.v1.kv_cache_interface import KVCacheLayerConfig
+
+        global_specs = {
+            n: KVCacheLayerConfig(g.manager_config, s)
+            for g in config.kv_cache_groups
+            for n, s in g.kv_cache_specs.items()
+        }
     partitions = _partitions(lengths)
     planner = SimpleNamespace(
         cache_config=SimpleNamespace(num_gpu_blocks_override=None, prefix_cache_retention_interval=None),
@@ -319,7 +331,9 @@ def test_mirrors_share_global_block_ids_without_local_page_aliases(runtime, monk
         stage_groups = [_project_kv_cache_groups_to_worker(config.kv_cache_groups, local)]
         if not draft_layers:
             # Also cover stage-local backbone grouping used for profiling.
-            stage_groups.append(make_cache_groups(group_cache_specs(local)))
+            stage_groups.append(
+                make_cache_groups(group_cache_specs(local)) if is_v034 else group_layer_configs(local)
+            )
         for groups in stage_groups:
             planned = get_deepseek_v41_kv_cache_config(planner, groups, 10**7)
             _, views = allocate_cache_views(planned)

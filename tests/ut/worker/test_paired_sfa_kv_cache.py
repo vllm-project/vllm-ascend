@@ -9,19 +9,20 @@ import pytest
 import torch
 from vllm.model_executor.models.utils import extract_layer_index
 from vllm.utils.torch_utils import get_dtype_size
+from vllm.v1.core.single_type_kv_cache_manager import FullAttentionManager, MambaManager
 from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
-    KVCacheGroupSpec,
-    KVCacheLayout,
     KVCacheTensor,
     MambaSpec,
-    UniformTypeKVCacheSpecs,
     compute_layout_strides,
 )
+from vllm.v1.kv_cache_layout import KVCacheLayout
 from vllm.v1.worker.utils import AttentionGroup
 
+from tests.ut.kv_cache_test_utils import make_kv_cache_group
 from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec, AscendSFAIndexerCacheSpec
 from vllm_ascend.models.kimi_k3.paired_sfa_cache import paired_sfa_cache_config, paired_sfa_cache_groups
+from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2 import attn_utils
 
 NUM_BLOCKS = 4
@@ -52,13 +53,15 @@ def vllm_config(monkeypatch):
 
 
 def make_paired_cache(config, scale_dtype, with_draft=True, local_layers=None, dcp_size=1):
+    is_v034 = vllm_version_is("0.34.0")
     config.parallel_config.decode_context_parallel_size = dcp_size
     specs = {}
+    entries = {}
     for layer in (3, 7):
-        specs[f"model.layers.{layer}.attn"] = AscendMLAAttentionSpec(
+        main_spec = AscendMLAAttentionSpec(
             block_size=BLOCK_SIZE, num_kv_heads=1, head_size=656, dtype=torch.int8, cache_sparse_sfa_c8=True
         )
-        specs[f"model.layers.{layer}.indexer.k_cache"] = AscendSFAIndexerCacheSpec(
+        indexer_spec = AscendSFAIndexerCacheSpec(
             block_size=BLOCK_SIZE,
             num_kv_heads=1,
             head_size=128,
@@ -68,31 +71,73 @@ def make_paired_cache(config, scale_dtype, with_draft=True, local_layers=None, d
             cache_sparse_li_c8=True,
             sfa_dcp_replicated_indexer_size=dcp_size,
         )
+        specs[f"model.layers.{layer}.attn"] = main_spec
+        specs[f"model.layers.{layer}.indexer.k_cache"] = indexer_spec
+        entries[f"model.layers.{layer}.attn"] = main_spec if is_v034 else FullAttentionManager.layer_config(main_spec)
+        entries[f"model.layers.{layer}.indexer.k_cache"] = (
+            indexer_spec if is_v034 else FullAttentionManager.layer_config(indexer_spec)
+        )
     for layer in range(3):
-        specs[f"model.layers.{layer}.linear_attn"] = MambaSpec(
+        mamba_spec = MambaSpec(
             block_size=BLOCK_SIZE,
             shapes=((3, 32), (8, 8)),
             dtypes=(torch.bfloat16, torch.float32),
             page_size_padded=BLOCK_SIZE * 656,
         )
+        specs[f"model.layers.{layer}.linear_attn"] = mamba_spec
+        entries[f"model.layers.{layer}.linear_attn"] = mamba_spec if is_v034 else MambaManager.layer_config(mamba_spec)
     if with_draft:
+        static_ctx = {}
         for layer, dtype in ((8, torch.bfloat16), (9, torch.int8)):
-            specs[f"model.layers.{layer}.attn"] = AscendMLAAttentionSpec(
-                block_size=BLOCK_SIZE,
-                num_kv_heads=1,
-                head_size=576,
-                dtype=dtype,
-                is_draft=True,
-                non_causal_multi_token_decode=True,
-            )
-    groups = paired_sfa_cache_groups(config, specs)
+            name = f"model.layers.{layer}.attn"
+            if is_v034:
+                draft_spec = AscendMLAAttentionSpec(
+                    block_size=BLOCK_SIZE,
+                    num_kv_heads=1,
+                    head_size=576,
+                    dtype=dtype,
+                    is_draft=True,
+                    non_causal_multi_token_decode=True,
+                )
+                specs[name] = draft_spec
+                entries[name] = draft_spec
+            else:
+                from vllm.v1.kv_cache_interface import KVCacheLayerConfig
+
+                draft_spec = AscendMLAAttentionSpec(
+                    block_size=BLOCK_SIZE,
+                    num_kv_heads=1,
+                    head_size=576,
+                    dtype=dtype,
+                )
+                specs[name] = draft_spec
+                entries[name] = KVCacheLayerConfig(FullAttentionManager.config(), draft_spec, is_draft=True)
+                static_ctx[name] = SimpleNamespace(non_causal_multi_token_decode=True)
+        if not is_v034:
+            config.compilation_config = SimpleNamespace(static_forward_context=static_ctx)
+    groups = paired_sfa_cache_groups(config, entries)
     if local_layers is not None:
-        groups = [
-            replace(
-                group, layer_names=[name for name in group.layer_names if extract_layer_index(name) in local_layers]
-            )
-            for group in groups
-        ]
+        if is_v034:
+            groups = [
+                replace(
+                    group,
+                    layer_names=[name for name in group.layer_names if extract_layer_index(name) in local_layers],
+                )
+                for group in groups
+            ]
+        else:
+            groups = [
+                replace(
+                    group,
+                    kv_cache_specs={
+                        name: spec
+                        for name, spec in group.kv_cache_specs.items()
+                        if extract_layer_index(name) in local_layers
+                    },
+                    unprojected_specs=group.distinct_specs,
+                )
+                for group in groups
+            ]
     local_specs = {name: specs[name] for group in groups for name in group.layer_names}
     return paired_sfa_cache_config(config, groups, 0), local_specs
 
@@ -187,6 +232,7 @@ def test_draft_fia_reshape_uses_draft_cache_dtype_in_packed_target_group(monkeyp
         kernel_block_sizes=[BLOCK_SIZE],
         shared_kv_cache_layers={},
         kv_cache_config=plan,
+        draft_layer_names=() if vllm_version_is("0.34.0") else {name},
     )
 
     backend.get_kv_cache_shape.assert_called_once_with(NUM_BLOCKS, BLOCK_SIZE, 1, 576, "auto")
@@ -292,12 +338,7 @@ def test_generic_sfa_mixed_group_keeps_private_caches(monkeypatch, vllm_config, 
     plan = KVCacheConfig(
         num_blocks=NUM_BLOCKS,
         kv_cache_tensors=descriptors,
-        kv_cache_groups=[
-            KVCacheGroupSpec(
-                layer_names=list(specs),
-                kv_cache_spec=UniformTypeKVCacheSpecs(block_size=BLOCK_SIZE, kv_cache_specs=specs),
-            )
-        ],
+        kv_cache_groups=[make_kv_cache_group(specs)],
     )
     monkeypatch.setattr(attn_utils, "_uses_single_raw_mla_cache", lambda *_args: False)
     monkeypatch.setattr(attn_utils, "_get_attention_kv_cache_dims", lambda *_args: (512, 64))

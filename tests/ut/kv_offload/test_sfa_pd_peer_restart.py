@@ -219,6 +219,7 @@ def test_draft_kv_worker_passes_process_identity():
     worker.kv_send_layer_thread = MagicMock()
     worker.dspark_aux_layer_ids = descriptor.aux_layer_ids
     worker.kv_cache_specs = [SimpleNamespace(block_size=16)]
+    worker.block_size = [16]
     worker.dspark_draft_kv_metadata = {
         "draft": DraftKVCacheMetadata(
             group_id=0,

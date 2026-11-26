@@ -11,10 +11,10 @@ from copy import copy
 from typing import Any
 
 from vllm.config.utils import hash_config
-from vllm.v1.kv_cache_interface import MambaSpec, SlidingWindowSpec, UniformTypeKVCacheSpecs
+from vllm.v1.core.single_type_kv_cache_manager import SlidingWindowManager
+from vllm.v1.kv_cache_interface import MambaSpec
 
 from vllm_ascend.ascend_config import KVPPConfig
-from vllm_ascend.core.kv_cache_interface import is_prefix_cacheable
 
 
 def make_block_key(
@@ -114,19 +114,18 @@ def validate_dcp_groups(kv_cache_config: Any) -> None:
         return None
     group_block_sizes: list[int] = []
     for group in groups:
-        spec = group.kv_cache_spec
-        specs = spec.kv_cache_specs.values() if isinstance(spec, UniformTypeKVCacheSpecs) else (spec,)
-        for sub_spec in specs:
-            if isinstance(sub_spec, SlidingWindowSpec):
-                raise ValueError("Mooncake layerwise DCP does not support sliding-window cache groups.")
-            if isinstance(sub_spec, MambaSpec) and getattr(sub_spec, "mamba_cache_mode", None) == "align":
+        if issubclass(group.manager_cls, SlidingWindowManager):
+            raise ValueError("Mooncake layerwise DCP does not support sliding-window cache groups.")
+        params = group.manager_config.params
+        for sub_spec in group.distinct_specs:
+            if isinstance(sub_spec, MambaSpec) and getattr(params, "mamba_cache_mode", None) == "align":
                 raise ValueError("Mooncake layerwise DCP does not support recurrent/align-state cache groups.")
             if not getattr(sub_spec, "dcp_sharded", False):
                 raise ValueError(
                     "Mooncake layerwise DCP requires every cache group to be DCP-sharded; "
                     f"found {type(sub_spec).__name__}."
                 )
-        if not is_prefix_cacheable(spec):
+        if not group.prefix_cacheable:
             continue
         block_size_signature = group_block_size_signature(group)
         if len(block_size_signature) != 1:
@@ -149,14 +148,11 @@ def group_block_size_signature(group) -> tuple[int, ...]:
     """Per-group page sizes, independent of how the spec is packaged.
 
     The scheduler and a worker can hold the *same* group in two different
-    shapes: one merged spec versus a ``UniformTypeKVCacheSpecs`` mapping every
-    layer name to its own spec. Both describe the same pages, so reduce either
-    shape to the set of block sizes it contains rather than reading a single
-    representative (which depends on dict order).
+    shapes: one merged spec versus per-layer specs. Both describe the same
+    pages, so reduce either shape to the set of block sizes it contains rather
+    than reading a single representative (which depends on dict order).
     """
-    spec = group.kv_cache_spec
-    specs = spec.kv_cache_specs.values() if isinstance(spec, UniformTypeKVCacheSpecs) else (spec,)
-    return tuple(sorted({int(sub.block_size) for sub in specs}))
+    return tuple(sorted({int(sub.block_size) for sub in group.distinct_specs}))
 
 
 def hybrid_layout_id(kv_cache_config, tp_size: int = 1, *, namespace: str = "") -> str:

@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 import math
-from collections.abc import Callable
+from collections.abc import Callable, Collection, Mapping
 from dataclasses import dataclass
-from typing import Final
+from typing import Any, Final
 
 import regex as re
 import torch
@@ -13,27 +13,26 @@ from vllm.config import VllmConfig
 from vllm.logger import logger
 from vllm.utils.math_utils import cdiv, round_up
 from vllm.utils.torch_utils import get_dtype_size
-
-try:
-    from vllm.v1.core.kv_cache_utils import may_override_num_blocks
-except ImportError:
-    from vllm.v1.core.kv_cache_planning import may_override_num_blocks
+from vllm.v1.core.kv_cache_planning import may_override_num_blocks
+from vllm.v1.core.single_type_kv_cache_manager import (
+    CircularBufferManager,
+    FullAttentionManager,
+)
 from vllm.v1.kv_cache_interface import (
-    CircularBufferSpec,
-    FullAttentionSpec,
+    AttentionSpec,
     HiddenStateCacheSpec,
     KVCacheConfig,
-    KVCacheGroupSpec,
     KVCacheSpec,
     KVCacheTensor,
     MambaSpec,
     MLAAttentionSpec,
-    UniformTypeKVCacheSpecs,
 )
 
 from vllm_ascend.core.kv_cache_interface import (
+    KVCacheGroup,
     get_kv_cache_compression_ratio,
 )
+from vllm_ascend.utils import vllm_version_is
 
 QSA_MAIN: Final = "qsa_main"
 QSA_RAW: Final = "qsa_raw"
@@ -104,16 +103,32 @@ class Qwen4KVCacheLayout:
         }[self.owner(layer_name).role]
 
 
-def _group_member_specs(group: KVCacheGroupSpec) -> dict[str, KVCacheSpec]:
-    if isinstance(group.kv_cache_spec, UniformTypeKVCacheSpecs):
-        return group.kv_cache_spec.kv_cache_specs
-    return {name: group.kv_cache_spec for name in group.layer_names}
+def _is_qsa_raw_spec(spec: KVCacheSpec, manager_cls: type | None = None) -> bool:
+    if vllm_version_is("0.34.0"):
+        from vllm.v1.kv_cache_interface import CircularBufferSpec
+
+        return isinstance(spec, CircularBufferSpec)
+    return manager_cls is not None and issubclass(manager_cls, CircularBufferManager)
 
 
-def _classify_spec(layer_name: str, spec: KVCacheSpec) -> str | None:
+def _is_qsa_main_spec(spec: KVCacheSpec, manager_cls: type | None = None) -> bool:
+    if isinstance(spec, MLAAttentionSpec):
+        return False
+    if vllm_version_is("0.34.0"):
+        from vllm.v1.kv_cache_interface import FullAttentionSpec
+
+        return isinstance(spec, FullAttentionSpec)
+    return (
+        manager_cls is not None
+        and issubclass(manager_cls, FullAttentionManager)
+        and isinstance(spec, AttentionSpec)
+    )
+
+
+def _classify_spec(layer_name: str, spec: KVCacheSpec, manager_cls: type | None = None) -> str | None:
     if isinstance(spec, HiddenStateCacheSpec):
         return HIDDEN
-    if layer_name.endswith(".raw_key_cache") and isinstance(spec, CircularBufferSpec):
+    if layer_name.endswith(".raw_key_cache") and _is_qsa_raw_spec(spec, manager_cls):
         return QSA_RAW
     if (
         layer_name.endswith(".compressed_key_cache")
@@ -121,7 +136,7 @@ def _classify_spec(layer_name: str, spec: KVCacheSpec) -> str | None:
         and get_kv_cache_compression_ratio(spec) > 1
     ):
         return QSA_COMPRESSED
-    if layer_name.endswith(".attn") and isinstance(spec, FullAttentionSpec):
+    if layer_name.endswith(".attn") and _is_qsa_main_spec(spec, manager_cls):
         return QSA_MAIN
     if isinstance(spec, MambaSpec):
         if len(spec.shapes) == 2:
@@ -158,7 +173,7 @@ def _state_bytes(spec: MambaSpec, index: int) -> int:
     return math.prod(spec.shapes[index]) * get_dtype_size(spec.dtypes[index])
 
 
-def _qsa_main_page_bytes(spec: FullAttentionSpec) -> tuple[int, int]:
+def _qsa_main_page_bytes(spec: AttentionSpec) -> tuple[int, int]:
     dtype_size = get_dtype_size(spec.dtype)
     tokens_heads = spec.block_size * spec.num_kv_heads
     return (
@@ -172,7 +187,7 @@ def _real_page_size_bytes(spec: KVCacheSpec) -> int:
 
 
 def build_qwen4_kv_cache_layout(
-    kv_cache_groups: list[KVCacheGroupSpec],
+    kv_cache_groups: list[KVCacheGroup],
     num_blocks: int,
 ) -> Qwen4KVCacheLayout | None:
     """Build shared QSA/GDN slots; PLE and hidden states have private storage."""
@@ -190,11 +205,11 @@ def build_qwen4_kv_cache_layout(
     owner_group_ids: dict[str, int] = {}
     unknown: list[tuple[str, KVCacheSpec]] = []
     for group_id, group in enumerate(kv_cache_groups):
-        member_specs = _group_member_specs(group)
+        member_specs = group.kv_cache_specs
         for layer_name in group.layer_names:
             owner_group_ids[layer_name] = group_id
             spec = member_specs[layer_name]
-            role = _classify_spec(layer_name, spec)
+            role = _classify_spec(layer_name, spec, group.manager_cls)
             if role is None:
                 unknown.append((layer_name, spec))
             else:
@@ -241,7 +256,7 @@ def build_qwen4_kv_cache_layout(
     max_ssm_bytes = max(_state_bytes(spec, 1) for spec in gdn_specs)
     conv_bytes = max(_state_bytes(spec, 0) for spec in gdn_specs)
     for layer_name, spec in role_members[QSA_MAIN]:
-        assert isinstance(spec, FullAttentionSpec)
+        assert isinstance(spec, AttentionSpec)
         kv_token_bytes = spec.num_kv_heads * (spec.head_size + spec.head_size_v) * get_dtype_size(spec.dtype)
         minimum_block_size = round_up((max_ssm_bytes + kv_token_bytes - 1) // kv_token_bytes, 128)
         if spec.block_size < minimum_block_size or spec.block_size % 128:
@@ -253,9 +268,9 @@ def build_qwen4_kv_cache_layout(
         main_name, main_spec = qsa_by_role[QSA_MAIN][source]
         compressed_name, compressed_spec = qsa_by_role[QSA_COMPRESSED][source]
         raw_name, raw_spec = qsa_by_role[QSA_RAW][source]
-        assert isinstance(main_spec, FullAttentionSpec)
+        assert isinstance(main_spec, AttentionSpec)
         assert isinstance(compressed_spec, MLAAttentionSpec)
-        assert isinstance(raw_spec, CircularBufferSpec)
+        assert isinstance(raw_spec, AttentionSpec)
         compress_ratio = get_kv_cache_compression_ratio(compressed_spec)
         same_block_table = owner_group_ids[main_name] == owner_group_ids[compressed_name]
         if same_block_table and compressed_spec.block_size != main_spec.block_size:
@@ -272,9 +287,7 @@ def build_qwen4_kv_cache_layout(
             raise ValueError(
                 f"{raw_name} circular capacity={raw_spec.block_size} is not aligned to ratio={compress_ratio}"
             )
-    main_pages = [
-        _qsa_main_page_bytes(spec) for _, spec in role_members[QSA_MAIN] if isinstance(spec, FullAttentionSpec)
-    ]
+    main_pages = [_qsa_main_page_bytes(spec) for _, spec in role_members[QSA_MAIN] if isinstance(spec, AttentionSpec)]
     # Independent scheduler groups own disjoint block IDs. QSA uses the
     # whole page; GDN interprets the same bytes as adjacent conv and SSM.
     subpage_alignment = math.lcm(
@@ -350,7 +363,7 @@ def build_qwen4_kv_cache_layout(
         dtypes = owner.spec.dtypes if isinstance(owner.spec, MambaSpec) else (owner.spec.dtype,)
         assert all(region.offset % get_dtype_size(dtype) == 0 for dtype in dtypes)
     for _, spec in role_members[QSA_MAIN]:
-        assert isinstance(spec, FullAttentionSpec)
+        assert isinstance(spec, AttentionSpec)
         assert sum(_qsa_main_page_bytes(spec)) <= layout.region("r0").page_size_bytes
     return layout
 
@@ -424,8 +437,16 @@ def make_qsa_kernel_page_cache(
     return key, value
 
 
+def _unpack_qsa_entries(
+    kv_cache_spec: Mapping[str, Any],
+) -> dict[str, tuple[KVCacheSpec, type | None]]:
+    if vllm_version_is("0.34.0"):
+        return {name: (spec, None) for name, spec in kv_cache_spec.items()}
+    return {name: (lc.spec, lc.manager_cls) for name, lc in kv_cache_spec.items()}
+
+
 def _prepare_qsa_composite_groups(
-    kv_cache_spec: dict[str, KVCacheSpec],
+    kv_cache_spec: Mapping[str, Any],
 ) -> tuple[set[str], set[str], set[str]] | None:
     """Identify the three cache owners of every QSA source layer.
 
@@ -434,22 +455,23 @@ def _prepare_qsa_composite_groups(
     block.  Grouping must therefore express those lifetimes before the main
     block manager and admission planner see the specs.
     """
+    unpacked = _unpack_qsa_entries(kv_cache_spec)
 
     raw = {
         name[: -len(".indexer.raw_key_cache")]: (name, spec)
-        for name, spec in kv_cache_spec.items()
-        if name.endswith(".indexer.raw_key_cache") and isinstance(spec, CircularBufferSpec)
+        for name, (spec, manager_cls) in unpacked.items()
+        if name.endswith(".indexer.raw_key_cache") and _is_qsa_raw_spec(spec, manager_cls)
     }
     if not raw:
         return None
     all_main = {
         name[: -len(".attn")]: (name, spec)
-        for name, spec in kv_cache_spec.items()
-        if name.endswith(".attn") and isinstance(spec, FullAttentionSpec) and not isinstance(spec, MLAAttentionSpec)
+        for name, (spec, manager_cls) in unpacked.items()
+        if name.endswith(".attn") and _is_qsa_main_spec(spec, manager_cls)
     }
     all_compressed = {
         name[: -len(".indexer.compressed_key_cache")]: (name, spec)
-        for name, spec in kv_cache_spec.items()
+        for name, (spec, _) in unpacked.items()
         if name.endswith(".indexer.compressed_key_cache")
         and isinstance(spec, MLAAttentionSpec)
         and get_kv_cache_compression_ratio(spec) > 1
@@ -464,7 +486,7 @@ def _prepare_qsa_composite_groups(
         )
     main = {source: all_main[source] for source in raw}
     compressed = {source: all_compressed[source] for source in raw}
-    if not any(isinstance(spec, MambaSpec) and len(spec.shapes) == 2 for spec in kv_cache_spec.values()):
+    if not any(isinstance(spec, MambaSpec) and len(spec.shapes) == 2 for spec, _ in unpacked.values()):
         raise ValueError("Qwen4 QSA cache layout requires GDN state specs")
 
     main_names: set[str] = set()
@@ -474,9 +496,9 @@ def _prepare_qsa_composite_groups(
         main_name, main_spec = main[source]
         compressed_name, compressed_spec = compressed[source]
         raw_name, raw_spec = raw[source]
-        assert isinstance(main_spec, FullAttentionSpec)
+        assert isinstance(main_spec, AttentionSpec)
         assert isinstance(compressed_spec, MLAAttentionSpec)
-        assert isinstance(raw_spec, CircularBufferSpec)
+        assert isinstance(raw_spec, AttentionSpec)
         ratio = get_kv_cache_compression_ratio(compressed_spec)
         if main_spec.block_size != compressed_spec.block_size:
             raise ValueError(
@@ -497,21 +519,57 @@ def _prepare_qsa_composite_groups(
     return main_names, compressed_names, raw_names
 
 
+def _make_merged_qsa_group_v034(
+    kv_cache_spec: Mapping[str, KVCacheSpec],
+    ordered: list[str],
+    description: str,
+    *,
+    is_eagle_group: bool,
+) -> KVCacheGroup:
+    from vllm.v1.kv_cache_interface import KVCacheGroupSpec, UniformTypeKVCacheSpecs
+
+    uniform = UniformTypeKVCacheSpecs.from_specs({name: kv_cache_spec[name] for name in ordered})
+    if uniform is None:
+        raise ValueError(f"QSA {description} owners do not have one lifetime")
+    return KVCacheGroupSpec(ordered, uniform, is_eagle_group=is_eagle_group)
+
+
+def _make_merged_qsa_group_from_layer_configs(
+    layer_configs: Mapping[str, Any],
+    ordered: list[str],
+    description: str,
+    *,
+    is_eagle_group: bool,
+) -> KVCacheGroup:
+    ordered_configs = {name: layer_configs[name] for name in ordered}
+    if not ordered_configs:
+        raise ValueError(f"QSA {description} owners do not have one lifetime")
+    first_cfg = next(iter(ordered_configs.values()))
+    if any(
+        lc.manager_config != first_cfg.manager_config
+        or lc.spec.block_size != first_cfg.spec.block_size
+        or lc.spec.dcp_sharded != first_cfg.spec.dcp_sharded
+        for lc in ordered_configs.values()
+    ):
+        raise ValueError(f"QSA {description} owners do not have one lifetime")
+    return KVCacheGroup.from_layers(ordered_configs, is_eagle_group=is_eagle_group)
+
+
 def _merge_qsa_composite_groups(
-    groups: list[KVCacheGroupSpec],
-    kv_cache_spec: dict[str, KVCacheSpec],
+    groups: list[KVCacheGroup],
+    kv_cache_spec: Mapping[str, Any],
     main_names: set[str],
     compressed_names: set[str],
     raw_names: set[str],
-) -> list[KVCacheGroupSpec]:
+) -> list[KVCacheGroup]:
     """Give QSA aliases the block-table lifetimes their backing requires."""
 
     def merge_owners(
-        current: list[KVCacheGroupSpec],
+        current: list[KVCacheGroup],
         owner_names: set[str],
         description: str,
         ordered_names: list[str] | None = None,
-    ) -> list[KVCacheGroupSpec]:
+    ) -> list[KVCacheGroup]:
         consumed: list[int] = []
         eagle = False
         for index, group in enumerate(current):
@@ -530,14 +588,15 @@ def _merge_qsa_composite_groups(
         ordered = ordered_names or [name for name in kv_cache_spec if name in owner_names]
         if set(ordered) != owner_names or len(ordered) != len(owner_names):
             raise ValueError(f"QSA {description} owner order does not match its cache owners")
-        uniform = UniformTypeKVCacheSpecs.from_specs({name: kv_cache_spec[name] for name in ordered})
-        if uniform is None:
-            raise ValueError(f"QSA {description} owners do not have one lifetime")
-        merged = KVCacheGroupSpec(
-            ordered,
-            uniform,
-            is_eagle_group=eagle,
-        )
+        if vllm_version_is("0.34.0"):
+            merged = _make_merged_qsa_group_v034(kv_cache_spec, ordered, description, is_eagle_group=eagle)
+        else:
+            merged = _make_merged_qsa_group_from_layer_configs(
+                kv_cache_spec,
+                ordered,
+                description,
+                is_eagle_group=eagle,
+            )
         first = min(consumed)
         return [
             merged if index == first else group
@@ -555,32 +614,51 @@ def _merge_qsa_composite_groups(
     return merge_owners(result, raw_names, "raw circular")
 
 
+def _make_mamba_state_group_v034(
+    specs: dict[str, MambaSpec],
+    first_spec: MambaSpec,
+    first_group: KVCacheGroup,
+) -> KVCacheGroup:
+    from vllm.v1.kv_cache_interface import KVCacheGroupSpec, UniformTypeKVCacheSpecs
+
+    uniform = UniformTypeKVCacheSpecs.from_specs(specs)
+    assert uniform is not None
+    return KVCacheGroupSpec(
+        list(specs),
+        first_spec if len(specs) == 1 else uniform,
+        is_eagle_group=first_group.is_eagle_group,
+    )
+
+
 def _merge_mamba_state_groups(
-    groups: list[KVCacheGroupSpec],
+    groups: list[KVCacheGroup],
     slot_count: int,
-) -> list[KVCacheGroupSpec]:
+    *,
+    draft_layer_names: Collection[str] | None = None,
+) -> list[KVCacheGroup]:
     """Pack compatible state layers into groups bounded by the QSA slot count.
 
     Each group gets a separate scheduler block table and reuses slot ordinals.
     Geometry and draft/target boundaries remain separate allocation domains.
     """
+    draft_names = draft_layer_names or ()
     buckets: dict[tuple, list[tuple[int, str, MambaSpec]]] = {}
     for index, group in enumerate(groups):
-        spec = group.kv_cache_spec
-        members = (
-            spec.kv_cache_specs
-            if isinstance(spec, UniformTypeKVCacheSpecs)
-            else {name: spec for name in group.layer_names}
-        )
+        members = group.kv_cache_specs
         if not all(isinstance(member, MambaSpec) for member in members.values()):
             continue
         for name, member in members.items():
-            key = (member, group.is_eagle_group)
+            key = (
+                (member, group.is_eagle_group)
+                if vllm_version_is("0.34.0")
+                else (member, group.manager_config, group.is_eagle_group, name in draft_names)
+            )
             buckets.setdefault(key, []).append((index, name, member))
-    replacements: dict[int, list[KVCacheGroupSpec]] = {}
+    replacements: dict[int, list[KVCacheGroup]] = {}
     drop: set[int] = set()
     for members in buckets.values():
         first = members[0][0]
+        first_group = groups[first]
         drop.update(index for index, _, _ in members)
         # Interleave layers in model order while keeping each group within the slot limit.
         members.sort(key=lambda member: _owner_sort_key(member[1]))
@@ -588,16 +666,18 @@ def _merge_mamba_state_groups(
         for i in range(num_groups):
             chunk = members[i::num_groups]
             specs = {name: spec for _, name, spec in chunk}
-            uniform = UniformTypeKVCacheSpecs.from_specs(specs)
-            assert uniform is not None
-            replacements.setdefault(first, []).append(
-                KVCacheGroupSpec(
-                    list(specs),
-                    chunk[0][2] if len(chunk) == 1 else uniform,
-                    is_eagle_group=groups[first].is_eagle_group,
+            if vllm_version_is("0.34.0"):
+                packed = _make_mamba_state_group_v034(specs, chunk[0][2], first_group)
+            else:
+                packed = KVCacheGroup(
+                    kv_cache_specs=specs,
+                    manager_config=first_group.manager_config,
+                    block_size=first_group.block_size,
+                    dcp_sharded=first_group.dcp_sharded,
+                    is_eagle_group=first_group.is_eagle_group,
                 )
-            )
-    result: list[KVCacheGroupSpec] = []
+            replacements.setdefault(first, []).append(packed)
+    result: list[KVCacheGroup] = []
     for index, group in enumerate(groups):
         result.extend(replacements.get(index, []))
         if index not in drop:
@@ -611,7 +691,7 @@ def _private_page_bytes(owner: CacheOwner) -> int:
 
 
 def get_qwen4_exp_pool_bytes_per_block(
-    kv_cache_groups: list[KVCacheGroupSpec],
+    kv_cache_groups: list[KVCacheGroup],
 ) -> int | None:
     """Charge shared slots once, plus one private bank per PLE/hidden owner."""
     layout = build_qwen4_kv_cache_layout(kv_cache_groups, num_blocks=1)
@@ -623,16 +703,21 @@ def get_qwen4_exp_pool_bytes_per_block(
 
 def get_qwen4_exp_kv_cache_groups(
     vllm_config: VllmConfig,
-    kv_cache_spec: dict[str, KVCacheSpec],
-    get_default_groups: Callable[[VllmConfig, dict[str, KVCacheSpec]], list[KVCacheGroupSpec]],
-) -> list[KVCacheGroupSpec] | None:
+    kv_cache_spec: Mapping[str, Any],
+    get_default_groups: Callable[[VllmConfig, Any], list[KVCacheGroup]],
+) -> list[KVCacheGroup] | None:
     """Build model-specific alias lifetimes on top of upstream grouping."""
     owners = _prepare_qsa_composite_groups(kv_cache_spec)
     if owners is None:
         return None
+    draft_layer_names = (
+        None
+        if vllm_version_is("0.34.0")
+        else frozenset(name for name, lc in kv_cache_spec.items() if lc.is_draft)
+    )
     groups = get_default_groups(vllm_config, kv_cache_spec)
     groups = _merge_qsa_composite_groups(groups, kv_cache_spec, *owners)
-    groups = _merge_mamba_state_groups(groups, len(owners[0]))
+    groups = _merge_mamba_state_groups(groups, len(owners[0]), draft_layer_names=draft_layer_names)
     logger.info(
         "Using Qwen4 cache grouping: %d main/compressed owners, %d raw circular owners, %d total cache groups",
         len(owners[0]) + len(owners[1]),
@@ -644,7 +729,7 @@ def get_qwen4_exp_kv_cache_groups(
 
 def get_qwen4_exp_kv_cache_config(
     vllm_config: VllmConfig,
-    kv_cache_groups: list[KVCacheGroupSpec],
+    kv_cache_groups: list[KVCacheGroup],
     available_memory: int,
 ) -> KVCacheConfig | None:
     """Plan state slabs and block-packed K/V-or-SSM pages per ordinal slot.

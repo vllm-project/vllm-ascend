@@ -37,7 +37,6 @@ from vllm.platforms import current_platform
 from vllm_ascend.attention.context_parallel.dsa_v41_cp import get_v41_cp_classes
 from vllm_ascend.attention.dsa_v1 import AscendDSAImpl, OProjBufferPool
 from vllm_ascend.attention.dsa_v41 import DeepseekV41CacheBackend, DeepseekV41CacheLayer, scatter_cache_sk
-from vllm_ascend.core.kv_cache_interface import AscendSlidingWindowMLASpec
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.models.common.ops.sequence_parallel import (
     sp_all_gather,
@@ -90,6 +89,8 @@ class DeepseekV41DSparkSWACache(AscendDeepseekV41SWACache):
 
     # TODO: Extract DeepseekV41DraftSWASpec construction from this cache subclass.
     def get_kv_cache_spec(self, vllm_config):
+        from vllm_ascend.core.kv_cache_interface import AscendSlidingWindowMLASpec
+
         spec = super().get_kv_cache_spec(vllm_config)
         return AscendSlidingWindowMLASpec(
             block_size=spec.block_size,

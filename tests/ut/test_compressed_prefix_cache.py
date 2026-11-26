@@ -9,27 +9,23 @@ from vllm.sampling_params import SamplingParams
 from vllm.utils.hashing import sha256
 from vllm.v1.core.block_pool import BlockPool
 
-# vLLM #61183 moved `is_kv_cache_spec_uniform` to `kv_cache_planning` on main.
-from vllm.v1.core.kv_cache_planning import is_kv_cache_spec_uniform
 from vllm.v1.core.kv_cache_utils import (
     BlockHashListWithBlockSize,
     get_block_hash,
     get_request_block_hasher,
     init_none_hash,
 )
-from vllm.v1.core.single_type_kv_cache_manager import (
-    FullAttentionManager,
-    register_all_kvcache_specs,
-)
-from vllm.v1.kv_cache_interface import (
-    FullAttentionSpec,
-    KVCacheConfig,
-    KVCacheGroupSpec,
-    MambaSpec,
-    MLAAttentionSpec,
-)
+from vllm.v1.core.single_type_kv_cache_manager import FullAttentionManager
+from vllm.v1.kv_cache_interface import KVCacheConfig, MambaSpec
 from vllm.v1.request import Request
 
+from tests.ut.kv_cache_test_utils import (
+    is_v034,
+    make_full_attention_layer_config,
+    make_kv_cache_group,
+    make_mamba_layer_config,
+    make_mla_layer_config,
+)
 from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec
 from vllm_ascend.patch.platform.patch_kv_cache_coordinator import (
     AscendHybridKVCacheCoordinator,
@@ -40,7 +36,10 @@ pytestmark = pytest.mark.cpu_test
 
 @pytest.fixture(autouse=True)
 def _init_hash_seed():
-    register_all_kvcache_specs(None)
+    if is_v034():
+        from vllm.v1.core.single_type_kv_cache_manager import register_all_kvcache_specs
+
+        register_all_kvcache_specs(None)
     init_none_hash(sha256)
 
 
@@ -61,21 +60,24 @@ def _make_full_manager(
     compress_ratio: int = 4,
 ) -> tuple[AscendMLAAttentionSpec, BlockPool, FullAttentionManager]:
     logical_block_size = physical_block_size * compress_ratio
-    spec = AscendMLAAttentionSpec(
+    entry = make_mla_layer_config(
         block_size=logical_block_size,
         num_kv_heads=1,
         head_size=1,
         dtype=torch.float32,
+        ascend=True,
         model_version="deepseek_v4",
         tokens_per_state=compress_ratio,
     )
+    spec = getattr(entry, "spec", entry)
     block_pool = BlockPool(
         num_gpu_blocks=8,
         enable_caching=True,
         hash_block_size=physical_block_size,
     )
+    manager_arg = entry if is_v034() else make_kv_cache_group(["mla"], entry)
     manager = FullAttentionManager(
-        spec,
+        manager_arg,
         block_pool=block_pool,
         enable_caching=True,
         kv_cache_group_id=0,
@@ -86,18 +88,24 @@ def _make_full_manager(
 
 def test_ascend_mla_spec_is_not_uniform_with_mamba() -> None:
     mla_spec, _, _ = _make_full_manager()
-    mamba_spec = MambaSpec(
-        block_size=1,
-        shapes=((1,),),
-        dtypes=(torch.float32,),
-    )
+    if is_v034():
+        from vllm.v1.core.kv_cache_planning import is_kv_cache_spec_uniform
 
-    assert not is_kv_cache_spec_uniform(
-        {
-            "mla": mla_spec,
-            "mamba": mamba_spec,
-        }
-    )
+        mamba_spec = MambaSpec(
+            block_size=1,
+            shapes=((1,),),
+            dtypes=(torch.float32,),
+        )
+        assert not is_kv_cache_spec_uniform({"mla": mla_spec, "mamba": mamba_spec})
+    else:
+        from vllm.v1.core.kv_cache_planning import can_share_block_table
+
+        mamba_cfg = make_mamba_layer_config(
+            block_size=1,
+            shapes=((1,),),
+            dtypes=(torch.float32,),
+        )
+        assert not can_share_block_table({"mla": FullAttentionManager.layer_config(mla_spec), "mamba": mamba_cfg})
 
 
 @pytest.mark.parametrize("physical_block_size", [32, 64, 128])
@@ -120,8 +128,10 @@ def test_compressed_spec_separates_logical_and_storage_blocks(
             decode_context_parallel_size=1,
             prefill_context_parallel_size=1,
         ),
+        max_in_flight_tokens=logical_block_size * 3,
     )
-    assert spec.max_memory_usage_bytes(config) == spec.page_size_bytes * 3
+    group = make_kv_cache_group(["mla"], spec)
+    assert group.max_memory_usage_bytes(config) == spec.page_size_bytes * 3
 
     request_id = f"p{physical_block_size}-c{compress_ratio}"
     expected_blocks = {
@@ -180,15 +190,27 @@ def test_compressed_prefix_cache_uses_logical_block_hash() -> None:
         physical_block_size,
         logical_block_size,
     )
-    hit_result = FullAttentionManager.find_longest_cache_hit(
-        block_hashes=request_b_hashes,
-        max_length=logical_block_size,
-        kv_cache_group_ids=[0],
-        block_pool=block_pool,
-        kv_cache_spec=spec,
-        drop_eagle_block=False,
-        alignment_tokens=logical_block_size,
-    )
+    if is_v034():
+        hit_result = FullAttentionManager.find_longest_cache_hit(
+            block_hashes=request_b_hashes,
+            max_length=logical_block_size,
+            kv_cache_group_ids=[0],
+            block_pool=block_pool,
+            kv_cache_spec=spec,
+            drop_eagle_block=False,
+            alignment_tokens=logical_block_size,
+        )
+    else:
+        hit_result = FullAttentionManager.find_longest_cache_hit(
+            block_hashes=request_b_hashes,
+            max_length=logical_block_size,
+            kv_cache_group_ids=[0],
+            block_pool=block_pool,
+            block_size=logical_block_size,
+            manager_config=FullAttentionManager.config(),
+            drop_eagle_block=False,
+            alignment_tokens=logical_block_size,
+        )
     hit_blocks = hit_result[0][0]
 
     assert hit_blocks == []
@@ -220,15 +242,27 @@ def test_compressed_prefix_cache_hits_identical_logical_block() -> None:
         physical_block_size,
         logical_block_size,
     )
-    hit_result = FullAttentionManager.find_longest_cache_hit(
-        block_hashes=logical_hashes,
-        max_length=logical_block_size,
-        kv_cache_group_ids=[0],
-        block_pool=block_pool,
-        kv_cache_spec=spec,
-        drop_eagle_block=False,
-        alignment_tokens=logical_block_size,
-    )
+    if is_v034():
+        hit_result = FullAttentionManager.find_longest_cache_hit(
+            block_hashes=logical_hashes,
+            max_length=logical_block_size,
+            kv_cache_group_ids=[0],
+            block_pool=block_pool,
+            kv_cache_spec=spec,
+            drop_eagle_block=False,
+            alignment_tokens=logical_block_size,
+        )
+    else:
+        hit_result = FullAttentionManager.find_longest_cache_hit(
+            block_hashes=logical_hashes,
+            max_length=logical_block_size,
+            kv_cache_group_ids=[0],
+            block_pool=block_pool,
+            block_size=logical_block_size,
+            manager_config=FullAttentionManager.config(),
+            drop_eagle_block=False,
+            alignment_tokens=logical_block_size,
+        )
     hit_blocks = hit_result[0][0]
 
     assert hit_blocks == manager.req_to_blocks[request.request_id]
@@ -243,7 +277,7 @@ def test_hybrid_coordinator_rejects_partial_compressed_prefix_hit() -> None:
 
     request_a = _make_request("a", request_a_tokens, physical_block_size)
     request_b = _make_request("b", request_b_tokens, physical_block_size)
-    compressed_spec = MLAAttentionSpec(
+    compressed_spec = make_mla_layer_config(
         block_size=logical_block_size,
         num_kv_heads=1,
         head_size=1,
@@ -251,7 +285,7 @@ def test_hybrid_coordinator_rejects_partial_compressed_prefix_hit() -> None:
         model_version="deepseek_v4",
         tokens_per_state=4,
     )
-    full_spec = FullAttentionSpec(
+    full_spec = make_full_attention_layer_config(
         block_size=physical_block_size,
         num_kv_heads=1,
         head_size=1,
@@ -262,8 +296,8 @@ def test_hybrid_coordinator_rejects_partial_compressed_prefix_hit() -> None:
             num_blocks=16,
             kv_cache_tensors=[],
             kv_cache_groups=[
-                KVCacheGroupSpec(["compressed"], compressed_spec),
-                KVCacheGroupSpec(["full"], full_spec),
+                make_kv_cache_group(["compressed"], compressed_spec),
+                make_kv_cache_group(["full"], full_spec),
             ],
         ),
         max_model_len=logical_block_size,
@@ -314,27 +348,27 @@ def test_hybrid_coordinator_truncates_every_full_attention_group() -> None:
             num_blocks=32,
             kv_cache_tensors=[],
             kv_cache_groups=[
-                KVCacheGroupSpec(
+                make_kv_cache_group(
                     ["full_a"],
-                    FullAttentionSpec(
+                    make_full_attention_layer_config(
                         block_size=block_size,
                         num_kv_heads=1,
                         head_size=1,
                         dtype=torch.float32,
                     ),
                 ),
-                KVCacheGroupSpec(
+                make_kv_cache_group(
                     ["full_b"],
-                    FullAttentionSpec(
+                    make_full_attention_layer_config(
                         block_size=2 * block_size,
                         num_kv_heads=1,
                         head_size=1,
                         dtype=torch.float32,
                     ),
                 ),
-                KVCacheGroupSpec(
+                make_kv_cache_group(
                     ["mamba"],
-                    MambaSpec(
+                    make_mamba_layer_config(
                         block_size=block_size,
                         shapes=((1,),),
                         dtypes=(torch.float32,),

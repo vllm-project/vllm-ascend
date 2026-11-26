@@ -40,6 +40,7 @@ from vllm_ascend.utils import (
     COMPRESSED_TENSORS_METHOD,
     AscendDeviceType,
     dsv4_skips_indexer_topk,
+    vllm_version_is,
 )
 
 
@@ -603,8 +604,9 @@ class TestNPUPlatform(TestBase):
         _validate_draft_decode_context_parallel_config(config)
 
     def test_get_kv_cache_config_builder_cls(self):
-        assert NPUPlatform.get_kv_cache_config_builder_cls(self.mock_vllm_config()) == (
-            "vllm_ascend.core.kv_cache_config_builder.AscendKVCacheConfigBuilder"
+        assert (
+            NPUPlatform.get_kv_cache_config_builder_cls(self.mock_vllm_config())
+            == "vllm_ascend.core.kv_cache_config_builder.AscendKVCacheConfigBuilder"
         )
 
     @patch("vllm_ascend.platform.enable_sp", return_value=False)

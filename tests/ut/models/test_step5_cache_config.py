@@ -11,18 +11,17 @@ like every other group so per-id spans of different groups can only
 intersect at identical block ids.
 """
 
+from dataclasses import replace
 from types import SimpleNamespace
 
 import pytest
 import torch
-from vllm.v1.kv_cache_interface import (
-    CircularBufferSpec,
-    FullAttentionSpec,
-    KVCacheGroupSpec,
-    KVCacheSpec,
-    SlidingWindowSpec,
-    UniformTypeKVCacheSpecs,
+from vllm.v1.core.single_type_kv_cache_manager import (
+    CircularBufferManager,
+    FullAttentionManager,
+    SlidingWindowManager,
 )
+from vllm.v1.kv_cache_interface import AttentionSpec
 
 from vllm_ascend.core.kv_cache_config_builder import AscendKVCacheConfigBuilder
 from vllm_ascend.models.step5.cache_config import (
@@ -34,6 +33,7 @@ from vllm_ascend.models.step5.cache_config import (
     is_step5_groups,
     is_step5_kv_cache_spec,
 )
+from vllm_ascend.utils import vllm_version_is
 
 BLOCK = 128
 # 96 KiB main DSA page: 2 (k+v) x 4 kv heads x 48 head_size x bf16 x 128 tok.
@@ -53,48 +53,112 @@ SUMMARY0 = f"{L0}.sparse_summary_cache"
 SUMMARY2 = f"{L2}.sparse_summary_cache"
 
 
-def _main_spec() -> FullAttentionSpec:
-    return FullAttentionSpec(
-        block_size=BLOCK,
-        num_kv_heads=4,
-        head_size=48,
-        head_size_v=48,
-        dtype=torch.bfloat16,
+def _main_spec():
+    if vllm_version_is("0.34.0"):
+        from vllm.v1.kv_cache_interface import FullAttentionSpec
+
+        return FullAttentionSpec(
+            block_size=BLOCK,
+            num_kv_heads=4,
+            head_size=48,
+            head_size_v=48,
+            dtype=torch.bfloat16,
+        )
+    return FullAttentionManager.layer_config(
+        AttentionSpec(
+            block_size=BLOCK,
+            num_kv_heads=4,
+            head_size=48,
+            head_size_v=48,
+            dtype=torch.bfloat16,
+        )
     )
 
 
-def _sw_spec() -> SlidingWindowSpec:
-    return SlidingWindowSpec(
-        block_size=BLOCK,
-        num_kv_heads=4,
-        head_size=48,
-        head_size_v=48,
-        dtype=torch.bfloat16,
+def _sw_spec():
+    if vllm_version_is("0.34.0"):
+        from vllm.v1.kv_cache_interface import SlidingWindowSpec
+
+        return SlidingWindowSpec(
+            block_size=BLOCK,
+            num_kv_heads=4,
+            head_size=48,
+            head_size_v=48,
+            dtype=torch.bfloat16,
+            sliding_window=4096,
+        )
+    return SlidingWindowManager.layer_config(
+        AttentionSpec(
+            block_size=BLOCK,
+            num_kv_heads=4,
+            head_size=48,
+            head_size_v=48,
+            dtype=torch.bfloat16,
+        ),
         sliding_window=4096,
     )
 
 
-def _summary_spec() -> FullAttentionSpec:
-    return FullAttentionSpec(
-        block_size=BLOCK,
-        num_kv_heads=1,
-        head_size=16,
-        dtype=torch.float8_e4m3fn,
+def _summary_spec():
+    if vllm_version_is("0.34.0"):
+        from vllm.v1.kv_cache_interface import FullAttentionSpec
+
+        return FullAttentionSpec(
+            block_size=BLOCK,
+            num_kv_heads=1,
+            head_size=16,
+            dtype=torch.float8_e4m3fn,
+        )
+    return FullAttentionManager.layer_config(
+        AttentionSpec(
+            block_size=BLOCK,
+            num_kv_heads=1,
+            head_size=16,
+            dtype=torch.float8_e4m3fn,
+        )
     )
 
 
-def _ring_spec() -> CircularBufferSpec:
-    return CircularBufferSpec(
-        block_size=BLOCK,
-        num_kv_heads=1,
-        head_size=384,
-        head_size_v=0,
-        dtype=torch.bfloat16,
-        block_stride_alignment=RING_ALIGNMENT,
+def _ring_spec():
+    if vllm_version_is("0.34.0"):
+        from vllm.v1.kv_cache_interface import CircularBufferSpec
+
+        return CircularBufferSpec(
+            block_size=BLOCK,
+            num_kv_heads=1,
+            head_size=384,
+            head_size_v=0,
+            dtype=torch.bfloat16,
+            block_stride_alignment=RING_ALIGNMENT,
+        )
+    return CircularBufferManager.layer_config(
+        AttentionSpec(
+            block_size=BLOCK,
+            num_kv_heads=1,
+            head_size=384,
+            head_size_v=0,
+            dtype=torch.bfloat16,
+            block_stride_alignment=RING_ALIGNMENT,
+        )
     )
 
 
-def _step5_kv_cache_spec() -> dict[str, KVCacheSpec]:
+def _make_group(layer_entries: dict, **kwargs):
+    if vllm_version_is("0.34.0"):
+        from vllm.v1.kv_cache_interface import KVCacheGroupSpec, UniformTypeKVCacheSpecs
+
+        layer_names = list(layer_entries)
+        if len(layer_names) == 1:
+            spec = next(iter(layer_entries.values()))
+        else:
+            spec = UniformTypeKVCacheSpecs.from_specs(layer_entries)
+        return KVCacheGroupSpec(layer_names, spec, **kwargs)
+    from vllm.v1.kv_cache_interface import KVCacheGroup
+
+    return KVCacheGroup.from_layers(layer_entries, **kwargs)
+
+
+def _step5_kv_cache_spec():
     """Two DSA layers with summaries, one sliding-window layer, one ring."""
     return {
         L0: _main_spec(),
@@ -109,19 +173,37 @@ def _step5_kv_cache_spec() -> dict[str, KVCacheSpec]:
 def _fake_orig_get_kv_cache_groups(vllm_config, kv_cache_spec):
     """Upstream-style grouping: full layers together, one SW group."""
     assert all(not name.endswith((".csa_tail_ring", ".sparse_summary_cache")) for name in kv_cache_spec)
-    full = [name for name, spec in kv_cache_spec.items() if type(spec) is FullAttentionSpec]
-    sliding = [name for name, spec in kv_cache_spec.items() if isinstance(spec, SlidingWindowSpec)]
+    if vllm_version_is("0.34.0"):
+        from vllm.v1.kv_cache_interface import (
+            FullAttentionSpec,
+            KVCacheGroupSpec,
+            SlidingWindowSpec,
+            UniformTypeKVCacheSpecs,
+        )
+
+        full = [name for name, spec in kv_cache_spec.items() if type(spec) is FullAttentionSpec]
+        sliding = [name for name, spec in kv_cache_spec.items() if isinstance(spec, SlidingWindowSpec)]
+        groups = []
+        if full:
+            uniform = UniformTypeKVCacheSpecs.from_specs({name: kv_cache_spec[name] for name in full})
+            groups.append(KVCacheGroupSpec(full, uniform))
+        if sliding:
+            uniform = UniformTypeKVCacheSpecs.from_specs({name: kv_cache_spec[name] for name in sliding})
+            groups.append(KVCacheGroupSpec(sliding, uniform))
+        return groups
+    from vllm.v1.kv_cache_interface import KVCacheGroup
+
+    full_cfgs = {name: cfg for name, cfg in kv_cache_spec.items() if cfg.manager_cls is FullAttentionManager}
+    sliding_cfgs = {name: cfg for name, cfg in kv_cache_spec.items() if cfg.manager_cls is SlidingWindowManager}
     groups = []
-    if full:
-        uniform = UniformTypeKVCacheSpecs.from_specs({name: kv_cache_spec[name] for name in full})
-        groups.append(KVCacheGroupSpec(full, uniform))
-    if sliding:
-        uniform = UniformTypeKVCacheSpecs.from_specs({name: kv_cache_spec[name] for name in sliding})
-        groups.append(KVCacheGroupSpec(sliding, uniform))
+    if full_cfgs:
+        groups.append(KVCacheGroup.from_layers(full_cfgs))
+    if sliding_cfgs:
+        groups.append(KVCacheGroup.from_layers(sliding_cfgs))
     return groups
 
 
-def _planned_groups() -> list[KVCacheGroupSpec]:
+def _planned_groups():
     groups = get_step5_kv_cache_groups(None, _step5_kv_cache_spec(), _fake_orig_get_kv_cache_groups)
     assert groups is not None
     return groups
@@ -156,7 +238,7 @@ def test_is_step5_detection_matches_aux_suffixes() -> None:
     assert not is_step5_kv_cache_spec({L0: _main_spec(), L1: _sw_spec()})
 
     assert is_step5_groups(_planned_groups())
-    assert not is_step5_groups([KVCacheGroupSpec([L0], _main_spec())])
+    assert not is_step5_groups([_make_group({L0: _main_spec()})])
 
 
 def test_grouping_merges_summary_into_parent_group_and_keeps_ring_separate() -> None:
@@ -169,14 +251,18 @@ def test_grouping_merges_summary_into_parent_group_and_keeps_ring_separate() -> 
         [L1],
         [RING],
     ]
-    merged = groups[0].kv_cache_spec
-    assert isinstance(merged, UniformTypeKVCacheSpecs)
-    assert merged.kv_cache_specs[L0].page_size_bytes == MAIN_PAGE
-    assert merged.kv_cache_specs[SUMMARY0].page_size_bytes == SUMMARY_PAGE
-    # The ring keeps its own group and stays a CircularBufferSpec.
-    assert isinstance(groups[2].kv_cache_spec, UniformTypeKVCacheSpecs)
-    ring_spec = groups[2].kv_cache_spec.kv_cache_specs[RING]
-    assert isinstance(ring_spec, CircularBufferSpec)
+    assert groups[0].kv_cache_specs[L0].page_size_bytes == MAIN_PAGE
+    assert groups[0].kv_cache_specs[SUMMARY0].page_size_bytes == SUMMARY_PAGE
+    # The ring keeps its own group and stays circular.
+    ring_spec = groups[2].kv_cache_specs[RING]
+    if vllm_version_is("0.34.0"):
+        from vllm.v1.kv_cache_interface import CircularBufferSpec, UniformTypeKVCacheSpecs
+
+        assert isinstance(groups[0].kv_cache_spec, UniformTypeKVCacheSpecs)
+        assert isinstance(groups[2].kv_cache_spec, UniformTypeKVCacheSpecs)
+        assert isinstance(ring_spec, CircularBufferSpec)
+    else:
+        assert groups[2].manager_cls is CircularBufferManager
     assert ring_spec.page_size_bytes == RING_PAGE
 
 
@@ -211,12 +297,24 @@ def test_grouping_isolates_orphan_summary_layers() -> None:
 
 def test_grouping_splits_aux_layers_with_mixed_geometry() -> None:
     """Aux layers the wrapper cannot merge fall back to one group each."""
-    small = FullAttentionSpec(
-        block_size=64,
-        num_kv_heads=1,
-        head_size=16,
-        dtype=torch.float8_e4m3fn,
-    )
+    if vllm_version_is("0.34.0"):
+        from vllm.v1.kv_cache_interface import FullAttentionSpec
+
+        small = FullAttentionSpec(
+            block_size=64,
+            num_kv_heads=1,
+            head_size=16,
+            dtype=torch.float8_e4m3fn,
+        )
+    else:
+        small = FullAttentionManager.layer_config(
+            AttentionSpec(
+                block_size=64,
+                num_kv_heads=1,
+                head_size=16,
+                dtype=torch.float8_e4m3fn,
+            )
+        )
     orphan_a = "model.layers.8.self_attn.sparse_summary_cache"
     orphan_b = "model.layers.9.self_attn.sparse_summary_cache"
     specs = {
@@ -235,17 +333,29 @@ def test_grouping_splits_aux_layers_with_mixed_geometry() -> None:
 
 
 def test_padded_page_pads_to_block_stride_alignment() -> None:
-    odd = FullAttentionSpec(
-        block_size=BLOCK,
-        num_kv_heads=1,
-        head_size=63,
-        dtype=torch.bfloat16,
-        block_stride_alignment=RING_ALIGNMENT,
-    )
+    if vllm_version_is("0.34.0"):
+        from vllm.v1.kv_cache_interface import FullAttentionSpec
+
+        odd = FullAttentionSpec(
+            block_size=BLOCK,
+            num_kv_heads=1,
+            head_size=63,
+            dtype=torch.bfloat16,
+            block_stride_alignment=RING_ALIGNMENT,
+        )
+    else:
+        odd = AttentionSpec(
+            block_size=BLOCK,
+            num_kv_heads=1,
+            head_size=63,
+            dtype=torch.bfloat16,
+            block_stride_alignment=RING_ALIGNMENT,
+        )
     # 2 x 1 x 63 x 2 x 128 = 32256 bytes; next 1024 multiple is 32768.
     assert odd.page_size_bytes == 32256
     assert _padded_page(odd) == 32768
-    assert _padded_page(_main_spec()) == MAIN_PAGE
+    main = _main_spec()
+    assert _padded_page(getattr(main, "spec", main)) == MAIN_PAGE
 
 
 def test_pool_bytes_per_block_is_widest_group_width() -> None:
@@ -265,8 +375,7 @@ def test_max_memory_usage_sums_group_demands_times_envelope() -> None:
 def test_max_memory_usage_skips_host_resident_groups() -> None:
     vllm_config = _vllm_config(max_model_len=8192)
     groups = _planned_groups()
-    sw_name, sw_spec = groups[1].layer_names, groups[1].kv_cache_spec
-    groups[1] = KVCacheGroupSpec(sw_name, sw_spec, host_resident=True)
+    groups[1] = replace(groups[1], host_resident=True)
     expected = (64 + 1) * (2 * MAIN_PAGE + 2 * SUMMARY_PAGE)
     assert get_step5_max_memory_usage(vllm_config, groups) == expected
 
@@ -314,7 +423,7 @@ def test_config_from_groups_ring_only_layout_stacks_from_byte_zero() -> None:
     # A ring-only layout: the ring IS the envelope, and its stack starts at
     # byte 0 like every other group -- no per-class start shift remains now
     # that the ring shares the attention stride class.
-    ring_group = KVCacheGroupSpec([RING], _ring_spec())
+    ring_group = _make_group({RING: _ring_spec()})
     vllm_config = _vllm_config()
     config = get_step5_kv_cache_config_from_groups(vllm_config, [ring_group], RING_PAGE * 3)
 
@@ -345,10 +454,9 @@ def test_builder_pool_bytes_keeps_default_layout_without_step5_aux_layers() -> N
     builder = AscendKVCacheConfigBuilder.__new__(AscendKVCacheConfigBuilder)
     vllm_config = _planner_vllm_config()
 
-    plain_groups = [KVCacheGroupSpec([L0], _main_spec()), KVCacheGroupSpec([L1], _sw_spec())]
+    plain_groups = [_make_group({L0: _main_spec()}), _make_group({L1: _sw_spec()})]
     assert builder._get_pool_bytes_per_block(vllm_config, plain_groups) is None
 
     # Adding one summary layer flips the same groups onto the step5 envelope.
-    merged = UniformTypeKVCacheSpecs.from_specs({L0: _main_spec(), SUMMARY0: _summary_spec()})
-    step_groups = [KVCacheGroupSpec([L0, SUMMARY0], merged), KVCacheGroupSpec([L1], _sw_spec())]
+    step_groups = [_make_group({L0: _main_spec(), SUMMARY0: _summary_spec()}), _make_group({L1: _sw_spec()})]
     assert builder._get_pool_bytes_per_block(vllm_config, step_groups) == MAIN_PAGE + SUMMARY_PAGE

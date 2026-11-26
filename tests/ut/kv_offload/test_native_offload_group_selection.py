@@ -18,13 +18,12 @@ from vllm.distributed.kv_transfer.kv_connector.v1.offloading.config import (
     get_offloading_group_ids,
 )
 from vllm.v1.kv_cache_interface import (
-    FullAttentionSpec,
     KVCacheConfig,
     KVCacheGroupRole,
-    KVCacheGroupSpec,
 )
 from vllm.v1.kv_offload.base import CanonicalKVCaches
 
+from tests.ut.kv_cache_test_utils import make_full_attention_layer_config, make_kv_cache_group
 import vllm_ascend.distributed.kv_transfer.kv_pool.kv_offload.native.offloading_connector as connector_mod
 from vllm_ascend.core.kv_cache_interface import AscendSFAIndexerCacheSpec
 from vllm_ascend.distributed.kv_transfer.kv_pool.kv_offload.native.offloading_connector import (
@@ -38,8 +37,8 @@ HEAD_SIZE = 3
 DTYPE = torch.bfloat16
 
 
-def _attention_spec() -> FullAttentionSpec:
-    return FullAttentionSpec(
+def _attention_layer_config():
+    return make_full_attention_layer_config(
         block_size=BLOCK_SIZE,
         num_kv_heads=1,
         head_size=HEAD_SIZE,
@@ -53,17 +52,17 @@ def _group(
     enable_kv_transfer: bool = True,
     spec: object | None = None,
     role: KVCacheGroupRole = KVCacheGroupRole.DEFAULT,
-) -> KVCacheGroupSpec:
-    return KVCacheGroupSpec(
-        layer_names=[layer_name],
-        kv_cache_spec=_attention_spec() if spec is None else spec,
+):
+    return make_kv_cache_group(
+        [layer_name],
+        _attention_layer_config() if spec is None else spec,
         enable_kv_transfer=enable_kv_transfer,
         role=role,
     )
 
 
 def _config(
-    groups: list[KVCacheGroupSpec],
+    groups: list,
     *,
     hisparse_host_num_blocks: int | None = None,
 ) -> KVCacheConfig:
@@ -140,7 +139,7 @@ def test_hisparse_bf16_offloading_preserves_shared_slab_stride(
         head_size=HEAD_SIZE,
         dtype=DTYPE,
     )
-    group = KVCacheGroupSpec(names, spec, role=KVCacheGroupRole.HISPARSE_INDEXER)
+    group = make_kv_cache_group(names, spec, role=KVCacheGroupRole.HISPARSE_INDEXER)
     worker, captured = _prepare_worker(monkeypatch, _config([group], hisparse_host_num_blocks=8))
     forward_context = {name: SimpleNamespace() for name in names}
     worker.vllm_config = SimpleNamespace(compilation_config=SimpleNamespace(static_forward_context=forward_context))
@@ -203,7 +202,7 @@ def test_non_cacheable_group_spec_is_not_introspected(
         _group(
             "model.layers.0.experimental_state",
             enable_kv_transfer=False,
-            spec=SimpleNamespace(),
+            spec=SimpleNamespace(block_size=BLOCK_SIZE, dcp_sharded=False),
         ),
     ]
     kv_cache_config = _config(groups)
@@ -244,7 +243,7 @@ def test_hisparse_host_pool_registers_only_indexer_groups(
         _group(
             "model.layers.0.hisparse_source",
             enable_kv_transfer=False,
-            role=KVCacheGroupRole.HISPARSE_SOURCE,
+            role=getattr(KVCacheGroupRole, "HISPARSE_SOURCE", KVCacheGroupRole.DEFAULT),
         ),
         _group(
             "model.layers.0.hisparse_indexer",

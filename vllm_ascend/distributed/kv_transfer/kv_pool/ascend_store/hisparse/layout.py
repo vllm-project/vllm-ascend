@@ -14,7 +14,7 @@ from typing import TYPE_CHECKING, Any
 
 import torch
 from vllm.model_executor.model_loader.utils import get_draft_load_config
-from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheTensor, UniformTypeKVCacheSpecs
+from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheTensor
 
 from vllm_ascend.core.kv_cache_interface import AlignedKVCacheTensor
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.buffer import (
@@ -22,6 +22,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.buffer import (
     BufferDescriptor,
     MemoryLocation,
 )
+from vllm_ascend.utils import vllm_version_is
 
 if TYPE_CHECKING:
     from vllm.config import LoadConfig, ModelConfig, VllmConfig
@@ -35,8 +36,21 @@ def has_hisparse_cache_layout(config: KVCacheConfig | None) -> bool:
     if config is None:
         return False
     host_blocks = getattr(config, "hisparse_host_num_blocks", None)
-    return (isinstance(host_blocks, int) and not isinstance(host_blocks, bool)) or any(
-        getattr(group, "role", None) == "hisparse_source" for group in getattr(config, "kv_cache_groups", ())
+    if isinstance(host_blocks, int) and not isinstance(host_blocks, bool):
+        return True
+    if vllm_version_is("0.34.0"):
+        return any(
+            getattr(group, "role", None) == "hisparse_source" for group in getattr(config, "kv_cache_groups", ())
+        )
+    from vllm.v1.core.single_type_kv_cache_manager import HiSparseSourceManager
+
+    return any(
+        getattr(group, "role", None) == "hisparse_source"
+        or (
+            isinstance(getattr(group, "manager_cls", None), type)
+            and issubclass(group.manager_cls, HiSparseSourceManager)
+        )
+        for group in getattr(config, "kv_cache_groups", ())
     )
 
 
@@ -202,9 +216,7 @@ def _hisparse_page_geometry(kv_cache_config: KVCacheConfig, dcp_size: int, trans
             continue
         group_layers = []
         for name in sorted(group.layer_names):
-            spec = group.kv_cache_spec
-            if isinstance(spec, UniformTypeKVCacheSpecs):
-                spec = spec.kv_cache_specs[name]
+            spec = group.kv_cache_specs[name]
             group_layers.append(
                 (
                     name,

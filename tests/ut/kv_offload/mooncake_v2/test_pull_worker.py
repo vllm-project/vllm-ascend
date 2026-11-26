@@ -13,7 +13,7 @@ import pytest
 import torch
 from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorTransferResults
 from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
-from vllm.v1.kv_cache_interface import KVCacheSpec, MLAAttentionSpec
+from vllm.v1.kv_cache_interface import MLAAttentionSpec
 
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake import base_worker, pull_worker
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.metadata import (
@@ -31,20 +31,25 @@ from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.utils import (
 )
 
 from .helpers import (
-    make_circular_spec,
+    get_group_spec,
+    make_circular_group,
+    make_full_group,
     make_full_spec,
-    make_kpool_tail_spec,
+    make_group_for_spec,
+    make_kpool_tail_group,
+    make_mamba_group,
     make_mamba_spec,
     make_metadata_groups,
     make_pp_metadata,
     make_sfa_indexer_spec,
-    make_sliding_spec,
+    make_sliding_group,
     make_transfer_metadata,
     vllm_dcp_ranks_by_worker,
 )
 
 
-def make_thread(**overrides: object) -> MooncakePullRecvingThread:
+def make_thread(**overrides: Any) -> MooncakePullRecvingThread:
+    kv_cache_groups = overrides.pop("kv_cache_groups", None)
     thread = MooncakePullRecvingThread.__new__(MooncakePullRecvingThread)
     thread.vllm_config = SimpleNamespace(parallel_config=SimpleNamespace(cp_kv_cache_interleave_size=16))
     thread.pull_transfer_mode = "batch"
@@ -77,6 +82,15 @@ def make_thread(**overrides: object) -> MooncakePullRecvingThread:
     thread._process_next = (
         thread._process_next_request if thread.pull_transfer_mode == "request" else thread._process_next_batch
     )
+    if kv_cache_groups is None:
+        if "spec_index_to_group" in overrides:
+            kv_cache_groups = list(thread.spec_index_to_group)
+        else:
+            kv_cache_groups = [make_group_for_spec(spec) for spec in thread.kv_cache_specs]
+    if "kv_cache_config" not in overrides:
+        thread.kv_cache_config = SimpleNamespace(kv_cache_groups=list(kv_cache_groups))
+    if "spec_index_to_group" not in overrides:
+        thread.spec_index_to_group = list(kv_cache_groups)
     return thread
 
 
@@ -663,7 +677,8 @@ def test_unsharded_fa_uses_tp_transfer_with_global_dcp() -> None:
 
 
 def test_compute_sliding_window_blocks_uses_unhashed_suffix() -> None:
-    thread = make_thread()
+    group = make_sliding_group()
+    thread = make_thread(spec_index_to_group=[group])
 
     result = thread._compute_group_block_ids(
         "request",
@@ -680,7 +695,7 @@ def test_compute_sliding_window_blocks_uses_unhashed_suffix() -> None:
         32,
         1,
         1,
-        make_sliding_spec(),
+        get_group_spec(group),
         0,
         remote_interleave_size=16,
     )
@@ -688,9 +703,10 @@ def test_compute_sliding_window_blocks_uses_unhashed_suffix() -> None:
     assert result == [(0, [10, 11], [20, 21])]
 
 
-@pytest.mark.parametrize("spec", [make_circular_spec(), make_kpool_tail_spec()])
-def test_compute_circular_blocks_transfers_the_single_complete_page(spec: KVCacheSpec) -> None:
-    thread = make_thread(num_speculative_tokens=3)
+@pytest.mark.parametrize("group_factory", [make_circular_group, make_kpool_tail_group])
+def test_compute_circular_blocks_transfers_the_single_complete_page(group_factory) -> None:
+    group = group_factory()
+    thread = make_thread(num_speculative_tokens=3, spec_index_to_group=[group])
 
     result = thread._compute_group_block_ids(
         "request",
@@ -707,7 +723,7 @@ def test_compute_circular_blocks_transfers_the_single_complete_page(spec: KVCach
         2048,
         1,
         1,
-        spec,
+        get_group_spec(group),
         2,
         remote_interleave_size=16,
     )
@@ -716,8 +732,9 @@ def test_compute_circular_blocks_transfers_the_single_complete_page(spec: KVCach
 
 
 def test_compute_circular_blocks_rejects_partial_or_mismatched_pages() -> None:
-    thread = make_thread()
-    spec = make_circular_spec()
+    group = make_circular_group()
+    thread = make_thread(spec_index_to_group=[group])
+    spec = get_group_spec(group)
 
     with pytest.raises(ValueError, match="exactly one block"):
         thread._compute_group_block_ids(
@@ -769,7 +786,8 @@ def test_compute_circular_blocks_rejects_partial_or_mismatched_pages() -> None:
 def test_compute_mamba_state_selects_pre_speculative_local_block(
     num_speculative_tokens, num_speculative_blocks, local_blocks, checkpoint
 ) -> None:
-    thread = make_thread(num_speculative_tokens=num_speculative_tokens)
+    group = make_mamba_group(num_speculative_blocks=num_speculative_blocks)
+    thread = make_thread(num_speculative_tokens=num_speculative_tokens, spec_index_to_group=[group])
 
     result = thread._compute_group_block_ids(
         "request",
@@ -786,7 +804,7 @@ def test_compute_mamba_state_selects_pre_speculative_local_block(
         0,
         1,
         1,
-        replace(make_mamba_spec(), num_speculative_blocks=num_speculative_blocks),
+        get_group_spec(group),
         0,
         remote_interleave_size=16,
     )
@@ -1539,10 +1557,12 @@ def test_whole_block_mla_address_generation_uses_independent_stride() -> None:
     assert lengths == [128, 128]
 
 
-@pytest.mark.parametrize("spec", [make_circular_spec(), make_kpool_tail_spec()])
-def test_circular_address_generation_transfers_whole_page_with_independent_stride(spec: KVCacheSpec) -> None:
+@pytest.mark.parametrize("group_factory", [make_circular_group, make_kpool_tail_group])
+def test_circular_address_generation_transfers_whole_page_with_independent_stride(group_factory) -> None:
+    group = group_factory()
     thread = make_thread(
-        kv_cache_specs=[spec],
+        kv_cache_specs=[get_group_spec(group)],
+        spec_index_to_group=[group],
         kv_caches_base_addr=[[1000]],
         block_strides=[[256]],
         block_lens=[[128]],
@@ -1577,8 +1597,10 @@ def test_circular_address_generation_transfers_whole_page_with_independent_strid
 
 @pytest.mark.parametrize("local_shape,remote_shape", [((9, 256), (2, 9, 128)), ((2, 9, 128), (9, 256))])
 def test_circular_transfer_rejects_equal_size_different_layout(local_shape, remote_shape) -> None:
+    group = make_kpool_tail_group()
     thread = make_thread(
-        kv_cache_specs=[make_kpool_tail_spec()],
+        kv_cache_specs=[get_group_spec(group)],
+        spec_index_to_group=[group],
         kv_caches_base_addr=[[1000]],
         block_shapes=[[local_shape]],
         block_strides=[[9216]],
@@ -1815,7 +1837,9 @@ def test_register_kv_caches_starts_receiving_thread_only_for_consumer(
     worker.engine = MagicMock()
     worker.vllm_config = MagicMock()
     worker.kv_cache_config = MagicMock()
-    worker.kv_cache_specs = [make_full_spec()]
+    full_group = make_full_group()
+    worker.kv_cache_specs = [get_group_spec(full_group)]
+    worker.spec_index_to_group = [full_group]
     worker.layer_name_to_group_index = {"model.layers.0.self_attn": 0}
     worker.layer_name_to_spec_index = {"model.layers.0.self_attn": 0}
     worker.tp_rank = worker.pp_rank = worker.dp_rank = worker.pcp_rank = worker.dcp_rank = 0
@@ -2043,23 +2067,25 @@ def test_layer_remote_tp_rank_groups_apply_spec_specific_dcp_rules() -> None:
         0, 0, mla_spec, make_pp_metadata(), remote_pcp_size=1, remote_tp_size=8, remote_dcp_size=8
     ) == [list(range(8))]
 
+    swa_group = make_sliding_group()
     swa_thread = make_thread(
         tp_size=4,
         tp_rank=2,
         dcp_size=4,
         block_shapes=[[(1, 16, 4)]],
+        spec_index_to_group=[swa_group],
     )
     swa_remote = make_pp_metadata(dcp_sharded=[False], block_shapes=[[(1, 16, 4)]])
     assert swa_thread._get_layer_remote_tp_rank_groups(
-        0, 0, make_sliding_spec(), swa_remote, remote_pcp_size=1, remote_tp_size=4, remote_dcp_size=4
+        0, 0, get_group_spec(swa_group), swa_remote, remote_pcp_size=1, remote_tp_size=4, remote_dcp_size=4
     ) == [[2]]
 
-    circular_thread = make_thread(tp_size=4, tp_rank=2, pcp_size=2, dcp_size=4)
-    for circular_spec in (make_circular_spec(), make_kpool_tail_spec()):
+    for circular_group in (make_circular_group(), make_kpool_tail_group()):
+        circular_thread = make_thread(tp_size=4, tp_rank=2, pcp_size=2, dcp_size=4, spec_index_to_group=[circular_group])
         assert circular_thread._get_layer_remote_tp_rank_groups(
             0,
             0,
-            circular_spec,
+            get_group_spec(circular_group),
             make_pp_metadata(),
             remote_pcp_size=2,
             remote_tp_size=4,

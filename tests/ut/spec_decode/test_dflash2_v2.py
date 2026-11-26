@@ -164,9 +164,10 @@ def test_v2_loader_selects_flash_attn_and_restores_target_context(monkeypatch, c
 def test_v2_flash_attn_uses_exact_lengths_after_rejection_and_reordering(monkeypatch, causal):
     import sys
 
-    from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheConfig, KVCacheGroupSpec
+    from vllm.v1.kv_cache_interface import KVCacheConfig
     from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
 
+    from tests.ut.kv_cache_test_utils import make_full_attention_spec, make_kv_cache_group
     from vllm_ascend.attention.fa_v1 import (
         AscendFlashAttentionBackend,
         AscendFlashAttentionImpl,
@@ -178,7 +179,7 @@ def test_v2_flash_attn_uses_exact_lengths_after_rejection_and_reordering(monkeyp
     builder = AscendFlashAttentionMetadataBuilder.__new__(AscendFlashAttentionMetadataBuilder)
     builder.model_config = SimpleNamespace(runner_type="generate")
     builder.attn_mask_builder = SimpleNamespace(get_splitfuse_attn_mask=lambda: None)
-    kv_spec = FullAttentionSpec(block_size=128, num_kv_heads=1, head_size=128, dtype=torch.bfloat16)
+    kv_spec = make_full_attention_spec(block_size=128, num_kv_heads=1, head_size=128, dtype=torch.bfloat16)
     group = AttentionGroup(
         backend=AscendFlashAttentionBackend,
         layer_names=layer_names,
@@ -202,7 +203,7 @@ def test_v2_flash_attn_uses_exact_lengths_after_rejection_and_reordering(monkeyp
     speculator.kv_cache_config = KVCacheConfig(
         num_blocks=8,
         kv_cache_tensors=[],
-        kv_cache_groups=[KVCacheGroupSpec(layer_names=layer_names, kv_cache_spec=kv_spec)],
+        kv_cache_groups=[make_kv_cache_group(layer_names, kv_spec)],
     )
     speculator.block_tables = SimpleNamespace(
         input_block_tables=[torch.zeros(4, 8, dtype=torch.int32)],
