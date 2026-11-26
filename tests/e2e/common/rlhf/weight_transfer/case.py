@@ -132,7 +132,7 @@ QWEN35_W8A8_MXFP_CASE = WeightUpdateModelCase(
         "--quantization",
         "ascend",
         "--worker-extension-cls",
-        "tests.e2e.common.rlhf.weight_transfer.quantized_weight_checks.MXFP8AuditWorker",
+        "tests.e2e.common.rlhf.weight_transfer.reference_check.MXFP8AuditWorker",
     ),
 )
 

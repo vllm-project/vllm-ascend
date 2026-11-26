@@ -4,14 +4,16 @@
 """Startup-load reference and live-update equivalence checks."""
 
 import base64
+import hashlib
 import json
 from contextlib import ExitStack, contextmanager
 from io import BytesIO
 
+import torch
 from PIL import Image
 from vllm.utils.network_utils import get_open_port
 
-from tests.e2e.common.rlhf.common import rlhf_server, wait_for_free_device_memory
+from tests.e2e.common.rlhf.common import post_control, rlhf_server, wait_for_free_device_memory
 from tests.e2e.common.rlhf.weight_transfer.case import WeightUpdateModelCase
 from tests.e2e.common.rlhf.weight_transfer.weight_source import (
     FixedRandomWeightSource,
@@ -21,16 +23,8 @@ from tests.e2e.common.rlhf.weight_transfer.weight_source import (
 UPDATE_ROUNDS = 2
 
 
-def update_rounds(case: WeightUpdateModelCase) -> int:
-    return 3 if case.weight_quantization else UPDATE_ROUNDS
-
-
 def capture_update_result(server, case):
     if case.weight_quantization:
-        from tests.e2e.common.rlhf.weight_transfer.quantized_weight_checks import (
-            capture_quantized_result,
-        )
-
         return capture_quantized_result(server, case)
     return generation_signature(
         server.get_client(),
@@ -283,18 +277,6 @@ def weight_transfer_servers(
     The reference server must release every TP device before the live-update
     server starts. Both use the case's environment and the same generated W.
     """
-    if case.weight_quantization:
-        with quantized_weight_transfer_servers(
-            source,
-            case,
-            backend=backend,
-            tensor_parallel_size=tensor_parallel_size,
-            device_index=device_index,
-            gpu_memory_utilization=gpu_memory_utilization,
-            env_dict=env_dict,
-        ) as servers:
-            yield servers
-        return
     reference = reference_signature(
         source,
         case,
@@ -327,8 +309,8 @@ def weight_transfer_servers(
 
 
 @contextmanager
-def quantized_weight_transfer_servers(
-    source,
+def hccl_weight_transfer_servers(
+    sources,
     case,
     *,
     backend,
@@ -337,19 +319,18 @@ def quantized_weight_transfer_servers(
     gpu_memory_utilization,
     env_dict,
 ):
-    """Compare live refits with independent normal loads of the same FP8 payload.
+    """Build independent references for explicit HCCL update sources.
 
     Keep A's temporary directory alive for the live server's config/recipe.
     Both references finish before the live server starts, sharing one NPU.
-    No reference cache is used: A and B have different weights and scales.
+    No reference cache is used: each source has independent weights/scales.
     """
-    references = []
+    references = {}
     with ExitStack() as stack:
         model_directory = None
-        for revision in (0, 1):
-            source.set_update_round(revision)
+        for name, source in sources.items():
             directory = stack.enter_context(fixed_startup_checkpoint(source))
-            if revision == 0:
+            if model_directory is None:
                 model_directory = directory
             for rank in range(tensor_parallel_size):
                 wait_for_free_device_memory(device_index + rank, gpu_memory_utilization)
@@ -366,8 +347,7 @@ def quantized_weight_transfer_servers(
                 server_port=port,
                 env_dict=env_dict,
             ) as server:
-                references.append(capture_update_result(server, case))
-        source.set_update_round(0)
+                references[name] = capture_update_result(server, case)
         for rank in range(tensor_parallel_size):
             wait_for_free_device_memory(device_index + rank, gpu_memory_utilization)
         port = get_open_port()
@@ -390,7 +370,8 @@ def quantized_weight_transfer_servers(
             server_port=port,
             env_dict=env_dict,
         ) as server:
-            yield server, references, None
+            dummy = None if case.weight_quantization else capture_update_result(server, case)
+            yield server, references, dummy
 
 
 def assert_weight_update_matches_reference(
@@ -403,13 +384,6 @@ def assert_weight_update_matches_reference(
     layerwise reload and graph-captured storage preserve the same behavior.
     Comparing updates only to each other could hide consistently wrong loads.
     """
-    if case.weight_quantization:
-        from tests.e2e.common.rlhf.weight_transfer.quantized_weight_checks import (
-            assert_quantized_updates,
-        )
-
-        assert_quantized_updates(reference_signature, updated_signatures, case)
-        return
     assert dummy_signature != reference_signature, (
         f"{case.id}: a dummy-loaded model already matches a normally loaded one; "
         "the reference cannot observe the payload"
@@ -422,3 +396,64 @@ def assert_weight_update_matches_reference(
         assert signature == reference_signature, (
             f"{case.id}: {phase} (round {update_round}) does not match normal startup loading of the same weights"
         )
+
+
+class MXFP8AuditWorker:
+    """Inspect representative dense/MoE layers without changing reload behavior."""
+
+    def mxfp8_snapshot(self):
+        tensors = {}
+        kinds = set()
+        for prefix, layer in self.model_runner.model.named_modules():
+            if not hasattr(layer, "_mxfp8_original_shapes"):
+                continue
+            kind = "moe" if "w13_weight" in layer._mxfp8_original_shapes else "linear"
+            if kind in kinds:
+                continue
+            assert layer._mxfp8_transformed, f"{prefix}: MXFP8 post-processing was skipped"
+            kinds.add(kind)
+            for name in ("w13_weight", "w2_weight") if kind == "moe" else ("weight",):
+                for tensor_name in (name, name + "_scale"):
+                    tensor = getattr(layer, tensor_name, None)
+                    if tensor is None:
+                        values = getattr(layer, tensor_name + "_list", None)
+                        if values is None:
+                            values = getattr(layer, "cann_mega_moe_" + tensor_name + "_list")
+                        tensor = values[0]
+                    elif kind == "moe":
+                        tensor = tensor[0]
+                    expected_dtypes = (
+                        (torch.float8_e4m3fn,) if tensor_name == name else (torch.uint8, torch.float8_e8m0fnu)
+                    )
+                    assert tensor.dtype in expected_dtypes, (prefix, tensor_name, tensor.dtype)
+                    assert tensor.element_size() == 1, (
+                        prefix,
+                        tensor_name,
+                        tensor.dtype,
+                    )
+                    raw = tensor.detach().cpu().contiguous().view(torch.uint8).numpy().tobytes()
+                    tensors[prefix + "." + tensor_name] = {
+                        "shape": list(tensor.shape),
+                        "dtype": str(tensor.dtype),
+                        "sha256": hashlib.sha256(raw).hexdigest(),
+                    }
+        assert kinds == {"linear", "moe"}, f"Missing MXFP8 layer types: {kinds}"
+        return tensors
+
+
+def capture_quantized_result(server, case):
+    return {
+        "generation": generation_signature(server.get_client(), case.model, prompts=case.prompts),
+        "tensors": post_control(server, "collective_rpc", json={"method": "mxfp8_snapshot"}).json()["results"],
+    }
+
+
+def assert_quantized_updates(references, updates, case):
+    assert len(references) == 2 and len(updates) == 3, f"{case.id}: expected A/B/A and two fresh-load baselines"
+    for index, actual in enumerate(updates):
+        assert actual == references[index % 2], f"{case.id}: round {index + 1} differs from fresh-load"
+    assert updates[0]["generation"] != updates[1]["generation"], "A/B inference results did not change"
+    for rank_a, rank_b in zip(updates[0]["tensors"], updates[1]["tensors"], strict=True):
+        assert rank_a.keys() == rank_b.keys()
+        for name in rank_a:
+            assert rank_a[name]["sha256"] != rank_b[name]["sha256"], f"{name}: A/B value unchanged"
