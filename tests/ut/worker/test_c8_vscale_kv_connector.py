@@ -80,8 +80,8 @@ def test_worker_installs_c8_wrapper_after_kv_cache_initialization(is_consumer):
     with (
         patch("vllm_ascend.worker.worker.plan_layerwise_cache_reuse", return_value=None),
         patch("vllm_ascend.worker.worker.ensure_kv_transfer_initialized"),
-        patch("vllm_ascend.worker.worker.has_kv_transfer_group", return_value=True),
-        patch("vllm_ascend.worker.worker.get_kv_transfer_group", return_value=group),
+        patch("vllm.distributed.kv_transfer.has_kv_transfer_group", return_value=True),
+        patch("vllm.distributed.kv_transfer.get_kv_transfer_group", return_value=group),
         patch("vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.connector.MooncakePullConnector", Pull),
     ):
         worker.initialize_from_config(runner.kv_cache_config)
