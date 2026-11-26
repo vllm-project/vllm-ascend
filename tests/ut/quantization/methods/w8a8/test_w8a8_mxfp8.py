@@ -3,6 +3,7 @@ from unittest.mock import Mock, patch
 
 import torch
 import torch.nn as nn
+from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.linear import RowParallelLinear
 
 from tests.ut.base import TestBase
@@ -18,6 +19,7 @@ from vllm_ascend.quantization.methods.w8a8.w8a8_mxfp8 import (
     AscendW8A8MXFP8DynamicLinearMethod,
 )
 from vllm_ascend.quantization.prepared_linear_input import PreparedLinearInput
+from vllm_ascend.quantization.utils import DynamicMXQuantScaleAlg
 
 # The MXFP schemes gate on the MX weight format at construction; tests build
 # them on any machine by pinning a profile that reports MXFP8 support.
@@ -720,6 +722,97 @@ class TestAscendW8A8MXFP8MoEMethod(TestBase):
             shared_experts_input=None,
         )
         mock_comm.fused_experts.assert_called_once()
+
+    def _make_swiglu_oai_compute_input(self, num_tokens: int, num_experts: int = 2):
+        layer = nn.Module()
+        layer.w13_weight = nn.Parameter(
+            torch.empty((num_experts, 128, 128), dtype=torch.float8_e4m3fn), requires_grad=False
+        )
+        layer.w13_weight_scale = nn.Parameter(
+            torch.empty((num_experts, 2, 128, 2), dtype=torch.uint8), requires_grad=False
+        )
+        return SimpleNamespace(
+            hidden_states=torch.empty((num_tokens, 128), dtype=torch.bfloat16),
+            dynamic_scale=None,
+            layer=layer,
+            activation=MoEActivation.SWIGLUOAI_UNINTERLEAVE,
+            group_list=torch.tensor([num_tokens // num_experts] * num_experts, dtype=torch.int64),
+            group_list_type=1,
+            swiglu_limit=7.0,
+            swiglu_alpha=1.702,
+            swiglu_beta=1.0,
+        )
+
+    def test_swiglu_oai_fusion_opt_in_routes_above_threshold(self):
+        self.scheme.use_expert_weight_list = False
+        self.scheme._dynamic_mx_quant_scale_alg = DynamicMXQuantScaleAlg.CEIL
+        self.scheme._swiglu_oai_fusion_enabled = True
+        mlp_compute_input = self._make_swiglu_oai_compute_input(num_tokens=2 * 513, num_experts=2)
+        quant_hidden = torch.empty((2 * 513, 128), dtype=torch.float8_e4m3fn)
+        pertoken_scale = torch.empty((2 * 513, 2, 2), dtype=torch.uint8)
+        expected_out = torch.empty((2 * 513, 64), dtype=torch.float8_e4m3fn)
+        expected_scale = torch.empty((2 * 513, 1, 2), dtype=torch.uint8)
+        fused_op = Mock(return_value=(expected_out, expected_scale))
+        with (
+            patch("vllm_ascend.quantization.methods.w8a8.w8a8_mxfp8.is_internal_npu_format", return_value=True),
+            patch("vllm_ascend.quantization.methods.w8a8.w8a8_mxfp8.enable_custom_op", return_value=True),
+            patch.object(self.scheme, "_quant_hidden_states", return_value=(quant_hidden, pertoken_scale)),
+            patch("vllm_ascend.quantization.methods.w8a8.w8a8_mxfp8.dispose_tensor") as mock_dispose,
+            patch(
+                "vllm_ascend.quantization.methods.w8a8.w8a8_mxfp8.maybe_normalize_mxfp_scale_layout",
+                side_effect=lambda scale: scale,
+            ),
+            patch.object(torch.ops._C_ascend, "gmm_swiglu_oai_mx_quant", create=True, new=fused_op),
+        ):
+            out, out_scale = self.scheme.apply_gmm1_act_quant(mlp_compute_input)
+
+        self.assertIs(out, expected_out)
+        self.assertIs(out_scale, expected_scale)
+        fused_op.assert_called_once_with(
+            quant_hidden,
+            [mlp_compute_input.layer.w13_weight],
+            [mlp_compute_input.layer.w13_weight_scale],
+            pertoken_scale,
+            mlp_compute_input.group_list,
+            1,
+            7.0,
+            1.702,
+            1.0,
+        )
+        mock_dispose.assert_called_once_with(mlp_compute_input.hidden_states)
+
+    def test_swiglu_oai_fusion_falls_back_when_disabled_or_below_threshold(self):
+        self.scheme.use_expert_weight_list = False
+        self.scheme._dynamic_mx_quant_scale_alg = DynamicMXQuantScaleAlg.CEIL
+        for enabled, num_tokens in ((False, 2 * 513), (True, 2 * 512)):
+            with self.subTest(enabled=enabled, num_tokens=num_tokens):
+                self.scheme._swiglu_oai_fusion_enabled = enabled
+                mlp_compute_input = self._make_swiglu_oai_compute_input(num_tokens=num_tokens, num_experts=2)
+                gmm1_out = torch.empty((num_tokens, 128), dtype=torch.bfloat16)
+                fallback_out = torch.empty((num_tokens, 64), dtype=torch.float8_e4m3fn)
+                fallback_scale = torch.empty((num_tokens, 1, 2), dtype=torch.uint8)
+                fused_op = Mock()
+                with (
+                    patch("vllm_ascend.quantization.methods.w8a8.w8a8_mxfp8.is_internal_npu_format", return_value=True),
+                    patch("vllm_ascend.quantization.methods.w8a8.w8a8_mxfp8.enable_custom_op", return_value=True),
+                    patch.object(torch.ops._C_ascend, "gmm_swiglu_oai_mx_quant", create=True, new=fused_op),
+                    patch.object(self.scheme, "apply_gmm1", return_value=gmm1_out) as mock_gmm1,
+                    patch(
+                        "vllm_ascend.quantization.methods.w8a8.w8a8_mxfp8.torch_npu.npu_swiglu_mx_quant",
+                        return_value=(fallback_out, fallback_scale),
+                    ) as mock_swiglu,
+                    patch(
+                        "vllm_ascend.quantization.methods.w8a8.w8a8_mxfp8.maybe_normalize_mxfp_scale_layout",
+                        side_effect=lambda scale: scale,
+                    ),
+                ):
+                    out, out_scale = self.scheme.apply_gmm1_act_quant(mlp_compute_input)
+
+                fused_op.assert_not_called()
+                mock_gmm1.assert_called_once_with(mlp_compute_input)
+                mock_swiglu.assert_called_once()
+                self.assertIs(out, fallback_out)
+                self.assertIs(out_scale, fallback_scale)
 
 
 class TestDSMXFP8OProjLayout(TestBase):
