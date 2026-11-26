@@ -2129,33 +2129,31 @@ Select the tab for the target hardware.
 
     unset https_proxy
     unset http_proxy
+    export LD_LIBRARY_PATH="${LD_LIBRARY_PATH:+$LD_LIBRARY_PATH:}/usr/local/lib/"
 
-    LOCAL_IP="<PREFILL_NODE_IP>"
     NIC_NAME="<NETWORK_INTERFACE>"
+    LOCAL_IP="<PREFILL_NODE_IP>"
     MODEL_PATH="<YOUR_MODEL_PATH>"
-    MEMCACHE_INSTALL_PATH="<MEMCACHE_INSTALL_PATH>"
-    MEMCACHE_CONFIG_DIR="<MEMCACHE_CONFIG_DIR>"
 
     export HCCL_IF_IP="$LOCAL_IP"
     export GLOO_SOCKET_IFNAME="$NIC_NAME"
     export TP_SOCKET_IFNAME="$NIC_NAME"
     export HCCL_SOCKET_IFNAME="$NIC_NAME"
-    export PYTHONHASHSEED=0
-    export MMC_LOCAL_CONFIG_PATH="$MEMCACHE_CONFIG_DIR/mmc-local.conf"
-    export LD_LIBRARY_PATH="$MEMCACHE_INSTALL_PATH/memcache_hybrid/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}:/usr/local/lib/"
-
     export VLLM_USE_V2_MODEL_RUNNER=1
     export VLLM_USE_FASTOKENS=1
-    export VLLM_SERVER_DEV_MODE=1
-
     export VLLM_ENGINE_READY_TIMEOUT_S=36000
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
     export HCCL_BUFFSIZE=1024
     export HCCL_OP_EXPANSION_MODE="AIV"
     export ASCEND_RT_VISIBLE_DEVICES=$1
 
-    #export MAX_JOBS=4
+    MEMCACHE_INSTALL_PATH="<MEMCACHE_INSTALL_PATH>"
+    MEMCACHE_CONFIG_DIR="<MEMCACHE_CONFIG_DIR>"
+    export PYTHONHASHSEED=0
+    export MMC_LOCAL_CONFIG_PATH="$MEMCACHE_CONFIG_DIR/mmc-local.conf"
+    export LD_LIBRARY_PATH="$MEMCACHE_INSTALL_PATH/memcache_hybrid/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 
+    # Ensure the model path matches the directory recorded during download
     vllm serve "$MODEL_PATH" \
         --host 0.0.0.0 \
         --port $2 \
@@ -2247,32 +2245,30 @@ Select the tab for the target hardware.
 
     unset https_proxy
     unset http_proxy
+    export LD_LIBRARY_PATH="${LD_LIBRARY_PATH:+$LD_LIBRARY_PATH:}/usr/local/lib/"
 
-    LOCAL_IP="<DECODE_NODE_IP>"
     NIC_NAME="<NETWORK_INTERFACE>"
+    LOCAL_IP="<DECODE_NODE_IP>"
     MODEL_PATH="<YOUR_MODEL_PATH>"
-    MEMCACHE_INSTALL_PATH="<MEMCACHE_INSTALL_PATH>"
-    MEMCACHE_CONFIG_DIR="<MEMCACHE_CONFIG_DIR>"
 
+    export VLLM_USE_V2_MODEL_RUNNER=1
+    export VLLM_USE_FASTOKENS=1
+    export VLLM_ENGINE_READY_TIMEOUT_S=36000
+    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
     export HCCL_IF_IP="$LOCAL_IP"
     export GLOO_SOCKET_IFNAME="$NIC_NAME"
     export TP_SOCKET_IFNAME="$NIC_NAME"
     export HCCL_SOCKET_IFNAME="$NIC_NAME"
-    export PYTHONHASHSEED=0
-    export MMC_LOCAL_CONFIG_PATH="$MEMCACHE_CONFIG_DIR/mmc-local.conf"
-    export LD_LIBRARY_PATH="$MEMCACHE_INSTALL_PATH/memcache_hybrid/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}:/usr/local/lib/"
-
-    export VLLM_USE_V2_MODEL_RUNNER=1
-    export VLLM_USE_FASTOKENS=1
-    export VLLM_SERVER_DEV_MODE=1
-
-    export VLLM_ENGINE_READY_TIMEOUT_S=36000
-    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
     export HCCL_BUFFSIZE=4096
     export ASCEND_RT_VISIBLE_DEVICES=$1
 
-    #export MAX_JOBS=4
+    MEMCACHE_INSTALL_PATH="<MEMCACHE_INSTALL_PATH>"
+    MEMCACHE_CONFIG_DIR="<MEMCACHE_CONFIG_DIR>"
+    export PYTHONHASHSEED=0
+    export MMC_LOCAL_CONFIG_PATH="$MEMCACHE_CONFIG_DIR/mmc-local.conf"
+    export LD_LIBRARY_PATH="$MEMCACHE_INSTALL_PATH/memcache_hybrid/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 
+    # Ensure the model path matches the directory recorded during download
     vllm serve "$MODEL_PATH" \
         --host 0.0.0.0 \
         --port $2 \
