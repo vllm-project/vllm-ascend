@@ -23,6 +23,13 @@ name: Handle /run Command
 # graph here, this handler re-emits a `pull_request: labeled` event for the PR,
 # which lets pr_test run with its normal event payload: ci-gate therefore lands
 # on the PR head SHA exactly as it did for an automatically triggered run.
+#
+# A commit is only ever started once through /run. Once E2E has settled the
+# head SHA, further /run comments are refused: a pass has nothing left to
+# prove, and a failure is retried far more cheaply with /rerun (failed jobs
+# only). Settled means the newest completed run concluded success, failure,
+# timeout or startup failure — a cancelled run is not a verdict on the code and
+# keeps the commit eligible.
 on:
   repository_dispatch:
     types: [run-command]
@@ -40,7 +47,7 @@ permissions:
 jobs:
   run:
     name: Trigger E2E on the latest commit
-    runs-on: linux-amd64-cpu-4-hk
+    runs-on: linux-amd64-cpu-2-hk
     container:
       image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend/act-environments-ubuntu:act-22.04
     steps:
@@ -206,33 +213,38 @@ jobs:
             | select(.name == "E2E" and .status == "action_required")] | length') \
             || fail_lookup "could not classify runs for $PR_SHA"
 
-          # A previously successful E2E on this exact commit does not block /run,
-          # but the reply should say so instead of implying a first run. Blocking
-          # would push people back to the "push an empty commit" workaround, which
-          # this whole command exists to replace.
-          PREV_SUCCESS=$(printf '%s' "$RUNS" | jq '[.workflow_runs[]
-            | select(.name == "E2E" and .status == "completed" and .conclusion == "success")] | length') \
+          # What this commit's E2E verdict is depends on the *newest* completed
+          # run, not on whether some run once passed. In practice a commit is not
+          # re-run after passing (/run refuses, and /rerun has no failed jobs to
+          # retry), but taking the latest conclusion keeps the answer right even
+          # if a finished run is restarted by hand from the Actions page.
+          LAST_CONCLUSION=$(printf '%s' "$RUNS" | jq -r '[.workflow_runs[]
+            | select(.name == "E2E" and .status == "completed")]
+            | sort_by(.updated_at) | last | .conclusion // empty') \
             || fail_lookup "could not classify runs for $PR_SHA"
 
-          for VALUE in "$ACTIVE" "$AWAITING" "$PREV_SUCCESS"; do
+          for VALUE in "$ACTIVE" "$AWAITING"; do
             case "$VALUE" in
               ''|*[!0-9]*) fail_lookup "unexpected jq output while classifying runs for $PR_SHA" ;;
             esac
           done
 
+          # A completed run only blocks /run when it says something about the
+          # code. `cancelled` (the pool lost the job, or a maintainer stopped it)
+          # and any other non-verdict conclusion leave the commit eligible for a
+          # fresh run.
           echo "active_runs=$ACTIVE" >> "$GITHUB_OUTPUT"
           echo "awaiting_approval=$AWAITING" >> "$GITHUB_OUTPUT"
-          if [ "$PREV_SUCCESS" -gt 0 ]; then
-            echo "prev_success=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "prev_success=false" >> "$GITHUB_OUTPUT"
-          fi
           if [ "$ACTIVE" -gt 0 ]; then
             echo "state=busy" >> "$GITHUB_OUTPUT"
           elif [ "$AWAITING" -gt 0 ]; then
             echo "state=awaiting" >> "$GITHUB_OUTPUT"
           else
-            echo "state=idle" >> "$GITHUB_OUTPUT"
+            case "$LAST_CONCLUSION" in
+              success) echo "state=already_passed" >> "$GITHUB_OUTPUT" ;;
+              failure|timed_out|startup_failure) echo "state=already_failed" >> "$GITHUB_OUTPUT" ;;
+              *) echo "state=idle" >> "$GITHUB_OUTPUT" ;;
+            esac
           fi
 
       - name: Post already-running comment
@@ -269,12 +281,34 @@ jobs:
           body: |
             [Bot]: run command failed before triggering anything, so **no new E2E run was started**. Reason: ${{ steps.inflight.outputs.lookup_reason }}
 
-            Please retry `/run` in a moment.
+            Details are in the [handler run log](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}). If the log shows a credential, rate-limit or unexpected-response error, retrying will not help — a maintainer needs to check that run and the `PAT_TOKEN` secret. Otherwise please retry `/run` in a moment.
           reactions: confused
 
       - name: Fail if the lookup failed
         if: steps.inflight.outputs.lookup_failed == 'true'
         run: exit 1
+
+      - name: Post already-passed refusal
+        if: steps.inflight.outputs.state == 'already_passed'
+        uses: peter-evans/create-or-update-comment@v5
+        with:
+          token: ${{ secrets.PAT_TOKEN }}
+          repository: ${{ github.event.client_payload.github.payload.repository.full_name }}
+          comment-id: ${{ github.event.client_payload.github.payload.comment.id }}
+          body: |
+            [Bot]: run command ignored. E2E already **passed** on commit `${{ github.event.client_payload.pull_request.head.sha }}`. The same commit cannot be run again — push a new commit if the code changed.
+          reactions: confused
+
+      - name: Post already-failed refusal
+        if: steps.inflight.outputs.state == 'already_failed'
+        uses: peter-evans/create-or-update-comment@v5
+        with:
+          token: ${{ secrets.PAT_TOKEN }}
+          repository: ${{ github.event.client_payload.github.payload.repository.full_name }}
+          comment-id: ${{ github.event.client_payload.github.payload.comment.id }}
+          body: |
+            [Bot]: run command ignored. E2E already finished on commit `${{ github.event.client_payload.pull_request.head.sha }}` without passing. The same commit cannot be run again — comment `/rerun` instead, which retries only the failed jobs on this commit.
+          reactions: confused
 
       - name: Re-arm ci-run label to emit a labeled event
         id: trigger
@@ -323,21 +357,8 @@ jobs:
           fi
           echo "triggered=true" >> "$GITHUB_OUTPUT"
 
-      - name: Comment result on PR (previous run on this commit passed)
-        if: steps.trigger.outputs.triggered == 'true' && steps.inflight.outputs.prev_success == 'true'
-        uses: peter-evans/create-or-update-comment@v5
-        with:
-          token: ${{ secrets.PAT_TOKEN }}
-          repository: ${{ github.event.client_payload.github.payload.repository.full_name }}
-          comment-id: ${{ github.event.client_payload.github.payload.comment.id }}
-          body: |
-            [Bot]: run command accepted, but E2E had **already passed** on commit `${{ github.event.client_payload.pull_request.head.sha }}`. A fresh run has been queued anyway, using whatever test-scope labels the PR currently carries.
-
-            If you are only re-verifying a suspected false pass, this is the right call. If you just wanted to look at the previous result, /run was unnecessary — track the new run in [PR checks](https://github.com/${{ github.event.client_payload.github.payload.repository.full_name }}/pull/${{ github.event.client_payload.pull_request.number }}/checks).
-          reactions: rocket
-
       - name: Comment result on PR
-        if: steps.trigger.outputs.triggered == 'true' && steps.inflight.outputs.prev_success != 'true'
+        if: steps.trigger.outputs.triggered == 'true'
         uses: peter-evans/create-or-update-comment@v5
         with:
           token: ${{ secrets.PAT_TOKEN }}
@@ -357,7 +378,7 @@ jobs:
           body: |
             [Bot]: run command could not start E2E on commit `${{ github.event.client_payload.pull_request.head.sha }}`. Reason: ${{ steps.trigger.outputs.fail_reason }}
 
-            Nothing has been queued for this PR. Please retry `/run` in a moment. If it keeps failing, a maintainer can add the `ci-run` label to this PR manually to trigger the same E2E run.
+            Nothing has been queued for this PR. Details are in the [handler run log](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}). Please retry `/run` in a moment; if it keeps failing, a maintainer can add the `ci-run` label to this PR manually to trigger the same E2E run.
           reactions: confused
 
       - name: Fail the job after a failed trigger

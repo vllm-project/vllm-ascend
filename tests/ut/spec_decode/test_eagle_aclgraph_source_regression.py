@@ -22,8 +22,7 @@ def test_eagle_aclgraph_uses_verified_main_speculator_contract() -> None:
     tree = ast.parse(ACLGRAPH.read_text())
     cls = _class(tree, "AutoRegressiveAclGraphManager")
 
-    assert isinstance(cls.bases[0], ast.Name)
-    assert cls.bases[0].id == "SpeculatorCudaGraphManager"
+    assert any(isinstance(base, ast.Name) and base.id == "SpeculatorCudaGraphManager" for base in cls.bases)
 
     source = ACLGRAPH.read_text()
     assert "AttentionStatePair" not in source
@@ -34,6 +33,6 @@ def test_eagle_aclgraph_uses_verified_main_speculator_contract() -> None:
 def test_eagle_patch_replaces_verified_main_manager_symbol() -> None:
     source = PATCH.read_text()
 
-    assert "vllm_speculator_module.SpeculatorCudaGraphManager = AutoRegressiveAclGraphManager" in source
+    assert "ar_speculator.SpeculatorCudaGraphManager = AutoRegressiveAclGraphManager" in source
     assert "PrefillSpeculatorCudaGraphManager" not in source
     assert "DecodeSpeculatorCudaGraphManager" not in source

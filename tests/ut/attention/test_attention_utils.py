@@ -27,6 +27,7 @@ from vllm_ascend.attention.utils import (
     filter_chunked_req_indices,
     get_flashmla_ops,
     get_or_register_attention_buffer,
+    get_quant_flashmla_ops,
 )
 
 NUM_REQS = 2
@@ -91,6 +92,31 @@ def test_get_flashmla_ops_propagates_internal_import_failure(monkeypatch):
         get_flashmla_ops()
 
 
+def test_get_quant_flashmla_ops_requires_both_callable_apis(monkeypatch):
+    attention_op = MagicMock()
+    metadata_op = MagicMock()
+    monkeypatch.setattr(attention_utils, "_has_flashmla_module", lambda: True)
+    monkeypatch.setattr(
+        attention_utils,
+        "import_module",
+        MagicMock(
+            return_value=SimpleNamespace(
+                quant_flash_mla=attention_op,
+                quant_flash_mla_metadata=metadata_op,
+            )
+        ),
+    )
+
+    assert get_quant_flashmla_ops() == (attention_op, metadata_op)
+
+    monkeypatch.setattr(
+        attention_utils,
+        "import_module",
+        MagicMock(return_value=SimpleNamespace(quant_flash_mla=attention_op)),
+    )
+    assert get_quant_flashmla_ops() is None
+
+
 def _common_attn_metadata() -> AscendCommonAttentionMetadata:
     return AscendCommonAttentionMetadata(
         query_start_loc=torch.tensor([0, 2, 5]),
@@ -109,6 +135,7 @@ def _common_attn_metadata() -> AscendCommonAttentionMetadata:
 def _spec_config(method: str, parallel_drafting: bool) -> MagicMock:
     spec_config = MagicMock()
     spec_config.parallel_drafting = parallel_drafting
+    spec_config.speculator_config.parallel_drafting = parallel_drafting
     spec_config.use_dspark.return_value = method == "dspark"
     return spec_config
 
@@ -152,6 +179,32 @@ def test_select_seq_lens_spec_decode(
         _spec_config(method, parallel_drafting),
         _vllm_config(model_type),
     )
+
+    torch.testing.assert_close(seq_lens, expected)
+
+
+@pytest.mark.parametrize(
+    ("method", "model_type", "parallel_drafting", "expected"),
+    [
+        ("dspark", "qwen3", True, NPU_SEQ_LENS),
+        ("dflash", "qwen3", True, NPU_SEQ_LENS),
+        ("dspark", "glm5_next", True, CPU_SEQ_LENS[:NUM_REQS]),
+        ("mtp", "qwen3", False, CPU_SEQ_LENS[:NUM_REQS]),
+    ],
+)
+def test_select_seq_lens_reads_the_speculator_capability(
+    method: str,
+    model_type: str,
+    parallel_drafting: bool,
+    expected: torch.Tensor,
+) -> None:
+    # Every supported pin exposes the capability on the speculator config.
+    spec_config = SimpleNamespace(
+        speculator_config=SimpleNamespace(parallel_drafting=parallel_drafting),
+        use_dspark=lambda: method == "dspark",
+    )
+
+    seq_lens = _select_seq_lens(_common_attn_metadata(), None, spec_config, _vllm_config(model_type))
 
     torch.testing.assert_close(seq_lens, expected)
 

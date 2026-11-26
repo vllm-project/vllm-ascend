@@ -10,6 +10,7 @@ from unittest.mock import MagicMock, Mock, patch
 import pytest
 import torch
 import vllm.distributed as vllm_distributed
+from vllm.config import AttentionConfig
 from vllm.config.compilation import CUDAGraphMode
 from vllm.v1.attention.ops.pcp import _gather_prefill_cache_inputs
 
@@ -97,7 +98,8 @@ def test_k31_prolog_v3_route_preserves_other_backends(impl_cls, is_kimi_k31, pcp
 
 @pytest.mark.parametrize("sharded_indexer", [False, True])
 @pytest.mark.parametrize("prefill", [False, True])
-def test_dcp_hooks_preserve_sharded_indexer_route(sharded_indexer, prefill):
+@pytest.mark.parametrize("pcp", [False, True])
+def test_dcp_hooks_preserve_sharded_indexer_route(sharded_indexer, prefill, pcp):
     impl = AscendSFADCPImpl.__new__(AscendSFADCPImpl)
     impl._sharded_indexer = False
     impl._local_topk = False
@@ -107,12 +109,14 @@ def test_dcp_hooks_preserve_sharded_indexer_route(sharded_indexer, prefill):
     metadata = AscendSFADCPMetadata.__new__(AscendSFADCPMetadata)
     metadata.num_prefills = int(prefill)
     metadata.pcp_has_global_prefill = False
-    metadata.dcp_context = SimpleNamespace(gather_context=None)
+    metadata.dcp_context = SimpleNamespace(
+        gather_context=None, kv_gather_block_ids=torch.arange(2) if prefill and (pcp or not sharded_indexer) else None
+    )
     impl._start_dcp_query_gather = Mock(return_value=object())
     impl._record_dcp_kv_gather_context = Mock()
     impl._on_query_ready(query, None, metadata)
     impl._on_kv_cache_written(cache, metadata)
-    if not prefill or sharded_indexer:
+    if not prefill or (sharded_indexer and not pcp):
         impl._start_dcp_query_gather.assert_called_once_with(query, None)
         impl._record_dcp_kv_gather_context.assert_not_called()
     else:
@@ -152,7 +156,8 @@ def test_sfa_pcp_dcp_compact_kv_selects_only_allocated_blocks(first_block_id):
     builder = AscendSFAPCPDCPMetadataBuilder.__new__(AscendSFAPCPDCPMetadataBuilder)
     builder.device = torch.device("cpu")
     builder.max_local_block_table_cols = 3
-    builder.arange_buffer = torch.arange(3, dtype=torch.int32)
+    builder.arange_buffer = torch.arange(6, dtype=torch.int32)
+    builder.kernel_block_size = builder.cp_kv_cache_interleave_size = 128
     builder.dcp_size = 2
     builder.dcp_collective_rank_order = torch.tensor([0, 1], dtype=torch.int32)
     global_table = torch.tensor([[first_block_id, 91, 92], [4, 5, 93]], dtype=torch.int32)
@@ -510,7 +515,10 @@ def test_sfa_dcp_extends_v1_backend() -> None:
 
 @pytest.mark.parametrize("pcp_size,dcp_enabled", [(1, False), (2, False), (1, True), (2, True)])
 def test_sfa_backend_selects_dcp_subclass_and_layout_specific_builder(pcp_size, dcp_enabled):
-    config = SimpleNamespace(parallel_config=SimpleNamespace(prefill_context_parallel_size=pcp_size))
+    config = SimpleNamespace(
+        attention_config=AttentionConfig(),
+        parallel_config=SimpleNamespace(prefill_context_parallel_size=pcp_size),
+    )
     with (
         patch("vllm_ascend.attention.sfa_v1.get_current_vllm_config", return_value=config),
         patch("vllm_ascend.attention.sfa_v1.get_ascend_config") as ascend_config,
@@ -595,7 +603,8 @@ def test_sfa_dcp_compact_kv_table_uses_logical_dcp_rank_order(with_global_view) 
     builder_cls = AscendSFAPCPDCPMetadataBuilder if with_global_view else AscendSFADCPMetadataBuilder
     builder = builder_cls.__new__(builder_cls)
     builder.device = torch.device("cpu")
-    builder.arange_buffer = torch.arange(2, dtype=torch.int32)
+    builder.arange_buffer = torch.arange(16, dtype=torch.int32)
+    builder.kernel_block_size = builder.cp_kv_cache_interleave_size = 128
     builder.dcp_size = 8
     builder.dcp_collective_rank_order = torch.tensor(
         [0, 4, 1, 5, 2, 6, 3, 7],
@@ -635,7 +644,8 @@ def test_sfa_dcp_compact_kv_table_uses_logical_dcp_rank_order(with_global_view) 
 def test_sfa_pcp_dcp_compact_kv_uses_global_request_blocks(local_rows, expected_rows) -> None:
     builder = AscendSFAPCPDCPMetadataBuilder.__new__(AscendSFAPCPDCPMetadataBuilder)
     builder.device = torch.device("cpu")
-    builder.arange_buffer = torch.arange(2, dtype=torch.int32)
+    builder.arange_buffer = torch.arange(4, dtype=torch.int32)
+    builder.kernel_block_size = builder.cp_kv_cache_interleave_size = 128
     builder.dcp_size = 2
     builder.dcp_collective_rank_order = torch.arange(2, dtype=torch.int32)
     # Actual [8, 1] prefill layout: the second PCP rank has no row for
@@ -655,6 +665,9 @@ def test_sfa_pcp_dcp_compact_kv_uses_global_request_blocks(local_rows, expected_
 
 def test_sfa_pcp_dcp_compact_kv_requires_global_block_counts():
     builder = AscendSFAPCPDCPMetadataBuilder.__new__(AscendSFAPCPDCPMetadataBuilder)
+    builder.arange_buffer = torch.arange(2, dtype=torch.int32)
+    builder.dcp_collective_rank_order = torch.arange(2, dtype=torch.int32)
+    builder.kernel_block_size = builder.cp_kv_cache_interleave_size = 128
     block_table = torch.tensor([[3]], dtype=torch.int32)
     with pytest.raises(ValueError, match="requires valid block counts"):
         builder._build_compact_kv_gather_metadata(block_table, global_dcp_block_table=block_table)
@@ -755,9 +768,11 @@ def test_sfa_pcp_dcp_empty_local_prefill_joins_dcp_kv_gather() -> None:
     impl.dcp_group = object()
     impl.enable_sparse_sfa_c8 = True
     impl.enable_sparse_sfa_turboquant = False
-    impl._start_dcp_gather = Mock(return_value="gathered")
+    handle = Mock()
+    impl._start_dcp_gather = Mock(return_value=SimpleNamespace(handle=handle))
     metadata = AscendSFADCPMetadata.__new__(AscendSFADCPMetadata)
     metadata.uses_pcp_sharded_layout = True
+    metadata.num_actual_tokens = 0
     metadata.num_prefills = 0
     metadata.pcp_has_global_prefill = True
     metadata.dcp_context = SimpleNamespace(
@@ -772,7 +787,8 @@ def test_sfa_pcp_dcp_empty_local_prefill_joins_dcp_kv_gather() -> None:
     gather_input = impl._start_dcp_gather.call_args.args[0]
     torch.testing.assert_close(gather_input, kv_cache[0][[0, 2]])
     assert impl._start_dcp_gather.call_args.kwargs == {"dim": 0, "split_sizes": (4,)}
-    assert metadata.dcp_context.gather_context == "gathered"
+    handle.wait.assert_called_once()
+    assert metadata.dcp_context.gather_context is None
 
 
 def test_sfa_pcp_dcp_native_cache_write_uses_full_dcp_slots():
@@ -1076,7 +1092,11 @@ def test_sfa_pcp_dcp_builder_slots_match_kv_gather(rank, num_decode_tokens, num_
     metadata.pcp_has_global_prefill = global_prefill
     metadata.slot_mapping = expanded_slots[:num_tokens]
     metadata.pcp_slot_mapping = expanded_slots.flip(0)
-    metadata.dcp_context = SimpleNamespace(slot_mapping=expanded_slots)
+    metadata.dcp_context = SimpleNamespace(
+        slot_mapping=expanded_slots,
+        kv_gather_block_ids=torch.arange(2) if metadata.pcp_has_global_prefill else None,
+        gather_context=None,
+    )
     indexer_slots = metadata.pcp_slot_mapping
     kv = torch.arange(2 * num_tokens).view(2, num_tokens, 1)
     group = SimpleNamespace(
@@ -1142,7 +1162,11 @@ def test_native_pcp_dcp_packed_kv_preserves_gathered_payload_addresses(
     metadata.pcp_slot_mapping = expanded_slots
     metadata.cos = metadata.sin = torch.empty(len(local), rope_dim) if rope_dim else None
     metadata.attn_state = AscendAttentionState.ChunkedPrefill
-    metadata.dcp_context = SimpleNamespace(slot_mapping=expanded_slots)
+    metadata.dcp_context = SimpleNamespace(
+        slot_mapping=expanded_slots,
+        kv_gather_block_ids=torch.arange(2) if metadata.pcp_has_global_prefill else None,
+        gather_context=None,
+    )
     group = SimpleNamespace(
         world_size=2,
         rank_in_group=0,
@@ -1168,7 +1192,7 @@ def test_native_pcp_dcp_packed_kv_preserves_gathered_payload_addresses(
     impl.indexer = Mock(return_value=torch.zeros(len(local), 1, 1, dtype=torch.int32))
     impl._execute_sparse_flash_attention_process = Mock(return_value=hidden)
     impl._v_up_proj = lambda values: values
-    impl._finalize_o_proj = lambda values, output: output.copy_(values)
+    impl.o_proj = lambda values: (values, None)
 
     def quantize(values, *_args, **_kwargs):
         rows = len(values)
@@ -1698,7 +1722,9 @@ def test_sfa_dcp_prefill_passes_contiguous_gathered_cache() -> None:
     packed = torch.randn(2, 128, 1, 576)
     gathered = packed.split((512, 64), dim=-1)
     assert all(not tensor.is_contiguous() for tensor in gathered)
-    context = SimpleNamespace(gather_context=object(), kv_gather_block_table=object())
+    context = SimpleNamespace(
+        gather_context=object(), kv_gather_block_table=object(), kv_gather_block_ids=torch.arange(2)
+    )
     metadata = SimpleNamespace(dcp_context=context)
     output = object()
     with (
@@ -2233,6 +2259,7 @@ def _make_initialized_sfa_impl(pcp_size, dcp_size, physical_pcp_size=None):
         parallel_config=SimpleNamespace(
             prefill_context_parallel_size=pcp_size,
             decode_context_parallel_size=dcp_size,
+            pcp_shard_decode_requests=pcp_size > 1 and dcp_size == 1,
             cp_kv_cache_interleave_size=128,
         ),
         model_config=SimpleNamespace(
@@ -2241,6 +2268,7 @@ def _make_initialized_sfa_impl(pcp_size, dcp_size, physical_pcp_size=None):
             hf_text_config=SimpleNamespace(index_topk=4),
         ),
         kv_transfer_config=None,
+        cache_config=SimpleNamespace(cache_dtype="auto"),
         num_speculative_tokens=0,
         scheduler_config=SimpleNamespace(max_num_seqs=4),
         compilation_config=SimpleNamespace(
@@ -2262,7 +2290,10 @@ def _make_initialized_sfa_impl(pcp_size, dcp_size, physical_pcp_size=None):
         patch(
             "vllm_ascend.attention.sfa_v1.get_ascend_config",
             return_value=SimpleNamespace(
-                enable_sparse_sfa_c8=False, enable_sparse_sfa_turboquant=False, enable_mlapo=False
+                enable_sparse_sfa_c8=False,
+                enable_sparse_sfa_turboquant=False,
+                enable_mlapo=False,
+                sparse_kv_offload_config=SimpleNamespace(enabled=False),
             ),
         ),
         patch("vllm_ascend.attention.sfa_v1.is_rl_weight_update_enabled", return_value=False),
@@ -2448,7 +2479,7 @@ def test_sfa_forward_orders_cache_writes_and_collectives(
             slot_mapping=slots,
             block_table=torch.tensor([[0, 1]]),
             seq_lens=lengths,
-            kv_gather_block_ids=torch.arange(2),
+            kv_gather_block_ids=torch.arange(2) if prefill or global_prefill else None,
             kv_gather_block_table=torch.tensor([[0, 1]]),
             gather_context=None,
         ),
@@ -2540,6 +2571,8 @@ def test_sfa_forward_orders_cache_writes_and_collectives(
             expected.append("cache_write")
             if dcp_enabled and (not packed_cache or prefill or global_prefill):
                 expected.append("kv_gather" if prefill or global_prefill else "query_gather")
+            if dcp_enabled and pcp_enabled and (prefill or global_prefill):
+                expected.append("wait")
             expected.append("indexer")
             if dcp_enabled:
                 expected.append("wait")

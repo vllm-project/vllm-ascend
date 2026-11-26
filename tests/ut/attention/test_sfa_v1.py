@@ -4,7 +4,7 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import torch
-from vllm.config import set_current_vllm_config
+from vllm.config import AttentionConfig, set_current_vllm_config
 from vllm.distributed.parallel_state import GroupCoordinator
 from vllm.model_executor.layers.linear import LinearBase, UnquantizedLinearMethod
 
@@ -39,12 +39,12 @@ from vllm_ascend.quantization.methods import (
     AscendW8A8LinearMethod,
     AscendW8A8MXFP8DynamicLinearMethod,
 )
-from vllm_ascend.utils import vllm_version_is
 
 
 class TestAscendSFABackend(TestBase):
     def setUp(self):
         self.mock_config = MagicMock()
+        self.mock_config.attention_config = AttentionConfig()
         mock_parallel_config = MagicMock()
         mock_parallel_config.prefill_context_parallel_size = 1
         mock_parallel_config.decode_context_parallel_size = 1
@@ -716,6 +716,7 @@ class TestAscendSFAKPathFusion(TestBase):
         wk_weights_proj = MagicMock(return_value=(kw, None))
 
         indexer = AscendSFAIndexerBackend.__new__(AscendSFAIndexerBackend)
+        indexer.topk_tokens = 4
         indexer.wk_weights_proj = wk_weights_proj
         indexer.k_norm = MagicMock(side_effect=lambda x: x)
         indexer.head_dim = head_dim
@@ -737,6 +738,8 @@ class TestAscendSFAKPathFusion(TestBase):
         cos = torch.randn(num_tokens, 1, 1, 64)
         sin = torch.randn(num_tokens, 1, 1, 64)
         indexer_metadata = SimpleNamespace(
+            num_actual_tokens=num_tokens,
+            kv_gather_block_ids=None,
             cos=cos,
             sin=sin,
             slot_mapping=torch.arange(num_tokens, dtype=torch.int64).view(-1, 1),
@@ -1324,8 +1327,8 @@ class TestAscendSFAImpl(TestBase):
     ):
         """An incompatible reload must rebind instead of raising from ``copy_``.
 
-        v0.33.0 rebinds an incompatible value; main can copy a smaller value
-        into the parameter's existing storage. Both must accept the new shape.
+        Main copies a smaller value into the parameter's existing storage, so
+        the new shape must be accepted.
         """
         layer = self._setup_kv_b_proj()
         mock_format_cast.return_value = layer.weight
@@ -1346,13 +1349,9 @@ class TestAscendSFAImpl(TestBase):
 
         self.impl.process_weights_after_loading(torch.bfloat16)
 
-        if vllm_version_is("0.33.0"):
-            # A re-derived value that no longer fits rebinds the parameter.
-            self.assertNotEqual(self.impl.W_UV.data_ptr(), w_uv_ptr)
-        else:
-            # Main copies a smaller value into the parameter's own storage, so
-            # the address captured by graphs is preserved.
-            self.assertEqual(self.impl.W_UV.data_ptr(), w_uv_ptr)
+        # Main copies a smaller value into the parameter's own storage, so
+        # the address captured by graphs is preserved.
+        self.assertEqual(self.impl.W_UV.data_ptr(), w_uv_ptr)
         self.assertEqual(
             self.impl.W_UV.shape,
             (self.impl.local_num_heads, self.impl.kv_lora_rank, self.impl.v_head_dim),
@@ -1977,9 +1976,11 @@ class TestAscendSFATurboQuantLatentCache(TestBase):
         impl._parallel_o_proj = None
         impl.enable_sparse_sfa_turboquant = True
         impl.turboquant = MagicMock()
+        impl.o_proj = MagicMock()
         hidden_states = torch.randn(2, 4)
 
         result = impl.forward("model.layers.0", hidden_states, (), None, output=torch.empty(2, 4))
 
         impl.turboquant._initialize.assert_called_once_with(hidden_states.device)
+        impl.o_proj.assert_not_called()
         self.assertTrue(torch.equal(result, torch.zeros(2, 4)))

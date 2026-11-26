@@ -23,6 +23,7 @@ from vllm.forward_context import create_forward_context, override_forward_contex
 from vllm.utils.network_utils import get_open_port
 
 from tests.e2e.conftest import wait_until_npu_memory_free
+from vllm_ascend.ascend_config import init_ascend_config
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX, MoECommType
 from vllm_ascend.distributed.eplb.eplb_state import AscendEplbLayerState, refresh_model_routing_tables
 from vllm_ascend.ops.fused_moe.dataclass.moe_quant import MoEQuantParams
@@ -103,6 +104,8 @@ def _run_a5_allgather_eplb(rank, port, graph_mode):
     )
     try:
         with set_current_vllm_config(config), override_forward_context(create_forward_context(None, config)):
+            # Model-parallel communicators read the Ascend all-reduce config.
+            init_ascend_config(config)
             initialize_model_parallel(tensor_model_parallel_size=2, backend="hccl")
             _EXTRA_CTX.moe_comm_type = MoECommType.ALLGATHER
             _EXTRA_CTX.max_tokens_across_dp = EPLB_ROWS

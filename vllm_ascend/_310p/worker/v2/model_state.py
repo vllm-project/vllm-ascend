@@ -12,6 +12,7 @@ import torch.nn as nn
 from vllm.config import VllmConfig
 from vllm.config.compilation import CUDAGraphMode
 from vllm.model_executor.layers.mamba.mamba_utils import is_conv_state_dim_first
+from vllm.utils.platform_utils import is_pin_memory_available
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.worker.gpu.mm.encoder_cache import EncoderCache
 from vllm.v1.worker.gpu.model_states.mamba_hybrid import (
@@ -280,6 +281,16 @@ class Ascend310PMambaHybridModelState(_Ascend310PModelStateMixin, AscendMambaHyb
         self._capture_seq_lens_by_ptr = {}
         self._replace_310p_rope_state(encoder_cache)
         self._num_accepted_tokens_cpu = np.ones(self.max_num_reqs, dtype=np.int32)
+        # Pinned staging for the per-step accepted-token upload. A freshly
+        # allocated NumPy array is pageable, so ``.to(device, non_blocking=True)``
+        # degrades into a stream-wide synchronous H2D on the decode critical path.
+        self._accepted_tokens_staging = torch.empty(
+            self.max_num_reqs,
+            dtype=torch.int32,
+            device="cpu",
+            pin_memory=is_pin_memory_available(),
+        )
+        self._accepted_tokens_staging_np = self._accepted_tokens_staging.numpy()
         self._mamba_copy_funcs_by_group = None
         if self._align_mode:
             self._mamba_state_idx_cpu = np.zeros(self.max_num_reqs, dtype=np.int32)
@@ -326,9 +337,10 @@ class Ascend310PMambaHybridModelState(_Ascend310PModelStateMixin, AscendMambaHyb
         num_accepted_tokens = None
         num_decode_draft_tokens_cpu = None
         if not for_capture and self.vllm_config.num_speculative_tokens > 0:
-            accepted_np = np.ones(num_reqs, dtype=np.int32)
+            accepted_np = self._accepted_tokens_staging_np[:num_reqs]
+            accepted_np.fill(1)
             accepted_np[:num_actual_reqs] = self._num_accepted_tokens_cpu[input_batch.idx_mapping_np]
-            num_accepted_tokens = torch.from_numpy(accepted_np).to(
+            num_accepted_tokens = self._accepted_tokens_staging[:num_reqs].to(
                 device=self.device,
                 non_blocking=True,
             )

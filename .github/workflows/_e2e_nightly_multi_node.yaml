@@ -25,6 +25,11 @@ on:
         type: string
         default: ''
         description: CONFIG_BASE_PATH used by the YAML loader inside the pod
+      tests:
+        required: false
+        type: string
+        default: ''
+        description: pytest entry run in each pod instead of the generic multi-node runner
       test_frequency:
         required: false
         type: string
@@ -147,6 +152,8 @@ on:
         default: ''
         description: override CONFIG_BASE_PATH for bisect
     secrets:
+      PAT_TOKEN:
+        required: false
       HW_OBS_PROFILE_AK:
         required: false
       HW_OBS_PROFILE_SK:
@@ -268,11 +275,15 @@ jobs:
           } >> $GITHUB_OUTPUT
 
       - name: Prepare scripts
+        id: prepare-scripts
         run: |
           install -D tests/e2e/common/multi_node/run.sh /root/.cache/tests/run.sh
           install -D tests/e2e/common/multi_node/download_archive.sh /root/.cache/tests/download_archive.sh
           install -D tests/e2e/nightly/scripts/bisect_args.sh /root/.cache/tests/bisect_args.sh
           install -D .github/workflows/scripts/collect_download.py /root/.cache/tests/collect_download.py
+          if ${{ startsWith(inputs.request_id, 'daily-') }} && bash .github/workflows/scripts/stage_ci_actions.sh; then
+            echo 'daily_issue_action_ready=true' >> "$GITHUB_OUTPUT" || true
+          fi
 
       - name: Launch cluster
         env:
@@ -331,6 +342,7 @@ jobs:
             -D image="$image" \
             -D config_file_path="$config_file_path" \
             -D config_base_path="$config_base_path" \
+            -D tests="${{ inputs.tests }}" \
             -D npu_per_node="$npu_per_node" \
             -D fail_tag="$fail_tag" \
             -D is_pr_test="$is_pr_test" \
@@ -582,6 +594,18 @@ jobs:
           echo "vllm_hash=${HASH_vllm:-N/A}" >> "$GITHUB_OUTPUT"
           echo "vllm_ascend_hash=${HASH_vllm_ascend:-N/A}" >> "$GITHUB_OUTPUT"
           rm -f "$LEADER_TMP"
+
+      - name: Dispatch Daily Issue update
+        id: daily-report
+        if: >-
+          ${{ !cancelled() && steps.prepare-scripts.outputs.daily_issue_action_ready == 'true' &&
+              steps.stream_logs.outcome == 'failure' }}
+        continue-on-error: true
+        uses: ./../../_temp/ci-workflow/.github/actions/dispatch-daily-issue
+        with:
+          github-token: ${{ secrets.PAT_TOKEN }}
+          request-id: ${{ inputs.request_id }}
+          case-name: ${{ inputs.name }}
 
       - name: Update good_table.csv on success
         if: ${{ steps.stream_logs.outcome == 'success' && inputs.request_id == '' }}

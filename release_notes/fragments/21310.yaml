@@ -1,0 +1,7 @@
+pr: 21310
+entries:
+  - category: breaking
+    text: >-
+      Removed dynamic chunk size Chunked Pipeline Parallelism (CPP).
+      Remove scheduler_config.profiling_chunk_config and the legacy top-level
+      profiling_chunk_config option from additional configuration.

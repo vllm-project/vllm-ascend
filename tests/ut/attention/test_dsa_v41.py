@@ -222,7 +222,7 @@ def test_index_selection_publishes_shared_output(monkeypatch, empty_cache):
     monkeypatch.setattr(
         dsa_v41,
         "get_forward_context",
-        lambda: SimpleNamespace(no_compile_layers={prefix: SimpleNamespace(kv_cache=[None])}),
+        lambda: SimpleNamespace(no_compile_layers={prefix: SimpleNamespace(kv_cache=None)}),
     )
     selected = torch.full((TOKENS, 0 if empty_cache else TOPK), 3, dtype=torch.int32)
     attn, shared = _attn(selected)
@@ -300,7 +300,7 @@ def test_compressor_input_ready_before_query_quantization(monkeypatch, ratio, c2
     attn = SimpleNamespace(
         compressor=Compressor(),
         indexer=SimpleNamespace(update_keys=lambda *args: None),
-        long_kv_cache=SimpleNamespace(kv_cache=[None]),
+        long_kv_cache=SimpleNamespace(kv_cache=None),
         head_dim=8,
         nope_head_dim=4,
     )
@@ -347,7 +347,7 @@ def test_compressed_cache_writes_align_rope_and_slots_to_latent(monkeypatch, num
 
     attn = SimpleNamespace(
         indexer=SimpleNamespace(update_keys=index_keys),
-        long_kv_cache=SimpleNamespace(kv_cache=[object()]),
+        long_kv_cache=SimpleNamespace(kv_cache=object()),
         head_dim=8,
         packed_cache_ops=SimpleNamespace(write_attention_cache=store) if packed else None,
     )

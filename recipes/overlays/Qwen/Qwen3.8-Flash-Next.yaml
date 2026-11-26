@@ -1,0 +1,1295 @@
+# Overlay for Qwen/Qwen3.8-Flash-Next on Huawei Ascend.
+# Verified on two Atlas A2 servers (800T A2 with 8 x Ascend 910B3, 800I A2 with
+# 8 x Ascend 910B4-1; 64 GB HBM per NPU), vLLM Ascend v0.32.0rc1.
+# 1P1D disaggregation, MooncakeConnectorV2 p2p KV transfer (no KV pool), MTP on both pools:
+#   prefill  TP4 x PP2 x DP1 x EP4         (node 1)
+#   decode   TP2 x DP4 x EP8               (node 2)
+# Topology: one prefill node and one decode node, 8 NPUs each.
+meta:
+  hardware:
+    ascend_910b: verified
+    ascend_910c: supported
+    ascend_950dt: supported
+
+strategy_hardware:
+  single_node_tp:
+    npu: unsupported
+    ascend_910c: supported
+    ascend_950dt: supported
+  single_node_tep:
+    npu: unsupported
+  single_node_dep:
+    npu: unsupported
+  single_node_dpa_tp:
+    npu: unsupported
+  multi_node_tp:
+    npu: unsupported
+  multi_node_tp_dp:
+    npu: unsupported
+  multi_node_tp_pp:
+    npu: unsupported
+  multi_node_tep:
+    npu: unsupported
+  multi_node_dep:
+    npu: unsupported
+  pd_cluster:
+    npu: unsupported
+    ascend_910b: supported
+
+features:
+  tool_calling:
+    hardware_overrides:
+      ascend_910b:
+        args:
+          - '--enable-auto-tool-choice'
+          - '--tool-call-parser'
+          - qwen3_xml
+      ascend_950dt:
+        args:
+          - '--enable-auto-tool-choice'
+          - '--tool-call-parser'
+          - 'qwen3_xml'
+      ascend_910c:
+        args:
+          - '--enable-auto-tool-choice'
+          - '--tool-call-parser'
+          - 'qwen3_xml'
+  spec_decoding:
+    hardware_overrides:
+      ascend_910b:
+        args:
+          - '--speculative-config'
+          - '{"method":"qwen3_5_mtp","num_speculative_tokens":3,"enforce_eager":true}'
+      ascend_950dt:
+        args:
+          - '--speculative-config'
+          - '{"method":"qwen3_5_mtp","num_speculative_tokens":3,"enforce_eager":false}'
+      ascend_910c:
+        args:
+          - '--speculative-config'
+          - '{"method":"qwen3_5_mtp","num_speculative_tokens":3,"enforce_eager":false}'
+
+variants:
+  ascend_w4a8:
+    model_id: Eco-Tech/Qwen3.8-Flash-Next-w4a8
+    label: W4A8 (Ascend A2/A3)
+    precision: int4
+    # 180.9 GiB on disk = 194.3 GB, x 1.2 headroom (same convention as the DeepSeek recipes)
+    vram_minimum_gb: 234
+    description: >-
+      A2 and A3 use the same ModelSlim W4A8 checkpoint (181 GiB, 48 shards). In the
+      two-node A2 1P1D deployment, Engram keeps the 51B N-gram embedding table in
+      host memory on both nodes so the weights fit on eight 64 GB NPUs per node.
+    supported_hardware:
+      - ascend_910b
+      - ascend_910c
+    tp: {ascend_910c: 8}
+    min_vllm_version: 0.32.0
+    hardware_overrides:
+      ascend_910b:
+        docker_image: quay.io/ascend/vllm-ascend:v0.32.0rc1
+        docker_serve_command: vllm serve
+        # Engram keeps ~95 GiB in /dev/shm on the decode node.
+        docker_shm_size: 128g
+        install:
+          pip: false
+        extra_args:
+          - '--host'
+          - 0.0.0.0
+          - '--served-model-name'
+          - qwen38-flash-next-a2-pd
+          - '--trust-remote-code'
+          - '--quantization'
+          - ascend
+          - '--max-model-len'
+          - '141312'
+          - '--max-num-seqs'
+          - '32'
+          - '--max-num-batched-tokens'
+          - '8192'
+          - '--gpu-memory-utilization'
+          - '0.90'
+          - '--enable-prefix-caching'
+          - '--mamba-cache-mode'
+          - align
+          - '--async-scheduling'
+        extra_env:
+          VLLM_USE_MODELSCOPE: 'True'
+          VLLM_USE_V2_MODEL_RUNNER: '1'
+          VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS: '3000'
+          VLLM_ENGINE_READY_TIMEOUT_S: '4800'
+          HCCL_CONNECT_TIMEOUT: '600'
+          ASCEND_RT_VISIBLE_DEVICES: 0,1,2,3,4,5,6,7
+          PYTHONUNBUFFERED: '1'
+      ascend_910c:
+        docker_image: quay.io/ascend/vllm-ascend:v0.32.0rc1-a3
+        docker_serve_command: vllm serve
+        docker_shm_size: 128g
+        install:
+          pip: false
+        extra_args:
+          - '--host'
+          - '0.0.0.0'
+          - '--port'
+          - '8088'
+          - '--served-model-name'
+          - 'qwen3.8-flash-next'
+          - '--trust-remote-code'
+          - '--quantization'
+          - 'ascend'
+          - '--data-parallel-size'
+          - '1'
+          - '--enable-expert-parallel'
+          - '--max-model-len'
+          - '131072'
+          - '--max-num-seqs'
+          - '8'
+          - '--max-num-batched-tokens'
+          - '4096'
+          - '--gpu-memory-utilization'
+          - '0.93'
+          - '--enable-prefix-caching'
+          - '--mamba-cache-mode'
+          - 'align'
+          - '--async-scheduling'
+          - '--engram-config'
+          - '{"cpu_offload":true,"dp_shared_memory":false}'
+          - '--compilation-config'
+          - '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
+          - '--additional-config'
+          - '{"enable_cpu_binding":true,"enable_shared_expert_dp":true,"enable_fused_mc2":0,"enable_flashcomm1":true,"multistream_overlap_shared_expert":true,"ascend_compilation_config":{"fuse_norm_quant":false,"enable_npugraph_ex":true,"enable_static_kernel":true,"enable_super_kernel":false}}'
+        extra_env:
+          VLLM_USE_MODELSCOPE: 'True'
+          VLLM_USE_V2_MODEL_RUNNER: '1'
+          VLLM_ENGINE_READY_TIMEOUT_S: '4800'
+
+  # These inherited variants are also selectable on Huawei in the base recipe.
+  # Give them the platform installer. The PD presets below target W4A8 only.
+  fp8:
+    hardware_overrides:
+      ascend_910c:
+        docker_image: quay.io/ascend/vllm-ascend:v0.32.0rc1-a3
+        docker_serve_command: vllm serve
+        docker_shm_size: 128g
+        install:
+          pip: false
+      ascend_950dt:
+        docker_image: quay.io/ascend/vllm-ascend:v0.32.0rc1-a5
+        docker_serve_command: vllm serve
+        docker_shm_size: 500g
+        install:
+          pip: false
+  bf16:
+    hardware_overrides:
+      ascend_910c:
+        docker_image: quay.io/ascend/vllm-ascend:v0.32.0rc1-a3
+        docker_serve_command: vllm serve
+        docker_shm_size: 128g
+        install:
+          pip: false
+      ascend_950dt:
+        docker_image: quay.io/ascend/vllm-ascend:v0.32.0rc1-a5
+        docker_serve_command: vllm serve
+        docker_shm_size: 500g
+        install:
+          pip: false
+
+  ascend_a5_w4a8_mxfp:
+    label: W4A8-MXFP (ASCEND 950DT)
+    model_id: Eco-Tech/Qwen3.8-Flash-Next-w4a8-mxfp
+    precision: mxfp4
+    # 48 ModelScope weight shards total 193.26 GB, with 20% headroom.
+    vram_minimum_gb: 232
+    supported_hardware: [ascend_950dt]
+    min_vllm_version: 0.32.0
+    tp: 4
+    extra_args:
+      - '--host'
+      - '0.0.0.0'
+      - '--port'
+      - '8087'
+      - '--served-model-name'
+      - 'qwen3.8-flash-next-950-dt'
+      - '--trust-remote-code'
+      - '--quantization'
+      - 'ascend'
+      - '--data-parallel-size'
+      - '1'
+      - '--max-model-len'
+      - '141312'
+      - '--max-num-seqs'
+      - '32'
+      - '--max-num-batched-tokens'
+      - '4096'
+      - '--gpu-memory-utilization'
+      - '0.90'
+      - '--enable-prefix-caching'
+      - '--async-scheduling'
+      - '--enable-expert-parallel'
+      - '--engram-config'
+      - '{"cpu_offload":true,"dp_shared_memory":false}'
+      - '--compilation-config'
+      - '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
+      - '--additional-config'
+      - '{"enable_cpu_binding":true,"enable_shared_expert_dp":true,"enable_fused_mc2":0,"enable_flashcomm1":true,"multistream_overlap_shared_expert":true,"ascend_compilation_config":{"fuse_norm_quant":false,"enable_npugraph_ex":true,"enable_static_kernel":true,"enable_super_kernel":false}}'
+    extra_env:
+      VLLM_USE_MODELSCOPE: 'True'
+      VLLM_USE_V2_MODEL_RUNNER: '1'
+      VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS: '3000'
+    hardware_overrides:
+      ascend_950dt:
+        docker_image: quay.io/ascend/vllm-ascend:v0.32.0rc1-a5
+        docker_serve_command: vllm serve
+        docker_shm_size: 500g
+        install:
+          pip: false
+
+presets:
+  ascend_a2_w4a8_pd:
+    label: A2 W4A8 PD Separation (1P1D)
+    hardware: ascend_910b
+    strategy: pd_cluster
+    variants:
+      - ascend_w4a8
+    workload: Prefill/decode disaggregation, 141312 context, MTP
+    default: true
+    description: >-
+      One node per pool. The prefill role overrides the pool's whole-node TP8 sizing with
+      tp 4 and pp 2, which renders the verified TP4 x PP2 prefill layout; the decode role
+      is DEP with TP2 x DP4 over the multi-port external load balancer, so one supervisor
+      process on the decode node runs four child API servers (one per DP rank) and the
+      Ascend Router fans decode requests across them, exactly as verified.
+    select:
+      pd_router: ascend
+      pd_connector: mooncake_ascend
+      frontend: python
+    roles:
+      prefill:
+        nodes: 1
+        parallelism: tep
+        tp: 4
+        pp: 2
+        args:
+          - '--engram-config'
+          - '{"cpu_offload":true,"dp_shared_memory":false}'
+          - '--compilation-config'
+          - '{"cudagraph_mode":"NONE"}'
+          - '--additional-config'
+          - '{"enable_shared_expert_dp":true,"enable_flashcomm1":true,"enable_prefill_mc2":true,"enable_fused_mc2":0,"enable_cpu_binding":true,"multistream_overlap_shared_expert":true,"ascend_compilation_config":{"fuse_norm_quant":false}}'
+        json_args:
+          --kv-transfer-config:
+            kv_connector: MooncakeConnectorV2
+            kv_role: kv_producer
+            kv_load_failure_policy: null
+            kv_port: '55220'
+            kv_connector_extra_config:
+              prefill:
+                dp_size: 1
+                tp_size: 4
+                pp_size: 2
+              decode:
+                dp_size: 4
+                tp_size: 2
+        env:
+          HCCL_BUFFSIZE: '8192'
+          HCCL_NPU_SOCKET_PORT_RANGE: 61400-61499
+      decode:
+        nodes: 1
+        parallelism: dep
+        tp: 2
+        args:
+          - '--engram-config'
+          - '{"cpu_offload":true,"dp_shared_memory":true}'
+          - '--compilation-config'
+          - '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
+          - '--additional-config'
+          - '{"enable_flashcomm1":true,"enable_cpu_binding":true,"enable_shared_expert_dp":true,"multistream_overlap_shared_expert":true,"scheduler_config":{"recompute_scheduler_enable":true},"ascend_compilation_config":{"fuse_norm_quant":false,"enable_npugraph_ex":true,"enable_static_kernel":true,"enable_super_kernel":false}}'
+        json_args:
+          --speculative-config:
+            enforce_eager: false
+          --kv-transfer-config:
+            kv_connector: MooncakeConnectorV2
+            kv_role: kv_consumer
+            kv_load_failure_policy: null
+            kv_port: '56010'
+            kv_connector_extra_config:
+              prefill:
+                dp_size: 1
+                tp_size: 4
+                pp_size: 2
+              decode:
+                dp_size: 4
+                tp_size: 2
+        env:
+          HCCL_BUFFSIZE: '512'
+          HCCL_NPU_SOCKET_PORT_RANGE: 61500-61599
+
+  a3_single_node:
+    label: A3 single service, TP8
+    hardware: ascend_910c
+    strategy: single_node_tp
+    variants: [ascend_w4a8]
+    default: true
+    select:
+      frontend: python
+    env:
+      ASCEND_RT_VISIBLE_DEVICES: 0,1,2,3,4,5,6,7
+
+  a5_single_node:
+    label: 950DT single service, TP4
+    hardware: ascend_950dt
+    strategy: single_node_tp
+    variants: [ascend_a5_w4a8_mxfp]
+    default: true
+    select:
+      frontend: python
+    env:
+      ASCEND_RT_VISIBLE_DEVICES: 0,1,2,3
+      VLLM_ENGINE_READY_TIMEOUT_S: '4800'
+      PYTORCH_NPU_ALLOC_CONF: expandable_segments:True
+      OMP_PROC_BIND: 'false'
+      OMP_NUM_THREADS: '1'
+      OPENBLAS_NUM_THREADS: '1'
+      TASK_QUEUE_ENABLE: '1'
+      HCCL_BUFFSIZE: '1024'
+      HCCL_NPU_SOCKET_PORT_RANGE: auto
+
+  a3_single_host_pd:
+    label: Single-host PD (A3)
+    hardware: ascend_910c
+    strategy: single_node_tp
+    variants:
+      - ascend_w4a8
+    source:
+      label: Qwen3.8-Flash-Next deployment tutorial
+      href: >-
+        https://github.com/vllm-project/vllm-ascend/blob/a41e2ff8ba274328f9ef2ff27d15653df1d2e8ee/docs/source/tutorials/models/Qwen3.8-Flash-Next.md
+      revision: a41e2ff8ba274328f9ef2ff27d15653df1d2e8ee
+    select:
+      frontend: python
+      features:
+        tool_calling: false
+        reasoning: false
+        spec_decoding: true
+    runbook: >-
+      Run Prefill on devices 0–7 and Decode on devices 8–15 in the same container. Start the proxy for the
+      selected workload after both roles are ready.
+    env:
+      VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS: '3000'
+      VLLM_HOST_IP: $LOCAL_SERVICE_IP
+      HCCL_IF_IP: $LOCAL_SERVICE_IP
+      GLOO_SOCKET_IFNAME: $SERVICE_NIC
+      TP_SOCKET_IFNAME: $SERVICE_NIC
+      HCCL_SOCKET_IFNAME: $SERVICE_NIC
+      no_proxy: localhost,127.0.0.1,$LOCAL_SERVICE_IP
+      NO_PROXY: localhost,127.0.0.1,$LOCAL_SERVICE_IP
+    args:
+      - '--served-model-name'
+      - qwen38-flash-next-a3-pd
+      - '--max-num-seqs'
+      - '32'
+      - '--gpu-memory-utilization'
+      - '0.90'
+    points:
+      basic_prefill:
+        label: Basic PD / Prefill
+        default: true
+        tp: 2
+        args:
+          - '--port'
+          - '25568'
+          - '--max-num-batched-tokens'
+          - '8192'
+          - '--mamba-ssm-cache-dtype'
+          - bfloat16
+          - '--enforce-eager'
+          - '--additional-config'
+          - >-
+            {"enable_shared_expert_dp":true,"enable_flashcomm1":true,"enable_prefill_mc2":true,"enable_fused_mc2":0,"enable_cpu_binding":true,"multistream_overlap_shared_expert":true,"ascend_compilation_config":{"fuse_norm_quant":false}}
+          - '--pipeline-parallel-size'
+          - '4'
+          - '--max-model-len'
+          - '262144'
+          - '--kv-transfer-config'
+          - >-
+            {"kv_connector":"MooncakeConnectorV2","kv_role":"kv_producer","kv_port":32600,"kv_connector_extra_config":{"prefill":{"dp_size":1,"tp_size":2,"pp_size":4},"decode":{"dp_size":4,"tp_size":2}}}
+        remove_args:
+          - '--compilation-config'
+        json_args:
+          '--speculative-config':
+            enforce_eager: true
+        env:
+          ASCEND_RT_VISIBLE_DEVICES: 0,1,2,3,4,5,6,7
+          HCCL_NPU_SOCKET_PORT_RANGE: 61400-61499
+          HCCL_BUFFSIZE: '8192'
+      basic_decode:
+        label: Basic PD / Decode
+        tp: 2
+        args:
+          - '--port'
+          - '25569'
+          - '--data-parallel-size'
+          - '4'
+          - '--max-num-batched-tokens'
+          - '8192'
+          - '--mamba-ssm-cache-dtype'
+          - bfloat16
+          - '--engram-config'
+          - '{"cpu_offload":true,"dp_shared_memory":true}'
+          - '--additional-config'
+          - >-
+            {"enable_flashcomm1":true,"enable_cpu_binding":true,"enable_shared_expert_dp":true,"multistream_overlap_shared_expert":true,"scheduler_config":{"recompute_scheduler_enable":true},"ascend_compilation_config":{"fuse_norm_quant":false,"enable_npugraph_ex":true,"enable_static_kernel":true,"enable_super_kernel":false}}
+          - '--max-model-len'
+          - '262144'
+          - '--kv-transfer-config'
+          - >-
+            {"kv_connector":"MooncakeConnectorV2","kv_role":"kv_consumer","kv_port":32700,"kv_connector_extra_config":{"prefill":{"dp_size":1,"tp_size":2,"pp_size":4},"decode":{"dp_size":4,"tp_size":2}}}
+        json_args:
+          '--speculative-config':
+            enforce_eager: false
+        env:
+          ASCEND_RT_VISIBLE_DEVICES: 8,9,10,11,12,13,14,15
+          HCCL_NPU_SOCKET_PORT_RANGE: 61500-61599
+          HCCL_BUFFSIZE: '512'
+      long_context_prefill:
+        label: Long context (1M) / Prefill
+        tp: 2
+        args:
+          - '--port'
+          - '25568'
+          - '--max-num-batched-tokens'
+          - '8192'
+          - '--mamba-ssm-cache-dtype'
+          - bfloat16
+          - '--enforce-eager'
+          - '--additional-config'
+          - >-
+            {"enable_shared_expert_dp":true,"enable_flashcomm1":true,"enable_prefill_mc2":true,"enable_fused_mc2":0,"enable_cpu_binding":true,"multistream_overlap_shared_expert":true,"ascend_compilation_config":{"fuse_norm_quant":false}}
+          - '--pipeline-parallel-size'
+          - '4'
+          - '--max-model-len'
+          - '1010000'
+          - '--hf-overrides'
+          - >-
+            {"text_config":{"rope_parameters":{"mrope_interleaved":true,"mrope_section":[11,11,10],"rope_type":"yarn","rope_theta":10000000,"partial_rotary_factor":0.25,"factor":4.0,"original_max_position_embeddings":262144}}}
+          - '--kv-transfer-config'
+          - >-
+            {"kv_connector":"MooncakeConnectorV2","kv_role":"kv_producer","kv_port":32600,"kv_connector_extra_config":{"prefill":{"dp_size":1,"tp_size":2,"pp_size":4},"decode":{"dp_size":4,"tp_size":2}}}
+        remove_args:
+          - '--compilation-config'
+        json_args:
+          '--speculative-config':
+            enforce_eager: true
+        env:
+          ASCEND_RT_VISIBLE_DEVICES: 0,1,2,3,4,5,6,7
+          HCCL_NPU_SOCKET_PORT_RANGE: 61400-61499
+          HCCL_BUFFSIZE: '8192'
+          VLLM_ALLOW_LONG_MAX_MODEL_LEN: '1'
+      long_context_decode:
+        label: Long context (1M) / Decode
+        tp: 2
+        args:
+          - '--port'
+          - '25569'
+          - '--data-parallel-size'
+          - '4'
+          - '--max-num-batched-tokens'
+          - '8192'
+          - '--mamba-ssm-cache-dtype'
+          - bfloat16
+          - '--engram-config'
+          - '{"cpu_offload":true,"dp_shared_memory":true}'
+          - '--additional-config'
+          - >-
+            {"enable_flashcomm1":true,"enable_cpu_binding":true,"enable_shared_expert_dp":true,"multistream_overlap_shared_expert":true,"scheduler_config":{"recompute_scheduler_enable":true},"ascend_compilation_config":{"fuse_norm_quant":false,"enable_npugraph_ex":true,"enable_static_kernel":true,"enable_super_kernel":false}}
+          - '--max-model-len'
+          - '1010000'
+          - '--hf-overrides'
+          - >-
+            {"text_config":{"rope_parameters":{"mrope_interleaved":true,"mrope_section":[11,11,10],"rope_type":"yarn","rope_theta":10000000,"partial_rotary_factor":0.25,"factor":4.0,"original_max_position_embeddings":262144}}}
+          - '--kv-transfer-config'
+          - >-
+            {"kv_connector":"MooncakeConnectorV2","kv_role":"kv_consumer","kv_port":32700,"kv_connector_extra_config":{"prefill":{"dp_size":1,"tp_size":2,"pp_size":4},"decode":{"dp_size":4,"tp_size":2}}}
+        json_args:
+          '--speculative-config':
+            enforce_eager: false
+        env:
+          ASCEND_RT_VISIBLE_DEVICES: 8,9,10,11,12,13,14,15
+          HCCL_NPU_SOCKET_PORT_RANGE: 61500-61599
+          HCCL_BUFFSIZE: '512'
+          VLLM_ALLOW_LONG_MAX_MODEL_LEN: '1'
+      image_10k_prefill:
+        label: Image and text (10K) / Prefill
+        tp: 4
+        args:
+          - '--port'
+          - '25568'
+          - '--max-num-batched-tokens'
+          - '8192'
+          - '--mm-encoder-tp-mode'
+          - data
+          - '--pipeline-parallel-size'
+          - '2'
+          - '--data-parallel-size-local'
+          - '1'
+          - '--max-model-len'
+          - '262144'
+          - '--no-enable-prefix-caching'
+          - '--compilation-config'
+          - '{"cudagraph_mode":"NONE"}'
+          - '--additional-config'
+          - >-
+            {"enable_shared_expert_dp":false,"enable_flashcomm1":true,"enable_prefill_mc2":true,"enable_fused_mc2":0,"enable_cpu_binding":true,"multistream_overlap_shared_expert":true,"ascend_compilation_config":{"fuse_norm_quant":false}}
+          - '--kv-transfer-config'
+          - >-
+            {"kv_connector":"MooncakeConnectorV2","kv_role":"kv_producer","kv_port":"34600","kv_connector_extra_config":{"prefill":{"dp_size":1,"tp_size":4,"pp_size":2,"pp_layer_partition":"24,24"},"decode":{"dp_size":4,"tp_size":2}}}
+        remove_args:
+          - '--enable-prefix-caching'
+          - '--mamba-cache-mode'
+          - '--mamba-ssm-cache-dtype'
+          - '--enforce-eager'
+        json_args:
+          '--speculative-config':
+            enforce_eager: true
+        env:
+          ASCEND_RT_VISIBLE_DEVICES: 0,1,2,3,4,5,6,7
+          HCCL_NPU_SOCKET_PORT_RANGE: 61400-61499
+          HCCL_BUFFSIZE: '4096'
+          VLLM_SERVER_DEV_MODE: '1'
+          VLLM_ENGINE_READY_TIMEOUT_S: '2400'
+          VLLM_ASCEND_PLE_BACKEND: torch
+          VLLM_PP_LAYER_PARTITION: 24,24
+      image_10k_decode:
+        label: Image and text (10K) / Decode
+        description: >-
+          This command runs one Decode rank. Run the four-rank loop in the A3 image-and-text 10K launch scripts
+          above the command to set the device pair, API port and Mooncake configuration for each rank.
+        tp: 2
+        args:
+          - '--data-parallel-size'
+          - '4'
+          - '--engram-config'
+          - '{"cpu_offload":true,"dp_shared_memory":true}'
+          - '--additional-config'
+          - >-
+            {"enable_flashcomm1":true,"enable_cpu_binding":true,"enable_shared_expert_dp":true,"multistream_overlap_shared_expert":true,"scheduler_config":{"recompute_scheduler_enable":true},"ascend_compilation_config":{"fuse_norm_quant":false,"enable_npugraph_ex":true,"enable_static_kernel":true,"enable_super_kernel":false}}
+          - '--port'
+          - $DECODE_HTTP_PORT
+          - '--data-parallel-size-local'
+          - '1'
+          - '--data-parallel-rank'
+          - $DECODE_RANK
+          - '--data-parallel-address'
+          - $LOCAL_SERVICE_IP
+          - '--data-parallel-rpc-port'
+          - '29569'
+          - '--max-model-len'
+          - '262144'
+          - '--max-num-batched-tokens'
+          - '4096'
+          - '--no-enable-prefix-caching'
+          - '--kv-transfer-config'
+          - $DECODE_KV_CONFIG
+        remove_args:
+          - '--enable-prefix-caching'
+          - '--mamba-cache-mode'
+          - '--mamba-ssm-cache-dtype'
+        json_args:
+          '--speculative-config':
+            enforce_eager: ~
+        env:
+          ASCEND_RT_VISIBLE_DEVICES: $DECODE_DEVICES
+          HCCL_NPU_SOCKET_PORT_RANGE: 61500-61599
+          HCCL_BUFFSIZE: '512'
+          VLLM_SERVER_DEV_MODE: '1'
+          VLLM_ENGINE_READY_TIMEOUT_S: '2400'
+          VLLM_ASCEND_PLE_BACKEND: torch
+
+  a5_single_host_pd:
+    label: Single-host PD (950DT)
+    hardware: ascend_950dt
+    strategy: single_node_tp
+    variants:
+      - ascend_a5_w4a8_mxfp
+    source:
+      label: Qwen3.8-Flash-Next deployment tutorial
+      href: >-
+        https://github.com/vllm-project/vllm-ascend/blob/a41e2ff8ba274328f9ef2ff27d15653df1d2e8ee/docs/source/tutorials/models/Qwen3.8-Flash-Next.md
+      revision: a41e2ff8ba274328f9ef2ff27d15653df1d2e8ee
+    select:
+      frontend: python
+      features:
+        tool_calling: false
+        reasoning: false
+        spec_decoding: true
+    runbook: >-
+      Run Prefill on devices 0–3 and Decode on devices 4–7 in the same container. Start the proxy for the
+      selected workload after both roles are ready.
+    points:
+      basic_prefill:
+        label: Basic PD / Prefill
+        default: true
+        tp: 2
+        args:
+          - '--compilation-config'
+          - '{"cudagraph_mode":"NONE"}'
+          - '--api-server-count'
+          - '1'
+          - '--port'
+          - '8088'
+          - '--served-model-name'
+          - qwen38-flash-next-950-dt-pd
+          - '--data-parallel-size'
+          - '2'
+          - '--data-parallel-address'
+          - $LOCAL_SERVICE_IP
+          - '--data-parallel-rpc-port'
+          - '13388'
+          - '--max-model-len'
+          - '143360'
+          - '--max-num-seqs'
+          - '64'
+          - '--engram-config'
+          - '{"cpu_offload":true,"dp_shared_memory":true}'
+          - '--mamba-cache-mode'
+          - align
+          - '--mamba-ssm-cache-dtype'
+          - bfloat16
+          - '--additional-config'
+          - >-
+            {"enable_cpu_binding":true,"enable_shared_expert_dp":true,"enable_fused_mc2":0,"enable_flashcomm1":true,"multistream_overlap_shared_expert":true,"ascend_compilation_config":{"fuse_norm_quant":false,"enable_npugraph_ex":true,"enable_static_kernel":false,"enable_super_kernel":false}}
+          - '--kv-transfer-config'
+          - >-
+            {"kv_connector":"MooncakeConnectorV2","kv_role":"kv_producer","kv_port":30000,"kv_connector_extra_config":{"prefill":{"dp_size":2,"tp_size":2},"decode":{"dp_size":2,"tp_size":2}}}
+        json_args:
+          '--speculative-config':
+            enforce_eager: ~
+        env:
+          ASCEND_RT_VISIBLE_DEVICES: 0,1,2,3
+          HCCL_NPU_SOCKET_PORT_RANGE: 61400-61499
+          VLLM_HOST_IP: $LOCAL_SERVICE_IP
+          HCCL_IF_IP: $LOCAL_SERVICE_IP
+          GLOO_SOCKET_IFNAME: $SERVICE_NIC
+          TP_SOCKET_IFNAME: $SERVICE_NIC
+          HCCL_SOCKET_IFNAME: $SERVICE_NIC
+          VLLM_VERSION: 0.32.0
+          VLLM_USE_V1: '1'
+          VLLM_RPC_TIMEOUT: '3600000'
+          HCCL_EXEC_TIMEOUT: '204'
+          HCCL_CONNECT_TIMEOUT: '120'
+          VLLM_ASCEND_ENABLE_MLAPO: '1'
+          VLLM_ENGINE_READY_TIMEOUT_S: '4800'
+          PYTORCH_NPU_ALLOC_CONF: expandable_segments:True
+          OMP_PROC_BIND: 'false'
+          OMP_NUM_THREADS: '1'
+          OPENBLAS_NUM_THREADS: '1'
+          TASK_QUEUE_ENABLE: '1'
+          HCCL_BUFFSIZE: '8192'
+          HCCL_OP_EXPANSION_MODE: AIV
+          ASCEND_BUFFER_POOL: 0:0
+          HCCL_IF_BASE_PORT: '62000'
+          no_proxy: localhost,127.0.0.1,$LOCAL_SERVICE_IP
+          NO_PROXY: localhost,127.0.0.1,$LOCAL_SERVICE_IP
+      basic_decode:
+        label: Basic PD / Decode
+        tp: 2
+        args:
+          - '--api-server-count'
+          - '1'
+          - '--port'
+          - '8092'
+          - '--served-model-name'
+          - qwen38-flash-next-950-dt-pd
+          - '--data-parallel-size'
+          - '2'
+          - '--data-parallel-address'
+          - $LOCAL_SERVICE_IP
+          - '--data-parallel-rpc-port'
+          - '13389'
+          - '--max-model-len'
+          - '143360'
+          - '--max-num-seqs'
+          - '64'
+          - '--engram-config'
+          - '{"cpu_offload":true,"dp_shared_memory":true}'
+          - '--mamba-cache-mode'
+          - align
+          - '--mamba-ssm-cache-dtype'
+          - bfloat16
+          - '--additional-config'
+          - >-
+            {"enable_cpu_binding":true,"enable_shared_expert_dp":true,"enable_fused_mc2":0,"enable_flashcomm1":true,"multistream_overlap_shared_expert":true,"ascend_compilation_config":{"fuse_norm_quant":false,"enable_npugraph_ex":true,"enable_static_kernel":true,"enable_super_kernel":false},"scheduler_config":{"recompute_scheduler_enable":true}}
+          - '--kv-transfer-config'
+          - >-
+            {"kv_connector":"MooncakeConnectorV2","kv_role":"kv_consumer","kv_port":30100,"kv_connector_extra_config":{"prefill":{"dp_size":2,"tp_size":2},"decode":{"dp_size":2,"tp_size":2}}}
+        json_args:
+          '--speculative-config':
+            enforce_eager: false
+        env:
+          ASCEND_RT_VISIBLE_DEVICES: 4,5,6,7
+          VLLM_ENGINE_READY_TIMEOUT_S: '4800'
+          HCCL_NPU_SOCKET_PORT_RANGE: 61500-61599
+          VLLM_HOST_IP: $LOCAL_SERVICE_IP
+          HCCL_IF_IP: $LOCAL_SERVICE_IP
+          GLOO_SOCKET_IFNAME: $SERVICE_NIC
+          TP_SOCKET_IFNAME: $SERVICE_NIC
+          HCCL_SOCKET_IFNAME: $SERVICE_NIC
+          VLLM_VERSION: 0.32.0
+          VLLM_USE_V1: '1'
+          VLLM_RPC_TIMEOUT: '3600000'
+          HCCL_EXEC_TIMEOUT: '204'
+          HCCL_CONNECT_TIMEOUT: '120'
+          VLLM_ASCEND_ENABLE_MLAPO: '1'
+          PYTORCH_NPU_ALLOC_CONF: expandable_segments:True
+          OMP_PROC_BIND: 'false'
+          OMP_NUM_THREADS: '1'
+          OPENBLAS_NUM_THREADS: '1'
+          TASK_QUEUE_ENABLE: '1'
+          HCCL_BUFFSIZE: '8192'
+          HCCL_OP_EXPANSION_MODE: AIV
+          ASCEND_BUFFER_POOL: 0:0
+          HCCL_IF_BASE_PORT: '63000'
+          no_proxy: localhost,127.0.0.1,$LOCAL_SERVICE_IP
+          NO_PROXY: localhost,127.0.0.1,$LOCAL_SERVICE_IP
+      long_context_prefill:
+        label: Long context (1M) / Prefill
+        tp: 4
+        args:
+          - '--compilation-config'
+          - '{"cudagraph_mode":"NONE"}'
+          - '--port'
+          - '8247'
+          - '--served-model-name'
+          - qwen38-megamoe-sp-pd
+          - '--pipeline-parallel-size'
+          - '1'
+          - '--max-model-len'
+          - '1010000'
+          - '--max-num-seqs'
+          - '16'
+          - '--gpu-memory-utilization'
+          - '0.9'
+          - '--mamba-cache-mode'
+          - align
+          - '--mamba-ssm-cache-dtype'
+          - bfloat16
+          - '--additional-config'
+          - >-
+            {"enable_shared_expert_dp":true,"enable_flashcomm1":true,"enable_cpu_binding":true,"ascend_compilation_config":{"fuse_norm_quant":false}}
+          - '--hf-overrides'
+          - >-
+            {"text_config":{"rope_parameters":{"mrope_interleaved":true,"mrope_section":[11,11,10],"rope_type":"yarn","rope_theta":10000000,"partial_rotary_factor":0.25,"factor":4.0,"original_max_position_embeddings":262144}}}
+          - '--kv-transfer-config'
+          - >-
+            {"kv_connector":"MooncakeConnectorV2","kv_role":"kv_producer","kv_port":"32470","kv_connector_extra_config":{"prefill":{"dp_size":1,"tp_size":4},"decode":{"dp_size":1,"tp_size":4}}}
+        json_args:
+          '--speculative-config':
+            enforce_eager: true
+        env:
+          ASCEND_RT_VISIBLE_DEVICES: 0,1,2,3
+          HCCL_NPU_SOCKET_PORT_RANGE: 61400-61499
+          VLLM_ALLOW_LONG_MAX_MODEL_LEN: '1'
+          VLLM_ENGINE_READY_TIMEOUT_S: '2400'
+          VLLM_ASCEND_PLE_BACKEND: torch
+          HCCL_BUFFSIZE: '512'
+      long_context_decode:
+        label: Long context (1M) / Decode
+        tp: 4
+        args:
+          - '--port'
+          - '8248'
+          - '--served-model-name'
+          - qwen38-megamoe-sp-pd
+          - '--max-model-len'
+          - '1010000'
+          - '--max-num-seqs'
+          - '16'
+          - '--gpu-memory-utilization'
+          - '0.9'
+          - '--mamba-cache-mode'
+          - align
+          - '--mamba-ssm-cache-dtype'
+          - bfloat16
+          - '--additional-config'
+          - >-
+            {"enable_flashcomm1":true,"enable_cpu_binding":true,"multistream_overlap_shared_expert":true,"scheduler_config":{"recompute_scheduler_enable":true},"ascend_compilation_config":{"fuse_norm_quant":false,"enable_npugraph_ex":true,"enable_static_kernel":true,"enable_super_kernel":false}}
+          - '--hf-overrides'
+          - >-
+            {"text_config":{"rope_parameters":{"mrope_interleaved":true,"mrope_section":[11,11,10],"rope_type":"yarn","rope_theta":10000000,"partial_rotary_factor":0.25,"factor":4.0,"original_max_position_embeddings":262144}}}
+          - '--kv-transfer-config'
+          - >-
+            {"kv_connector":"MooncakeConnectorV2","kv_role":"kv_consumer","kv_port":"32480","kv_connector_extra_config":{"prefill":{"dp_size":1,"tp_size":4},"decode":{"dp_size":1,"tp_size":4}}}
+        json_args:
+          '--speculative-config':
+            enforce_eager: false
+        env:
+          ASCEND_RT_VISIBLE_DEVICES: 4,5,6,7
+          VLLM_ENGINE_READY_TIMEOUT_S: '4800'
+          HCCL_NPU_SOCKET_PORT_RANGE: 61500-61599
+          VLLM_ALLOW_LONG_MAX_MODEL_LEN: '1'
+          VLLM_ASCEND_PLE_BACKEND: torch
+          HCCL_BUFFSIZE: '512'
+      image_10k_prefill:
+        label: Image and text (10K) / Prefill
+        tp: 2
+        args:
+          - '--compilation-config'
+          - '{"cudagraph_mode":"NONE"}'
+          - '--port'
+          - '8247'
+          - '--served-model-name'
+          - qwen38-megamoe-sp-pd
+          - '--pipeline-parallel-size'
+          - '2'
+          - '--max-model-len'
+          - '143360'
+          - '--max-num-seqs'
+          - '64'
+          - '--max-num-batched-tokens'
+          - '8192'
+          - '--gpu-memory-utilization'
+          - '0.9'
+          - '--additional-config'
+          - >-
+            {"enable_shared_expert_dp":true,"enable_flashcomm1":true,"multistream_overlap_shared_expert":true,"enable_cpu_binding":true,"ascend_compilation_config":{"fuse_norm_quant":false}}
+          - '--kv-transfer-config'
+          - >-
+            {"kv_connector":"MooncakeConnectorV2","kv_role":"kv_producer","kv_port":32470,"kv_connector_extra_config":{"prefill":{"dp_size":1,"tp_size":2,"pp_size":2,"pp_layer_partition":"25,23"},"decode":{"dp_size":2,"tp_size":2}}}
+        json_args:
+          '--speculative-config':
+            enforce_eager: true
+        env:
+          ASCEND_RT_VISIBLE_DEVICES: 0,1,2,3
+          HCCL_NPU_SOCKET_PORT_RANGE: 61400-61499
+          VLLM_ENGINE_READY_TIMEOUT_S: '4800'
+          VLLM_ASCEND_PLE_BACKEND: torch
+          VLLM_PP_LAYER_PARTITION: 25,23
+          HCCL_BUFFSIZE: '512'
+      image_10k_decode:
+        label: Image and text (10K) / Decode
+        tp: 2
+        args:
+          - '--port'
+          - '8248'
+          - '--served-model-name'
+          - qwen38-megamoe-sp-pd
+          - '--data-parallel-size'
+          - '2'
+          - '--max-model-len'
+          - '143360'
+          - '--max-num-seqs'
+          - '64'
+          - '--max-num-batched-tokens'
+          - '8192'
+          - '--gpu-memory-utilization'
+          - '0.9'
+          - '--engram-config'
+          - '{"cpu_offload":true,"dp_shared_memory":true}'
+          - '--additional-config'
+          - >-
+            {"enable_shared_expert_dp":true,"enable_flashcomm1":true,"multistream_overlap_shared_expert":true,"enable_cpu_binding":true,"ascend_compilation_config":{"fuse_norm_quant":false,"enable_npugraph_ex":true,"enable_static_kernel":true,"enable_super_kernel":false},"enable_fused_mc2":0}
+          - '--kv-transfer-config'
+          - >-
+            {"kv_connector":"MooncakeConnectorV2","kv_role":"kv_consumer","kv_port":32480,"kv_connector_extra_config":{"prefill":{"dp_size":1,"tp_size":2,"pp_size":2,"pp_layer_partition":"25,23"},"decode":{"dp_size":2,"tp_size":2}}}
+        json_args:
+          '--speculative-config':
+            enforce_eager: false
+        env:
+          ASCEND_RT_VISIBLE_DEVICES: 4,5,6,7
+          VLLM_ENGINE_READY_TIMEOUT_S: '4800'
+          HCCL_NPU_SOCKET_PORT_RANGE: 61500-61599
+          VLLM_ASCEND_PLE_BACKEND: torch
+          HCCL_BUFFSIZE: '512'
+
+notes:
+  - title: A3 image-and-text 10K launch scripts
+    when:
+      hardware: [ascend_910c]
+      variants: [ascend_w4a8]
+      strategies: [single_node_tp]
+    body: |
+      Use these scripts only for the **Image and text (10K) / Prefill** and **Image and text (10K) / Decode** points of the A3 single-host PD preset. Run Prefill, Decode and the proxy in separate terminals inside the prepared A3 container.
+
+      **Environment for Prefill and Decode** — run this block in both worker terminals.
+
+      ```bash
+      local_ip="<LOCAL_SERVICE_IP>"
+      nic_name="<SERVICE_NETWORK_INTERFACE>"
+
+      unset ftp_proxy FTP_PROXY https_proxy HTTPS_PROXY http_proxy HTTP_PROXY all_proxy ALL_PROXY
+      export VLLM_HOST_IP="${local_ip}"
+      export HCCL_IF_IP="${local_ip}"
+      export GLOO_SOCKET_IFNAME="${nic_name}"
+      export TP_SOCKET_IFNAME="${nic_name}"
+      export HCCL_SOCKET_IFNAME="${nic_name}"
+      export no_proxy="localhost,127.0.0.1,${local_ip}"
+      export NO_PROXY="${no_proxy}"
+      export LD_LIBRARY_PATH="$(python -c 'import mooncake; print(next(iter(mooncake.__path__)))'):${LD_LIBRARY_PATH:-}"
+      export VLLM_USE_MODELSCOPE=True
+      export VLLM_SERVER_DEV_MODE=1
+      export VLLM_USE_V2_MODEL_RUNNER=1
+      export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=3000
+      export VLLM_ENGINE_READY_TIMEOUT_S=2400
+      export VLLM_ASCEND_PLE_BACKEND=torch
+      ```
+
+      **Prefill** — run on devices 0–7.
+
+      ```bash
+      export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
+      export HCCL_NPU_SOCKET_PORT_RANGE=61400-61499
+      export HCCL_BUFFSIZE=4096
+      export VLLM_PP_LAYER_PARTITION=24,24
+
+      vllm serve Eco-Tech/Qwen3.8-Flash-Next-w4a8 \
+          --host 0.0.0.0 \
+          --port 25568 \
+          --served-model-name qwen38-flash-next-a3-pd \
+          --trust-remote-code \
+          --mm-encoder-tp-mode data \
+          --quantization ascend \
+          --tensor-parallel-size 4 \
+          --pipeline-parallel-size 2 \
+          --data-parallel-size 1 \
+          --data-parallel-size-local 1 \
+          --max-model-len 262144 \
+          --max-num-seqs 32 \
+          --max-num-batched-tokens 8192 \
+          --gpu-memory-utilization 0.90 \
+          --no-enable-prefix-caching \
+          --async-scheduling \
+          --enable-expert-parallel \
+          --compilation-config '{"cudagraph_mode":"NONE"}' \
+          --engram-config '{"cpu_offload":true,"dp_shared_memory":false}' \
+          --additional-config '{"enable_shared_expert_dp":false,"enable_flashcomm1":true,"enable_prefill_mc2":true,"enable_fused_mc2":0,"enable_cpu_binding":true,"multistream_overlap_shared_expert":true,"ascend_compilation_config":{"fuse_norm_quant":false}}' \
+          --speculative-config '{"method":"qwen3_5_mtp","num_speculative_tokens":3,"enforce_eager":true}' \
+          --kv-transfer-config '{"kv_connector":"MooncakeConnectorV2","kv_role":"kv_producer","kv_port":"34600","kv_connector_extra_config":{"prefill":{"dp_size":1,"tp_size":4,"pp_size":2,"pp_layer_partition":"24,24"},"decode":{"dp_size":4,"tp_size":2}}}'
+      ```
+
+      **Decode** — run this entire block once in the Decode terminal. It starts four TP2 workers in the same container. Keep the terminal open while they run.
+
+      ```bash
+      unset VLLM_PP_LAYER_PARTITION
+      export HCCL_NPU_SOCKET_PORT_RANGE=61500-61599
+      export HCCL_BUFFSIZE=512
+
+      for DECODE_RANK in 0 1 2 3; do
+          first_device=$((8 + DECODE_RANK * 2))
+          DECODE_HTTP_PORT=$((25569 + DECODE_RANK * 10))
+          kv_port=$((32700 + DECODE_RANK * 20))
+
+          DECODE_DEVICES="${first_device},$((first_device + 1))"
+          DECODE_KV_CONFIG='{"kv_connector":"MooncakeConnectorV2","kv_role":"kv_consumer","kv_port":"'"$kv_port"'","kv_connector_extra_config":{"prefill":{"dp_size":1,"tp_size":4,"pp_size":2,"pp_layer_partition":"24,24"},"decode":{"dp_size":4,"tp_size":2}}}'
+
+          ASCEND_RT_VISIBLE_DEVICES="${DECODE_DEVICES}" \
+          vllm serve Eco-Tech/Qwen3.8-Flash-Next-w4a8 \
+              --host 0.0.0.0 \
+              --port "${DECODE_HTTP_PORT}" \
+              --served-model-name qwen38-flash-next-a3-pd \
+              --trust-remote-code \
+              --quantization ascend \
+              --tensor-parallel-size 2 \
+              --data-parallel-size 4 \
+              --data-parallel-size-local 1 \
+              --data-parallel-rank "${DECODE_RANK}" \
+              --data-parallel-address "${local_ip}" \
+              --data-parallel-rpc-port 29569 \
+              --max-model-len 262144 \
+              --max-num-seqs 32 \
+              --max-num-batched-tokens 4096 \
+              --gpu-memory-utilization 0.90 \
+              --no-enable-prefix-caching \
+              --async-scheduling \
+              --enable-expert-parallel \
+              --engram-config '{"cpu_offload":true,"dp_shared_memory":true}' \
+              --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
+              --additional-config '{"enable_flashcomm1":true,"enable_cpu_binding":true,"enable_shared_expert_dp":true,"multistream_overlap_shared_expert":true,"scheduler_config":{"recompute_scheduler_enable":true},"ascend_compilation_config":{"fuse_norm_quant":false,"enable_npugraph_ex":true,"enable_static_kernel":true,"enable_super_kernel":false}}' \
+              --speculative-config '{"method":"qwen3_5_mtp","num_speculative_tokens":3}' \
+              --kv-transfer-config "${DECODE_KV_CONFIG}" &
+      done
+      wait
+      ```
+
+      **Proxy** — run from the vLLM-Ascend repository root in the third terminal. This checks all five endpoints before starting the proxy.
+
+      ```bash
+      local_ip="<LOCAL_SERVICE_IP>"
+
+      unset ftp_proxy FTP_PROXY https_proxy HTTPS_PROXY http_proxy HTTP_PROXY all_proxy ALL_PROXY
+      export no_proxy="localhost,127.0.0.1,${local_ip}"
+      export NO_PROXY="${no_proxy}"
+
+      for port in 25568 25569 25579 25589 25599; do
+          curl --fail --noproxy '*' "http://${local_ip}:${port}/v1/models" || exit 1
+      done
+
+      python examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py \
+          --host 0.0.0.0 --port 25570 \
+          --prefiller-hosts "${local_ip}" --prefiller-ports 25568 \
+          --decoder-hosts "${local_ip}" "${local_ip}" "${local_ip}" "${local_ip}" \
+          --decoder-ports 25569 25579 25589 25599
+      ```
+
+      **Verify through the proxy** — once the proxy is listening, run this request in another terminal on the same host. Replace `<IMAGE_URL>` with an image URL both workers can access and `<TEXT_PROMPT>` with the text for your 10K sample.
+
+      ```bash
+      curl --fail "http://127.0.0.1:25570/v1/chat/completions" \
+          -H "Content-Type: application/json" \
+          -d '{"model":"qwen38-flash-next-a3-pd","messages":[{"role":"user","content":[{"type":"image_url","image_url":{"url":"<IMAGE_URL>"}},{"type":"text","text":"<TEXT_PROMPT>"}]}],"max_tokens":1024,"temperature":0}'
+      ```
+
+hardware_notes:
+  ascend_910b:
+    title: Two-node A2 needs v0.32.0rc1 and 128g of shm
+    body: >-
+      Verified on two Atlas A2 servers with 1P1D disaggregation. Pin
+      quay.io/ascend/vllm-ascend:v0.32.0rc1; the Docker command below already starts each
+      container with `--shm-size=128g`, because Engram keeps about 95 GiB in `/dev/shm`
+      on the decode node. The Ascend deployment guide below covers the remaining
+      prerequisites, environment variables and caveats. The generated commands carry
+      four placeholders; the guide lists them.
+    link:
+      label: Ascend deployment
+      href: '#ascend-deployment'
+
+  ascend_910c:
+    title: Docker setup for A3
+    body: >-
+      Use the A3 container script in Section 4.1 with the v0.32.0rc1-a3 image and 128g of shared memory.
+      For PD, mount /etc/hccn.conf read-only and run Prefill and Decode in separate shells in that container.
+      Select W4A8 (Ascend A2/A3) and Single-host PD (A3) for the paired worker commands.
+    link:
+      label: Section 4.1 — A3 Docker script
+      href: https://github.com/vllm-project/vllm-ascend/blob/a41e2ff8ba274328f9ef2ff27d15653df1d2e8ee/docs/source/tutorials/models/Qwen3.8-Flash-Next.md?plain=1#L84-L123
+
+  ascend_950dt:
+    title: Docker setup for 950DT
+    body: >-
+      Use the 950DT container script in Section 4.1 with the v0.32.0rc1-a5 image and 500g of shared memory.
+      It maps /dev/ummu and /dev/uburma and mounts the firmware and /etc/hixlep directories.
+      For PD, run Prefill and Decode in separate shells in that container.
+      Select W4A8-MXFP and Single-host PD (950DT) for the paired worker commands.
+    link:
+      label: Section 4.1 — 950DT Docker script
+      href: https://github.com/vllm-project/vllm-ascend/blob/a41e2ff8ba274328f9ef2ff27d15653df1d2e8ee/docs/source/tutorials/models/Qwen3.8-Flash-Next.md?plain=1#L125-L162
+
+guide_sections:
+  ascend: |
+    ### Ascend deployment
+
+    Two-node 1P1D, verified end-to-end on two Atlas A2 servers (Atlas 800T A2 with
+    8 x Ascend 910B3, Atlas 800I A2 with 8 x Ascend 910B4-1; 64 GB HBM per NPU) with
+    vLLM Ascend 0.32.0rc1 from `quay.io/ascend/vllm-ascend:v0.32.0rc1`.
+    Prefill runs TP4 x PP2 x DP1 x EP4 in one `vllm serve` process; decode runs
+    TP2 x DP4 x EP8 in vLLM's multi-port external load-balancer mode, where one
+    `vllm serve` supervisor process on the decode node spawns four child API servers,
+    one per DP rank, each owning 2 NPUs. KV moves over `MooncakeConnectorV2` in p2p
+    mode — no HBM/DRAM/SSD KV pool. MTP (3 speculative tokens) is on for both pools;
+    engram keeps the 51B N-gram embedding table in host memory, which is what lets the
+    checkpoint fit in 8 x 64 GB per node.
+
+    The weights are the ModelScope build `Eco-Tech/Qwen3.8-Flash-Next-w4a8`.
+    `VLLM_USE_MODELSCOPE=True` with the repo id works, and so does a local copy — mount
+    it into the container and pass the in-container path to `vllm serve`.
+
+    If you pull from ModelScope, mount its cache out of the container:
+    `-v ~/.cache/modelscope:/root/.cache/modelscope`, or set `MODELSCOPE_CACHE` to a
+    mounted path. The site's Docker command only mounts `~/.cache/huggingface`, which
+    ModelScope does not use — without this the ~181 GiB land in the container's
+    writable layer and are downloaded again whenever the container is recreated.
+
+    **`--shm-size 128g` is required** — the Docker command on this page already sets it,
+    and any hand-written `docker run` must pass it too. The decode pool's Engram table
+    (51B rows) lives in `/dev/shm` as two TP shards of 47.7 GiB each, 95.4 GiB in total,
+    so at 64g the second shard already fails to register (vLLM error 107017). The
+    prefill pool keeps its Engram copy in anonymous pinned host memory instead and does
+    not consume `/dev/shm`.
+    `/etc/hccn.conf` carries the per-NPU RoCE address/netmask the PD path uses, and the
+    image ships no copy of its own. The site's Docker tab does not mount it — if you
+    take that command, add `-v /etc/hccn.conf:/etc/hccn.conf:ro`.
+
+    If the router exits with `RuntimeError: can't start new thread`, check the
+    host's seccomp profile. Docker Engine 20.10.10 added `clone3` support to its
+    default profile; upgrade older versions or update a custom profile to allow
+    the required syscall while keeping seccomp enabled.
+
+    The generated commands carry the recipe's environment as `-e` flags. Only if you
+    start `vllm serve` from a shell instead, prepare it first:
+
+    ```bash
+    source /usr/local/Ascend/ascend-toolkit/set_env.sh
+    [ -f /usr/local/Ascend/nnal/atb/set_env.sh ] && source /usr/local/Ascend/nnal/atb/set_env.sh
+    unset ftp_proxy FTP_PROXY https_proxy HTTPS_PROXY http_proxy HTTP_PROXY all_proxy ALL_PROXY
+    unset CPLUS_INCLUDE_PATH CPATH C_INCLUDE_PATH
+    unset VLLM_PP_LAYER_PARTITION
+    cd /workspace          # static-kernel cache root is <cwd>/static_kernel_compile_outputs
+    ```
+
+    vLLM-Ascend reads `ASCEND_RT_VISIBLE_DEVICES` only — change it (the recipe sets all
+    eight devices) to run the engines on a subset; a generic `CUDA_VISIBLE_DEVICES` is
+    ignored.
+
+    The recipe leaves the six communication variables below unset; vLLM and CANN infer
+    them. If the pools start but the two sides never connect — requests hang and the
+    logs show a cross-node handshake / connect timeout — set them explicitly on each
+    node (as `-e` flags on the Docker command, or exports before `vllm serve`),
+    pointing at that node's business interface and address:
+
+    - `VLLM_HOST_IP` — the address this engine advertises to its peer over the KV
+      handshake channel; the peer connects back to exactly this address.
+    - `HCCL_IF_IP` — the address HCCL binds for inter-node collectives; it has to be an
+      address of the NIC named below.
+    - `HCCL_SOCKET_IFNAME` — the NIC HCCL opens its sockets on.
+    - `GLOO_SOCKET_IFNAME` — the NIC PyTorch Gloo uses for host-side collectives.
+    - `TP_SOCKET_IFNAME` — the NIC torch's own socket layer binds; the vLLM Ascend
+      multi-node PD tutorial exports it on every node.
+    - `no_proxy` / `NO_PROXY` — both node addresses, so the two engines' traffic to
+      each other never goes through an HTTP proxy the host may set.
+
+    Unset, vLLM probes the default-route address and CANN picks a NIC by itself. On a
+    multi-homed node the two choices are not unique and can disagree with the NIC the
+    peer actually reaches — the mismatch then shows up as the handshake timeout above,
+    not as a startup error. One node's values, to be replaced with that node's own:
+
+    ```bash
+    export VLLM_HOST_IP=<this-node-ip> HCCL_IF_IP=<this-node-ip>
+    export HCCL_SOCKET_IFNAME=<business-nic>
+    export GLOO_SOCKET_IFNAME=<business-nic> TP_SOCKET_IFNAME=<business-nic>
+    export no_proxy=localhost,127.0.0.1,<prefill-ip>,<decode-ip>
+    export NO_PROXY=$no_proxy
+    ```
+
+    Both engines run `--max-model-len 141312`; the model supports up to 262144 tokens.
+
+    **Placeholders in the generated commands.** The rendered commands carry four
+    shell variables: the two node addresses, the DP RPC port and the router port.
+    The page fills in the router port; the other three must be substituted before
+    anything runs:
+
+    - `$PREFILL_NODE_1` — the prefill node. Set it to that node's address on the
+      interface the decode node and the router can reach; it becomes the router's
+      `--prefiller-hosts`.
+    - `$DECODE_NODE_1` — the decode node. Set it to that node's own IP. Three uses: the
+      decode pool's `--data-parallel-address`, the DP coordination endpoint its
+      supervisor binds, and the router's `--decoder-hosts`, repeated once per child API
+      server. `127.0.0.1` happens to work here only because the whole decode pool is one
+      node; it fails as soon as the pool spans two, and the node's IP is never wrong.
+    - `$DECODE_DP_RPC_PORT` — the port of that DP coordination endpoint. Set it to any
+      free TCP port on the decode node that no other pool or service binds (for
+      example 13345).
+    - `$ROUTER_PORT` — the port the frontend listens on. Set it to any free TCP port
+      on the node that runs the router; the page fills in 30000.
+
+    Every other port in the generated commands (8001, 8002-8005, 55220, 56010) is
+    already literal; the decode supervisor's aggregated `/health` stays on vLLM's
+    default port 9256.
+
+    **Prefill node.** The generated command runs TP4 x PP2 x DP1 x EP4 in one
+    `vllm serve` process, serves HTTP on :8001 and produces KV on :55220, with
+    `HCCL_BUFFSIZE=8192` and the NPU socket range 61400-61499.
+
+    **Decode node.** The generated command runs one `vllm serve` supervisor that
+    starts four child API servers, one per local DP rank and 2 NPUs each — child HTTP
+    :8002-:8005, DP coordination on `$DECODE_DP_RPC_PORT`, KV consumer :56010 — with
+    `HCCL_BUFFSIZE=512` and the NPU socket range 61500-61599. This is the only pool
+    that captures graphs, so it is also the only one that compiles static kernels.
+
+    In multi-port external LB mode the four children listen on the decode pool's
+    `--port` plus their local DP rank; the supervisor itself publishes aggregated
+    `/health` on vLLM's default supervisor port 9256 — setting
+    `--data-parallel-supervisor-port` moves only that port. Substitute
+    `$DECODE_NODE_1` and `$DECODE_DP_RPC_PORT` as described under Placeholders.
+    Do not add `--data-parallel-rank`,
+    `--data-parallel-external-lb` or `--data-parallel-hybrid-lb`: the supervisor
+    assigns the rank per child and rejects those flags.
+
+    The generated commands carry the same `kv_connector_extra_config`; it advertises
+    the pool shapes (prefill dp1/tp4/pp2, decode dp4/tp2), so keep it in sync with the
+    tp/pp/dp flags on both sides if you change them.
+
+    Start decode first: its static-kernel compile makes it the slow node — about
+    60-70 minutes from a fresh container, against about 10-15 for prefill. A restart
+    inside the same container can reuse part of the compile cache; a new container
+    starts cold.
+
+    Put the Ascend Router in front, on either node, and send requests to its port.
+
+    The router needs one decode endpoint per child API server — four here, on
+    8002-8005 — because each child serves one DP rank; a single
+    `--decoder-ports 8002` leaves the other three ranks idle. Both endpoint lists are
+    derived from the pools' `--port`, so if you change the decode `--port`, move the
+    four decoder endpoints with it (port + rank 0..3). The Ascend Router takes no
+    `--intra-node-data-parallel-size`; that flag exists only in the `vllm-router`
+    frontend. The generated command carries `$PREFILL_NODE_1` and `$DECODE_NODE_1`
+    (the last once per decode child); see Placeholders for the values.
+
+    ```bash
+    curl -s http://127.0.0.1:30000/v1/chat/completions \
+      -H 'Content-Type: application/json' \
+      -d '{"model":"qwen38-flash-next-a2-pd","messages":[{"role":"user","content":"Hello"}],"max_tokens":16}'
+    ```
+
+    `--reasoning-parser qwen3` matters: thinking mode is the default and the chat
+    template seeds the assistant turn with `<think>`, so without the parser the
+    reasoning block lands in `message.content`.
+
+    #### Single-host PD configurations
+
+    A3 uses devices 0–7 for Prefill and 8–15 for Decode with 128g of container shared memory.
+    950DT uses devices 0–3 for Prefill and 4–7 for Decode with 500g of container shared memory.
+    Choose **Tensor Parallel** and the **Single-host PD** preset for your hardware.
+    Under **Point**, select Prefill and then Decode for the same workload. Run the commands
+    in separate terminals on that host. The table links directly to each pair.
+    For the A3 image-and-text point, expand **A3 image-and-text 10K launch scripts** above the command
+    to launch all four Decode ranks, start the proxy and send the image request.
+
+    | Procedure | A3 (Prefill / Decode) | 950DT (Prefill / Decode) |
+    | --- | --- | --- |
+    | [Basic PD](https://github.com/vllm-project/vllm-ascend/blob/a41e2ff8ba274328f9ef2ff27d15653df1d2e8ee/docs/source/tutorials/models/Qwen3.8-Flash-Next.md#52-basic-pd-separation-deployment) | [TP2 PP4 DP1 (EP2)](?hardware=ascend_910c&variant=ascend_w4a8&strategy=single_node_tp&preset=a3_single_host_pd&point=basic_prefill) / [TP2 DP4 (EP8)](?hardware=ascend_910c&variant=ascend_w4a8&strategy=single_node_tp&preset=a3_single_host_pd&point=basic_decode) | [TP2 DP2 (EP4)](?hardware=ascend_950dt&variant=ascend_a5_w4a8_mxfp&strategy=single_node_tp&preset=a5_single_host_pd&point=basic_prefill) / [TP2 DP2 (EP4)](?hardware=ascend_950dt&variant=ascend_a5_w4a8_mxfp&strategy=single_node_tp&preset=a5_single_host_pd&point=basic_decode) |
+    | [Image-and-text 10K](https://github.com/vllm-project/vllm-ascend/blob/a41e2ff8ba274328f9ef2ff27d15653df1d2e8ee/docs/source/tutorials/models/Qwen3.8-Flash-Next.md#53-image-and-text-10k-pd-separation-deployment) | [TP4 PP2 DP1 (EP4)](?hardware=ascend_910c&variant=ascend_w4a8&strategy=single_node_tp&preset=a3_single_host_pd&point=image_10k_prefill) / [TP2 DP4 (EP8)](?hardware=ascend_910c&variant=ascend_w4a8&strategy=single_node_tp&preset=a3_single_host_pd&point=image_10k_decode) | [TP2 PP2 DP1 (EP2)](?hardware=ascend_950dt&variant=ascend_a5_w4a8_mxfp&strategy=single_node_tp&preset=a5_single_host_pd&point=image_10k_prefill) / [TP2 DP2 (EP4)](?hardware=ascend_950dt&variant=ascend_a5_w4a8_mxfp&strategy=single_node_tp&preset=a5_single_host_pd&point=image_10k_decode) |
+    | [Long context](https://github.com/vllm-project/vllm-ascend/blob/a41e2ff8ba274328f9ef2ff27d15653df1d2e8ee/docs/source/tutorials/models/Qwen3.8-Flash-Next.md#54-long-context-pd-separation-deployment) | [TP2 PP4 DP1 (EP2)](?hardware=ascend_910c&variant=ascend_w4a8&strategy=single_node_tp&preset=a3_single_host_pd&point=long_context_prefill) / [TP2 DP4 (EP8)](?hardware=ascend_910c&variant=ascend_w4a8&strategy=single_node_tp&preset=a3_single_host_pd&point=long_context_decode) | [TP4 DP1 (EP4)](?hardware=ascend_950dt&variant=ascend_a5_w4a8_mxfp&strategy=single_node_tp&preset=a5_single_host_pd&point=long_context_prefill) / [TP4 DP1 (EP4)](?hardware=ascend_950dt&variant=ascend_a5_w4a8_mxfp&strategy=single_node_tp&preset=a5_single_host_pd&point=long_context_decode) |
+
+    The 950DT Basic PD presets use the tutorial's `VLLM_VERSION=0.32.0` override with the
+    `v0.32.0rc1-a5` image. If you switch images, unset this override so vLLM Ascend
+    detects the installed vLLM version.
+
+    For basic, image or long-context serving, prepare the hardware-specific container
+    using the [A3 Docker script](https://github.com/vllm-project/vllm-ascend/blob/a41e2ff8ba274328f9ef2ff27d15653df1d2e8ee/docs/source/tutorials/models/Qwen3.8-Flash-Next.md?plain=1#L84-L123) or the [950DT Docker script](https://github.com/vllm-project/vllm-ascend/blob/a41e2ff8ba274328f9ef2ff27d15653df1d2e8ee/docs/source/tutorials/models/Qwen3.8-Flash-Next.md?plain=1#L125-L162) in Section 4.1.
+    Set `LOCAL_SERVICE_IP` and `SERVICE_NIC` to the service address
+    and interface. In each role shell, initialize CANN/ATB, unset proxy variables
+    and any inherited `VLLM_PP_LAYER_PARTITION`, and add Mooncake to the library path:
+
+    ```bash
+    export LD_LIBRARY_PATH="$(python -c 'import mooncake; print(next(iter(mooncake.__path__)))'):${LD_LIBRARY_PATH:-}"
+    ```
+
+    Run the two generated serve commands with their respective environments in separate
+    shells inside that container. Start the proxy from the vLLM-Ascend repository
+    root once both role endpoints respond at `/v1/models`.
+
+    | Basic PD | Prefill HTTP | Decode HTTP | Proxy HTTP |
+    | --- | --- | --- | --- |
+    | A3 | 25568 | 25569 | 25570 |
+    | 950DT | 8088 | 8092 | 8087 |
+
+    ```bash
+    # A3. For 950DT, set these ports to 8088, 8092 and 8087.
+    PREFILL_PORT=25568
+    DECODE_PORT=25569
+    PROXY_PORT=25570
+    python examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py \
+        --host 0.0.0.0 --port "${PROXY_PORT}" \
+        --prefiller-hosts "${LOCAL_SERVICE_IP}" --prefiller-ports "${PREFILL_PORT}" \
+        --decoder-hosts "${LOCAL_SERVICE_IP}" --decoder-ports "${DECODE_PORT}"
+    ```
+
+    Use the proxy ports in the linked procedure for each workload point.
+    Both long-context roles use YaRN and a 1,010,000-token service limit.
+
+    #### MemCache three-tier pooling on A3 and 950DT
+
+    Use the model deployment tutorial for the complete pooling procedure, including the Prefill and Decode commands.
+
+    1. Before starting the container, prepare the SSD or loop devices and mount them together with the MemCache configuration directory as shown in [Section 4.3, Docker for three-tier PD pooling](https://github.com/vllm-project/vllm-ascend/blob/a41e2ff8ba274328f9ef2ff27d15653df1d2e8ee/docs/source/tutorials/models/Qwen3.8-Flash-Next.md#43-docker-for-three-tier-pd-pooling).
+    2. In [Section 5.5, PD separation with a MemCache three-tier KV cache pool](https://github.com/vllm-project/vllm-ascend/blob/a41e2ff8ba274328f9ef2ff27d15653df1d2e8ee/docs/source/tutorials/models/Qwen3.8-Flash-Next.md#55-pd-separation-with-memcache-three-tier-kv-cache-pool), select your hardware. For a new pool, configure the MetaService and LocalService files and start MetaService. For an existing pool, use its endpoints and LocalService files and preserve its disk initialization settings.
+    3. Confirm the MetaService and ConfigStore endpoints are reachable, then use the service environment and P/D launch commands in the same hardware tab.

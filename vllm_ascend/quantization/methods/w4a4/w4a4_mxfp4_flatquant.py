@@ -23,7 +23,9 @@ from vllm.config import get_current_vllm_config
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.linear import RowParallelLinear
 
-from ..base import AscendLinearScheme, PreparedLinearInput
+from vllm_ascend.device.hardware_profile import WeightFormat
+
+from ..base import AscendLinearScheme, PreparedLinearInput, require_mx_weight_format
 from ..registry import register_scheme
 from .w4a4_flatquant import solve_kronecker_decompose
 
@@ -58,6 +60,7 @@ class AscendW4A4MXFP4FlatQuantDynamicLinearMethod(AscendLinearScheme):
     """Linear method for Ascend W4A4_MXFP4_FLATQUANT_DYNAMIC."""
 
     def __init__(self):
+        require_mx_weight_format(WeightFormat.MXFP4)
         vllm_config = get_current_vllm_config()
         self.group_size = vllm_config.quant_config.quant_description.get("group_size", 32)
         self.max_supported_tp = vllm_config.quant_config.quant_description.get("max_supported_tp", 4)

@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import inspect
 import sys
+from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
@@ -49,10 +50,12 @@ from vllm_ascend.models.minimax_m3.msa_m3 import (
     minimax_m3_sparse_forward,
 )
 from vllm_ascend.models.minimax_m3.ops import msa_m3_npu as msa_m3_npu_module
+from vllm_ascend.models.minimax_m3.ops import msa_m3_union as union_module
 from vllm_ascend.models.minimax_m3.ops.msa_m3_npu import (
     _as_ascendc_index_kv_cache,
     _decode_gbsa_block_counts,
     _minimax_m3_index_score,
+    _minimax_m3_index_score_topk,
     _minimax_m3_sparse_attn_kv_gather_q,
     minimax_m3_index_decode,
     minimax_m3_index_prefill,
@@ -89,8 +92,49 @@ def mock_gbsa_ops(monkeypatch: pytest.MonkeyPatch) -> tuple[MagicMock, MagicMock
     gbsa_ops_module = ModuleType("cann_ops_transformer.ops")
     gbsa_ops_module.generic_block_sparse_attention_metadata = gbsa_metadata_op  # type: ignore[attr-defined]
     gbsa_ops_module.generic_block_sparse_attention = gbsa_attention_op  # type: ignore[attr-defined]
+    transformer_module = ModuleType("cann_ops_transformer")
+    transformer_module.generic_block_sparse_attention_metadata = gbsa_metadata_op  # type: ignore[attr-defined]
+    transformer_module.generic_block_sparse_attention = gbsa_attention_op  # type: ignore[attr-defined]
+    transformer_module.ops = gbsa_ops_module  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "cann_ops_transformer", transformer_module)
     monkeypatch.setitem(sys.modules, "cann_ops_transformer.ops", gbsa_ops_module)
     return gbsa_metadata_op, gbsa_attention_op
+
+
+@pytest.fixture(autouse=True)
+def reset_union_availability(monkeypatch: pytest.MonkeyPatch):
+    # Optional packages are explicitly enabled by the Union integration fixture.
+    monkeypatch.setitem(sys.modules, "cann_ops_nn", None)
+    monkeypatch.setitem(sys.modules, "cann_ops_nn.ops.index.union_sparse_gen.union_sparse_gen", None)
+    msa_m3_module._can_use_union_attention.cache_clear()
+    yield
+    msa_m3_module._can_use_union_attention.cache_clear()
+
+
+@pytest.fixture
+def mock_union_ops(monkeypatch: pytest.MonkeyPatch, mock_gbsa_ops):
+    nn_ops = ModuleType("cann_ops_nn")
+    nn_ops.union_sparse_gen_launch = MagicMock(  # type: ignore[attr-defined]
+        return_value=(torch.zeros(1), torch.zeros(1), torch.zeros(1))
+    )
+    monkeypatch.setitem(sys.modules, "cann_ops_nn", nn_ops)
+    builders = (MagicMock(), MagicMock())
+    for name, builder_name, builder in (
+        (
+            "cann_ops_nn.ops.index.union_sparse_gen.union_sparse_gen",
+            "union_sparse_gen_builder",
+            builders[0],
+        ),
+        (
+            "cann_ops_transformer.ops.attention.generic_block_sparse_attention.generic_block_sparse_attention",
+            "generic_block_sparse_attention_op_builder",
+            builders[1],
+        ),
+    ):
+        module = ModuleType(name)
+        setattr(module, builder_name, builder)
+        monkeypatch.setitem(sys.modules, name, module)
+    return nn_ops.union_sparse_gen_launch, *mock_gbsa_ops, builders  # type: ignore[attr-defined]
 
 
 @pytest.mark.parametrize("dtype", [torch.int32, torch.int64])
@@ -200,7 +244,12 @@ def _make_vllm_config(
         model_config=SimpleNamespace(dtype=torch.bfloat16),
         compilation_config=SimpleNamespace(
             static_forward_context={
-                "layer0.attn": SimpleNamespace(num_heads=4, num_kv_heads=2, head_dim=128, topk_blocks=16),
+                "layer0.attn": SimpleNamespace(
+                    num_heads=4,
+                    num_kv_heads=2,
+                    head_dim=128,
+                    topk_blocks=16,
+                ),
             }
         ),
         scheduler_config=SimpleNamespace(
@@ -215,13 +264,23 @@ def _make_vllm_config(
 
 
 def _make_sparse_builder(
-    device: torch.device, kv_cache_dtype: torch.dtype = torch.bfloat16
+    device: torch.device,
+    kv_cache_dtype: torch.dtype = torch.bfloat16,
+    *,
+    impl: AscendMiniMaxM3SparseImpl | None = None,
 ) -> AscendMiniMaxM3SparseMetadataBuilder:
     vllm_config = _make_vllm_config()
+    layer = vllm_config.compilation_config.static_forward_context["layer0.attn"]
+    if impl is not None:
+        layer.num_heads = impl.num_heads
+        layer.num_kv_heads = impl.num_kv_heads
     vllm_config.speculative_config = SimpleNamespace(num_speculative_tokens=7, parallel_drafting=False)
+    vllm_config.speculative_config = SimpleNamespace(
+        num_speculative_tokens=7, max_num_new_slots_for_drafting=0, parallel_drafting=False
+    )
     spec = FullAttentionSpec(
         block_size=128,
-        num_kv_heads=2,
+        num_kv_heads=layer.num_kv_heads,
         head_size=128,
         head_size_v=128,
         dtype=kv_cache_dtype,
@@ -605,6 +664,124 @@ def test_sparse_metadata_builder(batch_spec: BatchSpec, mock_gbsa_ops) -> None:
         rebuilt = builder.build(0, common)
         assert rebuilt.prefill is not None
         assert rebuilt.prefill.cu_seqlens_q.data_ptr() == metadata.prefill.cu_seqlens_q.data_ptr()
+
+
+@pytest.mark.parametrize("device_type", [AscendDeviceType.A2, AscendDeviceType.A3])
+def test_unsupported_fp8_cache_rejected_before_union_loading(monkeypatch, mock_union_ops, device_type):
+    monkeypatch.setattr(msa_m3_module, "get_current_hardware_profile", lambda: get_hardware_profile(device_type))
+    with pytest.raises(TypeError, match="FP8 sparse attention is not supported on this device"):
+        AscendMiniMaxM3SparseImpl(16, 128, 0.5, 1, "fp8", topk_blocks=16, sparse_block_size=128)
+    for builder in mock_union_ops[-1]:
+        builder.load.assert_not_called()
+
+
+@pytest.mark.parametrize("kv_dtype", [torch.bfloat16, torch.float16, torch.float8_e4m3fn])
+@pytest.mark.parametrize("query_lens", [[1, 9, 17], [8]], ids=["mixed", "decode_only"])
+def test_union_prefill_keeps_native_decode(monkeypatch, mock_union_ops, kv_dtype, query_lens):
+    monkeypatch.setattr(
+        msa_m3_module, "get_current_hardware_profile", lambda: get_hardware_profile(AscendDeviceType.A5)
+    )
+    union_gen, metadata_op, attention_op, builders = mock_union_ops
+    # Fresh operator outputs expose accidental replacement of captured buffers.
+    metadata_op.side_effect = lambda *args, **kwargs: torch.full((1024,), metadata_op.call_count, dtype=torch.int32)
+    attention_op.side_effect = lambda q, *args, **kwargs: (
+        torch.zeros(q.shape, dtype=kwargs["attention_out_dtype"]),
+        None,
+    )
+    cache_dtype = "fp8_e4m3" if kv_dtype == torch.float8_e4m3fn else str(kv_dtype).removeprefix("torch.")
+    impl = AscendMiniMaxM3SparseImpl(16, 128, 0.5, 1, cache_dtype, topk_blocks=16, sparse_block_size=128)
+    for extension_builder in builders:
+        extension_builder.load.assert_called_once()
+    builder = _make_sparse_builder(torch.device("cpu"), kv_dtype, impl=impl)
+    common = _create_common_attn_metadata(
+        BatchSpec(seq_lens=[257] * len(query_lens), query_lens=query_lens), 128, torch.device("cpu")
+    )
+    md = builder.build(0, common)
+    assert builder.reuse_decode_gbsa_metadata
+    assert bool(builder.decode_gbsa_metadata_buffers) is (kv_dtype != torch.float16)
+    monkeypatch.setattr(
+        msa_m3_module,
+        "get_forward_context",
+        lambda: SimpleNamespace(attn_metadata={"attn": md, "attn_next": md}),
+    )
+    metadata_calls_before_forward = metadata_op.call_count
+    union = MagicMock(wraps=union_module.minimax_m3_sparse_attn_union)
+    native_decode = MagicMock()
+    monkeypatch.setattr(msa_m3_module, "minimax_m3_sparse_attn_union", union)
+    monkeypatch.setattr(
+        msa_m3_module, "minimax_m3_sparse_attn", MagicMock(side_effect=AssertionError("native prefill must not run"))
+    )
+    monkeypatch.setattr(msa_m3_module, "minimax_m3_sparse_attn_decode", native_decode)
+    q_dtype = torch.float16 if kv_dtype == torch.float16 else torch.bfloat16
+    q = torch.zeros((sum(query_lens), 16 * 128), dtype=q_dtype)
+    selections = (
+        torch.zeros((1, md.num_decode_tokens, 16), dtype=torch.int32),
+        torch.zeros((1, sum(query_lens) - md.num_decode_tokens, 16), dtype=torch.int32),
+        torch.ones((1, md.num_decode_tokens), dtype=torch.int32),
+    )
+    output = torch.empty_like(q)
+    kv = (torch.zeros((9, 128, 1, 128), dtype=kv_dtype), torch.zeros((9, 128, 1, 128), dtype=kv_dtype))
+    assert impl.forward(SimpleNamespace(layer_name="attn"), q, kv, selections, output) is output
+    native_decode.assert_called_once()
+    dec_args, dec_kwargs = native_decode.call_args
+    assert dec_args[0].shape == (md.num_decode_tokens, 16, 128)
+    assert dec_args[2] is selections[0]
+    assert dec_args[8] == query_lens[0]
+    assert dec_kwargs["select_num_idx"] is selections[2]
+    assert dec_kwargs["cu_seqlens_q"] is md.decode.cu_seqlens_q
+    assert dec_kwargs["gbsa_metadata_cache"] is md.decode.gbsa_metadata_cache
+    assert dec_kwargs["dequant_scale"] is impl._dequant_scale
+    assert (impl._dequant_scale is not None) is (kv_dtype == torch.float8_e4m3fn)
+    if not md.num_prefills:
+        union.assert_not_called()
+        union_gen.assert_not_called()
+        attention_op.assert_not_called()
+        assert not any(call.kwargs.get("mask_mode") == 3 for call in metadata_op.call_args_list)
+        return
+    assert md.prefill.num_union_groups == 5  # ceil(9/8) + ceil(17/8), not ceil(26/8).
+    assert md.prefill.cu_seqlens_q_int64.dtype == torch.int64
+    assert md.prefill.cu_seqlens_q_int64.is_contiguous()
+    schedule = md.prefill.union_gbsa_metadata[(16, 16)]
+    assert metadata_op.call_count == metadata_calls_before_forward
+    union.assert_called_once()
+    pre_args = union.call_args.args
+    assert pre_args[0].shape == (26, 16, 128)
+    assert pre_args[6:10] == (5, 3, 17, 257)
+    assert pre_args[2] is selections[1]
+    assert pre_args[12] is schedule
+    union_gen.assert_called_once()
+    call = union_gen.call_args
+    assert call.args[1].dtype == torch.int32
+    assert call.args[2] is md.prefill.cu_seqlens_q_int64
+    assert call.args[3] is None
+    assert call.kwargs["block_shape"] == [1, 128]
+    assert call.kwargs["union_size"] == 8
+    assert call.kwargs["mask_type"] == 1
+    attention_op.assert_called_once()
+    call = attention_op.call_args
+    assert call.args[0].dtype == kv_dtype
+    assert call.kwargs["quant_mode"] == (5 if kv_dtype == torch.float8_e4m3fn else 0)
+    assert call.kwargs["attention_out_dtype"] == q_dtype
+    assert call.kwargs["metadata"] is schedule
+
+    # A second layer has different sparse selections but shares this batch's schedule.
+    next_impl = AscendMiniMaxM3SparseImpl(16, 128, 0.5, 1, cache_dtype, topk_blocks=16, sparse_block_size=128)
+    next_selections = (selections[0], torch.ones_like(selections[1]), selections[2])
+    assert next_impl.forward(SimpleNamespace(layer_name="attn_next"), q, kv, next_selections, output) is output
+    assert union_gen.call_count == attention_op.call_count == native_decode.call_count == 2
+    assert metadata_op.call_count == metadata_calls_before_forward
+    assert attention_op.call_args.kwargs["metadata"] is schedule
+    assert torch.all(union_gen.call_args.args[0] == 1)
+
+    schedule_before_rebuild = schedule.clone()
+    rebuilt = builder.build(0, _create_common_attn_metadata(BatchSpec([513], [33]), 128, torch.device("cpu")))
+    assert rebuilt.prefill.union_gbsa_metadata[(16, 16)].data_ptr() == schedule.data_ptr()
+    assert rebuilt.prefill.cu_seqlens_q_int64.data_ptr() == md.prefill.cu_seqlens_q_int64.data_ptr()
+    torch.testing.assert_close(rebuilt.prefill.cu_seqlens_q_int64, torch.tensor([0, 33], dtype=torch.int64))
+    assert not torch.equal(schedule, schedule_before_rebuild)
+    union_metadata_calls = [call for call in metadata_op.call_args_list if call.kwargs.get("mask_mode") == 3]
+    assert len(union_metadata_calls) == 2
+    assert union_metadata_calls[-1].args[0].shape == (1, 5, 5)
 
 
 @pytest.mark.parametrize("query_len", [1, 2, 4, 8])
@@ -1401,7 +1578,7 @@ def test_cann_index_score_forwards_metadata_operands() -> None:
 
     mock_index_score = MagicMock(return_value=expected)
     with patch.dict("sys.modules", {"cann_ops_transformer.ops": SimpleNamespace(msa_index_score=mock_index_score)}):
-        actual = _minimax_m3_index_score(
+        actual = _minimax_m3_index_score_topk(
             idx_q,
             index_key_cache,
             block_table,
@@ -1409,6 +1586,7 @@ def test_cann_index_score_forwards_metadata_operands() -> None:
             seq_lens,
             start_loc,
             causal_mask,
+            topk=8,
             init_blocks=2,
             local_blocks=3,
         )
@@ -1426,8 +1604,10 @@ def test_cann_index_score_forwards_metadata_operands() -> None:
     assert kwargs["actual_seq_klen"] is seq_lens
     assert kwargs["layout_key"] == "BBND"
     assert kwargs["sparse_mode"] == 3
-    assert kwargs["init_blocks"] == 0
-    assert kwargs["local_blocks"] == 0
+    assert kwargs["return_choice"] == 1
+    assert kwargs["topk"] == 8
+    assert kwargs["init_blocks"] == 2
+    assert kwargs["local_blocks"] == 3
 
 
 def test_cann_index_score_casts_query_to_fp8_cache_dtype() -> None:
@@ -1618,6 +1798,589 @@ def test_ascendc_index_decode_returns_fused_select_counts() -> None:
         local_blocks=1,
         sort_indices=False,
     )
+
+
+def _index_score_test_operands(
+    total_q: int = 2,
+    max_blocks: int = 4,
+    num_heads: int = 2,
+) -> dict[str, torch.Tensor]:
+    return {
+        "idx_q": torch.zeros(total_q, num_heads, 128),
+        "index_kv_cache": torch.zeros(max_blocks, 128, 128),
+        "block_table": torch.arange(max_blocks, dtype=torch.int32).view(1, max_blocks),
+        "cu_seqlens_q": torch.tensor([0, total_q], dtype=torch.int32),
+        "seq_lens": torch.tensor([129], dtype=torch.int32),
+        "context_lens": torch.tensor([128], dtype=torch.int32),
+        "start_loc": torch.tensor([1], dtype=torch.int32),
+        "causal_mask": torch.zeros(2048, 2048, dtype=torch.int8),
+    }
+
+
+def _index_score_call_operands(
+    total_q: int = 2,
+    max_blocks: int = 4,
+    num_heads: int = 2,
+) -> dict[str, torch.Tensor]:
+    """Operands for ``_minimax_m3_index_score``, which has no ``context_lens``."""
+    operands = _index_score_test_operands(total_q=total_q, max_blocks=max_blocks, num_heads=num_heads)
+    operands.pop("context_lens")
+    return operands
+
+
+def _fused_index_topk_operands(
+    total_q: int = 2,
+    max_blocks: int = 4,
+    num_heads: int = 2,
+) -> dict[str, torch.Tensor]:
+    """Operands for the fused TopK functions (``_minimax_m3_index_score_topk``)."""
+    return _index_score_call_operands(total_q=total_q, max_blocks=max_blocks, num_heads=num_heads)
+
+
+def _index_score_wrapper(*, with_return_choice: bool = True) -> MagicMock:
+    """Model the CANN wrapper, with or without the fused-TopK ``return_choice``."""
+    wrapper = MagicMock(name="msa_index_score")
+    names = ["query", "key", "start_loc", "block_table"]
+    if with_return_choice:
+        names += ["return_choice", "topk"]
+    wrapper.__signature__ = inspect.Signature(  # type: ignore[attr-defined]
+        [inspect.Parameter(name, inspect.Parameter.POSITIONAL_OR_KEYWORD) for name in names]
+    )
+    return wrapper
+
+
+@pytest.fixture
+def fused_index_ops(monkeypatch: pytest.MonkeyPatch) -> Iterator[MagicMock]:
+    """Install a CANN package with the fused TopK and enable it on the device."""
+    ops = SimpleNamespace(msa_index_score=_index_score_wrapper())
+    # ``from cann_ops_transformer.ops import msa_index_score`` resolves through
+    # sys.modules, so replacing both entries makes the import pick up the mock.
+    monkeypatch.setitem(sys.modules, "cann_ops_transformer", SimpleNamespace(ops=ops))
+    monkeypatch.setitem(sys.modules, "cann_ops_transformer.ops", ops)
+    monkeypatch.setattr(
+        msa_m3_npu_module,
+        "get_current_hardware_profile",
+        lambda: get_hardware_profile(AscendDeviceType.A5),
+    )
+    msa_m3_npu_module._index_score_has_return_choice.cache_clear()
+    yield ops.msa_index_score
+    msa_m3_npu_module._index_score_has_return_choice.cache_clear()
+
+
+def test_topk_fusion_is_enabled_on_a5_only(
+    monkeypatch: pytest.MonkeyPatch,
+    fused_index_ops: MagicMock,
+) -> None:
+    """Only A5 advertises the capability; the operator itself is stubbed here."""
+    for device, expected in [
+        (AscendDeviceType.A5, True),
+        (AscendDeviceType.A3, False),
+        (AscendDeviceType.A2, False),
+    ]:
+        monkeypatch.setattr(
+            msa_m3_npu_module,
+            "get_current_hardware_profile",
+            lambda device=device: get_hardware_profile(device),
+        )
+        assert msa_m3_npu_module._can_use_index_score_topk_fusion(16) is expected
+
+
+def test_topk_fusion_requires_the_new_operator(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An older CANN package without ``return_choice`` keeps the separate path."""
+    ops = SimpleNamespace(msa_index_score=_index_score_wrapper(with_return_choice=False))
+    monkeypatch.setitem(sys.modules, "cann_ops_transformer", SimpleNamespace(ops=ops))
+    monkeypatch.setitem(sys.modules, "cann_ops_transformer.ops", ops)
+    monkeypatch.setattr(
+        msa_m3_npu_module,
+        "get_current_hardware_profile",
+        lambda: get_hardware_profile(AscendDeviceType.A5),
+    )
+    msa_m3_npu_module._index_score_has_return_choice.cache_clear()
+
+    assert msa_m3_npu_module._index_score_has_return_choice() is False
+    assert msa_m3_npu_module._can_use_index_score_topk_fusion(16) is False
+
+    # 换上带 return_choice 的新算子后同一台 A5 立刻可用。
+    msa_m3_npu_module._index_score_has_return_choice.cache_clear()
+    ops.msa_index_score = _index_score_wrapper()
+    assert msa_m3_npu_module._index_score_has_return_choice() is True
+    assert msa_m3_npu_module._can_use_index_score_topk_fusion(16) is True
+
+    msa_m3_npu_module._index_score_has_return_choice.cache_clear()
+
+
+def test_topk_fusion_is_off_when_the_operator_is_unimportable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No ``cann_ops_transformer`` at all must not raise, just disable fusion."""
+    monkeypatch.setitem(sys.modules, "cann_ops_transformer", None)
+    monkeypatch.setitem(sys.modules, "cann_ops_transformer.ops", None)
+    monkeypatch.setattr(
+        msa_m3_npu_module,
+        "get_current_hardware_profile",
+        lambda: get_hardware_profile(AscendDeviceType.A5),
+    )
+    msa_m3_npu_module._index_score_has_return_choice.cache_clear()
+
+    assert msa_m3_npu_module._index_score_has_return_choice() is False
+    assert msa_m3_npu_module._can_use_index_score_topk_fusion(16) is False
+
+    msa_m3_npu_module._index_score_has_return_choice.cache_clear()
+
+
+def test_index_score_requests_fused_topk_indices(fused_index_ops: MagicMock) -> None:
+    operands = _index_score_call_operands()
+    indices = torch.zeros(2, 2, 3, dtype=torch.int32)
+    fused_index_ops.return_value = indices
+
+    actual = _minimax_m3_index_score_topk(**operands, topk=3, local_blocks=1)
+
+    assert actual is indices
+    kwargs = fused_index_ops.call_args.kwargs
+    assert kwargs["return_choice"] == 1
+    assert kwargs["topk"] == 3
+    assert kwargs["layout_key"] == "BBND"
+    assert kwargs["sparse_mode"] == 3
+    # 强制选块由算子在 TopK 之前施加，与分离路径写 1e30 / 1e29 等价。
+    assert kwargs["init_blocks"] == 0
+    assert kwargs["local_blocks"] == 1
+
+
+def test_index_score_keeps_forcing_off_on_the_score_path(fused_index_ops: MagicMock) -> None:
+    """老路径显式把 init_blocks / local_blocks 置 0，强制块交给分离 TopK。"""
+    operands = _index_score_call_operands()
+    fused_index_ops.return_value = torch.zeros(2, 2, 4)
+
+    _minimax_m3_index_score(**operands, init_blocks=2, local_blocks=1)
+
+    assert "return_choice" not in fused_index_ops.call_args.kwargs
+    assert "topk" not in fused_index_ops.call_args.kwargs
+    assert fused_index_ops.call_args.kwargs["init_blocks"] == 0
+    assert fused_index_ops.call_args.kwargs["local_blocks"] == 0
+
+
+def test_ascendc_index_prefill_uses_fused_topk(fused_index_ops: MagicMock) -> None:
+    operands = _index_score_test_operands()
+    indices = torch.zeros(2, 2, 8, dtype=torch.int32)
+    fused_index_ops.return_value = indices
+
+    with (
+        patch("vllm_ascend.models.minimax_m3.ops.msa_m3_npu.index_decode_topk_fused") as mock_separate,
+        patch(
+            "vllm_ascend.models.minimax_m3.ops.msa_m3_npu._minimax_m3_index_prefill_topk",
+        ) as mock_prefill_topk,
+    ):
+        actual = minimax_m3_index_prefill(
+            **operands,
+            max_query_len=2,
+            max_seq_len=512,
+            topk=8,
+            init_blocks=0,
+            local_blocks=0,
+        )
+
+    # 融合结果原样透传：算子自己已经把补位槽写成 -1，适配层不再二次掩码。
+    torch.testing.assert_close(actual, indices, rtol=0, atol=0)
+    # 融合路径不再产生 score，TopK 与排序都在算子内完成。
+    mock_prefill_topk.assert_not_called()
+    mock_separate.assert_not_called()
+    assert fused_index_ops.call_args.kwargs["return_choice"] == 1
+    assert fused_index_ops.call_args.kwargs["topk"] == 8
+
+
+def test_ascendc_index_prefill_falls_back_for_unaligned_topk(
+    fused_index_ops: MagicMock,
+) -> None:
+    # topk=4 不是写回对齐的倍数，融合路径拒绝它并交回分离 TopK。强制块与此
+    # 无关：它们会原样转发给算子（见下面的 multi-token 那条）。
+    operands = _index_score_test_operands()
+    score = torch.zeros(2, 2, 16)
+    expected = torch.zeros(2, 2, 4, dtype=torch.int32)
+
+    with (
+        patch(
+            "vllm_ascend.models.minimax_m3.ops.msa_m3_npu._minimax_m3_index_score",
+            return_value=score,
+        ),
+        patch(
+            "vllm_ascend.models.minimax_m3.ops.msa_m3_npu._minimax_m3_index_prefill_topk",
+            return_value=expected,
+        ) as mock_topk,
+    ):
+        actual = minimax_m3_index_prefill(
+            **operands,
+            max_query_len=2,
+            max_seq_len=512,
+            topk=4,
+            init_blocks=0,
+            local_blocks=1,
+        )
+
+    assert actual is expected
+    fused_index_ops.assert_not_called()
+    mock_topk.assert_called_once()
+
+
+def test_ascendc_index_prefill_falls_back_without_fused_topk(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        msa_m3_npu_module,
+        "get_current_hardware_profile",
+        lambda: get_hardware_profile(AscendDeviceType.A3),
+    )
+    operands = _index_score_test_operands()
+    score = torch.zeros(2, 2, 16)
+    expected = torch.zeros(2, 2, 2, dtype=torch.int32)
+
+    with (
+        patch(
+            "vllm_ascend.models.minimax_m3.ops.msa_m3_npu._minimax_m3_index_score",
+            return_value=score,
+        ) as mock_score,
+        patch(
+            "vllm_ascend.models.minimax_m3.ops.msa_m3_npu._minimax_m3_index_prefill_topk",
+            return_value=expected,
+        ) as mock_topk,
+    ):
+        actual = minimax_m3_index_prefill(
+            **operands,
+            max_query_len=2,
+            max_seq_len=512,
+            topk=2,
+            init_blocks=1,
+            local_blocks=1,
+        )
+
+    assert actual is expected
+    assert "topk" not in mock_score.call_args.kwargs
+    mock_topk.assert_called_once()
+
+
+@pytest.mark.parametrize("topk", [0, 129])
+def test_fusion_gate_rejects_unsupported_k(fused_index_ops: MagicMock, topk: int) -> None:
+    # 算子只接受 1..128 的 topk，其余交给分离路径。
+    assert msa_m3_npu_module._can_use_index_score_topk_fusion(topk) is False
+
+
+@pytest.mark.parametrize("topk", [1, 2, 4, 12, 17, 127])
+def test_fusion_gate_rejects_unaligned_topk(topk: int) -> None:
+    """Unaligned ``topk`` must not reach the operator.
+
+    上机实测（Ascend950DT，PR #15456 kernel）：kernel 只对 ``k % 8 == 0`` 走整行
+    DataCopy 写回，其余按槽位标量写；q_len > 1 时除最后一行外都读到未初始化内存
+    （1050427392 / -8388609 之类的垃圾值）。这里断言适配层直接回退分离路径。
+    """
+    assert msa_m3_npu_module._can_use_index_score_topk_fusion(topk) is False
+
+
+@pytest.mark.parametrize("topk", [8, 16, 24, 32, 128])
+def test_fusion_gate_allows_aligned_topk(fused_index_ops: MagicMock, topk: int) -> None:
+    """``k % 8 == 0`` was exact and deterministic in every measured shape."""
+    assert msa_m3_npu_module._can_use_index_score_topk_fusion(topk) is True
+
+
+def test_ascendc_index_prefill_falls_back_when_device_cannot_fuse(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """硬件或 CANN 不支持融合时，对齐的 topk 也必须走分离路径。"""
+    monkeypatch.setattr(
+        msa_m3_npu_module,
+        "get_current_hardware_profile",
+        lambda: get_hardware_profile(AscendDeviceType.A3),
+    )
+    operands = _index_score_test_operands()
+    score = torch.zeros(2, 2, 64)
+    expected = torch.zeros(2, 2, 16, dtype=torch.int32)
+
+    with (
+        patch(
+            "vllm_ascend.models.minimax_m3.ops.msa_m3_npu._minimax_m3_index_score",
+            return_value=score,
+        ) as mock_score,
+        patch(
+            "vllm_ascend.models.minimax_m3.ops.msa_m3_npu._minimax_m3_index_score_topk",
+        ) as mock_fused,
+        patch(
+            "vllm_ascend.models.minimax_m3.ops.msa_m3_npu._minimax_m3_index_prefill_topk",
+            return_value=expected,
+        ) as mock_topk,
+    ):
+        actual = minimax_m3_index_prefill(
+            **operands,
+            max_query_len=2,
+            max_seq_len=2048,
+            topk=16,
+            init_blocks=0,
+            local_blocks=1,
+        )
+
+    assert actual is expected
+    mock_fused.assert_not_called()
+    mock_score.assert_called_once()
+    mock_topk.assert_called_once()
+
+
+def test_fused_index_topk_passes_topk_through(fused_index_ops: MagicMock) -> None:
+    # infershape 末维恒为 topk，所以 topk 不能按 block_table 宽度向下钳，
+    # 否则输出宽度会小于 GBSA 期望值。补位槽是否为 -1 由掩码另行保证，
+    # 不能作为透传的前提（上机实测并非总是 -1）。
+    operands = _fused_index_topk_operands(max_blocks=4)
+    fused_index_ops.return_value = torch.zeros(2, 2, 8, dtype=torch.int32)
+
+    actual = _minimax_m3_index_score_topk(**operands, topk=8)
+
+    assert fused_index_ops.call_args.kwargs["topk"] == 8
+    assert tuple(actual.shape) == (2, 2, 8)
+
+
+@pytest.mark.parametrize(
+    ("init_blocks", "local_blocks"),
+    [(0, 1), (0, 2), (1, 0), (4, 1)],
+)
+def test_fused_index_topk_forwards_forced_blocks(
+    fused_index_ops: MagicMock,
+    init_blocks: int,
+    local_blocks: int,
+) -> None:
+    """单 token decode 时强制块必须透传给算子。
+
+    算子在 epilogue 的 ``ApplyLocalMaskUb`` 里把 ``init_blocks`` / ``local_blocks``
+    对应的列抬成高分，发生在 TopK 之前。请求只有一个 query token 时，
+    ``start_loc`` 就是该 token 自己的块，与分离路径按 token 施加的强制块一致。
+
+    MiniMax-M3.1 配置 ``sparse_local_block: 1``，decode 是主路径，不转发就用不上融合。
+    """
+    # total_q == batch == 2：每个请求一个 query token。
+    operands = {
+        "idx_q": torch.zeros(2, 2, 128),
+        "index_kv_cache": torch.zeros(256, 128, 128),
+        "block_table": torch.arange(256, dtype=torch.int32).view(1, 256).repeat(2, 1),
+        "cu_seqlens_q": torch.tensor([0, 1, 2], dtype=torch.int32),
+        "seq_lens": torch.tensor([512, 512], dtype=torch.int32),
+        "start_loc": torch.tensor([3, 3], dtype=torch.int32),
+        "causal_mask": None,
+    }
+    fused_index_ops.return_value = torch.zeros(2, 2, 16, dtype=torch.int32)
+
+    _minimax_m3_index_score_topk(
+        **operands,
+        topk=16,
+        init_blocks=init_blocks,
+        local_blocks=local_blocks,
+    )
+
+    fused_index_ops.assert_called_once()
+    kwargs = fused_index_ops.call_args.kwargs
+    assert kwargs["init_blocks"] == init_blocks
+    assert kwargs["local_blocks"] == local_blocks
+
+
+def test_fused_index_topk_forwards_forced_blocks_for_multi_token_requests(
+    fused_index_ops: MagicMock,
+) -> None:
+    """一个请求多个 query token 且要施加强制块时也要走融合。
+
+    这里曾经回退，理由是算子的强制块只用一个 ``start_loc``（整个请求共享），
+    而分离路径按 token 各自算块号。上机实测表明该理由不成立：调用方传的
+    ``start_loc = floor(context / block_size)`` 是 chunk **第一个** token 的块号，
+    它落在每个 token 的可见范围内，融合不会越过任何 token 的因果范围。
+
+    实测（Ascend950DT，local_blocks=1、topk=16）：q_len=1 一致，prefill
+    q_len=16/64/128 一致，decode 上下文 <=1024 或 >=5112 token 一致；只有
+    q_len=8、上下文 2048-4096 时 chunk 最后一个 token 的 TopK 集合会换掉一个块。
+    该差异交给精度评测衡量，不再用门控一刀切挡掉。
+    """
+    # total_q=4, batch=1 -> 一个请求 4 个 token（prefill 形态）。
+    operands = _fused_index_topk_operands(total_q=4, max_blocks=256)
+    fused_index_ops.return_value = torch.zeros(2, 4, 16, dtype=torch.int32)
+
+    _minimax_m3_index_score_topk(**operands, topk=16, local_blocks=1)
+
+    fused_index_ops.assert_called_once()
+    assert fused_index_ops.call_args.kwargs["local_blocks"] == 1
+
+
+def test_fused_index_topk_allows_multi_token_requests_without_forced_blocks(
+    fused_index_ops: MagicMock,
+) -> None:
+    """不施加强制块时多 token 也安全：没有 local_mask，就没有逐 token 语义差异。"""
+    operands = _fused_index_topk_operands(total_q=4, max_blocks=256)
+    fused_index_ops.return_value = torch.zeros(2, 4, 16, dtype=torch.int32)
+
+    _minimax_m3_index_score_topk(**operands, topk=16)
+
+    fused_index_ops.assert_called_once()
+    assert fused_index_ops.call_args.kwargs["local_blocks"] == 0
+
+
+def test_ascendc_index_decode_uses_fused_topk_for_speculative_decode(fused_index_ops: MagicMock) -> None:
+    # 投机解码（decode_query_len>1）现在也走融合路径。topk 取 8 的倍数：
+    # 非对齐 topk 在 q_len>1 时算子写回未初始化内存，适配层会主动回退。
+    operands = _index_score_test_operands(total_q=4)
+    operands["seq_lens"] = torch.tensor([513, 513], dtype=torch.int32)
+    indices = torch.tensor(
+        [[[0, 1, -1, -1, -1, -1, -1, -1]] * 4 for _ in range(2)],
+        dtype=torch.int32,
+    )
+    fused_index_ops.return_value = indices
+
+    with patch(
+        "vllm_ascend.models.minimax_m3.ops.msa_m3_npu.index_decode_topk_fused",
+    ) as mock_separate:
+        actual, counts = minimax_m3_index_decode(
+            **operands,
+            topk=8,
+            init_blocks=0,
+            local_blocks=0,
+            decode_query_len=2,
+            sort_indices=True,
+        )
+
+    mock_separate.assert_not_called()
+    fused_index_ops.assert_called_once()
+    assert tuple(actual.shape) == (2, 4, 8)
+    # 逐 token 的可见块数与 [heads, tokens] 一一对应。
+    counts_per_token = _decode_gbsa_block_counts(
+        operands["seq_lens"],
+        2,
+        operands["idx_q"].shape[1],
+        4,
+        operands["block_table"].shape[-1],
+    )
+    assert counts_per_token.numel() == actual.shape[0] * actual.shape[1]
+    assert counts.shape[0] == actual.shape[0]
+
+
+def test_ascendc_index_decode_uses_fused_sorted_topk(fused_index_ops: MagicMock) -> None:
+    operands = _index_score_test_operands()
+    # decode_query_len=1 时每个 request 一个 token，seq_lens 必须逐 request 给足，
+    # 可见块数才 = min(topk, block_table 宽度)，下面的槽位才全部有效。
+    # topk 取 8 的倍数：非对齐 topk 在 q_len>1 时算子写回未初始化内存。
+    operands["seq_lens"] = torch.tensor([513, 513], dtype=torch.int32)
+    # seq_lens=513 给出 5 个可见块，但 block_table 只有 4 宽，可见块数被钳到 4，
+    # 列号只到 3。sort_indices=True 会原样返回升序结果，所以这里直接给升序数据。
+    indices = torch.tensor(
+        [
+            [[0, 1, 2, 3] + [-1] * 4, [0, 1, 2, 3] + [-1] * 4],
+            [[0, 1, 2, 3] + [-1] * 4, [0, 1, 2, 3] + [-1] * 4],
+        ],
+        dtype=torch.int32,
+    )
+    fused_index_ops.return_value = indices
+
+    with patch(
+        "vllm_ascend.models.minimax_m3.ops.msa_m3_npu.index_decode_topk_fused",
+    ) as mock_separate:
+        actual, counts = minimax_m3_index_decode(
+            **operands,
+            topk=8,
+            init_blocks=0,
+            local_blocks=0,
+            decode_query_len=1,
+            sort_indices=True,
+        )
+
+    # 掩码返回新张量，比较内容；select 计数由归一的 indices 推导。
+    torch.testing.assert_close(actual, indices, rtol=0, atol=0)
+    torch.testing.assert_close(counts, (actual >= 0).sum(dim=-1).to(torch.int32), rtol=0, atol=0)
+    mock_separate.assert_not_called()
+
+
+def test_ascendc_index_decode_passes_fused_slots_through(fused_index_ops: MagicMock) -> None:
+    # 上机实测（96 组配置与 torch.topk 对照）：算子的补位槽本来就是 -1，
+    # 不需要适配层二次归一，因此融合结果原样交给 GBSA。
+    operands = _index_score_test_operands()
+    # 两个 request 各给 seq_lens=129 且 decode_query_len=1，可见块数都是 2。
+    operands["seq_lens"] = torch.tensor([129, 129], dtype=torch.int32)
+    raw = torch.tensor(
+        [[[0, 1] + [-1] * 6, [1, 0] + [-1] * 6], [[0, 1] + [-1] * 6, [1, 0] + [-1] * 6]],
+        dtype=torch.int32,
+    )
+    fused_index_ops.return_value = raw
+
+    with patch(
+        "vllm_ascend.models.minimax_m3.ops.msa_m3_npu.index_decode_topk_fused",
+    ) as mock_separate:
+        actual, counts = minimax_m3_index_decode(
+            **operands,
+            topk=8,
+            init_blocks=0,
+            local_blocks=0,
+            decode_query_len=1,
+            sort_indices=True,
+        )
+
+    torch.testing.assert_close(actual, raw, rtol=0, atol=0)
+    # 选中块数只统计非负槽位。
+    torch.testing.assert_close(counts, (actual >= 0).sum(dim=-1).to(torch.int32), rtol=0, atol=0)
+    assert counts.max().item() <= 2
+    mock_separate.assert_not_called()
+
+
+def test_ascendc_index_decode_falls_back_for_unaligned_topk(fused_index_ops: MagicMock) -> None:
+    # topk=3 不是写回对齐的倍数，融合路径不参与，必须回到分离 TopK。
+    operands = _index_score_test_operands()
+    score = torch.zeros(2, 2, 4)
+    expected = torch.zeros(2, 2, 3, dtype=torch.int32)
+    expected_counts = torch.ones(2, 2, dtype=torch.int32)
+
+    with (
+        patch(
+            "vllm_ascend.models.minimax_m3.ops.msa_m3_npu._minimax_m3_index_score",
+            return_value=score,
+        ),
+        patch(
+            "vllm_ascend.models.minimax_m3.ops.msa_m3_npu.index_decode_topk_fused",
+            return_value=(expected, expected_counts),
+        ) as mock_separate,
+    ):
+        actual, counts = minimax_m3_index_decode(
+            **operands,
+            topk=3,
+            init_blocks=1,
+            local_blocks=0,
+            decode_query_len=1,
+            sort_indices=True,
+        )
+
+    assert actual is expected
+    assert counts is expected_counts
+    fused_index_ops.assert_not_called()
+    mock_separate.assert_called_once()
+
+
+def test_ascendc_index_decode_keeps_separate_helpers_when_unsorted(
+    fused_index_ops: MagicMock,
+) -> None:
+    # 未排序输出需要分离路径改写列号，因此仍走 TopK 后处理。
+    operands = _index_score_test_operands()
+    score = torch.zeros(2, 2, 4)
+    expected = torch.zeros(2, 2, 3, dtype=torch.int32)
+    expected_counts = torch.ones(2, 2, dtype=torch.int32)
+
+    with (
+        patch(
+            "vllm_ascend.models.minimax_m3.ops.msa_m3_npu._minimax_m3_index_score",
+            return_value=score,
+        ) as mock_score,
+        patch(
+            "vllm_ascend.models.minimax_m3.ops.msa_m3_npu.index_decode_topk_fused",
+            return_value=(expected, expected_counts),
+        ) as mock_separate,
+    ):
+        actual, counts = minimax_m3_index_decode(
+            **operands,
+            topk=3,
+            init_blocks=1,
+            local_blocks=1,
+            decode_query_len=1,
+        )
+
+    assert actual is expected
+    assert counts is expected_counts
+    assert "topk" not in mock_score.call_args.kwargs
+    mock_separate.assert_called_once()
 
 
 @pytest.mark.parametrize(
@@ -2256,7 +3019,9 @@ def test_sparse_builder_keeps_unverified_gbsa_paths_in_layers(dtype, block_size,
     config = _make_vllm_config()
     config.model_config.dtype = dtype
     spec = FullAttentionSpec(block_size=block_size, num_kv_heads=2, head_size=128, dtype=dtype)
-    config.speculative_config = SimpleNamespace(num_speculative_tokens=3, parallel_drafting=False)
+    config.speculative_config = SimpleNamespace(
+        num_speculative_tokens=3, max_num_new_slots_for_drafting=0, parallel_drafting=False
+    )
     with patch.object(
         msa_m3_module, "get_current_hardware_profile", return_value=get_hardware_profile(AscendDeviceType.A3)
     ):
@@ -2541,59 +3306,58 @@ def test_sparse_attn_prefill_fallback_rejects_mismatched_fp8_cache() -> None:
         )
 
 
+@pytest.mark.parametrize("device_type", [AscendDeviceType.A3, AscendDeviceType.A5, AscendDeviceType.A2])
 @pytest.mark.parametrize(
-    ("device_type", "split_kv_available", "expected_impl"),
-    [
-        (AscendDeviceType.A5, True, "kv_gather_q"),
-        (AscendDeviceType.A5, False, "gbsa"),
-        (AscendDeviceType.A3, True, "kv_gather_q"),
-        (AscendDeviceType.A3, False, "gbsa"),
-        (AscendDeviceType.A2, True, "kv_gather_q"),
-        (AscendDeviceType.A2, False, "gbsa"),
-    ],
+    "union_available,load_error", [(True, None), (False, None), (True, OSError), (True, RuntimeError)]
 )
-def test_sparse_attn_prefill_dispatches_by_operator_availability(
+@pytest.mark.parametrize("split_kv_available", [True, False])
+def test_sparse_model_prefill_dispatches_by_operator_availability(
+    monkeypatch,
+    mock_union_ops,
     device_type: AscendDeviceType,
+    union_available: bool,
+    load_error: type[Exception] | None,
     split_kv_available: bool,
-    expected_impl: str,
 ) -> None:
-    with (
-        patch.object(
-            msa_m3_npu_module,
-            "get_current_hardware_profile",
-            return_value=get_hardware_profile(device_type),
-        ),
-        patch.object(
-            msa_m3_npu_module,
-            "_is_minimax_sparse_attention_split_kv_available",
-            return_value=split_kv_available,
-        ) as mock_is_available,
-        patch.object(msa_m3_npu_module, "_minimax_m3_sparse_attn_a3") as mock_gbsa,
-        patch.object(
-            msa_m3_npu_module,
-            "_minimax_m3_sparse_attn_kv_gather_q",
-        ) as mock_kv_gather_q,
-    ):
-        msa_m3_npu_module.minimax_m3_sparse_attn(
-            q=torch.empty(0),
-            kv_cache=torch.empty(0),
-            topk_idx=torch.empty(0),
-            block_table=torch.empty(0),
-            cu_seqlens_q=torch.empty(0),
-            seq_lens=torch.empty(0),
-            prefix_lens=torch.empty(0),
-            max_query_len=0,
-            num_kv_heads=2,
-            sm_scale=0.5,
-            output=torch.empty(0),
-            total_kv_blocks=5,
-            max_kv_blocks=3,
-        )
+    profile = get_hardware_profile(device_type)
+    monkeypatch.setattr(msa_m3_module, "get_current_hardware_profile", lambda: profile)
+    monkeypatch.setattr(msa_m3_npu_module, "get_current_hardware_profile", lambda: profile)
+    if not union_available:
+        monkeypatch.setitem(sys.modules, "cann_ops_nn", None)
+        monkeypatch.setitem(sys.modules, "cann_ops_nn.ops.index.union_sparse_gen.union_sparse_gen", None)
+    if load_error is not None:
+        mock_union_ops[3][1].load.side_effect = load_error("Union extension failed to load")
+    mock_is_available = MagicMock(return_value=split_kv_available)
+    monkeypatch.setattr(msa_m3_npu_module, "_is_minimax_sparse_attention_split_kv_available", mock_is_available)
+    mock_union, mock_kv_gather_q, mock_gbsa = MagicMock(), MagicMock(), MagicMock()
+    monkeypatch.setattr(msa_m3_module, "minimax_m3_sparse_attn_union", mock_union)
+    monkeypatch.setattr(msa_m3_npu_module, "_minimax_m3_sparse_attn_kv_gather_q", mock_kv_gather_q)
+    monkeypatch.setattr(msa_m3_npu_module, "_minimax_m3_sparse_attn_a3", mock_gbsa)
+    impl = AscendMiniMaxM3SparseImpl(16, 128, 0.5, 1, "auto", topk_blocks=16, sparse_block_size=128)
+    builder = _make_sparse_builder(torch.device("cpu"), impl=impl)
+    common = _create_common_attn_metadata(BatchSpec(seq_lens=[257, 513], query_lens=[9, 17]), 128, torch.device("cpu"))
+    md = builder.build(0, common)
+    monkeypatch.setattr(msa_m3_module, "get_forward_context", lambda: SimpleNamespace(attn_metadata={"attn": md}))
+    q = torch.zeros((26, 16 * 128), dtype=torch.bfloat16)
+    output = torch.empty_like(q)
+    kv = (torch.zeros((8, 128, 1, 128), dtype=q.dtype), torch.zeros((8, 128, 1, 128), dtype=q.dtype))
+    selections = (None, torch.zeros((1, 26, 16), dtype=torch.int32), None)
+    metadata_op = mock_union_ops[1]
+    metadata_calls_before_forward = metadata_op.call_count
+    assert impl.forward(SimpleNamespace(layer_name="attn"), q, kv, selections, output) is output
 
-    if expected_impl == "kv_gather_q":
+    expect_union = union_available and load_error is None
+    assert metadata_op.call_count == metadata_calls_before_forward
+    assert sum(call.kwargs.get("mask_mode") == 3 for call in metadata_op.call_args_list) == int(expect_union)
+    assert mock_union.call_count == int(expect_union)
+    assert mock_is_available.call_count == int(not expect_union)
+    if expect_union:
+        mock_kv_gather_q.assert_not_called()
+        mock_gbsa.assert_not_called()
+    elif split_kv_available:
         mock_kv_gather_q.assert_called_once()
         mock_gbsa.assert_not_called()
-        assert mock_kv_gather_q.call_args.args[-2:] == (5, 3)
+        assert mock_kv_gather_q.call_args.args[-2:] == (8, 5)
         assert mock_kv_gather_q.call_args.kwargs == {
             "supports_fp8": device_type == AscendDeviceType.A5,
         }
@@ -2601,10 +3365,8 @@ def test_sparse_attn_prefill_dispatches_by_operator_availability(
         mock_gbsa.assert_called_once()
         mock_kv_gather_q.assert_not_called()
         assert mock_gbsa.call_args.kwargs == {
-            "max_query_len": 0,
+            "max_query_len": 17,
         }
-
-    mock_is_available.assert_called_once_with()
 
 
 @pytest.mark.parametrize("tp_size", [1, 4, 8])
@@ -2819,7 +3581,9 @@ def test_gbsa_schedule_lengths_follow_speculative_config(spec_tokens, mock_gbsa_
     )
     config = _make_vllm_config(max_num_batched_tokens=1024)
     config.speculative_config = (
-        SimpleNamespace(num_speculative_tokens=spec_tokens, parallel_drafting=False) if spec_tokens else None
+        SimpleNamespace(num_speculative_tokens=spec_tokens, max_num_new_slots_for_drafting=0, parallel_drafting=False)
+        if spec_tokens
+        else None
     )
     spec = FullAttentionSpec(block_size=128, num_kv_heads=2, head_size=128, dtype=torch.bfloat16)
     builder = AscendMiniMaxM3SparseMetadataBuilder(spec, ["layer0.attn"], config, torch.device("cpu"))

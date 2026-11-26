@@ -20,9 +20,6 @@ Data parallel inference with Model Runner V2.
 Run `pytest -sv tests/e2e/pull_request/two_card/model_runner_v2/test_data_parallel.py`.
 """
 
-import os
-from unittest.mock import patch
-
 import pytest
 from vllm import SamplingParams
 
@@ -31,7 +28,6 @@ from tests.e2e.conftest import DPVllmRunner, wait_until_npu_memory_free
 MODELS = ["vllm-ascend/DeepSeek-V2-Lite-W8A8"]
 
 
-@patch.dict(os.environ, {"VLLM_USE_V2_MODEL_RUNNER": "1"})
 @wait_until_npu_memory_free(target_free_percentage=0.7)
 def test_dsv2_w8a8_dp_eager_mode():
     example_prompts = [
@@ -65,7 +61,6 @@ def test_dsv2_w8a8_dp_eager_mode():
         pytest.param({}, id="default_full_and_piecewise"),
     ],
 )
-@patch.dict(os.environ, {"VLLM_USE_V2_MODEL_RUNNER": "1"})
 @wait_until_npu_memory_free(target_free_percentage=0.7)
 def test_dsv2_w8a8_dp_graph_mode(compilation_config: dict):
     example_prompts = [

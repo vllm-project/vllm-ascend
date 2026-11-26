@@ -84,7 +84,9 @@ def runtime(monkeypatch):
         ),
         scope,
     )
-    model = SimpleNamespace(head_dim=128, _fused_bfg_output_sizes=(12, 1536, 1536), uses_mixed_projection=True)
+    model = SimpleNamespace(
+        head_dim=128, _fused_bfg_output_sizes=(12, 1536, 1536), uses_mixed_projection=True, use_recoverssm=False
+    )
     model._postprocess_bfg = lambda packed: scope["_postprocess_bfg"](model, packed)
     scope["recurrent_kda"] = lambda q, k, v, gate, *args, **kwargs: (gate, None)
     return SimpleNamespace(model=model, scope=scope, events=events, current=current)
@@ -185,6 +187,14 @@ def test_padded_and_mixed_gates_accept_full_projection_copy(runtime):
         assert selected.is_contiguous() and selected.data_ptr() != gate.data_ptr()
         expected = packed[:4, 12:1548].reshape(1, 4, 12, 128).index_select(1, indices)
         torch.testing.assert_close(selected, expected)
+
+
+def test_recoverssm_postprocess_keeps_beta_raw(runtime):
+    runtime.model.use_recoverssm = True
+    packed = torch.randn(4, 3084, dtype=torch.bfloat16)
+    beta, _, _ = runtime.scope["_postprocess_bfg"](runtime.model, packed)
+    torch.testing.assert_close(beta, packed[:, :12].unsqueeze(0), rtol=0, atol=0)
+    assert ("sigmoid", "main") not in runtime.events
 
 
 def test_non_bfg_caller_keeps_recurrent_gate_materialization(runtime):

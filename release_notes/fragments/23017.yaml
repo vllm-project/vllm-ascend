@@ -1,0 +1,7 @@
+pr: 23017
+entries:
+  - category: bugfix
+    text: >-
+      DeepSeek V4.1 DSpark on Atlas A5 reuses the target MegaMoE communication
+      buffer when the draft has a different expert count and its communication
+      settings and buffer requirements fit the target.

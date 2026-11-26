@@ -33,7 +33,7 @@ jobs:
   prepare:
     name: Plan
     if: ${{ inputs.should_run }}
-    runs-on: linux-aarch64-cpu-4
+    runs-on: linux-aarch64-cpu-2
     timeout-minutes: 30
     container:
       image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-cpu-py3.12

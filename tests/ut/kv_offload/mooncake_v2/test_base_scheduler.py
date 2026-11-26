@@ -50,11 +50,14 @@ def make_scheduler_config(
     )
 
 
+@pytest.mark.parametrize("sliding_window", [False, True])
 def test_base_scheduler_initializes_parallel_layout_and_control_port(
     monkeypatch: pytest.MonkeyPatch,
+    sliding_window: bool,
 ) -> None:
     config = make_scheduler_config()
-    group = KVCacheGroupSpec(layer_names=["layer.0"], kv_cache_spec=make_full_spec())
+    spec = make_sliding_spec() if sliding_window else make_full_spec()
+    group = KVCacheGroupSpec(layer_names=["layer.0"], kv_cache_spec=spec)
     kv_cache_config = SimpleNamespace(kv_cache_groups=[group])
     ascend_config = object()
     init_ascend_config = MagicMock()
@@ -85,7 +88,7 @@ def test_base_scheduler_initializes_parallel_layout_and_control_port(
     assert scheduler.side_channel_port == 6025
     assert scheduler.group_block_size == [16]
     assert scheduler.group_unique_specs == [[group.kv_cache_spec]]
-    assert scheduler.need_truncate is False
+    assert scheduler.need_truncate is sliding_window
     init_ascend_config.assert_called_once_with(config)
 
 
@@ -179,6 +182,10 @@ def test_base_scheduler_expands_unique_uniform_specs_in_layer_order() -> None:
     )
 
     assert MooncakeBaseConnectorScheduler._get_group_unique_specs(group) == [full, sliding]
+    scheduler = MooncakeBaseConnectorScheduler.__new__(MooncakeBaseConnectorScheduler)
+    scheduler.vllm_config = SimpleNamespace(model_config=SimpleNamespace(hf_config=SimpleNamespace()))
+    scheduler.group_unique_specs = [scheduler._get_group_unique_specs(group)]
+    assert scheduler._needs_prefill_token_truncation() is True
 
 
 def test_base_scheduler_transfer_blocks_handles_empty_and_state_without_speculation() -> None:
@@ -264,13 +271,14 @@ def test_base_scheduler_abstract_contract_and_legacy_metadata_delegation() -> No
 def test_base_scheduler_on_new_request_truncates_only_stateful_producer(need_truncate, params):
     scheduler = MooncakeBaseConnectorScheduler.__new__(MooncakeBaseConnectorScheduler)
     scheduler.need_truncate = need_truncate
+    scheduler.kv_cache_config = SimpleNamespace(hash_block_size=2)
+    scheduler.vllm_config = SimpleNamespace(num_hash_lookahead_tokens=1)
     request = make_request(
         prompt_token_ids=[1, 2, 3],
         num_prompt_tokens=3,
         _all_token_ids=[1, 2, 3],
         kv_transfer_params=None if params is None else dict(params),
         max_tokens=8,
-        block_hashes=["full-prompt-hash"],
     )
 
     scheduler.on_new_request(request)
@@ -281,12 +289,10 @@ def test_base_scheduler_on_new_request_truncates_only_stateful_producer(need_tru
     assert request._all_token_ids == request.prompt_token_ids
     assert request.num_prompt_tokens == (2 if truncated else 3)
     assert request.max_tokens == (1 if truncated else 8)
-    # Keep the two list literals in separate statements. A conditional
-    # expression would join list[tuple[int, int]] with list[str] and fail mypy.
     if truncated:
-        assert request.block_hashes == [(1, 2)]
+        request.truncate_block_hashes.assert_called_once_with(2, 1)
     else:
-        assert request.block_hashes == ["full-prompt-hash"]
+        request.truncate_block_hashes.assert_not_called()
 
 
 @pytest.mark.parametrize(

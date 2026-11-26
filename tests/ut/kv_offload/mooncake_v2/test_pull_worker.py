@@ -2,7 +2,7 @@
 
 import queue
 import threading
-from concurrent.futures import Future
+from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import replace
 from types import SimpleNamespace
 from typing import Any
@@ -40,12 +40,14 @@ from .helpers import (
     make_sfa_indexer_spec,
     make_sliding_spec,
     make_transfer_metadata,
+    vllm_dcp_ranks_by_worker,
 )
 
 
 def make_thread(**overrides: object) -> MooncakePullRecvingThread:
     thread = MooncakePullRecvingThread.__new__(MooncakePullRecvingThread)
     thread.vllm_config = SimpleNamespace(parallel_config=SimpleNamespace(cp_kv_cache_interleave_size=16))
+    thread.pull_transfer_mode = "batch"
     thread.tp_rank = 0
     thread.tp_size = 1
     thread.pcp_rank = 0
@@ -72,6 +74,9 @@ def make_thread(**overrides: object) -> MooncakePullRecvingThread:
     thread.request_queue = queue.Queue()
     for name, value in overrides.items():
         setattr(thread, name, value)
+    thread._process_next = (
+        thread._process_next_request if thread.pull_transfer_mode == "request" else thread._process_next_batch
+    )
     return thread
 
 
@@ -166,6 +171,8 @@ def test_pcp2_tp8_remote_groups_cover_mla_and_gqa(
 ) -> None:
     local_tp_size = total_heads
     thread = make_thread(tp_size=local_tp_size, tp_rank=0)
+    dcp_ranks = vllm_dcp_ranks_by_worker(8, 2, remote_dcp_size)
+    expected_group = sorted(expected_group, key=lambda worker: (worker // remote_dcp_size, dcp_ranks[worker]))
 
     assert thread._get_attention_remote_tp_rank_groups(
         remote_tp_size=8,
@@ -203,17 +210,19 @@ def test_pcp_dcp_selects_one_complete_replica_group() -> None:
 
 
 def test_pcp2_tp4_full_dcp_block_order_matches_vllm_rank_order() -> None:
-    physical_ranks: list[int] = []
-    for dcp_rank in range(8):
+    for worker_rank, dcp_rank in enumerate(vllm_dcp_ranks_by_worker(4, 2, 8)):
+        tp_rank, pcp_rank = divmod(worker_rank, 2)
         thread = make_thread(
             tp_size=4,
+            tp_rank=tp_rank,
             pcp_size=2,
+            pcp_rank=pcp_rank,
             dcp_size=8,
             dcp_rank=dcp_rank,
         )
         result = thread._compute_group_block_ids(
             request_id="request",
-            remote_tp_rank_groups=[list(range(8))],
+            remote_tp_rank_groups=thread._get_attention_remote_tp_rank_groups(4, 2, 8, 8, 1),
             remote_dcp_size=8,
             spec_index=0,
             local_block_size=16,
@@ -231,11 +240,7 @@ def test_pcp2_tp4_full_dcp_block_order_matches_vllm_rank_order() -> None:
             remote_interleave_size=16,
         )
 
-        assert result == [(dcp_rank, [10], [20])]
-        tp_rank, pcp_rank = divmod(dcp_rank, 2)
-        physical_ranks.append(pcp_rank * 4 + tp_rank)
-
-    assert physical_ranks == [0, 4, 1, 5, 2, 6, 3, 7]
+        assert result == [(worker_rank, [10], [20])]
 
 
 @pytest.mark.parametrize("local_pcp", [False, True])
@@ -1064,9 +1069,9 @@ def test_attention_address_generation_handles_partial_head_overlap() -> None:
 @pytest.mark.parametrize(("local_tp", "local_pcp"), [(1, 4), (4, 1), (2, 2)])
 @pytest.mark.parametrize(("remote_tp", "remote_pcp"), [(1, 4), (4, 1), (2, 2)])
 @pytest.mark.parametrize("worker_rank", [1, 2, 3])
-@pytest.mark.parametrize("recoverssm", [False, True])
+@pytest.mark.parametrize("state_layout", ["native", "kda_recoverssm", "gdn_recoverssm", "gdn_recoverssm_bf16"])
 def test_mamba_equal_tp_address_generation_transfers_each_cache(
-    local_tp, local_pcp, remote_tp, remote_pcp, worker_rank, recoverssm
+    local_tp, local_pcp, remote_tp, remote_pcp, worker_rank, state_layout
 ) -> None:
     tp_rank, pcp_rank = divmod(worker_rank, local_pcp)
     remote_tp_rank, remote_pcp_rank = divmod(worker_rank, remote_pcp)
@@ -1074,8 +1079,8 @@ def test_mamba_equal_tp_address_generation_transfers_each_cache(
     dtypes: tuple[torch.dtype, ...] = (torch.float16, torch.float32)
     local_bases, remote_bases = [1000, 2000], [5000, 6000]
     strides, block_lens = [128, 256], [96, 128]
-    expected_src, expected_dst = [1128, 2256], [5256, 6512]
-    if recoverssm:
+    expected_src = [1128, 2256]
+    if state_layout == "kda_recoverssm":
         shapes += [(2, 6, 4), (2, 6, 8)]
         dtypes += (torch.float32, torch.float16)
         local_bases += [3000, 4000]
@@ -1083,7 +1088,19 @@ def test_mamba_equal_tp_address_generation_transfers_each_cache(
         strides += [256, 256]
         block_lens += [192, 192]
         expected_src += [3256, 4256]
-        expected_dst += [7512, 8512]
+    elif state_layout.startswith("gdn_recoverssm"):
+        # TP-local Qwen geometry with a four-token speculative window.
+        shapes = [(7, 2048), (8, 128, 128), (8, 5, 257)]
+        checkpoint_dtype = torch.bfloat16 if state_layout.endswith("bf16") else torch.float32
+        dtypes = (torch.bfloat16, checkpoint_dtype, torch.float32)
+        local_bases = [1000000, 2000000, 3000000]
+        remote_bases = [6000000, 7000000, 8000000]
+        checkpoint_bytes = 262144 if checkpoint_dtype == torch.bfloat16 else 524288
+        block_lens = [28672, checkpoint_bytes, 41120]
+        strides = [length + 256 for length in block_lens]
+        expected_src = [base + stride for base, stride in zip(local_bases, strides)]
+    remote_strides = [stride + 128 for stride in strides]
+    expected_dst = [base + 2 * stride for base, stride in zip(remote_bases, remote_strides)]
     thread = make_thread(
         tp_size=local_tp,
         tp_rank=tp_rank,
@@ -1096,7 +1113,7 @@ def test_mamba_equal_tp_address_generation_transfers_each_cache(
     )
     remote = make_pp_metadata(
         block_shapes=[shapes],
-        block_strides=[strides],
+        block_strides=[remote_strides],
         block_lens=[block_lens],
         pcp_tp_base_addrs={
             pcp: {
@@ -1110,7 +1127,16 @@ def test_mamba_equal_tp_address_generation_transfers_each_cache(
     dst: list[int] = []
     lengths: list[int] = []
     thread._append_mamba_transfer_addresses(
-        replace(make_mamba_spec(), shapes=tuple(shapes), dtypes=dtypes),
+        replace(
+            make_mamba_spec(),
+            shapes=tuple(shapes),
+            dtypes=dtypes,
+            mamba_type=(
+                MambaAttentionBackendEnum.GDN_ATTN
+                if state_layout.startswith("gdn_recoverssm")
+                else MambaAttentionBackendEnum.MAMBA2
+            ),
+        ),
         remote_pcp_rank,
         remote_tp_rank,
         remote_tp,
@@ -1264,11 +1290,12 @@ def test_handle_requests_attributes_failed_tp_to_affected_requests(
     thread.executor.submit.side_effect = submit
     requests = {"request-a": make_req_meta(), "request-b": make_req_meta()}
 
-    if submission_error:
-        with pytest.raises(RuntimeError, match="submit failed"):
-            thread._handle_requests("engine-p", "10.0.0.1", 6000, requests)
-    else:
-        assert thread._handle_requests("engine-p", "10.0.0.1", 6000, requests) == {"request-b"}
+    thread.add_requests("engine-p", requests)
+    thread._process_next()
+    assert thread.get_and_clear_finished_requests() == KVConnectorTransferResults(
+        finished_recving=set(requests),
+        failed_recving=set(requests) if submission_error else {"request-b"},
+    )
     completed_result.assert_called_once_with()
 
 
@@ -1426,12 +1453,16 @@ def test_validate_remote_metadata_rejects_invalid_topology(
 
 @pytest.mark.parametrize("can_report", [True, False])
 @pytest.mark.parametrize("batch_error", [False, True])
+@pytest.mark.parametrize("mode", ["batch", "request"])
 def test_worker_run_marks_only_failed_requests_and_finishes_the_batch(
+    mode: str,
     monkeypatch: pytest.MonkeyPatch,
     can_report: bool,
     batch_error: bool,
 ) -> None:
-    thread = make_thread(device=0, ready_event=threading.Event(), can_report_invalid_block_ids=can_report)
+    thread = make_thread(
+        pull_transfer_mode=mode, device=0, ready_event=threading.Event(), can_report_invalid_block_ids=can_report
+    )
     requests = {
         "request-a": make_req_meta(local=([10],)),
         "request-b": make_req_meta(local=([20],)),
@@ -1439,10 +1470,22 @@ def test_worker_run_marks_only_failed_requests_and_finishes_the_batch(
     request_queue = MagicMock()
     request_queue.get.side_effect = [("engine-p", requests), _StopWorkerLoop()]
     thread.request_queue = request_queue
-    thread._handle_requests = MagicMock(  # type: ignore[method-assign]
+    thread._get_remote_metadata = MagicMock(
         side_effect=RuntimeError("metadata unavailable") if batch_error else None,
-        return_value={"request-b"},
     )
+
+    def submit_group(_engine, _metadata, group, *_args):
+        futures = {}
+        for request_id in group:
+            future: Future[None] = Future()
+            if request_id == "request-b":
+                future.set_exception(RuntimeError("READ failed"))
+            else:
+                future.set_result(None)
+            futures[future] = (0, 0, 0, {request_id})
+        return futures, None
+
+    thread._submit_transfer_group = MagicMock(side_effect=submit_group)
     set_device = MagicMock()
     monkeypatch.setattr(torch.npu, "set_device", set_device)
 
@@ -2494,3 +2537,194 @@ def test_transfer_bucket_caches_remote_interleave_separately() -> None:
     calls = thread._compute_group_block_ids.call_args_list
     assert len(calls) == 2
     assert [call.args[16] for call in calls] == [8, 16]
+
+
+@pytest.mark.parametrize("mode,read_count", [("batch", 1), ("request", 2)])
+def test_pull_modes_preserve_addresses_and_select_read_granularity(mode, read_count) -> None:
+    options = {} if mode == "request" else {"pull_transfer_mode": mode}
+    config = SimpleNamespace(kv_transfer_config=SimpleNamespace(get_from_extra_config=options.get))
+    thread = make_thread(pull_transfer_mode=MooncakePullRecvingThread._get_pull_transfer_mode(config))
+    thread._get_remote_metadata = MagicMock(return_value=make_metadata_groups(pp_metadata=make_pp_metadata()))
+    thread.remote_tp_rank_groups = {"engine-p": {0: {(0, 0): [[0]]}}}
+    thread.remote_layer_index_pairs = {"engine-p": {0: [(0, 0)]}}
+    thread.engine = MagicMock()
+    thread.engine.batch_transfer_sync_read.return_value = 0
+    thread.executor = MagicMock()
+
+    def submit(fn, *args):
+        future: Future[None] = Future()
+        try:
+            future.set_result(fn(*args))
+        except Exception as exc:
+            future.set_exception(exc)
+        return future
+
+    thread.executor.submit.side_effect = submit
+    requests = {
+        "a": make_req_meta(local=([1, 2],), remote=([3, 4],)),
+        "b": make_req_meta(local=([5, 6],), remote=([7, 8],)),
+    }
+    thread.add_requests("engine-p", requests)
+    thread._process_next()
+
+    calls = thread.engine.batch_transfer_sync_read.call_args_list
+    assert len(calls) == read_count
+    assert all(call.args[0] == "10.0.0.1:9000" for call in calls)
+    # Same ordered byte ranges in both modes, grouped into one or two READs.
+    assert [address for call in calls for address in call.args[1]] == [1128, 1640]
+    assert [address for call in calls for address in call.args[2]] == [5384, 5896]
+    assert [length for call in calls for length in call.args[3]] == [256, 256]
+    assert thread.get_and_clear_finished_requests() == KVConnectorTransferResults(finished_recving={"a", "b"})
+    assert all(call.args[0] == thread._execute_tp_transfer_bucket for call in thread.executor.submit.call_args_list)
+
+
+@pytest.mark.parametrize("failure", ["submit", "read"])
+def test_request_completion_drains_reads(failure, monkeypatch):
+    thread = make_thread(pull_transfer_mode="request", device=0, ready_event=threading.Event())
+    remote = make_metadata_groups(pp_metadata=make_pp_metadata())
+    remote.metadata_by_pp_rank[1] = remote.metadata_by_pp_rank[0]
+    thread._get_remote_metadata = MagicMock(return_value=remote)
+    thread.remote_tp_rank_groups = {"engine-p": {pp: {(0, 0): [[0]]} for pp in range(2)}}
+    thread.remote_layer_index_pairs = {"engine-p": {pp: [(0, 0)] for pp in range(2)}}
+    futures: dict[tuple[str, int], Future[None]] = {}
+
+    def submit(fn, pp, pcp, tp, *args):
+        name = args[-1][0][(0, 0)][0][0]
+        if failure == "submit" and (name, pp) == ("a", 1):
+            raise RuntimeError("submit failed")
+        future = futures[name, pp] = Future()
+        return future
+
+    thread.executor = MagicMock()
+    thread.executor.submit.side_effect = submit
+    thread.request_queue = MagicMock()
+    thread.request_queue.get.side_effect = [
+        ("engine-p", {"a": make_req_meta(local=([10],)), "b": make_req_meta(local=([20],))}),
+        _StopWorkerLoop(),
+    ]
+    monkeypatch.setattr(torch.npu, "set_device", MagicMock())
+    with pytest.raises(_StopWorkerLoop):
+        thread.run()
+    assert thread.finished_requests.empty()
+    # B completes independently while A still owns an in-flight READ.
+    futures["b", 0].set_result(None)
+    assert thread.finished_requests.empty()
+    futures["b", 1].set_result(None)
+    assert thread.finished_requests.get_nowait() == ("b", False)
+    if failure == "read":
+        futures["a", 1].set_exception(RuntimeError("READ failed"))
+    assert thread.finished_requests.empty()
+    assert not thread.invalid_block_ids
+    futures["a", 0].set_result(None)
+    assert thread.finished_requests.get_nowait() == ("a", True)
+    assert thread.invalid_block_ids == {10}
+    assert thread.finished_requests.empty()
+
+
+@pytest.mark.parametrize("registration", ["before", "after", "completed"])
+def test_callback_registration_failure_drains_and_finishes_once(registration, monkeypatch):
+    thread = make_thread()
+    futures: list[Future[None]] = [Future() for _ in range(3)]
+    futures[0].set_result(None)
+    entered = threading.Event()
+    original = futures[1].add_done_callback
+    callbacks = []
+
+    def register(callback):
+        callbacks.append(callback)
+        if registration != "before":
+            original(callback)
+        if registration == "completed":
+            futures[1].set_result(None)
+        entered.set()
+        raise RuntimeError("callback registration failed")
+
+    monkeypatch.setattr(futures[1], "add_done_callback", register)
+    tasks = {future: (0, 0, rank, {"a"}) for rank, future in enumerate(futures)}
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        tracking = executor.submit(thread._track_request, "a", make_req_meta(local=([10],)), tasks, None)
+        try:
+            assert entered.wait(5)
+            assert thread.finished_requests.empty()
+            assert not thread.invalid_block_ids
+            if not futures[1].done():
+                futures[1].set_result(None)
+            assert thread.finished_requests.empty()  # The third READ still owns blocks.
+            futures[2].set_result(None)
+            tracking.result(timeout=5)
+            assert thread.finished_requests.get_nowait() == ("a", True)
+            callbacks[0](futures[1])  # A late/repeated callback must not publish twice.
+            assert thread.finished_requests.empty()
+            assert thread.invalid_block_ids == {10}
+        finally:
+            for future in futures:
+                if not future.done():
+                    future.set_result(None)
+
+
+@pytest.mark.parametrize("mode", ["request", "batch"])
+def test_pull_fallback_drains_before_finish_and_keeps_other_engines(mode, monkeypatch):
+    thread = make_thread(pull_transfer_mode=mode, device=0, ready_event=threading.Event())
+    pending: Future[None] = Future()
+    healthy: Future[None] = Future()
+    healthy.set_result(None)
+    thread._get_remote_metadata = MagicMock()
+    thread._submit_transfer_group = MagicMock(
+        side_effect=lambda _engine, _metadata, requests, *_args: (
+            {pending if request_id == "bad" else healthy: (0, 0, 0, {request_id}) for request_id in requests},
+            None,
+        )
+    )
+    entered = threading.Event()
+    if mode == "request":
+        track = thread._track_request
+
+        def fail_after_tracking(request_id, *args):
+            track(request_id, *args)
+            if request_id == "bad":
+                entered.set()
+                raise RuntimeError("unexpected handler failure after callbacks attached")
+
+        thread._track_request = fail_after_tracking
+    else:
+        original = pull_worker.as_completed
+
+        def fail_aggregation(futures):
+            if pending in futures:
+                entered.set()
+                raise RuntimeError("unexpected aggregation failure")
+            return original(futures)
+
+        monkeypatch.setattr(pull_worker, "as_completed", fail_aggregation)
+    thread.request_queue = MagicMock()
+    thread.request_queue.get.side_effect = [
+        ("bad", {"bad": make_req_meta(local=([10],)), "same-engine": make_req_meta(local=([30],))}),
+        ("good", {"good": make_req_meta(local=([20],))}),
+        _StopWorkerLoop(),
+    ]
+    monkeypatch.setattr(torch.npu, "set_device", MagicMock())
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        running = executor.submit(thread.run)
+        try:
+            assert entered.wait(5)
+            if mode == "request":
+                # Both healthy requests complete while the first READ is still pending.
+                with pytest.raises(_StopWorkerLoop):
+                    running.result(timeout=5)
+                assert thread.get_and_clear_finished_requests() == KVConnectorTransferResults(
+                    finished_recving={"same-engine", "good"}
+                )
+            assert thread.finished_requests.empty()
+            assert not thread.invalid_block_ids
+            pending.set_result(None)
+            with pytest.raises(_StopWorkerLoop):
+                running.result(timeout=5)
+            results = thread.get_and_clear_finished_requests()
+            assert results.finished_recving == ({"bad"} if mode == "request" else {"bad", "same-engine", "good"})
+            assert results.failed_recving == (set() if mode == "request" else {"bad", "same-engine"})
+            assert thread.invalid_block_ids == (set() if mode == "request" else {10, 30})
+            assert thread.finished_requests.empty()
+            assert thread.request_queue.task_done.call_count == 2
+        finally:
+            if not pending.done():
+                pending.set_result(None)
