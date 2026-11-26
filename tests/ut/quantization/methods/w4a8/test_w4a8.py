@@ -209,6 +209,58 @@ class TestAscendW4A8DynamicFusedMoEMethod(TestBase):
         self.assertIs(weight_views[0], list_layer.w13_weight_list)
         self.assertIs(weight_views[-1], list_layer.w2_scale_bias_list)
 
+    @patch("vllm_ascend.ops.fused_moe.routed_experts.get_current_vllm_config_or_none", new=lambda: object())
+    @patch("vllm_ascend.quantization.methods.w4a8.w4a8.use_cann_megamoe", new=lambda _: True)
+    @patch("vllm_ascend.quantization.methods.w4a8.w4a8.torch_npu.npu_format_cast")
+    @patch("torch.Tensor.npu", new=lambda self: self, create=True)
+    def test_process_weights_after_loading_megamoe_zero_copy_fallback(self, mock_format_cast):
+        mock_format_cast.side_effect = identity
+        self.quant_method.use_expert_weight_list = False
+        layer = self.build_layer()
+
+        self.quant_method.process_weights_after_loading(layer)
+
+        # MegaMoe per-expert int8 views and ALLTOALL/MC2 3D int32 views share
+        # the exact same physical storage with zero duplicate HBM allocation.
+        self.assertEqual(len(layer.cann_mega_moe_w13_weight_list), self.experts)
+        self.assertEqual(len(layer.cann_mega_moe_w2_weight_list), self.experts)
+        self.assertEqual(layer.w13_weight.dtype, torch.int32)
+        self.assertEqual(layer.w2_weight.dtype, torch.int32)
+        self.assertTrue(all(w.dtype == torch.int8 for w in layer.cann_mega_moe_w13_weight_list))
+        self.assertTrue(all(w.dtype == torch.int8 for w in layer.cann_mega_moe_w2_weight_list))
+        self.assertTrue(
+            all(
+                w.untyped_storage().data_ptr() == layer.w13_weight.untyped_storage().data_ptr()
+                for w in layer.cann_mega_moe_w13_weight_list
+            )
+        )
+        self.assertTrue(
+            all(
+                w.untyped_storage().data_ptr() == layer.w2_weight.untyped_storage().data_ptr()
+                for w in layer.cann_mega_moe_w2_weight_list
+            )
+        )
+        # Fallback MLP, scale_bias, and EPLB weight-view accessors must remain valid.
+        w1, w1_scale, w2, w2_scale = self.quant_method._get_mlp_weights(layer)
+        self.assertIs(w1[0], layer.w13_weight)
+        self.assertIs(w2[0], layer.w2_weight)
+        self.assertIs(w1_scale[0], layer.w13_weight_scale)
+        self.assertIs(w2_scale[0], layer.w2_weight_scale)
+        bias1, bias2 = self.quant_method._get_mlp_scale_bias(layer)
+        self.assertIs(bias1[0], layer.w13_scale_bias)
+        self.assertIs(bias2[0], layer.w2_scale_bias)
+        eplb_views = self.quant_method.get_eplb_weight_views(layer)
+        self.assertEqual(len(eplb_views), 6)
+        with patch("vllm_ascend.quantization.methods.w4a8.w4a8._EXTRA_CTX") as mock_ctx:
+            mock_ctx.use_mega_moe = True
+            fused_weights = self.quant_method.get_fused_mc2_weights(layer)
+            self.assertIs(fused_weights.w1, layer.cann_mega_moe_w13_weight_list)
+            self.assertIs(fused_weights.w2, layer.cann_mega_moe_w2_weight_list)
+            mock_ctx.use_mega_moe = False
+            fallback_weights = self.quant_method.get_fused_mc2_weights(layer)
+            self.assertIs(fallback_weights.w1[0], layer.w13_weight)
+            self.assertIs(fallback_weights.w2[0], layer.w2_weight)
+
     @patch("vllm_ascend.quantization.methods.w4a8.w4a8.get_current_vllm_config", new=lambda: None)
     @patch("vllm_ascend.quantization.methods.w4a8.w4a8.use_cann_megamoe", new=lambda _: False)
     @patch("vllm_ascend.quantization.methods.w4a8.w4a8.torch_npu.npu_format_cast")
