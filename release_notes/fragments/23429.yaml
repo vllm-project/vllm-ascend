@@ -1,0 +1,5 @@
+pr: 23429
+entries:
+  - category: performance
+    hardware: [A3]
+    text: Reduced combined KDA verification and ordinary state commit latency by an average of 8.4% on A3 across three batch shapes and four acceptance patterns with four to six accepted speculative tokens per request.
