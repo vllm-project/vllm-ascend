@@ -2672,6 +2672,7 @@ def test_layerwise_lookup_returns_result_without_tail_boundaries(block_key):
     scheduler = LayerwiseKVPoolScheduler.__new__(LayerwiseKVPoolScheduler)
     scheduler.use_block_key_layerwise = block_key
     scheduler.use_layerwise_transfer = not block_key
+    scheduler.vllm_config = SimpleNamespace(num_hash_lookahead_tokens=0)
     scheduler.use_eagle = False
     scheduler.cacheable_group_ids = [0]
     scheduler.original_block_size = [16]

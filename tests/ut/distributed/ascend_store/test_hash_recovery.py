@@ -18,6 +18,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.in_flight_save_blo
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.kv_transfer import KVCacheStoreSendingThread
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler import KVPoolScheduler
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker import KVPoolWorker
+from vllm_ascend.utils import vllm_version_is
 
 try:
     importlib.import_module("vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.coordinator")
@@ -44,6 +45,16 @@ def test_same_group_hits_as_upstream(eagle):
     hashes = [BlockHash(bytes([i + 1]) * 8) for i in range(32)]
     # Start with a shared prefix, then leave different holes in each group.
     exists = {(g, bytes(h)) for g in range(2) for i, h in enumerate(hashes) if i not in (12 + g, 21 + g)}
+    release = vllm_version_is("0.34.0")
+    cache_groups = groups()
+    if not release:
+        from vllm.v1.kv_cache_interface import KVCacheGroup
+
+        cache_groups = [
+            KVCacheGroup(group.kv_cache_specs, group.manager_config, group.block_size) for group in cache_groups
+        ]
+    lookahead_tokens = 4 if eagle else 0
+    policy = {"use_eagle": eagle} if release else {"num_hash_lookahead_tokens": lookahead_tokens}
     results = []
     for module, cls in [
         (coordinator, coordinator.AscendStoreCoordinator),
@@ -54,8 +65,12 @@ def test_same_group_hits_as_upstream(eagle):
             if cls is coordinator.AscendStoreCoordinator
             else {}
         )
-        coord = cls(groups(), 16, 4, use_eagle=eagle, enable_partial_hash_hits=True, **geometry)
+        coord = cls(cache_groups, 16, 4, enable_partial_hash_hits=True, **policy, **geometry)
         pool = module.ExternalCachedBlockPool(4, exists)
+        if not release:
+            # Both native coordinators pass the hash lookahead through the
+            # block pool to the allocation managers.
+            pool.num_hash_lookahead_tokens = lookahead_tokens
         results.append([coord.find_longest_cache_hit(hashes, end, pool)[1] for end in range(4, 129, 4)])
     assert results[0] == results[1]
 
@@ -197,8 +212,9 @@ def test_partial_tail_non_mamba_puts_follow_upstream_prompt_checkpoint(completed
         mamba_group_ids=[1],
         hash_block_size=4,
         lcm_block_size=16,
-        use_eagle=True,
-        eagle_proof_margin_by_group={0: 4},
+        use_eagle=vllm_version_is("0.34.0"),
+        num_hash_lookahead_tokens=7,
+        eagle_proof_margin_by_group={0: 4} if vllm_version_is("0.34.0") else {},
     )
     scheduler.grouped_block_size = [4, 16]
     scheduler.cacheable_group_ids = [0, 1]
@@ -212,6 +228,9 @@ def test_partial_tail_non_mamba_puts_follow_upstream_prompt_checkpoint(completed
         boundary_puts=[metadata.BoundaryPut(1, 60 + i, n) for i, n in enumerate(mamba_tails)],
         publish_partial_tail=publish,
     )
+    if not vllm_version_is("0.34.0"):
+        # Native lookup encodes proof in the hash itself.
+        expected = [put for put in expected if put[2] == 68]
     assert scheduler._partial_tail_non_mamba_puts(req_meta) == expected
 
 
@@ -224,7 +243,8 @@ def test_partial_tail_non_mamba_puts_follow_upstream_eagle_drop(blocks, expected
         mamba_group_ids=[1],
         hash_block_size=4,
         lcm_block_size=16,
-        use_eagle=True,
+        use_eagle=vllm_version_is("0.34.0"),
+        num_hash_lookahead_tokens=5,
         eagle_proof_margin_by_group={},
     )
     scheduler.grouped_block_size = [16, 16]
@@ -250,7 +270,8 @@ def finishing_tail():
         mamba_group_ids=[1],
         hash_block_size=4,
         lcm_block_size=16,
-        use_eagle=True,
+        use_eagle=vllm_version_is("0.34.0"),
+        num_hash_lookahead_tokens=5,
         eagle_proof_margin_by_group={},
     )
     scheduler.grouped_block_size = [16, 16]

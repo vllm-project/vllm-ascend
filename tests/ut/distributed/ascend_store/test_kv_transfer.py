@@ -1553,6 +1553,7 @@ class TestKVCacheStoreRecvingThread(unittest.TestCase):
         scheduler = Scheduler.__new__(Scheduler)
         scheduler.connector = multi
         scheduler.requests = {"r1": request}
+        hisparse.connector_scheduler.requests = scheduler.requests
         scheduler._aborted_kv_loads = set()
         scheduler.deferred_loads = {}
         scheduler.finished_recving_kv_req_ids = set()

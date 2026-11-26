@@ -124,7 +124,7 @@ def _hybrid_config(
                 KVCacheGroup.from_layers(
                     {
                         "other-mamba-layer": MambaManager.layer_config(
-                            replace(MAMBA_SPEC, block_size=HASH_BLOCK_SIZE), mamba_cache_mode="align"
+                            replace(MAMBA_SPEC, block_size=HASH_BLOCK_SIZE), enable_prefix_caching=True
                         )
                     }
                 )

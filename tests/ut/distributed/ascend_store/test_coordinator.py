@@ -512,17 +512,14 @@ class TestFindReachableHitTokens(unittest.TestCase):
         self.assertEqual(calls, [(0, _hashes(2), [False, True])])
 
     def test_hit_length_derived_from_callback_hits(self):
-        with patch(
-            "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.coordinator._get_manager_class",
-            return_value=_FakePrefixManager,
-        ):
-            coord = AscendStoreCoordinator(
-                [KVCacheGroupSpec(["layer.0"], _full_spec(128))],
-                scheduler_block_size=256,
-                hash_block_size=128,
-                group_block_sizes=[128],
-                group_cache_families=["c4"],
-            )
+        coord = AscendStoreCoordinator(
+            [KVCacheGroupSpec(["layer.0"], _full_spec(128))],
+            scheduler_block_size=256,
+            hash_block_size=128,
+            group_block_sizes=[128],
+            group_cache_families=["c4"],
+            enable_partial_hash_hits=True,
+        )
         block_hashes = _hashes(4)
         received: list[list] = []
 

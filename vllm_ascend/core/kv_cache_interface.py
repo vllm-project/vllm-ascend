@@ -476,6 +476,12 @@ class AscendSlidingWindowMLASpec(SlidingWindowMLASpec):
         assert len({spec.alignment for spec in specs}) == 1
         assert len({spec.indexes_kv_by_block_stride for spec in specs}) == 1
         if not vllm_version_is("0.34.0"):
+            assert len({spec.bounded_replay for spec in specs}) == 1, (
+                "All sliding-window layers must use the same replay policy."
+            )
+            assert len({spec.extra_retained_tokens for spec in specs}) == 1, (
+                "All sliding-window layers must use the same retained token count."
+            )
             assert all(spec == specs[0] for spec in specs), "All sliding-window layers must use the same cache layout."
             return specs[0]
         return replace(
