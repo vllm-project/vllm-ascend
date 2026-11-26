@@ -2108,32 +2108,15 @@ Select the tab for the target hardware.
     [Memcache and vLLM separated deployment](../../user_guide/feature_guide/kv_cache_pool_ascend_store.md#Memcache-and-vLLM-Separated-Deployment).
 
     Reuse `launch_online_dp.py` from [Section 5.2.1.1](#5211-prepare-the-dp-launcher).
-    Before launching vLLM on each node, run the following setup in the same shell
-    that will run the launcher. Set `LOCAL_IP` and `NIC_NAME` for the local node,
-    `MODEL_PATH` to the W4A8 checkpoint, `MEMCACHE_INSTALL_PATH` to the `Location`
+    In each role script below, set `MEMCACHE_INSTALL_PATH` to the `Location`
     reported by `pip show memcache_hybrid`, and `MEMCACHE_CONFIG_DIR` to the
-    absolute directory containing the configuration files above. The role scripts
-    inherit these environment variables from the launcher.
-
-    ```shell
-    LOCAL_IP="<LOCAL_NODE_IP>"
-    NIC_NAME="<NETWORK_INTERFACE>"
-    MEMCACHE_INSTALL_PATH="<MEMCACHE_INSTALL_PATH>"
-    MEMCACHE_CONFIG_DIR="<MEMCACHE_CONFIG_DIR>"
-    export MODEL_PATH="<YOUR_MODEL_PATH>"
-    export HCCL_IF_IP="$LOCAL_IP"
-    export GLOO_SOCKET_IFNAME="$NIC_NAME"
-    export TP_SOCKET_IFNAME="$NIC_NAME"
-    export HCCL_SOCKET_IFNAME="$NIC_NAME"
-    export PYTHONHASHSEED=0
-    export MMC_LOCAL_CONFIG_PATH="$MEMCACHE_CONFIG_DIR/mmc-local.conf"
-    export LD_LIBRARY_PATH="$MEMCACHE_INSTALL_PATH/memcache_hybrid/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
-    ```
+    absolute directory containing the configuration files above.
 
     ##### 5.3.2.2 Start the Prefill Node with Pooling
 
     On the Prefill node, save the following script as `run_dp_template.sh`.
-    Complete the environment setup in Section 5.3.2.1 before running the launcher.
+    Set `LOCAL_IP`, `NIC_NAME`, `MODEL_PATH`, `MEMCACHE_INSTALL_PATH`, and
+    `MEMCACHE_CONFIG_DIR` for the local environment.
 
     The `--eplb-config` settings below use `window_size: 64` and
     `step_interval: 128` for short benchmark runs. These smaller values provide
@@ -2147,7 +2130,19 @@ Select the tab for the target hardware.
     unset https_proxy
     unset http_proxy
 
-    export LD_LIBRARY_PATH="${LD_LIBRARY_PATH:+$LD_LIBRARY_PATH:}/usr/local/lib/"
+    LOCAL_IP="<PREFILL_NODE_IP>"
+    NIC_NAME="<NETWORK_INTERFACE>"
+    MODEL_PATH="<YOUR_MODEL_PATH>"
+    MEMCACHE_INSTALL_PATH="<MEMCACHE_INSTALL_PATH>"
+    MEMCACHE_CONFIG_DIR="<MEMCACHE_CONFIG_DIR>"
+
+    export HCCL_IF_IP="$LOCAL_IP"
+    export GLOO_SOCKET_IFNAME="$NIC_NAME"
+    export TP_SOCKET_IFNAME="$NIC_NAME"
+    export HCCL_SOCKET_IFNAME="$NIC_NAME"
+    export PYTHONHASHSEED=0
+    export MMC_LOCAL_CONFIG_PATH="$MEMCACHE_CONFIG_DIR/mmc-local.conf"
+    export LD_LIBRARY_PATH="$MEMCACHE_INSTALL_PATH/memcache_hybrid/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}:/usr/local/lib/"
 
     export VLLM_USE_V2_MODEL_RUNNER=1
     export VLLM_USE_FASTOKENS=1
@@ -2244,7 +2239,8 @@ Select the tab for the target hardware.
     ##### 5.3.2.3 Start the Decode Node with Pooling
 
     On the Decode node, save the following script as `run_dp_template.sh`.
-    Complete the environment setup in Section 5.3.2.1 before running the launcher.
+    Set `LOCAL_IP`, `NIC_NAME`, `MODEL_PATH`, `MEMCACHE_INSTALL_PATH`, and
+    `MEMCACHE_CONFIG_DIR` for the local environment.
 
     ```shell
     #!/usr/bin/env bash
@@ -2252,7 +2248,19 @@ Select the tab for the target hardware.
     unset https_proxy
     unset http_proxy
 
-    export LD_LIBRARY_PATH="${LD_LIBRARY_PATH:+$LD_LIBRARY_PATH:}/usr/local/lib/"
+    LOCAL_IP="<DECODE_NODE_IP>"
+    NIC_NAME="<NETWORK_INTERFACE>"
+    MODEL_PATH="<YOUR_MODEL_PATH>"
+    MEMCACHE_INSTALL_PATH="<MEMCACHE_INSTALL_PATH>"
+    MEMCACHE_CONFIG_DIR="<MEMCACHE_CONFIG_DIR>"
+
+    export HCCL_IF_IP="$LOCAL_IP"
+    export GLOO_SOCKET_IFNAME="$NIC_NAME"
+    export TP_SOCKET_IFNAME="$NIC_NAME"
+    export HCCL_SOCKET_IFNAME="$NIC_NAME"
+    export PYTHONHASHSEED=0
+    export MMC_LOCAL_CONFIG_PATH="$MEMCACHE_CONFIG_DIR/mmc-local.conf"
+    export LD_LIBRARY_PATH="$MEMCACHE_INSTALL_PATH/memcache_hybrid/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}:/usr/local/lib/"
 
     export VLLM_USE_V2_MODEL_RUNNER=1
     export VLLM_USE_FASTOKENS=1
