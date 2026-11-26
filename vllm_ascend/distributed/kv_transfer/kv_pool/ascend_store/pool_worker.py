@@ -402,25 +402,7 @@ class BaseKVPoolWorker(ABC):
         backend_module = importlib.import_module(backend_path)
         real_backend = getattr(backend_module, backend_name)
 
-        backend_kwargs = {}
-        # lazy_init is requested for compressed models and for sparse-indexer
-        # models that run the packed C8 cache path. The v0.26 trigger was
-        # fabric memory with c8_enable_reshape_optim; on main the packed path
-        # is the dtype-derived native default (sparse + fp8/int8), so the gate
-        # tracks that condition instead of the removed knob. Each backend owns
-        # the hardware/protocol checks that decide whether it can honor the
-        # request (Mooncake honors it under fabric memory, Memcache under
-        # device_sdma).
-        cache_dtype = self.vllm_config.cache_config.cache_dtype
-        packed_c8_path = self.use_sparse and cache_dtype in ("fp8", "int8")
-        backend_kwargs["lazy_init"] = self.use_compress or packed_c8_path
-        # The connector's extra_config (with MultiConnector the child's own
-        # config, not the top-level one) carries the QoS the backends inject.
-        backend_kwargs["extra_config"] = extra_config
-        self.m_store = real_backend(  # type: ignore[misc]
-            parallel_config,
-            **backend_kwargs,
-        )
+        self.m_store = real_backend(parallel_config, extra_config=extra_config)  # type: ignore[misc]
 
     def _init_kv_events(self, vllm_config) -> None:
         kv_event_config = vllm_config.kv_events_config

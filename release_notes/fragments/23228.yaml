@@ -1,0 +1,4 @@
+pr: 23228
+entries:
+  - category: bugfix
+    text: Memcache KV pooling now initializes at startup for all models. Compressed and sparse-indexer models using device SDMA can find cached entries before their first write.
