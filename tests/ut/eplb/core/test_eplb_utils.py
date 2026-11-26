@@ -85,29 +85,29 @@ class TestAscendConfig(unittest.TestCase):
 
     def test_generate_log2phy_map_rotates_tail_tp_rank_with_tp_size(self):
         global_expert_map = [
-            torch.tensor([0, -1], dtype=torch.int32),
-            torch.tensor([0, -1], dtype=torch.int32),
-            torch.tensor([0, -1], dtype=torch.int32),
-            torch.tensor([0, -1], dtype=torch.int32),
-            torch.tensor([-1, 0], dtype=torch.int32),
-            torch.tensor([-1, 0], dtype=torch.int32),
-            torch.tensor([-1, 0], dtype=torch.int32),
-            torch.tensor([-1, 0], dtype=torch.int32),
+            torch.tensor([0, -1], dtype=torch.int32, device="npu"),
+            torch.tensor([0, -1], dtype=torch.int32, device="npu"),
+            torch.tensor([0, -1], dtype=torch.int32, device="npu"),
+            torch.tensor([0, -1], dtype=torch.int32, device="npu"),
+            torch.tensor([-1, 0], dtype=torch.int32, device="npu"),
+            torch.tensor([-1, 0], dtype=torch.int32, device="npu"),
+            torch.tensor([-1, 0], dtype=torch.int32, device="npu"),
+            torch.tensor([-1, 0], dtype=torch.int32, device="npu"),
         ]
 
         fallback_tail_dp1 = generate_log2phy_map(global_expert_map, ep_rank=7)
         rotated_tail_dp0 = generate_log2phy_map(global_expert_map, ep_rank=3, tp_size=4)
         rotated_tail_dp1 = generate_log2phy_map(global_expert_map, ep_rank=7, tp_size=4)
 
-        self.assertTrue(torch.equal(fallback_tail_dp1, torch.tensor([3, 7], dtype=torch.int32)))
-        self.assertTrue(torch.equal(rotated_tail_dp0, torch.tensor([3, 4], dtype=torch.int32)))
-        self.assertTrue(torch.equal(rotated_tail_dp1, torch.tensor([0, 5], dtype=torch.int32)))
+        self.assertTrue(torch.equal(fallback_tail_dp1.cpu(), torch.tensor([3, 7], dtype=torch.int32)))
+        self.assertTrue(torch.equal(rotated_tail_dp0.cpu(), torch.tensor([3, 4], dtype=torch.int32)))
+        self.assertTrue(torch.equal(rotated_tail_dp1.cpu(), torch.tensor([0, 5], dtype=torch.int32)))
 
     def test_init_eplb_config_without_eplb(self):
         self.vllm_config.additional_config = {"refresh": True}
         eplb_config = init_ascend_config(self.vllm_config).eplb_config
         _, expert_map, log2phy, redundant_experts = init_eplb_config(eplb_config, 0, self.moe_config)
-        gt_expert_map = torch.tensor([-1, -1, -1, -1, 0, 1, 2, 3])
+        gt_expert_map = torch.tensor([-1, -1, -1, -1, 0, 1, 2, 3], device="npu")
         self.assertIsNone(log2phy)
         self.assertTrue(torch.equal(expert_map, gt_expert_map))
         self.assertEqual(redundant_experts, 0)
@@ -125,7 +125,7 @@ class TestLinearExpertMapCache(unittest.TestCase):
         eplb_utils._LINEAR_EXPERT_MAP_CACHE.clear()
 
     def test_map_is_built_once_per_key(self):
-        base_map = torch.tensor([0, 1, 2, 3, -1, -1, -1, -1], dtype=torch.int32)
+        base_map = torch.tensor([0, 1, 2, 3, -1, -1, -1, -1], dtype=torch.int32, device="npu")
 
         with patch.object(eplb_utils, "determine_expert_map", return_value=(4, base_map, None)) as mock_determine:
             _, first, _, _ = init_eplb_config(self.eplb_config, 0, self.moe_config)
@@ -136,7 +136,7 @@ class TestLinearExpertMapCache(unittest.TestCase):
         self.assertTrue(torch.equal(second, base_map))
 
     def test_each_layer_gets_its_own_copy(self):
-        base_map = torch.tensor([0, 1, 2, 3, -1, -1, -1, -1], dtype=torch.int32)
+        base_map = torch.tensor([0, 1, 2, 3, -1, -1, -1, -1], dtype=torch.int32, device="npu")
 
         with patch.object(eplb_utils, "determine_expert_map", return_value=(4, base_map, None)):
             _, first, _, _ = init_eplb_config(self.eplb_config, 0, self.moe_config)
@@ -148,8 +148,8 @@ class TestLinearExpertMapCache(unittest.TestCase):
         self.assertEqual(int(eplb_utils._LINEAR_EXPERT_MAP_CACHE[(2, 0, 8)][0]), 0)
 
     def test_different_rank_is_a_different_entry(self):
-        rank0 = torch.tensor([0, 1, 2, 3, -1, -1, -1, -1], dtype=torch.int32)
-        rank1 = torch.tensor([-1, -1, -1, -1, 0, 1, 2, 3], dtype=torch.int32)
+        rank0 = torch.tensor([0, 1, 2, 3, -1, -1, -1, -1], dtype=torch.int32, device="npu")
+        rank1 = torch.tensor([-1, -1, -1, -1, 0, 1, 2, 3], dtype=torch.int32, device="npu")
 
         with patch.object(eplb_utils, "determine_expert_map", side_effect=[(4, rank0, None), (4, rank1, None)]):
             _, first, _, _ = init_eplb_config(self.eplb_config, 0, self.moe_config)
