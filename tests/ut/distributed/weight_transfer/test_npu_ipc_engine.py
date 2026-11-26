@@ -46,6 +46,10 @@ from unittest.mock import MagicMock, patch
 import pytest
 import torch
 from vllm.distributed.weight_transfer.base import WeightTransferEngine
+from vllm.distributed.weight_transfer.ipc_engine import (
+    IPCTrainerWeightTransferEngine,
+    IPCWeightTransferEngine,
+)
 from vllm.distributed.weight_transfer.packed_tensor import PackedIpcChunk
 
 from vllm_ascend.distributed.weight_transfer import npu_ipc_engine
@@ -55,6 +59,7 @@ from vllm_ascend.distributed.weight_transfer.npu_ipc_engine import (
 )
 
 _MODULE = "vllm_ascend.distributed.weight_transfer.npu_ipc_engine"
+_SHARED_IPC = hasattr(IPCWeightTransferEngine, "_get_device_key")
 
 
 def _patch_rebuild_npu_tensor(rebuild_func):
@@ -115,7 +120,12 @@ def test_unpacked_send_stores_reduce_tensor_args_only():
     rebuild_args = (None, None, None, None, None, None, 999, None)
     fake_reduce = MagicMock(return_value=("rebuild_func_sentinel", rebuild_args))
 
-    with patch("vllm.distributed.weight_transfer.ipc_engine.reduce_tensor", fake_reduce):
+    reduce_target = (
+        "torch.multiprocessing.reductions.reduce_tensor"
+        if _SHARED_IPC
+        else "vllm.distributed.weight_transfer.ipc_engine.reduce_tensor"
+    )
+    with patch(reduce_target, fake_reduce):
         from vllm_ascend.distributed.weight_transfer.npu_ipc_engine import (
             NPUIPCTrainerWeightTransferEngine,
         )
@@ -189,6 +199,7 @@ def test_receive_weights_rebuilds_with_rebuild_npu_tensor():
 def test_start_weight_update():
     engine = object.__new__(NPUIPCWeightTransferEngine)
     engine.model = MagicMock()
+    engine.packed = False
     mock_init = MagicMock()
 
     with _patch_reload_module(initialize=mock_init):
@@ -203,22 +214,54 @@ def test_finish_weight_update():
     engine.model_config = MagicMock()
     engine.device = torch.device("cpu")
     engine._packed_importer = MagicMock()
+    engine._packed_consumer = MagicMock() if _SHARED_IPC else None
+    consumer = engine._packed_consumer
     mock_finalize = MagicMock()
 
     with _patch_reload_module(finalize=mock_finalize):
         engine.finish_weight_update()
 
     mock_finalize.assert_called_once_with(engine.model, engine.model_config, engine.device)
-    engine._packed_importer.close.assert_called_once_with()
+    if _SHARED_IPC:
+        consumer.close.assert_called_once_with()
+        assert engine._packed_consumer is None
+    else:
+        engine._packed_importer.close.assert_called_once_with()
 
 
-def test_receive_packed_weights_loads_model():
-    packed_weights = [("model.weight", torch.tensor([1.0, 2.0, 3.0]))]
+@pytest.mark.parametrize("element_count", [0, 3])
+def test_receive_packed_weights_loads_model(element_count):
+    weights = torch.arange(1.0, element_count + 1)
+    if _SHARED_IPC:
+        model = MagicMock()
+        engine = _shared_packed_worker(model)
+        info = engine.update_info_cls(
+            names=["model.weight"],
+            dtype_names=["float32"],
+            shapes=[[element_count]],
+            ipc_handles={"node-0": (None,) * 6 + (999,)} if element_count else {},
+            chunk_capacity=16,
+            last=True,
+        )
+
+        def rebuild(*args):
+            assert element_count, "An empty-only transfer imported an IPC buffer"
+            return weights.view(torch.uint8)
+
+        with _patch_rebuild_npu_tensor(rebuild):
+            engine.receive_weights(info)
+        loaded = model.load_weights.call_args.args[0]
+        assert loaded[0][0] == "model.weight"
+        assert torch.equal(loaded[0][1], weights)
+        engine.shutdown()
+        return
+
+    packed_weights = [("model.weight", weights)]
     update_info = MagicMock(
-        tensor_sizes=[12],
+        tensor_sizes=[4 * element_count],
         ipc_handles={"node-0": ("packed-handle",)},
         names=["model.weight"],
-        shapes=[[3]],
+        shapes=[[element_count]],
         dtype_names=["float32"],
     )
 
@@ -281,29 +324,54 @@ def test_packed_sender_waits_before_reusing_each_chunk(is_sender):
     engine.is_sender = is_sender
     engine.packed = True
     engine.npu_uuid = "node-0"
+    engine.gpu_uuid = engine.npu_uuid
+    engine.device = torch.device("cpu")
+    engine.device_index = 0
     engine.packed_buffer_size_bytes = 16
     engine.source = MagicMock()
     events: list[str] = []
 
     def chunks(**kwargs):
-        assert kwargs["npu_uuid"] == "node-0"
+        assert kwargs["gpu_uuid" if _SHARED_IPC else "npu_uuid"] == "node-0"
         assert kwargs["buffer_size_bytes"] == 16
         for i in range(2):
-            yield PackedIpcChunk(
-                names=[f"w{i}"], dtype_names=["float32"], shapes=[[4]], tensor_sizes=[16], ipc_handle={"node-0": (i,)}
-            )
+            if _SHARED_IPC:
+                yield PackedIpcChunk(
+                    names=[f"w{i}"],
+                    dtype_names=["float32"],
+                    shapes=[[4]],
+                    ipc_handle={"node-0": (i,)} if i == 0 else None,
+                    chunk_capacity=16 if i == 0 else None,
+                    last=i == 1,
+                )
+            else:
+                yield PackedIpcChunk(
+                    names=[f"w{i}"],
+                    dtype_names=["float32"],
+                    shapes=[[4]],
+                    tensor_sizes=[16],
+                    ipc_handle={"node-0": (i,)},
+                )
             assert events[-1] == "sync"
             events.append("reuse")
 
     engine.client.update_weights.side_effect = lambda payload: events.append("update")
+    producer_target = (
+        "vllm.distributed.weight_transfer.ipc_engine.packed_ipc_producer"
+        if _SHARED_IPC
+        else f"{_MODULE}.packed_npu_ipc_producer"
+    )
+    sync_target = "_barrier" if _SHARED_IPC else "_post_send_sync"
     with (
         patch.object(engine, "_all_gather_and_merge_handles", side_effect=lambda handles: handles),
-        patch.object(engine, "_post_send_sync", side_effect=lambda: events.append("sync")),
-        patch(f"{_MODULE}.packed_npu_ipc_producer", side_effect=chunks),
+        patch.object(engine, sync_target, side_effect=lambda: events.append("sync")),
+        patch(producer_target, side_effect=chunks),
     ):
         engine._send_packed(engine.source)
     expected_chunk = ["update", "sync", "reuse"] if is_sender else ["sync", "reuse"]
-    assert events == expected_chunk * 2
+    # Modern IPC has a pre-send barrier on chunks after the handle exchange.
+    expected = expected_chunk + (["sync"] if _SHARED_IPC else []) + expected_chunk
+    assert events == expected
     assert engine.client.update_weights.call_count == (2 if is_sender else 0)
     for i, call in enumerate(engine.client.update_weights.call_args_list):
         payload = call.args[0]
@@ -311,8 +379,12 @@ def test_packed_sender_waits_before_reusing_each_chunk(is_sender):
         assert payload["names"] == [f"w{i}"]
         assert payload["dtype_names"] == ["float32"]
         assert payload["shapes"] == [[4]]
-        assert payload["tensor_sizes"] == [16]
-        assert payload["ipc_handles"] == {"node-0": (i,)}
+        if _SHARED_IPC:
+            assert payload["last"] is (i == 1)
+            assert payload.get("chunk_capacity") == (16 if i == 0 else None)
+        else:
+            assert payload["tensor_sizes"] == [16]
+            assert payload["ipc_handles"] == {"node-0": (i,)}
 
 
 @pytest.mark.parametrize("is_sender", [False, True])
@@ -341,7 +413,20 @@ def test_multi_rank_handles_are_merged_and_synchronized_on_npu(is_sender):
     assert result == ([{**local[i], **remote[i]} for i in range(2)] if is_sender else [{}, {}])
 
 
-def test_packed_receive_rejects_missing_sizes():
+def test_packed_receive_rejects_missing_layout():
+    if _SHARED_IPC:
+        engine = _shared_packed_worker(MagicMock())
+        info = engine.update_info_cls(
+            names=["w"],
+            dtype_names=["float32"],
+            shapes=[[1]],
+            ipc_handles={},
+            last=True,
+        )
+        with pytest.raises(AssertionError):
+            engine.receive_weights(info)
+        engine.shutdown()
+        return
     engine = object.__new__(NPUIPCWeightTransferEngine)
     engine.device = types.SimpleNamespace(index=1)
     engine.packed = True
@@ -370,6 +455,9 @@ def test_uuid_uses_assigned_device_with_visibility_mapping():
 @pytest.mark.parametrize("cleanup", ["finish_weight_update", "shutdown"])
 def test_packed_export_imported_once_with_fresh_payload_and_release(cleanup):
     """Multiple chunks share an import, but load fresh independent weights."""
+    if _SHARED_IPC:
+        _check_shared_packed_mapping_lifecycle(cleanup)
+        return
 
     def fake_base_init(self, config, vllm_config, device, model):
         self.device, self.model = device, model
@@ -447,3 +535,143 @@ def test_packed_export_replacement_and_failed_rebuild_release():
         assert refs[1]() is not None
         importer.close()
         assert refs[1]() is None
+
+
+def _shared_packed_worker(model):
+    """Construct the real worker with external reload/device services replaced."""
+
+    def initialize(self, config, vllm_config, device, model):
+        self.device, self.model = device, model
+        self.model_config = None
+
+    with patch.object(WeightTransferEngine, "__init__", initialize):
+        engine = NPUIPCWeightTransferEngine(None, None, torch.device("cpu:0"), model)
+    engine.init_transfer_engine(engine.init_info_cls(packed=True))
+    with _patch_reload_module(), patch(f"{_MODULE}.npu_generate_uuid", return_value="node-0"):
+        engine.start_weight_update()
+    return engine
+
+
+def _check_shared_packed_mapping_lifecycle(cleanup):
+    model = MagicMock()
+    engine = _shared_packed_worker(model)
+    staging = torch.tensor([1.0, 2.0, 3.0, 4.0])
+    imports = []
+    loaded = []
+
+    def rebuild(*args):
+        assert args[6] == 0
+        assert args[-1] == f"export-{len(imports) + 1}"
+        mapping = staging.view(torch.uint8)
+        imports.append(weakref.ref(mapping))
+        return mapping
+
+    model.load_weights.side_effect = lambda weights: loaded.append(weights[0][1])
+    first = engine.update_info_cls(
+        names=["w"],
+        dtype_names=["float32"],
+        shapes=[[4]],
+        ipc_handles={"node-0": (None,) * 6 + (999, "export-1")},
+        chunk_capacity=16,
+    )
+    rest = engine.update_info_cls(
+        names=["v"],
+        dtype_names=["float32"],
+        shapes=[[4]],
+        ipc_handles={},
+        last=True,
+    )
+    with (
+        _patch_rebuild_npu_tensor(rebuild),
+        _patch_reload_module(),
+        patch(f"{_MODULE}.npu_generate_uuid", return_value="node-0"),
+    ):
+        engine.receive_weights(first)
+        staging.add_(4)
+        engine.receive_weights(rest)
+        assert len(imports) == 1
+        assert torch.equal(loaded[0], torch.tensor([1.0, 2.0, 3.0, 4.0]))
+        assert torch.equal(loaded[1], torch.tensor([5.0, 6.0, 7.0, 8.0]))
+        getattr(engine, cleanup)()
+        assert imports[0]() is None
+        getattr(engine, cleanup)()
+        engine.start_weight_update()
+        engine.receive_weights(
+            replace(
+                first,
+                ipc_handles={"node-0": (None,) * 6 + (999, "export-2")},
+                last=True,
+            )
+        )
+        assert len(imports) == 2
+        engine.shutdown()
+        assert imports[1]() is None
+
+
+def test_shared_ipc_uses_upstream_lifecycle_and_wire_schema():
+    """Modern NPU support supplies device operations, not duplicate transfer loops."""
+    if not _SHARED_IPC:
+        # Released vLLM still requires the existing packed compatibility loops.
+        assert "receive_weights" in NPUIPCWeightTransferEngine.__dict__
+        assert "_send_packed" in NPUIPCTrainerWeightTransferEngine.__dict__
+        return
+    for method in (
+        "__init__",
+        "init_transfer_engine",
+        "start_weight_update",
+        "update_weights",
+        "receive_weights",
+        "finish_weight_update",
+        "shutdown",
+    ):
+        assert inspect.getattr_static(NPUIPCWeightTransferEngine, method) is inspect.getattr_static(
+            IPCWeightTransferEngine, method
+        ), method
+    for method in (
+        "__init__",
+        "trainer_init",
+        "send_weights",
+        "_send",
+        "_send_unpacked",
+        "_send_packed",
+        "_all_gather_and_merge_handles",
+        "_do_send",
+        "_export_ipc_tensor",
+    ):
+        assert inspect.getattr_static(NPUIPCTrainerWeightTransferEngine, method) is inspect.getattr_static(
+            IPCTrainerWeightTransferEngine, method
+        ), method
+    info = NPUIPCWeightTransferEngine.update_info_cls(
+        names=[],
+        dtype_names=[],
+        shapes=[],
+        ipc_handles={},
+        chunk_capacity=16,
+        last=True,
+    )
+    assert not hasattr(info, "tensor_sizes")
+    assert NPUIPCTrainerWeightTransferEngine.worker_init_info_cls is NPUIPCWeightTransferEngine.init_info_cls
+    assert NPUIPCTrainerWeightTransferEngine.update_info_cls is NPUIPCWeightTransferEngine.update_info_cls
+
+
+def test_packed_split_tensor_requires_last_chunk_before_finish():
+    """The native importer cannot turn an incomplete modern transfer into success."""
+    if not _SHARED_IPC:
+        # Old protocol has no split tensor; its existing size guard still applies.
+        test_packed_receive_rejects_missing_layout()
+        return
+    model = MagicMock()
+    engine = _shared_packed_worker(model)
+    info = engine.update_info_cls(
+        names=["wide"],
+        dtype_names=["float32"],
+        shapes=[[8]],
+        ipc_handles={"node-0": (None,) * 6 + (999,)},
+        chunk_capacity=16,
+    )
+    with _patch_rebuild_npu_tensor(lambda *args: torch.arange(4.0).view(torch.uint8)):
+        engine.receive_weights(info)
+    model.load_weights.assert_not_called()
+    with _patch_reload_module(), pytest.raises(RuntimeError, match="before its last chunk"):
+        engine.finish_weight_update()
+    assert engine._packed_consumer is None

@@ -169,6 +169,30 @@ FRACTAL_NZ must be disabled for weight updates. RL mode forces
 `weight_nz_mode=0`; the weight-transfer start path validates the effective
 Ascend configuration.
 
+#### NPU IPC version alignment
+
+With the upstream IPC device extension points, NPU IPC uses the common vLLM
+trainer and worker transfer lifecycle for both packed and unpacked updates.
+Ascend supplies physical-device identity, native tensor reconstruction, and
+device initialization and completion hooks. These transfer interfaces are provided by the vLLM
+[IPC extension PR](https://github.com/vllm-project/vllm/pull/70027).
+Keep the rest of the runtime aligned with the vLLM and Torch versions supported
+by the Ascend build; the transfer hooks alone do not establish runtime compatibility.
+
+Set `packed=True` in `NPUIPCTrainerInitInfo` to use the upstream chunk layout:
+buffers are rounded down to a multiple of 16 bytes, tensors larger than one
+chunk are split and reassembled, and only the first chunk of a transfer with
+data carries an IPC handle. Transfers containing only empty tensors export no
+buffer. The worker checks that the last chunk arrived before finishing the
+update.
+
+Use matching trainer and worker versions. The new packed protocol uses
+`chunk_capacity` and `last`; it cannot be mixed with the legacy `tensor_sizes`
+protocol. Older released vLLM versions with the legacy protocol retain their
+existing NPU compatibility path. Builds that have the new packed protocol but
+lack the device extension points fail with a version-alignment error instead
+of selecting the legacy path.
+
 #### Sparse HCCL
 
 For sparse checkpoint updates, follow the upstream [Sparse NCCL guide](https://docs.vllm.ai/en/latest/training/weight_transfer/nccl/#sparse-nccl) for patch semantics and the update lifecycle. On Ascend, select `sparse_hccl` and enable RL mode:

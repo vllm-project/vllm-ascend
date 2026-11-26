@@ -11,7 +11,6 @@ from typing import Any
 import torch
 from torch.multiprocessing.reductions import reduce_tensor
 from vllm.distributed.weight_transfer import packed_tensor as upstream
-from vllm.distributed.weight_transfer.packed_tensor import PackedBufferImporter
 from vllm.logger import logger
 
 DEFAULT_PACKED_BUFFER_SIZE_BYTES = upstream.DEFAULT_PACKED_BUFFER_SIZE_BYTES
@@ -354,10 +353,11 @@ def packed_npu_ipc_producer(
         )
 
 
-class NPUPackedBufferImporter(PackedBufferImporter):
-    """Cache one rebuilt NPU mapping per packed IPC export."""
+class NPUPackedBufferImporter:
+    """Cache one rebuilt NPU mapping for the legacy packed IPC protocol."""
 
-    _entry: tuple[tuple, torch.Tensor] | None
+    def __init__(self) -> None:
+        self._entry: tuple[tuple, torch.Tensor] | None = None
 
     def rebuild(self, list_args: list) -> torch.Tensor:
         from torch_npu.multiprocessing.reductions import rebuild_npu_tensor
@@ -369,6 +369,9 @@ class NPUPackedBufferImporter(PackedBufferImporter):
         self._entry = (key, packed)
         return packed
 
+    def close(self) -> None:
+        self._entry = None
+
 
 def packed_npu_ipc_consumer(
     ipc_handle: dict[str, tuple],
@@ -378,7 +381,7 @@ def packed_npu_ipc_consumer(
     dtype_names: list[str],
     tensor_sizes: list[int],
     device_index: int,
-    importer: PackedBufferImporter | None = None,
+    importer: NPUPackedBufferImporter | None = None,
 ) -> list[tuple[str, torch.Tensor]]:
     """Unpack a single packed IPC chunk into named tensors.
 
