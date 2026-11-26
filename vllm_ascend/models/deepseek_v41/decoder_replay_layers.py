@@ -12,6 +12,8 @@ from vllm.forward_context import get_forward_context
 from vllm.logger import logger
 from vllm.utils.torch_utils import direct_register_custom_op
 
+from vllm_ascend.attention.dsa_v41 import DeepseekV41ReplayCacheSource
+
 if TYPE_CHECKING:
     from .model import DeepseekV41Model
 
@@ -26,6 +28,7 @@ class AscendDecoderReplayLayers:
         row_buffers: list[torch.Tensor],
         write_batch_kv: Callable[..., None] | None = None,
         first_swa_prefix: str | None = None,
+        prepare_cut_attention_inputs: Callable[..., tuple[torch.Tensor, ...]] | None = None,
     ) -> None:
         self.window = window
         self.run_layers = run_layers
@@ -34,6 +37,7 @@ class AscendDecoderReplayLayers:
         self.output_row_buffers: list[torch.Tensor] = []
         self.write_batch_kv = write_batch_kv
         self.first_swa_prefix = first_swa_prefix
+        self.prepare_cut_attention_inputs = prepare_cut_attention_inputs
         self.rows: torch.Tensor | None = None
         self.context_factory: Callable[[], AbstractContextManager[None]] | None = None
         self.num_actual_rows = 0
@@ -41,6 +45,21 @@ class AscendDecoderReplayLayers:
         self.sequence_parallel = False
         self.smla_plan_ratios: tuple[int, ...] | None = None
         self.first_swa_plan_ratios: tuple[int, ...] | None = None
+
+    def _select_rows(self, state: torch.Tensor, rows: torch.Tensor, *, sharded: bool = False) -> torch.Tensor:
+        if not sharded and self.num_padded_rows is not None and rows.numel() == 0:
+            return state.new_zeros((self.num_padded_rows, *state.shape[1:]))
+        if sharded:
+            state = tensor_model_parallel_all_gather(state, dim=0)
+        state = state.index_select(0, rows)
+        if sharded:
+            tp = get_tp_group()
+            state = state.chunk(tp.world_size)[tp.rank_in_group]
+        if self.num_padded_rows is not None:
+            padding = self.num_padded_rows - state.shape[0]
+            if padding:
+                state = torch.cat((state, state.new_zeros((padding, *state.shape[1:]))))
+        return state
 
     def __call__(self, *states: torch.Tensor | None) -> tuple[torch.Tensor, ...]:
         if self.rows is None:
@@ -53,9 +72,14 @@ class AscendDecoderReplayLayers:
         assert self.context_factory is not None
         positions = states[2]
         assert positions is not None
-        if self.write_batch_kv is not None:
-            # The cut layer's cache is shared by later layers, so populate it
-            # for every token before switching to replay-only metadata.
+        cut_attention_inputs = cut_cache_source = None
+        if self.prepare_cut_attention_inputs is not None:
+            cut_attention_inputs = self.prepare_cut_attention_inputs(*states[:2])
+            cut_cache_source = DeepseekV41ReplayCacheSource(
+                cut_attention_inputs[0], get_forward_context().attn_metadata
+            )
+        elif self.write_batch_kv is not None:
+            # Non-PCP cut layers keep the original full-batch cache write.
             self.write_batch_kv(*states)
         with self.context_factory():
             rows = self.rows
@@ -68,17 +92,15 @@ class AscendDecoderReplayLayers:
                 if state is None:
                     replay_states.append(None)
                     continue
-                sharded = self.sequence_parallel and index != 2
-                if sharded:
-                    state = tensor_model_parallel_all_gather(state, dim=0)
-                state = state.index_select(0, rows)
-                if sharded:
-                    state = state.chunk(get_tp_group().world_size)[get_tp_group().rank_in_group]
-                if self.num_padded_rows is not None:
-                    padding = self.num_padded_rows - state.shape[0]
-                    state = torch.cat((state, state.new_zeros((padding, *state.shape[1:]))))
-                replay_states.append(state)
-            row_outputs = self.run_layers(*replay_states)
+                replay_states.append(self._select_rows(state, rows, sharded=self.sequence_parallel and index != 2))
+            if cut_attention_inputs is None:
+                row_outputs = self.run_layers(*replay_states)
+            else:
+                row_outputs = self.run_layers(
+                    *replay_states,
+                    cut_attention_inputs=tuple(self._select_rows(state, rows) for state in cut_attention_inputs),
+                    cut_cache_source=cut_cache_source,
+                )
             for buffer in self.output_row_buffers:
                 # Clone before clearing: packed values may overlap their final rows.
                 values = buffer[: self.num_actual_rows].clone()
@@ -161,11 +183,20 @@ def make_decoder_replay(model: "DeepseekV41Model", config: VllmConfig) -> Ascend
     draft_layer_types = getattr(draft_hf_config, "layer_types", None) or ()
     cut = max(model.config.kv_source_layer_ids)
     start = getattr(model, "start_layer", 0)
+    ratios = getattr(model.config, "compress_ratios", None)
+    # C1 has no compressor ring state to carry across the two layouts.
+    # Keep connector-managed PCP writes on the full layer's metadata.
+    pcp_cut_supported = (
+        parallel.prefill_context_parallel_size > 1
+        and ratios is not None
+        and ratios[cut] == 1
+        and getattr(config, "kv_transfer_config", None) is None
+    )
     # Only the stage owning the last source can run its full-batch KV writer.
     trim_cut_layer = (
         start <= cut < model.end_layer
         and hasattr(model, "layers")
-        and parallel.prefill_context_parallel_size == 1
+        and (parallel.prefill_context_parallel_size == 1 or pcp_cut_supported)
         and not model.use_sequence_parallel
         and cut not in getattr(model.config, "engram_layer_ids", ())
     )
@@ -204,7 +235,10 @@ def make_decoder_replay(model: "DeepseekV41Model", config: VllmConfig) -> Ascend
             row_buffers.extend((model.candidate_indices_buffer, model.candidate_lengths_buffer))
         if not cut_writes_index_outputs:
             row_buffers.append(model.topk_lengths_buffer)
-        write_batch_kv = model.layers[cut].write_kv if trim_cut_layer else None
+        write_batch_kv = model.layers[cut].write_kv if trim_cut_layer and not pcp_cut_supported else None
+        prepare_cut_attention_inputs = (
+            model.layers[cut]._prepare_attention_inputs if trim_cut_layer and pcp_cut_supported else None
+        )
         first_swa_prefix = model.layers[cut].self_attn.v41_impl.swa_prefix if trim_cut_layer else None
         logger.info_once(
             "Ascend MRV2 decoder bounded replay: layers %d-%d keep each prefill's last %d tokens.",
@@ -218,9 +252,9 @@ def make_decoder_replay(model: "DeepseekV41Model", config: VllmConfig) -> Ascend
             row_buffers,
             write_batch_kv=write_batch_kv,
             first_swa_prefix=first_swa_prefix,
+            prepare_cut_attention_inputs=prepare_cut_attention_inputs,
         )
         replay.sequence_parallel = model.use_sequence_parallel
-        ratios = getattr(model.config, "compress_ratios", None)
         if ratios is not None and parallel.prefill_context_parallel_size == 1:
             # The cut layer has its own replay floor. Its original full
             # batch cache writes use the target metadata before compaction.

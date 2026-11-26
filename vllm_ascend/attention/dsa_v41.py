@@ -275,6 +275,14 @@ class DeepseekV41LayerMetadata:
         return self.swa.cos[layer_name][:num_tokens], self.swa.sin[layer_name][:num_tokens]
 
 
+@dataclass(frozen=True)
+class DeepseekV41ReplayCacheSource:
+    """Full-layout input and metadata for the cut layer's cache writes."""
+
+    hidden_states: torch.Tensor
+    metadata_by_prefix: dict[str, AscendDSAV41Metadata]
+
+
 @dataclass
 class DeepseekV41PreparedIndexer:
     """Query-local projections and the event guarding auxiliary quantization."""
@@ -424,8 +432,16 @@ class AscendDSAV41Impl:
         cls._apply_rotary(attn, kv, cos, sin)
         return kv.squeeze(1)
 
+    def _project_and_write_swa(self, attn, hidden_states, metadata, cos, sin):
+        # Empty PCP ranks still participate in the replicated-cache gather.
+        if hidden_states.shape[0]:
+            kv = self._project_kv(attn, hidden_states, cos, sin)
+        else:
+            kv = hidden_states.new_empty((0, attn.head_dim))
+        self._write_swa_cache(attn, metadata, kv)
+
     def _update_caches(self, attn, hidden_states, metadata):
-        if hidden_states.shape[0] == 0:
+        if not hidden_states.shape[0]:
             return
         cos, sin = metadata.rope(attn.rotary_emb.layername, hidden_states.shape[0])
         kv = self._project_kv(attn, hidden_states, cos, sin)
@@ -433,39 +449,65 @@ class AscendDSAV41Impl:
         if self.role.is_kv_source:
             self._compress_and_write_caches(attn, hidden_states, cos, sin, metadata, metadata)
 
-    def _prepare_inputs_and_caches(self, attn, hidden_states, metadata, metadata_by_prefix):
-        return self._preprocess(attn, hidden_states, metadata, metadata)
+    def _prepare_inputs_and_caches(self, attn, hidden_states, metadata, metadata_by_prefix, *, cache_source=None):
+        if cache_source is None:
+            return self._preprocess(attn, hidden_states, metadata, metadata)
+        write_metadata = self._get_layer_metadata(cache_source.metadata_by_prefix)
+        return self._preprocess(
+            attn, hidden_states, metadata, write_metadata, kv_inputs=(cache_source.hidden_states, write_metadata)
+        )
 
-    def _preprocess(self, attn, hidden_states, local_metadata, global_metadata):
+    def _preprocess(self, attn, hidden_states, local_metadata, global_metadata, *, kv_inputs=None):
         """Prepare rank-local queries and replicated caches.
 
-        All projections use the same local hidden states and RoPE. Global
-        metadata addresses the gathered caches; without PCP both views coincide.
+        PCP cut-layer replay selects only the retained queries. Its KV input
+        and write controls still come from the original chunk.
         """
         hidden_states = hidden_states[: local_metadata.swa.num_actual_tokens]
-        cos, sin = (
-            local_metadata.rope(attn.rotary_emb.layername, hidden_states.shape[0])
-            if hidden_states.shape[0]
-            else (None, None)
-        )
+        rope_name = attn.rotary_emb.layername
+        cos, sin = local_metadata.rope(rope_name, hidden_states.shape[0]) if hidden_states.shape[0] else (None, None)
+        if kv_inputs is None:
+            kv_hidden_states, kv_metadata = hidden_states, local_metadata
+            kv_cos, kv_sin = cos, sin
+        else:
+            kv_hidden_states, kv_metadata = kv_inputs
+            kv_hidden_states = kv_hidden_states[: kv_metadata.swa.num_actual_tokens]
+            kv_cos, kv_sin = (
+                kv_metadata.rope(rope_name, kv_hidden_states.shape[0]) if kv_hidden_states.shape[0] else (None, None)
+            )
         if hidden_states.shape[0] and self.multistream_dsv4_dsa_overlap:
-            q, qr = self._multistream_qkv(attn, hidden_states, cos, sin, local_metadata.swa)
+            q, qr = self._multistream_qkv(
+                attn,
+                hidden_states,
+                cos,
+                sin,
+                kv_metadata.swa,
+                kv_inputs=(kv_hidden_states, kv_cos, kv_sin) if kv_inputs is not None else None,
+            )
         else:
             if hidden_states.shape[0]:
                 qr = attn.q_norm(attn.wq_a(hidden_states))
                 q = attn.wq_b(qr).unflatten(-1, (-1, attn.head_dim))
-                kv = self._project_kv(attn, hidden_states, cos, sin)
             else:
                 q = qr = None
-                kv = hidden_states.new_empty((0, attn.head_dim))
-            # Empty PCP ranks still participate in the replicated-cache gather.
-            self._write_swa_cache(attn, local_metadata.swa, kv)
+            self._project_and_write_swa(attn, kv_hidden_states, kv_metadata.swa, kv_cos, kv_sin)
         prepared_indexer = None
         if q is not None:
             self._apply_rotary(attn, q, cos, sin)
             # Consume local Query RoPE before compression can reuse source tables.
             prepared_indexer = self._prepare_indexer_inputs(attn, hidden_states, qr, cos, sin)
-        self._prepare_compressed_cache(attn, hidden_states, cos, sin, local_metadata, global_metadata, prepared_indexer)
+        if kv_inputs is not None:
+            # Launch compact query quantization before full-chunk compression.
+            self._quantize_indexer_query(attn, prepared_indexer, local_metadata)
+        self._prepare_compressed_cache(
+            attn,
+            kv_hidden_states,
+            kv_cos,
+            kv_sin,
+            kv_metadata,
+            global_metadata,
+            prepared_indexer if kv_inputs is None else None,
+        )
         return q.to(hidden_states.dtype) if q is not None else None, prepared_indexer
 
     def _prepare_compressed_cache(
@@ -532,7 +574,7 @@ class AscendDSAV41Impl:
         attn.dsa_attn.dsa_attn.impl._forward_o_proj(padded, projected)
         return projected
 
-    def _multistream_qkv(self, attn, hidden_states, cos, sin, swa_metadata):
+    def _multistream_qkv(self, attn, hidden_states, cos, sin, swa_metadata, *, kv_inputs=None):
         """Overlap Q Vector work with KV Cube work, then reverse their roles.
 
         Reuse V1's stream and projection wrappers. V4.1 keeps floating-point
@@ -547,7 +589,12 @@ class AscendDSAV41Impl:
         # ModelSlim wraps different quantization schemes in the same adapter.
         q_scheme = getattr(wq_a._quant_method, "quant_method", wq_a._quant_method)
         kv_scheme = getattr(wkv._quant_method, "quant_method", wkv._quant_method)
-        share_quant = type(q_scheme) is type(kv_scheme) and wq_a._has_communication == wkv._has_communication
+        kv_hidden_states, kv_cos, kv_sin = (hidden_states, cos, sin) if kv_inputs is None else kv_inputs
+        share_quant = (
+            kv_inputs is None
+            and type(q_scheme) is type(kv_scheme)
+            and wq_a._has_communication == wkv._has_communication
+        )
         # Part 1: Q_a matmul (Cube) overlaps independent KV quantization (Vector).
         q_quant, q_scale = wq_a.quantize(hidden_states)
         kv_quant_done = None
@@ -557,7 +604,7 @@ class AscendDSAV41Impl:
             q_quant_done = main_stream.record_event()
             with npu_stream_switch(aux_stream):
                 aux_stream.wait_event(q_quant_done)
-                kv_quant, kv_scale = wkv.quantize(hidden_states)
+                kv_quant, kv_scale = wkv.quantize(kv_hidden_states)
                 kv_quant_done = aux_stream.record_event()
         q_a = wq_a.matmul(q_quant, q_scale, bias=attn.wq_a.bias)
 
@@ -580,7 +627,7 @@ class AscendDSAV41Impl:
         with npu_stream_switch(aux_stream):
             aux_stream.wait_event(part3_start)
             kv = attn.kv_norm(kv).view(-1, 1, attn.head_dim)
-            self._apply_rotary(attn, kv, cos, sin)
+            self._apply_rotary(attn, kv, kv_cos, kv_sin)
             if not write_cache_on_main:
                 self._write_swa_cache(attn, swa_metadata, kv.squeeze(1))
         q = wq_b.matmul(q_b_quant, q_b_scale, bias=attn.wq_b.bias).unflatten(-1, (-1, attn.head_dim))
@@ -786,7 +833,15 @@ class AscendDSAV41Impl:
         """V4.1 owns stable metadata buffers; no backend pointer patch is needed."""
         return None
 
-    def forward(self, attn, positions, hidden_states, output: torch.Tensor | None = None):
+    def forward(
+        self,
+        attn,
+        positions,
+        hidden_states,
+        output: torch.Tensor | None = None,
+        *,
+        cache_source: DeepseekV41ReplayCacheSource | None = None,
+    ):
         # The custom-op caller provides a graph-stable output buffer.  Write
         # O-projection results into it directly instead of materializing a
         # second full hidden-state tensor and copying it at the graph boundary.
@@ -814,7 +869,7 @@ class AscendDSAV41Impl:
         metadata = self._get_layer_metadata(forward_context.attn_metadata)
         wait_for_kv_layer_from_connector(attn.v41_layer_name)
         q, prepared_indexer = self._prepare_inputs_and_caches(
-            attn, hidden_states, metadata, forward_context.attn_metadata
+            attn, hidden_states, metadata, forward_context.attn_metadata, cache_source=cache_source
         )
         num_tokens = metadata.swa.num_actual_tokens
         if num_tokens:

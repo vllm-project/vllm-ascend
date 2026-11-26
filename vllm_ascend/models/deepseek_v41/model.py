@@ -68,6 +68,7 @@ from vllm_ascend.ascend_forward_context import MoECommType, select_moe_comm_meth
 from vllm_ascend.attention.dsa_v1 import AscendDSAImpl, OProjBufferPool
 from vllm_ascend.attention.dsa_v41 import (
     DeepseekV41CacheLayer,
+    DeepseekV41ReplayCacheSource,
     scatter_cache_sk,
 )
 from vllm_ascend.core.kv_cache_interface import resolve_bounded_replay
@@ -969,9 +970,20 @@ class DeepseekV41Attention(DeepseekV41SWAAttention):
         )
         context[self.v41_layer_name] = self
 
-    def forward(self, positions, hidden_states, llama_4_scaling=None):
+    def forward(
+        self,
+        positions,
+        hidden_states,
+        llama_4_scaling=None,
+        *,
+        cache_source: DeepseekV41ReplayCacheSource | None = None,
+    ):
         output = torch.empty_like(hidden_states)
-        torch.ops.vllm.dsa_v41_forward(hidden_states, output, self.v41_layer_name)
+        if cache_source is None:
+            torch.ops.vllm.dsa_v41_forward(hidden_states, output, self.v41_layer_name)
+        else:
+            # PCP replay already executes inside the eager decoder replay op.
+            self.v41_impl.forward(self, positions, hidden_states, output, cache_source=cache_source)
         return output
 
     def write_kv(self, hidden_states):
@@ -1081,18 +1093,20 @@ class DeepseekV41DecoderLayer(nn.Module):
             comb.unsqueeze(0),
         ).squeeze(0)
 
-    def write_kv(self, hidden_states, pre_mix, positions, input_ids=None):
-        """Project the attention input and write this layer's cache only."""
-        assert not self.use_sequence_parallel and self.prefill_context_parallel_size == 1
-        del positions, input_ids
-        x, _, _, _ = self.hc_pre(
+    def _prepare_attention_inputs(self, hidden_states, pre_mix):
+        x, attn_post, attn_comb, attn_pre = self.hc_pre(
             hidden_states,
             self.hc_attn_fn,
             self.hc_attn_scale,
             self.hc_attn_base,
             pre_mix,
         )
-        x = self.input_layernorm(x)
+        return self.input_layernorm(x), attn_post, attn_comb, attn_pre
+
+    def write_kv(self, hidden_states, pre_mix, positions, input_ids=None):
+        """Project the attention input and write this layer's cache only."""
+        assert not self.use_sequence_parallel and self.prefill_context_parallel_size == 1
+        x, _, _, _ = self._prepare_attention_inputs(hidden_states, pre_mix)
         self.self_attn.write_kv(x)
 
     def forward(
@@ -1102,20 +1116,21 @@ class DeepseekV41DecoderLayer(nn.Module):
         pre_mix,
         llama_4_scaling=None,
         input_ids=None,
+        *,
+        attention_inputs=None,
+        cache_source: DeepseekV41ReplayCacheSource | None = None,
     ):
         use_sequence_parallel = getattr(self, "use_sequence_parallel", False)
         residual = hidden_states
-        x, attn_post, attn_comb, attn_pre = self.hc_pre(
-            hidden_states,
-            self.hc_attn_fn,
-            self.hc_attn_scale,
-            self.hc_attn_base,
-            pre_mix,
-        )
-        x = self.input_layernorm(x)
+        if attention_inputs is None:
+            attention_inputs = self._prepare_attention_inputs(hidden_states, pre_mix)
+        x, attn_post, attn_comb, attn_pre = attention_inputs
         if use_sequence_parallel:
             x = sp_all_gather(x)[: positions.shape[0]]
-        x = self.self_attn(positions, x, llama_4_scaling)
+        if cache_source is None:
+            x = self.self_attn(positions, x, llama_4_scaling)
+        else:
+            x = self.self_attn(positions, x, llama_4_scaling, cache_source=cache_source)
         if use_sequence_parallel:
             x = sp_reduce_scatter(x)
         hidden_states = self.hc_post(x, residual, attn_post, attn_comb)
@@ -2050,7 +2065,9 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
             return hidden_states, aux_hidden_states
         return hidden_states
 
-    def _run_replay_layers(self, hidden_states, pre_mix, positions, input_ids):
+    def _run_replay_layers(
+        self, hidden_states, pre_mix, positions, input_ids, *, cut_attention_inputs=None, cut_cache_source=None
+    ):
         aux = []
         for layer_idx in range(self.decoder_replay_start, self.end_layer):
             layer = self.layers[layer_idx]
@@ -2059,7 +2076,18 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
                 if self.use_sequence_parallel:
                     residual = sp_all_gather(residual)[: positions.shape[0]]
                 aux.append(residual)
-            hidden_states, pre_mix = layer(positions, hidden_states, pre_mix, None, input_ids=input_ids)
+            if cut_attention_inputs is None:
+                hidden_states, pre_mix = layer(positions, hidden_states, pre_mix, None, input_ids=input_ids)
+            else:
+                hidden_states, pre_mix = layer(
+                    positions,
+                    hidden_states,
+                    pre_mix,
+                    input_ids=input_ids,
+                    attention_inputs=cut_attention_inputs,
+                    cache_source=cut_cache_source,
+                )
+                cut_attention_inputs = cut_cache_source = None
         return hidden_states, pre_mix, *aux
 
 

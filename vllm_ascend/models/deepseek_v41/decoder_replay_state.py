@@ -19,7 +19,11 @@ from vllm.v1.worker.gpu.input_batch import InputBatch
 from vllm.v1.worker.utils import AttentionGroup
 
 from vllm_ascend.ascend_forward_context import get_mc2_mask, get_mrv2_in_profile_run
-from vllm_ascend.attention.dsa_v41 import AscendDSAV41Metadata, AscendDSAV41MetadataBuilder
+from vllm_ascend.attention.dsa_v41 import (
+    AscendDSAV41Metadata,
+    AscendDSAV41MetadataBuilder,
+    build_replay_swa_visible_lens,
+)
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
 from vllm_ascend.core.kv_cache_interface import is_circular_kv_cache_spec
 from vllm_ascend.ops.rope_dsv4 import get_cos_and_sin_dsa
@@ -28,6 +32,7 @@ from vllm_ascend.utils import should_skip_allreduce_across_dp_group
 from vllm_ascend.worker.device_metadata import DeviceMetadataTask
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch
 
+from .cache_config import uses_a5_packed_cache
 from .decoder_replay_layers import AscendDecoderReplayLayers
 
 if TYPE_CHECKING:
@@ -76,7 +81,7 @@ class DecoderReplayState:
         self._pcp_replay_start = CpuGpuBuffer(local_reqs, dtype=torch.int32, device=device, pin_memory=False)
         self.slots: torch.Tensor | None = None
         self.builders: list[tuple[int, list[str], AscendDSAV41MetadataBuilder]] = []
-        self.first_swa_builder: tuple[int, list[str], AscendDSAV41MetadataBuilder] | None = None
+        self.first_swa_builder: AscendDSAV41MetadataBuilder | None = None
         self.metadata: dict[str, AscendDSAV41Metadata] = {}
         self.metadata_ready: torch.npu.Event | None = None
         self.num_tokens = 0
@@ -190,6 +195,7 @@ class DecoderReplayState:
         self.slots = torch.empty(
             (inputs.slot_mappings.shape[0], self.rows.numel()), dtype=torch.int64, device=self.rows.device
         )
+        reuse_first_swa = self.layers.prepare_cut_attention_inputs is not None and not uses_a5_packed_cache()
         with set_current_vllm_config(self.config):
             for group_id, groups in enumerate(inputs.attn_groups):
                 for group in groups:
@@ -200,14 +206,14 @@ class DecoderReplayState:
                         builder = builder_cls(group.kv_cache_spec, group.layer_names, self.config, self.rows.device)
                         builder.prepare_source_rope()
                         self.builders.append((group_id, group.layer_names, builder))
-                        if self.layers.first_swa_prefix in group.layer_names:
+                        if not reuse_first_swa and self.layers.first_swa_prefix in group.layer_names:
                             assert self.first_swa_builder is None
                             first_swa_builder = builder_cls(
                                 group.kv_cache_spec, group.layer_names, self.config, self.rows.device
                             )
                             first_swa_builder.prepare_source_rope()
-                            self.first_swa_builder = (group_id, group.layer_names, first_swa_builder)
-        if self.layers.first_swa_prefix is not None:
+                            self.first_swa_builder = first_swa_builder
+        if not reuse_first_swa and self.layers.first_swa_prefix is not None:
             assert self.first_swa_builder is not None, (
                 f"No decoder replay metadata builder owns {self.layers.first_swa_prefix}"
             )
@@ -367,9 +373,9 @@ class DecoderReplayState:
 
         producer = None if plan.uses_pcp_replay else inputs.metadata_producer_stream
         if producer is None:
-            self.metadata = self._build_metadata(plan.replay_inputs, offsets)
+            self.metadata = self._build_metadata(inputs, offsets)
         else:
-            self._submit_compact_metadata(plan.replay_inputs, offsets, producer)
+            self._submit_compact_metadata(inputs, offsets, producer)
         # PCP selects valid rows and pads downstream; other paths may include padding row indices.
         num_selected_rows = self.num_actual_tokens if plan.uses_pcp_replay else plan.num_tokens
         self.layers.rows = self.rows[:num_selected_rows]
@@ -382,7 +388,7 @@ class DecoderReplayState:
         tasks: list[DeviceMetadataTask] = []
         builders = [builder for _, _, builder in self.builders]
         if self.first_swa_builder is not None:
-            builders.append(self.first_swa_builder[2])
+            builders.append(self.first_swa_builder)
         with ExitStack() as stack:
             for builder in builders:
                 stack.enter_context(builder.defer_device_metadata())
@@ -466,31 +472,45 @@ class DecoderReplayState:
                 tasks.extend(build_tasks)
             for name in layer_names:
                 metadata[name] = value
-            if self.first_swa_builder is not None:
-                first_group_id, _, first_builder = self.first_swa_builder
-                first_swa_prefix = self.layers.first_swa_prefix
-                if group_id == first_group_id and first_swa_prefix in layer_names:
-                    first_common = replace(
-                        common,
-                        replay_start=inputs.encoder_replay_start[:num_reqs],
+            first_swa_prefix = self.layers.first_swa_prefix
+            if first_swa_prefix not in layer_names:
+                continue
+            assert first_swa_prefix is not None
+            if self.first_swa_builder is None:
+                # C1 reads the long-KV group's SMLA plan on the band backend.
+                # The cut layer only needs its own SWA visibility lengths.
+                visible_lens = None
+                if value.num_actual_tokens:
+                    visible_lens = build_replay_swa_visible_lens(
+                        self.layers.window,
+                        value.query_start_loc[: value.num_reqs + 1],
+                        value.seq_lens,
+                        inputs.encoder_replay_start[: value.num_reqs],
+                        value.num_actual_tokens,
                     )
-                    first_value = first_builder.build(
-                        0,
-                        first_common,
-                        num_actual_reqs=num_reqs,
-                        common_v41_batch_metadata={},
-                        common_v41_metadata={},
-                        rope_views=rope,
-                        smla_plan_ratios=self.layers.first_swa_plan_ratios,
-                    )
-                    build_tasks = first_builder.take_device_metadata_tasks()
-                    if tasks is None:
-                        for task in build_tasks:
-                            task.run()
-                    else:
-                        tasks.extend(build_tasks)
-                    assert first_swa_prefix is not None
-                    metadata[first_swa_prefix] = first_value
+                metadata[first_swa_prefix] = replace(value, ori_topk_length=visible_lens)
+                continue
+            first_builder = self.first_swa_builder
+            first_common = replace(
+                common,
+                replay_start=inputs.encoder_replay_start[:num_reqs],
+            )
+            first_value = first_builder.build(
+                0,
+                first_common,
+                num_actual_reqs=num_reqs,
+                common_v41_batch_metadata={},
+                common_v41_metadata={},
+                rope_views=rope,
+                smla_plan_ratios=self.layers.first_swa_plan_ratios,
+            )
+            build_tasks = first_builder.take_device_metadata_tasks()
+            if tasks is None:
+                for task in build_tasks:
+                    task.run()
+            else:
+                tasks.extend(build_tasks)
+            metadata[first_swa_prefix] = first_value
         return metadata
 
     @contextmanager

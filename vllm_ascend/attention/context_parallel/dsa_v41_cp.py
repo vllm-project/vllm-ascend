@@ -650,12 +650,18 @@ class AscendDSAV41PCPImpl(_ReplicatedCacheImpl):
 
     supports_pcp: ClassVar[bool] = True
 
-    def _prepare_inputs_and_caches(self, attn, hidden_states, metadata, metadata_by_prefix):
+    def _prepare_inputs_and_caches(self, attn, hidden_states, metadata, metadata_by_prefix, *, cache_source=None):
         if not isinstance(metadata.swa, AscendDSAV41PCPMetadata):
-            return super()._prepare_inputs_and_caches(attn, hidden_states, metadata, metadata_by_prefix)
+            return super()._prepare_inputs_and_caches(
+                attn, hidden_states, metadata, metadata_by_prefix, cache_source=cache_source
+            )
         projector = attn.dsa_attn.dsa_attn.impl
+        kv_inputs = None
+        if cache_source is not None:
+            metadata_by_prefix = cache_source.metadata_by_prefix
+            kv_inputs = (cache_source.hidden_states, self._get_layer_metadata(metadata_by_prefix))
         global_metadata = self._global_layer_metadata(metadata_by_prefix)
-        prepared = self._preprocess(attn, hidden_states, metadata, global_metadata)
+        prepared = self._preprocess(attn, hidden_states, metadata, global_metadata, kv_inputs=kv_inputs)
         projector._parallel_o_proj.all_gather_weights()
         return prepared
 
@@ -749,7 +755,7 @@ class AscendDSAV41PCPImpl(_ReplicatedCacheImpl):
         latent = self._gather_cache_rows(latent, local_metadata.swa)
         self._write_compressed_caches(attn, latent, source_cos, source_sin, global_metadata)
 
-    def forward(self, attn, positions, hidden_states, output=None):
+    def forward(self, attn, positions, hidden_states, output=None, *, cache_source=None):
         # Every layer has SWA metadata carrying the batch's PCP and prefill state.
         metadata = (
             get_forward_context().attn_metadata[self.swa_prefix]
@@ -767,4 +773,4 @@ class AscendDSAV41PCPImpl(_ReplicatedCacheImpl):
         # V4 owns the quantized O modules and their batch-scoped collective mode.
         # V4.1 already projects padded output even on empty query ranks.
         with projector._parallel_o_proj.batch(needs_global_metadata=needs_global_metadata, has_prefill=has_prefill):
-            return super().forward(attn, positions, hidden_states, output)
+            return super().forward(attn, positions, hidden_states, output, cache_source=cache_source)
