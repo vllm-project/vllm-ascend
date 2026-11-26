@@ -1593,7 +1593,9 @@ def _update_compilation_modes(vllm_config: VllmConfig, ascend_config: AscendConf
 
     # FULL (token-keyed) graphs over a head-major KV cache layout fail closed
     # at init instead of on the device; do NOT silently downgrade the user's
-    # mode -- the supported choice is explicit.
+    # mode -- the supported choice is explicit. This is the layout the user
+    # asked for; the worker repeats the check on the layout the engine core
+    # finally adopts (NPUWorker.set_kv_cache_layout).
     check_full_cudagraph_kv_layout(vllm_config)
 
 

@@ -110,6 +110,7 @@ from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_man
 )
 from vllm_ascend.distributed.kv_transfer.utils.mooncake_transfer_engine import global_te
 from vllm_ascend.distributed.parallel_state import init_ascend_model_parallel
+from vllm_ascend.kv_cache_layout import check_full_cudagraph_kv_layout
 from vllm_ascend.observability.runtime_guard.hooks import runtime_guard_idle_step
 from vllm_ascend.ops.triton.triton_utils import init_device_properties_triton
 from vllm_ascend.profiler.torch_npu_profiler import TorchNPUProfilerWrapper
@@ -753,6 +754,25 @@ class NPUWorker(GPUWorker):
             return available_bytes
         num_blocks = plan.get_num_blocks(available_bytes)
         return num_blocks * sum(spec.page_size_bytes for spec in plan.logical_cache_spec.values())
+
+    def set_kv_cache_layout(self, kv_cache_layout: str, cp_kv_cache_interleave_size: int) -> None:
+        """Adopt the engine core's layout, then repeat the FULL-graph gate on it.
+
+        The platform validated the layout the configuration asked for, but the
+        engine core resolves the final one afterwards: a connector preference
+        (the Mooncake connector requests HND) or a worker vote can pick a
+        head-major layout there. This call lands before every layout-dependent
+        step (memory profiling, KV cache allocation, graph capture).
+
+        Args:
+            kv_cache_layout: The layout name resolved by the engine core.
+            cp_kv_cache_interleave_size: The CP KV cache interleave size.
+
+        Raises:
+            RuntimeError: FULL graphs would run over a head-major KV cache layout.
+        """
+        super().set_kv_cache_layout(kv_cache_layout, cp_kv_cache_interleave_size)
+        check_full_cudagraph_kv_layout(self.vllm_config)
 
     @torch.inference_mode()
     def determine_available_memory(self) -> int:

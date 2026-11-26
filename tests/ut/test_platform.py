@@ -9,7 +9,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 import torch
-from vllm.config import CompilationConfig, VllmConfig, set_current_vllm_config
+from vllm.config import CacheConfig, CompilationConfig, VllmConfig, set_current_vllm_config
 from vllm.config.attention import AttentionConfig, HiSparseConfig
 from vllm.config.compilation import CompilationMode, CUDAGraphMode
 from vllm.platforms import PlatformEnum
@@ -3297,3 +3297,86 @@ def test_attention_v1_head_major_shapes_stay_inside_the_gated_family(pin_kv_layo
         if AscendAttentionBackend.get_kv_cache_shape(10, 20, 30, 40) != token_major_shape:
             stored_head_major.append(layout)
     assert stored_head_major == [KVCacheLayout.LBHNC]
+
+
+def _layout_gate_worker(cudagraph_mode, *, enforce_eager=False):
+    """An NPUWorker shell with the state set_kv_cache_layout needs: WorkerBase
+    adopts the layout on a real CacheConfig, then NPUWorker re-checks the gate
+    against a real CompilationConfig."""
+    from vllm_ascend.worker.worker import NPUWorker
+
+    worker = object.__new__(NPUWorker)
+    worker.vllm_config = SimpleNamespace(
+        cache_config=CacheConfig(),
+        compilation_config=CompilationConfig(cudagraph_mode=cudagraph_mode),
+        parallel_config=SimpleNamespace(cp_kv_cache_interleave_size=None),
+        model_config=SimpleNamespace(enforce_eager=enforce_eager, is_encoder_decoder=False),
+        additional_config={},
+    )
+    return worker
+
+
+@pytest.mark.parametrize("layout", ["LBHNC", "BLHNC"])
+def test_set_kv_cache_layout_refuses_full_graphs_on_the_adopted_head_major_layout(layout, pin_kv_layout):
+    """The engine core adopts the final layout through this call, after the
+    platform validated the configuration: a connector preference or a worker
+    vote can pick a head-major layout there. The worker refuses it before any
+    layout-dependent work (memory profiling, KV cache allocation, graph
+    capture). RED on the tree without the override: VLLM_KV_CACHE_LAYOUT is
+    unset here, so the platform gate saw no layout and the inherited method
+    only recorded it."""
+    pin_kv_layout(None)
+    worker = _layout_gate_worker(CUDAGraphMode.FULL)
+    with pytest.raises(RuntimeError, match=_FULL_HND_UNIT_MATCH) as exc_info:
+        worker.set_kv_cache_layout(layout, 1)
+    assert "FULL_DECODE_ONLY" in str(exc_info.value)
+
+
+def test_connector_chosen_layout_passes_the_platform_and_is_refused_by_the_worker(pin_kv_layout):
+    """Both stages on one configuration: before the layout is resolved the
+    platform can only judge the explicit request (none here) and accepts; the
+    layout the engine core adopts afterwards is the worker's to refuse."""
+    from vllm_ascend.platform import _update_compilation_modes
+
+    pin_kv_layout(None)
+    worker = _layout_gate_worker(CUDAGraphMode.FULL)
+    _update_compilation_modes(worker.vllm_config, _gate_ascend_config())
+    with pytest.raises(RuntimeError, match=_FULL_HND_UNIT_MATCH):
+        worker.set_kv_cache_layout("LBHNC", 1)
+
+
+@pytest.mark.parametrize("layout", ["LBHNC", "BLHNC"])
+def test_set_kv_cache_layout_allows_full_decode_only_with_head_major_layout(layout, pin_kv_layout):
+    """FULL_DECODE_ONLY replays graphs for decode batches only: unaffected."""
+    pin_kv_layout(None)
+    worker = _layout_gate_worker(CUDAGraphMode.FULL_DECODE_ONLY)
+    worker.set_kv_cache_layout(layout, 1)
+    assert worker.vllm_config.cache_config.get_resolved_kv_cache_layout().name == layout
+
+
+def test_set_kv_cache_layout_allows_full_and_piecewise_with_head_major_layout(pin_kv_layout):
+    """FULL_AND_PIECEWISE is (FULL, PIECEWISE): its decode routine replays the
+    full decode graphs FULL_DECODE_ONLY was validated with and only its mixed
+    routine runs piecewise, so no prefill graph is replayed."""
+    pin_kv_layout(None)
+    worker = _layout_gate_worker(CUDAGraphMode.FULL_AND_PIECEWISE)
+    worker.set_kv_cache_layout("LBHNC", 1)
+    assert worker.vllm_config.cache_config.get_resolved_kv_cache_layout().name == "LBHNC"
+
+
+@pytest.mark.parametrize("layout", ["LBNHC", "BLNHC"])
+def test_set_kv_cache_layout_allows_full_graphs_with_token_major_layout(layout, pin_kv_layout):
+    """The default layout and its block-outer token-major variant keep FULL
+    graphs at the worker stage too."""
+    pin_kv_layout(None)
+    worker = _layout_gate_worker(CUDAGraphMode.FULL)
+    worker.set_kv_cache_layout(layout, 1)
+    assert worker.vllm_config.cache_config.get_resolved_kv_cache_layout().name == layout
+
+
+def test_set_kv_cache_layout_allows_head_major_layout_when_eager(pin_kv_layout):
+    """enforce_eager captures no graph: the combination is harmless."""
+    pin_kv_layout(None)
+    worker = _layout_gate_worker(CUDAGraphMode.FULL, enforce_eager=True)
+    worker.set_kv_cache_layout("LBHNC", 1)
+    assert worker.vllm_config.cache_config.get_resolved_kv_cache_layout().name == "LBHNC"

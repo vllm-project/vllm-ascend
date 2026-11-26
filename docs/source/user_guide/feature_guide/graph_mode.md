@@ -120,6 +120,8 @@ The head-major KV cache layouts restrict the graph modes. `HND` is the legacy al
 
 With the `HND`/`LBHNC` layout, captured full-graph `npu_fused_infer_attention_score` tasks read the gathered (HND) KV cache, and replaying a token-keyed graph captured for a prefill/mixed batch crashes the NPU stream at the first replay — device error 507011 ("model stream execute failed"), reproduced consistently on Ascend 910C. `BLHNC` is refused for the same combination as a precaution (fail closed): FA3 stores it in the same head-major shape as `HND`, and that path has not been validated with `FULL` graphs. `FULL_DECODE_ONLY` never replays graphs for prefill/mixed batches (they run eager), and its decode replays were validated as exact against eager outputs, so it is the supported graph mode for the head-major layout. The combination is refused at engine startup with an error naming both knobs; unset `VLLM_KV_CACHE_LAYOUT` to use the default `LBNHC` layout, or switch to `cudagraph_mode=FULL_DECODE_ONLY`.
 
+The check runs twice: once when the engine configuration is validated, for the layout you requested, and again in the worker once the engine core has adopted the final layout. A KV connector can select that final layout after the first check (for example, the Mooncake connector requests `HND` for direct D2D transfer), so the second check is what makes the refusal hold for a connector-selected head-major layout.
+
 ### Troubleshooting capture resource exhaustion
 
 If ACLGraph capture fails because the configured graph sizes exceed the runtime resources available on the current stack, vLLM Ascend now raises a dedicated error with mitigation guidance. In practice, the most useful actions are:
