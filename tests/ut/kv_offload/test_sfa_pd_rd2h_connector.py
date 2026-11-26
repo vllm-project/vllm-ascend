@@ -1440,6 +1440,22 @@ def _make_completion_thread() -> MembPullReadThread:
     return thread
 
 
+@pytest.mark.parametrize(
+    ("entries", "completed", "expected"),
+    [
+        ([("a",), None, 7, "unrelated", [], [4], ["b"]], ("c", None, []), {"a", "b", "c"}),
+        (None, ("c",), {"c"}),
+        ([("a",)], None, {"a"}),
+    ],
+)
+def test_failed_batch_keeps_only_identifiable_requests(entries, completed, expected):
+    thread = _make_completion_thread()
+    thread._failed_requests.add("previous")
+    thread._record_failed_batch(entries, completed)
+    assert thread.get_and_clear_failed() == expected | {"previous"}
+    assert thread.get_and_clear_done() == set()
+
+
 def test_request_done_requires_all_contributors():
     thread = _make_completion_thread()
     thread._record_chunk_done(["req-0"], 0, 4)
