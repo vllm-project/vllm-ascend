@@ -129,7 +129,6 @@ def test_quantized_alltoall_protocol_is_uniform_across_dp(local_active, cross_dp
     ctx.permuted_lora_indices = ctx.punica_wrapper.token_lora_indices
     layer = object.__new__(token_dispatcher.TokenDispatcherWithAll2AllV)
     layer.lora_context = ctx
-    layer.ep_group = "ep"
     layer._dispatch_preprocess = lambda hidden, ids: (
         hidden.clone(),
         torch.tensor([0]),
@@ -157,6 +156,7 @@ def test_quantized_alltoall_protocol_is_uniform_across_dp(local_active, cross_dp
         routing=SimpleNamespace(pertoken_scale=None),
     )
     with (
+        patch.object(token_dispatcher, "get_ep_group", return_value=SimpleNamespace(device_group="ep")),
         patch.object(token_dispatcher, "async_all_to_all", side_effect=exchange),
         patch("vllm_ascend.lora.fused_moe.async_all_to_all", side_effect=exchange),
         patch.object(token_dispatcher, "validate_quant_moe_lora_activation_input"),
