@@ -1,0 +1,5 @@
+pr: 23336
+entries:
+  - category: bugfix
+    hardware: [A5]
+    text: Fixed a HiSparse worker crash when restoring an externally cached prefix to NPU memory on Ascend A5.
