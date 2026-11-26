@@ -290,14 +290,13 @@ class AscendSharedExperts:
         if any(getattr(linear, "bias", None) is not None for linear in (self.layer.gate_up_proj, self.layer.down_proj)):
             return "the fused shared expert does not consume linear biases"
         # One activation and one parameter set apply to both sides of the kernel.
-        shared = self._shared_megamoe_activation_signature(self.layer)
-        routed = self._routed_megamoe_activation_signature(self.moe_config)
+        shared = self._shared_megamoe_activation_signature()
+        routed = self._routed_megamoe_activation_signature()
         if shared is None or shared != routed:
             return f"shared activation {shared} does not match the routed activation {routed}"
         return None
 
-    @staticmethod
-    def _routed_megamoe_activation_signature(moe_config: FusedMoEConfig) -> tuple[str, dict[str, float]] | None:
+    def _routed_megamoe_activation_signature(self) -> tuple[str, dict[str, float]] | None:
         """Canonical ``(name, params)`` of the activation the operator executes.
 
         Mirrors :func:`select_mega_moe_activation_kwargs`: whatever kwargs this
@@ -307,6 +306,7 @@ class AscendSharedExperts:
         cannot represent (GELU variants, swiglustep, ...), which always keeps
         the separate shared-expert forward.
         """
+        moe_config = self.moe_config
         activation = getattr(moe_config, "activation", "silu")
         name = str(getattr(activation, "value", activation)).lower()
         clamp = moe_config.swiglu_limit if (moe_config.swiglu_limit or 0.0) > 0 else None
@@ -330,15 +330,14 @@ class AscendSharedExperts:
             return ("silu", params)
         return None
 
-    @staticmethod
-    def _shared_megamoe_activation_signature(layer: torch.nn.Module) -> tuple[str, dict[str, float]] | None:
+    def _shared_megamoe_activation_signature(self) -> tuple[str, dict[str, float]] | None:
         """Canonical ``(name, params)`` of the shared expert's activation module.
 
         ``None`` when the activation has no MegaMoe counterpart (GELU variants,
         unknown custom activations) or its standalone Ascend semantics cannot
         be reproduced by the operator's single global activation.
         """
-        act_fn = layer.act_fn
+        act_fn = self.layer.act_fn
         if isinstance(act_fn, SituAndMul):
             params = {"beta": act_fn.beta}
             if act_fn.linear_beta is not None:

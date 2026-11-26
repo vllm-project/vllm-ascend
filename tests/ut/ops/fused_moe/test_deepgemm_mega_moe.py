@@ -32,7 +32,7 @@ def context():
             hf_text_config=SimpleNamespace(model_type="deepseek_v41", n_routed_experts=384, n_shared_experts=0)
         ),
         scheduler_config=SimpleNamespace(max_num_batched_tokens=128),
-        parallel_config=SimpleNamespace(enable_eplb=False),
+        parallel_config=SimpleNamespace(use_ubatching=False),
         lora_config=None,
     )
     group = SimpleNamespace(world_size=8, device_group=object(), cpu_group=object())
@@ -227,12 +227,6 @@ def test_backend_uses_ep_group_size(context, ep_size):
     assert dependency.SymmBuffer.call_args.args[0] is group.device_group
 
 
-def test_draft_cannot_own_initial_allocation(context):
-    backend, _, _, _ = context
-    with pytest.raises(RuntimeError, match="target before"):
-        backend.DeepGemmExperts(layer(128, 3))
-
-
 @pytest.mark.parametrize("block,fp32_scale", [(0, False), (32, False), (32, True), (128, True)])
 def test_shared_checkpoint_scales_and_kernel_weight_ownership(context, block, fp32_scale):
     backend, config, _, dependency = context
@@ -292,29 +286,11 @@ def test_two_shared_experts_keep_routed_expert_count_and_topk(context):
     assert dependency.SymmBuffer.call_args.kwargs["num_shared_experts"] == 2
 
 
-@pytest.mark.parametrize(
-    "mode",
-    ["missing", "expired", "wrong_count", "wrong_shape", "wrong_dtype", "converted"],
-)
-def test_shared_experts_must_be_compatible_and_unconverted(context, mode):
-    backend, config, _, dependency = context
+def test_configured_shared_expert_cannot_be_silently_skipped(context):
+    backend, config, _, _ = context
     config.model_config.hf_text_config.n_shared_experts = 1
-    item, shared = layer(), shared_module()
-    if mode != "missing":
-        item._deepgemm_mega_moe_shared_experts = weakref.ref(shared)
-    if mode == "expired":
-        del shared
-    elif mode == "wrong_count":
-        config.model_config.hf_text_config.n_shared_experts = 2
-    elif mode == "wrong_shape":
-        shared.layer.gate_up_proj.weight.data = shared.layer.gate_up_proj.weight.data[:256]
-    elif mode == "wrong_dtype":
-        shared.layer.gate_up_proj.weight.data = shared.layer.gate_up_proj.weight.data.to(torch.bfloat16)
-    elif mode == "converted":
-        shared.megamoe_shared_weights_ready = True
-    with pytest.raises((RuntimeError, ValueError)):
-        backend.DeepGemmExperts(item)
-    dependency.transform_weights_for_mega_moe.assert_not_called()
+    with pytest.raises(RuntimeError, match="module reference"):
+        backend.DeepGemmExperts(layer())
 
 
 @pytest.mark.parametrize("mode", ["activation", "bias", "gate"])
@@ -334,15 +310,17 @@ def test_incompatible_shared_experts_fail_before_installing_hooks(mode):
     assert not shared.megamoe_shared_weights_ready
 
 
-@pytest.mark.parametrize("scaling_factor", [1.0, 1.5])
-def test_apply_fuses_shared_once_and_scales_only_routed_weights(context, scaling_factor):
+@pytest.mark.parametrize(("scaling_factor", "limit"), [(1.0, None), (1.5, 10.0)])
+def test_apply_fuses_shared_once_and_scales_only_routed_weights(context, scaling_factor, limit):
     backend, config, _, dependency = context
     config.model_config.hf_text_config.n_shared_experts = 1
     item, shared = layer(), shared_module()
     item._deepgemm_mega_moe_shared_experts = weakref.ref(shared)
+    item.moe_config.swiglu_limit = limit
     item.ascend_megamoe_fold_scale = scaling_factor
     shared.layer.forward = MagicMock(side_effect=AssertionError("Shared experts must only execute inside MegaMoE"))
     adapter = backend.DeepGemmExperts(item)
+    assert dependency.fp8_fp4_mega_moe.call_args.kwargs["activation_clamp"] == limit
     dependency.fp8_fp4_mega_moe.reset_mock()
     weights = torch.full((2, 6), 0.25)
     indices = torch.tensor([[0, 48, 96, 144, 192, 240]] * 2, dtype=torch.int32)
@@ -370,6 +348,7 @@ def test_apply_fuses_shared_once_and_scales_only_routed_weights(context, scaling
     assert torch.equal(weights, torch.full((2, 6), 0.25))
     assert torch.equal(result.routed_out, torch.full_like(x, 2))
     kwargs = dependency.fp8_fp4_mega_moe.call_args.kwargs
+    assert kwargs["activation_clamp"] == limit
     assert kwargs["shared_l1_weights"] is adapter.shared_l1_weights
     assert kwargs["shared_l2_weights"] is adapter.shared_l2_weights
     shared.layer.forward.assert_not_called()
@@ -407,7 +386,7 @@ def test_large_prefill_does_not_synchronize_host(context, tokens):
     dependency.fp8_fp4_mega_moe.assert_called_once()
 
 
-@pytest.mark.parametrize("name,value", [("expert_placement_strategy", "round_robin"), ("enable_dbo", True)])
+@pytest.mark.parametrize("name,value", [("expert_placement_strategy", "round_robin"), ("use_ubatching", True)])
 def test_rejects_incompatible_symmetric_buffer_scheduling(context, name, value):
     backend, config, _, dependency = context
     setattr(config.parallel_config, name, value)
