@@ -36,7 +36,6 @@ from vllm_ascend.attention.utils import AscendCommonAttentionMetadata, has_reque
 from vllm_ascend.core.kv_cache_interface import (
     AscendIndexerKPoolTailSpec,
     get_kv_cache_compression_ratio,
-    get_storage_block_size,
 )
 from vllm_ascend.device.hardware_profile import AttentionBackendFamily, get_current_hardware_profile
 from vllm_ascend.distributed.utils import all_gather_async
@@ -301,9 +300,6 @@ class AscendIndexerKPoolMetadataBuilder(AttentionMetadataBuilder):
         # AttentionGroup.create_metadata_builders() passes a copied spec whose
         # block_size is the final per-group kernel block size.
         self.kernel_block_size = kv_cache_spec.block_size
-        self.storage_block_size = get_storage_block_size(kv_cache_spec)
-        if self.storage_block_size <= 0:
-            raise ValueError(f"Indexer KPool storage block size must be positive, got {self.storage_block_size}.")
         self.compress_ratio = compress_ratio
         self.pcp_size = vllm_config.parallel_config.prefill_context_parallel_size
         self.is_pcp_decode_sharded = vllm_config.parallel_config.pcp_shard_decode_requests
@@ -319,12 +315,12 @@ class AscendIndexerKPoolMetadataBuilder(AttentionMetadataBuilder):
             )
         if use_hisparse:
             # CANN PoolKeyIndexer PA_BBND counts pooled rows per block.
-            if self.storage_block_size % 16 or self.storage_block_size > 2048:
+            pooled_rows = kv_cache_spec.num_states
+            if not 0 < pooled_rows <= 2048 or pooled_rows % 16:
                 raise ValueError(
-                    "HiSparse KPool pages must have a multiple of 16 pooled rows and at most 2048, "
-                    f"got {self.storage_block_size}."
+                    f"HiSparse KPool needs 16–2048 pooled rows per page in multiples of 16, got {pooled_rows}."
                 )
-            self.kernel_row_block_size = self.storage_block_size
+            self.kernel_row_block_size = pooled_rows
             self.kernel_blocks_per_logical_block = 1
         else:
             self.kernel_row_block_size = self.kernel_block_size // self.compress_ratio

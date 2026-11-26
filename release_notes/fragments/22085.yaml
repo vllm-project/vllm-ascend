@@ -1,0 +1,8 @@
+pr: 22085
+entries:
+  - category: config
+    text: "`quantized_all_reduce_config.min_numel` now defaults to `null` instead of `16777216` elements. On the `int8` backend that selects a per-TP payload gate calibrated on A2 (16 MiB at TP=2, 32 MiB at TP=4, 60 MiB at TP=8), while `mxfp8` keeps its 32 MiB default. An explicit value still overrides either, and forcing `int8` on A5 now requires one because these gates are measured on A2 only."
+    hardware: [A2]
+  - category: performance
+    text: "On A2, with int8 quantized all-reduce enabled, TP=8 now switches to int8 at 60 MiB of payload instead of 32 MiB, so mid-sized prefill chunks stay on bf16 instead of taking the slower int8 path. From the gate up, TTFT is 1.9% lower than bf16 at 60 MiB and 4.7% lower at 160 MiB."
+    hardware: [A2]

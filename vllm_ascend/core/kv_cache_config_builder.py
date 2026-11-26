@@ -10,7 +10,7 @@ no longer needs a monkey patch for these decisions.
 """
 
 from collections import defaultdict
-from dataclasses import replace
+from dataclasses import fields, replace
 
 import torch
 from vllm.config import VllmConfig
@@ -53,6 +53,7 @@ from vllm_ascend.hisparse import require_hybrid_hisparse_core, supports_pooled_h
 from vllm_ascend.hisparse.layout import (
     get_hybrid_sfa_hisparse_groups,
     has_hybrid_sfa_hisparse_groups,
+    has_hybrid_sfa_hisparse_specs,
     regroup_pooled_hisparse_kda,
 )
 from vllm_ascend.models.deepseek_v41.cache_config import (
@@ -166,7 +167,16 @@ class AscendKVCacheConfigBuilder(DefaultKVCacheConfigBuilder):
         mixed-page-size shared slots, then the Kimi-K3 DSpark mixed grouping,
         then vLLM's generic grouping.
         """
-        if uses_pooled_hisparse(vllm_config):
+        pooled_hisparse = uses_pooled_hisparse(vllm_config)
+        transfer_config = getattr(vllm_config, "kv_transfer_config", None)
+        if (
+            transfer_config is not None
+            and getattr(getattr(vllm_config, "attention_config", None), "hisparse_config", None) is not None
+            and transfer_config.has_connector("AscendStoreConnector")
+            and (pooled_hisparse or has_hybrid_sfa_hisparse_specs(kv_cache_spec.values()))
+        ):
+            raise ValueError("AscendStore does not support pooled or recurrent HiSparse cache layouts.")
+        if pooled_hisparse:
             require_hybrid_hisparse_core()
             if not supports_pooled_hisparse(vllm_config):
                 raise ValueError(
@@ -246,7 +256,26 @@ class AscendKVCacheConfigBuilder(DefaultKVCacheConfigBuilder):
         if kimi_k3_groups is not None:
             return kimi_k3_groups
 
-        return super().get_kv_cache_groups(vllm_config, kv_cache_spec)
+        groups = super().get_kv_cache_groups(vllm_config, kv_cache_spec)
+        if vllm_config.attention_config.hisparse_config is None:
+            return groups
+        if transfer_config is None or not transfer_config.has_connector("AscendStoreConnector"):
+            return groups
+
+        from vllm.v1.kv_cache_interface import HiSparseResidentSpec
+
+        from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.hisparse.admission import (
+            AscendStoreHiSparseResidentSpec,
+        )
+
+        for i, group in enumerate(groups):
+            spec = group.kv_cache_spec
+            if isinstance(spec, HiSparseResidentSpec):
+                resident_spec = AscendStoreHiSparseResidentSpec(
+                    **{field.name: getattr(spec, field.name) for field in fields(spec) if field.init}
+                )
+                groups[i] = replace(group, kv_cache_spec=resident_spec)
+        return groups
 
     def get_kv_cache_config_from_groups(
         self,

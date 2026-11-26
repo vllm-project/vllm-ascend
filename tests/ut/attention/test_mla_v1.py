@@ -1534,18 +1534,17 @@ class TestAscendMLAMetadataBuilderBuild(TestBase):
             hidden_restore_idx=torch.arange(batch.num_tokens),
             local_num_tokens=batch.num_tokens,
         )
-        state = SimpleNamespace(
-            vllm_config=self.mock_vllm_config,
-            max_model_len=65,
-            kvpp_runtime=None,
-            pcp_manager=SimpleNamespace(
-                is_target_attn_groups=lambda _: True,
-                build_attention_context=lambda *_: pcp_context,
-            ),
-            device_metadata=None,
-            decoder_replay=None,
-            _prepare_decoder_replay=MagicMock(),
+        state = AscendModelState.__new__(AscendModelState)
+        state.vllm_config = self.mock_vllm_config
+        state.model_config = SimpleNamespace(max_model_len=65)
+        state.kvpp_runtime = None
+        state.pcp_manager = SimpleNamespace(
+            is_target_attn_groups=lambda _: True,
+            build_attention_context=lambda *_: pcp_context,
         )
+        state.device_metadata = None
+        state.decoder_replay = None
+        state._prepare_decoder_replay = MagicMock()
         builder = AscendMLAMetadataBuilder(
             kv_cache_spec=self.kv_cache_spec,
             layer_names=["layer_0", "layer_1"],
@@ -1573,8 +1572,7 @@ class TestAscendMLAMetadataBuilderBuild(TestBase):
             patch.object(builder, "build_decode_metadata", return_value=decode_metadata) as build_decode,
             patch.object(builder, "build_prefill_metadata", return_value=prefill_metadata) as build_prefill,
         ):
-            metadata = AscendModelState.prepare_attn(
-                state,
+            metadata = state.prepare_attn(
                 batch,
                 CUDAGraphMode.NONE,
                 block_tables,

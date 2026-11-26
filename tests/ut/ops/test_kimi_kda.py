@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from contextlib import contextmanager
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -8,6 +9,9 @@ import pytest
 import torch
 from torch import nn
 
+import vllm_ascend.ops.kimi_kda as projection_module
+from vllm_ascend.ascend_forward_context import override_mrv2_in_profile_run
+from vllm_ascend.models.glm5next import kda_input_projection_tp as common_projection
 from vllm_ascend.ops.kimi_kda import (
     _PACKED_CONV_WEIGHT_NAME,
     AscendKimiK3DeltaAttention,
@@ -262,6 +266,7 @@ def test_mixed_forward_marks_auxiliary_beta_as_preprocessed(recover):
     attention = AscendKimiK3DeltaAttention.__new__(AscendKimiK3DeltaAttention)
     nn.Module.__init__(attention)
     attention.uses_mixed_projection = True
+    attention.qkv_layout = None
     attention.use_recoverssm = recover
     attention.pcp_size = 1
     attention.local_num_heads = 2
@@ -628,6 +633,7 @@ def test_kda_forward_preserves_live_rows_with_nan_padding(mode, source_layout):
             return_value=SimpleNamespace(attn_metadata={"kda": metadata}),
         ),
     ):
+        attention._forward_core = AscendKimiK3DeltaAttention._forward_core.__get__(attention)
         AscendKimiK3DeltaAttention._forward(
             attention,
             values,
@@ -714,6 +720,7 @@ def test_recoverssm_dispatches_without_spec_mask_and_sigmoids_beta_once(mixed):
         ),
         patch("vllm_ascend.ops.kimi_kda.kda_recoverssm_verify", side_effect=verify) as recover,
     ):
+        attention._forward_core = AscendKimiK3DeltaAttention._forward_core.__get__(attention)
         AscendKimiK3DeltaAttention._forward(
             attention, qkv, torch.zeros(1, num_tokens, 1, dim), torch.zeros(num_tokens, 1, dim), raw_beta, output
         )
@@ -776,7 +783,9 @@ def test_kda_prefill_direct_norm_and_idle_output(mode, recover):
             return_value=SimpleNamespace(attn_metadata={"kda": metadata}),
         ),
     ):
+        attention._forward_core = AscendKimiK3DeltaAttention._forward_core.__get__(attention)
         raw_beta = torch.linspace(-2, 2, tokens).reshape(1, tokens, 1).expand(-1, -1, heads)
+        attention._forward_core = AscendKimiK3DeltaAttention._forward_core.__get__(attention)
         AscendKimiK3DeltaAttention._forward(
             attention,
             torch.randn(tokens, 3 * heads * dim),
@@ -795,3 +804,295 @@ def test_kda_prefill_direct_norm_and_idle_output(mode, recover):
         torch.testing.assert_close(output[:, :tokens], before * gate[:tokens].sigmoid())
         torch.testing.assert_close(output[:, tokens:], torch.zeros_like(output[:, tokens:]))
         torch.testing.assert_close(core, before)
+
+
+@pytest.mark.parametrize("groups", ["shared", "distinct", "qkv_only", "gate_only"])
+@pytest.mark.parametrize("mode", ["decode", "verify", "mixed", "idle", "no_metadata"])
+@pytest.mark.parametrize("comm_mode", ["CCU_SCHED", "AIV", "AIV_ONLY"])
+@pytest.mark.parametrize("in_profile_run", [False, True])
+def test_local_tp_projection_stream_order(monkeypatch, groups, mode, comm_mode, in_profile_run):
+    """Trace stream submissions through the real KDA dispatch, including owners with no recurrent work."""
+    trace = []
+    main, aux = MagicMock(), MagicMock()
+    active = main
+
+    def mark(name):
+        trace.append((name, "main" if active is main else "aux"))
+
+    @contextmanager
+    def switch(stream):
+        nonlocal active
+        previous, active = active, stream
+        try:
+            yield
+        finally:
+            active = previous
+
+    main.wait_stream.side_effect = lambda stream: mark("join")
+    aux.wait_stream.side_effect = lambda stream: mark("fork")
+    pack_ready = object()
+
+    def record_event():
+        mark("pack_ready")
+        return pack_ready
+
+    def wait_event(event):
+        assert event is pack_ready
+        mark("wait_pack")
+
+    main.record_event.side_effect = record_event
+    aux.wait_event.side_effect = wait_event
+    monkeypatch.setenv("HCCL_OP_EXPANSION_MODE", comm_mode)
+    monkeypatch.setattr(torch.npu, "current_stream", lambda: active)
+    monkeypatch.setattr(torch.Tensor, "record_stream", lambda *args: None)
+    monkeypatch.setattr(projection_module, "_kda_bfg_stream", lambda: aux)
+    monkeypatch.setattr(projection_module, "npu_stream_switch", switch)
+    monkeypatch.setattr(common_projection, "_EXTRA_CTX", SimpleNamespace(max_tokens_across_dp=2))
+
+    def gather(hidden, dim):
+        mark("AG")
+        return torch.cat([hidden, hidden], dim=dim)
+
+    def gather_async(hidden, group):
+        mark("AG_submit")
+        return torch.cat([hidden, hidden]), SimpleNamespace(wait=lambda: mark("AG_wait"))
+
+    def exchange(out, src, group):
+        mark("QKV_A2A" if src.shape[-1] == 3 * q_layout.width + q_layout.heads else "G_A2A")
+        out.copy_(src)
+
+    monkeypatch.setattr(projection_module, "all_gather_async", gather_async)
+    monkeypatch.setattr(common_projection.dist, "all_to_all_single", exchange)
+    group = SimpleNamespace(world_size=2, device_group=object(), all_gather=gather)
+    q_group = None if groups == "gate_only" else group
+    g_group = None if groups == "qkv_only" else group
+    if groups == "distinct":
+        g_group = SimpleNamespace(world_size=2, device_group=object(), all_gather=gather)
+    layout = common_projection.KDAInputProjectionTPLayout
+    q_layout, g_layout = layout(q_group, 2, 2), layout(g_group, 2, 2)
+    restore_gate = g_layout.restore_gate
+
+    def restore(received, capacity):
+        mark("restore_G")
+        return restore_gate(received, capacity)
+
+    monkeypatch.setattr(g_layout, "restore_gate", restore)
+
+    def linear(name, width):
+        def apply(x):
+            mark(name)
+            return x.new_ones((len(x), width)), None
+
+        return apply
+
+    def quantize(hidden):
+        mark("quant")
+        return hidden
+
+    def conv(x, *args, **kwargs):
+        mark("conv")
+        return x
+
+    def recurrent(q, k, v, *args, **kwargs):
+        mark("recurrent")
+        return v.contiguous()
+
+    def verify(q, k, v, *args):
+        mark("verify")
+        return v.contiguous()
+
+    def norm(x, gate, *, out):
+        mark("norm")
+        assert gate.shape == x.shape[1:] == (2, 2, 2)
+        out.copy_(x * gate)
+
+    speculative = mode in ("verify", "mixed")
+    conv_meta = SimpleNamespace(
+        query_start_loc=torch.tensor([0, 2]), cache_indices=torch.tensor([0]), num_accepted_tokens=None
+    )
+    ids = torch.tensor([0]) if mode == "mixed" else torch.tensor([0, 1])
+    metadata = SimpleNamespace(
+        num_actual_tokens=0 if mode == "idle" else 2,
+        num_prefills=0,
+        num_decodes=int(mode in ("decode", "mixed")),
+        num_decode_tokens=int(mode == "mixed") or 2,
+        num_spec_decodes=int(speculative),
+        spec_sequence_masks=None,
+        spec_token_indx=ids,
+        non_spec_token_indx=torch.tensor([1]),
+        spec_query_start_loc=conv_meta.query_start_loc,
+        non_spec_query_start_loc=conv_meta.query_start_loc,
+        spec_state_indices_tensor=torch.tensor([[0]]),
+        non_spec_state_indices_tensor=torch.tensor([0]),
+        spec_decode_metadata=SimpleNamespace(spec_causal_conv1d=conv_meta),
+        non_spec_decode_metadata=SimpleNamespace(causal_conv1d=conv_meta),
+    )
+    monkeypatch.setattr(projection_module, "GDNAttentionMetadata", SimpleNamespace)
+    monkeypatch.setattr(
+        projection_module,
+        "get_forward_context",
+        lambda: SimpleNamespace(attn_metadata=None if mode == "no_metadata" else {"layer": metadata}),
+    )
+    monkeypatch.setattr(projection_module, "kda_recoverssm_verify", verify)
+    for name in (
+        "maybe_save_kv_layer_to_connector",
+        "wait_for_kv_layer_from_connector",
+        "record_attention_compute_start",
+    ):
+        monkeypatch.setattr(projection_module, name, MagicMock())
+    layer = SimpleNamespace(
+        qkv_layout=q_layout,
+        gate_layout=g_layout,
+        num_heads=2,
+        local_num_heads=2,
+        head_dim=2,
+        prefix="layer",
+        use_recoverssm=speculative,
+        num_spec=1,
+        kv_cache=(None, None),
+        A_log=torch.zeros(2),
+        dt_bias=None,
+        gate_lower_bound=-5.0,
+        recoverssm_records=SimpleNamespace(correction=None, key_gate=None),
+        get_parameter=lambda name: None,
+        _run_causal_conv1d=conv,
+        _run_recurrent=recurrent,
+        f_a_proj=linear("F_a", 2),
+        f_b_proj=linear("F_b", 4),
+        b_proj=linear("beta", q_layout.heads),
+        g_proj=linear("G", g_layout.width),
+        _quantize_fused_qkv=quantize,
+        _matmul_fused_qkv=lambda x: linear("QKV", 3 * q_layout.width)(x)[0],
+        o_norm=SimpleNamespace(forward_oot=norm),
+        o_proj=lambda x: (x, None),
+    )
+    layer._forward_core = AscendKimiK3DeltaAttention._forward_core.__get__(layer)
+    hidden = torch.ones((0 if mode == "idle" else 2, 4))
+    layer._forward_local_tp = AscendKimiK3DeltaAttention._forward_local_tp.__get__(layer)
+    with override_mrv2_in_profile_run(in_profile_run):
+        output = AscendKimiK3DeltaAttention.forward(layer, hidden, torch.arange(len(hidden)))
+    sync_qkv_gather = q_group is not None and in_profile_run
+    sync_gate_gather = g_group is not None and g_group is not q_group
+    assert trace.count(("AG", "main")) == int(sync_qkv_gather) + int(sync_gate_gather)
+    assert trace.count(("AG_submit", "main")) == int(q_group is not None and not in_profile_run)
+    assert trace.count(("AG_wait", "main")) == int(q_group is not None and not in_profile_run)
+    qkv_exchange_stream = "aux" if comm_mode == "CCU_SCHED" else "main"
+    assert trace.count(("QKV_A2A", qkv_exchange_stream)) == int(q_group is not None)
+    assert trace.count(("G_A2A", "aux")) == int(g_group is not None)
+    quant_index = trace.index(("quant", "main"))
+    assert trace[quant_index : quant_index + 3] == [("quant", "main"), ("QKV", "main"), ("beta", "main")]
+    gate_index = trace.index(("G", "main"))
+    assert trace.index(("F_a", "main")) < trace.index(("F_b", "main")) < quant_index < gate_index
+    if q_group is not None:
+        qkv_exchange_index = trace.index(("QKV_A2A", qkv_exchange_stream))
+        assert gate_index < qkv_exchange_index
+        if in_profile_run:
+            assert trace.index(("AG", "main")) < trace.index(("F_a", "main"))
+        else:
+            assert (
+                trace.index(("AG_submit", "main"))
+                < trace.index(("F_a", "main"))
+                < trace.index(("F_b", "main"))
+                < trace.index(("AG_wait", "main"))
+                < quant_index
+            )
+        if comm_mode == "CCU_SCHED":
+            assert trace.index(("pack_ready", "main")) < gate_index < trace.index(("wait_pack", "aux"))
+            assert trace[qkv_exchange_index + 1] == ("join", "main")
+    if g_group is not None:
+        gate_exchange_index = trace.index(("G_A2A", "aux"))
+        assert gate_index < gate_exchange_index
+        if q_group is not None:
+            assert qkv_exchange_index < gate_exchange_index
+    if mode in ("idle", "no_metadata"):
+        assert ("restore_G", "main") not in trace
+        assert ("norm", "main") not in trace
+        torch.testing.assert_close(output, torch.zeros_like(hidden))
+    else:
+        first_kernel = "verify" if speculative else "recurrent"
+        assert gate_index < trace.index(("conv", "main")) < trace.index((first_kernel, "main"))
+        if g_group is not None:
+            assert trace.index(("conv", "main")) < gate_exchange_index < trace.index((first_kernel, "main"))
+            assert trace[-3] == ("join", "main")
+        if mode == "mixed":
+            assert trace.index(("recurrent", "main")) < trace.index(("restore_G", "main"))
+        assert trace[-2:] == [("restore_G", "main"), ("norm", "main")]
+        torch.testing.assert_close(output, torch.ones_like(hidden))
+
+
+@pytest.mark.parametrize("dp_tokens", [None, 0])
+def test_local_tp_empty_capacity_skips_both_streams(monkeypatch, dp_tokens):
+    monkeypatch.setattr(common_projection, "_EXTRA_CTX", SimpleNamespace(max_tokens_across_dp=dp_tokens))
+    stream = MagicMock()
+    monkeypatch.setattr(projection_module, "_kda_bfg_stream", stream)
+    layer = SimpleNamespace(qkv_layout=common_projection.KDAInputProjectionTPLayout(None, 2, 2))
+    hidden = torch.empty(0, 3)
+    assert AscendKimiK3DeltaAttention._forward_local_tp(layer, hidden).shape == hidden.shape
+    stream.assert_not_called()
+
+
+def test_local_tp_restores_head_order():
+    receive = torch.tensor(
+        [
+            [[10, 11, 20, 21, 30, 31, 40], [110, 111, 120, 121, 130, 131, 140]],
+            [[12, 13, 22, 23, 32, 33, 41], [112, 113, 122, 123, 132, 133, 141]],
+        ]
+    )
+    layout = common_projection.KDAInputProjectionTPLayout(SimpleNamespace(world_size=2), 2, 2)
+    qkv, beta = layout.restore_qkv_beta(receive, 2)
+    torch.testing.assert_close(
+        qkv,
+        torch.tensor(
+            [
+                [10, 11, 12, 13, 20, 21, 22, 23, 30, 31, 32, 33],
+                [110, 111, 112, 113, 120, 121, 122, 123, 130, 131, 132, 133],
+            ]
+        ),
+    )
+    torch.testing.assert_close(beta, torch.tensor([[[40, 41], [140, 141]]]))
+    torch.testing.assert_close(layout.restore_gate(receive[..., :2], 2), qkv[:, :4].view(2, 2, 2))
+
+
+@pytest.mark.parametrize(
+    "qkv_size,gate_size,heads,full_rank,error",
+    [(2, 1, 4, False, "full-rank"), (2, 1, 3, True, "KDA head count"), (1, 2, 3, True, "KDA head count")],
+)
+def test_kimi_projection_checks_its_own_head_contract(qkv_size, gate_size, heads, full_rank, error):
+    def init(attention, config, vllm_config, prefix):
+        nn.Module.__init__(attention)
+        attention.num_heads = heads
+
+    config = SimpleNamespace(linear_attn_config={"use_full_rank_gate": full_rank})
+    vc = SimpleNamespace(
+        quant_config=SimpleNamespace(uses_kimi_k3_mixed_kda_projection=lambda prefix: True),
+        parallel_config=SimpleNamespace(prefill_context_parallel_size=1),
+        additional_config={
+            "finegrained_tp_config": {
+                "qkv_iproj_tensor_parallel_size": qkv_size,
+                "gproj_tensor_parallel_size": gate_size,
+            }
+        },
+    )
+    with (
+        patch("vllm_ascend.ops.kimi_kda.KimiK3DeltaAttention.__init__", init),
+        pytest.raises(ValueError, match=error),
+    ):
+        AscendKimiK3DeltaAttention(config, vc)
+
+
+def test_kda_forward_preserves_core_override():
+    class CustomCore(AscendKimiK3DeltaAttention):
+        def _forward_core(self, *args, **kwargs):
+            return torch.ones(1, 2, 1, 2)
+
+    attention = CustomCore.__new__(CustomCore)
+    nn.Module.__init__(attention)
+    attention.o_norm = SimpleNamespace(forward_oot=MagicMock())
+    gate = torch.zeros(4, 1, 2)
+    output = torch.empty(1, 4, 1, 2)
+    with patch("vllm_ascend.ops.kimi_kda.maybe_save_kv_layer_to_connector"):
+        attention._forward(torch.empty(0), torch.empty(0), gate, torch.empty(0), output)
+    norm_input, owner_gate = attention.o_norm.forward_oot.call_args.args
+    torch.testing.assert_close(norm_input, torch.ones(1, 2, 1, 2))
+    torch.testing.assert_close(owner_gate, gate[:2])
+    assert attention.o_norm.forward_oot.call_args.kwargs["out"] is output

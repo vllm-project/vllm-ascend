@@ -107,6 +107,45 @@ def _tasks(calls: list[tuple]) -> tuple[DeviceMetadataTask, ...]:
     )
 
 
+def test_submission_identity_is_shared_only_within_one_submit(executor_env):
+    executor, _, _ = executor_env
+    identities = []
+    task = DeviceMetadataTask(
+        DeviceMetadataStage.ATTENTION,
+        lambda: identities.append(device_metadata.get_device_metadata_submission()),
+        1,
+    )
+    assert device_metadata.get_device_metadata_submission() is None
+    for _ in range(2):
+        executor.submit((task, task))
+        assert device_metadata.get_device_metadata_submission() is None
+        executor.release()
+    assert identities[0] is not None
+    assert identities[0] is identities[1]
+    assert identities[2] is identities[3]
+    assert identities[0] is not identities[2]
+
+
+def test_submission_identity_restores_outer_scope_after_failure(executor_env):
+    executor, _, _ = executor_env
+    identities = []
+
+    def fail():
+        identities.append(device_metadata.get_device_metadata_submission())
+        raise ValueError("producer failed")
+
+    with device_metadata._device_metadata_submission_scope():
+        outer = device_metadata.get_device_metadata_submission()
+        with pytest.raises(ValueError, match="producer failed"):
+            executor.submit((DeviceMetadataTask(DeviceMetadataStage.ATTENTION, fail, 1),))
+        assert identities[0] is not None and identities[0] is not outer
+        assert device_metadata.get_device_metadata_submission() is outer
+        # Preserve the existing executor failure protocol: its owner retires work.
+        assert executor.submission_in_flight
+        executor.release()
+    assert device_metadata.get_device_metadata_submission() is None
+
+
 def test_stream_lifecycle_and_stage_frontiers(executor_env):
     executor, calls, allocations = executor_env
     assert allocations == [

@@ -29,6 +29,8 @@ SPEC_REUSE_RULES = MappingProxyType(
     {
         "glm5_next_text": "vllm_ascend.models.glm5next.cache_reuse.GLM5_NEXT_SPEC_REUSE_RULES",
         "glm_moe_dsa": "vllm_ascend.models.glm5next.cache_reuse.GLM_DSA_SPEC_REUSE_RULES",
+        "qwen4_exp": "vllm_ascend.models.qwen4_exp.cache_reuse.QWEN4_EXP_SPEC_REUSE_RULES",
+        "qwen4_exp_text": "vllm_ascend.models.qwen4_exp.cache_reuse.QWEN4_EXP_SPEC_REUSE_RULES",
     }
 )
 
@@ -294,6 +296,12 @@ def plan_layerwise_cache_reuse(
     layout = planner.build()
     if not layout.has_layer_reuse:
         return None
+    backend_name = str(extra_config.get("backend", "mooncake")).strip().lower()
+    if backend_name != "memcache":
+        raise ValueError(
+            "Layerwise shared-buffer offload requires the memcache backend. "
+            "Set backend to 'memcache' or remove layerwise_num_shared_buffers."
+        )
 
     for name in layout.reused_cache_names:
         spec = planner.spec_by_entry[name]

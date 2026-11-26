@@ -39,22 +39,53 @@ Enable it through ``--additional-config`` (see vllm_ascend.ascend_config):
   enable     bool, default false.
   min_numel  Payload threshold in elements: a collective is quantized only when
              its payload reaches min_numel elements, i.e. min_numel * 2 bytes of
-             bf16 data. The default 16,777,216 is 32 MiB, i.e. 8192 tokens at
-             hidden_size 2048 or 3277 tokens at hidden_size 5120. Concurrency
-             matters only through the collective payload. Mixed batches and
-             decode take the int8 path if they meet the same size/shape gates.
+             bf16 data. Left at ``None`` (the default) the int8 gate is chosen
+             per tensor-parallel degree from the A2 measurements below, but only
+             on A2: A5 has no int8 payload calibration, so forcing the int8
+             backend there requires an explicit ``min_numel``. MXFP8 keeps its
+             own 32 MiB default. Concurrency matters only
+             through the collective payload. Mixed batches and decode take the
+             int8 path if they meet the same size/shape gates.
 
-  The optimized A2 implementation breaks even at ~20-24 MiB: 16 MiB +13%,
-  32 MiB -29%, 42 MiB -32%, 64 MiB -37%, 128 MiB -37% versus BF16 on
-  4x910B3. A5 TP=2/4 measurements also support a conservative 32 MiB gate.
-  Do not lower min_numel without target-hardware and model validation.
+  The int8 break-even payload is strongly TP-dependent, because the bf16
+  bandwidth grows with the group size while the fixed cost of the int8 path
+  (absmax, tiny fp32 amax all-reduce, quantize, dequantize) does not. Measured
+  on 910B3 with a dependent chain of 16 collectives, i.e. the timing that
+  reproduces serving (bf16 payload, so numel = MiB * 524,288):
+
+    TP   break-even   default min_numel   payload   gain at the default
+    2    9-11 MiB     8,388,608           16 MiB    1.45x
+    4    21-23 MiB    16,777,216          32 MiB    1.30x
+    8    31-38 MiB    31,457,280          60 MiB    1.11x (1.24x at 160 MiB)
+
+  TP=8 is the only degree whose end-to-end crossing sits well above the
+  collective one: the isolated chain lets the 8 KiB fp32 amax all-reduce
+  overlap perfectly, while a real forward pass does not, so end to end keeps
+  40-90% of the collective gain. A 37-point scan in 64-token steps puts the
+  chained crossing at 31-38 MiB (31 MiB fitting the >=46 MiB region, 38 MiB
+  from the 40/80 MiB endpoints), yet serving is still neutral at 50 MiB
+  (+0.17% TTFT) and first pays at 60 MiB (-1.89%). The gate is therefore
+  60 MiB, the lowest measured payload that is strictly profitable, which
+  leaves 1.6-1.9x headroom over the collective crossing; the gain then grows
+  with the payload (1.11x at 60 MiB, 1.16x at 80 MiB, 1.24x at the deployed
+  160 MiB). The TP=2 and TP=4 gates sit ~1.5x above their break-even and gain
+  1.3-1.5x as soon as they trigger. Degrees that were not measured (3, 5-7)
+  take the next larger default, so the gate never undercuts a measured
+  break-even.
+
+  MXFP8 has no per-TP calibration yet and keeps 16,777,216 (32 MiB); benchmark
+  it on the intended A5 workload before lowering it. The same rule applies to
+  the int8 gate: re-measure it on the target hardware instead of guessing.
+  Note the gate is a payload threshold, not a token one: if
+  max_num_batched_tokens * hidden_size * 2 stays below it the feature can never
+  trigger, so either lower min_numel explicitly or leave the feature disabled.
 
   The setting is read when the TP communicator is created (server start-up) and
   is active when every TP worker logs
   "INT8 quantized all-reduce enabled (group=..., min_numel=..., max_q=...)".
   To diagnose actual calls, add the following to the same --additional-config:
   "runtime_config": {"ascend_log": {"debug":
-  ["distributed.device_communicators.quantized_all_reduce"]}}
+  ["distributed.device_communicators.int8_all_reduce"]}}
   Look for QAR-HIT and QAR-SKIP. These Python logs may also appear during
   warmup or graph capture and do not count graph replays. Disable debug logging
   for performance measurements.
@@ -73,17 +104,59 @@ from vllm_ascend.logger import init_logger_ascend
 logger = init_logger_ascend(__name__)
 
 # A2 is validated end to end; A5 TP=2/4 has standalone numerical and
-# performance evidence. A3 remains disabled due to its measured regression.
+# performance evidence, but its int8 payload gate is uncalibrated, so the
+# per-TP defaults below are A2-only (see default_min_numel). A3 remains
+# disabled due to its measured regression.
 _VALID_DEVICE_TYPES = (AscendDeviceType.A2, AscendDeviceType.A5)
 # Groups larger than 8 ranks leave too few int8 levels (ws=16 -> max_q=7), so
 # they keep bf16 instead of failing. The TP degree is rejected at config time.
 _MAX_VALID_WORLD_SIZE = 8
 
+# Default payload gate in elements, per tensor-parallel degree, for A2 (910B).
+# A bf16 payload of N elements is N * 2 bytes, so N = MiB * 524,288 and these
+# entries are 16 / 32 / 60 MiB. TP=2 and TP=4 are their measured break-even
+# (~10 / ~22 MiB) rounded up 1.5x, so the quantized path is a clear win right at
+# the gate. TP=8 is set 1.6-1.9x above its 31-38 MiB collective crossing, at the
+# lowest payload that is strictly profitable end to end (60 MiB, -1.89% TTFT);
+# 50 MiB is neutral (+0.17%) because a real forward keeps only 40-90% of the
+# collective gain. See the module docstring for the measurement and the
+# protocol.
+_DEFAULT_MIN_NUMEL_A2: dict[int, int] = {
+    2: 8_388_608,
+    4: 16_777_216,
+    8: 31_457_280,
+}
+
+
+def default_min_numel(world_size: int, device_type: AscendDeviceType) -> int:
+    """Return the measured A2 payload gate for a ``world_size``-rank group.
+
+    The per-TP gates were measured on A2 (910B) only. A5 has a different bf16
+    HCCS bandwidth, so its int8 break-even is not covered by this table and
+    reusing an A2 number there could gate the quantized path in below its own
+    crossing. An A5 deployment must pass an explicit ``min_numel`` instead.
+
+    On A2, unmeasured degrees take the next larger measured one, so the gate
+    never undercuts a measured break-even; degrees above the supported maximum
+    are not reachable here (those groups stay bf16).
+    """
+    if device_type != AscendDeviceType.A2:
+        raise ValueError(
+            "the per-TP min_numel defaults are measured on Atlas A2 only, but "
+            f"the current device family is {device_type.name}. Set "
+            "additional_config.quantized_all_reduce_config.min_numel explicitly "
+            "or use the MXFP8 backend."
+        )
+    for degree in sorted(_DEFAULT_MIN_NUMEL_A2):
+        if world_size <= degree:
+            return _DEFAULT_MIN_NUMEL_A2[degree]
+    return _DEFAULT_MIN_NUMEL_A2[max(_DEFAULT_MIN_NUMEL_A2)]
+
 
 class QuantizedAllReduce:
     """Wrapper adding int8 quantized all-reduce around a base all_reduce."""
 
-    def __init__(self, group: "dist.ProcessGroup", min_numel: int, group_name: str = "") -> None:
+    def __init__(self, group: "dist.ProcessGroup", min_numel: int | None = None, group_name: str = "") -> None:
         self.group = group
         self.group_name = group_name
         self.world_size = dist.get_world_size(group)
@@ -105,9 +178,12 @@ class QuantizedAllReduce:
         # +/-max_q, so the TP-way sum is <= 127 and int8 cannot wrap.
         # ws=2 -> 63 (sum 126), ws=4 -> 31 (sum 124), ws=8 -> 15 (sum 120).
         self.max_q = 127 // self.world_size if self.supported else 0
-        # Payload gate in elements (bf16 payload = 2 bytes per element);
-        # 32 MiB by default, the measured break-even rounded up. See docstring.
-        self.min_numel = min_numel
+        # Payload gate in elements (bf16 payload = 2 bytes per element). None
+        # means "use the measured A2 per-TP default"; see default_min_numel().
+        if min_numel is None:
+            self.min_numel = default_min_numel(self.world_size, device_type)
+        else:
+            self.min_numel = min_numel
 
     def _skip_reason(self, input_: torch.Tensor) -> str | None:
         if not self.supported:

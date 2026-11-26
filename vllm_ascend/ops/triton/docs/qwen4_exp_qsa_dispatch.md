@@ -2,10 +2,18 @@
 
 ## Description
 
-- **Function**: prepares Qwen4Exp LightningIndexer output for the selected-token FIA-mask and GBSA paths. Prefill requests whose cached logical prefix starts below 24K use FIA for that whole scheduler chunk; later chunks use GBSA. Decode always uses GBSA.
+| Request | Attention path |
+| --- | --- |
+| Prefill with a cached prefix below 24K at chunk start | FIA for the entire chunk, even if it crosses 24K |
+| Prefill with a cached prefix of 24K or more at chunk start | Union GBSA |
+| Decode | Standard GBSA, including decode-only graph replay |
+
 - **Packing**: the indexer selects 2048 tokens in groups of four. A compact row therefore contains 512 complete-group IDs followed by three residual-token slots. `pack_qsa_group_indices_npu` writes the complete groups and reconstructs up to three visible residual tokens. `-1` denotes an invalid lane.
 - **FIA mask**: `_prepare_qsa_mask_words_kernel` expands group IDs into four-token bit patterns. Its process-local workspace is allocated once before graph replay and reused with its real row stride; the resulting boolean mask uses `False` for visible positions and `True` for masked positions.
-- **GBSA preparation**: `_prepare_qsa_gbsa_rows_kernel` removes invalid groups, preserves selection order, appends/replaces the residual group at the 512-entry capacity boundary, replicates sparse indices per KV head, and gathers the request block-table row.
+- **Standard GBSA preparation**: `_prepare_qsa_gbsa_rows_kernel` removes invalid groups, preserves selection order, appends/replaces the residual group at the 512-entry capacity boundary, replicates sparse indices per KV head, and gathers the request block-table row.
+- **Shared Union preparation**: `AscendQSAMetadataBuilder.prepare_step_metadata()` computes per-query visible lengths and prepares request boundaries, row maps and block tables once per step for layers that share the same metadata. The worker invokes it after all cache metadata has been built.
+- **Multi-request batching**: Union Prefill requests with contiguous query rows can share one GBSA call. Each request forms its own groups of up to eight query rows. Unused lanes in the row map are set to `-1`.
+- **Per-layer Union preparation**: the AscendC operator `QsaUnionInputs` uses the layer's compact indices, shared visible lengths and row map to produce Union indices, block counts and the exact mask for GBSA.
 
 ## Tensor ABI
 

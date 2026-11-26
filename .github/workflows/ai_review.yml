@@ -73,7 +73,9 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.PAT_TOKEN }}
           GH_REPO: ${{ github.repository }}
-        run: python3 .github/workflows/scripts/ai_review.py prepare
+        run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          python3 .github/workflows/scripts/ai_review.py prepare
 
       - uses: actions/checkout@v7
         if: steps.prepare.outputs.review == 'true'
