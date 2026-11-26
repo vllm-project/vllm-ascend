@@ -39,7 +39,36 @@ class MoEAllGatherCombineMetadata310(MoEAllGatherCombineMetadata):
     local_row_count: torch.Tensor | None = None
 
 
+def _is_stream_capturing() -> bool:
+    checker = getattr(torch.npu, "is_current_stream_capturing", None)
+    return bool(checker()) if checker is not None else False
+
+
 class TokenDispatcherWithAllGather310(TokenDispatcherWithAllGather):
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self._encoded_expert_maps: dict[int, tuple[torch.Tensor, torch.Tensor]] = {}
+        self._row_indices_cache: dict[tuple[int, torch.device], torch.Tensor] = {}
+
+    def _get_encoded_expert_map(self, expert_map: torch.Tensor) -> torch.Tensor:
+        key = id(expert_map)
+        cached = self._encoded_expert_maps.get(key)
+        if cached is not None and cached[0] is expert_map:
+            return cached[1]
+        encoded = expert_map.masked_fill(expert_map < 0, self.num_experts_local)
+        if not _is_stream_capturing():
+            self._encoded_expert_maps[key] = (expert_map, encoded)
+        return encoded
+
+    def _get_row_indices(self, num_rows: int, device: torch.device) -> torch.Tensor:
+        key = (num_rows, device)
+        rows = self._row_indices_cache.get(key)
+        if rows is None:
+            rows = torch.arange(num_rows, device=device, dtype=torch.int32)
+            if not _is_stream_capturing():
+                self._row_indices_cache[key] = rows
+        return rows
+
     def token_dispatch(
         self,
         token_dispatch_input: MoETokenDispatchInput,
@@ -59,10 +88,11 @@ class TokenDispatcherWithAllGather310(TokenDispatcherWithAllGather):
             hidden_states = hidden_states * topk_weights.to(hidden_states.dtype)
         expert_num = self.num_experts_local
         if expert_map is not None:
-            # 310P only accepts the full routing range. Sort remote routes into a
-            # final slot and omit that slot from grouped matmul's cumulative counts.
-            local_ids = expert_map.index_select(0, topk_ids.flatten()).view_as(topk_ids)
-            topk_ids = local_ids.masked_fill(local_ids < 0, expert_num)
+            # 310P only accepts the full routing range. Pre-encode remote routes
+            # (-1) into a final slot once and omit that slot from grouped matmul's
+            # cumulative counts.
+            encoded_map = self._get_encoded_expert_map(expert_map)
+            topk_ids = encoded_map.index_select(0, topk_ids.flatten()).view_as(topk_ids)
             expert_num += 1
 
         assert hidden_states.shape[-1] % 16 == 0, (
@@ -109,6 +139,6 @@ class TokenDispatcherWithAllGather310(TokenDispatcherWithAllGather):
                 combine_metadata = replace(combine_metadata, expanded_row_idx=indices)
                 hidden_states[-1].masked_fill_(local_rows < num_rows, 0)
             else:
-                rows = torch.arange(num_rows, device=hidden_states.device, dtype=torch.int32)
-                hidden_states = hidden_states.masked_fill((rows >= local_rows).unsqueeze(1), 0)
+                rows = self._get_row_indices(num_rows, hidden_states.device)
+                hidden_states.masked_fill_((rows >= local_rows).unsqueeze(1), 0)
         return super().token_combine(hidden_states, combine_metadata, bias)
