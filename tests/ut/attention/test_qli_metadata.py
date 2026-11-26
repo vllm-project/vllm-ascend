@@ -74,7 +74,7 @@ def test_draft_steps_do_not_overwrite_each_other():
     torch.testing.assert_close(second.metadata, torch.tensor([2, 162], dtype=torch.int32))
 
 
-@pytest.mark.parametrize("change", [{"head_dim": 64}, {"num_heads_q": 64}, {"topk": 1024}])
+@pytest.mark.parametrize("change", [{"head_dim": 64}, {"num_heads_q": 64}, {"topk": 1024}, {"quant_mode": 5}])
 def test_incompatible_layer_cannot_consume_group_metadata(change):
     config = QLIMetadataConfig(32, 128, 1)
     prepared = QLIMetadataBuffers(config, 2).build("target", torch.tensor([0, 1]), torch.tensor([32]), _metadata_op)
@@ -102,14 +102,3 @@ def test_output_layout_change_does_not_replace_captured_storage():
             "target", torch.tensor([0, 1]), torch.tensor([32]), lambda **kw: torch.zeros(3, dtype=torch.int32)
         )
     torch.testing.assert_close(captured.metadata, torch.tensor([1, 32], dtype=torch.int32))
-
-
-def test_c4_and_c8_groups_have_independent_metadata():
-    queries, lengths = torch.tensor([0, 1]), torch.tensor([32])
-    groups = [QLIMetadataBuffers(QLIMetadataConfig(32, 128, mode), 2) for mode in (1, 5)]
-    c8, c4 = [group.build("same_slot_mapping", queries, lengths, _metadata_op) for group in groups]
-    groups[1].build("same_slot_mapping", queries, lengths + 1, _metadata_op)
-    torch.testing.assert_close(c8.metadata, torch.tensor([1, 32], dtype=torch.int32))
-    with pytest.raises(ValueError, match="configuration"):
-        get_qli_metadata(c8, c4.config, queries[1:], lengths, Mock())
-    torch.testing.assert_close(c4.metadata, torch.tensor([1, 33], dtype=torch.int32))
