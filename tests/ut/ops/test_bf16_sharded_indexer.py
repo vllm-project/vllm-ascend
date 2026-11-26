@@ -9,7 +9,8 @@ from vllm_ascend.ops import bf16_sharded_indexer
 
 @pytest.mark.parametrize("topk", [2, 20])
 @pytest.mark.parametrize("full_graph", [False, True])
-def test_bf16_paged_candidates_match_independent_causal_reference(monkeypatch, topk, full_graph):
+@pytest.mark.parametrize("use_shared_rows", [False, True])
+def test_bf16_paged_candidates_match_independent_causal_reference(monkeypatch, topk, full_graph, use_shared_rows):
     monkeypatch.setattr(bf16_sharded_indexer, "_KEY_TOKENS_PER_TILE", 4)
     generator = torch.Generator().manual_seed(23)
     query = torch.randn((8, 3, 6), generator=generator).bfloat16()
@@ -21,6 +22,12 @@ def test_bf16_paged_candidates_match_independent_causal_reference(monkeypatch, t
     table = torch.tensor([[4, 2, 3], [2, 3, 4], [7, 1, 5], [0, 6, 10]], dtype=torch.int32)
     ends = torch.tensor([2, 2, 5, 7], dtype=torch.int32)
     visible = torch.tensor([[1], [7], [5], [6], [9], [0], [10], [12]], dtype=torch.int32)
+    request_rows = None
+    if use_shared_rows:
+        # The fused metadata producer skips the empty request and maps graph
+        # padding to the last table row with an empty visible prefix.
+        request_rows = torch.tensor([0, 0, 2, 2, 2, 3, 3, 3], dtype=torch.int32)
+        visible[-1] = 0
     with torch.autocast(device_type="cpu", dtype=torch.bfloat16):
         actual_ids, actual_scores = bf16_sharded_indexer.bf16_paged_indexer_candidates(
             query,
@@ -30,6 +37,7 @@ def test_bf16_paged_candidates_match_independent_causal_reference(monkeypatch, t
             ends,
             visible,
             topk,
+            request_rows=request_rows,
             first_valid_page=2,
             full_graph=full_graph,
             query_rows_per_tile=2,

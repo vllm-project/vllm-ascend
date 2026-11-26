@@ -46,18 +46,20 @@ def test_bf16_sharded_indexer_graph_replay_reads_new_pages_and_visible_lengths()
     table = torch.zeros((2, num_pages), dtype=torch.int32, device=query.device)
     ends = torch.tensor([4, 4], dtype=torch.int32, device=query.device)
     visible = torch.zeros(4, dtype=torch.int32, device=query.device)
+    request_rows = torch.zeros_like(visible)
     candidate_inputs = (query, weights, keys, table, ends, visible)
     topk = 2048
-    bf16_paged_indexer_candidates(*candidate_inputs, topk, full_graph=True)
+    bf16_paged_indexer_candidates(*candidate_inputs, topk, full_graph=True, request_rows=request_rows)
     torch.npu.synchronize()
 
     graph = torch.npu.NPUGraph()
     with torch.npu.graph(graph, capture_error_mode="thread_local", auto_dispatch_capture=True):
-        ids, scores = bf16_paged_indexer_candidates(*candidate_inputs, topk, full_graph=True)
+        ids, scores = bf16_paged_indexer_candidates(*candidate_inputs, topk, full_graph=True, request_rows=request_rows)
 
     table[0].copy_(torch.arange(1, num_pages + 1, dtype=torch.int32))
     table[1, 0] = num_pages
     ends.copy_(torch.tensor([2, 3], dtype=torch.int32))
+    request_rows.copy_(torch.tensor([0, 0, 1, 1], dtype=torch.int32))
     visible.copy_(torch.tensor([page_size - 1, num_pages * page_size, 5, 0], dtype=torch.int32))
     graph.replay()
     expected_ids, expected_scores = bf16_paged_indexer_candidates(*candidate_inputs, topk)

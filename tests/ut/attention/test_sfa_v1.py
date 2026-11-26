@@ -229,6 +229,33 @@ class TestAscendSFADeviceOperator(TestBase):
         self.assertEqual(call_kwargs["sparse_mode"], 0)
         self.assertTrue(call_kwargs["return_softmax_lse"])
 
+    def test_padded_query_heads_share_dcp_output_and_stats_storage(self):
+        impl, _, _, indices, metadata, q_lens, kv_lens = self._make_common_inputs()
+        query = torch.randn(3, 96, 8, dtype=torch.bfloat16)
+        rope = query[..., :2]
+        kv = torch.randn(4, 1, 1, 8, dtype=query.dtype)
+        padded_output = torch.randn(3, 128, 8, dtype=query.dtype)
+        padded_max = torch.randn(1, 3, 128)
+        padded_sum = torch.rand_like(padded_max)
+        with patch.object(
+            torch.ops._C_ascend,
+            "npu_sparse_flash_attention",
+            create=True,
+            return_value=(padded_output, padded_max, padded_sum),
+        ) as sfa:
+            output, maximum, total = DeviceOperator.execute_sparse_flash_attention_process(
+                impl, query, rope, (kv, kv[..., :2]), indices, metadata, q_lens, kv_lens, return_lse=True
+            )
+
+        self.assertEqual(sfa.call_args.kwargs["query"].shape[1], 128)
+        for actual, expected in (
+            (output, padded_output[:, :96]),
+            (maximum, padded_max[..., :96]),
+            (total, padded_sum[..., :96]),
+        ):
+            torch.testing.assert_close(actual, expected, check_stride=True)
+            self.assertEqual(actual.data_ptr(), expected.data_ptr())
+
 
 class TestAscendSFACacheComposition(TestBase):
     def test_nope_cache_normalization_with_runtime_shared_indexer(self):

@@ -145,6 +145,9 @@ class AscendSFAIndexerMetadata:
     # V2's deferred producer fills this before the first indexer consumes it.
     qli_metadata: torch.Tensor | None = None
     qli_metadata_group_id: int | None = None
+    # BF16 DCP shares the query-row owner across indexer layers. Padded rows
+    # point at the final request and have zero local visibility.
+    request_rows: torch.Tensor | None = None
 
 
 class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
@@ -899,6 +902,7 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
                     first_valid_page=indexer_metadata.first_valid_indexer_page,
                     full_graph=indexer_metadata.full_graph_mode,
                     query_rows_per_tile=self._query_rows_per_tile,
+                    request_rows=indexer_metadata.request_rows,
                 )
                 return distributed_topk(
                     indices,
@@ -1027,7 +1031,7 @@ class AscendSFAIndexerMetadataBuilder(AttentionMetadataBuilder[AscendSFAIndexerM
         self._dsa_cp_seq_buffers: dict[object, tuple[torch.Tensor, torch.Tensor]] = {}
         self._dcp_block_table_buffers: dict[object, torch.Tensor] = {}
         self._dcp_slot_mapping_buffers: dict[object, torch.Tensor] = {}
-        self._sharded_seq_buffers: dict[object, tuple[torch.Tensor, torch.Tensor]] = {}
+        self._sharded_seq_buffers: dict[object, tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]] = {}
         self._pcp_indexer_slot_mapping_buffers: dict[object, torch.Tensor] = {}
         self._lim_token_masks: dict[object, CpuGpuBuffer] = {}
         self._cache_scatter_indices_buffers: dict[object, torch.Tensor] = {}
@@ -1651,6 +1655,7 @@ class AscendSFAIndexerMetadataBuilder(AttentionMetadataBuilder[AscendSFAIndexerM
         actual_seq_lengths_key = seq_lens
         query_start_loc = common_attn_metadata.query_start_loc[: num_reqs + 1]
         local_visible = None
+        request_rows = None
         max_local_indexer_pages = None
         qli_dcp_args = None
         if self.use_sharded_dcp:
@@ -1674,9 +1679,12 @@ class AscendSFAIndexerMetadataBuilder(AttentionMetadataBuilder[AscendSFAIndexerM
                         dtype=torch.int32,
                         device=self.device,
                     ),
+                    torch.empty(self._slot_capacity, dtype=torch.int32, device=self.device)
+                    if self.use_sharded_bf16
+                    else None,
                 )
                 self._sharded_seq_buffers[buffer_key] = buffers
-            key_buffer, visible_buffer = buffers
+            key_buffer, visible_buffer, request_buffer = buffers
             if num_reqs > key_buffer.numel():
                 raise ValueError(f"Sharded indexer request count {num_reqs} exceeds capacity {key_buffer.numel()}")
             actual_seq_lengths_key = key_buffer[:num_reqs]
@@ -1698,6 +1706,8 @@ class AscendSFAIndexerMetadataBuilder(AttentionMetadataBuilder[AscendSFAIndexerM
                 )
             else:
                 local_visible = visible_buffer[:num_input_tokens]
+                if request_buffer is not None:
+                    request_rows = request_buffer[:num_input_tokens]
                 build_local_lengths(
                     seq_lens,
                     cum_query_lens,
@@ -1706,6 +1716,7 @@ class AscendSFAIndexerMetadataBuilder(AttentionMetadataBuilder[AscendSFAIndexerM
                     group.world_size,
                     group.rank_in_group,
                     interleave,
+                    request_rows=request_rows,
                 )
         if self.use_dsa_cp and not self.use_pcp:
             (
@@ -1759,6 +1770,7 @@ class AscendSFAIndexerMetadataBuilder(AttentionMetadataBuilder[AscendSFAIndexerM
             num_decode_tokens=num_decode_tokens,
             uses_pcp_sharded_layout=is_pcp_sharded,
             local_visible_lengths=local_visible,
+            request_rows=request_rows,
             first_valid_indexer_page=self.first_valid_indexer_page,
             max_local_indexer_pages=max_local_indexer_pages,
             full_graph_mode=full_graph_mode,

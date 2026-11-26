@@ -65,22 +65,26 @@ def test_query_prep_broadcast_positional_heads(rows, nope, rope):
 
 @pytest.mark.parametrize("world,interleave", [(2, 1), (8, 128), (8, 768)])
 @pytest.mark.parametrize("requests", [4, 32, 33])
-def test_local_lengths_changed_graph_inputs(world, interleave, requests):
+@pytest.mark.parametrize("with_request_rows", [False, True])
+def test_local_lengths_changed_graph_inputs(world, interleave, requests, with_request_rows):
     seq = torch.tensor([0, 7, 131072, 1048576] + [1048576] * (requests - 4), dtype=torch.int32).npu()
     ends = torch.tensor([0, 2, 6, 14] + [14] * (requests - 4), dtype=torch.int32).npu()
     keys = torch.empty_like(seq)
     visible = torch.empty((17, 1), dtype=torch.int32, device="npu")
+    request_rows = torch.empty(17, dtype=torch.int32, device="npu") if with_request_rows else None
     rank = world - 1
     for _ in range(3):
-        build_local_lengths(seq, ends, keys, visible, world, rank, interleave)
+        build_local_lengths(seq, ends, keys, visible, world, rank, interleave, request_rows=request_rows)
     graph = torch.npu.NPUGraph()
     with torch.npu.graph(graph):
-        build_local_lengths(seq, ends, keys, visible, world, rank, interleave)
+        build_local_lengths(seq, ends, keys, visible, world, rank, interleave, request_rows=request_rows)
     for new_ends in ([0, 2, 6, 14], [1, 1, 5, 12], [0, 0, 0, 0]):
         ends.copy_(torch.tensor(new_ends + [new_ends[-1]] * (requests - 4), dtype=torch.int32).npu())
         graph.replay()
         rows = torch.arange(17)
         request_ids = torch.searchsorted(ends.cpu(), rows, right=True).clamp(max=requests - 1)
+        if with_request_rows:
+            torch.testing.assert_close(request_rows.cpu(), request_ids.int())
         global_visible = query_visible_lengths(seq.cpu(), ends.cpu(), rows, request_ids)
         key_only = torch.empty_like(keys)
         build_local_key_lengths(seq, key_only, world, rank, interleave)
@@ -120,8 +124,10 @@ def test_pack_from_softmax_statistics(tokens, heads, world, scatter_dim, dtype):
 def test_local_lengths_empty_requests(rows):
     empty = torch.empty(0, dtype=torch.int32, device="npu")
     visible = torch.full((rows, 1), 123, dtype=torch.int32, device="npu")
-    build_local_lengths(empty, empty, empty, visible, 8, 7, 768)
+    request_rows = torch.full((rows,), 123, dtype=torch.int32, device="npu")
+    build_local_lengths(empty, empty, empty, visible, 8, 7, 768, request_rows=request_rows)
     assert (visible.cpu() == 0).all()
+    assert (request_rows.cpu() == 0).all()
 
 
 @pytest.mark.parametrize(

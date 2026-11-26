@@ -727,14 +727,15 @@ class BaseDeviceAdaptor:
             )
             if pad_query_groups:
                 output, softmax_max, softmax_sum = result
-                output = (
-                    output.unflatten(1, (num_kv_heads, _SFA_PADDED_QUERY_GROUP_SIZE))[:, :, :query_group_size]
-                    .flatten(1, 2)
-                    .contiguous()
-                )
+                output = output.unflatten(1, (num_kv_heads, _SFA_PADDED_QUERY_GROUP_SIZE))
+                output = output[:, :, :query_group_size].flatten(1, 2)
                 if return_lse:
-                    softmax_max = softmax_max[..., :query_group_size].contiguous()
-                    softmax_sum = softmax_sum[..., :query_group_size].contiguous()
+                    # The DCP pack kernels read output and both statistics by
+                    # stride. With one MLA KV head, all three slices are views.
+                    softmax_max = softmax_max[..., :query_group_size]
+                    softmax_sum = softmax_sum[..., :query_group_size]
+                else:
+                    output = output.contiguous()
                 result = (output, softmax_max, softmax_sum)
         if not isinstance(result, tuple):
             if return_lse:

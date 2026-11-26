@@ -680,6 +680,7 @@ def _local_lengths_small_batch(
     query_ends,
     key_lengths,
     visible_lengths,
+    request_rows,
     REQUESTS,
     ROWS,
     WORLD: tl.constexpr,
@@ -701,6 +702,10 @@ def _local_lengths_small_batch(
     # row/request mask avoids dependent random GM loads during binary search.
     own = (row[:, None] >= start[None, :]) & (row[:, None] < end[None, :])
     own &= request[None, :] < REQUESTS
+    if request_rows is not None:
+        # Padded rows may safely read the last request's table; they have zero visible keys.
+        owner = tl.min(tl.where(own, request[None, :], REQUESTS - 1), 1)
+        tl.store(request_rows + row, owner, row < ROWS)
     visible = tl.maximum(seq[None, :] - end[None, :] + row[:, None] + 1, 0)
     visible = tl.sum(tl.where(own, visible, 0), 1)
     local = visible // (WORLD * INTERLEAVE) * INTERLEAVE
@@ -714,6 +719,7 @@ def _local_lengths(
     query_ends,
     key_lengths,
     visible_lengths,
+    request_rows,
     REQUESTS,
     ROWS,
     WORLD: tl.constexpr,
@@ -738,6 +744,8 @@ def _local_lengths(
         lower = tl.where(right, mid + 1, lower)
         upper = tl.where(right, upper, mid)
     request = tl.minimum(lower, REQUESTS - 1)
+    if request_rows is not None:
+        tl.store(request_rows + offsets, request, offsets < ROWS)
     seq = tl.load(seq_lens + request)
     end = tl.load(query_ends + request)
     total = tl.load(query_ends + REQUESTS - 1)
@@ -749,19 +757,36 @@ def _local_lengths(
 
 
 @triton.jit(do_not_specialize=["ROWS"])
-def _zero_visible_lengths(visible_lengths, ROWS, BLOCK: tl.constexpr):
+def _zero_visible_lengths(visible_lengths, request_rows, ROWS, BLOCK: tl.constexpr):
     row = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
     tl.store(visible_lengths + row, 0, row < ROWS)
+    if request_rows is not None:
+        tl.store(request_rows + row, 0, row < ROWS)
 
 
 def build_local_lengths(
-    seq_lens, query_ends, key_lengths, visible_lengths, world_size: int, rank: int, interleave: int
+    seq_lens,
+    query_ends,
+    key_lengths,
+    visible_lengths,
+    world_size: int,
+    rank: int,
+    interleave: int,
+    *,
+    request_rows: torch.Tensor | None = None,
 ):
-    """Write stable metadata buffers used by native causal local QLI."""
+    """Write rank-local lengths and optionally the BF16 scorer's row-to-request map."""
     requests, rows = seq_lens.numel(), visible_lengths.numel()
+    if request_rows is not None and (
+        request_rows.shape != (rows,)
+        or request_rows.dtype != torch.int32
+        or request_rows.device != visible_lengths.device
+        or not request_rows.is_contiguous()
+    ):
+        raise ValueError("Expected a contiguous int32 request index per query row on the lengths device.")
     if requests == 0:
         if rows:
-            _zero_visible_lengths[(triton.cdiv(rows, 256),)](visible_lengths, rows, 256)
+            _zero_visible_lengths[(triton.cdiv(rows, 256),)](visible_lengths, request_rows, rows, 256)
         return
     if requests <= 32 and rows:
         _local_lengths_small_batch[(triton.cdiv(rows, 32),)](
@@ -769,6 +794,7 @@ def build_local_lengths(
             query_ends,
             key_lengths,
             visible_lengths,
+            request_rows,
             requests,
             rows,
             world_size,
@@ -783,6 +809,7 @@ def build_local_lengths(
         query_ends,
         key_lengths,
         visible_lengths,
+        request_rows,
         requests,
         rows,
         world_size,

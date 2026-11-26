@@ -230,7 +230,7 @@ def test_sharded_indexer_pcp_request_capacity(mock_cos_sin, native, rows):
 
     ops: Any = ModuleType("vllm_ascend.ops.triton.sharded_indexer")
     ops.build_local_key_lengths = Mock(side_effect=lengths)
-    ops.build_local_lengths = Mock(side_effect=lambda seq, query, out, visible, *args: lengths(seq, out))
+    ops.build_local_lengths = Mock(side_effect=lambda seq, query, out, visible, *args, **kwargs: lengths(seq, out))
     with (
         patch.dict("sys.modules", {ops.__name__: ops}),
         patch(
@@ -249,6 +249,7 @@ def test_sharded_indexer_pcp_request_capacity(mock_cos_sin, native, rows):
         else:
             metadata = builder.build(0, common)
             torch.testing.assert_close(metadata.actual_seq_lengths_key, expected_lengths)
+            assert metadata.request_rows is None
 
 
 @pytest.mark.parametrize(
@@ -304,6 +305,9 @@ def test_bf16_sharded_builder_uses_causal_lengths_instead_of_native_qli(mock_cos
     assert ops.build_local_lengths.call_args.args[-3:] == (8, 1, 768)
     ops.build_local_key_lengths.assert_not_called()
     assert metadata.local_visible_lengths.shape == (4, 1)
+    assert metadata.request_rows is ops.build_local_lengths.call_args.kwargs["request_rows"]
+    assert metadata.request_rows.shape == (4,)
+    assert metadata.request_rows.dtype == torch.int32
     assert metadata.qli_dcp_args is None
     assert builder.take_device_metadata_tasks() == ()
     assert metadata.first_valid_indexer_page == 6
@@ -322,6 +326,7 @@ def test_bf16_sharded_builder_uses_causal_lengths_instead_of_native_qli(mock_cos
     assert captured.max_local_indexer_pages is replay.max_local_indexer_pages is None
     assert captured.block_table.shape == replay.block_table.shape
     assert captured.local_visible_lengths.data_ptr() == replay.local_visible_lengths.data_ptr()
+    assert captured.request_rows.data_ptr() == replay.request_rows.data_ptr()
 
 
 @patch("vllm_ascend.attention.indexer.get_ascend_config")
