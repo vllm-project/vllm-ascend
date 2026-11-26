@@ -67,11 +67,13 @@ def test_context_binds_request_records_and_detects_rebinding():
     assert not context.is_bound_to(layers)
 
 
-def test_context_binds_normalized_key_record(monkeypatch):
+@pytest.mark.parametrize("key_gate_dtype", [torch.float16, torch.bfloat16])
+def test_context_binds_normalized_key_record(monkeypatch, key_gate_dtype):
     monkeypatch.setattr(recoverssm, "is_950", lambda: True)
     layers = [make_layer(), make_layer()]
     for layer in layers:
         records = layer.recoverssm_records
+        records.key_gate = records.key_gate.to(key_gate_dtype)
         records.decay_cache, records.normalized_key_cache = recoverssm.allocate_kda_verify_caches(records.key_gate)
         assert records.normalized_key_cache.shape == records.correction.shape
         assert records.normalized_key_cache.dtype == records.decay_cache.dtype == torch.bfloat16

@@ -450,7 +450,9 @@ def test_conv_compaction_device_tile_preserves_other_slots(channels, dim_first, 
         torch.testing.assert_close(actual, expected, atol=0, rtol=0)
 
 
-def reference(q, k, v, raw_g, raw_beta, a_log, bias, lower_bound, state, starts, blocks, accepted):
+def reference(
+    q, k, v, raw_g, raw_beta, a_log, bias, lower_bound, state, starts, blocks, accepted, *, cached_commit=False
+):
     q, k, v, raw_g, raw_beta, a_log, bias, state = (
         tensor.detach().to(device="cpu", dtype=torch.float64)
         for tensor in (q, k, v, raw_g, raw_beta, a_log, bias, state)
@@ -463,6 +465,7 @@ def reference(q, k, v, raw_g, raw_beta, a_log, bias, lower_bound, state, starts,
         if block == 0:
             continue
         current = state[block].clone()
+        committed = current
         corrections = []
         for position, token in enumerate(range(starts[row], starts[row + 1])):
             key, query = k[0, token], q[0, token]
@@ -476,13 +479,22 @@ def reference(q, k, v, raw_g, raw_beta, a_log, bias, lower_bound, state, starts,
                 gate = -a * torch.nn.functional.softplus(gate_input)
             else:
                 gate = lower_bound * torch.sigmoid(a * gate_input)
-            current = current * gate.exp()[:, None, :]
+            decay = gate.exp()
+            current = current * decay[:, None, :]
             correction = raw_beta[0, token].sigmoid()[:, None] * (v[0, token] - (current * key[:, None, :]).sum(-1))
             corrections.append(correction)
             current = current + correction[:, :, None] * key[:, None, :]
             output[0, token] = (current * query[:, None, :]).sum(-1)
+            if cached_commit and position < accepted[row]:
+                # Verify uses unrounded vectors. Commit reads BF16 decay/key and FP32 correction records.
+                stored_decay = decay.float().bfloat16().double()
+                stored_key = key.float().bfloat16().double()
+                stored_correction = correction.float().double()
+                committed = (
+                    committed * stored_decay[:, None, :] + stored_correction[:, :, None] * stored_key[:, None, :]
+                )
             if position + 1 == accepted[row]:
-                final[block] = current
+                final[block] = committed if cached_commit else current
         if corrections:
             span = slice(starts[row], starts[row + 1])
             records[block] = (
@@ -982,7 +994,21 @@ def test_align_context(mode, graph_mode, state_dtype, heads, key_dim, value_dim,
         beta = torch.randn(1, 15, heads, dtype=torch.bfloat16, device="npu")
         a_log = torch.randn(heads, device="npu") * 0.1
         bias = torch.randn(heads * key_dim, device="npu") * 0.1
-        golden_output, final, _ = reference(q, k, v, gate, beta, a_log, bias, -5.0, initial, starts, blocks, accepted)
+        golden_output, final, _ = reference(
+            q,
+            k,
+            v,
+            gate,
+            beta,
+            a_log,
+            bias,
+            -5.0,
+            initial,
+            starts,
+            blocks,
+            accepted,
+            cached_commit=is_950(),
+        )
         decay, normalized_key = recoverssm_module.allocate_kda_verify_caches(kg)
         output = kda_recoverssm_verify(
             q,
@@ -1034,6 +1060,7 @@ def test_align_context(mode, graph_mode, state_dtype, heads, key_dim, value_dim,
                     starts,
                     blocks,
                     [length if index == row else 0 for index in range(3)],
+                    cached_commit=is_950(),
                 )
                 golden_state[boundary_dst] = intermediate[src]
                 golden_conv[boundary_dst, :, :3] = original_conv[src, :, length - 1 : length + 2]
@@ -1249,7 +1276,19 @@ def test_commit_window_uses_device_path(
         a_log = torch.randn(heads, device="npu") * 0.1
         bias = torch.randn(heads * dim, device="npu") * 0.1
         golden_output, golden_state, records = reference(
-            q, k, v, gate, beta, a_log, bias, lower_bound, initial, starts, blocks, accepted
+            q,
+            k,
+            v,
+            gate,
+            beta,
+            a_log,
+            bias,
+            lower_bound,
+            initial,
+            starts,
+            blocks,
+            accepted,
+            cached_commit=is_950(),
         )
         decay, normalized_key = recoverssm_module.allocate_kda_verify_caches(kg)
         output = kda_recoverssm_verify(
