@@ -3,6 +3,7 @@
 
 from collections.abc import Callable
 from dataclasses import dataclass
+from functools import partial
 from importlib import import_module
 
 import torch
@@ -23,9 +24,9 @@ class PrefillKDAMetadataWorkspace:
     def __init__(self, device, **_kwargs):
         pass
 
-    def new_context(self, query_start_loc, keep_meta=None):
-        if keep_meta is not None:
-            query_start_loc = torch.cat((query_start_loc[:1], query_start_loc[1:][keep_meta]))
+    def new_context(self, query_start_loc, keep_indices=None):
+        if keep_indices is not None:
+            query_start_loc = torch.cat((query_start_loc[:1], query_start_loc[1:].index_select(0, keep_indices)))
         return PrefillKDAMetadataContext(query_start_loc.to(dtype=torch.int32).contiguous())
 
 
@@ -64,12 +65,40 @@ def create_prefill_kda_metadata_workspace(vllm_config, layer_names, device):
     return PrefillKDAMetadataWorkspace(device)
 
 
+def _run_async_flash_kda_dev(
+    q, k, v, gate, beta, scale, state, a_log, dt_bias, lower_bound, layout, metadata, *, implementation, provider
+):
+    # The generic device entry handles staged/warped/persistent metadata itself.
+    # Supplying it bypasses Host selection of planned persistent specializations
+    # and the wait for a metadata readback, without forcing a template.
+    return implementation(
+        q,
+        k,
+        v,
+        gate,
+        beta,
+        state,
+        a_log,
+        dt_bias,
+        metadata=metadata,
+        scale=scale,
+        lower_bound=lower_bound,
+        layout_qkv=layout,
+        compiled_provider=provider,
+    )
+
+
 def load_prefill_fused_kda_operator() -> PrefillFusedKDAOperators | None:
     """Load the only supported Kimi K3 prefill operator chain."""
     try:
         prolog = import_module("ops.kda_prolog").kda_prolog
         prolog_metadata = import_module("ops.kda_prolog_metadata").kda_prolog_metadata
-        prefill = import_module("ops.flash_kda_dev").flash_kda_dev
+        dev = import_module("ops.flash_kda_dev")
+        prefill = partial(
+            _run_async_flash_kda_dev,
+            implementation=dev._run_prepared,
+            provider=dev._compile_flash_kda_dev(),
+        )
         metadata = import_module("ops.flash_kda_dev_metadata").flash_kda_dev_metadata
     except (ImportError, AttributeError) as error:
         logger.warning_once("CANNBot KDA Prolog prefill is unavailable: %s", error)

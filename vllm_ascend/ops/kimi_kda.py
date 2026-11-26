@@ -946,11 +946,12 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
             initial_mode = initial_mode[num_decode_tokens:]
         keep = prefill_meta.chunk.keep_meta
         if keep is not None:
-            state_indices = state_indices[keep]
-            has_initial_state = has_initial_state[keep]
+            keep_indices = prefill_meta.chunk.keep_indices
+            state_indices = state_indices.index_select(0, keep_indices)
+            has_initial_state = has_initial_state.index_select(0, keep_indices)
             if initial_mode is not None:
-                initial_mode = initial_mode[keep]
-            query_start_loc = torch.cat((query_start_loc[:1], query_start_loc[1:][keep]))
+                initial_mode = initial_mode.index_select(0, keep_indices)
+            query_start_loc = torch.cat((query_start_loc[:1], query_start_loc[1:].index_select(0, keep_indices)))
         if spec_masks is not None:
             assert metadata.spec_token_indx is not None
             assert metadata.non_spec_token_indx is not None
@@ -1604,8 +1605,8 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
             raise ValueError("KDA prefill requires has_initial_state metadata")
         keep = prebuilt_metadata.keep_meta
         if keep is not None:
-            state_indices = state_indices[keep]
-            has_initial_state = has_initial_state[keep]
+            state_indices = state_indices.index_select(0, prebuilt_metadata.keep_indices)
+            has_initial_state = has_initial_state.index_select(0, prebuilt_metadata.keep_indices)
 
         # The recurrent cache uses [H,V,K]. The fused prefill operator accepts
         # that state layout directly through state_v_first.

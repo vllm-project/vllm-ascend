@@ -133,6 +133,7 @@ class GDNChunkedPrefillMetadata:
     num_decodes: int = 0
     cu_seqlens_kern: tuple[int, ...] | None = None
     keep_meta: torch.Tensor | None = None
+    keep_indices: torch.Tensor | None = None
     flash_kda_metadata: PrefillKDAMetadataContext | None = None
 
 
@@ -267,8 +268,16 @@ def _compact_empty_segments(cu_seqlens_host, initial_state, device=None):
     cu_kern = torch.cat([cu[:1], cu[1:][keep]]).tolist()
     # Move keep to device only for indexing device-side tensors.
     if device is not None:
-        keep = keep.to(device)
-    st_kern = initial_state[keep] if initial_state is not None else None
+        if torch.device(device).type != "cpu":
+            keep = keep.pin_memory()
+        keep = keep.to(device, non_blocking=True)
+    st_kern = None
+    if initial_state is not None:
+        selected = [i for i, (start, end) in enumerate(zip(cu_seqlens_host, cu_seqlens_host[1:])) if end > start]
+        indices = torch.tensor(selected, dtype=torch.int64, pin_memory=initial_state.device.type != "cpu").to(
+            initial_state.device, non_blocking=True
+        )
+        st_kern = initial_state.index_select(0, indices)
     return cu_kern, st_kern, keep
 
 
@@ -309,8 +318,15 @@ def _build_non_spec_chunked_prefill_metadata(
     cu_seqlens_kern, _, keep_meta = _compact_empty_segments(cu_seqlens_host, None, device=device)
     if keep_meta is None:
         cu_seqlens_kern = None
+        keep_indices = None
     else:
         cu_seqlens_kern = tuple(cu_seqlens_kern)
+        # Scheduler lengths are already on the host. Preserve the selected
+        # count here instead of asking NPU nonzero for it in every KDA layer.
+        selected = [i for i, (start, end) in enumerate(zip(cu_seqlens_host, cu_seqlens_host[1:])) if end > start]
+        keep_indices = torch.tensor(selected, dtype=torch.int64, pin_memory=torch.device(device).type != "cpu").to(
+            device, non_blocking=True
+        )
 
     if build_device_metadata:
         device_chunk_metadata = {
@@ -337,6 +353,7 @@ def _build_non_spec_chunked_prefill_metadata(
         **device_chunk_metadata,
         cu_seqlens_kern=cu_seqlens_kern,
         keep_meta=keep_meta,
+        keep_indices=keep_indices,
     )
 
 
@@ -484,7 +501,7 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
             # V2 shares this metadata object across the group's layers and
             # builds a fresh one for each scheduled forward, including MTP.
             chunk_metadata.flash_kda_metadata = workspace.new_context(
-                attn_metadata.prefill_query_start_loc, chunk_metadata.keep_meta
+                attn_metadata.prefill_query_start_loc, chunk_metadata.keep_indices
             )
         attn_metadata.non_spec_prefill_metadata = GDNPrefillMetadata(
             causal_conv1d=GDNCausalConv1dMetadata(
