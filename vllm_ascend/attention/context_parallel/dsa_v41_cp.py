@@ -650,6 +650,29 @@ class AscendDSAV41PCPImpl(_ReplicatedCacheImpl):
 
     supports_pcp: ClassVar[bool] = True
 
+    @staticmethod
+    def _write_swa_cache_on_main_stream(attn, metadata):
+        return isinstance(metadata, AscendDSAV41PCPMetadata) or AscendDSAV41Impl._write_swa_cache_on_main_stream(
+            attn, metadata
+        )
+
+    def _projected_cache_metadata(self, metadata_by_prefix, metadata):
+        if isinstance(metadata.swa, AscendDSAV41PCPMetadata):
+            return self._global_layer_metadata(metadata_by_prefix)
+        return metadata
+
+    def _gather_projected_o_weights(self, attn):
+        attn.dsa_attn.dsa_attn.impl._parallel_o_proj.all_gather_weights()
+
+    def forward_sp(self, attn, hidden_states, output):
+        context = get_forward_context()
+        metadata = context.attn_metadata[self.swa_prefix] if context.attn_metadata is not None else None
+        needs_global = isinstance(metadata, AscendDSAV41PCPMetadata)
+        has_prefill = needs_global and metadata.global_metadata.num_prefills > 0
+        projector = attn.dsa_attn.dsa_attn.impl
+        with projector._parallel_o_proj.batch(needs_global_metadata=needs_global, has_prefill=has_prefill):
+            return super().forward_sp(attn, hidden_states, output)
+
     def _prepare_inputs_and_caches(self, attn, hidden_states, metadata, metadata_by_prefix):
         if not isinstance(metadata.swa, AscendDSAV41PCPMetadata):
             return super()._prepare_inputs_and_caches(attn, hidden_states, metadata, metadata_by_prefix)
@@ -666,14 +689,17 @@ class AscendDSAV41PCPImpl(_ReplicatedCacheImpl):
         gathered = get_pcp_group().all_gather(padded, dim=0)
         return torch.index_select(gathered, 0, metadata.hidden_restore_idx)
 
-    def _compress_local_c2(self, attn, hidden_states, local_metadata, global_metadata):
+    def _compress_local_c2(self, attn, hidden_states, local_metadata, global_metadata, *, projected_inputs=None):
         """Pool each local chunk with its predecessor, then update the persistent request rings."""
         from vllm_ascend.ops.triton.compressor.compressor_triton import write_pcp_ring_rows
 
         c2_metadata = local_metadata.swa.c2_metadata
         compressor = attn.compressor
-        hidden_states_fp32 = hidden_states.float()
-        kv, scores = compressor.wkv(hidden_states_fp32), compressor.wgate(hidden_states_fp32)
+        if projected_inputs is None:
+            hidden_states_fp32 = hidden_states.float()
+            kv, scores = compressor.wkv(hidden_states_fp32), compressor.wgate(hidden_states_fp32)
+        else:
+            kv, scores = projected_inputs["compressor_kv"], projected_inputs["compressor_score"]
         send_kv_scores = kv.new_zeros((c2_metadata.send_token_indices.numel(), 2 * compressor.width))
         if hidden_states.shape[0]:
             send_kv_scores.copy_(
@@ -720,7 +746,16 @@ class AscendDSAV41PCPImpl(_ReplicatedCacheImpl):
         AscendDSAV41Impl._write_swa_cache(attn, metadata, value)
 
     def _compress_and_write_caches(
-        self, attn, hidden_states, cos, sin, local_metadata, global_metadata, *, prepared_indexer=None
+        self,
+        attn,
+        hidden_states,
+        cos,
+        sin,
+        local_metadata,
+        global_metadata,
+        *,
+        prepared_indexer=None,
+        projected_inputs=None,
     ):
         if not isinstance(local_metadata.swa, AscendDSAV41PCPMetadata):
             return super()._compress_and_write_caches(
@@ -731,10 +766,13 @@ class AscendDSAV41PCPImpl(_ReplicatedCacheImpl):
                 local_metadata,
                 global_metadata,
                 prepared_indexer=prepared_indexer,
+                projected_inputs=projected_inputs,
             )
         self._quantize_indexer_query(attn, prepared_indexer, local_metadata)
         if self.role.compress_ratio == 2:
-            latent = self._compress_local_c2(attn, hidden_states, local_metadata, global_metadata)
+            latent = self._compress_local_c2(
+                attn, hidden_states, local_metadata, global_metadata, projected_inputs=projected_inputs
+            )
             source_state_metadata = global_metadata.compressor.state
             source_cos, source_sin = source_state_metadata.c2_source_cos, source_state_metadata.c2_source_sin
             if source_cos is None or source_sin is None:
@@ -742,7 +780,11 @@ class AscendDSAV41PCPImpl(_ReplicatedCacheImpl):
                 source_cos = source_cos[attn.rotary_emb.layername]
                 source_sin = source_sin[attn.rotary_emb.layername]
         else:
-            latent = attn.compressor(hidden_states)
+            latent = (
+                attn.compressor(hidden_states)
+                if projected_inputs is None
+                else attn.compressor.norm(projected_inputs["compressor_kv"])
+            )
             source_cos, source_sin = global_metadata.rope(
                 attn.rotary_emb.layername, global_metadata.swa.num_input_tokens
             )

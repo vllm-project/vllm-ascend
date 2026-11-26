@@ -896,6 +896,8 @@ def runtime(builders, monkeypatch):
             None,
         )
         context = SimpleNamespace(attn_metadata=None)
+        attn.role = impl.role
+        attn.role.is_index_source = False
         for module in (dsa_v41, dsa_v41_cp):
             monkeypatch.setattr(module, "get_forward_context", lambda: context)
 
@@ -915,7 +917,7 @@ def runtime(builders, monkeypatch):
             torch.ops._C_ascend, "inplace_partial_rotary_mul", lambda *args, **kwargs: None, raising=False
         )
 
-        def run(scenario):
+        def run(scenario, *, projected=False):
             batch = _batch(2, rank, scenario, decode_sharded=decode_sharded)
             metadata = _build_planes(owners, batch)
             context.attn_metadata = metadata
@@ -947,7 +949,20 @@ def runtime(builders, monkeypatch):
             if scenario != "dummy":
                 expected_cache[batch.slots] = canonical[:, :2]
             output = torch.full_like(peers[rank], -777)
-            assert impl.forward(attn, None, peers[rank], output) is output
+            if projected:
+                padded = torch.nn.functional.pad(peers[rank], (0, 0, 0, peers[rank].shape[0] % 2))
+                shard_rows = padded.shape[0] // 2
+
+                def tp_gather(value):
+                    events.append("tp")
+                    packed = torch.cat((padded, padded[:, :2]), dim=-1)
+                    torch.testing.assert_close(value, packed[:shard_rows])
+                    return packed
+
+                monkeypatch.setattr(dsa_v41, "sp_all_gather", tp_gather)
+                assert impl.forward_sp(attn, padded[:shard_rows], output) is output
+            else:
+                assert impl.forward(attn, None, peers[rank], output) is output
             torch.testing.assert_close(output, projector.reference_input)
             torch.testing.assert_close(cache, expected_cache)
             return batch, metadata
@@ -957,7 +972,75 @@ def runtime(builders, monkeypatch):
     return make
 
 
+@pytest.mark.parametrize("rank", range(4))
+def test_pure_tp_projected_forward_matches_dense_forward(monkeypatch, rank):
+    role = SimpleNamespace(is_kv_source=False, is_index_source=False, has_long_context=False)
+    impl = dsa_v41.AscendDSAV41Impl.__new__(dsa_v41.AscendDSAV41Impl)
+    impl.role = role
+    impl.multistream_dsv4_dsa_overlap = False
+    hidden = torch.arange(32, dtype=torch.float32).view(8, 4)
+    metadata = SimpleNamespace(
+        swa=SimpleNamespace(num_actual_tokens=6), positions=torch.arange(7), rope=lambda *args: (None, None)
+    )
+    cache = torch.zeros(6, 2)
+    projector = SimpleNamespace(_forward_o_proj=lambda value, out: out.copy_(value.flatten(1)))
+    attn = SimpleNamespace(
+        role=role,
+        head_dim=2,
+        n_local_heads=2,
+        rotary_emb=SimpleNamespace(layername=LAYER),
+        v41_layer_name=LAYER,
+        wq_a=torch.nn.Identity(),
+        wq_b=torch.nn.Identity(),
+        wkv=lambda value: value[:, :2],
+        q_norm=torch.nn.RMSNorm(4),
+        kv_norm=torch.nn.RMSNorm(2),
+        dsa_attn=SimpleNamespace(
+            swa_cache_layer=SimpleNamespace(kv_cache=cache), dsa_attn=SimpleNamespace(impl=projector)
+        ),
+    )
+    monkeypatch.setattr(dsa_v41, "get_forward_context", lambda: SimpleNamespace(attn_metadata={}))
+    monkeypatch.setattr(impl, "_get_layer_metadata", lambda _: metadata)
+    monkeypatch.setattr(dsa_v41.AscendDSAV41Impl, "_apply_rotary", staticmethod(lambda *args, **kwargs: None))
+    monkeypatch.setattr(impl, "_forward_attention", lambda attn, q, *args: q)
+    monkeypatch.setattr(impl, "_write_swa_cache", lambda attn, metadata, value: cache.copy_(value))
+    wait = Mock()
+    save = Mock()
+    monkeypatch.setattr(dsa_v41, "wait_for_kv_layer_from_connector", wait)
+    monkeypatch.setattr(dsa_v41, "maybe_save_kv_layer_to_connector", save)
+    expected = impl.forward(attn, metadata.positions, hidden[:7], torch.empty_like(hidden[:7]))
+    expected_cache = cache.clone()
+    cache.fill_(-1)
+    rows = slice(2 * rank, 2 * rank + 2)
+
+    def gather(local):
+        packed = torch.cat((hidden, hidden[:, :2]), dim=-1)
+        torch.testing.assert_close(local, packed[rows])
+        return packed
+
+    monkeypatch.setattr(dsa_v41, "sp_all_gather", gather)
+    output = torch.empty_like(expected)
+    assert impl.forward_sp(attn, hidden[rows], output) is output
+    torch.testing.assert_close(output, expected)
+    torch.testing.assert_close(cache, expected_cache)
+    assert wait.call_count == save.call_count == 2
+
+
 class TestPCPBatchLifecycle:
+    @pytest.mark.parametrize("overlap", [False, True])
+    @pytest.mark.parametrize("decode_sharded", [False, True])
+    def test_projected_pcp_preserves_cache_and_output(self, runtime, overlap, decode_sharded):
+        state = runtime(overlap=overlap, decode_sharded=decode_sharded)
+        for scenario in ("prefill", "empty", "mixed", "decode", "dummy"):
+            state.events.clear()
+            _, metadata = state.run(scenario, projected=True)
+            assert state.events.count("tp") == 1
+            if isinstance(metadata[PREFIXES["swa"]], dsa_v41_cp.AscendDSAV41PCPMetadata):
+                assert state.events.index("tp") < state.events.index("cache_gather")
+            if scenario == "empty":
+                assert "attention" not in state.events
+                assert "project" in state.events
+
     @pytest.mark.parametrize("wrapped", [False, True])
     @pytest.mark.parametrize(
         "q_scheme,kv_scheme,quantizations",

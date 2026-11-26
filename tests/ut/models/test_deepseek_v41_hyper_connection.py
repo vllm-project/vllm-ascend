@@ -106,14 +106,26 @@ def test_v41_forward_threads_pre_mix_through_fused_hc_pre():
     )
 
 
-def test_v41_forward_gathers_attention_and_keeps_moe_sharded(monkeypatch):
+@pytest.mark.parametrize(
+    "tokens,sp,eligible,projected",
+    [
+        (767, True, True, False),
+        (768, True, True, True),
+        (769, True, True, True),
+        (768, True, False, False),
+        (768, False, True, False),
+    ],
+)
+def test_v41_forward_selects_attention_path(monkeypatch, tokens, sp, eligible, projected):
     layer = _layer()
-    layer.use_sequence_parallel = True
-    hidden_states = torch.randn(2, 4, 8, dtype=torch.bfloat16)
-    collapsed = torch.randn(2, 8, dtype=torch.bfloat16)
-    post = torch.randn(2, 4, dtype=torch.float32)
-    comb = torch.randn(2, 4, 4, dtype=torch.float32)
-    pre = torch.randn(2, 4, dtype=torch.float32)
+    layer.use_sequence_parallel = sp
+    layer.projected_sp_enabled = eligible
+    rows = (tokens + 7) // 8 if sp else tokens
+    hidden_states = torch.randn(rows, 4, 8, dtype=torch.bfloat16)
+    collapsed = torch.randn(rows, 8, dtype=torch.bfloat16)
+    post = torch.randn(rows, 4, dtype=torch.float32)
+    comb = torch.randn(rows, 4, 4, dtype=torch.float32)
+    pre = torch.randn(rows, 4, dtype=torch.float32)
     layer.hc_attn_fn = torch.nn.Parameter(torch.empty(24, 32))
     layer.hc_attn_scale = torch.nn.Parameter(torch.empty(3))
     layer.hc_attn_base = torch.nn.Parameter(torch.empty(24))
@@ -126,17 +138,27 @@ def test_v41_forward_gathers_attention_and_keeps_moe_sharded(monkeypatch):
     layer.self_attn = MagicMock(side_effect=lambda _positions, value, _scaling: value)
     layer.mlp = MagicMock(side_effect=lambda value, **_kwargs: value)
     layer.hc_post = MagicMock(side_effect=lambda _x, residual, _post, _comb: residual)
-    all_gather = MagicMock(return_value=collapsed)
+    gathered = collapsed.repeat(8, 1) if sp else collapsed
+    layer.self_attn.forward_sp.return_value = gathered[:tokens]
+    all_gather = MagicMock(return_value=gathered)
     reduce_scatter = MagicMock(return_value=collapsed)
     monkeypatch.setattr(deepseek_v41_module, "sp_all_gather", all_gather)
     monkeypatch.setattr(deepseek_v41_module, "sp_reduce_scatter", reduce_scatter)
 
-    layer.forward(torch.arange(2), hidden_states, pre, input_ids=torch.tensor([1, 2]))
+    positions = torch.arange(tokens)
+    layer.forward(positions, hidden_states, pre, input_ids=positions)
 
-    all_gather.assert_called_once_with(collapsed)
-    reduce_scatter.assert_called_once()
-    torch.testing.assert_close(reduce_scatter.call_args.args[0], collapsed)
-    assert layer.mlp.call_args.kwargs["already_sequence_parallel"] is True
+    if projected:
+        layer.self_attn.forward_sp.assert_called_once_with(positions, collapsed)
+        layer.self_attn.assert_not_called()
+    else:
+        layer.self_attn.forward_sp.assert_not_called()
+        torch.testing.assert_close(layer.self_attn.call_args.args[1], gathered[:tokens])
+    assert all_gather.call_count == int(sp and not projected)
+    assert reduce_scatter.call_count == int(sp)
+    if sp:
+        torch.testing.assert_close(reduce_scatter.call_args.args[0], gathered[:tokens])
+    assert layer.mlp.call_args.kwargs["already_sequence_parallel"] is sp
 
 
 def test_v41_hc_reference_supports_hidden_size_5120():
