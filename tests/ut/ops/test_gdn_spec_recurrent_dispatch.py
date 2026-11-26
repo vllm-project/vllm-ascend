@@ -7,7 +7,7 @@ import pytest
 import torch
 from vllm.forward_context import ForwardContext, override_forward_context
 
-from vllm_ascend.attention.gdn import AscendGatedDeltaNetAttention, _rearrange_decode_qkv
+from vllm_ascend.attention.gdn import AscendGatedDeltaNetAttention
 from vllm_ascend.attention.gdn_attn_builder import (
     GDNSpecCausalConv1dMetadata,
     GDNSpecDecodeMetadata,
@@ -68,7 +68,7 @@ def test_spec_recurrent_dispatches_by_window_width(window: int, expect_upstream:
             "vllm_ascend.attention.gdn.DeviceOperator.fused_gdn_gating",
             return_value=(torch.zeros(1, num_tokens, 1), torch.ones(1, num_tokens, 1)),
         ),
-        patch("vllm_ascend.attention.gdn.split_normalized_decode_qkv", wraps=_rearrange_decode_qkv),
+        patch("vllm_ascend.attention.gdn.l2norm_fwd", side_effect=lambda x: x),
         patch("vllm_ascend.attention.gdn.causal_conv1d_update", side_effect=lambda x, *a, **k: x.clone()),
         patch("vllm_ascend.attention.gdn.recurrent_gated_delta_rule", side_effect=ascendc) as ascendc_mock,
         patch("vllm_ascend.attention.gdn.fused_recurrent_gated_delta_rule", side_effect=triton) as triton_mock,

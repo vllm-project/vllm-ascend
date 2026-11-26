@@ -11,8 +11,8 @@
     - `g[t, h] = -exp(A_log[h]) * softplus(a[t, h] + dt_bias[h])` (stored as fp32)
     - `beta_output[t, h] = sigmoid(b[t, h])` (stored in `b`'s dtype)
 - **Algorithm flow** (processed row by row, independently):
-  1. Map each program to a tile of tokens and heads. The head count determines the tile size.
-  2. Read each projection with its token stride. The wrapper packs projections whose head stride exceeds one. Mask the final tile on both axes.
+  1. Grid `(num_vectorcore, seq_len=1)`: each program owns `ceil(num_tokens / num_vectorcore)` token rows, iterated in `ROW_ITER` tiles of `BLK_BATCHES=64` rows.
+  2. Within a row tile, heads are tiled by `BLK_HEADS=8` (`COL_ITER = ceil(num_heads / 8)` iterations); per tile, load the `A_log` / `dt_bias` head slices and the `a` / `b` blocks with row/head masks.
   3. Compute `softplus`, `exp`, `sigmoid` in fp32 and store `g` and `beta_output` element-wise.
 - **Supported modes**: Atlas A2, Atlas A3, and 950PR&950DT Products (the A2/950PR&950DT Products `DeviceOperator` entries route to this same Triton kernel). Used by the GDN recurrent-attention path of `vllm_ascend/attention/gdn.py`; works in both eager and graph-capture modes.
 
@@ -34,17 +34,17 @@
 
 ## Constraints
 
-- The projections `a` and `b` have shape `[num_tokens, num_heads]` and may have different strides. The per-head vectors `A_log` and `dt_bias` must be contiguous.
-- The kernel computes both gates in fp32 and stores them in contiguous output tensors.
-- Each tile covers up to 64 heads and 16 tokens, with at most 256 elements.
-- The compiled kernel specializes on the head count and input strides. The token count can vary.
+- `a`, `b`: `[num_tokens, num_heads]`; `A_log`, `dt_bias`: `[num_heads]` with the same `num_heads`. All inputs are indexed with flat offsets and must be contiguous.
+- The wrapper fixes `seq_len = 1` (decode-style flattened token batch); internal computation is fp32 regardless of input dtype.
+- Kernel-internal tiling constants: `BLK_HEADS=8`, `BLK_BATCHES=64`, `ROW_ITER = ceil(ceil(num_tokens / num_vectorcore) / 64)`.
+- `seq_len`, `NUM_HEADS`, `NUM_BATCHES`, `beta`, `threshold`, `ROW_ITER` are `do_not_specialize`, so varying token counts or head counts do not trigger Triton recompilation.
 - Only for inference (prefill/decode) on NPU.
 
 ## Origin and Differences
 
-- **Origin**: Math adapted from vllm's `qwen3_next.py` (`Qwen3NextGatedDeltaNet` gating, [upstream source](https://github.com/vllm-project/vllm/blob/main/vllm/model_executor/models/qwen3_next.py)). The kernel first landed with Qwen3-Next support (#2917) and was extracted into the standalone op file `vllm_ascend/ops/triton/fused_gdn_gating.py` by #4304.
+- **Origin**: Math adapted from vllm's `qwen3_next.py` (`Qwen3NextGatedDeltaNet` gating, see source-file header). The kernel first landed with Qwen3-Next support (#2917) and was extracted into the standalone op file `vllm_ascend/ops/triton/fused_gdn_gating.py` by #4304.
 - **Differences**:
-    - The kernel computes both gates in one launch and reads the original projection slices directly.
+    - NPU adaptation for performance: fuses `softplus + exp + mul` and `sigmoid` into a single Triton launch on the vector cores (replaces the multi-op host-side torch chain); persistent-style row tiling (`BLK_BATCHES` rows per iteration per core) keeps the program count equal to the vector-core count to minimize launch overhead;
     - Modified for a specific vllm-ascend logic or different input parameters: returns `g` pre-shaped `[1, num_tokens, num_heads]` and forced to fp32 as expected by the Ascend recurrent gated-delta-rule kernel, while `beta_output` keeps `b`'s dtype.
 
 ## Test Cases

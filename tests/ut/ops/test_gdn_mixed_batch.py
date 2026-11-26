@@ -15,7 +15,6 @@ from vllm_ascend.attention.gdn import (
     AscendGatedDeltaNetAttention,
     _get_fla_gdn_prefill_op,
     _pack_conv_weights,
-    _rearrange_decode_qkv,
     initialize_packed_conv_weight,
 )
 from vllm_ascend.attention.gdn_attn_builder import (
@@ -121,7 +120,6 @@ def test_chunk32_raw_beta_routing(batch_kind, backend):
             "causal_conv1d_fn": {"side_effect": lambda x, *args, **kw: x.clone()},
             "causal_conv1d_update": {"side_effect": lambda x, *args, **kw: x.clone()},
             "l2norm_fwd": {"side_effect": lambda x: x},
-            "split_normalized_decode_qkv": {"side_effect": _rearrange_decode_qkv},
             "gather_ssm_states": {"side_effect": lambda state, indices, *args: state[indices].clone()},
             "scatter_ssm_states_": {},
             "clear_ssm_states": {},
@@ -511,7 +509,6 @@ def test_decode_forward_does_not_reconcat_qkv(speculative, adaptive, recover):
             "vllm_ascend.attention.gdn.DeviceOperator.fused_gdn_gating",
             return_value=(torch.zeros(1, 4, 1), torch.ones(1, 4, 1)),
         ),
-        patch("vllm_ascend.attention.gdn.split_normalized_decode_qkv", wraps=_rearrange_decode_qkv),
         patch("vllm_ascend.attention.gdn.l2norm_fwd", side_effect=lambda x: x),
         patch("vllm_ascend.attention.gdn.causal_conv1d_update", side_effect=lambda x, *a, **k: x.clone()) as conv,
         patch(

@@ -111,7 +111,6 @@ configuration rather than the runner input or sampling interface.
 | [fused_gdn_gating.py](fused_gdn_gating.py) | Model/attention primitive or shared utility |
 | [gdn/gdn_recoverssm_commit.py](gdn/gdn_recoverssm_commit.py) | GDN RecoverSSM commit. [Operator documentation](docs/gdn_recoverssm_commit.md) |
 | [gdn/gdn_recoverssm_verify.py](gdn/gdn_recoverssm_verify.py) | GDN RecoverSSM verify. [Operator documentation](docs/gdn_recoverssm_verify.md) |
-| [gdn/split_normalized_qkv.py](gdn/split_normalized_qkv.py) | GDN speculative verification input packing. [Operator documentation](docs/split_normalized_qkv.md) |
 | [glm5_next_cann_keypool.py](glm5_next_cann_keypool.py) | Model/attention primitive or shared utility |
 | [glm5_next_kpool_tail_compress.py](glm5_next_kpool_tail_compress.py) | Model/attention primitive or shared utility |
 | [glm5_next_lightning_indexer.py](glm5_next_lightning_indexer.py) | Model/attention primitive or shared utility |

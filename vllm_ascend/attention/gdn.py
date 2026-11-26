@@ -55,7 +55,6 @@ from vllm_ascend.ops.triton.fla.chunk import chunk_gated_delta_rule
 from vllm_ascend.ops.triton.fla.fused_qkvzba_split_reshape import fused_qkvzba_split_reshape_cat
 from vllm_ascend.ops.triton.fla.utils import clear_ssm_states
 from vllm_ascend.ops.triton.gdn.gdn_recoverssm_verify import gdn_recoverssm_verify
-from vllm_ascend.ops.triton.gdn.split_normalized_qkv import split_normalized_decode_qkv
 from vllm_ascend.ops.triton.mamba.causal_conv1d import causal_conv1d_update_varlen, extract_last_width
 from vllm_ascend.ops.triton.mamba.state_index import gather_ssm_states, scatter_ssm_states_
 
@@ -472,6 +471,8 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
             z, _ = self.in_proj_z(hidden_states)
             z = z.reshape(z.size(0), -1, self.head_v_dim)
             b, a = self._split_ba_for_tp(ba)
+            b = b.contiguous()
+            a = a.contiguous()
         else:
             if not self.gqa_interleaved_layout:
                 mixed_qkvz, _ = self.in_proj_qkvz(hidden_states)
@@ -483,6 +484,8 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
                 ba, _ = self.in_proj_ba(hidden_states)
                 b, a = self._split_ba_for_tp(ba)
 
+                b = b.contiguous()
+                a = a.contiguous()
             else:
                 projected_states_qkvz, _ = self.in_proj_qkvz(hidden_states)
                 projected_states_ba, _ = self.in_proj_ba(hidden_states)
@@ -758,10 +761,8 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
         else:
             mixed_qkv_non_spec = None
 
-        use_recoverssm = has_spec_decode and getattr(self, "use_gdn_recoverssm", False)
         if mixed_qkv_spec is not None:
-            split_decode_qkv = _rearrange_decode_qkv if use_recoverssm else split_normalized_decode_qkv
-            query_spec, key_spec, value_spec = split_decode_qkv(
+            query_spec, key_spec, value_spec = _rearrange_decode_qkv(
                 mixed_qkv_spec,
                 self.key_dim // self.tp_size,
                 self.value_dim // self.tp_size,
@@ -788,6 +789,7 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
             query_non_spec, key_non_spec, value_non_spec = self.rearrange_mixed_qkv(mixed_qkv_non_spec)
 
         # 2. Recurrent attention
+        use_recoverssm = has_spec_decode and getattr(self, "use_gdn_recoverssm", False)
         has_non_spec_tokens = attn_metadata.num_prefills > 0 or attn_metadata.num_decodes > 0
         is_mixed_batch = has_spec_decode and has_non_spec_tokens
 
@@ -830,11 +832,6 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
             if use_recoverssm:
                 assert a_spec is not None
                 assert b_spec is not None
-                # RecoverSSM reads adjacent heads and accepts a strided token axis.
-                if a_spec.stride(-1) != 1:
-                    a_spec = a_spec.contiguous()
-                if b_spec.stride(-1) != 1:
-                    b_spec = b_spec.contiguous()
                 core_attn_out_spec = gdn_recoverssm_verify(
                     self.A_log,
                     a_spec,
@@ -852,6 +849,8 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
             else:
                 assert g_spec is not None
                 assert beta_spec is not None
+                query_spec = l2norm_fwd(query_spec)
+                key_spec = l2norm_fwd(key_spec)
                 if use_upstream_recurrent:
                     # The native packed-index API bounds accepted_prev by the
                     # current query length. Reuse vLLM's strided state-table API

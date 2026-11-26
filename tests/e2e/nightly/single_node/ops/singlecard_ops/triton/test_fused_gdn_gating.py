@@ -21,9 +21,8 @@ def test_fused_gdn_gating_310p_parity_precision():
 
     A_log = torch.randn(num_heads, dtype=torch.float16, device=device)
     dt_bias = torch.randn(num_heads, dtype=torch.float16, device=device)
-    projection = torch.randn(num_tokens, 3 * num_heads, dtype=torch.float16, device=device)
-    a = projection[:, 1::3]
-    b = projection[:, 2 * num_heads :]
+    a = torch.randn(num_tokens, num_heads, dtype=torch.float16, device=device)
+    b = torch.randn(num_tokens, num_heads, dtype=torch.float16, device=device)
 
     triton_g, triton_beta = fused_gdn_gating_patch(
         A_log=A_log,

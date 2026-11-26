@@ -1,39 +1,59 @@
+# Adapt from https://github.com/vllm-project/vllm/blob/main/vllm/model_executor/models/qwen3_next.py
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import torch
 from vllm.triton_utils import tl, triton
 
+from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num
 
-@triton.jit(do_not_specialize=["num_tokens"])
+UNIFIED_BUFFER_SIZE = 1572864
+
+
+@triton.jit(do_not_specialize=["seq_len", "NUM_HEADS", "NUM_BATCHES", "beta", "threshold", "ROW_ITER"])
 def fused_gdn_gating_kernel(
     g,
-    gate_beta,
-    a_log,
+    beta_output,
+    A_log,
     a,
     b,
     dt_bias,
-    num_tokens,
-    num_heads: tl.constexpr,
-    a_row_stride: tl.constexpr,
-    b_row_stride: tl.constexpr,
-    beta: tl.constexpr,
-    threshold: tl.constexpr,
-    BLOCK_T: tl.constexpr,
-    BLOCK_H: tl.constexpr,
+    seq_len,
+    NUM_HEADS,
+    NUM_BATCHES,
+    beta,
+    threshold,
+    BLK_HEADS: tl.constexpr,
+    BLK_BATCHES: tl.constexpr,
+    ROW_ITER,
 ):
-    tokens = tl.program_id(0) * BLOCK_T + tl.arange(0, BLOCK_T)
-    heads = tl.program_id(1) * BLOCK_H + tl.arange(0, BLOCK_H)
-    mask = (tokens[:, None] < num_tokens) & (heads[None, :] < num_heads)
-    log_weight = tl.load(a_log + heads, heads < num_heads, 0).to(tl.float32)
-    bias = tl.load(dt_bias + heads, heads < num_heads, 0).to(tl.float32)
-    x = tl.load(a + tokens[:, None] * a_row_stride + heads[None, :], mask, 0).to(tl.float32)
-    y = tl.load(b + tokens[:, None] * b_row_stride + heads[None, :], mask, 0).to(tl.float32)
-    x = x + bias[None, :]
-    softplus = tl.where(beta * x <= threshold, (1 / beta) * tl.log(1 + tl.exp(beta * x)), x)
-    offsets = tokens[:, None] * num_heads + heads[None, :]
-    tl.store(g + offsets, -tl.exp(log_weight)[None, :] * softplus, mask)
-    tl.store(gate_beta + offsets, tl.sigmoid(y), mask)
+    i_b, i_s = tl.program_id(0), tl.program_id(1)
+    COL_ITER = tl.cdiv(NUM_HEADS, BLK_HEADS)
+
+    for row_idx in range(0, ROW_ITER):
+        batch_off = i_b * ROW_ITER * BLK_BATCHES + row_idx * BLK_BATCHES + tl.arange(0, BLK_BATCHES)
+
+        for col_idx in range(0, COL_ITER):
+            head_off = col_idx * BLK_HEADS + tl.arange(0, BLK_HEADS)
+
+            off = batch_off[:, None] * seq_len * NUM_HEADS + i_s * NUM_HEADS + head_off[None, :]
+            head_mask = head_off < NUM_HEADS
+            mask = head_mask[None, :] & (batch_off[:, None] < NUM_BATCHES)
+
+            blk_A_log = tl.load(A_log + head_off, mask=head_mask)
+            blk_a = tl.load(a + off, mask=mask)
+            blk_b = tl.load(b + off, mask=mask)
+            blk_bias = tl.load(dt_bias + head_off, mask=head_mask)
+
+            x = blk_a.to(tl.float32) + blk_bias.to(tl.float32)[None, :]
+            softplus_x = tl.where(beta * x <= threshold, (1 / beta) * tl.log(1 + tl.exp(beta * x)), x)
+
+            blk_g = -tl.exp(blk_A_log.to(tl.float32)) * softplus_x
+            tl.store(g + off, blk_g.to(g.dtype.element_ty), mask=mask)
+
+            # compute beta_output = sigmoid(b)
+            blk_beta_output = tl.sigmoid(blk_b.to(tl.float32))
+            tl.store(beta_output + off, blk_beta_output.to(beta_output.dtype.element_ty), mask=mask)
 
 
 def fused_gdn_gating_patch(
@@ -44,34 +64,36 @@ def fused_gdn_gating_patch(
     beta: float = 1.0,
     threshold: float = 20.0,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Apply the GDN gates directly to the strided linear projection slices."""
-    num_tokens, num_heads = a.shape
-    g = a.new_empty((1, num_tokens, num_heads), dtype=torch.float32)
-    gate_beta = b.new_empty((1, num_tokens, num_heads))
-    if num_tokens and num_heads:
-        # BA projection slices have adjacent heads and a gap between tokens.
-        # Pack only an interleaved head axis to preserve vector loads on large batches.
-        if a.stride(1) != 1:
-            a = a.contiguous()
-        if b.stride(1) != 1:
-            b = b.contiguous()
-        block_h = min(64, triton.next_power_of_2(num_heads))
-        block_t = min(16, 256 // block_h)
-        grid = (triton.cdiv(num_tokens, block_t), triton.cdiv(num_heads, block_h))
-        fused_gdn_gating_kernel[grid](
-            g,
-            gate_beta,
-            A_log,
-            a,
-            b,
-            dt_bias,
-            num_tokens,
-            num_heads,
-            a.stride(0),
-            b.stride(0),
-            beta,
-            threshold,
-            BLOCK_T=block_t,
-            BLOCK_H=block_h,
-        )
-    return g, gate_beta
+    batch, num_heads = a.shape
+    seq_len = 1
+
+    num_cores = get_vectorcore_num()
+
+    BLK_HEADS = 8
+
+    progs = num_cores
+    row_per_core = triton.cdiv(batch, progs)
+    BLK_BATCHES = 64
+    ROW_ITER = triton.cdiv(row_per_core, BLK_BATCHES)
+
+    g = torch.empty(1, batch, num_heads, dtype=torch.float32, device=a.device)
+    beta_output = torch.empty(1, batch, num_heads, dtype=b.dtype, device=b.device)
+
+    grid = (progs, seq_len)
+    fused_gdn_gating_kernel[grid](
+        g,
+        beta_output,
+        A_log,
+        a,
+        b,
+        dt_bias,
+        seq_len,
+        num_heads,
+        batch,
+        beta,
+        threshold,
+        BLK_HEADS=BLK_HEADS,
+        BLK_BATCHES=BLK_BATCHES,
+        ROW_ITER=ROW_ITER,
+    )
+    return g, beta_output
