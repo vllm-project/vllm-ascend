@@ -1,4 +1,5 @@
 meta:
+  date_updated: '2026-11-26'
   hardware:
     ascend_910b: supported
     ascend_910c: verified
@@ -31,6 +32,7 @@ guide_sections:
 
     Run the original BF16 checkpoint with one Ascend chip on a single node.
     Use the listed vLLM Ascend nightly image for your hardware. The A3 configuration was smoke-tested with vLLM 0.33.0 and vLLM Ascend build `405617bae227` from the A3 nightly image, using the CANNLab CANN 9.3.0 runtime.
+    The recorded A3 test covers single-node BF16 TP1 serving (health, model listing, and chat responses). A2 and optional tool-calling, reasoning, long-context, KV-offload, and frontend configurations were not separately hardware-tested. The verified hardware badge does not extend this evidence to every selectable feature or topology.
     See the [Qwen3 Dense tutorial](https://docs.vllm.ai/projects/ascend/en/latest/tutorials/models/Qwen3-Dense.html) for the functional check, AIME 2025 accuracy example, and serving benchmarks.
 
     For the separate 310P sharded checkpoint, see the Atlas 300I DUO section of the tutorial.
