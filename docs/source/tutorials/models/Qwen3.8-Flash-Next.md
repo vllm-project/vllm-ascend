@@ -640,12 +640,18 @@ For 950DT products, basic PD, the image-and-text 10K case, and the long-context 
     nic_name="<SERVICE_NETWORK_INTERFACE>"
 
     unset ftp_proxy FTP_PROXY https_proxy HTTPS_PROXY http_proxy HTTP_PROXY
+    unset all_proxy ALL_PROXY
 
     unset VLLM_PP_LAYER_PARTITION
     export VLLM_USE_V2_MODEL_RUNNER=1
     export VLLM_USE_FASTOKENS=1
     export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=3000
-    export VLLM_ENGINE_READY_TIMEOUT_S=4800
+    export VLLM_ENGINE_READY_TIMEOUT_S=2400
+    export PYTORCH_NPU_ALLOC_CONF=pinned_mem_register:True
+    unset HCCL_INTRA_ROCE_ENABLE ASCEND_GLOBAL_RESOURCE_CONFIG ASCEND_LOCAL_COMM_RES HCCL_BUFFSIZE_EP
+    export ACL_OP_INIT_MODE=1
+    export ASCEND_ENABLE_USE_FABRIC_MEM=1
+    export PYTHONHASHSEED=0
     export VLLM_HOST_IP="${local_ip}"
     export HCCL_IF_IP="${local_ip}"
     export GLOO_SOCKET_IFNAME="${nic_name}"
@@ -692,11 +698,17 @@ For 950DT products, basic PD, the image-and-text 10K case, and the long-context 
     nic_name="<SERVICE_NETWORK_INTERFACE>"
 
     unset ftp_proxy FTP_PROXY https_proxy HTTPS_PROXY http_proxy HTTP_PROXY
+    unset all_proxy ALL_PROXY
 
     unset VLLM_PP_LAYER_PARTITION
     export VLLM_USE_V2_MODEL_RUNNER=1
     export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=3000
     export VLLM_ENGINE_READY_TIMEOUT_S=4800
+    export PYTORCH_NPU_ALLOC_CONF=pinned_mem_register:True
+    unset HCCL_INTRA_ROCE_ENABLE ASCEND_GLOBAL_RESOURCE_CONFIG ASCEND_LOCAL_COMM_RES HCCL_BUFFSIZE_EP
+    export ACL_OP_INIT_MODE=1
+    export ASCEND_ENABLE_USE_FABRIC_MEM=1
+    export PYTHONHASHSEED=0
     export VLLM_HOST_IP="${local_ip}"
     export HCCL_IF_IP="${local_ip}"
     export GLOO_SOCKET_IFNAME="${nic_name}"
@@ -801,7 +813,12 @@ For 950DT products, basic PD, the image-and-text 10K case, and the long-context 
 
     unset CPLUS_INCLUDE_PATH CPATH C_INCLUDE_PATH
     unset ftp_proxy FTP_PROXY https_proxy HTTPS_PROXY http_proxy HTTP_PROXY
+    unset all_proxy ALL_PROXY
 
+    unset HCCL_INTRA_ROCE_ENABLE ASCEND_GLOBAL_RESOURCE_CONFIG ASCEND_LOCAL_COMM_RES HCCL_BUFFSIZE_EP
+    export ACL_OP_INIT_MODE=1
+    export ASCEND_ENABLE_USE_FABRIC_MEM=1
+    export PYTHONHASHSEED=0
     export VLLM_HOST_IP="${local_ip}"
     export HCCL_IF_IP="${local_ip}"
     export GLOO_SOCKET_IFNAME="${nic_name}"
@@ -818,7 +835,7 @@ For 950DT products, basic PD, the image-and-text 10K case, and the long-context 
     export VLLM_USE_V2_MODEL_RUNNER=1
     export VLLM_USE_FASTOKENS=1
     export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=3000
-    export VLLM_ENGINE_READY_TIMEOUT_S=4800
+    export VLLM_ENGINE_READY_TIMEOUT_S=2400
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
     export OMP_PROC_BIND=false
     export OMP_NUM_THREADS=1
@@ -868,7 +885,12 @@ For 950DT products, basic PD, the image-and-text 10K case, and the long-context 
 
     unset CPLUS_INCLUDE_PATH CPATH C_INCLUDE_PATH
     unset ftp_proxy FTP_PROXY https_proxy HTTPS_PROXY http_proxy HTTP_PROXY
+    unset all_proxy ALL_PROXY
 
+    unset HCCL_INTRA_ROCE_ENABLE ASCEND_GLOBAL_RESOURCE_CONFIG ASCEND_LOCAL_COMM_RES HCCL_BUFFSIZE_EP
+    export ACL_OP_INIT_MODE=1
+    export ASCEND_ENABLE_USE_FABRIC_MEM=1
+    export PYTHONHASHSEED=0
     export VLLM_HOST_IP="${local_ip}"
     export HCCL_IF_IP="${local_ip}"
     export GLOO_SOCKET_IFNAME="${nic_name}"
