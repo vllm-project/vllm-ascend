@@ -105,6 +105,7 @@ class AscendFusedTopKRouter(AscendGroupedTopKRouter):
             global_num_experts=global_num_experts,
             num_expert_group=num_expert_group,
             topk_group=topk_group,
+            e_score_correction_bias=e_score_correction_bias,
             eplb_state=eplb_state,
         )
         self.renormalize = renormalize
@@ -114,7 +115,6 @@ class AscendFusedTopKRouter(AscendGroupedTopKRouter):
         self.custom_routing_function = custom_routing_function
         self.scoring_func = scoring_func
         self.routed_scaling_factor = routed_scaling_factor
-        self.e_score_correction_bias = e_score_correction_bias
         self.num_logical_experts = num_logical_experts if num_logical_experts is not None else global_num_experts
         self.tid2eid = tid2eid
         self.bias_vl = bias_vl
@@ -271,8 +271,9 @@ class AscendFusedTopKRouter(AscendGroupedTopKRouter):
             )
             return topk_weights.to(torch.float32), topk_ids.to(torch.int32 if indices_type is None else indices_type)
         norm_type = 0 if self.scoring_func == "softmax" else 1
-        if self.e_score_correction_bias is not None and self.e_score_correction_bias.dtype != router_logits.dtype:
-            self.e_score_correction_bias = self.e_score_correction_bias.to(router_logits.dtype)
+        bias = self.e_score_correction_bias
+        if bias is not None and bias.dtype != router_logits.dtype:
+            bias = bias.to(router_logits.dtype)
         topk_weights, topk_ids, _ = torch_npu.npu_moe_gating_top_k(
             router_logits,
             k=self.top_k,
@@ -284,7 +285,7 @@ class AscendFusedTopKRouter(AscendGroupedTopKRouter):
             out_flag=False,
             routed_scaling_factor=self.routed_scaling_factor,
             eps=1e-20,
-            bias=self.e_score_correction_bias,
+            bias=bias,
         )
 
         return topk_weights, topk_ids
