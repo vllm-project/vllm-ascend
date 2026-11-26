@@ -64,7 +64,7 @@ class TorchExpertTransfer:
 
     @staticmethod
     def _copy_parameters(host_store, destination_weights, expert_loads, resident_weights, resident_loads):
-        parameters = []
+        parameters: list[tuple[int, int, int, int]] = []
         for name, prepared in host_store.prepared.items():
             destination = destination_weights[name].untyped_storage().data_ptr()
             expert_bytes = prepared.expert_bytes

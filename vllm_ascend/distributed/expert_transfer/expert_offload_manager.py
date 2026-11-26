@@ -301,6 +301,7 @@ class FullExpertPool:
 
     def drain(self):
         if self.inflight:
+            assert self.load_stream is not None
             self.load_stream.synchronize()
             self.inflight = False
 
