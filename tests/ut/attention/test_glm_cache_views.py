@@ -213,7 +213,8 @@ def test_glm52_53_unified_pool_supports_all_sfa_and_indexer_formats(
             nope_view, rope_view = parts
             assert nope_view.shape == (3, 4, 1, nope_dim)
             assert rope_view.shape == (3, 4, 1, rope_dim)
-            assert rope_view.data_ptr() == nope_view.data_ptr() + nope_view.nbytes
+            if rope_dim > 0:
+                assert rope_view.data_ptr() == nope_view.data_ptr() + nope_view.nbytes
 
     for idx_name in ("model.layers.0.self_attn.indexer.k_cache", "model.layers.1.self_attn.indexer.k_cache"):
         idx_parts = caches[idx_name]
