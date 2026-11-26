@@ -401,8 +401,8 @@ def assert_weight_update_matches_reference(
 class MXFP8AuditWorker:
     """Inspect representative dense/MoE layers without changing reload behavior."""
 
-    def mxfp8_snapshot(self):
-        tensors = {}
+    def _mxfp8_tensors(self):
+        """Yield the same inference buffers for content and address checks."""
         kinds = set()
         for prefix, layer in self.model_runner.model.named_modules():
             if not hasattr(layer, "_mxfp8_original_shapes"):
@@ -431,14 +431,41 @@ class MXFP8AuditWorker:
                         tensor_name,
                         tensor.dtype,
                     )
-                    raw = tensor.detach().cpu().contiguous().view(torch.uint8).numpy().tobytes()
-                    tensors[prefix + "." + tensor_name] = {
-                        "shape": list(tensor.shape),
-                        "dtype": str(tensor.dtype),
-                        "sha256": hashlib.sha256(raw).hexdigest(),
-                    }
+                    yield prefix + "." + tensor_name, tensor
         assert kinds == {"linear", "moe"}, f"Missing MXFP8 layer types: {kinds}"
+
+    def mxfp8_snapshot(self):
+        tensors = {}
+        for name, tensor in self._mxfp8_tensors():
+            raw = tensor.detach().cpu().contiguous().view(torch.uint8).numpy().tobytes()
+            tensors[name] = {
+                "shape": list(tensor.shape),
+                "dtype": str(tensor.dtype),
+                "sha256": hashlib.sha256(raw).hexdigest(),
+            }
         return tensors
+
+    def mxfp8_pointers(self):
+        return {name: tensor.data_ptr() for name, tensor in self._mxfp8_tensors()}
+
+
+def capture_quantized_pointers(server):
+    """Capture live receiver addresses without running dummy-weight inference."""
+    return post_control(server, "collective_rpc", json={"method": "mxfp8_pointers"}).json()["results"]
+
+
+def assert_quantized_storage_unchanged(initial, updates, case):
+    """Compare dummy -> A -> B -> A addresses within the same receiver only."""
+    assert initial and all(initial), f"{case.id}: missing initial inference tensor addresses"
+    assert len(updates) == 3, f"{case.id}: expected three A/B/A address snapshots"
+    for update_round, actual in enumerate(updates, start=1):
+        assert len(actual) == len(initial), f"{case.id}: worker count changed in round {update_round}"
+        for rank, (before, after) in enumerate(zip(initial, actual, strict=True)):
+            assert before.keys() == after.keys(), f"{case.id}: rank {rank} inference tensor names changed"
+            for name, pointer in before.items():
+                assert after[name] == pointer, (
+                    f"{case.id}: rank {rank} {name} moved after update {update_round}: {pointer} -> {after[name]}"
+                )
 
 
 def capture_quantized_result(server, case):

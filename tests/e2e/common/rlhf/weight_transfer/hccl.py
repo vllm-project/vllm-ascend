@@ -20,7 +20,9 @@ from vllm.utils.network_utils import get_ip, get_open_port
 from tests.e2e.common.rlhf.common import post_control, register_engines_once, server_visible_devices
 from tests.e2e.common.rlhf.weight_transfer.case import WeightUpdateModelCase
 from tests.e2e.common.rlhf.weight_transfer.reference_check import (
+    assert_quantized_storage_unchanged,
     assert_quantized_updates,
+    capture_quantized_pointers,
     capture_update_result,
     hccl_weight_transfer_servers,
 )
@@ -64,6 +66,8 @@ def run_hccl_weight_transfer_transaction(case: WeightUpdateModelCase, packed: bo
     ) as (server, references, dummy_signature):
         from vllm_ascend.distributed.weight_transfer.hccl_engine import HCCLTrainerInitInfo
 
+        initial_pointers = capture_quantized_pointers(server) if case.weight_quantization else None
+        updated_pointers = []
         register_engines_once()
         engine = WeightTransferTrainerFactory.trainer_init(
             HCCLTrainerInitInfo(
@@ -93,6 +97,8 @@ def run_hccl_weight_transfer_transaction(case: WeightUpdateModelCase, packed: bo
                 # if a transfer fails.
                 engine.send_weights()
                 post_control(server, "resume")
+                if case.weight_quantization:
+                    updated_pointers.append(capture_quantized_pointers(server))
                 observation = capture_update_result(server, case)
                 assert observation == references[reference_name], (
                     f"{case.id}: {reference_name} update {update_round} differs from fresh-load"
@@ -104,4 +110,5 @@ def run_hccl_weight_transfer_transaction(case: WeightUpdateModelCase, packed: bo
     assert signatures[0] != signatures[1], f"{case.id}: A/B updates have identical observations"
     assert signatures[2] == signatures[0], f"{case.id}: final A did not restore the first A"
     if case.weight_quantization:
+        assert_quantized_storage_unchanged(initial_pointers, updated_pointers, case)
         assert_quantized_updates([references["A"], references["B"]], signatures, case)
