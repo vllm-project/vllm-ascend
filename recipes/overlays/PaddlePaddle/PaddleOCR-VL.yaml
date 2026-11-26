@@ -5,12 +5,11 @@ variants:
     tp: 1
     label: BF16 · Ascend A2 graph
     vram_minimum_gb: 3
-    description: Original 0.9B checkpoint on one Ascend 910B3 or 910B4. Context uses the checkpoint default; 16384 is the batch-token budget. Long-context inputs are not validated.
+    description: Pinned 0.9B BF16 graph configuration on one Ascend 910B4 (32 GB HBM). Historical 910B3 evidence is documented separately; stable 910B3 serving is not claimed. Context uses the checkpoint default; 16384 is the batch-token budget. Long-context inputs are not validated.
     supported_hardware:
-      - ascend_910b
+      - ascend_910b4
     hardware_overrides:
-      ascend_910b:
-        docker_npu_device_count: 1
+      ascend_910b4:
         docker_image: quay.io/ascend/vllm-ascend:v0.30.0@sha256:28351d337b7f9367073344240fa4e28d99794d549d577eaf317689950064150a
         docker_serve_command: vllm serve
         install:
@@ -32,23 +31,21 @@ variants:
           - '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
         extra_env:
           VLLM_USE_MODELSCOPE: 'True'
-          ASCEND_RT_VISIBLE_DEVICES: '0'
           TASK_QUEUE_ENABLE: '0'
           CPU_AFFINITY_CONF: '1'
           PYTORCH_NPU_ALLOC_CONF: expandable_segments:True
 meta:
   hardware:
-    ascend_910b: supported
+    ascend_910b4: supported
 guide_sections:
   ascend: |
     ## Ascend A2 support and version scope
 
-    The tested stable configuration uses one 910B4 with 32 GB HBM. The shared
-    ascend_910b selector describes an eight-NPU node with 64 GB per NPU; this
-    recipe selects one device and does not claim that node specification for the test.
-
-    The historical PaddleOCR-VL tutorial covers single-NPU A2 deployment. The BF16
-    configuration below uses one 910B3 or 910B4 and the pinned v0.30.0 image.
+    The selected hardware profile is `ascend_910b4`: a single Ascend 910B4
+    with 32 GB HBM, rather than the shared eight-NPU `ascend_910b` node profile.
+    The BF16 graph variant is restricted to this one-NPU profile and uses the
+    pinned v0.30.0 image. The historical A2 tutorial also covers 910B3,
+    but stable 910B3 serving is not validated by this configuration.
     The current Ascend tutorial discontinues model support from v0.30.0.
     The 910B4 stable functional run passed recognition and document parsing.
     Its shutdown logs showed an EngineDeadError, forced EngineCore termination
@@ -85,8 +82,8 @@ guide_sections:
     ### Current-main A2 supplement on 910B4
 
     HiDevLab allocated a single 910B4 with 32 GB HBM on 2026-11-06, rather than
-    the historical 64 GB 910B3. The shared Ascend 910B hardware option uses the
-    same BF16 graph/TP1, batch 16384 and memory-utilization 0.80 settings; the
+    the historical 64 GB 910B3. The dedicated `ascend_910b4` profile retains the
+    tested BF16 graph/TP1, batch 16384 and memory-utilization 0.80 settings; the
     checkpoint default context is not replaced by a 16384-token context cap.
     The exposed physical device was davinci3, mapped to logical NPU 0 by this
     environment. This does not validate 910B3, 910B2 or long-context inputs.
