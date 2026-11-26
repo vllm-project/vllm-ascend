@@ -5,7 +5,12 @@ from vllm.compilation.backends import set_model_tag
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import get_tensor_model_parallel_world_size
-from vllm.model_executor.layers.linear import ReplicatedLinear
+from vllm.model_executor.layers.linear import (
+    MergedColumnParallelLinear,
+    QKVParallelLinear,
+    ReplicatedLinear,
+    RowParallelLinear,
+)
 from vllm.model_executor.layers.quantization.base_config import QuantizationConfig
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     UnquantizedEmbeddingMethod,
@@ -15,6 +20,7 @@ from vllm.model_executor.models.qwen3_dflash import (
     DFlashQwen3ForCausalLM,
     DFlashQwen3Model,
 )
+from vllm.model_executor.models.qwen3_dflash2 import dflash2_grouped_conv
 from vllm.model_executor.models.utils import maybe_prefix
 
 from vllm_ascend.models.quarot_utils import align_draft_weights
@@ -37,6 +43,8 @@ def _grouped_conv(
     group_size: int,
     taps: int,
 ) -> torch.Tensor:
+    if hidden_states.device.type == "npu":
+        return dflash2_grouped_conv(hidden_states, delta, base, block_size, group_size)
     blocks = hidden_states.unflatten(-1, (num_groups, group_size))
     coefficients = base.view(1, taps, num_groups, group_size) + delta.unsqueeze(-1)
     output = coefficients[:, 0] * blocks
@@ -138,6 +146,67 @@ class DFlash2Qwen3DecoderLayer(DFlashQwen3DecoderLayer):
         )
         self.attention_conv = DFlashGroupedConv(**conv_args, prefix=maybe_prefix(prefix, "attention_conv"))
         self.mlp_conv = DFlashGroupedConv(**conv_args, prefix=maybe_prefix(prefix, "mlp_conv"))
+
+        # The validated five-layer drafter has tiny per-rank GEMMs. On A5,
+        # replicating those GEMMs is faster than paying for ten small TP
+        # AllReduces per draft step. Keep other DFlash2 shapes unchanged.
+        if (
+            get_tensor_model_parallel_world_size() > 1
+            and config.num_hidden_layers == 5
+            and config.hidden_size == 2560
+            and config.intermediate_size == 7680
+            and config.num_attention_heads == 32
+            and config.num_key_value_heads == 8
+            and self.self_attn.head_dim == 128
+        ):
+            attn = self.self_attn
+            attn.qkv_proj = QKVParallelLinear(
+                config.hidden_size,
+                attn.head_dim,
+                attn.total_num_heads,
+                attn.total_num_kv_heads,
+                bias=attn.qkv_proj.bias is not None,
+                quant_config=quant_config,
+                prefix=f"{prefix}.self_attn.qkv_proj",
+                disable_tp=True,
+            )
+            attn.o_proj = RowParallelLinear(
+                attn.total_num_heads * attn.head_dim,
+                config.hidden_size,
+                bias=attn.o_proj.bias is not None,
+                quant_config=quant_config,
+                prefix=f"{prefix}.self_attn.o_proj",
+                disable_tp=True,
+            )
+            attn.num_heads = attn.total_num_heads
+            attn.num_kv_heads = attn.total_num_kv_heads
+            attn.q_size = attn.num_heads * attn.head_dim
+            attn.kv_size = attn.num_kv_heads * attn.head_dim
+            # Reuse the registered Attention object and its layer name. The
+            # implementation keeps these head-count fields for kernel calls
+            # and KV-cache specification, so update them together.
+            attn.attn.num_heads = attn.num_heads
+            attn.attn.num_kv_heads = attn.num_kv_heads
+            attn.attn.impl.num_heads = attn.num_heads
+            attn.attn.impl.num_kv_heads = attn.num_kv_heads
+            attn.attn.impl.hidden_size = attn.num_heads * attn.head_dim
+            attn.attn.impl.num_queries_per_kv = attn.num_heads // attn.num_kv_heads
+            self.mlp.gate_up_proj = MergedColumnParallelLinear(
+                config.hidden_size,
+                [config.intermediate_size] * 2,
+                bias=False,
+                quant_config=quant_config,
+                prefix=f"{prefix}.mlp.gate_up_proj",
+                disable_tp=True,
+            )
+            self.mlp.down_proj = RowParallelLinear(
+                config.intermediate_size,
+                config.hidden_size,
+                bias=False,
+                quant_config=quant_config,
+                prefix=f"{prefix}.mlp.down_proj",
+                disable_tp=True,
+            )
 
     def forward(
         self,

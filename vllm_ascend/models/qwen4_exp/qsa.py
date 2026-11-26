@@ -771,9 +771,10 @@ upstream_qsa.Qwen4ExpQSABackend = AscendQSABackend  # type: ignore[attr-defined]
 # required before LightningIndexer or the Triton QSA selector consumes them.
 QSAIndexerBackend.uses_descriptor_cache_view = True
 
-# The indexer module selects its Triton metadata builder at import time. The
-# upstream kernel uses CUDA PDL intrinsics, so Ascend uses the Torch path.
-qsa_indexer.build_qsa_metadata = qsa_indexer._build_qsa_metadata_torch
+# Keep the generic Triton builder on Ascend. PDL is guarded by the runtime
+# platform capability inside the kernel; forcing the Torch fallback here adds
+# dozens of small device operations to both QSA metadata builds on every step.
+qsa_indexer.build_qsa_metadata = qsa_indexer.build_qsa_metadata_triton
 
 
 class AscendPCPQSAIndexerMetadataBuilder(QSAIndexerMetadataBuilder):

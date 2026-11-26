@@ -56,7 +56,11 @@ from vllm_ascend.ops.triton.fla.fused_qkvzba_split_reshape import fused_qkvzba_s
 from vllm_ascend.ops.triton.fla.utils import clear_ssm_states
 from vllm_ascend.ops.triton.gdn.gdn_recoverssm_verify import gdn_recoverssm_verify
 from vllm_ascend.ops.triton.mamba.causal_conv1d import causal_conv1d_update_varlen, extract_last_width
-from vllm_ascend.ops.triton.mamba.state_index import gather_ssm_states, scatter_ssm_states_
+from vllm_ascend.ops.triton.mamba.state_index import (
+    flatten_recurrent_state_indices_from_qsl,
+    gather_ssm_states,
+    scatter_ssm_states_,
+)
 
 _PACKED_CONV_WEIGHT_NAME = "ascend_conv1d_weight"
 
@@ -238,6 +242,10 @@ def _flatten_recurrent_state_indices(
     # (total_tokens), so this path stays sync-free, unlike masked_select or
     # a CPU compaction whose output shape depends on device data.
     qsl = query_start_loc[: num_seqs + 1]
+    if num_seqs >= 16:
+        # At larger batch sizes, fuse compressed request bounds, token mapping
+        # and the 2D state-table gather to avoid the AiCpu indexing fallback.
+        return flatten_recurrent_state_indices_from_qsl(state_indices, qsl, total_tokens)
     lens = (qsl[1:] - qsl[:-1]).clamp_(min=0, max=num_slots)
     bounds = lens.cumsum(0)
     starts = bounds - lens

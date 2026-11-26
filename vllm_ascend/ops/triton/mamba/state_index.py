@@ -71,6 +71,64 @@ def _scatter_ssm_states_kernel(
     )
 
 
+@triton.jit(do_not_specialize=["num_reqs", "total_tokens", "num_slots"])
+def _flatten_recurrent_state_indices_from_qsl_kernel(
+    query_start_loc_ptr,
+    state_indices_ptr,
+    output_ptr,
+    num_reqs,
+    total_tokens,
+    num_slots,
+    stride_req,
+    stride_slot,
+    BLOCK_SIZE: tl.constexpr,
+    REQ_BLOCK_SIZE: tl.constexpr,
+):
+    token = tl.program_id(0) * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+    valid = token < total_tokens
+    req_offsets = tl.arange(0, REQ_BLOCK_SIZE)
+    req_valid = req_offsets < num_reqs
+    query_start = tl.load(query_start_loc_ptr + req_offsets, mask=req_valid, other=0)
+    query_end = tl.load(query_start_loc_ptr + req_offsets + 1, mask=req_valid, other=0)
+    lens = tl.minimum(tl.maximum(query_end - query_start, 0), num_slots).to(tl.int32)
+    bounds = tl.cumsum(lens, axis=0)
+    req = tl.sum((token[:, None] >= bounds[None, :]).to(tl.int32), axis=1)
+    req = tl.minimum(req, num_reqs - 1)
+    starts = bounds - lens
+    start = tl.sum(tl.where(req_offsets[None, :] == req[:, None], starts[None, :], 0), axis=1)
+    slot = tl.minimum(tl.maximum(token - start, 0), num_slots - 1)
+    offset = req.to(tl.int64) * stride_req + slot.to(tl.int64) * stride_slot
+    values = tl.load(state_indices_ptr + offset, mask=valid, other=0)
+    tl.store(output_ptr + token, values, mask=valid)
+
+
+def flatten_recurrent_state_indices_from_qsl(
+    state_indices: torch.Tensor,
+    query_start_loc: torch.Tensor,
+    total_tokens: int,
+) -> torch.Tensor:
+    """Build compressed request bounds and gather packed state rows in one kernel."""
+    output = torch.empty(total_tokens, dtype=state_indices.dtype, device=state_indices.device)
+    if total_tokens == 0:
+        return output
+    block_size = 256
+    num_reqs = state_indices.shape[0]
+    _flatten_recurrent_state_indices_from_qsl_kernel[(triton.cdiv(total_tokens, block_size),)](
+        query_start_loc,
+        state_indices,
+        output,
+        num_reqs,
+        total_tokens,
+        state_indices.shape[1],
+        state_indices.stride(0),
+        state_indices.stride(1),
+        BLOCK_SIZE=block_size,
+        REQ_BLOCK_SIZE=triton.next_power_of_2(num_reqs),
+        num_warps=4,
+    )
+    return output
+
+
 def _validate_state_and_indices(
     state: torch.Tensor,
     indices: torch.Tensor,

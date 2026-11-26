@@ -30,6 +30,7 @@ def can_skip_qwen_cpu_length_sync(runner: Any) -> bool:
             PleShortConvAttentionMetadataBuilder,
         )
 
+        from vllm_ascend.attention.attention_v1 import AscendAttentionBackend, AscendAttentionMetadataBuilder
         from vllm_ascend.attention.gdn_attn_builder import (
             AscendGDNAttentionBackend,
             AscendGDNAttentionMetadataBuilder,
@@ -44,12 +45,15 @@ def can_skip_qwen_cpu_length_sync(runner: Any) -> bool:
             AscendQSAImpl,
             AscendQSAMetadataBuilder,
         )
+        from vllm_ascend.worker.v2.spec_decode.dflash2.speculator import AscendDFlash2Speculator
         from vllm_ascend.worker.v2.spec_decode.mtp.speculator import AscendMTPSpeculator
 
         state = runner.model_state
+        is_mtp = type(runner.speculator) is AscendMTPSpeculator
+        is_dflash2 = type(runner.speculator) is AscendDFlash2Speculator
         if (
             type(state) is not AscendQwen4ExpModelState
-            or type(runner.speculator) is not AscendMTPSpeculator
+            or not (is_mtp or is_dflash2)
             or runner.model_config.architecture not in ("Qwen4ExpForCausalLM", "Qwen4ExpForConditionalGeneration")
         ):
             return False
@@ -77,6 +81,7 @@ def can_skip_qwen_cpu_length_sync(runner: Any) -> bool:
         if isinstance(ascend_state_builder, type) and issubclass(ascend_state_builder, QSAIndexerMetadataBuilder):
             qsa_state_builders += (ascend_state_builder,)
         allowed_builders = {
+            AscendAttentionBackend: (AscendAttentionMetadataBuilder,),
             AscendQSABackend: (
                 Qwen4ExpQSAMetadataBuilder,
                 AscendQSAMetadataBuilder,
@@ -97,15 +102,26 @@ def can_skip_qwen_cpu_length_sync(runner: Any) -> bool:
             for cache_groups in runner.speculator.attn_groups
             for group in cache_groups
         )
-        return (
+        target_supported = (
             bool(target_pairs)
-            and bool(draft_pairs)
-            and all(builder in allowed_builders.get(backend, ()) for backend, builder in (*target_pairs, *draft_pairs))
+            and all(builder in allowed_builders.get(backend, ()) for backend, builder in target_pairs)
             and any(backend is AscendQSABackend for backend, _ in target_pairs)
+            and AscendQSABackend.get_impl_cls() is AscendQSAImpl
+        )
+        if not target_supported or not draft_pairs:
+            return False
+        if is_dflash2:
+            # DFlash2's dense draft uses the CPU per-request upper bound in
+            # _select_seq_lens; its target uses the same Qwen QSA/GDN path.
+            return all(
+                backend is AscendAttentionBackend and builder is AscendAttentionMetadataBuilder
+                for backend, builder in draft_pairs
+            )
+        return (
+            all(builder in allowed_builders.get(backend, ()) for backend, builder in draft_pairs)
             and any(backend is AscendQSABackend for backend, _ in draft_pairs)
             and runner.speculator.attn_architecture == "QSA"
             and runner.speculator.attn_backend is AscendQSABackend
-            and AscendQSABackend.get_impl_cls() is AscendQSAImpl
         )
     except Exception:
         # Optional capability inspection must not make an otherwise supported

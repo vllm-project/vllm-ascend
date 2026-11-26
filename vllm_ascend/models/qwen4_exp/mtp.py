@@ -18,8 +18,14 @@ from typing import Any
 
 import regex as re
 import torch
+import torch.distributed as dist
 from vllm.config import VllmConfig
-from vllm.distributed import get_pp_group
+from vllm.distributed import (
+    get_pp_group,
+    get_tensor_model_parallel_world_size,
+    tensor_model_parallel_all_gather,
+)
+from vllm.distributed.parallel_state import get_tp_group
 from vllm.model_executor.models.config import _strip_qwen4_exp_mrope
 from vllm.models.qwen4_exp.amd import mtp as upstream_mtp
 from vllm.sequence import IntermediateTensors
@@ -32,6 +38,27 @@ from vllm_ascend.models.common.ops.sequence_parallel import sp_all_gather, sp_sh
 from . import model as _model  # noqa: F401
 
 _MTP_LAYER_PREFIX = re.compile(r"^mtp\.layers\.(\d+)(?=\.)")
+
+
+# Avoid lazy AICPU AllGather channel creation for large draft projections.
+_QWEN4EXP_ALL_TO_ALL_MIN_ROWS = 24
+
+
+def _gather_draft_projection(hidden_states: torch.Tensor) -> torch.Tensor:
+    world_size = get_tensor_model_parallel_world_size()
+    rows = hidden_states.shape[0]
+    if world_size == 1:
+        return hidden_states
+    if rows < _QWEN4EXP_ALL_TO_ALL_MIN_ROWS:
+        return tensor_model_parallel_all_gather(hidden_states, dim=-1)
+    features_per_rank = hidden_states.shape[-1]
+    group = get_tp_group()
+    repeated = hidden_states.repeat(world_size, 1)
+    exchanged = torch.empty_like(repeated)
+    dist.all_to_all_single(exchanged, repeated, group=group.device_group)
+    return exchanged.view(world_size, rows, features_per_rank).permute(1, 0, 2).reshape(
+        rows, world_size * features_per_rank
+    )
 
 
 def _align_qwen4_exp_mtp_position_cache(vllm_config: VllmConfig) -> None:
@@ -171,6 +198,11 @@ upstream_mtp._make_draft_vllm_config = _make_draft_vllm_config
 class AscendQwen4ExpMultiTokenPredictor(upstream_mtp.Qwen4ExpMultiTokenPredictor):
     """Qwen4Exp predictor adapted to Ascend's local PP drafter layout."""
 
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.fc_embedding.gather_output = False
+        self.fc_hidden.gather_output = False
+
     def forward(
         self,
         input_ids: torch.Tensor | None,
@@ -196,12 +228,13 @@ class AscendQwen4ExpMultiTokenPredictor(upstream_mtp.Qwen4ExpMultiTokenPredictor
                 assert input_ids is not None
                 inputs_embeds = self.embed_input_ids(input_ids)
             inputs_embeds = self.pre_fc_norm_embedding(inputs_embeds)
-            inputs_embeds = self.fc_embedding(inputs_embeds)
+            inputs_embeds = _gather_draft_projection(self.fc_embedding(inputs_embeds))
 
             num_tokens = hidden_states.shape[0]
             hidden_states = hidden_states.view(num_tokens, hc_count, hidden_size)
             hidden_states = self.pre_fc_norm_hidden(hidden_states.flatten(-2)).view(num_tokens, hc_count, hidden_size)
-            hidden_states = self.fc_hidden(hidden_states.reshape(-1, hidden_size)).view(
+            hidden_states = self.fc_hidden(hidden_states.reshape(-1, hidden_size))
+            hidden_states = _gather_draft_projection(hidden_states).view(
                 num_tokens, hc_count, hidden_size
             )
             hidden_states = inputs_embeds.unsqueeze(-2) + hidden_states

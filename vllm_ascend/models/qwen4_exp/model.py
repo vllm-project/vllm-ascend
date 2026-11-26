@@ -15,12 +15,14 @@
 """Ascend wrappers for the upstream Qwen4Exp model implementation."""
 
 from collections.abc import Callable
+from itertools import islice
 from typing import TYPE_CHECKING
 
 import torch
 from typing_extensions import Self
 from vllm.config import VllmConfig
 from vllm.distributed import get_pp_group
+from vllm.model_executor.models.interfaces import EagleModelMixin, SupportsEagle3
 from vllm.model_executor.models.qwen3_vl import Qwen3VLDummyInputsBuilder
 from vllm.models.qwen4_exp.amd import hyperconnection as upstream_hc
 from vllm.multimodal import MULTIMODAL_REGISTRY
@@ -97,8 +99,8 @@ def _build_ascend_ple(config, vllm_config: VllmConfig, **kwargs) -> Qwen4ExpPLEL
 upstream_model.Qwen4ExpPLELayer = _build_ascend_ple
 
 
-class AscendQwen4ExpModel(upstream_model.Qwen4ExpModel):
-    """Qwen4Exp backbone with Ascend-safe graph shape annotations."""
+class AscendQwen4ExpModel(upstream_model.Qwen4ExpModel, EagleModelMixin):
+    """Qwen4Exp backbone with Ascend graph and DFlash2 auxiliary outputs."""
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
         parallel = vllm_config.parallel_config
@@ -172,34 +174,152 @@ class AscendQwen4ExpModel(upstream_model.Qwen4ExpModel):
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,
         **kwargs: object,
-    ) -> torch.Tensor | IntermediateTensors:
-        """Adapt the upstream PP boundary to Ascend's full-token transport."""
+    ) -> torch.Tensor | IntermediateTensors | tuple[torch.Tensor, list[torch.Tensor]]:
+        """Reuse the upstream forward except for DFlash2 auxiliary capture."""
         pp_group = get_pp_group()
         if not pp_group.is_first_rank and self.use_hc_sequence_parallel and intermediate_tensors is not None:
             hidden_states = intermediate_tensors["hidden_states"]
-            intermediate_tensors = IntermediateTensors(
-                {**intermediate_tensors.tensors, "hidden_states": sp_shard(hidden_states)}
+            if hidden_states.shape[0] == positions.shape[-1]:
+                intermediate_tensors = IntermediateTensors(
+                    {**intermediate_tensors.tensors, "hidden_states": sp_shard(hidden_states)}
+                )
+
+        if self.aux_hidden_state_layers:
+            # Upstream does not expose completed decoder-layer HC states. Only
+            # DFlash2 uses the local loop that captures and returns them.
+            output = self._forward_with_dflash2_aux(
+                input_ids,
+                positions,
+                intermediate_tensors=intermediate_tensors,
+                inputs_embeds=inputs_embeds,
+                **kwargs,
+            )
+        else:
+            output = super().forward(
+                input_ids,
+                positions,
+                intermediate_tensors=intermediate_tensors,
+                inputs_embeds=inputs_embeds,
+                **kwargs,
             )
 
-        output = super().forward(
-            input_ids,
-            positions,
-            intermediate_tensors=intermediate_tensors,
-            inputs_embeds=inputs_embeds,
-            **kwargs,
-        )
         if not pp_group.is_last_rank and self.use_hc_sequence_parallel:
             assert isinstance(output, IntermediateTensors)
             hidden_states = sp_all_gather(output["hidden_states"])
             output = IntermediateTensors({**output.tensors, "hidden_states": hidden_states[: positions.shape[-1]]})
         return output
 
+    def _forward_with_dflash2_aux(
+        self,
+        input_ids: torch.Tensor | None,
+        positions: torch.Tensor,
+        intermediate_tensors: IntermediateTensors | None = None,
+        inputs_embeds: torch.Tensor | None = None,
+        query_start_loc: torch.Tensor | None = None,
+        ngram_context: torch.Tensor | None = None,
+        deepstack_input_embeds: IntermediateTensors | None = None,
+    ) -> torch.Tensor | IntermediateTensors | tuple[torch.Tensor, list[torch.Tensor]]:
+        if get_pp_group().is_first_rank:
+            if inputs_embeds is not None:
+                hidden_states = inputs_embeds
+            else:
+                if input_ids is None:
+                    raise ValueError("input_ids or inputs_embeds is required")
+                hidden_states = self.embed_input_ids(input_ids)
+            if self.use_hc_sequence_parallel:
+                hidden_states = upstream_model.sp_shard(hidden_states)
+            hidden_states = hidden_states.repeat(1, self.config.hc_count)
+        else:
+            if intermediate_tensors is None:
+                raise ValueError("pipeline stage requires intermediate tensors")
+            hidden_states = intermediate_tensors["hidden_states"]
+
+        full_num_tokens = positions.shape[-1]
+        block_output = None
+        injection = None
+        last_layer = None
+        aux_hidden_states: list[torch.Tensor] = []
+        for layer_idx, layer in islice(enumerate(self.layers), self.start_layer, self.end_layer):
+            last_layer = layer
+            hidden_states, block_output, injection = layer(
+                hidden_states=hidden_states,
+                prev_block_output=block_output,
+                prev_injection=injection,
+                positions=positions,
+                input_ids=input_ids,
+                query_start_loc=query_start_loc,
+                ngram_context=ngram_context,
+            )
+            if layer_idx + 1 in self.aux_hidden_state_layers:
+                # This DFlash2 checkpoint consumes the mean of the completed
+                # layer's HC streams. Reuse the materialized BF16 state in the
+                # backbone instead of combining the same pending output again.
+                combined = layer.mlp_hyper_connection.combine(hidden_states, block_output, injection)
+                aux_hidden_states.append(combined.view(-1, self.config.hc_count, self.config.hidden_size).mean(dim=-2))
+                hidden_states = combined
+                block_output = None
+                injection = None
+            if deepstack_input_embeds is not None and layer_idx < len(deepstack_input_embeds):
+                deepstack_embed = deepstack_input_embeds[f"deepstack_input_embeds_{layer_idx}"]
+                if self.use_hc_sequence_parallel:
+                    deepstack_embed = upstream_model.sp_shard(deepstack_embed)
+                deepstack_embed = (
+                    deepstack_embed.unsqueeze(-2)
+                    .expand(
+                        *deepstack_embed.shape[:-1],
+                        self.config.hc_count,
+                        self.config.hidden_size,
+                    )
+                    .flatten(-2)
+                )
+                if block_output is not None:
+                    hidden_states = layer.mlp_hyper_connection.combine(hidden_states, block_output, injection)
+                    block_output = None
+                    injection = None
+                hidden_states = hidden_states + deepstack_embed
+
+        if not get_pp_group().is_last_rank:
+            if last_layer is not None and block_output is not None:
+                hidden_states = last_layer.mlp_hyper_connection.combine(hidden_states, block_output, injection)
+            return IntermediateTensors({"hidden_states": hidden_states})
+
+        final_mixer = self.hyper_connection_mixer
+        assert final_mixer is not None
+        if block_output is None:
+            multi_hidden, sample_hidden_states, _ = final_mixer.mix(hidden_states)
+        else:
+            multi_hidden, sample_hidden_states, _ = final_mixer.combine_and_mix(hidden_states, block_output, injection)
+        if self.use_hc_sequence_parallel:
+            if aux_hidden_states:
+                hidden_size = self.config.hidden_size
+                packed_hidden_states = torch.cat([sample_hidden_states, *aux_hidden_states], dim=-1)
+                packed_hidden_states = upstream_model.sp_all_gather(packed_hidden_states)[:full_num_tokens]
+                split_sizes = [hidden_size] * (1 + len(aux_hidden_states))
+                sample_hidden_states, *aux_hidden_states = packed_hidden_states.split(split_sizes, dim=-1)
+                sample_hidden_states = sample_hidden_states.contiguous()
+            elif self._mtp_hidden_buffer is not None:
+                hidden_size = self.config.hidden_size
+                packed_hidden_states = torch.cat([sample_hidden_states, multi_hidden], dim=-1)
+                packed_hidden_states = upstream_model.sp_all_gather(packed_hidden_states)[:full_num_tokens]
+                sample_hidden_states, multi_hidden = packed_hidden_states.split(
+                    [hidden_size, self.config.hc_count * hidden_size], dim=-1
+                )
+                sample_hidden_states = sample_hidden_states.contiguous()
+            else:
+                sample_hidden_states = upstream_model.sp_all_gather(sample_hidden_states)[:full_num_tokens]
+        if self._mtp_hidden_buffer is not None:
+            num_tokens = multi_hidden.shape[0]
+            self._mtp_hidden_buffer[:num_tokens].copy_(multi_hidden)
+        if aux_hidden_states:
+            return sample_hidden_states, aux_hidden_states
+        return sample_hidden_states
+
 
 # Qwen4ExpForCausalLM resolves this module global when it creates the backbone.
 upstream_model.Qwen4ExpModel = AscendQwen4ExpModel
 
 
-class AscendQwen4ExpForCausalLM(upstream_model.Qwen4ExpForCausalLM):
+class AscendQwen4ExpForCausalLM(upstream_model.Qwen4ExpForCausalLM, SupportsEagle3):
     """Qwen3.8-Flash-Next text model using Ascend platform operators."""
 
     pp_intermediate_tensors_are_full_tokens = True

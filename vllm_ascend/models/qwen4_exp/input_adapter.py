@@ -267,17 +267,6 @@ class Qwen4ExpPreparedInputAdapter:
         requests = metadata.seq_lens.shape[0]
         lengths = metadata.seq_lens[:requests]
         query_start_loc = metadata.query_start_loc[: requests + 1]
-        compressed_lengths = lengths.floor_divide(GBSA_COMPRESS_RATIO)
-        residual_lengths = lengths.remainder(GBSA_COMPRESS_RATIO)
-        common = dict(
-            cu_seqlens_q=query_start_loc.clamp_max(rows),
-            seqused_k=compressed_lengths,
-            cmp_residual_k=residual_lengths,
-            layout_q="TND",
-            layout_k="PA_BBND",
-            mask_mode=3,
-            cmp_ratio=GBSA_COMPRESS_RATIO,
-        )
         head_dim = int(layer.indexer.index_head_dim)
         block_topk = int(layer.indexer.token_topk // layer.indexer.compress_ratio)
         if int(layer.indexer.compress_ratio) != GBSA_COMPRESS_RATIO:
@@ -296,6 +285,19 @@ class Qwen4ExpPreparedInputAdapter:
         if prepared is not None:
             metadata.qsa_lightning_v2_metadata = prepared
             return
+        # The schedule is shared by equal QSA geometries. Avoid launching the
+        # same length transforms for every layer before the cache lookup.
+        compressed_lengths = lengths.floor_divide(GBSA_COMPRESS_RATIO)
+        residual_lengths = lengths.remainder(GBSA_COMPRESS_RATIO)
+        common = dict(
+            cu_seqlens_q=query_start_loc.clamp_max(rows),
+            seqused_k=compressed_lengths,
+            cmp_residual_k=residual_lengths,
+            layout_q="TND",
+            layout_k="PA_BBND",
+            mask_mode=3,
+            cmp_ratio=GBSA_COMPRESS_RATIO,
+        )
         import cann_ops_transformer  # noqa: F401
 
         generated = torch.ops.cann_ops_transformer.lightning_indexer_metadata(
@@ -324,18 +326,8 @@ class Qwen4ExpPreparedInputAdapter:
         live_rows = int(main.num_actual_tokens)
         rows = int(raw.token_to_req.shape[0]) if full_graph else live_rows
         requests = int(raw.seq_lens.shape[0])
-        token_to_req = raw.token_to_req[:rows].to(torch.int64)
         positions = raw.logical_positions[:rows]
-        # Match both Python indexing and the Triton preparation kernel: a
-        # negative request index addresses from the end, so graph-padding -1
-        # rows use the final request rather than request zero.
-        visible = torch.minimum(
-            positions.add(1).clamp_min(0),
-            raw.seq_lens[token_to_req],
-        ).to(torch.int32)
-        counts = visible.add(GBSA_COMPRESS_RATIO - 1).floor_divide(GBSA_COMPRESS_RATIO)
         max_groups = int(layer.indexer.token_topk // layer.indexer.compress_ratio)
-        counts = counts.clamp_max(max_groups)
         num_kv_heads = int(layer.num_kv_heads)
         signature = (
             "gbsa",
@@ -354,6 +346,16 @@ class Qwen4ExpPreparedInputAdapter:
         if prepared is not None:
             main.qsa_gbsa_metadata = prepared
             return
+        token_to_req = raw.token_to_req[:rows].to(torch.int64)
+        # Match both Python indexing and the Triton preparation kernel: a
+        # negative request index addresses from the end, so graph-padding -1
+        # rows use the final request rather than request zero.
+        visible = torch.minimum(
+            positions.add(1).clamp_min(0),
+            raw.seq_lens[token_to_req],
+        ).to(torch.int32)
+        counts = visible.add(GBSA_COMPRESS_RATIO - 1).floor_divide(GBSA_COMPRESS_RATIO)
+        counts = counts.clamp_max(max_groups)
         sparse_count = counts.unsqueeze(0).expand(num_kv_heads, -1).contiguous()
         # Metadata generation consumes the GBSA geometry and counts.  Selected
         # indices are produced later by LI and passed to the attention operator.
