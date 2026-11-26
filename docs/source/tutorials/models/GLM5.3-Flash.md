@@ -1032,17 +1032,17 @@ For DP>1, the launcher executes the role script without filtering.
     - Prefill runs the target eagerly and enables draft graph execution.
       It enables asynchronous EPLB with the `stair` policy and `hixl`
       communicator, a window and step interval of 300, and zero redundant
-      experts. Prefill sets `enable_fused_mc2` to `2`.
+      experts. The Prefill configuration sets `enable_fused_mc2` to `2`
+      and `enable_shared_expert_dp` to `true`.
     - Prefill uses `--max-num-seqs 64` and
       `--max-num-batched-tokens 16384`. Decode uses `40` and `240`, respectively.
     - Decode uses `FULL_DECODE_ONLY` with default capture sizes and NPUGraph Ex.
-      It sets `enable_fused_mc2` to `2`. Static Kernel, Super Kernel, FlashComm1
-      and shared-expert multistream overlap are disabled.
+      It sets `enable_shared_expert_dp` to `true` and uses fused MC2 mode 2.
+      Static Kernel, Super Kernel, FlashComm1 and shared-expert multistream
+      overlap are disabled.
       QKV input-projection TP is 8 and output-projection TP is 1.
       Recompute scheduling is enabled through
       `scheduler_config.recompute_scheduler_enable` in `--additional-config`.
-    - Both role templates set `enable_shared_expert_dp`. The setting takes
-      effect with expert parallelism and a global TP size greater than one.
     - Both roles allow up to seven images per prompt and disable video input.
     - `MooncakeConnectorV2` uses `kv_producer` and engine ID `0` on Prefill,
       and `kv_consumer` and engine ID `1` on Decode. These IDs identify the
@@ -1806,9 +1806,8 @@ and tenant options, refer to the [KV Cache Pool Deployment Guide](../../user_gui
     curl --fail -X POST "http://<PREFILL_NODE_IP>:9081/reset_prefix_cache?reset_external=false"
     ```
 
-    Confirm the response contains `{"success": true}`. Then record
-    `vllm:ascend_store_load_get_keys_total` from the Prefill API's
-    `/metrics` endpoint and replay the same prefix
+    After the reset succeeds, record `vllm:ascend_store_load_get_keys_total`
+    from the Prefill API's `/metrics` endpoint and replay the same prefix
     through the proxy. Verify that the GET counter rises, Prefill reports a
     successful pool load, and Decode completes the request using the P→D
     transfer. Only complete, cacheable blocks are reused.
@@ -2146,10 +2145,8 @@ Use the role-specific values in the 950DT products example when deploying on tha
 - Set `--max-model-len` to the required context length and adjust
   `--gpu-memory-utilization` to the available NPU memory. The reference uses
   1048576 tokens and a utilization of 0.92 on both roles.
-- Decode sets `scheduler_config.recompute_scheduler_enable` to `true`.
-  When KV cache is insufficient, the scheduler tries to offload preempted
-  KV blocks and can return requests to Prefill for recomputation when the
-  fine-grained TP configuration allows it.
+- Enable `scheduler_config.recompute_scheduler_enable` on Decode. Keep it
+  disabled on Prefill.
 - For repeated prefixes, use the DRAM KV Cache Pool configuration in
   [Section 5.4](#54-prefill-decode-disaggregation-with-kv-cache-pool). Both
   Prefill and Decode contribute `20GB` per worker. Confirm pool hits when
