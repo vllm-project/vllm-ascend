@@ -42,8 +42,9 @@ def target_attn_groups_without_draft_flashmla(attn_groups, draft_layer_names):
     Only dedicated A3 MLA draft groups are removed. Other backends and
     mixed target/draft groups retain their existing metadata preparation.
     """
-    return [
-        [
+    target_groups = attn_groups
+    for index, groups in enumerate(attn_groups):
+        kept = [
             group
             for group in groups
             if not (
@@ -52,8 +53,11 @@ def target_attn_groups_without_draft_flashmla(attn_groups, draft_layer_names):
                 and getattr(group.get_metadata_builder(0), "use_a3_mla_sink", False)
             )
         ]
-        for groups in attn_groups
-    ]
+        if len(kept) != len(groups):
+            if target_groups is attn_groups:
+                target_groups = attn_groups.copy()
+            target_groups[index] = kept
+    return target_groups
 
 
 def prepare_flashmla_batch_req_state(

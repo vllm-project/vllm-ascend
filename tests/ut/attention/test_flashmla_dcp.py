@@ -464,17 +464,17 @@ def test_dspark_metadata_dispatch_preserves_non_full_and_fia(provider, mode):
         assert calls[0]["num_query_per_req"] == calls[0]["step"] == 3
 
 
-def test_target_group_filter_keeps_fia_mixed_and_empty_groups(runtime):
-    def group(names, external):
-        return SimpleNamespace(
-            layer_names=names, get_metadata_builder=lambda _: SimpleNamespace(flashmla_state=external)
-        )
+def test_target_group_filter_keeps_other_backends_mixed_and_empty_groups(runtime):
+    def group(names, **builder_flags):
+        return SimpleNamespace(layer_names=names, get_metadata_builder=lambda _: SimpleNamespace(**builder_flags))
 
-    fia = group(["draft.fia"], None)
-    mixed = group(["target", "draft.mixed"], object())
-    empty = group([], object())
-    groups = [[fia, mixed], [], [empty]]
-    assert runtime.api.target_attn_groups_without_draft_flashmla(groups, {"draft.fia", "draft.mixed"}) == groups
+    fia = group(["draft.fia"])
+    a5 = group(["draft.a5"], use_a3_mla_sink=False, flashmla_state=object())
+    mixed = group(["target", "draft.mixed"], use_a3_mla_sink=True)
+    empty = group([], use_a3_mla_sink=True)
+    groups = [[fia, a5, mixed], [], [empty]]
+    draft_names = {"draft.fia", "draft.a5", "draft.mixed"}
+    assert runtime.api.target_attn_groups_without_draft_flashmla(groups, draft_names) is groups
 
 
 def common(lengths, queries, *, tokens=None, causal=True):

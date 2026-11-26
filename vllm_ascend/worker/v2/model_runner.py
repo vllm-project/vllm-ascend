@@ -600,10 +600,7 @@ class NPUModelRunner(GPUModelRunner):
         draft_layer_names: set[str] = getattr(self.speculator, "draft_attn_layer_names", set())
         # The speculator owns separate builders and graph buffers for these
         # layers. Building them with target lengths submits unused schedules.
-        if any(
-            getattr(getattr(layer, "impl", None), "use_a3_mla_sink", False)
-            for layer in self.compilation_config.static_forward_context.values()
-        ):
+        if draft_layer_names:
             self.attn_groups = target_attn_groups_without_draft_flashmla(self.attn_groups, draft_layer_names)
         self.use_fia = any(
             (group.backend is AscendAttentionBackend or group.backend is AscendMLABackend)
