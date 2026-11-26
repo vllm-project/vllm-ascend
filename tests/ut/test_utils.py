@@ -1040,3 +1040,47 @@ def test_projection_dp_sync_does_not_change_dense_drafter(monkeypatch, knob, dra
     monkeypatch.setattr(utils, "is_moe_model", lambda _: True)
     monkeypatch.setattr(utils, "is_drafter_moe_model", lambda _: False)
     assert utils.should_skip_allreduce_across_dp_group(SimpleNamespace(), is_draft_model=draft) is draft
+
+
+@pytest.mark.parametrize(
+    ("max_batched_tokens", "separate_routine", "expected"),
+    [
+        # A local prefill chunk above MC2 capacity must coordinate even when
+        # the recompute scheduler is enabled.
+        (400, False, False),
+        # The whole runnable range fits MC2 with one graph mode: skip is safe.
+        (192, False, True),
+        # Prefill and decode graph modes differ, so ranks can select
+        # different execution paths.
+        (192, True, False),
+    ],
+)
+def test_recompute_scheduler_does_not_bypass_prefill_coordination(
+    monkeypatch, max_batched_tokens, separate_routine, expected
+):
+    capacity = 192
+    config = SimpleNamespace(
+        kv_transfer_config=SimpleNamespace(is_kv_consumer=True),
+        scheduler_config=SimpleNamespace(max_num_batched_tokens=max_batched_tokens),
+        compilation_config=SimpleNamespace(cudagraph_mode=SimpleNamespace(separate_routine=lambda: separate_routine)),
+    )
+    ascend = SimpleNamespace(
+        get_mc2_comm_alg=lambda: "fullmesh",
+        scheduler_config=SimpleNamespace(recompute_scheduler_enable=True),
+        finegrained_tp_config=SimpleNamespace(
+            qkv_iproj_tensor_parallel_size=1,
+            requires_graph=lambda _config: False,
+        ),
+    )
+    monkeypatch.setattr(utils, "get_ascend_config", lambda: ascend)
+    monkeypatch.setattr(utils, "is_mega_moe_supported", lambda: False)
+    monkeypatch.setattr(utils, "is_moe_model", lambda _: True)
+    monkeypatch.setattr(utils, "is_drafter_moe_model", lambda _: True)
+    monkeypatch.setattr(utils, "get_potential_max_tokens", lambda: capacity)
+    monkeypatch.setattr(ascend_forward_context, "use_cann_megamoe", lambda _: False)
+    monkeypatch.setattr(
+        ascend_forward_context,
+        "select_moe_comm_method",
+        lambda n, _: MoECommType.MC2 if n <= capacity else MoECommType.ALLTOALL,
+    )
+    assert utils.should_skip_allreduce_across_dp_group(config) is expected
