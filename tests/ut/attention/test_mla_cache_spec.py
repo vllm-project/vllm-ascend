@@ -98,7 +98,7 @@ def _make_owner(impl, backend, rope_dim=64):
     return layer
 
 
-def _get_owner_spec(monkeypatch, layer):
+def _get_owner_spec(monkeypatch, layer, **config_kwargs):
     source = MLAAttentionSpec(
         block_size=128,
         num_kv_heads=1,
@@ -108,6 +108,7 @@ def _get_owner_spec(monkeypatch, layer):
     monkeypatch.setattr(MLAAttention, "get_kv_cache_spec", lambda *_: source)
     config = SimpleNamespace(
         model_config=SimpleNamespace(dtype=torch.bfloat16, hf_text_config=SimpleNamespace(model_type="glm_moe_dsa")),
+        **config_kwargs,
     )
     return layer.get_kv_cache_spec(config)
 
@@ -140,14 +141,17 @@ def test_fa_quant_decision_stays_with_each_owner(monkeypatch, quantized):
     impl.fa_quant_layer = quantized
     impl.head_size = 576
     impl.dtype = torch.int8
+    impl.layer_name = "model.layers.0.self_attn.attn"
     layer = _make_owner(impl, AscendMLABackend)
-    spec = _get_owner_spec(monkeypatch, layer)
+    monkeypatch.setattr(mla_v1, "enable_fa_quant", lambda _: True)
+    quant_config = SimpleNamespace(get_kv_quant_dtype=lambda *_: (torch.float8_e4m3fn, torch.float16))
+    spec = _get_owner_spec(monkeypatch, layer, quant_config=quant_config)
     assert spec.head_size == (640 if quantized else 576)
-    assert spec.dtype == (torch.int8 if quantized else torch.bfloat16)
+    assert spec.dtype == (torch.float8_e4m3fn if quantized else torch.bfloat16)
     assert spec.page_size_bytes == 128 * (640 if quantized else 1152)
     if quantized:
         assert spec.cache_dtype_str is None
-    assert spec.rope_dtype == (torch.bfloat16 if quantized else None)
+    assert spec.rope_dtype == (torch.float16 if quantized else None)
 
 
 def test_quant_flashmla_keeps_one_storage_dtype(monkeypatch):
