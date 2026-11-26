@@ -37,6 +37,9 @@ from vllm.triton_utils import triton
 from vllm.v1.attention.backend import AttentionBackend, AttentionMetadata  # type: ignore
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID
+from vllm.model_executor.layers.fusion.quant_activation import (
+    QuantizedActivation,
+)
 
 from vllm_ascend.attention.utils import (
     maybe_save_kv_layer_to_connector,
@@ -379,6 +382,7 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
         self,
         hidden_states: torch.Tensor,
         output: torch.Tensor = None,
+        qkvz_input: QuantizedActivation | None = None,
     ):
         """
         Forward pass with three parts:
@@ -386,6 +390,7 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
         2. Core attention (custom op)
         3. Output projection
         """
+        
         num_tokens = hidden_states.size(0)
         if hasattr(self, "in_proj_qkv"):
             mixed_qkv, _ = self.in_proj_qkv(hidden_states)
