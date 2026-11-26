@@ -6,6 +6,12 @@ entries:
       and All2All paths when data parallelism is larger than one: the load executed
       by the experts of idle data-parallel ranks is now recorded, so rebalancing
       no longer sees those ranks as empty.
+  - category: bugfix
+    text: >-
+      Model Runner V2 EPLB with `--eplb-config '{"policy": "default"}'` now
+      samples expert load and rearranges on the MC2, FusedMC2 and All2All paths
+      instead of skipping load sampling on non-AllGather profiles, while
+      preserving the current expert placement on zero-load layers.
   - category: config
     text: >-
       With `load_collection_phase` set to `prefill` or `decode`, data parallelism

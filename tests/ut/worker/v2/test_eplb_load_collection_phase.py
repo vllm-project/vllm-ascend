@@ -10,10 +10,11 @@ import torch
 from vllm.distributed.eplb import eplb_state as upstream_eplb_state
 from vllm.distributed.eplb.policy import DefaultEplbPolicy
 
-from vllm_ascend.ascend_config import EplbConfig
+from vllm_ascend.ascend_config import EplbConfig, StairConfig
 from vllm_ascend.distributed.eplb import eplb_state as state_module
 from vllm_ascend.distributed.eplb.eplb_state import AscendEplbState
 from vllm_ascend.distributed.eplb.policy import PreparedLoadStats
+from vllm_ascend.distributed.eplb.policy.factory import AscendDefaultEplbPolicy, create_eplb_policy
 from vllm_ascend.distributed.eplb.policy.stair import StairEplbPolicy
 from vllm_ascend.worker.v2.eplb import (
     AscendEPLBController,
@@ -83,6 +84,7 @@ class TestEplbLoadCollectionPhase(unittest.TestCase):
         stair_controller = self._make_controller(policy="stair")
 
         self.assertIsInstance(default_controller.eplb_policy, DefaultEplbPolicy)
+        self.assertIsInstance(default_controller.eplb_policy, AscendDefaultEplbPolicy)
         self.assertIsInstance(stair_controller.eplb_policy, StairEplbPolicy)
 
     def test_setup_from_mapping_uses_current_upstream_contract(self):
@@ -157,7 +159,11 @@ def _stair_policy():
     return SimpleNamespace(prepare_local_load_stats=lambda samples: PreparedLoadStats(samples))
 
 
-_BOTH_POLICIES = pytest.mark.parametrize("policy_factory", [_stair_policy, DefaultEplbPolicy], ids=["stair", "default"])
+_BOTH_POLICIES = pytest.mark.parametrize(
+    "policy_factory",
+    [_stair_policy, AscendDefaultEplbPolicy],
+    ids=["stair", "default"],
+)
 
 
 def _model_state(window):
@@ -175,8 +181,8 @@ def _model_state(window):
 def _install_groups(monkeypatch, remote=()):
     """Give the EP group CPU and device subgroups and mock the reduction.
 
-    ``remote`` holds the per-slot ``[active, out_of_phase, load]`` that other
-    ranks contribute to the window flags; other tensors are left as they are.
+    ``remote`` holds the per-slot ``[active, out_of_phase]`` that other ranks
+    contribute to the window flags; other tensors are left as they are.
     """
     cpu_group = MagicMock()
     cpu_group.size.return_value = 4
@@ -186,7 +192,7 @@ def _install_groups(monkeypatch, remote=()):
 
     def all_reduce(value, **kwargs):
         reduced.append(kwargs["group"])
-        if value.shape == (3, _WINDOW_SIZE):
+        if kwargs["group"] is cpu_group and value.shape == (2, _WINDOW_SIZE):
             for flags in remote:
                 value.add_(torch.tensor(flags, dtype=value.dtype))
 
@@ -236,7 +242,7 @@ def _rearranged(policy, state, upstream_rearrange, publish):
 def test_slot_holding_load_of_an_idle_rank_is_rearranged(monkeypatch, policy_factory):
     # The three idle DP replicas of a group execute most of the tokens, so a
     # slot of a rank that scheduled nothing still holds load.
-    ep_group, reduced = _install_groups(monkeypatch, remote=[([1, 1], [0, 0], [0, 0])])
+    ep_group, reduced = _install_groups(monkeypatch, remote=[([1, 1], [0, 0])])
     state = _booked_state(policy_factory(), active=[0, 0], out_of_phase=[0, 0], rows=[[[5, 7]], [[9, 11]]])
     upstream_rearrange = MagicMock(return_value=None)
     publish = MagicMock()
@@ -246,8 +252,8 @@ def test_slot_holding_load_of_an_idle_rank_is_rearranged(monkeypatch, policy_fac
     state.rearrange()
 
     assert _rearranged(state.policy, state, upstream_rearrange, publish) == [[[5, 7]], [[9, 11]]]
-    # The window is reduced once per rearrangement on the EP CPU group. STAIR
-    # then sums the selected samples on the EPLB device group, as it did before.
+    # The window flags are reduced once per rearrangement on the EP CPU group.
+    # STAIR then sums the selected samples on the EP device group.
     later = [] if isinstance(state.policy, DefaultEplbPolicy) else [ep_group.device_group]
     assert reduced == [ep_group.cpu_group] + later
 
@@ -256,7 +262,7 @@ def test_slot_holding_load_of_an_idle_rank_is_rearranged(monkeypatch, policy_fac
 def test_slot_mixing_phases_across_ranks_is_dropped(monkeypatch, policy_factory):
     # Owner counts cannot tell which DP rank sent a token, so a slot in which
     # another rank prefills is not a decode sample.
-    _install_groups(monkeypatch, remote=[([1, 0], [0, 0], [0, 0]), ([0, 1], [0, 1], [0, 0])])
+    _install_groups(monkeypatch, remote=[([1, 0], [0, 0]), ([0, 1], [0, 1])])
     state = _booked_state(policy_factory(), active=[1, 1], out_of_phase=[0, 0], rows=[[[5, 7]], [[9, 11]]])
     upstream_rearrange = MagicMock(return_value=None)
     publish = MagicMock()
@@ -270,7 +276,7 @@ def test_slot_mixing_phases_across_ranks_is_dropped(monkeypatch, policy_factory)
 
 @_BOTH_POLICIES
 def test_window_without_a_complete_slot_does_not_rearrange(monkeypatch, policy_factory):
-    _install_groups(monkeypatch, remote=[([1, 0], [1, 1], [0, 0])])
+    _install_groups(monkeypatch, remote=[([1, 0], [1, 1])])
     state = _booked_state(policy_factory(), active=[1, 1], out_of_phase=[1, 1], rows=[[[5, 7]], [[9, 11]]])
     upstream_rearrange = MagicMock(return_value=None)
     publish = MagicMock()
@@ -282,17 +288,35 @@ def test_window_without_a_complete_slot_does_not_rearrange(monkeypatch, policy_f
     assert _rearranged(state.policy, state, upstream_rearrange, publish) is None
 
 
-def test_all_zero_window_does_not_reach_the_default_policy(monkeypatch):
-    # On an all-zero window DefaultEplbPolicy piles every replica on one expert.
-    _install_groups(monkeypatch)
-    state = _booked_state(DefaultEplbPolicy(), active=[1, 1], out_of_phase=[0, 0])
-    upstream_rearrange = MagicMock(return_value=None)
-    publish = MagicMock()
-    monkeypatch.setattr(upstream_eplb_state.EplbState, "rearrange", upstream_rearrange)
+def test_default_policy_preserves_placement_on_zero_load_layers():
+    # Upstream DefaultEplbPolicy piles every redundant replica onto expert 0
+    # when a layer's load is all zeros; AscendDefaultEplbPolicy keeps the
+    # current placement on CPU without requiring a device-window reduction.
+    policy = create_eplb_policy("default", StairConfig())
+    old_map = torch.tensor([[0, 1, 2, 3, 2, 3], [0, 1, 2, 3, 1, 2]], dtype=torch.int32)
 
-    state.rearrange()
+    all_zero = policy.rebalance_experts(
+        torch.zeros((2, 4), dtype=torch.int64),
+        num_replicas=6,
+        num_groups=2,
+        num_nodes=1,
+        num_ranks=2,
+        old_global_expert_indices=old_map,
+    )
+    assert all_zero.device.type == "cpu"
+    torch.testing.assert_close(all_zero, old_map.to(torch.long))
 
-    assert _rearranged(state.policy, state, upstream_rearrange, publish) is None
+    mixed_weight = torch.tensor([[0, 0, 0, 0], [100, 1, 1, 1]], dtype=torch.int64)
+    mixed = policy.rebalance_experts(
+        mixed_weight,
+        num_replicas=6,
+        num_groups=2,
+        num_nodes=1,
+        num_ranks=2,
+        old_global_expert_indices=old_map,
+    )
+    torch.testing.assert_close(mixed[0], old_map[0].to(torch.long))
+    assert int((mixed[1] == 0).sum()) > 1
 
 
 def test_slot_without_an_active_rank_is_dropped_with_its_stale_load(monkeypatch):
@@ -435,7 +459,7 @@ def test_interval_of_skipped_slots_restarts_the_clock_without_rearranging(monkey
     state, upstream_rearrange, publish = _live_state(monkeypatch, policy_factory())
     # Under a large DP another rank is likely inside the phase. That does not
     # make this rank's out-of-phase slots complete.
-    _install_groups(monkeypatch, remote=[([1, 0], [0, 0], [0, 0])])
+    _install_groups(monkeypatch, remote=[([1, 0], [0, 0])])
 
     for _ in range(4):
         _record(state, [5, 7], phase_matched=False)

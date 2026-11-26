@@ -32,6 +32,7 @@ from vllm.v1.worker.ubatching import dbo_current_ubatch_id
 from vllm_ascend.device.hardware_profile import MoECommPolicy, get_current_hardware_profile
 from vllm_ascend.distributed.eplb.eplb_communicator import AscendHixlEplbCommunicator, _HixlSession
 from vllm_ascend.distributed.eplb.policy import PreparedLoadStats
+from vllm_ascend.distributed.eplb.policy.factory import AscendDefaultEplbPolicy
 from vllm_ascend.distributed.eplb.tensor_ops import (
     build_expert_replica_routing_table,
     count_allgather_tokens,
@@ -278,6 +279,8 @@ class AscendEplbState(_eplb_state.EplbState):
         policy: AbstractEplbPolicy | None = None,
     ) -> None:
         super().__init__(parallel_config, device)
+        if policy is None and parallel_config.eplb_config.policy == "default":
+            policy = AscendDefaultEplbPolicy()
         self._configured_policy = policy
         if policy is not None:
             self.policy = policy
@@ -553,20 +556,6 @@ class AscendEplbState(_eplb_state.EplbState):
         """
         return super()._sync_load_pass(*args, **kwargs)
 
-    def _local_load_per_slot(self) -> torch.Tensor:
-        """Sum the load recorded behind each window slot, oldest first."""
-        physical_slots = self._physical_load_sample_slots[self._ordered_load_step_indices()]
-        local_load = torch.zeros(self.expert_load_window_size, dtype=torch.int64)
-        written = physical_slots >= 0
-        if written.any():
-            device_slots = physical_slots[written].to(self.device)
-            for model_state in self.model_states.values():
-                window = model_state.expert_load_window
-                local_load[written] += (
-                    window.index_select(0, device_slots).reshape(device_slots.numel(), -1).sum(dim=1).cpu()
-                )
-        return local_load
-
     def _all_reduce_sum(self, value: torch.Tensor) -> None:
         """Sum ``value`` over the EP group in place."""
         ep_group = get_ep_group()
@@ -583,17 +572,17 @@ class AscendEplbState(_eplb_state.EplbState):
         value.copy_(reduced.cpu())
 
     def _reduce_load_slots(self) -> torch.Tensor:
-        """Return per-slot ``[active ranks, active ranks outside the phase, load]``.
+        """Return per-slot ``[active ranks, active ranks outside the phase]``.
 
         Every rank calls this at the same rearrangement, so all of them read the
-        same reduced flags and take the same branch.
+        same reduced flags and take the same branch without reading or reducing
+        the device load window.
         """
         step_indices = self._ordered_load_step_indices()
         flags = torch.stack(
             (
-                self._slot_active[step_indices].to(torch.int64),
-                self._slot_out_of_phase[step_indices].to(torch.int64),
-                self._local_load_per_slot(),
+                self._slot_active[step_indices],
+                self._slot_out_of_phase[step_indices],
             )
         )
         self._all_reduce_sum(flags)
@@ -602,19 +591,20 @@ class AscendEplbState(_eplb_state.EplbState):
     def _included_load_slots(self, flags: torch.Tensor) -> torch.Tensor:
         """Return the slots whose load is complete.
 
-        A slot is complete when some rank scheduled tokens on it, no active rank
-        was outside the collection phase and some rank recorded load. Owner
-        counts cannot tell which DP rank sent a token, so a slot that mixes
-        phases across ranks is dropped. On the AllGather path the gathered
-        source eligibility of the slot decides instead: it is equal on every
-        rank and filters by the phase of each source.
+        A slot is complete when some rank scheduled tokens on it and no active
+        rank was outside the collection phase. Owner counts cannot tell which DP
+        rank sent a token, so a slot that mixes phases across ranks is dropped.
+        On the AllGather path the gathered source eligibility of the slot
+        decides instead: it is equal on every rank and filters by the phase of
+        each source. All-zero load windows are handled on the host by each
+        policy.
         """
-        active, out_of_phase, load = flags
+        active, out_of_phase = flags
         included = (active > 0) & (out_of_phase == 0)
         if getattr(self, "_slot_gathered", None) is not None:
             gathered = self._slot_gathered[self._ordered_load_step_indices()].cpu()
             included = torch.where(gathered >= 0, gathered > 0, included)
-        return included & (load > 0)
+        return included
 
     def _log_window_selection(self, flags: torch.Tensor, included: torch.Tensor) -> None:
         active = flags[0] > 0
@@ -637,7 +627,7 @@ class AscendEplbState(_eplb_state.EplbState):
         excluded = excluded[excluded >= 0]
         if excluded.numel() == 0:
             return
-        device_rows = excluded.to(self.device)
+        device_rows = excluded.to(self.device, non_blocking=True)
         for model_state in self.model_states.values():
             model_state.expert_load_window.index_fill_(0, device_rows, 0)
 
@@ -657,31 +647,44 @@ class AscendEplbState(_eplb_state.EplbState):
         if not included_slots.any():
             return None
 
+        accepts_slot_indices = "slot_indices" in inspect.signature(prepare_load_stats).parameters
         step_indices = self._ordered_load_step_indices()
         included_steps = step_indices[included_slots]
-        group = get_eplb_group()
+        physical_slots = self._physical_load_sample_slots[included_steps]
+        all_slots_written = bool((physical_slots >= 0).all())
+        # Reuse the foreground EP HCCL communicator (same group ranks as EPLB)
+        # instead of lazily initializing a separate ``eplb`` HCCL communicator
+        # at rearrangement time.
+        ep_group = get_ep_group()
 
         local_stats: dict[str, PreparedLoadStats] = {}
         for model_key, model_state in self.model_states.items():
-            physical_slots = self._physical_load_sample_slots[included_steps]
-            physical_samples = model_state.expert_load_window.new_zeros(
-                (
-                    included_steps.numel(),
-                    *model_state.expert_load_window.shape[1:],
+            window = model_state.expert_load_window
+            if all_slots_written:
+                device_slots = physical_slots.to(window.device, non_blocking=True)
+                if accepts_slot_indices:
+                    physical_stats = prepare_load_stats(window, slot_indices=device_slots)
+                else:
+                    physical_stats = prepare_load_stats(window.index_select(0, device_slots))
+            else:
+                physical_samples = window.new_zeros(
+                    (
+                        included_steps.numel(),
+                        *window.shape[1:],
+                    )
                 )
-            )
-            local_mask = physical_slots >= 0
-            if local_mask.any():
-                device_mask = local_mask.to(physical_samples.device)
-                device_slots = physical_slots[local_mask].to(physical_samples.device)
-                physical_samples[device_mask] = model_state.expert_load_window.index_select(0, device_slots)
-            physical_stats = prepare_load_stats(physical_samples)
+                local_mask = physical_slots >= 0
+                if local_mask.any():
+                    device_mask = local_mask.to(window.device, non_blocking=True)
+                    device_slots = physical_slots[local_mask].to(window.device, non_blocking=True)
+                    physical_samples[device_mask] = window.index_select(0, device_slots)
+                physical_stats = prepare_load_stats(physical_samples)
             local_stats[model_key] = self._map_physical_stats_to_logical(model_state, physical_stats)
 
         flat_values = [stats.values.reshape(-1, stats.values.shape[-1]) for stats in local_stats.values()]
         row_counts = [values.shape[0] for values in flat_values]
         reduced = torch.cat(flat_values)
-        all_reduce(reduced, group=group.device_group)
+        all_reduce(reduced, group=ep_group.device_group)
         split_values = reduced.split(row_counts)
         return {
             model_key: PreparedLoadStats(
@@ -725,7 +728,7 @@ class AscendEplbState(_eplb_state.EplbState):
             # nothing about the current one.
             self._discard_samples_from_old_mapping()
             # One reduction per rearrangement decides the window on every rank
-            # alike, so an all-zero or mixed-phase window never reaches a policy.
+            # alike, so a mixed-phase or empty window never reaches a policy.
             flags = self._reduce_load_slots()
             included = self._included_load_slots(flags)
             self._log_window_selection(flags, included)

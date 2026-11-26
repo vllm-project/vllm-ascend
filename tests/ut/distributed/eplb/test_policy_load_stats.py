@@ -8,9 +8,11 @@ import numpy as np
 import torch
 from vllm.distributed.eplb import eplb_state as upstream_eplb_state
 
+from vllm_ascend.ascend_config import StairConfig
 from vllm_ascend.distributed.eplb import eplb_state as state_module
 from vllm_ascend.distributed.eplb.eplb_state import AscendEplbState
 from vllm_ascend.distributed.eplb.policy import PreparedLoadStats
+from vllm_ascend.distributed.eplb.policy.stair import StairEplbPolicy
 
 
 def _custom_policy():
@@ -143,16 +145,17 @@ def test_initialize_load_stats_adds_empty_commit_anchors():
 def test_collect_global_load_stats_maps_physical_to_logical(monkeypatch):
     ep_cpu_group = MagicMock()
     ep_cpu_group.size.return_value = 2
+    ep_device_group = object()
     monkeypatch.setattr(
         state_module,
         "get_ep_group",
-        lambda: SimpleNamespace(cpu_group=ep_cpu_group, device_group=object()),
+        lambda: SimpleNamespace(cpu_group=ep_cpu_group, device_group=ep_device_group),
     )
-    device_group = object()
+    eplb_device_group = object()
     monkeypatch.setattr(
         state_module,
         "get_eplb_group",
-        lambda: SimpleNamespace(cpu_group=object(), device_group=device_group),
+        lambda: SimpleNamespace(cpu_group=object(), device_group=eplb_device_group),
     )
     all_reduce = MagicMock()
     monkeypatch.setattr(state_module, "all_reduce", all_reduce)
@@ -179,11 +182,72 @@ def test_collect_global_load_stats_maps_physical_to_logical(monkeypatch):
         result["model"].values,
         torch.tensor([[[3, 7]], [[19, 40]]]),
     )
-    # The slot flags are summed on the EP CPU group, the load on the EPLB device group.
+    # Slot flags reduce on the EP CPU group; load stats reuse the EP device
+    # group so ``eplb_group.device_group`` never lazily initializes HCCL buffers.
     assert [call.kwargs["group"] for call in all_reduce.call_args_list] == [
         ep_cpu_group,
-        device_group,
+        ep_device_group,
     ]
+
+
+def test_collect_global_load_stats_streams_stair_bins_without_full_window_copy(monkeypatch):
+    ep_cpu_group = MagicMock()
+    ep_cpu_group.size.return_value = 2
+    ep_device_group = object()
+    monkeypatch.setattr(
+        state_module,
+        "get_ep_group",
+        lambda: SimpleNamespace(cpu_group=ep_cpu_group, device_group=ep_device_group),
+    )
+    monkeypatch.setattr(state_module, "all_reduce", MagicMock())
+    window = torch.tensor(
+        [
+            [[10, 20, 30]],
+            [[99, 99, 99]],
+            [[1, 2, 3]],
+            [[4, 5, 6]],
+            [[7, 8, 9]],
+        ],
+        dtype=torch.int32,
+    )
+    policy = StairEplbPolicy(StairConfig(load_window_bins=2))
+    observed_calls = []
+    original_prepare = policy.prepare_local_load_stats
+
+    def spy_prepare(load_samples, slot_indices=None):
+        observed_calls.append((load_samples, slot_indices))
+        return original_prepare(load_samples, slot_indices=slot_indices)
+
+    monkeypatch.setattr(policy, "prepare_local_load_stats", spy_prepare)
+    model_state = _model_state(
+        model=SimpleNamespace(num_logical_experts=2),
+        physical_to_logical_map=torch.tensor([[1, 0, 1]]),
+        expert_load_window=window,
+    )
+    state = AscendEplbState.__new__(AscendEplbState)
+    state.device = torch.device("cpu")
+    state.policy = policy
+    state.model_states = {"model": model_state}
+    state.expert_load_window_size = 5
+    # Ring buffer starts at step 2 -> ordered steps [2, 3, 4, 0, 1]; step 1 excluded.
+    state._slot_active = torch.tensor([1, 0, 1, 1, 1], dtype=torch.int32)
+    state._slot_out_of_phase = torch.zeros(5, dtype=torch.int32)
+    state._physical_load_sample_slots = torch.tensor([0, 1, 2, 3, 4])
+    state._num_recorded_load_steps = 5
+    state._load_stats_window_start_index = 2
+
+    result = state.collect_global_load_stats()
+
+    assert result is not None
+    assert len(observed_calls) == 1
+    passed_window, passed_slots = observed_calls[0]
+    assert passed_window is window
+    assert passed_slots is not None
+    assert passed_slots.tolist() == [2, 3, 4, 0]
+    expected_physical = original_prepare(window.index_select(0, torch.tensor([2, 3, 4, 0])))
+    expected_logical = AscendEplbState._map_physical_stats_to_logical(model_state, expected_physical)
+    torch.testing.assert_close(result["model"].values, expected_logical.values)
+    np.testing.assert_array_equal(result["model"].sample_counts, [2, 2])
 
 
 def test_maps_aggregated_physical_stats_to_logical():

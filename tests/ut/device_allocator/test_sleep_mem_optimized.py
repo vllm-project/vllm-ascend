@@ -120,6 +120,10 @@ def test_hccl_lifecycle_anchor_uses_minimum_supported_buffer_size():
     assert SLEEP_LIFECYCLE_ANCHOR_BUFFER_SIZE == 1
 
 
+def test_eplb_hccl_group_uses_bounded_buffer_size():
+    assert get_hccl_config_for_pg_options("eplb") == {"hccl_buffer_size": 32}
+
+
 def test_hccl_lifecycle_anchor_is_physically_initialized_once_and_reused():
     manager = HcclSleepWakeupManager(MagicMock(), MagicMock())
     device_group = object()
