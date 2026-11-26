@@ -29,6 +29,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheSpec,
     KVCacheSpecKind,
     KVCacheTensor,
+    MambaSpec,
     MLAAttentionSpec,
     SlidingWindowMLASpec,
     UniformTypeKVCacheSpecs,
@@ -80,10 +81,33 @@ from vllm_ascend.quantization.methods.kv_cache.turboquant import cache as tq_cac
 from vllm_ascend.utils import vllm_version_is
 
 
+def _spec_has_mamba(spec: object) -> bool:
+    if isinstance(spec, MambaSpec):
+        return True
+    if isinstance(spec, UniformTypeKVCacheSpecs):
+        return any(_spec_has_mamba(s) for s in spec.kv_cache_specs.values())
+    return False
+
+
+def _group_has_mamba(group: object) -> bool:
+    specs = getattr(group, "kv_cache_specs", None)
+    if specs:
+        return any(_spec_has_mamba(spec) for spec in specs.values())
+    return _spec_has_mamba(getattr(group, "kv_cache_spec", None))
+
+
 class AscendKVCacheConfigBuilder(DefaultKVCacheConfigBuilder):
     """Build Ascend cache layouts with vLLM's cross-worker planning flow."""
 
     def get_kv_cache_groups(
+        self,
+        vllm_config: VllmConfig,
+        kv_cache_spec: dict[str, KVCacheSpec],
+    ) -> list[KVCacheGroupSpec]:
+        groups = self._build_kv_cache_groups(vllm_config, kv_cache_spec)
+        return self._mark_mamba_groups_non_transferable(vllm_config, groups)
+
+    def _build_kv_cache_groups(
         self,
         vllm_config: VllmConfig,
         kv_cache_spec: dict[str, KVCacheSpec],
@@ -170,6 +194,35 @@ class AscendKVCacheConfigBuilder(DefaultKVCacheConfigBuilder):
             kv_cache_groups,
             num_blocks * bytes_per_block,
         )
+
+    @staticmethod
+    def _mark_mamba_groups_non_transferable(
+        vllm_config: VllmConfig,
+        kv_cache_groups: list[KVCacheGroupSpec],
+    ) -> list[KVCacheGroupSpec]:
+        """Exclude Mamba groups from KV transfer when native offloading is used.
+
+        Mamba/linear-attention state is not block-addressable and uses a
+        non-coalescible interleaved layout on Ascend NPUs. Marking the group
+        ``enable_kv_transfer=False`` removes it from ``transfer_group_ids`` /
+        ``prefix_cacheable_group_ids``, so native offloading's group selection,
+        worker registration and ``_bounding_group_ids`` agree: the group is
+        neither offloaded nor transferred, and automatically becomes a bounding
+        group capping external hits by locally available state.
+
+        Scoped to ``OffloadingConnector`` so PD KV transfer of Mamba state is
+        unaffected.
+        """
+        kv_transfer_config = getattr(vllm_config, "kv_transfer_config", None)
+        if (
+            kv_transfer_config is None
+            or getattr(kv_transfer_config, "kv_connector", None) != "OffloadingConnector"
+        ):
+            return kv_cache_groups
+        for group in kv_cache_groups:
+            if _group_has_mamba(group):
+                group.enable_kv_transfer = False
+        return kv_cache_groups
 
     def _get_pool_bytes_per_block(
         self,

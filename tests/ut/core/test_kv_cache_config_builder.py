@@ -197,3 +197,58 @@ def test_turboquant_groups_use_packed_pool_bytes():
     pool_bytes = builder._get_pool_bytes_per_block(make_runtime(), groups)
     assert pool_bytes == tq_cache.pool_bytes_per_block(groups)
     assert pool_bytes >= sum(spec.page_size_bytes for spec in uniform.kv_cache_specs.values())
+
+
+def _offload_mamba_spec():
+    return MambaSpec(
+        block_size=16,
+        shapes=((1, 2),),
+        dtypes=(torch.float32,),
+        mamba_cache_mode="align",
+    )
+
+
+def _offload_fa_spec():
+    return FullAttentionSpec(
+        block_size=16, num_kv_heads=1, head_size=16, dtype=torch.bfloat16
+    )
+
+
+def test_native_offloading_marks_mamba_group_non_transferable():
+    groups = [
+        SimpleNamespace(enable_kv_transfer=True, kv_cache_spec=_offload_fa_spec()),
+        SimpleNamespace(enable_kv_transfer=True, kv_cache_spec=_offload_mamba_spec()),
+    ]
+    runtime = SimpleNamespace(
+        kv_transfer_config=SimpleNamespace(kv_connector="OffloadingConnector")
+    )
+    out = AscendKVCacheConfigBuilder._mark_mamba_groups_non_transferable(
+        runtime, groups
+    )
+    assert out is groups
+    assert groups[0].enable_kv_transfer is True
+    assert groups[1].enable_kv_transfer is False
+
+
+def test_uniform_wrapper_containing_mamba_is_marked_non_transferable():
+    wrapper = UniformTypeKVCacheSpecs.from_specs({"mamba.layer": _offload_mamba_spec()})
+    group = SimpleNamespace(enable_kv_transfer=True, kv_cache_spec=wrapper)
+    runtime = SimpleNamespace(
+        kv_transfer_config=SimpleNamespace(kv_connector="OffloadingConnector")
+    )
+    AscendKVCacheConfigBuilder._mark_mamba_groups_non_transferable(runtime, [group])
+    assert group.enable_kv_transfer is False
+
+
+@pytest.mark.parametrize(
+    "kv_transfer_config",
+    [None, SimpleNamespace(kv_connector="MooncakeConnectorV1")],
+)
+def test_mamba_groups_untouched_for_other_connectors(kv_transfer_config):
+    group = SimpleNamespace(enable_kv_transfer=True, kv_cache_spec=_offload_mamba_spec())
+    runtime = SimpleNamespace(kv_transfer_config=kv_transfer_config)
+    out = AscendKVCacheConfigBuilder._mark_mamba_groups_non_transferable(
+        runtime, [group]
+    )
+    assert out == [group]
+    assert group.enable_kv_transfer is True
