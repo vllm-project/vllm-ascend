@@ -37,7 +37,6 @@ from vllm_ascend._310p.worker.v2.spec_utils import (
     prepare_decode_inputs_cpu,
     set_async_mtp_state,
     set_draft_step_host,
-    update_draft_inputs_cpu,
 )
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.worker.v2.attn_utils import build_attn_metadata_factory
@@ -354,23 +353,6 @@ class AscendMTPSpeculator310(AscendTargetDependentARSpeculator, MTPSpeculator):
             seq_ub[:num_reqs] = seq_ub[:num_reqs] - rejected[:num_reqs].to(seq_ub.dtype)
 
         use_full = batch_desc.cg_mode == CUDAGraphMode.FULL
-        # A graph captured for step 1 cannot switch between distinct draft layers.
-        if use_full and self.num_speculative_steps > 2:
-            draft_config = self.draft_vllm_config.model_config.hf_text_config
-            layers = getattr(draft_config, "mtp_num_hidden_layers", None)
-            if layers is None:
-                layers = getattr(draft_config, "num_nextn_predict_layers", None)
-            if layers != 1:
-                use_full = False
-                # Preserve DP-negotiated token/request padding when num_tokens_across_dp
-                # is active so DPMetadata.make() never sees a rank token mismatch.
-                fallback_tokens = batch_desc.num_tokens if num_tokens_across_dp is not None else num_reqs
-                fallback_reqs = batch_desc.num_reqs if num_tokens_across_dp is not None else num_reqs
-                batch_desc = BatchExecutionDescriptor(
-                    cg_mode=CUDAGraphMode.NONE,
-                    num_tokens=fallback_tokens,
-                    num_reqs=fallback_reqs,
-                )
         attn_metadata = None
         slot_mappings_by_layer = None
         assert num_speculative_steps is not None
@@ -405,22 +387,6 @@ class AscendMTPSpeculator310(AscendTargetDependentARSpeculator, MTPSpeculator):
                 assert self.decode_cudagraph_manager is not None
                 self._pending_draft_attn_metadata = attn_metadata
                 self.decode_cudagraph_manager.run_fullgraph(batch_desc)
-                if self.num_speculative_steps > 2:
-                    tokens, hidden = self.decode_cudagraph_manager.decode_step_outputs[batch_desc]
-                    update_draft_inputs_cpu(
-                        tokens,
-                        self.current_draft_step,
-                        hidden,
-                        self.draft_tokens,
-                        self.hidden_states,
-                        self.input_buffers,
-                        self.sample_src_positions,
-                        num_reqs,
-                        self.max_model_len,
-                        num_speculative_steps,
-                        self.advance_draft_positions,
-                        safe_replay_write=True,
-                    )
                 if attn_metadata is not None:
                     self._update_decode_attn_metadata(attn_metadata, 1, num_reqs)
             else:

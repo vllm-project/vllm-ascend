@@ -612,8 +612,6 @@ def update_draft_inputs_cpu(
     max_model_len: int,
     num_speculative_steps: int,
     advance_draft_positions: bool = True,
-    *,
-    safe_replay_write: bool = False,
 ) -> None:
     """Update draft buffers for the next step using on-device ops where possible.
 
@@ -625,21 +623,12 @@ def update_draft_inputs_cpu(
     del current_draft_step
     step = _DRAFT_STEP_HOST
     tokens = draft_tokens[:num_reqs]
-    if safe_replay_write:
-        rows = cached_offsets(tokens.device, max(output_draft_tokens.shape[0], input_buffers.input_ids.numel()))[
-            :num_reqs
-        ]
-        output_draft_tokens[:, step].index_copy_(0, rows, tokens.to(output_draft_tokens.dtype))
-    else:
-        output_draft_tokens[:num_reqs, step].copy_(tokens)
+    output_draft_tokens[:num_reqs, step].copy_(tokens)
     if step >= num_speculative_steps - 1:
         return
     # Align with Triton: advance sampling key before preparing next draft inputs.
     sample_src_positions[:num_reqs].add_(1)
-    if safe_replay_write:
-        input_buffers.input_ids.index_copy_(0, rows, tokens.to(input_buffers.input_ids.dtype))
-    else:
-        input_buffers.input_ids[:num_reqs].copy_(tokens)
+    input_buffers.input_ids[:num_reqs].copy_(tokens)
     next_input_hidden_states[:num_reqs].copy_(hidden_states[:num_reqs])
     if advance_draft_positions:
         pos = input_buffers.positions[:num_reqs]
