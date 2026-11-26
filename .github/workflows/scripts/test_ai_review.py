@@ -198,7 +198,8 @@ def test_command_permissions(pr, phase, body, actor, allowed, feedback):
     if feedback is None:
         assert comment["body"] == body
     else:
-        assert feedback in comment["body"]
+        marker = "🟢" if allowed else "🔴"
+        assert f"🤖 [AI review bot]: {marker} {feedback}" in comment["body"]
     if allowed:
         assert "[View Actions run](https://github.com/example/project/actions/runs/101)" in comment["body"]
 
@@ -207,7 +208,8 @@ def test_command_permissions(pr, phase, body, actor, allowed, feedback):
 def test_label_checks_the_reviewer_and_removes_it_when_denied(pr, phase, actor):
     assert phase("authorize", pr.label_event(actor=actor)) == {}
     [notice] = pr.comments.values()
-    assert f"@{actor}" in notice["body"] and "RFC #21451" in notice["body"]
+    assert notice["body"].startswith(f"@{actor} 🤖 [AI review bot]: 🔴 ")
+    assert "RFC #21451" in notice["body"]
     assert not pr.labels
 
 
@@ -326,7 +328,7 @@ def test_waive_one_then_all_for_a_single_commit(pr, phase, agent, history):
         event = pr.command(f"/ai-review-waive {selector} upstream handles this", "maintainer")
         assert phase("authorize", event) == {"authorized": "true"}
         assert phase("prepare", event) == {}
-        assert "Waived 1" in pr.comments[event["comment"]["id"]]["body"]
+        assert "🤖 [AI review bot]: 🟢 Waived 1" in pr.comments[event["comment"]["id"]]["body"]
         if selector == "F001":
             assert "ai-review-passed" not in pr.labels
             first, second = pr.state()["findings"]
@@ -362,7 +364,7 @@ def test_invalid_waiver_preserves_summary(pr, phase, history, command, feedback)
         pr.pull["head"] = {"sha": history.next_head}
     event = pr.command(command, "maintainer")
     assert phase("prepare", event) == {}
-    assert feedback in pr.comments[event["comment"]["id"]]["body"]
+    assert f"🤖 [AI review bot]: 🔴 {feedback}" in pr.comments[event["comment"]["id"]]["body"]
     assert summary["body"] == before
 
 
@@ -384,7 +386,9 @@ def test_last_available_round_is_counted_before_the_next_request_runs(
     before = pr.state()
     assert (before["round"], before["total"]) == (5, previous_total + 1)
     assert phase("prepare", pending) == {}
-    assert expected_limit in pr.comments[pending["comment"]["id"]]["body"]
+    _, accepted, rejected = pr.comments[pending["comment"]["id"]]["body"].split("🤖 [AI review bot]: ")
+    assert accepted.startswith("🟢 Review request accepted")
+    assert rejected.startswith(f"🔴 Reached the {expected_limit}")
     assert pr.state() == before and agent.call_count == 1
     pr.pull["head"] = {"sha": history.next_head}
     assert bool(phase("prepare", pr.command())) == (previous_total < 14)
@@ -602,6 +606,8 @@ def test_agent_receives_original_input_and_redacts_output(agent_request, tmp_pat
     workspace = Path(ai.__file__).resolve().parents[3]
     prompt, echoed_key = json.loads(ai.run_agent(workspace, agent_request))
 
+    assert f"Merge base: {agent_request['merge_base']}" in prompt
+    assert f"Head: {agent_request['state']['head']}" in prompt
     assert agent_request["diff"] in prompt
     assert agent_request["reply"] in prompt
     assert '"id": "F003"' in prompt
