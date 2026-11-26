@@ -19,6 +19,7 @@ def _context(indices, slot_ids=None, no_lora=False):
         punica_wrapper=SimpleNamespace(
             token_lora_indices=torch.tensor(indices, dtype=torch.long),
             moe_lora_slot_ids=slot_ids,
+            moe_lora_active=True if slot_ids is not None else None,
             no_lora=no_lora,
         ),
     )

@@ -35,9 +35,14 @@ and checkpoint metadata must agree across workers, and the checkpoint paths
 must be readable by each worker that loads the corresponding expert shard.
 Dense models with independent DP replicas retain their existing slot capacity.
 
-Quantized MoE with cross-DP LoRA keeps floating-point activations during
+When a MoE adapter is active anywhere in the communication group, quantized
+MoE keeps floating-point activations during
 dispatch on every participating rank, including ranks with only base-model
 requests. W8A8 dynamic quantization occurs before the local expert matmuls.
+When the whole group has no active adapter, expert dispatch and computation
+skip LoRA metadata and delta operations. Resident adapters alone do not keep
+that work active. Graph selection also uses the group's active adapter count,
+so an idle or base-only worker can still process a peer's expert LoRA tokens.
 This adds CPU control collectives once per forward; device performance and
 supported topology evidence must be reported for the deployed revision.
 

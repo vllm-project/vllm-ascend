@@ -23,7 +23,7 @@ def test_active_mapping_does_not_reload_global_adapters(synchronized):
     assert activate.call_args.args[:2] == ((11,), (11, 0))
     assert activate.call_args.args[2] == (set() if synchronized else requests)
     if coordinator is not None:
-        coordinator.refresh_slot_ids.assert_called_once()
+        coordinator.refresh_slot_ids.assert_called_once_with(update_activity=not synchronized)
 
 
 @pytest.mark.parametrize("dummy_run", [False, True])
@@ -39,7 +39,9 @@ def test_real_and_idle_dp_forward_synchronize_once(dummy_run):
         patch.object(model_runner.expert_offload, "prepare_batch"),
     ):
         runner.gather_batch_req_state(scheduler_output, dummy_run)
-    runner._moe_lora_coordinator.synchronize.assert_called_once_with(set() if dummy_run else {"adapter-a"})
+    runner._moe_lora_coordinator.synchronize.assert_called_once_with(
+        set() if dummy_run else {"adapter-a"}, dummy_run=dummy_run
+    )
 
 
 @pytest.mark.parametrize(("dp_size", "has_experts", "enabled"), [(1, True, False), (2, False, False), (2, True, True)])

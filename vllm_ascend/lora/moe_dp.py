@@ -55,20 +55,29 @@ class MoELoRACoordinator:
         # Keep access to its model manager here until it provides that API.
         self.model_manager = worker_manager._adapter_manager
         self.cpu_group = cpu_group
+        self.wrappers = wrappers
         self.step_active = False
+        self.num_active_loras = 0
+        self._slot_ids = (-1,) * self.model_manager.lora_slots
         self.slot_ids = torch.full((self.model_manager.lora_slots,), -1, dtype=torch.long, device=worker_manager.device)
         for wrapper in wrappers:
             wrapper.moe_lora_slot_ids = self.slot_ids
+            wrapper.moe_lora_active = False
 
     def _gather(self, value):
         values = [None] * dist.get_world_size(self.cpu_group)
         dist.all_gather_object(values, value, group=self.cpu_group)
         return values
 
-    def synchronize(self, requests: set[LoRARequest]) -> None:
+    def synchronize(self, requests: set[LoRARequest], *, dummy_run: bool = False) -> None:
         self.step_active = False
         by_id = {}
-        for rank_requests in self._gather(list(requests)):
+        # Profiling uses already-resident synthetic adapters rather than real
+        # checkpoint requests. Normal forwards must not reuse the previous
+        # batch's activity, since local mappings are updated after this hook.
+        dummy_count = self.num_active_loras if dummy_run else 0
+        gathered = self._gather((list(requests), dummy_count))
+        for rank_requests, _ in gathered:
             for request in rank_requests:
                 previous = by_id.get(request.lora_int_id)
                 if previous is not None and any(
@@ -82,6 +91,14 @@ class MoELoRACoordinator:
                 f"but --max-loras={self.model_manager.lora_slots}. "
                 "Set --max-loras to cover the union of adapters scheduled across DP ranks."
             )
+
+        active_count = max(len(by_id), *(count for _, count in gathered))
+        if not by_id:
+            # No checkpoint can fail to load in a base-only or synthetic
+            # batch, so neither activation nor its status collective is needed.
+            self._set_activity(active_count)
+            self.step_active = True
+            return
 
         error = None
         try:
@@ -97,8 +114,20 @@ class MoELoRACoordinator:
         errors = self._gather(error)
         if any(errors):
             raise RuntimeError(f"Cross-DP MoE LoRA activation failed on peer ranks: {errors}")
+        self._set_activity(active_count)
         self.step_active = True
 
-    def refresh_slot_ids(self) -> None:
-        ids = [adapter_id if adapter_id is not None else -1 for adapter_id in self.model_manager.lora_index_to_id]
-        self.slot_ids.copy_(torch.tensor(ids, dtype=torch.long, device="cpu"))
+    def _set_activity(self, count: int) -> None:
+        self.num_active_loras = count
+        for wrapper in self.wrappers:
+            wrapper.moe_lora_active = count > 0
+
+    def refresh_slot_ids(self, *, update_activity: bool = False) -> None:
+        ids = tuple(adapter_id if adapter_id is not None else -1 for adapter_id in self.model_manager.lora_index_to_id)
+        if ids != self._slot_ids:
+            self.slot_ids.copy_(torch.tensor(ids, dtype=torch.long, device="cpu"))
+            self._slot_ids = ids
+        if update_activity:
+            # Capture hooks run outside execute_model. Their explicit dummy
+            # adapter count selects the matching LoRA or base-only graph.
+            self._set_activity(max(len(wrapper.active_lora_slots) for wrapper in self.wrappers))

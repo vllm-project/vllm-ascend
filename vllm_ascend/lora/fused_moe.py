@@ -58,13 +58,20 @@ def has_lora(lora_context) -> bool:
 def has_moe_lora(lora_context) -> bool:
     """Use one expert execution/communication protocol on every MoE rank.
 
-    A base-only DP rank can receive LoRA tokens from a peer. Keep the floating
-    activation path when cross-DP expert LoRA is configured, including graph
-    capture with an otherwise empty local adapter mapping.
+    A base-only DP rank can receive LoRA tokens from a peer. The coordinator
+    publishes group activity before graph dispatch; a globally base-only step
+    can use the original quantization and communication path.
     """
-    return lora_context is not None and (
-        getattr(lora_context.punica_wrapper, "moe_lora_slot_ids", None) is not None or has_lora(lora_context)
-    )
+    if lora_context is None:
+        return False
+    active = getattr(lora_context.punica_wrapper, "moe_lora_active", None)
+    return has_lora(lora_context) if active is None else active
+
+
+def get_active_moe_lora_context(layer):
+    """Keep inactive expert adapters out of the native MoE pipeline."""
+    context = getattr(layer, "_ascend_moe_lora_context", None)
+    return context if has_moe_lora(context) else None
 
 
 def get_lora_indices(lora_context, num_tokens: int) -> torch.Tensor:
@@ -182,6 +189,8 @@ def sync_lora_context(quant_method, lora_context):
     Encapsulates the ``hasattr``/``set_lora_context`` pattern shared by
     setup and teardown so callers just pass the target value.
     """
+    if not has_moe_lora(lora_context):
+        lora_context = None
     if hasattr(_EXTRA_CTX.moe_comm_method, "set_lora_context"):
         _EXTRA_CTX.moe_comm_method.set_lora_context(lora_context)
     if hasattr(quant_method, "set_lora_context"):

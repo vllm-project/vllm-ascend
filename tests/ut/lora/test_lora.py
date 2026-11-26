@@ -277,13 +277,25 @@ def test_sync_lora_context_updates_available_setters() -> None:
     quant = SimpleNamespace()
     quant.set_lora_context = Mock()
     extra = SimpleNamespace(moe_comm_method=object())
+    context = SimpleNamespace(punica_wrapper=SimpleNamespace(no_lora=False))
     with patch("vllm_ascend.lora.fused_moe._EXTRA_CTX", extra):
-        sync_lora_context(object(), "ctx")
+        sync_lora_context(object(), context)
     extra.moe_comm_method = comm
     with patch("vllm_ascend.lora.fused_moe._EXTRA_CTX", extra):
-        sync_lora_context(quant, "ctx")
-    comm.set_lora_context.assert_called_once_with("ctx")
-    quant.set_lora_context.assert_called_once_with("ctx")
+        sync_lora_context(quant, context)
+    comm.set_lora_context.assert_called_once_with(context)
+    quant.set_lora_context.assert_called_once_with(context)
+
+
+@pytest.mark.parametrize("group_active", [False, True])
+def test_base_only_rank_uses_group_activity_for_expert_context(group_active) -> None:
+    context = SimpleNamespace(punica_wrapper=SimpleNamespace(no_lora=True, moe_lora_active=group_active))
+    comm, quant = Mock(), Mock()
+    with patch("vllm_ascend.lora.fused_moe._EXTRA_CTX", SimpleNamespace(moe_comm_method=comm)):
+        sync_lora_context(quant, context)
+    expected = context if group_active else None
+    comm.set_lora_context.assert_called_once_with(expected)
+    quant.set_lora_context.assert_called_once_with(expected)
 
 
 def test_assert_rejects_dynamic_eplb_and_fused_mc2() -> None:
