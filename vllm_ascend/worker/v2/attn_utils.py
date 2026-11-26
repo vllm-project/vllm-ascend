@@ -1592,10 +1592,10 @@ def _uses_specialized_kv_allocator(
     kv_cache_config: KVCacheConfig,
     attn_groups: Sequence[AttentionGroup],
 ) -> bool:
-    """KVPP, layerwise reuse, and sparse KV offload own dedicated buffer layouts."""
+    """KVPP, multi-group layerwise reuse, and sparse KV offload own dedicated layouts."""
     return (
         KVPPConfig.from_vllm_config(vllm_config).size > 1
-        or get_layerwise_reuse_layout(kv_cache_config) is not None
+        or (get_layerwise_reuse_layout(kv_cache_config) is not None and len(kv_cache_config.kv_cache_groups) > 1)
         or any(getattr(g.kv_cache_spec, "store_on_host", False) for g in attn_groups)
     )
 
@@ -1609,12 +1609,17 @@ def _can_use_glm_unified_kv_cache(
     """Gate GLM's unified-pool path while legacy specialized modes remain active."""
     if _uses_specialized_kv_allocator(vllm_config, kv_cache_config, attn_groups):
         return False
+    if is_c8_mxfp_kv_quant(vllm_config) or enable_fa_quant(vllm_config):
+        return False
     strides = {name: d.block_stride for d in kv_cache_config.kv_cache_tensors for name in d.layers}
     return all(
         hasattr(g.backend, "get_runtime_shapes")
         and (
             not getattr(g.backend, "uses_contiguous_cache_components", False)
-            or all(strides.get(name) == g.kv_cache_spec.page_size_bytes for name in g.layer_names)
+            or (
+                getattr(g.kv_cache_spec, "page_size_padded", None) is None
+                and all(strides.get(name) == g.kv_cache_spec.page_size_bytes for name in g.layer_names)
+            )
         )
         for g, _ in _runtime_cache_groups(attn_groups, kernel_block_sizes)
     )
