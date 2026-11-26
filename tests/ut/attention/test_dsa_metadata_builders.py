@@ -74,13 +74,6 @@ class TestDSAMetadataBuilders(TestCase):
     def setUp(self):
         stack = ExitStack()
         self.addCleanup(stack.close)
-        stack.enter_context(
-            patch.object(
-                dsa_v1.AscendDSAMetadataBuilder,
-                "_dspark_swa_indices_fast_path_eligible",
-                return_value=False,
-            )
-        )
         self.builder = make_builder(dsa_v1.AscendDSASWAMetadataBuilder)
         self.common = CommonMetadata(
             num_reqs=1,
@@ -214,6 +207,9 @@ class TestDSAMetadataBuilders(TestCase):
     def test_swa_dspark_keeps_indices_and_window(self):
         req = self.build_req(update_cache=False)
         self.assertIs(req.dspark_swa_indices, self.indices_op.return_value[0])
+        self.indices_op.assert_called_once()
+        self.assertIs(self.indices_op.call_args.kwargs["buffer"], self.builder.dspark_swa_indices_buffer)
+        self.assertEqual(self.indices_op.call_args.kwargs["output_mode"], dsa_v1.DSPARK_SWA_OUTPUT_MODE_PHYSICAL)
         self.assertEqual((req.ori_win_left, req.ori_win_right), (5, 0))
         self.assertEqual(self.sas_op.call_args.kwargs["ori_mask_mode"], 0)
         self.assertIsNone(req.qli_metadata)

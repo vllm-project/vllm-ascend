@@ -17,7 +17,7 @@ indices are different coordinate systems; callers must not interchange them.
 | `quantize_mxfp4_indexer.py`: `write_mxfp4_indexer_cache` | BF16 `[T,128]`, page/row slots `[T,2]`, strided UINT8 cache planes | Fuse quantization with cache writes. Invalid slots leave the cache unchanged. Preserve 64-bit address arithmetic for large physical page strides. |
 | `fold_indexer_cache.py`: `fold_indexer_cache_rows` | K `[N,B,1,64]`, scales `[N,B,1,4]`, slots; folded `[N,B/8,1,544]` | Copy only updated rows into eight-row groups: 512 key bytes followed by 32 scale bytes. This is a layout conversion, with no requantization. |
 | `prepare_indexer_indices.py`: `prepare_indexer_indices` | INT32 top-k `[T,K]`, positions and compression ratio; indices and optional lengths | Filter invisible compressed rows, sort surviving row indices chronologically and pad with `-1`. The FP32 bitwise sort keys preserve integer ordering without numeric conversion. |
-| `spec_decode/dspark_swa_indices.py`: `build_dspark_swa_indices_triton` | Query boundaries and sequence lengths | Build DSpark's shared visible window for queries belonging to the same request; padded graph rows have zero valid length. |
+| `dspark_swa_indices.py`: `build_dspark_swa_indices_triton` (`output_mode="logical"`) | Query boundaries and sequence lengths | Build DSpark's shared visible window for queries belonging to the same request; padded graph rows have `-1` indices and `0` valid length. |
 
 ## Current hardware usage
 
@@ -33,7 +33,7 @@ layout or operation; it does not enable a kernel on additional hardware.
 | `quantize_mxfp4_indexer.py` (query quantization and cache writes) | A5 MXFP4 packed indexer path. A3 uses its existing non-packed quantization path. |
 | `fold_indexer_cache.py` | A5 folded packed indexer cache. |
 | `prepare_indexer_indices.py` | Shared index preparation, including the A3 non-packed indexer path. |
-| `spec_decode/dspark_swa_indices.py` | Shared DSpark logical-index fast path; selected by request and Triton/NPU conditions, with no A5-only gate. |
+| `dspark_swa_indices.py` (`output_mode="logical"`) | Shared DSpark logical-index Triton path; selected for NPU requests with no A5-only gate. |
 | `compressor/compressor_triton.py` | Shared compressor cache reads and updates, including A3. |
 
 The packed cache backend is selected through `DSV41_PACKED_CACHE`, currently

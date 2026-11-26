@@ -30,7 +30,13 @@ from vllm.v1.attention.backend import (
 from vllm.v1.kv_cache_interface import AttentionSpec, CircularBufferSpec
 
 from vllm_ascend.ascend_config import get_ascend_config
-from vllm_ascend.attention.dsa_v1 import AscendDSABackend, build_dspark_swa_indices, dsv4_dsa_overlap_stream
+from vllm_ascend.attention.dsa_v1 import (
+    DSPARK_SWA_OUTPUT_MODE_LOGICAL,
+    AscendDSABackend,
+    _aligned_dspark_index_width,
+    build_dspark_swa_indices,
+    dsv4_dsa_overlap_stream,
+)
 from vllm_ascend.attention.utils import (
     KVCacheRuntimeShapes,
     maybe_save_kv_layer_to_connector,
@@ -1292,32 +1298,42 @@ class AscendDSAV41MetadataBuilder(AttentionMetadataBuilder[AscendDSAV41Metadata]
                 ).view(req.num_reqs, blocks_per_req)
         noncausal = not bool(getattr(common, "causal", True))
         if noncausal and req.ori_sparse_indices is None:
+            num_spec_tokens = self.vllm_config.speculative_config.num_speculative_tokens
+            index_width = _aligned_dspark_index_width(window_size, num_spec_tokens)
+            # Full draft graphs retain these addresses from capture. Build
+            # straight into persistent buffers so capture-time addresses
+            # advance across decoding steps without temporary copies.
+            if self._dspark_swa_indices is None:
+                buf_rows = max(self._max_tokens, req.num_actual_tokens)
+                buf_device = common.query_start_loc.device
+                self._dspark_swa_indices = torch.empty(
+                    (buf_rows, 1, index_width),
+                    dtype=torch.int32,
+                    device=buf_device,
+                )
+                self._dspark_swa_lengths = torch.empty(
+                    (buf_rows, 1),
+                    dtype=torch.int32,
+                    device=buf_device,
+                )
+            if req.num_actual_tokens > self._dspark_swa_indices.shape[0]:
+                raise ValueError(
+                    "DSpark SWA metadata rows exceed persistent buffer capacity: "
+                    f"active={req.num_actual_tokens}, capacity={self._dspark_swa_indices.shape[0]}"
+                )
             req.ori_sparse_indices, req.ori_topk_length = build_dspark_swa_indices(
                 common.block_table_tensor[: req.num_reqs],
-                self.vllm_config.speculative_config.num_speculative_tokens,
+                num_spec_tokens,
                 window_size,
                 req.storage_block_size,
                 common.query_start_loc[: req.num_reqs + 1],
                 req.seq_lens,
                 req.num_actual_tokens,
-                use_logical_indices=True,
+                index_width=index_width,
+                indices_output=self._dspark_swa_indices,
+                lens_output=self._dspark_swa_lengths,
+                output_mode=DSPARK_SWA_OUTPUT_MODE_LOGICAL,
             )
-            # Full draft graphs retain these addresses from capture. Rebuild
-            # the values in persistent buffers rather than returning temporary
-            # tensors whose capture-time contents never advance with decoding.
-            if self._dspark_swa_indices is None:
-                self._dspark_swa_indices = req.ori_sparse_indices.new_empty(
-                    (self._max_tokens, *req.ori_sparse_indices.shape[1:])
-                )
-                self._dspark_swa_lengths = req.ori_topk_length.new_empty(
-                    (self._max_tokens, *req.ori_topk_length.shape[1:])
-                )
-            indices_view = self._dspark_swa_indices[: req.num_actual_tokens]
-            assert self._dspark_swa_lengths is not None
-            lengths_view = self._dspark_swa_lengths[: req.num_actual_tokens]
-            indices_view.copy_(req.ori_sparse_indices)
-            lengths_view.copy_(req.ori_topk_length)
-            req.ori_sparse_indices, req.ori_topk_length = indices_view, lengths_view
         replay_start = getattr(common, "replay_start", None)
         replay_visible_lens = None
         if replay_start is not None and req.cache_kind == "swa":

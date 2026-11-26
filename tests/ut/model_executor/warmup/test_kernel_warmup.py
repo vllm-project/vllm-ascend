@@ -157,6 +157,25 @@ def test_dspark_walker_skips_eager_builders(mock_register):
     mock_register.assert_not_called()
 
 
+@patch("vllm_ascend.ops.triton.dspark_swa_indices.register_dspark_swa_indices_warmup", return_value=True)
+@patch.object(kw, "HAS_TRITON", True)
+def test_dspark_walker_registers_v41_logical_mode(mock_register):
+    from vllm_ascend.attention.dsa_v41 import AscendDSAV41MetadataBuilder
+
+    worker, _ = _make_worker()
+    builder = MagicMock(_supports_device_ops=True, _cache_kind="swa", _window_size=944)
+    builder.__class__ = AscendDSAV41MetadataBuilder
+    builder.vllm_config = SimpleNamespace(speculative_config=SimpleNamespace(method="dspark", num_speculative_tokens=3))
+    group = MagicMock()
+    group.get_metadata_builder.return_value = builder
+    worker.model_runner.speculator = SimpleNamespace(attn_groups=[group])
+
+    assert kw._register_dspark_swa_indices_warmup(worker) == 1
+    assert mock_register.call_args.kwargs["output_mode"] == "logical"
+    assert mock_register.call_args.kwargs["window_size"] == 944
+    assert mock_register.call_args.kwargs["index_width"] == 1024
+
+
 def test_v2_initialize_kv_cache_upstream_holds_registry_window():
     """Builder construction inside upstream initialize_kv_cache registers
     into the registry; a runner without one (tests, partial mocks) still
