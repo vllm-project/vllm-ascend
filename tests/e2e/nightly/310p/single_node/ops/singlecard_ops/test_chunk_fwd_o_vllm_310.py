@@ -158,21 +158,21 @@ class TestChunkFwdOVllm310:
         cos = torch.nn.functional.cosine_similarity(o_npu.cpu().float().flatten(), o_ref.flatten(), dim=0).item()
         assert cos > 0.999, f"cosine {cos:.4f} too low for g=0 h=0 case"
 
-    @pytest.mark.parametrize("value_dim,tokens,key_heads,value_heads,key_dim,batch", [
-        (value_dim, tokens, 1, 1, 128, 1)
-        for tokens in (64, 128)
-        for value_dim in (128, 192, 256)
-    ] + [
-        (256, 64, 2, 2, 128, 1),
-        (256, 64, 1, 1, 256, 1),
-        (144, 64, 1, 1, 128, 1),
-        (240, 128, 1, 1, 128, 1),
-        (384, 64, 1, 1, 128, 1),
-        (384, 64, 1, 1, 256, 1),
-        (256, 128, 1, 2, 128, 1),
-        (256, 64, 1, 1, 128, 2),
-        (256, 64, 1, 1, 64, 1),
-    ])
+    @pytest.mark.parametrize(
+        "value_dim,tokens,key_heads,value_heads,key_dim,batch",
+        [(value_dim, tokens, 1, 1, 128, 1) for tokens in (64, 128) for value_dim in (128, 192, 256)]
+        + [
+            (256, 64, 2, 2, 128, 1),
+            (256, 64, 1, 1, 256, 1),
+            (144, 64, 1, 1, 128, 1),
+            (240, 128, 1, 1, 128, 1),
+            (384, 64, 1, 1, 128, 1),
+            (384, 64, 1, 1, 256, 1),
+            (256, 128, 1, 2, 128, 1),
+            (256, 64, 1, 1, 128, 2),
+            (256, 64, 1, 1, 64, 1),
+        ],
+    )
     def test_value_tiles_match_cpu_reference(self, value_dim, tokens, key_heads, value_heads, key_dim, batch):
         """Exercise V tile bounds, grouped heads, batches, and nonzero zN state."""
         torch.manual_seed(310)
@@ -276,11 +276,15 @@ class TestChunkFwdOVllm310:
                 assert torch.equal(actual, first), "nonzero-g output changed across repeats"
         assert torch.equal(g.cpu(), before), "FwdO modified g"
 
-    @pytest.mark.parametrize("tail,g_dtype,value_dim", [
-        (tail, g_dtype, 128)
-        for g_dtype in (torch.float16, torch.float32)
-        for tail in (1, 7, 8, 11, 15, 16, 17, 31, 32, 33, 47, 48, 49, 63)
-    ] + [(17, torch.float32, 256), (63, torch.float16, 256)])
+    @pytest.mark.parametrize(
+        "tail,g_dtype,value_dim",
+        [
+            (tail, g_dtype, 128)
+            for g_dtype in (torch.float16, torch.float32)
+            for tail in (1, 7, 8, 11, 15, 16, 17, 31, 32, 33, 47, 48, 49, 63)
+        ]
+        + [(17, torch.float32, 256), (63, torch.float16, 256)],
+    )
     def test_packed_partial_chunks(self, tail, g_dtype, value_dim):
         """NZ strides, exact DMA tails, nonzero states and packed boundaries."""
         heads_qk, heads_v, dim = 16, 32, 128
@@ -303,8 +307,7 @@ class TestChunkFwdOVllm310:
                 v[0, :, token_slice, :n] = torch.eye(n)
                 # Distinct heads/states also expose incorrect h-layout contracts.
                 h[0, :, chunk_index, 0, :] = (
-                    (torch.arange(heads_v)[:, None] + chunk_index + 1)
-                    * (torch.arange(value_dim)[None, :] + 1) / 1024
+                    (torch.arange(heads_v)[:, None] + chunk_index + 1) * (torch.arange(value_dim)[None, :] + 1) / 1024
                 )
                 slopes = (torch.arange(heads_v)[:, None] + 1) / 16
                 gate_log = (-slopes * torch.arange(n)).to(g_dtype)
