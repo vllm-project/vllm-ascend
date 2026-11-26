@@ -386,7 +386,7 @@ vLLM Ascend revision.
 
     Prefill and Decode form separate DP groups on different servers, so both
     can use RPC port `12321`. Within each group, all ranks must use the same
-    coordinator IP and RPC port.
+    DP master IP and RPC port.
 
     ##### Prepare the 950DT DP Launcher
 
@@ -520,7 +520,7 @@ vLLM Ascend revision.
     | `--pp-size` | Pipeline parallel size. Defaults to `1` and is forwarded to the template as `$9`. |
     | `--dp-size-local` | Number of DP ranks started on the current node. Defaults to `--dp-size`. |
     | `--dp-rank-start` | First global DP rank assigned to this node; `0` for both single-node groups here. |
-    | `--dp-address` | IP address of the corresponding group's DP coordinator. Use the Prefill IP on Prefill and the Decode IP on Decode. |
+    | `--dp-address` | IP address of the corresponding group's DP master. Use the Prefill IP on Prefill and the Decode IP on Decode. |
     | `--dp-rpc-port` | Coordination port shared by all ranks in the group; `12321` here. |
     | `--vllm-start-port` | First API port, incremented for each local DP rank; `7100` here. |
     | `--template`, `--script` | Path to the shell template. Defaults to `./run_dp_template.sh`. |
@@ -846,7 +846,7 @@ vLLM Ascend revision.
     Register only Prefill port `7100` in the proxy. Decode keeps DP8 and its
     existing startup command. MooncakeConnectorV2 discovers the changed topology.
     For Memcache pooling, start from the pooled Prefill template in
-    [Section 5.3.1](#531-memcache-kv-cache-pool) and increase its batch limit
+    [Section 5.3.1](#531-memcache-kv-cache-pool) and increase `--max-num-batched-tokens`
     from `8192` to `16384`. For this experimental PCP variant, set
     `use_layerwise: false` in the `AscendStoreConnector` child on both roles.
     Run the same PCP launch command from `~/dsv41-memcache` to select the pooled
@@ -860,7 +860,8 @@ vLLM Ascend revision.
     Decode servers. Two eight-NPU Decode servers can form DP16/TP1/EP16 while
     Prefill remains DP8/TP1/EP8. Keep `--enable-expert-parallel` and TP1 in
     the Decode template. Increasing global DP to 16 gives EP16. Retain its
-    batch limits, graph mode, DSpark, and other model settings as a starting point.
+    `--max-num-batched-tokens`, `--max-num-seqs`, graph mode, DSpark, and other
+    model settings as a starting point.
 
     Verify [Verify Multi-node Communication](../../getting_started/installation.md#installation-multi-node-interconnect)
     first. Set the Decode template's local IP and network interface separately
@@ -888,7 +889,7 @@ vLLM Ascend revision.
     Register ports `7100-7107` from each Decode server in the proxy, for 16
     Decode endpoints in total. Start both servers before waiting for readiness.
     Recheck Decode latency and throughput for the target workload before
-    changing the batch limits.
+    changing `--max-num-batched-tokens` or `--max-num-seqs`.
 
 === "A3 series"
 
@@ -1617,12 +1618,13 @@ Select the tab for the target hardware.
     continue to use their default non-layerwise pull mode.
 
     Both roles retain the MegaMoE, fastokens, and renderer settings from ordinary
-    PD deployment. Prefill uses the same EPLB settings. Keep its batch-token
-    budget at `8192`, enable local prefix caching and `--swa-bounded-replay`,
-    and keep `multistream_engram_overlap: false`. On Decode, use `384` batch
-    tokens, enable local prefix caching, and disable SWA bounded replay for
-    the recompute scheduler. Local Prefill hits can bypass the external pool;
-    use the verification procedure below to distinguish them.
+    PD deployment. Prefill uses the same EPLB settings. Keep
+    `--max-num-batched-tokens` at `8192`, enable local prefix caching and
+    `--swa-bounded-replay`, and keep `multistream_engram_overlap: false`.
+    On Decode, set `--max-num-batched-tokens` to `384`, enable local prefix
+    caching, and disable SWA bounded replay for the recompute scheduler.
+    Local Prefill hits can bypass the external pool; use the verification
+    procedure below to distinguish them.
 
     ##### 5.3.1.1 Prepare Memcache
 
