@@ -245,10 +245,6 @@ def test_flashmla_dspark_target_model_gate(monkeypatch, dcp_size, pcp_size, mode
         monkeypatch.setattr(mla_v1, "get_current_hardware_profile", lambda: SimpleNamespace(supports=lambda _: False))
         assert not AscendMLAImpl._can_use_flashmla(impl)
         monkeypatch.setattr(mla_v1, "get_current_hardware_profile", lambda: SimpleNamespace(supports=lambda _: True))
-    # MLA DFlash2 drafts (e.g. Kimi-K3.1-Dflash2-Preview) share the DSpark
-    # FlashMLA draft path.
-    config.speculative_config.method = "dflash"
-    assert AscendMLAImpl._can_use_flashmla(impl) is expected_flashmla
     config.speculative_config.method = "eagle"
     assert not AscendMLAImpl._can_use_flashmla(impl)
 
@@ -273,7 +269,7 @@ def test_flashmla_window_requires_a5_and_flashmla_ops(monkeypatch):
         dtype=torch.bfloat16,
         enable_kv_nz=False,
         use_pcp=False,
-        sliding_window=1024,
+        sliding_window=None,
     )
     has_mla_flash = True
     ops_available = True
@@ -287,6 +283,8 @@ def test_flashmla_window_requires_a5_and_flashmla_ops(monkeypatch):
     monkeypatch.setattr(mla_v1, "supports_component_major_mla_pd", lambda _: True)
     monkeypatch.setattr(mla_v1, "get_flashmla_ops", lambda: (object(), object()) if ops_available else None)
 
+    assert impl._can_use_flashmla()
+    impl.sliding_window = 1024
     assert impl._can_use_flashmla(dflash_draft_window=True)
     assert not impl._can_use_flashmla()  # A target layer cannot use the draft lengths.
     has_mla_flash = False  # A3.

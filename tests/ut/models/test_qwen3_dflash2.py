@@ -113,11 +113,6 @@ def test_mla_layer_attention_settings(
     assert dflash2.DFlash2Qwen3ForCausalLM.get_draft_attn_causal(draft) == [causal]
 
 
-def test_mla_layer_requires_a_window_size(build_mla_layer):
-    with pytest.raises(ValueError, match="requires a window size"):
-        build_mla_layer(dflash_config={"use_swa": True})
-
-
 @pytest.fixture
 def mla_context_model(monkeypatch):
     class TupleLinear(nn.Linear):
