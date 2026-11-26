@@ -1252,11 +1252,9 @@ def super_kernel_scope(scope: str | None, enabled: bool):
                 _SUPER_KERNEL_SCOPE_ACTIVE.reset(token)
 
 
-@contextmanager
 def no_super_kernel_for_multistream(enabled: bool):
     """Exclude an enabled multistream region only during SK capture."""
-    with super_kernel_scope(None, enabled and _SUPER_KERNEL_SCOPE_ACTIVE.get()):
-        yield
+    return super_kernel_scope(None, enabled and _SUPER_KERNEL_SCOPE_ACTIVE.get())
 
 
 def weak_ref_tensor(tensor: Any) -> Any:
