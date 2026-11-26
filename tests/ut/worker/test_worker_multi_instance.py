@@ -18,6 +18,7 @@
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+from vllm.config import CUDAGraphMode
 from vllm.config.attention import AttentionConfig
 from vllm.utils.mem_constants import GiB_bytes
 
@@ -55,7 +56,11 @@ class TestDetermineAvailableMemoryMultiInstance(TestBase):
             worker = NPUWorker()
 
         worker.vllm_config = SimpleNamespace(
-            attention_config=AttentionConfig(), kv_transfer_config=None, additional_config={}
+            attention_config=AttentionConfig(),
+            compilation_config=SimpleNamespace(cudagraph_mode=CUDAGraphMode.NONE),
+            speculative_config=None,
+            kv_transfer_config=None,
+            additional_config={},
         )
         worker._kvpp_cache_allocation_plan = None
         worker.model_runner = MagicMock()
@@ -150,15 +155,20 @@ class TestDetermineAvailableMemoryMultiInstance(TestBase):
 
     @patch("vllm_ascend.worker.worker.get_ascend_config")
     @patch("vllm_ascend.worker.worker.logger")
-    def test_determine_available_memory_does_not_profile_npugraph_memory(self, mock_logger, mock_get_ascend_config):
+    def test_determine_available_memory_profiles_and_subtracts_npugraph_memory(
+        self, mock_logger, mock_get_ascend_config
+    ):
         mock_get_ascend_config.return_value.sparse_kv_offload_config.enabled = False
+        mock_get_ascend_config.return_value.finegrained_tp_config.lmhead_tensor_parallel_size = 0
         total = int(64 * GiB_bytes)
         requested_memory = int(total * 0.9)
         init_free = int(60 * GiB_bytes)
         non_kv_cache = int(1 * GiB_bytes)
+        npugraph_memory = int(2 * GiB_bytes)
 
         worker = self._make_worker(requested_memory, init_free, total)
-        worker.model_runner.profile_cudagraph_memory = MagicMock()
+        worker.vllm_config.compilation_config.cudagraph_mode = CUDAGraphMode.FULL_DECODE_ONLY
+        worker.model_runner.profile_cudagraph_memory = MagicMock(return_value=npugraph_memory)
         profile_result = self._make_profile_result(
             free_memory_after=init_free - non_kv_cache,
             non_kv_cache_memory=non_kv_cache,
@@ -168,8 +178,99 @@ class TestDetermineAvailableMemoryMultiInstance(TestBase):
             result = worker.determine_available_memory()
 
         worker.model_runner.profile_run.assert_called_once()
+        worker.model_runner.profile_cudagraph_memory.assert_called_once_with()
+        self.assertEqual(worker.npugraph_memory_estimate, npugraph_memory)
+        self.assertEqual(result, requested_memory - non_kv_cache - npugraph_memory)
+
+    @patch("vllm_ascend.worker.worker.get_ascend_config")
+    @patch("vllm_ascend.worker.worker.logger")
+    def test_determine_available_memory_skips_npugraph_profile_when_disabled_or_eager(
+        self, mock_logger, mock_get_ascend_config
+    ):
+        mock_get_ascend_config.return_value.sparse_kv_offload_config.enabled = False
+        mock_get_ascend_config.return_value.finegrained_tp_config.lmhead_tensor_parallel_size = 0
+        total = int(64 * GiB_bytes)
+        requested_memory = int(total * 0.9)
+        init_free = int(60 * GiB_bytes)
+        non_kv_cache = int(1 * GiB_bytes)
+
+        for enforce_eager, estimate_flag in ((True, True), (False, False)):
+            with self.subTest(enforce_eager=enforce_eager, estimate_flag=estimate_flag):
+                worker = self._make_worker(requested_memory, init_free, total)
+                worker.model_config.enforce_eager = enforce_eager
+                worker.vllm_config.compilation_config.cudagraph_mode = CUDAGraphMode.FULL_DECODE_ONLY
+                worker.model_runner.profile_cudagraph_memory = MagicMock(return_value=int(2 * GiB_bytes))
+                profile_result = self._make_profile_result(
+                    free_memory_after=init_free - non_kv_cache,
+                    non_kv_cache_memory=non_kv_cache,
+                )
+
+                with (
+                    self._patch_memory_profiling(profile_result),
+                    patch(
+                        "vllm_ascend.worker.worker.envs.VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS",
+                        estimate_flag,
+                    ),
+                ):
+                    result = worker.determine_available_memory()
+
+                worker.model_runner.profile_cudagraph_memory.assert_not_called()
+                self.assertEqual(worker.npugraph_memory_estimate, 0)
+                self.assertEqual(result, requested_memory - non_kv_cache)
+
+    @patch("vllm_ascend.worker.worker.get_ascend_config")
+    @patch("vllm_ascend.worker.worker.logger")
+    def test_deepseek_v4_compressed_skips_npugraph_memory_profile(self, mock_logger, mock_get_ascend_config):
+        """DSV4 DSA must not run the pre-KV graph memory profiling path."""
+        mock_get_ascend_config.return_value.sparse_kv_offload_config.enabled = False
+        mock_get_ascend_config.return_value.finegrained_tp_config.lmhead_tensor_parallel_size = 0
+        total = int(64 * GiB_bytes)
+        requested_memory = int(total * 0.9)
+        init_free = int(60 * GiB_bytes)
+        non_kv_cache = int(1 * GiB_bytes)
+
+        worker = self._make_worker(requested_memory, init_free, total)
+        worker.vllm_config.compilation_config.cudagraph_mode = CUDAGraphMode.FULL_DECODE_ONLY
+        worker.model_config.hf_config.model_type = "deepseek_v4"
+        worker.model_runner.use_compress = True
+        worker.model_runner.profile_cudagraph_memory = MagicMock(return_value=int(2 * GiB_bytes))
+        profile_result = self._make_profile_result(
+            free_memory_after=init_free - non_kv_cache,
+            non_kv_cache_memory=non_kv_cache,
+        )
+
+        with self._patch_memory_profiling(profile_result):
+            result = worker.determine_available_memory()
+
         worker.model_runner.profile_cudagraph_memory.assert_not_called()
-        self.assertFalse(hasattr(worker, "npugraph_memory_estimate"))
+        self.assertEqual(worker.npugraph_memory_estimate, 0)
+        self.assertEqual(result, requested_memory - non_kv_cache)
+
+    @patch("vllm_ascend.worker.worker.get_ascend_config")
+    @patch("vllm_ascend.worker.worker.logger")
+    def test_spec_decode_with_lmhead_tp_skips_npugraph_memory_profile(self, mock_logger, mock_get_ascend_config):
+        """Speculative decoding + lmhead TP must skip pre-KV graph profiling (#11562)."""
+        mock_get_ascend_config.return_value.sparse_kv_offload_config.enabled = False
+        mock_get_ascend_config.return_value.finegrained_tp_config.lmhead_tensor_parallel_size = 2
+        total = int(64 * GiB_bytes)
+        requested_memory = int(total * 0.9)
+        init_free = int(60 * GiB_bytes)
+        non_kv_cache = int(1 * GiB_bytes)
+
+        worker = self._make_worker(requested_memory, init_free, total)
+        worker.vllm_config.compilation_config.cudagraph_mode = CUDAGraphMode.FULL_DECODE_ONLY
+        worker.vllm_config.speculative_config = SimpleNamespace(method="mtp")
+        worker.model_runner.profile_cudagraph_memory = MagicMock(return_value=int(2 * GiB_bytes))
+        profile_result = self._make_profile_result(
+            free_memory_after=init_free - non_kv_cache,
+            non_kv_cache_memory=non_kv_cache,
+        )
+
+        with self._patch_memory_profiling(profile_result):
+            result = worker.determine_available_memory()
+
+        worker.model_runner.profile_cudagraph_memory.assert_not_called()
+        self.assertEqual(worker.npugraph_memory_estimate, 0)
         self.assertEqual(result, requested_memory - non_kv_cache)
 
     @patch("vllm_ascend.worker.worker.get_ascend_config")
