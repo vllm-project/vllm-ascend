@@ -42,6 +42,7 @@
 /.github/workflows/scripts/test_ai_review.py @wangxiyuan
 /.github/agent-review/L1/ @wangxiyuan
 /.github/agent-review/L2/ci/ @zhangxinyuehfad
+/.github/agent-review/L2/doc-quality/ @liqian79
 /.github/agent-review/L2/release-note/ @wangxiyuan
 /.github/agent-review/L2/speculative-decoding/ @drslark @slippersss
 
@@ -59,7 +60,7 @@
 /docs/source/user_guide/feature_guide/quantization.md @kunpengW-code @lcfenglinwan
 /.readthedocs.yaml @liqian79 @MrZ20
 /README* @liqian79
-/mkdocs.yml @MrZ20
+/mkdocs.yml @MrZ20 @liqian79
 
 # examples
 /examples/ @MrZ20

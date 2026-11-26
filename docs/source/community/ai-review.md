@@ -44,6 +44,14 @@ Each round is one agent invocation. The orchestrator assembles the prompt determ
 
 The agent reads the referenced checklist files itself from the checked-out repository and cites only rules it has actually read (every finding has a file path, a rule ID and a severity, with a line number for inline findings).
 
+### Documentation changes
+
+When the current PR diff changes either root README (`README.md` or `README.zh.md`), Markdown in `docs/` or `vllm_ascend/ops/triton/docs/`, or Chinese translations in `docs/source/locale/zh_CN/LC_MESSAGES/`, the workflow fetches a pinned copy of the [doc-quality assessment standards](https://gitcode.com/ascend-ci/doc-quality/tree/main/skills/01.评估标准). The agent reads the applicable criteria and reports documentation findings alongside code findings in the same round.
+
+If you withdraw a documentation change, explain why in your next `/ai-review` comment and reference the finding ID. The agent can mark that finding `resolved` after verifying the affected content was withdrawn. If you moved the content and the issue persists, the finding stays open. A round with no matching documentation changes skips the rules download.
+
+Maintainers configure the GitCode username in the Actions variable `DOC_QUALITY_USERNAME` and the read-only token in the Actions secret `DOC_QUALITY_TOKEN`. A failed download stops that workflow run before the review is published.
+
 ### Multi-round interaction and termination
 
 The bot updates one PR summary comment. Its hidden `ai-review-state` JSON block records the reviewed commit, published rounds and finding history. A round counts when the bot publishes its result or a notice that the code changed during review. If a run fails before publication, a rerun starts a fresh review from the last published summary.
