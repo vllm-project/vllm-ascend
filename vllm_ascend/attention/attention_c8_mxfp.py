@@ -894,13 +894,13 @@ class AscendC8MXFPAttentionBackendImpl(AscendAttentionBackendImpl):
         *,
         batch_max_query_len: int,
     ) -> torch.Tensor:
-        # Keep the original batch's mask and Q-scale policy in the split
-        # comparison. Each partition still plans against its own query length.
+        # Preserve the batch mask when comparing decode scale layouts.
         mask_mode = QFA_MASK_MODE_NO_MASK if batch_max_query_len == 1 else QFA_MASK_MODE_CAUSAL
 
         # Both operators have to agree on the q scale layout: it is what
         # picks the kernel, and the metadata plan is computed for that kernel.
-        query_scale, layout_q_descale = self._qfa_query_scale_for_layout(query_scale, batch_max_query_len)
+        layout_query_len = max_seqlen_q if partition == "decode" else batch_max_query_len
+        query_scale, layout_q_descale = self._qfa_query_scale_for_layout(query_scale, layout_query_len)
 
         qfa_metadata = self._get_qfa_metadata(
             attn_metadata,

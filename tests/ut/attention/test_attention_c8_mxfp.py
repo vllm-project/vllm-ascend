@@ -406,7 +406,11 @@ class TestMixedQFASplit(TestBase):
         decode, prefill, next_decode, next_prefill = self.ops.quant_flash_attn.call_args_list
         self.assertEqual(decode.kwargs["cu_seqlens_q"].tolist(), [0, 1, 2])
         self.assertEqual(prefill.kwargs["cu_seqlens_q"].tolist(), [0, 22])
-        self.assertEqual((decode.kwargs["mask_mode"], decode.kwargs["layout_q_descale"]), (3, "TND"))
+        self.assertEqual((decode.kwargs["mask_mode"], decode.kwargs["layout_q_descale"]), (3, "N2TGD"))
+        self.assertEqual(decode.args[3].shape, (2, 2, 4, 2, 2))
+        decode_plan, prefill_plan = self.ops.quant_flash_attn_metadata.call_args_list
+        self.assertEqual(decode_plan.kwargs["layout_q_descale"], "N2TGD")
+        self.assertEqual(prefill_plan.kwargs["layout_q_descale"], "TND")
         self.assertEqual((prefill.kwargs["mask_mode"], prefill.kwargs["layout_q_descale"]), (3, "TND"))
         self.assertIs(decode.kwargs["attn_mask"], self.metadata.attn_mask)
         self.assertEqual(decode.kwargs["max_seqlen_q"], 1)
