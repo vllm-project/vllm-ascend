@@ -986,7 +986,7 @@ def test_main_dsv4_materializes_real_planner_geometry_once(monkeypatch):
     aliased_large_name = "model.layers.2.self_attn.attn"
     mtp_name = "model.mtp.layers.0.self_attn.attn"
     small_spec = AscendMLAAttentionSpec(
-        block_size=128,
+        block_size=8,
         num_kv_heads=1,
         head_size=4,
         dtype=torch.float16,
@@ -994,7 +994,7 @@ def test_main_dsv4_materializes_real_planner_geometry_once(monkeypatch):
         tokens_per_state=1,
     )
     large_spec = AscendMLAAttentionSpec(
-        block_size=128,
+        block_size=8,
         num_kv_heads=1,
         head_size=8,
         dtype=torch.float16,
@@ -1078,7 +1078,7 @@ def test_main_dsv4_materializes_real_planner_geometry_once(monkeypatch):
         kv_cache_config,
         device=torch.device("cpu"),
         layout=None,
-        kernel_block_sizes=[small_spec.block_size, large_spec.block_size],
+        kernel_block_sizes=[8, 8],
     )
 
     assert allocations == [backing_size]
@@ -1242,15 +1242,22 @@ def test_draft_layer_specs_keep_ownership_and_sequence_capacity(monkeypatch, is_
 
 
 @pytest.mark.parametrize(
-    "model_type",
-    ["kimi_linear", "deepseek_v3", "glm_moe_dsa"],
+    ("model_type", "expected_num_query_heads"),
+    [("kimi_linear", 1), ("deepseek_v3", 12), ("glm_moe_dsa", 12)],
 )
 @pytest.mark.parametrize("dcp_sharded", [False, True])
 @pytest.mark.parametrize(("source_is_draft", "is_draft_layer"), [(False, False), (False, True), (True, False)])
 @pytest.mark.parametrize("non_causal", [False, True])
 @pytest.mark.parametrize("dspark_active", [False, True])
 def test_mla_cache_spec_uses_physical_heads_for_kimi_k3(
-    monkeypatch, model_type, source_is_draft, is_draft_layer, non_causal, dcp_sharded, dspark_active
+    monkeypatch,
+    model_type,
+    expected_num_query_heads,
+    source_is_draft,
+    is_draft_layer,
+    non_causal,
+    dcp_sharded,
+    dspark_active,
 ):
     source_spec = MLAAttentionSpec(
         block_size=128,
@@ -1306,7 +1313,7 @@ def test_mla_cache_spec_uses_physical_heads_for_kimi_k3(
 
     assert isinstance(spec, AscendMLAAttentionSpec)
     assert spec.num_heads == source_spec.num_heads == 1
-    assert spec.num_query_heads == 12
+    assert spec.num_query_heads == expected_num_query_heads
     assert spec.dcp_sharded is dcp_sharded
     assert spec.page_size_bytes == source_spec.page_size_bytes
     assert spec.is_draft is (source_is_draft or is_draft_layer)

@@ -1435,14 +1435,6 @@ def create_cache_component_views(
     return views
 
 
-_UNIFIED_KV_CACHE_MODELS = frozenset({
-    "deepseek_v4",
-    "deepseek_v41",
-    "deepseek_v41_text",
-    "glm_moe_dsa",
-})
-
-
 def create_contiguous_cache_component_views(
     raw_tensor: torch.Tensor,
     cache_shapes: Sequence[tuple[int, ...]],
@@ -1575,7 +1567,7 @@ def unified_allocate_kv_cache(
         if shared_layers is None:
             shared_layers = get_shared_kv_cache_layers(vllm_config)
         if attn_groups is None:
-            attn_groups = _get_cache_attention_groups(kv_cache_config, attn_layers, shared_layers, kernel_block_sizes)
+            attn_groups = _get_cache_attention_groups(kv_cache_config, attn_layers, shared_layers)
     backing_size = sizes.pop()
 
     # Preserve the existing 2 MiB base-address alignment for KV transfer.
@@ -1606,13 +1598,13 @@ def _uses_specialized_kv_allocator(
     )
 
 
-def _can_use_unified_kv_cache(
+def _can_use_glm_unified_kv_cache(
     vllm_config: VllmConfig,
     kv_cache_config: KVCacheConfig,
     attn_groups: Sequence[AttentionGroup],
     kernel_block_sizes: Sequence[int],
 ) -> bool:
-    """Return whether all runtime groups share one device pool and implement runtime views."""
+    """Gate GLM's unified-pool path while legacy specialized modes remain active."""
     if len({d.size for d in kv_cache_config.kv_cache_tensors}) != 1 or _uses_specialized_kv_allocator(
         vllm_config, kv_cache_config, attn_groups
     ):
@@ -1645,21 +1637,20 @@ def allocate_kv_cache_main(
     """
     if allocate is not None:
         raise NotImplementedError("Extensible KV cache allocation is not supported on Ascend.")
-    if not kv_cache_config.kv_cache_tensors and not kv_cache_config.kv_cache_groups:
-        return {}
     vllm_config = get_current_vllm_config()
     model_type = getattr(getattr(vllm_config.model_config, "hf_text_config", None), "model_type", None)
+    if model_type in ("deepseek_v4", "deepseek_v41", "deepseek_v41_text"):
+        return unified_allocate_kv_cache(kv_cache_config, device, layout, kernel_block_sizes)
+
     attn_layers = get_layers_from_vllm_config(vllm_config, AttentionLayerBase)
     shared_layers = {
         layer_name: target_layer
         for layer_name, layer in attn_layers.items()
         if (target_layer := getattr(layer, "kv_sharing_target_layer_name", None))
     }
-    if hasattr(vllm_config, "compilation_config"):
-        shared_layers = get_shared_kv_cache_layers(vllm_config) | shared_layers
     attn_groups = _get_cache_attention_groups(kv_cache_config, attn_layers, shared_layers, kernel_block_sizes)
 
-    if model_type in _UNIFIED_KV_CACHE_MODELS and _can_use_unified_kv_cache(
+    if model_type == "glm_moe_dsa" and _can_use_glm_unified_kv_cache(
         vllm_config, kv_cache_config, attn_groups, kernel_block_sizes
     ):
         return unified_allocate_kv_cache(

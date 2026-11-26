@@ -393,6 +393,24 @@ def test_specialized_or_incompatible_layouts_route_to_legacy_allocator(monkeypat
     legacy.assert_called_once()
 
 
+def test_deepseek_retains_fail_fast_unified_contract(monkeypatch):
+    """DeepSeek V4/V4.1 must never silently fall back to legacy allocation on invalid descriptors."""
+    runtime = _make_glm_runtime(model_type="deepseek_v41")
+    spec = AscendMLAAttentionSpec(block_size=4, num_kv_heads=1, head_size=8, dtype=torch.float16)
+    bad_config = KVCacheConfig(
+        num_blocks=2,
+        kv_cache_tensors=[
+            KVCacheTensor(size=128, layers=["l0"], offset=0, layer_stride=128, block_stride=64),
+            KVCacheTensor(size=256, layers=["l1"], offset=0, layer_stride=256, block_stride=64),
+        ],
+        kv_cache_groups=[KVCacheGroupSpec(layer_names=["l0", "l1"], kv_cache_spec=spec)],
+    )
+    monkeypatch.setattr(attn_utils, "get_current_vllm_config", lambda: runtime)
+    monkeypatch.setattr(attn_utils, "_allocate_kv_cache", MagicMock(side_effect=AssertionError("unexpected fallback")))
+    with pytest.raises(ValueError, match="share one backing allocation"):
+        attn_utils.allocate_kv_cache_main(bad_config, torch.device("cpu"), None, [4])
+
+
 @pytest.mark.parametrize("offset,message", [(1, "aligned"), (900, "exceeds")])
 def test_contiguous_component_alignment_and_bounds(offset, message):
     raw = torch.empty(1024, dtype=torch.int8)
