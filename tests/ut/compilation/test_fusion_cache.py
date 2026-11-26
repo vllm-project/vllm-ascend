@@ -118,6 +118,7 @@ def test_cache_respects_disable_and_sequence_parallel(isolated_cache, disable_ca
         x = torch.randn(2, 3)
         with torch.no_grad():
             result, handle = compiler.compile(graph, [x], {COMPILATION_PASS_KEY: lambda gm: gm}, Range(1, 8))
+            assert result is not None
             torch.testing.assert_close(result(x), graph(x))
     assert handle is None
     assert cached.call_count == int(not disable_cache and not sequence_parallel)
