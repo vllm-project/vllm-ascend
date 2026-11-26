@@ -1,0 +1,9 @@
+pr: 23403
+entries:
+  - category: performance
+    text: >-
+      For DeepSeek V4.1 Flash on Ascend A2/A3, set
+      `ascend_compilation_config.fuse_mhc` to `true` in `--additional-config`
+      to reduce operator launches at eligible Attention-to-FFN and
+      FFN-to-next-layer Attention boundaries, including DSpark. This option
+      defaults to `false`.

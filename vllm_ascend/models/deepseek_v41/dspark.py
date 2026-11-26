@@ -168,7 +168,7 @@ class DeepseekV41DSparkModel(torch.nn.Module):
         self.hc_mult = config.hc_mult
         self.hidden_size = config.hidden_size
         self.use_cross_layer_hc_post_pre_norm = (
-            get_ascend_config().ascend_compilation_config.fuse_hc_post_pre_norm_cross_layer
+            get_ascend_config().ascend_compilation_config.fuse_mhc
             and get_current_hardware_profile().supports(HardwareCapability.HC_POST_PRE_NORM)
             and enable_custom_op()
             and hasattr(torch.ops._C_ascend, "npu_hc_post_pre_norm")

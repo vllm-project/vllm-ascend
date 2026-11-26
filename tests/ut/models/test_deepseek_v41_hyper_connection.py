@@ -517,9 +517,7 @@ def test_v41_dspark_decoder_uses_draft_experts_instead_of_target_config():
             patch.object(
                 shared,
                 "get_ascend_config",
-                return_value=SimpleNamespace(
-                    ascend_compilation_config=SimpleNamespace(fuse_hc_post_pre_norm_cross_layer=False)
-                ),
+                return_value=SimpleNamespace(ascend_compilation_config=SimpleNamespace(fuse_mhc=False)),
             )
         )
         for name in (

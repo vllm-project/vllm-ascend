@@ -136,8 +136,7 @@ Design / ops (analysis branch): `docs/source/developer_guide/Design_Documents/ru
 | `fuse_norm_quant`  | bool | `True` | Whether to enable fuse_norm_quant pass. |
 | `fuse_qknorm_rope` | bool | `True` | Whether to enable fuse_qknorm_rope pass. If Triton is not in the environment, set it to False. |
 | `fuse_muls_add` | bool | `True` | Whether to enable fuse_muls_add pass.|
-| `fuse_hc_post_pre_norm` | bool | `False` | Enable Attention-to-FFN mHC and RMSNorm fusion in eligible DeepSeek-V4.1 target and DSpark draft layers on A2/A3 for four residual streams and hidden size 5120. |
-| `fuse_hc_post_pre_norm_cross_layer` | bool | `False` | Enable FFN-to-next-layer Attention mHC and RMSNorm fusion in DeepSeek-V4.1 within a target pipeline stage or between adjacent DSpark draft layers on A2/A3 for four residual streams and hidden size 5120. |
+| `fuse_mhc` | bool | `False` | Enable both Attention-to-FFN and FFN-to-next-layer Attention mHC and RMSNorm fusion for eligible DeepSeek V4.1 Flash target and DSpark draft layers on A2/A3. The fused operator supports BF16 activations with four residual streams and hidden size 5120. |
 
 DSpark draft, target verification in eager mode, and captured target graphs in a DSpark deployment use the split cross-layer path when the local operator input has more than 36 token rows.
 
