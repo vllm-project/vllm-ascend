@@ -242,16 +242,10 @@ class AscendMLAAttention(MLAAttention):
             and not getattr(self.impl, "use_flashmla", False)
             and not (use_sfa_turboquant or use_sfa_c8)
         ):
-            if not enable_sfa(vllm_config) and enable_fa_quant(vllm_config):
-                k_dtype, v_dtype = vllm_config.quant_config.get_kv_quant_dtype(
-                    self.impl.layer_name, dtype, vllm_config.model_config
-                )
-                dtype, rope_dtype = k_dtype, v_dtype
-            else:
-                model_config = vllm_config.model_config
-                if (spec.is_draft or self.is_draft_layer) and draft_config is not None:
-                    model_config = draft_config
-                rope_dtype = model_config.dtype
+            model_config = vllm_config.model_config
+            if (spec.is_draft or self.is_draft_layer) and draft_config is not None:
+                model_config = draft_config
+            rope_dtype = model_config.dtype
 
         # Preserve upstream metadata and apply all owner fields together.
         # Reuse the physical packing selected by the execution implementation.
