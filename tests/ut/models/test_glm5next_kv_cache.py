@@ -381,7 +381,7 @@ def test_pcp_kpool_metadata_writes_global_token_order(keypool_kernels, capture, 
     """Keep one global CANN write request for two PCP-local query chunks."""
     config = SimpleNamespace(
         cache_config=SimpleNamespace(block_size=128),
-        scheduler_config=SimpleNamespace(max_num_batched_tokens=8, max_num_seqs=2),
+        scheduler_config=SimpleNamespace(max_num_batched_tokens=4, max_num_seqs=2),
         model_config=SimpleNamespace(max_model_len=512),
         compilation_config=SimpleNamespace(
             static_forward_context={
@@ -493,7 +493,15 @@ def test_pcp_kpool_metadata_writes_global_token_order(keypool_kernels, capture, 
         config,
         torch.device("cpu"),
     )
+    keypool_kernels.build_tail_slot_mapping = MagicMock(wraps=keypool_kernels.build_tail_slot_mapping)
     tail_metadata = tail_builder.build_for_cudagraph_capture(common) if capture else tail_builder.build(0, common)
+    # The global PCP write has eight tokens, exceeding the four-token local budget.
+    # The kernel stub returns its input slots, so check the allocated output too.
+    slot_calls = keypool_kernels.build_tail_slot_mapping.call_args_list
+    assert len(slot_calls) == 2
+    for call in slot_calls:
+        mapped_common, _, output = call.args
+        assert output.numel() >= mapped_common.num_input_tokens
     torch.testing.assert_close(tail_metadata.write_block_table, pcp_context.global_block_tables[0][:, :1])
     torch.testing.assert_close(tail_metadata.write_slot_mapping, global_slots)
     tail_common = keypool_kernels.build_tail_inputs.call_args.args[0]
@@ -599,6 +607,7 @@ def test_pcp_decode_kpool_and_tail_route_global_write_metadata(
     tail.is_pcp_decode_sharded = True
     tail.block_size = tail._pool_size = tail._page_rows = 4
     tail._max_num_metadata_reqs = global_reqs
+    tail._max_num_write_tokens = global_tokens
     tail._lookahead = False
     tail._tail_inputs = {}
     tail._slot_mapping_buffers = {}

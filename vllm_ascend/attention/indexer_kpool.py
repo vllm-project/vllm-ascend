@@ -674,6 +674,10 @@ class AscendIndexerKPoolTailMetadataBuilder(AttentionMetadataBuilder):
         self._max_num_metadata_reqs = max(
             vllm_config.scheduler_config.max_num_seqs, vllm_config.scheduler_config.max_num_batched_tokens
         )
+        self._max_num_write_tokens = (
+            vllm_config.scheduler_config.max_num_batched_tokens
+            * vllm_config.parallel_config.prefill_context_parallel_size
+        )
         self._tail_inputs: dict[int, dict[str, torch.Tensor]] = {}
         layers = vllm_config.compilation_config.static_forward_context
         ratios = {layers[name].compress_ratio for name in layer_names}
@@ -719,7 +723,7 @@ class AscendIndexerKPoolTailMetadataBuilder(AttentionMetadataBuilder):
             step = common.slot_mapping.data_ptr()
             if step not in self._slot_mapping_buffers:
                 self._slot_mapping_buffers[step] = torch.empty(
-                    self._max_num_metadata_reqs, dtype=torch.int64, device=self.device
+                    self._max_num_write_tokens, dtype=torch.int64, device=self.device
                 )
             return build_tail_slot_mapping(common, self.block_size, self._slot_mapping_buffers[step])
 
