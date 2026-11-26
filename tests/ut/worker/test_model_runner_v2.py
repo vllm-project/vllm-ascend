@@ -362,6 +362,23 @@ def test_lora_dp_sync_includes_idle_ranks(dummy_run):
     runner.lora_manager.synchronize_requests.assert_called_once_with(set() if dummy_run else {"adapter-a"})
 
 
+def test_lora_dp_sync_uses_prepared_backend_request_ids():
+    runner = _make_runner()
+    runner._target_uses_flashmla = True
+    runner.lora_manager = SimpleNamespace(requires_dp_sync=True, synchronize_requests=Mock())
+    runner.lora_state = SimpleNamespace(get_activate_loras=Mock(return_value={"adapter-a"}))
+    before = SimpleNamespace(req_ids=["before"])
+    prepared = SimpleNamespace(req_ids=["prepared"])
+    with (
+        patch.object(GPUModelRunner, "gather_batch_req_state", return_value=(before, 1)),
+        patch("vllm_ascend.worker.v2.model_runner.prepare_flashmla_batch_req_state", return_value=(prepared, 1)),
+        patch("vllm_ascend.worker.v2.model_runner.expert_offload.prepare_batch"),
+    ):
+        runner.gather_batch_req_state(SimpleNamespace(), False)
+    runner.lora_state.get_activate_loras.assert_called_once_with(["prepared"])
+    runner.lora_manager.synchronize_requests.assert_called_once_with({"adapter-a"})
+
+
 def test_model_specific_lora_manager_uses_upstream_creation_contract():
     runner = _make_runner()
     manager = Mock()

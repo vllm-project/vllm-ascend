@@ -888,14 +888,14 @@ class NPUModelRunner(GPUModelRunner):
 
     def gather_batch_req_state(self, scheduler_output: SchedulerOutput, dummy_run: bool):
         batch_state, uniform_token_count = super().gather_batch_req_state(scheduler_output, dummy_run)
-        lora_manager = getattr(self, "lora_manager", None)
-        if getattr(lora_manager, "requires_dp_sync", False):
-            requests = self.lora_state.get_activate_loras(batch_state.req_ids) if batch_state is not None else set()
-            lora_manager.synchronize_requests(requests)
         if self._target_uses_flashmla and batch_state is not None:
             # The backend order must precede derived inputs and graph dispatch.
             batch_state, uniform_token_count = prepare_flashmla_batch_req_state(batch_state, uniform_token_count)
         expert_offload.prepare_batch(self, batch_state)
+        lora_manager = getattr(self, "lora_manager", None)
+        if getattr(lora_manager, "requires_dp_sync", False):
+            requests = self.lora_state.get_activate_loras(batch_state.req_ids) if batch_state is not None else set()
+            lora_manager.synchronize_requests(requests)
         return batch_state, uniform_token_count
 
     def _check_finegrained_tp_graph_step(self, cg_mode: CUDAGraphMode) -> None:
