@@ -878,77 +878,111 @@ vLLM Ascend revision.
 
     #### 5.2.1.1 Prepare the DP Launcher
 
-    Save the following script as `launch_online_dp.py` on both nodes. It divides
-    the node's visible devices among local DP ranks and starts one vLLM process per
-    rank.
+    Save the following script from the [official example](https://github.com/vllm-project/vllm-ascend/blob/main/examples/external_online_dp/launch_online_dp.py)
+    as `launch_online_dp.py` on both nodes, beside the node's `run_dp_template.sh`.
+    Run the launcher from that directory. It starts one vLLM process per local DP
+    rank, assigning `tp-size * pcp-size * pp-size` devices to each rank.
+    The templates below use PP=1; leave `--pp-size` at its default of `1`.
 
     ```python
+    #!/usr/bin/env python3
+    """Launch one shell template per local DP rank."""
+
     import argparse
-    import multiprocessing
     import os
+    import signal
     import subprocess
     import sys
+    import time
+
+    POLL_INTERVAL = 0.1
 
 
     def parse_args():
         parser = argparse.ArgumentParser()
-        parser.add_argument("--dp-size", type=int, required=True)
-        parser.add_argument("--tp-size", type=int, default=1)
-        parser.add_argument("--pcp-size", type=int, default=1)
-        parser.add_argument("--dp-size-local", type=int, default=-1)
-        parser.add_argument("--dp-rank-start", type=int, default=0)
-        parser.add_argument("--dp-address", type=str, required=True)
-        parser.add_argument("--dp-rpc-port", type=str, default="12345")
-        parser.add_argument("--vllm-start-port", type=int, default=9000)
-        return parser.parse_args()
+        parser.add_argument("--dp-size", type=int, required=True, help="Global data parallel size.")
+        parser.add_argument("--tp-size", type=int, default=1, help="Tensor parallel size.")
+        parser.add_argument("--pcp-size", type=int, default=1, help="Prefill context parallel size (default: 1).")
+        parser.add_argument("--pp-size", type=int, default=1, help="Pipeline parallel size (default: 1).")
+        parser.add_argument("--dp-size-local", type=int, default=-1, help="Local DP size; defaults to --dp-size.")
+        parser.add_argument("--dp-rank-start", type=int, default=0, help="First global DP rank on this node.")
+        parser.add_argument("--dp-address", required=True, help="IP address of the DP master node.")
+        parser.add_argument("--dp-rpc-port", type=int, default=12345, help="DP RPC port.")
+        parser.add_argument("--vllm-start-port", type=int, default=9000, help="First API port on this node.")
+        parser.add_argument("--template", "--script", default="./run_dp_template.sh", help="Shell template path.")
+        args = parser.parse_args()
+
+        if args.dp_size_local == -1:
+            args.dp_size_local = args.dp_size
+        if min(args.dp_size, args.dp_size_local, args.tp_size, args.pcp_size, args.pp_size) < 1:
+            parser.error("Parallel sizes must be positive.")
+        if args.dp_rank_start < 0 or args.dp_rank_start + args.dp_size_local > args.dp_size:
+            parser.error("Local DP ranks exceed the global DP range.")
+        if not os.path.isfile(args.template):
+            parser.error(f"Template does not exist: {args.template}")
+        return args
 
 
-    args = parse_args()
-    dp_size = args.dp_size
-    tp_size = args.tp_size
-    pcp_size = args.pcp_size
-    dp_size_local = args.dp_size if args.dp_size_local == -1 else args.dp_size_local
+    def handle_sigterm(signum, frame):
+        raise SystemExit()
 
 
-    def run_command(visible_devices, dp_rank, vllm_engine_port):
-        command = [
-            "bash",
-            "./run_dp_template.sh",
-            visible_devices,
-            str(vllm_engine_port),
-            str(dp_size),
-            str(dp_rank),
-            args.dp_address,
-            args.dp_rpc_port,
-            str(tp_size),
-            str(pcp_size),
-        ]
-        subprocess.run(command, check=True)
+    def main():
+        args = parse_args()
+        devices_per_rank = args.tp_size * args.pcp_size * args.pp_size
+        processes = []
+        try:
+            signal.signal(signal.SIGTERM, handle_sigterm)
+            for i in range(args.dp_size_local):
+                dp_rank = args.dp_rank_start + i
+                port = args.vllm_start_port + i
+                devices = ",".join(str(x) for x in range(i * devices_per_rank, (i + 1) * devices_per_rank))
+                command = [
+                    "bash",
+                    "-o",
+                    "pipefail",
+                    args.template,
+                    devices,  # $1: visible devices
+                    str(port),  # $2: API port
+                    str(args.dp_size),  # $3: global DP size
+                    str(dp_rank),  # $4: global DP rank
+                    args.dp_address,  # $5: DP address
+                    str(args.dp_rpc_port),  # $6: DP RPC port
+                    str(args.tp_size),  # $7: TP
+                    str(args.pcp_size),  # $8: PCP
+                    str(args.pp_size),  # $9: PP
+                ]
+
+                print(f"DP rank={dp_rank}, devices={devices}, API port={port}", flush=True)
+                # Start all local ranks before waiting; each rank owns a process group.
+                processes.append(subprocess.Popen(command, start_new_session=True))
+
+            # Check every rank so a running rank cannot hide another rank's failure.
+            while True:
+                running = False
+                for i, process in enumerate(processes):
+                    code = process.poll()
+                    if code is None:
+                        running = True
+                    elif code != 0:
+                        raise RuntimeError(f"DP rank {args.dp_rank_start + i} exited with code {code}")
+                if not running:
+                    return 0
+                time.sleep(POLL_INTERVAL)
+        except BaseException:
+            # Notify every recorded rank, including workers whose shell has exited.
+            for process in processes:
+                try:
+                    os.killpg(process.pid, signal.SIGTERM)
+                except ProcessLookupError:
+                    continue
+            for process in processes:
+                process.wait()
+            raise
 
 
     if __name__ == "__main__":
-        if not os.path.exists("./run_dp_template.sh"):
-            print("Template file ./run_dp_template.sh does not exist.")
-            sys.exit(1)
-
-        devices_per_rank = tp_size * pcp_size
-        processes = []
-        for i in range(dp_size_local):
-            dp_rank = args.dp_rank_start + i
-            vllm_engine_port = args.vllm_start_port + i
-            visible_devices = ",".join(
-                str(device)
-                for device in range(i * devices_per_rank, (i + 1) * devices_per_rank)
-            )
-            process = multiprocessing.Process(
-                target=run_command,
-                args=(visible_devices, dp_rank, vllm_engine_port),
-            )
-            processes.append(process)
-            process.start()
-
-        for process in processes:
-            process.join()
+        sys.exit(main())
     ```
 
     The launcher arguments are:
@@ -957,25 +991,28 @@ vLLM Ascend revision.
     |-----------|-------------|
     | `--dp-size` | Global DP size within the Prefill or Decode node group. |
     | `--tp-size` | Tensor-parallel size within each DP rank. |
-    | `--pcp-size` | Prefill context-parallel size; each DP rank uses `tp-size * pcp-size` logical devices. Defaults to `1`. |
-    | `--dp-size-local` | Number of DP ranks started on the current node. |
+    | `--pcp-size` | Prefill context-parallel size. Defaults to `1`. |
+    | `--pp-size` | Pipeline-parallel size. Leave at the default of `1` for the templates below. |
+    | `--dp-size-local` | Number of DP ranks started on the current node. Defaults to `--dp-size`. |
     | `--dp-rank-start` | First DP rank assigned to this node. It is `0` for both single-node groups in this 1P1D example. |
     | `--dp-address` | IP address of the node that coordinates the corresponding DP group. Use the Prefill IP on the Prefill node and the Decode IP on the Decode node. |
     | `--dp-rpc-port` | DP coordination port. It must be unused and reachable within the node group. |
     | `--vllm-start-port` | First API port; the launcher increments it for each local DP rank. |
+    | `--template`, `--script` | Path to the shell template. Defaults to `./run_dp_template.sh`. |
 
-    The launcher passes eight positional arguments to `run_dp_template.sh`:
+    The launcher passes nine positional arguments to `run_dp_template.sh`:
 
     | Position | Value | Used by the template |
     |----------|-------|----------------------|
-    | `$1` | `visible_devices` | `ASCEND_RT_VISIBLE_DEVICES` |
-    | `$2` | `vllm_engine_port` | `--port` |
-    | `$3` | `dp_size` | `--data-parallel-size` |
+    | `$1` | `devices` | `ASCEND_RT_VISIBLE_DEVICES` |
+    | `$2` | `port` | `--port` |
+    | `$3` | `args.dp_size` | `--data-parallel-size` |
     | `$4` | `dp_rank` | `--data-parallel-rank` |
     | `$5` | `args.dp_address` | `--data-parallel-address` |
     | `$6` | `args.dp_rpc_port` | `--data-parallel-rpc-port` |
-    | `$7` | `tp_size` | `--tensor-parallel-size` |
-    | `$8` | `pcp_size` | `--prefill-context-parallel-size` |
+    | `$7` | `args.tp_size` | `--tensor-parallel-size` |
+    | `$8` | `args.pcp_size` | `--prefill-context-parallel-size` |
+    | `$9` | `args.pp_size` | Unused; PP remains `1`. |
 
     #### 5.2.1.2 Start the Prefill Node
 
