@@ -390,51 +390,164 @@ vLLM Ascend revision.
 
     ##### Prepare the 950DT DP Launcher
 
-    Use the repository's
-    [external DP launcher](https://github.com/vllm-project/vllm-ascend/tree/main/examples/external_online_dp).
-    On both nodes, copy it from the selected vLLM Ascend checkout into a working
-    directory inside the container. Set `VLLM_ASCEND_PATH` to that checkout;
-    the image uses `/vllm-workspace/vllm-ascend`.
+    On both nodes, create a working directory inside the container:
 
-    ```bash
-    VLLM_ASCEND_PATH="/vllm-workspace/vllm-ascend"
+    ```shell
     mkdir -p ~/dsv41-pd
-    cp "$VLLM_ASCEND_PATH/examples/external_online_dp/launch_online_dp.py" ~/dsv41-pd/
     cd ~/dsv41-pd
     ```
 
-    Keep the node's `run_dp_template.sh` in the same directory and run the
-    launcher from there. Each node needs its own role-specific template.
+    Save the following script from the
+    [official example](https://github.com/vllm-project/vllm-ascend/blob/main/examples/external_online_dp/launch_online_dp.py)
+    as `launch_online_dp.py` in this directory, beside the node's
+    `run_dp_template.sh`. Run the launcher from that directory.
+
+    ```python
+    #!/usr/bin/env python3
+    """Launch one shell template per local DP rank."""
+
+    import argparse
+    import os
+    import signal
+    import subprocess
+    import sys
+    import time
+
+    POLL_INTERVAL = 0.1
+
+
+    def parse_args():
+        parser = argparse.ArgumentParser()
+        parser.add_argument("--dp-size", type=int, required=True, help="Global data parallel size.")
+        parser.add_argument("--tp-size", type=int, default=1, help="Tensor parallel size.")
+        parser.add_argument("--pcp-size", type=int, default=1, help="Prefill context parallel size (default: 1).")
+        parser.add_argument("--pp-size", type=int, default=1, help="Pipeline parallel size (default: 1).")
+        parser.add_argument("--dp-size-local", type=int, default=-1, help="Local DP size; defaults to --dp-size.")
+        parser.add_argument("--dp-rank-start", type=int, default=0, help="First global DP rank on this node.")
+        parser.add_argument("--dp-address", required=True, help="IP address of the DP master node.")
+        parser.add_argument("--dp-rpc-port", type=int, default=12345, help="DP RPC port.")
+        parser.add_argument("--vllm-start-port", type=int, default=9000, help="First API port on this node.")
+        parser.add_argument("--template", "--script", default="./run_dp_template.sh", help="Shell template path.")
+        args = parser.parse_args()
+
+        if args.dp_size_local == -1:
+            args.dp_size_local = args.dp_size
+        if min(args.dp_size, args.dp_size_local, args.tp_size, args.pcp_size, args.pp_size) < 1:
+            parser.error("Parallel sizes must be positive.")
+        if args.dp_rank_start < 0 or args.dp_rank_start + args.dp_size_local > args.dp_size:
+            parser.error("Local DP ranks exceed the global DP range.")
+        if not os.path.isfile(args.template):
+            parser.error(f"Template does not exist: {args.template}")
+        return args
+
+
+    def handle_sigterm(signum, frame):
+        raise SystemExit()
+
+
+    def main():
+        args = parse_args()
+        devices_per_rank = args.tp_size * args.pcp_size * args.pp_size
+        processes = []
+        try:
+            signal.signal(signal.SIGTERM, handle_sigterm)
+            for i in range(args.dp_size_local):
+                dp_rank = args.dp_rank_start + i
+                port = args.vllm_start_port + i
+                devices = ",".join(str(x) for x in range(i * devices_per_rank, (i + 1) * devices_per_rank))
+                command = [
+                    "bash",
+                    "-o",
+                    "pipefail",
+                    args.template,
+                    devices,  # $1: visible devices
+                    str(port),  # $2: API port
+                    str(args.dp_size),  # $3: global DP size
+                    str(dp_rank),  # $4: global DP rank
+                    args.dp_address,  # $5: DP address
+                    str(args.dp_rpc_port),  # $6: DP RPC port
+                    str(args.tp_size),  # $7: TP
+                    str(args.pcp_size),  # $8: PCP
+                    str(args.pp_size),  # $9: PP
+                ]
+
+                print(f"DP rank={dp_rank}, devices={devices}, API port={port}", flush=True)
+                # Start all local ranks before waiting; each rank owns a process group.
+                processes.append(subprocess.Popen(command, start_new_session=True))
+
+            # Check every rank so a running rank cannot hide another rank's failure.
+            while True:
+                running = False
+                for i, process in enumerate(processes):
+                    code = process.poll()
+                    if code is None:
+                        running = True
+                    elif code != 0:
+                        raise RuntimeError(f"DP rank {args.dp_rank_start + i} exited with code {code}")
+                if not running:
+                    return 0
+                time.sleep(POLL_INTERVAL)
+        except BaseException:
+            # Notify every recorded rank, including workers whose shell has exited.
+            for process in processes:
+                try:
+                    os.killpg(process.pid, signal.SIGTERM)
+                except ProcessLookupError:
+                    continue
+            for process in processes:
+                process.wait()
+            raise
+
+
+    if __name__ == "__main__":
+        sys.exit(main())
+    ```
 
     Each local DP rank receives `TP × PCP × PP` consecutive devices, numbered
     from zero on each node regardless of `--dp-rank-start`. Keep each rank's
     TP/PCP/PP workers on one node. The launcher monitors all local ranks and
-    attempts to terminate their process groups if a rank fails. See the linked
-    launcher guide for interruption and cleanup behavior.
+    attempts to terminate their process groups if a rank fails. See the
+    [launcher guide](https://github.com/vllm-project/vllm-ascend/tree/main/examples/external_online_dp)
+    for interruption and cleanup behavior.
 
     The launcher arguments are:
 
-    | Parameter | Description | Value in this 1P1D example |
-    | --------- | ----------- | -------------------------- |
-    | `--dp-size` | Total DP ranks in one role's group, across all its nodes. Prefill and Decode form separate groups. | `8` on both roles. |
-    | `--tp-size` | Tensor parallel size. | `1`. |
-    | `--pcp-size` | Prefill context parallel size. | `1` (default). |
-    | `--pp-size` | Pipeline parallel size. | `1` (default); keep PP disabled for these recipes. |
-    | `--dp-size-local` | Number of DP ranks started on the current node. | `8`. |
-    | `--dp-rank-start` | Global rank of the first DP engine on this node. | `0`; local engines receive ranks `0` through `7`. |
-    | `--dp-address` | DP master IP for this role's group; use the same address on every node in the group. | Prefill node IP for the Prefill group; Decode node IP for the Decode group. |
-    | `--dp-rpc-port` | Coordination port shared by all ranks in this role's DP group. | `12321`; the two groups can use the same port on different servers. |
-    | `--vllm-start-port` | API port of the first local engine, incremented by one for each subsequent engine. | `7100`, giving ports `7100` through `7107`. |
-    | `--template` (alias `--script`) | Shell template path, relative to the current working directory. | `./run_dp_template.sh`. |
+    | Parameter | Description |
+    | --------- | ----------- |
+    | `--dp-size` | Global DP size within the Prefill or Decode group; `8` for each role in this example. |
+    | `--tp-size` | Tensor parallel size within each DP rank. Defaults to `1`. |
+    | `--pcp-size` | Prefill context parallel size. Defaults to `1`. |
+    | `--pp-size` | Pipeline parallel size. Defaults to `1` and is forwarded to the template as `$9`. |
+    | `--dp-size-local` | Number of DP ranks started on the current node. Defaults to `--dp-size`. |
+    | `--dp-rank-start` | First global DP rank assigned to this node; `0` for both single-node groups here. |
+    | `--dp-address` | IP address of the corresponding group's DP coordinator. Use the Prefill IP on Prefill and the Decode IP on Decode. |
+    | `--dp-rpc-port` | Coordination port shared by all ranks in the group; `12321` here. |
+    | `--vllm-start-port` | First API port, incremented for each local DP rank; `7100` here. |
+    | `--template`, `--script` | Path to the shell template. Defaults to `./run_dp_template.sh`. |
 
     For multi-node DP or wide EP, set `--dp-address` to the corresponding
     group's DP master IP on every node, including worker nodes.
 
-    The launcher calls `run_dp_template.sh` with nine positional arguments:
-    visible devices, API port, global DP size, global DP rank, coordinator IP,
-    coordinator RPC port, TP size, PCP size, and PP size. It defaults omitted
-    `--pcp-size` and `--pp-size` options to `1` and always supplies both values.
-    Direct shell-template calls must also supply all nine arguments.
+    The launcher passes nine positional arguments to `run_dp_template.sh`:
+
+    | Position | Value | Used by the template |
+    | -------- | ----- | -------------------- |
+    | `$1` | `devices` | `ASCEND_RT_VISIBLE_DEVICES` |
+    | `$2` | `port` | `--port` |
+    | `$3` | `args.dp_size` | `--data-parallel-size` |
+    | `$4` | `dp_rank` | `--data-parallel-rank` |
+    | `$5` | `args.dp_address` | `--data-parallel-address` |
+    | `$6` | `args.dp_rpc_port` | `--data-parallel-rpc-port` |
+    | `$7` | `args.tp_size` | `--tensor-parallel-size` |
+    | `$8` | `args.pcp_size` | `--prefill-context-parallel-size` |
+    | `$9` | `args.pp_size` | `--pipeline-parallel-size` |
+
+    The example commands use the default PP size of `1`. Set `--pp-size` on
+    the launcher to pass another value through `$9`; the templates do not
+    hard-code it. Keep `dp_size_local × tp_size × pcp_size × pp_size` within
+    the available devices on each node. The launcher always supplies all nine
+    arguments, including omitted PCP/PP defaults. Direct shell-template calls
+    must also supply all nine arguments.
 
     Prefill and Decode can start concurrently in separate terminals. Each
     launcher runs in the foreground; keep its terminal open.
@@ -442,35 +555,23 @@ vLLM Ascend revision.
     ##### Start the 950DT Decode Node
 
     On Decode, save the following as `~/dsv41-pd/run_dp_template.sh`, beside
-    `launch_online_dp.py`. Set `local_ip`, `nic_name`, and `MODEL_PATH` for the
+    `launch_online_dp.py`. Set `LOCAL_IP`, `NIC_NAME`, and `MODEL_PATH` for the
     Decode server.
 
-    ```bash
+    ```shell
     #!/usr/bin/env bash
 
-    # Arguments passed by launch_online_dp.py, in order:
-    # $1: Comma-separated visible NPU IDs (one ID for DP8/TP1).
-    # $2: API port for this rank (7100-7107).
-    # $3: Global DP size of this role's group (8 for DP8).
-    # $4: Global DP rank in this role's group (0-7 for DP8).
-    # $5: IP address of this role's DP coordinator.
-    # $6: DP coordinator RPC port (12321).
-    # $7: TP size (1).
-    # $8: PCP size (1).
-    # $9: PP size (1).
-
-    nic_name="<NETWORK_INTERFACE>"
-    local_ip="<LOCAL_IP>"
-    # Replace <YOUR_MODEL_PATH> with the actual path recorded in [Section 3.1](#31-model-weight).
+    NIC_NAME="<NETWORK_INTERFACE>"
+    LOCAL_IP="<DECODE_NODE_IP>"
     MODEL_PATH="<YOUR_MODEL_PATH>"
 
     export VLLM_USE_V2_MODEL_RUNNER=1
     export VLLM_USE_FASTOKENS=1
-    export VLLM_HOST_IP="$local_ip"
-    export HCCL_IF_IP="$local_ip"
-    export GLOO_SOCKET_IFNAME="$nic_name"
-    export TP_SOCKET_IFNAME="$nic_name"
-    export HCCL_SOCKET_IFNAME="$nic_name"
+    export VLLM_HOST_IP="$LOCAL_IP"
+    export HCCL_IF_IP="$LOCAL_IP"
+    export GLOO_SOCKET_IFNAME="$NIC_NAME"
+    export TP_SOCKET_IFNAME="$NIC_NAME"
+    export HCCL_SOCKET_IFNAME="$NIC_NAME"
     export HCCL_OP_EXPANSION_MODE=CCU_SCHED
     export HCCL_BUFFSIZE=1600
     export HCCL_CONNECT_TIMEOUT=1200
@@ -479,21 +580,21 @@ vLLM Ascend revision.
     export OMP_PROC_BIND=false
     export OMP_NUM_THREADS=10
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-    export ASCEND_RT_VISIBLE_DEVICES="$1"
+    export ASCEND_RT_VISIBLE_DEVICES=$1
     export ASCEND_LOCAL_COMM_RES='{"version":"1.3"}'
 
-    exec vllm serve "$MODEL_PATH" \
-        --host "$local_ip" \
-        --port "$2" \
+    vllm serve "$MODEL_PATH" \
+        --host "$LOCAL_IP" \
+        --port $2 \
         --served-model-name dsv41 \
-        --data-parallel-size "$3" \
+        --data-parallel-size $3 \
         --data-parallel-size-local 1 \
-        --data-parallel-rank "$4" \
-        --data-parallel-address "$5" \
-        --data-parallel-rpc-port "$6" \
-        --tensor-parallel-size "$7" \
-        --prefill-context-parallel-size "$8" \
-        --pipeline-parallel-size "$9" \
+        --data-parallel-rank $4 \
+        --data-parallel-address $5 \
+        --data-parallel-rpc-port $6 \
+        --tensor-parallel-size $7 \
+        --prefill-context-parallel-size $8 \
+        --pipeline-parallel-size $9 \
         --enable-expert-parallel \
         --max-model-len 1048576 \
         --max-num-batched-tokens 384 \
@@ -527,27 +628,19 @@ vLLM Ascend revision.
         }'
     ```
 
-    In the launch command below, `$1` is a visible NPU ID from `0` to `7`,
-    `$2` is its API port (`7100` through `7107`), `$3` is the global DP size
-    (`8`), `$4` is the global DP rank (`0` through `7`), `$5` is the Decode
-    group's coordinator IP, `$6` is its DP RPC port (`12321`), and
-    `$7` / `$8` / `$9` are the TP / PCP / PP sizes (all `1`).
-
     Start the eight Decode engines from their working directory:
 
-    ```bash
+    ```shell
     cd ~/dsv41-pd
-    dp_master_ip="<DECODE_DP_MASTER_IP>"
+    DP_MASTER_IP="<DECODE_DP_MASTER_IP>"
 
-    python3 launch_online_dp.py \
-        --template ./run_dp_template.sh \
+    python launch_online_dp.py \
         --dp-size 8 \
         --tp-size 1 \
         --pcp-size 1 \
-        --pp-size 1 \
         --dp-size-local 8 \
         --dp-rank-start 0 \
-        --dp-address "$dp_master_ip" \
+        --dp-address "$DP_MASTER_IP" \
         --dp-rpc-port 12321 \
         --vllm-start-port 7100
     ```
@@ -555,35 +648,23 @@ vLLM Ascend revision.
     ##### Start the 950DT Prefill Node
 
     On Prefill, save the following as `~/dsv41-pd/run_dp_template.sh`, beside
-    its own `launch_online_dp.py`. Set `local_ip`, `nic_name`, and `MODEL_PATH`
+    its own `launch_online_dp.py`. Set `LOCAL_IP`, `NIC_NAME`, and `MODEL_PATH`
     for the Prefill server.
 
-    ```bash
+    ```shell
     #!/usr/bin/env bash
 
-    # Arguments passed by launch_online_dp.py, in order:
-    # $1: Comma-separated visible NPU IDs (one ID for DP8/TP1).
-    # $2: API port for this rank (7100-7107).
-    # $3: Global DP size of this role's group (8 for DP8).
-    # $4: Global DP rank in this role's group (0-7 for DP8).
-    # $5: IP address of this role's DP coordinator.
-    # $6: DP coordinator RPC port (12321).
-    # $7: TP size (1).
-    # $8: PCP size (1).
-    # $9: PP size (1).
-
-    nic_name="<NETWORK_INTERFACE>"
-    local_ip="<LOCAL_IP>"
-    # Replace <YOUR_MODEL_PATH> with the actual path recorded in [Section 3.1](#31-model-weight).
+    NIC_NAME="<NETWORK_INTERFACE>"
+    LOCAL_IP="<PREFILL_NODE_IP>"
     MODEL_PATH="<YOUR_MODEL_PATH>"
 
     export VLLM_USE_V2_MODEL_RUNNER=1
     export VLLM_USE_FASTOKENS=1
-    export VLLM_HOST_IP="$local_ip"
-    export HCCL_IF_IP="$local_ip"
-    export GLOO_SOCKET_IFNAME="$nic_name"
-    export TP_SOCKET_IFNAME="$nic_name"
-    export HCCL_SOCKET_IFNAME="$nic_name"
+    export VLLM_HOST_IP="$LOCAL_IP"
+    export HCCL_IF_IP="$LOCAL_IP"
+    export GLOO_SOCKET_IFNAME="$NIC_NAME"
+    export TP_SOCKET_IFNAME="$NIC_NAME"
+    export HCCL_SOCKET_IFNAME="$NIC_NAME"
     export HCCL_OP_EXPANSION_MODE=CCU_SCHED
     export HCCL_BUFFSIZE=1024
     export HCCL_CONNECT_TIMEOUT=1200
@@ -592,24 +673,29 @@ vLLM Ascend revision.
     export OMP_PROC_BIND=false
     export OMP_NUM_THREADS=10
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-    export ASCEND_RT_VISIBLE_DEVICES="$1"
+    export ASCEND_RT_VISIBLE_DEVICES=$1
     export ASCEND_LOCAL_COMM_RES='{"version":"1.3"}'
 
-    exec vllm serve "$MODEL_PATH" \
-        --host "$local_ip" \
-        --port "$2" \
+    vllm serve "$MODEL_PATH" \
+        --host "$LOCAL_IP" \
+        --port $2 \
         --served-model-name dsv41 \
-        --data-parallel-size "$3" \
+        --data-parallel-size $3 \
         --data-parallel-size-local 1 \
-        --data-parallel-rank "$4" \
-        --data-parallel-address "$5" \
-        --data-parallel-rpc-port "$6" \
-        --tensor-parallel-size "$7" \
-        --prefill-context-parallel-size "$8" \
-        --pipeline-parallel-size "$9" \
+        --data-parallel-rank $4 \
+        --data-parallel-address $5 \
+        --data-parallel-rpc-port $6 \
+        --tensor-parallel-size $7 \
+        --prefill-context-parallel-size $8 \
+        --pipeline-parallel-size $9 \
         --enable-expert-parallel \
         --enable-eplb \
-        --eplb-config '{"window_size":64,"step_interval":128,"policy":"stair","num_redundant_experts":16}' \
+        --eplb-config '{
+            "window_size": 64,
+            "step_interval": 128,
+            "policy": "stair",
+            "num_redundant_experts": 16
+        }' \
         --max-model-len 1048576 \
         --max-num-batched-tokens 8192 \
         --max-num-seqs 16 \
@@ -639,31 +725,23 @@ vLLM Ascend revision.
         }'
     ```
 
-    In the launch command below, `$1` is a visible NPU ID from `0` to `7`,
-    `$2` is its API port (`7100` through `7107`), `$3` is the global DP size
-    (`8`), `$4` is the global DP rank (`0` through `7`), `$5` is the Prefill
-    group's coordinator IP, `$6` is its DP RPC port (`12321`), and
-    `$7` / `$8` / `$9` are the TP / PCP / PP sizes (all `1`).
-
     `kv_port` is a base port; the connector adds the DP/TP/PCP rank offsets.
     Keep the same base port on every rank of the same role. The V2 connector
     discovers the peer topology during its handshake.
 
     Start the eight Prefill engines from their working directory:
 
-    ```bash
+    ```shell
     cd ~/dsv41-pd
-    dp_master_ip="<PREFILL_DP_MASTER_IP>"
+    DP_MASTER_IP="<PREFILL_DP_MASTER_IP>"
 
-    python3 launch_online_dp.py \
-        --template ./run_dp_template.sh \
+    python launch_online_dp.py \
         --dp-size 8 \
         --tp-size 1 \
         --pcp-size 1 \
-        --pp-size 1 \
         --dp-size-local 8 \
         --dp-rank-start 0 \
-        --dp-address "$dp_master_ip" \
+        --dp-address "$DP_MASTER_IP" \
         --dp-rpc-port 12321 \
         --vllm-start-port 7100
     ```
@@ -676,7 +754,7 @@ vLLM Ascend revision.
     can reach both servers. The image contains the non-layerwise proxy used
     by MooncakeConnectorV2. Register all eight endpoints from each role:
 
-    ```bash
+    ```shell
     P_IP="<PREFILL_IP>"
     D_IP="<DECODE_IP>"
 
@@ -694,7 +772,7 @@ vLLM Ascend revision.
     `/healthcheck` reports configured instance counts, not backend readiness.
     Verify the proxy and model entry with:
 
-    ```bash
+    ```shell
     export SERVICE_URL="http://<PROXY_IP>:1999"
 
     curl -sS -o /dev/null -w 'HTTP %{http_code}\n' "$SERVICE_URL/healthcheck"
@@ -750,16 +828,14 @@ vLLM Ascend revision.
     the single Prefill DP rank; the template forwards `$8` to
     `--prefill-context-parallel-size`.
 
-    ```bash
+    ```shell
     cd ~/dsv41-pd
     P_IP="<PREFILL_IP>"
 
-    python3 launch_online_dp.py \
-        --template ./run_dp_template.sh \
+    python launch_online_dp.py \
         --dp-size 1 \
         --tp-size 1 \
         --pcp-size 8 \
-        --pp-size 1 \
         --dp-size-local 1 \
         --dp-rank-start 0 \
         --dp-address "$P_IP" \
@@ -791,16 +867,14 @@ vLLM Ascend revision.
     on each Decode server. Both servers use the first Decode server's IP as
     the DP master:
 
-    ```bash
+    ```shell
     D_DP_MASTER_IP="<FIRST_DECODE_IP>"
     DP_RANK_START=0  # Set to 8 on the second Decode server.
 
-    python3 launch_online_dp.py \
-        --template ./run_dp_template.sh \
+    python launch_online_dp.py \
         --dp-size 16 \
         --tp-size 1 \
         --pcp-size 1 \
-        --pp-size 1 \
         --dp-size-local 8 \
         --dp-rank-start "$DP_RANK_START" \
         --dp-address "$D_DP_MASTER_IP" \
@@ -1554,18 +1628,15 @@ Select the tab for the target hardware.
 
     On both nodes, create a separate working directory for the pooled deployment:
 
-    ```bash
-    VLLM_ASCEND_PATH="/vllm-workspace/vllm-ascend"
+    ```shell
     mkdir -p ~/dsv41-memcache
-    cp "$VLLM_ASCEND_PATH/examples/external_online_dp/launch_online_dp.py" ~/dsv41-memcache/
     cd ~/dsv41-memcache
     ```
 
-    Set `VLLM_ASCEND_PATH` as described in
-    [Prepare the 950DT DP Launcher](#prepare-the-950dt-dp-launcher). This uses the
-    same repository launcher and nine-argument template convention. Save the
-    corresponding pooled `run_dp_template.sh` below beside it and run the
-    launcher from this directory with `--template ./run_dp_template.sh`.
+    Reuse `launch_online_dp.py` from
+    [Prepare the 950DT DP Launcher](#prepare-the-950dt-dp-launcher). Save it
+    beside the corresponding pooled `run_dp_template.sh` below. Both roles
+    use the same nine-argument template convention, including PP through `$9`.
 
     Install `memfabric-hybrid` and `memcache-hybrid` on both nodes using the
     [Memcache backend guide](../../user_guide/feature_guide/kv_cache_pool_ascend_store.md#scenario-2-memcache-backend).
@@ -1626,7 +1697,7 @@ Select the tab for the target hardware.
 
     Start one MetaService before starting vLLM:
 
-    ```bash
+    ```shell
     MEMCACHE_INSTALL_PATH="<MEMCACHE_INSTALL_PATH>"
     export LD_LIBRARY_PATH="$MEMCACHE_INSTALL_PATH/memcache_hybrid/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
     export MMC_META_CONFIG_PATH="<MEMCACHE_CONFIG_DIR>/meta.conf"
@@ -1639,37 +1710,27 @@ Select the tab for the target hardware.
     ##### 5.3.1.2 Start the Decode Node with Pooling
 
     On Decode, save the following as `~/dsv41-memcache/run_dp_template.sh`,
-    beside `launch_online_dp.py`. Set `local_ip`, `nic_name`, and `MODEL_PATH`
+    beside `launch_online_dp.py`. Set `LOCAL_IP`, `NIC_NAME`, and `MODEL_PATH`
     for this node. Set `MEMCACHE_INSTALL_PATH` to the `Location` reported by
     `pip show memcache_hybrid`, and `MEMCACHE_CONFIG_DIR` to the directory
     containing this node's `mmc-local.conf`.
 
-    ```bash
+    ```shell
     #!/usr/bin/env bash
 
-    # Arguments passed by launch_online_dp.py, in order:
-    # $1: Comma-separated visible NPU IDs (one ID for DP8/TP1).
-    # $2: API port for this rank (7100-7107).
-    # $3: Global DP size of this role's group (8 for DP8).
-    # $4: Global DP rank in this role's group (0-7 for DP8).
-    # $5: IP address of this role's DP coordinator.
-    # $6: DP coordinator RPC port (12321).
-    # $7: TP size (1).
-    # $8: PCP size (1).
-    # $9: PP size (1).
-
-    nic_name="<NETWORK_INTERFACE>"
-    local_ip="<LOCAL_IP>"
-    # Replace <YOUR_MODEL_PATH> with the actual path recorded in [Section 3.1](#31-model-weight).
+    NIC_NAME="<NETWORK_INTERFACE>"
+    LOCAL_IP="<DECODE_NODE_IP>"
     MODEL_PATH="<YOUR_MODEL_PATH>"
+    MEMCACHE_INSTALL_PATH="<MEMCACHE_INSTALL_PATH>"
+    MEMCACHE_CONFIG_DIR="<MEMCACHE_CONFIG_DIR>"
 
     export VLLM_USE_V2_MODEL_RUNNER=1
     export VLLM_USE_FASTOKENS=1
-    export VLLM_HOST_IP="$local_ip"
-    export HCCL_IF_IP="$local_ip"
-    export GLOO_SOCKET_IFNAME="$nic_name"
-    export TP_SOCKET_IFNAME="$nic_name"
-    export HCCL_SOCKET_IFNAME="$nic_name"
+    export VLLM_HOST_IP="$LOCAL_IP"
+    export HCCL_IF_IP="$LOCAL_IP"
+    export GLOO_SOCKET_IFNAME="$NIC_NAME"
+    export TP_SOCKET_IFNAME="$NIC_NAME"
+    export HCCL_SOCKET_IFNAME="$NIC_NAME"
     export HCCL_OP_EXPANSION_MODE=CCU_SCHED
     export HCCL_BUFFSIZE=1600
     export HCCL_CONNECT_TIMEOUT=1200
@@ -1678,26 +1739,25 @@ Select the tab for the target hardware.
     export OMP_PROC_BIND=false
     export OMP_NUM_THREADS=10
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-    export ASCEND_RT_VISIBLE_DEVICES="$1"
+    export ASCEND_RT_VISIBLE_DEVICES=$1
     export ASCEND_LOCAL_COMM_RES='{"version":"1.3"}'
 
-    MEMCACHE_INSTALL_PATH="<MEMCACHE_INSTALL_PATH>"
-    MEMCACHE_CONFIG_DIR="<MEMCACHE_CONFIG_DIR>"
+    # Parameters required by the Memcache KV Cache Pool.
     export MMC_LOCAL_CONFIG_PATH="$MEMCACHE_CONFIG_DIR/mmc-local.conf"
     export LD_LIBRARY_PATH="$MEMCACHE_INSTALL_PATH/memcache_hybrid/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 
-    exec vllm serve "$MODEL_PATH" \
-        --host "$local_ip" \
-        --port "$2" \
+    vllm serve "$MODEL_PATH" \
+        --host "$LOCAL_IP" \
+        --port $2 \
         --served-model-name dsv41 \
-        --data-parallel-size "$3" \
+        --data-parallel-size $3 \
         --data-parallel-size-local 1 \
-        --data-parallel-rank "$4" \
-        --data-parallel-address "$5" \
-        --data-parallel-rpc-port "$6" \
-        --tensor-parallel-size "$7" \
-        --prefill-context-parallel-size "$8" \
-        --pipeline-parallel-size "$9" \
+        --data-parallel-rank $4 \
+        --data-parallel-address $5 \
+        --data-parallel-rpc-port $6 \
+        --tensor-parallel-size $7 \
+        --prefill-context-parallel-size $8 \
+        --pipeline-parallel-size $9 \
         --enable-expert-parallel \
         --max-model-len 1048576 \
         --max-num-batched-tokens 384 \
@@ -1749,30 +1809,10 @@ Select the tab for the target hardware.
         }'
     ```
 
-    In the launch command below, `$1` is a visible NPU ID from `0` to `7`,
-    `$2` is its API port (`7100` through `7107`), `$3` is the global DP size
-    (`8`), `$4` is the global DP rank (`0` through `7`), `$5` is the Decode
-    group's coordinator IP, `$6` is its DP RPC port (`12321`), and
-    `$7` / `$8` / `$9` are the TP / PCP / PP sizes (all `1`).
-
-    After MetaService is ready, start the eight Decode engines:
-
-    ```bash
-    cd ~/dsv41-memcache
-    dp_master_ip="<DECODE_DP_MASTER_IP>"
-
-    python3 launch_online_dp.py \
-        --template ./run_dp_template.sh \
-        --dp-size 8 \
-        --tp-size 1 \
-        --pcp-size 1 \
-        --pp-size 1 \
-        --dp-size-local 8 \
-        --dp-rank-start 0 \
-        --dp-address "$dp_master_ip" \
-        --dp-rpc-port 12321 \
-        --vllm-start-port 7100
-    ```
+    After MetaService is ready, start the eight Decode engines with the
+    launcher options from [Start the 950DT Decode Node](#start-the-950dt-decode-node).
+    Run from `~/dsv41-memcache` instead of `~/dsv41-pd` so that the default
+    template is this node's pooled role script.
 
     ##### 5.3.1.3 Start the Prefill Node with Pooling
 
@@ -1781,32 +1821,22 @@ Select the tab for the target hardware.
     Memcache paths as described for Decode above. Both nodes must use the same
     MetaService endpoint in `mmc-local.conf`.
 
-    ```bash
+    ```shell
     #!/usr/bin/env bash
 
-    # Arguments passed by launch_online_dp.py, in order:
-    # $1: Comma-separated visible NPU IDs (one ID for DP8/TP1).
-    # $2: API port for this rank (7100-7107).
-    # $3: Global DP size of this role's group (8 for DP8).
-    # $4: Global DP rank in this role's group (0-7 for DP8).
-    # $5: IP address of this role's DP coordinator.
-    # $6: DP coordinator RPC port (12321).
-    # $7: TP size (1).
-    # $8: PCP size (1).
-    # $9: PP size (1).
-
-    nic_name="<NETWORK_INTERFACE>"
-    local_ip="<LOCAL_IP>"
-    # Replace <YOUR_MODEL_PATH> with the actual path recorded in [Section 3.1](#31-model-weight).
+    NIC_NAME="<NETWORK_INTERFACE>"
+    LOCAL_IP="<PREFILL_NODE_IP>"
     MODEL_PATH="<YOUR_MODEL_PATH>"
+    MEMCACHE_INSTALL_PATH="<MEMCACHE_INSTALL_PATH>"
+    MEMCACHE_CONFIG_DIR="<MEMCACHE_CONFIG_DIR>"
 
     export VLLM_USE_V2_MODEL_RUNNER=1
     export VLLM_USE_FASTOKENS=1
-    export VLLM_HOST_IP="$local_ip"
-    export HCCL_IF_IP="$local_ip"
-    export GLOO_SOCKET_IFNAME="$nic_name"
-    export TP_SOCKET_IFNAME="$nic_name"
-    export HCCL_SOCKET_IFNAME="$nic_name"
+    export VLLM_HOST_IP="$LOCAL_IP"
+    export HCCL_IF_IP="$LOCAL_IP"
+    export GLOO_SOCKET_IFNAME="$NIC_NAME"
+    export TP_SOCKET_IFNAME="$NIC_NAME"
+    export HCCL_SOCKET_IFNAME="$NIC_NAME"
     export HCCL_OP_EXPANSION_MODE=CCU_SCHED
     export HCCL_BUFFSIZE=1024
     export HCCL_CONNECT_TIMEOUT=1200
@@ -1815,29 +1845,33 @@ Select the tab for the target hardware.
     export OMP_PROC_BIND=false
     export OMP_NUM_THREADS=10
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-    export ASCEND_RT_VISIBLE_DEVICES="$1"
+    export ASCEND_RT_VISIBLE_DEVICES=$1
     export ASCEND_LOCAL_COMM_RES='{"version":"1.3"}'
 
-    MEMCACHE_INSTALL_PATH="<MEMCACHE_INSTALL_PATH>"
-    MEMCACHE_CONFIG_DIR="<MEMCACHE_CONFIG_DIR>"
+    # Parameters required by the Memcache KV Cache Pool.
     export MMC_LOCAL_CONFIG_PATH="$MEMCACHE_CONFIG_DIR/mmc-local.conf"
     export LD_LIBRARY_PATH="$MEMCACHE_INSTALL_PATH/memcache_hybrid/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 
-    exec vllm serve "$MODEL_PATH" \
-        --host "$local_ip" \
-        --port "$2" \
+    vllm serve "$MODEL_PATH" \
+        --host "$LOCAL_IP" \
+        --port $2 \
         --served-model-name dsv41 \
-        --data-parallel-size "$3" \
+        --data-parallel-size $3 \
         --data-parallel-size-local 1 \
-        --data-parallel-rank "$4" \
-        --data-parallel-address "$5" \
-        --data-parallel-rpc-port "$6" \
-        --tensor-parallel-size "$7" \
-        --prefill-context-parallel-size "$8" \
-        --pipeline-parallel-size "$9" \
+        --data-parallel-rank $4 \
+        --data-parallel-address $5 \
+        --data-parallel-rpc-port $6 \
+        --tensor-parallel-size $7 \
+        --prefill-context-parallel-size $8 \
+        --pipeline-parallel-size $9 \
         --enable-expert-parallel \
         --enable-eplb \
-        --eplb-config '{"window_size":64,"step_interval":128,"policy":"stair","num_redundant_experts":16}' \
+        --eplb-config '{
+            "window_size": 64,
+            "step_interval": 128,
+            "policy": "stair",
+            "num_redundant_experts": 16
+        }' \
         --max-model-len 1048576 \
         --max-num-batched-tokens 8192 \
         --max-num-seqs 16 \
@@ -1885,30 +1919,10 @@ Select the tab for the target hardware.
         }'
     ```
 
-    In the launch command below, `$1` is a visible NPU ID from `0` to `7`,
-    `$2` is its API port (`7100` through `7107`), `$3` is the global DP size
-    (`8`), `$4` is the global DP rank (`0` through `7`), `$5` is the Prefill
-    group's coordinator IP, `$6` is its DP RPC port (`12321`), and
-    `$7` / `$8` / `$9` are the TP / PCP / PP sizes (all `1`).
-
-    After MetaService is ready, start the eight Prefill engines:
-
-    ```bash
-    cd ~/dsv41-memcache
-    dp_master_ip="<PREFILL_DP_MASTER_IP>"
-
-    python3 launch_online_dp.py \
-        --template ./run_dp_template.sh \
-        --dp-size 8 \
-        --tp-size 1 \
-        --pcp-size 1 \
-        --pp-size 1 \
-        --dp-size-local 8 \
-        --dp-rank-start 0 \
-        --dp-address "$dp_master_ip" \
-        --dp-rpc-port 12321 \
-        --vllm-start-port 7100
-    ```
+    After MetaService is ready, start the eight Prefill engines with the
+    launcher options from [Start the 950DT Prefill Node](#start-the-950dt-prefill-node).
+    Run from `~/dsv41-memcache` instead of `~/dsv41-pd` so that the default
+    template is this node's pooled role script.
 
     ##### 5.3.1.4 Start the Proxy and Verify Pooling
 
@@ -1925,7 +1939,7 @@ Select the tab for the target hardware.
 
     Check Prefill external prefix-cache hits and MetaService DRAM get hits:
 
-    ```bash
+    ```shell
     P_IP="<PREFILL_IP>"
     META_IP="<META_SERVICE_IP>"
 
