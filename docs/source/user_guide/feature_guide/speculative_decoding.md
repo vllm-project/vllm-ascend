@@ -883,4 +883,33 @@ vllm serve Qwen/Qwen3.6-35B-A3B \
 !!! warning
 
     RecoverSSM is experimental. Validate accuracy and performance on your
-    workload before deployment.
+    workload before deployment. Enable speculative decoding, disable stochastic
+    rounding, and use Mamba cache mode `align` with prefix caching or `none`
+    without it.
+
+    For direct prefill/decode (P/D) transfer, use `MooncakeConnectorV2` or
+    `MooncakePullConnector`. Enable RecoverSSM on both roles and match the model
+    weights, speculative method and window, draft checkpoint if used,
+    prefix-caching settings, state dtypes, and convolution layout.
+
+    - **GLM-5.3-Flash (KDA)** runs on A3 and A5. Set `PP=1` and `DCP=1`.
+      `PCP>1` is supported only on prefill KV producers, where the KDA head
+      count must be divisible by `TP × PCP`. Use the `SD` convolution layout
+      on both roles if their KDA head-shard counts differ. FP16 KV cache has
+      not been validated. For external prefix caching, use AscendStore with
+      Memcache or Mooncake, and use `MultiConnector` to combine it with
+      direct P/D transfer.
+    - **Kimi K3 and K3.1 (KDA)** require DSpark with adaptive verification
+      disabled. For P/D, use the same integration version and TP size on both
+      roles and set `VLLM_SSM_CONV_STATE_LAYOUT=SD` on both. The A5 P/D test
+      used a modified image with PP4/TP8 on prefill, DP4/TP8/DCP8 on decode,
+      and `PCP=1`. End-to-end output equivalence remains unverified, including
+      with prefix caching enabled.
+    - **Qwen3.x (GDN)** is validated on A3 and A5. Ascend 310P is unsupported.
+      For Qwen3.8, use the Qwen3.5-compatible `Qwen/Qwen3.8-27B` checkpoint.
+      Use MTP, DSpark, or DFlash with `PP=PCP=DCP=1`, BF16 activations and
+      convolution state, and BF16 or FP32 SSM state. The TP size must divide
+      both the key- and value-head counts, and the value-head count must be
+      divisible by the key-head count. In `align` mode, use a Mamba block size
+      of at least `K + 1`. For P/D, match the TP size and use Mooncake pull mode
+      (`use_layerwise=false`).
