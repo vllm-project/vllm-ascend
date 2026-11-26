@@ -721,8 +721,6 @@ def kda_recoverssm_verify(
         raise ValueError(f"KDA RecoverSSM correction buffer needs shape {expected_correction_shape}")
     expected_kg_shape = (record_capacity, num_heads, spec_query_len, 2 * key_dim)
     if normalized_key_cache is not None:
-        if decay_cache is None:
-            raise ValueError("RecoverSSM normalized keys require the decay record")
         _validate_vector_cache(normalized_key_cache, (record_capacity, num_heads, spec_query_len, key_dim), q.device)
     if decay_cache is not None:
         _validate_vector_cache(decay_cache, (record_capacity, num_heads, spec_query_len, key_dim), q.device)
