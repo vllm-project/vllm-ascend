@@ -117,10 +117,6 @@ def resolve_cluster_ips(
             raise AssertionError("cluster_hosts size mismatch")
         return list(cluster_hosts)
 
-    if num_nodes == 1 and not os.environ.get("LWS_LEADER_ADDRESS"):
-        # Single-node bare-metal runs have no LWS DNS name; the only node is local.
-        return [get_cur_ip()]
-
     logger.info(dns_log_message)
     return get_cluster_ips(num_nodes)
 
