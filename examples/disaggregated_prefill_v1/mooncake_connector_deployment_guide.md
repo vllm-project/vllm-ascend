@@ -7,20 +7,27 @@ The vllm version must be the same as the main branch of vllm-ascend, for example
 
 ## run
 
-### Native API forwarding in the load-balancing proxy
+### Messages and Responses in the load-balancing proxy
 
 `load_balance_proxy_server_example.py` also forwards `/v1/messages` and
-`/v1/responses` when both backends expose those native APIs. Responses requests
+`/v1/responses` when both backends expose those APIs. Responses requests
 must supply explicit input history; `background` and `previous_response_id` are
 unsupported.
 
-The proxy forwards native response bytes, including the backend's original usage.
-When a native response exposes `stop_reason="recomputed"`, it uses the existing
-P/D reassignment path to retry the original request, including its full input
-and token limit. `--max-retries` limits the number of attempts; exhaustion returns
-HTTP 503. Native SSE is buffered until decoding finishes, so a discarded attempt
-does not duplicate output or protocol events. This means native streams do not
-deliver tokens in real time, and a retry can repeat backend tool execution.
+Without recomputation, the proxy forwards the original response bytes and usage.
+On `stop_reason="recomputed"`, it appends generated text to the original prompt
+using the existing Chat/Completions approach: the first Messages message's content,
+or Responses' string input / first input message's content. It preserves the other
+history entries, reassigns P/D instances, and deducts reported output tokens from
+an explicit `max_tokens` / `max_output_tokens` budget. The final response combines
+the earlier text with the continuation and accumulates output-token usage.
+For Responses list input, continuation requires the first item to be a message
+with `content`; a tool-result item cannot be used as the text prompt.
+`--max-retries` bounds the attempts; exhausted attempts or token budget return
+HTTP 503. Continuation currently supports text output; a recomputed response with
+tool or reasoning output returns HTTP 409 instead of silently losing that content.
+Messages/Responses SSE remains buffered until completion to combine text within
+one set of protocol events. These streams do not deliver tokens in real time.
 Chat and Completions keep their existing streaming and continuation behavior.
 
 Messages also recognizes `stop_reason="stop_sequence"` with

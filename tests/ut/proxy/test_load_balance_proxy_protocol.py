@@ -26,28 +26,111 @@ class Body(httpx.AsyncByteStream):
 
 
 def wire(api, obj, streaming):
+    obj = dict(obj)
+    text = obj.pop("text", None)
+    if text is not None:
+        obj.setdefault("usage", {"output_tokens": 1})
+        if api == "/messages":
+            obj.setdefault("content", [{"type": "text", "text": text}])
+        else:
+            obj.setdefault(
+                "output",
+                [{"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": text}]}],
+            )
     if not streaming:
         return json.dumps(obj, ensure_ascii=False, indent=2).encode()
-    event = (
-        {"type": "message_delta", "delta": obj}
-        if api == "/messages"
-        else {
-            "type": "response.completed",
-            "response": obj,
-        }
-    )
+    events = []
+    if api == "/messages":
+        events.append({"type": "message_start", "message": {"id": "msg", "content": []}})
+        for index, block in enumerate(obj.get("content", [])):
+            events.append({"type": "content_block_start", "index": index, "content_block": {**block, "text": ""}})
+            if block.get("type") == "text":
+                events.append(
+                    {
+                        "type": "content_block_delta",
+                        "index": index,
+                        "delta": {"type": "text_delta", "text": block["text"]},
+                    }
+                )
+            events.append({"type": "content_block_stop", "index": index})
+        events.append(
+            {
+                "type": "message_delta",
+                "delta": {k: v for k, v in obj.items() if k != "content"},
+                "usage": obj.get("usage", {}),
+            }
+        )
+        events.append({"type": "message_stop"})
+    else:
+        events.append({"type": "response.created", "response": {"id": "resp", "output": []}})
+        for index, item in enumerate(obj.get("output", [])):
+            events.append(
+                {"type": "response.output_item.added", "output_index": index, "item": {**item, "content": []}}
+            )
+            for content_index, part in enumerate(item.get("content", [])):
+                if part.get("type") != "output_text":
+                    continue
+                ids = {"item_id": "item", "output_index": index, "content_index": content_index}
+                events.extend(
+                    [
+                        {"type": "response.content_part.added", **ids, "part": {**part, "text": ""}},
+                        {"type": "response.output_text.delta", **ids, "delta": part["text"]},
+                        {"type": "response.output_text.done", **ids, "text": part["text"]},
+                        {"type": "response.content_part.done", **ids, "part": part},
+                    ]
+                )
+            events.append({"type": "response.output_item.done", "output_index": index, "item": item})
+        events.append({"type": "response.completed", "response": obj})
+        for sequence_number, event in enumerate(events):
+            event["sequence_number"] = sequence_number
     # Preserve comments, IDs, event names, multiline data, and CRLF framing.
-    data = b"\r\n".join(
-        b"data: " + line for line in json.dumps(event, ensure_ascii=False, indent=2).encode().splitlines()
-    )
-    return b": keepalive\r\nid: event-1\r\nevent: " + event["type"].encode() + b"\r\n" + data + b"\r\n\r\n"
+    frames = []
+    for event in events:
+        data = b"\r\n".join(
+            b"data: " + line for line in json.dumps(event, ensure_ascii=False, indent=2).encode().splitlines()
+        )
+        frames.append(b": keepalive\r\nid: event-1\r\nevent: " + event["type"].encode() + b"\r\n" + data + b"\r\n\r\n")
+    return b"".join(frames)
+
+
+def response_text(api, response, streaming):
+    if not streaming:
+        obj = response.json()
+        parts = (
+            obj.get("content", [])
+            if api == "/messages"
+            else [part for item in obj.get("output", []) for part in item.get("content", [])]
+        )
+        return "".join(part.get("text", "") for part in parts)
+    events = [
+        json.loads(b"\n".join(line[5:].lstrip() for line in frame.splitlines() if line.startswith(b"data:")))
+        for frame in response.content.replace(b"\r\n", b"\n").split(b"\n\n")
+        if b"data:" in frame
+    ]
+    if api == "/messages":
+        assert sum(event["type"] == "message_start" for event in events) == 1
+        assert sum(event["type"] == "message_stop" for event in events) == 1
+        return "".join(
+            event.get("content_block", {}).get("text", "") + event.get("delta", {}).get("text", "") for event in events
+        )
+    assert sum(event["type"] == "response.created" for event in events) == 1
+    assert [event["sequence_number"] for event in events] == list(range(len(events)))
+    text = "".join(event["delta"] for event in events if event["type"] == "response.output_text.delta")
+    final = events[-1]["response"]
+    assert text == "".join(part["text"] for item in final.get("output", []) for part in item.get("content", []))
+    return text
 
 
 @pytest.fixture
 def exchange(monkeypatch):
     """One real httpx client per backend, with load cleanup checked on every path."""
 
-    async def run(api, payload, scripts, *, headers=None, prefill_error=None, affinity=False):
+    async def run(api, payload, scripts, *, headers=None, prefill_error=None, affinity=False, max_retries=2):
+        payload = dict(payload)
+        if api == "/messages":
+            payload.setdefault("messages", [{"role": "user", "content": "hi"}])
+        elif api == "/responses":
+            payload.setdefault("input", "hi")
         calls = {"prefill": [], "decode": []}
         scheduler = proxy.SharedProxyScheduler([("127.0.0.1", 8100)], [("127.0.0.1", 8200)])
         runtime = proxy.WorkerRuntime(scheduler)
@@ -56,7 +139,7 @@ def exchange(monkeypatch):
             proxy,
             "global_args",
             argparse.Namespace(
-                max_retries=2,
+                max_retries=max_retries,
                 retry_delay=0,
                 enable_prefill_affinity=affinity,
             ),
@@ -174,9 +257,12 @@ def test_all_protocols_reassign_after_recompute(exchange, api):
         assert second == {**payload, "messages": [{"role": "user", "content": "hipart"}]}
     elif api == "/completions":
         assert second == {**payload, "prompt": "hipart"}
+    elif api == "/messages":
+        assert second == {**payload, "messages": [{"role": "user", "content": "hipart"}], "max_tokens": 79}
+        assert response_text(api, response, True) == "partdone"
     else:
-        assert second == payload
-        assert response.content == bodies[-1]
+        assert second == {**payload, "input": "hipart", "max_output_tokens": 79}
+        assert response_text(api, response, True) == "partdone"
     for role in calls.values():
         assert all(call["path"] == "/v1" + api for call in role)
 
@@ -233,9 +319,9 @@ def test_native_passthrough_and_prefill_payload(exchange, api, streaming):
 @pytest.mark.parametrize("api", ["/messages", "/responses"])
 @pytest.mark.parametrize("streaming", [False, True])
 @pytest.mark.parametrize("exhausted", [False, True])
-def test_recompute_reuses_original_request_and_fresh_kv(exchange, api, streaming, exhausted):
+def test_recompute_appends_text_and_reduces_budget(exchange, api, streaming, exhausted):
     # Responses needs a backend extension to expose this marker; upstream omits it.
-    stopped = {"stop_reason": "recomputed", "text": "discarded"}
+    stopped = {"stop_reason": "recomputed", "text": "prefix", "usage": {"output_tokens": 7}}
     if api == "/messages":
         stopped.update(stop_reason="stop_sequence", stop_sequence="recomputed")
     final = {"stop_reason": "end_turn", "text": "done"}
@@ -254,11 +340,17 @@ def test_recompute_reuses_original_request_and_fresh_kv(exchange, api, streaming
     if exhausted:
         assert "retry limit" in response.json()["detail"]
     else:
-        assert response.content == wire(api, final, streaming)
+        assert response_text(api, response, streaming) == "prefixdone"
     assert first.closed and last.closed
     assert len(calls["prefill"]) == len(calls["decode"]) == 2
     for index, attempt in enumerate(calls["decode"], 1):
-        assert attempt["body"] == {**payload, "kv_transfer_params": {"remote_block_ids": [index]}}
+        expected = {**payload, "kv_transfer_params": {"remote_block_ids": [index]}}
+        if index == 2:
+            if api == "/messages":
+                expected.update(messages=[{"role": "user", "content": "hiprefix"}], max_tokens=73)
+            else:
+                expected.update(input="hiprefix", max_output_tokens=73)
+        assert attempt["body"] == expected
 
 
 @pytest.mark.parametrize("api", ["/messages", "/responses"])
@@ -271,6 +363,125 @@ def test_recompute_in_unterminated_final_event(exchange, api):
     assert response.status_code == 200
     assert response.content == final
     assert len(calls["prefill"]) == len(calls["decode"]) == 2
+
+
+@pytest.mark.parametrize("api", ["/messages", "/responses"])
+@pytest.mark.parametrize("streaming", [False, True])
+@pytest.mark.parametrize("array_content", [False, True])
+def test_multiple_recomputes_preserve_history_and_accumulate_text(exchange, api, streaming, array_content):
+    content = [{"type": "text" if api == "/messages" else "input_text", "text": "hi"}] if array_content else "hi"
+    history = [{"role": "user", "content": content}, {"role": "assistant", "content": "history"}]
+    field = "messages" if api == "/messages" else "input"
+    limit = "max_tokens" if api == "/messages" else "max_output_tokens"
+    payload = {"stream": streaming, field: history, limit: 20}
+    results = [
+        {"text": "你", "stop_reason": "recomputed", "usage": {"output_tokens": 2}},
+        {"text": "好", "stop_reason": "recomputed", "usage": {"output_tokens": 3}},
+        {
+            "text": "！",
+            "stop_reason": "end_turn",
+            "usage": {"input_tokens": 10, "output_tokens": 1, "total_tokens": 11},
+        },
+    ]
+    response, calls = exchange(
+        api, payload, [httpx.Response(200, stream=Body(wire(api, obj, streaming))) for obj in results], max_retries=3
+    )
+    assert response.status_code == 200
+    assert response_text(api, response, streaming) == "你好！"
+    for attempt, prefix, budget in zip(calls["decode"], ["", "你", "你好"], [20, 18, 15]):
+        expected = (
+            content + [{"type": "text" if api == "/messages" else "input_text", "text": prefix}]
+            if array_content and prefix
+            else content
+        )
+        if not array_content:
+            expected += prefix
+        assert attempt["body"][field] == [{"role": "user", "content": expected}, history[1]]
+        assert attempt["body"][limit] == budget
+    if not streaming:
+        assert response.json()["usage"]["output_tokens"] == 6
+        assert response.json()["usage"]["total_tokens"] == 16
+
+
+@pytest.mark.parametrize("api", ["/messages", "/responses"])
+@pytest.mark.parametrize("streaming", [False, True])
+def test_recompute_does_not_exceed_token_budget(exchange, api, streaming):
+    limit = "max_tokens" if api == "/messages" else "max_output_tokens"
+    response, calls = exchange(
+        api,
+        {"stream": streaming, limit: 2},
+        [
+            httpx.Response(
+                200,
+                content=wire(
+                    api, {"text": "done", "stop_reason": "recomputed", "usage": {"output_tokens": 2}}, streaming
+                ),
+            )
+        ],
+    )
+    assert response.status_code == 503
+    assert "budget" in response.json()["detail"]
+    assert len(calls["decode"]) == len(calls["prefill"]) == 1
+
+
+@pytest.mark.parametrize("streaming", [False, True])
+def test_responses_continuation_only_prefixes_first_text_block(exchange, streaming):
+    first = {"text": "prefix", "stop_reason": "recomputed"}
+    final = {
+        "output": [
+            {
+                "type": "message",
+                "role": "assistant",
+                "content": [{"type": "output_text", "text": "one"}, {"type": "output_text", "text": "two"}],
+            }
+        ]
+    }
+    response, _ = exchange(
+        "/responses",
+        {"stream": streaming},
+        [httpx.Response(200, content=wire("/responses", obj, streaming)) for obj in (first, final)],
+    )
+    assert response.status_code == 200
+    assert response_text("/responses", response, streaming) == "prefixonetwo"
+
+
+@pytest.mark.parametrize("streaming", [False, True])
+@pytest.mark.parametrize("response_input", ["", []])
+def test_responses_recompute_with_empty_input(exchange, streaming, response_input):
+    response, calls = exchange(
+        "/responses",
+        {"input": response_input, "stream": streaming},
+        [
+            httpx.Response(200, content=wire("/responses", obj, streaming))
+            for obj in ({"text": "prefix", "stop_reason": "recomputed"}, {"text": ""})
+        ],
+    )
+    assert response.status_code == 200
+    assert calls["decode"][1]["body"]["input"] == "prefix"
+    assert response_text("/responses", response, streaming) == "prefix"
+
+
+def test_responses_recompute_does_not_add_content_to_tool_input(exchange):
+    response, calls = exchange(
+        "/responses",
+        {"input": [{"type": "function_call_output", "call_id": "call", "output": "ok"}]},
+        [httpx.Response(200, content=wire("/responses", {"text": "prefix", "stop_reason": "recomputed"}, False))],
+    )
+    assert response.status_code == 409
+    assert len(calls["decode"]) == 1
+
+
+@pytest.mark.parametrize("api", ["/messages", "/responses"])
+@pytest.mark.parametrize("streaming", [False, True])
+def test_recompute_never_silently_drops_nontext_output(exchange, api, streaming):
+    stopped = {"stop_reason": "recomputed"}
+    if api == "/messages":
+        stopped["content"] = [{"type": "tool_use", "id": "tool", "name": "f", "input": {}}]
+    else:
+        stopped["output"] = [{"type": "function_call", "id": "tool", "name": "f", "arguments": "{}"}]
+    response, calls = exchange(api, {"stream": streaming}, [httpx.Response(200, content=wire(api, stopped, streaming))])
+    assert response.status_code == 409
+    assert len(calls["decode"]) == 1
 
 
 @pytest.mark.parametrize("streaming", [False, True])

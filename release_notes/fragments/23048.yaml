@@ -2,10 +2,12 @@ pr: 23048
 entries:
   - category: feature
     text: >-
-      Added native Messages and synchronous Responses forwarding to the PD
-      example proxy, with unchanged backend responses and whole-request retries
-      when the backend exposes a recomputed stop reason. Native SSE is
-      buffered until decoding finishes to avoid duplicate output on retries.
+      Added Messages and synchronous Responses forwarding to the PD example
+      proxy. When the backend exposes a recomputed stop reason, the proxy appends
+      generated text to the input, deducts used output tokens from an explicit
+      token budget, and combines the continuation with the earlier text.
+      SSE remains buffered until decoding finishes. Recompute continuation
+      supports text output; tool or reasoning output on this path returns HTTP 409.
       Responses requires explicit history, does not support background mode or
       previous_response_id, and needs backend stop-reason exposure for recompute
       retries.
