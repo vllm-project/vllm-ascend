@@ -568,9 +568,13 @@ def run_k3_mla_pd_tp2(k3_models: dict[str, str]) -> None:
     ]
     # Use the normal P/D transfer protocol directly so missing transfer metadata
     # cannot silently fall back to local prefill and make this test pass.
-    with RemotePDServer(servers):
+    with RemotePDServer(servers, env_dict={"VLLM_LOGGING_LEVEL": "INFO"}):
         prefill_url = f"http://127.0.0.1:{prefill_port}/v1/completions"
         decode_url = f"http://127.0.0.1:{decode_port}/v1/completions"
+        # Exercise the D engine before P starts holding KV blocks for transfer.
+        _completion(decode_url, _prompt(129, salt=503)["prompt_token_ids"])
+        metrics_url = f"http://127.0.0.1:{decode_port}/metrics"
+        drafts_before = sum(_draft_counts(metrics_url).values())
         prompt = _prompt(129, salt=129)["prompt_token_ids"]
         prefill = _completion(
             prefill_url,
@@ -591,8 +595,7 @@ def run_k3_mla_pd_tp2(k3_models: dict[str, str]) -> None:
         # A D worker can also receive a request without remote KV. Its MLA
         # prefill weights must remain usable (the previous P/D fallback bug).
         _completion(decode_url, _prompt(257, salt=911)["prompt_token_ids"])
-        counts = _draft_counts(f"http://127.0.0.1:{decode_port}/metrics")
-        assert counts and sum(counts.values()) > 0
+        assert sum(_draft_counts(metrics_url).values()) > drafts_before
 
 
 def test_k3_mla_block5_tp4(k3_models: dict[str, str]) -> None:
