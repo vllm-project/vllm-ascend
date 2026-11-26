@@ -1,0 +1,12 @@
+pr: 22657
+entries:
+  - category: bugfix
+    text: >-
+      Fixed Ascend A3 MegaMoe (`enable_fused_mc2=2` or `3`) crashes and
+      duplicate scaling when decode steps exceed `mc2_tokens_capacity` or
+      encounter unquantized speculative draft models, while eliminating
+      duplicate `W4A8` routed-weight copies (~600 MiB per card) across
+      `ALLTOALL` and `MC2` fallbacks. Oversized decode steps retain the
+      shared-expert output, and `W4A8` and `W8A8` MegaMoe refresh routed
+      weights and scales in place across reloads.
+    hardware: [A3]

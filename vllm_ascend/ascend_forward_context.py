@@ -10,7 +10,11 @@ from vllm.distributed import get_dp_group, get_ep_group, get_tensor_model_parall
 from vllm.forward_context import BatchDescriptor, get_forward_context, set_forward_context
 from vllm.logger import logger
 
-from vllm_ascend.ascend_config import get_ascend_config, is_mega_moe_supported
+from vllm_ascend.ascend_config import (
+    get_ascend_config,
+    is_draft_config_context,
+    is_mega_moe_supported,
+)
 from vllm_ascend.device.hardware_profile import (
     HardwareCapability,
     MoECommPolicy,
@@ -37,6 +41,7 @@ _MRV2_IN_PROFILE_RUN: ContextVar[bool] = ContextVar("_MRV2_IN_PROFILE_RUN", defa
 _MEGA_MOE_TOKENS_PER_RANK_LIMIT = 16384
 _DISPATCH_FFN_COMBINE_TOKENS_PER_RANK_LIMIT = 512
 _MC2_TOKENS_PER_RANK_LIMIT = 512
+_MC2_FULLMESH_V2_TOKENS_PER_RANK_LIMIT = 256
 
 
 def _is_decode_only_node(vllm_config: VllmConfig) -> bool:
@@ -84,17 +89,69 @@ def get_mrv2_in_profile_run() -> bool:
     return _MRV2_IN_PROFILE_RUN.get()
 
 
+def _is_moe_model_for_config(vllm_config: VllmConfig) -> bool:
+    model_is_moe = getattr(getattr(vllm_config, "model_config", None), "is_moe", None)
+    if isinstance(model_is_moe, bool):
+        return model_is_moe
+    is_moe = getattr(vllm_config.parallel_config, "is_moe_model", None)
+    return is_moe if isinstance(is_moe, bool) else is_moe_model(vllm_config)
+
+
 def use_cann_megamoe(vllm_config: VllmConfig) -> bool:
     # TODO: drop the EP-size guard when MegaMoe supports larger EP sizes.
     return (
         is_mega_moe_supported()
         and get_current_hardware_profile().supports(HardwareCapability.CANN_MEGAMOE)
         and get_ascend_config().enable_fused_mc2 == 1
-        and is_moe_model(vllm_config)
+        and _is_moe_model_for_config(vllm_config)
         and vllm_config.parallel_config.enable_expert_parallel
         and 1 < get_ep_group().world_size <= 64
         and getattr(vllm_config, "lora_config", None) is None
     )
+
+
+def resolve_use_mega_moe(
+    vllm_config: VllmConfig | None,
+    moe_comm_type: MoECommType | None,
+) -> bool:
+    """Return True iff the active step executes on CANN MegaMoe (FUSED_MC2)."""
+    return vllm_config is not None and use_cann_megamoe(vllm_config) and moe_comm_type is MoECommType.FUSED_MC2
+
+
+def is_draft_vllm_config(vllm_config: VllmConfig | None) -> bool:
+    """Return True when ``vllm_config`` or the active config context belongs to a draft model."""
+    if is_draft_config_context():
+        return True
+    if vllm_config is None:
+        return False
+    model_config = getattr(vllm_config, "model_config", None)
+    if getattr(model_config, "runner_type", None) == "draft":
+        return True
+    spec_cfg = getattr(vllm_config, "speculative_config", None)
+    return bool(
+        spec_cfg is not None
+        and model_config is not None
+        and model_config is getattr(spec_cfg, "draft_model_config", None)
+        and model_config is not getattr(spec_cfg, "target_model_config", None)
+    )
+
+
+def resolve_draft_moe_quant_type(
+    vllm_config: VllmConfig | None,
+    *,
+    is_draft_model: bool,
+) -> QuantType:
+    """Resolve the MoE quantization type of a speculative draft model."""
+    if not is_draft_model or vllm_config is None:
+        return QuantType.NONE
+    spec_cfg = getattr(vllm_config, "speculative_config", None)
+    draft_model_config = getattr(spec_cfg, "draft_model_config", None)
+    if draft_model_config is None:
+        draft_model_config = getattr(vllm_config, "model_config", None)
+    explicit_quant_type = getattr(draft_model_config, "draft_moe_quant_type", None)
+    if isinstance(explicit_quant_type, QuantType):
+        return explicit_quant_type
+    return QuantType.NONE
 
 
 @contextmanager
@@ -143,14 +200,25 @@ def set_ascend_forward_context(
 
         from vllm_ascend.ops.fused_moe.moe_comm_method import get_moe_comm_method
 
-        max_num_tokens = int(num_tokens_across_dp.max().item()) if num_tokens_across_dp is not None else num_tokens
-        if is_draft_model:
-            draft_model_config = getattr(vllm_config.speculative_config, "draft_model_config", None)
-            draft_moe_quant_type = getattr(draft_model_config, "draft_moe_quant_type", QuantType.NONE)
+        if num_tokens is None and attn_metadata is not None:
+            num_tokens = attn_metadata.num_actual_tokens
+
+        dp_world_size = get_dp_group().world_size
+        if dp_world_size > 1 and forward_context.dp_metadata is not None:
+            dp_meta = forward_context.dp_metadata
+            max_tokens_across_dp = dp_meta.num_tokens_across_dp_cpu.max().item()
+        elif num_tokens_across_dp is not None:
+            max_tokens_across_dp = int(num_tokens_across_dp.max().item())
         else:
-            draft_moe_quant_type = QuantType.NONE
+            max_tokens_across_dp = num_tokens
+
+        is_draft_model = bool(is_draft_model or is_draft_vllm_config(vllm_config))
+        draft_moe_quant_type = resolve_draft_moe_quant_type(
+            vllm_config,
+            is_draft_model=is_draft_model,
+        )
         moe_comm_type = select_moe_comm_method(
-            max_num_tokens,
+            max_tokens_across_dp,
             vllm_config,
             is_draft_model=is_draft_model,
             draft_moe_quant_type=draft_moe_quant_type,
@@ -162,10 +230,12 @@ def set_ascend_forward_context(
         # models retain the original singleton implementation.
         model_comm_methods = getattr(model_instance, "moe_comm_methods", None)
         forward_context.moe_comm_method = (
-            model_comm_methods[moe_comm_type] if model_comm_methods is not None else get_moe_comm_method(moe_comm_type)
+            model_comm_methods.get(moe_comm_type)
+            if model_comm_methods is not None
+            else get_moe_comm_method(moe_comm_type)
         )
         forward_context.is_decode_only_node = _is_decode_only_node(vllm_config)
-        forward_context.use_mega_moe = use_cann_megamoe(vllm_config)
+        forward_context.use_mega_moe = resolve_use_mega_moe(vllm_config, moe_comm_type)
         forward_context.draft_moe_quant_type = draft_moe_quant_type
 
         tp_world_size = get_tensor_model_parallel_world_size()
@@ -199,16 +269,6 @@ def set_ascend_forward_context(
         forward_context.is_draft_model = is_draft_model
         forward_context.is_draft_model_prefill = False
 
-        if num_tokens is None and attn_metadata is not None:
-            num_tokens = attn_metadata.num_actual_tokens
-
-        dp_world_size = get_dp_group().world_size
-        if dp_world_size > 1 and forward_context.dp_metadata is not None:
-            dp_meta = forward_context.dp_metadata
-            max_tokens_across_dp = dp_meta.num_tokens_across_dp_cpu.max().item()
-        else:
-            max_tokens_across_dp = num_tokens
-
         forward_context.max_tokens_across_dp = max_tokens_across_dp
         forward_context.max_tokens_across_pcp = max_tokens_across_pcp
         forward_context.padded_length = (
@@ -238,6 +298,21 @@ def set_ascend_forward_context(
 
 _mc2_tokens_capacity: int | None = None
 _reserved_mc2_mask: torch.Tensor | None = None
+
+
+def _regular_mc2_tokens_per_rank_limit() -> int:
+    get_mc2_comm_alg = getattr(get_ascend_config(), "get_mc2_comm_alg", None)
+    if callable(get_mc2_comm_alg) and get_mc2_comm_alg() == "fullmesh_v2":
+        return _MC2_FULLMESH_V2_TOKENS_PER_RANK_LIMIT
+    return _MC2_TOKENS_PER_RANK_LIMIT
+
+
+def _regular_mc2_tokens_capacity(vllm_config: VllmConfig, mc2_tokens_capacity: int | None) -> int | None:
+    if mc2_tokens_capacity is None:
+        return None
+    return min(
+        mc2_tokens_capacity, _regular_mc2_tokens_per_rank_limit() * vllm_config.parallel_config.tensor_parallel_size
+    )
 
 
 def set_mc2_tokens_capacity(vllm_config, max_num_reqs, uniform_decode_query_len):
@@ -298,7 +373,7 @@ def set_mc2_tokens_capacity(vllm_config, max_num_reqs, uniform_decode_query_len)
 
     # keep the num_tokens_per_tp_rank less than mc2 tokens per rank limit
     else:
-        num_tokens_per_tp_rank = min(num_tokens_per_tp_rank, _MC2_TOKENS_PER_RANK_LIMIT)
+        num_tokens_per_tp_rank = min(num_tokens_per_tp_rank, _regular_mc2_tokens_per_rank_limit())
     _mc2_tokens_capacity = num_tokens_per_tp_rank * tp_size
 
 
@@ -310,7 +385,7 @@ def set_mc2_mask(vllm_config, device):
     global _reserved_mc2_mask
     if _reserved_mc2_mask is not None:
         return
-    if is_moe_model(vllm_config):
+    if _is_moe_model_for_config(vllm_config):
         _reserved_mc2_mask = torch.zeros(
             vllm_config.scheduler_config.max_num_batched_tokens, dtype=torch.bool, device=device
         )
@@ -325,7 +400,7 @@ def get_mc2_mask():
 def _select_capacity_and_expert_density_moe_comm_method(
     num_tokens: int,
     vllm_config: VllmConfig,
-    mc2_tokens_capacity: int,
+    mc2_tokens_capacity: int | None,
     is_draft_model: bool = False,
     draft_moe_quant_type: QuantType = QuantType.NONE,
 ) -> MoECommType:
@@ -341,10 +416,11 @@ def _select_capacity_and_expert_density_moe_comm_method(
         vllm_config.parallel_config.world_size_across_dp // vllm_config.parallel_config.pipeline_parallel_size
     )
     num_experts_per_device = num_experts // ep_world_size
+    regular_mc2_capacity = _regular_mc2_tokens_capacity(vllm_config, mc2_tokens_capacity)
     if (
         num_experts_per_device <= 24
         and ep_world_size >= 16
-        and (num_tokens is None or num_tokens <= mc2_tokens_capacity)
+        and (num_tokens is None or regular_mc2_capacity is None or num_tokens <= regular_mc2_capacity)
     ):
         return MoECommType.MC2
     return MoECommType.ALLGATHER
@@ -353,16 +429,25 @@ def _select_capacity_and_expert_density_moe_comm_method(
 def _select_fused_or_capacity_moe_comm_method(
     num_tokens: int,
     vllm_config: VllmConfig,
-    mc2_tokens_capacity: int,
+    mc2_tokens_capacity: int | None,
     is_draft_model: bool = False,
     draft_moe_quant_type: QuantType = QuantType.NONE,
 ) -> MoECommType:
+    within_capacity = num_tokens is None or mc2_tokens_capacity is None or num_tokens <= mc2_tokens_capacity
+    is_unquantized_draft = is_draft_model and draft_moe_quant_type == QuantType.NONE
     if use_cann_megamoe(vllm_config):
-        return MoECommType.FUSED_MC2
-    if get_ascend_config().enable_fused_mc2 == 1 and get_ep_group().world_size <= 32:
+        # MegaMoe allocates its symmetric receive buffer for mc2_tokens_capacity
+        # and must skip unquantized speculative draft MoE layers so draft models
+        # neither allocate a redundant symm_buffer nor run BF16 persistent MegaMoe.
+        # Keep this branch mutually exclusive with legacy enable_fused_mc2 == 1
+        # because AscendConfig normalizes enable_fused_mc2=2/3 to 1.
+        if not is_unquantized_draft and within_capacity:
+            return MoECommType.FUSED_MC2
+    elif not is_unquantized_draft and get_ascend_config().enable_fused_mc2 == 1 and get_ep_group().world_size <= 32:
         return MoECommType.FUSED_MC2
 
-    if num_tokens is None or num_tokens <= mc2_tokens_capacity:
+    regular_mc2_capacity = _regular_mc2_tokens_capacity(vllm_config, mc2_tokens_capacity)
+    if num_tokens is None or regular_mc2_capacity is None or num_tokens <= regular_mc2_capacity:
         return MoECommType.MC2
 
     return MoECommType.ALLTOALL
@@ -371,7 +456,7 @@ def _select_fused_or_capacity_moe_comm_method(
 def _select_capacity_and_world_size_moe_comm_method(
     num_tokens: int,
     vllm_config: VllmConfig,
-    mc2_tokens_capacity: int,
+    mc2_tokens_capacity: int | None,
     is_draft_model: bool = False,
     draft_moe_quant_type: QuantType = QuantType.NONE,
 ) -> MoECommType:
@@ -396,7 +481,8 @@ def _select_capacity_and_world_size_moe_comm_method(
     ep_world_size = (
         vllm_config.parallel_config.world_size_across_dp // vllm_config.parallel_config.pipeline_parallel_size
     )
-    if (num_tokens is None or num_tokens <= mc2_tokens_capacity) and ep_world_size > 1:
+    regular_mc2_capacity = _regular_mc2_tokens_capacity(vllm_config, mc2_tokens_capacity)
+    if ep_world_size > 1 and (num_tokens is None or regular_mc2_capacity is None or num_tokens <= regular_mc2_capacity):
         return MoECommType.MC2
     if ep_world_size <= num_experts_per_tok:
         return MoECommType.ALLGATHER
@@ -428,7 +514,7 @@ def select_moe_comm_method(
     Returns:
         MoECommType | None: The selected MoE communication method.
     """
-    if not is_moe_model(vllm_config):
+    if not _is_moe_model_for_config(vllm_config):
         return None
 
     mc2_tokens_capacity = get_mc2_tokens_capacity()
@@ -453,7 +539,7 @@ def select_moe_comm_method(
             draft_moe_quant_type,
         )
     logger.debug(
-        "MoE comm method selected: policy=%s, method=%s, num_tokens=%d, mc2_capacity=%s, "
+        "MoE comm method selected: policy=%s, method=%s, num_tokens=%s, mc2_capacity=%s, "
         "is_draft_model=%s, draft_moe_quant_type=%r",
         moe_comm_policy,
         moe_comm_type,

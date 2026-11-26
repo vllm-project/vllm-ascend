@@ -66,7 +66,7 @@ The following table lists additional configuration options available in vLLM Asc
 | `enable_mlapo`                      | bool | `True`  | Whether to enable MLAPO (Model Layer-wise Adaptive Parallel Optimization). The legacy `VLLM_ASCEND_ENABLE_MLAPO` environment variable is no longer supported. |
 | `mlapo_keep_prefill_weights`        | bool | `False` | When True, keep MLAPO prefill weights on NPU instead of freeing them on kv_consumer (decode-only D) nodes. D nodes have normal local-prefill paths (recompute / fallback / preempt) that crash when the weights are freed (issue #11882). Enable this to trade NPU memory for stability. |
 | `weight_nz_mode`                    | int  | `1`     | Weight NZ mode. `0` disables NZ, `1` enables NZ only for quantized weights, and `2` also enables NZ for BF16/FP16 weights when supported. The legacy `VLLM_ASCEND_ENABLE_NZ` environment variable is no longer supported. |
-| `enable_fused_mc2`                  | int  | `0`     | Fused MC2 configuration. `0` disables the fused path, `1` selects dispatch-FFN-combine, and `2` selects CANN MegaMoe when the model and parallel configuration support it. Supported fused modes (`1`, `2`, and `3`) fall back to `0` when the target model or MTP draft uses per-layer SwiGLU limits. On A5, SiTU models require a CANN MegaMoe wrapper exposing `activation` and `activation_params`; both SiTU parameters are bound from the MoE configuration during initialization. The legacy `VLLM_ASCEND_ENABLE_FUSED_MC2` environment variable is no longer supported. |
+| `enable_fused_mc2`                  | int  | `0`     | Fused MC2 configuration. `0` disables the fused path, `1` selects dispatch-FFN-combine, and `2` selects CANN MegaMoe when the model and parallel configuration support it, and `3` also fuses compatible shared experts. Supported fused modes (`1`, `2`, and `3`) fall back to `0` when the target model or MTP draft uses per-layer SwiGLU limits. On A5, SiTU models require a CANN MegaMoe wrapper exposing `activation` and `activation_params`; both SiTU parameters are bound from the MoE configuration during initialization. The legacy `VLLM_ASCEND_ENABLE_FUSED_MC2` environment variable is no longer supported. |
 | `enable_transpose_kv_cache_by_block`| bool | `True`  | Whether to enable transpose KV cache by block. The legacy `VLLM_ASCEND_FUSION_OP_TRANSPOSE_KV_CACHE_BY_BLOCK` environment variable is no longer supported. |
 | `enable_flashcomm1`                 | bool | `False` | Whether to enable SP MoE. See [Sequence Parallelism](../feature_guide/sequence_parallelism.md). |
 | `enable_pcp_o_proj_weight_sharding` | bool | `True` | Whether PCP shards O-projection weights across the PCP group. This option controls SFA-PCP `o_proj` and DSA-PCP two-stage O-projection (`wo_a`/`wo_b`). If the weight method or PCP partition does not support sharding, the option is disabled with a warning. Set it to `false` at server startup to disable sharding. Other attention backends do not use this option. |
@@ -75,6 +75,19 @@ The following table lists additional configuration options available in vLLM Asc
 | `multistream_dsv4_dsa_overlap`      | bool | `True`  | Whether to enable DSA multi-stream overlap for DeepSeek V4. For PCP batches with global prefill, this option controls overlap of local Q projection with global cache preparation on nonempty query shards. Set it to `false` to run these operations serially.  |
 | `rl_config`                        | dict | `{}`    | One-click RL mode configuration. See <a href="#rl_config">rl_config</a> for all fields, the two deployment modes, usage examples, and the migration guide. |
 | `combine_quant_mode`                | int  | `0`     | Controls communication quantization for the MC2 combine operation. The default (`0`) lets the runtime select the mode. Set `2`, `3`, or `4` to override the `comm_quant_mode` argument to `torch_npu.npu_moe_distribute_combine_v2`. |
+
+**MegaMoe shared-expert fusion on Ascend A3**
+
+Set `enable_fused_mc2=3` to fuse W8A8 or W4A8 routed experts with dynamic
+per-channel W8A8 shared experts, or to fuse BF16 routed and shared experts.
+Mixed W4A8/W8A8 fusion requires a CANN MegaMoe build that accepts explicit
+shared-expert weight types. Shared weights can be replicated or TP-sharded.
+
+For TP-sharded W8A8 shared experts, all shards must have the same per-channel
+down-projection scales. Different scales at startup select standalone shared
+experts. After fusion is active, a weight update must preserve the fused
+operand layouts and the scale agreement across TP shards. A load failure on
+any rank aborts the shared-expert refresh across the worker group.
 
 The details of each configuration option are as follows:
 

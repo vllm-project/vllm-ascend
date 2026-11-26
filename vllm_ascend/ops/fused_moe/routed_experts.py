@@ -14,12 +14,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from types import SimpleNamespace
 
 import torch
 import torch_npu
-from vllm.config import get_current_vllm_config
+from vllm.config import VllmConfig, get_current_vllm_config, get_current_vllm_config_or_none
 from vllm.distributed.utils import is_weak_contiguous
 from vllm.forward_context import get_forward_context
 from vllm.logger import logger
@@ -29,11 +29,15 @@ from vllm.model_executor.layers.fused_moe.unquantized_fused_moe_method import Un
 from vllm.model_executor.utils import replace_parameter
 
 from vllm_ascend.ascend_config import get_ascend_config
-from vllm_ascend.ascend_forward_context import _EXTRA_CTX, use_cann_megamoe
+from vllm_ascend.ascend_forward_context import _EXTRA_CTX, is_draft_vllm_config, use_cann_megamoe
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.distributed.expert_transfer.expert_offload_utils import expert_offload_weights
 from vllm_ascend.lora.fused_moe import sync_lora_context
-from vllm_ascend.ops.fused_moe.dataclass.fused_experts import MoEWeights, build_fused_experts_input
+from vllm_ascend.ops.fused_moe.dataclass.fused_experts import (
+    MoEWeights,
+    build_fused_experts_input,
+    shared_moe_weight_kwargs,
+)
 from vllm_ascend.ops.fused_moe.dataclass.moe_mlp import MoEMlpComputeInput
 from vllm_ascend.ops.fused_moe.dataclass.shared_experts import RoutedMoEMilestones
 from vllm_ascend.ops.fused_moe.eplb import use_allgather_eplb
@@ -48,6 +52,30 @@ from vllm_ascend.ops.fused_moe.prepare_finalize import PrepareAndFinalizeWithAll
 from vllm_ascend.quantization.nz import NzCastSpec
 from vllm_ascend.quantization.quant_type import QuantType
 from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ, maybe_trans_nz
+
+
+def use_layer_megamoe(layer: torch.nn.Module, select: Callable[[VllmConfig], bool]) -> bool:
+    if not hasattr(layer, "_ascend_use_megamoe"):
+        config = get_current_vllm_config_or_none()
+        layer._ascend_use_megamoe = config is not None and select(config)
+    return layer._ascend_use_megamoe
+
+
+def update_expert_tensor_list(layer: torch.nn.Module, name: str, tensor: torch.Tensor) -> None:
+    """Keep per-expert storage live across checkpoint-format reloads."""
+    slices = tensor.unbind(dim=0)
+    current = getattr(layer, name, None)
+    if current is None:
+        setattr(layer, name, [expert.clone() for expert in slices])
+        return
+
+    if len(current) != len(slices) or any(
+        dst.shape != src.shape or dst.dtype != src.dtype for dst, src in zip(current, slices, strict=True)
+    ):
+        raise ValueError(f"Cannot reload {name} with a different expert count, shape, or dtype")
+    with torch.inference_mode():
+        for dst, src in zip(current, slices, strict=True):
+            dst.copy_(src)
 
 
 class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
@@ -117,6 +145,10 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
                 # with its old dimensions.
                 weight.data = transposed
 
+        if hasattr(layer, "cann_mega_moe_w13_weight_list"):
+            # vLLM copies these temporary ND weights back into the captured storage.
+            return
+
         # TODO: Current dispatch_ffn_combine/mega_moe fusion operator ONLY supports NZ format.
         # Therefore, we must cast weights to NZ when fusion is enabled.
         # Once the underlying dispatch_ffn_combine/mega_moe operator is updated to support
@@ -124,28 +156,39 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
         # npu_format_cast. At that point, the operator should be able to handle weights
         # in their native format without explicit casting here.
         if enable_fused_mc2:
-            use_megamoe = use_cann_megamoe(get_current_vllm_config())
+            # Unquantized speculative draft layers bypass MegaMoe and stay on
+            # standard 3D FRACTAL_NZ for MC2/ALLTOALL execution.
+            use_megamoe = use_layer_megamoe(layer, lambda cfg: use_cann_megamoe(cfg) and not is_draft_vllm_config(cfg))
             if not use_megamoe:
                 layer.w13_weight.data = torch_npu.npu_format_cast(layer.w13_weight.data, ACL_FORMAT_FRACTAL_NZ)
                 layer.w2_weight.data = torch_npu.npu_format_cast(layer.w2_weight.data, ACL_FORMAT_FRACTAL_NZ)
-            if use_megamoe or self.dynamic_eplb:
-                if use_megamoe and get_current_hardware_profile().supports(HardwareCapability.CANN_MEGAMOE_MXFP):
-                    logger.warning_once(
-                        "Unquantized MoE weights are not supported by the A5 mega moe "
-                        "(FUSED_MC2) operator. Falling back to the original MoE "
-                        "computation for this layer."
-                    )
-                    layer.w13_weight.data = maybe_trans_nz(layer.w13_weight.data)
-                    layer.w2_weight.data = maybe_trans_nz(layer.w2_weight.data)
-                else:
-                    layer.w13_weight_list = [weight.clone() for weight in layer.w13_weight.data.unbind(dim=0)]
-                    layer.w2_weight_list = [weight.clone() for weight in layer.w2_weight.data.unbind(dim=0)]
-                    del layer.w13_weight
-                    del layer.w2_weight
-                    torch.npu.empty_cache()
+            if use_megamoe and get_current_hardware_profile().supports(HardwareCapability.CANN_MEGAMOE_MXFP):
+                logger.warning_once(
+                    "Unquantized MoE weights are not supported by the A5 mega moe "
+                    "(FUSED_MC2) operator. Falling back to the original MoE "
+                    "computation for this layer."
+                )
+                layer.w13_weight.data = maybe_trans_nz(layer.w13_weight.data)
+                layer.w2_weight.data = maybe_trans_nz(layer.w2_weight.data)
+            elif self.dynamic_eplb:
+                update_expert_tensor_list(layer, "w13_weight_list", layer.w13_weight.data)
+                update_expert_tensor_list(layer, "w2_weight_list", layer.w2_weight.data)
+                del layer.w13_weight
+                del layer.w2_weight
+                torch.npu.empty_cache()
+            elif use_megamoe:
+                layer.cann_mega_moe_w13_weight_list = list(layer.w13_weight.data.unbind(dim=0))
+                layer.cann_mega_moe_w2_weight_list = list(layer.w2_weight.data.unbind(dim=0))
         else:
             layer.w13_weight.data = maybe_trans_nz(layer.w13_weight.data)
             layer.w2_weight.data = maybe_trans_nz(layer.w2_weight.data)
+
+    @torch.inference_mode()
+    def refresh_megamoe_weights(self, layer: torch.nn.Module) -> None:
+        if not hasattr(layer, "cann_mega_moe_w13_weight_list"):
+            return
+        layer.cann_mega_moe_w13_weight_list = list(layer.w13_weight.data.unbind(dim=0))
+        layer.cann_mega_moe_w2_weight_list = list(layer.w2_weight.data.unbind(dim=0))
 
     def apply(
         self,
@@ -184,33 +227,32 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
         """Normalized weight payload for the FUSED_MC2 comm path."""
         w13_weight_list = getattr(layer, "w13_weight_list", None)
         w2_weight_list = getattr(layer, "w2_weight_list", None)
-        has_split_weight_lists = isinstance(w13_weight_list, list) and isinstance(w2_weight_list, list)
-        if _EXTRA_CTX.use_mega_moe:
-            w1 = w13_weight_list if isinstance(w13_weight_list, list) else [layer.w13_weight]
-            w2 = w2_weight_list if isinstance(w2_weight_list, list) else [layer.w2_weight]
+        use_mega_moe = _EXTRA_CTX.use_mega_moe
+        if use_mega_moe:
+            w13_weight_list = getattr(layer, "cann_mega_moe_w13_weight_list", None) or w13_weight_list
+            w2_weight_list = getattr(layer, "cann_mega_moe_w2_weight_list", None) or w2_weight_list
             w1_scale = None
             w2_scale = None
             w1_scale_bias = None
             w2_scale_bias = None
         else:
-            if self.dynamic_eplb and not has_split_weight_lists:
+            if self.dynamic_eplb and not (isinstance(w13_weight_list, list) and isinstance(w2_weight_list, list)):
                 logger.warning_once(
                     "FUSED_MC2 is enabled with dynamic EPLB, but unquantized MoE weights are not split into "
                     "tensor lists. This may cause accuracy issues or communication hangs."
                 )
-            w1 = w13_weight_list if isinstance(w13_weight_list, list) else [layer.w13_weight]
-            w2 = w2_weight_list if isinstance(w2_weight_list, list) else [layer.w2_weight]
             w1_scale = [torch.tensor([], dtype=torch.int64)]
             w2_scale = [torch.tensor([], dtype=torch.int64)]
             w1_scale_bias = [torch.tensor([], dtype=torch.float32)]
             w2_scale_bias = [torch.tensor([], dtype=torch.float32)]
         return MoEWeights(
-            w1=w1,
-            w2=w2,
+            w1=w13_weight_list if isinstance(w13_weight_list, list) else [layer.w13_weight],
+            w2=w2_weight_list if isinstance(w2_weight_list, list) else [layer.w2_weight],
             w1_scale=w1_scale,
             w2_scale=w2_scale,
             w1_scale_bias=w1_scale_bias,
             w2_scale_bias=w2_scale_bias,
+            **(shared_moe_weight_kwargs(layer) if use_mega_moe else {}),
         )
 
     def get_mlp_weights(self, layer):
@@ -224,7 +266,7 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
         if not need_trans:
             return weight
         if isinstance(weight, list):
-            return [w.transpose(1, 2) for w in weight]
+            return [w.transpose(0, 1) if w.ndim == 2 else w.transpose(1, 2) for w in weight]
         return weight.transpose(1, 2)
 
     def apply_gmm1(self, mlp_compute_input: MoEMlpComputeInput):
@@ -452,9 +494,12 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
         runner_type = getattr(vllm_config.model_config, "runner_type", None)
         if runner_type is None:
             logger.warning_once("The runner_type is not set when initializing the model config in the prefill stage")
-        else:
-            if vllm_config.model_config.runner_type == "draft":
-                draft_model_config = vllm_config.speculative_config.draft_model_config
+        if runner_type == "draft" or is_draft_vllm_config(vllm_config):
+            spec_cfg = getattr(vllm_config, "speculative_config", None)
+            draft_model_config = getattr(spec_cfg, "draft_model_config", None)
+            if draft_model_config is None:
+                draft_model_config = getattr(vllm_config, "model_config", None)
+            if draft_model_config is not None:
                 draft_model_config.draft_moe_quant_type = self.quant_type
 
     def get_expert_weights(self) -> Iterable[torch.Tensor | EplbExpertTensorList]:
@@ -534,6 +579,12 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
             quant_type = getattr(method, "quant_type", QuantType.NONE)
         return quant_type
 
+    def refresh_megamoe_weights(self) -> None:
+        scheme = getattr(self.quant_method, "quant_method", self.quant_method)
+        refresh = getattr(scheme, "refresh_megamoe_weights", None)
+        if refresh is not None:
+            refresh(self)
+
     def _select_experts(
         self,
         hidden_states: torch.Tensor,
@@ -595,6 +646,7 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
         hidden_states: torch.Tensor,
         router_logits: torch.Tensor,
         input_ids: torch.Tensor | None = None,
+        skip_megamoe_shared: bool = False,
     ):
         forward_context = get_forward_context()
         # When static kernels are enabled, the forward pass runs twice
@@ -636,6 +688,8 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
         )
         self.ascend_pertoken_scale = pertoken_scale
         self.ascend_mc2_mask = mc2_mask
+        if skip_megamoe_shared:
+            self.ascend_skip_megamoe_shared = True
         try:
             fused_experts_results: FusedExpertsResult = self.quant_method.apply(
                 layer=self,
@@ -648,6 +702,8 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
         finally:
             self.ascend_pertoken_scale = None
             self.ascend_mc2_mask = None
+            if skip_megamoe_shared:
+                self.ascend_skip_megamoe_shared = False
 
         eplb_state = self.router.eplb_state
         if eplb_state is not None:

@@ -11,10 +11,14 @@ from unittest.mock import MagicMock, call, patch
 import pytest
 import torch
 from torch import nn
+from torch.fx.experimental.proxy_tensor import make_fx
 from torch.nn import functional as F
 from vllm.config import VllmConfig, set_current_vllm_config
+from vllm.forward_context import ForwardContext, override_forward_context
 from vllm.model_executor.layers.activation import SituAndMul
+from vllm.model_executor.layers.fused_moe import config as moe_config
 
+from vllm_ascend import ascend_forward_context as afc
 from vllm_ascend.ascend_forward_context import MoECommType
 from vllm_ascend.device.hardware import AscendDeviceType
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_hardware_profile
@@ -87,6 +91,7 @@ def runtime_moe_all_reduce(monkeypatch):
     library = torch.library.Library("vllm", "IMPL", "CPU")
     library.impl("maybe_all_reduce_tensor_model_parallel", custom_ops._maybe_all_reduce_tensor_model_parallel_impl)
     library.impl("maybe_all_reduce_shared_expert", custom_ops._maybe_all_reduce_shared_expert_impl)
+    library.impl("ascend_moe_forward_megamoe_armed", fused_moe_module._ascend_moe_forward_megamoe_armed)
     try:
         yield context
     finally:
@@ -376,6 +381,75 @@ def test_runner_reduction_contract(monkeypatch, moe_comm_type, is_sequence_paral
     assert runner.use_dp_chunking is False
     assert runner._fused_output_is_reduced is expected
     assert runner._maybe_reduce_shared_expert_output(shared_output) is shared_output
+
+
+@pytest.mark.parametrize("sharded_shared", [False, True], ids=["replicated", "tp-sharded"])
+def test_megamoe_graph_combines_shared_output_over_capacity(monkeypatch, runtime_moe_all_reduce, sharded_shared):
+    capacity = 2
+    monkeypatch.setattr(afc, "is_moe_model", lambda _: True)
+    monkeypatch.setattr(afc, "get_mc2_tokens_capacity", lambda: capacity)
+    monkeypatch.setattr(afc, "get_current_hardware_profile", lambda: get_hardware_profile(AscendDeviceType.A3))
+    monkeypatch.setattr(afc, "get_ep_group", lambda: SimpleNamespace(world_size=4))
+    monkeypatch.setattr(afc, "use_cann_megamoe", lambda _: True)
+    monkeypatch.setattr(afc, "get_ascend_config", lambda: SimpleNamespace(get_mc2_comm_alg=lambda: "fullmesh_v1"))
+    config = SimpleNamespace(parallel_config=SimpleNamespace(enable_expert_parallel=True, tensor_parallel_size=4))
+    context = runtime_moe_all_reduce
+    mode = (
+        SharedExpertParallelMode.TENSOR_PARALLEL
+        if sharded_shared
+        else SharedExpertParallelMode.SHARED_EXPERT_DATA_PARALLEL_ONLY
+    )
+    tp_reduce = MagicMock(side_effect=lambda partial: partial * 2)
+    monkeypatch.setattr(fused_moe_module, "tensor_model_parallel_all_reduce", tp_reduce)
+
+    runner = AscendMoERunner.__new__(AscendMoERunner)
+    nn.Module.__init__(runner)
+    runner.layer_name = "test.megamoe"
+    runner.moe_config = SimpleNamespace(hidden_dim=4, is_sequence_parallel=False)
+    runner.routed_input_transform = runner.routed_output_transform = None
+    runner.router = runner.gate = None
+    runner._shared_experts = nn.Identity()
+    runner.routed_scaling_factor = 2.0 if sharded_shared else 1.0
+    if not vllm_version_is("0.34.0"):
+        runner.routed_scale_mode = moe_config.RoutedScaleMode.OUTPUT
+    runner._forward_entry = torch.ops.vllm.moe_forward_shared
+    runner.ascend_shared_experts = SimpleNamespace(
+        megamoe_shared_weights_ready=True,
+        parallel_mode=lambda: mode,
+        multistream_overlap=False,
+        prepare_input_before_routed=PreparedSharedExpertInput,
+        forward=lambda prepared, *_args, **_kwargs: torch.full_like(
+            prepared.hidden_states, 1.5 if sharded_shared else 3.0
+        ),
+    )
+
+    def run_routed(hidden_states, **_kwargs):
+        value = 5.0 if context.use_mega_moe else 2.0 / runner.routed_scaling_factor
+        return torch.full_like(hidden_states, value), RoutedMoEMilestones()
+
+    runner.routed_experts = SimpleNamespace(
+        quant_method=SimpleNamespace(skip_forward_padding=False, has_unpadded_output=False),
+        forward_impl=run_routed,
+    )
+    context.no_compile_layers[runner.layer_name] = runner
+    forward_context = ForwardContext(no_compile_layers=context.no_compile_layers, attn_metadata={}, slot_mapping={})
+    with override_forward_context(forward_context):
+        within_capacity = torch.zeros(capacity, 4)
+        context.moe_comm_type = afc.select_moe_comm_method(within_capacity.shape[0], config)
+        assert context.moe_comm_type is MoECommType.FUSED_MC2
+        context.use_mega_moe = True
+        graph = make_fx(runner, tracing_mode="fake")(within_capacity, within_capacity)
+        torch.testing.assert_close(graph(within_capacity, within_capacity), torch.full_like(within_capacity, 5.0))
+
+        over_capacity = torch.zeros(capacity + 1, 4)
+        context.moe_comm_type = afc.select_moe_comm_method(over_capacity.shape[0], config)
+        assert context.moe_comm_type is MoECommType.ALLTOALL
+        context.use_mega_moe = False
+        eager = runner(over_capacity, over_capacity)
+        torch.testing.assert_close(eager, torch.full_like(over_capacity, 5.0))
+        torch.testing.assert_close(graph(over_capacity, over_capacity), eager)
+
+    assert tp_reduce.call_count == (2 if sharded_shared else 0)
 
 
 @pytest.mark.parametrize(

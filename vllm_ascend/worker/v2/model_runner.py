@@ -19,7 +19,7 @@
 
 import inspect
 import logging
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from contextlib import AbstractContextManager, contextmanager, nullcontext
 from copy import deepcopy
 from typing import Any
@@ -28,7 +28,7 @@ import numpy as np
 import torch
 from vllm.compilation import breakable_cudagraph
 from vllm.compilation.cuda_graph import CUDAGraphWrapper
-from vllm.config import VllmConfig
+from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.config.compilation import CompilationMode, CUDAGraphMode
 from vllm.distributed.kv_transfer import get_kv_transfer_group, has_kv_transfer_group
 from vllm.distributed.parallel_state import get_pp_group
@@ -115,6 +115,7 @@ from vllm_ascend.observability.runtime_guard.hooks import (
     runtime_guard_step,
 )
 from vllm_ascend.observability.runtime_guard.processor import RuntimeGuardProcessor
+from vllm_ascend.ops.fused_moe.fused_moe import AscendMoERunner
 from vllm_ascend.ops.rotary_embedding import set_cos_and_sin, update_cos_sin
 from vllm_ascend.platform import QWEN_FA3_TARGETS
 from vllm_ascend.utils import (
@@ -129,6 +130,7 @@ from vllm_ascend.utils import (
     requires_lmhead_dp_sync,
     set_potential_max_tokens,
     should_skip_allreduce_across_dp_group,
+    vllm_version_is,
 )
 from vllm_ascend.worker.device_metadata import TargetDeviceMetadata
 from vllm_ascend.worker.utils import disable_compilation
@@ -379,6 +381,52 @@ class NPUModelRunner(GPUModelRunner):
         if self.compilation_config.cudagraph_mode != CUDAGraphMode.NONE:
             self._start_dump_data()
         self.model_state.prompt_logprobs_worker = self.prompt_logprobs_worker
+
+    @torch.inference_mode()
+    def reload_weights(
+        self,
+        weights_iterator: Iterable[tuple[str, torch.Tensor]] | None = None,
+        weights_path: str | None = None,
+        is_checkpoint_format: bool = True,
+    ) -> None:
+        with set_current_vllm_config(self.vllm_config):
+            super().reload_weights(weights_iterator, weights_path, is_checkpoint_format)
+
+    def reset_lora_state(self) -> None:
+        if hasattr(super(), "reset_lora_state"):
+            super().reset_lora_state()
+        if vllm_version_is("0.34.0") and getattr(self.vllm_config, "lora_config", None) is None:
+            # v0.34.0 already runs on_target_weights_replaced() before
+            # reset_lora_state(); only refresh routed views here so shared
+            # experts are not gathered twice.
+            for module in self.get_model().modules():
+                if isinstance(module, AscendMoERunner):
+                    module.routed_experts.refresh_megamoe_weights()
+            self._refresh_linear_weight_scales()
+
+    def on_target_weights_replaced(self) -> None:
+        super().on_target_weights_replaced()
+        if getattr(getattr(self, "ascend_config", None), "megamoe_shared_expert_fusion", False):
+            with set_current_vllm_config(self.vllm_config):
+                for module in self.get_model().modules():
+                    if isinstance(module, AscendMoERunner) and module.ascend_shared_experts is not None:
+                        if not getattr(module, "_shared_reloaded_in_post_load", False):
+                            module.ascend_shared_experts.refresh_megamoe_shared_weights()
+                        module._shared_reloaded_in_post_load = False
+        self._refresh_linear_weight_scales()
+
+    @torch.inference_mode()
+    def _refresh_linear_weight_scales(self) -> None:
+        for module in self.get_model().modules():
+            if (scale_ref := getattr(module, "_ascend_weight_scale_ref", None)) is None:
+                continue
+            scale: Any = scale_ref()
+            current_scale = getattr(module, "weight_scale", None)
+            if scale is None or current_scale is None or scale is not current_scale:
+                continue
+            # W4A8 stores the FP32 bits in the low half of INT64.
+            values = scale.to(torch.int32).view(torch.float32) if scale.dtype == torch.int64 else scale
+            module.weight_scale_fp32.copy_(values)
 
     @runtime_guard_sample_tokens
     def sample_tokens(self, grammar_output):

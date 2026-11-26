@@ -1,17 +1,19 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Guards for the A3 INT8 shared-expert fusion path."""
+"""A3 shared-expert format admission, ABI gating, and scale encoding."""
 
 import sys
 from types import ModuleType, SimpleNamespace
-from unittest.mock import Mock, patch
+from unittest.mock import Mock
 
 import pytest
 import torch
+from torch import nn
+from vllm.model_executor.layers.activation import SiluAndMul
 
 from vllm_ascend.device.hardware import AscendDeviceType
 from vllm_ascend.device.hardware_profile import get_hardware_profile
 from vllm_ascend.ops.fused_moe import moe_comm_method, moe_utils
-from vllm_ascend.ops.fused_moe import shared_experts as shared_experts_module
+from vllm_ascend.ops.fused_moe import shared_experts as shared_mod
 from vllm_ascend.ops.fused_moe.dataclass.fused_experts import MegamoeSharedExpertFusion, MegamoeSharedWeights
 from vllm_ascend.ops.fused_moe.moe_comm_method import FusedMC2CommImpl
 from vllm_ascend.ops.fused_moe.shared_experts import AscendSharedExperts
@@ -19,30 +21,77 @@ from vllm_ascend.ops.fused_moe.token_dispatcher import TokenDispatcherWithMC2
 from vllm_ascend.quantization.methods.w4a8 import w4a8
 from vllm_ascend.quantization.quant_type import QuantType
 
-_MODULE = shared_experts_module.__name__
+_HIDDEN = 1024
+_SHARED_INTERMEDIATE = 512
+
+_INTEGER_SHARED_ABI = frozenset(
+    {
+        "shared_l1_weights",
+        "shared_l2_weights",
+        "shared_l1_weights_sf",
+        "shared_l2_weights_sf",
+        "shared_expert_quant_out_dtype",
+        "shared_weight1_type",
+        "shared_weight2_type",
+    }
+)
 
 
-def _make_runner(quant_type: QuantType) -> AscendSharedExperts:
-    """Build AscendSharedExperts without __init__; only the fusion state is used."""
-    runner = object.__new__(AscendSharedExperts)
-    runner.quant_type = quant_type
-    runner.moe_config = SimpleNamespace(hidden_dim=4096, intermediate_size_per_partition=2048)
-    runner.megamoe_shared_weights_ready = False
-    runner._megamoe_shared_fusion_disabled = False
-    runner._megamoe_shared_parts = {}
-    runner._megamoe_shared_quant_type = QuantType.NONE
-    runner._megamoe_shared_fusion = shared_experts_module.MegamoeSharedExpertFusion()
-    # Mirror the remaining __init__ fields so this helper cannot drift again.
-    runner._megamoe_shared_weight_dtype = None
-    runner._megamoe_shared_fusion_platform = "A3/INT8"
-    return runner
+def _projection(in_dim, out_dim, dtype, quant_type, *, packed_scale=False):
+    linear = nn.Module()
+    linear.bias = None
+    linear.weight = nn.Parameter(torch.zeros((in_dim, out_dim), dtype=dtype), requires_grad=False)
+    scale = torch.full((out_dim,), 0.0078125)
+    if packed_scale:
+        # Set nonzero upper bits to check the low-32-bit decoding contract.
+        scale = scale.view(torch.int32).to(torch.int64) | (1 << 40)
+    linear.weight_scale = nn.Parameter(scale, requires_grad=False)
+    linear.weight_scale_fp32 = torch.full((out_dim,), 99.0)
+    linear.quant_method = SimpleNamespace(quant_method=SimpleNamespace(quant_type=quant_type))
+    return linear
 
 
-def _shared_linear(weight_dtype: torch.dtype, shared_quant_type: QuantType) -> SimpleNamespace:
-    return SimpleNamespace(
-        weight=SimpleNamespace(data=torch.zeros(4096, 4096, dtype=weight_dtype)),
-        quant_method=SimpleNamespace(quant_type=shared_quant_type),
+def _make_executor(
+    monkeypatch,
+    routed,
+    shared,
+    weight_dtype,
+    profile,
+    *,
+    packed_scale=False,
+    patch_mixed_abi: bool = True,
+):
+    monkeypatch.setattr(shared_mod, "get_current_vllm_config", SimpleNamespace)
+    monkeypatch.setattr(shared_mod, "use_cann_megamoe", lambda _: True)
+    monkeypatch.setattr(shared_mod, "shared_expert_tp_enable", lambda: False)
+    monkeypatch.setattr(shared_mod, "get_current_hardware_profile", lambda: get_hardware_profile(profile))
+    if patch_mixed_abi:
+        monkeypatch.setattr(moe_utils, "supports_cann_mega_moe_mixed_int_shared", lambda: True)
+    monkeypatch.setattr(
+        shared_mod,
+        "get_ascend_config",
+        lambda: SimpleNamespace(
+            megamoe_shared_expert_fusion=True,
+            multistream_overlap_shared_expert=False,
+            enable_shared_expert_dp=False,
+        ),
     )
+    layer = SimpleNamespace(
+        gate_up_proj=_projection(_HIDDEN, 2 * _SHARED_INTERMEDIATE, weight_dtype, shared, packed_scale=packed_scale),
+        down_proj=_projection(_SHARED_INTERMEDIATE, _HIDDEN, weight_dtype, shared, packed_scale=packed_scale),
+        act_fn=SiluAndMul.__new__(SiluAndMul),
+    )
+    config = SimpleNamespace(
+        hidden_dim=_HIDDEN,
+        intermediate_size_per_partition=_SHARED_INTERMEDIATE,
+        in_dtype=torch.bfloat16,
+        swiglu_limit=None,
+        swiglu_alpha=None,
+        swiglu_beta=None,
+        is_sequence_parallel=False,
+        tp_group=SimpleNamespace(world_size=1),
+    )
+    return AscendSharedExperts(layer, config, routed, None)
 
 
 @pytest.fixture
@@ -88,95 +137,18 @@ def cann_mega_moe_abi(monkeypatch, mixed_int_abi):
     ],
 )
 @pytest.mark.usefixtures("cann_mega_moe_abi")
-def test_setup_a3_shared_expert_fusion(quant_type, expected) -> None:
-    runner = _make_runner(quant_type)
-    runner.layer = SimpleNamespace(gate_up_proj=SimpleNamespace(), down_proj=SimpleNamespace())
-    runner.moe_config.tp_group = SimpleNamespace(world_size=1)
-    runner._routed_megamoe_activation_signature = Mock(return_value=("silu", ()))
-    runner._shared_megamoe_activation_signature = Mock(return_value=("silu", ()))
-    runner._wrap_linear_for_megamoe_fusion = Mock()
-    with (
-        patch(f"{_MODULE}.use_cann_megamoe", return_value=True),
-        patch(f"{_MODULE}.get_current_vllm_config", return_value=object()),
-        patch(
-            f"{_MODULE}.get_ascend_config",
-            return_value=SimpleNamespace(megamoe_shared_expert_fusion=True),
-        ),
-        patch(
-            f"{_MODULE}.get_current_hardware_profile",
-            return_value=get_hardware_profile(AscendDeviceType.A3),
-        ),
-    ):
-        runner._setup_megamoe_shared_fusion()
-
-    assert runner._megamoe_shared_fusion_disabled is not expected
-    assert runner._wrap_linear_for_megamoe_fusion.call_count == (2 if expected else 0)
-
-
-def test_collect_rejects_packed_int32_shared_weight() -> None:
-    """A W4A8 shared linear materializes int32 packed weights: keep the separate forward."""
-    runner = _make_runner(QuantType.W8A8)
-    runner._collect_megamoe_shared_weight("w1", _shared_linear(torch.int32, QuantType.W4A8))
-
-    assert runner._megamoe_shared_fusion_disabled is True
-    assert runner._megamoe_shared_parts == {}
-
-
-def test_collect_rejects_w4a8_shared_quant_type() -> None:
-    """An int8 buffer that declares W4A8 does not match: reject it."""
-    runner = _make_runner(QuantType.W8A8)
-    runner._collect_megamoe_shared_weight("w1", _shared_linear(torch.int8, QuantType.W4A8))
-
-    assert runner._megamoe_shared_fusion_disabled is True
-    assert runner._megamoe_shared_parts == {}
-
-
-def test_collect_rejects_int8_shared_on_a5_mxfp() -> None:
-    """An int8 shared linear cannot ride the A5 MXFP-only MegaMoe payload family."""
-    runner = _make_runner(QuantType.W8A8MXFP)
-    runner._megamoe_shared_fusion_platform = "A5/MXFP"
-    runner._collect_megamoe_shared_weight("w1", _shared_linear(torch.int8, QuantType.W8A8))
-
-    assert runner._megamoe_shared_fusion_disabled is True
-    assert runner._megamoe_shared_parts == {}
-
-
-def test_collect_rejects_mxfp_shared_on_a3_int8() -> None:
-    """An MXFP shared linear cannot ride the arch22 INT8 MegaMoe payload family."""
-    runner = _make_runner(QuantType.W8A8)
-    runner._collect_megamoe_shared_weight("w1", _shared_linear(torch.float8_e4m3fn, QuantType.W8A8MXFP))
-
-    assert runner._megamoe_shared_fusion_disabled is True
-    assert runner._megamoe_shared_parts == {}
-
-
-def test_collect_int8_payload_matches_routed_scale_dtype() -> None:
-    """The A3 INT8 payload must carry the same int64 scale container as routed."""
-    runner = _make_runner(QuantType.W8A8)
-    linear = SimpleNamespace(
-        weight=SimpleNamespace(data=torch.zeros(4096, 4096, dtype=torch.int8)),
-        weight_scale=SimpleNamespace(data=torch.full((4096,), 0.0078125)),
-        quant_method=SimpleNamespace(quant_type=QuantType.W8A8),
+def test_setup_a3_shared_expert_fusion(monkeypatch, quant_type, expected) -> None:
+    executor = _make_executor(
+        monkeypatch,
+        quant_type,
+        QuantType.W8A8,
+        torch.int8,
+        AscendDeviceType.A3,
+        patch_mixed_abi=False,
     )
-    runner._collect_megamoe_shared_weight("w1", linear)
-
-    scale = runner._megamoe_shared_parts["w1_scale"]
-    assert scale.dtype is torch.int64
-    assert int(scale[0]) == 1006632960
-    assert tuple(runner._megamoe_shared_parts["w1"].shape) == (4096, 4096)
-
-
-_INTEGER_SHARED_ABI = frozenset(
-    {
-        "shared_l1_weights",
-        "shared_l2_weights",
-        "shared_l1_weights_sf",
-        "shared_l2_weights_sf",
-        "shared_expert_quant_out_dtype",
-        "shared_weight1_type",
-        "shared_weight2_type",
-    }
-)
+    assert (executor._megamoe_formats is not None) is expected
+    executor.refresh_megamoe_shared_weights()
+    assert executor.megamoe_shared_weights_ready is expected
 
 
 @pytest.mark.parametrize(
@@ -257,3 +229,106 @@ def test_w4a8_shared_weights_reach_megamoe(monkeypatch, use_expert_weight_list, 
         assert kwargs["shared_weight1_type"] == kwargs["shared_weight2_type"] == weight_type
     else:
         assert not (_INTEGER_SHARED_ABI & kwargs.keys())
+
+
+@pytest.mark.parametrize("routed", [QuantType.W4A8, QuantType.W8A8])
+@pytest.mark.parametrize("packed_scale", [False, True])
+def test_a3_w8a8_shared_payload(monkeypatch, routed, packed_scale):
+    executor = _make_executor(
+        monkeypatch,
+        routed,
+        QuantType.W8A8,
+        torch.int8,
+        AscendDeviceType.A3,
+        packed_scale=packed_scale,
+    )
+    executor.refresh_megamoe_shared_weights()
+
+    fusion = executor.megamoe_shared_fusion()
+    weights = fusion.weights
+    assert weights is not None
+    assert fusion.weight_type == 258
+    assert tuple(weights.w1[0].shape) == (_HIDDEN, 2 * _SHARED_INTERMEDIATE)
+    assert tuple(weights.w2[0].shape) == (_SHARED_INTERMEDIATE, _HIDDEN)
+    for scale in (weights.w1_scale[0], weights.w2_scale[0]):
+        assert scale.dtype == torch.int64
+        torch.testing.assert_close(scale, torch.full_like(scale, 1006632960))
+
+
+@pytest.mark.parametrize(
+    ("routed", "shared", "carrier", "profile"),
+    [
+        (QuantType.W4A8, QuantType.W4A8, torch.int32, AscendDeviceType.A3),
+        (QuantType.W8A8, QuantType.W4A8, torch.int8, AscendDeviceType.A3),
+        (QuantType.W8A8MXFP, QuantType.W8A8, torch.int8, AscendDeviceType.A5),
+        (QuantType.W8A8, QuantType.W8A8MXFP, torch.float8_e4m3fn, AscendDeviceType.A3),
+    ],
+)
+def test_incompatible_shared_format_stays_standalone(monkeypatch, routed, shared, carrier, profile):
+    executor = _make_executor(monkeypatch, routed, shared, carrier, profile)
+    executor.refresh_megamoe_shared_weights()
+
+    assert not executor.megamoe_shared_weights_ready
+    assert executor.megamoe_shared_fusion().weights is None
+
+
+@pytest.mark.parametrize("invalid", ["asymmetric", "grouped_scale"])
+def test_a3_int8_rejects_incompatible_scale_contract(monkeypatch, invalid):
+    executor = _make_executor(monkeypatch, QuantType.W4A8, QuantType.W8A8, torch.int8, AscendDeviceType.A3)
+    down = executor.layer.down_proj
+    if invalid == "asymmetric":
+        down.weight_offset = nn.Parameter(torch.ones(_HIDDEN), requires_grad=False)
+    else:
+        down.weight_scale = nn.Parameter(torch.ones(_HIDDEN, 2), requires_grad=False)
+    executor.refresh_megamoe_shared_weights()
+
+    assert not executor.megamoe_shared_weights_ready
+
+
+def test_a3_bf16_shared_payload_uses_dense_transposed_weights(monkeypatch):
+    executor = _make_executor(monkeypatch, QuantType.NONE, QuantType.NONE, torch.bfloat16, AscendDeviceType.A3)
+    for projection in (executor.layer.gate_up_proj, executor.layer.down_proj):
+        dense_weight = (projection.weight.T + torch.arange(projection.weight.size(0))).contiguous()
+        projection.weight = nn.Parameter(dense_weight.bfloat16(), requires_grad=False)
+        del projection.weight_scale
+    executor.refresh_megamoe_shared_weights()
+
+    weights = executor.megamoe_shared_fusion().weights
+    assert weights is not None
+    assert weights.w1_scale is None and weights.w2_scale is None
+    torch.testing.assert_close(weights.w1[0], executor.layer.gate_up_proj.weight.T)
+    torch.testing.assert_close(weights.w2[0], executor.layer.down_proj.weight.T)
+
+
+@pytest.mark.parametrize(
+    "shared,carrier", [(QuantType.W8A8MXFP, torch.float8_e4m3fn), (QuantType.W4A8MXFP, torch.uint8)]
+)
+def test_a5_shared_mxfp_refills_e8m0_scale_storage(monkeypatch, shared, carrier):
+    executor = _make_executor(monkeypatch, QuantType.W8A8MXFP, shared, carrier, AscendDeviceType.A5)
+    projections = executor.layer.gate_up_proj, executor.layer.down_proj
+    gen = torch.Generator().manual_seed(17)
+    for projection in projections:
+        in_dim, out_dim = projection.weight.shape
+        if carrier == torch.uint8:
+            projection.weight = nn.Parameter(projection.weight[: in_dim // 2].clone(), requires_grad=False)
+        projection.weight_scale = nn.Parameter(
+            torch.randint(1, 200, (in_dim // 64, out_dim, 2), dtype=torch.uint8, generator=gen),
+            requires_grad=False,
+        )
+    executor.refresh_megamoe_shared_weights()
+    weights = executor.megamoe_shared_fusion().weights
+    assert weights is not None
+    assert weights.w1_scale[0].dtype == weights.w2_scale[0].dtype == torch.float8_e8m0fnu
+    pointers = tuple(operand.data_ptr() for operand in weights.operands())
+    gen_new = torch.Generator().manual_seed(42)
+    expected_scales = []
+    for projection in projections:
+        updated = torch.randint(1, 200, projection.weight_scale.shape, dtype=torch.uint8, generator=gen_new)
+        projection.weight_scale.copy_(updated)
+        expected_scales.append(updated.transpose(0, 1).contiguous())
+    executor.refresh_megamoe_shared_weights()
+
+    assert executor.megamoe_shared_fusion().weights is weights
+    assert pointers == tuple(operand.data_ptr() for operand in weights.operands())
+    for scale, expected in zip((weights.w1_scale[0], weights.w2_scale[0]), expected_scales, strict=True):
+        torch.testing.assert_close(scale.view(torch.uint8), expected, rtol=0, atol=0)
