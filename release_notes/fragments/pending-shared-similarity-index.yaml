@@ -1,0 +1,7 @@
+# Draft: replace null and rename this file to <PR number>.yaml when a PR exists.
+pr: null
+entries:
+  - category: bugfix
+    text: Added an opt-in shared pHash/SSIM index for ECMemcacheConnector so data-parallel schedulers can recall each other's similar images. Configure the same shared_index_endpoint and shared_index_namespace on every scheduler; DP0 automatically owns the index thread, with no separate service command required.
+  - category: feature
+    text: Shared encoder-cache indexes now aggregate cumulative exact hits, similarity hits, and misses across DP schedulers. Scoped logs expose overall and similarity hit rates with the same formulas for single-DP and multi-DP runs; statistics reuse the existing index thread.

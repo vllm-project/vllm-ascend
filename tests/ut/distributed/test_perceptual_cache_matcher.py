@@ -11,6 +11,7 @@ import torch
 from vllm_ascend.distributed.ec_transfer import memcache_resized_tensor_store as resized_store_module
 from vllm_ascend.distributed.ec_transfer import perceptual_ssim_cache_matcher as matcher_module
 from vllm_ascend.distributed.ec_transfer import phash as phash_module
+from vllm_ascend.distributed.ec_transfer import similarity_index as index_module
 from vllm_ascend.distributed.ec_transfer.memcache_resized_tensor_store import (
     MemcacheResizedTensorStore,
     ResizedTensorLoadRequest,
@@ -103,6 +104,22 @@ def _make_matcher(max_hamming: int = PHASH_NUM_BANDS - 1) -> PhashSSIMCacheMatch
     return matcher
 
 
+def test_cached_ssim_skips_self_and_unavailable_embeddings() -> None:
+    matcher = _make_matcher()
+    try:
+        matcher._index.similarity_cache["query"] = SimilarityCacheItem(
+            phash=1, ssim_similar_items={"query": 1.0, "missing": 0.9999, "ready": 0.999}
+        )
+        matcher._backend.exists.return_value = [0, 1]
+        matcher._backend.exists.side_effect = None
+        assert matcher.get_cached_similarity_match("query") == "ready"
+        matcher._backend.exists.assert_called_once_with(["missing", "ready"])
+        matcher._backend.exists.return_value = [0, 0]
+        assert matcher.get_cached_similarity_match("query") is None
+    finally:
+        matcher.shutdown()
+
+
 def test_matcher_owns_similarity_compute_executors() -> None:
     matcher_compute_executor = MagicMock()
     store_compute_executor = MagicMock()
@@ -160,7 +177,7 @@ def test_cached_phash_is_none_without_prewarmed_result() -> None:
 
 def test_batch_ensure_similarity_cache_available_uses_ranked_direct_ssim_hit() -> None:
     matcher = _make_matcher()
-    matcher.similarity_cache["query"] = SimilarityCacheItem(
+    matcher._index.similarity_cache["query"] = SimilarityCacheItem(
         phash=123,
         ssim_similar_items=matcher._sort_ssim_similar_items({"lower": 0.991, "best": 0.999}),
     )
@@ -177,9 +194,9 @@ def test_batch_ensure_similarity_cache_available_uses_ranked_direct_ssim_hit() -
 
 def test_record_similarity_score_caches_every_calculated_result() -> None:
     matcher = _make_matcher()
-    matcher.similarity_cache["query"] = SimilarityCacheItem(phash=100)
-    matcher.similarity_cache["high"] = SimilarityCacheItem(phash=101)
-    matcher.similarity_cache["low"] = SimilarityCacheItem(phash=102)
+    matcher._index.similarity_cache["query"] = SimilarityCacheItem(phash=100)
+    matcher._index.similarity_cache["high"] = SimilarityCacheItem(phash=101)
+    matcher._index.similarity_cache["low"] = SimilarityCacheItem(phash=102)
 
     matcher._record_similarity_score(
         "query",
@@ -190,13 +207,13 @@ def test_record_similarity_score_caches_every_calculated_result() -> None:
         ],
     )
 
-    assert list(matcher.similarity_cache["query"].ssim_similar_items.items()) == [
+    assert list(matcher._index.similarity_cache["query"].ssim_similar_items.items()) == [
         ("high", 0.99),
         ("low", 0.80),
         ("not-indexed", 0.70),
     ]
-    assert matcher.similarity_cache["high"].ssim_similar_items == {"query": 0.99}
-    assert matcher.similarity_cache["low"].ssim_similar_items == {"query": 0.80}
+    assert matcher._index.similarity_cache["high"].ssim_similar_items == {"query": 0.99}
+    assert matcher._index.similarity_cache["low"].ssim_similar_items == {"query": 0.80}
     matcher.shutdown()
 
 
@@ -215,12 +232,12 @@ def test_batch_ensure_similarity_cache_available_registers_phash_without_persist
             [SimpleNamespace(data=item)] * len(mm_hashes),
         )
 
-    assert [matcher.similarity_cache[mm_hash].phash for mm_hash in mm_hashes] == [123] * len(mm_hashes)
+    assert [matcher._index.similarity_cache[mm_hash].phash for mm_hash in mm_hashes] == [123] * len(mm_hashes)
     put.assert_not_called()
     expected_keys = [
         matcher._tensor_store.get_resized_key(mm_hash, (1, 4, 4), resized.shape, resized.dtype) for mm_hash in mm_hashes
     ]
-    assert set(matcher.phash_to_resized_mm_hashes[123]) == set(expected_keys)
+    assert set(matcher._index.phash_to_resized_mm_hashes[123]) == set(expected_keys)
     assert matcher._tensor_store.values == {}
     matcher.shutdown()
 
@@ -249,14 +266,14 @@ def test_persist_missed_resized_tensor_persists_only_after_matching() -> None:
         matcher.persist_missed_resized_tensor("query", feature)
 
     assert matcher.get_cached_phash("query") == 123
-    assert matcher.phash_to_resized_mm_hashes[123] == [expected_key]
+    assert matcher._index.phash_to_resized_mm_hashes[123] == [expected_key]
     assert matcher._tensor_store.values == {expected_key: resized}
     matcher.shutdown()
 
 
 def test_persist_missed_resized_tensor_reuses_prewarmed_phash() -> None:
     matcher = _make_matcher()
-    matcher.similarity_cache["query"] = SimilarityCacheItem(phash=123)
+    matcher._index.similarity_cache["query"] = SimilarityCacheItem(phash=123)
     resized = torch.zeros(16, 12)
     expected_key = matcher._tensor_store.get_resized_key(
         "query",
@@ -270,7 +287,7 @@ def test_persist_missed_resized_tensor_reuses_prewarmed_phash() -> None:
 
     compute.assert_not_called()
     assert matcher.get_cached_phash("query") == 123
-    assert matcher.phash_to_resized_mm_hashes[123] == [expected_key]
+    assert matcher._index.phash_to_resized_mm_hashes[123] == [expected_key]
     assert set(matcher._tensor_store.values) == {expected_key}
     matcher.shutdown()
 
@@ -303,20 +320,20 @@ def test_zero_hamming_uses_direct_lookup_without_bands_or_hamming() -> None:
     matcher = _make_matcher(max_hamming=0)
     try:
         with (
-            patch.object(matcher_module, "bands", create=True) as bands_spy,
-            patch.object(matcher_module, "hamming") as hamming_spy,
+            patch.object(index_module, "bands", create=True) as bands_spy,
+            patch.object(index_module, "hamming") as hamming_spy,
         ):
             second_key = _register_phash(matcher, "second", 0)
             first_key = _register_phash(matcher, "first", 0)
             _register_phash(matcher, "unrelated", 1 << 63)
-            matcher.phash_to_resized_mm_hashes = _DirectLookupOnly(matcher.phash_to_resized_mm_hashes)
+            matcher._index.phash_to_resized_mm_hashes = _DirectLookupOnly(matcher._index.phash_to_resized_mm_hashes)
 
             matches = matcher.find_resized_mm_hashes_by_hamming(0)
             assert matches == [second_key, first_key]
             matches.clear()
             assert matcher.find_resized_mm_hashes_by_hamming(0) == [second_key, first_key]
             assert matcher.find_resized_mm_hashes_by_hamming(12345) is None
-            assert matcher._phash_band_index == {}
+            assert matcher._index._phash_band_index == {}
             bands_spy.assert_not_called()
             hamming_spy.assert_not_called()
     finally:
@@ -333,7 +350,7 @@ def test_exact_phash_collision_still_requires_ssim_threshold(score: float) -> No
         with patch.object(matcher, "_get_ssim_score_list", return_value=[(score, "candidate")]):
             result = matcher.find_and_cache_matched_ssim("query", _item(query, (1, 4, 4)), [candidate])
         assert result == ("candidate" if score > matcher._config.ssim_threshold else None)
-        assert "candidate" in matcher.similarity_cache["query"].ssim_similar_items
+        assert "candidate" in matcher._index.similarity_cache["query"].ssim_similar_items
     finally:
         matcher.shutdown()
 
@@ -378,8 +395,8 @@ def test_bands_recall_only_shared_bands_and_filter_false_positives() -> None:
         far_hash = ((1 << 64) - 1) ^ ((1 << (64 // PHASH_NUM_BANDS)) - 1)
         _register_phash(matcher, "shared-band-far", far_hash)
         _register_phash(matcher, "no-shared-band", 0x0101010101010101)
-        matcher.phash_to_resized_mm_hashes = _DirectLookupOnly(matcher.phash_to_resized_mm_hashes)
-        with patch.object(matcher_module, "hamming", wraps=phash_module.hamming) as hamming_spy:
+        matcher._index.phash_to_resized_mm_hashes = _DirectLookupOnly(matcher._index.phash_to_resized_mm_hashes)
+        with patch.object(index_module, "hamming", wraps=phash_module.hamming) as hamming_spy:
             assert matcher.find_resized_mm_hashes_by_hamming(0) == [exact, near]
         assert {call.args[1] for call in hamming_spy.call_args_list} == {0, 1, far_hash}
         assert hamming_spy.call_count == 3
@@ -390,18 +407,18 @@ def test_bands_recall_only_shared_bands_and_filter_false_positives() -> None:
 def test_band_registration_is_idempotent_for_colliding_hashes() -> None:
     matcher = _make_matcher(max_hamming=PHASH_NUM_BANDS - 1)
     try:
-        with patch.object(matcher_module, "bands", wraps=phash_module.bands, create=True) as bands_spy:
+        with patch.object(index_module, "bands", wraps=phash_module.bands, create=True) as bands_spy:
             first = _register_phash(matcher, "first", 0)
             second = _register_phash(matcher, "second", 0)
             assert _register_phash(matcher, "first", 0) == first
             high = _register_phash(matcher, "high", 1 << 63)
         assert bands_spy.call_count == 2
-        assert matcher.phash_to_resized_mm_hashes == {0: [first, second], 1 << 63: [high]}
+        assert matcher._index.phash_to_resized_mm_hashes == {0: [first, second], 1 << 63: [high]}
         expected_bands: dict[tuple[int, int], set[int]] = {}
         for image_phash in (0, 1 << 63):
             for band in phash_module.bands(image_phash):
                 expected_bands.setdefault(band, set()).add(image_phash)
-        assert matcher._phash_band_index == expected_bands
+        assert matcher._index._phash_band_index == expected_bands
     finally:
         matcher.shutdown()
 
@@ -413,9 +430,9 @@ def test_failed_persistence_does_not_publish_phash_indexes(
     matcher = _make_matcher()
 
     def failed_put(*args) -> bool:
-        assert matcher.phash_to_resized_mm_hashes == {}
-        assert matcher._phash_band_index == {}
-        assert matcher.similarity_cache == {}
+        assert matcher._index.phash_to_resized_mm_hashes == {}
+        assert matcher._index._phash_band_index == {}
+        assert matcher._index.similarity_cache == {}
         if put_raises:
             raise RuntimeError("persistence failed")
         return False
@@ -427,9 +444,9 @@ def test_failed_persistence_does_not_publish_phash_indexes(
                     _register_phash(matcher, "failed", 0)
             else:
                 _register_phash(matcher, "failed", 0)
-        assert matcher.phash_to_resized_mm_hashes == {}
-        assert matcher._phash_band_index == {}
-        assert matcher.similarity_cache == {}
+        assert matcher._index.phash_to_resized_mm_hashes == {}
+        assert matcher._index._phash_band_index == {}
+        assert matcher._index.similarity_cache == {}
     finally:
         matcher.shutdown()
 
@@ -440,9 +457,9 @@ def test_batch_hamming_lookup_memoizes_queries_and_preserves_multiplicity() -> N
         one = _register_phash(matcher, "one", 1)
         zero = _register_phash(matcher, "zero", 0)
         with patch.object(
-            matcher,
-            "find_resized_mm_hashes_by_hamming",
-            wraps=matcher.find_resized_mm_hashes_by_hamming,
+            matcher._index,
+            "batch_recall",
+            wraps=matcher._index.batch_recall,
         ) as lookup_spy:
             misses, candidates = matcher._collect_candidate_resized_mm_hashes_by_hamming(
                 [
@@ -455,7 +472,7 @@ def test_batch_hamming_lookup_memoizes_queries_and_preserves_multiplicity() -> N
             )
         assert misses == ["missing", "missing-again"]
         assert candidates == [one, zero, one]
-        assert [call.args[0] for call in lookup_spy.call_args_list] == [1, 0, 99]
+        lookup_spy.assert_called_once_with([1, 0, 99])
     finally:
         matcher.shutdown()
 
@@ -503,7 +520,7 @@ def test_parallel_phash_compute_waits_for_all_metadata_writes_before_return_or_e
         with (
             patch.object(
                 matcher,
-                "_compute_phash_and_cache_metadata",
+                "_compute_phash_metadata",
                 side_effect=compute,
             ),
             patch.object(matcher_module, "wait", side_effect=observed_wait, create=True),
@@ -530,15 +547,13 @@ def test_parallel_phash_compute_waits_for_all_metadata_writes_before_return_or_e
 def test_cpu_preprocessing_schedules_by_batch_size(count: int) -> None:
     matcher = _make_matcher()
     mm_hashes = [f"query-{index}" for index in range(count)]
-    features = {
-        mm_hash: SimpleNamespace(data=_item(torch.zeros(16, 12), (1, 4, 4))) for mm_hash in mm_hashes
-    }
+    features = {mm_hash: SimpleNamespace(data=_item(torch.zeros(16, 12), (1, 4, 4))) for mm_hash in mm_hashes}
     caller_thread = get_ident()
     compute_threads: list[int] = []
     try:
         with patch.object(
             matcher,
-            "_compute_phash_and_cache_metadata",
+            "_compute_phash_metadata",
             side_effect=lambda *args: compute_threads.append(get_ident()),
         ):
             matcher._compute_and_cache_missing_phashes(mm_hashes, features)
@@ -800,9 +815,10 @@ def test_regular_best_candidate_skips_oversized_loading(first_score: float) -> N
     store.select_ssim_from_oversized_batches = MagicMock(return_value=[])
     matcher._record_similarity_score = MagicMock()
     try:
-        assert matcher.find_and_cache_matched_ssim(
-            "current", _item(current, (1, 4, 4)), ["first", "best", "oversized"]
-        ) == "best"
+        assert (
+            matcher.find_and_cache_matched_ssim("current", _item(current, (1, 4, 4)), ["first", "best", "oversized"])
+            == "best"
+        )
         store.select_ssim_from_oversized_batches.assert_not_called()
     finally:
         matcher.shutdown()
@@ -827,14 +843,13 @@ def test_ssim_batches_break_score_ties_by_key(mode: str) -> None:
         store.shutdown()
 
 
-
 def test_four_band_lookup_keeps_distance_three_boundary():
     matcher = _make_matcher(max_hamming=3)
     try:
         hit = _register_phash(matcher, "three-bands", 0x0000000100010001)
         _register_phash(matcher, "four-bands", 0x0001000100010001)
         assert matcher.find_resized_mm_hashes_by_hamming(0) == [hit]
-        assert sum(len(bucket) for bucket in matcher._phash_band_index.values()) == 2 * PHASH_NUM_BANDS
+        assert sum(len(bucket) for bucket in matcher._index._phash_band_index.values()) == 2 * PHASH_NUM_BANDS
     finally:
         matcher.shutdown()
 
@@ -879,17 +894,15 @@ def test_similarity_cache_random_eviction_syncs_reverse_and_band_index() -> None
     try:
         for index in range(19):
             _register_phash(matcher, f"image-{index}", 0x1000 + index)
-        assert len(matcher.similarity_cache) == 10  # max_capacity * lower_watermark
+        assert len(matcher._index.similarity_cache) == 10  # max_capacity * lower_watermark
 
-        surviving_phashes = {item.phash for item in matcher.similarity_cache.values()}
+        surviving_phashes = {item.phash for item in matcher._index.similarity_cache.values()}
         assert len(surviving_phashes) == 10
-        assert set(matcher.phash_to_resized_mm_hashes) == surviving_phashes
-        for mm_hash, item in matcher.similarity_cache.items():
-            resized_keys = matcher.phash_to_resized_mm_hashes[item.phash]
-            assert [
-                MemcacheResizedTensorStore.get_mm_hash_from_resized_key(key) for key in resized_keys
-            ] == [mm_hash]
-        for phash_set in matcher._phash_band_index.values():
+        assert set(matcher._index.phash_to_resized_mm_hashes) == surviving_phashes
+        for mm_hash, item in matcher._index.similarity_cache.items():
+            resized_keys = matcher._index.phash_to_resized_mm_hashes[item.phash]
+            assert [MemcacheResizedTensorStore.get_mm_hash_from_resized_key(key) for key in resized_keys] == [mm_hash]
+        for phash_set in matcher._index._phash_band_index.values():
             assert phash_set
             assert phash_set <= surviving_phashes
     finally:
@@ -901,7 +914,7 @@ def test_similarity_cache_keeps_growing_below_eviction_threshold() -> None:
     try:
         for index in range(18):
             _register_phash(matcher, f"image-{index}", 0x1000 + index)
-        assert len(matcher.similarity_cache) == 18
-        assert len(matcher.phash_to_resized_mm_hashes) == 18
+        assert len(matcher._index.similarity_cache) == 18
+        assert len(matcher._index.phash_to_resized_mm_hashes) == 18
     finally:
         matcher.shutdown()

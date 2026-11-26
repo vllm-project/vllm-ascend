@@ -25,16 +25,23 @@ from functools import lru_cache
 import torch
 import torch.nn.functional as F
 
-_PHASH_SIZE = 32    # DCT 输入边长
-_HASH_SIDE = 8      # 取左上 8x8 低频 → 64 bit
+from vllm_ascend.distributed.ec_transfer.phash_index import (
+    PHASH_NUM_BANDS as PHASH_NUM_BANDS,
+)
+from vllm_ascend.distributed.ec_transfer.phash_index import (
+    bands as bands,
+)
+from vllm_ascend.distributed.ec_transfer.phash_index import (
+    hamming as hamming,
+)
+
+_PHASH_SIZE = 32  # DCT 输入边长
+_HASH_SIDE = 8  # 取左上 8x8 低频 → 64 bit
 # median 死区系数: |coef - median| <= _DEAD_ZONE * std 的位强制置 0
 _DEAD_ZONE = 0.05
 _DEVICE_CACHE_SIZE = 16
 _BITS_PER_BYTE = 8
 _HASH_BITS = _HASH_SIDE * _HASH_SIDE
-# Number of equal-width pHash bands; use a positive divisor of 64.
-# The similarity-cache Hamming limit is derived from this value.
-PHASH_NUM_BANDS = 4
 
 
 @lru_cache(maxsize=_DEVICE_CACHE_SIZE)
@@ -114,27 +121,3 @@ def compute_phash(
     # The Python dictionary lookup needs a host integer. Transfer only one
     # packed hash, preserving the original MSB-first order and unsigned bit 63.
     return int.from_bytes(bytes(packed.cpu().tolist()), byteorder="big")
-
-
-def hamming(a: int, b: int) -> int:
-    """两个 pHash 的汉明距离。"""
-    return (a ^ b).bit_count()
-
-
-def bands(phash: int, num_bands: int = PHASH_NUM_BANDS) -> list[tuple[int, int]]:
-    """LSH banding: 64 bit 切成 num_bands 段, 返回 (段号, 段值) 列表。
-
-    查询候选 = 任一段 (段号, 段值) 完全相同的已登记 hash。汉明距离
-    ≤ τ < num_bands 时由鸽笼原理必共享至少一段, 即 banding 不漏召;
-    共享段不代表真相似, 误候选由调用方的 hamming 过滤兜底。
-    """
-    if (
-        isinstance(num_bands, bool)
-        or not isinstance(num_bands, int)
-        or num_bands <= 0
-        or _HASH_BITS % num_bands
-    ):
-        raise ValueError(f"num_bands must be a positive integer divisor of {_HASH_BITS}")
-    width = _HASH_BITS // num_bands
-    mask = (1 << width) - 1
-    return [(i, (phash >> (i * width)) & mask) for i in range(num_bands)]
