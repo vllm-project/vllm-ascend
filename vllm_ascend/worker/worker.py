@@ -20,6 +20,8 @@
 import copy
 import gc
 import logging
+import subprocess
+import time
 from collections.abc import Iterator
 from contextlib import AbstractContextManager, contextmanager, nullcontext
 from datetime import timedelta
@@ -92,7 +94,7 @@ from vllm_ascend.core.kv_cache_placement import (
     create_kvpp_cache_allocation_plan,
     register_kvpp_draft_layers,
 )
-from vllm_ascend.cpu_binding import bind_cpus
+from vllm_ascend.cpu_binding import DeviceInfo, bind_cpus
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.device_allocator.camem import CaMemAllocator
 from vllm_ascend.device_allocator.sleep_mem_optimized import SleepWakeupManager
@@ -129,6 +131,8 @@ if TYPE_CHECKING:
 
 
 _STATIC_KERNEL_SHUTDOWN_TIMEOUT = timedelta(seconds=3)
+# Leave headroom for subprocess cleanup inside the Core's 10-second health RPC.
+_HEALTH_CHECK_TIMEOUT_SECONDS = 9.0
 
 
 # Both supported versions resolve grouping through the platform's builder.
@@ -1428,29 +1432,78 @@ class NPUWorker(GPUWorker):
     def reload_weights(self, *args, **kwargs) -> None:
         self.model_runner.reload_weights(*args, **kwargs)
 
-    def check_health(self) -> None:
-        import subprocess
+    def _health_query_device_id(self, deadline: float | None = None) -> int:
+        """Resolve the ``npu-smi`` NPU ID (card) for this worker's bound chip.
 
+        Three id spaces are in play, and conflating them is the bug this fixes:
+
+        * ``self.local_rank``                     -- vLLM logical rank
+        * visible device ordinal                  -- what ``torch.npu.set_device`` takes
+        * chip Phy-ID                             -- what CANN's physical lookup returns
+        * NPU ID (card)                            -- what ``npu-smi info -i`` takes
+
+        The last two differ on multi-chip cards: chips 2 and 3 can both sit on
+        card 1, so mapping rank -> chip Phy-ID is *not* enough. Go through the
+        ``Chip Phy-ID`` column of ``npu-smi info -m`` to land on the card.
+
+        Every step is inside the try: a health probe must never crash, and a
+        failing resolver degrades to the previous best-effort behaviour.
+        """
+        try:
+            visible_device_index = int(current_platform.logical_device_id_to_visible_device_id(self.local_rank))
+            chip_phy_id = current_platform.visible_device_id_to_physical_device_id(visible_device_index)
+            remaining = None if deadline is None else deadline - time.monotonic()
+            if remaining is None or remaining > 0:
+                mapping = DeviceInfo.get_npu_phy_id_to_card_id(
+                    timeout=remaining if remaining is not None else _HEALTH_CHECK_TIMEOUT_SECONDS
+                )
+                card_id = mapping.get(str(chip_phy_id))
+                if card_id is not None:
+                    return int(card_id)
+            else:
+                logger.debug("check_health id resolution budget exhausted for rank %s", self.local_rank)
+        except Exception as e:
+            logger.debug("resolve npu-smi card id for rank %s failed: %s", self.local_rank, e)
+
+        # Older hosts may not expose ``Chip Phy-ID``; on a single-chip card the
+        # physical id *is* the card id, so this stays correct there.
+        try:
+            return int(current_platform.device_id_to_physical_device_id(self.local_rank))
+        except Exception:
+            return int(self.local_rank)
+
+    def check_health(self) -> None:
+        deadline = time.monotonic() + _HEALTH_CHECK_TIMEOUT_SECONDS
+        device_id = None
         logger.debug("check_health starting for rank %s...", self.local_rank)
         try:
+            device_id = self._health_query_device_id(deadline=deadline)
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                logger.warning(
+                    "check_health budget exhausted for rank %s (card %s) before querying health.",
+                    self.local_rank,
+                    device_id,
+                )
+                return
             result = subprocess.run(
-                ["npu-smi", "info", "-i", str(self.local_rank), "-t", "health"],
+                ["npu-smi", "info", "-i", str(device_id), "-t", "health"],
                 capture_output=True,
                 text=True,
-                timeout=10,
+                timeout=remaining,
             )
 
             if result.returncode == 0:
                 parse_text_output(result.stdout)
-                logger.debug("check_health success for rank %s.", self.local_rank)
+                logger.debug("check_health success for rank %s (card %s).", self.local_rank, device_id)
             else:
-                logger.warning("query NPU card %s fail: %s", self.local_rank, result.stderr)
+                logger.warning("query NPU card %s (rank %s) fail: %s", device_id, self.local_rank, result.stderr)
         except subprocess.TimeoutExpired:
-            logger.warning("query NPU card %s timeout.", self.local_rank)
+            logger.warning("query NPU card %s (rank %s) timeout.", device_id, self.local_rank)
         except FileNotFoundError:
             logger.warning("npu-smi tool not found.")
         except Exception as e:
-            logger.error("query NPU card %s fail: %s", self.local_rank, e)
+            logger.error("query NPU card %s (rank %s) fail: %s", device_id, self.local_rank, e)
         return
 
 
