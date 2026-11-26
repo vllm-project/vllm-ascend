@@ -283,6 +283,10 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
         cache = getattr(self.connector_worker, "dspark_prefix_cache", None)
         request = next((request for request in metadata.requests if request.req_id == request_id), None)
         if cache is not None and request is not None:
+            if request.max_offload_tokens is not None:
+                through_tokens = min(through_tokens, request.max_offload_tokens)
+                if through_tokens <= 0:
+                    return
             cache.save(request, through_tokens, block_ids)
 
     def shutdown(self):

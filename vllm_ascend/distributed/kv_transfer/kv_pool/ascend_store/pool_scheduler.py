@@ -36,6 +36,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     ReqMeta,
     RequestTracker,
     StoreLookupResult,
+    get_max_offload_tokens,
     infer_cache_transfer_granularity,
     infer_cacheable_group_ids,
     infer_group_block_sizes,
@@ -211,6 +212,17 @@ class BaseKVPoolScheduler(ABC):
             )
             self._request_trackers[req_id] = tracker
         return tracker
+
+    def _parse_max_offload_tokens(self, request: Request) -> int | None:
+        max_offload_tokens = get_max_offload_tokens(getattr(request, "kv_transfer_params", None))
+        if max_offload_tokens is not None and self.layerwise_offload:
+            logger.warning(
+                "Ignoring max_offload_tokens=%d for request %s because layerwise buffer reuse requires full saves",
+                max_offload_tokens,
+                getattr(request, "request_id", "<unknown>"),
+            )
+            return None
+        return max_offload_tokens
 
     def _build_cache_coordinator(self) -> AscendStoreCoordinator | None:
         """Build the hybrid cache-hit/mask coordinator (mirrors the worker)."""
@@ -495,6 +507,7 @@ class BaseKVPoolScheduler(ABC):
             gva_block_offset=(previous_tracker.gva_block_offset if previous_tracker else 0),
             num_mamba_speculative_blocks_by_group=self.num_mamba_speculative_blocks_by_group,
             block_sizes=self.grouped_block_size,
+            max_offload_tokens=self._parse_max_offload_tokens(request_real),
         )
         self._request_trackers[request.req_id] = request_tracker
         return self._build_req_meta(
@@ -537,6 +550,7 @@ class BaseKVPoolScheduler(ABC):
             gva_block_offset=(previous_tracker.gva_block_offset if previous_tracker else 0),
             num_mamba_speculative_blocks_by_group=self.num_mamba_speculative_blocks_by_group,
             block_sizes=self.grouped_block_size,
+            max_offload_tokens=self._parse_max_offload_tokens(request_real),
         )
         self._request_trackers[req_id] = request_tracker
         return self._build_req_meta(
@@ -633,6 +647,7 @@ class BaseKVPoolScheduler(ABC):
             gva_block_offset=(previous_tracker.gva_block_offset if previous_tracker else 0),
             num_mamba_speculative_blocks_by_group=self.num_mamba_speculative_blocks_by_group,
             block_sizes=self.grouped_block_size,
+            max_offload_tokens=self._parse_max_offload_tokens(request),
         )
         self._request_trackers[request_id] = request_tracker
         return ReqMeta.from_request_tracker(
@@ -774,12 +789,16 @@ class BaseKVPoolScheduler(ABC):
             request = self._unfinished_requests.get(req_id)
             if tracker is None or request is None or not self.can_put:
                 continue
+            max_offload_tokens = getattr(tracker, "max_offload_tokens", None)
+            if max_offload_tokens == 0:
+                continue
             accepted = [
                 BoundaryPut(group, block, boundary)
                 for group, block, boundary in entries
                 if group in coord.mamba_group_ids
                 and block > 0
                 and boundary <= (tracker.prefill_end_tokens or tracker.num_prompt_tokens or 0)
+                and (max_offload_tokens is None or boundary <= max_offload_tokens)
             ]
             if not accepted:
                 continue
@@ -792,6 +811,7 @@ class BaseKVPoolScheduler(ABC):
                     block_hashes=list(request[0].block_hashes),
                     num_prompt_tokens=tracker.num_prompt_tokens,
                     completed_token_len=tracker.token_len,
+                    max_offload_tokens=max_offload_tokens,
                 )
                 meta.add_request(req_meta)
                 save_metas[req_id] = req_meta
@@ -948,6 +968,8 @@ class KVPoolScheduler(BaseKVPoolScheduler):
         A Mamba state handed off at any other position, i.e. a shared-prefix
         junction (``--enable-mamba-shared-prefix-checkpoint``), adds no puts here.
         """
+        if req_meta.max_offload_tokens == 0:
+            return []
         coord = self.cache_coordinator
         assert coord is not None
         mamba_tails = [
@@ -966,6 +988,8 @@ class KVPoolScheduler(BaseKVPoolScheduler):
         # Core drops the Mamba checkpoint whenever EAGLE block drop is on,
         # whichever groups carry the eagle flag.
         boundary = get_mamba_prefill_checkpoint_position(prompt_tokens, hash_block_size, coord.use_eagle)
+        if req_meta.max_offload_tokens is not None and boundary > req_meta.max_offload_tokens:
+            return []
         # Any other sub-block Mamba hand-off is a shared-prefix junction. Its
         # attention KV, EAGLE proof included, ends on an attention block end no
         # later than this checkpoint's proof, so normal and prompt-tail saves
@@ -984,6 +1008,8 @@ class KVPoolScheduler(BaseKVPoolScheduler):
                 continue
             proof_end = boundary + coord.eagle_proof_margin_by_group.get(group_id, 0)
             if proof_end > completed or proof_end // hash_block_size > num_hashes:
+                continue
+            if req_meta.max_offload_tokens is not None and proof_end > req_meta.max_offload_tokens:
                 continue
             block_size = self.grouped_block_size[group_id]
             group_blocks = req_meta.block_ids_by_group[group_id]
@@ -1009,12 +1035,17 @@ class KVPoolScheduler(BaseKVPoolScheduler):
         tracker = self._request_trackers.get(request.request_id)
         if tracker is None or not any(block_ids):
             return False
+        max_offload_tokens = getattr(tracker, "max_offload_tokens", None)
+        if max_offload_tokens == 0:
+            return False
         boundaries = {boundary for _, _, boundary in partial_tail_offloads}
         if len(boundaries) != 1:
             raise ValueError("Partial-tail offloads for one request must share a boundary")
         boundary_tokens = next(iter(boundaries))
         assert tracker.prefill_end_tokens is not None
-        if boundary_tokens > tracker.prefill_end_tokens:
+        if boundary_tokens > tracker.prefill_end_tokens or (
+            max_offload_tokens is not None and boundary_tokens > max_offload_tokens
+        ):
             return False
 
         coord = self.cache_coordinator
@@ -1036,6 +1067,7 @@ class KVPoolScheduler(BaseKVPoolScheduler):
             num_prompt_tokens=request.num_prompt_tokens,
             completed_token_len=request.num_computed_tokens,
             boundary_puts=mamba_puts,
+            max_offload_tokens=max_offload_tokens,
         )
         req_meta.boundary_puts = [*self._partial_tail_non_mamba_puts(req_meta), *mamba_puts]
         assert request.request_id not in self._finished_partial_tail_metas

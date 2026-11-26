@@ -30,6 +30,16 @@ def is_kv_save_role(kv_role: str, save_decode_cache: bool) -> bool:
     return kv_role in ("kv_producer", "kv_both") or save_decode_cache
 
 
+def get_max_offload_tokens(kv_transfer_params: Mapping[str, Any] | None) -> int | None:
+    """Parse the request's offload cap, preserving zero and rejecting booleans."""
+    raw = kv_transfer_params.get("max_offload_tokens") if isinstance(kv_transfer_params, Mapping) else None
+    if type(raw) is int and raw >= 0:
+        return raw
+    if raw is not None:
+        logger.warning("max_offload_tokens must be a non-negative int, got %r; ignoring", raw)
+    return None
+
+
 @dataclass(frozen=True)
 class TPMismatchInfo:
     enabled: bool
@@ -920,6 +930,7 @@ class RequestTracker:
 
     block_sizes: list[int] | None = None
     partial_tail_sent: bool = False
+    max_offload_tokens: int | None = None
 
     def __init__(
         self,
@@ -938,6 +949,7 @@ class RequestTracker:
         num_mamba_speculative_blocks_by_group: dict[int, int] | None = None,
         block_sizes: list[int] | None = None,
         partial_tail_sent: bool = False,
+        max_offload_tokens: int | None = None,
     ) -> None:
         self.req_id = req_id
         self.token_len = token_len
@@ -956,6 +968,7 @@ class RequestTracker:
         self.last_block_gva = last_block_gva
         self.block_sizes = block_sizes
         self.partial_tail_sent = partial_tail_sent
+        self.max_offload_tokens = max_offload_tokens
 
     @property
     def allocated_block_ids(self) -> list[int]:
@@ -1056,6 +1069,7 @@ class ReqMeta:
     boundary_puts: list[BoundaryPut] | None = None
     completed_token_len: int | None = None
     publish_partial_tail: bool = False
+    max_offload_tokens: int | None = None
 
     def __init__(
         self,
@@ -1101,6 +1115,7 @@ class ReqMeta:
         completed_token_len: int | None = None,
         publish_partial_tail: bool = False,
         computed_prefix_tokens: int = 0,
+        max_offload_tokens: int | None = None,
     ) -> None:
         if token_len_chunk is None:
             token_len_chunk = 0 if save_end_token is None else save_end_token
@@ -1147,6 +1162,7 @@ class ReqMeta:
         self.load_key_block_offset = load_key_block_offset
         self.load_last_block_key = load_last_block_key
         self.load_keys = [] if load_keys is None else list(load_keys)
+        self.max_offload_tokens = max_offload_tokens
 
     @property
     def block_ids(self) -> list[int]:
@@ -1215,19 +1231,28 @@ class ReqMeta:
             block_hashes = []
         target_token_len = tracker.token_len
         previous_saved_tokens = tracker.num_saved_tokens
+        effective_max_offload_tokens = None if save_partial_block else tracker.max_offload_tokens
+        save_token_len = (
+            target_token_len
+            if effective_max_offload_tokens is None
+            else min(target_token_len, effective_max_offload_tokens)
+        )
+        round_to_full_blocks = (
+            discard_partial_chunks or enable_partial_hash_hits or effective_max_offload_tokens is not None
+        )
 
         # For save operation: do not save if the following condition is met
         # 1. has already been saved before (num_saved_tokens > 0)
         # 2. number of unsaved tokens is not reached the chunk boundary
         chunk_boundary = (
             cdiv(tracker.num_saved_tokens + 1, cache_transfer_granularity) * cache_transfer_granularity
-            if discard_partial_chunks or enable_partial_hash_hits
+            if round_to_full_blocks
             else 0
         )
         num_tokens_to_save = (
-            (target_token_len // cache_transfer_granularity * cache_transfer_granularity)
-            if discard_partial_chunks or enable_partial_hash_hits
-            else target_token_len
+            (save_token_len // cache_transfer_granularity * cache_transfer_granularity)
+            if round_to_full_blocks
+            else save_token_len
         )
         hash_block_size = hash_block_size or cache_transfer_granularity
         assert cache_transfer_granularity % hash_block_size == 0
@@ -1244,9 +1269,11 @@ class ReqMeta:
         # Scheduled draft tokens can cross a page before that page has a
         # committed request hash. Do not mark an unsent page as saved.
         if full_block_count > available_full_block_count:
-            num_tokens_to_save = available_full_block_count * cache_transfer_granularity
-        if tracker.last_block_gva is not None and (
-            target_token_len % cache_transfer_granularity != 0 or boundary_without_hash
+            num_tokens_to_save = min(num_tokens_to_save, available_full_block_count * cache_transfer_granularity)
+        if (
+            tracker.last_block_gva is not None
+            and effective_max_offload_tokens is None
+            and (target_token_len % cache_transfer_granularity != 0 or boundary_without_hash)
         ):
             partial_block_index = (
                 full_block_count if target_token_len % cache_transfer_granularity != 0 else full_block_count - 1
@@ -1263,6 +1290,10 @@ class ReqMeta:
             and not skip_save
             and not tracker.partial_tail_sent
             and target_token_len >= prefill_end
+            and (
+                effective_max_offload_tokens is None
+                or (effective_max_offload_tokens > 0 and prefill_end <= effective_max_offload_tokens)
+            )
         )
         skip_save = skip_save or (
             num_tokens_to_save < chunk_boundary
@@ -1335,6 +1366,7 @@ class ReqMeta:
             kv_cache_group_ids=list(range(len(tracker.allocated_block_ids_by_group))),
             publish_partial_tail=publish_partial_tail and not skip_save,
             completed_token_len=target_token_len,
+            max_offload_tokens=effective_max_offload_tokens,
         )
 
 
