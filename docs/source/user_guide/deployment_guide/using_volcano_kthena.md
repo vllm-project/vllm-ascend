@@ -60,7 +60,9 @@ kubectl apply -f https://raw.githubusercontent.com/volcano-sh/kthena/refs/heads/
 or
 
 ```bash
-cat << EOF | kubectl apply -f -
+# The delimiter is quoted so that $(POD_NAME) and $(NAMESPACE) are kept as-is
+# and expanded by Kubernetes instead of being treated as shell command substitution.
+cat << 'EOF' | kubectl apply -f -
 apiVersion: workload.serving.volcano.sh/v1alpha1
 kind: ModelServing
 metadata:
@@ -340,7 +342,7 @@ The fields of `--kv-transfer-config` are:
 
 | Field | Value in this example | Description |
 | --- | --- | --- |
-| `kv_connector` | `MooncakeConnectorV1` | Connector implementation provided by vLLM-Ascend. It must be consistent with `kvConnector.type: mooncake` of `ModelServer`. |
+| `kv_connector` | `MooncakeConnectorV1` | Connector implementation provided by vLLM-Ascend. In Kthena the `mooncake` and `nixl` router types share the same implementation, so either works; this example uses `mooncake` to mirror the name configured here. |
 | `kv_buffer_device` | `npu` | Device on which the KV cache buffers are allocated (`npu` for Ascend). |
 | `kv_role` | `kv_producer` (prefill) / `kv_consumer` (decode) | Role in a PD pair: the prefill instance produces and sends KV cache, while the decode instance consumes it. |
 | `kv_rank` | `0` (prefill) / `1` (decode) | Rank identifying each instance of the PD group, so that both sides can be distinguished. |
@@ -381,8 +383,9 @@ metadata:
   namespace: dev
 spec:
   kvConnector:
-    # Must match the connector used by vLLM-Ascend (`MooncakeConnectorV1`) above,
-    # otherwise the router and the serving Pods disagree on how KV cache is transferred.
+    # In Kthena the `mooncake` and `nixl` router types share the same
+    # implementation; `mooncake` is used here to mirror the `MooncakeConnectorV1`
+    # configured on the vLLM-Ascend side above.
     type: mooncake
   workloadSelector:
     matchLabels:
