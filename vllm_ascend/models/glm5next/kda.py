@@ -42,10 +42,10 @@ from vllm_ascend.models.glm5next.ops.causal_conv1d import causal_conv1d
 from vllm_ascend.models.glm5next.ops.kda import KDA_MAX_RECURRENT_TOKENS, chunk_kda, recurrent_kda
 from vllm_ascend.models.glm5next.recoverssm_config import use_glm_recoverssm
 from vllm_ascend.ops.recurrent_pcp import prepare_recurrent_pcp_config
-from vllm_ascend.ops.triton.kda.recoverssm import allocate_kda_verify_caches, kda_recoverssm_verify
+from vllm_ascend.ops.triton.kda.recoverssm import kda_recoverssm_verify
 
 if TYPE_CHECKING:
-    from vllm.models.kimi_k3.nvidia.ops.recoverssm import KDARecoverSSMRecords
+    from vllm_ascend.ops.kda_recoverssm_records import AscendKDARecords
 
 
 def prepare_glm_pcp_config(vllm_config):
@@ -485,11 +485,11 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
 
         self.A_log = nn.Parameter(torch.empty(1, 1, self.local_num_heads, 1, dtype=torch.float32))
         set_weight_attrs(self.A_log, {"weight_loader": self._a_log_weight_loader})
-        self.recoverssm_records: KDARecoverSSMRecords | None = None
+        self.recoverssm_records: AscendKDARecords | None = None
         if self.use_recoverssm:
             # Importing Kimi's package can load FLA and initialize an NPU.
             # Defer it until the worker has selected its device.
-            from vllm.models.kimi_k3.nvidia.ops.recoverssm import KDARecoverSSMRecords as KDARecords
+            from vllm_ascend.ops.kda_recoverssm_records import AscendKDARecords as KDARecords
 
             self.recoverssm_records = KDARecords.allocate(
                 vllm_config.scheduler_config.max_num_seqs,
@@ -498,10 +498,6 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
                 self.head_dim,
                 vllm_config.model_config.dtype,
                 self.A_log.device,
-            )
-
-            self.recoverssm_decay_cache, self.recoverssm_normalized_key_cache = allocate_kda_verify_caches(
-                self.recoverssm_records.key_gate
             )
 
         self.g_b_proj = column_linear(
@@ -854,8 +850,8 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
                     spec_query_start_loc,
                     spec_state_indices_tensor[:, 0],
                     self.num_spec + 1,
-                    decay_cache=self.recoverssm_decay_cache,
-                    normalized_key_cache=self.recoverssm_normalized_key_cache,
+                    decay_cache=records.decay_cache,
+                    normalized_key_cache=records.normalized_key_cache,
                     store_raw_gate=getattr(commit_context, "decay_base_addrs", None) is None,
                 )
             else:

@@ -50,8 +50,9 @@ from vllm_ascend.ops.head_parallel import (
     get_head_parallel_size,
 )
 from vllm_ascend.ops.kda import run_chunk_kda, run_recurrent_kda
+from vllm_ascend.ops.kda_recoverssm_records import AscendKDARecords
 from vllm_ascend.ops.recurrent_pcp import PCPRecurrentMetadataBuilderMixin
-from vllm_ascend.ops.triton.kda.recoverssm import allocate_kda_verify_caches, kda_recoverssm_verify
+from vllm_ascend.ops.triton.kda.recoverssm import kda_recoverssm_verify
 from vllm_ascend.quantization.methods.w4a8.w4a8_mxfp4 import (
     AscendW4A8MXFPDynamicLinearMethod,
 )
@@ -259,16 +260,22 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
             )(f"{prefix}.in_proj_qkvgfab")
         )
         super().__init__(config, vllm_config, prefix)
-        if self.recoverssm_records is not None:
-            self.recoverssm_decay_cache, self.recoverssm_normalized_key_cache = allocate_kda_verify_caches(
-                self.recoverssm_records.key_gate
-            )
         parallel_config = getattr(vllm_config, "parallel_config", None)
         self.pcp_size = getattr(parallel_config, "prefill_context_parallel_size", 1)
         self.pcp_group = get_pcp_group() if self.pcp_size > 1 else None
         self.pcp_rank = self.pcp_group.rank_in_group if self.pcp_group is not None else 0
         if self.pcp_size > 1:
             self._init_pcp_projections(vllm_config, prefix)
+        if self.recoverssm_records is not None:
+            del self.recoverssm_records
+            self.recoverssm_records = AscendKDARecords.allocate(
+                vllm_config.scheduler_config.max_num_seqs,
+                self.local_num_heads,
+                self.spec_query_len,
+                self.head_dim,
+                vllm_config.model_config.dtype,
+                self.conv1d.weight.device,
+            )
         self.uses_mixed_projection = uses_mixed_projection
         self._ascend_kda_state_copy = None
         self.qkv_layout: KDAInputProjectionTPLayout | None = None
@@ -969,8 +976,8 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
                     attn_metadata.spec_query_start_loc,
                     attn_metadata.spec_state_indices_tensor[:, 0],
                     self.num_spec + 1,
-                    decay_cache=self.recoverssm_decay_cache,
-                    normalized_key_cache=self.recoverssm_normalized_key_cache,
+                    decay_cache=records.decay_cache,
+                    normalized_key_cache=records.normalized_key_cache,
                     store_raw_gate=getattr(commit_context, "decay_base_addrs", None) is None,
                 )
             else:

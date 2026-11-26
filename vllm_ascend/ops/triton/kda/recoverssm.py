@@ -876,8 +876,8 @@ class KDARecoverSSMCommitContext:
                 records is None
                 or records.correction is not self.correction_caches[index]
                 or records.key_gate is not self.kg_caches[index]
-                or getattr(layer, "recoverssm_decay_cache", None) is not self.decay_caches[index]
-                or getattr(layer, "recoverssm_normalized_key_cache", None) is not self.normalized_key_caches[index]
+                or getattr(records, "decay_cache", None) is not self.decay_caches[index]
+                or getattr(records, "normalized_key_cache", None) is not self.normalized_key_caches[index]
             ):
                 return False
         return True
@@ -996,8 +996,10 @@ class KDARecoverSSMCommitContext:
                 device=device,
             )
 
-        decay_caches = tuple(getattr(layer, "recoverssm_decay_cache", None) for layer in layers)
-        normalized_key_caches = tuple(getattr(layer, "recoverssm_normalized_key_cache", None) for layer in layers)
+        decay_caches = tuple(getattr(layer.recoverssm_records, "decay_cache", None) for layer in layers)
+        normalized_key_caches = tuple(
+            getattr(layer.recoverssm_records, "normalized_key_cache", None) for layer in layers
+        )
 
         if any(key is not None and decay is None for key, decay in zip(normalized_key_caches, decay_caches)):
             raise ValueError("RecoverSSM normalized keys require the decay record")

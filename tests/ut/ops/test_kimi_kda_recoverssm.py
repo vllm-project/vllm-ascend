@@ -73,14 +73,14 @@ def test_context_binds_normalized_key_record(monkeypatch):
     assert normalized_key.shape == layer.recoverssm_records.correction.shape
     assert normalized_key.dtype == decay.dtype == torch.bfloat16
     assert normalized_key.data_ptr() != decay.data_ptr()
-    layer.recoverssm_normalized_key_cache = normalized_key
+    layer.recoverssm_records.normalized_key_cache = normalized_key
     with pytest.raises(ValueError, match="require the decay record"):
         recoverssm.KDARecoverSSMCommitContext.create([layer], spec_query_len=4, max_num_reqs=4)
-    layer.recoverssm_decay_cache = decay
+    layer.recoverssm_records.decay_cache = decay
     context = recoverssm.KDARecoverSSMCommitContext.create([layer], spec_query_len=4, max_num_reqs=4)
     assert context.normalized_key_base_addrs.tolist() == [normalized_key.data_ptr()]
     assert context.is_bound_to([layer])
-    layer.recoverssm_normalized_key_cache = normalized_key.clone()
+    layer.recoverssm_records.normalized_key_cache = normalized_key.clone()
     assert not context.is_bound_to([layer])
 
 

@@ -1030,9 +1030,9 @@ def test_align_context(mode, graph_mode, state_dtype, heads, key_dim, value_dim,
         layers.append(
             SimpleNamespace(
                 kv_cache=(stored_conv, state),
-                recoverssm_decay_cache=decay,
-                recoverssm_normalized_key_cache=normalized_key,
-                recoverssm_records=SimpleNamespace(correction=correction, key_gate=kg),
+                recoverssm_records=SimpleNamespace(
+                    correction=correction, key_gate=kg, decay_cache=decay, normalized_key_cache=normalized_key
+                ),
                 A_log=a_log,
                 dt_bias=bias,
                 gate_lower_bound=-5.0,
@@ -1274,9 +1274,9 @@ def test_commit_window_uses_device_path(
         layers.append(
             SimpleNamespace(
                 kv_cache=(stored_conv, state),
-                recoverssm_decay_cache=decay,
-                recoverssm_normalized_key_cache=normalized_key,
-                recoverssm_records=SimpleNamespace(correction=correction, key_gate=kg),
+                recoverssm_records=SimpleNamespace(
+                    correction=correction, key_gate=kg, decay_cache=decay, normalized_key_cache=normalized_key
+                ),
                 A_log=a_log,
                 dt_bias=bias,
                 gate_lower_bound=lower_bound,
