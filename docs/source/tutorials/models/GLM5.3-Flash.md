@@ -62,6 +62,26 @@ ops-transformer build provides this interface. Keys and scales share managed
 cache pages so cache transport includes both. No separate indexer environment
 variable is required.
 
+### Fused KPool tail key/gate projection
+
+When MTP rolls back speculative tokens, the KPool indexer re-projects the live
+tail rows that are already missing from the CANN compressor state. Key and gate
+consume the same gathered hidden rows, so their two `[head_dim, hidden]`
+projections are stacked once after weight loading into a single
+`[2 * head_dim, hidden]` GEMM, and the tail cache write reads both halves
+through per-row key/gate strides. No input reshuffle is involved.
+
+Enable it with `--additional-config '{"enable_indexer_tail_kg_cat": true}'`. It
+is off by default, only applies to the GLM-5.3-Flash KPool indexer with MTP
+speculative decoding, and leaves the non-MTP path and the pooled-key projection
+unchanged.
+
+On a 1P1D W8A8 deployment (prefill DP4/TP4/EP16, decode DP12/TP4/EP48, 80K
+input / 1K output, concurrency 12, Atlas 910C) this shortens ITL by about
+0.25 ms and TPOT by about 0.08 ms. The written values are unchanged: the
+operands, the reduction order and the elementwise adds are the same, and GPQA
+Diamond (≈89.39) and GSM8K (≈97.95) match the default path.
+
 ### NoPE Prolog V3
 
 On A2/A3, eligible dynamic W8A8 checkpoints automatically fuse the NoPE SFA
