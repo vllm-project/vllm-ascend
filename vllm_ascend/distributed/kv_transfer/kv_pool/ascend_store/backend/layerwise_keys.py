@@ -15,6 +15,7 @@ class LayerwiseKeyBuilder:
     pcp_size: int = 1
     pcp_sharded_group_ids: set[int] = field(default_factory=set)
     dcp_size: int = 1
+    tp_size: int = 1
 
     def make_full_key(
         self,
@@ -26,6 +27,8 @@ class LayerwiseKeyBuilder:
         dcp_rank: int | None = None,
     ) -> str:
         key = self.make_base_key(group_id, block_hash, rank, stage)
+        if group_id in self.pcp_sharded_group_ids:
+            key = f"{key}@mamba_layout:tp{self.tp_size}-pcp{self.pcp_size}-dcp{self.dcp_size}"
         if self.pcp_size > 1 and group_id in self.pcp_sharded_group_ids:
             # State head partitions depend on the PCP topology.
             key = f"{key}@pcp_size:{self.pcp_size}@pcp_rank:{pcp_rank}"

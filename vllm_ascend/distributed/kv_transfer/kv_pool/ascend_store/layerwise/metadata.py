@@ -27,12 +27,14 @@ class LayerPoolKey(PoolKey):
                 self.key_metadata.kv_cache_group_id,
                 self.key_metadata.cache_role,
                 self.key_metadata.cache_family,
+                self.key_metadata.mamba_shard_layout,
                 self.chunk_hash,
                 self.layer_id,
             )
         )
 
     def to_string(self):
+        layout = f"@mamba_layout:{self.key_metadata.mamba_shard_layout}" if self.key_metadata.mamba_shard_layout else ""
         return (
             f"{self.key_metadata.model_name}"
             f"@dcp:{self.key_metadata.dcp_rank}"
@@ -40,6 +42,7 @@ class LayerPoolKey(PoolKey):
             f"@group:{self.key_metadata.kv_cache_group_id}"
             f"@cache_role:{self.key_metadata.cache_role}"
             f"@cache_family:{self.key_metadata.cache_family}"
+            f"{layout}"
             f"@layer_id:{self.layer_id}"
             f"@{self.chunk_hash}"
         )

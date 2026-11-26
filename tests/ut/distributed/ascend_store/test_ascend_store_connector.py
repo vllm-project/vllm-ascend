@@ -17,7 +17,6 @@
 
 import types
 import unittest
-from itertools import product
 from unittest.mock import MagicMock, patch
 
 # isort: off

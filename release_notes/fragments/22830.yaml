@@ -1,0 +1,8 @@
+pr: 22830
+entries:
+  - category: bugfix
+    text: >-
+      Fixed false AscendStore cache hits between incompatible parallel layouts
+      for sharded Mamba states. Compatible instances can now use tensor
+      parallelism and prefill context parallelism together. Upgrade writers and
+      readers together; older sharded Mamba pool entries are not reused.
