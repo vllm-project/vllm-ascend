@@ -1,0 +1,5 @@
+pr: 23323
+entries:
+  - category: bugfix
+    text: Fixed GLM-5.3-Flash NPU crashes (errcode 264) under large max-num-batched-tokens / MTP by initializing topk index buffer padding to -1.
+    model: glm-5.3-flash
