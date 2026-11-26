@@ -21,6 +21,18 @@ In the CSV, `native_us` is unfused latency, `pr16634_us` is cannbotDSL latency a
 
 Atlas 850 的 batch 49 另做了交错复测。固定权重地址时，旧版与优化后单核的设备耗时中位数分别为 554.682 和 550.206 µs。轮换四份数值相同、地址不同的权重时，分别为 553.285 和 548.454 µs。每种配置下两版各测 20 次，两种执行顺序各占 10 次。 [配对实测样本](atlas-850-b49-paired-device-times.json)
 
+## Measured software environment
+
+| Component | Version used for the Atlas 850E and 850 six-token benchmark |
+| --- | --- |
+| TileLang | `0.1.15` with the Ascend backend, JIT target `ascend`, execution backend `cython` |
+| CANN toolkit | `9.2.1` |
+| Python and architecture | CPython `3.12.16`, Linux `aarch64` |
+| PyTorch | `2.10.0+cpu` |
+| Ascend PyTorch extension | `torch-npu 2.10.0.post7` |
+
+The installed wheel was `tilelang-0.1.15-cp39-abi3-manylinux_2_34_aarch64.whl`. Its recorded SHA-256 is `77343b47643eaab07d8c1f8314c6c33e4992cb07883207796c900b719626524f`. The NPU computations use torch-npu and the Ascend backend.
+
 Run the following commands from this directory with the captured replay fixture, CANN 9.2.1, the Ascend TileLang environment, torch-npu and vllm-ascend available. Use a fresh profiler output directory for each board.
 
 ```sh
