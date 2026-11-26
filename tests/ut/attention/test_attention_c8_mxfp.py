@@ -416,6 +416,27 @@ class TestMixedQFASplit(TestBase):
         self.assertIs(prefill.kwargs["metadata"], next_prefill.kwargs["metadata"])
         self.assertIsNot(decode.kwargs["metadata"], prefill.kwargs["metadata"])
 
+    def test_metadata_lengths_have_partition_sized_storage(self):
+        self.metadata = replace(
+            self.metadata,
+            num_decodes=1,
+            num_decode_tokens=1,
+            num_prefills=2,
+            max_query_len=15,
+            actual_seq_lengths_q=[1, 9, 24],
+            query_start_loc_gpu=torch.tensor([0, 1, 9, 24], dtype=torch.int32),
+        )
+        self._forward()
+        plans = self.ops.quant_flash_attn_metadata.call_args_list
+        self.assertEqual(len(plans), 2)
+        for plan, offsets, lengths in zip(plans, ([0, 1], [0, 8, 23]), ([141], [79, 67])):
+            for name, expected in (("cu_seqlens_q", offsets), ("seqused_kv", lengths)):
+                with self.subTest(name=name, expected=expected):
+                    tensor = plan.kwargs[name]
+                    self.assertEqual(tensor.tolist(), expected)
+                    self.assertEqual(tensor.storage_offset(), 0)
+                    self.assertEqual(tensor.untyped_storage().nbytes(), len(expected) * tensor.element_size())
+
     def test_full_decode_only_distinguishes_runtime_modes(self):
         self.impl.vllm_config.model_config.enforce_eager = False
         self.impl.vllm_config.compilation_config.cudagraph_mode = CUDAGraphMode.FULL_DECODE_ONLY

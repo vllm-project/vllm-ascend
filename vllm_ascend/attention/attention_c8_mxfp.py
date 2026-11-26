@@ -592,12 +592,15 @@ class AscendC8MXFPAttentionBackendImpl(AscendAttentionBackendImpl):
             if all(n == 1 for n in lengths[:num_decodes]) and all(n > 1 for n in lengths[num_decodes:]):
                 # One query token per decode request on this path.
                 num_decode_tokens = attn_metadata.num_decode_tokens
+                # The metadata AICPU receives storage shapes for length tensors.
+                # Give each slice its own allocation. Rebasing prefill offsets
+                # below already allocates a tensor of the required size.
                 partitions = (
                     _QFAPartition(
                         "decode",
                         slice(0, num_decode_tokens),
-                        query_offsets[: num_decodes + 1],
-                        kv_lengths[:num_decodes],
+                        query_offsets[: num_decodes + 1].clone(),
+                        kv_lengths[:num_decodes].clone(),
                         attn_metadata.block_tables[:num_decodes],
                         1,
                     ),
@@ -605,7 +608,7 @@ class AscendC8MXFPAttentionBackendImpl(AscendAttentionBackendImpl):
                         "prefill",
                         slice(num_decode_tokens, num_tokens),
                         query_offsets[num_decodes : num_reqs + 1] - num_decode_tokens,
-                        kv_lengths[num_decodes:num_reqs],
+                        kv_lengths[num_decodes:num_reqs].clone(),
                         attn_metadata.block_tables[num_decodes:num_reqs],
                         max(lengths[num_decodes:]),
                     ),
