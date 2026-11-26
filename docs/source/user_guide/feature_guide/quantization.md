@@ -172,6 +172,36 @@ python -m vllm.entrypoints.api_server \
     --trust-remote-code
 ```
 
+## ModelSlim INT4 W4A4 MoE
+
+`--quantization ascend` recognizes ModelSlim `W4A4_DYNAMIC` routed experts
+with symmetric per-channel INT4 weights and dynamic per-token INT4 activations.
+This format is distinct from MXFP4 and from packed W4A8 checkpoints. Other
+layers can retain the precision specified by the model's quantization recipe.
+
+The implementation routes floating point tokens and quantizes activations
+locally before each expert projection. Weight offsets must be zero. EPLB and
+fused MC2 are unsupported; set `--additional-config '{"enable_fused_mc2":0}'`.
+
+The initial serving validation uses Qwen3.8-Flash-Next on A3 with TP8, expert
+parallelism, BF16 activations and eager execution. For that configuration:
+
+```bash
+vllm serve /path/to/qwen3.8-flash-next-w4a4 \
+  --quantization ascend \
+  --tensor-parallel-size 8 \
+  --enable-expert-parallel \
+  --language-model-only \
+  --enforce-eager \
+  --additional-config '{"enable_fused_mc2":0}' \
+  --engram-config '{"cpu_offload":true,"dp_shared_memory":false}'
+```
+
+INT8 PLE tables use the existing ModelSlim PLE support independently of the
+expert quantization. Full-model accuracy, performance, other hardware, MTP,
+and graph/FlashComm configurations require separate validation.
+
+
 ## References
 
 - [ModelSlim GitCode](https://gitcode.com/Ascend/msmodelslim)
