@@ -3,7 +3,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any
 
@@ -26,6 +26,7 @@ DSPARK_DRAFT_KV_ACK = b"dspark_draft_kv_ack"
 # PP-aware MF_META handshake.  A bare ACK is the legacy PP=1 response;
 # producers with PP>1 require the structured acknowledgement below.
 SFAPD_PROTOCOL_VERSION = 1
+HISPARSE_PROTOCOL_VERSION = 2  # Includes source bounds and the valid-token watermark.
 MF_META_ACK = b"mf_meta_ack"
 
 
@@ -67,6 +68,23 @@ def infer_sfa_component_group_ids(kv_cache_config: Any) -> tuple[int, int]:
     return main_group_id, indexer_group_id
 
 
+def hisparse_target_enabled(extra: dict[str, Any]) -> bool:
+    enabled = extra.get("hisparse_target", False)
+    if not isinstance(enabled, bool):
+        raise ValueError("hisparse_target must be a boolean")
+    return enabled
+
+
+def hisparse_transfer_group_ids(config: Any) -> tuple[int, int]:
+    """Find the externally writable target groups, excluding draft and hot caches."""
+    groups = config.kv_cache_groups
+    source = [i for i in config.transfer_group_ids if groups[i].role == "hisparse_source"]
+    indexer = [i for i in config.transfer_group_ids if groups[i].role == "hisparse_indexer"]
+    if len(source) != 1 or source[0] not in config.host_group_ids or len(indexer) != 1:
+        raise ValueError("Expected one transferable HiSparse Host source and one device Indexer group")
+    return source[0], indexer[0]
+
+
 @dataclass
 class LayerMetadata:
     tensor_group_idx: list[int]
@@ -79,6 +97,8 @@ class LayerMetadata:
     # indices and therefore do not own an indexer cache at all.
     main_tensor_count: int = 2
     has_indexer: bool = False
+    block_shapes: list[tuple[int, ...]] = field(default_factory=list)
+    num_logical_blocks: list[int] = field(default_factory=list)
 
 
 @dataclass

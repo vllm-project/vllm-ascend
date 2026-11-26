@@ -21,6 +21,7 @@ from vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.dspark_context impor
 from vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.protocol import (
     DSPARK_DRAFT_KV,
     DSPARK_DRAFT_KV_ACK,
+    HISPARSE_PROTOCOL_VERSION,
     MF_META,
     MF_META_ACK,
     READ_DONE,
@@ -47,6 +48,7 @@ class ProducerSendState:
     layer_storage_slots: dict[int, tuple[int, ...]]
     producer_pp_rank: int = 0
     producer_pp_size: int = 1
+    include_computed_tokens: bool = False
 
 
 @dataclass
@@ -353,7 +355,7 @@ class MembPullSendingThread(threading.Thread):
         # main_start_block, indexer_start_block)``.
         endpoint_payloads: dict[
             tuple[str, int],
-            tuple[list[tuple[str, list[int], list[int], int, int]], list[str]],
+            tuple[list[tuple], list[str]],
         ] = {}
         endpoint_engine_ids: dict[tuple[str, int], str | None] = {}
         layer_meta = self._state.layer_metadata[layer_name]
@@ -399,15 +401,16 @@ class MembPullSendingThread(threading.Thread):
                 endpoint_engine_ids[endpoint] = rm.remote_engine_id
                 read_reqs, done_ext_ids = endpoint_payloads.setdefault(endpoint, ([], []))
                 if p_main_block_ids or p_indexer_block_ids:
-                    read_reqs.append(
-                        (
-                            ext_id,
-                            p_main_block_ids,
-                            p_indexer_block_ids,
-                            main_start_block,
-                            indexer_start_block,
-                        )
+                    entry = (
+                        ext_id,
+                        p_main_block_ids,
+                        p_indexer_block_ids,
+                        main_start_block,
+                        indexer_start_block,
                     )
+                    if self._state.include_computed_tokens:
+                        entry = (*entry, int(rm.local_computed_tokens or 0))
+                    read_reqs.append(entry)
                 if chunk_done:
                     done_ext_ids.append(ext_id)
             logger.debug(
@@ -461,6 +464,7 @@ class MembPullSendingThread(threading.Thread):
             self._signal_layer_done(layer_idx)
 
     def _send_mf_meta(self, path: str, dealer, encoder: msgspec.msgpack.Encoder) -> None:
+        version = HISPARSE_PROTOCOL_VERSION if self._state.include_computed_tokens else SFAPD_PROTOCOL_VERSION
         p_meta_dict = {}
         for ln, meta in self._state.layer_metadata.items():
             p_meta_dict[ln] = {
@@ -471,13 +475,17 @@ class MembPullSendingThread(threading.Thread):
                 "main_tensor_count": meta.main_tensor_count,
                 "has_indexer": meta.has_indexer,
             }
+            if self._state.include_computed_tokens:
+                p_meta_dict[ln]["block_shapes"] = meta.block_shapes
+                p_meta_dict[ln]["num_logical_blocks"] = meta.num_logical_blocks
+                p_meta_dict[ln]["block_tokens"] = [self._state.block_sizes[i] for i in meta.tensor_group_idx]
         dealer.send(
             encoder.encode(
                 (
                     MF_META,
                     self._state.p_session,
                     encoder.encode(p_meta_dict),
-                    SFAPD_PROTOCOL_VERSION,
+                    version,
                     self._state.producer_pp_rank,
                     self._state.producer_pp_size,
                 )
@@ -487,11 +495,13 @@ class MembPullSendingThread(threading.Thread):
             frames = dealer.recv_multipart()
             payload = [f for f in frames if f != b""]
             if payload == [b"ACK"]:
+                if self._state.include_computed_tokens:
+                    raise RuntimeError("HiSparse target requires a HiSparse-aware Decode peer")
                 if self._state.producer_pp_size > 1:
                     raise RuntimeError("SFAPD producer PP>1 requires a PP-aware D; received a legacy MF_META ACK")
             elif len(payload) == 1:
                 reply = msgspec.msgpack.Decoder(type=tuple).decode(payload[0])
-                if reply != (MF_META_ACK, SFAPD_PROTOCOL_VERSION):
+                if reply != (MF_META_ACK, version):
                     raise RuntimeError(f"MembPull P MF_META got unexpected reply: {reply!r}")
             else:
                 raise RuntimeError(f"MembPull P MF_META got unexpected reply: {payload!r}")

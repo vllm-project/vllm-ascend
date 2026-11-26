@@ -20,6 +20,7 @@ class _FakeTransDataOpType(Enum):
     SDMA = 1
     DEVICE_RDMA = 2
     DEVICE_URMA = 3
+    HOST_RDMA = 4
 
 
 def _fake_memfabric(raw_engine: MagicMock) -> ModuleType:
@@ -177,3 +178,36 @@ def test_memfabric_transfer_protocol_rejects_unknown_value():
 
     with pytest.raises(ValueError, match="Invalid MemFabric transfer_protocol"):
         manager.configure(role=MEMFABRIC_ROLE_DECODE, device_id=0, transfer_protocol="rocev2")
+
+
+def test_host_rdma_keeps_device_endpoint_and_control_port_distinct():
+    raw = MagicMock()
+    raw.initialize.return_value = 0
+    raw.get_rpc_port.return_value = 23456
+    manager = GlobalMemfabricTE()
+    options = dict(
+        role=MEMFABRIC_ROLE_DECODE,
+        device_id=2,
+        transfer_protocol="host_rdma",
+        host_rdma_ip="192.0.2.1",
+        host_rdma_port_base=20000,
+    )
+    manager.configure(**options)
+    manager.configure(**options)
+    with patch.dict(sys.modules, {"memfabric_hybrid": _fake_memfabric(raw)}):
+        manager.get_transfer_engine("test-host")
+    assert raw.initialize.call_args.kwargs["nic"] == "tcp://192.0.2.1:20032"
+    assert raw.initialize.call_args.kwargs["data_op_type"] == _FakeTransDataOpType.HOST_RDMA
+    assert manager.unique_id == "test-host:23456"
+
+
+@pytest.mark.parametrize("ip,port", [("127.0.0.1", 20000), ("192.0.2.1", 65000), (None, 20000), ("192.0.2.1", True)])
+def test_reject_unusable_host_rdma_endpoint(ip, port):
+    with pytest.raises(ValueError):
+        GlobalMemfabricTE().configure(
+            role=MEMFABRIC_ROLE_DECODE,
+            device_id=0,
+            transfer_protocol="host_rdma",
+            host_rdma_ip=ip,
+            host_rdma_port_base=port,
+        )

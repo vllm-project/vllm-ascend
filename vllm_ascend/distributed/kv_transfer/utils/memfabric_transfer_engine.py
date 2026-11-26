@@ -9,6 +9,7 @@ unchanged.
 from __future__ import annotations
 
 import threading
+from ipaddress import IPv4Address
 from typing import Any
 
 from vllm.logger import logger
@@ -20,12 +21,15 @@ _VALID_MEMFABRIC_ROLES = (MEMFABRIC_ROLE_PREFILL, MEMFABRIC_ROLE_DECODE)
 # MemFabric data-path protocol, selected via kv_connector_extra_config so this
 # module never needs to branch on machine type: sdma/device_rdma for A3 nodes,
 # device_urma for 950PR&950DT Products.
-_VALID_MEMFABRIC_TRANSFER_PROTOCOLS = ("sdma", "device_rdma", "device_urma")
+_VALID_MEMFABRIC_TRANSFER_PROTOCOLS = ("sdma", "device_rdma", "device_urma", "host_rdma")
 _DEFAULT_MEMFABRIC_TRANSFER_PROTOCOL = "sdma"
+_HOST_RDMA_DEVICE_PORT_STRIDE = 16
+# Local MemFabric entity ranks run through 1023 and the HCOM listener retries eight ports.
+_HOST_RDMA_LAST_PORT_OFFSET = 1023 + 7
 
 
 class MemfabricBackend:
-    """Normalize the MemFabric API used by the SFA PD connector."""
+    """Normalize the MemFabric API used by PD connectors."""
 
     def __init__(self, engine: Any, advertised_rpc_port: int):
         self._engine = engine
@@ -69,6 +73,7 @@ class GlobalMemfabricTE:
         self._device_id: int | None = None
         self._transfer_protocol: str | None = None
         self._hostname: str | None = None
+        self._host_rdma_nic: str | None = None
         self._unique_id: str | None = None
         self._is_buffer_registered = False
         self._engine_lock = threading.Lock()
@@ -86,6 +91,8 @@ class GlobalMemfabricTE:
         role: str,
         device_id: int,
         transfer_protocol: str | None = None,
+        host_rdma_ip: str | None = None,
+        host_rdma_port_base: int | None = None,
     ) -> None:
         """Bind this process singleton to one MemFabric role, device and protocol.
 
@@ -107,12 +114,30 @@ class GlobalMemfabricTE:
                 f"expected one of {_VALID_MEMFABRIC_TRANSFER_PROTOCOLS}"
             )
 
+        host_rdma_nic = None
+        if protocol == "host_rdma":
+            if not isinstance(host_rdma_ip, str) or type(host_rdma_port_base) is not int:
+                raise ValueError("host_rdma requires an explicit local IPv4 and integer HCOM base port")
+            ip = IPv4Address(host_rdma_ip)
+            port = host_rdma_port_base + _HOST_RDMA_DEVICE_PORT_STRIDE * device_id
+            if (
+                ip.is_loopback
+                or ip.is_unspecified
+                or ip.is_multicast
+                or not 1024 <= port <= 65535 - _HOST_RDMA_LAST_PORT_OFFSET
+            ):
+                raise ValueError("Unusable host_rdma address or TCP bootstrap port range")
+            host_rdma_nic = f"tcp://{ip}:{port}"
+        elif host_rdma_ip is not None or host_rdma_port_base is not None:
+            raise ValueError("Host RDMA NIC settings require explicit host_rdma")
+
         with self._engine_lock:
             configured = self._role is not None
-            if configured and (role, device_id, protocol) != (
+            if configured and (role, device_id, protocol, host_rdma_nic) != (
                 self._role,
                 self._device_id,
                 self._transfer_protocol,
+                self._host_rdma_nic,
             ):
                 raise RuntimeError(
                     "MemFabric transfer engine is already configured for "
@@ -124,6 +149,7 @@ class GlobalMemfabricTE:
             self._role = role
             self._device_id = device_id
             self._transfer_protocol = protocol
+            self._host_rdma_nic = host_rdma_nic
 
     def get_transfer_engine(self, hostname: str) -> MemfabricBackend:
         with self._engine_lock:
@@ -152,6 +178,11 @@ class GlobalMemfabricTE:
             "device_urma": TransDataOpType.DEVICE_URMA,
         }
         protocol = self._transfer_protocol or _DEFAULT_MEMFABRIC_TRANSFER_PROTOCOL
+        if protocol == "host_rdma":
+            host_rdma = getattr(TransDataOpType, "HOST_RDMA", None)
+            if host_rdma is None:
+                raise ValueError("Installed memfabric_hybrid does not support host_rdma")
+            return host_rdma
         if protocol not in protocol_map:
             raise ValueError(
                 f"Invalid MemFabric transfer_protocol={protocol!r}; expected one of {sorted(protocol_map)}"
@@ -167,7 +198,7 @@ class GlobalMemfabricTE:
             )
         except ImportError as exc:
             raise ImportError(
-                "Please install memfabric_hybrid (memfabric-hybrid) to use SfaRemoteD2HConnector."
+                "Please install memfabric_hybrid (memfabric-hybrid) to use MemFabric KV transfer."
             ) from exc
 
         # Match the MemFabric initialization sequence used by its examples.
@@ -192,6 +223,7 @@ class GlobalMemfabricTE:
             self._device_id,
             store_server_role=MEMFABRIC_ROLE_PREFILL,
             data_op_type=data_op_type,
+            **({"nic": self._host_rdma_nic} if self._host_rdma_nic is not None else {}),
         )
         if ret != 0:
             raise RuntimeError(

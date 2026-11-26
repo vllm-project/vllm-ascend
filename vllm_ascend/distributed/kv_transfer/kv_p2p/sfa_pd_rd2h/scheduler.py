@@ -35,6 +35,8 @@ from vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.protocol import (
     SfaPDConsumerMetadata,
     SfaPDProducerMetadata,
     get_external_request_id,
+    hisparse_target_enabled,
+    hisparse_transfer_group_ids,
     infer_sfa_component_group_ids,
 )
 from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.copy_sfa_topk_slots import (
@@ -236,6 +238,8 @@ class SFAPDRD2HProducerScheduler:
 
 
 class SFAPDRD2HScheduler:
+    _hisparse_target = False
+
     def __init__(
         self,
         vllm_config: VllmConfig,
@@ -246,11 +250,14 @@ class SFAPDRD2HScheduler:
         self.kv_cache_config = kv_cache_config
         self.use_layerwise = use_layerwise
         self.engine_id = vllm_config.kv_transfer_config.engine_id
+        extra = getattr(vllm_config.kv_transfer_config, "kv_connector_extra_config", None) or {}
+        self._hisparse_target = hisparse_target_enabled(extra)
 
         if kv_cache_config is None:
             raise ValueError("SFAPDRD2HScheduler requires KVCacheConfig")
         self.block_size = [group_spec.kv_cache_spec.block_size for group_spec in kv_cache_config.kv_cache_groups]
-        self.main_group_idx, self.indexer_group_idx = infer_sfa_component_group_ids(kv_cache_config)
+        group_ids = hisparse_transfer_group_ids if self._hisparse_target else infer_sfa_component_group_ids
+        self.main_group_idx, self.indexer_group_idx = group_ids(kv_cache_config)
         self._dspark_context_groups = self._find_dspark_context_groups()
         self._dspark_context_requests: dict[str, tuple[DSparkContextDescriptor, dict[int, tuple[int, ...]]]] = {}
 
@@ -298,6 +305,7 @@ class SFAPDRD2HScheduler:
         # req_ids awaiting their first build_connector_meta seed (so the worker
         # can build request_map for get_finished even while async-waiting KV).
         self._reqs_need_recv: set[str] = set()
+        self._remote_prefill_matches: dict[str, tuple[int, int]] = {}
         self._dspark_pending_recv: set[str] = set()
         self._d2h_pending_releases: dict[str, int] = {}
         self._deferred_finished_req_ids: set[str] = set()
@@ -329,8 +337,11 @@ class SFAPDRD2HScheduler:
     # D side (kv_consumer)
     # ------------------------------------------------------------------
     def get_num_new_matched_tokens(self, request: Request, num_computed_tokens: int) -> tuple[int | None, bool]:
-        # Pull the entire prompt KV from the remote P node into D's CPU pool
-        # (main MLA) / HBM (indexer). Async relative to engine execution.
+        # Keep the exact aligned local hit from Core's lookup. At
+        # immediate allocation the request still reports zero, and at
+        # deferred allocation it may already count external tokens.
+        if self._hisparse_target:
+            self._remote_prefill_matches.pop(request.request_id, None)
         params = request.kv_transfer_params
         if params is not None and params.get("do_remote_prefill"):
             if getattr(self, "_dspark_context_groups", ()):
@@ -352,6 +363,8 @@ class SFAPDRD2HScheduler:
                 return None, False
             assert num_computed_tokens % min(self.block_size) == 0
             count = max(len(request.prompt_token_ids) - num_computed_tokens, 0)
+            if self._hisparse_target:
+                self._remote_prefill_matches[request.request_id] = (num_computed_tokens, count)
             return count, count > 0
         return 0, False
 
@@ -380,6 +393,15 @@ class SFAPDRD2HScheduler:
         params = request.kv_transfer_params
         if params is None or not params.get("do_remote_prefill"):
             return
+
+        remote_cached_tokens = request.num_computed_tokens
+        if self._hisparse_target:
+            match = self._remote_prefill_matches.pop(request.request_id, None)
+            if match is None and num_external_tokens == 0:
+                return
+            if match is None or match[1] != num_external_tokens:
+                raise RuntimeError("Remote KV allocation does not match the Decode cache lookup")
+            remote_cached_tokens = match[0]
 
         block_ids_by_group = SFAPDRD2HProducerScheduler._normalize_block_ids(blocks.get_block_ids())
         required_group = max(self.main_group_idx, self.indexer_group_idx)
@@ -414,10 +436,14 @@ class SFAPDRD2HScheduler:
                 dspark_draft_block_ids_by_group,
             )
             self._dspark_pending_recv.add(request.request_id)
-        self._reqs_need_recv.add(request.request_id)
+        needs_transfer = not self._hisparse_target or num_external_tokens > 0
+        if needs_transfer:
+            self._reqs_need_recv.add(request.request_id)
+        if self._hisparse_target and needs_transfer:
+            self._dspark_pending_recv.add(request.request_id)
         allocator = getattr(self, "_copy_sfa_slot_allocator", None)
         if allocator is not None:
-            kv_tokens = request.num_computed_tokens + num_external_tokens
+            kv_tokens = remote_cached_tokens + num_external_tokens
             if kv_tokens <= 0:
                 prompt_token_ids = getattr(request, "prompt_token_ids", None) or []
                 kv_tokens = len(prompt_token_ids)
@@ -443,14 +469,14 @@ class SFAPDRD2HScheduler:
         kv_transfer_params = dict(
             request_id=get_external_request_id(request.request_id),
             do_remote_prefill=False,
-            do_remote_decode=True,
+            do_remote_decode=needs_transfer,
             remote_engine_id=self.engine_id,
             remote_host=self.side_channel_host,
             remote_port=self.side_channel_port,
             remote_tp_size=self.vllm_config.parallel_config.tensor_parallel_size,
             remote_pcp_size=self.vllm_config.parallel_config.prefill_context_parallel_size,
             remote_dcp_size=self.vllm_config.parallel_config.decode_context_parallel_size,
-            remote_cached_tokens=request.num_computed_tokens,
+            remote_cached_tokens=remote_cached_tokens,
         )
         if dspark_context_descriptor is not None:
             kv_transfer_params["dspark_context_generation"] = dspark_context_descriptor.generation
@@ -585,6 +611,8 @@ class SFAPDRD2HScheduler:
     def _cleanup_finished_request(self, request_id: str) -> None:
         # vLLM owns the block lifecycle; the connector only drops its lookup.
         self._request_trackers.pop(request_id, None)
+        if self._hisparse_target:
+            self._remote_prefill_matches.pop(request_id, None)
         getattr(self, "_dspark_context_requests", {}).pop(request_id, None)
         self._reqs_need_recv.discard(request_id)
         self._dspark_pending_recv.discard(request_id)
