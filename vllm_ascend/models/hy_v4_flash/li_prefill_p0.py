@@ -5,7 +5,6 @@ from functools import lru_cache
 import torch
 import torch.distributed as dist
 from vllm.distributed import get_tp_group
-from vllm.forward_context import get_forward_context
 from vllm.triton_utils import HAS_TRITON
 
 from vllm_ascend.device.device_config import is_950
@@ -110,24 +109,15 @@ def _score_chunk(query_bf16, weights, pool_bf16, visible_len, stream):
 
 
 def select_many(query, weights, pool_bf16, first_visible, *, tail, tp_shard=False):
-    """Score eligible Prefill row batches against their shared key pool."""
+    """Score Prefill rows, with TP sharding enabled by the caller for all-Prefill batches."""
     stream = torch.npu.current_stream(query.device)
     query_bf16 = query.to(torch.bfloat16).contiguous()
     weights = weights.contiguous()
     query_rows = query_bf16.shape[0]
     minimum_keys = (first_visible - 1) // RATIO
     if tp_shard and query_rows >= 2048 and query_rows % 64 == 0 and minimum_keys >= 8192:
-        context = get_forward_context()
-        metadata = context.attn_metadata
-        batch = next(iter(metadata.values()), None) if isinstance(metadata, dict) else None
         tp = get_tp_group()
-        if (
-            tp.world_size == 4
-            and tp.device_group is not None
-            and batch is not None
-            and batch.prefill_reqs
-            and all(batch.prefill_reqs)
-        ):
+        if tp.world_size == 4 and tp.device_group is not None:
             shard_rows = query_rows // tp.world_size
             lo = shard_rows * tp.rank_in_group
             hi = lo + shard_rows

@@ -106,9 +106,11 @@ class FlashAttentionMetadata:
     query_start_loc_device: torch.Tensor | None = None
 
 
-def get_flash_attention_metadata() -> FlashAttentionMetadata | None:
+def get_flash_attention_metadata(layer_name: str | None = None) -> FlashAttentionMetadata | None:
     metadata = get_forward_context().attn_metadata
-    batch = next(iter(metadata.values()), None) if isinstance(metadata, dict) else None
+    if not isinstance(metadata, dict):
+        return None
+    batch = metadata.get(layer_name) if layer_name is not None else next(iter(metadata.values()), None)
     return batch if isinstance(batch, FlashAttentionMetadata) else None
 
 
@@ -720,7 +722,7 @@ class AscendHYV4FlashAttention(nn.Module, AttentionLayerBase):
 
     def forward(self, positions, hidden_states):
         needs_meta = self.use_cann_prefill or self.fuse_attn_output_gate or self.overlap_attn_output_gate
-        meta = get_flash_attention_metadata() if needs_meta else None
+        meta = get_flash_attention_metadata(self.layer_name) if needs_meta else None
         full_decode = meta is not None and meta.decode_seq_lens is not None
         full_prefill = (
             self.use_cann_prefill
@@ -931,8 +933,8 @@ class AscendHYV4FlashAttention(nn.Module, AttentionLayerBase):
         uses_indexpool = self.indexer is not None and any(
             (length - 1) // self.indexer.ratio > self.indexer.budget for length in meta.seq_lens
         )
+        all_prefill = uses_indexpool and self.use_cann_prefill and bool(meta.prefill_reqs and all(meta.prefill_reqs))
         if uses_indexpool:
-            all_prefill = self.use_cann_prefill and bool(meta.prefill_reqs and all(meta.prefill_reqs))
             # Whole indexer chunks can store the FP8 bins in the dtype consumed by LI.
             can_store_bf16 = (
                 all_prefill
@@ -1216,7 +1218,7 @@ class AscendHYV4FlashAttention(nn.Module, AttentionLayerBase):
                                     li_cache,
                                     visible_len,
                                     tail=li_tail[lo - start : end - start],
-                                    tp_shard=self.shard_prefill_li,
+                                    tp_shard=self.shard_prefill_li and all_prefill,
                                 )
                                 prefill_c8_v2_rows.append(selected)
                                 processed_until = end

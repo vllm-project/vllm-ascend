@@ -11,6 +11,45 @@ from vllm_ascend.hisparse.c8 import pack_c8_components
 from vllm_ascend.models.hy_v4_flash import attention
 
 
+@pytest.mark.parametrize("other_layer_first", [False, True])
+def test_prefill_attention_uses_current_layer_metadata(monkeypatch, other_layer_first):
+    layer_name = "layers.8.attn"
+    metadata = attention.FlashAttentionMetadata(
+        (0, 2), (2,), torch.empty(0), torch.empty(0), prefill_reqs=(True,)
+    )
+    entries = [(layer_name, metadata), ("other.attn", SimpleNamespace())]
+    if other_layer_first:
+        entries.reverse()
+    context = SimpleNamespace(attn_metadata=dict(entries))
+    monkeypatch.setattr(attention, "get_forward_context", lambda: context)
+    layer = attention.AscendHYV4FlashAttention.__new__(attention.AscendHYV4FlashAttention)
+    torch.nn.Module.__init__(layer)
+    layer.layer_name = layer_name
+    layer.use_cann_prefill = True
+    layer.use_cannbot_prolog = False
+    layer.use_eager_prefill_rotary = False
+    layer.fuse_attn_output_gate = False
+    layer.overlap_attn_output_gate = False
+    layer.sequence_parallel_output = False
+    layer.post_proj_norm = None
+    layer.local_heads = 1
+    layer.latent_dim = layer.nope_dim = layer.rope_dim = layer.v_dim = 2
+    layer._project_query = lambda hidden: (hidden, hidden)
+    layer.kv_a_proj_with_mqa = lambda hidden: (hidden,)
+    layer.kv_a_layernorm = lambda kv: kv
+    layer._rotate_qk = lambda positions, q, k: (q, k)
+    layer._project_output_gate = lambda hidden, fuse: hidden[:, :2]
+    layer.o_proj = lambda output: (output,)
+
+    def forward_paged(*args, absorbed, reuse_prefill_output=False):
+        assert reuse_prefill_output
+        return torch.full_like(args[-1], 3)
+
+    layer._forward_paged = forward_paged
+    output = layer(torch.arange(2), torch.ones(2, 4))
+    torch.testing.assert_close(output, torch.full((2, 2), 3.0))
+
+
 @pytest.mark.parametrize("sparse", [False, True])
 @pytest.mark.parametrize(
     ("query_lengths", "is_prefilling", "precise_decode", "expect_reuse"),
