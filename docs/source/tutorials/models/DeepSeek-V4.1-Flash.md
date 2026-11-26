@@ -57,6 +57,20 @@ Prefill node, and DP8/TP1 on the Decode node, with SWA bounded replay and
 MegaMoE on Prefill, DSpark speculative decoding, and `FULL_DECODE_ONLY` ACL
 Graph on Decode. The two-node colocated configuration uses DP2/TP8/EP16.
 
+### Block-outer KV layout for long contexts
+
+On A2/A3 with model runner V2 and BF16 cache, set `VLLM_KV_CACHE_LAYOUT=BLHNC`
+to use vLLM's block-outer planner. On Flash with 128-token blocks, each history
+block occupies 360.625 KiB, compared with 528.25 KiB for the default layout.
+Each group of sliding-window pages then holds two layers per block ID. The
+capacity gain depends on how much history each request keeps.
+Prefix caching can be enabled or disabled.
+
+This layout applies to the static hybrid cache with PP, PCP and DCP sizes of
+one. Speculative decoding, SWA bounded replay, KVPP, HiSparse and layerwise
+shared-buffer offload use the existing layout. For P/D disaggregation, use
+matching cache layout settings on both sides.
+
 ## 3 Prerequisites
 
 ### 3.1 Model Weight

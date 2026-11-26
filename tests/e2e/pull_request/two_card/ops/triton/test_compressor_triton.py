@@ -276,6 +276,66 @@ def test_pcp_chunks_share_ring_page(width):
     torch.testing.assert_close(ring.cpu(), state, rtol=0, atol=0)
 
 
+@pytest.mark.parametrize("gathered", [False, True])
+def test_projected_compressor_strided_pages(gathered):
+    # Match the physical FP32 stride of Flash's 369280-byte history block.
+    width, blocks, block_stride, offset = 512, 5, 92320, 1024
+    shape = (blocks, STATE_RING_ROWS, 2 * width)
+    strides = (block_stride, 2 * width, 1)
+    generator = torch.Generator().manual_seed(803)
+    backing = torch.randn(blocks * block_stride, generator=generator)
+    reference = backing.as_strided(shape, strides, offset)
+    device_backing = backing.npu()
+    ring = device_backing.as_strided(shape, strides, offset)
+    # The first pooled group reads a residual from block 3. Writes wrap the
+    # ring and must leave the other blocks and bytes between pages untouched.
+    k = torch.randn(4, width, generator=generator)
+    scores = torch.randn(4, width, generator=generator)
+    metadata = torch.tensor([[31], [4], [0], [0], [3]], dtype=torch.int32)
+    prev = torch.randn(1, 2 * width, generator=generator) if gathered else None
+    indices = torch.tensor([-1]) if gathered else None
+    expected, updated = _projected_reference(k, scores, reference, metadata, prev, indices)
+    result = compressor_from_projected(
+        k.npu(),
+        scores.npu(),
+        ring,
+        metadata.npu(),
+        torch.empty_like(k, dtype=torch.bfloat16, device="npu"),
+        max_query_len=4,
+        num_cores=1,
+        prev_rows=prev.npu() if gathered else None,
+        prev_row_indices=indices.npu() if gathered else None,
+    )
+    torch.testing.assert_close(result.cpu(), expected, rtol=2**-6, atol=2**-6)
+    if gathered:
+        torch.testing.assert_close(device_backing.cpu(), backing, rtol=0, atol=0)
+        offsets = torch.arange(4, device="npu")
+        write_pcp_ring_rows(
+            torch.cat((k, scores), dim=1).npu(), ring, metadata.npu(), offsets, torch.zeros_like(offsets), offsets
+        )
+    reference.copy_(updated)
+    torch.testing.assert_close(device_backing.cpu(), backing, rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("stride", [(4095, 128, 1), (8192, 256, 2)])
+def test_projected_compressor_rejects_overlapping_blocks_or_non_dense_rows(stride):
+    width = 64
+    ring = torch.empty_strided((2, STATE_RING_ROWS, 2 * width), stride)
+    kv = torch.empty(0, width)
+    with pytest.raises(ValueError, match="dense rows and non-overlapping blocks"):
+        compressor_from_projected(
+            kv,
+            kv,
+            ring,
+            torch.empty((5, 0), dtype=torch.int32),
+            kv.bfloat16(),
+            max_query_len=0,
+            num_cores=1,
+            prev_rows=None,
+            prev_row_indices=None,
+        )
+
+
 @pytest.mark.parametrize("empty", ["tokens", "requests", "launch"])
 @torch.inference_mode()
 def test_empty_projected_and_ring_writes(empty):

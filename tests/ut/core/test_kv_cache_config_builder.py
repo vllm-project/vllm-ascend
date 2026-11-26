@@ -176,7 +176,9 @@ def test_ascend_layout_takes_precedence_over_kimi_dspark(monkeypatch):
     monkeypatch.setattr(builder_module, "group_cache_specs", Mock(return_value=[]))
     monkeypatch.setattr(builder_module, "make_cache_groups", ascend_mock)
     monkeypatch.setattr(builder_module, "_get_kimi_k3_dspark_mixed_kv_cache_groups", kimi_mock)
-    assert AscendKVCacheConfigBuilder().get_kv_cache_groups(make_runtime(), generic_specs()) is sentinel
+    runtime = make_runtime()
+    runtime.cache_config = SimpleNamespace(kv_cache_layout="LBNHC")
+    assert AscendKVCacheConfigBuilder().get_kv_cache_groups(runtime, generic_specs()) is sentinel
     kimi_mock.assert_not_called()
 
 

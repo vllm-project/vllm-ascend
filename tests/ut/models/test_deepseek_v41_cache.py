@@ -22,6 +22,7 @@ from vllm.transformers_utils.configs.deepseek_v41 import DeepseekV41Config
 # vLLM #61183 moved the KV-cache planning helpers to `kv_cache_planning` on main.
 from vllm.v1.core import kv_cache_planning, kv_cache_utils
 from vllm.v1.kv_cache_interface import CircularBufferSpec
+from vllm.v1.kv_cache_layout import KVCacheLayout
 from vllm.v1.worker.gpu.spec_decode import adaptive_verification
 
 from tests.deepseek_v41_utils import (
@@ -229,6 +230,99 @@ def test_swa_only_reduced_backbone_uses_independent_slots(config, runtime, packe
         assert tensor.offset == offset
         assert tensor.layer_stride == 10 * tensor.block_stride
         offset += tensor.layer_stride
+
+
+@pytest.fixture
+def block_outer_flash(config, runtime, monkeypatch):
+    config.head_dim, config.index_head_dim = 512, 128
+    runtime.model_config.dtype = torch.bfloat16
+    runtime.cache_config.block_size = 128
+    runtime.cache_config.kv_cache_layout = "BLHNC"
+    runtime.cache_config.get_resolved_kv_cache_layout = lambda: KVCacheLayout[runtime.cache_config.kv_cache_layout]
+    runtime.cache_config.enable_extensible_kv_cache = False
+    runtime.cache_config.swa_bounded_replay = False
+    runtime.use_v2_model_runner = True
+    runtime.additional_config = {}
+    monkeypatch.setattr(kv_cache_config_builder, "uses_a5_packed_cache", lambda: False)
+    return runtime
+
+
+@pytest.mark.parametrize("prefix_caching", [False, True])
+def test_block_outer_flash_packs_history(block_outer_flash, prefix_caching):
+    runtime = block_outer_flash
+    runtime.cache_config.enable_prefix_caching = prefix_caching
+    specs = collect_specs(runtime)
+    builder = kv_cache_config_builder.AscendKVCacheConfigBuilder()
+    groups = builder.get_kv_cache_groups(runtime, specs)
+    assert groups == builder.get_kv_cache_groups(runtime, dict(reversed(specs.items())))
+    assert sorted(len(group.layer_names) for group in groups) == [1] + [2] * 21 + [8]
+    history_bytes = sum(s.unpadded_page_size_bytes for s in specs.values() if isinstance(s, AscendMLAAttentionSpec))
+    assert builder._get_pool_bytes_per_block(runtime, groups) == history_bytes == 369280
+    cache = builder.get_kv_cache_config_from_groups(runtime, groups, num_blocks=3)
+    assert cache.num_blocks == 3
+    assert {tensor.size for tensor in cache.kv_cache_tensors} == {3 * history_bytes}
+    backing, views = allocate_cache_views(cache)
+    spans = []
+    for name, spec in specs.items():
+        components = views[name] if isinstance(views[name], tuple) else (views[name],)
+        for view in components:
+            assert view.stride(0) * view.element_size() == history_bytes
+            if isinstance(spec, AscendMLAAttentionSpec):
+                row = view[1]
+                spans.append((row.data_ptr(), row.data_ptr() + row.numel() * row.element_size()))
+    spans.sort()
+    assert spans[0][0] == backing[0].data_ptr() + history_bytes
+    assert spans[-1][1] == backing[0].data_ptr() + 2 * history_bytes
+    assert all(left[1] == right[0] for left, right in zip(spans, spans[1:]))
+
+
+@pytest.mark.parametrize(
+    "setting,value",
+    [
+        ("cache_config.kv_cache_layout", "LBNHC"),
+        ("use_v2_model_runner", False),
+        ("cache_config.swa_bounded_replay", True),
+        ("cache_config.enable_extensible_kv_cache", True),
+        ("speculative_config", SimpleNamespace(method="mtp")),
+        ("parallel_config.prefill_context_parallel_size", 2),
+        ("parallel_config.decode_context_parallel_size", 2),
+        ("parallel_config.pipeline_parallel_size", 2),
+        ("additional_config", {"enable_kvpp": True}),
+        ("model_config.dtype", torch.float16),
+        ("cache_config.cache_dtype", "fp8"),
+        ("attention_config.hisparse_config", object()),
+        (
+            "kv_transfer_config",
+            SimpleNamespace(
+                kv_connector="AscendStoreConnector",
+                kv_connector_extra_config={"use_layerwise": True, "layerwise_num_shared_buffers": 2},
+            ),
+        ),
+    ],
+)
+def test_block_outer_flash_preserves_native_layout(block_outer_flash, setting, value):
+    runtime = block_outer_flash
+    parent, _, key = setting.rpartition(".")
+    setattr(getattr(runtime, parent) if parent else runtime, key, value)
+    specs = collect_specs(runtime)
+    builder = kv_cache_config_builder.AscendKVCacheConfigBuilder()
+    groups = builder.get_kv_cache_groups(runtime, specs)
+    assert len(groups) == 12
+    assert groups == make_cache_groups(group_cache_specs(specs))
+
+
+def test_block_outer_leaves_packed_device_pages_to_native_planner(block_outer_flash, monkeypatch):
+    monkeypatch.setattr(kv_cache_config_builder, "uses_a5_packed_cache", lambda: True)
+    monkeypatch.setattr("vllm_ascend.models.deepseek_v41.cache_config.uses_a5_packed_cache", lambda: True)
+    specs = collect_specs(block_outer_flash)
+    for name, spec in list(specs.items()):
+        if name.endswith(".indexer.k_cache"):
+            specs[name] = make_index_cache_spec(block_size=128, head_size=128, compress_ratio=spec.tokens_per_state)
+    specs["model.layers.20.self_attn.indexer.k_cache_folded"] = make_folded_index_cache_spec(block_size=128)
+    builder = kv_cache_config_builder.AscendKVCacheConfigBuilder()
+    groups = builder.get_kv_cache_groups(block_outer_flash, specs)
+    assert groups == make_cache_groups(group_cache_specs(specs))
+    assert builder._get_pool_bytes_per_block(block_outer_flash, groups) == get_deepseek_v41_pool_bytes_per_block(groups)
 
 
 def test_twelve_groups_share_four_layer_slots(config, runtime):
