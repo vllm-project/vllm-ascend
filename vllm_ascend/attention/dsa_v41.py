@@ -30,6 +30,7 @@ from vllm.v1.attention.backend import (
 from vllm.v1.kv_cache_interface import AttentionSpec, CircularBufferSpec
 
 from vllm_ascend.ascend_config import get_ascend_config
+from vllm_ascend.ascend_forward_context import is_multistream_overlap_disabled
 from vllm_ascend.attention.dsa_v1 import AscendDSABackend, build_dspark_swa_indices, dsv4_dsa_overlap_stream
 from vllm_ascend.attention.utils import (
     KVCacheRuntimeShapes,
@@ -358,7 +359,7 @@ class AscendDSAV41Impl:
     """
 
     def __init__(self, prefix, role, topology, long_kv_source_prefix, index_k_source_prefix):
-        self.multistream_dsv4_dsa_overlap = get_ascend_config().multistream_dsv4_dsa_overlap
+        self._multistream_dsv4_dsa_overlap = bool(get_ascend_config().multistream_dsv4_dsa_overlap)
         self.prefix = prefix
         self.layer_name = f"{prefix}.attn"
         self.role = role
@@ -369,6 +370,14 @@ class AscendDSAV41Impl:
         self.compressor_state_prefix = (
             f"{prefix}.compressor.state_cache" if role.is_kv_source and role.compress_ratio == 2 else None
         )
+
+    @property
+    def multistream_dsv4_dsa_overlap(self) -> bool:
+        return getattr(self, "_multistream_dsv4_dsa_overlap", False) and not is_multistream_overlap_disabled()
+
+    @multistream_dsv4_dsa_overlap.setter
+    def multistream_dsv4_dsa_overlap(self, value: bool) -> None:
+        self._multistream_dsv4_dsa_overlap = bool(value)
 
     def _get_layer_metadata(self, metadata) -> DeepseekV41LayerMetadata:
         swa = metadata[self.swa_prefix]
@@ -490,6 +499,12 @@ class AscendDSAV41Impl:
         if not self.role.has_long_context or not self.role.is_index_source:
             return None
         indexer = attn.indexer
+        if not self.multistream_dsv4_dsa_overlap:
+            query = indexer.project_query(qr)
+            weights = indexer.project_weights(hidden_states)
+            indexer.apply_query_rope(query, cos, sin)
+            return DeepseekV41PreparedIndexer(query=query, weights=weights)
+
         main_stream = torch.npu.current_stream()
         aux_stream = dsv4_dsa_overlap_stream()
 
@@ -515,6 +530,10 @@ class AscendDSAV41Impl:
 
     def _quantize_indexer_query(self, attn, prepared, metadata):
         if not self._should_quantize_indexer(prepared, metadata):
+            return
+        if not self.multistream_dsv4_dsa_overlap:
+            prepared.quantized_query, prepared.query_scale = attn.indexer.quantize_query(prepared.query)
+            prepared.quantize_done = None
             return
         main_stream = torch.npu.current_stream()
         aux_stream = dsv4_dsa_overlap_stream()

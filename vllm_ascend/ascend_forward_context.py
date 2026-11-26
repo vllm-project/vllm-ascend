@@ -32,6 +32,7 @@ class MoECommType(Enum):
 
 
 _MRV2_IN_PROFILE_RUN: ContextVar[bool] = ContextVar("_MRV2_IN_PROFILE_RUN", default=False)
+_MULTISTREAM_OVERLAP_DISABLED: ContextVar[bool] = ContextVar("_MULTISTREAM_OVERLAP_DISABLED", default=False)
 
 
 _MEGA_MOE_TOKENS_PER_RANK_LIMIT = 16384
@@ -82,6 +83,28 @@ def override_mrv2_in_profile_run(enabled: bool):
 
 def get_mrv2_in_profile_run() -> bool:
     return _MRV2_IN_PROFILE_RUN.get()
+
+
+@contextmanager
+def disable_multistream_overlap(disabled: bool = True):
+    """Temporarily disable multistream overlap within the current forward scope.
+
+    Small-token eager sub-batches (such as DeepSeek V4.1 bounded decoder
+    replay tails) spend more time on host-side event record/wait and
+    cross-stream synchronization than they recover from overlapping tiny
+    kernels. Scoping this state in a ContextVar avoids reverse imports from
+    shared ops onto model-specific replay code and always restores the
+    previous value on exit or exception.
+    """
+    token = _MULTISTREAM_OVERLAP_DISABLED.set(bool(disabled))
+    try:
+        yield
+    finally:
+        _MULTISTREAM_OVERLAP_DISABLED.reset(token)
+
+
+def is_multistream_overlap_disabled() -> bool:
+    return _MULTISTREAM_OVERLAP_DISABLED.get()
 
 
 def use_cann_megamoe(vllm_config: VllmConfig) -> bool:

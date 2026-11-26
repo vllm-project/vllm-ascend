@@ -6,12 +6,13 @@ import torch
 import torch_npu  # noqa: F401 -- registers torch.npu used by the module under test
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 
-from vllm_ascend.ascend_forward_context import MoECommType
+from vllm_ascend.ascend_forward_context import MoECommType, disable_multistream_overlap
 from vllm_ascend.ops.fused_moe.dataclass.fused_experts import MoEWeights
 from vllm_ascend.ops.fused_moe.dataclass.moe_mlp import MoEMlpComputeInput
 from vllm_ascend.ops.fused_moe.dataclass.moe_quant import MoEQuantParams
-from vllm_ascend.ops.fused_moe.moe_mlp import _unified_apply_activation, apply_moe_mlp
+from vllm_ascend.ops.fused_moe.moe_mlp import _unified_apply_activation, apply_moe_mlp, maybe_record_event
 from vllm_ascend.ops.fused_moe.routed_experts import AscendUnquantizedFusedMoEMethod
+from vllm_ascend.ops.fused_moe.shared_experts import AscendSharedExperts
 from vllm_ascend.quantization.methods.w4a8.w4a8 import AscendW4A8DynamicFusedMoEMethod
 from vllm_ascend.quantization.methods.w8a8.w8a8_dynamic import AscendW8A8DynamicFusedMoEMethod
 from vllm_ascend.quantization.methods.wna16.w4a16 import AscendW4A16FusedMoEMethod
@@ -651,6 +652,47 @@ class TestUnifiedApplyActivation(unittest.TestCase):
             )
         self.assertEqual(out, "out")
         mock_act.assert_called_once()
+
+
+class TestMultistreamOverlapSuppression(unittest.TestCase):
+    def test_maybe_record_event_suppressed_by_context(self):
+        mock_stream = MagicMock()
+        mock_stream.record_event.return_value = "evt"
+        cfg = SimpleNamespace(multistream_overlap_shared_expert=True)
+
+        with (
+            patch(f"{MOE_MLP}.get_ascend_config", return_value=cfg),
+            patch(f"{MOE_MLP}.torch.npu.current_stream", return_value=mock_stream),
+        ):
+            self.assertEqual(maybe_record_event(), "evt")
+            self.assertEqual(mock_stream.record_event.call_count, 1)
+            with disable_multistream_overlap():
+                self.assertIsNone(maybe_record_event())
+                self.assertEqual(mock_stream.record_event.call_count, 1)
+            self.assertEqual(maybe_record_event(), "evt")
+            self.assertEqual(mock_stream.record_event.call_count, 2)
+
+        with (
+            patch(f"{MOE_MLP}.get_ascend_config", side_effect=RuntimeError("uninitialized")),
+            patch(f"{MOE_MLP}.torch.npu.current_stream", return_value=mock_stream),
+        ):
+            with disable_multistream_overlap():
+                self.assertIsNone(maybe_record_event())
+            self.assertEqual(mock_stream.record_event.call_count, 2)
+
+    def test_shared_experts_property_respects_context_and_setter(self):
+        shared_experts = AscendSharedExperts.__new__(AscendSharedExperts)
+        self.assertFalse(shared_experts.multistream_overlap)
+        shared_experts.multistream_overlap = True
+        self.assertTrue(shared_experts.multistream_overlap)
+        with disable_multistream_overlap():
+            self.assertFalse(shared_experts.multistream_overlap)
+            with disable_multistream_overlap(False):
+                self.assertTrue(shared_experts.multistream_overlap)
+            self.assertFalse(shared_experts.multistream_overlap)
+        self.assertTrue(shared_experts.multistream_overlap)
+        shared_experts.multistream_overlap = False
+        self.assertFalse(shared_experts.multistream_overlap)
 
 
 if __name__ == "__main__":

@@ -18,7 +18,7 @@ from vllm.v1.worker.dp_utils import should_skip_dp_coordination
 from vllm.v1.worker.gpu.input_batch import InputBatch
 from vllm.v1.worker.utils import AttentionGroup
 
-from vllm_ascend.ascend_forward_context import get_mc2_mask, get_mrv2_in_profile_run
+from vllm_ascend.ascend_forward_context import disable_multistream_overlap, get_mc2_mask, get_mrv2_in_profile_run
 from vllm_ascend.attention.dsa_v41 import AscendDSAV41Metadata, AscendDSAV41MetadataBuilder
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
 from vllm_ascend.core.kv_cache_interface import is_circular_kv_cache_spec
@@ -519,14 +519,20 @@ class DecoderReplayState:
         mask = get_mc2_mask()
         saved_mask = mask.clone() if mask is not None else None
         try:
-            with set_forward_context(
-                self.metadata if compact else outer.attn_metadata,
-                self.config,
-                num_tokens=self.num_tokens,
-                num_tokens_across_dp=self.dp_tokens,
-                cudagraph_runtime_mode=CUDAGraphMode.NONE,
-                slot_mapping=None if compact else outer.slot_mapping,
-                is_padding=padding,
+            # Disable multistream overlap across all DP ranks entering the
+            # replay tail so small-token eager layers avoid cross-stream event
+            # overhead while preserving identical collective ordering across DP.
+            with (
+                set_forward_context(
+                    self.metadata if compact else outer.attn_metadata,
+                    self.config,
+                    num_tokens=self.num_tokens,
+                    num_tokens_across_dp=self.dp_tokens,
+                    cudagraph_runtime_mode=CUDAGraphMode.NONE,
+                    slot_mapping=None if compact else outer.slot_mapping,
+                    is_padding=padding,
+                ),
+                disable_multistream_overlap(),
             ):
                 context = get_forward_context()
                 # The replay tail continues the outer forward's MoE dispatch order.
