@@ -83,15 +83,6 @@ class DFlashAclGraphManager(AscendGraphManagerMixin, DFlashCudaGraphManager):
         ``prepare_forward(num_reqs, attn_metadata)``; accept both and forward the
         one the installed vLLM expects.
         """
-        # Builders that size buffers by graph shape need the complete bucket
-        # descriptors before upstream capture reduces each shape to a dummy batch.
-        descriptors = self._capture_descs.get(CUDAGraphMode.FULL, ())
-        if descriptors:
-            for groups in attn_groups:
-                for group in groups:
-                    configure = getattr(group.get_metadata_builder(0), "configure_draft_graph_capture", None)
-                    if configure is not None:
-                        configure(descriptors)
         prepare_kwargs: dict[str, Any] = {"prepare_forward": prepare_forward}
         with communicator_switch(), model_capture_wrapper(self.speculator, False):
             super().capture(
