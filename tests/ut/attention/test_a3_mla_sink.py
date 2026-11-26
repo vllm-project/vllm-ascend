@@ -477,7 +477,7 @@ def test_a3_callers_forward_the_matching_output_mask(monkeypatch, path):
     cache = adapter.allocate_cache(1, device="cpu")
     flash = SimpleNamespace(
         adapter=adapter,
-        query=torch.zeros(2, 8, 576, dtype=torch.bfloat16),
+        query=None,
         block_table=torch.zeros(1, 1, dtype=torch.int32),
         cache_lens=torch.zeros(1, dtype=torch.int32),
         cu=torch.tensor([0, 2], dtype=torch.int32),
@@ -488,14 +488,15 @@ def test_a3_callers_forward_the_matching_output_mask(monkeypatch, path):
     )
     flash.current = SimpleNamespace(
         adapter=adapter,
-        query=flash.query.clone(),
+        query=None,
         cache=cache,
         schedule=flash.schedule,
         block_table=flash.block_table,
         attn_mask=None,
         output_mask=torch.zeros(2, dtype=torch.bool),
     )
-    q_nope, q_pe = flash.query[..., :512].contiguous(), flash.query[..., 512:].contiguous()
+    q_nope = torch.zeros(2, 8, 512, dtype=torch.bfloat16)
+    q_pe = torch.zeros(2, 8, 64, dtype=torch.bfloat16)
     if path == "ordinary":
         forward = ast_method(
             "vllm_ascend/attention/mla_v1.py",
