@@ -15,6 +15,7 @@ from torch.nn import functional as F
 from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.model_executor.layers.activation import SituAndMul
 
+from vllm_ascend import utils as ascend_utils
 from vllm_ascend.ascend_forward_context import MoECommType
 from vllm_ascend.device.hardware import AscendDeviceType
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_hardware_profile
@@ -282,6 +283,36 @@ def test_process_weights_after_loading_keeps_nd_storage_for_captured_graphs(
     assert layer.w2_weight.shape == (2, 3, 4)
     assert layer.w13_weight.data_ptr() == w13_ptr
     assert layer.w2_weight.data_ptr() == w2_ptr
+
+
+def test_process_weights_after_loading_uses_new_storage_before_non_fused_nz_cast(monkeypatch):
+    method = _build_unquantized_method()
+    layer = _build_weight_layer()
+    layer.w13_weight.data = layer.w13_weight.data.to(torch.bfloat16)
+    layer.w2_weight.data = layer.w2_weight.data.to(torch.bfloat16)
+    checkpoint_weights = (layer.w13_weight.data, layer.w2_weight.data)
+    ascend_config = SimpleNamespace(enable_fused_mc2=0, weight_nz_mode=2)
+
+    monkeypatch.setattr(routed_experts_module, "get_ascend_config", lambda: ascend_config)
+    monkeypatch.setattr(ascend_utils, "get_ascend_config", lambda: ascend_config)
+    monkeypatch.setattr(ascend_utils, "get_current_hardware_profile", lambda: get_hardware_profile(AscendDeviceType.A3))
+    format_cast = MagicMock(side_effect=lambda weight, _: weight)
+    monkeypatch.setattr(ascend_utils.torch_npu, "npu_format_cast", format_cast)
+    monkeypatch.setattr(
+        AscendUnquantizedFusedMoEMethod.__mro__[2],
+        "process_weights_after_loading",
+        lambda self, layer: None,
+        raising=False,
+    )
+
+    method.process_weights_after_loading(layer)
+
+    assert format_cast.call_count == len(checkpoint_weights)
+    for checkpoint_weight, cast_call in zip(checkpoint_weights, format_cast.call_args_list):
+        weight, target_format = cast_call.args
+        assert target_format == ascend_utils.ACL_FORMAT_FRACTAL_NZ
+        assert weight.data_ptr() != checkpoint_weight.data_ptr()
+        torch.testing.assert_close(weight, checkpoint_weight.transpose(1, 2))
 
 
 def test_process_weights_after_loading_splits_lists_for_dynamic_eplb(monkeypatch):
