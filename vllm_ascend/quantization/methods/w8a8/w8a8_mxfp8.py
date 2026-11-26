@@ -379,9 +379,7 @@ class AscendW8A8MXFP8DynamicFusedMoEMethod(AscendMoEScheme):
         self.group_size = quant_description.get("group_size", 32)
         self.use_expert_weight_list = vllm_config.parallel_config.enable_eplb is True
         self._dynamic_mx_quant_scale_alg = get_dynamic_mx_quant_scale_alg(vllm_config)
-        self._swiglu_oai_fusion_enabled = (
-            get_ascend_config().ascend_fusion_config.fusion_ops_gmm_swiglu_oai_mx_quant
-        )
+        self._swiglu_oai_fusion_enabled = get_ascend_config().ascend_fusion_config.fusion_ops_gmm_swiglu_oai_mx_quant
 
     def supports_fused_activation(self, activation: MoEActivation) -> bool:
         # Only MiniMax's A5 CEIL-scale MXFP8 path has been validated with the

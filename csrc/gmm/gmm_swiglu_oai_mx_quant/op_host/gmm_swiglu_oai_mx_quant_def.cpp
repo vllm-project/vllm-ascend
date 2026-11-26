@@ -9,16 +9,20 @@ class GmmSwigluOaiMxQuant : public OpDef {
   explicit GmmSwigluOaiMxQuant(const char* name) : OpDef(name) {
     const std::initializer_list<ge::DataType> mxTypes{ge::DT_FLOAT4_E2M1, ge::DT_FLOAT8_E4M3FN};
     const std::initializer_list<ge::DataType> scaleTypes{ge::DT_FLOAT8_E8M0, ge::DT_FLOAT8_E8M0};
-    const std::initializer_list<ge::Format> nd{ge::FORMAT_ND, ge::FORMAT_ND};
-    const std::initializer_list<ge::Format> nz{ge::FORMAT_FRACTAL_NZ, ge::FORMAT_FRACTAL_NZ};
+    const std::initializer_list<ge::Format> ndFormats{ge::FORMAT_ND, ge::FORMAT_ND};
+    const std::initializer_list<ge::Format> nzFormats{ge::FORMAT_FRACTAL_NZ, ge::FORMAT_FRACTAL_NZ};
 
-    Input("x").ParamType(REQUIRED).DataType(mxTypes).Format(nd).UnknownShapeFormat(nd);
-    Input("x_scale").ParamType(REQUIRED).DataType(scaleTypes).Format(nd).UnknownShapeFormat(nd);
-    Input("group_list").ParamType(REQUIRED).DataType({ge::DT_INT64, ge::DT_INT64}).Format(nd).UnknownShapeFormat(nd);
-    Input("weight").ParamType(DYNAMIC).DataType(mxTypes).Format(nz).UnknownShapeFormat(nz);
-    Input("weight_scale").ParamType(DYNAMIC).DataType(scaleTypes).Format(nd).UnknownShapeFormat(nd);
-    Output("y").ParamType(REQUIRED).DataType(mxTypes).Format(nd).UnknownShapeFormat(nd);
-    Output("y_scale").ParamType(REQUIRED).DataType(scaleTypes).Format(nd).UnknownShapeFormat(nd);
+    Input("x").ParamType(REQUIRED).DataType(mxTypes).Format(ndFormats).UnknownShapeFormat(ndFormats);
+    Input("x_scale").ParamType(REQUIRED).DataType(scaleTypes).Format(ndFormats).UnknownShapeFormat(ndFormats);
+    Input("group_list")
+        .ParamType(REQUIRED)
+        .DataType({ge::DT_INT64, ge::DT_INT64})
+        .Format(ndFormats)
+        .UnknownShapeFormat(ndFormats);
+    Input("weight").ParamType(DYNAMIC).DataType(mxTypes).Format(nzFormats).UnknownShapeFormat(nzFormats);
+    Input("weight_scale").ParamType(DYNAMIC).DataType(scaleTypes).Format(ndFormats).UnknownShapeFormat(ndFormats);
+    Output("y").ParamType(REQUIRED).DataType(mxTypes).Format(ndFormats).UnknownShapeFormat(ndFormats);
+    Output("y_scale").ParamType(REQUIRED).DataType(scaleTypes).Format(ndFormats).UnknownShapeFormat(ndFormats);
 
     Attr("group_list_type").AttrType(OPTIONAL).Int(0);
     Attr("clamp_limit").AttrType(OPTIONAL).Float(7.0F);

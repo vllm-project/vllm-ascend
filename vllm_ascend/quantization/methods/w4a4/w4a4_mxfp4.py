@@ -231,9 +231,7 @@ class AscendW4A4MXFP4DynamicFusedMoEMethod(AscendMoEScheme):
         vllm_config = get_current_vllm_config()
         self.group_size = vllm_config.quant_config.quant_description.get("group_size", 32)
         self.dynamic_eplb = False
-        self._swiglu_oai_fusion_enabled = (
-            get_ascend_config().ascend_fusion_config.fusion_ops_gmm_swiglu_oai_mx_quant
-        )
+        self._swiglu_oai_fusion_enabled = get_ascend_config().ascend_fusion_config.fusion_ops_gmm_swiglu_oai_mx_quant
         self._swiglu_oai_fusion_weight_ready = False
 
     def _use_swiglu_oai_fusion(self) -> bool:
