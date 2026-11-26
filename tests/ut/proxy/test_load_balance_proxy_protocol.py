@@ -279,11 +279,16 @@ def exchange(monkeypatch):
                 raise script
             return script
 
+        async def app(scope, receive, send):
+            # ASGI 2.4 propagates backend cancellation without the older disconnect task.
+            scope["asgi"]["spec_version"] = "2.4"
+            await proxy.app(scope, receive, send)
+
         transport = httpx.MockTransport(backend)
         async with (
             httpx.AsyncClient(base_url="http://prefill/v1", transport=transport) as prefill,
             httpx.AsyncClient(base_url="http://decode/v1", transport=transport) as decode,
-            httpx.AsyncClient(base_url="http://proxy", transport=httpx.ASGITransport(app=proxy.app)) as client,
+            httpx.AsyncClient(base_url="http://proxy", transport=httpx.ASGITransport(app=app)) as client,
         ):
             runtime._clients[proxy.ServerRole.PREFILL][proxy.server_key("127.0.0.1", 8100)] = prefill
             runtime._clients[proxy.ServerRole.DECODE][proxy.server_key("127.0.0.1", 8200)] = decode
@@ -558,11 +563,12 @@ def test_recompute_leaves_budget_validation_to_backend(exchange, api, streaming)
             httpx.Response(400, json={"error": {"message": "output token limit must be positive"}}),
         ],
     )
-    assert response.status_code == (200 if streaming else 400)
+    assert response.status_code == 200
     if streaming:
-        assert b"event: error" in response.content
+        assert b"message_stop" not in response.content
+        assert b"response.completed" not in response.content
     else:
-        assert response.json()["error"]["message"] == "output token limit must be positive"
+        assert response.content == b""
     assert len(calls["decode"]) == len(calls["prefill"]) == 2
     assert calls["decode"][1]["body"][limit] == 0
 
@@ -604,29 +610,33 @@ def test_responses_recompute_with_empty_input(exchange, streaming, response_inpu
     assert response_text("/responses", response, streaming) == "prefix"
 
 
-def test_responses_recompute_does_not_add_content_to_tool_input(exchange):
+def test_responses_recompute_does_not_add_content_to_tool_input(exchange, caplog):
     response, calls = exchange(
         "/responses",
         {"input": [{"type": "function_call_output", "call_id": "call", "output": "ok"}]},
         [httpx.Response(200, content=wire("/responses", {"text": "prefix", "stop_reason": "recomputed"}, False))],
     )
-    assert response.status_code == 409
+    assert response.content == b""
+    assert "first input message with content" in caplog.text
     assert len(calls["decode"]) == 1
 
 
 @pytest.mark.parametrize("api", ["/messages", "/responses"])
 @pytest.mark.parametrize("streaming", [False, True])
-def test_recompute_never_silently_drops_nontext_output(exchange, api, streaming):
+def test_recompute_stops_on_nontext_output(exchange, caplog, api, streaming):
     stopped = {"stop_reason": "recomputed"}
     if api == "/messages":
         stopped["content"] = [{"type": "tool_use", "id": "tool", "name": "f", "input": {}}]
     else:
         stopped["output"] = [{"type": "function_call", "id": "tool", "name": "f", "arguments": "{}"}]
     response, calls = exchange(api, {"stream": streaming}, [httpx.Response(200, content=wire(api, stopped, streaming))])
-    assert response.status_code == (200 if streaming else 409)
-    assert b"text-only" in response.content
+    assert response.status_code == 200
+    assert "text-only" in caplog.text
     if streaming:
-        assert b"event: error" in response.content
+        assert b"message_stop" not in response.content
+        assert b"response.completed" not in response.content
+    else:
+        assert response.content == b""
     assert len(calls["decode"]) == 1
 
 
@@ -686,32 +696,34 @@ def test_backend_error_uses_existing_retry_policy(exchange, api, status):
 
 @pytest.mark.parametrize("api", ["/messages", "/responses"])
 @pytest.mark.parametrize("read_error", [False, True])
-def test_stream_failure_after_text_is_an_error_event(exchange, api, read_error):
+def test_stream_interruption_preserves_existing_close_behavior(exchange, api, read_error):
     raw = wire(api, {"text": "prefix", "stop_reason": "end_turn"}, True)
     cut = raw.index(b"\r\n\r\n", raw.index(b"prefix")) + 4
     body = Body(raw[:cut], httpx.ReadError("connection lost") if read_error else None)
     response, calls = exchange(api, {"stream": True}, [httpx.Response(200, stream=body)])
     assert response.status_code == 200
     assert b"prefix" in response.content
-    assert response.content.count(b"event: error") == 1
-    assert b"terminal event" in response.content
+    assert response.content == raw[:cut]
     assert len(calls["decode"]) == 1
     assert body.closed
 
 
 @pytest.mark.parametrize("api", ["/messages", "/responses"])
 @pytest.mark.parametrize("streaming", [False, True])
-def test_interrupted_decode_returns_502_and_closes_backend(exchange, api, streaming):
+def test_interrupted_decode_closes_backend_without_transport_retry(exchange, api, streaming):
     stream = Body(b'{"partial":', httpx.ReadError("connection lost"))
     response, calls = exchange(api, {"stream": streaming}, [httpx.Response(200, stream=stream)])
-    assert response.status_code == 502
+    assert response.status_code == 200
+    assert response.content == b""
     assert stream.closed
     assert len(calls["decode"]) == 1
 
 
-def test_incomplete_json_returns_502(exchange):
+def test_incomplete_json_uses_existing_log_and_close_behavior(exchange, caplog):
     response, _ = exchange("/messages", {}, [httpx.Response(200, content=b'{"partial":')])
-    assert response.status_code == 502
+    assert response.status_code == 200
+    assert response.content == b""
+    assert "Error during streaming" in caplog.text
 
 
 @pytest.mark.parametrize("stage", ["decode", "retry_prefill"])
@@ -727,7 +739,8 @@ def test_recompute_failure_releases_load(exchange, stage, error):
             exchange(*args, **kwargs)
     else:
         response, _ = exchange(*args, **kwargs)
-        assert response.status_code == 502
+        assert response.status_code == 200
+        assert response.content == b""
     assert stream.closed
 
 

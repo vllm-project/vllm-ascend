@@ -927,7 +927,6 @@ async def stream_service_response(
         req_data.pop("stream_options", None)
     for attempt in range(1, max_attempts + 1):
         first_chunk_sent = False
-        response_started = False
         pending = b""
         try:
             async with client.stream("POST", endpoint, json=req_data, headers=headers) as response:
@@ -947,10 +946,8 @@ async def stream_service_response(
                         continue
                     while match := re.search(rb"\r\n\r\n|\n\n|\r\r", pending):
                         frame, pending = pending[: match.end()], pending[match.end() :]
-                        response_started = True
                         yield frame
                 if pending:
-                    response_started = True
                     yield pending
                 return
         except httpx.HTTPStatusError as exc:
@@ -959,8 +956,6 @@ async def stream_service_response(
             logger.warning("Attempt %s failed for streaming %s: %s", attempt, endpoint, exc)
         except httpx.RequestError as exc:
             if first_chunk_sent:
-                if not response_started:
-                    raise
                 logger.error("Streaming to client interrupted after response started: %s", exc)
                 return
             if attempt == max_attempts:
@@ -968,8 +963,6 @@ async def stream_service_response(
             logger.warning("Attempt %s failed for streaming %s: %s", attempt, endpoint, exc)
         except Exception as exc:
             if first_chunk_sent:
-                if not response_started:
-                    raise
                 logger.error("Streaming to client interrupted after response started: %s", exc)
                 return
             if attempt == max_attempts:
@@ -1128,11 +1121,11 @@ async def handle_completions_impl(api: str, request: Request):
         request_length = len(req_body)
         instance_info = await assign_instances(api, req_data, request_length, is_initial_request=True)
         stream_flag = bool(req_data.get("stream", False))
-        chat_flag = api == "/chat/completions"
+        chat_flag = api in ("/chat/completions", "/messages")
 
         if "prompt" in req_data:
             origin_prompt = req_data["prompt"]
-        elif api in ("/chat/completions", "/messages"):
+        elif chat_flag:
             messages = req_data["messages"]
             origin_prompt = messages[0].get("content", "")
         elif api == "/responses":
@@ -1148,10 +1141,6 @@ async def handle_completions_impl(api: str, request: Request):
             origin_prompt = ""
         token_limit = "max_output_tokens" if api == "/responses" else "max_tokens"
         origin_max_tokens = req_data.get(token_limit)
-        end_events = {
-            "/messages": ("message_stop", "error"),
-            "/responses": ("response.completed", "response.incomplete", "error"),
-        }.get(api, ())
         if api in ("/chat/completions", "/completions"):
             origin_max_tokens = req_data.get("max_tokens", 16)
 
@@ -1199,7 +1188,9 @@ async def handle_completions_impl(api: str, request: Request):
             )
 
         async def generate_stream():
-            nonlocal instance_info, request_released, preopened_gen, preopened_first
+            nonlocal instance_info
+            nonlocal request_released
+            nonlocal preopened_gen, preopened_first
             generated_token = ""
             released_kv = False
             retry_count = 0
@@ -1225,7 +1216,6 @@ async def handle_completions_impl(api: str, request: Request):
                     attempt_text = ""
                     attempt_items = []
                     structured_output = False
-                    terminal_seen = False
                     if preopened_gen is not None:
                         backend_gen = preopened_gen
                         gen = _replay_first_chunk(preopened_first, preopened_gen)
@@ -1259,7 +1249,6 @@ async def handle_completions_impl(api: str, request: Request):
                             continue
                         chunk_json = frames[0].payload
                         event_type = chunk_json.get("type")
-                        terminal_seen |= event_type in end_events
                         content = ""
                         stop_reason = None
                         used_tokens = 0
@@ -1359,24 +1348,19 @@ async def handle_completions_impl(api: str, request: Request):
                             retry = True
                             retry_count += 1
                             if structured_output:
-                                raise HTTPException(
-                                    status_code=409, detail="Recompute continuation requires text-only output."
-                                )
+                                raise ValueError("Recompute continuation requires text-only output.")
                             if api == "/responses":
                                 if isinstance(response_input, str) or not response_input:
                                     req_data["input"] = (response_input or "") + generated_token
                                 else:
                                     if "content" not in response_input[0]:
-                                        raise HTTPException(
-                                            status_code=409,
-                                            detail="Recompute requires a first input message with content.",
-                                        )
+                                        raise ValueError("Recompute requires a first input message with content.")
                                     response_input[0]["content"] = (
                                         origin_prompt + [{"type": "input_text", "text": generated_token}]
                                         if isinstance(origin_prompt, list)
                                         else origin_prompt + generated_token
                                     )
-                            elif "messages" in req_data:
+                            elif chat_flag:
                                 messages[0]["content"] = (
                                     origin_prompt
                                     + ([{"type": "text", "text": generated_token}] if generated_token else [])
@@ -1389,13 +1373,13 @@ async def handle_completions_impl(api: str, request: Request):
                                 req_data[token_limit] = origin_max_tokens - completion_tokens + token_credit
                             req_data.pop("kv_transfer_params", None)
                             previous_items.extend(attempt_items)
-                            # The stream is no longer fully consumed before a retry:
-                            # close this decode connection before selecting the next P/D.
+                            # Close the abandoned decode before selecting the next P/D.
                             await backend_gen.aclose()
+                            tmp_request_length = len(json.dumps(req_data).encode("utf-8"))
                             instance_info = await reassign_instances(
                                 api,
                                 req_data,
-                                len(json.dumps(req_data).encode("utf-8")),
+                                tmp_request_length,
                                 instance_info,
                                 previous_prefiller_kv_released=released_kv,
                             )
@@ -1417,10 +1401,6 @@ async def handle_completions_impl(api: str, request: Request):
                             if is_sse and event_type:
                                 chunk = b"event: " + event_type.encode() + b"\n" + chunk
                         yield chunk
-                    if stream_flag and not retry and end_events and not terminal_seen:
-                        raise HTTPException(
-                            status_code=502, detail="The decode stream ended before its terminal event."
-                        )
             except asyncio.CancelledError:
                 logger.warning(
                     "Streaming from decoder %s:%s was cancelled; releasing request %s resources",
@@ -1437,23 +1417,6 @@ async def handle_completions_impl(api: str, request: Request):
                     exc,
                     instance_info.request_id,
                 )
-                if not stream_flag:
-                    raise
-                # Headers may already be sent. Report failure using the endpoint's SSE protocol.
-                error = None
-                message = str(getattr(exc, "detail", exc))
-                if api == "/messages":
-                    error = {"type": "error", "error": {"type": "api_error", "message": message}}
-                elif api == "/responses":
-                    error = {
-                        "type": "error",
-                        "code": "proxy_error",
-                        "message": message,
-                        "param": None,
-                        "sequence_number": sequence_number,
-                    }
-                if error:
-                    yield b"event: error\n" + encode_response_chunk(error, True)
             finally:
                 try:
                     if backend_gen is not None:
@@ -1464,10 +1427,7 @@ async def handle_completions_impl(api: str, request: Request):
                     request_released = True
 
         media_type = "text/event-stream; charset=utf-8" if stream_flag else "application/json"
-        if stream_flag:
-            return StreamingResponse(generate_stream(), media_type=media_type)
-        return Response(b"".join([chunk async for chunk in generate_stream()]), media_type=media_type)
-
+        return StreamingResponse(generate_stream(), media_type=media_type)
     except Exception as e:
         import traceback
 
@@ -1483,10 +1443,6 @@ async def handle_completions_impl(api: str, request: Request):
             except Exception:
                 err_body = {"error": {"message": e.response.text or "upstream error"}}
             return JSONResponse(err_body, status_code=e.response.status_code)
-        if isinstance(e, (httpx.RequestError, json.JSONDecodeError, UnicodeDecodeError)):
-            return JSONResponse(
-                {"error": {"message": "The decode backend did not complete the request."}}, status_code=502
-            )
         raise
 
 

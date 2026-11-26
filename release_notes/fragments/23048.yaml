@@ -8,8 +8,7 @@ entries:
       token budget, and combines the continuation with the earlier text.
       Streaming forwards complete SSE events as they arrive and joins retries
       into one response lifecycle. Recompute continuation supports text output;
-      unsupported tool or reasoning continuation returns an error rather than
-      dropping content. Failures after streaming starts use protocol error events.
+      unsupported tool or reasoning continuation is logged and stops the response.
       Responses requires explicit history, does not support background mode or
       previous_response_id, and needs backend stop-reason exposure for recompute
       retries.

@@ -26,9 +26,10 @@ For Responses list input, continuation requires the first item to be a message
 with `content`; a tool-result item cannot be used as the text prompt.
 `--max-retries` controls transport retries; recompute continuation follows the
 existing Chat/Completions loop without a separate attempt limit. The backend
-validates the remaining token budget. Unsupported tool/reasoning continuation
-returns HTTP 409 for non-streaming requests. Once streaming headers have been
-sent, failures are reported as protocol error events instead of changing HTTP status.
+validates the remaining token budget. Recompute continuation supports text only.
+Unsupported tool/reasoning continuation is logged and stops the response, using
+the existing proxy error handling. Failures during response generation close the
+response without adding error events or changing the already-sent HTTP status.
 
 All four APIs share the transport, frame-reading, reassignment, and response path.
 Streaming forwards each complete SSE frame immediately; only incomplete frames
