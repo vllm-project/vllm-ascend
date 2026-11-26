@@ -1302,3 +1302,131 @@ def test_hisparse_resolve_residency_union_tiles_and_fallbacks(
         # next aclrtHostRegister of the same range fail.
         torch.npu.synchronize()
         mapping.close()
+
+
+@_arch22_only
+def test_hisparse_resolve_residency_second_request_wave():
+    """One row per request across the vector-core count.
+
+    Forty-eight programs fit one wave, so request 49 starts a second one: this is
+    where a program that claims the wrong request group, or writes into a
+    neighbour's row, shows up. Every other row of the matrix uses one or two
+    requests, and the 128-request stats case only checks the counters.
+    """
+    # max_union_rows is rows * top-k and has to fit the hot cache, so 49 rows cap
+    # top-k at 104 here; 64 still exercises the vector union and the handoff emit.
+    # A Hot of 5120 is the smallest that keeps both, and it keeps the torch oracle
+    # (which walks Hot once per request) affordable.
+    block, topk, hot, cols, requests_count = 128, 64, 5120, 480, 49
+    rows = requests_count
+    hot_blocks = hot // block
+
+    generator = torch.Generator().manual_seed(23)
+    source = torch.arange(1, cols + 1, dtype=torch.int32).repeat(requests_count, 1)
+    hot_table = torch.arange(1, hot_blocks + 1, dtype=torch.int32).repeat(requests_count, 1)
+    logical = torch.randint(-1, cols * block, (rows, topk), generator=generator, dtype=torch.int32)
+    requests = torch.arange(requests_count, dtype=torch.int32)
+    states = torch.arange(requests_count, dtype=torch.int32)
+    # Sentinel 0 keeps a page cold; the first two pages resolve to device memory.
+    resident = torch.zeros((requests_count, cols), dtype=torch.int32)
+    resident[:, :2] = 1 + torch.arange(2, dtype=torch.int32)
+    dgi = torch.full((requests_count, hot), -1, dtype=torch.int32)
+    lru = torch.stack([torch.randperm(hot, generator=generator) for _ in range(requests_count)]).to(torch.int16)
+
+    actual, _ = run_resolver(
+        logical,
+        hot_table,
+        requests,
+        states,
+        source,
+        resident,
+        dgi,
+        lru,
+        block=block,
+        union_rows=rows * topk,
+        host_rows=(cols + 1) * block,
+    )
+    want = reference(logical, requests, states, source, resident, hot_table, dgi, lru, block)
+    out, counts, sh, sd, sc, dgi_out, lru_out, stats = actual
+    want_out, want_counts, want_sh, want_sd, want_sc, want_dgi, want_lru, want_stats = want
+    for name, got, expected in (
+        ("indices", out, want_out),
+        ("counts", counts, want_counts),
+        ("swap_counts", sc, want_sc),
+        ("dgi", dgi_out, want_dgi),
+        ("lru", lru_out, want_lru),
+        ("stats", stats, want_stats),
+    ):
+        torch.testing.assert_close(got.cpu(), expected, msg=f"second wave: {name}")
+    # The copy-back pads its last store to a 32 B block, so only the prefix
+    # announced by swap_counts belongs to the contract.
+    sh_cpu, sd_cpu = sh.cpu(), sd.cpu()
+    for row, length in enumerate(want_sc.tolist()):
+        torch.testing.assert_close(sh_cpu[row, :length], want_sh[row, :length], msg=f"second wave: swap_host row {row}")
+        torch.testing.assert_close(
+            sd_cpu[row, :length], want_sd[row, :length], msg=f"second wave: swap_device row {row}"
+        )
+
+
+@_arch22_only
+def test_hisparse_resolve_residency_row_per_program_fallback():
+    """Above 512 rows the grouping is off and every row gets its own program.
+
+    That is the fallback mapping: the program owning a row walks the contiguous
+    run of rows that share its request, and the rest of the run returns early.
+    Only two rows are announced valid, which keeps the torch oracle cheap while
+    the shape still takes the fallback.
+    """
+    block, topk, hot, cols = 128, 16, 10240, 480
+    rows, valid_rows = 520, 2
+    hot_blocks = hot // block
+
+    generator = torch.Generator().manual_seed(31)
+    source = torch.arange(1, cols + 1, dtype=torch.int32)[None, :]
+    hot_table = torch.arange(1, hot_blocks + 1, dtype=torch.int32)[None, :]
+    logical = torch.randint(-1, cols * block, (rows, topk), generator=generator, dtype=torch.int32)
+    requests = torch.zeros(rows, dtype=torch.int32)
+    states = torch.zeros(1, dtype=torch.int32)
+    # Sentinel 0 keeps a page cold; the first two pages resolve to device memory.
+    resident = torch.zeros((1, cols), dtype=torch.int32)
+    resident[:, :2] = 1 + torch.arange(2, dtype=torch.int32)
+    dgi = torch.full((1, hot), -1, dtype=torch.int32)
+    lru = torch.randperm(hot, generator=generator).to(torch.int16)[None, :].contiguous()
+
+    actual, _ = run_resolver(
+        logical,
+        hot_table,
+        requests,
+        states,
+        source,
+        resident,
+        dgi,
+        lru,
+        block=block,
+        union_rows=rows * topk,
+        host_rows=(cols + 1) * block,
+        valid_rows=valid_rows,
+    )
+    want = reference(logical[:valid_rows], requests[:valid_rows], states, source, resident, hot_table, dgi, lru, block)
+    out, counts, sh, sd, sc, dgi_out, lru_out, stats = actual
+    want_out, want_counts, want_sh, want_sd, want_sc, want_dgi, want_lru, want_stats = want
+    for name, got, expected in (
+        ("indices", out[:valid_rows], want_out),
+        ("counts", counts[:valid_rows], want_counts),
+        ("swap_counts", sc[:valid_rows], want_sc),
+        ("dgi", dgi_out, want_dgi),
+        ("lru", lru_out, want_lru),
+        ("stats", stats, want_stats),
+    ):
+        torch.testing.assert_close(got.cpu(), expected, msg=f"row-per-program: {name}")
+    sh_cpu, sd_cpu = sh.cpu(), sd.cpu()
+    for row, length in enumerate(want_sc.tolist()):
+        torch.testing.assert_close(
+            sh_cpu[row, :length], want_sh[row, :length], msg=f"row-per-program: swap_host row {row}"
+        )
+        torch.testing.assert_close(
+            sd_cpu[row, :length], want_sd[row, :length], msg=f"row-per-program: swap_device row {row}"
+        )
+    # Rows past num_valid_rows publish an empty row and touch no state.
+    torch.testing.assert_close(out[valid_rows:].cpu(), torch.full_like(out[valid_rows:], -1).cpu())
+    torch.testing.assert_close(counts[valid_rows:].cpu(), torch.zeros_like(counts[valid_rows:]).cpu())
