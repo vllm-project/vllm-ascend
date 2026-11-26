@@ -238,9 +238,3 @@ csrc/third_party/
 
 # local build cache
 .vllm_ascend/
-
-# CI job logs downloaded locally for debugging
-.ci-logs/
-
-# AI-generated documents and reports
-ai-docs/
