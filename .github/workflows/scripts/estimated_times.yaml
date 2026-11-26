@@ -210,11 +210,8 @@ estimated_times:
   tests/e2e/pull_request/two_card/ops/test_bgmv_expand.py: 30
   tests/e2e/pull_request/two_card/ops/test_bgmv_shrink.py: 30
   tests/e2e/pull_request/two_card/ops/test_chunk_gated_delta_rule_fwd_h_vllm.py: 30
-  tests/e2e/pull_request/two_card/ops/test_copy_and_expand_eagle_inputs.py: 30
   tests/e2e/pull_request/two_card/ops/test_dequant_swiglu_quant.py: 40
   tests/e2e/pull_request/two_card/ops/test_inplace_partial_rotary_mul.py: 50
-  tests/e2e/pull_request/two_card/ops/test_kda_gate_cumsum_vllm.py: 30
-  tests/e2e/pull_request/two_card/ops/test_kda_layout_swap12.py: 30
   tests/e2e/pull_request/two_card/ops/test_moe_gating_top_k_hash.py: 30
   tests/e2e/pull_request/two_card/ops/triton/test_bad_words.py: 40
   tests/e2e/pull_request/two_card/ops/triton/test_batch_memcpy.py: 30

@@ -1,0 +1,9 @@
+pr: 23213
+entries:
+  - category: breaking
+    text: >-
+      Removed the unused `_C_ascend` custom operators `npu_sign_bits_pack`,
+      `get_npu_storage_shape`, `npu_copy_and_expand_eagle_inputs`,
+      `kda_gate_cumsum_vllm`, and `kda_layout_swap12`. Users calling these
+      operators directly must update their integrations; use
+      `torch_npu.npu_sign_bits_pack` for sign-bit packing.

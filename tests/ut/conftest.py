@@ -279,11 +279,7 @@ register_ascend_customop()
 if not _npu_available:
     import torch
 
-    from tests.ut.helpers.golden_copy_and_expand import npu_copy_and_expand_eagle_inputs_stub
-
     enable_custom_op()
-    if hasattr(torch.ops, "_C_ascend") and not hasattr(torch.ops._C_ascend, "npu_copy_and_expand_eagle_inputs"):
-        torch.ops._C_ascend.npu_copy_and_expand_eagle_inputs = npu_copy_and_expand_eagle_inputs_stub
     # Re-sync after enable_custom_op / adapt_patch so @patch("torch.npu.*") hits
     # the same object production code uses via `torch.npu`.
     torch.npu.current_device = MagicMock(return_value="cpu")
