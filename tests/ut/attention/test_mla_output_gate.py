@@ -59,6 +59,7 @@ def test_mla_forward_preserves_output_gate(is_prefill, preprocess_path, gate_lay
     with (
         patch("vllm_ascend.attention.mla_v1._EXTRA_CTX", SimpleNamespace(num_tokens=num_tokens)),
         patch("vllm_ascend.attention.mla_v1.maybe_save_kv_layer_to_connector"),
+        patch("vllm_ascend.attention.mla_v1.flash_attention_gate", side_effect=lambda x, g: x.mul_(g.sigmoid())),
     ):
         result = impl.forward("layer", hidden, (cache, cache), metadata, output)
 

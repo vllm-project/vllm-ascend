@@ -15,42 +15,52 @@
 # This file is a part of the vllm-ascend project.
 #
 
+import ctypes
 import threading
 import unittest
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
+from uuid import uuid4
 
 import numpy as np
+import pytest
 
 # isort: off
 import tests.ut.distributed.ascend_store._mock_deps  # noqa: F401, E402
 from vllm.distributed.kv_events import BlockStored
+from vllm.v1.core.kv_cache_utils import maybe_convert_block_hash
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.metadata import (
     LayerBatchReqMeta,
     LayerBlockRange,
     LayerLoadTask,
-    LayerPoolKey,
     LayerTransferTask,
     SharedBlockData,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
+    AscendConnectorMetadata,
     ChunkedTokenDatabase,
     KeyMetadata,
     LoadSpec,
     ReqMeta,
+    RequestTracker,
 )
 
 # isort: on
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector import AscendStoreConnector
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.memcache_backend import MemcacheBackend, MmcDirect
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.buffer import MemoryLocation
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.kv_transfer import (
     KVCacheStoreRecvingThread,
     KVCacheStoreSendingThread,
     KVTransferThread,
+    get_bulk_by_memory_location,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.kv_transfer import (
-    KVCacheStoreKeyLayerSendingThread,
     KVCacheStoreLayerRecvingThread,
     KVCacheStoreLayerSendingThread,
     LayerBatchBuilder,
 )
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker import KVPoolWorker
 
 
 class FakeStore:
@@ -96,6 +106,32 @@ class MaskedFakeTokenDatabase(FakeTokenDatabase):
             return True
         block_idx = start // self.get_block_size(kv_cache_group_id)
         return block_idx < len(masks[kv_cache_group_id]) and masks[kv_cache_group_id][block_idx]
+
+
+def make_projected_database():
+    database = ChunkedTokenDatabase(
+        [KeyMetadata("m", 0, 0, 0, 0), KeyMetadata("m", 0, 0, 0, 1)],
+        [16, 16],
+        None,
+    )
+    database.set_group_buffers(
+        {0: [1000], 1: []},
+        {0: [16], 1: []},
+        {0: [16], 1: []},
+    )
+    return database
+
+
+def make_projected_request(block_id, *, for_load=False):
+    load_spec = LoadSpec(0, 16, can_load=True, token_len=16) if for_load else None
+    return ReqMeta(
+        req_id="projected-empty-group",
+        token_len_chunk=16,
+        block_ids_by_group=[[block_id], [block_id]],
+        block_hashes=["h0"],
+        kv_cache_group_ids=[0, 1],
+        load_spec=load_spec,
+    )
 
 
 class TestLayerBatchBuilderOffsets(unittest.TestCase):
@@ -237,10 +273,7 @@ class TestKVTransferThread(unittest.TestCase):
 
 class TestLayerStoreRequestTracking(unittest.TestCase):
     def test_multiple_pending_saves_finish_only_after_all_complete(self):
-        for thread_type, transfer_size in (
-            (KVCacheStoreKeyLayerSendingThread, 1),
-            (KVCacheStoreLayerSendingThread, 16),
-        ):
+        for thread_type, transfer_size in ((KVCacheStoreLayerSendingThread, 16),):
             with self.subTest(thread_type=thread_type.__name__):
                 thread = thread_type(
                     FakeStore(),
@@ -376,9 +409,7 @@ class TestGVALayerTransferFailures(unittest.TestCase):
 
 
 class TestGVALayerReceivingTaskOwnership(unittest.TestCase):
-    def _make_thread(
-        self, external_slot_release_waiter=None, save_failure_checker=None, raise_on_transfer_failure=True
-    ):
+    def _make_thread(self, external_slot_release_waiter=None, save_failure_checker=None):
         # Plain mock store: the layerwise threads are backend-agnostic.
         # `.store` is attached explicitly to pin batch_copy's return value.
         store = MagicMock()
@@ -404,7 +435,6 @@ class TestGVALayerReceivingTaskOwnership(unittest.TestCase):
             dcp_size=1,
             page_size_bytes=16,
             ready_event=threading.Event(),
-            get_event=threading.Event(),
             layer_load_finished_events=load_finished,
             layer_save_finished_events=save_finished,
             sync_save_events=sync_events,
@@ -412,14 +442,13 @@ class TestGVALayerReceivingTaskOwnership(unittest.TestCase):
             group_builders=[builder],
             external_slot_release_waiter=external_slot_release_waiter,
             save_failure_checker=save_failure_checker,
-            raise_on_transfer_failure=raise_on_transfer_failure,
         )
         return thread, load_finished, save_finished, sync_events
 
     def test_gva_load_failure_policy(self):
-        for strict, hybrid in ((False, False), (True, False), (False, True), (True, True)):
-            with self.subTest(strict=strict, hybrid=hybrid):
-                thread, load_finished, _, _ = self._make_thread(raise_on_transfer_failure=strict)
+        for hybrid in (False, True):
+            with self.subTest(hybrid=hybrid):
+                thread, load_finished, _, _ = self._make_thread()
                 thread.m_store.store.batch_copy.return_value = -1
                 request = ReqMeta("r1", block_ids_by_group=[[7], [7]] if hybrid else [[7, 8]], block_hashes=[])
                 task = LayerTransferTask(
@@ -432,7 +461,7 @@ class TestGVALayerReceivingTaskOwnership(unittest.TestCase):
                         is_last_chunks=[False],
                     ),
                 )
-                load_task = LayerLoadTask(wait_for_save_layer=None, transfer_tasks=[task], layer_id=1)
+                load_task = LayerLoadTask(wait_for_save_layers=(), transfer_tasks=[task], layer_id=1)
                 thread.request_queue.put(load_task)
 
                 thread._handle_request(load_task)
@@ -457,7 +486,7 @@ class TestGVALayerReceivingTaskOwnership(unittest.TestCase):
         )
         transfer_tasks = [task]
         load_task = LayerLoadTask(
-            wait_for_save_layer=None,
+            wait_for_save_layers=(),
             transfer_tasks=transfer_tasks,
             layer_id=1,
         )
@@ -471,7 +500,7 @@ class TestGVALayerReceivingTaskOwnership(unittest.TestCase):
         thread, load_finished, save_finished, sync_events = self._make_thread()
         save_finished[0].set()
         load_task = LayerLoadTask(
-            wait_for_save_layer=0,
+            wait_for_save_layers=(0,),
             transfer_tasks=[],
             layer_id=1,
         )
@@ -480,7 +509,7 @@ class TestGVALayerReceivingTaskOwnership(unittest.TestCase):
         thread._handle_request(load_task)
 
         sync_events[0].synchronize.assert_called_once_with()
-        self.assertFalse(save_finished[0].is_set())
+        self.assertTrue(save_finished[0].is_set())
         self.assertTrue(load_finished[1].is_set())
 
     def test_source_save_failure_stops_receiver_wait(self):
@@ -489,7 +518,7 @@ class TestGVALayerReceivingTaskOwnership(unittest.TestCase):
         save_finished[0] = MagicMock()
         save_finished[0].wait.return_value = False
         load_task = LayerLoadTask(
-            wait_for_save_layer=0,
+            wait_for_save_layers=(0,),
             transfer_tasks=[],
             layer_id=1,
         )
@@ -523,12 +552,12 @@ class TestGVALayerReceivingTaskOwnership(unittest.TestCase):
                 is_last_chunks=[False],
             ),
         )
-        load_task = LayerLoadTask(wait_for_save_layer=0, transfer_tasks=[task], layer_id=1)
+        load_task = LayerLoadTask(wait_for_save_layers=(0,), transfer_tasks=[task], layer_id=1)
         thread.request_queue.put(load_task)
 
         thread._handle_request(load_task)
 
-        self.assertEqual(call_order, [("save", 0), ("reuse", 1), ("h2d", 1)])
+        self.assertEqual(call_order, [("save", 0), ("reuse", 0), ("reuse", 1), ("h2d", 1)])
 
     def test_empty_load_waits_for_target_layer_reuse_before_finish(self):
         load_finished_observed: list[bool] = []
@@ -539,7 +568,7 @@ class TestGVALayerReceivingTaskOwnership(unittest.TestCase):
             load_finished_observed.append(thread.layer_load_finished_events[layer_id].is_set())
 
         thread, load_finished, _, _ = self._make_thread(external_slot_release_waiter=wait_for_reuse)
-        load_task = LayerLoadTask(wait_for_save_layer=None, transfer_tasks=[], layer_id=1)
+        load_task = LayerLoadTask(wait_for_save_layers=(), transfer_tasks=[], layer_id=1)
         thread.request_queue.put(load_task)
 
         thread._handle_request(load_task)
@@ -555,6 +584,7 @@ class TestKVCacheStoreSendingThread(unittest.TestCase):
         kv_role="kv_producer",
         enable_kv_event=False,
         block_size=16,
+        sharded_mamba_group_ids=None,
     ):
         store = FakeStore(exists_result or [0, 0, 0, 0])
         db = FakeTokenDatabase(block_size=block_size)
@@ -569,8 +599,44 @@ class TestKVCacheStoreSendingThread(unittest.TestCase):
             ready_event=threading.Event(),
             group_uses_align_state=[False],
             enable_kv_event=enable_kv_event,
+            sharded_mamba_group_ids=sharded_mamba_group_ids,
         )
         return t, store
+
+    def test_c8_indexer_put_waits_for_a_complete_prefill_block(self):
+        sender, store = self._make_thread(block_size=128, kv_role="kv_both")
+        sender.token_database.set_group_buffers({0: [4096, 32768]}, {0: [16384, 512]})
+        store.exists = MagicMock(
+            side_effect=lambda keys: [int(any(key in put[0] for put in store.put_calls)) for key in keys]
+        )
+        tracker = RequestTracker(req_id="r1", token_len=1, allocated_block_ids_by_group=[[1, 2]], num_prompt_tokens=257)
+        hashes = [b"first-page", b"second-page"]
+        meta = ReqMeta.from_request_tracker(tracker, 128, block_hashes=hashes, discard_partial_chunks=True)
+        self.assertIsNone(meta)
+        self.assertEqual(store.put_calls, [])
+
+        tracker.token_len = 129
+        meta = ReqMeta.from_request_tracker(tracker, 128, block_hashes=hashes, discard_partial_chunks=True)
+        assert meta is not None
+        self.assertTrue(sender._handle_stored_request(meta))
+        ((keys, _, sizes),) = store.put_calls
+        self.assertEqual(len(keys), 1)
+        self.assertEqual(sizes, [[16384, 512]])
+
+    def test_put_uses_only_locally_projected_groups(self):
+        thread, store = self._make_thread([0])
+        thread.token_database = make_projected_database()
+        thread.block_size = [16, 16]
+        store.exists = MagicMock(return_value=[0])
+        request = make_projected_request(1)
+        thread.add_stored_request(request)
+        thread.request_queue.put(request)
+
+        thread._handle_request(request)
+
+        store.exists.assert_called_once()
+        keys, addrs, sizes = store.put_calls[0]
+        self.assertEqual((len(keys), addrs, sizes), (1, [[1016]], [[16]]))
 
     def test_save_keeps_checks_for_align_state_slots(self):
         thread, store = self._make_thread()
@@ -597,6 +663,19 @@ class TestKVCacheStoreSendingThread(unittest.TestCase):
             [[key.rsplit("@", 1)[1] for key in call[0]] for call in store.put_calls],
             [["h1"], ["h0", "h2"]],
         )
+
+    def test_pcp_head_shards_save_every_checkpoint(self):
+        hashes = [f"h{i}" for i in range(4)]
+        for pcp_rank in range(2):
+            thread, store = self._make_thread(sharded_mamba_group_ids={0})
+            thread.pcp_rank, thread.pcp_size = pcp_rank, 2
+            thread.group_uses_align_state = [True]
+            req = ReqMeta(req_id="r1", token_len_chunk=64, block_ids=[1, 2, 3, 4], block_hashes=hashes)
+            thread.add_stored_request(req)
+            thread.request_queue.put(req)
+            thread._handle_request(req)
+            keys = [key for call in store.put_calls for key in call[0]]
+            self.assertEqual([key.rsplit("@", 1)[1] for key in keys], hashes)
 
     def test_write_shards_cover_filtered_blocks_once(self):
         hashes = [f"h{i}" for i in range(8)]
@@ -647,7 +726,7 @@ class TestKVCacheStoreSendingThread(unittest.TestCase):
                 req = ReqMeta(
                     req_id="r1",
                     token_len_chunk=16 * len(exists),
-                    block_ids=list(range(len(exists))),
+                    block_ids=list(range(1, len(exists) + 1)),
                     block_hashes=[f"h{i}" for i in range(len(exists))],
                     current_event=None,
                 )
@@ -666,7 +745,7 @@ class TestKVCacheStoreSendingThread(unittest.TestCase):
         req = ReqMeta(
             req_id="r1",
             token_len_chunk=32,
-            block_ids=[0, 1],
+            block_ids=[1, 2],
             block_hashes=[b"h0", b"h1"],  # type: ignore[arg-type]
             current_event=None,
         )
@@ -686,7 +765,7 @@ class TestKVCacheStoreSendingThread(unittest.TestCase):
         req = ReqMeta(
             req_id="r1",
             token_len_chunk=32,
-            block_ids=[0, 1],
+            block_ids=[1, 2],
             block_hashes=[b"h0", b"h1"],  # type: ignore[arg-type]
             current_event=None,
             token_ids=list(range(32)),
@@ -699,15 +778,51 @@ class TestKVCacheStoreSendingThread(unittest.TestCase):
 
         keys, _, _ = store.put_calls[0]
         self.assertEqual(len(keys), 1)
-        self.assertEqual(len(t.get_kv_events()), 1)
+        # Uncompressed groups report only the block this put stored.
+        events = t.get_kv_events()
+        self.assertEqual([event.block_hashes for event in events], [[maybe_convert_block_hash(b"h1")]])
+        self.assertEqual([event.parent_block_hash for event in events], [maybe_convert_block_hash(b"h0")])
+        self.assertEqual([event.token_ids for event in events], [list(range(16, 32))])
+        self.assertEqual(events[0].block_size, 16)
         store.exists.assert_called_once()
+
+    def test_missing_descriptors_publish_prepared_grains_after_batch_success(self):
+        for put_result in (None, [True, False]):
+            with self.subTest(put_result=put_result):
+                thread, store = self._make_thread([0, 0, 0], enable_kv_event=True)
+                request = ReqMeta(
+                    req_id="descriptor-filter",
+                    token_len_chunk=48,
+                    block_ids=[1, 2, 3],
+                    block_hashes=[b"h0", b"h1", b"h2"],
+                    token_ids=list(range(48)),
+                    original_block_size=16,
+                )
+                thread.add_stored_request(request)
+                thread.request_queue.put(request)
+                original_put = store.put
+
+                def put(keys, addrs, sizes, original_put=original_put, put_result=put_result):
+                    original_put(keys, addrs, sizes)
+                    return put_result
+
+                store.put = put
+                with patch.object(
+                    thread, "_prepare_value", side_effect=[([], [], None), ([1], [16], None), ([2], [16], None)]
+                ):
+                    thread._handle_request(request)
+                self.assertEqual(len(store.put_calls[0][0]), 2)
+                expected = [b"h1", b"h2"] if put_result is None else [b"h1"]
+                self.assertEqual(
+                    [e.block_hashes for e in thread.get_kv_events()], [[maybe_convert_block_hash(h)] for h in expected]
+                )
 
     def test_handle_request_with_kv_event(self):
         t, store = self._make_thread([0], enable_kv_event=True)
         req = ReqMeta(
             req_id="r1",
             token_len_chunk=16,
-            block_ids=[0],
+            block_ids=[1],
             block_hashes=[b"h0"],  # type: ignore[arg-type]
             current_event=None,
             token_ids=list(range(16)),
@@ -718,6 +833,188 @@ class TestKVCacheStoreSendingThread(unittest.TestCase):
         t._handle_request(req)
         events = t.get_kv_events()
         self.assertEqual(len(events), 1)
+
+    def test_lookup_hits_do_not_publish_cpu_events(self):
+        t, store = self._make_thread([1, 1], enable_kv_event=True)
+        req = ReqMeta(
+            req_id="r1",
+            token_len_chunk=32,
+            block_ids=[1, 2],
+            block_hashes=[b"h0", b"h1"],  # type: ignore[arg-type]
+            token_ids=list(range(32)),
+            original_block_size=16,
+        )
+        t.add_stored_request(req)
+        t.request_queue.put(req)
+        t._handle_request(req)
+        self.assertEqual(store.put_calls, [])
+        self.assertEqual(t.get_kv_events(), [])
+
+    def test_cpu_events_follow_tp_shard_and_keep_global_parent(self):
+        t, store = self._make_thread([0, 0], enable_kv_event=True, block_size=128)
+        t.put_step = 2
+        t.tp_rank = 0
+        req = ReqMeta(
+            req_id="r1",
+            token_len_chunk=512,
+            block_ids=list(range(1, 5)),
+            block_hashes=[b"h0", b"h1", b"h2", b"h3"],  # type: ignore[arg-type]
+            token_ids=list(range(512)),
+            original_block_size=128,
+        )
+        t.add_stored_request(req)
+        t.request_queue.put(req)
+        t._handle_request(req)
+        events = t.get_kv_events()
+        self.assertEqual(
+            [event.block_hashes for event in events],
+            [[maybe_convert_block_hash(b"h0")], [maybe_convert_block_hash(b"h2")]],
+        )
+        self.assertEqual([event.parent_block_hash for event in events], [None, maybe_convert_block_hash(b"h1")])
+        self.assertEqual(
+            [event.token_ids for event in events],
+            [list(range(128)), list(range(256, 384))],
+        )
+        self.assertEqual(len(store.put_calls), 1)
+
+    def test_cpu_events_cover_blocks_owned_by_each_tp_rank(self):
+        for dcp_size, align_state in ((2, False), (1, True)):
+            with self.subTest(dcp_size=dcp_size, align_state=align_state):
+                t, store = self._make_thread([0, 0, 0, 0], enable_kv_event=True, block_size=128)
+                t.put_step = 2
+                t.dcp_size = dcp_size
+                t.group_uses_align_state = [align_state]
+                req = ReqMeta(
+                    req_id="r1",
+                    token_len_chunk=512,
+                    block_ids=list(range(1, 5)),
+                    block_hashes=[b"h0", b"h1", b"h2", b"h3"],  # type: ignore[arg-type]
+                    token_ids=list(range(512)),
+                    original_block_size=128,
+                )
+                t.add_stored_request(req)
+                t.request_queue.put(req)
+                t._handle_request(req)
+                events = t.get_kv_events()
+                self.assertEqual(
+                    [event.block_hashes for event in events],
+                    [[maybe_convert_block_hash(block_hash)] for block_hash in (b"h0", b"h1", b"h2", b"h3")],
+                )
+                self.assertEqual(len(store.put_calls), 1)
+
+    def test_cpu_events_not_published_when_put_fails(self):
+        t, store = self._make_thread([0], enable_kv_event=True)
+        store.put = MagicMock(side_effect=RuntimeError("store unavailable"))
+        req = ReqMeta(
+            req_id="r1",
+            token_len_chunk=16,
+            block_ids=[1],
+            block_hashes=[b"h0"],  # type: ignore[arg-type]
+            token_ids=list(range(16)),
+            original_block_size=16,
+        )
+        t.add_stored_request(req)
+        t.request_queue.put(req)
+        t._handle_request(req)
+        events = t.get_kv_events()
+        self.assertEqual(events, [])
+
+    def test_partial_put_publishes_successful_blocks(self):
+        t, store = self._make_thread([0, 0], enable_kv_event=True)
+        store.put = MagicMock(return_value=[True, False])
+        req = ReqMeta(
+            req_id="r1",
+            token_len_chunk=32,
+            block_ids=[1, 2],
+            block_hashes=[b"h0", b"h1"],  # type: ignore[arg-type]
+            token_ids=list(range(32)),
+            original_block_size=16,
+        )
+        t.add_stored_request(req)
+        t.request_queue.put(req)
+        with self.assertLogs("vllm", level="ERROR"):
+            t._handle_request(req)
+        events = t.get_kv_events()
+        self.assertEqual([event.block_hashes for event in events], [[maybe_convert_block_hash(b"h0")]])
+        self.assertEqual(events[0].token_ids, list(range(16)))
+        self.assertIsNone(events[0].parent_block_hash)
+
+    def test_partial_pp_put_publishes_only_complete_logical_blocks(self):
+        for results, expected_indices in (
+            ([True, True, True, False], [0]),
+            ([False, True, True, True], [1]),
+            ([True, False, False, True], []),
+            ([False, False, False, False], []),
+            ([True], []),
+        ):
+            with self.subTest(results=results):
+                thread, store = self._make_thread([0, 0], enable_kv_event=True)
+                thread.kv_role = "kv_consumer"
+                thread._decode_adaptor_prefill_pp = MagicMock(
+                    return_value=(["a/0", "a/1", "b/0", "b/1"], [[1]] * 4, [[16]] * 4)
+                )
+                store.put = MagicMock(return_value=results)
+                request = ReqMeta(
+                    req_id="partial-pp",
+                    token_len_chunk=32,
+                    block_ids=[1, 2],
+                    block_hashes=[b"h0", b"h1"],
+                    token_ids=list(range(32)),
+                    original_block_size=16,
+                )
+                thread.add_stored_request(request)
+                with self.assertLogs("vllm", level="ERROR"):
+                    self.assertFalse(thread._handle_stored_request(request))
+                events = thread.get_kv_events()
+                self.assertEqual(
+                    [event.block_hashes for event in events],
+                    [[maybe_convert_block_hash(request.block_hashes[index])] for index in expected_indices],
+                )
+                self.assertEqual(
+                    [event.token_ids for event in events],
+                    [list(range(index * 16, (index + 1) * 16)) for index in expected_indices],
+                )
+                self.assertEqual(
+                    [event.parent_block_hash for event in events],
+                    [maybe_convert_block_hash(b"h0") if index else None for index in expected_indices],
+                )
+
+    def test_cpu_events_skip_empty_or_partial_grains(self):
+        t, _ = self._make_thread(enable_kv_event=True, block_size=128)
+        req = ReqMeta(
+            req_id="r1",
+            token_len_chunk=128,
+            block_ids=[0],
+            block_hashes=[b"h0"],  # type: ignore[arg-type]
+            token_ids=list(range(128)),
+            original_block_size=128,
+        )
+        t.add_stored_request(req)
+        for stored_ranges in ([], [(1, 128)], [(0, 64)]):
+            with self.subTest(stored_ranges=stored_ranges):
+                self.assertEqual(t._build_cpu_stored_events(req, 0, 128, stored_ranges), [])
+
+    def test_cpu_events_block_size_matches_token_span(self):
+        for block_size in (32, 64, 128):
+            with self.subTest(block_size=block_size):
+                t, _ = self._make_thread(enable_kv_event=True, block_size=block_size)
+                req = ReqMeta(
+                    req_id="r1",
+                    token_len_chunk=block_size,
+                    block_ids=[0],
+                    block_hashes=[b"h0"],  # type: ignore[arg-type]
+                    token_ids=list(range(block_size)),
+                    original_block_size=16,
+                )
+                t.add_stored_request(req)
+                events = t._build_cpu_stored_events(req, 0, block_size, [(0, block_size)])
+                self.assertEqual(len(events), 1)
+                self.assertEqual(events[0].block_size, block_size)
+                self.assertEqual(events[0].token_ids, list(range(block_size)))
+                self.assertEqual(events[0].block_hashes, [maybe_convert_block_hash(b"h0")])
+                self.assertEqual(events[0].group_idx, 0)
+                other_group = t._build_cpu_stored_events(req, 1, block_size, [(0, block_size)])
+                self.assertEqual(other_group[0].group_idx, 1)
 
     def test_store_job_lifecycle(self):
         t, _ = self._make_thread()
@@ -740,7 +1037,7 @@ class TestKVCacheStoreSendingThread(unittest.TestCase):
             req_id="r1",
             token_len_chunk=16,
             save_start_token=0,
-            block_ids=[0],
+            block_ids=[1],
             block_hashes=[b"h0"],  # type: ignore[arg-type]
             token_ids=list(range(16)),
             original_block_size=16,
@@ -758,7 +1055,7 @@ class TestKVCacheStoreSendingThread(unittest.TestCase):
             req_id="r1",
             token_len_chunk=32,
             save_start_token=16,
-            block_ids=[0, 1],
+            block_ids=[1, 2],
             block_hashes=[b"h0", b"h1"],  # type: ignore[arg-type]
             token_ids=list(range(16, 32)),
             original_block_size=16,
@@ -779,9 +1076,9 @@ class TestKVCacheStoreSendingThread(unittest.TestCase):
         stale = ReqMeta(
             req_id="reused",
             token_len_chunk=16,
-            block_ids=[0],
+            block_ids=[1],
             block_hashes=[b"old"],  # type: ignore[arg-type]
-            event_id=1,
+            event_id=uuid4().int,
             store_job_id=1,
         )
         t.add_stored_request(stale)
@@ -791,7 +1088,7 @@ class TestKVCacheStoreSendingThread(unittest.TestCase):
             token_len_chunk=16,
             block_ids=[1],
             block_hashes=[b"new"],  # type: ignore[arg-type]
-            event_id=2,
+            event_id=uuid4().int,
             store_job_id=2,
         )
         t.add_stored_request(fresh)
@@ -802,7 +1099,7 @@ class TestKVCacheStoreSendingThread(unittest.TestCase):
         self.assertEqual(store.put_calls, [])
         self.assertEqual(t.stored_requests["reused"], {2})
         self.assertEqual(t.get_saved_offset("reused"), 0)
-        self.assertEqual(t.get_completed_events(), {1: 1})
+        self.assertEqual(t.get_completed_events(), {stale.event_id: 1})
 
     def test_consumer_prefill_pp_lookup_requires_every_partition(self):
         t, _ = self._make_thread([1, 0, 1, 1], kv_role="kv_consumer")
@@ -820,8 +1117,8 @@ class TestKVCacheStoreSendingThread(unittest.TestCase):
 
     def test_unexpected_dispatch_error_releases_pinned_job(self):
         t, _ = self._make_thread([0])
-        first = ReqMeta("r1", event_id=7, store_job_id=7)
-        second = ReqMeta("r2", event_id=8, store_job_id=8)
+        first = ReqMeta("r1", event_id=uuid4().int, store_job_id=7)
+        second = ReqMeta("r2", event_id=uuid4().int, store_job_id=8)
         save_batch = t.add_save_batch([first, second])
 
         t._handle_request = MagicMock(side_effect=RuntimeError("dispatch failed"))
@@ -831,33 +1128,36 @@ class TestKVCacheStoreSendingThread(unittest.TestCase):
         self.assertEqual(t.request_queue.unfinished_tasks, 0)
         self.assertFalse(t.is_stored_request("r1"))
         self.assertFalse(t.is_stored_request("r2"))
-        self.assertEqual(t.get_completed_events(), {7: 1, 8: 1})
+        self.assertEqual(t.get_completed_events(), {first.event_id: 1, second.event_id: 1})
         self.assertTrue(save_batch.done.is_set())
 
     def test_dispatch_cleanup_does_not_acknowledge_request_twice(self):
         t, _ = self._make_thread([0])
-        req = ReqMeta("r1", event_id=7, store_job_id=7)
+        event_id = uuid4().int
+        req = ReqMeta("r1", event_id=event_id, store_job_id=7)
         t.add_stored_request(req)
         t.request_queue.put(req)
         self.assertIs(t.request_queue.get_nowait(), req)
         self.assertEqual(t.finish_store_job(req), 0)
-        t.completed_events[7] = 1
+        t.completed_events[event_id] = 1
         t.request_queue.task_done()
 
         t._handle_request_exception(req)
 
         self.assertEqual(t.request_queue.unfinished_tasks, 0)
         self.assertFalse(t.is_stored_request("r1"))
-        self.assertEqual(t.get_completed_events(), {7: 1})
+        self.assertEqual(t.get_completed_events(), {event_id: 1})
 
     def test_dispatch_cleanup_keeps_queued_acknowledgements_after_current_was_done(self):
         t, _ = self._make_thread([0])
-        current = ReqMeta("r1", event_id=7, store_job_id=7)
-        queued = ReqMeta("r2", event_id=8, store_job_id=8)
+        current_event_id = uuid4().int
+        queued_event_id = uuid4().int
+        current = ReqMeta("r1", event_id=current_event_id, store_job_id=7)
+        queued = ReqMeta("r2", event_id=queued_event_id, store_job_id=8)
         batch = t.add_save_batch([current, queued])
         self.assertIs(t.request_queue.get_nowait(), current)
         self.assertEqual(t.finish_store_job(current), 0)
-        t.completed_events[7] = 1
+        t.completed_events[current_event_id] = 1
         t.request_queue.task_done()
         acknowledge = t.request_queue.task_done
 
@@ -875,17 +1175,17 @@ class TestKVCacheStoreSendingThread(unittest.TestCase):
         self.assertTrue(t.request_queue.empty())
         self.assertTrue(batch.done.is_set())
         self.assertFalse(t.is_stored_request("r2"))
-        self.assertEqual(t.get_completed_events(), {7: 1, 8: 1})
+        self.assertEqual(t.get_completed_events(), {current_event_id: 1, queued_event_id: 1})
 
     def test_add_save_batch_rejects_job_after_fatal_error(self):
         t, _ = self._make_thread([0])
-        req = ReqMeta("r1", event_id=7, store_job_id=7)
+        req = ReqMeta("r1", event_id=uuid4().int, store_job_id=7)
         t._fatal_error = RuntimeError("dispatch failed")
 
         with self.assertLogs("vllm", level="ERROR"):
             batch = t.add_save_batch([req])
         self.assertTrue(batch.done.is_set())
-        self.assertEqual(t.get_completed_events(), {7: 1})
+        self.assertEqual(t.get_completed_events(), {req.event_id: 1})
         self.assertEqual(t.get_saved_offset("r1"), 0)
 
         self.assertFalse(t.is_stored_request("r1"))
@@ -908,11 +1208,11 @@ class TestKVCacheStoreSendingThread(unittest.TestCase):
                 req = ReqMeta(
                     "r1",
                     token_len_chunk=32,
-                    block_ids=[0, 1],
+                    block_ids=[1, 2],
                     block_hashes=[b"h0", b"h1"],
                     token_ids=list(range(32)),
                     original_block_size=16,
-                    event_id=7,
+                    event_id=uuid4().int,
                 )
                 t.add_stored_request(req)
                 t.request_queue.put(req)
@@ -922,7 +1222,7 @@ class TestKVCacheStoreSendingThread(unittest.TestCase):
                 self.assertEqual(t._retry_token_ids["r1"], (0, list(range(32))))
                 self.assertFalse(t.is_stored_request("r1"))
                 self.assertEqual(t.request_queue.unfinished_tasks, 0)
-                self.assertEqual(t.get_completed_events(), {7: 1})
+                self.assertEqual(t.get_completed_events(), {req.event_id: 1})
                 self.assertEqual(t.kv_events, [])
                 self.assertIsNone(t._fatal_error)
 
@@ -930,13 +1230,13 @@ class TestKVCacheStoreSendingThread(unittest.TestCase):
         t, _ = self._make_thread(enable_kv_event=True)
         t.worker = MagicMock(tp_mismatch=True)
         t.worker._store_kv_tp_mismatch.return_value = False
-        req = ReqMeta("r1", token_len_chunk=16, token_ids=list(range(16)), event_id=7)
+        req = ReqMeta("r1", token_len_chunk=16, token_ids=list(range(16)), event_id=uuid4().int)
         t.add_stored_request(req)
         t.request_queue.put(req)
         t._handle_request(req)
         self.assertEqual(t.get_saved_offset("r1"), 0)
         self.assertEqual(t._retry_token_ids["r1"], (0, list(range(16))))
-        self.assertEqual(t.get_completed_events(), {7: 1})
+        self.assertEqual(t.get_completed_events(), {req.event_id: 1})
         self.assertFalse(t.is_stored_request("r1"))
         self.assertEqual(t.request_queue.unfinished_tasks, 0)
 
@@ -957,7 +1257,7 @@ class TestKVCacheStoreSendingThread(unittest.TestCase):
         req = ReqMeta(
             req_id="r1",
             token_len_chunk=16,
-            block_ids=[0],
+            block_ids=[1],
             block_hashes=[b"h0"],  # type: ignore[arg-type]
             current_event=event,
         )
@@ -982,7 +1282,7 @@ class TestKVCacheStoreSendingThread(unittest.TestCase):
         req = ReqMeta(
             req_id="r1",
             token_len_chunk=32,
-            block_ids=[0, 1],
+            block_ids=[1, 2],
             block_hashes=[b"h0", b"h1"],  # type: ignore[arg-type]
             current_event=None,
         )
@@ -991,6 +1291,35 @@ class TestKVCacheStoreSendingThread(unittest.TestCase):
         t._handle_request(req)
         # dcp_size > 1 means no slicing
         self.assertEqual(len(store.put_calls), 1)
+
+    def test_mixed_put_waits_once_before_the_first_missing_group(self):
+        store = MagicMock(spec=MemcacheBackend)
+        store.requires_exists_before_put = True
+        db = ChunkedTokenDatabase([KeyMetadata("m", 0, 0, 0, i) for i in range(2)], [16, 16], None)
+        db.set_group_buffers({0: [1000], 1: [2000]}, {0: [16], 1: [16]})
+        sender = KVCacheStoreSendingThread(store, db, 16, tp_rank=0, host_memory_group_ids=frozenset({1}))
+        order = []
+        event = MagicMock()
+        event.synchronize.side_effect = lambda: order.append("ready")
+
+        def put(keys, addrs, sizes, *, memory_location):
+            order.append(memory_location.value)
+            return [True]
+
+        store.put.side_effect = put
+        request = ReqMeta(
+            req_id="mixed",
+            token_len_chunk=16,
+            block_ids_by_group=[[1], [2]],
+            block_hashes=["h0"],
+            kv_cache_group_ids=[0, 1],
+            current_event=event,
+        )
+        for hits, expected in (([0, 0], ["ready", "device", "host"]), ([1, 0], ["ready", "host"]), ([1, 1], [])):
+            order.clear()
+            store.exists.side_effect = [[hit] for hit in hits]
+            assert sender._handle_stored_request(request)
+            assert order == expected
 
     def test_handle_request_applies_store_mask(self):
         class StoreMask(list):
@@ -1032,7 +1361,7 @@ class TestKVCacheStoreSendingThread(unittest.TestCase):
         req = ReqMeta(
             req_id="r1",
             token_len_chunk=128,
-            block_ids=[0, 1],
+            block_ids=[1, 2],
             block_hashes=[f"h{i}" for i in range(8)],
             load_spec=LoadSpec(
                 vllm_cached_tokens=0,
@@ -1046,7 +1375,7 @@ class TestKVCacheStoreSendingThread(unittest.TestCase):
         t._handle_request(req)
         keys, addrs, _ = store.put_calls[0]
         self.assertEqual(len(keys), 1)
-        self.assertEqual(addrs, [[1001]])
+        self.assertEqual(addrs, [[1002]])
 
     def test_save_exception_cleans_queue_lifecycle(self):
         t, store = self._make_thread([0])
@@ -1054,7 +1383,7 @@ class TestKVCacheStoreSendingThread(unittest.TestCase):
         req = ReqMeta(
             req_id="r1",
             token_len_chunk=16,
-            block_ids=[0],
+            block_ids=[1],
             block_hashes=[b"h0"],  # type: ignore[arg-type]
         )
         t.add_stored_request(req)
@@ -1064,54 +1393,353 @@ class TestKVCacheStoreSendingThread(unittest.TestCase):
         self.assertNotIn("r1", t.stored_requests)
 
 
-class TestKVCacheStoreKeyLayerSendingThread(unittest.TestCase):
-    def test_handle_request_puts_all_keys_without_exists_check(self):
-        store = FakeStore([1, 1])
-        store.requires_exists_before_put = False
-        sync_event = MagicMock()
-        thread = KVCacheStoreKeyLayerSendingThread(
-            m_store=store,
-            token_database=FakeTokenDatabase(),
-            block_size=16,
-            tp_rank=0,
-            tp_size=1,
-            dcp_size=1,
-            put_step=1,
-            ready_event=threading.Event(),
-            num_layers=1,
-            layer_save_finished_events=[threading.Event()],
-            sync_save_events=[sync_event],
-        )
-        request = ReqMeta(
-            req_id="r1",
-            token_len_chunk=32,
-            block_ids=[0, 1],
-            block_hashes=[b"h0", b"h1"],  # type: ignore[arg-type]
-            is_last_chunk=False,
-        )
-        metadata = KeyMetadata("m", 0, 0, 0)
-        task = LayerTransferTask(
-            layer_id=0,
-            block_ranges=[LayerBlockRange(request=request, start_block=0, end_block=2)],
-            cached_process_tokens={
-                0: [
-                    (0, 16, [LayerPoolKey(metadata, "h0", 0)]),
-                    (16, 32, [LayerPoolKey(metadata, "h1", 0)]),
-                ]
-            },
-        )
-        thread.request_queue.put([task])
-
-        with patch.object(store, "exists", side_effect=AssertionError("exists should not be called")) as mock_exists:
-            thread._handle_request([task])
-
-        keys, _, _ = store.put_calls[0]
-        self.assertEqual(len(keys), 2)
-        mock_exists.assert_not_called()
-        sync_event.synchronize.assert_called_once()
-
-
 class TestKVCacheStoreRecvingThread(unittest.TestCase):
+    def test_prepare_value_exception_drains_pending_receives_and_rejects_new_loads(self):
+        db = ChunkedTokenDatabase([KeyMetadata("m", 0, 0, 0, group) for group in (0, 1)], [16, 16], None)
+        db.set_group_buffers({0: [1000], 1: [2000]}, {0: [16], 1: [32]}, {0: [16], 1: [32]})
+        store = MagicMock(spec=MemcacheBackend)
+        thread = KVCacheStoreRecvingThread(store, db, 16, tp_rank=0, host_memory_group_ids=frozenset({0}))
+        entered = threading.Event()
+        release = threading.Event()
+
+        def fail_address_preparation(*args, **kwargs):
+            entered.set()
+            assert release.wait(5)
+            raise ValueError("invalid address metadata")
+
+        def make_request(req_id):
+            return ReqMeta(
+                req_id=req_id,
+                token_len_chunk=16,
+                block_ids_by_group=[[1], [2]],
+                kv_cache_group_ids=[0, 1],
+                block_hashes=[b"h0"],
+                load_spec=LoadSpec(0, 16, can_load=True, token_len=16),
+            )
+
+        request_ids = {"current", "queued-1", "queued-2"}
+        with patch.object(thread, "_prepare_value", side_effect=fail_address_preparation):
+            thread.start()
+            try:
+                thread.add_request(make_request("current"))
+                assert entered.wait(5)
+                thread.add_request(make_request("queued-1"))
+                thread.add_request(make_request("queued-2"))
+            finally:
+                release.set()
+                thread.join(timeout=5)
+                if thread.is_alive():
+                    thread.stop()
+                    thread.join(timeout=5)
+
+        assert not thread.is_alive()
+        assert isinstance(thread._fatal_error, ValueError)
+        assert thread.request_queue.empty()
+        assert thread.request_queue.unfinished_tasks == 0
+        store.get.assert_not_called()
+        assert thread.get_and_clear_receive_results(request_ids, set()) == (request_ids, request_ids)
+        assert thread.get_and_clear_receive_results(request_ids, set()) == (set(), set())
+        thread.add_request(make_request("after-fatal"))
+        assert thread.get_and_clear_receive_results({"after-fatal"}, set()) == ({"after-fatal"}, {"after-fatal"})
+        assert thread.get_and_clear_receive_results({"after-fatal"}, set()) == (set(), set())
+        assert thread.request_queue.unfinished_tasks == 0
+
+    def test_device_and_first_host_batch_success_second_fails_then_retry(self):
+        # Copy bytes through the real backend/receive path, controlling only SDK results.
+        host = ctypes.create_string_buffer(48)
+        device = ctypes.create_string_buffer(48)
+        backend = MemcacheBackend.__new__(MemcacheBackend)
+        backend.store = MagicMock()
+        backend._store_initialized = True
+        backend._lazy_init = False
+        db = ChunkedTokenDatabase([KeyMetadata("m", 0, 0, 0, group) for group in (0, 1)], [16, 16], None)
+        db.set_group_buffers(
+            {0: [ctypes.addressof(host)], 1: [ctypes.addressof(device)]}, {0: [16], 1: [16]}, {0: [16], 1: [16]}
+        )
+        thread = KVCacheStoreRecvingThread(backend, db, 16, tp_rank=0, host_memory_group_ids=frozenset({0}))
+        batches = []
+        expected = {0: b"a" * 16 + b"b" * 16, 1: b"c" * 16 + b"d" * 16}
+
+        def sdk_get(keys, addresses, sizes, direction):
+            batches.append((direction, len(keys)))
+            if len(batches) == 3:
+                return [-3106]
+            dst = host if direction == MmcDirect.COPY_G2H.value else device
+            data = expected[0 if dst is host else 1]
+            for (address,), (size,) in zip(addresses, sizes, strict=True):
+                offset = address - ctypes.addressof(dst) - 16
+                assert 0 <= offset <= 16
+                ctypes.memmove(address, data[offset : offset + size], size)
+            return [0] * len(keys)
+
+        backend.store.batch_get_into_layers.side_effect = sdk_get
+        with patch(
+            "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.memcache_backend."
+            "_HISPARSE_HOST_GET_MAX_BYTES",
+            16,
+        ):
+            for req_id in ("failed", "retry"):
+                request = ReqMeta(
+                    req_id=req_id,
+                    token_len_chunk=32,
+                    block_ids_by_group=[[1, 2], [1, 2]],
+                    kv_cache_group_ids=[0, 1],
+                    block_hashes=[b"h0", b"h1"],
+                    load_spec=LoadSpec(0, 32, can_load=True, token_len=32),
+                )
+                thread.add_request(request)
+                thread._handle_request(thread.request_queue.get_nowait())
+                failed = {req_id} if req_id == "failed" else set()
+                assert thread.get_and_clear_receive_results({req_id}, set()) == ({req_id}, failed)
+                assert thread.get_and_clear_receive_results({req_id}, set()) == (set(), set())
+                assert device.raw[16:] == expected[1]
+                if failed:
+                    assert host.raw[16:] == expected[0][:16] + bytes(16)
+                    ctypes.memset(ctypes.addressof(host), 255, len(host))
+                    ctypes.memset(ctypes.addressof(device), 255, len(device))
+                else:
+                    assert host.raw[16:] == expected[0]
+
+        assert (
+            batches == [(MmcDirect.COPY_G2L.value, 2), (MmcDirect.COPY_G2H.value, 1), (MmcDirect.COPY_G2H.value, 1)] * 2
+        )
+        assert thread.request_queue.unfinished_tasks == 0
+
+    def test_hybrid_receive_results_wait_for_all_ranks_and_report_once(self):
+        for rank_failures, abort in (
+            ((True, False), False),
+            ((True, True), False),
+            ((False, False), False),
+            ((True, False), True),
+            ((True, True), True),
+        ):
+            with self.subTest(rank_failures=rank_failures, abort=abort):
+                self._assert_hybrid_receive_results(rank_failures, abort)
+
+    def _assert_hybrid_receive_results(self, rank_failures: tuple[bool, bool], abort: bool):
+        # The full HiSparse backend API includes the failure/abort quorum used below.
+        pytest.importorskip("vllm.v1.hisparse.backend")
+        utils = pytest.importorskip("vllm.distributed.kv_transfer.kv_connector.utils")
+        outputs = pytest.importorskip("vllm.v1.outputs")
+        from vllm.distributed.kv_transfer.kv_connector.v1.hisparse.connector import (
+            HiSparseConnector,
+            HiSparseConnectorScheduler,
+        )
+        from vllm.distributed.kv_transfer.kv_connector.v1.multi_connector import MultiConnector
+        from vllm.sampling_params import SamplingParams
+        from vllm.v1.core.sched.scheduler import Scheduler
+        from vllm.v1.hisparse.coordinator import HiSparseCoordinator
+        from vllm.v1.request import Request, RequestStatus
+
+        from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler import KVPoolScheduler
+
+        aggregator = utils.KVOutputAggregator(expected_finished_count=2)
+        metadata = AscendConnectorMetadata(set(), loading_req_ids={"r1"})
+        coordinator = HiSparseCoordinator.__new__(HiSparseCoordinator)
+        coordinator._pending_imports = {"r1": 16}
+        hisparse = HiSparseConnector.__new__(HiSparseConnector)
+        hisparse.connector_scheduler = HiSparseConnectorScheduler.__new__(HiSparseConnectorScheduler)
+        hisparse.connector_scheduler.coordinator = coordinator
+        pool = KVPoolScheduler.__new__(KVPoolScheduler)
+        pool._async_loading_req_ids = {"r1"}
+        store_scheduler = AscendStoreConnector.__new__(AscendStoreConnector)
+        store_scheduler.connector_scheduler = pool
+        multi = MultiConnector.__new__(MultiConnector)
+        multi._connectors = [hisparse, store_scheduler]
+
+        request = Request("r1", [0] * 16, SamplingParams(), None)
+        request.status = RequestStatus.WAITING_FOR_REMOTE_KVS
+        pool.kv_cache_config = MagicMock(hisparse_host_num_blocks=16)
+        pool._unfinished_requests = {"r1": (request, [[2], [3]])}
+        pool._failed_external_load_req_ids = set()
+        scheduler = Scheduler.__new__(Scheduler)
+        scheduler.connector = multi
+        scheduler.requests = {"r1": request}
+        scheduler._aborted_kv_loads = set()
+        scheduler.deferred_loads = {}
+        scheduler.finished_recving_kv_req_ids = set()
+        scheduler.failed_recving_kv_req_ids = set()
+        scheduler._kv_fetch_stages = None
+        scheduler._pending_encoder_input_ids = {}
+        scheduler._inflight_prefills = set()
+        scheduler._parked_reserved_blocks = 0
+        scheduler._parked_reservations = {}
+        scheduler.deferred_waiting = set()
+        scheduler.finished_req_ids = set()
+        scheduler.finished_req_ids_dict = None
+        scheduler.aux_output_connector = None
+        scheduler.ec_connector = None
+        scheduler.defer_block_free = False
+        scheduler.waiting = MagicMock()
+        scheduler.kv_holding_waiting = MagicMock()
+        scheduler.async_kv_waiting = MagicMock()
+        scheduler.encoder_cache_manager = MagicMock()
+        cache_manager = MagicMock()
+        scheduler.kv_cache_manager = cache_manager
+
+        def make_receiver(rank: int, result: list[int]):
+            db = ChunkedTokenDatabase([KeyMetadata("m", rank, 0, 0, group) for group in (0, 1)], [16, 16], None)
+            db.set_group_buffers({0: [1000], 1: [2000]}, {0: [16], 1: [32]}, {0: [16], 1: [32]})
+            store = MagicMock(spec=MemcacheBackend)
+
+            def get(keys, addrs, sizes, *, memory_location):
+                return [result[0] if memory_location is MemoryLocation.HOST else result[1]] * len(keys)
+
+            store.get.side_effect = get
+            thread = KVCacheStoreRecvingThread(store, db, 16, rank, tp_size=2, host_memory_group_ids=frozenset({0}))
+
+            worker = KVPoolWorker.__new__(KVPoolWorker)
+            worker.kv_recv_thread = thread
+            worker.kv_send_thread = None
+            worker.load_async = True
+            worker.use_layerwise = False
+            worker.tp_rank = rank
+            worker._invalid_block_ids_lock = threading.Lock()
+            worker._failed_requests = set()
+
+            connector = AscendStoreConnector.__new__(AscendStoreConnector)
+            connector.connector_worker = worker
+            connector.use_layerwise = False
+            connector._current_step_has_real_forward = False
+            connector._connector_metadata = metadata
+            request = ReqMeta(
+                req_id="r1",
+                token_len_chunk=16,
+                block_ids_by_group=[[2], [3]],
+                kv_cache_group_ids=[0, 1],
+                block_hashes=[b"h0"],
+                load_spec=LoadSpec(0, 16, can_load=True, token_len=16),
+            )
+            thread.request_queue.put(request)
+            return connector, thread, request, store
+
+        def poll(ranks):
+            worker_outputs = []
+            for connector in ranks:
+                result = connector.get_transfer_results(set())
+                worker_outputs.append(
+                    SimpleNamespace(
+                        kv_connector_output=outputs.KVConnectorOutput(
+                            finished_recving=result.finished_recving, failed_recving=result.failed_recving
+                        )
+                    )
+                )
+            return aggregator.aggregate(worker_outputs).kv_connector_output
+
+        first_result = [-3106, 0] if rank_failures[0] else [0, 0]
+        second_result = [0, -3106] if rank_failures[1] else [0, 0]
+        first, first_recv, first_request, first_store = make_receiver(0, first_result)
+        second, delayed_recv, delayed_request, delayed_store = make_receiver(1, second_result)
+        ranks = (first, second)
+        original_poll = first.get_finished
+
+        def finish_during_poll(finished_req_ids):
+            result = original_poll(finished_req_ids)
+            first_recv._handle_request(first_request)
+            # Polling failures alone before the atomic drain must not take
+            # ownership of the completed receive's failure notification.
+            assert first.connector_worker.get_failed_requests() == set()
+            return result
+
+        with patch.object(first, "get_finished", side_effect=finish_during_poll):
+            result = poll(ranks)
+            assert result.finished_recving is None
+            assert not result.failed_recving
+        assert poll(ranks).finished_recving is None
+        assert poll(ranks).finished_recving is None
+        delayed_store.get.assert_not_called()
+        assert coordinator._pending_imports == {"r1": 16}
+        if abort:
+            with patch.object(scheduler, "_connector_finished", return_value=(False, None)):
+                scheduler.finish_requests("r1", RequestStatus.FINISHED_ABORTED)
+            assert scheduler._aborted_kv_loads == {"r1"}
+            cache_manager.free.assert_not_called()
+            assert pool._async_loading_req_ids == {"r1"}
+
+        delayed_recv._handle_request(delayed_request)
+        result = poll(ranks)
+        assert result.finished_recving == {"r1"}
+        assert result.failed_recving == ({"r1"} if any(rank_failures) else set())
+        with patch.object(coordinator, "complete_host_import") as publish:
+            scheduler._update_from_kv_xfer_finished(result)
+        if any(rank_failures):
+            publish.assert_not_called()
+        else:
+            publish.assert_called_once_with("r1", 16)
+        assert not pool._async_loading_req_ids
+        assert pool._failed_external_load_req_ids == ({"r1"} if any(rank_failures) and not abort else set())
+        assert not coordinator._pending_imports
+        if abort:
+            assert not scheduler._aborted_kv_loads
+            assert not scheduler.requests
+            cache_manager.free.assert_called_once_with(request)
+        result = poll(ranks)
+        assert result.finished_recving is None
+        assert not result.failed_recving
+        for store in (first_store, delayed_store):
+            assert [call.kwargs["memory_location"] for call in store.get.call_args_list] == [
+                MemoryLocation.DEVICE,
+                MemoryLocation.HOST,
+            ]
+        device_call, host_call = delayed_store.get.call_args_list
+        assert "@group:1" in device_call.args[0][0]
+        assert device_call.args[1:] == ([[2096]], [[32]])
+        assert host_call.args[1:] == ([[1032]], [[16]])
+
+    def test_receive_drain_discards_preempted_results_and_retains_unpolled_results(self):
+        thread = KVCacheStoreRecvingThread(FakeStore(), FakeTokenDatabase(), 16, tp_rank=0)
+        failed = [
+            ReqMeta(req_id=req_id, block_ids_by_group=[[2], [3]]) for req_id in ("preempted", "failed", "waiting")
+        ]
+        thread._finish_failed_receives(failed)
+        thread.set_finished_request("ready")
+
+        assert thread.get_and_clear_receive_results({"preempted", "failed", "ready"}, {"preempted"}) == (
+            {"failed", "ready"},
+            {"failed"},
+        )
+        assert thread.get_and_clear_receive_results({"preempted", "failed", "ready"}, set()) == (set(), set())
+        assert thread.get_and_clear_receive_results({"waiting"}, set()) == ({"waiting"}, {"waiting"})
+
+    def test_hybrid_get_failure_is_independent_of_partial_hit_capability(self):
+        for partial_hits in (False, True):
+            for result in (None, [], [0, 0], [-1]):
+                with (
+                    self.subTest(partial_hits=partial_hits, result=result),
+                    patch.object(FakeStore, "get", return_value=result),
+                ):
+                    store = FakeStore()
+                    db = MaskedFakeTokenDatabase(masks=([True], [True]))
+                    db.cache_coordinator = MagicMock(enable_partial_hash_hits=partial_hits)
+                    db.process_token_key_strings_with_block_ids = MagicMock(
+                        return_value=iter([(0, 16, "key", b"hash", 1)])
+                    )
+                    thread = KVCacheStoreRecvingThread(
+                        m_store=store,
+                        token_database=db,
+                        block_size=16,
+                        tp_rank=0,
+                        dcp_size=1,
+                        ready_event=threading.Event(),
+                        invalid_block_ids=set(),
+                        invalid_block_ids_lock=threading.Lock(),
+                    )
+                    request = ReqMeta(
+                        "hybrid",
+                        block_ids_by_group=[[1], [2]],
+                        kv_cache_group_ids=[0],
+                        block_hashes=[b"hash"],
+                        can_save=True,
+                        load_spec=LoadSpec(0, 16, can_load=True, token_len=16),
+                    )
+                    thread.request_queue.put(request)
+                    thread._handle_request(request)
+                    self.assertEqual(thread.get_and_clear_failed_requests(), {"hybrid"})
+                    self.assertEqual(thread._invalid_block_ids, set())
+                    self.assertFalse(request.can_save)
+                    self.assertEqual(thread.get_and_clear_finished_requests(), {"hybrid"})
+                    self.assertEqual(thread.request_queue.unfinished_tasks, 0)
+
     def test_handle_request(self):
         store = FakeStore()
         db = FakeTokenDatabase()
@@ -1139,6 +1767,24 @@ class TestKVCacheStoreRecvingThread(unittest.TestCase):
         finished = t.get_and_clear_finished_requests()
         self.assertIn("r1", finished)
 
+    def test_async_get_uses_only_locally_projected_groups(self):
+        store = FakeStore()
+        thread = KVCacheStoreRecvingThread(
+            m_store=store,
+            token_database=make_projected_database(),
+            block_size=[16, 16],
+            tp_rank=0,
+            dcp_size=1,
+            ready_event=threading.Event(),
+        )
+        request = make_projected_request(0, for_load=True)
+        thread.request_queue.put(request)
+
+        thread._handle_request(request)
+
+        keys, addrs, sizes = store.get_calls[0]
+        self.assertEqual((len(keys), addrs, sizes), (1, [[1000]], [[16]]))
+
     def test_handle_request_applies_load_mask(self):
         store = FakeStore()
         db = MaskedFakeTokenDatabase(masks=([True, False],))
@@ -1165,6 +1811,24 @@ class TestKVCacheStoreRecvingThread(unittest.TestCase):
         keys, _, _ = store.get_calls[0]
         self.assertEqual(len(keys), 1)
         self.assertEqual(t._invalid_block_ids, set())
+
+    def test_rank_rotation_keeps_partial_get_failure_with_its_block(self):
+        store = FakeStore()
+        db = FakeTokenDatabase()
+        thread = KVCacheStoreRecvingThread(store, db, 16, tp_rank=1)
+        request = ReqMeta(
+            req_id="rank1",
+            token_len_chunk=48,
+            block_ids=[4, 8, 12],
+            block_hashes=[b"h0", b"h1", b"h2"],
+            load_spec=LoadSpec(0, 48, can_load=True, token_len=48),
+        )
+        with patch.object(store, "get", return_value=[-1, 0, 0]) as get:
+            thread.add_request(request)
+            thread._handle_request(thread.request_queue.get_nowait())
+        _, addrs, _ = get.call_args.args
+        assert addrs == [[1008], [1012], [1004]]
+        assert thread._invalid_block_ids == {8}
 
 
 class TestLayerBatchBuilder(unittest.TestCase):
@@ -1304,11 +1968,11 @@ class TestKVTransferTpMismatchDispatch(unittest.TestCase):
                             ReqMeta(
                                 req_id="r1",
                                 token_len_chunk=16,
-                                block_ids=[0],
+                                block_ids=[1],
                                 block_hashes=[b"h0"],
-                                event_id=chunk,
+                                event_id=uuid4().int,
                             )
-                            for chunk in range(2)
+                            for _ in range(2)
                         ]
                         for req in requests:
                             thread.add_stored_request(req)
@@ -1316,7 +1980,8 @@ class TestKVTransferTpMismatchDispatch(unittest.TestCase):
                             thread.request_queue.put(req)
                             thread._handle_request(req)
                             self.assertEqual(thread.request_queue.unfinished_tasks, 0)
-                            self.assertEqual(thread.completed_events[chunk], 1)
+                            assert req.event_id is not None
+                            self.assertEqual(thread.completed_events[req.event_id], 1)
                             self.assertEqual("r1" in thread.stored_requests, chunk == 0)
                             self.assertEqual("r1" in thread.finished_requests, chunk == 1)
                         # Identical successful saves reuse the durable offset;
@@ -1377,3 +2042,54 @@ class TestKVTransferTpMismatchDispatch(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def test_bulk_get_rotates_within_memory_kinds_and_restores_original_order():
+    store = MagicMock(spec=MemcacheBackend)
+    seen = []
+
+    def get(keys, addrs, sizes, *, memory_location):
+        seen.append((keys, memory_location))
+        return [int(key[-1]) for key in keys]
+
+    store.get.side_effect = get
+    keys = ["host0", "device1", "host2", "device3", "host4"]
+    assert get_bulk_by_memory_location(
+        store,
+        keys,
+        [[i] for i in range(5)],
+        [[8]] * 5,
+        memory_locations=[
+            MemoryLocation.HOST,
+            MemoryLocation.DEVICE,
+            MemoryLocation.HOST,
+            MemoryLocation.DEVICE,
+            MemoryLocation.HOST,
+        ],
+        tp_rank=1,
+    ) == list(range(5))
+    assert seen == [(["device3", "device1"], MemoryLocation.DEVICE), (["host2", "host4", "host0"], MemoryLocation.HOST)]
+
+
+@pytest.mark.parametrize("result", [[], [0, 0], None])
+def test_bulk_get_rejects_missing_or_misaligned_statuses(result):
+    from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.base import BatchResultShapeError
+
+    store = MagicMock(spec=MemcacheBackend)
+    store.get.return_value = result
+    if result is None:
+        assert (
+            get_bulk_by_memory_location(store, ["key"], [[100]], [[8]], memory_locations=[MemoryLocation.HOST]) is None
+        )
+    else:
+        with pytest.raises(BatchResultShapeError, match="results for 1"):
+            get_bulk_by_memory_location(store, ["key"], [[100]], [[8]], memory_locations=[MemoryLocation.HOST])
+
+
+def test_bulk_get_validates_every_location_before_issuing_reads():
+    store = MagicMock(spec=MemcacheBackend)
+    with pytest.raises(ValueError, match="bulk GET memory location"):
+        get_bulk_by_memory_location(
+            store, ["valid", "invalid"], [[100], [200]], [[8], [8]], memory_locations=[MemoryLocation.DEVICE, "host"]
+        )
+    store.get.assert_not_called()

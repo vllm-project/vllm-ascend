@@ -86,6 +86,7 @@ def write_report_json(
     bad: Candidate,
     first_bad: Candidate | None,
     trials: list[TrialResult],
+    mock_tests: bool = False,
 ) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -95,6 +96,7 @@ def write_report_json(
         return c
 
     payload = {
+        "mode": "mock-tests" if mock_tests else "real",
         "case_key": inp.case_key,
         "scene": inp.scene,
         "config_yaml": inp.config_yaml,

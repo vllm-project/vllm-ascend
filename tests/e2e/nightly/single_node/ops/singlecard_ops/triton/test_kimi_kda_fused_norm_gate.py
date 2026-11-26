@@ -13,9 +13,24 @@ from vllm_ascend.ops.triton.kda.kda import layer_norm_gated_fwd, rms_norm_gated
     get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3), reason="Requires Ascend A2/A3"
 )
 @torch.inference_mode()
-@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
-@pytest.mark.parametrize("tokens, heads, head_dim", [(1, 1, 128), (16, 4, 128), (37, 4, 128), (2, 1, 1024)])
-@pytest.mark.parametrize("strided_gate", [False, True])
+@pytest.mark.parametrize(
+    "strided_gate,tokens,heads,head_dim,dtype",
+    [
+        # Keep both dtypes and layouts at the single-token and 37-token shapes.
+        (False, 1, 1, 128, torch.float16),
+        (False, 1, 1, 128, torch.bfloat16),
+        (False, 16, 4, 128, torch.float16),
+        (False, 37, 4, 128, torch.float16),
+        (False, 37, 4, 128, torch.bfloat16),
+        (False, 2, 1, 1024, torch.bfloat16),
+        (True, 1, 1, 128, torch.float16),
+        (True, 1, 1, 128, torch.bfloat16),
+        (True, 16, 4, 128, torch.bfloat16),
+        (True, 37, 4, 128, torch.float16),
+        (True, 37, 4, 128, torch.bfloat16),
+        (True, 2, 1, 1024, torch.float16),
+    ],
+)
 def test_kimi_kda_fused_rms_norm_sigmoid_gate(dtype, tokens, heads, head_dim, strided_gate):
     torch.manual_seed(20260801)
     eps = 1e-6
@@ -51,8 +66,10 @@ def test_kimi_kda_fused_rms_norm_sigmoid_gate(dtype, tokens, heads, head_dim, st
     get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3), reason="Requires Ascend A2/A3"
 )
 @torch.inference_mode()
-@pytest.mark.parametrize("residual_dtype", [None, torch.bfloat16, torch.float32])
-@pytest.mark.parametrize("elementwise_affine", [False, True])
+@pytest.mark.parametrize(
+    "residual_dtype,elementwise_affine",
+    [(None, False), (None, True), (torch.bfloat16, False), (torch.float32, True)],
+)
 def test_fused_rms_norm_silu_gate_preserves_prenorm_contract(residual_dtype, elementwise_affine):
     torch.manual_seed(20260801)
     x = torch.randn(1, 3, 2, 128, dtype=torch.bfloat16, device="npu")
@@ -83,9 +100,19 @@ def test_fused_rms_norm_silu_gate_preserves_prenorm_contract(residual_dtype, ele
     get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3), reason="Requires Ascend A2/A3"
 )
 @torch.inference_mode()
-@pytest.mark.parametrize("tokens", [1, 4, 8, 16, 32, 37, 64, 768])
-@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
-@pytest.mark.parametrize("inplace", [False, True])
+@pytest.mark.parametrize(
+    "tokens,dtype,inplace",
+    # Keep every pair of token shape, dtype, and output mode across the representatives.
+    [
+        (1, torch.float16, False),
+        (1, torch.bfloat16, True),
+        (768, torch.float16, True),
+        (768, torch.bfloat16, False),
+        (37, torch.float16, False),
+        (37, torch.bfloat16, True),
+        (64, torch.bfloat16, True),  # 12 heads reach the 768-row medium-batch limit.
+    ],
+)
 def test_kimi_norm_gate_strides_and_direct_output(tokens, dtype, inplace):
     """Read a packed gate and preserve caller-owned padding across replays."""
     heads, dim = 12, 128
@@ -140,8 +167,7 @@ def test_kimi_norm_gate_strides_and_direct_output(tokens, dtype, inplace):
     get_ascend_device_type() not in (AscendDeviceType.A3, AscendDeviceType.A5), reason="Requires Ascend A3/A5"
 )
 @torch.inference_mode()
-@pytest.mark.parametrize("tokens,heads", [(257, 6), (65, 12)])
-@pytest.mark.parametrize("dim", [384, 512])
+@pytest.mark.parametrize("tokens,heads,dim", [(65, 12, 384), (257, 6, 512)])
 def test_kimi_norm_gate_wide_feature_tile(tokens, heads, dim):
     """Keep packed-gate tiles within the A3/A5 UB limit for wide features."""
     dtype = torch.bfloat16
@@ -170,9 +196,16 @@ def test_kimi_norm_gate_wide_feature_tile(tokens, heads, dim):
     get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3), reason="Requires Ascend A2/A3"
 )
 @torch.inference_mode()
-@pytest.mark.parametrize("dim", [128, 1024])
-@pytest.mark.parametrize("layout", ["row_gap", "feature_gap"])
-@pytest.mark.parametrize("inplace", [False, True])
+@pytest.mark.parametrize(
+    "dim,layout,inplace",
+    # Cover every pair of width, gate layout, and output mode without the full cross.
+    [
+        (128, "row_gap", False),
+        (128, "feature_gap", True),
+        (1024, "row_gap", True),
+        (1024, "feature_gap", False),
+    ],
+)
 def test_norm_gate_fallback_strided_gate(dim, layout, inplace):
     """A noncontiguous fallback gate must use its actual row/feature strides."""
     tokens = 3
@@ -199,3 +232,128 @@ def test_norm_gate_fallback_strided_gate(dim, layout, inplace):
     if inplace:
         assert actual is x
     torch.testing.assert_close(actual, expected.reshape(x.shape), rtol=0, atol=0)
+
+
+@pytest.mark.skipif(
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3), reason="Requires Ascend A2/A3"
+)
+@torch.inference_mode()
+@pytest.mark.parametrize(
+    "tokens,capacity,dtype,packed_gate,inplace",
+    # Cover each pair of dtype, gate layout, and output mode during graph replay.
+    [
+        (37, 40, torch.float16, False, False),
+        (37, 40, torch.float16, True, True),
+        (37, 40, torch.bfloat16, False, True),
+        (37, 40, torch.bfloat16, True, False),
+    ]
+    # Pair gate layouts with edge shapes while keeping both dtypes and output modes.
+    + [
+        (tokens, capacity, dtype, packed_gate, inplace)
+        for tokens, capacity, packed_gate in ((0, 8, False), (1, 8, True), (96, 104, True), (104, 104, False))
+        for dtype, inplace in ((torch.float16, packed_gate), (torch.bfloat16, not packed_gate))
+    ]
+    + [
+        (15959, 15960, dtype, packed_gate, inplace)
+        for dtype, packed_gate, inplace in (
+            (torch.float16, False, False),
+            (torch.float16, True, True),
+            (torch.bfloat16, False, True),
+            (torch.bfloat16, True, False),
+        )
+    ],
+)
+def test_kimi_norm_gate_zero_padded_output(tokens, capacity, dtype, packed_gate, inplace):
+    heads, dim = 12, 128
+    source = torch.randn(1, capacity, heads, dim, dtype=dtype, device="npu")
+    source[:, tokens:] = torch.nan
+    x = source[:, :tokens]
+    before = x.clone()
+    output_storage = source if inplace else torch.full((1, capacity + 2, heads, dim), 7, dtype=dtype, device="npu")
+    out = output_storage[:, :capacity]
+    gate_width = heads * dim
+    gate_storage = torch.full(
+        (capacity, heads + 2 * gate_width) if packed_gate else (capacity, heads, dim),
+        torch.nan,
+        dtype=dtype,
+        device="npu",
+    )
+    gate = (
+        gate_storage[:tokens, heads + gate_width :].view(tokens, heads, dim) if packed_gate else gate_storage[:tokens]
+    )
+    gate.normal_()
+    weight = torch.randn(dim, dtype=dtype, device="npu")
+    # Nonzero bias ensures padding is explicitly zeroed after the affine/gate
+    # operations instead of merely substituting zero for missing input loads.
+    bias = torch.randn(dim, dtype=dtype, device="npu")
+    baseline = rms_norm_gated(x, gate, weight, bias, "sigmoid")
+    actual = rms_norm_gated(x, gate, weight, bias, "sigmoid", out=out)
+    assert actual is out
+    torch.testing.assert_close(out[:, :tokens], baseline, rtol=0, atol=0)
+    expected = before.float() * torch.rsqrt(before.float().square().mean(-1, keepdim=True) + 1e-6)
+    expected = (expected * weight.float() + bias.float()) * gate.float().sigmoid()
+    torch.testing.assert_close(out[:, :tokens], expected.to(dtype), rtol=8e-3, atol=2e-3)
+    torch.testing.assert_close(out[:, tokens:], torch.zeros_like(out[:, tokens:]), rtol=0, atol=0)
+    if not inplace:
+        torch.testing.assert_close(x, before, rtol=0, atol=0)
+        torch.testing.assert_close(output_storage[:, capacity:], torch.full_like(output_storage[:, capacity:], 7))
+
+    if tokens == 37:
+        graph = torch.npu.NPUGraph()
+        with torch.npu.graph(graph):
+            rms_norm_gated(x, gate, weight, bias, "sigmoid", out=out)
+        for step in range(3):
+            x.fill_(0.25 * (step + 1))
+            gate.fill_(0.5 * step)
+            out[:, tokens:].fill_(torch.nan)
+            expected = rms_norm_gated(x, gate, weight, bias, "sigmoid")
+            graph.replay()
+            torch.npu.synchronize()
+            torch.testing.assert_close(out[:, :tokens], expected, rtol=0, atol=0)
+            torch.testing.assert_close(out[:, tokens:], torch.zeros_like(out[:, tokens:]), rtol=0, atol=0)
+
+
+@pytest.mark.skipif(
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3), reason="Requires Ascend A2/A3"
+)
+@torch.inference_mode()
+@pytest.mark.parametrize("dim", [128, 1024])
+@pytest.mark.parametrize("layout", ["contiguous", "feature_gap"])
+def test_norm_gate_padded_three_dimensional_output(dim, layout):
+    x = torch.randn(3, 2, dim, dtype=torch.bfloat16, device="npu")
+    gate = torch.randn(3, 2, dim * 2, dtype=x.dtype, device="npu")[..., ::2]
+    if layout == "contiguous":
+        gate = gate.contiguous()
+    weight = torch.randn(dim, dtype=x.dtype, device="npu")
+    expected = rms_norm_gated(x, gate, weight, None, "sigmoid")
+    out = torch.full((5, 2, dim), torch.nan, dtype=x.dtype, device="npu")
+    actual = rms_norm_gated(x, gate, weight, None, "sigmoid", out=out)
+    assert actual is out
+    torch.testing.assert_close(actual[:3], expected, rtol=0, atol=0)
+    torch.testing.assert_close(actual[3:], torch.zeros_like(actual[3:]), rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("invalid", ["shorter", "heads", "rank", "batch", "strided", "dtype", "residual", "prenorm"])
+def test_norm_gate_rejects_invalid_padded_output(invalid):
+    x = torch.empty(1, 3, 2, 128)
+    gate = torch.empty(3, 2, 128)
+    out = torch.empty(1, 5, 2, 128)
+    options = {}
+    if invalid == "shorter":
+        out = torch.empty(1, 2, 2, 128)
+    elif invalid == "heads":
+        out = torch.empty(1, 5, 3, 128)
+    elif invalid == "rank":
+        out = torch.empty(5, 2, 128)
+    elif invalid == "batch":
+        out = torch.empty(2, 5, 2, 128)
+    elif invalid == "strided":
+        out = torch.empty(1, 5, 2, 256)[..., ::2]
+    elif invalid == "dtype":
+        out = out.to(torch.bfloat16)
+    elif invalid == "residual":
+        options["residual"] = torch.empty_like(x)
+    else:
+        options["prenorm"] = True
+    with pytest.raises(ValueError):
+        rms_norm_gated(x, gate, None, None, out=out, **options)

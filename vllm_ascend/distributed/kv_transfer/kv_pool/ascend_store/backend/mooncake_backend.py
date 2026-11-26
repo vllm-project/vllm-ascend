@@ -27,6 +27,12 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.base impor
     set_scheduler_device,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.layerwise_keys import LayerwiseKeyBuilder
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.buffer import (
+    BufferDescriptor,
+    MemoryLocation,
+    buffer_arrays,
+)
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import get_sharded_mamba_group_ids
 from vllm_ascend.distributed.kv_transfer.utils.mooncake_transfer_engine import global_te
 from vllm_ascend.distributed.parallel_state import get_global_rank
 
@@ -319,24 +325,45 @@ class MooncakeBackend(Backend):
         grouped_block_size: list[int],
     ) -> LayerwiseKeyBuilder:
         parallel = vllm_config.parallel_config
+        cache_config = getattr(vllm_config, "cache_config", None)
 
         def parallel_size(name: str) -> int:
             value = getattr(parallel, name, 1)
             return value if isinstance(value, int) and not isinstance(value, bool) else 1
 
-        dimensions = (("decode_context_parallel_size", parallel_size("decode_context_parallel_size")),)
-        unsupported = [f"{name}={size}" for name, size in dimensions if size > 1]
-        if unsupported:
+        pcp_size = parallel_size("prefill_context_parallel_size")
+        dcp_size = parallel_size("decode_context_parallel_size")
+        if pcp_size > 1 and dcp_size > 1:
             raise ValueError(
-                "Mooncake block-key layerwise supports TP/PP/PCP, but not decode context parallelism; unsupported "
-                + ", ".join(unsupported)
+                "Mooncake block-key layerwise supports PCP or DCP, not both; unsupported "
+                f"prefill_context_parallel_size={pcp_size}, decode_context_parallel_size={dcp_size}"
             )
+        if (pcp_size > 1 or dcp_size > 1) and (getattr(vllm_config, "additional_config", None) or {}).get(
+            "enable_kvpp", False
+        ):
+            raise ValueError("Mooncake layerwise context parallelism does not support enable_kvpp layer-sharded caches")
+        if dcp_size > 1:
+            mooncake_layerwise.validate_dcp_groups(kv_cache_config)
+            model_config = getattr(vllm_config, "model_config", None)
+            num_kv_heads = (
+                1
+                if getattr(model_config, "use_mla", False)
+                else int(getattr(model_config, "get_total_num_kv_heads", lambda: 1)())
+            )
+            tp_size = parallel.tensor_parallel_size
+            put_step = tp_size // num_kv_heads if num_kv_heads < tp_size else 1
+            if put_step < dcp_size:
+                raise ValueError(
+                    "Mooncake layerwise DCP requires put_step >= decode_context_parallel_size; got "
+                    f"put_step={put_step}, num_kv_heads={num_kv_heads}, "
+                    f"tensor_parallel_size={tp_size}, decode_context_parallel_size={dcp_size}."
+                )
+            if getattr(cache_config, "prefix_match_unit", None) is not None:
+                raise ValueError("Mooncake layerwise DCP does not support prefix_match_unit.")
         mooncake_layerwise.validate_pp_groups(kv_cache_config, parallel)
         namespace = mooncake_layerwise.layerwise_topology_namespace(vllm_config, kv_cache_config)
         pp_size = parallel.pipeline_parallel_size
-        pcp_size = parallel_size("prefill_context_parallel_size")
-        if pcp_size > 1 and (getattr(vllm_config, "additional_config", None) or {}).get("enable_kvpp", False):
-            raise ValueError("Mooncake layerwise PCP does not support enable_kvpp layer-sharded caches")
+        pcp_sharded_group_ids = get_sharded_mamba_group_ids(kv_cache_config)
         if pp_size > 1:
             logger.info(
                 "Mooncake PP namespace=%s rank=%d pp_size=%d config_block_size=%s group_block_sizes=%s",
@@ -365,12 +392,12 @@ class MooncakeBackend(Backend):
                     pp_rank=stage if pp_size > 1 else None,
                 )
 
-            return LayerwiseKeyBuilder(make_key, pp_size, pcp_size)
+            return LayerwiseKeyBuilder(make_key, pp_size, pcp_size, pcp_sharded_group_ids, dcp_size)
 
         def make_single_group_key(group: int, block_hash: str, head: int, stage: int) -> str:
             return mooncake_layerwise.make_block_key(model_name, block_hash, head, namespace=namespace, pp_rank=stage)
 
-        return LayerwiseKeyBuilder(make_single_group_key, pp_size, pcp_size)
+        return LayerwiseKeyBuilder(make_single_group_key, pp_size, pcp_size, pcp_sharded_group_ids, dcp_size)
 
     @classmethod
     def send_fence_backlog(cls) -> int:
@@ -465,6 +492,13 @@ class MooncakeBackend(Backend):
                 self.config.metadata_server,
             )
             raise RuntimeError(msg)
+        if self._use_store_independent_te and self._contribute_memory and self.config.preferred_segment:
+            get_hostname = getattr(store, "get_hostname", None)
+            if get_hostname is not None:
+                configured_segment = get_hostname()
+                if configured_segment:
+                    self.local_seg = configured_segment
+                    logger.info("Mooncake preferred segment for store worker: %s", self.local_seg)
         if ssd_kwargs:
             logger.info(
                 "Mooncake SSD offload enabled (Mode A): path=%s",
@@ -559,22 +593,34 @@ class MooncakeBackend(Backend):
     def set_device(self):
         torch.npu.set_device(self.device_id)
 
-    def register_buffer(self, ptrs: list[int], lengths: list[int]):
+    @classmethod
+    def validate_hisparse_colocated_config(cls) -> None:
+        # Closing the client after the SDK reports a timeout cannot protect a
+        # pool allocation that the master has already made available for reuse.
+        raise ValueError(
+            "HiSparse with Mooncake is disabled because a timed-out PUT can overwrite another pool object "
+            "(kvcache-ai/Mooncake#4491). Set backend=memcache and configure the host_tcp protocol."
+        )
+
+    def register_buffer(self, buffers: list[BufferDescriptor]) -> None:
+        if any(buffer.memory_location is MemoryLocation.HOST for buffer in buffers):
+            raise ValueError("Mooncake does not support Host pool buffers")
+        ptrs, sizes = buffer_arrays(buffers)
         if self._use_store_independent_te or self._prefetch_conf.use_dict_setup:
             assert self.store is not None
-            for ptr, length in zip(ptrs, lengths):
-                ret = self.store.register_buffer(ptr, length)
+            for ptr, size in zip(ptrs, sizes):
+                ret = self.store.register_buffer(ptr, size)
                 if ret != 0:
                     logger.error(
                         "Failed to register buffer via store: ptr=%s, length=%s, ret=%s",
                         ptr,
-                        length,
+                        size,
                         ret,
                     )
         elif not self._use_fabric_mem:
             local_hostname = get_ip()
             global_te.get_transfer_engine(local_hostname, device_name=None)
-            global_te.register_buffer(ptrs, lengths)
+            global_te.register_buffer(ptrs, sizes)
 
     def exists(self, keys: list[str]) -> list[int]:
         if self._lazy_init and not self._store_initialized:
@@ -690,7 +736,16 @@ class MooncakeBackend(Backend):
             raise RuntimeError("Mooncake client does not support batch_get_session_end")
         return int(method(keys))
 
-    def put(self, keys: list[str], addrs: list[list[int]], sizes: list[list[int]]) -> list[bool] | bool:
+    def put(
+        self,
+        keys: list[str],
+        addrs: list[list[int]],
+        sizes: list[list[int]],
+        *,
+        memory_location: MemoryLocation | None = None,
+    ) -> list[bool] | bool:
+        if memory_location is MemoryLocation.HOST:
+            raise ValueError("Mooncake does not support Host pool transfers")
         self.ensure_initialized()
         assert self.store is not None
         try:
@@ -724,7 +779,16 @@ class MooncakeBackend(Backend):
                 logger.warning("First DSV4(compress) request failure is expected. This is normal behavior.")
             return False
 
-    def get(self, keys: list[str], addrs: list[list[int]], sizes: list[list[int]]):
+    def get(
+        self,
+        keys: list[str],
+        addrs: list[list[int]],
+        sizes: list[list[int]],
+        *,
+        memory_location: MemoryLocation | None = None,
+    ):
+        if memory_location is MemoryLocation.HOST:
+            raise ValueError("Mooncake does not support Host pool transfers")
         if self._lazy_init and not self._store_initialized:
             logger.error(
                 "Failed to get %d keys out of %d. Store is not initialized; "

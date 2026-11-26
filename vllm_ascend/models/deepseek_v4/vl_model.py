@@ -19,9 +19,7 @@ from vllm.model_executor.models.interfaces import (
     SupportsPP,
 )
 from vllm.model_executor.models.utils import maybe_prefix
-from vllm.multimodal import MULTIMODAL_REGISTRY
-
-from vllm_ascend.models.deepseek_v4.mm_preprocess import (
+from vllm.models.deepseek_v4.common.mm_preprocess import (
     IMAGE_PLACEHOLDER,
     IMAGE_SENTINEL_BASE_ID,
     DeepseekV4VLDummyInputsBuilder,
@@ -29,6 +27,8 @@ from vllm_ascend.models.deepseek_v4.mm_preprocess import (
     DeepseekV4VLProcessingInfo,
     image_sentinel_mask,
 )
+from vllm.multimodal import MULTIMODAL_REGISTRY
+
 from vllm_ascend.models.deepseek_v4.model import AscendDeepseekV4ForCausalLM
 from vllm_ascend.models.deepseek_v4.vision import (
     DeepseekV4Aligner,
@@ -86,10 +86,6 @@ class AscendDeepseekV4ForConditionalGeneration(
             self.image_end: nn.Parameter | None = None
             self.image_newline: nn.Parameter | None = None
             self.image_pad: nn.Parameter | None = None
-            # Cache for the stacked sentinel table in the embedding dtype;
-            # rebuilt lazily on first use (the raw params are float32 while
-            # the embedding output is model dtype).
-            self._sentinel_table: torch.Tensor | None = None
             if image_enabled:
                 self.vision = DeepseekV4ViT(config)
                 self.aligner = DeepseekV4Aligner(config)
@@ -162,34 +158,13 @@ class AscendDeepseekV4ForConditionalGeneration(
         return tuple(embeds)
 
     def _get_sentinel_table(self, dtype: torch.dtype, device: torch.device) -> torch.Tensor:
-        """Stacked sentinel vectors in ``dtype``, cached across steps.
-
-        The raw ``image_*`` parameters are float32, so stacking + casting per
-        forward would repeat an avoidable copy in this hot path. The cache is
-        keyed on dtype and device: it is rebuilt if the model is moved (e.g.
-        pipeline-parallel sharding or device placement) after the first
-        forward pass, since a plain attribute does not follow
-        ``nn.Module.to(device)``.
-        """
-        table = self._sentinel_table
-        if table is None or table.dtype != dtype or table.device != device:
-            # Detach: this is an inference-only cache, and a grad-enabled
-            # table would break torch.where(..., out=) below.
-            table = (
-                torch.stack(
-                    [
-                        self.image_start,
-                        self.image_pad,
-                        self.image_pad,
-                        self.image_newline,
-                        self.image_end,
-                    ]
-                )
-                .to(dtype=dtype, device=device)
-                .detach()
-            )
-            self._sentinel_table = table
-        return table
+        # Read live parameters on each forward, including graph replay.
+        # A detached cached copy can outlive both sleep and weight updates.
+        return (
+            torch.stack([self.image_start, self.image_pad, self.image_pad, self.image_newline, self.image_end])
+            .to(dtype=dtype, device=device)
+            .detach()
+        )
 
     def embed_multimodal(self, **kwargs: object) -> MultiModalEmbeddings:
         image_input = self._parse_and_validate_image_input(**kwargs)
@@ -286,12 +261,3 @@ class AscendDeepseekV4ForConditionalGeneration(
 
         loaded_language = self.language_model.load_weights(language_weights())
         return loaded_vision | {f"language_model.{name}" for name in loaded_language}
-
-    def process_weights_after_loading(self) -> None:
-        hook = getattr(
-            self.language_model,
-            "process_weights_after_loading",
-            None,
-        )
-        if hook is not None:
-            hook()

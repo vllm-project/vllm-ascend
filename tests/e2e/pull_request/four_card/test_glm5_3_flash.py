@@ -24,7 +24,7 @@ from tests.e2e.conftest import VllmRunner
 
 NUM_LAYERS = 9
 NUM_MTP_LAYERS = 1
-NUM_SPECULATIVE_TOKENS = 5
+NUM_SPECULATIVE_TOKENS = 3
 OUTPUT_TOKENS = 16
 TP_SIZE = 4
 LOADER = "glm53flash_functional_dummy"
@@ -121,6 +121,13 @@ class FlashWorker:
         methods = [getattr(module, "quant_method", None) for module in modules]
         schemes = {type(getattr(method, "quant_method", method)).__name__ for method in methods}
         assert "AscendW8A8DynamicFusedMoEMethod" in schemes
+        draft_layers = [
+            module
+            for module in self.model_runner.speculator.model.modules()
+            if type(module).__name__ == "Glm5NextDecoderLayer"
+        ]
+        assert len(draft_layers) == NUM_MTP_LAYERS
+        assert all(layer.is_sequence_parallel and not layer.self_attn.o_proj.reduce_results for layer in draft_layers)
         return True
 
 
@@ -129,7 +136,6 @@ class FlashWorker:
 @pytest.mark.parametrize("prefix_caching", [False, True], ids=["no_prefix", "prefix"])
 def test_glm53flash_tp4(tmp_path, monkeypatch, enforce_eager, use_replayssm, prefix_caching):
     for name, value in {
-        "VLLM_USE_V2_MODEL_RUNNER": "1",
         "VLLM_WORKER_MULTIPROC_METHOD": "spawn",
         "HCCL_OP_EXPANSION_MODE": "AIV",
         "HCCL_BUFFSIZE": "400",
@@ -171,7 +177,7 @@ def test_glm53flash_tp4(tmp_path, monkeypatch, enforce_eager, use_replayssm, pre
             "enforce_eager": enforce_eager,
         },
         use_replayssm=use_replayssm,
-        additional_config={"enable_cpu_binding": False, "enable_fused_mc2": 0},
+        additional_config={"enable_cpu_binding": False, "enable_fused_mc2": 0, "enable_flashcomm1": True},
     )
     if not enforce_eager:
         settings["compilation_config"] = {

@@ -25,7 +25,6 @@ from vllm.config.compilation import CUDAGraphMode
 from vllm.distributed.kv_transfer import get_kv_transfer_group, has_kv_transfer_group
 from vllm.model_executor.layers.mamba.mamba_utils import is_conv_state_dim_first
 from vllm.v1.kv_cache_interface import KVCacheConfig, MambaSpec
-from vllm.v1.utils import CpuGpuBuffer
 from vllm.v1.worker import mamba_utils
 from vllm.v1.worker.gpu.model_states.interface import ModelSpecificAttnMetadata
 from vllm.v1.worker.gpu.model_states.mamba_hybrid import (
@@ -40,7 +39,7 @@ from vllm.v1.worker.mamba_utils import (
 )
 from vllm.v1.worker.utils import AttentionGroup
 
-from vllm_ascend.utils import model_uses_kpool_indexer
+from vllm_ascend.utils import model_uses_kimi_kda, model_uses_kpool_indexer
 from vllm_ascend.worker.v2.attn_utils import build_attn_metadata
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch
 from vllm_ascend.worker.v2.model_states.default import AscendModelState
@@ -222,12 +221,13 @@ class AscendMambaHybridModelState(MambaHybridModelState, AscendModelState):
                 copy_funcs = self.model.get_mamba_state_copy_funcs(mamba_types)
                 validate_mamba_state_copy_funcs(mamba_groups, copy_funcs)
                 self._mamba_state_copy_funcs = copy_funcs
+            # vLLM #55688 counts state tensors from each layer's bindings.
             self._mamba_ctx = MambaSpecDecodeGPUContext.create(
                 max_num_reqs=self.max_num_reqs,
                 kv_cache_config=kv_cache_config,
                 copy_funcs=self._mamba_state_copy_funcs,
                 device=self.device,
-                make_buffer=lambda n, dtype: CpuGpuBuffer(n, dtype=dtype, device=self.device),
+                forward_context=self.vllm_config.compilation_config.static_forward_context,
             )
         ctx = self._mamba_ctx
         if not ctx.is_initialized:
@@ -260,7 +260,7 @@ class AscendMambaHybridModelState(MambaHybridModelState, AscendModelState):
         if not self._align_mode:
             return
         pcp_manager = getattr(self, "pcp_manager", None)
-        if pcp_manager is not None and model_uses_kpool_indexer(self.vllm_config.model_config):
+        if pcp_manager is not None and self._uses_global_mamba_pcp():
             pcp_context = pcp_manager.build_attention_context(input_batch, block_tables)
             input_batch = pcp_context.global_batch
             block_tables = pcp_context.global_block_tables
@@ -327,6 +327,10 @@ class AscendMambaHybridModelState(MambaHybridModelState, AscendModelState):
             self._pending_bulk_copy = None
         super().finish_execution(failed=failed)
 
+    def _uses_global_mamba_pcp(self) -> bool:
+        model_config = self.vllm_config.model_config
+        return model_uses_kpool_indexer(model_config) or model_uses_kimi_kda(model_config)
+
     def prepare_attn(
         self,
         input_batch: AscendInputBatch,
@@ -339,53 +343,63 @@ class AscendMambaHybridModelState(MambaHybridModelState, AscendModelState):
         ubatch_idx: int = 0,
         model_specific_attn_metadata: ModelSpecificAttnMetadata | None = None,
     ) -> dict[str, Any]:
+        self._check_finegrained_tp_idle_graph_step(cudagraph_mode)
         # Match the upstream Mamba contract without enabling DBO.
         assert ubatch_idx == 0, "DBO is not supported on Ascend"
         pcp_manager = getattr(self, "pcp_manager", None)
         pcp_context = None
-        if (
-            pcp_manager is not None
-            and model_uses_kpool_indexer(self.vllm_config.model_config)
-            and pcp_manager.is_target_attn_groups(attn_groups)
-        ):
+        if pcp_manager is not None and self._uses_global_mamba_pcp() and pcp_manager.is_target_attn_groups(attn_groups):
             pcp_context = pcp_manager.build_attention_context(input_batch, block_tables, slot_mappings)
-        if pcp_context is not None and not input_batch.is_dummy:
-            # PCP turns one prefill request into two rank-local segments. The
-            # recurrent state must advance once in original request order.
-            local_groups = [
-                [group for group in groups if not isinstance(group.kv_cache_spec, MambaSpec)] for groups in attn_groups
-            ]
-            mamba_groups = [
-                [group for group in groups if isinstance(group.kv_cache_spec, MambaSpec)] for groups in attn_groups
-            ]
-            local_metadata = AscendMambaHybridModelState._build_attn_metadata_for_batch(
-                self,
-                input_batch,
-                cudagraph_mode,
-                block_tables,
-                slot_mappings,
-                local_groups,
-                kv_cache_config,
-                for_capture,
-                use_pcp_padding=True,
-                pcp_context=pcp_context,
-            )
-            global_metadata = AscendMambaHybridModelState._build_attn_metadata_for_batch(
-                self,
-                pcp_context.global_batch,
-                cudagraph_mode,
-                pcp_context.global_block_tables,
-                pcp_context.global_slot_mappings,
-                mamba_groups,
-                kv_cache_config,
-                for_capture,
-                use_pcp_padding=False,
-                pcp_context=pcp_context,
-            )
-            local_metadata.update(global_metadata)
-            self.attn_metadata = local_metadata
-        else:
-            self.attn_metadata = AscendMambaHybridModelState._build_attn_metadata_for_batch(
+
+        def build_metadata(**kwargs):
+            if pcp_context is not None and (
+                not getattr(input_batch, "is_dummy", False)
+                or getattr(input_batch, "is_cpp_profile", False)
+                or pcp_context.global_batch is not input_batch
+                or (
+                    pcp_manager is not None
+                    and model_uses_kpool_indexer(self.vllm_config.model_config)
+                    and pcp_manager.is_decode_sharded
+                )
+            ):
+                # Recurrent state uses global request order; SFA keeps local queries.
+                # Sharded GLM decode capture must use the same global KDA
+                # extent as replay, even on a rank with no live requests.
+                local_groups = [
+                    [group for group in groups if not isinstance(group.kv_cache_spec, MambaSpec)]
+                    for groups in attn_groups
+                ]
+                mamba_groups = [
+                    [group for group in groups if isinstance(group.kv_cache_spec, MambaSpec)] for groups in attn_groups
+                ]
+                metadata = AscendMambaHybridModelState._build_attn_metadata_for_batch(
+                    self,
+                    input_batch,
+                    cudagraph_mode,
+                    block_tables,
+                    slot_mappings,
+                    local_groups,
+                    kv_cache_config,
+                    for_capture,
+                    use_pcp_padding=True,
+                    pcp_context=pcp_context,
+                )
+                metadata.update(
+                    AscendMambaHybridModelState._build_attn_metadata_for_batch(
+                        self,
+                        pcp_context.global_batch,
+                        cudagraph_mode,
+                        pcp_context.global_block_tables,
+                        pcp_context.global_slot_mappings,
+                        mamba_groups,
+                        kv_cache_config,
+                        for_capture,
+                        use_pcp_padding=False,
+                        pcp_context=pcp_context,
+                    )
+                )
+                return metadata
+            return AscendMambaHybridModelState._build_attn_metadata_for_batch(
                 self,
                 input_batch,
                 cudagraph_mode,
@@ -397,6 +411,18 @@ class AscendMambaHybridModelState(MambaHybridModelState, AscendModelState):
                 use_pcp_padding=pcp_context is not None,
                 pcp_context=pcp_context,
             )
+
+        device_metadata = getattr(self, "device_metadata", None)
+        if device_metadata is not None:
+            # Real, capture and idle batches share one producer lifecycle.
+            self.attn_metadata = device_metadata.run_build(
+                build_metadata,
+                attn_groups=attn_groups,
+                full_graph_mode=cudagraph_mode == CUDAGraphMode.FULL,
+                for_cudagraph_capture=for_capture,
+            )
+        else:
+            self.attn_metadata = build_metadata()
         if self.recoverssm is not None:
             self.recoverssm.record_step(self.attn_metadata, attn_groups, for_capture=for_capture)
         return self.attn_metadata
@@ -508,5 +534,6 @@ class AscendMambaHybridModelState(MambaHybridModelState, AscendModelState):
             attn_state=input_batch.attn_state,
             model_specific_attn_metadata=model_specific_metadata,
             pcp_context=pcp_context,
+            full_graph_mode=cudagraph_mode == CUDAGraphMode.FULL,
             for_cudagraph_capture=for_capture,
         )

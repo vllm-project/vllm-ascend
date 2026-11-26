@@ -54,6 +54,13 @@ class AscendRMSNorm(RMSNorm):
         dtype: torch.dtype | None = None,
     ) -> None:
         super().__init__(hidden_size, eps, var_hidden_size, has_weight, dtype)
+
+        # Register weight tensors that are neither parameters nor buffers as buffers
+        if not has_weight:
+            weight = self.weight
+            del self.weight
+            self.register_buffer("weight", weight, persistent=False)
+
         vllm_config = get_current_vllm_config()
         self.bias = None
         self.bias_loaded = False
@@ -86,12 +93,16 @@ class AscendRMSNorm(RMSNorm):
         import torch_npu
 
         if residual is not None:
-            import vllm_ascend.vllm_ascend_C  # type: ignore[import-untyped]  # noqa: F401, PLC0415
-
-            enable_custom_op()
-            x, _, residual = torch.ops._C_ascend.npu_add_rms_norm_bias(
-                x, residual, self.weight, self.bias, self.variance_epsilon
-            )
+            if enable_custom_op():
+                x, _, residual = torch.ops._C_ascend.npu_add_rms_norm_bias(
+                    x, residual, self.weight, self.bias, self.variance_epsilon
+                )
+            else:
+                # Under VLLM_BATCH_INVARIANT, batch_invariant.py patches npu_add_rms_norm
+                # for bitwise batch invariance; bias is added elementwise below.
+                x, _, residual = torch_npu.npu_add_rms_norm(x, residual, self.weight, self.variance_epsilon)
+                if self.bias is not None:
+                    x.add_(self.bias)
             return x, residual
 
         x, residual = torch_npu.npu_rms_norm(x, self.weight, self.variance_epsilon)

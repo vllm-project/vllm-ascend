@@ -4,7 +4,7 @@ Multi-node inference is suitable for scenarios where the model cannot be deploye
 
 * **Verify Multi-Node Communication Environment**
 * **Set Up and Start the Ray Cluster**
-* **Start the Online Inference Service on Multi-node**
+* **Start the Online Inference Service on Multi-node scenario**
 
 ## Verify Multi-Node Communication Environment
 
@@ -55,7 +55,7 @@ To ensure a consistent execution environment across all nodes, including the mod
 
 For setting up a multi-node inference cluster with Ray, **containerized deployment** is the preferred approach. Containers should be started on both the head and worker nodes, with the `--net=host` option to enable proper network connectivity.
 
-Below is the example container setup command, which should be executed on **all nodes**:
+Below is the example container setup command, which should be executed on **all nodes**. It needs [Ascend Docker Runtime](../../getting_started/installation.md#installation-ascend-docker-runtime) on every node and selects the eight NPUs with `ASCEND_VISIBLE_DEVICES`.
 
 ```bash
 # Update the vllm-ascend image
@@ -69,23 +69,8 @@ docker run --rm \
 --name $NAME \
 --net=host \
 --shm-size=1g \
---device /dev/davinci0 \
---device /dev/davinci1 \
---device /dev/davinci2 \
---device /dev/davinci3 \
---device /dev/davinci4 \
---device /dev/davinci5 \
---device /dev/davinci6 \
---device /dev/davinci7 \
---device /dev/davinci_manager \
---device /dev/devmm_svm \
---device /dev/hisi_hdc \
--v /usr/local/dcmi:/usr/local/dcmi \
+-e ASCEND_VISIBLE_DEVICES=0-7 \
 -v /usr/local/Ascend/driver/tools/hccn_tool:/usr/local/Ascend/driver/tools/hccn_tool \
--v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
--v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
--v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
--v /etc/ascend_install.info:/etc/ascend_install.info \
 -v /path/to/shared/cache:/root/.cache \
 -it $IMAGE bash
 ```
@@ -102,6 +87,11 @@ After setting up the containers and installing vllm-ascend on each node, follow 
 Choose one machine as the head node and the others as worker nodes. Before proceeding, use `ip addr` to check your `nic_name` (network interface name).
 
 Set the `ASCEND_RT_VISIBLE_DEVICES` environment variable to specify the NPU devices to use. For Ray versions above 2.1, also set the `RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES` variable to avoid device recognition issues.
+
+`--device-ids` does not select devices with the Ray executor; vLLM prints a
+warning and Ray placement groups control resource assignment. See
+[NPU Device Selection](../../user_guide/configuration/device_selection.md#ray)
+for the difference from multiprocessing launches.
 
 Below are the commands for the head and worker nodes:
 
@@ -131,15 +121,22 @@ ray start --address='{head_node_ip}:6379' --node-ip-address={local_ip}
 
 Once the cluster is started on multiple nodes, execute `ray status` and `ray list nodes` to verify the Ray cluster's status. You should see the correct number of nodes and NPUs listed.
 
-After Ray is successfully started, the following content will appear:\
-A local Ray instance has started successfully.\
-Dashboard URL: The access address for the Ray Dashboard (default: <http://localhost:8265>); Node status (CPU/memory resources, number of healthy nodes); Cluster connection address (used for adding multiple nodes).
+After Ray starts successfully, the output includes:
+
+```output
+A local Ray instance has started successfully.
+Dashboard URL: http://localhost:8265
+```
+
+* **Dashboard URL**: the Ray Dashboard address (default: <http://localhost:8265>)
+* **Node status**: CPU/memory resources and the number of healthy nodes
+* **Cluster connection address**: used to add more nodes
 
 ## Start the Online Inference Service on Multi-node scenario
 
 In the container, you can use vLLM as if all NPUs were on a single node. vLLM will utilize NPU resources across all nodes in the Ray cluster.
 
-**You only need to run the vllm command on one node.**
+**You only need to run the vLLM command on one node.**
 
 To set up parallelism, the common practice is to set the `tensor-parallel-size` to the number of NPUs per node, and the `pipeline-parallel-size` to the number of nodes.
 

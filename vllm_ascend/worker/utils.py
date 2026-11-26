@@ -16,8 +16,6 @@ from vllm.v1.worker.utils import (
     select_common_block_size,
 )
 
-from vllm_ascend.utils import vllm_version_is
-
 
 def copy_kv_cache_blocks_inplace(
     kv_caches: Iterable[torch.Tensor | Sequence[torch.Tensor | None] | None],
@@ -37,9 +35,7 @@ def copy_kv_cache_blocks_inplace(
         return
 
     cache_tensors: list[torch.Tensor] = []
-    seen_tensors: set[tuple[torch.device, int] | tuple[torch.device, int, tuple[int, ...], tuple[int, ...], int]] = (
-        set()
-    )
+    seen_tensors: set[tuple[torch.device, int, tuple[int, ...], tuple[int, ...], int]] = set()
     for entry in kv_caches:
         if entry is None:
             continue
@@ -53,12 +49,7 @@ def copy_kv_cache_blocks_inplace(
             data_ptr = tensor.data_ptr()
             # Hybrid models can overlay layers of different kinds on one
             # allocation, so views at the same address can differ in geometry.
-            # Main keys on that geometry; the release lane keys on (device, address).
-            key = (
-                (tensor.device, data_ptr)
-                if vllm_version_is("0.33.0")
-                else (tensor.device, data_ptr, tuple(tensor.shape), tuple(tensor.stride()), tensor.element_size())
-            )
+            key = (tensor.device, data_ptr, tuple(tensor.shape), tuple(tensor.stride()), tensor.element_size())
             if key in seen_tensors:
                 continue
             seen_tensors.add(key)
@@ -66,6 +57,40 @@ def copy_kv_cache_blocks_inplace(
 
     if not cache_tensors:
         return
+
+    # A paired hybrid slot exposes a contiguous main-page view and strided
+    # recurrent component views of the same storage. Copying both can replay a
+    # cyclic copy over already-updated source bytes. Keep the enclosing view
+    # once; independent indexer key/scale planes still need their own copies.
+    contiguous_regions = [
+        (
+            i,
+            tensor.untyped_storage().data_ptr(),
+            tensor.data_ptr(),
+            tensor.data_ptr() + tensor.numel() * tensor.element_size(),
+        )
+        for i, tensor in enumerate(cache_tensors)
+        if tensor.is_contiguous()
+    ]
+    selected = []
+    for i, tensor in enumerate(cache_tensors):
+        storage = tensor.untyped_storage().data_ptr()
+        start = tensor.data_ptr()
+        span = (
+            1 + sum((size - 1) * stride for size, stride in zip(tensor.shape, tensor.stride()))
+        ) * tensor.element_size()
+        end = start + span
+        enclosed = any(
+            storage == parent_storage
+            and parent_start <= start
+            and end <= parent_end
+            and (parent_end - parent_start > span or parent_index < i)
+            for parent_index, parent_storage, parent_start, parent_end in contiguous_regions
+            if parent_index != i
+        )
+        if not enclosed:
+            selected.append(tensor)
+    cache_tensors = selected
 
     device = cache_tensors[0].device
     for tensor in cache_tensors:

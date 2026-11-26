@@ -13,7 +13,6 @@ from vllm.v1.worker.gpu.spec_decode.eagle import speculator as eagle_speculator
 
 from vllm_ascend.ops.triton.sample.categorical_sample import categorical_sample
 from vllm_ascend.patch.worker import patch_triton
-from vllm_ascend.utils import vllm_version_is
 
 
 @pytest.mark.parametrize(
@@ -53,22 +52,14 @@ def test_dspark_sample_logits_dispatch(monkeypatch, probabilistic):
     speculator.temperature = torch.tensor([0.5, 1.5])
     speculator.seeds = torch.tensor([3, 7])
     speculator._step_cols = torch.arange(2, dtype=torch.int32)
-    if vllm_version_is("0.33.0"):
-        # vLLM main (#63554) forwards the draft-logits cache shard to the sampler.
-        speculator.draft_logits = (  # type: ignore[assignment]
-            torch.empty(2, 2, 3) if probabilistic else None
-        )
-        speculator.draft_logits_num_shards = 1  # type: ignore[attr-defined]
-        speculator.draft_logits_shard_idx = 0  # type: ignore[attr-defined]
-    else:
-        # Main supplies the cache object itself instead of separate shard args.
-        from vllm.v1.worker.gpu.spec_decode.draft_logits import (  # type: ignore[import-not-found]
-            DraftLogitsCache,
-        )
+    # Main supplies the cache object itself instead of separate shard args.
+    from vllm.v1.worker.gpu.spec_decode.draft_logits import (  # type: ignore[import-not-found]
+        DraftLogitsCache,
+    )
 
-        speculator.draft_logits = (  # type: ignore[assignment]
-            DraftLogitsCache(2, 2, 3, dtype=torch.float32, fill=0.0, device="cpu") if probabilistic else None
-        )
+    speculator.draft_logits = (  # type: ignore[assignment]
+        DraftLogitsCache(2, 2, 3, dtype=torch.float32, fill=0.0, device="cpu") if probabilistic else None
+    )
     speculator.use_fp64_gumbel = False
 
     # This fixture bypasses __init__, so provide defaults used by current main.
@@ -99,12 +90,9 @@ def test_dspark_sample_logits_dispatch(monkeypatch, probabilistic):
         torch.testing.assert_close(args[4], sample_pos - 1)
         assert kwargs["apply_temperature"] is True
         assert kwargs["is_drafting"] is True
-        if vllm_version_is("0.33.0"):
-            assert kwargs["logits_cache"] is speculator.draft_logits
-        else:
-            assert kwargs["logits_cache"] is speculator.draft_logits.values  # type: ignore[attr-defined]
-            row_mapping = speculator.draft_logits.row_mapping  # type: ignore[attr-defined]
-            assert kwargs["logits_cache_row_mapping"] is row_mapping
+        assert kwargs["logits_cache"] is speculator.draft_logits.values  # type: ignore[attr-defined]
+        row_mapping = speculator.draft_logits.row_mapping  # type: ignore[attr-defined]
+        assert kwargs["logits_cache_row_mapping"] is row_mapping
         torch.testing.assert_close(
             kwargs["logits_cache_col"],
             speculator._step_cols[1],
@@ -116,3 +104,40 @@ def test_dspark_sample_logits_dispatch(monkeypatch, probabilistic):
             result,
             logits.argmax(dim=-1) + 10,
         )
+
+
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16, torch.float32])
+@pytest.mark.parametrize("with_bias", [False, True])
+def test_categorical_sampler_applies_markov_bias_before_cache_and_temperature(monkeypatch, dtype, with_bias):
+    module = importlib.import_module("vllm_ascend.ops.triton.sample.categorical_sample")
+    logits = torch.tensor([[1.25, -2.5, 4.0], [-3.0, 2.25, 0.5]], dtype=dtype)
+    original = logits.clone()
+    bias = torch.tensor([[0.01, 2.0, -6.0], [4.0, -0.1, 1.5]], dtype=dtype) if with_bias else None
+    cache = torch.empty(2, 2, 3, dtype=dtype)
+    sampled = torch.tensor([1, 0])
+    kernel = MagicMock(return_value=sampled)
+    monkeypatch.setattr(module, "_categorical_sample", kernel)
+    result = module.categorical_sample(
+        logits,
+        torch.tensor([1, 0]),
+        torch.tensor([0.5, 1.5]),
+        torch.tensor([3, 7]),
+        torch.tensor([8, 12]),
+        apply_temperature=True,
+        is_drafting=True,
+        logits_cache=cache,
+        bias=bias,
+    )
+    assert result is sampled
+    kernel.assert_called_once()
+    passed_logits = kernel.call_args.args[0]
+    if bias is None:
+        assert passed_logits is logits
+    else:
+        expected = (original.float() + bias.float()).to(dtype)
+        torch.testing.assert_close(passed_logits, expected, rtol=0, atol=0)
+        assert passed_logits is not logits
+    torch.testing.assert_close(logits, original, rtol=0, atol=0)
+    assert kernel.call_args.args[5] is True
+    assert kernel.call_args.args[6] is cache
+    assert kernel.call_args.kwargs["is_drafting"] is True

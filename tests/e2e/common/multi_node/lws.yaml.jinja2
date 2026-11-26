@@ -14,7 +14,7 @@ spec:
           role: leader
           ascend-ci.com/required-npu-count: "{{ npu_per_node | default('16') }}"
           ascend-ci.com/npu-resource-domain: "huawei.com"
-          ascend-ci.com/npu-resource-model: "ascend-1980"
+          ascend-ci.com/npu-resource-model: "{{ 'npu' if (soc_version | default('a3') | lower) == 'a5' else 'ascend-1980' }}"
         annotations:
           karpenter.sh/do-not-disrupt: "true"
           liqo.io/api-server-support: "remote"
@@ -37,6 +37,10 @@ spec:
                 value: {{ config_file_path | default("DeepSeek-V3.yaml") }}
               - name: CONFIG_BASE_PATH
                 value: "{{ config_base_path | default("") }}"
+{% if tests | default('') %}
+              - name: MULTI_NODE_TEST_PATH
+                value: {{ tests | tojson }}
+{% endif %}
               - name: LOG_PREFIX
                 value: {{ log_prefix | default("/root/.cache/ascend-logs") }}
               - name: DOWNLOAD_SPEC
@@ -154,7 +158,7 @@ spec:
         labels:
           ascend-ci.com/required-npu-count: "{{ npu_per_node | default('16') }}"
           ascend-ci.com/npu-resource-domain: "huawei.com"
-          ascend-ci.com/npu-resource-model: "ascend-1980"
+          ascend-ci.com/npu-resource-model: "{{ 'npu' if (soc_version | default('a3') | lower) == 'a5' else 'ascend-1980' }}"
         annotations:
           karpenter.sh/do-not-disrupt: "true"
           liqo.io/api-server-support: "remote"
@@ -177,6 +181,10 @@ spec:
                 value: {{ config_file_path | default("DeepSeek-V3.yaml") }}
               - name: CONFIG_BASE_PATH
                 value: "{{ config_base_path | default("") }}"
+{% if tests | default('') %}
+              - name: MULTI_NODE_TEST_PATH
+                value: {{ tests | tojson }}
+{% endif %}
               - name: TEST_FREQUENCY
                 value: "{{ test_frequency | default("nightly") }}"
               - name: LOG_PREFIX

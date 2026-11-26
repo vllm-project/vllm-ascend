@@ -45,6 +45,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     LoadSpec,
     ReqMeta,
 )
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.planes import make_data_plane
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.pool_worker import LayerwiseKVPoolWorker
 
 # isort: on
@@ -196,9 +197,11 @@ class TestMooncakeWorkerSessionPreparation(unittest.TestCase):
     @staticmethod
     def _make_worker() -> LayerwiseKVPoolWorker:
         worker = LayerwiseKVPoolWorker.__new__(LayerwiseKVPoolWorker)
+        worker.sharded_mamba_group_ids = set()
         worker.kv_role = "kv_producer"
-        worker.consumer_is_to_put = False
+        worker.save_decode_cache = False
         worker.dcp_size = 1
+        worker.dcp_rank = 0
         worker.tp_rank = 0
         worker.pp_rank = 0
         worker.pcp_rank = 0
@@ -222,6 +225,9 @@ class TestMooncakeWorkerSessionPreparation(unittest.TestCase):
             grouped_block_size=worker.grouped_block_size,
         )
         worker.use_block_key_layerwise = True
+        worker.layerwise_data_plane = "block_key"
+        worker.block_key_hybrid = False
+        worker._data_plane = make_data_plane(worker)
         worker.layerwise_offload = False
         worker.independent_layers = []
         worker.page_size_bytes = 60
@@ -248,11 +254,32 @@ class TestMooncakeWorkerSessionPreparation(unittest.TestCase):
             load_spec=LoadSpec(0, 16, can_load=True),
         )
 
-        worker._prepare_layerwise_put_session(request)
+        worker._data_plane._prepare_single_put_session(request)
 
         worker.m_store.batch_put_start.assert_called_once_with(["model@6831@0"], [60])
         self.assertEqual(request.save_key_block_offset, 1)
         self.assertEqual(request.save_block_keys, ["model@6831@0"])
+
+    def test_decode_save_starts_only_missing_prefill_ancestors_and_decode_key(self):
+        worker = self._make_worker()
+        worker.kv_role = "kv_consumer"
+        worker.save_decode_cache = True
+        worker.m_store.batch_is_exist.side_effect = lambda keys: [int("@6830@" in key) for key in keys]
+        worker.m_store.batch_put_start.return_value = [0, 0]
+        request = ReqMeta(
+            "r1",
+            token_len_chunk=48,
+            save_start_token=0,
+            save_end_token=48,
+            block_ids=[1, 2, 3],
+            block_hashes=[b"h0", b"h1", b"h2"],
+            can_save=True,
+        )
+
+        worker._data_plane._prepare_single_put_session(request)
+
+        worker.m_store.batch_put_start.assert_called_once_with(["model@6831@0", "model@6832@0"], [60, 60])
+        self.assertEqual(request.save_block_keys, [None, "model@6831@0", "model@6832@0"])
 
     def test_full_remote_hit_loads_last_block_even_when_vllm_keeps_one_token(self):
         worker = self._make_worker()
@@ -263,7 +290,7 @@ class TestMooncakeWorkerSessionPreparation(unittest.TestCase):
             load_spec=LoadSpec(0, 63, can_load=True, kvpool_store_skip_tokens=64),
         )
 
-        slots = worker._prepare_layerwise_get_session(request)
+        slots = worker._data_plane._prepare_single_get_session(request)
 
         self.assertEqual(len(slots), 4)
         self.assertEqual(request.load_block_keys[-1], "model@6833@0")
@@ -285,7 +312,7 @@ class TestMooncakeWorkerSessionPreparation(unittest.TestCase):
             is_last_chunk=False,
         )
 
-        slots = worker._prepare_layerwise_get_session(request)
+        slots = worker._data_plane._prepare_single_get_session(request)
         worker.layer_load_tasks = [[]]
         worker._process_load_for_layer_batch([request], 0)
 
@@ -305,7 +332,7 @@ class TestMooncakeWorkerSessionPreparation(unittest.TestCase):
             load_spec=LoadSpec(0, 32, can_load=True),
         )
 
-        slots = worker._prepare_layerwise_get_session(request)
+        slots = worker._data_plane._prepare_single_get_session(request)
 
         self.assertEqual(
             request.load_block_keys,

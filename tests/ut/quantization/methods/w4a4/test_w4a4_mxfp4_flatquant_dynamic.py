@@ -62,7 +62,9 @@ class TestAscendW4A4MXFP4FlatQuantDynamicLinearMethod(TestBase):
                 "vllm_ascend.quantization.methods.w4a4.w4a4_mxfp4_flatquant.get_tensor_model_parallel_world_size",
                 return_value=tp_size,
             ),
+            patch("vllm_ascend.quantization.methods.base.get_current_hardware_profile") as mx_profile,
         ):
+            mx_profile.return_value.supports_weight_format.return_value = True
             return AscendW4A4MXFP4FlatQuantDynamicLinearMethod()
 
     def setUp(self):

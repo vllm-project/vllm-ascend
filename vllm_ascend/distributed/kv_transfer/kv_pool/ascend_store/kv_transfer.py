@@ -12,18 +12,56 @@ from vllm.distributed.kv_events import BlockStored
 from vllm.logger import logger
 from vllm.v1.core.kv_cache_utils import maybe_convert_block_hash
 
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence import AttentionComputeStartGate
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.base import Backend
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.memcache_backend import (
-    MemcacheBackend,
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence import AttentionLoadGate
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.base import (
+    Backend,
+    require_aligned_batch_results,
 )
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.buffer import MemoryLocation
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     ChunkedTokenDatabase,
     ReqMeta,
+    block_hash_to_str,
     get_block_hashes,
 )
 
 _TRANSFER_SHUTDOWN_POLL_S = 0.1
+
+
+def get_bulk_by_memory_location(
+    backend: Backend,
+    keys: list[str],
+    addrs: list[list[int]],
+    sizes: list[list[int]],
+    *,
+    memory_locations: list[MemoryLocation],
+    tp_rank: int = 0,
+) -> list[int] | None:
+    """Group and rotate homogeneous batches, then restore input key order."""
+    if not len(keys) == len(addrs) == len(sizes) == len(memory_locations):
+        raise ValueError("Bulk GET requires one buffer list and memory location per key")
+    indices_by_location: dict[MemoryLocation, list[int]] = {MemoryLocation.DEVICE: [], MemoryLocation.HOST: []}
+    for index, location in enumerate(memory_locations):
+        if location not in indices_by_location:
+            raise ValueError(f"Unsupported bulk GET memory location: {location!r}")
+        indices_by_location[location].append(index)
+
+    results = [-1] * len(keys)
+    for memory_location, indices in indices_by_location.items():
+        if not indices:
+            continue
+        # Start each TP rank at a different key to spread concurrent reads across the pool.
+        rotation = tp_rank % len(indices)
+        indices = indices[rotation:] + indices[:rotation]
+        batch_keys = [keys[i] for i in indices]
+        codes = backend.get(
+            batch_keys, [addrs[i] for i in indices], [sizes[i] for i in indices], memory_location=memory_location
+        )
+        if codes is None:
+            return None
+        for i, code in zip(indices, require_aligned_batch_results("Bulk GET", batch_keys, codes), strict=True):
+            results[i] = code
+    return results
 
 
 class KVTransferThread(threading.Thread):
@@ -72,6 +110,9 @@ class KVTransferThread(threading.Thread):
         with self.done_task_lock:
             self.failed_requests.update(request.req_id for request in requests if len(request.block_ids_by_group) > 1)
         self.save_disabled.set()
+        self._invalidate_failed_request_blocks(requests)
+
+    def _invalidate_failed_request_blocks(self, requests: list[ReqMeta]) -> None:
         with self._invalid_block_ids_lock:
             self._invalid_block_ids.update(
                 block_id
@@ -100,7 +141,7 @@ class KVTransferThread(threading.Thread):
             if self._stopping.is_set():
                 return
             if self._fatal_error is not None:
-                logger.error("Reject KV transfer submission to failed thread %s: %s", self.name, self._fatal_error)
+                self._reject_failed_submission(request)
                 return
             self.request_queue.put(request)
 
@@ -113,7 +154,7 @@ class KVTransferThread(threading.Thread):
 
     def _wait_for_event(
         self,
-        event: threading.Event | AttentionComputeStartGate,
+        event: threading.Event | AttentionLoadGate,
         failure_checker: Callable[[], None] | None = None,
     ) -> bool:
         while not self._stopping.is_set():
@@ -313,11 +354,16 @@ class KVTransferThread(threading.Thread):
         except Exception:
             pass
 
-    def run(self):
-        """Run the thread to handle KV cache transfer requests."""
+    def _initialize_for_transfer(self) -> bool:
         self._set_os_thread_name()
         self.m_store.set_device()
         self.ready_event.set()
+        return True
+
+    def run(self):
+        """Run the thread to handle KV cache transfer requests."""
+        if not self._initialize_for_transfer():
+            return
         while True:
             request_data = None
             try:
@@ -349,6 +395,9 @@ class KVTransferThread(threading.Thread):
     def _handle_request_exception(self, request_data: Any):
         """Allow subclasses to complete queue/request bookkeeping on errors."""
         pass
+
+    def _reject_failed_submission(self, request_data: Any) -> None:
+        logger.error("Reject KV transfer submission to failed thread %s: %s", self.name, self._fatal_error)
 
     def lookup(
         self,
@@ -383,7 +432,7 @@ class KVTransferThread(threading.Thread):
         exists_states = self.lookup(keys)
         return [index for index, exists in enumerate(exists_states) if not exists]
 
-    def update_kv_event(self, event: list[BlockStored]):
+    def update_kv_event(self, event: list[BlockStored]) -> None:
         with self.kv_event_lock:
             self.kv_events.extend(event)
 
@@ -448,7 +497,19 @@ class KVCacheStoreBatch:
         self.done = threading.Event()
 
 
-class KVCacheStoreSendingThread(KVTransferThread):
+class _WholeBlockKVTransferThread(KVTransferThread):
+    """Report startup failure to the whole-block worker waiting on readiness."""
+
+    def _initialize_for_transfer(self) -> bool:
+        try:
+            return super()._initialize_for_transfer()
+        except BaseException as error:
+            self._fatal_error = error
+            self.ready_event.set()
+            return False
+
+
+class KVCacheStoreSendingThread(_WholeBlockKVTransferThread):
     def __init__(
         self,
         m_store: Backend,
@@ -465,10 +526,20 @@ class KVCacheStoreSendingThread(KVTransferThread):
         group_uses_align_state: list[bool] | None = None,
         enable_kv_event: bool = False,
         worker: Any = None,
+        sharded_mamba_group_ids: set[int] | None = None,
+        host_memory_group_ids: frozenset[int] = frozenset(),
     ):
         super().__init__(
-            m_store, token_database, block_size, tp_rank, tp_size, dcp_size, ready_event, name="KVCacheSendingThread"
+            m_store,
+            token_database,
+            block_size,
+            tp_rank,
+            tp_size,
+            dcp_size,
+            ready_event,
+            name="KVCacheSendingThread",
         )
+        self.host_memory_group_ids = host_memory_group_ids
         self.pcp_rank = pcp_rank
         self.pcp_size = pcp_size
         self.put_step = put_step
@@ -478,6 +549,7 @@ class KVCacheStoreSendingThread(KVTransferThread):
         self.stored_requests: dict[str, set[int]] = {}
         self._next_local_store_job_id = -1
         self.group_uses_align_state = group_uses_align_state or []
+        self.sharded_mamba_group_ids = sharded_mamba_group_ids or set()
         self.enable_kv_event = enable_kv_event
         self.completed_events_lock = threading.Lock()
         self.completed_events: dict[int, int] = {}
@@ -751,6 +823,128 @@ class KVCacheStoreSendingThread(KVTransferThread):
                     self.completed_events[req_meta.event_id] = 1
             self.request_queue.task_done()
 
+    def _store_boundary_puts(self, req_meta: ReqMeta) -> bool:
+        """Store complete pages/checkpoints under their exact boundary keys."""
+        current_event = req_meta.current_event
+        # A boundary value is a complete physical page/checkpoint, keyed by
+        # its logical hash boundary. Never slice a head-major page by bytes.
+        if current_event is not None:
+            current_event.synchronize()
+        boundary_values = {}
+        assert req_meta.boundary_puts is not None
+        for group, block, boundary in req_meta.boundary_puts:
+            if block <= 0 or boundary <= 0 or boundary % self.token_database.hash_block_size:
+                raise ValueError("Invalid Core boundary-state handoff")
+            index = boundary // self.token_database.hash_block_size - 1
+            if index >= len(req_meta.block_hashes):
+                raise ValueError("Boundary state has no committed hash")
+            key = self.token_database._get_key_prefix(group) + block_hash_to_str(req_meta.block_hashes[index])
+            page = self._get_block_size(group)
+            addrs, sizes, _ = self._prepare_value(0, page, [], kv_cache_group_id=group, block_id=block)
+            if not addrs or len(addrs) != len(sizes):
+                raise ValueError("Boundary state has no transferable buffers")
+            boundary_values[key] = (addrs, sizes)
+        keys = list(boundary_values)
+        missing_indices = self._get_missing_indices(keys)
+        if not missing_indices:
+            return True
+        keys = [keys[index] for index in missing_indices]
+        adds = [boundary_values[key][0] for key in keys]
+        sizes = [boundary_values[key][1] for key in keys]
+        result = self.m_store.put(keys, adds, sizes)
+        if isinstance(result, list):
+            if len(result) != len(keys) or not all(result):
+                return False
+        elif result is False:
+            return False
+        return True
+
+    def _build_cpu_stored_events(
+        self,
+        req_meta: ReqMeta,
+        group_id: int,
+        token_len: int,
+        stored_ranges: list[tuple[int, int]],
+    ) -> list[BlockStored]:
+        """Build one event per complete grain covered by these stored ranges.
+
+        A grain is included only when one range covers it fully, so a TP shard
+        cannot advertise another worker's unfinished blocks. Parent hashes stay
+        on the global chain. ``block_size`` is this group's store grain, the
+        same span as ``token_ids``. ``group_idx`` selects the replication
+        factor the scheduler uses to wait for the other writers of this block.
+        """
+        group_block_size = self._get_block_size(group_id)
+        if group_block_size <= 0 or token_len < group_block_size:
+            return []
+        hash_block_size = getattr(self.token_database, "hash_block_size", group_block_size)
+        try:
+            grouped_hashes = get_block_hashes(
+                req_meta.block_hashes,
+                group_block_size,
+                hash_block_size,
+            )
+        except AssertionError:
+            return []
+        all_hashes = [maybe_convert_block_hash(block_hash) for block_hash in grouped_hashes]
+        num_blocks = min(token_len // group_block_size, len(all_hashes))
+        stored_blocks = {
+            block_idx
+            for start, end in stored_ranges
+            for block_idx in range(
+                max(0, (start + group_block_size - 1) // group_block_size),
+                min(end // group_block_size, num_blocks),
+            )
+        }
+        stored_events: list[BlockStored] = []
+        for block_idx in sorted(stored_blocks):
+            start = block_idx * group_block_size
+            end = start + group_block_size
+            stored_event = BlockStored(
+                block_hashes=[all_hashes[block_idx]],
+                parent_block_hash=all_hashes[block_idx - 1] if block_idx > 0 else None,
+                token_ids=self.get_event_token_ids(req_meta, start, end),
+                block_size=group_block_size,
+                lora_id=None,
+                medium="cpu",
+                lora_name=None,
+                group_idx=group_id,
+            )
+            stored_events.append(stored_event)
+            logger.debug("Built kv cache event '%s'", stored_event)
+        return stored_events
+
+    def _record_cpu_store_events(
+        self,
+        req_meta: ReqMeta,
+        group_id: int,
+        token_len: int,
+        stored_ranges: list[tuple[int, int]],
+    ) -> None:
+        """Queue events for the complete grains in these stored ranges."""
+        if not self.enable_kv_event or not stored_ranges:
+            return
+        stored_events = self._build_cpu_stored_events(
+            req_meta,
+            group_id,
+            token_len,
+            stored_ranges,
+        )
+        if stored_events:
+            self.update_kv_event(stored_events)
+
+    def _tp_replicas(self, group_id: int) -> int:
+        """Number of TP replicas used to distribute this group's block writes.
+
+        ``put_step`` splits blocks across KV-head replicas. DCP and align-state
+        Mamba groups keep every TP rank on the same blocks. KVPP forces
+        ``put_step`` to 1, so each worker keeps the same logical blocks.
+        """
+        align_state_group = group_id < len(self.group_uses_align_state) and self.group_uses_align_state[group_id]
+        if self.dcp_size > 1 or align_state_group:
+            return 1
+        return self.put_step
+
     def _handle_stored_request(self, req_meta: ReqMeta) -> bool:
         """Store missing KV chunks; log validation/PUT failures and return False."""
         if req_meta.can_save is False:
@@ -758,6 +952,8 @@ class KVCacheStoreSendingThread(KVTransferThread):
         token_len = req_meta.token_len_chunk
         req_id = req_meta.req_id
         current_event = req_meta.current_event
+        if req_meta.boundary_puts and not self._store_boundary_puts(req_meta):
+            return False
         try:
             store_masks = self.token_database.store_mask(token_len, req_meta.num_prompt_tokens)
         except AssertionError as exc:
@@ -786,7 +982,8 @@ class KVCacheStoreSendingThread(KVTransferThread):
                 return True
             return skip_end > skip_start and start >= skip_start and end <= skip_end
 
-        for group_id in req_meta.kv_cache_group_ids or [0]:
+        group_ids = self.token_database.project_group_ids(req_meta.kv_cache_group_ids or [0])
+        for group_id in group_ids:
             group_block_size = self._get_block_size(group_id)
 
             group_store_mask = (
@@ -798,7 +995,6 @@ class KVCacheStoreSendingThread(KVTransferThread):
             starts: list[int] = []
             ends: list[int] = []
             keys: list[str] = []
-            block_hashes = []
             key_block_ids: list[int] = []
             block_ids = req_meta.block_ids_by_group[group_id]
             skip_null_blocks = self._skip_null_blocks(req_meta, group_id)
@@ -813,13 +1009,19 @@ class KVCacheStoreSendingThread(KVTransferThread):
             ) -> bool:
                 return not should_skip(start, start + group_block_size, save_start)
 
-            tp_replicas = self.put_step if self.dcp_size <= 1 and not align_state_group else 1
+            tp_replicas = self._tp_replicas(group_id)
             # PCP=2, TP=4, KV heads=2, tp_replicas=2:
             # PCP  TP (KV 0 / KV 1)  shard_rank  filtered candidates
             #  0        0 / 2            0      0, 4, ...
             #  0        1 / 3            1      1, 5, ...
             #  1        0 / 2            2      2, 6, ...
             #  1        1 / 3            3      3, 7, ...
+            if group_id in self.sharded_mamba_group_ids:
+                # Each TP/PCP rank saves its own head shard for every candidate checkpoint.
+                shard_rank, shard_size = 0, 1
+            else:
+                shard_rank = self.pcp_rank * tp_replicas + self.tp_rank % tp_replicas
+                shard_size = self.pcp_size * tp_replicas
             iterator = self.token_database.process_token_key_strings_with_block_ids(
                 token_len,
                 req_meta.block_hashes,
@@ -827,16 +1029,19 @@ class KVCacheStoreSendingThread(KVTransferThread):
                 kv_cache_group_id=group_id,
                 skip_null_blocks=skip_null_blocks,
                 chunk_filter=chunk_filter,
-                shard_rank=self.pcp_rank * tp_replicas + self.tp_rank % tp_replicas,
-                shard_size=self.pcp_size * tp_replicas,
+                shard_rank=shard_rank,
+                shard_size=shard_size,
                 chunk_mask=group_store_mask,
             )
-            for start, end, key, block_hash, block_id in iterator:
+            for start, end, key, _block_hash, block_id in iterator:
+                # SWA may have freed an older block before this asynchronous
+                # save runs. Its slot is then the null block (id 0), whose
+                # address must never be published under the old key.
+                if block_id <= 0:
+                    continue
                 starts.append(start)
                 ends.append(end)
                 keys.append(key)
-                if self.enable_kv_event:
-                    block_hashes.append(block_hash)
                 key_block_ids.append(block_id)
 
             if not keys:
@@ -857,8 +1062,6 @@ class KVCacheStoreSendingThread(KVTransferThread):
             starts = [starts[index] for index in missing_indices]
             ends = [ends[index] for index in missing_indices]
             keys = [keys[index] for index in missing_indices]
-            if self.enable_kv_event:
-                block_hashes = [block_hashes[index] for index in missing_indices]
             key_block_ids = [key_block_ids[index] for index in missing_indices]
 
             logger.debug(
@@ -870,15 +1073,6 @@ class KVCacheStoreSendingThread(KVTransferThread):
             )
             addrs = []
             sizes = []
-            stored_events: list[BlockStored] = []
-            all_hashes = []
-            if self.enable_kv_event:
-                group_block_hashes = get_block_hashes(
-                    req_meta.block_hashes,
-                    group_block_size,
-                    getattr(self.token_database, "hash_block_size", group_block_size),
-                )
-                all_hashes = [maybe_convert_block_hash(bh) for bh in group_block_hashes]
             logger.debug(
                 "KV pool put request=%s group=%d token_len=%d keys=%d sample_keys=%s",
                 req_id,
@@ -887,6 +1081,10 @@ class KVCacheStoreSendingThread(KVTransferThread):
                 len(keys),
                 keys[:3],
             )
+            stored_ranges: list[tuple[int, int]] = []
+            prepared_keys: list[str] = []
+            prepared_addrs: list[list[int]] = []
+            prepared_sizes: list[list[int]] = []
             for index, start in enumerate(starts):
                 addr, size, _ = self._prepare_value(
                     start,
@@ -895,32 +1093,30 @@ class KVCacheStoreSendingThread(KVTransferThread):
                     kv_cache_group_id=group_id,
                     block_id=key_block_ids[index],
                 )
-                addrs.append(addr)
-                sizes.append(size)
-                if self.enable_kv_event:
-                    token_ids = self.get_event_token_ids(req_meta, start, ends[index])
-                    block_size = (
-                        req_meta.original_block_size[group_id]
-                        if isinstance(req_meta.original_block_size, list)
-                        else req_meta.original_block_size
+                if not addr or not size:
+                    pp_rank = (
+                        self.token_database.metadata[group_id].pp_rank
+                        if group_id < len(self.token_database.metadata)
+                        else "unknown"
                     )
-                    if block_size is not None:
-                        block_idx = start // group_block_size
-                        if block_idx >= len(all_hashes):
-                            continue
-                        current_hash = all_hashes[block_idx]
-                        parent_hash = all_hashes[block_idx - 1] if block_idx > 0 else None
-                        stored_event = BlockStored(
-                            block_hashes=[current_hash],
-                            parent_block_hash=parent_hash,
-                            token_ids=token_ids,
-                            block_size=block_size,
-                            lora_id=None,
-                            medium="cpu",
-                            lora_name=None,
-                        )
-                        stored_events.append(stored_event)
-                        logger.debug("Added kv cache event '%s' to kv cache events queue", stored_event)
+                    logger.warning(
+                        "Skipping KV pool key without local descriptors: request=%s group=%d pp_rank=%s key=%s",
+                        req_id,
+                        group_id,
+                        pp_rank,
+                        keys[index],
+                    )
+                    continue
+                stored_ranges.append((start, ends[index]))
+                prepared_keys.append(keys[index])
+                prepared_addrs.append(addr)
+                prepared_sizes.append(size)
+
+            keys = prepared_keys
+            addrs = prepared_addrs
+            sizes = prepared_sizes
+            if not keys:
+                continue
 
             logical_key_count = len(keys)
             if self.kv_role == "kv_consumer":
@@ -940,43 +1136,43 @@ class KVCacheStoreSendingThread(KVTransferThread):
                 return False
             if current_event is not None:
                 current_event.synchronize()
-            put_result = self.m_store.put(keys, addrs, sizes)
+                # This request's readiness event covers all subsequent group PUTs.
+                current_event = None
+            put_result: bool | list[bool] | None
+            if self.host_memory_group_ids:
+                memory_location = (
+                    MemoryLocation.HOST if group_id in self.host_memory_group_ids else MemoryLocation.DEVICE
+                )
+                put_result = self.m_store.put(keys, addrs, sizes, memory_location=memory_location)
+                if put_result is None:
+                    logger.error("KV store returned no bulk PUT status for request %s", req_id)
+                    return False
+            else:
+                put_result = self.m_store.put(keys, addrs, sizes)
             if isinstance(put_result, list):
                 if len(put_result) != len(keys):
                     logger.error("KV store backend returned %s results for %s keys", len(put_result), len(keys))
                     return False
                 if not all(put_result):
-                    if len(put_result) % logical_key_count != 0:
-                        logger.error(
-                            "KV store returned %s physical results for %s logical keys",
-                            len(put_result),
-                            logical_key_count,
-                        )
-                        return False
+                    # PP expansion keeps each logical key's physical keys
+                    # contiguous. Publish only fully stored logical blocks.
                     physical_keys_per_logical = len(put_result) // logical_key_count
-                    logical_success = [
-                        all(put_result[start : start + physical_keys_per_logical])
-                        for start in range(0, len(put_result), physical_keys_per_logical)
+                    successful_ranges = [
+                        stored_range
+                        for index, stored_range in enumerate(stored_ranges)
+                        if all(put_result[index * physical_keys_per_logical : (index + 1) * physical_keys_per_logical])
                     ]
-                    if self.enable_kv_event and len(stored_events) == len(logical_success):
-                        self.update_kv_event(
-                            [
-                                event
-                                for event, succeeded in zip(stored_events, logical_success, strict=True)
-                                if succeeded
-                            ]
-                        )
+                    self._record_cpu_store_events(req_meta, group_id, token_len, successful_ranges)
                     logger.error("KV store backend partially failed to put request %s", req_id)
                     return False
             elif put_result is False:
                 logger.error("KV store backend failed to put request %s", req_id)
                 return False
-            if self.enable_kv_event and stored_events:
-                self.update_kv_event(stored_events)
+            self._record_cpu_store_events(req_meta, group_id, token_len, stored_ranges)
         return True
 
 
-class KVCacheStoreRecvingThread(KVTransferThread):
+class KVCacheStoreRecvingThread(_WholeBlockKVTransferThread):
     def __init__(
         self,
         m_store: Backend,
@@ -990,6 +1186,7 @@ class KVCacheStoreRecvingThread(KVTransferThread):
         invalid_block_ids_lock: threading.Lock | None = None,
         worker: Any = None,
         record_operation: Callable[[str, float, int], None] | None = None,
+        host_memory_group_ids: frozenset[int] = frozenset(),
     ):
         super().__init__(
             m_store,
@@ -1001,10 +1198,53 @@ class KVCacheStoreRecvingThread(KVTransferThread):
             ready_event,
             name="KVCacheStoreRecvingThread",
         )
+        self.host_memory_group_ids = host_memory_group_ids
         self._invalid_block_ids = invalid_block_ids if invalid_block_ids is not None else set()
         self._invalid_block_ids_lock = invalid_block_ids_lock or threading.Lock()
         self.worker = worker
         self._record_operation_cb = record_operation
+
+    def _handle_request_exception(self, request_data: ReqMeta) -> None:
+        # run() holds the submission lock, and _handle_request already
+        # acknowledged the current item in its finally block.
+        failed = [request_data]
+        while True:
+            try:
+                queued = self.request_queue.get_nowait()
+            except queue.Empty:
+                break
+            if queued is not None:
+                failed.append(queued)
+            self.request_queue.task_done()
+        self._finish_failed_receives(failed)
+
+    def _reject_failed_submission(self, request_data: ReqMeta) -> None:
+        super()._reject_failed_submission(request_data)
+        self._finish_failed_receives([request_data])
+
+    def _finish_failed_receives(self, requests: list[ReqMeta]) -> None:
+        logger.error("KV pool receive failed for requests=%s", [request.req_id for request in requests])
+        for request in requests:
+            request.can_save = False
+        self.save_disabled.set()
+        self._invalidate_failed_request_blocks(requests)
+        # Publish failure and receive completion together for scheduler polling.
+        with self.done_task_lock:
+            self.failed_requests.update(request.req_id for request in requests if len(request.block_ids_by_group) > 1)
+            self.finished_requests.update(request.req_id for request in requests)
+
+    def get_and_clear_receive_results(
+        self, loading_req_ids: set[str], preempted_req_ids: set[str]
+    ) -> tuple[set[str], set[str]]:
+        """Consume each completed receive with its failure status under the same lock."""
+        with self.done_task_lock:
+            self.finished_requests.difference_update(preempted_req_ids)
+            self.failed_requests.difference_update(preempted_req_ids)
+            finished = self.finished_requests & loading_req_ids
+            failed = self.failed_requests & finished
+            self.finished_requests.difference_update(finished)
+            self.failed_requests.difference_update(failed)
+        return finished, failed
 
     def _handle_request(self, req_meta: ReqMeta):
         try:
@@ -1026,16 +1266,19 @@ class KVCacheStoreRecvingThread(KVTransferThread):
                     mask_num,
                 )
                 if loaded is False:
-                    self._mark_failed_requests([req_meta])
-                self.set_finished_request(req_id)
+                    self._finish_failed_receives([req_meta])
+                else:
+                    self.set_finished_request(req_id)
                 return
 
             addr_list = []
             size_list = []
             key_list = []
             block_id_list: list[int] = []
-            group_ids = req_meta.kv_cache_group_ids or [0]
+            memory_locations: list[MemoryLocation] | None = [] if self.host_memory_group_ids else None
+            group_ids = self.token_database.project_group_ids(req_meta.kv_cache_group_ids or [0])
             load_masks = self.token_database.load_mask(req_meta.block_hashes, token_len)
+            tail_boundaries = {boundary.group_id: boundary.num_tokens for boundary in load_spec.tail_key_boundaries}
             for group_id in group_ids:
                 block_ids = req_meta.block_ids_by_group[group_id]
                 group_block_size = self._get_block_size(group_id)
@@ -1052,6 +1295,7 @@ class KVCacheStoreRecvingThread(KVTransferThread):
                     kv_cache_group_id=group_id,
                     skip_null_blocks=self._skip_null_blocks(req_meta, group_id),
                     chunk_filter=chunk_filter,
+                    tail_key_boundary=tail_boundaries.get(group_id),
                 )
                 for start, end, key, _block_hash, block_id in token_iter:
                     addr, size, block_id = self._prepare_value(
@@ -1065,75 +1309,66 @@ class KVCacheStoreRecvingThread(KVTransferThread):
                     addr_list.append(addr)
                     size_list.append(size)
                     block_id_list.append(block_id)
+                    if memory_locations is not None:
+                        memory_locations.append(
+                            MemoryLocation.HOST if group_id in self.host_memory_group_ids else MemoryLocation.DEVICE
+                        )
             if not key_list:
                 self.set_finished_request(req_id)
                 return
-            key_list_c = key_list[self.tp_rank % len(key_list) :] + key_list[: self.tp_rank % len(key_list)]
-            addr_list_c = addr_list[self.tp_rank % len(addr_list) :] + addr_list[: self.tp_rank % len(addr_list)]
-            size_list_c = size_list[self.tp_rank % len(size_list) :] + size_list[: self.tp_rank % len(size_list)]
-            block_id_list_c = (
-                block_id_list[self.tp_rank % len(block_id_list) :] + block_id_list[: self.tp_rank % len(block_id_list)]
-            )
+            # With explicit memory locations, rotate keys within each group and restore input order.
+            # Otherwise rotate the whole batch together with its block IDs.
+            rotation = self.tp_rank % len(key_list)
+            if memory_locations is None and rotation:
+                key_list = key_list[rotation:] + key_list[:rotation]
+                addr_list = addr_list[rotation:] + addr_list[:rotation]
+                size_list = size_list[rotation:] + size_list[:rotation]
+                block_id_list = block_id_list[rotation:] + block_id_list[:rotation]
             logger.debug(
                 "KV pool async recv calls backend get request=%s token_len=%d groups=%s keys=%d sample_keys=%s",
                 req_id,
                 token_len,
-                req_meta.kv_cache_group_ids or [0],
-                len(key_list_c),
-                key_list_c[:3],
+                group_ids,
+                len(key_list),
+                key_list[:3],
             )
             load_get_start = time.perf_counter() if self._record_operation_cb is not None else 0.0
-            ret = self.m_store.get(key_list_c, addr_list_c, size_list_c)
+            if memory_locations is None:
+                ret = self.m_store.get(key_list, addr_list, size_list)
+            else:
+                ret = get_bulk_by_memory_location(
+                    self.m_store,
+                    key_list,
+                    addr_list,
+                    size_list,
+                    tp_rank=self.tp_rank,
+                    memory_locations=memory_locations,
+                )
             if self._record_operation_cb is not None:
                 self._record_operation_cb(
                     "load_get",
                     time.perf_counter() - load_get_start,
-                    len(key_list_c),
+                    len(key_list),
                 )
-            if isinstance(self.m_store, MemcacheBackend) and (
-                ret is None or len(ret) != len(key_list_c) or any(r != 0 for r in ret)
+            # A hybrid request must acknowledge a failed import as a unit.
+            if (
+                memory_locations is not None
+                or len(req_meta.block_ids_by_group) > 1
+                or getattr(self.m_store, "strict_get_results", False) is True
             ):
-                self._mark_failed_requests([req_meta])
-                self.set_finished_request(req_id)
-                return
-            if ret is not None and any(r != 0 for r in ret):
-                missing_block_ids = record_failed_blocks(
-                    block_id_list_c,
-                    ret,
-                )
-                if len(req_meta.block_ids_by_group) == 1:
-                    with self._invalid_block_ids_lock:
-                        self._invalid_block_ids.update(missing_block_ids)
-                elif missing_block_ids:
-                    logger.error(
-                        "KV load failed for hybrid request %s. "
-                        "Skip invalid-block fallback to avoid scheduler crash. "
-                        "failed_blocks=%s",
-                        req_id,
-                        missing_block_ids,
-                    )
-            elif ret is None:
-                missing_block_ids = record_failed_blocks(
-                    block_id_list_c,
-                    [1] * len(block_id_list_c),
-                )
-                if len(req_meta.block_ids_by_group) == 1:
-                    with self._invalid_block_ids_lock:
-                        self._invalid_block_ids.update(missing_block_ids)
-                elif missing_block_ids:
-                    logger.error(
-                        "KV load failed for hybrid request %s. "
-                        "Skip invalid-block fallback to avoid scheduler crash. "
-                        "failed_blocks=%s",
-                        req_id,
-                        missing_block_ids,
-                    )
+                if ret is None or len(ret) != len(key_list) or any(r != 0 for r in ret):
+                    self._finish_failed_receives([req_meta])
+                    return
+            elif ret is None or any(r != 0 for r in ret):
+                missing_block_ids = record_failed_blocks(block_id_list, ret if ret is not None else [1] * len(key_list))
+                with self._invalid_block_ids_lock:
+                    self._invalid_block_ids.update(missing_block_ids)
             logger.debug(
                 "KV pool async recv backend get returned request=%s token_len=%d groups=%s keys=%d",
                 req_id,
                 token_len,
-                req_meta.kv_cache_group_ids or [0],
-                len(key_list_c),
+                group_ids,
+                len(key_list),
             )
             self.set_finished_request(req_id)
         finally:

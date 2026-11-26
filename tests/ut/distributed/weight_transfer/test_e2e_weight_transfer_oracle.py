@@ -24,12 +24,15 @@ silently turn the comparison into apples-to-oranges, so the parity and the
 caching contract are pinned here.
 """
 
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
+import torch
 
 from tests.e2e.common.rlhf.weight_transfer import reference_check as utils
-from tests.e2e.common.rlhf.weight_transfer.case import MODEL_CASES
+from tests.e2e.common.rlhf.weight_transfer import weight_source
+from tests.e2e.common.rlhf.weight_transfer.case import DEEPSEEK_V4_VISION_CASE, MODEL_CASES
 from tests.e2e.common.rlhf.weight_transfer.reference_check import (
     live_update_serve_args,
     reference_serve_args,
@@ -187,3 +190,59 @@ def test_reference_signature_starts_one_server_per_measurement_conditions(refere
     assert mock_generate.call_count == 2
     # One gate per startup, not per call: a cache hit must not stop the world.
     assert mock_wait.call_count == 2
+
+
+@pytest.mark.parametrize("prompts", [CASE.prompts, ((1000, 1001, 1002),)])
+@pytest.mark.parametrize("image_prompt", [False, True])
+def test_generation_signature_preserves_case_prompts_and_optional_image(prompts, image_prompt):
+    client = MagicMock()
+    text_choice = client.completions.create.return_value.choices[0]
+    text_choice.text = "text"
+    text_choice.logprobs.token_logprobs = [-0.5]
+    image_choice = client.chat.completions.create.return_value.choices[0]
+    image_choice.message.content = "image"
+    image_choice.logprobs.content = [MagicMock(logprob=-0.25)]
+
+    signature = utils.generation_signature(client, CASE.model, prompts=prompts, image_prompt=image_prompt)
+
+    expected = [("text", (-0.5,))] * len(prompts)
+    if image_prompt:
+        expected.append(("image", (-0.25,)))
+    assert signature == expected
+    assert [call.kwargs["prompt"] for call in client.completions.create.call_args_list] == [
+        list(prompt) if isinstance(prompt, tuple) else prompt for prompt in prompts
+    ]
+    if image_prompt:
+        client.chat.completions.create.assert_called_once()
+        request = client.chat.completions.create.call_args.kwargs
+        assert request["model"] == CASE.model
+        assert request["messages"][0]["content"] == [
+            {"type": "text", "text": utils.IMAGE_PROMPT},
+            {"type": "image_url", "image_url": {"url": utils.IMAGE_DATA_URL}},
+        ]
+    else:
+        client.chat.completions.create.assert_not_called()
+
+
+def test_vision_weight_source_keeps_text_router_buffer_without_duplicate(monkeypatch):
+    config = SimpleNamespace(
+        hidden_size=8,
+        vision_dim=8,
+        vision_inter_dim=16,
+        vision_patch_size=2,
+        vision_downsample_ratio=2,
+        mlp_layer_types=["hash_moe", "hash_moe", "hash_moe", "moe"],
+    )
+    model = torch.nn.Module()
+    model.model = torch.nn.Module()
+    model.model.layers = torch.nn.ModuleList([torch.nn.Module() for _ in range(4)])
+    model.model.layers[3].mlp = torch.nn.Module()
+    gate = torch.nn.Module()
+    gate.register_buffer("e_score_correction_bias", torch.zeros(8))
+    model.model.layers[3].mlp.gate = gate
+    monkeypatch.setattr(weight_source.AutoConfig, "from_pretrained", lambda *args, **kwargs: config)
+    monkeypatch.setattr(weight_source.AutoModelForCausalLM, "from_config", lambda *args, **kwargs: model)
+
+    source = weight_source.FixedRandomWeightSource(DEEPSEEK_V4_VISION_CASE, torch.device("cpu"))
+
+    assert "model.layers.3.mlp.gate.e_score_correction_bias" in [meta.name for meta in source.metadata]

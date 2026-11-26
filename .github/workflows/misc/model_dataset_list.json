@@ -329,6 +329,7 @@
             "Eco-Tech/DeepSeek-V3.1-Terminus-w8a8-mtp-QuaRot",
             "Eco-Tech/DeepSeek-V3.1-w8a8-mtp-QuaRot",
             "Eco-Tech/DeepSeek-V3.1-w8a8c8-mtp-QuaRot",
+            "Eco-Tech/DeepSeek-V4.1-Flash-1017-w4a8",
             "Eco-Tech/DeepSeek-V4.1-Flash-w8a8",
             "Eco-Tech/DeepSeek-V4-Flash-w8a8-mtp",
             "Eco-Tech/DeepSeek-V4-Flash-0731-w8a8",
@@ -588,6 +589,7 @@
             "rainney/AEON-DFlash-Qwen3.6-35B-A3B",
             "Eco-Tech/GLM-5.3-w8a8c8",
             "Eco-Tech/GLM-5.3-Flash-w8a8",
+            "Eco-Tech/Kimi-K3.1-Pro-w4a8",
             "Eco-Tech/Qwen3.6-27B-W8A8-310P"
         ],
         "a5": [

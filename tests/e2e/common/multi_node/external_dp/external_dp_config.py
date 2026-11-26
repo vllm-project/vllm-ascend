@@ -244,7 +244,7 @@ class ExternalDPConfigLoader:
     @staticmethod
     def _load_yaml(yaml_path: str | None) -> dict[str, Any]:
         default_config_name = "GLM5_1-W8A8-EP-external.yaml"
-        default_config_base_path = "tests/e2e/cases/models/configs/GLM/"
+        default_config_base_path = "tests/SIT/cases/models/configs/GLM/"
         return load_yaml_mapping(
             yaml_path,
             default_name=default_config_name,

@@ -711,6 +711,7 @@ def test_rope0_python_quant_cache_attention_pipeline(dtype):
     assert torch.unique(scales).numel() > 1
 
     impl = SimpleNamespace(
+        is_kimi_k31=False,
         pcp_enabled=False,
         enable_sparse_sfa_c8=True,
         enable_sparse_sfa_turboquant=False,

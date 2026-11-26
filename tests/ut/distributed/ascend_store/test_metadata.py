@@ -18,11 +18,15 @@
 import unittest
 from dataclasses import replace
 from types import SimpleNamespace
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import tests.ut.distributed.ascend_store._mock_deps  # noqa: F401, E402
+
+# isort: split
+import torch
+from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheGroupSpec, MambaSpec, UniformTypeKVCacheSpecs
+
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.metadata import (
-    LayerMultiBlockReqMeta,
     LayerPoolKey,
     masked_block_runs,
 )
@@ -35,8 +39,10 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     ReqMeta,
     RequestTracker,
     get_block_hashes,
+    get_engine_transfer_config,
     get_group_block_size,
     get_group_cache_family,
+    get_sharded_mamba_group_ids,
     infer_cache_transfer_granularity,
     infer_dcp_mismatch_info,
     infer_group_block_sizes,
@@ -45,6 +51,40 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
 
 
 class TestCacheLayoutHelpers(unittest.TestCase):
+    def test_engine_transfer_config_uses_planner_then_core_context_then_child(self):
+        child, engine, planner = object(), object(), object()
+        config = SimpleNamespace(kv_transfer_config=child)
+        current = SimpleNamespace(kv_transfer_config=engine)
+        with patch(
+            "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata.get_current_vllm_config_or_none",
+            return_value=current,
+        ):
+            self.assertIs(get_engine_transfer_config(config, SimpleNamespace(kv_transfer_config=planner)), planner)
+            self.assertIs(get_engine_transfer_config(config, SimpleNamespace()), engine)
+        with patch(
+            "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata.get_current_vllm_config_or_none",
+            return_value=None,
+        ):
+            self.assertIs(get_engine_transfer_config(config, None), child)
+
+    def test_sharded_mamba_groups_exclude_tp_replicas(self):
+        mamba_spec = MambaSpec(
+            shapes=((4,),),
+            dtypes=(torch.float32,),
+            block_size=16,
+            mamba_cache_mode="align",
+        )
+        specs = [
+            FullAttentionSpec(block_size=16, num_kv_heads=1, head_size=1, dtype=torch.float32),
+            mamba_spec,
+            replace(mamba_spec, tp_replicated=True),
+            UniformTypeKVCacheSpecs.from_specs({"layer.3": mamba_spec}),
+        ]
+        config = SimpleNamespace(
+            kv_cache_groups=[KVCacheGroupSpec([f"layer.{group_id}"], spec) for group_id, spec in enumerate(specs)]
+        )
+        self.assertEqual(get_sharded_mamba_group_ids(config), {1, 3})
+
     def test_uses_hybrid_kv_cache(self):
         groups = [
             SimpleNamespace(kv_cache_spec=SimpleNamespace(block_size=16)),
@@ -478,7 +518,7 @@ class TestRequestTracker(unittest.TestCase):
             req_id="r1",
             token_len=32,
             allocated_block_ids_by_group=[[1, 2], [3, 4], [5, 6]],
-            num_speculative_blocks_by_group={1: 1, 2: 0},
+            num_mamba_speculative_blocks_by_group={1: 1, 2: 0},
             block_sizes=[16] * 3,
         )
 
@@ -498,7 +538,7 @@ class TestRequestTracker(unittest.TestCase):
                 [0, 7, 8, 9, 10],
                 [0, 11, 12, 13, 14],
             ],
-            num_speculative_blocks_by_group={1: 3, 2: 3, 3: 3},
+            num_mamba_speculative_blocks_by_group={1: 3, 2: 3, 3: 3},
             block_sizes=[16] * 4,
         )
 
@@ -518,7 +558,7 @@ class TestRequestTracker(unittest.TestCase):
                 [0, 0, 0, 0, 0, 0, 0, 13, 14, 15, 16],
                 [0, 0, 0, 0, 0, 0, 0, 17, 18, 19, 20],
             ],
-            num_speculative_blocks_by_group={1: 3, 2: 3, 3: 3},
+            num_mamba_speculative_blocks_by_group={1: 3, 2: 3, 3: 3},
             block_sizes=[16] * 4,
         )
 
@@ -803,22 +843,6 @@ class TestAscendConnectorMetadata(unittest.TestCase):
         meta.add_request(req)
         self.assertEqual(len(meta.requests), 1)
         self.assertEqual(meta.requests[0].req_id, "r1")
-
-
-class TestLayerMultiBlockReqMeta(unittest.TestCase):
-    def test_fields(self):
-        meta = LayerMultiBlockReqMeta(
-            req_id="r1",
-            keys=[],
-            starts=[0, 16],
-            ends=[16, 32],
-            block_ids=[0, 1],
-            layer_id=2,
-        )
-        self.assertEqual(meta.req_id, "r1")
-        self.assertEqual(meta.layer_id, 2)
-        self.assertTrue(meta.is_last_chunk)
-        self.assertIsNone(meta.current_event)
 
 
 if __name__ == "__main__":

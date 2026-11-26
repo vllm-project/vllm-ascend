@@ -32,6 +32,7 @@ BASE_EXCLUDES = [
     "libstdc++.so",
     "libgcc_s.so",
     "libc.so",
+    "libgomp*",
     "libm.so",
     "libdl.so",
     "libpthread.so",

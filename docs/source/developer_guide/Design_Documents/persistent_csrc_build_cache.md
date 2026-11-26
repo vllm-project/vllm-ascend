@@ -274,7 +274,7 @@ keyed outer snapshot with compatibility prefixes, and removes `.updated` before
 the build. `.github/actions/csrc-l1-save/action.yaml` publishes only when the
 caller supplies a primary key, the local cache contains `.updated`, and trusted
 writer credentials are present. The local engine creates `.updated` only after
-an entry is newly saved or replaced; an all-hit build consequently does not
+an entry is newly saved or replaced; an all-HIT build consequently does not
 republish an unchanged snapshot. Restore and save transport failures are
 availability failures and remain fail-open. A missing or unparsable manifest,
 or a manifest object that fails schema or artifact validation, is a MISS and is

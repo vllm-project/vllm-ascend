@@ -21,7 +21,7 @@ For example:
 
 The table below is the release compatibility matrix for vLLM Ascend release.
 
-| vLLM Ascend | vLLM              | Python          | Stable CANN |        PyTorch/torch_npu        |   Triton Ascend   |    Mooncake  | memfabric-hybrid / memcache-hybrid | flash-linear-attention-npu |
+| vLLM Ascend | vLLM              | Python          | Stable CANN |        PyTorch/torch_npu        |   Triton-Ascend   |    Mooncake  | memfabric-hybrid / memcache-hybrid | flash-linear-attention-npu |
 |-------------|-------------------|-----------------|-------------|---------------------------------|-------------------|--------------|------------------------------------|----------------------------|
 | v0.30.0     | v0.30.0           | >= 3.10, < 3.13 | 9.2.1       | 2.10.0 / 2.10.0.post7           | 3.6.0.post2       | v0.3.14-rc1  | 1.3.0 / 1.3.0                      | v26.9.1-release            |
 | v0.30.0rc2  | v0.30.0           | >= 3.10, < 3.13 | 9.2.0       | 2.10.0 / 2.10.0.post7           | 3.2.2             | v0.3.11.post1 | N/A                               | N/A                        |
@@ -93,14 +93,19 @@ Using `--no-build-isolation` can bypass build-environment resolution, so run
 
 | Date       | Event                                     |
 |------------|-------------------------------------------|
+| 2026.11.10 | Release candidates, v0.32.0rc1            |
+| 2026.10.29 | v0.30.0 Final release, v0.30.0            |
+| 2026.10.13 | Release candidates, v0.30.0rc2            |
 | 2026.10.11 | Release candidates, v0.30.0rc1            |
-| 2026.09.21 | v0.23.0 post release, v0.23.0.post1  |
+| 2026.09.29 | Release candidates, v0.27.1rc1            |
+| 2026.09.21 | v0.23.0 post release, v0.23.0.post1       |
 | 2026.09.03 | Release candidates, v0.26.0rc1            |
 | 2026.08.16 | v0.23.0 Final release, v0.23.0            |
 | 2026.07.20 | Release candidates, v0.23.0rc1            |
 | 2026.06.30 | Release candidates, v0.22.1rc1            |
 | 2026.06.16 | Release candidates, v0.21.0rc1            |
 | 2026.06.03 | Release candidates, v0.20.2rc1            |
+| 2026.04.30 | v0.18.0 Final release, v0.18.0            |
 | 2026.04.30 | Release candidates, v0.19.1rc1            |
 | 2026.04.24 | Release candidates, v0.13.0rc3            |
 | 2026.04.01 | Release candidates, v0.18.0rc1            |
@@ -163,7 +168,7 @@ Usually, each minor version of vLLM (such as 0.7) corresponds to a vLLM Ascend v
 
 | Branch     | State        | Note                                                     |
 | ---------- | ------------ | -------------------------------------------------------- |
-| main       | Maintained   | CI commitment for vLLM main branch and vLLM {{main_vllm_tag}}  tag |
+| main       | Maintained   | CI commitment for vLLM main branch and vLLM {{main_vllm_tag}} tag |
 | releases/v0.23.0 | Maintained | CI commitment for vLLM 0.23.0 version                |
 | releases/v0.30.0 | Maintained | CI commitment for vLLM 0.30.0 version                |
 | releases/v0.18.0 | Maintained | CI commitment for vLLM 0.18.0 version                |
@@ -177,7 +182,7 @@ Usually, each minor version of vLLM (such as 0.7) corresponds to a vLLM Ascend v
 
 | Branch     | State       | RFC Link                             | Scheduled Merge Time | Mentor |
 |------------|--------------|---------------------------------------|------------|--------|
-|rfc/long_seq_optimization|Maintained|[RFC: long sequence optimization #22693](https://github.com/vllm-project/vllm/issues/22693)|930|wangxiyuan|
+|rfc/long_seq_optimization|Maintained|[RFC: long sequence optimization #22693](https://github.com/vllm-project/vllm/issues/22693)|2026.09.30|wangxiyuan|
 
 - Branch: The feature branch should be created with a prefix `rfc/` followed by the feature name, such as `rfc/feature-name`.
 - State: The state of the feature branch is `Maintained` until it is merged into the main branch or deleted.

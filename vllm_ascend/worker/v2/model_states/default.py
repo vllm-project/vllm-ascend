@@ -37,13 +37,16 @@ from vllm.v1.worker.gpu.model_states.interface import ModelSpecificAttnMetadata
 from vllm.v1.worker.utils import AttentionGroup
 
 from vllm_ascend.ascend_config import get_ascend_config
+from vllm_ascend.attention.utils import apply_prefill_as_decode_mask
 from vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h import get_prebound_copy_sfa_slots
 from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.copy_sfa_topk_slots import CopySfaRequestStates
+from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.request_identity import RequestIdentityRegistry
 from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_manager import (
     get_sparse_kv_offload_manager,
+    reset_sparse_kv_offload_request_owners,
     update_sparse_kv_offload_metadata,
 )
-from vllm_ascend.utils import should_skip_allreduce_across_dp_group
+from vllm_ascend.utils import embedding_tp_enable, should_skip_allreduce_across_dp_group
 from vllm_ascend.worker.v2.attn_utils import build_attn_metadata, ring_state_update_skipped
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch
 
@@ -60,6 +63,7 @@ class ReplayAttnMetadata(ModelSpecificAttnMetadata):
 
 
 if TYPE_CHECKING:
+    from vllm_ascend.ascend_config import XliteGraphConfig
     from vllm_ascend.attention.dsa_v41 import AscendDSAV41Metadata, AscendDSAV41MetadataBuilder
     from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
     from vllm_ascend.models.deepseek_v41.decoder_replay_layers import AscendDecoderReplayLayers
@@ -77,6 +81,9 @@ class AscendModelState(DefaultModelState):
     kvpp_is_dummy_run: bool = False
     device_metadata: "TargetDeviceMetadata | None" = None
 
+    def runner_plan_launch_d2h(self, **kwargs) -> None:
+        """Runner-assigned hook: plan and launch the delayed D2H batch."""
+
     def finish_execution(self, *, failed: bool) -> None:
         """Join auxiliary metadata work even if input preparation failed."""
         if self.device_metadata is not None:
@@ -88,12 +95,18 @@ class AscendModelState(DefaultModelState):
         self._offload_token_to_req: CpuGpuBuffer | None = None
         self._offload_pool_slots: CpuGpuBuffer | None = None
         self._offload_pool_active: CpuGpuBuffer | None = None
+        self._offload_pool_generations: CpuGpuBuffer | None = None
+        self._offload_stable_prefixes: CpuGpuBuffer | None = None
         self._offload_request_states: CopySfaRequestStates | None = None
+        self._offload_request_identity: RequestIdentityRegistry | None = None
         self._offload_live_req_ids: Collection[str] = ()
         self._offload_draft_attn_groups: list[list[AttentionGroup]] = []
         self._offload_draft_layer_names: set[str] = set()
         sparse_cfg = get_ascend_config().sparse_kv_offload_config
         if sparse_cfg.enabled:
+            self._offload_request_identity = RequestIdentityRegistry(
+                on_wrap=lambda: reset_sparse_kv_offload_request_owners(self.vllm_config)
+            )
             pin_memory = is_pin_memory_available()
             self._offload_req_ids = CpuGpuBuffer(
                 vllm_config.scheduler_config.max_num_seqs,
@@ -114,6 +127,12 @@ class AscendModelState(DefaultModelState):
                 )
                 self._offload_pool_active = CpuGpuBuffer(
                     pool_capacity, dtype=torch.bool, device=device, pin_memory=pin_memory
+                )
+                self._offload_pool_generations = CpuGpuBuffer(
+                    pool_capacity, dtype=torch.int64, device=device, pin_memory=pin_memory
+                )
+                self._offload_stable_prefixes = CpuGpuBuffer(
+                    pool_capacity, dtype=torch.int32, device=device, pin_memory=pin_memory
                 )
                 self._offload_request_states = CopySfaRequestStates()
         self._initialize_decoder_replay()
@@ -335,6 +354,8 @@ class AscendModelState(DefaultModelState):
 
     def remove_request(self, req_id: str) -> None:
         super().remove_request(req_id)
+        if self._offload_request_identity is not None:
+            self._offload_request_identity.remove(req_id)
         if self._offload_request_states is not None:
             self._offload_request_states.remove_request(req_id)
 
@@ -373,6 +394,32 @@ class AscendModelState(DefaultModelState):
             "slot_mapping": slot_mappings[group_id],
             "block_table": block_tables[group_id][: batch.num_reqs],
         }
+
+    def dummy_inputs_embeds(self, num_tokens: int, input_ids: torch.Tensor | None = None) -> torch.Tensor:
+        if input_ids is not None:
+            return super().dummy_inputs_embeds(num_tokens, input_ids)
+
+        if embedding_tp_enable():
+            if not hasattr(self, "_embedding_tp_dummy_join"):
+                from vllm_ascend.ops.vocab_parallel_embedding import AscendVocabParallelEmbedding, VocabParallelMode
+
+                self._embedding_tp_dummy_join = None
+                for module in self.model.modules():
+                    if (
+                        isinstance(module, AscendVocabParallelEmbedding)
+                        and module.parallel_mode == VocabParallelMode.FINE_GRAINED
+                        and module.token_exchange_group is not None
+                    ):
+                        capacity = module.embedding_tp_capacity
+                        assert capacity is not None
+                        token_ids = torch.zeros(capacity, dtype=torch.int32, device=self.device)
+                        self._embedding_tp_dummy_join = (module, token_ids)
+                        break
+            if self._embedding_tp_dummy_join is not None:
+                module, token_ids = self._embedding_tp_dummy_join
+                module(token_ids)
+
+        return super().dummy_inputs_embeds(num_tokens)
 
     def prepare_inputs_embeds(self, scheduled_encoder_inputs, input_batch, req_states) -> torch.Tensor:
         # MRV2 prepares MM embeddings before entering ForwardContext. Upstream
@@ -413,6 +460,14 @@ class AscendModelState(DefaultModelState):
             return prepare_engram_graph_inputs(num_tokens)
         return {}
 
+    def _check_finegrained_tp_idle_graph_step(self, cudagraph_mode: CUDAGraphMode) -> None:
+        if (
+            ring_state_update_skipped()
+            and cudagraph_mode == CUDAGraphMode.NONE
+            and get_ascend_config().finegrained_tp_config.requires_graph(self.vllm_config)
+        ):
+            raise RuntimeError("Fine-grained projection / MLP TP require every DP rank on a captured graph.")
+
     def prepare_attn(
         self,
         input_batch: AscendInputBatch,
@@ -426,8 +481,14 @@ class AscendModelState(DefaultModelState):
         model_specific_attn_metadata: ModelSpecificAttnMetadata | None = None,
     ) -> dict[str, Any]:
         """Override prepare_attn method because `build_attn_metadata` is different from vllm."""
+        self._check_finegrained_tp_idle_graph_step(cudagraph_mode)
         # vLLM #50945 adds this contract; Ascend still disables DBO.
         assert ubatch_idx == 0, "DBO is not supported on Ascend"
+        # Legacy callers (and pre-D2H unit fixtures) build this state via
+        # __new__ without the delayed-D2H buffers; read them defensively and
+        # bind once for the whole method so every branch can use them.
+        pool_generations = getattr(self, "_offload_pool_generations", None)
+        stable_prefixes = getattr(self, "_offload_stable_prefixes", None)
         if cudagraph_mode == CUDAGraphMode.FULL:
             # Use padded sizes - padding is handled by model_runner.prepare_attn.
             num_reqs = input_batch.num_reqs_after_padding
@@ -466,6 +527,7 @@ class AscendModelState(DefaultModelState):
         offload_token_to_req = getattr(self, "_offload_token_to_req", None)
         if offload_req_ids is not None:
             assert offload_token_to_req is not None
+            assert self._offload_request_identity is not None
             update_sparse_kv_offload_metadata(
                 input_batch.num_tokens,
                 input_batch.num_reqs,
@@ -475,6 +537,8 @@ class AscendModelState(DefaultModelState):
                 input_batch.query_start_loc_np,
                 offload_req_ids,
                 offload_token_to_req,
+                request_identity=self._offload_request_identity,
+                is_dummy=getattr(input_batch, "is_dummy", False),
             )
         pool_slots = getattr(self, "_offload_pool_slots", None)
         pool_active = getattr(self, "_offload_pool_active", None)
@@ -502,6 +566,7 @@ class AscendModelState(DefaultModelState):
                 hot_tokens=get_ascend_config().sparse_kv_offload_config.topk_buffer_size,
                 dummy=offload_dummy,
                 lim_cache_histories=histories,
+                generations=pool_generations.np if pool_generations is not None else None,
             )
             if dense_fills:
                 get_sparse_kv_offload_manager().dense_fill_copy_sfa_rows(
@@ -509,8 +574,44 @@ class AscendModelState(DefaultModelState):
                     block_size=self.vllm_config.cache_config.block_size,
                     block_table=block_tables[0],
                 )
-        is_prefilling = torch.from_numpy(input_batch.is_prefilling_np)
-        max_query_len = input_batch.num_scheduled_tokens.max().item()
+            manager = get_sparse_kv_offload_manager()
+            if manager is not None and pool_generations is not None and stable_prefixes is not None:
+                # Newly bound rows adopt the manager's D2H ledger at their
+                # aligned computed frontier; every row then publishes its
+                # stable prefix for the metadata builder.
+                assert pool_slots is not None
+                num_real_reqs = input_batch.num_reqs
+                if offload_dummy:
+                    stable_prefixes.np[:num_reqs] = 0
+                else:
+                    active_slots = pool_slots.np[:num_real_reqs].astype(np.int64, copy=False)
+                    active_generations = pool_generations.np[:num_real_reqs]
+                    owner_generations = manager.d2h_owner_generations_cpu[active_slots]
+                    newly_bound = owner_generations != active_generations
+                    if np.any(newly_bound):
+                        computed = input_batch.num_computed_tokens_np[:num_real_reqs]
+                        initial_prefixes = (
+                            computed[newly_bound]
+                            // self.vllm_config.cache_config.block_size
+                            * self.vllm_config.cache_config.block_size
+                        )
+                        manager.initialize_d2h_slots(
+                            active_slots[newly_bound],
+                            active_generations[newly_bound],
+                            initial_prefixes,
+                        )
+                    stable_prefixes.np[:num_real_reqs] = manager.d2h_stable_prefixes_cpu[active_slots]
+                pool_generations.copy_to_gpu(num_reqs)
+                stable_prefixes.copy_to_gpu(num_reqs)
+        is_prefilling = torch.from_numpy(
+            apply_prefill_as_decode_mask(input_batch.is_prefilling_np, input_batch.prefill_runs_as_decode_np)
+        )
+        # Varlen graphs capture one-token dummy requests but may replay wider
+        # verification rows. Preserve the descriptor's promised bound for C2
+        # compressor launch grids and attention/indexer tiling.
+        max_query_len = input_batch.max_query_len
+        if max_query_len is None:
+            max_query_len = input_batch.num_scheduled_tokens.max().item()
         pcp_context = (
             self.pcp_manager.build_attention_context(input_batch, block_tables, slot_mappings)
             if self.pcp_manager is not None and self.pcp_manager.is_target_attn_groups(attn_groups)
@@ -526,6 +627,7 @@ class AscendModelState(DefaultModelState):
         if self.device_metadata is not None:
             build_metadata = partial(self.device_metadata.run_build, build_attn_metadata)
         self._decoder_replay_common_metadata = {}
+        xlite_cfg: XliteGraphConfig | None = getattr(get_ascend_config(), "xlite_graph_config", None)
         self.attn_metadata = build_metadata(
             attn_groups=attn_groups,
             num_reqs=num_reqs,
@@ -558,13 +660,14 @@ class AscendModelState(DefaultModelState):
             offload_dummy=getattr(input_batch, "is_dummy", False),
             req_topk_buffer_slots=pool_slots.cpu[:num_reqs] if pool_slots is not None else None,
             req_topk_buffer_active=pool_active.cpu[:num_reqs] if pool_active is not None else None,
+            req_topk_buffer_stable_prefixes=(stable_prefixes.gpu[:num_reqs] if stable_prefixes is not None else None),
             copy_sfa_restore_tails=restore_copy_sfa_tails,
             draft_layer_names=getattr(self, "_offload_draft_layer_names", None),
             common_metadata_callback=(
                 lambda group_id, common: self._decoder_replay_common_metadata.__setitem__(group_id, common)
-                if self.decoder_replay is not None
-                else None
-            ),
+            )
+            if self.decoder_replay is not None or (xlite_cfg is not None and xlite_cfg.enabled)
+            else None,
         )
         self._prepare_decoder_replay(input_batch, cudagraph_mode, attn_groups, kv_cache_config)
         if restore_copy_sfa_tails:
@@ -573,4 +676,20 @@ class AscendModelState(DefaultModelState):
                 if getattr(metadata, "copy_sfa_copy_src_offsets", None) is not None:
                     manager.restore_copy_sfa_tails(metadata)
                     break
+        # Delayed D2H planning and launching moved to the runner's step
+        # boundary (model_runner._sparse_kv_offload_d2h_plan_launch): the
+        # builder only settles offload state and consumes it here.
+        # Delayed D2H: plan and launch via the runner hook.
+        if request_states is not None and not getattr(input_batch, "is_dummy", False) and pool_generations is not None:
+            manager = get_sparse_kv_offload_manager()
+            assert pool_slots is not None
+            num_real_reqs = input_batch.num_reqs
+            self.runner_plan_launch_d2h(
+                computed_tokens=input_batch.num_computed_tokens_np[:num_real_reqs],
+                pool_slots=pool_slots.np[:num_real_reqs],
+                pool_generations=pool_generations.np[:num_real_reqs],
+                block_table=block_tables[manager.d2h_host_kv_cache_group_id][:num_real_reqs].cpu().numpy(),
+                num_real_reqs=num_real_reqs,
+            )
+
         return self.attn_metadata

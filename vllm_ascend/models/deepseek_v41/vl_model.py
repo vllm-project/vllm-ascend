@@ -8,7 +8,7 @@ import torch
 from torch import nn
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.interfaces import MultiModalEmbeddings, SupportsEagle3, SupportsMultiModal, SupportsPP
-from vllm.model_executor.models.utils import maybe_prefix
+from vllm.model_executor.models.utils import is_pp_missing_parameter, maybe_prefix
 
 # Upstream #56741 normalized the V4.1 model package name from deepseek_v4_1
 # to deepseek_v41.
@@ -24,6 +24,8 @@ from vllm.models.deepseek_v41.common.mm_preprocess import (
 )
 from vllm.multimodal import MULTIMODAL_REGISTRY
 
+from .engram.shared_pool import rollback_shared_engram
+from .engram_lifecycle import close_engram_on_init_failure
 from .model import AscendDeepseekV41LLMForCausalLM
 from .vision import DeepseekV41Aligner, DeepseekV41ViT
 
@@ -55,6 +57,16 @@ class AscendDeepseekV41ForCausalLM(
     packed_modules_mapping = {"gate_up_proj": ["gate_proj", "up_proj"]}
     language_model_cls = AscendDeepseekV41LLMForCausalLM
 
+    @property
+    def filter_unused_checkpoint_weights(self) -> bool:
+        return self.language_model.filter_unused_checkpoint_weights
+
+    def is_unused_checkpoint_weight(self, name: str) -> bool:
+        return self.language_model.is_unused_checkpoint_weight(name)
+
+    def close_shared_engram(self) -> None:
+        self.language_model.close_shared_engram()
+
     @classmethod
     def get_placeholder_str(cls, modality: str, i: int) -> str | None:
         del i
@@ -62,6 +74,7 @@ class AscendDeepseekV41ForCausalLM(
             return IMAGE_PLACEHOLDER
         return None
 
+    @close_engram_on_init_failure(("language_model", "model", "_engram_remote_reader"))
     def __init__(self, *, vllm_config, prefix: str = "") -> None:
         super().__init__()
         model_config = vllm_config.model_config
@@ -91,14 +104,23 @@ class AscendDeepseekV41ForCausalLM(
                 self.vision.to(dtype=model_config.dtype)
                 self.aligner.to(dtype=model_config.dtype)
 
-        with self._mark_language_model(vllm_config):
-            self.language_model = self.language_model_cls(
-                vllm_config=vllm_config,
-                prefix=maybe_prefix(prefix, "language_model"),
-            )
-        self.requires_uncompiled_fallback = self.language_model.requires_uncompiled_fallback
-        self.make_empty_intermediate_tensors = self.language_model.make_empty_intermediate_tensors
-        self.moe_comm_methods = self.language_model.moe_comm_methods
+        try:
+            with self._mark_language_model(vllm_config):
+                self.language_model = self.language_model_cls(
+                    vllm_config=vllm_config,
+                    prefix=maybe_prefix(prefix, "language_model"),
+                )
+            self.requires_uncompiled_fallback = self.language_model.requires_uncompiled_fallback
+            self.make_empty_intermediate_tensors = self.language_model.make_empty_intermediate_tensors
+            self.moe_comm_methods = self.language_model.moe_comm_methods
+
+        except BaseException:
+            language_model = getattr(self, "language_model", None)
+            if language_model is not None:
+                for module in reversed(list(language_model.modules())):
+                    if getattr(module, "_shared_pool_client", None) is not None:
+                        rollback_shared_engram(module.close_host_offload)
+            raise
 
     def _parse_and_validate_image_input(self, **kwargs: object) -> dict | None:
         patches = kwargs.pop("patches", None)
@@ -308,11 +330,9 @@ class AscendDeepseekV41ForCausalLM(
                 if vision_name is None:
                     yield name, loaded_weight
                     continue
-                # Text-only serving intentionally leaves the vision tower
-                # unconstructed, although a multimodal checkpoint still
-                # contains its tensors. Keep loading strict when the tower is
-                # enabled, but do not make disabled modalities loadable state.
-                if vision_name not in params and self.vision is None:
+                # Skip disabled vision components and towers owned by another
+                # PP stage, but keep loading strict for local enabled modules.
+                if vision_name not in params and (self.vision is None or is_pp_missing_parameter(vision_name, self)):
                     continue
                 param = params[vision_name]
                 loader = getattr(param, "weight_loader", default_weight_loader)
@@ -321,15 +341,6 @@ class AscendDeepseekV41ForCausalLM(
 
         loaded_language = self.language_model.load_weights(language_weights())
         return loaded_vision | {f"language_model.{name}" for name in loaded_language}
-
-    def process_weights_after_loading(self) -> None:
-        hook = getattr(
-            self.language_model,
-            "process_weights_after_loading",
-            None,
-        )
-        if hook is not None:
-            hook()
 
     @property
     def engram_cache_layer_name(self) -> str | None:

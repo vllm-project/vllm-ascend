@@ -26,10 +26,6 @@ from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num, init_device_
 @triton.jit(
     do_not_specialize=[
         "num_tokens",
-        "num_heads",
-        "nope_dim",
-        "rope_dim",
-        "total_dim",
         "qn_stride_t",
         "qn_stride_h",
         "qp_stride_t",
@@ -41,16 +37,19 @@ def _q_gather_prep_head_major_kernel(
     qp_ptr,  # [T, H, rope_dim] q_pe (any non-negative strides)
     out_ptr,  # [H, T, nope_dim + rope_dim] contiguous, head-major gather input
     num_tokens,
-    num_heads,
-    nope_dim,
-    rope_dim,
-    total_dim,
+    num_heads: tl.constexpr,
+    nope_dim: tl.constexpr,
+    rope_dim: tl.constexpr,
+    total_dim: tl.constexpr,
     qn_stride_t,
     qn_stride_h,
+    qn_stride_d: tl.constexpr,
     qp_stride_t,
     qp_stride_h,
+    qp_stride_d: tl.constexpr,
     BLOCK_N: tl.constexpr,
     BLOCK_R: tl.constexpr,
+    BLOCK_ROWS: tl.constexpr,
 ):
     """Assemble the fused query directly in head-major layout.
 
@@ -61,73 +60,40 @@ def _q_gather_prep_head_major_kernel(
     gather. This replaces the torch ``cat -> permute -> contiguous`` chain
     with a single kernel.
 
-    Each fragment uses its own ``tl.arange`` index space, so pointer
-    arithmetic is never negative (no ``offs - nope_dim``) and no per-lane
-    offset selects are required. The wrapper only launches this kernel for
-    shapes it can prove legal (all addresses, including masked tail lanes,
-    inside the tensor storages); any other shape falls back to the torch
-    assembly in the caller (``prep_query_head_major`` raises).
+    Keep each tile inside one head for affine source/destination strides.
+    Masks protect tail rows/features; clamping their addresses would force
+    element-wise movement instead of DMA. Empty fragments are omitted.
     """
     pid = tl.program_id(0)
     num_programs = tl.num_programs(0)
-    total_tasks = num_tokens * num_heads
+    token_tiles = tl.cdiv(num_tokens, BLOCK_ROWS)
+    total_tasks = token_tiles * num_heads
 
-    offs_n = tl.arange(0, BLOCK_N)
-    n_mask = offs_n < nope_dim
-    offs_p = tl.arange(0, BLOCK_R)
-    p_mask = offs_p < rope_dim
-
-    for task_id in range(pid, total_tasks, num_programs):
-        row = task_id
-        head_idx = row // num_tokens
-        token_idx = row % num_tokens
-        dst_base = row * total_dim
+    for task in range(pid, total_tasks, num_programs):
+        head_idx = (task // token_tiles).to(tl.int64)
+        token_idx = (task % token_tiles) * BLOCK_ROWS + tl.arange(0, BLOCK_ROWS)[:, None]
+        row_mask = token_idx < num_tokens
+        token_idx = token_idx.to(tl.int64)
+        dst_base = (head_idx * num_tokens + token_idx) * total_dim
         src_base_n = token_idx * qn_stride_t + head_idx * qn_stride_h
         src_base_p = token_idx * qp_stride_t + head_idx * qp_stride_h
 
-        qn = tl.load(qn_ptr + src_base_n + offs_n, mask=n_mask, other=0)
-        tl.store(out_ptr + dst_base + offs_n, qn, mask=n_mask)
-
-        qp = tl.load(qp_ptr + src_base_p + offs_p, mask=p_mask, other=0)
-        tl.store(out_ptr + dst_base + nope_dim + offs_p, qp, mask=p_mask)
-
-
-def _qualifies_fast_path(
-    ql_nope: torch.Tensor,
-    q_pe: torch.Tensor,
-    block_n: int,
-    block_r: int,
-    rope_dim: int,
-    total_dim: int,
-) -> bool:
-    """Host-side proof that every address the fast kernel computes is legal.
-
-    Loads and stores only use non-negative offsets (per-fragment index
-    spaces), so the remaining risk is a masked tail lane pointing past the
-    end of a tensor storage. Returns True iff no such lane exists for any
-    (head, token) row:
-      - strides are non-negative (no mirrored views);
-      - the two store tails stay inside the [H, T, total] allocation, i.e.
-        BLOCK_N <= total_dim and nope_dim + BLOCK_R <= total_dim;
-      - loads: the last row base + BLOCK - 1 never passes the storage end,
-        for both fragments.
-    """
-    if ql_nope.stride(0) < 0 or ql_nope.stride(1) < 0 or q_pe.stride(0) < 0 or q_pe.stride(1) < 0:
-        return False
-    if block_n > total_dim or ql_nope.shape[-1] + block_r > total_dim:
-        return False
-    num_tokens, num_heads = ql_nope.shape[:2]
-    for tensor, block in ((ql_nope, block_n), (q_pe, block_r)):
-        last_base = (num_tokens - 1) * tensor.stride(0) + (num_heads - 1) * tensor.stride(1)
-        if last_base + block > tensor.numel():
-            return False
-    return True
+        if nope_dim > 0:
+            offs_n = tl.arange(0, BLOCK_N)[None, :]
+            n_mask = row_mask & (offs_n < nope_dim)
+            qn = tl.load(qn_ptr + src_base_n + offs_n * qn_stride_d, mask=n_mask, other=0)
+            tl.store(out_ptr + dst_base + offs_n, qn, mask=n_mask)
+        if rope_dim > 0:
+            offs_p = tl.arange(0, BLOCK_R)[None, :]
+            p_mask = row_mask & (offs_p < rope_dim)
+            qp = tl.load(qp_ptr + src_base_p + offs_p * qp_stride_d, mask=p_mask, other=0)
+            tl.store(out_ptr + dst_base + nope_dim + offs_p, qp, mask=p_mask)
 
 
 def prep_query_head_major(
     ql_nope: torch.Tensor,
     q_pe: torch.Tensor,
-) -> torch.Tensor | None:
+) -> torch.Tensor:
     """Return the fused query as a contiguous [H, T, nope+rope] tensor.
 
     Args:
@@ -137,40 +103,35 @@ def prep_query_head_major(
     Returns:
         [H, T, nope_dim + rope_dim] contiguous tensor, in the layout
         ``all_gather_into_tensor`` produces for a head gather (each rank's
-        head chunk is contiguous along dim 0); or ``None`` when the shapes
-        cannot be proven legal for the kernel (see ``_qualifies_fast_path``)
-        or when the input is empty (``num_tokens == 0`` or ``num_heads == 0``),
-        in which case callers fall back to the torch ``cat -> permute ->
-        contiguous`` assembly. No guarded Triton kernel is used.
+        head chunk is contiguous along dim 0). Empty inputs return an empty
+        output without launching a kernel. Zero-width fragments and strided
+        views are supported; kernel failures propagate to the caller.
 
     Raises:
         RuntimeError: on genuinely invalid inputs (mismatched (T, H) or
-        dtype); those cannot be assembled by the torch fallback either.
+        dtype).
     """
     if ql_nope.shape[:2] != q_pe.shape[:2]:
         raise RuntimeError(
             f"prep_query_head_major requires matching (T, H), got {tuple(ql_nope.shape)} and {tuple(q_pe.shape)}"
         )
-    if ql_nope.dtype != q_pe.dtype:
-        raise RuntimeError("prep_query_head_major requires ql_nope and q_pe to share a dtype")
+    if ql_nope.dtype != q_pe.dtype or ql_nope.device != q_pe.device:
+        raise RuntimeError("prep_query_head_major requires ql_nope and q_pe to share a dtype and device")
 
     num_tokens, num_heads, nope_dim = ql_nope.shape
-    if num_tokens == 0 or num_heads == 0:
-        return None
     rope_dim = q_pe.shape[-1]
     total_dim = nope_dim + rope_dim
-    block_n = next_power_of_2(nope_dim)
-    block_r = next_power_of_2(rope_dim)
-    if not _qualifies_fast_path(ql_nope, q_pe, block_n, block_r, rope_dim, total_dim):
-        return None
     out = torch.empty(
         (num_heads, num_tokens, total_dim),
         dtype=ql_nope.dtype,
         device=ql_nope.device,
     )
+    if out.numel() == 0:
+        return out
     init_device_properties_triton()
     num_vectorcore = get_vectorcore_num()
-    grid = (min(num_tokens * num_heads, num_vectorcore),)
+    block_rows = 8 if num_tokens * num_heads >= 8 * num_vectorcore else 1
+    grid = (min(triton.cdiv(num_tokens, block_rows) * num_heads, num_vectorcore),)
 
     _q_gather_prep_head_major_kernel[grid](
         ql_nope,
@@ -183,10 +144,13 @@ def prep_query_head_major(
         total_dim,
         ql_nope.stride(0),
         ql_nope.stride(1),
+        ql_nope.stride(2),
         q_pe.stride(0),
         q_pe.stride(1),
-        BLOCK_N=block_n,
-        BLOCK_R=block_r,
+        q_pe.stride(2),
+        BLOCK_N=next_power_of_2(max(nope_dim, 1)),
+        BLOCK_R=next_power_of_2(max(rope_dim, 1)),
+        BLOCK_ROWS=block_rows,
         multibuffer=False,
     )
 

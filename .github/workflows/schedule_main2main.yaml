@@ -24,9 +24,9 @@ on:
         required: false
         default: ''
       model:
-        description: 'opencode model name (default: deepseek/deepseek-flash)'
+        description: 'opencode model name (default: deepseek/deepseek-v4.1-flash)'
         required: false
-        default: 'deepseek/deepseek-flash'
+        default: 'deepseek/deepseek-v4.1-flash'
       runner:
         description: 'A3 16-card NPU runner label (linux-aarch64-a3-16-sh-001 or linux-aarch64-a3-800i-16)'
         required: false
@@ -44,7 +44,7 @@ defaults:
 
 env:
   UPSTREAM_REPO: vllm-project/vllm-ascend
-  MAIN2MAIN_MODEL: ${{ github.event_name == 'workflow_dispatch' && inputs.model || 'deepseek/deepseek-flash' }}
+  MAIN2MAIN_MODEL: ${{ github.event_name == 'workflow_dispatch' && inputs.model || 'deepseek/deepseek-v4.1-flash' }}
   RUNS_ON_S3_BUCKET_CACHE: ascend-ci-cache-hk
   RUNS_ON_S3_BUCKET_ENDPOINT: https://obs.ap-southeast-1.myhuaweicloud.com
   RUNS_ON_S3_FORCE_PATH_STYLE: "false"
@@ -195,7 +195,7 @@ jobs:
       group: main2main
       cancel-in-progress: false
     container:
-      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:9.2.1-a3-ubuntu22.04-py3.12
+      image: swr.cn-north-12.myhuaweicloud.com/atlas_inference/cann:9.3.0_20261113161300-a3-ubuntu22.04-py3.12
       env:
         VLLM_LOGGING_LEVEL: ERROR
         VLLM_USE_MODELSCOPE: True
@@ -218,7 +218,7 @@ jobs:
       GH_TOKEN: ${{ secrets.DEV_SUBMITTER_TOKEN }}
       OBS_CACHE_WRITE_ACCESS_KEY_ID: ${{ secrets.HW_OBS_AK }}
       OBS_CACHE_WRITE_SECRET_ACCESS_KEY: ${{ secrets.HW_OBS_SK }}
-      MAIN2MAIN_IMAGE_TAG: 9.2.1-a3-ubuntu22.04-py3.12
+      MAIN2MAIN_IMAGE_TAG: 9.3.0_20261113161300-a3-ubuntu22.04-py3.12
       TARGET_COMMIT: ${{ github.event_name == 'workflow_dispatch' && inputs.target_commit || '' }}
       PUSH_TO_GITHUB: 'true'
       GITHUB_REPO: vllm-project/vllm-ascend
@@ -319,6 +319,11 @@ jobs:
       - name: Install opencode + main2main-flow
         env:
           NODE_VERSION: 24.18.0
+          # Unified agent credential, shared with the AI review job (#22319).
+          # The built-in `deepseek` provider reads DEEPSEEK_API_KEY directly
+          # and defaults to https://api.deepseek.com, so no auth.json needed.
+          # AI_REVIEW_API is expected to point at that same DeepSeek channel.
+          DEEPSEEK_API_KEY: ${{ secrets.AI_REVIEW_KEY }}
         run: |
           set -euxo pipefail
 
@@ -343,25 +348,16 @@ jobs:
             --prefix "$HOME/.opencode" \
             --registry https://repo.huaweicloud.com/repository/npm/ \
             opencode-ai
-          # configure opencode auth
-          # DeepSeek official platform; MAIN2MAIN_API_KEY must hold a DeepSeek key.
-          mkdir -p ~/.local/share/opencode
-          cat > ~/.local/share/opencode/auth.json <<EOF
-          {
-            "deepseek": {
-              "type": "api",
-              "key": "${{ secrets.MAIN2MAIN_API_KEY }}"
-            }
-          }
-          EOF
-          # extend opencode's model catalog: models.dev does not list deepseek-flash yet
+
+          # models.dev does not list deepseek-v4.1-flash yet; extend the
+          # built-in deepseek provider catalog with it.
           mkdir -p ~/.config/opencode
           cat > ~/.config/opencode/opencode.json <<EOF
           {
             "provider": {
               "deepseek": {
                 "models": {
-                  "deepseek-flash": {}
+                  "deepseek-v4.1-flash": {}
                 }
               }
             }
@@ -504,7 +500,7 @@ jobs:
         run: |
           pip install uc-manager
           uv pip install -r requirements-dev.txt
-          uv pip install 'mooncake-transfer-engine-npu===0.3.14rc3'
+          uv pip install 'mooncake-transfer-engine-npu===0.3.14.post1'
           # Reinstall triton-ascend last so its files win over upstream triton in the shared triton/ dir.
           uv pip install --force-reinstall --no-deps 'triton-ascend===3.6.0.post2'
           if [ "$CSRC_CACHE_HIT" = "true" ]; then
@@ -519,20 +515,11 @@ jobs:
         working-directory: ${{ github.workspace }}
         run: |
           set -euo pipefail
-          # This runner is linux-aarch64-a3; keep the case block when other
-          # pools are added (see _selected_tests.yaml for the full matrix).
-          FLA_VERSION=26.9.1+deva4a7958
-          FLA_WHL="flash_linear_attention_npu_a3-${FLA_VERSION}-py3-none-manylinux_2_34_aarch64.whl"
-          FLA_SHA256=6a6f298a23fbc4902e8379a469696bca1cce108db8159d9c5bf6dfe819a22d58
-          FLA_DOWNLOAD_URL="https://github.com/flashserve/flash-linear-attention-npu/releases/download/v26.9.1-beta2/${FLA_WHL}"
-          curl --fail --location --show-error --silent --retry 3 --retry-delay 5 --retry-all-errors \
-            "${FLA_DOWNLOAD_URL}" -o "/tmp/${FLA_WHL}"
-          echo "${FLA_SHA256}  /tmp/${FLA_WHL}" | sha256sum --check
-          uv pip install --no-deps "/tmp/${FLA_WHL}"
+          # Match the exact mirror pin used by selected/upstream A3 tests.
+          uv pip install --no-deps flash-linear-attention-npu-a3===26.10.0+feature
           # Fail the job here rather than letting the flow rediscover a
           # missing kernel op as an "adaptation failure" hours later.
           python3 -c "import fla_npu.ops.ascendc"
-          rm -f "/tmp/${FLA_WHL}"
 
       - name: Save vllm-ascend csrc cache
         # Persist the on-runner build for the next dispatch.
@@ -559,6 +546,9 @@ jobs:
         working-directory: ${{ github.workspace }}
         env:
           RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES: True
+          # Same unified agent credential as the install step; the main2main
+          # flow spawns `opencode` and inherits this environment.
+          DEEPSEEK_API_KEY: ${{ secrets.AI_REVIEW_KEY }}
         run: |
           set -euo pipefail
           export PATH="$HOME/.opencode/bin:$PATH"
