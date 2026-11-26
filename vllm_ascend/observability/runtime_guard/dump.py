@@ -490,15 +490,41 @@ def _slice_blocks(tensor: torch.Tensor, block_ids: list[int]) -> tuple[torch.Ten
     if not valid:
         return None
     # Per-block D2H into a CPU buffer. ``tensor[b]`` is a view into the existing
-    # page; stacking / allocation happens on host only.
+    # page; stacking / allocation happens on host only (avoids device gather OOM).
+    # Prefer pinned + non_blocking copies then one device sync so the dump path
+    # does not force a host sync per block on the inference thread.
     prototype = tensor[valid[0]]
-    out = torch.empty(
-        (len(valid),) + tuple(prototype.shape),
-        dtype=tensor.dtype,
-        device="cpu",
-    )
+    device_type = tensor.device.type
+    on_accel = device_type in ("npu", "cuda")
+    pin_memory = False
+    if on_accel:
+        try:
+            out = torch.empty(
+                (len(valid),) + tuple(prototype.shape),
+                dtype=tensor.dtype,
+                device="cpu",
+                pin_memory=True,
+            )
+            pin_memory = True
+        except RuntimeError:
+            out = torch.empty(
+                (len(valid),) + tuple(prototype.shape),
+                dtype=tensor.dtype,
+                device="cpu",
+            )
+    else:
+        out = torch.empty(
+            (len(valid),) + tuple(prototype.shape),
+            dtype=tensor.dtype,
+            device="cpu",
+        )
     for i, block_id in enumerate(valid):
-        out[i].copy_(tensor[block_id])
+        out[i].copy_(tensor[block_id], non_blocking=pin_memory)
+    if pin_memory:
+        if device_type == "npu":
+            torch.npu.synchronize()
+        else:
+            torch.cuda.synchronize()
     return out, valid
 
 
