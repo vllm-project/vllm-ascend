@@ -1,0 +1,4 @@
+pr: 23326
+entries:
+  - category: feature
+    text: Qwen3 attention can use fused Q/K RMSNorm and RoPE on Ascend without model-level compilation for supported BF16 inputs when `fuse_qknorm_rope` is enabled.
