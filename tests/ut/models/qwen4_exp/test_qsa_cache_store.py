@@ -4,6 +4,7 @@
 import os
 import subprocess
 import sys
+from pathlib import Path
 
 import pytest
 
@@ -18,7 +19,7 @@ except ImportError:
 if not torch.npu.is_available():
     raise SystemExit({_CHILD_EXIT_NO_DEVICE})
 
-from vllm_ascend.ops.triton.qwen4_exp.qsa import qsa_store_cache_rows
+from vllm_ascend.models.qwen4_exp.ops.qsa import qsa_store_cache_rows
 
 blocks = 5
 page_size = 8
@@ -71,7 +72,7 @@ def test_qsa_store_invalid_slots_stay_in_bounds_for_strided_cache():
     if not torch.npu.is_available():
         pytest.skip("requires a real Ascend NPU")
 
-    repo_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+    repo_root = str(Path(__file__).resolve().parents[4])
     env = dict(os.environ)
     env["PYTHONPATH"] = os.pathsep.join(path for path in (repo_root, env.get("PYTHONPATH")) if path)
     try:

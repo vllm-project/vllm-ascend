@@ -36,16 +36,16 @@ from vllm_ascend.models.qwen3_5_vl import (
     _AscendProcessorMixin,
     _AscendVLPreprocessMixin,
 )
-from vllm_ascend.ops.triton.qwen4_exp.hc import (
+
+from . import ple_embedding  # noqa: F401 - register the OOT host embedding before model construction
+from .hc_fused import AscendTextGatedResidual, prepare_model_textgr_weights
+from .ops.hc import (
     grouped_gemma_rmsnorm,
     hc_combine,
     hc_combine_norm,
     hc_gate_mix,
     hc_silu,
 )
-
-from . import ple_embedding  # noqa: F401 - register the OOT host embedding before model construction
-from .hc_fused import AscendTextGatedResidual, prepare_model_textgr_weights
 from .ple import AscendPCPPLELayer, patch_upstream_ple_short_conv
 from .topk_buffer import share_target_topk_buffers
 

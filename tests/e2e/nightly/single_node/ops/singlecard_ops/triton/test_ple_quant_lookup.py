@@ -9,8 +9,8 @@ import torch
 import torch_npu  # noqa: F401
 
 from vllm_ascend.models.deepseek_v41.engram.npu import CHUNK_ROWS, HostUvaBuffer
+from vllm_ascend.models.qwen4_exp.ops.ple_lookup_quantized import _lookup_quantized, lookup_quantized
 from vllm_ascend.models.qwen4_exp.ple_quant import AscendPLEQuantizedEmbeddingMethod
-from vllm_ascend.ops.triton.qwen4_exp.ple_lookup_quantized import _lookup_quantized, lookup_quantized
 from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
 
 

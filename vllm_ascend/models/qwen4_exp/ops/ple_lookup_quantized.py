@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Gather and dequantize INT8/MXFP8 PLE rows from registered host memory."""
+"""Model-local gather/dequantize of INT8/MXFP8 PLE rows."""
 
 import torch
 from vllm.triton_utils import tl, triton

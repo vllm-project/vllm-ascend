@@ -7,7 +7,7 @@ import pytest
 import torch
 
 from vllm_ascend.device.hardware_profile import HardwareCapability
-from vllm_ascend.ops.triton.qwen4_exp import hc
+from vllm_ascend.models.qwen4_exp.ops import hc
 
 
 class _KernelRecorder:

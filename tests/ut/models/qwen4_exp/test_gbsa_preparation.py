@@ -98,7 +98,7 @@ class _Kernel:
 
 
 def load_cpu_preparation():
-    source = Path(__file__).resolve().parents[4] / "vllm_ascend/ops/triton/qwen4_exp/gbsa.py"
+    source = Path(__file__).resolve().parents[4] / "vllm_ascend/models/qwen4_exp/qsa_prepare.py"
     module = ast.parse(source.read_text())
     module.body = [node for node in module.body if not isinstance(node, (ast.Import, ast.ImportFrom))]
     language = _Language()
@@ -157,7 +157,7 @@ def test_empty_preparation():
 
 @pytest.mark.parametrize("dtype", [torch.int32, torch.int64])
 def test_pack_wide_positions_and_strided_buffers(dtype):
-    source = Path(__file__).resolve().parents[4] / "vllm_ascend/ops/triton/qwen4_exp/qsa.py"
+    source = Path(__file__).resolve().parents[4] / "vllm_ascend/models/qwen4_exp/ops/qsa.py"
     module = ast.parse(source.read_text())
     kernel_node = next(
         node

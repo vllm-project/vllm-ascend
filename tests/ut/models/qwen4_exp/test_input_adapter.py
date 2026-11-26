@@ -135,36 +135,6 @@ def test_rotary_wrapper_preserves_delegate_fallback(monkeypatch):
     assert delegate.calls == 1
 
 
-@pytest.mark.parametrize("tokens", [1, 2, 7])
-def test_mrope_slices_token_axis_and_keeps_fixed_address(tokens: int, monkeypatch):
-    adapter_cls, _ = _load_adapter(monkeypatch)
-    layer = AscendQwen4ExpQSAAttention()
-    adapter = adapter_cls(_Model(layer))
-    positions = torch.stack((torch.arange(9), torch.arange(9) + 1, torch.arange(9) + 2))
-
-    adapter.prepare_positions(positions, tokens)
-    first = layer._qsa_prepared_cos_sin
-    first_ptr = first.data_ptr()
-    assert first.shape == (3, tokens, 8)
-
-    adapter.prepare_positions(positions + 3, tokens)
-    assert layer._qsa_prepared_cos_sin.data_ptr() == first_ptr
-    torch.testing.assert_close(layer._qsa_prepared_cos_sin, layer.rotary_emb.cos_sin_cache[(positions + 3)[:, :tokens]])
-
-
-def test_one_dimensional_positions_keep_fixed_address(monkeypatch):
-    adapter_cls, _ = _load_adapter(monkeypatch)
-    layer = AscendQwen4ExpQSAAttention()
-    adapter = adapter_cls(_Model(layer))
-
-    adapter.prepare_positions(torch.arange(8), 4)
-    pointer = layer._qsa_prepared_cos_sin.data_ptr()
-    adapter.prepare_positions(torch.arange(8) + 1, 4)
-
-    assert layer._qsa_prepared_cos_sin.shape == (4, 8)
-    assert layer._qsa_prepared_cos_sin.data_ptr() == pointer
-
-
 def test_full_graph_metadata_uses_padded_geometry_and_fixed_address(monkeypatch):
     adapter_cls, calls = _load_adapter(monkeypatch)
     layer = AscendQwen4ExpQSAAttention()
@@ -247,15 +217,13 @@ def test_full_graph_negative_padding_request_uses_last_sequence(monkeypatch):
     )
 
 
-def test_compatible_layers_share_one_schedule_per_step(monkeypatch):
+def test_compatible_layers_share_one_metadata_schedule_per_step(monkeypatch):
     adapter_cls, calls = _load_adapter(monkeypatch)
     first = AscendQwen4ExpQSAAttention()
     second = AscendQwen4ExpQSAAttention()
     second.layer_name = "model.layers.1.self_attn"
     second.indexer.raw_key_cache = SimpleNamespace(prefix="raw2")
     second.indexer.compressed_key_cache = SimpleNamespace(prefix="compressed2")
-    # Real QSA layers share the same rotary cache; model it explicitly.
-    second.rotary_emb = first.rotary_emb
     adapter = adapter_cls(_TwoLayerModel(first, second))
 
     raw = SimpleNamespace(
@@ -289,11 +257,9 @@ def test_compatible_layers_share_one_schedule_per_step(monkeypatch):
     }
 
     adapter.prepare_attention_metadata(metadata, full_graph=False)
-    adapter.prepare_positions(torch.arange(4), 2)
 
     assert calls == {"li": 1, "gbsa": 1}
     assert main1.qsa_gbsa_metadata.data_ptr() == main2.qsa_gbsa_metadata.data_ptr()
-    assert first._qsa_prepared_cos_sin.data_ptr() == second._qsa_prepared_cos_sin.data_ptr()
 
 
 def test_same_geometry_with_different_dynamic_tensors_does_not_share(monkeypatch):

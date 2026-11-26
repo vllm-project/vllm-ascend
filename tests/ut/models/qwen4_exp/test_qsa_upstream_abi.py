@@ -15,6 +15,7 @@ from vllm.v1.worker.utils import AttentionGroup
 
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
 from vllm_ascend.models.qwen4_exp import model, qsa
+from vllm_ascend.models.qwen4_exp.ops import qsa as qsa_ops
 from vllm_ascend.worker.v2.attn_utils import build_attn_metadata
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch
 from vllm_ascend.worker.v2.pcp_manager import AscendPCPAttentionContext
@@ -205,12 +206,14 @@ def test_fused_prepare_upstream_abi_materializes_qkv_and_gate(monkeypatch, pcp) 
         slot_mapping=torch.tensor([0, 1]),
     )
     side_prefix = "model.layers.0.self_attn.indexer.raw_key_cache"
+    compressed_prefix = "model.layers.0.self_attn.indexer.compressed_key_cache"
     side_metadata = SimpleNamespace(
         num_actual_tokens=2,
         token_to_req=torch.tensor([0, 0]),
         logical_positions=torch.tensor([0, 1]),
         seq_lens=torch.tensor([2]),
     )
+    compressed_metadata = SimpleNamespace(num_actual_tokens=2)
     if pcp:
         side_metadata.pcp_context = SimpleNamespace(
             local_num_tokens=2,
@@ -228,6 +231,7 @@ def test_fused_prepare_upstream_abi_materializes_qkv_and_gate(monkeypatch, pcp) 
             attn_metadata={
                 layer.layer_name: main_metadata,
                 side_prefix: side_metadata,
+                compressed_prefix: compressed_metadata,
             }
         ),
     )
@@ -237,18 +241,63 @@ def test_fused_prepare_upstream_abi_materializes_qkv_and_gate(monkeypatch, pcp) 
     indexer = Mock(return_value=(selected, None))
     indexer.output_width = 3
     indexer.raw_key_cache = SimpleNamespace(prefix=side_prefix)
+    indexer.compressed_key_cache = SimpleNamespace(prefix=compressed_prefix)
     layer.indexer = indexer
     layer.impl = Mock()
 
     projected_q = torch.arange(16, dtype=torch.float32).reshape(2, 8)
     projected_k = torch.arange(8, dtype=torch.float32).reshape(2, 4)
     projected_v = projected_k + 10
-    projected_gate = projected_q + 20
-    layer._project_qkv_gate = Mock(return_value=(projected_q, projected_k, projected_v, projected_gate))
+    gate_data_ptr = None
+
+    def project_qkv_to_gate(
+        qkv_arg,
+        q_weight,
+        k_weight,
+        cos_sin,
+        gate_output,
+        num_q_heads,
+        num_kv_heads,
+        head_size,
+        eps,
+        mrope_section,
+        is_interleaved,
+        rope_dim,
+        positions_arg,
+    ):
+        nonlocal gate_data_ptr
+        assert qkv_arg is qkv
+        assert positions_arg is positions
+        assert q_weight is layer.q_norm.weight
+        assert k_weight is layer.k_norm.weight
+        assert cos_sin is layer.rotary_emb.cos_sin_cache
+        assert (num_q_heads, num_kv_heads, head_size) == (2, 1, 4)
+        assert eps == 1e-6
+        assert mrope_section == [1, 1, 0]
+        assert is_interleaved
+        assert rope_dim == 4
+        gate_data_ptr = gate_output.data_ptr()
+        gate_output.copy_(projected_q + 20)
+        return projected_q, projected_k, projected_v
+
+    monkeypatch.setattr(
+        qsa,
+        "qwen4_exp_split_qkv_rmsnorm_mrope_out",
+        project_qkv_to_gate,
+    )
+    layer.q_norm = SimpleNamespace(weight=torch.empty(4, dtype=torch.bfloat16), variance_epsilon=1e-6)
+    layer.k_norm = SimpleNamespace(weight=torch.empty(4, dtype=torch.bfloat16), variance_epsilon=1e-6)
+    layer.rotary_emb = SimpleNamespace(
+        cos_sin_cache=torch.empty((8, 4)),
+        mrope_section=[1, 1, 0],
+        mrope_interleaved=True,
+        rotary_dim=4,
+        _match_cos_sin_cache_dtype=lambda _: layer.rotary_emb.cos_sin_cache,
+    )
 
     hidden_states = torch.empty((2, 8))
     positions = torch.arange(2)
-    qkv = torch.empty((2, 24))
+    qkv = torch.empty((2, 24), dtype=torch.bfloat16)
     output = torch.empty((2, 2, 4))
     gate = torch.empty_like(output)
 
@@ -263,8 +312,8 @@ def test_fused_prepare_upstream_abi_materializes_qkv_and_gate(monkeypatch, pcp) 
         gate=gate,
     )
 
-    layer._project_qkv_gate.assert_called_once_with(qkv, positions)
-    torch.testing.assert_close(gate, projected_gate.view_as(gate))
+    assert gate_data_ptr == gate.data_ptr()
+    torch.testing.assert_close(gate, (projected_q + 20).view_as(gate))
     layer.impl.do_kv_cache_update.assert_called_once()
     update_args = layer.impl.do_kv_cache_update.call_args.args
     expected_key = projected_k.view(2, 1, 4)
@@ -277,9 +326,77 @@ def test_fused_prepare_upstream_abi_materializes_qkv_and_gate(monkeypatch, pcp) 
     torch.testing.assert_close(update_args[2], expected_value)
     torch.testing.assert_close(update_args[4], main_metadata.slot_mapping)
     assert layer.impl.forward_qsa.call_count + layer.impl.forward.call_count == 1
-    forward_call = layer.impl.forward
+    forward_call = layer.impl.forward_qsa if layer.impl.forward_qsa.called else layer.impl.forward
     forward_args = forward_call.call_args.args
     torch.testing.assert_close(forward_args[1], projected_q.view(2, 2, 4))
+    assert forward_call.call_args.kwargs["qsa_step_metadata"] is compressed_metadata
+
+
+def test_num_actual_tokens_uses_raw_cache_metadata(monkeypatch) -> None:
+    layer = qsa.AscendQwen4ExpQSAAttention.__new__(qsa.AscendQwen4ExpQSAAttention)
+    torch.nn.Module.__init__(layer)
+    layer.layer_name = "model.layers.0.self_attn.attn"
+    raw_prefix = "model.layers.0.self_attn.indexer.raw_key_cache"
+    layer.indexer = SimpleNamespace(raw_key_cache=SimpleNamespace(prefix=raw_prefix))
+    monkeypatch.setattr(
+        qsa,
+        "get_forward_context",
+        lambda: SimpleNamespace(attn_metadata={raw_prefix: SimpleNamespace(num_actual_tokens=7)}),
+    )
+
+    assert layer._num_actual_tokens() == 7
+
+
+def test_main_fused_prepare_eligibility_rejects_text_only_rope() -> None:
+    layer = qsa.AscendQwen4ExpQSAAttention.__new__(qsa.AscendQwen4ExpQSAAttention)
+    torch.nn.Module.__init__(layer)
+    layer.head_dim = 4
+    layer.q_norm = SimpleNamespace(weight=torch.empty(4, dtype=torch.bfloat16))
+    layer.k_norm = SimpleNamespace(weight=torch.empty(4, dtype=torch.bfloat16))
+    layer.rotary_emb = SimpleNamespace(rotary_dim=4)
+
+    assert not layer._fused_qkv_prepare_eligible(
+        torch.empty((2, 24), dtype=torch.bfloat16),
+        torch.arange(2),
+    )
+
+
+def test_qsa_store_kv_rows_accepts_independent_singleton_head_layouts(monkeypatch) -> None:
+    launches = []
+
+    class FakeKernel:
+        def __getitem__(self, grid):
+            def launch(*args, **kwargs):
+                launches.append((grid, args, kwargs))
+
+            return launch
+
+    monkeypatch.setattr(qsa_ops, "_store_qsa_key_position_rows_kernel", FakeKernel())
+    key_cache = torch.empty((1, 2, 1, 4), dtype=torch.bfloat16)
+    value_cache = torch.empty_like(key_cache)
+    key_rows = torch.empty((2, 1, 4), dtype=torch.bfloat16)
+    value_rows = torch.empty((2, 4), dtype=torch.bfloat16)
+
+    qsa_ops.qsa_store_kv_rows(
+        key_cache,
+        value_cache,
+        torch.tensor([0, 1]),
+        key_rows,
+        value_rows,
+    )
+
+    assert len(launches) == 1
+
+
+def test_gate_buffer_is_reused_for_the_same_graph_shape() -> None:
+    layer = qsa.AscendQwen4ExpQSAAttention.__new__(qsa.AscendQwen4ExpQSAAttention)
+    torch.nn.Module.__init__(layer)
+    output = torch.empty((8, 2, 4), dtype=torch.bfloat16)
+
+    first = layer._gate_buffer_for(output)
+    second = layer._gate_buffer_for(output)
+
+    assert first is second
 
 
 def test_fused_prepare_zeros_gate_without_runtime_metadata(monkeypatch) -> None:
@@ -416,6 +533,10 @@ def test_pcp_indexer_global_write_invalidates_the_local_layout(monkeypatch) -> N
     common._num_computed_tokens_cache = torch.tensor([0])
     monkeypatch.setattr(qsa.QSAIndexerMetadataBuilder, "build", lambda *_: SimpleNamespace())
     builder = qsa.AscendPCPQSAIndexerMetadataBuilder.__new__(qsa.AscendPCPQSAIndexerMetadataBuilder)
+    # This test covers PCP global-write metadata invalidation, not compressed
+    # QSA preparation.  Keep the compressed path disabled as a real builder
+    # configured with a non-compressing cache would do.
+    builder.compress_ratio = 1
     builder.write_builder = Mock()
 
     builder.build(0, common)
@@ -507,6 +628,9 @@ def test_pcp_qsa_full_graph_keeps_capture_and_replay_extents(monkeypatch, cpu_to
         ),
         torch.device("cpu"),
     )
+    # The extent assertions below exercise the PCP gather/write metadata.  A
+    # compressed-cache owner is intentionally not part of this focused setup.
+    indexer_builder.compress_ratio = 1
 
     monkeypatch.setattr(
         qsa.upstream_qsa.Qwen4ExpQSAMetadataBuilder,

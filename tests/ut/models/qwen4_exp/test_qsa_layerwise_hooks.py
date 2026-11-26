@@ -13,7 +13,12 @@ def test_qsa_restores_before_updates_and_opens_prefetch_after_updates(monkeypatc
     order = []
     main = SimpleNamespace(num_actual_tokens=2, slot_mapping=torch.arange(2))
     raw = SimpleNamespace(num_actual_tokens=2, token_to_req=None, logical_positions=None, seq_lens=None)
-    monkeypatch.setattr(qsa, "get_forward_context", lambda: SimpleNamespace(attn_metadata={"main": main, "raw": raw}))
+    compressed = SimpleNamespace(num_actual_tokens=2)
+    monkeypatch.setattr(
+        qsa,
+        "get_forward_context",
+        lambda: SimpleNamespace(attn_metadata={"main": main, "raw": raw, "compressed": compressed}),
+    )
     monkeypatch.setattr(qsa, "wait_for_kv_layer_from_connector", lambda name: order.append("load"))
     saved = []
 
@@ -33,6 +38,7 @@ def test_qsa_restores_before_updates_and_opens_prefetch_after_updates(monkeypatc
 
     class Indexer:
         raw_key_cache = SimpleNamespace(prefix="raw")
+        compressed_key_cache = SimpleNamespace(prefix="compressed")
         output_width = 4
 
         def __call__(self, *args, **kwargs):

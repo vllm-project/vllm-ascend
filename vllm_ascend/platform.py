@@ -1710,6 +1710,7 @@ def _setup_compile_backend(
                 "vllm::minimax_m3_fused_sparse_forward",
                 "vllm::glm5next_kda_forward_with_output",
                 "vllm::step5_sparse_attention_forward",
+                "vllm::qwen4_exp_ascend_qsa_core_with_output",
             ]
         )
         # npugraph_ex compiles each piece (force_eager) and runs the static/

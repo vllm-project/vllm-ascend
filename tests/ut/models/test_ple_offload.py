@@ -50,7 +50,7 @@ def test_failed_close_preserves_owner_for_retry():
 @pytest.mark.parametrize("reduce_results", [True, False])
 @pytest.mark.parametrize("format_", ["bf16", "int8", "mxfp8"])
 def test_backend_reduces_only_when_outer_sp_does_not(monkeypatch, reduce_results, format_):
-    from vllm_ascend.ops.triton.qwen4_exp import ple_lookup, ple_lookup_quantized
+    from vllm_ascend.models.qwen4_exp.ops import ple_lookup, ple_lookup_quantized
 
     obj = embedding()
     obj._host_table = SimpleNamespace(ptrs=None)
@@ -221,7 +221,7 @@ def test_load_scope_retains_successful_and_failed_constructors(monkeypatch):
 
 
 def test_lookup_accepts_keyword_ids_and_reuses_output(monkeypatch):
-    from vllm_ascend.ops.triton.qwen4_exp import ple_lookup
+    from vllm_ascend.models.qwen4_exp.ops import ple_lookup
 
     obj = embedding()
     obj.embedding_dim = 160
@@ -239,7 +239,7 @@ def test_lookup_accepts_keyword_ids_and_reuses_output(monkeypatch):
 
 @pytest.mark.parametrize("mismatch", ["shape", "dtype", "device"])
 def test_lookup_rejects_incompatible_output(monkeypatch, mismatch):
-    from vllm_ascend.ops.triton.qwen4_exp import ple_lookup
+    from vllm_ascend.models.qwen4_exp.ops import ple_lookup
 
     obj = embedding()
     obj.embedding_dim = 160
