@@ -2,6 +2,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <limits>
 
 namespace {
 
@@ -52,7 +53,9 @@ ge::graphStatus InferShape(gert::InferShapeContext* context)
         }
         ++layers;
     }
-    if (layers <= 0 || reconstructed->GetDim(0) != s * b ||
+    constexpr int64_t MAX_DIM = std::numeric_limits<int64_t>::max();
+    if (layers <= 0 || s > MAX_DIM / b || layers > MAX_DIM / h / d ||
+        reconstructed->GetDim(0) != s * b ||
         reconstructed->GetDim(1) != layers * h * d) {
         return ge::GRAPH_FAILED;
     }

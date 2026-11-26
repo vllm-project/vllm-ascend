@@ -1,0 +1,7 @@
+pr: 22564
+entries:
+  - category: feature
+    hardware: [A2]
+    text: >-
+      Added the opt-in AscendKVTCOffloadConnector for compressing and offloading the KV cache to
+      CPU on Ascend 910B, with optional quantization.

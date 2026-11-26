@@ -1,6 +1,8 @@
 #ifndef KVTC_PREPARE_TORCH_ADPT_H
 #define KVTC_PREPARE_TORCH_ADPT_H
 
+#include "../kvtc_shape.h"
+
 namespace vllm_ascend {
 
 at::Tensor kvtc_prepare(at::TensorList caches, const at::Tensor& block_ids)
@@ -23,8 +25,14 @@ at::Tensor kvtc_prepare(at::TensorList caches, const at::Tensor& block_ids)
         TORCH_CHECK(cache.device() == first_cache.device(), "kvtc_prepare: all caches must be on one device");
     }
 
-    const int64_t num_tokens = block_ids.size(0) * first_cache.size(1);
-    const int64_t feature_dim = static_cast<int64_t>(caches.size()) * first_cache.size(2) * first_cache.size(3);
+    const int64_t block_size = first_cache.size(1);
+    const int64_t num_heads = first_cache.size(2);
+    const int64_t head_size = first_cache.size(3);
+    const int64_t selected_blocks = block_ids.size(0);
+    check_kvtc_cache_shape(first_cache.size(0), block_size, num_heads, head_size, selected_blocks,
+                           false, "kvtc_prepare");
+    const auto [num_tokens, feature_dim] = kvtc_matrix_shape(static_cast<int64_t>(caches.size()), block_size,
+        num_heads, head_size, selected_blocks, "kvtc_prepare");
     at::Tensor prepared = at::empty({num_tokens, feature_dim}, first_cache.options());
     EXEC_NPU_CMD(aclnnKvtcPrepare, caches, block_ids, prepared);
     return prepared;

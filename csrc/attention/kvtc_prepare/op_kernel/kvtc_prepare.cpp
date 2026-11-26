@@ -111,6 +111,9 @@ void kvtc_prepare(
              ++localTask) {
             __gm__ bfloat16_t* cachePtr =
                 cacheList.GetDataPtr<__gm__ bfloat16_t>(layer);
+            if (cachePtr == nullptr) {
+                return;
+            }
             GlobalTensor<bfloat16_t> cacheGm;
             cacheGm.SetGlobalBuffer(cachePtr, cacheElements);
 
@@ -177,6 +180,9 @@ void kvtc_prepare(
          ++localTask) {
         __gm__ bfloat16_t* cachePtr =
             cacheList.GetDataPtr<__gm__ bfloat16_t>(layer);
+        if (cachePtr == nullptr) {
+            return;
+        }
         GlobalTensor<bfloat16_t> cacheGm;
         cacheGm.SetGlobalBuffer(cachePtr, cacheElements);
 

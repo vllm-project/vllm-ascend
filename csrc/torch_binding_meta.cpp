@@ -5,6 +5,7 @@
 #include <torch_npu/csrc/framework/OpCommand.h>
 #include <torch_npu/csrc/npu/Module.h>
 #include "acl/acl_base_rt.h"
+#include "attention/kvtc_shape.h"
 #include "utils.h"
 
 /*
@@ -567,6 +568,8 @@ at::Tensor kvtc_prepare_meta(at::TensorList caches, const at::Tensor& block_ids)
     TORCH_CHECK(first_cache.dim() == 4, "kvtc_prepare: every cache must be [G,B,H,D]");
     TORCH_CHECK(block_ids.dim() == 1, "kvtc_prepare: block_ids must be one-dimensional");
 
+    check_kvtc_cache_shape(first_cache.sym_size(0), first_cache.sym_size(1), first_cache.sym_size(2),
+                           first_cache.sym_size(3), block_ids.sym_size(0), false, "kvtc_prepare");
     const auto num_tokens = block_ids.sym_size(0) * first_cache.sym_size(1);
     const int64_t num_layers = static_cast<int64_t>(caches.size()); // symbolic-meta-ok: TensorList length is static.
     const auto feature_dim = num_layers * first_cache.sym_size(2) * first_cache.sym_size(3);
@@ -585,6 +588,8 @@ at::Tensor kvtc_prepare_rope_meta(at::TensorList caches, const at::Tensor& block
     TORCH_CHECK(inv_cos_sin_cache.dim() == 2 && inv_cos_sin_cache.sym_size(1) == first_cache.sym_size(3),
                 "kvtc_prepare_rope: inv_cos_sin_cache must be [P,D]");
 
+    check_kvtc_cache_shape(first_cache.sym_size(0), first_cache.sym_size(1), first_cache.sym_size(2),
+                           first_cache.sym_size(3), block_ids.sym_size(0), true, "kvtc_prepare_rope");
     const auto num_tokens = block_ids.sym_size(0) * first_cache.sym_size(1);
     const int64_t num_layers = static_cast<int64_t>(caches.size()); // symbolic-meta-ok: TensorList length is static.
     const auto feature_dim = num_layers * first_cache.sym_size(2) * first_cache.sym_size(3);
@@ -598,6 +603,8 @@ at::Tensor kvtc_restore_meta(const at::Tensor& reconstructed, const at::Tensor& 
     TORCH_CHECK(first_cache.dim() == 4, "kvtc_restore: cache must be [G,B,H,D]");
     TORCH_CHECK(reconstructed.dim() == 2, "kvtc_restore: reconstructed must be [M,K]");
     TORCH_CHECK(dst_block_ids.dim() == 1, "kvtc_restore: dst_block_ids must be [S]");
+    check_kvtc_cache_shape(first_cache.sym_size(0), first_cache.sym_size(1), first_cache.sym_size(2),
+                           first_cache.sym_size(3), dst_block_ids.sym_size(0), false, "kvtc_restore");
     const auto num_tokens = dst_block_ids.sym_size(0) * first_cache.sym_size(1);
     const int64_t num_layers = static_cast<int64_t>(caches.size()); // symbolic-meta-ok: TensorList length is static.
     const auto feature_dim = num_layers * first_cache.sym_size(2) * first_cache.sym_size(3);
@@ -619,6 +626,8 @@ at::Tensor kvtc_restore_rope_meta(const at::Tensor& reconstructed, const at::Ten
                 "kvtc_restore_rope: token_starts must be [S]");
     TORCH_CHECK(cos_sin_cache.dim() == 2 && cos_sin_cache.sym_size(1) == first_cache.sym_size(3),
                 "kvtc_restore_rope: cos_sin_cache must be [P,D]");
+    check_kvtc_cache_shape(first_cache.sym_size(0), first_cache.sym_size(1), first_cache.sym_size(2),
+                           first_cache.sym_size(3), dst_block_ids.sym_size(0), true, "kvtc_restore_rope");
     const auto num_tokens = dst_block_ids.sym_size(0) * first_cache.sym_size(1);
     const int64_t num_layers = static_cast<int64_t>(caches.size()); // symbolic-meta-ok: TensorList length is static.
     const auto feature_dim = num_layers * first_cache.sym_size(2) * first_cache.sym_size(3);

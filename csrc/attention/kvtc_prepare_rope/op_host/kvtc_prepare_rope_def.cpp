@@ -63,6 +63,7 @@ ge::graphStatus InferShape(gert::InferShapeContext* context)
         ++numLayers;
     }
     if (numLayers <= 0 || headSize % 16 != 0 || headSize > 128 ||
+        selectedBlocks > std::numeric_limits<int64_t>::max() / blockSize ||
         numLayers > std::numeric_limits<int64_t>::max() /
             numKvHeads / headSize) {
         return ge::GRAPH_FAILED;
@@ -70,9 +71,6 @@ ge::graphStatus InferShape(gert::InferShapeContext* context)
 
     const int64_t m = selectedBlocks * blockSize;
     const int64_t k = numLayers * numKvHeads * headSize;
-    if (m <= 0 || k <= 0) {
-        return ge::GRAPH_FAILED;
-    }
 
     output->SetDimNum(2);
     output->SetDim(0, m);

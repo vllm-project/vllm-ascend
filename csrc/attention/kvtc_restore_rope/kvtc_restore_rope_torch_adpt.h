@@ -1,6 +1,8 @@
 #ifndef KVTC_RESTORE_ROPE_TORCH_ADPT_H
 #define KVTC_RESTORE_ROPE_TORCH_ADPT_H
 
+#include "../kvtc_shape.h"
+
 namespace vllm_ascend {
 
 at::Tensor kvtc_restore_rope(const at::Tensor& reconstructed, const at::Tensor& dst_block_ids,
@@ -10,8 +12,6 @@ at::Tensor kvtc_restore_rope(const at::Tensor& reconstructed, const at::Tensor& 
     const at::Tensor& first_cache = caches.front();
     TORCH_CHECK(first_cache.dim() == 4 && first_cache.scalar_type() == at::kBFloat16 && first_cache.is_contiguous(),
                 "kvtc_restore_rope: caches must be contiguous BF16 [G,B,H,D]");
-    TORCH_CHECK(first_cache.size(3) > 0 && first_cache.size(3) <= 128 && first_cache.size(3) % 16 == 0,
-                "kvtc_restore_rope: head size must be <=128 and divisible by 16");
     TORCH_CHECK(
         reconstructed.dim() == 2 && reconstructed.scalar_type() == at::kBFloat16 && reconstructed.is_contiguous(),
         "kvtc_restore_rope: reconstructed must be contiguous BF16 [M,K]");
@@ -24,8 +24,14 @@ at::Tensor kvtc_restore_rope(const at::Tensor& reconstructed, const at::Tensor& 
                     cos_sin_cache.is_contiguous() && cos_sin_cache.size(1) == first_cache.size(3),
                 "kvtc_restore_rope: cos_sin_cache must be contiguous FP32 [P,D]");
 
-    const int64_t num_tokens = dst_block_ids.size(0) * first_cache.size(1);
-    const int64_t feature_dim = static_cast<int64_t>(caches.size()) * first_cache.size(2) * first_cache.size(3);
+    const int64_t block_size = first_cache.size(1);
+    const int64_t num_heads = first_cache.size(2);
+    const int64_t head_size = first_cache.size(3);
+    const int64_t selected_blocks = dst_block_ids.size(0);
+    check_kvtc_cache_shape(first_cache.size(0), block_size, num_heads, head_size, selected_blocks,
+                           true, "kvtc_restore_rope");
+    const auto [num_tokens, feature_dim] = kvtc_matrix_shape(static_cast<int64_t>(caches.size()), block_size,
+        num_heads, head_size, selected_blocks, "kvtc_restore_rope");
     TORCH_CHECK(reconstructed.size(0) == num_tokens && reconstructed.size(1) == feature_dim,
                 "kvtc_restore_rope: reconstructed shape must be [S*B,L*H*D]");
     TORCH_CHECK(reconstructed.device() == first_cache.device() && dst_block_ids.device() == first_cache.device() &&
