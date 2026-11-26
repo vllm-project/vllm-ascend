@@ -13,6 +13,7 @@
 | --- | --- | --- | --- | --- |
 | indices, scores | Input | Native local QLI candidates `[T,1,K_local]`, positive strides | INT32; FP32/BF16 | ND |
 | world_size, rank, interleave | Attribute | DCP group geometry and token stripe width | int | Scalar |
+| visible_lengths (pack) | Optional input | Rank-local visible length per captured query row. Zero suppresses all candidate loads for that row | INT32 | Contiguous ND |
 | sort_candidates, fuse_sort | Attribute | Establish comparator order; permit workload-based fused preparation | bool | Scalar |
 | packed | Input/Output | Exact global ID and FP32 score-bit pairs `[P*T,K_local,2]` after gather | INT32 | Contiguous ND |
 | rows, topk | Attribute | Query count and global winner count | int | Scalar |
@@ -30,7 +31,9 @@
 - K2048 has fused preparation/merge. Other supported K values retain native stable sorting. Fused preparation uses one inline stable radix algorithm for BF16 and FP32, with 16 and 32 score-key bits respectively. The public wrapper rejects other score dtypes before allocation or launch; the kernel receives `SCORE_BITS` as a compile-time parameter. BF16 values widen exactly to FP32 for transport; FP32 scores retain all their bits.
 - Owner-prefix merge requires `presorted=True`, `owner_sharded=True`, `K_local=topk=2048`, and a valid local rank. Other calls use full selection.
 - Non-power-of-two rank tiles clamp padded peer addresses before masked loads; this prevents A3 GM faults without changing any valid peer or selection result.
-- Invalid/nonfinite candidates do not enter the valid output prefix. Empty requests and graph padding produce zero lengths or -1 IDs. Normalization writes only the native QLI-owned output buffers in place.
+- Invalid/nonfinite candidates do not enter the valid output prefix. Empty requests and graph padding produce zero lengths or -1 IDs.
+- The native A3 INT8 and 950dt FP8 QLI paths can omit output initialization when the pack receives the per-query visibility buffer. Positive lengths identify rows that QLI writes. Pack and sort variants mask zero-length rows before reading their IDs or scores. The shared metadata builder refreshes the entire capture range on replay. Consumers without visibility metadata use initialized QLI outputs.
+- The optional visibility pointer adds masked pack variants. Pointer presence and layout select the variant, while changes to visible lengths reuse it.
 - ROWS is runtime and does not specialize transport/merge kernels. K, topology, strides and sorting tiles are fixed compilation/layout parameters. Length kernels keep row/request counts dynamic; power-of-two tiles and binary-search step counts select compilation buckets. Input values update on replay. Black-box compilation counts and hardware/model validation belong in the PR evidence.
 
 ## Origin and Differences
@@ -57,4 +60,5 @@ pytest -q tests/ut/attention/test_sharded_indexer.py
 pytest -q tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_dcp_candidates.py
 pytest -q tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_candidate_radix.py
 pytest -q tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_dcp_pre_post.py -k local_lengths
+pytest -q tests/e2e/nightly/single_node/ops/singlecard_ops/test_quant_lightning_indexer_v2.py -k changed_length_replay
 ```

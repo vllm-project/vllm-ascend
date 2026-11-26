@@ -17,7 +17,11 @@ import vllm_ascend.vllm_ascend_C  # type: ignore[import-untyped] # noqa: E402,F4
 enable_custom_op()
 
 from vllm_ascend.device.device_op import A5DeviceAdaptor  # noqa: E402
-from vllm_ascend.ops.triton.sharded_indexer import build_local_key_lengths  # noqa: E402
+from vllm_ascend.ops.triton.sharded_indexer import (  # noqa: E402
+    build_local_key_lengths,
+    build_local_lengths,
+    pack_local_candidates,
+)
 
 
 @torch.inference_mode()
@@ -450,15 +454,16 @@ def test_qli_adaptive_topk_boundaries(topk, ratio, mode):
 
 
 @pytest.mark.parametrize(
-    "arch,enable_dcp",
+    "arch,enable_dcp,initialize_outputs",
     [
-        pytest.param(AscendDeviceType.A3, False, id="a3-int8"),
-        pytest.param(AscendDeviceType.A3, True, id="a3-int8-dcp"),
-        pytest.param(AscendDeviceType.A5, False, id="a5-fp8"),
+        pytest.param(AscendDeviceType.A3, False, True, id="a3-int8"),
+        pytest.param(AscendDeviceType.A3, True, True, id="a3-int8-dcp"),
+        pytest.param(AscendDeviceType.A3, True, False, id="a3-int8-dcp-skip-fill"),
+        pytest.param(AscendDeviceType.A5, False, True, id="950dt-fp8"),
     ],
 )
 @torch.inference_mode()
-def test_quant_lightning_indexer_v2_accuracy(arch, enable_dcp):
+def test_quant_lightning_indexer_v2_accuracy(arch, enable_dcp, initialize_outputs):
     """Compare paged QLI indices and scores with the operator's CPU formula."""
     if get_ascend_device_type() != arch:
         pytest.skip(f"requires {arch.name} NPU")
@@ -542,6 +547,7 @@ def test_quant_lightning_indexer_v2_accuracy(arch, enable_dcp):
         block_table=block_table,
         metadata=metadata,
         return_value=1,
+        initialize_outputs=initialize_outputs,
         **common,
         **dcp,
     )
@@ -610,8 +616,13 @@ def test_quant_lightning_indexer_v2_dcp_visibility_padding_and_changed_length_re
         causal_seqlens_kv_global=global_len,
     )
 
-    def call():
-        build_local_key_lengths(global_len, local, world, rank, interleave)
+    visible = torch.empty((rows, 1), dtype=torch.int32, device="npu")
+
+    def call(initialize_outputs=True):
+        if initialize_outputs:
+            build_local_key_lengths(global_len, local, world, rank, interleave)
+        else:
+            build_local_lengths(global_len, starts[1:], local, visible, world, rank, interleave)
         metadata = torch.ops._C_ascend.npu_quant_lightning_indexer_v2_metadata(
             heads,
             1,
@@ -645,35 +656,47 @@ def test_quant_lightning_indexer_v2_dcp_visibility_padding_and_changed_length_re
             cmp_ratio=1,
             return_value=1,
             output_idx_offset=None,
+            initialize_outputs=initialize_outputs,
             **dcp,
         )
 
-    def check(outputs, causal_end):
+    def check(outputs, causal_end, live_rows):
         indices, scores = [x.cpu() for x in outputs]
         assert indices.dtype == torch.int32 and scores.dtype == torch.bfloat16
-        assert (indices[active:] == -1).all() and torch.isneginf(scores[active:]).all()
+        assert (indices[live_rows:] == -1).all() and torch.isneginf(scores[live_rows:]).all()
         local_ids = torch.arange(local_length)
         global_ids = (local_ids // interleave * world + rank) * interleave + local_ids % interleave
-        for row in range(active):
-            expected = local_ids[global_ids < causal_end - active + row + 1]
+        for row in range(live_rows):
+            expected = local_ids[global_ids < causal_end - live_rows + row + 1]
             valid = indices[row, 0] >= 0
             torch.testing.assert_close(indices[row, 0, valid].sort().values.long(), expected)
             assert torch.isfinite(scores[row, 0, valid]).all()
             assert torch.isneginf(scores[row, 0, ~valid]).all()
 
+    def run():
+        initialized = call()
+        raw = call(initialize_outputs=False)
+        packed = pack_local_candidates(*raw, world, rank, interleave, visible_lengths=visible)
+        return initialized, raw, packed
+
     for _ in range(3):
-        result = call()
-    check(result, world * interleave + active)
+        result, _, _ = run()
+    check(result, world * interleave + active, active)
     graph = torch.npu.NPUGraph()
     with torch.npu.graph(graph):
-        captured = call()
-    for length in (0, world * interleave - 1, world * interleave + 13):
+        captured, raw, packed = run()
+    for length, live_rows in ((0, active), (world * interleave - 1, 1), (world * interleave + 13, 7)):
+        starts[1:].fill_(live_rows)
         global_len.fill_(length)
-        captured[0].fill_(0)
-        captured[1].fill_(0)
+        # If QLI leaves an inactive row unwritten, these look like valid candidates.
+        for output in (*captured, *raw):
+            output.fill_(1)
         graph.replay()
         torch.npu.synchronize()
-        check(captured, length)
+        check(captured, length, live_rows)
+        expected = pack_local_candidates(*captured, world, rank, interleave)
+        torch.testing.assert_close(packed.cpu(), expected.cpu(), atol=0, rtol=0)
+    graph.reset()
 
 
 @pytest.mark.skipif(

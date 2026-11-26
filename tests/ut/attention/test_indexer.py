@@ -167,14 +167,15 @@ def _make_decode_pcp_context() -> SimpleNamespace:
     return SimpleNamespace(global_batch=SimpleNamespace(is_prefilling_np=torch.tensor([False])))
 
 
-@pytest.mark.parametrize("native", [False, True])
+@pytest.mark.parametrize("backend", ["a3", "950dt", "local"])
 @pytest.mark.parametrize("rows", [8, 9, 10])
 @patch("vllm_ascend.attention.indexer.get_cos_and_sin_mla")
-def test_sharded_indexer_pcp_request_capacity(mock_cos_sin, native, rows):
+def test_sharded_indexer_pcp_request_capacity(mock_cos_sin, backend, rows):
     # Four PCP prefills become eight segments, plus one possible graph dummy.
     builder = _make_builder(pcp_size=2)
     builder.use_sharded_dcp = True
-    builder.use_native_dcp_qli = native
+    builder.use_native_dcp_qli = backend == "950dt"
+    builder.vllm_config.compilation_config.max_cudagraph_capture_size = 24
     builder.vllm_config.parallel_config.cp_kv_cache_interleave_size = 2
     mock_cos_sin.return_value = (torch.zeros(rows * 2, 1, 1, 8), torch.zeros(rows * 2, 1, 1, 8))
     common = _make_common_metadata()
@@ -196,7 +197,6 @@ def test_sharded_indexer_pcp_request_capacity(mock_cos_sin, native, rows):
         out.copy_(expected_lengths)
 
     ops: Any = ModuleType("vllm_ascend.ops.triton.sharded_indexer")
-    ops.build_local_key_lengths = Mock(side_effect=lengths)
     ops.build_local_lengths = Mock(side_effect=lambda seq, query, out, visible, *args: lengths(seq, out))
     with (
         patch.dict("sys.modules", {ops.__name__: ops}),
@@ -205,17 +205,21 @@ def test_sharded_indexer_pcp_request_capacity(mock_cos_sin, native, rows):
         ),
         patch(
             "vllm_ascend.attention.indexer.get_current_hardware_profile",
-            return_value=SimpleNamespace(supports=lambda capability: False),
+            return_value=SimpleNamespace(supports=lambda capability: backend == "a3"),
         ),
     ):
         if rows > 9:
             with pytest.raises(ValueError, match="request.*capacity"):
                 builder.build(0, common)
-            ops.build_local_key_lengths.assert_not_called()
             ops.build_local_lengths.assert_not_called()
         else:
             metadata = builder.build(0, common)
             torch.testing.assert_close(metadata.actual_seq_lengths_key, expected_lengths)
+            ops.build_local_lengths.assert_called_once()
+            assert metadata.local_visible_lengths is ops.build_local_lengths.call_args.args[3]
+            expected_rows = rows * 2 if backend == "local" else 24
+            assert metadata.local_visible_lengths.shape == (expected_rows, 1)
+            assert (metadata.qli_dcp_args is not None) == (backend == "950dt")
 
 
 @patch("vllm_ascend.attention.indexer.get_ascend_config")
