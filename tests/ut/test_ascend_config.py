@@ -1384,6 +1384,25 @@ class TestSparseKVOffloadConfig(TestBase):
                 },
             )
 
+    def test_copy_sfa_rejects_keep_device_kv_cache(self):
+        vllm_config = SimpleNamespace(
+            model_config=SimpleNamespace(hf_text_config=SimpleNamespace(index_topk=128)),
+            parallel_config=SimpleNamespace(
+                prefill_context_parallel_size=1,
+                decode_context_parallel_size=1,
+                pipeline_parallel_size=1,
+            ),
+            kv_transfer_config=None,
+        )
+        with self.assertRaisesRegex(ValueError, "keep_device_kv_cache"):
+            SparseKVOffloadConfig.from_additional_config(
+                vllm_config,
+                {
+                    "enabled": "true",
+                    "keep_device_kv_cache": "true",
+                },
+            )
+
     def test_mooncake_host_backend_valid_config_passes_validation(self):
         vllm_config = SimpleNamespace(
             model_config=SimpleNamespace(hf_text_config=SimpleNamespace(index_topk=128)),

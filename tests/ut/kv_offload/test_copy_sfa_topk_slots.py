@@ -90,7 +90,7 @@ def test_recycled_slot_does_not_inherit_previous_request_rollback():
     new = _prepare(states, ["new"], [512], prebound={"new": 0})
     assert old[0][0] == new[0][0] == 0
     assert new[1] == (0,)
-    assert new[2:] == (False, {})
+    assert new[2:] == (False, {0: (0, 512, 0)})
 
 
 def test_same_request_rollback_across_hot_boundary_still_refills():
@@ -98,7 +98,7 @@ def test_same_request_rollback_across_hot_boundary_still_refills():
     _prepare(states, ["a"], [8320], prebound={"a": 1})
     after = _prepare(states, ["a"], [512], prebound={"a": 1})
     assert after[1] == ()
-    assert after[2:] == (True, {1: (0, 512)})
+    assert after[2:] == (True, {1: (0, 512, 0)})
 
 
 def test_same_request_long_rollback_restores_only_tail():
@@ -124,7 +124,7 @@ def test_unscheduled_pd_request_keeps_its_reservation_and_history():
     resumed = _prepare(states, ["a"], [512], prebound={"a": 0})
     assert resumed[0][0] == before[0][0]
     assert resumed[1] == ()
-    assert resumed[3] == {int(before[0][0]): (0, 512)}
+    assert resumed[3] == {int(before[0][0]): (0, 512, 0)}
 
 
 def test_unscheduled_unreserved_request_releases_its_slot():
@@ -133,7 +133,7 @@ def test_unscheduled_unreserved_request_releases_its_slot():
     after = _prepare(states, ["b"], [512], capacity=1)
     assert after[0][0] == before[0][0]
     assert after[1] == (0,)
-    assert after[2:] == (False, {})
+    assert after[2:] == (False, {0: (0, 512, 0)})
 
 
 def test_removed_then_resubmitted_same_id_gets_fresh_history():
@@ -143,7 +143,7 @@ def test_removed_then_resubmitted_same_id_gets_fresh_history():
     states.remove_request("a")
     after = _prepare(states, ["a"], [512], prebound={"a": 0})
     assert after[1] == (0,)
-    assert after[2:] == (False, {})
+    assert after[2:] == (False, {0: (0, 512, 0)})
 
 
 def test_finished_pd_owner_is_ignored_until_connector_cleanup():
@@ -153,14 +153,14 @@ def test_finished_pd_owner_is_ignored_until_connector_cleanup():
     # Both bindings can coexist until the worker's post-forward get_finished.
     after = _prepare(states, ["new"], [512], prebound={"old": 0, "new": 0})
     assert after[1] == (0,)
-    assert after[2:] == (False, {})
+    assert after[2:] == (False, {0: (0, 512, 0)})
     stable = _prepare(states, ["new"], [640], prebound={"old": 0, "new": 0})
     assert stable[1] == ()
     _prepare(states, ["new"], [768], prebound={"new": 0})
     # Once cleanup removes the old reservation, its ID can be allocated anew.
     again = _prepare(states, ["old", "new"], [256, 896], prebound={"old": 1, "new": 0})
     assert again[1] == (1,)
-    assert again[2:] == (False, {})
+    assert again[2:] == (False, {1: (0, 256, 0)})
 
 
 def test_finished_waiting_pd_reservation_does_not_block_replacement():
@@ -168,7 +168,7 @@ def test_finished_waiting_pd_reservation_does_not_block_replacement():
     states.remove_request("waiting")
     after = _prepare(states, ["new"], [512], prebound={"waiting": 0, "new": 0})
     assert after[0][0] == 0
-    assert after[2:] == (False, {})
+    assert after[2:] == (False, {0: (0, 512, 0)})
 
 
 def test_waiting_pd_reservation_is_not_allocated_to_another_request():
@@ -189,7 +189,7 @@ def test_dummy_batch_does_not_change_live_request_history():
     assert dummy[2:] == (False, {})
     after = _prepare(states, ["a"], [512], prebound={"a": 1})
     assert after[1] == ()
-    assert after[2:] == (True, {1: (0, 512)})
+    assert after[2:] == (True, {1: (0, 512, 0)})
 
 
 def test_changed_live_pd_binding_fails_without_mutating_history():
@@ -199,7 +199,7 @@ def test_changed_live_pd_binding_fails_without_mutating_history():
         _prepare(states, ["a"], [512], prebound={"a": 1})
     after = _prepare(states, ["a"], [512], prebound={"a": 0})
     assert after[1] == ()
-    assert after[2:] == (True, {0: (0, 512)})
+    assert after[2:] == (True, {0: (0, 512, 0)})
 
 
 def test_pd_reservation_cannot_steal_a_live_request_slot():
@@ -227,7 +227,7 @@ def test_pool_exhaustion_preserves_existing_request_state():
         _prepare(states, ["b"], [512], live=["a", "b"], capacity=1)
     after = _prepare(states, ["a"], [512], capacity=1)
     assert after[1] == ()
-    assert after[3] == {0: (0, 512)}
+    assert after[3] == {0: (0, 512, 0)}
 
 
 def test_prepare_resets_all_history_banks_only_for_new_slot_owners():

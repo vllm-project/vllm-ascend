@@ -809,6 +809,7 @@ class AscendSFAKVOffloadImpl(AscendSFAImpl):
         layer_id = manager._get_offload_layer_id(layer_name)
         hbm_k = manager.topk_buffers_k[layer_id].view(-1, 128, 1, self.kv_lora_rank)
         hbm_v = manager.topk_buffers_v[layer_id].view(-1, 128, 1, self.qk_rope_head_dim)
+        manager.ensure_copy_sfa_host_visibility(capturing=self._in_graph_runtime())
         host_k = manager.k_caches_cpu[layer_id].view(-1, 128, self.kv_lora_rank)
         host_v = manager.v_caches_cpu[layer_id].view(-1, 128, self.qk_rope_head_dim)
         if reuse_indices:
