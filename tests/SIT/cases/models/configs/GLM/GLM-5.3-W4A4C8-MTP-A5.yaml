@@ -9,7 +9,7 @@ test_cases:
       OMP_PROC_BIND: "false"
       OMP_NUM_THREADS: "100"
       HCCL_DFS_CONFIG: "task_exception:off,inconsistent_check:off"
-      HCCL_BUFFSIZE: "400"
+      HCCL_BUFFSIZE: "1024"
       HCCL_OP_EXPANSION_MODE: "AIV"
       HCCL_INTRA_PCIE_ENABLE: "1"
       HCCL_INTRA_ROCE_ENABLE: "0"
