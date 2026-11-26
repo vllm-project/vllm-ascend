@@ -177,7 +177,7 @@ class TestGlobalTE(unittest.TestCase):
         global_te.register_buffer([0x1000, 0x2000], [128, 256])
         global_te.unregister_buffer()
 
-        self.assertFalse(global_te.is_register_buffer)
+        self.assertEqual(global_te._unregistered_ptrs, {0x1000, 0x2000})
         global_te.transfer_engine.assert_has_calls(
             [
                 call.register_memory(0x1000, 128),
@@ -190,7 +190,7 @@ class TestGlobalTE(unittest.TestCase):
 
         global_te.reregister_buffer()
 
-        self.assertTrue(global_te.is_register_buffer)
+        self.assertEqual(global_te._unregistered_ptrs, set())
         self.assertEqual(global_te.transfer_engine.register_memory.call_count, 4)
 
     def test_unregister_failure_leaves_completed_buffers_unregistered(self):
@@ -198,10 +198,102 @@ class TestGlobalTE(unittest.TestCase):
         global_te.transfer_engine = MagicMock(spec_set=["register_memory", "unregister_memory"])
         global_te.transfer_engine.unregister_memory.side_effect = [0, -1]
         global_te.registered_buffers = [(0x1000, 128), (0x2000, 256)]
-        global_te.is_register_buffer = True
 
         with self.assertRaisesRegex(RuntimeError, "ptr=0x2000"):
             global_te.unregister_buffer()
 
         global_te.transfer_engine.register_memory.assert_not_called()
-        self.assertTrue(global_te.is_register_buffer)
+        # Only 0x1000 was unregistered before the failure.
+        self.assertEqual(global_te._unregistered_ptrs, {0x1000})
+
+    def test_failure_on_the_first_buffer_leaves_everything_registered(self):
+        global_te = self.global_te_cls()
+        global_te.transfer_engine = MagicMock(spec_set=["register_memory", "unregister_memory"])
+        global_te.transfer_engine.register_memory.return_value = 0
+        global_te.transfer_engine.unregister_memory.side_effect = [-1, 0, 0]
+        global_te.register_buffer([0x1000, 0x2000], [128, 256])
+
+        with self.assertRaisesRegex(RuntimeError, "ptr=0x1000"):
+            global_te.unregister_buffer()
+        self.assertEqual(global_te._unregistered_ptrs, set())
+
+        # Every buffer is still registered, so neither call may register again.
+        global_te.reregister_buffer()
+        global_te.register_buffer([0x1000, 0x2000], [128, 256])
+        self.assertEqual(global_te.transfer_engine.register_memory.call_count, 2)
+
+        # A retried unregister starts from the buffer that failed.
+        global_te.unregister_buffer()
+        self.assertEqual(
+            global_te.transfer_engine.unregister_memory.call_args_list,
+            [call(0x1000), call(0x1000), call(0x2000)],
+        )
+        self.assertEqual(global_te._unregistered_ptrs, {0x1000, 0x2000})
+
+    def test_reregister_after_partial_unregister_restores_only_the_dropped_buffers(self):
+        global_te = self.global_te_cls()
+        global_te.transfer_engine = MagicMock(spec_set=["register_memory", "unregister_memory"])
+        global_te.transfer_engine.unregister_memory.side_effect = [0, -1]
+        global_te.transfer_engine.register_memory.return_value = 0
+        global_te.registered_buffers = [(0x1000, 128), (0x2000, 256)]
+
+        with self.assertRaisesRegex(RuntimeError, "ptr=0x2000"):
+            global_te.unregister_buffer()
+        global_te.reregister_buffer()
+
+        # Re-registering 0x2000 would register a buffer that is still registered.
+        global_te.transfer_engine.register_memory.assert_called_once_with(0x1000, 128)
+        self.assertEqual(global_te._unregistered_ptrs, set())
+        global_te.reregister_buffer()
+        global_te.transfer_engine.register_memory.assert_called_once_with(0x1000, 128)
+
+    def test_register_after_a_partial_unregister_does_not_register_twice(self):
+        global_te = self.global_te_cls()
+        global_te.transfer_engine = MagicMock(spec_set=["register_memory", "unregister_memory"])
+        global_te.transfer_engine.register_memory.return_value = 0
+        global_te.transfer_engine.unregister_memory.side_effect = [0, -1]
+        global_te.register_buffer([0x1000, 0x2000], [128, 256])
+
+        with self.assertRaisesRegex(RuntimeError, "ptr=0x2000"):
+            global_te.unregister_buffer()
+        global_te.register_buffer([0x1000, 0x2000], [128, 256])
+
+        # 0x2000 is still registered; only reregister_buffer() restores 0x1000.
+        self.assertEqual(global_te.transfer_engine.register_memory.call_count, 2)
+        self.assertEqual(global_te._unregistered_ptrs, {0x1000})
+
+    def test_retried_unregister_resumes_after_the_completed_buffers(self):
+        global_te = self.global_te_cls()
+        global_te.transfer_engine = MagicMock(spec_set=["register_memory", "unregister_memory"])
+        global_te.transfer_engine.unregister_memory.side_effect = [0, -1, 0]
+        global_te.registered_buffers = [(0x1000, 128), (0x2000, 256)]
+
+        with self.assertRaisesRegex(RuntimeError, "ptr=0x2000"):
+            global_te.unregister_buffer()
+        global_te.unregister_buffer()
+        global_te.unregister_buffer()
+
+        self.assertEqual(
+            global_te.transfer_engine.unregister_memory.call_args_list,
+            [call(0x1000), call(0x2000), call(0x2000)],
+        )
+        self.assertEqual(global_te._unregistered_ptrs, {0x1000, 0x2000})
+
+    def test_retried_reregister_resumes_after_a_failure(self):
+        global_te = self.global_te_cls()
+        global_te.transfer_engine = MagicMock(spec_set=["register_memory", "unregister_memory"])
+        global_te.transfer_engine.unregister_memory.return_value = 0
+        global_te.transfer_engine.register_memory.side_effect = [0, 0, 0, -1, 0]
+
+        global_te.register_buffer([0x1000, 0x2000], [128, 256])
+        global_te.unregister_buffer()
+        with self.assertRaisesRegex(RuntimeError, "ptr=0x2000"):
+            global_te.reregister_buffer()
+        self.assertEqual(global_te._unregistered_ptrs, {0x2000})
+        global_te.reregister_buffer()
+
+        self.assertEqual(
+            global_te.transfer_engine.register_memory.call_args_list,
+            [call(0x1000, 128), call(0x2000, 256), call(0x1000, 128), call(0x2000, 256), call(0x2000, 256)],
+        )
+        self.assertEqual(global_te._unregistered_ptrs, set())
