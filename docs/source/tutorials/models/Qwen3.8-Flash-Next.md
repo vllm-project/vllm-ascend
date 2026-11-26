@@ -461,12 +461,37 @@ The response should list the configured model name. After startup, use [Section 
 
 #### HiSparse for colocated text generation on 950DT
 
-With a vLLM Core revision that supports QSA HiSparse, the W4A8-MXFP checkpoint can keep QSA token K/V in a pinned host pool. The raw and compressed indexer caches stay on the NPU. For eager TP4 decoding with BF16 KV, PCP1 and no speculative decoding, add the following flags to the colocated server command:
+The W4A8-MXFP checkpoint can keep QSA token K/V in a pinned host pool while the raw and compressed indexer caches stay on the NPU. Use a vLLM Core revision that includes QSA HiSparse and `Qwen4ExpQSAAttention.get_kv_cache_config`, such as the validated [revision `28fb1365`](https://github.com/vllm-project/vllm/commit/28fb1365a90e9929e4596a72906e309dd7ac701f), with its matching vLLM Ascend adaptation.
+
+The following command uses eager TP4, BF16 KV, PCP1 and ordinary decoding. Disabling prefix caching enables the eager HiSparse GDN fast path for single-token decode batches.
 
 ```bash
---enforce-eager \
---attention-config '{"hisparse_config":{"eager_host_mirror":true}}' \
---kv-transfer-config '{"kv_connector":"HiSparseConnector","kv_role":"kv_both","kv_connector_extra_config":{"host_pool_gib":8}}'
+export VLLM_USE_MODELSCOPE=True
+export VLLM_USE_V2_MODEL_RUNNER=1
+export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3
+export HCCL_BUFFSIZE=1024
+export HCCL_NPU_SOCKET_PORT_RANGE=auto
+export OMP_NUM_THREADS=1
+
+vllm serve Eco-Tech/Qwen3.8-Flash-Next-w4a8-mxfp \
+    --host 0.0.0.0 \
+    --port 8087 \
+    --served-model-name qwen3.8-flash-next-950-dt \
+    --trust-remote-code \
+    --quantization ascend \
+    --dtype bfloat16 \
+    --tensor-parallel-size 4 \
+    --data-parallel-size 1 \
+    --enable-expert-parallel \
+    --max-model-len 16384 \
+    --max-num-seqs 16 \
+    --max-num-batched-tokens 2048 \
+    --gpu-memory-utilization 0.85 \
+    --enforce-eager \
+    --no-enable-prefix-caching \
+    --engram-config '{"cpu_offload":true,"dp_shared_memory":false}' \
+    --attention-config '{"hisparse_config":{"eager_host_mirror":false}}' \
+    --kv-transfer-config '{"kv_connector":"HiSparseConnector","kv_role":"kv_both","kv_connector_extra_config":{"host_pool_gib":8}}'
 ```
 
 The startup log reports the host pool capacity and the steady-state concurrency at the configured maximum model length. The `vllm:hisparse_host_to_device_bytes_total` metric counts transfers into the hot cache.

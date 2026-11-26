@@ -153,6 +153,13 @@ def get_qsa_hisparse_cache_config(config: KVCacheLayerConfig, token_topk: int) -
     )
 
 
+def _valid_first_order(valid: torch.Tensor) -> torch.Tensor:
+    # Lane numbers are exact in float32, which keeps argsort on AiCore.
+    width = valid.shape[1]
+    lanes = torch.arange(width, device=valid.device, dtype=torch.float32)
+    return torch.where(valid, lanes, lanes + width).argsort(dim=-1)
+
+
 def attend_physical(query, packed, physical, num_kv_heads, output):
     """Pack resolved rows into request-local pages for the regular GBSA kernel."""
     n, _, dim = query.shape
@@ -160,12 +167,14 @@ def attend_physical(query, packed, physical, num_kv_heads, output):
     pages = (width + GBSA_PAGE_SIZE - 1) // GBSA_PAGE_SIZE
     valid = physical >= 0
     lengths = valid.sum(dim=1, dtype=torch.int32)
-    # These small lane positions are exact in float32, which keeps argsort on AiCore.
-    positions = torch.arange(width, device=query.device, dtype=torch.float32)
-    order = torch.where(valid, positions, positions + width).argsort(dim=-1)
-    indices = physical.gather(1, order)
+    indices = physical.gather(1, _valid_first_order(valid))
     indices = torch.nn.functional.pad(indices, (0, pages * GBSA_PAGE_SIZE - width), value=-1)
-    rows = packed.view(-1, num_kv_heads, 2 * dim)
+    # Resolver row IDs include the gaps between blocks in Core's hot cache.
+    # Keep that address space in a flat view without copying the cache.
+    blocks, block_size, _ = packed.shape
+    row_stride = packed.stride(1)
+    num_rows = (blocks - 1) * (packed.stride(0) // row_stride) + block_size
+    rows = packed.as_strided((num_rows, num_kv_heads, 2 * dim), (row_stride, 2 * dim, 1))
     selected = rows.index_select(0, indices.clamp_min(0).long().flatten())
     selected.masked_fill_(indices.reshape(-1, 1, 1) < 0, 0)
     key, value = selected.reshape(n * pages, GBSA_PAGE_SIZE, num_kv_heads, 2 * dim).split(dim, dim=-1)
@@ -187,10 +196,7 @@ def prepare_resolver_indices(compact, visible, logical):
     tokens = expand_qsa_selected_tokens(compact, visible.to(dtype=logical.dtype))
     # The last partial group can follow holes in LI-v2 output. Keep its
     # valid tokens within the resolver's fixed token_topk budget.
-    # As in attend_physical, use float32 sort keys to avoid an AiCPU fallback.
-    width = tokens.shape[1]
-    lanes = torch.arange(width, device=tokens.device, dtype=torch.float32)
-    order = torch.where(tokens >= 0, lanes, lanes + width).argsort(dim=-1)
+    order = _valid_first_order(tokens >= 0)
     torch.gather(tokens, 1, order[:, : logical.shape[1]], out=logical)
 
 
@@ -256,6 +262,7 @@ def run_qsa_hisparse(
         host = cache.runtime.host_cache.view(-1, metadata.block_size, cache.runtime.row_width)
         staged, table, requests = group.stage_prefill_rows(0, host, metadata)
         keys, values = staged.unflatten(-1, (layer.num_kv_heads, 2 * layer.head_dim)).split(layer.head_dim, dim=-1)
+        # The staged pages already have a remapped table for regular paged GBSA.
         dispatch_qsa_attention(
             query[prefill_rows],
             key[prefill_rows],
@@ -269,4 +276,5 @@ def run_qsa_hisparse(
             indexer_metadata.seq_lens[metadata.num_decodes : metadata.num_reqs],
             output[prefill_rows],
             metadata.prefill_dispatch,
+            use_union_prefill=False,
         )

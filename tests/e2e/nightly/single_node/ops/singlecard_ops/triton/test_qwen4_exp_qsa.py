@@ -5,6 +5,7 @@ import pytest
 import torch
 from vllm.triton_utils import HAS_TRITON
 from vllm.v1 import kv_cache_interface
+from vllm.v1.hisparse import runtime as hisparse_runtime
 
 from vllm_ascend.device.device_config import get_ascend_device_type
 from vllm_ascend.device.hardware import AscendDeviceType
@@ -232,7 +233,13 @@ def test_qwen4_exp_gbsa_npugraph_replays_updated_input() -> None:
     _assert_gbsa_close(captured_output, expected_replay)
 
 
-@pytest.mark.skipif(not hasattr(kv_cache_interface, "KVCacheLayerConfig"), reason="Requires Core QSA HiSparse")
+@pytest.mark.skipif(
+    not (
+        hasattr(kv_cache_interface, "KVCacheLayerConfig")
+        and hasattr(hisparse_runtime, "hisparse_staging_block_capacity")
+    ),
+    reason="Requires Core QSA HiSparse cache layout and staging APIs",
+)
 @torch.inference_mode()
 def test_resolved_rows_match_paged_gbsa() -> None:
     from vllm_ascend.models.qwen4_exp.hisparse import attend_physical, prepare_resolver_indices
@@ -241,7 +248,9 @@ def test_resolved_rows_match_paged_gbsa() -> None:
     lengths = torch.tensor([2081, 2050], dtype=torch.int32, device="npu")
     positions = (lengths - 1).long()
     query = torch.randn(2, 8, GBSA_HEAD_DIM, dtype=torch.bfloat16, device="npu")
-    cache = torch.randn(34, GBSA_PAGE_SIZE, 1, 2 * GBSA_HEAD_DIM, dtype=query.dtype, device="npu")
+    block_stride = GBSA_PAGE_SIZE + 1
+    storage = torch.randn(34, block_stride, 1, 2 * GBSA_HEAD_DIM, dtype=query.dtype, device="npu")
+    cache = storage[:, :GBSA_PAGE_SIZE]
     table = torch.randperm(34, dtype=torch.int32).view(2, 17).npu()
     compact = torch.full((2, 515), -1, dtype=torch.int32)
     for row, groups in enumerate((520, 512)):
@@ -263,7 +272,7 @@ def test_resolved_rows_match_paged_gbsa() -> None:
     logical = torch.empty((2, 2048), dtype=torch.int32, device="npu")
     prepare_resolver_indices(compact, positions + 1, logical)
     pages = table.gather(1, (logical.clamp_min(0) // GBSA_PAGE_SIZE).long())
-    physical = (pages * GBSA_PAGE_SIZE + logical.remainder(GBSA_PAGE_SIZE)).masked_fill(logical < 0, -1)
+    physical = (pages * block_stride + logical.remainder(GBSA_PAGE_SIZE)).masked_fill(logical < 0, -1)
     actual = attend_physical(query, cache.flatten(2), physical, 1, torch.empty_like(query))
     torch.testing.assert_close(actual, reference, rtol=2e-2, atol=1e-3)
 

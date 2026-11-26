@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import ast
+from dataclasses import dataclass, replace
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock
@@ -13,14 +14,15 @@ MODEL_DIR = Path(__file__).resolve().parents[4] / "vllm_ascend/models/qwen4_exp"
 
 @pytest.fixture
 def ops():
-    scope = {"torch": torch}
-    for filename in ("gbsa.py", "hisparse.py"):
+    scope = {"torch": torch, "dataclass": dataclass, "replace": replace, "__name__": __name__}
+    for filename in ("gbsa.py", "attention_dispatch.py", "hisparse.py"):
         source = MODEL_DIR / filename
         module = ast.parse(source.read_text())
         module.body = [
             node
             for node in module.body
             if isinstance(node, (ast.FunctionDef, ast.Assign))
+            or (filename == "attention_dispatch.py" and isinstance(node, ast.ClassDef))
             or (isinstance(node, ast.ImportFrom) and node.module == "__future__")
         ]
         exec(compile(module, str(source), "exec"), scope)
@@ -72,13 +74,15 @@ def test_resolver_keeps_partial_group_after_invalid_lanes(ops, length_dtype):
 
 
 @pytest.mark.parametrize("kv_heads", [1, 2])
-def test_physical_attention_reads_selected_rows_per_kv_head(ops, kv_heads):
-    rng = torch.Generator().manual_seed(17)
-    heads, dim = 4, 8
-    query = torch.randn(2, heads, dim, generator=rng)
-    packed = torch.randn(3, 4, kv_heads * 2 * dim, generator=rng)
+@pytest.mark.parametrize("block_stride", [4, 5], ids=["dense", "gapped"])
+def test_physical_attention_reads_selected_rows_per_kv_head(ops, kv_heads, block_stride):
+    dim = 8
+    query = torch.zeros(2, 4, dim)
+    storage = torch.arange(3 * block_stride * kv_heads * 2 * dim, dtype=query.dtype)
+    packed = storage.view(3, block_stride, -1)[:, :4]
     packed[0, 0] = torch.nan
-    physical = torch.tensor([[9, -1, 2, 6], [-1, -1, -1, -1]], dtype=torch.int32)
+    physical = torch.tensor([[2 * block_stride + 1, -1, 2, block_stride + 2], [-1] * 4], dtype=torch.int32)
+    expected_rows = packed[[2, 0, 1], [1, 2, 2]].view(3, kv_heads, 2 * dim)
 
     def reference_gbsa(q, key, value, compact, table, requests, positions, lengths, output):
         assert table.tolist() == [[0], [1]]
@@ -87,42 +91,51 @@ def test_physical_attention_reads_selected_rows_per_kv_head(ops, kv_heads):
         assert requests.tolist() == [0, 1]
         assert compact.is_contiguous()
         assert compact[:, 0].tolist() == [0, 0]
-        for head in range(heads):
-            kv_head = head * kv_heads // heads
-            scores = (key[0, :3, kv_head] @ q[0, head]) * dim**-0.5
-            output[0, head] = scores.softmax(0) @ value[0, :3, kv_head]
-        output[1].fill_(torch.nan)
+        torch.testing.assert_close(torch.cat((key, value), dim=-1)[0, :3], expected_rows)
+        assert not key[1].any() and not value[1].any()
+        output.fill_(1)
 
     ops["qsa_gbsa_attention"] = reference_gbsa
     actual = ops["attend_physical"](query, packed, physical, kv_heads, torch.empty_like(query))
-    expected = torch.zeros_like(query)
-    rows = packed.reshape(-1, kv_heads, 2 * dim)[[9, 2, 6]]
-    for head in range(heads):
-        key, value = rows[:, head * kv_heads // heads].split(dim, dim=-1)
-        expected[0, head] = ((key @ query[0, head]) * dim**-0.5).softmax(0) @ value
+    expected = torch.ones_like(query)
+    expected[1].zero_()
     torch.testing.assert_close(actual, expected)
 
 
-def test_mixed_resident_batch_uses_decode_fast_path_and_stages_prefill(ops):
+@pytest.mark.parametrize(
+    ("num_decodes", "prefill_start", "all_resident"),
+    [
+        pytest.param(2, 0, True, id="resident-mixed"),
+        pytest.param(2, 0, False, id="swap-in-mixed"),
+        pytest.param(0, 24 * 1024, True, id="long-prefill"),
+        pytest.param(2, 24 * 1024, True, id="long-prefill-with-decode"),
+    ],
+)
+def test_hisparse_batch_routes_decode_and_staged_prefill(ops, num_decodes, prefill_start, all_resident):
+    num_prefill_tokens = 3
+    num_tokens = num_decodes + num_prefill_tokens
+    prefill_length = prefill_start + num_prefill_tokens
     resident = torch.empty(3, 128, 16)
-    group = Mock()
+    staged_table = torch.tensor([[0]], dtype=torch.int32)
+    group = Mock(logical_topk_indices=torch.empty(num_tokens, 8, dtype=torch.int32))
+    group.physical_kv_cache.return_value = resident
     group.stage_prefill_rows.return_value = (
         resident[:1],
-        torch.tensor([[0]], dtype=torch.int32),
-        torch.tensor([0, 0, 0], dtype=torch.int32),
+        staged_table,
+        torch.zeros(num_prefill_tokens, dtype=torch.int32),
     )
     cache = Mock(
-        all_context_pages_resident=True,
-        decode_batch=False,
+        all_context_pages_resident=all_resident,
         block_table=torch.tensor([[11], [21], [31]], dtype=torch.int32),
+        source_block_table=torch.tensor([[10], [20], [30]], dtype=torch.int32),
         runtime=SimpleNamespace(
             request_state_indices=torch.tensor([2, 0, 1], dtype=torch.int32),
             host_cache=resident,
             row_width=16,
         ),
     )
-    slots = torch.arange(5)
-    cache.write_target.return_value = resident, slots, 5
+    slots = torch.arange(num_tokens)
+    cache.write_target.return_value = resident, slots, num_tokens
     layer = SimpleNamespace(
         index_group=group,
         hisparse_cache=cache,
@@ -130,33 +143,74 @@ def test_mixed_resident_batch_uses_decode_fast_path_and_stages_prefill(ops):
         num_kv_heads=1,
         head_dim=8,
     )
+    plan = ops["build_qsa_request_plan"](
+        torch.tensor([0, num_prefill_tokens]), torch.tensor([prefill_length]), num_prefill_tokens, torch.tensor([True])
+    )
+    requests = torch.tensor([*range(num_decodes), *([num_decodes] * num_prefill_tokens)], dtype=torch.int32)
     meta = SimpleNamespace(
-        num_actual_tokens=5,
-        num_decode_tokens=2,
-        num_reqs=3,
-        num_decodes=2,
+        num_actual_tokens=num_tokens,
+        num_decode_tokens=num_decodes,
+        num_reqs=num_decodes + 1,
+        num_decodes=num_decodes,
         slot_mapping=slots,
         block_size=128,
-        prefill_dispatch=object(),
+        req_id_per_token=requests,
+        query_start_loc=torch.tensor([*range(num_decodes + 1), num_tokens], dtype=torch.int32),
+        prefill_dispatch=plan,
     )
     side = SimpleNamespace(
-        token_to_req=torch.tensor([0, 1, 2, 2, 2]),
-        logical_positions=torch.tensor([8192, 8193, 0, 1, 2]),
-        seq_lens=torch.tensor([8193, 8194, 3]),
+        token_to_req=requests,
+        logical_positions=torch.tensor([*([8191] * num_decodes), *range(prefill_start, prefill_length)]),
+        seq_lens=torch.tensor([*([8192] * num_decodes), prefill_length], dtype=torch.int32),
     )
-    for name in ("_store_qsa_cache_rows", "qsa_resident_gbsa_attention", "dispatch_qsa_attention"):
+    for name in (
+        "_store_qsa_cache_rows",
+        "qsa_resident_gbsa_attention",
+        "attend_physical",
+        "qsa_fia_attention",
+        "qsa_gbsa_attention",
+        "qsa_union_gbsa_attention",
+    ):
         ops[name] = Mock()
-    qkv = torch.zeros(5, 1, 8)
-    ops["run_qsa_hisparse"](layer, meta, side, torch.zeros(5, 5, dtype=torch.int32), qkv, qkv, qkv, qkv)
+    qkv = torch.zeros(num_tokens, 1, 8)
+    compact = torch.tensor([[0, 1, -1, -1, -1]], dtype=torch.int32).repeat(num_tokens, 1)
+    ops["run_qsa_hisparse"](layer, meta, side, compact, qkv, qkv, qkv, qkv)
 
-    cache.swap_in.assert_not_called()
     group.stage_prefill_rows.assert_called_once()
-    fast_call = ops["qsa_resident_gbsa_attention"].call_args
-    fast_args = fast_call.args
-    assert fast_args[0].shape[0] == 2
-    assert fast_args[3] is cache.block_table
-    assert fast_call.kwargs["request_state_indices"] is cache.runtime.request_state_indices
-    assert fast_args[4].tolist() == [0, 1]
-    prefill_args = ops["dispatch_qsa_attention"].call_args.args
-    assert prefill_args[0].shape[0] == 3
-    assert prefill_args[-1] is meta.prefill_dispatch
+    resident_attention = ops["qsa_resident_gbsa_attention"]
+    if num_decodes and all_resident:
+        fast = resident_attention.call_args
+        assert fast.args[0].shape[0] == num_decodes and fast.args[3] is cache.block_table
+        assert fast.kwargs["request_state_indices"] is cache.runtime.request_state_indices
+        assert fast.args[4].tolist() == list(range(num_decodes))
+    else:
+        resident_attention.assert_not_called()
+    if all_resident:
+        cache.swap_in.assert_not_called()
+        ops["attend_physical"].assert_not_called()
+    else:
+        cache.swap_in.assert_called_once()
+        swap = cache.swap_in.call_args
+        assert swap.args[0].tolist() == list(range(num_decodes))
+        assert swap.kwargs["block_table"] is cache.source_block_table
+        assert swap.kwargs["block_size"] == meta.block_size
+        assert swap.kwargs["num_valid_rows"].tolist() == [num_tokens]
+        assert swap.kwargs["logical_topk_indices"].tolist() == [list(range(8))] * num_decodes
+        group.set_logical_topk_ready.assert_called_once_with(0)
+        assert ops["attend_physical"].call_args.args[1:4] == (resident, cache.swap_in.return_value, 1)
+
+    fia = ops["qsa_fia_attention"]
+    paged = ops["qsa_gbsa_attention"]
+    ops["qsa_union_gbsa_attention"].assert_not_called()
+    if prefill_start:
+        fia.assert_not_called()
+        paged.assert_called_once()
+        args = paged.call_args.args
+        assert args[0].shape[0] == num_prefill_tokens and args[4] is staged_table
+        assert args[5].tolist() == [0] * num_prefill_tokens
+        assert args[6].tolist() == list(range(prefill_start, prefill_length))
+        assert args[7].tolist() == [prefill_length]
+    else:
+        paged.assert_not_called()
+        fia.assert_called_once()
+        assert fia.call_args.args[0].shape[0] == num_prefill_tokens
