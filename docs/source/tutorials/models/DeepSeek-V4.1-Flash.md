@@ -1009,7 +1009,6 @@ vLLM Ascend revision.
     export VLLM_ENGINE_READY_TIMEOUT_S=36000
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
     export HCCL_BUFFSIZE=1024
-    export HCCL_EXEC_TIMEOUT=3600
     export HCCL_OP_EXPANSION_MODE="AIV"
     export ASCEND_RT_VISIBLE_DEVICES=$1
 
@@ -1108,7 +1107,6 @@ vLLM Ascend revision.
     export TP_SOCKET_IFNAME="$NIC_NAME"
     export HCCL_SOCKET_IFNAME="$NIC_NAME"
     export HCCL_BUFFSIZE=4096
-    export HCCL_EXEC_TIMEOUT=3600
     export ASCEND_RT_VISIBLE_DEVICES=$1
 
     # Ensure the model path matches the directory recorded during download
@@ -2158,20 +2156,19 @@ Select the tab for the target hardware.
     export VLLM_ENGINE_READY_TIMEOUT_S=36000
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
     export HCCL_BUFFSIZE=1024
-    export HCCL_EXEC_TIMEOUT=3600
     export HCCL_OP_EXPANSION_MODE="AIV"
-    export ASCEND_RT_VISIBLE_DEVICES="$1"
+    export ASCEND_RT_VISIBLE_DEVICES=$1
 
     #export MAX_JOBS=4
 
     vllm serve "$MODEL_PATH" \
         --host 0.0.0.0 \
-        --port "$2" \
-        --data-parallel-size "$3" \
-        --data-parallel-rank "$4" \
-        --data-parallel-address "$5" \
-        --data-parallel-rpc-port "$6" \
-        --tensor-parallel-size "$7" \
+        --port $2 \
+        --data-parallel-size $3 \
+        --data-parallel-rank $4 \
+        --data-parallel-address $5 \
+        --data-parallel-rpc-port $6 \
+        --tensor-parallel-size $7 \
         --prefill-context-parallel-size 4 \
         --enable-expert-parallel \
         --enable-eplb \
@@ -2264,19 +2261,18 @@ Select the tab for the target hardware.
     export VLLM_ENGINE_READY_TIMEOUT_S=36000
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
     export HCCL_BUFFSIZE=4096
-    export HCCL_EXEC_TIMEOUT=3600
-    export ASCEND_RT_VISIBLE_DEVICES="$1"
+    export ASCEND_RT_VISIBLE_DEVICES=$1
 
     #export MAX_JOBS=4
 
     vllm serve "$MODEL_PATH" \
         --host 0.0.0.0 \
-        --port "$2" \
-        --data-parallel-size "$3" \
-        --data-parallel-rank "$4" \
-        --data-parallel-address "$5" \
-        --data-parallel-rpc-port "$6" \
-        --tensor-parallel-size "$7" \
+        --port $2 \
+        --data-parallel-size $3 \
+        --data-parallel-rank $4 \
+        --data-parallel-address $5 \
+        --data-parallel-rpc-port $6 \
+        --tensor-parallel-size $7 \
         --prefill-context-parallel-size 1 \
         --enable-expert-parallel \
         --seed 1024 \
