@@ -70,7 +70,7 @@ def test_fused_grouped_topk_checks_expert_groups(
     weights = torch.ones(2, 8, dtype=torch.float32)
     ids = torch.zeros(2, 8, dtype=torch.int32)
     gating_op = MagicMock(return_value=(weights, ids, None))
-    monkeypatch.setattr(fused_topk_router_module.torch_npu, "npu_moe_gating_top_k", gating_op)
+    monkeypatch.setattr(fused_topk_router_module.torch_npu, "npu_moe_gating_top_k", gating_op, raising=False)
     monkeypatch.setattr(fused_topk_router_module, "get_current_hardware_profile", lambda: None)
     router = AscendFusedTopKRouter(
         top_k=8,
