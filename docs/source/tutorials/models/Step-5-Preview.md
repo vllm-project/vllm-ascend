@@ -102,7 +102,7 @@ docker run --rm \
 -it $IMAGE bash
 ```
 
-The `-v` option maps directories. **You should map the weight directory into the container** so that the weights can be accessed inside the container. The local weight path is `/mnt/weight`; modify it according to the actual situation.
+The `-v` option maps directories. **You should map the weight directory into the container** so that the weights can be accessed inside the container. The local weight path is `/root/.cache`; modify it according to the actual situation.
 
 The `docker run` command above opens an interactive container shell. Use that shell for the following steps. To open an additional shell, run this command from another terminal on the host:
 

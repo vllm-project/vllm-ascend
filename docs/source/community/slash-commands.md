@@ -91,7 +91,7 @@ multi-node tests, pass a compact JSON map to select paths on each node:
 `--log-path '{"node0":"logs/leader.txt","node1":"/tmp/test-logs"}'`.
 To collect multiple paths from one node, repeat that node in a single
 mapping, for example
-`--log-path '{"node1":"logs/worker.txt","node1":"/tmp/test-logs"}'`.
+`--log-path '[{"node1":"logs/worker.txt"},{"node1":"/tmp/test-logs"}]'`.
 The equivalent list of single-path entries is also supported:
 `--log-path '[{"node1":"logs/worker.txt"},{"node1":"/tmp/test-logs"}]'`.
 Multiple paths from one node are placed under `path-1/`, `path-2/`, etc.
