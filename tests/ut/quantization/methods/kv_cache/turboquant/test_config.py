@@ -133,9 +133,34 @@ def test_sfa_model_is_validated_against_the_sfa_dims(runtime):
         config.validate_turboquant(runtime)
 
 
-def test_sfa_model_allows_context_parallelism(runtime):
-    # Only the compressed-cache path forbids DCP/PCP; the packed SFA cache works
-    # with context parallelism.
+@pytest.mark.parametrize(
+    "signature,supported",
+    [
+        (None, False),
+        ("(Tensor q) -> Tensor", False),
+        ("(Tensor q) -> (Tensor, Tensor, Tensor)", False),
+        ("(Tensor q, *, bool return_softmax_lse=False) -> Tensor", False),
+        ("(Tensor q, *, bool return_softmax_lse=False) -> (Tensor, Tensor, Tensor)", True),
+    ],
+)
+def test_sfa_dcp_requires_turboquant_lse_interface(runtime, monkeypatch, signature, supported):
+    op_name = "npu_kv_quant_sparse_flash_attention"
+    op = None
+    if signature is not None:
+        schema = torch._C.parse_schema(f"npu::{op_name}{signature}")
+        op = SimpleNamespace(default=SimpleNamespace(_schema=schema))
+    monkeypatch.setattr(torch.ops.npu, op_name, op, raising=False)
     _as_sfa_model(runtime).parallel_config.decode_context_parallel_size = 2
 
+    if supported:
+        config.validate_turboquant(runtime)
+    else:
+        with pytest.raises(ValueError, match="return_softmax_lse.*--decode-context-parallel-size 1"):
+            config.validate_turboquant(runtime)
+
+
+@pytest.mark.parametrize("pcp_size", [1, 2])
+def test_sfa_dcp1_accepts_turboquant_without_lse(runtime, monkeypatch, pcp_size):
+    monkeypatch.setattr(torch.ops.npu, "npu_kv_quant_sparse_flash_attention", None, raising=False)
+    _as_sfa_model(runtime).parallel_config.prefill_context_parallel_size = pcp_size
     config.validate_turboquant(runtime)
