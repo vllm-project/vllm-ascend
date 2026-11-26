@@ -20,10 +20,14 @@ from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead, 
 from vllm_ascend.utils import (
     get_rotation_matrix,
     get_rotation_path,
+    is_rot_weight_used,
     lmhead_tp_enable,
 )
 
 logger = logging.getLogger(__name__)
+
+CONVENTIONAL_ROTATION_RELPATH = Path("optional") / "quarot.safetensors"
+_rotation_fallback_warnings: set[str] = set()
 
 TARGET_EMBED_WEIGHT_NAMES = (
     "language_model.model.embed_tokens.weight",
@@ -131,10 +135,102 @@ def process_weight(linear_weight: torch.Tensor, rotation_weight: torch.Tensor):
     return processed_weight.to(ori_dtype)
 
 
-@torch.no_grad()
-def align_draft_weights(model, projection, vllm_config):
-    """Align draft inputs with the rotated target without modifying shared weights."""
+def _warn_rotation_once(key: str, message: str, *args) -> None:
+    if key not in _rotation_fallback_warnings:
+        _rotation_fallback_warnings.add(key)
+        logger.warning(message, *args)
+
+
+def _rotation_shape_matches(rotation_path: Path, hidden_size: int | None) -> bool:
+    """Validate the conventional fallback tensor against the target hidden size.
+
+    Reads only the safetensors header, never the matrix body."""
+    if hidden_size is None:
+        return True
+    try:
+        with safe_open(rotation_path, framework="pt", device="cpu") as shard:
+            shape = shard.get_slice("global_rotation").get_shape()
+    except Exception as e:
+        _warn_rotation_once(
+            f"{rotation_path}:unreadable",
+            "[spec_decode/quarot] Conventional rotation fallback %s cannot be read as a "
+            "'global_rotation' tensor (%s); draft rotation alignment is skipped and "
+            "speculative decoding will accept ~0 tokens.",
+            rotation_path,
+            e,
+        )
+        return False
+    if len(shape) != 2 or shape[0] != hidden_size:
+        _warn_rotation_once(
+            f"{rotation_path}:shape",
+            "[spec_decode/quarot] Conventional rotation fallback %s has shape %s, expected "
+            "(%d, %d) for the target hidden size; refusing to align with it and skipping "
+            "draft rotation alignment. Update quant_model_description.json to declare the "
+            "correct rotation_map.",
+            rotation_path,
+            tuple(shape),
+            hidden_size,
+            hidden_size,
+        )
+        return False
+    return True
+
+
+def resolve_rotation_path(vllm_config, *, allow_fallback: bool = False) -> Path | None:
+    """Resolve the QuaRot global-rotation path for draft alignment.
+
+    Behaves like :func:`vllm_ascend.utils.get_rotation_path` unless the target
+    sets ``is_rot_used`` without declaring ``optional.quarot.rotation_map`` in
+    its quant_model_description.json. Draft alignment would then be silently
+    skipped and speculative decoding would accept ~0 tokens, so with
+    ``allow_fallback=True`` the conventional ``optional/quarot.safetensors``
+    checkpoint file is used instead, after a header-only shape check and with
+    a warning. Callers that must not change behavior keep the default
+    ``allow_fallback=False``, which stays fully silent.
+    """
     rotation_path = get_rotation_path(vllm_config)
+    if rotation_path is not None:
+        return rotation_path
+    if getattr(vllm_config, "quant_config", None) is None or not is_rot_weight_used(vllm_config):
+        return None
+    if not allow_fallback:
+        return None
+    model_config = vllm_config.model_config
+    fallback = Path(model_config.model) / CONVENTIONAL_ROTATION_RELPATH
+    if not fallback.is_file():
+        _warn_rotation_once(
+            f"{fallback}:missing",
+            "[spec_decode/quarot] %s sets is_rot_used=true but quant_model_description.json has "
+            "no optional.quarot.rotation_map.global_rotation and %s does not exist; draft "
+            "rotation alignment is skipped and speculative decoding will accept ~0 tokens. "
+            "Update quant_model_description.json from the upstream model revision to fix this.",
+            model_config.model,
+            fallback,
+        )
+        return None
+    hidden_size = getattr(getattr(model_config, "hf_text_config", None), "hidden_size", None)
+    if not _rotation_shape_matches(fallback, hidden_size):
+        return None
+    _warn_rotation_once(
+        f"{fallback}:used",
+        "[spec_decode/quarot] %s sets is_rot_used=true but quant_model_description.json has no "
+        "optional.quarot.rotation_map.global_rotation; falling back to the conventional %s for "
+        "draft rotation alignment.",
+        model_config.model,
+        fallback,
+    )
+    return fallback
+
+
+@torch.no_grad()
+def align_draft_weights(model, projection, vllm_config, *, allow_fallback: bool = True):
+    """Align draft inputs with the rotated target without modifying shared weights.
+
+    All draft families routing through here (Qwen3/GLM5/Kimi DSpark and
+    DFlash2) recover from a QuaRot target whose quant_model_description.json
+    lost the rotation-map entry; pass allow_fallback=False to restore the
+    silently-skip behavior."""
+    rotation_path = resolve_rotation_path(vllm_config, allow_fallback=allow_fallback)
     if rotation_path is not None:
         rotation = get_rotation_matrix(rotation_path).cpu()
         weight = projection.weight

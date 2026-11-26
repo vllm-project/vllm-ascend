@@ -161,7 +161,7 @@ def test_pp_target_embedding_uses_normal_weight_loader_before_dflash_sharing(
     config = SimpleNamespace(
         model_config=SimpleNamespace(model=str(tmp_path), hf_text_config=SimpleNamespace(vocab_size=65, hidden_size=2))
     )
-    monkeypatch.setattr(qwen3_dflash2, "get_rotation_path", lambda _: "/rotation" if rotated else None)
+    monkeypatch.setattr(qwen3_dflash2, "resolve_rotation_path", lambda _, **__: "/rotation" if rotated else None)
     monkeypatch.setattr(quarot_utils, "get_rotation_path", lambda _: "/rotation" if rotated else None)
     monkeypatch.setattr(quarot_utils, "get_rotation_matrix", lambda _: rotation)
     # Device-specific post-load packing is outside this CPU test.
