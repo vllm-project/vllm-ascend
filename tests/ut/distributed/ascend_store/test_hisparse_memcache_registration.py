@@ -478,8 +478,13 @@ def test_buffer_descriptor_rejects_invalid_geometry(overrides, message):
 
 def test_register_hisparse_views_requires_sized_host_pool():
     spec = AscendMLAAttentionSpec(block_size=128, num_kv_heads=1, head_size=128, dtype=torch.bfloat16)
-    role = KVCacheGroupRole.HISPARSE_SOURCE if vllm_version_is("0.34.0") else KVCacheGroupRole.DEFAULT
-    source = KVCacheGroupSpec(["source"], spec, host_resident=True, role=role)
+    if vllm_version_is("0.34.0"):
+        source = KVCacheGroupSpec(["source"], spec, host_resident=True, role=KVCacheGroupRole.HISPARSE_SOURCE)
+    else:
+        from vllm.v1.core.single_type_kv_cache_manager import HiSparseSourceManager
+        from vllm.v1.kv_cache_interface import KVCacheGroup
+
+        source = KVCacheGroup.from_layers({"source": HiSparseSourceManager.layer_config(spec)}, host_resident=True)
     worker = KVPoolWorker.__new__(KVPoolWorker)
     worker.use_recoverssm = False
     worker.kv_cache_config = KVCacheConfig(1, [], [source])

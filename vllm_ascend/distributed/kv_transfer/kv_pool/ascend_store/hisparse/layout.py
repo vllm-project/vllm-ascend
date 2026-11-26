@@ -37,7 +37,8 @@ def has_hisparse_cache_layout(config: KVCacheConfig | None) -> bool:
         return False
     host_blocks = getattr(config, "hisparse_host_num_blocks", None)
     return (isinstance(host_blocks, int) and not isinstance(host_blocks, bool)) or any(
-        getattr(group, "role", None) == "hisparse_source" for group in getattr(config, "kv_cache_groups", ())
+        getattr(group, "host_resident", False) is True or getattr(group, "role", None) == "hisparse_source"
+        for group in getattr(config, "kv_cache_groups", ())
     )
 
 
