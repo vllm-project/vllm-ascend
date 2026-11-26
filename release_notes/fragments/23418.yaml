@@ -2,9 +2,8 @@ pr: 23418
 entries:
   - category: bugfix
     text: >-
-      Dense speculative drafts can start when their runtime configuration inherits
-      expert parallelism from the target. Invalid tensor or decode context
-      parallel sizes still raise a configuration error.
+      Dense multi-module MTP drafts and plain MTP drafts on 310P can start when
+      the target uses expert parallelism. The target keeps its expert settings.
   - category: bugfix
     text: >-
       On Ascend 310P, plain MTP speculative decoding now honors the draft's

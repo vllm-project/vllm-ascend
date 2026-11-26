@@ -1,3 +1,4 @@
+# Adapt from https://github.com/vllm-project/vllm/blob/main/vllm/v1/worker/gpu/sample/spec_decode/__init__.py
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 # Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
@@ -20,37 +21,9 @@ from typing import TYPE_CHECKING
 
 import torch
 from vllm.config import CompilationMode, VllmConfig
-from vllm.utils.import_utils import resolve_obj_by_qualname
-from vllm.v1.worker.gpu.spec_decode.dflash.config import DFlashSpeculatorConfig
-from vllm.v1.worker.gpu.spec_decode.dflash2.config import DFlash2SpeculatorConfig
-from vllm.v1.worker.gpu.spec_decode.dspark.config import DSparkSpeculatorConfig
-from vllm.v1.worker.gpu.spec_decode.eagle.config import EagleSpeculatorConfig
-from vllm.v1.worker.gpu.spec_decode.extract_hidden_states_config import ExtractHiddenStatesSpeculatorConfig
-from vllm.v1.worker.gpu.spec_decode.gemma4.config import Gemma4MTPSpeculatorConfig
-from vllm.v1.worker.gpu.spec_decode.lilicorr.config import LiLiCorrSpeculatorConfig
-from vllm.v1.worker.gpu.spec_decode.mtp.config import MTPSpeculatorConfig
-from vllm.v1.worker.gpu.spec_decode.multi_module_mtp.config import MultiModuleMTPSpeculatorConfig
-from vllm.v1.worker.gpu.spec_decode.ngram.config import NgramSpeculatorConfig
-from vllm.v1.worker.gpu.spec_decode.standalone_ar.config import StandaloneARSpeculatorConfig
 
 if TYPE_CHECKING:
     from vllm.v1.worker.gpu.states import RequestState
-
-
-# Keep backend imports lazy. The draft checkpoint and method are resolved by vLLM.
-_ASCEND_SPECULATORS = {
-    DFlashSpeculatorConfig.speculator_class: f"{__name__}.dflash.speculator.AscendDFlashSpeculator",
-    DFlash2SpeculatorConfig.speculator_class: f"{__name__}.dflash2.speculator.AscendDFlash2Speculator",
-    DSparkSpeculatorConfig.speculator_class: f"{__name__}.dspark.speculator.AscendDSparkSpeculator",
-    EagleSpeculatorConfig.speculator_class: f"{__name__}.eagle.speculator.AscendEagleSpeculator",
-    Gemma4MTPSpeculatorConfig.speculator_class: f"{__name__}.gemma4.speculator.AscendGemma4Speculator",
-    LiLiCorrSpeculatorConfig.speculator_class: f"{__name__}.lilicorr.speculator.AscendLiLiCorrSpeculator",
-    MTPSpeculatorConfig.speculator_class: f"{__name__}.mtp.speculator.AscendMTPSpeculator",
-    MultiModuleMTPSpeculatorConfig.speculator_class: (
-        f"{__name__}.multi_module_mtp.speculator.AscendMultiModuleMTPSpeculator"
-    ),
-    StandaloneARSpeculatorConfig.speculator_class: f"{__name__}.standalone_ar.speculator.AscendStandaloneARSpeculator",
-}
 
 
 def init_speculator(
@@ -58,22 +31,84 @@ def init_speculator(
     device: torch.device,
     req_states: "RequestState | None" = None,
 ):
-    """Build the NPU implementation of the speculator selected by vLLM."""
+    """Override GPU init_speculator for Ascend NPUs.
+    Use AscendEagleSpeculator when eagle is used.
+    """
+    # TODO: Align init_speculator dispatch with upstream vLLM by mapping the
+    # resolved speculator class to its Ascend implementation.
     speculative_config = vllm_config.speculative_config
     assert speculative_config is not None
     if speculative_config.enforce_eager:
         vllm_config = copy.copy(vllm_config)
         vllm_config.compilation_config = copy.copy(vllm_config.compilation_config)
         vllm_config.compilation_config.mode = CompilationMode.NONE
-    qualname = speculative_config.speculator_config.speculator_class
-    if qualname == NgramSpeculatorConfig.speculator_class:
+    if speculative_config.method in ("ngram", "ngram_gpu"):
         if req_states is None:
             raise ValueError("MRV2 n-gram speculative decoding requires request states")
-        return resolve_obj_by_qualname(qualname)(vllm_config, device, req_states)
-    if qualname == ExtractHiddenStatesSpeculatorConfig.speculator_class:
-        return resolve_obj_by_qualname(qualname)(vllm_config, device)
+        # Older vLLM pins lack this module; MRV2 n-gram requires upstream #40704.
+        from vllm.v1.worker.gpu.spec_decode.ngram.speculator import (  # type: ignore[import-not-found]
+            NgramGPUSpeculator,
+        )
 
-    implementation = _ASCEND_SPECULATORS.get(qualname)
-    if implementation is None:
-        raise NotImplementedError(f"No Ascend MRV2 implementation for {speculative_config.method!r} ({qualname!r})")
-    return resolve_obj_by_qualname(implementation)(vllm_config, device)
+        # MRV2 postprocess has already updated history. The MRV1 NPU kernel
+        # appends sampled tokens itself and cannot be used here unchanged.
+        return NgramGPUSpeculator(vllm_config, device, req_states)
+    if speculative_config.method == "extract_hidden_states":
+        # No Ascend-specific behavior beyond update_stream assignment in
+        # NPUModelRunner; reuse upstream ExtractHiddenStatesSpeculator as-is.
+        from vllm.v1.worker.gpu.spec_decode.extract_hidden_states import (
+            ExtractHiddenStatesSpeculator,
+        )
+
+        return ExtractHiddenStatesSpeculator(vllm_config, device)
+    if speculative_config.use_dspark():
+        from vllm_ascend.worker.v2.spec_decode.dspark.speculator import (
+            AscendDSparkSpeculator,
+        )
+
+        return AscendDSparkSpeculator(vllm_config, device)
+    if speculative_config.use_dflash():
+        if "LiLiCorrDraftModel" in speculative_config.draft_model_config.architectures:
+            from vllm_ascend.worker.v2.spec_decode.lilicorr.speculator import (
+                AscendLiLiCorrSpeculator,
+            )
+
+            return AscendLiLiCorrSpeculator(vllm_config, device)
+        if "DFlash2DraftModel" in speculative_config.draft_model_config.architectures:
+            from vllm_ascend.worker.v2.spec_decode.dflash2.speculator import (
+                AscendDFlash2Speculator,
+            )
+
+            return AscendDFlash2Speculator(vllm_config, device)
+        from vllm_ascend.worker.v2.spec_decode.dflash.speculator import (
+            AscendDFlashSpeculator,
+        )
+
+        return AscendDFlashSpeculator(vllm_config, device)
+    if speculative_config.use_gemma4_mtp():
+        from vllm_ascend.worker.v2.spec_decode.gemma4.speculator import (
+            AscendGemma4Speculator,
+        )
+
+        return AscendGemma4Speculator(vllm_config, device)
+    if speculative_config.use_multi_module_mtp():
+        from vllm_ascend.worker.v2.spec_decode.multi_module_mtp.speculator import AscendMultiModuleMTPSpeculator
+
+        return AscendMultiModuleMTPSpeculator(vllm_config, device)
+    if speculative_config.method == "mtp":
+        from vllm_ascend.worker.v2.spec_decode.mtp.speculator import (
+            AscendMTPSpeculator,
+        )
+
+        return AscendMTPSpeculator(vllm_config, device)
+    if speculative_config.use_eagle():
+        from vllm_ascend.worker.v2.spec_decode.eagle.speculator import AscendEagleSpeculator
+
+        return AscendEagleSpeculator(vllm_config, device)
+    if speculative_config.uses_draft_model():
+        from vllm_ascend.worker.v2.spec_decode.standalone_ar.speculator import (
+            AscendStandaloneARSpeculator,
+        )
+
+        return AscendStandaloneARSpeculator(vllm_config, device)
+    raise NotImplementedError(f"{speculative_config.method} is not supported yet.")

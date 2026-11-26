@@ -3,12 +3,14 @@
 #
 # Lean UTs for 310P MRv2 MTP (rejection offset, capture-safe draft step, RoPE flag).
 
+import runpy
 from types import SimpleNamespace
 from unittest.mock import patch
 
 import numpy as np
+import pytest
 import torch
-from vllm.config.compilation import CUDAGraphMode
+from vllm.config.compilation import CompilationMode, CUDAGraphMode
 
 from tests.ut.base import TestBase
 from vllm_ascend._310p.ops.rotary_embedding import AscendRotaryEmbedding310
@@ -20,6 +22,47 @@ from vllm_ascend._310p.worker.v2.spec_utils import (
     set_draft_step_host,
     update_draft_inputs_cpu,
 )
+
+
+def test_310_router_delegates_registered_mtp(monkeypatch):
+    from vllm.v1.worker.gpu.spec_decode import target_dependent_ar
+
+    from vllm_ascend.worker.v2 import model_runner, spec_decode
+
+    monkeypatch.setattr(target_dependent_ar, "speculator", SimpleNamespace())
+    monkeypatch.setattr(model_runner, "init_speculator", spec_decode.init_speculator)
+    with (
+        patch.object(spec_decode, "init_speculator") as shared_factory,
+        patch("vllm_ascend._310p.worker.v2.spec_decode.mtp_speculator.AscendMTPSpeculator310") as plain_mtp,
+    ):
+        router = runpy.run_module("vllm_ascend.patch.worker.patch_spec_decode_310")["_init_speculator_310p"]
+        spec = SimpleNamespace(
+            method="mtp", custom_method="custom_mtp", use_gemma4_mtp=lambda: False, use_multi_module_mtp=lambda: False
+        )
+        config = SimpleNamespace(speculative_config=spec)
+        device, req_states = torch.device("cpu"), object()
+        assert router(config, device, req_states) is shared_factory.return_value
+        shared_factory.assert_called_once_with(config, device, req_states)
+        plain_mtp.assert_not_called()
+
+
+@pytest.mark.parametrize("eager", [False, True])
+def test_plain_mtp_310_draft_compilation_mode(eager):
+    from vllm_ascend.worker.v2.spec_decode.target_dependent_ar.speculator import AscendTargetDependentARSpeculator
+
+    target = SimpleNamespace(
+        speculative_config=SimpleNamespace(enforce_eager=eager),
+        compilation_config=SimpleNamespace(mode=CompilationMode.VLLM_COMPILE),
+    )
+    with patch.object(AscendTargetDependentARSpeculator, "__init__", autospec=True, return_value=None) as initialize:
+        AscendMTPSpeculator310(target, torch.device("cpu"))
+    draft = initialize.call_args.args[1]
+    if eager:
+        assert draft.compilation_config.mode == CompilationMode.NONE
+        assert draft.compilation_config is not target.compilation_config
+    else:
+        assert draft is target
+    assert target.compilation_config.mode == CompilationMode.VLLM_COMPILE
 
 
 class TestMRv2Mtp310(TestBase):

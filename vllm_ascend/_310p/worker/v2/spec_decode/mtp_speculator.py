@@ -21,7 +21,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 from vllm.config import VllmConfig, replace
-from vllm.config.compilation import CUDAGraphMode
+from vllm.config.compilation import CompilationMode, CUDAGraphMode
 from vllm.logger import logger
 from vllm.v1.worker.gpu.attn_utils import build_slot_mappings_by_layer
 from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
@@ -35,6 +35,7 @@ from vllm_ascend._310p.ops.rotary_embedding import AscendRotaryEmbedding310
 from vllm_ascend._310p.worker.v2.spec_utils import set_draft_step_host
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.worker.v2.attn_utils import build_attn_metadata_factory
+from vllm_ascend.worker.v2.spec_decode.mtp import get_mtp_draft_parallel_config
 from vllm_ascend.worker.v2.spec_decode.target_dependent_ar.speculator import (
     AscendTargetDependentARSpeculator,
 )
@@ -42,6 +43,17 @@ from vllm_ascend.worker.v2.spec_decode.target_dependent_ar.speculator import (
 
 class AscendMTPSpeculator310(AscendTargetDependentARSpeculator, MTPSpeculator):
     """Ascend MTP speculator for 310P MRv2 (Triton-free draft loop)."""
+
+    def __init__(self, vllm_config: VllmConfig, device: torch.device):
+        # The 310P router constructs plain MTP directly, before the shared
+        # factory applies the draft-only compilation mode.
+        spec = vllm_config.speculative_config
+        assert spec is not None
+        if spec.enforce_eager:
+            vllm_config = copy.copy(vllm_config)
+            vllm_config.compilation_config = copy.copy(vllm_config.compilation_config)
+            vllm_config.compilation_config.mode = CompilationMode.NONE
+        super().__init__(vllm_config, device)
 
     def _create_draft_vllm_config(self) -> VllmConfig:
         draft_model_config = self.speculative_config.draft_model_config
@@ -55,10 +67,7 @@ class AscendMTPSpeculator310(AscendTargetDependentARSpeculator, MTPSpeculator):
             model_config_for_vllm = copy.copy(draft_model_config)
             model_config_for_vllm.hf_overrides = {}
 
-        parallel_config = replace(
-            self.vllm_config.parallel_config,
-            pipeline_parallel_size=1,
-        )
+        parallel_config = get_mtp_draft_parallel_config(self.vllm_config)
         draft_vllm_config = replace(
             self.vllm_config,
             model_config=model_config_for_vllm,

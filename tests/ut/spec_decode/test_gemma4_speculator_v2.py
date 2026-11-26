@@ -16,10 +16,9 @@
 # This file is a part of the vllm-ascend project.
 #
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import torch
-from vllm.v1.worker.gpu.spec_decode.gemma4.config import Gemma4MTPSpeculatorConfig
 from vllm.v1.worker.gpu.spec_decode.gemma4.speculator import Gemma4Speculator
 from vllm.v1.worker.gpu.spec_decode.target_dependent_ar.speculator import (
     TargetDependentARSpeculator,
@@ -35,9 +34,22 @@ from vllm_ascend.worker.v2.spec_decode.target_dependent_ar.speculator import (
 )
 
 
+def _speculative_config():
+    config = MagicMock()
+    config.method = "mtp"
+    # Falsy: init_speculator's enforce_eager branch copies compilation_config,
+    # which the stub vllm_config does not carry.
+    config.enforce_eager = None
+    config.use_gemma4_mtp.return_value = True
+    config.use_step3p5_mtp.return_value = False
+    config.use_dspark.return_value = False
+    config.use_dflash.return_value = False
+    config.use_eagle.return_value = True
+    return config
+
+
 def test_routes_gemma4_mtp_to_ascend_gemma4_speculator():
-    spec = SimpleNamespace(method="mtp", enforce_eager=False, speculator_config=Gemma4MTPSpeculatorConfig)
-    vllm_config = SimpleNamespace(speculative_config=spec)
+    vllm_config = SimpleNamespace(speculative_config=_speculative_config())
     expected = object()
     with patch(
         "vllm_ascend.worker.v2.spec_decode.gemma4.speculator.AscendGemma4Speculator",
@@ -47,6 +59,17 @@ def test_routes_gemma4_mtp_to_ascend_gemma4_speculator():
 
     assert result is expected
     speculator_cls.assert_called_once()
+
+
+def test_eagle_speculator_is_not_reached_for_gemma4():
+    vllm_config = SimpleNamespace(speculative_config=_speculative_config())
+    with patch(
+        "vllm_ascend.worker.v2.spec_decode.gemma4.speculator.AscendGemma4Speculator",
+        return_value=object(),
+    ):
+        v2_spec_decode.init_speculator(vllm_config, torch.device("cpu"))
+
+    vllm_config.speculative_config.use_eagle.assert_not_called()
 
 
 def test_gemma4_speculator_mro():

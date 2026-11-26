@@ -281,17 +281,13 @@ def test_patch_swaps_upstream_selector_walk_kernel():
 
 
 def _spec_config(arch: str) -> SimpleNamespace:
-    from vllm.model_executor.models.qwen3_dflash import DFlashQwen3ForCausalLM
-
-    from vllm_ascend.models.qwen3_dflash2 import DFlash2Qwen3ForCausalLM
-
-    if arch == "LiLiCorrDraftModel":
-        from vllm.model_executor.models.lilicorr import LiLiCorrForCausalLM
-
-        model_cls = LiLiCorrForCausalLM
-    else:
-        model_cls = {"DFlash2DraftModel": DFlash2Qwen3ForCausalLM, "DFlashDraftModel": DFlashQwen3ForCausalLM}[arch]
-    return SimpleNamespace(method="dflash", enforce_eager=None, speculator_config=model_cls.speculator_config_class)
+    return SimpleNamespace(
+        method="dflash",
+        enforce_eager=None,
+        use_dspark=lambda: False,
+        use_dflash=lambda: True,
+        draft_model_config=SimpleNamespace(architectures=[arch]),
+    )
 
 
 def test_init_speculator_routes_dflash2_draft_model():

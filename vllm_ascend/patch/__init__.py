@@ -424,16 +424,22 @@
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.config.model.ModelConfig.verify_with_parallel_config`
 #    Why:
-#       The draft parallel config already sets PP=1 and disables EP for dense
-#       drafts. Some runtime loaders derive another config from the target,
-#       e.g. AscendMultiModuleMTPSpeculator._create_draft_vllm_config.
-#    How:
-#       Validate a shallow copy when a dense draft inherits EP or a local
-#       Eagle/MTP/DSpark draft inherits PP. Keep all upstream validation.
-#    Related PR:
-#       https://github.com/vllm-project/vllm/pull/56930
+#       Local Eagle/MTP drafters are loaded on the last PP stage rather than
+#       partitioned across all PP ranks. Upstream `ModelConfig.verify_with_parallel_config`
+#       validates against `pipeline_parallel_size`, which fails for these drafters
+#       since they run locally with effective PP=1.
+#    How：
+#       Monkey-patch `verify_with_parallel_config` to detect Eagle/MTP drafter
+#       models (by `model_type` and `architectures`) when `runner="draft"` and
+#       `pipeline_parallel_size > 1`. For such configs, call the original verify
+#       with a patched `pipeline_parallel_size=1` copy, preserving normal target-model
+#       validation for non-drafter models.
+#    Related PR (if no, explain why):
+#       Backport of local vLLM PP+MTP branch changes.
 #    Future Plan:
-#       Remove when all draft loaders pass their effective parallel config.
+#       Remove this patch once upstream vLLM's `ModelConfig.verify_with_parallel_config`
+#       supports local drafter models with PP > 1, or moves the PP validation to a
+#       separate hook that can be overridden per-model-type.
 #
 # ** 18. File: platform/patch_speculative_config.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -971,10 +977,11 @@
 #    Why:
 #       310P needs its own MTP speculator (`AscendMTPSpeculator310`).
 #    How：
-#       Override the ordinary MTP entry in the Ascend speculator table.
-#       The shared factory still handles eager mode and checkpoint specializations.
+#       Replace `init_speculator` with a 310P router that returns
+#       `AscendMTPSpeculator310` for plain MTP and delegates to the original
+#       otherwise; rebind the model_runner by-name reference as well.
 #    Future Plan:
-#       Remove the override when the shared Ascend MTP implementation supports 310P.
+#       Remove once the MTP speculator is selected through a device dispatch.
 #
 # ** 18. File: worker/patch_bind_kv_cache.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
