@@ -66,7 +66,15 @@ class AscendStoreHiSparseResidentManager(HiSparseResidentManager):
         )
 
 
-if vllm_version_is("0.34.0"):
+if TYPE_CHECKING or not vllm_version_is("0.34.0"):
+    from vllm.v1.kv_cache_interface import HiSparsePageSpec
+
+    @dataclass(frozen=True, kw_only=True)
+    class AscendStoreHiSparseResidentSpec(HiSparsePageSpec):
+        """Retain the native Resident page geometry and require slab alignment."""
+
+        requires_aligned_device_slab: ClassVar[bool] = True
+else:
     from vllm.v1.kv_cache_interface import HiSparseResidentSpec
     from vllm.v1.kv_cache_spec_registry import register_kv_cache_spec
 
@@ -85,11 +93,3 @@ if vllm_version_is("0.34.0"):
             max_context_pages = cdiv(vllm_config.model_config.max_model_len, self.block_size)
             # The writable import tail can coexist with a full prefill window.
             return min(window_bytes + self.page_size_bytes, max_context_pages * self.page_size_bytes)
-else:
-    from vllm.v1.kv_cache_interface import HiSparsePageSpec
-
-    @dataclass(frozen=True, kw_only=True)
-    class AscendStoreHiSparseResidentSpec(HiSparsePageSpec):
-        """Retain the native Resident page geometry and require slab alignment."""
-
-        requires_aligned_device_slab: ClassVar[bool] = True
