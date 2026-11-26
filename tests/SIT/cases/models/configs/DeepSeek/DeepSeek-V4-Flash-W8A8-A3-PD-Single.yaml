@@ -1,7 +1,7 @@
 # Single-node PD disaggregation on one A3 node (16 NPUs).
 # The prefiller owns NPUs 0-7 and the decoder owns NPUs 8-15; both instances run
 # in the same pod, so the nightly caller must pass size=1.
-test_name: "DeepSeek-V4-Flash-W8A8-A3-PD-single-node"
+test_name: "DeepSeek-V4-Flash-W8A8-A3-PD-Single"
 model: "Eco-Tech/DeepSeek-V4-Flash-w8a8-mtp"
 num_nodes: 1
 npu_per_node: 16

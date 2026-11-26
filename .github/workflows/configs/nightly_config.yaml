@@ -119,8 +119,8 @@ a3:
         config_file_path: MiniMax-M3-w8a8-PP-prefix-PD.yaml
         config_base_path: tests/SIT/cases/models/configs/MiniMax
         size: 3
-      - name: DeepSeek-V4-Flash-W8A8-A3-PD-single-node
-        config_file_path: DeepSeek-V4-Flash-W8A8-A3-PD-single-node.yaml
+      - name: DeepSeek-V4-Flash-W8A8-A3-PD-Single
+        config_file_path: DeepSeek-V4-Flash-W8A8-A3-PD-Single.yaml
         config_base_path: tests/SIT/cases/models/configs/DeepSeek
         size: 1
   double_node:
