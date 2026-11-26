@@ -7,39 +7,32 @@ Ported from the official reference implementation
 checkpoint so no renaming is needed at load time.
 """
 
-from functools import lru_cache
-
 import torch
 import torch.nn.functional as F
 from torch import nn
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.attention import MMEncoderAttention
+from vllm.model_executor.layers.fusion.mm_input_norm import IdentityInputNorm
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.rotary_embedding.common import ApplyRotaryEmb
-
-
-@lru_cache(8)
-def get_vision_cos_sin(n_h: int, n_w: int, dim: int, theta: float) -> tuple[torch.Tensor, torch.Tensor]:
-    inv_freq = 1.0 / (theta ** (torch.arange(0, dim, 2, dtype=torch.float32) / dim))
-    hpos = torch.arange(n_h).unsqueeze(1).expand(n_h, n_w)
-    wpos = torch.arange(n_w).unsqueeze(0).expand(n_h, n_w)
-    freqs = torch.stack([hpos, wpos], dim=-1).reshape(-1, 2, 1).float()
-    freqs = (freqs * inv_freq).flatten(1)
-    return freqs.cos().unsqueeze(1), freqs.sin().unsqueeze(1)
+from vllm.models.deepseek_v4.common.vision import DeepseekV4ViT, get_vision_cos_sin
 
 
 class DeepseekV41PatchEmbed(nn.Module):
     def __init__(self, config):
         super().__init__()
         self.proj = nn.Linear(3 * config.vision_patch_size**2, config.vision_dim)
+        self.input_norm = IdentityInputNorm()
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.proj(x.flatten(1))
+        return self.proj(self.input_norm(x.flatten(1), self.proj.weight.dtype))
 
 
 class DeepseekV41VisionAttention(nn.Module):
     def __init__(self, config):
         super().__init__()
+        self.hidden_size = config.vision_dim
+        self.tp_size = 1
         self.n_heads = config.vision_n_heads
         self.head_dim = config.vision_dim // config.vision_n_heads
         self.wqkv = nn.Linear(config.vision_dim, 3 * config.vision_dim)
@@ -102,11 +95,12 @@ class DeepseekV41VisionBlock(nn.Module):
         return residual + self.mlp(self.norm2(residual))
 
 
-class DeepseekV41ViT(nn.Module):
+class DeepseekV41ViT(DeepseekV4ViT):
     """Ascend DeepSeek ViT: full bidirectional attention per image, 2D RoPE."""
 
     def __init__(self, config):
-        super().__init__()
+        # The Ascend tower uses replicated layers in place of upstream's TP-aware blocks.
+        nn.Module.__init__(self)
         self.rope_dim = config.vision_dim // config.vision_n_heads // 2
         self.rope_theta = config.vision_rope_theta
         self.patch_embed = DeepseekV41PatchEmbed(config)
@@ -120,20 +114,6 @@ class DeepseekV41ViT(nn.Module):
         sin = sin.to(device=x.device)
         for block in self.blocks:
             x = block(x, cos, sin)
-        return self.norm(x)
-
-    def forward_packed(
-        self,
-        patches: torch.Tensor,
-        cos: torch.Tensor,
-        sin: torch.Tensor,
-        cu_seqlens: torch.Tensor,
-        max_seqlen: torch.Tensor,
-    ) -> torch.Tensor:
-        """Tensor-only capture path with precomputed RoPE and image boundaries."""
-        x = self.patch_embed(patches)
-        for block in self.blocks:
-            x = block(x, cos, sin, cu_seqlens, max_seqlen)
         return self.norm(x)
 
 
