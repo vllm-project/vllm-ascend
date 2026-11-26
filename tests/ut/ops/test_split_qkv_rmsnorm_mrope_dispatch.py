@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import ast
 import importlib.util
+import math
 import os
 import sys
 import unittest
@@ -41,6 +42,8 @@ def _wrapper_namespace(contracts, helper, requested=2, cores=40, *, source_text=
         if isinstance(node, ast.FunctionDef)
         and node.name
         in (
+            "_validate_scalars",
+            "_layout_valid",
             "_get_ub_capacity",
             "_t1_grouped_eligible",
             "_select_tiling",
@@ -87,9 +90,8 @@ def _wrapper_namespace(contracts, helper, requested=2, cores=40, *, source_text=
         ),
         "get_ub_size_bytes": helper,
         "get_vectorcore_num": lambda: cores,
-        "validate_scalars": contracts.validate_scalars,
+        "math": math,
         "working_set": contracts.working_set,
-        "layout_valid": contracts.layout_valid,
         "envs": SimpleNamespace(**{ENV_NAME: requested}),
         "split_qkv_rmsnorm_mrope_kernel": m1,
         "_M2_KERNEL": m2,
@@ -139,9 +141,8 @@ def _t1_args(hq, hkv):
 
 
 def _load_contracts(package_name):
-    validation = _load_source_module(package_name + ".ac_input_validation", OP_DIR / "ac_input_validation.py")
     resource = _load_source_module(package_name + ".ac_working_set", OP_DIR / "ac_working_set.py")
-    return SimpleNamespace(**vars(validation), working_set=resource.working_set)
+    return SimpleNamespace(working_set=resource.working_set)
 
 
 def _decision(
@@ -608,13 +609,45 @@ class SplitQKVMRoPEDispatchTests(unittest.TestCase):
             with self.subTest(kwargs=kwargs), self.assertRaises((TypeError, ValueError)):
                 self._run(**kwargs)
 
+    def test_live_scalar_validation_patch_target(self):
+        for eps in (1e-6, float("inf")):
+            with self.subTest(eps=eps):
+                capacity = mock.Mock(return_value=196608)
+                namespace, _, _ = _wrapper_namespace(self.contracts, capacity)
+                self.assertIs(namespace["_validate_scalars"].__globals__["math"], math)
+                validator = mock.Mock(wraps=namespace["_validate_scalars"])
+                namespace["_validate_scalars"] = validator
+                args = (
+                    _tensor((1024, 3584)),
+                    _tensor((256,)),
+                    _tensor((256,)),
+                    _tensor((3, 1024, 64)),
+                    6,
+                    1,
+                    256,
+                    eps,
+                    [11, 11, 10],
+                    True,
+                )
+                if math.isfinite(eps):
+                    namespace["triton_split_qkv_rmsnorm_mrope"](*args, rope_dim=64, has_gate=True)
+                    capacity.assert_called_once_with()
+                else:
+                    with self.assertRaisesRegex(ValueError, "^eps must be a finite positive float$"):
+                        namespace["triton_split_qkv_rmsnorm_mrope"](*args, rope_dim=64, has_gate=True)
+                    capacity.assert_not_called()
+                validator.assert_called_once()
+                self.assertEqual(len(validator.call_args.kwargs), 8)
+
     def test_production_single_selection_and_real_import_wiring(self):
         tree = ast.parse(OP_PATH.read_text())
         imports = {
             alias.name: node.module for node in tree.body if isinstance(node, ast.ImportFrom) for alias in node.names
         }
-        self.assertEqual(imports["validate_scalars"], "ac_input_validation")
-        self.assertEqual(imports["layout_valid"], "ac_input_validation")
+        self.assertNotIn("ac_input_validation", OP_PATH.read_text())
+        self.assertFalse((OP_DIR / "ac_input_validation.py").exists())
+        functions = {node.name for node in tree.body if isinstance(node, ast.FunctionDef)}
+        self.assertTrue({"_validate_scalars", "_layout_valid"} <= functions)
         self.assertEqual(imports["working_set"], "ac_working_set")
         self.assertFalse((OP_DIR / "ac_ub_demand.py").exists())
         source = OP_PATH.read_text()
@@ -898,10 +931,11 @@ class SplitQKVMRoPEDispatchTests(unittest.TestCase):
             self._check_kernel_contract(kernel)
 
     def test_layout_checks_without_identity_strings(self):
+        namespace, _, _ = _wrapper_namespace(self.contracts, lambda: 196608)
         tensors = [_tensor((1024, 2048)), _tensor((256,)), _tensor((256,)), _tensor((3, 1024, 64)), None, None]
 
         def valid():
-            return self.contracts.layout_valid(*tensors, 1024, 1536, 0, 256, 256, 64)
+            return namespace["_layout_valid"](*tensors, 1024, 1536, 0, 256, 256, 64)
 
         self.assertTrue(valid())
         for slot, bad in (
@@ -961,7 +995,7 @@ class SplitQKVMRoPEDispatchTests(unittest.TestCase):
     def test_explicit_m1_bypasses_capacity_and_dispatch(self):
         helper = mock.Mock(side_effect=AssertionError("must not probe"))
         namespace, m1, m2 = _wrapper_namespace(self.contracts, helper, requested=1)
-        namespace["validate_scalars"] = mock.Mock(side_effect=AssertionError("must not validate"))
+        namespace["_validate_scalars"] = mock.Mock(side_effect=AssertionError("must not validate"))
         namespace["triton_split_qkv_rmsnorm_mrope"](
             _tensor((1024, 3072)),
             _tensor((256,)),
@@ -1076,10 +1110,10 @@ class SplitQKVMRoPEDispatchTests(unittest.TestCase):
                 namespace, m1, m2 = _wrapper_namespace(self.contracts, helper)
                 args = _t1_args(hq, hkv)
                 self.assertTrue(
-                    self.contracts.layout_valid(*args[:4], None, None, 1, hq * 256, hq * 256, hkv * 256, 256, 64)
+                    namespace["_layout_valid"](*args[:4], None, None, 1, hq * 256, hq * 256, hkv * 256, 256, 64)
                 )
-                layout = mock.Mock(wraps=self.contracts.layout_valid)
-                namespace["layout_valid"] = layout
+                layout = mock.Mock(wraps=namespace["_layout_valid"])
+                namespace["_layout_valid"] = layout
                 self.assertIs(namespace["_t1_grouped_eligible"](*args, 64, None, None, True, 40), grouped)
                 if grouped:
                     layout.assert_called_once()

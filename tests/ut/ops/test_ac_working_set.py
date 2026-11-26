@@ -59,16 +59,16 @@ class WorkingSetTests(unittest.TestCase):
     def test_init_packed_predicate_negative_mutant(self):
         _, local = self.stages(2, 8, 2, 128, 128, False)
         # Reusing h32's fixed 8M term at h64 misses a real 16-byte predicate pool.
-        mutant = max(24 * 64 + 4 * 2, local["Ib"] + 2 * 64 * 2 + 8 * 2)
-        self.assertEqual(local["Iinit"] - mutant, 16)
+        mutant = max(24 * 64 + 4 * 2, local["bulk_control_bytes"] + 2 * 64 * 2 + 8 * 2)
+        self.assertEqual(local["init_control_peak_bytes"] - mutant, 16)
         self.assertEqual(local["init"] - 16, 49264)
 
     def test_k8_m4_rejected_by_resource_model_itself(self):
         m4, local = self.stages(4, 8, 8, 256, 64, True)
         self.assertEqual(m4, 219540)
         self.assertGreater(m4, 196608)
-        self.assertEqual(local["Kraw"], 16384)
-        self.assertEqual(local["LoK"], local["Kraw"] + 2 * local["Xk"])
+        self.assertEqual(local["k_raw_bytes"], 16384)
+        self.assertEqual(local["k_output_live_bytes"], local["k_raw_bytes"] + 2 * local["k_compute_bytes"])
         self.assertEqual(self.module.working_set(2, 8, 8, 256, 64, True), 111436)
 
     def test_budget_floor_padding_and_scratch_minimum(self):
@@ -78,15 +78,15 @@ class WorkingSetTests(unittest.TestCase):
                 self.assertEqual(value, self.module.working_set(2, 2, 1, *padded, False))
                 self.assertEqual((local["D"], local["h"]), (padded[0], padded[1] // 2))
                 self.assertGreaterEqual(local["bulk_mul_q"], 256)
-                self.assertGreater(local["It"], 0)
+                self.assertGreater(local["tail_control_bytes"], 0)
         _, local = self.stages(2, 2, 1, 512, 512, False)
         self.assertEqual(local["Sinit"], 512)
 
     def test_bias_and_mask_roles_are_separate_increments(self):
         _, base = self.stages(2, 8, 2, 256, 64, True)
         _, bias = self.stages(2, 8, 2, 256, 64, True, True)
-        self.assertEqual(bias["P"] - base["P"], 28672)
-        self.assertEqual(bias["Ji"] - base["Ji"], 12800)
+        self.assertEqual(bias["prepared_parameter_bytes"] - base["prepared_parameter_bytes"], 28672)
+        self.assertEqual(bias["init_parameter_aux_bytes"] - base["init_parameter_aux_bytes"], 12800)
         self.assertEqual(bias["tail"] - base["tail"], 3584)
         _, masked = self.stages(2, 8, 2, 256, 64, True, False, False)
         self.assertEqual(masked["mask_extra"], 1200)
@@ -96,7 +96,10 @@ class WorkingSetTests(unittest.TestCase):
         self.assertEqual(masked["tail"] - base["tail"], 984)
         self.assertEqual(masked["bulk"], base["bulk"])
         self.assertEqual(masked["output"], base["output"])
-        self.assertEqual(base["Ro"], max(2 * 8 * 256 * 2, 16 * 4 + 2 * 16 * 32 * 4 + 512, 4 * 16 * 32 * 4, base["RoK"]))
+        self.assertEqual(
+            base["output_aux_bytes"],
+            max(2 * 8 * 256 * 2, 16 * 4 + 2 * 16 * 32 * 4 + 512, 4 * 16 * 32 * 4, base["k_output_aux_bytes"]),
+        )
 
     def test_total_integer_for_large_heads_and_strict_errors(self):
         for q in (1, 2, 6, 12, 24, 36, 48, 72, 120):

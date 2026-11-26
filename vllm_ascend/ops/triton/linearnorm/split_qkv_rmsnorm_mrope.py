@@ -16,6 +16,8 @@
 #
 
 
+import math
+
 import torch
 from vllm.triton_utils import tl, triton
 from vllm.utils.torch_utils import direct_register_custom_op
@@ -23,7 +25,6 @@ from vllm.utils.torch_utils import direct_register_custom_op
 from vllm_ascend import envs
 from vllm_ascend.ops.triton.triton_utils import extract_slice, get_ub_size_bytes, get_vectorcore_num, insert_slice
 
-from .ac_input_validation import layout_valid, validate_scalars
 from .ac_working_set import working_set
 
 _MIN_PAIR_ITERATIONS = 12  # B3-derived workload threshold, not a universal optimum.
@@ -805,6 +806,81 @@ _M2_KERNEL = triton.autotune(
 )(split_qkv_rmsnorm_mrope_kernel)
 
 
+def _validate_scalars(
+    *,
+    num_q_heads: int,
+    num_kv_heads: int,
+    head_size: int,
+    has_gate: bool,
+    rope_dim: int,
+    is_interleaved: bool,
+    mrope_section: tuple[int, int, int],
+    eps: float,
+) -> None:
+    """Preserve the adaptive selector's strict scalar checks and their order."""
+    for value, label in (
+        (num_q_heads, "num_q_heads"),
+        (num_kv_heads, "num_kv_heads"),
+        (head_size, "head_size"),
+        (rope_dim, "rope_dim"),
+    ):
+        if type(value) is not int:
+            raise TypeError(f"{label} must be an integer, not bool or another numeric type")
+    if num_q_heads <= 0 or num_kv_heads <= 0 or head_size <= 0:
+        raise ValueError("shape dimensions must be positive")
+    if rope_dim <= 0 or rope_dim > head_size or rope_dim % 2:
+        raise ValueError("rope_dim must be positive, even, and no greater than head_size")
+    for flag, label in ((has_gate, "has_gate"), (is_interleaved, "is_interleaved")):
+        if type(flag) is not bool:
+            raise TypeError(f"{label} must be a real bool")
+    for value in mrope_section:
+        if type(value) is not int:
+            raise TypeError("mrope_section entry must be an integer, not bool or another numeric type")
+        if value < 0:
+            raise ValueError("mrope_section entries must be non-negative")
+    if 2 * sum(mrope_section) != rope_dim:
+        raise ValueError("2 * sum(mrope_section) must equal rope_dim")
+    if type(eps) is not float or not math.isfinite(eps) or eps <= 0:
+        raise ValueError("eps must be a finite positive float")
+
+
+def _layout_valid(
+    qkv,
+    q_weight,
+    k_weight,
+    cos_sin,
+    q_bias,
+    k_bias,
+    num_tokens,
+    q_size,
+    gate_size,
+    kv_size,
+    head_size,
+    rope_dim,
+) -> bool:
+    """Check the shapes, contiguous storage, dtype/device and paired biases.
+
+    M1 fallback does not make an arbitrary malformed input kernel-safe.
+    """
+    if (q_bias is None) != (k_bias is None):
+        return False
+    tensors = [
+        (qkv, (num_tokens, q_size + gate_size + 2 * kv_size)),
+        (q_weight, (head_size,)),
+        (k_weight, (head_size,)),
+        (cos_sin, (3, num_tokens, rope_dim)),
+    ]
+    if q_bias is not None:
+        tensors.extend(((q_bias, (head_size,)), (k_bias, (head_size,))))
+    try:
+        return all(
+            tuple(t.shape) == shape and t.is_contiguous() and t.dtype == qkv.dtype and t.device == qkv.device
+            for t, shape in tensors
+        )
+    except Exception:
+        return False
+
+
 def _t1_grouped_eligible(
     qkv,
     q_weight,
@@ -851,7 +927,7 @@ def _t1_grouped_eligible(
         return False
     if qkv.dtype != torch.bfloat16 or getattr(qkv.device, "type", None) != "npu":
         return False
-    return layout_valid(
+    return _layout_valid(
         qkv,
         q_weight,
         k_weight,
@@ -925,20 +1001,18 @@ def _select_tiling(
     if not isinstance(mrope_section, (list, tuple)) or len(mrope_section) != 3:
         raise TypeError("sections must be a three-integer list or tuple")
     has_bias = q_bias is not None
-    validate_scalars(
+    _validate_scalars(
         num_q_heads=num_q_heads,
         num_kv_heads=num_kv_heads,
         head_size=head_size,
         has_gate=has_gate,
         rope_dim=rope_dim,
-        has_bias=has_bias,
         is_interleaved=is_interleaved,
         mrope_section=(mrope_section[0], mrope_section[1], mrope_section[2]),
         eps=eps,
-        dtype=dtype_tag,
     )
     q_size = num_q_heads * head_size
-    current_layout_valid = layout_valid(
+    current_layout_valid = _layout_valid(
         qkv,
         q_weight,
         k_weight,
