@@ -210,7 +210,6 @@ def test_run_fullgraph_uses_updatable_graph():
     draft_vllm_config = object()
     draft_attn_metadatas = [{"draft": object()}]
     manager.speculator = SimpleNamespace(
-        attn_architecture="GQA",
         attn_backend=backend,
         draft_vllm_config=draft_vllm_config,
         build_draft_attn_metadatas=MagicMock(return_value=draft_attn_metadatas),
@@ -241,7 +240,6 @@ def test_run_fullgraph_uses_legacy_graph():
     draft_vllm_config = object()
     draft_attn_metadatas = [{"draft": object()}]
     manager.speculator = SimpleNamespace(
-        attn_architecture="GQA",
         attn_backend=backend,
         draft_vllm_config=draft_vllm_config,
         build_draft_attn_metadatas=MagicMock(return_value=draft_attn_metadatas),
@@ -324,7 +322,7 @@ def test_capture_draft_prefill_prepares_pcp_inputs_and_runs_forward(warmup):
 def test_capture_draft_decode_prepares_inputs_and_runs_forward():
     """Verify draft decode capture prepares inputs and invokes the forward path."""
     manager = AutoRegressiveAclGraphManager.__new__(AutoRegressiveAclGraphManager)
-    manager.speculator = SimpleNamespace(num_speculative_steps=3, attn_architecture="GQA")
+    manager.speculator = SimpleNamespace(num_speculative_steps=3)
     manager.is_draft_model_prefill = False
     manager.max_num_reqs = 3
     # vLLM #53934 turned `dp_size` into a read-only property backed by

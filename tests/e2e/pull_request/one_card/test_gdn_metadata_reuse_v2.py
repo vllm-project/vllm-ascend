@@ -3,17 +3,20 @@
 
 from types import SimpleNamespace
 
+import numpy as np
 import pytest
 import torch
 import torch_npu  # noqa: F401
 from vllm.config.compilation import CUDAGraphMode
 from vllm.v1.kv_cache_interface import MambaSpec
 from vllm.v1.worker.mamba_utils import MambaSpecDecodeGPUContext
+from vllm.v1.worker.utils import AttentionGroup
 
-from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
-from vllm_ascend.ops.gdn_attn_builder import AscendGDNAttentionMetadataBuilder
+from vllm_ascend.attention.gdn_attn_builder import AscendGDNAttentionBackend, AscendGDNHostMetadataBackend
+from vllm_ascend.ops.triton.mamba.cached_decode import materialize_cached_gdn_decode
 from vllm_ascend.ops.triton.mamba.graph_state import GDNGraphStateUpdater
 from vllm_ascend.utils import adapt_patch
+from vllm_ascend.worker.v2.model_states.mamba_hybrid import AscendMambaHybridModelState
 
 
 @pytest.mark.parametrize("width", [1, 3, 8, 17])
@@ -111,19 +114,23 @@ def test_aligned_state_indices_aclgraph_replay(num_groups, max_reqs, num_reqs, s
         assert torch.all(output[:, num_reqs:].cpu() == -99)
 
 
-def test_gdn_shared_metadata_aclgraph_reads_updated_group_states():
+@pytest.mark.parametrize(
+    ("backend", "mode"), [(AscendGDNAttentionBackend, "none"), (AscendGDNHostMetadataBackend, "align")]
+)
+def test_gdn_shared_metadata_aclgraph_reads_updated_group_states(backend, mode):
     torch.npu.set_device(0)
     graph_reqs, width = 4, 4
     spec = MambaSpec(block_size=16, shapes=((1,), (1,)), dtypes=(torch.float32,), num_speculative_blocks=3)
     config = SimpleNamespace(
         use_v2_model_runner=True,
+        num_speculative_tokens=3,
         additional_config=None,
         model_config=SimpleNamespace(
             max_model_len=1024,
             hf_text_config=SimpleNamespace(model_type="qwen3_5", linear_attn_config={"num_heads": 8}),
             get_num_attention_heads=lambda _parallel_config: 8,
         ),
-        cache_config=SimpleNamespace(mamba_cache_mode="none"),
+        cache_config=SimpleNamespace(mamba_cache_mode=mode),
         compilation_config=SimpleNamespace(
             cudagraph_mode=CUDAGraphMode.FULL_DECODE_ONLY, max_cudagraph_capture_size=None
         ),
@@ -138,35 +145,53 @@ def test_gdn_shared_metadata_aclgraph_reads_updated_group_states():
         ),
         num_hash_lookahead_tokens=0,
     )
-    builders = [AscendGDNAttentionMetadataBuilder(spec, [f"layer{i}"], config, torch.device("npu")) for i in range(24)]
+    builders = [backend.get_builder_cls()(spec, [f"layer{i}"], config, torch.device("npu")) for i in range(24)]
     table = torch.arange(graph_reqs * (width + 2), dtype=torch.int32, device="npu").view(graph_reqs, width + 2)
     group_tables = [table + i * 1000 for i in range(24)]
 
+    groups = [
+        [AttentionGroup(backend, [f"layer{i}"], spec, i, metadata_builders=[builder])]
+        for i, builder in enumerate(builders)
+    ]
+    state = SimpleNamespace(vllm_config=config, max_model_len=1024, _align_mode=False)
+    slot_mappings = torch.empty((len(groups), graph_reqs * width), dtype=torch.int64, device="npu")
+    kv_config = SimpleNamespace(kv_cache_groups=[SimpleNamespace(kv_cache_spec=spec)] * len(groups))
+
     def prepare(count, step):
-        query_cpu = torch.tensor([min(i, count) * width for i in range(graph_reqs + 1)], dtype=torch.int32)
-        common = AscendCommonAttentionMetadata(
-            query_start_loc=query_cpu.to("npu"),
-            query_start_loc_cpu=query_cpu,
-            seq_lens=torch.full((graph_reqs,), 32, dtype=torch.int32, device="npu"),
-            seq_lens_cpu_upper_bound=torch.full((graph_reqs,), 32, dtype=torch.int32),
-            num_reqs=graph_reqs,
-            num_actual_tokens=count * width,
+        query = np.minimum(np.arange(graph_reqs + 1, dtype=np.int32), count) * width
+        state.num_accepted_tokens_gpu = torch.full((count,), (step - 1) % width + 1, dtype=torch.int32, device="npu")
+        seq_lens = np.where(np.arange(graph_reqs) < count, 32, 0).astype(np.int32)
+        batch = SimpleNamespace(
+            num_reqs=count,
+            num_reqs_after_padding=graph_reqs,
+            num_tokens=count * width,
+            num_tokens_after_padding=graph_reqs * width,
+            is_prefilling_np=np.zeros(count, dtype=bool),
+            prefill_runs_as_decode_np=None,
+            idx_mapping=torch.arange(count, device="npu"),
+            num_draft_tokens_per_req=np.full(count, width - 1, dtype=np.int32),
+            num_scheduled_tokens=np.diff(query),
             max_query_len=width,
-            max_seq_len=1024,
-            block_table_tensor=group_tables[0],
-            slot_mapping=torch.empty(graph_reqs * width, dtype=torch.int64, device="npu"),
-            is_prefilling=torch.zeros(graph_reqs, dtype=torch.bool),
+            query_start_loc=torch.from_numpy(query).to("npu"),
+            query_start_loc_np=query,
+            seq_lens=torch.from_numpy(seq_lens).to("npu"),
+            seq_lens_np=seq_lens,
+            dcp_local_seq_lens=None,
+            positions=None,
+            attn_state=None,
         )
-        accepted = torch.full((graph_reqs,), (step - 1) % width + 1, dtype=torch.int32, device="npu")
-        drafts = torch.tensor([3] * count + [-1] * (graph_reqs - count), dtype=torch.int32)
-        first = builders[0].build(0, common, accepted, drafts, num_actual_reqs=count)
-        updates: list = []
-        metadata = [first] + [
-            builder.update_block_table(first, bt, graph_state_updates=updates)
-            for builder, bt in zip(builders[1:], group_tables[1:])
-        ]
-        builders[0].graph_state_updater.apply(updates)
-        return metadata
+        metadata = AscendMambaHybridModelState._build_attn_metadata_for_batch(
+            state,
+            batch,
+            CUDAGraphMode.FULL,
+            tuple(group_tables),
+            slot_mappings,
+            groups,
+            kv_config,
+            for_capture=step == 1,
+            use_pcp_padding=False,
+        )
+        return [metadata[f"layer{i}"] for i in range(len(groups))]
 
     stream = torch.npu.Stream()
     graph = torch.npu.NPUGraph()
@@ -178,6 +203,8 @@ def test_gdn_shared_metadata_aclgraph_reads_updated_group_states():
     with torch.npu.stream(stream):
         stream.wait_stream(torch.npu.default_stream())
         captured = prepare(graph_reqs, 1)
+        assert len({m.spec_query_start_loc.data_ptr() for m in captured}) == 1
+        assert len({m.spec_state_indices_tensor.data_ptr() for m in captured}) == len(groups)
 
         def consume():
             for i, metadata in enumerate(captured):
@@ -223,10 +250,99 @@ def test_gdn_shared_metadata_aclgraph_reads_updated_group_states():
             )
     torch.npu.synchronize()
     for count, step, states, accepted, query, masks, lengths in snapshots:
-        expected = torch.stack([table.cpu()[:, :width] + i * 1000 + (step - 1) * 100 for i in range(24)])
+        col = 1 if mode == "align" else 0  # seq_len=32 and block_size=16
+        expected = torch.stack([table.cpu()[:, col : col + width] + i * 1000 + (step - 1) * 100 for i in range(24)])
         expected[:, count:].zero_()
         torch.testing.assert_close(states.cpu(), expected, rtol=0, atol=0)
         assert accepted.cpu().tolist() == [(step - 1) % width + 1] * count + [1] * (graph_reqs - count)
         assert query.cpu().tolist() == [min(i, count) * width for i in range(graph_reqs + 1)]
         assert masks.cpu().tolist() == [True] * count + [False] * (graph_reqs - count)
         assert lengths.cpu().tolist() == [0] + [width] * count + [0] * (graph_reqs - count)
+
+
+def test_cached_decode_replays_strided_inputs_and_preserves_tail():
+    width, graph_rows, actual_rows, stride = 8, 33, 17, 2
+    torch.npu.set_device(0)
+    capacity = graph_rows + 3
+    state_values = (torch.arange(capacity * (width + 4), dtype=torch.int32) + 2**24 + 1).view(capacity, width + 4)
+    states = state_values.to("npu")[:, :width]
+    query_values = torch.arange((actual_rows + 1) * stride, dtype=torch.int32)
+    query = (query_values * 5).to("npu")[::stride]
+    accepted = torch.arange(max(1, actual_rows) * stride, dtype=torch.int32, device="npu")[::stride]
+    tokens = torch.arange(actual_rows * 5, dtype=torch.int32, device="npu")
+    outs = [
+        torch.full(shape, -99, dtype=torch.int32, device="npu")
+        for shape in (
+            (capacity, width),
+            (capacity + 1,),
+            (capacity,),
+            (max(1, actual_rows * 5) + 5,),
+            (capacity + 1,),
+        )
+    ]
+    out_state, out_query, out_accepted, out_token, out_lengths = outs
+    out_masks = torch.ones(capacity, dtype=torch.bool, device="npu")
+    stream, graph = torch.npu.Stream(), torch.npu.NPUGraph()
+
+    def prepare():
+        materialize_cached_gdn_decode(
+            states,
+            query,
+            accepted,
+            tokens,
+            out_state,
+            out_query,
+            out_accepted,
+            out_token,
+            out_masks,
+            out_lengths,
+            actual_rows,
+            graph_rows,
+        )
+
+    with torch.npu.stream(stream):
+        stream.wait_stream(torch.npu.default_stream())
+        prepare()
+        torch.npu.synchronize()
+        with torch.npu.graph(graph, stream=stream):
+            prepare()
+        snapshots = []
+        for step in (1, 2, 3):
+            states.add_(1)
+            query.add_(1)
+            accepted.add_(1)
+            tokens.add_(1)
+            graph.replay()
+            snapshots.append([t.clone() for t in (*outs, out_masks)])
+    torch.npu.synchronize()
+    for step, snapshot in enumerate(snapshots, 1):
+        (
+            current_state,
+            current_query,
+            current_accepted,
+            current_tokens,
+            lengths,
+            masks,
+        ) = [t.cpu() for t in snapshot]
+        expected_state = state_values[:graph_rows, :width].clone() + step
+        expected_state[actual_rows:].zero_()
+        torch.testing.assert_close(current_state[:graph_rows], expected_state, rtol=0, atol=0)
+        offsets = torch.arange(graph_rows + 1).clamp_max(actual_rows)
+        expected_query = offsets.to(torch.int32) * stride * 5 + step
+        torch.testing.assert_close(current_query[: graph_rows + 1], expected_query, rtol=0, atol=0)
+        expected_lengths = torch.cat([expected_query[:1], expected_query[1:] - expected_query[:-1]])
+        torch.testing.assert_close(lengths[: graph_rows + 1], expected_lengths, rtol=0, atol=0)
+        assert current_accepted[:graph_rows].tolist() == [i * stride + step for i in range(actual_rows)] + [1] * (
+            graph_rows - actual_rows
+        )
+        assert masks[:graph_rows].tolist() == [True] * actual_rows + [False] * (graph_rows - actual_rows)
+        assert current_tokens[: tokens.numel()].tolist() == [i + step for i in range(tokens.numel())]
+        for tensor, tail in (
+            (current_state, graph_rows),
+            (current_query, graph_rows + 1),
+            (current_accepted, graph_rows),
+            (current_tokens, tokens.numel()),
+            (lengths, graph_rows + 1),
+        ):
+            assert torch.all(tensor[tail:] == -99)
+        assert torch.all(masks[graph_rows:])

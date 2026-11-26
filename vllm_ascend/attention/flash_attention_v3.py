@@ -239,9 +239,6 @@ class AscendFlashAttentionMetadataBuilder(AttentionMetadataBuilder[AscendFlashAt
             if is_graph_capture_size
             else common.max_query_len
         )
-        if self.capture_query_len is not None and num_input_tokens == num_reqs and common.max_query_len == 1:
-            # A one-token decode graph has one query per row regardless of the target verification width.
-            max_query_len = 1
         if is_graph_capture_size:
             # Distinct input buffers (including draft steps) and token buckets
             # must retain independent tiling storage even for identical specs.
@@ -252,24 +249,6 @@ class AscendFlashAttentionMetadataBuilder(AttentionMetadataBuilder[AscendFlashAt
             scheduler_metadata = self.scheduler_buffers.setdefault(graph_key, {})
         else:
             scheduler_metadata = {}
-        metadata = AscendFlashAttentionMetadata(
-            num_actual_tokens=common.num_actual_tokens,
-            query_start_loc=query_start_loc,
-            seq_lens=seq_lens,
-            block_tables=block_tables,
-            slot_mapping=common.slot_mapping[: common.num_actual_tokens],
-            max_query_len=max_query_len,
-            causal=common.causal,
-            scheduler_metadata=scheduler_metadata,
-        )
-        self.refresh_scheduler_metadata(metadata, reserve_graph_storage=is_graph_capture_size)
-        return metadata
-
-    def refresh_scheduler_metadata(
-        self, metadata: AscendFlashAttentionMetadata, *, reserve_graph_storage: bool = False
-    ) -> None:
-        """Refresh device tiling for the lengths in the current forward."""
-        scheduler_metadata = metadata.scheduler_metadata
         for spec in self.scheduler_specs:
             # Match the layer configuration used by forward. Causality is a
             # runtime property and is also part of the graph storage key.
@@ -281,18 +260,18 @@ class AscendFlashAttentionMetadataBuilder(AttentionMetadataBuilder[AscendFlashAt
             tiling = get_scheduler_metadata(
                 # Inactive slots must not participate in FlashDecode's
                 # min-Q/task count, even when runner buffers include padding.
-                batch_size=metadata.seq_lens.shape[0],
-                max_seqlen_q=metadata.max_query_len,
-                max_seqlen_k=metadata.block_tables.shape[1] * self.block_size,
+                batch_size=active_reqs,
+                max_seqlen_q=max_query_len,
+                max_seqlen_k=block_tables.shape[1] * self.block_size,
                 num_heads_q=num_heads,
                 num_heads_kv=num_kv_heads,
                 headdim=head_size,
-                cache_seqlens=metadata.seq_lens,
+                cache_seqlens=seq_lens,
                 qkv_dtype=dtype,
-                cu_seqlens_q=metadata.query_start_loc,
+                cu_seqlens_q=query_start_loc,
                 page_size=self.block_size,
-                causal=metadata.causal,
-                window_size=_get_window_size(sliding_window, metadata.causal),
+                causal=common.causal,
+                window_size=_get_window_size(sliding_window, common.causal),
                 has_softcap=softcap != 0.0,
                 num_splits=0,
             )
@@ -301,14 +280,24 @@ class AscendFlashAttentionMetadataBuilder(AttentionMetadataBuilder[AscendFlashAt
                 if tiling.numel() * tiling.element_size() > buffer.untyped_storage().nbytes():
                     raise RuntimeError("FA3 scheduler metadata exceeds its graph-stable buffer capacity")
                 buffer.resize_(tiling.shape).copy_(tiling)
-            elif reserve_graph_storage:
+            elif is_graph_capture_size:
                 # 950 metadata appends an int32 KV offset per request. Reserve
                 # that tail once so changing active batch size keeps the address.
-                reserve = self.max_num_reqs * metadata.seq_lens.element_size()
+                reserve = self.max_num_reqs * common.seq_lens.element_size()
                 buffer = tiling.new_empty(tiling.numel() + reserve)
                 scheduler_metadata[spec] = buffer[: tiling.numel()].copy_(tiling)
             else:
                 scheduler_metadata[spec] = tiling
+        return AscendFlashAttentionMetadata(
+            num_actual_tokens=common.num_actual_tokens,
+            query_start_loc=query_start_loc,
+            seq_lens=seq_lens,
+            block_tables=block_tables,
+            slot_mapping=common.slot_mapping[: common.num_actual_tokens],
+            max_query_len=max_query_len,
+            causal=common.causal,
+            scheduler_metadata=scheduler_metadata,
+        )
 
     def build_for_graph_capture(
         self,

@@ -23,6 +23,7 @@ from vllm.v1.kv_cache_interface import (
 )
 from vllm.v1.worker.gpu.model_states.mamba_hybrid import MambaHybridModelState
 
+from vllm_ascend.attention.gdn_attn_builder import AscendGDNAttentionMetadataBuilder, AscendGDNHostMetadataBuilder
 from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec
 from vllm_ascend.device.hardware import AscendDeviceType
 from vllm_ascend.device.hardware_profile import get_hardware_profile
@@ -1484,7 +1485,7 @@ def test_prepare_attn_zero_drafts_and_align_groups(monkeypatch, drafts, for_capt
     gather = MagicMock(return_value=indices)
     builders = [SimpleNamespace(mamba_aligned_state_indices=None) for _ in range(24)]
     groups = [[SimpleNamespace(get_metadata_builder=lambda _, b=b: b)] for b in builders]
-    state = SimpleNamespace(
+    state = _MetadataState(
         vllm_config=SimpleNamespace(num_speculative_tokens=3, parallel_config=None),
         num_accepted_tokens_gpu=torch.tensor([1, 4, 2, 3], dtype=torch.int32),
         max_model_len=1024,
@@ -1529,3 +1530,26 @@ def test_prepare_attn_zero_drafts_and_align_groups(monkeypatch, drafts, for_capt
     else:
         assert model_metadata.num_decode_draft_tokens_cpu.tolist() == [-1, -1, -1, -1, -1, -1]
         assert model_metadata.num_accepted_tokens.tolist() == [3, 4, 2, 1, 1, 1]
+
+
+def test_gdn_group_reuse_respects_builder_spec_and_step_hooks():
+    spec = _mamba_spec()
+
+    def group(name, cls, cache_spec):
+        builder = object.__new__(cls)
+        builder.supports_update_block_table = True
+        builder.graph_state_updater = object()
+        return SimpleNamespace(layer_names=[name], kv_cache_spec=cache_spec, get_metadata_builder=lambda _: builder)
+
+    owner = group("owner", AscendGDNAttentionMetadataBuilder, spec)
+    follower = group("follower", AscendGDNAttentionMetadataBuilder, spec)
+    other_spec = group("other_spec", AscendGDNAttentionMetadataBuilder, replace(spec, block_size=spec.block_size * 2))
+    host = group("host", AscendGDNHostMetadataBuilder, spec)
+    groups = [[owner], [other_spec, follower], [host]]
+    built, followers = mamba_hybrid_module._partition_gdn_groups(groups)
+    assert built == [[owner], [other_spec], [host]]
+    assert [(gid, g, parent[0]) for gid, g, _, parent in followers] == [(1, follower, "owner")]
+
+    # A late hook consumes every layer before the common metadata build returns.
+    host.get_metadata_builder(0).prepare_step_metadata = lambda *args: None
+    assert mamba_hybrid_module._partition_gdn_groups(groups) == (groups, [])

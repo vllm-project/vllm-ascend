@@ -314,28 +314,6 @@ def test_qwen_dflash2_fa3_routing(monkeypatch, dflash2_config, target, draft, ta
 
 
 @pytest.mark.parametrize(
-    "is_hybrid,version,head_size,alibi,expected",
-    [
-        (True, "0.5.1", 256, False, True),
-        (True, "0.5.0", 256, False, False),
-        (False, "0.5.1", 256, False, False),
-        (True, "0.5.1", 512, False, False),
-        (True, "0.5.1", 256, True, False),
-    ],
-)
-def test_hybrid_mtp_fa3(monkeypatch, is_hybrid, version, head_size, alibi, expected):
-    from vllm_ascend import platform
-    from vllm_ascend.device.hardware import AscendDeviceType
-    from vllm_ascend.device.hardware_profile import get_hardware_profile
-
-    spec = SimpleNamespace(method="mtp", target_model_config=SimpleNamespace(is_hybrid=is_hybrid))
-    config = SimpleNamespace(speculative_config=spec, model_config=SimpleNamespace(uses_alibi=alibi))
-    monkeypatch.setattr(platform, "get_current_hardware_profile", lambda: get_hardware_profile(AscendDeviceType.A3))
-    monkeypatch.setattr(platform.metadata, "version", lambda _: version)
-    assert platform._uses_hybrid_mtp_fa3(config, SimpleNamespace(head_size=head_size)) is expected
-
-
-@pytest.mark.parametrize(
     "field,value",
     [
         ("method", "eagle3"),

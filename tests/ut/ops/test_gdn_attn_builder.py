@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 
-from contextlib import ExitStack
 from dataclasses import dataclass, is_dataclass
 from types import SimpleNamespace
 from unittest.mock import Mock, patch, sentinel
@@ -14,7 +13,6 @@ from vllm.v1.attention.backend import CommonAttentionMetadata
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionBackend, GDNAttentionMetadataBuilder
 from vllm.v1.attention.backends.utils import NULL_BLOCK_ID, PAD_SLOT_ID
 from vllm.v1.kv_cache_interface import MambaSpec
-from vllm.v1.worker.gpu.model_states.mamba_hybrid import MambaHybridAttnMetadata
 from vllm.v1.worker.gpu.spec_decode import adaptive_verification
 from vllm.v1.worker.utils import AttentionGroup
 
@@ -52,7 +50,6 @@ from vllm_ascend.ops.triton.fla.utils import (
     prepare_update_chunk_offsets as runtime_prepare_update_chunk_offsets,
 )
 from vllm_ascend.ops.triton.mamba import cached_decode as cached_decode_module
-from vllm_ascend.worker.v2.attn_utils import build_attn_metadata
 
 
 @pytest.mark.parametrize("builder_cls", [AscendGDNAttentionMetadataBuilder, AscendGDNHostMetadataBuilder])
@@ -486,99 +483,6 @@ def test_shared_gdn_graph_inputs_refresh_without_repeated_public_staging(builder
             assert pointers == captured
 
 
-@pytest.mark.parametrize("builder_cls", [AscendGDNAttentionMetadataBuilder, AscendGDNHostMetadataBuilder])
-@pytest.mark.parametrize("mamba_cache_mode", ["none", "align"])
-def test_v2_gdn_capture_and_replay_keep_one_public_buffer_owner(builder_cls, mamba_cache_mode):
-    builders = [
-        _make_builder(
-            device=torch.device("cpu"),
-            num_heads=32,
-            num_speculative_tokens=3,
-            num_speculative_blocks=3,
-            builder_cls=builder_cls,
-            mamba_cache_mode=mamba_cache_mode,
-            cudagraph_mode=CUDAGraphMode.FULL_DECODE_ONLY,
-        )
-        for _ in range(24)
-    ]
-    groups = [
-        SimpleNamespace(
-            kv_cache_spec=builder.kv_cache_spec,
-            layer_names=[f"layer{i}"],
-            get_metadata_builder=lambda _index, builder=builder: builder,
-        )
-        for i, builder in enumerate(builders)
-    ]
-    query = torch.tensor([0, 4, 8], dtype=torch.int32)
-    lengths = torch.tensor([24, 48], dtype=torch.int32)
-    tables = tuple(torch.arange(32, dtype=torch.int32).view(2, 16) + i * 1000 for i in range(24))
-    kwargs = dict(
-        attn_groups=[[group] for group in groups],
-        num_reqs=2,
-        num_tokens=8,
-        query_start_loc_gpu=query,
-        query_start_loc_cpu=query,
-        max_query_len=4,
-        seq_lens=lengths,
-        seq_lens_cpu_upper_bound=lengths,
-        max_seq_len=128,
-        block_tables=tables,
-        slot_mappings=torch.zeros((24, 8), dtype=torch.int64),
-        kv_cache_config=SimpleNamespace(kv_cache_groups=groups),
-        model_specific_attn_metadata=MambaHybridAttnMetadata(is_prefilling=torch.zeros(2, dtype=torch.bool)),
-    )
-    with ExitStack() as stack:
-        full_build = stack.enter_context(patch.object(builders[0], "build", wraps=builders[0].build))
-        for builder in builders[1:]:
-            stack.enter_context(patch.object(builder, "build", side_effect=AssertionError("Only the owner builds")))
-            stack.enter_context(
-                patch.object(builder, "_pad_spec_decode_metadata", side_effect=AssertionError("Shared"))
-            )
-        captured = build_attn_metadata(**kwargs, for_cudagraph_capture=True)
-        pointers = [
-            (
-                metadata.spec_query_start_loc.data_ptr(),
-                metadata.spec_state_indices_tensor.data_ptr(),
-                metadata.spec_decode_metadata.actual_seq_lengths.data_ptr(),
-            )
-            for metadata in captured.values()
-        ]
-        for step, count in enumerate([2, 1, 2]):
-            query[-1] = count * 4
-            lengths[0] = 64 + step * 16
-            lengths[1] = 80 if count == 2 else 0
-            kwargs["num_actual_tokens"] = count * 4
-            kwargs["num_actual_reqs"] = count
-            kwargs["block_tables"] = tuple(table + 100 + step * 40 for table in tables)
-            kwargs["model_specific_attn_metadata"] = MambaHybridAttnMetadata(
-                is_prefilling=torch.zeros(2, dtype=torch.bool),
-                num_accepted_tokens=torch.tensor([step + 1, step + 2], dtype=torch.int32),
-                num_decode_draft_tokens_cpu=torch.tensor([3, 3 if count == 2 else -1], dtype=torch.int32),
-            )
-            result = build_attn_metadata(**kwargs)
-            for i, metadata in enumerate(result.values()):
-                assert metadata.spec_query_start_loc is result["layer0"].spec_query_start_loc
-                assert (
-                    metadata.spec_decode_metadata.actual_seq_lengths
-                    is result["layer0"].spec_decode_metadata.actual_seq_lengths
-                )
-                assert pointers[i] == (
-                    metadata.spec_query_start_loc.data_ptr(),
-                    metadata.spec_state_indices_tensor.data_ptr(),
-                    metadata.spec_decode_metadata.actual_seq_lengths.data_ptr(),
-                )
-                assert metadata.spec_query_start_loc.tolist() == [0, 4, count * 4]
-                for row in range(count):
-                    col = int((lengths[row] - 1) // 16) if mamba_cache_mode == "align" else 0
-                    torch.testing.assert_close(
-                        metadata.spec_state_indices_tensor[row], kwargs["block_tables"][i][row, col : col + 4]
-                    )
-                assert torch.all(metadata.spec_state_indices_tensor[count:] == NULL_BLOCK_ID)
-        assert full_build.call_count == 4  # One capture + three execution batches.
-    assert len({pointer[0] for pointer in pointers}) == 1
-    assert len({pointer[1] for pointer in pointers}) == 24
-
-
 def test_rebound_gdn_graph_keeps_addresses_and_clears_inactive_state():
     device = torch.device("cpu")
     builders = [
@@ -655,30 +559,6 @@ def test_zero_draft_static_decode_uses_non_spec_route(builder_cls, full_graph):
     assert metadata.num_spec_decodes == 0
     assert metadata.spec_decode_metadata is None
     assert metadata.non_spec_decode_metadata is not None
-
-
-def test_reused_gdn_checkpoint_rebinds_physical_indices():
-    builder = _make_builder(device=torch.device("cpu"), num_heads=32, num_speculative_tokens=0)
-    common = create_common_attn_metadata(BatchSpec([50, 40], [1, 1]), 16, torch.device("cpu"))
-    common.block_table_tensor = torch.arange(8, dtype=torch.int32).view(2, 4)
-    source = builder.build(0, common)
-    source.checkpoint = SimpleNamespace(
-        checkpoint_offsets=torch.tensor([16, 0]),
-        state_indices=torch.tensor([2, NULL_BLOCK_ID], dtype=torch.int32),
-        regather_state_indices=Mock(),
-    )
-    rebound_checkpoint = SimpleNamespace(
-        checkpoint_offsets=source.checkpoint.checkpoint_offsets,
-        state_indices=torch.tensor([102, NULL_BLOCK_ID], dtype=torch.int32),
-    )
-    source.checkpoint.regather_state_indices.return_value = rebound_checkpoint
-    other_table = common.block_table_tensor + 100
-    updated = builder.update_block_table(source, other_table)
-    source.checkpoint.regather_state_indices.assert_called_once_with(other_table)
-    assert updated.checkpoint is rebound_checkpoint
-    assert updated.checkpoint.state_indices.tolist() == [102, NULL_BLOCK_ID]
-    assert source.checkpoint.state_indices.tolist() == [2, NULL_BLOCK_ID]
-    assert updated.checkpoint.checkpoint_offsets is source.checkpoint.checkpoint_offsets
 
 
 @pytest.mark.parametrize("use_v2", [False, True])
@@ -1465,6 +1345,33 @@ def test_host_builder_materializes_device_chunks_for_checkpoint_enabled_prefill(
     if checkpoint is not None:
         assert checkpoint.checkpoint_offsets.tolist() == [0]
     builder.checkpoint_builder.build.assert_called_once_with(common, [0])
+
+
+def test_checkpoint_offsets_follow_each_groups_reserved_page(monkeypatch):
+    _patch_missing_runtime_cdiv(monkeypatch)
+    config = _make_vllm_config(mamba_cache_mode="align")
+    config.cache_config.hash_block_size = 16
+    config.cache_config.cache_hit_alignment_tokens = 128
+    config.compilation_config.static_forward_context = {
+        name: SimpleNamespace(_ascend_internal_checkpoint_enabled=True) for name in ("g0", "g1")
+    }
+    spec = MambaSpec(
+        block_size=128,
+        shapes=((1,), (1,)),
+        dtypes=(torch.float32,),
+        num_prefill_checkpoint_blocks=1,
+        prefill_checkpoint_alignment=16,
+    )
+    offsets = []
+    for name, page in (("g0", NULL_BLOCK_ID), ("g1", 42)):
+        builder = AscendGDNHostMetadataBuilder(spec, [name], config, torch.device("cpu"))
+        assert not builder.supports_update_block_table
+        common = create_common_attn_metadata(BatchSpec([160], [160]), 128, torch.device("cpu"))
+        common.block_table_tensor = torch.tensor([[page, 77]], dtype=torch.int32)
+        checkpoint = builder.build(0, common).checkpoint
+        assert checkpoint.state_indices.tolist() == [page]
+        offsets.extend(checkpoint.checkpoint_offsets.tolist())
+    assert offsets == [0, 128]
 
 
 def test_sequence_index_buffers_cover_spec_decode_when_cudagraph_disabled():

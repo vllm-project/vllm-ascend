@@ -144,7 +144,6 @@ def selection(monkeypatch, profiles):
             {"MiniMaxM3SparseForCausalLM", "MiniMaxM3SparseForConditionalGeneration"}
         ),
         "_uses_qwen_fa3": lambda _: False,
-        "_uses_hybrid_mtp_fa3": lambda *_: False,
         "_validate_fa3_backend": lambda *args: False,
         "_validate_flash_attn_backend": lambda *args: False,
     }
@@ -723,11 +722,6 @@ def test_minimax_fa3_graph_metadata_keeps_storage_across_batch_sizes(fa3):
     assert len(set(addresses)) == 1
     assert len(builder.scheduler_buffers) == 2
     assert other_bucket.scheduler_metadata[spec].data_ptr() != addresses[0]
-    common.seq_lens[0] = 74
-    with patch.object(fa3, "get_scheduler_metadata", side_effect=lambda **kw: kw["cache_seqlens"][:1].byte()):
-        builder.refresh_scheduler_metadata(metadata)
-    assert metadata.scheduler_metadata[spec].data_ptr() == addresses[0]
-    assert metadata.scheduler_metadata[spec].tolist() == [74]
 
 
 @pytest.mark.parametrize(

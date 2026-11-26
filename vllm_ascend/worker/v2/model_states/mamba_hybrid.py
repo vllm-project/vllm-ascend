@@ -39,6 +39,7 @@ from vllm.v1.worker.mamba_utils import (
 )
 from vllm.v1.worker.utils import AttentionGroup
 
+from vllm_ascend.attention.gdn_attn_builder import AscendGDNAttentionMetadataBuilder
 from vllm_ascend.utils import model_uses_kimi_kda, model_uses_kpool_indexer
 from vllm_ascend.worker.v2.attn_utils import build_attn_metadata
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch
@@ -50,6 +51,29 @@ if TYPE_CHECKING:
 # Copy block size used by the upstream fused mamba kernels.
 _COPY_BLOCK_SIZE = 1024
 _PREPROCESS_BLOCK_SIZE = 256
+
+
+def _partition_gdn_groups(attn_groups: list[list[AttentionGroup]]):
+    """Keep one full build per compatible GDN spec and preserve cache-group indices."""
+    leaders = {}
+    followers = []
+    build_groups = []
+    for group_id, groups in enumerate(attn_groups):
+        retained = []
+        for group in groups:
+            builder = group.get_metadata_builder(0)
+            # These hooks run inside the common build and need the complete layer map.
+            if callable(getattr(builder, "prepare_step_metadata", None)):
+                return attn_groups, []
+            if isinstance(builder, AscendGDNAttentionMetadataBuilder) and builder.supports_update_block_table:
+                key = (group.kv_cache_spec, type(builder))
+                if key in leaders:
+                    followers.append((group_id, group, builder, leaders[key]))
+                    continue
+                leaders[key] = (group.layer_names[0], builder.graph_state_updater)
+            retained.append(group)
+        build_groups.append(retained)
+    return build_groups, followers
 
 
 @dataclass
@@ -537,8 +561,11 @@ class AscendMambaHybridModelState(MambaHybridModelState, AscendModelState):
         max_query_len = getattr(input_batch, "max_query_len", None)
         if max_query_len is None:
             max_query_len = input_batch.num_scheduled_tokens.max().item()
-        return build_attn_metadata(
-            attn_groups=attn_groups,
+        build_groups, followers = attn_groups, []
+        if pcp_context is None and len(attn_groups) > 1:
+            build_groups, followers = _partition_gdn_groups(attn_groups)
+        metadata = build_attn_metadata(
+            attn_groups=build_groups,
             num_reqs=num_reqs,
             num_actual_reqs=input_batch.num_reqs,
             num_tokens=num_tokens,
@@ -562,3 +589,16 @@ class AscendMambaHybridModelState(MambaHybridModelState, AscendModelState):
             full_graph_mode=cudagraph_mode == CUDAGraphMode.FULL,
             for_cudagraph_capture=for_capture,
         )
+        graph_writes = {}
+        for group_id, group, builder, (first_layer, updater) in followers:
+            updated = builder.update_block_table(
+                metadata[first_layer],
+                group.map_to_kernel_block_table(block_tables[group_id]),
+                slot_mappings[group_id],
+                graph_state_updates=graph_writes.setdefault(updater, []),
+            )
+            for layer_name in group.layer_names:
+                metadata[layer_name] = updated
+        for updater, writes in graph_writes.items():
+            updater.apply(writes)
+        return metadata

@@ -20,13 +20,12 @@ from __future__ import annotations
 
 import math
 import os
-from importlib import import_module, metadata, util
+from importlib import import_module, util
 from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
 import torch
 import vllm.envs as envs_vllm
-from packaging.version import Version
 from vllm.logger import logger
 from vllm.platforms import Platform, PlatformEnum
 
@@ -102,7 +101,6 @@ _MINIMAX_M3_ARCHITECTURES = frozenset(
         "MiniMaxM3SparseForConditionalGeneration",
     }
 )
-FA3_BACKEND = ("vllm_ascend.attention.flash_attention_v3", "AscendFlashAttentionBackend")
 QWEN_FA3_TARGETS = frozenset(
     {
         "Qwen3NextForCausalLM",
@@ -2088,13 +2086,7 @@ def _validate_flash_attn_npu_3(backend_key, selector) -> bool:
     )
     if config is None or config.model_config is None:
         return False
-    if not (
-        local_glm_dflash
-        or _uses_minimax_fa3(config)
-        or _uses_step5_fa3(config)
-        or _uses_hybrid_mtp_fa3(config, selector)
-        or _uses_qwen_fa3(config)
-    ):
+    if not (local_glm_dflash or _uses_minimax_fa3(config) or _uses_step5_fa3(config) or _uses_qwen_fa3(config)):
         return False
     return _validate_fa3_common_constraints(config, selector) and _validate_fa3_global_constraints(
         config,
@@ -2130,31 +2122,17 @@ def _uses_minimax_fa3(config) -> bool:
     )
 
 
-def _uses_hybrid_mtp_fa3(config: VllmConfig, selector) -> bool:
-    spec = config.speculative_config
-    if spec.method != "mtp" or not getattr(spec.target_model_config, "is_hybrid", False):
-        return False
-    # The A3 paged kernel supports head dimensions up to 256 and has no ALiBi input.
-    if not 0 < selector.head_size <= 256 or config.model_config.uses_alibi:
-        return False
-    if FlashAttentionNpu3Model.HYBRID_MTP not in get_current_hardware_profile().flash_attn_npu_3_models:
-        return False
-    # Older paged forwards copy device lengths to the host during capture.
-    try:
-        return Version(metadata.version("flash-attn-npu")) >= Version("0.5.1")
-    except metadata.PackageNotFoundError:
-        return False
-
-
 def _uses_qwen_fa3(config: VllmConfig) -> bool:
     from vllm.compilation import backends
 
     architectures = config.model_config.hf_config.architectures or ()
-    supported = get_current_hardware_profile().flash_attn_npu_3_models
-    spec = config.speculative_config
-    # DFlash keeps the target model config while loading the draft.
-    if FlashAttentionNpu3Model.QWEN not in supported or QWEN_FA3_TARGETS.isdisjoint(architectures):
+    if (
+        FlashAttentionNpu3Model.QWEN not in get_current_hardware_profile().flash_attn_npu_3_models
+        or QWEN_FA3_TARGETS.isdisjoint(architectures)
+    ):
         return False
+    # DFlash keeps the target model config while loading the draft.
+    spec = config.speculative_config
     return (
         backends.model_tag in ("backbone", "dflash_head")
         and spec.method == "dflash"

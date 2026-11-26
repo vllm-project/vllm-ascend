@@ -434,6 +434,8 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
         self.supports_update_block_table = (
             type(self) in (AscendGDNAttentionMetadataBuilder, AscendGDNHostMetadataBuilder)
             and vllm_config.use_v2_model_runner
+            # Checkpoint offsets are masked against each group's actual state pages.
+            and not self._ascend_gdn_checkpoints
             and vllm_config.parallel_config.prefill_context_parallel_size == 1
         )
         # One layout only: a fallback build may overwrite the graph inputs.
@@ -1492,10 +1494,6 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
         result.spec_state_indices_tensor = spec_indices
         result.non_spec_state_indices_tensor = non_spec_indices
         result.prefill_state_indices = prefill_indices
-        # Checkpoint metadata is optional and absent from vLLM v0.30.0.
-        checkpoint = getattr(m, "checkpoint", None)
-        if checkpoint is not None:
-            result.checkpoint = checkpoint.regather_state_indices(blk_table)
         result.non_spec_prefill_metadata = m.non_spec_prefill_metadata
         if m.non_spec_prefill_metadata is not None:
             assert conv_cache_indices is not None, "Prefill metadata requires cache indices"
