@@ -5,6 +5,7 @@ import platform
 import shutil
 import subprocess
 from collections import defaultdict
+from pathlib import Path
 
 import psutil
 import regex as re
@@ -794,7 +795,7 @@ class CpuAlloc:
         self.bind_npu_irq()
 
 
-def bind_rank_cpus(local_rank: int, cpu_lists: list[str]) -> None:
+def bind_rank_cpus(local_rank: int, cpu_lists: list[str], *, selective_prefetch_cpus: list[int] | None = None) -> None:
     """Apply an explicit local worker CPU mask before its runtime threads start."""
     if not hasattr(os, "sched_setaffinity"):
         raise RuntimeError("Explicit rank CPU binding requires Linux sched_setaffinity.")
@@ -816,7 +817,22 @@ def bind_rank_cpus(local_rank: int, cpu_lists: list[str]) -> None:
         masks.append(mask)
 
     mask = masks[local_rank]
-    unavailable = mask - os.sched_getaffinity(0)
+    allowed = os.sched_getaffinity(0)
+    if selective_prefetch_cpus is not None:
+        if len(selective_prefetch_cpus) != len(cpu_lists) or any(cpu < 0 for cpu in selective_prefetch_cpus):
+            raise ValueError("selective_prefetch_cpus requires one nonnegative CPU ID per local rank.")
+        dedicated = set(selective_prefetch_cpus)
+        if len(dedicated) != len(selective_prefetch_cpus):
+            raise ValueError("selective_prefetch_cpus must assign a different physical core to each local rank.")
+        cpu = selective_prefetch_cpus[local_rank]
+        if cpu not in allowed:
+            raise ValueError(f"Selective prefetch CPU {cpu} is outside the allowed mask for local rank {local_rank}.")
+        topology = Path(f"/sys/devices/system/cpu/cpu{cpu}/topology/thread_siblings_list")
+        siblings = set(DeviceInfo.expand_cpu_list(topology.read_text().strip()))
+        if siblings & (assigned | (dedicated - {cpu})):
+            raise ValueError(f"Selective prefetch core {cpu} overlaps a rank mask or another prefetch core.")
+
+    unavailable = mask - allowed
     if unavailable:
         raise ValueError(f"CPUs outside the allowed mask for local rank {local_rank}: {sorted(unavailable)}.")
 

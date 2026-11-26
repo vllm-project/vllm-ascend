@@ -596,6 +596,8 @@ class AscendConfig:
     enable_cpu_binding: bool = True
     # Explicit disjoint CPU sets indexed by local NPU rank.
     rank_cpu_bindings: list[str] | None = None
+    # Optional physical cores outside rank_cpu_bindings for small native selective-KV graph batches.
+    selective_prefetch_cpus: list[int] | None = None
     multistream_dsv4_dsa_overlap: bool = True
     # Prepare Engram hashes, lookups and DP/TP exchanges on an auxiliary stream;
     # FULL graphs wait on descriptor-specific external events at consumers.

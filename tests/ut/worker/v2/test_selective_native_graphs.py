@@ -69,6 +69,7 @@ def make_manager():
     manager._selective_native_groups = {}
     manager._selective_native_tp_groups = {}
     manager._selective_native_epoch = 0
+    manager.selective_prefetch_cpu = -1
     return manager
 
 
@@ -247,6 +248,7 @@ def test_handle_lifecycle_uses_graph_object_and_orders_completion():
     manager._selective_native_graphs[graph] = [11, 12]
     manager._selective_native_graph_keys[graph] = [(2,), (1,)]
     manager._selective_native_graphs[other] = [21]
+    manager.selective_prefetch_cpu = 7
     manager._selective_native_graph_keys[other] = [(1,)]
     anchor = object()
     trace = MagicMock()
@@ -279,7 +281,7 @@ def test_handle_lifecycle_uses_graph_object_and_orders_completion():
         "release",
         "release",
     ]
-    trace.start.assert_called_once_with([11, 12, 21])
+    trace.start.assert_called_once_with([11, 12, 21], 7)
     trace.begin.assert_called_once_with([11, 12], epoch, anchor)
     assert [call.args[0] for call in trace.retire.call_args_list] == [12, 11]
     graph.reset.assert_called_once()

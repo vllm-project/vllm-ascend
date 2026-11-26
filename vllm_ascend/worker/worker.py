@@ -499,9 +499,16 @@ class NPUWorker(WorkerBase):
             tp_pp_world_size = parallel_config.pipeline_parallel_size * parallel_config.tensor_parallel_size
             self.local_rank += dp_local_rank * tp_pp_world_size
 
-        rank_cpu_bindings = get_ascend_config().rank_cpu_bindings
+        ascend_config = get_ascend_config()
+        rank_cpu_bindings = ascend_config.rank_cpu_bindings
+        prefetch_cpus = ascend_config.selective_prefetch_cpus
+        self.selective_prefetch_cpu = -1
+        if prefetch_cpus is not None and (rank_cpu_bindings is None or not self.use_v2_model_runner):
+            raise ValueError("selective_prefetch_cpus requires rank_cpu_bindings and Model Runner V2.")
         if rank_cpu_bindings is not None:
-            bind_rank_cpus(self.local_rank, rank_cpu_bindings)
+            bind_rank_cpus(self.local_rank, rank_cpu_bindings, selective_prefetch_cpus=prefetch_cpus)
+            if prefetch_cpus is not None:
+                self.selective_prefetch_cpu = prefetch_cpus[self.local_rank]
 
         # Publish the logical-to-physical mapping for topology queries.
         assigned_physical_gpu_ids = parallel_config.assigned_physical_gpu_ids
@@ -612,7 +619,9 @@ class NPUWorker(WorkerBase):
             else:
                 from vllm_ascend.worker.v2.model_runner import NPUModelRunner as NPUModelRunnerV2
 
-                self.model_runner = NPUModelRunnerV2(self.vllm_config, self.device)
+                self.model_runner = NPUModelRunnerV2(
+                    self.vllm_config, self.device, selective_prefetch_cpu=self.selective_prefetch_cpu
+                )
         else:
             self.model_runner = NPUModelRunner(self.vllm_config, self.device)
 

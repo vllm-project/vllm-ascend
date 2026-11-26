@@ -36,3 +36,20 @@ def test_explicit_rank_cpu_binding_rejects_bad_sets(monkeypatch, rank, bindings,
 
     with pytest.raises(ValueError, match=message):
         cpu_binding.bind_rank_cpus(rank, bindings)
+
+
+@pytest.mark.parametrize(("siblings", "overlap"), [("6-7", False), ("5-6", True)])
+def test_prefetch_core_is_excluded_from_rank_mask(monkeypatch, siblings, overlap):
+    applied = []
+    monkeypatch.setattr(os, "sched_getaffinity", lambda _: {4, 5, 6, 7}, raising=False)
+    monkeypatch.setattr(os, "sched_setaffinity", lambda tid, cpus: applied.append((tid, cpus)), raising=False)
+    monkeypatch.setattr(cpu_binding.Path, "read_text", lambda _: siblings)
+    monkeypatch.setattr(cpu_binding.psutil, "Process", lambda: SimpleNamespace(threads=lambda: []))
+
+    if overlap:
+        with pytest.raises(ValueError, match="overlaps"):
+            cpu_binding.bind_rank_cpus(0, ["4-5"], selective_prefetch_cpus=[6])
+        assert applied == []
+    else:
+        cpu_binding.bind_rank_cpus(0, ["4-5"], selective_prefetch_cpus=[6])
+        assert applied == [(0, {4, 5})]

@@ -15,6 +15,7 @@
  */
 
 #include <dlfcn.h>
+#include <pthread.h>
 #include <torch/extension.h>
 #include <torch/library.h>
 #include <torch/version.h>
@@ -2816,10 +2817,12 @@ struct SelectivePersistentLRU {
   }
 };
 
+constexpr int64_t SELECTIVE_PARALLEL_REQUEST_THRESHOLD = 4;
+
 template <typename Function>
 void selective_parallel_requests(int64_t rows, Function&& function) {
   std::vector<std::exception_ptr> errors(static_cast<size_t>(rows));
-#pragma omp parallel for if(rows > 4) schedule(static) num_threads(std::min<int64_t>(rows, 8))
+#pragma omp parallel for if(rows > SELECTIVE_PARALLEL_REQUEST_THRESHOLD) schedule(static) num_threads(std::min<int64_t>(rows, 8))
   for (int64_t row = 0; row < rows; ++row) {
     try {
       c10::InferenceMode inference_guard(true);
@@ -2836,7 +2839,7 @@ void selective_pipeline_requests(int64_t rows, size_t layers, Gather gather, Sub
   const auto record_error = [&] {
     if (!failed.exchange(true)) error = std::current_exception();
   };
-#pragma omp parallel if(rows > 4 && layers > 1) num_threads(std::min<int64_t>(rows, 8))
+#pragma omp parallel if(rows > SELECTIVE_PARALLEL_REQUEST_THRESHOLD && layers > 1) num_threads(std::min<int64_t>(rows, 8))
   {
     c10::InferenceMode inference_guard(true);
     for (size_t layer = 0; layer < layers; ++layer) {
@@ -3495,7 +3498,28 @@ void selective_pack_native_metadata_cpu(
 
 class SelectivePrefetchWorker {
  public:
-  SelectivePrefetchWorker() : thread_([this] { run(); }) {}
+  explicit SelectivePrefetchWorker(int64_t cpu) : dedicated_cpu_(cpu) {
+    TORCH_CHECK(cpu >= -1 && cpu < CPU_SETSIZE, "invalid selective prefetch CPU ", cpu);
+    if (cpu >= 0) {
+      const auto result = pthread_getaffinity_np(pthread_self(), sizeof(rank_mask_), &rank_mask_);
+      TORCH_CHECK(result == 0, "cannot read selective prefetch rank CPU mask: ", result);
+    }
+    thread_ = std::thread([this] { run(); });
+  }
+
+  void set_affinity(int64_t rows) {
+    if (dedicated_cpu_ < 0) return;
+    const bool use_dedicated = rows <= SELECTIVE_PARALLEL_REQUEST_THRESHOLD;
+    if (use_dedicated == pinned_) return;
+    auto mask = rank_mask_;
+    if (use_dedicated) {
+      CPU_ZERO(&mask);
+      CPU_SET(dedicated_cpu_, &mask);
+    }
+    const auto result = pthread_setaffinity_np(pthread_self(), sizeof(mask), &mask);
+    TORCH_CHECK(result == 0, "cannot set selective prefetch CPU affinity: ", result);
+    pinned_ = use_dedicated;
+  }
   ~SelectivePrefetchWorker() {
     {
       std::lock_guard<std::mutex> lock(mu_);
@@ -3538,6 +3562,9 @@ class SelectivePrefetchWorker {
   std::condition_variable ready_;
   std::function<void()> replay_;
   bool stopping_ = false;
+  int64_t dedicated_cpu_;
+  cpu_set_t rank_mask_{};
+  bool pinned_ = false;
   std::thread thread_;
 };
 
@@ -3826,7 +3853,7 @@ class SelectiveNativeGraph {
     std::lock_guard<std::mutex> lock(mu_);
     return executor_;
   }
-  void process_group() noexcept { run(); }
+  void process_group(SelectivePrefetchWorker& worker) noexcept { run(worker); }
   int64_t graph_identity() {
     std::lock_guard<std::mutex> lock(mu_);
     const auto value = reinterpret_cast<uintptr_t>(model_ri_);
@@ -4369,8 +4396,10 @@ class SelectiveNativeGraph {
     if (inputs_[3].scalar_type() == at::kLong) pack(inputs_[3].data_ptr<int64_t>());
     else pack(inputs_[3].data_ptr<int32_t>());
   }
-  void run() noexcept {
+  void run(SelectivePrefetchWorker& worker) noexcept {
     try {
+      // Leave the inherited rank mask available to OpenMP when a replay can create a team.
+      worker.set_affinity(rows_);
       thread_local aclrtContext active_context = nullptr;
       if (active_context != context_) {
         check_acl(aclrtSetCurrentContext(context_), "selective native worker context");
@@ -4745,9 +4774,9 @@ void selective_native_wait_layer(int64_t h, int64_t layer, const at::Tensor& anc
 void selective_native_scatter_done(int64_t h, const at::Tensor& anchor) {
   selective_native_call(h, [&](auto& graph) { graph.record_scatter(anchor); });
 }
-void selective_native_start(const std::vector<int64_t>& handles) {
+void selective_native_start(const std::vector<int64_t>& handles, int64_t prefetch_cpu) {
   if (handles.empty()) return;
-  auto executor = std::make_shared<SelectivePrefetchWorker>();
+  auto executor = std::make_shared<SelectivePrefetchWorker>(prefetch_cpu);
   for (const auto h : handles) selective_native_call(h, [&](auto& graph) { graph.start(executor); });
 }
 int64_t selective_native_graph_identity(int64_t h) { return selective_native_get(h)->graph_identity(); }
@@ -4765,8 +4794,8 @@ void selective_native_begin(const std::vector<int64_t>& handles, int64_t epoch, 
   for (const auto h : handles) selective_native_call(h, [&](auto& graph) { graph.begin(epoch, anchor); });
   // The first full layer drives the first ready notification. Waiting in
   // capture order leaves later groups free to depend on earlier cache stores.
-  executor->submit([groups = std::move(groups)] {
-    for (const auto& group : groups) group->process_group();
+  executor->submit([groups = std::move(groups), worker = executor.get()] {
+    for (const auto& group : groups) group->process_group(*worker);
   });
 }
 void selective_native_record_complete(int64_t h, const at::Tensor& anchor) {
@@ -5489,7 +5518,7 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
     ops.def("selective_native_scatter_done(int handle, Tensor anchor) -> ()");
     ops.impl("selective_native_scatter_done", c10::DispatchKey::CompositeExplicitAutograd,
              &vllm_ascend::selective_native_scatter_done);
-    ops.def("selective_native_start(int[] handles) -> ()");
+    ops.def("selective_native_start(int[] handles, int prefetch_cpu=-1) -> ()");
     ops.impl("selective_native_start", c10::DispatchKey::CompositeExplicitAutograd,
              &vllm_ascend::selective_native_start);
     ops.def("selective_native_graph_identity(int handle) -> int");

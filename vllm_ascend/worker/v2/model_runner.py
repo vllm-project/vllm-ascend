@@ -148,10 +148,11 @@ class NPUModelRunner(GPUModelRunner):
     kv_connector: KVConnector
     max_num_reqs: int
 
-    def __init__(self, vllm_config: VllmConfig, device: torch.device):
+    def __init__(self, vllm_config: VllmConfig, device: torch.device, *, selective_prefetch_cpu: int = -1):
         # Ascend-specific configurations
         self.ascend_config = get_ascend_config()
         self.sparse_kv_offload_manager = None
+        self.selective_prefetch_cpu = selective_prefetch_cpu
         self.kvpp = KVPPRuntime()
         # Adaptive verification uses this flag to apply FIA-specific query
         # boundary and sequence length padding during FULL graph execution.
@@ -528,6 +529,7 @@ class NPUModelRunner(GPUModelRunner):
             self.sparse_kv_offload_manager = init_sparse_kv_offload_manager(
                 self.vllm_config, kv_cache_config, sparse_cfg
             )
+            self.sparse_kv_offload_manager.selective_prefetch_cpu = self.selective_prefetch_cpu
             if sparse_cfg.selective_offload:
                 self.sparse_kv_offload_manager._selective_model_state = self.model_state
             self.model_state._offload_live_req_ids = self.req_states.req_id_to_index

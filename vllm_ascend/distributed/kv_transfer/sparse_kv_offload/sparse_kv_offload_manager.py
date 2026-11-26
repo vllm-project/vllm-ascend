@@ -903,6 +903,7 @@ class SparseKVOffloadManager:
         self.vllm_config = vllm_config
         self.kv_cache_config = kv_cache_config
         self.sparse_kv_offload_config = sparse_kv_offload_config
+        self.selective_prefetch_cpu = -1
 
         model_config = vllm_config.model_config
         parallel_config = vllm_config.parallel_config
@@ -2213,7 +2214,8 @@ class SparseKVOffloadManager:
         start_error = None
         try:
             ops.selective_native_start(
-                [handle for handles in self._selective_native_graphs.values() for handle in handles]
+                [handle for handles in self._selective_native_graphs.values() for handle in handles],
+                self.selective_prefetch_cpu,
             )
         except Exception as error:
             start_error = error
