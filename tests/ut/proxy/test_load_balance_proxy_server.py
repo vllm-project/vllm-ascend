@@ -254,8 +254,8 @@ if __name__ == "__main__" and "--mock-backend" in sys.argv:
 # --------------------------------------------------------------------------- #
 # Pytest fixture: start mock backends + proxy
 # --------------------------------------------------------------------------- #
-@pytest.fixture(scope="module")
-def proxy_server():
+@pytest.fixture(scope="module", params=[1, 4], ids=["single-worker", "multi-worker"])
+def proxy_server(request):
     """Start mock backends + proxy as subprocesses, yield proxy URL, teardown."""
     test_file = str(Path(__file__).resolve())
     procs = []
@@ -296,6 +296,8 @@ def proxy_server():
                     "127.0.0.1",
                     "--port",
                     str(PROXY_PORT),
+                    "--workers",
+                    str(request.param),
                     "--prefiller-hosts",
                     "127.0.0.1",
                     "--prefiller-ports",

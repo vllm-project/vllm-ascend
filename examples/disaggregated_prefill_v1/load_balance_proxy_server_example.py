@@ -736,7 +736,7 @@ def parse_args() -> argparse.Namespace:
         "--workers",
         type=int,
         default=1,
-        help="Number of uvicorn worker processes. Scheduling state is shared across workers.",
+        help="Number of uvicorn workers. Linux workers use independent listeners; backend scheduling state is shared.",
     )
     parser.add_argument(
         "--log-level",
@@ -1446,13 +1446,23 @@ if __name__ == "__main__":
 
     module_name = Path(__file__).stem
     try:
-        uvicorn.run(
-            f"{module_name}:create_app",
-            host=global_args.host,
-            port=global_args.port,
-            workers=global_args.workers,
-            factory=True,
-            app_dir=str(Path(__file__).resolve().parent),
-        )
+        if sys.platform == "linux" and global_args.workers > 1:
+            from proxy_worker_listener import run_worker_listeners
+
+            run_worker_listeners(
+                f"{module_name}:create_app",
+                host=global_args.host,
+                port=global_args.port,
+                workers=global_args.workers,
+            )
+        else:
+            uvicorn.run(
+                f"{module_name}:create_app",
+                host=global_args.host,
+                port=global_args.port,
+                workers=global_args.workers,
+                factory=True,
+                app_dir=str(Path(__file__).resolve().parent),
+            )
     finally:
         cleanup_manager_config(global_args.port)
