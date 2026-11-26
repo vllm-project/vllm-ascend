@@ -13,7 +13,6 @@ from vllm.forward_context import get_forward_context
 from vllm.v1.worker.gpu.pcp_manager import PCPManager
 
 from vllm_ascend.attention import dsa_v41 as v41
-from vllm_ascend.attention.context_parallel.common_cp import is_pcp_decode_sharding_enabled
 from vllm_ascend.attention.context_parallel.dsa_cp import (
     AscendDSAPCPMetadataBuilder,
 )
@@ -25,8 +24,14 @@ from vllm_ascend.attention.dsa_v41 import (
     AscendDSAV41Metadata,
     AscendDSAV41MetadataBuilder,
 )
-from vllm_ascend.attention.utils import AscendCommonAttentionMetadata, is_pcp_enabled, uses_pcp_sharded_layout
-from vllm_ascend.core.kv_cache_interface import get_kv_cache_compression_ratio, get_storage_block_size
+from vllm_ascend.attention.utils import (
+    AscendCommonAttentionMetadata,
+    apply_prefill_as_decode_mask,
+    has_requests_to_run_as_prefill,
+    is_pcp_enabled,
+    uses_pcp_sharded_layout,
+)
+from vllm_ascend.core.kv_cache_interface import get_kv_cache_compression_ratio
 from vllm_ascend.models.deepseek_v41.cache_config import STATE_RING_ROWS
 from vllm_ascend.ops.rope_dsv4 import get_cos_and_sin_dsa, get_full_cos_and_sin_dsa_for_layer
 from vllm_ascend.worker.device_metadata import DeviceMetadataStage, wait_for_device_metadata
@@ -143,7 +148,9 @@ def build_v41_pcp_c2_metadata(
     """Use upstream segment ownership; send chunk ends and each request's ring tail."""
     query_lens = batch.num_scheduled_tokens[: batch.num_reqs]
     query_start_rows = batch.query_start_loc_np[: batch.num_reqs + 1]
-    is_prefilling = batch.is_prefilling_np[: batch.num_reqs]
+    is_prefilling = apply_prefill_as_decode_mask(
+        batch.is_prefilling_np, getattr(batch, "prefill_runs_as_decode_np", None)
+    )[: batch.num_reqs]
     manager = PCPManager.__new__(PCPManager)
     manager.pcp_world_size, manager.dcp_world_size = world, 1
     manager.shard_decode_requests = decode_sharded
@@ -260,7 +267,7 @@ class AscendDSAV41PCPMetadataBuilder(_ReplicatedCacheMetadataBuilder):
         self._pcp_world_size = vllm_config.parallel_config.prefill_context_parallel_size
         self.use_pcp = self._pcp_world_size > 1
         self._pcp_rank = get_pcp_group().rank_in_group
-        self._is_decode_sharded = is_pcp_decode_sharding_enabled(vllm_config)
+        self._is_decode_sharded = vllm_config.parallel_config.pcp_shard_decode_requests
         self._max_tokens = vllm_config.scheduler_config.max_num_batched_tokens
         self._hidden_restore_idx_buffer = torch.empty(self._max_tokens, dtype=torch.int64, device=device)
 
@@ -382,7 +389,7 @@ class AscendDSAV41PCPMetadataBuilder(_ReplicatedCacheMetadataBuilder):
             slot_mapping=slots[:num_tokens].fill_(-1),
             flat_slot_mapping=self._flat_slot_mapping[:num_tokens].fill_(-1),
             compress_ratio=get_kv_cache_compression_ratio(self.kv_cache_spec),
-            storage_block_size=get_storage_block_size(self.kv_cache_spec),
+            storage_block_size=self.kv_cache_spec.num_states,
             logical_block_size=self.kv_cache_spec.block_size,
             is_compressor_state=is_state,
             cache_kind=self._cache_kind,
@@ -491,7 +498,7 @@ class AscendDSAV41PCPMetadataBuilder(_ReplicatedCacheMetadataBuilder):
             raise ValueError("V4.1 PCP metadata sharing requires matching batch signatures")
         mode = shared.get("mode")
         if mode is None:
-            has_prefill = bool(pcp_context.global_batch.is_prefilling_np.any())
+            has_prefill = has_requests_to_run_as_prefill(pcp_context.global_batch)
             mode = (has_prefill, has_prefill or self._is_decode_sharded)
             shared["mode"] = mode
         has_prefill, needs_global_metadata = mode

@@ -32,6 +32,11 @@ on:
         required: false
         default: false
         type: boolean
+      model:
+        description: 'DeepSeek-compatible model for translation (default: vars.TRANSLATE_MODEL or deepseek-v4.1-flash)'
+        required: false
+        default: ''
+        type: string
 
 concurrency:
   group: translation-${{ github.ref }}
@@ -39,10 +44,14 @@ concurrency:
 
 jobs:
   translate:
-    runs-on: linux-amd64-cpu-8-hk
+    runs-on: linux-amd64-cpu-4-hk
     if: github.event_name == 'workflow_dispatch' || github.event_name == 'schedule'
     permissions:
       contents: read
+    env:
+      # Model is selectable per run; the API key and endpoint come from the
+      # unified agent credentials below (shared with the AI review job).
+      TRANSLATE_MODEL: ${{ inputs.model || vars.TRANSLATE_MODEL || 'deepseek-v4.1-flash' }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v7
@@ -101,8 +110,12 @@ jobs:
         if: steps.detect.outputs.has_changes == 'true'
         id: translate
         env:
-          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+          # Unified agent credentials, the same pair the AI review job uses
+          # (#22319): configure AI_REVIEW_KEY / AI_REVIEW_API once in the repo.
+          TRANSLATE_API_KEY: ${{ secrets.AI_REVIEW_KEY }}
+          TRANSLATE_BASE_URL: ${{ secrets.AI_REVIEW_API || 'https://api.deepseek.com' }}
         run: |
+          echo "Translating with model '${TRANSLATE_MODEL}'"
           python .github/workflows/scripts/po_translate.py \
             --files "${{ steps.detect.outputs.files }}" \
             --output-json /tmp/translation_results.json \
@@ -167,6 +180,7 @@ jobs:
         env:
           FILE_LIST: ${{ steps.results.outputs.file_list }}
           FILE_COUNT: ${{ steps.results.outputs.file_count }}
+          TRANSLATE_MODEL: ${{ env.TRANSLATE_MODEL }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           PR_HEAD: vllm-ascend-ci:${{ env.BRANCH_NAME }}
           PR_BASE: ${{ env.TARGET_BRANCH }}
@@ -180,7 +194,8 @@ jobs:
                 ? '[Doc] Translated Doc files ' + date
                 : '[' + branchLabel + '][Doc] Translated Doc files ' + date;
               const prBody = '## Auto-Translation Summary\n\n' +
-                'Translated **' + process.env.FILE_COUNT + '** file(s):\n\n' +
+                'Translated **' + process.env.FILE_COUNT + '** file(s) using `' +
+                process.env.TRANSLATE_MODEL + '`:\n\n' +
                 process.env.FILE_LIST + '\n---\n\n' +
                 '[Workflow run](' + process.env.RUN_URL + ')';
               const pr = await github.rest.pulls.create({

@@ -272,7 +272,7 @@ rebalances a layer only when the hysteresis gates above fire, so lowering
 
 2. Hardware Requirements:
     - Ensure that all NPUs have identical memory capacity and compute capabilities.
-    - Network bandwidth must support expert redistribution traffic (≥ 10 Gbps recommended).
+    - Network bandwidth must support expert redistribution traffic (≥ 10 Gbit/s recommended).
     - shm needs to be mounted for container.
 
 3. Monitoring & Validation:

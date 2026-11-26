@@ -60,6 +60,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.mooncake_b
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.yuanrong_backend import (
     YuanrongConfig,
 )
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.buffer import BufferDescriptor, MemoryLocation
 
 
 def _format_log_call(call):
@@ -506,6 +507,24 @@ class TestMooncakeBackendSetup(unittest.TestCase):
             mock_global_te.get_transfer_engine.return_value = transfer_engine
             return backend._setup_store()
 
+    def test_independent_store_preference_uses_registered_segment(self):
+        for hostname, expected in (("10.0.0.7:50053", "10.0.0.7:50053"), ("", "10.0.0.7"), (None, "10.0.0.7")):
+            with self.subTest(hostname=hostname):
+                backend = self._make_backend(
+                    config=_make_mooncake_store_config(preferred_segment=True), use_fabric_mem=False
+                )
+                backend._use_store_independent_te = True
+                store = MagicMock()
+                store.setup.return_value = 0
+                if hostname is None:
+                    del store.get_hostname
+                else:
+                    store.get_hostname.return_value = hostname
+
+                self._setup_store(backend, store)
+
+                self.assertEqual(backend.local_seg, expected)
+
     def test_dp_clients_use_distinct_ssd_paths_and_log_actual_directories(self):
         for use_fabric_mem, use_store_independent_te in ((False, False), (True, False), (False, True)):
             with (
@@ -587,6 +606,50 @@ class TestMooncakeBackendSetup(unittest.TestCase):
                 self.assertIs(result, store)
                 self.assertNotIn("tenant_id", store.setup.call_args.kwargs)
                 set_device.assert_called_once_with(3)
+
+    def test_init_preserves_configured_engine_selection(self):
+        config = _make_mooncake_store_config()
+        for fabric_mem, resource_config, expected_fabric, expected_independent in (
+            ("0", "", False, False),
+            ("1", "{}", True, False),
+            ("0", "{}", False, True),
+        ):
+            with (
+                self.subTest(fabric_mem=fabric_mem, resource_config=resource_config),
+                patch.dict(
+                    os.environ,
+                    {"ASCEND_ENABLE_USE_FABRIC_MEM": fabric_mem, "ASCEND_GLOBAL_RESOURCE_CONFIG": resource_config},
+                ),
+                patch.object(MooncakeStoreConfig, "load_from_env", return_value=config),
+                patch.object(MooncakeBackend, "_setup_store", return_value=MagicMock()),
+            ):
+                backend = MooncakeBackend(MagicMock())
+                self.assertEqual(backend._use_fabric_mem, expected_fabric)
+                self.assertEqual(backend._use_store_independent_te, expected_independent)
+                self.assertEqual(os.environ["ASCEND_ENABLE_USE_FABRIC_MEM"], fabric_mem)
+                self.assertEqual(os.environ["ASCEND_GLOBAL_RESOURCE_CONFIG"], resource_config)
+
+    def test_shared_engine_preserves_configured_pool_and_local_buffer(self):
+        config = _make_mooncake_store_config()
+        with (
+            patch.dict(os.environ, {"ASCEND_ENABLE_USE_FABRIC_MEM": "0", "ASCEND_GLOBAL_RESOURCE_CONFIG": ""}),
+            patch.object(MooncakeStoreConfig, "load_from_env", return_value=config),
+            patch.object(MooncakeBackend, "_setup_store", return_value=MagicMock()),
+        ):
+            backend = MooncakeBackend(MagicMock())
+            self.assertFalse(backend._use_fabric_mem)
+            self.assertFalse(backend._use_store_independent_te)
+            store = MagicMock()
+            engine = MagicMock()
+            with patch.object(mooncake_module, "global_te") as global_engine:
+                global_engine.get_transfer_engine.return_value = engine
+                backend._setup_store_kwargs(store, "host", {})
+                self.assertIs(store.setup.call_args.kwargs["engine"], engine.get_engine.return_value)
+                self.assertEqual(store.setup.call_args.kwargs["local_buffer_size"], config.local_buffer_size)
+                self.assertEqual(store.setup.call_args.kwargs["global_segment_size"], config.global_segment_size)
+                backend.register_buffer([BufferDescriptor(address=2**21, size_bytes=4096)])
+                global_engine.register_buffer.assert_called_once_with([2**21], [4096])
+            store.register_buffer.assert_not_called()
 
     def test_setup_forwards_tenant_for_all_memory_paths(self):
         for use_fabric_mem in (False, True):
@@ -924,7 +987,7 @@ class TestMooncakeBackendMethods(unittest.TestCase):
             ) as mock_te,
             patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.mooncake_backend.get_ip"),
         ):
-            b.register_buffer([100], [200])
+            b.register_buffer([BufferDescriptor(address=100, size_bytes=200)])
             mock_te.register_buffer.assert_called_once()
 
     def test_layerwise_put_start_passes_replicate_config(self):
@@ -968,7 +1031,9 @@ class TestMooncakeBackendMethods(unittest.TestCase):
         with patch(
             "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.mooncake_backend.global_te"
         ) as mock_te:
-            b.register_buffer([100, 101], [200, 201])
+            b.register_buffer(
+                [BufferDescriptor(address=100, size_bytes=200), BufferDescriptor(address=101, size_bytes=201)]
+            )
             b.store.register_buffer.assert_any_call(100, 200)
             b.store.register_buffer.assert_any_call(101, 201)
             self.assertEqual(b.store.register_buffer.call_count, 2)
@@ -977,7 +1042,7 @@ class TestMooncakeBackendMethods(unittest.TestCase):
     def test_register_buffer_skips_fabric_mem(self):
         b = self._make_backend()
         b._use_fabric_mem = True
-        b.register_buffer([100], [200])
+        b.register_buffer([BufferDescriptor(address=100, size_bytes=200)])
         b.store.register_buffer.assert_not_called()
 
     def test_setup_store_with_store_independent_te(self):
@@ -993,6 +1058,7 @@ class TestMooncakeBackendMethods(unittest.TestCase):
             master_server_address="127.0.0.1:50088",
             enable_ssd_offload=False,
             tenant_id="default",
+            preferred_segment=False,
         )
         with (
             patch.object(sys.modules["mooncake.store"], "MooncakeDistributedStore", create=True) as mock_store_cls,
@@ -1356,7 +1422,7 @@ class TestYuanrongBackendMethods(unittest.TestCase):
 
     def test_register_buffer_noop_when_remote_h2d_disabled(self):
         b = self._make_backend()
-        b.register_buffer([100], [200])
+        b.register_buffer([BufferDescriptor(address=100, size_bytes=200)])
         b.store.pre_register_device_memory.assert_not_called()
 
     def test_register_buffer_noop_when_pregister_toggle_off(self):
@@ -1374,13 +1440,13 @@ class TestYuanrongBackendMethods(unittest.TestCase):
             and not b.config.enable_fabric_mem
             and b.config.enable_dev_mem_pregister
         )
-        b.register_buffer([100], [200])
+        b.register_buffer([BufferDescriptor(address=100, size_bytes=200)])
         b.store.pre_register_device_memory.assert_not_called()
 
     def test_register_buffer_when_remote_h2d_enabled_hixl(self):
         b = self._make_backend()
         b._needs_dev_mem_pregister = True
-        b.register_buffer([100], [200])
+        b.register_buffer([BufferDescriptor(address=100, size_bytes=200)])
         b.store.pre_register_device_memory.assert_called_once_with([100], [200])
 
     def test_register_buffer_noop_when_p2p_transfer_link(self):
@@ -1389,7 +1455,7 @@ class TestYuanrongBackendMethods(unittest.TestCase):
         b.config.enable_remote_h2d = True
         b.config.remote_h2d_transport_backend = "P2P_TRANSFER"
         b._needs_dev_mem_pregister = False
-        b.register_buffer([100], [200])
+        b.register_buffer([BufferDescriptor(address=100, size_bytes=200)])
         b.store.pre_register_device_memory.assert_not_called()
 
     def test_register_buffer_noop_when_fabric_mem(self):
@@ -1405,14 +1471,14 @@ class TestYuanrongBackendMethods(unittest.TestCase):
             and b.config.remote_h2d_transport_backend == "HIXL"
             and not b.config.enable_fabric_mem
         )
-        b.register_buffer([100], [200])
+        b.register_buffer([BufferDescriptor(address=100, size_bytes=200)])
         b.store.pre_register_device_memory.assert_not_called()
 
     def test_register_buffer_idempotent(self):
         b = self._make_backend()
         b._needs_dev_mem_pregister = True
-        b.register_buffer([100], [200])
-        b.register_buffer([300], [400])
+        b.register_buffer([BufferDescriptor(address=100, size_bytes=200)])
+        b.register_buffer([BufferDescriptor(address=300, size_bytes=400)])
         b.store.pre_register_device_memory.assert_called_once_with([100], [200])
 
     def test_register_buffers_if_needed_no_buffers(self):
@@ -1573,6 +1639,7 @@ class TestMemcacheBackendMethods(unittest.TestCase):
             backend._lazy_init = False
             backend._store_initialized = True
             backend._pending_buffers = None
+            backend._checked_buffer_sizes = {}
             return backend
 
     def test_ssd_load_rewarms_via_registered_full_sized_npu_read(self):
@@ -1716,7 +1783,7 @@ class TestMemcacheBackendMethods(unittest.TestCase):
 
     def test_register_buffer(self):
         b = self._make_backend()
-        b.register_buffer([100], [200])
+        b.register_buffer([BufferDescriptor(address=100, size_bytes=200)])
         b.store.register_buffer.assert_called_once()
 
     def test_unregister_buffer(self):
@@ -1810,6 +1877,10 @@ class TestMemcacheBackendMethods(unittest.TestCase):
         b = self._make_backend()
         b.store.batch_put_from_layers.return_value = [1]
         self.assertEqual(b.put(["k1"], [[100]], [[10]]), [False])
+        for malformed in ([False], ["0"], [], [0, 0]):
+            with self.subTest(malformed=malformed):
+                b.store.batch_put_from_layers.return_value = malformed
+                self.assertIs(b.put(["k1"], [[100]], [[10]], memory_location=MemoryLocation.HOST), False)
 
     def test_put_exception(self):
         b = self._make_backend()

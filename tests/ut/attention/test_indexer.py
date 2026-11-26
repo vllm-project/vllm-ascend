@@ -19,6 +19,8 @@ from vllm_ascend.attention.indexer import (
     AscendSFAIndexerCache,
     AscendSFAIndexerMetadata,
     AscendSFAIndexerMetadataBuilder,
+    QLIMetadataBuffers,
+    QLIMetadataConfig,
 )
 from vllm_ascend.core.kv_cache_interface import AscendSFAIndexerCacheSpec
 from vllm_ascend.device.device_op import A5DeviceAdaptor
@@ -696,6 +698,44 @@ def test_indexer_owner_tracks_runtime_cache_requirement(monkeypatch, mtp):
         if enabled:
             assert specs["cache_owner"] == replace(spec, block_stride_alignment=MultipleOf(_KERNEL_BLOCK_SIZE))
             assert owner.cache_spec == spec
+
+
+def test_builder_prepares_qli_after_lengths_and_refreshes_each_step(monkeypatch):
+    builder = _make_builder()
+    config = QLIMetadataConfig(32, 128, 1)
+    builder._qli_metadata_buffers = QLIMetadataBuffers(config, 4)
+    op = Mock(side_effect=lambda **kw: kw["seqused_k"].clone())
+    monkeypatch.setattr(indexer_module.DeviceOperator, "get_indexer_metadata_op", lambda: op)
+    monkeypatch.setattr(indexer_module, "get_cos_and_sin_mla", lambda *a, **kw: (torch.zeros(5, 1, 1, 8),) * 2)
+    common = _make_common_metadata()
+    first = builder.build(0, common)
+    assert first.qli_inputs is not None
+    assert first.qli_inputs.config.quant_mode == 1
+    torch.testing.assert_close(first.qli_inputs.query_start_loc, common.query_start_loc.to(torch.int32))
+    common.seq_lens.add_(1)
+    second = builder.build(0, common)
+    assert second.qli_inputs.metadata.data_ptr() == first.qli_inputs.metadata.data_ptr()
+    torch.testing.assert_close(first.qli_inputs.metadata, common.seq_lens[:2].to(torch.int32))
+    assert op.call_count == 2
+
+
+@pytest.mark.parametrize("topk", [1024, 2048])
+def test_a5_builder_metadata_contract_from_cache_spec(topk):
+    spec = AscendSFAIndexerCacheSpec(
+        block_size=128,
+        num_kv_heads=1,
+        head_size=128,
+        dtype=torch.float8_e4m3fn,
+        cache_sparse_li_c8=True,
+    )
+    config = A5DeviceAdaptor.get_indexer_metadata_config(
+        spec, SimpleNamespace(index_n_heads=32, index_head_dim=128, index_topk=topk)
+    )
+    assert config == QLIMetadataConfig(32, 128, 1, topk=topk)
+    assert (
+        A5DeviceAdaptor.get_indexer_metadata_config(replace(spec, cache_sparse_li_c8=False), SimpleNamespace()) is None
+    )
+    assert A5DeviceAdaptor.get_indexer_metadata_config(replace(spec, dtype=torch.bfloat16), SimpleNamespace()) is None
 
 
 @pytest.mark.parametrize("world", [2, 8])

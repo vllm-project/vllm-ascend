@@ -189,6 +189,9 @@ class FixedRandomWeightSource(WeightSource):
             for name, buffer in meta_model.named_buffers()
             if name in persistent_state_names or (not buffer.dtype.is_floating_point and not buffer.dtype.is_complex)
         ]
+        if case.extra_param_builder is not None:
+            assert case.checkpoint_model_prefix is None, "Extra parameter names must already use checkpoint namespaces"
+            parameters += case.extra_param_builder(meta_config)
         self._num_experts = int(getattr(meta_config, "n_routed_experts", 0) or 0)
         del meta_model
 

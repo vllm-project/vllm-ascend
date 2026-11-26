@@ -47,7 +47,7 @@ def worker():
     w.use_layerwise = w.use_layerwise_transfer = w.layerwise_offload = True
     w.use_block_key_layerwise = False
     w.tp_size = 16
-    w.kv_role, w.consumer_is_to_put = "kv_producer", False
+    w.kv_role, w.save_decode_cache = "kv_producer", False
     w.can_put = True
     w.num_kv_cache_groups, w.num_layers = 1, 2
     w.grouped_block_size, w.hash_block_size = [128], 128
@@ -60,6 +60,9 @@ def worker():
     w._global_group_alloc_size = lambda group: 4096
     w._compute_reachable_load_masks = lambda request, cached: None
     w._make_layerwise_full_key = lambda group, key: "full:" + key
+    w.layerwise_keys = SimpleNamespace(make_full_key=lambda group, key, *ranks: "full:" + key)
+    w.metadata = [SimpleNamespace(head_or_tp_rank=0)]
+    w.pp_rank = w.pcp_rank = w.dcp_rank = 0
     w._make_layerwise_partial_key = lambda r, group, block, end: f"{r.req_id}:snapshot:{block}:{end}"
     w._invalid_block_ids, w._invalid_block_ids_lock = set(), threading.Lock()
     w._save_disabled = threading.Event()

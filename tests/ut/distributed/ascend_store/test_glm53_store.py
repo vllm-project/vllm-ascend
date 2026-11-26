@@ -19,6 +19,7 @@ from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
 from vllm.v1.core.single_type_kv_cache_manager import register_all_kvcache_specs
 from vllm.v1.kv_cache_interface import MambaSpec, UniformTypeKVCacheSpecs
 
+from tests.ut.distributed.ascend_store.cache_config_helpers import make_resolved_cache_config
 from tests.ut.distributed.ascend_store.test_mooncake_hybrid import MemoryRangeStore
 from tests.ut.distributed.ascend_store.test_pool_worker import make_worker, start_patch
 from tests.ut.models.test_glm5next_cache_config import make_config, make_specs
@@ -56,6 +57,8 @@ def make_glm53_plan(layer_offset=0, *, use_recoverssm=False):
                 )
         specs[".".join(parts)] = spec
     config = make_config()
+    # Round-trip fixtures persist every recurrent checkpoint, not sparse tails.
+    config.cache_config.prefix_cache_retention_interval = None
     groups = get_glm5_next_kv_cache_groups(config, specs)
     return get_glm5_next_kv_cache_config(config, groups, 24 * get_glm5_next_pool_bytes_per_block(groups))
 
@@ -153,6 +156,8 @@ class TestGLM53Store(unittest.TestCase):
     def finish_layerwise_step(worker, metadata, *, load=False):
         for _ in range(4):
             worker.wait_for_layer_load()
+            # Model attention opens the prefetch gate and drains its window.
+            # The CPU fixture must drive that same hook, not bypass the fence.
             with attention_transfer_window():
                 pass
             worker.save_kv_layer(metadata)
@@ -172,7 +177,9 @@ class TestGLM53Store(unittest.TestCase):
                     "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.mooncake_backend."
                     "MooncakeBackend.create_scheduler_client",
                 )
-                scheduler = KVPoolScheduler(worker.vllm_config, False, plan)
+                scheduler = KVPoolScheduler(
+                    worker.vllm_config, False, make_resolved_cache_config(worker.vllm_config, plan)
+                )
                 self.assertEqual(worker.hash_block_size, prefix_unit or 512)
                 self.assertEqual(scheduler.hash_block_size, worker.hash_block_size)
                 self.assertEqual(worker.cacheable_group_ids, [0, 2, 3, 4])
@@ -181,11 +188,14 @@ class TestGLM53Store(unittest.TestCase):
                 for prompt_len, hit, expected in ((512, 512, 0), (1024, 1024, 512), (1025, 1024, 1024)):
                     scheduler.client = MagicMock()
                     scheduler.client.closed = False
-                    scheduler.client.lookup.return_value = hit
+                    scheduler.client.lookup.return_value = SimpleNamespace(hit_length=hit, tail_key_boundaries=())
                     request = SimpleNamespace(
                         request_id="hit", prompt_token_ids=[1] * prompt_len, num_tokens=prompt_len, block_hashes=[]
                     )
-                    self.assertEqual(scheduler.get_num_new_matched_tokens(request, 0), (expected, False))
+                    self.assertEqual(
+                        scheduler.get_num_new_matched_tokens(request, 0),
+                        (expected, scheduler.load_async if expected else False),
+                    )
                 self.doCleanups()
 
     def test_nonlayerwise_round_trip_keeps_each_tp_state_and_private_tail(self):
@@ -263,7 +273,7 @@ class TestGLM53Store(unittest.TestCase):
                 self.assertEqual(len(mla_keys), len(hashes))
                 self.assertTrue(all("@head_or_tp_rank:0@" in key for key in mla_keys))
                 for worker, caches in workers:
-                    self.assertEqual(worker.lookup_scheduler(1024, hashes, list(range(5))), 1024)
+                    self.assertEqual(worker.lookup_scheduler(1024, hashes, list(range(5))).hit_length, 1024)
                     metadata = self.make_metadata(target, hashes, load=True)
                     worker.start_load_kv(metadata)
                     if load_async:
@@ -278,7 +288,7 @@ class TestGLM53Store(unittest.TestCase):
                         if "@group:4@" in key and f"@head_or_tp_rank:{rank}@" in key and key.endswith(hashes[-1].hex())
                     )
                     payload = stored.pop(missing)
-                    self.assertLess(workers[0][0].lookup_scheduler(1024, hashes, list(range(5))), 1024)
+                    self.assertLess(workers[0][0].lookup_scheduler(1024, hashes, list(range(5))).hit_length, 1024)
                     stored[missing] = payload
 
     def test_recoverssm_registration_exports_each_backend_copyable_state_prefix(self):
@@ -428,7 +438,11 @@ class TestGLM53Store(unittest.TestCase):
         # make_worker pins to retention 0 (semantic checkpoints only); this
         # round-trip persists every block, so look it up densely.
         workers[0][0].vllm_config.cache_config.prefix_cache_retention_interval = None
-        scheduler = create_kv_pool_scheduler(workers[0][0].vllm_config, True, workers[0][0].kv_cache_config)
+        scheduler = create_kv_pool_scheduler(
+            workers[0][0].vllm_config,
+            True,
+            make_resolved_cache_config(workers[0][0].vllm_config, workers[0][0].kv_cache_config),
+        )
         scheduler.store_scheduler.batch_is_readable.side_effect = lambda keys: [key in readable for key in keys]
         hit_request = SimpleNamespace(
             request_id="hit", prompt_token_ids=[1] * 513, num_tokens=513, block_hashes=[block_hash]
@@ -457,7 +471,9 @@ class TestGLM53Store(unittest.TestCase):
             "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.mooncake_backend."
             "MooncakeBackend.create_scheduler_client",
         )
-        scheduler = create_kv_pool_scheduler(worker.vllm_config, True, plan)
+        scheduler = create_kv_pool_scheduler(
+            worker.vllm_config, True, make_resolved_cache_config(worker.vllm_config, plan)
+        )
         self.assertTrue(worker.use_block_key_layerwise)
         self.assertTrue(scheduler.use_block_key_layerwise)
         self.assertEqual(worker.cacheable_group_ids, [0, 2, 3, 4])
