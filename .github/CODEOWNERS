@@ -52,8 +52,8 @@
 /docs @liqian79
 /docs/source/getting_started @MrZ20
 /docs/source/user_guide/feature_guide/rfork.md @yangsonglin13
-/docs/source/user_guide/feature_guide/rl.md @Ronald1995 @Liccol
-/docs/source/user_guide/feature_guide/batch_invariance.md @Ronald1995
+/docs/source/user_guide/feature_guide/rl.md @Ronald1995 @Liccol @wangx700
+/docs/source/user_guide/feature_guide/batch_invariance.md @Ronald1995 @wangx700
 /docs/source/community/contributors.md @wangxiyuan
 /docs/source/developer_guide/Design_Documents/quantization.md @kunpengW-code @lcfenglinwan
 /docs/source/user_guide/feature_guide/quantization.md @kunpengW-code @lcfenglinwan
@@ -63,13 +63,14 @@
 
 # examples
 /examples/ @MrZ20
-/examples/rl/ @Ronald1995 @Liccol
+/examples/rl/ @Ronald1995 @Liccol @wangx700
 /examples/eplb/ @freyfwt
 /examples/rfork/ @yangsonglin13
 
 # c++ source code
 /cmake @ZT-AIA
 /csrc @ZT-AIA
+/csrc/build_batch_invariant_ops.sh @Ronald1995 @wangx700
 /CMakeLists.txt @ZT-AIA
 /vllm_ascend/_cann_ops_custom @ZT-AIA
 
@@ -80,7 +81,7 @@
 # /vllm_ascend/attention/attention_v1.py
 /vllm_ascend/attention/dsa*.py @weijinqian0 @lcfenglinwan @GDzhu01 @linfeng-yuan
 /vllm_ascend/attention/fa_v1.py @jiajinzhu2 @CXY-Katrina
-/vllm_ascend/attention/fa3_v1.py @Ronald1995 @CXY-Katrina
+/vllm_ascend/attention/fa3_v1.py @Ronald1995 @CXY-Katrina @wangx700
 /vllm_ascend/attention/flash_attention_v3.py @earthmanylf @CXY-Katrina
 /vllm_ascend/attention/flashmla.py @hust17yixuan @Dawn952
 /vllm_ascend/attention/indexer.py @weijinqian0 @lijiahang226
@@ -113,7 +114,7 @@
 /vllm_ascend/distributed/kv_transfer/sparse_kv_offload @weiguihua2 @zhangsicheng5 @zhenwenqi2024 @pisceskkk @weijinqian0
 
 # lora
-/vllm_ascend/lora @paulyu12 @voidvelocity
+/vllm_ascend/lora @paulyu12 @voidvelocity @wangx700
 
 # ops
 /vllm_ascend/ops @zzzzwwjj
@@ -122,7 +123,7 @@
 /vllm_ascend/ops/vocab_parallel_embedding.py @xuchi-0808
 /vllm_ascend/ops/triton @ShyRa1n @ZT-AIA @yiz-liu
 /vllm_ascend/ops/triton/eplb.py @freyfwt
-/vllm_ascend/ops/triton/batch_invariant @Ronald1995
+/vllm_ascend/ops/triton/batch_invariant @Ronald1995 @wangx700
 /vllm_ascend/ops/triton/dcp/ @weiguihua2 @zhenwenqi2024 @pisceskkk @zhaochuang001 @li1how @wzx0726
 /vllm_ascend/ops/triton/pcp_kv_cache.py @weiguihua2 @zhenwenqi2024 @pisceskkk @zhaochuang001 @li1how @wzx0726
 /vllm_ascend/ops/triton/msa @CXY-Katrina
@@ -160,7 +161,7 @@
 /vllm_ascend/__init__.py @wangxiyuan
 /vllm_ascend/ascend_config.py @ningjingbengxiaohai @zzzzwwjj
 /vllm_ascend/ascend_forward_context.py @zzzzwwjj @yiz-liu
-/vllm_ascend/batch_invariant.py @Ronald1995
+/vllm_ascend/batch_invariant.py @Ronald1995 @wangx700
 /vllm_ascend/config_utils.py @wxsIcey @Tflowers-0129 @Ronald1995 @zhenwenqi2024 @pisceskkk @zzzzwwjj @linfeng-yuan
 /vllm_ascend/cpu_binding.py @zouyida2052
 /vllm_ascend/envs.py @ningjingbengxiaohai @zzzzwwjj
@@ -246,7 +247,7 @@
 # tests
 /tests/ @wenjun91
 # RLHF e2e tests
-/tests/e2e/common/rlhf/ @Ronald1995 @Liccol
+/tests/e2e/common/rlhf/ @Ronald1995 @Liccol @wangx700
 /tests/e2e/nightly @wenjun91
 /tests/e2e/nightly/single_node/ops @Foriv
 /tests/e2e/nightly/single_node/ops/singlecard_ops/triton/ @Foriv @ShyRa1n
