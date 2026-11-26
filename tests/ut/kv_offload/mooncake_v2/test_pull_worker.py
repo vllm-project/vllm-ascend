@@ -1676,7 +1676,9 @@ def test_whole_block_coalescing_is_prepared_per_request_and_reused_across_layers
             ("request-a", [1 + shift, 2 + shift], [3 + 2 * shift, 4 + 2 * shift]),
             ("request-b", [3 + shift, 5 + shift], [5 + 2 * shift, 8 + 2 * shift]),
         ]
-        src, dst, lengths = [], [], []
+        src: list[int] = []
+        dst: list[int] = []
+        lengths: list[int] = []
         with patch.object(
             thread, "_prepare_block_transfer_ranges", wraps=thread._prepare_block_transfer_ranges
         ) as group:
@@ -1687,7 +1689,9 @@ def test_whole_block_coalescing_is_prepared_per_request_and_reused_across_layers
         for _, local_ids, remote_ids in requests:
             for coalesce in modes:
                 group.assert_any_call(local_ids, remote_ids, coalesce)
-        expected_src, expected_dst, expected_lengths = [], [], []
+        expected_src: list[int] = []
+        expected_dst: list[int] = []
+        expected_lengths: list[int] = []
         for layer, (local_stride, remote_stride, length) in enumerate(
             zip(local_strides, remote_strides, block_lengths)
         ):
@@ -2802,7 +2806,9 @@ def test_vector_addresses_match_scalar_ranges(local_ids, remote_ids, coalesce):
         [remote_base + group[0] * remote_stride + 32 for group in groups[1]],
         [len(group) * size for group in groups[0]],
     )
-    src, dst, lengths = [], [], []
+    src: list[int] = []
+    dst: list[int] = []
+    lengths: list[int] = []
     thread._append_block_transfer_addresses(
         thread._prepare_block_transfer_ranges(local_ids, remote_ids, coalesce),
         local_base,

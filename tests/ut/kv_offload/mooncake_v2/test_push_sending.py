@@ -1232,7 +1232,7 @@ def test_layer_transfer_vector_addresses(mode):
     event = Mock()
     write = Mock(side_effect=lambda *args: event.synchronize.assert_called_once_with() or 0)
     worker.engine = SimpleNamespace(batch_transfer_sync_write=write)
-    requests = (
+    requests: tuple[push_worker.LayerTransferRequest, ...] = (
         push_worker.LayerTransferRequest("a", (3, 1), (7, 4), 0, 8),
         push_worker.LayerTransferRequest("b", (8,), (2,), 0, 4),
     )

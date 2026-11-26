@@ -1038,7 +1038,7 @@ class MooncakePullRecvingThread(threading.Thread, MooncakeTransferAddressMixin):
             return local_ids, remote_ids, np.ones(local_ids.size, dtype=np.uint64)
         breaks = np.flatnonzero((np.diff(local_ids) != 1) | (np.diff(remote_ids) != 1)) + 1
         starts = np.concatenate(([0], breaks))
-        lengths = np.diff(np.append(starts, local_ids.size)).astype(np.uint64)
+        lengths = np.diff(np.concatenate((starts, [local_ids.size]))).astype(np.uint64)
         return local_ids[starts], remote_ids[starts], lengths
 
     @staticmethod
