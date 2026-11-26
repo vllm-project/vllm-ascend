@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vllm-ascend project
 
 from contextlib import AbstractContextManager
+from copy import copy
 
 from vllm.config.compilation import CUDAGraphMode
 from vllm.v1.kv_cache_interface import KVCacheConfig
@@ -33,6 +34,20 @@ def dispatch_cg_and_sync_dp(cudagraph_manager, num_reqs, num_tokens, uniform_tok
             get_ascend_config().enable_shared_expert_dp,
         )
     return _dispatch_cg_and_sync_dp(cudagraph_manager, num_reqs, num_tokens, uniform_token_count, *args, **kwargs)
+
+
+def _cp_validation_config(config):
+    transfer = config.kv_transfer_config
+    if config.parallel_config.decode_context_parallel_size == 1 or not transfer or not transfer.is_kv_producer:
+        return config
+    context = config.compilation_config.static_forward_context
+    executing = {k: v for k, v in context.items() if not getattr(v, "projection_only_in_dcp_prefill", False)}
+    if len(executing) == len(context):
+        return config
+    validation = copy(config)
+    validation.compilation_config = copy(config.compilation_config)
+    validation.compilation_config.static_forward_context = executing
+    return validation
 
 
 # Adapted from vLLM ced6857afa GPUModelRunner.initialize_kv_cache.
@@ -186,7 +201,7 @@ def initialize_kv_cache(
     )
     if self.cache_config.kv_sharing_fast_prefill and self.pcp_manager is None:
         self.fast_prefill = upstream.FastPrefillHelper(self.cudagraph_manager, self.max_num_tokens)
-    upstream.check_attention_cp_compatibility(self.vllm_config, target_attn_layer_names)
+    upstream.check_attention_cp_compatibility(_cp_validation_config(self.vllm_config), target_attn_layer_names)
     if isinstance(self.speculator, upstream.DraftModelSpeculator):
         # HACK(woosuk)
         self.speculator.set_attn(

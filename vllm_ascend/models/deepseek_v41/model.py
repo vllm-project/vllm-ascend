@@ -953,6 +953,9 @@ class DeepseekV41Attention(DeepseekV41SWAAttention):
         self.index_source_layer = role.index_source_layer
         from vllm_ascend.attention.context_parallel.dsa_v41_cp import get_v41_cp_classes
 
+        # The nested DSA impl supplies projections. Its decode attention kernel
+        # is never called by the V4.1 prefill forward.
+        self.dsa_attn.dsa_attn.projection_only_in_dcp_prefill = True
         self.v41_impl = get_v41_cp_classes()[1](
             prefix=prefix,
             role=role,
