@@ -420,15 +420,40 @@ RUN printf '%s\n' \
     '  grep -m2 -nE "error:|undefined reference|Error [0-9]+|No such file" "$LOG" | cut -c1-400 || tail -n 3 "$LOG" | cut -c1-400' \
     '  exit 1' \
     'fi' \
-    > /opt/build_mooncake.sh && chmod +x /opt/build_mooncake.sh
+    > /opt/build_mooncake.sh && chmod +x /opt/build_mooncake.sh && \
+    printf '%s\n' \
+    '#!/bin/bash' \
+    'set -u' \
+    'for f in /usr/local/Ascend/cann/set_env.sh /usr/local/Ascend/ascend-toolkit/set_env.sh; do if [ -f "$f" ]; then . "$f"; fi; done' \
+    'LOG=/tmp/mooncake_py.log' \
+    ': > "$LOG"' \
+    'if {' \
+    '  cd /tmp/Mooncake/mooncake-wheel &&' \
+    '  cp -f ../README.md README.md &&' \
+    '  cnt=0;' \
+    '  for so in $(find /tmp/Mooncake/build -name "*.so*" -type f); do cp -f "$so" mooncake/ && cnt=$((cnt+1)); done;' \
+    '  echo "INFO: 已复制 $cnt 个编译产物到 mooncake-wheel/mooncake/";' \
+    '  ls -l mooncake/ &&' \
+    '  python3 -m pip install . &&' \
+    '  python3 -c "import mooncake.engine, mooncake.store" && echo MOONCAKE_PY_IMPORT_OK &&' \
+    '  cd / && rm -rf /tmp/Mooncake && python3 -m pip cache purge' \
+    '} > "$LOG" 2>&1; then' \
+    '  echo MOONCAKE_PY_OK' \
+    'else' \
+    '  echo MOONCAKE_PY_FAILED' \
+    '  grep -m3 -nE "error|ERROR|Error|No such file|No module named|not found" "$LOG" | cut -c1-400 || tail -n 6 "$LOG" | cut -c1-400' \
+    '  exit 1' \
+    'fi' \
+    > /opt/install_mooncake_py.sh && chmod +x /opt/install_mooncake_py.sh
 
 #    失败时只打印 2 行，且本步骤命令串很短，GitHub 的错误注解能完整显示这两行
 RUN bash /opt/build_mooncake.sh
 
 # 9) mooncake python 绑定
-RUN for f in /usr/local/Ascend/cann/set_env.sh /usr/local/Ascend/ascend-toolkit/set_env.sh; do if [ -f "$f" ]; then . "$f"; fi; done && \
-    cd /tmp/Mooncake && python3 -m pip install . && \
-    rm -rf /tmp/Mooncake && python3 -m pip cache purge
+#    仓库根目录没有 setup.py/pyproject.toml，Python 包在 mooncake-wheel/ 子目录；
+#    其 pyproject 的 package-data 只收 mooncake/*.so 与 mooncake_master 等可执行文件，
+#    且 readme = "README.md" 要求先把根 README 复制进该目录（上游 scripts/build_wheel.sh 的做法）。
+RUN bash /opt/install_mooncake_py.sh
 
 RUN echo 'export LD_PRELOAD=/usr/lib64/libjemalloc.so.2:$LD_PRELOAD' >> ~/.bashrc && \
     echo 'export LD_LIBRARY_PATH=/usr/local/lib64:/usr/local/lib:$LD_LIBRARY_PATH' >> ~/.bashrc
