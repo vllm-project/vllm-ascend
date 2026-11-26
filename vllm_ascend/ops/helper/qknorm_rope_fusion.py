@@ -57,6 +57,17 @@ def maybe_fused_qknorm_rope(
         return None
     if head_dim != 128:
         return None
+    q_bias = q_norm.bias if getattr(q_norm, "bias_loaded", False) else None
+    k_bias = k_norm.bias if getattr(k_norm, "bias_loaded", False) else None
+    if (q_bias is None) != (k_bias is None):
+        return None
+    if q_bias is not None and k_bias is not None:
+        if q_bias.shape != (head_dim,) or k_bias.shape != (head_dim,):
+            return None
+        if q_bias.dtype != qkv.dtype or k_bias.dtype != qkv.dtype:
+            return None
+        if q_bias.device != qkv.device or k_bias.device != qkv.device:
+            return None
     return DeviceOperator.split_qkv_rmsnorm_rope(
         input=qkv,
         q_weight=q_norm.weight,
@@ -65,8 +76,8 @@ def maybe_fused_qknorm_rope(
         kv_hidden_size=kv_size,
         head_dim=head_dim,
         eps=eps,
-        q_bias=None,
-        k_bias=None,
+        q_bias=q_bias,
+        k_bias=k_bias,
         cos_sin_cache=cache,
         positions=positions,
     )

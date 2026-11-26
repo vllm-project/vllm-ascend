@@ -18,6 +18,8 @@ class Rotary:
 class Norm:
     def __init__(self, head_dim):
         self.weight = torch.ones(head_dim, dtype=torch.bfloat16)
+        self.bias = None
+        self.bias_loaded = False
         self.variance_epsilon = 1e-6
         self.has_weight = True
         self.pass_weight = True
@@ -46,10 +48,56 @@ def test_qwen3_qk_fusion_dispatch(monkeypatch):
     kernel = Mock(return_value=fused)
     monkeypatch.setattr(fusion.DeviceOperator, "split_qkv_rmsnorm_rope", kernel)
     qkv, positions, q_norm, k_norm, rope, q_size, kv_size = _inputs()
+    q_norm.bias = torch.zeros(128, dtype=torch.bfloat16)
+    k_norm.bias = torch.zeros(128, dtype=torch.bfloat16)
 
     assert fusion.maybe_fused_qknorm_rope(qkv, positions, q_norm, k_norm, rope, q_size, kv_size, 128) is fused
     assert kernel.call_args.kwargs["q_bias"] is None
     assert kernel.call_args.kwargs["k_bias"] is None
+
+
+def test_qwen3_qk_fusion_passes_loaded_norm_biases(monkeypatch):
+    _enable_fusion(monkeypatch)
+    kernel = Mock(return_value=(object(), object(), object()))
+    monkeypatch.setattr(fusion.DeviceOperator, "split_qkv_rmsnorm_rope", kernel)
+    qkv, positions, q_norm, k_norm, rope, q_size, kv_size = _inputs()
+    q_norm.bias = torch.full((128,), 0.25, dtype=torch.bfloat16)
+    k_norm.bias = torch.full((128,), -0.5, dtype=torch.bfloat16)
+    q_norm.bias_loaded = k_norm.bias_loaded = True
+
+    assert (
+        fusion.maybe_fused_qknorm_rope(qkv, positions, q_norm, k_norm, rope, q_size, kv_size, 128)
+        is kernel.return_value
+    )
+    assert kernel.call_args.kwargs["q_bias"] is q_norm.bias
+    assert kernel.call_args.kwargs["k_bias"] is k_norm.bias
+
+
+def test_qwen3_qk_fusion_falls_back_for_single_loaded_bias(monkeypatch):
+    _enable_fusion(monkeypatch)
+    kernel = Mock()
+    monkeypatch.setattr(fusion.DeviceOperator, "split_qkv_rmsnorm_rope", kernel)
+    qkv, positions, q_norm, k_norm, rope, q_size, kv_size = _inputs()
+
+    for biased_norm in (q_norm, k_norm):
+        biased_norm.bias = torch.full((128,), 0.25, dtype=torch.bfloat16)
+        biased_norm.bias_loaded = True
+        assert fusion.maybe_fused_qknorm_rope(qkv, positions, q_norm, k_norm, rope, q_size, kv_size, 128) is None
+        biased_norm.bias_loaded = False
+    kernel.assert_not_called()
+
+
+def test_qwen3_qk_fusion_falls_back_for_incompatible_bias(monkeypatch):
+    _enable_fusion(monkeypatch)
+    kernel = Mock()
+    monkeypatch.setattr(fusion.DeviceOperator, "split_qkv_rmsnorm_rope", kernel)
+    qkv, positions, q_norm, k_norm, rope, q_size, kv_size = _inputs()
+    q_norm.bias = torch.ones(128, dtype=torch.bfloat16)
+    k_norm.bias = torch.ones(128, dtype=torch.float32)
+    q_norm.bias_loaded = k_norm.bias_loaded = True
+
+    assert fusion.maybe_fused_qknorm_rope(qkv, positions, q_norm, k_norm, rope, q_size, kv_size, 128) is None
+    kernel.assert_not_called()
 
 
 def test_disabled_and_unsupported_inputs_fall_back(monkeypatch):
