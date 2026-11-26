@@ -160,6 +160,7 @@ def script(ch):
         return "control"
     if cat.startswith("M"):
         return "combining"
+    # Unicode category "Nd" = Number, decimal digit (must match unicodedata).
     if cat == "Nd":
         return "digit" if o < 128 else "other_letter"
     if cat.startswith("L"):
