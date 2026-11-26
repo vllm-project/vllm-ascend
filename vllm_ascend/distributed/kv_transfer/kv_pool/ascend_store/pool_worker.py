@@ -3153,8 +3153,13 @@ class KVPoolWorker:
             source_layers = self.hf_config.kv_source_layer_ids
             global_layer = self.current_layer + self.layerwise_key_layer_offset
             window_end = self.current_layer
-            if global_layer >= source_layers[-1]:
-                # Keep tail SWA and draft loads one layer ahead.
+            if global_layer == self.hf_config.num_hidden_layers - 1:
+                # The runner collects transfer results after the target forward.
+                # Queue every resident draft layer before that fence drains the
+                # reads and releases their GVA leases.
+                window_end = self.num_layers - 1
+            elif global_layer >= source_layers[-1]:
+                # Keep the remaining target SWA loads one layer ahead.
                 window_end += 1
             elif self.current_layer == 0 or global_layer in source_layers:
                 # Submit the intervening SWA before the next shared source.

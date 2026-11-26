@@ -111,7 +111,7 @@ class MemoryGVAStore:
         return 0
 
 
-def make_shared_worker(test, *, bounded=False, draft=False, num_layers=12, sources=(2, 8)):
+def make_shared_worker(test, *, bounded=False, draft=False, num_layers=12, sources=(2, 8), num_draft_layers=1):
     """Register real CPU cache views with the production GVA worker and queue threads."""
     names = [
         name
@@ -122,7 +122,7 @@ def make_shared_worker(test, *, bounded=False, draft=False, num_layers=12, sourc
     if not bounded:
         groups.append([f"model.layers.{layer}.attn.swa_cache" for layer in range(num_layers)])
     if draft:
-        groups.append(["model.mtp.layers.0.attn.kv_cache"])
+        groups.append([f"model.mtp.layers.{i}.attn.kv_cache" for i in range(num_draft_layers)])
     spec = FullAttentionSpec(block_size=16, num_kv_heads=1, head_size=1, dtype=torch.uint8)
     cache_config = SimpleNamespace(
         kv_cache_groups=[KVCacheGroupSpec(layer_names=group, kv_cache_spec=spec) for group in groups],
@@ -252,6 +252,27 @@ class TestSharedSourceLayerwise(unittest.TestCase):
                     torch.testing.assert_close(cache[1], expected[name][1])
                     self.assertEqual(int(cache[0].sum()), 0)
                 self.assertFalse(store.leases)
+
+    def test_draft_prefix_is_restored_before_target_releases_read_leases(self):
+        worker, store, caches = make_shared_worker(self, draft=True, num_draft_layers=3)
+        expected = {name: cache[1].clone() for name, cache in caches.items() if ".mtp." in name}
+        self.assertEqual(len(expected), 3)
+        save_prefix(worker)
+        for cache in caches.values():
+            cache.zero_()
+        meta = metadata(worker, load=True, save=False)
+        worker.prepare_layerwise_step(meta)
+        worker.start_load_kv(meta)
+        for _ in range(worker.hf_config.num_hidden_layers):
+            forward_layer(worker, meta)
+        worker.get_finished(set(), meta)
+        self.assertFalse(store.leases)
+        for name, value in expected.items():
+            torch.testing.assert_close(caches[name][1], value)
+        with patch.object(worker.kv_recv_thread, "add_request", wraps=worker.kv_recv_thread.add_request) as enqueue:
+            for _ in expected:
+                forward_layer(worker, meta)
+            enqueue.assert_not_called()
 
     def test_source_triggered_submission_preserves_swa_order_and_tail(self):
         for bounded in (False, True):
