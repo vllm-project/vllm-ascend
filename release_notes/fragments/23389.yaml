@@ -1,0 +1,10 @@
+pr: 23389
+entries:
+  - category: performance
+    text: >-
+      DeepSeek V4.1 DSpark with sequence parallelism now expands only each
+      tensor-parallel rank's local token rows, avoiding full-token
+      hyper-connection expansion and reducing temporary clone and padding
+      allocations on Ascend A2/A3. No configuration changes are required.
+    model: deepseek-v4.1
+    hardware: [A2, A3]
