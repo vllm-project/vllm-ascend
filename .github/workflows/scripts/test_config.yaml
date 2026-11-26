@@ -76,6 +76,8 @@ skip_tests:
   - tests/e2e/pull_request/two_card/aclgraph/test_aclgraph_capture_replay.py
   # Temporarily skipped: this test is currently broken
   - tests/e2e/pull_request/four_card/spec_decode/test_mtp_step3p5.py
+  # Temporarily skip while A3 NPU startup timeouts are investigated in PR #23118.
+  - tests/e2e/pull_request/one_card/test_sparse_kv_offload_lifecycle.py
 
 # === Accuracy Tests ===
 # The accuracy test files. All A3 partitions now target 560T labels directly,

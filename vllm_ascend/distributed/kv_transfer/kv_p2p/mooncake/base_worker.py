@@ -315,6 +315,14 @@ class MooncakeTransferAddressMixin:
 class MooncakeBaseConnectorWorker(MooncakeTransferAddressMixin):
     """Worker implementation shared by Mooncake transfer modes."""
 
+    @staticmethod
+    def _get_transfer_max_workers(vllm_config: VllmConfig) -> int:
+        assert vllm_config.kv_transfer_config is not None
+        max_workers = vllm_config.kv_transfer_config.get_from_extra_config("transfer_max_workers", 32)
+        if isinstance(max_workers, bool) or not isinstance(max_workers, int) or max_workers <= 0:
+            raise ValueError(f"Mooncake transfer_max_workers must be a positive integer, got {max_workers!r}")
+        return max_workers
+
     def __init__(
         self,
         vllm_config: VllmConfig,

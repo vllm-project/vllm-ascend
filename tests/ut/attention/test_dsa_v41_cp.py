@@ -9,7 +9,9 @@ tests check persistent addresses and state controls, not NPU graph replay.
 """
 
 import importlib
+from contextlib import nullcontext
 from dataclasses import fields, replace
+from itertools import permutations
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import Mock
@@ -36,6 +38,7 @@ from vllm_ascend.quantization.methods import AscendW8A8DynamicLinearMethod
 from vllm_ascend.quantization.methods.w4a8.w4a8 import AscendW4A8DynamicLinearMethod
 from vllm_ascend.quantization.methods.w8a8.w8a8_mxfp8 import AscendW8A8MXFP8DSDynamicLinearMethod
 from vllm_ascend.weight_switch import ParallelOProjection, WeightSwitchConfig
+from vllm_ascend.worker.device_metadata import DeviceMetadataExecutor
 from vllm_ascend.worker.v2.pcp_manager import AscendPCPAttentionContext
 
 
@@ -156,6 +159,52 @@ def test_local_compressor_boundaries_preserve_request_tails_and_predecessors(wor
                 assert int(gathered[predecessor]) == row - 1
             else:
                 assert predecessor == -1
+
+
+@pytest.mark.parametrize("world", [2, 4, 8])
+@pytest.mark.parametrize("query_len", [1, 4])
+def test_c2_metadata_uses_cached_short_prefill_decode_ownership(world, query_len):
+    """Gather cached prompt tails from their decode owner, including draft tokens."""
+    batch = SimpleNamespace(
+        num_reqs=2,
+        num_tokens=1 + query_len,
+        num_scheduled_tokens=np.array([1, query_len], dtype=np.int32),
+        query_start_loc_np=np.array([0, 1, 1 + query_len], dtype=np.int32),
+        is_prefilling_np=np.array([False, True]),
+        prefill_runs_as_decode_np=np.array([False, True]),
+    )
+    # Decode requests are owned round-robin. Each rank's local rows start at zero.
+    rank_rows = [[0], list(range(1, batch.num_tokens))] + [[] for _ in range(world - 2)]
+    rank_metadata, gathered_rows = [], []
+    for rank, rows in enumerate(rank_rows):
+        metadata = dsa_v41_cp.build_v41_pcp_c2_metadata(
+            batch,
+            world,
+            rank,
+            torch.device("cpu"),
+            decode_sharded=True,
+            min_send_rows=0,
+            num_local_reqs=int(bool(rows)),
+            num_ring_rows=0,
+            buffers=None,
+            buffer_capacity=0,
+        )
+        assert int(metadata.send_valid_mask.sum()) == len(rows)
+        assert metadata.prev_token_row_indices.tolist() == ([-1] if rows else [])
+        sent_rows = torch.full_like(metadata.send_token_indices, -1)
+        if rows:
+            sent_rows[metadata.send_valid_mask] = torch.tensor(rows)[
+                metadata.send_token_indices[metadata.send_valid_mask]
+            ]
+        rank_metadata.append(metadata)
+        gathered_rows.append(sent_rows)
+
+    gathered = torch.cat(gathered_rows)
+    for metadata in rank_metadata:
+        assert gathered[metadata.ring_source_row_indices].tolist() == list(range(batch.num_tokens))
+        assert metadata.ring_request_indices.tolist() == [0] + [1] * query_len
+        assert metadata.ring_token_offsets.tolist() == [0] + list(range(query_len))
+    np.testing.assert_array_equal(batch.is_prefilling_np, [False, True])
 
 
 # Scheduler token IDs owned by each rank, in DualChunkSwap order. Repeated
@@ -1547,7 +1596,15 @@ class TestProjectionLayout:
 
 
 @pytest.mark.parametrize("rank", [0, 1])
-def test_a5_async_plans_use_real_lengths_and_first_consumption_order(builders, rank):
+@pytest.mark.parametrize("order", list(permutations((0, 2, 1))))
+@pytest.mark.parametrize("use_executor", [False, True])
+def test_a5_async_plans_use_real_lengths_and_first_consumption_order(builders, monkeypatch, rank, order, use_executor):
+    stream = SimpleNamespace(wait_event=lambda event: None)
+    monkeypatch.setattr(torch.npu, "Stream", lambda: stream)
+    monkeypatch.setattr(torch.npu, "Event", lambda: SimpleNamespace(record=lambda stream: None))
+    monkeypatch.setattr(torch.npu, "current_stream", lambda: stream)
+    monkeypatch.setattr(torch.npu, "stream", lambda stream: nullcontext())
+    executor = DeviceMetadataExecutor(capture_producers=True)
     owners = builders(rank=rank)
     builder = owners["swa"]
     builder.vllm_config.model_config.hf_text_config.compress_ratios = [0, 0, 2, 2, 1, 1]
@@ -1562,6 +1619,14 @@ def test_a5_async_plans_use_real_lengths_and_first_consumption_order(builders, r
         return torch.ones(dsa_v41.V41_METADATA_BUFFER_SIZE, dtype=torch.int32)
 
     builder._device_backend = SimpleNamespace(mixed_quant_sparse_flash_mla_metadata=plan)
+    minimum = torch.minimum
+    visibility_calls: list[None] = []
+
+    def track_visibility(*args, **kwargs):
+        visibility_calls.append(None)
+        return minimum(*args, **kwargs)
+
+    monkeypatch.setattr(torch, "minimum", track_visibility)
     addresses = None
     for scenario in ["prefill", "decode", "mixed", "prefill"]:
         batch = _batch(2, rank, scenario)
@@ -1570,13 +1635,23 @@ def test_a5_async_plans_use_real_lengths_and_first_consumption_order(builders, r
         tasks = builder.take_device_metadata_tasks()
         assert len(tasks) == 3
         assert list(result.a5_smla_plans) == [0, 2, 1]
+        by_ratio = dict(zip((0, 2, 1), tasks))
+        executor._attention_order = {by_ratio[ratio].group_id: index for index, ratio in enumerate(order)}
         before = len(calls)
         # Run the same deferred tasks again after the request lengths change.
         for _ in range(2):
-            for ratio, task in zip([0, 2, 1], tasks):
+            start = len(calls)
+            visibility_before = len(visibility_calls)
+            if use_executor:
+                executor.submit(tasks)
+                executor.release()
+            else:
+                for ratio in order:
+                    by_ratio[ratio].run()
+            assert len(visibility_calls) - visibility_before == (1 if use_executor else 2)
+            for ratio, (ori, cmp, kw) in zip(order, calls[start:]):
+                task = by_ratio[ratio]
                 assert task.group_id == id(result.a5_smla_plans[ratio])
-                task.run()
-                ori, cmp, kw = calls[-1]
                 rows = ori.shape[0]
                 torch.testing.assert_close(ori[:, 0], (result.positions[:rows] + 1).clamp(0, 4).int())
                 expected = torch.zeros(rows, dtype=torch.int32)
