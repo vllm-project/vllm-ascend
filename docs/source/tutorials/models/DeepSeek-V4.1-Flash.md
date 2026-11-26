@@ -2965,16 +2965,14 @@ Keep the following options in the serving command:
 --enable-auto-tool-choice
 ```
 
-For common environment, installation, and parameter issues, refer to the
-[Public FAQs](../../faqs.md).
-
-### 10.2 Which shared Engram table is still registering on A5?
+### 10.2 Which shared Engram table is still registering on 950DT&950PR products?
 
 With `--engram-config '{"cpu_offload":true,"dp_shared_memory":true}'`, these
 events come only from the local `SharedUvaBuffer` path, where DP or PCP peers
 map the same TP shard. With four-card TP4/DP1/PCP1 and local host offload,
-each shard has no sharing peer and uses a private `HostUvaBuffer`. The A5
-remote Engram path skips local table allocation. Skip this check for both paths.
+each shard has no sharing peer and uses a private `HostUvaBuffer`. The remote
+Engram path on these products skips local table allocation. Skip this check
+for both paths.
 
 Each participating worker logs `Shared Engram registration start` before
 entering `aclrtHostRegisterV2`. Match it to the `end` event by global rank,
@@ -2985,9 +2983,9 @@ For the 1017 checkpoint, compare the maximum `elapsed` across ranks for
 `layer=14 table=codes`. Each rank registers each table in one call.
 
 To check a mapping's backing, wait for its matching `end` with `rc=0` and
-sample while that worker still holds the mapping. In the single-node
-DP4/TP1/PCP1 run of the 1017 checkpoint, all four ranks registered codes and
-scales for layers 1 and 14. We sampled after all 16 calls succeeded
+sample while that worker still holds the mapping. In the single-node 950DT
+run of the 1017 checkpoint with DP4/TP1/PCP1, all four ranks registered
+codes and scales for layers 1 and 14. We sampled after all 16 calls succeeded
 (4 ranks × 2 layers × 2 tables). From the worker's PID namespace, use its PID
 and the exact `shm` name from its log. This reads mapping metadata without
 touching table contents.
@@ -3019,6 +3017,9 @@ docker volume create --driver local --opt type=tmpfs --opt device=tmpfs \
 
 Pass `-v engram-shm:/dev/shm` to `docker run`. Check coverage on each rank
 because the kernel can fall back to smaller pages under memory pressure.
+
+For common environment, installation, and parameter issues, refer to the
+[Public FAQs](../../faqs.md).
 
 ## 11 Limitations
 
