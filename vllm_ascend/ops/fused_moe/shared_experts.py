@@ -208,11 +208,12 @@ class AscendSharedExperts:
                 raise ValueError("DeepGEMM requires replicated shared weights for fused shared experts")
             return
         if getattr(self.moe_config, "deepgemm_mega_moe", False) is True:
+            if reason := self._megamoe_shared_incompatibility():
+                raise ValueError(f"DeepGEMM cannot fuse this shared expert: {reason}")
             # The routed layer's post-load hook packs both FP8 linears directly
             # from their checkpoint tensors. Keep the normal mode-3 forward.
             self._wrap_linear_for_megamoe_fusion(self.layer.gate_up_proj, "w1", preserve_checkpoint=True)
             self._wrap_linear_for_megamoe_fusion(self.layer.down_proj, "w2", preserve_checkpoint=True)
-            self.megamoe_shared_weights_ready = True
             return
         if not use_cann_megamoe(get_current_vllm_config()):
             return
@@ -253,45 +254,8 @@ class AscendSharedExperts:
                 "the CANN MegaMoe interface cannot describe W4A8 routed and W8A8 shared experts independently"
             )
             return
-        # Output gating (e.g. Qwen3-Next expert_gate) happens outside the
-        # operator and cannot be fused.
-        if getattr(self.layer, "expert_gate", None) is not None:
-            logger.info_once(
-                "MegaMoe shared-expert fusion is not supported with expert gating; "
-                "keeping the separate shared-expert forward."
-            )
-            self._megamoe_shared_fusion_disabled = True
-            return
-        # The operator consumes no shared bias.
-        if (
-            getattr(self.layer.gate_up_proj, "bias", None) is not None
-            or getattr(self.layer.down_proj, "bias", None) is not None
-        ):
-            logger.info_once(
-                "MegaMoe shared-expert fusion is not supported with shared-expert bias; "
-                "keeping the separate shared-expert forward."
-            )
-            self._megamoe_shared_fusion_disabled = True
-            return
-        # The operator exposes a single global activation/activation_params
-        # pair that it applies to the shared experts too, so fusion is only
-        # valid when the shared activation is the *same function* as the
-        # routed one: equal activation type AND equal activation params
-        # (e.g. SituAndMul beta/linear_beta, SwiGLU-OAI alpha/beta/limit).
-        # Parameterized activations of the same class but different params
-        # (or an unbounded shared SiluAndMul under a clamped routed swiglu)
-        # must keep the separate shared-expert forward.
-        # TODO(ZT-AIA): The MegaMoe operator currently executes one activation
-        # for both routed and shared experts, so it cannot represent configs
-        # where the two differ. Remove this activation-signature equality check
-        # once the operator supports distinct routed/shared activations.
-        routed_activation = self._routed_megamoe_activation_signature(self.moe_config)
-        shared_activation = self._shared_megamoe_activation_signature(self.layer)
-        if shared_activation is None or shared_activation != routed_activation:
-            self._disable_megamoe_shared_fusion(
-                f"shared activation {type(self.layer.act_fn).__name__} {shared_activation} "
-                f"does not match the routed activation {routed_activation} executed by the MegaMoe operator"
-            )
+        if reason := self._megamoe_shared_incompatibility():
+            self._disable_megamoe_shared_fusion(reason)
             return
         # The operator accumulates the shared-expert output into the local
         # token accumulator with no cross-rank reduction, so fusion is only
@@ -319,6 +283,18 @@ class AscendSharedExperts:
             (self.layer.down_proj, "w2"),
         ):
             self._wrap_linear_for_megamoe_fusion(linear, slot)
+
+    def _megamoe_shared_incompatibility(self) -> str | None:
+        if getattr(self.layer, "expert_gate", None) is not None:
+            return "the fused shared expert cannot apply an output gate"
+        if any(getattr(linear, "bias", None) is not None for linear in (self.layer.gate_up_proj, self.layer.down_proj)):
+            return "the fused shared expert does not consume linear biases"
+        # One activation and one parameter set apply to both sides of the kernel.
+        shared = self._shared_megamoe_activation_signature(self.layer)
+        routed = self._routed_megamoe_activation_signature(self.moe_config)
+        if shared is None or shared != routed:
+            return f"shared activation {shared} does not match the routed activation {routed}"
+        return None
 
     @staticmethod
     def _routed_megamoe_activation_signature(moe_config: FusedMoEConfig) -> tuple[str, dict[str, float]] | None:

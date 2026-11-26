@@ -1388,7 +1388,6 @@ class TestNPUPlatform(TestBase):
         vllm_config = TestNPUPlatform.mock_vllm_config()
         vllm_config.parallel_config.prefill_context_parallel_size = 2
         dummy_comm_method = object.__new__(FusedMC2CommImpl)
-        dummy_comm_method.uses_deepgemm = False
         dummy_comm_method.enable_fused_mc2 = 1
         dummy_comm_method.token_dispatcher = object.__new__(TokenDispatcherWithMC2)
         output = torch.empty(1)

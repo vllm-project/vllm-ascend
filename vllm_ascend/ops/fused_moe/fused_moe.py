@@ -31,9 +31,7 @@ from vllm.model_executor.layers.fused_moe.layer import MoERunner
 from vllm.model_executor.layers.fused_moe.runner.moe_runner import _moe_forward_shared, _unpack
 from vllm.utils.torch_utils import direct_register_custom_op
 
-from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX, MoECommType
-from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.distributed.parallel_state import get_mc2_group
 from vllm_ascend.ops.fused_moe.dataclass.shared_experts import PreparedSharedExpertInput, RoutedMoEMilestones
 from vllm_ascend.ops.fused_moe.moe_comm_method import get_moe_comm_method, setup_moe_comm_method
@@ -45,7 +43,6 @@ from vllm_ascend.ops.fused_moe.shared_experts import (
     SharedExpertParallelMode,
     SubmittedSharedExpertGateUp,
 )
-from vllm_ascend.quantization.quant_type import QuantType
 from vllm_ascend.utils import vllm_version_is
 
 
@@ -173,24 +170,11 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
             self.moe_config.ep_group = get_ep_group()
             self.moe_config.mc2_group = get_mc2_group()
 
-        if (
-            get_ascend_config().deepgemm_mega_moe
-            and self.moe_config.ep_size > 1
-            and self.quant_type == QuantType.W4A8MXFP
-            and get_current_hardware_profile().supports(HardwareCapability.CANN_MEGAMOE_MXFP)
+        setup_moe_comm_method(self.moe_config, self.quant_type)
+        if self.moe_config.deepgemm_mega_moe and (
+            shared_expert_gate is not None or routed_input_transform is not None or routed_output_transform is not None
         ):
-            from vllm_ascend.ops.fused_moe.deepgemm_mega_moe import deepgemm_device_supported
-
-            if deepgemm_device_supported(self.moe_config.ep_group):
-                if (
-                    shared_expert_gate is not None
-                    or routed_input_transform is not None
-                    or routed_output_transform is not None
-                ):
-                    raise ValueError("DeepGEMM shared and routed experts must use the same input without a gate")
-                self.moe_config.deepgemm_mega_moe = True
-                if shared_experts is not None:
-                    routed_experts._deepgemm_mega_moe_shared_experts = weakref.ref(shared_experts)
+            raise ValueError("DeepGEMM shared and routed experts must use the same input without a gate")
         self.ascend_shared_experts = None
         if shared_experts is not None:
             routed_experts.return_with_event = True
@@ -200,6 +184,8 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
                 self.quant_type,
                 self._quant_method,
             )
+            if self.moe_config.deepgemm_mega_moe:
+                routed_experts._deepgemm_mega_moe_shared_experts = weakref.ref(self.ascend_shared_experts)
             # Weight loading runs after construction, so the shared expert
             # hands out a live payload that it fills in once both shared
             # linears are rebuilt. Install it explicitly here: the routed
@@ -212,7 +198,6 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
             ):
                 self._forward_entry = torch.ops.vllm.ascend_moe_forward_shared_sp
 
-        setup_moe_comm_method(self.moe_config)
         # Communication objects are shared across MoE layers. Keep the bound
         # activation with its owning layer when a later layer replaces them.
         self.routed_experts.mega_moe_activation_kwargs = getattr(

@@ -19,7 +19,6 @@ from vllm.config import get_current_vllm_config
 from vllm.distributed import get_ep_group, get_tensor_model_parallel_world_size
 from vllm.logger import logger
 
-from vllm_ascend.ops.fused_moe.shared_experts import AscendSharedExperts
 from vllm_ascend.utils import is_deepseek_v41
 
 # The pinned kernel launches this many Cube blocks and waits for all of them.
@@ -115,11 +114,11 @@ class DeepGemmExperts:
         self.max_tokens = config.scheduler_config.max_num_batched_tokens
         deep_gemm = load_deepgemm()
         self.kernel = deep_gemm.fp8_fp4_mega_moe
-        self._prepare_shared_weights(layer, text, deep_gemm.transform_weights_for_mega_moe)
+        shared = self._prepare_shared_weights(layer, text, deep_gemm.transform_weights_for_mega_moe)
 
         # Byte-paired UE8M0 is packed along K, not the NZ-transposed layout
         # used by the existing CANN grouped matmul backend.
-        (w13, s13), (w2, s2) = deep_gemm.transform_weights_for_mega_moe(
+        w13, w2 = deep_gemm.transform_weights_for_mega_moe(
             (
                 layer.w13_weight.data.contiguous().view(torch.int8),
                 layer.w13_weight_scale.data.contiguous().view(torch.uint8).view(torch.int16),
@@ -129,11 +128,6 @@ class DeepGemmExperts:
                 layer.w2_weight_scale.data.contiguous().view(torch.uint8).view(torch.int16),
             ),
         )
-        layer.w13_weight.data = w13
-        layer.w13_weight_scale.data = s13
-        layer.w2_weight.data = w2
-        layer.w2_weight_scale.data = s2
-
         # The target loads before DSpark. All layers with the same shape use
         # one view; draft layouts reuse the target allocation through the
         # dependency's public base= API, which checks group and capacity.
@@ -156,7 +150,7 @@ class DeepGemmExperts:
                 num_shared_experts=self.num_shared_experts,
                 base=base,
             )
-            self._compile_kernel(layer, deep_gemm, group, buffer)
+            self._compile_kernel(w13, w2, deep_gemm, group, buffer)
             buffers[key] = buffer
             logger.info(
                 "DeepGEMM MegaMoE: experts=%d topk=%d shared=%d H=%d I=%d capacity=%d bytes=%d shared_base=%s",
@@ -170,19 +164,29 @@ class DeepGemmExperts:
                 base is not None,
             )
         self.buffer = buffers[key]
+        # Publish only after the kernel and all packed weights are usable.
+        layer.w13_weight.data, layer.w13_weight_scale.data = w13
+        layer.w2_weight.data, layer.w2_weight_scale.data = w2
+        if shared is not None:
+            gate_up, down = shared.layer.gate_up_proj, shared.layer.down_proj
+            gate_up.weight.data, gate_up.weight_scale.data = self.shared_l1_weights
+            down.weight.data, down.weight_scale.data = self.shared_l2_weights
+            self.shared_l1_weights = (gate_up.weight, gate_up.weight_scale)
+            self.shared_l2_weights = (down.weight, down.weight_scale)
+            shared.megamoe_shared_weights_ready = True
 
-    def _compile_kernel(self, layer, deep_gemm, group, buffer):
+    def _compile_kernel(self, w13, w2, deep_gemm, group, buffer):
         # Cold JIT completion can differ across ranks by more than the device
         # barrier watchdog. Compile each layout before publishing it, then join
         # on the CPU group before any rank launches the distributed kernel.
         dry_run = deep_gemm._C.get_dry_run()
         try:
             deep_gemm._C.set_dry_run(True)
-            out = torch.empty((0, self.hidden), dtype=torch.bfloat16, device=layer.w2_weight.device)
+            out = torch.empty((0, self.hidden), dtype=torch.bfloat16, device=w2[0].device)
             self.kernel(
                 out,
-                (layer.w13_weight, layer.w13_weight_scale),
-                (layer.w2_weight, layer.w2_weight_scale),
+                w13,
+                w2,
                 buffer,
                 shared_l1_weights=self.shared_l1_weights,
                 shared_l2_weights=self.shared_l2_weights,
@@ -228,22 +232,9 @@ class DeepGemmExperts:
                     "DeepGEMM shared experts are configured but their module reference is missing or expired"
                 )
             return
-        if getattr(shared, "_deepgemm_mega_moe_weights_transformed", False):
+        if shared.megamoe_shared_weights_ready:
             raise RuntimeError("Shared expert weights have already been converted for MegaMoE")
-        gate_up, down = shared.gate_up_proj, shared.down_proj
-        if any(
-            getattr(module, name, None) is not None
-            for module, name in (
-                (shared, "expert_gate"),
-                (gate_up, "bias"),
-                (down, "bias"),
-            )
-        ):
-            raise ValueError("DeepGEMM cannot fuse a gated or biased shared expert")
-        if AscendSharedExperts._shared_megamoe_activation_signature(
-            shared
-        ) != AscendSharedExperts._routed_megamoe_activation_signature(layer.moe_config):
-            raise ValueError("The shared expert must use the routed SwiGLU parameters")
+        gate_up, down = shared.layer.gate_up_proj, shared.layer.down_proj
         if gate_up.weight.ndim != 2 or down.weight.ndim != 2:
             raise ValueError("Shared expert weights must remain in their checkpoint ND layout")
         shared_intermediate = down.weight.shape[1]
@@ -252,13 +243,11 @@ class DeepGemmExperts:
             raise ValueError("Shared expert width must match n_shared_experts times the routed intermediate width")
         if gate_up.weight.shape != (2 * shared_intermediate, self.hidden) or down.weight.shape[0] != self.hidden:
             raise ValueError("Shared expert gate/up and down weight shapes are inconsistent")
-        shared_l1, shared_l2 = transform(self._shared_weight_pair(gate_up), self._shared_weight_pair(down))
-        gate_up.weight.data, gate_up.weight_scale.data = shared_l1
-        down.weight.data, down.weight_scale.data = shared_l2
-        self.shared_l1_weights = (gate_up.weight, gate_up.weight_scale)
-        self.shared_l2_weights = (down.weight, down.weight_scale)
+        self.shared_l1_weights, self.shared_l2_weights = transform(
+            self._shared_weight_pair(gate_up), self._shared_weight_pair(down)
+        )
         self.num_shared_experts = count
-        shared._deepgemm_mega_moe_weights_transformed = True
+        return shared
 
     def apply(self, layer, x, topk_weights, topk_ids):
         from vllm_ascend.ops.fused_moe.moe_comm_method import FusedExpertsResult

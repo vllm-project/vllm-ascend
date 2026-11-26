@@ -2094,7 +2094,7 @@ def test_runner_selects_sp_multistream_custom_op(
     uses_sp_custom_op,
 ):
     upstream_forward_entry = object()
-    moe_config = SimpleNamespace(hidden_dim=4, ep_size=1)
+    moe_config = SimpleNamespace(hidden_dim=4, ep_size=1, deepgemm_mega_moe=False)
     routed_experts = SimpleNamespace(
         quant_type=QuantType.NONE,
         quant_method=object(),
@@ -2139,7 +2139,6 @@ def test_runner_selects_sp_multistream_custom_op(
 
     monkeypatch.setattr(fused_moe_module.MoERunner, "__init__", init_base_runner)
     monkeypatch.setattr(fused_moe_module, "AscendSharedExperts", MagicMock(return_value=shared_executor))
-    monkeypatch.setattr(fused_moe_module, "get_ascend_config", lambda: SimpleNamespace(deepgemm_mega_moe=False))
     monkeypatch.setattr(fused_moe_module, "get_tp_group", MagicMock(return_value=object()))
     monkeypatch.setattr(fused_moe_module, "get_dp_group", MagicMock(return_value=object()))
     monkeypatch.setattr(fused_moe_module, "setup_moe_comm_method", MagicMock())
@@ -3078,7 +3077,7 @@ def _stub_moe_runner_init(
     routed_scaling_factor=1.0,
 ):
     """Construct AscendMoERunner with a lightweight MoERunner.__init__ stub."""
-    moe_config = SimpleNamespace(hidden_dim=4, ep_size=8 if deepgemm else 1)
+    moe_config = SimpleNamespace(hidden_dim=4, ep_size=8 if deepgemm else 1, deepgemm_mega_moe=deepgemm)
     routed_experts = SimpleNamespace(
         quant_type=QuantType.W4A8MXFP if deepgemm else QuantType.NONE,
         quant_method=object(),
@@ -3121,11 +3120,8 @@ def _stub_moe_runner_init(
     if deepgemm:
         monkeypatch.setattr(fused_moe_module, "get_ep_group", MagicMock())
         monkeypatch.setattr(fused_moe_module, "get_mc2_group", MagicMock())
-        monkeypatch.setattr(fused_moe_module, "get_current_hardware_profile", lambda: MagicMock())
-        monkeypatch.setattr("vllm_ascend.ops.fused_moe.deepgemm_mega_moe.deepgemm_device_supported", lambda group: True)
     monkeypatch.setattr(fused_moe_module.MoERunner, "__init__", init_base_runner)
     monkeypatch.setattr(fused_moe_module, "AscendSharedExperts", MagicMock(return_value=MagicMock()))
-    monkeypatch.setattr(fused_moe_module, "get_ascend_config", lambda: SimpleNamespace(deepgemm_mega_moe=deepgemm))
     monkeypatch.setattr(fused_moe_module, "get_tp_group", MagicMock(return_value=object()))
     monkeypatch.setattr(fused_moe_module, "get_dp_group", MagicMock(return_value=object()))
     monkeypatch.setattr(fused_moe_module, "setup_moe_comm_method", MagicMock())
@@ -3181,7 +3177,7 @@ def test_deepgemm_runner_leaves_step_execution_to_the_backend(monkeypatch, with_
 
     if shared is not None:
         assert dict(runner.named_parameters())["_shared_experts.gate_up_proj.weight"] is shared.gate_up_proj.weight
-        assert runner.routed_experts._deepgemm_mega_moe_shared_experts() is shared
+        assert runner.routed_experts._deepgemm_mega_moe_shared_experts() is runner.ascend_shared_experts
         assert runner.ascend_shared_experts is not None
         assert runner.routed_experts.return_with_event
     assert runner.moe_config.deepgemm_mega_moe

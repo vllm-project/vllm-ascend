@@ -14,6 +14,8 @@ import pytest
 import torch
 from vllm.model_executor.layers.activation import SiluAndMulWithClamp
 
+from vllm_ascend.ops.fused_moe.shared_experts import AscendSharedExperts
+
 
 @pytest.fixture
 def context():
@@ -96,7 +98,10 @@ def shared_module(count=1, block=32, fp32_scale=False):
         scale = torch.pow(2.0, exponents.float() - 127) if fp32_scale else exponents
         linear.weight_scale = torch.nn.Parameter(scale, requires_grad=False)
         setattr(shared, name, linear)
-    return shared
+    owner = AscendSharedExperts.__new__(AscendSharedExperts)
+    owner.layer = shared
+    owner.megamoe_shared_weights_ready = False
+    return owner
 
 
 def test_target_draft_share_one_allocation_and_keep_layouts(context):
@@ -116,14 +121,25 @@ def test_target_draft_share_one_allocation_and_keep_layouts(context):
 
 @pytest.mark.parametrize("previous_dry_run", [False, True])
 def test_failed_cold_compile_restores_mode_without_publishing_buffer(context, previous_dry_run):
-    backend, _, group, dependency = context
+    backend, config, group, dependency = context
+    config.model_config.hf_text_config.n_shared_experts = 1
+    item, shared = layer(), shared_module()
+    item._deepgemm_mega_moe_shared_experts = weakref.ref(shared)
+    raw_shared_scale = shared.layer.down_proj.weight_scale.detach()
+    raw_routed = item.w13_weight.detach()
     dependency._C.get_dry_run.return_value = previous_dry_run
     dependency.fp8_fp4_mega_moe.side_effect = RuntimeError("cold compile failed")
     with pytest.raises(RuntimeError, match="cold compile failed"):
-        backend.DeepGemmExperts(layer())
+        backend.DeepGemmExperts(item)
     assert dependency._C.set_dry_run.call_args_list == [call(True), call(previous_dry_run)]
     assert group._deepgemm_mega_moe_buffers == {}
     torch.distributed.barrier.assert_not_called()
+    assert not shared.megamoe_shared_weights_ready
+    assert shared.layer.down_proj.weight_scale.data_ptr() == raw_shared_scale.data_ptr()
+    assert item.w13_weight.data_ptr() == raw_routed.data_ptr()
+    dependency.fp8_fp4_mega_moe.side_effect = None
+    backend.DeepGemmExperts(item)
+    assert shared.megamoe_shared_weights_ready
 
 
 def test_strided_checkpoint_weights_and_scales_pack_identically(context):
@@ -222,11 +238,16 @@ def test_shared_checkpoint_scales_and_kernel_weight_ownership(context, block, fp
     backend, config, _, dependency = context
     config.model_config.hf_text_config.n_shared_experts = 1
     item, shared = layer(), shared_module(block=block, fp32_scale=fp32_scale)
-    original = shared.gate_up_proj.weight_scale.detach().clone()
-    gate_weight_parameter = shared.gate_up_proj.weight
-    scale_parameter = shared.gate_up_proj.weight_scale
+    shared.moe_config = item.moe_config
+    shared.moe_config.deepgemm_mega_moe = True
+    shared._setup_megamoe_shared_fusion()
+    assert not shared.megamoe_shared_weights_ready
+    original = shared.layer.gate_up_proj.weight_scale.detach().clone()
+    gate_weight_parameter = shared.layer.gate_up_proj.weight
+    scale_parameter = shared.layer.gate_up_proj.weight_scale
     item._deepgemm_mega_moe_shared_experts = weakref.ref(shared)
     adapter = backend.DeepGemmExperts(item)
+    assert shared.megamoe_shared_weights_ready
     shared_l1 = dependency.transform_weights_for_mega_moe.call_args_list[0].args[0]
     expected = ((original.view(torch.int32) >> 23) & 0xFF).to(torch.uint8) if fp32_scale else original
     if block:
@@ -236,7 +257,7 @@ def test_shared_checkpoint_scales_and_kernel_weight_ownership(context, block, fp
     assert torch.equal(shared_l1[1].view(torch.uint8), expected)
     assert adapter.shared_l1_weights[0] is gate_weight_parameter
     assert adapter.shared_l1_weights[1] is scale_parameter
-    assert adapter.shared_l2_weights[0] is shared.down_proj.weight
+    assert adapter.shared_l2_weights[0] is shared.layer.down_proj.weight
     assert adapter.num_shared_experts == adapter.buffer.num_shared_experts == 1
     assert dependency.transform_weights_for_mega_moe.call_count == 2
 
@@ -273,7 +294,7 @@ def test_two_shared_experts_keep_routed_expert_count_and_topk(context):
 
 @pytest.mark.parametrize(
     "mode",
-    ["missing", "expired", "wrong_count", "wrong_shape", "wrong_dtype", "converted", "activation", "bias", "gate"],
+    ["missing", "expired", "wrong_count", "wrong_shape", "wrong_dtype", "converted"],
 )
 def test_shared_experts_must_be_compatible_and_unconverted(context, mode):
     backend, config, _, dependency = context
@@ -286,20 +307,31 @@ def test_shared_experts_must_be_compatible_and_unconverted(context, mode):
     elif mode == "wrong_count":
         config.model_config.hf_text_config.n_shared_experts = 2
     elif mode == "wrong_shape":
-        shared.gate_up_proj.weight.data = shared.gate_up_proj.weight.data[:256]
+        shared.layer.gate_up_proj.weight.data = shared.layer.gate_up_proj.weight.data[:256]
     elif mode == "wrong_dtype":
-        shared.gate_up_proj.weight.data = shared.gate_up_proj.weight.data.to(torch.bfloat16)
+        shared.layer.gate_up_proj.weight.data = shared.layer.gate_up_proj.weight.data.to(torch.bfloat16)
     elif mode == "converted":
-        shared._deepgemm_mega_moe_weights_transformed = True
-    elif mode == "activation":
-        shared.act_fn.swiglu_limit = 8.0
-    elif mode == "bias":
-        shared.down_proj.bias = torch.nn.Parameter(torch.zeros(256))
-    elif mode == "gate":
-        shared.expert_gate = torch.nn.Identity()
+        shared.megamoe_shared_weights_ready = True
     with pytest.raises((RuntimeError, ValueError)):
         backend.DeepGemmExperts(item)
     dependency.transform_weights_for_mega_moe.assert_not_called()
+
+
+@pytest.mark.parametrize("mode", ["activation", "bias", "gate"])
+def test_incompatible_shared_experts_fail_before_installing_hooks(mode):
+    shared = shared_module()
+    shared.moe_config = layer().moe_config
+    shared.moe_config.deepgemm_mega_moe = True
+    if mode == "activation":
+        shared.layer.act_fn.swiglu_limit = 8.0
+    elif mode == "bias":
+        shared.layer.down_proj.bias = torch.nn.Parameter(torch.zeros(256))
+    else:
+        shared.layer.expert_gate = torch.nn.Identity()
+    with patch.object(shared, "_wrap_linear_for_megamoe_fusion") as install, pytest.raises(ValueError):
+        shared._setup_megamoe_shared_fusion()
+    install.assert_not_called()
+    assert not shared.megamoe_shared_weights_ready
 
 
 @pytest.mark.parametrize("scaling_factor", [1.0, 1.5])
@@ -309,7 +341,7 @@ def test_apply_fuses_shared_once_and_scales_only_routed_weights(context, scaling
     item, shared = layer(), shared_module()
     item._deepgemm_mega_moe_shared_experts = weakref.ref(shared)
     item.ascend_megamoe_fold_scale = scaling_factor
-    shared.forward = MagicMock(side_effect=AssertionError("Shared experts must only execute inside MegaMoE"))
+    shared.layer.forward = MagicMock(side_effect=AssertionError("Shared experts must only execute inside MegaMoE"))
     adapter = backend.DeepGemmExperts(item)
     dependency.fp8_fp4_mega_moe.reset_mock()
     weights = torch.full((2, 6), 0.25)
@@ -340,7 +372,7 @@ def test_apply_fuses_shared_once_and_scales_only_routed_weights(context, scaling
     kwargs = dependency.fp8_fp4_mega_moe.call_args.kwargs
     assert kwargs["shared_l1_weights"] is adapter.shared_l1_weights
     assert kwargs["shared_l2_weights"] is adapter.shared_l2_weights
-    shared.forward.assert_not_called()
+    shared.layer.forward.assert_not_called()
     dependency.fp8_fp4_mega_moe.assert_called_once()
 
 
