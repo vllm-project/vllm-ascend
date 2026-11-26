@@ -1,0 +1,11 @@
+pr: 23405
+entries:
+  - category: performance
+    text: >-
+      DeepSeek-V4.1 prefill steps that run as PIECEWISE graphs now execute the
+      decoder replay layers on each request's trailing sliding window instead
+      of the whole batch. Enable it with breakable ACL graph capture
+      (`VLLM_USE_BREAKABLE_CUDAGRAPH=1`); the cutoff is
+      `decoder_replay_trim_threshold` (default 768 tokens, and it must exceed
+      the replay window). Without breakable capture nothing changes.
+    model: deepseek-v4.1
