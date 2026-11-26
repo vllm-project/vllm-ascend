@@ -1574,6 +1574,7 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
         ):
             return False
 
+        # make_layers uses PPMissingLayer placeholders to preserve global indices.
         return self.layers[next_layer_idx].engram is None
 
     def _make_empty_intermediate_tensors(self, batch_size, dtype, device):

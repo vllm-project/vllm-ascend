@@ -13,6 +13,7 @@ pytest.importorskip(
 
 import torch
 from vllm.config import CUDAGraphMode
+from vllm.model_executor.models.utils import PPMissingLayer
 
 from tests.deepseek_v41_utils import hc_mixes_reference, hc_post_reference
 from vllm_ascend.models.deepseek_v41 import model as deepseek_v41_module
@@ -422,6 +423,30 @@ def test_v41_dspark_propagates_delayed_mix_and_collapses_final_stream(cross_laye
         ([1, 0] if i % 2 == 0 else [0, 1], cross_layer and i > 0, cross_layer and i + 1 < num_layers)
         for i in range(num_layers)
     ]
+
+
+def test_v41_cross_layer_fusion_uses_global_indices_on_later_pp_stage():
+    from vllm_ascend.models.deepseek_v41.model import DeepseekV41Model
+
+    model = DeepseekV41Model.__new__(DeepseekV41Model)
+    torch.nn.Module.__init__(model)
+    model.start_layer = 2
+    model.end_layer = 4
+    model.use_cross_layer_hc_post_pre_norm = True
+    model.aux_hidden_state_layers = ()
+    model.decoder_replay_layers = None
+    next_layer = _layer()
+    next_layer.engram = None
+    model.layers = torch.nn.ModuleList(
+        [PPMissingLayer(), PPMissingLayer(), _layer(), next_layer, PPMissingLayer(), PPMissingLayer()]
+    )
+
+    assert model._can_defer_ffn_post(3)
+    assert not model._can_defer_ffn_post(1)
+    assert not model._can_defer_ffn_post(4)
+
+    next_layer.engram = torch.nn.Identity()
+    assert not model._can_defer_ffn_post(3)
 
 
 def test_v41_target_emits_input_residual_for_selected_aux_layers():
