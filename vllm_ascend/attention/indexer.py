@@ -225,8 +225,7 @@ class AscendSFAIndexerMetadata:
     # The selector receives ``(q_li, weights, indexer, metadata, q_li_scale)``;
     # ``q_li_scale`` is set only when LI C8 has already quantized ``q_li``.
     topk_selector: Any | None = None
-    local_visible_lengths: torch.Tensor | None = None
-    # Shared verbatim by the A5 metadata producer and QLI consumer.
+    # DCP geometry shared by the native metadata and candidate operators.
     qli_dcp_args: dict[str, Any] | None = None
     # Includes the leading zero; shared by every layer in this metadata group.
     query_start_loc: torch.Tensor | None = None
@@ -793,7 +792,7 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
         return k_li, k_li_scale, slot_mapping
 
     def _get_local_qli_inputs(
-        self, indexer_metadata: AscendSFAIndexerMetadata
+        self, indexer_metadata: AscendSFAIndexerMetadata, dcp_args: dict[str, Any]
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Consume V2's deferred result, or share one inline result per forward.
 
@@ -815,14 +814,14 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
             cache = {}
             forward_context.sfa_qli_metadata_cache = cache
         # Quant/mask modes and TND/PA_BBND layouts are fixed by the device
-        # adapter. A3 metadata also consumes global bounds and DCP geometry. The
+        # adapter. Native DCP metadata also consumes global bounds and rank geometry. The
         # metadata identity and input identities keep cache groups/draft steps
         # separate, even when their sizes or physical buffers happen to match.
         key = (
             id(indexer_metadata),
             id(query_start_loc),
             id(seq_lens),
-            id(indexer_metadata.qli_dcp_args),
+            id(dcp_args),
             id(indexer_metadata.seq_lens),
             self.n_head,
             self.head_dim,
@@ -833,22 +832,13 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
         if cached is None or cached[0] == owner:
             cu_seqlens_q = query_start_loc.to(torch.int32)
             seqused_k = seq_lens.to(torch.int32)
-            dcp_kwargs = indexer_metadata.qli_dcp_args or {}
-            if get_current_hardware_profile().supports(HardwareCapability.NATIVE_INT8_SPARSE):
-                group = get_dcp_group()
-                dcp_kwargs = dict(
-                    global_seq_lens=indexer_metadata.seq_lens,
-                    cp_world=group.world_size,
-                    cp_rank=group.rank_in_group,
-                    cp_interleave=self._dcp_interleave,
-                )
             metadata = DeviceOperator.build_indexer_local_metadata(
                 cu_seqlens_q,
                 seqused_k,
                 num_heads_q=self.n_head,
                 head_dim=self.head_dim,
                 topk=self.topk_tokens,
-                **dcp_kwargs,
+                **dcp_args,
             )
             cached = (owner, cu_seqlens_q, seqused_k, metadata)
             cache[key] = cached
@@ -1096,53 +1086,22 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
         if self._sharded_dcp and indexer_metadata.kv_gather_block_ids is None:
             from vllm_ascend.attention.context_parallel.sharded_indexer import distributed_topk
 
-            cu_seqlens_q, seqused_k, qli_metadata = self._get_local_qli_inputs(indexer_metadata)
-            if indexer_metadata.qli_dcp_args is not None:
-                indices, scores = DeviceOperator.indexer_select_dcp_candidates(
-                    q_li.view(*q_li_shape_ori),
-                    weights,
-                    self.k_cache.kv_cache[INDEXER_K_CACHE_SLOT],
-                    self.k_cache.kv_cache[INDEXER_SCALE_CACHE_SLOT],
-                    indexer_metadata.block_table,
-                    cu_seqlens_q,
-                    seqused_k,
-                    q_li_scale,
-                    qli_metadata=qli_metadata,
-                    topk=self.topk_tokens,
-                    **indexer_metadata.qli_dcp_args,
-                )
-            elif get_current_hardware_profile().supports(HardwareCapability.NATIVE_INT8_SPARSE):
-                indices, scores = DeviceOperator.indexer_select_dcp_candidates(
-                    q_li.view(*q_li_shape_ori),
-                    weights,
-                    self.k_cache.kv_cache[INDEXER_K_CACHE_SLOT],
-                    self.k_cache.kv_cache[INDEXER_SCALE_CACHE_SLOT],
-                    indexer_metadata.block_table,
-                    cu_seqlens_q,
-                    seqused_k,
-                    q_li_scale,
-                    global_seq_lens=indexer_metadata.seq_lens,
-                    cp_world=get_dcp_group().world_size,
-                    cp_rank=get_dcp_group().rank_in_group,
-                    cp_interleave=self._dcp_interleave,
-                    qli_metadata=qli_metadata,
-                    topk=self.topk_tokens,
-                )
-            else:
-                assert indexer_metadata.local_visible_lengths is not None
-                indices, scores = DeviceOperator.indexer_select_local_candidates(
-                    q_li.view(*q_li_shape_ori),
-                    weights,
-                    self.k_cache.kv_cache[INDEXER_K_CACHE_SLOT],
-                    self.k_cache.kv_cache[INDEXER_SCALE_CACHE_SLOT],
-                    indexer_metadata.block_table,
-                    cu_seqlens_q,
-                    seqused_k,
-                    q_li_scale,
-                    indexer_metadata.local_visible_lengths,
-                    qli_metadata=qli_metadata,
-                    topk=self.topk_tokens,
-                )
+            dcp_args = indexer_metadata.qli_dcp_args
+            assert dcp_args is not None
+            cu_seqlens_q, seqused_k, qli_metadata = self._get_local_qli_inputs(indexer_metadata, dcp_args)
+            indices, scores = DeviceOperator.indexer_select_dcp_candidates(
+                q_li.view(*q_li_shape_ori),
+                weights,
+                self.k_cache.kv_cache[INDEXER_K_CACHE_SLOT],
+                self.k_cache.kv_cache[INDEXER_SCALE_CACHE_SLOT],
+                indexer_metadata.block_table,
+                cu_seqlens_q,
+                seqused_k,
+                q_li_scale,
+                qli_metadata=qli_metadata,
+                topk=self.topk_tokens,
+                **dcp_args,
+            )
             return distributed_topk(
                 indices,
                 scores,
@@ -1234,7 +1193,7 @@ class AscendSFAIndexerMetadataBuilder(AttentionMetadataBuilder[AscendSFAIndexerM
         self.use_pcp = vllm_config.parallel_config.prefill_context_parallel_size > 1
         self._is_pcp_decode_sharded = vllm_config.parallel_config.pcp_shard_decode_requests
         self._rope_buffers: dict[object, tuple[torch.Tensor, torch.Tensor]] = {}
-        self._sharded_seq_buffers: dict[object, tuple[torch.Tensor, torch.Tensor]] = {}
+        self._sharded_seq_buffers: dict[object, torch.Tensor] = {}
         self._lim_token_masks: dict[object, CpuGpuBuffer] = {}
         self._cache_scatter_indices_buffers: dict[object, torch.Tensor] = {}
         self._device_metadata_enabled = False
@@ -1250,7 +1209,6 @@ class AscendSFAIndexerMetadataBuilder(AttentionMetadataBuilder[AscendSFAIndexerM
         )
 
         self.use_sharded_dcp = enable_sfa_dcp_sharded_indexer(vllm_config)
-        self.use_native_dcp_qli = self.use_sharded_dcp and DeviceOperator.native_dcp_indexer
         qli_config = (
             None
             if self.use_sharded_dcp
@@ -1350,20 +1308,12 @@ class AscendSFAIndexerMetadataBuilder(AttentionMetadataBuilder[AscendSFAIndexerM
         head_dim, topk = config.index_head_dim, config.index_topk
         query_start_loc = metadata.query_start_loc
         actual_seq_lengths_key = metadata.actual_seq_lengths_key
-        assert query_start_loc is not None and actual_seq_lengths_key is not None
+        dcp_args = metadata.qli_dcp_args
+        assert query_start_loc is not None and actual_seq_lengths_key is not None and dcp_args is not None
 
         def build_qli_metadata() -> None:
             metadata.query_start_loc = query_start_loc.to(torch.int32)
             metadata.actual_seq_lengths_key = actual_seq_lengths_key.to(torch.int32)
-            dcp_kwargs = metadata.qli_dcp_args or {}
-            if get_current_hardware_profile().supports(HardwareCapability.NATIVE_INT8_SPARSE):
-                group = get_dcp_group()
-                dcp_kwargs = dict(
-                    global_seq_lens=metadata.seq_lens,
-                    cp_world=group.world_size,
-                    cp_rank=group.rank_in_group,
-                    cp_interleave=self.vllm_config.parallel_config.cp_kv_cache_interleave_size,
-                )
             # Keep the operator output itself: no extra copy into a persistent
             # output buffer. FULL capture retains this allocation and replays
             # the producer before its consumers; eager keeps it in metadata.
@@ -1373,7 +1323,7 @@ class AscendSFAIndexerMetadataBuilder(AttentionMetadataBuilder[AscendSFAIndexerM
                 num_heads_q=num_heads_q,
                 head_dim=head_dim,
                 topk=topk,
-                **dcp_kwargs,
+                **dcp_args,
             )
 
         # The builder is long-lived, so event keys do not grow with each new
@@ -1537,7 +1487,6 @@ class AscendSFAIndexerMetadataBuilder(AttentionMetadataBuilder[AscendSFAIndexerM
         actual_seq_lengths_query = cum_query_lens
         actual_seq_lengths_key = seq_lens
         query_start_loc = common_attn_metadata.query_start_loc[: num_reqs + 1]
-        local_visible = None
         qli_dcp_args = None
         kv_gather_block_ids = None
         pcp_context = kwargs.get("pcp_context")
@@ -1562,50 +1511,24 @@ class AscendSFAIndexerMetadataBuilder(AttentionMetadataBuilder[AscendSFAIndexerM
                 global_dcp_num_blocks=None if counts is None else counts[group_idx],
             )
         elif self.use_sharded_dcp:
-            from vllm_ascend.ops.triton.sharded_indexer import build_local_key_lengths, build_local_lengths
+            from vllm_ascend.ops.triton.sharded_indexer import build_local_key_lengths
 
             group = get_dcp_group()
             interleave = self.vllm_config.parallel_config.cp_kv_cache_interleave_size
-            buffers = self._sharded_seq_buffers.get(buffer_key)
-            if buffers is None:
-                buffers = (
-                    torch.empty(self._max_num_reqs, dtype=torch.int32, device=self.device),
-                    torch.empty(
-                        (0 if self.use_native_dcp_qli else self._slot_capacity, 1),
-                        dtype=torch.int32,
-                        device=self.device,
-                    ),
-                )
-                self._sharded_seq_buffers[buffer_key] = buffers
-            key_buffer, visible_buffer = buffers
+            key_buffer = self._sharded_seq_buffers.get(buffer_key)
+            if key_buffer is None:
+                key_buffer = torch.empty(self._max_num_reqs, dtype=torch.int32, device=self.device)
+                self._sharded_seq_buffers[buffer_key] = key_buffer
             if num_reqs > key_buffer.numel():
                 raise ValueError(f"Sharded indexer request count {num_reqs} exceeds capacity {key_buffer.numel()}")
             actual_seq_lengths_key = key_buffer[:num_reqs]
-            if self.use_native_dcp_qli:
-                build_local_key_lengths(
-                    seq_lens, actual_seq_lengths_key, group.world_size, group.rank_in_group, interleave
-                )
-                qli_dcp_args = dict(
-                    global_seq_lens=seq_lens.to(torch.int32),
-                    cp_world=group.world_size,
-                    cp_rank=group.rank_in_group,
-                    cp_interleave=interleave,
-                )
-            elif get_current_hardware_profile().supports(HardwareCapability.NATIVE_INT8_SPARSE):
-                build_local_key_lengths(
-                    seq_lens, actual_seq_lengths_key, group.world_size, group.rank_in_group, interleave
-                )
-            else:
-                local_visible = visible_buffer[:num_input_tokens]
-                build_local_lengths(
-                    seq_lens,
-                    cum_query_lens,
-                    actual_seq_lengths_key,
-                    local_visible,
-                    group.world_size,
-                    group.rank_in_group,
-                    interleave,
-                )
+            build_local_key_lengths(seq_lens, actual_seq_lengths_key, group.world_size, group.rank_in_group, interleave)
+            qli_dcp_args = dict(
+                global_seq_lens=seq_lens.to(torch.int32),
+                cp_world=group.world_size,
+                cp_rank=group.rank_in_group,
+                cp_interleave=interleave,
+            )
         if copy_rope:
             cos, sin = self._copy_rope_to_metadata_buffers(
                 cos,
@@ -1645,7 +1568,6 @@ class AscendSFAIndexerMetadataBuilder(AttentionMetadataBuilder[AscendSFAIndexerM
             actual_seq_lengths_key=actual_seq_lengths_key,
             num_decode_tokens=num_decode_tokens,
             uses_pcp_sharded_layout=is_pcp_sharded,
-            local_visible_lengths=local_visible,
             qli_dcp_args=qli_dcp_args,
             query_start_loc=query_start_loc,
             kv_gather_block_ids=kv_gather_block_ids,

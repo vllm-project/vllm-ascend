@@ -119,19 +119,8 @@ def mock_dcp_metadata(monkeypatch):
     def key_lengths(seq_lens, out, world, rank, interleave):
         out.copy_(torch.tensor([local_length(n, world, rank, interleave) for n in seq_lens], dtype=out.dtype))
 
-    def lengths(seq_lens, query_ends, out, visible, world, rank, interleave):
-        key_lengths(seq_lens, out, world, rank, interleave)
-        start = 0
-        for seq_len, end in zip(seq_lens.tolist(), query_ends.tolist()):
-            visible[start:end, 0] = torch.tensor(
-                [local_length(n, world, rank, interleave) for n in range(seq_len - (end - start) + 1, seq_len + 1)],
-                dtype=visible.dtype,
-            )
-            start = end
-
     ops: Any = ModuleType("vllm_ascend.ops.triton.sharded_indexer")
     ops.build_local_key_lengths = Mock(side_effect=key_lengths)
-    ops.build_local_lengths = Mock(side_effect=lengths)
     monkeypatch.setitem(sys.modules, ops.__name__, ops)
 
     def configure(world, rank=0):
@@ -200,15 +189,11 @@ def _make_decode_pcp_context() -> SimpleNamespace:
     return SimpleNamespace(global_batch=SimpleNamespace(is_prefilling_np=torch.tensor([False])))
 
 
-@pytest.mark.parametrize("native", [False, True])
 @pytest.mark.parametrize("rows", [8, 9, 10])
 @patch("vllm_ascend.attention.indexer.get_cos_and_sin_mla")
-def test_sharded_indexer_pcp_request_capacity(mock_cos_sin, native, rows):
+def test_sharded_indexer_pcp_request_capacity(mock_cos_sin, rows):
     # Four PCP prefills become eight segments, plus one possible graph dummy.
-    builder = _make_builder(pcp_size=2)
-    builder.use_sharded_dcp = True
-    builder.use_native_dcp_qli = native
-    builder.vllm_config.parallel_config.cp_kv_cache_interleave_size = 2
+    builder = _make_builder(pcp_size=2, dcp_size=2)
     mock_cos_sin.return_value = (torch.zeros(rows * 2, 1, 1, 8), torch.zeros(rows * 2, 1, 1, 8))
     common = _make_common_metadata()
     common.num_reqs = rows
@@ -230,22 +215,16 @@ def test_sharded_indexer_pcp_request_capacity(mock_cos_sin, native, rows):
 
     ops: Any = ModuleType("vllm_ascend.ops.triton.sharded_indexer")
     ops.build_local_key_lengths = Mock(side_effect=lengths)
-    ops.build_local_lengths = Mock(side_effect=lambda seq, query, out, visible, *args: lengths(seq, out))
     with (
         patch.dict("sys.modules", {ops.__name__: ops}),
         patch(
             "vllm_ascend.attention.indexer.get_dcp_group", return_value=SimpleNamespace(world_size=2, rank_in_group=1)
-        ),
-        patch(
-            "vllm_ascend.attention.indexer.get_current_hardware_profile",
-            return_value=SimpleNamespace(supports=lambda capability: False),
         ),
     ):
         if rows > 9:
             with pytest.raises(ValueError, match="request.*capacity"):
                 builder.build(0, common)
             ops.build_local_key_lengths.assert_not_called()
-            ops.build_local_lengths.assert_not_called()
         else:
             metadata = builder.build(0, common)
             torch.testing.assert_close(metadata.actual_seq_lengths_key, expected_lengths)
@@ -282,6 +261,11 @@ def test_sfa_indexer_native_dcp_decode_boundary(mock_cos_sin, mock_get_ascend_co
     common.is_prefilling = torch.tensor([False, False])
     builder = _make_builder(pcp_size=1, dcp_size=8)
     metadata = builder.build_for_cudagraph_capture(common) if capture else builder.build(0, common)
+    assert metadata.qli_dcp_args is not None
+    assert metadata.qli_dcp_args["cp_world"] == 8
+    assert metadata.qli_dcp_args["cp_rank"] == 0
+    assert metadata.qli_dcp_args["cp_interleave"] == 2
+    torch.testing.assert_close(metadata.qli_dcp_args["global_seq_lens"], common.seq_lens[:2].int())
     assert metadata.num_decode_tokens == metadata.num_actual_tokens == 2
 
 
@@ -858,7 +842,7 @@ def test_sharded_pcp_prefill_uses_global_history_and_local_query_rows(
     assert metadata.slot_mapping is common.slot_mapping
     assert metadata.actual_seq_lengths_key is metadata.seq_lens
     assert metadata.block_table.shape == (8, 12 * world)
-    assert metadata.local_visible_lengths is None
+    assert metadata.qli_dcp_args is None
     assert metadata.qli_metadata is None and metadata.qli_metadata_group_id is None
     assert builder.take_device_metadata_tasks() == ()
     assert builder._sharded_seq_buffers == {}
