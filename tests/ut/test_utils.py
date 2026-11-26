@@ -604,7 +604,7 @@ class TestUtils(TestBase):
             self.assertEqual(kwargs["customize_dtype"], torch.float8_e4m3fn)
             self.assertEqual(kwargs["input_dtype"], torch_npu.float4_e2m1fn_x2)
 
-        # Test case 11: no conversion when should_trans_nz returns False,
+        # Test case 11: no conversion when _should_trans_nz returns False,
         # even when customize_dtype is provided
         mock_npu_format_cast.reset_mock()
         mock_config.weight_nz_mode = 0

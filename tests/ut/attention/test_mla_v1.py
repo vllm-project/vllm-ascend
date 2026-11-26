@@ -217,7 +217,7 @@ def test_mxfp8_mla_fused_preprocess_owns_nz_conversion(
         ),
         patch("vllm_ascend.attention.mla_v1.enabling_mlapo", return_value=enable_mlapo),
         patch("vllm_ascend.attention.mla_v1.enable_fa_quant", return_value=fa_quant_layer),
-        patch("vllm_ascend.utils.should_trans_nz", return_value=True),
+        patch("vllm_ascend.utils._should_trans_nz", return_value=True),
         patch("torch_npu.npu_format_cast", side_effect=lambda weight, fmt, **kwargs: weight.clone()) as cast,
     ):
         impl = AscendMLAImpl(

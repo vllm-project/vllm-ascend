@@ -101,7 +101,7 @@ class TestAscendW8A8MXFP8LinearMethod(TestBase):
         self.assertEqual(layer.weight_scale.shape, original_scale_shape)
         self.assertFalse(layer._mxfp8_transformed)
 
-    @patch("vllm_ascend.utils.should_trans_nz", return_value=True)
+    @patch("vllm_ascend.utils._should_trans_nz", return_value=True)
     @patch("torch_npu.npu_format_cast", side_effect=lambda weight, fmt, **kwargs: weight.clone())
     def test_transform_buffer_data_ptr_stable_across_reloads(self, mock_cast, mock_should_trans_nz):
         # The transformed buffer is what the ACL graph captures and replays.
@@ -155,7 +155,7 @@ class TestAscendW8A8MXFP8LinearMethod(TestBase):
         self.assertEqual(layer.weight_scale.shape, (4, 128, 2))
         mock_cast.assert_not_called()
 
-    @patch("vllm_ascend.utils.should_trans_nz", return_value=True)
+    @patch("vllm_ascend.utils._should_trans_nz", return_value=True)
     @patch("torch_npu.npu_format_cast", side_effect=lambda weight, fmt, **kwargs: weight.clone())
     def test_process_weights_preserves_unaligned_tp_group_phase(self, mock_cast, mock_should_trans_nz):
         layer = RowParallelLinear.__new__(RowParallelLinear)
@@ -218,7 +218,7 @@ class TestAscendW8A8MXFP8LinearMethod(TestBase):
         torch.testing.assert_close(padded_x[:, :16], torch.zeros(2, 16))
         torch.testing.assert_close(padded_x[:, 16:], x)
 
-    @patch("vllm_ascend.quantization.methods.w8a8.w8a8_mxfp8.should_trans_nz", return_value=True)
+    @patch("vllm_ascend.quantization.methods.w8a8.w8a8_mxfp8._should_trans_nz", return_value=True)
     @patch("torch_npu.npu_format_cast", side_effect=lambda weight, fmt, **kwargs: weight.clone())
     def test_single_group_nz_layout_round_trip(self, mock_cast, mock_should_trans_nz):
         layer = nn.Module()
@@ -420,7 +420,7 @@ class TestAscendW8A8MXFP8MoEMethod(TestBase):
         for nz_enabled in (False, True):
             with (
                 self.subTest(nz_enabled=nz_enabled),
-                patch("vllm_ascend.utils.should_trans_nz", return_value=nz_enabled),
+                patch("vllm_ascend.utils._should_trans_nz", return_value=nz_enabled),
             ):
                 layer = create_mxfp_moe_layer(
                     num_experts=self.num_experts,

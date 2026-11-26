@@ -47,7 +47,7 @@ from vllm_ascend.ops.fused_moe.moe_utils import get_moe_num_logical_experts
 from vllm_ascend.ops.fused_moe.prepare_finalize import PrepareAndFinalizeWithAllGather
 from vllm_ascend.quantization.nz import NzCastSpec
 from vllm_ascend.quantization.quant_type import QuantType
-from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ, maybe_trans_nz, should_trans_nz
+from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ, _should_trans_nz, maybe_trans_nz
 
 
 class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
@@ -104,10 +104,12 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
 
         # Keep expert-aware loaders attached for later online weight updates.
         enable_fused_mc2 = get_ascend_config().enable_fused_mc2
+        # TODO: Centralize expert weight layout selection and storage preparation
+        # so this path can avoid importing the private NZ predicate.
         for name in ("w13_weight", "w2_weight"):
             weight = getattr(layer, name)
             transposed = self._maybe_pad_weight(weight.data).transpose(1, 2).contiguous()
-            if weight.shape != transposed.shape and (enable_fused_mc2 or should_trans_nz(transposed)):
+            if weight.shape != transposed.shape and (enable_fused_mc2 or _should_trans_nz(transposed)):
                 # NZ packing reads the NPU storage's base shape. Reusing the
                 # pre-transpose storage here would pack a rectangular matrix
                 # with its old dimensions.
