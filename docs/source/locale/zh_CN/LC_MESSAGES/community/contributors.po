@@ -45,5 +45,5 @@ msgstr ""
 "## 贡献者\n"
 "<!-- last_commit: 4ec1a32e19513cdd8ec033b77a7a7130104f8ca8 -->"
 
-msgid "Updated on 2026-11-18:"
-msgstr "更新于 2026-11-18："
+msgid "Updated on 2026/11/18:"
+msgstr "更新于 2026/11/18："

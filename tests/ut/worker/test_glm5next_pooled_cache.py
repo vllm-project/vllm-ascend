@@ -154,7 +154,6 @@ def v2_glm_cache_plan(request, monkeypatch):
     config.model_config.get_num_layers = lambda _: 2
     monkeypatch.setattr(attn_utils, "get_current_vllm_config", lambda: config)
     monkeypatch.setattr(attn_utils.KVPPConfig, "from_vllm_config", lambda _: SimpleNamespace(size=1))
-    monkeypatch.setattr(attn_utils, "_is_dsv4_model", lambda _: False)
     monkeypatch.setattr(attn_utils, "enable_sfa", lambda _: False)
     return config, plan
 
@@ -241,7 +240,6 @@ def test_glm_fp8_indexer_keys_and_scales_share_padded_pages_without_overlapping(
     config.model_config.get_num_layers = lambda _: 2
     monkeypatch.setattr(attn_utils, "get_current_vllm_config", lambda: config)
     monkeypatch.setattr(attn_utils.KVPPConfig, "from_vllm_config", lambda _: SimpleNamespace(size=1))
-    monkeypatch.setattr(attn_utils, "_is_dsv4_model", lambda _: False)
     monkeypatch.setattr(attn_utils, "enable_sfa", lambda _: False)
     raw = attn_utils._allocate_kv_cache(plan, {}, torch.device("cpu"))
     group = SimpleNamespace(
@@ -273,7 +271,6 @@ def test_cann_tail_views_keep_interleaved_rows_and_shared_page_stride(monkeypatc
     config.model_config.get_num_layers = lambda _: 2
     monkeypatch.setattr(attn_utils, "get_current_vllm_config", lambda: config)
     monkeypatch.setattr(attn_utils.KVPPConfig, "from_vllm_config", lambda _: SimpleNamespace(size=1))
-    monkeypatch.setattr(attn_utils, "_is_dsv4_model", lambda _: False)
     monkeypatch.setattr(attn_utils, "enable_sfa", lambda _: False)
     raw_caches = attn_utils._allocate_kv_cache(plan, {}, torch.device("cpu"))
     spec = replace(_make_specs()[STATE], head_size=2)

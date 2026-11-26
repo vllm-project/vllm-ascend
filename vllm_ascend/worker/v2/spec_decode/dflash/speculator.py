@@ -20,7 +20,6 @@ from vllm_ascend.attention.attention_v1 import AscendAttentionBackend
 from vllm_ascend.ops.triton.spec_decode.prepare_dflash_inputs import prepare_dflash_inputs_triton
 from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2.attn_utils import build_attn_metadata_wrapper
-from vllm_ascend.worker.v2.pcp_manager import AscendPCPManager
 from vllm_ascend.worker.v2.spec_decode.lmhead_tp_utils import LmheadTPDraftSamplingMixin
 from vllm_ascend.worker.v2.spec_decode.pcp_utils import prepare_replicated_draft_profile_inputs
 
@@ -40,7 +39,7 @@ def draft_metadata_request_count(speculator: Any, num_reqs: int):
 
 def install_ascend_dflash_input_preparation() -> None:
     # DFlash and DSpark share the input-preparation symbol in the upstream module.
-    if vllm_version_is("0.33.0"):
+    if vllm_version_is("0.34.0"):
         dflash_speculator.prepare_dflash_inputs = prepare_dflash_inputs_triton
     else:
         dflash_speculator.prepare_dflash_inputs = _prepare_dflash_inputs_with_block_stride
@@ -96,11 +95,9 @@ def _prepare_dflash_inputs_with_block_stride(
 
 
 class AscendDFlashSpeculator(LmheadTPDraftSamplingMixin, DFlashSpeculator):
-    if not vllm_version_is("0.33.0"):
-
-        def supports_batch_sharded_draft_logits(self) -> bool:
-            # NPU draft-logits kernels index the cache by request state.
-            return False
+    def supports_batch_sharded_draft_logits(self) -> bool:
+        # NPU draft-logits kernels index the cache by request state.
+        return False
 
     @draft_config_context()
     def load_draft_model(
@@ -285,9 +282,4 @@ class AscendDFlashSpeculator(LmheadTPDraftSamplingMixin, DFlashSpeculator):
                 is_profile=is_profile,
                 num_speculative_tokens=num_speculative_tokens,
             )
-        # vLLM 0.33.0 needs this call; newer runners synchronize after
-        # propose(). Never communicate during dummy runs.
-        if vllm_version_is("0.33.0") and self.pcp_manager is not None and not dummy_run:
-            assert isinstance(self.pcp_manager, AscendPCPManager)
-            self.pcp_manager.sync_drafts(draft_tokens, input_batch.idx_mapping, self.draft_logits)
         return draft_tokens

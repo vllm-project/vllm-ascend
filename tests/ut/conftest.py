@@ -329,19 +329,19 @@ def _reset_stream_globals_before_test():
 
 @pytest.fixture(autouse=True)
 def _mock_ascend_store_deps(request):
-    # ascend_store code imports vllm_ascend helpers (AttentionComputeStartGate,
-    # get/reset_attention_compute_start_gate, ...) which _mock_deps.py no longer
+    # ascend_store code imports vllm_ascend helpers (AttentionLoadGate,
+    # get_attention_load_gate, reset_attention_gates, ...) which _mock_deps.py no longer
     # mocks globally (mutating the real modules leaked into other UTs). Mock them
     # per-test, scoped to the ascend_store tests only.
     if "distributed/ascend_store/" not in request.node.nodeid:
         yield
         return
-    from unittest.mock import patch
+    from unittest.mock import MagicMock, patch
 
     _pfx = "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store"
     with (
-        patch(f"{_pfx}.layerwise.pool_worker.get_attention_compute_start_gate"),
-        patch(f"{_pfx}.layerwise.pool_worker.reset_attention_compute_start_gate"),
-        patch(f"{_pfx}.layerwise.metadata.AttentionComputeStartGate", type("AttentionComputeStartGate", (), {})),
+        patch(f"{_pfx}.layerwise.pool_worker.get_attention_load_gate"),
+        patch(f"{_pfx}.layerwise.pool_worker.reset_attention_gates", return_value=(MagicMock(), MagicMock())),
+        patch(f"{_pfx}.layerwise.metadata.AttentionLoadGate", type("AttentionLoadGate", (), {})),
     ):
         yield

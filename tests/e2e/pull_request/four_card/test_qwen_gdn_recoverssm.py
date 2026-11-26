@@ -9,8 +9,7 @@ from tests.e2e.pull_request.utils import assert_valid_generation_outputs
 
 
 @pytest.mark.parametrize("cache_mode", ["none", "align"])
-def test_qwen36_recoverssm_matches_mtp_baseline_and_graph(monkeypatch, cache_mode):
-    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
+def test_qwen36_recoverssm_matches_mtp_baseline_and_graph(cache_mode):
     prompts = ["What is 17 times 23?", "Explain why the sky is blue.", "Write a Python function to reverse a list."]
     if cache_mode == "align":
         prefix = "This is shared background context for the following question. " * 128

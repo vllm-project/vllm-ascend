@@ -6,14 +6,11 @@ descriptor interface. It builds real native dispatch tables; it does not
 capture or replay any device graph.
 """
 
-from importlib import import_module
 from types import SimpleNamespace
 from unittest.mock import patch
 
 import torch
 from vllm.v1.worker.gpu.cudagraph_utils import CudaGraphManager
-
-from vllm_ascend.utils import vllm_version_is
 
 
 class _ModelRunnerV2Dispatcher:
@@ -53,7 +50,4 @@ class _ModelRunnerV2Dispatcher:
         return desc.cg_mode, desc
 
 
-if vllm_version_is("0.33.0"):
-    CudagraphDispatcher = import_module("vllm.v1.cudagraph_dispatcher").CudagraphDispatcher
-else:
-    CudagraphDispatcher = _ModelRunnerV2Dispatcher
+CudagraphDispatcher = _ModelRunnerV2Dispatcher

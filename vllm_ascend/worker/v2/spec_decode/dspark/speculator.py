@@ -39,14 +39,13 @@ from vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.dspark_context impor
     DSparkContextChunk,
     initialize_draft_context_chunk,
 )
-from vllm_ascend.utils import lmhead_tp_enable, lmhead_tp_max_num_logits, vllm_version_is
+from vllm_ascend.utils import embedding_tp_enable, lmhead_tp_enable, lmhead_tp_max_num_logits
 from vllm_ascend.worker.dcp_utils import DCPManager
 from vllm_ascend.worker.v2.aclgraph_utils import _get_graph_update_backend
 from vllm_ascend.worker.v2.attn_utils import (
     build_attn_metadata_factory,
     build_attn_metadata_wrapper,
 )
-from vllm_ascend.worker.v2.pcp_manager import AscendPCPManager
 from vllm_ascend.worker.v2.spec_decode.dflash.speculator import (
     draft_metadata_request_count,
     install_ascend_dflash_input_preparation,
@@ -68,11 +67,9 @@ class AscendDSparkSpeculator(LmheadTPDraftSamplingMixin, DSparkSpeculator):
     # override, upstream sampling logic untouched).
     _lmhead_tp_sample_draft_supported = True
 
-    if not vllm_version_is("0.33.0"):
-
-        def supports_batch_sharded_draft_logits(self) -> bool:
-            # NPU draft-logits kernels index the cache by request state.
-            return False
+    def supports_batch_sharded_draft_logits(self) -> bool:
+        # NPU draft-logits kernels index the cache by request state.
+        return False
 
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
         vllm_config = build_dspark_draft_config(vllm_config)
@@ -101,6 +98,15 @@ class AscendDSparkSpeculator(LmheadTPDraftSamplingMixin, DSparkSpeculator):
         target_attn_layer_names: set[str],
     ) -> torch.nn.Module:
         model = super().load_draft_model(target_model, target_attn_layer_names)
+        from vllm_ascend.ops.fused_moe.mega_moe_context import try_share_dspark_mega_moe_buffer
+
+        try_share_dspark_mega_moe_buffer(
+            target_model,
+            model,
+            self.vllm_config,
+            getattr(self, "draft_model_config", None),
+            context_kv_only=getattr(self, "context_kv_only", False),
+        )
         if hasattr(model, "post_process"):
             model.post_process(self.vllm_config)
         if hasattr(model, "configure_target_aux_hidden_capture"):
@@ -454,6 +460,13 @@ class AscendDSparkSpeculator(LmheadTPDraftSamplingMixin, DSparkSpeculator):
             input_batch, last_hidden_states, aux_hidden_states = prepare_replicated_draft_profile_inputs(
                 input_batch, last_hidden_states, aux_hidden_states, self.input_buffers
             )
+        if sync_state is not None and not is_profile and (lmhead_tp_enable() or embedding_tp_enable()):
+            # Fine-grained vocabulary collectives need the same query pass on
+            # active and idle DP peers. The runner discards local K=0 drafts.
+            if getattr(sync_state, "skip_drafts", False):
+                num_speculative_tokens = 0
+            elif num_speculative_tokens == 0:
+                num_speculative_tokens = None
         self.input_batch = input_batch
         assert self.input_batch is not None
         # Upstream trims DP dummy draft requests before selecting its graph,
@@ -492,9 +505,4 @@ class AscendDSparkSpeculator(LmheadTPDraftSamplingMixin, DSparkSpeculator):
                 is_profile=is_profile,
                 num_speculative_tokens=num_speculative_tokens,
             )
-        # vLLM 0.33.0 needs this call; newer runners synchronize after
-        # propose(). Never communicate during dummy runs.
-        if vllm_version_is("0.33.0") and self.pcp_manager is not None and not dummy_run:
-            assert isinstance(self.pcp_manager, AscendPCPManager)
-            self.pcp_manager.sync_drafts(draft_tokens, input_batch.idx_mapping, self.draft_logits)
         return draft_tokens

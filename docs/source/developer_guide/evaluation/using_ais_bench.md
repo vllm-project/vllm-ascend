@@ -6,25 +6,19 @@ This document guides you to conduct accuracy testing using [AISBench](https://gi
 
 ### 1. Start the vLLM server
 
-You can run docker container to start the vLLM server on a single NPU:
+You can run Docker container to start the vLLM server on a single NPU:
+
+The container needs [Ascend Docker Runtime](../../getting_started/installation.md#installation-ascend-docker-runtime) on the host; it selects the NPUs with `ASCEND_VISIBLE_DEVICES`.
 
 ```bash
-# Update DEVICE according to your device (/dev/davinci[0-7])
-export DEVICE=/dev/davinci7
+# Update ASCEND_VISIBLE_DEVICES according to the NPU you want (/dev/davinci[0-7])
+export ASCEND_VISIBLE_DEVICES=7
 # Update the vllm-ascend image
 export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}
 docker run --rm \
 --name vllm-ascend \
 --shm-size=1g \
---device $DEVICE \
---device /dev/davinci_manager \
---device /dev/devmm_svm \
---device /dev/hisi_hdc \
--v /usr/local/dcmi:/usr/local/dcmi \
--v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
--v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
--v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
--v /etc/ascend_install.info:/etc/ascend_install.info \
+-e ASCEND_VISIBLE_DEVICES \
 -v /root/.cache:/root/.cache \
 -p 8000:8000 \
 -e VLLM_USE_MODELSCOPE=True \
@@ -33,7 +27,7 @@ docker run --rm \
 /bin/bash
 ```
 
-Run the vLLM server in the docker.
+Run the vLLM server in the Docker.
 
 ```bash
 vllm serve Qwen/Qwen2.5-0.5B-Instruct --max-model-len 35000 &
@@ -41,11 +35,11 @@ vllm serve Qwen/Qwen2.5-0.5B-Instruct --max-model-len 35000 &
 
 !!! note
 
-    `--max-model-len` should be greater than `35000`, this will be suitable for most datasets. Otherwise the accuracy evaluation may be affected.
+    `--max-model-len` should be greater than or equal to `35000`. This will be suitable for most datasets. Otherwise the accuracy evaluation may be affected.
 
 The vLLM server is started successfully, if you see logs as below:
 
-```shell
+```output
 INFO:     Started server process [9446]
 INFO:     Waiting for application startup.
 INFO:     Application startup complete.
@@ -159,8 +153,8 @@ There are several arguments that you should update according to your environment
 - `abbr`: Unique identifier for a local task, used to distinguish between multiple tasks.
 - `path`: Update to your model weight path.
 - `model`: Update to your model name in vLLM.
-- `host_ip` and `host_port`: Update to your vLLM server ip and port.
-- `max_out_len`: Note `max_out_len` + LLM input length should be less than `max_model_len` (config in your vllm server), `32768` will be suitable for most datasets.
+- `host_ip` and `host_port`: Update to your vLLM server IP and port.
+- `max_out_len`: Note `max_out_len` + LLM input length should be less than `max_model_len` (config in your vLLM server); `32768` will be suitable for most datasets.
 - `batch_size`: Update according to your dataset.
 - `temperature`: Update inference argument.
 
@@ -223,7 +217,7 @@ ais_bench --models vllm_api_general_chat --datasets gsm8k_gen_0_shot_cot_chat_pr
 
 ```
 
-After each dataset execution, you can get the result from saved files such as `outputs/default/20250628_151326`, there is an example as follows:
+After each dataset execution, you can get the result from saved files such as `outputs/default/20250628_151326`. There is an example as follows:
 
 ```shell
 20250628_151326/
@@ -282,7 +276,7 @@ Multi-modal benchmarks (text + images):
 ais_bench --models vllm_api_stream_chat --datasets textvqa_gen_base64 --summarizer default_perf --mode perf
 ```
 
-After execution, you can get the result from saved files, there is an example as follows:
+After execution, you can get the result from saved files. There is an example as follows:
 
 ```shell
 20251031_070226/

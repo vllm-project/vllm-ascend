@@ -27,6 +27,11 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.base impor
     set_scheduler_device,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.layerwise_keys import LayerwiseKeyBuilder
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.buffer import (
+    BufferDescriptor,
+    MemoryLocation,
+    buffer_arrays,
+)
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import get_sharded_mamba_group_ids
 from vllm_ascend.distributed.kv_transfer.utils.mooncake_transfer_engine import global_te
 from vllm_ascend.distributed.parallel_state import get_global_rank
@@ -487,6 +492,13 @@ class MooncakeBackend(Backend):
                 self.config.metadata_server,
             )
             raise RuntimeError(msg)
+        if self._use_store_independent_te and self._contribute_memory and self.config.preferred_segment:
+            get_hostname = getattr(store, "get_hostname", None)
+            if get_hostname is not None:
+                configured_segment = get_hostname()
+                if configured_segment:
+                    self.local_seg = configured_segment
+                    logger.info("Mooncake preferred segment for store worker: %s", self.local_seg)
         if ssd_kwargs:
             logger.info(
                 "Mooncake SSD offload enabled (Mode A): path=%s",
@@ -581,22 +593,34 @@ class MooncakeBackend(Backend):
     def set_device(self):
         torch.npu.set_device(self.device_id)
 
-    def register_buffer(self, ptrs: list[int], lengths: list[int]):
+    @classmethod
+    def validate_hisparse_colocated_config(cls) -> None:
+        # Closing the client after the SDK reports a timeout cannot protect a
+        # pool allocation that the master has already made available for reuse.
+        raise ValueError(
+            "HiSparse with Mooncake is disabled because a timed-out PUT can overwrite another pool object "
+            "(kvcache-ai/Mooncake#4491). Set backend=memcache and configure the host_tcp protocol."
+        )
+
+    def register_buffer(self, buffers: list[BufferDescriptor]) -> None:
+        if any(buffer.memory_location is MemoryLocation.HOST for buffer in buffers):
+            raise ValueError("Mooncake does not support Host pool buffers")
+        ptrs, sizes = buffer_arrays(buffers)
         if self._use_store_independent_te or self._prefetch_conf.use_dict_setup:
             assert self.store is not None
-            for ptr, length in zip(ptrs, lengths):
-                ret = self.store.register_buffer(ptr, length)
+            for ptr, size in zip(ptrs, sizes):
+                ret = self.store.register_buffer(ptr, size)
                 if ret != 0:
                     logger.error(
                         "Failed to register buffer via store: ptr=%s, length=%s, ret=%s",
                         ptr,
-                        length,
+                        size,
                         ret,
                     )
         elif not self._use_fabric_mem:
             local_hostname = get_ip()
             global_te.get_transfer_engine(local_hostname, device_name=None)
-            global_te.register_buffer(ptrs, lengths)
+            global_te.register_buffer(ptrs, sizes)
 
     def exists(self, keys: list[str]) -> list[int]:
         if self._lazy_init and not self._store_initialized:
@@ -712,7 +736,16 @@ class MooncakeBackend(Backend):
             raise RuntimeError("Mooncake client does not support batch_get_session_end")
         return int(method(keys))
 
-    def put(self, keys: list[str], addrs: list[list[int]], sizes: list[list[int]]) -> list[bool] | bool:
+    def put(
+        self,
+        keys: list[str],
+        addrs: list[list[int]],
+        sizes: list[list[int]],
+        *,
+        memory_location: MemoryLocation | None = None,
+    ) -> list[bool] | bool:
+        if memory_location is MemoryLocation.HOST:
+            raise ValueError("Mooncake does not support Host pool transfers")
         self.ensure_initialized()
         assert self.store is not None
         try:
@@ -746,7 +779,16 @@ class MooncakeBackend(Backend):
                 logger.warning("First DSV4(compress) request failure is expected. This is normal behavior.")
             return False
 
-    def get(self, keys: list[str], addrs: list[list[int]], sizes: list[list[int]]):
+    def get(
+        self,
+        keys: list[str],
+        addrs: list[list[int]],
+        sizes: list[list[int]],
+        *,
+        memory_location: MemoryLocation | None = None,
+    ):
+        if memory_location is MemoryLocation.HOST:
+            raise ValueError("Mooncake does not support Host pool transfers")
         if self._lazy_init and not self._store_initialized:
             logger.error(
                 "Failed to get %d keys out of %d. Store is not initialized; "
