@@ -4,7 +4,7 @@
 import torch
 import torch_npu
 
-from .gbsa import GBSA_COMPRESS_RATIO, GBSA_PAGE_SIZE, GBSA_RESIDUAL_TOKENS
+from .gbsa import GBSA_PAGE_SIZE, expand_qsa_selected_tokens
 
 # Bound temporary mask memory even for long-context prefills.
 QSA_FIA_QUERY_TILE = 4096
@@ -33,25 +33,6 @@ def build_selected_token_mask(
     )
     mask.scatter_(-1, scatter_indices, True)
     return mask[..., :kv_length].unsqueeze(1)
-
-
-def expand_qsa_selected_tokens(compact_indices: torch.Tensor, visible_lens: torch.Tensor) -> torch.Tensor:
-    """Expand complete groups and reconstruct the implicit GBSA residual group."""
-    if compact_indices.ndim != 2 or compact_indices.shape[1] <= GBSA_RESIDUAL_TOKENS:
-        raise ValueError("Expected compact QSA group indices followed by three residual slots")
-    groups = compact_indices[:, :-GBSA_RESIDUAL_TOKENS]
-    full_groups = visible_lens.floor_divide(GBSA_COMPRESS_RATIO)
-    valid = (groups >= 0) & (groups < full_groups.unsqueeze(-1))
-    if groups.shape[1] >= 512:
-        capacity = groups.shape[1] - visible_lens.remainder(GBSA_COMPRESS_RATIO).ne(0).to(torch.int32)
-        valid &= valid.to(torch.int32).cumsum(-1) <= capacity.unsqueeze(-1)
-    offsets = torch.arange(GBSA_COMPRESS_RATIO, device=groups.device, dtype=groups.dtype)
-    tokens = groups.unsqueeze(-1) * GBSA_COMPRESS_RATIO + offsets
-    tokens = torch.where(valid.unsqueeze(-1), tokens, -1).flatten(1)
-    tail_offsets = torch.arange(GBSA_RESIDUAL_TOKENS, device=groups.device, dtype=groups.dtype)
-    tail = full_groups.unsqueeze(-1) * GBSA_COMPRESS_RATIO + tail_offsets
-    tail = torch.where(tail < visible_lens.unsqueeze(-1), tail, -1)
-    return torch.cat((tokens, tail), dim=-1)
 
 
 def prepare_qsa_fia_paged_kv(

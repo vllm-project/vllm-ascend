@@ -1980,6 +1980,58 @@ def test_host_conv_indices_are_shared_and_refreshed(monkeypatch):
     assert indices.tolist() == [40, 50]
 
 
+@pytest.mark.parametrize(
+    ("num_reqs", "disabled_by"),
+    [(2, None), (4, None), (2, "prefix-cache"), (2, "speculative"), (2, "pcp"), (2, "graph")],
+)
+def test_hisparse_gdn_decode_gate_and_metadata(num_reqs, disabled_by):
+    device = torch.device("cpu")
+    config = _make_vllm_config(
+        num_speculative_tokens=int(disabled_by == "speculative"),
+        cudagraph_mode=CUDAGraphMode.FULL if disabled_by == "graph" else CUDAGraphMode.NONE,
+    )
+    config.model_config.enforce_eager = disabled_by != "graph"
+    config.model_config.hf_text_config.model_type = "qwen4_exp"
+    config.parallel_config.prefill_context_parallel_size = 2 if disabled_by == "pcp" else 1
+    config.cache_config.enable_prefix_caching = disabled_by == "prefix-cache"
+    config.cache_config.use_replayssm = False
+    config.num_speculative_tokens = int(disabled_by == "speculative")
+    config.max_concurrent_batches = 1
+    config.compilation_config.static_forward_context = {"layer0": SimpleNamespace(use_contiguous_conv_indices=True)}
+    spec = MambaSpec(block_size=16, shapes=((1,), (1,)), dtypes=(torch.float32,))
+    if disabled_by is None:
+        reference_builder = AscendGDNHostMetadataBuilder(spec, ["layer0"], config, device)
+    config.attention_config = SimpleNamespace(hisparse_config=object())
+    builder = AscendGDNHostMetadataBuilder(spec, ["layer0"], config, device)
+    assert builder._use_hisparse_decode_path is (disabled_by is None)
+    if disabled_by is not None:
+        return
+
+    common = create_common_attn_metadata(BatchSpec([64] * num_reqs, [1] * num_reqs), 16, device)
+    common.is_prefilling = torch.zeros(num_reqs, dtype=torch.bool)
+    common.block_table_tensor = torch.arange(2 * num_reqs, dtype=torch.int32).reshape(num_reqs, 2) + 11
+    reference = reference_builder.build(0, common, num_actual_reqs=num_reqs)
+    conv_indices = reference.non_spec_decode_metadata.causal_conv1d.cache_indices.clone()
+
+    actual = builder.build(0, common, num_actual_reqs=num_reqs)
+    assert actual.num_decodes == actual.num_actual_tokens == num_reqs
+    assert actual.non_spec_prefill_metadata is None
+    torch.testing.assert_close(actual.non_spec_query_start_loc, reference.non_spec_query_start_loc)
+    torch.testing.assert_close(actual.non_spec_state_indices_tensor, reference.non_spec_state_indices_tensor)
+    torch.testing.assert_close(
+        actual.non_spec_decode_metadata.actual_seq_lengths, reference.non_spec_decode_metadata.actual_seq_lengths
+    )
+    torch.testing.assert_close(actual.non_spec_decode_metadata.causal_conv1d.cache_indices, conv_indices)
+
+    common.block_table_tensor = common.block_table_tensor + 20
+    next_metadata = builder.build(0, common, num_actual_reqs=num_reqs)
+    torch.testing.assert_close(next_metadata.non_spec_decode_metadata.causal_conv1d.cache_indices, conv_indices + 20)
+    assert (
+        next_metadata.non_spec_decode_metadata.actual_seq_lengths.data_ptr()
+        == actual.non_spec_decode_metadata.actual_seq_lengths.data_ptr()
+    )
+
+
 @pytest.mark.parametrize("builder_cls", [AscendGDNAttentionMetadataBuilder, AscendGDNHostMetadataBuilder])
 @pytest.mark.parametrize("device_type", [AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5])
 @pytest.mark.parametrize("num_speculative_tokens", [7, 8, 9])

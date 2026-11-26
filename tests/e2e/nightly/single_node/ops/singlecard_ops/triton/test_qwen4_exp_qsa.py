@@ -4,10 +4,12 @@ from collections.abc import Callable
 import pytest
 import torch
 from vllm.triton_utils import HAS_TRITON
+from vllm.v1 import kv_cache_interface
+from vllm.v1.hisparse import runtime as hisparse_runtime
 
 from vllm_ascend.device.device_config import get_ascend_device_type
 from vllm_ascend.device.hardware import AscendDeviceType
-from vllm_ascend.models.qwen4_exp.gbsa import qsa_gbsa_attention
+from vllm_ascend.models.qwen4_exp.gbsa import qsa_gbsa_attention, qsa_resident_gbsa_attention
 from vllm_ascend.ops.triton.qwen4_exp.fia import QSAFIAMaskWorkspace, build_qsa_fia_mask
 from vllm_ascend.ops.triton.qwen4_exp.gbsa import prepare_qsa_gbsa_inputs
 from vllm_ascend.ops.triton.qwen4_exp.qsa import pack_qsa_group_indices_npu
@@ -229,3 +231,98 @@ def test_qwen4_exp_gbsa_npugraph_replays_updated_input() -> None:
     graph.replay()
     torch.npu.synchronize()
     _assert_gbsa_close(captured_output, expected_replay)
+
+
+@pytest.mark.skipif(
+    not (
+        hasattr(kv_cache_interface, "KVCacheLayerConfig")
+        and hasattr(hisparse_runtime, "hisparse_staging_block_capacity")
+    ),
+    reason="Requires Core QSA HiSparse cache layout and staging APIs",
+)
+@torch.inference_mode()
+def test_resolved_rows_match_paged_gbsa() -> None:
+    from vllm_ascend.models.qwen4_exp.hisparse import attend_physical, prepare_resolver_indices
+
+    torch.manual_seed(127)
+    lengths = torch.tensor([2081, 2050], dtype=torch.int32, device="npu")
+    positions = (lengths - 1).long()
+    query = torch.randn(2, 8, GBSA_HEAD_DIM, dtype=torch.bfloat16, device="npu")
+    block_stride = GBSA_PAGE_SIZE + 1
+    storage = torch.randn(34, block_stride, 1, 2 * GBSA_HEAD_DIM, dtype=query.dtype, device="npu")
+    cache = storage[:, :GBSA_PAGE_SIZE]
+    table = torch.randperm(34, dtype=torch.int32).view(2, 17).npu()
+    compact = torch.full((2, 515), -1, dtype=torch.int32)
+    for row, groups in enumerate((520, 512)):
+        compact[row, :512] = torch.randperm(groups, dtype=torch.int32)[:512]
+    compact[1, 1] = -1
+    compact = compact.npu()
+    key, value = cache.split(GBSA_HEAD_DIM, dim=-1)
+    reference = qsa_gbsa_attention(
+        query,
+        key.contiguous(),
+        value.contiguous(),
+        compact,
+        table,
+        torch.arange(2, dtype=torch.int32, device="npu"),
+        positions,
+        lengths,
+        torch.empty_like(query),
+    )
+    logical = torch.empty((2, 2048), dtype=torch.int32, device="npu")
+    prepare_resolver_indices(compact, positions + 1, logical)
+    pages = table.gather(1, (logical.clamp_min(0) // GBSA_PAGE_SIZE).long())
+    physical = (pages * block_stride + logical.remainder(GBSA_PAGE_SIZE)).masked_fill(logical < 0, -1)
+    actual = attend_physical(query, cache.flatten(2), physical, 1, torch.empty_like(query))
+    torch.testing.assert_close(actual, reference, rtol=2e-2, atol=1e-3)
+
+
+@torch.inference_mode()
+def test_qwen4_exp_resident_gbsa_matches_paged_attention() -> None:
+    torch.manual_seed(20261009)
+    lengths = torch.tensor([8192, 8201, 8226, 8231], dtype=torch.int32, device="npu")
+    rows = len(lengths)
+    pages_per_request = 65
+    num_pages = rows * pages_per_request
+    head_dim = 256
+    packed_width = 2 * head_dim
+    # Other cache owners leave gaps between pages in the shared device pool.
+    storage = torch.randn((num_pages, GBSA_PAGE_SIZE, 2 * packed_width), dtype=torch.bfloat16, device="npu")
+    resident = storage.flatten(1)[:, : GBSA_PAGE_SIZE * packed_width].view(num_pages, GBSA_PAGE_SIZE, packed_width)
+    key, value = resident.unsqueeze(2).split(head_dim, dim=-1)
+    table = torch.randperm(num_pages, dtype=torch.int32).view(rows, pages_per_request).npu()
+    query = torch.randn((rows, 6, head_dim), dtype=torch.bfloat16, device="npu")
+    compact = torch.full((rows, 515), -1, dtype=torch.int32)
+    for row, length in enumerate(lengths.tolist()):
+        compact[row, :512] = torch.randperm(length // 4, dtype=torch.int32)[:512]
+    compact[2, 1] = -1
+    compact = compact.npu()
+    request_ids = torch.arange(rows, dtype=torch.int32, device="npu")
+    positions = (lengths - 1).long()
+    state_indices = torch.tensor([5, 1, 7, 3], dtype=torch.int32, device="npu")
+    state_table = torch.full((8, pages_per_request), -1, dtype=table.dtype, device=table.device)
+    state_table[state_indices.long()] = table
+
+    expected = qsa_gbsa_attention(
+        query,
+        key.contiguous(),
+        value.contiguous(),
+        compact,
+        table,
+        request_ids,
+        positions,
+        lengths,
+        torch.empty_like(query),
+    )
+    actual = qsa_resident_gbsa_attention(
+        query,
+        resident,
+        compact,
+        state_table,
+        request_ids,
+        positions,
+        lengths,
+        torch.empty_like(query),
+        request_state_indices=state_indices,
+    )
+    torch.testing.assert_close(actual.float(), expected.float(), rtol=0.025, atol=5e-4)

@@ -14,6 +14,9 @@
 
 """Ascend QSA owner for Qwen3.8-Flash-Next."""
 
+from collections.abc import Iterator
+from contextlib import contextmanager
+from contextvars import ContextVar
 from copy import copy
 from dataclasses import replace
 from typing import TYPE_CHECKING, Any, Protocol, TypeAlias, cast
@@ -771,9 +774,37 @@ upstream_qsa.Qwen4ExpQSABackend = AscendQSABackend  # type: ignore[attr-defined]
 # required before LightningIndexer or the Triton QSA selector consumes them.
 QSAIndexerBackend.uses_descriptor_cache_view = True
 
-# The indexer module selects its Triton metadata builder at import time. The
-# upstream kernel uses CUDA PDL intrinsics, so Ascend uses the Torch path.
-qsa_indexer.build_qsa_metadata = qsa_indexer._build_qsa_metadata_torch
+_USE_HISPARSE_QSA_METADATA: ContextVar[bool] = ContextVar("_USE_HISPARSE_QSA_METADATA", default=False)
+
+
+@contextmanager
+def use_hisparse_qsa_metadata() -> Iterator[None]:
+    """Select fused indexer metadata for one eager HiSparse build."""
+    token = _USE_HISPARSE_QSA_METADATA.set(True)
+    try:
+        yield
+    finally:
+        _USE_HISPARSE_QSA_METADATA.reset(token)
+
+
+def _build_qsa_indexer_metadata(common_attn_metadata, *buffers, **kwargs):
+    if (
+        _USE_HISPARSE_QSA_METADATA.get()
+        and hasattr(qsa_indexer, "build_qsa_metadata_triton")
+        and common_attn_metadata.num_reqs > 0
+        and common_attn_metadata.num_actual_tokens > 0
+        and common_attn_metadata.query_start_loc.device.type == "npu"
+        and getattr(common_attn_metadata, "pcp_context", None) is None
+        and getattr(common_attn_metadata, "graph_pad_size", -1) < 0
+    ):
+        # Core's newer Triton kernel disables CUDA PDL on Ascend.
+        return qsa_indexer.build_qsa_metadata_triton(common_attn_metadata, *buffers, **kwargs)
+    return qsa_indexer._build_qsa_metadata_torch(common_attn_metadata, *buffers, **kwargs)
+
+
+# Core selects a module-level builder. Keep the Ascend Torch default for other
+# models and graph modes, and scope the fused path to the model state's build.
+qsa_indexer.build_qsa_metadata = _build_qsa_indexer_metadata
 
 
 class AscendPCPQSAIndexerMetadataBuilder(QSAIndexerMetadataBuilder):
@@ -850,6 +881,15 @@ class AscendQwen4ExpQSAAttention(upstream_qsa.Qwen4ExpQSAAttention):
     """Qwen4Exp QSA owner bound to the Ascend implementation."""
 
     def __init__(self, *, vllm_config: VllmConfig, **kwargs) -> None:
+        hisparse = getattr(vllm_config.attention_config, "hisparse_config", None)
+        if hisparse is not None:
+            if not hasattr(upstream_qsa.Qwen4ExpQSAAttention, "get_kv_cache_config"):
+                raise NotImplementedError("QSA HiSparse requires vLLM Core with GQA HiSparse cache planning")
+            from .hisparse import init_qsa_hisparse
+
+            super().__init__(vllm_config=vllm_config, **kwargs)
+            init_qsa_hisparse(self, vllm_config)
+            return
         if vllm_config.parallel_config.prefill_context_parallel_size == 1:
             super().__init__(vllm_config=vllm_config, **kwargs)
             # Rebind as each layer is constructed to limit live allocations.
@@ -866,6 +906,14 @@ class AscendQwen4ExpQSAAttention(upstream_qsa.Qwen4ExpQSAAttention):
 
     def bind_kv_cache(self, kv_cache: QSAKVCache) -> None:
         self.kv_cache = kv_cache
+
+    def get_kv_cache_config(self, vllm_config):
+        config = super().get_kv_cache_config(vllm_config)
+        if getattr(self, "hisparse_cache", None) is not None:
+            from .hisparse import get_qsa_hisparse_cache_config
+
+            return get_qsa_hisparse_cache_config(config, self.indexer.token_topk)
+        return config
 
     def _run_qsa(
         self,
@@ -887,11 +935,13 @@ class AscendQwen4ExpQSAAttention(upstream_qsa.Qwen4ExpQSAAttention):
                 gate.zero_()
             return
         main_metadata = metadata[self.layer_name]
-        if not _qsa_cache_is_bound(self.kv_cache):
+        hisparse_cache = getattr(self, "hisparse_cache", None)
+        if hisparse_cache is None and not _qsa_cache_is_bound(self.kv_cache):
             raise RuntimeError("QSA main K/V cache is not bound")
         num_tokens = main_metadata.num_actual_tokens
         # Restore main KV and indexer groups before either cache is updated.
-        wait_for_kv_layer_from_connector(self.layer_name)
+        if hisparse_cache is None:
+            wait_for_kv_layer_from_connector(self.layer_name)
         side_metadata = metadata[self.indexer.raw_key_cache.prefix]
         if side_metadata.num_actual_tokens != num_tokens:
             raise RuntimeError("QSA main and side metadata token counts disagree")
@@ -922,6 +972,11 @@ class AscendQwen4ExpQSAAttention(upstream_qsa.Qwen4ExpQSAAttention):
             raise RuntimeError("QSA indexer returned an invalid selection shape")
         if query is None or key is None or value is None:
             raise RuntimeError("QSA preparation did not produce Q/K/V tensors")
+        if hisparse_cache is not None:
+            from .hisparse import run_qsa_hisparse
+
+            run_qsa_hisparse(self, main_metadata, side_metadata, selected, query, key, value, output)
+            return
         pcp_context = getattr(side_metadata, "pcp_context", None)
         write_key, write_value = key, value
         if pcp_context is not None:

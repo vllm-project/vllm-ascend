@@ -254,6 +254,12 @@ class NPUPlatform(Platform):
 
     @classmethod
     def get_kv_cache_config_builder_cls(cls, vllm_config: VllmConfig) -> str:
+        if (
+            getattr(getattr(vllm_config, "attention_config", None), "hisparse_config", None) is not None
+            and vllm_config.model_config.hf_config.model_type == "qwen4_exp"
+        ):
+            # Core owns the host and resident pools for QSA HiSparse.
+            return super().get_kv_cache_config_builder_cls(vllm_config)
         return "vllm_ascend.core.kv_cache_config_builder.AscendKVCacheConfigBuilder"
 
     @property

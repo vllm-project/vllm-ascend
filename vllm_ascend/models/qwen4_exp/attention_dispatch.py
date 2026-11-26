@@ -218,6 +218,8 @@ def dispatch_qsa_attention(
     seq_lens: torch.Tensor,
     output: torch.Tensor,
     request_plan: QSARequestPlan | None,
+    *,
+    use_union_prefill: bool = True,
 ) -> torch.Tensor:
     # None is the decode-only metadata sentinel, including graph capture.
     # This branch contains no host length decisions or FIA launches; device KV
@@ -269,7 +271,12 @@ def dispatch_qsa_attention(
     # changing the original request IDs used to address block tables and lengths.
     # Union groups must never cross request boundaries. Keep the decode-only
     # sentinel above unchanged, including graph capture and replay.
-    for batch_index, batch in enumerate(request_plan.union_batches):
+    union_batches = request_plan.union_batches
+    paged_spans = request_plan.decode_spans
+    if not use_union_prefill:
+        paged_spans += tuple((batch.query_start, batch.query_end) for batch in union_batches)
+        union_batches = ()
+    for batch_index, batch in enumerate(union_batches):
         rows = slice(batch.query_start, batch.query_end)
         prepared = request_plan.prepared_union_batches[batch_index]
         if len(batch.request_indices) == 1:
@@ -301,7 +308,7 @@ def dispatch_qsa_attention(
                 request_indices=batch.request_indices,
                 prepared=prepared,
             )
-    for start, end in request_plan.decode_spans:
+    for start, end in paged_spans:
         rows = slice(start, end)
         qsa_gbsa_attention(
             query[rows],
