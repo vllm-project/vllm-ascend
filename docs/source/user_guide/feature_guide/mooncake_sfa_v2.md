@@ -79,7 +79,13 @@ existing SFA connector. Appending P's first output token to D's prompt is reject
 before receiving KV. Ordinary Mooncake transfers retain their existing
 first-token behavior.
 
-The existing V2 batch READ and bounded staging pipeline still land Host main
+SFA inherits Mooncake V2's default per-request completion. Set
+`kv_connector_extra_config.pull_transfer_mode="batch"` to use the upstream
+batch barrier instead. Each transfer task retains its own request metadata;
+its Future completes only after its READ and Host landing have stopped.
+The upstream completion tracker then reports each request independently.
+
+The existing V2 READ and bounded staging pipeline still land Host main
 KV through the SFA manager's local-copy API. Receive completion includes both
 direct HBM reads and the final Host staging drain. After all TP workers complete
 PD, the first real decode validates the reservation and expected execution
@@ -110,7 +116,12 @@ Finished requests release their reservations. A cancelled in-flight PD retains
 its row until all D workers finish their reads, preventing late HBM writes from
 corrupting a reused row. A failed receive cannot
 publish a ready hot row. Subsequent decode uses the existing SFA metadata,
-LIM, Copy-SFA, hot-cache management and current-token Host writeback.
+LIM, Copy-SFA, hot-cache management and delayed full-block D2H writeback.
+After PD initialization and any required tail restoration succeed, attention
+preparation invokes the runner's existing D2H planner. Newly bound rows adopt
+the aligned computed prefix and their request generation; metadata consumes
+the manager's settled Host prefix. The runner retains upstream's source-ready
+event and previous-batch retirement order.
 
 This combination retains existing SFA offload restrictions, including BF16 main
 KV, supported device-resident indexer formats, and no context/pipeline parallel

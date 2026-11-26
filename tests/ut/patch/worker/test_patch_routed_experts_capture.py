@@ -38,6 +38,7 @@ class TestRoutedExpertsCapturerCapture:
         """Create a mock forward context."""
         ctx = MagicMock()
         ctx.dp_metadata = dp_metadata
+        ctx.additional_kwargs = {}
         return ctx
 
     def _create_mock_dp_metadata(self, num_tokens_across_dp_cpu):

@@ -301,56 +301,21 @@ def list_tracked_files(repo_root: str) -> list[str]:
     return out.stdout.splitlines()
 
 
-def get_git_blob_sizes(repo_root: str) -> dict[str, int]:
-    """Map path -> blob size from HEAD, independent of the working tree.
-
-    The CI gate job checks out only ``.github/`` (sparse), so the working
-    tree cannot answer file-size questions for the rest of the repo - but
-    actions/checkout still fetches every blob, and ``ls-tree --long`` reads
-    sizes straight from the object store.
-    """
-    out = subprocess.run(
-        ["git", "ls-tree", "-r", "--long", "HEAD"],
-        capture_output=True,
-        text=True,
-        check=True,
-        cwd=repo_root,
-    )
-    sizes: dict[str, int] = {}
-    for line in out.stdout.splitlines():
-        meta, path = line.split("\t", 1)
-        parts = meta.split()
-        # size is "-" for non-blob entries (gitlinks/submodules): no content.
-        if parts[3] == "-":
-            continue
-        sizes[path] = int(parts[3])
-    return sizes
-
-
-def is_contentless_file(path: str, git_sizes: dict[str, int] | None = None) -> bool:
+def is_contentless_file(path: str) -> bool:
     """True for zero-byte files (empty ``__init__.py``, ``.gitkeep``, ...).
 
     Contentless files carry no behavior to own, so they are exempt from the
-    ownership requirement. When ``git_sizes`` (from ``get_git_blob_sizes``)
-    is given, sizes come from the git object store so a sparse working tree
-    (CI checks out only ``.github/``) still sees the whole repo. Otherwise
-    the working tree is consulted; files missing there are NOT exempt: in a
-    full checkout a missing file only happens in partial local checkouts
-    and must still be reported as unowned.
+    ownership requirement. Files missing from the working tree are NOT
+    exempt: CI always checks out full trees, so a missing file only happens
+    in partial local checkouts and must still be reported as unowned.
     """
-    if git_sizes is not None:
-        return git_sizes.get(path, -1) == 0
     try:
         return os.path.getsize(path) == 0 and not os.path.islink(path)
     except OSError:
         return False
 
 
-def check_coverage(
-    rules: list[Rule],
-    tracked: list[str],
-    git_sizes: dict[str, int] | None = None,
-) -> tuple[list[str], list[str]]:
+def check_coverage(rules: list[Rule], tracked: list[str]) -> tuple[list[str], list[str]]:
     """CODEOWNERS health: ownership of tracked files + stale entries.
 
     Returns ``(errors, warnings)``:
@@ -368,7 +333,7 @@ def check_coverage(
     warnings: list[str] = []
 
     for path in tracked:
-        if path == CODEOWNERS_PATH or is_contentless_file(path, git_sizes):
+        if path == CODEOWNERS_PATH or is_contentless_file(path):
             continue
         owners, skipped = resolve_owners(rules, path)
         if skipped or owners:
@@ -458,7 +423,7 @@ def main() -> int:
             tracked = load_files_from_file(args.files_json)
         else:
             tracked = list_tracked_files(args.repo_root)
-        errors, warnings = check_coverage(rules, tracked, get_git_blob_sizes(args.repo_root))
+        errors, warnings = check_coverage(rules, tracked)
         cov_out = os.environ.get("COVERAGE_ERRORS_OUT")
         if cov_out is not None:
             with open(cov_out, "w") as f:

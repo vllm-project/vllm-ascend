@@ -6,7 +6,6 @@ test_cases:
   - name: "glm-5.2-W4A8C8-DSpark-PCP"
     model: "Eco-Tech/GLM-5.2-w4a8c8"
     envs:
-      VLLM_USE_V2_MODEL_RUNNER: "1"
       VLLM_WORKER_MULTIPROC_METHOD: "spawn"
       OMP_PROC_BIND: "false"
       OMP_NUM_THREADS: "1"

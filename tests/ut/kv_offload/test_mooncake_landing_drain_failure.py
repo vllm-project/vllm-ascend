@@ -4,7 +4,9 @@
 import ctypes
 import threading
 import weakref
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import nullcontext
+from types import SimpleNamespace
 from typing import TypedDict
 from unittest.mock import MagicMock
 
@@ -12,7 +14,6 @@ import pytest
 import torch
 from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorTransferResults
 
-from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.pull_worker import MooncakePullRecvingThread
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_sfa import worker as pull_worker
 
 from .mooncake_sfa_helpers import make_thread
@@ -116,12 +117,25 @@ def test_worker_defers_results_and_invalid_blocks_until_drain(monkeypatch, pipel
     # A submission error with a successful drain is safe to report immediately.
     state["wait_fails"] = persistent_failure
     worker = make_thread(
-        device=0, ready_event=threading.Event(), staging_reader=reader, can_report_invalid_block_ids=can_report
+        device=0,
+        ready_event=threading.Event(),
+        staging_reader=SimpleNamespace(
+            batch_transfer_sync_read=lambda *_args, **_kwargs: receive(),
+            drain_pending_landing=reader.drain_pending_landing,
+        ),
+        can_report_invalid_block_ids=can_report,
     )
     requests = {"request": make_req_meta(local=([10],))}
     worker.request_queue = MagicMock()
     worker.request_queue.get.side_effect = [("engine-p", requests), StopWorkerLoop()]
-    monkeypatch.setattr(MooncakePullRecvingThread, "_handle_requests", lambda *_args: receive())
+    worker._get_remote_metadata = MagicMock()
+    transfers = ThreadPoolExecutor(max_workers=1)
+
+    def submit(*_args):
+        future = transfers.submit(worker._read_transfer_bucket, "peer", [], [], [], ["request"], None)
+        return {future: (0, 0, 0, {"request"})}, None
+
+    worker._submit_transfer_group = submit
     monkeypatch.setattr(torch.npu, "set_device", MagicMock())
     waiting = threading.Event()
     resume = threading.Event()
@@ -156,6 +170,7 @@ def test_worker_defers_results_and_invalid_blocks_until_drain(monkeypatch, pipel
         state["wait_fails"] = False
         resume.set()
         runner.join(timeout=5)
+        transfers.shutdown(wait=True)
     assert not runner.is_alive() and not errors
     assert not state["pending"]
     assert all(ref() is None for ref in state["descriptors"])

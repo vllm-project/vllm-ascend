@@ -1,12 +1,13 @@
-from collections.abc import Callable, Iterable
+from collections import Counter
+from collections.abc import Callable, Iterable, Sequence
 from typing import TYPE_CHECKING, Any, cast
 
 import torch
 from vllm.config import KVTransferConfig, VllmConfig
 from vllm.distributed.kv_events import (
+    BlockStored,
     KVCacheEvent,
     KVConnectorKVEvents,
-    KVEventAggregator,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorBase_V1,
@@ -35,6 +36,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend import (
     get_backend_class,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.dspark_prefix_cache import DSparkPrefixKeys
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.hisparse.layout import has_hisparse_cache_layout
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.layerwise_cache_layout import (
     has_shared_kv_sources,
 )
@@ -47,7 +49,6 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.pool_wor
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.lookup_key import LookupKeyServer
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     AscendStoreKVConnectorWorkerMetadata,
-    get_sharded_mamba_group_ids,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metrics import (
     AscendStoreKVConnectorStats,
@@ -84,34 +85,71 @@ def create_kv_pool_worker(
 
 
 class AscendStoreKVEvents(KVConnectorKVEvents):
-    def __init__(self, num_workers: int) -> None:
-        self._aggregator = KVEventAggregator(num_workers)
+    """Publish a logical block once every rank that writes it has reported.
+
+    ``group_tp_replication_factors[group_idx]`` is the number of aggregated
+    workers that own other blocks of that group. A block is ready when
+    ``count * factor >= num_workers``. The required count is the number of
+    ranks that write its keys. Reports that arrive on later steps stay in
+    the counter.
+    """
+
+    def __init__(
+        self,
+        num_workers: int,
+        group_tp_replication_factors: Sequence[int] = (1,),
+    ) -> None:
+        if num_workers <= 0:
+            raise ValueError("num_workers must be greater than zero.")
+        if not group_tp_replication_factors or any(factor <= 0 for factor in group_tp_replication_factors):
+            raise ValueError("TP replication factors must be positive.")
+        self._event_counter: Counter[KVCacheEvent] = Counter()
+        self._num_workers = num_workers
+        self._group_tp_replication_factors = tuple(group_tp_replication_factors)
 
     def add_events(self, events: list[KVCacheEvent]) -> None:
-        self._aggregator.add_events(events)
+        if not isinstance(events, list):
+            raise TypeError("events must be a list of KVCacheEvent.")
+        self._event_counter.update(events)
+
+    def _replication_factor(self, event: KVCacheEvent) -> int:
+        if not isinstance(event, BlockStored) or event.group_idx is None:
+            return 1
+        if event.group_idx < 0 or event.group_idx >= len(self._group_tp_replication_factors):
+            return 1
+        return self._group_tp_replication_factors[event.group_idx]
+
+    def _is_ready(self, event: KVCacheEvent, count: int) -> bool:
+        return count * self._replication_factor(event) >= self._num_workers
 
     def aggregate(self) -> "AscendStoreKVEvents":
-        """
-        Aggregate KV events and retain only common events.
-        """
-        common_events = self._aggregator.get_common_events()
-        self._aggregator.clear_events()
-        self._aggregator.add_events(common_events)
-        self._aggregator.reset_workers()
+        """Keep partial quorums. Callers publish through pop_common_events."""
         return self
 
+    def pop_common_events(self) -> list[KVCacheEvent]:
+        """Remove and return events whose block writers have all reported."""
+        ready = [event for event, count in self._event_counter.items() if self._is_ready(event, count)]
+        for event in ready:
+            del self._event_counter[event]
+        return ready
+
+    def has_events(self) -> bool:
+        return bool(self._event_counter)
+
     def increment_workers(self, count: int = 1) -> None:
-        self._aggregator.increment_workers(count)
+        if count <= 0:
+            raise ValueError("count must be positive.")
+        self._num_workers += count
 
     def get_all_events(self) -> list[KVCacheEvent]:
-        return self._aggregator.get_all_events()
+        return list(self._event_counter.elements())
 
     def get_number_of_workers(self) -> int:
-        return self._aggregator.get_number_of_workers()
+        return self._num_workers
 
     def clear_events(self) -> None:
-        self._aggregator.clear_events()
-        self._aggregator.reset_workers()
+        self._event_counter.clear()
+        self._num_workers = 1
 
     def __repr__(self) -> str:
         return f"<AscendStoreKVEvents events={self.get_all_events()}>"
@@ -136,41 +174,46 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
     def __init__(self, vllm_config: VllmConfig, role: KVConnectorRole, kv_cache_config: KVCacheConfig | None = None):
         super().__init__(vllm_config=vllm_config, role=role, kv_cache_config=kv_cache_config)
         self.kv_role = vllm_config.kv_transfer_config.kv_role
-        parallel_config = vllm_config.parallel_config
-        if (
-            get_sharded_mamba_group_ids(kv_cache_config)
-            and parallel_config.tensor_parallel_size > 1
-            and parallel_config.prefill_context_parallel_size > 1
-        ):
-            raise ValueError("AscendStore sharded Mamba state transfer currently requires PCP=1 or TP=1")
-
         extra_config = vllm_config.kv_transfer_config.kv_connector_extra_config
+        if "consumer_is_to_put" in extra_config:
+            raise ValueError("consumer_is_to_put has been replaced by save_decode_cache")
+        if "consumer_is_to_load" in extra_config:
+            raise ValueError("consumer_is_to_load has been replaced by enable_lookup")
         self.use_layerwise = extra_config.get("use_layerwise", False)
-        self.consumer_is_to_put = extra_config.get("consumer_is_to_put", False)
+        self.save_decode_cache = extra_config.get("save_decode_cache", False)
+        self.supports_attention_prefetch_gate = bool(self.use_layerwise)
         self.backend_name = extra_config.get("backend", "mooncake").lower()
+        if has_hisparse_cache_layout(kv_cache_config):
+            incompatibilities = []
+            if self.use_layerwise or self.kv_role != "kv_both":
+                incompatibilities.append("requires whole-block transfers with kv_role=kv_both")
+            if not extra_config.get("load_async", False):
+                # HiSparse publishes imported Host Source pages on receive completion.
+                incompatibilities.append("requires load_async=true")
+            if extra_config.get("discard_partial_chunks", True) is not True:
+                incompatibilities.append("requires discard_partial_chunks=true to save only complete blocks")
+            # A one-token prefill chunk may take the decode path. A later
+            # prefill PUT can publish that row before the deferred page copy.
+            hisparse_config = vllm_config.attention_config.hisparse_config
+            if hisparse_config is None or not hisparse_config.eager_host_mirror:
+                incompatibilities.append("requires eager_host_mirror=true for all whole-block saves")
+            try:
+                pool_backend_class = get_backend_class(self.backend_name)
+                if pool_backend_class is None:
+                    raise ValueError(f"unknown pool backend {self.backend_name!r}")
+                pool_backend_class.validate_hisparse_colocated_config()
+            except (ValueError, OSError, NotImplementedError) as error:
+                incompatibilities.append(str(error))
+            if incompatibilities:
+                raise ValueError(
+                    "HiSparse with AscendStore has incompatible configuration:\n- " + "\n- ".join(incompatibilities)
+                )
         self.backend_class = get_backend_class(self.backend_name) if self.use_layerwise else None
         self.layerwise_data_plane = self.backend_class.layerwise_data_plane if self.backend_class is not None else None
         self.use_block_key_layerwise = self.use_layerwise and self.layerwise_data_plane == "block_key"
-        self.supports_composite_kv_loads = (
-            self.use_layerwise and self.layerwise_data_plane == "gva" and has_shared_kv_sources(vllm_config)
-        )
+        self.supports_composite_kv_loads = self.use_layerwise and has_shared_kv_sources(vllm_config)
         self.supports_composite_kv_saves = self.supports_composite_kv_loads
-        self.save_decode_cache = vllm_config.kv_transfer_config.kv_connector_extra_config.get(
-            "save_decode_cache", False
-        )
-        self.can_put = self.kv_role in ("kv_producer", "kv_both") or self.consumer_is_to_put or self.save_decode_cache
-        if (
-            self.kv_role == "kv_consumer"
-            and self.save_decode_cache
-            and not self.consumer_is_to_put
-            and self.use_layerwise
-        ):
-            raise ValueError(
-                "save_decode_cache on a kv_consumer does not support use_layerwise "
-                "unless consumer_is_to_put is enabled. "
-                "Decode-only saving is not implemented in the layerwise transfer path. "
-                "Set use_layerwise=False for Decode KV offload."
-            )
+        self.can_put = self.kv_role in ("kv_producer", "kv_both") or self.save_decode_cache
 
         connector_name = vllm_config.kv_transfer_config.kv_connector
         if connector_name == "MooncakeConnectorStoreV1":
@@ -180,7 +223,6 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
             )
 
         self._kv_cache_events: AscendStoreKVEvents | None = None
-
         self._current_step_has_real_forward = False
         # Handle to the (V2) mamba hybrid model state while its per-layer
         # align pre-copy is deferred behind this connector's layerwise loads.
@@ -302,6 +344,17 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
         assert self.connector_scheduler is not None
         return self.connector_scheduler.request_finished_all_groups(request, block_ids)
 
+    def register_finished_partial_tail(
+        self,
+        request: Request,
+        block_ids: tuple[list[int], ...],
+        partial_tail_offloads: list[tuple[int, int, int]],
+    ) -> bool:
+        assert self.connector_scheduler is not None
+        if self.connector_scheduler.use_layerwise:
+            return False
+        return self.connector_scheduler.register_finished_partial_tail(request, block_ids, partial_tail_offloads)
+
     def update_connector_output(self, connector_output: KVConnectorOutput):
         """
         Update KVConnector state from worker-side connectors output.
@@ -320,23 +373,17 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
         if self._kv_cache_events is None:
             self._kv_cache_events = kv_cache_events
         else:
+            # The retained object already counted every worker. Adding the next
+            # step's worker count would raise the quorum on every poll.
             self._kv_cache_events.add_events(kv_cache_events.get_all_events())
-            self._kv_cache_events.increment_workers(kv_cache_events.get_number_of_workers())
-        return
 
     def take_events(self) -> Iterable["KVCacheEvent"]:
-        """
-        Take the KV cache events from the connector.
-
-        Yields:
-            New KV cache events since the last call.
-        """
+        """Yield blocks whose writers have all reported, and keep the rest."""
         if self._kv_cache_events is not None:
-            self._kv_cache_events.aggregate()
-            kv_cache_events = self._kv_cache_events.get_all_events()
-            yield from kv_cache_events
-            self._kv_cache_events.clear_events()
-            self._kv_cache_events = None
+            ready = self._kv_cache_events.pop_common_events()
+            if not self._kv_cache_events.has_events():
+                self._kv_cache_events = None
+            yield from ready
 
     ############################################################
     # Worker Side Methods
@@ -464,6 +511,14 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
         if layer_name not in getattr(worker, "dflash_draft_layer_names", ()):
             worker.save_kv_layer(self._get_connector_metadata())
 
+    def has_pending_bulk_save(self) -> bool:
+        """Let the parent order Host mirroring before this connector's save hook."""
+        return (
+            self.can_put
+            and not self.use_layerwise
+            and any(request.can_save for request in self._get_connector_metadata().requests)
+        )
+
     def wait_for_save(self):
         if not self.can_put:
             # A load-only consumer has no store thread to wait for.
@@ -495,8 +550,6 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
         done_sending, done_recving = self.get_finished(finished_req_ids)
         assert self.connector_worker is not None
         failed = self.connector_worker.get_failed_requests()
-        if self.connector_worker.load_async and not self.use_layerwise:
-            done_recving |= failed
         return KVConnectorTransferResults(
             finished_sending=done_sending, finished_recving=done_recving, failed_recving=failed
         )
@@ -507,17 +560,21 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
         return self.connector_worker.get_block_ids_with_load_errors()
 
     def get_kv_connector_kv_cache_events(self) -> AscendStoreKVEvents | None:
-        """
-        Get the KV connector kv cache events collected during the last interval.
+        """Return this poll's events, including an empty batch.
+
+        An empty batch still counts this worker toward the block quorum.
+        Workers that cannot publish events stay out of that count.
         """
         assert self.connector_worker is not None
-        events = self.connector_worker.get_kv_events()
-        if not events:
+        worker = self.connector_worker
+        if not getattr(worker, "enable_kv_events", False) or getattr(worker, "kv_send_thread", None) is None:
             return None
-
-        ascend_store_kv_events = AscendStoreKVEvents(num_workers=1)
-        ascend_store_kv_events.add_events(events)
-        return ascend_store_kv_events
+        factors = getattr(worker, "group_tp_replication_factors", (1,))
+        if not isinstance(factors, tuple) or not factors:
+            factors = (1,)
+        events = AscendStoreKVEvents(num_workers=1, group_tp_replication_factors=factors)
+        events.add_events(list(worker.get_kv_events()))
+        return events
 
     def bind_gpu_block_pool(self, gpu_block_pool: "BlockPool") -> None:
         assert self.connector_scheduler is not None

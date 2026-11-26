@@ -1,6 +1,6 @@
 # Performance Benchmark
 
-This document details the benchmark methodology for vllm-ascend, aimed at evaluating the performance under a variety of workloads. To maintain alignment with vLLM, we use the [benchmark](https://github.com/vllm-project/vllm/tree/main/benchmarks) script provided by the vllm project.
+This document details the benchmark methodology for vllm-ascend, aimed at evaluating the performance under a variety of workloads. To maintain alignment with vLLM, we use the [benchmark](https://github.com/vllm-project/vllm/tree/main/benchmarks) script provided by the vLLM project.
 
 **Benchmark Coverage**: We measure offline E2E latency and throughput, and fixed-QPS online serving benchmarks. For more details, see [vllm-ascend benchmark scripts](https://github.com/vllm-project/vllm-ascend/tree/main/benchmarks).
 
@@ -10,24 +10,18 @@ This document details the benchmark methodology for vllm-ascend, aimed at evalua
 - 🟡 = Partial / Work in progress
 - 🚧 = Under development
 
-## 1. Run docker container
+## 1. Run Docker container
+
+The container needs [Ascend Docker Runtime](../../getting_started/installation.md#installation-ascend-docker-runtime) on the host; it selects the NPUs with `ASCEND_VISIBLE_DEVICES`.
 
 ```bash
-# Update DEVICE according to your device (/dev/davinci[0-7])
-export DEVICE=/dev/davinci7
+# Update ASCEND_VISIBLE_DEVICES according to the NPU you want (/dev/davinci[0-7])
+export ASCEND_VISIBLE_DEVICES=7
 export IMAGE=m.daocloud.io/quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}
 docker run --rm \
 --name vllm-ascend \
 --shm-size=1g \
---device $DEVICE \
---device /dev/davinci_manager \
---device /dev/devmm_svm \
---device /dev/hisi_hdc \
--v /usr/local/dcmi:/usr/local/dcmi \
--v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
--v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
--v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
--v /etc/ascend_install.info:/etc/ascend_install.info \
+-e ASCEND_VISIBLE_DEVICES \
 -v /root/.cache:/root/.cache \
 -p 8000:8000 \
 -e VLLM_USE_MODELSCOPE=True \
@@ -97,7 +91,7 @@ th {
     `HF_ENDPOINT` does not rewrite URLs passed directly to `wget` or `git clone`.
     For these commands, replace `huggingface.co` in the URL with an accessible
     mirror explicitly. The availability of third-party mirrors is not guaranteed
-    by vLLM or vLLM Ascend. `VLLM_USE_MODELSCOPE=True` controls model and tokenizer
+    by vLLM or vllm-ascend. `VLLM_USE_MODELSCOPE=True` controls model and tokenizer
     loading in vLLM; it does not redirect benchmark dataset downloads to ModelScope.
 
     Datasets prefixed with `HuggingFace-` in the table should set `dataset-name`
@@ -110,7 +104,7 @@ th {
 
 ### 3.2 Run basic benchmark
 
-#### 3.2.1 Online serving
+#### 3.2.1 Online Serving Benchmark
 
 First start serving your model:
 
@@ -154,7 +148,7 @@ vllm bench serve \
 
 If successful, you will see the following output:
 
-```shell
+```output
 ============ Serving Benchmark Result ============
 Successful requests:                     10
 Failed requests:                         0
@@ -192,10 +186,10 @@ vllm bench throughput \
   --output-len 128
 ```
 
-If successful, you will see the following output
+If successful, you will see the following output:
 
 ```shell
-Processed prompts: 100%|█| 10/10 [00:03<00:00,  2.74it/s, est. speed input: 351.02 toks/s, output: 351.02 toks/s]
+Processed prompts: 100%|█| 10/10 [00:03<00:00, 2.74it/s, est. speed input: 351.02 tokens/s, output: 351.02 tokens/s]
 Throughput: 2.73 requests/s, 699.93 total tokens/s, 349.97 output tokens/s
 Total num prompt tokens:  1280
 Total num output tokens:  1280
@@ -223,7 +217,7 @@ vllm bench serve --model Qwen/Qwen2.5-VL-7B-Instruct \
 --no-stream
 ```
 
-```shell
+```output
 ============ Serving Benchmark Result ============
 Successful requests:                     10
 Failed requests:                         0
@@ -269,7 +263,7 @@ vllm bench serve \
   --dataset-path <your dataset path>/datasets/ShareGPT_V3_unfiltered_cleaned_split.json
 ```
 
-```shell
+```output
 ============ Serving Benchmark Result ============
 Successful requests:                     10
 Failed requests:                         0

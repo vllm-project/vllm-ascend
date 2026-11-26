@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
+import logging
 import threading
 import time
 from dataclasses import replace
@@ -32,6 +33,7 @@ from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.metadata import (
 )
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.pull_scheduler import (
     ACK_MSG,
+    DELAYED_FREE_STATUS_INTERVAL_SECONDS,
     DONE_RECVING_MSG,
     MooncakePullConnectorScheduler,
     MooncakeSchedulerRecvingThread,
@@ -354,6 +356,134 @@ def test_sending_thread_force_frees_expired_request(monkeypatch: pytest.MonkeyPa
 
     thread._handle_finished_request("expired")
     assert thread.get_and_clear_finished_requests() == set()
+
+
+@pytest.fixture
+def status_logger(monkeypatch: pytest.MonkeyPatch) -> tuple[logging.Logger, list[logging.LogRecord]]:
+    """Return an isolated logger plus the records it emits.
+
+    A private Manager keeps the sample independent of a global
+    logging.disable() left behind by another test in the same process.
+    """
+    logger = logging.Logger("mooncake-status-test", logging.DEBUG)
+    logger.manager = logging.Manager(logging.RootLogger(logging.DEBUG))
+    records: list[logging.LogRecord] = []
+
+    class _Capture(logging.Handler):
+        def emit(self, record: logging.LogRecord) -> None:
+            records.append(record)
+
+    logger.addHandler(_Capture())
+    monkeypatch.setattr(pull_scheduler, "logger", logger)
+    return logger, records
+
+
+def _pending_lines(records: list[logging.LogRecord]) -> list[logging.LogRecord]:
+    return [r for r in records if "pending_release" in r.getMessage()]
+
+
+@pytest.mark.parametrize("debug_enabled", [False, True])
+def test_delayed_free_status_loop_observes_only_in_debug(
+    monkeypatch: pytest.MonkeyPatch,
+    status_logger: tuple[logging.Logger, list[logging.LogRecord]],
+    debug_enabled: bool,
+) -> None:
+    """DEBUG disabled skips the sample entirely; enabled samples once per window.
+
+    The control loop must not pay for the diagnostic when DEBUG is off: no
+    clock read and no queue sampling. When enabled, the first iteration
+    samples a nonzero pending release and logs it exactly once.
+    """
+    logger, records = status_logger
+    thread = make_sending_thread()
+    thread.finished_requests.put("done")
+    logger.setLevel(logging.DEBUG if debug_enabled else logging.INFO)
+    clock = MagicMock(return_value=1000.0)
+    monkeypatch.setattr(pull_scheduler, "time", SimpleNamespace(monotonic=clock))
+    state_lock_mock = MagicMock()
+    thread.state_lock = state_lock_mock  # type: ignore[assignment]
+    finished_mock = MagicMock(wraps=thread.finished_requests)
+    thread.finished_requests = finished_mock  # type: ignore[assignment]
+    thread.stop_event.is_set = MagicMock(side_effect=[False, True])  # type: ignore[method-assign]
+    sock = MagicMock()
+    sock.recv_multipart.side_effect = zmq.Again()  # type: ignore[attr-defined]
+
+    thread._run_busy_loop(sock)
+
+    assert clock.call_count == int(debug_enabled)
+    assert finished_mock.qsize.call_count == int(debug_enabled)
+    assert len(_pending_lines(records)) == int(debug_enabled)
+    state_lock_mock.__enter__.assert_not_called()
+    sock.recv_multipart.assert_called_once()
+    assert finished_mock.get_nowait() == "done"
+
+
+def test_delayed_free_status_cadence_and_read_only(
+    monkeypatch: pytest.MonkeyPatch, status_logger: tuple[logging.Logger, list[logging.LogRecord]]
+) -> None:
+    """The sample runs on its cadence and never reaps, locks or drains.
+
+    An expired lease must stay in the ledger for the normal drain path, the
+    bookkeeping snapshot must not move, and a drain by the hook must still
+    return every queued id.
+    """
+    _, records = status_logger
+    thread = make_sending_thread()
+    clock = MagicMock(return_value=1000.0)
+    monkeypatch.setattr(pull_scheduler, "time", SimpleNamespace(monotonic=clock))
+    thread.add_delayed_request("expired")
+    thread.add_delayed_request("done")
+    thread._handle_finished_request("done")
+    records.clear()  # the lease-finish debug line is not a status sample
+    before = (dict(thread.delayed_free_requests), dict(thread.renewed_requests), thread.finished_requests.qsize())
+    clock.return_value += 40  # The reporter must not reap the expired lease.
+
+    thread._report_delayed_free_status()
+    lines = _pending_lines(records)
+    assert len(lines) == 1
+    assert lines[0].getMessage() == "Mooncake delayed-free status: engine_id=engine-p pending_release=1"
+    clock.return_value += DELAYED_FREE_STATUS_INTERVAL_SECONDS / 2
+    thread._report_delayed_free_status()
+    assert len(_pending_lines(records)) == 1
+    clock.return_value += DELAYED_FREE_STATUS_INTERVAL_SECONDS / 2
+    thread._report_delayed_free_status()
+    assert len(_pending_lines(records)) == 2
+    assert before == (
+        dict(thread.delayed_free_requests),
+        dict(thread.renewed_requests),
+        thread.finished_requests.qsize(),
+    )
+
+    assert thread.get_and_clear_finished_requests() == {"done", "expired"}
+    records.clear()
+    clock.return_value += DELAYED_FREE_STATUS_INTERVAL_SECONDS
+    thread._report_delayed_free_status()
+    assert _pending_lines(records) == []  # Empty queues stay silent.
+
+
+def test_delayed_free_status_failure_keeps_control_loop_running(
+    monkeypatch: pytest.MonkeyPatch, status_logger: tuple[logging.Logger, list[logging.LogRecord]]
+) -> None:
+    """A failing sample is logged and the control loop keeps serving.
+
+    The reporter shares the sending thread with DONE and heartbeat handling,
+    so an observation error must be swallowed and the loop must still reach
+    the socket receive path.
+    """
+    _, records = status_logger
+    thread = make_sending_thread()
+    monkeypatch.setattr(pull_scheduler, "time", SimpleNamespace(monotonic=lambda: 1000.0))
+    finished_mock = MagicMock()
+    finished_mock.qsize.side_effect = RuntimeError("observation failed")
+    thread.finished_requests = finished_mock  # type: ignore[assignment]
+    thread.stop_event.is_set = MagicMock(side_effect=[False, True])  # type: ignore[method-assign]
+    sock = MagicMock()
+    sock.recv_multipart.side_effect = zmq.Again()  # type: ignore[attr-defined]
+
+    thread._run_busy_loop(sock)
+
+    assert [r.getMessage() for r in records] == ["Mooncake delayed-free status report failed"]
+    sock.recv_multipart.assert_called_once()
 
 
 def test_recving_thread_reuses_socket_after_ack_and_discards_it_on_error(

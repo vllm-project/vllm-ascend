@@ -15,6 +15,7 @@ from vllm import envs
 
 from tests.e2e.common.rlhf.weight_transfer.checkpoint_adapters import (
     deepseek_v4_checkpoint_name,
+    deepseek_v4_vision_params,
     expand_fused_expert_params,
     expand_minimax_m3_params,
     minimax_m3_checkpoint_name,
@@ -50,6 +51,8 @@ class WeightUpdateModelCase:
         "The capital of France is",
         "Explain why the sky is blue in one sentence:",
     )
+    extra_param_builder: Callable[[Any], list[tuple[str, tuple[int, ...], Any]]] | None = None
+    image_prompt: bool = False
     # One representative model covers both backends and packing modes.
     full_transfer_matrix: bool = False
     skip_reason: str | None = None
@@ -204,6 +207,28 @@ DEEPSEEK_V41_ENGRAM_CASE = WeightUpdateModelCase(
 
 
 DEEPSEEK_V41_CASES = (DEEPSEEK_V41_ENGRAM_CASE,)
+
+
+DEEPSEEK_V4_VISION_CASE = WeightUpdateModelCase(
+    id="deepseek-v4-flash-vision-bf16-4l-vit2-e8-hash3",
+    model="deepseek-ai/DeepSeek-V4-Flash-Vision-Exp",
+    full_transfer_matrix=True,
+    hf_overrides={
+        "architectures": ["DeepseekV4ForConditionalGeneration"],
+        "num_hidden_layers": 4,
+        "vision_n_layers": 2,
+        "n_routed_experts": 8,
+        "num_hash_layers": 3,
+        "num_nextn_predict_layers": 0,
+        "dspark_target_layer_ids": [],
+        "quantization_config": None,
+    },
+    checkpoint_name_map=deepseek_v4_checkpoint_name,
+    expert_intermediate_size=2048,
+    extra_param_builder=deepseek_v4_vision_params,
+    image_prompt=True,
+    extra_server_args=("--tokenizer-mode", "deepseek_v4"),
+)
 
 
 GLM51_CASE = WeightUpdateModelCase(

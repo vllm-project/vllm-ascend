@@ -534,7 +534,8 @@ class TestGlobalTERegisterBufferDedup(unittest.TestCase):
                 unittest.mock.call(0x3000, 256),
             ],
         )
-        self.assertTrue(backend.is_register_buffer)
+        self.assertEqual(backend.registered_buffers, [(0x1000, 64), (0x2000, 128), (0x3000, 256)])
+        self.assertEqual(backend._unregistered_ptrs, set())
 
     def test_failed_registration_is_not_cached(self):
         backend = self._make_backend()

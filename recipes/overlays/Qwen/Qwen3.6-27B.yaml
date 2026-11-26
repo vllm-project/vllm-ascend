@@ -47,10 +47,11 @@ variants:
   ascend_w8a8:
     model_id: Eco-Tech/Qwen3.6-27B-w8a8
     precision: int8
-    label: W8A8 (Ascend A3)
+    label: W8A8 (Ascend A2/A3)
     vram_minimum_gb: 33
     supported_hardware:
       - ascend_910c
+      - ascend_910b
     tp: 2
     min_vllm_version: 0.23.0
     default_modes:
@@ -86,7 +87,37 @@ variants:
     hardware_overrides:
       ascend_910c:
         docker_image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:v0.23.0-a3
-    description: ModelSlim INT8 W8A8 checkpoint for one Atlas 800 A3 node (16x Ascend 910C), using TP2+DP8. Requires --quantization ascend.
+      # Atlas 800I A2 layout from the Modelers.cn deployment guide (A2 tab):
+      # TP2+DP1, full 262144 window, HCCL 1024, AIV expansion. The variant's
+      # TP2+DP8 A3 baseline is overridden per-flag (last-wins). No jemalloc
+      # LD_PRELOAD on 910B (confirmed 2026-11-19).
+      ascend_910b:
+        docker_image: quay.io/ascend/vllm-ascend:v0.32.0rc1
+        install:
+          pip: false
+        docker_serve_command: vllm serve
+        extra_args:
+          - '--data-parallel-size'
+          - '1'
+          - '--served-model-name'
+          - qwen3.6
+          - '--max-num-seqs'
+          - '128'
+          - '--max-model-len'
+          - '262144'
+          - '--max-num-batched-tokens'
+          - '25600'
+          - '--gpu-memory-utilization'
+          - '0.94'
+          - '--compilation-config'
+          - '{"cudagraph_capture_sizes":[1,2,3,4,8,12,16,24,32,48],"cudagraph_mode":"FULL_DECODE_ONLY"}'
+          - '--mm-processor-cache-gb'
+          - '0'
+        extra_env:
+          VLLM_USE_MODELSCOPE: 'True'
+          HCCL_BUFFSIZE: '1024'
+          HCCL_OP_EXPANSION_MODE: AIV
+    description: ModelSlim INT8 W8A8 checkpoint for one Atlas 800 A3 node (16x Ascend 910C) or one Atlas 800I A2 node (8x Ascend 910B). Requires --quantization ascend.
   default:
     hardware_overrides:
       ascend_910c:
@@ -121,6 +152,7 @@ meta:
   hardware:
     ascend_950dt: verified
     ascend_910c: verified
+    ascend_910b: verified
 strategy_overrides:
   multi_node_tp:
     hardware_overrides:
@@ -130,3 +162,80 @@ strategy_overrides:
         extra_args: ['--data-parallel-size', '1']
       ascend_950dt:
         extra_args: ['--data-parallel-size', '1']
+      ascend_910b:
+        extra_args: ['--data-parallel-size', '1']
+# The A2 tutorial launches without --speculative-config, but this variant's
+# default_modes force-enables the qwen3_5_mtp feature on every hardware.
+# Per-hardware default_modes are not expressible, so the mode itself is opted
+# out on 910B: no allowed mode remains, synthesis emits no --speculative-config
+# there, while 910C/950DT keep their MTP rendering untouched.
+features:
+  spec_decoding:
+    modes:
+      qwen3_5_mtp:
+        hardware:
+          ascend_910b: unsupported
+# The Ascend images ship no vllm-rs binary, so the Rust frontend aborts at
+# startup (FileNotFoundError: vllm-rs). The preset below pins the Python
+# frontend on 910B only — presets match their hardware exactly, so 910C/950DT
+# renderings keep whatever the core recipe selects for them.
+presets:
+  ascend_910b_python:
+    label: Python frontend (no vllm-rs in the A2 image)
+    hardware: ascend_910b
+    default: true
+    variants: [ascend_w8a8]
+    source:
+      label: Modelers.cn deployment guide — Qwen3.6-27B on Atlas 800I A2
+      href: https://modelers.cn/models/vLLM_Ascend/Qwen3.6-27B
+    select:
+      frontend: python
+guide_sections:
+  ascend: |
+    ### Huawei Ascend 910B-w8a8 (vLLM Ascend)
+
+    Verified on Atlas 800I A2 (8x Ascend 910B, 64 GB each), TP2+DP1, vLLM Ascend
+    from the `quay.io/ascend/vllm-ascend:v0.32.0rc1` image, following the
+    [Modelers.cn deployment guide](https://modelers.cn/models/vLLM_Ascend/Qwen3.6-27B).
+
+    The ModelSlim INT8 build (`Eco-Tech/Qwen3.6-27B-w8a8`) is the checkpoint to
+    use here. `--quantization ascend` is what selects the ModelSlim scheme —
+    without it the loader treats the weights as float. The guide's A2 launch
+    line runs the full 262,144-token window with async scheduling and no
+    speculative decoding: MTP is not enabled on this hardware.
+
+    Both the weight and the image come from ModelScope, not HuggingFace: set
+    `VLLM_USE_MODELSCOPE=True` or pass a local path.
+
+    ```bash
+    export VLLM_USE_MODELSCOPE=True
+    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+    export HCCL_OP_EXPANSION_MODE=AIV
+    export HCCL_BUFFSIZE=1024
+    export OMP_NUM_THREADS=1
+    export TASK_QUEUE_ENABLE=1
+
+    vllm serve Eco-Tech/Qwen3.6-27B-w8a8 \
+      --tensor-parallel-size 2 \
+      --data-parallel-size 1 \
+      --quantization ascend \
+      --served-model-name qwen3.6 \
+      --max-model-len 262144 \
+      --max-num-batched-tokens 25600 \
+      --max-num-seqs 128 \
+      --gpu-memory-utilization 0.94 \
+      --compilation-config '{"cudagraph_capture_sizes":[1,2,3,4,8,12,16,24,32,48],"cudagraph_mode":"FULL_DECODE_ONLY"}' \
+      --trust-remote-code \
+      --async-scheduling \
+      --no-enable-prefix-caching \
+      --mm-processor-cache-gb 0 \
+      --additional-config '{"enable_cpu_binding":true}' \
+      --enable-auto-tool-choice \
+      --tool-call-parser qwen3_coder \
+      --reasoning-parser qwen3 \
+      --mm-encoder-tp-mode data
+    ```
+
+    The draft-free A2 launch trades the MTP speedup for the guide's verified
+    stability; if you enable speculative decoding anyway, spell the method
+    `qwen3_5_mtp` and re-check memory headroom at the 262K window.

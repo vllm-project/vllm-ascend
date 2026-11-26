@@ -111,8 +111,10 @@ def test_v2_sparse_layerwise_mode_is_rejected_before_component_construction(monk
 
 
 @pytest.mark.parametrize("role", [KVConnectorRole.WORKER, KVConnectorRole.SCHEDULER])
-def test_v2_sparse_pull_constructs_only_the_specialized_component(monkeypatch, role):
-    config = SimpleNamespace(kv_transfer_config=SimpleNamespace(kv_connector_extra_config={}))
+@pytest.mark.parametrize("mode", [None, "batch", "request"])
+def test_v2_sparse_pull_constructs_only_the_specialized_component(monkeypatch, role, mode):
+    extra = {} if mode is None else {"pull_transfer_mode": mode}
+    config = SimpleNamespace(kv_transfer_config=SimpleNamespace(kv_connector_extra_config=extra))
     monkeypatch.setattr(
         compatible,
         "init_ascend_config",

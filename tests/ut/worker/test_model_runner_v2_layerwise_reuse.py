@@ -79,7 +79,6 @@ def test_real_allocator_aliases_only_planned_slots(monkeypatch, reuse_enabled, z
     vllm_config = SimpleNamespace(kv_transfer_config=None)
     monkeypatch.setattr(attn_utils, "get_current_vllm_config", lambda: vllm_config)
     monkeypatch.setattr(attn_utils.KVPPConfig, "from_vllm_config", lambda _: SimpleNamespace(size=1))
-    monkeypatch.setattr(attn_utils, "_is_dsv4_model", lambda _: False)
     monkeypatch.setattr(attn_utils, "enable_sfa", lambda _: cache_kind == "sfa_c8")
     monkeypatch.setattr(attn_utils, "enable_fa_quant", lambda _: False)
     shares = reuse_enabled and zero_stride

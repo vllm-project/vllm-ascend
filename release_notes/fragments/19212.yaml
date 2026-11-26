@@ -2,6 +2,12 @@ pr: 19212
 entries:
   - category: config
     text: >-
+      MooncakeConnectorV2 with Sparse KV offload follows the upstream default
+      per-request completion, including Host landing before each request is
+      reported ready. Set kv_connector_extra_config.pull_transfer_mode to
+      "batch" to retain a batch completion barrier.
+  - category: config
+    text: >-
       MooncakeConnectorV2 with Sparse KV offload requires the same original
       prompt on P and D. D generates the complete output; appending P's first
       output token to D's prompt is rejected before receiving KV. Ordinary

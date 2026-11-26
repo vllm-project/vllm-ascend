@@ -555,7 +555,6 @@ def _mixed_quant_sparse_flash_mla_metadata_impl(
     )
 
 
-@torch.library.impl("vllm_ascend::mixed_quant_sparse_flash_mla", "PrivateUse1")
 def _mixed_quant_sparse_flash_mla_impl(
     q,
     *,
@@ -617,7 +616,24 @@ def _mixed_quant_sparse_flash_mla_impl(
         out=attn_out,
         lse=softmax_lse,
     )
+    # Temporary workaround for eager execution. CannBotDSL records these
+    # temporaries on the submission stream. Retire those uses after a device
+    # event so the allocator can reuse the buffers without synchronizing the
+    # host. Graph capture retains the buffer lifetimes.
+    # TODO(lihefei): Remove this workaround once CannBotDSL manages eager
+    # buffer lifetimes without caller-side cleanup.
+    if not torch.npu.is_current_stream_capturing():
+        from torch_npu.npu.utils import _erase_stream
+
+        stream = torch.npu.current_stream(q.device)
+        submitted = stream.record_event()
+        stream.wait_event(submitted)
+        _erase_stream(q, stream)
+        _erase_stream(attn_out, stream)
     return (attn_out, softmax_lse)
+
+
+torch.library.impl("vllm_ascend::mixed_quant_sparse_flash_mla", "PrivateUse1", _mixed_quant_sparse_flash_mla_impl)
 
 
 quant_lightning_indexer_metadata = torch.ops.vllm_ascend.quant_lightning_indexer_metadata.default

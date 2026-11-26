@@ -20,7 +20,10 @@ from vllm_ascend.worker.v2.model_states import default
 @pytest.mark.parametrize("mode", [CUDAGraphMode.NONE, CUDAGraphMode.FULL])
 @pytest.mark.parametrize("local_hit", [False, True])
 @pytest.mark.parametrize("dummy", [False, True])
-def test_first_decode_primes_correct_group_before_graph_or_eager_forward(monkeypatch, computed, mode, local_hit, dummy):
+@pytest.mark.parametrize("delayed_d2h", [False, True])
+def test_first_decode_primes_correct_group_before_graph_or_eager_forward(
+    monkeypatch, computed, mode, local_hit, dummy, delayed_d2h
+):
     pd = MooncakeSFAPDState(main_group_id=1)
     pd.update({"r": 2}, {} if local_hit else {"r": computed + 1})
     pd.record_received({"r"}, set())
@@ -51,6 +54,7 @@ def test_first_decode_primes_correct_group_before_graph_or_eager_forward(monkeyp
         num_computed_tokens_np=np.array([computed]),
         query_start_loc_np=np.array([0, 1]),
         is_prefilling_np=np.array([False]),
+        prefill_runs_as_decode_np=np.array([False]),
         num_scheduled_tokens=torch.tensor([1]),
         query_start_loc=torch.tensor([0, 1]),
         seq_lens=torch.tensor([computed + 1]),
@@ -61,6 +65,31 @@ def test_first_decode_primes_correct_group_before_graph_or_eager_forward(monkeyp
         is_dummy=dummy,
     )
     manager = SimpleNamespace(dense_fill_copy_sfa_rows=MagicMock(), restore_copy_sfa_tails=MagicMock())
+    state.runner_plan_launch_d2h = MagicMock()
+    if delayed_d2h:
+        for name, dtype in [("_offload_pool_generations", np.int64), ("_offload_stable_prefixes", np.int32)]:
+            values = np.zeros(4, dtype=dtype)
+            tensor = torch.from_numpy(values)
+            setattr(state, name, SimpleNamespace(np=values, cpu=tensor, gpu=tensor, copy_to_gpu=MagicMock()))
+        manager.d2h_owner_generations_cpu = np.full(4, -1, dtype=np.int64)
+        manager.d2h_stable_prefixes_cpu = np.zeros(4, dtype=np.int32)
+        manager.d2h_host_kv_cache_group_id = 1
+
+        def initialize(slots, generations, prefixes):
+            manager.d2h_owner_generations_cpu[slots] = generations
+            manager.d2h_stable_prefixes_cpu[slots] = prefixes
+
+        manager.initialize_d2h_slots = MagicMock(side_effect=initialize)
+
+        def plan(**kwargs):
+            # A missing/failed first-decode copy must never start D2H.
+            assert not pd.pending
+            assert kwargs["num_real_reqs"] == 1
+            np.testing.assert_array_equal(kwargs["pool_slots"], [2])
+            np.testing.assert_array_equal(kwargs["pool_generations"], [manager.d2h_owner_generations_cpu[2]])
+            np.testing.assert_array_equal(kwargs["block_table"], [[7, 8]])
+
+        state.runner_plan_launch_d2h.side_effect = plan
     worker = MooncakeSFAConnectorWorker.__new__(MooncakeSFAConnectorWorker)
     worker._sfa_pd_state = pd
     worker._sfa_host_kv = SimpleNamespace(manager=manager)
@@ -96,6 +125,7 @@ def test_first_decode_primes_correct_group_before_graph_or_eager_forward(monkeyp
         assert pd.pending == pd.received == {"r"}
         manager.dense_fill_copy_sfa_rows.assert_not_called()
         manager.restore_copy_sfa_tails.assert_not_called()
+        state.runner_plan_launch_d2h.assert_not_called()
         assert builds[-1]["copy_sfa_restore_tails"] is False
         return
     needs_dense = local_hit and computed <= 2048
@@ -108,6 +138,7 @@ def test_first_decode_primes_correct_group_before_graph_or_eager_forward(monkeyp
         with pytest.raises(RuntimeError, match="initial copy failed"):
             state.prepare_attn(batch, mode, tables, torch.empty(0), [], None)
         assert pd.pending == pd.received == {"r"}
+        state.runner_plan_launch_d2h.assert_not_called()
         operation.reset_mock()
         operation.side_effect = None
     if needs_tail and not local_hit:
@@ -115,11 +146,13 @@ def test_first_decode_primes_correct_group_before_graph_or_eager_forward(monkeyp
         with pytest.raises(RuntimeError, match="missing its tail-copy metadata"):
             state.prepare_attn(batch, mode, tables, torch.empty(0), [], None)
         assert pd.pending == pd.received == {"r"}
+        state.runner_plan_launch_d2h.assert_not_called()
         missing_tail_metadata = False
     fail_metadata_build = True
     with pytest.raises(RuntimeError, match="metadata build failed"):
         state.prepare_attn(batch, mode, tables, torch.empty(0), [], None)
     assert pd.pending == pd.received == {"r"}
+    state.runner_plan_launch_d2h.assert_not_called()
     fail_metadata_build = False
     state.prepare_attn(batch, mode, tables, torch.empty(0), [], None)
     assert not pd.pending
@@ -135,6 +168,10 @@ def test_first_decode_primes_correct_group_before_graph_or_eager_forward(monkeyp
     state.prepare_attn(batch, mode, tables, torch.empty(0), [], None)
     assert before == (manager.dense_fill_copy_sfa_rows.call_count, manager.restore_copy_sfa_tails.call_count)
     assert builds[-1]["copy_sfa_restore_tails"] is False
+    assert state.runner_plan_launch_d2h.call_count == (2 if delayed_d2h else 0)
+    if delayed_d2h:
+        manager.initialize_d2h_slots.assert_called_once()
+        assert builds[-1]["req_topk_buffer_stable_prefixes"][0] == computed // 128 * 128
 
 
 def test_shared_rollback_fills_keep_main_group_after_pd_initialization():

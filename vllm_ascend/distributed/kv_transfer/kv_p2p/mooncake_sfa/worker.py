@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import threading
 import time
+from functools import partial
 from typing import Any
 
 import torch
@@ -45,7 +46,6 @@ class MooncakeSFAPullRecvingThread(MooncakePullRecvingThread):
             raise ValueError("Mooncake SFA receiving requires a staging reader")
         super().__init__(*args, **kwargs)
         self.staging_reader = staging_reader
-        self._sfa_batch_requests: dict[str, ReqMeta] | None = None
         self._sfa_host_kv = staging_reader.host_kv
         self._transfer_targets = staging_reader.get_transfer_targets(self.layer_names, self.kv_caches_base_addr)
 
@@ -55,21 +55,10 @@ class MooncakeSFAPullRecvingThread(MooncakePullRecvingThread):
             raise ValueError("Mooncake V2 SFA PD hot/tail reads require a producer without context parallelism")
         return metadata
 
-    def _handle_requests(
-        self, remote_engine_id: str, remote_host: str, remote_port: int, requests: dict[str, ReqMeta]
-    ) -> set[str]:
-        """Retain request resources until every submitted Host landing has stopped."""
-        # The inherited loop handles one batch at a time and joins every
-        # submitted bucket before returning. Keep this read-only context
-        # available to executor workers until their landing has drained.
-        self._sfa_batch_requests = requests
-        try:
-            return super()._handle_requests(remote_engine_id, remote_host, remote_port, requests)
-        finally:
-            # The shared loop marks failures and reports completion only after
-            # this returns. A failed wait must retain owners and keep retrying.
-            self._wait_for_pending_landing()
-            self._sfa_batch_requests = None
+    def _get_transfer_bucket_runner(self, requests: dict[str, ReqMeta]):
+        # Futures may outlive the receive loop's current queue item. Borrow a
+        # private mapping per submission instead of sharing mutable batch state.
+        return partial(self._execute_tp_transfer_bucket, requests=dict(requests))
 
     def _wait_for_pending_landing(self) -> None:
         while True:
@@ -430,8 +419,6 @@ class MooncakeSFAPullRecvingThread(MooncakePullRecvingThread):
                 transfer_targets=transfer_targets,
             )
 
-        if requests is None:
-            requests = getattr(self, "_sfa_batch_requests", None)
         self._append_additional_reads(
             remote_metadata,
             remote_pcp_rank,
@@ -531,14 +518,21 @@ class MooncakeSFAPullRecvingThread(MooncakePullRecvingThread):
     ) -> int:
         # Success includes landing and event drain, before completion can
         # release the producer's blocks or make Host KV visible to decode.
-        return self.staging_reader.batch_transfer_sync_read(
-            session_id,
-            src_list,
-            dst_list,
-            length_list,
-            ",".join(request_ids),
-            **({"transfer_targets": transfer_targets} if transfer_targets is not None else {}),
-        )
+        try:
+            return self.staging_reader.batch_transfer_sync_read(
+                session_id,
+                src_list,
+                dst_list,
+                length_list,
+                ",".join(request_ids),
+                **({"transfer_targets": transfer_targets} if transfer_targets is not None else {}),
+            )
+        except Exception:
+            # Successful READs already include Host landing. A failed wait can
+            # leave copies running: keep this Future pending until they drain,
+            # then let the inherited completion path report the failure.
+            self._wait_for_pending_landing()
+            raise
 
 
 class MooncakeSFAConnectorWorker(MooncakePullConnectorWorker):

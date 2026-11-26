@@ -94,7 +94,7 @@ def test_gemma4_26b_a4b_moe_full_decode_graph() -> None:
     quantization="BF16",
     graph_mode="full_decode_only",
 )
-@patch.dict(os.environ, {**_GRAPH_ENV, "VLLM_USE_V2_MODEL_RUNNER": "1"})
+@patch.dict(os.environ, {**_GRAPH_ENV})
 @wait_until_npu_memory_free()
 def test_gemma4_mtp_spec_decode_model_runner_v2() -> None:
     """Gemma4 MTP keeps its acceptance on Model Runner V2."""

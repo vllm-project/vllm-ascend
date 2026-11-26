@@ -5,10 +5,10 @@ class GlobalTE:
     def __init__(self):
         self.transfer_engine = None
         self._initialization_attempted = False
-        self.is_register_buffer: bool = False
-        # Keep registration order across sleep/wake cycles.
-        # False entries remain known, but must be registered again before use.
-        self.registered_buffers: dict[tuple[int, int], bool] = {}
+        self.registered_buffers: list[tuple[int, int]] = []
+        # Buffers unregistered since the last full (re)registration, so a
+        # failure part-way through either direction can be resumed.
+        self._unregistered_ptrs: set[int] = set()
         self.transfer_engine_lock = threading.Lock()
         self.register_buffer_lock = threading.Lock()
 
@@ -50,53 +50,52 @@ class GlobalTE:
     def register_buffer(self, ptrs: list[int], sizes: list[int]):
         with self.register_buffer_lock:
             assert self.transfer_engine is not None, "Transfer engine must be initialized"
-            # Register each buffer at most once, so lazily allocated buffers
-            # (e.g. the NPU staging window) can register after the initial
-            # kv_caches registration instead of being silently skipped.
+            # Admit late-created staging buffers without registering known
+            # regions twice. Dropped regions remain known: only
+            # reregister_buffer() restores them after sleep or partial failure.
+            known_regions = set(self.registered_buffers)
             for ptr, size in zip(ptrs, sizes):
-                key = (int(ptr), int(size))
-                if self.registered_buffers.get(key, False):
+                ptr, size = int(ptr), int(size)
+                if (ptr, size) in known_regions:
                     continue
-                ptr, size = key
                 ret_value = self.transfer_engine.register_memory(ptr, size)
                 if ret_value != 0:
                     raise RuntimeError(f"Mooncake memory registration failed for ptr={ptr:#x}, ret_value={ret_value}")
-                self.registered_buffers[key] = True
-                self.is_register_buffer = True
+                self.registered_buffers.append((ptr, size))
+                known_regions.add((ptr, size))
 
     def unregister_buffer(self):
         with self.register_buffer_lock:
-            if not self.is_register_buffer or not self.registered_buffers:
+            if len(self._unregistered_ptrs) == len(self.registered_buffers):
                 return
             assert self.transfer_engine is not None, "Transfer engine must be initialized"
 
+            # Record each buffer as it goes, so that after a failure part-way
+            # reregister_buffer() restores exactly the ones this call dropped.
             # Ascend Direct unregister_memory also disconnects peers.
-            for key, registered in self.registered_buffers.items():
-                if not registered:
+            for ptr, _ in self.registered_buffers:
+                if ptr in self._unregistered_ptrs:
                     continue
-                ptr = key[0]
                 ret_value = self.transfer_engine.unregister_memory(ptr)
                 if ret_value != 0:
                     raise RuntimeError(f"Mooncake memory unregistration failed for ptr={ptr:#x}, ret_value={ret_value}")
-
-                self.registered_buffers[key] = False
-                self.is_register_buffer = any(self.registered_buffers.values())
+                self._unregistered_ptrs.add(ptr)
 
     def reregister_buffer(self):
         with self.register_buffer_lock:
-            if not self.registered_buffers:
+            if not self._unregistered_ptrs:
                 return
             assert self.transfer_engine is not None, "Transfer engine must be initialized"
 
-            for key, registered in self.registered_buffers.items():
-                if registered:
+            for ptr, size in self.registered_buffers:
+                if ptr not in self._unregistered_ptrs:
                     continue
-                ptr, size = key
                 ret_value = self.transfer_engine.register_memory(ptr, size)
                 if ret_value != 0:
-                    raise RuntimeError(f"Mooncake memory registration failed for ptr={ptr:#x}, ret_value={ret_value}")
-                self.registered_buffers[key] = True
-                self.is_register_buffer = True
+                    raise RuntimeError(
+                        f"Mooncake memory re-registration failed for ptr={ptr:#x}, ret_value={ret_value}"
+                    )
+                self._unregistered_ptrs.discard(ptr)
 
 
 global_te = GlobalTE()

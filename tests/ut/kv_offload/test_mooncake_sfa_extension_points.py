@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+import threading
 from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
 from unittest.mock import MagicMock
@@ -15,7 +16,7 @@ from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_sfa.worker import (
 )
 
 from .mooncake_sfa_helpers import make_thread
-from .mooncake_v2.helpers import make_metadata_groups, make_pp_metadata, make_transfer_metadata
+from .mooncake_v2.helpers import make_pp_metadata, make_transfer_metadata
 from .mooncake_v2.test_pull_worker import make_req_meta
 
 
@@ -46,6 +47,22 @@ def test_sfa_receiver_rejects_missing_reader_before_starting() -> None:
         MooncakeSFAPullRecvingThread(staging_reader=None)
 
 
+@pytest.mark.parametrize("mode", [None, "batch", "request", "invalid"])
+def test_sfa_inherits_upstream_pull_modes_and_default(mode):
+    extra = {} if mode is None else {"pull_transfer_mode": mode}
+    config = SimpleNamespace(
+        kv_transfer_config=SimpleNamespace(get_from_extra_config=lambda key, default: extra.get(key, default))
+    )
+    if mode == "invalid":
+        for cls in [MooncakeSFAPullRecvingThread, MooncakePullRecvingThread]:
+            with pytest.raises(ValueError, match="must be 'batch' or 'request'"):
+                cls._get_pull_transfer_mode(config)
+    else:
+        expected = mode or "request"
+        assert MooncakeSFAPullRecvingThread._get_pull_transfer_mode(config) == expected
+        assert MooncakePullRecvingThread._get_pull_transfer_mode(config) == expected
+
+
 @pytest.mark.parametrize("result", [0, -1])
 def test_execute_bucket_waits_for_staged_landing_and_propagates_failure(result):
     reader = MagicMock()
@@ -62,27 +79,29 @@ def test_execute_bucket_waits_for_staged_landing_and_propagates_failure(result):
     thread.engine.batch_transfer_sync_read.assert_not_called()
 
 
-@pytest.mark.parametrize("outcome", [set(), {"request"}, RuntimeError("transfer failed")])
-def test_receive_drains_before_returning_failures_or_propagating_an_error(monkeypatch, outcome):
+@pytest.mark.parametrize("outcome", [0, -1, RuntimeError("transfer failed")])
+def test_read_failure_drains_before_propagating_to_the_future(outcome):
     events = []
     reader = MagicMock()
     reader.drain_pending_landing.side_effect = lambda: events.append("drained")
     thread = make_thread(staging_reader=reader)
 
-    def transfer(*_args):
+    def transfer(*_args, **_kwargs):
         events.append("submitted")
         if isinstance(outcome, Exception):
             raise outcome
         return outcome
 
-    monkeypatch.setattr(MooncakePullRecvingThread, "_handle_requests", transfer)
+    reader.batch_transfer_sync_read.side_effect = transfer
     if isinstance(outcome, Exception):
         with pytest.raises(RuntimeError, match="transfer failed"):
-            thread._handle_requests("engine", "host", 6000, {})
+            thread._read_transfer_bucket("peer", [], [], [], ["request"], None)
+        assert events == ["submitted", "drained"]
+        reader.drain_pending_landing.assert_called_once_with()
     else:
-        assert thread._handle_requests("engine", "host", 6000, {}) == outcome
-    assert events == ["submitted", "drained"]
-    reader.drain_pending_landing.assert_called_once_with()
+        assert thread._read_transfer_bucket("peer", [], [], [], ["request"], None) == outcome
+        assert events == ["submitted"]
+        reader.drain_pending_landing.assert_not_called()
 
 
 def test_thread_factory_injects_reader_and_leaves_startup_to_public_worker(monkeypatch):
@@ -106,46 +125,158 @@ def test_thread_factory_injects_reader_and_leaves_startup_to_public_worker(monke
     thread.start.assert_not_called()
 
 
-def test_executor_buckets_keep_batch_context_until_join_and_drain():
-    reader = MagicMock()
-    thread = make_thread(staging_reader=reader)
-    remote = make_metadata_groups(pp_metadata=make_pp_metadata())
+def _prepare_sfa_receive(thread, pp_ranks=(0,)):
+    """Use real bucket tasks; replace address layout and device I/O boundaries."""
+    pp = SimpleNamespace(
+        metadata_by_pcp_rank={
+            0: SimpleNamespace(metadata_by_tp_rank={0: SimpleNamespace(local_ip="peer", te_rpc_port=9)})
+        }
+    )
+    remote = SimpleNamespace(metadata_by_pp_rank={rank: pp for rank in pp_ranks}, pcp_size=1, tp_size=1, dcp_size=1)
     thread._get_remote_metadata = MagicMock(return_value=remote)
-    thread.remote_tp_rank_groups = {"engine": {0: {(0, 0): [[0]]}}}
-    thread.remote_layer_index_pairs = {"engine": {0: [(0, 0)]}}
-    events = []
+    thread.remote_tp_rank_groups = {"engine": {rank: {(0, 0): [[0]]} for rank in pp_ranks}}
+    thread.remote_layer_index_pairs = {"engine": {rank: [(0, 0)] for rank in pp_ranks}}
+    thread.layer_names = ["main"]
+    thread.local_metadata = SimpleNamespace(local_ip="local")
+    thread.tp_rank = 0
+    thread._transfer_targets = None
+    seen = []
 
-    def buckets(*_args):
-        request_id = next(iter(thread._sfa_batch_requests))
-        return (
-            {(0, 0): {0: {(0, 0): [(request_id, [1], [2])]}}},
-            {(0, 0): {request_id}},
-        )
+    def buckets(_metadata, _layers, _groups, _pcp, _dcp, requests, _cache, **_kwargs):
+        entries = [(req_id, [1], [2]) for req_id in requests]
+        return {(0, 0): {0: {(0, 0): entries}}}, {(0, 0): set(requests)}
 
-    def execute(*_args):
-        request_id = next(iter(thread._sfa_batch_requests))
-        events.append(("read", request_id))
-        if request_id == "failed":
-            raise RuntimeError("READ failed")
-
-    def drain():
-        events.append(("drain", next(iter(thread._sfa_batch_requests))))
+    def additional(_metadata, _pcp, _tp, entries, requests, src, dst, lengths, _targets):
+        request_ids = {req_id for spec in entries.values() for pairs in spec.values() for req_id, _, _ in pairs}
+        assert requests is not None and request_ids <= requests.keys()
+        seen.append((request_ids, dict(requests)))
+        src.append(1)
+        dst.append(2)
+        lengths.append(1)
 
     thread._build_transfer_block_buckets = buckets
-    thread._execute_tp_transfer_bucket = execute
-    reader.drain_pending_landing.side_effect = drain
-    with ThreadPoolExecutor(max_workers=2) as executor:
+    thread._append_spec_transfer_addresses = lambda **_kwargs: None
+    thread._append_additional_reads = additional
+    return remote, seen
+
+
+def test_executor_tasks_keep_private_request_context_after_queue_advances():
+    reader = MagicMock()
+    reader.batch_transfer_sync_read.return_value = 0
+    thread = make_thread(staging_reader=reader)
+    remote, seen = _prepare_sfa_receive(thread)
+    entered, release = threading.Event(), threading.Event()
+    first, second = {"first": make_req_meta()}, {"second": make_req_meta()}
+    original_first = dict(first)
+
+    def block_pool():
+        entered.set()
+        assert release.wait(timeout=5)
+
+    with ThreadPoolExecutor(max_workers=1) as executor:
         thread.executor = executor
-        for request_id in ["first", "failed", "last"]:
-            requests = {request_id: make_req_meta()}
-            failed = thread._handle_requests("engine", "host", 6000, requests)
-            assert failed == ({request_id} if request_id == "failed" else set())
-            assert thread._sfa_batch_requests is None
-    assert events == [
-        ("read", "first"),
-        ("drain", "first"),
-        ("read", "failed"),
-        ("drain", "failed"),
-        ("read", "last"),
-        ("drain", "last"),
-    ]
+        blocker = executor.submit(block_pool)
+        try:
+            assert entered.wait(timeout=5)
+            first_tasks, error = thread._submit_transfer_group("engine", remote, first)
+            assert error is None
+            first.clear()
+            second_tasks, error = thread._submit_transfer_group("engine", remote, second)
+            assert error is None
+        finally:
+            release.set()
+        blocker.result(timeout=5)
+        for future in [*first_tasks, *second_tasks]:
+            future.result(timeout=5)
+    assert seen == [({"first"}, original_first), ({"second"}, second)]
+    reader.drain_pending_landing.assert_not_called()
+
+
+@pytest.mark.parametrize("mode", ["request", "batch"])
+@pytest.mark.parametrize("failed", [False, True])
+def test_sfa_future_stays_pending_until_its_host_landing_finishes(mode, failed):
+    entered, release = threading.Event(), threading.Event()
+    reader = MagicMock()
+    thread = make_thread(staging_reader=reader, pull_transfer_mode=mode)
+    _prepare_sfa_receive(thread)
+
+    def landing():
+        entered.set()
+        assert release.wait(timeout=5), "Test did not release the pending Host landing"
+
+    def read(*_args, **_kwargs):
+        if failed:
+            raise RuntimeError("Host landing wait failed")
+        landing()
+        return 0
+
+    reader.batch_transfer_sync_read.side_effect = read
+    reader.drain_pending_landing.side_effect = landing
+    thread.add_requests("engine", {"request": make_req_meta(local=([10],))})
+    with ThreadPoolExecutor(max_workers=1) as transfers:
+        thread.executor = transfers
+        with ThreadPoolExecutor(max_workers=1) as processors:
+            processing = processors.submit(thread._process_next)
+            try:
+                assert entered.wait(timeout=5)
+                assert thread.finished_requests.empty()
+                assert thread.get_and_clear_invalid_block_ids() == set()
+            finally:
+                release.set()
+            processing.result(timeout=5)
+    assert thread.finished_requests.get_nowait() == ("request", failed)
+    assert thread.get_and_clear_invalid_block_ids() == ({10} if failed else set())
+    assert thread.request_queue.unfinished_tasks == 0
+
+
+@pytest.mark.parametrize("failure", ["read", "submit", "wait"])
+def test_sfa_request_completion_does_not_wait_for_an_unrelated_failed_landing(monkeypatch, failure):
+    entered, release = threading.Event(), threading.Event()
+    reader = MagicMock()
+    thread = make_thread(staging_reader=reader, pull_transfer_mode="request")
+    _, seen = _prepare_sfa_receive(thread, pp_ranks=(0, 1) if failure == "submit" else (0,))
+
+    def landing():
+        entered.set()
+        assert release.wait(timeout=5), "Test did not release request a's landing"
+
+    def read(_session, _src, _dst, _lengths, request_id, **_kwargs):
+        if request_id == "a":
+            if failure in ("read", "wait"):
+                raise RuntimeError("Host landing wait failed")
+            landing()
+        return 0
+
+    def drain():
+        if failure == "wait" and not release.is_set():
+            raise RuntimeError("Host drain still pending")
+        landing()
+
+    class Transfers(ThreadPoolExecutor):
+        def submit(self, fn, *args, **kwargs):
+            if failure == "submit" and args[0] == 1 and "a" in fn.keywords["requests"]:
+                raise RuntimeError("second bucket submission failed")
+            return super().submit(fn, *args, **kwargs)
+
+    reader.batch_transfer_sync_read.side_effect = read
+    reader.drain_pending_landing.side_effect = drain
+    if failure == "wait":
+        monkeypatch.setattr(worker_module.time, "sleep", lambda _seconds: landing())
+    requests = {"a": make_req_meta(local=([10],)), "b": make_req_meta(local=([20],))}
+    thread.add_requests("engine", requests)
+    with Transfers(max_workers=3) as executor:
+        thread.executor = executor
+        try:
+            thread._process_next()
+            assert entered.wait(timeout=5)
+            assert thread.finished_requests.get(timeout=5) == ("b", False)
+            assert thread.finished_requests.empty()
+            assert thread.get_and_clear_invalid_block_ids() == set()
+        finally:
+            release.set()
+    assert thread.finished_requests.get_nowait() == ("a", True)
+    assert thread.finished_requests.empty()
+    assert thread.get_and_clear_invalid_block_ids() == {10}
+    assert all(set(context) == request_ids for request_ids, context in seen)
+    if failure == "wait":
+        assert reader.drain_pending_landing.call_count >= 2

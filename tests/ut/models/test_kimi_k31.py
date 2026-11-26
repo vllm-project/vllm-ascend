@@ -125,7 +125,6 @@ def test_sfa_k31_identity_in_registered_inner_model_context(tmp_path, monkeypatc
     )
     monkeypatch.setattr("vllm_ascend.attention.sfa_v1.get_ascend_config", lambda: ascend_config)
     monkeypatch.setattr("vllm_ascend.attention.sfa_v1.get_tensor_model_parallel_world_size", lambda: 8)
-    monkeypatch.setattr("vllm_ascend.attention.sfa_v1.is_pcp_decode_sharding_enabled", lambda _: False)
     monkeypatch.setattr("vllm_ascend.attention.sfa_v1.is_rl_weight_update_enabled", lambda _: False)
     monkeypatch.setattr("vllm_ascend.attention.sfa_v1.enable_sp", lambda: False)
 

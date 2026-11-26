@@ -16,12 +16,10 @@ from vllm_ascend.quantization.utils import DynamicMXQuantScaleAlg
 def make_method(scale_alg, enable_eplb=False):
     config = SimpleNamespace(
         quant_config=SimpleNamespace(),
-        use_v2_model_runner=True,
         parallel_config=SimpleNamespace(enable_eplb=enable_eplb),
     )
     with (
         patch.object(module, "get_current_vllm_config", return_value=config),
-        patch.object(module, "get_ascend_config"),
         patch.object(module, "get_dynamic_mx_quant_scale_alg", return_value=scale_alg) as get_scale_alg,
         patch("vllm_ascend.quantization.methods.base.get_current_hardware_profile") as mx_profile,
     ):
@@ -123,7 +121,7 @@ def test_mlp_dispatch_preserves_fallback_and_gmm2_scales(scale_alg, group_list_t
 
 @pytest.mark.parametrize("scale_alg", [0, 1])
 @pytest.mark.parametrize("group_list_type", [0, 1])
-@pytest.mark.parametrize("swiglu_limit", [0.0, None, 5.0])
+@pytest.mark.parametrize("swiglu_limit", [4.0, 5.0])
 def test_swiglustep_mlp_dispatch(scale_alg, group_list_type, swiglu_limit):
     method = make_method(scale_alg)
     packed = torch.randn(4, 128, dtype=torch.bfloat16)
@@ -138,7 +136,7 @@ def test_swiglustep_mlp_dispatch(scale_alg, group_list_type, swiglu_limit):
         lora_context=None,
         group_list=torch.tensor([1, 1, 4] if group_list_type == 0 else [1, 0, 3], dtype=torch.int64),
         group_list_type=group_list_type,
-        swiglu_limit=swiglu_limit,
+        swiglustep_limit=swiglu_limit,
     )
     with (
         patch.object(module.torch_npu, "npu_swiglu_mx_quant", return_value=(quantized, scales), create=True) as fused,
@@ -154,7 +152,7 @@ def test_swiglustep_mlp_dispatch(scale_alg, group_list_type, swiglu_limit):
         group_mode=0,
         activate_left=True,
         swiglu_mode=3,
-        clamp_limit=7.0,
+        clamp_limit=swiglu_limit,
         dst_type=torch.float8_e4m3fn,
         scale_alg=scale_alg,
     )

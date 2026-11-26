@@ -11,7 +11,6 @@ from vllm.v1.kv_offload.cpu.shared_offload_region import SharedOffloadRegion
 
 
 def test_mla_tiering_uses_one_copy_and_preserves_greedy_tokens(monkeypatch):
-    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
     cpu_bytes = 512 << 20
     llm = LLM(
         model="deepseek-ai/DeepSeek-V2-Lite-Chat",
