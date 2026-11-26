@@ -120,7 +120,7 @@ def test_real_allocator_orders_startup_before_client_creation(monkeypatch, faile
         dim=256,
         block_size=32,
         storage_dtype=torch.int8,
-        _shared_pool_spec=(["pool0", "pool1"] if sharded else "pool", "identity", "table"),
+        _shared_pool_spec=(["pool0", "pool1"] if sharded else ["pool"], "identity", "table"),
     )
     if failed:
         with pytest.raises(RuntimeError, match="scheduler startup"):

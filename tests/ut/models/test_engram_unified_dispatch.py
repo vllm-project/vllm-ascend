@@ -25,7 +25,12 @@ def test_model_selects_exactly_one_backend(monkeypatch, backend, sharded):
         if isinstance(n, ast.Assign) and any(isinstance(t, ast.Name) and t.id == "shared_config" for t in n.targets)
     )
     end = next(i for i in range(start, len(init.body)) if isinstance(init.body[i], ast.With))
-    tree = ast.fix_missing_locations(ast.Module(body=init.body[start:end], type_ignores=[]))
+    tree = ast.fix_missing_locations(
+        ast.Module(
+            body=[ast.parse("from __future__ import annotations").body[0], *init.body[start:end]],
+            type_ignores=[],
+        )
+    )
     calls = []
     package = types.ModuleType("_unified_test")
     package.__path__ = []
