@@ -86,6 +86,26 @@ def test_batch_dma_rejects_failed_memory_query(monkeypatch):
         AscendHiSparseBackend().swap_blocks_batch(src, dst, sizes)
 
 
+@pytest.mark.parametrize(
+    "invalid_attributes", [None, {}, {"location": None}, {"location": {}}, {"location": {"type": False}}]
+)
+@pytest.mark.parametrize("invalid_endpoint", ["source", "destination"])
+def test_batch_dma_rejects_malformed_memory_attributes(monkeypatch, invalid_attributes, invalid_endpoint):
+    src = torch.tensor([1024], dtype=torch.int64)
+    dst = torch.tensor([4096], dtype=torch.int64)
+    sizes = torch.tensor([128], dtype=torch.int64)
+    attributes = {1024: {"location": {"type": 0}}, 4096: {"location": {"type": 1}}}
+    attributes[1024 if invalid_endpoint == "source" else 4096] = invalid_attributes
+
+    def swap_blocks_batch(*args, **kwargs):
+        pytest.fail("Invalid memory attributes must prevent DMA submission")
+
+    monkeypatch.setitem(sys.modules, "acl", NS(rt=NS(pointer_get_attributes=lambda address: (attributes[address], 0))))
+    monkeypatch.setattr(torch.ops._C_ascend, "swap_blocks_batch", swap_blocks_batch, raising=False)
+    with pytest.raises(RuntimeError, match=f"Invalid HiSparse DMA memory locations.*{invalid_endpoint}=None"):
+        AscendHiSparseBackend().swap_blocks_batch(src, dst, sizes)
+
+
 @pytest.fixture(params=[False, True], ids=["standalone", "profiled"])
 def prepare_workspaces(request):
     from vllm.v1.worker.workspace import init_workspace_manager, reset_workspace_manager

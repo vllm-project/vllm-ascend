@@ -25,6 +25,16 @@ _HOST_TO_DEVICE = 0
 _DEVICE_TO_HOST = 1
 
 
+def _memory_location_type(attributes: object) -> int | None:
+    if not isinstance(attributes, dict):
+        return None
+    location = attributes.get("location")
+    if not isinstance(location, dict):
+        return None
+    memory_type = location.get("type")
+    return memory_type if type(memory_type) is int else None
+
+
 def _dma_copy_direction(source_address: int, destination_address: int) -> int:
     import acl  # type: ignore[import-not-found]  # Provided by the CANN runtime.
 
@@ -34,8 +44,13 @@ def _dma_copy_direction(source_address: int, destination_address: int) -> int:
         raise RuntimeError(
             f"Failed to query HiSparse DMA memory locations: source={source_status}, destination={destination_status}."
         )
-    source_type = source["location"]["type"]
-    destination_type = destination["location"]["type"]
+    source_type = _memory_location_type(source)
+    destination_type = _memory_location_type(destination)
+    if source_type is None or destination_type is None:
+        raise RuntimeError(
+            f"Invalid HiSparse DMA memory locations returned by CANN: source={source_type}, "
+            f"destination={destination_type}."
+        )
     if (source_type, destination_type) == (_ACL_HOST_MEMORY, _ACL_DEVICE_MEMORY):
         return _HOST_TO_DEVICE
     if (source_type, destination_type) == (_ACL_DEVICE_MEMORY, _ACL_HOST_MEMORY):
