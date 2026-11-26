@@ -9,7 +9,7 @@ import threading
 from concurrent.futures import ThreadPoolExecutor
 from multiprocessing.shared_memory import SharedMemory
 from types import SimpleNamespace
-from unittest.mock import MagicMock, Mock
+from unittest.mock import Mock
 
 import pytest
 import torch
@@ -28,7 +28,6 @@ from vllm_ascend.models.deepseek_v41.engram import npu
 from vllm_ascend.models.deepseek_v41.engram.common import engram_gate, load_engram_rotation_block
 from vllm_ascend.models.deepseek_v41.engram.hash_state import DEAD_ID, AscendNgramHashState
 from vllm_ascend.models.deepseek_v41.engram.parallel import resolve_dp_shared_memory
-from vllm_ascend.ops.triton import engram_lookup, triton_utils
 
 
 @pytest.mark.skipif(
@@ -82,31 +81,6 @@ def test_remote_host_offload_close_retires_reader():
     table._remote_reader = reader
     table.close_host_offload()
     reader.close.assert_called_once_with()
-
-
-@pytest.mark.parametrize(
-    ("tokens", "core_percentage", "expected_grid", "uses_capped_kernel"),
-    [(32, None, 32, False), (16, 75, 16, False), (24, 75, 24, False), (32, 75, 24, True)],
-    ids=["default", "below-limit", "at-limit", "capped"],
-)
-def test_host_uva_launch_uses_row_loop_only_when_grid_is_smaller(
-    monkeypatch, tokens, core_percentage, expected_grid, uses_capped_kernel
-):
-    fast_kernel, capped_kernel = MagicMock(), MagicMock()
-    get_vectorcore_num = Mock(return_value=32)
-    monkeypatch.setattr(triton_utils, "get_vectorcore_num", get_vectorcore_num)
-    monkeypatch.setattr(triton_utils, "init_device_properties_triton", Mock())
-    monkeypatch.setattr(engram_lookup, "_engram_host_uva_gather_dequant_kernel", fast_kernel)
-    monkeypatch.setattr(engram_lookup, "_engram_host_uva_gather_dequant_capped_kernel", capped_kernel)
-
-    codes = SimpleNamespace(tensor=torch.zeros(8, 64, dtype=torch.bfloat16), ptrs=None)
-    ids = torch.zeros(tokens, 1, dtype=torch.int32)
-    npu.gather_dequantize_host_uva(codes, None, ids, core_percentage=core_percentage)
-
-    selected, other = (capped_kernel, fast_kernel) if uses_capped_kernel else (fast_kernel, capped_kernel)
-    selected.__getitem__.assert_called_once_with((expected_grid,))
-    other.__getitem__.assert_not_called()
-    assert get_vectorcore_num.call_count == int(core_percentage is not None)
 
 
 @pytest.mark.parametrize("tp", [1, 2, 4])

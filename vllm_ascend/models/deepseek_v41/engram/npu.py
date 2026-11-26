@@ -272,16 +272,10 @@ def gather_dequantize_host_uva(
         return output
     init_device_properties_triton()
     # The kernel widens loaded IDs to int64; no extra cast/copy is needed here.
-    from vllm_ascend.ops.triton.engram_lookup import (
-        _engram_host_uva_gather_dequant_capped_kernel,
-        _engram_host_uva_gather_dequant_kernel,
-    )
+    from vllm_ascend.ops.triton.engram_lookup import _engram_host_uva_gather_dequant_kernel
 
     programs = rows if core_percentage is None else min(rows, max(1, get_vectorcore_num() * core_percentage // 100))
-    kernel = (
-        _engram_host_uva_gather_dequant_capped_kernel if programs < rows else _engram_host_uva_gather_dequant_kernel
-    )
-    kernel[(programs,)](
+    _engram_host_uva_gather_dequant_kernel[(programs,)](
         codes.ptrs,
         scales.ptrs if scales is not None else None,
         ids,
