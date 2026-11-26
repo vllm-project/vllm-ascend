@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Exercise shared-source scheduling through the real layerwise GVA data plane."""
+"""Exercise shared-source scheduling through the real layerwise data planes."""
 
 import ctypes
 import os
@@ -10,7 +10,7 @@ from collections import Counter
 from contextlib import suppress
 from copy import deepcopy
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import tests.ut.distributed.ascend_store._mock_deps  # noqa: F401, E402
 
@@ -20,6 +20,7 @@ import torch
 from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheGroupSpec
 
 from tests.ut.distributed.ascend_store import test_pool_worker
+from tests.ut.distributed.ascend_store.test_mooncake_hybrid import MemoryRangeStore
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector import (
     AscendStoreConnector,
     create_kv_pool_worker,
@@ -125,13 +126,16 @@ def make_shared_worker(
     draft=False,
     num_layers=12,
     sources=(2, 8),
+    backend="memcache",
+    store=None,
+    enable_prefix_caching=True,
     partition=None,
     pp_rank=0,
     pcp_size=1,
     pcp_rank=0,
     mirrors=(),
 ):
-    """Register real CPU cache views with the production GVA worker and queue threads."""
+    """Register CPU cache views with the production layerwise worker and queue threads."""
     start = sum(partition[:pp_rank]) if partition else 0
     local_count = partition[pp_rank] if partition else num_layers
     local_layers = range(start, start + local_count)
@@ -159,6 +163,7 @@ def make_shared_worker(
         config.model_config.hf_config = config.model_config.hf_text_config = SimpleNamespace(
             num_hidden_layers=num_layers, kv_source_layer_ids=list(sources), compress_ratios=[2] * num_layers
         )
+        config.model_config.architectures = ["DeepseekV41ForCausalLM"]
         config.model_config.enforce_eager = True
         config.compilation_config.cudagraph_mode = SimpleNamespace(name="NONE")
         config.compilation_config.static_forward_context = {
@@ -169,6 +174,7 @@ def make_shared_worker(
         }
         config.parallel_config.use_ubatching = config.parallel_config.use_sequence_parallel_moe = False
         config.cache_config.swa_bounded_replay = bounded
+        config.cache_config.enable_prefix_caching = enable_prefix_caching
         config.use_v2_model_runner = True
         config.speculative_config = None
         return create_kv_pool_worker(config, use_layerwise, kv_cache_config)
@@ -190,10 +196,11 @@ def make_shared_worker(
             pcp_size=pcp_size,
             pcp_rank=pcp_rank,
             num_hidden_layers=num_layers,
-            extra_config={"backend": "memcache"},
+            extra_config={"backend": backend},
             kv_cache_config=cache_config,
         )
-    store = MemoryGVAStore()
+    if store is None:
+        store = MemoryGVAStore()
     worker.m_store = store
     worker.cache_coordinator = worker.token_database.cache_coordinator = None
     all_names = sum(groups, [])
@@ -207,7 +214,8 @@ def make_shared_worker(
     }
 
     def close():
-        store.resume.set()
+        if isinstance(store, MemoryGVAStore):
+            store.resume.set()
         with suppress(RuntimeError):
             worker.shutdown()
 
@@ -247,6 +255,253 @@ def save_prefix(worker):
     for layer in range(worker.num_layers):
         forward_layer(worker, meta)
     worker.get_finished(set(), meta)
+
+
+class TestMooncakeSharedSourceLayerwise(unittest.TestCase):
+    def make_connector(self, *, bounded, draft=True, enable_prefix_caching=True):
+        class ThreadedRangeStore(MemoryRangeStore):
+            def close(self):
+                pass
+
+        store = ThreadedRangeStore()
+        worker, _, caches = make_shared_worker(
+            self,
+            bounded=bounded,
+            draft=draft,
+            num_layers=24,
+            sources=(2, 8, 14, 20),
+            backend="mooncake",
+            store=store,
+            enable_prefix_caching=enable_prefix_caching,
+        )
+        # One aligned block is reachable in each of these synthetic groups.
+        worker.cache_coordinator = object()
+        masks = tuple([True] for _ in worker.grouped_block_size)
+        worker.token_database.store_mask = Mock(return_value=masks)
+        worker.token_database.load_mask = Mock(return_value=masks)
+        connector = AscendStoreConnector.__new__(AscendStoreConnector)
+        connector.use_layerwise = connector.can_put = True
+        connector.connector_worker = worker
+        connector._mamba_state = None
+        return connector, worker, store, caches
+
+    def bind_step(self, connector, worker, *, load=False):
+        meta = metadata(worker, load=load, save=not load)
+        meta.requests[0].is_last_chunk = True
+        meta.requests[0].num_prompt_tokens = 16
+        connector.bind_connector_metadata(meta)
+
+    def forward(self, connector, worker, *, replay_cut=False):
+        for layer in range(worker.num_layers):
+            name = f"model.layers.{layer}.attn" if layer < 24 else "model.mtp.layers.0.attn"
+            connector.wait_for_layer_load(name)
+            if replay_cut and layer == 20:
+                # The cache-only cut and its normal forward share one load.
+                connector.wait_for_layer_load(name)
+            connector.save_kv_layer(name, [], None)
+
+    def test_roundtrip_keeps_shared_source_prefetch_order(self):
+        for bounded in (False, True):
+            with self.subTest(bounded=bounded):
+                connector, worker, store, caches = self.make_connector(bounded=bounded)
+                self.assertEqual(worker.num_layers, 25)
+                self.assertEqual(worker._groups_for_layerwise_transfer(20)[:2], [(0, 3), (1, 3)])
+                self.assertEqual(bool(worker._groups_for_layerwise_transfer(0)), not bounded)
+                expected = {name: cache[1].clone() for name, cache in caches.items()}
+                self.bind_step(connector, worker)
+                with patch.object(torch.npu, "Event") as boundary_event:
+                    self.forward(connector, worker, replay_cut=bounded)
+                boundary_event.assert_not_called()
+                self.assertTrue(store.complete)
+                self.assertFalse(worker._put_started_keys)
+                for cache in caches.values():
+                    cache.zero_()
+
+                submitted: list[tuple[int, int]] = []
+                enqueue = worker.kv_recv_thread.add_request
+
+                def record(task, submitted=submitted, worker=worker, enqueue=enqueue):
+                    submitted.append((worker.current_layer, task.layer_id))
+                    # DS4.1 has no attention-start gate for lookahead transfers.
+                    self.assertIsNone(task.load_gate)
+                    enqueue(task)
+
+                self.bind_step(connector, worker, load=True)
+                with (
+                    patch.object(worker.kv_recv_thread, "add_request", side_effect=record),
+                    patch.object(torch.npu, "Event") as boundary_event,
+                ):
+                    self.forward(connector, worker, replay_cut=bounded)
+                boundary_event.assert_called_once()
+                boundary_event.return_value.synchronize.assert_called_once()
+                self.assertEqual(
+                    submitted,
+                    [(0, 2), (0, 8), (2, 14), (8, 20), (23, 24)]
+                    if bounded
+                    else [(0, layer) for layer in range(9)]
+                    + [(2, layer) for layer in range(9, 15)]
+                    + [(8, layer) for layer in range(15, 21)]
+                    + [(20, 21), (21, 22), (22, 23), (23, 24)],
+                )
+                self.assertFalse(store.open_reads)
+                for name, cache in caches.items():
+                    torch.testing.assert_close(cache[1], expected[name])
+                    self.assertEqual(int(cache[0].sum()), 0)
+
+    def test_failed_range_load_releases_sessions_before_attention(self):
+        connector, worker, store, _ = self.make_connector(bounded=True, draft=False)
+        self.bind_step(connector, worker)
+        self.forward(connector, worker)
+        self.bind_step(connector, worker, load=True)
+        with (
+            patch.object(store, "batch_copy_get", side_effect=lambda keys, *_: [-1] * len(keys)),
+            self.assertRaisesRegex(RuntimeError, "refusing incomplete"),
+        ):
+            self.forward(connector, worker)
+        self.assertTrue(worker.get_block_ids_with_load_errors())
+        self.assertFalse(store.open_reads)
+
+    def test_shared_read_ahead_waits_for_compute_boundary_on_receive_thread(self):
+        connector, worker, store, _ = self.make_connector(bounded=True, draft=False)
+        self.bind_step(connector, worker)
+        self.forward(connector, worker)
+        self.bind_step(connector, worker, load=True)
+
+        waiting = threading.Event()
+        release = threading.Event()
+
+        def synchronize():
+            waiting.set()
+            if not release.wait(timeout=3):
+                raise TimeoutError("Shared-source read boundary was not released")
+
+        boundary = Mock()
+        boundary.synchronize.side_effect = synchronize
+        with (
+            patch.object(torch.npu, "Event", return_value=boundary),
+            patch.object(worker.kv_recv_thread, "add_request", wraps=worker.kv_recv_thread.add_request) as submit,
+            patch.object(store, "batch_copy_get", wraps=store.batch_copy_get) as copy_get,
+        ):
+            try:
+                connector.wait_for_layer_load("model.layers.0.attn")
+                self.assertTrue(waiting.wait(timeout=3))
+                tasks = [call.args[0] for call in submit.call_args_list]
+                self.assertEqual([task.layer_id for task in tasks], [2, 8])
+                self.assertIs(tasks[0].compute_boundary, boundary)
+                self.assertIsNone(tasks[1].compute_boundary)
+                copy_get.assert_not_called()
+            finally:
+                release.set()
+            self.forward(connector, worker)
+
+        boundary.record.assert_called_once()
+        boundary.synchronize.assert_called_once()
+        copy_get.assert_called()
+        self.assertFalse(store.open_reads)
+
+    def test_running_prefix_stays_in_hbm_only_when_known_resident(self):
+        for enable_prefix_caching, computed_prefix_tokens in ((False, 16), (True, 16), (True, 0)):
+            with self.subTest(
+                enable_prefix_caching=enable_prefix_caching, computed_prefix_tokens=computed_prefix_tokens
+            ):
+                connector, worker, store, caches = self.make_connector(
+                    bounded=True, draft=False, enable_prefix_caching=enable_prefix_caching
+                )
+                first_chunk = metadata(worker)
+                first_chunk.requests[0].is_last_chunk = False
+                connector.bind_connector_metadata(first_chunk)
+                self.forward(connector, worker)
+                self.assertTrue(store.complete)
+
+                continuation = metadata(worker, save=False)
+                request = continuation.requests[0]
+                request.save_start_token = 16
+                request.computed_prefix_tokens = computed_prefix_tokens
+                request.is_last_chunk = True
+                should_reload = computed_prefix_tokens == 0
+                expected = {name: cache[1].clone() for name, cache in caches.items()}
+                if should_reload:
+                    for cache in caches.values():
+                        cache[1].zero_()
+
+                with patch.object(store, "batch_copy_get", wraps=store.batch_copy_get) as batch_get:
+                    connector.bind_connector_metadata(continuation)
+                    self.forward(connector, worker)
+
+                self.assertEqual(batch_get.called, should_reload)
+                self.assertFalse(store.open_reads)
+                for name, cache in caches.items():
+                    torch.testing.assert_close(cache[1], expected[name])
+
+    def test_apc_hit_loads_external_remainder_then_saves_new_chunk_without_get(self):
+        connector, worker, store, caches = self.make_connector(bounded=True, draft=False)
+        masks = tuple([True] * 3 for _ in worker.grouped_block_size)
+        worker.token_database.store_mask.return_value = masks
+        worker.token_database.load_mask.return_value = masks
+
+        def run_step(request):
+            meta = AscendConnectorMetadata(set())
+            meta.add_request(request)
+            connector.bind_connector_metadata(meta)
+            self.forward(connector, worker)
+
+        groups = worker.num_kv_cache_groups
+        run_step(
+            ReqMeta(
+                "external-writer",
+                token_len_chunk=32,
+                save_start_token=16,
+                block_hashes=[b"h0", b"h1"],
+                block_ids_by_group=[[1, 2] for _ in range(groups)],
+                can_save=True,
+                is_last_chunk=True,
+            )
+        )
+        external_keys = {worker._make_layerwise_full_key(group, b"h1".hex()) for group in worker.cacheable_group_ids}
+        self.assertEqual(store.complete, external_keys)
+        expected = {name: cache[1:3].clone() for name, cache in caches.items()}
+        for cache in caches.values():
+            cache[2].zero_()
+
+        with patch.object(store, "batch_get_start", wraps=store.batch_get_start) as get_start:
+            run_step(
+                ReqMeta(
+                    "r",
+                    token_len_chunk=32,
+                    block_hashes=[b"h0", b"h1"],
+                    block_ids_by_group=[[1, 2] for _ in range(groups)],
+                    can_save=False,
+                    load_spec=LoadSpec(16, 32, True),
+                    is_last_chunk=False,
+                )
+            )
+        self.assertEqual({key for call in get_start.call_args_list for key in call.args[0]}, external_keys)
+        for name, cache in caches.items():
+            torch.testing.assert_close(cache[1:3], expected[name])
+
+        with (
+            patch.object(store, "batch_get_start", wraps=store.batch_get_start) as get_start,
+            patch.object(store, "batch_copy_get", wraps=store.batch_copy_get) as copy_get,
+        ):
+            run_step(
+                ReqMeta(
+                    "r",
+                    token_len_chunk=48,
+                    save_start_token=32,
+                    computed_prefix_tokens=32,
+                    block_hashes=[b"h0", b"h1", b"h2"],
+                    block_ids_by_group=[[1, 2, 3] for _ in range(groups)],
+                    can_save=True,
+                    is_last_chunk=True,
+                )
+            )
+        get_start.assert_not_called()
+        copy_get.assert_not_called()
+        self.assertFalse(store.open_reads)
+        new_keys = {worker._make_layerwise_full_key(group, b"h2".hex()) for group in worker.cacheable_group_ids}
+        self.assertEqual(store.complete, external_keys | new_keys)
+        for name, cache in caches.items():
+            torch.testing.assert_close(cache[1:3], expected[name])
 
 
 class TestSharedSourceLayerwise(unittest.TestCase):

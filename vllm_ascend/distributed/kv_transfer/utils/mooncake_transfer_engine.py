@@ -5,8 +5,10 @@ class GlobalTE:
     def __init__(self):
         self.transfer_engine = None
         self._initialization_attempted = False
-        self.is_register_buffer: bool = False
         self.registered_buffers: list[tuple[int, int]] = []
+        # Buffers unregistered since the last full (re)registration, so a
+        # failure part-way through either direction can be resumed.
+        self._unregistered_ptrs: set[int] = set()
         self.transfer_engine_lock = threading.Lock()
         self.register_buffer_lock = threading.Lock()
 
@@ -46,19 +48,25 @@ class GlobalTE:
         return self.transfer_engine
 
     def _register_missing_locked(self, ptrs: list[int], sizes: list[int]) -> None:
-        """Register regions that are not already published to the engine."""
+        """Register regions that are not already published to the engine.
+
+        The engine is registered once per process. Once recorded, buffers
+        dropped by :meth:`unregister_buffer` come back through
+        :meth:`reregister_buffer`, so a stray call here cannot register a
+        still-registered buffer twice. Regions already published (for example by
+        an earlier ``MultiConnector`` child) are skipped, and genuinely new
+        regions (for example an owner-staging buffer) are added.
+        """
         assert self.transfer_engine is not None, "Transfer engine must be initialized"
         known = {ptr for ptr, _ in self.registered_buffers}
         for ptr, size in zip(ptrs, sizes, strict=True):
-            if self.is_register_buffer and ptr in known:
+            if ptr in known:
                 continue
             ret_value = self.transfer_engine.register_memory(ptr, size)
             if ret_value != 0:
                 raise RuntimeError(f"Mooncake memory registration failed for ptr={ptr:#x}, ret_value={ret_value}")
-            if ptr not in known:
-                self.registered_buffers.append((ptr, size))
-                known.add(ptr)
-        self.is_register_buffer = True
+            self.registered_buffers.append((ptr, size))
+            known.add(ptr)
 
     def register_buffer(self, ptrs: list[int], sizes: list[int]):
         """Register this connector's regions.
@@ -78,32 +86,36 @@ class GlobalTE:
 
     def unregister_buffer(self):
         with self.register_buffer_lock:
-            if not self.is_register_buffer or not self.registered_buffers:
+            if len(self._unregistered_ptrs) == len(self.registered_buffers):
                 return
             assert self.transfer_engine is not None, "Transfer engine must be initialized"
 
+            # Record each buffer as it goes, so that after a failure part-way
+            # reregister_buffer() restores exactly the ones this call dropped.
             # Ascend Direct unregister_memory also disconnects peers.
             for ptr, _ in self.registered_buffers:
+                if ptr in self._unregistered_ptrs:
+                    continue
                 ret_value = self.transfer_engine.unregister_memory(ptr)
                 if ret_value != 0:
                     raise RuntimeError(f"Mooncake memory unregistration failed for ptr={ptr:#x}, ret_value={ret_value}")
-
-            self.is_register_buffer = False
+                self._unregistered_ptrs.add(ptr)
 
     def reregister_buffer(self):
         with self.register_buffer_lock:
-            if self.is_register_buffer or not self.registered_buffers:
+            if not self._unregistered_ptrs:
                 return
             assert self.transfer_engine is not None, "Transfer engine must be initialized"
 
             for ptr, size in self.registered_buffers:
+                if ptr not in self._unregistered_ptrs:
+                    continue
                 ret_value = self.transfer_engine.register_memory(ptr, size)
                 if ret_value != 0:
                     raise RuntimeError(
                         f"Mooncake memory re-registration failed for ptr={ptr:#x}, ret_value={ret_value}"
                     )
-
-            self.is_register_buffer = True
+                self._unregistered_ptrs.discard(ptr)
 
 
 global_te = GlobalTE()

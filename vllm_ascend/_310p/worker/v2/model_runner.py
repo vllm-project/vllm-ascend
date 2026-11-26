@@ -53,7 +53,6 @@ from vllm_ascend._310p.worker.v2.spec_utils import (
 )
 from vllm_ascend._310p.worker.v2.states import Ascend310PRequestState
 from vllm_ascend._310p.worker.v2.structured_outputs import apply_grammar_bitmask
-from vllm_ascend.core.kv_cache_interface import get_storage_block_size
 from vllm_ascend.ops.rotary_embedding import update_cos_sin
 from vllm_ascend.utils import (
     ACL_FORMAT_FRACTAL_NZ,
@@ -983,10 +982,9 @@ class NPUModelRunner310V2(NPUModelRunner):
                 if isinstance(kv_cache_spec, AttentionSpec):
                     backend = layer_backends[layer_name]
                     group_id = layer_group_ids[layer_name]
-                    storage_block_size = get_storage_block_size(kv_cache_spec)
                     kernel_block_size = (
-                        storage_block_size
-                        if storage_block_size != kv_cache_spec.block_size
+                        kv_cache_spec.num_states
+                        if kv_cache_spec.num_states != kv_cache_spec.block_size
                         else self.kernel_block_sizes[group_id]
                     )
                     cache_key = (kv_cache_spec, backend, kernel_block_size)

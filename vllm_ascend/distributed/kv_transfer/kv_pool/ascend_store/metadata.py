@@ -479,6 +479,10 @@ class ChunkedTokenDatabase:
         if group_num_layers is not None:
             self.group_num_layers[cache_role] = group_num_layers.copy()
 
+    def project_group_ids(self, group_ids: list[int]) -> list[int]:
+        """Project global cache-group IDs onto locally registered regions."""
+        return [group_id for group_id in group_ids if self.group_block_len.get(group_id)]
+
     def _get_group_buffers(
         self, kv_cache_group_id: int, cache_role: str = "kv"
     ) -> tuple[list[int], list[int], list[int] | None]:
@@ -1024,6 +1028,9 @@ class ReqMeta:
     # First token that has not been saved before this metadata was built.
     save_start_token: int = 0
 
+    # Tokens computed before this step of an uninterrupted running request.
+    computed_prefix_tokens: int = 0
+
     can_save: bool | None = None
     # load_spec
     load_spec: LoadSpec | None = None
@@ -1093,6 +1100,7 @@ class ReqMeta:
         boundary_puts: list[BoundaryPut] | None = None,
         completed_token_len: int | None = None,
         publish_partial_tail: bool = False,
+        computed_prefix_tokens: int = 0,
     ) -> None:
         if token_len_chunk is None:
             token_len_chunk = 0 if save_end_token is None else save_end_token
@@ -1101,6 +1109,7 @@ class ReqMeta:
         self.save_end_token = token_len_chunk if save_end_token is None else save_end_token
         self.target_token_len = token_len_chunk if target_token_len is None else target_token_len
         self.save_start_token = save_start_token
+        self.computed_prefix_tokens = computed_prefix_tokens
         if block_ids_by_group is None:
             block_ids_by_group = normalize_block_ids_by_group(block_ids or [])
         self.block_ids_by_group = block_ids_by_group
@@ -1334,10 +1343,13 @@ class AscendConnectorMetadata(KVConnectorMetadata):
         self,
         preempted_req_ids,
         loading_req_ids: set[str] | None = None,
+        *,
+        cancelled_load_req_ids: set[str] | None = None,
     ):
         self.requests: list[ReqMeta] = []
         self.preempted_req_ids = preempted_req_ids
         self.loading_req_ids = loading_req_ids or set()
+        self.cancelled_load_req_ids = cancelled_load_req_ids if cancelled_load_req_ids is not None else set()
 
     def add_request(self, req_meta: ReqMeta) -> None:
         """Add a request to the metadata."""

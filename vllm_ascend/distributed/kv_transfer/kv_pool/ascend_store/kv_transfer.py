@@ -13,10 +13,11 @@ from vllm.logger import logger
 from vllm.v1.core.kv_cache_utils import maybe_convert_block_hash
 
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence import AttentionLoadGate
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.base import Backend
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.memcache_backend import (
-    MemcacheBackend,
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.base import (
+    Backend,
+    require_aligned_batch_results,
 )
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.buffer import MemoryLocation
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     ChunkedTokenDatabase,
     ReqMeta,
@@ -29,6 +30,42 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.timing import (
 )
 
 _TRANSFER_SHUTDOWN_POLL_S = 0.1
+
+
+def get_bulk_by_memory_location(
+    backend: Backend,
+    keys: list[str],
+    addrs: list[list[int]],
+    sizes: list[list[int]],
+    *,
+    memory_locations: list[MemoryLocation],
+    tp_rank: int = 0,
+) -> list[int] | None:
+    """Group and rotate homogeneous batches, then restore input key order."""
+    if not len(keys) == len(addrs) == len(sizes) == len(memory_locations):
+        raise ValueError("Bulk GET requires one buffer list and memory location per key")
+    indices_by_location: dict[MemoryLocation, list[int]] = {MemoryLocation.DEVICE: [], MemoryLocation.HOST: []}
+    for index, location in enumerate(memory_locations):
+        if location not in indices_by_location:
+            raise ValueError(f"Unsupported bulk GET memory location: {location!r}")
+        indices_by_location[location].append(index)
+
+    results = [-1] * len(keys)
+    for memory_location, indices in indices_by_location.items():
+        if not indices:
+            continue
+        # Start each TP rank at a different key to spread concurrent reads across the pool.
+        rotation = tp_rank % len(indices)
+        indices = indices[rotation:] + indices[:rotation]
+        batch_keys = [keys[i] for i in indices]
+        codes = backend.get(
+            batch_keys, [addrs[i] for i in indices], [sizes[i] for i in indices], memory_location=memory_location
+        )
+        if codes is None:
+            return None
+        for i, code in zip(indices, require_aligned_batch_results("Bulk GET", batch_keys, codes), strict=True):
+            results[i] = code
+    return results
 
 
 class KVTransferThread(threading.Thread):
@@ -77,6 +114,9 @@ class KVTransferThread(threading.Thread):
         with self.done_task_lock:
             self.failed_requests.update(request.req_id for request in requests if len(request.block_ids_by_group) > 1)
         self.save_disabled.set()
+        self._invalidate_failed_request_blocks(requests)
+
+    def _invalidate_failed_request_blocks(self, requests: list[ReqMeta]) -> None:
         with self._invalid_block_ids_lock:
             self._invalid_block_ids.update(
                 block_id
@@ -105,7 +145,7 @@ class KVTransferThread(threading.Thread):
             if self._stopping.is_set():
                 return
             if self._fatal_error is not None:
-                logger.error("Reject KV transfer submission to failed thread %s: %s", self.name, self._fatal_error)
+                self._reject_failed_submission(request)
                 return
             self.request_queue.put(request)
 
@@ -318,11 +358,16 @@ class KVTransferThread(threading.Thread):
         except Exception:
             pass
 
-    def run(self):
-        """Run the thread to handle KV cache transfer requests."""
+    def _initialize_for_transfer(self) -> bool:
         self._set_os_thread_name()
         self.m_store.set_device()
         self.ready_event.set()
+        return True
+
+    def run(self):
+        """Run the thread to handle KV cache transfer requests."""
+        if not self._initialize_for_transfer():
+            return
         while True:
             request_data = None
             try:
@@ -354,6 +399,9 @@ class KVTransferThread(threading.Thread):
     def _handle_request_exception(self, request_data: Any):
         """Allow subclasses to complete queue/request bookkeeping on errors."""
         pass
+
+    def _reject_failed_submission(self, request_data: Any) -> None:
+        logger.error("Reject KV transfer submission to failed thread %s: %s", self.name, self._fatal_error)
 
     def lookup(
         self,
@@ -453,7 +501,19 @@ class KVCacheStoreBatch:
         self.done = threading.Event()
 
 
-class KVCacheStoreSendingThread(KVTransferThread):
+class _WholeBlockKVTransferThread(KVTransferThread):
+    """Report startup failure to the whole-block worker waiting on readiness."""
+
+    def _initialize_for_transfer(self) -> bool:
+        try:
+            return super()._initialize_for_transfer()
+        except BaseException as error:
+            self._fatal_error = error
+            self.ready_event.set()
+            return False
+
+
+class KVCacheStoreSendingThread(_WholeBlockKVTransferThread):
     def __init__(
         self,
         m_store: Backend,
@@ -474,13 +534,22 @@ class KVCacheStoreSendingThread(KVTransferThread):
         owner_stager: Any = None,
         record_operation: Callable[..., None] | None = None,
         enable_timing: bool = False,
+        host_memory_group_ids: frozenset[int] = frozenset(),
     ):
         super().__init__(
-            m_store, token_database, block_size, tp_rank, tp_size, dcp_size, ready_event, name="KVCacheSendingThread"
+            m_store,
+            token_database,
+            block_size,
+            tp_rank,
+            tp_size,
+            dcp_size,
+            ready_event,
+            name="KVCacheSendingThread",
         )
         self.owner_stager = owner_stager
         self._record_operation_cb = record_operation
         self.enable_timing = enable_timing
+        self.host_memory_group_ids = host_memory_group_ids
         self.pcp_rank = pcp_rank
         self.pcp_size = pcp_size
         self.put_step = put_step
@@ -932,7 +1001,8 @@ class KVCacheStoreSendingThread(KVTransferThread):
                 return True
             return skip_end > skip_start and start >= skip_start and end <= skip_end
 
-        for group_id in req_meta.kv_cache_group_ids or [0]:
+        group_ids = self.token_database.project_group_ids(req_meta.kv_cache_group_ids or [0])
+        for group_id in group_ids:
             group_block_size = self._get_block_size(group_id)
 
             group_store_mask = (
@@ -1085,6 +1155,9 @@ class KVCacheStoreSendingThread(KVTransferThread):
                 return False
             if current_event is not None:
                 current_event.synchronize()
+                # This request's readiness event covers all subsequent group PUTs.
+                current_event = None
+            put_result: bool | list[bool] | None
             put_start = time.perf_counter()
             put_bytes = sum_transfer_bytes(sizes)
             queue_wait = put_start - getattr(req_meta, "save_enqueue_perf", put_start) if self.enable_timing else None
@@ -1099,7 +1172,20 @@ class KVCacheStoreSendingThread(KVTransferThread):
                     queue_wait_ms=round(queue_wait * 1e3, 3),
                     sample_keys=keys[:1],
                 )
-            if self.owner_stager is not None:
+            if self.host_memory_group_ids:
+                memory_location = (
+                    MemoryLocation.HOST if group_id in self.host_memory_group_ids else MemoryLocation.DEVICE
+                )
+                # Owner staging buffers are device memory; host (DDR) groups
+                # have no owner-mapped pages and go straight to the backend.
+                if self.owner_stager is not None and memory_location is MemoryLocation.DEVICE:
+                    put_result = self.owner_stager.put(self.m_store, keys, addrs, sizes)
+                else:
+                    put_result = self.m_store.put(keys, addrs, sizes, memory_location=memory_location)
+                if put_result is None:
+                    logger.error("KV store returned no bulk PUT status for request %s", req_id)
+                    return False
+            elif self.owner_stager is not None:
                 put_result = self.owner_stager.put(self.m_store, keys, addrs, sizes)
             else:
                 put_result = self.m_store.put(keys, addrs, sizes)
@@ -1147,7 +1233,7 @@ class KVCacheStoreSendingThread(KVTransferThread):
         return True
 
 
-class KVCacheStoreRecvingThread(KVTransferThread):
+class KVCacheStoreRecvingThread(_WholeBlockKVTransferThread):
     def __init__(
         self,
         m_store: Backend,
@@ -1163,6 +1249,7 @@ class KVCacheStoreRecvingThread(KVTransferThread):
         record_operation: Callable[..., None] | None = None,
         owner_stager: Any = None,
         enable_timing: bool = False,
+        host_memory_group_ids: frozenset[int] = frozenset(),
     ):
         super().__init__(
             m_store,
@@ -1175,11 +1262,54 @@ class KVCacheStoreRecvingThread(KVTransferThread):
             name="KVCacheStoreRecvingThread",
         )
         self.owner_stager = owner_stager
+        self.host_memory_group_ids = host_memory_group_ids
         self._invalid_block_ids = invalid_block_ids if invalid_block_ids is not None else set()
         self._invalid_block_ids_lock = invalid_block_ids_lock or threading.Lock()
         self.worker = worker
         self._record_operation_cb = record_operation
         self.enable_timing = enable_timing
+
+    def _handle_request_exception(self, request_data: ReqMeta) -> None:
+        # run() holds the submission lock, and _handle_request already
+        # acknowledged the current item in its finally block.
+        failed = [request_data]
+        while True:
+            try:
+                queued = self.request_queue.get_nowait()
+            except queue.Empty:
+                break
+            if queued is not None:
+                failed.append(queued)
+            self.request_queue.task_done()
+        self._finish_failed_receives(failed)
+
+    def _reject_failed_submission(self, request_data: ReqMeta) -> None:
+        super()._reject_failed_submission(request_data)
+        self._finish_failed_receives([request_data])
+
+    def _finish_failed_receives(self, requests: list[ReqMeta]) -> None:
+        logger.error("KV pool receive failed for requests=%s", [request.req_id for request in requests])
+        for request in requests:
+            request.can_save = False
+        self.save_disabled.set()
+        self._invalidate_failed_request_blocks(requests)
+        # Publish failure and receive completion together for scheduler polling.
+        with self.done_task_lock:
+            self.failed_requests.update(request.req_id for request in requests if len(request.block_ids_by_group) > 1)
+            self.finished_requests.update(request.req_id for request in requests)
+
+    def get_and_clear_receive_results(
+        self, loading_req_ids: set[str], preempted_req_ids: set[str]
+    ) -> tuple[set[str], set[str]]:
+        """Consume each completed receive with its failure status under the same lock."""
+        with self.done_task_lock:
+            self.finished_requests.difference_update(preempted_req_ids)
+            self.failed_requests.difference_update(preempted_req_ids)
+            finished = self.finished_requests & loading_req_ids
+            failed = self.failed_requests & finished
+            self.finished_requests.difference_update(finished)
+            self.failed_requests.difference_update(failed)
+        return finished, failed
 
     def _handle_request(self, req_meta: ReqMeta):
         try:
@@ -1201,15 +1331,17 @@ class KVCacheStoreRecvingThread(KVTransferThread):
                     mask_num,
                 )
                 if loaded is False:
-                    self._mark_failed_requests([req_meta])
-                self.set_finished_request(req_id)
+                    self._finish_failed_receives([req_meta])
+                else:
+                    self.set_finished_request(req_id)
                 return
 
             addr_list = []
             size_list = []
             key_list = []
             block_id_list: list[int] = []
-            group_ids = req_meta.kv_cache_group_ids or [0]
+            memory_locations: list[MemoryLocation] | None = [] if self.host_memory_group_ids else None
+            group_ids = self.token_database.project_group_ids(req_meta.kv_cache_group_ids or [0])
             load_masks = self.token_database.load_mask(req_meta.block_hashes, token_len)
             tail_boundaries = {boundary.group_id: boundary.num_tokens for boundary in load_spec.tail_key_boundaries}
             for group_id in group_ids:
@@ -1242,24 +1374,30 @@ class KVCacheStoreRecvingThread(KVTransferThread):
                     addr_list.append(addr)
                     size_list.append(size)
                     block_id_list.append(block_id)
+                    if memory_locations is not None:
+                        memory_locations.append(
+                            MemoryLocation.HOST if group_id in self.host_memory_group_ids else MemoryLocation.DEVICE
+                        )
             if not key_list:
                 self.set_finished_request(req_id)
                 return
-            key_list_c = key_list[self.tp_rank % len(key_list) :] + key_list[: self.tp_rank % len(key_list)]
-            addr_list_c = addr_list[self.tp_rank % len(addr_list) :] + addr_list[: self.tp_rank % len(addr_list)]
-            size_list_c = size_list[self.tp_rank % len(size_list) :] + size_list[: self.tp_rank % len(size_list)]
-            block_id_list_c = (
-                block_id_list[self.tp_rank % len(block_id_list) :] + block_id_list[: self.tp_rank % len(block_id_list)]
-            )
+            # With explicit memory locations, rotate keys within each group and restore input order.
+            # Otherwise rotate the whole batch together with its block IDs.
+            rotation = self.tp_rank % len(key_list)
+            if memory_locations is None and rotation:
+                key_list = key_list[rotation:] + key_list[:rotation]
+                addr_list = addr_list[rotation:] + addr_list[:rotation]
+                size_list = size_list[rotation:] + size_list[:rotation]
+                block_id_list = block_id_list[rotation:] + block_id_list[:rotation]
             logger.debug(
                 "KV pool async recv calls backend get request=%s token_len=%d groups=%s keys=%d sample_keys=%s",
                 req_id,
                 token_len,
-                req_meta.kv_cache_group_ids or [0],
-                len(key_list_c),
-                key_list_c[:3],
+                group_ids,
+                len(key_list),
+                key_list[:3],
             )
-            load_bytes = sum_transfer_bytes(size_list_c)
+            load_bytes = sum_transfer_bytes(size_list)
             load_get_start = time.perf_counter() if self._record_operation_cb is not None or self.enable_timing else 0.0
             queue_wait = (
                 load_get_start - getattr(req_meta, "load_enqueue_perf", load_get_start) if self.enable_timing else None
@@ -1271,14 +1409,26 @@ class KVCacheStoreRecvingThread(KVTransferThread):
                     req_id,
                     token_len=token_len,
                     groups=req_meta.kv_cache_group_ids or [0],
-                    keys=len(key_list_c),
+                    keys=len(key_list),
                     bytes=load_bytes,
                     queue_wait_ms=round(queue_wait * 1e3, 3),
                 )
-            if self.owner_stager is not None:
-                ret = self.owner_stager.get(self.m_store, key_list_c, addr_list_c, size_list_c)
+            if memory_locations is None:
+                # Owner-sharded VMM pages cannot be read directly; stage them
+                # through the registered transport buffer.
+                if self.owner_stager is not None:
+                    ret = self.owner_stager.get(self.m_store, key_list, addr_list, size_list)
+                else:
+                    ret = self.m_store.get(key_list, addr_list, size_list)
             else:
-                ret = self.m_store.get(key_list_c, addr_list_c, size_list_c)
+                ret = get_bulk_by_memory_location(
+                    self.m_store,
+                    key_list,
+                    addr_list,
+                    size_list,
+                    tp_rank=self.tp_rank,
+                    memory_locations=memory_locations,
+                )
             load_get_duration = time.perf_counter() - load_get_start
             if self.enable_timing:
                 log_kvpd_timing(
@@ -1287,7 +1437,7 @@ class KVCacheStoreRecvingThread(KVTransferThread):
                     req_id,
                     duration_ms=round(load_get_duration * 1e3, 3),
                     queue_wait_ms=round(queue_wait * 1e3, 3),
-                    keys=len(key_list_c),
+                    keys=len(key_list),
                     bytes=load_bytes,
                     success=not (ret is None or (isinstance(ret, list) and any(r != 0 for r in ret))),
                 )
@@ -1295,54 +1445,29 @@ class KVCacheStoreRecvingThread(KVTransferThread):
                 self._record_operation_cb(
                     "load_get",
                     load_get_duration,
-                    len(key_list_c),
+                    len(key_list),
                     num_bytes=load_bytes,
                     queue_wait_seconds=queue_wait,
                 )
-            if (isinstance(self.m_store, MemcacheBackend) or len(req_meta.block_ids_by_group) > 1) and (
-                ret is None or len(ret) != len(key_list_c) or any(r != 0 for r in ret)
+            # A hybrid request must acknowledge a failed import as a unit.
+            if (
+                memory_locations is not None
+                or len(req_meta.block_ids_by_group) > 1
+                or getattr(self.m_store, "strict_get_results", False) is True
             ):
-                self._mark_failed_requests([req_meta])
-                self.set_finished_request(req_id)
-                return
-            if ret is not None and any(r != 0 for r in ret):
-                missing_block_ids = record_failed_blocks(
-                    block_id_list_c,
-                    ret,
-                )
-                if len(req_meta.block_ids_by_group) == 1:
-                    with self._invalid_block_ids_lock:
-                        self._invalid_block_ids.update(missing_block_ids)
-                elif missing_block_ids:
-                    logger.error(
-                        "KV load failed for hybrid request %s. "
-                        "Skip invalid-block fallback to avoid scheduler crash. "
-                        "failed_blocks=%s",
-                        req_id,
-                        missing_block_ids,
-                    )
-            elif ret is None:
-                missing_block_ids = record_failed_blocks(
-                    block_id_list_c,
-                    [1] * len(block_id_list_c),
-                )
-                if len(req_meta.block_ids_by_group) == 1:
-                    with self._invalid_block_ids_lock:
-                        self._invalid_block_ids.update(missing_block_ids)
-                elif missing_block_ids:
-                    logger.error(
-                        "KV load failed for hybrid request %s. "
-                        "Skip invalid-block fallback to avoid scheduler crash. "
-                        "failed_blocks=%s",
-                        req_id,
-                        missing_block_ids,
-                    )
+                if ret is None or len(ret) != len(key_list) or any(r != 0 for r in ret):
+                    self._finish_failed_receives([req_meta])
+                    return
+            elif ret is None or any(r != 0 for r in ret):
+                missing_block_ids = record_failed_blocks(block_id_list, ret if ret is not None else [1] * len(key_list))
+                with self._invalid_block_ids_lock:
+                    self._invalid_block_ids.update(missing_block_ids)
             logger.debug(
                 "KV pool async recv backend get returned request=%s token_len=%d groups=%s keys=%d",
                 req_id,
                 token_len,
-                req_meta.kv_cache_group_ids or [0],
-                len(key_list_c),
+                group_ids,
+                len(key_list),
             )
             self.set_finished_request(req_id)
         finally:

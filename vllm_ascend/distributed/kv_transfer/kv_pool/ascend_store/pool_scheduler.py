@@ -25,6 +25,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend import (
     resolve_backend,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.coordinator import AscendStoreCoordinator
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.hisparse.layout import has_hisparse_cache_layout
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.in_flight_save_blocks import InFlightSaveBlockTracker
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.lookup_key import LookupKeyClient
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
@@ -133,11 +134,11 @@ class BaseKVPoolScheduler(ABC):
             assert group_block_size % self.hash_block_size == 0, "block_size must be divisible by hash_block_size"
         self._block_size = self.grouped_block_size[0]
         self.lcm_block_size = math.lcm(*(self.grouped_block_size[i] for i in self.cacheable_group_ids))
-        # TODO: Adapt layerwise save/load paths to support partial hash hits.
-        # Layerwise IO keeps its existing whole-page protocol; Core may still
-        # use finer alignment for local APC independently of external restores.
+        # Layerwise and HiSparse external transfers use complete pages.
         self.enable_partial_hash_hits = (
-            not use_layerwise and kv_cache_config.cache_hit_alignment_tokens < self.lcm_block_size
+            not use_layerwise
+            and not has_hisparse_cache_layout(kv_cache_config)
+            and kv_cache_config.cache_hit_alignment_tokens < self.lcm_block_size
         )
         self.cache_transfer_granularity = infer_cache_transfer_granularity(
             self.grouped_block_size, self.lcm_block_size, self.cacheable_group_ids
@@ -605,13 +606,16 @@ class BaseKVPoolScheduler(ABC):
         # A consumer skips Prefill writes, including KV received over PD.
         # Its first Decode save may restore missing Prefill ancestors in the pool.
         skip_save = force_skip_save and not (is_decoding and self.save_decode_cache)
-        return self._build_req_meta(
+        meta = self._build_req_meta(
             request_tracker,
             request.block_hashes,
             load_spec,
             request.prompt_token_ids,
             skip_save,
         )
+        if meta is not None:
+            meta.computed_prefix_tokens = num_current_tokens
+        return meta
 
     def _sync_swa_block_ids(self, tracker: RequestTracker) -> None:
         """Use the current request table rather than retained SWA block IDs."""
@@ -672,7 +676,13 @@ class BaseKVPoolScheduler(ABC):
         """
         force_skip_save = self.kv_role == "kv_consumer"
 
+        cancelled_load_req_ids = set()
         for finished_req_id in scheduler_output.finished_req_ids:
+            load_spec = self.load_specs.pop(finished_req_id, None)
+            if load_spec is not None and load_spec.can_load and finished_req_id in self._async_loading_req_ids:
+                # Core is waiting for receive completion once it hands us the
+                # destination pages. A spec still present here was never sent.
+                cancelled_load_req_ids.add(finished_req_id)
             self._request_trackers.pop(finished_req_id, None)
             self._unfinished_requests.pop(finished_req_id, None)
             self._preempted_req_ids.discard(finished_req_id)
@@ -686,6 +696,7 @@ class BaseKVPoolScheduler(ABC):
         meta = AscendConnectorMetadata(
             scheduler_output.preempted_req_ids,
             self._async_loading_req_ids.copy(),
+            cancelled_load_req_ids=cancelled_load_req_ids,
         )
 
         for request in scheduler_output.scheduled_new_reqs:
@@ -894,13 +905,25 @@ class KVPoolScheduler(BaseKVPoolScheduler):
         kv_cache_config: KVCacheConfig | None = None,
     ) -> None:
         super().__init__(vllm_config, use_layerwise, kv_cache_config)
+        self._failed_external_load_req_ids: set[str] = set()
         self._in_flight_save_blocks = InFlightSaveBlockTracker(vllm_config.parallel_config.world_size)
 
     def update_connector_output(self, connector_output: KVConnectorOutput) -> None:
+        if connector_output.failed_recving and has_hisparse_cache_layout(self.kv_cache_config):
+            for request_id in self._async_loading_req_ids & connector_output.failed_recving:
+                request_and_blocks = self._unfinished_requests.get(request_id)
+                if request_and_blocks is not None and not request_and_blocks[0].is_finished():
+                    self._failed_external_load_req_ids.add(request_id)
         super().update_connector_output(connector_output)
         meta = connector_output.kv_connector_worker_meta
         if isinstance(meta, AscendStoreKVConnectorWorkerMetadata) and self._block_pool is not None:
             self._in_flight_save_blocks.complete(meta.completed_events, self._block_pool)
+
+    def request_finished_all_groups(
+        self, request: Request, block_ids: tuple[list[int], ...]
+    ) -> tuple[bool, dict[str, Any] | None]:
+        self._failed_external_load_req_ids.discard(request.request_id)
+        return super().request_finished_all_groups(request, block_ids)
 
     def has_pending_push_work(self) -> bool:
         return self._in_flight_save_blocks.has_pending_work()
@@ -1043,6 +1066,10 @@ class KVPoolScheduler(BaseKVPoolScheduler):
         return False
 
     def _lookup_external_hit_tokens(self, request: Request, num_computed_tokens: int) -> StoreLookupResult | None:
+        # Core may reschedule the request with zero computed tokens after an
+        # import failure. A key can still be visible to lookup while GET fails.
+        if request.request_id in self._failed_external_load_req_ids:
+            return None
         prompt_token_len = len(request.prompt_token_ids)
         if self.enable_partial_hash_hits:
             # Preserve the prompt end so the worker can reserve the final token for recomputation.
