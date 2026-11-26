@@ -192,11 +192,20 @@ def test_pull_uses_selected_prefill_pcp_rank():
     assert sizes == [4, 2]
 
 
-def test_pull_rejects_different_component_sizes():
+def test_pull_rejects_different_tp_and_component_sizes():
     thread, remote = pull_layout()
+    with pytest.raises(ValueError, match="equal P/D TP"):
+        thread._append_spec_transfer_addresses(0, 0, 0, 1, 4, 1, {}, remote, [], [], [])
     remote.block_lens = [[4, 4]]
     with pytest.raises(ValueError, match="component sizes"):
         thread._append_spec_transfer_addresses(0, 0, 0, 1, 2, 1, {(0, 0): [("r", [1], [1])]}, remote, [], [], [])
+
+
+def test_pull_rejects_decode_pcp():
+    thread, remote = pull_layout()
+    thread.pcp_size = 2
+    with pytest.raises(ValueError, match="D PCP=1"):
+        thread._append_spec_transfer_addresses(0, 0, 0, 1, 2, 1, {}, remote, [], [], [])
 
 
 def test_pull_registers_producer_sources_and_consumer_destinations():
