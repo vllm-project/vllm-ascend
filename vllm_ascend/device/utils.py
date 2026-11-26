@@ -122,7 +122,15 @@ def _gather_paged_kv_to_dense(
 ) -> tuple[torch.Tensor, torch.Tensor]:
     # npu_fusion_attention consumes dense TND KV, while cached prefill KV is
     # stored by blocks. Gather only valid tokens from the block table.
-    block_size = key_cache.shape[1]
+    # BNSD/HND layout stores blocks as [num_blocks, num_kv_heads, block_size,
+    # head_size]; the gathered blocks are re-laid to the natural
+    # [num_blocks, block_size, num_kv_heads, head_size] shape so the block
+    # gather stays layout-agnostic. Only the active blocks are permuted, so
+    # the whole KV cache pool is never copied.
+    # (block_size is 64/128 while num_kv_heads is at most 16, so the two
+    # layouts are distinguishable by shape[1].)
+    is_bnsd = key_cache.shape[1] == num_kv_heads and key_cache.shape[2] != num_kv_heads
+    block_size = key_cache.shape[2] if is_bnsd else key_cache.shape[1]
     max_seq_len = max(seq_lens)
     seq_lens_tensor = torch.tensor(seq_lens, dtype=torch.long, device=key_cache.device)
     num_blocks = (max_seq_len + block_size - 1) // block_size
@@ -131,8 +139,22 @@ def _gather_paged_kv_to_dense(
     flat_block_ids = block_table.reshape(-1)
     max_tokens_padded = num_blocks * block_size
     dense_shape = (len(seq_lens), max_tokens_padded, num_kv_heads, head_size)
-    gathered_key = key_cache.index_select(0, flat_block_ids).reshape(dense_shape)
-    gathered_value = value_cache.index_select(0, flat_block_ids).reshape(dense_shape)
+    if is_bnsd:
+        gathered_key = (
+            key_cache.index_select(0, flat_block_ids)
+            .view(len(seq_lens), num_blocks, num_kv_heads, block_size, head_size)
+            .permute(0, 1, 3, 2, 4)
+            .reshape(dense_shape)
+        )
+        gathered_value = (
+            value_cache.index_select(0, flat_block_ids)
+            .view(len(seq_lens), num_blocks, num_kv_heads, block_size, head_size)
+            .permute(0, 1, 3, 2, 4)
+            .reshape(dense_shape)
+        )
+    else:
+        gathered_key = key_cache.index_select(0, flat_block_ids).reshape(dense_shape)
+        gathered_value = value_cache.index_select(0, flat_block_ids).reshape(dense_shape)
 
     positions = torch.arange(max_tokens_padded, dtype=torch.long, device=key_cache.device)
     valid_mask = positions.unsqueeze(0) < seq_lens_tensor.unsqueeze(1)

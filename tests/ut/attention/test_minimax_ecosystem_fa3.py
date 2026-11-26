@@ -78,6 +78,9 @@ def selection(monkeypatch, profiles):
         ),
         "_validate_fa3_backend": lambda *args: False,
         "_validate_flash_attn_backend": lambda *args: False,
+        # B1 paged verify needs full Ascend config wiring; it has its own
+        # coverage in test_b1_paged_verify.py, so keep it disabled here.
+        "_want_b1_paged_verify": lambda *args: False,
     }
     path = ROOT / "vllm_ascend/platform.py"
     execute_nodes(path, {"_validate_minimax_ecosystem_fa3", "_uses_minimax_ecosystem_fa3"}, namespace)

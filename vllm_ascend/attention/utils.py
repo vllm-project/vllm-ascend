@@ -306,15 +306,121 @@ def using_paged_attention(runtime_shape: int | None, vllm_config: VllmConfig, he
     return bool(pa_shape_list) if runtime_shape is None else runtime_shape in pa_shape_list
 
 
+def in_full_cudagraph_mode(vllm_config: VllmConfig | None = None) -> bool:
+    """True when the engine runs whole steps inside FULL cudagraphs.
+
+    FULL graphs capture every op of the step, so the head_dim=512 layers are
+    captured by the stock PagedAttention path (the one the no-spec FULL
+    profile uses) and must keep the natural LBNHC cache layout. The B1
+    FIA-v2 BNSD verify capture stays exclusive to the FULL_DECODE_ONLY lane,
+    where prefill runs eagerly and only the uniform k+1-query steps are
+    captured.
+    """
+    if vllm_config is None:
+        from vllm.config import get_current_vllm_config_or_none
+
+        vllm_config = get_current_vllm_config_or_none()
+    compilation_config = getattr(vllm_config, "compilation_config", None)
+    if compilation_config is None:
+        return False
+    cudagraph_mode = getattr(compilation_config, "cudagraph_mode", None)
+    if cudagraph_mode is None:
+        return False
+    from vllm.config.compilation import CUDAGraphMode
+
+    return cudagraph_mode == CUDAGraphMode.FULL
+
+
+def expand_pa_per_token_rows(metadata) -> bool:
+    """Re-lay the 512-dim group's PagedAttention metadata as one query per row.
+
+    ``torch_npu._npu_paged_attention`` is decode-only: it splits the query
+    tensor evenly over the rows of ``context_lens``, so every row must hold
+    exactly one query.  FULL cudagraph steps do not satisfy that -- the MTP
+    verify runs k+1 queries per request and prefills run many per request --
+    and the op then silently returns wrong values (verified on NPU: a single
+    multi-query row matches neither causal nor full-context attention, while
+    one-query-per-row stays within bf16 noise of a torch reference for every
+    context length tried).
+
+    Splitting each request's query block into one row per token -- the row's
+    context length being the request's computed prefix plus its own causal
+    position -- restores exact causal attention with the same output row
+    order.  The expanded layout is written to ``pa_block_tables`` /
+    ``pa_seq_lens`` only, never over ``block_tables`` / ``seq_lens``: FULL mode
+    does not guarantee that every step is replayed from a graph, and a step
+    that misses the capture sizes runs eagerly through the stock FIA path,
+    which binds one block-table row per request.  The per-request view
+    therefore has to stay intact; only ``full_graph_pa`` and the PA param
+    provider read the expanded fields.  Zero-query rows (the pad row the runner
+    appends) contribute nothing.
+    """
+    if getattr(metadata, "pa_rows_expanded", False):
+        return True
+    block_tables = getattr(metadata, "block_tables", None)
+    query_lengths = getattr(metadata, "actual_seq_lengths_q", None)
+    seq_lens_list = getattr(metadata, "seq_lens_list", None)
+    if block_tables is None or not query_lengths or not seq_lens_list:
+        return False
+    if len(query_lengths) != len(seq_lens_list):
+        return False
+    query_lens: list[int] = []
+    prev = 0
+    for end in query_lengths:
+        query_lens.append(int(end) - prev)
+        prev = int(end)
+    num_tokens = int(query_lengths[-1])
+    if sum(query_lens) != num_tokens:
+        return False
+    if all(q == 1 for q in query_lens):
+        # Already one query per row; the per-request view is exact, so the PA
+        # view aliases it instead of copying.
+        metadata.pa_block_tables = block_tables
+        metadata.pa_seq_lens = getattr(metadata, "seq_lens", None)
+        metadata.pa_rows_expanded = True
+        return True
+    context_lens: list[int] = []
+    for query_len, seq_len in zip(query_lens, seq_lens_list):
+        if query_len <= 0:
+            continue
+        # seq_len counts the computed prefix plus this step's queries; the
+        # query at index j therefore attends prefix + j + 1 KV positions.
+        prefix = max(int(seq_len) - query_len, 0)
+        context_lens.extend(prefix + j + 1 for j in range(query_len))
+    if len(context_lens) != num_tokens:
+        return False
+    counts = torch.tensor(query_lens, dtype=torch.long, device=block_tables.device)
+    metadata.pa_block_tables = block_tables.repeat_interleave(counts, dim=0)
+    # torch_npu paged attention derives the workspace size from context_lens on
+    # the host, so keep this a CPU tensor (matching the stock seq_lens that
+    # AscendAttentionBackendImpl.full_graph_pa passes).
+    metadata.pa_seq_lens = torch.tensor(context_lens, dtype=torch.int32)
+    metadata.pa_rows_expanded = True
+    return True
+
+
 def requires_contiguous_pa_kv_cache(layer, vllm_config: VllmConfig, spec: FullAttentionSpec) -> bool:
     """Require contiguous K/V only for unpadded ordinary Attention layers eligible for PA."""
     # Import lazily to avoid a circular dependency with attention_v1.
     from vllm_ascend.attention.attention_v1 import AscendAttentionBackendImpl
 
     impl = getattr(layer, "impl", None)
+    if type(impl) is not AscendAttentionBackendImpl:
+        # B1: the head_dim=512 MTP verify step is captured as a FIA-v2 BNSD
+        # paged op, and that op rejects the block-interleaved K/V views
+        # produced by the combined single-buffer allocation. Give these layers
+        # private contiguous K and V buffers instead. This cannot ride on
+        # using_paged_attention(): speculative decoding turns it off, even
+        # though the 512 verify step still runs through the paged path.
+        from vllm_ascend.attention.attention_v2_b1 import AscendB1AttentionBackendImpl
+
+        return (
+            type(impl) is AscendB1AttentionBackendImpl
+            and getattr(vllm_config.model_config, "runner_type", None) != "pooling"
+            and spec.page_size_bytes == spec.real_page_size_bytes
+        )
     return (
-        type(impl) is AscendAttentionBackendImpl
-        and impl.sliding_window is None
+        impl.sliding_window is None
         and getattr(vllm_config.model_config, "runner_type", None) != "pooling"
         and spec.page_size_bytes == spec.real_page_size_bytes
         and using_paged_attention(None, vllm_config, spec.head_size)
