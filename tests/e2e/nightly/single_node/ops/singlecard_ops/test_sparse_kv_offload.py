@@ -3,7 +3,9 @@ import pytest
 torch = pytest.importorskip("torch")
 torch_npu = pytest.importorskip("torch_npu")
 
-from vllm_ascend.utils import enable_custom_op  # noqa: E402
+import vllm.envs as envs  # noqa: E402
+
+from vllm_ascend.utils import AscendDeviceType, enable_custom_op, get_ascend_device_type  # noqa: E402
 
 ROWS = 4
 TOPK = 8
@@ -18,8 +20,9 @@ PAIRED_SELECTION_COPY_MARKER = 0x5A56
 
 
 def _load_sparse_kv_ops():
-    if not enable_custom_op():
-        pytest.skip("custom ops are unavailable")
+    if envs.VLLM_BATCH_INVARIANT or get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3):
+        pytest.skip("sparse KV custom ops require an A2 or A3 custom-op build")
+    assert enable_custom_op(), "Failed to load the sparse KV custom-op extension"
 
     required = {
         "sparse_kv_warmup_lru_resident_threads",
@@ -29,8 +32,7 @@ def _load_sparse_kv_ops():
         "sparse_kv_restore_int16_tensor",
     }
     missing = [name for name in required if not hasattr(torch.ops._C_ascend, name)]
-    if missing:
-        pytest.skip(f"sparse KV ops are unavailable: {missing}")
+    assert not missing, f"Sparse KV ops are missing from the custom-op build: {missing}"
     return torch.ops._C_ascend
 
 

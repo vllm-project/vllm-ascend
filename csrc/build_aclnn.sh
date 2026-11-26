@@ -89,7 +89,7 @@ if [[ "$SOC_VERSION" =~ ^ascend310 ]]; then
     )
     CUSTOM_OPS=$(IFS=';'; echo "${CUSTOM_OPS_ARRAY[*]}")
     SOC_ARG="ascend310p"
-elif [[ "$SOC_VERSION" =~ ^ascend910b ]]; then
+elif [[ "$SOC_VERSION" == "910b" || "$SOC_VERSION" =~ ^ascend910b ]]; then
     log "matched SOC branch: ascend910b"
     # ASCEND910B (A2) series
     # dependency: catlass

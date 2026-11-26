@@ -1,3 +1,4 @@
+import math
 import unittest
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -5,6 +6,7 @@ from unittest.mock import MagicMock, patch
 from torch import Tensor
 from vllm.v1.kv_cache_interface import UniformTypeKVCacheSpecs
 
+from vllm_ascend.ascend_config import SparseKVOffloadConfig
 from vllm_ascend.distributed.kv_transfer.sparse_kv_offload import (
     sparse_kv_offload_manager as manager_module,
 )
@@ -58,13 +60,36 @@ def _make_memory_plan_inputs(max_num_seqs=2):
 
 
 class TestSparseKVOffloadMemoryPlanning(unittest.TestCase):
-    def test_non_a3_is_rejected(self):
-        with (
-            patch.object(manager_module, "_SPARSE_KV_OFFLOAD_MANAGER", None),
-            patch.object(manager_module, "get_ascend_device_type", return_value=AscendDeviceType.A2),
-            self.assertRaisesRegex(RuntimeError, "Sparse KV offload is only support on A3"),
+    def test_supported_offload_paths_initialize_manager(self):
+        for device, overlap in (
+            (AscendDeviceType.A2, False),
+            (AscendDeviceType.A3, False),
+            (AscendDeviceType.A3, True),
         ):
-            manager_module.init_sparse_kv_offload_manager(None, None, None)
+            config = SparseKVOffloadConfig(enabled=True, use_fused_overlap=overlap)
+            with (
+                self.subTest(device=device, overlap=overlap),
+                patch.object(manager_module, "_SPARSE_KV_OFFLOAD_MANAGER", None),
+                patch.object(manager_module, "get_ascend_device_type", return_value=device),
+                patch.object(manager_module, "SparseKVOffloadManager") as factory,
+            ):
+                self.assertIs(manager_module.init_sparse_kv_offload_manager(None, None, config), factory.return_value)
+                factory.assert_called_once_with(None, None, config)
+
+    def test_unsupported_offload_paths_are_rejected(self):
+        for device, overlap in (
+            (AscendDeviceType.A2, True),
+            (AscendDeviceType.A5, False),
+            (AscendDeviceType._310P, False),
+        ):
+            config = SparseKVOffloadConfig(enabled=True, use_fused_overlap=overlap)
+            with (
+                self.subTest(device=device, overlap=overlap),
+                patch.object(manager_module, "_SPARSE_KV_OFFLOAD_MANAGER", None),
+                patch.object(manager_module, "get_ascend_device_type", return_value=device),
+                self.assertRaisesRegex(RuntimeError, "Sparse KV offload requires A3 or fused Copy-SFA on A2"),
+            ):
+                manager_module.init_sparse_kv_offload_manager(None, None, config)
 
     def test_memory_plan_is_limited_by_active_workload(self):
         specs, vllm_config, alignment_reserve = _make_memory_plan_inputs()
@@ -407,15 +432,25 @@ if __name__ == "__main__":
 
 
 class TestHostKVRegistration(unittest.TestCase):
+    def test_a2_registers_rank_local_host_and_copy_sfa_addresses(self):
+        self._check_registration(shared_pool=True)
+
     def test_copy_sfa_exports_block_byte_strides_on_all_tp_ranks(self):
+        self._check_registration(shared_pool=False)
+
+    def _check_registration(self, shared_pool):
         torch = manager_module.torch
         original_zeros = torch.zeros
         original_tensor = torch.tensor
         broadcasts: list[Tensor] = []
+        if shared_pool:
+            host_pools = [torch.empty(8192, dtype=torch.uint8) for _ in range(2)]
+            device_views = [torch.empty_like(pool) for pool in host_pools]
         for rank in (0, 1):
             with self.subTest(rank=rank):
                 manager = SparseKVOffloadManager.__new__(SparseKVOffloadManager)
                 manager.tp_rank = rank
+                manager.shared_host_pool = SimpleNamespace(tensor=host_pools[rank]) if shared_pool else None
                 manager.num_layers = 1
                 manager.offload_layer_names = ["layer.0"]
                 manager.kv_cache_config = SimpleNamespace(num_blocks=3)
@@ -448,6 +483,19 @@ class TestHostKVRegistration(unittest.TestCase):
                     torch.empty((2, 256, 1, 2), dtype=torch.bfloat16),
                 )
 
+                if shared_pool:
+                    host = host_pools[rank]
+                    manager.shared_device_view = device_views[rank]
+
+                    def restore(ptr, shape, host=host):
+                        offset = ptr - host.data_ptr()
+                        return host[offset:].view(torch.bfloat16)[: math.prod(shape)].view(shape)
+
+                    manager._restore_bfloat16_tensor.side_effect = restore
+                    key = restore(host.data_ptr() + 128, cache[2].shape)
+                    value = restore(host.data_ptr() + 4096, cache[3].shape)
+                    cache = (*cache[:2], key, value, *cache[4:])
+
                 def cpu_zeros(*args, **kwargs):
                     kwargs["device"] = "cpu"
                     return original_zeros(*args, **kwargs)
@@ -464,5 +512,10 @@ class TestHostKVRegistration(unittest.TestCase):
 
                 # SfaRemoteD2H consumes these strides on every TP rank.
                 self.assertEqual(manager.cpu_block_lens, [(1024, 512)])
+                if shared_pool:
+                    self.assertEqual(manager.gvas_k_bases, [host.data_ptr() + 128])
+                    self.assertEqual(manager.gvas_v_bases, [host.data_ptr() + 4096])
+                    self.assertEqual(manager.copy_sfa_k_views[0].data_ptr(), device_views[rank].data_ptr() + 128)
+                    self.assertEqual(manager.copy_sfa_v_views[0].data_ptr(), device_views[rank].data_ptr() + 4096)
                 manager._bind_copy_sfa_bases.assert_called_once()
                 manager._init_fused_overlap_planner.assert_not_called()
