@@ -22,6 +22,27 @@ def kv_connector_tree(connector: Any) -> Iterator[Any]:
         yield from kv_connector_tree(child)
 
 
+def maybe_wrap_c8_v_scale_connector(model_runner: Any, kv_cache_config: "KVCacheConfig", transfer_config: Any) -> None:
+    """Install V-scale restoration for MRv2 Mooncake Pull consumers."""
+    from vllm.distributed.kv_transfer import get_kv_transfer_group, has_kv_transfer_group
+
+    from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.connector import MooncakePullConnector
+    from vllm_ascend.worker.v2.model_runner import NPUModelRunner
+
+    if (
+        not isinstance(model_runner, NPUModelRunner)
+        or transfer_config is None
+        or not transfer_config.is_kv_consumer
+        or not getattr(model_runner, "_c8_mxfp_v_scale_caches", None)
+        or not has_kv_transfer_group()
+    ):
+        return
+    if any(isinstance(connector, MooncakePullConnector) for connector in kv_connector_tree(get_kv_transfer_group())):
+        model_runner.kv_connector = C8VScaleKVConnector(
+            model_runner.kv_connector, kv_cache_config, model_runner.compilation_config.static_forward_context
+        )
+
+
 class MambaCopyKVConnector(KVConnector):
     """Keep Mamba bulk copies between synchronous KV loads and forward.
 

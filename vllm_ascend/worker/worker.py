@@ -1268,28 +1268,9 @@ class NPUWorker(GPUWorker):
             kv_cache_allocation_context=self._maybe_get_memory_pool_context(tag="kv_cache"),
         )
 
-        # MRv2 Pull consumers restore the static C8 V scales after KV loads
-        # and Mamba state copies, before the model's first forward.
-        from vllm_ascend.worker.v2.model_runner import NPUModelRunner
+        from vllm_ascend.worker.v2.kv_connector import maybe_wrap_c8_v_scale_connector
 
-        transfer_config = self.vllm_config.kv_transfer_config
-        if (
-            isinstance(self.model_runner, NPUModelRunner)
-            and transfer_config is not None
-            and transfer_config.is_kv_consumer
-            and getattr(self.model_runner, "_c8_mxfp_v_scale_caches", None)
-            and has_kv_transfer_group()
-        ):
-            from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.connector import MooncakePullConnector
-            from vllm_ascend.worker.v2.kv_connector import C8VScaleKVConnector, kv_connector_tree
-
-            connectors = kv_connector_tree(get_kv_transfer_group())
-            if any(isinstance(connector, MooncakePullConnector) for connector in connectors):
-                self.model_runner.kv_connector = C8VScaleKVConnector(
-                    self.model_runner.kv_connector,
-                    kv_cache_config,
-                    self.model_runner.compilation_config.static_forward_context,
-                )
+        maybe_wrap_c8_v_scale_connector(self.model_runner, kv_cache_config, self.vllm_config.kv_transfer_config)
 
         # MRV2's scheduler emits new_block_ids_to_zero whenever this flag is
         # set, so its worker-side consumer must use the same condition.
