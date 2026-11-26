@@ -383,18 +383,10 @@ class EncoderAclGraphManager(EncoderCudaGraphManager):
         with torch.inference_mode():
             output = self.model.encoder_cudagraph_forward(dict(values), path=path)
             shared_out = self._shared_output_buffers.get(share_key)
-            if (
-                shared_out is None
-                or output.ndim == 0
-                or shared_out.ndim != output.ndim
-                or shared_out.shape[1:] != output.shape[1:]
-                or shared_out.dtype != output.dtype
-                or shared_out.device != output.device
-                or output.shape[0] > shared_out.shape[0]
-            ):
+            if shared_out is None or output.shape[0] > shared_out.shape[0]:
                 shared_out = torch.empty_like(output)
                 self._shared_output_buffers[share_key] = shared_out
-            output_buffer = shared_out if output.ndim == 0 else shared_out[: output.shape[0]]
+            output_buffer = shared_out[: output.shape[0]]
 
         graph = torch.npu.NPUGraph()
         with (

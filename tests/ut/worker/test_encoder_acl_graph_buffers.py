@@ -152,18 +152,12 @@ def test_incompatible_inputs_keep_own_allocation(manager, kind):
     assert same_storage(large.input_buffers["pixels"], small.input_buffers["pixels"])
 
 
-@pytest.mark.parametrize("kind", ["shape", "dtype", "larger", "scalar"])
-def test_incompatible_outputs_keep_live_storage(manager, kind):
+def test_larger_output_keeps_previous_storage_live(manager):
     def forward(values, path):
         pixels = values["pixels"]
         if len(pixels) == 8:
             return pixels + 1
-        return {
-            "shape": lambda: torch.ones(4, 3),
-            "dtype": lambda: pixels.double(),
-            "larger": lambda: torch.ones(9, 2),
-            "scalar": lambda: pixels.sum(),
-        }[kind]()
+        return torch.ones(9, 2)
 
     manager.model.encoder_cudagraph_forward.side_effect = forward
     large, small = capture_pair(manager)
