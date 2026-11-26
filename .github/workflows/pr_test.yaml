@@ -888,6 +888,10 @@ jobs:
       # the PR's reviews and changed files for the CODEOWNERS gate.
       issues: write
       pull-requests: write
+      # /ignore-owner re-validates the command author with
+      # GET /collaborators/{user}/permission, which requires read access to
+      # repository metadata that unspecified scopes do not grant.
+      contents: read
     env:
       HEAD_SHA: ${{ github.event.pull_request.head.sha }}
     steps:
@@ -932,6 +936,7 @@ jobs:
           UNCLAIMED_OUT: ${{ runner.temp }}/unclaimed_files.txt
           SELF_OWNED_OUT: ${{ runner.temp }}/self_owned_files.txt
           APPROVAL_FAILURES_OUT: ${{ runner.temp }}/approval_failures.txt
+          IGNORED_OUT: ${{ runner.temp }}/ignored_files.txt
         run: |
           python3 .github/workflows/scripts/codeowner_gate.py check-approvals \
             --pr "${{ github.event.pull_request.number }}"
@@ -1112,6 +1117,7 @@ jobs:
             ${{ runner.temp }}/unclaimed_files.txt
             ${{ runner.temp }}/self_owned_files.txt
             ${{ runner.temp }}/approval_failures.txt
+            ${{ runner.temp }}/ignored_files.txt
             ${{ runner.temp }}/coverage_errors.txt
 
       - name: Package gate result
