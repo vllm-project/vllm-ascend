@@ -1,0 +1,11 @@
+pr: 23418
+entries:
+  - category: bugfix
+    text: >-
+      Dense speculative drafts can start when their runtime configuration inherits
+      expert parallelism from the target. Invalid tensor or decode context
+      parallel sizes still raise a configuration error.
+  - category: bugfix
+    text: >-
+      On Ascend 310P, plain MTP speculative decoding now honors the draft's
+      enforce_eager setting when using Model Runner V2.
