@@ -562,6 +562,7 @@ def test_c8_selector_reuses_builder_metadata_across_layers(topk):
         assert call.kwargs["seqused_k"] is prepared.seq_lens
 
 
+@pytest.mark.parametrize("topk", [1024, 2048])
 @pytest.mark.parametrize("prepared_in_builder", [True, False])
 @pytest.mark.parametrize(
     "query_lengths,cache_indices,weights_dtype",
@@ -572,7 +573,7 @@ def test_c8_selector_reuses_builder_metadata_across_layers(topk):
     ],
 )
 def test_c4_selector_preserves_packed_layout_and_reuses_metadata(
-    prepared_in_builder, query_lengths, cache_indices, weights_dtype
+    prepared_in_builder, query_lengths, cache_indices, weights_dtype, topk
 ):
     tokens, heads, logical_dim = sum(query_lengths), 32, 128
     query = torch.zeros(tokens * heads, logical_dim // 2, dtype=torch.uint8)
@@ -583,12 +584,12 @@ def test_c4_selector_preserves_packed_layout_and_reuses_metadata(
     query_ends = torch.tensor(query_lengths, dtype=torch.int32).cumsum(0, dtype=torch.int32)
     cumulative = torch.cat((torch.zeros(1, dtype=torch.int32), query_ends))
     lengths = torch.full((len(query_lengths),), 256, dtype=torch.int32)
-    config = QLIMetadataConfig(heads, logical_dim, 5)
+    config = QLIMetadataConfig(heads, logical_dim, 5, topk=topk)
     metadata_op = mock.Mock(return_value=torch.arange(1024, dtype=torch.int32))
     prepared = (
         QLIMetadataBuffers(config, 4).build("target", cumulative, lengths, metadata_op) if prepared_in_builder else None
     )
-    indices = torch.full((tokens, 1, 2048), -1, dtype=torch.int32)
+    indices = torch.full((tokens, 1, topk), -1, dtype=torch.int32)
     select_op = mock.Mock(return_value=(indices, None))
     metadata = SimpleNamespace(block_table=torch.zeros(len(query_lengths), 2, dtype=torch.int32), qli_inputs=prepared)
     weights = torch.ones(tokens, heads, dtype=weights_dtype)
@@ -609,12 +610,15 @@ def test_c4_selector_preserves_packed_layout_and_reuses_metadata(
                 False,
                 True,
                 True,
+                topk=topk,
             )
             assert result is indices
     assert metadata_op.call_count == (1 if prepared_in_builder else 4)
     assert select_op.call_count == 4
     assert metadata_op.call_args.kwargs["head_dim"] == logical_dim
     assert metadata_op.call_args.kwargs["quant_mode"] == 5
+    for call in metadata_op.call_args_list:
+        assert call.kwargs["topk"] == topk
     for call in select_op.call_args_list:
         q, k, w, q_scale, k_scale = call.args
         assert q.shape == (tokens, heads, logical_dim // 2)
@@ -622,6 +626,7 @@ def test_c4_selector_preserves_packed_layout_and_reuses_metadata(
         assert k is key and q_scale is query_scale and k_scale is key_scale
         assert w.dtype == torch.float32
         assert call.kwargs["quant_mode"] == 5
+        assert call.kwargs["topk"] == topk
         torch.testing.assert_close(call.kwargs["cu_seqlens_q"], cumulative)
         torch.testing.assert_close(call.kwargs["seqused_k"], lengths)
         if prepared is not None:
@@ -629,7 +634,10 @@ def test_c4_selector_preserves_packed_layout_and_reuses_metadata(
             assert call.kwargs["cu_seqlens_q"] is prepared.query_start_loc
 
 
-def test_c4_selector_metadata_config_uses_logical_head_dim():
+@pytest.mark.parametrize("topk", [1024, 2048])
+def test_c4_selector_metadata_config_uses_logical_head_dim(topk):
     spec = SimpleNamespace(cache_sparse_li_c4=True, cache_sparse_li_c8=False, dtype=torch.uint8, head_size=64)
-    config = A5DeviceAdaptor.get_indexer_metadata_config(spec, SimpleNamespace(index_n_heads=32, index_head_dim=128))
-    assert config == QLIMetadataConfig(32, 128, 5)
+    config = A5DeviceAdaptor.get_indexer_metadata_config(
+        spec, SimpleNamespace(index_n_heads=32, index_head_dim=128, index_topk=topk)
+    )
+    assert config == QLIMetadataConfig(32, 128, 5, topk=topk)
