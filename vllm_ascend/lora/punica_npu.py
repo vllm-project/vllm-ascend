@@ -31,9 +31,10 @@ class PunicaWrapperNPU(PunicaWrapperBase):
         self.active_lora_slots: frozenset[int] = frozenset()
         ascend_device_type = get_ascend_device_type()
         self.ascend_device_type = ascend_device_type
-        if not get_current_hardware_profile().supports(HardwareCapability.LORA_CUSTOM_OPS) or (
-            self.lora_config is not None and self.lora_config.max_lora_rank >= 128
-        ):
+        self._use_native_lora_ops = get_current_hardware_profile().supports(HardwareCapability.LORA_CUSTOM_OPS) and (
+            self.lora_config is None or self.lora_config.max_lora_rank < 128
+        )
+        if not self._use_native_lora_ops:
             from vllm.lora.ops.torch_ops import (
                 bgmv_expand,
                 bgmv_expand_slice,
@@ -239,8 +240,10 @@ class PunicaWrapperNPU(PunicaWrapperBase):
         GEMM of lora'b.
         """
 
-        if y_slice_size < x.shape[-1]:
+        if self._use_native_lora_ops and y_slice_size < x.shape[-1]:
             # AscendC expand requires output width >= rank.
+            if self.is_prefill and self.no_lora:
+                return
             expand_slice(y, x, w_t_all, self._get_token_lora_indices(x), y_offset, y_slice_size, add_inputs)
             return
         expand_slice_fun: Callable = self._expand_slice_prefill if self._use_sgmv() else self._expand_slice_decode
