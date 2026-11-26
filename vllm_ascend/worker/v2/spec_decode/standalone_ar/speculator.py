@@ -7,6 +7,7 @@ from typing import Any
 
 import numpy as np
 import torch
+from vllm.config.compilation import CUDAGraphMode
 from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
 from vllm.v1.worker.gpu.spec_decode.standalone_ar.speculator import StandaloneARSpeculator
 
@@ -18,6 +19,15 @@ from vllm_ascend.worker.v2.attn_utils import (
 
 
 class AscendStandaloneARSpeculator(StandaloneARSpeculator):
+    def init_cudagraph_manager(self, cudagraph_mode: CUDAGraphMode) -> None:
+        # Ascend standalone AR does not yet wire ACL graph attention-parameter
+        # updates on replay. Keep standalone AR eager.
+        super().init_cudagraph_manager(CUDAGraphMode.NONE)
+
+    def capture(self) -> None:
+        # The target runner invokes this hook when capturing target graphs.
+        pass
+
     def supports_batch_sharded_draft_logits(self) -> bool:
         # NPU draft-logits kernels index the cache by request state.
         return False

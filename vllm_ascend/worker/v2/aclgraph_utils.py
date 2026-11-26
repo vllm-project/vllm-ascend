@@ -17,7 +17,7 @@
 # This file is a part of the vllm-ascend project.
 #
 from collections.abc import Callable, Hashable, Mapping
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from typing import Any
 
 import torch
@@ -36,7 +36,7 @@ from vllm.v1.worker.gpu.model_states.interface import ModelState
 from vllm.v1.worker.gpu.ubatch_utils import UBatchRunner
 from vllm.v1.worker.utils import AttentionGroup
 
-from vllm_ascend.ascend_forward_context import _EXTRA_CTX
+from vllm_ascend.ascend_forward_context import _EXTRA_CTX, sync_draft_moe_comm_context
 from vllm_ascend.compilation.acl_graph import (
     set_graph_params,
     update_full_graph_params,
@@ -48,6 +48,7 @@ from vllm_ascend.compilation.updatable_graph import (
 )
 from vllm_ascend.distributed.expert_transfer import expert_offload_utils as expert_offload
 from vllm_ascend.utils import use_updatable_graph
+from vllm_ascend.worker.v2.spec_decode import resolve_speculator_draft_vllm_config
 from vllm_ascend.worker.v2.utils import communicator_switch
 
 
@@ -247,12 +248,29 @@ class ModelWithContext(nn.Module):
     so we can inherit vllm's CudaGraphManager._capture_full_graph.
     """
 
-    def __init__(self, original_model, is_draft_model=False, is_draft_model_prefill=False, device_metadata=None):
+    def __init__(
+        self,
+        original_model,
+        is_draft_model=False,
+        is_draft_model_prefill=False,
+        device_metadata=None,
+        vllm_config: VllmConfig | None = None,
+        *,
+        speculator=None,
+    ):
         super().__init__()
         self.original_model = original_model
         self.is_draft_model = is_draft_model
         self.is_draft_model_prefill = is_draft_model_prefill
         self.device_metadata = device_metadata
+        self.vllm_config = vllm_config
+        if is_draft_model:
+            bound_config = getattr(original_model, "_ascend_draft_vllm_config", None)
+            self.vllm_config = (
+                bound_config
+                if bound_config is not None
+                else resolve_speculator_draft_vllm_config(speculator, vllm_config)
+            )
 
     def forward(self, *args, **kwargs):
         forward_context = get_forward_context()
@@ -262,21 +280,35 @@ class ModelWithContext(nn.Module):
             torch.npu.is_current_stream_capturing()
             and forward_context.cudagraph_runtime_mode != CUDAGraphMode.PIECEWISE
         )
-        if self.is_draft_model:
-            _EXTRA_CTX.is_draft_model = True
-        if self.is_draft_model_prefill:
+        bound_draft = self.is_draft_model and getattr(self.original_model, "_ascend_draft_comm_bound", False)
+        draft_ctx = (
+            sync_draft_moe_comm_context(
+                self.vllm_config,
+                model_instance=self.original_model,
+                is_draft_model_prefill=self.is_draft_model_prefill,
+            )
+            if self.is_draft_model and not bound_draft
+            else nullcontext()
+        )
+        if bound_draft:
+            prev_prefill = _EXTRA_CTX.is_draft_model_prefill
+            _EXTRA_CTX.is_draft_model_prefill = self.is_draft_model_prefill
+        elif not self.is_draft_model and self.is_draft_model_prefill:
             _EXTRA_CTX.is_draft_model_prefill = True
 
-        try:
-            if self.device_metadata is not None:
-                self.device_metadata.begin_forward()
-            return self.original_model(*args, **kwargs)
-        finally:
-            # Warmup and actual capture receive separate prepare_attn calls.
-            # Retire each submission, including unused producers, after its
-            # consumers; do not wait for metadata at graph entry.
-            if self.device_metadata is not None:
-                self.device_metadata.finish()
+        with draft_ctx:
+            try:
+                if self.device_metadata is not None:
+                    self.device_metadata.begin_forward()
+                return self.original_model(*args, **kwargs)
+            finally:
+                if bound_draft:
+                    _EXTRA_CTX.is_draft_model_prefill = prev_prefill
+                # Warmup and actual capture receive separate prepare_attn calls.
+                # Retire each submission, including unused producers, after its
+                # consumers; do not wait for metadata at graph entry.
+                if self.device_metadata is not None:
+                    self.device_metadata.finish()
 
     def get_original_model(self):
         return self.original_model
@@ -296,8 +328,14 @@ class ModelWithContext(nn.Module):
 @contextmanager
 def model_capture_wrapper(speculator, is_draft_model_prefill):
     """Context manager to override speculator's model for speculator capturing."""
+    model = ModelWithContext(
+        speculator.model,
+        is_draft_model=True,
+        is_draft_model_prefill=is_draft_model_prefill,
+        speculator=speculator,
+    )
+    speculator.model = model
     try:
-        speculator.model = ModelWithContext(speculator.model, True, is_draft_model_prefill)
         yield
     finally:
-        speculator.model = speculator.model.get_original_model()
+        speculator.model = model.get_original_model()

@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM-Ascend project
 from collections.abc import Callable, Mapping, Sequence
+from copy import copy
 from typing import TYPE_CHECKING, Any
 
 import torch
@@ -20,7 +21,13 @@ from vllm.v1.worker.gpu.model_states.interface import ModelState
 from vllm.v1.worker.gpu.spec_decode.autoregressive.cudagraph_utils import SpeculatorCudaGraphManager
 from vllm.v1.worker.utils import AttentionGroup
 
-from vllm_ascend.ascend_forward_context import _EXTRA_CTX, MoECommType, select_moe_comm_method
+from vllm_ascend.ascend_config import draft_config_context
+from vllm_ascend.ascend_forward_context import (
+    _EXTRA_CTX,
+    MoECommType,
+    resolve_draft_moe_quant_type,
+    select_moe_comm_method,
+)
 from vllm_ascend.compilation.acl_graph import (
     set_draft_graph_params,
     set_draft_graph_prefill_params,
@@ -33,10 +40,109 @@ from vllm_ascend.worker.v2.aclgraph_utils import (
     collect_sorted_captured_token_sizes,
     model_capture_wrapper,
 )
+from vllm_ascend.worker.v2.spec_decode import resolve_speculator_draft_vllm_config
 from vllm_ascend.worker.v2.utils import communicator_switch
 
 if TYPE_CHECKING:
     from vllm.v1.worker.gpu.pcp_manager import PCPManager
+
+
+def _draft_batch_supports_full_aclgraph(num_tokens: int, draft_config: VllmConfig) -> bool:
+    with draft_config_context():
+        return (
+            select_moe_comm_method(
+                num_tokens,
+                draft_config,
+                is_draft_model=True,
+                draft_moe_quant_type=resolve_draft_moe_quant_type(draft_config, is_draft_model=True),
+            )
+            is not MoECommType.ALLTOALL
+        )
+
+
+def filter_draft_full_aclgraph_sizes(
+    vllm_config: VllmConfig,
+    cudagraph_mode: CUDAGraphMode,
+    decode_query_lens: Mapping[int, int] | None,
+    decode_request_sizes: Sequence[int] | None = None,
+    *,
+    varlen_decode: bool = False,
+) -> tuple[VllmConfig, CUDAGraphMode, Sequence[int] | None]:
+    # Both FULL and PIECEWISE capture MoE forward, where ALLTOALL synchronizes
+    # dynamic split counts on the host.
+    if (
+        cudagraph_mode == CUDAGraphMode.NONE
+        or getattr(vllm_config, "speculative_config", None) is None
+        or not is_drafter_moe_model(vllm_config)
+    ):
+        return vllm_config, cudagraph_mode, decode_request_sizes
+
+    draft_config = resolve_speculator_draft_vllm_config(None, vllm_config)
+    assert draft_config is not None
+    # Keep the target capture grids intact.
+    compilation = vllm_config.compilation_config
+    graph_config = copy(vllm_config)
+    graph_config.compilation_config = copy(compilation)
+    graph_compilation = graph_config.compilation_config
+    mixed_mode = cudagraph_mode.mixed_mode()
+    if mixed_mode != CUDAGraphMode.NONE:
+        graph_compilation.prefill_cudagraph_capture_token_sizes = [
+            size
+            for size in compilation.prefill_cudagraph_capture_token_sizes or ()
+            if _draft_batch_supports_full_aclgraph(size, draft_config)
+        ]
+        if not graph_compilation.prefill_cudagraph_capture_token_sizes:
+            mixed_mode = CUDAGraphMode.NONE
+
+    has_decode = False
+    if cudagraph_mode.separate_routine():
+        assert decode_query_lens is not None
+        if varlen_decode:
+            sizes = [
+                size
+                for size in vllm_config.get_varlen_decode_cudagraph_token_sizes(max(decode_query_lens))
+                if _draft_batch_supports_full_aclgraph(size, draft_config)
+            ]
+            if sizes:
+                graph_compilation.max_decode_cudagraph_capture_tokens = max(sizes)
+            has_decode = bool(sizes)
+        else:
+            candidate_sizes = (
+                compilation.decode_cudagraph_capture_request_sizes
+                if decode_request_sizes is None
+                else decode_request_sizes
+            )
+            max_decode_tokens = compilation.max_cudagraph_capture_size or 0
+            if compilation.max_decode_cudagraph_capture_tokens:
+                max_decode_tokens = (
+                    min(max_decode_tokens, compilation.max_decode_cudagraph_capture_tokens)
+                    if max_decode_tokens > 0
+                    else compilation.max_decode_cudagraph_capture_tokens
+                )
+            effective_limits = [
+                (query_len, min(max_reqs, max_decode_tokens // query_len) if max_decode_tokens > 0 else max_reqs)
+                for query_len, max_reqs in decode_query_lens.items()
+            ]
+            effective_limits = [(query_len, limit) for query_len, limit in effective_limits if limit >= 1]
+            decode_request_sizes = (
+                [
+                    size
+                    for size in candidate_sizes or ()
+                    if all(
+                        _draft_batch_supports_full_aclgraph(min(size, limit) * query_len, draft_config)
+                        for query_len, limit in effective_limits
+                    )
+                ]
+                if effective_limits
+                else []
+            )
+            has_decode = bool(decode_request_sizes)
+
+    if not has_decode:
+        cudagraph_mode = mixed_mode
+    elif mixed_mode == CUDAGraphMode.NONE:
+        cudagraph_mode = CUDAGraphMode.FULL_DECODE_ONLY
+    return graph_config, cudagraph_mode, decode_request_sizes
 
 
 def get_draft_prefill_cudagraph_mode(vllm_config: VllmConfig, cudagraph_mode: CUDAGraphMode) -> CUDAGraphMode:
@@ -70,24 +176,11 @@ class AutoRegressiveAclGraphManager(AscendGraphManagerMixin, SpeculatorCudaGraph
         # length and 1 for draft decode.
         # vLLM #63406 keys uniform decode graphs by request count.
         decode_query_len = max(decode_query_lens)
-        if (
-            decode_query_len == 1
-            and decode_request_sizes is not None
-            and cudagraph_mode.decode_mode() == CUDAGraphMode.FULL
-            and is_drafter_moe_model(vllm_config)
-        ):
-            # Upstream expands this independent draft grid beyond the target
-            # capture bound (#63406). ALLTOALL preprocess synchronizes
-            # dynamic token counts on the host and cannot run in FULL.
-            # Native dispatch keeps larger batches eager, with all their
-            # requests/tokens, when they have no compatible capture size.
-            decode_request_sizes = [
-                size
-                for size in decode_request_sizes
-                if select_moe_comm_method(size, vllm_config) != MoECommType.ALLTOALL
-            ]
         if decode_query_len > 1:
             cudagraph_mode = get_draft_prefill_cudagraph_mode(vllm_config, cudagraph_mode)
+        vllm_config, cudagraph_mode, decode_request_sizes = filter_draft_full_aclgraph_sizes(
+            vllm_config, cudagraph_mode, decode_query_lens, decode_request_sizes, varlen_decode=varlen_decode
+        )
         super().__init__(
             vllm_config,
             device,

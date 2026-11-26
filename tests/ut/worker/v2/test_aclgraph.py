@@ -4,17 +4,25 @@
 from contextlib import nullcontext
 from types import SimpleNamespace
 from typing import Any
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, Mock, patch
 
 import pytest
 import torch
+from vllm.config import VllmConfig
 from vllm.config.compilation import CUDAGraphMode
+from vllm.v1.worker.gpu import cudagraph_utils
 
+from vllm_ascend import ascend_forward_context, utils
 from vllm_ascend.ascend_forward_context import MoECommType
+from vllm_ascend.device.hardware import AscendDeviceType
+from vllm_ascend.device.hardware_profile import get_hardware_profile
+from vllm_ascend.quantization.quant_type import QuantType
+from vllm_ascend.worker.v2.spec_decode.dflash.aclgraph import DFlashAclGraphManager
+from vllm_ascend.worker.v2.spec_decode.target_dependent_ar import aclgraph
 from vllm_ascend.worker.v2.spec_decode.target_dependent_ar.aclgraph import (
     AutoRegressiveAclGraphManager,
-    CudaGraphManager,
     SpeculatorCudaGraphManager,
+    filter_draft_full_aclgraph_sizes,
 )
 
 
@@ -109,96 +117,254 @@ def test_init_draft_decode_graph():
     set_prefill.assert_not_called()
 
 
+@pytest.fixture
+def graph_runtime(monkeypatch):
+    monkeypatch.setattr(cudagraph_utils, "get_pp_group", lambda: SimpleNamespace(is_first_rank=True, is_last_rank=True))
+    monkeypatch.setattr(cudagraph_utils.current_platform, "get_global_graph_pool", lambda: None)
+    monkeypatch.setattr(cudagraph_utils, "is_breakable_cudagraph_enabled", lambda *args: False)
+    monkeypatch.setattr(aclgraph, "set_draft_graph_params", Mock())
+    monkeypatch.setattr(aclgraph, "set_draft_graph_prefill_params", Mock())
+    monkeypatch.setattr("vllm_ascend.worker.v2.spec_decode.dflash.aclgraph.set_draft_graph_params", Mock())
+
+
 @pytest.mark.parametrize(
-    "draft_moe,method,query_len,mode,limit,expected_max_requests",
+    "draft_moe,method,query_len,mode,limit,expected_max_requests,expected_mode",
     [
-        (True, MoECommType.MC2, 1, CUDAGraphMode.FULL_DECODE_ONLY, 16, 16),
-        (True, MoECommType.MC2, 1, CUDAGraphMode.FULL_DECODE_ONLY, 8, 8),
-        (True, MoECommType.FUSED_MC2, 1, CUDAGraphMode.FULL_DECODE_ONLY, 512, 512),
-        (True, MoECommType.ALLGATHER, 1, CUDAGraphMode.FULL_DECODE_ONLY, 512, 512),
-        (False, MoECommType.MC2, 1, CUDAGraphMode.FULL_DECODE_ONLY, 16, 512),
-        (True, MoECommType.MC2, 4, CUDAGraphMode.FULL_DECODE_ONLY, 16, 512),
-        (True, MoECommType.MC2, 1, CUDAGraphMode.NONE, 16, 512),
-        (True, MoECommType.ALLTOALL, 1, CUDAGraphMode.FULL_DECODE_ONLY, 512, 0),
+        (True, MoECommType.MC2, 1, CUDAGraphMode.FULL_DECODE_ONLY, 16, 16, CUDAGraphMode.FULL_DECODE_ONLY),
+        (True, MoECommType.MC2, 1, CUDAGraphMode.FULL_DECODE_ONLY, 8, 8, CUDAGraphMode.FULL_DECODE_ONLY),
+        (True, MoECommType.FUSED_MC2, 1, CUDAGraphMode.FULL_DECODE_ONLY, 512, 512, CUDAGraphMode.FULL_DECODE_ONLY),
+        (True, MoECommType.ALLGATHER, 1, CUDAGraphMode.FULL_DECODE_ONLY, 512, 512, CUDAGraphMode.FULL_DECODE_ONLY),
+        (False, MoECommType.MC2, 1, CUDAGraphMode.FULL_DECODE_ONLY, 16, 512, CUDAGraphMode.FULL_DECODE_ONLY),
+        (True, MoECommType.MC2, 4, CUDAGraphMode.FULL_DECODE_ONLY, 16, 4, CUDAGraphMode.FULL_DECODE_ONLY),
+        (True, MoECommType.MC2, 1, CUDAGraphMode.NONE, 16, 512, CUDAGraphMode.NONE),
+        (True, MoECommType.ALLTOALL, 1, CUDAGraphMode.FULL_DECODE_ONLY, 512, 0, CUDAGraphMode.NONE),
+        (True, MoECommType.MC2, 4, CUDAGraphMode.FULL_AND_PIECEWISE, 2, 0, CUDAGraphMode.NONE),
+        (True, MoECommType.MC2, 8, CUDAGraphMode.FULL_AND_PIECEWISE, 4, 0, CUDAGraphMode.PIECEWISE),
+        (True, MoECommType.MC2, 1, CUDAGraphMode.FULL_AND_PIECEWISE, 2, 1, CUDAGraphMode.FULL_DECODE_ONLY),
     ],
 )
 def test_draft_decode_capture_respects_moe_comm_policy(
-    draft_moe, method, query_len, mode, limit, expected_max_requests
+    monkeypatch, graph_runtime, draft_moe, method, query_len, mode, limit, expected_max_requests, expected_mode
 ):
     sizes = [1, 4, 8, 16, 32, 512]
     original_sizes = sizes.copy()
-    parent_kwargs: dict[str, Any] = {}
-
-    def parent_init(self, *args, **kwargs):
-        parent_kwargs.update(kwargs)
-        _parent_init(self, *args, **kwargs)
-
-    with (
-        patch.object(SpeculatorCudaGraphManager, "__init__", parent_init),
-        patch.object(SpeculatorCudaGraphManager, "needs_capture", return_value=False),
-        patch(
-            "vllm_ascend.worker.v2.spec_decode.target_dependent_ar.aclgraph.collect_sorted_captured_token_sizes",
-            return_value=[],
-        ),
-        patch(
-            "vllm_ascend.worker.v2.spec_decode.target_dependent_ar.aclgraph.is_drafter_moe_model",
-            return_value=draft_moe,
-        ),
-        patch(
-            "vllm_ascend.worker.v2.spec_decode.target_dependent_ar.aclgraph.select_moe_comm_method",
-            side_effect=lambda size, _: method if size <= limit else MoECommType.ALLTOALL,
-        ),
-    ):
-        AutoRegressiveAclGraphManager(
-            _graph_config(),
-            torch.device("cpu"),
-            mode,
-            decode_query_lens={query_len: 512},
-            decode_request_sizes=sizes,
-        )
-    compatible_sizes = parent_kwargs["decode_request_sizes"]
-    assert max(compatible_sizes, default=0) == expected_max_requests
-    assert sizes == original_sizes
-
-    # Exercise native descriptor creation and dispatch, including the eager
-    # boundary, without allocating a device graph or changing the config grid.
     compilation = SimpleNamespace(
         prefill_cudagraph_capture_token_sizes=[4, 8, 12, 16],
         decode_cudagraph_capture_request_sizes=[1, 2, 3, 4],
         max_decode_cudagraph_capture_tokens=None,
         max_cudagraph_capture_size=4096,
     )
-    native: Any = SimpleNamespace(
+    config = SimpleNamespace(
         compilation_config=compilation,
-        cudagraph_mode=mode,
-        max_num_reqs=512,
-        decode_query_len=query_len,
-        decode_max_reqs={query_len: 512},
-        decode_request_sizes=compatible_sizes,
-        varlen_decode=False,
-        lora_capture_cases=[0],
-        vllm_config=SimpleNamespace(uniform_decode_query_len=4, cache_config=SimpleNamespace(use_kda_recoverssm=False)),
-        _capture_descs={},
-        _decode_descs={},
-        _candidates={},
-        _graphs_captured=True,
-        _maybe_ubatch_twin=lambda _: None,
-        _resolve_effective_loras=lambda count: count,
+        speculative_config=SimpleNamespace(),
+        scheduler_config=SimpleNamespace(max_num_seqs=512),
+        parallel_config=SimpleNamespace(tensor_parallel_size=1, prefill_context_parallel_size=1),
+        cache_config=SimpleNamespace(use_kda_recoverssm=False),
+        uniform_decode_query_len=query_len,
     )
-    CudaGraphManager._init_candidates(native)
-    captured = [desc for descs in native._capture_descs.values() for desc in descs]
-    if mode == CUDAGraphMode.NONE:
-        assert not captured
-    else:
-        assert max((desc.num_reqs for desc in captured), default=0) == expected_max_requests
-    if draft_moe and query_len == 1 and method == MoECommType.MC2 and mode != CUDAGraphMode.NONE:
-        at_limit = CudaGraphManager.dispatch(native, limit, limit, uniform_token_count=1, num_active_loras=0)
-        above_limit = CudaGraphManager.dispatch(native, limit + 1, limit + 1, uniform_token_count=1, num_active_loras=0)
+    monkeypatch.setattr(aclgraph, "is_drafter_moe_model", lambda _: draft_moe)
+    monkeypatch.setattr(
+        aclgraph, "select_moe_comm_method", lambda size, _, **kwargs: method if size <= limit else MoECommType.ALLTOALL
+    )
+    manager = AutoRegressiveAclGraphManager(
+        config, torch.device("cpu"), mode, decode_query_lens={query_len: 512}, decode_request_sizes=sizes
+    )
+    assert manager.cudagraph_mode == expected_mode
+    assert manager.needs_capture() == (expected_mode != CUDAGraphMode.NONE)
+    assert max(manager.decode_request_sizes, default=0) == expected_max_requests
+    captured = manager._capture_descs.get(CUDAGraphMode.FULL, [])
+    assert max((desc.num_reqs for desc in captured), default=0) == (expected_max_requests if expected_mode else 0)
+    if draft_moe and query_len == 1 and method == MoECommType.MC2 and mode == CUDAGraphMode.FULL_DECODE_ONLY:
+        manager._graphs_captured = True
+        at_limit = manager.dispatch(limit, limit, uniform_token_count=1, num_active_loras=0)
+        above_limit = manager.dispatch(limit + 1, limit + 1, uniform_token_count=1, num_active_loras=0)
         assert at_limit.cg_mode == CUDAGraphMode.FULL
         assert above_limit.cg_mode == CUDAGraphMode.NONE
         assert above_limit.num_reqs == limit + 1
         assert above_limit.num_tokens == limit + 1
+    assert sizes == original_sizes
     assert compilation.decode_cudagraph_capture_request_sizes == [1, 2, 3, 4]
+    assert compilation.prefill_cudagraph_capture_token_sizes == [4, 8, 12, 16]
+
+
+def test_varlen_draft_decode_prunes_mixed_and_decode_grids(monkeypatch, graph_runtime):
+    capacity = 256
+    config = VllmConfig()
+    config.speculative_config = SimpleNamespace(num_speculative_tokens=3)
+    config.scheduler_config.max_num_seqs = 128
+    config.scheduler_config.max_num_batched_tokens = 512
+    compilation = config.compilation_config
+    compilation.prefill_cudagraph_capture_token_sizes = [256, 512]
+    compilation.max_decode_cudagraph_capture_requests = 128
+    compilation.max_decode_cudagraph_capture_tokens = 512
+    monkeypatch.setattr(aclgraph, "is_drafter_moe_model", lambda _: True)
+    monkeypatch.setattr(
+        aclgraph,
+        "select_moe_comm_method",
+        lambda size, _, **kwargs: MoECommType.MC2 if size <= capacity else MoECommType.ALLTOALL,
+    )
+    manager = AutoRegressiveAclGraphManager(
+        config,
+        torch.device("cpu"),
+        CUDAGraphMode.FULL_AND_PIECEWISE,
+        decode_query_lens={4: 128},
+        varlen_decode=True,
+    )
+    assert manager.capture_sizes[-1] == capacity
+    assert manager.compilation_config.max_decode_cudagraph_capture_tokens == capacity
+    assert compilation.max_decode_cudagraph_capture_tokens == 512
+    manager._graphs_captured = True
+    for max_query_len, expected in ((4, CUDAGraphMode.FULL), (5, CUDAGraphMode.PIECEWISE)):
+        assert manager.dispatch(64, 256, None, 0, max_query_len=max_query_len).cg_mode == expected
+        assert manager.dispatch(128, 512, None, 0, max_query_len=max_query_len).cg_mode == CUDAGraphMode.NONE
+
+
+@pytest.mark.parametrize(("comm_alg", "capacity"), [("fullmesh_v1", 512), ("fullmesh_v2", 256)])
+@pytest.mark.parametrize(
+    ("method", "manager_cls", "query_len", "mode", "target_tp", "pcp_size"),
+    [
+        pytest.param("mtp", AutoRegressiveAclGraphManager, 1, CUDAGraphMode.FULL_DECODE_ONLY, 1, 1, id="mtp-decode"),
+        pytest.param(
+            "draft_model", AutoRegressiveAclGraphManager, 1, CUDAGraphMode.FULL_DECODE_ONLY, 2, 1, id="draft-tp1-decode"
+        ),
+        pytest.param(
+            "eagle", AutoRegressiveAclGraphManager, 1, CUDAGraphMode.FULL_DECODE_ONLY, 1, 1, id="eagle-decode"
+        ),
+        pytest.param("eagle", AutoRegressiveAclGraphManager, 4, CUDAGraphMode.FULL, 1, 1, id="eagle-prefill"),
+        *(
+            pytest.param("draft_model", AutoRegressiveAclGraphManager, 4, mode, tp, pcp, id=f"{mode}-tp{tp}-pcp{pcp}")
+            for tp in (1, 2)
+            for mode, pcp in (
+                (CUDAGraphMode.FULL_AND_PIECEWISE, 1),
+                (CUDAGraphMode.PIECEWISE, 1),
+                (CUDAGraphMode.FULL_AND_PIECEWISE, 2),
+            )
+        ),
+        pytest.param("dspark", DFlashAclGraphManager, 2, CUDAGraphMode.FULL_DECODE_ONLY, 1, 1, id="dspark-decode"),
+        pytest.param("dspark", DFlashAclGraphManager, 2, CUDAGraphMode.FULL_AND_PIECEWISE, 1, 1, id="dspark-mixed"),
+        pytest.param("dspark", DFlashAclGraphManager, 2, CUDAGraphMode.PIECEWISE, 1, 1, id="dspark-piecewise"),
+    ],
+)
+def test_draft_graphs_exclude_batches_requiring_alltoall(
+    monkeypatch, graph_runtime, comm_alg, capacity, method, manager_cls, query_len, mode, target_tp, pcp_size
+):
+    token_sizes = [128, 256, 512, 1024]
+    request_sizes = [size // query_len for size in token_sizes]
+    compilation = SimpleNamespace(
+        cudagraph_capture_sizes=token_sizes,
+        max_cudagraph_capture_size=1024,
+        decode_cudagraph_capture_request_sizes=request_sizes,
+        prefill_cudagraph_capture_token_sizes=token_sizes,
+        max_decode_cudagraph_capture_tokens=None,
+    )
+    draft_config = SimpleNamespace(
+        dtype=torch.bfloat16,
+        quantization=None,
+        is_moe=True,
+        hf_text_config=SimpleNamespace(to_dict=lambda: {"num_experts": 8}),
+    )
+    # MoE construction publishes this after loading. MTP tests the earlier fallback.
+    if method != "mtp":
+        draft_config.draft_moe_quant_type = QuantType.NONE
+    config = SimpleNamespace(
+        model_config=SimpleNamespace(is_moe=True, quantization="ascend"),
+        speculative_config=SimpleNamespace(
+            method=method, draft_model_config=draft_config, uses_dynamic_speculative_decoding=lambda: False
+        ),
+        compilation_config=compilation,
+        parallel_config=SimpleNamespace(
+            tensor_parallel_size=target_tp, enable_expert_parallel=True, prefill_context_parallel_size=pcp_size
+        ),
+        scheduler_config=SimpleNamespace(max_num_seqs=1024),
+        cache_config=SimpleNamespace(use_kda_recoverssm=False),
+        uniform_decode_query_len=query_len,
+    )
+    if method == "draft_model":
+        config.speculative_config.draft_parallel_config = SimpleNamespace(
+            tensor_parallel_size=1, enable_expert_parallel=True
+        )
+    monkeypatch.setattr(utils, "_IS_DRAFTER_MOE_MODEL", None)
+    monkeypatch.setattr(ascend_forward_context, "_mc2_tokens_capacity", 1024)
+    monkeypatch.setattr(ascend_forward_context, "is_mega_moe_supported", lambda: True)
+    monkeypatch.setattr(
+        ascend_forward_context, "get_current_hardware_profile", lambda: get_hardware_profile(AscendDeviceType.A3)
+    )
+    monkeypatch.setattr(ascend_forward_context, "get_ep_group", lambda: SimpleNamespace(world_size=8))
+    monkeypatch.setattr(
+        ascend_forward_context,
+        "get_ascend_config",
+        lambda: SimpleNamespace(enable_fused_mc2=1, get_mc2_comm_alg=lambda: comm_alg),
+    )
+    # The target would have admitted each rejected size under its MegaMoE policy.
+    rejected_size = 2 * capacity
+    assert ascend_forward_context.select_moe_comm_method(rejected_size, config) == MoECommType.FUSED_MC2
+    shape: dict[str, Any] = {"decode_query_lens": {query_len: 1024}}
+    if manager_cls is AutoRegressiveAclGraphManager and query_len == 1:
+        shape["decode_request_sizes"] = request_sizes
+    manager = manager_cls(config, torch.device("cpu"), mode, **shape)
+    expected_mode = CUDAGraphMode.PIECEWISE if pcp_size > 1 else mode
+    assert manager.cudagraph_mode == expected_mode
+    assert manager.capture_sizes == [size for size in token_sizes if size <= capacity]
+    assert compilation.max_cudagraph_capture_size == 1024
+    assert compilation.cudagraph_capture_sizes == [128, 256, 512, 1024]
+    assert compilation.prefill_cudagraph_capture_token_sizes == [128, 256, 512, 1024]
+    assert compilation.decode_cudagraph_capture_request_sizes == [size // query_len for size in token_sizes]
+
+    manager._graphs_captured = True
+    for uniform_query_len, runtime_mode in (
+        (query_len, expected_mode.decode_mode()),
+        (None, expected_mode.mixed_mode()),
+    ):
+        admitted = manager.dispatch(capacity // query_len, capacity, uniform_query_len, num_active_loras=0)
+        eager = manager.dispatch(rejected_size // query_len, rejected_size, uniform_query_len, num_active_loras=0)
+        assert admitted.cg_mode == runtime_mode
+        assert eager.cg_mode == CUDAGraphMode.NONE
+        assert (eager.num_reqs, eager.num_tokens) == (rejected_size // query_len, rejected_size)
+
+
+def test_filter_draft_full_aclgraph_sizes_uses_clipped_decode_token_budget():
+    """Uniform decode buckets clipped by max_decode_cudagraph_capture_tokens stay admissible."""
+    draft_config = SimpleNamespace(parallel_config=SimpleNamespace(prefill_context_parallel_size=1))
+    compilation = SimpleNamespace(
+        cudagraph_capture_sizes=[256, 512],
+        max_cudagraph_capture_size=512,
+        prefill_cudagraph_capture_token_sizes=[],
+        decode_cudagraph_capture_request_sizes=[128],
+        max_decode_cudagraph_capture_tokens=256,
+    )
+    vllm_config = SimpleNamespace(
+        compilation_config=compilation,
+        speculative_config=SimpleNamespace(draft_model_config=SimpleNamespace()),
+        parallel_config=SimpleNamespace(prefill_context_parallel_size=1),
+    )
+
+    with (
+        patch(
+            "vllm_ascend.worker.v2.spec_decode.target_dependent_ar.aclgraph.is_drafter_moe_model",
+            return_value=True,
+        ),
+        patch(
+            "vllm_ascend.worker.v2.spec_decode.target_dependent_ar.aclgraph.resolve_speculator_draft_vllm_config",
+            return_value=draft_config,
+        ),
+        patch(
+            "vllm_ascend.worker.v2.spec_decode.target_dependent_ar.aclgraph.resolve_draft_moe_quant_type",
+            return_value=QuantType.NONE,
+        ),
+        patch(
+            "vllm_ascend.worker.v2.spec_decode.target_dependent_ar.aclgraph.select_moe_comm_method",
+            side_effect=lambda num_tokens, *_, **__: MoECommType.MC2 if num_tokens <= 256 else MoECommType.ALLTOALL,
+        ),
+    ):
+        _, mode, req_sizes = filter_draft_full_aclgraph_sizes(
+            vllm_config,
+            CUDAGraphMode.FULL_DECODE_ONLY,
+            {4: 128},
+            [128],
+        )
+
+    assert mode == CUDAGraphMode.FULL_DECODE_ONLY
+    assert req_sizes == [128]
 
 
 def test_run_fullgraph_uses_updatable_graph():

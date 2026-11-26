@@ -34,7 +34,7 @@ from vllm.model_executor.layers.activation import (
 from vllm.model_executor.layers.fused_moe import FusedMoEConfig, FusedMoEMethodBase
 
 from vllm_ascend.ascend_config import get_ascend_config
-from vllm_ascend.ascend_forward_context import _EXTRA_CTX, use_cann_megamoe
+from vllm_ascend.ascend_forward_context import _EXTRA_CTX, is_draft_vllm_config, use_cann_megamoe
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.distributed.parallel_state import get_shared_expert_tp_group
 from vllm_ascend.lora.fused_moe import has_lora
@@ -205,7 +205,8 @@ class AscendSharedExperts:
         # MegaMoe's fused shared ABI does not own the DP-axis AG/RS.
         if getattr(self, "finegrained_tp_group", None) is not None:
             return
-        if not use_cann_megamoe(get_current_vllm_config()):
+        vllm_config = get_current_vllm_config()
+        if is_draft_vllm_config(vllm_config) or not use_cann_megamoe(vllm_config):
             return
         # Only enable_fused_mc2=3 opts into fusing the shared expert into the
         # MegaMoe operator; =2 keeps the separate shared-expert forward.

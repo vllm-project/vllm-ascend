@@ -15,6 +15,7 @@
 # limitations under the License.
 #
 
+import weakref
 from typing import Any
 
 import torch
@@ -34,7 +35,7 @@ from vllm_ascend.ops.fused_moe.moe_utils import (
     _prepare_dequant_swiglu_weight_scale,
     cumsum_group_list,
 )
-from vllm_ascend.ops.fused_moe.routed_experts import AscendRoutedExperts  # noqa: F401
+from vllm_ascend.ops.fused_moe.routed_experts import AscendRoutedExperts, update_expert_tensor_list, use_layer_megamoe
 from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ, dispose_tensor, maybe_trans_nz
 
 from ..base import (
@@ -139,7 +140,13 @@ class AscendW8A8DynamicLinearMethod(AscendLinearScheme):
         if self.act_quant_type == torch.int8:
             layer.weight.data = maybe_trans_nz(layer.weight.data)
         layer.weight_scale.data = layer.weight_scale.data.flatten()
-        layer.weight_scale_fp32 = layer.weight_scale.data.to(torch.float32)
+        scale_ref = getattr(layer, "_ascend_weight_scale_ref", None)
+        if scale_ref is None:
+            layer.weight_scale_fp32 = layer.weight_scale.data.to(torch.float32)
+            layer._ascend_weight_scale_ref = weakref.ref(layer.weight_scale)
+        elif scale_ref() is layer.weight_scale:
+            with torch.inference_mode():
+                layer.weight_scale_fp32.copy_(layer.weight_scale.data.to(torch.float32))
         layer.weight_offset.data = layer.weight_offset.data.flatten()
 
 
@@ -198,7 +205,7 @@ class AscendW8A8DynamicFusedMoEMethod(AscendMoEScheme):
 
     def apply(
         self,
-        layer: "AscendRoutedExperts",  # noqa: F821
+        layer: AscendRoutedExperts,
         x: torch.Tensor,
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
@@ -281,44 +288,36 @@ class AscendW8A8DynamicFusedMoEMethod(AscendMoEScheme):
             layer.w13_weight.data = torch_npu.npu_format_cast(layer.w13_weight.data, ACL_FORMAT_FRACTAL_NZ)
             layer.w2_weight.data = torch_npu.npu_format_cast(layer.w2_weight.data, ACL_FORMAT_FRACTAL_NZ)
         layer.w13_weight_scale.data = layer.w13_weight_scale.data.view(layer.w13_weight_scale.data.shape[0], -1)
-        layer.w13_weight_scale_fp32 = layer.w13_weight_scale.data.to(torch.float32)
         layer.w13_weight_offset.data = layer.w13_weight_offset.data.view(layer.w13_weight_offset.data.shape[0], -1)
         layer.w2_weight_scale.data = layer.w2_weight_scale.data.view(layer.w2_weight_scale.data.shape[0], -1)
         layer.w2_weight_offset.data = layer.w2_weight_offset.data.view(layer.w2_weight_offset.data.shape[0], -1)
 
-        if get_ascend_config().enable_fused_mc2 == 1:
+        if hasattr(layer, "cann_mega_moe_w13_weight_list"):
+            # Keep captured operands alive while vLLM processes temporary
+            # reload parameters. Refresh them after copy-back.
+            return
+        layer.w13_weight_scale_fp32 = layer.w13_weight_scale.data.to(torch.float32)
+
+        enable_fused_mc2 = get_ascend_config().enable_fused_mc2 == 1
+        if enable_fused_mc2:
             layer.fused_w1_scale = scale_from_float_to_int64(layer.w13_weight_scale.data)
             layer.fused_w2_scale = scale_from_float_to_int64(layer.w2_weight_scale.data)
             layer.fused_w1_scale_bias = [torch.tensor([], dtype=torch.float32)]
             layer.fused_w2_scale_bias = [torch.tensor([], dtype=torch.float32)]
 
         if self.use_expert_weight_list:
-            layer.w13_weight_list = [weight.clone() for weight in layer.w13_weight.data.unbind(dim=0)]
-            layer.w2_weight_list = [weight.clone() for weight in layer.w2_weight.data.unbind(dim=0)]
-            layer.w13_weight_scale_fp32_list = [
-                weight.clone() for weight in layer.w13_weight_scale_fp32.data.unbind(dim=0)
-            ]
-            layer.w2_weight_scale_list = [weight.clone() for weight in layer.w2_weight_scale.data.unbind(dim=0)]
-            if get_ascend_config().enable_fused_mc2 == 1:
-                layer.fused_w1_scale_list = [
-                    weight.clone()
-                    for weight in layer.fused_w1_scale.view(len(layer.w13_weight_list), -1).data.unbind(dim=0)
-                ]
-                layer.fused_w2_scale_list = [
-                    weight.clone()
-                    for weight in layer.fused_w2_scale.view(len(layer.w2_weight_list), -1).data.unbind(dim=0)
-                ]
-            del layer.w13_weight
-            del layer.w2_weight
+            num_experts = layer.w13_weight.shape[0]
+            for name in ("w13_weight", "w2_weight", "w13_weight_scale_fp32", "w2_weight_scale"):
+                update_expert_tensor_list(layer, f"{name}_list", getattr(layer, name).data)
+                delattr(layer, name)
             del layer.w13_weight_scale
-            del layer.w13_weight_scale_fp32
-            del layer.w2_weight_scale
-            if get_ascend_config().enable_fused_mc2 == 1:
-                del layer.fused_w1_scale
-                del layer.fused_w2_scale
+            if enable_fused_mc2:
+                for name in ("fused_w1_scale", "fused_w2_scale"):
+                    update_expert_tensor_list(layer, f"{name}_list", getattr(layer, name).view(num_experts, -1))
+                    delattr(layer, name)
             torch.npu.empty_cache()
 
-        elif use_cann_megamoe(get_current_vllm_config()):
+        elif use_layer_megamoe(layer, use_cann_megamoe):
             layer.cann_mega_moe_w13_weight_list = list(layer.w13_weight.data.unbind(dim=0))
             layer.cann_mega_moe_w2_weight_list = list(layer.w2_weight.data.unbind(dim=0))
             layer.cann_mega_moe_fused_w1_scale_list = list(
@@ -327,14 +326,21 @@ class AscendW8A8DynamicFusedMoEMethod(AscendMoEScheme):
             layer.cann_mega_moe_fused_w2_scale_list = list(
                 layer.fused_w2_scale.view(layer.w2_weight.shape[0], -1).data.unbind(dim=0)
             )
-            # MegaMoe reads the fused int64 scale lists above exclusively for
-            # activations whose fused MC2 path supports the scale layout.
-            # swigluoai_uninterleave still uses the standard GMM path, which
-            # reads the fp32 scale copy during forward.
-            activation = getattr(layer, "activation", "silu")
-            activation = getattr(activation, "value", activation)
-            if activation != "swigluoai_uninterleave":
-                del layer.w13_weight_scale_fp32
+            # Keep w13_weight_scale_fp32 alive even when MegaMoe is enabled:
+            # oversized batches (M > mc2_tokens_capacity -> ALLTOALL), MC2
+            # fallback, and EPLB weight-view inspection still consume it via
+            # _get_mlp_weights / get_eplb_weight_views.
+
+    @torch.inference_mode()
+    def refresh_megamoe_weights(self, layer: torch.nn.Module) -> None:
+        if not hasattr(layer, "cann_mega_moe_w13_weight_list"):
+            return
+        layer.cann_mega_moe_w13_weight_list = list(layer.w13_weight.data.unbind(dim=0))
+        layer.cann_mega_moe_w2_weight_list = list(layer.w2_weight.data.unbind(dim=0))
+        # The MegaMoE scale lists are views of these packed tensors.
+        layer.fused_w1_scale.copy_(scale_from_float_to_int64(layer.w13_weight_scale.data))
+        layer.fused_w2_scale.copy_(scale_from_float_to_int64(layer.w2_weight_scale.data))
+        layer.w13_weight_scale_fp32.copy_(layer.w13_weight_scale)
 
     def _get_mlp_weights(self, layer: torch.nn.Module) -> tuple:
         """Return (w1, w1_scale, w2, w2_scale) in the standard MLP layout."""
