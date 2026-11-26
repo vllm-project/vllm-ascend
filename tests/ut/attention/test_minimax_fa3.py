@@ -264,9 +264,15 @@ def fa3(monkeypatch):
         def __class_getitem__(cls, _):
             return cls
 
+    from vllm.config.cache import _layout_from_name
+
+    from vllm_ascend.kv_cache_layout import HEAD_MAJOR_KV_CACHE_LAYOUTS
+
     namespace = {
         "__name__": __name__,
         "torch": torch,
+        "HEAD_MAJOR_KV_CACHE_LAYOUTS": HEAD_MAJOR_KV_CACHE_LAYOUTS,
+        "_layout_from_name": _layout_from_name,
         "dataclass": dataclass,
         "field": field,
         "Enum": Enum,
@@ -444,6 +450,25 @@ def test_cache_layout_alias_resolution(fa3, monkeypatch, layout_source):
     resolved = utils.resolve_kv_cache_layout(config, [["LBNHC", "LBHNC"]])
     assert resolved.name == "LBHNC"
     assert fa3._uses_hnd_kv_cache(config)
+
+
+def test_head_major_family_is_the_family_the_full_graph_gate_refuses(fa3):
+    """PR #23065 review: the head-major family FA3 gathers is the shared
+    constant the FULL-graph gate refuses (vllm_ascend.kv_cache_layout), so
+    the backend and the gate cannot drift apart."""
+    from vllm.v1.kv_cache_layout import KVCacheLayout
+
+    from vllm_ascend.kv_cache_layout import HEAD_MAJOR_KV_CACHE_LAYOUTS
+
+    assert frozenset({KVCacheLayout.LBHNC, KVCacheLayout.BLHNC}) == HEAD_MAJOR_KV_CACHE_LAYOUTS
+    for layout in KVCacheLayout:
+        fa3.envs_vllm.VLLM_KV_CACHE_LAYOUT = layout.name
+        assert fa3._uses_hnd_kv_cache(None) is (layout in HEAD_MAJOR_KV_CACHE_LAYOUTS), layout
+    # The legacy alias keeps its canonical meaning through upstream's map.
+    fa3.envs_vllm.VLLM_KV_CACHE_LAYOUT = "HND"
+    assert fa3._uses_hnd_kv_cache(None) is True
+    fa3.envs_vllm.VLLM_KV_CACHE_LAYOUT = None
+    assert fa3._uses_hnd_kv_cache(None) is False
 
 
 def test_copied_draft_config_uses_worker_layout_outside_context(fa3, monkeypatch):

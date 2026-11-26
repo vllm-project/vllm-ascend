@@ -47,6 +47,7 @@ from vllm_ascend.device.hardware_profile import (
     QuantizationBackendFamily,
     get_current_hardware_profile,
 )
+from vllm_ascend.kv_cache_layout import check_full_cudagraph_kv_layout
 from vllm_ascend.mrv2_utils import apply_v2_model_runner_config_patch
 
 # isort: off
@@ -1511,33 +1512,6 @@ def _validate_mooncake_connector_v1_role(vllm_config: VllmConfig) -> None:
             )
 
 
-# The head-major KV cache layout's user-facing spellings: the legacy
-# short name (HND) and its canonical enum name (LBHNC), the alias mapping
-# vLLM core applies (vllm/config/cache.py: _LAYOUT_COMPAT_ALIASES).
-_HEAD_MAJOR_KV_LAYOUT_NAMES = ("HND", "LBHNC")
-
-
-def _resolved_kv_cache_layout_name(vllm_config: VllmConfig) -> str | None:
-    """The KV cache layout this engine will run with, or None when neither
-    source names one (the backend default wins at resolution).
-
-    Mirrors vLLM core's resolution precedence (resolve_kv_cache_layout): an
-    explicit cache_config.kv_cache_layout (already adopted in this process)
-    wins; otherwise the user's VLLM_KV_CACHE_LAYOUT is the authoritative
-    explicit choice (the Ascend attention backend reads it directly too).
-    The legacy HND alias is normalized to its canonical LBHNC name.
-    """
-    # cache_config can be absent or None on a partially built config (e.g. a
-    # test fixture); such a config names no explicit layout to honor.
-    cache_config = getattr(vllm_config, "cache_config", None)
-    layout = getattr(cache_config, "kv_cache_layout", None)
-    if layout is None:
-        layout = envs_vllm.VLLM_KV_CACHE_LAYOUT
-    if layout is None:
-        return None
-    return "LBHNC" if layout in _HEAD_MAJOR_KV_LAYOUT_NAMES else layout
-
-
 def _update_compilation_modes(vllm_config: VllmConfig, ascend_config: AscendConfig) -> None:
     """Update compilation / cudagraph modes.
 
@@ -1617,35 +1591,10 @@ def _update_compilation_modes(vllm_config: VllmConfig, ascend_config: AscendConf
         )
         compilation_config.cudagraph_mode = cudagraph_mode
 
-    # FULL (token-keyed) graphs replay captured graphs for prefill/mixed
-    # batches too. With the head-major KV cache layout (HND/LBHNC, whose
-    # captured FIA tasks read the gathered HND KV) the first replayed
-    # prefill graph crashes the NPU stream: device error 507011 "model
-    # stream execute failed" (rtDeviceSynchronizeWithTimeout), reproduced
-    # 3/3 on Ascend 910C with the default-layout control of identical
-    # batch geometry completing cleanly, while FULL_DECODE_ONLY is
-    # unaffected (the graph mode this combination was validated with).
-    # Fail closed at init instead of crashing the stream; do NOT silently
-    # downgrade the user's mode -- the supported choice is explicit.
-    if (
-        not enforce_eager
-        and compilation_config.cudagraph_mode == CUDAGraphMode.FULL
-        and _resolved_kv_cache_layout_name(vllm_config) == "LBHNC"
-    ):
-        raise RuntimeError(
-            "cudagraph_mode=FULL (token-keyed graphs replayed for "
-            "prefill/mixed batches) is not supported with the "
-            "head-major KV cache layout (VLLM_KV_CACHE_LAYOUT=HND or "
-            "LBHNC) on Ascend: the first replayed prefill graph crashes "
-            "the NPU stream (device error 507011 'model stream execute "
-            "failed', reproduced 3/3 on 910C). Use the validated graph "
-            "mode for this layout, cudagraph_mode=FULL_DECODE_ONLY "
-            "(decode-only graphs; prefill/mixed batches run eager), or "
-            "unset VLLM_KV_CACHE_LAYOUT to keep the default (LBNHC) "
-            "layout. See the graph mode guide "
-            "(docs/source/user_guide/feature_guide/graph_mode.md) for "
-            "the layout/cudagraph_mode support matrix."
-        )
+    # FULL (token-keyed) graphs over a head-major KV cache layout fail closed
+    # at init instead of on the device; do NOT silently downgrade the user's
+    # mode -- the supported choice is explicit.
+    check_full_cudagraph_kv_layout(vllm_config)
 
 
 def _setup_compile_backend(

@@ -110,15 +110,15 @@ This is why the effective graph mode on Ascend may differ from the mode requeste
 
 ### KV cache layout compatibility
 
-The head-major KV cache layout (`VLLM_KV_CACHE_LAYOUT=HND` or `LBHNC`) restricts the graph modes:
+The head-major KV cache layouts restrict the graph modes. `HND` is the legacy alias of `LBHNC`; `BLHNC` is the block-outer member of the same family:
 
-| `cudagraph_mode` | Head-major layout (`HND`/`LBHNC`) | Default layout (`LBNHC`) |
+| `cudagraph_mode` | Head-major layout (`HND`/`LBHNC`, `BLHNC`) | Default layout (`LBNHC`) |
 |---|---|---|
 | `FULL` | **Refused at startup** | Supported |
-| `FULL_DECODE_ONLY` | Supported (the validated mode for this layout) | Supported |
+| `FULL_DECODE_ONLY` | Supported (the validated mode for `HND`/`LBHNC`) | Supported |
 | `NONE` / `PIECEWISE` / `FULL_AND_PIECEWISE` | Not affected by this restriction | Not affected by this restriction |
 
-With the head-major layout, captured full-graph `npu_fused_infer_attention_score` tasks read the gathered (HND) KV cache, and replaying a token-keyed graph captured for a prefill/mixed batch crashes the NPU stream at the first replay — device error 507011 ("model stream execute failed"), reproduced consistently on Ascend 910C. `FULL_DECODE_ONLY` never replays graphs for prefill/mixed batches (they run eager), and its decode replays were validated as exact against eager outputs, so it is the supported graph mode for this layout. The combination is refused at engine startup with an error naming both knobs; unset `VLLM_KV_CACHE_LAYOUT` to use the default `LBNHC` layout, or switch to `cudagraph_mode=FULL_DECODE_ONLY`.
+With the `HND`/`LBHNC` layout, captured full-graph `npu_fused_infer_attention_score` tasks read the gathered (HND) KV cache, and replaying a token-keyed graph captured for a prefill/mixed batch crashes the NPU stream at the first replay — device error 507011 ("model stream execute failed"), reproduced consistently on Ascend 910C. `BLHNC` is refused for the same combination as a precaution (fail closed): FA3 stores it in the same head-major shape as `HND`, and that path has not been validated with `FULL` graphs. `FULL_DECODE_ONLY` never replays graphs for prefill/mixed batches (they run eager), and its decode replays were validated as exact against eager outputs, so it is the supported graph mode for the head-major layout. The combination is refused at engine startup with an error naming both knobs; unset `VLLM_KV_CACHE_LAYOUT` to use the default `LBNHC` layout, or switch to `cudagraph_mode=FULL_DECODE_ONLY`.
 
 ### Troubleshooting capture resource exhaustion
 
