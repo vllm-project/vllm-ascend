@@ -31,6 +31,26 @@ Contributors must provide the following content in the deliverables before merge
 - [ ] The implementation matches the documented inputs, outputs, and behavior.
 - [ ] The operator is integrated into the corresponding model or shared operator call path in vLLM-Ascend.
 
+### Upstream kernel overrides
+
+Some operators replace a Triton kernel or host wrapper *defined in upstream vLLM*, so upstream call sites run the Ascend implementation without source changes. Register these in the override table instead of editing call sites or adding monkey patches.
+
+- [ ] Add the entry to the table in `vllm_ascend/triton_kernel_overrides.py`:
+    - [ ] The key targets the module where the upstream object is *defined* (`func.__module__`), never a from-import copy site; the dispatcher's identity sweep rebinds every copy automatically. A class attribute mounts as module path plus class name, for example `vllm.v1.worker.gpu.sample.output.SamplingMaskTensors.from_logits`.
+    - [ ] The value is either a plain callable (host implementation or launch adapter) or a raw `@triton.jit` kernel. Plain callables are wrapped in `KernelOverride`; raw kernels are swapped in directly, must mirror the original's parameter names and order, and are the only shape that works for Triton *device functions*.
+    - [ ] The entry comment states why the override exists, which copy sites it covers, and its removal condition (`TODO: Remove when/after ...`).
+- [ ] Keep the signature contract that `tests/ut/test_triton_kernel_overrides.py` enforces:
+    - [ ] The impl carries every explicit parameter of the original by name; an impl-side `**kwargs` may only absorb extras that the original's own `**kwargs` accepts.
+    - [ ] Parameters shared with the original keep the original's relative order; otherwise a keyword-only `[grid]` relaunch binds values to the wrong slots.
+    - [ ] NPU-only parameters sit in the impl's tail and carry defaults, so upstream call sites that omit them still work.
+    - [ ] A documented deviation goes into `_KNOWN_SIGNATURE_DEVIATIONS` with the reason and the follow-up plan -- never a silent signature change.
+- [ ] Update `EXPECTED_OVERRIDE_COUNT` in the test file to the new table size.
+- [ ] Run `TORCH_DEVICE_BACKEND_AUTOLOAD=0 pytest -sv tests/ut/test_triton_kernel_overrides.py` and make it green.
+- [ ] Warmup: raw-kernel values keep compiling before graph capture; plain-callable values compile lazily on first launch. Register the impl's own warmup variants as described in [Triton JIT warmup on Ascend](../Design_Documents/triton_jit_warmup.md).
+- [ ] Host helpers that upstream kernels evaluate inside `@triton.jit` bodies at compile time (for example `triton.next_power_of_2`) cannot go through the table: `KernelOverride` is a runtime callable that the Triton compiler rejects. Keep such shims in `vllm_ascend/patch/worker/patch_triton.py` under its stated retirement plan.
+
+The table's module docstring in `vllm_ascend/triton_kernel_overrides.py` is the reference text for these rules.
+
 ### Accuracy
 
 - [ ] The PR description includes:
