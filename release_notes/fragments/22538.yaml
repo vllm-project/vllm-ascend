@@ -1,6 +1,11 @@
 pr: 22538
 entries:
   - category: performance
-    text: Improved Qwen4Exp HyperConnection combine-norm performance on A3 for per-branch norm batches of 512 rows or more, with 1.117x-1.131x measured speedups over the previous kernel. Shared weights and smaller batches are unchanged.
-    model: qwen4exp
+    text: >-
+      Improved Qwen3.8-Flash-Next long-prefill HyperConnections performance on A3
+      for batches of 512 rows or more, with 1.117x-1.131x faster execution than
+      before. Three ABBA rounds at 1,024/128 input/output tokens and concurrency 8
+      measured 1.26% higher average output throughput. Smaller batches and shared
+      norm weights are unchanged.
+    model: qwen3.8-flash-next
     hardware: [A3]
