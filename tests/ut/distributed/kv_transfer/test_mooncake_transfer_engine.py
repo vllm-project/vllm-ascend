@@ -5,8 +5,10 @@ import threading
 import unittest
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from types import ModuleType
-from unittest.mock import MagicMock, call, patch
+from types import ModuleType, SimpleNamespace
+from unittest.mock import MagicMock, Mock, call, patch
+
+import numpy as np
 
 _WAIT_SECONDS = 5
 
@@ -29,6 +31,7 @@ class TestGlobalTE(unittest.TestCase):
         assert spec is not None and spec.loader is not None
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
+        self.mte = module
         self.global_te_cls = module.GlobalTE
 
     def test_concurrent_getters_only_receive_initialized_engine(self):
@@ -297,3 +300,87 @@ class TestGlobalTE(unittest.TestCase):
             [call(0x1000, 128), call(0x2000, 256), call(0x1000, 128), call(0x2000, 256), call(0x2000, 256)],
         )
         self.assertEqual(global_te._unregistered_ptrs, set())
+
+    def test_transfer_arrays_detection_and_dispatch(self):
+        src = np.array([0xFF00000000100000, 0xFF00000000200000], dtype=np.uint64)
+        dst = np.array([0xFF00000000300000, 0xFF00000000400000], dtype=np.uint64)
+        lens = np.array([256, 512], dtype=np.uint64)
+        empty = np.empty(0, dtype=np.uint64)
+
+        cases = (
+            ("callable", True, True),
+            ("write_only", True, False),
+            ("missing", False, False),
+            (None, False, False),
+            ("bad", False, False),
+            ("bare_mock", False, False),
+            ("configured_mock", True, True),
+        )
+        for mode, expect_write_arrays, expect_read_arrays in cases:
+            with self.subTest(mode=mode):
+                if mode in ("bare_mock", "configured_mock"):
+                    engine: object = Mock() if mode == "bare_mock" else MagicMock()
+                    engine.initialize.return_value = 0  # type: ignore[attr-defined]
+                    engine.batch_transfer_sync_write.return_value = 0  # type: ignore[attr-defined]
+                    engine.batch_transfer_sync_read.return_value = 0  # type: ignore[attr-defined]
+                    if mode == "configured_mock":
+                        engine.batch_transfer_sync_write_arrays = MagicMock(return_value=0)  # type: ignore[attr-defined]
+                        engine.batch_transfer_sync_read_arrays = MagicMock(return_value=0)  # type: ignore[attr-defined]
+                else:
+                    engine = SimpleNamespace(
+                        initialize=MagicMock(return_value=0),
+                        batch_transfer_sync_write=MagicMock(return_value=0),
+                        batch_transfer_sync_read=MagicMock(return_value=0),
+                    )
+                    if mode in ("callable", "write_only"):
+                        engine.batch_transfer_sync_write_arrays = MagicMock(return_value=0)
+                    if mode == "callable":
+                        engine.batch_transfer_sync_read_arrays = MagicMock(return_value=0)
+                    elif mode != "missing" and mode != "write_only":
+                        engine.batch_transfer_sync_write_arrays = mode
+                        engine.batch_transfer_sync_read_arrays = mode
+
+                with (
+                    patch("mooncake.engine.TransferEngine", return_value=engine),
+                    patch.object(self.mte.logger, "info") as log_info,
+                ):
+                    gte = self.global_te_cls()
+                    self.assertIs(gte.get_transfer_engine("127.0.0.1", None), engine)
+                    self.assertEqual(gte.supports_write_arrays, expect_write_arrays)
+                    self.assertEqual(gte.supports_read_arrays, expect_read_arrays)
+                    self.assertEqual(log_info.called, not (expect_write_arrays and expect_read_arrays))
+
+                for fn, list_attr, arr_attr, expect_arrays in (
+                    (
+                        self.mte.batch_transfer_sync_write,
+                        "batch_transfer_sync_write",
+                        "batch_transfer_sync_write_arrays",
+                        expect_write_arrays,
+                    ),
+                    (
+                        self.mte.batch_transfer_sync_read,
+                        "batch_transfer_sync_read",
+                        "batch_transfer_sync_read_arrays",
+                        expect_read_arrays,
+                    ),
+                ):
+                    self.assertEqual(fn(engine, "peer:1", src, dst, lens), 0)
+                    list_mock = getattr(engine, list_attr)
+                    if expect_arrays:
+                        list_mock.assert_not_called()
+                        getattr(engine, arr_attr).assert_called_once_with("peer:1", src, dst, lens)
+                    else:
+                        list_mock.assert_called_once_with("peer:1", src.tolist(), dst.tolist(), lens.tolist())
+                    self.assertEqual(fn(engine, "peer:1", empty, empty, empty), 0)
+
+    def test_batch_transfer_sync_rejects_invalid_columns(self):
+        direct = np.array([0x1000, 0xFF00000000200000], dtype=np.uint64)
+        engine = SimpleNamespace(
+            batch_transfer_sync_write=MagicMock(return_value=0),
+            batch_transfer_sync_read=MagicMock(return_value=0),
+        )
+        for fn in (self.mte.batch_transfer_sync_write, self.mte.batch_transfer_sync_read):
+            with self.assertRaisesRegex(ValueError, "contiguous 1D native uint64"):
+                fn(engine, "p:1", np.array([1, 2], dtype=np.int64), direct, direct)
+            with self.assertRaisesRegex(ValueError, "equal lengths"):
+                fn(engine, "p:1", direct, direct[:1], direct)

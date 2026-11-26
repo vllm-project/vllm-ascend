@@ -5,13 +5,17 @@ import os
 import unittest
 from unittest.mock import patch
 
+import numpy as np
 import torch
 
 from vllm_ascend.distributed.kv_transfer.utils.utils import (
     PD_QOS_DEFAULT,
     QOS_KEY,
+    as_uint64_transfer_array,
     collect_storage_merged_register_regions,
+    concat_uint64_chunks,
     inject_qos,
+    validate_uint64_transfer_columns,
 )
 
 ENV = "ASCEND_GLOBAL_RESOURCE_CONFIG"
@@ -115,3 +119,53 @@ class TestKVRegisterRegions(unittest.TestCase):
         self.assertEqual(regions.lengths, [36 * cache.element_size()])
         self.assertEqual(regions.logical_total_bytes, cache.nbytes)
         self.assertEqual(regions.logical_tensor_count, 1)
+
+
+class TestUint64TransferArrays(unittest.TestCase):
+    def test_as_uint64_transfer_array_concat_and_column_validation(self):
+        direct = np.array([0x1000, 0xFF00000000200000], dtype=np.uint64)
+        self.assertIs(as_uint64_transfer_array(direct), direct)
+        self.assertEqual(concat_uint64_chunks([]).size, 0)
+        self.assertIs(concat_uint64_chunks([direct]), direct)
+
+        strided = np.array([10, 20, 30, 40], dtype=np.uint64)[::2]
+        normalized_strided = as_uint64_transfer_array(strided)
+        self.assertTrue(normalized_strided.flags.c_contiguous)
+        self.assertEqual(normalized_strided.tolist(), [10, 30])
+
+        swapped = direct.byteswap().view(direct.dtype.newbyteorder())
+        normalized_swapped = as_uint64_transfer_array(swapped)
+        self.assertEqual(
+            (normalized_swapped.dtype, normalized_swapped.tolist()),
+            (np.dtype(np.uint64), direct.tolist()),
+        )
+
+        merged = concat_uint64_chunks([np.array([(1 << 63) + 7], dtype=np.uint64), np.array([42], dtype=np.int64)])
+        self.assertEqual((merged.dtype, [int(x) for x in merged]), (np.uint64, [(1 << 63) + 7, 42]))
+        from_list = as_uint64_transfer_array([(1 << 63) + 7, 42])
+        self.assertEqual((from_list.dtype, [int(x) for x in from_list]), (np.uint64, [(1 << 63) + 7, 42]))
+        self.assertEqual(as_uint64_transfer_array([]).size, 0)
+
+        bad_inputs = (
+            [1, -1],
+            [1 << 64],
+            [True],
+            [True, 1],
+            [1.0],
+            np.zeros((2, 2), dtype=np.uint64),
+            np.array([-1], dtype=np.int64),
+            np.array([1.0], dtype=np.float64),
+            "12",
+            123,
+        )
+        for bad in bad_inputs:
+            with self.assertRaises(ValueError):
+                as_uint64_transfer_array(bad)
+
+        self.assertEqual(validate_uint64_transfer_columns(direct, direct, direct), 2)
+        with self.assertRaisesRegex(ValueError, "contiguous 1D native uint64"):
+            validate_uint64_transfer_columns(strided, direct, direct)
+        with self.assertRaisesRegex(ValueError, "contiguous 1D native uint64"):
+            validate_uint64_transfer_columns(swapped, direct, direct)
+        with self.assertRaisesRegex(ValueError, "equal lengths"):
+            validate_uint64_transfer_columns(direct, direct[:1], direct)

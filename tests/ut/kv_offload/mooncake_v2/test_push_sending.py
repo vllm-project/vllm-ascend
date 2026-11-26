@@ -12,6 +12,7 @@ from types import SimpleNamespace
 from unittest.mock import Mock
 
 import msgspec
+import numpy as np
 import pytest
 import torch
 from zmq.constants import SocketOption, SocketType
@@ -1298,3 +1299,125 @@ def test_layer_transfer_vector_addresses(mode):
                 lengths.append(size)
     write.assert_called_once_with("127.0.0.1:2", src, dst, lengths)
     assert all(type(value) is int for values in write.call_args.args[1:] for value in values)
+
+
+@pytest.mark.parametrize("array_api", ["available", "missing", "not_callable"])
+@pytest.mark.parametrize("base_addr", [0x1000, 0xFF00000000200000])
+def test_write_arrays_api_and_legacy_fallback(worker, monkeypatch, array_api, base_addr):
+    calls = []
+
+    def record(api, session, src, dst, lengths):
+        calls.append((api, session, src, dst, lengths))
+        for col in (src, dst, lengths):
+            if array_api == "available":
+                assert (
+                    isinstance(col, np.ndarray) and col.dtype == np.uint64 and col.ndim == 1 and col.flags.c_contiguous
+                )
+            else:
+                assert isinstance(col, list) and all(type(v) is int for v in col)
+        return 0
+
+    worker.engine = SimpleNamespace(batch_transfer_sync_write=lambda *args: record("list", *args))
+    if array_api == "available":
+        worker.engine.batch_transfer_sync_write_arrays = lambda *args: record("arrays", *args)
+    elif array_api == "not_callable":
+        worker.engine.batch_transfer_sync_write_arrays = "not-callable"
+
+    local = worker.transfer_metadata
+    local.kv_caches_base_addr[:] = [[base_addr, base_addr + 0x10000]]
+    local.block_strides[:], local.block_lens[:], local.block_shapes[:] = [[64, 64]], [[32, 32]], [[(2, 4, 2)] * 2]
+    remote = remote_metadata(tp_size=1, heads=2)
+    pp = remote.metadata_by_pp_rank[0]
+    pp.block_strides[:], pp.block_lens[:], pp.block_shapes[:] = [[64, 64]], [[32, 32]], [[(2, 4, 2)] * 2]
+    pp.metadata_by_pcp_rank[0].metadata_by_tp_rank[0].kv_caches_base_addr[:] = [
+        [base_addr + 0x20000, base_addr + 0x30000]
+    ]
+    monkeypatch.setattr(worker, "_get_remote_metadata", lambda _: remote)
+
+    meta = source_meta(0, 8)
+    second = dict(destination_message(), request_id="d-request-2", block_ids=[[12, 13]])
+    meta.add_new_push_send_req("p-request-2", ([3, 4],), 8, 0, 8, target_params(second))
+    worker.start_load_kv(meta)
+    worker.wait_for_save()
+    drive(worker, lambda: worker._send_done.call_count == 2)
+
+    assert len(calls) == 1
+    api, session, got_src, got_dst, got_lengths = calls[0]
+    assert (api, session) == ("arrays" if array_api == "available" else "list", "127.0.0.1:2")
+    np.testing.assert_array_equal(
+        got_src,
+        [base_addr + b * 64 for b in (1, 2, 3, 4)] + [base_addr + 0x10000 + b * 64 for b in (1, 2, 3, 4)],
+    )
+    np.testing.assert_array_equal(
+        got_dst,
+        [base_addr + 0x20000 + b * 64 for b in (10, 11, 12, 13)]
+        + [base_addr + 0x30000 + b * 64 for b in (10, 11, 12, 13)],
+    )
+    np.testing.assert_array_equal(got_lengths, [32] * 8)
+    assert worker._send_done.call_count == 2
+    assert all(call.args[1] is None for call in worker._send_done.call_args_list)
+
+
+def test_build_attention_transfer_arrays_rejects_slice_length_mismatch(worker):
+    remote = remote_metadata()
+    pp = remote.metadata_by_pp_rank[0]
+    tp_worker = pp.metadata_by_pcp_rank[0].metadata_by_tp_rank[0]
+    pp.block_lens[0][0] = 64
+    bad_len = push_worker.LayerTransferBatch(
+        "model.layers.0.attn",
+        (0, 0, 0),
+        remote,
+        (push_worker.LayerTransferRequest("d-2", (1,), (10,), 0, 4),),
+        Event(),
+    )
+    with pytest.raises(ValueError, match="P/D cache slice lengths differ"):
+        worker._build_attention_transfer_arrays(bad_len, 0, 0, pp, tp_worker, worker.kv_cache_specs[0])
+
+
+def test_mamba_layer_transfer_uses_write_arrays(worker, monkeypatch):
+    backends = SimpleNamespace(MAMBA1="mamba1", MAMBA2="mamba2", GDN_ATTN="gdn")
+    monkeypatch.setattr(base_worker, "MambaAttentionBackendEnum", backends, raising=False)
+    monkeypatch.setattr(
+        base_worker, "torch", SimpleNamespace(tensor=lambda *args, **kwargs: SimpleNamespace(element_size=lambda: 1))
+    )
+    spec = Mock(spec=push_worker.MambaSpec)
+    spec.tp_replicated = False
+    spec.mamba_type = backends.GDN_ATTN
+    spec.dtypes = ("byte", "byte")
+    worker.kv_cache_specs = [spec]
+    local = worker.transfer_metadata
+    local.kv_caches_base_addr[:] = [[0xFF00000000001000, 0xFF00000000002000]]
+    local.block_strides[:], local.block_lens[:] = [[12, 4]], [[12, 4]]
+    local.block_shapes[:], local.block_size_scales[:] = [[(2, 6), (1, 2, 2)]], [[1, 1]]
+    remote = remote_metadata()
+    pp = remote.metadata_by_pp_rank[0]
+    pp.block_strides[:], pp.block_lens[:] = [[12, 4]], [[12, 4]]
+    pp.block_shapes[:], pp.block_size_scales[:] = [[(2, 6), (1, 2, 2)]], [[1, 1]]
+    pp.metadata_by_pcp_rank[0].metadata_by_tp_rank[0].kv_caches_base_addr[:] = [
+        [0xFF00000000010000, 0xFF00000000020000]
+    ]
+    write_list = Mock(return_value=0)
+    write_arrays = Mock(return_value=0)
+    worker.engine = SimpleNamespace(
+        batch_transfer_sync_write=write_list,
+        batch_transfer_sync_write_arrays=write_arrays,
+    )
+    event = Event()
+    event.record()
+    batch = push_worker.LayerTransferBatch(
+        "model.layers.0.attn",
+        (0, 0, 0),
+        remote,
+        (push_worker.LayerTransferRequest("d-mamba", (2,), (3,), 0, 4),),
+        event,
+    )
+    assert worker._execute_layer_transfer(batch) is None
+    write_list.assert_not_called()
+    write_arrays.assert_called_once()
+    session, src, dst, lengths = write_arrays.call_args.args
+    assert session == "127.0.0.1:2"
+    for col in (src, dst, lengths):
+        assert isinstance(col, np.ndarray) and col.dtype == np.uint64 and col.ndim == 1 and col.flags.c_contiguous
+    np.testing.assert_array_equal(src, [0xFF00000000001000 + 24, 0xFF00000000002000 + 8])
+    np.testing.assert_array_equal(dst, [0xFF00000000010000 + 36, 0xFF00000000020000 + 12])
+    np.testing.assert_array_equal(lengths, [12, 4])

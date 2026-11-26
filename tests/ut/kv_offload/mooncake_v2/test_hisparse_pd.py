@@ -3,6 +3,8 @@ import ctypes
 from types import SimpleNamespace as NS
 from unittest.mock import MagicMock, patch
 
+import numpy as np
+import numpy.typing as npt
 import pytest
 import torch
 from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheGroupSpec, KVCacheTensor
@@ -14,8 +16,21 @@ from vllm_ascend.distributed.kv_transfer.kv_p2p.hisparse_pd import (
 )
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake import pull_worker
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.pull_worker import MooncakePullConnectorWorker
+from vllm_ascend.distributed.kv_transfer.utils.utils import concat_uint64_chunks
 
 from .helpers import make_full_spec
+
+
+def _flatten_chunks(
+    local: list[npt.NDArray[np.uint64]],
+    peer: list[npt.NDArray[np.uint64]],
+    sizes: list[npt.NDArray[np.uint64]],
+) -> tuple[list[int], list[int], list[int]]:
+    return (
+        concat_uint64_chunks(local).tolist(),
+        concat_uint64_chunks(peer).tolist(),
+        concat_uint64_chunks(sizes).tolist(),
+    )
 
 
 @pytest.mark.parametrize("shared,rank,expected", [(True, 0, [0, 1]), (True, 1, [1]), (False, 1, [0, 1])])
@@ -108,20 +123,19 @@ def pull_layout():
 
 def test_pull_reads_split_mla_components_into_one_host_page():
     thread, remote = pull_layout()
-    local: list[int] = []
-    peer: list[int] = []
-    sizes: list[int] = []
+    local: list[npt.NDArray[np.uint64]] = []
+    peer: list[npt.NDArray[np.uint64]] = []
+    sizes: list[npt.NDArray[np.uint64]] = []
     thread._append_spec_transfer_addresses(
         0, 0, 0, 1, 2, 1, {(0, 0): [("r", [1, 3], [1, 4])]}, remote, local, peer, sizes
     )
-    assert local == [106, 110, 118, 122]
-    assert peer == [1004, 2002, 1016, 2008]
-    assert sizes == [4, 2, 4, 2]
+    assert _flatten_chunks(local, peer, sizes) == ([106, 110, 118, 122], [1004, 2002, 1016, 2008], [4, 2, 4, 2])
 
 
+@pytest.mark.parametrize("api_mode", ["arrays", "list"])
 @pytest.mark.parametrize("tokens,nope_bytes,rope_bytes", [(2, 2, 1), (128, 512, 144)])
 @pytest.mark.parametrize("duplicate_page", [False, True])
-def test_pull_reorders_split_mla_page_before_bucket_completes(tokens, nope_bytes, rope_bytes, duplicate_page):
+def test_pull_reorders_split_mla_page_before_bucket_completes(api_mode, tokens, nope_bytes, rope_bytes, duplicate_page):
     thread, remote = pull_layout()
     page_bytes = tokens * (nope_bytes + rope_bytes)
     nope_page_bytes = tokens * nope_bytes
@@ -144,12 +158,22 @@ def test_pull_reorders_split_mla_page_before_bucket_completes(tokens, nope_bytes
     thread.tp_rank = 0
 
     def read(_session, local, remote_addrs, sizes):
-        assert sizes == [nope_page_bytes, rope_page_bytes] * (3 if duplicate_page else 2)
+        expected_sizes = [nope_page_bytes, rope_page_bytes] * (3 if duplicate_page else 2)
+        if api_mode == "arrays":
+            for col in (local, remote_addrs, sizes):
+                assert (
+                    isinstance(col, np.ndarray) and col.dtype == np.uint64 and col.ndim == 1 and col.flags.c_contiguous
+                )
+            assert sizes.tolist() == expected_sizes
+        else:
+            assert sizes == expected_sizes
         for dst, src, size in zip(local, remote_addrs, sizes, strict=True):
-            ctypes.memmove(dst, src, size)
+            ctypes.memmove(int(dst), int(src), int(size))
         return 0
 
-    thread.engine = NS(batch_transfer_sync_read=read)
+    thread.engine = (
+        NS(batch_transfer_sync_read_arrays=read) if api_mode == "arrays" else NS(batch_transfer_sync_read=read)
+    )
     blocks = [0, 1, 0] if duplicate_page else [0, 1]
     thread._execute_tp_transfer_bucket(0, 0, 0, 1, 2, 1, remote, {0: {(0, 0): [("req", blocks, blocks)]}})
     expected = b"".join(
@@ -168,28 +192,24 @@ def test_pull_reads_one_descriptor_per_packed_mla_page():
     remote.block_strides = [[10]]
     remote.block_shapes = [[(2, 3)]]
     remote.metadata_by_pcp_rank[0].metadata_by_tp_rank[0].kv_caches_base_addr = [[1000]]
-    local: list[int] = []
-    peer: list[int] = []
-    sizes: list[int] = []
+    local: list[npt.NDArray[np.uint64]] = []
+    peer: list[npt.NDArray[np.uint64]] = []
+    sizes: list[npt.NDArray[np.uint64]] = []
     thread._append_spec_transfer_addresses(
         0, 0, 0, 1, 2, 1, {(0, 0): [("r", [1, 3], [2, 5])]}, remote, local, peer, sizes
     )
 
-    assert local == [108, 124]
-    assert peer == [1020, 1050]
-    assert sizes == [6, 6]
+    assert _flatten_chunks(local, peer, sizes) == ([108, 124], [1020, 1050], [6, 6])
 
 
 def test_pull_uses_selected_prefill_pcp_rank():
     thread, remote = pull_layout()
     remote.metadata_by_pcp_rank[1] = NS(metadata_by_tp_rank={0: NS(kv_caches_base_addr=[[3000, 4000]])})
-    local: list[int] = []
-    peer: list[int] = []
-    sizes: list[int] = []
+    local: list[npt.NDArray[np.uint64]] = []
+    peer: list[npt.NDArray[np.uint64]] = []
+    sizes: list[npt.NDArray[np.uint64]] = []
     thread._append_spec_transfer_addresses(0, 1, 0, 2, 2, 1, {(0, 0): [("r", [1], [1])]}, remote, local, peer, sizes)
-    assert local == [106, 110]
-    assert peer == [3004, 4002]
-    assert sizes == [4, 2]
+    assert _flatten_chunks(local, peer, sizes) == ([106, 110], [3004, 4002], [4, 2])
 
 
 def test_pull_rejects_different_tp_and_component_sizes():
@@ -281,10 +301,8 @@ def test_pull_unpacks_flat_component_major_mla_slot():
     remote.block_strides = [[6]]
     remote.block_shapes = [[(6,)]]
     remote.metadata_by_pcp_rank[0].metadata_by_tp_rank[0].kv_caches_base_addr = [[1000]]
-    local: list[int] = []
-    peer: list[int] = []
-    sizes: list[int] = []
+    local: list[npt.NDArray[np.uint64]] = []
+    peer: list[npt.NDArray[np.uint64]] = []
+    sizes: list[npt.NDArray[np.uint64]] = []
     thread._append_spec_transfer_addresses(0, 0, 0, 1, 2, 1, {(0, 0): [("r", [1], [1])]}, remote, local, peer, sizes)
-    assert local == [106, 110]
-    assert peer == [1006, 1010]
-    assert sizes == [4, 2]
+    assert _flatten_chunks(local, peer, sizes) == ([106, 110], [1006, 1010], [4, 2])
