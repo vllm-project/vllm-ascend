@@ -7,6 +7,7 @@ import torch.distributed as dist
 from vllm.distributed.parallel_state import GroupCoordinator, _groups
 from vllm.logger import logger
 from vllm.triton_utils import tl, triton
+from vllm.utils.math_utils import next_power_of_2
 from vllm.utils.torch_utils import direct_register_custom_op
 
 from vllm_ascend.device.device_config import AscendDeviceType, get_ascend_device_type, is_950
@@ -413,7 +414,7 @@ def _launch_pack_dcp_output_lse(partial_output, softmax_lse, softmax_sum, send, 
             SCATTER_TOKENS=scatter_dim == 0,
             LSE_PACK_DIM=lse_pack_dim,
             FROM_STATS=softmax_sum is not None,
-            BLOCK_D=triton.next_power_of_2(head_dim),
+            BLOCK_D=next_power_of_2(head_dim),
             BLOCK_ROWS=32 if head_dim == 512 and num_tokens >= 128 and partial_output.stride(-1) == 1 else 8,
             OUTPUT_HEAD_MAJOR=head_dim == 512,
         )
@@ -438,7 +439,7 @@ def _launch_pack_dcp_output_lse(partial_output, softmax_lse, softmax_sum, send, 
         SCATTER_TOKENS=scatter_dim == 0,
         LSE_PACK_DIM=lse_pack_dim,
         FROM_STATS=softmax_sum is not None,
-        BLOCK_D=triton.next_power_of_2(head_dim),
+        BLOCK_D=next_power_of_2(head_dim),
     )
     return
 
@@ -515,8 +516,8 @@ def _launch_fused_dcp_lse_combine(
     # faster than narrower tiles and than the scalar/batched paths at DCP8/16
     # with head dims 512 and 1024. It runs before the batched path because
     # those rows still won at T64/T256.
-    rank_tile = triton.next_power_of_2(dcp_size)
-    feature_tile = min(512, triton.next_power_of_2(head_dim), 8192 // rank_tile)
+    rank_tile = next_power_of_2(dcp_size)
+    feature_tile = min(512, next_power_of_2(head_dim), 8192 // rank_tile)
     tiles_per_head = triton.cdiv(head_dim, max(feature_tile, 1))
     # At least one row per rank and roughly two rows per core. T4 (16 rows at
     # DCP8/16) wins on both backends; T2 stays on the scalar path.
@@ -612,7 +613,7 @@ def _launch_fused_dcp_lse_combine(
     )
     if batched:
         block_rows = 8
-        block_d = triton.next_power_of_2(head_dim)
+        block_d = next_power_of_2(head_dim)
         # Unrolling amortizes loop overhead when cores process multiple tiles.
         # Bound its live output tiles; larger worlds use the same streaming math.
         rank_unroll = (
@@ -661,7 +662,7 @@ def _launch_fused_dcp_lse_combine(
         DCP_SIZE=dcp_size,
         SCATTER_TOKENS=scatter_dim == 0,
         LSE_PACK_DIM=lse_pack_dim,
-        BLOCK_D=triton.next_power_of_2(head_dim),
+        BLOCK_D=next_power_of_2(head_dim),
         RETURN_LSE=return_lse,
         HAS_LOCAL=local_output is not None,
     )

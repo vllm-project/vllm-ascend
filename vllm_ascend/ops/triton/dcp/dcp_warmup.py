@@ -6,6 +6,7 @@ from collections import defaultdict
 import torch
 from vllm.model_executor.warmup.jit_warmup_triton_helper import TritonWarmupTensor
 from vllm.triton_utils import triton
+from vllm.utils.math_utils import next_power_of_2
 
 from vllm_ascend.ops.triton.dcp.dcp_a2a import (
     A3_DECODE_TOKEN_BUCKETS,
@@ -99,7 +100,7 @@ def _token_representatives(max_tokens, heads, local_heads, head_dim, vector_core
         local_heads * (head_dim + 4),
         local_heads * (head_dim // 2 + 1),
         local_heads * (head_dim // 2 + 1) * 2,
-        local_heads * triton.cdiv(head_dim, min(triton.next_power_of_2(head_dim), 512)),
+        local_heads * triton.cdiv(head_dim, min(next_power_of_2(head_dim), 512)),
     )
     cuts.update(triton.cdiv(1 << 31, factor) for factor in factors)
     ordered = sorted(cut for cut in cuts if 1 <= cut <= max_tokens + 1)

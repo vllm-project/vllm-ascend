@@ -7,6 +7,7 @@ import math
 
 import torch
 from vllm.triton_utils import tl, triton
+from vllm.utils.math_utils import next_power_of_2
 
 from vllm_ascend.ops.triton.dcp.dcp_jit import _launch_kernel
 from vllm_ascend.ops.triton.triton_utils import get_element, get_vectorcore_num, init_device_properties_triton
@@ -95,7 +96,7 @@ def _launch_fused_merge(out_recv, lse_recv, result, token_dim, vector_cores, lau
     tokens, heads, head_dim = result.shape
     native_layout = token_dim == 2
     # Bound each program to one feature accumulator and a rank-weight vector.
-    block_d = min(triton.next_power_of_2(head_dim), 512)
+    block_d = min(next_power_of_2(head_dim), 512)
     tiles = tokens * heads * math.ceil(head_dim / block_d)
     programs = min(tiles, vector_cores)
     launch(

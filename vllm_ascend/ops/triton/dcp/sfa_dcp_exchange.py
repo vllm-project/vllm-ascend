@@ -4,6 +4,7 @@
 import torch
 import torch.distributed as dist
 from vllm.triton_utils import tl, triton
+from vllm.utils.math_utils import next_power_of_2
 
 from vllm_ascend.ops.triton.dcp.dcp_jit import _launch_kernel
 from vllm_ascend.ops.triton.dcp.sfa_dcp_merge import fused_merge
@@ -268,7 +269,7 @@ def _launch_exchange_tokens_pack(
     full_vectors = max(output_words, tokens * local_heads) <= _FULL_PACK_VECTOR_ELEMENTS
     pack = _pack_token_peer if full_vectors else _pack_token_peer_tiled
     # Bound row-index and optional logarithm temporaries within UB.
-    stats_tile = min(triton.next_power_of_2(tokens * local_heads), _PACK_BLOCK_ELEMENTS)
+    stats_tile = min(next_power_of_2(tokens * local_heads), _PACK_BLOCK_ELEMENTS)
     grid: tuple[int, ...] = (ranks,)
     if not full_vectors:
         grid = (ranks, max(1, min(tokens, vector_cores() // ranks)))
