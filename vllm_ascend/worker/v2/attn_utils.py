@@ -1545,7 +1545,15 @@ def _resolve_cache_attention_groups(
     kernel_block_sizes: Sequence[int],
 ) -> tuple[dict[str, AttentionLayerBase], dict[str, str], list[AttentionGroup]]:
     attn_layers = get_layers_from_vllm_config(vllm_config, AttentionLayerBase)
-    shared_layers = get_shared_kv_cache_layers(vllm_config)
+    compilation_config = getattr(vllm_config, "compilation_config", None)
+    if getattr(compilation_config, "static_forward_context", None) is not None:
+        shared_layers = get_shared_kv_cache_layers(vllm_config)
+    else:
+        shared_layers = {
+            layer_name: target_layer
+            for layer_name, layer in attn_layers.items()
+            if (target_layer := getattr(layer, "kv_sharing_target_layer_name", None))
+        }
     attn_groups = _get_cache_attention_groups(kv_cache_config, attn_layers, shared_layers, kernel_block_sizes)
     return attn_layers, shared_layers, attn_groups
 

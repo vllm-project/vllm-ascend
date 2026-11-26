@@ -596,7 +596,11 @@ def test_mooncake_asymmetric_kvpp_prefill_to_unified_decode(monkeypatch, li_c4, 
 
     prefill_config = _build_glm_plan(runtime, {"indexer.0": spec}, num_blocks=3)
     prefill_key = torch.full((3, *key.shape[1:]), 7, dtype=key.dtype)
-    prefill_scale = torch.arange(3 * scale[0].numel(), dtype=torch.uint8).reshape(3, *scale.shape[1:]).view(scale.dtype)
+    prefill_scale = (
+        torch.arange(3 * scale[0].numel() * scale.element_size(), dtype=torch.uint8)
+        .view(scale.dtype)
+        .reshape(3, *scale.shape[1:])
+    )
     monkeypatch.setattr(base_worker, "map_kvpp_layers_to_owners", lambda *_: {"indexer.0": 0})
     prefill = _register_mooncake_worker(
         prefill_config, {"indexer.0": (prefill_key, prefill_scale)}, monkeypatch, kvpp_size=2
