@@ -111,7 +111,7 @@ def test_connector_restores_after_delegate():
     _, _, _, runner, _ = _packet()
     connector = runner.kv_connector
     delegate = connector._connector
-    calls = []
+    calls: list[object] = []
     delegate.pre_forward.side_effect = lambda *_args, **_kwargs: calls.append("delegate")
     connector._restore = lambda output: calls.append(("restore", output))
     output = _output()
