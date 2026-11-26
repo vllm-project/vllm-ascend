@@ -108,6 +108,53 @@ def _groups() -> list[KVCacheGroupSpec]:
     ]
 
 
+def test_recoverssm_replay_has_disjoint_fp32_pages_in_shared_slab():
+    groups = _groups()
+    gdn = groups[3].kv_cache_spec
+    groups[3].kv_cache_spec = replace(
+        gdn,
+        shapes=(*gdn.shapes, (1, 4, 257)),
+        dtypes=(*gdn.dtypes, torch.float32),
+    )
+    layout = build_qwen4_kv_cache_layout(groups, num_blocks=3)
+    assert layout is not None
+    assert layout.owner("model.layers.0.linear_attn").role == GDN
+    backing = torch.zeros(layout.slot_backing_size, dtype=torch.int8)
+    spec = groups[3].kv_cache_spec
+    views = [
+        make_slab_view(
+            backing,
+            dtype=dtype,
+            num_blocks=3,
+            item_shape=shape,
+            storage_offset=layout.region(region).offset,
+            block_stride=layout.region(region).block_stride,
+        )
+        for shape, dtype, region in zip(spec.shapes, spec.dtypes, ("r1", "r2", "r3"), strict=True)
+    ]
+    conv, checkpoint, replay = views
+    conv[1].fill_(2)
+    checkpoint[1].fill_(3)
+    replay[1].fill_(7.5)
+    torch.testing.assert_close(conv[1], torch.full_like(conv[1], 2))
+    torch.testing.assert_close(checkpoint[1], torch.full_like(checkpoint[1], 3))
+    torch.testing.assert_close(replay[1], torch.full_like(replay[1], 7.5))
+    for view in views:
+        assert torch.count_nonzero(view[0]) == torch.count_nonzero(view[2]) == 0
+        assert view.stride(0) * view.element_size() == layout.region("r0").block_stride
+    assert layout.region("r2").offset + layout.region("r2").page_size_bytes <= layout.region("r3").offset
+    assert layout.region("r3").offset + layout.region("r3").page_size_bytes <= layout.region("r0").page_size_bytes
+
+
+def test_recover_descriptor_does_not_turn_ple_into_gdn():
+    groups = _groups()
+    spec = groups[3].kv_cache_spec
+    groups[3].kv_cache_spec = replace(spec, shapes=(*spec.shapes, (1, 4, 257)), dtypes=(*spec.dtypes, torch.float32))
+    layout = build_qwen4_kv_cache_layout(groups, num_blocks=2)
+    assert layout is not None
+    assert layout.owner("model.ple").role == PLE
+
+
 def _ungrouped_qwen_specs() -> dict[str, KVCacheSpec]:
     main = FullAttentionSpec(
         block_size=256,
@@ -382,6 +429,26 @@ def _allocate_mrv2_kv_cache(
         config.num_blocks,
     )
     return raw, caches, layout
+
+
+@pytest.mark.parametrize("use_main", [False, True])
+def test_runner_materializes_three_recover_views_without_aliasing(monkeypatch, use_main):
+    groups = _groups()
+    gdn = groups[3].kv_cache_spec
+    groups[3].kv_cache_spec = replace(gdn, shapes=(*gdn.shapes, (1, 4, 257)), dtypes=(*gdn.dtypes, torch.float32))
+    config = get_qwen4_exp_kv_cache_config(
+        SimpleNamespace(cache_config=SimpleNamespace(num_gpu_blocks_override=3, prefix_cache_retention_interval=None)),
+        groups,
+        10**9,
+    )
+    assert config is not None
+    _, caches, layout = _allocate_mrv2_kv_cache(config, monkeypatch, use_main=use_main)
+    views = caches["model.layers.0.linear_attn"]
+    assert len(views) == 3
+    assert views[2].dtype == torch.float32
+    for view, region in zip(views, ("r1", "r2", "r3"), strict=True):
+        assert view.stride(0) * view.element_size() == layout.region(region).block_stride
+        assert view.storage_offset() * view.element_size() == layout.region(region).offset
 
 
 @pytest.mark.parametrize("runner_kind", ["v2", "v2_main"])

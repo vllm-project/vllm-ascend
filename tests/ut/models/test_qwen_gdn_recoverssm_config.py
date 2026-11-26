@@ -340,3 +340,64 @@ def test_unsupported_architecture_keeps_base_descriptors():
     config.model_config.hf_config = NS(architectures=["CustomQwenForCausalLM"])
     assert helpers["gdn_mamba_state_shape_from_config"](config) == base_shapes(config)
     assert helpers["gdn_mamba_state_dtype_from_config"](config) == (torch.bfloat16, torch.bfloat16)
+
+
+@pytest.mark.parametrize("architecture", ["Qwen4ExpForCausalLM", "Qwen4ExpForConditionalGeneration"])
+@pytest.mark.parametrize("enabled", [False, True])
+def test_qwen4exp_registered_descriptors_match_layer_replay_contract(architecture, enabled):
+    from vllm_ascend.models.qwen4_exp.model import (
+        AscendQwen4ExpForCausalLM,
+        AscendQwen4ExpForConditionalGeneration,
+    )
+
+    config = make_config()
+    config.model_config.hf_config = NS(architectures=[architecture])
+    config.model_config.hf_text_config.model_type = "qwen4_exp_text"
+    config.cache_config.use_replayssm = enabled
+    cls = AscendQwen4ExpForCausalLM if architecture.endswith("ForCausalLM") else AscendQwen4ExpForConditionalGeneration
+    expected = helpers["gdn_mamba_state_shape_from_config"](config)
+    assert cls.get_mamba_state_shape_from_config(config) == expected
+    assert cls.get_mamba_state_dtype_from_config(config) == helpers["gdn_mamba_state_dtype_from_config"](config)
+    assert len(expected) == (3 if enabled else 2)
+
+
+def test_internal_qwen4_mtp_config_has_private_non_recovery_cache(monkeypatch):
+    from vllm.config import CacheConfig
+
+    from vllm_ascend.patch.platform import patch_replayssm_config
+
+    cache = CacheConfig(use_replayssm=True)
+    cache.use_kda_recoverssm = True
+    model = NS(
+        architecture="Qwen4ExpMTP",
+        hf_config=NS(architectures=["Qwen4ExpMTP"]),
+        hf_text_config=NS(model_type="qwen4_exp_mtp"),
+    )
+    config = NS(cache_config=cache, model_config=model, speculative_config=NS(draft_model_config=model))
+    original = Mock(side_effect=lambda config: config)
+    monkeypatch.setattr(patch_replayssm_config, "_original_validate", original)
+    assert patch_replayssm_config.validate_mamba_cached_kernel(config) is config
+    assert config.cache_config is not cache
+    assert not config.cache_config.use_replayssm
+    assert not config.cache_config.use_kda_recoverssm
+    assert cache.use_replayssm and cache.use_kda_recoverssm
+    original.assert_called_once_with(config)
+
+
+def test_qwen4_mtp_architecture_without_draft_identity_does_not_bypass_validation(monkeypatch):
+    from vllm.config import CacheConfig
+
+    from vllm_ascend.patch.platform import patch_replayssm_config
+
+    cache = CacheConfig(use_replayssm=True)
+    model = NS(
+        architecture="Qwen4ExpMTP",
+        hf_config=NS(architectures=["Qwen4ExpMTP"]),
+        hf_text_config=NS(model_type="qwen4_exp_mtp"),
+    )
+    config = NS(cache_config=cache, model_config=model, speculative_config=NS(draft_model_config=object()))
+    original = Mock(side_effect=ValueError("unsupported draft architecture"))
+    monkeypatch.setattr(patch_replayssm_config, "_original_validate", original)
+    with pytest.raises(ValueError, match="unsupported draft architecture"):
+        patch_replayssm_config.validate_mamba_cached_kernel(config)
+    assert config.cache_config is cache and cache.use_replayssm

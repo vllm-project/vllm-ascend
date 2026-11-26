@@ -1,0 +1,4 @@
+pr: 23310
+entries:
+  - category: feature
+    text: Qwen4Exp models can opt into RecoverSSM with --use-replayssm. The gdn_recoverssm_backend additional configuration selects Triton, TileLang, or AscendC with the required optional operators installed.

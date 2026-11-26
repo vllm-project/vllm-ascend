@@ -832,11 +832,12 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
             if use_recoverssm:
                 assert a_spec is not None
                 assert b_spec is not None
-                core_attn_out_spec = gdn_recoverssm_verify(
-                    self.A_log,
+                verify = getattr(self, "_gdn_recoverssm_verify", gdn_recoverssm_verify)
+                core_attn_out_spec = verify(
+                    getattr(self, "_recoverssm_A_log_fp32", self.A_log),
                     a_spec,
                     b_spec,
-                    self.dt_bias,
+                    getattr(self, "_recoverssm_dt_bias_fp32", self.dt_bias),
                     query_spec,
                     key_spec,
                     value_spec,

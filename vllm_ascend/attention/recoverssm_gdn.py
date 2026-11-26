@@ -9,6 +9,7 @@ from typing import Any
 import torch
 from vllm.model_executor.layers.mamba.mamba_utils import is_conv_state_dim_first
 
+from vllm_ascend.ops.gdn_recoverssm_backend import GDNRecoverSSMOps, load_gdn_recoverssm_backend
 from vllm_ascend.ops.triton.gdn.gdn_recoverssm_commit import gdn_recoverssm_commit
 from vllm_ascend.ops.triton.gdn.gdn_recoverssm_verify import validate_gdn_state_replay
 from vllm_ascend.ops.triton.mamba.compact_conv_state import compact_conv_state
@@ -234,6 +235,7 @@ class GDNRecoverSSMCommitContext:
     # Device-side int64 table [2, 2, num_layers]: checkpoint/replay,
     # base address/block stride in elements, layer index.
     _state_commit_cache_address_stride_table: torch.Tensor = field(repr=False)
+    _backend_ops: GDNRecoverSSMOps | None = field(default=None, repr=False)
 
     @classmethod
     def create(
@@ -242,6 +244,8 @@ class GDNRecoverSSMCommitContext:
         *,
         spec_query_len: int,
         max_num_reqs: int,
+        backend: str = "triton",
+        native_root: str | None = None,
     ) -> "GDNRecoverSSMCommitContext":
         """Bind named layer caches and allocate reusable commit metadata."""
         if not layers or spec_query_len < 1 or max_num_reqs < 1:
@@ -259,6 +263,9 @@ class GDNRecoverSSMCommitContext:
             conv_shared_dim_stride=_get_shared_conv_dim_stride(layer_caches),
             _conv_cache_address_stride_table=_create_conv_cache_address_stride_table(layer_caches),
             _state_commit_cache_address_stride_table=_create_state_commit_cache_address_stride_table(layer_caches),
+            _backend_ops=(
+                load_gdn_recoverssm_backend(backend, native_root=native_root) if backend != "triton" else None
+            ),
         )
 
     def commit(
@@ -306,6 +313,20 @@ class GDNRecoverSSMCommitContext:
         if not batch:
             return
 
+        if self._backend_ops is not None and self._backend_ops.commit_step is not None:
+            self._backend_ops.commit_step(
+                self,
+                num_accepted_tokens,
+                state_indices,
+                query_start_loc,
+                request_indices,
+                block_table,
+                num_computed_tokens,
+                mamba_block_size,
+                commit_conv,
+            )
+            return
+
         plan = self.commit_plan
         # 1. Resolve accepted lengths and both destinations once per request.
         prepare_commit_plan(
@@ -327,7 +348,9 @@ class GDNRecoverSSMCommitContext:
         )
         # 2. Copy final and optional boundary convolution histories.
         if commit_conv:
-            compact_conv_state(
+            compact = self._backend_ops.compact if self._backend_ops is not None else compact_conv_state
+            assert compact is not None
+            compact(
                 reference.conv,
                 self._conv_cache_address_stride_table[0],
                 self._conv_cache_address_stride_table[1],
@@ -344,7 +367,9 @@ class GDNRecoverSSMCommitContext:
                 null_block_id=0,
             )
         # 3. Compose accepted records backwards, then merge the checkpoint.
-        gdn_recoverssm_commit(
+        commit_state = self._backend_ops.commit if self._backend_ops is not None else gdn_recoverssm_commit
+        assert commit_state is not None
+        commit_state(
             reference.checkpoint,
             reference.replay,
             self._state_commit_cache_address_stride_table,

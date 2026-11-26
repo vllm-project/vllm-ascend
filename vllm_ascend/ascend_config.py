@@ -767,6 +767,10 @@ class AscendConfig:
     ascend_compilation_config: AscendCompilationConfig = dataclasses.field(default_factory=AscendCompilationConfig)
     ascend_fusion_config: AscendFusionConfig = dataclasses.field(default_factory=AscendFusionConfig)
     ascend_warmup_config: AscendWarmupConfig = dataclasses.field(default_factory=AscendWarmupConfig)
+    gdn_recoverssm_backend: Literal["triton", "tilelang", "ascendc"] = "triton"
+    """Execution provider for GDN RecoverSSM; requires --use-replayssm."""
+    gdn_recoverssm_native_root: str | None = None
+    """Optional isolated FLA delta package directory; preserves base FLA ops."""
     eplb_config: EplbConfig = dataclasses.field(default_factory=EplbConfig)
     rejection_sampler_config: RejectionSamplerConfig = dataclasses.field(default_factory=RejectionSamplerConfig)
     rl_config: RlConfig = dataclasses.field(default_factory=RlConfig)

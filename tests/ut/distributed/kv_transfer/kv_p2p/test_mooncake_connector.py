@@ -1519,6 +1519,27 @@ class TestCoreFunctionality(unittest.TestCase):
         self.assertEqual(dst_list, [0x3000 + 3 * 160, 0x4000 + 3 * 512])
         self.assertEqual(length_list, [100, 200])
 
+    def test_append_mamba_transfer_meta_keeps_replay_local_to_decode(self):
+        src_list, dst_list, lengths = [], [], []
+        self.thread._append_mamba_transfer_meta(
+            src_list,
+            dst_list,
+            lengths,
+            group_spec={"kv_cache_spec_type": "MambaSpec"},
+            src_layer_base_addr=[0x1000, 0x2000, 0x9000],
+            dst_layer_base_addr=[0x3000, 0x4000],
+            block_len=[100, 200, 300],
+            block_stride=[128, 256, 512],
+            remote_block_stride=[160, 512],
+            remote_block_id=3,
+            local_block_id=2,
+            tp_num_need_pulls=1,
+            remote_tp_offset=0,
+        )
+        self.assertEqual(src_list, [0x1000 + 2 * 128, 0x2000 + 2 * 256])
+        self.assertEqual(dst_list, [0x3000 + 3 * 160, 0x4000 + 3 * 512])
+        self.assertEqual(lengths, [100, 200])
+
     @patch(
         "vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector.is_conv_state_dim_first",
         return_value=False,
