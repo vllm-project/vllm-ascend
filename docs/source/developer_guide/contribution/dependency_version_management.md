@@ -12,10 +12,10 @@ stack.
 | torch | 2.10.0 | `requirements.txt`<br>`pyproject.toml` `[build-system]` | PyTorch CPU index <https://download.pytorch.org/whl/cpu/> (images), PyPI <https://pypi.org/simple/> (CI) |
 | torch-npu | 2.10.0.post7 | `requirements.txt`<br>`pyproject.toml` `[build-system]` | Ascend mirror (stable) <https://repo.huaweicloud.com/ascend/repos/pypi> |
 | triton-ascend | 3.6.0.post2 | `requirements.txt`<br>`pyproject.toml` `[build-system]`<br>`.github/workflows/_selected_tests.yaml`<br>`.github/workflows/schedule_main2main.yaml` | Ascend mirror (stable) <https://repo.huaweicloud.com/ascend/repos/pypi> |
-| memfabric-hybrid / memcache-hybrid | 1.5.0.dev20261123 | `requirements.txt`<br>`pyproject.toml` `[build-system]` | Ascend mirror (nightly) <https://repo.huaweicloud.com/ascend/repos/pypi/nightly> |
+| memfabric-hybrid / memcache-hybrid | 1.3.0 | `requirements.txt`<br>`pyproject.toml` `[build-system]` | Ascend mirror (stable) <https://repo.huaweicloud.com/ascend/repos/pypi> |
 | flash-linear-attention-npu (FLA) | 26.10.0+feature | Image build —<br>`Dockerfile`<br>`Dockerfile.openEuler`<br>`Dockerfile.a3`<br>`Dockerfile.a3.openEuler`<br>`Dockerfile.a5`<br>`Dockerfile.a5.openEuler`<br>PR —<br>`.github/workflows/_selected_tests.yaml`<br>`_selected_tests_upstream.yaml`<br>`schedule_e2e_upstream_test.yaml`<br>main2main —<br>`.github/workflows/schedule_main2main.yaml` | Ascend mirror (stable) <https://repo.huaweicloud.com/ascend/repos/pypi>; the `v26.10.0-feature` release is published as `26.10.0+feature` for both x86_64 and aarch64, and pip selects the matching wheel |
 | flash_attn_npu | 0.5.0 | Image build —<br>`Dockerfile`<br>`Dockerfile.openEuler`<br>`Dockerfile.a3`<br>`Dockerfile.a3.openEuler` | PyPI <https://pypi.org/simple/> (sdist only) |
-| mooncake-transfer-engine-npu | 0.3.14 | Image build —<br>`Dockerfile`<br>`Dockerfile.openEuler`<br>`Dockerfile.a3`<br>`Dockerfile.a3.openEuler`<br>`Dockerfile.a5`<br>`Dockerfile.a5.openEuler`<br>PR / main2main —<br>`.github/workflows/_selected_tests.yaml`<br>`.github/workflows/schedule_main2main.yaml` | Ascend mirror (nightly) <https://repo.huaweicloud.com/ascend/repos/pypi/nightly> only; `manylinux_2_35` wheels, never in `requirements.txt` |
+| mooncake-transfer-engine-npu | 0.3.14.post1 | Image build —<br>`Dockerfile`<br>`Dockerfile.openEuler`<br>`Dockerfile.a3`<br>`Dockerfile.a3.openEuler`<br>`Dockerfile.a5`<br>`Dockerfile.a5.openEuler`<br>PR / main2main —<br>`.github/workflows/_selected_tests.yaml`<br>`.github/workflows/schedule_main2main.yaml` | Ascend mirror (nightly) <https://repo.huaweicloud.com/ascend/repos/pypi/nightly> only; `manylinux_2_35` wheels, never in `requirements.txt` |
 | cannbotdsl / cannbot-arena-net-ops | 0.6.0+g91e7c8f / 0.1.0 | Image build —<br>`Dockerfile.a5`<br>`Dockerfile.a5.openEuler` | Ascend mirror (stable) <https://repo.huaweicloud.com/ascend/repos/pypi>, aarch64 only |
 | CANN | 9.2.1 | Image build — `FROM` tag of:<br>`Dockerfile`<br>`Dockerfile.openEuler`<br>`Dockerfile.310p`<br>`Dockerfile.310p.openEuler`<br>`Dockerfile.a3`<br>`Dockerfile.a3.openEuler`<br>`Dockerfile.a5`<br>`Dockerfile.a5.openEuler`<br>PR —<br>`mkdocs.yml` | `quay.io/ascend/cann` |
 
@@ -33,8 +33,8 @@ file. The `-` lines use the example versions from the table; replace
 -torch==2.10.0
 -torch-npu==2.10.0.post7
 -triton-ascend===3.6.0.post2
--memfabric-hybrid===1.5.0.dev20261123
--memcache-hybrid===1.5.0.dev20261123
+-memfabric-hybrid===1.3.0
+-memcache-hybrid===1.3.0
 +torch==<new-version>
 +torch-npu==<new-version>
 +triton-ascend===<new-version>
@@ -47,8 +47,8 @@ file. The `-` lines use the example versions from the table; replace
 ```diff
 -    "torch-npu==2.10.0.post7",
 -    "torch==2.10.0",
--    "memfabric-hybrid===1.5.0.dev20261123",
--    "memcache-hybrid===1.5.0.dev20261123",
+-    "memfabric-hybrid===1.3.0",
+-    "memcache-hybrid===1.3.0",
 -    "triton-ascend===3.6.0.post2"
 +    "torch-npu==<new-version>",
 +    "torch==<new-version>",
@@ -71,7 +71,7 @@ file. The `-` lines use the example versions from the table; replace
 ...
 -ARG FLA_VERSION="26.10.0+feature"
 -ARG FLASH_ATTN_NPU_VERSION="0.5.0"
--ARG MOONCAKE_VERSION="0.3.14"
+-ARG MOONCAKE_VERSION="0.3.14.post1"
 +ARG FLA_VERSION="<new-version>"
 +ARG FLASH_ATTN_NPU_VERSION="<new-version>"
 +ARG MOONCAKE_VERSION="<new-version>"
@@ -88,7 +88,7 @@ file. The `-` lines use the example versions from the table; replace
 -ARG FLA_VERSION="26.10.0+feature"
 +ARG FLA_VERSION="<new-version>"
 ...
--python3 -m pip install "mooncake-transfer-engine-npu===0.3.14" && \
+-python3 -m pip install "mooncake-transfer-engine-npu===0.3.14.post1" && \
 +python3 -m pip install "mooncake-transfer-engine-npu===<new-version>" && \
 ...
 -python3 -m pip install "cannbotdsl===0.6.0+g91e7c8f" "cannbot-arena-net-ops===0.1.0" && \
@@ -107,7 +107,7 @@ file. The `-` lines use the example versions from the table; replace
 ### `.github/workflows/_selected_tests.yaml`
 
 ```diff
--uv pip install 'mooncake-transfer-engine-npu===0.3.14'
+-uv pip install 'mooncake-transfer-engine-npu===0.3.14.post1'
 -uv pip install --force-reinstall --no-deps 'triton-ascend===3.6.0.post2'
 -uv pip install --no-deps "flash-linear-attention-npu-${NPU_TYPE}===26.10.0+feature"
 -uv pip install --no-deps flash-linear-attention-npu-a3===26.10.0+feature
@@ -120,7 +120,7 @@ file. The `-` lines use the example versions from the table; replace
 ### `.github/workflows/schedule_main2main.yaml`
 
 ```diff
--uv pip install 'mooncake-transfer-engine-npu===0.3.14'
+-uv pip install 'mooncake-transfer-engine-npu===0.3.14.post1'
 -uv pip install --force-reinstall --no-deps 'triton-ascend===3.6.0.post2'
 -uv pip install --no-deps flash-linear-attention-npu-a3===26.10.0+feature
 +uv pip install 'mooncake-transfer-engine-npu===<new-version>'

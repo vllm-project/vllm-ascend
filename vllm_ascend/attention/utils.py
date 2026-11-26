@@ -7,6 +7,7 @@ from importlib.util import find_spec
 from math import prod
 from typing import TYPE_CHECKING, Any
 
+import numpy as np
 import torch
 import torch.nn.functional as F
 import torch_npu
@@ -31,6 +32,7 @@ from vllm.v1.kv_cache_interface import (
 from vllm_ascend.core.kv_cache_interface import get_kv_cache_compression_ratio, supports_component_major_mla_pd
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.device.utils import FIA_TND_LARGE_HEAD_FALLBACK_HEAD_SIZE
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence import record_attention_prefetch_start
 from vllm_ascend.ops.triton.attention_update import prepare_attention_update
 from vllm_ascend.utils import (
     _is_glm_model,
@@ -39,7 +41,32 @@ from vllm_ascend.utils import (
 )
 
 if TYPE_CHECKING:
+    from vllm.v1.worker.gpu.input_batch import InputBatch
+
     from vllm_ascend.worker.v2.pcp_manager import AscendPCPAttentionContext
+
+
+def apply_prefill_as_decode_mask(
+    is_prefilling: np.ndarray | torch.Tensor,
+    prefill_runs_as_decode: np.ndarray | torch.Tensor | None = None,
+) -> np.ndarray:
+    """Return effective request phases from host masks without modifying the inputs."""
+    flags = np.asarray(is_prefilling, dtype=np.bool_)
+    if prefill_runs_as_decode is None:
+        return flags
+    override = np.asarray(prefill_runs_as_decode, dtype=np.bool_)
+    if override.shape != flags.shape:
+        raise RuntimeError(
+            f"Prefill-as-decode mask must match the request phase mask: {override.shape} != {flags.shape}."
+        )
+    return flags & ~override
+
+
+def has_requests_to_run_as_prefill(batch: "InputBatch") -> bool:
+    """Whether an input batch still contains requests computed by the prefill path."""
+    flags = apply_prefill_as_decode_mask(batch.is_prefilling_np, getattr(batch, "prefill_runs_as_decode_np", None))
+    return bool(flags.any())
+
 
 # Native npu_attention_update accepts at most 16 output/LSE pairs.
 ATTENTION_UPDATE_MAX_INPUTS = 16
@@ -638,6 +665,12 @@ def _kv_layer_transfer_connectors(
         yield from _kv_layer_transfer_connectors(child, layer, for_save=for_save)
 
 
+def _supports_attention_prefetch_gate(connector: Any) -> bool:
+    return getattr(connector, "supports_attention_prefetch_gate", False) is True or any(
+        _supports_attention_prefetch_gate(child) for child in getattr(connector, "sub_connectors", ())
+    )
+
+
 def wait_for_kv_layer_from_connector(layer_name: str):
     if not has_kv_transfer_group() or not is_v1_kv_transfer_group():
         return
@@ -649,8 +682,12 @@ def wait_for_kv_layer_from_connector(layer_name: str):
     if attn_metadata is None or not connector.has_connector_metadata():
         return
     # TODO: assert ascendMetadata
+    prefetch_gate_ready = False
     for layer_connector in _kv_layer_transfer_connectors(connector, forward_context.no_compile_layers.get(layer_name)):
         layer_connector.wait_for_layer_load(layer_name)
+        prefetch_gate_ready |= _supports_attention_prefetch_gate(layer_connector)
+    if prefetch_gate_ready:
+        record_attention_prefetch_start()
 
 
 def maybe_save_kv_layer_to_connector(

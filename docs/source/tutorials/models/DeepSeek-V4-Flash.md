@@ -84,7 +84,6 @@ Select an image based on your machine type and start the docker image on your no
         --name vllm-ascend \
         --shm-size=512g \
         --net=host \
-        --privileged=true \
         -v /usr/local/Ascend/driver/tools/hccn_tool:/usr/local/Ascend/driver/tools/hccn_tool \
         -v /etc/hccn.conf:/etc/hccn.conf \
         -v /root/.cache:/root/.cache \
@@ -104,7 +103,6 @@ Select an image based on your machine type and start the docker image on your no
         --name vllm-ascend \
         --shm-size=512g \
         --net=host \
-        --privileged=true \
         -v /usr/local/Ascend/driver/tools/hccn_tool:/usr/local/Ascend/driver/tools/hccn_tool \
         -v /etc/hccn.conf:/etc/hccn.conf \
         -v /root/.cache:/root/.cache \
@@ -434,7 +432,7 @@ The following sections describe multi-node PD separation deployment on Atlas 800
 
             export VLLM_USE_V2_MODEL_RUNNER=1
             export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=3000
-            export HCCL_EXEC_TIMEOUT=204
+            export HCCL_EXEC_TIMEOUT=3600
             export HCCL_CONNECT_TIMEOUT=120
             export OMP_PROC_BIND=false
             export OMP_NUM_THREADS=10
@@ -507,7 +505,7 @@ The following sections describe multi-node PD separation deployment on Atlas 800
 
             export VLLM_USE_V2_MODEL_RUNNER=1
             export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=3000
-            export HCCL_EXEC_TIMEOUT=204
+            export HCCL_EXEC_TIMEOUT=3600
             export HCCL_CONNECT_TIMEOUT=120
             export OMP_PROC_BIND=false
             export OMP_NUM_THREADS=10
@@ -770,7 +768,7 @@ The following sections describe multi-node PD separation deployment on Atlas 800
             export HCCL_SOCKET_IFNAME=$nic_name
             export VLLM_RPC_TIMEOUT=3600000
             export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=30000
-            export HCCL_EXEC_TIMEOUT=204
+            export HCCL_EXEC_TIMEOUT=3600
             export HCCL_CONNECT_TIMEOUT=120
             export OMP_PROC_BIND=false
             export OMP_NUM_THREADS=10
@@ -837,7 +835,7 @@ The following sections describe multi-node PD separation deployment on Atlas 800
             export TASK_QUEUE_ENABLE=1
             export VLLM_RPC_TIMEOUT=3600000
             export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=30000
-            export HCCL_EXEC_TIMEOUT=204
+            export HCCL_EXEC_TIMEOUT=3600
             export HCCL_CONNECT_TIMEOUT=120
             export HCCL_IF_IP=$local_ip
             export GLOO_SOCKET_IFNAME=$nic_name
@@ -992,7 +990,7 @@ The following sections describe multi-node PD separation deployment on Atlas 800
     export ASCEND_LOCAL_COMM_RES='{"version":"1.3"}'
     export VLLM_RPC_TIMEOUT=3600000
     export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=30000
-    export HCCL_EXEC_TIMEOUT=204
+    export HCCL_EXEC_TIMEOUT=3600
     export HCCL_CONNECT_TIMEOUT=120
     export HCCL_BUFFSIZE=1200
     export HCCL_OP_EXPANSION_MODE="AIV"
@@ -1073,7 +1071,7 @@ The following sections describe multi-node PD separation deployment on Atlas 800
     export VLLM_USE_V2_MODEL_RUNNER=1
     export VLLM_RPC_TIMEOUT=3600000
     export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=30000
-    export HCCL_EXEC_TIMEOUT=204
+    export HCCL_EXEC_TIMEOUT=3600
     export HCCL_CONNECT_TIMEOUT=120
     export HCCL_BUFFSIZE=1800
     export GLOO_SOCKET_IFNAME="$nic_name"
@@ -1246,7 +1244,7 @@ This section provides PD separation deployment examples with a KV Cache Pool for
 
         export VLLM_USE_V2_MODEL_RUNNER=1
         export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=3000
-        export HCCL_EXEC_TIMEOUT=204
+        export HCCL_EXEC_TIMEOUT=3600
         export HCCL_CONNECT_TIMEOUT=120
         export PYTHONHASHSEED=0
         export OMP_PROC_BIND=false
@@ -1344,7 +1342,7 @@ This section provides PD separation deployment examples with a KV Cache Pool for
 
         export VLLM_USE_V2_MODEL_RUNNER=1
         export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=3000
-        export HCCL_EXEC_TIMEOUT=204
+        export HCCL_EXEC_TIMEOUT=3600
         export HCCL_CONNECT_TIMEOUT=120
         export PYTHONHASHSEED=0
         export OMP_PROC_BIND=false
@@ -1639,7 +1637,7 @@ This section provides PD separation deployment examples with a KV Cache Pool for
         export HCCL_SOCKET_IFNAME=$nic_name
         export VLLM_RPC_TIMEOUT=3600000
         export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=30000
-        export HCCL_EXEC_TIMEOUT=204
+        export HCCL_EXEC_TIMEOUT=3600
         export HCCL_CONNECT_TIMEOUT=120
         export OMP_PROC_BIND=false
         export OMP_NUM_THREADS=10
@@ -1743,7 +1741,7 @@ This section provides PD separation deployment examples with a KV Cache Pool for
         export TASK_QUEUE_ENABLE=1
         export VLLM_RPC_TIMEOUT=3600000
         export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=30000
-        export HCCL_EXEC_TIMEOUT=204
+        export HCCL_EXEC_TIMEOUT=3600
         export HCCL_CONNECT_TIMEOUT=120
         export HCCL_IF_IP=$local_ip
         export GLOO_SOCKET_IFNAME=$nic_name
@@ -2028,7 +2026,7 @@ This section provides PD separation deployment examples with a KV Cache Pool for
         export VLLM_USE_V2_MODEL_RUNNER=1
         export HCCL_INTRA_ROCE_ENABLE=1
         export HCCL_CONNECT_TIMEOUT=6000
-        export HCCL_EXEC_TIMEOUT=204
+        export HCCL_EXEC_TIMEOUT=3600
         export HCCL_BUFFSIZE=1200
         export GLOO_SOCKET_IFNAME="$nic_name"
         export HCCL_SOCKET_IFNAME="$nic_name"
@@ -2142,7 +2140,7 @@ This section provides PD separation deployment examples with a KV Cache Pool for
         export VLLM_USE_V2_MODEL_RUNNER=1
         export HCCL_INTRA_ROCE_ENABLE=1
         export HCCL_CONNECT_TIMEOUT=6000
-        export HCCL_EXEC_TIMEOUT=204
+        export HCCL_EXEC_TIMEOUT=3600
         export HCCL_BUFFSIZE=1200
         export GLOO_SOCKET_IFNAME="$nic_name"
         export HCCL_SOCKET_IFNAME="$nic_name"
@@ -2252,7 +2250,7 @@ This section provides PD separation deployment examples with a KV Cache Pool for
         export VLLM_USE_V2_MODEL_RUNNER=1
         export HCCL_INTRA_ROCE_ENABLE=1
         export HCCL_CONNECT_TIMEOUT=120
-        export HCCL_EXEC_TIMEOUT=204
+        export HCCL_EXEC_TIMEOUT=3600
         export HCCL_BUFFSIZE=1800
         export GLOO_SOCKET_IFNAME="$nic_name"
         export HCCL_SOCKET_IFNAME="$nic_name"
@@ -2372,7 +2370,7 @@ This section provides PD separation deployment examples with a KV Cache Pool for
         export VLLM_USE_V2_MODEL_RUNNER=1
         export HCCL_INTRA_ROCE_ENABLE=1
         export HCCL_CONNECT_TIMEOUT=120
-        export HCCL_EXEC_TIMEOUT=204
+        export HCCL_EXEC_TIMEOUT=3600
         export HCCL_BUFFSIZE=1800
         export GLOO_SOCKET_IFNAME="$nic_name"
         export HCCL_SOCKET_IFNAME="$nic_name"

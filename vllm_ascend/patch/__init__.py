@@ -241,9 +241,7 @@
 #       No, vllm-ascend-specific MoE runner integration.
 #    Future Plan:
 #       Remove this patch once upstream exposes a backend dispatch / plugin hook
-#       for selecting the MoE runner implementation. Register warmup from the
-#       selected Ascend router initialization when that hook is available.
-#       Until then the factory registers EPLB map variants during model construction.
+#       for selecting the MoE runner implementation.
 #
 #   2. `vllm.model_executor.layers.fused_moe.FusedMoEFactory`
 #    Why:
@@ -305,6 +303,8 @@
 #       worker pickle IPC), read the PD role back in the coordinator, and
 #       skip the EAGLE drop in both lookup entry points on a pure producer.
 #       The EAGLE-group fallback marks FullAttention groups only.
+#       Checkpoint writes apply the role-gated drop to all Mamba managers,
+#       including unmarked target groups, matching the scheduler boundary.
 #    Related PR (if no, explain why):
 #       No upstream PR; producer-side drop exemption for hybrid PD.
 #    Future Plan:
@@ -420,79 +420,7 @@
 #
 # ** 17. File: platform/patch_pp_mtp.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-#   1. `vllm.v1.outputs.ModelRunnerOutput`
-#    Why:
-#       PP + MTP mixed deployment needs the model runner to return the draft
-#       tokens produced for the same scheduler output. Upstream output objects
-#       do not carry `spec_token_ids` on all supported vLLM revisions.
-#    How：
-#       Add a backward-compatible `spec_token_ids` field to `ModelRunnerOutput`
-#       and `EMPTY_MODEL_RUNNER_OUTPUT` when the field is missing.
-#    Related PR (if no, explain why):
-#       Backport of local vLLM PP+MTP branch changes.
-#    Future Plan:
-#       Remove this patch once the supported vLLM version carries PP-safe
-#       speculative token metadata in `ModelRunnerOutput`.
-#
-#   2. `vllm.v1.engine.core.EngineCore.post_step`
-#      (the patch function lives here; it is applied from
-#      `patch_engine_core._apply_patch`, together with the other
-#      engine-core-level patches)
-#    Why:
-#       With PP batch queue, synchronous scheduling can schedule the next batch
-#       before the previous model output is consumed. Calling `post_step` in that
-#       window updates `request.spec_token_ids` from live request state that may
-#       already belong to the newer schedule step.
-#    How：
-#       In PP + MTP + batch queue + sync scheduling, skip `post_step` after model
-#       execution and let scheduler output processing perform the spec token
-#       writeback from the corresponding `ModelRunnerOutput`.
-#    Related PR (if no, explain why):
-#       Backport of local vLLM PP+MTP branch changes.
-#    Future Plan:
-#       Remove this patch when upstream makes spec token writeback output-owned
-#       for PP batch queue.
-#
-#   3. `vllm.v1.core.sched.scheduler.Scheduler._update_after_schedule`
-#      `vllm.v1.core.sched.scheduler.Scheduler.update_from_output`
-#    Why:
-#       PP async scheduling must not schedule the same decode request again
-#       before the previous output has written sampled/spec tokens back. Without
-#       this request-level in-flight fence, the next step may use stale sampled
-#       tokens and produce incorrect target-model output. Intermediate prefill
-#       chunks do not depend on sampled/spec writeback and should remain
-#       schedulable to keep the PP pipeline filled.
-#    How：
-#       After scheduling, set a temporary decode fence for final prefill/decode
-#       chunks in PP IPC mode. Release the fence in `update_from_output` after
-#       the matching output is processed. For PP + MTP, also filter zero-token
-#       placeholder requests before delegating to upstream scheduler accounting,
-#       then write `request.spec_token_ids` from `model_runner_output.spec_token_ids`.
-#    Related PR (if no, explain why):
-#       Backport of local vLLM PP+MTP branch changes.
-#    Future Plan:
-#       Remove this patch once upstream supports request-level PP async fences
-#       and output-owned spec token writeback.
-#
-#   4. `vllm.v1.core.sched.scheduler.Scheduler._make_cached_request_data`
-#    Why:
-#       Upstream PP async scheduling relies on direct PP-rank GPU broadcast for
-#       sampled-token handoff and omits `new_token_ids` from cached request data.
-#       vLLM Ascend routes PP sampled-token handoff through scheduler IPC, so
-#       non-last PP ranks need the previous sampled token in both sync and async
-#       scheduling. This also avoids copying draft tokens as confirmed tokens in
-#       PP + MTP mixed deployment.
-#    How：
-#       Temporarily build cached request data with sync-PP semantics in PP IPC
-#       mode, then fill the last confirmed output token for requests whose
-#       clamped upstream slice is empty.
-#    Related PR (if no, explain why):
-#       Backport of local vLLM PP+MTP branch changes.
-#    Future Plan:
-#       Remove this patch once upstream provides a scheduler-owned PP sampled
-#       token handoff path that works for both sync and async scheduling.
-#
-#   5. `vllm.config.model.ModelConfig.verify_with_parallel_config`
+#   1. `vllm.config.model.ModelConfig.verify_with_parallel_config`
 #    Why:
 #       Local Eagle/MTP drafters are loaded on the last PP stage rather than
 #       partitioned across all PP ranks. Upstream `ModelConfig.verify_with_parallel_config`
@@ -512,36 +440,29 @@
 #       separate hook that can be overridden per-model-type.
 #
 # ** 18. File: platform/patch_speculative_config.py**
-# Native MiniMax Flash draft extension:
-#   Targets: SpeculativeConfig.__post_init__ and draft HF configuration loading.
-#   Why: native DSpark exports use a standalone architecture and carry their
-#        own dspark/config.json, while upstream normalizes unknown drafts to
-#        DSparkDraftModel.
-#   How: preserve DSparkMiniMaxDraftModel before Pydantic validation and
-#        normalize the checkpoint's dspark/config.json without changing the
-#        target or checkpoint. The adapter, its checkpoint contract and weight
-#        loading live in models/minimax_m3/minimax_m3_dspark.py; it inherits
-#        DSpark drafting and changes only Flash norms, MLP and loading.
-#   Related PR:
-#        https://github.com/vllm-project/vllm/pull/64111
-#   Future Plan: remove the architecture guard and config/weight normalization
-#        once upstream loads native MiniMax Flash drafts. Retain only required
-#        Ascend quantized projection handling behind the upstream extension points.
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.config.speculative.SpeculativeConfig.hf_config_override`
 #    Why:
-#       Upstream v0.32.0 remaps most MTP draft model_types/architectures
-#       natively. The remaining Ascend deltas are legacy checkpoint
-#       normalization upstream does not cover: Kimi K2.5 DFlash YaRN amplitude,
-#       un-converted Qwen3 DSpark drafts, and the VL glm5_next_text wrapper.
+#       Upstream v0.34.0 remaps most MTP/DSpark draft model_types/architectures
+#       natively (including MiniMax DSpark subfolder discovery and architecture
+#       preservation in vllm#64111). The remaining Ascend deltas are legacy
+#       checkpoint normalizations upstream does not cover (Kimi K2.5 DFlash
+#       YaRN amplitude, un-converted Qwen3 DSpark drafts, and the VL
+#       glm5_next_text wrapper) plus MiniMax DSpark's Ascend config
+#       normalization and weight-header-derived quantization metadata.
 #    How：
-#       Call upstream `hf_config_override` first, then apply the legacy
-#       normalizations on top.
+#       Route MiniMax DSpark drafts through `draft_hf_override`; otherwise call
+#       upstream `hf_config_override` first and apply the legacy normalizations
+#       on top.
 #    Related PR (if no, explain why):
-#       No, Ascend-specific legacy checkpoint compatibility.
+#       https://github.com/vllm-project/vllm/pull/64111 handles native MiniMax
+#       DSpark recognition and default checkpoint selection. No upstream PR
+#       covers the remaining legacy compatibility or Ascend weight-header
+#       quantization metadata.
 #    Future Plan:
 #       Remove these normalizations once the checkpoints ship converted
-#       configs and upstream handles glm5_next_text MTP remapping.
+#       configs, upstream handles glm5_next_text MTP remapping, and Ascend can
+#       derive MiniMax metadata through a loader extension point.
 #
 #   2. `vllm.config.speculative.SpeculativeConfig.__post_init__`
 #    Why:
@@ -638,6 +559,22 @@
 #    Future Plan:
 #       Remove this patch once `torch.accelerator` correctly routes to the NPU
 #       backend for these memory APIs.
+#
+# ** 21b. File: platform/patch_torch_utils.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.utils.torch_utils.get_accelerator_view_from_cpu_tensor`
+#    Why:
+#       The upstream UVA helper supports CUDA, ROCm, and XPU, but not NPU.
+#       Qwen4Exp Engram imports that common helper for its host-resident table.
+#    How:
+#       Replace the common helper during the Ascend platform patch phase with
+#       an NPU implementation backed by `_C_ascend.get_npu_view_from_cpu_tensor`.
+#       Model code then uses the normal upstream import without a model-local
+#       rebinding.
+#    Related PR (if no, explain why):
+#       Pending upstream vLLM support; requested in review of vllm-ascend #20311.
+#    Future Plan:
+#       Remove this patch after the NPU branch is available upstream.
 #
 # ** 22. File: platform/patch_tool_choice_none_content.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -1633,6 +1570,14 @@
 #    Future Plan:
 #       Once #65565 is included in all supported vLLM versions, remove this
 #       patch and implement the NPUWorker profiler-validation hook instead.
+#
+# ** File: worker/patch_v2_static_kernel.py **
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+# Targets: CudaGraphManager.capture and BreakableCUDAGraphCapture._end_segment.
+# Why: upstream has no device callback for capture warmup or segment optimization.
+# How: wrap the existing warmup input factory and optimize completed graph segments.
+# Related PR: none; the device extension points are still a local design proposal.
+# Future Plan: remove when upstream exposes device warmup and segment-finalization hooks.
 #
 # ** 35. File: platform/patch_parallel_config.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~

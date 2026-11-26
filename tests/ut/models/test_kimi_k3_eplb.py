@@ -275,19 +275,17 @@ def test_update_physical_experts_metadata_rejects_resizing_local_weights():
 @pytest.mark.parametrize("packed", [False, True])
 @pytest.mark.parametrize("reverse_weights", [False, True])
 @pytest.mark.parametrize(
-    "num_experts,num_redundant_experts,ep_size,ep_rank,use_v2,expected_experts",
+    "num_experts,num_redundant_experts,ep_size,ep_rank,expected_experts",
     [
-        (2, 0, 1, 0, False, [0, 1]),
-        (2, 4, 1, 0, False, [0, 1, 0, 1, 0, 1]),
-        (4, 0, 2, 1, True, [2, 3]),
-        (4, 2, 2, 0, False, [0, 1, 2]),
-        (4, 2, 2, 1, False, [3, 0, 1]),
-        (4, 2, 2, 0, True, [0, 1, 2]),
-        (4, 2, 2, 1, True, [2, 3, 0]),
-        (5, 3, 2, 0, True, [0, 1, 2, 3]),
-        (5, 3, 2, 1, True, [2, 3, 4, 0]),
-        (2, 6, 2, 0, True, [0, 1, 0, 1]),
-        (2, 6, 2, 1, True, [1, 0, 1, 0]),
+        (2, 0, 1, 0, [0, 1]),
+        (2, 4, 1, 0, [0, 1, 0, 1, 0, 1]),
+        (4, 0, 2, 1, [2, 3]),
+        (4, 2, 2, 0, [0, 1, 2]),
+        (4, 2, 2, 1, [2, 3, 0]),
+        (5, 3, 2, 0, [0, 1, 2, 3]),
+        (5, 3, 2, 1, [2, 3, 4, 0]),
+        (2, 6, 2, 0, [0, 1, 0, 1]),
+        (2, 6, 2, 1, [1, 0, 1, 0]),
     ],
 )
 def test_expert_loading_initializes_every_replica(
@@ -299,7 +297,6 @@ def test_expert_loading_initializes_every_replica(
     num_redundant_experts,
     ep_size,
     ep_rank,
-    use_v2,
     expected_experts,
 ):
     # Upstream caches PP names by object ID; parameterized models can reuse IDs.
@@ -330,7 +327,6 @@ def test_expert_loading_initializes_every_replica(
     # instance skips the constructor that seeds it.
     routed.shared_expert_online_loader = None
     routed.moe_config = SimpleNamespace(ep_size=ep_size)
-    routed._use_v2_model_runner = use_v2
     layer.block_sparse_moe.experts.routed_experts = routed
     local_experts = (num_experts + num_redundant_experts) // ep_size
     local_start = ep_rank * local_experts
@@ -398,7 +394,6 @@ def test_eplb_expert_remapping_preserves_weight_metadata():
     nn.Module.__init__(routed)
     routed.shared_expert_online_loader = None
     routed.moe_config = SimpleNamespace(ep_size=2)
-    routed._use_v2_model_runner = True
     routed.register_parameter("w13_weight", nn.Parameter(torch.empty((3, 2, 1))))
     model.experts.routed_experts = routed
     metadata = {"loaded_shard_id": "w1", "sentinel": object()}

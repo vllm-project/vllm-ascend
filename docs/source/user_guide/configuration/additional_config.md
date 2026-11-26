@@ -72,7 +72,7 @@ The following table lists additional configuration options available in vLLM Asc
 | `enable_pcp_o_proj_weight_sharding` | bool | `True` | Whether PCP shards O-projection weights across the PCP group. This option controls SFA-PCP `o_proj` and DSA-PCP two-stage O-projection (`wo_a`/`wo_b`). If the weight method or PCP partition does not support sharding, the option is disabled with a warning. Set it to `false` at server startup to disable sharding. Other attention backends do not use this option. |
 | `enable_pcp_embedding_lmhead_weight_sharding` | bool | `True` | Whether PCP shards embedding and LM Head weights across PCP ranks inside each TP shard. This option is enabled by default, takes effect when PCP size is greater than 1, and is incompatible with batch-sharded sampling (`enable_batch_sharded_sampling`) and fine-grained TP for these modules. |
 | `rejection_sampler_config`          | dict | `{}`    | Configures entropy verification for speculative decoding. |
-| `multistream_dsv4_dsa_overlap`      | bool | `True`  | Whether to enable dsa multi-stream overlap for DeepSeek V4.  |
+| `multistream_dsv4_dsa_overlap`      | bool | `True`  | Whether to enable DSA multi-stream overlap for DeepSeek V4. For PCP batches with global prefill, this option controls overlap of local Q projection with global cache preparation on nonempty query shards. Set it to `false` to run these operations serially.  |
 | `rl_config`                        | dict | `{}`    | One-click RL mode configuration. See <a href="#rl_config">rl_config</a> for all fields, the two deployment modes, usage examples, and the migration guide. |
 | `combine_quant_mode`                | int  | `0`     | Controls communication quantization for the MC2 combine operation. The default (`0`) lets the runtime select the mode. Set `2`, `3`, or `4` to override the `comm_quant_mode` argument to `torch_npu.npu_moe_distribute_combine_v2`. |
 
@@ -122,7 +122,9 @@ Design / ops (analysis branch): `docs/source/developer_guide/Design_Documents/ru
 | `mlp_tensor_parallel_size`       | int  | `1` | The custom tensor parallel size of `mlp`.       |
 | `lmhead_tensor_parallel_size`    | int  | `1` | The custom tensor parallel size of `lm_head`.    |
 | `embedding_tensor_parallel_size` | int  | `1` | The custom tensor parallel size of `embedding`. |
+| `shared_expert_tensor_parallel_size` | int | `1` | Independent shared-expert TP along DP. Requires graph-dispatched PD decode with global TP=PCP=DCP=PP=1. See [shared-expert TP](../feature_guide/Fine_grained_TP.md#shared-expert-fine-grained-tp). |
 | `qkv_iproj_tensor_parallel_size`  | int  | `1` | The custom tensor parallel size of QKV input projections. See [QKV IProj preconditions](../feature_guide/Fine_grained_TP.md#preconditions-for-qkv-iproj-tp). |
+| `gproj_tensor_parallel_size` | int | `1` | Independent Kimi full-rank output-gate projection TP. Requires the Kimi graph-decode conditions in [QKV IProj preconditions](../feature_guide/Fine_grained_TP.md#preconditions-for-qkv-iproj-tp). |
 
 **ascend_compilation_config**
 

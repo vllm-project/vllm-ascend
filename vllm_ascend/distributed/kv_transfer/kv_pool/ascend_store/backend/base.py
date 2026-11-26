@@ -10,6 +10,8 @@ from vllm.config import ParallelConfig
 from vllm.platforms import current_platform
 from vllm.platforms.interface import set_assigned_physical_gpu_ids
 
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.buffer import BufferDescriptor, MemoryLocation
+
 # QoS range supported by the pooled KV store backends. A larger value
 # means a higher transfer priority.
 QOS_VALUE_MIN = 0
@@ -75,6 +77,12 @@ class Backend(ABC):
     layerwise_data_plane: str | None = None
     # Whether the connector must filter existing keys before calling put().
     requires_exists_before_put: bool = True
+    strict_get_results: bool = False
+
+    @classmethod
+    def validate_hisparse_colocated_config(cls) -> None:
+        """Opt in to whole-block transfer of both DDR and device buffers."""
+        raise ValueError(f"{cls.__name__} does not support mixed Host/Device bulk transfers")
 
     @abstractmethod
     def __init__(self, parallel_config: ParallelConfig, lazy_init: bool = False):
@@ -118,7 +126,8 @@ class Backend(ABC):
         pass
 
     @abstractmethod
-    def register_buffer(self, ptrs: list[int], lengths: list[int]):
+    def register_buffer(self, buffers: list[BufferDescriptor]) -> None:
+        """Register typed ranges; Host buffers require checked registration."""
         pass
 
     @abstractmethod
@@ -188,14 +197,35 @@ class Backend(ABC):
         raise NotImplementedError(f"{type(self).__name__} does not support batch_get_end")
 
     @abstractmethod
-    def put(self, keys: list[str], addrs: list[list[int]], sizes: list[list[int]]) -> bool | list[bool] | None:
+    def put(
+        self,
+        keys: list[str],
+        addrs: list[list[int]],
+        sizes: list[list[int]],
+        *,
+        memory_location: MemoryLocation | None = None,
+    ) -> bool | list[bool] | None:
         """Store a batch, returning False for a detected backend failure.
 
         A per-key boolean list preserves partial-success information. ``None``
         remains valid for legacy backends that report failures by raising.
+        ``memory_location`` identifies the local source buffers for this batch.
+        ``None`` uses the original backend path and its result conventions.
         """
         pass
 
     @abstractmethod
-    def get(self, keys: list[str], addrs: list[list[int]], sizes: list[list[int]]):
+    def get(
+        self,
+        keys: list[str],
+        addrs: list[list[int]],
+        sizes: list[list[int]],
+        *,
+        memory_location: MemoryLocation | None = None,
+    ):
+        """Read a batch into local buffers at the given memory location.
+
+        Returns one status per key (zero on success). ``None`` for
+        ``memory_location`` uses the original backend path.
+        """
         pass

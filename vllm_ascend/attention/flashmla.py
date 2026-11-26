@@ -17,7 +17,12 @@ import numpy as np
 import torch
 from vllm.v1.attention.backends.utils import get_dcp_local_seq_lens
 
-from vllm_ascend.attention.utils import MLA_FLASH_SUPPORTED_Q_HEADS, get_flashmla_ops, get_quant_flashmla_ops
+from vllm_ascend.attention.utils import (
+    MLA_FLASH_SUPPORTED_Q_HEADS,
+    apply_prefill_as_decode_mask,
+    get_flashmla_ops,
+    get_quant_flashmla_ops,
+)
 from vllm_ascend.ops.rotary_embedding import get_cos_and_sin_mla
 
 if TYPE_CHECKING:
@@ -40,10 +45,14 @@ def prepare_flashmla_batch_req_state(
     """Order real decode before FIA prefill before inputs and graph dispatch.
 
     Reorder the release request-state fields together so positions, KV slots
-    and sampling indices inherit the same order. A one-token prompt remains
-    FIA prefill and cannot reuse a graph captured for FlashMLA decode.
+    and sampling indices inherit the same order. Cached one-token prompt tails
+    use the PCP decode classification, while fresh one-token prompts remain
+    FIA prefills.
     """
-    order = np.argsort(batch_state.is_prefilling_np, kind="stable")
+    effective_is_prefilling = apply_prefill_as_decode_mask(
+        batch_state.is_prefilling_np, getattr(batch_state, "prefill_runs_as_decode_np", None)
+    )
+    order = np.argsort(effective_is_prefilling, kind="stable")
     reordered_fields: dict[str, Any] = dict(
         req_ids=[batch_state.req_ids[index] for index in order],
         num_scheduled_tokens=batch_state.num_scheduled_tokens[order],
@@ -58,7 +67,7 @@ def prepare_flashmla_batch_req_state(
             values = getattr(batch_state, field)
             reordered_fields[field] = values[order] if values is not None else None
     batch_state = batch_state._replace(**reordered_fields)
-    if batch_state.has_prefill:
+    if effective_is_prefilling.any():
         if "decode_graph_eligible" in batch_state._fields:
             batch_state = batch_state._replace(decode_graph_eligible=False)
         uniform_token_count = None
@@ -71,8 +80,9 @@ def prepare_flashmla_batch_req_state(
 def split_flashmla_requests(common) -> tuple[int, int, int, int]:
     """Split real generation stages after the runner's stable phase ordering.
 
-    Read only CPU scheduler metadata. A one-token prompt suffix is still FIA
-    prefill; query length alone must never opt a request into FlashMLA.
+    Read only CPU scheduler metadata. Query length alone must never opt a
+    fresh prompt into FlashMLA; PCP supplies an explicit override for cached
+    one-token prompt tails.
     """
     flags = common.is_prefilling
     offsets = common.query_start_loc_cpu[: common.num_reqs + 1]

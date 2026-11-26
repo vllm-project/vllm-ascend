@@ -30,7 +30,6 @@
         mkdir -p "$MODEL_CACHE"
 
         docker run --rm \
-            --privileged \
             --name vllm-ascend-cann \
             --shm-size=10g \
             -e ASCEND_VISIBLE_DEVICES=0 \
@@ -61,7 +60,6 @@
         mkdir -p "$MODEL_CACHE"
 
         docker run --rm \
-            --privileged \
             --name vllm-ascend-cann \
             --shm-size=10g \
             -e ASCEND_VISIBLE_DEVICES=0 \

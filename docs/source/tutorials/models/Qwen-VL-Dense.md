@@ -54,7 +54,6 @@ Select an image based on your machine type and start the docker image on your no
     --name $NAME \
     --net=host \
     --shm-size=1g \
-    --privileged=true \
     -v /usr/local/Ascend/driver:/usr/local/Ascend/driver \
     -v /etc/hccl_rootinfo.json:/etc/hccl_rootinfo.json \
     -v /etc/hixlep/:/etc/hixlep/ \

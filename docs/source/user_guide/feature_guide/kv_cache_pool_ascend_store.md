@@ -699,7 +699,7 @@ For MooncakeStore with `ASCEND_BUFFER_POOL` enabled, perform a warm-up phase bef
     Docker containers need to mount key paths. Example command (the command needs [Ascend Docker Runtime](../../getting_started/installation.md#installation-ascend-docker-runtime) on the host and selects the NPUs with `ASCEND_VISIBLE_DEVICES`):
 
     ```shell
-    docker run -u root -it -d --name ${NAME} --net=host --privileged=true \
+    docker run -u root -it -d --name ${NAME} --net=host \
         -e ASCEND_VISIBLE_DEVICES=0-7 \
         -v /usr/bin/urma_admin:/usr/bin/urma_admin \
         -v /lib/route.conf:/lib/route.conf \

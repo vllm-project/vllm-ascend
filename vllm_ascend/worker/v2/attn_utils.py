@@ -82,7 +82,6 @@ from vllm_ascend.core.kv_cache_interface import (
     AscendMLAAttentionSpec,
     AscendSFAIndexerCacheSpec,
     get_kv_cache_compression_ratio,
-    get_storage_block_size,
     requires_padded_page_layout,
     supports_component_major_mla_pd,
 )
@@ -434,6 +433,7 @@ def build_attn_metadata(
         positions = torch.zeros(num_input_tokens, dtype=torch.int64, device=query_start_loc_gpu.device)
 
     attn_metadata: dict[str, Any] = {}
+    step_metadata_builders: list[tuple[list[str], Any]] = []
     # Share request-level DSA metadata across cache groups in one execution.
     common_ratio_to_sas_metadata: dict[Any, Any] = {}
     common_v41_batch_metadata: dict[str, Any] = {}
@@ -462,7 +462,14 @@ def build_attn_metadata(
                 # Group geometry is fixed for this builder. Keep one device tensor
                 # so metadata preparation does not add an H2D copy on every step.
                 block_sizes = torch.tensor(
-                    [get_storage_block_size(group.kv_cache_spec) for group in kv_cache_groups],
+                    [
+                        (
+                            group.kv_cache_spec.first_spec
+                            if isinstance(group.kv_cache_spec, UniformTypeKVCacheSpecs)
+                            else group.kv_cache_spec
+                        ).num_states
+                        for group in kv_cache_groups
+                    ],
                     dtype=slot_mappings.dtype,
                     device=slot_mappings.device,
                 ).unsqueeze(1)
@@ -526,6 +533,8 @@ def build_attn_metadata(
 
         for attn_group in attn_groups[i]:
             attn_metadata_builder = attn_group.get_metadata_builder(0)
+            if callable(getattr(attn_metadata_builder, "prepare_step_metadata", None)):
+                step_metadata_builders.append((attn_group.layer_names, attn_metadata_builder))
             is_dsa_builder = isinstance(attn_metadata_builder, AscendDSAMetadataBuilder)
             is_v41_builder = isinstance(attn_metadata_builder, AscendDSAV41MetadataBuilder)
             is_sfa_builder = isinstance(attn_metadata_builder, AscendSFAMetadataBuilder)
@@ -538,10 +547,16 @@ def build_attn_metadata(
                 layer_common = layer_common.replace(
                     query_start_loc_cpu=layer_common.query_start_loc_cpu[: num_actual_reqs + 1],
                 )
-            if pcp_context is not None and (full_graph_mode or for_cudagraph_capture):
-                backend = getattr(attn_group, "backend", None)
-                if is_qsa_indexer or getattr(backend, "uses_qsa_page_major_kv_view", False):
+            backend = getattr(attn_group, "backend", None)
+            is_qsa_group = is_qsa_indexer or getattr(backend, "uses_qsa_page_major_kv_view", False)
+            if is_qsa_group:
+                if pcp_context is not None and (full_graph_mode or for_cudagraph_capture):
                     layer_common = layer_common.replace(graph_pad_size=num_input_tokens)
+                elif full_graph_mode and num_input_tokens > num_actual_tokens:
+                    # QSA sizes LI and GBSA tiling buffers from num_actual_tokens.
+                    # Replay needs the captured row count. The indexer's CPU
+                    # query boundary still marks the end of the live rows.
+                    layer_common = layer_common.replace(num_actual_tokens=num_input_tokens)
             metadata_variants = [(attn_group.layer_names, layer_common)]
             if is_sfa_builder and draft_layer_names:
                 target_names = [name for name in attn_group.layer_names if name not in draft_layer_names]
@@ -617,6 +632,11 @@ def build_attn_metadata(
                     common_ratio_to_sas_metadata = attn_metadata_builder.common_ratio_to_sas_metadata  # type: ignore[assignment]
                 for layer_name in variant_names:
                     attn_metadata[layer_name] = metadata
+    if step_metadata_builders:
+        rows = min(num_actual_tokens, int(query_start_loc_cpu[num_actual_reqs]))
+        prepared_metadata_ids: set[int] = set()
+        for layer_names, builder in step_metadata_builders:
+            builder.prepare_step_metadata(attn_metadata, layer_names, rows, prepared_metadata_ids)
     return attn_metadata
 
 
@@ -1614,17 +1634,13 @@ def _reshape_kv_cache_v2(
             if group.kernel_block_size is not None
             else kernel_block_sizes[group.kv_cache_group_id]
         )
-        group_storage_block_size = get_storage_block_size(group_spec)
-        kernel_block_size = (
-            group_storage_block_size
-            if group_storage_block_size != group_spec.block_size
-            else selected_kernel_block_size
-        )
-        if group_storage_block_size != group_spec.block_size and getattr(
-            group_spec, "indexes_kv_by_block_stride", False
-        ):
-            compression_ratio = get_kv_cache_compression_ratio(group_spec)
-            kernel_block_size = selected_kernel_block_size // compression_ratio
+        kernel_block_size = selected_kernel_block_size
+        if isinstance(group_spec, AttentionSpec) and group_spec.num_states != group_spec.block_size:
+            kernel_block_size = (
+                group_spec.get_num_kernel_states(selected_kernel_block_size)
+                if getattr(group_spec, "indexes_kv_by_block_stride", False)
+                else group_spec.num_states
+            )
 
         for layer_name in group.layer_names:
             if layer_name in shared_kv_cache_layers:
@@ -1687,10 +1703,10 @@ def _reshape_kv_cache_v2(
                     num_view_blocks = kv_cache_config.num_blocks
                     if owner.role == QSA_COMPRESSED:
                         # Match MRV2's virtual block table and builder spec:
-                        # each kernel page owns kernel_block_size / ratio keys.
-                        kernel_pages = kv_cache_spec.block_size // kernel_block_size
+                        # each kernel page owns selected_kernel_block_size / ratio keys.
+                        kernel_pages = kv_cache_spec.block_size // selected_kernel_block_size
                         num_view_blocks *= kernel_pages
-                        storage_block_size = kv_cache_spec.get_num_kernel_states(kernel_block_size)
+                        storage_block_size = kv_cache_spec.get_num_kernel_states(selected_kernel_block_size)
                     kv_caches[layer_name] = make_slab_view(
                         raw_slab,
                         dtype=kv_cache_spec.dtype,
@@ -1985,7 +2001,7 @@ def _reshape_kv_cache_v2(
             if total_bytes % page_stride_bytes:
                 raise ValueError(f"KV cache for {layer_name} is not a whole number of pages.")
             num_blocks = total_bytes // page_stride_bytes
-            num_blocks_per_kv_block = get_storage_block_size(kv_cache_spec) // kernel_block_size
+            num_blocks_per_kv_block = kv_cache_spec.num_states // kernel_block_size
             kernel_num_blocks = num_blocks * num_blocks_per_kv_block
             kv_cache_shape = group.backend.get_kv_cache_shape(
                 kernel_num_blocks,
