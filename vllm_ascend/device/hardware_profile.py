@@ -256,6 +256,7 @@ class FlashAttentionNpu3Model(Enum):
     MINIMAX = auto()
     STEP5 = auto()
     QWEN = auto()
+    HYBRID_MTP = auto()
 
 
 class CPUBindingMode(Enum):
@@ -453,7 +454,9 @@ _HARDWARE_PROFILES: Mapping[AscendDeviceType, HardwareProfile] = MappingProxyTyp
         ),
         AscendDeviceType.A3: HardwareProfile(
             _device_type=AscendDeviceType.A3,
-            flash_attn_npu_3_models=frozenset({FlashAttentionNpu3Model.MINIMAX, FlashAttentionNpu3Model.QWEN}),
+            flash_attn_npu_3_models=frozenset(
+                {FlashAttentionNpu3Model.MINIMAX, FlashAttentionNpu3Model.QWEN, FlashAttentionNpu3Model.HYBRID_MTP}
+            ),
             attention_backend_family=AttentionBackendFamily.STANDARD,
             cpu_binding_mode=CPUBindingMode.GLOBAL_SLICE,
             default_worker_cls=_DEFAULT_WORKER_CLS,
@@ -498,11 +501,11 @@ _HARDWARE_PROFILES: Mapping[AscendDeviceType, HardwareProfile] = MappingProxyTyp
         ),
         AscendDeviceType.A5: HardwareProfile(
             _device_type=AscendDeviceType.A5,
-            # A5 uses CANN flash_attn by default. Step5 temporarily uses the
+            # Hybrid MTP uses FA3 device tiling. Step5 temporarily uses the
             # ecosystem FA3 operator because CANN flash_attn does not support it.
             # TODO: Route Step5 back to CANN flash_attn and remove this exception
             # once CANN supports Step5 and the integration is validated.
-            flash_attn_npu_3_models=frozenset({FlashAttentionNpu3Model.STEP5}),
+            flash_attn_npu_3_models=frozenset({FlashAttentionNpu3Model.STEP5, FlashAttentionNpu3Model.HYBRID_MTP}),
             qwen4exp_hc_gate_mix_row_block_min_rows=1024,
             requires_2d_nz_linear_input=True,
             minimax_m3_gbsa_bf16_softmax_precision=1,

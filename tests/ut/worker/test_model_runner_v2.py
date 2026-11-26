@@ -2564,6 +2564,37 @@ def test_qwen_dflash2_cpu_length_sync(target_arch, draft_arch, draft_uses_fa3, k
 
 
 @pytest.mark.parametrize(
+    "architecture,draft,steps,target_fa3,expected",
+    [
+        ("Qwen3_5ForConditionalGeneration", "Qwen3_5MTP", 1, True, True),
+        ("Qwen3_5MoeForConditionalGeneration", "Qwen3_5MoeMTP", 1, True, True),
+        ("Qwen3_5ForConditionalGeneration", "Qwen3_5MTP", 1, False, False),
+        ("OtherHybrid", "OtherMTP", 3, True, True),
+    ],
+)
+def test_hybrid_mtp_cpu_length_sync(architecture, draft, steps, target_fa3, expected):
+    from vllm_ascend.attention.gdn_attn_builder import AscendGDNFusedAttentionBackend
+    from vllm_ascend.platform import FA3_BACKEND
+    from vllm_ascend.worker.v2.model_states.mamba_hybrid import AscendMambaHybridModelState
+
+    runner, _, _ = _device_length_runner("qwen3_5_text")
+    runner.vllm_config.kv_transfer_config = object()
+    runner.model_config.architecture = architecture
+    runner.model_state = AscendMambaHybridModelState.__new__(AscendMambaHybridModelState)
+    runner.speculative_config = SimpleNamespace(
+        method="mtp", num_speculative_tokens=steps, draft_model_config=SimpleNamespace(architectures=[draft])
+    )
+    fa3 = SimpleNamespace(full_cls_name=lambda: FA3_BACKEND)
+    runner.speculator = SimpleNamespace(attn_groups=[[SimpleNamespace(backend=fa3)]])
+    runner.attn_groups = [
+        [SimpleNamespace(backend=b)]
+        for b in (fa3 if target_fa3 else AscendAttentionBackend, AscendGDNFusedAttentionBackend)
+    ]
+    runner.initialize_spec_cpu_length_sync()
+    assert runner._can_skip_spec_cpu_length_sync() is expected
+
+
+@pytest.mark.parametrize(
     "unsupported",
     ["no_spec_config", "no_speculator", "method", "no_draft_config", "draft_arch", "target_arch"],
 )
