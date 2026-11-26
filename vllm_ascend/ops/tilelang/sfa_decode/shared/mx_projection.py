@@ -5,7 +5,8 @@
 import tilelang.ascend.language as T  # type: ignore[import-not-found]
 
 from ..mtp.native_output import MXFP8_NZ_C0, make_native_weight_loader
-from ..single import OUTPUT_PANEL_CHANNELS
+
+OUTPUT_PANEL_CHANNELS = 1024
 
 
 def mx_projection(
