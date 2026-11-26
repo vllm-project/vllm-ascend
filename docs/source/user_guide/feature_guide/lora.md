@@ -182,8 +182,12 @@ context-parallel layouts require separate acceptance.
 Use the following checks in a compatible vLLM/Ascend installation:
 
 ```bash
-pytest tests/ut/models/test_glm5next_lora_cpu.py tests/ut/lora/test_glm5next_integration.py
-pytest tests/e2e/pull_request/one_card/lora/test_glm53_projection_lora.py
+pytest tests/ut/lora/test_projection_layouts.py tests/ut/lora/test_torch_ops.py \
+    tests/ut/attention/test_mla_lora.py tests/ut/attention/test_mla_lora_cpu.py \
+    tests/ut/lora/test_glm5next_integration.py
+pytest tests/e2e/pull_request/one_card/lora/test_projection_layouts.py \
+    tests/e2e/pull_request/one_card/lora/test_mla_projections.py \
+    tests/e2e/pull_request/one_card/lora/test_glm53_projection_lora.py
 ```
 
 The first command checks Python integration and CPU arithmetic. The second
