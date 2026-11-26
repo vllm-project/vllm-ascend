@@ -1490,7 +1490,11 @@ class AscendSFAIndexerMetadataBuilder(AttentionMetadataBuilder[AscendSFAIndexerM
         qli_dcp_args = None
         kv_gather_block_ids = None
         pcp_context = kwargs.get("pcp_context")
-        if self.use_sharded_dcp and pcp_context is not None and has_requests_to_run_as_prefill(pcp_context.global_batch):
+        if (
+            self.use_sharded_dcp
+            and pcp_context is not None
+            and has_requests_to_run_as_prefill(pcp_context.global_batch)
+        ):
             group_idx = kwargs.get("pcp_cache_group_idx")
             if group_idx is None:
                 raise RuntimeError("PCP+DCP indexer metadata requires the PCP cache-group index.")
