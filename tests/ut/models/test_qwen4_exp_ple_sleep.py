@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Regressions for PLE constants in the level-2 sleep buffer lifecycle."""
 
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
@@ -16,9 +17,10 @@ def make_state(model, *, enabled=True, context_len=2):
         if enabled:
             state.ngram_context_offsets = torch.arange(-context_len, 0, dtype=torch.int64)
 
-    # Isolate model-state allocation from unrelated runner/configuration setup.
+    vllm_config = SimpleNamespace(parallel_config=SimpleNamespace(prefill_context_parallel_size=1))
+    # Isolate model-state allocation from unrelated runner setup.
     with patch.object(Qwen4ExpModelState, "__init__", initialize):
-        return AscendQwen4ExpModelState(None, model, None, torch.device("cpu"))
+        return AscendQwen4ExpModelState(vllm_config, model, None, torch.device("cpu"))
 
 
 @pytest.mark.parametrize("context_len", [1, 2, 4])
