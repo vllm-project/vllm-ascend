@@ -173,13 +173,23 @@ def test_pcp_replay_metadata_orders_collectives_and_planners(state, monkeypatch,
             "builder.build",
             "builder.take_device_metadata_tasks",
             "c2",
-            "producer.wait_stream",
+            "stream.record_event",
+        ]
+        assert state.metadata_ready is None
+        calls.sas.assert_not_called()
+        calls.first_attention()
+        state.layers.launch_pending_metadata()
+        state.layers.launch_pending_metadata()
+        assert [call[0] for call in calls.mock_calls][-6:] == [
+            "first_attention",
+            "producer.wait_event",
             "enter_producer",
             "sas",
             "qli",
             "producer.record_event",
         ]
-        calls.producer.wait_stream.assert_called_once_with(calls.stream)
+        calls.producer.wait_event.assert_called_once_with(calls.stream.record_event.return_value)
+        calls.producer.wait_stream.assert_not_called()
         assert [task.stage for task in state._pending_pcp_metadata_tasks] == [stage.ATTENTION, stage.INDEXER]
         state.wait_for_metadata()
         state.wait_for_metadata()
@@ -219,24 +229,33 @@ def test_compact_metadata_orders_production_and_first_consumption(state, monkeyp
         return metadata
 
     monkeypatch.setattr(state, "_build_metadata", build)
+
+    def submit_and_launch():
+        state._submit_compact_metadata(inputs(), np.array([0, 1]), calls.producer, pcp=pcp)
+        state.layers.launch_pending_metadata()
+
     if has_tasks and task_fails:
         with pytest.raises(RuntimeError, match="planner failed"):
-            state._submit_compact_metadata(inputs(), np.array([0, 1]), calls.producer, pcp=pcp)
+            submit_and_launch()
         calls.main.wait_stream.assert_called_once_with(calls.producer)
         calls.producer.record_event.assert_not_called()
         assert state.metadata_ready is None
         return
 
-    state._submit_compact_metadata(inputs(), np.array([0, 1]), calls.producer, pcp=pcp)
+    submit_and_launch()
     assert state.metadata is metadata
     if has_tasks:
+        ready_calls = ["main.record_event", "producer.wait_event"] if pcp else ["producer.wait_stream"]
         assert [call[0] for call in calls.mock_calls] == [
-            "producer.wait_stream",
+            *ready_calls,
             "enter_producer",
             "run",
             "producer.record_event",
         ]
-        calls.producer.wait_stream.assert_called_once_with(calls.main)
+        if pcp:
+            calls.producer.wait_event.assert_called_once_with(calls.main.record_event.return_value)
+        else:
+            calls.producer.wait_stream.assert_called_once_with(calls.main)
         calls.main.wait_event.assert_not_called()
         state.wait_for_metadata()
         state.wait_for_metadata()
@@ -244,6 +263,23 @@ def test_compact_metadata_orders_production_and_first_consumption(state, monkeyp
     else:
         assert not calls.mock_calls
     assert state.metadata_ready is None
+
+
+def test_unlaunched_pcp_metadata_is_discarded_at_retirement(state, monkeypatch):
+    calls = Mock()
+    monkeypatch.setattr(torch.npu, "current_stream", lambda: calls.main)
+
+    def build(*args, tasks):
+        tasks.append(replay_mod.DeviceMetadataTask(replay_mod.DeviceMetadataStage.ATTENTION, calls.run, 0))
+        return {}
+
+    monkeypatch.setattr(state, "_build_metadata", build)
+    state._submit_compact_metadata(inputs(), np.array([0, 1]), calls.producer, pcp=True)
+    state.wait_for_metadata()
+    state.layers.launch_pending_metadata()
+
+    calls.run.assert_not_called()
+    assert not state._pending_pcp_metadata_tasks
 
 
 @pytest.mark.parametrize(

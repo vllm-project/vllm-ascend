@@ -406,9 +406,10 @@ packed-cache configurations are rejected when enabled. Omit the option or set
 `enabled` to `false` to use the original path.
 
 With SWA bounded replay, eager PCP compaction can overlap with the original
-batch's SAS and QLI preparation. After gathering the compact inputs, replay
-SAS and QLI run on the same metadata stream and can overlap with model
-computation before the decoder switches to the compact batch.
+batch's SAS and QLI preparation. The runtime records when compact inputs are
+ready, queues the first original-batch attention on the main stream, then
+submits replay SAS and QLI on the metadata stream. The decoder waits for
+replay metadata when it enters the compact batch.
 With multiple DP replicas, eager SWA bounded replay starts DP coordination
 before preparing the original metadata and joins it before choosing the
 replay layout.

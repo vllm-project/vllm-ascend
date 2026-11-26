@@ -4,6 +4,7 @@
 from collections.abc import Iterator
 from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass, replace
+from functools import partial
 from typing import TYPE_CHECKING, Any, cast
 
 import numpy as np
@@ -419,29 +420,46 @@ class DecoderReplayState:
                 else:
                     task.run()
             tasks = async_tasks
-        if tasks:
-            main = torch.npu.current_stream()
-            # Target planners are already on this stream. The wait orders
-            # compact input tensors, and stream order serializes AICPU scratch.
+        if not tasks:
+            return
+        if pcp:
+            # Record readiness before forward queues independent main-stream
+            # work. The later launch must wait on this event, not the new tail.
+            inputs_ready = torch.npu.current_stream().record_event()
+            self._pending_pcp_metadata_tasks = tasks
+            self.layers.launch_metadata = partial(self._enqueue_compact_metadata, tasks, producer, inputs_ready)
+        else:
+            self._enqueue_compact_metadata(tasks, producer)
+
+    def _enqueue_compact_metadata(
+        self,
+        tasks: list[DeviceMetadataTask],
+        producer: torch.npu.Stream,
+        inputs_ready: torch.npu.Event | None = None,
+    ) -> None:
+        main = torch.npu.current_stream()
+        # The shared producer stream also serializes the two sets of planners.
+        if inputs_ready is None:
             producer.wait_stream(main)
-            try:
-                with torch.npu.stream(producer):
-                    for task in tasks:
-                        task.run()
-                self.metadata_ready = producer.record_event()
-                if pcp:
-                    # Keep compact inputs captured by the tasks alive until
-                    # the owning main stream has enqueued its completion wait.
-                    self._pending_pcp_metadata_tasks = tasks
-            except BaseException:
-                main.wait_stream(producer)
-                raise
+        else:
+            producer.wait_event(inputs_ready)
+        try:
+            with torch.npu.stream(producer):
+                for task in tasks:
+                    task.run()
+            self.metadata_ready = producer.record_event()
+        except BaseException:
+            main.wait_stream(producer)
+            raise
 
     def wait_for_metadata(self) -> None:
         if self.metadata_ready is not None:
             torch.npu.current_stream().wait_event(self.metadata_ready)
             self.metadata_ready = None
-            self._pending_pcp_metadata_tasks.clear()
+        # The owning stream now orders reuse, or forward never launched the
+        # pending tasks. In either case the retained inputs can be released.
+        self.layers.launch_metadata = None
+        self._pending_pcp_metadata_tasks.clear()
 
     def _build_metadata(
         self,
@@ -531,6 +549,7 @@ class DecoderReplayState:
 
     @contextmanager
     def forward_context(self) -> Iterator[None]:
+        self.layers.launch_pending_metadata()
         self.wait_for_metadata()
         outer = get_forward_context()
         compact = self.layers.rows is not None
