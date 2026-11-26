@@ -75,7 +75,7 @@ from vllm_ascend.attention.attention_c8_mxfp import (
 from vllm_ascend.attention.attention_v1 import AscendAttentionBackend
 from vllm_ascend.attention.fa_v1 import AscendFlashAttentionBackend
 from vllm_ascend.attention.flashmla import prepare_flashmla_batch_req_state, target_attn_groups_without_draft_flashmla
-from vllm_ascend.attention.gdn_recoverssm_execution import AscendGDNRecoverSSMState
+from vllm_ascend.attention.gdn_recoverssm_execution import AscendGDNRecoverSSMState, startup_gdn_commit_jobs
 from vllm_ascend.attention.mla_v1 import AscendMLABackend
 from vllm_ascend.core.kv_cache_interface import is_circular_kv_cache_spec
 from vllm_ascend.distributed.expert_transfer import expert_offload_utils as expert_offload
@@ -428,6 +428,75 @@ class NPUModelRunner(GPUModelRunner):
         if (executor := self._gdn_recovery_executor()) is not None:
             executor.wait()
 
+    @torch.inference_mode()
+    def profile_gdn_recovery_memory(self) -> int:
+        """Measure recovery's startup footprint before allocating the real KV pool."""
+        if not self.ascend_config.gdn_recoverssm_execution_config.capture_commit:
+            return 0
+        if hasattr(self, "gdn_recovery_graph_memory_bytes"):
+            return self.gdn_recovery_graph_memory_bytes
+        # Reuse upstream cache planning and teardown, but run ONLY recovery on
+        # NULL pages. No target/draft forward or KV transfer is needed here.
+        from vllm.v1.core.kv_cache_config_builder import get_kv_cache_config_builder
+        from vllm.v1.core.kv_cache_planning import get_kv_cache_groups_from_builder
+        from vllm.v1.worker.gpu.cudagraph_utils import _teardown_profiling_state
+
+        builder = get_kv_cache_config_builder(self.vllm_config)
+        groups = get_kv_cache_groups_from_builder(builder, self.vllm_config, self.get_kv_cache_spec())
+        minimal = builder.get_kv_cache_config_from_groups(self.vllm_config, groups, num_blocks=1)
+        torch.npu.synchronize()
+        torch.npu.empty_cache()
+        free_before = torch.npu.mem_get_info()[0]
+        try:
+            self.initialize_kv_cache(minimal, is_profiling=True)
+            self.cache_config.num_gpu_blocks = minimal.num_blocks
+            graph_bytes = self.capture_gdn_recovery_graphs(profile_only=True)
+            torch.npu.synchronize()
+            torch.npu.empty_cache()
+            # Includes temporary NULL-page/context metadata, conservatively,
+            # as well as graph-private and non-Torch allocations.
+            measured = max(graph_bytes, free_before - torch.npu.mem_get_info()[0], 0)
+        finally:
+            try:
+                if (executor := self._gdn_recovery_executor()) is not None:
+                    executor.close()
+            finally:
+                _teardown_profiling_state(self)
+        self.gdn_recovery_graph_memory_bytes = measured
+        logger.info("Reserved %d bytes for startup GDN recovery graphs before KV allocation", measured)
+        return measured
+
+    @torch.inference_mode()
+    def capture_gdn_recovery_graphs(self, *, profile_only: bool = False) -> int:
+        """Capture bound groups after target/draft warmup, before serving."""
+        if not self.ascend_config.gdn_recoverssm_execution_config.capture_commit:
+            return 0
+        reserve = getattr(self, "gdn_recovery_graph_memory_bytes", None)
+        if not profile_only and reserve is None:
+            raise RuntimeError("GDN graph memory must be profiled before allocating the KV cache")
+        executor = self._gdn_recovery_executor()
+        if executor is None:
+            raise RuntimeError("GDN graph capture requires a bound RecoverSSM executor")
+        torch.npu.synchronize()
+        torch.npu.empty_cache()
+        free_before = torch.npu.mem_get_info()[0]
+        allocated_before = torch.npu.memory_allocated()
+        torch.npu.reset_peak_memory_stats()
+        jobs = startup_gdn_commit_jobs(self)
+        if not jobs:
+            raise RuntimeError("GDN graph capture requires target GDN cache groups")
+        executor.prepare(jobs)
+        torch.npu.synchronize()
+        torch.npu.empty_cache()
+        used = max(
+            free_before - torch.npu.mem_get_info()[0],
+            torch.npu.max_memory_allocated() - allocated_before,
+            0,
+        )
+        if not profile_only and used > reserve:
+            raise RuntimeError(f"GDN recovery graphs used {used} bytes, exceeding the profiled reserve of {reserve}")
+        return used
+
     @contextmanager
     def draft_context(self):
         with super().draft_context():
@@ -486,6 +555,8 @@ class NPUModelRunner(GPUModelRunner):
         self,
         kv_cache_config: KVCacheConfig,
         kv_cache_allocation_context: AbstractContextManager | None,
+        *,
+        is_profiling: bool = False,
     ) -> None:
         # Upstream initialize_kv_cache builds the attention metadata builders
         # via init_attn_backend; the DSA builder registers its fused Q-RMS
@@ -500,6 +571,7 @@ class NPUModelRunner(GPUModelRunner):
             super().initialize_kv_cache(
                 kv_cache_config,
                 kv_cache_allocation_context=kv_cache_allocation_context,
+                **({"is_profiling": True} if is_profiling else {}),
             )
 
     def _has_target_flashmla_attention(self) -> bool:
@@ -517,6 +589,8 @@ class NPUModelRunner(GPUModelRunner):
         self,
         kv_cache_config: KVCacheConfig,
         kv_cache_allocation_context: AbstractContextManager | None = None,
+        *,
+        is_profiling: bool = False,
     ) -> None:
         # Match V1's physical buffer plan without mutating the scheduler's
         # logical cache configuration. Allocation must honor zero-stride aliases.
@@ -555,7 +629,11 @@ class NPUModelRunner(GPUModelRunner):
         if is_hisparse_ascendstore_enabled(self.vllm_config, kv_cache_config):
             allocation_config = aligned_hisparse_allocation_config(kv_cache_config)
         with graph_manager_wrapper(self):
-            self._initialize_kv_cache_upstream(allocation_config, kv_cache_allocation_context)
+            self._initialize_kv_cache_upstream(
+                allocation_config,
+                kv_cache_allocation_context,
+                **({"is_profiling": True} if is_profiling else {}),
+            )
             # PCP owns the local-row capacity; FIA may append one padding
             # request for either target or draft metadata.
             max_metadata_reqs = (

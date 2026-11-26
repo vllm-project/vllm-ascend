@@ -14,11 +14,12 @@ from vllm_ascend.ops.triton.mamba import stage_gdn_commit as staging
 @pytest.mark.parametrize("mapped", [False, True])
 @pytest.mark.parametrize("align", [False, True])
 @pytest.mark.parametrize("dtype", [torch.int32, torch.int64])
-def test_stage_kernel(batch, capacity, width, mapped, align, dtype):
-    check_stage_case(batch, capacity, width, mapped, align, dtype, device="npu")
+@pytest.mark.parametrize("copy_accepted", [False, True])
+def test_stage_kernel(batch, capacity, width, mapped, align, dtype, copy_accepted):
+    check_stage_case(batch, capacity, width, mapped, align, dtype, device="npu", copy_accepted=copy_accepted)
 
 
-def check_stage_case(batch, capacity, width, mapped, align, dtype, *, device):
+def check_stage_case(batch, capacity, width, mapped, align, dtype, *, device, copy_accepted=True):
     bucket = min(1 << (batch - 1).bit_length(), capacity)
     rows = min(batch + 2, capacity)
 
@@ -48,9 +49,12 @@ def check_stage_case(batch, capacity, width, mapped, align, dtype, *, device):
         computed=torch.full((capacity,), -1, dtype=dtype, device=device) if align else None,
     )
     output = torch.full((capacity,), -1, dtype=dtype, device=device)
-    staging.stage_gdn_commit(source, target, accepted, output)
-    torch.testing.assert_close(output[:rows], accepted)
-    assert not output[rows:].count_nonzero()
+    staging.stage_gdn_commit(source, target, accepted, output, copy_accepted=copy_accepted)
+    if copy_accepted:
+        torch.testing.assert_close(output[:rows], accepted)
+        assert not output[rows:].count_nonzero()
+    else:
+        assert (output == -1).all()
     torch.testing.assert_close(target.indices[:batch], source.indices)
     assert not target.indices[batch:].count_nonzero()
     torch.testing.assert_close(target.offsets[: batch + 1], source.offsets)

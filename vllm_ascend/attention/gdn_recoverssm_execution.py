@@ -11,12 +11,16 @@ from typing import Any
 
 import torch
 from vllm.logger import logger
+from vllm.model_executor.layers.mamba.abstract import MambaBase
 from vllm.v1.worker.gpu.model_states.recoverssm import (
     RecoverSSMState,
     _postprocess_recoverssm_align_kernel,
 )
 
-from vllm_ascend.attention.gdn_recoverssm_metadata import AscendGDNRecoverSSMMetadata
+from vllm_ascend.attention.gdn_recoverssm_metadata import (
+    AscendGDNRecoverSSMMetadata,
+    AscendGDNRecoverSSMMetadataBuilder,
+)
 from vllm_ascend.attention.recoverssm_gdn import (
     GDNRecoverSSMCommitContext,
     _create_conv_cache_address_stride_table,
@@ -75,6 +79,11 @@ def commit_bucket(batch: int, capacity: int) -> int:
     return min(1 << (batch - 1).bit_length(), capacity)
 
 
+def commit_buckets(capacity: int) -> tuple[int, ...]:
+    """Prepare every dispatch bucket, largest first, before serving requests."""
+    return tuple(sorted({commit_bucket(n, capacity) for n in range(1, capacity + 1)}, reverse=True))
+
+
 def _context_layout(context):
     cache = context.layer_caches[0]
     return (
@@ -85,6 +94,37 @@ def _context_layout(context):
         _inner_stride_signature(cache.checkpoint),
         _inner_stride_signature(cache.replay),
     )
+
+
+def startup_gdn_commit_jobs(runner) -> tuple[GDNCommitJob, ...]:
+    """Bind the actual target groups, keeping each physical page table separate."""
+    jobs = []
+    capacity = runner.max_num_reqs
+    align = runner.cache_config.mamba_cache_mode == "align"
+    seen = set()
+    for group_index, groups in enumerate(runner.attn_groups):
+        for group in groups:
+            builder = group.get_metadata_builder(0)
+            if not isinstance(builder, AscendGDNRecoverSSMMetadataBuilder) or id(builder) in seen:
+                continue
+            seen.add(id(builder))
+            reference = getattr(builder, "_checkpoint_indices", builder.spec_state_indices_tensor[:, 0])
+            indices = torch.empty_strided(
+                (capacity,), reference.stride(), dtype=reference.dtype, device=runner.device
+            ).zero_()
+            table = runner.block_tables.block_tables[group_index].gpu
+            jobs.append(
+                GDNCommitJob(
+                    builder._get_context(),
+                    indices,
+                    torch.zeros(capacity + 1, dtype=torch.int32, device=runner.device),
+                    None,
+                    torch.zeros_like(table[:capacity]) if align else None,
+                    torch.zeros(capacity, dtype=torch.int32, device=runner.device) if align else None,
+                    builder.kv_cache_spec.block_size if align else None,
+                )
+            )
+    return tuple(jobs)
 
 
 class GDNCommitGraph:
@@ -127,7 +167,7 @@ class GDNCommitGraph:
     def update(self, jobs: tuple[GDNCommitJob, ...], accepted: torch.Tensor) -> None:
         if accepted.ndim != 1 or accepted.numel() > self.capacity:
             raise ValueError("GDN sampled counts exceed graph capacity")
-        for source, target in zip(jobs, self.jobs):
+        for group_index, (source, target) in enumerate(zip(jobs, self.jobs)):
             batch = source.indices.numel()
             if source.indices.ndim != 1 or source.offsets.shape != (batch + 1,):
                 raise ValueError("GDN group indices and query offsets have incompatible shapes")
@@ -143,7 +183,7 @@ class GDNCommitGraph:
                 or source.computed.numel() < accepted.numel()
             ):
                 raise ValueError("GDN align metadata does not cover the sampler rows")
-            stage_gdn_commit(source, target, accepted, self.accepted)
+            stage_gdn_commit(source, target, accepted, self.accepted, copy_accepted=group_index == 0)
 
     def replay(self) -> None:
         self.graph.replay()
@@ -167,8 +207,7 @@ class GDNCommitExecutor:
         if not self.config.async_commit:
             return
         if model is None or any(
-            bool(getattr(layer, "use_gdn_recoverssm", False))
-            or (hasattr(layer, "num_k_heads") and hasattr(layer, "kv_cache"))
+            isinstance(layer, MambaBase) or bool(getattr(layer, "use_gdn_recoverssm", False))
             for layer in model.modules()
         ):
             raise ValueError("Async GDN recovery requires a draft model without recurrent GDN state")
@@ -223,11 +262,25 @@ class GDNCommitExecutor:
             for job in jobs:
                 job.run(accepted)
             return
+        graph = self.graphs.get(self._graph_key(jobs, accepted))
+        if graph is None:
+            # A different context/subset or metadata layout must never start a
+            # device-wide synchronize/capture in a live request. Keep the same
+            # provider and stream, and let startup diagnostics expose the miss.
+            logger.warning_once("GDN recovery graph was not prepared at startup; using eager recovery")
+            for job in jobs:
+                job.run(accepted)
+            return
+        graph.update(jobs, accepted)
+        graph.replay()
+
+    def _graph_key(self, jobs: tuple[GDNCommitJob, ...], accepted: torch.Tensor, bucket: int | None = None):
         capacity = min(self.capacity, *(job.context.commit_plan.capacity for job in jobs))
-        bucket = commit_bucket(max(job.indices.numel() for job in jobs), capacity)
+        if bucket is None:
+            bucket = commit_bucket(max(job.indices.numel() for job in jobs), capacity)
         # Contexts own immutable cache pointers. Values and source buffer
         # addresses vary per step, and are copied into stable graph inputs.
-        key = (
+        return (
             tuple(id(job.context) for job in jobs),
             bucket,
             accepted.dtype,
@@ -242,14 +295,53 @@ class GDNCommitExecutor:
                 for job in jobs
             ),
         )
-        graph = self.graphs.get(key)
-        if graph is None:
-            graph = GDNCommitGraph(jobs, accepted, bucket)
-            graph.capture(self.stream)
-            self.graphs[key] = graph
-            logger.info("Captured GDN recovery graph: %d groups, request bucket %d", len(jobs), bucket)
-        graph.update(jobs, accepted)
-        graph.replay()
+
+    def prepare(self, jobs: tuple[GDNCommitJob, ...]) -> None:
+        """Startup only: compile staging and capture with NULL/zero metadata."""
+        if not self.config.capture_commit or not jobs:
+            return
+        if self.pending:
+            raise RuntimeError("Cannot prepare recovery graphs with an outstanding transition")
+        jobs = self._merge_jobs(jobs)
+        self._runtime()
+        capacity = min(self.capacity, *(job.context.commit_plan.capacity for job in jobs))
+        device = jobs[0].indices.device
+        with torch.npu.stream(self.stream):
+            for dtype in (torch.int32, torch.int64):
+                accepted = torch.zeros(capacity, dtype=dtype, device=device)
+                for bucket in commit_buckets(capacity):
+                    key = self._graph_key(jobs, accepted, bucket)
+                    if key in self.graphs:
+                        continue
+                    graph = GDNCommitGraph(jobs, accepted, bucket)
+                    # The sources are graph-owned NULL metadata, never live
+                    # cache indices. Warm both sampler-mapping launch variants.
+                    graph.update(graph.jobs, accepted)
+                    graph.update(tuple(replace(job, mapping=None) for job in graph.jobs), accepted)
+                    # Match source strides without reading or staging any
+                    # caller-owned page IDs or offsets during warmup.
+                    bound = tuple(
+                        replace(
+                            target,
+                            indices=torch.empty_strided(
+                                (bucket,), source.indices.stride(), dtype=source.indices.dtype, device=device
+                            ).zero_(),
+                            offsets=torch.empty_strided(
+                                (bucket + 1,), source.offsets.stride(), dtype=source.offsets.dtype, device=device
+                            ).zero_(),
+                            mapping=None,
+                        )
+                        for source, target in zip(jobs, graph.jobs)
+                    )
+                    graph.update(bound, accepted)
+                    graph.update(
+                        tuple(replace(job, mapping=graph_job.mapping) for job, graph_job in zip(bound, graph.jobs)),
+                        accepted,
+                    )
+                    graph.capture(self.stream)
+                    self.graphs[key] = graph
+        self.stream.synchronize()
+        logger.info("Prepared %d GDN recovery graphs before serving requests", len(self.graphs))
 
     def submit(self, jobs: tuple[GDNCommitJob, ...], accepted: torch.Tensor) -> None:
         if not jobs:

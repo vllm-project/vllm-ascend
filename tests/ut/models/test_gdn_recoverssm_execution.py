@@ -6,7 +6,7 @@ import inspect
 from contextlib import contextmanager
 from dataclasses import replace
 from types import SimpleNamespace as NS
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 import pytest
 import torch
@@ -15,7 +15,9 @@ from vllm_ascend.ascend_config import GDNRecoverSSMExecutionConfig
 from vllm_ascend.attention import gdn_recoverssm_execution as execution
 from vllm_ascend.attention import recoverssm_gdn as binding
 from vllm_ascend.attention.gdn_recoverssm_metadata import AscendGDNRecoverSSMMetadata
+from vllm_ascend.worker import worker as worker_module
 from vllm_ascend.worker.v2 import model_runner as runner_module
+from vllm_ascend.worker.worker import NPUWorker
 
 
 def job(indices=None, *, align=False, context=None):
@@ -97,6 +99,14 @@ def test_draft_with_recurrent_state_is_rejected():
         runner.configure_draft(NS(modules=lambda: [NS(use_gdn_recoverssm=True)]))
     runner.configure_draft(NS(modules=lambda: [NS()]))
     assert runner.overlap_safe
+
+
+def test_draft_attention_attribute_names_do_not_imply_recurrent_state():
+    runner = execution.GDNCommitExecutor(config(async_commit=True), 8)
+    runner.configure_draft(NS(modules=lambda: [NS(num_k_heads=8, kv_cache=[])]))
+    assert runner.overlap_safe
+    with pytest.raises(ValueError, match="without recurrent"):
+        runner.configure_draft(NS(modules=lambda: [Mock(spec=execution.MambaBase)]))
 
 
 def fake_npu(monkeypatch, log):
@@ -308,3 +318,194 @@ def test_graph_does_not_hide_short_sampled_counts(monkeypatch):
     with pytest.raises(ValueError, match="do not cover"):
         graph.update((source,), torch.ones(2, dtype=torch.int32))
     stage.assert_not_called()
+
+
+def test_graph_stages_shared_accepted_only_once(monkeypatch):
+    jobs = tuple(job() for _ in range(3))
+    graph = execution.GDNCommitGraph(jobs, torch.ones(3, dtype=torch.int32), 4)
+    stage = Mock()
+    monkeypatch.setattr(execution, "stage_gdn_commit", stage)
+    graph.update(jobs, torch.ones(3, dtype=torch.int32))
+    assert [call.kwargs["copy_accepted"] for call in stage.call_args_list] == [True, False, False]
+
+
+@pytest.mark.parametrize("capacity", [1, 8, 160, 192])
+def test_startup_covers_every_dispatch_bucket(capacity):
+    buckets = execution.commit_buckets(capacity)
+    assert buckets[0] == capacity
+    assert set(buckets) == {execution.commit_bucket(n, capacity) for n in range(1, capacity + 1)}
+
+
+def test_graph_miss_never_captures_during_a_request(monkeypatch):
+    runner = execution.GDNCommitExecutor(config(capture_commit=True, merge_groups=False), 8)
+    monkeypatch.setattr(execution, "GDNCommitGraph", Mock(side_effect=AssertionError("live capture")))
+    source = job()
+    runner._run((source,), torch.ones(3, dtype=torch.int32))
+    source.context.commit.assert_called_once()
+    assert not runner.graphs
+
+
+def test_startup_capture_uses_null_metadata_then_runtime_only_replays(monkeypatch):
+    fake_npu(monkeypatch, [])
+    captures = []
+
+    def stage(source, target, accepted, out_accepted, **kwargs):
+        assert not source.indices.count_nonzero() and not source.offsets.count_nonzero()
+
+    monkeypatch.setattr(execution, "stage_gdn_commit", stage)
+
+    def capture(graph, stream):
+        assert all(not job.indices.count_nonzero() and not job.offsets.count_nonzero() for job in graph.jobs)
+        assert not graph.accepted.count_nonzero()
+        graph.graph = NS(replay=Mock())
+        captures.append(graph)
+
+    monkeypatch.setattr(execution.GDNCommitGraph, "capture", capture)
+    runner = execution.GDNCommitExecutor(config(capture_commit=True, merge_groups=False), 8)
+    source = job()
+    runner.prepare((source,))
+    assert len(captures) == 2 * len(execution.commit_buckets(8))
+    monkeypatch.setattr(execution, "stage_gdn_commit", Mock())
+    runner._run((source,), torch.ones(3, dtype=torch.int32))
+    assert sum(graph.graph.replay.call_count for graph in captures) == 1
+    source.context.commit.assert_not_called()
+    runner.close()
+    assert not runner.graphs
+
+
+def test_worker_deducts_measured_reserve_and_rejects_exhausted_budget(monkeypatch):
+    cfg = config(capture_commit=True)
+    monkeypatch.setattr(worker_module, "get_ascend_config", lambda: NS(gdn_recoverssm_execution_config=cfg))
+    worker = NPUWorker.__new__(NPUWorker)
+    worker.vllm_config = None
+    worker.model_runner = NS(profile_gdn_recovery_memory=Mock(return_value=30))
+    assert worker._reserve_gdn_recovery_memory(100) == 70
+    assert worker.gdn_recovery_graph_memory_bytes == 30
+    with pytest.raises(ValueError, match="leaves no KV cache"):
+        worker._reserve_gdn_recovery_memory(30)
+    worker.model_runner = NS()
+    assert worker._reserve_gdn_recovery_memory(100) == 100
+    cfg = config()
+    worker.model_runner = NS(profile_gdn_recovery_memory=Mock(side_effect=AssertionError("disabled probe")))
+    assert worker._reserve_gdn_recovery_memory(100) == 100
+
+
+def memory_api(monkeypatch, free, peak=30):
+    monkeypatch.setattr(torch.npu, "synchronize", Mock())
+    monkeypatch.setattr(torch.npu, "empty_cache", Mock())
+    monkeypatch.setattr(torch.npu, "reset_peak_memory_stats", Mock())
+    monkeypatch.setattr(torch.npu, "mem_get_info", Mock(side_effect=[(n, 1000) for n in free]))
+    monkeypatch.setattr(torch.npu, "memory_allocated", Mock(return_value=100))
+    monkeypatch.setattr(torch.npu, "max_memory_allocated", Mock(return_value=100 + peak))
+
+
+def test_real_capture_requires_pre_kv_budget_and_checks_peak(monkeypatch):
+    runner = runner_module.NPUModelRunner.__new__(runner_module.NPUModelRunner)
+    runner.ascend_config = NS(gdn_recoverssm_execution_config=config(capture_commit=True))
+    with pytest.raises(RuntimeError, match="profiled before"):
+        runner.capture_gdn_recovery_graphs()
+    executor = NS(prepare=Mock())
+    runner._gdn_recovery_executor = lambda: executor
+    monkeypatch.setattr(runner_module, "startup_gdn_commit_jobs", lambda runner: (job(),))
+    runner.gdn_recovery_graph_memory_bytes = 40
+    memory_api(monkeypatch, [100, 80])
+    assert runner.capture_gdn_recovery_graphs() == 30
+    memory_api(monkeypatch, [100, 80], peak=41)
+    with pytest.raises(RuntimeError, match="exceeding the profiled reserve"):
+        runner.capture_gdn_recovery_graphs()
+
+
+@pytest.mark.parametrize("fails", [False, True])
+def test_memory_probe_cleans_temporary_context(monkeypatch, fails):
+    from vllm.v1.core import kv_cache_config_builder, kv_cache_planning
+    from vllm.v1.worker.gpu import cudagraph_utils
+
+    runner = runner_module.NPUModelRunner.__new__(runner_module.NPUModelRunner)
+    runner.ascend_config = NS(gdn_recoverssm_execution_config=config(capture_commit=True))
+    runner.vllm_config = object()
+    runner.cache_config = NS(num_gpu_blocks=None)
+    runner.get_kv_cache_spec = Mock(return_value={})
+    runner.initialize_kv_cache = Mock()
+    runner.capture_gdn_recovery_graphs = Mock(return_value=50)
+    if fails:
+        runner.capture_gdn_recovery_graphs.side_effect = RuntimeError("capture failure")
+    executor = NS(close=Mock())
+    runner._gdn_recovery_executor = lambda: executor
+    planner = NS(get_kv_cache_config_from_groups=Mock(return_value=NS(num_blocks=1)))
+    monkeypatch.setattr(kv_cache_config_builder, "get_kv_cache_config_builder", lambda _: planner)
+    monkeypatch.setattr(kv_cache_planning, "get_kv_cache_groups_from_builder", lambda *args: [])
+    cleanup = Mock()
+    monkeypatch.setattr(cudagraph_utils, "_teardown_profiling_state", cleanup)
+    memory_api(monkeypatch, [100, 65])
+    if fails:
+        with pytest.raises(RuntimeError, match="capture failure"):
+            runner.profile_gdn_recovery_memory()
+        assert not hasattr(runner, "gdn_recovery_graph_memory_bytes")
+    else:
+        assert runner.profile_gdn_recovery_memory() == 50
+        assert runner.profile_gdn_recovery_memory() == 50
+    executor.close.assert_called_once()
+    cleanup.assert_called_once_with(runner)
+    assert runner.initialize_kv_cache.call_args.kwargs == {"is_profiling": True}
+    assert planner.get_kv_cache_config_from_groups.call_args.kwargs == {"num_blocks": 1}
+
+
+def test_recovery_capture_follows_model_graphs_in_startup_only(monkeypatch):
+    events = []
+    worker = NS(
+        vllm_config=NS(
+            compilation_config=NS(
+                compile_sizes=[],
+                cudagraph_mode=runner_module.CUDAGraphMode.NONE,
+                get_compile_ranges=lambda: [],
+                compilation_time=0.0,
+            )
+        ),
+        model_config=NS(enforce_eager=False, seed=0),
+        cache_config=NS(kv_cache_memory_bytes=1),
+        model_runner=NS(
+            capture_model=lambda: events.append("target_and_draft_graphs") or 10,
+            capture_gdn_recovery_graphs=lambda: events.append("recovery_graphs") or 5,
+        ),
+    )
+    monkeypatch.setattr(
+        worker_module,
+        "get_ascend_config",
+        lambda: NS(
+            enable_cpu_binding=False,
+            gdn_recoverssm_execution_config=config(capture_commit=True),
+        ),
+    )
+    monkeypatch.setattr(worker_module, "get_current_hardware_profile", lambda: NS(supports=lambda _: False))
+    monkeypatch.setattr(worker_module, "set_random_seed", Mock())
+    with patch(
+        "vllm_ascend.model_executor.warmup.kernel_warmup.kernel_warmup",
+        side_effect=lambda _: events.append("kernel_warmup"),
+    ):
+        NPUWorker.compile_or_warm_up_model(worker)
+    assert events == ["kernel_warmup", "target_and_draft_graphs", "recovery_graphs"]
+
+
+def test_startup_jobs_use_bound_groups_and_separate_null_page_tables():
+    builders = []
+    for _ in range(3):
+        builder = execution.AscendGDNRecoverSSMMetadataBuilder.__new__(execution.AscendGDNRecoverSSMMetadataBuilder)
+        builder.spec_state_indices_tensor = torch.tensor([[17]], dtype=torch.int32)
+        builder.kv_cache_spec = NS(block_size=8)
+        builder._get_context = Mock(return_value=object())
+        builders.append(builder)
+    runner = NS(
+        max_num_reqs=8,
+        device=torch.device("cpu"),
+        cache_config=NS(mamba_cache_mode="align"),
+        attn_groups=[[NS(get_metadata_builder=lambda index, builder=builder: builder)] for builder in builders],
+        block_tables=NS(block_tables=[NS(gpu=torch.ones((9, 7), dtype=torch.int32)) for _ in builders]),
+    )
+    jobs = execution.startup_gdn_commit_jobs(runner)
+    assert len(jobs) == 3
+    assert len({job.indices.data_ptr() for job in jobs}) == 3
+    for builder, job in zip(builders, jobs):
+        assert job.context is builder._get_context.return_value
+        assert job.table.shape == (8, 7)
+        assert not job.indices.count_nonzero() and not job.table.count_nonzero()
+        assert builder.spec_state_indices_tensor[0, 0] == 17

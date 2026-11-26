@@ -33,11 +33,13 @@ def _stage_gdn_commit_kernel(
     WIDTH: tl.constexpr,
     MAPPED: tl.constexpr,
     ALIGN: tl.constexpr,
+    COPY_ACCEPTED: tl.constexpr,
     BLOCK: tl.constexpr,
 ):
     i = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
-    value = tl.load(accepted + i * accepted_stride, i < sampled_rows, 0)
-    tl.store(out_accepted + i, value, i < CAPACITY)
+    if COPY_ACCEPTED:
+        value = tl.load(accepted + i * accepted_stride, i < sampled_rows, 0)
+        tl.store(out_accepted + i, value, i < CAPACITY)
     page = tl.load(indices + i * indices_stride, i < batch, 0)
     tl.store(out_indices + i, page, i < BUCKET)
     # Empty padded rows retain the last offset, hence a zero query length.
@@ -55,7 +57,7 @@ def _stage_gdn_commit_kernel(
         tl.store(out_table + i, block, i < CAPACITY * WIDTH)
 
 
-def stage_gdn_commit(source, target, accepted, out_accepted):
+def stage_gdn_commit(source, target, accepted, out_accepted, *, copy_accepted=True):
     """Preserve group-specific page IDs and sampler mapping; no host reads."""
     align = source.table is not None
     width = source.table.shape[1] if align else 1
@@ -89,6 +91,7 @@ def stage_gdn_commit(source, target, accepted, out_accepted):
         WIDTH=width,
         MAPPED=source.mapping is not None,
         ALIGN=align,
+        COPY_ACCEPTED=copy_accepted,
         BLOCK=256,
         num_warps=4,
     )

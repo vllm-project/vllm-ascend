@@ -70,7 +70,9 @@ guess equivalence. Duplicate checkpoint owners are rejected.
 Graph metadata is padded to bounded power-of-two request buckets, capped at
 the configured sequence capacity. Padded requests use NULL pages, zero accepted
 counts and zero query lengths. Each group stages its metadata with one Triton
-launch, avoiding a chain of individual zero/copy kernels. Source page strides,
+launch, avoiding a chain of individual zero/copy kernels. Shared sampled counts
+are copied by the first group only; later groups leave that buffer untouched.
+Source page strides,
 sampler mappings and group-specific block tables remain intact. Contexts cache
 their convolution pointer-table views once rather than reconstructing them at
 every commit.
@@ -80,17 +82,36 @@ warm against real accepted replay records: doing so would apply the accepted
 transition more than once. Real metadata is staged only before replay. Graphs
 and input buffers are owned by the worker, with no global Tensor cache.
 
-First use still needs runtime JIT, ACL graph capture and graph-private memory.
-A cold request is not a performance sample. Reserving more KV memory must leave
-room for this graph memory, communication workspaces and in-flight transfers.
-Memory utilization 0.96 is an experiment setting, not a general safe default.
+Before allocating the real KV pool, startup creates a temporary one-block cache
+using the configured cache planner and profiles recovery only on NULL pages.
+It prepares all dispatch buckets, with int32/int64 sampled counts and both
+sampler-mapping staging variants. The measured reserve covers peak Torch graph
+allocations and retained device-memory growth, including temporary context/cache
+metadata conservatively. The worker deducts it from automatic or explicitly
+requested KV budgets before physical-layout scaling. The temporary executor,
+graphs and cache bindings are then torn down using upstream profiling cleanup.
+
+After the real caches and target/draft graphs are initialized, startup captures
+recovery against the actual contexts. Its measured footprint must fit the
+pre-KV reserve; otherwise startup reports the mismatch. This extra footprint
+also contributes to startup graph-memory reporting. No guessed fixed-size
+reserve or new environment variable is introduced.
+
+Requests only update metadata and replay prepared graphs. An unprepared context,
+group subset or metadata signature uses eager recovery on the same stream and
+provider, with a warning; it never captures a graph during a request. Startup
+capture still requires real NPU execution and compilation time. Reserving more
+KV memory must also leave room for communication workspaces and in-flight
+transfers. Memory utilization 0.96 is an experiment setting, not a safe default.
 
 ## Validation
 
 CPU tests cover event order, exception propagation, shutdown, target and
 connector fences, group-specific page preservation, compatible group merging,
-and NULL-page capture warmup. The metadata staging kernel has a separate exact
+NULL-page startup capture, complete bucket coverage, no-capture request fallback,
+pre-KV budget deduction and probe cleanup. The metadata staging kernel has a separate exact
 integer reference test covering mappings, strided sources and graph padding.
+It also checks that later groups preserve the shared sampled-count buffer.
 
 Before merge, NPU validation must check graph replay and state equivalence,
 MTP acceptance, all three recovery kernels in the raw trace, and performance
