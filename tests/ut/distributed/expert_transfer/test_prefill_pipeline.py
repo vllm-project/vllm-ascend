@@ -42,7 +42,7 @@ class Stream:
 
 
 def make_pool(monkeypatch, layers=4):
-    calls = []
+    calls: list[tuple[str, str] | tuple[str, str, str | int]] = []
     compute, load = Stream("compute", calls), Stream("load", calls)
     manager = mod.ExpertOffloadManager()
     pool = manager.full_pool
