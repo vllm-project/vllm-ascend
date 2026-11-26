@@ -202,6 +202,17 @@ sampling, add this to `speculative_config` to sample at the request temperature.
 }
 ```
 
+```shell
+vllm serve Qwen/Qwen3-8B \
+  --enforce-eager \
+  --speculative-config '{
+    "method": "eagle3",
+    "model": "RedHatAI/Qwen3-8B-speculator.eagle3",
+    "num_speculative_tokens": 3,
+    "draft_sample_method": "probabilistic"
+  }'
+```
+
 ### Block Verification {: #block-verification }
 
 Add this to `speculative_config` to verify draft tokens as a block while
@@ -211,6 +222,17 @@ preserving the target sampling distribution.
 {
   "rejection_sample_method": "block"
 }
+```
+
+```shell
+vllm serve Qwen/Qwen3-8B \
+  --enforce-eager \
+  --speculative-config '{
+    "method": "eagle3",
+    "model": "RedHatAI/Qwen3-8B-speculator.eagle3",
+    "num_speculative_tokens": 3,
+    "rejection_sample_method": "block"
+  }'
 ```
 
 Greedy requests retain greedy verification. Use Block Verification separately
@@ -230,6 +252,22 @@ default, `"standard"`, and add this to `additional_config`
     "enable_entropy_verify": true
   }
 }
+```
+
+```shell
+vllm serve Qwen/Qwen3-8B \
+  --enforce-eager \
+  --speculative-config '{
+    "method": "eagle3",
+    "model": "RedHatAI/Qwen3-8B-speculator.eagle3",
+    "num_speculative_tokens": 3,
+    "rejection_sample_method": "standard"
+  }' \
+  --additional-config '{
+    "rejection_sampler_config": {
+      "enable_entropy_verify": true
+    }
+  }'
 ```
 
 | Option | Default | Effect |
@@ -260,6 +298,22 @@ For `K=3`, add these fields to your existing `speculative_config`.
   "rejection_sample_method": "synthetic",
   "synthetic_acceptance_rates": [0.9, 0.6, 0.3]
 }
+```
+
+```shell
+vllm serve Qwen/Qwen3-8B \
+  --enforce-eager \
+  --speculative-config '{
+    "method": "eagle3",
+    "model": "RedHatAI/Qwen3-8B-speculator.eagle3",
+    "num_speculative_tokens": 3,
+    "rejection_sample_method": "synthetic",
+    "synthetic_acceptance_rates": [
+      0.9,
+      0.6,
+      0.3
+    ]
+  }'
 ```
 
 <span id="ascend-specific-notes"></span>
