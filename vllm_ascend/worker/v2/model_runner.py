@@ -139,6 +139,7 @@ from vllm_ascend.worker.v2.input_batch import AscendInputBatch, AscendInputBuffe
 from vllm_ascend.worker.v2.kv_connector import MambaCopyKVConnector
 from vllm_ascend.worker.v2.kvpp import KVPPRuntime
 from vllm_ascend.worker.v2.pcp_manager import AscendPCPManager
+from vllm_ascend.worker.v2.pp_feedback import AscendPPHandler, use_host_pp_feedback
 from vllm_ascend.worker.v2.pp_transport import resolve_spec_pp_support
 from vllm_ascend.worker.v2.spec_decode import init_speculator
 from vllm_ascend.worker.v2.states import AscendRequestState
@@ -196,7 +197,9 @@ class NPUModelRunner(GPUModelRunner):
         if self.use_pp:
             assert self.pp_handler is not None
             old_broadcast_group = self.pp_handler.broadcast_group
-            if torch.distributed.get_backend(old_broadcast_group) == "hccl":
+            if use_host_pp_feedback(vllm_config, device):
+                self.pp_handler = AscendPPHandler(self.pp_handler)
+            elif torch.distributed.get_backend(old_broadcast_group) == "hccl":
                 broadcast_group, _ = torch.distributed.new_subgroups_by_enumeration(
                     get_pp_group().group_ranks,
                     timeout=get_distributed_timeout_or_none(),
@@ -638,6 +641,12 @@ class NPUModelRunner(GPUModelRunner):
     def shutdown(self) -> None:
         from vllm_ascend.distributed.expert_transfer import expert_offload_utils as expert_offload
 
+        feedback_error = None
+        if isinstance(getattr(self, "pp_handler", None), AscendPPHandler):
+            try:
+                self.pp_handler.shutdown()
+            except Exception as exc:
+                feedback_error = exc
         expert_offload.shutdown(self)
 
         model = getattr(self, "model", None)
@@ -694,6 +703,8 @@ class NPUModelRunner(GPUModelRunner):
                     del pending[index]
             if errors:
                 raise EngramSharedReleaseError("; ".join(errors))
+        if feedback_error is not None:
+            raise feedback_error
 
     def _register_sparse_kv_caches(self, kv_caches: dict[str, Any]) -> None:
         """Bind host pools before the V2 KV connector registers its destinations."""

@@ -4,4 +4,6 @@ entries:
     text: >-
       Fixed decode stalls with Model Runner V2 pipeline parallelism when
       HCCL_OP_EXPANSION_MODE=AIV, asynchronous scheduling, and MTP are enabled.
+      Two-stage asynchronous pipelines now exchange sampled tokens and draft
+      feedback over host communication to avoid device-side feedback waits.
       No configuration changes are required.

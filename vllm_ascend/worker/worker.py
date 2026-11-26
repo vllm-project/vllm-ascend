@@ -993,8 +993,9 @@ class NPUWorker(GPUWorker):
                 and self.vllm_config.scheduler_config.async_scheduling
                 and envs_ascend.HCCL_OP_EXPANSION_MODE == "AIV"
             ):
-                pp_handler = self.model_runner.pp_handler
-                assert pp_handler is not None
+                pp_handler = getattr(self.model_runner, "pp_handler", None)
+                if pp_handler is None:
+                    raise RuntimeError("AIV asynchronous pipeline receive requires a PP feedback handler")
                 torch.npu.current_stream(self.device).wait_stream(pp_handler.broadcast_stream)
             if enable_sp(self.vllm_config):
                 all_gather_group = None
@@ -1042,8 +1043,8 @@ class NPUWorker(GPUWorker):
         if (
             self.use_v2_model_runner
             and envs_ascend.HCCL_OP_EXPANSION_MODE == "AIV"
-            and not self.model_runner.is_last_pp_rank
             and self._pp_send_work
+            and not self.model_runner.is_last_pp_rank
         ):
             for handle in self._pp_send_work:
                 handle.wait()

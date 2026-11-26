@@ -69,6 +69,16 @@ def test_send_failure_does_not_submit_feedback(worker_class, monkeypatch):
     assert worker._pp_send_work
 
 
+def test_runner_without_pp_does_not_require_rank_metadata(worker_class, monkeypatch):
+    monkeypatch.setenv("HCCL_OP_EXPANSION_MODE", "AIV")
+    worker = SimpleNamespace(
+        use_v2_model_runner=True,
+        model_runner=SimpleNamespace(sample_tokens=lambda grammar: "encoded"),
+        _pp_send_work=[],
+    )
+    assert worker_class["sample_tokens"](worker, None) == "encoded"
+
+
 @pytest.mark.parametrize("pending", [[], [SimpleNamespace(wait=lambda: None)]])
 def test_sampling_without_pending_sends(worker_class, monkeypatch, pending):
     monkeypatch.setenv("HCCL_OP_EXPANSION_MODE", "AIV")
