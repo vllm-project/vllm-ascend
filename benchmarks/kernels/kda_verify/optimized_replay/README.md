@@ -1,5 +1,7 @@
 # Optimized single-launch ReplaySSM verify
 
+The fused operator lives in [vllm_ascend/ops/tilelang/kda.py](../../../../vllm_ascend/ops/tilelang/kda.py). Import it with `from vllm_ascend.ops.tilelang.kda import WholeKDA`. The benchmark entry points retain their existing call signatures.
+
 The BF16 kernel processes six verification tokens per request from QKV projection through output projection. The CSV includes the unfused path (不融合), cannbotDSL, the published multi-kernel TileLang path, the first single-kernel measurement, and the optimized kernel. Positive savings indicate a latency reduction from the published multi-kernel path. Each optimized point is the median of 11 device tasks. Model weights are packed before timing.
 
 ### Six-token BF16 ReplaySSM comparison

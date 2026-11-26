@@ -1,5 +1,7 @@
 # GLM5Next KDA verify benchmark
 
+The fused operator lives in [vllm_ascend/ops/tilelang/kda.py](../../../vllm_ascend/ops/tilelang/kda.py). Import it with `from vllm_ascend.ops.tilelang.kda import WholeKDA`. The benchmark entry points retain their existing call signatures.
+
 ### Optimized single-launch TileLang QKV-to-O replay
 
 Each request verifies six tokens with ReplaySSM. Every optimized batch from 1 to 50 recorded one device compute task per invocation, with 11 device-time samples per batch on each board. The baseline is the previously published multi-kernel TileLang path.
