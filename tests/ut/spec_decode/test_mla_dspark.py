@@ -11,6 +11,7 @@ import pytest
 import torch
 from vllm.config import AttentionConfig
 from vllm.v1.worker.gpu.dp_utils import DPSyncState
+from vllm.v1.worker.gpu.spec_decode.dspark.config import DSparkSpeculatorConfig
 from vllm.v1.worker.gpu.spec_decode.dspark.speculator import DSparkSpeculator
 
 from vllm_ascend.attention.attention_v1 import AscendAttentionBackend, AscendAttentionState
@@ -151,7 +152,9 @@ def initialize_attention(monkeypatch, draft_backend, target_backend=AscendMLABac
     monkeypatch.setattr(shared, "build_dspark_draft_config", lambda config: config)
     config = SimpleNamespace(
         attention_config=AttentionConfig(),
-        speculative_config=SimpleNamespace(method="dspark", enforce_eager=None, use_dspark=lambda: True),
+        speculative_config=SimpleNamespace(
+            method="dspark", enforce_eager=None, speculator_config=DSparkSpeculatorConfig
+        ),
         parallel_config=SimpleNamespace(decode_context_parallel_size=1),
         cache_config=SimpleNamespace(block_size=128),
     )

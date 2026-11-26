@@ -424,22 +424,16 @@
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.config.model.ModelConfig.verify_with_parallel_config`
 #    Why:
-#       Local Eagle/MTP drafters are loaded on the last PP stage rather than
-#       partitioned across all PP ranks. Upstream `ModelConfig.verify_with_parallel_config`
-#       validates against `pipeline_parallel_size`, which fails for these drafters
-#       since they run locally with effective PP=1.
-#    How：
-#       Monkey-patch `verify_with_parallel_config` to detect Eagle/MTP drafter
-#       models (by `model_type` and `architectures`) when `runner="draft"` and
-#       `pipeline_parallel_size > 1`. For such configs, call the original verify
-#       with a patched `pipeline_parallel_size=1` copy, preserving normal target-model
-#       validation for non-drafter models.
-#    Related PR (if no, explain why):
-#       Backport of local vLLM PP+MTP branch changes.
+#       The draft parallel config already sets PP=1 and disables EP for dense
+#       drafts. Some runtime loaders derive another config from the target,
+#       e.g. AscendMultiModuleMTPSpeculator._create_draft_vllm_config.
+#    How:
+#       Validate a shallow copy when a dense draft inherits EP or a local
+#       Eagle/MTP/DSpark draft inherits PP. Keep all upstream validation.
+#    Related PR:
+#       https://github.com/vllm-project/vllm/pull/56930
 #    Future Plan:
-#       Remove this patch once upstream vLLM's `ModelConfig.verify_with_parallel_config`
-#       supports local drafter models with PP > 1, or moves the PP validation to a
-#       separate hook that can be overridden per-model-type.
+#       Remove when all draft loaders pass their effective parallel config.
 #
 # ** 18. File: platform/patch_speculative_config.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -483,26 +477,6 @@
 #       Remove this normalization once upstream performs multimodal conversion
 #       before DSpark draft selection, or otherwise guarantees that rebuilding
 #       `model_arch_config` preserves the selected draft architecture.
-#
-#   3. `vllm.config.model.ModelConfig.verify_with_parallel_config`
-#    Why:
-#       The pinned vLLM revision propagates `enable_expert_parallel` to the
-#       draft parallel config (upstream #55914) but no longer disables it for
-#       dense drafts (upstream #56930 is not on this revision). Non-MoE draft
-#       models (e.g. Kimi K3 DSpark, VWN eagle3) then fail the
-#       `_verify_with_expert_parallelism` check in
-#       `ModelConfig.verify_with_parallel_config` and cannot start.
-#    How:
-#       Monkey-patch `verify_with_parallel_config` to skip the expert-parallel
-#       check when `runner_type == "draft"` and the model is not MoE. The target
-#       model EP check and MoE draft models are unaffected.
-#    Related PR (if no, explain why):
-#       https://github.com/vllm-project/vllm/pull/55914
-#       https://github.com/vllm-project/vllm/pull/56930
-#    Future Plan:
-#       Remove this patch once the pinned vLLM revision disables expert
-#       parallelism for non-MoE draft models (upstream #56930) or exposes a
-#       backend-safe draft parallel config selection.
 #
 # ** 19. File: platform/patch_structured_output.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -997,11 +971,10 @@
 #    Why:
 #       310P needs its own MTP speculator (`AscendMTPSpeculator310`).
 #    How：
-#       Replace `init_speculator` with a 310P router that returns
-#       `AscendMTPSpeculator310` for plain MTP and delegates to the original
-#       otherwise; rebind the model_runner by-name reference as well.
+#       Override the ordinary MTP entry in the Ascend speculator table.
+#       The shared factory still handles eager mode and checkpoint specializations.
 #    Future Plan:
-#       Remove once the MTP speculator is selected through a device dispatch.
+#       Remove the override when the shared Ascend MTP implementation supports 310P.
 #
 # ** 18. File: worker/patch_bind_kv_cache.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~

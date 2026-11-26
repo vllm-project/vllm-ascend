@@ -16,6 +16,7 @@ from vllm.model_executor.models.qwen3_dflash import (
     DFlashQwen3Model,
 )
 from vllm.model_executor.models.utils import maybe_prefix
+from vllm.v1.worker.gpu.spec_decode.dflash2.config import DFlash2SpeculatorConfig
 
 from vllm_ascend.models.quarot_utils import align_draft_weights
 from vllm_ascend.ops.vocab_parallel_embedding import (
@@ -324,6 +325,8 @@ def _gather_lm_head_candidates(
 
 
 class DFlash2Qwen3ForCausalLM(DFlashQwen3ForCausalLM):
+    speculator_config_class = DFlash2SpeculatorConfig
+
     # vLLM #52816 likewise routes the draft model through this class factory.
     model_cls = DFlash2Qwen3Model
 

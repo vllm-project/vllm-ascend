@@ -14,11 +14,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-"""Backport vLLM PP + MTP config validation.
-
-The local Eagle/MTP drafter is loaded on the last PP stage rather than
-partitioned across all PP ranks. Keep its parallel validation at PP=1.
-"""
+"""Validate local drafters when a loader derives its config from the target."""
 
 from __future__ import annotations
 
@@ -42,11 +38,10 @@ def _patch_model_config_validation() -> None:
 
     mtp_model_types = set(get_args(MTPModelTypes))
 
-    @wraps(original_verify)
-    def _patched_verify_with_parallel_config(self, parallel_config):
-        hf_config = getattr(self, "hf_config", None)
+    def runs_on_last_stage(model_config):
+        hf_config = getattr(model_config, "hf_config", None)
         model_type = getattr(hf_config, "model_type", None)
-        architectures = getattr(self, "architectures", ())
+        architectures = getattr(model_config, "architectures", ())
         is_eagle_drafter = (model_type == "eagle" or model_type == "speculators") and any(
             arch.startswith("Eagle") or arch.endswith("Eagle3") for arch in architectures
         )
@@ -54,11 +49,25 @@ def _patch_model_config_validation() -> None:
         is_dspark_drafter = any(
             arch in {"DSparkDraftModel", "K3DSparkModel", "Qwen3DSparkModel"} for arch in architectures
         )
-        if (
+        return is_eagle_drafter or is_mtp_drafter or is_dspark_drafter
+
+    @wraps(original_verify)
+    def _patched_verify_with_parallel_config(self, parallel_config):
+        single_stage = (
             getattr(self, "runner", None) == "draft"
-            and (is_eagle_drafter or is_mtp_drafter or is_dspark_drafter)
-            and getattr(parallel_config, "pipeline_parallel_size", 1) > 1
-        ):
+            and parallel_config.pipeline_parallel_size > 1
+            and runs_on_last_stage(self)
+        )
+        dense_draft_ep = (
+            getattr(self, "runner_type", None) == "draft" and parallel_config.enable_expert_parallel and not self.is_moe
+        )
+        if not (single_stage or dense_draft_ep):
+            return original_verify(self, parallel_config)
+
+        patched_config = copy.copy(parallel_config)
+        if dense_draft_ep:
+            patched_config.enable_expert_parallel = False
+        if single_stage:
             # Local speculative drafters are loaded on the last PP stage
             # rather than partitioned across all PP stages. Keep normal target
             # validation intact, but validate these draft models as PP=1.
@@ -66,10 +75,8 @@ def _patch_model_config_validation() -> None:
                 "Validating local speculative drafter with pipeline_parallel_size=1 "
                 "because it is loaded locally on the last pipeline stage."
             )
-            patched_config = copy.copy(parallel_config)
             patched_config.pipeline_parallel_size = 1
-            return original_verify(self, patched_config)
-        return original_verify(self, parallel_config)
+        return original_verify(self, patched_config)
 
     _patched_verify_with_parallel_config._vllm_ascend_pp_mtp_patched = True  # type: ignore[attr-defined]
     ModelConfig.verify_with_parallel_config = _patched_verify_with_parallel_config
