@@ -4,6 +4,7 @@
 
 import pytest
 import torch
+from torch.overrides import TorchFunctionMode
 
 from vllm_ascend.lora.torch_ops import expand_slice
 
@@ -55,3 +56,28 @@ def test_fp32_shrink_preserves_precision_and_inactive_rows(dtype, add_inputs):
         torch.testing.assert_close(output, expected)
         if slot < 0:
             torch.testing.assert_close(output, base, rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("add_inputs", [False, True])
+def test_narrow_prefill_workspace_does_not_repeat_b_factors_per_token(add_inputs):
+    class TrackTensorSize(TorchFunctionMode):
+        largest = 0
+
+        def __torch_function__(self, function, types, args=(), kwargs=None):
+            result = function(*args, **(kwargs or {}))
+            if isinstance(result, torch.Tensor):
+                self.largest = max(self.largest, result.numel())
+            return result
+
+    tokens, rank, width = 257, 32, 4
+    inputs = torch.ones(tokens, rank)
+    weights = torch.ones(2, 1, width, rank)
+    output = torch.ones(tokens, 11)
+    indices = torch.zeros(tokens, dtype=torch.long)
+    budget = 2 * max(inputs.numel(), output.numel(), weights.numel())
+    with TrackTensorSize() as workspace:
+        expand_slice(output, inputs, weights, indices, 3, width, add_inputs)
+    assert workspace.largest <= budget
+    torch.testing.assert_close(output[:, 3:7], torch.full((tokens, width), rank + int(add_inputs), dtype=output.dtype))
+    assert torch.equal(output[:, :3], torch.ones_like(output[:, :3]))
+    assert torch.equal(output[:, 7:], torch.ones_like(output[:, 7:]))
