@@ -30,6 +30,7 @@ from vllm_ascend._310p.attention.attention_mask import (
 )
 from vllm_ascend._310p.attention.metadata_builder import (
     AscendAttentionMetadataBuilder310,
+    AscendMetadata310,
     get_query_lens_cpu,
 )
 from vllm_ascend.attention.attention_v1 import (
@@ -41,7 +42,6 @@ from vllm_ascend.attention.attention_v1 import (
 )
 
 MASK_TYPE_NORM_COMPRESS_SELF_ATTENTION = 3
-MASK_TYPE_NORM_COMPRESS_PAGED_ATTENTION = 5
 
 
 @register_backend(AttentionBackendEnum.CUSTOM, "ASCEND")
@@ -246,7 +246,7 @@ class AscendAttentionBackendImpl310(AscendAttentionBackendImpl):
         mask = attn_metadata.attn_mask
         return self._flash_attention(query, key, value, mask, seq_len, output)
 
-    def forward_chunked_prefill_310(self, query, attn_metadata, output):
+    def forward_chunked_prefill_310(self, query, attn_metadata: AscendMetadata310, output):
         """
         Executes SplitFuse (Chunked Prefill) attention on 310P.
 
@@ -260,15 +260,16 @@ class AscendAttentionBackendImpl310(AscendAttentionBackendImpl):
             output: The output tensor.
         """
         num_actual_tokens = int(attn_metadata.num_actual_tokens)
+        if num_actual_tokens == 0:
+            return output
         query = query[:num_actual_tokens]
         output_slice = output[:num_actual_tokens]
+        capturing = query.device.type == "npu" and torch.npu.is_current_stream_capturing()
 
         # Host qLens filled in AscendAttentionMetadataBuilder310.build(); eager fallback only.
         qlens = get_query_lens_cpu(attn_metadata)
         if qlens is None:
-            from vllm_ascend.ascend_forward_context import _EXTRA_CTX
-
-            if _EXTRA_CTX.capturing:
+            if capturing:
                 raise RuntimeError(
                     "310P splitfuse requires attn_metadata.query_lens_cpu during graph capture; "
                     "ensure AscendAttentionMetadataBuilder310.build() ran before forward."
@@ -279,39 +280,32 @@ class AscendAttentionBackendImpl310(AscendAttentionBackendImpl):
         block_table = attn_metadata.block_tables
 
         if attn_metadata.seq_lens.device != query.device:
-            if torch.npu.is_current_stream_capturing():
+            if capturing:
                 raise RuntimeError("310P splitfuse: seq_lens must already be on-device before ACLGraph capture.")
             attn_metadata.seq_lens = attn_metadata.seq_lens.to(
                 device=query.device,
                 non_blocking=True,
             )
 
-        if self.support_compressed_mask:
-            # splitfuse_v2 requires fixed ND [2048, 2048]; parent build() may set FRACTAL_NZ mask.
-            mask = AttentionMaskBuilder310.get_compressed_splitfuse_mask(query.device)
-            torch_npu._npu_paged_attention_splitfuse_v2(
-                query=query,
-                key_cache=self.key_cache,
-                value_cache=self.value_cache,
-                mask=mask,
-                block_table=block_table,
-                seq_len=qlens,
-                context_lens=attn_metadata.seq_lens,
-                num_kv_heads=self.num_kv_heads,
-                num_heads=self.num_heads,
-                scale_value=self.scale,
-                mask_type=MASK_TYPE_NORM_COMPRESS_PAGED_ATTENTION,
-                out=output_slice,
+        # Compressed SplitFuse can admit future tokens on 310P (issue #21902).
+        # Build one explicit mask per batch and share it across attention layers.
+        if attn_metadata.splitfuse_mask is None:
+            max_context_len = attn_metadata.splitfuse_max_context_len
+            if capturing or max_context_len is None:
+                # Replay can use more KV blocks than the batch used to capture the graph.
+                max_context_len = block_table.size(1) * self.key_cache.size(-2)
+            attn_metadata.splitfuse_mask = AttentionMaskBuilder310.get_splitfuse_mask(
+                attn_metadata.query_start_loc,
+                attn_metadata.seq_lens,
+                query.size(0),
+                max_context_len,
+                capturing=capturing,
             )
-            return output
-
-        # Generate the specific mask for splitfuse
-        mask = AttentionMaskBuilder310.get_splitfuse_mask(attn_metadata, query.device)
         torch_npu._npu_paged_attention_splitfuse(
             query=query,
             key_cache=self.key_cache,
             value_cache=self.value_cache,
-            mask=mask,
+            mask=attn_metadata.splitfuse_mask,
             block_table=block_table,
             seq_len=qlens,
             context_lens=attn_metadata.seq_lens,
