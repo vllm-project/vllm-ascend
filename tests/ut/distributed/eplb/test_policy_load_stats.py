@@ -33,14 +33,8 @@ def _step_state(monkeypatch, **overrides):
     state = AscendEplbState.__new__(AscendEplbState)
     state._hixl_session = None
     state._close_error = None
-    state.device = torch.device("cpu")
     state.policy = _custom_policy()
-    state.model_states = {
-        "model": _model_state(
-            expert_load_window=torch.tensor([[[5]], [[9]]], dtype=torch.int32),
-            _window_row_sums=torch.zeros(2, dtype=torch.int64),
-        )
-    }
+    state.model_states = {"model": _model_state()}
     state.expert_load_window_size = 2
     state.expert_load_window_step = 0
     state._slot_active = torch.zeros(2, dtype=torch.int32)
@@ -76,9 +70,6 @@ def test_step_books_every_sampling_slot_and_writes_it(monkeypatch):
     torch.testing.assert_close(state._slot_out_of_phase, torch.tensor([0, 0], dtype=torch.int32))
     torch.testing.assert_close(state._physical_load_sample_slots, torch.tensor([0, 1]))
     assert state._num_recorded_load_steps == 2
-    # Each slot tracks the row sum of the window row it points at, so
-    # rearrangement never gathers the whole window on the device.
-    torch.testing.assert_close(state.model_states["model"]._window_row_sums, torch.tensor([5, 9], dtype=torch.int64))
 
 
 def test_step_passes_non_sampling_steps_through(monkeypatch):
@@ -115,7 +106,6 @@ def test_mapping_change_discards_old_samples():
     model_state = _model_state(
         _load_mapping_generation=2,
         _observed_load_mapping_generation=1,
-        _window_row_sums=torch.ones(3, dtype=torch.int64),
     )
     state.model_states = {"model": model_state}
     state._slot_active = torch.ones(3, dtype=torch.int32)
@@ -132,14 +122,12 @@ def test_mapping_change_discards_old_samples():
     assert not state._slot_out_of_phase.any()
     assert bool((state._physical_load_sample_slots == -1).all())
     assert bool((state._slot_gathered == -1).all())
-    assert not model_state._window_row_sums.any()
     assert state._num_recorded_load_steps == 0
     assert model_state._observed_load_mapping_generation == 2
 
 
 def test_initialize_load_stats_adds_empty_commit_anchors():
     state = AscendEplbState.__new__(AscendEplbState)
-    state.device = torch.device("cpu")
     state.expert_load_window_size = 3
     state.policy = _custom_policy()
     model_state = _model_state(model=SimpleNamespace(num_moe_layers=2))
@@ -149,10 +137,6 @@ def test_initialize_load_stats_adds_empty_commit_anchors():
     np.testing.assert_array_equal(
         np.isnan(model_state._last_committed_mean_ratios),
         [True, True],
-    )
-    torch.testing.assert_close(
-        model_state._window_row_sums,
-        torch.zeros(3, dtype=torch.int64),
     )
 
 
@@ -176,7 +160,6 @@ def test_collect_global_load_stats_maps_physical_to_logical(monkeypatch):
         model=SimpleNamespace(num_logical_experts=2),
         physical_to_logical_map=torch.tensor([[1, 0, 1]]),
         expert_load_window=torch.tensor([[[2, 3, 5]], [[7, 11, 13]], [[17, 19, 23]]]),
-        _window_row_sums=torch.tensor([12, 0, 59], dtype=torch.int64),
     )
     state = AscendEplbState.__new__(AscendEplbState)
     state.device = torch.device("cpu")

@@ -167,7 +167,6 @@ def _model_state(window):
         _load_mapping_generation=0,
         _observed_load_mapping_generation=0,
         expert_load_window=window,
-        _window_row_sums=window.sum(dim=(1, 2), dtype=torch.int64),
         expert_load_pass=torch.zeros_like(window[0]),
         rebalanced=False,
     )
