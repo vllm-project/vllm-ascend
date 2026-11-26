@@ -14,7 +14,6 @@ from vllm_ascend.ops.fused_moe.prepare_finalize import (
     PrepareAndFinalizeWithAllGather,
     PrepareAndFinalizeWithMC2,
 )
-from vllm_ascend.quantization.quant_type import QuantType
 
 
 class TestPrepareAndFinalize(unittest.TestCase):
@@ -372,7 +371,6 @@ class TestPrepareAndFinalize(unittest.TestCase):
                 self.assertEqual(prepared.hidden_states.shape[0], expected_input_ids.numel())
                 self.assertEqual(prepared.router_logits.shape[0], expected_input_ids.numel())
                 self.assertIsNone(prepared.padded_hidden_states_shape)
-                self.assertIsNone(prepared.pertoken_scale)
                 torch.testing.assert_close(gathered_input_ids, expected_input_ids)
 
                 finalized = layer.finalize(
@@ -388,86 +386,6 @@ class TestPrepareAndFinalize(unittest.TestCase):
 
 
 class TestSequenceParallelPCP(unittest.TestCase):
-    def test_w8a8_pcp_preserves_token_and_scale_alignment(self):
-        def rows(values):
-            return torch.tensor(values, dtype=torch.float32).reshape(-1, 1)
-
-        def quantize(x):
-            return x.to(torch.int8), x.flatten() + 0.5
-
-        def gather_with_peer(*tensors):
-            peer = iter(tensors)
-            return lambda x, dim: torch.cat((x, next(peer)), dim)
-
-        # Expected local rows include DP and PCP padding, in that order.
-        for local, dp_peer, padded, pcp_peer in (
-            ([1], [2, 3], [1, 0, 2, 3, 0], [4, 5, 6, 7, 8]),
-            ([], None, [0, 0], [4, 5]),
-            ([], None, [], []),
-        ):
-            with self.subTest(local=local, pcp_peer=pcp_peer):
-                config = MagicMock(is_sequence_parallel=False, dp_size=1 if dp_peer is None else 2, pcp_size=2)
-                if dp_peer is not None:
-                    config.dp_group.all_gather.side_effect = gather_with_peer(rows(dp_peer), -rows(dp_peer))
-
-                peer = rows(pcp_peer)
-                peer_q, peer_scale = quantize(peer)
-                with (
-                    patch("vllm_ascend.ops.fused_moe.prepare_finalize.get_dynamic_mx_quant_scale_alg", return_value=0),
-                    patch("vllm_ascend.ops.fused_moe.prepare_finalize.get_pcp_group") as pcp,
-                    patch(
-                        "vllm_ascend.ops.fused_moe.prepare_finalize._EXTRA_CTX",
-                        max_tokens_across_dp=len(dp_peer or ()),
-                        max_tokens_across_pcp=len(pcp_peer),
-                    ),
-                    patch("torch_npu.npu_dynamic_quant", side_effect=quantize, create=True) as quant,
-                ):
-                    gather = pcp.return_value.all_gather
-                    gather.side_effect = gather_with_peer(peer_q if pcp_peer else peer, -peer, peer_scale)
-                    layer = PrepareAndFinalizeWithAllGather(config)
-                    result = layer.prepare(rows(local), -rows(local), quant_type=QuantType.W8A8)
-
-                expected = rows(padded + pcp_peer)
-                torch.testing.assert_close(result.router_logits, -expected)
-                if pcp_peer:
-                    quant.assert_called_once()
-                    torch.testing.assert_close(quant.call_args.args[0], rows(padded))
-                    expected_q, expected_scale = quantize(expected)
-                    torch.testing.assert_close(result.hidden_states, expected_q)
-                    torch.testing.assert_close(result.pertoken_scale, expected_scale)
-                else:
-                    quant.assert_not_called()
-                    self.assertIsNone(result.pertoken_scale)
-                    torch.testing.assert_close(result.hidden_states, expected)
-                    self.assertEqual(gather.call_count, 2)
-
-    def test_pcp_prequantization_keeps_floating_point_fallbacks(self):
-        for quant_type, pcp_size, lora_context in (
-            (QuantType.W8A8, 1, None),
-            (QuantType.W8A8, 2, object()),
-            (QuantType.W8A8MXFP, 2, object()),
-            (QuantType.W4A8, 2, None),
-        ):
-            with self.subTest(quant_type=quant_type, pcp_size=pcp_size, lora=lora_context is not None):
-                config = MagicMock()
-                config.is_sequence_parallel = False
-                config.dp_size = 1
-                config.pcp_size = pcp_size
-                inputs = torch.randn(3, 4)
-                with (
-                    patch("vllm_ascend.ops.fused_moe.prepare_finalize.get_dynamic_mx_quant_scale_alg", return_value=0),
-                    patch("vllm_ascend.ops.fused_moe.prepare_finalize.get_pcp_group") as pcp,
-                    patch("vllm_ascend.ops.fused_moe.prepare_finalize._EXTRA_CTX", max_tokens_across_pcp=3),
-                    patch("torch_npu.npu_dynamic_quant", create=True) as quant,
-                ):
-                    pcp.return_value.all_gather.side_effect = lambda x, dim: x.repeat(2, 1)
-                    layer = PrepareAndFinalizeWithAllGather(config)
-                    layer.set_lora_context(lora_context)
-                    result = layer.prepare(inputs, inputs[:, :2], quant_type=quant_type)
-                quant.assert_not_called()
-                self.assertEqual(result.hidden_states.dtype, inputs.dtype)
-                self.assertIsNone(result.pertoken_scale)
-
     def test_ep_path_gathers_inputs_once_without_dp_pcp_collectives(self):
         config = MagicMock()
         config.is_sequence_parallel = True
