@@ -42,6 +42,9 @@ class AscendGQADraftSlidingWindowSpec(SlidingWindowSpec):
     """Sliding-window GQA cache owned by the Kimi K3.1 DSpark draft."""
 
     is_draft: bool = field(default=True, init=False)
+    # The paired planner checks the target indexer layout before granting
+    # this capability. Worker projection retains it for local pool sizing.
+    can_overlay_indexer: bool = field(default=False, compare=False)
 
     def max_num_blocks_per_req(self, vllm_config: VllmConfig, max_len: int) -> int:
         return cdiv(max_len, self.block_size)

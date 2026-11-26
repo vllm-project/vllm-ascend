@@ -80,6 +80,7 @@ def make_config():
             max_model_len=131072,
         ),
         scheduler_config=SimpleNamespace(disable_hybrid_kv_cache_manager=False),
+        kv_transfer_config=None,
         cache_config=SimpleNamespace(
             num_gpu_blocks_override=None, prefix_cache_retention_interval=None, mamba_cache_mode="align"
         ),
@@ -150,6 +151,8 @@ def test_gqa_dspark_engine_cache_admission_and_scheduler_alignment(dcp_size, tar
     register_all_kvcache_specs(None)
     register_ascend_kv_cache_specs()
     config = make_config()
+    config.model_config.dtype = torch.bfloat16
+    config.cache_config.cache_dtype = "auto"
     config.model_config.original_max_model_len = config.model_config.max_model_len
     config.parallel_config = SimpleNamespace(
         decode_context_parallel_size=dcp_size, cp_kv_cache_interleave_size=target_block_size
@@ -178,6 +181,11 @@ def test_gqa_dspark_engine_cache_admission_and_scheduler_alignment(dcp_size, tar
     plans = get_kv_cache_configs(config, [specs] * 8, [usable_memory + pool_bytes] * 8)
     assert len(plans) == 8
     assert plans[0].num_blocks == usable_memory // pool_bytes + 1
+    indexer, full_draft, sliding_draft = plans[0].kv_cache_tensors[-3:]
+    if swa_block_size == target_block_size:
+        assert sliding_draft.offset == indexer.offset
+    else:
+        assert sliding_draft.offset == full_draft.offset + full_draft.layer_stride
     scheduler = generate_scheduler_kv_cache_config(plans)
     config.cache_config.block_size = min(group.kv_cache_spec.block_size for group in scheduler.kv_cache_groups)
     assert config.cache_config.block_size == swa_block_size
@@ -208,11 +216,11 @@ def test_gqa_dspark_engine_cache_admission_and_scheduler_alignment(dcp_size, tar
     ("dcp_size", "target_block_size", "override", "expected_ids", "ids_per_request"),
     [
         (8, 768, 128, 860, 118),
-        (8, 768, None, 809, 52),
+        (8, 768, None, 870, 52),
         (8, 896, 128, 738, 115),
-        (8, 896, None, 693, 47),
+        (8, 896, None, 746, 47),
         (1, 768, 128, 733, 459),
-        (1, 768, None, 689, 233),
+        (1, 768, None, 742, 233),
     ],
 )
 def test_bf16_dspark_capacity_at_logged_budget(dcp_size, target_block_size, override, expected_ids, ids_per_request):
@@ -238,6 +246,80 @@ def test_bf16_dspark_capacity_at_logged_budget(dcp_size, target_block_size, over
     plan = paired_sfa_cache_config(config, groups, 22_600_744_960 if dcp_size == 8 else 19_263_193_088)
     assert plan.num_blocks == expected_ids
     assert get_max_concurrency_for_kv_cache_config(config, plan) == pytest.approx(expected_ids / ids_per_request)
+
+
+@pytest.mark.parametrize("local_sparse_layers", [0, 1, 3, 4])
+def test_bf16_draft_slot_assignment_after_worker_projection(local_sparse_layers):
+    config = make_config()
+    config.model_config.dtype = torch.bfloat16
+    config.cache_config.cache_dtype = "auto"
+    specs = make_bf16_specs(768)
+    native = dict(block_size=768, num_kv_heads=2, head_size=64, dtype=torch.bfloat16)
+    swa = AscendGQADraftSlidingWindowSpec(**native, sliding_window=2048)
+    # The two windows have independent allocator groups. Within the first
+    # group both layers must retain their history for the same manager IDs.
+    names = [f"draft.layers.{i}.attn" for i in (0, 1, 2, 3)]
+    drafts = dict(zip(names, (swa, swa, replace(swa, sliding_window=1024), AscendGQADraftFullAttentionSpec(**native))))
+    groups = paired_sfa_cache_groups(config, {**specs, **dict(reversed(drafts.items()))})
+    local_names = set(groups[0].layer_names[: 2 * local_sparse_layers]) | drafts.keys()
+    project = patch_kv_cache_utils.vllm.v1.core.kv_cache_utils._project_kv_cache_groups_to_worker
+    local = project(groups, {name: spec for name, spec in (specs | drafts).items() if name in local_names})
+    pool_bytes = paired_sfa_pool_bytes(local)
+    plan = paired_sfa_cache_config(config, local, pool_bytes * 5)
+    indexer = plan.kv_cache_tensors[-5]
+    assert len(indexer.layers) == local_sparse_layers
+    assert plan.num_blocks == 5
+    by_name = {tensor.layers[0]: tensor for tensor in plan.kv_cache_tensors[-4:]}
+    # Exhausting the complete pairs on a stage spills the remaining layer to
+    # private storage. A new SWA group can use the same pairs on different IDs.
+    next_private = indexer.offset + len(indexer.layers) * indexer.layer_stride
+    for name, first_slot in zip(names, (0, 2, 0, None)):
+        tensor = by_name[name]
+        assert tensor.layer_stride == swa.page_size_bytes * plan.num_blocks
+        if first_slot is not None and first_slot + 2 <= len(indexer.layers):
+            assert tensor.offset == indexer.offset + first_slot * indexer.layer_stride
+        else:
+            assert tensor.offset == next_private
+            next_private += tensor.layer_stride
+    assert next_private == pool_bytes * plan.num_blocks
+    assert {tensor.size for tensor in plan.kv_cache_tensors} == {next_private}
+
+
+@pytest.mark.parametrize(
+    "case", ["foreign_model", "legacy_transfer", "int8_target", "replicated_index", "unequal_kv", "padded_draft"]
+)
+def test_bf16_draft_uses_private_storage_for_other_layouts(case):
+    config = make_config()
+    config.model_config.dtype = torch.bfloat16
+    config.cache_config.cache_dtype = "auto"
+    target = make_bf16_specs(768)
+    draft = AscendGQADraftSlidingWindowSpec(
+        block_size=768, num_kv_heads=2, head_size=64, dtype=torch.bfloat16, sliding_window=2048
+    )
+    if case == "foreign_model":
+        config.model_config.hf_config.model_type = "kimi_k3"
+    elif case == "legacy_transfer":
+        config.kv_transfer_config = SimpleNamespace(kv_connector="MooncakeConnector")
+    elif case == "int8_target":
+        target = make_specs(1536)
+        draft = replace(draft, block_size=1536)
+    elif case == "replicated_index":
+        # Match the total bytes but store two 64-channel replicas per manager ID.
+        target = {
+            name: replace(spec, head_size=64, sfa_dcp_replicated_indexer_size=2)
+            if isinstance(spec, AscendSFAIndexerCacheSpec)
+            else spec
+            for name, spec in target.items()
+        }
+    elif case == "unequal_kv":
+        draft = replace(draft, head_size=32, head_size_v=96)
+    elif case == "padded_draft":
+        draft = replace(draft, head_size=32, head_size_v=32, page_size_padded=draft.page_size_bytes)
+    old_bytes = paired_sfa_pool_bytes(paired_sfa_cache_groups(config, target))
+    groups = paired_sfa_cache_groups(config, {**target, "draft.layers.0.attn": draft})
+    assert paired_sfa_pool_bytes(groups) == old_bytes + draft.page_size_bytes
+    plan = paired_sfa_cache_config(config, groups, 7 * (old_bytes + draft.page_size_bytes))
+    assert plan.kv_cache_tensors[-1].offset == 7 * old_bytes
 
 
 def test_token_blocks_unchanged_and_components_share_ids():

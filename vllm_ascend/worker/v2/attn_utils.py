@@ -1690,9 +1690,8 @@ def _reshape_kv_cache_v2(
             kv_cache_spec = layer_kv_cache_spec[layer_name]
 
             if isinstance(kv_cache_spec, (AscendGQADraftFullAttentionSpec, AscendGQADraftSlidingWindowSpec)):
-                # The paired plan reserves a private range for each draft layer.
-                # Keep K and V contiguous within that range for GQA cache writes,
-                # FIA reads and Mooncake's separate K/V transfer descriptors.
+                # The paired plan gives this layer consecutive K and V planes,
+                # including when they overlay two target indexer slots.
                 raw_cache = kv_cache_raw_tensors[layer_name]
                 num_kernel_blocks, remainder = divmod(kv_cache_spec.block_size, kernel_block_size)
                 if remainder or not isinstance(raw_cache, torch.Tensor):

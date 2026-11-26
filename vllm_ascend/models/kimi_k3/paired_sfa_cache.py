@@ -6,11 +6,12 @@ Each full-history block owns both components. Recurrent groups use disjoint
 IDs from the same pool and may alias main-page physical slots. Token ownership
 never depends on the relative byte sizes of the two attention components.
 MLA DSpark shares full-history block IDs. GQA DSpark has its own groups.
-Both use separate regions in the backing.
+Matching BF16 sliding-window draft K/V planes reuse adjacent indexer slots.
 """
 
 from dataclasses import replace
 
+import torch
 from vllm.config import VllmConfig
 from vllm.logger import logger
 from vllm.model_executor.models.utils import extract_layer_index
@@ -18,6 +19,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
     KVCacheGroupSpec,
     KVCacheTensor,
+    KVQuantMode,
     MambaSpec,
     UniformTypeKVCacheSpecs,
 )
@@ -27,6 +29,8 @@ from vllm_ascend.core.kv_cache_interface import (
     AscendGQADraftSlidingWindowSpec,
     AscendMLAAttentionSpec,
     AscendSFAIndexerCacheSpec,
+    supports_component_major_mla_pd,
+    uses_kimi_k31_bf16_cache,
 )
 from vllm_ascend.models.kimi_k3.cache_config import make_kimi_cache_groups
 from vllm_ascend.utils import vllm_version_is
@@ -38,16 +42,69 @@ else:
     from vllm.v1.core.kv_cache_planning import may_override_num_blocks
 
 
-def _draft_layer_specs(groups):
-    """Return local draft specs; empty PP-local groups allocate no tensors."""
-    result = {}
+def _draft_layout(groups, num_indexer_slots, indexer_page):
+    """Offsets in the indexer/draft region, in bytes per manager block ID."""
+    region_size = num_indexer_slots * indexer_page
+    layers = []
     for group in groups:
         group_spec = group.kv_cache_spec
+        # All layers within this group hold the same IDs and need distinct
+        # planes. Other groups acquire disjoint IDs from the same BlockPool.
+        next_slot = 0
         for name in group.layer_names:
             spec = group_spec.kv_cache_specs[name] if isinstance(group_spec, UniformTypeKVCacheSpecs) else group_spec
-            if getattr(spec, "is_draft", False):
-                result[name] = spec
-    return result
+            if not getattr(spec, "is_draft", False):
+                continue
+            if (
+                isinstance(group_spec, AscendGQADraftSlidingWindowSpec)
+                and group_spec.can_overlay_indexer
+                and next_slot + 2 <= num_indexer_slots
+            ):
+                offset = next_slot * indexer_page
+                next_slot += 2
+            else:
+                offset = region_size
+                region_size += spec.page_size_bytes
+            layers.append((name, spec.page_size_bytes, offset))
+    return layers, region_size
+
+
+def _can_overlay_indexer(spec, target):
+    """Both interpretations of each slot must address exactly the same bytes per ID."""
+    plane_bytes = spec.block_size * spec.num_kv_heads * spec.head_size * torch.bfloat16.itemsize
+    if (
+        spec.dtype != torch.bfloat16
+        or spec.kv_quant_mode != KVQuantMode.NONE
+        or spec.head_size != spec.head_size_v
+        or spec.tokens_per_state != 1
+        or spec.block_size % 128
+        or spec.page_size_bytes != 2 * plane_bytes
+        or spec.real_page_size_bytes != spec.page_size_bytes
+    ):
+        return False
+    for component in target.values():
+        if not isinstance(component, (AscendMLAAttentionSpec, AscendSFAIndexerCacheSpec)):
+            continue
+        if (
+            component.dtype != torch.bfloat16
+            or component.block_size != spec.block_size
+            or component.kv_quant_mode != KVQuantMode.NONE
+            or component.tokens_per_state != 1
+            or component.scale_dim
+        ):
+            return False
+        if isinstance(component, AscendMLAAttentionSpec):
+            if component.uses_packed_sfa_main_cache or component.static_fp8_pa_nz:
+                return False
+        elif (
+            component.cache_sparse_li_c4
+            or component.cache_sparse_li_c8
+            or component.sfa_dcp_replicated_indexer_size != 1
+            or component.page_size_padded not in (None, plane_bytes)
+            or component.page_size_bytes != plane_bytes
+        ):
+            return False
+    return True
 
 
 def _validate_paired_sfa_pages(specs) -> None:
@@ -88,7 +145,10 @@ def paired_sfa_cache_groups(config, specs):
         by_spec = {}
         for name, spec in sorted(gqa.items(), key=lambda item: (extract_layer_index(item[0]), item[0])):
             by_spec.setdefault(spec, []).append(name)
+        use_indexer_slots = uses_kimi_k31_bf16_cache(config) and supports_component_major_mla_pd(config)
         for spec, names in by_spec.items():
+            if isinstance(spec, AscendGQADraftSlidingWindowSpec):
+                spec = replace(spec, can_overlay_indexer=use_indexer_slots and _can_overlay_indexer(spec, target))
             logger.info_once(
                 "K3.1 DSpark GQA KV group %d: %d %s layers, block=%d, window=%s, dtype=%s, bytes/page/layer=%d",
                 len(groups),
@@ -188,9 +248,8 @@ def _layout(groups):
 
 def paired_sfa_pool_bytes(groups):
     _, _, indexer, _, main_page, indexer_page, slots = _layout(groups)
-    # Every pool ID still reserves independent target/indexer/draft storage.
-    draft_bytes = sum(spec.page_size_bytes for spec in _draft_layer_specs(groups).values())
-    return slots * main_page + len(indexer) * indexer_page + draft_bytes
+    _, region_size = _draft_layout(groups, len(indexer), indexer_page)
+    return slots * main_page + region_size
 
 
 def paired_sfa_cache_config(
@@ -201,12 +260,13 @@ def paired_sfa_cache_config(
     _, main_mla_names, indexer_names, kda_groups, main_page_size, indexer_page_size, num_main_slots = _layout(
         kv_cache_groups
     )
-    pool_bytes = paired_sfa_pool_bytes(kv_cache_groups)
+    draft_layers, region_size = _draft_layout(kv_cache_groups, len(indexer_names), indexer_page_size)
+    pool_bytes = num_main_slots * main_page_size + region_size
     num_blocks = may_override_num_blocks(vllm_config, available_memory // pool_bytes)
     backing_size = pool_bytes * num_blocks
     main_layer_size = main_page_size * num_blocks
     # Recurrent groups overlay the target MLA region. Their block IDs are
-    # disjoint, while indexer and draft layers always own separate regions.
+    # disjoint. The indexer/draft region follows these main-page slots.
     tensors = [
         KVCacheTensor(
             size=backing_size,
@@ -237,19 +297,16 @@ def paired_sfa_cache_config(
             block_stride=indexer_page_size,
         )
     )
-    offset += len(indexer_names) * indexer_layer_size
-    for name, spec in _draft_layer_specs(kv_cache_groups).items():
-        draft_layer_size = spec.page_size_bytes * num_blocks
+    for name, page_bytes, draft_offset in draft_layers:
         tensors.append(
             KVCacheTensor(
                 size=backing_size,
                 layers=[name],
-                offset=offset,
-                layer_stride=draft_layer_size,
-                block_stride=spec.page_size_bytes,
+                offset=offset + draft_offset * num_blocks,
+                layer_stride=page_bytes * num_blocks,
+                block_stride=page_bytes,
             )
         )
-        offset += draft_layer_size
     return KVCacheConfig(
         num_blocks=num_blocks,
         kv_cache_tensors=tensors,

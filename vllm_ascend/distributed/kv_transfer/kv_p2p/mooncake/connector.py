@@ -31,7 +31,9 @@ from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
     PromMetricT,
 )
 from vllm.logger import logger
+from vllm.utils.math_utils import cdiv
 from vllm.v1.core.sched.output import SchedulerOutput
+from vllm.v1.core.single_type_kv_cache_manager import MambaManager
 from vllm.v1.outputs import KVConnectorOutput
 
 from vllm_ascend.core.kv_cache_interface import uses_kimi_k31_gqa_draft
@@ -257,6 +259,63 @@ class MooncakePullConnector(MooncakeBaseConnector):
             self.connector_worker = MooncakePullConnectorWorker(vllm_config, str(self.engine_id), kv_cache_config)
         else:
             raise ValueError(f"Unsupported KVConnectorRole: {role}")
+
+    def request_finished_all_groups(
+        self, request: "Request", block_ids: tuple[list[int], ...]
+    ) -> tuple[bool, dict[str, Any] | None]:
+        delay_free, params = super().request_finished_all_groups(request, block_ids)
+        if delay_free and params is not None:
+            self._free_prefill_mamba_scratch(request, params["remote_block_ids"])
+        return delay_free, params
+
+    def _free_prefill_mamba_scratch(self, request: "Request", transfer_ids: tuple[list[int], ...]) -> None:
+        config = self._vllm_config
+        # The cache builder attaches the top-level connector config. A child
+        # of MultiConnector cannot account for another child's async readers.
+        transfer = getattr(self.kv_cache_config, "kv_transfer_config", None)
+        if (
+            transfer is None
+            or transfer.kv_role != "kv_producer"
+            or transfer.kv_connector not in ("MooncakeConnectorV2", "MooncakePullConnector")
+            or not uses_kimi_k31_bf16_cache(config)
+            or not uses_kimi_k31_gqa_draft(config)
+            or not config.use_v2_model_runner
+            or config.parallel_config.pipeline_parallel_size != 1
+            or config.parallel_config.prefill_context_parallel_size != 1
+            or config.cache_config.use_kda_recoverssm
+            or request.max_tokens != 1
+            or request.num_output_tokens != 1
+            or request.num_computed_tokens != request.num_prompt_tokens
+            or request.num_in_flight_tokens
+            or self._kv_cache_manager is None
+        ):
+            return
+        # A single prefill sample gives align postprocess a zero acceptance
+        # bias, so even if it trails AsyncOutput it never reads a scratch
+        # column. The Qwen3 drafter only touches its own attention groups.
+        managers = self._kv_cache_manager.coordinator.single_type_managers
+        published = {block_id for group in transfer_ids for block_id in group}
+        for manager, group_ids in zip(managers, transfer_ids, strict=True):
+            if not isinstance(manager, MambaManager) or manager.mamba_cache_mode != "align":
+                continue
+            state_end = cdiv(request.num_prompt_tokens, manager.block_size)
+            blocks = manager.req_to_blocks.get(request.request_id)
+            if (
+                not manager.num_speculative_blocks
+                or not state_end
+                or blocks is None
+                or len(blocks) != state_end + manager.num_speculative_blocks
+                or group_ids != [blocks[state_end - 1].block_id]
+            ):
+                continue
+            scratch = blocks[state_end:]
+            if all(
+                block.block_id not in published and manager.block_pool.is_block_writable(block) for block in scratch
+            ):
+                # Detach first. The normal ACK/timeout can safely free the
+                # retained prefix even after another request reuses these IDs.
+                del blocks[state_end:]
+                manager.block_pool.free_blocks(reversed(scratch))
 
 
 class MooncakePushConnector(MooncakeBaseConnector):

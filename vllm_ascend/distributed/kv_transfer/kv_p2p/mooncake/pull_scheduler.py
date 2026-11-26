@@ -755,20 +755,22 @@ class MooncakePullConnectorScheduler(MooncakeBaseConnectorScheduler):
         computed_block_ids = self._get_transfer_block_ids(block_ids, prompt_len)
         num_computed_blocks = sum(len(group_block_ids) for group_block_ids in computed_block_ids)
         delay_free_blocks = num_computed_blocks > 0
-        if delay_free_blocks:
+        # Keep the original lease on re-publication, including the interval
+        # after DONE arrives and before the scheduler drains that completion.
+        if delay_free_blocks and request.request_id not in self._reqs_need_send:
             logger.info(
                 "Delaying free of %d blocks for request %s",
                 num_computed_blocks,
                 request.request_id,
             )
             delay_start_time = time.time()
-            self._reqs_need_send[request.request_id] = delay_start_time
             if self._sending_thread is None:
                 raise RuntimeError("Mooncake scheduler metadata has not been initialized")
             self._sending_thread.add_delayed_request(
                 request.request_id,
                 delay_start_time,
             )
+            self._reqs_need_send[request.request_id] = delay_start_time
 
         return delay_free_blocks, {
             "do_remote_prefill": True,

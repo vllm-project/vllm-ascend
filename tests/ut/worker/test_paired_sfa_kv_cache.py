@@ -1,7 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import ctypes
 from dataclasses import replace
+from threading import Event
 from types import SimpleNamespace
 from unittest.mock import Mock
 
@@ -9,6 +11,8 @@ import pytest
 import torch
 from vllm.model_executor.models.utils import extract_layer_index
 from vllm.utils.torch_utils import get_dtype_size
+from vllm.v1.core.block_pool import BlockPool
+from vllm.v1.core.kv_cache_utils import KVCacheBlockCopy
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheConfig,
@@ -23,6 +27,8 @@ from vllm.v1.kv_cache_interface import (
 from vllm.v1.worker.utils import AttentionGroup
 
 from vllm_ascend.attention.attention_v1 import AscendAttentionBackend
+from vllm_ascend.attention.indexer import AscendSFAIndexerBackend
+from vllm_ascend.attention.sfa_v1 import AscendSFABackend
 from vllm_ascend.core.kv_cache_interface import (
     AscendGQADraftFullAttentionSpec,
     AscendGQADraftSlidingWindowSpec,
@@ -30,7 +36,9 @@ from vllm_ascend.core.kv_cache_interface import (
     AscendSFAIndexerCacheSpec,
 )
 from vllm_ascend.models.kimi_k3.paired_sfa_cache import paired_sfa_cache_config, paired_sfa_cache_groups
+from vllm_ascend.worker.utils import copy_kv_cache_blocks_inplace
 from vllm_ascend.worker.v2 import attn_utils
+from vllm_ascend.worker.v2.utils import AscendV2KVBlockZeroer
 
 NUM_BLOCKS = 4
 BLOCK_SIZE = 128
@@ -443,3 +451,212 @@ def test_generic_sfa_mixed_group_keeps_private_caches(monkeypatch, vllm_config, 
                 assert all(torch.count_nonzero(part) == 0 for part in other_parts)
         for part in parts:
             part.zero_()
+
+
+def make_bf16_swa_cache(config, monkeypatch, page, *, private=False):
+    config.model_config.dtype = torch.bfloat16
+    config.cache_config.cache_dtype = "auto"
+    config.kv_transfer_config = SimpleNamespace(kv_connector="MooncakeConnectorV2")
+    config.parallel_config.cp_kv_cache_interleave_size = BLOCK_SIZE
+    main = [f"model.layers.{4 * i + 3}.attn" for i in range(10)]
+    indexers = [name.removesuffix("attn") + "indexer.k_cache" for name in main]
+    drafts = [f"draft.model.layers.{93 + i}.attn" for i in range(5)]
+    specs = {}
+    for names, spec in (
+        (main, AscendMLAAttentionSpec(block_size=page, num_kv_heads=1, head_size=576, dtype=torch.bfloat16)),
+        (indexers, AscendSFAIndexerCacheSpec(block_size=page, num_kv_heads=1, head_size=128, dtype=torch.bfloat16)),
+        (
+            drafts,
+            AscendGQADraftSlidingWindowSpec(
+                block_size=page, num_kv_heads=2, head_size=64, dtype=torch.bfloat16, sliding_window=2048
+            ),
+        ),
+    ):
+        specs.update(dict.fromkeys(names, spec))
+    groups = paired_sfa_cache_groups(config, specs)
+    if private:
+        groups[1] = replace(groups[1], kv_cache_spec=replace(groups[1].kv_cache_spec, can_overlay_indexer=False))
+    plan = paired_sfa_cache_config(config, groups, 0)
+    raw = attn_utils._allocate_kv_cache(plan, shared_layers={}, device=torch.device("cpu"))
+    attn_groups = [
+        AttentionGroup(AscendSFABackend, main, specs[main[0]], 0),
+        AttentionGroup(AscendSFAIndexerBackend, indexers, specs[indexers[0]], 0),
+        AttentionGroup(AscendAttentionBackend, drafts, groups[1].kv_cache_spec, 1),
+    ]
+    monkeypatch.setattr(attn_utils, "_get_attention_kv_cache_dims", lambda *_: (512, 64))
+    caches = attn_utils._reshape_kv_cache_v2(attn_groups, raw, "auto", [BLOCK_SIZE] * len(groups), {}, plan)
+    return plan, attn_groups, caches, indexers, drafts
+
+
+@pytest.mark.parametrize("layout", ["HND", "NHD"])
+@pytest.mark.parametrize("page", [768, 896])
+def test_bf16_swa_indexer_alias_recycling_and_cow(monkeypatch, vllm_config, layout, page):
+    monkeypatch.setenv("VLLM_KV_CACHE_LAYOUT", layout)
+    plan, attn_groups, caches, indexers, drafts = make_bf16_swa_cache(vllm_config, monkeypatch, page)
+    pool = BlockPool(plan.num_blocks, enable_caching=True, hash_block_size=BLOCK_SIZE)
+    target, draft, spare = pool.get_new_blocks(3)
+    assert (target.block_id, draft.block_id, spare.block_id) == (1, 2, 3)
+    planes = [plane for name in drafts for plane in caches[name]]
+    assert len({p.data_ptr() for p in planes}) == 10
+    parts = page // BLOCK_SIZE
+    shape = (2, BLOCK_SIZE, 64) if layout == "HND" else (BLOCK_SIZE, 2, 64)
+    expected = []
+    for i, (plane, index_name) in enumerate(zip(planes, indexers, strict=True)):
+        (indexer,) = caches[index_name]
+        assert plane.shape == (plan.num_blocks * parts, *shape)
+        assert plane.is_contiguous() and indexer.is_contiguous()
+        assert plane.data_ptr() == indexer.data_ptr() and plane.nbytes == indexer.nbytes
+        # Interleave target-owned ID 1, draft-owned ID 2 and untouched guard IDs.
+        index_bytes = indexer.view(torch.uint8).view(plan.num_blocks, -1)
+        offset = torch.arange(index_bytes.shape[1], dtype=torch.int32)
+        pattern = ((offset ^ (offset >> 8) ^ (offset >> 16)) + i).to(torch.uint8)
+        index_bytes.fill_(43)
+        index_bytes[1].copy_(pattern)
+        plane[2 * parts : 3 * parts].view(torch.uint8).flatten().copy_(255 - pattern)
+        reference = torch.full_like(index_bytes, 43)
+        reference[1].copy_(pattern)
+        reference[2].copy_(255 - pattern)
+        assert torch.equal(index_bytes, reference)
+        expected.append(reference)
+
+    # Copy overlapping sources and destinations once, even though both
+    # interpretations of each plane were supplied to the worker.
+    copy_kv_cache_blocks_inplace(caches.values(), plan.num_blocks, [KVCacheBlockCopy(1, 2), KVCacheBlockCopy(2, 3)])
+    for plane, reference in zip(planes, expected, strict=True):
+        reference[[2, 3]] = reference[[1, 2]]
+        assert torch.equal(plane.view(torch.uint8).view_as(reference), reference)
+
+    # Replay the real zeroer's generated segment table using CPU tensors.
+    first = caches[attn_groups[0].layer_names[0]][0]
+    backing = first.view(torch.uint8).as_strided((plan.kv_cache_tensors[0].size,), (1,), first.storage_offset() * 2)
+
+    def cpu_zero(addrs, strides, pages, block_ids, BLOCK_SIZE):
+        for address, stride, size in zip(addrs.tolist(), strides.tolist(), pages.tolist(), strict=True):
+            for block_id in block_ids.tolist():
+                start = address - backing.data_ptr() + 4 * stride * block_id
+                assert 0 <= start < start + 4 * size <= backing.numel()
+                backing[start : start + 4 * size].zero_()
+
+    kernel = Mock()
+    kernel.__getitem__ = Mock(return_value=cpu_zero)
+    monkeypatch.setattr("vllm.v1.worker.utils._zero_kv_blocks_kernel", kernel)
+    zeroer = AscendV2KVBlockZeroer(
+        torch.device("cpu"),
+        attn_groups,
+        [BLOCK_SIZE] * len(plan.kv_cache_groups),
+        {name: SimpleNamespace(kv_cache=cache) for name, cache in caches.items()},
+        plan.num_blocks,
+    )
+    pool.free_blocks([draft])
+    (new_draft,) = pool.get_new_blocks(1)
+    assert new_draft.block_id == 2
+    zeroer.zero_block_ids([new_draft.block_id])
+    for plane, index_name, reference in zip(planes, indexers, expected, strict=True):
+        reference[2].zero_()
+        observed = plane.view(torch.uint8).view_as(reference)
+        assert torch.equal(observed, reference)
+        # The released target page becomes draft-owned. Its neighbors are live.
+        plane[2 * parts : 3 * parts].view(torch.uint8).fill_(197)
+        reference[2].fill_(197)
+        assert torch.equal(caches[index_name][0].view(torch.uint8).view_as(reference), reference)
+
+
+@pytest.mark.parametrize("private_producer", [False, True], ids=["overlaid-P", "private-P"])
+def test_mooncake_pulls_target_and_draft_into_disjoint_ids(monkeypatch, vllm_config, private_producer):
+    from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake import base_worker
+    from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.metadata import ReqMeta
+    from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.pull_scheduler import MooncakeSchedulerSendingThread
+    from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.pull_worker import MooncakePullRecvingThread
+
+    monkeypatch.setenv("VLLM_KV_CACHE_LAYOUT", "HND")
+    monkeypatch.setattr(torch.npu, "set_device", lambda *_: None)
+    vllm_config.model_config.is_deepseek_mla = True
+    vllm_config.speculative_config = None
+    engine = Mock()
+    monkeypatch.setattr(base_worker, "global_te", engine)
+    page = 768
+
+    def register(engine_id, private=False):
+        plan, _, caches, indexers, drafts = make_bf16_swa_cache(vllm_config, monkeypatch, page, private=private)
+        worker = base_worker.MooncakeBaseConnectorWorker.__new__(base_worker.MooncakeBaseConnectorWorker)
+        worker.vllm_config = vllm_config
+        worker.ascend_config = SimpleNamespace(kvpp_config=SimpleNamespace(size=1))
+        worker.pcp_rank, worker.tp_rank, worker.tp_size = 0, 0, 1
+        worker.kv_cache_config = plan
+        worker.engine_id, worker.te_rpc_port = engine_id, 9000
+        worker.block_size, worker.side_channel_host, worker.handshake_port = page, "127.0.0.1", 6000
+        worker.register_kv_caches(caches)
+        ([base], [length]) = engine.register_buffer.call_args.args
+        assert length == plan.kv_cache_tensors[0].size
+        return worker, caches, indexers, drafts, (base, length)
+
+    p, producer, indexers, drafts, p_range = register("P", private_producer)
+    d, consumer, _, _, d_range = register("D")
+    sender = MooncakeSchedulerSendingThread(
+        "127.0.0.1", 6000, "P", {0: p.transfer_metadata}, 1, 1, 1, 1, False, Event()
+    )
+    receiver = MooncakePullRecvingThread(
+        engine,
+        vllm_config,
+        d.kv_cache_config,
+        d.kv_cache_specs,
+        d.layer_name_to_group_index,
+        d.layer_name_to_spec_index,
+        d.transfer_metadata,
+        tp_rank=0,
+        tp_size=1,
+        pp_rank=0,
+        pp_size=1,
+        dp_rank=0,
+        dp_size=1,
+        pcp_rank=0,
+        pcp_size=1,
+        dcp_rank=0,
+        dcp_size=1,
+        device=torch.device("cpu"),
+        ready_event=Event(),
+    )
+    remote = receiver.decoder.decode(sender.encoded_metadata)
+    receiver._validate_remote_metadata(remote, "P")
+    receiver.remote_metadata["P"] = remote
+    receiver.remote_tp_rank_groups["P"], receiver.remote_layer_index_pairs["P"] = (
+        receiver._build_remote_transfer_layout(remote)
+    )
+
+    def cpu_read(session_id, local, peer, lengths):
+        for dst, src, size in zip(local, peer, lengths, strict=True):
+            assert d_range[0] <= dst < dst + size <= sum(d_range)
+            assert p_range[0] <= src < src + size <= sum(p_range)
+            ctypes.memmove(dst, src, size)
+        return 0
+
+    engine.batch_transfer_sync_read.side_effect = cpu_read
+    # P target/draft IDs 1/2, D target/draft IDs 3/1. Transfer two kernel
+    # blocks of a six-block manager page, including one partial final block.
+    local_ids, remote_ids = ([3], [1]), ([1], [2])
+    req = ReqMeta(local_ids, 194, 193, 0, remote_ids, "127.0.0.1", 6000, "P", "req-p", 193, local_ids)
+    parts = page // BLOCK_SIZE
+    for i, name in enumerate(producer):
+        src_id = 2 if name in drafts else 1
+        for component, tensor in enumerate(producer[name]):
+            block = tensor[src_id * parts : (src_id + 1) * parts]
+            offsets = torch.arange(block.numel(), dtype=torch.int32).reshape(block.shape)
+            block.copy_(
+                ((offsets ^ (offsets >> 8) ^ (offsets >> 16)) + 13 * i + component).to(torch.int16).view(torch.bfloat16)
+            )
+    try:
+        assert receiver._handle_requests("P", "127.0.0.1", 6000, {"req": req}) == set()
+    finally:
+        receiver.executor.shutdown(wait=True)
+    engine.batch_transfer_sync_read.assert_called_once()
+
+    # Check the entire D plane, including both live owners, unused ID 2,
+    # guard ID 0 and the untransferred suffix of each allocated manager page.
+    for i, index_name in enumerate(indexers):
+        draft_name = drafts[i // 2]
+        result = consumer[index_name][0].view(torch.uint8)
+        expected = torch.zeros_like(result)
+        expected[3 * parts : 3 * parts + 2].copy_(producer[index_name][0][parts : parts + 2].view(torch.uint8))
+        draft_part = producer[draft_name][i % 2][2 * parts : 2 * parts + 2].view(torch.uint8)
+        expected[parts : parts + 2].copy_(draft_part.reshape_as(expected[parts : parts + 2]))
+        assert torch.equal(result, expected)

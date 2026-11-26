@@ -11,6 +11,12 @@ import pytest
 import torch
 import zmq
 from vllm.sampling_params import SamplingParams
+from vllm.utils.hashing import sha256
+from vllm.v1.core.kv_cache_manager import KVCacheManager
+from vllm.v1.core.kv_cache_utils import get_request_block_hasher, init_none_hash
+from vllm.v1.core.sched.scheduler import Scheduler
+from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheGroupSpec
+from vllm.v1.outputs import KVConnectorOutput
 from vllm.v1.request import Request, RequestStatus
 
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake import pull_scheduler
@@ -591,6 +597,157 @@ def test_request_finished_delays_blocks_and_builds_remote_params() -> None:
     assert params["remote_request_id"] == "request-p"
     assert params["last_token_id"] == 123
     scheduler._sending_thread.add_delayed_request.assert_called_once()
+
+
+@pytest.fixture
+def k31_prefill():
+    specs = [make_full_spec()] + [replace(make_mamba_spec(), mamba_cache_mode="align", num_speculative_blocks=3)] * 3
+    cache = KVCacheConfig(64, [], [KVCacheGroupSpec([f"layer-{i}"], spec) for i, spec in enumerate(specs)])
+    transfer = SimpleNamespace(kv_role="kv_producer", kv_connector="MooncakeConnectorV2", is_kv_producer=True)
+    cache.kv_transfer_config = transfer
+    init_none_hash(sha256)
+    manager = KVCacheManager(cache, 256, 16, 16, enable_caching=True)
+    pull = make_pull_scheduler()
+    pull._kimi_k31_bf16 = True
+    pull.group_unique_specs = [[spec] for spec in specs]
+    pull.group_block_size = [16] * len(specs)
+    pull._sending_thread = make_sending_thread()
+    connector = MooncakePullConnector.__new__(MooncakePullConnector)
+    connector._vllm_config = SimpleNamespace(
+        model_config=SimpleNamespace(hf_config=SimpleNamespace(model_type="kimi_k31"), dtype=torch.bfloat16),
+        cache_config=SimpleNamespace(cache_dtype="auto", use_kda_recoverssm=False),
+        speculative_config=SimpleNamespace(
+            method="dspark", draft_model_config=SimpleNamespace(architectures=["Qwen3DSparkModel"])
+        ),
+        parallel_config=SimpleNamespace(pipeline_parallel_size=1, prefill_context_parallel_size=1),
+        use_v2_model_runner=True,
+        kv_transfer_config=transfer,
+    )
+    connector.kv_cache_config = cache
+    connector.connector_scheduler = pull
+    connector.bind_kv_cache_manager(manager)
+    scheduler = Scheduler.__new__(Scheduler)
+    scheduler.vllm_config = connector._vllm_config
+    scheduler.connector = connector
+    scheduler.kv_cache_manager = manager
+    scheduler.defer_block_free = False
+    scheduler.ec_connector = None
+    scheduler.encoder_cache_manager = MagicMock()
+    scheduler._inflight_prefills = set()
+    scheduler.finished_req_ids = set()
+    scheduler.finished_req_ids_dict = None
+    scheduler.requests = {}
+    return scheduler
+
+
+def make_finished_prefill(scheduler, length, request_id="request-p", expected_hit=0):
+    request = Request(
+        request_id,
+        list(range(length)),
+        SamplingParams(max_tokens=1),
+        None,
+        block_hasher=get_request_block_hasher(16, sha256),
+    )
+    request.kv_transfer_params = {"do_remote_decode": True}
+    scheduler.requests[request.request_id] = request
+    manager = scheduler.kv_cache_manager
+    manager.new_step_starts()
+    hit_blocks, hit, _ = manager.get_computed_blocks(request)
+    assert hit == expected_hit
+    assert manager.allocate_slots(request, length - hit, hit, hit_blocks, num_lookahead_tokens=3) is not None
+    request.num_computed_tokens = length
+    request.append_output_token_ids(99)
+    request.status = RequestStatus.FINISHED_LENGTH_CAPPED
+    return request
+
+
+@pytest.mark.parametrize("length", [32, 33])
+@pytest.mark.parametrize("completion", ["done", "timeout"])
+def test_k31_prefill_reuses_only_unpublished_scratch_before_send_completes(k31_prefill, length, completion):
+    scheduler = k31_prefill
+    manager = scheduler.kv_cache_manager
+    pool = manager.block_pool
+    request = make_finished_prefill(scheduler, length)
+    initial = manager.get_block_ids(request.request_id)
+    scratch = {block for ids in initial[1:] for block in ids[-3:]}
+    assert len(scratch) == 9
+    free_before = pool.get_num_free_blocks()
+    params, _ = scheduler._free_request(request)
+    assert params["remote_block_ids"] == (initial[0][: (length + 15) // 16], *([ids[-4]] for ids in initial[1:]))
+    assert pool.get_num_free_blocks() == free_before + 9
+    reused = pool.get_new_blocks(9)
+    assert {block.block_id for block in reused} == scratch
+    assert all(pool.blocks[ids[-4]].ref_cnt == 1 for ids in initial[1:])
+
+    # A second publication sees the same original checkpoint after the trim.
+    assert scheduler._connector_finished(request) == (True, params)
+    sender = scheduler.connector.connector_scheduler._sending_thread
+    if completion == "done":
+        sender._handle_finished_request(request.request_id)
+        assert scheduler._connector_finished(request) == (True, params)
+        assert request.request_id not in sender.delayed_free_requests
+        sender._handle_finished_request(request.request_id)
+    else:
+        sender.delayed_free_requests[request.request_id] = 0
+    scheduler._update_from_kv_xfer_finished(KVConnectorOutput())
+    assert request.request_id not in scheduler.requests
+    sender._handle_finished_request(request.request_id)
+    scheduler._update_from_kv_xfer_finished(KVConnectorOutput())
+    assert all(block.ref_cnt == 1 for block in reused)
+    pool.free_blocks(reused)
+    assert pool.get_num_free_blocks() == 63
+
+
+def test_k31_prefill_reuses_hot_prefix_while_first_send_is_pending(k31_prefill):
+    scheduler = k31_prefill
+    first = make_finished_prefill(scheduler, 32)
+    first_ids, _ = scheduler._free_request(first)
+    second = make_finished_prefill(scheduler, 33, request_id="hot", expected_hit=32)
+    second_ids, _ = scheduler._free_request(second)
+    manager = scheduler.kv_cache_manager
+    assert second_ids["remote_block_ids"][0][:2] == first_ids["remote_block_ids"][0]
+    for old, new in zip(first_ids["remote_block_ids"][1:], second_ids["remote_block_ids"][1:]):
+        assert old != new
+        assert manager.block_pool.blocks[old[0]].ref_cnt >= 1
+        assert manager.block_pool.blocks[new[0]].ref_cnt == 1
+    sender = scheduler.connector.connector_scheduler._sending_thread
+    for req in (first, second):
+        sender._handle_finished_request(req.request_id)
+        scheduler._update_from_kv_xfer_finished(KVConnectorOutput())
+    assert manager.block_pool.get_num_free_blocks() == 63
+
+
+@pytest.mark.parametrize("guard", ["in_flight", "multi_connector", "other_model", "abort", "shared", "published"])
+def test_k31_prefill_preserves_blocks_for_other_readers(k31_prefill, guard):
+    scheduler = k31_prefill
+    manager = scheduler.kv_cache_manager
+    request = make_finished_prefill(scheduler, 32)
+    initial = manager.get_block_ids(request.request_id)
+    if guard == "in_flight":
+        request.num_in_flight_tokens = 1
+    elif guard == "multi_connector":
+        scheduler.connector.kv_cache_config.kv_transfer_config.kv_connector = "MultiConnector"
+    elif guard == "other_model":
+        scheduler.vllm_config.model_config.hf_config.model_type = "kimi_k3"
+    elif guard == "abort":
+        request.status = RequestStatus.FINISHED_ABORTED
+    elif guard == "shared":
+        manager.block_pool.touch([manager.block_pool.blocks[initial[1][-1]]])
+    elif guard == "published":
+        pull = scheduler.connector.connector_scheduler
+        # Another transfer group explicitly lists this Mamba scratch ID.
+        pull._get_transfer_block_ids = lambda ids, _: ([*ids[0], ids[1][-1]], *([row[-4]] for row in ids[1:]))
+    params, _ = scheduler._free_request(request)
+    if guard == "abort":
+        assert params is None and request.request_id not in scheduler.requests
+        assert manager.block_pool.get_num_free_blocks() == 63
+        return
+    remaining = manager.get_block_ids(request.request_id)
+    assert remaining[1] == initial[1]
+    if guard in ("shared", "published"):
+        assert remaining[2:] == tuple(ids[:-3] for ids in initial[2:])
+    else:
+        assert remaining == initial
 
 
 @pytest.mark.parametrize("status", [RequestStatus.FINISHED_ABORTED, RequestStatus.FINISHED_ERROR])
