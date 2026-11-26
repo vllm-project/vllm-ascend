@@ -104,8 +104,8 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
 
         # Keep expert-aware loaders attached for later online weight updates.
         enable_fused_mc2 = get_ascend_config().enable_fused_mc2
-        # TODO: Centralize expert weight layout selection and storage preparation
-        # so this path can avoid importing the private NZ predicate.
+        # TODO: Revisit how this check is structured. For example, decide whether to
+        # reuse storage in the same place that chooses the expert weight format.
         for name in ("w13_weight", "w2_weight"):
             weight = getattr(layer, name)
             transposed = self._maybe_pad_weight(weight.data).transpose(1, 2).contiguous()
