@@ -132,6 +132,17 @@ class AscendHiSparseMetadata(AscendSFAMetadata):
     prefill: AscendHiSparsePrefillMetadata | None = None
     prefill_valid_token_mask: torch.Tensor | None = None
     hisparse_for_capture: bool = False
+    # Device-side inputs for the Ascend950 SparseKvPlan resolver. They are
+    # built once per scheduling step and shared by all index groups.
+    plan_group_width: int = 0
+    plan_request_ids: torch.Tensor | None = None
+    plan_token_to_req: torch.Tensor | None = None
+    plan_stable_prefix_lens: torch.Tensor | None = None
+    plan_visible_seq_lens: torch.Tensor | None = None
+    plan_active_rows: torch.Tensor | None = None
+    # Deployment-wide exclusive logical-token bound. Keeping it in metadata
+    # avoids a device-to-host read while preserving a graph-static ACLNN value.
+    plan_max_token: int = 0
 
 
 class AscendHiSparseMetadataBuilder(AscendSFAMetadataBuilder):
@@ -153,6 +164,80 @@ class AscendHiSparseMetadataBuilder(AscendSFAMetadataBuilder):
         self._row_capacity = max(
             vllm_config.scheduler_config.max_num_batched_tokens,
             vllm_config.compilation_config.max_cudagraph_capture_size or 0,
+        )
+        self._sparse_plan_inputs: dict[tuple[int | None, int], dict[str, torch.Tensor]] = {}
+        self._sparse_plan_max_token = vllm_config.model_config.max_model_len
+
+    def _build_sparse_kv_plan_inputs(
+        self,
+        metadata: AscendHiSparseMetadata,
+        buffers: dict[str, torch.Tensor],
+        request_ids: torch.Tensor | None,
+    ) -> None:
+        """Materialize grouped request IDs, stable/visible lengths and active rows."""
+        rows = metadata.num_decode_tokens
+        width = metadata.max_query_len
+        if rows <= 0 or width <= 0 or rows % width:
+            return
+        requests = rows // width
+        # Recycled state rows can be reused by another request. The operator's
+        # reset detection requires durable scheduler request IDs; do not fall
+        # back to transient batch-row indices.
+        if request_ids is None or request_ids.numel() < requests:
+            return
+        base_lengths = metadata.seq_lens[:requests].to(torch.int32)
+        repeated_lengths = base_lengths.repeat_interleave(width)
+        buffers["request_ids"][:requests].copy_(request_ids[:requests].to(torch.int64))
+        buffers["token_to_req"][:rows].copy_(
+            torch.arange(requests, dtype=torch.int32, device=buffers["active_rows"].device).repeat_interleave(width)
+        )
+        buffers["stable_prefix_lens"][:rows].copy_(repeated_lengths - width)
+        buffers["visible_seq_lens"][:rows].copy_(repeated_lengths - width + 1)
+        buffers["visible_seq_lens"][:rows].add_(buffers["lane_offset"][:rows])
+        # Graph padding supplies a fixed row shape; SparseKvPlan itself uses the
+        # device scalar so only complete, actually scheduled query groups run.
+        buffers["active_rows"].copy_(metadata.query_start_loc[-1:])
+        metadata.plan_group_width = width
+        metadata.plan_request_ids = buffers["request_ids"][:requests]
+        metadata.plan_token_to_req = buffers["token_to_req"][:rows]
+        metadata.plan_stable_prefix_lens = buffers["stable_prefix_lens"][:rows]
+        metadata.plan_visible_seq_lens = buffers["visible_seq_lens"][:rows]
+        metadata.plan_active_rows = buffers["active_rows"]
+        metadata.plan_max_token = self._sparse_plan_max_token
+
+    def _get_sparse_kv_plan_buffers(
+        self, metadata: AscendHiSparseMetadata, draft_index: int | None
+    ) -> dict[str, torch.Tensor]:
+        width = metadata.max_query_len
+        key = (draft_index, width)
+        buffers = self._sparse_plan_inputs.get(key)
+        if buffers is None:
+            if width <= 0:
+                raise ValueError("HiSparse SparseKvPlan requires a positive decode query width")
+            requests = (self._row_capacity + width - 1) // width
+            rows = requests * width
+            device = self.device
+            buffers = {
+                "request_ids": torch.full((requests,), -1, dtype=torch.int64, device=device),
+                "token_to_req": torch.empty((rows,), dtype=torch.int32, device=device),
+                "stable_prefix_lens": torch.empty((rows,), dtype=torch.int32, device=device),
+                "visible_seq_lens": torch.empty((rows,), dtype=torch.int32, device=device),
+                "lane_offset": torch.arange(width, dtype=torch.int32, device=device).repeat(requests),
+                "active_rows": torch.empty((1,), dtype=torch.int32, device=device),
+            }
+            self._sparse_plan_inputs[key] = buffers
+        return buffers
+
+    def _has_uniform_sparse_plan_groups(self, common_attn_metadata, metadata) -> bool:
+        """Check that decode rows form fixed-width, per-request groups."""
+        query_start_loc_cpu = getattr(common_attn_metadata, "query_start_loc_cpu", None)
+        if query_start_loc_cpu is None:
+            return False
+        query_lens = query_start_loc_cpu[1 : metadata.num_reqs + 1] - query_start_loc_cpu[: metadata.num_reqs]
+        return (
+            query_lens.numel() == metadata.num_reqs
+            and bool(torch.all(query_lens == metadata.max_query_len).item())
+            and metadata.num_reqs * metadata.max_query_len == metadata.num_decode_tokens
         )
 
     def _build(
@@ -177,6 +262,17 @@ class AscendHiSparseMetadataBuilder(AscendSFAMetadataBuilder):
             metadata.num_input_tokens,
             metadata.num_input_tokens,
         )
+        if (
+            metadata.num_decode_tokens
+            and not metadata.num_prefills
+            and getattr(getattr(self, "kv_cache_spec", None), "cache_sparse_li_c8", False)
+            and self._has_uniform_sparse_plan_groups(common_attn_metadata, metadata)
+        ):
+            self._build_sparse_kv_plan_inputs(
+                metadata,
+                self._get_sparse_kv_plan_buffers(metadata, draft_index),
+                getattr(common_attn_metadata, "req_ids_tensor", None),
+            )
         if pcp_context is not None:
             local_states = pcp_context.local_request_state_indices
             assert local_states is not None
@@ -244,6 +340,7 @@ class AscendHiSparseImpl(AscendSFAImpl):
         if not isinstance(self.index_group, HiSparseMLAIndexGroup):
             raise RuntimeError("Ascend HiSparse was initialized without a HiSparse index group")
         self.hisparse_cache = self.index_group.cache(self.index_group_index)
+        self.hisparse_cache.runtime._ascend_sparse_kv_plan_eligible = self.enable_sparse_sfa_c8
         self.topk = self.index_group.logical_topk_indices.shape[-1]
         if self.topk % 128:
             raise ValueError("Ascend HiSparse SFA requires top-k to be divisible by 128")
@@ -727,6 +824,11 @@ class AscendHiSparseImpl(AscendSFAImpl):
             # Keep mixed prefill/decode batches on the NPU residency resolver.
             # The generic index-group resident shortcut uses the CUDA sparse
             # index converter when a batch also contains prefill tokens.
+            if (
+                getattr(cache.runtime.cache_ops, "plan_workspace", None) is not None
+                and self.enable_sparse_sfa_c8
+            ):
+                cache.runtime._sparse_kv_plan_inputs = metadata
             physical = cache.swap_in(
                 metadata.req_id_per_token[:num_decode],
                 block_table=cache.source_block_table,
