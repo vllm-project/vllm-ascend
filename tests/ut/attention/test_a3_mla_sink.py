@@ -155,15 +155,19 @@ def selection_impl():
 
 @pytest.mark.parametrize("is_a3,is_draft", [(False, False), (False, True), (True, False), (True, True)])
 def test_selection_is_hardware_and_model_scoped(is_a3, is_draft):
-    assert sink.supports_a3_mla(selection_impl(), is_a3=is_a3, is_draft=is_draft) is (is_a3 and is_draft)
+    assert sink.supports_a3_mla(
+        selection_impl(), is_a3=is_a3, is_draft=is_draft, supports_pd_layout=use_component_major_mla_pd_layout
+    ) is (is_a3 and is_draft)
 
 
 def test_multi_rank_selection_requires_split_dcp_implementation():
     impl = selection_impl()
     impl.use_dcp = True
-    assert not sink.supports_a3_mla(impl, is_a3=True, is_draft=True)
+    assert not sink.supports_a3_mla(
+        impl, is_a3=True, is_draft=True, supports_pd_layout=use_component_major_mla_pd_layout
+    )
     impl.supports_split_query_dcp = True
-    assert sink.supports_a3_mla(impl, is_a3=True, is_draft=True)
+    assert sink.supports_a3_mla(impl, is_a3=True, is_draft=True, supports_pd_layout=use_component_major_mla_pd_layout)
 
 
 @pytest.mark.parametrize(
@@ -213,7 +217,9 @@ def test_unsupported_config_retains_fia(reason):
         impl.qk_rope_head_dim = 0
     else:
         impl.num_kv_heads = 2
-    assert not sink.supports_a3_mla(impl, is_a3=True, is_draft=True)
+    assert not sink.supports_a3_mla(
+        impl, is_a3=True, is_draft=True, supports_pd_layout=use_component_major_mla_pd_layout
+    )
 
 
 @pytest.mark.parametrize("eager", [False, True])
@@ -223,7 +229,7 @@ def test_uses_existing_execution_config_and_page_capacity(eager):
     impl.vllm_config.speculative_config.enforce_eager = eager
     impl.vllm_config.model_config.max_model_len = 131072
     impl.vllm_config.cache_config.block_size = 1536
-    assert sink.supports_a3_mla(impl, is_a3=True, is_draft=True)
+    assert sink.supports_a3_mla(impl, is_a3=True, is_draft=True, supports_pd_layout=use_component_major_mla_pd_layout)
     adapter = sink.A3MLAAdapter(sink.A3MLAConfig(8, 192**-0.5), None, None).for_capacity(1024, 16)
     assert adapter.config.max_seqlen_k == 131072
     assert adapter.config.max_seqlen_q == 16
@@ -582,9 +588,7 @@ def test_pd_selection_uses_transfer_gate(role, connector, module, expected):
     impl = selection_impl()
     impl.vllm_config.kv_transfer_config = transfer
     assert (
-        sink.supports_a3_mla(
-            impl, is_a3=True, is_draft=True, pd_supported=use_component_major_mla_pd_layout(impl.vllm_config)
-        )
+        sink.supports_a3_mla(impl, is_a3=True, is_draft=True, supports_pd_layout=use_component_major_mla_pd_layout)
         is expected
     )
 
@@ -617,9 +621,7 @@ def test_single_child_multi_pd_selection(role, children, module, expected):
     impl = selection_impl()
     impl.vllm_config.kv_transfer_config = transfer
     assert (
-        sink.supports_a3_mla(
-            impl, is_a3=True, is_draft=True, pd_supported=use_component_major_mla_pd_layout(impl.vllm_config)
-        )
+        sink.supports_a3_mla(impl, is_a3=True, is_draft=True, supports_pd_layout=use_component_major_mla_pd_layout)
         is expected
     )
     # Inspecting child capability must not replace the user's connector config.
@@ -642,7 +644,7 @@ def test_mooncake_layerwise_retains_legacy_layout(wrapped, layerwise):
     impl.vllm_config.kv_transfer_config = transfer
     assert supports_component_major_mla_pd(impl.vllm_config) is (not layerwise)
     assert sink.supports_a3_mla(
-        impl, is_a3=True, is_draft=True, pd_supported=use_component_major_mla_pd_layout(impl.vllm_config)
+        impl, is_a3=True, is_draft=True, supports_pd_layout=use_component_major_mla_pd_layout
     ) is (not layerwise)
 
 

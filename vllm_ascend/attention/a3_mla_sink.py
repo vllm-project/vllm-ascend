@@ -9,6 +9,7 @@ padding KV lengths to zero before either operator consumes them.
 """
 
 import math
+from collections.abc import Callable
 from dataclasses import dataclass, replace
 from importlib import import_module
 from typing import Any
@@ -59,7 +60,7 @@ class A3MLAConfig:
             raise ValueError("query capacity must be nonnegative")
 
 
-def supports_a3_mla(impl, *, is_a3: bool, is_draft: bool, pd_supported: bool = False) -> bool:
+def supports_a3_mla(impl, *, is_a3: bool, is_draft: bool, supports_pd_layout: Callable[[Any], bool]) -> bool:
     """Static selection before cache allocation; no tensor-content reads."""
     if not is_a3 or not is_draft:
         return False
@@ -81,7 +82,7 @@ def supports_a3_mla(impl, *, is_a3: bool, is_draft: bool, pd_supported: bool = F
         return False
     # The caller shares A5's component-major cache transfer gate. Keep this
     # provider boundary independent of vLLM's cache/connector imports.
-    if cfg.kv_transfer_config is not None and not pd_supported:
+    if not supports_pd_layout(cfg):
         return False
     # AscendMLABackend exposes 128-token kernel pages. Manager blocks (e.g.
     # K3.1's 1536) are expanded by the existing block-table/cache-view layer;
