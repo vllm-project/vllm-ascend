@@ -77,6 +77,11 @@ jobs:
       cpu_ut_versions: ${{ steps.vllm.outputs.cpu_ut_versions }}
       src: ${{ steps.filter.outputs.src }}
       ci_pipeline: ${{ steps.filter.outputs.ci_pipeline }}
+      # Paths outside vllm_ascend/ and csrc/ that the coverage recommender
+      # cannot map, but that still change what CPU UT executes. A hit runs
+      # the full tests/ut suite even when selection returns no UT.
+      ut_relevant: ${{ steps.filter.outputs.ut_relevant }}
+      full_ut_groups: ${{ steps.ut-fallback.outputs.full_ut_groups }}
     steps:
       - name: Validate PR title prefix
         run: |
@@ -247,6 +252,51 @@ jobs:
               - 'requirements.txt'
               - 'requirements-dev.txt'
               - 'pyproject.toml'
+            # Outside vllm_ascend/ and csrc/, which the recommender already
+            # maps. These paths are imported by tests/ut or change the package
+            # UT installs, and a changed test_*.py is excluded so a precise
+            # recommendation still runs only that file.
+            ut_relevant:
+              - 'setup.py'
+              - 'packages.txt'
+              - 'CMakeLists.txt'
+              - 'cmake/**'
+              - 'tests/ut/**'
+              - '!tests/ut/test_*.py'
+              - '!tests/ut/**/test_*.py'
+              - 'examples/**'
+              - 'tools/**'
+              - '.github/vllm-main-verified.commit'
+              - '.github/vllm-release-tag.commit'
+              - '!**/*.md'
+
+      - name: Emit the full CPU UT group for unmapped paths
+        id: ut-fallback
+        if: steps.filter.outputs.ut_relevant == 'true'
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          runners = json.loads(
+              Path(".github/workflows/scripts/runner_label.json").read_text(encoding="utf-8")
+          )
+          label = "linux-amd64-cpu-8-hk"
+          info = runners[label]
+          group = {
+              "num_npus": info["npu_num"],
+              "npu_type": info["chip"],
+              "runner": label,
+              "tests": "tests/ut",
+              "partition_name": "cpu-ut",
+              "image_tag": info["image_tag"],
+          }
+          line = "full_ut_groups=" + json.dumps([group], separators=(",", ":"))
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as handle:
+              handle.write(line + "\n")
+          print(line)
+          PY
 
       - name: Install vllm-ascend dev (conditional)
         if: steps.filter.outputs.lint_tracker == 'true'
@@ -316,24 +366,39 @@ jobs:
           python3 .github/workflows/scripts/run_mypy_parallel.py
 
   cpu-ut:
-    # Run only after test selection, and only when that selection includes UT.
-    # On main this still covers both vLLM refs (verified main commit and the
-    # matched release tag). Release branches only run the release tag. E2E
-    # waits for this job when it runs; a selection with no UT skips it.
+    # Run after test selection when that selection includes UT, or when the
+    # diff hits ut_relevant (paths the recommender cannot map). The latter
+    # runs the full tests/ut suite. This job does not need prepare-csrc-cache,
+    # and prepare-csrc-cache does not need this job: the two start together
+    # once selection finishes. On main this still covers both vLLM refs.
+    # Release branches only run the release tag. E2E waits for this job when
+    # it runs.
     name: cpu-ut (vllm@${{ matrix.vllm }})
     needs:
       - pre-commit
       - select-tests
     # !cancelled() lets this job evaluate its own condition when select-tests
-    # is skipped (ready-a5 only). Without it, the skipped need would skip
-    # cpu-ut before the has_ut check. An unlabeled PR still selects tests, so
-    # UT runs here when that selection includes UT; E2E stays behind a label.
+    # is skipped (ready-a5 only). A ut_relevant diff still runs the full UT
+    # suite in that case. An unlabeled PR still selects tests, so UT also runs
+    # when that selection includes UT; E2E stays behind a label.
     if: >-
       ${{
         !cancelled() &&
         needs.pre-commit.result == 'success' &&
-        needs.select-tests.result == 'success' &&
-        needs.select-tests.outputs.has_ut == 'true'
+        (
+          (
+            needs.pre-commit.outputs.ut_relevant == 'true' &&
+            (
+              needs.select-tests.result == 'success' ||
+              needs.select-tests.result == 'skipped'
+            )
+          ) ||
+          (
+            needs.select-tests.result == 'success' &&
+            needs.select-tests.outputs.has_ut == 'true' &&
+            needs.pre-commit.outputs.ut_relevant != 'true'
+          )
+        )
       }}
     strategy:
       fail-fast: false
@@ -345,7 +410,7 @@ jobs:
       ref: ${{ github.event.pull_request.head.sha }}
       base_ref: ${{ github.base_ref }}
       base_sha: ${{ needs.select-tests.outputs.base_sha }}
-      test_groups: ${{ needs.select-tests.outputs.ut_test_groups }}
+      test_groups: ${{ needs.pre-commit.outputs.full_ut_groups || needs.select-tests.outputs.ut_test_groups }}
       enable-coverage: false
 
   recommend-tests:
@@ -506,8 +571,9 @@ jobs:
     # paths changed. ready-a5 alone does not select the NPU suite.
     # !cancelled() allows skipped recommendations (main2main) while the
     # explicit pre-commit success check preserves the first gate.
-    # Selection finishes before CPU UT. UT runs only when the selected cases
-    # include UT; each NPU entry point then waits for that UT to succeed.
+    # Selection finishes before CPU UT. UT runs when the selected cases include
+    # UT, or when ut_relevant is set; each NPU entry point then waits for that
+    # UT to succeed. cpu-ut and prepare-csrc-cache do not wait for each other.
     # The src/ci_pipeline path categories are computed by the paths-filter step
     # in pre-commit. Modes:
     #   recommended - ready-precise, or no run-enabling label, with coverage
@@ -712,10 +778,11 @@ jobs:
   prepare-csrc-cache:
     needs:
       - select-tests
-    # !cancelled() is required: select-tests depends on recommend-tests,
-    # which is skipped under main2main. Without a status check
-    # function, the skipped need propagates transitively and skips this job
-    # even when select-tests succeeded.
+    # Sibling of cpu-ut: both start after select-tests and neither waits for
+    # the other. !cancelled() is required because select-tests depends on
+    # recommend-tests, which is skipped under main2main. Without a status
+    # check function, the skipped need propagates transitively and skips this
+    # job even when select-tests succeeded.
     if: >-
       ${{
         !cancelled() &&
@@ -752,7 +819,10 @@ jobs:
         needs.select-tests.result == 'success' &&
         needs.prepare-csrc-cache.result == 'success' &&
         (
-          needs.select-tests.outputs.has_ut != 'true' ||
+          (
+            needs.select-tests.outputs.has_ut != 'true' &&
+            needs.pre-commit.outputs.ut_relevant != 'true'
+          ) ||
           needs.cpu-ut.result == 'success'
         ) &&
         (
@@ -797,7 +867,10 @@ jobs:
         needs.select-tests.result == 'success' &&
         needs.prepare-csrc-cache.result == 'success' &&
         (
-          needs.select-tests.outputs.has_ut != 'true' ||
+          (
+            needs.select-tests.outputs.has_ut != 'true' &&
+            needs.pre-commit.outputs.ut_relevant != 'true'
+          ) ||
           needs.cpu-ut.result == 'success'
         ) &&
         contains(github.event.pull_request.labels.*.name, 'ready-precise') &&
@@ -829,7 +902,10 @@ jobs:
         needs.pre-commit.result == 'success' &&
         needs.select-tests.result == 'success' &&
         (
-          needs.select-tests.outputs.has_ut != 'true' ||
+          (
+            needs.select-tests.outputs.has_ut != 'true' &&
+            needs.pre-commit.outputs.ut_relevant != 'true'
+          ) ||
           needs.cpu-ut.result == 'success'
         ) &&
         needs.select-tests.outputs.has_tests_a5 == 'true' &&
@@ -1000,11 +1076,14 @@ jobs:
           # cpu-ut check and the select-tests skip branch below share them.
           SRC_FILTER="${{ needs.pre-commit.outputs.src }}"
           CI_PIPELINE_FILTER="${{ needs.pre-commit.outputs.ci_pipeline }}"
+          UT_RELEVANT="${{ needs.pre-commit.outputs.ut_relevant }}"
+          HAS_UT="${{ needs.select-tests.outputs.has_ut }}"
 
           echo "=== CI Gate Summary ==="
           echo "pre-commit: ${PRE_COMMIT_RESULT}"
           echo "cpu-ut: ${CPU_UT_RESULT}"
-          echo "has_ut: ${{ needs.select-tests.outputs.has_ut }}"
+          echo "has_ut: ${HAS_UT}"
+          echo "ut_relevant: ${UT_RELEVANT}"
           echo "src filter: ${{ needs.pre-commit.outputs.src }}"
           echo "ci_pipeline filter: ${{ needs.pre-commit.outputs.ci_pipeline }}"
           echo "vllm target: ${{ needs.pre-commit.outputs.target }} (ref: ${{ needs.pre-commit.outputs.vllm_ref }})"
@@ -1022,9 +1101,16 @@ jobs:
 
           # Downstream jobs are skipped when lint failed; their results are
           # meaningless then and are not reported. A skipped cpu-ut is success
-          # for the gate when the selection did not include UT.
+          # for the gate when neither the selection nor ut_relevant asked for UT.
           if [ "${PRE_COMMIT_RESULT}" = "success" ]; then
-            if [ "${{ needs.select-tests.outputs.has_ut }}" = "true" ] && [ "${CPU_UT_RESULT}" != "success" ]; then
+            SHOULD_RUN_UT=false
+            if [ "${HAS_UT}" = "true" ] && [ "${UT_RELEVANT}" != "true" ]; then
+              SHOULD_RUN_UT=true
+            fi
+            if [ "${UT_RELEVANT}" = "true" ] && { [ "${SELECT_TESTS_RESULT}" = "success" ] || [ "${SELECT_TESTS_RESULT}" = "skipped" ]; }; then
+              SHOULD_RUN_UT=true
+            fi
+            if [ "${SHOULD_RUN_UT}" = "true" ] && [ "${CPU_UT_RESULT}" != "success" ]; then
               add "cpu-ut failed. Open the failed 'cpu-ut' job above, fix the failing test(s) and push again."
             elif [ "${CPU_UT_RESULT}" = "failure" ]; then
               add "cpu-ut failed. Open the failed 'cpu-ut' job above, fix the failing test(s) and push again."
