@@ -1,5 +1,0 @@
-pr: 21830
-entries:
-  - category: performance
-    text: DeepSeek V4.1 Flash on Ascend 950 now reuses the main query's MXFP8 input for indexer projections in prefill and decode.
-    model: deepseek-v4.1-flash
