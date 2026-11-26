@@ -2,22 +2,31 @@ meta:
   hardware:
     ascend_910c: supported
 variants:
-  default:
+  ascend_bf16_a3:
+    model_id: tencent/Hy3-preview
+    precision: bf16
+    label: BF16 (Ascend A3)
+    vram_minimum_gb: 708
+    supported_hardware: [ascend_910c]
+    tp: 16
+    min_vllm_version: "0.30.0"
+    description: BF16 checkpoint on one Atlas A3 node with TP16, expert parallelism and one MTP draft token.
+    install:
+      pip: false
+      docker:
+        command: docker pull quay.io/ascend/vllm-ascend:v0.30.0-a3-openeuler
     hardware_overrides:
-      ascend_910c:
+      ascend_910c: &a3_runtime
         docker_image: quay.io/ascend/vllm-ascend:v0.30.0-a3-openeuler
         docker_ipc: host
-        docker_serve_command: env --chdir=/root/.cache/huggingface vllm serve
+        docker_serve_command: vllm serve
         install:
           pip: false
-          docker: true
         extra_env:
           HCCL_OP_EXPANSION_MODE: AIV
-          VLLM_USE_RUST_FRONTEND: "0"
         extra_args:
           - --served-model-name
           - hy3-preview
-          - tencent/Hy3-preview
           - --enable-ep-weight-filter
           - --speculative-config
           - '{"method":"mtp","num_speculative_tokens":1,"enforce_eager":true}'
@@ -29,29 +38,29 @@ variants:
           - 127.0.0.1
           - --port
           - "8000"
+  default:
+    hardware_overrides:
+      ascend_910c: *a3_runtime
 strategy_hardware:
-  single_node_tp:
-    ascend_910c: unsupported
   single_node_tep:
     ascend_910c: supported
-  single_node_dep:
-    ascend_910c: unsupported
-  multi_node_tp:
-    ascend_910c: unsupported
-  multi_node_tep:
-    ascend_910c: unsupported
-  multi_node_dep:
-    ascend_910c: unsupported
 
 presets:
   a3_bf16:
     label: A3 BF16
     hardware: ascend_910c
     strategy: single_node_tep
-    variants: [default]
+    variants: [ascend_bf16_a3, default]
     default: true
+    description: A3 BF16 with TP16, expert parallelism and one MTP draft token. The Guide uses the recorded ModelScope revision.
+    image:
+      vllm: quay.io/ascend/vllm-ascend:v0.30.0-a3-openeuler
+      model_revision: bc124022a73e3556246dd5c15ffc2da8250225f7
     select:
       frontend: python
+      features:
+        tool_calling: true
+        reasoning: true
     remove_args: [--trust-remote-code]
 
 hardware_notes:
@@ -60,6 +69,7 @@ hardware_notes:
     body: >-
       Use the Guide to serve the pinned checkpoint from /models.
       The generated Docker command uses the Hugging Face cache mount.
+      For the pinned local checkpoint under /models, use the Guide commands.
     link:
       href: '#single-node-a3-release-retest'
       label: Open tested A3 Guide
@@ -73,7 +83,9 @@ guide_sections:
 
     The tested image is vLLM Ascend v0.30.0, with a serving limit of 32,768 tokens. The draft step runs eagerly because full decode graph capture failed in an earlier test. The target model still uses ACLGraph.
 
-    See the [historical deployment tutorial](https://github.com/vllm-project/vllm-ascend/blob/5cb98caaadeff42b5b62b996e34bb2aaa29d20fd/docs/source/tutorials/models/Hy3-preview.md) and the [v0.30.0 support notice](https://docs.vllm.ai/projects/ascend/en/v0.30.0/tutorials/models/Hy3-preview.html).
+    Hy3-preview is discontinued since vLLM Ascend v0.30.0; no support is claimed for later releases.
+
+    See the [historical deployment tutorial](https://github.com/vllm-project/vllm-ascend/blob/5cb98caaadeff42b5b62b996e34bb2aaa29d20fd/docs/source/tutorials/models/Hy3-preview.md) and the [v0.30.0 discontinuation notice](https://docs.vllm.ai/projects/ascend/en/v0.30.0/tutorials/models/Hy3-preview.html).
 
     ### Prepare the pinned BF16 checkpoint
 
@@ -93,7 +105,7 @@ guide_sections:
 
     ### 1. A3 host terminal · Open the release container
 
-    Run on the A3 host with 16 visible devices, port 8000 free and the verified BF16 checkpoint under `/models/tencent/Hy3-preview`. Docker opens a shell using the release image entrypoint.
+    Run on the A3 host with 16 visible devices, port 8000 free and the verified BF16 checkpoint under `/models/tencent/Hy3-preview`. Docker opens a shell using the release image entrypoint. To see the A3 installation card, open the [A3 BF16 configuration](?hardware=ascend_910c&variant=ascend_bf16_a3&strategy=single_node_tep&preset=a3_bf16&frontend=python).
 
     ```bash
     IMAGE=quay.io/ascend/vllm-ascend:v0.30.0-a3-openeuler
@@ -268,6 +280,14 @@ guide_sections:
     )
     ```
 
+    The table reports performance from the A3 release retest. Input lengths are the benchmark settings; the chat template adds 15 tokens to each request.
+
+    | Configured input tokens | Completed requests | Mean TTFT (ms) | Mean TPOT (ms) | Output throughput (tokens/s) |
+    | ---: | ---: | ---: | ---: | ---: |
+    | 1,024 | 4/4 | 406.99 | 29.05 | 31.24 |
+    | 4,096 | 4/4 | 843.02 | 30.21 | 27.35 |
+    | 16,384 | 4/4 | 2779.66 | 31.37 | 18.92 |
+
     The [official GSM8K-lite case](https://github.com/vllm-project/vllm-ascend/blob/128f35ed1461ecb34bc8b87583a67a66bc4bd1d6/tests/e2e/cases/models/configs/Hunyuan/Hy3-preview.yaml) records the accuracy reference. The historical tutorial also reports GSM8K and C-Eval reference scores; the release retest measures the 32-row GSM8K-lite case.
 
-    On November 21, 2026 (China Standard Time), the A3 run answered all 32 questions correctly. On November 22, all 32 requests returned and 31 answers were correct (96.875%). Both runs used temperature 0.6. The recorded performance figures come from the November 21 run.
+    The A3 release retest answered all 32 questions correctly. In a follow-up run, all 32 requests completed and 31 answers were correct (96.875%). Both runs used temperature 0.6.
