@@ -1,0 +1,11 @@
+pr: 23422
+entries:
+  - category: feature
+    text: >-
+      To reuse AscendStore prefix hits with HiSparse under single-node prefill context parallelism
+      (PCP > 1), enable --scheduler-reserve-full-isl and pair HiSparseConnector with
+      AscendStoreConnector (backend=memcache over host_tcp, load_async=true) in MultiConnector.
+      Device validation covered GLM-5.3 W4A4C8 with native FP8 E4M3FN C8 KV on Ascend 950 (A5)
+      at TP4 x PCP2 with a single DP group and MTP.
+    model: glm-5.3
+    hardware: [A5]

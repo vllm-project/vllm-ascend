@@ -1813,7 +1813,7 @@ class TestKVCacheStoreRecvingThread(unittest.TestCase):
     def test_rank_rotation_keeps_partial_get_failure_with_its_block(self):
         store = FakeStore()
         db = FakeTokenDatabase()
-        thread = KVCacheStoreRecvingThread(store, db, 16, tp_rank=1)
+        thread = KVCacheStoreRecvingThread(store, db, 16, tp_rank=1, kvpp_rank=5)
         request = ReqMeta(
             req_id="rank1",
             token_len_chunk=48,
@@ -1827,6 +1827,31 @@ class TestKVCacheStoreRecvingThread(unittest.TestCase):
         _, addrs, _ = get.call_args.args
         assert addrs == [[1008], [1012], [1004]]
         assert thread._invalid_block_ids == {8}
+
+    def test_hisparse_pcp_get_starts_at_kvpp_rank(self):
+        store = MagicMock(spec=MemcacheBackend)
+        store.get.return_value = [0, 0, 0]
+        thread = KVCacheStoreRecvingThread(
+            store,
+            FakeTokenDatabase(),
+            16,
+            tp_rank=1,
+            kvpp_rank=5,
+            host_memory_group_ids=frozenset({0}),
+            hisparse_layout=True,
+        )
+        request = ReqMeta(
+            req_id="pcp",
+            block_ids=[4, 8, 12],
+            block_hashes=[b"h0", b"h1", b"h2"],
+            load_spec=LoadSpec(0, 48, can_load=True, token_len=48),
+        )
+        thread.add_request(request)
+        thread._handle_request(thread.request_queue.get_nowait())
+        keys, addrs, _ = store.get.call_args.args
+        assert [key.rsplit("@", 1)[1] for key in keys] == ["6832", "6830", "6831"]
+        assert addrs == [[1012], [1004], [1008]]
+        assert store.get.call_args.kwargs == {"memory_location": MemoryLocation.HOST}
 
 
 class TestLayerBatchBuilder(unittest.TestCase):
@@ -2064,7 +2089,7 @@ def test_bulk_get_rotates_within_memory_kinds_and_restores_original_order():
             MemoryLocation.DEVICE,
             MemoryLocation.HOST,
         ],
-        tp_rank=1,
+        read_rank=1,
     ) == list(range(5))
     assert seen == [(["device3", "device1"], MemoryLocation.DEVICE), (["host2", "host4", "host0"], MemoryLocation.HOST)]
 

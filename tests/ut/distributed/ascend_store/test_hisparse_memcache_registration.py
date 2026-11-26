@@ -28,6 +28,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.memcache_b
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.buffer import BufferDescriptor, MemoryLocation
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.hisparse.layout import (
+    CacheGroupSharding,
     aligned_hisparse_allocation_config,
     build_pool_key_namespace,
 )
@@ -52,6 +53,7 @@ def _checkpoint(model, revision=None, *, model_weights=""):
 def _key_config(target, draft=None):
     return SimpleNamespace(
         model_config=target,
+        parallel_config=SimpleNamespace(prefill_context_parallel_size=1, tensor_parallel_size=1),
         speculative_config=SimpleNamespace(draft_model_config=draft, draft_load_config=None)
         if draft is not None
         else None,
@@ -282,6 +284,7 @@ def test_hisparse_groups_register_with_independent_host_blocks(
     )
     hf_text_config = SimpleNamespace(index_topk=128)
     config = SimpleNamespace(
+        parallel_config=SimpleNamespace(prefill_context_parallel_size=1, tensor_parallel_size=1),
         attention_config=SimpleNamespace(
             hisparse_config=SimpleNamespace(device_buffer_size=256, eager_host_mirror=True),
         ),
@@ -629,7 +632,7 @@ def test_hisparse_rejects_unsupported_store_mode(extra_config, kv_role):
         attention_config=SimpleNamespace(hisparse_config=SimpleNamespace(eager_host_mirror=True)),
         kv_transfer_config=SimpleNamespace(kv_role=kv_role, kv_connector_extra_config=extra_config),
     )
-    cache = SimpleNamespace(kv_cache_groups=[SimpleNamespace(role="hisparse_source", layer_names=[])])
+    cache = SimpleNamespace(kv_cache_groups=[SimpleNamespace(role=KVCacheGroupRole.HISPARSE_SOURCE, layer_names=[])])
     with pytest.raises(ValueError, match="requires whole-block transfers"):
         AscendStoreConnector(config, KVConnectorRole.SCHEDULER, cache)
 
@@ -641,7 +644,7 @@ def test_hisparse_requires_async_store_load(extra_config):
         attention_config=SimpleNamespace(hisparse_config=SimpleNamespace(eager_host_mirror=True)),
         kv_transfer_config=SimpleNamespace(kv_role="kv_both", kv_connector_extra_config=extra_config),
     )
-    cache = SimpleNamespace(kv_cache_groups=[SimpleNamespace(role="hisparse_source", layer_names=[])])
+    cache = SimpleNamespace(kv_cache_groups=[SimpleNamespace(role=KVCacheGroupRole.HISPARSE_SOURCE, layer_names=[])])
     with pytest.raises(ValueError, match="requires load_async=true"):
         AscendStoreConnector(config, KVConnectorRole.SCHEDULER, cache)
 
@@ -655,7 +658,7 @@ def test_hisparse_rejects_partial_chunk_saves():
             kv_connector_extra_config={"backend": "memcache", "load_async": True, "discard_partial_chunks": False},
         ),
     )
-    cache = SimpleNamespace(kv_cache_groups=[SimpleNamespace(role="hisparse_source", layer_names=[])])
+    cache = SimpleNamespace(kv_cache_groups=[SimpleNamespace(role=KVCacheGroupRole.HISPARSE_SOURCE, layer_names=[])])
     with pytest.raises(ValueError, match="requires discard_partial_chunks=true"):
         AscendStoreConnector(config, KVConnectorRole.SCHEDULER, cache)
 
@@ -678,7 +681,7 @@ def test_hisparse_rejects_incompatible_backend_before_creating_pool(role, extra_
             kv_connector_extra_config={"load_async": True, **extra_config},
         ),
     )
-    cache = SimpleNamespace(kv_cache_groups=[SimpleNamespace(role="hisparse_source", layer_names=[])])
+    cache = SimpleNamespace(kv_cache_groups=[SimpleNamespace(role=KVCacheGroupRole.HISPARSE_SOURCE, layer_names=[])])
     module = "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector"
     with (
         patch(f"{module}.create_kv_pool_scheduler") as scheduler,
@@ -701,7 +704,7 @@ def test_whole_block_put_requires_current_host_rows(save_decode, eager):
             kv_connector_extra_config={"backend": "memcache", "load_async": True, "save_decode_cache": save_decode},
         ),
     )
-    cache = SimpleNamespace(kv_cache_groups=[SimpleNamespace(role="hisparse_source", layer_names=[])])
+    cache = SimpleNamespace(kv_cache_groups=[SimpleNamespace(role=KVCacheGroupRole.HISPARSE_SOURCE, layer_names=[])])
     with (
         patch.object(MemcacheBackend, "validate_hisparse_colocated_config"),
         patch(
@@ -731,7 +734,7 @@ def test_hisparse_reports_all_incompatible_bulk_store_options(monkeypatch, tmp_p
             kv_connector_extra_config={"backend": "memcache", "use_layerwise": True, "load_async": False},
         ),
     )
-    cache = SimpleNamespace(kv_cache_groups=[SimpleNamespace(role="hisparse_source", layer_names=[])])
+    cache = SimpleNamespace(kv_cache_groups=[SimpleNamespace(role=KVCacheGroupRole.HISPARSE_SOURCE, layer_names=[])])
     with pytest.raises(ValueError) as error:
         AscendStoreConnector(config, KVConnectorRole.SCHEDULER, cache)
     message = str(error.value)
@@ -773,7 +776,9 @@ def test_bulk_store_protocol_is_scoped_to_hisparse(monkeypatch, tmp_path, has_hi
         ),
     )
     cache = SimpleNamespace(
-        kv_cache_groups=[SimpleNamespace(role="hisparse_source" if has_hisparse else None, layer_names=[])]
+        kv_cache_groups=[
+            SimpleNamespace(role=KVCacheGroupRole.HISPARSE_SOURCE if has_hisparse else None, layer_names=[])
+        ]
     )
     with patch(
         "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector.create_kv_pool_scheduler"
@@ -888,3 +893,41 @@ def test_memcache_hisparse_rollback_keeps_earlier_registration_and_allows_retry(
         call(200, 20),
         call(100, 11),
     ]
+
+
+def test_pcp_pool_keys_preserve_legacy_and_distinguish_topologies():
+    config = _key_config(_checkpoint("org/glm", "r1"))
+    cache = KVCacheConfig(2, [], [], hisparse_host_num_blocks=3)
+    parallel = config.parallel_config
+    parallel.tensor_parallel_size = 4
+
+    def key(sharding=()):
+        return build_pool_key_namespace(config, cache, 1, 128, group_sharding=sharding)
+
+    # Frozen from the legacy namespace, before PCP added topology fields.
+    assert key() == "hisparse-ascendstore-v1:a0f2221f77f31e551d92afee"
+
+    parallel.prefill_context_parallel_size = 2
+    groups = (CacheGroupSharding(0, 1, 4), CacheGroupSharding(1, 2, 2))
+    original = key(groups)
+    assert original.startswith("hisparse-ascendstore-pcp-v1:")
+    assert key(groups[::-1]) == original
+    assert key((groups[0], CacheGroupSharding(1, 1, 4))) != original
+    parallel.prefill_context_parallel_size = 4
+    assert key(groups) != original
+    parallel.prefill_context_parallel_size = 2
+    parallel.tensor_parallel_size = 8
+    assert key(groups) != original
+
+
+def test_pcp_sharding_uses_cacheable_groups():
+    worker = KVPoolWorker.__new__(KVPoolWorker)
+    worker.pcp_size, worker.tp_size = 2, 4
+    roles = (KVCacheGroupRole.HISPARSE_SOURCE, KVCacheGroupRole.HISPARSE_INDEXER, KVCacheGroupRole.DEFAULT)
+    worker.kv_cache_config = SimpleNamespace(kv_cache_groups=[SimpleNamespace(role=role) for role in roles])
+    worker.cacheable_group_ids = [1, 0]
+    with patch.object(worker, "get_group_tp_size", side_effect=[1, 2]):
+        assert worker._hisparse_pcp_group_sharding() == (CacheGroupSharding(0, 1, 4), CacheGroupSharding(1, 2, 2))
+    worker.cacheable_group_ids = [2]
+    with pytest.raises(ValueError, match="Invalid HiSparse PCP group 2"):
+        worker._hisparse_pcp_group_sharding()

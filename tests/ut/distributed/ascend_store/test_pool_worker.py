@@ -573,6 +573,9 @@ class TestPCPPoolWorker(unittest.TestCase):
                     worker._start_kv_transfer_threads()
                     self.assertEqual(send_thread.call_args.args[5], pcp_rank)
                     self.assertEqual(send_thread.call_args.args[6], pcp_size)
+                    self.assertEqual(
+                        recv_thread.call_args.kwargs["kvpp_rank"], pcp_rank * worker.tp_size + worker.tp_rank
+                    )
                     self.assertIs(recv_thread.call_args.args[1], worker.token_database)
                     self.doCleanups()
 
@@ -1754,6 +1757,8 @@ class TestKVPoolWorkerRegisterAndTransfer(unittest.TestCase):
     def test_transfer_threads_use_grouped_block_sizes(self, send_thread, recv_thread):
         worker = self._make_worker(kv_role="kv_both", extra_config={"backend": "mooncake", "load_async": True})
         worker.grouped_block_size = [128, 128, 128, 128, 8, 32]
+        worker.kv_cache_config.hisparse_host_num_blocks = 8
+        worker.kvpp_rank = 5
 
         worker._start_kv_transfer_threads()
 
@@ -1761,6 +1766,8 @@ class TestKVPoolWorkerRegisterAndTransfer(unittest.TestCase):
         self.assertEqual(recv_thread.call_args.args[2], worker.grouped_block_size)
         self.assertIsNone(send_thread.call_args.kwargs["worker"])
         self.assertIsNone(recv_thread.call_args.kwargs["worker"])
+        self.assertEqual(recv_thread.call_args.kwargs["kvpp_rank"], 5)
+        self.assertTrue(recv_thread.call_args.kwargs["hisparse_layout"])
         for thread in (send_thread.return_value, recv_thread.return_value):
             thread.ready_event.wait.assert_called_once_with()
             thread.raise_if_failed.assert_called_once_with()

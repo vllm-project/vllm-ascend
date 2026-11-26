@@ -6,6 +6,7 @@ import threading
 import time
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Iterator, Sequence
+from typing import cast
 
 import torch
 import vllm.envs as envs
@@ -23,6 +24,7 @@ from vllm.model_executor.model_loader.utils import get_model_cls
 from vllm.v1.core.kv_cache_utils import BlockHash, maybe_convert_block_hash
 from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
+    KVCacheGroupRole,
     MambaSpec,
     UniformTypeKVCacheSpecs,
 )
@@ -39,6 +41,8 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.coordinator import
     ExternalCachedBlockPool,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.hisparse.layout import (
+    CacheGroupSharding,
+    GroupShardingSpec,
     HiSparseTransferLayout,
     build_pool_key_namespace,
     has_hisparse_cache_layout,
@@ -343,6 +347,19 @@ class BaseKVPoolWorker(ABC):
             self.effective_heads_per_rank = tp_mismatch_info.effective_heads_per_rank
             self.num_sub_keys = tp_mismatch_info.num_sub_keys
 
+    def _hisparse_pcp_group_sharding(self) -> GroupShardingSpec:
+        if self.pcp_size == 1 or not has_hisparse_cache_layout(self.kv_cache_config):
+            return ()
+        cache = cast(KVCacheConfig, self.kv_cache_config)
+        groups = []
+        for group_id in sorted(self.cacheable_group_ids):
+            role = cache.kv_cache_groups[group_id].role
+            if role not in (KVCacheGroupRole.HISPARSE_SOURCE, KVCacheGroupRole.HISPARSE_INDEXER):
+                raise ValueError(f"Invalid HiSparse PCP group {group_id}: role={role}")
+            partitions = self.get_group_tp_size(group_id)
+            groups.append(CacheGroupSharding(group_id, partitions, self.tp_size // partitions))
+        return tuple(groups)
+
     def _init_metadata(self, model_config, vllm_config, extra_config) -> None:
         partitions = None
         if self.kv_role == "kv_consumer" and self.can_put:
@@ -368,7 +385,11 @@ class BaseKVPoolWorker(ABC):
                         partitions[-i] += 1
 
         pool_key_namespace = build_pool_key_namespace(
-            vllm_config, self.kv_cache_config, self.dcp_size, self.cache_transfer_granularity
+            vllm_config,
+            self.kv_cache_config,
+            self.dcp_size,
+            self.cache_transfer_granularity,
+            group_sharding=self._hisparse_pcp_group_sharding(),
         )
         self.metadata: list[KeyMetadata] = []
         for group_id in range(self.num_kv_cache_groups):
@@ -1529,6 +1550,8 @@ class KVPoolWorker(BaseKVPoolWorker):
                 worker=self if self.tp_mismatch else None,
                 record_operation=self._record_kv_connector_operation,
                 host_memory_group_ids=host_memory_group_ids,
+                kvpp_rank=self.kvpp_rank,
+                hisparse_layout=has_hisparse_cache_layout(self.kv_cache_config),
             )
         try:
             for thread in (self.kv_send_thread, self.kv_recv_thread):
