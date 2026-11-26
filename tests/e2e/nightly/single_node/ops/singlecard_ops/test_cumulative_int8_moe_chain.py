@@ -131,14 +131,21 @@ def require_real_ops():
     assert enable_custom_op()
 
 
-@pytest.mark.parametrize("shape", SHAPES)
+@pytest.fixture(scope="module", params=SHAPES)
+@torch.inference_mode()
+def shape_layer(request):
+    # The chain only reads weights; inputs and graph state stay test-local.
+    experts, hidden, intermediate, _ = request.param
+    return request.param, make_layer(experts, hidden, intermediate)
+
+
 @pytest.mark.parametrize("rows", ROWS)
 @pytest.mark.parametrize("pattern", PATTERNS)
 @pytest.mark.parametrize("prequantized", [False, True])
 @torch.inference_mode()
-def test_exact_complete_int8_chain(shape, rows, pattern, prequantized):
-    experts, hidden, intermediate, topk = shape
-    layer = make_layer(experts, hidden, intermediate)
+def test_exact_complete_int8_chain(shape_layer, rows, pattern, prequantized):
+    shape, layer = shape_layer
+    experts, hidden, _, topk = shape
     states, ids, weights = make_inputs(rows, experts, hidden, topk, pattern)
     topology, forward, fusion = local_context()
     with topology, forward, fusion:
@@ -148,11 +155,10 @@ def test_exact_complete_int8_chain(shape, rows, pattern, prequantized):
         assert_stages_equal(baseline, candidate)
 
 
-@pytest.mark.parametrize("shape", SHAPES)
 @torch.inference_mode()
-def test_graph_replay_updates_routing_inputs(shape):
-    experts, hidden, intermediate, topk = shape
-    layer = make_layer(experts, hidden, intermediate)
+def test_graph_replay_updates_routing_inputs(shape_layer):
+    shape, layer = shape_layer
+    experts, hidden, _, topk = shape
     states, ids, weights = make_inputs(7, experts, hidden, topk, "spread")
     topology, forward, fusion = local_context()
     with topology, forward, fusion:
