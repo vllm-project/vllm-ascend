@@ -52,9 +52,6 @@ class TestCustomVocabParallelEmbedding(unittest.TestCase):
         self.mock_pcp_group.world_size = 1
         self.mock_pcp_group.rank_in_group = 0
 
-        parallel_state._MLP_TP = self.mock_group
-        parallel_state._OTP = self.mock_group
-
         mock_vllm_config = MagicMock()
         mock_vllm_config.additional_config = {}
         self.mock_ascend_config = MagicMock()
@@ -62,6 +59,8 @@ class TestCustomVocabParallelEmbedding(unittest.TestCase):
         self.mock_ascend_config.finegrained_tp_config.embedding_tensor_parallel_size = 2
 
         self.patches = [
+            patch.object(parallel_state, "_MLP_TP", self.mock_group),
+            patch.object(parallel_state, "_OTP", self.mock_group),
             patch("vllm_ascend.utils.get_ascend_config", return_value=self.mock_ascend_config),
             patch("vllm_ascend.distributed.parallel_state.get_lmhead_tp_group", return_value=self.mock_group),
             patch(
@@ -870,3 +869,17 @@ class TestAscendLogitsProcessor(unittest.TestCase):
 
         self.assertEqual(events, [("pcp", -1), ("tp", -1)])
         self.assertTrue(torch.equal(logits, torch.tensor([[0.0, 1.0, 10.0, 11.0, 20.0, 21.0, 30.0]])))
+
+
+def test_tied_embedding_uses_lmhead_exchange(monkeypatch):
+    layer, _ = _exchange_embedding(monkeypatch, VocabParallelMode.FINE_GRAINED)
+    group = SimpleNamespace(world_size=2, device_group=None, all_gather=lambda hidden, dim: torch.cat((hidden, hidden)))
+    module = "vllm_ascend.ops.vocab_parallel_embedding"
+    monkeypatch.setattr(f"{module}.get_lmhead_tp_group", lambda: group)
+    monkeypatch.setattr(f"{module}.dist.all_to_all_single", lambda output, source, **kwargs: output.copy_(source))
+    config = MagicMock()
+    config.model_config.head_dtype = None
+    with set_current_vllm_config(config):
+        processor = AscendLogitsProcessor(vocab_size=8)
+        logits = processor._get_logits(torch.ones(1, 2), layer)
+    assert logits.shape == (1, 8)

@@ -27,7 +27,7 @@ from vllm_ascend.distributed.kv_transfer.utils.utils import (
     RegisterRegions,
     tensor_storage_key,
 )
-from vllm_ascend.utils import get_kv_cache_tensor_layers
+from vllm_ascend.utils import get_kv_cache_tensor_layers, vllm_version_is
 
 if TYPE_CHECKING:
     from vllm.v1.kv_cache_interface import KVCacheConfig
@@ -293,6 +293,22 @@ class SizedDict(OrderedDict[_KT, _VT]):
             return value
 
 
+def worker_rank_to_dcp_rank(worker_rank: int, pcp_size: int, dcp_size: int) -> int:
+    """Return a Mooncake worker's rank within its vLLM DCP group."""
+    worker_rank_in_group = worker_rank % dcp_size
+    # todo v0.33.0 and the verified main pin (c410543d) enumerate PCP first.
+    # Remove this gate once both pins include vLLM #64534.
+    if not vllm_version_is("0.34.0"):
+        return worker_rank_in_group
+
+    # vLLM sorts each DCP group by ascending global rank (https://github.com/vllm-project/vllm/pull/64534).
+    #     group_ranks = [sorted(x.tolist()) for x in group_ranks]
+    # PCP varies fastest in Mooncake worker IDs and TP varies fastest in global rank order.
+    tp_rank_in_group, pcp_rank_in_group = divmod(worker_rank_in_group, pcp_size)
+    tp_size_in_group = dcp_size // pcp_size
+    return pcp_rank_in_group * tp_size_in_group + tp_rank_in_group
+
+
 def group_concurrent_contiguous(
     src: list[int],
     dst: list[int],
@@ -399,5 +415,6 @@ __all__ = [
     "group_concurrent_contiguous",
     "split_if_not_byte_contiguous",
     "string_to_int64_hash",
+    "worker_rank_to_dcp_rank",
     "zmq_ctx",
 ]

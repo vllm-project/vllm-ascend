@@ -42,8 +42,8 @@ COPY . /vllm-workspace/vllm-ascend/
 
 RUN pip install -r /vllm-workspace/vllm-ascend/requirements-dev.txt \
     --extra-index-url https://download.pytorch.org/whl/cpu \
-    --extra-index-url https://mirrors.huaweicloud.com/ascend/repos/pypi \
-    --extra-index-url https://mirrors.huaweicloud.com/ascend/repos/pypi/nightly && \
+    --extra-index-url https://repo.huaweicloud.com/ascend/repos/pypi \
+    --extra-index-url https://repo.huaweicloud.com/ascend/repos/pypi/nightly && \
     pip cache purge && \
     rm -fr /vllm-workspace/
 

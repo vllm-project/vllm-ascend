@@ -24,6 +24,30 @@ def load_mla_cache_rows_by_slots(cache_k, cache_v, slots):
     return copy_pcp_kv_cache((cache_k, cache_v), slots)[:num_tokens]
 
 
+def load_mla_cache_context_rows(cache_k, cache_v, block_table, seq_lens, seq_offset, num_tokens):
+    """Read the requested history rows in request order, preserving source strides."""
+    if num_tokens == 0:
+        return cache_k.new_empty((0, cache_k.shape[-1] + cache_v.shape[-1]))
+    # Device lengths describe local rows for both base and DCP paths.
+    # Do not use global cumulative lengths from the CPU.
+    lengths = seq_lens.to(torch.int64)
+    requests = torch.repeat_interleave(
+        torch.arange(seq_lens.numel(), device=seq_lens.device, dtype=torch.int64),
+        lengths,
+        output_size=num_tokens,
+    )
+    prefix_starts = torch.cumsum(lengths, dim=0) - lengths
+    positions = torch.arange(num_tokens, device=seq_lens.device, dtype=torch.int64)
+    positions = positions - prefix_starts.index_select(0, requests)
+    if seq_offset is not None:
+        positions = positions + seq_offset.to(torch.int64).index_select(0, requests)
+    block_size = cache_k.shape[1]
+    physical_blocks = block_table[requests, positions // block_size].to(torch.int64)
+    slots = physical_blocks * block_size + positions % block_size
+
+    return load_mla_cache_rows_by_slots(cache_k, cache_v, slots)
+
+
 def try_load_strided_mla_cache(cache_k, cache_v, block_table, seq_lens, seq_offset, key, value) -> bool:
     """Handle validated strided 4D FP16/BF16 ND caches with one physical head."""
     if (
@@ -60,24 +84,7 @@ def try_load_strided_mla_cache(cache_k, cache_v, block_table, seq_lens, seq_offs
         raise ValueError("Strided MLA cache reader received incompatible metadata or output buffers.")
     if num_tokens == 0:
         return True
-    # Device lengths describe local rows for both base and DCP paths.
-    # Do not use global cumulative lengths from the CPU.
-    lengths = seq_lens.to(torch.int64)
-    requests = torch.repeat_interleave(
-        torch.arange(num_sequences, device=seq_lens.device, dtype=torch.int64),
-        lengths,
-        output_size=num_tokens,
-    )
-    prefix_starts = torch.cumsum(lengths, dim=0) - lengths
-    positions = torch.arange(num_tokens, device=seq_lens.device, dtype=torch.int64)
-    positions = positions - prefix_starts.index_select(0, requests)
-    if seq_offset is not None:
-        positions = positions + seq_offset.to(torch.int64).index_select(0, requests)
-    block_size = cache_k.shape[1]
-    physical_blocks = block_table[requests, positions // block_size].to(torch.int64)
-    slots = physical_blocks * block_size + positions % block_size
-
-    packed = load_mla_cache_rows_by_slots(cache_k, cache_v, slots)
+    packed = load_mla_cache_context_rows(cache_k, cache_v, block_table, seq_lens, seq_offset, num_tokens)
     # Split views retain a row stride spanning both components. Copy into the
     # original TND outputs to preserve the consumer's layout contract.
     key.copy_(packed[:, : cache_k.shape[-1]].unsqueeze(1))

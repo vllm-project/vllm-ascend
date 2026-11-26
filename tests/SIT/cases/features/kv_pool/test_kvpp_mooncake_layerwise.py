@@ -80,7 +80,7 @@ def test_kvpp_mooncake_layerwise_reload(tmp_path, use_mtp):
             args,
             server_port=port,
             auto_port=False,
-            env_dict={**pool.server_envs, "VLLM_USE_V2_MODEL_RUNNER": "1", "VLLM_SERVER_DEV_MODE": "1"},
+            env_dict={**pool.server_envs, "VLLM_SERVER_DEV_MODE": "1"},
         ) as server:
             # 128-token chunks span multiple cache blocks and exercise later
             # forwards with history, including shared-index SFA layers.

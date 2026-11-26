@@ -17,18 +17,8 @@ from tests.e2e.pull_request.one_card.attention_utils import (
     create_common_attn_metadata,
     create_vllm_config,
 )
-from vllm_ascend.ascend_forward_context import _EXTRA_CTX, sync_v2_extra_kwargs
+from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
-
-
-@pytest.fixture(autouse=True)
-def _enable_default_v2_extra_kwargs() -> None:
-    """Default V2 stores extras in ``additional_kwargs``.
-
-    This harness does not build a real runner config. Sync the extra-kwargs
-    cache so ``_EXTRA_CTX`` writes reach the MLA backend.
-    """
-    sync_v2_extra_kwargs(MagicMock())
 
 
 @pytest.fixture(autouse=True)

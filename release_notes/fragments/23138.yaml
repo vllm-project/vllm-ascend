@@ -1,0 +1,17 @@
+# Release note fragment template.
+#
+# Copy this file to release_notes/fragments/<PR number>.yaml and fill it in.
+# Add a fragment in the same PR that introduces a user-facing change.
+# See release_notes/README.md for when a fragment is needed and the field rules.
+pr: 23138
+entries:
+  # category: feature | hardware | performance | dependency | breaking | config | documentation | bugfix | other
+  - category: bugfix
+    # One to three short English sentences for users of the released artifact, not reviewers.
+    # What changed for them and what they must do. Perf: scenario + effect (no invented
+    # numbers). Breaking/config: old -> new, exact switch, migration step. Bugfix: the
+    # user-visible symptom, not the root cause. Full rules: release_notes/README.md.
+    # Do not append the PR link; the release tooling adds it automatically.
+    text: >-
+      Fixed Mooncake KV transfers failing after wake-up when unregistering the KV cache
+      buffers failed part-way during sleep; the wake-up now registers all of them again.

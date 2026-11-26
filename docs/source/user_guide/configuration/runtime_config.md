@@ -38,9 +38,9 @@ Valid action names: `report`, `dump_kv`. ActionQueue capacity is a fixed interna
 | `manual_dump` | bool \| int | `false` | Manual dump watermark: `false`, positive int N (catch-up: dump once per armed wave while process `done < N`; **prefer bump 1→2→3**), or `true` (continuous; **not recommended**). Never rewritten by the process. If disk value ≤ `done`, skip. Setting N=5 with `done=0` fires about five dumps across subsequent waves. Reports / `.pt` carry `manual_dump_count` (1-based seq). Multi-DP: each replica tracks its own `done`. **Ops:** start the server first, then raise N in the live JSON (hot-reload required). |
 | `dump_dir` | str \| null | derived | KV dump root (default `<report_dir>/kv_cache`). Layout: `<dump_root>/<incident_type>/<req_id>/dp*_tp*_pp*_cp*/*.pt`. Coverage is last PP × all TP (not other PP). |
 
-Free-space headroom for `dump_kv` (`estimated payload + headroom`) is a fixed internal constant (5 GiB), not a JSON field.
+Free-space headroom for `dump_kv` (`estimated payload + headroom`) is a fixed internal constant (5GB), not a JSON field.
 
-Manual dump / manual trigger skip auto quota and cooldown. Requires `runtime_config_hot_reload=true`.
+Manual dump skips the auto quota and cooldown. Requires `runtime_config_hot_reload=true`.
 
 ## report
 
@@ -51,7 +51,7 @@ Manual dump / manual trigger skip auto quota and cooldown. Requires `runtime_con
 | `max_output_token_ids` | int | `100000` | Truncate persisted output ids |
 | `max_per_req` | int | `1` | Max report files per `(incident_type, req_id)`; at cap, stop detecting that request. Wave backoff (64×2ⁿ) between writes when cap &gt; 1 |
 
-GPU `block_ids` are always included in report detail. Decoding token ids to text follows `save_sensitive_info` (no separate toggle).
+NPU `block_ids` are always included in report detail. Decoding token ids to text follows `save_sensitive_info` (no separate toggle).
 
 `[SamplingMeta]` is emitted at DEBUG on the after-sample path (TP0 + last PP). Enable with `ascend_log` / logger level for `vllm_ascend.observability.runtime_guard` — there is no JSON toggle.
 

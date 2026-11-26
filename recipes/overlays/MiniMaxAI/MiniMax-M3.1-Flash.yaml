@@ -507,7 +507,7 @@ hardware_notes:
       Eco-Tech/Minimax-M3.1-Flash-w8a8 from ModelScope; the recipe sets
       VLLM_USE_MODELSCOPE and passes --quantization ascend, and no model revision
       is pinned because the tutorial pins none. The Docker command starts the
-      container with 100g of shared memory, --network host and --privileged. The
+      container with 100g of shared memory and --network host. The
       Ascend deployment guide below covers the PD placeholders, the minimal
       decode launch and the ports.
     link:
@@ -520,7 +520,7 @@ hardware_notes:
       quay.io/ascend/vllm-ascend:minimax-m3.1-flash-a5-openeuler. The weights are
       Eco-Tech/Minimax-M3.1-Flash-w8a8-mxfp8 from ModelScope, again with
       --quantization ascend and no pinned revision. The generated Docker command
-      sets 100g of shared memory, --network host and --privileged; add
+      sets 100g of shared memory and --network host; add
       --ipc host yourself because the recipe cannot express extra Docker flags.
       The PD presets use an FP8 main-model KV cache with a BF16 DSpark draft; the
       Ascend deployment guide lists the rest.
@@ -550,7 +550,7 @@ guide_sections:
     `--quantization ascend`. No model revision is pinned, matching the tutorial.
 
     The two images are model-specific builds. Each Docker command starts the
-    container with `--network host --privileged --shm-size=100g`; the 950DT
+    container with `--network host --shm-size=100g`; the 950DT
     container also needs `--ipc host`. The recipe sets the shared-memory size for
     you.
 
