@@ -72,6 +72,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise_cache_la
     build_layerwise_reuse_layout,
     get_layerwise_kv_cache_specs,
     get_layerwise_physical_layer_index,
+    has_shared_kv_sources,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     AscendConnectorMetadata,
@@ -235,6 +236,7 @@ class KVPoolWorker:
         self.layerwise_data_plane = get_layerwise_data_plane(self.layerwise_protocol)
         self.use_block_key_layerwise = self.use_layerwise and self.layerwise_data_plane == "block_key"
         self.use_layerwise_transfer = self.use_layerwise and self.layerwise_data_plane == "gva"
+        self.has_shared_kv = self.use_layerwise_transfer and has_shared_kv_sources(vllm_config)
         validate_layerwise_topology(self.layerwise_protocol, vllm_config.parallel_config, self.use_layerwise)
         kv_cache_groups = kv_cache_config.kv_cache_groups if kv_cache_config is not None else None
         self.use_hybrid = uses_hybrid_kv_cache(vllm_config.scheduler_config, kv_cache_groups) or (
@@ -522,6 +524,12 @@ class KVPoolWorker:
             self.layerwise_key_layers = self.num_layers
             self.layerwise_key_layer_offset = 0
 
+        layout_config = self._extra_config
+        if getattr(self, "has_shared_kv", False):
+            # Source buffers remain live across their consumers, even when the
+            # connector requests a smaller scratch pool for ordinary models.
+            layout_config = {**layout_config, "layerwise_independent_layers": "all"}
+
         if self.kv_cache_config is not None:
             draft_names = getattr(self, "_dspark_draft_layer_names", ())
             layer_specs = get_layerwise_kv_cache_specs(self.kv_cache_config)
@@ -535,7 +543,7 @@ class KVPoolWorker:
                 self._layerwise_reuse_layout = build_layerwise_reuse_layout(
                     target_specs,
                     base_layers,
-                    self._extra_config,
+                    layout_config,
                 )
                 if (
                     draft_names
@@ -552,6 +560,11 @@ class KVPoolWorker:
                 for layer_name in group_spec.layer_names
                 if layer_name not in draft_names
             }
+            if getattr(self, "has_shared_kv", False):
+                # Execution layers include holes; group ordinals stay dense.
+                stage_start = self.pp_layer_offset if self.pp_size > 1 else 0
+                physical_layers.update(range(stage_start, stage_start + self.num_layers))
+                self.num_layers = len(physical_layers)
             if physical_layers:
                 self._global_to_local_layer = {
                     global_layer: local_layer for local_layer, global_layer in enumerate(sorted(physical_layers))
@@ -570,7 +583,7 @@ class KVPoolWorker:
                         effective_num_layers,
                     )
                     self.num_layers = effective_num_layers
-        if self.kv_cache_config is not None and self.num_kv_cache_groups > 1:
+        if self.kv_cache_config is not None and (self.num_kv_cache_groups > 1 or getattr(self, "has_shared_kv", False)):
             for group_id, group_spec in enumerate(self.kv_cache_config.kv_cache_groups):
                 if group_id not in self.cacheable_group_ids:
                     continue
@@ -612,7 +625,7 @@ class KVPoolWorker:
             if self._layerwise_reuse_layout is None:
                 cache_layout = build_layerwise_cache_layout(
                     self.num_layers,
-                    self._extra_config,
+                    layout_config,
                 )
                 self.layerwise_offload = cache_layout.has_layer_reuse
                 self.independent_layers = cache_layout.independent_layers
@@ -1075,6 +1088,8 @@ class KVPoolWorker:
         gbl = self.group_block_len.get(group_id) or []
         if not gbl:
             return self.page_size_bytes
+        if getattr(self, "has_shared_kv", False) and self.pp_size == self.dcp_size == 1:
+            return sum(gbl)
         # Backward compatibility: when total_layers is not set (unit tests,
         # partial init), fall back to the LOCAL sum (pre-PP behavior).
         total_layers = getattr(self, "total_layers", None)
@@ -2342,10 +2357,18 @@ class KVPoolWorker:
                 # Only call batch_add_lease for keys with valid size.
                 valid_keys = [keys[index] for index in valid_gva_indices]
                 if valid_keys:
-                    lease_results = self.m_store.batch_add_lease(valid_keys, LAYERWISE_READ_LEASE_TTL_MS)
-                    if lease_results is None or len(lease_results) != len(valid_keys):
+                    # Multiple requests in one step can share prefix keys. One
+                    # lease pins each key for the whole step, so acquire it only
+                    # once to match the set-based release at the step fence.
+                    new_keys = list(dict.fromkeys(key for key in valid_keys if key not in self._step_load_keys))
+                    new_results = (
+                        self.m_store.batch_add_lease(new_keys, LAYERWISE_READ_LEASE_TTL_MS) if new_keys else []
+                    )
+                    if new_results is None or len(new_results) != len(new_keys):
                         return False
-                    for key, res in zip(valid_keys, lease_results):
+                    result_by_key = dict(zip(new_keys, new_results))
+                    lease_results = [0 if key in self._step_load_keys else result_by_key[key] for key in valid_keys]
+                    for key, res in zip(new_keys, new_results):
                         if res == 0:
                             self._step_load_keys.add(key)
                     leased_keys = []
@@ -2391,13 +2414,15 @@ class KVPoolWorker:
                     leased_infos = self.m_store.batch_get_key_info(leased_keys)
                     if leased_infos is None or len(leased_infos) != len(leased_keys):
                         return False
-                    for key, info in zip(leased_keys, leased_infos, strict=True):
-                        index = keys.index(key)
-                        gvas[index] = (
-                            next((address for address in info.gva_list() if address > 0), 0) if info is not None else 0
-                        )
-                        if not gvas[index]:
-                            invalid_block_ids.append(int(block_ids_by_group[block_indices[index]]))
+                    pinned_gvas = {
+                        key: next((address for address in info.gva_list() if address > 0), 0) if info is not None else 0
+                        for key, info in zip(leased_keys, leased_infos, strict=True)
+                    }
+                    for index, key in enumerate(keys):
+                        if key in pinned_gvas:
+                            gvas[index] = pinned_gvas[key]
+                            if not gvas[index]:
+                                invalid_block_ids.append(int(block_ids_by_group[block_indices[index]]))
 
                 if invalid_block_ids:
                     return False
@@ -2463,7 +2488,9 @@ class KVPoolWorker:
                 raise RuntimeError(f"Mooncake layerwise: no KV cache group for local layer {local_layer}")
             return [(group_id, layer_idx) for group_id, layer_idx in groups if group_id in self.cacheable_group_ids]
         # GVA groups use stage-local indices too; PP offsets apply to pool keys and remote addresses.
-        return self.physical_layer_to_group_layers.get(local_layer, [(0, local_layer)])
+        return self.physical_layer_to_group_layers.get(
+            local_layer, [] if getattr(self, "has_shared_kv", False) else [(0, local_layer)]
+        )
 
     def _layerwise_key_batches(self, keys: list[str]) -> list[list[str]]:
         batch_size = self.layerwise_max_transfer_blocks if self.layerwise_max_transfer_blocks > 0 else max(1, len(keys))
@@ -3105,7 +3132,11 @@ class KVPoolWorker:
             if not self.layer_load_tasks[layer_id] and reuse_source is None:
                 return False
             attention_start_gate = None
-            if self.layer_load_tasks[layer_id] and layer_id != self.current_layer:
+            if (
+                self.layer_load_tasks[layer_id]
+                and layer_id != self.current_layer
+                and not getattr(self, "has_shared_kv", False)
+            ):
                 attention_start_gate = get_attention_compute_start_gate()
             recv_thread.add_request(
                 LayerLoadTask(  # type: ignore[arg-type]
@@ -3117,7 +3148,21 @@ class KVPoolWorker:
             )
             return True
 
-        window_end = min(self.current_layer + self.num_prefetch_layers, self.num_layers - 1)
+        if getattr(self, "has_shared_kv", False):
+            assert self.hf_config is not None
+            source_layers = self.hf_config.kv_source_layer_ids
+            global_layer = self.current_layer + self.layerwise_key_layer_offset
+            window_end = self.current_layer
+            if global_layer >= source_layers[-1]:
+                # Keep tail SWA and draft loads one layer ahead.
+                window_end += 1
+            elif self.current_layer == 0 or global_layer in source_layers:
+                # Submit the intervening SWA before the next shared source.
+                next_source = next(layer for layer in source_layers if layer > global_layer)
+                window_end = next_source - self.layerwise_key_layer_offset
+        else:
+            window_end = self.current_layer + self.num_prefetch_layers
+        window_end = min(window_end, self.num_layers - 1)
         while self.next_layer_to_submit <= window_end:
             layer_id = self.next_layer_to_submit
             self.next_layer_to_submit += 1

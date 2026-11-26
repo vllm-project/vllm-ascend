@@ -38,6 +38,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise_cache_la
     build_layerwise_reuse_layout,
     get_layerwise_kv_cache_specs,
     get_layerwise_reuse_config,
+    has_shared_kv_sources,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     AscendConnectorMetadata,
@@ -253,7 +254,7 @@ class KVPoolScheduler:
             self.put_step = 1
         self.num_layers = vllm_config.model_config.get_num_layers(vllm_config.parallel_config)
         self.layerwise_offload = False
-        if self.use_layerwise_transfer:
+        if self.use_layerwise_transfer and not has_shared_kv_sources(vllm_config):
             extra_config = get_layerwise_reuse_config(vllm_config.kv_transfer_config)
             if kv_cache_config is not None and extra_config is not None:
                 reuse_layout = build_layerwise_reuse_layout(

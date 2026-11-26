@@ -112,7 +112,15 @@ class LayerwiseReuseLayout:
     has_layer_reuse: bool
 
 
-def get_layerwise_reuse_config(kv_transfer_config: Any) -> dict[str, Any] | None:
+def has_shared_kv_sources(vllm_config: Any) -> bool:
+    """Identify execution layers that share a smaller set of KV sources."""
+    model = getattr(vllm_config, "model_config", None)
+    config = getattr(model, "hf_text_config", None) or getattr(model, "hf_config", None)
+    sources = getattr(config, "kv_source_layer_ids", None)
+    return isinstance(sources, (list, tuple)) and bool(sources) and len(sources) < config.num_hidden_layers
+
+
+def get_layerwise_reuse_config(kv_transfer_config: Any, *, vllm_config: Any = None) -> dict[str, Any] | None:
     """Return the extra config of the layerwise-reuse connector, if any.
 
     A connector opts into layerwise reuse when its backend carries a
@@ -120,7 +128,8 @@ def get_layerwise_reuse_config(kv_transfer_config: Any) -> dict[str, Any] | None
     config. Both checks resolve through the backend registry — the generic
     layer never names the protocol or the backend.
     """
-    if kv_transfer_config is None:
+    if kv_transfer_config is None or has_shared_kv_sources(vllm_config):
+        # Keep shared source buffers resident through their last consumer.
         return None
 
     connector_name = getattr(kv_transfer_config, "kv_connector", None)
@@ -340,7 +349,7 @@ def apply_layerwise_kv_cache_plan(
     excluded_layer_names: set[str] | None = None,
 ) -> None:
     """Rewrite logical layer tensors to use shared physical KV buffers."""
-    extra_config = get_layerwise_reuse_config(vllm_config.kv_transfer_config)
+    extra_config = get_layerwise_reuse_config(vllm_config.kv_transfer_config, vllm_config=vllm_config)
     if extra_config is None:
         return
 
