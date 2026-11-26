@@ -22,7 +22,7 @@ import logging
 from collections.abc import Mapping
 from contextlib import AbstractContextManager, contextmanager, nullcontext
 from copy import deepcopy
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 import torch
@@ -149,6 +149,9 @@ from vllm_ascend.worker.v2.utils import (
     torch_cuda_wrapper,
 )
 
+if TYPE_CHECKING:
+    from vllm.v1.worker.utils import AttentionGroup
+
 
 class NPUModelRunner(GPUModelRunner):
     """Model runner for Ascend NPUs."""
@@ -159,6 +162,7 @@ class NPUModelRunner(GPUModelRunner):
     supports_standardized_shared_kv_backing = True
 
     execute_model_state: ExecuteModelState | None
+    attn_groups: list[list["AttentionGroup"]]
     kv_connector: KVConnector
     max_num_reqs: int
     max_num_tokens: int

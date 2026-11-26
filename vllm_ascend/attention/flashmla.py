@@ -24,6 +24,7 @@ from .a3_mla_sink import A3MLAAdapter
 
 if TYPE_CHECKING:
     from vllm.v1.worker.gpu.model_runner import BatchReqState
+    from vllm.v1.worker.utils import AttentionGroup
 
 FLASHMLA_QK_DIM = 576
 FLASHMLA_V_DIM = 512
@@ -36,7 +37,9 @@ FLASHMLA_KV_LAYOUT = "PA_BBND"
 FLASHMLA_MAX_BATCH_SIZE = 65535
 
 
-def target_attn_groups_without_draft_flashmla(attn_groups, draft_layer_names):
+def target_attn_groups_without_draft_flashmla(
+    attn_groups: list[list["AttentionGroup"]], draft_layer_names: set[str]
+) -> list[list["AttentionGroup"]]:
     """Keep cache-group indices while leaving draft metadata to its own runner.
 
     Only dedicated A3 MLA draft groups are removed. Other backends and
@@ -688,6 +691,7 @@ class FlashMLAMetadataBuilder:
                 flash.sin.copy_(sin)
             self._refresh_schedule(flash, flash.cache_lens, flash.cu, flash.used_q)
             if flash.output_mask is not None and flash.current is None:
+                assert isinstance(flash.adapter, A3MLAAdapter)
                 flash.output_mask.copy_(flash.adapter.build_output_mask(flash.cache_lens, flash.cu, tokens))
             if flash.current is not None:
                 current = flash.current

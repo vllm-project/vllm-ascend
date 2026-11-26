@@ -3123,9 +3123,9 @@ class AscendMLAImpl(MLAAttentionImpl):
             output_kwargs = {"output_mask": flash.output_mask, "return_softmax_lse": False}
         else:
             output_kwargs = {}
+            flash.query[..., : self.kv_lora_rank].copy_(preprocessed.ql_nope)
+            flash.query[..., self.kv_lora_rank :].copy_(preprocessed.q_pe)
             query = flash.query
-            query[..., : self.kv_lora_rank].copy_(preprocessed.ql_nope)
-            query[..., self.kv_lora_rank :].copy_(preprocessed.q_pe)
         record_attention_compute_start()
         quant_kwargs = {}
         if self.use_quant_flashmla:
