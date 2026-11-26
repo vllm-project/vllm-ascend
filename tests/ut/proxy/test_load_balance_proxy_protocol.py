@@ -110,15 +110,126 @@ def response_text(api, response, streaming):
     if api == "/messages":
         assert sum(event["type"] == "message_start" for event in events) == 1
         assert sum(event["type"] == "message_stop" for event in events) == 1
+        indexes = [event["index"] for event in events if event["type"] == "content_block_start"]
+        assert indexes == list(range(len(indexes)))
         return "".join(
             event.get("content_block", {}).get("text", "") + event.get("delta", {}).get("text", "") for event in events
         )
     assert sum(event["type"] == "response.created" for event in events) == 1
     assert [event["sequence_number"] for event in events] == list(range(len(events)))
+    indexes = [event["output_index"] for event in events if event["type"] == "response.output_item.added"]
+    assert indexes == list(range(len(indexes)))
     text = "".join(event["delta"] for event in events if event["type"] == "response.output_text.delta")
     final = events[-1]["response"]
     assert text == "".join(part["text"] for item in final.get("output", []) for part in item.get("content", []))
     return text
+
+
+@pytest.mark.parametrize("api", ["/chat/completions", "/completions", "/messages", "/responses"])
+@pytest.mark.parametrize("disconnect", [False, True])
+def test_client_receives_text_before_backend_finishes(monkeypatch, api, disconnect):
+    """The backend cannot finish until ASGI sends text; also exercise a real disconnect."""
+
+    async def run():
+        gate, disconnected = asyncio.Event(), asyncio.Event()
+        if api in ("/messages", "/responses"):
+            raw = wire(api, {"text": "prefix", "stop_reason": "end_turn"}, True)
+            cut = raw.index(b"\r\n\r\n", raw.index(b"prefix")) + 4
+        else:
+            choice = {"delta": {"content": "prefix"}} if api == "/chat/completions" else {"text": "prefix"}
+            raw = b"data: " + json.dumps({"choices": [choice]}).encode() + b"\n\ndata: [DONE]\n\n"
+            cut = raw.index(b"\n\n") + 2
+
+        class GatedBody(httpx.AsyncByteStream):
+            closed = False
+
+            async def __aiter__(self):
+                yield raw[:cut]
+                await gate.wait()
+                yield raw[cut:]
+
+            async def aclose(self):
+                self.closed = True
+
+        body = GatedBody()
+        scheduler = proxy.SharedProxyScheduler([("127.0.0.1", 8100)], [("127.0.0.1", 8200)])
+        runtime = proxy.WorkerRuntime(scheduler)
+        monkeypatch.setattr(proxy, "runtime", runtime)
+        monkeypatch.setattr(
+            proxy, "global_args", argparse.Namespace(max_retries=2, retry_delay=0, enable_prefill_affinity=False)
+        )
+
+        async def backend(request):
+            if request.url.host == "prefill":
+                return httpx.Response(200, json={"kv_transfer_params": {"remote_block_ids": [1]}})
+            return httpx.Response(200, stream=body)
+
+        payload = {
+            "model": "m",
+            "stream": True,
+            "max_tokens": 20,
+            "max_output_tokens": 20,
+            "messages": [{"role": "user", "content": "hi"}],
+            "prompt": "hi",
+            "input": "hi",
+        }
+        # Use only the input field belonging to the endpoint.
+        field = {
+            "/chat/completions": "messages",
+            "/completions": "prompt",
+            "/messages": "messages",
+            "/responses": "input",
+        }[api]
+        for key in ("messages", "prompt", "input"):
+            if key != field:
+                payload.pop(key)
+        requested = False
+        sent = []
+
+        async def receive():
+            nonlocal requested
+            if not requested:
+                requested = True
+                return {"type": "http.request", "body": json.dumps(payload).encode(), "more_body": False}
+            await disconnected.wait()
+            return {"type": "http.disconnect"}
+
+        async def send(message):
+            sent.append(message)
+            if message["type"] == "http.response.body" and b"prefix" in message.get("body", b""):
+                if disconnect:
+                    disconnected.set()
+                else:
+                    gate.set()
+
+        transport = httpx.MockTransport(backend)
+        async with (
+            httpx.AsyncClient(base_url="http://prefill/v1", transport=transport) as prefill,
+            httpx.AsyncClient(base_url="http://decode/v1", transport=transport) as decode,
+        ):
+            runtime._clients[proxy.ServerRole.PREFILL][proxy.server_key("127.0.0.1", 8100)] = prefill
+            runtime._clients[proxy.ServerRole.DECODE][proxy.server_key("127.0.0.1", 8200)] = decode
+            scope = {
+                "type": "http",
+                "asgi": {"version": "3.0", "spec_version": "2.0"},
+                "http_version": "1.1",
+                "method": "POST",
+                "scheme": "http",
+                "path": "/v1" + api,
+                "query_string": b"",
+                "headers": [(b"content-type", b"application/json")],
+                "client": ("127.0.0.1", 1),
+                "server": ("127.0.0.1", 2),
+            }
+            await asyncio.wait_for(proxy.app(scope, receive, send), timeout=3)
+        assert gate.is_set() != disconnect
+        assert any(b"prefix" in message.get("body", b"") for message in sent)
+        assert body.closed
+        assert scheduler.request_num == 0
+        assert all(entry.active_kv_cache == 0 for entry in scheduler.prefillers.values())
+        assert all(entry.active_tokens == 0 for entry in scheduler.decoders.values())
+
+    asyncio.run(run())
 
 
 @pytest.fixture
@@ -185,6 +296,26 @@ def exchange(monkeypatch):
         return response, calls
 
     return lambda *args, **kwargs: asyncio.run(run(*args, **kwargs))
+
+
+@pytest.mark.parametrize("api", ["/chat/completions", "/completions", "/messages", "/responses"])
+@pytest.mark.parametrize("fragmented", [False, True])
+def test_shared_frame_path_never_duplicates_or_drops_events(exchange, api, fragmented):
+    payload = {"stream": True, "messages": [{"role": "user", "content": "hi"}]}
+    if api == "/completions":
+        payload = {"stream": True, "prompt": "hi"}
+    if api in ("/messages", "/responses"):
+        raw = wire(api, {"text": "你好", "stop_reason": "end_turn"}, True)
+    else:
+        frames = []
+        for text in ("你", "好"):
+            choice = {"delta": {"content": text}} if api == "/chat/completions" else {"text": text}
+            frames.append(b"data: " + json.dumps({"choices": [choice]}, ensure_ascii=False).encode() + b"\n\n")
+        raw = b"".join(frames) + b"data: [DONE]\n\n"
+    script = httpx.Response(200, stream=Body(raw)) if fragmented else httpx.Response(200, content=raw)
+    response, _ = exchange(api, payload, [script])
+    assert response.status_code == 200
+    assert response.content == raw
 
 
 @pytest.mark.parametrize("api", ["/chat/completions", "/completions", "/messages", "/responses"])
@@ -336,9 +467,11 @@ def test_recompute_appends_text_and_reduces_budget(exchange, api, streaming, exh
         "max_output_tokens": 80,
     }
     response, calls = exchange(api, payload, [httpx.Response(200, stream=first), httpx.Response(200, stream=last)])
-    assert response.status_code == (503 if exhausted else 200)
+    assert response.status_code == (503 if exhausted and not streaming else 200)
     if exhausted:
-        assert "retry limit" in response.json()["detail"]
+        assert b"retry limit" in response.content
+        if streaming:
+            assert b"event: error" in response.content
     else:
         assert response_text(api, response, streaming) == "prefixdone"
     assert first.closed and last.closed
@@ -361,7 +494,7 @@ def test_recompute_in_unterminated_final_event(exchange, api):
         api, {"stream": True}, [httpx.Response(200, content=stopped), httpx.Response(200, content=final)]
     )
     assert response.status_code == 200
-    assert response.content == final
+    assert response_text(api, response, True) == "done"
     assert len(calls["prefill"]) == len(calls["decode"]) == 2
 
 
@@ -419,8 +552,10 @@ def test_recompute_does_not_exceed_token_budget(exchange, api, streaming):
             )
         ],
     )
-    assert response.status_code == 503
-    assert "budget" in response.json()["detail"]
+    assert response.status_code == (200 if streaming else 503)
+    assert b"budget" in response.content
+    if streaming:
+        assert b"event: error" in response.content
     assert len(calls["decode"]) == len(calls["prefill"]) == 1
 
 
@@ -480,7 +615,10 @@ def test_recompute_never_silently_drops_nontext_output(exchange, api, streaming)
     else:
         stopped["output"] = [{"type": "function_call", "id": "tool", "name": "f", "arguments": "{}"}]
     response, calls = exchange(api, {"stream": streaming}, [httpx.Response(200, content=wire(api, stopped, streaming))])
-    assert response.status_code == 409
+    assert response.status_code == (200 if streaming else 409)
+    assert b"text-only" in response.content
+    if streaming:
+        assert b"event: error" in response.content
     assert len(calls["decode"]) == 1
 
 
@@ -509,7 +647,10 @@ def test_recompute_only_uses_protocol_stop_fields(exchange, api, stopped, option
         {"stream": streaming, **options},
         [httpx.Response(200, content=original), httpx.Response(200, content=final)],
     )
-    assert response.content == (final if retry else original)
+    if retry:
+        assert response_text(api, response, streaming) == "done"
+    else:
+        assert response.content == original
     assert len(calls["decode"]) == len(calls["prefill"]) == (2 if retry else 1)
 
 
@@ -536,6 +677,21 @@ def test_backend_error_uses_existing_retry_policy(exchange, api, status):
 
 
 @pytest.mark.parametrize("api", ["/messages", "/responses"])
+@pytest.mark.parametrize("read_error", [False, True])
+def test_stream_failure_after_text_is_an_error_event(exchange, api, read_error):
+    raw = wire(api, {"text": "prefix", "stop_reason": "end_turn"}, True)
+    cut = raw.index(b"\r\n\r\n", raw.index(b"prefix")) + 4
+    body = Body(raw[:cut], httpx.ReadError("connection lost") if read_error else None)
+    response, calls = exchange(api, {"stream": True}, [httpx.Response(200, stream=body)])
+    assert response.status_code == 200
+    assert b"prefix" in response.content
+    assert response.content.count(b"event: error") == 1
+    assert b"terminal event" in response.content
+    assert len(calls["decode"]) == 1
+    assert body.closed
+
+
+@pytest.mark.parametrize("api", ["/messages", "/responses"])
 @pytest.mark.parametrize("streaming", [False, True])
 def test_interrupted_decode_returns_502_and_closes_backend(exchange, api, streaming):
     stream = Body(b'{"partial":', httpx.ReadError("connection lost"))
@@ -554,10 +710,10 @@ def test_incomplete_json_returns_502(exchange):
 @pytest.mark.parametrize("error", [asyncio.CancelledError, httpx.ReadError])
 def test_recompute_failure_releases_load(exchange, stage, error):
     stream = Body(
-        wire("/messages", {"stop_reason": "recomputed"}, True), error("interrupted") if stage == "decode" else None
+        wire("/messages", {"stop_reason": "recomputed"}, False), error("interrupted") if stage == "decode" else None
     )
     kwargs = {"prefill_error": error("interrupted")} if stage == "retry_prefill" else {}
-    args = ("/messages", {"stream": True}, [httpx.Response(200, stream=stream)])
+    args = ("/messages", {"stream": False}, [httpx.Response(200, stream=stream)])
     if error is asyncio.CancelledError:
         with pytest.raises(asyncio.CancelledError):
             exchange(*args, **kwargs)

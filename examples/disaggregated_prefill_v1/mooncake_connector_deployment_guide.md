@@ -23,12 +23,19 @@ an explicit `max_tokens` / `max_output_tokens` budget. The final response combin
 the earlier text with the continuation and accumulates output-token usage.
 For Responses list input, continuation requires the first item to be a message
 with `content`; a tool-result item cannot be used as the text prompt.
-`--max-retries` bounds the attempts; exhausted attempts or token budget return
-HTTP 503. Continuation currently supports text output; a recomputed response with
-tool or reasoning output returns HTTP 409 instead of silently losing that content.
-Messages/Responses SSE remains buffered until completion to combine text within
-one set of protocol events. These streams do not deliver tokens in real time.
-Chat and Completions keep their existing streaming and continuation behavior.
+`--max-retries` bounds the attempts. For non-streaming requests, exhausted attempts
+or token budgets return HTTP 503; unsupported tool/reasoning continuation returns
+HTTP 409 instead of silently losing that content. Once streaming headers have been
+sent, failures are reported as protocol error events instead of changing HTTP status.
+
+All four APIs share the transport, frame-reading, reassignment, and response path.
+Streaming forwards each complete SSE frame immediately; only incomplete frames
+are buffered. Messages continuation keeps one message lifecycle with consecutive
+content-block indexes. Responses continuation keeps one response lifecycle,
+consecutive output indexes and event sequence numbers, and combines output items
+in the final response. Complete JSON bodies are collected for non-streaming requests.
+Chat/Completions retain their text-continuation and transport-retry policy. The
+shared frame reader also prevents coalesced network chunks from duplicating events.
 
 Messages also recognizes `stop_reason="stop_sequence"` with
 `stop_sequence="recomputed"`, unless the caller explicitly requested that stop

@@ -13,7 +13,6 @@
 # - Load balances requests to multiple prefiller and decoder servers.
 # - Supports OpenAI-compatible /v1/completions and /v1/chat/completions endpoints.
 # - Forwards Anthropic /v1/messages and OpenAI /v1/responses APIs.
-#   Messages/Responses output is buffered to join recomputed continuations.
 # - Streams responses from backend servers to clients.
 #
 # Prerequisites:
@@ -125,6 +124,7 @@ import ipaddress
 import json
 import logging
 import os
+import re
 import sys
 import tempfile
 import threading
@@ -927,7 +927,8 @@ async def stream_service_response(
         req_data.pop("stream_options", None)
     for attempt in range(1, max_attempts + 1):
         first_chunk_sent = False
-        buffered_body = bytearray() if endpoint in ("/messages", "/responses") else None
+        response_started = False
+        pending = b""
         try:
             async with client.stream("POST", endpoint, json=req_data, headers=headers) as response:
                 if response.status_code >= 400:
@@ -939,13 +940,18 @@ async def stream_service_response(
                     response.raise_for_status()
                 async for chunk in response.aiter_bytes():
                     first_chunk_sent = True
-                    if buffered_body is None:
-                        yield chunk
-                    else:
-                        buffered_body.extend(chunk)
-                if buffered_body is not None:
-                    # Join continuation text before returning one complete response.
-                    yield bytes(buffered_body)
+                    pending += chunk
+                    # Frame boundaries, not network reads, define output chunks.
+                    # JSON needs its full body; SSE only needs one complete event.
+                    if pending.lstrip().startswith((b"{", b"[")):
+                        continue
+                    while match := re.search(rb"\r\n\r\n|\n\n|\r\r", pending):
+                        frame, pending = pending[: match.end()], pending[match.end() :]
+                        response_started = True
+                        yield frame
+                if pending:
+                    response_started = True
+                    yield pending
                 return
         except httpx.HTTPStatusError as exc:
             if exc.response.status_code == 400 or attempt == max_attempts:
@@ -953,7 +959,7 @@ async def stream_service_response(
             logger.warning("Attempt %s failed for streaming %s: %s", attempt, endpoint, exc)
         except httpx.RequestError as exc:
             if first_chunk_sent:
-                if buffered_body is not None:
+                if not response_started:
                     raise
                 logger.error("Streaming to client interrupted after response started: %s", exc)
                 return
@@ -962,7 +968,7 @@ async def stream_service_response(
             logger.warning("Attempt %s failed for streaming %s: %s", attempt, endpoint, exc)
         except Exception as exc:
             if first_chunk_sent:
-                if buffered_body is not None:
+                if not response_started:
                     raise
                 logger.error("Streaming to client interrupted after response started: %s", exc)
                 return
@@ -1142,6 +1148,12 @@ async def handle_completions_impl(api: str, request: Request):
             origin_prompt = ""
         token_limit = "max_output_tokens" if api == "/responses" else "max_tokens"
         origin_max_tokens = req_data.get(token_limit)
+        # Preserve the pre-existing Chat/Completions recompute policy.
+        recompute_limit = {"/messages": args.max_retries, "/responses": args.max_retries}.get(api)
+        end_events = {
+            "/messages": ("message_stop", "error"),
+            "/responses": ("response.completed", "response.incomplete", "error"),
+        }.get(api, ())
         if api in ("/chat/completions", "/completions"):
             origin_max_tokens = req_data.get("max_tokens", 16)
 
@@ -1189,16 +1201,17 @@ async def handle_completions_impl(api: str, request: Request):
             )
 
         async def generate_stream():
-            nonlocal instance_info
-            nonlocal request_released
-            nonlocal preopened_gen, preopened_first
+            nonlocal instance_info, request_released, preopened_gen, preopened_first
             generated_token = ""
             released_kv = False
             retry_count = 0
             retry = True
             completion_tokens = 0
+            previous_items = []
+            sequence_number = 0
+            response_id = None
+            backend_gen = None
             reported_prefiller_cached_tokens = instance_info.prefiller_cached_tokens
-            frame_parser = SSEFrameParser()
 
             async def release_prefill_kv_once() -> None:
                 nonlocal released_kv
@@ -1212,21 +1225,16 @@ async def handle_completions_impl(api: str, request: Request):
                 while retry:
                     retry = False
                     attempt_text = ""
-                    attempt_output_tokens = 0
-                    text_prefix_sent = False
-                    response_text_index = None
+                    attempt_items = []
                     structured_output = False
-                    # Each decoder attempt emits a self-contained stream, so the
-                    # frame buffer must be reset at every attempt boundary.
-                    frame_parser = SSEFrameParser()
+                    terminal_seen = False
                     if preopened_gen is not None:
-                        # First iteration: consume the decode stream pre-opened by the
-                        # caller so initial 4xx/5xx could be returned with the real status.
+                        backend_gen = preopened_gen
                         gen = _replay_first_chunk(preopened_first, preopened_gen)
                         preopened_gen = None
                     else:
                         decoder_client = await runtime.get_client(ServerRole.DECODE, instance_info.decoder_key)
-                        gen = stream_service_response(
+                        backend_gen = stream_service_response(
                             decoder_client,
                             api,
                             req_data,
@@ -1234,249 +1242,201 @@ async def handle_completions_impl(api: str, request: Request):
                             max_retries=args.max_retries,
                             base_delay=args.retry_delay,
                         )
+                        gen = backend_gen
                     async for chunk in gen:
                         if not released_kv and chunk:
                             await release_prefill_kv_once()
-                        # The decode backend speaks SSE, but the network does
-                        # not respect frame boundaries: one frame can arrive
-                        # split across two chunks, and two frames can be
-                        # coalesced into one chunk. Reassemble frames before
-                        # decoding them, so no frame is dropped.
-                        if api in ("/messages", "/responses") and not stream_flag:
-                            obj = json.loads(chunk)
-                            frames = [SSEFrame(obj, False)] if isinstance(obj, dict) else []
+                        # The transport yields complete frames. Keep their original bytes
+                        # unless a protocol field must change; reuse the shared JSON/SSE parser.
+                        is_sse = not chunk.lstrip().startswith((b"{", b"["))
+                        if is_sse:
+                            data = b"\n".join(
+                                line[5:].lstrip() for line in chunk.splitlines() if line.startswith(b"data:")
+                            )
+                            frames = SSEFrameParser().feed(b"data: " + data + b"\n\n")
                         else:
-                            data = chunk
-                            if api in ("/messages", "/responses"):
-                                # Adapt event framing for the existing parser; preserve bytes unless retrying.
-                                data = b"\n\n".join(
-                                    b"data: "
-                                    + b"\n".join(
-                                        line[5:].lstrip() for line in frame.splitlines() if line.startswith(b"data:")
-                                    )
-                                    for frame in chunk.replace(b"\r\n", b"\n").replace(b"\r", b"\n").split(b"\n\n")
-                                )
-                            frames = frame_parser.feed(data)
-                            # These attempts are fully buffered; include an unterminated final frame.
-                            if api in ("/messages", "/responses") and (tail := frame_parser.flush()) is not None:
-                                frames.append(tail)
+                            frames = [SSEFrame(json.loads(chunk), False)]
                         if not frames:
-                            # No complete frame yet; forward the raw bytes so
-                            # the client still sees them, and wait for the
-                            # rest of the frame.
-                            if chunk:
-                                yield chunk
+                            yield chunk
                             continue
-                        for frame in list(frames):
-                            chunk_json = frame.payload
-                            is_sse = frame.is_sse
-                            if api == "/messages":
-                                result = (
-                                    chunk_json.get("delta") if chunk_json.get("type") == "message_delta" else chunk_json
-                                )
-                            elif api == "/responses":
-                                result = chunk_json.get("response", chunk_json)
-                            else:
-                                result = None
-                            choices = chunk_json.get("choices", [])
-                            if api in ("/messages", "/responses"):
-                                if not isinstance(result, dict):
-                                    continue
-                                event_type = chunk_json.get("type")
-                                event_index = (chunk_json.get("output_index"), chunk_json.get("content_index"))
-                                if (
-                                    api == "/responses"
-                                    and event_type in ("response.output_text.delta", "response.output_text.done")
-                                    and response_text_index is None
-                                ):
-                                    response_text_index = event_index
-                                text_parts = []
-                                if api == "/messages":
-                                    if not stream_flag:
-                                        text_parts = result.get("content", [])
-                                    elif event_type == "content_block_start":
-                                        text_parts = [chunk_json.get("content_block", {})]
-                                    elif event_type == "content_block_delta":
-                                        text_parts = [chunk_json.get("delta", {})]
-                                elif not stream_flag or event_type in ("response.completed", "response.incomplete"):
-                                    for item in result.get("output", []):
-                                        structured_output |= item.get("type") != "message"
-                                        text_parts.extend(item.get("content", []))
-                                elif event_type == "response.output_text.delta":
-                                    attempt_text += chunk_json.get("delta", "")
-                                for part in text_parts:
-                                    structured_output |= part.get("type") not in ("text", "text_delta", "output_text")
-                                # Responses terminal output repeats its streamed deltas.
-                                if not (api == "/responses" and stream_flag and attempt_text):
-                                    attempt_text += "".join(part.get("text", "") for part in text_parts)
-                                attempt_output_tokens = (chunk_json.get("usage") or result.get("usage") or {}).get(
-                                    "output_tokens", attempt_output_tokens
-                                )
-                                if generated_token:
-                                    # Keep one protocol envelope; include the earlier text in
-                                    # both streamed deltas and the final response snapshots.
-                                    if api == "/messages":
-                                        if not stream_flag:
-                                            if not text_parts:
-                                                result["content"] = text_parts = [{"type": "text", "text": ""}]
-                                            text_parts[0]["text"] = generated_token + text_parts[0].get("text", "")
-                                        elif text_parts and not text_prefix_sent:
-                                            text_parts[0]["text"] = generated_token + text_parts[0].get("text", "")
-                                            text_prefix_sent = True
-                                    elif event_type == "response.output_text.delta" and not text_prefix_sent:
-                                        chunk_json["delta"] = generated_token + chunk_json.get("delta", "")
-                                        text_prefix_sent = True
-                                    elif (
-                                        event_type == "response.output_text.done" and event_index == response_text_index
-                                    ):
-                                        if not text_prefix_sent:
-                                            prefix = {**chunk_json, "type": "response.output_text.delta"}
-                                            prefix.pop("text", None)
-                                            prefix["delta"] = generated_token
-                                            frames.insert(frames.index(frame), SSEFrame(prefix, True))
-                                            text_prefix_sent = True
-                                        chunk_json["text"] = generated_token + chunk_json.get("text", "")
-                                    elif (
-                                        event_type == "response.content_part.done"
-                                        and event_index == response_text_index
-                                    ):
-                                        part = chunk_json.get("part", {})
-                                        if part.get("type") == "output_text":
-                                            part["text"] = generated_token + part.get("text", "")
-                                    elif event_type == "response.output_item.done" and (
-                                        response_text_index is not None
-                                        and chunk_json.get("output_index") == response_text_index[0]
-                                    ):
-                                        parts = chunk_json.get("item", {}).get("content", [])
-                                        if parts and parts[0].get("type") == "output_text":
-                                            parts[0]["text"] = generated_token + parts[0].get("text", "")
-                                    elif text_parts:
-                                        text_parts[0]["text"] = generated_token + text_parts[0].get("text", "")
-                                    usage = chunk_json.get("usage") or result.get("usage")
-                                    if usage and "output_tokens" in usage:
-                                        usage["output_tokens"] += completion_tokens
-                                        if "total_tokens" in usage:
-                                            usage["total_tokens"] += completion_tokens
+                        chunk_json = frames[0].payload
+                        event_type = chunk_json.get("type")
+                        terminal_seen |= event_type in end_events
+                        content = ""
+                        stop_reason = None
+                        used_tokens = 0
+                        token_credit = 0
+                        rewrite = False
+
+                        if api == "/messages":
+                            result = chunk_json.get("delta", {}) if event_type == "message_delta" else chunk_json
+                            if event_type == "message_start" and retry_count:
+                                continue
+                            if event_type == "content_block_start":
+                                block = chunk_json.get("content_block", {})
+                                attempt_items.append(block)
+                                structured_output |= block.get("type") != "text"
+                                attempt_text += block.get("text", "")
+                            elif event_type == "content_block_delta":
+                                delta = chunk_json.get("delta", {})
+                                structured_output |= delta.get("type") != "text_delta"
+                                attempt_text += delta.get("text", "")
+                            if "index" in chunk_json and retry_count:
+                                chunk_json["index"] += len(previous_items)
+                                rewrite = True
+                            if not is_sse:
+                                attempt_items = chunk_json.get("content", [])
+                                structured_output = any(item.get("type") != "text" for item in attempt_items)
+                                attempt_text = "".join(item.get("text", "") for item in attempt_items)
+                                if retry_count:
+                                    chunk_json["content"] = previous_items + attempt_items
+                                    rewrite = True
+                            if not is_sse or event_type == "message_delta":
+                                content = attempt_text
                                 stop_reason = result.get("stop_reason")
                                 if (
-                                    api == "/messages"
-                                    and stop_reason == "stop_sequence"
+                                    stop_reason == "stop_sequence"
                                     and result.get("stop_sequence") == "recomputed"
                                     and "recomputed" not in (req_data.get("stop_sequences") or [])
                                 ):
                                     stop_reason = "recomputed"
-                                if stop_reason != "recomputed":
+                                usage = chunk_json.get("usage") or result.get("usage") or {}
+                                used_tokens = usage.get("output_tokens", 0)
+                                if retry_count and "output_tokens" in usage:
+                                    usage["output_tokens"] += completion_tokens
+                                    if "total_tokens" in usage:
+                                        usage["total_tokens"] += completion_tokens
+                                    rewrite = True
+
+                        elif api == "/responses":
+                            result = chunk_json.get("response", chunk_json)
+                            if event_type in ("response.created", "response.in_progress"):
+                                response_id = response_id or result.get("id")
+                                if retry_count:
                                     continue
-                                # Only the stop marker enters the existing retry path.
-                                choices = [{"stop_reason": stop_reason}]
-                            # A frame is re-encoded only when the proxy has to
-                            # rewrite its payload (cached-token injection, or
-                            # the non-streaming reply). Otherwise the original
-                            # bytes are forwarded unchanged.
-                            out_chunk = chunk
-                            if not choices:
-                                if update_cached_tokens_in_chunk(chunk_json, reported_prefiller_cached_tokens):
-                                    out_chunk = encode_response_chunk(chunk_json, is_sse)
-                                yield out_chunk
-                                continue
+                            if event_type == "response.output_text.delta":
+                                attempt_text += chunk_json.get("delta", "")
+                            if "output_index" in chunk_json and retry_count:
+                                chunk_json["output_index"] += len(previous_items)
+                                rewrite = True
+                            if not is_sse or event_type in ("response.completed", "response.incomplete"):
+                                attempt_items = result.get("output", [])
+                                structured_output = any(
+                                    item.get("type") != "message"
+                                    or any(part.get("type") != "output_text" for part in item.get("content", []))
+                                    for item in attempt_items
+                                )
+                                content = (
+                                    "".join(
+                                        part.get("text", "")
+                                        for item in attempt_items
+                                        for part in item.get("content", [])
+                                    )
+                                    or attempt_text
+                                )
+                                stop_reason = result.get("stop_reason")
+                                usage = result.get("usage") or {}
+                                used_tokens = usage.get("output_tokens", 0)
+                                if retry_count:
+                                    result["output"] = previous_items + attempt_items
+                                    if response_id:
+                                        result["id"] = response_id
+                                    if "output_tokens" in usage:
+                                        usage["output_tokens"] += completion_tokens
+                                    if "total_tokens" in usage:
+                                        usage["total_tokens"] += completion_tokens
+                                    rewrite = True
+
+                        else:
+                            # Preserve Chat/Completions text continuation and token accounting.
+                            choices = chunk_json.get("choices", [])
+                            if choices:
+                                choice = choices[0]
+                                delta, message = choice.get("delta") or {}, choice.get("message") or {}
+                                content = delta.get("content") or message.get("content") or choice.get("text") or ""
+                                stop_reason = choice.get("stop_reason")
+                                used_tokens = (
+                                    1 if stream_flag else (chunk_json.get("usage") or {}).get("completion_tokens", 0)
+                                )
+                                token_credit = retry_count + 1
+                            else:
+                                rewrite = update_cached_tokens_in_chunk(chunk_json, reported_prefiller_cached_tokens)
                             if not stream_flag:
-                                out_chunk = encode_response_chunk(chunk_json, is_sse)
+                                rewrite = True
 
-                            choice = choices[0]
-                            delta = choice.get("delta") or {}
-                            message = choice.get("message") or {}
-                            content = delta.get("content") or message.get("content") or choice.get("text") or ""
-                            generated_token += content
-
-                            stop_reason = choice.get("stop_reason")
-                            usage = chunk_json.get("usage", {})
-                            if api in ("/messages", "/responses"):
-                                completion_tokens += attempt_output_tokens
-                            else:
-                                completion_tokens = (
-                                    (completion_tokens + 1)
-                                    if stream_flag
-                                    else (completion_tokens + usage.get("completion_tokens", 0))
+                        generated_token += content
+                        completion_tokens += used_tokens
+                        if stop_reason == "recomputed":
+                            retry = True
+                            retry_count += 1
+                            if structured_output:
+                                raise HTTPException(
+                                    status_code=409, detail="Recompute continuation requires text-only output."
                                 )
-                            if stop_reason == "recomputed":
-                                retry = True
-                                retry_count += 1
-                                if api in ("/messages", "/responses"):
-                                    if structured_output:
+                            if recompute_limit is not None and retry_count >= max(1, recompute_limit):
+                                raise HTTPException(status_code=503, detail="Decode recompute retry limit reached.")
+                            if api == "/responses":
+                                if isinstance(response_input, str) or not response_input:
+                                    req_data["input"] = (response_input or "") + generated_token
+                                else:
+                                    if "content" not in response_input[0]:
                                         raise HTTPException(
-                                            status_code=409, detail="Recompute continuation requires text-only output."
+                                            status_code=409,
+                                            detail="Recompute requires a first input message with content.",
                                         )
-                                    if retry_count >= max(1, args.max_retries):
-                                        raise HTTPException(
-                                            status_code=503, detail="Decode recompute retry limit reached."
-                                        )
-                                    req_data.pop("kv_transfer_params", None)
-                                    generated_token += attempt_text
-                                    if origin_max_tokens is not None:
-                                        remaining_tokens = origin_max_tokens - completion_tokens
-                                        if remaining_tokens <= 0:
-                                            raise HTTPException(
-                                                status_code=503, detail="Recompute token budget exhausted."
-                                            )
-                                        req_data[token_limit] = remaining_tokens
-                                if api in ("/chat/completions", "/messages"):
-                                    messages[0]["content"] = (
-                                        origin_prompt
-                                        + ([{"type": "text", "text": generated_token}] if generated_token else [])
+                                    response_input[0]["content"] = (
+                                        origin_prompt + [{"type": "input_text", "text": generated_token}]
                                         if isinstance(origin_prompt, list)
-                                        else (origin_prompt or "") + generated_token
+                                        else origin_prompt + generated_token
                                     )
-                                elif api == "/responses":
-                                    if isinstance(response_input, str) or not response_input:
-                                        req_data["input"] = (response_input or "") + generated_token
-                                    else:
-                                        if "content" not in response_input[0]:
-                                            raise HTTPException(
-                                                status_code=409,
-                                                detail="Recompute requires a first input message with content.",
-                                            )
-                                        response_input[0]["content"] = (
-                                            origin_prompt + [{"type": "input_text", "text": generated_token}]
-                                            if isinstance(origin_prompt, list)
-                                            else origin_prompt + generated_token
-                                        )
-                                else:
-                                    req_data["prompt"] = origin_prompt + generated_token
-                                if api in ("/chat/completions", "/completions"):
-                                    req_data["max_tokens"] = origin_max_tokens - completion_tokens + retry_count
-                                tmp_request_length = len(json.dumps(req_data).encode("utf-8"))
-                                instance_info = await reassign_instances(
-                                    api,
-                                    req_data,
-                                    tmp_request_length,
-                                    instance_info,
-                                    previous_prefiller_kv_released=released_kv,
+                            elif "messages" in req_data:
+                                messages[0]["content"] = (
+                                    origin_prompt
+                                    + ([{"type": "text", "text": generated_token}] if generated_token else [])
+                                    if isinstance(origin_prompt, list)
+                                    else (origin_prompt or "") + generated_token
                                 )
-                                released_kv = False
-                                break
-                            if retry_count > 0 and not stream_flag:
-                                if chat_flag:
-                                    choice["message"]["content"] = generated_token
-                                else:
-                                    choice["text"] = generated_token
-                                out_chunk = encode_response_chunk(chunk_json, is_sse)
-                            yield out_chunk
-                        if api in ("/messages", "/responses") and not retry:
-                            if retry_count and generated_token:
-                                if structured_output:
-                                    raise HTTPException(
-                                        status_code=409, detail="Recompute continuation requires text-only output."
-                                    )
-                                for sequence_number, frame in enumerate(frames):
-                                    if stream_flag:
-                                        if "sequence_number" in frame.payload:
-                                            frame.payload["sequence_number"] = sequence_number
-                                        yield b"event: " + frame.payload["type"].encode() + b"\n"
-                                    yield encode_response_chunk(frame.payload, stream_flag)
                             else:
-                                yield chunk
-                        if retry:
+                                req_data["prompt"] = origin_prompt + generated_token
+                            if origin_max_tokens is not None:
+                                remaining = origin_max_tokens - completion_tokens + token_credit
+                                if recompute_limit is not None and remaining <= 0:
+                                    raise HTTPException(status_code=503, detail="Recompute token budget exhausted.")
+                                req_data[token_limit] = remaining
+                            req_data.pop("kv_transfer_params", None)
+                            previous_items.extend(attempt_items)
+                            # The stream is no longer fully consumed before a retry:
+                            # close this decode connection before selecting the next P/D.
+                            await backend_gen.aclose()
+                            instance_info = await reassign_instances(
+                                api,
+                                req_data,
+                                len(json.dumps(req_data).encode("utf-8")),
+                                instance_info,
+                                previous_prefiller_kv_released=released_kv,
+                            )
+                            released_kv = False
                             break
+                        if retry_count and not stream_flag and api == "/chat/completions" and choices:
+                            choice["message"]["content"] = generated_token
+                            rewrite = True
+                        elif retry_count and not stream_flag and api == "/completions" and choices:
+                            choice["text"] = generated_token
+                            rewrite = True
+                        if "sequence_number" in chunk_json:
+                            if retry_count:
+                                chunk_json["sequence_number"] = sequence_number
+                                rewrite = True
+                            sequence_number += 1
+                        if rewrite:
+                            chunk = encode_response_chunk(chunk_json, is_sse)
+                            if is_sse and event_type:
+                                chunk = b"event: " + event_type.encode() + b"\n" + chunk
+                        yield chunk
+                    if stream_flag and not retry and end_events and not terminal_seen:
+                        raise HTTPException(
+                            status_code=502, detail="The decode stream ended before its terminal event."
+                        )
             except asyncio.CancelledError:
                 logger.warning(
                     "Streaming from decoder %s:%s was cancelled; releasing request %s resources",
@@ -1486,8 +1446,6 @@ async def handle_completions_impl(api: str, request: Request):
                 )
                 raise
             except Exception as exc:
-                if api in ("/messages", "/responses"):
-                    raise
                 logger.error(
                     "Error during streaming from decoder %s:%s: %s while handling request %s; releasing prefiller KV",
                     instance_info.decoder_host,
@@ -1495,15 +1453,37 @@ async def handle_completions_impl(api: str, request: Request):
                     exc,
                     instance_info.request_id,
                 )
+                if not stream_flag:
+                    raise
+                # Headers may already be sent. Report failure using the endpoint's SSE protocol.
+                error = None
+                message = str(getattr(exc, "detail", exc))
+                if api == "/messages":
+                    error = {"type": "error", "error": {"type": "api_error", "message": message}}
+                elif api == "/responses":
+                    error = {
+                        "type": "error",
+                        "code": "proxy_error",
+                        "message": message,
+                        "param": None,
+                        "sequence_number": sequence_number,
+                    }
+                if error:
+                    yield b"event: error\n" + encode_response_chunk(error, True)
             finally:
-                await _finish_instance(runtime, instance_info, release_prefill_kv=not released_kv)
-                released_kv = True
-                request_released = True
+                try:
+                    if backend_gen is not None:
+                        await backend_gen.aclose()
+                finally:
+                    await _finish_instance(runtime, instance_info, release_prefill_kv=not released_kv)
+                    released_kv = True
+                    request_released = True
 
         media_type = "text/event-stream; charset=utf-8" if stream_flag else "application/json"
-        if api in ("/messages", "/responses"):
-            return Response(b"".join([chunk async for chunk in generate_stream()]), media_type=media_type)
-        return StreamingResponse(generate_stream(), media_type=media_type)
+        if stream_flag:
+            return StreamingResponse(generate_stream(), media_type=media_type)
+        return Response(b"".join([chunk async for chunk in generate_stream()]), media_type=media_type)
+
     except Exception as e:
         import traceback
 
@@ -1519,9 +1499,7 @@ async def handle_completions_impl(api: str, request: Request):
             except Exception:
                 err_body = {"error": {"message": e.response.text or "upstream error"}}
             return JSONResponse(err_body, status_code=e.response.status_code)
-        if api in ("/messages", "/responses") and isinstance(
-            e, (httpx.RequestError, json.JSONDecodeError, UnicodeDecodeError)
-        ):
+        if isinstance(e, (httpx.RequestError, json.JSONDecodeError, UnicodeDecodeError)):
             return JSONResponse(
                 {"error": {"message": "The decode backend did not complete the request."}}, status_code=502
             )
