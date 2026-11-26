@@ -5,7 +5,7 @@ Comment examples below use shortened hashes and formatted JSON.
 Command feedback (appended to the user's original comment):
     /ai-review I fixed F001. Please check it again.
     ---
-    [AI review bot]: Review request accepted. The bot will check the round limit before starting.
+    🤖 [AI review bot]: 🟢 Review request accepted. The bot will check the round limit before starting.
     [View Actions run](https://github.com/owner/repo/actions/runs/123)
 
 PR summary (updated in place):
@@ -308,18 +308,18 @@ class Orchestrator:
         pull = self.pull()
         if pull["state"] != "open":
             if command != "push":
-                self.feedback(event, "This PR is closed.")
+                self.feedback(event, "🔴 This PR is closed.")
             return False
 
         if command == "/ai-review":
             if actor != pull["user"]["login"] and not self.can_write(actor):
                 self.feedback(
                     event,
-                    "Permission denied. Only the PR author or a maintainer with write access can request a review.",
+                    "🔴 Permission denied. Only the PR author or a maintainer with write access can request a review.",
                 )
                 return False
         elif command in ("/ai-review-stop", "/ai-review-waive") and not self.can_write(actor):
-            self.feedback(event, "Permission denied. This action requires repository write access.")
+            self.feedback(event, "🔴 Permission denied. This action requires repository write access.")
             return False
 
         enabled = AI_REVIEW_LABEL in {label["name"] for label in pull["labels"]}
@@ -328,7 +328,7 @@ class Orchestrator:
         if command not in ("stop", "/ai-review-stop") and not enabled:
             if command != "push":
                 self.feedback(
-                    event, "AI review is not enabled. Ask an allowlisted reviewer to add the `ai-review` label."
+                    event, "🔴 AI review is not enabled. Ask an allowlisted reviewer to add the `ai-review` label."
                 )
             return False
 
@@ -338,7 +338,7 @@ class Orchestrator:
                 self.remove_labels(pull, AI_REVIEW_LABEL)
                 self.feedback(
                     event,
-                    "You are not on the pilot allowlist. The label was removed. "
+                    "🔴 You are not on the pilot allowlist. The label was removed. "
                     "See `.github/agent-review/allowlist.txt` or comment on RFC #21451 to join the pilot.",
                 )
                 return False
@@ -363,7 +363,7 @@ class Orchestrator:
             f"{os.environ['GITHUB_SERVER_URL']}/{os.environ['GITHUB_REPOSITORY']}"
             f"/actions/runs/{os.environ['GITHUB_RUN_ID']}"
         )
-        self.feedback(event, f"{message}\n[View Actions run]({run_url})")
+        self.feedback(event, f"🟢 {message}\n[View Actions run]({run_url})")
 
         return True
 
@@ -393,7 +393,7 @@ class Orchestrator:
         # The PR can close or its labels can change while the request is queued.
         pull = self.pull()
         if pull["state"] != "open":
-            self.feedback(event, "This PR is closed.")
+            self.feedback(event, "🔴 This PR is closed.")
             return None
 
         enabled = AI_REVIEW_LABEL in {label["name"] for label in pull["labels"]}
@@ -401,7 +401,9 @@ class Orchestrator:
         if command == "stop" and enabled:
             return None  # The label has already been reapplied to restart.
         if not stopping and not enabled:
-            self.feedback(event, "AI review is not enabled. Ask an allowlisted reviewer to add the `ai-review` label.")
+            self.feedback(
+                event, "🔴 AI review is not enabled. Ask an allowlisted reviewer to add the `ai-review` label."
+            )
             return None
 
         # Read the published summary to handle stops, session restarts and waivers.
@@ -424,7 +426,9 @@ class Orchestrator:
                 self.state.round = self.state.total = 0
                 self.state.session_run_id = run_id
         elif self.state.status == "stopped":
-            self.feedback(event, "AI review is stopped. Ask an allowlisted reviewer to reapply the `ai-review` label.")
+            self.feedback(
+                event, "🔴 AI review is stopped. Ask an allowlisted reviewer to reapply the `ai-review` label."
+            )
             return None
 
         if command == "/ai-review-waive":
@@ -443,7 +447,7 @@ class Orchestrator:
         if self.state.total >= MAX_TOTAL_ROUNDS:
             self.feedback(
                 event,
-                f"Reached the {MAX_TOTAL_ROUNDS}-round limit for this session. "
+                f"🔴 Reached the {MAX_TOTAL_ROUNDS}-round limit for this session. "
                 "Ask an allowlisted reviewer to reapply the `ai-review` label to reset the counts. "
                 "Pushing new commits does not reset the session count.",
             )
@@ -451,8 +455,9 @@ class Orchestrator:
         if self.state.round >= MAX_ROUNDS_PER_HEAD:
             self.feedback(
                 event,
-                f"Reached the {MAX_ROUNDS_PER_HEAD}-round limit for this commit. Push changes and comment `/ai-review` "
-                "again, or ask an allowlisted reviewer to reapply the `ai-review` label to reset the counts.",
+                f"🔴 Reached the {MAX_ROUNDS_PER_HEAD}-round limit for this commit. "
+                "Push changes and comment `/ai-review` again, or ask an allowlisted reviewer "
+                "to reapply the `ai-review` label to reset the counts.",
             )
             return None
 
@@ -499,13 +504,13 @@ class Orchestrator:
         """Waive findings for the reviewed commit and return feedback for the user."""
         parts = argument.split(maxsplit=1)
         if len(parts) != 2:
-            return "Use `/ai-review-waive F003 reason` or `/ai-review-waive all reason`."
+            return "🔴 Use `/ai-review-waive F003 reason` or `/ai-review-waive all reason`."
         if (self.state.base, self.state.head) != (pull["base"]["sha"], pull["head"]["sha"]):
-            return "Review the current commit with `/ai-review` and wait for the result before waiving findings."
+            return "🔴 Review the current commit with `/ai-review` and wait for the result before waiving findings."
 
         selected = [f for f in self.state.findings if f.status == "open" and parts[0] in ("all", f.id)]
         if not selected:
-            return "No matching open findings. Check the finding IDs and their status in the AI review summary."
+            return "🔴 No matching open findings. Check the finding IDs and their status in the AI review summary."
 
         for finding in selected:
             finding.status = "waived"
@@ -524,7 +529,7 @@ class Orchestrator:
         self.state.decide()
         self.save_summary()
         self.publish_status()
-        return f"Waived {len(selected)} open finding(s) for commit `{self.state.head[:12]}`. See the review summary."
+        return f"🟢 Waived {len(selected)} open finding(s) for commit `{self.state.head[:12]}`. See the review summary."
 
     # --- Publish results ---
 
@@ -634,7 +639,7 @@ class Orchestrator:
 
     def feedback(self, event: dict, message: str):
         """Append feedback to the command comment, or post it for a label event."""
-        body = f"[AI review bot]: {message}"
+        body = f"🤖 [AI review bot]: {message}"
         if "comment" in event:
             endpoint = f"{self.repo}/issues/comments/{event['comment']['id']}"
             comment = gh(endpoint)
