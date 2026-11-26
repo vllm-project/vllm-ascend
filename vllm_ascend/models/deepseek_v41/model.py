@@ -2450,9 +2450,9 @@ class AscendDeepseekV41LLMForCausalLM(nn.Module, DeepseekV41MixtureOfExperts, Su
                     # down: RowParallel → split along dim 1
                     split_dim = 1 if "down_proj.weight" in name else 0
                     total = loaded_weight.shape[split_dim]
-                    assert (
-                        total % num_chunks == 0
-                    ), f"Shared expert weight dim {total} not divisible by num_chunks {num_chunks}"
+                    assert total % num_chunks == 0, (
+                        f"Shared expert weight dim {total} not divisible by num_chunks {num_chunks}"
+                    )
                     chunk_size = total // num_chunks
 
                 for j in range(num_chunks):
