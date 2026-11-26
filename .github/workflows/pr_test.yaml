@@ -15,24 +15,24 @@
 # This file is a part of the vllm-ascend project.
 #
 
+# TEMPORARY (fork-only validation): offline karc full-suite validation of the
+# direct-sync hook. Runs the complete a2 + a3 PR E2E matrix (all tests, no a5,
+# no 310p, no CPU UT) plus the upstream vllm suite on the karc-only federated
+# scale sets:
+#   a2-1 -> linux-aarch64-a2b3-karc-fed-1
+#   a3-2 -> linux-aarch64-a3-800i-karc-fed-2
+#   a3-4 -> linux-aarch64-a3-800i-karc-fed-4
+# Card counts, partitions and sharding still come from the repository routing
+# tables (test_config.yaml), so every case keeps its intended runner size.
+# Lint, CPU UT, precision recommendations, a5/310p, and the label/CODEOWNERS
+# gate are intentionally omitted. Do not merge.
 name: E2E
 
 on:
-  workflow_dispatch:
   pull_request:
-    types:
-      - opened
-      - synchronize
-      - reopened
-      - labeled
-    branches:
-      - 'main'
-      - '*-dev'
-      - 'releases/v*'
+    types: [opened, synchronize, reopened]
+    branches: [main]
 
-# Bash shells do not use ~/.profile or ~/.bashrc so these shells need to be explicitly
-# declared as "shell: bash -el {0}" on steps that need to be properly activated.
-# It's used to activate ascend-toolkit environment variables.
 defaults:
   run:
     shell: bash -el {0}
@@ -42,176 +42,126 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  lint-and-select-tests:
-    if: ${{ github.event.action != 'labeled' || github.event.label.name == 'ready' }}
+  select-tests:
     runs-on: linux-amd64-cpu-8-hk
     container:
       image: quay.io/ascend-ci/vllm-ascend:lint
     outputs:
-      has_tests: ${{ steps.scope.outputs.has_tests || steps.noop.outputs.has_tests }}
-      test_groups: ${{ steps.scope.outputs.test_groups || steps.noop.outputs.test_groups }}
-      matched_modules: ${{ steps.scope.outputs.matched_modules || steps.noop.outputs.matched_modules }}
       main_commit: ${{ steps.vllm.outputs.main_commit }}
-      release_tag: ${{ steps.vllm.outputs.release_tag }}
+      test_groups: ${{ steps.scope.outputs.test_groups }}
+      csrc_cache_target_ids: ${{ steps.scope.outputs.csrc_cache_target_ids }}
+      base_sha: ${{ steps.source-snapshot.outputs.base_sha }}
     steps:
-      - name: Validate PR title prefix
-        run: |
-          PR_TITLE=$(curl -sSf -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
-            -H "Accept: application/vnd.github.v3+json" \
-            "https://api.github.com/repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number }}" \
-            | python3 -c "import sys,json; print(json.load(sys.stdin)['title'])") || {
-              echo "::error::Failed to fetch PR title from GitHub API"
-              exit 1
-            }
-
-          if [ -z "$PR_TITLE" ]; then
-            echo "::error::PR title cannot be empty"
-            exit 1
-          fi
-
-          echo "Checking PR title: $PR_TITLE"
-
-          VALID_PREFIXES='\[(BugFix|Performance|Test|CI|Feature|Doc|Misc|Community|Refactor)\]'
-
-          if ! echo "$PR_TITLE" | grep -iqE "$VALID_PREFIXES"; then
-            echo "::error::PR title must contain one of the following prefixes: [BugFix], [Performance], [Test], [CI], [Feature], [Doc], [Misc], [Community], [Refactor]"
-            echo "::error::Example: '[Feature] Add new optimization pass' or 'Add new feature [Feature]'"
-            exit 1
-          fi
-
-          echo "✓ PR title prefix is valid"
-
       - name: Checkout vllm-project/vllm-ascend repo
         uses: actions/checkout@v7
         with:
+          ref: ${{ github.event.pull_request.head.sha }}
           fetch-depth: 0
 
-      - name: Read verified vLLM refs
+      - name: Resolve source snapshot
+        id: source-snapshot
+        env:
+          BASE_REF: ${{ github.base_ref }}
+          EVENT_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          cd "$GITHUB_WORKSPACE"
+          git config user.name "vllm-ascend-ci"
+          git config user.email "vllm-ascend-ci@users.noreply.github.com"
+          git fetch origin "$BASE_REF"
+          BASE_SHA=$(git rev-parse FETCH_HEAD)
+
+          if ! git diff --quiet "$EVENT_BASE_SHA" "$BASE_SHA" -- \
+            .github/workflows/_ensure_csrc_cache.yaml \
+            .github/workflows/_build_csrc_cache.yaml \
+            .github/workflows/scripts/csrc_cache_targets.json \
+            .github/workflows/scripts/resolve_csrc_cache_targets.py; then
+            echo "::error::CSRC build workflows changed on $BASE_REF, please rebase the code."
+            echo "::error::Trigger a new PR workflow run."
+            exit 1
+          fi
+
+          git rebase "$BASE_SHA"
+          echo "base_sha=$BASE_SHA" >> "$GITHUB_OUTPUT"
+
+      - name: Read verified vLLM main commit
         id: vllm
         run: |
           main_commit="$(tr -d '[:space:]' < .github/vllm-main-verified.commit)"
-          release_tag="$(tr -d '[:space:]' < .github/vllm-release-tag.commit)"
           [[ "${main_commit}" =~ ^[0-9a-f]{7,40}$ ]] || {
-            echo "::error file=.github/vllm-main-verified.commit::invalid vLLM main commit: ${main_commit}"
+            echo "::error::Invalid verified vLLM main commit: ${main_commit}"
             exit 1
           }
-          [[ "${release_tag}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([.-].*)?$ ]] || {
-            echo "::error file=.github/vllm-release-tag.commit::invalid vLLM release tag: ${release_tag}"
-            exit 1
-          }
-          {
-            echo "main_commit=${main_commit}"
-            echo "release_tag=${release_tag}"
-          } >> "$GITHUB_OUTPUT"
+          echo "main_commit=${main_commit}" >> "$GITHUB_OUTPUT"
 
-      - name: cp problem matchers
-        run: |
-          cp .github/workflows/matchers/actionlint.json "$RUNNER_TEMP/actionlint.json"
-          cp .github/workflows/matchers/markdownlint.json "$RUNNER_TEMP/markdownlint.json"
-          cp .github/workflows/matchers/mypy.json "$RUNNER_TEMP/mypy.json"
-
-      - run: echo "::add-matcher::$RUNNER_TEMP/actionlint.json"
-      - run: echo "::add-matcher::$RUNNER_TEMP/markdownlint.json"
-      - run: echo "::add-matcher::$RUNNER_TEMP/mypy.json"
-
-      - name: Checkout vllm-project/vllm repo
-        uses: actions/checkout@v7
-        with:
-          repository: vllm-project/vllm
-          path: ./vllm-empty
-          ref: ${{ steps.vllm.outputs.main_commit }}
-
-      - uses: dorny/paths-filter@v4
-        id: filter
-        with:
-          filters: |
-            lint_tracker:
-              - 'requirements.txt'
-              - 'requirements-dev.txt'
-              - 'requirements-lint.txt'
-            src:
-              - 'vllm_ascend/**'
-              - 'setup.py'
-              - 'csrc/**'
-              - 'requirements.txt'
-              - 'pyproject.toml'
-              - 'cmake/**'
-              - '.github/**'
-              - 'tests/**'
-              - 'tools/**'
-              - 'CMakeLists.txt'
-
-      - name: Install vllm-ascend dev (conditional)
-        if: steps.filter.outputs.lint_tracker == 'true'
-        env:
-          UV_INDEX_URL: http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple
-          UV_EXTRA_INDEX_URL: "https://repo.huaweicloud.com/ascend/repos/pypi"
-          UV_INDEX_STRATEGY: unsafe-best-match
-          UV_NO_CACHE: 1
-          UV_SYSTEM_PYTHON: 1
-        run: |
-          pip install uv
-          git config --global --add safe.directory /__w/vllm-ascend/vllm-ascend
-          pip install uc-manager
-          uv pip install -r requirements-dev.txt --extra-index-url https://download.pytorch.org/whl/cpu
-
-      - name: Run pre-commit
-        env:
-          PRE_COMMIT_COLOR: always
-          FORCE_COLOR: "1"
-          TERM: xterm-256color
-          SHELLCHECK_OPTS: "--exclude=SC2046,SC2006,SC2086"
-        run: |
-          git config --global --add safe.directory /__w/vllm-ascend/vllm-ascend
-          pre-commit run --all-files --hook-stage manual --show-diff-on-failure
-
-      - name: Run mypy
-        run: |
-          PYTHONPATH="$PYTHONPATH:$(pwd)/vllm-empty"
-          export PYTHONPATH
-          git config --global --add safe.directory /__w/vllm-ascend/vllm-ascend
-          for python_version in "3.10" "3.11" "3.12"; do
-            echo "============================"
-            tools/mypy.sh 1 "$python_version"
-            echo "============================"
-          done
-
-      - name: Validate test coverage config
-        run: |
-          pip install pyyaml
-          python3 .github/workflows/scripts/coverage.py
-
-      - name: Select tests based on changed files
+      - name: Select the full a2 + a3 suite for the karc runners
         id: scope
-        if: steps.filter.outputs.src == 'true'
         run: |
-          git config --global --add safe.directory /__w/vllm-ascend/vllm-ascend
-          git fetch origin ${{ github.base_ref }}
-          pip install regex
-          python3 .github/workflows/scripts/select_tests.py \
-            --diff-base origin/${{ github.base_ref }}
+          pip install regex pyyaml
+          GITHUB_OUTPUT="$RUNNER_TEMP/all-test-groups.txt" \
+            python3 .github/workflows/scripts/select_tests.py --all-tests --skip-cpu-ut --skip-a5
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
 
-      - name: Set no-tests output when source paths unchanged
-        id: noop
-        if: steps.filter.outputs.src != 'true'
-        run: |
-          {
-            echo "has_tests=false"
-            echo "test_groups=[]"
-            echo "matched_modules="
-          } >> "$GITHUB_OUTPUT"
+          # Keep every a2/a3 group exactly as select_tests.py produced it. a5 and
+          # CPU UT are dropped by the flags above; 310p is dropped here because
+          # the offline karc pool has no 310p members. Card counts, partitions
+          # and per-partition sharding all come from the routing tables.
+          outputs = dict(
+              line.split("=", 1)
+              for line in Path(os.environ["RUNNER_TEMP"], "all-test-groups.txt").read_text().splitlines()
+          )
+          all_groups = json.loads(outputs["test_groups"])
+          groups = [group for group in all_groups if group.get("npu_type") in ("a2", "a3")]
+          if not groups:
+              raise SystemExit("No a2/a3 test groups selected")
+
+          for group in groups:
+              files = str(group["tests"]).split()
+              print(
+                  f"{group['runner']} ({group.get('num_npus')} card)"
+                  f" [part {group.get('partition')}] {len(files)} files"
+              )
+
+          target_ids = sorted({group["csrc_cache_target"] for group in groups})
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
+              print("test_groups=" + json.dumps(groups, separators=(",", ":")), file=output)
+              print("csrc_cache_target_ids=" + json.dumps(target_ids), file=output)
+          PY
+
+  prepare-csrc-cache:
+    needs: select-tests
+    uses: ./.github/workflows/_ensure_csrc_cache.yaml
+    with:
+      target_ids: ${{ needs.select-tests.outputs.csrc_cache_target_ids }}
+      source_ref: ${{ github.event.pull_request.head.sha }}
+      base_ref: ${{ github.base_ref }}
+      base_sha: ${{ needs.select-tests.outputs.base_sha }}
 
   run-selected-tests:
-    needs: lint-and-select-tests
-    if: ${{ needs.lint-and-select-tests.outputs.has_tests == 'true' && contains(github.event.pull_request.labels.*.name, 'ready') }}
-    strategy:
-      matrix:
-        vllm_version:
-          - ${{ needs.lint-and-select-tests.outputs.main_commit }}
-          - ${{ needs.lint-and-select-tests.outputs.release_tag }}
+    # prepare-csrc-cache is observational (continue-on-error in the reusable
+    # workflow) and must not gate the NPU tests; the csrc cache is looked up by
+    # the test jobs themselves.
+    needs: select-tests
     uses: ./.github/workflows/_selected_tests.yaml
     with:
-      vllm: ${{ matrix.vllm_version }}
+      vllm: ${{ needs.select-tests.outputs.main_commit }}
       ref: ${{ github.event.pull_request.head.sha }}
       base_ref: ${{ github.base_ref }}
-      test_groups: ${{ needs.lint-and-select-tests.outputs.test_groups }}
+      base_sha: ${{ needs.select-tests.outputs.base_sha }}
+      test_groups: ${{ needs.select-tests.outputs.test_groups }}
+
+  # Upstream vllm suite (part of the PR blocking set). Its reusable workflow
+  # has been rebound to the karc a2 label so it runs offline too.
+  run-selected-tests-upstream:
+    needs: [select-tests]
+    name: run-selected-tests-upstream (vllm@${{ needs.select-tests.outputs.main_commit }})
+    uses: ./.github/workflows/_selected_tests_upstream.yaml
+    with:
+      vllm: ${{ needs.select-tests.outputs.main_commit }}
+      ref: ${{ github.event.pull_request.head.sha }}
+      base_ref: ${{ github.base_ref }}
+      base_sha: ${{ needs.select-tests.outputs.base_sha }}
+      test_groups: ${{ needs.select-tests.outputs.test_groups }}
