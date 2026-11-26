@@ -1,21 +1,21 @@
 # SPDX-License-Identifier: Apache-2.0
-"""PCP2/EP2 producer and DP2/EP2 consumer, using nine synthetic Flash layers.
+"""PCP2/EP2 producer and DP2/EP2 consumer, using a real nine-layer Flash checkpoint.
 
 This is functional coverage, not checkpoint accuracy or MTP acceptance quality.
 """
 
 import json
-import sys
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 
 import pytest
 import requests
 from vllm.utils.network_utils import get_open_port
 
-from tests.e2e.common.glm53flash_pd_checks import check_completion, check_state_pulls
+from tests.e2e.common.glm53flash_pd_checks import check_checkpoint, check_completion, check_state_pulls
 from tests.e2e.conftest import RemotePDServer, wait_until_npu_memory_free
-from tests.e2e.pull_request.four_card.test_glm5_3_flash import _write_model
 
+MODEL_PATH = Path("/root/.cache/modelscope/hub/models/vllm-ascend/GLM-5___3-Flash-W8A8-MXFP8-9L-MTP1")
 MODEL_NAME = "flash-pd-test"
 OUTPUT_TOKENS = 16
 MTP_TOKENS = 5
@@ -30,11 +30,6 @@ class FlashPDServer(RemotePDServer):
             self._terminate_server()
             raise
 
-    def _start_server_with_prefix(self, server_cmd, env_dict, log_prefix):
-        # Import the test loader before parsing the CLI and in spawned workers.
-        command = [sys.executable, "-m", "tests.e2e.common.glm53flash_pd", *server_cmd[1:]]
-        return super()._start_server_with_prefix(command, env_dict, log_prefix)
-
 
 def serve_args(model, port, kv_port, producer, eager, prefix_caching):
     topology = {
@@ -48,7 +43,7 @@ def serve_args(model, port, kv_port, producer, eager, prefix_caching):
         "--port",
         str(port),
         "--load-format",
-        "glm53flash_pd_dummy",
+        "safetensors",
         "--worker-extension-cls",
         "tests.e2e.common.glm53flash_pd.FlashPDWorker",
         "--dtype",
@@ -98,8 +93,6 @@ def serve_args(model, port, kv_port, producer, eager, prefix_caching):
             {
                 "enable_cpu_binding": False,
                 "enable_fused_mc2": 0,
-                # The INT8 GMM-SwiGLU fusion kernel is not built for A5.
-                "ascend_fusion_config": {"fusion_ops_gmmswigluquant": False},
             }
         ),
         "--kv-transfer-config",
@@ -153,6 +146,7 @@ def rpc(url, method, *args):
 
 
 @pytest.mark.parametrize("eager,prefix_caching", [(True, False), (False, True)], ids=["eager", "graph-prefix"])
+@pytest.mark.e2e_model(str(MODEL_PATH))
 @pytest.mark.e2e_coverage(
     arch="moe",
     feature="mtp,chunked_prefill,prefix_caching,logprobs",
@@ -163,14 +157,13 @@ def rpc(url, method, *args):
     graph_mode="eager,full_decode_only",
 )
 @wait_until_npu_memory_free()
-def test_glm53flash_pcp2_dp2(tmp_path, eager, prefix_caching):
-    model = tmp_path / "model"
-    _write_model(model)
+def test_glm53flash_pcp2_dp2(eager, prefix_caching):
+    check_checkpoint(MODEL_PATH)
     p_port, d_port = get_open_port(), get_open_port()
     p_url, d_url = f"http://127.0.0.1:{p_port}", f"http://127.0.0.1:{d_port}"
     servers = [
-        serve_args(model, p_port, 26770, True, eager, prefix_caching),
-        serve_args(model, d_port, 26970, False, eager, prefix_caching),
+        serve_args(MODEL_PATH, p_port, 26770, True, eager, prefix_caching),
+        serve_args(MODEL_PATH, d_port, 26970, False, eager, prefix_caching),
     ]
     with FlashPDServer(
         servers,
@@ -192,13 +185,21 @@ def test_glm53flash_pcp2_dp2(tmp_path, eager, prefix_caching):
                 assert worker["kda_heads"] == [64 // expected[1]] * 7
                 assert worker["replayssm"] and worker["has_speculator"]
                 assert worker["mtp_tokens"] == MTP_TOKENS
+                assert worker["kv_dtype"] == "fp8"
+                assert "AscendW8A8MXFP8DynamicFusedMoEMethod" in worker["quant_methods"]
                 assert worker["prefix_caching"] == prefix_caching
                 assert worker["graph_mode"] == ("NONE" if url == p_url or eager else "FULL_DECODE_ONLY")
         rpc(d_url, "flash_pd_probe")
 
         def generate(length, dp_rank=0):
             prompt = [10 + i % 1000 for i in range(length)]
-            prefill = complete(p_url, prompt, max_tokens=1, kv_transfer_params={"do_remote_decode": True})
+            prefill = complete(
+                p_url,
+                prompt,
+                max_tokens=1,
+                cache_salt=f"flash-pd-{length}-{dp_rank}",
+                kv_transfer_params={"do_remote_decode": True},
+            )
             transfer = prefill.get("kv_transfer_params")
             assert transfer and transfer.get("do_remote_prefill"), prefill
             assert any(transfer.get("remote_block_ids", [])), transfer
@@ -206,7 +207,8 @@ def test_glm53flash_pcp2_dp2(tmp_path, eager, prefix_caching):
             check_completion(result, OUTPUT_TOKENS)
             return result
 
-        generate(128)
+        for rank in (0, 1):
+            generate(128, rank)
         check_state_pulls(rpc(d_url, "flash_pd_records"))
         with ThreadPoolExecutor(max_workers=3) as pool:
             futures = [
