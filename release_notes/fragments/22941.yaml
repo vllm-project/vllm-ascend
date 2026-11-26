@@ -1,0 +1,6 @@
+pr: 22941
+entries:
+  - category: bugfix
+    text: >-
+      Fixed shape-mismatch failures during layerwise reload of MXFP8 weights.
+      Repeated rollout weight updates now rerun the required post-load processing.
