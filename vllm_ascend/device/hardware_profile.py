@@ -187,6 +187,9 @@ class HardwareCapability(Enum):
     # A2, A3, and A5 validated parity and a performance benefit at the
     # family-specific dispatch threshold; other profiles retain one-row dispatch.
     QWEN4EXP_HC_GATE_MIX_ROW_BLOCK = auto()
+    # Reuse each block-output row across HC streams on A3. The operator owns
+    # its measured row-count threshold; other profiles retain per-stream dispatch.
+    QWEN4EXP_HC_COMBINE_NORM_ROW_WISE = auto()
     # Inspect PCIe topology to distinguish 310P Root-Complex and endpoint deployments.
     RC_DEVICE_DISCOVERY = auto()
     # Fused RMSNorm+cast is available for the A2/A3 (CANN 9.1) path.
@@ -342,9 +345,6 @@ class HardwareProfile:
     # First row count where the integrated Qwen4Exp HC gate-mix wrapper is
     # faster than the one-row kernel on this hardware family.
     qwen4exp_hc_gate_mix_row_block_min_rows: int = 2048
-    # A3 reuses each block-output row across HC streams for long prefills.
-    # Other profiles retain the per-stream kernel until their crossover is measured.
-    qwen4exp_hc_combine_norm_row_wise_min_rows: int | None = None
 
     def supports(self, capability: HardwareCapability) -> bool:
         """Return whether the exact documented ``capability`` contract is available."""
@@ -416,6 +416,7 @@ _A3_CAPABILITIES = _STANDARD_CAPABILITIES | {
     HardwareCapability.MC2_FULLMESH_V2_COMM,
     HardwareCapability.MM_REDUCE_SCATTER_BF16,
     HardwareCapability.QWEN4EXP_HC_GATE_MIX_ROW_BLOCK,
+    HardwareCapability.QWEN4EXP_HC_COMBINE_NORM_ROW_WISE,
     HardwareCapability.RMS_NORM_CAST,
 }
 _DEFAULT_WORKER_CLS = "vllm_ascend.worker.worker.NPUWorker"
@@ -457,7 +458,6 @@ _HARDWARE_PROFILES: Mapping[AscendDeviceType, HardwareProfile] = MappingProxyTyp
         AscendDeviceType.A3: HardwareProfile(
             _device_type=AscendDeviceType.A3,
             flash_attn_npu_3_models=frozenset({FlashAttentionNpu3Model.MINIMAX, FlashAttentionNpu3Model.QWEN}),
-            qwen4exp_hc_combine_norm_row_wise_min_rows=512,
             attention_backend_family=AttentionBackendFamily.STANDARD,
             cpu_binding_mode=CPUBindingMode.GLOBAL_SLICE,
             default_worker_cls=_DEFAULT_WORKER_CLS,

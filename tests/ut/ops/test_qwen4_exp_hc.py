@@ -133,26 +133,27 @@ def test_hc_gate_mix_passes_wide_offset_flag(monkeypatch: pytest.MonkeyPatch) ->
 
 
 @pytest.mark.parametrize(
-    ("rows", "row_wise_min_rows", "weight_shared", "expected_kernel"),
+    ("rows", "row_wise_supported", "weight_shared", "expected_streams_per_program"),
     (
-        (511, 512, False, "legacy"),
-        (512, 512, False, "row_wise"),
-        (512, None, False, "legacy"),
-        (4096, 512, True, "legacy"),
+        (511, True, False, 1),
+        (512, True, False, 4),
+        (512, False, False, 1),
+        (4096, True, True, 1),
     ),
 )
-def test_hc_combine_norm_row_wise_dispatch(
+def test_hc_combine_norm_streams_per_program_dispatch(
     rows: int,
-    row_wise_min_rows: int | None,
+    row_wise_supported: bool,
     weight_shared: bool,
-    expected_kernel: str,
+    expected_streams_per_program: int,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    legacy = _KernelRecorder()
-    row_wise = _KernelRecorder()
-    profile = SimpleNamespace(qwen4exp_hc_combine_norm_row_wise_min_rows=row_wise_min_rows)
-    monkeypatch.setattr(hc, "_hc_combine_norm_kernel", legacy)
-    monkeypatch.setattr(hc, "_hc_combine_norm_row_wise_kernel", row_wise)
+    kernel = _KernelRecorder()
+    profile = SimpleNamespace(
+        supports=lambda capability: row_wise_supported
+        and capability is HardwareCapability.QWEN4EXP_HC_COMBINE_NORM_ROW_WISE
+    )
+    monkeypatch.setattr(hc, "_hc_combine_norm_kernel", kernel)
     monkeypatch.setattr(hc, "get_current_hardware_profile", lambda: profile)
 
     residual = torch.empty((rows, 40), dtype=torch.bfloat16)
@@ -163,18 +164,15 @@ def test_hc_combine_norm_row_wise_dispatch(
 
     assert combined.shape == residual.shape
     assert normalized.shape == residual.shape
-    expected_recorder, other_recorder = (row_wise, legacy) if expected_kernel == "row_wise" else (legacy, row_wise)
-    assert len(expected_recorder.launches) == 1
-    assert other_recorder.launches == []
-    grid, args, kwargs = expected_recorder.launches[0]
-    assert grid == ((rows,) if expected_kernel == "row_wise" else (rows * 4,))
+    assert len(kernel.launches) == 1
+    grid, args, kwargs = kernel.launches[0]
+    expected_stream_groups = 4 // expected_streams_per_program
+    assert grid == (rows * expected_stream_groups,)
     assert args[2] is injection
     assert kwargs["HAS_INJECTION"] is True
     assert kwargs["WEIGHT_SHARED"] is weight_shared
-    if expected_kernel == "row_wise":
-        assert kwargs["WIDE_OFFSETS"] is False
-    else:
-        assert "WIDE_OFFSETS" not in kwargs
+    assert kwargs["STREAMS_PER_PROGRAM"] == expected_streams_per_program
+    assert kwargs["WIDE_OFFSETS"] is False
 
 
 @pytest.mark.parametrize("wide_tensor", ("residual", "block", "injection", "combined", "normalized"))
@@ -203,9 +201,11 @@ def test_hc_combine_norm_detects_wide_offsets_for_all_tensors(wide_tensor: str) 
 
 
 def test_hc_combine_norm_passes_wide_offset_flag(monkeypatch: pytest.MonkeyPatch) -> None:
-    row_wise = _KernelRecorder()
-    profile = SimpleNamespace(qwen4exp_hc_combine_norm_row_wise_min_rows=512)
-    monkeypatch.setattr(hc, "_hc_combine_norm_row_wise_kernel", row_wise)
+    kernel = _KernelRecorder()
+    profile = SimpleNamespace(
+        supports=lambda capability: capability is HardwareCapability.QWEN4EXP_HC_COMBINE_NORM_ROW_WISE
+    )
+    monkeypatch.setattr(hc, "_hc_combine_norm_kernel", kernel)
     monkeypatch.setattr(hc, "_hc_combine_norm_needs_wide_offsets", lambda *_: True)
     monkeypatch.setattr(hc, "get_current_hardware_profile", lambda: profile)
 
@@ -215,5 +215,6 @@ def test_hc_combine_norm_passes_wide_offset_flag(monkeypatch: pytest.MonkeyPatch
     norm_weight = torch.empty(40, dtype=torch.bfloat16)
     hc._hc_combine_norm(residual, block_output, injection, norm_weight, 1e-6, 4)
 
-    _, _, kwargs = row_wise.launches[0]
+    _, _, kwargs = kernel.launches[0]
+    assert kwargs["STREAMS_PER_PROGRAM"] == 4
     assert kwargs["WIDE_OFFSETS"] is True

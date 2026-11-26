@@ -12,7 +12,6 @@ from vllm_ascend.ops.triton.qwen4_exp.hc import (
     _HC_GATE_MIX_BLOCK_SIZE,
     _HC_GATE_MIX_ROWS_PER_BLOCK,
     _hc_combine_norm_kernel,
-    _hc_combine_norm_row_wise_kernel,
     _hc_gate_mix_kernel,
     _hc_gate_mix_row_block_kernel,
     hc_combine_norm,
@@ -227,6 +226,8 @@ def _legacy_combine_norm(
         WEIGHT_SHARED=norm_weight.numel() == group_dim,
         BLOCK_SIZE=triton.next_power_of_2(group_dim),
         EPS=eps,
+        STREAMS_PER_PROGRAM=1,
+        WIDE_OFFSETS=False,
     )
     return combined, normalized
 
@@ -262,7 +263,7 @@ def test_hc_combine_norm_per_branch_weights_matches_reference() -> None:
 
 
 @pytest.mark.skipif(
-    get_current_hardware_profile().qwen4exp_hc_combine_norm_row_wise_min_rows is None,
+    not get_current_hardware_profile().supports(HardwareCapability.QWEN4EXP_HC_COMBINE_NORM_ROW_WISE),
     reason="Qwen4Exp HC row-wise combine-norm is not enabled for this hardware profile",
 )
 @pytest.mark.parametrize(
@@ -304,7 +305,7 @@ def test_hc_combine_norm_row_wise_matches_legacy_kernel(
 
 
 @pytest.mark.skipif(
-    get_current_hardware_profile().qwen4exp_hc_combine_norm_row_wise_min_rows is None,
+    not get_current_hardware_profile().supports(HardwareCapability.QWEN4EXP_HC_COMBINE_NORM_ROW_WISE),
     reason="Qwen4Exp HC row-wise combine-norm is not enabled for this hardware profile",
 )
 @torch.inference_mode()
@@ -335,7 +336,7 @@ def test_hc_combine_norm_row_wise_npugraph_replay() -> None:
 
 
 @pytest.mark.skipif(
-    get_current_hardware_profile().qwen4exp_hc_combine_norm_row_wise_min_rows is None,
+    not get_current_hardware_profile().supports(HardwareCapability.QWEN4EXP_HC_COMBINE_NORM_ROW_WISE),
     reason="Qwen4Exp HC row-wise combine-norm is not enabled for this hardware profile",
 )
 @torch.inference_mode()
@@ -345,7 +346,7 @@ def test_hc_combine_norm_row_counts_reuse_compilation(monkeypatch: pytest.Monkey
     block_backing = _make_input(max_rows, GROUP_DIM, row_strided=True)
     injection_backing = _make_input(max_rows, HC_COUNT, row_strided=True)
     norm_weight = torch.randn(HYPER_HIDDEN_SIZE, device="npu", dtype=DTYPE) * 0.1
-    isolated_kernel = triton.jit(_hc_combine_norm_row_wise_kernel.fn)
+    isolated_kernel = triton.jit(_hc_combine_norm_kernel.fn)
     compile_events = []
     original_compile = isolated_kernel._do_compile
 
@@ -354,7 +355,7 @@ def test_hc_combine_norm_row_counts_reuse_compilation(monkeypatch: pytest.Monkey
         return original_compile(*args, **kwargs)
 
     monkeypatch.setattr(isolated_kernel, "_do_compile", record_compile)
-    monkeypatch.setattr(hc_module, "_hc_combine_norm_row_wise_kernel", isolated_kernel)
+    monkeypatch.setattr(hc_module, "_hc_combine_norm_kernel", isolated_kernel)
 
     for rows in (512, 513, 520, 521):
         hc_combine_norm(

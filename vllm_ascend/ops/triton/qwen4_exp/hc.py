@@ -19,6 +19,7 @@ from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_
 # Scale in the upstream HC injection formula: 2 * sigmoid(logit / hc_count).
 _HC_INJECTION_SIGMOID_SCALE = tl.constexpr(2.0)
 _HC_COMBINE_FINAL_BLOCK_SIZE = 1024
+_HC_COMBINE_NORM_ROW_WISE_MIN_ROWS = 512
 
 
 @triton.jit
@@ -645,64 +646,16 @@ def _hc_combine_norm_kernel(
     WEIGHT_SHARED: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
     EPS: tl.constexpr,
-) -> None:
-    program = tl.program_id(0)
-    row = program // HC_COUNT
-    stream = program % HC_COUNT
-    inner_offsets = tl.arange(0, BLOCK_SIZE)
-    mask = inner_offsets < GROUP_DIM
-    block_output = tl.load(
-        block_output_ptr + row * stride_block_row + inner_offsets,
-        mask=mask,
-        other=0.0,
-    ).to(tl.float32)
-    _hc_combine_norm_stream(
-        residual_ptr,
-        injection_ptr,
-        weight_ptr,
-        combined_ptr,
-        normalized_ptr,
-        block_output,
-        row,
-        stream,
-        inner_offsets,
-        mask,
-        stride_residual_row,
-        stride_injection_row,
-        stride_combined_row,
-        stride_normalized_row,
-        GROUP_DIM,
-        HC_COUNT,
-        HAS_INJECTION,
-        WEIGHT_SHARED,
-        EPS,
-    )
-
-
-@triton.jit
-def _hc_combine_norm_row_wise_kernel(
-    residual_ptr,
-    block_output_ptr,
-    injection_ptr,
-    weight_ptr,
-    combined_ptr,
-    normalized_ptr,
-    stride_residual_row,
-    stride_block_row,
-    stride_injection_row,
-    stride_combined_row,
-    stride_normalized_row,
-    GROUP_DIM: tl.constexpr,
-    HC_COUNT: tl.constexpr,
-    HAS_INJECTION: tl.constexpr,
-    WEIGHT_SHARED: tl.constexpr,
-    BLOCK_SIZE: tl.constexpr,
-    EPS: tl.constexpr,
+    STREAMS_PER_PROGRAM: tl.constexpr,
     WIDE_OFFSETS: tl.constexpr,
 ) -> None:
-    row = tl.program_id(0)
+    program = tl.program_id(0)
+    stream_groups = HC_COUNT // STREAMS_PER_PROGRAM
+    row = program // stream_groups
+    stream_group = program % stream_groups
     if WIDE_OFFSETS:
         row = row.to(tl.int64)
+    first_stream = stream_group * STREAMS_PER_PROGRAM
     inner_offsets = tl.arange(0, BLOCK_SIZE)
     mask = inner_offsets < GROUP_DIM
     block_output = tl.load(
@@ -710,8 +663,8 @@ def _hc_combine_norm_row_wise_kernel(
         mask=mask,
         other=0.0,
     ).to(tl.float32)
-
-    for stream in tl.static_range(HC_COUNT):
+    for stream_offset in tl.static_range(STREAMS_PER_PROGRAM):
+        stream = first_stream + stream_offset
         _hc_combine_norm_stream(
             residual_ptr,
             injection_ptr,
@@ -758,26 +711,29 @@ def _hc_combine_norm(
     if rows:
         injection_ptr = residual if injection_logits is None else injection_logits
         injection_stride = 0 if injection_logits is None else injection_logits.stride(0)
-        kernel = _hc_combine_norm_kernel
-        grid = (rows * hc_count,)
-        kernel_kwargs: dict[str, bool] = {}
-        row_wise_min_rows = get_current_hardware_profile().qwen4exp_hc_combine_norm_row_wise_min_rows
-        if row_wise_min_rows is not None and norm_weight_numel != group_dim and rows >= row_wise_min_rows:
-            kernel = _hc_combine_norm_row_wise_kernel
-            grid = (rows,)
-            kernel_kwargs["WIDE_OFFSETS"] = _hc_combine_norm_needs_wide_offsets(
-                rows,
-                residual_dim,
-                group_dim,
-                hc_count,
-                residual.stride(0),
-                block_output.stride(0),
-                injection_stride,
-                combined.stride(0),
-                normalized.stride(0),
-                injection_logits is not None,
-            )
-        kernel[grid](
+        # One program handles the historical single stream, or all streams on
+        # the A3 row-wise path while loading the block-output row only once.
+        streams_per_program = 1
+        if (
+            rows >= _HC_COMBINE_NORM_ROW_WISE_MIN_ROWS
+            and norm_weight_numel != group_dim
+            and get_current_hardware_profile().supports(HardwareCapability.QWEN4EXP_HC_COMBINE_NORM_ROW_WISE)
+        ):
+            streams_per_program = hc_count
+        stream_groups = hc_count // streams_per_program
+        wide_offsets = _hc_combine_norm_needs_wide_offsets(
+            rows,
+            residual_dim,
+            group_dim,
+            hc_count,
+            residual.stride(0),
+            block_output.stride(0),
+            injection_stride,
+            combined.stride(0),
+            normalized.stride(0),
+            injection_logits is not None,
+        )
+        _hc_combine_norm_kernel[(rows * stream_groups,)](
             residual,
             block_output,
             injection_ptr,
@@ -795,7 +751,8 @@ def _hc_combine_norm(
             WEIGHT_SHARED=norm_weight_numel == group_dim,
             BLOCK_SIZE=block_size,
             EPS=eps,
-            **kernel_kwargs,
+            STREAMS_PER_PROGRAM=streams_per_program,
+            WIDE_OFFSETS=wide_offsets,
         )
     return combined, normalized
 
