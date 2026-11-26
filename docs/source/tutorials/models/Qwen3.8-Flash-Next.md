@@ -32,7 +32,7 @@ See [supported features](../../user_guide/support_matrix/supported_features.md) 
 | `Qwen3.8-Flash-Next-w4a8` (quantized version) | A2 series / A3 series | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/Qwen3.8-Flash-Next-w4a8) |
 | `Qwen3.8-Flash-Next-w4a8-mxfp` (quantized version) | 950DT products | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/Qwen3.8-Flash-Next-w4a8-mxfp) |
 
-The examples use ModelScope model IDs with `VLLM_USE_MODELSCOPE=True`. Both PD roles must load the same checkpoint.
+The examples use ModelScope model IDs with `VLLM_USE_MODELSCOPE=True`. Both PD roles must load the same checkpoint. The A3 and 950DT deployment configurations in Sections 5.1 and 5.2 follow the November 24 scripts, using W4A8 ALL-INT shared-expert AWQ weights on A3 and W4A8 ALL-MXFP shared-expert AWQ weights on 950DT. If using local weights, replace the model ID with the matching checkpoint directory; validate the quantization format before reusing these settings.
 
 ## 4 Installation
 
@@ -628,6 +628,8 @@ For 950DT products, basic PD, the image-and-text 10K case, and the long-context 
 
     This W4A8 PD deployment uses one 16-device A3 series host specified by `local_ip`. Prefill uses TP2 × PP4 × DP1 (EP2) on devices 0–7. Decode uses TP2 × DP4 (EP8) on devices 8–15. Both roles load the same checkpoint. The proxy routes requests through one Prefill API endpoint and one Decode API endpoint (1P1D); Decode runs four DP replicas behind its endpoint.
 
+    Both roles use a maximum context length of 143360 tokens. Prefill uses a 4096 MB HCCL buffer and expert-parallel buffer; Decode uses a 1024 MB HCCL buffer and explicit graph capture sizes.
+
     Before starting:
 
     - Expose the required devices, mount `/etc/hccn.conf`, and use `--shm-size=128g`. Provide sufficient host memory for Engram CPU offload and DP shared memory.
@@ -656,7 +658,8 @@ For 950DT products, basic PD, the image-and-text 10K case, and the long-context 
     export VLLM_USE_MODELSCOPE=True
     export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
     export HCCL_NPU_SOCKET_PORT_RANGE=61400-61499
-    export HCCL_BUFFSIZE=8192
+    export HCCL_BUFFSIZE=4096
+    export HCCL_BUFFSIZE_EP=4096
 
     vllm serve Eco-Tech/Qwen3.8-Flash-Next-w4a8 \
         --host 0.0.0.0 \
@@ -667,7 +670,11 @@ For 950DT products, basic PD, the image-and-text 10K case, and the long-context 
         --tensor-parallel-size 2 \
         --pipeline-parallel-size 4 \
         --data-parallel-size 1 \
-        --max-model-len 262144 \
+        --data-parallel-address "${local_ip}" \
+        --data-parallel-rpc-port 19345 \
+        --master-addr "${local_ip}" \
+        --master-port 29450 \
+        --max-model-len 143360 \
         --max-num-seqs 32 \
         --max-num-batched-tokens 8192 \
         --gpu-memory-utilization 0.90 \
@@ -706,7 +713,7 @@ For 950DT products, basic PD, the image-and-text 10K case, and the long-context 
     export VLLM_USE_MODELSCOPE=True
     export ASCEND_RT_VISIBLE_DEVICES=8,9,10,11,12,13,14,15
     export HCCL_NPU_SOCKET_PORT_RANGE=61500-61599
-    export HCCL_BUFFSIZE=512
+    export HCCL_BUFFSIZE=1024
 
     vllm serve Eco-Tech/Qwen3.8-Flash-Next-w4a8 \
         --host 0.0.0.0 \
@@ -716,7 +723,11 @@ For 950DT products, basic PD, the image-and-text 10K case, and the long-context 
         --quantization ascend \
         --tensor-parallel-size 2 \
         --data-parallel-size 4 \
-        --max-model-len 262144 \
+        --data-parallel-address "${local_ip}" \
+        --data-parallel-rpc-port 19346 \
+        --master-addr "${local_ip}" \
+        --master-port 29460 \
+        --max-model-len 143360 \
         --max-num-seqs 32 \
         --max-num-batched-tokens 8192 \
         --gpu-memory-utilization 0.90 \
@@ -726,7 +737,7 @@ For 950DT products, basic PD, the image-and-text 10K case, and the long-context 
         --mamba-cache-mode align \
         --mamba-ssm-cache-dtype bfloat16 \
         --engram-config '{"cpu_offload":true,"dp_shared_memory":true}' \
-        --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
+        --compilation-config '{"cudagraph_capture_sizes":[1,2,4,8,12,16,20,24,28,32,36,40,44,48,64,80,96,112,128],"cudagraph_mode":"FULL_DECODE_ONLY"}' \
         --additional-config '{"enable_flashcomm1":true,"enable_cpu_binding":true,"enable_shared_expert_dp":true,"multistream_overlap_shared_expert":true,"scheduler_config":{"recompute_scheduler_enable":true},"ascend_compilation_config":{"fuse_norm_quant":false,"enable_npugraph_ex":true,"enable_static_kernel":true,"enable_super_kernel":false}}' \
         --speculative-config '{"method":"qwen3_5_mtp","num_speculative_tokens":3,"enforce_eager":false}' \
         --kv-transfer-config '{"kv_connector":"MooncakeConnectorV2","kv_role":"kv_consumer","kv_port":32700,"kv_connector_extra_config":{"prefill":{"dp_size":1,"tp_size":2,"pp_size":4},"decode":{"dp_size":4,"tp_size":2}}}'
@@ -789,7 +800,7 @@ For 950DT products, basic PD, the image-and-text 10K case, and the long-context 
 
     Run Prefill and Decode in separate terminals. Start the proxy after both APIs are ready. Port 8087 is also used by the colocated example, so stop that service before starting this proxy.
 
-    These commands retain `VLLM_VERSION=0.32.0` from the validated runtime. This variable overrides vLLM version detection; it does not install or upgrade vLLM. Initialize CANN/ATB as described in Section 4.1.
+    Initialize CANN/ATB as described in Section 4.1. Use the vLLM version matching the selected vLLM-Ascend runtime.
 
     **Prefill:**
 
@@ -805,12 +816,9 @@ For 950DT products, basic PD, the image-and-text 10K case, and the long-context 
     export GLOO_SOCKET_IFNAME="${nic_name}"
     export TP_SOCKET_IFNAME="${nic_name}"
     export HCCL_SOCKET_IFNAME="${nic_name}"
-    export VLLM_VERSION=0.32.0
     export VLLM_RPC_TIMEOUT=3600000
-    export HCCL_EXEC_TIMEOUT=3600
+    export HCCL_EXEC_TIMEOUT=204
     export HCCL_CONNECT_TIMEOUT=120
-    export VLLM_ASCEND_ENABLE_MLAPO=1
-    export VLLM_USE_V1=1
     export VLLM_USE_MODELSCOPE=True
     export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3
     export VLLM_USE_V2_MODEL_RUNNER=1
@@ -841,6 +849,8 @@ For 950DT products, basic PD, the image-and-text 10K case, and the long-context 
         --data-parallel-size 2 \
         --data-parallel-address "${local_ip}" \
         --data-parallel-rpc-port 13388 \
+        --master-addr "${local_ip}" \
+        --master-port 29450 \
         --max-model-len 143360 \
         --max-num-seqs 64 \
         --max-num-batched-tokens 4096 \
@@ -871,12 +881,9 @@ For 950DT products, basic PD, the image-and-text 10K case, and the long-context 
     export GLOO_SOCKET_IFNAME="${nic_name}"
     export TP_SOCKET_IFNAME="${nic_name}"
     export HCCL_SOCKET_IFNAME="${nic_name}"
-    export VLLM_VERSION=0.32.0
     export VLLM_RPC_TIMEOUT=3600000
-    export HCCL_EXEC_TIMEOUT=3600
+    export HCCL_EXEC_TIMEOUT=204
     export HCCL_CONNECT_TIMEOUT=120
-    export VLLM_ASCEND_ENABLE_MLAPO=1
-    export VLLM_USE_V1=1
     export VLLM_USE_MODELSCOPE=True
     export ASCEND_RT_VISIBLE_DEVICES=4,5,6,7
     export VLLM_USE_V2_MODEL_RUNNER=1
@@ -907,6 +914,8 @@ For 950DT products, basic PD, the image-and-text 10K case, and the long-context 
         --data-parallel-size 2 \
         --data-parallel-address "${local_ip}" \
         --data-parallel-rpc-port 13389 \
+        --master-addr "${local_ip}" \
+        --master-port 29460 \
         --max-model-len 143360 \
         --max-num-seqs 64 \
         --max-num-batched-tokens 4096 \
@@ -2751,10 +2760,10 @@ Use the configuration for your hardware and deployment mode. The table summarize
 | A3 series | Colocated | 0–7 | 8 × 1 × 1 | 131072 | 8 | 4096 |
 | 950DT products | Colocated | 0–3 | 4 × 1 × 1 | 141312 | 32 | 4096 |
 | A2 series | Prefill | 0–7 on prefill host | 4 × 2 × 1 | 141312 | 32 | 8192 |
-| A3 series | Prefill (basic PD) | 0–7 | 2 × 4 × 1 (EP2) | 262144 | 32 | 8192 |
+| A3 series | Prefill (basic PD) | 0–7 | 2 × 4 × 1 (EP2) | 143360 | 32 | 8192 |
 | 950DT products | Prefill (basic PD) | 0–3 | 2 × 1 × 2 (EP4) | 143360 | 64 | 4096 |
 | A2 series | Decode | 0–7 on decode host | 2 × 1 × 4 | 141312 | 32 | 8192 |
-| A3 series | Decode (basic PD) | 8–15 | 2 × 1 × 4 (EP8) | 262144 | 32 | 8192 |
+| A3 series | Decode (basic PD) | 8–15 | 2 × 1 × 4 (EP8) | 143360 | 32 | 8192 |
 | 950DT products | Decode (basic PD) | 4–7 | 2 × 1 × 2 (EP4) | 143360 | 64 | 4096 |
 | A2 series | Prefill (image-and-text 10K) | 0–7 on prefill host | 4 × 2 × 1 (EP4) | 262144 | 32 | 8192 |
 | A3 series | Prefill (image-and-text 10K) | 0–7 | 4 × 2 × 1 (EP4) | 262144 | 32 | 8192 |
