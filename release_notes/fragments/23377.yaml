@@ -1,0 +1,7 @@
+pr: 23377
+entries:
+  - category: feature
+    text: >-
+      DeepSeek V4.1 Flash eager MRV2 PD producers on Ascend 950 can shard long-context
+      and index caches across two DCP ranks with whole-block interleave.
+      TP2 requires an A5 attention operator path supporting 32 local query heads.
