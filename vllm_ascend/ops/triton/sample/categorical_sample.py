@@ -55,6 +55,7 @@ def _categorical_prepare_mass_kernel(
     logits_cache_stride_0,
     logits_cache_stride_1,
     logits_cache_col_ptr,
+    logits_cache_row_mapping_ptr,
     logits_ptr,
     logits_stride,
     expanded_idx_mapping_ptr,
@@ -94,6 +95,13 @@ def _categorical_prepare_mass_kernel(
         )
 
         if logits_cache_ptr is not None:
+            cache_row = req_state_idx
+            if logits_cache_row_mapping_ptr is not None:
+                cache_row = tl.load(
+                    logits_cache_row_mapping_ptr + req_state_idx,
+                    mask=is_valid_req,
+                    other=-1,
+                ).to(tl.int64)
             if logits_cache_col_ptr is not None:
                 if PER_TOKEN_COL:
                     col = tl.load(logits_cache_col_ptr + token_idx)
@@ -101,10 +109,11 @@ def _categorical_prepare_mass_kernel(
                     col = tl.load(logits_cache_col_ptr)
             else:
                 col = 0
+            safe_cache_row = tl.maximum(0, cache_row)
             tl.store(
-                logits_cache_ptr + req_state_idx * logits_cache_stride_0 + col * logits_cache_stride_1 + offsets,
+                logits_cache_ptr + safe_cache_row * logits_cache_stride_0 + col * logits_cache_stride_1 + offsets,
                 logits,
-                mask=mask & is_valid_req,
+                mask=mask & is_valid_req & (cache_row >= 0),
             )
 
         if temp != 0.0 and APPLY_TEMPERATURE:
@@ -312,6 +321,7 @@ def _categorical_sample(
     use_fp64: bool = False,
     *,
     is_drafting: bool = False,
+    logits_cache_row_mapping: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Sample token ids from logits with categorical sampling.
 
@@ -363,6 +373,7 @@ def _categorical_sample(
         logits_cache.stride(0) if logits_cache is not None else 0,
         logits_cache.stride(1) if logits_cache is not None else 0,
         logits_cache_col,
+        logits_cache_row_mapping,
         logits,
         logits.stride(0),
         expanded_idx_mapping,
@@ -449,6 +460,7 @@ def _categorical_sample_main(
         logits_cache_col,
         use_fp64,
         is_drafting=is_drafting,
+        logits_cache_row_mapping=logits_cache_row_mapping,
     )
 
 

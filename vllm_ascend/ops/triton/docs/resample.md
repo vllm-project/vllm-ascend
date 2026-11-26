@@ -264,3 +264,29 @@ pytest -sv tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_resample
 ```
 
 Performance is validated separately with `msprof op`; the numerical UT does not use Python wall time as an operator-performance metric.
+
+
+## Request-sharded proposal caches
+
+`resample(..., draft_logits_row_mapping=...)` reads a rank-local cache of shape
+`[local_cache_rows, num_steps, full_vocab_size]` directly. The optional contiguous
+int32/int64 vector maps original request-state slots to local cache rows; `-1`
+denotes no local row. `None` preserves replicated-cache indexing. Temperature,
+seed and position remain indexed by original request state, never cache row.
+
+The caller must reject overwritten drafts using the upstream cache's ownership
+check before invoking resampling. A missing row falls back to the target
+distribution; bonus positions never access proposal logits. Negative rows use a
+safe nonnegative pointer plus a masked load. No vocabulary-axis partition or
+full-cache copy is introduced. The optional pointer creates two JIT variants
+(mapped/unmapped); it does not specialize on the mapping's contents.
+
+Mapped-cache parity and ownership coverage:
+
+```bash
+python -m pytest -q tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_request_sharded_rejection.py
+```
+
+The complete mapped rejection path requires upstream `DraftLogitsCache` and
+matching row-mapped statistics kernels. vLLM 0.33.0's DSpark probabilistic sharding
+guard remains in place. This does not change greedy draft execution.

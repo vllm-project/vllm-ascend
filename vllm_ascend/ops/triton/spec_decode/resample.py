@@ -45,6 +45,7 @@ def _resample_kernel(
     draft_logits_ptr,
     draft_logits_stride_0,
     draft_logits_stride_1,
+    draft_logits_row_mapping_ptr,
     draft_rejected_logsumexp_ptr,
     rejected_step_ptr,
     cu_num_logits_ptr,
@@ -80,6 +81,11 @@ def _resample_kernel(
         end_idx = tl.load(cu_num_logits_ptr + req_idx + 1)
         resample_token_idx = start_idx + resample_idx
         req_state_idx = tl.load(expanded_idx_mapping_ptr + resample_token_idx).to(tl.int64)
+        draft_row = req_state_idx
+        if HAS_DRAFT_LOGITS:
+            if draft_logits_row_mapping_ptr is not None:
+                draft_row = tl.load(draft_logits_row_mapping_ptr + req_state_idx).to(tl.int64)
+        safe_draft_row = tl.maximum(draft_row, 0)
         temperature = tl.load(temp_ptr + req_state_idx).to(tl.float32)
         is_bonus = resample_token_idx == end_idx - 1
         needs_resample = (temperature != 0.0) | is_bonus
@@ -87,6 +93,8 @@ def _resample_kernel(
         if needs_resample:
             rejected_draft_token = tl.load(draft_sampled_ptr + resample_token_idx + 1, mask=not is_bonus, other=0)
             is_valid_rejected_draft = rejected_draft_token >= 0
+            if HAS_DRAFT_LOGITS:
+                is_valid_rejected_draft &= draft_row >= 0
             vocab_offsets = block_idx * BLOCK_SIZE + block_lanes
             vocab_mask = vocab_offsets < vocab_size
             target_block_logits = tl.load(
@@ -117,10 +125,10 @@ def _resample_kernel(
                 if HAS_DRAFT_LOGITS:
                     draft_block_logits = tl.load(
                         draft_logits_ptr
-                        + req_state_idx * draft_logits_stride_0
+                        + safe_draft_row * draft_logits_stride_0
                         + resample_idx * draft_logits_stride_1
                         + vocab_offsets,
-                        mask=vocab_mask,
+                        mask=vocab_mask & (draft_row >= 0),
                         other=float("-inf"),
                     ).to(tl.float32)
                     draft_block_logits = draft_block_logits / temperature
@@ -172,6 +180,7 @@ def _categorical_finalize_kernel(
     draft_logits_ptr,
     draft_logits_stride_0,
     draft_logits_stride_1,
+    draft_logits_row_mapping_ptr,
     draft_rejected_logsumexp_ptr,
     rejected_step_ptr,
     cu_num_logits_ptr,
@@ -199,12 +208,19 @@ def _categorical_finalize_kernel(
     end_idx = tl.load(cu_num_logits_ptr + req_idx + 1)
     resample_token_idx = start_idx + resample_idx
     req_state_idx = tl.load(expanded_idx_mapping_ptr + resample_token_idx).to(tl.int64)
+    draft_row = req_state_idx
+    if HAS_DRAFT_LOGITS:
+        if draft_logits_row_mapping_ptr is not None:
+            draft_row = tl.load(draft_logits_row_mapping_ptr + req_state_idx).to(tl.int64)
+    safe_draft_row = tl.maximum(draft_row, 0)
 
     temperature = tl.load(temp_ptr + req_state_idx).to(tl.float32)
     is_greedy = temperature == 0.0
     is_bonus = resample_token_idx == end_idx - 1
     rejected_draft_token = tl.load(draft_sampled_ptr + resample_token_idx + 1, mask=not is_bonus, other=0)
     is_valid_rejected_draft = rejected_draft_token >= 0
+    if HAS_DRAFT_LOGITS:
+        is_valid_rejected_draft &= draft_row >= 0
     is_greedy_bonus = is_greedy & is_bonus
     is_random = ~is_greedy
     is_random_bonus = is_random & (is_bonus | ~is_valid_rejected_draft)
@@ -307,8 +323,11 @@ def _categorical_finalize_kernel(
 
     if HAS_DRAFT_LOGITS:
         draft_block_logits = tl.load(
-            draft_logits_ptr + req_state_idx * draft_logits_stride_0 + resample_idx * draft_logits_stride_1 + token_ids,
-            mask=valid_token_mask & is_random_residual & has_total_mass,
+            draft_logits_ptr
+            + safe_draft_row * draft_logits_stride_0
+            + resample_idx * draft_logits_stride_1
+            + token_ids,
+            mask=valid_token_mask & is_random_residual & has_total_mass & (draft_row >= 0),
             other=float("-inf"),
         ).to(tl.float32)
         draft_block_logits = draft_block_logits / tl.where(temperature != 0.0, temperature, 1.0)
@@ -361,6 +380,7 @@ def resample(
     has_draft_logits: bool | None = None,
     cumulative_log_p: torch.Tensor | None = None,
     use_block_verification: bool = False,
+    draft_logits_row_mapping: torch.Tensor | None = None,
 ) -> None:
     """Resample the first rejected token or the bonus token in place.
 
@@ -411,6 +431,16 @@ def resample(
     elif draft_logits is None:
         draft_logits = target_logits.new_empty(1, 1, 1)
 
+    if draft_logits_row_mapping is not None:
+        if not has_draft_logits:
+            raise ValueError("draft_logits_row_mapping requires a draft logits cache")
+        if draft_logits_row_mapping.ndim != 1 or not draft_logits_row_mapping.is_contiguous():
+            raise ValueError("draft_logits_row_mapping must be a contiguous vector")
+        if draft_logits_row_mapping.dtype not in (torch.int32, torch.int64):
+            raise ValueError("draft_logits_row_mapping must have int32 or int64 dtype")
+        if draft_logits_row_mapping.device != target_logits.device:
+            raise ValueError("draft_logits_row_mapping must be on the target logits device")
+
     num_blocks = triton.cdiv(vocab_size, _RESAMPLE_BLOCK_SIZE)
     local_argmax = torch.empty((num_reqs, num_blocks), dtype=torch.int64, device=target_logits.device)
     local_max = torch.empty((num_reqs, num_blocks), dtype=torch.float32, device=target_logits.device)
@@ -430,6 +460,7 @@ def resample(
         draft_logits,
         draft_logits.stride(0),
         draft_logits.stride(1),
+        draft_logits_row_mapping,
         draft_rejected_logsumexp,
         num_sampled,
         cu_num_logits,
@@ -462,6 +493,7 @@ def resample(
         draft_logits,
         draft_logits.stride(0),
         draft_logits.stride(1),
+        draft_logits_row_mapping,
         draft_rejected_logsumexp,
         num_sampled,
         cu_num_logits,

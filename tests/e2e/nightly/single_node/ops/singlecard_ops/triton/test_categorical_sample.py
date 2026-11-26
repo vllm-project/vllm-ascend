@@ -827,3 +827,38 @@ def test_categorical_sample_use_fp64_is_not_supported():
             apply_temperature=True,
             use_fp64=True,
         )
+
+
+@pytest.mark.parametrize("per_token_col", [False, True])
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
+def test_categorical_sample_mapped_cache_writes_preserve_rng_and_guards(per_token_col, dtype):
+    """Mapped writes must not alter request RNG or write unmapped/padded rows."""
+    logits = torch.randn(4, 1031, dtype=dtype, device=DEVICE)
+    slots = torch.tensor([7, 2, 5, -1], dtype=torch.int32, device=DEVICE)
+    temperature = torch.ones(8, dtype=torch.float32, device=DEVICE)
+    seeds, pos = _seed_and_pos(4, 8)
+    mapping = torch.full((8,), -1, dtype=torch.int32, device=DEVICE)
+    mapping[7], mapping[5] = 2, 0
+    cols = torch.tensor([1, 2, 2, 0] if per_token_col else 1, dtype=torch.int32, device=DEVICE)
+    cache = torch.full((4, 3, 1031), -12345.0, dtype=torch.float32, device=DEVICE)
+    expected = cache.clone()
+    expected[2, 1] = logits[0].float()
+    expected[0, 2 if per_token_col else 1] = logits[2].float()
+    reference = categorical_sample(
+        logits, slots, temperature, seeds, pos, apply_temperature=True, is_drafting=True
+    )
+    sampled = categorical_sample(
+        logits,
+        slots,
+        temperature,
+        seeds,
+        pos,
+        apply_temperature=True,
+        is_drafting=True,
+        logits_cache=cache,
+        logits_cache_col=cols,
+        logits_cache_row_mapping=mapping,
+    )
+    torch.npu.synchronize()
+    torch.testing.assert_close(sampled, reference, rtol=0, atol=0)
+    torch.testing.assert_close(cache, expected, rtol=0, atol=0)
