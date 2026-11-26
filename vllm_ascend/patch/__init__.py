@@ -484,26 +484,6 @@
 #       before DSpark draft selection, or otherwise guarantees that rebuilding
 #       `model_arch_config` preserves the selected draft architecture.
 #
-#   3. `vllm.config.model.ModelConfig.verify_with_parallel_config`
-#    Why:
-#       The pinned vLLM revision propagates `enable_expert_parallel` to the
-#       draft parallel config (upstream #55914) but no longer disables it for
-#       dense drafts (upstream #56930 is not on this revision). Non-MoE draft
-#       models (e.g. Kimi K3 DSpark, VWN eagle3) then fail the
-#       `_verify_with_expert_parallelism` check in
-#       `ModelConfig.verify_with_parallel_config` and cannot start.
-#    How:
-#       Monkey-patch `verify_with_parallel_config` to skip the expert-parallel
-#       check when `runner_type == "draft"` and the model is not MoE. The target
-#       model EP check and MoE draft models are unaffected.
-#    Related PR (if no, explain why):
-#       https://github.com/vllm-project/vllm/pull/55914
-#       https://github.com/vllm-project/vllm/pull/56930
-#    Future Plan:
-#       Remove this patch once the pinned vLLM revision disables expert
-#       parallelism for non-MoE draft models (upstream #56930) or exposes a
-#       backend-safe draft parallel config selection.
-#
 # ** 19. File: platform/patch_structured_output.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.sampling_params.SamplingParams._validate_structured_outputs`
@@ -561,6 +541,22 @@
 #    Future Plan:
 #       Remove this patch once `torch.accelerator` correctly routes to the NPU
 #       backend for these memory APIs.
+#
+# ** 21b. File: platform/patch_torch_utils.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.utils.torch_utils.get_accelerator_view_from_cpu_tensor`
+#    Why:
+#       The upstream UVA helper supports CUDA, ROCm, and XPU, but not NPU.
+#       Qwen4Exp Engram imports that common helper for its host-resident table.
+#    How:
+#       Replace the common helper during the Ascend platform patch phase with
+#       an NPU implementation backed by `_C_ascend.get_npu_view_from_cpu_tensor`.
+#       Model code then uses the normal upstream import without a model-local
+#       rebinding.
+#    Related PR (if no, explain why):
+#       Pending upstream vLLM support; requested in review of vllm-ascend #20311.
+#    Future Plan:
+#       Remove this patch after the NPU branch is available upstream.
 #
 # ** 22. File: platform/patch_tool_choice_none_content.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~

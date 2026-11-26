@@ -16,6 +16,7 @@ from vllm.v1.kv_cache_interface import (
     CircularBufferSpec,
     FullAttentionSpec,
     KVCacheSpec,
+    KVCacheTensor,
     MambaSpec,
     MLAAttentionSpec,
     SlidingWindowMLASpec,
@@ -25,24 +26,17 @@ from vllm.v1.kv_cache_interface import (
 from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry
 
 
+@dataclass(kw_only=True)
+class AlignedKVCacheTensor(KVCacheTensor):
+    """Allocator padding carried explicitly through copies of the base descriptor."""
+
+    logical_size: int
+    alignment: int
+
+
 def get_kv_cache_compression_ratio(kv_cache_spec: KVCacheSpec) -> int:
     """Return the MLA compression ratio across vLLM cache-spec APIs."""
     return kv_cache_spec.tokens_per_state
-
-
-def get_storage_block_size(kv_cache_spec: KVCacheSpec) -> int:
-    """Return the physical token rows represented by one scheduler block."""
-    if isinstance(kv_cache_spec, UniformTypeKVCacheSpecs):
-        storage_block_sizes = {get_storage_block_size(spec) for spec in kv_cache_spec.kv_cache_specs.values()}
-        assert len(storage_block_sizes) == 1, "All specs in one KV cache group must use the same storage block size."
-        return storage_block_sizes.pop()
-    # vLLM #53906 added an optional MLA storage-view override. It is not
-    # Ascend's derived number of physical rows per logical block.
-    if isinstance(kv_cache_spec, AscendMLAAttentionSpec):
-        return kv_cache_spec.block_size // kv_cache_spec.tokens_per_state
-    if isinstance(kv_cache_spec, MLAAttentionSpec):
-        return kv_cache_spec.block_size
-    return getattr(kv_cache_spec, "storage_block_size", kv_cache_spec.block_size)
 
 
 def is_circular_kv_cache_spec(kv_cache_spec: KVCacheSpec) -> bool:
@@ -252,7 +246,7 @@ class AscendMLAAttentionSpec(MLAAttentionSpec):
     @property
     def real_page_size_bytes(self) -> int:
         return (
-            get_storage_block_size(self)
+            self.num_states
             * self.num_kv_heads
             * (self.head_size * get_dtype_size(self.dtype) + self.scale_dim * get_dtype_size(self.scale_dtype))
         )
@@ -405,7 +399,6 @@ class AscendSlidingWindowMLASpec(SlidingWindowMLASpec):
     cache_dtype_str: str | None = None
     # DeepseekV4-only: see MLAAttentionSpec.model_version.
     alignment: int | None = None  # Default to None for no padding.
-    compress_ratio: int = 1
     model_version: str | None = None
     indexes_kv_by_block_stride: bool = False
     bounded_replay: bool = False
@@ -421,62 +414,17 @@ class AscendSlidingWindowMLASpec(SlidingWindowMLASpec):
     def __post_init__(self):
         pass
 
-    @property
-    def storage_block_size(self) -> int:
-        return self.block_size // self.compress_ratio
-
-    @property
-    def real_page_size_bytes(self) -> int:
-        return self.storage_block_size * self.num_kv_heads * self.head_size * get_dtype_size(self.dtype)
-
     @classmethod
     def merge(cls, specs: list[Self]) -> Self:
         assert all(isinstance(spec, AscendSlidingWindowMLASpec) for spec in specs), (
             "All attention layers in the same KV cache group must be AscendSlidingWindowMLASpec."
         )
-        cache_dtype_str_set = set(spec.cache_dtype_str for spec in specs)
-        compress_ratio_set = set(spec.compress_ratio for spec in specs)
-        model_version_set = set(spec.model_version for spec in specs)
-        sliding_window_set = set(spec.sliding_window for spec in specs)
-        assert len({spec.dcp_sharded for spec in specs}) == 1
-        # ``extra_retained_tokens`` belongs to ``SlidingWindowSpec`` and
-        # ``bounded_replay`` arrives with vLLM #56227. This override builds the
-        # merged spec from scratch rather than through the parent's ``merge``,
-        # so it has to carry both across itself, and dropping either is silent:
-        # the first leaves a multi-layer group with a narrower window than its
-        # layers asked for, the second leaves it replaying nothing. ``None`` is
-        # what a lane without the field reads back, and is not carried.
-        extra_retained_set = set(getattr(spec, "extra_retained_tokens", None) for spec in specs)
-        bounded_replay_set = set(getattr(spec, "bounded_replay", None) for spec in specs)
-        assert (
-            len(cache_dtype_str_set) == 1
-            and len(compress_ratio_set) == 1
-            and len(model_version_set) == 1
-            and len(sliding_window_set) == 1
-            and len(extra_retained_set) == 1
-            and len(bounded_replay_set) == 1
-        ), (
-            "All attention layers in the same KV cache group must use the same "
-            "quantization method, compress ratio, model version, sliding "
-            "window size, retained token count and replay policy."
-        )
-        carried_kwargs: dict[str, Any] = {}
-        if None not in bounded_replay_set:
-            carried_kwargs.update(declared_kwarg(cls, "bounded_replay", bounded_replay_set.pop()))
-        if None not in extra_retained_set:
-            carried_kwargs.update(declared_kwarg(cls, "extra_retained_tokens", extra_retained_set.pop()))
-        return cls(
-            block_size=specs[0].block_size,
-            dcp_sharded=specs[0].dcp_sharded,
-            num_kv_heads=specs[0].num_kv_heads,
-            head_size=specs[0].head_size,
-            dtype=specs[0].dtype,
-            page_size_padded=specs[0].page_size_padded,
-            sliding_window=sliding_window_set.pop(),
-            cache_dtype_str=cache_dtype_str_set.pop(),
-            compress_ratio=compress_ratio_set.pop(),
-            model_version=model_version_set.pop(),
-            **carried_kwargs,
+        assert len({spec.alignment for spec in specs}) == 1
+        assert len({spec.indexes_kv_by_block_stride for spec in specs}) == 1
+        return replace(
+            super().merge(specs),
+            alignment=specs[0].alignment,
+            indexes_kv_by_block_stride=specs[0].indexes_kv_by_block_stride,
         )
 
 
@@ -503,10 +451,6 @@ class AscendIndexerKPoolTailSpec(SlidingWindowSpec):
     @property
     def prefix_cacheable(self) -> bool:
         return False
-
-    @property
-    def storage_block_size(self) -> int:
-        return self.ring_capacity
 
     def get_num_kernel_states(self, kernel_block_size: int) -> int:
         # One logical pool block owns the whole ring, including lookahead.

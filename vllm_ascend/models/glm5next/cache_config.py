@@ -34,7 +34,6 @@ from vllm_ascend.core.kv_cache_interface import (
     AscendIndexerKPoolTailSpec,
     AscendMLAAttentionSpec,
     get_kv_cache_compression_ratio,
-    get_storage_block_size,
 )
 
 
@@ -121,7 +120,7 @@ def _align_glm5_next_cache_specs(kv_cache_spec: dict[str, KVCacheSpec]) -> None:
         max(_unpadded_page_size(spec) for spec in small_candidates),
     )
     scale_alignments = tuple(
-        get_storage_block_size(spec) * get_dtype_size(spec.scale_dtype)
+        spec.num_states * get_dtype_size(spec.scale_dtype)
         for spec in indexer_specs
         if isinstance(spec, AscendMLAAttentionSpec) and spec.scale_dim
     )
