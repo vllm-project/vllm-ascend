@@ -448,6 +448,58 @@ def test_a5_nope_quantized_attention_accepts_absent_rope(return_lse):
     assert execute.call_args.kwargs["return_lse"] is return_lse
 
 
+def test_turboquant_sharded_dcp_prefill_consumes_query_gather():
+    from vllm_ascend.attention.context_parallel import sfa_cp
+
+    impl = _make_impl(rank=0)
+    impl._sharded_indexer = True
+    impl.pcp_enabled = False
+    impl.enable_sparse_sfa_turboquant = True
+    impl.dcp_group = SimpleNamespace(world_size=2, unique_name="dcp:0")
+    query = torch.arange(8).reshape(2, 1, 4).float()
+    rope = query[..., :1]
+    query_lens = torch.tensor([2])
+    cache = torch.zeros(1, 128, 1, 4, dtype=torch.uint8)
+    indices = torch.tensor([[[0, 2]], [[1, 3]]], dtype=torch.int32)
+    metadata = AscendSFADCPMetadata.__new__(AscendSFADCPMetadata)
+    metadata.num_prefills = 1
+    metadata.pcp_has_global_prefill = False
+    metadata.dcp_context = SimpleNamespace(
+        gather_context=None,
+        kv_gather_block_ids=None,
+        kv_gather_block_table=None,
+        block_table=torch.tensor([[0]]),
+        seq_lens=torch.tensor([2]),
+    )
+    impl._tq_rotate_query = lambda q, pe: torch.cat((q, pe), dim=-1)
+    partial = torch.ones(2, 2, 4)
+    impl._turboquant_sfa = Mock(return_value=(partial, torch.zeros(2, 2, 1), torch.ones(2, 2, 1)))
+    impl.turboquant = SimpleNamespace(inverse=lambda output: output)
+    packed = impl._tq_rotate_query(query, rope).transpose(0, 1)
+    gathered = torch.cat((packed, packed + 10))
+    with (
+        patch.object(sfa_cp, "get_pcp_group", return_value=SimpleNamespace(world_size=1)),
+        patch.object(sfa_cp, "all_gather_async", return_value=(gathered, None)) as gather,
+        patch.object(impl, "_merge_dcp_outputs", return_value=query) as merge,
+    ):
+        impl._on_query_ready(query, rope, metadata)
+        impl._on_kv_cache_written((cache,), metadata)
+        actual = impl._execute_sparse_flash_attention_process(
+            query, rope, (cache,), indices, metadata, query_lens, torch.tensor([4])
+        )
+    gather.assert_called_once()
+    assert gather.call_args.args[1] is impl.dcp_group
+    args, kwargs = impl._turboquant_sfa.call_args
+    torch.testing.assert_close(args[0], gathered.transpose(0, 1))
+    torch.testing.assert_close(args[2], torch.tensor([[[0, -1]], [[1, -1]]], dtype=torch.int32))
+    assert args[1] is cache and args[3] is metadata.dcp_context.block_table
+    assert args[5] is metadata.dcp_context.seq_lens
+    assert kwargs == {"sparse_mode": 0, "return_softmax_lse": True}
+    merge.assert_called_once()
+    assert metadata.dcp_context.gather_context is None
+    assert actual is query
+
+
 @pytest.mark.parametrize("turboquant", [False, True])
 @pytest.mark.parametrize("prefetched", [False, True])
 @pytest.mark.parametrize("wait_fails", [False, True])

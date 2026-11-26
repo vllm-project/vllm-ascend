@@ -29,7 +29,7 @@ class _RemoveLayerIndexImport(ast.NodeTransformer):
         return node
 
 
-def load_sparse_config_type(use_int8_adaptor=True):
+def load_sparse_config_type(device):
     source = Path(__file__).resolve().parents[2] / "vllm_ascend/ascend_config.py"
     tree = ast.parse(source.read_text(encoding="utf-8"))
     config = next(node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == "AscendConfig")
@@ -70,16 +70,21 @@ def load_sparse_config_type(use_int8_adaptor=True):
         "Any": Any,
         "extract_layer_index": extract_layer_index,
         "HardwareCapability": SimpleNamespace(NATIVE_INT8_SPARSE=object()),
-        "get_current_hardware_profile": lambda: SimpleNamespace(supports=lambda capability: use_int8_adaptor),
+        "DeviceAdaptorFamily": SimpleNamespace(STANDARD="standard"),
+        "get_current_hardware_profile": lambda: SimpleNamespace(
+            device_adaptor_family="standard" if device in ("A2", "A3") else "fp8",
+            supports=lambda capability: device == "A3",
+        ),
     }
     exec(compile(ast.fix_missing_locations(module), str(source), "exec"), namespace)
     return namespace["AscendConfig"]
 
 
-def make_config(description, *, dtype="int8", sparse=True, use_int8_adaptor=True):
-    config = load_sparse_config_type(use_int8_adaptor)()
+def make_config(description, *, dtype="int8", sparse=True, device="A3", dcp=1):
+    config = load_sparse_config_type(device)()
     config.configure(
         SimpleNamespace(
+            parallel_config=SimpleNamespace(decode_context_parallel_size=dcp),
             quant_config=SimpleNamespace(quant_description=description),
             attention_config=SimpleNamespace(indexer_kv_dtype=dtype),
         ),
@@ -91,12 +96,32 @@ def make_config(description, *, dtype="int8", sparse=True, use_int8_adaptor=True
 class TestSparseLIC8ProjectionTypes(unittest.TestCase):
     def test_a5_keeps_original_projection_and_explicit_type_resolution(self):
         prefix = "model.layers.3.self_attn.indexer"
-        config = make_config({f"{prefix}.wq_b.weight": "W8A8_DYNAMIC"}, use_int8_adaptor=False)
+        config = make_config({f"{prefix}.wq_b.weight": "W8A8_DYNAMIC"}, device="A5", dcp=2)
         self.assertFalse(config.is_sparse_li_c8_layer(f"{prefix}.k_cache"))
         config = make_config(
-            {f"{prefix}.quant_type": "FLOAT", f"{prefix}.wq_b.weight": "W8A8_MXFP8"}, use_int8_adaptor=False
+            {f"{prefix}.quant_type": "FLOAT", f"{prefix}.wq_b.weight": "W8A8_MXFP8"}, device="A5", dcp=2
         )
         self.assertTrue(config.is_sparse_li_c8_layer(f"{prefix}.k_cache"))
+
+    def test_a2_uses_projection_fallback_only_for_sharded_int8(self):
+        prefix = "model.layers.3.self_attn.indexer"
+        projection = {f"{prefix}.wq_b.weight": "W8A8_DYNAMIC"}
+        for dcp, dtype, sparse, expected in (
+            (2, "int8", True, True),
+            (1, "int8", True, False),
+            (2, "fp8", True, False),
+            (2, "int8", False, False),
+        ):
+            with self.subTest(dcp=dcp, dtype=dtype, sparse=sparse):
+                config = make_config(projection, device="A2", dcp=dcp, dtype=dtype, sparse=sparse)
+                self.assertEqual(config.is_sparse_li_c8_layer(f"{prefix}.k_cache"), expected)
+
+        for explicit in ("FLOAT", "BF16", "INT8_DYNAMIC"):
+            entry = {f"{prefix}.quant_type": explicit}
+            for description in (projection | entry, entry | projection):
+                with self.subTest(explicit=explicit, keys=list(description)):
+                    config = make_config(description, device="A2", dcp=2)
+                    self.assertEqual(config.is_sparse_li_c8_layer(f"{prefix}.k_cache"), explicit == "INT8_DYNAMIC")
 
     def test_delivered_a3_checkpoint_selects_all_24_dynamic_int8_indexers(self):
         layers = [*range(3, 92, 4), 92]

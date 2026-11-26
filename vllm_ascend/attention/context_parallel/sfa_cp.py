@@ -834,11 +834,11 @@ class AscendSFADCPImpl(DCPImplMixin, AscendSFAImpl):
         actual_seq_lengths_key,
     ):
         # Mirrors AscendSFAImpl for the non-DCP case, and additionally asks for
-        # softmax LSE so decode can merge partial results across CP ranks.
+        # softmax LSE when merging partial results from local KV shards.
         dcp_context = attn_metadata.dcp_context
 
-        if self._has_prefill(attn_metadata):
-            # Prefill keeps Q local and attends over the gathered KV, so no LSE.
+        if dcp_context.kv_gather_block_ids is not None:
+            # PCP prefill keeps Q local and attends over the gathered KV.
             gathered_kv_cache = self._finish_dcp_kv_gather(kv_cache, attn_metadata)
             block_table = dcp_context.kv_gather_block_table
             assert block_table is not None
@@ -855,8 +855,8 @@ class AscendSFADCPImpl(DCPImplMixin, AscendSFAImpl):
             output = self.turboquant.inverse(attn_out)
             return self._mask_nope_dcp_padding(output, actual_seq_lengths_query)[0]
 
-        # Decode attends over this rank's KV shard only, so the partial results
-        # are recombined by _merge_dcp_outputs using the LSE.
+        # Both decode and DCP-only sharded prefill attend over local KV.
+        # Merge their partial outputs using the LSE.
         gather_context = dcp_context.gather_context
         dcp_context.gather_context = None
         if gather_context is None:

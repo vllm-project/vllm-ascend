@@ -1066,6 +1066,13 @@ class AscendConfig:
             if get_current_hardware_profile().supports(HardwareCapability.NATIVE_INT8_SPARSE)
             and vllm_config.attention_config.indexer_kv_dtype == "int8"
             else ("INT8_DYNAMIC", "W8A8_MXFP8"),
+            # The standard adaptor also runs sharded INT8 QLI on A2.
+            allow_int8_projection=(
+                use_sparse
+                and vllm_config.attention_config.indexer_kv_dtype == "int8"
+                and vc.parallel_config.decode_context_parallel_size > 1
+                and get_current_hardware_profile().device_adaptor_family == DeviceAdaptorFamily.STANDARD
+            ),
         )
         (
             self._sparse_li_c4_layer_ids,
@@ -1396,7 +1403,7 @@ class AscendConfig:
 
     @classmethod
     def _parse_sparse_li_layers_from_quant_config(
-        cls, quant_config: Any, valid_quant_types: tuple[str, ...]
+        cls, quant_config: Any, valid_quant_types: tuple[str, ...], *, allow_int8_projection: bool = False
     ) -> tuple[set[int], set[str]]:
         """Prefer explicit indexer cache types over projection-type fallback."""
         quant_description = getattr(quant_config, "quant_description", None)
@@ -1404,6 +1411,7 @@ class AscendConfig:
             return set(), set()
 
         QUANT_SUFFIXES = (".indexer.quant_type", ".indexer.wq_b.weight")
+        projection_types = (*valid_quant_types, "W8A8_DYNAMIC") if allow_int8_projection else valid_quant_types
 
         layer_ids: set[int] = set()
         layer_names: set[str] = set()
@@ -1420,13 +1428,17 @@ class AscendConfig:
                 continue
             # A projection's quantization does not override an explicit
             # indexer cache rollback, such as quant_type="FLOAT".
+            is_projection = matched_suffix == ".indexer.wq_b.weight"
             if (
-                get_current_hardware_profile().supports(HardwareCapability.NATIVE_INT8_SPARSE)
-                and matched_suffix == ".indexer.wq_b.weight"
+                is_projection
                 and f"{layer_name}.indexer.quant_type" in quant_description
+                and (
+                    allow_int8_projection
+                    or get_current_hardware_profile().supports(HardwareCapability.NATIVE_INT8_SPARSE)
+                )
             ):
                 continue
-            if value not in valid_quant_types:
+            if value not in (projection_types if is_projection else valid_quant_types):
                 continue
             layer_names.add(layer_name)
             layer_ids.add(extract_layer_index(layer_name))
