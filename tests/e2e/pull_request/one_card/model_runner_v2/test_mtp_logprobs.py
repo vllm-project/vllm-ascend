@@ -6,6 +6,8 @@ from typing import TypedDict
 from unittest.mock import patch
 
 import pytest
+from huggingface_hub import snapshot_download as hf_snapshot_download
+from huggingface_hub.constants import HF_HUB_OFFLINE
 from vllm import SamplingParams
 from vllm.v1.metrics.reader import Counter
 
@@ -39,6 +41,7 @@ def _spec_decode_count(runner, metric_name):
 @patch.dict(os.environ, {"VLLM_USE_V2_MODEL_RUNNER": "1"})
 @wait_until_npu_memory_free(target_free_percentage=0.8)
 def test_mtp_logprobs_match_greedy_reference(enforce_eager: bool) -> None:
+    model_path = hf_snapshot_download(MODEL, local_files_only=HF_HUB_OFFLINE)
     runner_kwargs: _RunnerKwargs = {
         "dtype": "bfloat16",
         "max_model_len": 256,
@@ -50,7 +53,7 @@ def test_mtp_logprobs_match_greedy_reference(enforce_eager: bool) -> None:
         "logprobs_mode": "raw_logprobs",
     }
     params = SamplingParams(temperature=0.0, max_tokens=MAX_TOKENS, logprobs=5, ignore_eos=True)
-    with VllmRunner(MODEL, enforce_eager=True, **runner_kwargs) as runner:
+    with VllmRunner(model_path, enforce_eager=True, **runner_kwargs) as runner:
         reference = runner.generate_w_logprobs(PROMPTS, params, use_tqdm=False)
 
     compilation_config = (
@@ -62,7 +65,7 @@ def test_mtp_logprobs_match_greedy_reference(enforce_eager: bool) -> None:
         }
     )
     with VllmRunner(
-        MODEL,
+        model_path,
         enforce_eager=enforce_eager,
         disable_log_stats=False,
         speculative_config={"method": "qwen3_5_mtp", "num_speculative_tokens": NUM_SPECULATIVE_TOKENS},
