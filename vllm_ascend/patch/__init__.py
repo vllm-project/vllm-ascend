@@ -576,6 +576,17 @@
 #    Future Plan:
 #       Remove this patch after the NPU branch is available upstream.
 #
+#   2. `vllm.model_executor.offloader.uva.is_uva_available`
+#    Why:
+#       Pinned CPU memory alone does not guarantee an NPU UVA mapping, and
+#       the weight offloader may bind the upstream view helper before platform setup.
+#    How:
+#       Select the weight offloader's explicit CPU-to-NPU copy path. Keep
+#       the platform's pinned memory support for other consumers.
+#    Future Plan:
+#       Remove this override when upstream vLLM can select NPU weight
+#       offloading based on a working device mapping.
+#
 # ** 22. File: platform/patch_tool_choice_none_content.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.entrypoints.openai.chat_completion.protocol.ChatCompletionResponse`

@@ -1,5 +1,6 @@
 import torch
 import vllm.utils.torch_utils as upstream_torch_utils
+from vllm.model_executor.offloader import uva as upstream_uva_offloader
 
 
 def get_npu_view_from_cpu_tensor(cpu_tensor: torch.Tensor) -> torch.Tensor:
@@ -15,4 +16,11 @@ def get_npu_view_from_cpu_tensor(cpu_tensor: torch.Tensor) -> torch.Tensor:
     return view
 
 
+def _supports_weight_uva_offload() -> bool:
+    # Pinning is supported even when the driver cannot map pinned memory onto the NPU.
+    # Use the upstream offloader's explicit-copy path for Ascend model weights.
+    return False
+
+
 upstream_torch_utils.get_accelerator_view_from_cpu_tensor = get_npu_view_from_cpu_tensor
+upstream_uva_offloader.is_uva_available = _supports_weight_uva_offload

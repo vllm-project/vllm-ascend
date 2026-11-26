@@ -4,6 +4,8 @@ from unittest.mock import Mock
 
 import pytest
 import torch
+from vllm.config import OffloadConfig, UVAOffloadConfig
+from vllm.model_executor.offloader import UVAOffloader, create_offloader
 from vllm.utils import torch_utils as upstream_torch_utils
 
 from vllm_ascend.patch.platform import patch_torch_utils
@@ -11,6 +13,15 @@ from vllm_ascend.patch.platform import patch_torch_utils
 
 def test_upstream_uva_helper_is_patched_for_npu() -> None:
     assert upstream_torch_utils.get_accelerator_view_from_cpu_tensor is patch_torch_utils.get_npu_view_from_cpu_tensor
+
+
+def test_npu_weight_offload_uses_pinned_cpu_copies(monkeypatch) -> None:
+    monkeypatch.setenv("VLLM_WEIGHT_OFFLOADING_DISABLE_UVA", "0")
+    offloader = create_offloader(OffloadConfig(uva=UVAOffloadConfig(cpu_offload_gb=1)))
+
+    assert isinstance(offloader, UVAOffloader)
+    assert offloader.pin_memory
+    assert not offloader.uva_offloading
 
 
 def test_npu_uva_helper_requires_pinned_memory() -> None:
