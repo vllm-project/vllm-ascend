@@ -432,6 +432,14 @@ if __name__ == "__main__":
 
 
 class TestHostKVRegistration(unittest.TestCase):
+    def test_allocating_from_unavailable_shared_pool_fails(self):
+        manager = SparseKVOffloadManager.__new__(SparseKVOffloadManager)
+        for pool in (None, SimpleNamespace(tensor=None)):
+            with self.subTest(pool=pool):
+                manager.shared_host_pool = pool
+                with self.assertRaisesRegex(RuntimeError, "shared host pool is unavailable"):
+                    manager.allocate_shared_bytes(128)
+
     def test_a2_registers_rank_local_host_and_copy_sfa_addresses(self):
         self._check_registration(shared_pool=True)
 

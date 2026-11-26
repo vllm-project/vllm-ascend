@@ -551,9 +551,10 @@ class SparseKVOffloadManager:
             device = torch.device("npu", torch_npu.npu.current_device())
             self.shared_host_pool = SharedUvaBuffer((1, actual_pool_size_bytes), torch.int8, device, self.tp_group)
             self.shared_host_cursor = 0
-            storage = torch_npu._C._construct_storage_from_data_pointer(
-                self.shared_host_pool.ptrs.item(), device, actual_pool_size_bytes
-            )
+            ptrs = self.shared_host_pool.ptrs
+            if ptrs is None:
+                raise RuntimeError("Sparse KV offload shared host pool has no device mapping")
+            storage = torch_npu._C._construct_storage_from_data_pointer(ptrs.item(), device, actual_pool_size_bytes)
             self.shared_device_view = torch.empty(0, dtype=torch.int8, device=device).set_(
                 storage, 0, (actual_pool_size_bytes,), (1,)
             )
@@ -569,9 +570,15 @@ class SparseKVOffloadManager:
         assert offload.initialize(config) == 0, "Sparse KV offload offload.initialize failed."
         self.tp_group.barrier()
 
+    def _shared_host_tensor(self) -> torch.Tensor:
+        pool = self.shared_host_pool
+        if pool is None or pool.tensor is None:
+            raise RuntimeError("Sparse KV offload shared host pool is unavailable")
+        return pool.tensor
+
     def allocate_shared_bytes(self, size: int) -> torch.Tensor:
         # Only TP0 assigns offsets. Every rank maps the same underlying bytes.
-        raw = self.shared_host_pool.tensor.view(-1).narrow(0, self.shared_host_cursor, size)
+        raw = self._shared_host_tensor().view(-1).narrow(0, self.shared_host_cursor, size)
         self.shared_host_cursor += size
         return raw
 
@@ -842,17 +849,18 @@ class SparseKVOffloadManager:
                 )
             shape_k_tensor.copy_(torch.tensor(self.k_caches_cpu[0].shape, dtype=torch.int64, device="npu"))
             shape_v_tensor.copy_(torch.tensor(self.v_caches_cpu[0].shape, dtype=torch.int64, device="npu"))
-        if self.shared_host_pool is not None and self.tp_rank == 0:
-            gvas_k_tensor -= self.shared_host_pool.tensor.data_ptr()
-            gvas_v_tensor -= self.shared_host_pool.tensor.data_ptr()
+        host_base = self._shared_host_tensor().data_ptr() if self.shared_host_pool is not None else None
+        if host_base is not None and self.tp_rank == 0:
+            gvas_k_tensor -= host_base
+            gvas_v_tensor -= host_base
         self.tp_group.broadcast(gvas_k_tensor, src=0)
         self.tp_group.broadcast(gvas_v_tensor, src=0)
         self.tp_group.broadcast(cpu_block_lens_tensor, src=0)
         self.tp_group.broadcast(shape_k_tensor, src=0)
         self.tp_group.broadcast(shape_v_tensor, src=0)
-        if self.shared_host_pool is not None:
-            gvas_k_tensor += self.shared_host_pool.tensor.data_ptr()
-            gvas_v_tensor += self.shared_host_pool.tensor.data_ptr()
+        if host_base is not None:
+            gvas_k_tensor += host_base
+            gvas_v_tensor += host_base
         for layer_id in range(self.num_layers):
             self.gvas_k_bases.append(gvas_k_tensor[layer_id].item())
             self.gvas_v_bases.append(gvas_v_tensor[layer_id].item())
@@ -889,7 +897,7 @@ class SparseKVOffloadManager:
             self._init_fused_overlap_planner()
 
     def _device_view_of_host_kv(self, tensor: torch.Tensor) -> torch.Tensor:
-        offset = tensor.data_ptr() - self.shared_host_pool.tensor.data_ptr()
+        offset = tensor.data_ptr() - self._shared_host_tensor().data_ptr()
         return self.shared_device_view.narrow(0, offset, tensor.nbytes).view(tensor.dtype).view(tensor.shape)
 
     def _init_fused_overlap_planner(self) -> None:
