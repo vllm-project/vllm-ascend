@@ -1698,8 +1698,6 @@ Select the tab for the target hardware.
     Start one MetaService before starting vLLM:
 
     ```shell
-    MEMCACHE_INSTALL_PATH="<MEMCACHE_INSTALL_PATH>"
-    export LD_LIBRARY_PATH="$MEMCACHE_INSTALL_PATH/memcache_hybrid/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
     export MMC_META_CONFIG_PATH="<MEMCACHE_CONFIG_DIR>/meta.conf"
     python3 -c 'from memcache_hybrid import MetaService; MetaService.main()'
     ```
