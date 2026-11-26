@@ -11,6 +11,11 @@
 a2:
   single_node:
     test_config:
+      # Minimal PD smoke case (pd_server_cmds): 1 prefiller + 1 decoder, 1 NPU each.
+      - name: Qwen3-0.6B-A2-PD-Smoke
+        os: linux-aarch64-a2b3-8
+        config_file_path: Qwen3-0.6B-PD-Smoke.yaml
+        config_base_path: tests/SIT/cases/models/configs/Qwen
       # YAML-driven tests
       - name: qwen3-30b-a3b-bf16-a2-performance
         os: linux-aarch64-a2b3-8
@@ -97,6 +102,13 @@ a2:
           - Hunyuan-A13B-Instruct
 
 a3:
+  single_node:
+    test_config:
+      # Minimal PD smoke case (pd_server_cmds): 1 prefiller + 1 decoder, 1 NPU each.
+      - name: Qwen3-0.6B-A3-PD-Smoke
+        os: linux-aarch64-a3-800t-16
+        config_file_path: Qwen3-0.6B-PD-Smoke.yaml
+        config_base_path: tests/SIT/cases/models/configs/Qwen
   multi_node:
     test_config:
       - name: Kimi-K3-W4A8-A3-1M-PD
@@ -161,6 +173,11 @@ a3:
 a3-560t:
   single_node:
     test_config:
+      # Minimal PD smoke case (pd_server_cmds): 1 prefiller + 1 decoder, 1 NPU each.
+      - name: Qwen3-0.6B-560T-PD-Smoke
+        os: linux-aarch64-a3-800i-16
+        config_file_path: Qwen3-0.6B-PD-Smoke.yaml
+        config_base_path: tests/SIT/cases/models/configs/Qwen
       - name: singlecard-ops-a3
         os: linux-aarch64-a3-800i-8
         tests: tests/e2e/nightly/single_node/ops/singlecard_ops/
