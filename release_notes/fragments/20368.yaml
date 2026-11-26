@@ -1,0 +1,11 @@
+pr: 20368
+entries:
+  - category: bugfix
+    text: >-
+      Fixed KV cache reformatting in PD disaggregation when the attention groups
+      of one decode shard complete with different pull counts: 1-pull
+      indexer/MLA groups finish before the multi-pull GQA group, and the
+      pending-reformat consumer applied a single pull count to the whole shard,
+      which raised RuntimeError. It now dispatches one reformat per group pull
+      count, and applies each (attention group, pull count, layer subset) once,
+      so a segment that arrives twice is not reformatted twice.
