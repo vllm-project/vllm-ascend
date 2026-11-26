@@ -47,7 +47,7 @@ from vllm_ascend.ops.fused_moe.moe_utils import get_moe_num_logical_experts
 from vllm_ascend.ops.fused_moe.prepare_finalize import PrepareAndFinalizeWithAllGather
 from vllm_ascend.quantization.nz import NzCastSpec
 from vllm_ascend.quantization.quant_type import QuantType
-from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ, maybe_trans_nz
+from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ, _should_trans_nz, maybe_trans_nz
 
 
 class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
@@ -107,15 +107,14 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
         for name in ("w13_weight", "w2_weight"):
             weight = getattr(layer, name)
             transposed = self._maybe_pad_weight(weight.data).transpose(1, 2).contiguous()
-            if not enable_fused_mc2 or weight.shape == transposed.shape:
-                # ND weights are read in place by captured graphs, so keep the
-                # parameter's storage across direct reloads.
-                replace_parameter(layer, name, transposed)
-            else:
+            if weight.shape != transposed.shape and (enable_fused_mc2 or _should_trans_nz(transposed)):
                 # NZ packing reads the NPU storage's base shape. Reusing the
                 # pre-transpose storage here would pack a rectangular matrix
                 # with its old dimensions.
                 weight.data = transposed
+            else:
+                # Preserve the storage used by captured graphs across direct reloads.
+                replace_parameter(layer, name, transposed)
 
         # TODO: Current dispatch_ffn_combine/mega_moe fusion operator ONLY supports NZ format.
         # Therefore, we must cast weights to NZ when fusion is enabled.
