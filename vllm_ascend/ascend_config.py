@@ -444,8 +444,7 @@ class SharedEngramConfig:
 
     model_config = ConfigDict(extra="forbid")
     backend: Literal["a2", "a3", "a5"]
-    endpoint: str | None = None
-    endpoints: list[str] | None = None
+    endpoints: list[str]
     capacity: int = 65536
     library_path: str | None = None
     listen_port: int | None = None
@@ -455,23 +454,30 @@ class SharedEngramConfig:
     @classmethod
     def _validate_backend_options(cls, data: Any) -> Any:
         options = data.kwargs if isinstance(data, ArgsKwargs) else data
-        if isinstance(options, dict) and options.get("backend") == "a3":
-            # Serialized dataclasses include the other backend's default fields.
-            defaults = {"capacity": 65536, "library_path": None, "listen_port": None, "local_comm_res": None}
-            if any(name in options and options[name] != default for name, default in defaults.items()):
-                raise ValueError("A3 does not accept A2/A5 shared Engram options")
+        if isinstance(options, dict):
+            options = dict(options)
+            if "endpoint" in options:
+                if "endpoints" in options:
+                    raise ValueError("set only one of shared Engram endpoint or endpoints")
+                legacy = options.pop("endpoint")
+                options["endpoints"] = legacy if isinstance(legacy, list) else [legacy]
+            if options.get("backend") == "a3":
+                # Serialized dataclasses include the other backend's default fields.
+                defaults = {"capacity": 65536, "library_path": None, "listen_port": None, "local_comm_res": None}
+                if any(name in options and options[name] != default for name, default in defaults.items()):
+                    raise ValueError("A3 does not accept A2/A5 shared Engram options")
+            if isinstance(data, ArgsKwargs):
+                return ArgsKwargs(data.args, options)
+            return options
         return data
 
     @model_validator(mode="after")
     def _validate(self):
-        if bool(self.endpoint) == bool(self.endpoints):
-            raise ValueError("set exactly one of shared Engram endpoint or endpoints")
-        if self.endpoints is not None and len(self.endpoints) < 2:
-            raise ValueError("shared Engram endpoints must contain at least two owners")
-        endpoints = self.endpoints if self.endpoints is not None else [self.endpoint or ""]
-        if len(set(endpoints)) != len(endpoints):
+        if not self.endpoints:
+            raise ValueError("shared Engram endpoints must not be empty")
+        if len(set(self.endpoints)) != len(self.endpoints):
             raise ValueError("shared Engram endpoints must be distinct")
-        for endpoint in endpoints:
+        for endpoint in self.endpoints:
             host, separator, port = endpoint.rpartition(":")
             if not separator or not host or not port.isdigit() or not 0 < int(port) < 65536:
                 raise ValueError("shared Engram endpoint must be host:port")

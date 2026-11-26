@@ -61,7 +61,7 @@ Add these options to each server's otherwise unchanged launch:
 
 ```bash
 --engram-config '{"cpu_offload":true,"dp_shared_memory":true}' \
---additional-config '{"shared_engram":{"backend":"a3","endpoint":"OWNER_ADDRESS:29500"}}'
+--additional-config '{"shared_engram":{"backend":"a3","endpoints":["OWNER_ADDRESS:29500"]}}'
 ```
 
 Merge this key into any existing additional configuration; do not replace
@@ -219,5 +219,5 @@ Stop all consumers first, then nonzero owners, and finally shard 0. A missing or
 failed owner makes the group unavailable; restart the complete group with a new
 generation. These static shards do not provide failover.
 
-For a single owner, use the `endpoint` string configuration. The `endpoints`
-list requires at least two owners.
+For a single owner, pass a one-element `endpoints` list. The legacy
+`endpoint` string form is still accepted.

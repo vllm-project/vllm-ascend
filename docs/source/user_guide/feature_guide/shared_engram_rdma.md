@@ -53,7 +53,7 @@ Wait for `POOL_READY` from this owner process. Enable consumers with `cpu_offloa
 {
   "shared_engram": {
     "backend": "a2",
-    "endpoint": "OWNER_IP:29500",
+    "endpoints": ["OWNER_IP:29500"],
     "capacity": 65536,
     "library_path": "/absolute/path/libengram_hixl.so"
   }
@@ -103,8 +103,8 @@ and transport for the ordered owners. The capacity limit still applies to each
 request. Stop consumers before owners. All owners are required for the life of
 the deployment; there is no automatic failover.
 
-For a single owner, use the `endpoint` string configuration. The `endpoints`
-list requires at least two owners.
+For a single owner, pass a one-element `endpoints` list. The legacy
+`endpoint` string form is still accepted.
 
 The multi-owner A2 component test used a distinct physical NPU for each owner
 and consumer. In the tested environment, two owner processes sharing one NPU

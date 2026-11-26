@@ -62,8 +62,7 @@ def test_model_selects_exactly_one_backend(monkeypatch, backend, sharded):
         if backend is None
         else types.SimpleNamespace(
             backend=backend,
-            endpoint=None if sharded else "owner:29500",
-            endpoints=["owner0:29500", "owner1:29500"] if sharded else None,
+            endpoints=["owner0:29500", "owner1:29500"] if sharded else ["owner:29500"],
             capacity=32,
             library_path=None,
             listen_port=None,
@@ -107,7 +106,7 @@ def test_embedding_rejects_simultaneous_backends():
     exec(compile(tree, str(ROOT / "engram/embedding.py"), "exec"), ns)
     with pytest.raises(ValueError, match="mutually exclusive"):
         ns["__init__"](
-            types.SimpleNamespace(), 32, 256, (32,), 0, remote_reader=object(), shared_pool_endpoint="owner:1"
+            types.SimpleNamespace(), 32, 256, (32,), 0, remote_reader=object(), shared_pool_endpoint=["owner:1"]
         )
 
 

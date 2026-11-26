@@ -1287,23 +1287,22 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
                 remote_engram.capacity, max_tokens, layer_head_counts, get_tensor_model_parallel_world_size()
             )
 
-            reader_cls = ShardedRemoteReader if remote_engram.endpoints else RemoteReader
-            remote_reader = reader_cls(
-                self.engram_weight_root,
-                remote_engram.endpoints or remote_engram.endpoint,
+            reader_kwargs = dict(
                 capacity=capacity,
                 library_path=remote_engram.library_path,
                 listen_port=remote_engram.listen_port,
                 local_comm_res=remote_engram.local_comm_res,
             )
-            if not remote_engram.endpoints and remote_reader.shard != {"index": 0, "count": 1}:
-                remote_reader.close()
-                raise ValueError("single-owner Engram endpoint points to a sharded owner")
+            if len(remote_engram.endpoints) > 1:
+                remote_reader = ShardedRemoteReader(self.engram_weight_root, remote_engram.endpoints, **reader_kwargs)
+            else:
+                remote_reader = RemoteReader(self.engram_weight_root, remote_engram.endpoints[0], **reader_kwargs)
+                if remote_reader.shard != {"index": 0, "count": 1}:
+                    remote_reader.close()
+                    raise ValueError("single-owner Engram endpoint points to a sharded owner")
         self._engram_remote_reader = remote_reader
         shared_pool_endpoint = (
-            (shared_config.endpoints or shared_config.endpoint)
-            if shared_config is not None and shared_config.backend == "a3"
-            else None
+            shared_config.endpoints if shared_config is not None and shared_config.backend == "a3" else None
         )
         shared_pool_identity = None
         if shared_pool_endpoint:
@@ -2451,9 +2450,9 @@ class AscendDeepseekV41LLMForCausalLM(nn.Module, DeepseekV41MixtureOfExperts, Su
                     # down: RowParallel → split along dim 1
                     split_dim = 1 if "down_proj.weight" in name else 0
                     total = loaded_weight.shape[split_dim]
-                    assert total % num_chunks == 0, (
-                        f"Shared expert weight dim {total} not divisible by num_chunks {num_chunks}"
-                    )
+                    assert (
+                        total % num_chunks == 0
+                    ), f"Shared expert weight dim {total} not divisible by num_chunks {num_chunks}"
                     chunk_size = total // num_chunks
 
                 for j in range(num_chunks):

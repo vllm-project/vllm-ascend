@@ -449,7 +449,7 @@ def test_model_construction_rolls_back_first_layer_when_second_attach_fails(pool
         self=model_obj,
         config=config,
         vllm_config=vc,
-        shared_pool_endpoint="pool",
+        shared_pool_endpoint=["pool"],
         shared_pool_identity="model-a",
         cpu_offload=True,
         torch=torch,
@@ -1026,7 +1026,7 @@ def test_sharded_pool_rejects_fewer_than_two_endpoints(pool_module):
             pool_module.ShardedPoolClient(endpoints, "model", device="cpu")
 
 
-def test_config_requires_two_endpoints_when_using_a_list():
+def test_config_validates_endpoint_list():
     source = Path(__file__).resolve().parents[3] / "vllm_ascend/ascend_config.py"
     module = ast.parse(source.read_text())
     cls = next(node for node in module.body if isinstance(node, ast.ClassDef) and node.name == "SharedEngramConfig")
@@ -1035,15 +1035,14 @@ def test_config_requires_two_endpoints_when_using_a_list():
     namespace: dict[str, Any] = {}
     exec(compile(ast.Module(body=[method], type_ignores=[]), str(source), "exec"), namespace)
     validate = namespace["_validate"]
-    config = types.SimpleNamespace(
-        endpoint=None, endpoints=["owner:1"], capacity=65536, listen_port=None, local_comm_res=None
-    )
-    with pytest.raises(ValueError, match="at least two owners"):
+    config = types.SimpleNamespace(endpoints=["owner:1"], capacity=65536, listen_port=None, local_comm_res=None)
+    assert validate(config) is config
+    config.endpoints = []
+    with pytest.raises(ValueError, match="must not be empty"):
         validate(config)
-    config.endpoints.append("other:2")
-    assert validate(config) is config
-    config.endpoints, config.endpoint = None, "owner:1"
-    assert validate(config) is config
+    config.endpoints = ["owner:1", "owner:1"]
+    with pytest.raises(ValueError, match="must be distinct"):
+        validate(config)
 
 
 def test_partial_lease_close_blocks_new_mapping_and_allows_retry(pool_module):
