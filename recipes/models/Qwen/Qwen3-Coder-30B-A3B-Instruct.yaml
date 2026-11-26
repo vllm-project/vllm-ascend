@@ -5,7 +5,7 @@ meta:
   provider: "Qwen"
   description: "Agentic coding Mixture-of-Experts model (30.5B total / 3.3B active) served with vLLM Ascend on Atlas 800I A3, with validated W8A8 presets for high throughput, low latency, and 128K long context."
   date_added: "2026-11-19"
-  date_updated: "2026-11-19"
+  date_updated: "2026-11-26"
   tasks:
     - text
   performance_headline: "Atlas 800I A3 W8A8: 1219 tok/s output in the TP4 low-latency preset, 21.35 ms TPOT"
@@ -16,8 +16,6 @@ meta:
 model:
   model_id: "Qwen/Qwen3-Coder-30B-A3B-Instruct"
   min_vllm_version: "0.30.0"
-  docker_image:
-    ascend_910c: "quay.io/ascend/vllm-ascend:v0.30.0-a3-openeuler"
   install:
     docker:
       command: "docker pull quay.io/ascend/vllm-ascend:v0.30.0-a3-openeuler"
@@ -35,13 +33,14 @@ model:
     OMP_PROC_BIND: "false"
     OMP_NUM_THREADS: "1"
     PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
+    VLLM_USE_MODELSCOPE: "True"
 
 variants:
   default:
     model_id: "Eco-Tech/Qwen3-Coder-30B-A3B-Instruct-w8a8"
     precision: int8
     label: "W8A8 (Ascend A3)"
-    vram_minimum_gb: 32
+    vram_minimum_gb: 37
     supported_hardware: [ascend_910c]
     hardware_overrides:
       ascend_910c:
@@ -53,13 +52,16 @@ variants:
     description: "W8A8 checkpoint published by Eco-Tech on ModelScope; served with the Ascend quantization method."
   bf16:
     precision: bf16
-    vram_minimum_gb: 64
+    vram_minimum_gb: 74
     supported_hardware: [ascend_910c]
     hardware_overrides:
       ascend_910c:
         docker_image: "quay.io/ascend/vllm-ascend:v0.30.0-a3-openeuler"
         docker_serve_command: "vllm serve"
-    description: "Official BF16 checkpoint; no quantization flag is added."
+    extra_args:
+      - "--max-model-len"
+      - "37364"
+    description: "Official BF16 checkpoint; no quantization flag is added. A conservative 37364-token limit is set because this fallback path is not benchmarked."
 
 compatible_strategies:
   - single_node_tp
@@ -75,9 +77,19 @@ features:
     label: "Eagle3 Spec Decoding"
     description: "Optional Eagle3 speculative decoding; replace your_eagle3_model_path with the downloaded draft model path"
     args: ["--speculative-config", '{"method": "eagle3", "model": "your_eagle3_model_path", "num_speculative_tokens": 3}']
+  tool_calling:
+    description: "Qwen3-Coder tool-call parser with automatic tool choice"
+    args:
+      - "--enable-auto-tool-choice"
+      - "--tool-call-parser"
+      - "qwen3_coder"
 
 opt_in_features:
   - spec_decoding
+
+hardware_opt_in_features:
+  ascend_910c:
+    - tool_calling
 
 dependencies:
   - note: "Optional Eagle3 draft model for speculative decoding (replace your_eagle3_model_path)"
@@ -242,10 +254,14 @@ guide: |
   `modelscope download --model AngelSlim/Qwen3-a3B_eagle3` and enable the opt-in
   `spec_decoding` feature; the measured preset numbers above remain the non-Eagle3 baseline.
 
+  Tool calling is exposed as an opt-in component using the `qwen3_coder` parser and is
+  not enabled in the benchmark presets.
+
   ## Limitations
 
   - The optional Eagle3 draft model from the tutorial is exposed as an opt-in `spec_decoding` feature. It was functionally validated on Atlas 800I A3 at TP1 (3/3 HTTP 200 responses, no ERROR/Traceback in the logs); it is not enabled in the default presets or performance baselines. Replace `your_eagle3_model_path` with the local draft-model directory before enabling it.
-  - Only the W8A8 variant was benchmarked and evaluated. BF16 numbers are not claimed.
+  - Only the W8A8 variant was benchmarked and evaluated. BF16 numbers are not claimed;
+    its 37364-token limit is a conservative safety cap, not a performance result.
   - Multi-node and PD-separated topologies are out of scope for this recipe.
 
   ## References
