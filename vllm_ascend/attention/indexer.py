@@ -10,9 +10,9 @@ import torch
 import torch.nn.functional as F
 import torch_npu
 from torch import nn
-from vllm.config import VllmConfig, get_current_vllm_config
+from vllm.config import CUDAGraphMode, VllmConfig, get_current_vllm_config
 from vllm.distributed import get_dcp_group, get_pcp_group
-from vllm.forward_context import get_forward_context
+from vllm.forward_context import get_forward_context, is_forward_context_available
 from vllm.model_executor.models.deepseek_v2 import DeepseekV32IndexerCache
 from vllm.triton_utils import HAS_TRITON
 from vllm.utils.math_utils import round_up
@@ -31,6 +31,7 @@ from vllm.v1.utils import CpuGpuBuffer
 from vllm.v1.worker.utils import select_common_block_size
 
 from vllm_ascend.ascend_config import get_ascend_config
+from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.attention.context_parallel.common_cp import (
     build_pcp_ordered_slot_mapping,
     get_cp_max_num_reqs,
@@ -59,6 +60,7 @@ from vllm_ascend.distributed.utils import all_gather_async
 from vllm_ascend.ops.rotary_embedding import get_cos_and_sin_mla
 from vllm_ascend.ops.triton.rope import rope_forward_triton_siso
 from vllm_ascend.ops.triton.sfa_indexer_store import store_indexer_key_scale
+from vllm_ascend.ops.triton.small_indexer_row_store import try_store_small_indexer_rows
 from vllm_ascend.quantization.methods.kv_cache.turboquant import TURBOQUANT_CACHE_DTYPE
 from vllm_ascend.utils import (
     _round_up,
@@ -444,6 +446,22 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
         # non-replicated token across the CP group. Base layout is a no-op.
         parallel_config = get_current_vllm_config().parallel_config
         self.use_pcp = parallel_config.prefill_context_parallel_size > 1
+        # V2 does not pass a BatchDescriptor into FULL target forwards. With a
+        # separate decode routine and fixed verification length, only uniform
+        # decode graphs are FULL; mixed/prefill runs are eager or piecewise.
+        self._use_small_indexer_rows = (
+            HAS_TRITON
+            and type(self) is AscendSFAIndexerBackend
+            and get_current_hardware_profile().supports(HardwareCapability.SMALL_INDEXER_ROW_STORE)
+            and not self.enable_sparse_li_quant
+            and vllm_config.cache_config.cache_dtype not in ("int8", "fp8")
+            and not self.use_pcp
+            and parallel_config.decode_context_parallel_size == 1
+            and not (vllm_config.kv_transfer_config and vllm_config.kv_transfer_config.is_kv_producer)
+            and vllm_config.compilation_config.cudagraph_mode
+            in (CUDAGraphMode.FULL_DECODE_ONLY, CUDAGraphMode.FULL_AND_PIECEWISE)
+            and not getattr(vllm_config.speculative_config, "enable_adaptive_verification", False)
+        )
         self._is_pcp_decode_sharded = parallel_config.pcp_shard_decode_requests
         self._use_fused_cache_store = (
             type(self) is AscendSFAIndexerBackend
@@ -678,12 +696,20 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
         if k_li.dtype == torch_npu.float4_e2m1fn_x2:
             indexer_k_cache = indexer_k_cache.view(torch.uint8)
             k_li = k_li.view(torch.uint8)
-        self._write_cache_tensor(
-            indexer_k_cache,
-            k_li.view(-1, k_li.shape[-1]),
-            slot_mapping,
-            cache_scatter_indices,
-        )
+        updates = k_li.view(-1, k_li.shape[-1])
+        if (
+            getattr(self, "_use_small_indexer_rows", False)
+            and is_forward_context_available()
+            and _EXTRA_CTX.capturing
+            and not _EXTRA_CTX.is_draft_model
+            # V2 runs the model body with mode NONE inside an outer FULL capture.
+            # ModelWithContext sets the capture flag from the actual NPU stream.
+            and get_forward_context().cudagraph_runtime_mode in (CUDAGraphMode.NONE, CUDAGraphMode.FULL)
+            and try_store_small_indexer_rows(indexer_k_cache, updates, slot_mapping)
+        ):
+            # This route is only enabled for an unquantized, K-only cache.
+            return
+        self._write_cache_tensor(indexer_k_cache, updates, slot_mapping, cache_scatter_indices)
         if self.enable_sparse_li_quant:
             assert k_li_scale is not None
             # C4 scale is multi-dimensional (b*s, d/64, 2); C8 is (b*s, 1).
