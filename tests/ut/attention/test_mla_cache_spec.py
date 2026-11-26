@@ -144,7 +144,7 @@ def test_fa_quant_decision_stays_with_each_owner(monkeypatch, quantized):
     impl.dtype = torch.int8
     layer = _make_owner(impl, AscendMLABackend)
     spec = _get_owner_spec(monkeypatch, layer)
-    assert spec.head_size == (640 if quantized else 576)
+    assert spec.head_size == 576
     assert spec.dtype == (torch.int8 if quantized else torch.bfloat16)
     assert spec.page_size_bytes == 128 * (640 if quantized else 1152)
     if quantized:
@@ -204,7 +204,7 @@ def test_mla_runtime_uses_rope_dtype(monkeypatch, cache_dtype, fused, kernel_blo
     spec = AscendMLAAttentionSpec(
         block_size=128 * kernel_blocks_per_manager,
         num_kv_heads=1,
-        head_size=row_bytes,
+        head_size=sum(widths),
         dtype=cache_dtype,
         kv_lora_rank=512,
         qk_rope_head_dim=64,
@@ -214,6 +214,7 @@ def test_mla_runtime_uses_rope_dtype(monkeypatch, cache_dtype, fused, kernel_blo
     )
     merged = AscendMLAAttentionSpec.merge([spec, spec])
     assert merged.rope_dtype == spec.rope_dtype
+    assert merged.real_page_size_bytes == spec.block_size * row_bytes
     shapes, actual_dtypes = AscendMLABackend.get_runtime_shapes_and_dtypes(merged, 2, None, 128)
     assert actual_dtypes == dtypes
     assert shapes == tuple((2 * kernel_blocks_per_manager, 128, 1, width) for width in widths)
@@ -223,8 +224,9 @@ def test_mla_runtime_uses_rope_dtype(monkeypatch, cache_dtype, fused, kernel_blo
     assert tuple(view.dtype for view in views) == dtypes
     if not fused:
         assert views[1].data_ptr() - views[0].data_ptr() == 128 * 512
+    else:
         with pytest.raises(ValueError, match="smaller than its cache components"):
-            AscendMLABackend.get_runtime_shapes_and_dtypes(replace(spec, head_size=576), 2, None, 128)
+            AscendMLABackend.get_runtime_shapes_and_dtypes(replace(spec, head_size=575), 2, None, 128)
     with pytest.raises(AssertionError, match="same Ascend KV cache layout"):
         AscendMLAAttentionSpec.merge([spec, replace(spec, rope_dtype=torch.float32)])
     if not fused:
