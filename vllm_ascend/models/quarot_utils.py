@@ -27,7 +27,6 @@ from vllm_ascend.utils import (
 logger = logging.getLogger(__name__)
 
 CONVENTIONAL_ROTATION_RELPATH = Path("optional") / "quarot.safetensors"
-_rotation_fallback_warnings: set[str] = set()
 
 TARGET_EMBED_WEIGHT_NAMES = (
     "language_model.model.embed_tokens.weight",
@@ -136,8 +135,12 @@ def process_weight(linear_weight: torch.Tensor, rotation_weight: torch.Tensor):
 
 
 def _warn_rotation_once(key: str, message: str, *args) -> None:
-    if key not in _rotation_fallback_warnings:
-        _rotation_fallback_warnings.add(key)
+    warnings = getattr(_warn_rotation_once, "_warnings", None)
+    if warnings is None:
+        warnings = set()
+        _warn_rotation_once._warnings = warnings  # type: ignore[attr-defined]
+    if key not in warnings:
+        warnings.add(key)
         logger.warning(message, *args)
 
 
@@ -195,7 +198,9 @@ def resolve_rotation_path(vllm_config, *, allow_fallback: bool = False) -> Path 
         return None
     if not allow_fallback:
         return None
-    model_config = vllm_config.model_config
+    model_config = getattr(vllm_config, "model_config", None)
+    if model_config is None or getattr(model_config, "model", None) is None:
+        return None
     fallback = Path(model_config.model) / CONVENTIONAL_ROTATION_RELPATH
     if not fallback.is_file():
         _warn_rotation_once(
@@ -223,14 +228,23 @@ def resolve_rotation_path(vllm_config, *, allow_fallback: bool = False) -> Path 
 
 
 @torch.no_grad()
-def align_draft_weights(model, projection, vllm_config, *, allow_fallback: bool = True):
+def align_draft_weights(
+    model,
+    projection,
+    vllm_config,
+    *,
+    allow_fallback: bool = True,
+    rotation_path: Path | None = None,
+):
     """Align draft inputs with the rotated target without modifying shared weights.
 
     All draft families routing through here (Qwen3/GLM5/Kimi DSpark and
     DFlash2) recover from a QuaRot target whose quant_model_description.json
     lost the rotation-map entry; pass allow_fallback=False to restore the
-    silently-skip behavior."""
-    rotation_path = resolve_rotation_path(vllm_config, allow_fallback=allow_fallback)
+    silently-skip behavior. Callers that already resolved the path can pass
+    ``rotation_path`` to avoid resolving it again."""
+    if rotation_path is None:
+        rotation_path = resolve_rotation_path(vllm_config, allow_fallback=allow_fallback)
     if rotation_path is not None:
         rotation = get_rotation_matrix(rotation_path).cpu()
         weight = projection.weight

@@ -439,11 +439,12 @@ class DFlash2Qwen3ForCausalLM(DFlashQwen3ForCausalLM):
         return names
 
     def post_process(self, vllm_config: VllmConfig) -> None:
-        if resolve_rotation_path(vllm_config, allow_fallback=True) is None:
+        rotation_path = resolve_rotation_path(vllm_config, allow_fallback=True)
+        if rotation_path is None:
             return
         if not hasattr(self.model, "fc"):
             raise ValueError("DFlash2 with a QuaRot target requires auxiliary hidden states.")
-        align_draft_weights(self, self.model.fc, vllm_config, allow_fallback=True)
+        align_draft_weights(self, self.model.fc, vllm_config, allow_fallback=True, rotation_path=rotation_path)
 
     def compute_candidates(self, hidden_states: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         if not isinstance(self.lm_head.quant_method, UnquantizedEmbeddingMethod):

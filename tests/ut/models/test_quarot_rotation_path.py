@@ -17,7 +17,7 @@ QUAROT_LOGGER = "vllm_ascend.models.quarot_utils"
 
 @pytest.fixture(autouse=True)
 def reset_quarot_globals(monkeypatch):
-    monkeypatch.setattr(quarot_utils, "_rotation_fallback_warnings", set())
+    monkeypatch.setattr(quarot_utils._warn_rotation_once, "_warnings", set(), raising=False)
     monkeypatch.setattr(ascend_utils, "_IS_ROT_WEIGHT_USED", None)
 
 
@@ -159,7 +159,13 @@ def test_dflash2_post_process_aligns_via_fallback(tmp_path, monkeypatch):
     monkeypatch.setattr(qwen3_dflash2, "align_draft_weights", align)
     draft = make_dflash2_draft()
     draft.post_process(config)
-    align.assert_called_once_with(draft, draft.model.fc, config, allow_fallback=True)
+    align.assert_called_once_with(
+        draft,
+        draft.model.fc,
+        config,
+        allow_fallback=True,
+        rotation_path=tmp_path / "optional" / "quarot.safetensors",
+    )
 
 
 def test_dflash2_post_process_survives_missing_fallback_file(tmp_path, caplog, monkeypatch):
@@ -198,3 +204,20 @@ def test_align_draft_weights_explicit_false_restores_silent_skip(tmp_path, caplo
         quarot_utils.align_draft_weights(SimpleNamespace(), projection, config, allow_fallback=False)
     torch.testing.assert_close(projection.weight, torch.ones_like(projection.weight))
     assert caplog.records == []
+
+
+def test_align_draft_weights_skips_resolution_for_pre_resolved_path(tmp_path, monkeypatch):
+    rotation_path = write_rotation_file(tmp_path, "optional/quarot.safetensors")
+    resolve = MagicMock()
+    monkeypatch.setattr(quarot_utils, "resolve_rotation_path", resolve)
+    projection = torch.nn.Linear(8, 4, bias=False, dtype=torch.float32)
+    with torch.no_grad():
+        projection.weight.copy_(torch.ones_like(projection.weight))
+    draft = SimpleNamespace(model=SimpleNamespace(), has_own_embed_tokens=True, has_own_lm_head=True)
+    monkeypatch.setattr(quarot_utils, "get_pp_group", lambda: SimpleNamespace(world_size=1))
+    monkeypatch.setattr(quarot_utils, "get_rotation_matrix", lambda path: 2 * torch.eye(8))
+    quarot_utils.align_draft_weights(
+        draft, projection, make_config(tmp_path, is_rot_used=True), rotation_path=rotation_path
+    )
+    resolve.assert_not_called()
+    torch.testing.assert_close(projection.weight, 2 * torch.ones_like(projection.weight))
