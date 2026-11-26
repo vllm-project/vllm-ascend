@@ -305,6 +305,8 @@ def _get_parallel_config_for_attn_metadata(attn_groups: list[list[AttentionGroup
     # builders retain the draft config used to create their KV layout.
     for groups in attn_groups:
         for group in groups:
+            if not getattr(group, "metadata_builders", True):
+                continue
             builder_config = getattr(group.get_metadata_builder(0), "vllm_config", None)
             if builder_config is not None:
                 return builder_config.parallel_config
@@ -446,7 +448,8 @@ def build_attn_metadata(
                 builder
                 for cache_group in attn_groups
                 for attn_group in cache_group
-                if isinstance(builder := attn_group.get_metadata_builder(0), AscendDSAMetadataBuilder)
+                if getattr(attn_group, "metadata_builders", True)
+                and isinstance(builder := attn_group.get_metadata_builder(0), AscendDSAMetadataBuilder)
             ),
             None,
         )
@@ -477,8 +480,9 @@ def build_attn_metadata(
             plan = get_dsa_attn_kv_plan(dsa_builder.vllm_config, dsa_builder.compressor_ratio)
             formatted_slot_mappings = plan.format_dsa_slot_mapping(slot_mappings[:, :num_input_tokens], block_sizes)
     for i, kv_cache_spec in enumerate(kv_cache_groups):
-        # Resident/hot storage groups have no Attention metadata consumer.
-        if not attn_groups[i]:
+        # Resident/hot storage groups or builderless context-KV groups skip metadata.
+        groups = [group for group in attn_groups[i] if getattr(group, "metadata_builders", True)]
+        if not groups:
             continue
         block_table = block_tables[i]
         slot_mapping = slot_mappings[i]
@@ -531,7 +535,7 @@ def build_attn_metadata(
         if common_metadata_callback is not None:
             common_metadata_callback(i, common_attn_metadata)
 
-        for attn_group in attn_groups[i]:
+        for attn_group in groups:
             attn_metadata_builder = attn_group.get_metadata_builder(0)
             if callable(getattr(attn_metadata_builder, "prepare_step_metadata", None)):
                 step_metadata_builders.append((attn_group.layer_names, attn_metadata_builder))

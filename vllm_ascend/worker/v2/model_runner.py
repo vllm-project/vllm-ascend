@@ -120,8 +120,10 @@ from vllm_ascend.platform import QWEN_FA3_TARGETS
 from vllm_ascend.utils import (
     create_hccl_pg_options,
     enable_sfa_dcp_sharded_indexer,
+    get_num_scheduled_spec_tokens,
     get_pcp_profile_num_tokens,
     is_c8_mxfp_kv_quant,
+    is_context_kv_only_speculator,
     is_deepseek_v41,
     lmhead_tp_enable,
     lmhead_tp_max_num_logits,
@@ -220,7 +222,7 @@ class NPUModelRunner(GPUModelRunner):
         # use device lengths instead of exact CPU lengths.
         self.sync_spec_pp_cpu_counts = (
             self.use_pp
-            and self.num_speculative_steps > 0
+            and get_num_scheduled_spec_tokens(getattr(self, "vllm_config", None), self.num_speculative_steps) > 0
             and self.model_config.architecture
             in (
                 "KimiLinearForCausalLM",
@@ -484,6 +486,7 @@ class NPUModelRunner(GPUModelRunner):
         draft_layer_names = getattr(self.speculator, "draft_attn_layer_names", ())
         return any(
             any(layer_name not in draft_layer_names for layer_name in group.layer_names)
+            and bool(getattr(group, "metadata_builders", True))
             and getattr(group.get_metadata_builder(0), "flashmla_state", None) is not None
             for groups in self.attn_groups
             for group in groups
@@ -1407,6 +1410,9 @@ class NPUModelRunner(GPUModelRunner):
         """Allow device lengths for supported speculative-decoding paths."""
         if self.sync_spec_pp_cpu_counts:
             return False
+
+        if is_context_kv_only_speculator(self.speculator):
+            return True
 
         if is_deepseek_v41(self.model_config.hf_config):
             return True

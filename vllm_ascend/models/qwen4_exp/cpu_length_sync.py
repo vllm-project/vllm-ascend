@@ -91,11 +91,13 @@ def can_skip_qwen_cpu_length_sync(runner: Any) -> bool:
             (group.backend, type(group.get_metadata_builder(0)))
             for cache_groups in runner.attn_groups
             for group in cache_groups
+            if getattr(group, "metadata_builders", True)
         )
         draft_pairs = tuple(
             (group.backend, type(group.get_metadata_builder(0)))
             for cache_groups in runner.speculator.attn_groups
             for group in cache_groups
+            if getattr(group, "metadata_builders", True)
         )
         return (
             bool(target_pairs)

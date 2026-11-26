@@ -817,6 +817,35 @@ def vllm_version_is(target_vllm_version: str):
         )
 
 
+def is_prefill_context_kv_only(speculative_config: Any) -> bool:
+    """Return whether DFlash-family prefill context-KV-only mode is enabled."""
+    # vLLM v0.34.0 SpeculativeConfig predates prefill_context_kv_only.
+    if vllm_version_is("0.34.0") or speculative_config is None:
+        return False
+    # Native on vLLM main (c410543d); getattr stays safe for SimpleNamespace/MagicMock UTs.
+    return getattr(speculative_config, "prefill_context_kv_only", False) is True
+
+
+def is_context_kv_only_speculator(speculator: Any) -> bool:
+    """Return whether a speculator runs in DFlash-family context-KV-only mode."""
+    # vLLM v0.34.0 DFlashSpeculator predates context_kv_only.
+    if vllm_version_is("0.34.0") or speculator is None:
+        return False
+    # Only DFlash-family speculators set context_kv_only on main; `is True` rejects MagicMock.
+    return getattr(speculator, "context_kv_only", False) is True
+
+
+def get_num_scheduled_spec_tokens(vllm_config: Any, fallback: int) -> int:
+    """Return scheduled speculative tokens, falling back when unset or bool."""
+    # vLLM v0.34.0 VllmConfig predates num_scheduled_spec_tokens.
+    if vllm_version_is("0.34.0") or vllm_config is None:
+        return fallback
+    count = getattr(vllm_config, "num_scheduled_spec_tokens", fallback)
+    if isinstance(count, int) and not isinstance(count, bool):
+        return count
+    return fallback
+
+
 def get_kv_cache_tensor_layers(kv_cache_tensor) -> list[str]:
     """Layer names covered by a KVCacheTensor.
 

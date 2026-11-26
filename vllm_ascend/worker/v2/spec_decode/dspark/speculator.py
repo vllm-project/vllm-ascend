@@ -37,7 +37,12 @@ from vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.dspark_context impor
     DSparkContextChunk,
     initialize_draft_context_chunk,
 )
-from vllm_ascend.utils import embedding_tp_enable, lmhead_tp_enable, lmhead_tp_max_num_logits
+from vllm_ascend.utils import (
+    embedding_tp_enable,
+    is_context_kv_only_speculator,
+    lmhead_tp_enable,
+    lmhead_tp_max_num_logits,
+)
 from vllm_ascend.worker.dcp_utils import DCPManager
 from vllm_ascend.worker.v2.attn_utils import (
     build_attn_metadata_factory,
@@ -126,7 +131,7 @@ class AscendDSparkSpeculator(LmheadTPDraftSamplingMixin, DSparkSpeculator):
         (``max_num_reqs * num_speculative_steps``) into the LM-head
         collectives, then the logits are trimmed back to the real rows.
         """
-        if not lmhead_tp_enable():
+        if not lmhead_tp_enable() or is_context_kv_only_speculator(self):
             return
 
         original = model.compute_draft_logits
@@ -148,7 +153,7 @@ class AscendDSparkSpeculator(LmheadTPDraftSamplingMixin, DSparkSpeculator):
         model.compute_draft_logits = aligned
 
     def init_cudagraph_manager(self, cudagraph_mode: CUDAGraphMode) -> None:
-        if self.speculative_config.enforce_eager:
+        if self.speculative_config.enforce_eager or is_context_kv_only_speculator(self):
             cudagraph_mode = CUDAGraphMode.NONE
         super().init_cudagraph_manager(cudagraph_mode)
         # The Ascend graph manager is patched onto the upstream module and

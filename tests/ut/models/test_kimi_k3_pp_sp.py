@@ -12,6 +12,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, replace
 from pathlib import Path
 from types import MappingProxyType, SimpleNamespace
+from typing import Any
 
 import pytest
 import torch
@@ -674,7 +675,9 @@ def initialize_pp_cpu_count_sync(runner):
             isinstance(target, ast.Attribute) and target.attr == "sync_spec_pp_cpu_counts" for target in node.targets
         )
     )
-    exec(compile(ast.Module(body=[assignment], type_ignores=[]), "model_runner.py", "exec"), {"self": runner})
+    namespace: dict[str, Any] = {"self": runner, "vllm_version_is": lambda _v: False}
+    load_definitions("vllm_ascend/utils.py", {"get_num_scheduled_spec_tokens"}, namespace)
+    exec(compile(ast.Module(body=[assignment], type_ignores=[]), "model_runner.py", "exec"), namespace)
 
 
 @pytest.mark.parametrize(
@@ -734,8 +737,12 @@ def test_host_positions_after_rejection_or_chunk(
             events.append("copy")
             self.num_computed_tokens_cpu.copy_(self.req_states.num_computed_tokens.gpu)
 
-    namespace = {"BaseStateRunner": BaseStateRunner, "MambaHybridModelState": type("MambaHybridModelState", (), {})}
-    load_definitions("vllm_ascend/utils.py", {"is_deepseek_v41"}, namespace)
+    namespace: dict[str, Any] = {
+        "BaseStateRunner": BaseStateRunner,
+        "MambaHybridModelState": type("MambaHybridModelState", (), {}),
+        "vllm_version_is": lambda _v: False,
+    }
+    load_definitions("vllm_ascend/utils.py", {"is_deepseek_v41", "is_context_kv_only_speculator"}, namespace)
     load_definitions(
         "vllm_ascend/worker/v2/model_runner.py",
         {"NPUModelRunner"},

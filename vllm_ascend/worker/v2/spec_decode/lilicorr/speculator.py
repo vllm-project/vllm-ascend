@@ -8,6 +8,7 @@ from vllm.v1.worker.gpu.spec_decode.lilicorr.speculator import (
 )
 
 from vllm_ascend.ops.vocab_parallel_embedding import VocabParallelMode
+from vllm_ascend.utils import is_context_kv_only_speculator
 from vllm_ascend.worker.v2.spec_decode.dflash2.speculator import (
     AscendDFlash2Speculator,
 )
@@ -21,7 +22,7 @@ class AscendLiLiCorrSpeculator(LiLiCorrSpeculator, AscendDFlash2Speculator):
     def init_cudagraph_manager(self, cudagraph_mode: CUDAGraphMode) -> None:
         # DFlash2 supports ACL graphs, but LiLiCorr's scoring path still
         # requires eager execution. Keep this restriction local to LiLiCorr.
-        if not self.speculative_config.enforce_eager:
+        if not is_context_kv_only_speculator(self) and not self.speculative_config.enforce_eager:
             raise NotImplementedError("LiLiCorr does not currently support graph mode; please enable enforce_eager.")
         super().init_cudagraph_manager(CUDAGraphMode.NONE)
 
@@ -31,6 +32,8 @@ class AscendLiLiCorrSpeculator(LiLiCorrSpeculator, AscendDFlash2Speculator):
         target_attn_layer_names: set[str],
     ) -> torch.nn.Module:
         model = super().load_draft_model(target_model, target_attn_layer_names)
+        if is_context_kv_only_speculator(self):
+            return model
         # The upstream candidate path assumes standard TP: get_top_k_tokens
         # gathers vocabulary shards only over TP, and target_embeddings receives
         # [requests, steps, topk] IDs rather than the flat token rows required by

@@ -53,7 +53,7 @@ from vllm_ascend.models.deepseek_v41.model import (
     DeepseekV41SWAAttention,
 )
 from vllm_ascend.ops.rope_dsv4 import get_cos_and_sin_dsa
-from vllm_ascend.utils import normalize_deepseek_v41_config
+from vllm_ascend.utils import is_prefill_context_kv_only, normalize_deepseek_v41_config
 
 from .model import DeepseekV41MixtureOfExperts, DeepseekV41MoE
 
@@ -187,12 +187,13 @@ class DeepseekV41DSparkModel(torch.nn.Module):
             }
         )
         self._oproj_buffer_pool = OProjBufferPool()
-        for layer in self.layers.values():
-            impl = layer.self_attn.dsa_attn.dsa_attn.impl
-            if not isinstance(impl, AscendDSAImpl):
-                continue
-            impl._oproj_buffer_pool = self._oproj_buffer_pool
-            impl.reserve_oproj_buffers(torch.device(current_platform.device_type), vllm_config.model_config.dtype)
+        if not is_prefill_context_kv_only(vllm_config.speculative_config):
+            for layer in self.layers.values():
+                impl = layer.self_attn.dsa_attn.dsa_attn.impl
+                if not isinstance(impl, AscendDSAImpl):
+                    continue
+                impl._oproj_buffer_pool = self._oproj_buffer_pool
+                impl.reserve_oproj_buffers(torch.device(current_platform.device_type), vllm_config.model_config.dtype)
 
         first_layer = self.layers[str(self.mtp_start_layer_idx)]
         self.use_sequence_parallel_moe = vllm_config.parallel_config.use_sequence_parallel_moe
@@ -318,6 +319,18 @@ class DeepseekV41DSparkModel(torch.nn.Module):
 
     def combine_hidden_states(self, aux_hidden_states: torch.Tensor) -> torch.Tensor:
         return self.main_norm(self.main_proj(aux_hidden_states))
+
+    def context_kv_modules(self) -> list[torch.nn.Module]:
+        """Return modules needed to compute and write context KV on prefill."""
+        modules: list[torch.nn.Module] = [self.main_proj, self.main_norm, self.context_wkv_proj]
+        for layer in self.layers.values():
+            attn = layer.self_attn
+            modules.append(attn.kv_norm)
+            dsa_attn = attn.dsa_attn
+            modules.append(dsa_attn.swa_cache_layer)
+            if isinstance(getattr(dsa_attn, "dsa_attn", None), torch.nn.Module):
+                modules.append(dsa_attn.dsa_attn)
+        return modules
 
     def _project_shared_kv(
         self,
@@ -500,6 +513,10 @@ class DSparkDeepseekV41ForCausalLM(torch.nn.Module, DeepseekV41MixtureOfExperts,
 
     def combine_hidden_states(self, aux_hidden_states: torch.Tensor) -> torch.Tensor:
         return self.model.combine_hidden_states(aux_hidden_states)
+
+    def context_kv_modules(self) -> list[torch.nn.Module]:
+        """Delegate context-KV module selection to the underlying DSpark model."""
+        return self.model.context_kv_modules()
 
     def precompute_and_store_context_kv(
         self,

@@ -70,12 +70,16 @@ def runner_cls(mamba_state_cls):
         "Parent": Parent,
         "MambaHybridModelState": mamba_state_cls,
         "QWEN_FA3_TARGETS": {"Qwen3_5ForConditionalGeneration"},
+        "vllm_version_is": lambda _v: False,
     }
     utils = ast.parse((source.parents[2] / "utils.py").read_text())
-    predicate = next(
-        node for node in utils.body if isinstance(node, ast.FunctionDef) and node.name == "is_deepseek_v41"
-    )
-    module = ast.fix_missing_locations(ast.Module(body=[predicate, cls], type_ignores=[]))
+    helper_names = {
+        "is_deepseek_v41",
+        "is_context_kv_only_speculator",
+        "get_num_scheduled_spec_tokens",
+    }
+    helpers = [node for node in utils.body if isinstance(node, ast.FunctionDef) and node.name in helper_names]
+    module = ast.fix_missing_locations(ast.Module(body=[*helpers, cls], type_ignores=[]))
     exec(compile(module, str(source), "exec", flags=__future__.annotations.compiler_flag), namespace)
     return namespace["NPUModelRunner"]
 

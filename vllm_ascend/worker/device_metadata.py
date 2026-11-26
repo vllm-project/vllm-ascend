@@ -220,6 +220,7 @@ class TargetDeviceMetadata:
             id(builder): builder
             for groups in attn_groups
             for group in groups
+            if getattr(group, "metadata_builders", True)
             for builder in (group.get_metadata_builder(0),)
             if hasattr(builder, "defer_device_metadata")
         }

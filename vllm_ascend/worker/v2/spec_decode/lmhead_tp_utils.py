@@ -7,7 +7,12 @@ from typing import TYPE_CHECKING
 
 import torch
 
-from vllm_ascend.utils import lmhead_tp_enable, lmhead_tp_max_num_logits, lmhead_tp_pad_rows
+from vllm_ascend.utils import (
+    is_context_kv_only_speculator,
+    lmhead_tp_enable,
+    lmhead_tp_max_num_logits,
+    lmhead_tp_pad_rows,
+)
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
@@ -62,7 +67,7 @@ class LmheadTPDraftSamplingMixin:
 
     def _lmhead_tp_validate_draft_sampling(self) -> None:
         """Fail unsupported draft sampling at construction, not first use."""
-        if not lmhead_tp_enable():
+        if not lmhead_tp_enable() or is_context_kv_only_speculator(self):
             return
         if not self._lmhead_tp_sample_draft_supported:
             raise NotImplementedError(
