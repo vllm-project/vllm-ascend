@@ -189,9 +189,9 @@ def test_glm52_53_unified_pool_supports_all_sfa_and_indexer_formats(
     raw, caches = _allocate_unified(config, runtime)
 
     # Every component across main, indexer, and MTP draft aliases the single backing buffer.
-    assert {
-        part.untyped_storage().data_ptr() for components in caches.values() for part in components
-    } == {raw.untyped_storage().data_ptr()}
+    assert {part.untyped_storage().data_ptr() for components in caches.values() for part in components} == {
+        raw.untyped_storage().data_ptr()
+    }
 
     main_names = (
         "model.layers.0.self_attn.attn",
@@ -399,9 +399,7 @@ def test_unified_models_fail_fast_on_mismatched_descriptor_sizes(monkeypatch, mo
         kv_lora_rank=4,
         qk_rope_head_dim=4,
     )
-    layers = {
-        name: SimpleNamespace(get_attn_backend=lambda: AscendSFABackend, num_heads=1) for name in ("l0", "l1")
-    }
+    layers = {name: SimpleNamespace(get_attn_backend=lambda: AscendSFABackend, num_heads=1) for name in ("l0", "l1")}
     runtime.compilation_config = SimpleNamespace(static_forward_context=layers)
     bad_config = KVCacheConfig(
         num_blocks=2,

@@ -1495,11 +1495,7 @@ def create_kv_cache_runtime_views(
                 layout,
                 kernel_block_size=kernel_block_size,
             )
-            dtypes = (
-                (spec.dtype, spec.scale_dtype)
-                if getattr(spec, "scale_dim", 0)
-                else (spec.dtype,) * len(shapes)
-            )
+            dtypes = (spec.dtype, spec.scale_dtype) if getattr(spec, "scale_dim", 0) else (spec.dtype,) * len(shapes)
             # Backend shapes describe bytes in [B, H, N, *inner, C]; kernels
             # consume [B, N, H, *inner, D] views in dtype elements.
             cache_shapes = [
