@@ -95,6 +95,9 @@ def register_model():
     ModelRegistry.register_model("DeepSeekMTPModel", "vllm_ascend.models.deepseek_mtp:AscendDeepSeekMTP")
     ModelRegistry.register_model("DeepseekV32MTPModel", "vllm_ascend.models.deepseek_mtp:AscendDeepSeekMTP")
     ModelRegistry.register_model("GlmMoeDsaForCausalLM", "vllm_ascend.models.deepseek_mtp:AscendGlmMoeDsaForCausalLM")
+    ModelRegistry.register_model(
+        "Glm54LoopProfileForCausalLM", "vllm_ascend.models.glm54_loop:Glm54LoopProfileForCausalLM"
+    )
     # Ascend Qwen3.5-VL: NPU-side image preprocessing (resize/patchify +
     # fused rescale/normalize); overwrites the upstream architecture mapping,
     # same pattern as AscendDeepseekV4ForConditionalGeneration (see PR #15457).

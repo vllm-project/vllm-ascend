@@ -1,0 +1,7 @@
+pr: 23360
+entries:
+  - category: feature
+    text: >-
+      Profile two passes over 28 shared decoder layers with GLM-5.3 weights
+      on Atlas 850E by selecting Glm54LoopProfileForCausalLM in
+      --hf-overrides and enabling eager execution.

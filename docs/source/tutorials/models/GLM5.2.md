@@ -1,5 +1,8 @@
 # GLM-5.2 & GLM-5.3
 
+For an experimental two-pass text decoder using the same GLM-5.3 weights on Atlas 850E,
+see [GLM-5.4 loop profiling](GLM5.4-loop.md).
+
 ## 1 Introduction
 
 !!! note
