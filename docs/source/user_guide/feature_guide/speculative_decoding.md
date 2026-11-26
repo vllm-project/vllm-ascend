@@ -6,30 +6,9 @@ This guide covers Model Runner V2 on Ascend.
 
 ## Quickstart {: #common-configuration }
 
-Use `LLM(speculative_config=...)` for offline inference or pass the same settings
-as JSON to `vllm serve --speculative-config` (`-sc`) for online serving. The
-examples below include a launch command for each drafting method. Use local
-checkpoint paths when you already have the weights downloaded.
-
-```python
-from vllm import LLM
-
-llm = LLM(
-    model="Qwen/Qwen3-1.7B",
-    speculative_config={
-        "method": "ngram_gpu",
-        "num_speculative_tokens": 3,
-        "prompt_lookup_min": 2,
-        "prompt_lookup_max": 5,
-    },
-)
-outputs = llm.generate(["The future of AI is"])
-```
-
-```shell
-vllm serve Qwen/Qwen3-1.7B \
-  --speculative-config '{"method":"ngram_gpu","num_speculative_tokens":3,"prompt_lookup_min":2,"prompt_lookup_max":5}'
-```
+For offline inference, set `speculative_config` in `LLM()`. For online serving, pass the same
+settings as JSON to `vllm serve --speculative-config` (`-sc`). Each example below
+shows both forms. Use local checkpoint paths when you already have the weights.
 
 - `num_speculative_tokens` sets the draft length `K`. Some checkpoints supply
     it through `n_predict`. On paths that use `npu_fused_infer_attention_score`,
@@ -59,7 +38,34 @@ vllm serve Qwen/Qwen3-1.7B \
 ### N-gram {: #speculating-by-matching-n-grams-in-the-prompt }
 
 With `ngram_gpu`, set `prompt_lookup_min` and `prompt_lookup_max` to bound the
-n-gram lengths to search. See the [offline and online examples](#common-configuration).
+n-gram lengths to search.
+
+**Offline inference**
+
+```python
+from vllm import LLM, SamplingParams
+
+if __name__ == "__main__":
+    llm = LLM(
+        model="Qwen/Qwen3-1.7B",
+        speculative_config={
+            "method": "ngram_gpu",
+            "num_speculative_tokens": 3,
+            "prompt_lookup_min": 2,
+            "prompt_lookup_max": 5,
+        },
+    )
+    sampling_params = SamplingParams(temperature=0.0, max_tokens=32)
+    outputs = llm.generate(["The future of AI is"], sampling_params)
+    print(outputs[0].outputs[0].text)
+```
+
+**Online serving**
+
+```shell
+vllm serve Qwen/Qwen3-1.7B \
+  --speculative-config '{"method":"ngram_gpu","num_speculative_tokens":3,"prompt_lookup_min":2,"prompt_lookup_max":5}'
+```
 
 ### EAGLE and EAGLE-3 {: #speculating-using-eagle-based-draft-models }
 
@@ -67,6 +73,31 @@ Set `method` to `eagle` or `eagle3` according to the draft checkpoint. Set
 `model` to the matching draft and use `draft_tensor_parallel_size=1` for EAGLE.
 
 EAGLE with ModelScope checkpoints:
+
+**Offline inference**
+
+```python
+import os
+
+if __name__ == "__main__":
+    os.environ["VLLM_USE_MODELSCOPE"] = "True"
+    from vllm import LLM, SamplingParams
+
+    llm = LLM(
+        model="LLM-Research/Meta-Llama-3.1-8B-Instruct",
+        speculative_config={
+            "method": "eagle",
+            "model": "vllm-ascend/EAGLE-LLaMA3.1-Instruct-8B",
+            "num_speculative_tokens": 3,
+            "draft_tensor_parallel_size": 1,
+        },
+    )
+    sampling_params = SamplingParams(temperature=0.0, max_tokens=32)
+    outputs = llm.generate(["The future of AI is"], sampling_params)
+    print(outputs[0].outputs[0].text)
+```
+
+**Online serving**
 
 ```shell
 VLLM_USE_MODELSCOPE=True vllm serve LLM-Research/Meta-Llama-3.1-8B-Instruct \
@@ -80,6 +111,28 @@ VLLM_USE_MODELSCOPE=True vllm serve LLM-Research/Meta-Llama-3.1-8B-Instruct \
 
 EAGLE-3:
 
+**Offline inference**
+
+```python
+from vllm import LLM, SamplingParams
+
+if __name__ == "__main__":
+    llm = LLM(
+        model="Qwen/Qwen3-8B",
+        enforce_eager=True,
+        speculative_config={
+            "method": "eagle3",
+            "model": "RedHatAI/Qwen3-8B-speculator.eagle3",
+            "num_speculative_tokens": 3,
+        },
+    )
+    sampling_params = SamplingParams(temperature=0.0, max_tokens=32)
+    outputs = llm.generate(["The future of AI is"], sampling_params)
+    print(outputs[0].outputs[0].text)
+```
+
+**Online serving**
+
 ```shell
 vllm serve Qwen/Qwen3-8B \
   --enforce-eager \
@@ -92,6 +145,29 @@ Set `method` to `mtp`. For a target with built-in MTP weights, omit `model`
 from the speculative config. Start with `K=1` and measure acceptance and
 throughput before increasing it, especially with a single prediction layer.
 
+**Offline inference**
+
+```python
+from vllm import LLM, SamplingParams
+
+if __name__ == "__main__":
+    llm = LLM(
+        model="Qwen/Qwen3.5-4B",
+        dtype="float16",
+        mamba_ssm_cache_dtype="float16",
+        max_model_len=4096,
+        speculative_config={
+            "method": "mtp",
+            "num_speculative_tokens": 1,
+        },
+    )
+    sampling_params = SamplingParams(temperature=0.0, max_tokens=32)
+    outputs = llm.generate(["The future of AI is"], sampling_params)
+    print(outputs[0].outputs[0].text)
+```
+
+**Online serving**
+
 ```shell
 vllm serve Qwen/Qwen3.5-4B \
   --dtype float16 \
@@ -102,6 +178,32 @@ vllm serve Qwen/Qwen3.5-4B \
 
 For Gemma 4 with an assistant, set `model` to the matching assistant checkpoint
 and keep `method="mtp"`. This example uses two A5 NPUs.
+
+**Offline inference**
+
+```python
+from vllm import LLM, SamplingParams
+
+if __name__ == "__main__":
+    llm = LLM(
+        model="google/gemma-4-31B-it",
+        tensor_parallel_size=2,
+        max_model_len=2048,
+        compilation_config={
+            "cudagraph_mode": "FULL_DECODE_ONLY",
+        },
+        speculative_config={
+            "method": "mtp",
+            "model": "google/gemma-4-31B-it-assistant",
+            "num_speculative_tokens": 3,
+        },
+    )
+    sampling_params = SamplingParams(temperature=0.0, max_tokens=32)
+    outputs = llm.generate(["The future of AI is"], sampling_params)
+    print(outputs[0].outputs[0].text)
+```
+
+**Online serving**
 
 ```shell
 vllm serve google/gemma-4-31B-it \
@@ -115,6 +217,27 @@ vllm serve google/gemma-4-31B-it \
 
 Set `method` to `dflash` and `model` to a checkpoint trained for the target.
 The checkpoint's architecture selects the DFlash variant.
+
+**Offline inference**
+
+```python
+from vllm import LLM, SamplingParams
+
+if __name__ == "__main__":
+    llm = LLM(
+        model="Qwen/Qwen3-8B",
+        speculative_config={
+            "method": "dflash",
+            "model": "z-lab/Qwen3-8B-DFlash-b16",
+            "num_speculative_tokens": 7,
+        },
+    )
+    sampling_params = SamplingParams(temperature=0.0, max_tokens=32)
+    outputs = llm.generate(["The future of AI is"], sampling_params)
+    print(outputs[0].outputs[0].text)
+```
+
+**Online serving**
 
 ```shell
 vllm serve Qwen/Qwen3-8B \
@@ -130,6 +253,34 @@ candidate selector settings and supported draft lengths.
 Full draft ACLGraph
 capture requires target `FULL_DECODE_ONLY` or `FULL_AND_PIECEWISE` and draft
 `enforce_eager` unset or false.
+
+**Offline inference**
+
+```python
+from vllm import LLM, SamplingParams
+
+if __name__ == "__main__":
+    llm = LLM(
+        model="Qwen/Qwen3.8-27B",
+        tensor_parallel_size=2,
+        max_model_len=2048,
+        enable_prefix_caching=False,
+        compilation_config={
+            "cudagraph_mode": "FULL_AND_PIECEWISE",
+            "cudagraph_capture_sizes": [8, 16],
+        },
+        speculative_config={
+            "method": "dflash",
+            "model": "z-lab/Qwen3.8-27B-DFlash2",
+            "num_speculative_tokens": 7,
+        },
+    )
+    sampling_params = SamplingParams(temperature=0.0, max_tokens=32)
+    outputs = llm.generate(["The future of AI is"], sampling_params)
+    print(outputs[0].outputs[0].text)
+```
+
+**Online serving**
 
 ```shell
 vllm serve Qwen/Qwen3.8-27B \
@@ -148,6 +299,36 @@ one. Both plain and convolutional checkpoints support greedy and probabilistic
 drafting with standard TP. Fine-grained embedding or LM-head TP and PCP
 vocabulary sharding are unsupported. Quantized draft weights must use an
 Ascend-supported format. The example uses a draft checkpoint from ModelScope.
+
+**Offline inference**
+
+```python
+import os
+
+if __name__ == "__main__":
+    os.environ["VLLM_USE_MODELSCOPE"] = "True"
+    from vllm import LLM, SamplingParams
+
+    llm = LLM(
+        model="Qwen/Qwen3.8-27B",
+        tensor_parallel_size=2,
+        max_model_len=4096,
+        enforce_eager=True,
+        enable_prefix_caching=False,
+        speculative_config={
+            "method": "dflash",
+            "model": "niannianxu/Qwen3.8-27B-LiLiCorr-block8-epoch0",
+            "num_speculative_tokens": 7,
+            "draft_tensor_parallel_size": 2,
+            "enforce_eager": True,
+        },
+    )
+    sampling_params = SamplingParams(temperature=0.0, max_tokens=32)
+    outputs = llm.generate(["The future of AI is"], sampling_params)
+    print(outputs[0].outputs[0].text)
+```
+
+**Online serving**
 
 ```shell
 VLLM_USE_MODELSCOPE=True vllm serve Qwen/Qwen3.8-27B \
@@ -171,6 +352,30 @@ a length supported by that checkpoint. If an MLA draft uses BF16 while the
 target uses FP8 KV cache, set `"kv_cache_dtype":"bfloat16"` in
 `speculative_config`.
 
+**Offline inference**
+
+```python
+from vllm import LLM, SamplingParams
+
+if __name__ == "__main__":
+    llm = LLM(
+        model="Qwen/Qwen3-8B",
+        compilation_config={
+            "cudagraph_mode": "FULL_DECODE_ONLY",
+        },
+        speculative_config={
+            "method": "dspark",
+            "model": "deepseek-ai/dspark_qwen3_8b_block7",
+            "num_speculative_tokens": 7,
+        },
+    )
+    sampling_params = SamplingParams(temperature=0.0, max_tokens=32)
+    outputs = llm.generate(["The future of AI is"], sampling_params)
+    print(outputs[0].outputs[0].text)
+```
+
+**Online serving**
+
 ```shell
 vllm serve Qwen/Qwen3-8B \
   --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
@@ -182,6 +387,29 @@ For per-request verification lengths, see [Adaptive Verification](#adaptive-veri
 ### Standalone Draft Model {: #speculating-using-a-draft-model }
 
 Set `method` to `draft_model` and `model` to a compatible standalone draft.
+
+**Offline inference**
+
+```python
+from vllm import LLM, SamplingParams
+
+if __name__ == "__main__":
+    llm = LLM(
+        model="Qwen/Qwen3-8B",
+        enforce_eager=True,
+        enable_prefix_caching=False,
+        speculative_config={
+            "method": "draft_model",
+            "model": "Qwen/Qwen3-0.6B",
+            "num_speculative_tokens": 3,
+        },
+    )
+    sampling_params = SamplingParams(temperature=0.0, max_tokens=32)
+    outputs = llm.generate(["The future of AI is"], sampling_params)
+    print(outputs[0].outputs[0].text)
+```
+
+**Online serving**
 
 ```shell
 vllm serve Qwen/Qwen3-8B \
@@ -198,6 +426,38 @@ data for EAGLE-style drafts. Select layers with
 `ExampleHiddenStatesConnector` with `kv_role="kv_producer"`. The connector
 writes one `.safetensors` file per request to `shared_storage_path`. See the
 [upstream offline example](https://docs.vllm.ai/en/latest/features/speculative_decoding/extract_hidden_states/#offline-example).
+
+**Offline inference**
+
+```python
+from vllm import LLM, SamplingParams
+
+if __name__ == "__main__":
+    llm = LLM(
+        model="Qwen/Qwen3-8B",
+        speculative_config={
+            "method": "extract_hidden_states",
+            "num_speculative_tokens": 1,
+            "draft_model_config": {
+                "hf_config": {
+                    "eagle_aux_hidden_state_layer_ids": [2, 18, 34],
+                },
+            },
+        },
+        kv_transfer_config={
+            "kv_connector": "ExampleHiddenStatesConnector",
+            "kv_role": "kv_producer",
+            "kv_connector_extra_config": {
+                "shared_storage_path": "/dev/shm/hidden_states",
+            },
+        },
+    )
+    sampling_params = SamplingParams(temperature=0.0, max_tokens=1)
+    outputs = llm.generate(["The future of AI is"], sampling_params)
+    print(outputs[0].kv_transfer_params["hidden_states_path"])
+```
+
+**Online serving**
 
 ```shell
 vllm serve Qwen/Qwen3-8B \
@@ -226,6 +486,29 @@ sampling, add this to `speculative_config` to sample at the request temperature.
 }
 ```
 
+**Offline inference**
+
+```python
+from vllm import LLM, SamplingParams
+
+if __name__ == "__main__":
+    llm = LLM(
+        model="Qwen/Qwen3-8B",
+        enforce_eager=True,
+        speculative_config={
+            "method": "eagle3",
+            "model": "RedHatAI/Qwen3-8B-speculator.eagle3",
+            "num_speculative_tokens": 3,
+            "draft_sample_method": "probabilistic",
+        },
+    )
+    sampling_params = SamplingParams(temperature=0.7, max_tokens=32)
+    outputs = llm.generate(["The future of AI is"], sampling_params)
+    print(outputs[0].outputs[0].text)
+```
+
+**Online serving**
+
 ```shell
 vllm serve Qwen/Qwen3-8B \
   --enforce-eager \
@@ -247,6 +530,29 @@ preserving the target sampling distribution.
   "rejection_sample_method": "block"
 }
 ```
+
+**Offline inference**
+
+```python
+from vllm import LLM, SamplingParams
+
+if __name__ == "__main__":
+    llm = LLM(
+        model="Qwen/Qwen3-8B",
+        enforce_eager=True,
+        speculative_config={
+            "method": "eagle3",
+            "model": "RedHatAI/Qwen3-8B-speculator.eagle3",
+            "num_speculative_tokens": 3,
+            "rejection_sample_method": "block",
+        },
+    )
+    sampling_params = SamplingParams(temperature=0.7, max_tokens=32)
+    outputs = llm.generate(["The future of AI is"], sampling_params)
+    print(outputs[0].outputs[0].text)
+```
+
+**Online serving**
 
 ```shell
 vllm serve Qwen/Qwen3-8B \
@@ -277,6 +583,34 @@ default, `"standard"`, and add this to `additional_config`
   }
 }
 ```
+
+**Offline inference**
+
+```python
+from vllm import LLM, SamplingParams
+
+if __name__ == "__main__":
+    llm = LLM(
+        model="Qwen/Qwen3-8B",
+        enforce_eager=True,
+        speculative_config={
+            "method": "eagle3",
+            "model": "RedHatAI/Qwen3-8B-speculator.eagle3",
+            "num_speculative_tokens": 3,
+            "rejection_sample_method": "standard",
+        },
+        additional_config={
+            "rejection_sampler_config": {
+                "enable_entropy_verify": True,
+            },
+        },
+    )
+    sampling_params = SamplingParams(temperature=0.7, max_tokens=32)
+    outputs = llm.generate(["The future of AI is"], sampling_params)
+    print(outputs[0].outputs[0].text)
+```
+
+**Online serving**
 
 ```shell
 vllm serve Qwen/Qwen3-8B \
@@ -324,6 +658,30 @@ For `K=3`, add these fields to your existing `speculative_config`.
 }
 ```
 
+**Offline inference**
+
+```python
+from vllm import LLM, SamplingParams
+
+if __name__ == "__main__":
+    llm = LLM(
+        model="Qwen/Qwen3-8B",
+        enforce_eager=True,
+        speculative_config={
+            "method": "eagle3",
+            "model": "RedHatAI/Qwen3-8B-speculator.eagle3",
+            "num_speculative_tokens": 3,
+            "rejection_sample_method": "synthetic",
+            "synthetic_acceptance_rates": [0.9, 0.6, 0.3],
+        },
+    )
+    sampling_params = SamplingParams(temperature=0.7, max_tokens=32)
+    outputs = llm.generate(["The future of AI is"], sampling_params)
+    print(outputs[0].outputs[0].text)
+```
+
+**Online serving**
+
 ```shell
 vllm serve Qwen/Qwen3-8B \
   --enforce-eager \
@@ -352,6 +710,33 @@ range. A draft length of 0 disables drafting for that range.
 
 <span id="online-examples"></span><span id="dynamic-sd-eagle-drafter"></span><span id="dynamic-sd-eagle3-drafter"></span>The following settings use three, one, or zero draft tokens as the batch grows.
 
+**Offline inference**
+
+```python
+from vllm import LLM, SamplingParams
+
+if __name__ == "__main__":
+    llm = LLM(
+        model="Qwen/Qwen3-8B",
+        enforce_eager=True,
+        speculative_config={
+            "method": "eagle3",
+            "model": "RedHatAI/Qwen3-8B-speculator.eagle3",
+            "num_speculative_tokens": 3,
+            "num_speculative_tokens_per_batch_size": [
+                [1, 64, 3],
+                [65, 128, 1],
+                [129, 512, 0],
+            ],
+        },
+    )
+    sampling_params = SamplingParams(temperature=0.0, max_tokens=32)
+    outputs = llm.generate(["The future of AI is"], sampling_params)
+    print(outputs[0].outputs[0].text)
+```
+
+**Online serving**
+
 ```shell
 vllm serve Qwen/Qwen3-8B \
   --enforce-eager \
@@ -372,6 +757,31 @@ With a DSpark checkpoint that has a confidence head, set
 `"enable_adaptive_verification":true` to select a verification length per
 request. Enable full decode graphs on the target. PP, PCP, DCP, and LoRA
 are unsupported, and commercial use is restricted.
+
+**Offline inference**
+
+```python
+from vllm import LLM, SamplingParams
+
+if __name__ == "__main__":
+    llm = LLM(
+        model="Qwen/Qwen3-8B",
+        compilation_config={
+            "cudagraph_mode": "FULL_DECODE_ONLY",
+        },
+        speculative_config={
+            "method": "dspark",
+            "model": "deepseek-ai/dspark_qwen3_8b_block7",
+            "num_speculative_tokens": 7,
+            "enable_adaptive_verification": True,
+        },
+    )
+    sampling_params = SamplingParams(temperature=0.0, max_tokens=32)
+    outputs = llm.generate(["The future of AI is"], sampling_params)
+    print(outputs[0].outputs[0].text)
+```
+
+**Online serving**
 
 ```shell
 vllm serve Qwen/Qwen3-8B \
@@ -400,6 +810,49 @@ Disable stochastic rounding.
 
 Use Mamba cache mode `align` with prefix caching and `none` without it.
 In `align` mode, use a Mamba block size of at least `K + 1`.
+
+This example runs on four NPUs with prefix caching disabled.
+
+**Offline inference**
+
+```python
+from vllm import LLM, SamplingParams
+
+if __name__ == "__main__":
+    llm = LLM(
+        model="Qwen/Qwen3.6-35B-A3B",
+        tensor_parallel_size=4,
+        dtype="bfloat16",
+        max_model_len=4096,
+        enable_prefix_caching=False,
+        mamba_cache_mode="none",
+        mamba_ssm_cache_dtype="float32",
+        use_replayssm=True,
+        enforce_eager=True,
+        speculative_config={
+            "method": "mtp",
+            "num_speculative_tokens": 4,
+        },
+    )
+    sampling_params = SamplingParams(temperature=0.0, max_tokens=32)
+    outputs = llm.generate(["The future of AI is"], sampling_params)
+    print(outputs[0].outputs[0].text)
+```
+
+**Online serving**
+
+```shell
+vllm serve Qwen/Qwen3.6-35B-A3B \
+  --tensor-parallel-size 4 \
+  --dtype bfloat16 \
+  --max-model-len 4096 \
+  --no-enable-prefix-caching \
+  --mamba-cache-mode none \
+  --mamba-ssm-cache-dtype float32 \
+  --use-replayssm \
+  --enforce-eager \
+  --speculative-config '{"method":"mtp","num_speculative_tokens":4}'
+```
 
 For P/D, enable RecoverSSM on both roles and match the speculative window,
 state dtypes, convolution layout, and prefix-caching settings. Use
