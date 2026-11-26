@@ -31,7 +31,7 @@ from vllm_ascend.attention.utils import (
     is_pcp_enabled,
     uses_pcp_sharded_layout,
 )
-from vllm_ascend.core.kv_cache_interface import get_kv_cache_compression_ratio, get_storage_block_size
+from vllm_ascend.core.kv_cache_interface import get_kv_cache_compression_ratio
 from vllm_ascend.models.deepseek_v41.cache_config import STATE_RING_ROWS
 from vllm_ascend.ops.rope_dsv4 import get_cos_and_sin_dsa, get_full_cos_and_sin_dsa_for_layer
 from vllm_ascend.worker.device_metadata import DeviceMetadataStage, wait_for_device_metadata
@@ -389,7 +389,7 @@ class AscendDSAV41PCPMetadataBuilder(_ReplicatedCacheMetadataBuilder):
             slot_mapping=slots[:num_tokens].fill_(-1),
             flat_slot_mapping=self._flat_slot_mapping[:num_tokens].fill_(-1),
             compress_ratio=get_kv_cache_compression_ratio(self.kv_cache_spec),
-            storage_block_size=get_storage_block_size(self.kv_cache_spec),
+            storage_block_size=self.kv_cache_spec.num_states,
             logical_block_size=self.kv_cache_spec.block_size,
             is_compressor_state=is_state,
             cache_kind=self._cache_kind,
