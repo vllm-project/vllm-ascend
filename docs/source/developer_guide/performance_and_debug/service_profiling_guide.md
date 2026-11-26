@@ -91,7 +91,7 @@ Navigate to the `./vllm_profile` directory and locate the generated `*ascend_pt`
 
 ```python
 from torch_npu.profiler.profiler import analyse
-analyse("./vllm_profile/localhost.localdomain_*_ascend_pt/")
+analyse("./localhost.localdomain_*_ascend_pt/")
 ```
 
 ### 5. View Results
@@ -144,7 +144,7 @@ curl -X POST http://<decoder_ip>:<decoder_port>/stop_profile
 
 ### 0. Build from Source and Upgrade
 
-The `msserviceprofiler` tool is pre-installed with the CANN Toolkit package. Use the following commands to install or upgrade from source.
+The `msserviceprofiler` tool is pre-installed with the CANN Toolkit package. If you need to upgrade it, use the following commands to build and upgrade from source.
 
 ```bash
 git clone https://gitcode.com/Ascend/msserviceprofiler.git
@@ -283,7 +283,7 @@ After you change profiling symbols, restart the vLLM service so the updated conf
 
 ```yaml
 - symbol: vllm.v1.core.kv_cache_manager:KVCacheManager.free
-  handler: ms_service_profiler.patcher.config.custom_handler_example.kvcache_manager_free_example_handler
+  handler: ms_service_profiler.patcher.config.custom_handler_example:kvcache_manager_free_example_handler
   domain: Example
   name: example_custom
 ```
