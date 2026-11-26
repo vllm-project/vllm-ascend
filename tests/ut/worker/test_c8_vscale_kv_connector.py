@@ -7,6 +7,7 @@ from unittest.mock import MagicMock, Mock, patch
 
 import pytest
 import torch
+from vllm.v1.core.sched.output import CachedRequestData
 
 from vllm_ascend.attention.attention_c8_mxfp import (
     AscendC8MXFPAttentionBackendImpl,
@@ -104,7 +105,7 @@ def test_pull_admission_restores_c8_v_scales_after_partial_page_copy(ratio):
     output = SimpleNamespace(
         has_sync_kv_loads=False,
         scheduled_new_reqs=[SimpleNamespace(block_ids=([], [1]))],
-        scheduled_cached_reqs=SimpleNamespace(req_ids=[], new_block_ids=[], resumed_req_ids=set()),
+        scheduled_cached_reqs=CachedRequestData.make_empty(),
         new_block_ids_to_zero=[],
     )
 
@@ -123,8 +124,14 @@ def test_pull_admission_restores_resumed_pages_but_skips_zeroed_pages():
     views[3][3:6].fill_(73)
     output = SimpleNamespace(
         has_sync_kv_loads=False,
-        scheduled_new_reqs=[],
-        scheduled_cached_reqs=SimpleNamespace(req_ids=["resumed"], new_block_ids=[([1],)], resumed_req_ids={"resumed"}),
+        scheduled_new_reqs=[SimpleNamespace(block_ids=([1],))],
+        scheduled_cached_reqs=CachedRequestData(
+            req_ids=["cached"],
+            new_token_ids=[[]],
+            new_block_ids=[([1],)],
+            num_computed_tokens=[0],
+            num_output_tokens=[0],
+        ),
         new_block_ids_to_zero=[1],
     )
 
@@ -142,7 +149,7 @@ def test_pull_admission_batches_disjoint_pages_and_ignores_missing_blocks():
     output = SimpleNamespace(
         has_sync_kv_loads=False,
         scheduled_new_reqs=[SimpleNamespace(block_ids=None), SimpleNamespace(block_ids=([1, None, 3],))],
-        scheduled_cached_reqs=SimpleNamespace(req_ids=[], new_block_ids=[], resumed_req_ids=set()),
+        scheduled_cached_reqs=CachedRequestData.make_empty(),
         new_block_ids_to_zero=[],
     )
 
@@ -158,7 +165,7 @@ def test_pull_admission_rejects_out_of_range_page():
     output = SimpleNamespace(
         has_sync_kv_loads=False,
         scheduled_new_reqs=[SimpleNamespace(block_ids=([2],))],
-        scheduled_cached_reqs=SimpleNamespace(req_ids=[], new_block_ids=[], resumed_req_ids=set()),
+        scheduled_cached_reqs=CachedRequestData.make_empty(),
         new_block_ids_to_zero=[],
     )
 

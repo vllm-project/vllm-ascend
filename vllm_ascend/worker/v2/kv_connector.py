@@ -126,13 +126,6 @@ class C8VScaleKVConnector(KVConnector):
                 blocks_by_group.setdefault(group_id, set()).update(
                     block_id for block_id in (blocks or ()) if block_id is not None
                 )
-        cached = scheduler_output.scheduled_cached_reqs
-        for req_id, block_ids in zip(cached.req_ids, cached.new_block_ids or ()):
-            if req_id in cached.resumed_req_ids and block_ids is not None:
-                for group_id, blocks in enumerate(block_ids):
-                    blocks_by_group.setdefault(group_id, set()).update(
-                        block_id for block_id in (blocks or ()) if block_id is not None
-                    )
         if not blocks_by_group:
             return
         zeroed = set(scheduler_output.new_block_ids_to_zero or ())
