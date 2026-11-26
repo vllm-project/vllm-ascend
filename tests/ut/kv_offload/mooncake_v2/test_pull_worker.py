@@ -688,6 +688,47 @@ def test_compute_sliding_window_blocks_uses_unhashed_suffix() -> None:
     assert result == [(0, [10, 11], [20, 21])]
 
 
+@pytest.mark.parametrize("scale", [1, 2])
+@pytest.mark.parametrize(
+    "remote_prompt_len,local_prompt_len,unhashed_start",
+    [(17, 18, 0), (128, 129, 0), (128, 129, 3), (128, 129, 7), (129, 130, 4), (129, 130, 9)],
+)
+def test_compute_sliding_window_tail_preserves_logical_positions(
+    scale, remote_prompt_len, local_prompt_len, unhashed_start
+) -> None:
+    thread = make_thread()
+    remote_end = (remote_prompt_len + 15) // 16
+    local_end = (local_prompt_len + 15) // 16
+    remote_start = max(0, remote_end - 5)
+    local_full = list(range(100, 100 + local_end))
+    remote_tail = list(range(200 + remote_start, 200 + remote_end))
+
+    result = thread._compute_group_block_ids(
+        "request",
+        [[0]],
+        1,
+        0,
+        16,
+        16,
+        local_full[unhashed_start:],
+        local_full,
+        remote_tail,
+        local_prompt_len,
+        remote_prompt_len,
+        unhashed_start * 16,
+        scale,
+        scale,
+        make_sliding_spec(),
+        0,
+        remote_interleave_size=16,
+    )
+
+    logical_pages = range(max(unhashed_start, remote_start), min(local_end, remote_end))
+    expected_local = [(100 + page) * scale + offset for page in logical_pages for offset in range(scale)]
+    expected_remote = [(200 + page) * scale + offset for page in logical_pages for offset in range(scale)]
+    assert result == [(0, expected_local, expected_remote)]
+
+
 @pytest.mark.parametrize("spec", [make_circular_spec(), make_kpool_tail_spec()])
 def test_compute_circular_blocks_transfers_the_single_complete_page(spec: KVCacheSpec) -> None:
     thread = make_thread(num_speculative_tokens=3)

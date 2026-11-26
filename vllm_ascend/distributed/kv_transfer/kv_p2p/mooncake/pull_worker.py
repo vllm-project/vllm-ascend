@@ -16,6 +16,7 @@ import zmq
 from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorTransferResults
 from vllm.logger import logger
+from vllm.utils.math_utils import cdiv
 from vllm.utils.network_utils import make_zmq_path
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
@@ -900,9 +901,16 @@ class MooncakePullRecvingThread(threading.Thread, MooncakeTransferAddressMixin):
         elif isinstance(spec, SlidingWindowSpec):
             assert local_block_size == remote_block_size, "Mooncake SWA requires the same P/D logical block size."
             local_unhashed_start_idx = len(local_full_group_block_ids) - len(local_group_block_ids)
-            local_kernel_block_ids = self._expand_block_ids(local_group_block_ids, local_block_size_scale)
+            # P publishes a window-sized suffix. Recover its logical position
+            # before intersecting it with D's unhashed suffix; prefix hits and
+            # different windows in a uniform group need not start together.
+            remote_start_idx = max(0, cdiv(remote_num_prompt_tokens, remote_block_size) - len(remote_group_block_ids))
+            start_idx = max(local_unhashed_start_idx, remote_start_idx)
+            local_kernel_block_ids = self._expand_block_ids(
+                local_group_block_ids[start_idx - local_unhashed_start_idx :], local_block_size_scale
+            )
             remote_kernel_block_ids = self._expand_block_ids(
-                remote_group_block_ids[local_unhashed_start_idx:], remote_block_size_scale
+                remote_group_block_ids[start_idx - remote_start_idx :], remote_block_size_scale
             )
         elif isinstance(spec, FullAttentionSpec):
             if is_dcp_transfer:
