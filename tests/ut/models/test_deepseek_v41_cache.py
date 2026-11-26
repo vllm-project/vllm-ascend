@@ -1610,3 +1610,117 @@ def test_swa_cache_uses_configured_block_size(block_size, monkeypatch):
 
     assert cache.block_size == block_size
     assert cache.get_kv_cache_spec(None).block_size == block_size
+
+
+# --- INT8 CSA packed-cache ABI -------------------------------------------
+#
+# The INT8 CSA path reuses the V4.1 cache graph but swaps the main KV/spec ABI
+# for a fixed 608-byte packed record.
+
+
+def test_uses_int8_packed_cache_requires_the_dtype_the_profile_and_no_a5(monkeypatch):
+    import vllm_ascend.models.deepseek_v41.cache_config as cc
+    from vllm_ascend.device.hardware_profile import HardwareCapability
+
+    def profile(*capabilities):
+        return SimpleNamespace(supports=lambda cap: cap in capabilities)
+
+    monkeypatch.setattr(cc, "get_current_hardware_profile", lambda: profile(HardwareCapability.NATIVE_INT8_SPARSE))
+    assert cc.uses_int8_packed_cache("int8") is True
+
+    # A5 owns the packed ABI on its own silicon; INT8 must stand down so the
+    # adaptor never returns two competing backends.
+    monkeypatch.setattr(
+        cc,
+        "get_current_hardware_profile",
+        lambda: profile(HardwareCapability.NATIVE_INT8_SPARSE, HardwareCapability.DSV41_PACKED_CACHE),
+    )
+    assert cc.uses_int8_packed_cache("int8") is False
+
+
+@pytest.mark.parametrize(
+    ("caches", "expected"),
+    [
+        pytest.param(("int8-608",), True, id="packed"),
+        # A DSpark draft layer inherits the packed backend but its source slot
+        # resolves to None, so the writer must stand down.
+        pytest.param(("int8-608", None), False, id="missing-source"),
+    ],
+)
+def test_packed_cache_ready_routes_by_backend_and_cache_shape(caches, expected):
+    from vllm_ascend.attention.dsa_v41 import _packed_cache_ready
+
+    backend = SimpleNamespace(uses_a5_packed_cache=False, uses_int8_packed_cache=True)
+    tensors = {"int8-608": torch.zeros(2, 4, 1, 608, dtype=torch.int8)}
+    resolved = tuple(None if name is None else tensors[name] for name in caches)
+    assert _packed_cache_ready(backend, *resolved) is expected
+
+
+def test_resolve_layer_compress_ratio_skips_unparsable_names_and_keeps_looking():
+    # A broken prefix must fall through to ``continue``, not end the lookup.
+    builder = object.__new__(AscendDSAV41MetadataBuilder)
+    builder._v41_layer_names = ("model.layers.abc.self_attn.swa_cache", "model.layers.2.self_attn.swa_cache")
+    text_config = SimpleNamespace(compress_ratios=[1, 1, 2, 2], num_hidden_layers=4)
+    builder.vllm_config = SimpleNamespace(model_config=SimpleNamespace(hf_text_config=text_config))
+    assert builder._resolve_layer_compress_ratio() == 2
+
+
+def test_swa_cache_spec_packs_int8_into_the_fixed_record(monkeypatch):
+    import vllm_ascend.models.deepseek_v41.cache_config as cc
+
+    monkeypatch.setattr(cc, "uses_a5_packed_cache", lambda: False)
+    monkeypatch.setattr(cc, "uses_int8_packed_cache", lambda dtype=None: True)
+
+    spec = cc.make_swa_cache_spec(
+        block_size=128,
+        window_size=128,
+        head_size=cc.MLA_HEAD_DIM,
+        dtype=torch.bfloat16,
+        cache_dtype="int8",
+        packed_int8=True,
+    )
+
+    assert spec.head_size == cc.INT8_KV_RECORD_BYTES == 608
+    assert spec.dtype == torch.int8
+    assert spec.cache_dtype_str == "int8_bf16_rope_scale"
+
+
+@pytest.mark.parametrize("compress_ratio", [1, 2])
+def test_mla_cache_spec_packs_int8_for_compressed_ratios(compress_ratio, monkeypatch):
+    import vllm_ascend.models.deepseek_v41.cache_config as cc
+
+    monkeypatch.setattr(cc, "uses_a5_packed_cache", lambda: False)
+    monkeypatch.setattr(cc, "uses_int8_packed_cache", lambda dtype=None: True)
+
+    spec = cc.make_mla_cache_spec(
+        block_size=128,
+        head_size=cc.MLA_HEAD_DIM,
+        compress_ratio=compress_ratio,
+        cache_dtype="int8",
+    )
+
+    assert spec.head_size == cc.INT8_KV_RECORD_BYTES
+    assert spec.dtype == torch.int8
+    assert spec.tokens_per_state == compress_ratio
+
+
+def test_mla_cache_spec_falls_back_for_uncompressed_layers(monkeypatch):
+    import vllm_ascend.models.deepseek_v41.cache_config as cc
+
+    monkeypatch.setattr(cc, "uses_a5_packed_cache", lambda: False)
+    monkeypatch.setattr(cc, "uses_int8_packed_cache", lambda dtype=None: True)
+
+    spec = cc.make_mla_cache_spec(block_size=128, head_size=cc.MLA_HEAD_DIM, compress_ratio=0, cache_dtype="int8")
+
+    assert spec.head_size == cc.MLA_HEAD_DIM
+    assert spec.dtype == torch.bfloat16
+
+
+def test_int8_record_bytes_match_the_pack_int8_kv_width():
+    # The cache page width and the packer must agree, or writes land out of bounds.
+    from vllm_ascend.models.deepseek_v41 import mixed_quant_attention as mqa
+    from vllm_ascend.models.deepseek_v41.cache_config import INT8_KV_RECORD_BYTES
+
+    assert INT8_KV_RECORD_BYTES == mqa.INT8_KV_RECORD_BYTES
+    packed = mqa.pack_int8_kv(torch.zeros(1, mqa.INT8_NOPE_HEAD_DIM + mqa.INT8_ROPE_HEAD_DIM))
+    assert packed.shape[-1] == INT8_KV_RECORD_BYTES

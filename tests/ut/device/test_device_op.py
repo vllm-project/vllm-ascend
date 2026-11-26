@@ -303,3 +303,36 @@ def test_clipped_swiglu_kernel_selection_per_adaptor(adaptor, uses_fused_kernel)
     gate = torch.clamp(x[..., :d], max=limit)
     up = torch.clamp(x[..., d:], min=-limit, max=limit)
     torch.testing.assert_close(out, gate * torch.sigmoid(alpha * gate) * (up + beta))
+
+
+def test_int8_packed_backend_is_routed_by_cache_dtype(monkeypatch):
+    """``--kv-cache-dtype int8`` must reach the INT8 CSA backend, others must not.
+
+    The adaptor decides this from ``uses_int8_packed_cache``, which also gates on
+    the hardware profile, so the probe is patched to isolate the dtype routing.
+    """
+    import vllm_ascend.models.deepseek_v41.cache_config as cache_config
+
+    monkeypatch.setattr(cache_config, "uses_int8_packed_cache", lambda cache_dtype=None: False)
+    assert BaseDeviceAdaptor.get_dsv41_packed_cache_ops("auto") is None
+    assert BaseDeviceAdaptor.get_dsv41_packed_cache_ops() is None
+
+    monkeypatch.setattr(cache_config, "uses_int8_packed_cache", lambda cache_dtype=None: True)
+    backend = BaseDeviceAdaptor.get_dsv41_packed_cache_ops("int8")
+    assert backend is not None
+    assert backend.__name__ == "Int8MixedQuantPackedCacheOps"
+    assert backend.uses_int8_packed_cache is True
+    assert backend.uses_a5_packed_cache is False
+
+
+def test_int8_and_a5_backends_are_mutually_exclusive():
+    """Two competing packed ABIs would each claim the same cache tensors."""
+    from vllm_ascend.models.deepseek_v41.mixed_quant_attention import (
+        Int8MixedQuantPackedCacheOps,
+        MixedQuantPackedCacheOps,
+    )
+
+    assert Int8MixedQuantPackedCacheOps.uses_a5_packed_cache is False
+    assert Int8MixedQuantPackedCacheOps.uses_int8_packed_cache is True
+    assert MixedQuantPackedCacheOps.uses_a5_packed_cache is True
+    assert MixedQuantPackedCacheOps.uses_int8_packed_cache is False

@@ -353,6 +353,7 @@ class MixedQuantPackedCacheOps:
     """Packed mixed-quant cache ABI selected by the hardware adaptor."""
 
     uses_a5_packed_cache = True
+    uses_int8_packed_cache = False
     build_packed_cache_slot_mapping = staticmethod(build_packed_cache_slot_mapping)
     build_window_indices = staticmethod(build_window_indices_triton)
     build_smla_metadata = staticmethod(build_smla_metadata)

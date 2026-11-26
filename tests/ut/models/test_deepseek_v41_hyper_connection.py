@@ -345,6 +345,7 @@ def test_v41_dspark_decoder_uses_draft_experts_instead_of_target_config():
         parallel_config=SimpleNamespace(use_sequence_parallel_moe=False),
         speculative_config=SimpleNamespace(draft_model_config=SimpleNamespace(hf_text_config=draft)),
         quant_config=None,
+        cache_config=SimpleNamespace(block_size=128, cache_dtype="auto"),
     )
 
     def make_layer(*args, **kwargs):

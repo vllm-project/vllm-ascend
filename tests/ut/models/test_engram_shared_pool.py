@@ -591,7 +591,7 @@ def test_outer_model_init_failure_releases_attached_engram(pool_module, owner, c
         close_engram_on_init_failure=lifecycle_decorator(),
         get_ascend_config=lambda: types.SimpleNamespace(shared_engram=types.SimpleNamespace(backend="a3")),
         normalize_deepseek_v41_config=lambda config: config,
-        DeviceOperator=types.SimpleNamespace(get_dsv41_packed_cache_ops=lambda: None),
+        DeviceOperator=types.SimpleNamespace(get_dsv41_packed_cache_ops=lambda cache_dtype=None: None),
         maybe_prefix=lambda *args: "model",
         get_pp_group=lambda: types.SimpleNamespace(is_last_rank=True),
         ParallelLMHead=fail_head,
@@ -601,7 +601,11 @@ def test_outer_model_init_failure_releases_attached_engram(pool_module, owner, c
     exec(compile(tree, str(path), "exec"), ns)
     ns["Model"].model_cls = staticmethod(lambda **kwargs: inner)
     config = types.SimpleNamespace(vocab_size=1, hidden_size=1)
-    vc = types.SimpleNamespace(model_config=types.SimpleNamespace(hf_config=config), quant_config=None)
+    vc = types.SimpleNamespace(
+        model_config=types.SimpleNamespace(hf_config=config),
+        quant_config=None,
+        cache_config=types.SimpleNamespace(block_size=128, cache_dtype="auto"),
+    )
     try:
         with pytest.raises(RuntimeError, match="head failed"):
             ns["Model"](vllm_config=vc)
