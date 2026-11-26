@@ -1518,9 +1518,9 @@ class MiniMaxM3SparseForCausalLM(
                 raise ValueError("MiniMax M3 LoRA does not support fully_sharded_loras.")
             if vllm_config.lora_config.enable_moe_shared_loras:
                 raise ValueError("MiniMax M3 LoRA does not support enable_moe_shared_loras; use per-expert factors.")
-            from vllm_ascend.lora.minimax_m3 import MiniMaxM3WorkerLoRAManager
+            from vllm_ascend.lora.moe_manager import AscendMoEWorkerLoRAManager
 
-            self.lora_worker_manager_cls = MiniMaxM3WorkerLoRAManager
+            self.lora_worker_manager_cls = AscendMoEWorkerLoRAManager
             # LoRA sees all five sparse projections; quantization keeps the class mapping.
             self.packed_modules_mapping = {
                 **self.packed_modules_mapping,

@@ -42,7 +42,6 @@ from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.ops.fused_moe.moe_utils import async_all_to_all
 
 _MOE_LORA_INDEX_FIELDS = (
-    "gathered_lora_indices",
     "split_lora_indices",
     "permuted_lora_indices",
     "exchanged_lora_indices",
@@ -208,9 +207,7 @@ def _recover_moe_lora_routing_allgather(lora_context, expanded_row_idx, topk_ids
     # (host-known constant). Clamping defensively to the last index is a no-op
     # in normal operation but keeps the gather graph-safe.
     orig_token = inv_perm // top_k
-    token_lora_indices = getattr(lora_context, "gathered_lora_indices", None)
-    if token_lora_indices is None:
-        token_lora_indices = lora_context.punica_wrapper.token_lora_indices
+    token_lora_indices = lora_context.punica_wrapper.token_lora_indices
     orig_token = orig_token.clamp_(max=token_lora_indices.numel() - 1)
     lora_per_row = token_lora_indices[orig_token]
     return expert_per_row, lora_per_row
