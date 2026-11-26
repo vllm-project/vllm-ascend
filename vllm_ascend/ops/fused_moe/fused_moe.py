@@ -31,6 +31,7 @@ from vllm.model_executor.layers.fused_moe.layer import MoERunner
 from vllm.model_executor.layers.fused_moe.runner.moe_runner import _moe_forward_shared, _unpack
 from vllm.utils.torch_utils import direct_register_custom_op
 
+from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX, MoECommType
 from vllm_ascend.distributed.parallel_state import get_mc2_group
 from vllm_ascend.ops.fused_moe.dataclass.shared_experts import PreparedSharedExpertInput, RoutedMoEMilestones
