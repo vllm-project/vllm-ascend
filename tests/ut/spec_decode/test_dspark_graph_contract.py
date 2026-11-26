@@ -17,9 +17,11 @@ import vllm_ascend.worker.v2.spec_decode.dflash.aclgraph as aclgraph_module
 import vllm_ascend.worker.v2.spec_decode.dflash.speculator as dflash_module
 import vllm_ascend.worker.v2.spec_decode.dspark.speculator as speculator_module
 from vllm_ascend.attention.attention_v1 import AscendAttentionBackend
+from vllm_ascend.attention.dsa_v41 import DeepseekV41CacheBackend
 from vllm_ascend.attention.fa_v1 import AscendFlashAttentionBackend
 from vllm_ascend.attention.mla_v1 import AscendMLABackend
 from vllm_ascend.compilation.updatable_graph import UpdatableGraph
+from vllm_ascend.models.deepseek_v41.dspark import DeepseekV41DSparkSWACache
 from vllm_ascend.worker.v2.spec_decode.dflash.aclgraph import DFlashAclGraphManager
 from vllm_ascend.worker.v2.spec_decode.dspark.speculator import AscendDSparkSpeculator
 
@@ -160,6 +162,66 @@ def test_sfa_draft_metadata_passes_through_upstream(monkeypatch):
 
     assert result is metadata
     assert parent_build.call_args.kwargs["batch_desc"] is batch_desc
+
+
+def _v41_dspark_draft_backend():
+    cache = DeepseekV41DSparkSWACache.__new__(DeepseekV41DSparkSWACache)
+    return cache.get_attn_backend()
+
+
+@pytest.mark.parametrize(
+    "graph_mode,backends,expected_proposal_builds",
+    [
+        (CUDAGraphMode.FULL, (_v41_dspark_draft_backend(),), 0),
+        (CUDAGraphMode.NONE, (DeepseekV41CacheBackend,), 1),
+        (CUDAGraphMode.PIECEWISE, (DeepseekV41CacheBackend,), 1),
+        (CUDAGraphMode.FULL, (AscendAttentionBackend,), 1),
+        (CUDAGraphMode.FULL, (DeepseekV41CacheBackend, AscendAttentionBackend), 1),
+        (CUDAGraphMode.FULL, (), 1),
+    ],
+)
+def test_dspark_full_replay_builds_v41_metadata_once(monkeypatch, graph_mode, backends, expected_proposal_builds):
+    metadata = {"draft.0": object()}
+    parent_build = MagicMock(return_value=metadata)
+    monkeypatch.setattr(DSparkSpeculator, "_build_attn_metadata", parent_build)
+    monkeypatch.setattr(speculator_module, "build_attn_metadata_wrapper", nullcontext)
+    monkeypatch.setattr(speculator_module, "build_attn_metadata_factory", lambda *_args, **_kwargs: nullcontext())
+    monkeypatch.setattr(AscendDSparkSpeculator, "attn_vllm_config", property(lambda self: self.vllm_config))
+    monkeypatch.setattr(aclgraph_module, "use_updatable_graph", lambda _backend: False)
+    manager = DFlashAclGraphManager.__new__(DFlashAclGraphManager)
+    manager._graph_replay = MagicMock(return_value=object())
+    seq_lens = torch.tensor([20, 30, 40])
+    speculator = _speculator(
+        query_cudagraph_manager=manager,
+        attn_backends={f"draft.{i}": backend for i, backend in enumerate(backends)},
+        num_query_per_req=8,
+        arange_np=np.arange(5, dtype=np.int32),
+        input_batch=SimpleNamespace(num_reqs=3, seq_lens_cpu_upper_bound=seq_lens),
+        input_buffers=SimpleNamespace(positions=object()),
+        vllm_config=SimpleNamespace(parallel_config=object()),
+        use_dcp=False,
+        _group_causal=False,
+    )
+    manager.speculator = speculator
+    desc = BatchExecutionDescriptor(cg_mode=graph_mode, num_tokens=32, num_reqs=4)
+
+    with dflash_module.draft_metadata_request_count(speculator, 3):
+        result = speculator._build_uniform_attn_metadata(desc, 3, 8, seq_lens, step=8, causal=False)
+        assert result is (metadata if expected_proposal_builds else None)
+        assert parent_build.call_count == expected_proposal_builds
+        if graph_mode == CUDAGraphMode.FULL and backends:
+            assert manager.run_fullgraph(desc) is manager._graph_replay.return_value
+            manager._graph_replay.assert_called_once_with(desc, backends[0], 32, [metadata])
+            assert parent_build.call_count == expected_proposal_builds + 1
+            replay_inputs = parent_build.call_args.kwargs
+            assert replay_inputs["batch_desc"].num_reqs == 4
+            assert replay_inputs["batch_desc"].num_tokens == 32
+            assert replay_inputs["num_reqs"] == 3
+            assert replay_inputs["seq_lens_cpu_upper_bound"] is seq_lens
+            assert not replay_inputs["causal"]
+            np.testing.assert_array_equal(replay_inputs["query_start_loc_np"], [0, 8, 16, 24])
+
+    assert speculator._build_uniform_attn_metadata(desc, 3, 8, seq_lens, step=8) is metadata
 
 
 @pytest.mark.parametrize("query_count", [1, 7, 8])
