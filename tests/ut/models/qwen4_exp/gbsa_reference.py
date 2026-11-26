@@ -19,9 +19,17 @@ def reference_prepare(
     sparse_width = compact_indices.shape[1] - GBSA_RESIDUAL_TOKENS
     row_requests = token_to_req.long()
     row_request_lens = seq_lens[row_requests].to(torch.int32)
-    row_visible_lens = torch.minimum(
+    current_visible_lens = torch.minimum(
         logical_positions.to(torch.int32).add(1).clamp_min(0),
         row_request_lens,
+    )
+    tail = compact_indices[:, sparse_width:].to(torch.int32)
+    valid_tail = (tail >= 0) & (tail < row_request_lens.unsqueeze(1))
+    tail_end = torch.where(valid_tail, tail + 1, 0).amax(dim=1)
+    row_visible_lens = torch.where(
+        valid_tail.any(dim=1),
+        tail_end,
+        torch.div(current_visible_lens, GBSA_COMPRESS_RATIO, rounding_mode="floor") * GBSA_COMPRESS_RATIO,
     )
     sparse_idx = compact_indices[:, :sparse_width].to(torch.int32)
     full_blocks = torch.div(

@@ -82,7 +82,8 @@ def test_qsa_gbsa_uses_kernel_paged_cache(dtype, tail_tokens, storage_page_size,
     block_table = (manager_table.unsqueeze(-1) * subpages + torch.arange(subpages)).flatten(1).to(torch.int32)
     seq_lens = torch.tensor([sequence_length], dtype=torch.int32)
     groups = torch.tensor(group_ids, dtype=torch.int32)
-    compact_indices = torch.cat((groups, torch.full((3,), -1, dtype=torch.int32))).view(1, -1)
+    tail = torch.arange(sequence_length - tail_tokens, sequence_length, dtype=torch.int32)
+    compact_indices = torch.cat((groups, tail, torch.full((3 - tail_tokens,), -1, dtype=torch.int32))).view(1, -1)
     output = torch.empty_like(query)
 
     # Aligned storage is contiguous [K128,V128] pairs. MRV2 IDs stay unchanged.
@@ -138,7 +139,7 @@ def test_qsa_gbsa_uses_kernel_paged_cache(dtype, tail_tokens, storage_page_size,
     torch.testing.assert_close(calls[0][2], expected.flatten(1).to(torch.int32))
 
 
-def test_qsa_gbsa_uses_per_row_mtp_visible_lengths():
+def test_qsa_gbsa_reuses_step_zero_mtp_tail():
     source = Path(__file__).resolve().parents[4] / "vllm_ascend/models/qwen4_exp/gbsa.py"
     module = ast.parse(source.read_text())
     module.body = [node for node in module.body if not isinstance(node, (ast.Import, ast.ImportFrom))]
@@ -164,10 +165,10 @@ def test_qsa_gbsa_uses_per_row_mtp_visible_lengths():
     values = torch.randn_like(keys)
     compact_indices = torch.tensor(
         [
-            [24, 25, -1, -1, -1],
-            [24, 25, -1, -1, -1],
-            [24, 25, -1, -1, -1],
-            [24, 25, -1, -1, -1],
+            [24, 25, 100, 101, -1],
+            [24, 25, 100, 101, -1],
+            [24, 25, 100, 101, -1],
+            [24, 25, 100, 101, -1],
         ],
         dtype=torch.int32,
     )
@@ -186,8 +187,8 @@ def test_qsa_gbsa_uses_per_row_mtp_visible_lengths():
     )
 
     indices, counts, visible_lengths = calls[0]
-    assert visible_lengths.tolist() == [102, 103, 104, 105]
-    assert counts[0].tolist() == [1, 1, 2, 2]
+    assert visible_lengths.tolist() == [102, 102, 102, 102]
+    assert counts[0].tolist() == [1, 1, 1, 1]
     assert indices[0, :, :2].tolist() == [
         [24, 25],
         [24, 25],
@@ -218,10 +219,12 @@ def test_qsa_gbsa_preserves_all_512_groups_with_implicit_tail(tail):
     }
     exec(compile(module, str(source), "exec"), namespace)
 
+    tail_indices = torch.arange(2048, 2048 + tail, dtype=torch.int32)
     compact_indices = torch.cat(
         (
             torch.arange(512, dtype=torch.int32),
-            torch.full((3,), -1, dtype=torch.int32),
+            tail_indices,
+            torch.full((3 - tail,), -1, dtype=torch.int32),
         )
     ).view(1, -1)
     query = torch.randn(1, 4, 128, dtype=torch.bfloat16)

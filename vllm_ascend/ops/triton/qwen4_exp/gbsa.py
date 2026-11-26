@@ -39,7 +39,20 @@ def _prepare_qsa_gbsa_rows_kernel(
     request = tl.where(request < 0, request + requests_count, request)
     position = tl.load(positions + row * position_stride).to(tl.int32)
     length = tl.load(lengths + request * length_stride).to(tl.int32)
-    visible = tl.minimum(tl.maximum(position + 1, 0), length)
+    current_visible = tl.minimum(tl.maximum(position + 1, 0), length)
+    tail_offsets = tl.arange(0, 4)
+    tail_tokens = tl.load(
+        indices + row * indices_row_stride + (GROUPS + tail_offsets) * indices_column_stride,
+        tail_offsets < 3,
+        other=-1,
+    ).to(tl.int32)
+    valid_tail = (tail_offsets < 3) & (tail_tokens >= 0) & (tail_tokens < length)
+    tail_end = tl.max(tl.where(valid_tail, tail_tokens + 1, 0), 0)
+    # The compact LI-v2 buffer is the selection contract. In MTP skip-topk
+    # steps its three tail slots still describe step 0, while positions and
+    # sequence lengths advance. Keep that saved tail; when it is empty, keep
+    # only the complete-group boundary rather than synthesizing a new tail.
+    visible = tl.where(tl.sum(valid_tail.to(tl.int32), 0) > 0, tail_end, current_visible // 4 * 4)
     group = tl.load(
         indices + row * indices_row_stride + columns * indices_column_stride, columns < GROUPS, other=-1
     ).to(tl.int32)
@@ -87,6 +100,8 @@ def prepare_qsa_gbsa_inputs(
 
     The block table already addresses 128-token kernel pages. Residual blocks
     are implicit (residual_block_mode=1); explicit indices contain full groups only.
+    The packed tail slots define the residual visibility so MTP skip-topk steps
+    reuse both parts of the step-0 selection.
     Every output element is written before use. No device-to-host reads or
     process-global tensor cache are introduced; inputs can change every call.
     """
