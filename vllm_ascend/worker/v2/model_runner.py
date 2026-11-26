@@ -1479,9 +1479,20 @@ class NPUModelRunner(GPUModelRunner):
             # Flash's sparse target uses device lengths, but a mixed target
             # GQA backend still consumes the shared CPU length mirror.
             backends = [group.backend for groups in self.attn_groups for group in groups]
-            return AscendFlashAttentionBackend in backends and all(
+            fa3_backend = ("vllm_ascend.attention.flash_attention_v3", "AscendFlashAttentionBackend")
+            has_fa3_draft = getattr(self, "_skip_fa3_cpu_length_sync", False)
+            if has_fa3_draft and (
+                self.parallel_config.pipeline_parallel_size != 1
+                or self.parallel_config.prefill_context_parallel_size != 1
+                or self.parallel_config.decode_context_parallel_size != 1
+                or self.ascend_config.sparse_kv_offload_config.enabled
+                or spec.enable_adaptive_verification
+            ):
+                return False
+            return (AscendFlashAttentionBackend in backends or has_fa3_draft) and all(
                 backend is AscendFlashAttentionBackend
                 or backend.get_name() in ("ASCEND_MINIMAX_M3_SPARSE", "ASCEND_MINIMAX_M3_SPARSE_INDEXER")
+                or (has_fa3_draft and backend.full_cls_name() == fa3_backend)
                 for backend in backends
             )
 

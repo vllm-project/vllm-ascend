@@ -24,3 +24,11 @@ entries:
       without context parallelism by sharing already prepared attention
       metadata within the same proposal. No new configuration is required.
     model: minimax-m3
+  - category: performance
+    text: >-
+      Enabled FA3 draft attention for eligible MiniMax-M3 DSpark decode on A3
+      with flash_attn_npu 0.5.1.post1 or newer, reducing host length
+      synchronization during resident-KV decode without pipeline or context
+      parallelism. Older or missing FA3 packages retain the existing backend.
+    model: minimax-m3
+    hardware: [A3]

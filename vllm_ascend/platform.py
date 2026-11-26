@@ -2102,8 +2102,26 @@ def _uses_step5_fa3(config) -> bool:
 
 def _uses_minimax_fa3(config) -> bool:
     """Keep unrelated models and drafts on their configured attention backend."""
+    from vllm.compilation import backends
+
     architectures = config.model_config.hf_config.architectures or ()
     spec = config.speculative_config
+    if getattr(backends, "model_tag", None) == "dspark_head" and spec is not None:
+        from importlib.metadata import PackageNotFoundError, version
+
+        from packaging.version import InvalidVersion, Version
+
+        # Older binaries can copy device lengths to the host in long-context
+        # graph capture. Keep the existing backend until this path is supported.
+        try:
+            if Version(version("flash_attn_npu")) < Version("0.5.1.post1"):
+                return False
+        except (PackageNotFoundError, InvalidVersion):
+            return False
+        # DSpark's loader retains the target ModelConfig in VllmConfig and
+        # passes the draft ModelConfig separately to get_model().
+        draft = spec.draft_model_config
+        architectures = draft.architectures or () if draft is not None else ()
     target = getattr(spec, "target_model_config", None)
     target_hf = getattr(target, "hf_config", None)
     draft_architectures = {

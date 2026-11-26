@@ -5,6 +5,7 @@
 import __future__
 
 import ast
+import importlib.metadata
 import sys
 from contextlib import contextmanager
 from dataclasses import dataclass, field
@@ -108,7 +109,17 @@ def profiles():
 
 @pytest.fixture
 def selection(monkeypatch, profiles):
-    runtime = NS(device=profiles.AscendDeviceType.A2, installed=True)
+    runtime = NS(device=profiles.AscendDeviceType.A2, installed=True, package_version="0.5.1.post1")
+    original_version = importlib.metadata.version
+
+    def package_version(name):
+        if name != "flash_attn_npu":
+            return original_version(name)
+        if runtime.package_version is None:
+            raise importlib.metadata.PackageNotFoundError(name)
+        return runtime.package_version
+
+    monkeypatch.setattr(importlib.metadata, "version", package_version)
     target = NS(hf_config=NS(architectures=["MiniMaxM3SparseForConditionalGeneration"]))
     runtime.config = NS(
         model_config=target,
@@ -190,6 +201,29 @@ def test_hardware_and_model_routing(selection, device, installed, arch):
         assert actual == "vllm_ascend.attention.flash_attention_v3.AscendFlashAttentionBackend"
     else:
         assert "flash_attention_v3" not in actual
+
+
+@pytest.mark.parametrize("device", ["A2", "A3"])
+@pytest.mark.parametrize("tag", ["backbone", "dspark_head"])
+def test_dspark_loader_retains_target_config(selection, monkeypatch, device, tag):
+    r = selection
+    r.device = getattr(r.profiles.AscendDeviceType, device)
+    # This is the actual DSpark loader contract: the current config keeps
+    # the target, while get_model receives draft_model_config separately.
+    r.config.model_config = r.config.speculative_config.target_model_config
+    monkeypatch.setitem(sys.modules, "vllm.compilation", NS(backends=NS(model_tag=tag)))
+    assert ("flash_attention_v3" in r.select()) == (tag == "dspark_head")
+
+
+@pytest.mark.parametrize(
+    "version,supported",
+    [("0.5.0", False), ("0.5.1", False), ("0.5.1.post1", True), ("0.6.0", True), ("unknown", False), (None, False)],
+)
+def test_dspark_fa3_requires_long_context_graph_support(selection, monkeypatch, version, supported):
+    selection.package_version = version
+    selection.config.model_config = selection.config.speculative_config.target_model_config
+    monkeypatch.setitem(sys.modules, "vllm.compilation", NS(backends=NS(model_tag="dspark_head")))
+    assert ("flash_attention_v3" in selection.select()) is supported
 
 
 @pytest.mark.parametrize(
@@ -454,6 +488,8 @@ def _check_cache_layout(fa3, monkeypatch, layout, heads, layout_source, runtime_
     # Model construction precedes the layout RPC/cache initialization.
     from vllm.config import CacheConfig, replace
 
+    if hasattr(torch, "npu"):
+        monkeypatch.setattr(torch.npu, "is_available", lambda: False)
     config = NS(cache_config=CacheConfig(), speculative_config=None)
     # Match load_dflash_model: even "auto" creates an independent cache config.
     draft_cache_config = (
@@ -676,6 +712,46 @@ def test_minimax_fa3_scheduler_api(fa3, causal, padded, softcap):
     assert metadata.scheduler_metadata[spec].tolist() == [1]
     assert metadata.query_start_loc.numel() == (2 if padded else 3)
     assert metadata.block_tables.shape[0] == (1 if padded else 2)
+
+
+@pytest.mark.parametrize("capture_method", ["build_for_cudagraph_capture", "build_for_graph_capture"])
+def test_fa3_draft_capture_registers_actual_token_bucket(fa3, capture_method):
+    builder = object.__new__(fa3.AscendFlashAttentionMetadataBuilder)
+    builder.device = torch.device("cpu")
+    # DSpark uses seven query tokens; four requests capture 28 tokens even
+    # though the target's configured token buckets do not include 28.
+    builder.capture_sizes = {1, 2, 4, 8, 16, 24, 32, 40, 48, 56, 64}
+    builder.capture_query_len = 8
+    builder.max_num_reqs, builder.block_size = 4, 128
+    spec = (16, 1, 128, torch.bfloat16, 0.1, 0.0, 4096)
+    builder.scheduler_specs, builder.scheduler_buffers = {spec}, {}
+    offsets = torch.arange(5, dtype=torch.int32) * 7
+    common = NS(
+        num_reqs=4,
+        num_actual_tokens=28,
+        num_input_tokens=28,
+        max_query_len=7,
+        query_start_loc=offsets,
+        query_start_loc_cpu=offsets,
+        seq_lens=torch.full((4,), 7, dtype=torch.int32),
+        block_table_tensor=torch.zeros(4, 1026, dtype=torch.int32),
+        slot_mapping=torch.arange(28),
+        causal=False,
+    )
+
+    def scheduler(**kwargs):
+        return torch.full((64,), int(kwargs["cache_seqlens"][0]), dtype=torch.int32)
+
+    with patch.object(fa3, "get_scheduler_metadata", side_effect=scheduler):
+        captured = getattr(builder, capture_method)(common)
+        captured_tiling = captured.scheduler_metadata[spec]
+        captured_address = captured_tiling.data_ptr()
+        for live_length in (131071, 131078, 4097):
+            common.seq_lens.fill_(live_length)
+            replay = builder.build(0, common)
+            assert replay.scheduler_metadata[spec].data_ptr() == captured_address
+            assert torch.all(captured_tiling == live_length)
+    assert 28 in builder.capture_sizes
 
 
 def test_minimax_fa3_graph_metadata_keeps_storage_across_batch_sizes(fa3):

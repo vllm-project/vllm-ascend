@@ -49,6 +49,7 @@ def runner_cls(mamba_state_cls):
     cls.bases = [ast.Name(id="Parent", ctx=ast.Load())]
 
     class Parent:
+        _dspark_decode_indices = None
         device_count: int
         events: list[str]
         num_computed_tokens_cpu: torch.Tensor
@@ -344,3 +345,34 @@ def test_fa3_skips_cpu_snapshot_and_wait(fa3_runner):
     assert runner.input_buffers.seq_lens_cpu.tolist() == [24]
 
     backend.full_cls_name.assert_not_called()
+
+
+@pytest.mark.parametrize("blocked", [None, "cpu_target", "pp", "pcp", "dcp", "offload", "adaptive", "sync_pp"])
+def test_minimax_flash_fa3_cpu_length_policy(fa3_runner, monkeypatch, blocked):
+    runner = fa3_runner
+    runner.initialize_spec_cpu_length_sync()
+    monkeypatch.setitem(
+        runner._can_skip_spec_cpu_length_sync.__globals__, "AscendFlashAttentionBackend", type("CANNFlash", (), {})
+    )
+    runner.model_config = SimpleNamespace(
+        hf_config=SimpleNamespace(architectures=["MiniMaxM3SparseForCausalLM"]),
+        hf_text_config=SimpleNamespace(model_type="minimax_m3_text"),
+    )
+    runner.speculative_config = SimpleNamespace(
+        method="dspark",
+        enable_adaptive_verification=blocked == "adaptive",
+        draft_model_config=SimpleNamespace(architectures=["DSparkMiniMaxDraftModel"]),
+    )
+    runner.parallel_config = SimpleNamespace(
+        pipeline_parallel_size=2 if blocked == "pp" else 1,
+        prefill_context_parallel_size=2 if blocked == "pcp" else 1,
+        decode_context_parallel_size=2 if blocked == "dcp" else 1,
+    )
+    runner.ascend_config = SimpleNamespace(sparse_kv_offload_config=SimpleNamespace(enabled=blocked == "offload"))
+    sparse = SimpleNamespace(get_name=lambda: "ASCEND_MINIMAX_M3_SPARSE")
+    runner.attn_groups = [[SimpleNamespace(backend=sparse)]]
+    if blocked == "cpu_target":
+        dense = SimpleNamespace(get_name=lambda: "ASCEND", full_cls_name=lambda: ("fia", "Attention"))
+        runner.attn_groups[0].append(SimpleNamespace(backend=dense))
+    runner.sync_spec_pp_cpu_counts = blocked == "sync_pp"
+    assert runner._can_skip_spec_cpu_length_sync() is (blocked is None)

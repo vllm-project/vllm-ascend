@@ -99,10 +99,18 @@ class DFlashAclGraphManager(DFlashCudaGraphManager):
     def run_fullgraph(self, desc: BatchExecutionDescriptor) -> torch.Tensor | tuple[torch.Tensor, list[torch.Tensor]]:
         """Override run_fullgraph to update full graph params in run_fullgraph."""
         num_tokens = desc.num_tokens
-        attn_backend = list(self.speculator.attn_backends.values())[0]
-        if all(backend is AscendFlashAttentionBackend for backend in self.speculator.attn_backends.values()):
+        backends = list(self.speculator.attn_backends.values())
+        attn_backend = backends[0]
+        if all(backend is AscendFlashAttentionBackend for backend in backends):
             # Length preparation and FlashAttn tiling run inside the graph,
             # reading the draft's persistent device buffers on every replay.
+            return super().run_fullgraph(desc)
+        if all(
+            backend.full_cls_name() == ("vllm_ascend.attention.flash_attention_v3", "AscendFlashAttentionBackend")
+            for backend in backends
+        ):
+            # The proposer already refreshed FA3's graph-stable device tiling
+            # during metadata build. FIA's host-list task updates do not apply.
             return super().run_fullgraph(desc)
         draft_attn_metadatas = self.speculator.build_draft_attn_metadatas(
             desc.num_reqs,
