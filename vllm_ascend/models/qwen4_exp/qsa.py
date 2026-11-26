@@ -33,9 +33,11 @@ from vllm.utils.torch_utils import (
     get_dtype_size,
 )
 from vllm.v1.attention.backend import AttentionCGSupport, AttentionImplBase, CommonAttentionMetadata
+from vllm.v1.attention.backends.mla.compressor_utils import get_compressed_slot_mapping
 from vllm.v1.kv_cache_interface import AttentionSpec
 from vllm.v1.kv_cache_layout import KVCacheLayout
 
+from vllm_ascend.attention.context_parallel.common_cp import DCPImplMixin, DCPMetadataBuilderMixin
 from vllm_ascend.attention.context_parallel.sfa_dcp_utils import get_sfa_pcp_global_metadata
 from vllm_ascend.attention.utils import (
     maybe_save_kv_layer_to_connector,
@@ -52,8 +54,9 @@ from vllm_ascend.ops.triton.qwen4_exp.qsa import (
 )
 
 from .attention_dispatch import build_qsa_request_plan, dispatch_qsa_attention
-from .gbsa import GBSA_PAGE_SIZE, qsa_gbsa_attention
+from .gbsa import GBSA_PAGE_SIZE, qsa_gbsa_attention, qsa_gbsa_local_attention
 from .lightning_indexer import QSAIndexerMetadataProtocol, qsa_select_paged_tokens_lightning_v2
+from .qsa_cp import configure_qsa_dcp
 from .topk_buffer import share_topk_buffer
 
 if TYPE_CHECKING:
@@ -206,13 +209,16 @@ class AscendQSAIndexer(upstream_indexer.QSAIndexer):
         compressed_key_cache: qsa_indexer.QSACompressedKeyCache
 
     def configure_pcp_cache_backends(self, vllm_config: VllmConfig) -> None:
+        self._configure_cache_backends(vllm_config, AscendPCPQSARawKeyCache, AscendPCPQSACompressedKeyCache)
+
+    def _configure_cache_backends(self, vllm_config: VllmConfig, raw_cls, compressed_cls) -> None:
         # Only the cache owners need new backends. Keep upstream's indexer
         # projection, cache dtype and ring configuration.
         raw = self.raw_key_cache
         compressed = self.compressed_key_cache
         static_context = vllm_config.compilation_config.static_forward_context
         del static_context[raw.prefix], static_context[compressed.prefix]
-        self.raw_key_cache = AscendPCPQSARawKeyCache(
+        self.raw_key_cache = raw_cls(
             vllm_config=vllm_config,
             head_size=raw.key_head_size,
             dtype=raw.dtype,
@@ -221,7 +227,7 @@ class AscendQSAIndexer(upstream_indexer.QSAIndexer):
             prefix=raw.prefix,
             compress_ratio=raw.compress_ratio,
         )
-        self.compressed_key_cache = AscendPCPQSACompressedKeyCache(
+        self.compressed_key_cache = compressed_cls(
             vllm_config=vllm_config,
             head_size=compressed.head_size,
             dtype=compressed.dtype,
@@ -447,7 +453,7 @@ class AscendQSAIndexer(upstream_indexer.QSAIndexer):
         metadata: QSAIndexerMetadataProtocol,
         out: torch.Tensor | None,
     ) -> torch.Tensor:
-        logger.info_once("QSA is using native request-batched LightningIndexerV2 through the CANN Torch interface.")
+        logger.info_once("QSA is using LightningIndexerV2 through the CANN Torch interface.")
         return qsa_select_paged_tokens_lightning_v2(
             query,
             self.compressed_key_cache.kv_cache,
@@ -455,13 +461,15 @@ class AscendQSAIndexer(upstream_indexer.QSAIndexer):
             self.token_topk,
             self.compress_ratio,
             out,
+            dcp_group=getattr(self, "dcp_group", None),
         )
 
 
-class AscendQSAImpl(AttentionImplBase[Any]):
+class AscendQSAImpl(DCPImplMixin, AttentionImplBase[Any]):
     """Minimal QSA attention implementation independent of FlashAttention."""
 
-    supports_dcp = False
+    can_return_lse_for_decode = True
+    supports_mtp_with_cp_non_trivial_interleave_size = True
     supports_pcp = False
 
     def __init__(  # type: ignore[misc]
@@ -482,6 +490,9 @@ class AscendQSAImpl(AttentionImplBase[Any]):
         self.sinks = None
         self.sliding_window = (-1, -1)
         self.supports_quant_query_input = False
+        self.dcp_size = self.dcp_world_size
+        if self.dcp_size > 1:
+            super().__init__()
 
     def do_kv_cache_update(
         self,
@@ -548,6 +559,24 @@ class AscendQSAImpl(AttentionImplBase[Any]):
         value_cache = canonicalize_singleton_dim_strides(value_cache)
         packed_width = layer.indexer.token_topk // layer.indexer.compress_ratio + layer.indexer.compress_ratio - 1
         compact_indices = selected_indices[:, :packed_width]
+        if self.dcp_size > 1:
+            # The shared TopK merge already returned this rank's winning group IDs.
+            gathered_query = self._dcp_all_gather(query[:num_tokens], dim=1)
+            partial, lse = qsa_gbsa_local_attention(
+                gathered_query,
+                key_cache,
+                value_cache,
+                compact_indices,
+                attn_metadata.block_table,
+                token_to_req[:num_tokens],
+                logical_positions[:num_tokens],
+                seq_lens,
+                dcp_size=self.dcp_size,
+                dcp_rank=self.dcp_rank,
+                dcp_interleave=self.dcp_interleave,
+            )
+            output[:num_tokens].copy_(self._merge_dcp_attention_output(partial, lse))
+            return output
         request_plan = getattr(attn_metadata, "qsa_request_plan", None)
         if request_plan is None:
             logger.info_once("QSA attention is using the CANN GBSA backend.")
@@ -674,6 +703,8 @@ class AscendQSAMetadataBuilder(upstream_qsa.Qwen4ExpQSAMetadataBuilder):
             metadata.slot_mapping = pcp_context.global_slot_mappings[group, :num_write_tokens]
         metadata.qsa_request_plan = None
         if for_capture or full_pcp_graph:
+            return metadata
+        if self.vllm_config.parallel_config.decode_context_parallel_size > 1:
             return metadata
         phases = common_attn_metadata.is_prefilling
         if phases is None or phases.device.type != "cpu":
@@ -830,21 +861,78 @@ class AscendPCPQSACompressedKeyCache(qsa_indexer.QSACompressedKeyCache):
         return AscendPCPQSAIndexerBackend
 
 
+class AscendDCPQSAIndexerMetadataBuilder(DCPMetadataBuilderMixin, QSAIndexerMetadataBuilder):
+    def build(self, common_prefix_len, common_attn_metadata, fast_build=False):
+        metadata = super().build(common_prefix_len, common_attn_metadata, fast_build)
+        metadata.dcp_size = self.dcp_size
+        metadata.dcp_rank = self.dcp_rank
+        metadata.dcp_interleave = self.vllm_config.parallel_config.cp_kv_cache_interleave_size
+
+        rows = metadata.num_actual_tokens
+        # Graph-padded device offsets can extend past the slot buffer. Launch only for live requests.
+        num_live_reqs = common_attn_metadata.query_start_loc_cpu.numel() - 1
+        get_compressed_slot_mapping(
+            rows,
+            common_attn_metadata.slot_mapping[:rows].masked_fill(metadata.logical_positions < 0, -1),
+            metadata.query_start_loc,
+            metadata.seq_lens,
+            metadata.block_table[:num_live_reqs],
+            block_size=metadata.storage_block_size,
+            compress_ratio=metadata.compress_ratio,
+            out=metadata.slot_mapping,
+            dcp_world_size=metadata.dcp_size,
+            cp_interleave=metadata.dcp_interleave,
+        )
+        # The Ascend compressor consumes the rank-local slots directly.
+        metadata.k_work_metadata = metadata.k_work_metadata[:0]
+        return metadata
+
+
+class AscendDCPQSAIndexerBackend(QSAIndexerBackend):
+    @staticmethod
+    def get_builder_cls() -> type[AscendDCPQSAIndexerMetadataBuilder]:
+        return AscendDCPQSAIndexerMetadataBuilder
+
+
+class AscendDCPQSARawKeyCache(QSARawKeyCache):
+    supports_dcp = True
+
+
+class AscendDCPQSACompressedKeyCache(qsa_indexer.QSACompressedKeyCache):
+    supports_dcp = True
+
+    def get_attn_backend(self) -> type[AscendDCPQSAIndexerBackend]:
+        return AscendDCPQSAIndexerBackend
+
+
 class AscendQwen4ExpQSAAttention(upstream_qsa.Qwen4ExpQSAAttention):
     """Qwen4Exp QSA owner bound to the Ascend implementation."""
 
+    supports_dcp = True
+
     def __init__(self, *, vllm_config: VllmConfig, **kwargs) -> None:
-        if vllm_config.parallel_config.prefill_context_parallel_size == 1:
+        parallel = vllm_config.parallel_config
+        if parallel.prefill_context_parallel_size == parallel.decode_context_parallel_size == 1:
             super().__init__(vllm_config=vllm_config, **kwargs)
             # Rebind as each layer is constructed to limit live allocations.
             share_topk_buffer(self)
             return
         # Upstream constructs token-local projections and cache owners. The
-        # Ascend forward and metadata builders handle the PCP layout.
+        # Ascend forward and metadata builders handle the CP layout.
         local_config = copy(vllm_config)
         local_config.parallel_config = copy(vllm_config.parallel_config)
         local_config.parallel_config.prefill_context_parallel_size = 1
+        local_config.parallel_config.decode_context_parallel_size = 1
         super().__init__(vllm_config=local_config, **kwargs)
+        if parallel.decode_context_parallel_size > 1:
+            configure_qsa_dcp(parallel, self.total_num_kv_heads, self.indexer.compress_ratio)
+            if self.kv_cache_torch_dtype != torch.bfloat16 or self.indexer.compressed_key_cache.dtype != torch.bfloat16:
+                raise NotImplementedError("Ascend QSA DCP requires BF16 main and compressed caches")
+            share_topk_buffer(self)
+            self.impl.dcp_interleave = parallel.cp_kv_cache_interleave_size
+            self.indexer.dcp_group = self.impl.dcp_group
+            self.indexer._configure_cache_backends(vllm_config, AscendDCPQSARawKeyCache, AscendDCPQSACompressedKeyCache)
+            return
         # The raw/compressed cache owners were built by the same local constructor.
         self.indexer.configure_pcp_cache_backends(vllm_config)
 

@@ -4,6 +4,8 @@
 import torch
 from vllm.triton_utils import tl, triton
 
+from vllm_ascend.ops.triton.sharded_indexer import dcp_local_length
+
 
 @triton.jit
 def _prepare_qsa_gbsa_rows_kernel(
@@ -31,6 +33,9 @@ def _prepare_qsa_gbsa_rows_kernel(
     GROUP_BLOCK: tl.constexpr,
     KV_HEADS: tl.constexpr,
     TABLE_BLOCK: tl.constexpr,
+    DCP_SIZE: tl.constexpr,
+    DCP_RANK: tl.constexpr,
+    INTERLEAVE: tl.constexpr,
 ):
     row = tl.program_id(0)
     columns = tl.arange(0, GROUP_BLOCK)
@@ -53,6 +58,9 @@ def _prepare_qsa_gbsa_rows_kernel(
     # sequence lengths advance. Keep that saved tail; when it is empty, keep
     # only the complete-group boundary rather than synthesizing a new tail.
     visible = tl.where(tl.sum(valid_tail.to(tl.int32), 0) > 0, tail_end, current_visible // 4 * 4)
+    if DCP_SIZE > 1:
+        # A graph padding row may still carry a live request's saved tail.
+        visible = dcp_local_length(tl.minimum(visible, current_visible), DCP_SIZE, DCP_RANK, INTERLEAVE)
     group = tl.load(
         indices + row * indices_row_stride + columns * indices_column_stride, columns < GROUPS, other=-1
     ).to(tl.int32)
@@ -95,6 +103,10 @@ def prepare_qsa_gbsa_inputs(
     token_to_req: torch.Tensor,
     block_table: torch.Tensor,
     num_kv_heads: int,
+    *,
+    dcp_size: int = 1,
+    dcp_rank: int = 0,
+    dcp_interleave: int = 4,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """Prepare full-group indices for GBSA implicit residual mode.
 
@@ -105,6 +117,8 @@ def prepare_qsa_gbsa_inputs(
     Every output element is written before use. No device-to-host reads or
     process-global tensor cache are introduced; inputs can change every call.
     """
+    if dcp_size > 1 and (dcp_interleave < 4 or dcp_interleave % 4):
+        raise ValueError("QSA DCP interleave must preserve four-token groups")
     rows = compact_indices.shape[0]
     groups = compact_indices.shape[1] - 3
     columns = block_table.shape[1]
@@ -142,6 +156,9 @@ def prepare_qsa_gbsa_inputs(
         GROUP_BLOCK=group_block,
         KV_HEADS=num_kv_heads,
         TABLE_BLOCK=triton.next_power_of_2(columns),
+        DCP_SIZE=dcp_size,
+        DCP_RANK=dcp_rank,
+        INTERLEAVE=dcp_interleave,
         num_warps=1,
     )
     return sparse_idx, sparse_count, visible, cu_query, row_table

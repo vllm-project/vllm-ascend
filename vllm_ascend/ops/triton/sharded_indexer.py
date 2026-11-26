@@ -656,6 +656,12 @@ def merge_packed_candidates(
     return output
 
 
+@triton.jit
+def dcp_local_length(length, WORLD: tl.constexpr, RANK: tl.constexpr, INTERLEAVE: tl.constexpr):
+    cycle = WORLD * INTERLEAVE
+    return length // cycle * INTERLEAVE + tl.minimum(tl.maximum(length % cycle - RANK * INTERLEAVE, 0), INTERLEAVE)
+
+
 @triton.jit(do_not_specialize=["REQUESTS", "ROWS"])
 def _local_lengths_small_batch(
     seq_lens,
@@ -676,8 +682,7 @@ def _local_lengths_small_batch(
     end = tl.load(query_ends + request, request < REQUESTS, 0).to(tl.int32)
     start = tl.load(query_ends + request - 1, (request > 0) & (request < REQUESTS), 0).to(tl.int32)
     if tl.program_id(0) == 0:
-        local = seq // (WORLD * INTERLEAVE) * INTERLEAVE
-        local += tl.minimum(tl.maximum(seq % (WORLD * INTERLEAVE) - RANK * INTERLEAVE, 0), INTERLEAVE)
+        local = dcp_local_length(seq, WORLD, RANK, INTERLEAVE)
         tl.store(key_lengths + request, local, request < REQUESTS)
     # All request bounds fit in UB for the common decode batches. A bounded
     # row/request mask avoids dependent random GM loads during binary search.
@@ -685,8 +690,7 @@ def _local_lengths_small_batch(
     own &= request[None, :] < REQUESTS
     visible = tl.maximum(seq[None, :] - end[None, :] + row[:, None] + 1, 0)
     visible = tl.sum(tl.where(own, visible, 0), 1)
-    local = visible // (WORLD * INTERLEAVE) * INTERLEAVE
-    local += tl.minimum(tl.maximum(visible % (WORLD * INTERLEAVE) - RANK * INTERLEAVE, 0), INTERLEAVE)
+    local = dcp_local_length(visible, WORLD, RANK, INTERLEAVE)
     tl.store(visible_lengths + row, local, row < ROWS)
 
 
@@ -706,8 +710,7 @@ def _local_lengths(
 ):
     offsets = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
     length = tl.load(seq_lens + offsets, offsets < REQUESTS, 0)
-    local = length // (WORLD * INTERLEAVE) * INTERLEAVE
-    local += tl.minimum(tl.maximum(length % (WORLD * INTERLEAVE) - RANK * INTERLEAVE, 0), INTERLEAVE)
+    local = dcp_local_length(length, WORLD, RANK, INTERLEAVE)
     tl.store(key_lengths + offsets, local, offsets < REQUESTS)
     # Upper_bound on device query ends also handles empty requests. Values
     # change on graph replay without rebuilding or copying a CPU row map.
@@ -725,8 +728,7 @@ def _local_lengths(
     total = tl.load(query_ends + REQUESTS - 1)
     visible = tl.maximum(seq - end + offsets + 1, 0)
     visible = tl.where(offsets < total, visible, 0)
-    local = visible // (WORLD * INTERLEAVE) * INTERLEAVE
-    local += tl.minimum(tl.maximum(visible % (WORLD * INTERLEAVE) - RANK * INTERLEAVE, 0), INTERLEAVE)
+    local = dcp_local_length(visible, WORLD, RANK, INTERLEAVE)
     tl.store(visible_lengths + offsets, local, offsets < ROWS)
 
 
@@ -787,9 +789,7 @@ def _local_key_lengths(
 ):
     request = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
     seq = tl.load(seq_lens + request, request < REQUESTS, 0).to(tl.int32)
-    cycle = WORLD * INTERLEAVE
-    local = seq // cycle * INTERLEAVE
-    local += tl.minimum(tl.maximum(seq % cycle - RANK * INTERLEAVE, 0), INTERLEAVE)
+    local = dcp_local_length(seq, WORLD, RANK, INTERLEAVE)
     tl.store(key_lengths + request, local, request < REQUESTS)
 
 

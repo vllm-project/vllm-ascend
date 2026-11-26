@@ -224,8 +224,12 @@ class Qwen4ExpPreparedInputAdapter:
             self._prepare_lightning(
                 layer,
                 compressed,
+                full_graph=full_graph,
                 prepared_this_step=prepared_this_step,
             )
+            if getattr(compressed, "dcp_size", 1) > 1:
+                # Local GBSA counts depend on this layer's distributed TopK.
+                continue
             # Mixed Prefill/Decode dispatch slices GBSA rows dynamically.  Keep
             # its existing per-span fallback; the hot decode-only path has no
             # host request plan and can safely reuse one prepared schedule.
@@ -259,39 +263,51 @@ class Qwen4ExpPreparedInputAdapter:
         layer: Any,
         metadata: Any,
         *,
+        full_graph: bool,
         prepared_this_step: dict[tuple[object, ...], torch.Tensor],
     ) -> None:
+        from vllm_ascend.models.qwen4_exp.lightning_indexer import qsa_lightning_indexer_args
+
         # QSA forward slices query rows to this existing metadata field.
         # Keep padded request capacity and use the same device boundaries as LI.
         rows = metadata.num_actual_tokens
         requests = metadata.seq_lens.shape[0]
-        lengths = metadata.seq_lens[:requests]
-        query_start_loc = metadata.query_start_loc[: requests + 1]
-        compressed_lengths = lengths.floor_divide(GBSA_COMPRESS_RATIO)
-        residual_lengths = lengths.remainder(GBSA_COMPRESS_RATIO)
-        common = dict(
-            cu_seqlens_q=query_start_loc.clamp_max(rows),
-            seqused_k=compressed_lengths,
-            cmp_residual_k=residual_lengths,
-            layout_q="TND",
-            layout_k="PA_BBND",
-            mask_mode=3,
-            cmp_ratio=GBSA_COMPRESS_RATIO,
-        )
         head_dim = int(layer.indexer.index_head_dim)
-        block_topk = int(layer.indexer.token_topk // layer.indexer.compress_ratio)
-        if int(layer.indexer.compress_ratio) != GBSA_COMPRESS_RATIO:
+        ratio = int(layer.indexer.compress_ratio)
+        block_topk = int(layer.indexer.token_topk // ratio)
+        if ratio != GBSA_COMPRESS_RATIO:
             raise ValueError("QSA prepared metadata requires compression ratio 4")
-        signature = (
-            "lightning_v2",
-            int(layer.indexer.index_n_heads),
-            head_dim,
-            block_topk,
-            requests,
-            rows,
-            _tensor_storage_signature(lengths),
-            _tensor_storage_signature(query_start_loc),
-        )
+        shape = (int(layer.indexer.index_n_heads), head_dim, block_topk, rows)
+        signature: tuple[object, ...]
+        inputs = None
+        if getattr(metadata, "dcp_size", 1) > 1:
+            from vllm_ascend.models.qwen4_exp.qsa_cp import qsa_dcp_indexer_inputs
+
+            signature = (
+                "dcp_lightning_v2",
+                *shape,
+                metadata.dcp_size,
+                metadata.dcp_rank,
+                metadata.dcp_interleave,
+                _tensor_storage_signature(metadata.visible_blocks[:rows]),
+                _tensor_storage_signature(metadata.token_to_req),
+                _tensor_storage_signature(metadata.block_table),
+            )
+            # Eager layers share these rows for one step. Only a FULL graph retains their addresses.
+            keys = [(*signature, name) for name in ("cu_query", "local_lengths", "row_table")]
+            if signature not in prepared_this_step:
+                for key, tensor in zip(keys, qsa_dcp_indexer_inputs(metadata, ratio), strict=True):
+                    prepared_this_step[key] = self._persistent_metadata(key, tensor) if full_graph else tensor
+            inputs = tuple(prepared_this_step[key] for key in keys)
+            metadata.qsa_dcp_indexer_inputs = inputs
+        else:
+            signature = (
+                "lightning_v2",
+                *shape,
+                requests,
+                _tensor_storage_signature(metadata.seq_lens),
+                _tensor_storage_signature(metadata.query_start_loc[: requests + 1]),
+            )
         prepared = prepared_this_step.get(signature)
         if prepared is not None:
             metadata.qsa_lightning_v2_metadata = prepared
@@ -303,14 +319,12 @@ class Qwen4ExpPreparedInputAdapter:
             1,
             head_dim,
             block_topk,
-            batch_size=requests,
-            **common,
+            batch_size=rows if inputs is not None else requests,
+            **qsa_lightning_indexer_args(metadata, rows, ratio, inputs),
         )
-        metadata.qsa_lightning_v2_metadata = self._persistent_metadata(
-            signature,
-            generated,
-        )
-        prepared_this_step[signature] = metadata.qsa_lightning_v2_metadata
+        if full_graph:
+            generated = self._persistent_metadata(signature, generated)
+        metadata.qsa_lightning_v2_metadata = prepared_this_step[signature] = generated
 
     def _prepare_gbsa(
         self,

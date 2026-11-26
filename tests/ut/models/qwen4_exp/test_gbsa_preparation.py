@@ -31,6 +31,7 @@ class _Pointer:
 
 class _Language:
     int32, int64, float32 = np.int32, np.int64, np.float32
+    uint32, uint64 = np.uint32, np.uint64
     constexpr = object
     static_range = staticmethod(range)
     row = 0
@@ -78,6 +79,10 @@ class _Language:
     def where(condition, a, b):
         return _value(np.where(condition, a, b))
 
+    @staticmethod
+    def gather(value, indices, axis):
+        return _value(np.take(value, indices, axis=axis))
+
 
 class _Kernel:
     def __init__(self, function, language):
@@ -101,20 +106,28 @@ class _Kernel:
         return launch
 
 
+def load_triton_functions(source, names, namespace):
+    # NumPy and Triton expose integer widths in bytes and bits respectively.
+    module = ast.parse(source.read_text().replace(".dtype.primitive_bitwidth", ".dtype.itemsize * 8"))
+    functions = [node for node in ast.walk(module) if isinstance(node, ast.FunctionDef) and node.name in names]
+    for node in functions:
+        node.decorator_list = []
+    module.body[:] = functions
+    exec(compile(module, str(source), "exec"), namespace)
+
+
 def load_cpu_preparation():
-    source = Path(__file__).resolve().parents[4] / "vllm_ascend/ops/triton/qwen4_exp/gbsa.py"
-    module = ast.parse(source.read_text())
-    module.body = [node for node in module.body if not isinstance(node, (ast.Import, ast.ImportFrom))]
+    root = Path(__file__).resolve().parents[4] / "vllm_ascend/ops/triton"
     language = _Language()
-    for node in module.body:
-        if isinstance(node, ast.FunctionDef):
-            node.decorator_list = []
     namespace = {
         "torch": torch,
         "tl": language,
         "triton": SimpleNamespace(next_power_of_2=lambda n: 1 << (n - 1).bit_length()),
     }
-    exec(compile(module, str(source), "exec"), namespace)
+    load_triton_functions(root / "sharded_indexer.py", {"dcp_local_length"}, namespace)
+    load_triton_functions(
+        root / "qwen4_exp/gbsa.py", {"_prepare_qsa_gbsa_rows_kernel", "prepare_qsa_gbsa_inputs"}, namespace
+    )
     namespace["_prepare_qsa_gbsa_rows_kernel"] = _Kernel(namespace["_prepare_qsa_gbsa_rows_kernel"], language)
     return namespace["prepare_qsa_gbsa_inputs"]
 

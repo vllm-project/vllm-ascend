@@ -78,6 +78,64 @@ class _Model:
         return iter((self.layer,))
 
 
+def test_dcp_indexer_inputs_are_shared_per_step_and_persist_only_for_full_graph(monkeypatch):
+    adapter_cls, calls = _load_adapter(monkeypatch)
+    layer = AscendQwen4ExpQSAAttention()
+    second = AscendQwen4ExpQSAAttention()
+    second.layer_name = "model.layers.1.self_attn"
+    second.indexer.compressed_key_cache = SimpleNamespace(prefix="compressed2")
+    adapter = adapter_cls(_TwoLayerModel(layer, second))
+    compressed = SimpleNamespace(
+        num_actual_tokens=3,
+        token_to_req=torch.tensor([0, 0, 1]),
+        logical_positions=torch.tensor([2, 3, -1]),
+        visible_blocks=torch.tensor([0, 1, 0], dtype=torch.int32),
+        seq_lens=torch.tensor([4, 0]),
+        block_table=torch.tensor([[2, 3], [0, 0]], dtype=torch.int32),
+        dcp_size=2,
+        dcp_rank=1,
+        dcp_interleave=4,
+    )
+    main = SimpleNamespace(num_actual_tokens=3)
+    other = SimpleNamespace(**vars(compressed))
+    metadata = {
+        layer.layer_name: main,
+        second.layer_name: main,
+        "compressed": compressed,
+        "compressed2": other,
+        "raw": object(),
+    }
+    adapter.prepare_attention_metadata(metadata, full_graph=True)
+    addresses = [tensor.data_ptr() for tensor in compressed.qsa_dcp_indexer_inputs]
+    schedule_address = compressed.qsa_lightning_v2_metadata.data_ptr()
+    assert addresses == [tensor.data_ptr() for tensor in other.qsa_dcp_indexer_inputs]
+    assert other.qsa_lightning_v2_metadata.data_ptr() == schedule_address
+    assert compressed.qsa_dcp_indexer_inputs[1].tolist() == [0, 0, 0]
+    compressed.logical_positions.copy_(torch.tensor([6, 7, -1]))
+    compressed.visible_blocks.copy_(torch.tensor([1, 2, 0]))
+    compressed.seq_lens[0] = 8
+    compressed.block_table[0, 0] = 7
+    adapter.prepare_attention_metadata(metadata, full_graph=True)
+    assert addresses == [tensor.data_ptr() for tensor in compressed.qsa_dcp_indexer_inputs]
+    assert schedule_address == compressed.qsa_lightning_v2_metadata.data_ptr()
+    assert compressed.qsa_dcp_indexer_inputs[1].tolist() == [0, 1, 0]
+    assert compressed.qsa_dcp_indexer_inputs[2][0, 0] == 7
+    assert calls == {"li": 2, "gbsa": 0}
+    assert not hasattr(main, "qsa_gbsa_metadata")
+
+    graph_buffers = set(adapter._metadata_buffers)
+    for rows in (1, 2, 3, 2):
+        compressed.num_actual_tokens = other.num_actual_tokens = rows
+        adapter.prepare_attention_metadata(metadata, full_graph=False)
+        row_table = compressed.qsa_dcp_indexer_inputs[2]
+        assert row_table is other.qsa_dcp_indexer_inputs[2]
+        assert row_table.data_ptr() != addresses[2]
+        torch.testing.assert_close(row_table, compressed.block_table[compressed.token_to_req[:rows]])
+        assert compressed.qsa_lightning_v2_metadata is other.qsa_lightning_v2_metadata
+    assert set(adapter._metadata_buffers) == graph_buffers
+    assert calls == {"li": 6, "gbsa": 0}
+
+
 class _TwoLayerModel:
     def __init__(self, first, second):
         self.layers = (first, second)

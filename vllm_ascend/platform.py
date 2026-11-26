@@ -63,6 +63,7 @@ from vllm_ascend.utils import (
     is_moe_model,
     model_supports_dcp,
     model_uses_kpool_indexer,
+    model_uses_qwen4_exp_qsa,
     model_uses_sfa_sparse,
     pad_num_tokens,
     refresh_block_size,
@@ -2351,11 +2352,19 @@ def _validate_parallel_config(vllm_config: VllmConfig) -> None:
 
 def _validate_target_dcp_config(vllm_config: VllmConfig) -> None:
     """Validate DCP support for the target model."""
-    if vllm_config.parallel_config.decode_context_parallel_size > 1 and not model_supports_dcp(
-        vllm_config.model_config
-    ):
+    parallel = vllm_config.parallel_config
+    if parallel.decode_context_parallel_size <= 1:
+        return
+    if model_uses_qwen4_exp_qsa(vllm_config.model_config):
+        from vllm_ascend.models.qwen4_exp.qsa_cp import configure_qsa_dcp
+
+        config = vllm_config.model_config.hf_text_config
+        configure_qsa_dcp(parallel, config.num_key_value_heads, config.indexer_compress_ratio)
+        return
+    if not model_supports_dcp(vllm_config.model_config):
         raise ValueError(
-            "Decode Context Parallelism (DCP) is not supported for GQA/MQA models. Only MLA and SFA models support DCP."
+            "Decode Context Parallelism (DCP) is not supported for this model. "
+            "Only MLA, SFA and QSA models support DCP."
         )
 
 

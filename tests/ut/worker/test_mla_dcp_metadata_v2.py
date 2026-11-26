@@ -10,6 +10,7 @@ import torch
 from vllm.v1.worker.utils import AttentionGroup
 
 from vllm_ascend.attention.context_parallel.mla_cp import AscendMLADCPDecodeMetadata
+from vllm_ascend.attention.mla_v1 import AscendMLABackend
 from vllm_ascend.worker.dcp_utils import DCPManager
 from vllm_ascend.worker.v2 import attn_utils
 from vllm_ascend.worker.v2.spec_decode.target_dependent_ar.speculator import AscendTargetDependentARSpeculator
@@ -63,7 +64,7 @@ def test_v2_common_lengths_are_shared_by_groups(monkeypatch, for_capture, use_dc
     groups = [
         [
             AttentionGroup(
-                backend=Mock(),
+                backend=AscendMLABackend,
                 layer_names=[name],
                 kv_cache_spec=Mock(),
                 kv_cache_group_id=group_id,

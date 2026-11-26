@@ -8,7 +8,7 @@
 from __future__ import annotations
 
 import math
-from typing import Protocol
+from typing import Any, Protocol, cast
 
 import torch
 from vllm.utils.torch_utils import canonicalize_singleton_dim_strides
@@ -32,6 +32,30 @@ class QSAIndexerMetadataProtocol(Protocol):
     seq_lens: torch.Tensor
 
 
+class _DCPIndexerMetadata(QSAIndexerMetadataProtocol, Protocol):
+    dcp_interleave: int
+
+
+def qsa_lightning_indexer_args(
+    metadata: QSAIndexerMetadataProtocol, rows: int, compress_ratio: int, dcp_inputs=None
+) -> dict[str, Any]:
+    """Use the same causal bounds for the LI-v2 schedule and the operator."""
+    common: dict[str, Any] = {"layout_q": "TND", "layout_k": "PA_BBND"}
+    if dcp_inputs is None:
+        lengths = metadata.seq_lens
+        common.update(
+            cu_seqlens_q=metadata.query_start_loc[: lengths.shape[0] + 1].clamp_max(rows),
+            seqused_k=lengths.floor_divide(compress_ratio),
+            cmp_residual_k=lengths.remainder(compress_ratio),
+            mask_mode=3,
+            cmp_ratio=compress_ratio,
+        )
+    else:
+        cu_q, local_lengths, _ = dcp_inputs
+        common.update(cu_seqlens_q=cu_q, seqused_k=local_lengths, mask_mode=0, cmp_ratio=1)
+    return common
+
+
 def qsa_select_paged_tokens_lightning_v2(
     query: torch.Tensor,
     compressed_key_cache: torch.Tensor,
@@ -39,10 +63,13 @@ def qsa_select_paged_tokens_lightning_v2(
     token_topk: int,
     compress_ratio: int,
     out: torch.Tensor | None = None,
+    *,
+    dcp_group=None,
 ) -> torch.Tensor:
-    """Select QSA groups with native request-batched LightningIndexerV2.
+    """Select QSA groups with BF16 LightningIndexerV2.
 
-    Preserve the original request batch and page table.
+    DCP searches the local compressed prefix per query and merges candidates
+    with distributed_topk. The unsharded path preserves the original request batch.
     The QSA producer must provide packed, contiguous query suffixes: local row i
     of request r has logical position seq_lens[r] - query_len[r] + i. The upstream
     QSA builder establishes this relationship. Request boundaries start at zero
@@ -57,8 +84,8 @@ def qsa_select_paged_tokens_lightning_v2(
 
     Preserve the caller's INT32 output buffer and fill unused entries with -1.
     For Qwen3.8 (token_topk=2048, compress_ratio=4), each 2051-column row
-    stores 512 logical group IDs and up to three original-token tail IDs
-    in its first 515 columns.
+    stores up to 512 winning group IDs (rank-local under DCP), followed by
+    up to three global residual token IDs in its first 515 columns.
     Later MTP steps must continue to reuse the buffer without invoking selection.
     """
     # CANN checks even singleton-axis strides strictly. Cache views may have
@@ -79,20 +106,20 @@ def qsa_select_paged_tokens_lightning_v2(
     # Register CANN Torch operators lazily in the executing worker.
     import cann_ops_transformer  # noqa: F401
 
-    # Metadata uses original-token lengths. Only request-sized arrays are
-    # materialized; there is no token-wise length or page-table gather.
-    lengths = attn_metadata.seq_lens[:requests]
-    compressed_lengths = lengths.floor_divide(compress_ratio)
-    residual_lengths = lengths.remainder(compress_ratio)
-    common = dict(
-        cu_seqlens_q=attn_metadata.query_start_loc[: requests + 1].clamp_max(rows),
-        seqused_k=compressed_lengths,
-        cmp_residual_k=residual_lengths,
-        layout_q="TND",
-        layout_k="PA_BBND",
-        mask_mode=3,
-        cmp_ratio=compress_ratio,
-    )
+    sharded = dcp_group is not None and dcp_group.world_size > 1
+    inputs = None
+    if sharded:
+        from vllm_ascend.models.qwen4_exp.qsa_cp import qsa_dcp_indexer_inputs
+
+        inputs = (
+            getattr(attn_metadata, "qsa_dcp_indexer_inputs", None) if rows == attn_metadata.num_actual_tokens else None
+        )
+        if inputs is None:
+            inputs = qsa_dcp_indexer_inputs(attn_metadata, compress_ratio, rows)
+        table = inputs[2]
+    else:
+        table = attn_metadata.block_table[:requests]
+    common = qsa_lightning_indexer_args(attn_metadata, rows, compress_ratio, inputs)
     block_topk = token_topk // compress_ratio
     # MRV2 prepares one schedule outside the layer loop. A caller that trims
     # the query further must regenerate it for the new boundary instead.
@@ -103,7 +130,7 @@ def qsa_select_paged_tokens_lightning_v2(
             1,
             _HEAD_DIM,
             block_topk,
-            batch_size=requests,
+            batch_size=table.shape[0],
             **common,
         )
     # Promote the old BF16-representable uniform weight to FP32. Keep its
@@ -118,21 +145,36 @@ def qsa_select_paged_tokens_lightning_v2(
         dtype=torch.float32,
         device=query.device,
     )
-    groups, _ = torch.ops.cann_ops_transformer.lightning_indexer(
+    groups, scores = torch.ops.cann_ops_transformer.lightning_indexer(
         query,
         compressed_key_cache,
         weights,
         block_topk,
-        block_table=attn_metadata.block_table[:requests],
+        block_table=table,
         metadata=metadata,
-        return_value=0,
+        return_value=int(sharded),
         **common,
     )
+    if sharded:
+        from vllm_ascend.attention.context_parallel.sharded_indexer import distributed_topk
+        from vllm_ascend.attention.utils import build_valid_topk_mask
+
+        # Indexer query heads are replicated across TP. Exchange only candidates.
+        valid = build_valid_topk_mask(groups, common["seqused_k"][:, None, None])
+        group_interleave = cast(_DCPIndexerMetadata, attn_metadata).dcp_interleave // compress_ratio
+        groups = distributed_topk(
+            groups.masked_fill(~valid, -1),
+            scores.masked_fill(~valid, -torch.inf),
+            dcp_group,
+            block_topk,
+            group_interleave,
+            return_local=True,
+        )
     packed_width = block_topk + compress_ratio - 1
     pack_qsa_group_indices_npu(
         groups.squeeze(1),
         attn_metadata.logical_positions[:rows],
-        lengths,
+        attn_metadata.seq_lens,
         attn_metadata.token_to_req[:rows],
         compress_ratio,
         token_topk,
