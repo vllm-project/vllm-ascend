@@ -11,7 +11,6 @@ from torch import nn
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import ReplicatedLinear
 
-from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.attention.dsa_v41 import (
     DeepseekV41CacheLayer,
     scatter_cache_sk,
@@ -38,6 +37,8 @@ from vllm_ascend.worker.device_metadata import (
     wait_for_device_metadata,
 )
 
+_QW_FLASH_SHAPE = (5120, 1280, 32, 128, 64)
+
 
 class DeepseekV41Indexer(nn.Module):
     """Small side attention that selects compressed KV positions.
@@ -55,6 +56,8 @@ class DeepseekV41Indexer(nn.Module):
         compress_ratio,
         quant_config=None,
         is_candidate_source=False,
+        *,
+        main_q_projection,
     ):
         super().__init__()
         self.owns_k = owns_k
@@ -70,13 +73,6 @@ class DeepseekV41Indexer(nn.Module):
         _QUANTIZE_INDEXER_QUERY_KERNEL.register_warmup(vllm_config)
         self.softmax_scale = self.width**-0.5
         self.weights_scale = self.softmax_scale * self.n_heads**-0.5
-        self.fused_prologue_qw = None
-        if get_ascend_config().dsv41_indexer_prologue:
-            if self.packed_cache_ops is None:
-                raise ValueError("dsv41_indexer_prologue requires the A5 packed index cache")
-            from ops.indexer_prologue_qw_vllm import indexer_prologue_qw  # type: ignore[import-not-found]
-
-            self.fused_prologue_qw = indexer_prologue_qw
         self.wq_b = ReplicatedLinear(
             config.q_lora_rank,
             self.n_heads * self.width,
@@ -93,6 +89,18 @@ class DeepseekV41Indexer(nn.Module):
             prefix=f"{prefix}.weights_proj",
             return_bias=False,
         )
+        self.fused_prologue_qw = None
+        shape = (config.hidden_size, config.q_lora_rank, self.n_heads, self.width, self.rope_width)
+        # The QW kernel is specialized for this Flash shape. Other shapes use the standard indexer projections.
+        if (
+            self.packed_cache_ops is not None
+            and shape == _QW_FLASH_SHAPE
+            and self.weights_proj.weight.dtype == torch.bfloat16
+            and main_q_projection.can_share_mxfp8_input(self.wq_b, group_size=32)
+        ):
+            from ops.indexer_prologue_qw_vllm import indexer_prologue_qw  # type: ignore[import-not-found]
+
+            self.fused_prologue_qw = indexer_prologue_qw
         if owns_k:
             self.wk = nn.Linear(
                 config.head_dim,
