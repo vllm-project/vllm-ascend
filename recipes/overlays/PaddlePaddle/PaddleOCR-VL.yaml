@@ -37,6 +37,11 @@ variants:
 meta:
   hardware:
     ascend_910b4: supported
+# The selected 910B4 profile is one non-scalable NPU; do not inherit the
+# core recipe's multi-node TP option for this single-device deployment.
+strategy_hardware:
+  multi_node_tp:
+    ascend_910b4: unsupported
 guide_sections:
   ascend: |
     ## Ascend A2 support and version scope
