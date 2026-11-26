@@ -568,7 +568,7 @@ def run_k3_mla_pd_tp2(k3_models: dict[str, str]) -> None:
     ]
     # Use the normal P/D transfer protocol directly so missing transfer metadata
     # cannot silently fall back to local prefill and make this test pass.
-    with RemotePDServer(servers, env_dict={"VLLM_LOGGING_LEVEL": "INFO"}):
+    with RemotePDServer(servers):
         prefill_url = f"http://127.0.0.1:{prefill_port}/v1/completions"
         decode_url = f"http://127.0.0.1:{decode_port}/v1/completions"
         prompt = _prompt(129, salt=129)["prompt_token_ids"]
