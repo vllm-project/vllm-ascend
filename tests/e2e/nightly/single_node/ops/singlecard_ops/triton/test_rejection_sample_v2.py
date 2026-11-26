@@ -212,8 +212,8 @@ def test_draft_vocab_narrower_than_target_vocab(has_draft_logits: bool, use_bloc
     padded_target[:, :draft_vocab_size] = inputs["target_logits"]
     padded_inputs["target_logits"] = padded_target
     if not has_draft_logits:
-        inputs["draft_logits"] = None
-        padded_inputs["draft_logits"] = None
+        inputs["draft_logits_cache"] = None
+        padded_inputs["draft_logits_cache"] = None
 
     sampled, num_sampled = rejection_sample(
         **padded_inputs,
@@ -280,7 +280,7 @@ def test_placeholder_draft_tokens_are_rejected(has_draft_logits: bool):
     draft_rows = inputs["draft_sampled"].view(num_trials, num_speculative_steps + 1)
     draft_rows[:, 2] = -1
     if not has_draft_logits:
-        inputs["draft_logits"] = None
+        inputs["draft_logits_cache"] = None
         # p(7) ~ 1, so draft step 0 (column 1) is accepted ~surely and the
         # rejection lands exactly on the placeholder.
         draft_rows[:, 1] = 7
@@ -320,7 +320,7 @@ def test_block_verification_preserves_target_distribution(num_speculative_steps,
         target.log(), draft.log() * temperature, num_speculative_steps, temperature, num_trials=8192
     )
     if not has_draft_logits:
-        inputs["draft_logits"] = None
+        inputs["draft_logits_cache"] = None
         # Deterministic one-hot proposals expose acceptance/recovery RNG
         # coupling: reusing u would produce [0.2, 0.175, 0.625] at position 0.
         inputs["draft_sampled"].zero_()
@@ -356,7 +356,7 @@ def test_placeholder_recovers_from_target(placeholder_step, method, has_draft_lo
     if temperature == 0.0 or not has_draft_logits:
         inputs["draft_sampled"].view(-1, 4)[:, 1:] = 3
     if not has_draft_logits:
-        inputs["draft_logits"] = None
+        inputs["draft_logits_cache"] = None
         # Ensure every request reaches the placeholder, even with one-hot
         # proposals, while keeping its recovery distribution non-degenerate.
         prefix_logits = inputs["target_logits"].view(-1, 4, 4)[:, :placeholder_step, :]
@@ -453,7 +453,7 @@ def test_block_verification_single_bonus_only_request(has_draft_logits, temperat
         inputs[name] = inputs[name][:1]
     inputs["cu_num_logits"] = torch.tensor([0, 1], dtype=torch.int32, device="npu")
     if not has_draft_logits:
-        inputs["draft_logits"] = None
+        inputs["draft_logits_cache"] = None
 
     sampled, num_sampled = rejection_sample(
         **inputs, num_speculative_steps=3, use_block_verification=True, use_entropy_verify=False
@@ -474,7 +474,7 @@ def test_block_verification_keeps_greedy_results(has_draft_logits):
     logits = torch.tensor([-2.0, 0.0, 2.0], device="npu")
     inputs = _build_rejection_sample_inputs(logits, logits, 3, 0.0, num_trials=16)
     if not has_draft_logits:
-        inputs["draft_logits"] = None
+        inputs["draft_logits_cache"] = None
     # Include all accepted, first rejected, and placeholder paths.
     drafts = inputs["draft_sampled"].view(-1, 4)
     drafts[:, 1:] = 2
@@ -532,10 +532,10 @@ def test_entropy_verify_ragged_requests(has_draft_logits, temperature):
     logits = torch.tensor([-float("inf"), 0.0, -float("inf")], device="npu")
     inputs = _build_rejection_sample_inputs(logits, logits, 3, temperature, 3)
     if not has_draft_logits:
-        inputs["draft_logits"] = None
+        inputs["draft_logits_cache"] = None
     else:
         # The last request proposes token 1 although its draft probability is zero.
-        inputs["draft_logits"][1, :, :] = torch.tensor([0.0, -float("inf"), -float("inf")], device="npu")
+        inputs["draft_logits_cache"][1, :, :] = torch.tensor([0.0, -float("inf"), -float("inf")], device="npu")
     # Requests: 3 drafts with an interior placeholder, bonus only, 1 draft.
     lengths = [4, 1, 2]
     inputs["cu_num_logits"] = torch.tensor([0, 4, 5, 7], dtype=torch.int32, device="npu")
@@ -574,7 +574,7 @@ def test_entropy_parameters_and_per_position_thresholds(has_draft_logits, dtype)
     q = torch.tensor([[0.8, 0.2]] * steps, device="npu")
     inputs = _build_rejection_sample_inputs(p[0].log(), q[0].log() * temperature, steps, temperature, num_trials)
     inputs["target_logits"] = torch.cat([p, p[-1:]]).log().to(dtype).repeat(num_trials, 1)
-    inputs["draft_logits"] = (
+    inputs["draft_logits_cache"] = (
         (q.log() * temperature).to(dtype)[None].repeat(num_trials, 1, 1) if has_draft_logits else None
     )
     inputs["draft_sampled"].zero_()
@@ -585,7 +585,7 @@ def test_entropy_parameters_and_per_position_thresholds(has_draft_logits, dtype)
     u = uniforms.cpu().numpy().reshape(num_trials, steps + 1)[:, :steps]
     target_probs = inputs["target_logits"][:steps].float().softmax(-1).cpu().numpy()
     draft_probs = (
-        (inputs["draft_logits"][0].float() / temperature).softmax(-1).cpu().numpy() if has_draft_logits else None
+        (inputs["draft_logits_cache"][0].float() / temperature).softmax(-1).cpu().numpy() if has_draft_logits else None
     )
 
     def reference(thresholds):
@@ -628,7 +628,7 @@ def test_entropy_verify_reduces_all_vocab_blocks(has_draft_logits):
     draft[token_ids] = torch.tensor([0.8, 0.1, 0.1], device="npu").log()
     inputs = _build_rejection_sample_inputs(target, draft, 1, 1.0, num_trials)
     if not has_draft_logits:
-        inputs["draft_logits"] = None
+        inputs["draft_logits_cache"] = None
     inputs["draft_sampled"].zero_()
     uniforms = torch.empty_like(inputs["pos"], dtype=torch.float32)
     _export_verification_uniforms[(uniforms.numel(),)](
