@@ -19,17 +19,17 @@ from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec
 
 
 @pytest.mark.parametrize(
-    "model_type,heads",
+    "model_type",
     [
-        ("glm_moe_dsa", 12),
-        ("glm4_moe_lite", 12),
-        ("glm5_next", 12),
-        ("glm5_next_text", 12),
-        ("kimi_linear", 1),
-        ("deepseek_v3", 12),
+        "glm_moe_dsa",
+        "glm4_moe_lite",
+        "glm5_next",
+        "glm5_next_text",
+        "kimi_linear",
+        "deepseek_v3",
     ],
 )
-def test_mla_owner_preserves_upstream_spec_metadata(monkeypatch, model_type, heads):
+def test_mla_owner_preserves_upstream_spec_metadata(monkeypatch, model_type):
     source = MLAAttentionSpec(
         block_size=128,
         num_kv_heads=1,
@@ -63,7 +63,10 @@ def test_mla_owner_preserves_upstream_spec_metadata(monkeypatch, model_type, hea
     )
     actual = layer.get_kv_cache_spec(config)
     assert isinstance(actual, AscendMLAAttentionSpec)
-    assert actual.num_heads == heads
+    assert actual.num_heads == source.num_heads == 1
+    assert actual.num_query_heads == 12
+    assert actual.kv_lora_rank == 512
+    assert actual.qk_rope_head_dim == 64
     assert layer.num_heads == 12
     for field in (
         "kv_quant_mode",

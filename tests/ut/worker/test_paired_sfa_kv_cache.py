@@ -251,14 +251,14 @@ def test_paired_indexer_and_mamba_writes_stay_in_their_pages(vllm_config, scale_
 
 
 @pytest.mark.parametrize("model_type", ["deepseek_v32", "glm_moe_dsa"])
-@pytest.mark.parametrize("num_heads", [2, 64])
-def test_generic_sfa_mixed_group_keeps_private_caches(monkeypatch, vllm_config, model_type, num_heads):
+@pytest.mark.parametrize("num_query_heads", [2, 64])
+def test_generic_sfa_mixed_group_keeps_private_caches(monkeypatch, vllm_config, model_type, num_query_heads):
     """K3.1 paired dispatch must not consume generic SFA descriptor strides."""
     vllm_config.model_config.hf_config.model_type = model_type
     vllm_config.model_config.hf_text_config.model_type = model_type
     main_spec = AscendMLAAttentionSpec(
         block_size=BLOCK_SIZE,
-        num_heads=num_heads,
+        num_query_heads=num_query_heads,
         num_kv_heads=1,
         head_size=576,
         dtype=torch.bfloat16,
@@ -278,6 +278,8 @@ def test_generic_sfa_mixed_group_keeps_private_caches(monkeypatch, vllm_config, 
         # The generic planner derives descriptors from the logical head shape.
         # Ascend's query-head field must not change its one-latent-head storage.
         layer_stride, block_stride, *_ = compute_layout_strides(spec, NUM_BLOCKS, len(names), KVCacheLayout.LBNHC)
+        assert block_stride == spec.page_size_bytes
+        assert layer_stride == NUM_BLOCKS * block_stride
         descriptors.append(
             KVCacheTensor(
                 size=backing_size,
@@ -288,7 +290,7 @@ def test_generic_sfa_mixed_group_keeps_private_caches(monkeypatch, vllm_config, 
             )
         )
         offset += len(names) * layer_stride
-    assert descriptors[1].offset + descriptors[1].layer_stride >= backing_size
+    assert offset == backing_size
     plan = KVCacheConfig(
         num_blocks=NUM_BLOCKS,
         kv_cache_tensors=descriptors,
@@ -331,3 +333,49 @@ def test_generic_sfa_mixed_group_keeps_private_caches(monkeypatch, vllm_config, 
                 assert all(torch.count_nonzero(part) == 0 for part in other_parts)
         for part in parts:
             part.zero_()
+
+
+@pytest.mark.parametrize("scale_dtype", [torch.float16, torch.float32])
+@pytest.mark.parametrize("dcp_size,kernel_block_size", [(1, 128), (2, 128), (2, 64)])
+def test_paired_sfa_runtime_views_preserve_legacy_storage(
+    monkeypatch, vllm_config, scale_dtype, dcp_size, kernel_block_size
+):
+    from vllm_ascend.attention.indexer import AscendSFAIndexerBackend
+    from vllm_ascend.attention.sfa_v1 import AscendSFABackend
+
+    for backend in (AscendSFAIndexerBackend, AscendSFABackend):
+        monkeypatch.setattr(backend, "get_supported_kernel_block_sizes", lambda spec=None: [64, 128])
+
+    plan, specs = make_paired_cache(vllm_config, scale_dtype, with_draft=False, local_layers=(3, 7), dcp_size=dcp_size)
+    vllm_config.parallel_config.prefill_context_parallel_size = 2
+    layers = {}
+    for name, spec in specs.items():
+        backend = AscendSFAIndexerBackend if isinstance(spec, AscendSFAIndexerCacheSpec) else AscendSFABackend
+        layers[name] = SimpleNamespace(get_attn_backend=lambda backend=backend: backend)
+    monkeypatch.setattr(attn_utils, "get_layers_from_vllm_config", lambda *_args: layers)
+    monkeypatch.setattr(attn_utils, "_uses_single_raw_mla_cache", lambda *_args: False)
+    monkeypatch.setattr(attn_utils, "_get_attention_kv_cache_dims", lambda *_args: (656, 0))
+    raw = attn_utils._allocate_kv_cache(plan, shared_layers={}, device=torch.device("cpu"))
+    groups = attn_utils._get_cache_attention_groups(plan, layers, {})
+    blocks = [kernel_block_size] * len(plan.kv_cache_groups)
+    legacy = attn_utils._reshape_kv_cache_v2(
+        attn_groups=groups,
+        kv_cache_raw_tensors=raw,
+        cache_dtype="int8",
+        kernel_block_sizes=blocks,
+        shared_kv_cache_layers={},
+        kv_cache_config=plan,
+    )
+    vllm_config.model_config.hf_text_config.model_type = "glm_moe_dsa"
+    actual = attn_utils.allocate_kv_cache_main(plan, torch.device("cpu"), None, blocks)
+    for name in specs:
+        assert type(actual[name]) is type(legacy[name])
+        for new, old in zip(actual[name], legacy[name], strict=True):
+            assert new.shape == old.shape
+            assert new.dtype == old.dtype
+            assert new.stride() == old.stride()
+            assert new.storage_offset() == old.storage_offset()
+            assert (
+                new.data_ptr() - new.untyped_storage().data_ptr() == old.data_ptr() - old.untyped_storage().data_ptr()
+            )
+    assert len({part.untyped_storage().data_ptr() for parts in actual.values() for part in parts}) == 1

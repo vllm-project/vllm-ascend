@@ -525,7 +525,7 @@ def test_v2_mla_single_raw_backing_selects_layout_by_resolved_backend(monkeypatc
     num_blocks = 2
     spec = AscendMLAAttentionSpec(
         block_size=384,
-        num_heads=64,
+        num_query_heads=64,
         num_kv_heads=1,
         head_size=576,
         dtype=torch.bfloat16,
@@ -602,7 +602,7 @@ def test_v2_mla_single_raw_backing_selects_layout_by_resolved_backend(monkeypatc
         )[layer_name]
 
     for q_heads in (8, 12, 64, 96):
-        spec = replace(spec, num_heads=q_heads)
+        spec = replace(spec, num_query_heads=q_heads)
         fused = reshape()
         assert isinstance(fused, torch.Tensor)
         assert fused.shape == (6, 128, 1, 576)
@@ -610,7 +610,7 @@ def test_v2_mla_single_raw_backing_selects_layout_by_resolved_backend(monkeypatc
 
     # The resolved backend rejects unsupported query-head counts before cache
     # allocation, so FIA receives the component-major view even on A5.
-    spec = replace(spec, num_heads=48)
+    spec = replace(spec, num_query_heads=48)
     attn_module.impl.use_flashmla = False
     a5_fallback = reshape()
     assert isinstance(a5_fallback, tuple)
@@ -619,7 +619,7 @@ def test_v2_mla_single_raw_backing_selects_layout_by_resolved_backend(monkeypatc
     # FIA-compatible component-major layout.
     # Backend selection has already resolved missing operator APIs to FIA.
     attn_module.impl.use_flashmla = False
-    spec = replace(spec, num_heads=64)
+    spec = replace(spec, num_query_heads=64)
     missing_flashmla_ops = reshape()
     assert isinstance(missing_flashmla_ops, tuple)
 
@@ -986,7 +986,7 @@ def test_main_dsv4_materializes_real_planner_geometry_once(monkeypatch):
     aliased_large_name = "model.layers.2.self_attn.attn"
     mtp_name = "model.mtp.layers.0.self_attn.attn"
     small_spec = AscendMLAAttentionSpec(
-        block_size=8,
+        block_size=128,
         num_kv_heads=1,
         head_size=4,
         dtype=torch.float16,
@@ -994,7 +994,7 @@ def test_main_dsv4_materializes_real_planner_geometry_once(monkeypatch):
         tokens_per_state=1,
     )
     large_spec = AscendMLAAttentionSpec(
-        block_size=8,
+        block_size=128,
         num_kv_heads=1,
         head_size=8,
         dtype=torch.float16,
@@ -1078,7 +1078,7 @@ def test_main_dsv4_materializes_real_planner_geometry_once(monkeypatch):
         kv_cache_config,
         device=torch.device("cpu"),
         layout=None,
-        kernel_block_sizes=[8, 8],
+        kernel_block_sizes=[small_spec.block_size, large_spec.block_size],
     )
 
     assert allocations == [backing_size]
@@ -1242,15 +1242,15 @@ def test_draft_layer_specs_keep_ownership_and_sequence_capacity(monkeypatch, is_
 
 
 @pytest.mark.parametrize(
-    ("model_type", "expected_num_heads"),
-    [("kimi_linear", 1), ("deepseek_v3", 12)],
+    "model_type",
+    ["kimi_linear", "deepseek_v3", "glm_moe_dsa"],
 )
 @pytest.mark.parametrize("dcp_sharded", [False, True])
 @pytest.mark.parametrize(("source_is_draft", "is_draft_layer"), [(False, False), (False, True), (True, False)])
 @pytest.mark.parametrize("non_causal", [False, True])
 @pytest.mark.parametrize("dspark_active", [False, True])
 def test_mla_cache_spec_uses_physical_heads_for_kimi_k3(
-    monkeypatch, model_type, expected_num_heads, source_is_draft, is_draft_layer, non_causal, dcp_sharded, dspark_active
+    monkeypatch, model_type, source_is_draft, is_draft_layer, non_causal, dcp_sharded, dspark_active
 ):
     source_spec = MLAAttentionSpec(
         block_size=128,
@@ -1305,7 +1305,8 @@ def test_mla_cache_spec_uses_physical_heads_for_kimi_k3(
     spec = attn_utils.get_kv_cache_spec(vllm_config)["model.layers.0.self_attn.attn"]
 
     assert isinstance(spec, AscendMLAAttentionSpec)
-    assert spec.num_heads == expected_num_heads
+    assert spec.num_heads == source_spec.num_heads == 1
+    assert spec.num_query_heads == 12
     assert spec.dcp_sharded is dcp_sharded
     assert spec.page_size_bytes == source_spec.page_size_bytes
     assert spec.is_draft is (source_is_draft or is_draft_layer)
@@ -1437,15 +1438,14 @@ def test_mrv2_initializes_dsv4_cache_only_layer(
         # from the cache config; the Ascend DSV4 path ignores it.
         get_resolved_kv_cache_layout=lambda: None,
     )
+    hf_config = SimpleNamespace(compress_ratios=[4], model_type="deepseek_v4")
     vllm_config = SimpleNamespace(
         additional_config={},
         attention_config=AttentionConfig(indexer_kv_dtype="int8"),
         model_config=SimpleNamespace(
             dtype=torch.bfloat16,
-            hf_config=SimpleNamespace(
-                compress_ratios=[4],
-                model_type="deepseek_v4",
-            ),
+            hf_config=hf_config,
+            hf_text_config=hf_config,
         ),
         cache_config=cache_config,
         kv_transfer_config=None,
@@ -1507,17 +1507,6 @@ def test_mrv2_initializes_dsv4_cache_only_layer(
 
     # Exercise the unified allocator and backend runtime views through
     # upstream initialization, including its binding/connector handoff.
-    def _ascend_allocate_kv_cache(
-        _kv_cache_config: KVCacheConfig,
-        _device: torch.device,
-        _layout: Any,
-        _kernel_block_sizes: list[int],
-        *,
-        allocate=None,
-    ) -> dict[str, Any]:
-        assert allocate is None
-        return attn_utils.unified_allocate_kv_cache(_kv_cache_config, _device, _layout, _kernel_block_sizes)
-
     def _ascend_bind_kv_cache(
         kv_caches: dict[str, Any],
         forward_context: dict[str, Any],
@@ -1531,7 +1520,7 @@ def test_mrv2_initializes_dsv4_cache_only_layer(
         for layer_name_, kv_cache in kv_caches.items():
             forward_context[layer_name_].kv_cache = kv_cache
 
-    monkeypatch.setattr(upstream_attn_utils, "allocate_kv_cache", _ascend_allocate_kv_cache)
+    monkeypatch.setattr(upstream_attn_utils, "allocate_kv_cache", attn_utils.allocate_kv_cache_main)
     # vLLM main (#53781) routes init_kv_cache through bind_kv_cache_to_layers
     # and dropped the runner_kv_caches parameter.
     monkeypatch.setattr(upstream_attn_utils, "bind_kv_cache_to_layers", _ascend_bind_kv_cache)
@@ -2398,7 +2387,7 @@ def _make_mla_layer(*, fa_quant: bool = False, sparse_c8: bool = False):
     layer.get_kv_cache_spec = lambda _cfg: AscendMLAAttentionSpec(
         block_size=16,
         # The owner publishes the complete Ascend cache contract.
-        num_heads=64,
+        num_query_heads=64,
         num_kv_heads=1,
         head_size=128,
         dtype=torch.bfloat16,
@@ -2806,8 +2795,10 @@ def test_attn_state_mla_spec_and_metadata_wrappers(monkeypatch):
     specs = attn_utils.get_kv_cache_spec(vllm_config)
     assert set(specs) == {"fa", "sfa"}
     assert specs["fa"].head_size == 128
-    assert specs["fa"].num_heads == 64
-    assert specs["sfa"].num_heads == 64
+    assert specs["fa"].num_heads == 1
+    assert specs["sfa"].num_heads == 1
+    assert specs["fa"].num_query_heads == 64
+    assert specs["sfa"].num_query_heads == 64
     assert specs["sfa"].cache_sparse_sfa_c8 is True
 
     mla_spec = AscendMLAAttentionSpec(block_size=16, num_kv_heads=1, head_size=128, dtype=torch.bfloat16)

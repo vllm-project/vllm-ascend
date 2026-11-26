@@ -1,3 +1,4 @@
+import math
 from collections.abc import Callable, Hashable
 from contextlib import contextmanager
 from dataclasses import dataclass, fields, replace
@@ -47,7 +48,10 @@ from vllm_ascend.attention.context_parallel.sfa_dcp_utils import (
     get_sfa_pcp_global_metadata,
 )
 from vllm_ascend.attention.context_parallel.sharded_indexer import use_local_topk_output
+from vllm_ascend.attention.dsa_attn_kv_plan import write_dsa_cache
 from vllm_ascend.attention.utils import (
+    KVCacheRuntimeShapes,
+    RuntimeComponentShape,
     has_requests_to_run_as_prefill,
     split_decodes_and_prefills,
     uses_pcp_sharded_layout,
@@ -302,6 +306,25 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
     """
 
     accept_output_buffer: bool = True
+
+    @staticmethod
+    def get_runtime_shapes(
+        spec: AscendSFAIndexerCacheSpec,
+        num_blocks: int,
+        layout: Any,
+        kernel_block_size: int | None = None,
+    ) -> KVCacheRuntimeShapes:
+        """Describe the SFA indexer cache as [kernel_blocks, heads, tokens, *inner, bytes]."""
+        tokens = kernel_block_size or spec.block_size
+        blocks = num_blocks * spec.sfa_dcp_replicated_indexer_size * (spec.block_size // tokens)
+        prefix = (blocks, spec.num_kv_heads, tokens)
+        key_shape: RuntimeComponentShape = (*prefix, spec.head_size * get_dtype_size(spec.dtype))
+        if not spec.scale_dim:
+            return (key_shape,)
+        scale_elem_bytes = get_dtype_size(spec.scale_dtype)
+        if spec.cache_sparse_li_c4:
+            return (key_shape, (*prefix, spec.scale_dim // 2, 2 * scale_elem_bytes))
+        return (key_shape, (*prefix, spec.scale_dim * scale_elem_bytes))
 
     # Bare annotations only: the buffers themselves are registered per instance
     # in ``__init__`` and stay ``None`` until ``process_weights_after_loading``
@@ -649,12 +672,24 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
     ) -> None:
         if cache.is_contiguous():
             DeviceOperator.scatter_cache(cache.view(-1, *updates.shape[1:]), slots.view(-1, 1), updates)
-        else:
-            # A hybrid page contains K and scales, so flattening its component
-            # views would either fail or copy the write destination. Address the
-            # block/token axes explicitly to retain the original shared storage.
-            assert cache_scatter_indices is not None
-            DeviceOperator.scatter_cache(cache, cache_scatter_indices, updates.view(-1, *cache.shape[2:]))
+            return
+        if HAS_TRITON and cache.device.type != "cpu":
+            # Page-strided hybrid/unified caches interleave K and scale pages.
+            # Avoid 4D npu_scatter_nd_update_ on non-contiguous destinations,
+            # which can drop writes on arch35.
+            row_width = math.prod(cache.shape[2:])
+            cache_4d = torch.as_strided(
+                cache,
+                (cache.shape[0], cache.shape[1], 1, row_width),
+                (cache.stride(0), cache.stride(1), row_width, 1),
+                storage_offset=cache.storage_offset(),
+            )
+            write_dsa_cache(cache_4d, updates.reshape(-1, row_width).contiguous(), slots.reshape(-1))
+            return
+        # Fallback for non-Triton / CPU test mocks: address block/token axes
+        # explicitly to retain the original shared storage.
+        assert cache_scatter_indices is not None
+        DeviceOperator.scatter_cache(cache, cache_scatter_indices, updates.view(-1, *cache.shape[2:]))
 
     def write_cache(
         self,
@@ -673,6 +708,27 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
         require the builder's matching ``cache_scatter_indices``.
         """
         indexer_k_cache = self.k_cache.kv_cache[INDEXER_K_CACHE_SLOT]
+        if (
+            not indexer_k_cache.is_contiguous()
+            and HAS_TRITON
+            and indexer_k_cache.device.type != "cpu"
+            and self.enable_sparse_li_c8
+            and not self.enable_sparse_li_c4
+            and (self.head_dim & (self.head_dim - 1)) == 0
+        ):
+            assert k_li_scale is not None
+            indexer_scale_cache = self.k_cache.kv_cache[INDEXER_SCALE_CACHE_SLOT]
+            store_indexer_key_scale(
+                k_li.view(-1, k_li.shape[-1]),
+                k_li_scale,
+                slot_mapping,
+                indexer_k_cache,
+                indexer_scale_cache,
+                block_size=indexer_k_cache.shape[1],
+                key_block_stride=indexer_k_cache.stride(0),
+                scale_block_stride=indexer_scale_cache.stride(0),
+            )
+            return
         # float4_e2m1fn_x2 / float8_e8m0fnu are not supported by the scatter
         # kernel; view as uint8 (same 1-byte layout) for the cache write.
         if k_li.dtype == torch_npu.float4_e2m1fn_x2:
@@ -1046,12 +1102,17 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
             )
         elif fuse_store:
             assert k_li_scale is not None
+            key_cache = self.k_cache.kv_cache[INDEXER_K_CACHE_SLOT]
+            scale_cache = self.k_cache.kv_cache[INDEXER_SCALE_CACHE_SLOT]
             store_indexer_key_scale(
                 k_li,
                 k_li_scale,
                 slot_mapping,
-                self.k_cache.kv_cache[INDEXER_K_CACHE_SLOT],
-                self.k_cache.kv_cache[INDEXER_SCALE_CACHE_SLOT],
+                key_cache,
+                scale_cache,
+                block_size=key_cache.shape[1],
+                key_block_stride=key_cache.stride(0),
+                scale_block_stride=scale_cache.stride(0),
             )
         else:
             self.write_cache(k_li, k_li_scale, slot_mapping, indexer_metadata.cache_scatter_indices)
