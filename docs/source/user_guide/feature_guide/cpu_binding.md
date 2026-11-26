@@ -6,6 +6,27 @@ ARM-based Ascend servers.**
 **You usually do not need to configure it manually.** Set `enable_cpu_binding`
 only when you want to disable it or make the default explicit.
 
+## Deprecation on A3/A5 (2027 RP1)
+
+!!! warning "Native CPU binding on A3/A5 is deprecated"
+    The native CPU binding implementation for **Ascend A3** and **A5
+    (950PR&950DT Products)** is deprecated and is scheduled for removal in
+    **2027 RP1**. It keeps running with its current behavior during the
+    deprecation period. vLLM Ascend logs a one-time warning when
+    `enable_cpu_binding` is active on these device types; the notice does not
+    disable CPU binding or switch to another implementation.
+
+    [MindStudio Boost (msboost)](https://gitcode.com/Ascend/msboost) is the
+    replacement for host-side CPU affinity and CPU resource coordination. See
+    the official project documentation for deployment scope, permissions,
+    setup, and usage.
+
+    **A2 and Atlas 300 inference products (310P) are not affected** and keep
+    their native CPU binding implementation.
+
+    Follow migration progress and provide feedback in
+    [RFC #23266](https://github.com/vllm-project/vllm-ascend/issues/23266).
+
 ## Benefits of CPU Binding
 
 CPU Binding improves **host-side scheduling** for multi-socket ARM servers with
@@ -147,3 +168,4 @@ sudo systemctl start irqbalance
 | `The 'migratepages' command is not available...` | Memory migration is skipped, while CPU thread binding still proceeds. | Install `numactl` if NUMA locality or performance is affected. |
 | `[irq] IRQ binding skipped on Ascend 950.` | 950PR&950DT Products does not use the IRQ binding step. | No action needed. Worker main binding and memory migration still proceed. |
 | `Bind cpus failed in rank...` | A binding step failed and CPU binding was skipped for that rank. | Check `taskset`, `lscpu`, `npu-smi`, cpuset size, and `/proc/irq` permissions. |
+| `Native CPU binding on Ascend A3/A5 is deprecated...` | One-time notice that native CPU binding on A3/A5 will be removed in 2027 RP1. Binding is still applied. | Plan the migration to [MindStudio Boost (msboost)](https://gitcode.com/Ascend/msboost) and track progress in [RFC #23266](https://github.com/vllm-project/vllm-ascend/issues/23266). A2 and 310P are unaffected. |

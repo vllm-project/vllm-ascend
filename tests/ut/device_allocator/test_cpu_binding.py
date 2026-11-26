@@ -347,6 +347,8 @@ class TestCpuAlloc(unittest.TestCase):
         self.assertEqual(self.cpu_alloc._binding_mode(), "global_slice")
         mock_get_device_type.return_value = get_hardware_profile(AscendDeviceType.A5)
         self.assertEqual(self.cpu_alloc._binding_mode(), "topo_affinity")
+        mock_get_device_type.return_value = get_hardware_profile(AscendDeviceType._310P)
+        self.assertEqual(self.cpu_alloc._binding_mode(), "topo_affinity")
 
     @patch("vllm_ascend.cpu_binding.get_current_hardware_profile")
     def test_build_cpu_pools_fallback_to_global_slice(self, mock_get_device_type):
@@ -1301,20 +1303,72 @@ class TestBindingSwitch(unittest.TestCase):
         mock_machine.return_value = "mips64"
         self.assertFalse(is_arm_cpu())
 
+    @patch(
+        "vllm_ascend.cpu_binding.get_current_hardware_profile",
+        return_value=get_hardware_profile(AscendDeviceType.A2),
+    )
     @patch("vllm_ascend.cpu_binding.CpuAlloc")
     @patch("vllm_ascend.cpu_binding.is_arm_cpu")
-    def test_bind_cpus_skip_non_arm(self, mock_is_arm_cpu, mock_cpu_alloc):
+    def test_bind_cpus_skip_non_arm(self, mock_is_arm_cpu, mock_cpu_alloc, _mock_hardware_profile):
         mock_is_arm_cpu.return_value = False
         bind_cpus(0, npu_id=0)
         mock_cpu_alloc.assert_not_called()
 
+    @patch(
+        "vllm_ascend.cpu_binding.get_current_hardware_profile",
+        return_value=get_hardware_profile(AscendDeviceType.A2),
+    )
     @patch("vllm_ascend.cpu_binding.CpuAlloc")
     @patch("vllm_ascend.cpu_binding.is_arm_cpu", return_value=True)
-    def test_bind_cpus_runs_allocator_on_arm(self, _mock_is_arm_cpu, mock_cpu_alloc):
+    def test_bind_cpus_runs_allocator_on_arm(self, _mock_is_arm_cpu, mock_cpu_alloc, _mock_hardware_profile):
         bind_cpus(1, npu_id=3)
 
         mock_cpu_alloc.assert_called_once_with(1, npu_id=3)
         mock_cpu_alloc.return_value.run_all.assert_called_once_with(migrate_memory=True)
+
+
+class TestNativeCpuBindingDeprecation(unittest.TestCase):
+    def _bind_cpus_for_device(self, device_type):
+        with (
+            patch(
+                "vllm_ascend.cpu_binding.get_current_hardware_profile",
+                return_value=get_hardware_profile(device_type),
+            ),
+            patch("vllm_ascend.cpu_binding.is_arm_cpu", return_value=True),
+            patch("vllm_ascend.cpu_binding.CpuAlloc") as mock_cpu_alloc,
+            patch("vllm_ascend.cpu_binding.logger.warning_once") as mock_warning_once,
+        ):
+            bind_cpus(1, npu_id=3)
+        return mock_cpu_alloc, mock_warning_once
+
+    def test_a3_and_a5_emit_deprecation_warning_once_and_keep_binding(self):
+        for device_type in (AscendDeviceType.A3, AscendDeviceType.A5):
+            with self.subTest(device_type=device_type):
+                mock_cpu_alloc, mock_warning_once = self._bind_cpus_for_device(device_type)
+
+                mock_warning_once.assert_called_once()
+                message = mock_warning_once.call_args.args[0]
+                self.assertIn("A3/A5", message)
+                self.assertIn("deprecated", message)
+                self.assertIn("2027 RP1", message)
+                self.assertIn("msboost", message)
+                self.assertIn(cpu_binding_module.MSBOOST_DOC_URL, message)
+                self.assertIn("#23266", message)
+                self.assertIn(cpu_binding_module.NATIVE_CPU_BINDING_RFC_URL, message)
+                self.assertIn("A2/310P are not affected", message)
+
+                # The notice must not change behavior: binding still runs.
+                mock_cpu_alloc.assert_called_once_with(1, npu_id=3)
+                mock_cpu_alloc.return_value.run_all.assert_called_once_with(migrate_memory=True)
+
+    def test_a2_and_310p_do_not_emit_deprecation_warning(self):
+        for device_type in (AscendDeviceType.A2, AscendDeviceType._310P):
+            with self.subTest(device_type=device_type):
+                mock_cpu_alloc, mock_warning_once = self._bind_cpus_for_device(device_type)
+
+                mock_warning_once.assert_not_called()
+                mock_cpu_alloc.assert_called_once_with(1, npu_id=3)
+                mock_cpu_alloc.return_value.run_all.assert_called_once_with(migrate_memory=True)
 
 
 if __name__ == "__main__":

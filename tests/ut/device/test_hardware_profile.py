@@ -269,6 +269,19 @@ def test_hardware_profile_capability_matrix(device_type: AscendDeviceType) -> No
 
 
 @pytest.mark.parametrize(
+    "device_type,deprecated",
+    [
+        (AscendDeviceType.A2, False),
+        (AscendDeviceType.A3, True),
+        (AscendDeviceType._310P, False),
+        (AscendDeviceType.A5, True),
+    ],
+)
+def test_native_cpu_binding_deprecation_scope(device_type: AscendDeviceType, deprecated: bool) -> None:
+    assert get_hardware_profile(device_type).native_cpu_binding_deprecated is deprecated
+
+
+@pytest.mark.parametrize(
     "device_type,expected_min_query_len",
     [
         (AscendDeviceType.A2, 9),
