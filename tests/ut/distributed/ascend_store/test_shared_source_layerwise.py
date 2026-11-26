@@ -20,8 +20,8 @@ from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheGroupSpec
 
 from tests.ut.distributed.ascend_store import test_pool_worker
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector import AscendStoreConnector
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker import KVPoolWorker
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import AscendConnectorMetadata, LoadSpec, ReqMeta
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker import KVPoolWorker
 
 
 class MemoryGVAStore:
@@ -350,7 +350,7 @@ class TestSharedSourceLayerwise(unittest.TestCase):
         meta = metadata(worker)
         conn = AscendStoreConnector.__new__(AscendStoreConnector)
         conn.use_layerwise = True
-        conn.kv_role = 'kv_producer'
+        conn.kv_role = "kv_producer"
         conn.consumer_is_to_put = False
         conn.connector_worker = worker
         conn._mamba_state = None

@@ -167,7 +167,7 @@ class TestStandardConnectorHooks(unittest.TestCase):
         meta = metadata(worker)
         conn = AscendStoreConnector.__new__(AscendStoreConnector)
         conn.use_layerwise = True
-        conn.kv_role = 'kv_producer'
+        conn.kv_role = "kv_producer"
         conn.consumer_is_to_put = False
         conn.connector_worker = worker
         conn._mamba_state = None
