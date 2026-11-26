@@ -5,6 +5,8 @@
 import math
 import mmap
 import sys
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from types import SimpleNamespace as NS
 
@@ -183,7 +185,7 @@ def shared_offload_sdk(monkeypatch):
     from vllm.v1.hisparse import runtime
 
     configs, messages, allocations, dva_queries = [], [], [], []
-    group = NS(rank_in_group=0, world_size=2, barrier=lambda: None)
+    group = NS(rank_in_group=0, world_size=2, barrier=lambda: None, cpu_all_reduce_=lambda tensor: tensor)
 
     def broadcast(value, src):
         if group.rank_in_group == 0:
@@ -269,6 +271,64 @@ def test_shared_offload_resolves_distinct_device_mapping_per_rank(shared_offload
         mapping = region.base_tensor._hisparse_registration
         assert mapping.device_ptr == mapping.host_address + offset
         assert mapping.address_of(region.base_tensor[:32]) == mapping.device_ptr
+
+
+@pytest.mark.parametrize("raises", [False, True], ids=["nonzero-status", "exception"])
+def test_shared_offload_follower_init_failure_stops_all_ranks(shared_offload_sdk, monkeypatch, raises):
+    sdk, _, _, _, _ = shared_offload_sdk
+    bound = []
+    barriers = []
+    rank = threading.local()
+    sync = threading.Barrier(2)
+
+    class Group:
+        world_size = 2
+        flags = [0, 0]
+
+        @property
+        def rank_in_group(self):
+            return rank.value
+
+        def broadcast_object(self, value, src):
+            if rank.value == src:
+                self.message = value
+            sync.wait(timeout=5)
+            result = self.message
+            sync.wait(timeout=5)
+            return result
+
+        def cpu_all_reduce_(self, failure):
+            self.flags[rank.value] = failure.item()
+            sync.wait(timeout=5)
+            failure.fill_(sum(self.flags))
+            sync.wait(timeout=5)
+
+        def barrier(self):
+            barriers.append(rank.value)
+
+    group = Group()
+    monkeypatch.setattr(torch.npu, "current_device", lambda: rank.value)
+
+    def initialize(config):
+        if config.rank_id == 1 and raises:
+            raise RuntimeError("follower SDK failure")
+        return int(config.rank_id == 1)
+
+    sdk.initialize = initialize
+    monkeypatch.setattr(host_pool.MemFabricSharedHostRegion, "_bind_host_pool", lambda *args, **kwargs: bound.append(1))
+
+    def initialize_rank(rank_id):
+        rank.value = rank_id
+        try:
+            host_pool.MemFabricSharedHostRegion([32], group=group)
+        except RuntimeError as exc:
+            return str(exc)
+        return None
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        errors = list(executor.map(initialize_rank, (0, 1)))
+    assert all(error and "initialization failed" in error for error in errors)
+    assert bound == barriers == []
 
 
 def test_shared_offload_checks_rounded_capacity_before_initialization(monkeypatch, shared_offload_sdk):

@@ -90,8 +90,20 @@ class MemFabricSharedHostRegion:
         config.scene = offload.Scene.SHARED
         config.store_url = f"tcp://127.0.0.1:{port}"
         # The SDK owns both the shared storage and its per-device mappings.
-        if offload.initialize(config) != 0:
-            raise RuntimeError("MemFabric shared HiSparse Host pool initialization failed")
+        try:
+            status = offload.initialize(config)
+            init_error = f"status {status}" if status != 0 else None
+        except Exception as exc:
+            init_error = str(exc)
+        if group is not None:
+            failures = torch.tensor([init_error is not None], dtype=torch.int32)
+            group.cpu_all_reduce_(failures)
+            failed = bool(failures.item())
+        else:
+            failed = init_error is not None
+        if failed:
+            detail = f": {init_error}" if init_error is not None else " on another TP rank"
+            raise RuntimeError(f"MemFabric shared HiSparse Host pool initialization failed{detail}")
         if group is not None:
             group.barrier()
         self._bind_host_pool(offload, pool_size, group, leader=leader)
