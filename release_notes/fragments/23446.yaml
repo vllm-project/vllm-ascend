@@ -1,0 +1,7 @@
+pr: 23446
+entries:
+  - category: feature
+    text: >-
+      Added layerwise KV transfer from a separate Prefill node to HiSparse Decode.
+      Set `hisparse_target` on both SFA endpoints to receive Main KV in Host memory
+      and the Indexer in device memory.
