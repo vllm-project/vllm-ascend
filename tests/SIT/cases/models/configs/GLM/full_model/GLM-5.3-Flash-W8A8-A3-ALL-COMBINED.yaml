@@ -1,4 +1,4 @@
-# Serving: docs/source/tutorials/models/GLM5.3-Flash.md, main 4601f4f2e.
+# Serving: GLM5.3-Flash.md ordinary A3 PD, PR #23368 at 4e46a2c06a78.
 # Two A3 hosts (16 logical devices each): P DP1/TP1/PCP16, D DP16/TP1.
 # RP3 A3 release table: P row151, PD row177, D low row170, D high row162.
 # D high row161 is a stable subset (876 requests / 7590.3374 tokens/s);
@@ -49,6 +49,8 @@ config:
 env_common: &env_common
   TORCH_EXTENSIONS_DIR: /tmp/torch_extensions/glm53flash
   VLLM_USE_MODELSCOPE: 'true'
+  VLLM_USE_FASTOKENS: '1'
+  VLLM_USE_V2_MODEL_RUNNER: '1'
   SERVER_PORT: ${PORT}
   ASCEND_RT_VISIBLE_DEVICES: ${VISIBLE_DEVICES}
   PYTORCH_NPU_ALLOC_CONF: expandable_segments:True
@@ -83,7 +85,7 @@ templates:
   - --enable-expert-parallel
   - --enable-eplb
   - --eplb-config
-  - '{"window_size":300,"step_interval":300,"num_redundant_experts":16,"use_async":true,"policy":"stair","communicator":"hixl"}'
+  - '{"window_size":300,"step_interval":300,"num_redundant_experts":0,"use_async":true,"policy":"stair","communicator":"hixl"}'
   - --seed
   - '1024'
   - --served-model-name
@@ -91,7 +93,7 @@ templates:
   - --safetensors-load-strategy
   - prefetch
   - --max-num-seqs
-  - '32'
+  - '64'
   - --max-model-len
   - '1048576'
   - --max-num-batched-tokens
@@ -126,7 +128,6 @@ templates:
 - node_index: 1
   envs:
     <<: *env_common
-    HCCL_BUFFSIZE: '1200'
   server_cmd_template:
   - --host
   - 0.0.0.0
