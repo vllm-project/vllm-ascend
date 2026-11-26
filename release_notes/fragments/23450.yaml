@@ -1,0 +1,7 @@
+pr: 23450
+entries:
+  - category: feature
+    text: >-
+      DeepGEMM MegaMoE on Ascend 950 now supports dynamic expert load balancing
+      and redundant experts with Model Runner V2. Enable it with the existing
+      `--enable-eplb` and `--eplb-config` options.
