@@ -14,7 +14,7 @@ from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
 from functools import partial
 from itertools import islice
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import torch
 import vllm.envs as envs
@@ -132,6 +132,9 @@ from .engram.parallel import gather_engram_hashes, resolve_dp_shared_memory
 from .engram.shared_pool import rollback_shared_engram
 from .engram_lifecycle import close_engram_on_init_failure
 from .indexer import DeepseekV41Indexer
+
+if TYPE_CHECKING:
+    from .engram.shared_rdma import RemoteReader, ShardedRemoteReader
 
 
 def _retain_local_engram_tables(model):
@@ -1267,7 +1270,7 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
         self.engram_layout = EngramLayout.from_config(config) if self.has_engram else None
         shared_config = get_ascend_config().shared_engram
         remote_engram = shared_config if shared_config is not None and shared_config.backend in ("a2", "a5") else None
-        remote_reader = None
+        remote_reader: RemoteReader | ShardedRemoteReader | None = None
         if remote_engram is not None and self.has_engram:
             if self.engram_layout is None or not cpu_offload or not self.engram_dp_shared_memory:
                 raise ValueError("shared_engram requires Engram cpu_offload and local DP sharing enabled")
