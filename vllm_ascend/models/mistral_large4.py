@@ -91,9 +91,8 @@ from vllm_ascend.attention.indexer import AscendSFAIndexerBackend
 from vllm_ascend.models.common.ops.sequence_parallel import sp_all_gather, sp_reduce_scatter, sp_shard
 from vllm_ascend.ops.mla import AscendMultiHeadLatentAttention
 from vllm_ascend.ops.rotary_embedding import (
-    _record_cos_and_sin_cache_interleaved,
-    _record_cos_sin_cache,
     gather_mla_rope,
+    refresh_cos_and_sin_cache_interleaved,
 )
 from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
 
@@ -910,9 +909,11 @@ class AscendMistralLarge4ForCausalLM(MistralLarge4ForCausalLM, MistralLarge4Mixt
         # classes replaced by vLLM-Ascend's RoPE registry. Publish its final
         # LeRoPE-adjusted cache only after weight loading has rebuilt it;
         # attention metadata is constructed before the first model forward.
+        # Refresh rather than record, because a reload rebuilds the LeRoPE
+        # table and plain registration keeps the first one: the derived tables
+        # would then scale every rotation with the pre-reload cache.
         rotary_emb = self.model.rotary_emb
-        _record_cos_sin_cache(rotary_emb.cos_sin_cache)
-        _record_cos_and_sin_cache_interleaved(rotary_emb, rotary_emb.cos_sin_cache)
+        refresh_cos_and_sin_cache_interleaved(rotary_emb, rotary_emb.cos_sin_cache)
         return loaded
 
 

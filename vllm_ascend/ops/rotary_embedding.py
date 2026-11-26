@@ -223,6 +223,50 @@ def _record_cos_and_sin_cache_interleaved(owner: "torch.nn.Module", cos_sin_cach
     _cos_sin_flat = repeated.view(-1, repeated.shape[-1])
 
 
+def refresh_cos_and_sin_cache_interleaved(owner: "torch.nn.Module", cos_sin_cache) -> None:
+    """Re-derive the published cos/sin pair after a reload rebuilt *cos_sin_cache*.
+
+    Registration above is first-wins on purpose, so a layer that builds its own
+    rotary module cannot displace the table the model published. A weight reload
+    is the one case that has to overwrite it, and only for a table that is
+    itself derived from the weights: Mistral Large 4's LeRoPE cache, which
+    ``load_weights`` rebuilds. Every other model derives its table from the
+    config, so a reload cannot make it stale and this path is not needed.
+
+    The derived tables are refreshed **in place**. ``_cos_cache`` and
+    ``_sin_cache`` are registered as the owner's buffers and are views over the
+    one storage ``_cos_sin_flat`` spans, and those addresses are baked into
+    captured ACL graphs; rebinding them would leave replay reading the previous
+    allocation while the pointers stay valid, so nothing would crash and the
+    rotation would silently use the pre-reload table. Writing through the two
+    views covers every row of that storage — row 2i through ``_cos_cache[i]``,
+    row 2i + 1 through ``_sin_cache[i]`` — so the flat view follows along
+    without being rebuilt.
+    """
+    global _cos_sin_cache
+    if _cos_cache is None or _sin_cache is None:
+        _record_cos_sin_cache(cos_sin_cache)
+        _record_cos_and_sin_cache_interleaved(owner, cos_sin_cache)
+        return
+    hidden_dim = cos_sin_cache.shape[-1] // 2
+    repeated = cos_sin_cache.view(-1, 2, hidden_dim).repeat(1, 1, 2)
+    cos_cache, sin_cache = repeated.chunk(2, dim=1)
+    cos_cache = cos_cache.squeeze(1)
+    sin_cache = sin_cache.squeeze(1)
+    if cos_cache.shape != _cos_cache.shape or sin_cache.shape != _sin_cache.shape:
+        raise ValueError(
+            "The rebuilt rotary cache has a different shape than the published "
+            f"one ({tuple(cos_cache.shape)} against {tuple(_cos_cache.shape)}). "
+            "The published tables cannot be refreshed in place, and captured "
+            "graphs hold their addresses."
+        )
+    # Unlike the derived pair, this one is dereferenced on every lookup rather
+    # than captured, so rebinding the reference is what keeps it current.
+    _cos_sin_cache = cos_sin_cache
+    _cos_cache.copy_(cos_cache)
+    _sin_cache.copy_(sin_cache)
+
+
 def update_cos_sin(positions):
     global _cos
     global _sin

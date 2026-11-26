@@ -111,14 +111,10 @@ class MistralLarge4Worker:
         model = self.model_runner.model
         # DummyModelLoader skips the model's load_weights hook, which normally
         # publishes the final LeRoPE table for the Ascend metadata builder.
-        from vllm_ascend.ops.rotary_embedding import (
-            _record_cos_and_sin_cache_interleaved,
-            _record_cos_sin_cache,
-        )
+        from vllm_ascend.ops.rotary_embedding import refresh_cos_and_sin_cache_interleaved
 
         rotary_emb = model.model.rotary_emb
-        _record_cos_sin_cache(rotary_emb.cos_sin_cache)
-        _record_cos_and_sin_cache_interleaved(rotary_emb, rotary_emb.cos_sin_cache)
+        refresh_cos_and_sin_cache_interleaved(rotary_emb, rotary_emb.cos_sin_cache)
         layers = model.model.layers
         attentions = [layer.self_attn for layer in layers]
 

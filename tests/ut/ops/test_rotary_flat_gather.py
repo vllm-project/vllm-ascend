@@ -18,6 +18,7 @@
 
 from __future__ import annotations
 
+import pytest
 import torch
 import torch.nn as nn
 
@@ -134,3 +135,63 @@ class TestRegistrationOverride:
         second = _make_cache(seed=2)
         rope._record_cos_and_sin_cache_interleaved(_make_owner(second), second)
         assert rope._cos_cache is first_cache
+
+
+def _derive(cos_sin_cache):
+    repeated = cos_sin_cache.view(-1, 2, cos_sin_cache.shape[-1] // 2).repeat(1, 1, 2)
+    cos_cache, sin_cache = repeated.chunk(2, dim=1)
+    return cos_cache.squeeze(1), sin_cache.squeeze(1)
+
+
+class TestInterleavedRefresh:
+    """A weight reload rebuilds Mistral Large 4's LeRoPE table, and registration
+    keeps the first one, so the reload goes through the refresh path instead."""
+
+    def test_refresh_registers_when_nothing_is_published(self, monkeypatch):
+        monkeypatch.setattr(rope, "_cos_cache", None)
+        monkeypatch.setattr(rope, "_sin_cache", None)
+        monkeypatch.setattr(rope, "_cos_sin_flat", None)
+        monkeypatch.setattr(rope, "_cos_sin_cache", None)
+        cache = _make_cache()
+
+        rope.refresh_cos_and_sin_cache_interleaved(_make_owner(cache), cache)
+
+        assert rope._cos_sin_flat is not None
+        assert rope._cos_sin_cache is cache
+
+    def test_reload_refreshes_the_values_without_moving_the_buffers(self, monkeypatch):
+        monkeypatch.setattr(rope, "_cos_sin_cache", None)
+        _register_interleaved(monkeypatch, _make_cache(seed=1))
+        cos_before, sin_before, flat_before = rope._cos_cache, rope._sin_cache, rope._cos_sin_flat
+        storage_before = cos_before.untyped_storage().data_ptr()
+        reloaded = _make_cache(seed=2)
+
+        rope.refresh_cos_and_sin_cache_interleaved(_make_owner(reloaded), reloaded)
+
+        # Captured ACL graphs hold these addresses, so nothing may be rebound.
+        assert rope._cos_cache is cos_before
+        assert rope._sin_cache is sin_before
+        assert rope._cos_sin_flat is flat_before
+        assert rope._cos_cache.untyped_storage().data_ptr() == storage_before
+        # The values are the reloaded table's, not the ones published first.
+        expected_cos, expected_sin = _derive(reloaded)
+        assert torch.equal(rope._cos_cache, expected_cos)
+        assert torch.equal(rope._sin_cache, expected_sin)
+        assert rope._cos_sin_cache is reloaded
+
+    def test_the_flat_view_follows_the_refresh(self, monkeypatch):
+        _register_interleaved(monkeypatch, _make_cache(seed=1))
+        reloaded = _make_cache(seed=2)
+
+        rope.refresh_cos_and_sin_cache_interleaved(_make_owner(reloaded), reloaded)
+
+        assert torch.equal(rope._cos_cache, rope._cos_sin_flat[0::2])
+        assert torch.equal(rope._sin_cache, rope._cos_sin_flat[1::2])
+
+    def test_a_reshaped_cache_is_refused(self, monkeypatch):
+        """Rather than rebind, which would strand every captured graph."""
+        _register_interleaved(monkeypatch, _make_cache())
+        longer = _make_cache(num_positions=NUM_POSITIONS * 2)
+
+        with pytest.raises(ValueError, match="refreshed in place"):
+            rope.refresh_cos_and_sin_cache_interleaved(_make_owner(longer), longer)
