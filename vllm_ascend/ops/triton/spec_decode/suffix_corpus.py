@@ -11,8 +11,6 @@ ordering remain with the upstream speculator.
 import torch
 from vllm.triton_utils import tl, triton
 
-# Odd 64-bit multiplier (golden ratio), as a signed int64.
-_HASH_MUL = 0x9E3779B97F4A7C15 - (1 << 64)
 # Corpus slots kept per hash bucket: the newest occurrence in each of the
 # last _BUCKET_SLOTS documents that contain the bucket's key tokens. Entries
 # pack (document sequence number << 32 | corpus position).
