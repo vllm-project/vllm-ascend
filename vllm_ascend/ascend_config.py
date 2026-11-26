@@ -540,16 +540,20 @@ class SparseAttentionQuantConfig:
         if not is_950() or not any(name.startswith("MiniMaxM3") for name in architectures):
             raise ValueError("A8C4 currently requires MiniMax-M3/M3.1 on Ascend 950")
         parallel = vllm_config.parallel_config
-        if (
-            parallel.pipeline_parallel_size != 1
-            or parallel.prefill_context_parallel_size != 1
-            or parallel.decode_context_parallel_size != 1
-            or getattr(parallel, "nnodes", 1) != 1
-            or vllm_config.kv_transfer_config is not None
-        ):
-            raise ValueError("A8C4 dual-format pages currently support single-node PP1 without KV transfer or CP")
+        if parallel.prefill_context_parallel_size != 1 or parallel.decode_context_parallel_size != 1:
+            raise ValueError("A8C4 dual-format pages do not support context parallelism")
         if vllm_config.cache_config.cache_dtype != "fp8":
             raise ValueError("A8C4 dual-format pages require --kv-cache-dtype fp8")
+        transfer = vllm_config.kv_transfer_config
+        if transfer is not None:
+            if transfer.kv_connector != "MooncakeConnectorV1":
+                raise ValueError("A8C4 KV transfer requires MooncakeConnectorV1 full-page transfers")
+            prefill = transfer.get_from_extra_config("prefill", {})
+            decode = transfer.get_from_extra_config("decode", {})
+            prefill_tp = prefill.get("tp_size")
+            decode_tp = decode.get("tp_size")
+            if not isinstance(prefill_tp, int) or prefill_tp < 1 or prefill_tp != decode_tp:
+                raise ValueError("A8C4 KV transfer requires matching Prefill and Decode TP sizes")
 
 
 @config

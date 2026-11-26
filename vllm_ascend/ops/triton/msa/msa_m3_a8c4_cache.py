@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Single-node validation: accounted FP8 and FP4 caches in one padded page.
+"""Accounted FP8 and FP4 caches in one transferable physical page.
 
 The sparse model reserves physical head size256 for logical head size128.
 Each physical K/V plane contains [FP8 page][FP4 page][BF16 scales][padding].

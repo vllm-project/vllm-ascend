@@ -114,6 +114,133 @@ def make_agent_metadata(**overrides: Any) -> MooncakeAgentMetadata:
     return MooncakeAgentMetadata(**metadata)
 
 
+@pytest.mark.parametrize(
+    "local_layout,remote_layout",
+    [
+        ("", ""),
+        ("minimax_m3_dual_fp8_fp4_v1", "minimax_m3_dual_fp8_fp4_v1"),
+        ("", "minimax_m3_dual_fp8_fp4_v1"),
+        ("minimax_m3_dual_fp8_fp4_v1", ""),
+    ],
+)
+def test_sparse_layout_handshake_before_transfer(wire_transfer_contract, local_layout, remote_layout):
+    _, receiver, engine, socket, peer = wire_transfer_contract
+    receiver.sparse_cache_layout = local_layout
+    peer.sparse_cache_layout = remote_layout
+    socket.recv.return_value = msgspec.msgpack.encode(peer)
+    if local_layout == remote_layout:
+        receiver._get_remote_metadata("127.0.0.1", 6000)
+        assert receiver.kv_caches_base_addr["prefill-engine"][6000] == peer.kv_caches_base_addr
+    else:
+        with pytest.raises(ValueError, match="sparse cache layout mismatch"):
+            receiver._get_remote_metadata("127.0.0.1", 6000)
+        assert "prefill-engine" not in receiver.kv_caches_base_addr
+    engine.batch_transfer_sync_read.assert_not_called()
+
+
+@pytest.mark.parametrize("heads", [1, 4])
+@pytest.mark.parametrize("padding", [0, 256])
+def test_a8c4_pp2_to_pp1_copies_complete_physical_pages(monkeypatch, heads, padding):
+    """Use the real PP routing/codec/descriptors and CPU memcpy as the RDMA boundary."""
+    from vllm_ascend.ops.triton.msa.msa_m3_a8c4_cache import a8c4_cache_views
+
+    config = MockVllmConfig()
+    config.model_config.hf_text_config.num_hidden_layers = 4
+    config.model_config.get_total_num_hidden_layers.return_value = 4
+    config.speculative_config = None
+    page_bytes = 128 * heads * 256
+    stride = page_bytes + padding
+    owners = []
+
+    def pages(blocks, fill):
+        raw = torch.full((32 + blocks * stride,), fill, dtype=torch.uint8)
+        owners.append(raw)
+        return torch.as_strided(raw, (blocks, 128, heads, 256), (stride, heads * 256, 256, 1), 32).view(
+            torch.float8_e4m3fn
+        )
+
+    names = [f"model.layers.{i}.self_attn" for i in range(4)]
+    sources = {name: (pages(4, 0xEE), pages(4, 0xEE)) for name in names}
+    destinations = {name: (pages(5, 0xCD), pages(5, 0xCD)) for name in names}
+    for layer, source in enumerate(sources.values()):
+        for plane, (fp8, packed, scales, _) in enumerate(a8c4_cache_views(source)):
+            fp8.fill_(layer + plane + 1)
+            packed.fill_(0x17 + layer + plane)
+            scales.fill_(0.25 * (layer + plane + 1))
+    group = {"kv_cache_spec_type": "FullAttentionSpec", "layer_names": names}
+    engine = MagicMock()
+
+    def copy_bytes(session, dst, src, lengths):
+        for destination, source, length in zip(dst, src, lengths):
+            assert length == page_bytes
+            ctypes.memmove(destination, source, length)
+        return 0
+
+    engine.batch_transfer_sync_read.side_effect = copy_bytes
+    receiver = KVCacheRecvingThread(
+        tp_rank=0,
+        tp_size=4,
+        _prefill_pp_size=2,
+        engine=engine,
+        local_engine_id="decode",
+        local_handshake_port=5000,
+        side_channel_port=5000,
+        local_kv_caches_base_addr=[[p.data_ptr() for p in destinations[name]] for name in names],
+        block_len_per_addr=[[page_bytes, page_bytes] for _ in names],
+        block_stride_per_addr=[[stride, stride] for _ in names],
+        vllm_config=config,
+        kv_caches=destinations,
+        kv_group2layeridx={0: (group, list(range(4)))},
+        block_size_scale=[[1, 1] for _ in names],
+        sparse_cache_layout="minimax_m3_dual_fp8_fp4_v1",
+    )
+    monkeypatch.setattr(receiver, "_return_remote_socket", lambda *args: None)
+    try:
+        for pp_rank in range(2):
+            selected = names[pp_rank * 2 : (pp_rank + 1) * 2]
+            # P metadata is local to its PP partition; D metadata spans all layers.
+            peer = make_agent_metadata(
+                engine_id=f"prefill-{pp_rank}",
+                block_size=128,
+                kv_group2layeridx={0: ({**group, "layer_names": selected}, [0, 1])},
+                kv_caches_base_addr=[[p.data_ptr() for p in sources[name]] for name in selected],
+                block_lens=[[page_bytes, page_bytes] for _ in selected],
+                block_strides=[[stride, stride] for _ in selected],
+                sparse_cache_layout="minimax_m3_dual_fp8_fp4_v1",
+            )
+            socket = MagicMock()
+            socket.recv.return_value = msgspec.msgpack.encode(peer)
+            monkeypatch.setattr(receiver, "_get_remote_socket", lambda *args, socket=socket: socket)
+            receiver._transfer_kv_cache_all_groups(
+                {
+                    "remote_request_id": "request",
+                    "remote_engine_id": peer.engine_id,
+                    "remote_host": "127.0.0.1",
+                    "remote_handshake_port": 6000 + pp_rank,
+                    "local_block_ids": ([1, 4],),
+                    "remote_block_ids": ([3, 1],),
+                    "group_pulls": [GroupPull(0, 0, 1, prefill_pp_rank=pp_rank)],
+                }
+            )
+        assert engine.batch_transfer_sync_read.call_count == 2
+        for name in names:
+            source_views = a8c4_cache_views(sources[name])
+            destination_views = a8c4_cache_views(destinations[name])
+            for plane in range(2):
+                for src, dst in [(3, 1), (1, 4)]:
+                    assert torch.equal(
+                        sources[name][plane][src].view(torch.uint8), destinations[name][plane][dst].view(torch.uint8)
+                    )
+                    for region in range(3):
+                        assert torch.equal(source_views[plane][region][src], destination_views[plane][region][dst])
+                for untouched in (0, 2, 3):
+                    assert torch.all(destinations[name][plane][untouched].view(torch.uint8) == 0xCD)
+        for owner in owners:
+            assert torch.all(owner[:32] == owner[0])
+    finally:
+        receiver.executor.shutdown(wait=True)
+
+
 def make_exact_aligned_cpu_buffer(size):
     """Real CPU storage with an exact extent, independent of allocator alignment.
 
@@ -3456,6 +3583,15 @@ class TestMooncakeConnectorWorker(unittest.TestCase):
         self.assertEqual(len(worker.kv_caches), 1)
         self.assertIsNotNone(worker.kv_send_thread)
         self.assertIsNone(worker.kv_recv_thread)
+
+    def test_registration_advertises_dual_page_layout(self):
+        for enabled in (False, True):
+            with self.subTest(enabled=enabled):
+                self.vllm_config.additional_config = {"sparse_attention_quant_config": {"enable_a8c4": enabled}}
+                worker = MooncakeConnectorWorker(self.vllm_config, self.engine_id, MockKVCacheConfig())
+                worker.register_kv_caches(self.kv_caches)
+                layout = worker.xfer_handshake_metadata.sparse_cache_layout
+                self.assertEqual(layout, "minimax_m3_dual_fp8_fp4_v1" if enabled else "")
 
     def test_register_combined_attention_cache_preserves_views_and_kernel_scale(self):
         for num_blocks in (2, 5):

@@ -57,7 +57,7 @@ from vllm.v1.kv_cache_interface import (
 )
 from vllm.v1.request import RequestStatus
 
-from vllm_ascend.ascend_config import get_ascend_config, init_ascend_config
+from vllm_ascend.ascend_config import SparseAttentionQuantConfig, get_ascend_config, init_ascend_config
 from vllm_ascend.core.kv_cache_interface import (
     AscendSFAIndexerCacheSpec,
     AscendSlidingWindowMLASpec,
@@ -101,6 +101,7 @@ DONE_RECVING_MSG = b"done_recving_msg"
 # other peers already waiting in the global executor queue can make progress.
 MAX_REQUESTS_PER_PEER_HANDLER = 5
 KV_CACHE_BUFFER_ALIGNMENT = 2 * 1024 * 1024
+_A8C4_CACHE_LAYOUT = "minimax_m3_dual_fp8_fp4_v1"
 
 
 class RemotePortInfo(TypedDict):
@@ -120,6 +121,7 @@ class MooncakeAgentMetadata(msgspec.Struct, omit_defaults=True, dict=True):
     block_strides: list[list[int]]
     local_ip: str = ""
     handshake_port: int = 0
+    sparse_cache_layout: str = ""
 
 
 @dataclass
@@ -449,12 +451,14 @@ class KVCacheRecvingThread(threading.Thread):
         kv_group2layeridx: dict[int, tuple[dict[str, Any], list[int]]] | None = None,
         block_size_scale: list[list[int]] | None = None,
         use_request_level_recv_errors: bool = False,
+        sparse_cache_layout: str = "",
     ):
         super().__init__(daemon=True, name="KVCacheRecvingThread")
         self.tp_rank = tp_rank
         self.tp_size = tp_size
         self._prefill_pp_size = _prefill_pp_size
         self.local_engine_id = local_engine_id
+        self.sparse_cache_layout = sparse_cache_layout
         self.local_handshake_port = local_handshake_port
         self.side_channel_port = side_channel_port
         self.engine = engine
@@ -1494,6 +1498,12 @@ class KVCacheRecvingThread(threading.Thread):
             ensure_zmq_send(sock, self.encoder.encode((GET_META_MSG, "")), f"{remote_host}:{remote_handshake_port}")
             metadata_bytes = ensure_zmq_recv(sock, f"{remote_host}:{remote_handshake_port}")
             agent_meta = self.decoder.decode(metadata_bytes)
+            if agent_meta.sparse_cache_layout != self.sparse_cache_layout:
+                raise ValueError(
+                    "Mooncake sparse cache layout mismatch: "
+                    f"local={self.sparse_cache_layout!r}, remote={agent_meta.sparse_cache_layout!r}. "
+                    "Configure sparse_attention_quant_config.enable_a8c4 identically on Prefill and Decode."
+                )
             engine_id = agent_meta.engine_id
             assert engine_id != self.local_engine_id, (
                 f"Conflict engine id {engine_id} with local engine id {self.local_engine_id}."
@@ -2751,6 +2761,9 @@ class MooncakeConnectorWorker:
             block_strides=self.block_stride_per_addr,
             local_ip=get_ip(),
             handshake_port=self.handshake_port,
+            sparse_cache_layout=_A8C4_CACHE_LAYOUT
+            if SparseAttentionQuantConfig.from_vllm_config(self.vllm_config).enable_a8c4
+            else "",
         )
         self.xfer_handshake_metadata = metadata
 
@@ -2789,6 +2802,7 @@ class MooncakeConnectorWorker:
                 self.kv_group2layeridx,
                 self.block_size_scale,
                 use_request_level_recv_errors=self._use_request_level_recv_errors,
+                sparse_cache_layout=metadata.sparse_cache_layout,
             )
             self.kv_recv_thread.start()
         start_wait_time = time.time()

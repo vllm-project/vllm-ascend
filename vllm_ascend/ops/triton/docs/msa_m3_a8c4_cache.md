@@ -41,20 +41,36 @@ PyTorch bridge. No private filesystem paths are used.
 
 Prefill reads the FP8 region. The dense prefill fallback materializes contiguous
 FP8 pages, so prefill memory/time overhead remains to be measured. Union prefill
-is disabled with this option. PP other than 1, CP, multi-node execution and KV
-transfer connectors are rejected. The dual-format layout is a temporary
-single-node integration, pending a compact native FP4 cache and PD transfer
-contract; it is not a validated PD format.
+is disabled with this option. Pipeline parallelism and multi-node execution do
+not change the rank-local page layout. Context parallelism remains unsupported.
+
+For PD, use `MooncakeConnectorV1` and set the option identically on P and D.
+Prefill and Decode TP sizes must match: splitting a dual-format physical page
+for a different TP layout would split its FP8, FP4 and scale regions incorrectly.
+The connector transfers each complete physical K/V page, including FP4 data and
+BF16 scales, using its existing layer-name mapping across PP partitions. For
+example, a TP4/PP2 producer can send to a TP4/PP1 consumer whose DP group spans
+two hosts. A layout identifier in the handshake rejects mismatched peer options
+before any data copy. Native peers that omit the identifier remain compatible
+with native caches; all A8C4 peers must include this change.
+
+P and D must also use the same cache block size and index-cache configuration.
+Both retain the full dual-format reservation; PD does not reduce its memory
+overhead. Other connectors and asymmetric TP require their own physical-page
+transfer/reformat contract.
 
 ## Validation
 
 CPU tests check allocation accounting, alias boundaries, nonzero storage offsets,
-multiple KV heads, malformed layouts, default behavior and configuration guards:
+multiple KV heads, malformed layouts, default behavior and configuration guards.
+Connector tests cover PP2-to-PP1 layer mapping, noncontiguous block remapping,
+padded page strides, complete FP8/FP4/scale copies and peer-layout rejection:
 
 ```bash
 TORCH_DEVICE_BACKEND_AUTOLOAD=0 pytest -q \
   tests/ut/ops/triton/msa/test_msa_m3_a8c4_cache.py \
-  tests/ut/test_sparse_attention_quant_config.py
+  tests/ut/test_sparse_attention_quant_config.py \
+  tests/ut/distributed/kv_transfer/kv_p2p/test_mooncake_connector.py
 ```
 
 NPU producer tests use an independent CPU nearest-even reference, including zero
@@ -74,8 +90,19 @@ contained 4442 mode-8 GBSA and 4442 fused producer calls on every rank, with zer
 standalone FP4 packing/scattering or Q-shaped Cast/Clip calls. This is dispatch
 evidence, not a baseline speedup measurement. The rebased PR and opt-in guards
 still require fresh NPU/graph replay, model accuracy, prefill cost and performance
-regression validation before merge. BF16 versus FP4 model accuracy and PD are
-unverified.
+regression validation before merge. BF16 versus FP4 model accuracy and full
+cross-host PD acceptance are unverified.
+
+A fresh r139 deployment overlay containing this change and PR #22283 passed
+367 targeted CPU tests (14 existing storage-registration cases conditionally
+skipped) and 123 NPU operator cases: nine A8C4 cases and 114 MXFP4/index-cache
+cases. Two independent NPU processes also transferred 16 complete physical pages
+with Mooncake Ascend Direct. All FP8/FP4/BF16-scale bytes matched, and untouched
+pages and registration padding were preserved. That local transfer check covers
+the physical payload. A TP4/PP2 producer with DSpark K7, W4A4 weights and the
+Mooncake connector also completed startup and a generation request in the same
+overlay. These checks do not establish cross-host model accuracy or PD
+performance. Main-based full-suite and graph-replay coverage remain for CI.
 
 ## JIT specialization
 
