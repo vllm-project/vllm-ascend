@@ -42,6 +42,9 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     pad_vocab_size,
 )
 from vllm.model_executor.utils import set_weight_attrs
+from vllm.triton_utils import HAS_TRITON
+
+from vllm_ascend.device.device_config import is_950
 
 from vllm_ascend.distributed.parallel_state import (
     GroupCoordinator,
@@ -221,6 +224,17 @@ class AscendVocabParallelEmbedding(VocabParallelEmbedding):
             self.tp_size,
         )
         self.embedding_dim = embedding_dim
+        from vllm_ascend.models.hy_v4_flash.pd_role import uses_prefill_ops
+
+        vllm_config = get_current_vllm_config()
+        model = vllm_config.model_config
+        self._use_hy4_vocab_indices = (
+            HAS_TRITON and model is not None and model.enforce_eager
+            and model.hf_text_config.model_type == "hy_v4_flash"
+            and uses_prefill_ops(vllm_config)
+            and self.parallel_mode == VocabParallelMode.STANDARD
+            and self.tp_size > 1 and is_950()
+        )
         quant_method = None
         if quant_config is not None:
             quant_method = quant_config.get_quant_method(self, prefix=prefix)
@@ -263,6 +277,22 @@ class AscendVocabParallelEmbedding(VocabParallelEmbedding):
             params_dtype=params_dtype,
             weight_loader=self.weight_loader,
         )
+
+        self._hy4_padding_weight_ptr = None
+        if (
+            self._use_hy4_vocab_indices
+            and not isinstance(self, ParallelLMHead)
+            and type(self.quant_method) is UnquantizedEmbeddingMethod
+            and self.weight.device.type == "npu"
+            and self.weight.dtype in (torch.bfloat16, torch.float16)
+        ):
+            # One zero row belongs to the backing allocation. The parameter
+            # retains the original shape for checkpoint loading and tying.
+            rows, width = self.weight.shape
+            storage = self.weight.new_empty((rows + 1, width))
+            storage[rows].zero_()
+            self.weight.data = storage[:rows]
+            self._hy4_padding_weight_ptr = self.weight.data_ptr()
 
         self.update_param_tp_status()
 
@@ -388,9 +418,38 @@ class AscendVocabParallelEmbedding(VocabParallelEmbedding):
             output = torch.ops.vllm.all_reduce(output, reduce_group.unique_name)
         return output
 
+    def hy4_prefill_vocab_parameters(self):
+        if self._hy4_padding_weight_ptr is None or self.weight.data_ptr() != self._hy4_padding_weight_ptr:
+            return None
+        shard = self.shard_indices
+        added_local = shard.org_vocab_end_index - shard.org_vocab_start_index + shard.num_org_vocab_padding
+        return (
+            shard.org_vocab_start_index, shard.org_vocab_end_index,
+            shard.added_vocab_start_index, shard.added_vocab_end_index, added_local, self.weight.shape[0],
+        )
+
+    def embed_hy4_local_indices(self, indices):
+        rows, width = self.weight.shape
+        lookup = self.weight.as_strided((rows + 1, width), (width, 1))
+        return self._reduce_standard_embedding(torch.nn.functional.embedding(indices, lookup))
+
     def _forward_standard(self, input_):
-        if self.tp_size > 1:
-            # Build the mask.
+        if (
+            self._use_hy4_vocab_indices
+            and type(self.quant_method) is UnquantizedEmbeddingMethod
+            and input_.device.type == "npu"
+            and input_.ndim == 1 and input_.numel() and input_.is_contiguous()
+            and input_.dtype in (torch.int32, torch.int64)
+            and self.weight.dtype in (torch.bfloat16, torch.float16)
+            and self.weight.is_contiguous()
+        ):
+            from vllm_ascend.ops.triton.hy4_vocab_lookup import vocab_indices
+
+            if self.weight.data_ptr() == self._hy4_padding_weight_ptr:
+                indices, _ = vocab_indices(input_, self.shard_indices, padding_index=self.weight.shape[0])
+                return self.embed_hy4_local_indices(indices)
+            masked_input, input_mask = vocab_indices(input_, self.shard_indices)
+        elif self.tp_size > 1:
             masked_input, input_mask = self._mask_input_for_vocab_range(
                 input_,
                 self.shard_indices.org_vocab_start_index,
@@ -400,15 +459,13 @@ class AscendVocabParallelEmbedding(VocabParallelEmbedding):
                 self.shard_indices.added_vocab_end_index,
             )
         else:
-            masked_input = input_
-        # Get the embeddings.
-        output_parallel = self.quant_method.embedding(self, masked_input.long())
-        # Mask the output embedding.
-        if self.tp_size > 1:
-            output_parallel.masked_fill_(input_mask.unsqueeze(-1), 0)
-        else:
-            return output_parallel
+            return self.quant_method.embedding(self, input_.long())
 
+        output_parallel = self.quant_method.embedding(self, masked_input.long())
+        output_parallel.masked_fill_(input_mask.unsqueeze(-1), 0)
+        return self._reduce_standard_embedding(output_parallel)
+
+    def _reduce_standard_embedding(self, output_parallel):
         reduce_group = self.output_reduce_group
         if reduce_group is None or reduce_group.world_size == 1:
             return output_parallel

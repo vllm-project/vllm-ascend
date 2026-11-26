@@ -36,19 +36,16 @@ def _flash_engram_mapped_rows_kernel(
     addr = tl.load(weight_ptrs + chunk)
     if FP8:
         weight = addr.to(tl.pointer_type(tl.uint8))
-        bits = tl.load(weight + offset * WIDTH + cols, cols < WIDTH, other=0).to(tl.int32)
-        exponent = (bits >> 3) & 15
-        fraction = (bits & 7).to(tl.float32) * 0.125
-        magnitude = tl.exp2(tl.maximum(exponent, 1).to(tl.float32) - 7)
-        magnitude = magnitude * (fraction + (exponent != 0).to(tl.float32))
-        value = tl.where(bits >= 128, -magnitude, magnitude)
+        bits = tl.load(weight + offset * WIDTH + cols, cols < WIDTH, other=0)
+        value = bits.to(tl.float8e4nv, bitcast=True).to(tl.float32)
         value = tl.where((bits & 127) == 127, float("nan"), value)
         scales = tl.load(scale_ptrs + chunk).to(tl.pointer_type(tl.bfloat16))
         value = value * tl.load(scales + offset).to(tl.float32)
     else:
         weight = addr.to(tl.pointer_type(tl.bfloat16))
         value = tl.load(weight + offset * WIDTH + cols, cols < WIDTH, other=0).to(tl.float32)
-    tl.store(output + row * WIDTH + cols, value, cols < WIDTH)
+    # A negative hash is a padded row. Write the mask with the gathered values.
+    tl.store(output + row * WIDTH + cols, tl.where(index >= 0, value, 0.0), cols < WIDTH)
 
 
 def gather_mapped_rows(hashes, weight, scale, head_start, head_end, vocab_start, vocab_end):

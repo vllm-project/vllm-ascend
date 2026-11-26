@@ -19,6 +19,7 @@
 
 import inspect
 import logging
+import os
 from collections.abc import Mapping
 from contextlib import AbstractContextManager, contextmanager, nullcontext
 from copy import deepcopy
@@ -271,6 +272,39 @@ class NPUModelRunner(GPUModelRunner):
             max_num_tokens=self.max_num_tokens,
             device=self.device,
         )
+
+        from vllm_ascend.models.hy_v4_flash.pd_role import uses_prefill_ops
+
+        self._hy4_prefill_writes = None
+        if (
+            uses_prefill_ops(vllm_config)
+            and vllm_config.speculative_config is None
+            and self.model_config.enforce_eager
+            and self.model_config.hf_text_config.model_type == "hy_v4_flash"
+            and os.getenv("HY4_PREFILL_BATCH_WRITES") == "1"
+        ):
+            from .hy4_prefill_writes import PrefillWrites
+
+            self._hy4_prefill_writes = PrefillWrites(self.device)
+
+        self._hy4_prefill_logit_offsets: torch.Tensor | None = None
+        self._hy4_prefill_local_positions: torch.Tensor | None = None
+        self._hy4_prefill_no_padding: torch.Tensor | None = None
+        if (
+            uses_prefill_ops(vllm_config)
+            and os.getenv("HY4_PREFILL_FUSED_ENTRY") == "1"
+            and self.model_config.enforce_eager
+            and self.model_config.hf_text_config.model_type == "hy_v4_flash"
+        ):
+            # These views are read-only. Keep the no-padding mask separate
+            # from the input buffer that padded batches overwrite.
+            self._hy4_prefill_logit_offsets = torch.arange(
+                self.max_num_reqs + 1, device=self.device, dtype=torch.int32
+            )
+            self._hy4_prefill_local_positions = torch.zeros(
+                self.max_num_reqs, device=self.device, dtype=torch.int32
+            )
+            self._hy4_prefill_no_padding = torch.zeros_like(self.input_buffers.is_padding)
 
         # Pinned D2H staging for corrected device state after spec rejection.
         # The authoritative host state is the shared NumPy/torch RequestState view.
@@ -728,7 +762,13 @@ class NPUModelRunner(GPUModelRunner):
         dp_coordination_context = skip_dp_coordination() if skip_dp_metadata_sync else nullcontext()
         profile_kwargs = {"randomize_inputs": randomize_inputs}
         forward_failed = True
-        with dp_coordination_context:
+        prefill_writes = self._hy4_prefill_writes
+        write_context = (
+            prefill_writes.for_step(self, scheduler_output)
+            if prefill_writes is not None and not dummy_run and not is_profile
+            else nullcontext()
+        )
+        with dp_coordination_context, write_context:
             try:
                 output = super().execute_model(
                     scheduler_output,
@@ -855,6 +895,9 @@ class NPUModelRunner(GPUModelRunner):
 
     def prepare_padding_mask(self, num_tokens: int, num_tokens_after_padding: int) -> torch.Tensor:
         # EPLB and decoder replay also consume validity when MoE padding skipping is off.
+        no_padding = self._hy4_prefill_no_padding
+        if no_padding is not None and num_tokens == num_tokens_after_padding <= no_padding.numel():
+            return no_padding[:num_tokens]
         mask = self.input_buffers.is_padding[:num_tokens_after_padding]
         mask[:num_tokens].fill_(False)
         mask[num_tokens:].fill_(True)
@@ -918,9 +961,15 @@ class NPUModelRunner(GPUModelRunner):
             total_num_draft_tokens = 0
             total_num_logits = num_reqs
             cu_num_logits_np = np.arange(num_reqs + 1, dtype=np.int32)
-            cu_num_logits = torch.arange(num_reqs + 1, device=self.device, dtype=torch.int32)
             expanded_idx_mapping = idx_mapping
-            expanded_local_pos = torch.zeros(num_reqs, dtype=torch.int32, device=self.device)
+            logit_offsets = self._hy4_prefill_logit_offsets
+            local_positions = self._hy4_prefill_local_positions
+            if logit_offsets is not None and local_positions is not None and num_reqs <= local_positions.numel():
+                cu_num_logits = logit_offsets[: num_reqs + 1]
+                expanded_local_pos = local_positions[:num_reqs]
+            else:
+                cu_num_logits = torch.arange(num_reqs + 1, device=self.device, dtype=torch.int32)
+                expanded_local_pos = torch.zeros(num_reqs, dtype=torch.int32, device=self.device)
         else:
             num_draft_tokens_per_req = np.fromiter(
                 (len(draft_tokens.get(req_id, ())) for req_id in req_ids),
@@ -1022,29 +1071,81 @@ class NPUModelRunner(GPUModelRunner):
         query_start_loc = query_start_loc[: num_reqs_padded + 1]
         self.eplb.set_batch_phase(batch_req_state.has_prefill)
 
-        # Graph dispatch may classify a PD prompt-tail step as decode, but
-        # its input still comes from all_token_ids rather than sampled tokens.
-        # Keep input preparation tied to the actual prefill progress so the
-        # prompt tail and MTP lookahead are populated even on a decode graph.
-        if np.any(batch_req_state.num_computed_prefill_tokens_np < batch_req_state.prefill_len_np):
-            prepare_prefill_inputs(
-                self.input_buffers.input_ids,
-                self.req_states.next_prefill_tokens,
+        prefill_progress = batch_req_state.num_computed_prefill_tokens_np
+        prefill_lens = batch_req_state.prefill_len_np
+        from vllm_ascend.models.hy_v4_flash.pd_role import uses_prefill_ops
+
+        hy4_pure_prefill = (
+            os.getenv("HY4_PREFILL_SMALL_OPS") == "1"
+            and uses_prefill_ops(self.vllm_config)
+            and type(self.model_state).__name__ == "FlashModelState"
+            and self.compilation_config.cudagraph_mode == CUDAGraphMode.NONE
+            and batch_desc.cg_mode == CUDAGraphMode.NONE
+            and num_reqs == num_reqs_padded
+            and num_tokens == num_tokens_after_padding
+            and not self.model_state.kvpp_is_dummy_run
+            and not draft_tokens
+            and self.vllm_config.speculative_config is None
+            and self.model_state.num_new_sampled_tokens_per_step == 1
+            and np.all(prefill_progress < prefill_lens)
+            and np.all(prefill_progress + num_scheduled_tokens_np <= prefill_lens)
+        )
+        hy4_lookback = None
+        hy4_attention_inputs = None
+        hy4_rope_positions = None
+        hy4_vocab_indices = None
+        if hy4_pure_prefill and os.getenv("HY4_PREFILL_FUSED_INPUTS") == "1":
+            from vllm_ascend.worker.v2.hy4_prefill_inputs import prepare_hy4_prefill_inputs
+
+            lookback_depth = getattr(self.model_state.model, "token_lookback_depth", 0)
+            fuse_cache_mapping = (
+                os.getenv("HY4_PREFILL_FUSED_ENTRY") == "1"
+                and self.pcp_manager is None
+                and self.dcp_size == 1
+                and self.block_tables.num_kv_cache_groups > 0
+                and self.block_tables.cp_size == 1
+                and hasattr(self.block_tables, "kernel_block_sizes_tensor")
+            )
+            rope = (
+                self.model_state.rope_state
+                if fuse_cache_mapping and os.getenv("HY4_PREFILL_FUSED_ROPE") == "1"
+                else None
+            )
+            vocab = self.model_state.prefill_vocab_parameters() if fuse_cache_mapping else None
+            logits_indices, hy4_lookback, hy4_attention_inputs, hy4_vocab_indices = prepare_hy4_prefill_inputs(
+                self.input_buffers, self.req_states, idx_mapping, query_start_loc,
+                lookback_depth=lookback_depth if self.pcp_manager is None else 0,
+                tables=self.block_tables if fuse_cache_mapping else None,
+                num_tokens=num_tokens,
+                rope=rope,
+                vocab=vocab or (),
+            )
+            if rope is not None:
+                hy4_rope_positions = rope.get_positions(num_tokens)
+        else:
+            # Graph dispatch may classify a PD prompt-tail step as decode, but
+            # its input still comes from all_token_ids rather than sampled tokens.
+            # Keep input preparation tied to the actual prefill progress so the
+            # prompt tail and MTP lookahead are populated even on a decode graph.
+            if np.any(batch_req_state.num_computed_prefill_tokens_np < batch_req_state.prefill_len_np):
+                prepare_prefill_inputs(
+                    self.input_buffers.input_ids,
+                    self.req_states.next_prefill_tokens,
+                    idx_mapping,
+                    query_start_loc,
+                    self.req_states.all_token_ids.gpu,
+                    self.req_states.prefill_len.gpu,
+                    self.req_states.num_computed_tokens.gpu,
+                )
+
+            # Prepare positions and seq_lens.
+            prepare_pos_seq_lens(
                 idx_mapping,
                 query_start_loc,
-                self.req_states.all_token_ids.gpu,
-                self.req_states.prefill_len.gpu,
                 self.req_states.num_computed_tokens.gpu,
+                self.input_buffers.positions,
+                self.input_buffers.seq_lens,
             )
-
-        # Prepare positions and seq_lens.
-        prepare_pos_seq_lens(
-            idx_mapping,
-            query_start_loc,
-            self.req_states.num_computed_tokens.gpu,
-            self.input_buffers.positions,
-            self.input_buffers.seq_lens,
-        )
         seq_lens = self.input_buffers.seq_lens[:num_reqs_padded]
         if adaptive_verification_active and self.use_fia:
             self.input_buffers.seq_lens_np[:num_reqs] = seq_lens[:num_reqs].cpu().numpy()
@@ -1056,20 +1157,21 @@ class NPUModelRunner(GPUModelRunner):
         # Main computes DCP lengths in the inherited execute_model after PCP
         # partitioning (vLLM #55212).
 
-        # Some input token ids are directly read from the last sampled tokens
-        # and draft tokens. Also, get the logits indices to sample tokens from.
-        logits_indices = combine_sampled_and_draft_tokens(
-            self.input_buffers.input_ids,
-            idx_mapping,
-            self.req_states.last_sampled_tokens,
-            query_start_loc,
-            seq_lens,
-            self.req_states.prefill_len.gpu,
-            self.req_states.draft_tokens,
-            cu_num_logits,
-            total_num_logits,
-            self.model_state.num_new_sampled_tokens_per_step,
-        )
+        if not (hy4_pure_prefill and os.getenv("HY4_PREFILL_FUSED_INPUTS") == "1"):
+            # Some input token ids are directly read from the last sampled tokens
+            # and draft tokens. Also, get the logits indices to sample tokens from.
+            logits_indices = combine_sampled_and_draft_tokens(
+                self.input_buffers.input_ids,
+                idx_mapping,
+                self.req_states.last_sampled_tokens,
+                query_start_loc,
+                seq_lens,
+                self.req_states.prefill_len.gpu,
+                self.req_states.draft_tokens,
+                cu_num_logits,
+                total_num_logits,
+                self.model_state.num_new_sampled_tokens_per_step,
+            )
 
         # CPU upper bound on seq_lens (num_computed_tokens + num_scheduled_tokens).
         # Added by vLLM PR #40654 to avoid GPU->CPU sync for seq_lens.
@@ -1136,6 +1238,11 @@ class NPUModelRunner(GPUModelRunner):
         # For mla/sfa, update cos/sin. Here is for execute_model.
         update_cos_sin(input_batch.positions)
 
+        input_batch.hy4_pure_prefill = hy4_pure_prefill
+        input_batch.hy4_lookback_token_ids = hy4_lookback
+        input_batch.hy4_attention_inputs = hy4_attention_inputs
+        input_batch.hy4_rope_positions = hy4_rope_positions
+        input_batch.hy4_vocab_indices = hy4_vocab_indices
         return input_batch
 
     def prepare_inputs(
@@ -1147,7 +1254,15 @@ class NPUModelRunner(GPUModelRunner):
     ) -> AscendInputBatch:
         # vLLM #56456 added num_active_loras to prepare_inputs on main; it
         # only feeds FastPrefillHelper, which this Ascend path does not use.
+        if self._hy4_prefill_writes is not None:
+            self._hy4_prefill_writes.flush()
         return self._prepare_inputs_impl(scheduler_output, batch_req_state, batch_desc)
+
+    def prepare_attn(self, input_batch: AscendInputBatch):
+        fused = getattr(input_batch, "hy4_attention_inputs", None)
+        if fused is not None:
+            return fused
+        return super().prepare_attn(input_batch)
 
     def prepare_dummy_attn(
         self, input_batch: AscendInputBatch, valid_state_slots: bool = False

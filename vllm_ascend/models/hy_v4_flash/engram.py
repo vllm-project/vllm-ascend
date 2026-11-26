@@ -192,6 +192,7 @@ class FlashNgramHashState(nn.Module):
                 self.pad_id,
                 self.layout.pad_token_id,
                 self.visual_token_ids,
+                query_starts=starts,
             )
             logger.info_once("HYV4 Prefill uses the fused Engram hash")
             return
@@ -432,6 +433,10 @@ class FlashEngram(nn.Module):
         self.hidden_size, self.hc_mult = config.hidden_size, config.hc_mult
         self._use_small_aiv = HAS_TRITON and is_950() and uses_prefill_ops(vllm_config)
         self.register_buffer("_lookup_gamma", None, persistent=False)
+        self.register_buffer("_key_gamma", None, persistent=False)
+        self.register_buffer("_query_gamma", None, persistent=False)
+        self.register_buffer("_packed_kv_weight", None, persistent=False)
+        self.register_buffer("_packed_kv_bias", None, persistent=False)
         self.register_buffer("_pre_gamma", None, persistent=False)
         self.register_buffer("_residual_scales", None, persistent=False)
         local = self.multi_head_embedding.head_end - self.multi_head_embedding.head_start
@@ -469,6 +474,25 @@ class FlashEngram(nn.Module):
             self._pre_gamma = self.unified_pre_gamma.float()
             self._residual_scales = torch.stack(list(self.unified_per_hc_scales)).float()
 
+            if all(
+                norm.eps is None and norm.weight.dtype == torch.bfloat16
+                for norm in (*self.norm_key, *self.norm_query)
+            ):
+                self._key_gamma = torch.stack([norm.weight for norm in self.norm_key])
+                self._query_gamma = torch.stack([norm.weight for norm in self.norm_query])
+
+            if self.multi_head_embedding.tp_size == 4 and self.hc_mult == 4 and self.hidden_size == 3072:
+                projections = (*self.key_projs, self.value_proj)
+                if all(p.weight.shape[1] == 384 and p.weight.dtype == torch.bfloat16 for p in projections):
+                    self._packed_kv_weight = torch.cat([p.weight for p in projections])
+                    self._packed_kv_bias = torch.cat([p.bias for p in projections])
+
+    def _project(self, projection, x):
+        result = projection(x)
+        if self.multi_head_embedding.tp_size > 1:
+            result = tensor_model_parallel_all_reduce(result)
+        return result
+
     def forward(self, hidden, hashes, embedding_rows=None):
         rows = self.multi_head_embedding(hashes) if embedding_rows is None else embedding_rows
         eps = torch.finfo(torch.float32).eps
@@ -490,48 +514,136 @@ class FlashEngram(nn.Module):
         )
         local = self.multi_head_embedding
         local_hashes = hashes[:, local.head_start : local.head_end]
-        x = rows.masked_fill(local_hashes.unsqueeze(-1) < 0, 0)
-        inverse = _engram_inverse_rms(x, gamma[0], eps, self.use_cann_inverse_rms)
-        x = (x * inverse * gamma).to(hidden.dtype)
-        x = x.flatten(1)
-        if use_fused:
-            from .prefill_ops.small_aiv import engram_gate_epilogue, engram_residual
+        # Mapped prefetch writes zeros for negative hashes while it gathers.
+        x = rows if embedding_rows is not None else rows.masked_fill(local_hashes.unsqueeze(-1) < 0, 0)
+        use_lookup_kernel = (
+            use_fused
+            and x.shape[0] >= 512
+            and x.dtype == gamma.dtype == torch.float32
+            and x.is_contiguous()
+            and gamma.is_contiguous()
+        )
+        fuse_inverse = (
+            use_lookup_kernel
+            and x.shape[1:] == (4, 96)
+            and gamma.shape == x.shape[1:]
+            and not self.use_cann_inverse_rms
+        )
+        inverse = None if fuse_inverse else _engram_inverse_rms(x, gamma[0], eps, self.use_cann_inverse_rms)
+        if use_lookup_kernel and (inverse is None or (inverse.dtype == torch.float32 and inverse.is_contiguous())):
+            from .prefill_ops.engram_norm import apply_lookup_norm
 
-            gate_output = hidden.new_empty((hidden.shape[0], self.hc_mult))
+            x = apply_lookup_norm(x, gamma, hidden.dtype, eps, inverse=inverse)
         else:
-            gates = []
-        for channel in range(self.hc_mult):
-            key = self.key_projs[channel](x)
-            if local.tp_size > 1:
-                key = tensor_model_parallel_all_reduce(key)
-            query = hidden[:, channel]
-            key_norm = self.norm_key[channel]
-            query_norm = self.norm_query[channel]
-            if (
-                use_fused
-                and hidden.shape[0] >= 512
-                and key.dtype is torch.bfloat16
-                and key.is_contiguous()
-                and key_norm.eps is None
-                and query_norm.eps is None
-                and key_norm.weight.dtype == query_norm.weight.dtype == torch.bfloat16
-                and key_norm.weight.is_contiguous()
-                and query_norm.weight.is_contiguous()
-            ):
-                from .prefill_ops.engram_norm import engram_normalized_dot
+            x = (x * inverse * gamma).to(hidden.dtype)
+        x = x.flatten(1)
+        # Cap the batched workspace based on the current token count.
+        use_batched_norm = (
+            use_fused and 512 <= hidden.shape[0] <= 2048 and self._key_gamma is not None
+            and x.dtype is torch.bfloat16
+        )
+        gate_scale = self.hidden_size**-0.5
+        # This TP4 message range keeps the BF16 collective's tested reduction order.
+        packed_projection = (
+            use_fused and self._packed_kv_weight is not None
+            and x.dtype is torch.bfloat16 and x.is_contiguous()
+            and 64 <= x.shape[0] <= 1024
+        )
+        if packed_projection:
+            projected = nn.functional.linear(x, self._packed_kv_weight, self._packed_kv_bias)
+            projected = tensor_model_parallel_all_reduce(projected)
+            packed = projected.unflatten(-1, (self.hc_mult + 1, self.hidden_size))
+            *packed_keys, value = packed.transpose(0, 1).contiguous().unbind(0)
 
-                gate = engram_normalized_dot(key, query, key_norm.weight, query_norm.weight)
+        # Match CANN reductions for the two full Prefill scheduling buckets.
+        if use_fused and x.shape[0] in (2048, 4096) and self._key_gamma is not None:
+            from .prefill_ops.engram_gate import gate_dot, gate_value_inverse
+            from .prefill_ops.small_aiv import engram_gate_residual
+
+            dots = tuple(
+                gate_dot(
+                    packed_keys[channel] if packed_projection else self._project(projection, x),
+                    hidden, self._key_gamma[channel], self._query_gamma[channel], channel, eps,
+                )
+                for channel, projection in enumerate(self.key_projs)
+            )
+            if not packed_projection:
+                value = self._project(self.value_proj, x)
+            inverse = gate_value_inverse(value, eps)
+            return engram_gate_residual(
+                hidden, hashes, dots, self._residual_scales, value, self._pre_gamma, inverse, gate_scale,
+            )
+
+        if use_batched_norm:
+            from .prefill_ops.engram_norm import engram_batched_dots
+
+            keys = tuple(packed_keys) if packed_projection else tuple(
+                self._project(projection, x) for projection in self.key_projs
+            )
+            dots = engram_batched_dots(keys, hidden, self._key_gamma, self._query_gamma)
+        else:
+            dots = []
+            for channel, projection in enumerate(self.key_projs):
+                key = packed_keys[channel] if packed_projection else self._project(projection, x)
+                query = hidden[:, channel]
+                key_norm = self.norm_key[channel]
+                query_norm = self.norm_query[channel]
+                if (
+                    use_fused
+                    and hidden.shape[0] >= 512
+                    and key.dtype is torch.bfloat16
+                    and key.is_contiguous()
+                    and key_norm.eps is None
+                    and query_norm.eps is None
+                    and key_norm.weight.dtype == query_norm.weight.dtype == torch.bfloat16
+                    and key_norm.weight.is_contiguous()
+                    and query_norm.weight.is_contiguous()
+                ):
+                    from .prefill_ops.engram_norm import engram_normalized_dot
+
+                    dot = engram_normalized_dot(key, query, key_norm.weight, query_norm.weight)
+                else:
+                    dot = (key_norm(key) * query_norm(query)).sum(-1)
+                dots.append(dot)
+
+        if not packed_projection:
+            value = self._project(self.value_proj, x)
+        simple_dots = use_fused and all(dot.dtype is torch.bfloat16 and dot.is_contiguous() for dot in dots)
+        contiguous_value_norm = (
+            use_fused
+            and value.dtype == torch.bfloat16
+            and value.is_contiguous()
+            and 512 <= value.shape[0] <= 4096
+        )
+        if contiguous_value_norm and simple_dots:
+            from .prefill_ops.engram_norm import engram_value_inverse
+            from .prefill_ops.small_aiv import engram_gate_residual
+
+            inverse = engram_value_inverse(value, eps)
+            return engram_gate_residual(
+                hidden, hashes, dots, self._residual_scales, value, self._pre_gamma, inverse, gate_scale,
+            )
+
+        if use_fused:
+            from .prefill_ops.small_aiv import engram_gate_epilogue, engram_gates, engram_residual
+
+            if simple_dots:
+                gate = engram_gates(dots, gate_scale)
             else:
-                gate = (key_norm(key) * query_norm(query)).sum(-1)
-            if use_fused:
-                engram_gate_epilogue(gate, gate_output, channel, self.hidden_size**-0.5)
-            else:
-                gate = gate * self.hidden_size**-0.5
-                gates.append((gate.abs().clamp_min(1e-6).sqrt() * gate.sign()).sigmoid())
-        gate = gate_output if use_fused else torch.stack(gates, dim=1)
-        value = self.value_proj(x)
-        if local.tp_size > 1:
-            value = tensor_model_parallel_all_reduce(value)
+                gate = hidden.new_empty((hidden.shape[0], self.hc_mult))
+                for channel, dot in enumerate(dots):
+                    engram_gate_epilogue(dot, gate, channel, gate_scale)
+        else:
+            scaled = [dot * gate_scale for dot in dots]
+            gate = torch.stack([(g.abs().clamp_min(1e-6).sqrt() * g.sign()).sigmoid() for g in scaled], dim=1)
+        if contiguous_value_norm:
+            from .prefill_ops.engram_norm import engram_value_inverse
+
+            inverse = engram_value_inverse(value, eps)
+            return engram_residual(
+                hidden, hashes, gate, self._residual_scales, value,
+                gamma=self._pre_gamma, inverse=inverse,
+            )
         value = value.float()
         if use_fused:
             signal = self._pre_gamma * value * (value.square().mean(-1, keepdim=True) + eps).rsqrt()

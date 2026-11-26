@@ -10,6 +10,8 @@ from vllm.triton_utils import HAS_TRITON
 from vllm_ascend.device.device_config import is_950
 from vllm_ascend.hisparse.c8 import C8_ROW_BYTES, dequantize_c8_rows
 
+from .prefill_metadata import sparse_lengths, window_indices
+
 
 def _pack_c8_pages(cache, block_table, block_size, num_pages):
     if HAS_TRITON and 0 < num_pages <= block_table.numel():
@@ -70,9 +72,7 @@ def attend_c8_v2(query, cache, block_table, block_size, selected, seq_len, sink,
             )
             context.append(partial.squeeze(0))
             return torch.cat(context, dim=0) if len(context) > 1 else context[0]
-        compact_table = torch.arange(num_pages, dtype=torch.int32, device=query.device).unsqueeze(0)
-        query_ends = torch.full((1,), query.size(0), dtype=torch.int32, device=query.device)
-        kv_lengths = torch.full((1,), seq_len, dtype=torch.int32, device=query.device)
+        compact_table, query_ends, kv_lengths = sparse_lengths(num_pages, query.size(0), seq_len, query.device)
         partial, _, _ = kv_quant_sparse_flash_attention(
             query,
             packed,
@@ -184,9 +184,7 @@ def attend_c8_window(query, cache, block_table, block_size, seq_len, sink, scale
         )
     # Each row has exactly window valid entries. This avoids the unsupported
     # varying effective index width of the C8 kernel at the beginning of a sequence.
-    starts = torch.arange(first_index, first_index + query.size(0), dtype=torch.int32, device=query.device)
-    offsets = torch.arange(window, dtype=torch.int32, device=query.device)
-    selected = starts[:, None] + offsets
+    selected = window_indices(first_index, query.size(0), window, query.device)
     return attend_c8_v2(
         query,
         cache,

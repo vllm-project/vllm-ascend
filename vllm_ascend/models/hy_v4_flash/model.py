@@ -1,10 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import os
+
 import torch
 from vllm.config import CUDAGraphMode, VllmConfig
 from vllm.distributed import get_ep_group, get_tp_group
 from vllm.forward_context import get_forward_context
+from vllm.logger import init_logger
 from vllm.models.hy_v4_flash.model import HYV4FlashDecoderLayer, HYV4FlashForCausalLM, HYV4FlashModel
 
 from vllm_ascend.ascend_config import get_ascend_config
@@ -19,6 +22,8 @@ from .engram_prefetch import PrefetchedEngramRows
 from .ihc import FlashHCHeadLayer, FlashHCLayer
 from .moe import AscendFlashMoE
 from .pd_role import uses_prefill_ops
+
+logger = init_logger(__name__)
 
 FLASHCOMM_950_PEER_BYTES = 768 * 1024
 
@@ -187,7 +192,13 @@ class AscendHYV4FlashModel(HYV4FlashModel):
         inputs_embeds=None,
         lookback_token_ids=None,
         prepared_engram=None,
+        *,
+        defer_hc_head=False,
+        check_hc_head_rows=None,
+        first_ihc_vocab=False,
     ):
+        if first_ihc_vocab and input_ids is not None:
+            get_forward_context().additional_kwargs["hy4_first_ihc_token_ids"] = input_ids
         if (
             prepared_engram is None
             and self.engram_hash is not None
@@ -207,9 +218,67 @@ class AscendHYV4FlashModel(HYV4FlashModel):
                     prepared_engram = self._prefetch_engram(
                         input_ids, lookback_token_ids, layer_name, batch, embeddings
                     )
-        return super().forward(
-            input_ids, positions, intermediate_tensors, inputs_embeds, lookback_token_ids, prepared_engram
+        if not defer_hc_head or self.engram_hash is None:
+            return super().forward(
+                input_ids, positions, intermediate_tensors, inputs_embeds, lookback_token_ids, prepared_engram,
+            )
+        hidden = self._forward_prefill_hidden(input_ids, positions, inputs_embeds, lookback_token_ids, prepared_engram)
+        if check_hc_head_rows is not None:
+            reference = self.finish_hidden_states(hidden)[check_hc_head_rows]
+            selected = self.finish_hidden_states(hidden[check_hc_head_rows])
+            different = torch.count_nonzero(reference != selected).item()
+            max_abs = (reference.float() - selected.float()).abs().max().item()
+            logger.info(
+                "HY4 HC_HEAD_CHECK tokens=%d rows=%d different=%d max_abs=%g",
+                hidden.shape[0], selected.shape[0], different, max_abs,
+            )
+        return hidden
+
+    def finish_hidden_states(self, hidden):
+        return self.norm(self.hc_head(hidden))
+
+    def _forward_prefill_hidden(self, input_ids, positions, inputs_embeds, lookback_token_ids, prepared_engram):
+        if input_ids is None:
+            raise ValueError("Flash Engram requires original input token IDs")
+        hidden = (
+            inputs_embeds
+            if inputs_embeds is not None
+            else self.embed_input_ids(input_ids)
         )
+        if prepared_engram is None:
+            hashes = input_ids.new_empty(
+                (
+                    len(self.config.engram_layer_ids),
+                    input_ids.numel(),
+                    self.engram_hash.offsets.shape[1],
+                ),
+                dtype=torch.int32,
+            )
+            self.engram_hash.prepare_hashes_with_output(
+                input_ids,
+                lookback_token_ids,
+                self.layers[0].self_attn.layer_name,
+                hashes,
+            )
+            rows = None
+        else:
+            hashes, rows = prepared_engram
+        hash_indices = {
+            layer_id - 1: index
+            for index, layer_id in enumerate(self.config.engram_layer_ids)
+        }
+        for index, layer in enumerate(self.layers):
+            if index in hash_indices:
+                hidden = layer.hc_attn_layer.prepare_input(hidden)
+                i = hash_indices[index]
+                if rows is None:
+                    hidden = layer.engram_layer(hidden, hashes[i])
+                else:
+                    hidden = layer.engram_layer(
+                        hidden, hashes[i], embedding_rows=rows[i]
+                    )
+            hidden, _ = layer(positions, hidden, None)
+        return hidden
 
     def _prefetch_engram(self, input_ids, lookback, layer_name, batch, embeddings):
         if self._engram_prefetch_stream is None:
@@ -249,7 +318,26 @@ class AscendHYV4FlashForCausalLM(HYV4FlashForCausalLM):
         self._pack_prefill_engram_weights = uses_prefill_ops(vllm_config)
         transfer = vllm_config.kv_transfer_config
         self.logits_processor.use_npu_fp32_head = (
-            transfer is not None and transfer.kv_role == "kv_consumer" and is_950()
+            is_950()
+            and transfer is not None
+            and (
+                transfer.kv_role == "kv_consumer"
+                or (
+                    transfer.kv_role == "kv_producer"
+                    and os.getenv("HY4_PREFILL_FP32_HEAD") == "1"
+                )
+            )
+        )
+
+    def forward(
+        self, input_ids, positions, intermediate_tensors=None, inputs_embeds=None,
+        lookback_token_ids=None, prepared_engram=None, *,
+        defer_hc_head=False, check_hc_head_rows=None, first_ihc_vocab=False,
+    ):
+        return self.model(
+            input_ids, positions, intermediate_tensors, inputs_embeds, lookback_token_ids, prepared_engram,
+            defer_hc_head=defer_hc_head, check_hc_head_rows=check_hc_head_rows,
+            first_ihc_vocab=first_ihc_vocab,
         )
 
     def load_weights(self, weights):

@@ -138,12 +138,14 @@ def select_many(query, weights, pool_bf16, first_visible, *, tail, tp_shard=Fals
             dist.all_gather_into_tensor(group_ids, local_ids.contiguous(), group=tp.device_group)
             last_visible = first_visible + query_rows - 16
             used_k = (last_visible - 1) // RATIO
-            return merge_group_rows(group_ids, used_k, offsets, tail, RATIO)
+            return merge_group_rows(group_ids, used_k, offsets, tail, RATIO, consume_groups=True)
     chunks = []
     lo = 0
     while lo < query.shape[0]:
         remaining = query.shape[0] - lo
-        if remaining >= 1024 and (first_visible + lo - 1) // RATIO >= 8192:
+        if remaining >= 2 * WIDE_SCORE_ROWS:
+            # This range already satisfies the full-group causal mask. Reuse
+            # the wide CANN launch for short histories as well.
             rows = remaining // WIDE_SCORE_ROWS * WIDE_SCORE_ROWS
         elif remaining >= WIDE_SCORE_ROWS:
             rows = WIDE_SCORE_ROWS
@@ -157,7 +159,7 @@ def select_many(query, weights, pool_bf16, first_visible, *, tail, tp_shard=Fals
         lo = hi
     # Each legal ID is smaller than its chunk's used_k, hence also smaller than the last used_k.
     group_ids = chunks[0] if len(chunks) == 1 else torch.cat(chunks, dim=0)
-    return merge_group_rows(group_ids, used_k, offsets, tail, RATIO)
+    return merge_group_rows(group_ids, used_k, offsets, tail, RATIO, consume_groups=True)
 
 
 def select(query, weights, pool_bf16, visible_len, *, tail):
@@ -168,4 +170,4 @@ def select(query, weights, pool_bf16, visible_len, *, tail):
         visible_len,
         torch.npu.current_stream(query.device),
     )
-    return merge_group_rows(group_ids, used_k, offsets, tail, RATIO)
+    return merge_group_rows(group_ids, used_k, offsets, tail, RATIO, consume_groups=True)

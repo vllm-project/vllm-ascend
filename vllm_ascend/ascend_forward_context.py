@@ -1,4 +1,5 @@
 import math
+import os
 from contextlib import contextmanager
 from contextvars import ContextVar
 from enum import Enum
@@ -254,6 +255,7 @@ def set_ascend_forward_context(
 
 _mc2_tokens_capacity: int | None = None
 _reserved_mc2_mask: torch.Tensor | None = None
+_mrv2_prefill_mc2_mask: torch.Tensor | None = None
 
 
 def set_mc2_tokens_capacity(vllm_config, max_num_reqs, uniform_decode_query_len):
@@ -321,15 +323,31 @@ def get_mc2_tokens_capacity():
 
 
 def set_mc2_mask(vllm_config, device):
-    global _reserved_mc2_mask
+    global _reserved_mc2_mask, _mrv2_prefill_mc2_mask
     if _reserved_mc2_mask is not None:
         return
     if is_moe_model(vllm_config):
         _reserved_mc2_mask = torch.zeros(
             vllm_config.scheduler_config.max_num_batched_tokens, dtype=torch.bool, device=device
         )
+        transfer = vllm_config.kv_transfer_config
+        if os.getenv("HY4_PREFILL_FUSED_ROPE") == "1" and transfer is not None and transfer.kv_role == "kv_producer":
+            capacity = _reserved_mc2_mask.numel()
+            _mrv2_prefill_mc2_mask = torch.arange(2 * capacity, device=device, dtype=torch.int32) < capacity
     else:
         _reserved_mc2_mask = None
+
+
+def get_mrv2_prefill_mc2_mask(num_actual_tokens: int, padded_num_tokens: int) -> torch.Tensor | None:
+    mask = _mrv2_prefill_mc2_mask
+    if mask is None:
+        return None
+    # Slice a read-only True/False buffer at its boundary. Padded and ragged
+    # batches preserve the same mask values and capacity as the reserved mask.
+    capacity = mask.numel() // 2
+    length = min(padded_num_tokens, capacity)
+    start = capacity - min(num_actual_tokens, length)
+    return mask[start : start + length]
 
 
 def get_mc2_mask():

@@ -724,6 +724,7 @@ class NPUPlatform(Platform):
             _is_decode_only_node,
             get_mc2_mask,
             get_mrv2_in_profile_run,
+            get_mrv2_prefill_mc2_mask,
             select_moe_comm_method,
             sync_v2_extra_kwargs,
             use_cann_megamoe,
@@ -799,8 +800,10 @@ class NPUPlatform(Platform):
             num_actual_tokens = num_tokens
             # NOTE: token num which need to pad to when mc2
             padded_num_tokens = math.ceil(max_tokens_across_dp / tp_world_size) * tp_world_size
+            if cudagraph_runtime_mode == CUDAGraphMode.NONE:
+                mc2_mask = get_mrv2_prefill_mc2_mask(num_actual_tokens, padded_num_tokens)
             reserved_mc2_mask = get_mc2_mask()
-            if reserved_mc2_mask is not None:
+            if mc2_mask is None and reserved_mc2_mask is not None:
                 mc2_mask = reserved_mc2_mask[:padded_num_tokens]
                 mc2_mask[:num_actual_tokens] = True
                 mc2_mask[num_actual_tokens:] = False
