@@ -203,9 +203,16 @@ def _explicit_arg_names(kernel):
     The catch-all's own name is never a caller-side keyword, and the
     open names behind it cannot be enumerated statically; the impl
     covers those with its own ``**kwargs`` or by absorbing the known
-    ones explicitly.
+    ones explicitly. A plain function yields its signature, so the
+    VAR_KEYWORD kind filters any catch-all name; a registered
+    override or Triton kernel only exposes plain names, so the
+    conventional "kwargs" is skipped there.
     """
-    return tuple(n for n in _kernel_arg_names(kernel) if n != "kwargs")
+    if getattr(kernel, "arg_names", None) is None:
+        fn = getattr(kernel, "func", kernel)
+        params = inspect.signature(fn).parameters
+        return tuple(n for n, p in params.items() if p.kind is not inspect.Parameter.VAR_KEYWORD)
+    return tuple(n for n in kernel.arg_names if n != "kwargs")
 
 
 @pytest.mark.parametrize("key", sorted(TRITON_KERNEL_OVERRIDES))
