@@ -1,0 +1,10 @@
+pr: 22804
+entries:
+  - category: bugfix
+    text: >-
+      Dense multi-module MTP drafts and plain MTP drafts on 310P can start when
+      the target uses expert parallelism. The target keeps its expert settings.
+  - category: bugfix
+    text: >-
+      On Ascend 310P, plain MTP speculative decoding now honors the draft's
+      enforce_eager setting when using Model Runner V2.

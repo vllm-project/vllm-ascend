@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM Ascend project
 
-import ast
+import runpy
 import sys
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
@@ -361,6 +361,42 @@ def test_init_speculator_routes_step3p5_mtp(monkeypatch, multi_module):
     constructor.assert_called_once_with(config, device)
 
 
+def _install_310p_spec_decode_patch(monkeypatch):
+    from vllm.v1.worker.gpu.spec_decode import target_dependent_ar
+
+    # Isolate the three CPU input helpers and the dispatch map between cases.
+    monkeypatch.setattr(target_dependent_ar, "speculator", SimpleNamespace(), raising=False)
+    monkeypatch.setattr(
+        v2_spec_decode, "_UPSTREAM_TO_ASCEND_SPECULATOR", v2_spec_decode._UPSTREAM_TO_ASCEND_SPECULATOR.copy()
+    )
+    path = Path(v2_spec_decode.__file__).resolve().parents[3] / "patch/worker/patch_spec_decode_310.py"
+    runpy.run_path(str(path))
+
+
+@pytest.mark.parametrize("eager", [False, True])
+def test_310p_plain_mtp_uses_shared_factory(monkeypatch, eager):
+    from vllm_ascend.worker.v2 import model_runner
+
+    _install_310p_spec_decode_patch(monkeypatch)
+    config = _make_config("mtp")
+    config.speculative_config.enforce_eager = eager
+    config.compilation_config = SimpleNamespace(mode=CompilationMode.VLLM_COMPILE)
+    constructor = _mock_speculator_module(
+        monkeypatch, "vllm_ascend._310p.worker.v2.spec_decode.mtp_speculator", "AscendMTPSpeculator310"
+    )
+    assert model_runner.init_speculator is v2_spec_decode.init_speculator is init_speculator
+    device = torch.device("cpu")
+    assert model_runner.init_speculator(config, device, object()) is constructor.return_value
+    draft_config, draft_device = constructor.call_args.args
+    assert draft_device == device
+    assert config.compilation_config.mode == CompilationMode.VLLM_COMPILE
+    if eager:
+        assert draft_config.compilation_config.mode == CompilationMode.NONE
+        assert draft_config.compilation_config is not config.compilation_config
+    else:
+        assert draft_config is config
+
+
 @pytest.mark.parametrize("use_310p", [False, True])
 @pytest.mark.parametrize("num_mtp_modules", [1, 2])
 @pytest.mark.parametrize("num_speculative_tokens", [1, 2])
@@ -392,14 +428,8 @@ def test_mtp_routing_uses_actual_native_config(
         ),
     )
     config = SimpleNamespace(speculative_config=speculative)
-    factory = init_speculator
     if use_310p:
-        # Execute the actual route without installing global 310P patches.
-        path = Path(v2_spec_decode.__file__).resolve().parents[3] / "patch/worker/patch_spec_decode_310.py"
-        node = next(n for n in ast.parse(path.read_text()).body if isinstance(n, ast.FunctionDef))
-        namespace: dict[str, Any] = {"ascend_spec_decode": v2_spec_decode, "_orig_init_speculator": init_speculator}
-        exec(compile(ast.Module(body=[node], type_ignores=[]), str(path), "exec"), namespace)
-        factory = namespace["_init_speculator_310p"]
+        _install_310p_spec_decode_patch(monkeypatch)
     if model_type == "gemma4_mtp":
         expected_upstream = "vllm.v1.worker.gpu.spec_decode.gemma4.speculator.Gemma4Speculator"
         module, name = "vllm_ascend.worker.v2.spec_decode.gemma4.speculator", "AscendGemma4Speculator"
@@ -416,7 +446,7 @@ def test_mtp_routing_uses_actual_native_config(
     assert speculative.speculator_config.speculator_class == expected_upstream
     constructor = _mock_speculator_module(monkeypatch, module, name)
     device = torch.device("cpu")
-    assert factory(config, device) is constructor.return_value
+    assert init_speculator(config, device) is constructor.return_value
     constructor.assert_called_once_with(config, device)
 
 
@@ -627,8 +657,11 @@ def test_init_speculator_main_actual_native_config_xpress_rejected_vs_dflash(mon
     dflash_ctor.assert_called_once_with(dflash_cfg, device)
 
 
-def test_init_speculator_main_supports_custom_speculator(monkeypatch):
+@pytest.mark.parametrize("use_310p", [False, True])
+def test_init_speculator_main_supports_custom_speculator(monkeypatch, use_310p):
     """Main path supports registered custom speculators with or without req_states."""
+    if use_310p:
+        _install_310p_spec_decode_patch(monkeypatch)
     base_mod: Any = ModuleType("vllm.v1.worker.gpu.spec_decode.speculator")
 
     class DummyBaseSpeculator:
@@ -667,7 +700,7 @@ def test_init_speculator_main_supports_custom_speculator(monkeypatch):
 
     req_states = object()
     cfg_with_req = _make_config(
-        "ngram",
+        "mtp" if use_310p else "ngram",
         custom_method="my_custom_req",
         speculator_class="tests.fake_custom_speculator.CustomWithReqStates",
     )
