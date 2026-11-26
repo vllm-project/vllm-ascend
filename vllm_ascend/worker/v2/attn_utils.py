@@ -75,6 +75,7 @@ from vllm_ascend.attention.utils import (
     AscendCommonAttentionMetadata,
     requires_contiguous_pa_kv_cache,
     supports_strided_mla_cache,
+    use_component_major_mla_pd_layout,
 )
 from vllm_ascend.core.kv_cache_interface import (
     AscendIndexerKPoolTailSpec,
@@ -83,7 +84,6 @@ from vllm_ascend.core.kv_cache_interface import (
     get_kv_cache_compression_ratio,
     get_storage_block_size,
     requires_padded_page_layout,
-    supports_component_major_mla_pd,
 )
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.utils import KV_CACHE_BUFFER_ALIGNMENT
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.layerwise_cache_layout import (
@@ -859,7 +859,7 @@ def _uses_single_raw_mla_cache(
         return False
     if not kv_cache_spec.supports_single_raw_backing:
         return False
-    if not supports_component_major_mla_pd(vllm_config):
+    if not use_component_major_mla_pd_layout(vllm_config):
         return False
 
     attn_layers = get_layers_from_vllm_config(vllm_config, AttentionLayerBase, [layer_name])
