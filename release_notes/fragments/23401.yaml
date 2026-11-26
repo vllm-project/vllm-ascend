@@ -1,0 +1,4 @@
+pr: 23401
+entries:
+  - category: performance
+    text: Added fused preparation for eligible packed GDN projections, combining QKV and B/A copies with attention-output zero initialization. Large eligible prefill batches use a tiled kernel; unsupported layouts retain the existing path.
