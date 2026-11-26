@@ -445,6 +445,7 @@ class TestSequenceParallelPCP(unittest.TestCase):
         for quant_type, pcp_size, lora_context in (
             (QuantType.W8A8, 1, None),
             (QuantType.W8A8, 2, object()),
+            (QuantType.W8A8MXFP, 2, object()),
             (QuantType.W4A8, 2, None),
         ):
             with self.subTest(quant_type=quant_type, pcp_size=pcp_size, lora=lora_context is not None):

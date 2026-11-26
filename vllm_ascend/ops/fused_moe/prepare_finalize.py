@@ -39,7 +39,7 @@ from vllm_ascend.lora.fused_moe import prepare_lora_indices
 from vllm_ascend.ops.fused_moe.dataclass.prepare_finalize import MoEPrepareOutput
 from vllm_ascend.ops.fused_moe.moe_utils import _pad_and_split_tokens, _pad_tokens_with_cat
 from vllm_ascend.quantization.quant_type import QuantType
-from vllm_ascend.quantization.utils import get_dynamic_mx_quant_scale_alg
+from vllm_ascend.quantization.utils import DynamicMXQuantScaleAlg, get_dynamic_mx_quant_scale_alg
 
 # ForwardContext.additional_kwargs key for the per-forward MC2 mask cache.
 _MC2_RUNNER_PADDING_MASK_KEY = "ascend_mc2_runner_padding_mask"
@@ -533,11 +533,17 @@ class PrepareAndFinalizeWithAllGather(PrepareAndFinalize):
                 router_logits = nn.functional.pad(router_logits, (0, 0, 0, pad_size))
 
             # Quantize each token on its owner before replicating it across
-            # PCP. Dispatch already accepts INT8 inputs with per-token scales,
-            # so this halves activation traffic and avoids replicated quantization.
+            # PCP. Dispatch reuses the INT8 per-token or MXFP8 block scales.
             # LoRA needs the original floating-point activations.
-            if quant_type == QuantType.W8A8 and self.lora_context is None and hidden_states.shape[0] > 0:
-                hidden_states, pertoken_scale = torch_npu.npu_dynamic_quant(hidden_states)
+            if self.lora_context is None and hidden_states.shape[0] > 0:
+                if quant_type == QuantType.W8A8:
+                    hidden_states, pertoken_scale = torch_npu.npu_dynamic_quant(hidden_states)
+                elif quant_type == QuantType.W8A8MXFP:
+                    # Match both A5 dispatch paths: fused init_routing (quant_mode=3)
+                    # and the explicit CEIL quantizer used for MiniMax.
+                    hidden_states, pertoken_scale = torch_npu.npu_dynamic_mx_quant(
+                        hidden_states, dst_type=torch.float8_e4m3fn, scale_alg=DynamicMXQuantScaleAlg.CEIL
+                    )
             hidden_states = get_pcp_group().all_gather(
                 hidden_states,
                 dim=0,

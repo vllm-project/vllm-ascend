@@ -618,7 +618,7 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
         num_source_tokens = hidden_states.shape[0]
         prepare_quant_type = self.quant_type
         if (
-            prepare_quant_type == QuantType.W8A8
+            prepare_quant_type in (QuantType.W8A8, QuantType.W8A8MXFP)
             and isinstance(moe_comm_method, AllGatherCommImpl)
             and self.moe_config.pcp_size > 1
             and not self.moe_config.is_sequence_parallel

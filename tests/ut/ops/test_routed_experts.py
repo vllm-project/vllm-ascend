@@ -24,21 +24,22 @@ class _ModelRouter(AscendGroupedTopKRouter):
 
 
 @pytest.mark.parametrize(
-    ("router_cls", "weight_on_input", "expected_dtype"),
+    ("quant_type", "router_cls", "weight_on_input", "expected_dtype"),
     [
-        (AscendFusedTopKRouter, False, torch.int8),
-        (AscendGroupedTopKRouter, False, torch.int8),
-        (AscendFusedTopKRouter, True, torch.bfloat16),
-        (CustomRoutingRouter, False, torch.bfloat16),
-        (_ModelRouter, False, torch.bfloat16),
+        (QuantType.W8A8, AscendFusedTopKRouter, False, torch.int8),
+        (QuantType.W8A8, AscendGroupedTopKRouter, False, torch.int8),
+        (QuantType.W8A8, AscendFusedTopKRouter, True, torch.bfloat16),
+        (QuantType.W8A8, CustomRoutingRouter, False, torch.bfloat16),
+        (QuantType.W8A8, _ModelRouter, False, torch.bfloat16),
+        (QuantType.W8A8MXFP, _ModelRouter, False, torch.bfloat16),
     ],
 )
-def test_pcp_router_receives_expected_activations(monkeypatch, router_cls, weight_on_input, expected_dtype):
+def test_pcp_router_receives_expected_activations(monkeypatch, quant_type, router_cls, weight_on_input, expected_dtype):
     config = SimpleNamespace(pcp_size=2, dp_size=1, is_sequence_parallel=False)
     layer = SimpleNamespace(
         enable_npugraph_ex_static_kernel=False,
         moe_config=config,
-        quant_type=QuantType.W8A8,
+        quant_type=quant_type,
         router=object.__new__(router_cls),
         apply_router_weight_on_input=weight_on_input,
     )
